@@ -14,12 +14,12 @@
  * renders and Server Action invocations. That collapses page-level and
  * mutation-level handling into one place — no per-call-site try/catch.
  *
- * Behavior: when this process holds `PDPP_OWNER_PASSWORD` (controller
- * `enabled`), HMAC-validate the cookie and redirect to /owner/login on miss.
- * Otherwise, pass through and let the AS be authoritative. This preserves the
- * documented open local-dev mode when owner-auth is disabled, and still keeps
- * split deployments safe because the AS revalidates every downstream `_ref`
- * and `/v1/*` request.
+ * Every request asks the AS to validate the forwarded opaque session cookie.
+ * This works when only the AS has the password and lets the AS admit its open
+ * local-dev posture without the console inventing an owner identity. `/v1/*`
+ * requests carry the owner bearer instead, and the RS checks only that bearer,
+ * so `getOwnerToken()` also asks the AS to admit the current request before it
+ * hands the bearer out (see owner-token.ts).
  *
  * Memoized with React's `cache()` so a single render that fans out to many
  * sibling fetchers verifies once, not N times. The memoization key is the
@@ -34,13 +34,10 @@ import "server-only";
 
 import { cache } from "react";
 import { redirectToOwnerLogin } from "./login-redirect.ts";
-import { isOwnerSessionGateEnabled, readDashboardOwnerSession } from "./owner-token.ts";
+import { readDashboardOwnerSession } from "./owner-token.ts";
 
 async function hasValidSession(): Promise<boolean> {
-  if (!isOwnerSessionGateEnabled()) {
-    return true;
-  }
-  return (await readDashboardOwnerSession()) !== null;
+  return await readDashboardOwnerSession();
 }
 
 export const verifyDashboardSession = cache(async (returnTo?: string): Promise<void> => {

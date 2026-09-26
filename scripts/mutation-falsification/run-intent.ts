@@ -21,6 +21,7 @@ import {
   freezeIntent,
   type LineRange,
   NO_CONFIGURATION_READ,
+  ownedByNestedTestRunner,
   parseNameStatusZ,
   parseUnifiedZeroHunks,
   readsMutatedSource,
@@ -210,6 +211,21 @@ if (selectedTestsPath !== undefined) {
   // rather than applied silently.
   const withheld: string[] = []
   const withheldReadingMutated: string[] = []
+  const withheldNestedRunner: string[] = []
+  // A nested package's `test` script is read from disk here rather than guessed,
+  // so the signal is the package's own declaration.
+  const hasOwnTestScript = (packageJsonPath: string): boolean => {
+    if (!existsSync(packageJsonPath)) {
+      return false
+    }
+    try {
+      return typeof JSON.parse(readFileSync(packageJsonPath, "utf8")).scripts?.test === "string"
+    } catch {
+      // An unreadable or malformed manifest is not evidence of a nested runner,
+      // and guessing one would withhold a test that may be perfectly runnable.
+      return false
+    }
+  }
   const tests = selectCohortTests(diff, cohort).filter((test) => {
     const onDisk = cohort.root === "." ? test : join(cohort.root, test)
     if (!existsSync(onDisk)) {
@@ -218,6 +234,13 @@ if (selectedTestsPath !== undefined) {
     const testSource = readFileSync(onDisk, "utf8")
     if (escapesCohortRoot(test, testSource)) {
       withheld.push(test)
+      return false
+    }
+    // A test a nested package runs its own way cannot run under this cohort's
+    // single command, and is not in the cohort's suite either. Withheld on the
+    // same terms as the two below: it can inform no mutant it cannot execute.
+    if (ownedByNestedTestRunner(test, cohort.root, hasOwnTestScript)) {
+      withheldNestedRunner.push(test)
       return false
     }
     // A test that asserts on the TEXT of a file this batch mutates reads
@@ -239,6 +262,11 @@ if (selectedTestsPath !== undefined) {
   if (withheldReadingMutated.length > 0) {
     process.stdout.write(
       `withheld from the mutation baseline, asserts on the source text of a mutated file: ${withheldReadingMutated.join(", ")}\n`
+    )
+  }
+  if (withheldNestedRunner.length > 0) {
+    process.stdout.write(
+      `withheld from the mutation baseline, run by a nested package's own test script: ${withheldNestedRunner.join(", ")}\n`
     )
   }
   writeFileSync(selectedTestsPath, tests.length === 0 ? "" : `${tests.join("\n")}\n`)

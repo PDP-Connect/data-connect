@@ -27,8 +27,7 @@ const TOP_LEVEL_REGEX_6 = /run\.started requires data\.boot_epoch/;
 
 import assert from "node:assert/strict";
 import test from "node:test";
-// biome-ignore lint/correctness/noUnresolvedImports: Biome resolver cannot model this installed package export
-import Database from "better-sqlite3";
+import Database from "./helpers/sqlite-driver.ts";
 import { emitSpineEvent } from "../lib/spine.ts";
 import { closeDb, initDb } from "../server/db.ts";
 import { makeTemporaryDbPath } from "./helpers/temp-dir.ts";

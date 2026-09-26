@@ -1,0 +1,457 @@
+name: docker-images
+
+# This workflow validates that the image matrix still builds, and offers a
+# manual diagnostic publish. It is deliberately NOT a release publisher.
+#
+# Ported from PDP-Connect/pdpp's own docker-images.yml (pre-Move-B commit
+# 206abe0b57^) against the root Dockerfile restored in this same change (see
+# that file's header comment for the pnpm->npm / packages/*->real-path
+# conversion notes). Converted here for this repo's npm workspaces (not
+# pnpm), package-lock.json (not pnpm-lock.yaml/pnpm-workspace.yaml), Node
+# Node version (24.19.0, matching this repo's package.json engines field),
+# and GHCR org (ghcr.io/pdp-connect/data-connect,
+# not ghcr.io/pdp-connect/pdpp).
+#
+# There is no `tags: ["v*"]` trigger. This repo's own release workflow
+# (release.yml / npm-release.yml) owns the release channel end to end,
+# mirroring pdpp's own single-owner-for-latest rationale: a v* trigger here
+# would make this workflow a second, independent publisher of `latest` racing
+# that promotion, and because it rebuilds from source, the winner could be
+# bytes that no immutable tag points at.
+on:
+  push:
+    branches: [main]
+    # Broad reference-implementation changes do not rebuild the image matrix.
+    # The package manifest and declaration shims are included because the
+    # production build installs that manifest and typechecks the console.
+    paths:
+      - "reference-implementation/type-shims/**"
+      - "reference-implementation/server/connector-install/**"
+      - "reference-implementation/server/routes/ref-manual-upload-draft-connection.ts"
+      - "reference-implementation/server/index.ts"
+      - "reference-implementation/package.json"
+      - "scripts/check-polyfill-connector-type-shims.sh"
+      - ".dockerignore"
+      - ".railwayignore"
+      - "apps/console/.dockerignore"
+      - "deploy/docker/check-image-secrets*"
+      - ".env.docker.example"
+      - ".github/workflows/docker-images.yml"
+      - "Dockerfile"
+      - "apps/console/**"
+      - "deploy/railway/**"
+      - "docker/neko/**"
+      - "docker-compose*.yml"
+      - "package.json"
+      - "package-lock.json"
+      - "packages/**"
+      - "scripts/check-dockerfile-copy-paths.ts"
+      - "scripts/core-headed-patchright-runtime-oracle.*"
+      - "scripts/docker-core-demo-smoke.sh"
+      - "scripts/docker-core-demo-smoke-browser.mjs"
+      - "scripts/fixtures/**"
+      - "deploy/docker/check-image-identity.sh"
+  pull_request:
+    # See the push trigger above for the narrow reference-implementation paths
+    # that affect the production image build.
+    paths:
+      - "reference-implementation/type-shims/**"
+      - "reference-implementation/server/connector-install/**"
+      - "reference-implementation/server/routes/ref-manual-upload-draft-connection.ts"
+      - "reference-implementation/server/index.ts"
+      - "reference-implementation/package.json"
+      - "scripts/check-polyfill-connector-type-shims.sh"
+      - ".dockerignore"
+      - ".railwayignore"
+      - "apps/console/.dockerignore"
+      - "deploy/docker/check-image-secrets*"
+      - ".env.docker.example"
+      - ".github/workflows/docker-images.yml"
+      - "Dockerfile"
+      - "apps/console/**"
+      - "deploy/railway/**"
+      - "docker/neko/**"
+      - "docker-compose*.yml"
+      - "package.json"
+      - "package-lock.json"
+      - "packages/**"
+      - "scripts/check-dockerfile-copy-paths.ts"
+      - "scripts/core-headed-patchright-runtime-oracle.*"
+      - "scripts/docker-core-demo-smoke.sh"
+      - "scripts/docker-core-demo-smoke-browser.mjs"
+      - "scripts/fixtures/**"
+      - "deploy/docker/check-image-identity.sh"
+  workflow_dispatch:
+    inputs:
+      image:
+        description: Image to build on manual dispatch
+        required: false
+        default: all
+        type: choice
+        options:
+          - all
+          - reference
+          - reference-browser
+          - console
+          - core
+      platforms:
+        description: Publish platforms on manual dispatch
+        required: false
+        default: linux/amd64,linux/arm64
+        type: string
+
+concurrency:
+  group: docker-images-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: validate ${{ matrix.image }}
+    if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: reference
+            target: reference
+            title: PDPP reference AS/RS
+            description: PDPP reference authorization server and resource server
+          - image: console
+            target: console
+            title: PDPP reference operator console
+            description: PDPP browser-facing reference operator console
+          - image: reference-browser
+            target: reference-browser
+            title: PDPP reference AS/RS (browser-capable)
+            description: PDPP reference AS/RS with Patchright/Chromium for browser-backed connectors (ChatGPT, USAA, ...)
+          - image: core
+            target: core
+            title: PDPP Core node
+            description: PDPP platform-neutral single-container Core node with console and loopback AS/RS
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Verify excluded connector type declarations
+        if: matrix.image == 'console' || matrix.image == 'core'
+        run: bash scripts/check-polyfill-connector-type-shims.sh
+
+      - name: Compute image name
+        env:
+          IMAGE_NAME: ${{ matrix.image }}
+        run: |
+          echo "PDPP_IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}/${IMAGE_NAME}" >> "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.PDPP_IMAGE }}
+          labels: |
+            org.opencontainers.image.title=${{ matrix.title }}
+            org.opencontainers.image.description=${{ matrix.description }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          # Build-only tag names (push: false below), so these never reach the
+          # registry. No semver/latest entries: this workflow has no tag
+          # trigger and must never name a release channel tag, even locally.
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,prefix=sha-
+
+      - name: Build image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          # Pull from both the target's own scope and the reference scope.
+          # reference-browser/core extend the browsers stage (large ~300 MB
+          # layer) and share base layers with reference; pulling from both
+          # scopes lets BuildKit reuse those layers without rebuilding them.
+          cache-from: |
+            type=gha,scope=${{ matrix.target }}
+            type=gha,scope=reference
+          cache-to: type=gha,mode=max,scope=${{ matrix.target }}
+          context: .
+          file: ./Dockerfile
+          build-args: |
+            PDPP_REFERENCE_REVISION=${{ github.sha }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Loaded so the secret-file scan below can read every layer.
+          load: true
+          platforms: linux/amd64
+          push: false
+          tags: |
+            ${{ steps.meta.outputs.tags }}
+            pdpp:ci-${{ matrix.image }}
+            ${{ matrix.image == 'core' && 'pdpp:ci-core-test' || '' }}
+          target: ${{ matrix.target }}
+
+      # Every Dockerfile does `COPY . .`; only the ignore files keep an
+      # operator's .env.docker, keys and credential JSON out of the image.
+      - name: Prove no layer of the built image carries a secret-looking file
+        run: bash deploy/docker/check-image-secrets.sh image pdpp:ci-${{ matrix.image }}
+
+      # Fails before any other core-image check if the OCI revision label and
+      # the runtime PDPP_REFERENCE_REVISION disagree, are missing, or are
+      # "unknown". This is a CI build (github.sha is always real), so
+      # --require-known is correct here; only intentional local dev builds
+      # use --allow-unknown.
+      - name: Prove the built core image carries one non-unknown revision in both the OCI label and the runtime env
+        if: matrix.image == 'core'
+        run: bash deploy/docker/check-image-identity.sh --require-known pdpp:ci-core-test
+
+      - name: Prove the built Core image runs headed Patchright with durable profiles and interaction-scoped CDP
+        if: matrix.image == 'core'
+        env:
+          PDPP_CORE_ORACLE_IMAGE: pdpp:ci-core-test
+          PDPP_CORE_ORACLE_SKIP_BUILD: "1"
+        run: bash scripts/core-headed-patchright-runtime-oracle.sh
+
+      - name: Smoke Kahtaf's Docker Core demo path
+        if: matrix.image == 'core'
+        env:
+          PDPP_CORE_SMOKE_IMAGE: pdpp:ci-core-test
+          PDPP_CORE_SMOKE_SKIP_BUILD: "1"
+        run: bash scripts/docker-core-demo-smoke.sh
+
+  validate-neko:
+    name: validate docker/neko image
+    if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - name: Build n.eko browser image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: ./docker/neko/Dockerfile
+          load: true
+          platforms: linux/amd64
+          push: false
+          tags: pdpp-neko:ci
+      - name: Prove no layer of the n.eko image carries a secret-looking file
+        run: bash deploy/docker/check-image-secrets.sh image pdpp-neko:ci
+
+  # A CI checkout never contains an operator's .env.docker, so scanning built
+  # images cannot catch a missing ignore rule. This job plants dummy secret
+  # files in each build context (repository root and apps/console), builds a
+  # `COPY . /ctx` probe image, and fails if any dummy reaches it or is not
+  # in .railwayignore (`railway up` uploads the repository root).
+  secret-context:
+    name: build contexts exclude secret files
+    if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Unit-test the secret-file rule
+        run: bash deploy/docker/check-image-secrets.test.sh
+      - name: Probe every Docker build context with dummy secret files
+        run: bash deploy/docker/check-image-secrets.sh context . apps/console
+
+  # Manual diagnostic publish ONLY - never a release publisher.
+  #
+  # Reachable exclusively via workflow_dispatch, and it writes exactly one
+  # immutable, clearly-marked tag: dispatch-sha-<rev>. It cannot write
+  # `latest`, a bare version, or a semver tag, so a maintainer debugging a
+  # registry-side problem can never collide with the release channel this
+  # repo's own release workflow owns.
+  publish:
+    name: publish diagnostic image ${{ matrix.image }}
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+      packages: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: reference
+            target: reference
+            title: PDPP reference AS/RS
+            description: PDPP reference authorization server and resource server
+          - image: reference-browser
+            target: reference-browser
+            title: PDPP reference AS/RS (browser-capable)
+            description: PDPP reference AS/RS with Patchright/Chromium for browser-backed connectors (ChatGPT, USAA, ...)
+          - image: console
+            target: console
+            title: PDPP reference operator console
+            description: PDPP browser-facing reference operator console
+          - image: core
+            target: core
+            title: PDPP Core node
+            description: PDPP platform-neutral single-container Core node with console and loopback AS/RS
+
+    steps:
+      - name: Checkout
+        if: github.event.inputs.image == 'all' || github.event.inputs.image == matrix.image
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Compute image name
+        if: github.event.inputs.image == 'all' || github.event.inputs.image == matrix.image
+        env:
+          IMAGE_NAME: ${{ matrix.image }}
+        run: |
+          echo "PDPP_IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}/${IMAGE_NAME}" >> "$GITHUB_ENV"
+
+      - name: Set up QEMU
+        if: github.event.inputs.image == 'all' || github.event.inputs.image == matrix.image
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+
+      - name: Set up Docker Buildx
+        if: github.event.inputs.image == 'all' || github.event.inputs.image == matrix.image
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Log in to GHCR
+        if: github.event.inputs.image == 'all' || github.event.inputs.image == matrix.image
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        if: github.event.inputs.image == 'all' || github.event.inputs.image == matrix.image
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.PDPP_IMAGE }}
+          labels: |
+            org.opencontainers.image.title=${{ matrix.title }}
+            org.opencontainers.image.description=${{ matrix.description }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          # One immutable, dispatch-scoped tag. The dispatch- prefix keeps a
+          # manual diagnostic image from ever being mistaken for, or
+          # overwriting, a released tag. The moving channel tag, semver
+          # patterns and the bare sha- release tag are intentionally absent:
+          # only this repo's own release workflow is permitted to write them.
+          tags: |
+            type=sha,prefix=dispatch-sha-
+
+      - name: Probe the build context with dummy secret files before publishing
+        if: github.event.inputs.image == 'all' || github.event.inputs.image == matrix.image
+        run: bash deploy/docker/check-image-secrets.sh context .
+
+      # Same path as the release publish in release.yml: build once into an OCI
+      # archive, scan every layer of every platform, push those exact bytes,
+      # then re-scan what GHCR serves. This job writes the same packages
+      # (including core) that releases write, so it gets the same gate.
+      - name: Build image without pushing
+        if: github.event.inputs.image == 'all' || github.event.inputs.image == matrix.image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          cache-from: |
+            type=gha,scope=${{ matrix.target }}
+            type=gha,scope=reference
+          cache-to: type=gha,mode=max,scope=${{ matrix.target }}
+          context: .
+          file: ./Dockerfile
+          build-args: |
+            PDPP_REFERENCE_REVISION=${{ github.sha }}
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=oci,dest=${{ runner.temp }}/image.oci.tar,tar=true
+          platforms: ${{ github.event.inputs.platforms || 'linux/amd64,linux/arm64' }}
+          provenance: mode=max
+          push: false
+          sbom: true
+          tags: ${{ steps.meta.outputs.tags }}
+          target: ${{ matrix.target }}
+
+      - name: Scan every layer of the built image for secret files
+        id: scan-image
+        if: github.event.inputs.image == 'all' || github.event.inputs.image == matrix.image
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash deploy/docker/check-image-secrets.sh oci-archive "$RUNNER_TEMP/image.oci.tar" | tee "$RUNNER_TEMP/image-scan.txt"
+          digest="$(sed -n 's/^SCANNED-DIGEST: //p' "$RUNNER_TEMP/image-scan.txt")"
+          if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::The scan did not report the archive digest (got '$digest')."
+            exit 1
+          fi
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Push the scanned image
+        id: push-image
+        if: github.event.inputs.image == 'all' || github.event.inputs.image == matrix.image
+        shell: bash
+        env:
+          SCANNED_DIGEST: ${{ steps.scan-image.outputs.digest }}
+          TAG_REF: ${{ steps.meta.outputs.tags }}
+          SKOPEO_IMAGE: quay.io/skopeo/stable:v1.22.3@sha256:064d2cefb512c97d5a22979599ca05b7198fd6176494a634e1f31bd6b5fbd77a
+        run: |
+          set -euo pipefail
+          if [[ ! "$SCANNED_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::No clean scan digest (got '$SCANNED_DIGEST'); refusing to push."
+            exit 1
+          fi
+          TAG_REF="${TAG_REF%$'\n'}"
+          if [[ "$TAG_REF" != "$PDPP_IMAGE:dispatch-sha-"* || "$TAG_REF" == *$'\n'* ]]; then
+            echo "::error::Expected one $PDPP_IMAGE:dispatch-sha-* tag, got '$TAG_REF'."
+            exit 1
+          fi
+          skopeo() {
+            docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
+              -v "$HOME/.docker/config.json:/auth.json:ro" -v "$RUNNER_TEMP:/work" \
+              "$SKOPEO_IMAGE" "$@" --authfile /auth.json
+          }
+          skopeo copy --all --preserve-digests oci-archive:/work/image.oci.tar "docker://$TAG_REF"
+          pushed="sha256:$(skopeo inspect --raw "docker://$TAG_REF" | sha256sum | cut -d' ' -f1)"
+          if [[ "$pushed" != "$SCANNED_DIGEST" ]]; then
+            echo "::error::Pushed digest $pushed differs from scanned digest $SCANNED_DIGEST."
+            exit 1
+          fi
+          echo "digest=$pushed" >> "$GITHUB_OUTPUT"
+          rm -f "$RUNNER_TEMP/image.oci.tar"
+
+      - name: Re-scan the pushed image from GHCR by digest
+        if: github.event.inputs.image == 'all' || github.event.inputs.image == matrix.image
+        shell: bash
+        env:
+          PUSHED_DIGEST: ${{ steps.push-image.outputs.digest }}
+          SKOPEO_IMAGE: quay.io/skopeo/stable:v1.22.3@sha256:064d2cefb512c97d5a22979599ca05b7198fd6176494a634e1f31bd6b5fbd77a
+        run: |
+          set -euo pipefail
+          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
+            -v "$HOME/.docker/config.json:/auth.json:ro" -v "$RUNNER_TEMP:/work" \
+            "$SKOPEO_IMAGE" copy --all --authfile /auth.json \
+            "docker://$PDPP_IMAGE@$PUSHED_DIGEST" oci-archive:/work/image-pushed.oci.tar
+          if ! bash deploy/docker/check-image-secrets.sh oci-archive "$RUNNER_TEMP/image-pushed.oci.tar" | tee "$RUNNER_TEMP/image-rescan.txt"; then
+            echo "::error::$PDPP_IMAGE@$PUSHED_DIGEST in GHCR carries a secret-looking file or could not be scanned."
+            exit 1
+          fi
+          if ! grep -qxF "SCANNED-DIGEST: $PUSHED_DIGEST" "$RUNNER_TEMP/image-rescan.txt"; then
+            echo "::error::GHCR returned a different image for $PDPP_IMAGE@$PUSHED_DIGEST."
+            exit 1
+          fi

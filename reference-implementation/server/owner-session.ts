@@ -2,14 +2,19 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import crypto from "node:crypto";
-
-export const OWNER_SESSION_COOKIE_NAME = "pdpp_owner_session";
-export const OWNER_SESSION_DEFAULT_TTL_SECONDS = 7 * 24 * 60 * 60; // 7 days
-export const OWNER_SESSION_DEFAULT_SUBJECT_ID = "owner_local";
-
-export const OWNER_AUTH_COOKIE_NAME = OWNER_SESSION_COOKIE_NAME;
-export const OWNER_AUTH_DEFAULT_SESSION_TTL_SECONDS = OWNER_SESSION_DEFAULT_TTL_SECONDS;
-export const OWNER_AUTH_DEFAULT_SUBJECT_ID = OWNER_SESSION_DEFAULT_SUBJECT_ID;
+export {
+  OWNER_AUTH_COOKIE_NAME,
+  OWNER_AUTH_DEFAULT_SESSION_TTL_SECONDS,
+  OWNER_AUTH_DEFAULT_SUBJECT_ID,
+  OWNER_SESSION_COOKIE_NAME,
+  OWNER_SESSION_DEFAULT_SUBJECT_ID,
+  OWNER_SESSION_DEFAULT_TTL_SECONDS,
+} from "./owner-session-constants.ts";
+import {
+  OWNER_SESSION_COOKIE_NAME,
+  OWNER_SESSION_DEFAULT_SUBJECT_ID,
+  OWNER_SESSION_DEFAULT_TTL_SECONDS,
+} from "./owner-session-constants.ts";
 
 export type OwnerSessionSecret = string | Uint8Array;
 
@@ -19,12 +24,64 @@ export interface OwnerSessionPayload {
   readonly sub: string;
 }
 
+export interface OwnerSessionRecord extends OwnerSessionPayload {
+  readonly idHash: string;
+  readonly publicId: string;
+  readonly label: string | null;
+  readonly ipAddress: string | null;
+  readonly userAgent: string | null;
+  readonly deviceKey: string | null;
+  readonly lastSeenAt: number;
+  readonly revokedAt: number | null;
+}
+
+export interface OwnerSessionSummary {
+  readonly id: string;
+  readonly label: string;
+  readonly createdAt: number;
+  readonly lastSeenAt: number;
+  readonly ipAddress: string | null;
+  readonly current: boolean;
+}
+
+export interface OwnerBearerSummary {
+  readonly id: string;
+  readonly label: string;
+  readonly createdAt: string;
+  readonly expiresAt: string | null;
+}
+
+type MaybePromise<T> = T | Promise<T>;
+
+export interface OwnerSessionStore {
+  createSession: (record: OwnerSessionRecord, expectedCredentialRevision?: string) => MaybePromise<boolean | void>;
+  readSession: (idHash: string, nowSeconds: number) => MaybePromise<OwnerSessionRecord | null>;
+  revokeSession: (idHash: string, nowSeconds: number) => MaybePromise<void>;
+  touchSession: (idHash: string, nowSeconds: number) => MaybePromise<void>;
+  listSessions: (subjectId: string, nowSeconds: number) => MaybePromise<readonly OwnerSessionRecord[]>;
+  revokeOtherSessions: (subjectId: string, keepIdHash: string, nowSeconds: number) => MaybePromise<void>;
+  revokeAllSessions: (subjectId: string, nowSeconds: number) => MaybePromise<void>;
+  revokeByPublicId: (subjectId: string, publicId: string, nowSeconds: number) => MaybePromise<boolean>;
+  listOwnerBearers: (subjectId: string, nowSeconds: number) => MaybePromise<readonly OwnerBearerSummary[]>;
+  revokeOwnerBearer: (subjectId: string, publicId: string, nowSeconds: number) => MaybePromise<boolean>;
+}
+
+export interface OwnerSessionIssueMetadata {
+  readonly credentialRevision?: string;
+  readonly deviceKey?: string | null;
+  readonly ipAddress?: string | null;
+  readonly label?: string | null;
+  readonly userAgent?: string | null;
+}
+
 export type OwnerSessionSameSite = "lax" | "strict";
 
 export interface OwnerSessionControllerOptions {
+  readonly enabled?: boolean;
   readonly forceSecureCookies?: boolean;
   readonly password?: string | null;
   readonly sameSite?: OwnerSessionSameSite;
+  readonly sessionStore: OwnerSessionStore;
   readonly sessionTtlSeconds?: number;
   readonly subjectId?: string | null;
 }
@@ -41,9 +98,18 @@ export interface OwnerSessionSetCookieOptions extends OwnerSessionCookieOptions 
 export interface OwnerSessionController {
   clearSessionCookieHeader: (opts?: OwnerSessionCookieOptions) => string;
   readonly enabled: boolean;
-  issueSessionCookieHeader: (opts?: OwnerSessionCookieOptions) => string | null;
-  readSessionFromCookieHeader: (header?: string | null) => OwnerSessionPayload | null;
-  readSessionFromCookieValue: (raw?: string | null) => OwnerSessionPayload | null;
+  issueSessionCookieHeader: (opts?: OwnerSessionCookieOptions, metadata?: OwnerSessionIssueMetadata) => Promise<string | null>;
+  readSessionFromCookieValue: (raw?: string | null) => Promise<OwnerSessionPayload | null>;
+  readSessionFromCookieHeader: (header?: string | null) => Promise<OwnerSessionPayload | null>;
+  readSessionRecordFromCookieHeader: (header?: string | null) => Promise<OwnerSessionRecord | null>;
+  revokeSessionFromCookieHeader: (header?: string | null) => Promise<boolean>;
+  revokeSessionFromCookieValue: (raw?: string | null) => Promise<boolean>;
+  revokeSessionByPublicId: (subjectId: string, publicId: string) => Promise<boolean>;
+  revokeOtherSessions: (header: string | null | undefined, subjectId: string) => Promise<void>;
+  revokeAllSessions: (subjectId: string) => Promise<void>;
+  listSessions: (subjectId: string, header?: string | null) => Promise<readonly OwnerSessionSummary[]>;
+  listOwnerBearers: (subjectId: string) => Promise<readonly OwnerBearerSummary[]>;
+  revokeOwnerBearer: (subjectId: string, publicId: string) => Promise<boolean>;
   readonly subjectId: string;
 }
 
@@ -120,7 +186,7 @@ export function decodeOwnerSession(
 }
 
 /**
- * Derive the HMAC signing secret for owner session cookies using scrypt.
+ * Derive the HMAC signing secret for the legacy signed-session helpers.
  *
  * Previously this was a single-round SHA-256 hash, which is GPU-fast and
  * offline-brute-forceable if a session cookie leaks. Replaced with scrypt at
@@ -132,7 +198,7 @@ export function decodeOwnerSession(
  * per-server variable, so no additional random salt storage is required for
  * this placeholder auth implementation.
  *
- * Migration note: existing pdpp_owner_session cookies issued under the old
+ * Migration note: existing signed pdpp_owner_session cookies issued under the old
  * SHA-256 derivation will fail HMAC verification and be silently rejected —
  * the owner must log in again after deploying this change. This is acceptable
  * for the placeholder single-owner auth model.
@@ -164,6 +230,84 @@ export function parseCookieHeader(header?: string | null): Record<string, string
     }
   }
   return out;
+}
+
+function hashOwnerSessionId(sessionId: string): string {
+  return crypto.createHash("sha256").update(sessionId).digest("base64url");
+}
+
+function generateOwnerSessionId(): string {
+  return crypto.randomBytes(32).toString("base64url");
+}
+
+export function createMemoryOwnerSessionStore(): OwnerSessionStore {
+  const sessions = new Map<string, OwnerSessionRecord>();
+  return {
+    createSession(record: OwnerSessionRecord): void {
+      const reusable = record.deviceKey
+        ? [...sessions.entries()].find(([, existing]) => existing.sub === record.sub && existing.deviceKey === record.deviceKey)
+        : undefined;
+      if (reusable) {
+        sessions.delete(reusable[0]);
+        sessions.set(record.idHash, { ...record, publicId: reusable[1].publicId });
+        return;
+      }
+      sessions.set(record.idHash, record);
+    },
+    readSession(idHash: string, nowSeconds: number): OwnerSessionRecord | null {
+      const record = sessions.get(idHash) ?? null;
+      if (!record || record.revokedAt !== null || record.exp <= nowSeconds) {
+        return null;
+      }
+      return record;
+    },
+    revokeSession(idHash: string, nowSeconds: number): void {
+      const record = sessions.get(idHash);
+      if (!record || record.revokedAt !== null) {
+        return;
+      }
+      sessions.set(idHash, { ...record, revokedAt: nowSeconds });
+    },
+    touchSession(idHash: string, nowSeconds: number): void {
+      const record = sessions.get(idHash);
+      if (!record || record.revokedAt !== null || record.exp <= nowSeconds) {
+        return;
+      }
+      sessions.set(idHash, { ...record, lastSeenAt: nowSeconds });
+    },
+    listSessions(subjectId: string, nowSeconds: number): readonly OwnerSessionRecord[] {
+      return [...sessions.values()].filter((record) => record.sub === subjectId && record.revokedAt === null && record.exp > nowSeconds);
+    },
+    revokeOtherSessions(subjectId: string, keepIdHash: string, nowSeconds: number): void {
+      for (const [idHash, record] of sessions) {
+        if (record.sub === subjectId && idHash !== keepIdHash && record.revokedAt === null) {
+          sessions.set(idHash, { ...record, revokedAt: nowSeconds });
+        }
+      }
+    },
+    revokeAllSessions(subjectId: string, nowSeconds: number): void {
+      for (const [idHash, record] of sessions) {
+        if (record.sub === subjectId && record.revokedAt === null) {
+          sessions.set(idHash, { ...record, revokedAt: nowSeconds });
+        }
+      }
+    },
+    revokeByPublicId(subjectId: string, publicId: string, nowSeconds: number): boolean {
+      for (const [idHash, record] of sessions) {
+        if (record.sub === subjectId && record.publicId === publicId && record.revokedAt === null) {
+          sessions.set(idHash, { ...record, revokedAt: nowSeconds });
+          return true;
+        }
+      }
+      return false;
+    },
+    listOwnerBearers(): readonly OwnerBearerSummary[] {
+      return [];
+    },
+    revokeOwnerBearer(): boolean {
+      return false;
+    },
+  };
 }
 
 export function readOwnerSessionFromCookieValue(
@@ -222,15 +366,17 @@ export function buildOwnerSessionClearCookie({
 }
 
 export function createOwnerSessionController({
+  enabled: enabledOverride,
   password,
   subjectId,
+  sessionStore,
   sessionTtlSeconds = OWNER_SESSION_DEFAULT_TTL_SECONDS,
   sameSite = "lax",
   forceSecureCookies = false,
-}: OwnerSessionControllerOptions = {}): OwnerSessionController {
-  const enabled = typeof password === "string" && password.length > 0;
+}: OwnerSessionControllerOptions): OwnerSessionController {
+  const enabled = enabledOverride ?? (typeof password === "string" && password.length > 0);
   const resolvedSubjectId = typeof subjectId === "string" && subjectId ? subjectId : OWNER_SESSION_DEFAULT_SUBJECT_ID;
-  const secret = enabled && password ? deriveOwnerSessionSecret(password) : null;
+  const store = sessionStore;
 
   function resolveCookieFlags({ secure, sameSite: callerSameSite }: OwnerSessionCookieOptions): {
     secure: boolean;
@@ -242,37 +388,122 @@ export function createOwnerSessionController({
     };
   }
 
-  function readSessionFromCookieValue(raw?: string | null): OwnerSessionPayload | null {
-    if (!(enabled && secret)) {
+  async function readSessionRecordFromCookieValue(raw?: string | null): Promise<OwnerSessionRecord | null> {
+    if (!enabled) {
       return null;
     }
-    return readOwnerSessionFromCookieValue(raw ?? null, secret);
+    if (typeof raw !== "string" || !raw) {
+      return null;
   }
-
-  function readSessionFromCookieHeader(header?: string | null): OwnerSessionPayload | null {
-    if (!(enabled && secret)) {
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    const record = await store.readSession(hashOwnerSessionId(raw), nowSeconds);
+    if (!record) {
       return null;
     }
-    return readOwnerSessionFromCookieHeader(header ?? null, secret);
+    await store.touchSession(record.idHash, nowSeconds);
+    return { ...record, lastSeenAt: nowSeconds };
   }
 
-  function issueSessionCookieHeader(opts: OwnerSessionCookieOptions = {}): string | null {
-    if (!(enabled && secret)) {
+  async function readSessionRecordFromCookieHeader(header?: string | null): Promise<OwnerSessionRecord | null> {
+    const cookies = parseCookieHeader(header);
+    return readSessionRecordFromCookieValue(cookies[OWNER_SESSION_COOKIE_NAME] ?? null);
+  }
+
+  async function readSessionFromCookieHeader(header?: string | null): Promise<OwnerSessionPayload | null> {
+    const record = await readSessionRecordFromCookieHeader(header);
+    return record ? { exp: record.exp, iat: record.iat, sub: record.sub } : null;
+  }
+
+  async function readSessionFromCookieValue(raw?: string | null): Promise<OwnerSessionPayload | null> {
+    const record = await readSessionRecordFromCookieValue(raw);
+    return record ? { exp: record.exp, iat: record.iat, sub: record.sub } : null;
+  }
+
+  async function issueSessionCookieHeader(
+    opts: OwnerSessionCookieOptions = {},
+    metadata: OwnerSessionIssueMetadata = {}
+  ): Promise<string | null> {
+    if (!enabled) {
       return null;
     }
     const now = Math.floor(Date.now() / 1000);
-    const payload: OwnerSessionPayload = {
+    const sessionId = generateOwnerSessionId();
+    const idHash = hashOwnerSessionId(sessionId);
+    const created = await store.createSession({
       exp: now + sessionTtlSeconds,
+      idHash,
       iat: now,
+      publicId: crypto.randomBytes(12).toString("base64url"),
+      label: metadata.label?.trim().slice(0, 80) || "Unknown device",
+      ipAddress: metadata.ipAddress?.slice(0, 64) || null,
+      userAgent: metadata.userAgent?.slice(0, 512) || null,
+      deviceKey: metadata.deviceKey?.slice(0, 80) || null,
+      lastSeenAt: now,
+      revokedAt: null,
       sub: resolvedSubjectId,
-    };
-    const token = encodeOwnerSession(payload, secret);
+    }, metadata.credentialRevision);
+    if (created === false) return null;
     const flags = resolveCookieFlags(opts);
-    return buildOwnerSessionSetCookie(token, {
+    return buildOwnerSessionSetCookie(sessionId, {
       maxAgeSeconds: sessionTtlSeconds,
       sameSite: flags.sameSite,
       secure: flags.secure,
     });
+  }
+
+  async function revokeSessionFromCookieValue(raw?: string | null): Promise<boolean> {
+    if (!enabled || typeof raw !== "string" || !raw) {
+      return false;
+    }
+    const now = Math.floor(Date.now() / 1000);
+    const idHash = hashOwnerSessionId(raw);
+    const record = await store.readSession(idHash, now);
+    await store.revokeSession(idHash, now);
+    return record !== null;
+  }
+
+  async function revokeSessionFromCookieHeader(header?: string | null): Promise<boolean> {
+    const cookies = parseCookieHeader(header);
+    return await revokeSessionFromCookieValue(cookies[OWNER_SESSION_COOKIE_NAME] ?? null);
+  }
+
+  async function listSessions(subjectId: string, header?: string | null): Promise<readonly OwnerSessionSummary[]> {
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    const currentCookie = parseCookieHeader(header)[OWNER_SESSION_COOKIE_NAME];
+    const currentIdHash = currentCookie ? hashOwnerSessionId(currentCookie) : null;
+    return (await store.listSessions(subjectId, nowSeconds)).map((record) => ({
+      id: record.publicId,
+      label: record.label ?? "Unknown device",
+      createdAt: record.iat,
+      lastSeenAt: record.lastSeenAt,
+      ipAddress: record.ipAddress,
+      current: record.idHash === currentIdHash,
+    }));
+  }
+
+  async function revokeSessionByPublicId(subjectId: string, publicId: string): Promise<boolean> {
+    return await store.revokeByPublicId(subjectId, publicId, Math.floor(Date.now() / 1000));
+  }
+
+  async function revokeOtherSessions(header: string | null | undefined, subjectId: string): Promise<void> {
+    const cookies = parseCookieHeader(header);
+    const raw = cookies[OWNER_SESSION_COOKIE_NAME];
+    if (!raw) {
+      return;
+    }
+    await store.revokeOtherSessions(subjectId, hashOwnerSessionId(raw), Math.floor(Date.now() / 1000));
+  }
+
+  async function revokeAllSessions(subjectId: string): Promise<void> {
+    await store.revokeAllSessions(subjectId, Math.floor(Date.now() / 1000));
+  }
+
+  async function listOwnerBearers(subjectId: string): Promise<readonly OwnerBearerSummary[]> {
+    return await store.listOwnerBearers(subjectId, Math.floor(Date.now() / 1000));
+  }
+
+  async function revokeOwnerBearer(subjectId: string, publicId: string): Promise<boolean> {
+    return await store.revokeOwnerBearer(subjectId, publicId, Math.floor(Date.now() / 1000));
   }
 
   function clearSessionCookieHeader(opts: OwnerSessionCookieOptions = {}): string {
@@ -283,9 +514,18 @@ export function createOwnerSessionController({
   return {
     clearSessionCookieHeader,
     enabled,
+    listSessions,
+    listOwnerBearers,
     issueSessionCookieHeader,
-    readSessionFromCookieHeader,
     readSessionFromCookieValue,
+    readSessionFromCookieHeader,
+    readSessionRecordFromCookieHeader,
+    revokeSessionFromCookieHeader,
+    revokeSessionFromCookieValue,
+    revokeSessionByPublicId,
+    revokeOtherSessions,
+    revokeAllSessions,
+    revokeOwnerBearer,
     subjectId: resolvedSubjectId,
   };
 }

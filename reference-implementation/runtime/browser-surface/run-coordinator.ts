@@ -164,6 +164,10 @@ interface AllocatorSurfaceReconciliation {
 export interface BrowserSurfaceManagerDeps {
   readonly activeRunInteractions: Map<string, ActiveRunInteraction>;
   readonly browserSurfaceAllocator: BrowserSurfaceAllocator | null;
+  readonly beforeBrowserSurfaceLeaseEnsure?: (args: {
+    readonly runId: string;
+    readonly surfaceId: string;
+  }) => Promise<void> | void;
   readonly browserSurfaceLeaseManager: BrowserSurfaceLeaseManager | null;
   readonly browserSurfaceLeaseStore: BrowserSurfaceLeaseStore | null;
   readonly browserSurfaceMidWaitPollIntervalMs: number | undefined;
@@ -275,6 +279,7 @@ export function createBrowserSurfaceManager(deps: BrowserSurfaceManagerDeps): Br
   const {
     activeRunInteractions,
     browserSurfaceAllocator,
+    beforeBrowserSurfaceLeaseEnsure,
     browserSurfaceLeaseManager,
     browserSurfaceLeaseStore,
     browserSurfaceReplacementReceiptStore,
@@ -796,6 +801,9 @@ export function createBrowserSurfaceManager(deps: BrowserSurfaceManagerDeps): Br
     lease: BrowserSurfaceLease,
     allocator: BrowserSurfaceAllocator
   ): Promise<{ lease: BrowserSurfaceLease; surface?: BrowserSurface }> {
+    if (lease.surface_id) {
+      await beforeBrowserSurfaceLeaseEnsure?.({ runId: lease.run_id, surfaceId: lease.surface_id });
+    }
     const readyResult = await leaseManager.ensureStartingSurfaceReady({
       allocator,
       leaseId: lease.lease_id,

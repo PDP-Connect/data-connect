@@ -33,6 +33,11 @@ import {
 import { postgresEmitSpineEventInTransaction } from "../lib/postgres-spine.ts";
 import { createTraceContext, emitSpineEvent as emitRawSpineEvent, type SpineEventInput } from "../lib/spine.ts";
 import type { CimdFetchDependencies, CimdTransportFailureEvent } from "./cimd.ts";
+import {
+  OAUTH_JWT_BEARER_CLIENT_ASSERTION_TYPE,
+  clientAssertionIssuer,
+  verifyPrivateKeyJwtClientAssertion,
+} from "./oauth-client-auth.ts";
 import { listActiveBindingsForGrant, projectBindingForWire } from "./connection-identity.ts";
 import { canonicalConnectorKey, canonicalConnectorKeyFromManifest, legacyLocalAliasMap } from "./connector-key.ts";
 import {
@@ -40,6 +45,7 @@ import {
   resolveManifestSensitivity,
   validateConnectorManifest,
 } from "./connector-manifest-validation.ts";
+import { lockConnectorManifestPublication } from "./connector-manifest-write-fence.ts";
 import {
   projectResolvedCoreGrantStreams as coreProjectResolvedGrantStreams,
   coreSchemaRequiredFields,
@@ -64,6 +70,10 @@ import {
   SUPPORTED_AUTHORIZATION_CODE_CHALLENGE_METHODS,
 } from "./oauth-substrate/primitives.ts";
 import { isPostgresStorageBackend, postgresQuery, withPostgresTransaction } from "./postgres-storage.ts";
+import {
+  lockOwnerPasswordVerifierRevision,
+  ownerPasswordVerifierRevision,
+} from "./stores/owner-password-verifier-store.ts";
 import { buildGrantedAuthorizationDetail } from "./source-approved-authorization.ts";
 import { snapshotSourceDeclaration } from "./source-declaration.ts";
 import { snapshotContentAddressedSourceDeclarationFromLegacyConnectorManifest } from "./source-declaration-legacy-collection.ts";
@@ -78,6 +88,13 @@ import {
   makeDefaultAccountConnectorInstanceId,
   resolveOwnerConnectorInstanceNamespace,
 } from "./stores/connector-instance-store.ts";
+import {
+  buildDomainControlTrustSignal,
+  parseTrustSignal,
+  serializeTrustSignal,
+  type TrustSignal,
+  type TrustSignalMethod,
+} from "./trust-signal.ts";
 
 // ─── Domain types ─────────────────────────────────────────────────────────────
 
@@ -209,12 +226,15 @@ interface ClientMetadata {
   client_name?: string | null;
   client_uri?: string | null | undefined;
   grant_types?: string[] | undefined;
+  jwks?: unknown;
+  jwks_uri?: string | undefined;
   issuer_subject_id?: string;
   logo_uri?: string | null | undefined;
   policy_uri?: string | null | undefined;
   redirect_uris?: string[] | undefined;
   response_types?: string[] | undefined;
   token_endpoint_auth_method: string;
+  token_endpoint_auth_signing_alg?: string | undefined;
   tos_uri?: string | null | undefined;
 }
 
@@ -225,6 +245,12 @@ interface RegisteredClient {
   metadata: ClientMetadata;
   registration_mode: string;
   token_endpoint_auth_method: string;
+  /**
+   * The trust signal the AS relied on to accept this identity, when it relied on
+   * one (spec-core.md#trust-registry-queries). A pre-registered client carries no
+   * signal: the AS relied on its own registration table, not on an assertion.
+   */
+  trust_signal?: TrustSignal | null;
   updated_at: string | null;
 }
 
@@ -455,6 +481,7 @@ export type AuthorizationDecisionFaultStage = "after_cas_before_event" | "after_
 export type AuthorizationDecisionFaultHook = (stage: AuthorizationDecisionFaultStage) => void;
 
 interface OwnerDeviceApprovalInput {
+  authorizationFence?: { credentialRevision?: string | null; sessionIdHash?: string };
   clientId: string;
   consentApprovedEvent: AuthSpineEventInput;
   deviceCode: string;
@@ -554,6 +581,8 @@ interface TokenIntrospectionRow extends DbRow {
   subject_id: string;
   token_kind: string;
   trace_id: string | null;
+  // SQLite hands this back as TEXT, PostgreSQL as already-decoded JSONB.
+  trust_signal_json: string | Record<string, unknown> | null;
 }
 
 interface TokenIntrospectionResult extends Record<string, unknown> {
@@ -562,6 +591,7 @@ interface TokenIntrospectionResult extends Record<string, unknown> {
   exp?: number;
   grant_id?: string | null;
   grant_package_id?: string | null;
+  grant_trust_signal?: TrustSignal;
   pdpp_token_kind?: string;
   scenario_id?: string | null;
   subject_id?: string;
@@ -700,6 +730,7 @@ interface GrantPackageStore {
     clientId: string;
     storageBindingJson: string | null;
     grantJson: string;
+    trustSignalJson: string | null;
     accessMode: string;
     issuedAt: string;
     expiresAt: string | null;
@@ -2739,6 +2770,12 @@ function buildOwnerDeviceApprovalConflictError(row: OwnerDeviceAuthRow): AuthErr
   );
 }
 
+function buildOwnerDeviceApprovalSessionConflictError(): AuthError {
+  return Object.assign(new Error("The owner session changed during device approval. Sign in again and retry."), {
+    code: "approval_conflict",
+  });
+}
+
 function requireOwnerDeviceApprovedSubject(row: OwnerDeviceAuthRow, subjectId: string): void {
   if (row.subject_id === subjectId) {
     return;
@@ -2784,6 +2821,31 @@ function requireDynamicClientSubject(registeredClient: RegisteredClient, subject
 const postgresOwnerDeviceAuthStore: OwnerDeviceAuthStore = {
   approveAtomically: (input) =>
     withPostgresTransaction(async (client) => {
+      if (input.authorizationFence) {
+        await lockOwnerPasswordVerifierRevision(client);
+        const verifier = (
+          await client.query<{ verifier_json: string }>(
+            "SELECT verifier_json FROM owner_password_verifier WHERE singleton = 1 FOR UPDATE"
+          )
+        ).rows[0];
+        const hasRevisionFence = Object.hasOwn(input.authorizationFence, "credentialRevision");
+        const currentRevision = verifier ? ownerPasswordVerifierRevision(verifier.verifier_json) : null;
+        if (hasRevisionFence && currentRevision !== input.authorizationFence.credentialRevision) {
+          throw buildOwnerDeviceApprovalSessionConflictError();
+        }
+        if (input.authorizationFence.sessionIdHash !== undefined) {
+          const session = (
+            await client.query<{ id_hash: string }>(
+              `SELECT id_hash FROM owner_sessions
+               WHERE id_hash = $1 AND subject_id = $2 AND revoked_at IS NULL AND expires_at > $3`,
+              [input.authorizationFence.sessionIdHash, input.subjectId, Math.floor(Date.now() / 1000)]
+            )
+          ).rows[0];
+          if (!session) throw buildOwnerDeviceApprovalSessionConflictError();
+        } else if (!hasRevisionFence) {
+          throw buildOwnerDeviceApprovalSessionConflictError();
+        }
+      }
       const existing = await client.query<OwnerDeviceAuthRow>(
         `SELECT *
          FROM owner_device_auth
@@ -2950,7 +3012,32 @@ const postgresOwnerDeviceAuthStore: OwnerDeviceAuthStore = {
 
 const sqliteOwnerDeviceAuthStore: OwnerDeviceAuthStore = {
   approveAtomically: (input) =>
-    transaction(() => {
+    writeTransaction(() => {
+      if (input.authorizationFence) {
+        const verifier = getDb()
+          .prepare("SELECT verifier_json FROM owner_password_verifier WHERE singleton = 1")
+          .get<{ verifier_json: string }>();
+        const hasRevisionFence = Object.hasOwn(input.authorizationFence, "credentialRevision");
+        const currentRevision = verifier ? ownerPasswordVerifierRevision(verifier.verifier_json) : null;
+        if (hasRevisionFence && currentRevision !== input.authorizationFence.credentialRevision) {
+          throw buildOwnerDeviceApprovalSessionConflictError();
+        }
+        if (input.authorizationFence.sessionIdHash !== undefined) {
+          const session = getDb()
+            .prepare(
+              `SELECT id_hash FROM owner_sessions
+               WHERE id_hash = ? AND subject_id = ? AND revoked_at IS NULL AND expires_at > ?`
+            )
+            .get<{ id_hash: string }>(
+              input.authorizationFence.sessionIdHash,
+              input.subjectId,
+              Math.floor(Date.now() / 1000)
+            );
+          if (!session) throw buildOwnerDeviceApprovalSessionConflictError();
+        } else if (!hasRevisionFence) {
+          throw buildOwnerDeviceApprovalSessionConflictError();
+        }
+      }
       const row = getOne<OwnerDeviceAuthRow>(referenceQueries.authOwnerDeviceAuthGetByDeviceCode, [input.deviceCode]);
       if (!row) {
         const err: AuthError = new Error("Unknown user code");
@@ -3268,6 +3355,14 @@ function canonicalManifestJson(rawManifest: string): string {
 async function persistManifestAndAdvanceGenerations(connectorId: string, manifestJson: string): Promise<boolean> {
   if (isPostgresStorageBackend()) {
     return await withPostgresTransaction(async (client) => {
+      await lockConnectorManifestPublication(client, connectorId);
+      const activation = await client.query<{ state: string; canonical_manifest_json: string }>(
+        "SELECT state, canonical_manifest_json FROM connector_activations WHERE connector_id=$1 FOR SHARE",
+        [connectorId]
+      );
+      if (activation.rows[0]?.state === "active") {
+        assertActiveConnectorStreamShape(activation.rows[0].canonical_manifest_json, manifestJson);
+      }
       const changed = await client.query(
         `INSERT INTO connectors(connector_id, manifest)
          VALUES($1, $2::jsonb)
@@ -3296,6 +3391,12 @@ async function persistManifestAndAdvanceGenerations(connectorId: string, manifes
   }
   return transaction(() => {
     const db = getDb();
+    const activation = db
+      .prepare("SELECT state, canonical_manifest_json FROM connector_activations WHERE connector_id=?")
+      .get<{ state: string; canonical_manifest_json: string }>(connectorId);
+    if (activation?.state === "active") {
+      assertActiveConnectorStreamShape(activation.canonical_manifest_json, manifestJson);
+    }
     const existing = db
       .prepare("SELECT manifest FROM connectors WHERE connector_id = ?")
       .get<{ manifest?: string }>(connectorId);
@@ -3317,6 +3418,17 @@ async function persistManifestAndAdvanceGenerations(connectorId: string, manifes
     );
     return true;
   });
+}
+
+function assertActiveConnectorStreamShape(activeManifestJson: string, proposedManifestJson: string): void {
+  const active = JSON.parse(activeManifestJson) as { streams?: unknown };
+  const proposed = JSON.parse(proposedManifestJson) as { streams?: unknown };
+  if (
+    canonicalManifestJson(JSON.stringify(active.streams ?? null)) !==
+    canonicalManifestJson(JSON.stringify(proposed.streams ?? null))
+  ) {
+    throw new Error("Cannot change connector stream shape while its installed activation is active");
+  }
 }
 
 function getConnectorCatalogStore() {
@@ -4047,6 +4159,7 @@ async function persistApprovedSingleGrantAtomically({
   subjectId,
   tokenIssuedEvent,
   traceContext,
+  trustSignal,
   reviewedRevision,
   reviewedInstanceChecks,
 }: {
@@ -4064,10 +4177,12 @@ async function persistApprovedSingleGrantAtomically({
   subjectId: string;
   tokenIssuedEvent: (tokenId: string) => AuthSpineEventInput;
   traceContext: TraceContext;
+  trustSignal: TrustSignal | null;
   reviewedRevision: string;
   reviewedInstanceChecks: ReviewedInstanceCheck[];
 }): Promise<string> {
   const storageBindingJson = serializeStorageBinding(persistedStorageBinding);
+  const trustSignalJson = serializeTrustSignal(trustSignal);
 
   if (isPostgresStorageBackend()) {
     return await withPostgresTransaction(async (client) => {
@@ -4090,14 +4205,15 @@ async function persistApprovedSingleGrantAtomically({
       await client.query(
         `INSERT INTO grants(
            grant_id, subject_id, client_id, storage_binding_json, grant_json,
-           access_mode, issued_at, expires_at, trace_id, scenario_id
-         ) VALUES($1, $2, $3, $4::jsonb, $5::jsonb, $6, $7, $8, $9, $10)`,
+           trust_signal_json, access_mode, issued_at, expires_at, trace_id, scenario_id
+         ) VALUES($1, $2, $3, $4::jsonb, $5::jsonb, $6::jsonb, $7, $8, $9, $10, $11)`,
         [
           grantId,
           subjectId,
           clientId,
           storageBindingJson,
           grantJson,
+          trustSignalJson,
           accessMode,
           issuedAt,
           expiresAt,
@@ -4153,6 +4269,7 @@ async function persistApprovedSingleGrantAtomically({
       clientId,
       storageBindingJson,
       grantJson,
+      trustSignalJson,
       accessMode,
       issuedAt,
       expiresAt,
@@ -5151,20 +5268,16 @@ async function maybeRegisterConnectorPhaseForTest(point: string, context: Record
  */
 export async function registerConnector(
   manifest: Record<string, unknown>,
-  options: { backfillRetrievalIndexes?: boolean } = {}
+  options: { backfillRetrievalIndexes?: boolean; skipManifestPersistence?: boolean } = {}
 ): Promise<string> {
   validateConnectorManifest(manifest);
   const { connectorId, storedManifest } = normalizeConnectorManifestForStorage(manifest);
-  await persistManifestAndAdvanceGenerations(connectorId, JSON.stringify(storedManifest));
+  if (!options.skipManifestPersistence) {
+    await persistManifestAndAdvanceGenerations(connectorId, JSON.stringify(storedManifest));
+  }
   await maybeRegisterConnectorPhaseForTest("after-manifest-persisted", { connectorId, manifest: storedManifest });
 
   const postgresBackend = isPostgresStorageBackend();
-  if (postgresBackend) {
-    // Not fenced — keep the manifest-shape cache coherent regardless of
-    // whether the fenced repair below runs.
-    const { invalidatePostgresRecordManifestCache } = await import("./postgres-records.ts");
-    invalidatePostgresRecordManifestCache(connectorId);
-  }
 
   if (options.backfillRetrievalIndexes === false) {
     const postgresRecords = await import("./postgres-records.ts");
@@ -5452,6 +5565,17 @@ function normalizeCimdRegisteredClient(value: unknown): RegisteredClient {
     metadata: {
       client_name: isNonEmptyString(value.metadata.client_name) ? value.metadata.client_name : null,
       client_uri: isNonEmptyString(value.metadata.client_uri) ? value.metadata.client_uri : null,
+      ...(Array.isArray(value.metadata.grant_types)
+        ? { grant_types: value.metadata.grant_types.filter(isNonEmptyString) }
+        : {}),
+      ...(Array.isArray(value.metadata.response_types)
+        ? { response_types: value.metadata.response_types.filter(isNonEmptyString) }
+        : {}),
+      ...(value.metadata.jwks !== undefined ? { jwks: value.metadata.jwks } : {}),
+      ...(isNonEmptyString(value.metadata.jwks_uri) ? { jwks_uri: value.metadata.jwks_uri } : {}),
+      ...(isNonEmptyString(value.metadata.token_endpoint_auth_signing_alg)
+        ? { token_endpoint_auth_signing_alg: value.metadata.token_endpoint_auth_signing_alg }
+        : {}),
       logo_uri: isNonEmptyString(value.metadata.logo_uri) ? value.metadata.logo_uri : null,
       policy_uri: isNonEmptyString(value.metadata.policy_uri) ? value.metadata.policy_uri : null,
       redirect_uris: Array.isArray(value.metadata.redirect_uris)
@@ -5465,6 +5589,33 @@ function normalizeCimdRegisteredClient(value: unknown): RegisteredClient {
       : "client_id_metadata_document",
     token_endpoint_auth_method: tokenEndpointAuthMethod,
     updated_at: null,
+  };
+}
+
+/**
+ * Attach the reliance record for verified domain control to a CIMD-resolved client.
+ *
+ * Both resolution branches establish the same signal — the document was retrieved
+ * from the https URL the client claims as its identity and names that client_id back
+ * (spec-core.md#client-display obligation 5) — and differ only in `method`, which is
+ * the provenance a relying party needs to reproduce the decision. The lookup time is
+ * stamped here, at the moment of reliance, not at issuance: a status may be withdrawn
+ * between the two, and the record has to show what was true when the server relied.
+ */
+function withDomainControlTrustSignal(
+  client: RegisteredClient,
+  clientId: string,
+  method: TrustSignalMethod,
+  issuer: string
+): RegisteredClient {
+  return {
+    ...client,
+    trust_signal: buildDomainControlTrustSignal({
+      clientId,
+      issuer,
+      lookedUpAt: new Date().toISOString(),
+      method,
+    }),
   };
 }
 
@@ -5513,7 +5664,12 @@ async function resolveCimdClientForGrant(
           redirect_uris: localDoc.redirect_uris,
           token_endpoint_auth_method: "none",
         };
-        return normalizeCimdRegisteredClient(buildCimdRegisteredClient(clientId, doc));
+        return withDomainControlTrustSignal(
+          normalizeCimdRegisteredClient(buildCimdRegisteredClient(clientId, doc)),
+          clientId,
+          "same_origin_document",
+          issuerUrl.origin
+        );
       }
     } catch (err: unknown) {
       if (isAuthError(err) && (err.code === "invalid_client" || err.code === "invalid_request")) {
@@ -5531,7 +5687,12 @@ async function resolveCimdClientForGrant(
     ...((opts.requestId ?? opts.request_id) === undefined ? {} : { requestId: opts.requestId ?? opts.request_id }),
     ...((opts.traceId ?? opts.trace_id) === undefined ? {} : { traceId: opts.traceId ?? opts.trace_id }),
   });
-  return normalizeCimdRegisteredClient(buildCimdRegisteredClient(clientId, doc));
+  return withDomainControlTrustSignal(
+    normalizeCimdRegisteredClient(buildCimdRegisteredClient(clientId, doc)),
+    clientId,
+    "https_document_fetch",
+    issuerBase ?? clientId
+  );
 }
 
 export async function resolveOAuthClient(
@@ -5556,6 +5717,82 @@ export async function resolveOAuthClient(
     registeredClient = await resolveCimdClientForGrant(clientId, opts);
   }
   return registeredClient;
+}
+
+/**
+ * Enforce CIMD token-endpoint client authentication before consuming a grant.
+ * An assertion issuer may supply the client_id when the token request omits it.
+ */
+export async function authenticateOAuthTokenClient({
+  baseUrl,
+  clientAssertion,
+  clientAssertionType,
+  clientId,
+  cimdFetchDependencies,
+  tokenEndpoint,
+}: {
+  baseUrl: string;
+  clientAssertion: unknown;
+  clientAssertionType: unknown;
+  clientId: unknown;
+  cimdFetchDependencies?: CimdFetchDependencies;
+  tokenEndpoint: string;
+}): Promise<string | null> {
+  const hasAssertion = clientAssertion !== undefined || clientAssertionType !== undefined;
+  let resolvedClientId = isNonEmptyString(clientId) ? clientId : null;
+  if (!resolvedClientId && clientAssertion !== undefined) {
+    resolvedClientId = clientAssertionIssuer(clientAssertion);
+  }
+  if (!resolvedClientId) {
+    if (hasAssertion) {
+      throw bindingError("invalid_client", "Client authentication failed");
+    }
+    return null;
+  }
+
+  const { isCimdClientId } = await import("./cimd.ts");
+  if (!isCimdClientId(resolvedClientId)) {
+    if (hasAssertion) {
+      throw bindingError("invalid_client", "Client authentication failed");
+    }
+    return resolvedClientId;
+  }
+
+  let registeredClient: RegisteredClient | null;
+  try {
+    registeredClient = await resolveOAuthClient(resolvedClientId, {
+      baseUrl,
+      ...(cimdFetchDependencies ? { cimdFetchDependencies } : {}),
+    });
+  } catch {
+    throw bindingError("invalid_client", "Client authentication failed");
+  }
+  if (!registeredClient) {
+    throw bindingError("invalid_client", "Client authentication failed");
+  }
+
+  if (registeredClient.token_endpoint_auth_method === "private_key_jwt") {
+    if (clientAssertionType !== OAUTH_JWT_BEARER_CLIENT_ASSERTION_TYPE) {
+      throw bindingError("invalid_client", "Client authentication failed");
+    }
+    try {
+      await verifyPrivateKeyJwtClientAssertion({
+        assertion: clientAssertion,
+        clientId: resolvedClientId,
+        ...(cimdFetchDependencies ? { dependencies: cimdFetchDependencies } : {}),
+        metadata: registeredClient.metadata,
+        tokenEndpoint,
+      });
+    } catch {
+      throw bindingError("invalid_client", "Client authentication failed");
+    }
+    return resolvedClientId;
+  }
+
+  if (hasAssertion) {
+    throw bindingError("invalid_client", "Client authentication failed");
+  }
+  return resolvedClientId;
 }
 
 function requiresStagedGrantBatch(input: Record<string, unknown>): boolean {
@@ -6257,6 +6494,7 @@ function resolveApprovedEntryIndexes(
 interface ApproveStagedGrantBatchOptions {
   approval_review_revision?: unknown;
   approvedSourceIndexes?: number[] | null;
+  baseUrl?: string;
   confirmedApproveAll?: boolean;
   narrowings?: Record<string, unknown>[] | null;
   nativeManifest?: DbRow | null;
@@ -6399,7 +6637,14 @@ async function approveStagedGrantBatch(
   const reviewed = requireMatchingApprovalReview(pending as PendingConsentRow, opts.approval_review_revision);
   const { subjectId } = reviewed;
   const persistedOptions = persistedBatchReviewOptions(pending as PendingConsentRow);
-  const batchState = await buildReviewedBatchApprovalState(request, pending, subjectId, persistedOptions);
+  // The re-resolution inside the batch state needs the issuer origin: a CIMD
+  // client_id under the AS's own origin resolves from local storage, and
+  // without the base URL it falls through to a network self-fetch that cannot
+  // succeed. The single-grant path already forwards it.
+  const batchState = await buildReviewedBatchApprovalState(request, pending, subjectId, {
+    ...persistedOptions,
+    ...(opts.baseUrl ? { baseUrl: opts.baseUrl } : {}),
+  });
   if (
     batchState.review.revision !== pending.approval_review_revision ||
     batchState.review.digest !== pending.approval_review_digest
@@ -6648,6 +6893,7 @@ async function persistApprovedBatchGrantAtomically({
     reviewRevision: review.revision,
     subjectId,
     traceContext,
+    trustSignal: registeredClient.trust_signal ?? null,
   });
 
   return {
@@ -6686,8 +6932,12 @@ async function persistApprovedBatchRowsAtomically(input: {
   reviewRevision: string;
   subjectId: string;
   traceContext: TraceContext;
+  trustSignal: TrustSignal | null;
 }): Promise<string> {
   const packageJson = JSON.stringify(input.packageEnvelope);
+  // One reliance decision accepted the identity for the whole batch, so every child
+  // grant in it records the same signal.
+  const trustSignalJson = serializeTrustSignal(input.trustSignal);
   if (isPostgresStorageBackend()) {
     return await withPostgresTransaction(async (client) => {
       const claim = await client.query(
@@ -6749,14 +6999,15 @@ async function persistApprovedBatchRowsAtomically(input: {
         await client.query(
           `INSERT INTO grants(
              grant_id, subject_id, client_id, storage_binding_json, grant_json,
-             access_mode, issued_at, expires_at, trace_id, scenario_id
-           ) VALUES($1, $2, $3, $4::jsonb, $5::jsonb, $6, $7, $8, $9, $10)`,
+             trust_signal_json, access_mode, issued_at, expires_at, trace_id, scenario_id
+           ) VALUES($1, $2, $3, $4::jsonb, $5::jsonb, $6::jsonb, $7, $8, $9, $10, $11)`,
           [
             child.grant.grant_id,
             input.subjectId,
             input.clientId,
             serializeStorageBinding(normalizeStorageBinding(resolved.storageBinding)),
             JSON.stringify(child.grant),
+            trustSignalJson,
             resolved.entry.selection.access_mode,
             child.grant.issued_at,
             child.grant.expires_at ?? null,
@@ -6895,6 +7146,7 @@ async function persistApprovedBatchRowsAtomically(input: {
         input.clientId,
         serializeStorageBinding(normalizeStorageBinding(resolved.storageBinding)),
         JSON.stringify(child.grant),
+        trustSignalJson,
         resolved.entry.selection.access_mode,
         child.grant.issued_at,
         child.grant.expires_at ?? null,
@@ -7285,6 +7537,12 @@ export async function approveGrant(
     }),
     reviewedRevision: approvalArtifact.revision,
     subjectId,
+    // The signal from the resolution that immediately precedes issuance, which is
+    // the one the AS actually relied on to issue this grant. `requirePendingRequest
+    // ClientRegistration` re-resolved the identity a moment ago, so its lookup time
+    // is the truthful one; the PAR-time signal describes a reliance that only got
+    // the request as far as a reviewable consent.
+    trustSignal: registeredClient.trust_signal ?? null,
     tokenIssuedEvent: (tokenId) =>
       buildTokenIssuedEventInput({
         clientId: registeredClient.client_id,
@@ -7593,6 +7851,7 @@ const postgresGrantPackageStore: GrantPackageStore = {
     clientId,
     storageBindingJson,
     grantJson,
+    trustSignalJson,
     accessMode,
     issuedAt,
     expiresAt,
@@ -7602,14 +7861,15 @@ const postgresGrantPackageStore: GrantPackageStore = {
     pgExec(
       `INSERT INTO grants(
          grant_id, subject_id, client_id, storage_binding_json, grant_json,
-         access_mode, issued_at, expires_at, trace_id, scenario_id
-       ) VALUES($1, $2, $3, $4::jsonb, $5::jsonb, $6, $7, $8, $9, $10)`,
+         trust_signal_json, access_mode, issued_at, expires_at, trace_id, scenario_id
+       ) VALUES($1, $2, $3, $4::jsonb, $5::jsonb, $6::jsonb, $7, $8, $9, $10, $11)`,
       [
         grantId,
         subjectId,
         clientId,
         storageBindingJson,
         grantJson,
+        trustSignalJson,
         accessMode,
         issuedAt,
         expiresAt,
@@ -7780,6 +8040,7 @@ const sqliteGrantPackageStore: GrantPackageStore = {
     clientId,
     storageBindingJson,
     grantJson,
+    trustSignalJson,
     accessMode,
     issuedAt,
     expiresAt,
@@ -7792,6 +8053,7 @@ const sqliteGrantPackageStore: GrantPackageStore = {
       clientId,
       storageBindingJson,
       grantJson,
+      trustSignalJson,
       accessMode,
       issuedAt,
       expiresAt,
@@ -8065,7 +8327,8 @@ const postgresTokenStore: TokenStore = {
                 gp.package_id AS persisted_package_id,
                 gp.subject_id AS package_subject_id,
                 gp.client_id AS package_client_id,
-                g.storage_binding_json::text AS storage_binding_json
+                g.storage_binding_json::text AS storage_binding_json,
+                g.trust_signal_json
          FROM tokens t
          LEFT JOIN grants g ON t.grant_id = g.grant_id
          LEFT JOIN grant_packages gp ON t.package_id = gp.package_id
@@ -8360,6 +8623,7 @@ async function persistChildGrantForPackage({
   resolvedStreams,
   traceContext,
   reviewDigest = null,
+  grantExpiresAt = null,
 }: {
   request: PendingRequest;
   registeredClient: RegisteredClient;
@@ -8367,6 +8631,16 @@ async function persistChildGrantForPackage({
   storageBinding: StorageBinding;
   resolvedStreams: ResolvedGrantStream[];
   traceContext: TraceContext;
+  /**
+   * Owner-chosen grant expiry (Grant fields: `expires_at`) from the hosted-MCP
+   * picker, as an ISO instant. `null` means the owner chose no scheduled end
+   * date, or the surface offered no choice — both resolve to a grant with no
+   * expiry, which is the pre-existing behavior for `continuous`.
+   *
+   * Only consulted for `continuous`: a `single_use` grant is consumed at first
+   * token issuance (spec-core.md:920), and keeps its existing 24h backstop.
+   */
+  grantExpiresAt?: string | null;
   /**
    * Digest binding the hosted-MCP picker's resolved decision (grant:873-877,
    * AS-conformance #15) — computed server-side over the exact
@@ -8389,8 +8663,15 @@ async function persistChildGrantForPackage({
 
   const grantId = generateId("grt");
   const issuedAt = nowIso();
+  // single_use keeps its 24h backstop: the grant is consumed at first token
+  // issuance (spec-core.md:920), so a longer window would only widen the
+  // period in which an unused code stays live. continuous now honors the
+  // owner's choice, defaulting to no expiry when none was made — which is
+  // what this flow always did before the control existed.
   const expiresAt =
-    selection.access_mode === "single_use" ? new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString() : null;
+    selection.access_mode === "single_use"
+      ? new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
+      : grantExpiresAt;
 
   const persistedStorageBinding = normalizeStorageBinding(storageBinding);
   const snapshot = readRetainedSourceDeclarationSnapshot(request);
@@ -8421,6 +8702,7 @@ async function persistChildGrantForPackage({
     storageBindingJson: serializeStorageBinding(persistedStorageBinding),
     subjectId,
     traceId: traceContext.trace_id,
+    trustSignalJson: serializeTrustSignal(registeredClient.trust_signal),
   });
 
   await emitSpineEvent({
@@ -8502,6 +8784,12 @@ export async function createHostedMcpGrantPackage({
      * every child grant's `grant.issued` spine event.
      */
     reviewDigest?: string | null;
+    /**
+     * Owner-chosen grant expiry (`expires_at`) as an ISO instant, applied to
+     * every `continuous` child grant in the package. `null`/absent means no
+     * scheduled end date.
+     */
+    grantExpiresAt?: string | null;
   };
 }): Promise<Record<string, unknown>> {
   if (!isNonEmptyString(clientId)) {
@@ -8532,6 +8820,36 @@ export async function createHostedMcpGrantPackage({
     version: CURRENT_GRANT_PACKAGE_VERSION,
   };
 
+  // Resolve and check every source BEFORE writing anything. Normalization,
+  // declaration retention, and eligibility all reject — a source revoked since
+  // the owner approved, a manifest that no longer matches — and inserting the
+  // package first meant a rejection on the second source left an approved
+  // package row with no child grants behind it. Nothing here writes; the
+  // failures surface with no package to clean up.
+  const resolvedSources: Array<{
+    childRegisteredClient: Awaited<ReturnType<typeof requirePendingRequestClientRegistration>>;
+    request: PendingRequest;
+    resolvedStreams: Awaited<ReturnType<typeof resolvePendingRequestForApproval>>;
+    storageBinding: StorageBinding;
+  }> = [];
+  await forEachSequential(authorizationDetails, async (detail, index) => {
+    const request = await normalizePendingGrantRequest({ authorization_details: [detail], client_id: clientId }, opts);
+    const selectedStorageBinding = normalizeStorageBinding(storageBindings[index]);
+    if (selectedStorageBinding) {
+      request.storage_binding = selectedStorageBinding;
+    }
+    requireStructuredPendingRequestShape(request);
+    request.trace_context = traceContext;
+    const childRegisteredClient = await requirePendingRequestClientRegistration(request, opts);
+    const { sourceBinding, storageBinding } = requireStructuredPendingRequestBindings(request);
+    request.source_binding = describeSourceBinding(sourceBinding);
+    request.storage_binding = normalizeStorageBinding(storageBinding);
+    const manifest = await requireGrantManifestForBindings(sourceBinding, storageBinding, opts);
+    await retainSourceDeclarationSnapshot(request, sourceBinding, storageBinding, manifest, opts);
+    const resolvedStreams = await resolvePendingRequestForApproval(request, sourceBinding, storageBinding, subjectId);
+    resolvedSources.push({ childRegisteredClient, request, resolvedStreams, storageBinding });
+  });
+
   await getGrantPackageStore().insertPackage({
     approvedAt: createdAt,
     clientId,
@@ -8550,22 +8868,10 @@ export async function createHostedMcpGrantPackage({
     source: Record<string, unknown> | null;
     token: string;
   }[] = [];
-  await forEachSequential(authorizationDetails, async (detail, index) => {
-    const request = await normalizePendingGrantRequest({ authorization_details: [detail], client_id: clientId }, opts);
-    const selectedStorageBinding = normalizeStorageBinding(storageBindings[index]);
-    if (selectedStorageBinding) {
-      request.storage_binding = selectedStorageBinding;
-    }
-    requireStructuredPendingRequestShape(request);
-    request.trace_context = traceContext;
-    const childRegisteredClient = await requirePendingRequestClientRegistration(request, opts);
-    const { sourceBinding, storageBinding } = requireStructuredPendingRequestBindings(request);
-    request.source_binding = describeSourceBinding(sourceBinding);
-    request.storage_binding = normalizeStorageBinding(storageBinding);
-    const manifest = await requireGrantManifestForBindings(sourceBinding, storageBinding, opts);
-    await retainSourceDeclarationSnapshot(request, sourceBinding, storageBinding, manifest, opts);
-    const resolvedStreams = await resolvePendingRequestForApproval(request, sourceBinding, storageBinding, subjectId);
+  await forEachSequential(resolvedSources, async (resolved, index) => {
+    const { childRegisteredClient, request, resolvedStreams, storageBinding } = resolved;
     const { grant, token } = await persistChildGrantForPackage({
+      grantExpiresAt: opts.grantExpiresAt ?? null,
       registeredClient: childRegisteredClient,
       request,
       resolvedStreams,
@@ -9697,6 +10003,7 @@ export async function exchangeOAuthAuthorizationCode({
   codeVerifier,
   baseUrl = null,
   issuerBase = null,
+  cimdFetchDependencies,
 }: {
   code: unknown;
   clientId: unknown;
@@ -9704,6 +10011,7 @@ export async function exchangeOAuthAuthorizationCode({
   codeVerifier: unknown;
   baseUrl?: string | null;
   issuerBase?: string | null;
+  cimdFetchDependencies?: CimdFetchDependencies;
 }): Promise<Record<string, unknown>> {
   const normalized = requireOAuthAuthorizationCodeExchangeInput({ clientId, code, codeVerifier, redirectUri });
   const oauthCodeStore = getOAuthCodeStore();
@@ -9716,6 +10024,7 @@ export async function exchangeOAuthAuthorizationCode({
   const registeredClient = await resolveOAuthClient(normalized.clientId, {
     ...(baseUrl ? { baseUrl } : {}),
     ...(issuerBase ? { issuerBase } : {}),
+    ...(cimdFetchDependencies ? { cimdFetchDependencies } : {}),
   });
   if (!registeredClient) {
     throw buildOAuthAuthorizationCodeError("invalid_client", "Unknown client_id");
@@ -10275,9 +10584,13 @@ function reusedOAuthRefreshTokenError(): AuthError {
 export async function exchangeOAuthRefreshToken({
   refreshToken,
   clientId,
+  baseUrl,
+  cimdFetchDependencies,
 }: {
   refreshToken: unknown;
   clientId: unknown;
+  baseUrl?: string | null;
+  cimdFetchDependencies?: CimdFetchDependencies;
 }): Promise<Record<string, unknown>> {
   if (!isNonEmptyString(refreshToken)) {
     throw buildOAuthRefreshTokenError("invalid_request", "refresh_token is required");
@@ -10286,7 +10599,10 @@ export async function exchangeOAuthRefreshToken({
     throw buildOAuthRefreshTokenError("invalid_request", "client_id is required");
   }
 
-  const registeredClient = await getRegisteredClient(clientId);
+  const registeredClient = await resolveOAuthClient(clientId, {
+    ...(baseUrl ? { baseUrl } : {}),
+    ...(cimdFetchDependencies ? { cimdFetchDependencies } : {}),
+  });
   if (!(registeredClient && clientSupportsOAuthRefreshToken(registeredClient))) {
     throw buildOAuthRefreshTokenError("invalid_grant", "Client is not registered for refresh_token");
   }
@@ -10817,7 +11133,10 @@ export async function getOwnerDeviceAuthorizationByUserCode(
 export async function approveOwnerDeviceAuthorization(
   userCode: unknown,
   subjectId = "owner_local",
-  opts: { faultHook?: OwnerDeviceApprovalFaultHook } = {}
+  opts: {
+    authorizationFence?: { credentialRevision?: string | null; sessionIdHash?: string };
+    faultHook?: OwnerDeviceApprovalFaultHook;
+  } = {}
 ): Promise<Record<string, unknown>> {
   const pending = await getOwnerDeviceAuthRowByUserCode(userCode);
   if (!pending) {
@@ -10852,6 +11171,7 @@ export async function approveOwnerDeviceAuthorization(
         token,
         traceContext,
       }),
+      ...(opts.authorizationFence === undefined ? {} : { authorizationFence: opts.authorizationFence }),
     });
   } catch (err: unknown) {
     if (isOwnerDeviceExpiredError(err)) {
@@ -11444,6 +11764,12 @@ function enrichClientTokenIntrospection(
     result.client_id = row.client_id;
     result.grant = parsedGrant;
     result.grant_storage_binding = grantStorageBinding;
+    // Only present when the AS relied on a signal to accept this identity. A grant
+    // issued to a pre-registered client carries none, and reports none.
+    const trustSignal = parseTrustSignal(row.trust_signal_json);
+    if (trustSignal) {
+      result.grant_trust_signal = trustSignal;
+    }
     result.trace_id = row.trace_id;
     result.scenario_id = row.scenario_id;
     return result;

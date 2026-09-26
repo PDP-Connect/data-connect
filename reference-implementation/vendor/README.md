@@ -63,6 +63,15 @@ install`. No other code changes are needed — the package's public surface (all
 
 ## `@pdpp/polyfill-connectors` — pinned tarball, canonical `data-connectors` package (Move B seam closure)
 
+The tarball remains in this repository for host-side conformance tests,
+connector-registry generation, and the reference-stack setup helper. It is a
+development dependency only. Production Docker builds do not copy or install
+it: the reference implementation reaches its helper surface through an
+optional compatibility boundary, and executable connector implementations
+come from the verified connector-install catalog. Keep this tarball until all
+of those host-side consumers are migrated; removing it from the image is the
+deployment boundary covered by this document.
+
 Same interim mechanism as `@pdpp/reference-contract` above: a committed tarball built
 with a plain `npm pack`, referenced via a `file:` dependency, digest recorded in
 `SHA256SUMS`. This one pins `packages/polyfill-connectors` from `PDP-Connect/data-connectors`
@@ -92,19 +101,20 @@ how `reference-implementation/package.json` itself already depends on
 package from `data-connectors` at the SHA below, edit those three dependency lines the
 same way, delete `vendor/`, `npm pack` again.
 
-`reference-implementation/package.json` depends on it via
-`"file:./vendor/pdpp-polyfill-connectors-0.0.1.tgz"`. Every import inside
-`reference-implementation` that used to reach `../../packages/polyfill-connectors/src/*.ts`
-or `../../packages/polyfill-connectors/connectors/*/index.ts` by relative file path now
-imports `@pdpp/polyfill-connectors/<subpath>` instead — production code and tests alike.
-Manifest JSON access goes through the package's own `readPolyfillManifests()` export
-(`@pdpp/polyfill-connectors/manifests`) rather than a direct file-path read, since the
-package does not expose individual manifest files by path.
+Host-side conformance tests and the reference-stack helper depend on it via
+`"file:./vendor/pdpp-polyfill-connectors-0.0.1.tgz"`. The production server
+uses `reference-implementation/server/polyfill-connectors-runtime.ts` as an
+optional boundary: it loads the package's subpaths when the development
+dependency is present, and returns safe empty or fail-closed behavior when the
+catalog has not installed a connector. Manifest JSON access uses the package's
+`readPolyfillManifests()` export in that development path rather than a direct
+file-path read. Executable production implementations come from the verified
+connector-install roots, not this tarball.
 
-**Swapping to a real registry release is a one-line change** once the owner publishes
-`@pdpp/polyfill-connectors`: replace the `file:` path with the published semver range,
-delete this tarball and its `SHA256SUMS` line, run `npm install`. No import-site changes
-are needed — they already reference the package by name, not by file path.
+**Swapping the host-side dependency to a real registry release is a one-line change**
+once the owner publishes `@pdpp/polyfill-connectors`: replace the `file:` path with the
+published semver range, delete this tarball and its `SHA256SUMS` line, and run
+`npm install`. The optional boundary keeps the package's public surface unchanged.
 
 **Update (2026-09-03): pin moved to `data-connectors` commit `262c7bd80c9b4919a274702f6a75b0fb4e7fb1d0`
 (`main`, merge of `data-connectors#68`, "fix(polyfill-connectors): publish JavaScript
@@ -220,3 +230,23 @@ upstream connector index is regenerated before packing; host-provided dependenci
 bundled local collector sources are updated using the same post-pack procedure above.
 This replaces the three interim PR-head pins recorded while #92 was open
 (`f57aa6f5a`, `f5adf2546`, `b17342743`), which are superseded and no longer current.
+
+**Update (2026-09-18): pin moved to `data-connectors` commit
+`243c3d726b278bc0da14b7047f37d9805c620e2f`** (`main`, data-connectors#139, the
+LinkedIn/ChatGPT icon normalization fix). The prior pin (2026-09-10) had gone two days
+stale with no automated signal: `scripts/revendor-polyfill-connectors.sh`'s connector-file
+patch step (added for #92's malformed-line fix) does not apply to an icon-only change, so
+this re-vendor ran the tarball-only portion of that script by hand — pack, repoint the
+three in-repo `*` dependencies, strip `vendor/`/`node_modules`, update `SHA256SUMS`, clear
+and refresh `package-lock.json` integrity — and skipped the `claude_code`/`codex`
+connector-source copy, which is orthogonal to this pin and script-updates its own
+hardcoded targets pin-to-pin. See `scripts/check-polyfill-connectors-tarball-freshness.mjs`
+for the check that now fails CI instead of letting a future pin go silently stale.
+
+**Update (2026-09-25): pin moved to data-connectors commit `d2d9007a91cd7e5035d6d70e5273985354d8dfff`.**
+Rebuilt with `scripts/revendor-polyfill-connectors.sh` to clear the 7-day
+freshness limit. This is the last data-connectors commit before the 2026-09-22
+connector cutover; later pins change manifests this reference implementation
+does not yet accept (for example `heb` stream selections without `resources`).
+The bundled `claude_code` source stays at data-connectors@5f17986, as
+`packages/polyfill-connectors/vendor-source.json` records.

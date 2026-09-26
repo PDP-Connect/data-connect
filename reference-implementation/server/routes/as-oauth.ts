@@ -259,7 +259,7 @@ export interface MountAsTokenContext {
    * Exchanges a refresh token for a new access token.
    * Delegated to `auth.js#exchangeOAuthRefreshToken` via context.
    */
-  exchangeOAuthRefreshToken: (args: { refreshToken: unknown; clientId: unknown }) => Promise<{
+  exchangeOAuthRefreshToken: (args: { baseUrl?: string; refreshToken: unknown; clientId: unknown }) => Promise<{
     access_token: string;
     access_token_expires_at?: string;
     token_type: string;
@@ -267,9 +267,19 @@ export interface MountAsTokenContext {
     grant_id?: string | null;
     grant_package_id?: string | null;
   }>;
+  /** Validates confidential CIMD client authentication before any grant is redeemed. */
+  authenticateOAuthTokenClient?: (args: {
+    baseUrl: string;
+    clientAssertion: unknown;
+    clientAssertionType: unknown;
+    clientId: unknown;
+    tokenEndpoint: string;
+  }) => Promise<string | null>;
   oauthError: PdppErrorFn;
   /** Resolves the full base URL for the running AS given the inbound request. */
   resolveBaseUrl: (req: RouteRequest) => string;
+  /** Resolves the advertised token endpoint, which may use a distinct AS issuer. */
+  resolveTokenEndpoint?: (req: RouteRequest) => string;
   setReferenceTraceId: (res: unknown, traceId: string) => void;
 }
 
@@ -325,12 +335,14 @@ async function handleAuthCodeExchange(
 }
 
 async function handleRefreshTokenExchange(
+  req: RouteRequest,
   body: Record<string, unknown>,
   res: RouteResponse,
   ctx: MountAsTokenContext
 ): Promise<unknown> {
   try {
     const token = await ctx.exchangeOAuthRefreshToken({
+      baseUrl: ctx.resolveBaseUrl(req),
       clientId: body.client_id,
       refreshToken: body.refresh_token,
     });
@@ -364,17 +376,36 @@ export function mountAsToken(app: AppLike, ctx: MountAsTokenContext): void {
   const handler: RouteHandler = async (req, res) => {
     // biome-ignore lint/style/useDestructuring: Explicit property or positional access documents this compatibility boundary.
     const body = req.body;
-    if (body?.grant_type === "authorization_code") {
-      return handleAuthCodeExchange(req, body, res, ctx);
+    let tokenBody = body ?? {};
+    if (ctx.authenticateOAuthTokenClient) {
+      try {
+        const baseUrl = ctx.resolveBaseUrl(req);
+        const clientId = await ctx.authenticateOAuthTokenClient({
+          baseUrl,
+          clientAssertion: body?.client_assertion,
+          clientAssertionType: body?.client_assertion_type,
+          clientId: body?.client_id,
+          tokenEndpoint: ctx.resolveTokenEndpoint?.(req) ?? `${baseUrl.replace(/\/+$/, "")}/oauth/token`,
+        });
+        if (clientId && clientId !== body?.client_id) {
+          tokenBody = { ...tokenBody, client_id: clientId };
+        }
+      } catch (err) {
+        const e = err as { code?: string; message?: string };
+        return ctx.oauthError(res, 401, e.code ?? "invalid_client", e.message ?? "Client authentication failed");
+      }
     }
-    if (body?.grant_type === "refresh_token") {
-      return handleRefreshTokenExchange(body, res, ctx);
+    if (tokenBody.grant_type === "authorization_code") {
+      return handleAuthCodeExchange(req, tokenBody, res, ctx);
+    }
+    if (tokenBody.grant_type === "refresh_token") {
+      return handleRefreshTokenExchange(req, tokenBody, res, ctx);
     }
     const outcome = await executeAsDeviceTokenExchange(
       {
-        clientId: bodyString(body?.client_id),
-        deviceCode: bodyString(body?.device_code),
-        grantType: bodyString(body?.grant_type),
+        clientId: bodyString(tokenBody.client_id),
+        deviceCode: bodyString(tokenBody.device_code),
+        grantType: bodyString(tokenBody.grant_type),
       },
       { exchangeDeviceCode: (args) => ctx.exchangeDeviceCode(args) }
     );

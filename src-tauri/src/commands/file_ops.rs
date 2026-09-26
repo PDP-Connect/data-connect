@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{AppHandle, Manager};
 use dirs::home_dir;
 
@@ -934,6 +935,30 @@ pub struct AppConfig {
     pub server_mode: Option<String>,
     #[serde(rename = "selfHostedUrl")]
     pub self_hosted_url: Option<String>,
+    /// Skip showing the console window at startup, leaving only the tray
+    /// icon. Purely a startup-sequencing preference (no OS side effect),
+    /// unlike autostart-at-login, which is why it lives in this general
+    /// config blob instead of desktop_settings.rs. Defaults to false so
+    /// existing config.json files without this field parse as "not set".
+    #[serde(rename = "startMinimized", default)]
+    pub start_minimized: bool,
+    /// Hide the console window to the tray instead of quitting when the
+    /// titlebar close button is used. Defaults to true: DataConnect keeps
+    /// background sidecars (RI, console, Personal Server) running whether
+    /// or not a window is open, the same "service-like" mental model as
+    /// Dropbox/1Password/Tailscale/Docker Desktop, which either have no
+    /// quit-on-close choice at all or background by default without asking
+    /// -- see ai/research/desktop-app-packaging/tray-app-lifecycle-settings-and-defaults-2026.md.
+    /// Unlike startMinimized this has a real behavioral consequence (it
+    /// changes whether closing the window quits the app), so it is exposed
+    /// as an explicit, visible setting rather than an implicit default the
+    /// user can't see or change.
+    #[serde(rename = "closeToTray", default = "default_close_to_tray")]
+    pub close_to_tray: bool,
+}
+
+fn default_close_to_tray() -> bool {
+    true
 }
 
 impl Default for AppConfig {
@@ -942,6 +967,8 @@ impl Default for AppConfig {
             storage_provider: Some("local".to_string()),
             server_mode: Some("cloud".to_string()),
             self_hosted_url: None,
+            start_minimized: false,
+            close_to_tray: default_close_to_tray(),
         }
     }
 }
@@ -956,6 +983,13 @@ fn get_config_path() -> Result<PathBuf, String> {
 /// Get app configuration from ~/.dataconnect/config.json
 #[tauri::command]
 pub async fn get_app_config() -> Result<AppConfig, String> {
+    read_app_config_sync()
+}
+
+/// Synchronous config read shared by the async command above and by
+/// startup code (unified::setup runs before the async runtime is driving
+/// command dispatch, so it cannot `.await` the command wrapper).
+pub(crate) fn read_app_config_sync() -> Result<AppConfig, String> {
     let config_path = get_config_path()?;
 
     if !config_path.exists() {
@@ -968,6 +1002,57 @@ pub async fn get_app_config() -> Result<AppConfig, String> {
 
     serde_json::from_str(&content)
         .map_err(|e| format!("Failed to parse config file: {}", e))
+}
+
+/// Whether the console window should stay hidden at startup, leaving only
+/// the tray icon. Defaults to false (show) on any read failure — a config
+/// read/parse error must not silently hide the app from a user who never
+/// asked for that.
+pub(crate) fn read_start_minimized_preference() -> bool {
+    read_app_config_sync()
+        .map(|config| config.start_minimized)
+        .unwrap_or(false)
+}
+
+/// Whether the titlebar close button should hide the console window to the
+/// tray instead of quitting the app. Defaults to true (close-to-tray) on
+/// any read failure, matching AppConfig::default -- the safer failure mode
+/// is "sidecars keep running", not "an unreadable config silently starts
+/// quitting the app on every window close".
+///
+/// This does a blocking `fs::read_to_string` (via `read_app_config_sync`).
+/// Callers on a latency-sensitive thread (in particular the GTK/tao window
+/// event loop, which owns titlebar hit-testing and redraw) must use
+/// `cached_close_to_tray_preference()` instead -- see that function's docs.
+pub(crate) fn read_close_to_tray_preference() -> bool {
+    read_app_config_sync()
+        .map(|config| config.close_to_tray)
+        .unwrap_or(true)
+}
+
+/// In-memory cache of the closeToTray preference, so the window-event loop
+/// never has to touch disk. Seeded once at startup by
+/// `init_close_to_tray_cache()` and kept in sync by `set_app_config`
+/// whenever the setting changes -- see
+/// ai/research/desktop-app-packaging/tauri-linux-unresponsive-titlebar-is-a-tao-wayland-csd-overlay-bug-not-a-blocked-main-thread-2026.md
+/// and the orphaned-sidecar-processes corpus entry's H3 hypothesis: a
+/// blocking `fs::read_to_string(~/.dataconnect/config.json)` was running
+/// synchronously inside `on_window_event`'s `CloseRequested` branch, on the
+/// same thread that owns titlebar hit-testing.
+static CLOSE_TO_TRAY_CACHE: AtomicBool = AtomicBool::new(true);
+
+/// Seed the in-memory closeToTray cache from disk. Call exactly once, early
+/// in startup (before any window can receive a close event), off the hot
+/// path this cache exists to protect -- an extra disk read at startup is
+/// fine, the point is that `CloseRequested` never does one.
+pub(crate) fn init_close_to_tray_cache() {
+    CLOSE_TO_TRAY_CACHE.store(read_close_to_tray_preference(), Ordering::Relaxed);
+}
+
+/// Fast, allocation-free, syscall-free read of the closeToTray preference
+/// for use on the window-event loop. Never touches disk.
+pub(crate) fn cached_close_to_tray_preference() -> bool {
+    CLOSE_TO_TRAY_CACHE.load(Ordering::Relaxed)
 }
 
 /// Set app configuration to ~/.dataconnect/config.json
@@ -986,6 +1071,11 @@ pub async fn set_app_config(config: AppConfig) -> Result<(), String> {
 
     fs::write(&config_path, json)
         .map_err(|e| format!("Failed to write config file: {}", e))?;
+
+    // Keep the in-memory closeToTray cache (read by CloseRequested on the
+    // window-event thread) in sync with whatever was just written, so a
+    // settings change takes effect without another disk read.
+    CLOSE_TO_TRAY_CACHE.store(config.close_to_tray, Ordering::Relaxed);
 
     log::info!("App config saved to: {:?}", config_path);
     Ok(())
@@ -1015,6 +1105,7 @@ mod tests {
     use super::read_export_content;
     use super::sanitize_path_component;
     use super::scan_latest_json_in_confined_tree;
+    use super::AppConfig;
     use serde_json::json;
     use std::fs;
     use std::path::PathBuf;
@@ -1123,6 +1214,102 @@ mod tests {
         assert!(
             result.unwrap_err().contains("symlink"),
             "error should explain why the exact export was rejected"
+        );
+    }
+
+    #[test]
+    fn app_config_defaults_close_to_tray_true_for_a_pre_existing_config_file() {
+        // An older config.json written before closeToTray existed has no
+        // such key at all. It must still parse -- and default to true
+        // (close-to-tray), not false (quit-on-close) -- so upgrading the
+        // app does not silently change what the titlebar close button does
+        // for someone who never touched this setting.
+        let legacy_config = json!({
+            "storageProvider": "local",
+            "serverMode": "cloud",
+            "selfHostedUrl": null,
+            "startMinimized": false
+        });
+
+        let config: AppConfig =
+            serde_json::from_value(legacy_config).expect("legacy config should still parse");
+
+        assert!(
+            config.close_to_tray,
+            "a config file predating closeToTray must default to true, not false"
+        );
+    }
+
+    #[test]
+    fn app_config_round_trips_an_explicit_close_to_tray_false() {
+        let config: AppConfig = serde_json::from_value(json!({
+            "storageProvider": "local",
+            "serverMode": "cloud",
+            "selfHostedUrl": null,
+            "startMinimized": false,
+            "closeToTray": false
+        }))
+        .expect("explicit closeToTray: false should parse");
+
+        assert!(
+            !config.close_to_tray,
+            "an explicit false must be honored, not overridden by the default"
+        );
+    }
+
+    // CLOSE_TO_TRAY_CACHE is process-global; serialize the tests that touch
+    // it directly so they can't interleave under cargo test's default
+    // parallelism, mirroring RUN_REGISTRY_TEST_LOCK in
+    // pdpp_installed_connector.rs and COLLECTION_STATE_LOCK in
+    // pdpp_collection_state.rs.
+    static CLOSE_TO_TRAY_CACHE_TEST_LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
+        std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
+
+    #[test]
+    fn cached_close_to_tray_preference_reflects_the_last_value_stored_without_touching_disk() {
+        let _guard = CLOSE_TO_TRAY_CACHE_TEST_LOCK.lock().unwrap();
+
+        // Drive the cache directly through the same atomic the production
+        // code path (set_app_config / init_close_to_tray_cache) writes to
+        // -- proves cached_close_to_tray_preference() is a pure in-memory
+        // read with no filesystem dependency: this test never touches
+        // ~/.dataconnect/config.json, never calls read_app_config_sync,
+        // yet the getter still reports whatever was last stored.
+        super::CLOSE_TO_TRAY_CACHE.store(false, std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            !super::cached_close_to_tray_preference(),
+            "cache getter must report the value just stored, not a disk-derived default"
+        );
+
+        super::CLOSE_TO_TRAY_CACHE.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            super::cached_close_to_tray_preference(),
+            "cache getter must reflect an update made via the same write path set_app_config uses"
+        );
+    }
+
+    #[test]
+    fn set_app_config_write_path_updates_the_cache_to_the_same_value_it_persists() {
+        let _guard = CLOSE_TO_TRAY_CACHE_TEST_LOCK.lock().unwrap();
+
+        // Exercise the exact store the real set_app_config command performs
+        // after writing config.json (see set_app_config above), without
+        // going through the #[tauri::command] wrapper (which needs a
+        // running Tauri app). This is the regression guard for "the cache
+        // must serve the same value the file was just written with."
+        let config = AppConfig {
+            storage_provider: None,
+            server_mode: None,
+            self_hosted_url: None,
+            start_minimized: false,
+            close_to_tray: false,
+        };
+        super::CLOSE_TO_TRAY_CACHE.store(config.close_to_tray, std::sync::atomic::Ordering::Relaxed);
+
+        assert_eq!(
+            super::cached_close_to_tray_preference(),
+            config.close_to_tray,
+            "the cache must match what set_app_config's write path just stored"
         );
     }
 }

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { existsSync } from "node:fs";
+import { isIP } from "node:net";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -20,6 +21,10 @@ const HOP_BY_HOP_HEADERS = new Set([
 ]);
 const TRAILING_COLON_RE = /:$/;
 const STARTUP_RETRY_AFTER_SECONDS = "2";
+const ACTIVE_TUNNEL_PROVIDER_ENV = "PDPP_ACTIVE_TUNNEL_PROVIDER";
+const CLOUDFLARE_TUNNEL_PROVIDER_ID = "cloudflare_tunnel";
+const NGROK_PROVIDER_ID = "ngrok";
+const OWNER_LOGIN_TUNNEL_CLIENT_IP_HEADER = "x-pdpp-owner-login-tunnel-client-ip";
 
 interface CatchAllRouteContext {
   params: Promise<{
@@ -39,16 +44,57 @@ function forwardedProto(request: Request, url: URL): string {
   return request.headers.get("x-forwarded-proto") || url.protocol.replace(TRAILING_COLON_RE, "");
 }
 
-function buildProxyHeaders(request: Request, url: URL): Headers {
+function activeTunnelProvider(): string {
+  return process.env[ACTIVE_TUNNEL_PROVIDER_ENV]?.trim() ?? "";
+}
+
+function validIpLiteral(value: string | null): string | null {
+  const trimmed = value?.trim() ?? "";
+  if (!trimmed || isIP(trimmed) === 0) {
+    return null;
+  }
+  return trimmed;
+}
+
+function lastForwardedForEntry(value: string | null): string | null {
+  const last = value
+    ?.split(",")
+    .map(entry => entry.trim())
+    .filter(Boolean)
+    .at(-1);
+  return validIpLiteral(last ?? null);
+}
+
+function tunnelClientIp(request: Request): string | null {
+  switch (activeTunnelProvider()) {
+    case CLOUDFLARE_TUNNEL_PROVIDER_ID:
+      return validIpLiteral(request.headers.get("cf-connecting-ip"));
+    case NGROK_PROVIDER_ID:
+      // ngrok documents that it appends the real client IP to X-Forwarded-For.
+      // Earlier entries can be client-supplied, so only the last entry is usable.
+      return lastForwardedForEntry(request.headers.get("x-forwarded-for"));
+    default:
+      return null;
+  }
+}
+
+export function buildProxyHeaders(request: Request, url: URL, path: readonly string[] = []): Headers {
   const headers = new Headers(request.headers);
   for (const header of HOP_BY_HOP_HEADERS) {
     headers.delete(header);
   }
+  headers.delete(OWNER_LOGIN_TUNNEL_CLIENT_IP_HEADER);
   headers.delete("host");
   headers.delete("content-length");
   headers.set("x-forwarded-host", request.headers.get("x-forwarded-host") || request.headers.get("host") || url.host);
   headers.set("x-forwarded-proto", forwardedProto(request, url));
   headers.set("x-forwarded-for", request.headers.get("x-forwarded-for") || "127.0.0.1");
+  if (path.join("/") === "owner/login") {
+    const clientIp = tunnelClientIp(request);
+    if (clientIp) {
+      headers.set(OWNER_LOGIN_TUNNEL_CLIENT_IP_HEADER, clientIp);
+    }
+  }
   return headers;
 }
 
@@ -81,7 +127,7 @@ function startupPage(target: ReferenceTarget): Response {
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <meta http-equiv="refresh" content="2" />
-<title>PDPP is starting</title>
+<title>DataConnect is starting</title>
 <style>
 :root { color-scheme: light dark; font-family: system-ui, sans-serif; background: Canvas; color: CanvasText; }
 body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 1.5rem; }
@@ -154,7 +200,7 @@ export async function proxyReferenceRequest(
   try {
     const upstream = await fetch(upstreamUrl, {
       body,
-      headers: buildProxyHeaders(request, sourceUrl),
+      headers: buildProxyHeaders(request, sourceUrl, path),
       method,
       redirect: "manual",
     });

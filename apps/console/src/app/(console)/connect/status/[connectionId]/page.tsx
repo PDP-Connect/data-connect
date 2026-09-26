@@ -7,6 +7,7 @@ import { Callout, PageHeader, Section } from "@pdpp/operator-ui/components/primi
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
+import { ConnectorMark } from "@/app/(console)/components/connector-mark.tsx";
 import { LivePoller } from "../../../components/live-poller.tsx";
 import {
   type ConnectionSetupStatus,
@@ -14,6 +15,8 @@ import {
   RefNotFoundError,
   type StaticSecretSetupStateValue,
 } from "../../../lib/ref-client.ts";
+import { findManifestForConnectorId } from "../../../sources/lib/relationships.ts";
+import { listConnectorManifests } from "../../../lib/rs-client.ts";
 import { setupHref, sourceDetailHref, sourceRecordsHref } from "./connect-status-links.ts";
 
 export const dynamic = "force-dynamic";
@@ -575,14 +578,14 @@ function importPhaseProgress(status: ConnectionSetupStatus): readonly ImportPhas
   const facts = importPhaseFacts(status);
   return [
     {
-      detail: facts.fileReceived ? "PDPP captured the file for this import." : "Choose a file to start.",
+      detail: facts.fileReceived ? "DataConnect captured the file for this import." : "Choose a file to start.",
       label: "Received",
       state: facts.fileReceived ? "done" : "waiting",
     },
     {
       detail: facts.parsed
         ? "The connector parser produced safe validation facts."
-        : "PDPP has not parsed this file yet.",
+        : "DataConnect has not parsed this file yet.",
       label: "Parsed",
       state: parsedPhaseState(facts),
     },
@@ -655,7 +658,7 @@ function CoverageReceiptCard({ receipt }: { receipt: ImportReceipt }) {
   return (
     <div className="mt-4 max-w-2xl rounded-md border border-border/80 bg-background p-4">
       <p className="pdpp-eyebrow text-muted-foreground">Coverage preview</p>
-      <h2 className="pdpp-section-title mt-1">What PDPP found</h2>
+      <h2 className="pdpp-section-title mt-1">What DataConnect found</h2>
       <p className="pdpp-caption mt-1 text-muted-foreground">
         Repeating the same file returns this receipt instead of creating another import.
       </p>
@@ -699,6 +702,7 @@ export default async function ConnectionSetupStatusPage({
   const described = describeState(status);
   const importPhases = importPhaseProgress(status);
   const displayName = deriveSetupStatusDisplayName(status);
+  const connectorIcon = findManifestForConnectorId(await listConnectorManifests().catch(() => []), status.connector_id)?.icon;
   const title = accountIdentity ? `${displayName} · ${accountIdentity}` : displayName;
   return (
     <RecordroomShellWithPalette>
@@ -710,8 +714,18 @@ export default async function ConnectionSetupStatusPage({
           </Link>
         }
         breadcrumbs={[{ href: "/sources", label: "Sources" }, { label: "Setup status" }]}
-        description="Durable status for the account or import you just submitted. Bookmark it and come back any time."
-        title={title}
+        description={
+          <span className="inline-flex items-center gap-2">
+            <ConnectorMark className="size-5 shrink-0" icon={connectorIcon} name={displayName} />
+            <span>Durable status for the account or import you just submitted. Bookmark it and come back any time.</span>
+          </span>
+        }
+        title={
+          <span className="inline-flex items-center gap-2">
+            <ConnectorMark className="size-6 shrink-0" icon={connectorIcon} name={displayName} />
+            {title}
+          </span>
+        }
       />
 
       <Section description={described.detail} title={described.headline}>

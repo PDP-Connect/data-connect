@@ -1,16 +1,45 @@
 [package]
 name = "dataconnect"
+default-run = "dataconnect"
 version = "0.1.0"
 description = "DataConnect - Export your data from various platforms"
 authors = ["DataConnect Team"]
 license = "MIT"
 repository = ""
 edition = "2021"
-rust-version = "1.77.2"
+rust-version = "1.88.0"
 
 [lib]
 name = "dataconnect_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "stall_repro"
+path = "src/bin/stall_repro.rs"
+required-features = ["stall-repro"]
+
+[[bin]]
+name = "winclose_repro"
+path = "src/bin/winclose_repro.rs"
+required-features = ["stall-repro"]
+
+[[bin]]
+name = "pdeathsig_port_repro"
+path = "src/bin/pdeathsig_port_repro.rs"
+required-features = ["stall-repro"]
+
+[[bin]]
+name = "titlebar_repro"
+path = "src/bin/titlebar_repro.rs"
+required-features = ["stall-repro"]
+
+[[bin]]
+name = "new_window_repro"
+path = "src/bin/new_window_repro.rs"
+required-features = ["stall-repro"]
+
+[features]
+stall-repro = []
 
 [build-dependencies]
 tauri-build = { version = "2.5.5", features = [] }
@@ -19,19 +48,23 @@ tauri-build = { version = "2.5.5", features = [] }
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
-tauri = { version = "2.11", features = ["test", "unstable"] }
+tauri = { version = "2.11", features = ["test", "unstable", "tray-icon"] }
 tauri-plugin-log = "2"
 tauri-plugin-fs = "2"
 tauri-plugin-dialog = "2"
+tauri-plugin-notification = "2"
 tauri-plugin-shell = "2"
 tauri-plugin-http = "2.6"
 tauri-plugin-deep-link = "2"
+tauri-plugin-window-state = "2"
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.13", features = ["json", "stream", "blocking"] }
 zip = "8.6"
 walkdir = "2"
 futures-util = "0.3"
 base64 = "0.23"
+getrandom = "0.3.4"
+keyring = "4.2.0"
 chrono = { version = "0.4", features = ["serde"] }
 sha2 = "0.11"
 # `sigstore` 0.14.0 depends on `sha2 = "0.10"`, one major behind this crate's
@@ -42,6 +75,7 @@ sha2 = "0.11"
 # updates its own `sha2` requirement to 0.11 or later.
 sha2-for-sigstore = { package = "sha2", version = "0.10" }
 hex = "0.4"
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 sigstore = { version = "0.14", default-features = false, features = ["bundle", "verify", "sigstore-trust-root", "rustls-tls"] }
 oci-client = "0.18"
 semver = "1.0"
@@ -50,11 +84,42 @@ dotenvy = "0.15"
 mime_guess = "2.0.5"
 flate2 = "1.0"
 fs2 = "0.4"
+rusqlite = { version = "0.37", features = ["bundled"] }
 tar = "0.4"
 tempfile = "3"
 tauri-plugin-mcp-bridge = "0.13.0"
 tauri-plugin-clipboard-manager = "2.3.2"
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
+tauri-plugin-autostart = "2"
+ngrok = "0.19.0"
+url = "2.5"
+open = "5.3.3"
+uuid = { version = "1.22", features = ["v4"] }
+aes-gcm = "0.11.1"
+scrypt = { version = "0.12.0", default-features = false, features = ["kdf"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+signal-hook = "0.4.4"
+
+# gtk is already in the tree via tauri; it is named here so the
+# wayland_titlebar module can call GtkWindowExt on the window tauri returns.
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# run_lease.rs's process-identity check has no /proc filesystem to read on
+# macOS (Linux keeps its existing hand-rolled /proc/<pid>/stat parser,
+# untouched; Windows already has its own #[cfg(not(unix))] no-op path in the
+# same module and does not need this).
+#
+# Pinned to 0.38, not the newer 0.39 line: 0.39 requires Rust 1.95, above
+# this crate's own declared rust-version = "1.88" (Cargo.toml, package
+# section) and above the 1.94.0 toolchain available in this review's
+# sandbox, which cannot compile 0.39 at all. 0.38.4 requires exactly 1.88,
+# matching this crate's MSRV -- verified against crates.io's published
+# rust_version per release, not assumed.
+sysinfo = { version = "0.38", default-features = false, features = ["system"] }
+
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+robius-authentication = "0.3.1"

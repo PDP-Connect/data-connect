@@ -45,8 +45,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-// biome-ignore lint/correctness/noUnresolvedImports: test-only raw SQLite instrumentation.
-import Database from "better-sqlite3";
+import Database from "./helpers/sqlite-driver.ts";
 import {
   ConnectorSummaryPageRequestError,
   decodeConnectorSummaryPageCursor,

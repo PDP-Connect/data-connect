@@ -53,12 +53,12 @@ const requiredFiles = new Set([
   "dist/local-collector/bin/pdpp-local-collector.js",
   "dist/local-collector/src/errors.js",
   "dist/local-collector/src/runner.js",
-  "dist/polyfill-connectors/connectors/claude_code/index.js",
-  "dist/polyfill-connectors/connectors/codex/index.js",
-  "dist/polyfill-connectors/connectors/imessage/index.js",
-  "dist/polyfill-connectors/connectors/google_takeout/index.js",
-  "dist/polyfill-connectors/connectors/apple_photos/index.js",
-  "dist/polyfill-connectors/connectors/google_messages/index.js",
+  "dist/local-collector/src/managed/collection-profiles.js",
+  "dist/local-collector/src/generated/collection-profile-pins.generated.js",
+  // The installer core that fetches and Sigstore-verifies Collection
+  // Profiles; see scripts/postbuild.ts's copyInstallerCore.
+  "dist/connector-installer-core/index.mjs",
+  "dist/connector-installer-core/LICENSE",
 ]);
 
 const packInfo = (await npmPackMetadata({ cwd: packageRoot })) as PackMetadata;
@@ -78,6 +78,9 @@ for (const file of packedFiles) {
   assert.equal(file.startsWith("test/"), false, `test file leaked into package: ${file}`);
   assert.equal(/(^|\/).+\.test\./.test(file), false, `test artifact leaked into package: ${file}`);
   assert.equal(file.includes("node_modules/"), false, `node_modules leaked into package: ${file}`);
+  // Connector code is installed from pinned, signed Collection Profiles at
+  // run time; none is compiled into this package any more.
+  assert.equal(file.startsWith("dist/polyfill-connectors/"), false, `vendored connector code leaked into package: ${file}`);
   if (file.endsWith(".ts") && !file.endsWith(".d.ts")) {
     throw new Error(`raw TypeScript leaked into package: ${file}`);
   }
@@ -90,10 +93,9 @@ const forbidden = [
   /(?:from\s+|import\s*\(|require\s*\()\s*["']pdf-parse["']/,
   /(?:from\s+|import\s*\(|require\s*\()\s*["']better-sqlite3["']/,
   /(?:from\s+|import\s*\(|require\s*\()\s*["']linkedom["']/,
-  // iMessage reads chat.db via node:sqlite (built into Node.js), not a
-  // spawned `sqlite3` binary — a regression to shelling out would silently
-  // break the zero-install npx promise on hosts without that binary on
-  // PATH. See connectors/imessage/index.ts's module doc.
+  // The signed iMessage profile reads chat.db via node:sqlite (built into
+  // Node.js), not a spawned `sqlite3` binary. A regression to shelling out
+  // would break the profile on hosts without that binary on PATH.
   /execFileSync?\s*\(\s*["']sqlite3["']/,
   /["']workspace:/,
 ];
@@ -200,7 +202,7 @@ function collectExportTargets(exportsField: unknown, label = "exports"): [string
 async function assertLiteralRelativeImportsResolve(packedFiles: string[], packedFileSet: Set<string>): Promise<void> {
   const fileChecks = await Promise.all(
     packedFiles
-      .filter((f) => f.endsWith(".js") || f.endsWith(".d.ts"))
+      .filter((f) => f.endsWith(".js") || f.endsWith(".mjs") || f.endsWith(".d.ts"))
       .map(async (packedFile) => ({
         packedFile,
         source: await readFile(path.join(packageRoot, packedFile), "utf8"),
@@ -326,7 +328,8 @@ function isBareSpecifier(specifier: string): boolean {
  * Extract every bare (non-relative, non-absolute) import/export/require
  * specifier a compiled `.js`/`.mjs`/`.d.ts` file references: static
  * `import … from "x"` (including the bare side-effect form `import "x"`),
- * `export … from "x"`, dynamic `import("x")`, and `require("x")`.
+ * `export … from "x"`, dynamic `import("x")`, and `require("x")` or a
+ * `require…("x")` alias.
  * `node:`-prefixed specifiers are excluded here (handled as builtins by the
  * caller) so the private-package guidance below never fires on them.
  *
@@ -345,7 +348,10 @@ export function bareImportSpecifiers(source: string): Set<string> {
   const staticImport =
     /^[ \t]*(?:import\s+(?:[^"'\n;]*?\s+from\s+)?["']([^"'.][^"']*)["']|export\s+[^"'\n;]*?\s+from\s+["']([^"'.][^"']*)["'])/gm;
   const dynamicImport = /\bimport\s*\(\s*["']([^"'.][^"']*)["']\s*\)/g;
-  const requireCall = /\brequire\s*\(\s*["']([^"'.][^"']*)["']\s*\)/g;
+  // `require\w*` also matches a createRequire()-bound alias such as
+  // `requireFromTarReader("tar")`, which is how a vendored module can load a
+  // package without a literal `require(` call.
+  const requireCall = /\brequire\w*\s*\(\s*["']([^"'.][^"']*)["']\s*\)/g;
   for (const match of source.matchAll(staticImport)) {
     const specifier = match[1] ?? match[2];
     if (specifier && isBareSpecifier(specifier) && !specifier.startsWith("node:")) {

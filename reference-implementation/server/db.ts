@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * PDPP Personal Server — Database layer (`better-sqlite3`).
+ * PDPP Personal Server — Database layer (`better-sqlite3` API, linked via
+ * `server/sqlite-driver.ts`; see that module for why the driver package is
+ * named in exactly one place).
  *
  * The reference implementation talks to SQLite synchronously. Callers do:
  *
@@ -21,7 +23,6 @@
 
 import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { createRequire } from "node:module";
 import { dirname } from "node:path";
 import { load as loadSqliteVec } from "sqlite-vec";
 import {
@@ -30,14 +31,13 @@ import {
 } from "./connector-instance-utils.ts";
 import { canonicalConnectorKey } from "./connector-key.ts";
 import { RECORD_REJECTION_GENERATION, recordRejectionReplayKey } from "./record-rejection-replay-key.ts";
+import { SqliteDriver } from "./sqlite-driver.ts";
+import { openSqliteDatabase, type SqliteEncryptionOptions } from "./sqlite-encryption.ts";
 import { bumpStorageGeneration } from "./storage-generation.ts";
 
 const DEFAULT_SQLITE_BUSY_TIMEOUT_MS = 30_000;
 const LEGACY_SYNC_STATE_OWNER_SUBJECT_ID = "owner_local";
-const Database = createRequire(import.meta.url)("better-sqlite3") as new (
-  filename: string,
-  options: { timeout: number }
-) => SqliteDatabase;
+const Database = SqliteDriver;
 
 type SqliteRow = Record<string, unknown>;
 interface SqliteRunResult {
@@ -264,7 +264,7 @@ interface AccountDestinationRow {
   status: string;
 }
 
-interface InitDbOptions extends BusyRetryOptions {
+export interface InitDbOptions extends BusyRetryOptions, SqliteEncryptionOptions {
   busyTimeoutMs?: number;
   onSchemaMigration?: (event: SchemaMigrationEvent) => void;
   onSchemaRetry?: (event: BusyRetryEvent) => void;
@@ -518,6 +518,30 @@ CREATE TABLE IF NOT EXISTS connectors (
   connector_id TEXT PRIMARY KEY,
   manifest     TEXT NOT NULL,
   created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS connector_installs (
+  connector_id TEXT PRIMARY KEY,
+  record_json TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS connector_activations (
+  connector_id TEXT PRIMARY KEY,
+  state TEXT NOT NULL CHECK (state IN ('active', 'repair_required')),
+  record_json TEXT NOT NULL,
+  canonical_manifest_json TEXT NOT NULL,
+  manifest_revision TEXT NOT NULL,
+  activation_id TEXT NOT NULL,
+  attempt_id TEXT NOT NULL,
+  repair_reason TEXT,
+  repair_error_json TEXT,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS connector_install_catalog_state (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  catalog_high_water TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS connector_instances (
@@ -872,6 +896,7 @@ CREATE TABLE IF NOT EXISTS grants (
   client_id      TEXT NOT NULL,
   storage_binding_json TEXT,
   grant_json     TEXT NOT NULL,
+  trust_signal_json TEXT,
   access_mode    TEXT NOT NULL,
   status         TEXT NOT NULL DEFAULT 'active',
   consumed       INTEGER NOT NULL DEFAULT 0,
@@ -940,6 +965,21 @@ CREATE TABLE IF NOT EXISTS pending_consents (
 CREATE INDEX IF NOT EXISTS idx_pending_consents_status_expires
   ON pending_consents(status, expires_at);
 
+CREATE TABLE IF NOT EXISTS consent_challenges (
+  id TEXT PRIMARY KEY,
+  owner_subject_id TEXT NOT NULL,
+  authorization_request_json TEXT NOT NULL,
+  client_json TEXT NOT NULL,
+  render_model_inputs_json TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'accepted', 'rejected', 'expired')),
+  decision_digest TEXT,
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  decided_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_consent_challenges_owner_status_expires
+  ON consent_challenges(owner_subject_id, status, expires_at);
+
 CREATE TABLE IF NOT EXISTS agent_connect_attempts (
   id                TEXT PRIMARY KEY,
   request_uri       TEXT NOT NULL,
@@ -985,6 +1025,36 @@ CREATE TABLE IF NOT EXISTS owner_device_auth (
   -- POST /oauth/token; projecting it to operator surfaces is a
   -- direct credential leak.
   approval_id        TEXT UNIQUE
+);
+
+-- The cookie value is a random credential. Only its SHA-256 hash is stored;
+-- session metadata is retained so the owner can inspect and revoke devices.
+CREATE TABLE IF NOT EXISTS owner_sessions (
+  id_hash       TEXT PRIMARY KEY,
+  session_id    TEXT NOT NULL UNIQUE,
+  subject_id    TEXT NOT NULL,
+  device_key    TEXT,
+  label         TEXT NOT NULL,
+  user_agent    TEXT,
+  ip_address    TEXT,
+  created_at    INTEGER NOT NULL,
+  expires_at    INTEGER NOT NULL,
+  last_seen_at  INTEGER NOT NULL,
+  revoked_at    INTEGER,
+  UNIQUE(subject_id, device_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_owner_sessions_subject_active
+  ON owner_sessions(subject_id, revoked_at, expires_at);
+
+-- The single app-managed owner password is stored as a salted scrypt verifier.
+-- The verifier JSON contains no plaintext password; singleton=1 keeps this
+-- table intentionally limited to one owner credential.
+CREATE TABLE IF NOT EXISTS owner_password_verifier (
+  singleton      INTEGER PRIMARY KEY CHECK (singleton = 1),
+  verifier_json  TEXT NOT NULL,
+  created_at     INTEGER NOT NULL,
+  updated_at     INTEGER NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_owner_device_auth_status_expires
@@ -6037,7 +6107,7 @@ export function initDb(path = ":memory:", opts: InitDbOptions = {}): DatabaseHan
   if (path !== ":memory:") {
     mkdirSync(dirname(path), { recursive: true });
   }
-  const raw = new Database(path, { timeout: busyTimeoutMs }) as unknown as SqliteDatabase;
+  const raw = openSqliteDatabase(Database, path, busyTimeoutMs, opts) as unknown as SqliteDatabase;
   sqliteStoreCacheGeneration += 1;
   sqliteStoreCacheIdentity = `sqlite:${String(path)}:${sqliteStoreCacheGeneration}`;
   raw.pragma(`busy_timeout = ${busyTimeoutMs}`);
@@ -6390,6 +6460,7 @@ CREATE INDEX IF NOT EXISTS idx_blob_bindings_record ON blob_bindings(connector_i
   // write-path derivation, only promoting an existing value to a column.
   // Spec: openspec/changes/reconcile-active-summary-evidence/specs/
   //       reference-connector-instances/spec.md
+  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "grants", "trust_signal_json", "TEXT"));
   runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "spine_events", "connector_instance_id", "TEXT"));
   // Terminal provenance is source-bound, not projection-bound. This trigger
   // shares SQLite's single-writer ordering with registry mutation. It accepts

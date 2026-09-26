@@ -22,10 +22,13 @@ export function escapeHtml(input: unknown): string;
 
 export interface PdppMarkOptions {
   size?: number;
+  surface?: "light" | "dark";
   title?: string;
 }
 
 export function renderPdppMark(options?: PdppMarkOptions): string;
+
+export function renderDataConnectMark(options?: PdppMarkOptions): string;
 
 export interface HostedDocumentOptions {
   body: string;

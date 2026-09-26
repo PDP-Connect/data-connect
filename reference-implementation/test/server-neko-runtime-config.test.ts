@@ -57,10 +57,13 @@ interface BrowserSurfaceLeaseManagerLike {
 
 interface ResolvedNekoOptions {
   browserSurfaceAllocator?: TestAllocator;
+  browserSurfaceAllocatorScopeId?: string;
   browserSurfaceLeaseManager?: BrowserSurfaceLeaseManagerLike;
   browserSurfaceLeaseStore?: TestLeaseStore;
   browserSurfaceReadinessProbe?: { probe: (input: Record<string, unknown>) => Promise<{ ok: boolean }> };
   browserSurfaceReadinessTimeoutMs?: number;
+  beforeBrowserSurfaceLeaseEnsure?: (args: { readonly runId: string; readonly surfaceId: string }) => void;
+  beforeBrowserSurfaceLeaseRelease?: (args: { readonly runId: string }) => Promise<void>;
 }
 
 interface ResolveNekoBrowserSurfaceControllerOptionsArgs {
@@ -135,6 +138,25 @@ test("n.eko dynamic runtime config builds allocator and readiness controller opt
   assert.equal(options.browserSurfaceAllocator, allocator);
   assert.equal(options.browserSurfaceReadinessTimeoutMs, 34_567);
   assert.deepEqual(allocatorOptions, [{ baseUrl: "http://allocator.test/api" }]);
+});
+
+test("host runtime config builds allocator and run-lifecycle wiring", async () => {
+  const options = await resolveNekoBrowserSurfaceControllerOptions({
+    env: {
+      PDPP_BROWSER_SURFACE_HOST_ENDPOINT: "http://host-agent.test/api",
+      PDPP_BROWSER_SURFACE_HOST_TOKEN: "shared-secret",
+      PDPP_BROWSER_SURFACE_MODE: "host",
+      PDPP_NEKO_MANAGED_CONNECTORS: "connector-a",
+      PDPP_NEKO_SURFACE_CAP: "1",
+    },
+    getBrowserSurfaceLeaseStore: () => createEmptyLeaseStore(),
+  });
+
+  assert.ok(options.browserSurfaceAllocator);
+  assert.equal(options.browserSurfaceAllocatorScopeId, "http://host-agent.test/api");
+  assert.equal(options.browserSurfaceReadinessTimeoutMs, 120_000);
+  assert.equal(typeof options.beforeBrowserSurfaceLeaseEnsure, "function");
+  assert.equal(typeof options.beforeBrowserSurfaceLeaseRelease, "function");
 });
 
 interface FakeFetchResponse {

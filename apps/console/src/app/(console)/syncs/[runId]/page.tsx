@@ -8,6 +8,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { Fragment } from "react";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
+import { ConnectorMark } from "@/app/(console)/components/connector-mark.tsx";
 import { ServerUnreachable } from "../../components/server-unreachable.tsx";
 import { getAsInternalUrl, ReferenceServerUnreachableError } from "../../lib/owner-token.ts";
 import {
@@ -17,6 +18,8 @@ import {
   type SpineEvent,
   type TimelineEnvelope,
 } from "../../lib/ref-client.ts";
+import { listConnectorManifests } from "../../lib/rs-client.ts";
+import { findManifestForConnectorId } from "../../sources/lib/relationships.ts";
 import {
   type CurrentRunAssistance,
   getCurrentRunAssistance,
@@ -107,6 +110,9 @@ export default async function RunDetailPage({
 
   const { events } = envelope;
   const connectorId = events.find((e) => e.actor_type === "runtime")?.actor_id ?? null;
+  const connectorManifests = await listConnectorManifests().catch(() => []);
+  const connectorManifest = connectorId ? findManifestForConnectorId(connectorManifests, connectorId) : null;
+  const connectorName = connectorManifest?.display_name ?? connectorId ?? "connector";
 
   const checkpoints = summarizeCheckpoints(events);
   const progress = summarizeProgress(events);
@@ -160,6 +166,14 @@ export default async function RunDetailPage({
         interactions={interactions}
         progress={progress}
       />
+      {runStatus?.failure?.recovery_hint?.action === "refresh_credentials" && connectorId ? (
+        <p className="pdpp-caption mb-8 text-muted-foreground">
+          Reconnect this source to sync again: {" "}
+          <Link className="text-foreground underline" href={`/sources/${encodeURIComponent(connectorId)}`}>
+            {connectorName}
+          </Link>
+        </p>
+      ) : null}
       <KnownGapsSection
         coverageGaps={gapClassification.coverageGaps}
         informationalGaps={gapClassification.informationalGaps}
@@ -183,6 +197,7 @@ export default async function RunDetailPage({
             className="font-mono text-foreground underline underline-offset-2"
             href={`/sources/${encodeURIComponent(connectorId)}`}
           >
+            <ConnectorMark className="mr-2 inline-block size-5 align-[-0.2em]" icon={connectorManifest?.icon} name={connectorName} />
             {connectorId}
           </Link>
           {" · "}
@@ -616,7 +631,7 @@ function SkippedWithoutGapRecord({ skipped }: { skipped: SkippedStreamSummary })
       ) : null}
       {skipped.unexplainedCount > 0 ? (
         <p className="pdpp-caption mt-1.5 text-muted-foreground">
-          {skipped.unexplainedCount} of these recorded no reason, so PDPP cannot tell you whether anything is missing
+          {skipped.unexplainedCount} of these recorded no reason, so DataConnect cannot tell you whether anything is missing
           for {skipped.unexplainedCount === 1 ? "it" : "them"}.
         </p>
       ) : null}
@@ -988,6 +1003,9 @@ function summarizeFailure(failure: SpineEvent | undefined, runStatus: RunStatusE
       ];
     }
     if (runStatus?.failure) {
+      if (runStatus.failure.recovery_hint?.action === "refresh_credentials") {
+        return runStatus.failure.message ? [["message", runStatus.failure.message]] : [];
+      }
       return [
         ["reason", runStatus.failure.reason ?? runStatus.terminal_reason ?? "—"],
         ["origin", runStatus.failure.origin ?? "—"],

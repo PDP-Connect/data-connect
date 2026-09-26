@@ -394,6 +394,13 @@ test("Postgres sort repair fences all manifest streams for an instance and blob 
   const instanceA = `cin_${suffix}`;
   const streamA = "first";
   const streamB = "later";
+  const manifest = {
+    connector_id: connectorId,
+    streams: [
+      { cursor_field: "first_cursor", name: streamA },
+      { cursor_field: "later_cursor", name: streamB },
+    ],
+  };
   initDb(":memory:");
   const postgresUrl = DEDICATED_POSTGRES_URL;
   assert.ok(postgresUrl, "DEDICATED_POSTGRES_URL is required for this test");
@@ -407,7 +414,7 @@ test("Postgres sort repair fences all manifest streams for an instance and blob 
       `INSERT INTO connectors(connector_id, manifest, created_at)
        VALUES ($1, $2::jsonb, $3)
        ON CONFLICT (connector_id) DO NOTHING`,
-      [connectorId, JSON.stringify({ connector_id: connectorId }), "2026-07-16T00:00:00.000Z"]
+      [connectorId, JSON.stringify(manifest), "2026-07-16T00:00:00.000Z"]
     );
     await postgresQuery(
       `INSERT INTO records(connector_id, connector_instance_id, stream, record_key, record_json, emitted_at, version, deleted, primary_key_text)
@@ -424,13 +431,7 @@ test("Postgres sort repair fences all manifest streams for an instance and blob 
         JSON.stringify({ id: "later-record", later_cursor: "2026-07-15T02:00:00.000Z" }),
       ]
     );
-    const repaired = await postgresBackfillRecordSortPositionsForManifest({
-      connector_id: connectorId,
-      streams: [
-        { cursor_field: "first_cursor", name: streamA },
-        { cursor_field: "later_cursor", name: streamB },
-      ],
-    });
+    const repaired = await postgresBackfillRecordSortPositionsForManifest(manifest);
     assert.equal(repaired.updated, 2);
     const cursors = await postgresQuery(
       `SELECT stream, cursor_value FROM records

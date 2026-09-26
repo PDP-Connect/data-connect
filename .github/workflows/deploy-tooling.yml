@@ -1,0 +1,165 @@
+name: deploy-tooling
+
+# Offline checks for the Railway/Fly.io/Docker deploy tooling restored from
+# PDP-Connect/pdpp (see deploy/railway/README.md, deploy/flyio/README.md,
+# deploy/docker/README.md). Mirrors the classify -> suite -> gate shape of
+# .github/workflows/reference-implementation.yml, scoped to this repo's npm
+# workspaces and Node engine floor (>=24.15.0) rather than pdpp's pnpm.
+#
+# This workflow proves deploy check scripts and Compose configs. The separate
+# docker-images workflow builds image targets; it has no automatic publish
+# trigger.
+#
+# check-image-identity.sh / check-prod-revision-drift.sh are plain bash and
+# their *.test.sh counterparts stub `docker` entirely, so they run with no
+# Docker daemon and no network -- see those test files' own headers.
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/deploy-tooling.yml"
+      - ".railwayignore"
+      - "deploy/**"
+      - "docker-compose.yml"
+      - "docker-compose.dev.yml"
+      - "docker-compose.neko.yml"
+      - "package.json"
+      - "package-lock.json"
+      - "scripts/check-railway-deploy-env.ts"
+      - "scripts/check-railway-deploy-env.test.ts"
+      - "scripts/check-railway-template-artifacts.test.ts"
+      - "scripts/check-flyio-deploy-env.ts"
+      - "scripts/check-flyio-deploy-env.test.ts"
+      - "scripts/check-railway-ghcr-public.ts"
+      - "scripts/check-railway-ghcr-public.test.ts"
+      - "scripts/railway-mcp-query-smoke.ts"
+      - "scripts/railway-mcp-query-smoke.test.ts"
+      - "scripts/railway-sqlite-restart-smoke.sh"
+      - "scripts/lib/owner-session.ts"
+  merge_group: {}
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: deploy-tooling-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  shell-checks:
+    name: docker check-script unit tests (bash, no Docker daemon needed)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: check-image-identity.sh
+        run: bash deploy/docker/check-image-identity.test.sh
+
+      - name: check-prod-revision-drift.sh
+        run: bash deploy/docker/check-prod-revision-drift.test.sh
+
+  railway-checks:
+    name: railway deploy-contract unit tests (node:test, no network needed)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.19.0"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Pin the official Railway schema snapshot so CI does not depend on a
+      # website/CDN response being JSON. Snapshot fetched 2026-09-23 from
+      # https://railway.com/railway.schema.json; refresh deliberately and
+      # review the diff when Railway changes its schema.
+      - name: Verify pinned Railway schema
+        run: |
+          echo "0302fd53109298d9c277dbaedae772630506d8da43636e69875268a8782dd68f  .github/schemas/railway.schema.json" | sha256sum --check
+          node --input-type=module -e '
+            import { readFileSync } from "node:fs";
+            const schema = JSON.parse(readFileSync(".github/schemas/railway.schema.json", "utf8"));
+            if (schema.$schema !== "https://json-schema.org/draft/2020-12/schema" || schema.type !== "object") {
+              throw new Error("pinned Railway schema has an unexpected JSON Schema dialect or root type");
+            }
+          '
+
+      - name: Run railway check-script unit tests
+        run: |
+          npm run railway:template:test
+          npx vitest run scripts/check-railway-template-artifacts.test.ts scripts/check-flyio-deploy-env.test.ts
+          npx --yes ajv-cli@5.0.0 validate --spec=draft2020 --all-errors \
+            -s .github/schemas/railway.schema.json \
+            -d deploy/railway/railway.console.json \
+            -d deploy/railway/railway.reference.json
+
+  compose-config:
+    name: docker compose config parses cleanly
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate root compose stack (base + dev + neko overlays)
+        env:
+          PDPP_OWNER_PASSWORD: ci-placeholder
+          PDPP_CREDENTIAL_ENCRYPTION_KEY: ci-placeholder
+        run: |
+          set -euo pipefail
+          docker compose -f docker-compose.yml config >/dev/null
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml config >/dev/null
+          docker compose -f docker-compose.yml -f docker-compose.neko.yml config >/dev/null
+
+      - name: Validate the minimal self-host stack
+        env:
+          PDPP_OWNER_PASSWORD: ci-placeholder
+          PDPP_CREDENTIAL_ENCRYPTION_KEY: ci-placeholder
+        run: docker compose -f deploy/docker/docker-compose.yml config >/dev/null
+
+  gate:
+    name: deploy-tooling gate
+    needs:
+      - shell-checks
+      - railway-checks
+      - compose-config
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Aggregate required sub-job results
+        run: |
+          set -euo pipefail
+
+          fail=0
+          for job_result in \
+            "shell-checks:${{ needs.shell-checks.result }}" \
+            "railway-checks:${{ needs.railway-checks.result }}" \
+            "compose-config:${{ needs.compose-config.result }}"
+          do
+            name="${job_result%%:*}"
+            result="${job_result##*:}"
+            if [[ "${result}" != "success" && "${result}" != "skipped" ]]; then
+              echo "::error::${name} reported ${result}"
+              fail=1
+            fi
+          done
+
+          exit "${fail}"

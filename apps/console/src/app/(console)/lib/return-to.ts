@@ -28,6 +28,7 @@ const OWNER_ROUTE_PREFIXES = [
   "/explore",
   "/grants",
   "/connect",
+  "/consent",
   "/notifications",
   "/schedules",
   "/deployment",

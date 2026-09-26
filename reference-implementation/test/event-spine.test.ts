@@ -8,8 +8,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-// biome-ignore lint/correctness/noUnresolvedImports: Biome resolver lacks this runtime-supported dependency export shape.
-import Database from "better-sqlite3";
+import Database from "./helpers/sqlite-driver.ts";
 import { emitSpineEvent, type SpineEventRecord } from "../lib/spine.ts";
 import { runConnector } from "../runtime/index.ts";
 import { canonicalConnectorKey } from "../server/connector-key.ts";

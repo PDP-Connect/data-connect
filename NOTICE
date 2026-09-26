@@ -1,2 +1,30 @@
 Copyright © 2026 The PDP-Connect Contributors
 Licensed under the Apache License, Version 2.0.
+
+## Third-party connector brand icons
+
+The console displays small brand glyphs to identify third-party services a
+connector can connect to (e.g. Amazon, GitHub, Spotify). All product names,
+trademarks, and registered trademarks referenced or depicted by these icons
+are the property of their respective owners. These icons are used by the
+PDP-Connect project strictly to identify the products and companies a
+connector integrates with; their use implies no sponsorship, affiliation, or
+endorsement by the mark holder.
+
+Two sources of icon are in play:
+
+- Icons bundled with `@pdpp/polyfill-connectors`' shipped connector
+  manifests (`manifests/icons/*.svg`, referenced by each manifest's
+  `brand.icon` field). That package is an external dependency of this repo,
+  not vendored source here.
+- When a connector's manifest declares no bundled icon, the console falls
+  back to a same-name lookup in `simple-icons` (https://simpleicons.org), an
+  offline npm package of ~3,300 brand SVGs. simple-icons' SVG markup is
+  released under CC0 1.0, but per its own LICENSE.md that waiver explicitly
+  does not extend to trademark or patent rights, and the project maintains a
+  brand-owner takedown channel. See
+  https://github.com/simple-icons/simple-icons/blob/master/DISCLAIMER.md.
+
+A connector with no icon from either source renders a deterministic
+monogram (the connector's initial(s) and a color derived from its name) —
+this is the normal, first-class default, not an error state.

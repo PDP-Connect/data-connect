@@ -46,3 +46,13 @@ test("run detail still renders a breadcrumb trail when the connector is unknown"
   const src = await readFile(PAGE_FILE, "utf8");
   assert.match(src, /: \[\{ href: dashboardRoutes\.section\.runs, label: "Syncs" \}, \{ label: "Sync" \}\]/);
 });
+
+test("auth failure diagnosis hides the connector code and links to reconnect", async () => {
+  const src = await readFile(PAGE_FILE, "utf8");
+  assert.match(src, /recovery_hint\?\.action === "refresh_credentials"/);
+  assert.match(src, /Reconnect this source to sync again/);
+  assert.match(
+    src,
+    /if \(runStatus\.failure\.recovery_hint\?\.action === "refresh_credentials"\) \{\s*return runStatus\.failure\.message \? \[\["message", runStatus\.failure\.message\]\]/
+  );
+});

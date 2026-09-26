@@ -613,9 +613,29 @@ test("keeps the source-revision stale-publication PostgreSQL skip title in the e
   const name = "PostgreSQL stale failure publication cannot overwrite newer evidence";
   assert.ok(POSTGRES_UNNAMED_SKIP_TEST_NAME_ROWS.includes(name));
 });
+test("keeps the stale-semantic-page PostgreSQL skip title in the exact receipt mapping", () => {
+  const name = "PostgreSQL: a stale semantic page cannot overwrite the index after manifest B publishes";
+  assert.ok(POSTGRES_UNNAMED_SKIP_TEST_NAME_ROWS.includes(name));
+});
+test("keeps the stale-record-column PostgreSQL skip title in the exact receipt mapping", () => {
+  const name = "PostgreSQL: stale record-column repair cannot overwrite manifest B";
+  assert.ok(POSTGRES_UNNAMED_SKIP_TEST_NAME_ROWS.includes(name));
+});
 test("keeps the source-revision trigger-omission PostgreSQL skip title in the exact receipt mapping", () => {
   const name = "PostgreSQL trigger omission fails before migration and a live writer waits for the atomic reinstall";
   assert.ok(POSTGRES_UNNAMED_SKIP_TEST_NAME_ROWS.includes(name));
+});
+test("keeps every new PostgreSQL manifest, connector, and owner-auth skip title in the exact receipt mapping", () => {
+  const names = [
+    "PostgreSQL: a stale derived write cannot commit after manifest B publishes",
+    "PostgreSQL: delayed live lexical and semantic maintenance cannot publish after manifest B",
+    "PostgreSQL: active installed connectors allow refresh-policy updates but reject stream-shape changes",
+    "Postgres owner-device approval fence rejects stale sessions and rotation revokes completed approvals",
+    "Postgres stores app-managed owner password verifiers",
+    "Postgres fences owner login session issuance against password rotation",
+    "Postgres owner-session store supports device replacement, revocation, and bearer inventory",
+  ];
+  assert.deepEqual(names.filter((name) => POSTGRES_UNNAMED_SKIP_TEST_NAME_ROWS.includes(name)), names);
 });
 // Aggregate gate regression (2026-07-30, run-history-backfill-cutover REVISE):
 // test/active-run-summary-zero-spine.test.ts (reference-implementation) added

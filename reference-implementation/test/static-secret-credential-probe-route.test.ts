@@ -14,7 +14,7 @@
 //   - the submitted secret never appears in the response, body, or audit event.
 
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { after } from "node:test";
 import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 
 import { listSpineEventsPage } from "../lib/spine.ts";
@@ -23,6 +23,14 @@ import { activateDraftConnection, startServer } from "../server/index.ts";
 import { createSqliteConnectorInstanceCredentialStore } from "../server/stores/connector-instance-credential-store.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
 import { CREDENTIAL_ENCRYPTION_KEY_ENV } from "../server/stores/credential-encryption.ts";
+import { createFirstSyncConnectorFixture } from "./helpers/first-sync-connector-fixture.ts";
+
+// Tests whose flow starts a first sync need a runnable connector. Catalog
+// connectors run only from a verified install, so these route tests supply a
+// fixture connector instead of reaching a provider.
+const firstSyncConnector = createFirstSyncConnectorFixture();
+after(() => firstSyncConnector.cleanup());
+const FIRST_SYNC_SERVER_OPTIONS = { connectorPathResolver: () => firstSyncConnector.connectorPath };
 
 const REGEXP_1 = /<input type="hidden" name="_csrf" value="([^"]+)"\s*\/>/;
 const REGEXP_2 = /Google rejected this app password/;
@@ -118,7 +126,10 @@ function makeProberDouble(): { calls: ProberCall[]; prober: (args: ProberCall) =
   return { calls, prober };
 }
 
-async function withServer(fn: (harness: { asUrl: string; proberCalls: ProberCall[] }) => Promise<void>): Promise<void> {
+async function withServer(
+  fn: (harness: { asUrl: string; proberCalls: ProberCall[] }) => Promise<void>,
+  extraOptions: { connectorPathResolver?: () => string } = {}
+): Promise<void> {
   const { calls, prober } = makeProberDouble();
   const server = await startServer({
     asPort: 0,
@@ -130,6 +141,7 @@ async function withServer(fn: (harness: { asUrl: string; proberCalls: ProberCall
     rsPort: 0,
     staticSecretAutoResume: false,
     staticSecretCredentialProber: prober,
+    ...extraOptions,
   });
   const asUrl = `http://localhost:${server.asPort}`;
   try {
@@ -1107,7 +1119,7 @@ test("a paused historical-archive connection is resumed and its first sync start
       assert.ok(archiveReconnect, "expected an archive_reconnect summary in the response");
       assert.equal(archiveReconnect?.status, "resumed");
       assert.match(archiveReconnect?.run_id ?? "", RUN_ID_PATTERN);
-    });
+    }, FIRST_SYNC_SERVER_OPTIONS);
   });
 });
 
@@ -1172,7 +1184,7 @@ test("a probed identity capture persists onto a paused historical-archive row (s
         "the binding kind must survive the setup-fields/identity write untouched"
       );
       assert.equal(instance?.status, "active", "capture on a recovered row must also resume it (requirement #2)");
-    });
+    }, FIRST_SYNC_SERVER_OPTIONS);
   });
 });
 

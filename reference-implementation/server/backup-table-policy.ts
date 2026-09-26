@@ -70,6 +70,10 @@ export const BACKUP_TABLE_INVENTORY: Record<string, BackupTableInventoryEntry> =
     classification: "backup_required",
     reason: "Owner-visible connector attention state must survive restore.",
   },
+  connector_activations: {
+    classification: "backup_required",
+    reason: "Installed connector activation state is durable runtime authority for which verified manifest revision may run.",
+  },
   connector_coverage_horizons: {
     classification: "backup_required",
     reason:
@@ -78,6 +82,14 @@ export const BACKUP_TABLE_INVENTORY: Record<string, BackupTableInventoryEntry> =
   connector_detail_gaps: {
     classification: "backup_required",
     reason: "Gap evidence records source coverage state.",
+  },
+  connector_install_catalog_state: {
+    classification: "backup_required",
+    reason: "Verified connector catalog high-water state prevents catalog rollback after restore.",
+  },
+  connector_installs: {
+    classification: "backup_required",
+    reason: "Verified connector artifact records and activation state are required to resolve installed code after restore.",
   },
   connector_instance_config_current: {
     classification: "backup_required",
@@ -130,6 +142,10 @@ export const BACKUP_TABLE_INVENTORY: Record<string, BackupTableInventoryEntry> =
   connectors: {
     classification: "backup_required",
     reason: "Connector catalog rows are required to interpret connections and records.",
+  },
+  consent_challenges: {
+    classification: "backup_required",
+    reason: "Owner-bound consent requests and single-use decision status/digests are durable authorization state.",
   },
   consent_exchange_codes: {
     classification: "backup_required",
@@ -228,6 +244,14 @@ export const BACKUP_TABLE_INVENTORY: Record<string, BackupTableInventoryEntry> =
   owner_device_auth: {
     classification: "backup_required",
     reason: "Owner-device authorization state must survive restore.",
+  },
+  owner_password_verifier: {
+    classification: "backup_required",
+    reason: "Owner password verifier state is the durable local owner credential authority.",
+  },
+  owner_sessions: {
+    classification: "backup_required",
+    reason: "Owner session records are durable bearer inventory and revocation state until expiry.",
   },
   pending_consents: {
     classification: "backup_required",

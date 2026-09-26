@@ -7,8 +7,7 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-// biome-ignore lint/correctness/noUnresolvedImports: better-sqlite3 is the real driver under test.
-import Database from "better-sqlite3";
+import Database from "./helpers/sqlite-driver.ts";
 import type { RuntimeRunConnectorOptions, RuntimeRunConnectorResult } from "../runtime/index.ts";
 import { runConnector } from "../runtime/index.ts";
 import { DEFAULT_QUARANTINE_POLICY } from "../runtime/recovery-quarantine.ts";

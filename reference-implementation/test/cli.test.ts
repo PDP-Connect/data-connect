@@ -1689,7 +1689,7 @@ test("PDPP CLI smoke", async (t) => {
       assert.equal(result.json.authorization_server, asUrl);
       assert.deepEqual(result.json.authorization_servers_advertised, [asUrl]);
       assert.equal(result.json.authorization_server_advertised, true);
-      assert.equal(result.json.resource_name, "PDPP Reference Provider Resource Server");
+      assert.equal(result.json.resource_name, "DataConnect Resource Server");
       assert.equal(result.json.pdpp_self_export_supported, true);
       assert.equal(result.json.device_authorization_supported, true);
       assert.equal(result.json.pushed_authorization_request_supported, true);
@@ -1698,7 +1698,8 @@ test("PDPP CLI smoke", async (t) => {
       assert.equal(result.json.authorization_endpoint, `${asUrl}/oauth/authorize`);
       assert.deepEqual(result.json.response_types_supported, ["code"]);
       assert.deepEqual(result.json.code_challenge_methods_supported, ["S256"]);
-      assert.deepEqual(result.json.token_endpoint_auth_methods_supported, ["none"]);
+      assert.deepEqual(result.json.token_endpoint_auth_methods_supported, ["none", "private_key_jwt"]);
+      assert.deepEqual(result.json.token_endpoint_auth_signing_alg_values_supported, ["RS256"]);
       const providerConnectCapabilities = result.json.pdpp_provider_connect_capabilities;
       assert.ok(Array.isArray(providerConnectCapabilities));
       assert.ok(providerConnectCapabilities.includes("owner_self_export"));

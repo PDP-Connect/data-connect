@@ -3,14 +3,13 @@
 
 import assert from "node:assert/strict";
 import { type ChildProcessByStdio, spawn } from "node:child_process";
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { Readable } from "node:stream";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 import { registerEphemeralOrigin, unregisterEphemeralOrigin } from "../scripts/hermetic/guard.ts";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { startServer as startServerUntyped } from "../server/index.ts";
@@ -42,6 +41,7 @@ interface ClosableServer {
 
 interface StartServerOptions {
   asPort?: number;
+  connectorPathResolver?: () => string;
   dbPath?: string;
   ownerAuthPassword?: string;
   quiet?: boolean;
@@ -90,7 +90,6 @@ const COMPOSED_EXPLORE_RECORD_ID = "artist_owner/top#1";
 const HREF_ATTRIBUTE_PATTERN = /href="([^"]+)"/g;
 const WORK_RECORD_NAME_RE = /Nils Frahm \(work\)/;
 const PERSONAL_RECORD_NAME_RE = /Nils Frahm \(personal\)/;
-const CLAUDE_CODE_CONNECTOR_ID = "https://registry.pdpp.dev/connectors/claude-code";
 
 let consoleBuildPromise: Promise<void> | null = null;
 
@@ -499,68 +498,68 @@ async function waitForRunTerminal(asUrl: string, runId: string, timeoutMs = 5000
   throw new Error(`Timed out waiting for run ${runId} to finish`);
 }
 
-async function makeClaudeCodeFixture() {
-  const root = await mkdtemp(join(tmpdir(), "pdpp-claude-code-ingest-"));
-  const claudeHome = join(root, ".claude");
-  const projectsDir = join(claudeHome, "projects");
-  const projectDir = join(projectsDir, "-home-test-safe-project");
-  await mkdir(projectDir, { recursive: true });
-  // The Claude Code connector reads .claude/skills and .claude/commands
-  // even when empty; create them so the run doesn't fail before exercising
-  // the origin-routing behavior this test targets.
-  await mkdir(join(claudeHome, "skills"), { recursive: true });
-  await mkdir(join(claudeHome, "commands"), { recursive: true });
-  const sessionId = "00000000-0000-4000-8000-000000000001";
-  const lines = [
-    {
-      cwd: "/home/user/safe-project",
-      entrypoint: "cli",
-      gitBranch: "main",
-      message: { content: [{ text: "synthetic safe prompt", type: "text" }] },
-      sessionId,
-      timestamp: "2026-04-24T15:00:00.000Z",
-      type: "user",
-      userType: "external",
-      uuid: "msg-safe-1",
-      version: "1.0.0",
-    },
-    {
-      message: { content: [{ text: "synthetic safe response", type: "text" }] },
-      sessionId,
-      timestamp: "2026-04-24T15:00:01.000Z",
-      type: "assistant",
-      uuid: "msg-safe-2",
-    },
+const COMPOSED_INGEST_CONNECTOR_KEY = "composed-ingest-fixture";
+const COMPOSED_INGEST_STREAMS = [
+  {
+    name: "items",
+    primary_key: ["id"],
+    schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+    semantics: "append_only",
+  },
+];
+const COMPOSED_INGEST_MANIFEST = {
+  connector_id: COMPOSED_INGEST_CONNECTOR_KEY,
+  display_name: "Composed ingest fixture",
+  protocol_version: "0.1.0",
+  source_declaration: {
+    declaration_version: "composed-ingest-fixture-v1",
+    display: { name: "Composed ingest fixture" },
+    protocol_version: "0.1.0",
+    publisher: { id: "https://pdpp.dev/reference-implementation/tests" },
+    source: { id: `https://sources.example/connectors/${COMPOSED_INGEST_CONNECTOR_KEY}`, kind: "connector" },
+    streams: COMPOSED_INGEST_STREAMS,
+  },
+  streams: COMPOSED_INGEST_STREAMS,
+  version: "1.0.0",
+};
+
+// A connector child that emits one RECORD after START. Record ingest is done
+// by the runtime parent, so this exercises the same RS routing any installed
+// connector's records take.
+async function makeRecordEmittingConnector() {
+  const root = await mkdtemp(join(tmpdir(), "pdpp-composed-ingest-connector-"));
+  const connectorPath = join(root, "connector.mjs");
+  const messages = [
+    { data: { id: "i1" }, emitted_at: "2026-04-24T15:00:00.000Z", key: "i1", stream: "items", type: "RECORD" },
+    { records_emitted: 1, status: "succeeded", type: "DONE" },
   ];
   await writeFile(
-    join(projectDir, `${sessionId}.jsonl`),
-    `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`,
+    connectorPath,
+    `
+import { createInterface } from 'readline';
+const rl = createInterface({ input: process.stdin });
+rl.on('line', (line) => {
+  if (JSON.parse(line).type === 'START') {
+    for (const m of ${JSON.stringify(messages)}) {
+      process.stdout.write(JSON.stringify(m) + '\\n');
+    }
+    rl.close();
+    process.exit(0);
+  }
+});
+`,
     "utf8"
   );
-  return {
-    claudeHome,
-    cleanup: () => rm(root, { force: true, recursive: true }),
-    projectsDir,
-  };
+  return { cleanup: () => rm(root, { force: true, recursive: true }), connectorPath };
 }
 
 test("composed controller runs ingest against the internal RS, not the public browser origin", async () => {
   const publicOrigin = await startPublicOriginTrap();
-  const fixture = await makeClaudeCodeFixture();
-  const claudeCodeManifestEntry = readPolyfillManifests().find((candidate) => candidate.file === "claude_code.json");
-  if (!claudeCodeManifestEntry) {
-    throw new Error("no polyfill manifest found for claude_code.json");
-  }
-  const manifest = claudeCodeManifestEntry.manifest;
-  const previousEnv = {
-    CLAUDE_CODE_HOME: process.env.CLAUDE_CODE_HOME,
-    CLAUDE_CODE_PROJECTS_DIR: process.env.CLAUDE_CODE_PROJECTS_DIR,
-  };
-  process.env.CLAUDE_CODE_HOME = fixture.claudeHome;
-  process.env.CLAUDE_CODE_PROJECTS_DIR = fixture.projectsDir;
+  const fixture = await makeRecordEmittingConnector();
 
   const server = await startServer({
     asPort: 0,
+    connectorPathResolver: () => fixture.connectorPath,
     dbPath: ":memory:",
     quiet: true,
     referenceMode: "composed",
@@ -571,13 +570,13 @@ test("composed controller runs ingest against the internal RS, not the public br
 
   try {
     const registerConnector = await fetch(`${asUrl}/connectors`, {
-      body: JSON.stringify(manifest),
+      body: JSON.stringify(COMPOSED_INGEST_MANIFEST),
       headers: { "Content-Type": "application/json" },
       method: "POST",
     });
     assert.equal(registerConnector.status, 201);
 
-    const runResp = await fetch(`${asUrl}/_ref/connectors/${encodeURIComponent(CLAUDE_CODE_CONNECTOR_ID)}/run`, {
+    const runResp = await fetch(`${asUrl}/_ref/connectors/${encodeURIComponent(COMPOSED_INGEST_CONNECTOR_KEY)}/run`, {
       method: "POST",
     });
     assert.equal(runResp.status, 202);
@@ -585,23 +584,13 @@ test("composed controller runs ingest against the internal RS, not the public br
 
     const timeline = await waitForRunTerminal(asUrl, started.run_id);
     const completed = timeline.data.find((event) => event.event_type === "run.completed");
-    assert.ok(completed, "Claude Code run should complete using the internal RS URL");
+    assert.ok(completed, "the controller run should complete using the internal RS URL");
     assert.deepEqual(
       publicOrigin.requests.filter((req) => req.url.startsWith("/v1/ingest/")),
       [],
       "server-side runtime ingest must not traverse the public composed origin"
     );
   } finally {
-    if (previousEnv.CLAUDE_CODE_HOME === undefined) {
-      delete process.env.CLAUDE_CODE_HOME;
-    } else {
-      process.env.CLAUDE_CODE_HOME = previousEnv.CLAUDE_CODE_HOME;
-    }
-    if (previousEnv.CLAUDE_CODE_PROJECTS_DIR === undefined) {
-      delete process.env.CLAUDE_CODE_PROJECTS_DIR;
-    } else {
-      process.env.CLAUDE_CODE_PROJECTS_DIR = previousEnv.CLAUDE_CODE_PROJECTS_DIR;
-    }
     await closeServer(server);
     await fixture.cleanup();
     await publicOrigin.close();

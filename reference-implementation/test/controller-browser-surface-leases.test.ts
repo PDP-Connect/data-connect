@@ -25,6 +25,7 @@ import {
   createController,
 } from "../runtime/controller.ts";
 import type { RuntimeRunConnectorOptions, RuntimeRunConnectorResult } from "../runtime/index.ts";
+import { createHostBrowserSurfaceAllocator } from "../runtime/host-browser-surface-allocator.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
 import type {
   BrowserSurfaceLeaseStore,
@@ -381,6 +382,10 @@ function createBlockedAllocator(): { allocator: BrowserSurfaceAllocator; unblock
 }
 
 interface SetupOptions {
+  beforeBrowserSurfaceLeaseEnsure?: (args: {
+    readonly runId: string;
+    readonly surfaceId: string;
+  }) => Promise<void> | void;
   beforeBrowserSurfaceLeaseRelease?: (args: { readonly runId: string }) => Promise<void> | void;
   browserSurfaceAllocator?: BrowserSurfaceAllocator;
   browserSurfaceLeaseStore?: BrowserSurfaceLeaseStore;
@@ -417,6 +422,7 @@ function setupIsolatedControllerDb(t: TestContext): void {
 function setup(
   t: TestContext,
   {
+    beforeBrowserSurfaceLeaseEnsure,
     manager = createManager(),
     browserSurfaceAllocator,
     browserSurfaceLeaseStore,
@@ -465,6 +471,7 @@ function setup(
     // production's real resolver would for the single-account convention.
     resolveOwnerSubjectIdForConnectorInstance: async () => "owner_local",
     ...(browserSurfaceAllocator ? { browserSurfaceAllocator } : {}),
+    ...(beforeBrowserSurfaceLeaseEnsure ? { beforeBrowserSurfaceLeaseEnsure } : {}),
     browserSurfaceLeaseManager: manager,
     ...(browserSurfaceLeaseStore ? { browserSurfaceLeaseStore } : {}),
     ...(browserSurfaceReadinessProbe ? { browserSurfaceReadinessProbe } : {}),
@@ -564,6 +571,94 @@ test("managed free surface leases and spawns with browser-surface env", async (t
   assert.equal(firstOpts.browserSurfaceEnv?.PDPP_BROWSER_SURFACE_LEASE_ID, "lease_1");
   assert.equal(firstOpts.browserSurfaceEnv?.PDPP_BROWSER_SURFACE_PROFILE_KEY, "managed-profile");
   assert.equal(manager.getLease("lease_1")?.status, "released");
+});
+
+test("host endpoint failure fails controller admission before connector spawn", async (t) => {
+  let hostCalls = 0;
+  const hostFetch = (async () => {
+    hostCalls += 1;
+    return {
+      json: async () => ({}),
+      ok: false,
+      status: 503,
+    } as Response;
+  }) as typeof fetch;
+  const hostAllocator = createHostBrowserSurfaceAllocator({
+    endpoint: "http://127.0.0.1:9916/agent",
+    fetchImpl: hostFetch,
+    headless: false,
+    token: "shared-secret",
+  });
+  const { calls, controller, manager } = setup(t, {
+    beforeBrowserSurfaceLeaseEnsure: (binding) => hostAllocator.bindRunToSurface(binding),
+    browserSurfaceAllocator: hostAllocator,
+    manager: createDynamicManager(),
+  });
+
+  const result = await controller.runNow("managed", {
+    manifest: MANIFEST,
+    ownerToken: "owner-token",
+    runId: "run_host_down",
+  });
+
+  assert.equal(result.status, "surface_failed");
+  assert.equal(calls.runConnector, 0);
+  assert.equal(hostCalls, 1);
+  assert.equal(manager.getLease("lease_1")?.wait_reason, "surface_start_failed");
+});
+
+test("host lease CDP URL reaches readiness and release uses the owning run identity", async (t) => {
+  const hostRequests: { method: string; url: string }[] = [];
+  const hostFetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const method = init?.method ?? "GET";
+    const url = String(input);
+    hostRequests.push({ method, url });
+    if (method === "POST") {
+      return {
+        json: async () => ({ cdp_url: "http://127.0.0.1:9222/host-cdp", surface_id: "host-surface-8" }),
+        ok: true,
+        status: 200,
+      } as Response;
+    }
+    return { json: async () => ({}), ok: true, status: 204 } as Response;
+  }) as typeof fetch;
+  const hostAllocator = createHostBrowserSurfaceAllocator({
+    endpoint: "http://127.0.0.1:9916/agent",
+    fetchImpl: hostFetch,
+    headless: false,
+    token: "shared-secret",
+  });
+  let probedCdpUrl: string | undefined;
+  const { calls, controller } = setup(t, {
+    beforeBrowserSurfaceLeaseEnsure: (binding) => hostAllocator.bindRunToSurface(binding),
+    beforeBrowserSurfaceLeaseRelease: (binding) => hostAllocator.releaseRun(binding.runId),
+    browserSurfaceAllocator: hostAllocator,
+    browserSurfaceReadinessProbe: {
+      probe: async (surface) => {
+        probedCdpUrl = surface.cdp_url;
+        return { ok: true, pageTargetCount: 1 };
+      },
+    },
+    manager: createDynamicManager(),
+  });
+
+  const result = await controller.runNow("managed", {
+    manifest: MANIFEST,
+    ownerToken: "owner-token",
+    runId: "run_host_ready",
+  });
+  await controller.drainActiveRuns(1000);
+
+  assert.equal(result.status, "started");
+  assert.equal(probedCdpUrl, "http://127.0.0.1:9222/host-cdp");
+  assert.equal(calls.runConnectorOpts[0]?.browserSurfaceEnv?.PDPP_BROWSER_SURFACE_REMOTE_CDP_URL, probedCdpUrl);
+  assert.deepEqual(
+    hostRequests.map(({ method, url }) => [method, url]),
+    [
+      ["POST", "http://127.0.0.1:9916/agent/browser-surface/leases"],
+      ["DELETE", "http://127.0.0.1:9916/agent/browser-surface/runs/run_host_ready"],
+    ]
+  );
 });
 
 test("watchdog cleanup keeps a managed lease unavailable until the presentation terminalizer settles", async (t) => {

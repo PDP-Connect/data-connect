@@ -8,6 +8,7 @@ import { EmptyState } from "@pdpp/operator-ui/components/empty-state";
 import { Callout, DataList, MetaPill, PageHeader, Section, StatusBadge } from "@pdpp/operator-ui/components/primitives";
 import Link from "next/link";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
+import { ConnectorMark } from "@/app/(console)/components/connector-mark.tsx";
 import { ServerUnreachable } from "../components/server-unreachable.tsx";
 import { formatSourceOutboxState } from "../lib/connection-evidence.ts";
 import { isBrowserBoundConnector, isSupportedLocalCollectorConnector } from "../lib/connection-modality.ts";
@@ -18,6 +19,7 @@ import {
   listDeviceExporterDiagnostics,
   listDeviceExporterSourceInstances,
 } from "../lib/ref-client.ts";
+import { listConnectorManifests } from "../lib/rs-client.ts";
 import { revokeDeviceExporterAction } from "./actions.ts";
 import { EnrollmentForm } from "./enrollment-form.tsx";
 import { ReenrollButton } from "./reenroll-button.tsx";
@@ -74,11 +76,18 @@ export default async function DeviceExportersPage({
     : undefined;
 
   try {
-    const [diagnostics, sourceInstances, referenceBaseUrl] = await Promise.all([
+    const [diagnostics, sourceInstances, referenceBaseUrl, connectorManifests] = await Promise.all([
       listDeviceExporterDiagnostics(),
       listDeviceExporterSourceInstances(),
       getReferencePublicOrigin(),
+      listConnectorManifests().catch(() => []),
     ]);
+    const connectorIcons = Object.fromEntries(
+      connectorManifests.flatMap((manifest) => [
+        [manifest.connector_id, manifest.icon] as const,
+        ...(manifest.connector_key ? ([[manifest.connector_key, manifest.icon]] as const) : []),
+      ])
+    );
     const devices = diagnostics.data;
 
     return (
@@ -96,7 +105,9 @@ export default async function DeviceExportersPage({
           title="Local device exporters"
         />
 
-        {browserBoundRequest ? <BrowserBoundEnrollmentNotice connectorId={browserBoundRequest} /> : null}
+        {browserBoundRequest ? (
+          <BrowserBoundEnrollmentNotice connectorIcon={connectorIcons[browserBoundRequest]} connectorId={browserBoundRequest} />
+        ) : null}
 
         <Section>
           <EnrollmentForm defaultConnectorId={defaultConnectorId} referenceBaseUrl={referenceBaseUrl} />
@@ -114,7 +125,7 @@ export default async function DeviceExportersPage({
           ) : (
             <DataList ariaLabel="Local device exporters">
               {devices.map((device) => (
-                <DeviceRow device={device} key={device.device_id} referenceBaseUrl={referenceBaseUrl} />
+                <DeviceRow connectorIcons={connectorIcons} device={device} key={device.device_id} referenceBaseUrl={referenceBaseUrl} />
               ))}
             </DataList>
           )}
@@ -137,13 +148,18 @@ export default async function DeviceExportersPage({
  * Honest notice for a browser-bound connector deep-link that has no generated
  * console setup path yet.
  */
-function BrowserBoundEnrollmentNotice({ connectorId }: { connectorId: string }) {
+function BrowserBoundEnrollmentNotice({ connectorIcon, connectorId }: { connectorIcon?: import("@pdpp/brand-react").ConnectorIconLike | null; connectorId: string }) {
   return (
     <Callout
       className="mb-4"
       description={`${formatConnectorKeyForDisplay(connectorId)} needs a browser sign-in. Browser setup is not available in this dashboard yet.`}
       surface="human"
-      title="Browser setup not available yet"
+      title={
+        <span className="inline-flex items-center gap-2">
+          <ConnectorMark className="size-5 shrink-0" icon={connectorIcon} name={formatConnectorKeyForDisplay(connectorId)} />
+          Browser setup not available yet
+        </span>
+      }
     >
       <p className="pdpp-caption text-muted-foreground">
         Existing data remains available. Adding another account is not available yet. See available setup paths on the{" "}
@@ -156,7 +172,15 @@ function BrowserBoundEnrollmentNotice({ connectorId }: { connectorId: string }) 
   );
 }
 
-function DeviceRow({ device, referenceBaseUrl }: { device: DeviceExporter; referenceBaseUrl: string }) {
+function DeviceRow({
+  connectorIcons,
+  device,
+  referenceBaseUrl,
+}: {
+  connectorIcons: Readonly<Record<string, import("@pdpp/brand-react").ConnectorIconLike | null | undefined>>;
+  device: DeviceExporter;
+  referenceBaseUrl: string;
+}) {
   const heartbeat = classifyHeartbeatFreshness(device.last_heartbeat_at, device.stale);
   const counts = summarizeIngestCounts(device);
   const visibleStatus = device.status === "revoked" ? "revoked" : heartbeat;
@@ -254,7 +278,7 @@ function DeviceRow({ device, referenceBaseUrl }: { device: DeviceExporter; refer
         /* P1: single column on mobile, 2-col on lg only — cards need breathing room */
         <ul className="mt-4 grid gap-3 lg:grid-cols-2">
           {device.source_instances.map((source) => (
-            <SourceInstanceCard key={source.source_instance_id} source={source} />
+            <SourceInstanceCard connectorIcon={connectorIcons[source.connector_id]} key={source.source_instance_id} source={source} />
           ))}
         </ul>
       ) : null}
@@ -262,7 +286,13 @@ function DeviceRow({ device, referenceBaseUrl }: { device: DeviceExporter; refer
   );
 }
 
-function SourceInstanceCard({ source }: { source: DeviceSourceInstance }) {
+function SourceInstanceCard({
+  connectorIcon,
+  source,
+}: {
+  connectorIcon?: import("@pdpp/brand-react").ConnectorIconLike | null;
+  source: DeviceSourceInstance;
+}) {
   const lastError = formatLastError(source.last_error);
   const outbox = formatSourceOutboxState(source);
   // `source_instance_id` identifies the device-side binding row; the durable
@@ -277,7 +307,10 @@ function SourceInstanceCard({ source }: { source: DeviceSourceInstance }) {
     <li className="rounded-md border border-border/70 bg-muted/20 p-3">
       <div className="flex min-w-0 items-start justify-between gap-3">
         <div className="min-w-0">
-          <h3 className="pdpp-body truncate font-medium text-foreground">{sourceLabel(source)}</h3>
+          <h3 className="pdpp-body truncate font-medium text-foreground">
+            <ConnectorMark className="mr-2 inline-block size-5 align-[-0.2em]" icon={connectorIcon} name={sourceLabel(source)} />
+            {sourceLabel(source)}
+          </h3>
           <p className="pdpp-caption truncate text-muted-foreground">
             {formatConnectorKeyForDisplay(source.connector_id)} / {source.local_binding_name}
           </p>
