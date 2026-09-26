@@ -53,13 +53,9 @@ const nextConfig = {
     "*": ["**/node_modules/@img/sharp-linuxmusl-x64/**", "**/node_modules/@img/sharp-libvips-linuxmusl-x64/**"],
   },
   outputFileTracingIncludes: {
-    "/llms-full.txt": ["../../docs/agent-skills/**/*.md", "../../openspec/README.md", "../../pnpm-workspace.yaml"],
-    "/llms.txt": ["../../docs/agent-skills/**/*.md", "../../openspec/README.md", "../../pnpm-workspace.yaml"],
-    "/well-known/skills/**": [
-      "../../docs/agent-skills/**/*.md",
-      "../../openspec/README.md",
-      "../../pnpm-workspace.yaml",
-    ],
+    "/llms-full.txt": ["../../docs/agent-skills/**/*.md"],
+    "/llms.txt": ["../../docs/agent-skills/**/*.md"],
+    "/well-known/skills/**": ["../../docs/agent-skills/**/*.md"],
   },
   outputFileTracingRoot: path.join(__dirname, "../.."),
   reactStrictMode: true,

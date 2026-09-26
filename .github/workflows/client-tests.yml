@@ -83,6 +83,16 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Build console standalone server
+        env:
+          NEXT_TELEMETRY_DISABLED: "1"
+        run: npm run build --workspace=apps/console
+
+      - name: Test copied standalone skill routes
+        env:
+          REQUIRE_STANDALONE: "1"
+        run: node --test apps/console/packaged-agent-skill-routes.test.mjs
+
       # `vitest run` without --passWithNoTests: an empty collection exits 1 on its own,
       # so a vite.config.ts `test.include` that silently stops matching fails the job
       # instead of reporting a green zero-test run. The JSON report records which files
