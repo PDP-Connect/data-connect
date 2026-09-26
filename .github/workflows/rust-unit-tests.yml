@@ -7,6 +7,8 @@ on:
       - "connectors/**"
       - "pdpp-runtime/**"
       - "reference-implementation/vendor/**"
+      - "reference-implementation/server/autostart-store.ts"
+      - "scripts/rust-test-path-filter.test.mjs"
       - "scripts/ensure-pdpp-runtime.js"
       - "scripts/is-main-module.js"
       - "scripts/resolve-connectors.js"
@@ -42,6 +44,9 @@ jobs:
         with:
           node-version: "24.21.0"
           cache: npm
+
+      - name: Check Rust test path filter
+        run: node --test scripts/rust-test-path-filter.test.mjs
 
       - name: Install connector tooling
         run: npm ci --ignore-scripts
