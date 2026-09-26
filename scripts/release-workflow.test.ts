@@ -719,6 +719,25 @@ describe("release workflow", () => {
         expect(ok.status).toBe(1)
         expect(ok.stderr).toContain("differs from scanned digest")
       })
+
+      if (workflowPath === dockerImagesWorkflowPath) {
+        it("dispatch publish refuses tags outside the dispatch-sha namespace", () => {
+          for (const tag of [
+            "ghcr.io/pdp-connect/data-connect/core:latest",
+            "ghcr.io/pdp-connect/data-connect/core:v1.2.3",
+            "ghcr.io/pdp-connect/data-connect/core:sha-abc1234",
+          ]) {
+            const run = runPush(workflowPath, step, {
+              ...extra,
+              SCANNED_DIGEST: `sha256:${"b".repeat(64)}`,
+              TAG_REF: tag,
+            })
+            expect(run.status).toBe(1)
+            expect(run.stderr).toContain("Expected one")
+            expect(run.calls).toBe("")
+          }
+        })
+      }
     }
   })
 

@@ -106,6 +106,8 @@ with tarfile.open(fileobj=sys.stdin.buffer, mode="r|") as t:
         seen.add(key)
         kind = "0" if m.type == tarfile.AREGTYPE else m.type.decode()
         print(kind, m.size, m.name, sep="\t")
+    if t.pax_headers:
+        sys.exit("pax global header")
 # Drain past the end-of-archive marker so the writer never sees SIGPIPE.
 while sys.stdin.buffer.read(1 << 20):
     pass
@@ -243,16 +245,36 @@ oci_layer_codec() {
 }
 
 scan_oci_archive() {
-  local archive="$1" found=0 top todo=() digest blob doc mt layer codec rc dups hashfile
+  local archive="$1" found=0 top todo=() digest blob doc mt layer codec rc hashfile
   blob_of() { printf 'blobs/sha256/%s' "${1#sha256:}"; }
-  # tar -xO concatenates duplicate members, and an unpacker keeps the last
-  # one, so a duplicate could show the scan different bytes from the push.
-  if ! dups="$(tar -tf "$archive" | sort | uniq -d)"; then
-    echo "ERROR: $archive is not a readable tar" >&2
-    return 2
-  fi
-  if [[ -n "$dups" ]]; then
-    echo "ERROR: $archive has duplicate members: $dups" >&2
+  # Validate normalized names before extracting. An unpacker treats ./index.json
+  # as index.json, so exact-name duplicate checks do not protect the scanned bytes.
+  if ! python3 - "$archive" <<'PY'
+import re, sys, tarfile
+seen = set()
+try:
+    with tarfile.open(sys.argv[1], mode="r:") as archive:
+        for member in archive:
+            parts = []
+            for part in member.name.split("/"):
+                if part in ("", "."):
+                    continue
+                if part == "..":
+                    raise ValueError("parent path segment")
+                parts.append(part)
+            name = "/".join(parts)
+            if name in seen:
+                raise ValueError("duplicate normalized member " + name)
+            seen.add(name)
+            if name not in ("oci-layout", "index.json", "blobs", "blobs/sha256") and not re.fullmatch(r"blobs/sha256/[0-9a-f]{64}", name):
+                raise ValueError("unexpected member " + member.name)
+        if archive.pax_headers:
+            raise ValueError("pax global header")
+except (OSError, tarfile.TarError, ValueError) as error:
+    sys.exit(str(error))
+PY
+  then
+    echo "ERROR: $archive has invalid or duplicate normalized members" >&2
     return 2
   fi
   hashfile="$(mktemp "${TMPDIR:-/tmp}/pdpp-blob-hash.XXXXXX")" || return 2
