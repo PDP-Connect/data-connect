@@ -102,7 +102,7 @@ For each `(stream, connection_id)` with a stored cursor:
 ```bash
 TOKEN="$(jq -r '.access_token' "$HOME/applications/daisy/.pi/agent/pdpp-owner-agent.json")"
 curl -fsS \
-  "$RS_URL/v1/streams/<stream>/records?connection_id=<id>&changes_since=<stored-cursor>&limit=200" \
+  "$RS_URL/v1/streams/<stream>/records?connection_id=<id>&changes_since=<stored-cursor>&limit=100" \
   -H "Authorization: Bearer $TOKEN" \
   | jq '{records: .data, has_more, next_cursor, next_changes_since}'
 unset TOKEN

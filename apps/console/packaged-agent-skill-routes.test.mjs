@@ -21,8 +21,9 @@ const STANDALONE_SERVER = SERVER_RELATIVE_PATHS.map((relativePath) => path.join(
 const SKILL_CATALOG_INDEX = /\/\.well-known\/skills\/index\.json/;
 
 test("copied standalone console serves every advertised agent skill route outside the repository", {
-  skip: !STANDALONE_SERVER && "Run after the console standalone build",
+  skip: !STANDALONE_SERVER && process.env.REQUIRE_STANDALONE !== "1" && "Run after the console standalone build",
 }, async () => {
+  assert.ok(STANDALONE_SERVER, "Build the console standalone server before this test");
   const createdTempRoot = !existsSync(TEMP_ROOT);
   mkdirSync(TEMP_ROOT, { recursive: true });
   const temporaryRoot = mkdtempSync(path.join(TEMP_ROOT, "agent-skill-standalone-"));
@@ -75,6 +76,7 @@ test("copied standalone console serves every advertised agent skill route outsid
     const fullTextBody = await fullText.text();
 
     const files = catalog.skills.flatMap((skill) => skill.files);
+    const servedPaths = new Set(files.map((file) => file.path));
     await Promise.all(
       files.map(async (file) => {
         const fileResponse = await fetch(`${origin}/.well-known/skills/${file.path}`);
@@ -85,6 +87,23 @@ test("copied standalone console serves every advertised agent skill route outsid
         assert.ok(fullTextBody.includes(body.toString("utf8")), `${file.path} is included in /llms-full.txt`);
       })
     );
+
+    for (const skill of catalog.skills) {
+      const skillFile = skill.files.find((file) => file.path === `${skill.name}/SKILL.md`);
+      assert.ok(skillFile, `${skill.name} advertises its SKILL.md`);
+      const response = await fetch(`${origin}/.well-known/skills/${skillFile.path}`);
+      assert.equal(response.status, 200, skillFile.path);
+      const markdown = await response.text();
+      const relativeLinks = [...markdown.matchAll(/\[[^\]]*\]\(([^)]+)\)/g)]
+        .map(([, target]) => target.trim().replace(/^<|>$/g, ""))
+        .filter((target) => target && !/^(?:[a-z][a-z\d+.-]*:|\/|#)/i.test(target));
+      for (const target of relativeLinks) {
+        const pathname = decodeURIComponent(target.split(/[?#]/, 1)[0] ?? "");
+        const resolved = path.posix.normalize(path.posix.join(path.posix.dirname(skillFile.path), pathname));
+        assert.ok(resolved.startsWith(`${skill.name}/`), `${skillFile.path} link ${target} stays inside its skill`);
+        assert.ok(servedPaths.has(resolved), `${skillFile.path} link ${target} resolves to a served file (${resolved})`);
+      }
+    }
   } finally {
     if (serverProcess && serverProcess.exitCode === null) {
       serverProcess.kill("SIGTERM");

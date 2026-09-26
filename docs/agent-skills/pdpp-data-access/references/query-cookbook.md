@@ -66,7 +66,7 @@ curl -fsS "$RS_URL/v1/streams/pull_requests/records?limit=50&order=desc" \
 Filter by declared filters. Exact filters use `filter[field]=value`; range filters use `filter[field][op]=value` and require a declared range operator:
 
 ```bash
-curl -fsS "$RS_URL/v1/streams/pull_requests/records?filter[repository_full_name]=acme/api&filter[updated_at][gte]=2026-04-18T00:00:00Z&limit=200&order=desc" \
+curl --globoff -fsS "$RS_URL/v1/streams/pull_requests/records?filter[repository_full_name]=acme/api&filter[updated_at][gte]=2026-04-18T00:00:00Z&limit=100&order=desc" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -121,7 +121,7 @@ Pagination caveat: hybrid search does **not** support `cursor` on this reference
 Counts, sums, time histograms — when the stream metadata advertises usable aggregation for the field:
 
 ```bash
-curl -fsS "$RS_URL/v1/streams/transactions/aggregate?metric=sum&field=amount&group_by=account_type&filter[date][gte]=2026-04-01" \
+curl --globoff -fsS "$RS_URL/v1/streams/transactions/aggregate?metric=sum&field=amount&group_by=account_type&filter[date][gte]=2026-04-01" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -172,11 +172,11 @@ If your records call returns no `blob_ref` field at all, the issue is one of:
 
 ```bash
 # 1. Find an attachment record with a hydrated blob.
-curl -fsS "$RS_URL/v1/streams/attachments/records?filter[hydration_status]=hydrated&limit=5" \
+curl --globoff -fsS "$RS_URL/v1/streams/attachments/records?filter[hydration_status]=hydrated&limit=5" \
   -H "Authorization: Bearer $TOKEN" | jq '.data[0]'
 
 # 2. The response includes blob_ref. Pull blob_id and fetch_url out of it.
-BLOB_FETCH_URL=$(curl -fsS "$RS_URL/v1/streams/attachments/records?filter[hydration_status]=hydrated&limit=1" \
+BLOB_FETCH_URL=$(curl --globoff -fsS "$RS_URL/v1/streams/attachments/records?filter[hydration_status]=hydrated&limit=1" \
   -H "Authorization: Bearer $TOKEN" | jq -r '.data[0].blob_ref.fetch_url')
 
 # 3. Follow fetch_url verbatim. -L follows any 302 the RS may emit to a signed URL.
@@ -225,7 +225,7 @@ To navigate without inline expansion (cheaper, no server hydration):
 
 ## Performance and grant-safety hygiene
 
-- Never call `records?limit=10000`. Page in chunks of 100–500. The user's machine is doing this work.
+- Never call `records?limit=10000`. Page in chunks of at most 100; the server caps larger requests at 100.
 - Avoid concurrency unless the user asked for a fast result. Sequential calls are easier to inspect and don't surprise the owner with a burst pattern.
 - Cache `/v1/schema` per grant for the session; it doesn't change while the grant is active.
 - If a query returns nothing, do not retry with broader filters. Tell the user the answer is empty and ask whether to widen.

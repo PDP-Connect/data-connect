@@ -190,8 +190,9 @@ For the **Amazon second-account** acceptance case, the honest path today is:
 initiate the intent, receive `unsupported` with the reason naming the browser-
 collector primitive gap, and report that owner-mediated next step to the operator.
 That is the correct stopping point until the browser-collector enrollment
-primitive ships (see the OpenSpec change `add-owner-agent-control-surface`,
-"Resolved: Amazon second-account implementation packet").
+primitive ships. The current implementation and acceptance coverage are in
+`reference-implementation/server/routes/owner-connection-intent.ts` and
+`reference-implementation/test/owner-connection-intent.test.ts`.
 
 ## Boundary: owner-agent control vs. scoped grants / MCP
 

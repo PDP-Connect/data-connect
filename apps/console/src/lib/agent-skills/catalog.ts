@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { createHash } from "node:crypto";
-import { promises as fs } from "node:fs";
+import { promises as fs, type Dirent } from "node:fs";
 import path from "node:path";
 import { pdppCliConnectCommand, pdppCliTokenCompletionUnavailable } from "../pdpp-cli-command.ts";
 
@@ -31,7 +31,7 @@ interface AgentSkillFileDefinition {
 interface AgentSkillDefinition {
   readonly canonical_source: "docs/agent-skills";
   readonly description: string;
-  readonly files: readonly AgentSkillFileDefinition[];
+  readonly repoBasePath: string;
   readonly name: string;
   readonly recommended_install: "npx skills add <repo-url> -g when supported; otherwise fetch files from this catalog";
 }
@@ -40,52 +40,20 @@ const SKILLS: readonly AgentSkillDefinition[] = [
   {
     canonical_source: "docs/agent-skills",
     description: DATA_ACCESS_SKILL_DESCRIPTION,
-    files: [
-      {
-        mediaType: "text/markdown; charset=utf-8",
-        repoRelativePath: `${DATA_ACCESS_SKILL_BASE_REPO_PATH}/SKILL.md`,
-        routePath: `${DATA_ACCESS_SKILL_NAME}/SKILL.md`,
-      },
-      {
-        mediaType: "text/markdown; charset=utf-8",
-        repoRelativePath: `${DATA_ACCESS_SKILL_BASE_REPO_PATH}/references/grant-design.md`,
-        routePath: `${DATA_ACCESS_SKILL_NAME}/references/grant-design.md`,
-      },
-      {
-        mediaType: "text/markdown; charset=utf-8",
-        repoRelativePath: `${DATA_ACCESS_SKILL_BASE_REPO_PATH}/references/query-cookbook.md`,
-        routePath: `${DATA_ACCESS_SKILL_NAME}/references/query-cookbook.md`,
-      },
-      {
-        mediaType: "text/markdown; charset=utf-8",
-        repoRelativePath: `${DATA_ACCESS_SKILL_BASE_REPO_PATH}/references/security.md`,
-        routePath: `${DATA_ACCESS_SKILL_NAME}/references/security.md`,
-      },
-      {
-        mediaType: "text/markdown; charset=utf-8",
-        repoRelativePath: `${DATA_ACCESS_SKILL_BASE_REPO_PATH}/references/troubleshooting.md`,
-        routePath: `${DATA_ACCESS_SKILL_NAME}/references/troubleshooting.md`,
-      },
-    ],
+    repoBasePath: DATA_ACCESS_SKILL_BASE_REPO_PATH,
     name: DATA_ACCESS_SKILL_NAME,
     recommended_install: "npx skills add <repo-url> -g when supported; otherwise fetch files from this catalog",
   },
   {
     canonical_source: "docs/agent-skills",
     description: OWNER_AGENT_SKILL_DESCRIPTION,
-    files: [
-      {
-        mediaType: "text/markdown; charset=utf-8",
-        repoRelativePath: `${OWNER_AGENT_SKILL_BASE_REPO_PATH}/SKILL.md`,
-        routePath: OWNER_AGENT_SKILL_ROUTE_PATH,
-      },
-    ],
+    repoBasePath: OWNER_AGENT_SKILL_BASE_REPO_PATH,
     name: OWNER_AGENT_SKILL_NAME,
     recommended_install: "npx skills add <repo-url> -g when supported; otherwise fetch files from this catalog",
   },
 ];
 
-const SKILL_FILES: readonly AgentSkillFileDefinition[] = SKILLS.flatMap((skill) => skill.files);
+let cachedSkillFiles: Promise<readonly AgentSkillFileDefinition[]> | null = null;
 
 export interface AgentSkillCatalogFile {
   readonly bytes: number;
@@ -176,6 +144,45 @@ async function readSkillFile(repoRelativePath: string): Promise<Buffer> {
   return fs.readFile(path.join(skillRoot, path.relative("docs/agent-skills", repoRelativePath)));
 }
 
+async function collectFiles(directory: string): Promise<string[]> {
+  const entries: Dirent[] = await fs.readdir(directory, { withFileTypes: true });
+  const nested = await Promise.all(
+    entries.map(async (entry) => {
+      const entryPath = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        return collectFiles(entryPath);
+      }
+      return entry.isFile() ? [entryPath] : [];
+    })
+  );
+  return nested.flat();
+}
+
+async function skillFiles(): Promise<readonly AgentSkillFileDefinition[]> {
+  if (!cachedSkillFiles) {
+    cachedSkillFiles = (async () => {
+      const skillRoot = await resolveSkillRoot();
+      const definitions = await Promise.all(
+        SKILLS.map(async (skill) => {
+          const absoluteBase = path.join(skillRoot, path.relative("docs/agent-skills", skill.repoBasePath));
+          const absoluteFiles = (await collectFiles(absoluteBase)).sort();
+          return absoluteFiles.map((absolutePath) => {
+            const withinSkill = path.relative(absoluteBase, absolutePath).split(path.sep).join("/");
+            return {
+              mediaType:
+                path.extname(absolutePath) === ".md" ? "text/markdown; charset=utf-8" : "application/octet-stream",
+              repoRelativePath: path.posix.join(skill.repoBasePath, withinSkill),
+              routePath: path.posix.join(skill.name, withinSkill),
+            };
+          });
+        })
+      );
+      return definitions.flat();
+    })();
+  }
+  return cachedSkillFiles;
+}
+
 function normalizeOrigin(origin: string): string {
   return origin.endsWith("/") ? origin.slice(0, -1) : origin;
 }
@@ -189,22 +196,31 @@ function sha256(buffer: Buffer): string {
 }
 
 export async function buildAgentSkillCatalog(origin: string): Promise<AgentSkillCatalog> {
+  const allFiles = await skillFiles();
   const skills = await Promise.all(
     SKILLS.map(async (skill): Promise<AgentSkillCatalogSkill> => {
       const files = await Promise.all(
-        skill.files.map(async (file): Promise<AgentSkillCatalogFile> => {
-          const bytes = await readSkillFile(file.repoRelativePath);
-          return {
-            bytes: bytes.byteLength,
-            media_type: file.mediaType,
-            path: file.routePath,
-            repo_path: file.repoRelativePath,
-            sha256: sha256(bytes),
-            url: catalogUrl(origin, file.routePath),
-          };
-        })
+        allFiles
+          .filter((file) => file.routePath.startsWith(`${skill.name}/`))
+          .map(async (file): Promise<AgentSkillCatalogFile> => {
+            const bytes = await readSkillFile(file.repoRelativePath);
+            return {
+              bytes: bytes.byteLength,
+              media_type: file.mediaType,
+              path: file.routePath,
+              repo_path: file.repoRelativePath,
+              sha256: sha256(bytes),
+              url: catalogUrl(origin, file.routePath),
+            };
+          })
       );
-      return { ...skill, files };
+      return {
+        canonical_source: skill.canonical_source,
+        description: skill.description,
+        files,
+        name: skill.name,
+        recommended_install: skill.recommended_install,
+      };
     })
   );
 
@@ -220,7 +236,7 @@ export async function readAgentSkillFile(routePath: string): Promise<{
   readonly definition: AgentSkillFileDefinition;
 } | null> {
   const normalized = routePath.replace(LEADING_SLASHES, "");
-  const definition = SKILL_FILES.find((file) => file.routePath === normalized);
+  const definition = (await skillFiles()).find((file) => file.routePath === normalized);
   if (!definition) {
     return null;
   }
@@ -263,8 +279,9 @@ export function agentSkillsLLMSIndex(): string {
 }
 
 export async function agentSkillsLLMSFullText(): Promise<string> {
+  const allFiles = await skillFiles();
   const parts = await Promise.all(
-    SKILL_FILES.map(async (file) => {
+    allFiles.map(async (file) => {
       const body = await readSkillFile(file.repoRelativePath);
       return [`## ${file.repoRelativePath}`, "", body.toString("utf8")].join("\n");
     })

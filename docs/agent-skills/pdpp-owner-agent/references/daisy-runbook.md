@@ -10,7 +10,7 @@ Conventions used below:
 - `$ENTRYPOINT` — the operator's reference instance origin (what the operator hands Daisy).
 - `$RS_URL`, `$AS_URL` — resolved from discovery, not assumed.
 - `read-owner-cred` — read `access_token` from
-  `~/.pdpp/owner-agent/pdpp-owner-agent.json` without printing it.
+  `~/applications/daisy/.pi/agent/pdpp-owner-agent.json` without printing it.
 
 Never print the bearer at any step. Status output is non-secret metadata only.
 
@@ -62,8 +62,11 @@ stop. Do not scrape owner pages or invent a bearer.
 ## Step 2 — Owner approval via device authorization
 
 Onboarding is an RFC 8628 device-authorization flow. The reliable path is
-`pdpp owner-agent onboard <entrypoint>`, which runs every sub-step below and writes the
-credential without printing it. The manual shape, for reference, is:
+`pdpp owner-agent onboard <entrypoint> --credential-file ~/applications/daisy/.pi/agent/pdpp-owner-agent.json`,
+which runs every sub-step below and writes to the explicit target without printing the
+credential. In `reference-implementation/vendor/cli/src/owner-agent/credential-store.ts`,
+an explicit `--credential-file` wins; otherwise the CLI defaults to
+`~/.pdpp/owner-agents/<host>.json`. The manual shape, for reference, is:
 
 1. **Start device authorization.** POST the `device_authorization_endpoint`. The response
    carries a `device_code`, a `user_code`, and a `verification_uri_complete` — the
@@ -98,14 +101,19 @@ do not retry silently.
 
 The approved flow writes the owner credential to:
 
-`~/.pdpp/owner-agent/pdpp-owner-agent.json`
+`~/applications/daisy/.pi/agent/pdpp-owner-agent.json`
+
+Pass this target explicitly to the CLI. In
+`reference-implementation/vendor/cli/src/owner-agent/credential-store.ts`, an explicit
+`--credential-file` wins; without it, the CLI writes
+`~/.pdpp/owner-agents/<host>.json`.
 
 The file is JSON, mode `0600`, and contains the bearer as `access_token`. Verify by
 reading it at call time and hitting compact schema — without echoing the token:
 
 ```bash
-TOKEN="$(jq -r '.access_token' "$HOME/.pdpp/owner-agent/pdpp-owner-agent.json")"
-SCHEMA_URL="$(jq -r '.schema_compact_endpoint // (.resource + "/v1/schema?view=compact")' "$HOME/.pdpp/owner-agent/pdpp-owner-agent.json")"
+TOKEN="$(jq -r '.access_token' "$HOME/applications/daisy/.pi/agent/pdpp-owner-agent.json")"
+SCHEMA_URL="$(jq -r '.schema_compact_endpoint // (.resource + "/v1/schema?view=compact")' "$HOME/applications/daisy/.pi/agent/pdpp-owner-agent.json")"
 curl -fsS "$SCHEMA_URL" -H "Authorization: Bearer $TOKEN" | jq '.connectors[].name'
 unset TOKEN
 unset SCHEMA_URL
@@ -117,7 +125,7 @@ expiry, revocation handle. Never the bearer.
 Confirm the boundary holds (this should fail, and that is correct):
 
 ```bash
-TOKEN="$(jq -r '.access_token' "$HOME/.pdpp/owner-agent/pdpp-owner-agent.json")"
+TOKEN="$(jq -r '.access_token' "$HOME/applications/daisy/.pi/agent/pdpp-owner-agent.json")"
 curl -s -o /dev/null -w '%{http_code}\n' "$RS_URL/mcp" -H "Authorization: Bearer $TOKEN"
 unset TOKEN
 # Expect a rejection. /mcp is the grant-scoped client transport, not owner-agent REST.
@@ -134,18 +142,16 @@ unset TOKEN
    you do not re-list before every read:
 
    ```bash
-   TOKEN="$(jq -r '.access_token' "$HOME/.pdpp/owner-agent/pdpp-owner-agent.json")"
+   TOKEN="$(jq -r '.access_token' "$HOME/applications/daisy/.pi/agent/pdpp-owner-agent.json")"
    curl -fsS "$RS_URL/v1/streams" -H "Authorization: Bearer $TOKEN" \
      | jq '.data | map({name, connection_id})'
    unset TOKEN
    ```
 
 3. For each stream, page through with the declared pagination cursor and request only the
-   fields you need. **Owner bearers require `?connector_id=<connector_id>` on every record
-   read** — the polyfill layer cannot infer a connector from the bearer alone (400
-   `invalid_request` if omitted). In multi-connection deployments, also pass
-   `?connection_id=<id>` to address a specific instance. Attribute every record by its
-   `connection_id`.
+   fields you need. Select records with `connector_id` or `connection_id`; a
+   `connection_id` alone identifies its connector. Pass both when useful, and attribute
+   every record by its `connection_id`.
 4. Persist sync state **per `(stream, connection_id)`** — the latest pagination cursor and
    the last `changes_since` value — to Daisy's local state. This is what makes future syncs
    cheap.
@@ -158,9 +164,9 @@ following `blob_ref.fetch_url`.
 On every refresh, do not rescan. For each stream/connection, resume from the stored cursor:
 
 ```bash
-TOKEN="$(jq -r '.access_token' "$HOME/.pdpp/owner-agent/pdpp-owner-agent.json")"
+TOKEN="$(jq -r '.access_token' "$HOME/applications/daisy/.pi/agent/pdpp-owner-agent.json")"
 curl -fsS \
-  "$RS_URL/v1/streams/<stream>/records?connector_id=<connector_id>&connection_id=<id>&changes_since=<stored-cursor>&limit=200" \
+  "$RS_URL/v1/streams/<stream>/records?connector_id=<connector_id>&connection_id=<id>&changes_since=<stored-cursor>&limit=100" \
   -H "Authorization: Bearer $TOKEN" \
   | jq '{records: .data, has_more, next_cursor, next_changes_since}'
 unset TOKEN
@@ -184,7 +190,7 @@ plane at `/v1/owner/*`. The full reference is `references/control-surface.md`; t
 one-shot, non-secret entrypoint is:
 
 ```bash
-pdpp owner-agent control --credential-file "$HOME/.pdpp/owner-agent/pdpp-owner-agent.json"
+pdpp owner-agent control --credential-file "$HOME/applications/daisy/.pi/agent/pdpp-owner-agent.json"
 ```
 
 It prints the supported control actions (each with a typed `status`) and every configured
@@ -238,14 +244,14 @@ entrypoint-first flow without leaking any secret:
 > `device_authorization_endpoint`, show me the `verification_uri_complete` (the
 > `/device?user_code=...` page) to approve in my browser, and wait. After I approve, poll
 > the `token_endpoint`, and store the issued credential at
-> `~/.pdpp/owner-agent/pdpp-owner-agent.json` with mode 0600. Never print the
-> bearer; confirm with non-secret status only (token kind, subject, expiry).
+> `~/applications/daisy/.pi/agent/pdpp-owner-agent.json` with mode 0600 using the CLI's
+> `--credential-file` option. Never print the bearer; confirm with non-secret status
+> only (token kind, subject, expiry).
 >
 > From then on, read the credential from that file at call time without printing it. Pull
 > `schema_compact_endpoint` and `/v1/streams` (the stream catalog is under `data`), cache it.
-> Query records at `/v1/streams/{stream}/records?connector_id=<connector_id>` — owner
-> bearers require `connector_id` on every record read (400 if omitted); also pass
-> `connection_id` to address a specific instance in multi-connection deployments.
+> Query records at `/v1/streams/{stream}/records?connector_id=<connector_id>` or use
+> `connection_id=<id>` to select a connection instance; a connection id alone is enough.
 > Use `next_cursor` for pagination and `changes_since` (bootstrap `beginning`, then store
 > `next_changes_since`) for deltas. Keep per-`(stream, connection_id)` cursors so refreshes
 > are incremental, and re-list streams periodically so new data appears. Don't use `/mcp`

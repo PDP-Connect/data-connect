@@ -113,7 +113,8 @@ After the operator approves, poll the `token_endpoint` with
 `authorization_pending` / `slow_down` (keep polling), `access_denied` (denied — stop), and
 `expired_token` (start over). On success the response contains the owner `access_token`;
 write it to the local credential target (see §3) and surface only non-secret status.
-`pdpp owner-agent onboard <entrypoint>` performs all of this without printing the bearer.
+`pdpp owner-agent onboard <entrypoint> --credential-file ~/applications/daisy/.pi/agent/pdpp-owner-agent.json`
+performs all of this without printing the bearer and writes to the path used below.
 
 This is separate from grant-scoped MCP device authorization. MCP device setup includes
 the `/mcp` `resource` and PDPP `authorization_details`, then redeems a client token.
@@ -156,11 +157,11 @@ question. See `references/sync.md` for the full reference; the shape is:
    catalog before any record read. `/v1/streams` returns a list envelope
    (`{ "object": "list", "has_more": ..., "data": [...] }`); the stream entries are under
    **`data`**, not a top-level `streams` key. Build all queries off that response.
-2. **Scope record reads by `connector_id` (required for owner bearers).** Owner-bearer
-   record reads require `?connector_id=<connector_id>` — the polyfill layer does not
-   infer a connector from the bearer alone. Additionally pass `connection_id` as a
-   query parameter when addressing a specific instance in a multi-connection deployment.
-   Store sync state per stream **and** per connection.
+2. **Scope record reads to a connector or connection.** Pass
+   `?connector_id=<connector_id>` to select a connector, or `connection_id=<id>` to
+   select a specific connection instance. The connection selector can identify the
+   connector by itself; pass both when useful. Store sync state per stream **and** per
+   connection.
 3. **Initial sync, bounded.** Page through each stream with the declared pagination
    cursor (`next_cursor` while `has_more`) and field projection. Request only the fields
    you need.
