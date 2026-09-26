@@ -9,5 +9,5 @@ test("the console product identity is always DataConnect", () => {
   const identity = getProductIdentity()
   assert.equal(identity.name, "DataConnect")
   assert.equal(identity.protocolName, "PDPP")
-  assert.equal(identity.version, "0.7.55")
+  assert.equal(identity.version, "0.7.56")
 })
