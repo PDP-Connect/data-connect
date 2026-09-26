@@ -502,6 +502,10 @@ jobs:
           SKOPEO_IMAGE: quay.io/skopeo/stable:v1.22.3@sha256:064d2cefb512c97d5a22979599ca05b7198fd6176494a634e1f31bd6b5fbd77a
         run: |
           set -euo pipefail
+          if [[ ! "$SCANNED_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::No clean scan digest (got '$SCANNED_DIGEST'); refusing to push."
+            exit 1
+          fi
           skopeo() {
             docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
               -v "$HOME/.docker/config.json:/auth.json:ro" -v "$RUNNER_TEMP:/work" \
