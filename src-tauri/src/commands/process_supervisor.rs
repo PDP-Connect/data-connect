@@ -947,18 +947,17 @@ fn exit_before_readiness_message(
 }
 
 fn redact_child_output(line: &str, secrets: &[String]) -> String {
-    let mut redacted = line.to_string();
+    let mut redacted = redact_bearer_values(&redact_labeled_values(line));
     for secret in secrets {
         if secret.len() >= 4 {
             redacted = redacted.replace(secret, "[REDACTED]");
         }
     }
-    let redacted = redact_bearer_values(&redact_labeled_values(&redacted));
     truncate_output_line(redacted, false)
 }
 
 fn redact_labeled_values(value: &str) -> String {
-    const SENSITIVE_LABELS: [&str; 15] = [
+    const SENSITIVE_LABELS: [&str; 16] = [
         "credentialEncryptionKey",
         "databaseEncryptionKey",
         "ownerCredentialRevealProof",
@@ -967,6 +966,7 @@ fn redact_labeled_values(value: &str) -> String {
         "accessToken",
         "refresh_token",
         "refreshToken",
+        "proxy-authorization",
         "authorization",
         "password",
         "passwd",
@@ -1022,8 +1022,10 @@ fn redact_labeled_values(value: &str) -> String {
                         end_value += 1;
                     }
                 }
-            } else if label.eq_ignore_ascii_case("authorization") {
-                while end_value < bytes.len() && !b",}] ;".contains(&bytes[end_value]) {
+            } else if label.eq_ignore_ascii_case("authorization")
+                || label.eq_ignore_ascii_case("proxy-authorization")
+            {
+                while end_value < bytes.len() && !b",}];".contains(&bytes[end_value]) {
                     end_value += 1;
                 }
             } else {
@@ -1066,16 +1068,20 @@ fn is_secret_environment_key(key: &OsStr) -> bool {
 }
 
 fn redact_bearer_values(value: &str) -> String {
+    const CREDENTIAL_SCHEMES: [&[u8]; 2] = [b"bearer", b"basic"];
     let mut bytes = value.as_bytes().to_vec();
     let mut scan = 0;
-    while scan + 6 <= bytes.len() {
-        if !bytes[scan..scan + 6].eq_ignore_ascii_case(b"bearer")
-            || (scan > 0 && is_label_byte(bytes[scan - 1]))
-        {
+    while scan < bytes.len() {
+        let Some(scheme) = CREDENTIAL_SCHEMES.iter().find(|scheme| {
+            let end = scan + scheme.len();
+            end <= bytes.len()
+                && bytes[scan..end].eq_ignore_ascii_case(scheme)
+                && (scan == 0 || !is_label_byte(bytes[scan - 1]))
+        }) else {
             scan += 1;
             continue;
-        }
-        let mut start = scan + 6;
+        };
+        let mut start = scan + scheme.len();
         if bytes.get(start).is_some_and(u8::is_ascii_whitespace) {
             while bytes.get(start).is_some_and(u8::is_ascii_whitespace) {
                 start += 1;
@@ -1083,7 +1089,7 @@ fn redact_bearer_values(value: &str) -> String {
             let mut end = start;
             while end < bytes.len()
                 && !bytes[end].is_ascii_whitespace()
-                && !b"\"' ,}]".contains(&bytes[end])
+                && !b"\"' ,}];".contains(&bytes[end])
             {
                 end += 1;
             }
@@ -1093,7 +1099,7 @@ fn redact_bearer_values(value: &str) -> String {
                 continue;
             }
         }
-        scan += 6;
+        scan += scheme.len();
     }
     String::from_utf8_lossy(&bytes).into_owned()
 }
@@ -1932,6 +1938,60 @@ mod tests {
             );
         }
         assert!(diagnostic.contains("[REDACTED]"), "{diagnostic}");
+    }
+
+    #[test]
+    fn readiness_diagnostic_redacts_complete_authorization_credentials() {
+        let line_with_split_token = format!(
+            "{}Authorization: Bearer fixture-secret-0123456789\n",
+            "x".repeat(OUTPUT_READ_BUFFER_BYTES - "Authorization: Bearer ".len() - 3)
+        );
+        let mut reader = BufReader::with_capacity(
+            OUTPUT_READ_BUFFER_BYTES,
+            std::io::Cursor::new(line_with_split_token.into_bytes()),
+        );
+        let split_token_line = read_bounded_output_line(&mut reader)
+            .unwrap()
+            .unwrap();
+
+        for child_line in [
+            "Authorization: Bearer fixture-secret-0123456789".to_string(),
+            "authorization: bearer x".to_string(),
+            "Authorization: Basic base64".to_string(),
+            r#"{"authorization":"Bearer json-secret"}"#.to_string(),
+            "Proxy-Authorization: token proxy-secret".to_string(),
+            "request failed with Bearer inline-bearer-secret".to_string(),
+            "response body contains Basic inline-basic-secret".to_string(),
+            split_token_line,
+        ] {
+            let diagnostic = exit_before_readiness_message(
+                "test-sidecar",
+                None,
+                &[redact_child_output(&child_line, &[])],
+                &[],
+            );
+            for secret in [
+                "fixture-secret-0123456789",
+                "bearer x",
+                "base64",
+                "json-secret",
+                "proxy-secret",
+                "inline-bearer-secret",
+                "inline-basic-secret",
+            ] {
+                assert!(
+                    !diagnostic.contains(secret),
+                    "diagnostic leaked {secret}: {diagnostic}"
+                );
+            }
+        }
+
+        let redacted_with_scheme_secret =
+            redact_child_output("Bearer configured-anchor-secret", &["Bearer".to_string()]);
+        assert!(
+            !redacted_with_scheme_secret.contains("configured-anchor-secret"),
+            "credential scheme redaction leaked its value: {redacted_with_scheme_secret}"
+        );
     }
 
     #[cfg(unix)]
