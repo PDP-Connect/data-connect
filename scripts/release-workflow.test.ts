@@ -1,6 +1,6 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
-import { execFileSync } from "node:child_process"
+import { execFileSync, spawnSync } from "node:child_process"
 import {
   mkdtempSync,
   mkdirSync,
@@ -27,7 +27,18 @@ function readWorkflowStep(workflow: string, name: string) {
   const start = workflow.indexOf(marker)
   if (start === -1) throw new Error(`Missing workflow step: ${name}`)
   const next = workflow.indexOf("\n      - name: ", start + marker.length)
-  return workflow.slice(start, next === -1 ? workflow.length : next)
+  const nextJob = workflow
+    .slice(start + marker.length)
+    .search(/\n  [a-z][\w-]+:\n/)
+  const end =
+    next === -1
+      ? nextJob === -1
+        ? workflow.length
+        : start + marker.length + nextJob
+      : nextJob === -1
+        ? next
+        : Math.min(next, start + marker.length + nextJob)
+  return workflow.slice(start, end)
 }
 
 function readWorkflowRunScript(workflow: string, name: string) {
@@ -104,12 +115,12 @@ describe("release workflow", () => {
     expect(workflow).toContain("node scripts/ensure-pdpp-runtime.js")
     expect(workflow).toContain("Stage reference-stack roots")
     expect(workflow).toContain(
-      'node scripts/ensure-console-stack.js --profile release'
+      "node scripts/ensure-console-stack.js --profile release"
     )
     expect(workflow).toContain("node scripts/ensure-reference-stack.js \\")
     expect(workflow).toContain('--node-binary "$node_binary"')
     expect(workflow).toContain(
-      'node scripts/verify-reference-stack.mjs --profile release'
+      "node scripts/verify-reference-stack.mjs --profile release"
     )
     expect(workflow).toContain("if: github.event_name == 'release'")
     expect(workflow).not.toMatch(
@@ -228,6 +239,226 @@ describe("release workflow", () => {
     expect(publishArtifacts).toContain(
       'gh release upload "$RELEASE_TAG" "${artifacts[@]}" --clobber'
     )
+  })
+
+  it("publishes the Core image only from the release workflow", () => {
+    const workflow = readReleaseWorkflow()
+    const publishCoreImage = workflow.slice(
+      workflow.indexOf("  publish-core-image:")
+    )
+    const coreMetadata = readWorkflowStep(workflow, "Extract Docker metadata")
+    const buildAndPushCore = readWorkflowStep(
+      workflow,
+      "Build and push Core image"
+    )
+
+    expect(workflow).toContain(
+      "publish-core-image:\n    if: github.event_name == 'release'\n    needs: [build, publish]"
+    )
+    expect(publishCoreImage).toContain("packages: write")
+    expect(publishCoreImage).not.toContain("id-token:")
+    expect(publishCoreImage).not.toContain("attestations:")
+    expect(publishCoreImage).toContain("ghcr.io/${GITHUB_REPOSITORY,,}/core")
+    expect(publishCoreImage).toContain(
+      "node scripts/verify-release-ref.mjs --release-tag"
+    )
+    expect(coreMetadata).toContain("type=semver,pattern={{version}}")
+    expect(coreMetadata).toContain("latest=false")
+    expect(coreMetadata).not.toContain("value=latest")
+    expect(coreMetadata).not.toContain("dispatch-sha-")
+    expect(buildAndPushCore).toContain("push: true")
+    expect(buildAndPushCore).toContain("target: core")
+    expect(buildAndPushCore).toContain("platforms: linux/amd64,linux/arm64")
+    expect(buildAndPushCore).toContain(
+      "PDPP_REFERENCE_REVISION=${{ github.sha }}"
+    )
+  })
+
+  it("runs clean-install instead of build only on a dispatch that names a release", () => {
+    const workflow = readReleaseWorkflow()
+    type Trigger = { event: string; releaseTag?: string }
+    // Evaluates the simple ==, !=, &&, || job gates this workflow uses.
+    const runs = (job: string, trigger: Trigger) => {
+      const gate = new RegExp(`\\n  ${job}:\\n(?:    #.*\\n)*    if: (.*)\\n`)
+      const match = workflow.match(gate)
+      if (!match) return true
+      const expression = match[1]
+        .replaceAll("github.event_name", "event")
+        .replaceAll("inputs.release_tag", "releaseTag")
+        .replaceAll("!github.event.release.prerelease", "true")
+        .replaceAll("!=", "!==")
+        .replaceAll(/([^!=])==/g, "$1===")
+      return new Function("event", "releaseTag", `return ${expression}`)(
+        trigger.event,
+        trigger.event === "workflow_dispatch" ? (trigger.releaseTag ?? "") : ""
+      )
+    }
+    const scenarios: Array<[Trigger, string[]]> = [
+      [{ event: "workflow_dispatch", releaseTag: "v2.4.0" }, ["clean-install"]],
+      [{ event: "workflow_dispatch", releaseTag: "" }, ["build"]],
+      [{ event: "pull_request" }, ["build"]],
+      [
+        { event: "release" },
+        ["build", "publish", "publish-core-image", "promote-core-latest"],
+      ],
+    ]
+    const jobs = [
+      "build",
+      "publish",
+      "publish-core-image",
+      "promote-core-latest",
+      "clean-install",
+    ]
+    for (const [trigger, expected] of scenarios) {
+      expect(
+        jobs.filter(job => runs(job, trigger)),
+        JSON.stringify(trigger)
+      ).toEqual(expected)
+    }
+
+    expect(workflow).toContain(
+      '      release_tag:\n        description: Existing release tag to clean-install on fresh VMs instead of building (leave empty to build)\n        required: false\n        default: ""'
+    )
+    const cleanInstall = workflow.slice(
+      workflow.indexOf("\n  clean-install:\n")
+    )
+    expect(cleanInstall).toContain(
+      "    permissions:\n      contents: read\n    strategy:"
+    )
+    for (const platform of ["macos-15", "macos-15-intel", "windows-latest"]) {
+      expect(cleanInstall).toContain(`          - platform: ${platform}\n`)
+    }
+    expect(cleanInstall.match(/          - platform: /g)).toHaveLength(3)
+    expect(cleanInstall).not.toMatch(/needs:|write|gh release upload|docker\//)
+    expect(cleanInstall).toContain("if: always()")
+    expect(readWorkflowStep(workflow, "Upload evidence")).toContain(
+      "if: always()"
+    )
+    expect(workflow).not.toContain("clean-install-acceptance.yml")
+  })
+
+  it("pushes only versioned Core tags and serializes only latest promotion", () => {
+    const workflow = readReleaseWorkflow()
+    const publishCoreImage = workflow.slice(
+      workflow.indexOf("  publish-core-image:"),
+      workflow.indexOf("  promote-core-latest:")
+    )
+    const promoter = workflow.slice(workflow.indexOf("  promote-core-latest:"))
+
+    expect(publishCoreImage).not.toContain("concurrency")
+    expect(publishCoreImage).not.toMatch(/:latest|value=latest/)
+    expect(publishCoreImage).toContain(
+      "outputs:\n      digest: ${{ steps.build-core.outputs.digest }}\n      version: ${{ steps.meta.outputs.version }}"
+    )
+    expect(readWorkflowStep(workflow, "Build and push Core image")).toContain(
+      "id: build-core"
+    )
+    expect(workflow.match(/concurrency:/g)).toHaveLength(1)
+    expect(promoter).toContain(
+      "promote-core-latest:\n    if: github.event_name == 'release' && !github.event.release.prerelease\n    needs: publish-core-image"
+    )
+    expect(promoter).toContain(
+      "concurrency:\n      group: core-image-latest-promotion\n      cancel-in-progress: false"
+    )
+    expect(promoter).toContain(
+      "permissions:\n      contents: read\n      packages: write\n    steps:"
+    )
+    expect(promoter).toContain(
+      "CANDIDATE_DIGEST: ${{ needs.publish-core-image.outputs.digest }}"
+    )
+  })
+
+  describe("latest promotion script", () => {
+    const repository = ACTIONS_EXPRESSION_VALUES["github.repository"]
+    const image = `ghcr.io/${repository.toLowerCase()}/core`
+    const digest = `sha256:${"b".repeat(64)}`
+    const create = `CREATE=buildx imagetools create --tag ${image}:latest ${image}@${digest}`
+    const stubs = `
+docker() {
+  if [ "$3" = create ]; then printf 'CREATE=%s\\n' "$*"; return; fi
+  [ "$4" = "${image}:latest" ] || { echo "unexpected docker $*" >&2; return 1; }
+  case "$FX_LATEST" in
+    MISSING) echo "ERROR: ${image}:latest: not found" >&2; return 1 ;;
+    DENIED) echo "ERROR: unexpected status 403 Forbidden" >&2; return 1 ;;
+    *) printf '{"linux/amd64":{"config":{"Labels":{"org.opencontainers.image.version":"%s"}}},"linux/arm64":{"config":{"Labels":{"org.opencontainers.image.version":"%s"}}}}\\n' "$FX_LATEST" "\${FX_LATEST_ARM64:-$FX_LATEST}" ;;
+  esac
+}
+`
+
+    function runPromote(candidate: string, latest: string, extra = {}) {
+      const script = readWorkflowRunScript(
+        readReleaseWorkflow(),
+        "Promote Core image to latest if newer"
+      )
+      const root = mkdtempSync(join(tmpdir(), "data-connect-promote-"))
+      try {
+        const result = spawnSync("bash", ["-c", `${stubs}\n${script}`], {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            REPOSITORY: repository,
+            RUNNER_TEMP: root,
+            CANDIDATE_DIGEST: digest,
+            CANDIDATE_VERSION: candidate,
+            FX_LATEST: latest,
+            ...extra,
+          },
+        })
+        return {
+          status: result.status,
+          creates: result.stdout
+            .split("\n")
+            .filter(line => line.startsWith("CREATE=")),
+        }
+      } finally {
+        rmSync(root, { force: true, recursive: true })
+      }
+    }
+
+    it.each([
+      ["1.5.1", "1.5.0"],
+      ["1.6.0", "1.5.9"],
+      ["2.0.0", "1.99.99"],
+      ["1.10.0", "1.9.0"],
+      ["1.5.1", "MISSING"],
+    ])("promotes %s over latest %s", (candidate, latest) => {
+      expect(runPromote(candidate, latest)).toEqual({
+        status: 0,
+        creates: [create],
+      })
+    })
+
+    it.each([
+      ["1.5.1", "1.5.1"],
+      ["1.5.0", "1.5.1"],
+      ["1.9.0", "1.10.0"],
+      ["1.99.99", "2.0.0"],
+      ["1.6.0-rc.1", "1.5.0"],
+    ])("leaves latest alone for %s when latest is %s", (candidate, latest) => {
+      expect(runPromote(candidate, latest)).toEqual({ status: 0, creates: [] })
+    })
+
+    it.each([
+      ["an unreadable latest", "1.5.1", "DENIED", {}],
+      ["an unlabelled latest", "1.5.1", "", {}],
+      ["a prerelease latest", "1.5.1", "1.5.0-rc.1", {}],
+      [
+        "mixed platform versions",
+        "1.5.1",
+        "1.5.0",
+        { FX_LATEST_ARM64: "1.4.0" },
+      ],
+      [
+        "a malformed digest",
+        "1.5.1",
+        "1.5.0",
+        { CANDIDATE_DIGEST: "sha256:x" },
+      ],
+    ])("fails closed on %s", (_name, candidate, latest, extra) => {
+      const run = runPromote(candidate, latest, extra)
+      expect(run.status).not.toBe(0)
+      expect(run.creates).toEqual([])
+    })
   })
 
   it("publishes five files from upload-artifact's preserved subdirectories", () => {

@@ -11,6 +11,11 @@ on:
         required: false
         default: main
         type: string
+      release_tag:
+        description: Existing release tag to clean-install on fresh VMs instead of building (leave empty to build)
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -20,6 +25,8 @@ env:
 
 jobs:
   build:
+    # A dispatch with release_tag only runs clean-install against that release.
+    if: github.event_name != 'workflow_dispatch' || inputs.release_tag == ''
     env:
       APPLE_CERTIFICATE_AVAILABLE: ${{ github.event_name == 'release' && secrets.APPLE_BUILD_CERTIFICATE_BASE64 != '' }}
       APPLE_SIGNING_AVAILABLE: ${{ github.event_name == 'release' && secrets.APPLE_BUILD_CERTIFICATE_BASE64 != '' && secrets.APPLE_SIGNING_IDENTITY != '' }}
@@ -386,3 +393,291 @@ jobs:
             exit 1
           fi
           gh release upload "$RELEASE_TAG" "${artifacts[@]}" --clobber --repo "${{ github.repository }}"
+
+  publish-core-image:
+    if: github.event_name == 'release'
+    needs: [build, publish]
+    runs-on: ubuntu-22.04
+    outputs:
+      digest: ${{ steps.build-core.outputs.digest }}
+      version: ${{ steps.meta.outputs.version }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ github.ref_name }}
+          persist-credentials: false
+
+      - name: Verify checked-out release identity
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          node scripts/verify-release-ref.mjs --release-tag "$RELEASE_TAG"
+
+      - name: Verify excluded connector type declarations
+        run: bash scripts/check-polyfill-connector-type-shims.sh
+
+      - name: Compute image name
+        run: |
+          echo "PDPP_IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}/core" >> "$GITHUB_ENV"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.PDPP_IMAGE }}
+          labels: |
+            org.opencontainers.image.title=PDPP Core node
+            org.opencontainers.image.description=PDPP platform-neutral single-container Core node with console and loopback AS/RS
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          flavor: |
+            latest=false
+          tags: |
+            type=semver,pattern={{version}}
+
+      - name: Build and push Core image
+        id: build-core
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          cache-from: |
+            type=gha,scope=core
+            type=gha,scope=reference
+          cache-to: type=gha,mode=max,scope=core
+          context: .
+          file: ./Dockerfile
+          build-args: |
+            PDPP_REFERENCE_REVISION=${{ github.sha }}
+          labels: ${{ steps.meta.outputs.labels }}
+          platforms: linux/amd64,linux/arm64
+          provenance: mode=max
+          push: true
+          sbom: true
+          tags: ${{ steps.meta.outputs.tags }}
+          target: core
+
+  # Only the mutable latest alias is serialized; version tags publish per release
+  # above. GitHub keeps one pending run per group and cancels a replaced pending
+  # run. Re-running a cancelled promoter is safe: it moves latest only forward.
+  promote-core-latest:
+    if: github.event_name == 'release' && !github.event.release.prerelease
+    needs: publish-core-image
+    runs-on: ubuntu-22.04
+    concurrency:
+      group: core-image-latest-promotion
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Promote Core image to latest if newer
+        shell: bash
+        env:
+          CANDIDATE_DIGEST: ${{ needs.publish-core-image.outputs.digest }}
+          CANDIDATE_VERSION: ${{ needs.publish-core-image.outputs.version }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${REPOSITORY,,}/core"
+          stable='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+
+          if [[ ! "$CANDIDATE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Unexpected Core image digest: '$CANDIDATE_DIGEST'."
+            exit 1
+          fi
+          # A prerelease never moves latest, so it cannot displace a stable release.
+          if [[ ! "$CANDIDATE_VERSION" =~ $stable ]]; then
+            echo "Not promoting '$CANDIDATE_VERSION': latest tracks stable X.Y.Z releases only."
+            exit 0
+          fi
+          candidate=("${BASH_REMATCH[@]:1}")
+
+          if inspect_error="$(docker buildx imagetools inspect "$image:latest" --format '{{json .Image}}' 2>&1 >"$RUNNER_TEMP/core-latest-image.json")"; then
+            current="$(jq -r '[.[] | .config.Labels["org.opencontainers.image.version"] // ""] | unique | join(",")' "$RUNNER_TEMP/core-latest-image.json")"
+            if [[ ! "$current" =~ $stable ]]; then
+              echo "::error::Cannot identify the stable version behind $image:latest (got '$current')."
+              exit 1
+            fi
+            for part in 0 1 2; do
+              if (( candidate[part] > BASH_REMATCH[part + 1] )); then break; fi
+              if (( candidate[part] < BASH_REMATCH[part + 1] )) || (( part == 2 )); then
+                echo "Not promoting $CANDIDATE_VERSION: $image:latest is already $current."
+                exit 0
+              fi
+            done
+          elif [[ "$inspect_error" == *"$image:latest: not found"* ]]; then
+            echo "No $image:latest yet; publishing it for the first time."
+          else
+            echo "::error::Cannot inspect $image:latest: $inspect_error"
+            exit 1
+          fi
+
+          docker buildx imagetools create --tag "$image:latest" "$image@$CANDIDATE_DIGEST"
+          echo "Promoted $image:latest to $CANDIDATE_VERSION ($CANDIDATE_DIGEST)."
+
+  # Installs an existing release's assets on fresh hosted VMs, launches the
+  # installed app with no human, and checks it. Verification only: it never
+  # builds or publishes, and it runs only on a dispatch that names a release.
+  clean-install:
+    if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-15
+            asset_pattern: "*_aarch64.dmg"
+          - platform: macos-15-intel
+            asset_pattern: "*_x86_64.dmg"
+          - platform: windows-latest
+            asset_pattern: "*-setup.exe"
+    runs-on: ${{ matrix.platform }}
+    timeout-minutes: 30
+    env:
+      RELEASE_TAG: ${{ inputs.release_tag }}
+      EVIDENCE_DIR: ${{ github.workspace }}/clean-install-evidence
+    steps:
+      # Only the acceptance script comes from the repo. The app under test is
+      # the release asset, never a source-tree build.
+      - name: Checkout acceptance script
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.21.0"
+
+      - name: Download release installer
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ASSET_PATTERN: ${{ matrix.asset_pattern }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$EVIDENCE_DIR" installer
+          gh release download --repo "$GITHUB_REPOSITORY" --pattern "$ASSET_PATTERN" --dir installer -- "$RELEASE_TAG"
+          mapfile -t assets < <(find installer -type f)
+          if [ "${#assets[@]}" -ne 1 ]; then
+            echo "::error::Expected one $ASSET_PATTERN asset on $RELEASE_TAG, found ${#assets[@]}."
+            exit 1
+          fi
+          echo "INSTALLER=${assets[0]}" >> "$GITHUB_ENV"
+          shasum -a 256 "${assets[0]}" | tee "$EVIDENCE_DIR/installer.sha256"
+
+      - name: Install and launch (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          app_data="$HOME/Library/Application Support/dev.dataconnect"
+          if [ -e "$app_data" ]; then
+            echo "::error::$app_data exists before install; the VM is not clean."
+            exit 1
+          fi
+          mount_dir="$(mktemp -d)"
+          hdiutil attach "$INSTALLER" -nobrowse -readonly -mountpoint "$mount_dir" | tee "$EVIDENCE_DIR/install.log"
+          ditto "$mount_dir/DataConnect.app" /Applications/DataConnect.app
+          hdiutil detach "$mount_dir" | tee -a "$EVIDENCE_DIR/install.log"
+          codesign -dv --verbose=2 /Applications/DataConnect.app >>"$EVIDENCE_DIR/install.log" 2>&1 || true
+          # Hosted macOS runners keep a logged-in Aqua session, so LaunchServices
+          # starts the real bundle the same way a Finder double-click does.
+          open -a /Applications/DataConnect.app
+          echo "APP_DATA_DIR=$app_data" >> "$GITHUB_ENV"
+          echo "APP_LOG_DIR=$HOME/Library/Logs/dev.dataconnect" >> "$GITHUB_ENV"
+
+      - name: Install and launch (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $appData = Join-Path $env:APPDATA 'dev.dataconnect'
+          if (Test-Path $appData) {
+            Write-Output "::error::$appData exists before install; the VM is not clean."
+            exit 1
+          }
+          # Tauri NSIS installers are per-user here (installMode currentUser)
+          # and accept the standard NSIS silent flag.
+          $install = Start-Process -FilePath (Resolve-Path $env:INSTALLER) -ArgumentList '/S' -Wait -PassThru
+          "installer exit code: $($install.ExitCode)" | Tee-Object -FilePath "$env:EVIDENCE_DIR/install.log"
+          if ($install.ExitCode -ne 0) { exit 1 }
+          $uninstall = Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall' |
+            Get-ItemProperty | Where-Object { $_.DisplayName -eq 'DataConnect' } | Select-Object -First 1
+          if (-not $uninstall) { Write-Output '::error::DataConnect uninstall entry not found'; exit 1 }
+          $uninstall | Format-List | Out-File -Append "$env:EVIDENCE_DIR/install.log"
+          $installDir = $uninstall.InstallLocation.Trim('"')
+          $exe = Get-ChildItem $installDir -Filter *.exe |
+            Where-Object { $_.Name -notmatch '^(uninstall|pdpp-node)' } | Select-Object -First 1
+          if (-not $exe) { Write-Output "::error::No app executable in $installDir"; exit 1 }
+          Get-ChildItem $installDir | Out-File -Append "$env:EVIDENCE_DIR/install.log"
+          Start-Process -FilePath $exe.FullName
+          "APP_DATA_DIR=$appData" >> $env:GITHUB_ENV
+          # Tauri app_log_dir() on Windows is the local, not roaming, app-data
+          # folder (tauri 2.11.6 src/path/desktop.rs:285-287).
+          "APP_LOG_DIR=$(Join-Path $env:LOCALAPPDATA 'dev.dataconnect\logs')" >> $env:GITHUB_ENV
+
+      # First-run claim: fresh install, app ran, owner password not yet set.
+      # Also checks the sidecars serve. It does not render or check the setup
+      # UI, which sits behind owner sign-in.
+      - name: Assert owner password not yet set and sidecars serving
+        shell: bash
+        run: node scripts/clean-install-acceptance.mjs --app-data-dir "$APP_DATA_DIR" --log-file "$APP_LOG_DIR/DataConnect.log" --timeout-ms 300000
+
+      # Collect logs and non-secret state only. The app-data directory also
+      # holds the owner credential and encryption keys, so it is never uploaded
+      # whole.
+      - name: Collect evidence
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p "$EVIDENCE_DIR/app-logs" "$EVIDENCE_DIR/run-leases"
+          [ -d "${APP_LOG_DIR:-}" ] && cp -R "$APP_LOG_DIR"/. "$EVIDENCE_DIR/app-logs/" || true
+          [ -f "${APP_DATA_DIR:-}/unified/console-port.json" ] && cp "$APP_DATA_DIR/unified/console-port.json" "$EVIDENCE_DIR/" || true
+          # Run leases: <appData>/run (unified.rs:2250-2254, run_lease.rs:172-177).
+          # Windows has none: process_start_ticks is None there (run_lease.rs:157-160).
+          [ -d "${APP_DATA_DIR:-}/run" ] && cp "$APP_DATA_DIR"/run/*.json "$EVIDENCE_DIR/run-leases/" 2>/dev/null || true
+          [ -d "${APP_DATA_DIR:-}" ] && ls -laR "$APP_DATA_DIR" > "$EVIDENCE_DIR/app-data-listing.txt" 2>&1 || true
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            pwsh -NoProfile -Command "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,CommandLine | Format-Table -AutoSize -Wrap | Out-String -Width 4096" > "$EVIDENCE_DIR/processes.txt" || true
+          else
+            ps -axo pid,ppid,command > "$EVIDENCE_DIR/processes.txt" || true
+          fi
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: clean-install-${{ matrix.platform }}
+          path: clean-install-evidence
+          if-no-files-found: warn
+          retention-days: 14
