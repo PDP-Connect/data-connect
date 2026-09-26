@@ -18,33 +18,33 @@ name: reference-implementation
 # Node floor (>=24.15.0, this repo's package.json engines field, matching pdpp's
 # node-version 24).
 #
-# pdpp's version also gates apps/console and several owner-journey/stream-audit scripts
-# that are pdpp-specific (openspec-driven authoring surfaces not part of this repo's
-# scope). Those jobs are deliberately NOT ported here — only the parts that map to
-# what Move B actually brings into this repo: the reference-implementation package
-# itself. Re-derive the full job list against pdpp's then-current workflow when Move B
-# lands, since pdpp's own reference-implementation.yml will keep evolving until then.
+# pdpp's version also gates owner-journey/stream-audit scripts that are pdpp-specific
+# (openspec-driven authoring surfaces not part of this repo's scope). This workflow
+# also runs the console's existing test command when a PR changes the console or its
+# shared inputs. Other pdpp-only jobs remain out of scope.
 
 on:
   pull_request: {}
   merge_group: {}
   push:
-    branches: [main]
+    branches: [main, integration/unified-stack]
   workflow_dispatch: {}
 
+permissions:
+  contents: read
+
 concurrency:
-  # Keyed by ref for PRs and branches, so a ref's runs supersede each other but
-  # never a sibling's. main is keyed by sha instead, which is what actually gives
-  # every merge commit its own pass/fail record: a group holds at most one pending
-  # run, so a per-ref main group would have GitHub cancel the waiting run when the
-  # next merge arrives, leaving that commit permanently unjudged -- the same blind
-  # spot as having no push trigger at all. Merge traffic is high enough for that to
-  # bite: over the 30 days to 2026-09-11 main took 48 first-parent commits (26 in
+  # Keyed by ref for PRs and other branches, so a ref's runs supersede each other
+  # but never a sibling's. main and integration/unified-stack use sha keys, which
+  # give every push its own pass/fail record: a group holds at most one pending run, so
+  # a per-ref group would cancel a waiting run when the next merge arrives. On main,
+  # merge traffic is high enough for that to bite: over the 30 days to 2026-09-11 it
+  # took 48 first-parent commits (26 in
   # the last 7), with 11 gaps under 25 minutes and 3 runs of three commits inside
-  # 22 minutes, against a suite that takes about 21. Per-sha groups each hold one
-  # run, so main's runs proceed in parallel rather than queueing; at that rate it is
-  # at most 3 concurrent.
-  group: reference-implementation-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
+  # 22 minutes, against a suite that takes about 21. Per-sha groups let each push
+  # proceed in parallel rather than queueing; at that rate main reaches at most 3
+  # concurrent runs.
+  group: reference-implementation-${{ (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/integration/unified-stack') && github.sha || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -54,6 +54,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       reference_impacting: ${{ steps.changes.outputs.reference_impacting }}
+      console_impacting: ${{ steps.changes.outputs.console_impacting }}
       has_content: ${{ steps.has-content.outputs.has_content }}
     steps:
       - name: Checkout
@@ -85,25 +86,27 @@ jobs:
           # Changed-file classification is a pull-request optimization: it keeps a
           # docs-only PR from paying for a 20-minute suite. It is deliberately NOT
           # applied to push, because a branch build answers a different question --
-          # "is main green at this commit" -- and that answer must not depend on
-          # which files the merge happened to touch. Path-filtering pushes would let
-          # main go unjudged after any unrelated merge, which is the blind spot this
-          # trigger exists to close.
+          # "is this integration branch green at this commit" -- and that answer
+          # must not depend on which files the merge happened to touch. Path-filtering
+          # pushes would leave unrelated merges unjudged, which this trigger closes.
           if [[ "${EVENT_NAME}" == "push" ]]; then
             echo "reference_impacting=true" >> "$GITHUB_OUTPUT"
-            echo "push to ${GITHUB_REF}: running full reference suite unconditionally."
+            echo "console_impacting=true" >> "$GITHUB_OUTPUT"
+            echo "push to ${GITHUB_REF}: running reference and console checks unconditionally."
             exit 0
           fi
 
           if [[ -z "${BASE_SHA}" ]]; then
             echo "reference_impacting=true" >> "$GITHUB_OUTPUT"
-            echo "workflow_dispatch has no PR base; running full reference suite."
+            echo "console_impacting=true" >> "$GITHUB_OUTPUT"
+            echo "workflow_dispatch has no PR base; running reference and console checks."
             exit 0
           fi
 
           git diff --name-only "${BASE_SHA}" "${HEAD_SHA}" > "$RUNNER_TEMP/reference-changed-files.txt"
 
           reference_impacting=false
+          console_impacting=false
           while IFS= read -r path; do
             case "$path" in
               .github/workflows/reference-implementation.yml|\
@@ -111,16 +114,40 @@ jobs:
               package-lock.json|\
               reference-implementation/*|reference-implementation/**)
                 reference_impacting=true
-                break
                 ;;
             esac
+
+            case "$path" in
+              .github/workflows/reference-implementation.yml|\
+              .npmrc|\
+              package.json|\
+              package-lock.json|\
+              tsconfig*.json|\
+              apps/console/*|apps/console/**|\
+              packages/*|packages/**|\
+              reference-implementation/*|reference-implementation/**|\
+              scripts/run-node-tests.mjs|scripts/run-node-tests/*|\
+              scripts/test-scratch/*|scripts/test-scratch/**)
+                console_impacting=true
+                ;;
+            esac
+
+            if [[ "${reference_impacting}" == "true" && "${console_impacting}" == "true" ]]; then
+              break
+            fi
           done < "$RUNNER_TEMP/reference-changed-files.txt"
 
           echo "reference_impacting=${reference_impacting}" >> "$GITHUB_OUTPUT"
+          echo "console_impacting=${console_impacting}" >> "$GITHUB_OUTPUT"
           if [[ "${reference_impacting}" == "true" ]]; then
             echo "Reference-impacting changes detected; running full reference suite."
           else
             echo "No reference-impacting changes detected (or reference-implementation/ does not exist in this repo yet); required context will pass without heavy reference tests."
+          fi
+          if [[ "${console_impacting}" == "true" ]]; then
+            echo "Console-impacting changes detected; running console tests."
+          else
+            echo "No console-impacting changes detected; console tests will skip."
           fi
 
   typecheck-reference:
@@ -228,6 +255,30 @@ jobs:
       - name: Check vendored connector-manifests tarball matches its pin
         run: node scripts/check-polyfill-connectors-tarball-freshness.mjs
 
+  test-console:
+    name: test console
+    needs: classify
+    if: needs.classify.outputs.console_impacting == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.21.0"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test console
+        run: npm --prefix apps/console run test
+
   gate:
     name: reference-implementation gate
     needs:
@@ -235,6 +286,7 @@ jobs:
       - typecheck-reference
       - test-reference-implementation
       - check-vendor-freshness
+      - test-console
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -247,7 +299,8 @@ jobs:
           for job_result in \
             "typecheck-reference:${{ needs.typecheck-reference.result }}" \
             "test-reference-implementation:${{ needs.test-reference-implementation.result }}" \
-            "check-vendor-freshness:${{ needs.check-vendor-freshness.result }}"
+            "check-vendor-freshness:${{ needs.check-vendor-freshness.result }}" \
+            "test-console:${{ needs.test-console.result }}"
           do
             name="${job_result%%:*}"
             result="${job_result##*:}"
