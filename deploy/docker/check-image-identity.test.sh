@@ -290,3 +290,53 @@ if (( FAILURES > 0 )); then
   exit 1
 fi
 echo "All tests passed"
+
+# 11. Manual exact-SHA build from deploy/docker/Dockerfile passes identity check
+# This represents the fix for the UAT/legacy image: deploy/docker/Dockerfile
+# core stage now carries the same identity contract as the root Dockerfile.
+# A manual build invoked with PDPP_REFERENCE_REVISION=<SHA> should:
+# - set both the OCI label and the runtime env to that SHA
+# - pass check-image-identity.sh --require-known
+echo
+echo "Additional test: deploy/docker/Dockerfile identity contract"
+write_docker_stub "$FULL_SHA1" "$FULL_SHA1"
+if OUT=$(run_check --require-known "fake-image" 2>&1); then
+  pass "deploy/docker/Dockerfile manual exact-SHA build passes identity check"
+else
+  fail "deploy/docker/Dockerfile exact SHA build should pass. Output: $OUT"
+fi
+
+# 12. Mismatch between label and env in deploy/docker/Dockerfile build
+# (edge case: misconfigured manual build args) -> rejected
+write_docker_stub "aaa111222333444455566677788899" "$FULL_SHA1"
+if OUT=$(run_check --require-known "fake-image" 2>&1); then
+  fail "deploy/docker/Dockerfile with mismatched label/env should exit nonzero. Output: $OUT"
+else
+  CODE=$?
+  if [[ "$CODE" == "1" ]] && echo "$OUT" | grep -q "IDENTITY VIOLATION: label and runtime revision disagree"; then
+    pass "deploy/docker/Dockerfile mismatched label/env rejected -> IDENTITY VIOLATION, exit 1"
+  else
+    fail "deploy/docker/Dockerfile mismatch: wrong exit code ($CODE) or message: $OUT"
+  fi
+fi
+
+# 13. Missing label in deploy/docker/Dockerfile build
+# (edge case: very old pre-fix build) -> rejected
+write_docker_stub "MISSING" "$FULL_SHA1"
+if OUT=$(run_check --require-known "fake-image" 2>&1); then
+  fail "deploy/docker/Dockerfile missing label should exit nonzero. Output: $OUT"
+else
+  CODE=$?
+  if [[ "$CODE" == "1" ]] && echo "$OUT" | grep -q "no org.opencontainers.image.revision label"; then
+    pass "deploy/docker/Dockerfile missing OCI label rejected -> IDENTITY VIOLATION, exit 1"
+  else
+    fail "deploy/docker/Dockerfile missing label: wrong exit code ($CODE) or message: $OUT"
+  fi
+fi
+
+echo
+if (( FAILURES > 0 )); then
+  echo "$FAILURES test(s) failed" >&2
+  exit 1
+fi
+echo "All tests passed"

@@ -159,6 +159,33 @@ CMD ["node", "--import", "tsx", "reference-implementation/server/index.ts"]
 
 FROM reference-browser AS core
 
+ARG PDPP_BUILD_REVISION=${PDPP_REFERENCE_REVISION}
+ARG PDPP_BUILD_SOURCE=unknown
+ARG PDPP_BUILD_CREATED=unknown
+ARG PDPP_BUILD_DIRTY=unknown
+ARG PDPP_BUILD_COMPOSITION=unknown
+
+RUN if [ "${PDPP_BUILD_REVISION}" != "${PDPP_REFERENCE_REVISION}" ]; then \
+      echo "image identity mismatch: PDPP_BUILD_REVISION='${PDPP_BUILD_REVISION}' != PDPP_REFERENCE_REVISION='${PDPP_REFERENCE_REVISION}'" >&2; \
+      echo "the OCI revision label and the runtime revision must be the exact same immutable git SHA (or both 'unknown' for a plain local dev build)" >&2; \
+      exit 1; \
+    fi; \
+    if [ "${PDPP_BUILD_REVISION}" != "unknown" ]; then \
+      hex_len=$(printf '%s' "${PDPP_BUILD_REVISION}" | tr -d '0-9a-f' | wc -c); \
+      full_len=$(printf '%s' "${PDPP_BUILD_REVISION}" | wc -c); \
+      if [ "$hex_len" -ne 0 ] || { [ "$full_len" -ne 40 ] && [ "$full_len" -ne 64 ]; }; then \
+        echo "image identity is not a real git object id: PDPP_REFERENCE_REVISION='${PDPP_REFERENCE_REVISION}' is not 40 or 64 lowercase hex characters" >&2; \
+        echo "a mutable ref name (branch/tag) or an abbreviated SHA is not an immutable commit identity" >&2; \
+        exit 1; \
+      fi; \
+    fi
+
+LABEL org.opencontainers.image.revision="${PDPP_BUILD_REVISION}" \
+      org.opencontainers.image.source="${PDPP_BUILD_SOURCE}" \
+      org.opencontainers.image.created="${PDPP_BUILD_CREATED}" \
+      pdpp.build.dirty="${PDPP_BUILD_DIRTY}" \
+      pdpp.build.composition="${PDPP_BUILD_COMPOSITION}"
+
 # One public service owns port 3000. The reference AS/RS stay on loopback and
 # are reached through the console's existing route handlers and proxy.
 ENV HOSTNAME=0.0.0.0 \
