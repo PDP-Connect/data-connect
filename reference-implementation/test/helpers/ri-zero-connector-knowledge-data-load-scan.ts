@@ -241,19 +241,15 @@ const SANCTIONED_GENERIC_DATA_READ_CALL_SITES: ReadonlySet<string> = new Set([
   // PDPP_DATA_DIR ("credential-recovery-state.json"). This is operator/runtime
   // recovery state written by the recovery kit, not RI-committed connector
   // policy or provider identity data.
-  // Re-derived 2026-09-25: the call site moved from line 2219 to 2220 after
-  // f680c0c6e (fix(docker): smoke-test Core demo flow) added a
-  // `connectorInstallService` field to `ServerOpts` above it -- the function
-  // itself is unchanged.
-  "reference-implementation/server/index.ts:2220",
+  // Re-derived 2026-09-26: moving the cross-tree main-module helper into the
+  // RI tree added one import line before this fixed runtime-state read.
+  "reference-implementation/server/index.ts:2223",
   // applyRecoveryOwnerSessionReset() reads a fixed filename under PDPP_DATA_DIR
   // ("owner-session-recovery-reset.json"). It is consumed only as an owner
   // session reset marker for recovered deployments.
-  // Re-derived 2026-09-25: the call site moved from line 2289 to 2290 after
-  // f680c0c6e (fix(docker): smoke-test Core demo flow) added a
-  // `connectorInstallService` field to `ServerOpts` above it -- the function
-  // itself is unchanged.
-  "reference-implementation/server/index.ts:2290",
+  // Re-derived 2026-09-26: moving the cross-tree main-module helper into the
+  // RI tree added one import line before this fixed runtime-state read.
+  "reference-implementation/server/index.ts:2293",
   // readRequestState(path) reads owner-password window request state from
   // fixed filenames under PDPP_DATA_DIR. The JSON contains request status and
   // OS reauth handoff state, never connector/provider policy.

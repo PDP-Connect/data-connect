@@ -391,11 +391,6 @@ function copyRuntimeSources(projectRoot, stageRoot) {
     join(projectRoot, "reference-implementation"),
     join(stageRoot, "reference-implementation")
   )
-  mkdirSync(join(stageRoot, "scripts"), { recursive: true })
-  copyFileSync(
-    join(projectRoot, "scripts", "is-main-module.js"),
-    join(stageRoot, "scripts", "is-main-module.js")
-  )
   for (const [, sourceRelativePath] of LOCAL_PACKAGES) {
     const source = join(projectRoot, sourceRelativePath)
     const destination = join(
@@ -704,7 +699,7 @@ export function verifyReferenceStackRoot(stageRoot) {
   const requiredPaths = [
     "launch.mjs",
     "manifest.json",
-    "scripts/is-main-module.js",
+    "reference-implementation/scripts/is-main-module.js",
     "reference-implementation/server/index.ts",
     "node_modules/tsx/package.json",
     "node_modules/patchright/package.json",

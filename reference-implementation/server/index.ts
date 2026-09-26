@@ -11,7 +11,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { existsSync, readFileSync, renameSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { isMainModule } from "../../scripts/is-main-module.js";
+import { isMainModule } from "../scripts/is-main-module.js";
 // biome-ignore lint/correctness/noUnresolvedImports: Biome cannot resolve this installed package export; Node and TypeScript resolve it.
 import type { BrowserSurfaceAllocator, BrowserSurfaceLeaseManager } from "@opendatalabs/remote-surface/leases";
 import { handleStreamableHttpRequest } from "@pdpp/mcp-server/server";

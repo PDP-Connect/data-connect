@@ -38,6 +38,9 @@ function fixtureRoot() {
   mkdirSync(join(root, "reference-implementation", "server"), {
     recursive: true,
   })
+  mkdirSync(join(root, "reference-implementation", "scripts"), {
+    recursive: true,
+  })
   mkdirSync(join(root, "node_modules", "tsx"), { recursive: true })
   mkdirSync(join(root, "node_modules", "patchright"), { recursive: true })
   mkdirSync(join(root, "node_modules", "better-sqlite3", "build", "Release"), {
@@ -49,6 +52,10 @@ function fixtureRoot() {
   writeFileSync(
     join(root, "reference-implementation", "server", "index.ts"),
     "export {}\n"
+  )
+  writeFileSync(
+    join(root, "reference-implementation", "scripts", "is-main-module.js"),
+    "export function isMainModule() { return true }\n"
   )
   writeFileSync(join(root, "node_modules", "tsx", "package.json"), "{}\n")
   writeFileSync(
@@ -496,6 +503,16 @@ describe("reference stack staging contract", () => {
         })
 
         expect(explicitStage.reused).toBe(false)
+        expect(
+          existsSync(
+            join(
+              explicitStage.root,
+              "reference-implementation",
+              "scripts",
+              "is-main-module.js"
+            )
+          )
+        ).toBe(true)
         expect(hookStage).toEqual({
           manifest: explicitStage.manifest,
           reused: true,
