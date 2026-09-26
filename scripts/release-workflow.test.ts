@@ -41,6 +41,60 @@ function readWorkflowStep(workflow: string, name: string) {
   return workflow.slice(start, end)
 }
 
+// Returns why the publish-core-image job could push an image it has not
+// scanned, or [] when every GHCR write follows the full-layer secret scan.
+function coreImageScanGaps(workflow: string) {
+  const job = workflow.slice(
+    workflow.indexOf("  publish-core-image:"),
+    workflow.indexOf("  promote-core-latest:")
+  )
+  const gaps: string[] = []
+  const step = (name: string) => {
+    const marker = `      - name: ${name}\n`
+    return job.includes(marker) ? readWorkflowStep(job, name) : undefined
+  }
+  const build = step("Build Core image without pushing")
+  const scan = step("Scan every layer of the built Core image for secret files")
+  const push = step("Push the scanned Core image")
+  const rescan = step("Re-scan the pushed Core image from GHCR by digest")
+  if (!build?.includes("push: false")) gaps.push("build step pushes")
+  if (
+    !build?.includes("outputs: type=oci,dest=${{ runner.temp }}/core.oci.tar")
+  )
+    gaps.push("build step does not write the OCI archive")
+  if (
+    !scan?.includes(
+      'check-image-secrets.sh oci-archive "$RUNNER_TEMP/core.oci.tar"'
+    )
+  )
+    gaps.push("no scan of the built archive")
+  if (!push?.includes("--preserve-digests oci-archive:/work/core.oci.tar"))
+    gaps.push("push does not copy the scanned archive")
+  if (!push?.includes('"$pushed" != "$SCANNED_DIGEST"'))
+    gaps.push("push does not assert pushed digest equals scanned digest")
+  if (!push?.includes("SCANNED_DIGEST: ${{ steps.scan-core.outputs.digest }}"))
+    gaps.push("push does not take the digest from the scan")
+  if (!rescan?.includes('"docker://$PDPP_IMAGE@$PUSHED_DIGEST"'))
+    gaps.push("no re-scan of the pushed digest")
+  const order = [build, scan, push, rescan].map(text =>
+    text === undefined ? -1 : job.indexOf(text)
+  )
+  if (order.some((at, n) => at === -1 || (n > 0 && at < order[n - 1])))
+    gaps.push("steps are not ordered build, scan, push, re-scan")
+  // Any other GHCR write in the job must come after the scan.
+  const scanAt = scan === undefined ? job.length : job.indexOf(scan)
+  for (const write of [
+    "push: true",
+    "skopeo copy",
+    "docker push",
+    "imagetools create",
+  ]) {
+    const at = job.indexOf(write)
+    if (at !== -1 && at < scanAt) gaps.push(`"${write}" before the scan`)
+  }
+  return gaps
+}
+
 function readWorkflowRunScript(workflow: string, name: string) {
   const step = readWorkflowStep(workflow, name)
   const marker = "        run: |\n"
@@ -247,9 +301,9 @@ describe("release workflow", () => {
       workflow.indexOf("  publish-core-image:")
     )
     const coreMetadata = readWorkflowStep(workflow, "Extract Docker metadata")
-    const buildAndPushCore = readWorkflowStep(
+    const buildCore = readWorkflowStep(
       workflow,
-      "Build and push Core image"
+      "Build Core image without pushing"
     )
 
     expect(workflow).toContain(
@@ -266,12 +320,10 @@ describe("release workflow", () => {
     expect(coreMetadata).toContain("latest=false")
     expect(coreMetadata).not.toContain("value=latest")
     expect(coreMetadata).not.toContain("dispatch-sha-")
-    expect(buildAndPushCore).toContain("push: true")
-    expect(buildAndPushCore).toContain("target: core")
-    expect(buildAndPushCore).toContain("platforms: linux/amd64,linux/arm64")
-    expect(buildAndPushCore).toContain(
-      "PDPP_REFERENCE_REVISION=${{ github.sha }}"
-    )
+    expect(buildCore).toContain("push: false")
+    expect(buildCore).toContain("target: core")
+    expect(buildCore).toContain("platforms: linux/amd64,linux/arm64")
+    expect(buildCore).toContain("PDPP_REFERENCE_REVISION=${{ github.sha }}")
   })
 
   it("runs clean-install instead of build only on a dispatch that names a release", () => {
@@ -337,6 +389,37 @@ describe("release workflow", () => {
     expect(workflow).not.toContain("clean-install-acceptance.yml")
   })
 
+  it("scans every layer of the exact Core image before any GHCR write", () => {
+    const workflow = readReleaseWorkflow()
+    expect(coreImageScanGaps(workflow)).toEqual([])
+
+    const scanStep = readWorkflowStep(
+      workflow,
+      "Scan every layer of the built Core image for secret files"
+    )
+    const withoutScan = workflow.replace(scanStep, "")
+    expect(withoutScan).not.toBe(workflow)
+    expect(coreImageScanGaps(withoutScan)).toContain(
+      "no scan of the built archive"
+    )
+
+    const pushFirst = workflow.replace("push: false", "push: true")
+    expect(coreImageScanGaps(pushFirst)).toEqual(
+      expect.arrayContaining([
+        "build step pushes",
+        '"push: true" before the scan',
+      ])
+    )
+
+    const rebuilds = workflow.replace(
+      "--preserve-digests oci-archive:/work/core.oci.tar",
+      "oci-archive:/work/core.oci.tar"
+    )
+    expect(coreImageScanGaps(rebuilds)).toContain(
+      "push does not copy the scanned archive"
+    )
+  })
+
   it("pushes only versioned Core tags and serializes only latest promotion", () => {
     const workflow = readReleaseWorkflow()
     const publishCoreImage = workflow.slice(
@@ -348,10 +431,10 @@ describe("release workflow", () => {
     expect(publishCoreImage).not.toContain("concurrency")
     expect(publishCoreImage).not.toMatch(/:latest|value=latest/)
     expect(publishCoreImage).toContain(
-      "outputs:\n      digest: ${{ steps.build-core.outputs.digest }}\n      version: ${{ steps.meta.outputs.version }}"
+      "outputs:\n      digest: ${{ steps.push-core.outputs.digest }}\n      version: ${{ steps.meta.outputs.version }}"
     )
-    expect(readWorkflowStep(workflow, "Build and push Core image")).toContain(
-      "id: build-core"
+    expect(readWorkflowStep(workflow, "Push the scanned Core image")).toContain(
+      "id: push-core"
     )
     expect(workflow.match(/concurrency:/g)).toHaveLength(1)
     expect(promoter).toContain(

@@ -23,8 +23,16 @@ dist-ssr
 .cursor/
 .claude/
 
-# Local-only
+# Local-only. Operator env files hold secrets (.env.docker holds the owner
+# password and credential encryption key); keep the *.example templates.
 .env
+.env.*
+*.env
+!*.example
+*.pem
+*.key
+*.p12
+*.pfx
 read-only-for-reference/
 .DS_Store
 *.suo

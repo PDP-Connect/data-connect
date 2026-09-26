@@ -15,3 +15,20 @@ node_modules
 **/node_modules
 .next
 **/.next
+
+# Operator secrets. .env.docker.example tells operators to create .env.docker
+# (owner password, credential encryption key, connector passwords) here, and
+# every Dockerfile does `COPY . .`. Keep the committed *.example templates.
+# deploy/docker/check-image-secrets.sh enforces this in CI.
+.env
+.env.*
+*.env
+!*.example
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa
+id_ed25519
+credentials.json
+service-account*.json

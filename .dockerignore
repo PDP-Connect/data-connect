@@ -10,3 +10,21 @@ tmp
 **/tmp
 *.log
 /reference-implementation/vendor/pdpp-polyfill-connectors-0.0.1.tgz
+
+# Operator secrets. .env.docker.example tells operators to create .env.docker
+# (owner password, credential encryption key, connector passwords) here, and
+# every Dockerfile does `COPY . .`. Unlike .gitignore, patterns here are
+# anchored at the context root, hence **/. Keep the committed *.example templates.
+# deploy/docker/check-image-secrets.sh enforces this in CI.
+**/.env
+**/.env.*
+**/*.env
+!**/*.example
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/id_rsa
+**/id_ed25519
+**/credentials.json
+**/service-account*.json

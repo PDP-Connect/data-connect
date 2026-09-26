@@ -32,6 +32,9 @@ on:
       - "reference-implementation/package.json"
       - "scripts/check-polyfill-connector-type-shims.sh"
       - ".dockerignore"
+      - ".railwayignore"
+      - "apps/console/.dockerignore"
+      - "deploy/docker/check-image-secrets*"
       - ".env.docker.example"
       - ".github/workflows/docker-images.yml"
       - "Dockerfile"
@@ -59,6 +62,9 @@ on:
       - "reference-implementation/package.json"
       - "scripts/check-polyfill-connector-type-shims.sh"
       - ".dockerignore"
+      - ".railwayignore"
+      - "apps/console/.dockerignore"
+      - "deploy/docker/check-image-secrets*"
       - ".env.docker.example"
       - ".github/workflows/docker-images.yml"
       - "Dockerfile"
@@ -180,13 +186,20 @@ jobs:
           build-args: |
             PDPP_REFERENCE_REVISION=${{ github.sha }}
           labels: ${{ steps.meta.outputs.labels }}
-          load: ${{ matrix.image == 'core' }}
+          # Loaded so the secret-file scan below can read every layer.
+          load: true
           platforms: linux/amd64
           push: false
           tags: |
             ${{ steps.meta.outputs.tags }}
+            pdpp:ci-${{ matrix.image }}
             ${{ matrix.image == 'core' && 'pdpp:ci-core-test' || '' }}
           target: ${{ matrix.target }}
+
+      # Every Dockerfile does `COPY . .`; only the ignore files keep an
+      # operator's .env.docker, keys and credential JSON out of the image.
+      - name: Prove no layer of the built image carries a secret-looking file
+        run: bash deploy/docker/check-image-secrets.sh image pdpp:ci-${{ matrix.image }}
 
       # Fails before any other core-image check if the OCI revision label and
       # the runtime PDPP_REFERENCE_REVISION disagree, are missing, or are
@@ -230,9 +243,34 @@ jobs:
         with:
           context: .
           file: ./docker/neko/Dockerfile
+          load: true
           platforms: linux/amd64
           push: false
           tags: pdpp-neko:ci
+      - name: Prove no layer of the n.eko image carries a secret-looking file
+        run: bash deploy/docker/check-image-secrets.sh image pdpp-neko:ci
+
+  # A CI checkout never contains an operator's .env.docker, so scanning built
+  # images cannot catch a missing ignore rule. This job plants dummy secret
+  # files in each build context (repository root and apps/console), builds a
+  # `COPY . /ctx` probe image, and fails if any dummy reaches it or is not
+  # in .railwayignore (`railway up` uploads the repository root).
+  secret-context:
+    name: build contexts exclude secret files
+    if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Unit-test the secret-file rule
+        run: bash deploy/docker/check-image-secrets.test.sh
+      - name: Probe every Docker build context with dummy secret files
+        run: bash deploy/docker/check-image-secrets.sh context . apps/console
 
   # Manual diagnostic publish ONLY - never a release publisher.
   #
@@ -320,6 +358,10 @@ jobs:
           # only this repo's own release workflow is permitted to write them.
           tags: |
             type=sha,prefix=dispatch-sha-
+
+      - name: Probe the build context with dummy secret files before publishing
+        if: github.event.inputs.image == 'all' || github.event.inputs.image == matrix.image
+        run: bash deploy/docker/check-image-secrets.sh context .
 
       - name: Build and push image
         if: github.event.inputs.image == 'all' || github.event.inputs.image == matrix.image

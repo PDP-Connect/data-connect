@@ -399,7 +399,7 @@ jobs:
     needs: [build, publish]
     runs-on: ubuntu-22.04
     outputs:
-      digest: ${{ steps.build-core.outputs.digest }}
+      digest: ${{ steps.push-core.outputs.digest }}
       version: ${{ steps.meta.outputs.version }}
     permissions:
       contents: read
@@ -454,7 +454,9 @@ jobs:
           tags: |
             type=semver,pattern={{version}}
 
-      - name: Build and push Core image
+      # Build once into an OCI archive; nothing reaches GHCR until the scan
+      # below has read every layer of every platform manifest in it.
+      - name: Build Core image without pushing
         id: build-core
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
@@ -467,12 +469,72 @@ jobs:
           build-args: |
             PDPP_REFERENCE_REVISION=${{ github.sha }}
           labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=oci,dest=${{ runner.temp }}/core.oci.tar,tar=true
           platforms: linux/amd64,linux/arm64
           provenance: mode=max
-          push: true
+          push: false
           sbom: true
           tags: ${{ steps.meta.outputs.tags }}
           target: core
+
+      - name: Scan every layer of the built Core image for secret files
+        id: scan-core
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash deploy/docker/check-image-secrets.sh oci-archive "$RUNNER_TEMP/core.oci.tar" | tee "$RUNNER_TEMP/core-scan.txt"
+          digest="$(sed -n 's/^SCANNED-DIGEST: //p' "$RUNNER_TEMP/core-scan.txt")"
+          if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::The scan did not report the archive digest (got '$digest')."
+            exit 1
+          fi
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      # skopeo copies the scanned archive byte for byte; --preserve-digests
+      # fails instead of re-compressing. The runner's apt skopeo is too old
+      # for that flag, so use a pinned release image.
+      - name: Push the scanned Core image
+        id: push-core
+        shell: bash
+        env:
+          SCANNED_DIGEST: ${{ steps.scan-core.outputs.digest }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          SKOPEO_IMAGE: quay.io/skopeo/stable:v1.22.3@sha256:064d2cefb512c97d5a22979599ca05b7198fd6176494a634e1f31bd6b5fbd77a
+        run: |
+          set -euo pipefail
+          skopeo() {
+            docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
+              -v "$HOME/.docker/config.json:/auth.json:ro" -v "$RUNNER_TEMP:/work" \
+              "$SKOPEO_IMAGE" "$@" --authfile /auth.json
+          }
+          skopeo copy --all --preserve-digests oci-archive:/work/core.oci.tar "docker://$PDPP_IMAGE:$VERSION"
+          pushed="sha256:$(skopeo inspect --raw "docker://$PDPP_IMAGE:$VERSION" | sha256sum | cut -d' ' -f1)"
+          if [[ "$pushed" != "$SCANNED_DIGEST" ]]; then
+            echo "::error::Pushed digest $pushed differs from scanned digest $SCANNED_DIGEST."
+            exit 1
+          fi
+          echo "digest=$pushed" >> "$GITHUB_OUTPUT"
+          rm -f "$RUNNER_TEMP/core.oci.tar"
+
+      - name: Re-scan the pushed Core image from GHCR by digest
+        shell: bash
+        env:
+          PUSHED_DIGEST: ${{ steps.push-core.outputs.digest }}
+          SKOPEO_IMAGE: quay.io/skopeo/stable:v1.22.3@sha256:064d2cefb512c97d5a22979599ca05b7198fd6176494a634e1f31bd6b5fbd77a
+        run: |
+          set -euo pipefail
+          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
+            -v "$HOME/.docker/config.json:/auth.json:ro" -v "$RUNNER_TEMP:/work" \
+            "$SKOPEO_IMAGE" copy --all --authfile /auth.json \
+            "docker://$PDPP_IMAGE@$PUSHED_DIGEST" oci-archive:/work/core-pushed.oci.tar
+          if ! bash deploy/docker/check-image-secrets.sh oci-archive "$RUNNER_TEMP/core-pushed.oci.tar" | tee "$RUNNER_TEMP/core-rescan.txt"; then
+            echo "::error::$PDPP_IMAGE@$PUSHED_DIGEST in GHCR carries a secret-looking file or could not be scanned."
+            exit 1
+          fi
+          if ! grep -qxF "SCANNED-DIGEST: $PUSHED_DIGEST" "$RUNNER_TEMP/core-rescan.txt"; then
+            echo "::error::GHCR returned a different image for $PDPP_IMAGE@$PUSHED_DIGEST."
+            exit 1
+          fi
 
   # Only the mutable latest alias is serialized; version tags publish per release
   # above. GitHub keeps one pending run per group and cancels a replaced pending
