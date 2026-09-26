@@ -9,6 +9,7 @@ import { type ListWithPeekParams, ListWithPeekView } from "@pdpp/operator-ui/com
 import { dashboardRoutes } from "@pdpp/operator-ui/components/views/routes";
 import Link from "next/link";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
+import { ConnectorMark } from "@/app/(console)/components/connector-mark.tsx";
 import { ServerUnreachable } from "../components/shell.tsx";
 import { getOwnerLoginPath, ReferenceServerUnreachableError } from "../lib/owner-token.ts";
 import {
@@ -19,6 +20,7 @@ import {
   listPendingApprovals,
   type PendingApproval,
 } from "../lib/ref-client.ts";
+import { listConnectorManifests } from "../lib/rs-client.ts";
 import { clientCaption } from "./client-caption.ts";
 import { denyPendingApprovalAction } from "./pending-actions.ts";
 import { PendingApprovalRow } from "./pending-approval-row.tsx";
@@ -61,6 +63,13 @@ export default async function GrantsPage({ searchParams }: { searchParams: Promi
 
   let result: ListResponse<GrantSummary>;
   let approvals: ListResponse<PendingApproval>;
+  const connectorManifests = await listConnectorManifests().catch(() => []);
+  const connectorIcons = Object.fromEntries(
+    connectorManifests.flatMap((manifest) => [
+      [manifest.connector_id, manifest.icon] as const,
+      ...(manifest.connector_key ? ([[manifest.connector_key, manifest.icon]] as const) : []),
+    ])
+  );
   let peekEnvelope: Awaited<ReturnType<typeof getGrantTimeline>> = null;
   if (process.env.NODE_ENV !== "production" && params.demo === "atlas") {
     const demo = await import("./grants-demo-data.ts");
@@ -112,7 +121,7 @@ export default async function GrantsPage({ searchParams }: { searchParams: Promi
           <DataList>
             {approvals.data.map((approval) => (
               <li key={approval.approval_id}>
-                <PendingApprovalRow approval={approval} denyAction={denyPendingApprovalAction} />
+                <PendingApprovalRow approval={approval} connectorIcons={connectorIcons} denyAction={denyPendingApprovalAction} />
               </li>
             ))}
           </DataList>
@@ -158,7 +167,7 @@ export default async function GrantsPage({ searchParams }: { searchParams: Promi
     peekId: params.peek,
     preHeader,
     renderRow: (grant, { peeked, href, detailHref }) => (
-      <GrantRow detailHref={detailHref} grant={grant} href={href} peeked={peeked} />
+      <GrantRow connectorIcons={connectorIcons} detailHref={detailHref} grant={grant} href={href} peeked={peeked} />
     ),
     resetHref: "/grants",
     result,
@@ -176,11 +185,13 @@ export default async function GrantsPage({ searchParams }: { searchParams: Promi
 }
 
 function GrantRow({
+  connectorIcons,
   grant,
   href,
   detailHref,
   peeked,
 }: {
+  connectorIcons: Readonly<Record<string, import("@pdpp/brand-react").ConnectorIconLike | null | undefined>>;
   grant: GrantSummary;
   href: string;
   detailHref: string;
@@ -188,6 +199,7 @@ function GrantRow({
 }) {
   const packageHref = grant.grant_package_id ? `/grants/packages/${encodeURIComponent(grant.grant_package_id)}` : null;
   const clientCaptionText = clientCaption(grant);
+  const connectorId = grant.connector_id ?? (grant.source?.kind === "connector" ? grant.source.id : null);
 
   // Shared row content rendered inside both the mobile and desktop links.
   const rowContent = (
@@ -196,6 +208,9 @@ function GrantRow({
           to a monospace lookup key on the detail line. */}
       <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
         <div className="flex min-w-0 flex-wrap items-center gap-2">
+          {connectorId ? (
+            <ConnectorMark className="size-5 shrink-0" icon={connectorIcons[connectorId]} name={grantRowLabel(grant)} />
+          ) : null}
           <span className="truncate font-medium text-foreground">{grantRowLabel(grant)}</span>
           <StatusBadge status={grant.status} vocabulary={GRANT_LIFECYCLE_VOCABULARY} />
           {clientCaptionText ? (

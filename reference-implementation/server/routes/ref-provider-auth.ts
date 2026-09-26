@@ -263,6 +263,18 @@ export interface MountRefProviderAuthContext {
   requireOwnerSession: MiddlewareHandler;
   resolveCallbackBaseUrl: (req: unknown) => string;
   /**
+   * True when the request itself carries an `x-forwarded-host` header (from
+   * a peer the reachability contract trusts to set it). Distinguishes an
+   * explicit, possibly-conflicting origin claim from a request that simply
+   * has none — a trusted proxy is not guaranteed to attach the same
+   * forwarding headers to every hop of a flow (e.g. it forwards them on the
+   * initial page load but not the OAuth callback redirect), so the absence
+   * of the header is not evidence of tampering. Optional: defaults to
+   * treating every request as carrying no forwarded-origin signal, which
+   * preserves prior behavior for callers that don't wire it up.
+   */
+  hasForwardedOriginSignal?: (req: unknown) => boolean;
+  /**
    * Resolves the deployment-config env view for one connector's manifest,
    * merging the DB-backed provider-app-config store (authoritative) with
    * `process.env` (fallback, consulted only when the store has no value) —
@@ -724,7 +736,8 @@ function validateCallbackStateAndCode(
   ctx: MountRefProviderAuthContext,
   res: RouteResponse,
   params: CallbackParams,
-  redirectUri: string
+  recomputedRedirectUri: string,
+  hasForwardedOriginSignal: boolean
 ): Promise<ValidatedCallbackState | "rejected"> {
   const { stateToken, code, providerError } = params;
   const pending = stateToken ? ctx.pendingAuthStore.get(stateToken) : null;
@@ -747,7 +760,18 @@ function validateCallbackStateAndCode(
     return rejectWithStateExpired(ctx, res, stateToken, connectorId, ownerSubjectId);
   }
 
-  if (pending.redirectUri !== redirectUri) {
+  // The redirect_uri actually used for the code exchange is always the one
+  // recorded at initiate (`pending.redirectUri`) -- it's a fixed OAuth
+  // parameter, not something to recompute per callback request. The
+  // recomputed value here is only a same-origin check on the callback
+  // request itself: a proxy is not guaranteed to attach identical
+  // x-forwarded-* headers to every hop of a flow (e.g. it forwards them on
+  // the initial page load but not on the OAuth redirect a few seconds
+  // later), so a callback that presents NO forwarded-origin claim carries no
+  // evidence either way and must not be treated as a mismatch. Only an
+  // explicit, conflicting origin claim on the callback request itself is
+  // rejected.
+  if (hasForwardedOriginSignal && pending.redirectUri !== recomputedRedirectUri) {
     return rejectWithRedirectUriMismatch(ctx, res, stateToken, connectorId, ownerSubjectId);
   }
 
@@ -863,8 +887,15 @@ export function mountRefProviderAuthCallback(app: AppLike, ctx: MountRefProvider
     let resolvedOwnerSubjectId = "";
 
     try {
-      const redirectUri = buildCallbackRedirectUri(ctx, req);
-      const validated = await validateCallbackStateAndCode(ctx, res, params, redirectUri);
+      const recomputedRedirectUri = buildCallbackRedirectUri(ctx, req);
+      const hasForwardedOriginSignal = ctx.hasForwardedOriginSignal?.(req) ?? false;
+      const validated = await validateCallbackStateAndCode(
+        ctx,
+        res,
+        params,
+        recomputedRedirectUri,
+        hasForwardedOriginSignal
+      );
       if (validated === "rejected") {
         return;
       }
@@ -875,7 +906,10 @@ export function mountRefProviderAuthCallback(app: AppLike, ctx: MountRefProvider
       // Consume the state token immediately — replay protection.
       ctx.pendingAuthStore.delete(validated.stateToken);
 
-      const exchanged = await exchangeCodeAndRunInventory(ctx, res, validated, redirectUri);
+      // The code exchange always uses the redirect_uri recorded at initiate:
+      // it's the value the provider actually authorized against, regardless
+      // of what this callback request's own headers happen to recompute.
+      const exchanged = await exchangeCodeAndRunInventory(ctx, res, validated, validated.pending.redirectUri);
       if (exchanged === "rejected") {
         return;
       }

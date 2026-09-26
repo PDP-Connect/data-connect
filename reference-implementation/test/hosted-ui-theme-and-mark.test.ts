@@ -17,13 +17,17 @@
  *     decorative (`role="presentation"` + `aria-hidden="true"`, no aria-label).
  *     The title is HTML-escaped so it cannot break out of the attribute.
  *
- * Pure — the module has zero imports. No DB, no server, no fixtures.
+ *   - renderDataConnectMark / renderBrandHeader: the hosted pages carry the
+ *     console's DataConnect mark, byte-for-byte the same geometry as
+ *     apps/console/public/brand/dataconnect-mark.svg.
+ *
+ * Pure — no DB, no server, no fixtures.
  */
 
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { normalizeHostedThemeChoice, renderPdppMark } from "../server/hosted-ui.ts";
+import { normalizeHostedThemeChoice, renderBrandFooter, renderPdppMark } from "../server/hosted-ui.ts";
 
 // --- normalizeHostedThemeChoice ---------------------------------------------
 
@@ -75,4 +79,28 @@ test("renderPdppMark: an empty title makes the mark decorative (presentation + a
   assert.ok(svg.includes('aria-hidden="true"'), "empty title => aria-hidden");
   assert.equal(svg.includes("aria-label"), false, "no aria-label for a decorative mark");
   assert.equal(svg.includes('role="img"'), false, 'not role="img" when decorative');
+});
+
+// --- renderPdppMark: surface (light/dark palette) ---------------------------
+
+test("renderPdppMark: light surface (default) uses the real light-mark colors from apps/console/public/brand/pdpp-mark.svg", () => {
+  const svg = renderPdppMark();
+  assert.ok(svg.includes("oklch(0.52 0.11 45)"), "warm fill matches pdpp-mark.svg");
+  assert.ok(svg.includes("oklch(0.58 0.18 253)"), "cool fill matches pdpp-mark.svg");
+  assert.ok(svg.includes("oklch(0.985 0.005 85)"), "counter fill matches pdpp-mark.svg");
+});
+
+test("renderPdppMark: dark surface uses the real night-mark colors from apps/console/public/brand/pdpp-mark-dark.svg", () => {
+  const svg = renderPdppMark({ surface: "dark" });
+  assert.ok(svg.includes("oklch(0.72 0.12 45)"), "warm fill matches pdpp-mark-dark.svg");
+  assert.ok(svg.includes("oklch(0.74 0.16 253)"), "cool fill matches pdpp-mark-dark.svg");
+  assert.ok(svg.includes("oklch(0.16 0.01 60)"), "counter fill matches pdpp-mark-dark.svg");
+});
+
+// --- renderBrandFooter --------------------------------------------------------
+
+test("renderBrandFooter: links Secured by PDPP to https://pdpp.dev", () => {
+  const html = renderBrandFooter();
+  assert.match(html, /<a class="hosted-ui-footer-attribution-link" href="https:\/\/pdpp\.dev">/);
+  assert.ok(html.includes("Secured by PDPP"));
 });

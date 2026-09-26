@@ -11,6 +11,11 @@ on:
         required: false
         default: main
         type: string
+      release_tag:
+        description: Existing release tag to clean-install on fresh VMs instead of building (leave empty to build)
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -20,6 +25,8 @@ env:
 
 jobs:
   build:
+    # A dispatch with release_tag only runs clean-install against that release.
+    if: github.event_name != 'workflow_dispatch' || inputs.release_tag == ''
     env:
       APPLE_CERTIFICATE_AVAILABLE: ${{ github.event_name == 'release' && secrets.APPLE_BUILD_CERTIFICATE_BASE64 != '' }}
       APPLE_SIGNING_AVAILABLE: ${{ github.event_name == 'release' && secrets.APPLE_BUILD_CERTIFICATE_BASE64 != '' && secrets.APPLE_SIGNING_IDENTITY != '' }}
@@ -32,6 +39,7 @@ jobs:
           - platform: macos-15
             os_family: macos
             target: aarch64-apple-darwin
+            verify_reference_stacks: true
             artifact_key: macos-arm64
             expected_arch: arm64
             node_platform: darwin
@@ -42,6 +50,7 @@ jobs:
           - platform: macos-15-intel
             os_family: macos
             target: x86_64-apple-darwin
+            verify_reference_stacks: false
             artifact_key: macos-x64
             expected_arch: x86_64
             node_platform: darwin
@@ -52,6 +61,7 @@ jobs:
           - platform: ubuntu-22.04
             os_family: linux
             target: x86_64-unknown-linux-gnu
+            verify_reference_stacks: true
             artifact_key: linux-x64
             node_platform: linux
             node_arch: x64
@@ -76,6 +86,7 @@ jobs:
           - platform: windows-latest
             os_family: windows
             target: x86_64-pc-windows-msvc
+            verify_reference_stacks: false
             artifact_key: windows-x64
             node_platform: win32
             node_arch: x64
@@ -179,6 +190,23 @@ jobs:
       - name: Install PDPP runtime dependencies
         run: node scripts/ensure-pdpp-runtime.js
 
+      - name: Stage reference-stack roots
+        shell: bash
+        run: |
+          set -euo pipefail
+          node_binary="src-tauri/binaries/pdpp-node-${{ matrix.target }}"
+          if [ "${{ matrix.os_family }}" = "windows" ]; then
+            node_binary="${node_binary}.exe"
+          fi
+          node scripts/ensure-reference-stack.js \
+            --node-binary "$node_binary" \
+            --target "${{ matrix.target }}" \
+            --profile release
+          node scripts/ensure-console-stack.js --profile release
+
+      - name: Verify staged reference implementation
+        run: node scripts/verify-reference-stack.mjs --profile release
+
       - name: Optionally sign macOS helper binaries
         if: matrix.os_family == 'macos' && env.APPLE_SIGNING_AVAILABLE == 'true'
         env:
@@ -189,6 +217,19 @@ jobs:
           codesign --force --options runtime --timestamp --entitlements playwright-runner/entitlements.plist --sign "$APPLE_SIGNING_IDENTITY" playwright-runner/dist/${{ matrix.binary_name }}
           codesign --force --options runtime --timestamp --entitlements personal-server/entitlements.plist --sign "$APPLE_SIGNING_IDENTITY" personal-server/dist/${{ matrix.ps_binary_name }}
           find personal-server/dist/node_modules -name '*.node' -type f -exec codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" {} \;
+          for stack_root in \
+            src-tauri/target/release/reference-stack/ri \
+            src-tauri/target/release/reference-stack/console; do
+            find "$stack_root" -type f \( -name '*.node' -o -name '*.dylib' \) \
+              -exec codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" {} \;
+            node scripts/verify-reference-stack.mjs --root "$stack_root" --refresh-manifest
+          done
+
+      - name: Clear cached AppImage staging output
+        if: matrix.os_family == 'linux'
+        run: |
+          rm -rf "src-tauri/target/${{ matrix.target }}/release/bundle/appimage"
+          rm -rf "src-tauri/target/${{ matrix.target }}/release/bundle/appimage_deb"
 
       # On macOS the shipped DMG is not the one Tauri builds. "Finalize platform bundles"
       # below deletes every Tauri-produced .dmg and rebuilds it with
@@ -210,6 +251,8 @@ jobs:
       - name: Build unsigned Tauri app
         if: matrix.os_family != 'macos' || env.APPLE_SIGNING_AVAILABLE != 'true'
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
+        env:
+          ARCH: ${{ matrix.os_family == 'linux' && 'x86_64' || '' }}
         with:
           args: --target ${{ matrix.target }}${{ matrix.os_family == 'macos' && ' --bundles app' || '' }}
 
@@ -220,9 +263,22 @@ jobs:
         run: |
           set -euo pipefail
           bundle_root="src-tauri/target/${{ matrix.target }}/release/bundle"
+          if [ "${{ matrix.verify_reference_stacks }}" = "true" ]; then
+            stack_verification_enabled=true
+          else
+            stack_verification_enabled=false
+            echo "::warning::reference-stack verification is deferred for ${{ matrix.target }}; the artifact will still be built."
+          fi
           if [ "${{ matrix.os_family }}" = "macos" ]; then
             for app in "$bundle_root"/macos/*.app; do
               [ -e "$app" ] || { echo "No macOS app bundle found"; exit 1; }
+
+              reference_destination="$app/Contents/Resources/reference-stack"
+              rm -rf "$reference_destination"
+              mkdir -p "$reference_destination"
+              cp -R src-tauri/target/release/reference-stack/ri "$reference_destination/ri"
+              cp -R src-tauri/target/release/reference-stack/console "$reference_destination/console"
+
               destination="$app/Contents/Resources/personal-server/dist/node_modules"
               mkdir -p "$destination"
               cp -R personal-server/dist/node_modules/. "$destination/"
@@ -231,6 +287,11 @@ jobs:
                 ps_bin="$app/Contents/Resources/personal-server/dist/${{ matrix.ps_binary_name }}"
                 codesign --force --options runtime --timestamp --entitlements personal-server/entitlements.plist --sign "$APPLE_SIGNING_IDENTITY" "$ps_bin"
                 find "$destination" -name '*.node' -type f -exec codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" {} \;
+                for stack_root in "$reference_destination/ri" "$reference_destination/console"; do
+                  find "$stack_root" -type f \( -name '*.node' -o -name '*.dylib' \) \
+                    -exec codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" {} \;
+                  node scripts/verify-reference-stack.mjs --root "$stack_root" --refresh-manifest
+                done
                 codesign --force --deep --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$app"
               fi
 
@@ -247,6 +308,9 @@ jobs:
               node scripts/create-macos-dmg.mjs --volume-name DataConnect --source-folder "$staging_dir" --output "$dmg_path"
             done
             verification_args=(--platform macos --expected-arch "${{ matrix.expected_arch }}" --bundle-root "$bundle_root")
+            if [ "$stack_verification_enabled" = "true" ]; then
+              verification_args+=(--verify-reference-stacks)
+            fi
             if [ -n "$APPLE_SIGNING_IDENTITY" ]; then
               verification_args+=(--verify-code-signature)
             fi
@@ -255,11 +319,19 @@ jobs:
 
           if [ "${{ matrix.os_family }}" = "linux" ]; then
             node scripts/finalize-linux-appimage.js --appimage-dir "$bundle_root/appimage"
-            node scripts/verify-bundled-personal-server.mjs --platform linux --bundle-root "$bundle_root"
+            if [ "$stack_verification_enabled" = "true" ]; then
+              node scripts/verify-bundled-personal-server.mjs --platform linux --bundle-root "$bundle_root" --verify-reference-stacks
+            else
+              node scripts/verify-bundled-personal-server.mjs --platform linux --bundle-root "$bundle_root"
+            fi
           fi
 
           if [ "${{ matrix.os_family }}" = "windows" ]; then
-            node scripts/verify-bundled-personal-server.mjs --platform windows --bundle-root "$bundle_root"
+            if [ "$stack_verification_enabled" = "true" ]; then
+              node scripts/verify-bundled-personal-server.mjs --platform windows --bundle-root "$bundle_root" --verify-reference-stacks
+            else
+              node scripts/verify-bundled-personal-server.mjs --platform windows --bundle-root "$bundle_root"
+            fi
           fi
 
       - name: Stage verified release artifacts
@@ -321,3 +393,362 @@ jobs:
             exit 1
           fi
           gh release upload "$RELEASE_TAG" "${artifacts[@]}" --clobber --repo "${{ github.repository }}"
+
+  publish-core-image:
+    if: github.event_name == 'release'
+    needs: [build, publish]
+    runs-on: ubuntu-22.04
+    outputs:
+      digest: ${{ steps.push-core.outputs.digest }}
+      version: ${{ steps.meta.outputs.version }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ github.ref_name }}
+          persist-credentials: false
+
+      - name: Verify checked-out release identity
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          node scripts/verify-release-ref.mjs --release-tag "$RELEASE_TAG"
+
+      - name: Verify excluded connector type declarations
+        run: bash scripts/check-polyfill-connector-type-shims.sh
+
+      - name: Compute image name
+        run: |
+          echo "PDPP_IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}/core" >> "$GITHUB_ENV"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.PDPP_IMAGE }}
+          labels: |
+            org.opencontainers.image.title=PDPP Core node
+            org.opencontainers.image.description=PDPP platform-neutral single-container Core node with console and loopback AS/RS
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          flavor: |
+            latest=false
+          tags: |
+            type=semver,pattern={{version}}
+
+      # Build once into an OCI archive; nothing reaches GHCR until the scan
+      # below has read every layer of every platform manifest in it.
+      - name: Build Core image without pushing
+        id: build-core
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          cache-from: |
+            type=gha,scope=core
+            type=gha,scope=reference
+          cache-to: type=gha,mode=max,scope=core
+          context: .
+          file: ./Dockerfile
+          build-args: |
+            PDPP_REFERENCE_REVISION=${{ github.sha }}
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=oci,dest=${{ runner.temp }}/core.oci.tar,tar=true
+          platforms: linux/amd64,linux/arm64
+          provenance: mode=max
+          push: false
+          sbom: true
+          tags: ${{ steps.meta.outputs.tags }}
+          target: core
+
+      - name: Scan every layer of the built Core image for secret files
+        id: scan-core
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash deploy/docker/check-image-secrets.sh oci-archive "$RUNNER_TEMP/core.oci.tar" | tee "$RUNNER_TEMP/core-scan.txt"
+          digest="$(sed -n 's/^SCANNED-DIGEST: //p' "$RUNNER_TEMP/core-scan.txt")"
+          if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::The scan did not report the archive digest (got '$digest')."
+            exit 1
+          fi
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      # skopeo copies the scanned archive byte for byte; --preserve-digests
+      # fails instead of re-compressing. The runner's apt skopeo is too old
+      # for that flag, so use a pinned release image.
+      - name: Push the scanned Core image
+        id: push-core
+        shell: bash
+        env:
+          SCANNED_DIGEST: ${{ steps.scan-core.outputs.digest }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          SKOPEO_IMAGE: quay.io/skopeo/stable:v1.22.3@sha256:064d2cefb512c97d5a22979599ca05b7198fd6176494a634e1f31bd6b5fbd77a
+        run: |
+          set -euo pipefail
+          if [[ ! "$SCANNED_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::No clean scan digest (got '$SCANNED_DIGEST'); refusing to push."
+            exit 1
+          fi
+          skopeo() {
+            docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
+              -v "$HOME/.docker/config.json:/auth.json:ro" -v "$RUNNER_TEMP:/work" \
+              "$SKOPEO_IMAGE" "$@" --authfile /auth.json
+          }
+          skopeo copy --all --preserve-digests oci-archive:/work/core.oci.tar "docker://$PDPP_IMAGE:$VERSION"
+          pushed="sha256:$(skopeo inspect --raw "docker://$PDPP_IMAGE:$VERSION" | sha256sum | cut -d' ' -f1)"
+          if [[ "$pushed" != "$SCANNED_DIGEST" ]]; then
+            echo "::error::Pushed digest $pushed differs from scanned digest $SCANNED_DIGEST."
+            exit 1
+          fi
+          echo "digest=$pushed" >> "$GITHUB_OUTPUT"
+          rm -f "$RUNNER_TEMP/core.oci.tar"
+
+      - name: Re-scan the pushed Core image from GHCR by digest
+        shell: bash
+        env:
+          PUSHED_DIGEST: ${{ steps.push-core.outputs.digest }}
+          SKOPEO_IMAGE: quay.io/skopeo/stable:v1.22.3@sha256:064d2cefb512c97d5a22979599ca05b7198fd6176494a634e1f31bd6b5fbd77a
+        run: |
+          set -euo pipefail
+          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
+            -v "$HOME/.docker/config.json:/auth.json:ro" -v "$RUNNER_TEMP:/work" \
+            "$SKOPEO_IMAGE" copy --all --authfile /auth.json \
+            "docker://$PDPP_IMAGE@$PUSHED_DIGEST" oci-archive:/work/core-pushed.oci.tar
+          if ! bash deploy/docker/check-image-secrets.sh oci-archive "$RUNNER_TEMP/core-pushed.oci.tar" | tee "$RUNNER_TEMP/core-rescan.txt"; then
+            echo "::error::$PDPP_IMAGE@$PUSHED_DIGEST in GHCR carries a secret-looking file or could not be scanned."
+            exit 1
+          fi
+          if ! grep -qxF "SCANNED-DIGEST: $PUSHED_DIGEST" "$RUNNER_TEMP/core-rescan.txt"; then
+            echo "::error::GHCR returned a different image for $PDPP_IMAGE@$PUSHED_DIGEST."
+            exit 1
+          fi
+
+  # Only the mutable latest alias is serialized; version tags publish per release
+  # above. GitHub keeps one pending run per group and cancels a replaced pending
+  # run. Re-running a cancelled promoter is safe: it moves latest only forward.
+  promote-core-latest:
+    if: github.event_name == 'release' && !github.event.release.prerelease
+    needs: publish-core-image
+    runs-on: ubuntu-22.04
+    concurrency:
+      group: core-image-latest-promotion
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Promote Core image to latest if newer
+        shell: bash
+        env:
+          CANDIDATE_DIGEST: ${{ needs.publish-core-image.outputs.digest }}
+          CANDIDATE_VERSION: ${{ needs.publish-core-image.outputs.version }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${REPOSITORY,,}/core"
+          stable='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+
+          if [[ ! "$CANDIDATE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Unexpected Core image digest: '$CANDIDATE_DIGEST'."
+            exit 1
+          fi
+          # A prerelease never moves latest, so it cannot displace a stable release.
+          if [[ ! "$CANDIDATE_VERSION" =~ $stable ]]; then
+            echo "Not promoting '$CANDIDATE_VERSION': latest tracks stable X.Y.Z releases only."
+            exit 0
+          fi
+          candidate=("${BASH_REMATCH[@]:1}")
+
+          if inspect_error="$(docker buildx imagetools inspect "$image:latest" --format '{{json .Image}}' 2>&1 >"$RUNNER_TEMP/core-latest-image.json")"; then
+            current="$(jq -r '[.[] | .config.Labels["org.opencontainers.image.version"] // ""] | unique | join(",")' "$RUNNER_TEMP/core-latest-image.json")"
+            if [[ ! "$current" =~ $stable ]]; then
+              echo "::error::Cannot identify the stable version behind $image:latest (got '$current')."
+              exit 1
+            fi
+            for part in 0 1 2; do
+              if (( candidate[part] > BASH_REMATCH[part + 1] )); then break; fi
+              if (( candidate[part] < BASH_REMATCH[part + 1] )) || (( part == 2 )); then
+                echo "Not promoting $CANDIDATE_VERSION: $image:latest is already $current."
+                exit 0
+              fi
+            done
+          elif [[ "$inspect_error" == *"$image:latest: not found"* ]]; then
+            echo "No $image:latest yet; publishing it for the first time."
+          else
+            echo "::error::Cannot inspect $image:latest: $inspect_error"
+            exit 1
+          fi
+
+          docker buildx imagetools create --tag "$image:latest" "$image@$CANDIDATE_DIGEST"
+          echo "Promoted $image:latest to $CANDIDATE_VERSION ($CANDIDATE_DIGEST)."
+
+  # Installs an existing release's assets on fresh hosted VMs, launches the
+  # installed app with no human, and checks it. Verification only: it never
+  # builds or publishes, and it runs only on a dispatch that names a release.
+  clean-install:
+    if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-15
+            asset_pattern: "*_aarch64.dmg"
+          - platform: macos-15-intel
+            asset_pattern: "*_x86_64.dmg"
+          - platform: windows-latest
+            asset_pattern: "*-setup.exe"
+    runs-on: ${{ matrix.platform }}
+    timeout-minutes: 30
+    env:
+      RELEASE_TAG: ${{ inputs.release_tag }}
+      EVIDENCE_DIR: ${{ github.workspace }}/clean-install-evidence
+    steps:
+      # Only the acceptance script comes from the repo. The app under test is
+      # the release asset, never a source-tree build.
+      - name: Checkout acceptance script
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.21.0"
+
+      - name: Download release installer
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ASSET_PATTERN: ${{ matrix.asset_pattern }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$EVIDENCE_DIR" installer
+          gh release download --repo "$GITHUB_REPOSITORY" --pattern "$ASSET_PATTERN" --dir installer -- "$RELEASE_TAG"
+          asset_count=0
+          for asset in installer/*; do
+            [ -f "$asset" ] || continue
+            asset_count=$((asset_count + 1))
+            installer_path="$asset"
+          done
+          if [ "$asset_count" -ne 1 ]; then
+            echo "::error::Expected one $ASSET_PATTERN asset on $RELEASE_TAG, found $asset_count."
+            exit 1
+          fi
+          echo "INSTALLER=$installer_path" >> "$GITHUB_ENV"
+          node -e 'const fs = require("node:fs"); const { createHash } = require("node:crypto"); const file = process.argv[1]; console.log(`${createHash("sha256").update(fs.readFileSync(file)).digest("hex")}  ${file}`)' "$installer_path" > "$EVIDENCE_DIR/installer.sha256"
+
+      - name: Install and launch (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          app_data="$HOME/Library/Application Support/dev.dataconnect"
+          if [ -e "$app_data" ]; then
+            echo "::error::$app_data exists before install; the VM is not clean."
+            exit 1
+          fi
+          mount_dir="$(mktemp -d)"
+          hdiutil attach "$INSTALLER" -nobrowse -readonly -mountpoint "$mount_dir" | tee "$EVIDENCE_DIR/install.log"
+          ditto "$mount_dir/DataConnect.app" /Applications/DataConnect.app
+          hdiutil detach "$mount_dir" | tee -a "$EVIDENCE_DIR/install.log"
+          codesign -dv --verbose=2 /Applications/DataConnect.app >>"$EVIDENCE_DIR/install.log" 2>&1 || true
+          # Hosted macOS runners keep a logged-in Aqua session, so LaunchServices
+          # starts the real bundle the same way a Finder double-click does.
+          open -a /Applications/DataConnect.app
+          echo "APP_DATA_DIR=$app_data" >> "$GITHUB_ENV"
+          echo "APP_LOG_DIR=$HOME/Library/Logs/dev.dataconnect" >> "$GITHUB_ENV"
+
+      - name: Install and launch (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $appData = Join-Path $env:APPDATA 'dev.dataconnect'
+          if (Test-Path $appData) {
+            Write-Output "::error::$appData exists before install; the VM is not clean."
+            exit 1
+          }
+          # Tauri NSIS installers are per-user here (installMode currentUser)
+          # and accept the standard NSIS silent flag.
+          $install = Start-Process -FilePath (Resolve-Path $env:INSTALLER) -ArgumentList '/S' -Wait -PassThru
+          "installer exit code: $($install.ExitCode)" | Tee-Object -FilePath "$env:EVIDENCE_DIR/install.log"
+          if ($install.ExitCode -ne 0) { exit 1 }
+          $uninstall = Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall' |
+            Get-ItemProperty | Where-Object { $_.DisplayName -eq 'DataConnect' } | Select-Object -First 1
+          if (-not $uninstall) { Write-Output '::error::DataConnect uninstall entry not found'; exit 1 }
+          $uninstall | Format-List | Out-File -Append "$env:EVIDENCE_DIR/install.log"
+          $installDir = $uninstall.InstallLocation.Trim('"')
+          $exe = Get-ChildItem $installDir -Filter *.exe |
+            Where-Object { $_.Name -notmatch '^(uninstall|pdpp-node)' } | Select-Object -First 1
+          if (-not $exe) { Write-Output "::error::No app executable in $installDir"; exit 1 }
+          Get-ChildItem $installDir | Out-File -Append "$env:EVIDENCE_DIR/install.log"
+          Start-Process -FilePath $exe.FullName
+          "APP_DATA_DIR=$appData" >> $env:GITHUB_ENV
+          # Tauri app_log_dir() on Windows is the local, not roaming, app-data
+          # folder (tauri 2.11.6 src/path/desktop.rs:285-287).
+          "APP_LOG_DIR=$(Join-Path $env:LOCALAPPDATA 'dev.dataconnect\logs')" >> $env:GITHUB_ENV
+
+      # First-run claim: fresh install, app ran, owner password not yet set.
+      # Also checks the sidecars serve. It does not render or check the setup
+      # UI, which sits behind owner sign-in.
+      - name: Assert owner password not yet set and sidecars serving
+        shell: bash
+        run: node scripts/clean-install-acceptance.mjs --app-data-dir "$APP_DATA_DIR" --log-file "$APP_LOG_DIR/DataConnect.log" --timeout-ms 300000
+
+      # Collect logs and non-secret state only. The app-data directory also
+      # holds the owner credential and encryption keys, so it is never uploaded
+      # whole.
+      - name: Collect evidence
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p "$EVIDENCE_DIR/app-logs" "$EVIDENCE_DIR/run-leases"
+          [ -d "${APP_LOG_DIR:-}" ] && cp -R "$APP_LOG_DIR"/. "$EVIDENCE_DIR/app-logs/" || true
+          [ -f "${APP_DATA_DIR:-}/unified/console-port.json" ] && cp "$APP_DATA_DIR/unified/console-port.json" "$EVIDENCE_DIR/" || true
+          # Run leases: <appData>/run (unified.rs:2250-2254, run_lease.rs:172-177).
+          # Windows has none: process_start_ticks is None there (run_lease.rs:157-160).
+          [ -d "${APP_DATA_DIR:-}/run" ] && cp "$APP_DATA_DIR"/run/*.json "$EVIDENCE_DIR/run-leases/" 2>/dev/null || true
+          [ -d "${APP_DATA_DIR:-}" ] && ls -laR "$APP_DATA_DIR" > "$EVIDENCE_DIR/app-data-listing.txt" 2>&1 || true
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            pwsh -NoProfile -Command "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,CommandLine | Format-Table -AutoSize -Wrap | Out-String -Width 4096" > "$EVIDENCE_DIR/processes.txt" || true
+          else
+            ps -axo pid,ppid,command > "$EVIDENCE_DIR/processes.txt" || true
+          fi
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: clean-install-${{ matrix.platform }}
+          path: clean-install-evidence
+          if-no-files-found: warn
+          retention-days: 14

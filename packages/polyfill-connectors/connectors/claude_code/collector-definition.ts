@@ -33,7 +33,6 @@ export const CLAUDE_CODE_DEFAULT_STREAMS = [
 	"memory_notes",
 	"skills",
 	"slash_commands",
-	"usage",
 	"file_history",
 	"cache_inventory",
 	"coverage_diagnostics",

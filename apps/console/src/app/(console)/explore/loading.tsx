@@ -15,7 +15,7 @@ import { ListLoadingSkeleton } from "../components/route-loading.tsx";
  */
 export default function ExploreLoading() {
   return (
-    <RecordroomShellWithPalette build="pdpp 0.1.0" host="this server">
+    <RecordroomShellWithPalette host="this server">
       <ListLoadingSkeleton label="records" rows={8} />
     </RecordroomShellWithPalette>
   );

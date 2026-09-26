@@ -28,7 +28,13 @@
     ],
     "paths": {
       "@/*": ["./src/*"],
-      "collections/*": ["./.source/*"]
+      "collections/*": ["./.source/*"],
+      "@pdpp/polyfill-connectors/manual-upload-validation": [
+        "../../reference-implementation/type-shims/src/manual-upload-validation.d.ts"
+      ],
+      "@pdpp/polyfill-connectors/local-source-inventory": [
+        "../../reference-implementation/type-shims/src/local-source-inventory.d.ts"
+      ]
     }
   },
   "include": [

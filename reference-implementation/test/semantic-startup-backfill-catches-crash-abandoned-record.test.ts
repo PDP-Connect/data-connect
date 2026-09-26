@@ -58,8 +58,11 @@ const baseManifest = {
 };
 
 const semanticManifest = {
-  connector_id: "crash-gap",
-  streams: [{ name: "items", query: { search: { semantic_fields: ["subject"] } } }],
+  ...baseManifest,
+  streams: baseManifest.streams.map((stream) => ({
+    ...stream,
+    query: { search: { semantic_fields: ["subject"] } },
+  })),
 };
 
 test("startup semantic backfill catches a record whose index maintenance never ran (crash-abandoned deferred index work)", async () => {
@@ -69,6 +72,7 @@ test("startup semantic backfill catches a record whose index maintenance never r
     await registerConnector(baseManifest);
     // Record 1: normal ingest, index maintenance runs (deferIndexes defaults false).
     await ingestRecord(target("cin_crash_gap_a"), record("items", "k1", "indexed normally"));
+    await registerConnector(semanticManifest, { backfillRetrievalIndexes: false });
 
     // Establish steady-state meta (fields_fingerprint/model/dims persisted)
     // via a first backfill pass BEFORE the crash-abandoned record exists —

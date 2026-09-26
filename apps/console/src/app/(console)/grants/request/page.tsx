@@ -302,7 +302,7 @@ function DriveConsentSection({ ownerLoginUrl, workspace }: { ownerLoginUrl: stri
         </Link>
       </form>
       <p className="pdpp-caption mt-3 text-muted-foreground">
-        These buttons only work in open local-dev approval mode. If placeholder owner auth is enabled, open the hosted
+        These buttons only work in open local-dev approval mode. If owner sign-in is enabled, open the hosted
         consent page or sign in at{" "}
         <a className="underline-offset-2 hover:underline" href={ownerLoginUrl}>
           owner access

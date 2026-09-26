@@ -10,13 +10,16 @@
  *
  * Auth gating lives in two layers per the BFF / token-handler pattern:
  *   1. `proxy.ts` — optimistic UX redirect when the session cookie is absent.
- *   2. `verify-session.ts` (DAL) — authoritative HMAC check before any fetch.
- * This module is the BFF's outbound-call helper, not an auth gate.
+ *   2. `verify-session.ts` (DAL) — authoritative AS check before any fetch.
+ * This module is the BFF's outbound-call helper, not an auth gate — with one
+ * exception: `getOwnerToken()` admits the current request before it hands
+ * out the owner bearer (see `admitCurrentOwnerRequest`).
  */
 import "server-only";
 
 import { cookies, headers } from "next/headers";
-import { createOwnerSessionController, OWNER_AUTH_COOKIE_NAME } from "pdpp-reference-implementation/owner-session";
+import { cache } from "react";
+import { OWNER_AUTH_COOKIE_NAME } from "pdpp-reference-implementation/owner-session-constants";
 import {
   resolveReferenceBrowserOrigin,
   resolveReferenceTopology,
@@ -58,11 +61,6 @@ function resolveConfiguredReferenceOrigin(): string | null {
 }
 
 const referenceTopology = resolveReferenceTopology();
-
-const ownerSessionController = createOwnerSessionController({
-  password: process.env.PDPP_OWNER_PASSWORD,
-  subjectId: process.env.PDPP_OWNER_SUBJECT_ID,
-});
 
 export function getAsInternalUrl(): string {
   return referenceTopology.asInternalUrl;
@@ -150,25 +148,36 @@ export async function withOwnerSessionCookie(init: RequestInit = {}): Promise<Re
 }
 
 export function isOwnerSessionGateEnabled(): boolean {
-  return ownerSessionController.enabled;
+  return Boolean(process.env.PDPP_OWNER_PASSWORD);
 }
 
 /**
- * Read the validated owner session payload from the request cookie, or `null`
- * if owner-auth is disabled in this process or the cookie is absent / invalid.
- *
- * Authoritative validation when this process holds `PDPP_OWNER_PASSWORD`. In
- * split deployments (AS holds password, web does not), the controller's
- * `readSessionFromCookieValue` returns `null` and callers fall back to
- * forwarding the cookie to the AS for revalidation.
+ * Ask the AS whether the current request has an admitted owner session or is
+ * using the open local-development posture.
  */
-export async function readDashboardOwnerSession() {
-  if (!ownerSessionController.enabled) {
-    return null;
+export async function readDashboardOwnerSession(): Promise<boolean> {
+  const asUrl = getAsInternalUrl();
+  let res: Response;
+  try {
+    res = await fetch(
+      `${asUrl}/owner/session`,
+      await withOwnerSessionCookie({
+        cache: "no-store",
+        headers: { Accept: "application/json" },
+        method: "GET",
+      })
+    );
+  } catch (err) {
+    // biome-ignore lint/style/useErrorCause: see mintOwnerToken.
+    throw new ReferenceServerUnreachableError(`Cannot reach authorization server at ${asUrl}`, err);
   }
-  const cookieStore = await cookies();
-  const rawCookie = cookieStore.get(OWNER_AUTH_COOKIE_NAME)?.value ?? null;
-  return ownerSessionController.readSessionFromCookieValue(rawCookie);
+  // `/owner/session` uses 204 for admission, including open local dev. The
+  // console needs only the admission decision; it must not invent an owner
+  // subject when the AS deliberately returns no identity.
+  if (res.status === 204) return true;
+  const body = await res.text();
+  if (res.status === 401 && isOwnerSessionRequiredBody(body)) return false;
+  throw new Error(`owner session check failed (${res.status}): ${body}`);
 }
 
 export class ReferenceServerUnreachableError extends Error {
@@ -298,9 +307,35 @@ async function mintOwnerToken(): Promise<string> {
   return access_token;
 }
 
-export function getOwnerToken(force = false): Promise<string> {
+/**
+ * Admit the current request to owner authority. Throws a login redirect when
+ * the request is not the owner's.
+ *
+ * `getOwnerToken()` runs this before it returns ANY bearer: cached, in flight,
+ * or newly minted. The bearer cache is process-wide and the RS checks only the
+ * bearer, so the cache is never evidence that this request is authenticated.
+ *
+ * The console asks the AS about this request's cookie (`GET /owner/session`).
+ * The AS checks the server-side session record and admits the open local-dev
+ * posture itself. An absent console password never means "open" on its own.
+ *
+ * `cache()` scopes the result to one server request, so a render that fans
+ * out to many RS reads asks once. It never carries a result across requests.
+ */
+const admitCurrentOwnerRequest = cache(async (): Promise<void> => {
+  if (await readDashboardOwnerSession()) {
+    return;
+  }
+    await redirectToOwnerLogin();
+});
+
+export async function getOwnerToken(force = false): Promise<string> {
+  // Admission comes first, before the cache and before joining an in-flight
+  // mint, so an anonymous request can never receive a bearer that another
+  // request's session produced.
+  await admitCurrentOwnerRequest();
   if (!force && cachedToken) {
-    return Promise.resolve(cachedToken);
+    return cachedToken;
   }
   if (!force && inFlight) {
     return inFlight;

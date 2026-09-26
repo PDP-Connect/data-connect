@@ -46,7 +46,7 @@
 import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
-import { emitToStdout, resourceSet } from "@pdpp/connector-protocol";
+import { emitToStdout, passesTimeRange, resourceSet } from "@pdpp/connector-protocol";
 
 import { type AuthConfig, resolveAuth } from "@pdpp/connector-protocol/auth";
 import type {
@@ -429,39 +429,7 @@ export function describeUnexpectedFailure(err: unknown): string {
 
 /** Returns true if the scope's half-open time_range excludes this record value. */
 function isOutsideTimeRange(timeRange: { since?: string; until?: string }, dateValue: unknown): boolean {
-  if (typeof dateValue !== "string" || !dateValue) {
-    return false;
-  }
-  const since = timeRange.since ? Date.parse(timeRange.since) : undefined;
-  const until = timeRange.until ? Date.parse(timeRange.until) : undefined;
-  if (
-    (since !== undefined && Number.isNaN(since)) ||
-    (until !== undefined && Number.isNaN(until))
-  ) {
-    return true;
-  }
-
-  if (/^\d{4}-\d{2}-\d{2}$/.test(dateValue)) {
-    const dayStart = Date.parse(`${dateValue}T00:00:00.000Z`);
-    if (
-      Number.isNaN(dayStart) ||
-      new Date(dayStart).toISOString().slice(0, 10) !== dateValue
-    ) {
-      return true;
-    }
-    const dayEnd = dayStart + 86_400_000;
-    return (
-      (since !== undefined && dayEnd <= since) ||
-      (until !== undefined && dayStart >= until)
-    );
-  }
-
-  const timestamp = Date.parse(dateValue);
-  return (
-    Number.isNaN(timestamp) ||
-    (since !== undefined && timestamp < since) ||
-    (until !== undefined && timestamp >= until)
-  );
+  return !passesTimeRange(typeof dateValue === "string" ? dateValue : undefined, timeRange);
 }
 
 /** Build a SKIP_RESULT for a shape-check failure. */
@@ -1189,6 +1157,12 @@ export function makeEmitRecord(deps: {
       return Promise.resolve();
     }
 
+    const streamScope = requested.get(stream);
+    const field = timeRangeFieldFor(stream);
+    if (streamScope?.time_range && isOutsideTimeRange(streamScope.time_range, data[field])) {
+      return Promise.resolve();
+    }
+
     if (isTombstone?.(stream, data)) {
       counters.totalEmitted += 1;
       return emit({
@@ -1199,12 +1173,6 @@ export function makeEmitRecord(deps: {
         emitted_at: emittedAt,
         op: "delete",
       });
-    }
-
-    const streamScope = requested.get(stream);
-    const field = timeRangeFieldFor(stream);
-    if (streamScope?.time_range && isOutsideTimeRange(streamScope.time_range, data[field])) {
-      return Promise.resolve();
     }
 
     const validation = validateRecord?.(stream, data);

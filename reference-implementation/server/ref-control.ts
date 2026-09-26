@@ -18,6 +18,7 @@ import type { BrowserSurface, BrowserSurfaceLease } from "@opendatalabs/remote-s
 import type { RuntimeContinuationFact } from "@pdpp/connector-protocol/connector-runtime-protocol";
 import { allowUnboundedReadAcknowledged, iterateDynamicSqlAcknowledged, referenceQueries } from "../lib/db.ts";
 import { isNullish } from "../lib/nullish.ts";
+import { BROWSER_BOUND_KEYS } from "./generated/connector-registry.generated.ts";
 import type { SpineSummary } from "../lib/spine.ts";
 import type { RefApprovalDetail } from "../operations/ref-approval-detail/index.ts";
 import {
@@ -7600,7 +7601,9 @@ function manifestHasBrowserBinding(manifest: ConnectorManifest): boolean {
 // `PDPP_NEKO_MANAGED_CONNECTORS` (CSV, canonical-key or raw connector id) is
 // the authoritative source of "which connectors get a leased neko surface"
 // -- reference-implementation/runtime/browser-surface-leases.ts parses the
-// same variable for the allocator/lease-manager side. `PDPP_NEKO_CDP_HTTP_URL`
+// same variable for the allocator/lease-manager side. Host mode uses the same
+// override when present and otherwise covers the generated browser-bound set.
+// `PDPP_NEKO_CDP_HTTP_URL`
 // (single shared static-mode surface) and `PDPP_BROWSER_SURFACE_REMOTE_CDP_URL`
 // (operator-forced pin, docker-compose.yml's "point ALL browser connectors at
 // one remote CDP endpoint" escape hatch) both mean every browser-bound
@@ -7612,6 +7615,12 @@ function manifestHasBrowserBinding(manifest: ConnectorManifest): boolean {
 function connectorUsesNekoSurface(connectorId: string, env: NodeJS.ProcessEnv = process.env): boolean {
   if (env.PDPP_BROWSER_SURFACE_REMOTE_CDP_URL?.trim() || env.PDPP_NEKO_CDP_HTTP_URL?.trim()) {
     return true;
+  }
+  if (env.PDPP_BROWSER_SURFACE_MODE?.trim() === "host") {
+    const managedConnectorsCsv = env.PDPP_NEKO_MANAGED_CONNECTORS?.trim();
+    if (!managedConnectorsCsv) {
+      return BROWSER_BOUND_KEYS.includes(canonicalConnectorKey(connectorId) ?? connectorId);
+    }
   }
   const managedConnectorsCsv = env.PDPP_NEKO_MANAGED_CONNECTORS?.trim();
   if (!managedConnectorsCsv) {

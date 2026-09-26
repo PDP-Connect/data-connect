@@ -121,6 +121,9 @@ export interface DataLoadViolation {
 const MANIFEST_ROOTS = [
   "reference-implementation/fixtures/seed-manifests",
   "node_modules/@pdpp/polyfill-connectors/manifests",
+  // The pinned Collection Profiles @pdpp/local-collector installs, and a pin
+  // record per profile; see server/local-collector-profiles.ts.
+  "reference-implementation/server/local-collector-profiles",
 ];
 
 /**
@@ -212,23 +215,83 @@ const SANCTIONED_GENERIC_DATA_READ_CALL_SITES: ReadonlySet<string> = new Set([
   "reference-implementation/scripts/quality-ratchet/check-mass-ratchet.ts:94",
   // reference-revision.ts reads the repo's own package.json for its version string.
   "reference-implementation/server/reference-revision.ts:17",
+  // Recovery startup markers live under the operator's PDPP_DATA_DIR. Their
+  // JSON controls one-time recovery transitions and contains no connector or
+  // provider identity/policy; keep these exact read sites pinned so edits
+  // still require re-review.
+  "reference-implementation/server/index.ts:2222",
+  "reference-implementation/server/index.ts:2292",
+  // createFileConnectorInstallStore() reads the operator-managed
+  // PDPP_DATA_DIR connector activation state. Connector ids in this file are
+  // runtime data supplied by the owner, not RI-committed provider knowledge.
+  // Re-derived 2026-09-17: the call site moved from line 110 to 115 after
+  // feat/docker-connectors-from-catalog and feat/developer-connector-sources
+  // (both merged 2026-09-16, after this entry was last pinned) added lines
+  // above it -- the function itself is unchanged.
+  "reference-implementation/server/connector-install/index.ts:115",
+  // createFileLocalConnectorSourceStore() in local-source.ts: same shape and
+  // reasoning as connector-install/index.ts above -- statePath is
+  // join(dataDir, "connector-local-sources.json"), a fixed RI-owned literal
+  // filename joined with the operator-configured PDPP_DATA_DIR. The file
+  // tracks developer-local source selections (opaque connectorId keys are
+  // runtime data the operator supplied when adding a local source), not
+  // RI-committed provider/connector policy.
+  "reference-implementation/server/connector-install/local-source.ts:327",
+  // readCredentialRecoveryStateMarker() reads a fixed filename under
+  // PDPP_DATA_DIR ("credential-recovery-state.json"). This is operator/runtime
+  // recovery state written by the recovery kit, not RI-committed connector
+  // policy or provider identity data.
+  // Re-derived 2026-09-25: the call site moved from line 2219 to 2220 after
+  // f680c0c6e (fix(docker): smoke-test Core demo flow) added a
+  // `connectorInstallService` field to `ServerOpts` above it -- the function
+  // itself is unchanged.
+  "reference-implementation/server/index.ts:2220",
+  // applyRecoveryOwnerSessionReset() reads a fixed filename under PDPP_DATA_DIR
+  // ("owner-session-recovery-reset.json"). It is consumed only as an owner
+  // session reset marker for recovered deployments.
+  // Re-derived 2026-09-25: the call site moved from line 2289 to 2290 after
+  // f680c0c6e (fix(docker): smoke-test Core demo flow) added a
+  // `connectorInstallService` field to `ServerOpts` above it -- the function
+  // itself is unchanged.
+  "reference-implementation/server/index.ts:2290",
+  // readRequestState(path) reads owner-password window request state from
+  // fixed filenames under PDPP_DATA_DIR. The JSON contains request status and
+  // OS reauth handoff state, never connector/provider policy.
+  "reference-implementation/server/owner-password-owner-set.ts:145",
+  // readManifest(root) in local-source.ts: readFileSync(manifestPath, "utf8")
+  // where manifestPath is confinedFile(root, MANIFEST_PATH, ...) --
+  // MANIFEST_PATH is the fixed literal "profile/collection-profile.json" and
+  // `root` traces to canonicalRoot(sourcePath), where sourcePath is the
+  // developer-supplied absolute directory path given to the public
+  // add(sourcePath) API. Same class as the CLI-operator-supplied-root sites
+  // already allowlisted above (cache.ts:125, common.ts:35): the path is
+  // caller-supplied, the filename component is an RI-owned generic literal,
+  // and this feature is explicitly unsigned/unregistered developer tooling
+  // (see this file's own module doc comment), not connector catalog data.
+  "reference-implementation/server/connector-install/local-source.ts:150",
   // readManifestJson(path) in polyfill-manifest-reconcile.ts: both call sites
-  // pass join(<manifest-root-derived-dir>, entryName) (defaultPolyfillManifestsDir()
-  // / defaultReferenceFixturesDir(), both resolve()'d off the two sanctioned
-  // manifest roots — defaultPolyfillManifestsDir()'s own
-  // import.meta.resolve("@pdpp/polyfill-connectors/manifests") anchor is now
-  // separately recognized by this scanner's resolver, see
-  // `isPolyfillConnectorsPackageSrcDirExpr`; that fix closes THAT anchor
-  // shape, not this one), but through 2 hops of parameter indirection
+  // pass join(<manifest-dir>, entryName), where the dir is
+  // defaultReferenceFixturesDir() (resolve()'d off the sanctioned reference
+  // fixture root) or a caller-supplied `manifestsDir` option (tests and
+  // one-off operator repairs; the default shipped set is the verified
+  // install store, read without this function), but through 2 hops of parameter indirection
   // (readManifestJson's own `path` param, fed by loadReferenceFixtureFingerprints's/
   // reconcilePolyfillManifests's `referenceFixturesDir`/`manifestsDir` params) —
   // one hop deeper than this scanner's bounded parameter resolver follows.
   // Verified by direct inspection, not by the scanner, hence the allowlist entry.
   // Re-derived 2026-09-03: the call site moved from line 98 to 99 after
   // 3870a58b (consume @pdpp/polyfill-connectors as a pinned dependency) added
-  // a line above it -- the function itself is unchanged. This entry is
-  // line-pinned by design (see this array's own doc comment above); it must
-  // be re-derived whenever an edit anywhere above the call site shifts it.
+  // a line above it -- the function itself is unchanged.
+  // Re-derived 2026-09-17: the call site moved from line 99 to 107 after the
+  // docker-connectors-from-catalog / developer-connector-sources merges
+  // (2026-09-16) added lines above it -- the function itself is unchanged.
+  // Re-derived 2026-09-23: the call site moved from line 107 to 99 when the
+  // default shipped set moved to the verified install store and
+  // defaultPolyfillManifestsDir() was removed -- the function itself is
+  // unchanged.
+  // This entry is line-pinned by design (see this array's own doc comment
+  // above); it must be re-derived whenever an edit anywhere above the call
+  // site shifts it.
   POLYFILL_MANIFEST_READ_SITE,
   // readReviewedCompactionResidueMap() in version-disposition.ts:
   // readFileSync(path, "utf8") where `path` is compactionResidueReviewPath()
@@ -1542,20 +1605,25 @@ export function scanFileDataLoads(
     return checkResolvedImportLikeSource(node, first, enclosingFunctionName);
   }
 
-  /** Dynamic `import(...)` (a Babel `ImportExpression` node, not a `CallExpression` —
-   * unlike `require(...)`, `@babel/parser` has never modeled dynamic import as a call
-   * with an `Import` pseudo-callee; that legacy shape belongs to older non-Babel
-   * parsers) reaching a sibling JSON/YAML resource. Returns true if this call site
-   * was handled. */
+  /** Dynamic `import(...)` reaching a sibling JSON/YAML resource. Babel parser
+   * versions have represented this as either `ImportExpression.source` or
+   * `CallExpression` with an `Import` callee, so support both AST shapes. */
   function checkDynamicImportExpression(node: Node, enclosingFunctionName: string | null): boolean {
-    if (node.type !== "ImportExpression") {
-      return false;
+    if (node.type === "ImportExpression") {
+      const source = nodeField(node, "source");
+      if (!source) {
+        return true;
+      }
+      return checkResolvedImportLikeSource(node, source, enclosingFunctionName);
     }
-    const source = nodeField(node, "source");
-    if (!source) {
-      return true;
+    if (node.type === "CallExpression" && (node.callee as Node)?.type === "Import") {
+      const [first] = nodeArrayField(node, "arguments");
+      if (!first) {
+        return true;
+      }
+      return checkResolvedImportLikeSource(node, first, enclosingFunctionName);
     }
-    return checkResolvedImportLikeSource(node, source, enclosingFunctionName);
+    return false;
   }
 
   /** Shared resolution/classification tail for `require(...)`'s and dynamic
@@ -1709,6 +1777,9 @@ export function scanFileDataLoads(
       return;
     }
     if (checkRequireCall(node, callee, enclosingFunctionName)) {
+      return;
+    }
+    if (checkDynamicImportExpression(node, enclosingFunctionName)) {
       return;
     }
     if (checkReadFileCall(node, callee, parent, enclosingFunctionName)) {

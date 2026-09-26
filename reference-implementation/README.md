@@ -140,6 +140,13 @@ It behaves as a small reference-only owner access hub:
 - when already signed in, it becomes a signed-in landing page with device
   approval and sign-out actions
 
+The sign-in page itself names only the product and what the password
+protects. It does not print operator configuration. On a server, the
+password comes from `PDPP_OWNER_PASSWORD` (see "Environment variables"
+below). The desktop app keeps its owner password in the OS keychain and shows
+it under Settings > Owner password. `POST /owner/logout` is listed under
+"Stable owner-entry routes" below.
+
 ### Owner self-export
 
 - `POST /oauth/device_authorization`
@@ -291,6 +298,7 @@ Stable owner-entry routes:
 - `GET /owner/login` - owner access page (supports a safe same-origin `return_to` query parameter). When placeholder auth is disabled it renders an honest disabled-state landing page; when enabled it renders either the sign-in form or a signed-in landing page.
 - `POST /owner/login` - when placeholder auth is enabled, submits the owner password; on success sets a signed HTTP-only session cookie (`pdpp_owner_session`, 7 day lifetime by default, configurable with `PDPP_OWNER_SESSION_TTL_SECONDS`, `SameSite=Lax`, `Secure` when served over HTTPS) and redirects to `return_to`
 - `POST /owner/logout` - clears the session cookie when present
+- `GET /owner/session` - body-less admission check: `204` when the request would pass the owner-session gate (a valid session, or the open local-dev posture), otherwise the same `401` / login redirect as a protected route. A server that forwards the browser's cookie but cannot validate it itself (the console in a split deployment) asks this before it uses owner authority.
 
 Unauthenticated HTML requests to the protected routes redirect to `/owner/login?return_to=...`; non-HTML callers receive an honest `401` with error code `owner_session_required`.
 
@@ -301,9 +309,56 @@ The placeholder is intentionally narrow:
 - public protocol surfaces (`/oauth/par`, `/oauth/register`, `/oauth/token`, `/v1/*`, `/.well-known/*`) are **not** gated
 - the placeholder is still not a durable owner-auth story; it is only the current reference-local browser/session gate
 
+### Config precedence: stored values vs. environment variables
+
+Most config keys have exactly one precedence rule, implemented once in
+[`server/stores/config-precedence-resolver.ts`](server/stores/config-precedence-resolver.ts)
+(`createConfigPrecedenceResolver`):
+
+> An env var is read only when the config store has no value for that key and
+> the key is not on the platform-owned list; everywhere else, once the owner
+> has set a value through the UI, that stored value wins even if the env var
+> is still present, and the env var is consulted again only if the stored
+> value is cleared.
+
+Two exceptions:
+
+- **Platform-owned keys** (`PORT`, `AS_PORT`, `RS_PORT` today) never consult
+  the store at all — env always wins, so the UI can never fight the platform
+  that injects them (Railway/PaaS `PORT` injection, or the `core` image's
+  internal AS/RS supervisor ports).
+- **Bootstrap values** — `PDPP_DATABASE_URL` (or `PDPP_STORAGE_BACKEND=sqlite`
+  + `PDPP_DB_PATH`), `PDPP_OWNER_PASSWORD`, `PDPP_CREDENTIAL_ENCRYPTION_KEY` /
+  `_FILE`, and `PDPP_REFERENCE_ORIGIN` — can never come from the store, because
+  each is needed before the store can be read (it names the database, decrypts
+  it, or classifies hosted/local deployment before any store lookup) or
+  because storing it would let store-write access grant itself store-read
+  access. These are read directly from `process.env`, never through this
+  resolver.
+
+`createDeploymentConfigResolver` (in
+[`server/stores/provider-app-config-store.ts`](server/stores/provider-app-config-store.ts))
+is the shipped, tested instance of this rule for provider OAuth app config
+(`identityGroup`/`logicalKey`-scoped); it is implemented in terms of the
+generic resolver above. No provider-app-config key is platform-owned.
+
+This PR lands the rule, its generic form, and the platform-owned exception —
+it does not migrate additional env vars into the store. `PDPP_INSTANCE_NAME`,
+`PDPP_TRUSTED_HOSTS`/`PDPP_TRUSTED_PROXIES`, the `GOOGLE_DATAPORTABILITY_*`
+vars, VAPID web-push keys, operational limits
+(`PDPP_MANUAL_UPLOAD_MAX_BYTES`, `PDPP_RECORD_REJECTION_*_QUOTA_BYTES`,
+`PDPP_CHANGE_HISTORY_LIMIT`), feature toggles
+(`PDPP_ENABLE_DYNAMIC_CLIENT_REGISTRATION`, `PDPP_DCR_INITIAL_ACCESS_TOKENS`,
+`PDPP_ENABLE_STREAM_PLAYGROUND`), and owner-session policy
+(`PDPP_OWNER_SESSION_TTL_SECONDS`, `PDPP_OWNER_SAMESITE`,
+`PDPP_OWNER_FORCE_SECURE_COOKIES`) are candidates for the same treatment, but
+that migration is a separate, larger, not-yet-scoped change. There is no
+`PDPP_BIND_HOST` env var in this server today — `bindHost` is an in-process
+start option, not a config-store or bootstrap candidate.
+
 ### Reference-only hosted-UI layer
 
-Server-rendered HTML pages (`GET /consent`, `GET /device` and its result pages, `POST /consent/approve`/`deny` result pages, and the stable owner-entry page at `GET /owner/login`) all go through a small shared hosted-UI module, [`server/hosted-ui.js`](server/hosted-ui.js). That module renders the PDPP brand mark and typography, reuses the `data-surface="human"` / `data-surface="protocol"` language from `packages/pdpp-brand/styles/base.css`, and serves a single shared stylesheet at `GET /__pdpp/hosted-ui.css`.
+Server-rendered HTML pages (`GET /consent`, `GET /device` and its result pages, `POST /consent/approve`/`deny` result pages, and the stable owner-entry page at `GET /owner/login`) all go through a small shared hosted-UI module, [`server/hosted-ui.ts`](server/hosted-ui.ts). That module renders the DataConnect product mark and wordmark (plus the `PDPP_INSTANCE_NAME` label when one is set) with the PDPP typography, reuses the `data-surface="human"` / `data-surface="protocol"` language from `packages/pdpp-brand/styles/base.css`, and serves a single shared stylesheet at `GET /__pdpp/hosted-ui.css`.
 
 This hosted-UI layer is **reference-only** implementation support. It is **not** a PDPP protocol surface; clients and providers never need to fetch `/__pdpp/hosted-ui.css` or consume any of the `hosted-ui-*` class names. The React/Next public site in `apps/site/` and operator console in `apps/console/` remain the canonical app-layer design-system surfaces.
 
@@ -364,6 +419,18 @@ metadata, device verification URLs, and PAR authorization URLs.
 
 ### Standalone reference server
 
+The reference server imports built output from the `@pdpp/connector-protocol`
+and `@pdpp/collector-runtime` workspace packages
+(`packages/connector-protocol`, `packages/collector-runtime`). A root-level
+`npm install` builds both automatically via their `prepare` scripts — if you
+ever see `ERR_MODULE_NOT_FOUND` for one of those packages' `dist/` files (for
+example after `npm install --workspace=<something>` instead of a plain
+`npm install` at the repo root), rebuild them directly:
+
+```bash
+npm run build --workspace=packages/connector-protocol --workspace=packages/collector-runtime
+```
+
 Run the server:
 
 ```bash
@@ -402,7 +469,7 @@ pnpm reference-contract:check-generated
 
 For an end-to-end operator runbook (Docker host or RunPod CPU Pod, env vars,
 dashboard verification, MCP wiring), see
-[`docs/operator/selfhost-quickstart.md`](../docs/operator/selfhost-quickstart.md).
+[`deploy/docker/README.md`](../deploy/docker/README.md).
 
 The notes below are the topology reference; the quickstart is the procedure.
 
@@ -506,6 +573,34 @@ Persistent mounts are defined for:
   with `PDPP_DB_PATH` at `/var/lib/pdpp/pdpp.sqlite`
 - `PDPP_EMBEDDING_CACHE_DIR` at `/var/cache/pdpp/transformers`
 
+### Connector catalog and air-gapped preload
+
+The reference Docker image does not bundle `@pdpp/polyfill-connectors` or a
+default connector source list. A new instance starts with an empty installed
+connector state. The owner console reads the verified catalog at
+`GET /v1/owner/connector-install/catalog`; an owner can install a selected
+digest, after which the server activates the verified immutable root and adds
+its manifest to the source catalog.
+
+For an air-gapped deployment, set `PDPP_CONNECTOR_PRELOAD_DIR` to a mounted
+directory containing connector-install state prepared by the normal verified
+installer. The directory uses the install module's layout:
+
+```text
+$PDPP_CONNECTOR_PRELOAD_DIR/
+├── connector-install-state.json
+└── connectors/<connector-id>/<sha256:digest>/
+    ├── profile/collection-profile.json
+    ├── dist/collection-profile.mjs
+    └── provenance.json
+```
+
+The state file must contain the installer-produced hashes, provenance, digest,
+and entrypoint metadata. Do not hand-edit it or copy an unverified connector
+tree. The preload directory is used as the file-backed install store, so it
+must be writable when the service updates catalog high-water state; mount it
+read-only only when no catalog refresh or install operation is needed.
+
 Durable connector artifacts — the Slack workspace archive, downloaded
 statement PDFs — resolve under `PDPP_CONNECTOR_ARTIFACT_ROOT`, which Core
 pins to `/var/lib/pdpp/connector-artifacts`. They are on the volume above; no
@@ -523,6 +618,21 @@ Secrets must be supplied at runtime through environment variables,
 passwords, tokens, cookies, or DCR initial access tokens into images. The
 repo-root `.env.local` remains a local development convenience, not a Docker
 or production posture.
+
+### SQLite encryption boundary
+
+The managed DataConnect desktop stack always supplies a database key from the
+OS keychain as PDPP_DATABASE_ENCRYPTION_KEY to the RI child at spawn time.
+Desktop SQLite storage is encrypted at rest with no user setting or opt-out.
+Existing plaintext desktop vaults are migrated on startup with a verified
+backup and rollback path.
+
+Self-hosted and Docker deployments intentionally remain plaintext when
+PDPP_DATABASE_ENCRYPTION_KEY is absent. They have no desktop OS keychain, and
+their database-key lifecycle is not defined by this release. Do not treat the
+absence of the variable as permission for a desktop install to mint a
+replacement key: an encrypted vault fails closed until its original key is
+restored.
 
 Browser-based polyfill connectors are not clean-room portable demos. They need
 persistent browser profiles and remain subject to upstream anti-bot behavior.
@@ -560,6 +670,8 @@ pnpm docker:reference:quick
 To build from the current local checkout instead of pulling public images:
 
 ```bash
+docker build -f deploy/docker/Dockerfile .
+
 pnpm docker:reference:up
 ```
 

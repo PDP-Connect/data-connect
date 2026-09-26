@@ -34,6 +34,16 @@ import {
   staticSecretConnectEntries,
   unsupportedNetworkEntries,
 } from "./connection-catalog.ts";
+import { parseConnectorInstallCatalogResponse } from "./connector-install-contract.ts";
+import {
+  CONNECTOR_INSTALL_FIXTURE_DIGESTS,
+  connectorInstallCatalogFixture,
+} from "./connector-install-fixtures.ts";
+import {
+  buildConnectorInstallLifecycleByConnector,
+  connectorInstallRowModel,
+  connectorLookupKey,
+} from "./connector-install-presentation.ts";
 import {
   isRunnableAddOffer,
   publicTierLabel,
@@ -50,7 +60,7 @@ test("public connector tiers use the manifest declaration and exact public label
   assert.deepEqual(["supported", "preview", "development"].map((tier) => publicTierLabel(tier as "supported" | "preview" | "development")), [
     "Supported",
     "Preview",
-    "Development",
+    "In development",
   ]);
 });
 
@@ -158,6 +168,91 @@ function ownerTemplate(
     uat_expose_unlisted_connectors: args.uat_expose_unlisted_connectors ?? null,
   };
 }
+
+test("owner catalog keeps manifest-known connectors when a template exists", () => {
+  // Regression: one registered template used to collapse the whole catalog to
+  // that single connector, so connecting a first source hid every other one.
+  const manifests = [
+    { connector_id: "https://registry.pdpp.dev/connectors/ynab", connector_key: "ynab", display_name: "YNAB" },
+    { connector_id: "https://registry.pdpp.dev/connectors/strava", connector_key: "strava", display_name: "Strava" },
+    { connector_id: "https://registry.pdpp.dev/connectors/github", connector_key: "github", display_name: "GitHub" },
+  ];
+
+  const withoutTemplates = buildOwnerConnectorCatalog(manifests, []);
+  assert.equal(withoutTemplates.length, 3);
+
+  const withOneTemplate = buildOwnerConnectorCatalog(manifests, [
+    { ...ownerTemplate({ connectorKey: "ynab" }), connector_id: "https://registry.pdpp.dev/connectors/ynab" },
+  ]);
+  assert.equal(withOneTemplate.length, 3);
+  assert.equal(withOneTemplate.filter((entry) => entry.connectorKey === "ynab").length, 1);
+  assert.deepEqual(
+    withOneTemplate.map((entry) => entry.connectorKey).sort(),
+    ["github", "strava", "ynab"]
+  );
+});
+
+test("owner catalog uses the signed runtime install catalog when local manifests and templates are absent", () => {
+  const installCatalog = parseConnectorInstallCatalogResponse(connectorInstallCatalogFixture).data;
+  const catalog = buildOwnerConnectorCatalog([], [], installCatalog);
+
+  assert.deepEqual(
+    catalog.map((entry) => entry.connectorKey).sort(),
+    ["github", "imessage", "signal"]
+  );
+  const github = catalog.find((entry) => entry.connectorKey === "github");
+  assert.ok(github);
+  assert.equal(github.displayName, "GitHub");
+  assert.equal(github.publicTier, "supported");
+  assert.equal(github.setupModality, "provider_authorization");
+});
+
+test("runtime install catalog inventory joins to the latest package digest for Add Source install actions", () => {
+  const installCatalog = parseConnectorInstallCatalogResponse(connectorInstallCatalogFixture).data;
+  const catalog = buildOwnerConnectorCatalog([], [], installCatalog);
+  const lifecycle = buildConnectorInstallLifecycleByConnector(installCatalog, []);
+  const github = catalog.find((entry) => entry.connectorKey === "github");
+  assert.ok(github);
+
+  const model = connectorInstallRowModel(github, lifecycle[connectorLookupKey(github.connectorKey)] ?? {
+    catalog: null,
+    installed: null,
+  });
+
+  assert.deepEqual(model.action, {
+    digest: CONNECTOR_INSTALL_FIXTURE_DIGESTS.githubCurrent,
+    kind: "install",
+    version: "1.1.0",
+  });
+  assert.equal(model.connectorId, "github");
+});
+
+test("owner catalog joins staged URI identities through explicit manifest keys", () => {
+  const catalog = buildOwnerConnectorCatalog(
+    [
+      {
+        connector_id: "https://registry.pdpp.dev/connectors/package-slug",
+        connector_key: "owner-key",
+        display_name: "Manifest display name",
+        external_docs: [{ label: "Provider docs", url: "https://provider.example/docs" }],
+      },
+    ],
+    [
+      {
+        ...ownerTemplate({ connectorKey: "owner-key" }),
+        connector_id: "https://registry.pdpp.dev/connectors/package-slug",
+        connector_key: null,
+        display_name: null,
+      },
+    ]
+  );
+
+  const entry = catalog[0];
+  assert.ok(entry);
+  assert.equal(entry.connectorKey, "owner-key");
+  assert.equal(entry.displayName, "Manifest display name");
+  assert.deepEqual(entry.externalDocs, [{ label: "Provider docs", url: "https://provider.example/docs" }]);
+});
 
 test("catalogModalityFromManifest mirrors the filesystem>browser>network precedence", () => {
   assert.equal(catalogModalityFromManifest({ connector_id: "x", runtime_requirements: { bindings: {} } }), "unknown");
@@ -303,7 +398,7 @@ test("non-browser static-secret connectors keep the existing single capture path
   assert.equal(entry.isKnownScaffold, false);
   assert.equal(sourceSetupAction(entry) !== null, true, "a real development entry gets a self-test action");
   assert.equal(sourceSetupSecondaryAction(entry), null);
-  assert.equal(sourceSetupStatus(entry).label, "Development");
+  assert.equal(sourceSetupStatus(entry).label, "In development");
 });
 
 test("YNAB static-secret entry shows as actionable with draft-create path", async () => {
@@ -317,7 +412,7 @@ test("YNAB static-secret entry shows as actionable with draft-create path", asyn
   assert.equal(ynab.enrollmentKey, undefined);
   assert.equal(ynab.supportState, "supported");
   assert.equal(ynab.proofGate, null);
-  assert.equal(sourceSetupStatus(ynab).label, "Supported");
+  assert.equal(sourceSetupStatus(ynab).label, null);
   assert.equal(sourceSetupAction(ynab)?.href, "/connect/static-secret/ynab");
   assert.equal(sourceSetupSecondaryAction(ynab), null);
   assert.equal(sourceSetupAvailability(ynab), "available_now");
@@ -453,7 +548,7 @@ test("wave-0807 static-secret connectors (Steam, Jellyfin, Apple Contacts) are e
 test("requested-connector reachability: Steam/Jellyfin/Apple Contacts/GroupMe never render actionless or unavailable", async () => {
   // Discrimination guard for the static-secret injection-registry fix: these
   // four connectors declare a real static_secret setup and are present in
-  // STATIC_SECRET_CONNECTOR_REGISTRY (packages/polyfill-connectors/src/
+  // STATIC_SECRET_CONNECTOR_REGISTRY (@pdpp/polyfill-connectors/src/
   // static-secret-injection.ts). If either the manifest or the registry drift,
   // Add Source must not silently strand them with no route or a "not
   // available" verdict.
@@ -464,7 +559,8 @@ test("requested-connector reachability: Steam/Jellyfin/Apple Contacts/GroupMe ne
   // deliberately curated subset (see its own package.json) vendored for
   // @pdpp/local-collector's build only, not a general-purpose mirror of the
   // full @pdpp/polyfill-connectors package, and does not carry this file.
-  const { STATIC_SECRET_CONNECTOR_REGISTRY } = await import("@pdpp/polyfill-connectors/static-secret-injection");
+  const staticSecretInjectionModule = "@pdpp/polyfill-connectors/static-secret-injection";
+  const { STATIC_SECRET_CONNECTOR_REGISTRY } = await import(staticSecretInjectionModule);
   for (const key of ["steam", "jellyfin", "apple_contacts", "groupme"]) {
     const entry = catalog.find((e) => e.connectorKey === key);
     assert.ok(entry, `${key} must be in the catalog`);
@@ -688,6 +784,34 @@ test("Google Maps Timeline keeps its import/API distinction visible in the catal
   assert.match(sourceSetupContext(entry) ?? "", TIMELINE_NO_SIGN_IN_RE);
 });
 
+test("owner catalog lists every manifest-known connector when templates are empty", () => {
+  const manifests: CatalogManifestLike[] = [
+    {
+      capabilities: { public_listing: { tier: "supported" } },
+      connector_id: "https://registry.pdpp.dev/connectors/alpha",
+      connector_key: "alpha",
+      display_name: "Alpha",
+    },
+    {
+      capabilities: { public_listing: { tier: "preview" } },
+      connector_id: "https://registry.pdpp.dev/connectors/beta",
+      connector_key: "beta",
+      display_name: "Beta",
+    },
+  ];
+
+  const catalog = buildOwnerConnectorCatalog(manifests, []);
+
+  assert.equal(catalog.length, manifests.length);
+  assert.deepEqual(
+    catalog.map((entry) => entry.connectorKey),
+    ["alpha", "beta"],
+    "an empty owner-template response must not hide manifest-known connectors"
+  );
+  assert.equal(catalog[0]?.ownerActionable, undefined, "the fallback must not invent owner authorization");
+  assert.equal(catalog[0]?.registrationStatus, undefined, "the fallback must not invent registration state");
+});
+
 test("configured Google provider readiness exposes the existing owner authorization action", async () => {
   // "Configured" means the manifest's declared deployment settings are
   // actually present in the environment — readiness is measured, not asserted
@@ -703,7 +827,7 @@ test("configured Google provider readiness exposes the existing owner authorizat
   assert.equal(entry.nextStepKind, "open_provider_auth");
   assert.equal(entry.supportState, "supported");
   assert.equal(entry.disposition, "provider_auth_connect");
-  assert.equal(sourceSetupStatus(entry).label, "Development");
+  assert.equal(sourceSetupStatus(entry).label, "In development");
   // google-maps-data-portability is real, not a known scaffold (its own
   // manifest documents exactly what is and is not implemented via
   // public_listing.proof_gate), and provider_auth_connect IS in the
@@ -717,15 +841,7 @@ test("configured Google provider readiness exposes the existing owner authorizat
   assert.deepEqual(providerAuthConnectEntries(catalog), [entry]);
 });
 
-test("owner catalog fails closed for local-only, listed-unproven, and proof-gated static-secret entries", () => {
-  const staleLocalManifest: CatalogManifestLike = {
-    capabilities: { public_listing: { tier: "supported" } },
-    connector_id: "stale-local-only",
-    display_name: "Stale local-only",
-    runtime_requirements: { bindings: { network: {} } },
-  };
-  assert.deepEqual(buildOwnerConnectorCatalog([staleLocalManifest], []), [], "local-only entries are not listed");
-
+test("owner catalog keeps server-authorized gates for listed-unproven and proof-gated entries", () => {
   const listedUnproven = buildOwnerConnectorCatalog(
     [],
     [

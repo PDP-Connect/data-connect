@@ -34,14 +34,20 @@ const VIEW_FILE = fileURLToPath(new URL("../../sources/sources-view.tsx", import
 const RECORDS_PAGE_FILE = `${HERE}../../sources/page.tsx`;
 const RECORDS_ADD_PAGE_FILE = `${HERE}../../sources/add/page.tsx`;
 const ROUTES_FILE = fileURLToPath(
-  new URL("../../../../../../../packages/operator-ui/src/components/views/routes.ts", import.meta.url)
+  new URL(
+    "../../../../../../../reference-implementation/vendor/operator-ui/src/components/views/routes.ts",
+    import.meta.url
+  )
 );
 // The live sidebar shell — `components/shell.tsx` (DashboardShell) was dead
 // code (2026-08-07 IA audit finding 1.7/1.5: zero content-page importers,
 // verified by grep) and has been deleted. `RecordroomShell`'s NAV_GROUPS is
 // the real, rendered nav every page uses.
 const SHELL_FILE = fileURLToPath(
-  new URL("../../../../../../../packages/pdpp-brand-react/src/shell-frame.tsx", import.meta.url)
+  new URL(
+    "../../../../../../../reference-implementation/vendor/brand-react/src/shell-frame.tsx",
+    import.meta.url
+  )
 );
 const CONNECT_PAGE_FILE = `${HERE}../../connect/page.tsx`;
 const SOURCE_SETUP_CATALOG_FILE = `${HERE}../source-setup-catalog.tsx`;
@@ -49,7 +55,10 @@ const ADD_SUPPORT_FILE = `${HERE}../../lib/source-add-support.ts`;
 const SOURCE_SETUP_PRESENTATION_FILE = `${HERE}../../lib/source-setup-presentation.ts`;
 const SOURCE_GROUPS_FILE = `${HERE}../../lib/source-groups.ts`;
 const HERO_FILE = fileURLToPath(
-  new URL("../../../../../../../packages/operator-ui/src/components/overview-hero.tsx", import.meta.url)
+  new URL(
+    "../../../../../../../reference-implementation/vendor/operator-ui/src/components/overview-hero.tsx",
+    import.meta.url
+  )
 );
 
 // routes.ts derives the Sources add route from the section segment (clean

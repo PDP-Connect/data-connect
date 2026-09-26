@@ -2,31 +2,102 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { type NextRequest, NextResponse } from "next/server";
-import { OWNER_AUTH_COOKIE_NAME } from "pdpp-reference-implementation/owner-session";
+import { OWNER_AUTH_COOKIE_NAME } from "pdpp-reference-implementation/owner-session-constants";
 import { resolveReferenceTopology } from "pdpp-reference-implementation/reference-topology";
 import { normalizeDashboardReturnTo } from "@/app/(console)/lib/return-to.ts";
+import { proxyReferenceRequest } from "./app/reference-proxy.ts";
 
 const referenceTopology = resolveReferenceTopology();
 const AS_PROXY_TARGET = referenceTopology.asInternalUrl;
 
+/**
+ * Host-header allowlist for this process's own listener, active ONLY when
+ * `HOSTNAME` (set by `src-tauri/src/unified.rs`'s `console_process_spec`)
+ * is non-loopback -- i.e. only for the `my_devices_only` posture. Every
+ * other posture keeps `HOSTNAME=127.0.0.1` and this check never activates,
+ * so existing behavior for the loopback-only case is unchanged.
+ *
+ * This is the same allowlist-and-reject shape as the reference server's
+ * `isAllowedRequestHost` (`reference-implementation/server/
+ * reachability-contract.ts`), and exists for the same reason: a browser on
+ * this LAN visiting an attacker's page can be made to send a request to
+ * this listener with an attacker-chosen Host header (DNS rebinding). Before
+ * this posture existed, the console had no Host check at all because it
+ * was never reachable from anything but this same machine's loopback
+ * interface -- binding a LAN address changes that, so this check exists
+ * specifically to close the gap `my_devices_only` opens. See the fixes for
+ * CVE-2025-49596 (Anthropic's MCP Inspector) and GHSA-89vp-x53w-74fx (Rust
+ * MCP SDK), both the same missing-Host-check-on-a-locally-bound-HTTP-server
+ * shape, both fixed by adding exactly this kind of allowlist.
+ */
+function isLoopbackBindHost(bindHost: string): boolean {
+  return (
+    bindHost === "" ||
+    bindHost === "127.0.0.1" ||
+    bindHost === "localhost" ||
+    bindHost === "::1"
+  );
+}
+
+function requestHostname(host: string): string {
+  const withoutPort = host.split(":")[0] ?? host;
+  return withoutPort.toLowerCase();
+}
+
+/**
+ * Pure predicate behind `isAllowedConsoleHost`, parameterized for testing
+ * without mutating `process.env` (module-level constants below are read
+ * once at import time, so a test cannot override them after the fact).
+ */
+export function isAllowedConsoleHostFor(
+  requestHost: string,
+  bindHost: string,
+  trustedHosts: readonly string[]
+): boolean {
+  if (isLoopbackBindHost(bindHost)) {
+    return true;
+  }
+  const hostname = requestHostname(requestHost);
+  return (
+    hostname === bindHost.trim().toLowerCase() ||
+    trustedHosts.some(trusted => trusted.trim().toLowerCase() === hostname)
+  );
+}
+
+const CONSOLE_BIND_HOST = process.env.HOSTNAME?.trim() ?? "";
+const CONSOLE_TRUSTED_HOSTS = (process.env.PDPP_TRUSTED_HOSTS ?? "")
+  .split(",")
+  .map(host => host.trim())
+  .filter(Boolean);
+
+function isAllowedConsoleHost(request: NextRequest): boolean {
+  const host = request.headers.get("host") ?? request.nextUrl.host;
+  return isAllowedConsoleHostFor(host, CONSOLE_BIND_HOST, CONSOLE_TRUSTED_HOSTS);
+}
+
 // Optimistic auth gate at the proxy layer (Next.js 16 BFF pattern). When
-// owner-auth is on and the BFF process holds the password, we could HMAC-
-// verify here too — but the documented topology allows split deployments
-// where only the AS holds the password. So proxy does cookie-presence-only
-// for the redirect UX; the DAL ((console)/lib/verify-session.ts) is the
-// authoritative gate that runs before any data leaves the AS.
+// owner-auth uses opaque server-side sessions, so proxy does cookie-presence
+// only for the redirect UX; the DAL ((console)/lib/verify-session.ts) is the
+// authoritative gate that asks the AS before any data leaves the server.
 //
-// We only redirect when owner-auth is plausibly enabled in this process. When
-// `PDPP_OWNER_PASSWORD` is unset, the local-dev open path stays open and the
-// AS remains authoritative for downstream `_ref` / `/v1` requests. This
-// matches the behavior pinned by `gate-ref-reads-when-owner-auth-enabled`.
-const OWNER_AUTH_PROBABLY_ENABLED =
-  typeof process.env.PDPP_OWNER_PASSWORD === "string" && process.env.PDPP_OWNER_PASSWORD.length > 0;
+// Hosted and production console processes must show the sign-in redirect even
+// when only the authorization server has the credential. Keep the password
+// check for local setups that deliberately enable owner auth outside production.
+export function shouldRedirectOwnerToLogin(
+  hasSessionCookie: boolean,
+  env: NodeJS.ProcessEnv = process.env
+): boolean {
+  const ownerAuthProbablyEnabled =
+    env.NODE_ENV === "production" ||
+    (typeof env.PDPP_OWNER_PASSWORD === "string" && env.PDPP_OWNER_PASSWORD.length > 0);
+  return ownerAuthProbablyEnabled && !hasSessionCookie;
+}
 
 // Clean owner-console route prefixes. The console owner control plane lives at
 // top-level nouns off root; the overview is `/`. Removed legacy console-prefix
 // paths are intentionally not routed or redirected.
 const OWNER_ROUTE_PREFIXES = [
+  "/settings",
   "/sources",
   "/syncs",
   "/audit",
@@ -83,6 +154,20 @@ function resolveReferenceProxyTarget(pathname: string): string | null {
 }
 
 export default function proxy(request: NextRequest) {
+  if (!isAllowedConsoleHost(request)) {
+    return new NextResponse("Host not allowed", { status: 403 });
+  }
+
+  // PAR and pending approvals still use the AS consent shell. The console
+  // page owns challenge requests; preserve that choice when parameters mix.
+  if (
+    request.nextUrl.pathname === "/consent" &&
+    !request.nextUrl.searchParams.has("challenge") &&
+    (request.nextUrl.searchParams.has("request_uri") || request.nextUrl.searchParams.has("approval_id"))
+  ) {
+    return proxyReferenceRequest(request, "as", ["consent"]);
+  }
+
   // AS-proxied protocol paths first, so paths that share a prefix with an owner
   // section (notably `/grants/:id/revoke`) are rewritten to the AS rather than
   // caught by the owner-page gate below.
@@ -105,9 +190,8 @@ export default function proxy(request: NextRequest) {
     // render race that previously surfaced raw 401s on logged-out
     // owner hits. The DAL ((console)/lib/verify-session.ts) is
     // the authoritative gate; this is purely UX.
-    if (OWNER_AUTH_PROBABLY_ENABLED) {
       const sessionCookie = request.cookies.get(OWNER_AUTH_COOKIE_NAME);
-      if (!sessionCookie?.value) {
+    if (shouldRedirectOwnerToLogin(Boolean(sessionCookie?.value))) {
         const returnTo = normalizeDashboardReturnTo(`${request.nextUrl.pathname}${request.nextUrl.search}`);
         const loginUrl = new URL("/owner/login", request.nextUrl);
         loginUrl.searchParams.set("return_to", returnTo);
@@ -115,7 +199,6 @@ export default function proxy(request: NextRequest) {
         redirect.headers.set("X-Robots-Tag", "noindex, nofollow");
         return redirect;
       }
-    }
 
     const requestHeaders = new Headers(request.headers);
     requestHeaders.set("x-pdpp-return-to", `${request.nextUrl.pathname}${request.nextUrl.search}`);
@@ -137,7 +220,11 @@ export const config = {
   matcher: [
     // Owner overview at root.
     "/",
+    // First-run setup must pass the same public Host allowlist as other routes.
+    "/setup",
     // Clean owner-console sections (redesign-owner-console-product-experience §10.B).
+    "/settings",
+    "/settings/:path*",
     "/sources",
     "/sources/:path*",
     "/syncs",

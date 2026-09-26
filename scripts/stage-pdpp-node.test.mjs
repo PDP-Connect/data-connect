@@ -172,7 +172,7 @@ describe("stage PDPP Node.js sidecar", () => {
       "utf8"
     )
     expect(buildScript).toContain(
-      "stagePdppNode({ ...nativeTauriTarget(PLAT, arch()), projectRoot: ROOT })"
+      "stagePdppNode({ ...tauriTarget, projectRoot: ROOT })"
     )
   })
 })

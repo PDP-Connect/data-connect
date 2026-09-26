@@ -146,7 +146,14 @@ function assertHostedShell(html: string): void {
     "links shared hosted-ui stylesheet"
   );
   assert.match(html, /hosted-ui-header/, "renders brand header");
-  assert.match(html, /<span class="hosted-ui-wordmark">PDPP<\/span>/, "shows PDPP wordmark");
+  // The header is the instance identity alone. Consent screens are branded
+  // with the party the owner trusts and is accountable to — here, the
+  // instance. PDPP is the plumbing, and plumbing does not get the letterhead;
+  // it keeps a quiet footer attribution instead, which is where Plaid puts
+  // its own wordmark on a bank-branded screen.
+  assert.doesNotMatch(html, /<span class="hosted-ui-wordmark">PDPP<\/span>/, "no protocol wordmark in the header");
+  assert.match(html, /<span class="hosted-ui-provider" aria-label="Provider">/, "header carries the instance name");
+  assert.match(html, /hosted-ui-footer-attribution">Secured by PDPP</, "PDPP attribution moves to the footer");
   assert.doesNotMatch(html, /<style>[\s\S]*body\s*{\s*font-family:\s*system-ui/, "no route-local inline style block");
 }
 
@@ -302,7 +309,7 @@ test("hosted-ui: /owner/login disabled state still uses the shared hosted-UI lay
     const html = await resp.text();
     assertHostedShell(html);
     assert.match(html, /owner access/i, "shows owner-access heading");
-    assert.match(html, /disabled/i, "explains disabled placeholder auth");
+    assert.match(html, /No owner password is set/, "explains that owner sign-in is off");
     assert.doesNotMatch(html, /hosted-ui-password/, "does not render password field");
   });
 });

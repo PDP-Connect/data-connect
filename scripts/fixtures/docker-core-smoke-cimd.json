@@ -1,0 +1,28 @@
+{
+  "client_id": "https://cimd.pdpp-smoke.test/docker-core-smoke-cimd.json",
+  "client_name": "DataConnect Docker Core smoke",
+  "redirect_uris": [
+    "http://localhost:42173/callback"
+  ],
+  "grant_types": [
+    "authorization_code",
+    "refresh_token"
+  ],
+  "response_types": [
+    "code"
+  ],
+  "token_endpoint_auth_method": "private_key_jwt",
+  "token_endpoint_auth_signing_alg": "RS256",
+  "jwks": {
+    "keys": [
+      {
+        "kty": "RSA",
+        "n": "r1PLvTz5_RLODQjTfWxj6NuDEglMzJv2W73sokfpNDqucgLGVnEZonJ49W2xxXDZUBQbfHK5aIxBhDP0V5pOBLEg17BXziIZxc86Bn3Y7rTw1cJ5Az-EFhI8j4-eETg6F1nURaz16GD0YdB5KjNzXQLNPN7hw1SLDSJs9QqfhojpbopAucTyDXlv2DqcJ651uu5o-pdJuy4Wr910h_Y070htDl-Up4oPPsyfcPZL34MLPXrYZrhOgJ8_N1u4xcwaYwzJ9aPqqpnemPjdFRa_r2MvEiOhyaBoDlvrXh_xHcPBH4wZO67OtfTI4zM-vd4yVDprM4T_5JQYMBdZPc7c-w",
+        "e": "AQAB",
+        "alg": "RS256",
+        "kid": "docker-core-smoke-key",
+        "use": "sig"
+      }
+    ]
+  }
+}

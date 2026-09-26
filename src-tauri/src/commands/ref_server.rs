@@ -84,10 +84,15 @@ fn configured_checkout_dir() -> Result<Option<PathBuf>, String> {
 }
 
 fn configured_server_url() -> Option<String> {
-    std::env::var("PDPP_REFERENCE_SERVER_URL")
+    std::env::var("DATACONNECT_RI_URL")
+        .or_else(|_| std::env::var("PDPP_REFERENCE_SERVER_URL"))
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn configured_server_origin() -> String {
+    configured_server_url().unwrap_or_else(|| DEFAULT_REFERENCE_SERVER_URL.to_string())
 }
 
 fn resolve_reference_server_target(
@@ -130,6 +135,22 @@ async fn wait_for_health(origin: String) -> bool {
 /// `reference-server-ready` on success, `reference-server-error` on failure.
 #[tauri::command]
 pub async fn start_reference_server(app: AppHandle) -> Result<ReferenceServerStatus, String> {
+    start_reference_server_internal(app, true).await
+}
+
+/// Attach to an already-running reference server without consulting the
+/// legacy checkout-spawn setting. The unified tray uses this until the A3
+/// supervisor owns sidecar startup.
+pub(crate) async fn attach_reference_server(
+    app: AppHandle,
+) -> Result<ReferenceServerStatus, String> {
+    start_reference_server_internal(app, false).await
+}
+
+async fn start_reference_server_internal(
+    app: AppHandle,
+    allow_spawn: bool,
+) -> Result<ReferenceServerStatus, String> {
     use std::io::{BufRead, BufReader};
     use std::process::{Command, Stdio};
 
@@ -165,17 +186,61 @@ pub async fn start_reference_server(app: AppHandle) -> Result<ReferenceServerSta
         }
     };
 
-    let checkout_dir = match configured_checkout_dir() {
-        Ok(checkout_dir) => checkout_dir,
-        Err(message) => {
+    let checkout_dir = if allow_spawn {
+        match configured_checkout_dir() {
+            Ok(checkout_dir) => checkout_dir,
+            Err(message) => {
+                clear_starting();
+                let _ = app.emit(
+                    "reference-server-error",
+                    serde_json::json!({ "message": message }),
+                );
+                return Err(message);
+            }
+        }
+    } else {
+        None
+    };
+
+    if !allow_spawn {
+        // Dev-mode fallback: no local pdpp checkout configured. Health-check
+        // whatever is already listening at PDPP_REFERENCE_SERVER_URL instead
+        // of spawning anything.
+        let origin = configured_server_origin();
+        log::info!(
+            "PDPP_REFERENCE_CHECKOUT not set; attaching to already-running reference server at {}",
+            origin
+        );
+        if wait_for_health(origin.clone()).await {
+            if let Ok(mut guard) = REF_SERVER_ORIGIN.lock() {
+                *guard = Some(origin.clone());
+            }
+            if let Ok(mut guard) = REF_SERVER_OWNS_PROCESS.lock() {
+                *guard = false;
+            }
             clear_starting();
             let _ = app.emit(
-                "reference-server-error",
-                serde_json::json!({ "message": message }),
+                "reference-server-ready",
+                serde_json::json!({ "origin": origin, "managed": false }),
             );
-            return Err(message);
+            return Ok(ReferenceServerStatus {
+                running: true,
+                origin: Some(origin),
+                managed: false,
+            });
         }
-    };
+        clear_starting();
+        let message = format!(
+            "No reference server answered {} within {:?}.",
+            health_check_url(&origin),
+            HEALTH_WAIT_TIMEOUT
+        );
+        let _ = app.emit(
+            "reference-server-error",
+            serde_json::json!({ "message": message }),
+        );
+        return Err(message);
+    }
     let target = match resolve_reference_server_target(checkout_dir, configured_server_url()) {
         Ok(target) => target,
         Err(message) => {
@@ -572,6 +637,31 @@ pub async fn login_reference_server(origin: String) -> Result<ReferenceServerLog
             .to_string()
     })?;
 
+    login_reference_server_with_password(origin, &password).await
+}
+
+pub(crate) async fn login_reference_server_with_password(
+    origin: String,
+    password: &str,
+) -> Result<ReferenceServerLoginResult, String> {
+    login_reference_server_with_password_and_host(origin, password, None).await
+}
+
+/// Same as `login_reference_server_with_password`, but overrides the `Host`
+/// header when `trusted_host` is `Some`. Needed for the same reason
+/// `Readiness::HttpGet`'s `host_header` was added
+/// (`commands/process_supervisor.rs`): once a public origin is configured,
+/// the reference server's `isAllowedRequestHost` rejects any request whose
+/// `Host` header isn't in `PDPP_TRUSTED_HOSTS`, and this login call dials
+/// `127.0.0.1` just like that readiness probe did. Without this, every
+/// bootstrap/restart that runs after ngrok has discovered an origin fails
+/// its own login step with `invalid_host` and tears the stack back down --
+/// reproduced live against a real ngrok tunnel.
+pub(crate) async fn login_reference_server_with_password_and_host(
+    origin: String,
+    password: &str,
+    trusted_host: Option<&str>,
+) -> Result<ReferenceServerLoginResult, String> {
     // The server's own /owner/login handler answers a successful login with a
     // 302 redirect back to the login page (a browser-form-compatible shape),
     // setting pdpp_owner_session on THAT response, not on whatever it
@@ -586,11 +676,15 @@ pub async fn login_reference_server(origin: String) -> Result<ReferenceServerLog
         .build()
         .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
     let login_url = format!("{}/owner/login", origin.trim_end_matches('/'));
-    let response = client
+    let mut request = client
         .post(&login_url)
         .header("Accept", "application/json")
         .header("Content-Type", "application/json")
-        .json(&serde_json::json!({ "password": password }))
+        .json(&serde_json::json!({ "password": password }));
+    if let Some(host) = trusted_host {
+        request = request.header(reqwest::header::HOST, host);
+    }
+    let response = request
         .send()
         .await
         .map_err(|e| format!("Failed to reach {}: {}", login_url, e))?;
@@ -608,8 +702,7 @@ pub async fn login_reference_server(origin: String) -> Result<ReferenceServerLog
         .get_all(reqwest::header::SET_COOKIE)
         .iter()
         .filter_map(|v| v.to_str().ok())
-        .find(|v| v.starts_with("pdpp_owner_session="))
-        .map(|v| v.to_string());
+        .find_map(extract_owner_session_cookie);
 
     let Some(raw_cookie) = set_cookie_header else {
         return Err(
@@ -618,23 +711,24 @@ pub async fn login_reference_server(origin: String) -> Result<ReferenceServerLog
         );
     };
 
-    // Extract just the cookie value (between '=' and the first ';').
-    let value = raw_cookie
-        .split_once('=')
-        .map(|(_, rest)| rest.split(';').next().unwrap_or("").to_string())
-        .ok_or_else(|| "Malformed Set-Cookie header from reference server".to_string())?;
-
     Ok(ReferenceServerLoginResult {
-        session_cookie: value,
+        session_cookie: raw_cookie,
         origin,
     })
 }
 
+fn extract_owner_session_cookie(header: &str) -> Option<String> {
+    let value = header
+        .strip_prefix("pdpp_owner_session=")?
+        .split(';')
+        .next()?
+        .trim();
+    (!value.is_empty()).then_some(value.to_string())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{
-        resolve_reference_server_target, ReferenceServerTarget, OPERATOR_TOOLS_UNAVAILABLE,
-    };
+    use super::*;
     use std::path::PathBuf;
 
     #[test]
@@ -674,5 +768,25 @@ mod tests {
             .expect_err("the bundled Personal Server is not a reference operator host");
 
         assert_eq!(error, OPERATOR_TOOLS_UNAVAILABLE);
+    }
+
+    #[test]
+    fn extracts_owner_session_cookie_value_without_attributes() {
+        assert_eq!(
+            extract_owner_session_cookie("pdpp_owner_session=abc123; Path=/; HttpOnly"),
+            Some("abc123".to_string())
+        );
+    }
+
+    #[test]
+    fn rejects_other_or_empty_cookie_headers() {
+        assert_eq!(
+            extract_owner_session_cookie("pdpp_owner_csrf=abc123; Path=/"),
+            None
+        );
+        assert_eq!(
+            extract_owner_session_cookie("pdpp_owner_session=; Path=/"),
+            None
+        );
     }
 }

@@ -2,17 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
-  KNOWN_SCAFFOLD_CONNECTORS,
-  PRODUCTION_READY_CONNECTORS,
-} from "@pdpp/polyfill-connectors/connector-conformance-roster";
-import { type CredentialValidationMode, credentialValidationMode } from "@pdpp/polyfill-connectors/credential-probe";
-import {
   type NormalizedStaticSecretCredentialCapture,
   type NormalizedStaticSecretField,
   normalizeStaticSecretCredentialCapture,
   type StaticSecretCredentialCaptureFieldLike,
   type StaticSecretFieldType,
-} from "@pdpp/polyfill-connectors/static-secret-credential-capture";
+  KNOWN_SCAFFOLD_CONNECTORS,
+  PRODUCTION_READY_CONNECTORS,
+  credentialValidationMode,
+} from "./polyfill-connectors-runtime.ts";
+import type { CredentialValidationMode } from "./polyfill-connectors-runtime.ts";
 import { legacyLocalAliasMap } from "./connector-key.ts";
 import {
   BROWSER_BOUND_KEYS,

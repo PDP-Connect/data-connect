@@ -23,6 +23,14 @@ export interface StreamRequest {
   time_range?: TimeRange;
 }
 
+const ISO_TIMESTAMP_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(Z|[+-]\d{2}:\d{2})$/;
+const TRAILING_ZEROS_PATTERN = /0+$/;
+
+interface ParsedTimestamp {
+  epochSecond: number;
+  fraction: string;
+}
+
 /**
  * Returns a Set of canonical-key strings if resources were requested, else
  * null (meaning "all records allowed").
@@ -52,50 +60,92 @@ export function passesResourceFilter(resSet: ReadonlySet<string> | null, primary
   return resSet.has(canonical);
 }
 
-/**
- * True if an ISO date/datetime string falls within the stream's time_range.
- */
+/** Parse a timezone-qualified ISO 8601 timestamp without Date.parse leniency. */
+function parseIsoTimestamp(value: unknown): ParsedTimestamp | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const match = value.match(ISO_TIMESTAMP_PATTERN);
+  if (match === null) {
+    return null;
+  }
+
+  const [, yearText, monthText, dayText, hourText, minuteText, secondText, fraction = "", zone] = match;
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const day = Number(dayText);
+  const hour = Number(hourText);
+  const minute = Number(minuteText);
+  const second = Number(secondText);
+  const daysInMonth = [
+    31,
+    year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0) ? 29 : 28,
+    31,
+    30,
+    31,
+    30,
+    31,
+    31,
+    30,
+    31,
+    30,
+    31,
+  ];
+  const maxDay = daysInMonth[month - 1];
+  if (
+    month < 1 ||
+    month > 12 ||
+    maxDay === undefined ||
+    day < 1 ||
+    day > maxDay ||
+    hour > 23 ||
+    minute > 59 ||
+    second > 59
+  ) {
+    return null;
+  }
+  if (zone && zone !== "Z") {
+    const [offsetHourText, offsetMinuteText] = zone.slice(1).split(":");
+    if (Number(offsetHourText) > 23 || Number(offsetMinuteText) > 59) {
+      return null;
+    }
+  }
+
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp)
+    ? { epochSecond: Math.floor(timestamp / 1000), fraction: fraction.replace(TRAILING_ZEROS_PATTERN, "") }
+    : null;
+}
+
+function compareTimestamps(left: ParsedTimestamp, right: ParsedTimestamp): number {
+  if (left.epochSecond !== right.epochSecond) {
+    return left.epochSecond < right.epochSecond ? -1 : 1;
+  }
+  const length = Math.max(left.fraction.length, right.fraction.length);
+  for (let index = 0; index < length; index += 1) {
+    const leftDigit = left.fraction[index] ?? "0";
+    const rightDigit = right.fraction[index] ?? "0";
+    if (leftDigit !== rightDigit) {
+      return leftDigit < rightDigit ? -1 : 1;
+    }
+  }
+  return 0;
+}
+
+/** True only when a valid timestamp falls within the half-open time_range. */
 export function passesTimeRange(isoValue: string | null | undefined, timeRange: TimeRange | null | undefined): boolean {
   if (!timeRange) {
     return true;
   }
-  if (!isoValue) {
-    // connector-side: if we can't determine, let RS do enforcement
-    return true;
-  }
-
-  const since = timeRange.since ? Date.parse(timeRange.since) : undefined;
-  const until = timeRange.until ? Date.parse(timeRange.until) : undefined;
-  if (
-    (since !== undefined && Number.isNaN(since)) ||
-    (until !== undefined && Number.isNaN(until))
-  ) {
-    return true;
-  }
-
-  if (/^\d{4}-\d{2}-\d{2}$/.test(isoValue)) {
-    const dayStart = Date.parse(`${isoValue}T00:00:00.000Z`);
-    if (
-      Number.isNaN(dayStart) ||
-      new Date(dayStart).toISOString().slice(0, 10) !== isoValue
-    ) {
-      return true;
-    }
-    const dayEnd = dayStart + 86_400_000;
-    return (
-      (since === undefined || dayEnd > since) &&
-      (until === undefined || dayStart < until)
-    );
-  }
-
-  const timestamp = Date.parse(isoValue);
-  if (Number.isNaN(timestamp)) {
-    // connector-side: if we can't determine, let RS do enforcement
-    return true;
-  }
+  const timestamp = parseIsoTimestamp(isoValue);
+  const since = timeRange.since === undefined ? undefined : parseIsoTimestamp(timeRange.since);
+  const until = timeRange.until === undefined ? undefined : parseIsoTimestamp(timeRange.until);
   return (
-    (since === undefined || timestamp >= since) &&
-    (until === undefined || timestamp < until)
+    timestamp !== null &&
+    (timeRange.since === undefined ||
+      (since !== undefined && since !== null && compareTimestamps(timestamp, since) >= 0)) &&
+    (timeRange.until === undefined ||
+      (until !== undefined && until !== null && compareTimestamps(timestamp, until) < 0))
   );
 }
 

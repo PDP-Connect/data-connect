@@ -9,8 +9,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-// biome-ignore lint/correctness/noUnresolvedImports: better-sqlite3 is a declared workspace runtime dependency resolved by pnpm/Node.
-import Database from "better-sqlite3";
+import Database from "./helpers/sqlite-driver.ts";
 import { Pool } from "pg";
 import { writeTransaction } from "../lib/db.ts";
 import { scanDirectPrepareText } from "../scripts/check-direct-prepare-conformance.ts";

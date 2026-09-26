@@ -8,10 +8,10 @@
  * reference approval UIs (`/consent*`, `/device*`). It is intentionally
  * narrow:
  *
- *   - enabled only when `PDPP_OWNER_PASSWORD` is set
+ *   - enabled when an environment password or app-managed verifier is present
  *   - single-password, single-owner model
- *   - no user table, no external IdP, no password reset
- *   - stateless signed cookie (HMAC-SHA256) — no DB-backed sessions
+ *   - no user table or external IdP; app-managed passwords change in Settings
+ *   - opaque session cookie with a server-side validation seam
  *
  * It is NOT a PDPP protocol surface. It is NOT a full owner-authentication
  * product. See
@@ -19,6 +19,7 @@
  * for scope and rationale.
  */
 import crypto from "node:crypto";
+import { DATACONNECT_PRODUCT_IDENTITY } from "../vendor/brand-react/src/product-identity.ts";
 import {
   escapeHtml as hostedEscape,
   readHostedThemeChoiceFromCookieHeader,
@@ -43,14 +44,30 @@ import {
   verifyOwnerCsrfToken,
 } from "./owner-csrf.ts";
 import {
+  createOwnerLoginRateLimiter,
+  type OwnerLoginRateLimitConfig,
+  type OwnerLoginRateLimiter,
+} from "./owner-login-rate-limit.ts";
+import {
   createOwnerSessionController,
   OWNER_SESSION_COOKIE_NAME,
   OWNER_SESSION_DEFAULT_SUBJECT_ID,
   OWNER_SESSION_DEFAULT_TTL_SECONDS,
+  parseCookieHeader,
   type OwnerSessionController,
   type OwnerSessionPayload,
+  type OwnerSessionRecord,
+  type OwnerSessionStore,
   type OwnerSessionSameSite,
 } from "./owner-session.ts";
+import {
+  createOwnerPasswordVerifier,
+  OWNER_PASSWORD_MIN_LENGTH,
+  verifyOwnerPassword,
+  type OwnerPasswordVerifier,
+} from "./owner-password-verifier.ts";
+import type { OwnerPasswordVerifierStore } from "./stores/owner-password-verifier-store.ts";
+import { getOwnerSessionStore } from "./stores/owner-session-store.ts";
 
 const DEFAULT_RETURN_TO = "/owner/login";
 
@@ -66,16 +83,22 @@ interface AuthRequestHeaders {
   readonly referer?: string;
   readonly referrer?: string;
   readonly "x-forwarded-proto"?: string;
+  readonly "user-agent"?: string;
+  readonly "x-pdpp-owner-session-label"?: string;
 }
 
 interface AuthRequest {
   readonly body?: Record<string, unknown>;
+  readonly connection?: { readonly remoteAddress?: string };
   readonly headers: AuthRequestHeaders;
+  readonly ip?: string;
   readonly method?: string;
   readonly originalUrl?: string;
   ownerSession?: OwnerSessionPayload;
   readonly query?: Record<string, unknown>;
+  readonly params?: Record<string, string | undefined>;
   readonly secure?: boolean;
+  readonly socket?: { readonly remoteAddress?: string };
   readonly url?: string;
 }
 
@@ -122,8 +145,7 @@ export interface OwnerAuthPlaceholderOptions {
    * `requireOwnerSession` falls through to the open local-dev behavior
    * (`true`, the historical default) or fails closed with a 401 / login
    * redirect (`false`). The host computes this from the owner-exposure
-   * posture: it is `true` only in a local-dev (loopback) posture or under
-   * the explicit `PDPP_ALLOW_UNAUTHENTICATED_OWNER=1` override, and `false`
+   * posture: it is `true` only in a local-dev (loopback) posture, and `false`
    * on any internet-facing deployment. Security audit S-1: an unset password
    * must never silently open the owner control plane on a hosted surface.
    * Defaults to `true` to preserve the password-optional convenience for the
@@ -140,11 +162,21 @@ export interface OwnerAuthPlaceholderOptions {
    */
   csrfSecret?: OwnerCsrfSecret | null;
   forceSecureCookies?: boolean;
+  /**
+   * Login-attempt throttling config for `POST /owner/login`. Pass `false` to
+   * disable throttling entirely (test fixtures only — every real deployment
+   * should keep the default). See `owner-login-rate-limit.ts` for the
+   * research-grounded design (time-boxed, self-clearing, local/remote split).
+   */
+  loginRateLimit?: OwnerLoginRateLimitConfig | false;
   password?: string | null;
+  passwordVerifier?: OwnerPasswordVerifier | null;
   providerName?: string;
   sameSite?: OwnerSessionSameSite;
   sessionTtlSeconds?: number;
   subjectId?: string | null;
+  sessionStore?: OwnerSessionStore | null;
+  passwordVerifierStore?: OwnerPasswordVerifierStore | null;
 }
 
 export interface OwnerAuthPlaceholder {
@@ -152,7 +184,11 @@ export interface OwnerAuthPlaceholder {
   readonly csrfCookieName: string;
   readonly csrfFieldName: string;
   readonly enabled: boolean;
+  /** Install the verifier after a successful first-run claim. */
+  setPasswordVerifier: (verifier: OwnerPasswordVerifier) => void;
   ensureCsrfToken: (req: AuthRequest, res: AuthResponse) => string;
+  /** Watch a successful logout for this session; callers remove the listener on disconnect. */
+  onSessionLogout: (req: AuthRequest, listener: () => void) => () => void;
   /**
    * Soft session reader — returns the validated owner session payload when
    * the request carries one, or null when it doesn't. Unlike
@@ -161,10 +197,13 @@ export interface OwnerAuthPlaceholder {
    * happens to be signed in (e.g. `/oauth/register` stamping
    * `issuer_subject_id`).
    */
-  readOwnerSession: (req: AuthRequest) => OwnerSessionPayload | null;
+  readOwnerSession: (req: AuthRequest) => Promise<OwnerSessionPayload | null>;
+  readOwnerAuthorizationFence: (
+    req: AuthRequest
+  ) => Promise<{ credentialRevision?: string | null; sessionIdHash?: string } | null>;
   renderCsrfField: (token: string) => string;
   requireCsrf: (req: AuthRequest, res: AuthResponse, next: AuthNextFunction) => void;
-  requireOwnerSession: (req: AuthRequest, res: AuthResponse, next: AuthNextFunction) => void;
+  requireOwnerSession: (req: AuthRequest, res: AuthResponse, next: AuthNextFunction) => Promise<void>;
   readonly subjectId: string;
 }
 
@@ -217,13 +256,12 @@ function renderLoginPage({ providerName, error, returnTo, csrfToken, themeChoice
   <div class="hosted-ui-actions">
     <button type="submit" class="hosted-ui-button" data-variant="primary">Sign in</button>
   </div>
-  <p class="hosted-ui-footnote">Configured via <code>PDPP_OWNER_PASSWORD</code>. Clear this placeholder with <code>POST /owner/logout</code>.</p>
 </form>`;
 
   const body = [
     renderPageIntro({
       eyebrow: "Owner sign-in",
-      lede: "This is the local placeholder owner auth for the reference implementation. It is not a full auth product.",
+      lede: "This password keeps other people from seeing your data or changing which apps can use it.",
       title: `Sign in to ${providerName}`,
     }),
     form,
@@ -241,14 +279,14 @@ function renderOwnerAuthDisabledPage({ providerName, themeChoice }: DisabledPage
   const body = [
     renderPageIntro({
       eyebrow: "Owner approval UI",
-      lede: "Placeholder owner sign-in is disabled on this local reference instance, so approval pages remain open in local-dev mode.",
+      lede: "No owner password is set, so approval pages open without sign-in.",
       title: `${providerName} owner access`,
     }),
     renderSurface({
       ariaLabel: "Owner auth status",
       children: renderResultState({
         body: "Device approvals are open locally. Consent approvals still arrive through pending request links.",
-        footnote: "Set PDPP_OWNER_PASSWORD to turn on the reference-only session gate.",
+        footnote: "Set PDPP_OWNER_PASSWORD to require sign-in.",
         title: "Sign-in is not required right now",
         tone: "neutral",
       }),
@@ -258,8 +296,14 @@ function renderOwnerAuthDisabledPage({ providerName, themeChoice }: DisabledPage
       ariaLabel: "Owner auth configuration details",
       children: renderKeyValueList([
         { label: "Current mode", value: "Open local-dev approval UI" },
-        { html: "<code>PDPP_OWNER_PASSWORD=&lt;password&gt;</code>", label: "Enable sign-in" },
-        { label: "Protected when enabled", value: "/consent*, /device*, /owner/login" },
+        {
+          html: "<code>PDPP_OWNER_PASSWORD=&lt;password&gt;</code>",
+          label: "Enable sign-in",
+        },
+        {
+          label: "Protected when enabled",
+          value: "/consent*, /device*, /owner/login",
+        },
         {
           label: "Consent pages",
           value: "Reached from a pending request authorization_url / request_uri flow",
@@ -282,7 +326,7 @@ function renderSignedInOwnerPage({ providerName, subjectId, csrfToken, themeChoi
   const body = [
     renderPageIntro({
       eyebrow: "Owner approval UI",
-      lede: "You are signed in to the local placeholder owner-auth gate for the reference implementation.",
+      lede: `You are signed in to ${providerName}.`,
       title: `${providerName} owner access`,
     }),
     renderSurface({
@@ -290,16 +334,25 @@ function renderSignedInOwnerPage({ providerName, subjectId, csrfToken, themeChoi
       children: [
         renderResultState({
           body: "You can approve device flows directly here, or open a pending consent URL from a staged provider-connect request.",
-          footnote: "This session is reference-only placeholder auth, not a full owner account system.",
+          footnote: "Sign out when you finish on a shared computer.",
           title: "Signed in",
           tone: "success",
         }),
-        renderKeyValueList([{ html: `<code>${hostedEscape(subjectId)}</code>`, label: "Owner subject" }]),
+        renderKeyValueList([
+          {
+            html: `<code>${hostedEscape(subjectId)}</code>`,
+            label: "Owner subject",
+          },
+        ]),
       ].join("\n"),
       surface: "human",
     }),
     renderActionRow([
-      { href: "/", label: "Open PDPP", variant: "primary" },
+      {
+        href: "/",
+        label: `Open ${DATACONNECT_PRODUCT_IDENTITY.name}`,
+        variant: "primary",
+      },
       { href: "/device", label: "Open device approval UI" },
       {
         action: "/owner/logout",
@@ -413,8 +466,16 @@ function readReturnToFromBodyOrQuery(req: AuthRequest): string {
 
 interface SessionHelpers {
   clearSession: (res: AuthResponse, req: AuthRequest) => void;
-  issueSession: (res: AuthResponse, req: AuthRequest) => void;
-  readSession: (req: AuthRequest) => OwnerSessionPayload | null;
+  issueSession: (res: AuthResponse, req: AuthRequest, credentialRevision?: string) => Promise<boolean>;
+  readSession: (req: AuthRequest) => Promise<OwnerSessionPayload | null>;
+  readSessionRecord: (req: AuthRequest) => Promise<OwnerSessionRecord | null>;
+  revokeSession: (req: AuthRequest) => Promise<boolean>;
+  listSessions: (req: AuthRequest, subjectId: string) => ReturnType<OwnerSessionController["listSessions"]>;
+  revokeSessionByPublicId: (subjectId: string, publicId: string) => Promise<boolean>;
+  revokeOtherSessions: (req: AuthRequest, subjectId: string) => Promise<void>;
+  revokeAllSessions: (subjectId: string) => Promise<void>;
+  listOwnerBearers: (subjectId: string) => ReturnType<OwnerSessionController["listOwnerBearers"]>;
+  revokeOwnerBearer: (subjectId: string, publicId: string) => Promise<boolean>;
 }
 
 function appendSetCookie(res: AuthResponse, value: string): void {
@@ -438,27 +499,103 @@ function buildSessionHelpers(controller: OwnerSessionController): SessionHelpers
     clearSession(res: AuthResponse, req: AuthRequest): void {
       appendSetCookie(res, controller.clearSessionCookieHeader({ secure: isSecureRequest(req) }));
     },
-    issueSession(res: AuthResponse, req: AuthRequest): void {
-      const cookieHeader = controller.issueSessionCookieHeader({ secure: isSecureRequest(req) });
-      if (cookieHeader) {
-        appendSetCookie(res, cookieHeader);
+    async issueSession(res: AuthResponse, req: AuthRequest, credentialRevision?: string): Promise<boolean> {
+      const requestedLabel = req.headers["x-pdpp-owner-session-label"]?.trim();
+      const desktopSession = requestedLabel?.toLowerCase() === "this computer";
+      const ipAddress = req.ip ?? req.socket?.remoteAddress ?? req.connection?.remoteAddress ?? null;
+      const userAgent = req.headers["user-agent"] ?? null;
+      const cookieHeader = await controller.issueSessionCookieHeader(
+        { secure: isSecureRequest(req) },
+        {
+          ...(credentialRevision === undefined ? {} : { credentialRevision }),
+          deviceKey: desktopSession ? "desktop-shell" : null,
+          ipAddress,
+          label: desktopSession ? "This computer" : labelOwnerSession(userAgent),
+          userAgent,
       }
+      );
+      if (!cookieHeader) return false;
+      appendSetCookie(res, cookieHeader);
+      return true;
     },
-    readSession(req: AuthRequest): OwnerSessionPayload | null {
+    readSession(req: AuthRequest): Promise<OwnerSessionPayload | null> {
       return controller.readSessionFromCookieHeader(req.headers.cookie);
     },
+    readSessionRecord(req: AuthRequest): Promise<OwnerSessionRecord | null> {
+      return controller.readSessionRecordFromCookieHeader(req.headers.cookie);
+    },
+    revokeSession(req: AuthRequest): Promise<boolean> {
+      return controller.revokeSessionFromCookieHeader(req.headers.cookie);
+    },
+    listSessions(req: AuthRequest, subjectId: string) {
+      return controller.listSessions(subjectId, req.headers.cookie);
+    },
+    revokeSessionByPublicId(subjectId: string, publicId: string) {
+      return controller.revokeSessionByPublicId(subjectId, publicId);
+    },
+    revokeOtherSessions(req: AuthRequest, subjectId: string) {
+      return controller.revokeOtherSessions(req.headers.cookie, subjectId);
+    },
+    revokeAllSessions(subjectId: string) {
+      return controller.revokeAllSessions(subjectId);
+    },
+    listOwnerBearers(subjectId: string) {
+      return controller.listOwnerBearers(subjectId);
+    },
+    revokeOwnerBearer(subjectId: string, publicId: string) {
+      return controller.revokeOwnerBearer(subjectId, publicId);
+    },
   };
+}
+
+function labelOwnerSession(userAgent: string | null): string {
+  if (!userAgent) return "Unknown browser";
+  const browser = /Firefox\//u.test(userAgent)
+    ? "Firefox"
+    : /Edg\//u.test(userAgent)
+      ? "Edge"
+      : /Chrome\//u.test(userAgent)
+        ? "Chrome"
+        : /Safari\//u.test(userAgent)
+          ? "Safari"
+          : "Browser";
+  const platform = /Windows/u.test(userAgent)
+    ? "Windows"
+    : /Android/u.test(userAgent)
+      ? "Android"
+      : /iPhone|iPad|iPod/u.test(userAgent)
+        ? "iOS"
+        : /Macintosh|Mac OS X/u.test(userAgent)
+          ? "macOS"
+          : /Linux/u.test(userAgent)
+            ? "Linux"
+            : null;
+  return platform ? `${browser} on ${platform}` : browser;
 }
 
 interface OwnerAuthRouteContext {
   readonly csrfPairValid: (req: AuthRequest) => boolean;
   readonly enabled: boolean;
   readonly ensureCsrfToken: (req: AuthRequest, res: AuthResponse) => string;
-  readonly passwordMatches: (submitted: string) => boolean;
+  readonly loginRateLimiter: OwnerLoginRateLimiter;
+  readonly notifySessionLogout: (req: AuthRequest) => void;
+  readonly passwordMatches: (submitted: string) => Promise<OwnerPasswordMatch>;
+  readonly credentialSource: () => "app" | "env" | "disabled";
+  readonly changeAppPassword: (
+    password: string,
+    subjectId: string,
+    keepSessionIdHash: string,
+    expectedRevision: string
+  ) => Promise<boolean>;
   readonly providerName: string;
   readonly resolvedSubjectId: string;
   readonly rotateCsrfCookie: (req: AuthRequest, res: AuthResponse) => void;
   readonly session: SessionHelpers;
+}
+
+interface OwnerPasswordMatch {
+  matched: boolean;
+  credentialRevision?: string;
 }
 
 function isJsonRequest(req: AuthRequest): boolean {
@@ -538,6 +675,42 @@ function replyCsrfFailure(req: AuthRequest, res: AuthResponse, providerName: str
     });
 }
 
+function replyLoginRateLimited(
+  req: AuthRequest,
+  res: AuthResponse,
+  providerName: string,
+  retryAfterSeconds: number
+): void {
+  res.setHeader("Retry-After", String(retryAfterSeconds));
+  if (wantsHtml(req)) {
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    res.status(429).send(
+      renderHostedDocument({
+        body: [
+          renderPageIntro({
+            eyebrow: "Owner sign-in",
+            lede: `Too many sign-in attempts from this address. Try again in about ${retryAfterSeconds} seconds.`,
+            title: "Slow down",
+          }),
+        ].join("\n"),
+        providerName,
+        title: `${providerName} — Slow down`,
+      })
+    );
+    return;
+  }
+  res
+    .status(429)
+    .setHeader("Content-Type", "application/json")
+    .json({
+      error: {
+        code: "owner_login_rate_limited",
+        message: "Too many sign-in attempts. Retry after the indicated delay.",
+        type: "slow_down",
+      },
+    });
+}
+
 function replyDisabledLogin(req: AuthRequest, res: AuthResponse, providerName: string): void {
   if (wantsHtml(req)) {
     res.setHeader("Content-Type", "text/html; charset=utf-8");
@@ -555,7 +728,7 @@ function replyDisabledLogin(req: AuthRequest, res: AuthResponse, providerName: s
     .json({
       error: {
         code: "owner_auth_disabled",
-        message: "Owner placeholder auth is disabled on this reference instance.",
+        message: "Owner sign-in is disabled because no owner password is set.",
         type: "invalid_request",
       },
     });
@@ -610,7 +783,7 @@ function sendOwnerLoginPage(
   );
 }
 
-function handleOwnerLoginGet(req: AuthRequest, res: AuthResponse, context: OwnerAuthRouteContext): void {
+async function handleOwnerLoginGet(req: AuthRequest, res: AuthResponse, context: OwnerAuthRouteContext): Promise<void> {
   const hasExplicitReturnTo = typeof req.query?.return_to === "string" && req.query.return_to.length > 0;
   const returnTo = readReturnToFromQuery(req);
   res.setHeader("Content-Type", "text/html; charset=utf-8");
@@ -625,7 +798,7 @@ function handleOwnerLoginGet(req: AuthRequest, res: AuthResponse, context: Owner
     return;
   }
 
-  const currentSession = context.session.readSession(req);
+  const currentSession = await context.session.readSession(req);
   if (!currentSession) {
     const csrfToken = context.ensureCsrfToken(req, res);
     res.status(200).send(
@@ -654,7 +827,11 @@ function handleOwnerLoginGet(req: AuthRequest, res: AuthResponse, context: Owner
   );
 }
 
-function handleOwnerLoginPost(req: AuthRequest, res: AuthResponse, context: OwnerAuthRouteContext): void {
+async function handleOwnerLoginPost(
+  req: AuthRequest,
+  res: AuthResponse,
+  context: OwnerAuthRouteContext
+): Promise<void> {
   const returnTo = readReturnToFromBodyOrQuery(req);
 
   if (!context.enabled) {
@@ -686,8 +863,20 @@ function handleOwnerLoginPost(req: AuthRequest, res: AuthResponse, context: Owne
     return;
   }
 
+  // Checked after CSRF (so an attacker cannot cheaply burn the owner's own
+  // attempt budget with CSRF-invalid junk — obtaining a valid CSRF pair
+  // costs the attacker nothing either, but only real password attempts
+  // should count against the throttle) and before the password comparison
+  // (so every guess, right or wrong, counts toward the window).
+  const retryAfterSeconds = context.loginRateLimiter.check(req);
+  if (retryAfterSeconds !== null) {
+    replyLoginRateLimited(req, res, context.providerName, retryAfterSeconds);
+    return;
+  }
+
   const submitted = req.body && typeof req.body.password === "string" ? req.body.password : "";
-  if (!context.passwordMatches(submitted)) {
+  const passwordMatch = await context.passwordMatches(submitted);
+  if (!passwordMatch.matched) {
     const csrfToken = context.ensureCsrfToken(req, res);
     sendOwnerLoginPage(
       res,
@@ -700,14 +889,27 @@ function handleOwnerLoginPost(req: AuthRequest, res: AuthResponse, context: Owne
     );
     return;
   }
-  context.session.issueSession(res, req);
+  context.loginRateLimiter.recordSuccess(req);
+  if (!(await context.session.issueSession(res, req, passwordMatch.credentialRevision))) {
+    const csrfToken = context.ensureCsrfToken(req, res);
+    sendOwnerLoginPage(
+      res,
+      context.providerName,
+      csrfToken,
+      returnTo,
+      401,
+      "The password changed during sign-in. Try again with the current password.",
+      readHostedThemeChoiceFromCookieHeader(req.headers.cookie)
+    );
+    return;
+  }
   // Rotate the CSRF cookie on auth-state change so a token captured
   // from a pre-login response cannot be reused after sign-in.
   context.rotateCsrfCookie(req, res);
   res.redirect(returnTo);
 }
 
-function handleOwnerLogout(req: AuthRequest, res: AuthResponse, context: OwnerAuthRouteContext): void {
+async function handleOwnerLogout(req: AuthRequest, res: AuthResponse, context: OwnerAuthRouteContext): Promise<void> {
   // CSRF only applies when owner-auth is enabled. With placeholder
   // auth disabled (no PDPP_OWNER_PASSWORD), there is no session
   // and no CSRF surface to protect; preserve the prior open
@@ -720,8 +922,10 @@ function handleOwnerLogout(req: AuthRequest, res: AuthResponse, context: OwnerAu
     replyLogoutCsrfFailure(req, res, context.providerName);
     return;
   }
+  await context.session.revokeSession(req);
   context.session.clearSession(res, req);
   context.rotateCsrfCookie(req, res);
+  context.notifySessionLogout(req);
   if (wantsHtml(req)) {
     res.redirect("/owner/login");
     return;
@@ -741,11 +945,35 @@ function denyOwnerAccess(req: AuthRequest, res: AuthResponse): void {
     .json({
       error: {
         code: "owner_session_required",
-        message:
-          "Owner session required. This is the reference implementation placeholder owner auth; sign in at /owner/login.",
+        message: "Owner session required. Sign in at /owner/login.",
         type: "authentication_error",
       },
     });
+}
+
+async function requireSignedInSession(
+  req: AuthRequest,
+  res: AuthResponse,
+  context: OwnerAuthRouteContext
+): Promise<OwnerSessionPayload | null> {
+  if (!context.enabled) {
+    denyOwnerAccess(req, res);
+    return null;
+  }
+  const current = await context.session.readSession(req);
+  if (!current) {
+    denyOwnerAccess(req, res);
+    return null;
+  }
+  return current;
+}
+
+function isCsrfAuthorized(req: AuthRequest, res: AuthResponse, context: OwnerAuthRouteContext): boolean {
+  if (context.enabled && shouldRequireCsrf(req) && !context.csrfPairValid(req)) {
+    replyCsrfFailure(req, res, context.providerName);
+    return false;
+  }
+  return true;
 }
 
 function handleDisabledOwnerSession(
@@ -765,33 +993,76 @@ function handleDisabledOwnerSession(
  * Build the owner-auth placeholder. Returns an object with:
  *   - `enabled`: whether placeholder auth is active (password configured)
  *   - `subjectId`: the single owner subject id to use when enabled
- *   - `attachRoutes(app)`: wire `/owner/login*` and `/owner/logout` routes
+ *   - `attachRoutes(app)`: wire `/owner/login*`, `/owner/logout` and the
+ *     `/owner/session` admission check
  *   - `requireOwnerSession(req, res, next)`: Express middleware that gates
  *     a protected route. Redirects browsers to `/owner/login`, returns 401
  *     JSON to non-HTML callers.
  */
 export function createOwnerAuthPlaceholder({
   password,
+  passwordVerifier,
   subjectId,
-  providerName = "PDPP Reference Provider",
+  providerName = DATACONNECT_PRODUCT_IDENTITY.name,
   sessionTtlSeconds = OWNER_SESSION_DEFAULT_TTL_SECONDS,
   sameSite = "lax",
   forceSecureCookies = false,
   allowUnauthenticatedWhenDisabled = true,
   csrfSecret: csrfSecretOverride = null,
+  loginRateLimit = {},
+  sessionStore,
+  passwordVerifierStore,
 }: OwnerAuthPlaceholderOptions = {}): OwnerAuthPlaceholder {
   // `exactOptionalPropertyTypes` won't accept `undefined` in these fields,
   // so we fall back to the declared `null` sentinel the controller already
   // understands as "not provided."
+  let activePasswordVerifier = passwordVerifier ?? null;
+  let credentialSource: "app" | "env" | "disabled" = password ? "env" : activePasswordVerifier ? "app" : "disabled";
+  const hasPasswordCredential =
+    (typeof password === "string" && password.length > 0) ||
+    passwordVerifier != null ||
+    !allowUnauthenticatedWhenDisabled;
   const sessionController = createOwnerSessionController({
+    enabled: hasPasswordCredential,
     forceSecureCookies,
     password: password ?? null,
+    sessionStore: sessionStore ?? getOwnerSessionStore(),
     sameSite,
     sessionTtlSeconds,
     subjectId: subjectId ?? null,
   });
   const { enabled, subjectId: resolvedSubjectId } = sessionController;
   const session = buildSessionHelpers(sessionController);
+  const logoutListeners = new Map<string, Set<() => void>>();
+
+  function ownerSessionKey(req: AuthRequest): string | null {
+    const cookie = parseCookieHeader(req.headers.cookie)[OWNER_SESSION_COOKIE_NAME];
+    return cookie ? crypto.createHash("sha256").update(cookie).digest("base64url") : null;
+  }
+
+  function onSessionLogout(req: AuthRequest, listener: () => void): () => void {
+    const key = enabled ? ownerSessionKey(req) : null;
+    if (!key) return () => undefined;
+    let listeners = logoutListeners.get(key);
+    if (!listeners) {
+      listeners = new Set();
+      logoutListeners.set(key, listeners);
+    }
+    const registered = listeners;
+    registered.add(listener);
+    return () => {
+      registered.delete(listener);
+      if (registered.size === 0 && logoutListeners.get(key) === registered) logoutListeners.delete(key);
+    };
+  }
+
+  function notifySessionLogout(req: AuthRequest): void {
+    const key = ownerSessionKey(req);
+    if (!key) return;
+    const listeners = logoutListeners.get(key);
+    logoutListeners.delete(key);
+    for (const listener of listeners ?? []) listener();
+  }
   // CSRF protection is only meaningful when owner-auth is enabled (the
   // password gates everything). When disabled, the helpers no-op and
   // the routes stay open as before.
@@ -805,6 +1076,15 @@ export function createOwnerAuthPlaceholder({
   // SHOULD pass an explicit `csrfSecret` (high-entropy, unrelated to
   // any user input) — but the default is the random secret.
   const csrfSecret: OwnerCsrfSecret | null = enabled ? (csrfSecretOverride ?? generateOwnerCsrfSecret()) : null;
+
+  // Disabled only for test fixtures that need deterministic unlimited
+  // attempts (`loginRateLimit: false`); every real deployment keeps the
+  // default throttle. `check` always returning `null` yields a genuine
+  // no-op, not merely a very high ceiling.
+  const loginRateLimiter: OwnerLoginRateLimiter =
+    loginRateLimit === false
+      ? { check: () => null, recordSuccess: () => undefined }
+      : createOwnerLoginRateLimiter(loginRateLimit);
 
   function ensureCsrfToken(req: AuthRequest, res: AuthResponse): string {
     if (!csrfSecret) {
@@ -880,30 +1160,265 @@ export function createOwnerAuthPlaceholder({
     return validateOwnerCsrfPair(cookieToken, formToken, csrfSecret);
   }
 
-  function passwordMatches(submitted: string): boolean {
-    if (!submitted || typeof password !== "string" || !password) {
-      return false;
+  async function passwordMatches(submitted: string): Promise<OwnerPasswordMatch> {
+    if (!submitted) return { matched: false };
+    if (typeof password === "string" && password) {
+      return { matched: timingSafeEqualString(submitted, password) };
     }
-    return timingSafeEqualString(submitted, password);
+    let credentialRevision: string | undefined;
+    if (passwordVerifierStore) {
+      const storedVerifier = await passwordVerifierStore.readVersioned();
+      if (storedVerifier) {
+        activePasswordVerifier = storedVerifier.verifier;
+        credentialRevision = storedVerifier.revision;
+      }
+    }
+    if (!activePasswordVerifier) return { matched: false };
+    return {
+      matched: await verifyOwnerPassword(submitted, activePasswordVerifier),
+      ...(credentialRevision === undefined ? {} : { credentialRevision }),
+    };
+    }
+
+  async function changeAppPassword(
+    newPassword: string,
+    subjectId: string,
+    keepSessionIdHash: string,
+    expectedRevision: string
+  ): Promise<boolean> {
+    if (credentialSource !== "app" || !passwordVerifierStore || !passwordVerifierStore.isDurable()) {
+      throw new Error("App-managed password changes require a durable verifier store.");
+    }
+    const verifier = await createOwnerPasswordVerifier(newPassword);
+    const changed = await passwordVerifierStore.writeAndRevokeAccess(
+      verifier,
+      subjectId,
+      keepSessionIdHash,
+      expectedRevision
+    );
+    if (!changed) return false;
+    activePasswordVerifier = verifier;
+    return true;
   }
 
   function attachRoutes(app: AuthAppLike): void {
     const context: OwnerAuthRouteContext = {
       csrfPairValid,
+      credentialSource: () => credentialSource,
+      changeAppPassword,
       enabled,
       ensureCsrfToken,
+      loginRateLimiter,
+      notifySessionLogout,
       passwordMatches,
       providerName,
       resolvedSubjectId,
       rotateCsrfCookie,
       session,
     };
-    app.get("/owner/login", (req, res) => handleOwnerLoginGet(req, res, context));
-    app.post("/owner/login", (req, res) => handleOwnerLoginPost(req, res, context));
-    app.post("/owner/logout", (req, res) => handleOwnerLogout(req, res, context));
+    app.get("/owner/login", async (req, res) => {
+      if (!allowUnauthenticatedWhenDisabled && !(typeof password === "string" && password) && !activePasswordVerifier) {
+        res.redirect("/setup");
+        return;
+      }
+      await handleOwnerLoginGet(req, res, context);
+    });
+    app.post("/owner/login", async (req, res) => {
+      if (!allowUnauthenticatedWhenDisabled && !(typeof password === "string" && password) && !activePasswordVerifier) {
+        res.redirect("/setup");
+        return;
+      }
+      await handleOwnerLoginPost(req, res, context);
+    });
+    app.post("/owner/logout", async (req, res) => await handleOwnerLogout(req, res, context));
+
+    app.get("/owner/password", async (req, res) => {
+      const current = await requireSignedInSession(req, res, context);
+      if (!current) return;
+      res.setHeader("Content-Type", "application/json").status(200).json({
+        object: "owner_password",
+        source: context.credentialSource(),
+        minimumLength: OWNER_PASSWORD_MIN_LENGTH,
+      });
+    });
+
+    app.post("/owner/password/change", async (req, res) => {
+      if (!isCsrfAuthorized(req, res, context)) return;
+      if (context.credentialSource() === "env") {
+        res.status(409).json({
+          error: {
+            code: "owner_password_env_managed",
+            message:
+              "This password is set by PDPP_OWNER_PASSWORD. Change that environment variable and restart the server.",
+          },
+        });
+        return;
+      }
+      if (context.credentialSource() !== "app") {
+        res.status(404).json({
+          error: {
+            code: "owner_auth_disabled",
+            message: "Owner password changes are unavailable.",
+          },
+        });
+        return;
+      }
+      const current = await requireSignedInSession(req, res, context);
+      if (!current) return;
+      const retryAfterSeconds = context.loginRateLimiter.check(req);
+      if (retryAfterSeconds !== null) {
+        replyLoginRateLimited(req, res, context.providerName, retryAfterSeconds);
+        return;
+      }
+      const currentPassword = typeof req.body?.currentPassword === "string" ? req.body.currentPassword : "";
+      const newPassword = typeof req.body?.newPassword === "string" ? req.body.newPassword : "";
+      const passwordMatch = await context.passwordMatches(currentPassword);
+      if (!passwordMatch.matched || !passwordMatch.credentialRevision) {
+        res.status(401).json({
+          error: {
+            code: "owner_password_invalid",
+            message: "Current password is incorrect.",
+          },
+        });
+        return;
+      }
+      const currentRecord = await context.session.readSessionRecord(req);
+      if (!currentRecord) {
+        res.status(401).json({
+          error: { code: "owner_session_required", message: "Sign in to change the owner password." },
+        });
+        return;
+      }
+      context.loginRateLimiter.recordSuccess(req);
+      if (Array.from(newPassword).length < OWNER_PASSWORD_MIN_LENGTH) {
+        res.status(400).json({
+          error: {
+            code: "owner_password_too_short",
+            message: `New passwords must be at least ${OWNER_PASSWORD_MIN_LENGTH} characters long.`,
+          },
+        });
+        return;
+      }
+      try {
+        const changed = await context.changeAppPassword(
+          newPassword,
+          current.sub,
+          currentRecord.idHash,
+          passwordMatch.credentialRevision
+        );
+        if (!changed) {
+          res.status(409).json({
+            error: {
+              code: "owner_password_changed",
+              message: "The password changed during this request. Sign in with the current password and try again.",
+            },
+          });
+          return;
+        }
+      } catch {
+        res.status(503).json({
+          error: {
+            code: "owner_password_not_durable",
+            message: "Could not save the new password to durable storage.",
+          },
+        });
+        return;
+      }
+      res.status(204).end();
+    });
+    // Body-less admission check for a server that forwards a browser's cookie
+    // but cannot validate it itself (the console in a split deployment, before
+    // it hands out the owner bearer). Same decision as every other gated
+    // route: 204 when `requireOwnerSession` admits the request (a valid
+    // session, or the open local-dev posture), otherwise its 401/redirect.
+    app.get("/owner/session", async (req, res) => {
+      await requireOwnerSession(req, res, () => {
+        res.status(204).end();
+      });
+    });
+
+    app.get("/owner/sessions", async (req, res) => {
+      if (!context.enabled) {
+        res.status(404).json({
+          error: {
+            code: "owner_sessions_disabled",
+            message: "Owner sessions are not enabled.",
+          },
+        });
+        return;
+  }
+      const current = await requireSignedInSession(req, res, context);
+      if (!current) return;
+      const [sessions, bearers] = await Promise.all([
+        context.session.listSessions(req, current.sub),
+        context.session.listOwnerBearers(current.sub),
+      ]);
+      res
+        .setHeader("Content-Type", "application/json")
+        .status(200)
+        .json({ object: "owner_sessions", sessions, bearers });
+    });
+
+    app.post("/owner/sessions/revoke-others", async (req, res) => {
+      if (!isCsrfAuthorized(req, res, context)) return;
+      const current = await requireSignedInSession(req, res, context);
+      if (!current) return;
+      await context.session.revokeOtherSessions(req, current.sub);
+      res.status(204).end();
+    });
+
+    app.post("/owner/sessions/revoke-all", async (req, res) => {
+      if (!isCsrfAuthorized(req, res, context)) return;
+      const current = await requireSignedInSession(req, res, context);
+      if (!current) return;
+      await context.session.revokeAllSessions(current.sub);
+      res.status(204).end();
+    });
+
+    app.post("/owner/sessions/:publicId/revoke", async (req, res) => {
+      if (!isCsrfAuthorized(req, res, context)) return;
+      const current = await requireSignedInSession(req, res, context);
+      if (!current) return;
+      const publicId = req.params?.publicId ?? "";
+      if (!/^[A-Za-z0-9_-]{16}$/u.test(publicId)) {
+        res.status(400).json({
+          error: {
+            code: "invalid_request",
+            message: "Session id is invalid.",
+          },
+        });
+        return;
+      }
+      if (!(await context.session.revokeSessionByPublicId(current.sub, publicId))) {
+        res.status(404).json({ error: { code: "not_found", message: "Session not found." } });
+        return;
+      }
+      res.status(204).end();
+    });
+
+    app.post("/owner/bearers/:publicId/revoke", async (req, res) => {
+      if (!isCsrfAuthorized(req, res, context)) return;
+      const current = await requireSignedInSession(req, res, context);
+      if (!current) return;
+      const publicId = req.params?.publicId ?? "";
+      if (!/^tok_[A-Za-z0-9_-]{43}$/u.test(publicId)) {
+        res.status(400).json({
+          error: {
+            code: "invalid_request",
+            message: "Bearer id is invalid.",
+          },
+        });
+        return;
+      }
+      if (!(await context.session.revokeOwnerBearer(current.sub, publicId))) {
+        res.status(404).json({ error: { code: "not_found", message: "Bearer not found." } });
+        return;
+      }
+      res.status(204).end();
+    });
   }
 
-  function requireOwnerSession(req: AuthRequest, res: AuthResponse, next: AuthNextFunction): void {
+  async function requireOwnerSession(req: AuthRequest, res: AuthResponse, next: AuthNextFunction): Promise<void> {
     if (!enabled) {
       // Owner auth is disabled (no PDPP_OWNER_PASSWORD). Whether that means
       // "open" depends on the deployment posture the host computed:
@@ -916,7 +1431,7 @@ export function createOwnerAuthPlaceholder({
       return;
     }
 
-    const current = session.readSession(req);
+    const current = await session.readSession(req);
     if (current) {
       req.ownerSession = current;
       next();
@@ -931,8 +1446,24 @@ export function createOwnerAuthPlaceholder({
     csrfCookieName: OWNER_CSRF_COOKIE_NAME,
     csrfFieldName: OWNER_CSRF_FIELD_NAME,
     enabled,
+    setPasswordVerifier(verifier) {
+      activePasswordVerifier = verifier;
+      credentialSource = "app";
+    },
     ensureCsrfToken,
-    readOwnerSession: (req) => session.readSession(req),
+    onSessionLogout,
+    readOwnerSession: async (req) => await session.readSession(req),
+    readOwnerAuthorizationFence: async (req) => {
+      const record = await session.readSessionRecord(req);
+      if (!record) return null;
+      const storedVerifier = await passwordVerifierStore?.readVersioned();
+      return {
+        ...(storedVerifier === null || storedVerifier === undefined
+          ? {}
+          : { credentialRevision: storedVerifier.revision }),
+        sessionIdHash: record.idHash,
+      };
+    },
     renderCsrfField: renderCsrfHiddenField,
     requireCsrf,
     requireOwnerSession,

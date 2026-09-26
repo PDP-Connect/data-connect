@@ -16,13 +16,13 @@
 //   - selecting one stream without "select all" was confusing/impossible
 //   - a stream selected without its parent produced a raw JSON invalid_request
 //
-// This file loads the real picker HTML the AS renders and executes its script
+// This file loads the real legacy form fallback HTML the AS renders and executes its script
 // in a real DOM (jsdom), then drives the picker the way a person would and
 // asserts the resulting DOM state. It fails on each of the UAT regressions
 // above at the level they were actually observed: in-browser behavior.
 
 import assert from "node:assert/strict";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, webcrypto } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
@@ -30,11 +30,15 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { canonicalConnectorKeyFromManifest } from "../server/connector-key.ts";
+import { computeHostedMcpDecisionDigest } from "../server/hosted-mcp-decision-digest.ts";
 import { startServer } from "../server/index.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
 
 interface JsdomModule {
-  JSDOM: new (html: string, options?: { runScripts?: "dangerously" }) => { readonly window: unknown };
+  JSDOM: new (
+    html: string,
+    options?: { beforeParse?: (window: Record<string, unknown>) => void; runScripts?: "dangerously" }
+  ) => { readonly window: unknown };
 }
 
 const { JSDOM } = createRequire(import.meta.url)("jsdom") as JsdomModule;
@@ -53,15 +57,19 @@ interface MinimalDomEvent {
 interface MinimalElement {
   checked: boolean;
   click: () => void;
+  closest: (selector: string) => MinimalElement | null;
   readonly dataset: Record<string, string | undefined>;
   readonly disabled: boolean;
   dispatchEvent: (event: MinimalDomEvent) => boolean;
   readonly hidden: boolean;
   readonly indeterminate: boolean;
   open: boolean;
+  readonly nextElementSibling: MinimalElement | null;
   querySelector: (selector: string) => MinimalElement | null;
   querySelectorAll: (selector: string) => Iterable<MinimalElement>;
   readonly textContent: string | null;
+  /** Present on inputs; the hidden decision-digest field is read through it. */
+  value: string;
 }
 
 interface MinimalDocument {
@@ -157,8 +165,8 @@ function mustExist<T>(value: T | null | undefined, description: string): T {
 }
 
 // Boot the AS, register three connectors, seed two active owner bindings, and
-// fetch the live picker HTML the way the browser would (GET /oauth/authorize
-// with no authorization_details / connector_id). The unheld third catalog entry
+// verify GET /oauth/authorize hands off to the console, then load the legacy
+// form's validation fallback. The unheld third catalog entry
 // proves the picker filters registered sources through owner holdings. Returns a
 // jsdom window with the inline picker script executed, plus helpers to drive and
 // inspect it.
@@ -182,14 +190,31 @@ async function openPickerDom() {
     authorizeUrl.searchParams.set("code_challenge", pkceChallenge(verifier));
     authorizeUrl.searchParams.set("code_challenge_method", "S256");
 
-    const pickerResp = await fetch(authorizeUrl, { redirect: "manual" });
-    assert.equal(pickerResp.status, 200);
+    const handoff = await fetch(authorizeUrl, { redirect: "manual" });
+    assert.equal(handoff.status, 302, "new approvals hand off to the console");
+    const location = new URL(mustExist(handoff.headers.get("location"), "handoff must have a location"));
+    assert.ok(location.searchParams.get("challenge"), "handoff must carry a consent challenge");
+
+    // The inline script still runs when a legacy form submission needs repair.
+    // Request that actual HTTP surface; the console challenge page uses React.
+    const pickerResp = await fetch(`${asUrl}/oauth/authorize/mcp-package`, {
+      body: authorizeUrl.searchParams.toString(),
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      method: "POST",
+      redirect: "manual",
+    });
+    assert.equal(pickerResp.status, 400, "an empty legacy submission renders the repair form");
     const html = await pickerResp.text();
 
     // runScripts: 'dangerously' executes the inline picker <script>, wiring the
     // real event listeners the browser would. The IIFE also runs its initial
     // syncSource pass on load, exactly as in a browser.
-    const dom = new JSDOM(html, { runScripts: "dangerously" });
+    const dom = new JSDOM(html, {
+      beforeParse(window) {
+        Object.defineProperty(window, "crypto", { configurable: true, value: webcrypto });
+      },
+      runScripts: "dangerously",
+    });
     const window = dom.window as MinimalWindow;
     const { document } = window;
     const form = mustExist(document.querySelector("[data-hosted-mcp-picker-form]"), "picker form must render");
@@ -215,9 +240,25 @@ async function openPickerDom() {
       return prevented;
     };
     const errorEl = () => form.querySelector("[data-hosted-mcp-picker-error]");
+    // The approval binding is hashed with SubtleCrypto, so it lands a
+    // microtask after the `change` that triggered it. A real click always
+    // arrives long after; these tests drive the DOM synchronously, so they
+    // wait for the field the way the page's own submit handler does.
+    const decisionDigestField = () => form.querySelector("[data-hosted-mcp-decision-digest]");
+    const awaitDecisionDigest = async () => {
+      for (let attempt = 0; attempt < 50; attempt += 1) {
+        if (decisionDigestField()?.value) {
+          return decisionDigestField()?.value;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      return decisionDigestField()?.value;
+    };
 
     return {
+      awaitDecisionDigest,
       click,
+      decisionDigestField,
       async close() {
         await closeServer(server);
       },
@@ -361,8 +402,79 @@ test("picker runtime: a valid single-stream selection submits (not prevented)", 
     );
     stream.checked = true;
     p.fire(stream, "change");
+    await p.awaitDecisionDigest();
+
+    // jsdom exposes no SubtleCrypto, which is the same situation as a browser
+    // on a non-secure origin — a real case, since a local instance is reached
+    // over plain HTTP. The picker must degrade rather than trap the owner:
+    // the digest stays empty, nothing throws, and the submit is allowed
+    // through on the retry so the SERVER's fail-closed check is what rejects
+    // it (with a page telling the owner to review again), instead of a button
+    // that silently does nothing forever.
+    const digest = p.decisionDigestField()?.value ?? "";
+    if (digest) {
+      assert.match(digest, /^sha256:/, "a computed binding must be a sha256 digest");
+    }
+    p.submit();
     const prevented = p.submit();
-    assert.equal(prevented, false, "a valid one-stream selection must be allowed to submit");
+    assert.equal(prevented, false, "a valid one-stream selection must never be trapped by the binding guard");
+  } finally {
+    await p.close();
+  }
+});
+
+test("picker runtime: decision digest matches the AS payload for expiry, selected fields, and date range", async () => {
+  const p = await openPickerDom();
+  try {
+    const stream = mustExist(
+      p.streamBoxes().find((candidate) => candidate.dataset.streamName === "saved_tracks"),
+      "the fixture must render the saved_tracks stream"
+    );
+    const sourceKey = mustExist(stream.dataset.sourceKey, "stream checkbox must carry its source key");
+    const scope = mustExist(
+      stream.closest(".hosted-ui-stream-option")?.nextElementSibling,
+      "the stream must carry scope controls beside its checkbox"
+    );
+    const fieldInputs = Array.from(scope.querySelectorAll('input[name^="narrow_fields_"]'));
+    assert.ok(fieldInputs.length > 1, "the fixture must expose optional field checkboxes");
+    for (const input of fieldInputs) {
+      input.checked = input.value === "artist_names";
+    }
+    const since = mustExist(scope.querySelector('input[name^="narrow_since_"]'), "the fixture must expose a start date");
+    const until = mustExist(scope.querySelector('input[name^="narrow_until_"]'), "the fixture must expose an end date");
+    since.value = "2025-01-01";
+    until.value = "2025-01-31";
+    const expiry = mustExist(
+      p.form.querySelector('input[name="grant_expiry"][value="1y"]'),
+      "the picker must offer the one-year grant expiry"
+    );
+    expiry.checked = true;
+    stream.checked = true;
+
+    p.fire(stream, "change");
+    p.fire(scope, "change");
+    p.fire(expiry, "change");
+    const actual = await p.awaitDecisionDigest();
+    const clientId = mustExist(p.form.querySelector('input[name="client_id"]')?.value, "form must carry client_id");
+    const expected = computeHostedMcpDecisionDigest({
+      accessMode: "continuous",
+      clientId,
+      grantExpiry: "1y",
+      sources: [
+        {
+          sourceKey,
+          streams: [
+            {
+              fields: ["artist_names", "id", "name"],
+              name: "saved_tracks",
+              timeRange: { since: "2025-01-01", until: "2025-01-31" },
+            },
+          ],
+        },
+      ],
+    });
+
+    assert.equal(actual, expected, "browser digest must match the AS recomputation payload");
   } finally {
     await p.close();
   }
@@ -410,23 +522,43 @@ test("picker runtime: bulk controls behave distinctly (select / clear / expand /
   }
 });
 
-test("picker runtime: clearing a source via its per-source button collapses only that source", async () => {
+test("picker runtime: the parent checkbox selects and clears its own source, with no per-source buttons", async () => {
+  // The 54 per-source `Select every stream` / `Clear this source` buttons are
+  // gone. They existed because 27 sources made bulk affordances feel
+  // necessary, but the tri-state parent checkbox already does exactly this
+  // job — and a control that needs two buttons to explain it is a control
+  // that is not working. This proves the parent alone covers both directions.
   const p = await openPickerDom();
   try {
     const source = mustExist(p.sources()[0], "at least one source must render");
-    // Select the whole source (opens it), then use the per-source clear button.
+    assert.equal(
+      source.querySelector("[data-hosted-mcp-clear-streams]"),
+      null,
+      "no per-source clear button remains"
+    );
+    assert.equal(
+      source.querySelector("[data-hosted-mcp-select-streams]"),
+      null,
+      "no per-source select-every button remains"
+    );
+
     const sourceBox = mustExist(p.sourceBoxIn(source), "the source checkbox must render");
     sourceBox.checked = true;
     p.fire(sourceBox, "change");
+    assert.ok(
+      p.streamsIn(source).every((s) => s.checked),
+      "checking the parent selects every stream in that source"
+    );
     assert.equal(source.open, true, "selecting a source opens it");
+    assert.equal(source.dataset.sourceSelected, "true", "the source reads as selected");
 
-    source.querySelector("[data-hosted-mcp-clear-streams]")?.click();
+    sourceBox.checked = false;
+    p.fire(sourceBox, "change");
     assert.ok(
       p.streamsIn(source).every((s) => !s.checked),
-      "per-source clear unchecks its streams"
+      "unchecking the parent clears every stream in that source"
     );
-    assert.equal(source.open, false, "per-source clear collapses that source");
-    assert.equal(source.dataset.sourceSelected, "false", "per-source clear deselects the source");
+    assert.equal(source.dataset.sourceSelected, "false", "the source reads as deselected");
   } finally {
     await p.close();
   }

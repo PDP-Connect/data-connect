@@ -125,6 +125,7 @@ export type ExclusionReason =
   | "outside_cohort"
   | "test_file"
   | "excluded_tooling"
+  | "no_mutable_change"
 
 /** One `git diff` name-status record, already parsed out of the NUL-delimited stream. */
 export interface DiffEntry {
@@ -529,6 +530,13 @@ function isProductionSourceExtension(path: string): boolean {
   )
 }
 
+function isCohortTestPath(entryPath: string, cohort: CohortDefinition): boolean {
+  if (cohort.root !== ".") {
+    return entryPath.startsWith(`${cohort.root}/`)
+  }
+  return cohort.productionPrefixes.some((prefix) => entryPath.startsWith(prefix))
+}
+
 /**
  * Classify one diff entry for one cohort.
  *
@@ -595,14 +603,63 @@ export function selectCohortTests(
     if (!isTestPath(entry.path) || !isProductionSourceExtension(entry.path)) {
       continue
     }
-    // Test files live inside the cohort root but outside the production
-    // prefixes, so cohort membership is decided by the root here.
-    if (cohort.root !== "." && !entry.path.startsWith(`${cohort.root}/`)) {
+    // Non-root cohorts can keep tests beside their own root even when tests
+    // live outside production prefixes. Root cohorts share the repository root,
+    // so their tests must be narrowed by production prefix; otherwise the
+    // scripts cohort picks up client/reference tests that its Stryker config
+    // cannot honestly run for script mutants.
+    if (!isCohortTestPath(entry.path, cohort)) {
       continue
     }
     selected.push(toCohortRelative(entry.path, cohort.root))
   }
   return [...new Set(selected)].sort()
+}
+
+/**
+ * Whether a test belongs to a nested package that runs its tests its own way.
+ *
+ * A cohort's command runner executes one command for the whole selection, so
+ * every selected test has to be runnable by that one command. A vendored
+ * sub-package with its own `package.json` `test` script is not: it declares a
+ * different contract. `vendor/brand-react` runs
+ * `node --import tsx --import ./css-stub-register.ts` because its tests import
+ * `.tsx` components which in turn `import "./components.css"` -- two loaders the
+ * cohort command does not carry, and would have to adopt wholesale to run these.
+ *
+ * Such a test is not part of the cohort's suite either: reference-implementation
+ * discovery walks `test/` only (`scripts/run-tests.ts:57`), so these files never
+ * run in the cohort's own test job. They reached the baseline solely because the
+ * revision touched them, and there they failed with ERR_UNKNOWN_FILE_EXTENSION,
+ * rejected the baseline, and cost the attempt every mutant's verdict.
+ *
+ * Withholding is not skipping, and here it removes no coverage the baseline
+ * otherwise had: the package's own `npm test` still runs these, and they still
+ * fail if broken. They are held out only of a cohort baseline whose single
+ * command was never able to execute them.
+ *
+ * The judgement is the package boundary, not the file extension -- a nested
+ * `package.json` declaring its own `test` script is the durable signal that some
+ * other runner owns these files.
+ */
+export function ownedByNestedTestRunner(
+  testPath: SelectedFile,
+  cohortRoot: string,
+  hasOwnTestScript: (packageJsonPath: string) => boolean
+): boolean {
+  const segments = testPath.split("/")
+  // Every directory strictly above the test file, nearest first. The cohort root
+  // itself is excluded: its `package.json` is the cohort's own, and treating it
+  // as a nested runner would withhold the whole suite.
+  for (let depth = segments.length - 1; depth > 0; depth -= 1) {
+    const directory = segments.slice(0, depth).join("/")
+    const packageJsonPath =
+      cohortRoot === "." ? `${directory}/package.json` : `${cohortRoot}/${directory}/package.json`
+    if (hasOwnTestScript(packageJsonPath)) {
+      return true
+    }
+  }
+  return false
 }
 
 /**
@@ -623,20 +680,78 @@ export function selectCohortTests(
  * The exclusion is recorded in the intent packet rather than applied silently.
  */
 export function escapesCohortRoot(testPath: SelectedFile, testSource: string): boolean {
+  // Git can walk out of a Stryker sandbox to the enclosing checkout metadata.
+  // A test that asks for the repository root can then read files outside the
+  // copied cohort. That is the same boundary as an explicit ../ path, but the
+  // traversal is hidden behind Git.
+  if (/\bexecFileSync\(\s*["'`]git["'`]\s*,\s*\[\s*["'`]rev-parse["'`]\s*,\s*["'`]--show-toplevel["'`]/.test(testSource)) {
+    return true
+  }
+
   // How far the test's own directory sits below the cohort root. A `../` budget
   // larger than this climbs past the root, which is what leaves the sandbox.
   const depth = testPath.split("/").length - 1
+
+  // Follow simple `join(alias, "relative/path")` bindings as well as direct
+  // literals. Tests often derive the repository root through an intermediate
+  // cohort-root constant; counting each `..` independently misses that the
+  // second join starts at the root rather than at the test directory.
+  const aliasDepths = new Map([["__dirname", depth]])
+  let foundAlias = true
+  while (foundAlias) {
+    foundAlias = false
+    for (const [, alias, base, relativePath] of testSource.matchAll(
+      /(?:const|let)\s+([\w$]+)\s*=\s*join\(\s*([\w$]+)\s*,\s*["'`]([^"'`]*)["'`]\s*\)/g
+    )) {
+      const baseDepth = aliasDepths.get(base)
+      if (baseDepth === undefined || aliasDepths.has(alias)) {
+        continue
+      }
+      let aliasDepth = baseDepth
+      for (const segment of relativePath.split("/")) {
+        if (segment === "..") {
+          aliasDepth -= 1
+        } else if (segment !== "" && segment !== ".") {
+          aliasDepth += 1
+        }
+      }
+      if (aliasDepth < 0) {
+        return true
+      }
+      aliasDepths.set(alias, aliasDepth)
+      foundAlias = true
+    }
+  }
 
   // The traversals these tests build with `join(__dirname, "../../...")`. Each
   // literal is measured against the budget rather than matched at a fixed
   // depth, because the same `../../` escapes from `scripts/` but not from
   // `test/nested/`.
-  for (const [, literal] of testSource.matchAll(/["'`]([^"'`\n]*\.\.\/[^"'`\n]*)["'`]/g)) {
+  //
+  // `join` takes its segments either way, so the same escape has two spellings:
+  // one literal `"../../x"`, or separate arguments `"..", "..", "x"`. Measuring
+  // only the first missed `join(testDir, "..", "..", "PG-PROFILE-51-REPORT.md")`
+  // -- a real repository-root read whose ENOENT in the sandbox rejected a whole
+  // cohort's baseline. A run of adjacent `".."` literals is therefore counted as
+  // one climb, the same as the slash-joined form it is equivalent to.
+  for (const [, literals] of testSource.matchAll(
+    /((?:["'`][^"'`\n]*["'`]\s*,\s*)*["'`][^"'`\n]*\.\.[^"'`\n]*["'`])/g
+  )) {
     let climbed = 0
-    for (const segment of literal.split("/")) {
-      if (segment === "..") {
-        climbed += 1
-      } else if (segment !== "." && segment !== "") {
+    for (const [, literal] of literals.matchAll(/["'`]([^"'`\n]*)["'`]/g)) {
+      // A lone `".."` argument climbs one level; a slash-joined literal climbs
+      // by its own leading `..` segments. Either way the run ends at the first
+      // segment that names something, which is where the descent begins.
+      let escaped = false
+      for (const segment of literal.split("/")) {
+        if (segment === "..") {
+          climbed += 1
+        } else if (segment !== "." && segment !== "") {
+          escaped = true
+          break
+        }
+      }
+      if (escaped) {
         break
       }
     }
@@ -905,19 +1020,43 @@ export function freezeIntent(input: {
       continue
     }
 
-    const ranges = [...(input.hunks?.get(path) ?? [])]
-    if (ranges.length === 0) {
-      // Failing here is the point. The caller selected this file, so the
-      // evidence has to say which of its lines were mutated; there is no
-      // reading of "none" that a completed run could honestly report. A revision
-      // that legitimately changes no line of a selected file -- a pure rename --
-      // must drop it from the diff rather than have it silently mutated whole.
+    // `Map.get` distinguishes "no entry for this path" from "an entry whose
+    // ranges are empty" -- `parseUnifiedZeroHunks` only ever inserts a path
+    // when `git diff -U0` emits a `+++ b/<path>` header for it at all, so an
+    // ABSENT entry means git supplied no hunk output whatsoever (a
+    // 100%-similarity rename: the file's bytes are identical at head, and
+    // its being selected as changed at all is exactly the anomaly this
+    // scoping exists to catch). A PRESENT entry with an empty array means
+    // git did emit hunks for the file, and every one of them was a pure
+    // deletion (`newCount` 0 -- see `parseUnifiedZeroHunks`'s doc comment:
+    // deleted content cannot carry a fault into head, so it contributes no
+    // range by design). These are not the same fact and must not collapse
+    // into the same branch: the first is a signal something is wrong with
+    // what the diff even claims changed; the second is an ordinary,
+    // legitimate code change (removing dead code) that happens to leave
+    // nothing mutable behind.
+    const entry = input.hunks?.get(path)
+    if (entry === undefined) {
+      // The caller selected this file, so the evidence has to say which of
+      // its lines were mutated; there is no reading of "none" that a
+      // completed run could honestly report. A revision that legitimately
+      // changes no line of a selected file -- a pure rename -- must drop it
+      // from the diff rather than have it silently mutated whole.
       throw new Error(
         `${relative} was selected for mutation (status ${status || "unknown"}) but has no ` +
           `changed line ranges. Whole-file scope is reserved for added files; a selected file ` +
           `with no derived ranges cannot be scoped, and silently mutating it in full would ` +
           `report evidence this revision's diff does not support.`
       )
+    }
+    const ranges = [...entry]
+    if (ranges.length === 0) {
+      // A modification whose diff exists but whose every hunk is a pure
+      // deletion changed zero lines AT HEAD -- there is nothing left to
+      // mutate, the same fact a deleted or renamed-with-no-content-change
+      // file already records via `excluded`, not a crash.
+      excluded.push({ path, reason: "no_mutable_change" })
+      continue
     }
     scope.push({ path: relative, kind: "changed_ranges", ranges })
     mutate.push(...toMutateEntries(relative, ranges))

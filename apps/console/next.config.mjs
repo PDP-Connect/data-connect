@@ -35,15 +35,27 @@ const nextConfig = {
     },
     useTypeScriptCli: true,
   },
+  // Off everywhere: the dev-only "N" build-status badge (bottom-left, fixed
+  // position) never ships in a production build regardless of this flag —
+  // `next build`/`next start` don't include next-devtools — but it visually
+  // overlaps small-viewport UI (e.g. a mobile sticky action bar) in `next
+  // dev`, which is where this app's screenshots and manual review happen.
+  devIndicators: false,
   output: "standalone",
+  // sharp ships prebuilt binaries for both glibc and musl per platform, and Next's
+  // file tracer can't tell at build time which one the deploy target needs, so it
+  // conservatively includes both. The console never runs on musl, but linuxdeploy
+  // (the Tauri Linux AppImage bundler) walks every .node file's ELF deps and treats
+  // the musl-only libc.musl-x86_64.so.1 reference as an unresolvable dependency,
+  // hard-failing the whole bundle. Exclude the musl variant so it never reaches the
+  // standalone output that gets packaged into the AppImage.
+  outputFileTracingExcludes: {
+    "*": ["**/node_modules/@img/sharp-linuxmusl-x64/**", "**/node_modules/@img/sharp-libvips-linuxmusl-x64/**"],
+  },
   outputFileTracingIncludes: {
-    "/llms-full.txt": ["../../docs/agent-skills/**/*.md", "../../openspec/README.md", "../../pnpm-workspace.yaml"],
-    "/llms.txt": ["../../docs/agent-skills/**/*.md", "../../openspec/README.md", "../../pnpm-workspace.yaml"],
-    "/well-known/skills/**": [
-      "../../docs/agent-skills/**/*.md",
-      "../../openspec/README.md",
-      "../../pnpm-workspace.yaml",
-    ],
+    "/llms-full.txt": ["../../docs/agent-skills/**/*.md"],
+    "/llms.txt": ["../../docs/agent-skills/**/*.md"],
+    "/well-known/skills/**": ["../../docs/agent-skills/**/*.md"],
   },
   outputFileTracingRoot: path.join(__dirname, "../.."),
   reactStrictMode: true,
@@ -51,7 +63,7 @@ const nextConfig = {
   async redirects() {
     return [
       {
-        destination: "/brand/pdpp-favicon.svg",
+        destination: "/icon",
         permanent: false,
         source: "/favicon.ico",
       },
