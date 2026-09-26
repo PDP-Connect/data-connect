@@ -20,9 +20,9 @@
 //! the command, and lets the server consume and unlink the short-lived result.
 
 use crate::owner_credential::{
-    DatabaseKeyError, credential_encryption_key_path, database_encryption_key_path,
-    database_is_encrypted, load_or_create_credential_encryption_key,
-    load_or_create_database_encryption_key,
+    credential_encryption_key_path, database_encryption_key_path, database_is_encrypted,
+    load_or_create_credential_encryption_key, load_or_create_database_encryption_key,
+    DatabaseKeyError,
 };
 use crate::recovery_code;
 use crate::unified::unified_database_path;
@@ -190,12 +190,21 @@ const NO_VAULT_MESSAGE: &str = "No encrypted vault exists yet. There is nothing 
 /// be safe to log, and even that isn't done here since neither the command
 /// nor the watcher's own logging need it.
 fn export_recovery_code_at(key_path: &Path, database_path: &Path) -> Result<String, String> {
+    export_recovery_code_at_with(database_path, || {
+        load_or_create_database_encryption_key(key_path, database_path)
+            .map_err(DatabaseKeyError::into_message)
+    })
+}
+
+fn export_recovery_code_at_with(
+    database_path: &Path,
+    load_database_key: impl FnOnce() -> Result<String, String>,
+) -> Result<String, String> {
     if !database_is_encrypted(database_path)? {
         return Err(NO_VAULT_MESSAGE.to_string());
     }
 
-    let credential = load_or_create_database_encryption_key(key_path, database_path)
-        .map_err(DatabaseKeyError::into_message)?;
+    let credential = load_database_key()?;
     recovery_code::encode(&credential).map_err(|error| error.to_string())
 }
 
@@ -204,15 +213,27 @@ fn export_recovery_kit_v2_at(
     credential_key_path: &Path,
     database_path: &Path,
 ) -> Result<String, String> {
+    export_recovery_kit_v2_at_with(
+        database_path,
+        || {
+            load_or_create_database_encryption_key(database_key_path, database_path)
+                .map_err(DatabaseKeyError::into_message)
+        },
+        || load_or_create_credential_encryption_key(credential_key_path, database_path),
+    )
+}
+
+fn export_recovery_kit_v2_at_with(
+    database_path: &Path,
+    load_database_key: impl FnOnce() -> Result<String, String>,
+    load_credential_key: impl FnOnce() -> Result<String, String>,
+) -> Result<String, String> {
     if !database_is_encrypted(database_path)? {
         return Err(NO_VAULT_MESSAGE.to_string());
     }
 
-    let database_encryption_key =
-        load_or_create_database_encryption_key(database_key_path, database_path)
-            .map_err(DatabaseKeyError::into_message)?;
-    let credential_encryption_key =
-        load_or_create_credential_encryption_key(credential_key_path, database_path)?;
+    let database_encryption_key = load_database_key()?;
+    let credential_encryption_key = load_credential_key()?;
     let kit = recovery_code::RecoveryKitV2 {
         database_encryption_key: Some(database_encryption_key),
         credential_encryption_key,
@@ -453,48 +474,46 @@ mod tests {
     #[test]
     fn export_succeeds_and_round_trips_when_a_vault_exists() {
         let directory = tempdir().expect("temp directory");
-        let database_key_path = directory.path().join("database-encryption-key");
-        let credential_key_path = directory.path().join("credential-encryption-key");
         let database_path = directory.path().join("pdpp.sqlite");
         fs::write(&database_path, [0u8; 16]).expect("encrypted database marker");
+        let database_key = "database-key-for-recovery-test".to_string();
+        let credential_key = "credential-key-for-recovery-test".to_string();
 
-        // Whether this sandbox's OS keychain is reachable or not,
-        // load_or_create_database_encryption_key_with_store (exercised via
-        // export_recovery_code_at -> the AppHandle-free path) must durably
-        // persist SOME key on first call and return the SAME key on a
-        // second call -- that stability is what the recovery code actually
-        // has to round-trip against, independent of which backend (keychain
-        // vs 0600 file) this environment happens to route through.
-        let first_code =
-            export_recovery_kit_v2_at(&database_key_path, &credential_key_path, &database_path)
-                .expect("export recovery kit");
-        let second_code =
-            export_recovery_kit_v2_at(&database_key_path, &credential_key_path, &database_path)
-                .expect("export recovery kit again");
+        let first_code = export_recovery_kit_v2_at_with(
+            &database_path,
+            || Ok(database_key.clone()),
+            || Ok(credential_key.clone()),
+        )
+        .expect("export recovery kit");
+        let second_code = export_recovery_kit_v2_at_with(
+            &database_path,
+            || Ok(database_key.clone()),
+            || Ok(credential_key.clone()),
+        )
+        .expect("export recovery kit again");
         assert_eq!(first_code, second_code);
 
         let decoded = recovery_code::decode_v2(&first_code).expect("recovery kit decodes");
-        assert!(decoded.database_encryption_key.is_some());
-        assert!(!decoded.credential_encryption_key.is_empty());
+        assert_eq!(
+            decoded.database_encryption_key.as_deref(),
+            Some(database_key.as_str())
+        );
+        assert_eq!(decoded.credential_encryption_key, credential_key);
     }
 
     #[test]
     fn exported_v2_kit_imports_both_keys() {
         let directory = tempdir().expect("temp directory");
-        let database_key_path = directory.path().join("database-encryption-key");
-        let credential_key_path = directory.path().join("credential-encryption-key");
         let database_path = directory.path().join("pdpp.sqlite");
         fs::write(&database_path, [0u8; 16]).expect("encrypted database marker");
-        let code =
-            export_recovery_kit_v2_at(&database_key_path, &credential_key_path, &database_path)
-                .expect("export recovery kit");
-        let database_key =
-            load_or_create_database_encryption_key(&database_key_path, &database_path)
-                .map_err(DatabaseKeyError::into_message)
-                .expect("database key");
-        let credential_key =
-            load_or_create_credential_encryption_key(&credential_key_path, &database_path)
-                .expect("credential key");
+        let database_key = "database-key-for-recovery-test".to_string();
+        let credential_key = "credential-key-for-recovery-test".to_string();
+        let code = export_recovery_kit_v2_at_with(
+            &database_path,
+            || Ok(database_key.clone()),
+            || Ok(credential_key.clone()),
+        )
+        .expect("export recovery kit");
 
         let imported = recovery_code::decode_for_import(&code).expect("import decodes kit");
         assert_eq!(imported.database_encryption_key, database_key);
@@ -504,15 +523,11 @@ mod tests {
     #[test]
     fn legacy_v1_code_still_imports_the_database_key() {
         let directory = tempdir().expect("temp directory");
-        let database_key_path = directory.path().join("database-encryption-key");
         let database_path = directory.path().join("pdpp.sqlite");
         fs::write(&database_path, [0u8; 16]).expect("encrypted database marker");
-        let code =
-            export_recovery_code_at(&database_key_path, &database_path).expect("export v1 code");
-        let database_key =
-            load_or_create_database_encryption_key(&database_key_path, &database_path)
-                .map_err(DatabaseKeyError::into_message)
-                .expect("database key");
+        let database_key = "database-key-for-recovery-test".to_string();
+        let code = export_recovery_code_at_with(&database_path, || Ok(database_key.clone()))
+            .expect("export v1 code");
 
         let imported = recovery_code::decode_for_import(&code).expect("import decodes v1");
         assert_eq!(imported.database_encryption_key, database_key);
