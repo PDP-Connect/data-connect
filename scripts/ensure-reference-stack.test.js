@@ -301,6 +301,7 @@ describe("reference stack staging contract", () => {
     expect(source).toContain(
       'console.info("[reference-implementation] launch entry started")'
     )
+    expect(source).toContain('NODE_ENV: "production"')
     expect(source).toContain('process.execPath, ["--import", "tsx"')
     expect(source).toContain("PDPP_DB_PATH")
     expect(source).toContain(

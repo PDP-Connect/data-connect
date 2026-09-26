@@ -612,6 +612,7 @@ const child = spawn(process.execPath, ["--import", "tsx", "reference-implementat
   cwd: root,
   env: {
     ...process.env,
+    NODE_ENV: "production",
     AS_PORT: process.env.AS_PORT || "0",
     RS_PORT: process.env.RS_PORT || "0",
     PDPP_DB_PATH: dbPath,
