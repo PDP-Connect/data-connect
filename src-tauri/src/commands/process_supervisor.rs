@@ -957,7 +957,7 @@ fn redact_child_output(line: &str, secrets: &[String]) -> String {
 }
 
 fn redact_labeled_values(value: &str) -> String {
-    const SENSITIVE_LABELS: [&str; 16] = [
+    const SENSITIVE_LABELS: [&str; 18] = [
         "credentialEncryptionKey",
         "databaseEncryptionKey",
         "ownerCredentialRevealProof",
@@ -966,8 +966,10 @@ fn redact_labeled_values(value: &str) -> String {
         "accessToken",
         "refresh_token",
         "refreshToken",
+        "set-cookie",
         "proxy-authorization",
         "authorization",
+        "cookie",
         "password",
         "passwd",
         "secret",
@@ -990,6 +992,9 @@ fn redact_labeled_values(value: &str) -> String {
             {
                 continue;
             }
+            let json_key = scan > 0
+                && bytes[scan - 1] == b'"'
+                && bytes.get(end) == Some(&b'"');
             let mut separator = end;
             if bytes.get(separator) == Some(&b'"') || bytes.get(separator) == Some(&b'\'') {
                 separator += 1;
@@ -1000,6 +1005,7 @@ fn redact_labeled_values(value: &str) -> String {
             if bytes.get(separator) != Some(&b':') && bytes.get(separator) != Some(&b'=') {
                 continue;
             }
+            let json_member = json_key && bytes.get(separator) == Some(&b':');
             let mut start = separator + 1;
             while bytes.get(start).is_some_and(u8::is_ascii_whitespace) {
                 start += 1;
@@ -1008,36 +1014,52 @@ fn redact_labeled_values(value: &str) -> String {
                 .get(start)
                 .copied()
                 .filter(|byte| *byte == b'"' || *byte == b'\'');
-            if quote.is_some() {
+            let redact_to_line_end = matches!(
+                label.to_ascii_lowercase().as_str(),
+                "authorization" | "proxy-authorization" | "cookie" | "set-cookie"
+            );
+            if redact_to_line_end && json_member && quote == Some(b'"') {
                 start += 1;
-            }
-            let mut end_value = start;
-            if let Some(quote) = quote {
+                let mut end_value = start;
                 while end_value < bytes.len() {
                     if bytes[end_value] == b'\\' {
                         end_value = (end_value + 2).min(bytes.len());
-                    } else if bytes[end_value] == quote {
+                    } else if bytes[end_value] == b'"' {
                         break;
                     } else {
                         end_value += 1;
                     }
                 }
-            } else if label.eq_ignore_ascii_case("authorization")
-                || label.eq_ignore_ascii_case("proxy-authorization")
-            {
-                while end_value < bytes.len() && !b",}];".contains(&bytes[end_value]) {
-                    end_value += 1;
-                }
+                found = Some((start, end_value));
+                break;
+            } else if redact_to_line_end {
+                found = Some((start, bytes.len()));
+                break;
             } else {
-                while end_value < bytes.len()
-                    && !bytes[end_value].is_ascii_whitespace()
-                    && !b",}] ;".contains(&bytes[end_value])
-                {
-                    end_value += 1;
+                let mut end_value = start;
+                if let Some(quote) = quote {
+                    start += 1;
+                    end_value = start;
+                    while end_value < bytes.len() {
+                        if bytes[end_value] == b'\\' {
+                            end_value = (end_value + 2).min(bytes.len());
+                        } else if bytes[end_value] == quote {
+                            break;
+                        } else {
+                            end_value += 1;
+                        }
+                    }
+                } else {
+                    while end_value < bytes.len()
+                        && !bytes[end_value].is_ascii_whitespace()
+                        && !b",}] ;".contains(&bytes[end_value])
+                    {
+                        end_value += 1;
+                    }
                 }
+                found = Some((start, end_value));
+                break;
             }
-            found = Some((start, end_value));
-            break;
         }
         if let Some((start, end)) = found {
             bytes.splice(start..end, b"[REDACTED]".iter().copied());
@@ -1068,20 +1090,19 @@ fn is_secret_environment_key(key: &OsStr) -> bool {
 }
 
 fn redact_bearer_values(value: &str) -> String {
-    const CREDENTIAL_SCHEMES: [&[u8]; 2] = [b"bearer", b"basic"];
+    const CREDENTIAL_SCHEME: &[u8] = b"bearer";
     let mut bytes = value.as_bytes().to_vec();
     let mut scan = 0;
     while scan < bytes.len() {
-        let Some(scheme) = CREDENTIAL_SCHEMES.iter().find(|scheme| {
-            let end = scan + scheme.len();
-            end <= bytes.len()
-                && bytes[scan..end].eq_ignore_ascii_case(scheme)
-                && (scan == 0 || !is_label_byte(bytes[scan - 1]))
-        }) else {
+        let end_scheme = scan + CREDENTIAL_SCHEME.len();
+        if end_scheme > bytes.len()
+            || !bytes[scan..end_scheme].eq_ignore_ascii_case(CREDENTIAL_SCHEME)
+            || (scan > 0 && is_label_byte(bytes[scan - 1]))
+        {
             scan += 1;
             continue;
-        };
-        let mut start = scan + scheme.len();
+        }
+        let mut start = end_scheme;
         if bytes.get(start).is_some_and(u8::is_ascii_whitespace) {
             while bytes.get(start).is_some_and(u8::is_ascii_whitespace) {
                 start += 1;
@@ -1099,7 +1120,7 @@ fn redact_bearer_values(value: &str) -> String {
                 continue;
             }
         }
-        scan += scheme.len();
+        scan = end_scheme;
     }
     String::from_utf8_lossy(&bytes).into_owned()
 }
@@ -1941,16 +1962,16 @@ mod tests {
     }
 
     #[test]
-    fn readiness_diagnostic_redacts_complete_authorization_credentials() {
-        let line_with_split_token = format!(
-            "{}Authorization: Bearer fixture-secret-0123456789\n",
-            "x".repeat(OUTPUT_READ_BUFFER_BYTES - "Authorization: Bearer ".len() - 3)
+    fn readiness_diagnostic_redacts_auth_and_cookie_labels_conservatively() {
+        let line_with_split_label = format!(
+            "{}Authorization: Digest username=\"alice\", response=\"boundary-digest-secret\"",
+            ".".repeat(OUTPUT_READ_BUFFER_BYTES - 6)
         );
         let mut reader = BufReader::with_capacity(
             OUTPUT_READ_BUFFER_BYTES,
-            std::io::Cursor::new(line_with_split_token.into_bytes()),
+            std::io::Cursor::new(line_with_split_label.into_bytes()),
         );
-        let split_token_line = read_bounded_output_line(&mut reader)
+        let split_label_line = read_bounded_output_line(&mut reader)
             .unwrap()
             .unwrap();
 
@@ -1958,11 +1979,13 @@ mod tests {
             "Authorization: Bearer fixture-secret-0123456789".to_string(),
             "authorization: bearer x".to_string(),
             "Authorization: Basic base64".to_string(),
-            r#"{"authorization":"Bearer json-secret"}"#.to_string(),
+            "Authorization: Digest username=\"alice\", realm=\"api\", response=\"digest-response-probe\"".to_string(),
+            r#"{"authorization":"Digest username=\"alice\", realm=\"api\", response=\"json-digest-secret\""}"#.to_string(),
+            "Cookie: sessionid=cookie-session-secret; theme=dark; auth=cookie-auth-secret".to_string(),
+            "Set-Cookie: sessionid=set-cookie-secret; HttpOnly; SameSite=Strict".to_string(),
             "Proxy-Authorization: token proxy-secret".to_string(),
             "request failed with Bearer inline-bearer-secret".to_string(),
-            "response body contains Basic inline-basic-secret".to_string(),
-            split_token_line,
+            split_label_line,
         ] {
             let diagnostic = exit_before_readiness_message(
                 "test-sidecar",
@@ -1974,10 +1997,14 @@ mod tests {
                 "fixture-secret-0123456789",
                 "bearer x",
                 "base64",
-                "json-secret",
+                "digest-response-probe",
+                "json-digest-secret",
+                "cookie-session-secret",
+                "cookie-auth-secret",
+                "set-cookie-secret",
+                "boundary-digest-secret",
                 "proxy-secret",
                 "inline-bearer-secret",
-                "inline-basic-secret",
             ] {
                 assert!(
                     !diagnostic.contains(secret),
@@ -1985,6 +2012,9 @@ mod tests {
                 );
             }
         }
+
+        let benign_line = "healthcheck: sidecar is ready";
+        assert_eq!(redact_child_output(benign_line, &[]), benign_line);
 
         let redacted_with_scheme_secret =
             redact_child_output("Bearer configured-anchor-secret", &["Bearer".to_string()]);
