@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, rmdirSync, rmSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmdirSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -12,6 +12,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const CONSOLE_ROOT = path.dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = path.resolve(CONSOLE_ROOT, "../..");
 const STANDALONE_ROOT = path.join(CONSOLE_ROOT, ".next", "standalone");
 const TEMP_ROOT = path.join(os.homedir(), ".tmp");
 const SERVER_RELATIVE_PATHS = ["apps/console/server.js", "server.js"];
@@ -19,6 +20,21 @@ const STANDALONE_SERVER = SERVER_RELATIVE_PATHS.map((relativePath) => path.join(
   (serverPath) => existsSync(serverPath)
 );
 const SKILL_CATALOG_INDEX = /\/\.well-known\/skills\/index\.json/;
+const MINIMUM_SKILL_REFERENCES = 7;
+
+test("skill reference completeness detects a removed served file", () => {
+  const ownerSkillPath = "pdpp-owner-agent/SKILL.md";
+  const ownerMarkdown = readFileSync(path.join(REPO_ROOT, "docs/agent-skills", ownerSkillPath), "utf8");
+  const references = extractRelativeFileReferences(ownerMarkdown);
+  const servedPaths = new Set([
+    "pdpp-owner-agent/SKILL.md",
+    "pdpp-owner-agent/references/control-surface.md",
+    "pdpp-owner-agent/references/daisy-runbook.md",
+    "pdpp-owner-agent/references/sync.md",
+  ]);
+  servedPaths.delete("pdpp-owner-agent/references/daisy-runbook.md");
+  assert.throws(() => assertSkillReferencesServed("pdpp-owner-agent", ownerSkillPath, references, servedPaths));
+});
 
 test("copied standalone console serves every advertised agent skill route outside the repository", {
   skip: !STANDALONE_SERVER && process.env.REQUIRE_STANDALONE !== "1" && "Run after the console standalone build",
@@ -88,22 +104,22 @@ test("copied standalone console serves every advertised agent skill route outsid
       })
     );
 
+    let extractedReferenceCount = 0;
     for (const skill of catalog.skills) {
       const skillFile = skill.files.find((file) => file.path === `${skill.name}/SKILL.md`);
       assert.ok(skillFile, `${skill.name} advertises its SKILL.md`);
       const response = await fetch(`${origin}/.well-known/skills/${skillFile.path}`);
       assert.equal(response.status, 200, skillFile.path);
       const markdown = await response.text();
-      const relativeLinks = [...markdown.matchAll(/\[[^\]]*\]\(([^)]+)\)/g)]
-        .map(([, target]) => target.trim().replace(/^<|>$/g, ""))
-        .filter((target) => target && !/^(?:[a-z][a-z\d+.-]*:|\/|#)/i.test(target));
-      for (const target of relativeLinks) {
-        const pathname = decodeURIComponent(target.split(/[?#]/, 1)[0] ?? "");
-        const resolved = path.posix.normalize(path.posix.join(path.posix.dirname(skillFile.path), pathname));
-        assert.ok(resolved.startsWith(`${skill.name}/`), `${skillFile.path} link ${target} stays inside its skill`);
-        assert.ok(servedPaths.has(resolved), `${skillFile.path} link ${target} resolves to a served file (${resolved})`);
-      }
+      const references = extractRelativeFileReferences(markdown);
+      assert.ok(references.length > 0, `${skill.name} has extracted relative file references`);
+      extractedReferenceCount += references.length;
+      assertSkillReferencesServed(skill.name, skillFile.path, references, servedPaths);
     }
+    assert.ok(
+      extractedReferenceCount >= MINIMUM_SKILL_REFERENCES,
+      `extracts at least ${MINIMUM_SKILL_REFERENCES} known skill references (got ${extractedReferenceCount})`
+    );
   } finally {
     if (serverProcess && serverProcess.exitCode === null) {
       serverProcess.kill("SIGTERM");
@@ -115,6 +131,25 @@ test("copied standalone console serves every advertised agent skill route outsid
     }
   }
 });
+
+function extractRelativeFileReferences(markdown) {
+  const markdownLinks = [...markdown.matchAll(/\[[^\]]*\]\(([^)]+)\)/g)].map(([, target]) => target.trim().replace(/^<|>$/g, ""));
+  const codePaths = [...markdown.matchAll(/`([^`]+)`/g)]
+    .map(([, target]) => target.trim())
+    .filter((target) => /^(?:\.\/)?(?:references|docs|examples|schemas)\/[^\s]+/i.test(target));
+  return [...new Set([...markdownLinks, ...codePaths])].filter(
+    (target) => target && !/^(?:[a-z][a-z\d+.-]*:|\/|#)/i.test(target)
+  );
+}
+
+function assertSkillReferencesServed(skillName, skillFilePath, references, servedPaths) {
+  for (const target of references) {
+    const pathname = decodeURIComponent(target.split(/[?#]/, 1)[0] ?? "");
+    const resolved = path.posix.normalize(path.posix.join(path.posix.dirname(skillFilePath), pathname));
+    assert.ok(resolved.startsWith(`${skillName}/`), `${skillFilePath} link ${target} stays inside its skill`);
+    assert.ok(servedPaths.has(resolved), `${skillFilePath} link ${target} resolves to a served file (${resolved})`);
+  }
+}
 
 async function findAvailablePort() {
   const server = createServer();

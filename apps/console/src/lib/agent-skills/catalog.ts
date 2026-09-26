@@ -158,13 +158,33 @@ async function collectFiles(directory: string): Promise<string[]> {
   return nested.flat();
 }
 
+export async function resolveSkillDirectory(packagedRoot: string, skillName: string): Promise<string> {
+  const skillPath = path.join(packagedRoot, skillName);
+  const skillStat = await fs.lstat(skillPath);
+  if (!skillStat.isDirectory() || skillStat.isSymbolicLink()) {
+    throw new Error(`Packaged agent skill root must be a real directory: ${skillName}`);
+  }
+
+  const [realPackagedRoot, realSkillPath] = await Promise.all([fs.realpath(packagedRoot), fs.realpath(skillPath)]);
+  const relativeSkillPath = path.relative(realPackagedRoot, realSkillPath);
+  if (
+    !relativeSkillPath ||
+    relativeSkillPath === ".." ||
+    relativeSkillPath.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(relativeSkillPath)
+  ) {
+    throw new Error(`Packaged agent skill root escapes its packaged tree: ${skillName}`);
+  }
+  return realSkillPath;
+}
+
 async function skillFiles(): Promise<readonly AgentSkillFileDefinition[]> {
   if (!cachedSkillFiles) {
     cachedSkillFiles = (async () => {
       const skillRoot = await resolveSkillRoot();
       const definitions = await Promise.all(
         SKILLS.map(async (skill) => {
-          const absoluteBase = path.join(skillRoot, path.relative("docs/agent-skills", skill.repoBasePath));
+          const absoluteBase = await resolveSkillDirectory(skillRoot, skill.name);
           const absoluteFiles = (await collectFiles(absoluteBase)).sort();
           return absoluteFiles.map((absolutePath) => {
             const withinSkill = path.relative(absoluteBase, absolutePath).split(path.sep).join("/");

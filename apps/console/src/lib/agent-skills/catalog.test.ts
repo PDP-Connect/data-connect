@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -13,6 +14,7 @@ import {
   buildAgentSkillCatalog,
   ownerAgentOnboardingLLMSIndex,
   readAgentSkillFile,
+  resolveSkillDirectory,
 } from "./catalog.ts";
 
 const SHA256_HEX = /^[a-f0-9]{64}$/;
@@ -76,6 +78,22 @@ test("console readAgentSkillFile serves only explicit files", async () => {
   assert.equal(await readAgentSkillFile("../package.json"), null);
   assert.equal(await readAgentSkillFile("pdpp-data-access/../../package.json"), null);
   assert.equal(await readAgentSkillFile("pdpp-data-access/references/missing.md"), null);
+});
+
+test("console agent skill roots reject symlinks outside the packaged tree", async () => {
+  const temporaryRoot = mkdtempSync(path.join(tmpdir(), "agent-skill-root-"));
+  const packagedRoot = path.join(temporaryRoot, "skills");
+  const externalRoot = path.join(temporaryRoot, "external");
+  const symlinkedRoot = path.join(packagedRoot, "pdpp-data-access");
+  try {
+    mkdirSync(packagedRoot);
+    mkdirSync(externalRoot);
+    symlinkSync(externalRoot, symlinkedRoot, "dir");
+    assert.equal(lstatSync(symlinkedRoot).isSymbolicLink(), true);
+    await assert.rejects(resolveSkillDirectory(packagedRoot, "pdpp-data-access"));
+  } finally {
+    rmSync(temporaryRoot, { force: true, recursive: true });
+  }
 });
 
 test("console agent skill and llms index use the CLI package-info source of truth", async () => {
