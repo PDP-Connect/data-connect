@@ -439,7 +439,19 @@ export async function inspectActiveConnector(
   connectorId: string
 ): Promise<ActiveConnectorInspection> {
   let active: ConnectorInstallRecord | null;
+  let hasActivation = false;
   try {
+    if (store.activationAuthority) {
+      const activation = await getConnectorActivation(connectorId);
+      hasActivation = activation !== null;
+      if (activation && activation.state !== "active") {
+        const detail = activation.repairReason ? `: ${activation.repairReason}` : "";
+        return {
+          reason: `activation is ${activation.state}${detail}; an operator must repair it before this connector can run`,
+          status: "invalid",
+        };
+      }
+    }
     active = await store.getActive(connectorId);
   } catch (error) {
     return {
@@ -448,7 +460,9 @@ export async function inspectActiveConnector(
     };
   }
   if (!active) {
-    return { status: "none" };
+    return hasActivation
+      ? { reason: "activation has no runnable install; operator recovery is required", status: "invalid" }
+      : { status: "none" };
   }
   if (active.connectorId !== connectorId) {
     return { reason: "active connector id mismatch", status: "invalid" };

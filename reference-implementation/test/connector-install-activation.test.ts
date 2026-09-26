@@ -3,10 +3,11 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { ControllerError, createController, resolveActiveInstallFirstConnectorPath } from "../runtime/controller.ts";
 import {
   __setRegisterConnectorPhaseHookForTest,
   getConnectorManifest,
@@ -25,6 +26,7 @@ import {
   repairPendingConnectorActivations,
   resolveActiveConnectorPath,
 } from "../server/connector-install/index.ts";
+import { createFileLocalConnectorSourceStore } from "../server/connector-install/local-source.ts";
 import { closeDb, initDb } from "../server/db.ts";
 import { closePostgresStorage, initPostgresStorage } from "../server/postgres-storage.ts";
 import { withTemporaryPostgresDatabase } from "./helpers/postgres-temp-database.ts";
@@ -118,6 +120,79 @@ async function assertPostPersistenceFailure(): Promise<void> {
       join(dataDir, "connectors", connectorId, secondDigest, "dist", "collection-profile.mjs")
     );
     assert.notEqual((await store.getActive(connectorId))?.root, original.root);
+  } finally {
+    __setRegisterConnectorPhaseHookForTest(null);
+    if (previousDataDir === undefined) {
+      delete process.env.PDPP_DATA_DIR;
+    } else {
+      process.env.PDPP_DATA_DIR = previousDataDir;
+    }
+    rmSync(dataDir, { force: true, recursive: true });
+  }
+}
+
+async function assertRepairRequiredNeverRunsSeed(): Promise<void> {
+  const dataDir = mkdtempSync(join(tmpdir(), "pdpp-f1-seed-fallback-"));
+  const previousDataDir = process.env.PDPP_DATA_DIR;
+  process.env.PDPP_DATA_DIR = dataDir;
+  const seedManifest = JSON.parse(
+    readFileSync(join(import.meta.dirname, "..", "fixtures", "seed-manifests", "github.json"), "utf8")
+  );
+  const initial = { ...first, connector_id: "github", connector_key: "github" };
+  const replacement = { ...initial, digest: secondDigest, latest: true, version: seedManifest.version };
+  let current = initial;
+  const store = createConnectorInstallStore();
+  try {
+    const service = createConnectorInstallService({
+      catalogLoader: async () => [current],
+      dataDir,
+      installArtifact(root, selected) {
+        mkdirSync(join(root, "profile"), { recursive: true });
+        mkdirSync(join(root, "dist"), { recursive: true });
+        writeFileSync(
+          join(root, "profile", "collection-profile.json"),
+          JSON.stringify({ ...seedManifest, version: selected.version })
+        );
+        writeFileSync(join(root, "dist", "collection-profile.mjs"), "export {};\n");
+        writeFileSync(join(root, "provenance.json"), "{}\n");
+      },
+      registerManifest: (manifest, options) => registerConnector(manifest, options),
+      store,
+    });
+    await service.install("github", firstDigest);
+    current = replacement;
+    __setRegisterConnectorPhaseHookForTest(async (point) => {
+      if (point === "after-manifest-persisted") {
+        throw new Error("review negative: repair failed");
+      }
+    });
+    await assert.rejects(service.update("github"), /review negative: repair failed/);
+    __setRegisterConnectorPhaseHookForTest(null);
+    assert.equal((await getConnectorActivation("github"))?.state, "repair_required");
+    assert.equal(await resolveActiveConnectorPath(store, "github"), null);
+    const manifest = await getConnectorManifest("github");
+    assert.ok(manifest);
+    await assert.rejects(
+      resolveActiveInstallFirstConnectorPath(
+        "github", manifest, undefined, createFileLocalConnectorSourceStore(dataDir), store
+      ),
+      /repair_required/
+    );
+    const controller = createController({
+      admitRunConnection: async ({ connectorId, ownerSubjectId }) => ({
+        connectorId,
+        connectorInstanceId: "cin_seed_fallback",
+        ownerSubjectId: ownerSubjectId ?? "owner_local",
+      }),
+      connectorPathResolver: () => join(import.meta.dirname, "..", "connectors", "seed", "index.ts"),
+    });
+    await assert.rejects(
+      controller.runNow("github", { manifest }),
+      (error: unknown) =>
+        error instanceof ControllerError &&
+        error.code === "connector_install_invalid" &&
+        /repair_required.*operator must repair/.test(error.message)
+    );
   } finally {
     __setRegisterConnectorPhaseHookForTest(null);
     if (previousDataDir === undefined) {
@@ -357,6 +432,15 @@ test("SQLite: post-persistence failure leaves one coherent activation", async ()
   }
 });
 
+test("SQLite: repair-required activation cannot admit seed bytes", async () => {
+  initDb(":memory:");
+  try {
+    await assertRepairRequiredNeverRunsSeed();
+  } finally {
+    closeDb();
+  }
+});
+
 test("SQLite: activation transaction failure retains the old tuple", async () => {
   initDb(":memory:");
   try {
@@ -412,6 +496,31 @@ test("PostgreSQL: post-persistence failure leaves one coherent activation", {
       try {
         await initPostgresStorage({ backend: "postgres", databaseUrl });
         await assertPostPersistenceFailure();
+      } finally {
+        await closePostgresStorage();
+        closeDb();
+      }
+    }
+  );
+});
+
+test("PostgreSQL: repair-required activation cannot admit seed bytes", {
+  skip: !process.env.PDPP_TEST_POSTGRES_URL,
+}, async () => {
+  const url = process.env.PDPP_TEST_POSTGRES_URL;
+  assert.ok(url);
+  await withTemporaryPostgresDatabase(
+    {
+      closeConnections: closePostgresStorage,
+      connectionString: url,
+      databaseName: `pdpp_test_f1_seed_${Date.now().toString(36)}`,
+      templateName: null,
+    },
+    async (databaseUrl) => {
+      initDb(":memory:");
+      try {
+        await initPostgresStorage({ backend: "postgres", databaseUrl });
+        await assertRepairRequiredNeverRunsSeed();
       } finally {
         await closePostgresStorage();
         closeDb();

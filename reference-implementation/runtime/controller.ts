@@ -1369,9 +1369,8 @@ export function resolveDefaultConnectorPath(connectorId: string, manifest?: Conn
 }
 
 // OCI installs are the only source of catalog connector code, and they fail
-// closed. Only an absent active record falls through to the seed resolver; a
-// corrupt or path-escaping active record stops resolution instead of being
-// bypassed.
+// closed. Only an absent activation record falls through to the seed resolver;
+// a non-active activation or corrupt/path-escaping install stops resolution.
 const activeConnectorInstallStore = createConnectorInstallStore();
 const localConnectorSourceStore = createFileLocalConnectorSourceStore();
 export async function resolveActiveInstallFirstConnectorPath(
@@ -1381,16 +1380,16 @@ export async function resolveActiveInstallFirstConnectorPath(
   localStore: LocalConnectorSourceStore = localConnectorSourceStore,
   installStore: ConnectorInstallStore = activeConnectorInstallStore
 ): Promise<string | null> {
+  const active = await inspectActiveConnector(installStore, connectorId);
+  if (active.status === "invalid") {
+    throw new Error(`Active connector install is invalid for ${connectorId}: ${active.reason}`);
+  }
   const local = await inspectActiveLocalConnectorSource(localStore, connectorId);
   if (local.status === "invalid") {
     throw new Error("Active developer-local connector source is invalid for " + connectorId + ": " + local.reason);
   }
   if (local.status === "active") {
     return local.path;
-  }
-  const active = await inspectActiveConnector(installStore, connectorId);
-  if (active.status === "invalid") {
-    throw new Error(`Active connector install is invalid for ${connectorId}: ${active.reason}`);
   }
   return active.status === "active"
     ? active.path
@@ -3777,7 +3776,9 @@ export function createController(opts: ControllerOptions = {}): Controller {
       );
     }
     const activeInstall =
-      activeLocalSource.status === "none" ? await inspectActiveConnector(activeConnectorInstallStore, connectorId) : null;
+      activeLocalSource.status === "none" || activeConnectorInstallStore.activationAuthority
+        ? await inspectActiveConnector(activeConnectorInstallStore, connectorId)
+        : null;
     if (activeInstall?.status === "invalid") {
       throw new ControllerError(
         `Active connector install is invalid for ${connectorId}: ${activeInstall.reason}`,
