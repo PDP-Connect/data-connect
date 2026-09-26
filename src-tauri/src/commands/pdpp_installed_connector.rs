@@ -5173,7 +5173,9 @@ setInterval(() => {}, 1000);
         });
         fs::write(&fake_app, b"fixture app").unwrap();
         let bundled_node = app_dir.path().join(BUNDLED_NODE_NAME);
-        fs::copy(&ambient_node, &bundled_node).unwrap();
+        let staged_node = app_dir.path().join(format!(".{BUNDLED_NODE_NAME}.staged"));
+        fs::copy(&ambient_node, &staged_node).unwrap();
+        fs::rename(&staged_node, &bundled_node).unwrap();
 
         let resolved_node = resolve_node_program_from(&fake_app, Some(OsStr::new(""))).unwrap();
         assert_eq!(Path::new(&resolved_node), bundled_node);

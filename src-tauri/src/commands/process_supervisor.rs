@@ -1090,18 +1090,20 @@ fn is_secret_environment_key(key: &OsStr) -> bool {
 }
 
 fn redact_bearer_values(value: &str) -> String {
-    const CREDENTIAL_SCHEME: &[u8] = b"bearer";
+    const CREDENTIAL_SCHEMES: [&[u8]; 2] = [b"bearer", b"basic"];
     let mut bytes = value.as_bytes().to_vec();
     let mut scan = 0;
     while scan < bytes.len() {
-        let end_scheme = scan + CREDENTIAL_SCHEME.len();
-        if end_scheme > bytes.len()
-            || !bytes[scan..end_scheme].eq_ignore_ascii_case(CREDENTIAL_SCHEME)
-            || (scan > 0 && is_label_byte(bytes[scan - 1]))
-        {
+        let Some(scheme) = CREDENTIAL_SCHEMES.iter().find(|scheme| {
+            let end = scan + scheme.len();
+            end <= bytes.len()
+                && bytes[scan..end].eq_ignore_ascii_case(scheme)
+                && (scan == 0 || !is_label_byte(bytes[scan - 1]))
+        }) else {
             scan += 1;
             continue;
-        }
+        };
+        let end_scheme = scan + scheme.len();
         let mut start = end_scheme;
         if bytes.get(start).is_some_and(u8::is_ascii_whitespace) {
             while bytes.get(start).is_some_and(u8::is_ascii_whitespace) {
@@ -1985,6 +1987,7 @@ mod tests {
             "Set-Cookie: sessionid=set-cookie-secret; HttpOnly; SameSite=Strict".to_string(),
             "Proxy-Authorization: token proxy-secret".to_string(),
             "request failed with Bearer inline-bearer-secret".to_string(),
+            "response body contains Basic dXNlcjpwYXNz".to_string(),
             split_label_line,
         ] {
             let diagnostic = exit_before_readiness_message(
@@ -2005,6 +2008,7 @@ mod tests {
                 "boundary-digest-secret",
                 "proxy-secret",
                 "inline-bearer-secret",
+                "dXNlcjpwYXNz",
             ] {
                 assert!(
                     !diagnostic.contains(secret),
