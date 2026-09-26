@@ -2381,3 +2381,200 @@ test("vocabulary: an UNRECOGNISED run status still fails closed", () => {
   );
   assert.ok(invented.perClass.unknown_vocabulary > 0, "unknown vocabulary must still be caught");
 });
+
+// ─── state_stream manifest inheritance ─────────────────────────────────────
+//
+// A `state_stream` child (e.g. Gmail's `message_bodies` declaring
+// `state_stream: "messages"`) is FORBIDDEN from emitting its own
+// DETAIL_COVERAGE, so its own `considered`/`covered` are always blank and its
+// own report never clears `committedCoverageProof` on its own evidence. The
+// server (`inheritStateStreamCoverageCondition`, ref-control.ts) already
+// projects the child's `coverage_condition` as inherited from a genuinely
+// proven parent, but this audit re-derives proof independently rather than
+// trusting that label — so before the fix, a live Gmail connection with a
+// fully-proven `messages` parent and a complete-but-unmeasured
+// `message_bodies` child was misclassified `unobserved`.
+
+function parentChildManifest(childOverrides: Json = {}): Json {
+  return manifest({
+    streams: [
+      {
+        name: "messages",
+        required: true,
+        coverage_strategy: "full_inventory",
+        freshness_strategy: "manual_as_of",
+      },
+      {
+        name: "message_bodies",
+        required: true,
+        state_stream: "messages",
+        ...childOverrides,
+      },
+    ],
+  });
+}
+
+function childReport(overrides: Json = {}): Json {
+  return {
+    stream: "message_bodies",
+    coverage_condition: "complete",
+    checkpoint: "checkpoint-1",
+    evidence_as_of: EVIDENCE_AT,
+    ...overrides,
+  };
+}
+
+function parentChildConnection(childReportOverrides: Json = {}): Json {
+  return healthyConnection({
+    streams: ["messages", "message_bodies"],
+    collection_report: [
+      {
+        stream: "messages",
+        coverage_condition: "complete",
+        coverage_strategy: "full_inventory",
+        freshness_strategy: "manual_as_of",
+        checkpoint: "checkpoint-1",
+        considered: 1,
+        covered: 1,
+        evidence_as_of: EVIDENCE_AT,
+      },
+      childReport(childReportOverrides),
+    ],
+    stream_records: [
+      { stream: "messages", record_count: 3, count_state: "known", declaration_state: "declared" },
+      { stream: "message_bodies", record_count: 3, count_state: "known", declaration_state: "declared" },
+    ],
+  });
+}
+
+function childResult(result: StreamHealthAuthorityResult): StreamHealthAuthorityResult["streams"][number] {
+  const stream = result.streams.find((item) => item.stream === "message_bodies");
+  assert.ok(stream, "expected a message_bodies stream finding");
+  return stream;
+}
+
+test("state_stream child inherits committed coverage from a genuinely proven parent", () => {
+  const result = evaluate(parentChildConnection(), parentChildManifest());
+  assert.equal(childResult(result).class, "green");
+  assert.equal(childResult(result).green, true);
+  assert.match(childResult(result).reason, /declared parent stream messages/);
+});
+
+test("state_stream child stays unobserved when the declared parent's own proof is unproven", () => {
+  const base = healthyConnection();
+  const result = evaluate(
+    healthyConnection({
+      streams: ["messages", "message_bodies"],
+      connection_health: {
+        ...(base.connection_health as Json),
+        axes: { ...((base.connection_health as Json).axes as Json), coverage: "partial" },
+      },
+      collection_report: [
+        {
+          // Parent itself never cleared committedCoverageProof (partial, no
+          // committed checkpoint) — the child must fail closed with it.
+          stream: "messages",
+          coverage_condition: "partial",
+          coverage_strategy: "full_inventory",
+          freshness_strategy: "manual_as_of",
+          checkpoint: "checkpoint-1",
+          considered: 2,
+          covered: 1,
+          evidence_as_of: EVIDENCE_AT,
+        },
+        childReport(),
+      ],
+      stream_records: [
+        { stream: "messages", record_count: 3, count_state: "known", declaration_state: "declared" },
+        { stream: "message_bodies", record_count: 3, count_state: "known", declaration_state: "declared" },
+      ],
+    }),
+    parentChildManifest()
+  );
+  assert.equal(childResult(result).class, "unobserved");
+  assert.equal(childResult(result).green, false);
+});
+
+test("state_stream child stays unobserved when the declared parent is corrupt (non-monotonic counts)", () => {
+  const result = evaluate(
+    healthyConnection({
+      streams: ["messages", "message_bodies"],
+      collection_report: [
+        {
+          // covered > considered: committedCoverageProof's integerCounts
+          // floor rejects this even though coverage_condition claims complete.
+          stream: "messages",
+          coverage_condition: "complete",
+          coverage_strategy: "full_inventory",
+          freshness_strategy: "manual_as_of",
+          checkpoint: "checkpoint-1",
+          considered: 1,
+          covered: 2,
+          evidence_as_of: EVIDENCE_AT,
+        },
+        childReport(),
+      ],
+      stream_records: [
+        { stream: "messages", record_count: 3, count_state: "known", declaration_state: "declared" },
+        { stream: "message_bodies", record_count: 3, count_state: "known", declaration_state: "declared" },
+      ],
+    }),
+    parentChildManifest()
+  );
+  assert.equal(childResult(result).class, "unobserved");
+  assert.equal(childResult(result).green, false);
+});
+
+test("a stream with no declared state_stream never inherits a sibling's coverage", () => {
+  // Same shape as the child above (own considered/covered blank, own
+  // coverage_condition complete) but no `state_stream` manifest declaration.
+  // Parent inheritance must never be invented for an ordinary sibling.
+  const result = evaluate(
+    healthyConnection({
+      streams: ["messages", "message_bodies"],
+      collection_report: [
+        {
+          stream: "messages",
+          coverage_condition: "complete",
+          coverage_strategy: "full_inventory",
+          freshness_strategy: "manual_as_of",
+          checkpoint: "checkpoint-1",
+          considered: 1,
+          covered: 1,
+          evidence_as_of: EVIDENCE_AT,
+        },
+        childReport(),
+      ],
+      stream_records: [
+        { stream: "messages", record_count: 3, count_state: "known", declaration_state: "declared" },
+        { stream: "message_bodies", record_count: 3, count_state: "known", declaration_state: "declared" },
+      ],
+    }),
+    manifest({
+      streams: [
+        {
+          name: "messages",
+          required: true,
+          coverage_strategy: "full_inventory",
+          freshness_strategy: "manual_as_of",
+        },
+        { name: "message_bodies", required: true },
+      ],
+    })
+  );
+  assert.equal(childResult(result).class, "unobserved");
+  assert.equal(childResult(result).green, false);
+});
+
+test("state_stream child fails closed when the declared parent has no report entry at all", () => {
+  const result = evaluate(
+    healthyConnection({
+      streams: ["messages", "message_bodies"],
+      collection_report: [childReport()],
+      stream_records: [{ stream: "message_bodies", record_count: 3, count_state: "known", declaration_state: "declared" }],
+    }),
+    parentChildManifest()
+  );
+  assert.equal(childResult(result).class, "unobserved");
+  assert.equal(childResult(result).green, false);
+});

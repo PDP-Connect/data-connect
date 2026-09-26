@@ -1132,6 +1132,19 @@ function connectionIsSynthetic(connection: JsonObject, manifest: ResolvedManifes
   return isExplicitSynthetic(connection) || isExplicitSynthetic(manifest?.value);
 }
 
+/**
+ * Manifest-declared `state_stream` parent name for a child stream, or `null`
+ * when the manifest declares none. Mirrors `localCoverageParentStream` in
+ * `reference-implementation/server/ref-control.ts` — the same single-string
+ * read, no invented default and no chain-walk (manifest validation there
+ * already forbids a `state_stream` chain, so a declared parent is never
+ * itself a child awaiting inheritance).
+ */
+function manifestStateStreamParent(stream: ManifestStream): string | null {
+  const parent = stream.raw.state_stream;
+  return typeof parent === "string" && parent ? parent : null;
+}
+
 function streamIsOptionalUnsupported(stream: ManifestStream): boolean {
   const required = stream.raw.required !== false;
   if (required) {
@@ -1697,11 +1710,47 @@ function hasAcceptedRuntimeAbsence(stream: ManifestStream, report: JsonObject): 
   return ACCEPTED_ABSENCE_POLICIES.has(condition);
 }
 
+/**
+ * Whether a `state_stream` child's declared parent independently proves
+ * committed coverage. Mirrors the server's `inheritStateStreamCoverageCondition`
+ * guard rails (`reference-implementation/server/ref-control.ts`) exactly:
+ *
+ *   1. only consulted for a stream that declares `state_stream` (never
+ *      invented for an ordinary sibling with no declared parent);
+ *   2. the parent must have its OWN report entry in the SAME connection
+ *      (never a cross-connection or invented lookup);
+ *   3. the parent's proof is re-derived independently through
+ *      `committedCoverageProof` — never the child's own `coverage_condition`
+ *      label, and never the parent's `coverage_condition` label either,
+ *      since that label can itself already be a downstream inheritance the
+ *      server produced. An unproven parent (partial, unknown, any gap axis,
+ *      or missing entirely) fails closed exactly as an undeclared stream
+ *      would — the child stays whatever its own evidence proved.
+ *
+ * One pass, no transitive walk: manifest validation forbids a `state_stream`
+ * chain, so a declared parent is never itself a child awaiting inheritance.
+ */
+function stateStreamParentProvesCoverage(
+  stream: ManifestStream,
+  reportsByStream: ReadonlyMap<string, JsonObject>
+): boolean {
+  const parentName = manifestStateStreamParent(stream);
+  if (!parentName) {
+    return false;
+  }
+  const parentReport = reportsByStream.get(parentName);
+  if (!parentReport) {
+    return false;
+  }
+  return committedCoverageProof(parentReport);
+}
+
 function isGreenStream(
   connection: JsonObject,
   stream: ManifestStream,
   report: JsonObject | undefined,
-  record: JsonObject | undefined
+  record: JsonObject | undefined,
+  reportsByStream: ReadonlyMap<string, JsonObject>
 ): { green: boolean; reason: string } {
   if (!report) {
     return { green: false, reason: "no collection report for the manifest-declared stream" };
@@ -1722,8 +1771,15 @@ function isGreenStream(
   const considered = report.considered as number;
   const covered = report.covered as number;
   const verifiedEmpty = considered === 0 && covered === 0 && explicitVerifiedEmpty(connection, report);
-  if (!(committedCoverageProof(report) || verifiedEmpty || localDeviceProof)) {
+  const inheritedParentProof = stateStreamParentProvesCoverage(stream, reportsByStream);
+  if (!(committedCoverageProof(report) || verifiedEmpty || localDeviceProof || inheritedParentProof)) {
     return { green: false, reason: "committed coverage or explicit verified-empty proof is incomplete" };
+  }
+  if (inheritedParentProof && !(committedCoverageProof(report) || verifiedEmpty || localDeviceProof)) {
+    return {
+      green: true,
+      reason: `declared parent stream ${manifestStateStreamParent(stream)} independently proves committed coverage`,
+    };
   }
   if (localDeviceProof) {
     return { green: true, reason: "healthy local-device receipt completed this stream with no queued work" };
@@ -2031,7 +2087,8 @@ function classForStream(
   stream: ManifestStream,
   report: JsonObject | undefined,
   record: JsonObject | undefined,
-  assessment: ConnectionAssessment
+  assessment: ConnectionAssessment,
+  reportsByStream: ReadonlyMap<string, JsonObject>
 ): { class: StreamHealthClass; reason: string; denominator: boolean } {
   const state = lifecycle(connection);
   const denominator = state === "active";
@@ -2094,7 +2151,7 @@ function classForStream(
   if (isOwnerStateUnobserved(connection)) {
     return { class: "unobserved", denominator, reason: "owner/runtime disposition is unmeasured" };
   }
-  const green = isGreenStream(connection, stream, report, record);
+  const green = isGreenStream(connection, stream, report, record, reportsByStream);
   if (green.green) {
     return { class: "green", denominator, reason: green.reason };
   }
@@ -2535,7 +2592,8 @@ function evaluateDeclaredStreams({
       stream,
       reports.map.get(stream.name),
       records.map.get(stream.name),
-      assessment
+      assessment,
+      reports.map
     );
     addFinding(aggregate.findings, aggregate.counts, {
       class: result.class,
