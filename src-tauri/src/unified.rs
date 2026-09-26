@@ -668,12 +668,28 @@ fn resolve_staged_root(resource_dir: &Path, profile: &str, sidecar: &str) -> Opt
 }
 
 fn resolve_node_binary(resource_dir: &Path) -> Option<PathBuf> {
-    let binary_roots = [
+    let executable_dir = std::env::current_exe()
+        .ok()
+        .and_then(|executable| executable.parent().map(Path::to_path_buf));
+    resolve_node_binary_from(resource_dir, executable_dir.as_deref())
+}
+
+fn resolve_node_binary_from(
+    resource_dir: &Path,
+    executable_dir: Option<&Path>,
+) -> Option<PathBuf> {
+    let mut binary_roots = Vec::with_capacity(5);
+    if let Some(executable_dir) = executable_dir {
+        // Tauri places externalBin beside the app executable (Contents/MacOS
+        // on macOS), not in the resource directory.
+        binary_roots.push(executable_dir.to_path_buf());
+    }
+    binary_roots.extend([
         resource_dir.join("binaries"),
         resource_dir.join("_up_").join("binaries"),
         resource_dir.to_path_buf(),
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("binaries"),
-    ];
+    ]);
     for root in binary_roots {
         for name in ["pdpp-node", "pdpp-node.exe"] {
             let candidate = root.join(name);
@@ -6142,6 +6158,22 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
         assert_eq!(
             resolve_staged_root(directory.path(), "release", "console"),
             Some(root)
+        );
+    }
+
+    #[test]
+    fn node_sidecar_resolves_beside_the_macos_app_executable() {
+        let directory = tempdir().expect("app bundle temp directory");
+        let resources = directory.path().join("Contents").join("Resources");
+        let executable_dir = directory.path().join("Contents").join("MacOS");
+        let node_binary = executable_dir.join("pdpp-node");
+        fs::create_dir_all(&resources).expect("app resources directory");
+        fs::create_dir_all(&executable_dir).expect("app executable directory");
+        fs::write(&node_binary, "node runtime").expect("bundled Node.js executable");
+
+        assert_eq!(
+            resolve_node_binary_from(&resources, Some(&executable_dir)),
+            Some(node_binary)
         );
     }
 
