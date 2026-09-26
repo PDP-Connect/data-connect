@@ -80,13 +80,9 @@ lines[index] = `${digest}  ${basename(artifact)}`;
 writeFileSync(sums, `${lines.join("\n")}\n`);
 NODE
 
-# These are the connector sources and shared cursor changed by upstream #92.
-for connector in claude_code codex; do
-  for file in index.ts types.ts; do
-    source_path="packages/polyfill-connectors/connectors/$connector/$file"
-    git -C "$upstream_repo" show "$pin_sha:$source_path" > "$source_path"
-  done
-done
+# Connector code is consumed from signed Collection Profiles by local-collector.
+# Keep the reference-implementation tarball refresh above; do not restore retired
+# local-collector sources from data-connectors here.
 source_path="packages/polyfill-connectors/src/local-jsonl-cursor.ts"
 git -C "$upstream_repo" show "$pin_sha:$source_path" > "$source_path"
 
