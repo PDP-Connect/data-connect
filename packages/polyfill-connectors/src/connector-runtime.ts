@@ -46,7 +46,7 @@
 import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
-import { emitToStdout, resourceSet } from "@pdpp/connector-protocol";
+import { emitToStdout, passesTimeRange, resourceSet } from "@pdpp/connector-protocol";
 
 import { type AuthConfig, resolveAuth } from "@pdpp/connector-protocol/auth";
 import type {
@@ -427,18 +427,9 @@ export function describeUnexpectedFailure(err: unknown): string {
     : combined;
 }
 
-/** Returns true if the scope's time_range excludes this record's date value. */
+/** Returns true if the scope's half-open time_range excludes this record value. */
 function isOutsideTimeRange(timeRange: { since?: string; until?: string }, dateValue: unknown): boolean {
-  if (typeof dateValue !== "string" || !dateValue) {
-    return false;
-  }
-  if (timeRange.since && dateValue < timeRange.since.slice(0, 10)) {
-    return true;
-  }
-  if (timeRange.until && dateValue >= timeRange.until.slice(0, 10)) {
-    return true;
-  }
-  return false;
+  return !passesTimeRange(typeof dateValue === "string" ? dateValue : undefined, timeRange);
 }
 
 /** Build a SKIP_RESULT for a shape-check failure. */
@@ -1136,7 +1127,7 @@ async function resolveCredentials(
 }
 
 /** Factory: returns the emitRecord closure + a live-updating counters object. */
-function makeEmitRecord(deps: {
+export function makeEmitRecord(deps: {
   requested: Map<string, StreamScope>;
   emit: (msg: EmittedMessage) => Promise<void>;
   emittedAt: string;
@@ -1166,6 +1157,12 @@ function makeEmitRecord(deps: {
       return Promise.resolve();
     }
 
+    const streamScope = requested.get(stream);
+    const field = timeRangeFieldFor(stream);
+    if (streamScope?.time_range && isOutsideTimeRange(streamScope.time_range, data[field])) {
+      return Promise.resolve();
+    }
+
     if (isTombstone?.(stream, data)) {
       counters.totalEmitted += 1;
       return emit({
@@ -1176,12 +1173,6 @@ function makeEmitRecord(deps: {
         emitted_at: emittedAt,
         op: "delete",
       });
-    }
-
-    const streamScope = requested.get(stream);
-    const field = timeRangeFieldFor(stream);
-    if (streamScope?.time_range && isOutsideTimeRange(streamScope.time_range, data[field])) {
-      return Promise.resolve();
     }
 
     const validation = validateRecord?.(stream, data);
