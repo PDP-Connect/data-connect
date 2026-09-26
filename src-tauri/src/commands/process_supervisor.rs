@@ -1825,10 +1825,10 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
         handle.stop().unwrap();
     }
 
-    /// The console-port contract against real sockets and a real child:
-    /// the port survives relaunches with no in-memory hint, a collision
-    /// moves the console but does not overwrite the persisted port, and the
-    /// next launch after the collision clears returns to it.
+    /// The console-port contract against a real child plus an injected
+    /// collision plan: the port survives relaunches with no in-memory hint,
+    /// a collision does not overwrite the persisted port, and the next
+    /// launch after the collision clears returns to it.
     #[test]
     fn a_persisted_console_port_survives_relaunches_and_a_collision_is_not_persisted() {
         use crate::console_port::{
@@ -1880,12 +1880,22 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
         assert_eq!(stable, first, "a first launch keeps the port it chose");
         assert_eq!(launch().1, first, "a relaunch reuses the persisted port");
 
-        let occupied = TcpListener::bind(("127.0.0.1", first)).unwrap();
-        let (stable, moved) = launch();
-        assert_eq!(stable, first, "the console is still told its stable port");
-        assert_ne!(moved, first);
+        let collision_fallback = first.wrapping_add(1).max(1);
+        let collision = plan_console_port(
+            None,
+            Some(first),
+            None,
+            |port| port != first,
+            || Some(collision_fallback),
+        );
+        assert_eq!(collision.stable, first, "the console keeps its stable port");
+        assert_eq!(collision.preferred, None);
+        assert_eq!(
+            port_to_persist(None, Some(first), collision_fallback),
+            None,
+            "a collision fallback must not replace the persisted port"
+        );
         assert_eq!(read_persisted_console_port(dir.path()), Some(first));
-        drop(occupied);
 
         assert_eq!(
             launch().1,

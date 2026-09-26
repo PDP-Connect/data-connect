@@ -185,6 +185,27 @@ function readWorkflowRunScript(workflow: string, name: string) {
     .join("\n")
 }
 
+function readCleanInstallBashScripts(workflow: string) {
+  const cleanInstall = workflow.slice(workflow.indexOf("\n  clean-install:\n"))
+  const steps = cleanInstall.split(/\n      - name: /).slice(1)
+
+  return steps.flatMap(step => {
+    if (!/^        shell: bash$/m.test(step)) return []
+    const marker = "        run: |\n"
+    const start = step.indexOf(marker)
+    const inline = step.match(/^        run: (.+)$/m)?.[1]
+    if (start === -1 && inline === undefined) return []
+    const script =
+      (start === -1 ? inline : undefined) ??
+      step
+        .slice(start + marker.length)
+        .split("\n")
+        .map(line => (line.startsWith("          ") ? line.slice(10) : line))
+        .join("\n")
+    return [{ name: step.split("\n", 1)[0], script }]
+  })
+}
+
 // Values GitHub Actions would substitute into a run script before the runner's
 // shell ever sees it. Tests that execute a step's script have to do the same
 // substitution, because `${{ ... }}` is not shell syntax -- bash rejects it as a
@@ -213,6 +234,49 @@ function substituteActionsExpressions(script: string) {
 }
 
 describe("release workflow", () => {
+  it("keeps every clean-install Bash script portable across runner shells", () => {
+    const scripts = readCleanInstallBashScripts(readReleaseWorkflow())
+
+    expect(scripts.map(({ name }) => name)).toEqual([
+      "Download release installer",
+      "Install and launch (macOS)",
+      "Assert owner password not yet set and sidecars serving",
+      "Collect evidence",
+    ])
+
+    for (const { name, script } of scripts) {
+      expect(script, name).not.toMatch(
+        /\b(?:mapfile|readarray|coproc)\b|\bdeclare\s+-[A-Za-z]*[Ang][A-Za-z]*\b|\$\{[A-Za-z_][A-Za-z0-9_]*(?:,,?|\^\^?)[^}]*\}|\bshopt\s+-s\s+globstar|&>>|\|&|;{1,2}&/
+      )
+      // shasum is absent from Git Bash on windows-latest. The hash step uses
+      // Node, which Setup Node provides on all three clean-install runners.
+      expect(script, name).not.toMatch(/\bshasum\b/)
+      const syntaxCheck = spawnSync("bash", ["-n"], { input: script })
+      expect(syntaxCheck.status, `${name}: ${syntaxCheck.stderr}`).toBe(0)
+    }
+
+    // Verify the shell commands needed by each runner image stay in steps
+    // whose runner provides them. Setup Node provides node everywhere; the
+    // hosted images provide gh and Git Bash coreutils; macOS provides its
+    // installer tools; windows-latest provides pwsh; macOS provides ps.
+    const requiredCommands = [
+      [0, ["gh", "mkdir", "node"]],
+      [1, ["mktemp", "hdiutil", "tee", "ditto", "codesign", "open"]],
+      [2, ["node"]],
+      [3, ["mkdir", "cp", "ls", "pwsh", "ps"]],
+    ] as const
+    for (const [index, commands] of requiredCommands) {
+      for (const command of commands) {
+        expect(
+          scripts[index].script,
+          `${scripts[index].name}: ${command}`
+        ).toMatch(new RegExp(`\\b${command}\\b`))
+      }
+    }
+    expect(scripts[0].script).toContain("gh release download")
+    expect(scripts[3].script).toContain("pwsh -NoProfile")
+  })
+
   it("builds manual-install artifacts on demand without an updater", () => {
     const workflow = readReleaseWorkflow()
 

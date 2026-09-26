@@ -653,13 +653,18 @@ jobs:
           set -euo pipefail
           mkdir -p "$EVIDENCE_DIR" installer
           gh release download --repo "$GITHUB_REPOSITORY" --pattern "$ASSET_PATTERN" --dir installer -- "$RELEASE_TAG"
-          mapfile -t assets < <(find installer -type f)
-          if [ "${#assets[@]}" -ne 1 ]; then
-            echo "::error::Expected one $ASSET_PATTERN asset on $RELEASE_TAG, found ${#assets[@]}."
+          asset_count=0
+          for asset in installer/*; do
+            [ -f "$asset" ] || continue
+            asset_count=$((asset_count + 1))
+            installer_path="$asset"
+          done
+          if [ "$asset_count" -ne 1 ]; then
+            echo "::error::Expected one $ASSET_PATTERN asset on $RELEASE_TAG, found $asset_count."
             exit 1
           fi
-          echo "INSTALLER=${assets[0]}" >> "$GITHUB_ENV"
-          shasum -a 256 "${assets[0]}" | tee "$EVIDENCE_DIR/installer.sha256"
+          echo "INSTALLER=$installer_path" >> "$GITHUB_ENV"
+          node -e 'const fs = require("node:fs"); const { createHash } = require("node:crypto"); const file = process.argv[1]; console.log(`${createHash("sha256").update(fs.readFileSync(file)).digest("hex")}  ${file}`)' "$installer_path" > "$EVIDENCE_DIR/installer.sha256"
 
       - name: Install and launch (macOS)
         if: runner.os == 'macOS'
