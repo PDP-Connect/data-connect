@@ -2276,7 +2276,13 @@ setInterval(() => {}, 1000);
         let environment: Value =
             serde_json::from_str(&fs::read_to_string(report.path()).unwrap()).unwrap();
         let object = environment.as_object().unwrap();
-        assert_eq!(object.len(), 3);
+        for key in object.keys() {
+            assert!(
+                ["ALLOWED", "PORT", "REPORT_PATH"].contains(&key.as_str())
+                    || is_windows_runtime_environment_key(OsStr::new(key)),
+                "unexpected child environment variable: {key}"
+            );
+        }
         assert_eq!(object.get("ALLOWED").and_then(Value::as_str), Some("yes"));
         assert!(object.get("SECRET").is_none());
         assert!(object
