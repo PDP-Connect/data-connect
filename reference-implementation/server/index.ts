@@ -83,7 +83,9 @@ import {
   createConnectorInstallService,
   createConnectorInstallStore,
   inspectActiveConnector,
+  repairPendingConnectorActivations,
 } from "./connector-install/index.ts";
+import { getActiveConnectorActivationToken } from "./connector-install/activation-authority.ts";
 import { createFileLocalConnectorSourceStore } from "./connector-install/local-source.ts";
 import { createRemoteAccessConfigStore, remoteAccessConfigPath } from "./remote-access-store.ts";
 import { ownerPasswordOwnerSet } from "./owner-password-owner-set.ts";
@@ -6669,7 +6671,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
   const connectorInstallService =
     opts.connectorInstallService ??
     createConnectorInstallService({
-      registerManifest: (manifest) => registerConnector(manifest),
+      registerManifest: (manifest, options) => registerConnector(manifest, options),
     });
 
   {
@@ -8240,7 +8242,7 @@ function buildRsApp(opts: ServerOpts = {}) {
     service:
       opts.connectorInstallService ??
       createConnectorInstallService({
-        registerManifest: (manifest) => registerConnector(manifest),
+        registerManifest: (manifest, options) => registerConnector(manifest, options),
       }),
   } as unknown as Parameters<typeof mountOwnerConnectorInstall>[1]);
 
@@ -8682,6 +8684,18 @@ export async function startServer(opts: ServerOpts = {}) {
     configureSemanticBackend(opts.semanticRetrievalBackend as Parameters<typeof configureSemanticBackend>[0]);
   }
 
+  if (!process.env.PDPP_CONNECTOR_PRELOAD_DIR) {
+    const failedRepairs = await repairPendingConnectorActivations((manifest, options) =>
+      registerConnector(manifest, options)
+    );
+    for (const failure of failedRepairs) {
+      logger.warn(
+        { connectorId: failure.connectorId, err: failure.error },
+        "connector activation remains non-runnable and requires repair"
+      );
+    }
+  }
+
   // Model preparation is an optional acceleration effect, not a boot gate.
   // The backend owns its single-flight promise and lifecycle status; scheduling
   // it here ensures a fresh Core with no semantic backfill work still starts
@@ -9119,7 +9133,7 @@ export async function startServer(opts: ServerOpts = {}) {
   const connectorInstallService =
     opts.connectorInstallService ??
     createConnectorInstallService({
-      registerManifest: (manifest) => registerConnector(manifest),
+      registerManifest: (manifest, options) => registerConnector(manifest, options),
     });
   const asApp = buildAsApp({
     acceptedCollectorProtocolVersions: opts.acceptedCollectorProtocolVersions,
@@ -10025,15 +10039,6 @@ function createReferenceSchedulerManager({
           );
           continue;
         }
-        const connectorPath = await Promise.resolve(
-          connectorPathResolver(connectorId, manifest, {
-            priorityClass: "background",
-          })
-        );
-        if (!connectorPath) {
-          logger?.warn?.({ connector_id: connectorId }, "skipping scheduled connector without runnable implementation");
-          continue;
-        }
         // Scheduler rows are not capabilities. Authorize their exact stored
         // connection (or materialize this owner's default only when the legacy
         // row lacks a selector) before the scheduler can create run.started.
@@ -10046,7 +10051,31 @@ function createReferenceSchedulerManager({
         connectors.push({
           connectorId: namespace.connectorId,
           connectorInstanceId: namespace.connectorInstanceId,
-          connectorPath,
+          resolveImplementation: async () => {
+            const currentManifest = await getConnectorManifest(connectorId);
+            if (!currentManifest) {
+              throw new Error(`Unknown connector: ${connectorId}`);
+            }
+            const authoritativePath = await resolveActiveInstallFirstConnectorPath(connectorId, currentManifest);
+            const currentPolicyReason = getScheduleIneligibilityReason(getManifestRefreshPolicy(currentManifest));
+            if (currentPolicyReason) {
+              throw new Error(`Scheduled connector is no longer background-safe: ${currentPolicyReason}`);
+            }
+            const activeInstall = await inspectActiveConnector(createConnectorInstallStore(), connectorId);
+            if (activeInstall.status === "invalid") {
+              throw new Error(`Active connector install is invalid for ${connectorId}: ${activeInstall.reason}`);
+            }
+            const connectorPath = activeInstall.status === "active"
+              ? authoritativePath
+              : await Promise.resolve(connectorPathResolver(connectorId, currentManifest, { priorityClass: "background" }));
+            return connectorPath
+              ? {
+                  activationToken: await getActiveConnectorActivationToken(connectorId),
+                  connectorPath,
+                  manifest: currentManifest,
+                }
+              : null;
+          },
           intervalMs: Math.max(1, schedule.interval_seconds) * 1000,
           manifest,
           ownerSubjectId,

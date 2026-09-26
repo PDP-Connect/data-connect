@@ -24,6 +24,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import {
   BROWSER_SURFACE_LEASE_STATUSES,
   // biome-ignore lint/correctness/noUnresolvedImports: Biome cannot resolve this installed package export; Node and TypeScript resolve it.
@@ -317,6 +318,7 @@ interface RunConnectorCall {
   staticSecretEnv?: Record<string, string> | null;
   traceContext?: SpineTraceContext;
   triggerKind?: RunTriggerKind;
+  verifyLaunchAuthority?: () => Promise<void>;
 }
 
 interface StartedRunInfo {
@@ -1161,10 +1163,10 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
     }
   }
 
-  function buildAttemptCall(schedule: ConnectorSchedule, call: RunConnectorCall, attempt: number): RunConnectorCall {
+  function buildAttemptCall(call: RunConnectorCall, attempt: number): RunConnectorCall {
     const attemptTriggerKind: RunTriggerKind = attempt === 1 ? (call.triggerKind ?? "scheduled") : "retry";
     const attemptPolicy = projectRunAutomationPolicy({
-      refreshPolicy: getManifestRefreshPolicy(schedule.manifest),
+      refreshPolicy: getManifestRefreshPolicy(call.manifest),
       triggerKind: attemptTriggerKind,
     });
     return {
@@ -1203,7 +1205,7 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
     return failRecord;
   }
 
-  async function runWithRetries(schedule: ConnectorSchedule, call: RunConnectorCall): Promise<RunRecord> {
+  async function runWithRetries(schedule: ConnectorSchedule, call: Omit<RunConnectorCall, "connectorPath">): Promise<RunRecord> {
     const { maxRetries = 2 } = schedule;
     let attempt = 0;
     let lastError: RunConnectorError | null = null;
@@ -1215,8 +1217,54 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
       // biome-ignore lint/style/noIncrementDecrement: The explicit counter update preserves this loop’s evaluation order.
       attempt++;
 
+      let implementation: {
+        connectorPath: string;
+        manifest: SchedulerManifest;
+        activationToken?: string | null;
+      } | null;
+      try {
+        // biome-ignore lint/performance/noAwaitInLoops: Every retry must recheck activation before it can spawn.
+        implementation = await resolveScheduleAttemptImplementation(schedule);
+      } catch (err) {
+        return recordAndNotify(
+          buildRunAdmissionFailure(
+            schedule.connectorId,
+            err instanceof Error ? err.message : String(err),
+            schedule.connectorInstanceId
+          )
+        );
+      }
+      if (!implementation) {
+        return recordAndNotify(
+          buildRunAdmissionFailure(schedule.connectorId, "no runnable connector implementation", schedule.connectorInstanceId)
+        );
+      }
+
+      const { connectorPath, manifest, activationToken } = implementation;
       // biome-ignore lint/performance/noAwaitInLoops: Work is intentionally sequential to preserve ordering and state transitions.
-      const outcome = await runSingleAttempt(schedule, buildAttemptCall(schedule, call, attempt), attempt);
+      const outcome = await runSingleAttempt(
+        schedule,
+        buildAttemptCall(
+          {
+            ...call,
+            connectorPath,
+            manifest,
+            verifyLaunchAuthority: async () => {
+              const current = await resolveScheduleAttemptImplementation(schedule);
+              if (
+                !current ||
+                current.connectorPath !== connectorPath ||
+                !isDeepStrictEqual(current.manifest, manifest) ||
+                current.activationToken !== activationToken
+              ) {
+                throw new Error(`Connector implementation changed before launch for ${schedule.connectorId}`);
+              }
+            },
+          },
+          attempt
+        ),
+        attempt
+      );
       if (outcome.kind === "done") {
         return outcome.record;
       }
@@ -1228,6 +1276,19 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
     }
 
     return finalizeExhaustedFailure(schedule, lastError, attempt);
+  }
+
+  async function resolveScheduleAttemptImplementation(
+    schedule: ConnectorSchedule
+  ): Promise<{
+    connectorPath: string;
+    manifest: SchedulerManifest;
+    activationToken?: string | null;
+  } | null> {
+    if (schedule.resolveImplementation) {
+      return schedule.resolveImplementation();
+    }
+    return schedule.connectorPath ? { connectorPath: schedule.connectorPath, manifest: schedule.manifest } : null;
   }
 
   function scheduledManagedConnectorLacksRoutingSeam(
@@ -1524,7 +1585,6 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
     const {
       connectorId,
       connectorInstanceId = connectorId,
-      connectorPath,
       manifest,
       ownerToken,
       ownerSubjectId,
@@ -1629,7 +1689,6 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
       collectionMode,
       connectorId,
       connectorInstanceId,
-      connectorPath,
       manifest,
       onInteraction: wrappedInteraction,
       onProgress: () => {

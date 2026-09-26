@@ -5,6 +5,8 @@ import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { SUPPORTED_SEED_CONNECTOR_KEYS } from "../../connectors/seed/index.ts";
+import { resolveActiveInstallFirstConnectorPath } from "../../runtime/controller.ts";
+import { getActiveConnectorActivationToken } from "../../server/connector-install/activation-authority.ts";
 import { canonicalConnectorKey } from "../../server/connector-key.ts";
 import { initDb } from "../../server/db.ts";
 import { initPostgresStorage, isPostgresStorageBackend, resolveStorageBackend } from "../../server/postgres-storage.ts";
@@ -106,6 +108,7 @@ type RunConnectorFn = (args: {
     ownerSubjectId: string | null;
   }) => Promise<{ connectorId: string; connectorInstanceId: string; ownerSubjectId: string }>;
   connectorPath: string;
+  verifyLaunchAuthority?: () => Promise<void>;
   connectorId: string;
   ownerToken: string;
   manifest: SeedManifest;
@@ -167,6 +170,12 @@ async function seedOneConnector(
     const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as SeedManifest;
 
     await registerManifest(asUrl, manifest);
+    const connectorId = canonicalConnectorKey(manifest.connector_id) ?? manifest.connector_id;
+    const connectorPath = await resolveActiveInstallFirstConnectorPath(connectorId, manifest);
+    if (connectorPath !== SEED_CONNECTOR_PATH) {
+      throw new Error(`Seed connector is unavailable for ${connectorId}; its activation requires operator review`);
+    }
+    const activationToken = await getActiveConnectorActivationToken(connectorId);
 
     const connectorInstanceStore = isPostgresStorageBackend()
       ? createPostgresConnectorInstanceStore()
@@ -199,12 +208,21 @@ async function seedOneConnector(
       // against the SAME canonical key here rather than the raw manifest
       // value — otherwise the store resolves a different connector than the
       // one runConnector actually starts.
-      connectorId: canonicalConnectorKey(manifest.connector_id) ?? manifest.connector_id,
-      connectorPath: SEED_CONNECTOR_PATH,
+      connectorId,
+      connectorPath,
       manifest,
       ownerToken,
       rsUrl,
       state: null,
+      verifyLaunchAuthority: async () => {
+        const currentPath = await resolveActiveInstallFirstConnectorPath(connectorId, manifest);
+        if (
+          currentPath !== connectorPath ||
+          (await getActiveConnectorActivationToken(connectorId)) !== activationToken
+        ) {
+          throw new Error(`Seed connector activation changed before launch for ${connectorId}`);
+        }
+      },
     });
 
     const recordCount = typeof result.records === "number" ? result.records : null;

@@ -38,6 +38,7 @@ import {
   initiateOwnerDeviceAuthorization,
 } from "../server/auth.ts";
 import { canonicalConnectorKey, canonicalConnectorKeyFromManifest } from "../server/connector-key.ts";
+import { getActiveConnectorActivationToken } from "../server/connector-install/activation-authority.ts";
 import {
   getConnectorSummaryEvidence,
   reconcileDirtyConnectorSummaryEvidence,
@@ -1369,9 +1370,8 @@ export function resolveDefaultConnectorPath(connectorId: string, manifest?: Conn
 }
 
 // OCI installs are the only source of catalog connector code, and they fail
-// closed. Only an absent active record falls through to the seed resolver; a
-// corrupt or path-escaping active record stops resolution instead of being
-// bypassed.
+// closed. Only an absent activation record falls through to the seed resolver;
+// a non-active activation or corrupt/path-escaping install stops resolution.
 const activeConnectorInstallStore = createConnectorInstallStore();
 const localConnectorSourceStore = createFileLocalConnectorSourceStore();
 export async function resolveActiveInstallFirstConnectorPath(
@@ -1381,16 +1381,16 @@ export async function resolveActiveInstallFirstConnectorPath(
   localStore: LocalConnectorSourceStore = localConnectorSourceStore,
   installStore: ConnectorInstallStore = activeConnectorInstallStore
 ): Promise<string | null> {
+  const active = await inspectActiveConnector(installStore, connectorId);
+  if (active.status === "invalid") {
+    throw new Error(`Active connector install is invalid for ${connectorId}: ${active.reason}`);
+  }
   const local = await inspectActiveLocalConnectorSource(localStore, connectorId);
   if (local.status === "invalid") {
     throw new Error("Active developer-local connector source is invalid for " + connectorId + ": " + local.reason);
   }
   if (local.status === "active") {
     return local.path;
-  }
-  const active = await inspectActiveConnector(installStore, connectorId);
-  if (active.status === "invalid") {
-    throw new Error(`Active connector install is invalid for ${connectorId}: ${active.reason}`);
   }
   return active.status === "active"
     ? active.path
@@ -3777,7 +3777,9 @@ export function createController(opts: ControllerOptions = {}): Controller {
       );
     }
     const activeInstall =
-      activeLocalSource.status === "none" ? await inspectActiveConnector(activeConnectorInstallStore, connectorId) : null;
+      activeLocalSource.status === "none" || activeConnectorInstallStore.activationAuthority
+        ? await inspectActiveConnector(activeConnectorInstallStore, connectorId)
+        : null;
     if (activeInstall?.status === "invalid") {
       throw new ControllerError(
         `Active connector install is invalid for ${connectorId}: ${activeInstall.reason}`,
@@ -3820,6 +3822,40 @@ export function createController(opts: ControllerOptions = {}): Controller {
         ? { runSource: { ...activeLocalSource.source, id: connectorId } }
         : {}),
     };
+  }
+
+  async function resolveRunStartPath(
+    connectorId: string,
+    admittedPath: string,
+    manifest: ConnectorManifest,
+    options: RunNowOptions
+  ): Promise<string> {
+    const currentInstall = await inspectActiveConnector(activeConnectorInstallStore, connectorId);
+    if (currentInstall.status === "invalid") {
+      throw new ControllerError(
+        `Active connector install is invalid for ${connectorId}: ${currentInstall.reason}`,
+        "connector_install_invalid"
+      );
+    }
+    const currentLocal = await inspectActiveLocalConnectorSource(localSourceStore, connectorId);
+    if (currentLocal.status === "invalid") {
+      throw new ControllerError(
+        `Active developer-local connector source is invalid for ${connectorId}: ${currentLocal.reason}`,
+        "connector_install_invalid"
+      );
+    }
+    let currentPath: string | null;
+    if (currentLocal.status === "active") {
+      currentPath = currentLocal.path;
+    } else if (currentInstall.status === "active") {
+      currentPath = currentInstall.path;
+    } else {
+      currentPath = await Promise.resolve(resolveConnectorPath(connectorId, manifest, options));
+    }
+    if (currentPath !== admittedPath) {
+      throw new ControllerError(`Connector implementation changed before run start for ${connectorId}`, "connector_install_invalid");
+    }
+    return currentPath;
   }
 
   /**
@@ -4122,8 +4158,13 @@ export function createController(opts: ControllerOptions = {}): Controller {
     // polyfill-connectors/src/profile-lock.ts).
     let runResult: Awaited<ReturnType<RunConnectorFn>> | undefined;
     const runPromise = Promise.resolve()
-      .then(() =>
-        runConnectorImpl({
+      .then(async () => {
+        // Browser-surface acquisition and credential loading can outlive an
+        // installation update. Recheck before entering the runtime; the
+        // launch guard repeats this after runtime setup, immediately before spawn.
+        const currentPath = await resolveRunStartPath(admittedConnectorId, connectorPath, manifest, options);
+        const activationToken = await getActiveConnectorActivationToken(admittedConnectorId);
+        return runConnectorImpl({
           admitRunConnection: async (candidate) => {
             await Promise.resolve();
             if (
@@ -4145,7 +4186,7 @@ export function createController(opts: ControllerOptions = {}): Controller {
             : {}),
           ...(opts.approvedProxyConnectorIds ? { approvedProxyConnectorIds: opts.approvedProxyConnectorIds } : {}),
           connectorInstanceId,
-          connectorPath,
+          connectorPath: currentPath,
           manifest,
           ownerSubjectId: runOwnerSubjectId,
           ownerToken,
@@ -4170,8 +4211,17 @@ export function createController(opts: ControllerOptions = {}): Controller {
           streamingRegistrationToken: streamingNonce,
           traceContext,
           triggerKind,
-        })
-      )
+          verifyLaunchAuthority: async () => {
+            await resolveRunStartPath(admittedConnectorId, currentPath, manifest, options);
+            if ((await getActiveConnectorActivationToken(admittedConnectorId)) !== activationToken) {
+              throw new ControllerError(
+                `Connector activation changed before launch for ${admittedConnectorId}`,
+                "connector_install_invalid"
+              );
+            }
+          },
+        });
+      })
       // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: This protocol transition owns ordered state invariants that must remain local.
       .then(async (result) => {
         runResult = result;

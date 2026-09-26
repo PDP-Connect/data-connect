@@ -24,8 +24,11 @@ import {
   createFileConnectorInstallStore,
   inspectActiveConnector,
   normalizeCoreInstallLayout,
+  repairPendingConnectorActivations,
   resolveActiveConnectorPath,
 } from "../server/connector-install/index.ts";
+import { getConnectorActivation } from "../server/connector-install/activation-authority.ts";
+import { closeDb, initDb } from "../server/db.ts";
 import { mountOwnerConnectorInstall } from "../server/routes/owner-connector-install.ts";
 
 const digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -71,6 +74,33 @@ function writeFixture(root: string): void {
   writeFileSync(
     join(root, "profile", "collection-profile.json"),
     JSON.stringify({ connector_id: "github", version: "1.0.0" })
+  );
+  writeFileSync(join(root, "dist", "collection-profile.mjs"), "export {};\n");
+  writeFileSync(join(root, "provenance.json"), "{}\n");
+}
+
+function writeActivationFixture(root: string, connectorId: string): void {
+  mkdirSync(join(root, "profile"), { recursive: true });
+  mkdirSync(join(root, "dist"), { recursive: true });
+  writeFileSync(
+    join(root, "profile", "collection-profile.json"),
+    JSON.stringify({
+      capabilities: { human_interaction: [] },
+      connector_id: connectorId,
+      display_name: `${connectorId} fixture`,
+      manifest_uri: `https://sources.example/${connectorId}`,
+      protocol_version: "0.1.0",
+      streams: [
+        {
+          name: "items",
+          primary_key: ["id"],
+          schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+          selection: { fields: true, resources: true },
+          semantics: "append_only",
+        },
+      ],
+      version: "1.0.0",
+    })
   );
   writeFileSync(join(root, "dist", "collection-profile.mjs"), "export {};\n");
   writeFileSync(join(root, "provenance.json"), "{}\n");
@@ -752,6 +782,68 @@ test("a post-publication registration failure restores the previous active root"
     assert.equal((await service.status())[0]?.digest, previous.digest);
     assert.equal(existsSync(join(dataDir, "connectors", "github", next.digest)), false);
   } finally {
+    rmSync(dataDir, { force: true, recursive: true });
+  }
+});
+
+test("repairing a selected connector does not repair unrelated pending activations", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pdpp-connector-install-"));
+  const previousDataDir = process.env.PDPP_DATA_DIR;
+  const selected = {
+    ...entry,
+    connector_id: "github",
+    connector_key: "github",
+  };
+  const unrelated = {
+    ...entry,
+    config_digest: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    connector_id: "slack",
+    connector_key: "slack",
+    digest: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  };
+  try {
+    process.env.PDPP_DATA_DIR = dataDir;
+    initDb(":memory:");
+    const service = createConnectorInstallService({
+      catalogLoader: async () => [selected, unrelated],
+      dataDir,
+      installArtifact: (root, candidate) => {
+        writeActivationFixture(root, candidate.connector_id);
+      },
+      registerManifest: () => Promise.reject(new Error("initial registration failed")),
+      store: createConnectorInstallStore(),
+    });
+
+    await assert.rejects(() => service.install(selected.connector_id, selected.digest), /initial registration failed/);
+    await assert.rejects(() => service.install(unrelated.connector_id, unrelated.digest), /initial registration failed/);
+    assert.equal((await getConnectorActivation(selected.connector_id))?.state, "repair_required");
+    assert.equal((await getConnectorActivation(unrelated.connector_id))?.state, "repair_required");
+
+    const registered: string[] = [];
+    const failures = await repairPendingConnectorActivations(
+      (manifest) => {
+        const connectorId = String(manifest.connector_id);
+        registered.push(connectorId);
+        if (connectorId === unrelated.connector_id) {
+          throw new Error("unrelated registration failed");
+        }
+        return Promise.resolve();
+      },
+      dataDir,
+      selected.connector_id
+    );
+
+    assert.deepEqual(failures, []);
+    assert.deepEqual(registered, [selected.connector_id]);
+    assert.equal((await getConnectorActivation(selected.connector_id))?.state, "active");
+    assert.equal((await getConnectorActivation(unrelated.connector_id))?.state, "repair_required");
+  } finally {
+    closeDb();
+    if (previousDataDir === undefined) {
+      delete process.env.PDPP_DATA_DIR;
+    } else {
+      process.env.PDPP_DATA_DIR = previousDataDir;
+    }
     rmSync(dataDir, { force: true, recursive: true });
   }
 });

@@ -166,6 +166,42 @@ test("older installed digest exposes Update only when a latest target exists", (
   });
 });
 
+test("repair-required install surfaces safe operator instructions without a mutation action", () => {
+  const catalog = parseConnectorInstallCatalogResponse(connectorInstallCatalogFixture).data;
+  const status = parseConnectorInstallStatusResponse({
+    ...connectorInstallStatusFixture,
+    data: [
+      {
+        ...connectorInstallStatusFixture.data[0],
+        activation_state: "repair_required",
+        repair_error: "internal path /secret/pdpp-data/connectors/github failed",
+        repair_reason: "Derived manifest repair pending",
+      },
+    ],
+  }).data;
+  const github = connectorInstallRowModel(entry("github"), {
+    catalog: catalog.find((candidate) => candidate.connector_id === "github" && candidate.latest) ?? null,
+    installed: status[0] ?? null,
+  });
+
+  assert.equal(github.activationState, "repair_required");
+  assert.equal(github.activationLabel, "Repair required");
+  assert.equal(github.activationReason, "Derived manifest repair pending");
+  assert.equal(github.action, null);
+  assert.equal(
+    github.operatorInstruction,
+    "Operator repair is required. Follow the connector install recovery runbook on the server host."
+  );
+
+  const repairStatus = status[0];
+  assert.ok(repairStatus);
+  const errorOnly = connectorInstallRowModel(entry("github"), {
+    catalog: catalog.find((candidate) => candidate.connector_id === "github" && candidate.latest) ?? null,
+    installed: { ...repairStatus, repair_reason: null },
+  });
+  assert.equal(errorOnly.activationReason, null, "raw repair_error must not reach owner-facing presentation");
+});
+
 test("explicit unavailable binding blocks Install and surfaces its server reason", () => {
   const catalog = parseConnectorInstallCatalogResponse(connectorInstallCatalogFixture).data;
   const signal = connectorInstallRowModel(entry("signal", "preview"), {
