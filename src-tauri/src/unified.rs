@@ -1193,9 +1193,9 @@ fn start_managed_stack(
             }
         };
     if let Some(fields) = applied_fields {
-        apply_ngrok_tunnel_outcome(app, &fields, None);
+        apply_cloudflare_tunnel_outcome(app, &fields, None);
     } else if let Some(error) = tunnel_error.as_deref() {
-        apply_ngrok_tunnel_outcome(app, &remote_access.fields, Some(error));
+        apply_cloudflare_tunnel_outcome(app, &remote_access.fields, Some(error));
     }
 
     Ok(ManagedStackStart {
@@ -1741,10 +1741,29 @@ fn apply_ngrok_tunnel_outcome(
     fields: &crate::remote_access::ReachabilityFields,
     tunnel_error: Option<&str>,
 ) {
+    apply_public_url_tunnel_outcome(app, "ngrok", fields, tunnel_error);
+}
+
+/// Persist the outcome of this run's Cloudflare tunnel start attempt in the
+/// shared reachability fields consumed by the console.
+fn apply_cloudflare_tunnel_outcome(
+    app: &AppHandle,
+    fields: &crate::remote_access::ReachabilityFields,
+    tunnel_error: Option<&str>,
+) {
+    apply_public_url_tunnel_outcome(app, "Cloudflare", fields, tunnel_error);
+}
+
+fn apply_public_url_tunnel_outcome(
+    app: &AppHandle,
+    provider: &str,
+    fields: &crate::remote_access::ReachabilityFields,
+    tunnel_error: Option<&str>,
+) {
     let current = match load_remote_access_config(app) {
         Ok(config) => config,
         Err(error) => {
-            log::error!("Could not read the remote-access config to persist the ngrok tunnel outcome: {error}");
+            log::error!("Could not read the remote-access config to persist the {provider} tunnel outcome: {error}");
             return;
         }
     };
@@ -1758,7 +1777,7 @@ fn apply_ngrok_tunnel_outcome(
         ..current
     };
     if let Err(error) = save_remote_access_config(app, updated) {
-        log::error!("Could not persist the ngrok tunnel outcome: {error}");
+        log::error!("Could not persist the {provider} tunnel outcome: {error}");
     }
 }
 
@@ -5493,6 +5512,34 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
                  on the stack while it is being torn down"
             );
         }
+    }
+
+    #[test]
+    fn cloudflare_start_outcome_uses_cloudflare_outcome_handling() {
+        let source = include_str!("unified.rs");
+        let body = source
+            .split_once("fn start_managed_stack(")
+            .expect("managed stack start")
+            .1
+            .split_once("fn resolve_ngrok_options(")
+            .expect("next function after managed stack start")
+            .0;
+        let cloudflare_outcome = body
+            .split_once("match start_cloudflare_tunnel_provider")
+            .expect("Cloudflare provider start")
+            .1
+            .split_once("Ok(ManagedStackStart")
+            .expect("managed stack return")
+            .0;
+
+        assert!(
+            contains_code(cloudflare_outcome, "apply_cloudflare_tunnel_outcome"),
+            "Cloudflare success and failure outcomes must use Cloudflare handling, not the ngrok handler"
+        );
+        assert!(
+            !contains_code(cloudflare_outcome, "apply_ngrok_tunnel_outcome"),
+            "a Cloudflare result must not be recorded through ngrok outcome handling"
+        );
     }
 
     #[test]
