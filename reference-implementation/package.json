@@ -66,7 +66,7 @@
   "dependencies": {
     "@fastify/formbody": "^9.0.0",
     "@huggingface/transformers": "^4.3.0",
-    "@opendatalabs/data-connectors-tools": "github:PDP-Connect/data-connectors#16e357fd508268cf917cabd4123b372e524eb3b3",
+    "@opendatalabs/data-connectors-tools": "github:PDP-Connect/data-connectors#bd6f94a1134665b82c527ed7d67ddf14b75fa0ad",
     "@pdpp/collector-runtime": "*",
     "@pdpp/connector-protocol": "*",
     "@pdpp/display": "*",
