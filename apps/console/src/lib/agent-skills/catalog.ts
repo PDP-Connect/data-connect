@@ -20,7 +20,7 @@ const PROTECTED_RESOURCE_METADATA_PATH = "/.well-known/oauth-protected-resource"
 const MCP_ENDPOINT_PATH = "/mcp";
 const LEADING_SLASHES = /^\/+/;
 
-let cachedRepoRoot: string | null = null;
+let cachedSkillRoot: string | null = null;
 
 interface AgentSkillFileDefinition {
   readonly mediaType: string;
@@ -119,40 +119,61 @@ async function pathExists(absPath: string, kind: "file" | "dir"): Promise<boolea
   }
 }
 
-async function resolveRepoRoot(): Promise<string> {
-  if (cachedRepoRoot) {
-    return cachedRepoRoot;
+async function resolveSkillRoot(): Promise<string> {
+  if (cachedSkillRoot) {
+    return cachedSkillRoot;
   }
 
-  let dir = process.cwd();
-  const { root } = path.parse(dir);
-  for (;;) {
-    // Each iteration walks up one directory from the previous iteration's
-    // result (dir = parent(dir)); the checks can't run in parallel because
-    // the next directory to check isn't known until this one is checked.
-    // biome-ignore lint/performance/noAwaitInLoops: see comment above.
-    const hasWorkspace = await pathExists(path.join(dir, "pnpm-workspace.yaml"), "file");
-    const hasOpenSpec = await pathExists(path.join(dir, "openspec"), "dir");
-    if (hasWorkspace && hasOpenSpec) {
-      cachedRepoRoot = dir;
-      return dir;
+  const serverDirectory = path.dirname(process.argv[1] ?? process.cwd());
+  const packagedRoots = [
+    path.resolve(serverDirectory, "../../docs/agent-skills"),
+    path.resolve(process.cwd(), "docs/agent-skills"),
+  ];
+  const packagedRootExists = await Promise.all(
+    packagedRoots.map((root) => pathExists(path.join(root, "pdpp-data-access", "SKILL.md"), "file"))
+  );
+  const packagedRootIndex = packagedRootExists.findIndex(Boolean);
+  if (packagedRootIndex !== -1) {
+    const packagedRoot = packagedRoots[packagedRootIndex];
+    if (packagedRoot) {
+      cachedSkillRoot = packagedRoot;
+      return packagedRoot;
     }
-    if (dir === root) {
-      break;
-    }
-    const parent = path.dirname(dir);
-    if (parent === dir) {
-      break;
-    }
-    dir = parent;
   }
 
-  throw new Error(`Could not resolve PDPP repo root from ${process.cwd()}`);
+  // Development runs from apps/console, while the canonical source lives at
+  // the repository's docs/agent-skills path. Packaged production runs use one
+  // of the stable roots above and do not need workspace or OpenSpec markers.
+  if (process.env.NODE_ENV !== "production") {
+    let dir = process.cwd();
+    const { root } = path.parse(dir);
+    const developmentRoots: string[] = [];
+    for (;;) {
+      developmentRoots.push(path.join(dir, "docs/agent-skills"));
+      if (dir === root) {
+        break;
+      }
+      dir = path.dirname(dir);
+    }
+    const developmentRootExists = await Promise.all(
+      developmentRoots.map((skillRoot) => pathExists(path.join(skillRoot, "pdpp-data-access", "SKILL.md"), "file"))
+    );
+    const developmentRootIndex = developmentRootExists.findIndex(Boolean);
+    if (developmentRootIndex !== -1) {
+      const developmentRoot = developmentRoots[developmentRootIndex];
+      if (developmentRoot) {
+        cachedSkillRoot = developmentRoot;
+        return developmentRoot;
+      }
+    }
+  }
+
+  throw new Error(`Could not resolve packaged agent skills from ${process.cwd()}`);
 }
 
-async function readRepoFile(repoRelativePath: string): Promise<Buffer> {
-  const repoRoot = await resolveRepoRoot();
-  return fs.readFile(path.join(repoRoot, repoRelativePath));
+async function readSkillFile(repoRelativePath: string): Promise<Buffer> {
+  const skillRoot = await resolveSkillRoot();
+  return fs.readFile(path.join(skillRoot, path.relative("docs/agent-skills", repoRelativePath)));
 }
 
 function normalizeOrigin(origin: string): string {
@@ -172,7 +193,7 @@ export async function buildAgentSkillCatalog(origin: string): Promise<AgentSkill
     SKILLS.map(async (skill): Promise<AgentSkillCatalogSkill> => {
       const files = await Promise.all(
         skill.files.map(async (file): Promise<AgentSkillCatalogFile> => {
-          const bytes = await readRepoFile(file.repoRelativePath);
+          const bytes = await readSkillFile(file.repoRelativePath);
           return {
             bytes: bytes.byteLength,
             media_type: file.mediaType,
@@ -204,7 +225,7 @@ export async function readAgentSkillFile(routePath: string): Promise<{
     return null;
   }
   return {
-    body: await readRepoFile(definition.repoRelativePath),
+    body: await readSkillFile(definition.repoRelativePath),
     definition,
   };
 }
@@ -244,7 +265,7 @@ export function agentSkillsLLMSIndex(): string {
 export async function agentSkillsLLMSFullText(): Promise<string> {
   const parts = await Promise.all(
     SKILL_FILES.map(async (file) => {
-      const body = await readRepoFile(file.repoRelativePath);
+      const body = await readSkillFile(file.repoRelativePath);
       return [`## ${file.repoRelativePath}`, "", body.toString("utf8")].join("\n");
     })
   );
