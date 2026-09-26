@@ -18,6 +18,12 @@
 #                      alone cannot see a missing ignore rule; this can.
 #                      Also checks the same dummies against .railwayignore,
 #                      because `railway up` uploads the repository root.
+#   oci-archive <tar>  Scan an OCI image layout tarball (buildx
+#                      `--output type=oci`) without unpacking it: every
+#                      nested index, every platform manifest, every layer.
+#                      Prints the digest of the archive's top-level manifest
+#                      as `SCANNED-DIGEST: sha256:...` so a caller can prove
+#                      it pushes exactly what was scanned.
 #   paths              Classify layer paths read from stdin (for tests).
 #
 # Output names files only, never contents. Exit 1 on any finding.
@@ -100,6 +106,69 @@ scan_image() {
   return "$found"
 }
 
+# Layer media types hold tar streams. Attestation manifests (provenance,
+# SBOM) carry in-toto JSON layers; those are not filesystem content.
+oci_layer_tar_flags() {
+  case "$1" in
+    *tar+gzip) echo "-z" ;;
+    *tar+zstd) echo "--zstd" ;;
+    *tar) echo "" ;;
+    application/vnd.in-toto+json) echo "skip" ;;
+    *) echo "unknown" ;;
+  esac
+}
+
+scan_oci_archive() {
+  local archive="$1" found=0 top todo=() digest blob doc mt layer flags listing
+  blob_of() { printf 'blobs/sha256/%s' "${1#sha256:}"; }
+  if ! top="$(tar -xOf "$archive" index.json | jq -er '.manifests[].digest')"; then
+    echo "ERROR: $archive has no readable index.json" >&2
+    return 2
+  fi
+  if [[ "$(wc -l <<<"$top")" -ne 1 ]]; then
+    echo "ERROR: $archive must hold exactly one top-level image, found: $top" >&2
+    return 2
+  fi
+  todo=("$top")
+  while [[ "${#todo[@]}" -gt 0 ]]; do
+    digest="${todo[0]}"
+    todo=("${todo[@]:1}")
+    blob="$(blob_of "$digest")"
+    # Hash the blob bytes, not "$doc": $(...) strips trailing newlines.
+    if ! doc="$(tar -xOf "$archive" "$blob")" ||
+      [[ "sha256:$(tar -xOf "$archive" "$blob" | sha256sum | cut -d' ' -f1)" != "$digest" ]]; then
+      echo "ERROR: $archive manifest $digest is missing or does not match its digest" >&2
+      return 2
+    fi
+    while IFS= read -r digest; do
+      [[ -n "$digest" ]] && todo+=("$digest")
+    done < <(jq -r '.manifests[]?.digest' <<<"$doc")
+    while IFS=$'\t' read -r mt layer; do
+      [[ -n "$layer" ]] || continue
+      flags="$(oci_layer_tar_flags "$mt")"
+      [[ "$flags" == "skip" ]] && continue
+      if [[ "$flags" == "unknown" ]]; then
+        echo "ERROR: $archive layer $layer has unknown media type $mt" >&2
+        found=2
+        continue
+      fi
+      # shellcheck disable=SC2086
+      # Drain after tar -t, as in scan_image, so the writer never sees SIGPIPE.
+      if ! listing="$(tar -xOf "$archive" "$(blob_of "$layer")" | { tar -t $flags && cat >/dev/null; })"; then
+        echo "ERROR: $archive layer $layer is not a readable tar" >&2
+        found=2
+        continue
+      fi
+      classify_paths "$archive layer=$layer" <<<"$listing" || [[ "$found" -eq 2 ]] || found=1
+    done < <(jq -r '.layers[]? | [.mediaType, .digest] | @tsv' <<<"$doc")
+  done
+  echo "SCANNED-DIGEST: $top"
+  if [[ "$found" -eq 0 ]]; then
+    echo "OK: $archive has no secret-looking files in any layer of any platform"
+  fi
+  return "$found"
+}
+
 # Dummy files an operator is told to create, or that commonly hold secrets.
 # Values are fixed dummies; the scan reports names only.
 DUMMY_FILES=(
@@ -162,11 +231,15 @@ main() {
       [[ $# -gt 0 ]] || { echo "usage: $0 context <dir>..." >&2; exit 2; }
       for arg in "$@"; do scan_context "$arg" || rc=1; done
       ;;
+    oci-archive)
+      [[ $# -gt 0 ]] || { echo "usage: $0 oci-archive <tar>..." >&2; exit 2; }
+      for arg in "$@"; do scan_oci_archive "$arg" || rc=1; done
+      ;;
     paths)
       classify_paths "${1:-stdin}" || rc=1
       ;;
     *)
-      echo "usage: $0 {image <ref>...|context <dir>...|paths [label]}" >&2
+      echo "usage: $0 {image <ref>...|context <dir>...|oci-archive <tar>...|paths [label]}" >&2
       exit 2
       ;;
   esac
