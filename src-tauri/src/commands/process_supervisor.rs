@@ -8,9 +8,9 @@
 //! available there and the option stops only the leader after escalation.
 
 use serde::Serialize;
-use std::collections::BTreeMap;
 #[cfg(unix)]
 use std::collections::BTreeSet;
+use std::collections::{BTreeMap, VecDeque};
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io::{self, BufRead, BufReader};
@@ -674,6 +674,8 @@ fn run_supervisor(
                 return;
             }
             ReadinessOutcome::Exited(status) => {
+                let (stdout_tail, stderr_tail) = spawned.output.drain();
+                log_exit_before_readiness(&spec.label, status.as_ref(), &stdout_tail, &stderr_tail);
                 emit(
                     &spec,
                     &sink,
@@ -829,8 +831,82 @@ fn emit_stopped(spec: &ProcessSpec, state: &SupervisorState, sink: &Arc<dyn Even
 struct SpawnedProcess {
     child: Child,
     stdout_lines: mpsc::Receiver<String>,
+    output: CapturedOutput,
     #[cfg(unix)]
     process_group_id: Option<libc::pid_t>,
+}
+
+const OUTPUT_TAIL_LINES: usize = 40;
+
+#[derive(Default)]
+struct CapturedOutput {
+    stdout: Arc<Mutex<VecDeque<String>>>,
+    stderr: Arc<Mutex<VecDeque<String>>>,
+    readers: Vec<thread::JoinHandle<()>>,
+}
+
+impl CapturedOutput {
+    fn drain(self) -> (Vec<String>, Vec<String>) {
+        // An exited leader closes its pipes. Join both readers before taking
+        // the snapshots so a fast child cannot lose its final output to a
+        // scheduling race between wait() and pipe drainage.
+        for reader in self.readers {
+            let _ = reader.join();
+        }
+        (tail_snapshot(&self.stdout), tail_snapshot(&self.stderr))
+    }
+}
+
+fn append_tail(tail: &Mutex<VecDeque<String>>, line: String) {
+    if let Ok(mut tail) = tail.lock() {
+        if tail.len() == OUTPUT_TAIL_LINES {
+            tail.pop_front();
+        }
+        tail.push_back(line);
+    }
+}
+
+fn tail_snapshot(tail: &Mutex<VecDeque<String>>) -> Vec<String> {
+    tail.lock()
+        .map(|tail| tail.iter().cloned().collect())
+        .unwrap_or_default()
+}
+
+fn log_exit_before_readiness(
+    label: &str,
+    status: Option<&ExitStatus>,
+    stdout_tail: &[String],
+    stderr_tail: &[String],
+) {
+    log::error!(
+        "{}",
+        exit_before_readiness_message(label, status, stdout_tail, stderr_tail)
+    );
+}
+
+fn exit_before_readiness_message(
+    label: &str,
+    status: Option<&ExitStatus>,
+    stdout_tail: &[String],
+    stderr_tail: &[String],
+) -> String {
+    let stdout = if stdout_tail.is_empty() {
+        "(empty)".to_string()
+    } else {
+        stdout_tail.join("\n")
+    };
+    let stderr = if stderr_tail.is_empty() {
+        "(empty)".to_string()
+    } else {
+        stderr_tail.join("\n")
+    };
+    format!(
+        "[{}] exited before readiness: exit_code={:?}; stdout tail:\n{}\nstderr tail:\n{}",
+        label,
+        status.and_then(ExitStatus::code),
+        stdout,
+        stderr
+    );
 }
 
 fn spawn_process(spec: &ProcessSpec, port: u16) -> Result<SpawnedProcess, SupervisorError> {
@@ -972,12 +1048,15 @@ fn spawn_process(spec: &ProcessSpec, port: u16) -> Result<SpawnedProcess, Superv
     };
 
     let (stdout_sender, stdout_lines) = mpsc::channel();
+    let mut output = CapturedOutput::default();
     let label = spec.label.clone();
-    thread::spawn(move || {
+    let stdout_tail = Arc::clone(&output.stdout);
+    output.readers.push(thread::spawn(move || {
         for line in BufReader::new(stdout).lines() {
             match line {
                 Ok(line) => {
                     log::info!("[{label}] stdout: {line}");
+                    append_tail(&stdout_tail, line.clone());
                     let _ = stdout_sender.send(line);
                 }
                 Err(error) => {
@@ -986,24 +1065,29 @@ fn spawn_process(spec: &ProcessSpec, port: u16) -> Result<SpawnedProcess, Superv
                 }
             }
         }
-    });
+    }));
 
     let label = spec.label.clone();
-    thread::spawn(move || {
+    let stderr_tail = Arc::clone(&output.stderr);
+    output.readers.push(thread::spawn(move || {
         for line in BufReader::new(stderr).lines() {
             match line {
-                Ok(line) => log::warn!("[{label}] stderr: {line}"),
+                Ok(line) => {
+                    log::warn!("[{label}] stderr: {line}");
+                    append_tail(&stderr_tail, line);
+                }
                 Err(error) => {
                     log::warn!("[{label}] stderr read error: {error}");
                     break;
                 }
             }
         }
-    });
+    }));
 
     Ok(SpawnedProcess {
         child,
         stdout_lines,
+        output,
         #[cfg(unix)]
         process_group_id,
     })
@@ -1498,6 +1582,37 @@ mod tests {
         assert!(events
             .iter()
             .any(|event| matches!(event, LifecycleState::Stopped)));
+    }
+
+    #[test]
+    fn fast_exit_diagnostics_include_drained_stdout_stderr_and_exit_code() {
+        let script = node_script(
+            r#"process.stdout.write('fast stdout tail\n'); process.stderr.write('fast stderr tail\n'); process.exitCode = 23;"#,
+        );
+        let mut spec = base_spec(
+            script.path(),
+            Readiness::StdoutMarker {
+                marker: "never emitted".to_string(),
+                deadline: Duration::from_secs(3),
+            },
+        );
+        spec.process_group = false;
+        let state = SupervisorState::new();
+        let spawned = spawn_process(&spec, 0).unwrap();
+        state.child.lock().unwrap().replace(spawned.child);
+
+        let ReadinessOutcome::Exited(Some(status)) =
+            wait_for_readiness(&spec.readiness, 0, &state, &spawned.stdout_lines)
+        else {
+            panic!("fast child should exit before readiness");
+        };
+        let (stdout_tail, stderr_tail) = spawned.output.drain();
+        let message =
+            exit_before_readiness_message(&spec.label, Some(&status), &stdout_tail, &stderr_tail);
+
+        assert!(message.contains("exit_code=Some(23)"), "{message}");
+        assert!(message.contains("fast stdout tail"), "{message}");
+        assert!(message.contains("fast stderr tail"), "{message}");
     }
 
     #[cfg(unix)]
