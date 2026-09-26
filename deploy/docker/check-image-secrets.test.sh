@@ -59,6 +59,7 @@ expect_flagged "app/node_modules_backup/.env.docker"
 # Dev data and extra key types the ignore files now exclude.
 expect_flagged "app/.envrc"
 expect_flagged "app/packages/polyfill-connectors/.pdpp-data/pdpp.sqlite"
+expect_flagged "app/.pdpp-data/config.json"
 expect_flagged "app/dev.sqlite"
 expect_flagged "app/dev.sqlite-wal"
 expect_flagged "app/release.jks"
@@ -111,6 +112,17 @@ build_save_archive() {
   tar -cf "$out" -C "$root/save" .
 }
 
+build_tampered_save_archive() {
+  local out="$1" root="$WORK_DIR/tampered-save" sha
+  rm -rf "$root"
+  mkdir -p "$root/save/blobs/sha256"
+  printf 'valid layer bytes' > "$root/layer"
+  sha="$(sha256sum "$root/layer" | cut -d' ' -f1)"
+  printf '[{"Layers":["blobs/sha256/%s"]}]\n' "$sha" > "$root/save/manifest.json"
+  printf 'different layer bytes' > "$root/save/blobs/sha256/$sha"
+  tar -cf "$out" -C "$root/save" .
+}
+
 write_docker_stub() {
   cat > "$STUB_BIN/docker" <<'STUB'
 #!/usr/bin/env bash
@@ -118,6 +130,7 @@ write_docker_stub() {
 case "$2" in
   dirty:*) cat "$STUB_DIR/dirty.tar" ;;
   clean:*) cat "$STUB_DIR/clean.tar" ;;
+  tampered:*) cat "$STUB_DIR/tampered-image.tar" ;;
   *) echo "Error response from daemon: reference does not exist" >&2; exit 1 ;;
 esac
 STUB
@@ -126,6 +139,7 @@ STUB
 
 build_save_archive "$WORK_DIR/dirty.tar" app/package.json app/.env.docker
 build_save_archive "$WORK_DIR/clean.tar" app/package.json app/.env.docker.example
+build_tampered_save_archive "$WORK_DIR/tampered-image.tar"
 write_docker_stub
 
 run_image() {
@@ -145,6 +159,14 @@ if run_image clean:test >/dev/null 2>&1; then
   pass "image with only .env.docker.example passes"
 else
   fail "clean image failed"
+fi
+
+if out="$(run_image tampered:test 2>&1)"; then
+  fail "image with a layer digest mismatch passed"
+elif [[ "$out" == *"does not match its digest"* ]]; then
+  pass "image mode rejects a layer digest mismatch"
+else
+  fail "unexpected output for tampered image: $out"
 fi
 
 if run_image missing:test >/dev/null 2>&1; then
@@ -228,6 +250,29 @@ def put(data):
     return "sha256:" + digest
 
 def layer(members):
+    if case == "pax-global" and any(name == "app/.env.docker" for name, _, _ in members):
+        raw = io.BytesIO()
+        def append(info, data=b""):
+            raw.write(info.tobuf(format=tarfile.USTAR_FORMAT))
+            raw.write(data)
+            raw.write(b"\0" * ((-len(data)) % 512))
+        for name, kind, data in members:
+            if name == "app/.env.docker":
+                value = "path=app/zzz-readme.txt"
+                size = 0
+                while size != len(f"{size} {value}\n".encode()):
+                    size = len(f"{size} {value}\n".encode())
+                pax = f"{size} {value}\n".encode()
+                header = tarfile.TarInfo("GlobalHead.0")
+                header.type = tarfile.XGLTYPE
+                header.size = len(pax)
+                append(header, pax)
+            info = tarfile.TarInfo(name)
+            info.type = kind
+            info.size = len(data)
+            append(info, data)
+        raw.write(b"\0" * 1024)
+        return gzip.compress(raw.getvalue(), mtime=0)
     raw = io.BytesIO()
     with tarfile.open(fileobj=raw, mode="w", format=tarfile.PAX_FORMAT) as t:
         for name, kind, data in members:
@@ -242,10 +287,13 @@ dummy = b"PDPP_DUMMY=not-a-secret\n"
 base = [("etc/", DIR, b""), ("etc/os-release", REG, b"ID=test\n")]
 app = [("app/", DIR, b""), ("app/package.json", REG, b"{}\n")]
 secret = {
+    "pax-global": [("app/.env.docker", REG, dummy)],
     "arm64-layer2": [("app/.env.docker", REG, dummy)],
     "dotdot": [("app/node_modules/../.env.docker", REG, dummy)],
     "slash": [("app/.env.docker/", REG, dummy)],
     "whiteout": [("app/.wh.env.docker", REG, dummy)],
+    "hardlink": [("app/.env.docker", tarfile.LNKTYPE, b"")],
+    "contig7": [("app/.env.docker", tarfile.CONTTYPE, dummy)],
     "case": [("app/.ENV.docker", REG, dummy)],
     "dup-member": [("app/.env.docker", REG, b""), ("app/.env.docker", REG, dummy)],
 }.get(case, [])
@@ -284,7 +332,10 @@ index = put(json.dumps({"schemaVersion": 2,
 top = json.dumps({"schemaVersion": 2, "manifests": [
     {"mediaType": "application/vnd.oci.image.index.v1+json", "digest": index}]}).encode()
 with tarfile.open(out, "w") as t:
-    for name, data in [("index.json", top)] + blobs:
+    outer = [("index.json", top)] + blobs
+    if case == "outer-dot-index":
+        outer.append(("./index.json", top))
+    for name, data in outer:
         info = tarfile.TarInfo(name)
         info.size = len(data)
         t.addfile(info, io.BytesIO(data))
@@ -312,12 +363,17 @@ expect_oci arm64-layer2 secret "a secret only in layer 2 of the arm64 manifest f
 expect_oci unknown-type error "an unknown layer media type fails closed" "unknown media type"
 expect_oci manifest-mismatch error "a manifest whose bytes do not match its digest fails" "does not match its digest"
 expect_oci layer-mismatch error "a layer blob whose bytes do not match its digest fails" "does not match its digest"
-expect_oci dup-blob error "a duplicate blob member (clean decoy first) fails" "duplicate members"
+expect_oci dup-blob error "a duplicate blob member (clean decoy first) fails" "duplicate normalized member"
 expect_oci dup-member error "a duplicate member name inside a layer fails" "duplicate member app/.env.docker"
 expect_oci dotdot error "a layer member with a .. segment fails" ".. segment"
 expect_oci slash error "a regular file whose name ends in / fails" "name ending in /"
 expect_oci whiteout error "a non-empty whiteout file fails" "is not empty"
 expect_oci case secret "an upper-case .ENV.docker is flagged" "app/.ENV.docker"
+expect_oci pax-global error "a PAX global path override fails closed" "pax global header"
+expect_oci outer-dot-index error "index.json and ./index.json collide after normalization" "duplicate normalized member index.json"
+expect_oci hardlink secret "a hardlink named like a secret is flagged" "app/.env.docker"
+expect_oci contig7 secret "a contiguous file named like a secret is flagged" "app/.env.docker"
+
 
 if [[ "$FAILURES" -gt 0 ]]; then
   echo "$FAILURES test(s) failed" >&2
