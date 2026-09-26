@@ -14,5 +14,5 @@ export const DATACONNECT_PRODUCT_IDENTITY: ProductIdentity = Object.freeze({
   description: "The DataConnect desktop console for your personal data.",
   name: "DataConnect",
   protocolName: "PDPP",
-  version: "0.7.55",
+  version: "0.7.56",
 })
