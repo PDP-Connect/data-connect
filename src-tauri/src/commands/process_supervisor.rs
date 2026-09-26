@@ -8,9 +8,9 @@
 //! available there and the option stops only the leader after escalation.
 
 use serde::Serialize;
-use std::collections::BTreeMap;
 #[cfg(unix)]
 use std::collections::BTreeSet;
+use std::collections::{BTreeMap, VecDeque};
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io::{self, BufRead, BufReader};
@@ -27,6 +27,62 @@ use tauri::{AppHandle, Emitter};
 
 const SUPERVISOR_EVENT: &str = "process-supervisor";
 const READINESS_POLL_INTERVAL: Duration = Duration::from_millis(50);
+#[cfg(any(windows, test))]
+const WINDOWS_RUNTIME_ENVIRONMENT_KEYS: [&str; 7] = [
+    "SYSTEMROOT",
+    "SYSTEMDRIVE",
+    "WINDIR",
+    "TEMP",
+    "TMP",
+    "PATH",
+    "PATHEXT",
+];
+
+#[cfg(any(windows, test))]
+fn windows_child_environment(
+    inherited: impl IntoIterator<Item = (OsString, OsString)>,
+    configured: &BTreeMap<OsString, OsString>,
+) -> BTreeMap<OsString, OsString> {
+    let mut environment = BTreeMap::new();
+    for (key, value) in inherited {
+        if is_windows_runtime_environment_key(&key) {
+            set_case_insensitive_environment_value(&mut environment, key, value);
+        }
+    }
+    for (key, value) in configured {
+        set_case_insensitive_environment_value(&mut environment, key.clone(), value.clone());
+    }
+    environment
+}
+
+#[cfg(any(windows, test))]
+fn is_windows_runtime_environment_key(key: &OsStr) -> bool {
+    key.to_str().is_some_and(|key| {
+        WINDOWS_RUNTIME_ENVIRONMENT_KEYS
+            .iter()
+            .any(|required| key.eq_ignore_ascii_case(required))
+    })
+}
+
+#[cfg(any(windows, test))]
+fn set_case_insensitive_environment_value(
+    environment: &mut BTreeMap<OsString, OsString>,
+    key: OsString,
+    value: OsString,
+) {
+    if let Some(existing_key) = environment
+        .keys()
+        .find(|existing| {
+            existing
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&key.to_string_lossy())
+        })
+        .cloned()
+    {
+        environment.remove(&existing_key);
+    }
+    environment.insert(key, value);
+}
 
 #[cfg(unix)]
 type ProcessGroupRegistry = Arc<Mutex<BTreeSet<libc::pid_t>>>;
@@ -618,6 +674,8 @@ fn run_supervisor(
                 return;
             }
             ReadinessOutcome::Exited(status) => {
+                let (stdout_tail, stderr_tail) = spawned.output.drain();
+                log_exit_before_readiness(&spec.label, status.as_ref(), &stdout_tail, &stderr_tail);
                 emit(
                     &spec,
                     &sink,
@@ -773,8 +831,338 @@ fn emit_stopped(spec: &ProcessSpec, state: &SupervisorState, sink: &Arc<dyn Even
 struct SpawnedProcess {
     child: Child,
     stdout_lines: mpsc::Receiver<String>,
+    output: CapturedOutput,
     #[cfg(unix)]
     process_group_id: Option<libc::pid_t>,
+}
+
+const OUTPUT_TAIL_LINES: usize = 40;
+const OUTPUT_LINE_MAX_BYTES: usize = 8 * 1024;
+const OUTPUT_STREAM_MAX_BYTES: usize = 64 * 1024;
+const OUTPUT_READ_BUFFER_BYTES: usize = 4 * 1024;
+const OUTPUT_DRAIN_DEADLINE: Duration = Duration::from_millis(300);
+const OUTPUT_TRUNCATED_MARKER: &str = "[line truncated; contents hidden]";
+
+#[derive(Default)]
+struct CapturedOutput {
+    stdout: Arc<Mutex<OutputTail>>,
+    stderr: Arc<Mutex<OutputTail>>,
+    readers: Vec<thread::JoinHandle<()>>,
+}
+
+impl CapturedOutput {
+    fn drain(self) -> (Vec<String>, Vec<String>) {
+        // A descendant can inherit a pipe and keep it open after the leader
+        // exits. Wait briefly for ordinary EOF, then detach unfinished readers
+        // and report the output captured so far instead of hanging startup.
+        let deadline = Instant::now() + OUTPUT_DRAIN_DEADLINE;
+        while self.readers.iter().any(|reader| !reader.is_finished()) {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(5).min(remaining));
+        }
+        for reader in self.readers {
+            if reader.is_finished() {
+                let _ = reader.join();
+            }
+        }
+        (tail_snapshot(&self.stdout), tail_snapshot(&self.stderr))
+    }
+}
+
+#[derive(Default)]
+struct OutputTail {
+    lines: VecDeque<String>,
+    bytes: usize,
+}
+
+impl OutputTail {
+    fn push(&mut self, line: String) {
+        let line_bytes = line.len().saturating_add(1);
+        if line_bytes > OUTPUT_STREAM_MAX_BYTES {
+            return;
+        }
+        while self.lines.len() >= OUTPUT_TAIL_LINES
+            || self.bytes.saturating_add(line_bytes) > OUTPUT_STREAM_MAX_BYTES
+        {
+            let Some(removed) = self.lines.pop_front() else {
+                break;
+            };
+            self.bytes = self.bytes.saturating_sub(removed.len().saturating_add(1));
+        }
+        self.bytes = self.bytes.saturating_add(line_bytes);
+        self.lines.push_back(line);
+    }
+}
+
+fn append_tail(tail: &Mutex<OutputTail>, line: String) {
+    if let Ok(mut tail) = tail.lock() {
+        tail.push(line);
+    }
+}
+
+fn tail_snapshot(tail: &Mutex<OutputTail>) -> Vec<String> {
+    tail.lock()
+        .map(|tail| tail.lines.iter().cloned().collect())
+        .unwrap_or_default()
+}
+
+fn log_exit_before_readiness(
+    label: &str,
+    status: Option<&ExitStatus>,
+    stdout_tail: &[String],
+    stderr_tail: &[String],
+) {
+    log::error!(
+        "{}",
+        exit_before_readiness_message(label, status, stdout_tail, stderr_tail)
+    );
+}
+
+fn exit_before_readiness_message(
+    label: &str,
+    status: Option<&ExitStatus>,
+    stdout_tail: &[String],
+    stderr_tail: &[String],
+) -> String {
+    let stdout = if stdout_tail.is_empty() {
+        "(empty)".to_string()
+    } else {
+        stdout_tail.join("\n")
+    };
+    let stderr = if stderr_tail.is_empty() {
+        "(empty)".to_string()
+    } else {
+        stderr_tail.join("\n")
+    };
+    format!(
+        "[{}] exited before readiness: exit_code={:?}; stdout tail:\n{}\nstderr tail:\n{}",
+        label,
+        status.and_then(ExitStatus::code),
+        stdout,
+        stderr
+    )
+}
+
+fn redact_child_output(line: &str, secrets: &[String]) -> String {
+    let mut redacted = line.to_string();
+    for secret in secrets {
+        if secret.len() >= 4 {
+            redacted = redacted.replace(secret, "[REDACTED]");
+        }
+    }
+    let redacted = redact_bearer_values(&redact_labeled_values(&redacted));
+    truncate_output_line(redacted, false)
+}
+
+fn redact_labeled_values(value: &str) -> String {
+    const SENSITIVE_LABELS: [&str; 15] = [
+        "credentialEncryptionKey",
+        "databaseEncryptionKey",
+        "ownerCredentialRevealProof",
+        "setupToken",
+        "access_token",
+        "accessToken",
+        "refresh_token",
+        "refreshToken",
+        "authorization",
+        "password",
+        "passwd",
+        "secret",
+        "apiKey",
+        "token",
+        "key",
+    ];
+    let mut bytes = value.as_bytes().to_vec();
+    let mut scan = 0;
+    while scan < bytes.len() {
+        let mut found = None;
+        for label in SENSITIVE_LABELS {
+            let label_bytes = label.as_bytes();
+            let Some(end) = scan.checked_add(label_bytes.len()) else {
+                continue;
+            };
+            if end > bytes.len()
+                || !bytes[scan..end].eq_ignore_ascii_case(label_bytes)
+                || (scan > 0 && is_label_byte(bytes[scan - 1]))
+            {
+                continue;
+            }
+            let mut separator = end;
+            if bytes.get(separator) == Some(&b'"') || bytes.get(separator) == Some(&b'\'') {
+                separator += 1;
+            }
+            while bytes.get(separator).is_some_and(u8::is_ascii_whitespace) {
+                separator += 1;
+            }
+            if bytes.get(separator) != Some(&b':') && bytes.get(separator) != Some(&b'=') {
+                continue;
+            }
+            let mut start = separator + 1;
+            while bytes.get(start).is_some_and(u8::is_ascii_whitespace) {
+                start += 1;
+            }
+            let quote = bytes
+                .get(start)
+                .copied()
+                .filter(|byte| *byte == b'"' || *byte == b'\'');
+            if quote.is_some() {
+                start += 1;
+            }
+            let mut end_value = start;
+            if let Some(quote) = quote {
+                while end_value < bytes.len() {
+                    if bytes[end_value] == b'\\' {
+                        end_value = (end_value + 2).min(bytes.len());
+                    } else if bytes[end_value] == quote {
+                        break;
+                    } else {
+                        end_value += 1;
+                    }
+                }
+            } else if label.eq_ignore_ascii_case("authorization") {
+                while end_value < bytes.len() && !b",}] ;".contains(&bytes[end_value]) {
+                    end_value += 1;
+                }
+            } else {
+                while end_value < bytes.len()
+                    && !bytes[end_value].is_ascii_whitespace()
+                    && !b",}] ;".contains(&bytes[end_value])
+                {
+                    end_value += 1;
+                }
+            }
+            found = Some((start, end_value));
+            break;
+        }
+        if let Some((start, end)) = found {
+            bytes.splice(start..end, b"[REDACTED]".iter().copied());
+            scan = start + "[REDACTED]".len();
+        } else {
+            scan += 1;
+        }
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+fn is_label_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+fn is_secret_environment_key(key: &OsStr) -> bool {
+    let key = key.to_string_lossy().to_ascii_lowercase();
+    [
+        "password",
+        "token",
+        "secret",
+        "credential",
+        "encryption_key",
+        "reveal_proof",
+    ]
+    .iter()
+    .any(|sensitive| key.contains(sensitive))
+}
+
+fn redact_bearer_values(value: &str) -> String {
+    let mut bytes = value.as_bytes().to_vec();
+    let mut scan = 0;
+    while scan + 6 <= bytes.len() {
+        if !bytes[scan..scan + 6].eq_ignore_ascii_case(b"bearer")
+            || (scan > 0 && is_label_byte(bytes[scan - 1]))
+        {
+            scan += 1;
+            continue;
+        }
+        let mut start = scan + 6;
+        if bytes.get(start).is_some_and(u8::is_ascii_whitespace) {
+            while bytes.get(start).is_some_and(u8::is_ascii_whitespace) {
+                start += 1;
+            }
+            let mut end = start;
+            while end < bytes.len()
+                && !bytes[end].is_ascii_whitespace()
+                && !b"\"' ,}]".contains(&bytes[end])
+            {
+                end += 1;
+            }
+            if end > start {
+                bytes.splice(start..end, b"[REDACTED]".iter().copied());
+                scan = start + "[REDACTED]".len();
+                continue;
+            }
+        }
+        scan += 6;
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+fn truncate_output_line(mut line: String, truncated: bool) -> String {
+    if truncated {
+        let limit = OUTPUT_LINE_MAX_BYTES.saturating_sub(OUTPUT_TRUNCATED_MARKER.len());
+        let mut end = limit.min(line.len());
+        while !line.is_char_boundary(end) {
+            end -= 1;
+        }
+        line.truncate(end);
+        line.push(' ');
+        line.push_str(OUTPUT_TRUNCATED_MARKER);
+    } else if line.len() > OUTPUT_LINE_MAX_BYTES {
+        let mut end = OUTPUT_LINE_MAX_BYTES;
+        while !line.is_char_boundary(end) {
+            end -= 1;
+        }
+        line.truncate(end);
+    }
+    line
+}
+
+fn read_bounded_output_line(reader: &mut impl BufRead) -> io::Result<Option<String>> {
+    let mut bytes = Vec::with_capacity(OUTPUT_LINE_MAX_BYTES);
+    let mut truncated = false;
+    loop {
+        let (consume, newline, at_eof) = {
+            let available = reader.fill_buf()?;
+            if available.is_empty() {
+                (0, false, true)
+            } else {
+                let newline_at = available.iter().position(|byte| *byte == b'\n');
+                let data_len = newline_at.unwrap_or(available.len());
+                let remaining = OUTPUT_LINE_MAX_BYTES.saturating_sub(bytes.len());
+                let keep = data_len.min(remaining);
+                bytes.extend_from_slice(&available[..keep]);
+                truncated |= data_len > keep;
+                (
+                    newline_at.map_or(available.len(), |index| index + 1),
+                    newline_at.is_some(),
+                    false,
+                )
+            }
+        };
+        if at_eof {
+            if bytes.is_empty() && !truncated {
+                return Ok(None);
+            }
+            let line = String::from_utf8_lossy(&bytes).into_owned();
+            return Ok(Some(if truncated {
+                OUTPUT_TRUNCATED_MARKER.to_string()
+            } else {
+                truncate_output_line(line, false)
+            }));
+        }
+        reader.consume(consume);
+        if newline {
+            let line = String::from_utf8_lossy(&bytes).into_owned();
+            return Ok(Some(if truncated {
+                // Do not retain a prefix of a potentially sensitive value from
+                // an overlong line; preserve only the fact that it was long.
+                OUTPUT_TRUNCATED_MARKER.to_string()
+            } else {
+                truncate_output_line(line, false)
+            }));
+        }
+    }
 }
 
 fn spawn_process(spec: &ProcessSpec, port: u16) -> Result<SpawnedProcess, SupervisorError> {
@@ -788,10 +1176,20 @@ fn spawn_process(spec: &ProcessSpec, port: u16) -> Result<SpawnedProcess, Superv
         command.current_dir(cwd);
     }
 
-    if spec.env.clear {
+    let environment = if spec.env.clear {
         command.env_clear();
-    }
-    for (key, value) in &spec.env.vars {
+        #[cfg(windows)]
+        {
+            windows_child_environment(std::env::vars_os(), &spec.env.vars)
+        }
+        #[cfg(not(windows))]
+        {
+            spec.env.vars.clone()
+        }
+    } else {
+        spec.env.vars.clone()
+    };
+    for (key, value) in &environment {
         command.env(key, render_port(value, port));
     }
 
@@ -906,38 +1304,61 @@ fn spawn_process(spec: &ProcessSpec, port: u16) -> Result<SpawnedProcess, Superv
     };
 
     let (stdout_sender, stdout_lines) = mpsc::channel();
+    let secrets = spec
+        .env
+        .vars
+        .iter()
+        .filter(|(key, _)| is_secret_environment_key(key))
+        .filter_map(|(_, value)| value.to_str().map(str::to_owned))
+        .collect::<Vec<_>>();
+    let stdout_secrets = secrets.clone();
+    let stderr_secrets = secrets;
+    let mut output = CapturedOutput::default();
     let label = spec.label.clone();
-    thread::spawn(move || {
-        for line in BufReader::new(stdout).lines() {
-            match line {
-                Ok(line) => {
+    let stdout_tail = Arc::clone(&output.stdout);
+    output.readers.push(thread::spawn(move || {
+        let mut reader = BufReader::with_capacity(OUTPUT_READ_BUFFER_BYTES, stdout);
+        loop {
+            match read_bounded_output_line(&mut reader) {
+                Ok(Some(line)) => {
+                    let line = redact_child_output(&line, &stdout_secrets);
                     log::info!("[{label}] stdout: {line}");
+                    append_tail(&stdout_tail, line.clone());
                     let _ = stdout_sender.send(line);
                 }
+                Ok(None) => break,
                 Err(error) => {
                     log::warn!("[{label}] stdout read error: {error}");
                     break;
                 }
             }
         }
-    });
+    }));
 
     let label = spec.label.clone();
-    thread::spawn(move || {
-        for line in BufReader::new(stderr).lines() {
-            match line {
-                Ok(line) => log::warn!("[{label}] stderr: {line}"),
+    let stderr_tail = Arc::clone(&output.stderr);
+    output.readers.push(thread::spawn(move || {
+        let mut reader = BufReader::with_capacity(OUTPUT_READ_BUFFER_BYTES, stderr);
+        loop {
+            match read_bounded_output_line(&mut reader) {
+                Ok(Some(line)) => {
+                    let line = redact_child_output(&line, &stderr_secrets);
+                    log::warn!("[{label}] stderr: {line}");
+                    append_tail(&stderr_tail, line);
+                }
+                Ok(None) => break,
                 Err(error) => {
                     log::warn!("[{label}] stderr read error: {error}");
                     break;
                 }
             }
         }
-    });
+    }));
 
     Ok(SpawnedProcess {
         child,
         stdout_lines,
+        output,
         #[cfg(unix)]
         process_group_id,
     })
@@ -1008,6 +1429,12 @@ fn wait_for_readiness(
                 Ok(line) if line.contains(marker) => return ReadinessOutcome::Ready,
                 Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    // EOF can race the parent's observation of the child's
+                    // exit status when the child writes and exits at once.
+                    thread::sleep(READINESS_POLL_INTERVAL);
+                    if let Some(status) = child_exit_status(state) {
+                        return ReadinessOutcome::Exited(Some(status));
+                    }
                     return ReadinessOutcome::TimedOut(
                         "stdout closed before its readiness marker was seen".to_string(),
                     );
@@ -1432,6 +1859,126 @@ mod tests {
         assert!(events
             .iter()
             .any(|event| matches!(event, LifecycleState::Stopped)));
+    }
+
+    #[test]
+    fn fast_exit_diagnostics_include_drained_stdout_stderr_and_exit_code() {
+        let script = node_script(
+            r#"process.stdout.write('fast stdout tail\n'); process.stderr.write('fast stderr tail\n'); process.exitCode = 23;"#,
+        );
+        let mut spec = base_spec(
+            script.path(),
+            Readiness::StdoutMarker {
+                marker: "never emitted".to_string(),
+                deadline: Duration::from_secs(3),
+            },
+        );
+        spec.process_group = false;
+        let state = SupervisorState::new();
+        let spawned = spawn_process(&spec, 0).unwrap();
+        state.child.lock().unwrap().replace(spawned.child);
+
+        let ReadinessOutcome::Exited(Some(status)) =
+            wait_for_readiness(&spec.readiness, 0, &state, &spawned.stdout_lines)
+        else {
+            panic!("fast child should exit before readiness");
+        };
+        let (stdout_tail, stderr_tail) = spawned.output.drain();
+        let message =
+            exit_before_readiness_message(&spec.label, Some(&status), &stdout_tail, &stderr_tail);
+
+        assert!(message.contains("exit_code=Some(23)"), "{message}");
+        assert!(message.contains("fast stdout tail"), "{message}");
+        assert!(message.contains("fast stderr tail"), "{message}");
+    }
+
+    #[test]
+    fn output_reader_caps_a_huge_line_and_total_tail_bytes() {
+        let mut reader = BufReader::with_capacity(
+            OUTPUT_READ_BUFFER_BYTES,
+            std::io::Cursor::new(vec![b'x'; OUTPUT_LINE_MAX_BYTES * 128]),
+        );
+        let line = read_bounded_output_line(&mut reader).unwrap().unwrap();
+        assert_eq!(line, OUTPUT_TRUNCATED_MARKER);
+        assert!(line.len() <= OUTPUT_LINE_MAX_BYTES);
+
+        let mut tail = OutputTail::default();
+        for _ in 0..OUTPUT_TAIL_LINES {
+            tail.push("x".repeat(OUTPUT_LINE_MAX_BYTES));
+        }
+        assert!(tail.bytes <= OUTPUT_STREAM_MAX_BYTES);
+        assert!(tail
+            .lines
+            .iter()
+            .all(|line| line.len() <= OUTPUT_LINE_MAX_BYTES));
+    }
+
+    #[test]
+    fn readiness_diagnostic_redacts_setup_tokens_bearers_passwords_and_keys() {
+        let child_line = r#"{"setupToken":"setup-token-value","authorization":"Bearer bearer-token-value","password":"owner-password-value","credentialEncryptionKey":"credential-key-value","apiKey":"api-key-value"}"#;
+        let redacted = redact_child_output(child_line, &[]);
+        let diagnostic = exit_before_readiness_message("test-sidecar", None, &[redacted], &[]);
+
+        for secret in [
+            "setup-token-value",
+            "bearer-token-value",
+            "owner-password-value",
+            "credential-key-value",
+            "api-key-value",
+        ] {
+            assert!(
+                !diagnostic.contains(secret),
+                "diagnostic leaked {secret}: {diagnostic}"
+            );
+        }
+        assert!(diagnostic.contains("[REDACTED]"), "{diagnostic}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn output_drain_returns_when_descendant_keeps_pipe_open() {
+        let directory = tempdir().unwrap();
+        let pid_path = directory.path().join("descendant.pid");
+        let script = node_script(&format!(
+            r#"const fs = require('node:fs');
+const {{ spawn }} = require('node:child_process');
+const child = spawn(process.execPath, ['-e', 'setInterval(() => {{}}, 1000)'], {{ stdio: 'inherit' }});
+fs.writeFileSync({:?}, String(child.pid));
+console.log('leader exited while descendant holds pipes');
+process.exit(23);"#,
+            pid_path
+        ));
+        let mut spec = base_spec(
+            script.path(),
+            Readiness::StdoutMarker {
+                marker: "never emitted".to_string(),
+                deadline: Duration::from_secs(3),
+            },
+        );
+        spec.process_group = false;
+        let state = SupervisorState::new();
+        let spawned = spawn_process(&spec, 0).unwrap();
+        state.child.lock().unwrap().replace(spawned.child);
+        let ReadinessOutcome::Exited(Some(status)) =
+            wait_for_readiness(&spec.readiness, 0, &state, &spawned.stdout_lines)
+        else {
+            panic!("leader should exit before readiness");
+        };
+
+        let started = Instant::now();
+        let (stdout_tail, stderr_tail) = spawned.output.drain();
+        let drain_elapsed = started.elapsed();
+        let descendant_pid: i32 = fs::read_to_string(pid_path).unwrap().parse().unwrap();
+        unsafe {
+            libc::kill(descendant_pid, libc::SIGKILL);
+        }
+
+        assert_eq!(status.code(), Some(23));
+        assert!(drain_elapsed < OUTPUT_DRAIN_DEADLINE + Duration::from_millis(250));
+        assert!(stdout_tail
+            .iter()
+            .any(|line| line.contains("leader exited")));
+        assert!(stderr_tail.is_empty());
     }
 
     #[cfg(unix)]
@@ -2220,7 +2767,13 @@ setInterval(() => {}, 1000);
         let environment: Value =
             serde_json::from_str(&fs::read_to_string(report.path()).unwrap()).unwrap();
         let object = environment.as_object().unwrap();
-        assert_eq!(object.len(), 3);
+        for key in object.keys() {
+            assert!(
+                ["ALLOWED", "PORT", "REPORT_PATH"].contains(&key.as_str())
+                    || is_windows_runtime_environment_key(OsStr::new(key)),
+                "unexpected child environment variable: {key}"
+            );
+        }
         assert_eq!(object.get("ALLOWED").and_then(Value::as_str), Some("yes"));
         assert!(object.get("SECRET").is_none());
         assert!(object
@@ -2233,6 +2786,40 @@ setInterval(() => {}, 1000);
             object.get("REPORT_PATH").and_then(Value::as_str),
             Some(report.path().to_str().unwrap())
         );
+    }
+
+    #[test]
+    fn windows_cleared_environment_preserves_runtime_variables() {
+        let inherited = [
+            ("sYsTeMrOoT", "C:\\Windows"),
+            ("SystemDrive", "C:"),
+            ("windir", "C:\\Windows"),
+            ("temp", "C:\\Temp"),
+            ("TMP", "C:\\Temp"),
+            ("Path", "C:\\Windows\\System32"),
+            ("PATHEXT", ".COM;.EXE;.BAT;.CMD"),
+            ("UNRELATED_SECRET", "do-not-forward"),
+        ]
+        .map(|(key, value)| (OsString::from(key), OsString::from(value)));
+        let configured =
+            BTreeMap::from([(OsString::from("NODE_ENV"), OsString::from("production"))]);
+        let environment = windows_child_environment(inherited, &configured);
+
+        for required in WINDOWS_RUNTIME_ENVIRONMENT_KEYS {
+            assert!(
+                environment
+                    .keys()
+                    .any(|key| key.to_string_lossy().eq_ignore_ascii_case(required)),
+                "Windows child environment must preserve {required}"
+            );
+        }
+        assert_eq!(
+            environment.get(OsStr::new("NODE_ENV")),
+            Some(&OsString::from("production"))
+        );
+        assert!(!environment.keys().any(|key| key
+            .to_string_lossy()
+            .eq_ignore_ascii_case("UNRELATED_SECRET")));
     }
 
     #[cfg(unix)]

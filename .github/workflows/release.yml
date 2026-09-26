@@ -28,8 +28,6 @@ jobs:
     # A dispatch with release_tag only runs clean-install against that release.
     if: github.event_name != 'workflow_dispatch' || inputs.release_tag == ''
     env:
-      APPLE_CERTIFICATE_AVAILABLE: ${{ github.event_name == 'release' && secrets.APPLE_BUILD_CERTIFICATE_BASE64 != '' }}
-      APPLE_SIGNING_AVAILABLE: ${{ github.event_name == 'release' && secrets.APPLE_BUILD_CERTIFICATE_BASE64 != '' && secrets.APPLE_SIGNING_IDENTITY != '' }}
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: "true"
     strategy:
@@ -97,6 +95,26 @@ jobs:
     runs-on: ${{ matrix.platform }}
 
     steps:
+      - name: Determine Apple signing availability
+        if: github.event_name == 'release'
+        id: apple-signing-availability
+        shell: bash
+        env:
+          APPLE_BUILD_CERTIFICATE_BASE64: ${{ github.event_name == 'release' && secrets.APPLE_BUILD_CERTIFICATE_BASE64 || '' }}
+          APPLE_SIGNING_IDENTITY: ${{ github.event_name == 'release' && secrets.APPLE_SIGNING_IDENTITY || '' }}
+        run: |
+          set -euo pipefail
+          certificate_available=false
+          signing_available=false
+          if [[ -n "$APPLE_BUILD_CERTIFICATE_BASE64" ]]; then
+            certificate_available=true
+            if [[ -n "$APPLE_SIGNING_IDENTITY" ]]; then
+              signing_available=true
+            fi
+          fi
+          echo "apple_certificate_available=$certificate_available" >> "$GITHUB_OUTPUT"
+          echo "apple_signing_available=$signing_available" >> "$GITHUB_OUTPUT"
+
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -145,7 +163,7 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
       - name: Install optional Apple signing certificate
-        if: matrix.os_family == 'macos' && env.APPLE_CERTIFICATE_AVAILABLE == 'true'
+        if: github.event_name == 'release' && matrix.os_family == 'macos' && steps.apple-signing-availability.outputs.apple_certificate_available == 'true'
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_BUILD_CERTIFICATE_BASE64 }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_BUILD_CERTIFICATE_PASSWORD }}
@@ -208,7 +226,7 @@ jobs:
         run: node scripts/verify-reference-stack.mjs --profile release
 
       - name: Optionally sign macOS helper binaries
-        if: matrix.os_family == 'macos' && env.APPLE_SIGNING_AVAILABLE == 'true'
+        if: github.event_name == 'release' && matrix.os_family == 'macos' && steps.apple-signing-availability.outputs.apple_signing_available == 'true'
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: |
@@ -241,7 +259,7 @@ jobs:
       # both carry the risk. Restricting the macOS bundle to "app" skips it entirely; "app"
       # is the .app bundle the DMG step already depends on, so nothing else changes.
       - name: Build signed Tauri app
-        if: matrix.os_family == 'macos' && env.APPLE_SIGNING_AVAILABLE == 'true'
+        if: github.event_name == 'release' && matrix.os_family == 'macos' && steps.apple-signing-availability.outputs.apple_signing_available == 'true'
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
@@ -249,7 +267,7 @@ jobs:
           args: --target ${{ matrix.target }} --bundles app
 
       - name: Build unsigned Tauri app
-        if: matrix.os_family != 'macos' || env.APPLE_SIGNING_AVAILABLE != 'true'
+        if: matrix.os_family != 'macos' || github.event_name != 'release' || steps.apple-signing-availability.outputs.apple_signing_available != 'true'
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
         env:
           ARCH: ${{ matrix.os_family == 'linux' && 'x86_64' || '' }}
@@ -259,7 +277,7 @@ jobs:
       - name: Finalize platform bundles
         shell: bash
         env:
-          APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_AVAILABLE == 'true' && secrets.APPLE_SIGNING_IDENTITY || '' }}
+          APPLE_SIGNING_IDENTITY: ${{ github.event_name == 'release' && steps.apple-signing-availability.outputs.apple_signing_available == 'true' && secrets.APPLE_SIGNING_IDENTITY || '' }}
         run: |
           set -euo pipefail
           bundle_root="src-tauri/target/${{ matrix.target }}/release/bundle"
@@ -335,7 +353,7 @@ jobs:
           fi
 
       - name: Stage verified release artifacts
-        if: github.event_name == 'release'
+        if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.release_tag == '')
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: manual-install-${{ matrix.artifact_key }}
@@ -348,8 +366,81 @@ jobs:
           retention-days: 1
 
       - name: Cleanup optional Apple keychain
-        if: matrix.os_family == 'macos' && always() && env.APPLE_CERTIFICATE_AVAILABLE == 'true'
+        if: always() && github.event_name == 'release' && matrix.os_family == 'macos' && steps.apple-signing-availability.outputs.apple_certificate_available == 'true'
         run: security delete-keychain "$RUNNER_TEMP/app-signing.keychain-db" || true
+
+  clean-install-built-windows:
+    if: github.event_name == 'workflow_dispatch' && inputs.release_tag == ''
+    needs: build
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      EVIDENCE_DIR: ${{ github.workspace }}/clean-install-evidence
+    steps:
+      - name: Checkout acceptance script
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.21.0"
+
+      - name: Download branch-built Windows installer
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: manual-install-windows-x64
+          path: installer
+
+      - name: Install and launch on a clean Windows runner
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $appData = Join-Path $env:APPDATA 'dev.dataconnect'
+          if (Test-Path $appData) {
+            Write-Output "::error::$appData exists before install; the VM is not clean."
+            exit 1
+          }
+          $installers = @(Get-ChildItem 'installer' -Recurse -File -Filter '*-setup.exe')
+          if ($installers.Count -ne 1) { Write-Output "::error::Expected exactly one branch-built Windows installer, found $($installers.Count)."; exit 1 }
+          $installer = $installers[0]
+          New-Item -ItemType Directory -Force -Path $env:EVIDENCE_DIR | Out-Null
+          $install = Start-Process -FilePath $installer.FullName -ArgumentList '/S' -Wait -PassThru
+          "installer exit code: $($install.ExitCode)" | Tee-Object -FilePath "$env:EVIDENCE_DIR/install.log"
+          if ($install.ExitCode -ne 0) { exit 1 }
+          $uninstall = Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall' |
+            Get-ItemProperty | Where-Object { $_.DisplayName -eq 'DataConnect' } | Select-Object -First 1
+          if (-not $uninstall) { Write-Output '::error::DataConnect uninstall entry not found'; exit 1 }
+          $installDir = $uninstall.InstallLocation.Trim('"')
+          $exe = Get-ChildItem $installDir -Filter *.exe |
+            Where-Object { $_.Name -notmatch '^(uninstall|pdpp-node)' } | Select-Object -First 1
+          if (-not $exe) { Write-Output '::error::No app executable in install directory'; exit 1 }
+          Start-Process -FilePath $exe.FullName
+          "APP_DATA_DIR=$appData" >> $env:GITHUB_ENV
+          "APP_LOG_DIR=$(Join-Path $env:LOCALAPPDATA 'dev.dataconnect\logs')" >> $env:GITHUB_ENV
+
+      - name: Assert fresh-install sidecars are serving
+        shell: bash
+        run: node scripts/clean-install-acceptance.mjs --app-data-dir "$APP_DATA_DIR" --log-file "$APP_LOG_DIR/DataConnect.log" --timeout-ms 300000
+
+      - name: Collect clean-install evidence
+        if: always()
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "$env:EVIDENCE_DIR/app-logs" | Out-Null
+          if (Test-Path "$env:APP_LOG_DIR") { Copy-Item "$env:APP_LOG_DIR\*" "$env:EVIDENCE_DIR/app-logs" -Recurse -Force }
+          if (Test-Path "$env:APP_DATA_DIR") { Get-ChildItem "$env:APP_DATA_DIR" -Recurse | Format-Table -AutoSize | Out-File "$env:EVIDENCE_DIR/app-data-listing.txt" }
+          Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,CommandLine | Format-Table -AutoSize -Wrap | Out-String -Width 4096 | Out-File "$env:EVIDENCE_DIR/processes.txt"
+
+      - name: Upload clean-install evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: clean-install-branch-windows-latest
+          path: clean-install-evidence
+          if-no-files-found: warn
+          retention-days: 14
 
   publish:
     if: github.event_name == 'release'
