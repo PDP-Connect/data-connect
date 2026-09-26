@@ -906,7 +906,7 @@ fn exit_before_readiness_message(
         status.and_then(ExitStatus::code),
         stdout,
         stderr
-    );
+    )
 }
 
 fn spawn_process(spec: &ProcessSpec, port: u16) -> Result<SpawnedProcess, SupervisorError> {
@@ -1158,6 +1158,12 @@ fn wait_for_readiness(
                 Ok(line) if line.contains(marker) => return ReadinessOutcome::Ready,
                 Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    // EOF can race the parent's observation of the child's
+                    // exit status when the child writes and exits at once.
+                    thread::sleep(READINESS_POLL_INTERVAL);
+                    if let Some(status) = child_exit_status(state) {
+                        return ReadinessOutcome::Exited(Some(status));
+                    }
                     return ReadinessOutcome::TimedOut(
                         "stdout closed before its readiness marker was seen".to_string(),
                     );
