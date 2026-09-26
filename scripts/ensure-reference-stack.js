@@ -360,7 +360,10 @@ function createStagedPackageJson(projectRoot, stageRoot) {
       "utf8"
     )
   )
-  const dependencies = { ...riPackage.dependencies }
+  const dependencies = {
+    ...riPackage.dependencies,
+    ...riPackage.optionalDependencies,
+  }
   const rootPackage = JSON.parse(
     readFileSync(join(projectRoot, "package.json"), "utf8")
   )

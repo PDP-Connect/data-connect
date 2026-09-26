@@ -638,7 +638,10 @@ describe("reference stack staging contract", () => {
     mkdirSync(join(project, "reference-implementation"), { recursive: true })
     writeFileSync(
       join(project, "reference-implementation", "package.json"),
-      JSON.stringify({ dependencies: { tsx: "^4.23.13" } })
+      JSON.stringify({
+        dependencies: { tsx: "^4.23.13" },
+        optionalDependencies: { "@opendatalabs/remote-surface": "^1.5.2" },
+      })
     )
     writeFileSync(
       join(project, "package.json"),
@@ -665,7 +668,10 @@ describe("reference stack staging contract", () => {
       npmRecorderPath,
       `const fs = require("node:fs")
 const invocations = JSON.parse(fs.readFileSync(${JSON.stringify(invocationsPath)}, "utf8"))
-invocations.push(process.argv.slice(2))
+invocations.push({
+  args: process.argv.slice(2),
+  packageJson: JSON.parse(fs.readFileSync("package.json", "utf8")),
+})
 fs.writeFileSync(${JSON.stringify(invocationsPath)}, JSON.stringify(invocations))
 `
     )
@@ -684,9 +690,14 @@ fs.writeFileSync(${JSON.stringify(invocationsPath)}, JSON.stringify(invocations)
     )
 
     const invocations = JSON.parse(readFileSync(invocationsPath, "utf8"))
-    const installArgs = invocations.find(args => args[0] === "install")
-    expect(installArgs).toBeDefined()
-    expect(installArgs).toContain("--allow-git=all")
-    expect(installArgs).not.toContain("--no-package-lock")
+    const install = invocations.find(
+      invocation => invocation.args[0] === "install"
+    )
+    expect(install).toBeDefined()
+    expect(install.args).toContain("--allow-git=all")
+    expect(install.args).not.toContain("--no-package-lock")
+    expect(install.packageJson.dependencies["@opendatalabs/remote-surface"]).toBe(
+      "^1.5.2"
+    )
   })
 })
