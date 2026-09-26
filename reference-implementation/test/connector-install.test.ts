@@ -549,11 +549,13 @@ test("normalizes the pinned core collection-profiles layout before verification"
     writeFixture(join(root, "collection-profiles", "github"));
     mkdirSync(join(root, "collection-profiles", "github", "licenses"), { recursive: true });
     mkdirSync(join(root, "collection-profiles", "github", "assets"), { recursive: true });
+    writeFileSync(join(root, "collection-profiles", "github", "source-declaration.json"), "{}\n");
     writeFileSync(join(root, "collection-profiles", "github", "licenses", "NOTICE"), "notice");
     writeFileSync(join(root, "collection-profiles", "github", "assets", "icon.svg"), "<svg />");
     normalizeCoreInstallLayout(root, "github");
     assert.equal(existsSync(join(root, "profile", "collection-profile.json")), true);
     assert.equal(existsSync(join(root, "dist", "collection-profile.mjs")), true);
+    assert.equal(existsSync(join(root, "source-declaration.json")), true);
     assert.equal(existsSync(join(root, "licenses", "NOTICE")), true);
     assert.equal(existsSync(join(root, "assets", "icon.svg")), true);
   } finally {

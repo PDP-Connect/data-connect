@@ -1202,7 +1202,7 @@ async function installPinnedArtifact(root: string, entry: ConnectorCatalogEntry)
 
 export function normalizeCoreInstallLayout(root: string, connectorId: string): void {
   const coreRoot = join(root, "collection-profiles", connectorId);
-  for (const name of ["profile", "dist", "provenance.json"]) {
+  for (const name of ["profile", "dist", "provenance.json", "source-declaration.json"]) {
     const source = join(coreRoot, name);
     if (!existsSync(source)) {
       throw new Error("Pinned installer core produced an incomplete collection-profile layout.");
