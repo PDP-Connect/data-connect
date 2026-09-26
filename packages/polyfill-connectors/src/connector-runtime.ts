@@ -427,18 +427,41 @@ export function describeUnexpectedFailure(err: unknown): string {
     : combined;
 }
 
-/** Returns true if the scope's time_range excludes this record's date value. */
+/** Returns true if the scope's half-open time_range excludes this record value. */
 function isOutsideTimeRange(timeRange: { since?: string; until?: string }, dateValue: unknown): boolean {
   if (typeof dateValue !== "string" || !dateValue) {
     return false;
   }
-  if (timeRange.since && dateValue < timeRange.since.slice(0, 10)) {
+  const since = timeRange.since ? Date.parse(timeRange.since) : undefined;
+  const until = timeRange.until ? Date.parse(timeRange.until) : undefined;
+  if (
+    (since !== undefined && Number.isNaN(since)) ||
+    (until !== undefined && Number.isNaN(until))
+  ) {
     return true;
   }
-  if (timeRange.until && dateValue >= timeRange.until.slice(0, 10)) {
-    return true;
+
+  if (/^\d{4}-\d{2}-\d{2}$/.test(dateValue)) {
+    const dayStart = Date.parse(`${dateValue}T00:00:00.000Z`);
+    if (
+      Number.isNaN(dayStart) ||
+      new Date(dayStart).toISOString().slice(0, 10) !== dateValue
+    ) {
+      return true;
+    }
+    const dayEnd = dayStart + 86_400_000;
+    return (
+      (since !== undefined && dayEnd <= since) ||
+      (until !== undefined && dayStart >= until)
+    );
   }
-  return false;
+
+  const timestamp = Date.parse(dateValue);
+  return (
+    Number.isNaN(timestamp) ||
+    (since !== undefined && timestamp < since) ||
+    (until !== undefined && timestamp >= until)
+  );
 }
 
 /** Build a SKIP_RESULT for a shape-check failure. */
@@ -1136,7 +1159,7 @@ async function resolveCredentials(
 }
 
 /** Factory: returns the emitRecord closure + a live-updating counters object. */
-function makeEmitRecord(deps: {
+export function makeEmitRecord(deps: {
   requested: Map<string, StreamScope>;
   emit: (msg: EmittedMessage) => Promise<void>;
   emittedAt: string;

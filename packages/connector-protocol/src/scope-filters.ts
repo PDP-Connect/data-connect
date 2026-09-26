@@ -63,13 +63,40 @@ export function passesTimeRange(isoValue: string | null | undefined, timeRange: 
     // connector-side: if we can't determine, let RS do enforcement
     return true;
   }
-  if (timeRange.since && isoValue < timeRange.since) {
-    return false;
+
+  const since = timeRange.since ? Date.parse(timeRange.since) : undefined;
+  const until = timeRange.until ? Date.parse(timeRange.until) : undefined;
+  if (
+    (since !== undefined && Number.isNaN(since)) ||
+    (until !== undefined && Number.isNaN(until))
+  ) {
+    return true;
   }
-  if (timeRange.until && isoValue >= timeRange.until) {
-    return false;
+
+  if (/^\d{4}-\d{2}-\d{2}$/.test(isoValue)) {
+    const dayStart = Date.parse(`${isoValue}T00:00:00.000Z`);
+    if (
+      Number.isNaN(dayStart) ||
+      new Date(dayStart).toISOString().slice(0, 10) !== isoValue
+    ) {
+      return true;
+    }
+    const dayEnd = dayStart + 86_400_000;
+    return (
+      (since === undefined || dayEnd > since) &&
+      (until === undefined || dayStart < until)
+    );
   }
-  return true;
+
+  const timestamp = Date.parse(isoValue);
+  if (Number.isNaN(timestamp)) {
+    // connector-side: if we can't determine, let RS do enforcement
+    return true;
+  }
+  return (
+    (since === undefined || timestamp >= since) &&
+    (until === undefined || timestamp < until)
+  );
 }
 
 export interface EmitGateRecord {
