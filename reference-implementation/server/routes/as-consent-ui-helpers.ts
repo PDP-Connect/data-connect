@@ -2349,6 +2349,7 @@ const ES_ACCENTED_WORDS: Record<string, string> = {
 const ES_LABEL_ACRONYMS = new Set(["icv", "id", "nss", "rnc", "url"]);
 const ES_FIELD_LABEL_OVERRIDES: Record<string, string> = {
   id: "Identificador",
+  miembros_hogar: "Número de miembros del hogar",
   source_updated_at: "Última actualización",
 };
 
@@ -2899,7 +2900,7 @@ const EN_FIELD_LABELS: Record<string, string> = {
   icv_grupo: "ICV group",
   icv_puntaje: "ICV score",
   id: "Identifier",
-  miembros_hogar: "Household members",
+  miembros_hogar: "Number of household members",
   municipio: "Municipality",
   nivel_educativo: "Education level",
   nombre: "Name",

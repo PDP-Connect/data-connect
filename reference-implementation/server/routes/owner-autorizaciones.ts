@@ -71,7 +71,7 @@ const STREAM_LABELS: Record<string, readonly [string, string]> = {
   clasificacion_hogar: ["Clasificación socioeconómica del hogar", "Household socio-economic classification"],
   control_prenatal: ["Control prenatal", "Prenatal care"],
   licencias_conducir: ["Licencia de conducir", "Driving licence"],
-  miembros_hogar: ["Miembros del hogar", "Household members"],
+  miembros_hogar: ["Miembros del hogar registrados", "Registered household members"],
 };
 const FIELD_LABELS: Record<string, readonly [string, string]> = {
   categoria: ["Categoría", "Category"],
@@ -92,7 +92,7 @@ const FIELD_LABELS: Record<string, readonly [string, string]> = {
   icv_grupo: ["Grupo ICV", "ICV group"],
   icv_puntaje: ["Puntaje ICV", "ICV score"],
   id: ["Identificador", "Identifier"],
-  miembros_hogar: ["Miembros del hogar", "Household members"],
+  miembros_hogar: ["Número de miembros del hogar", "Number of household members"],
   municipio: ["Municipio", "Municipality"],
   nivel_educativo: ["Nivel educativo", "Education level"],
   nombre: ["Nombre", "Name"],

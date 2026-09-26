@@ -57,7 +57,7 @@ const T = {
     centre: "Centro de salud",
     icv: "Clasificación del hogar (ICV)",
     place: "Municipio, provincia",
-    membersCount: "Miembros del hogar",
+    membersCount: "Número de miembros del hogar",
     memberCols: ["Nombre", "Parentesco", "Edad"],
     updated: (d) => `Actualizado al ${d}`,
     noData: "No recibido",
@@ -162,7 +162,7 @@ const T = {
     centre: "Health centre",
     icv: "Household classification (ICV)",
     place: "Municipality, province",
-    membersCount: "Household members",
+    membersCount: "Number of household members",
     memberCols: ["Name", "Relationship", "Age"],
     updated: (d) => `Updated ${d}`,
     noData: "Not received",
@@ -444,10 +444,13 @@ function householdCard(t, lang, h, miembros, granted) {
     .map((m) => `<tr data-member><td>${esc(m.nombre)}</td><td>${esc(m.parentesco)}</td><td>${esc(m.edad)}</td></tr>`)
     .join("\n      ");
   const updated = formatDateLong(h?.source_updated_at, lang);
+  const membersCount = isFieldGranted(granted, "clasificacion_hogar", "miembros_hogar")
+    ? row(t.membersCount, h?.miembros_hogar)
+    : notSharedRow(t, t.membersCount, "miembros_hogar_count");
   const hogarRows = hogarGranted
     ? `${row(t.icv, icv, ` data-icv="${esc(h?.icv_grupo)}"`)}
     ${row(t.place, place)}
-    ${row(t.membersCount, h?.miembros_hogar ?? miembros.length)}`
+    ${membersCount}`
     : notSharedRow(t, t.icv, "clasificacion_hogar");
   const members = miembrosGranted
     ? `<table>
