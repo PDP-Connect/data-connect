@@ -11,6 +11,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { existsSync, readFileSync, renameSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { isMainModule } from "../../scripts/is-main-module.js";
 // biome-ignore lint/correctness/noUnresolvedImports: Biome cannot resolve this installed package export; Node and TypeScript resolve it.
 import type { BrowserSurfaceAllocator, BrowserSurfaceLeaseManager } from "@opendatalabs/remote-surface/leases";
 import { handleStreamableHttpRequest } from "@pdpp/mcp-server/server";
@@ -10638,7 +10639,7 @@ export async function shutdownStorageClose(
 // listeners from the library surface would accumulate on every call and
 // cross-contaminate tests. These handlers fire only when server/index.ts is
 // run directly as `node server/index.ts`.
-if (process.argv[1]?.endsWith("server/index.ts")) {
+if (isMainModule(import.meta.url, process.argv[1])) {
   const cliLogger = buildLogger();
   let shuttingDown = false;
   let pipeWarnEmitted = false;

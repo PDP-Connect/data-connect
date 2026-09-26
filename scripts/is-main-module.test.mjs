@@ -14,13 +14,25 @@ describe("isMainModule", () => {
     ).toBe(true)
   })
 
-  it("matches a Windows entrypoint with backslash separators", () => {
-    const moduleUrl =
-      "file:///D:/a/data-connect/scripts/resolve-connectors.js"
-    const argvPath = "D:\\a\\data-connect\\scripts\\resolve-connectors.js"
-    expect(moduleUrl).not.toBe(`file://${argvPath}`)
+  it("matches Windows separators, drive letter casing, and file URLs", () => {
     expect(
-      isMainModule(moduleUrl, argvPath, "win32")
+      isMainModule(
+        "file:///D:/a/data-connect/reference-implementation/server/index.ts",
+        "d:\\a\\data-connect\\reference-implementation\\server\\index.ts",
+        "win32"
+      )
+    ).toBe(true)
+  })
+
+  it("matches a Windows 8.3 path after realpath resolution", () => {
+    const realpath = value => value.replace("RUNNER~1", "runneradmin")
+    expect(
+      isMainModule(
+        "file:///C:/Users/runneradmin/work/server/index.ts",
+        "C:\\Users\\RUNNER~1\\work\\server\\index.ts",
+        "win32",
+        realpath
+      )
     ).toBe(true)
   })
 

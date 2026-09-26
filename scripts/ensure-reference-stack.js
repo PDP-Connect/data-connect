@@ -19,6 +19,7 @@ import {
 import { spawnSync } from "node:child_process"
 import { dirname, join, relative, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
+import { isMainModule } from "./is-main-module.js"
 import {
   KEEP_GENERATIONS,
   collectOldStageGenerations,
@@ -169,6 +170,7 @@ function sourceInputFiles(projectRoot) {
     // The recipe itself is a behavior-affecting input: changing it must
     // invalidate any cache built under the old recipe.
     join(projectRoot, "scripts", "ensure-reference-stack.js"),
+    join(projectRoot, "scripts", "is-main-module.js"),
     join(projectRoot, "scripts", "stage-generations.js"),
     ...roots.flatMap(root =>
       existsSync(root)
@@ -389,6 +391,11 @@ function copyRuntimeSources(projectRoot, stageRoot) {
     join(projectRoot, "reference-implementation"),
     join(stageRoot, "reference-implementation")
   )
+  mkdirSync(join(stageRoot, "scripts"), { recursive: true })
+  copyFileSync(
+    join(projectRoot, "scripts", "is-main-module.js"),
+    join(stageRoot, "scripts", "is-main-module.js")
+  )
   for (const [, sourceRelativePath] of LOCAL_PACKAGES) {
     const source = join(projectRoot, sourceRelativePath)
     const destination = join(
@@ -596,6 +603,7 @@ import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { spawn } from "node:child_process"
 
+console.info("[reference-implementation] launch entry started")
 const root = dirname(fileURLToPath(import.meta.url))
 const dataDir = resolve(process.env.PDPP_DATA_DIR || process.env.PDPP_REFERENCE_DATA_DIR || join(root, "data"))
 const dbPath = resolve(process.env.PDPP_DB_PATH || join(dataDir, "pdpp.sqlite"))
@@ -695,6 +703,7 @@ export function verifyReferenceStackRoot(stageRoot) {
   const requiredPaths = [
     "launch.mjs",
     "manifest.json",
+    "scripts/is-main-module.js",
     "reference-implementation/server/index.ts",
     "node_modules/tsx/package.json",
     "node_modules/patchright/package.json",
@@ -872,10 +881,7 @@ function parseArgs(argv) {
   return options
 }
 
-if (
-  process.argv[1] &&
-  resolve(process.argv[1]) === fileURLToPath(import.meta.url)
-) {
+if (isMainModule(import.meta.url, process.argv[1])) {
   try {
     const result = stageReferenceStack(parseArgs(process.argv.slice(2)))
     console.log(

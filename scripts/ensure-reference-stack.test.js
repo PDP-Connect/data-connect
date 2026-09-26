@@ -72,6 +72,7 @@ function fixtureRoot() {
   )
   mkdirSync(join(root, "scripts"), { recursive: true })
   writeFileSync(join(root, "scripts", "ensure-reference-stack.js"), "// recipe v1\n")
+  writeFileSync(join(root, "scripts", "is-main-module.js"), "// helper v1\n")
   writeFileSync(join(root, "scripts", "stage-generations.js"), "// helper v1\n")
   return root
 }
@@ -297,6 +298,9 @@ describe("reference stack staging contract", () => {
 
   it("keeps the launcher on the shipped Node ABI and disables first-boot downloads", () => {
     const source = launchScript()
+    expect(source).toContain(
+      'console.info("[reference-implementation] launch entry started")'
+    )
     expect(source).toContain('process.execPath, ["--import", "tsx"')
     expect(source).toContain("PDPP_DB_PATH")
     expect(source).toContain(
