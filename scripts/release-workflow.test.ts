@@ -193,17 +193,21 @@ describe("release workflow", () => {
     const removeGeneratedDmgs = `find "$bundle_root/dmg" -maxdepth 1 -type f -name '*.dmg' -delete`
 
     expect(workflow).toContain("APPLE_SIGNING_IDENTITY")
-    expect(signedBuild).toContain("env.APPLE_SIGNING_AVAILABLE == 'true'")
+    expect(signedBuild).toContain(
+      "github.event_name == 'release' && matrix.os_family == 'macos' && steps.apple-signing-availability.outputs.apple_signing_available == 'true'"
+    )
     expect(signedBuild).toContain(
       "APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}"
     )
-    expect(unsignedBuild).toContain("env.APPLE_SIGNING_AVAILABLE != 'true'")
+    expect(unsignedBuild).toContain(
+      "steps.apple-signing-availability.outputs.apple_signing_available != 'true'"
+    )
     expect(unsignedBuild).not.toContain("APPLE_SIGNING_IDENTITY")
     expect(workflow).toContain(
-      "github.event_name == 'release' && secrets.APPLE_BUILD_CERTIFICATE_BASE64 != ''"
+      "github.event_name == 'release' && secrets.APPLE_BUILD_CERTIFICATE_BASE64 || ''"
     )
     expect(workflow).toContain(
-      "env.APPLE_SIGNING_AVAILABLE == 'true' && secrets.APPLE_SIGNING_IDENTITY || ''"
+      "github.event_name == 'release' && steps.apple-signing-availability.outputs.apple_signing_available == 'true' && secrets.APPLE_SIGNING_IDENTITY || ''"
     )
     expect(workflow).toContain("verification_args+=(--verify-code-signature)")
     expect(workflow).toContain(
@@ -222,6 +226,101 @@ describe("release workflow", () => {
     expect(workflow).not.toContain("VITE_PRIVY_CLIENT_ID")
     expect(workflow).not.toMatch(/msi\/\*\.msi/i)
     expect(workflow).not.toMatch(/vana\.(?:com|org)|corsali/i)
+  })
+
+  it("keeps Apple signing release-only and uses immutable availability outputs", () => {
+    const workflow = readReleaseWorkflow()
+    const availability = readWorkflowStep(
+      workflow,
+      "Determine Apple signing availability"
+    )
+
+    expect(workflow.indexOf(availability)).toBeLessThan(
+      workflow.indexOf("      - name: Checkout repository\n")
+    )
+    expect(availability).toContain("if: github.event_name == 'release'")
+    expect(availability).toContain("id: apple-signing-availability")
+    expect(availability).toContain("$GITHUB_OUTPUT")
+
+    const signingSteps = [
+      "Install optional Apple signing certificate",
+      "Optionally sign macOS helper binaries",
+      "Build signed Tauri app",
+      "Cleanup optional Apple keychain",
+    ]
+    for (const name of signingSteps) {
+      const step = readWorkflowStep(workflow, name)
+      expect(step, name).toMatch(
+        /if: .*github\.event_name == 'release'.*steps\.apple-signing-availability\.outputs\.(?:apple_certificate|apple_signing)_available == 'true'/
+      )
+      expect(step, name).not.toMatch(
+        /if: .*env\.APPLE_(?:CERTIFICATE|SIGNING)_AVAILABLE/
+      )
+    }
+
+    const finalize = readWorkflowStep(workflow, "Finalize platform bundles")
+    expect(finalize).toContain(
+      "github.event_name == 'release' && steps.apple-signing-availability.outputs.apple_signing_available == 'true' && secrets.APPLE_SIGNING_IDENTITY"
+    )
+    const finalizerCanSign = (eventName: string, available: boolean) =>
+      eventName === "release" &&
+      finalize.includes(
+        "github.event_name == 'release' && steps.apple-signing-availability.outputs.apple_signing_available == 'true' && secrets.APPLE_SIGNING_IDENTITY"
+      ) &&
+      available
+    expect(finalizerCanSign("workflow_dispatch", true)).toBe(false)
+    expect(finalizerCanSign("pull_request", true)).toBe(false)
+    expect(finalizerCanSign("release", true)).toBe(true)
+
+    for (const event of ["workflow_dispatch", "pull_request"]) {
+      for (const name of signingSteps) {
+        const gate = readWorkflowStep(workflow, name).match(/if: (.*)\n/)?.[1]
+        expect(gate, `${name} on ${event}`).toContain(
+          "github.event_name == 'release'"
+        )
+        const output = gate?.match(
+          /steps\.apple-signing-availability\.outputs\.(apple_certificate|apple_signing)_available == 'true'/
+        )?.[1]
+        expect(output, name).toBeTruthy()
+        const canRun = (eventName: string, available: boolean) =>
+          eventName === "release" &&
+          gate?.includes(`outputs.${output}_available == 'true'`) &&
+          available
+        expect(canRun(event, true), `${name} on ${event}`).toBe(false)
+        expect(canRun("release", true), `${name} with availability`).toBe(true)
+      }
+    }
+
+    expect(workflow).not.toMatch(
+      /^\s+if: .*env\.APPLE_(?:CERTIFICATE|SIGNING)_AVAILABLE/m
+    )
+  })
+
+  it("finds exactly one branch installer in the preserved nsis artifact layout", () => {
+    const workflow = readReleaseWorkflow()
+    const installStep = readWorkflowStep(
+      workflow,
+      "Install and launch on a clean Windows runner"
+    )
+    const root = mkdtempSync(join(tmpdir(), "data-connect-branch-installer-"))
+    const installerDirectory = join(root, "installer")
+    const nsisDirectory = join(installerDirectory, "nsis")
+    const installerName = "DataConnect_0.7.54_x64-setup.exe"
+
+    try {
+      mkdirSync(nsisDirectory, { recursive: true })
+      writeFileSync(join(nsisDirectory, installerName), "installer")
+
+      expect(readdirSync(installerDirectory)).toEqual(["nsis"])
+      expect(readdirSync(nsisDirectory)).toContain(installerName)
+      expect(installStep).toContain(
+        "$installers = @(Get-ChildItem 'installer' -Recurse -File -Filter '*-setup.exe')"
+      )
+      expect(installStep).toContain("if ($installers.Count -ne 1)")
+      expect(installStep).toContain("$installer = $installers[0]")
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 
   it("replaces Tauri's x64 DMG without deleting artifacts outside the bundle", () => {
