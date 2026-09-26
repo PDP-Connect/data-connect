@@ -85,6 +85,7 @@ import {
   inspectActiveConnector,
   repairPendingConnectorActivations,
 } from "./connector-install/index.ts";
+import { getActiveConnectorActivationToken } from "./connector-install/activation-authority.ts";
 import { createFileLocalConnectorSourceStore } from "./connector-install/local-source.ts";
 import { createRemoteAccessConfigStore, remoteAccessConfigPath } from "./remote-access-store.ts";
 import { ownerPasswordOwnerSet } from "./owner-password-owner-set.ts";
@@ -10067,7 +10068,13 @@ function createReferenceSchedulerManager({
             const connectorPath = activeInstall.status === "active"
               ? authoritativePath
               : await Promise.resolve(connectorPathResolver(connectorId, currentManifest, { priorityClass: "background" }));
-            return connectorPath ? { connectorPath, manifest: currentManifest } : null;
+            return connectorPath
+              ? {
+                  activationToken: await getActiveConnectorActivationToken(connectorId),
+                  connectorPath,
+                  manifest: currentManifest,
+                }
+              : null;
           },
           intervalMs: Math.max(1, schedule.interval_seconds) * 1000,
           manifest,

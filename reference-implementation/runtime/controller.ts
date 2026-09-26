@@ -38,6 +38,7 @@ import {
   initiateOwnerDeviceAuthorization,
 } from "../server/auth.ts";
 import { canonicalConnectorKey, canonicalConnectorKeyFromManifest } from "../server/connector-key.ts";
+import { getActiveConnectorActivationToken } from "../server/connector-install/activation-authority.ts";
 import {
   getConnectorSummaryEvidence,
   reconcileDirtyConnectorSummaryEvidence,
@@ -4159,9 +4160,10 @@ export function createController(opts: ControllerOptions = {}): Controller {
     const runPromise = Promise.resolve()
       .then(async () => {
         // Browser-surface acquisition and credential loading can outlive an
-        // installation update. Recheck the executable immediately before the
-        // runtime starts so an admitted run cannot launch stale bytes.
+        // installation update. Recheck before entering the runtime; the
+        // launch guard repeats this after runtime setup, immediately before spawn.
         const currentPath = await resolveRunStartPath(admittedConnectorId, connectorPath, manifest, options);
+        const activationToken = await getActiveConnectorActivationToken(admittedConnectorId);
         return runConnectorImpl({
           admitRunConnection: async (candidate) => {
             await Promise.resolve();
@@ -4209,6 +4211,15 @@ export function createController(opts: ControllerOptions = {}): Controller {
           streamingRegistrationToken: streamingNonce,
           traceContext,
           triggerKind,
+          verifyLaunchAuthority: async () => {
+            await resolveRunStartPath(admittedConnectorId, currentPath, manifest, options);
+            if ((await getActiveConnectorActivationToken(admittedConnectorId)) !== activationToken) {
+              throw new ControllerError(
+                `Connector activation changed before launch for ${admittedConnectorId}`,
+                "connector_install_invalid"
+              );
+            }
+          },
         });
       })
       // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: This protocol transition owns ordered state invariants that must remain local.

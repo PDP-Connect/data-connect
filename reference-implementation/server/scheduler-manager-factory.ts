@@ -31,6 +31,7 @@ import { createScheduler } from "../runtime/scheduler.ts";
 import { SOURCE_PRESSURE_GAP_REASONS } from "../runtime/scheduler-source-pressure-cooldown.ts";
 import { getConnectorManifest } from "./auth.ts";
 import { createConnectorInstallStore, inspectActiveConnector } from "./connector-install/index.ts";
+import { getActiveConnectorActivationToken } from "./connector-install/activation-authority.ts";
 import { buildConnectionScopedRunEnvResolver } from "./connection-scoped-run-env.ts";
 import { canonicalConnectorKey } from "./connector-key.ts";
 import { getConnectorSummaryEvidence, reconcileDirtyConnectorSummaryEvidence } from "./connector-summary-read-model.ts";
@@ -496,7 +497,13 @@ export function createReferenceSchedulerManager({
               const connectorPath = activeInstall.status === "active"
                 ? authoritativePath
                 : await Promise.resolve(connectorPathResolver(connectorId, currentManifest, { priorityClass: "background" }));
-              return connectorPath ? { connectorPath, manifest: currentManifest } : null;
+              return connectorPath
+                ? {
+                    activationToken: await getActiveConnectorActivationToken(connectorId),
+                    connectorPath,
+                    manifest: currentManifest,
+                  }
+                : null;
             },
             intervalMs: Math.max(1, schedule.interval_seconds) * 1000,
             manifest,

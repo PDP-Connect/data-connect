@@ -131,8 +131,6 @@ export interface ConnectorSchedule {
   readonly connectorInstanceId?: string;
   /** Standalone scheduler fixtures may supply a fixed executable. */
   readonly connectorPath?: string;
-  /** Production resolves authority and current manifest immediately before every attempt. */
-  readonly resolveImplementation?: () => Promise<{ connectorPath: string; manifest: SchedulerManifest } | null>;
   readonly grantAccessMode?: GrantAccessMode;
   readonly intervalMs: number;
   readonly manifest: SchedulerManifest;
@@ -140,6 +138,12 @@ export interface ConnectorSchedule {
   /** Owner admitted with this exact connection at scheduler refresh. */
   readonly ownerSubjectId: string;
   readonly ownerToken: string;
+  /** Production resolves authority and current manifest immediately before every attempt. */
+  readonly resolveImplementation?: () => Promise<{
+    connectorPath: string;
+    manifest: SchedulerManifest;
+    activationToken?: string | null;
+  } | null>;
 }
 
 export interface SchedulerReadinessResult {

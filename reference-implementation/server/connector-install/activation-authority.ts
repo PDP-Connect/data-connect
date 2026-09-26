@@ -408,6 +408,18 @@ export async function getConnectorActivation(connectorId: string): Promise<Conne
   return parseRow(row);
 }
 
+/** A publication attempt changes this token even when an update reuses the same executable bytes. */
+export async function getActiveConnectorActivationToken(connectorId: string): Promise<string | null> {
+  const activation = await getConnectorActivation(connectorId);
+  if (!activation) {
+    return null;
+  }
+  if (activation.state !== "active") {
+    throw new Error(`Connector ${connectorId} activation is ${activation.state}; it cannot launch`);
+  }
+  return `${activation.activationId}:${activation.attemptId}:${activation.manifestRevision}`;
+}
+
 export async function listRunnableConnectorActivations(): Promise<readonly ConnectorActivation[]> {
   await migrateListedLegacyActivations();
   const rows = isPostgresStorageBackend()
