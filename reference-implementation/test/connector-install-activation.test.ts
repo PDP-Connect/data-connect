@@ -104,6 +104,9 @@ async function assertPostPersistenceFailure(): Promise<void> {
     assert.equal(registered?.version, "2.0.0");
     assert.equal(pending?.state, "repair_required");
     assert.equal(pending?.record.digest, secondDigest);
+    const blockedStatus = await service.status();
+    assert.equal(blockedStatus.find((record) => record.connectorId === connectorId)?.activationState, "repair_required");
+    assert.match(blockedStatus.find((record) => record.connectorId === connectorId)?.repairReason ?? "", /Manifest repair failed/);
     assert.equal(pending?.manifestRevision, canonicalActivationManifestRevision(registered ?? {}));
     assert.deepEqual(registered, normalizeConnectorManifestForStorage(pending?.record.manifest ?? {}).storedManifest);
     assert.equal(await store.getActive(connectorId), null);
@@ -114,6 +117,7 @@ async function assertPostPersistenceFailure(): Promise<void> {
       []
     );
     assert.equal((await getConnectorActivation(connectorId))?.state, "active");
+    assert.equal((await service.status()).find((record) => record.connectorId === connectorId)?.activationState, "active");
     assert.equal((await store.getActive(connectorId))?.digest, secondDigest);
     assert.equal(
       await resolveActiveConnectorPath(store, connectorId),

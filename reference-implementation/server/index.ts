@@ -10038,15 +10038,6 @@ function createReferenceSchedulerManager({
           );
           continue;
         }
-        const connectorPath = await Promise.resolve(
-          connectorPathResolver(connectorId, manifest, {
-            priorityClass: "background",
-          })
-        );
-        if (!connectorPath) {
-          logger?.warn?.({ connector_id: connectorId }, "skipping scheduled connector without runnable implementation");
-          continue;
-        }
         // Scheduler rows are not capabilities. Authorize their exact stored
         // connection (or materialize this owner's default only when the legacy
         // row lacks a selector) before the scheduler can create run.started.
@@ -10059,7 +10050,25 @@ function createReferenceSchedulerManager({
         connectors.push({
           connectorId: namespace.connectorId,
           connectorInstanceId: namespace.connectorInstanceId,
-          connectorPath,
+          resolveImplementation: async () => {
+            const currentManifest = await getConnectorManifest(connectorId);
+            if (!currentManifest) {
+              throw new Error(`Unknown connector: ${connectorId}`);
+            }
+            const authoritativePath = await resolveActiveInstallFirstConnectorPath(connectorId, currentManifest);
+            const currentPolicyReason = getScheduleIneligibilityReason(getManifestRefreshPolicy(currentManifest));
+            if (currentPolicyReason) {
+              throw new Error(`Scheduled connector is no longer background-safe: ${currentPolicyReason}`);
+            }
+            const activeInstall = await inspectActiveConnector(createConnectorInstallStore(), connectorId);
+            if (activeInstall.status === "invalid") {
+              throw new Error(`Active connector install is invalid for ${connectorId}: ${activeInstall.reason}`);
+            }
+            const connectorPath = activeInstall.status === "active"
+              ? authoritativePath
+              : await Promise.resolve(connectorPathResolver(connectorId, currentManifest, { priorityClass: "background" }));
+            return connectorPath ? { connectorPath, manifest: currentManifest } : null;
+          },
           intervalMs: Math.max(1, schedule.interval_seconds) * 1000,
           manifest,
           ownerSubjectId,

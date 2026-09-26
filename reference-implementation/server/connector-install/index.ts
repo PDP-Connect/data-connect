@@ -64,6 +64,14 @@ export interface ConnectorInstallRecord {
   readonly version: string | null;
 }
 
+export type ConnectorInstallActivationState = "active" | "repair_required";
+
+export interface ConnectorInstallStatusRecord extends ConnectorInstallRecord {
+  readonly activationState: ConnectorInstallActivationState;
+  readonly repairError: string | null;
+  readonly repairReason: string | null;
+}
+
 export interface ConnectorCatalogEntry {
   readonly bindings?: Readonly<Record<string, unknown>>;
   readonly catalog_connector_id?: string;
@@ -678,7 +686,7 @@ async function repairPendingConnectorActivationsUnlocked(
 ): Promise<readonly { connectorId: string; error: unknown }[]> {
   const failures: { connectorId: string; error: unknown }[] = [];
   for (const activation of await listRepairRequiredConnectorActivations()) {
-    if (connectorId && activation.record.connectorId !== connectorId) {
+    if (connectorId !== undefined && activation.record.connectorId !== connectorId) {
       continue;
     }
     if (activation.repairReason === "Legacy registry and installed artifact disagree") {
@@ -713,11 +721,12 @@ async function repairPendingConnectorActivationsUnlocked(
 
 export async function repairPendingConnectorActivations(
   registerManifest: RegisterManifest,
-  dataDir = process.env.PDPP_DATA_DIR || join(process.cwd(), "data")
+  dataDir = process.env.PDPP_DATA_DIR || join(process.cwd(), "data"),
+  connectorId?: string
 ): Promise<readonly { connectorId: string; error: unknown }[]> {
   const release = acquireInstallLock(dataDir);
   try {
-    return await repairPendingConnectorActivationsUnlocked(registerManifest, dataDir);
+    return await repairPendingConnectorActivationsUnlocked(registerManifest, dataDir, connectorId);
   } finally {
     release();
   }
@@ -814,7 +823,7 @@ export interface ConnectorInstallService {
   reloadLocalSource?: (sourceId: string) => Promise<LocalConnectorSourceRecord>;
   removeLocalSource?: (sourceId: string) => Promise<void>;
   selectLocalSource?: (connectorKey: string, sourceId: string | null) => Promise<void>;
-  status: () => Promise<readonly ConnectorInstallRecord[]>;
+  status: () => Promise<readonly ConnectorInstallStatusRecord[]>;
   update: (connectorId: string) => Promise<ConnectorInstallRecord>;
 }
 
@@ -1028,7 +1037,34 @@ export function createConnectorInstallService(options: {
     reloadLocalSource: (sourceId) => localSourceStore.reload(sourceId),
     removeLocalSource: (sourceId) => localSourceStore.remove(sourceId),
     selectLocalSource: (connectorKey, sourceId) => localSourceStore.select(connectorKey, sourceId),
-    status: async () => (await listVerifiedActiveConnectors(store)).verified,
+    status: async () => {
+      if (!store.activationAuthority) {
+        return (await listVerifiedActiveConnectors(store)).verified.map((record) => ({
+          ...record,
+          activationState: "active" as const,
+          repairError: null,
+          repairReason: null,
+        }));
+      }
+      const [active, repairRequired] = await Promise.all([
+        listVerifiedActiveConnectors(store),
+        listRepairRequiredConnectorActivations(),
+      ]);
+      const activeRows = active.verified.map((record) => ({
+        ...record,
+        activationState: "active" as const,
+        repairError: null,
+        repairReason: null,
+      }));
+      const repairRows = repairRequired.map((activation) => ({
+        ...activation.record,
+        activationState: activation.state,
+        repairError: activation.repairError,
+        repairReason: activation.repairReason,
+      }));
+      return [...activeRows, ...repairRows]
+        .sort((a, b) => a.connectorId.localeCompare(b.connectorId));
+    },
     async update(connectorId) {
       const entries = await catalog();
       const candidates = entries.filter((entry) => entry.connector_id === connectorId);

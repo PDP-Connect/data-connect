@@ -15,7 +15,7 @@
 import { getRunTerminalEvent } from "../lib/spine.ts";
 import { isHealthRelevant as isAttentionHealthRelevant } from "../runtime/attention.ts";
 import type { ConnectorEnvironmentPolicy } from "../runtime/connector-child-environment.ts";
-import { getScheduleIneligibilityReason, resolveDefaultConnectorPath } from "../runtime/controller.ts";
+import { getScheduleIneligibilityReason, resolveActiveInstallFirstConnectorPath, resolveDefaultConnectorPath } from "../runtime/controller.ts";
 import { hasForwardEvidenceDebt } from "../runtime/recovery-decision.ts";
 import { matchesRecoveryInstance } from "../runtime/scheduler/recovery-instance-scope.ts";
 import type {
@@ -30,6 +30,7 @@ import type {
 import { createScheduler } from "../runtime/scheduler.ts";
 import { SOURCE_PRESSURE_GAP_REASONS } from "../runtime/scheduler-source-pressure-cooldown.ts";
 import { getConnectorManifest } from "./auth.ts";
+import { createConnectorInstallStore, inspectActiveConnector } from "./connector-install/index.ts";
 import { buildConnectionScopedRunEnvResolver } from "./connection-scoped-run-env.ts";
 import { canonicalConnectorKey } from "./connector-key.ts";
 import { getConnectorSummaryEvidence, reconcileDirtyConnectorSummaryEvidence } from "./connector-summary-read-model.ts";
@@ -475,17 +476,28 @@ export function createReferenceSchedulerManager({
             );
             return null;
           }
-          const connectorPath = await Promise.resolve(
-            connectorPathResolver(connectorId, manifest, { priorityClass: "background" })
-          );
-          if (!connectorPath) {
-            logger.warn({ connector_id: connectorId }, "skipping scheduled connector without runnable implementation");
-            return null;
-          }
           return {
             connectorId,
             connectorInstanceId: schedule.connector_instance_id,
-            connectorPath,
+            resolveImplementation: async () => {
+              const currentManifest = await getConnectorManifest(connectorId);
+              if (!currentManifest) {
+                throw new Error(`Unknown connector: ${connectorId}`);
+              }
+              const authoritativePath = await resolveActiveInstallFirstConnectorPath(connectorId, currentManifest);
+              const currentPolicyReason = getScheduleIneligibilityReason(getManifestRefreshPolicy(currentManifest));
+              if (currentPolicyReason) {
+                throw new Error(`Scheduled connector is no longer background-safe: ${currentPolicyReason}`);
+              }
+              const activeInstall = await inspectActiveConnector(createConnectorInstallStore(), connectorId);
+              if (activeInstall.status === "invalid") {
+                throw new Error(`Active connector install is invalid for ${connectorId}: ${activeInstall.reason}`);
+              }
+              const connectorPath = activeInstall.status === "active"
+                ? authoritativePath
+                : await Promise.resolve(connectorPathResolver(connectorId, currentManifest, { priorityClass: "background" }));
+              return connectorPath ? { connectorPath, manifest: currentManifest } : null;
+            },
             intervalMs: Math.max(1, schedule.interval_seconds) * 1000,
             manifest,
             ownerSubjectId,

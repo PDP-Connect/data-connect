@@ -3823,6 +3823,40 @@ export function createController(opts: ControllerOptions = {}): Controller {
     };
   }
 
+  async function resolveRunStartPath(
+    connectorId: string,
+    admittedPath: string,
+    manifest: ConnectorManifest,
+    options: RunNowOptions
+  ): Promise<string> {
+    const currentInstall = await inspectActiveConnector(activeConnectorInstallStore, connectorId);
+    if (currentInstall.status === "invalid") {
+      throw new ControllerError(
+        `Active connector install is invalid for ${connectorId}: ${currentInstall.reason}`,
+        "connector_install_invalid"
+      );
+    }
+    const currentLocal = await inspectActiveLocalConnectorSource(localSourceStore, connectorId);
+    if (currentLocal.status === "invalid") {
+      throw new ControllerError(
+        `Active developer-local connector source is invalid for ${connectorId}: ${currentLocal.reason}`,
+        "connector_install_invalid"
+      );
+    }
+    let currentPath: string | null;
+    if (currentLocal.status === "active") {
+      currentPath = currentLocal.path;
+    } else if (currentInstall.status === "active") {
+      currentPath = currentInstall.path;
+    } else {
+      currentPath = await Promise.resolve(resolveConnectorPath(connectorId, manifest, options));
+    }
+    if (currentPath !== admittedPath) {
+      throw new ControllerError(`Connector implementation changed before run start for ${connectorId}`, "connector_install_invalid");
+    }
+    return currentPath;
+  }
+
   /**
    * Arms the wall-clock watchdog for a run. If the run does not reach terminal
    * state within `maxRunWallClockMs`, the watchdog:
@@ -4123,8 +4157,12 @@ export function createController(opts: ControllerOptions = {}): Controller {
     // polyfill-connectors/src/profile-lock.ts).
     let runResult: Awaited<ReturnType<RunConnectorFn>> | undefined;
     const runPromise = Promise.resolve()
-      .then(() =>
-        runConnectorImpl({
+      .then(async () => {
+        // Browser-surface acquisition and credential loading can outlive an
+        // installation update. Recheck the executable immediately before the
+        // runtime starts so an admitted run cannot launch stale bytes.
+        const currentPath = await resolveRunStartPath(admittedConnectorId, connectorPath, manifest, options);
+        return runConnectorImpl({
           admitRunConnection: async (candidate) => {
             await Promise.resolve();
             if (
@@ -4146,7 +4184,7 @@ export function createController(opts: ControllerOptions = {}): Controller {
             : {}),
           ...(opts.approvedProxyConnectorIds ? { approvedProxyConnectorIds: opts.approvedProxyConnectorIds } : {}),
           connectorInstanceId,
-          connectorPath,
+          connectorPath: currentPath,
           manifest,
           ownerSubjectId: runOwnerSubjectId,
           ownerToken,
@@ -4171,8 +4209,8 @@ export function createController(opts: ControllerOptions = {}): Controller {
           streamingRegistrationToken: streamingNonce,
           traceContext,
           triggerKind,
-        })
-      )
+        });
+      })
       // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: This protocol transition owns ordered state invariants that must remain local.
       .then(async (result) => {
         runResult = result;

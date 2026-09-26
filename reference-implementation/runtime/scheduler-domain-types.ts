@@ -129,7 +129,10 @@ export type SchedulerManifest = Record<string, unknown>;
 export interface ConnectorSchedule {
   readonly connectorId: string;
   readonly connectorInstanceId?: string;
-  readonly connectorPath: string;
+  /** Standalone scheduler fixtures may supply a fixed executable. */
+  readonly connectorPath?: string;
+  /** Production resolves authority and current manifest immediately before every attempt. */
+  readonly resolveImplementation?: () => Promise<{ connectorPath: string; manifest: SchedulerManifest } | null>;
   readonly grantAccessMode?: GrantAccessMode;
   readonly intervalMs: number;
   readonly manifest: SchedulerManifest;

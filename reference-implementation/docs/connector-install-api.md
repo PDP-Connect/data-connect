@@ -75,7 +75,8 @@ is a temporary fail-closed guard for this lane.
 
 An imported legacy install whose registry manifest differs from its installed
 manifest has a `repair_required` activation in the database. It is absent from
-the owner status list, and install and update refuse it.
+the runnable active list, appears in owner status with `activation_state:
+repair_required`, and install and update refuse it.
 The following offline runbook restores the **installed artifact's** manifest;
 it therefore rolls back any newer registry-only policy. Use it only after an
 operator has compared those two manifests and approved that rollback. If the
@@ -129,10 +130,18 @@ try {
     ).run('Operator approved legacy manifest restoration', id, activation.attemptId);
   }
   const failures = await repairPendingConnectorActivations(
-    (manifest, options) => registerConnector(manifest, options), dataDir
+    (manifest, options) => registerConnector(manifest, options), dataDir, id
   );
-  if (failures.length || (await getConnectorActivation(id))?.state !== 'active') {
-    throw new Error(`Activation remains blocked: ${JSON.stringify(failures)}`);
+  const selected = await getConnectorActivation(id);
+  if (failures.length) {
+    const details = failures.map(({ connectorId, error }) => ({
+      connectorId,
+      error: error instanceof Error ? error.message : String(error),
+    }));
+    throw new Error(`Activation repair failed: ${JSON.stringify(details)}; ${id} is ${selected?.state ?? 'missing'}`);
+  }
+  if (selected?.state !== 'active') {
+    throw new Error(`Activation remains blocked: ${id} is ${selected?.state ?? 'missing'}`);
   }
   console.log(`Activation active: ${id}`);
 } finally {
