@@ -1,5 +1,5 @@
 {
-  "client_id": "https://raw.githubusercontent.com/PDP-Connect/data-connect/waspflow/deployrestore-0923/scripts/fixtures/docker-core-smoke-cimd.json",
+  "client_id": "https://cimd.pdpp-smoke.test/docker-core-smoke-cimd.json",
   "client_name": "DataConnect Docker Core smoke",
   "redirect_uris": [
     "http://localhost:42173/callback"

@@ -12,8 +12,8 @@ import { createSqliteConnectorInstanceStore } from "../reference-implementation/
 const origin = requiredEnv("PDPP_CORE_SMOKE_ORIGIN");
 const setupToken = requiredEnv("PDPP_CORE_SMOKE_SETUP_TOKEN");
 const ownerPassword = requiredEnv("PDPP_CORE_SMOKE_OWNER_PASSWORD");
-const fixtureRef = "waspflow/deployrestore-0923";
-const clientId = `https://raw.githubusercontent.com/PDP-Connect/data-connect/${fixtureRef}/scripts/fixtures/docker-core-smoke-cimd.json`;
+// Served from this checkout by the smoke's TLS ingress (see docker-core-demo-smoke.sh).
+const clientId = "https://cimd.pdpp-smoke.test/docker-core-smoke-cimd.json";
 const privateKeyPath = "/app/scripts/fixtures/docker-core-smoke-private-key.pem";
 
 function requiredEnv(name) {
@@ -139,7 +139,7 @@ try {
     "manual-upload route must render WhatsApp export instructions"
   );
 
-  // The CIMD document is an external, public test fixture on this branch. This
+  // The smoke's TLS ingress serves the CIMD document from this checkout. This
   // preserves Core's real URL fetch and SSRF checks while the private key stays
   // a committed, non-production test vector.
   const verifier = randomBytes(32).toString("base64url");

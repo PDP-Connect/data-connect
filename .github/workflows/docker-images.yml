@@ -44,6 +44,10 @@ on:
       - "packages/**"
       - "scripts/check-dockerfile-copy-paths.ts"
       - "scripts/core-headed-patchright-runtime-oracle.*"
+      - "scripts/docker-core-demo-smoke.sh"
+      - "scripts/docker-core-demo-smoke-browser.mjs"
+      - "scripts/fixtures/**"
+      - "deploy/docker/check-image-identity.sh"
   pull_request:
     # See the push trigger above for the narrow reference-implementation paths
     # that affect the production image build.
@@ -67,6 +71,10 @@ on:
       - "packages/**"
       - "scripts/check-dockerfile-copy-paths.ts"
       - "scripts/core-headed-patchright-runtime-oracle.*"
+      - "scripts/docker-core-demo-smoke.sh"
+      - "scripts/docker-core-demo-smoke-browser.mjs"
+      - "scripts/fixtures/**"
+      - "deploy/docker/check-image-identity.sh"
   workflow_dispatch:
     inputs:
       image:
