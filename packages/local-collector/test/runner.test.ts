@@ -4312,10 +4312,19 @@ test("plain run installs a real SIGINT handler and an interrupt mid-run flushes 
 
     const outbox = new LocalDeviceOutbox({ path: queuePath });
     try {
-      const status = outbox.summary({ sourceInstanceId: "dsrc-1" });
+      const items = outbox.list({ sourceInstanceId: "dsrc-1" });
       assert.ok(
-        status.ready + status.leased + status.retrying + status.succeeded >= 1,
-        "the record emitted before the interrupt must be durably flushed, not lost"
+        items.some((item) => item.kind === "gap" && item.status === "ready"),
+        "the interrupted run must persist its ready failure gap"
+      );
+      const recordBatch = items.find((item) => item.kind === "record_batch");
+      assert.ok(recordBatch, "the record emitted before the interrupt must be durably flushed");
+      const payload = recordBatch.payload as {
+        records?: Array<{ data?: { id?: unknown }; record_key?: unknown }>;
+      };
+      assert.ok(
+        payload.records?.some((record) => record.record_key === "m-1" && record.data?.id === "m-1"),
+        "the durable record batch must contain the fixture record"
       );
     } finally {
       outbox.close();
