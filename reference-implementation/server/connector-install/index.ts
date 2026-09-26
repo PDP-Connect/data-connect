@@ -24,6 +24,14 @@ import {
 import { dirname, join, resolve, sep } from "node:path";
 import { canonicalConnectorKey } from "../connector-key.ts";
 import {
+  completeConnectorActivation,
+  getConnectorActivation,
+  listRepairRequiredConnectorActivations,
+  listRunnableConnectorActivations,
+  markConnectorActivationRepairRequired,
+  publishConnectorActivation,
+} from "./activation-authority.ts";
+import {
   createFileLocalConnectorSourceStore,
   type LocalConnectorSourceRecord,
   type LocalConnectorSourceStore,
@@ -90,6 +98,7 @@ interface InstallerCore {
 
 export interface ConnectorInstallStore {
   activate: (record: ConnectorInstallRecord) => Promise<void>;
+  readonly activationAuthority?: true;
   readonly dataDir?: string;
   deactivate: (connectorId: string) => Promise<void>;
   getActive: (connectorId: string) => Promise<ConnectorInstallRecord | null>;
@@ -97,6 +106,11 @@ export interface ConnectorInstallStore {
   listActive: () => Promise<readonly ConnectorInstallRecord[]>;
   setCatalogHighWater: (value: string) => Promise<void>;
 }
+
+type RegisterManifest = (
+  manifest: Record<string, unknown>,
+  options?: { skipManifestPersistence?: boolean }
+) => Promise<unknown>;
 
 export type ActiveConnectorInspection =
   | { readonly status: "none" }
@@ -158,9 +172,6 @@ export function createFileConnectorInstallStore(
   };
 }
 
-interface InstallRow {
-  readonly record_json: string;
-}
 interface HighWaterRow {
   readonly catalog_high_water: string | null;
 }
@@ -183,55 +194,15 @@ export function createConnectorInstallStore(): ConnectorInstallStore {
     return db;
   };
   const postgres = () => import("../postgres-storage.ts");
-  const parse = (row: InstallRow | undefined): ConnectorInstallRecord | null =>
-    row ? (JSON.parse(row.record_json) as ConnectorInstallRecord) : null;
   return {
-    async activate(record) {
-      const value = JSON.stringify(record);
-      const pg = await postgres();
-      if (pg.isPostgresStorageBackend()) {
-        await pg.postgresQuery(
-          "INSERT INTO connector_installs(connector_id, record_json, updated_at) VALUES ($1, $2, clock_timestamp()::text) ON CONFLICT(connector_id) DO UPDATE SET record_json = EXCLUDED.record_json, updated_at = EXCLUDED.updated_at",
-          [record.connectorId, value]
-        );
-        return;
-      }
-      (await sqlite()).execDynamicSqlAcknowledged(
-        `INSERT INTO connector_installs(connector_id, record_json, updated_at) VALUES (?, ?, datetime('now')) ON CONFLICT(connector_id) DO UPDATE SET record_json = excluded.record_json, updated_at = excluded.updated_at`,
-        [record.connectorId, value]
-      );
-    },
+    activate: () => Promise.reject(new Error("Database connector activation must use the atomic activation authority")),
+    activationAuthority: true,
     dataDir,
-    async deactivate(connectorId) {
-      const pg = await postgres();
-      if (pg.isPostgresStorageBackend()) {
-        await pg.postgresQuery("DELETE FROM connector_installs WHERE connector_id = $1", [connectorId]);
-        return;
-      }
-      (await sqlite()).execDynamicSqlAcknowledged("DELETE FROM connector_installs WHERE connector_id = ?", [
-        connectorId,
-      ]);
-    },
+    deactivate: () =>
+      Promise.reject(new Error("Database connector deactivation must use the atomic activation authority")),
     async getActive(connectorId) {
-      const pg = await postgres();
-      if (pg.isPostgresStorageBackend()) {
-        return parse(
-          (
-            await pg.postgresQuery<InstallRow>("SELECT record_json FROM connector_installs WHERE connector_id = $1", [
-              connectorId,
-            ])
-          ).rows[0]
-        );
-      }
-      const db = await sqlite();
-      return parse(
-        [
-          ...db.iterateDynamicSqlAcknowledged<InstallRow>(
-            "SELECT record_json FROM connector_installs WHERE connector_id = ?",
-            [connectorId]
-          ),
-        ].at(0)
-      );
+      const activation = await getConnectorActivation(connectorId);
+      return activation?.state === "active" ? activation.record : null;
     },
     async getCatalogHighWater() {
       const pg = await postgres();
@@ -254,22 +225,7 @@ export function createConnectorInstallStore(): ConnectorInstallStore {
       );
     },
     async listActive() {
-      const pg = await postgres();
-      if (pg.isPostgresStorageBackend()) {
-        return (
-          await pg.postgresQuery<InstallRow>("SELECT record_json FROM connector_installs ORDER BY connector_id")
-        ).rows
-          .map(parse)
-          .filter((row): row is ConnectorInstallRecord => row !== null);
-      }
-      const db = await sqlite();
-      return [
-        ...db.iterateDynamicSqlAcknowledged<InstallRow>(
-          "SELECT record_json FROM connector_installs ORDER BY connector_id"
-        ),
-      ]
-        .map(parse)
-        .filter((row): row is ConnectorInstallRecord => row !== null);
+      return (await listRunnableConnectorActivations()).map((activation) => activation.record);
     },
     async setCatalogHighWater(value) {
       const pg = await postgres();
@@ -640,7 +596,7 @@ async function reuseExistingInstall(
   existing: ConnectorInstallRecord | null,
   previousActive: ConnectorInstallRecord | null,
   dataDir: string,
-  registerManifest: (manifest: Record<string, unknown>) => Promise<unknown>,
+  registerManifest: RegisterManifest,
   store: ConnectorInstallStore
 ): Promise<ConnectorInstallRecord> {
   if (existing) {
@@ -654,6 +610,10 @@ async function reuseExistingInstall(
   }
   const reusable = existing ?? { ...readVerifiedRecord(root, entry), root };
   const verified = verifyStoredRecord(root, reusable, dataDir);
+  if (store.activationAuthority) {
+    await publishAndRepairActivation(verified, registerManifest);
+    return verified;
+  }
   await store.activate(verified);
   try {
     await registerManifest(verified.manifest);
@@ -668,8 +628,112 @@ async function reuseExistingInstall(
   return verified;
 }
 
+async function publishAndRepairActivation(
+  record: ConnectorInstallRecord,
+  registerManifest: RegisterManifest,
+  onPublished?: () => void
+): Promise<void> {
+  const activation = await publishConnectorActivation(record);
+  onPublished?.();
+  try {
+    await registerManifest(record.manifest, { skipManifestPersistence: true });
+    await completeConnectorActivation(record.connectorId, activation.attemptId);
+  } catch (error) {
+    try {
+      await markConnectorActivationRepairRequired(
+        record.connectorId,
+        activation.attemptId,
+        "Manifest repair failed",
+        error
+      );
+    } catch (compensationError) {
+      console.error("Connector activation repair-error recording failed", {
+        compensationError,
+        connectorId: record.connectorId,
+      });
+    }
+    throw error;
+  }
+}
+
+/** Retry a committed, non-runnable activation after an interrupted install or repair. */
+async function repairPendingConnectorActivationsUnlocked(
+  registerManifest: RegisterManifest,
+  dataDir = process.env.PDPP_DATA_DIR || join(process.cwd(), "data"),
+  connectorId?: string
+): Promise<readonly { connectorId: string; error: unknown }[]> {
+  const failures: { connectorId: string; error: unknown }[] = [];
+  for (const activation of await listRepairRequiredConnectorActivations()) {
+    if (connectorId && activation.record.connectorId !== connectorId) {
+      continue;
+    }
+    if (activation.repairReason === "Legacy registry and installed artifact disagree") {
+      failures.push({
+        connectorId: activation.record.connectorId,
+        error: new Error("Legacy activation and registry disagree; operator review is required"),
+      });
+      continue;
+    }
+    try {
+      verifyStoredRecord(activation.record.root, activation.record, dataDir);
+      await registerManifest(activation.record.manifest, { skipManifestPersistence: true });
+      await completeConnectorActivation(activation.record.connectorId, activation.attemptId);
+    } catch (error) {
+      // biome-ignore lint/performance/noAwaitInLoops: Preserve every independent repair failure.
+      await markConnectorActivationRepairRequired(
+        activation.record.connectorId,
+        activation.attemptId,
+        "Restart repair failed",
+        error
+      ).catch((compensationError) => {
+        console.error("Connector activation repair-error recording failed", {
+          compensationError,
+          connectorId: activation.record.connectorId,
+        });
+      });
+      failures.push({ connectorId: activation.record.connectorId, error });
+    }
+  }
+  return failures;
+}
+
+export async function repairPendingConnectorActivations(
+  registerManifest: RegisterManifest,
+  dataDir = process.env.PDPP_DATA_DIR || join(process.cwd(), "data")
+): Promise<readonly { connectorId: string; error: unknown }[]> {
+  const release = acquireInstallLock(dataDir);
+  try {
+    return await repairPendingConnectorActivationsUnlocked(registerManifest, dataDir);
+  } finally {
+    release();
+  }
+}
+
 // biome-ignore lint/suspicious/noConfusingVoidType: Test fixtures may use synchronous installers.
 type InstallArtifact = (root: string, entry: ConnectorCatalogEntry) => Promise<string | void> | string | void;
+
+async function compensateUncommittedPublication(options: {
+  readonly connectorId: string;
+  readonly dataDir: string;
+  readonly digest: string;
+  readonly existing: ConnectorInstallRecord | null;
+  readonly root: string;
+  readonly store: ConnectorInstallStore;
+}): Promise<void> {
+  if (options.store.activationAuthority) {
+    // A connection failure after COMMIT can hide whether publication succeeded.
+    // Retain the candidate whenever the authority points at it or cannot be read.
+    const activation = await getConnectorActivation(options.connectorId);
+    if (activation?.record.root === options.root && activation.record.digest === options.digest) {
+      return;
+    }
+  } else if (options.existing) {
+    await options.store.activate(options.existing);
+  } else {
+    await options.store.deactivate(options.connectorId);
+  }
+  removePublishedRootSafely(options.root, options.dataDir, options.connectorId, options.digest);
+}
 
 async function installStagedEntry(options: {
   readonly connectorId: string;
@@ -677,13 +741,14 @@ async function installStagedEntry(options: {
   readonly entry: ConnectorCatalogEntry;
   readonly existing: ConnectorInstallRecord | null;
   readonly installArtifact: InstallArtifact;
-  readonly registerManifest: (manifest: Record<string, unknown>) => Promise<unknown>;
+  readonly registerManifest: RegisterManifest;
   readonly root: string;
   readonly store: ConnectorInstallStore;
 }): Promise<ConnectorInstallRecord> {
   const transaction = mkdtempSync(join(dirname(options.root), `.${options.entry.digest.replace(":", "-")}-install-`));
   const staged = join(transaction, "next");
   let published = false;
+  let activationCommitted = false;
   try {
     const discoveredConfigDigest = await options.installArtifact(staged, options.entry);
     const verifiedEntry = discoveredConfigDigest
@@ -695,17 +760,30 @@ async function installStagedEntry(options: {
     published = true;
     const active = { ...record, root: options.root };
     const verifiedActive = verifyStoredRecord(options.root, active, options.dataDir);
+    if (options.store.activationAuthority) {
+      await publishAndRepairActivation(verifiedActive, options.registerManifest, () => {
+        activationCommitted = true;
+      });
+      return verifiedActive;
+    }
     await options.store.activate(verifiedActive);
     await options.registerManifest(verifiedActive.manifest);
     return verifiedActive;
   } catch (error) {
-    if (published) {
-      if (options.existing) {
-        await options.store.activate(options.existing);
-      } else {
-        await options.store.deactivate(options.connectorId);
-      }
-      removePublishedRootSafely(options.root, options.dataDir, options.connectorId, options.entry.digest);
+    if (published && !activationCommitted) {
+      await compensateUncommittedPublication({
+        connectorId: options.connectorId,
+        dataDir: options.dataDir,
+        digest: options.entry.digest,
+        existing: options.existing,
+        root: options.root,
+        store: options.store,
+      }).catch((compensationError) => {
+        console.error("Connector install publication compensation failed", {
+          compensationError,
+          connectorId: options.connectorId,
+        });
+      });
     }
     throw error;
   } finally {
@@ -733,7 +811,7 @@ export function createConnectorInstallService(options: {
   /** Test seam; production always delegates OCI verification to the pinned core. */
   readonly installArtifact?: InstallArtifact;
   readonly localSourceStore?: LocalConnectorSourceStore;
-  readonly registerManifest: (manifest: Record<string, unknown>) => Promise<unknown>;
+  readonly registerManifest: RegisterManifest;
 }): ConnectorInstallService {
   const dataDir =
     options.dataDir ||
@@ -798,6 +876,12 @@ export function createConnectorInstallService(options: {
   const installEntry = async (connectorId: string, entry: ConnectorCatalogEntry): Promise<ConnectorInstallRecord> => {
     const release = acquireInstallLock(dataDir);
     try {
+      if (store.activationAuthority) {
+        await repairPendingConnectorActivationsUnlocked(options.registerManifest, dataDir, connectorId);
+        if ((await getConnectorActivation(connectorId))?.state === "repair_required") {
+          throw new Error(`Connector ${connectorId} activation requires repair before another install`);
+        }
+      }
       const root = join(dataDir, "connectors", connectorId, entry.digest);
       const existing = await store.getActive(connectorId);
       if (existsSync(root)) {
@@ -821,20 +905,23 @@ export function createConnectorInstallService(options: {
         } else if (existing) {
           return await reuseExistingInstall(root, entry, null, existing, dataDir, options.registerManifest, store);
         } else {
-          // A crash can leave the published directory between rename and the
-          // active-record commit. Do not delete a valid retained root only
-          // because its active record is missing.
-          try {
-            readVerifiedRecord(root, entry);
-            throw new Error("Connector digest root already exists without a matching active record.");
-          } catch (error) {
-            if (
-              error instanceof Error &&
-              error.message === "Connector digest root already exists without a matching active record."
-            ) {
-              throw error;
+          if (!store.activationAuthority) {
+            // File-backed installs retain a verified root after a crash rather
+            // than deleting it without a durable record of its provenance.
+            try {
+              readVerifiedRecord(root, entry);
+              throw new Error("Connector digest root already exists without a matching active record.");
+            } catch (error) {
+              if (
+                error instanceof Error &&
+                error.message === "Connector digest root already exists without a matching active record."
+              ) {
+                throw error;
+              }
             }
           }
+          // The database authority has no pointer to this candidate. Remove
+          // it and repeat signed installation instead of trusting orphan bytes.
           removePublishedRootSafely(root, dataDir, connectorId, entry.digest);
           if (existsSync(root)) {
             throw new Error("Connector digest root already exists without a matching active record.");

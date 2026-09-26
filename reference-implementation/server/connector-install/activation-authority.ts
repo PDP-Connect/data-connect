@@ -4,6 +4,7 @@
 /** The database pointer is the only authority for an OCI connector's runnable bytes. */
 import { createHash, randomUUID } from "node:crypto";
 import { normalizeConnectorManifestForStorage } from "../auth.ts";
+import { validateConnectorManifest } from "../connector-manifest-validation.ts";
 import { getDb } from "../db.ts";
 import { isPostgresStorageBackend, postgresQuery, withPostgresTransaction } from "../postgres-storage.ts";
 import type { ConnectorInstallRecord } from "./index.ts";
@@ -28,6 +29,13 @@ interface ActivationRow {
   repair_error_json: string | null;
   repair_reason: string | null;
   state: "active" | "repair_required";
+}
+
+let activationPhaseHook: ((point: string) => void) | null = null;
+
+/** Test-only fault seam; production never installs a hook. */
+export function __setConnectorActivationPhaseHookForTest(hook: ((point: string) => void) | null): void {
+  activationPhaseHook = hook;
 }
 
 function canonicalJson(value: unknown): string {
@@ -107,6 +115,7 @@ function parseRow(row: ActivationRow | undefined): ConnectorActivation | null {
 
 /** Atomically publish the registry manifest, generation advance, and executable tuple. */
 export async function publishConnectorActivation(record: ConnectorInstallRecord): Promise<ConnectorActivation> {
+  validateConnectorManifest(record.manifest);
   const values = activationValues(record);
   const attemptId = randomUUID();
   const id = record.connectorId;
@@ -142,6 +151,7 @@ export async function publishConnectorActivation(record: ConnectorInstallRecord)
          ON CONFLICT(connector_id) DO UPDATE SET record_json=EXCLUDED.record_json,updated_at=EXCLUDED.updated_at`,
         [id, values.recordJson]
       );
+      activationPhaseHook?.("before-publication-commit");
     });
   } else {
     getDb()
@@ -172,9 +182,11 @@ export async function publishConnectorActivation(record: ConnectorInstallRecord)
         db.prepare(
           "INSERT INTO connector_installs(connector_id,record_json,updated_at) VALUES(?,?,datetime('now')) ON CONFLICT(connector_id) DO UPDATE SET record_json=excluded.record_json,updated_at=excluded.updated_at"
         ).run(id, values.recordJson);
+        activationPhaseHook?.("before-publication-commit");
       })
       .immediate();
   }
+  activationPhaseHook?.("after-publication-commit");
   return {
     activationId: values.activationId,
     attemptId,
@@ -195,10 +207,11 @@ export async function markConnectorActivationRepairRequired(
   error: unknown
 ): Promise<void> {
   const message = error instanceof Error ? error.message : String(error);
+  activationPhaseHook?.("before-repair-error-write");
   if (isPostgresStorageBackend()) {
     const result = await postgresQuery(
       `UPDATE connector_activations SET state='repair_required',repair_reason=$3,repair_error_json=$4,
-       updated_at=clock_timestamp()::text WHERE connector_id=$1 AND attempt_id=$2`,
+       updated_at=clock_timestamp()::text WHERE connector_id=$1 AND attempt_id=$2 AND state='repair_required'`,
       [connectorId, attemptId, reason, JSON.stringify({ message })]
     );
     if (!result.rowCount) {
@@ -207,7 +220,7 @@ export async function markConnectorActivationRepairRequired(
   } else {
     const result = getDb()
       .prepare(`UPDATE connector_activations SET state='repair_required',repair_reason=?,repair_error_json=?,
-      updated_at=datetime('now') WHERE connector_id=? AND attempt_id=?`)
+      updated_at=datetime('now') WHERE connector_id=? AND attempt_id=? AND state='repair_required'`)
       .run(reason, JSON.stringify({ message }), connectorId, attemptId);
     if (!result.changes) {
       throw new Error("Connector activation changed before repair state could be recorded");

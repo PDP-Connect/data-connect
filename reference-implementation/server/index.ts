@@ -83,6 +83,7 @@ import {
   createConnectorInstallService,
   createConnectorInstallStore,
   inspectActiveConnector,
+  repairPendingConnectorActivations,
 } from "./connector-install/index.ts";
 import { createFileLocalConnectorSourceStore } from "./connector-install/local-source.ts";
 import { createRemoteAccessConfigStore, remoteAccessConfigPath } from "./remote-access-store.ts";
@@ -6669,7 +6670,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
   const connectorInstallService =
     opts.connectorInstallService ??
     createConnectorInstallService({
-      registerManifest: (manifest) => registerConnector(manifest),
+      registerManifest: (manifest, options) => registerConnector(manifest, options),
     });
 
   {
@@ -8240,7 +8241,7 @@ function buildRsApp(opts: ServerOpts = {}) {
     service:
       opts.connectorInstallService ??
       createConnectorInstallService({
-        registerManifest: (manifest) => registerConnector(manifest),
+        registerManifest: (manifest, options) => registerConnector(manifest, options),
       }),
   } as unknown as Parameters<typeof mountOwnerConnectorInstall>[1]);
 
@@ -8682,6 +8683,18 @@ export async function startServer(opts: ServerOpts = {}) {
     configureSemanticBackend(opts.semanticRetrievalBackend as Parameters<typeof configureSemanticBackend>[0]);
   }
 
+  if (!process.env.PDPP_CONNECTOR_PRELOAD_DIR) {
+    const failedRepairs = await repairPendingConnectorActivations((manifest, options) =>
+      registerConnector(manifest, options)
+    );
+    for (const failure of failedRepairs) {
+      logger.warn(
+        { connectorId: failure.connectorId, err: failure.error },
+        "connector activation remains non-runnable and requires repair"
+      );
+    }
+  }
+
   // Model preparation is an optional acceleration effect, not a boot gate.
   // The backend owns its single-flight promise and lifecycle status; scheduling
   // it here ensures a fresh Core with no semantic backfill work still starts
@@ -9119,7 +9132,7 @@ export async function startServer(opts: ServerOpts = {}) {
   const connectorInstallService =
     opts.connectorInstallService ??
     createConnectorInstallService({
-      registerManifest: (manifest) => registerConnector(manifest),
+      registerManifest: (manifest, options) => registerConnector(manifest, options),
     });
   const asApp = buildAsApp({
     acceptedCollectorProtocolVersions: opts.acceptedCollectorProtocolVersions,
