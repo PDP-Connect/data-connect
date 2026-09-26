@@ -11,12 +11,33 @@ node_modules
 **/.env
 **/.env.*
 **/*.env
-!**/*.example
+**/.envrc
+!**/.env*.example
+!**/*.env.example
 **/*.pem
 **/*.key
 **/*.p12
 **/*.pfx
+**/*.jks
+**/*.keystore
 **/id_rsa
+**/id_dsa
+**/id_ecdsa
 **/id_ed25519
+**/.netrc
 **/credentials.json
 **/service-account*.json
+
+# Local dev databases (`npm run dev` writes .pdpp-data/pdpp.sqlite) hold
+# personal data.
+**/.pdpp-data
+**/*.sqlite
+**/*.sqlite-*
+**/*.sqlite3
+**/*.sqlite3-*
+
+# The ! rules above would re-include matching files inside the trees excluded
+# at the top of this file, so exclude everything under those trees again
+# (a bare directory pattern here does not undo a ! rule). Keep this block last.
+node_modules/**
+.next/**

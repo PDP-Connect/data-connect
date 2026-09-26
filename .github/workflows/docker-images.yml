@@ -363,7 +363,11 @@ jobs:
         if: github.event.inputs.image == 'all' || github.event.inputs.image == matrix.image
         run: bash deploy/docker/check-image-secrets.sh context .
 
-      - name: Build and push image
+      # Same path as the release publish in release.yml: build once into an OCI
+      # archive, scan every layer of every platform, push those exact bytes,
+      # then re-scan what GHCR serves. This job writes the same packages
+      # (including core) that releases write, so it gets the same gate.
+      - name: Build image without pushing
         if: github.event.inputs.image == 'all' || github.event.inputs.image == matrix.image
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
@@ -376,9 +380,78 @@ jobs:
           build-args: |
             PDPP_REFERENCE_REVISION=${{ github.sha }}
           labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=oci,dest=${{ runner.temp }}/image.oci.tar,tar=true
           platforms: ${{ github.event.inputs.platforms || 'linux/amd64,linux/arm64' }}
           provenance: mode=max
-          push: true
+          push: false
           sbom: true
           tags: ${{ steps.meta.outputs.tags }}
           target: ${{ matrix.target }}
+
+      - name: Scan every layer of the built image for secret files
+        id: scan-image
+        if: github.event.inputs.image == 'all' || github.event.inputs.image == matrix.image
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash deploy/docker/check-image-secrets.sh oci-archive "$RUNNER_TEMP/image.oci.tar" | tee "$RUNNER_TEMP/image-scan.txt"
+          digest="$(sed -n 's/^SCANNED-DIGEST: //p' "$RUNNER_TEMP/image-scan.txt")"
+          if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::The scan did not report the archive digest (got '$digest')."
+            exit 1
+          fi
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Push the scanned image
+        id: push-image
+        if: github.event.inputs.image == 'all' || github.event.inputs.image == matrix.image
+        shell: bash
+        env:
+          SCANNED_DIGEST: ${{ steps.scan-image.outputs.digest }}
+          TAG_REF: ${{ steps.meta.outputs.tags }}
+          SKOPEO_IMAGE: quay.io/skopeo/stable:v1.22.3@sha256:064d2cefb512c97d5a22979599ca05b7198fd6176494a634e1f31bd6b5fbd77a
+        run: |
+          set -euo pipefail
+          if [[ ! "$SCANNED_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::No clean scan digest (got '$SCANNED_DIGEST'); refusing to push."
+            exit 1
+          fi
+          TAG_REF="${TAG_REF%$'\n'}"
+          if [[ "$TAG_REF" != "$PDPP_IMAGE:dispatch-sha-"* || "$TAG_REF" == *$'\n'* ]]; then
+            echo "::error::Expected one $PDPP_IMAGE:dispatch-sha-* tag, got '$TAG_REF'."
+            exit 1
+          fi
+          skopeo() {
+            docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
+              -v "$HOME/.docker/config.json:/auth.json:ro" -v "$RUNNER_TEMP:/work" \
+              "$SKOPEO_IMAGE" "$@" --authfile /auth.json
+          }
+          skopeo copy --all --preserve-digests oci-archive:/work/image.oci.tar "docker://$TAG_REF"
+          pushed="sha256:$(skopeo inspect --raw "docker://$TAG_REF" | sha256sum | cut -d' ' -f1)"
+          if [[ "$pushed" != "$SCANNED_DIGEST" ]]; then
+            echo "::error::Pushed digest $pushed differs from scanned digest $SCANNED_DIGEST."
+            exit 1
+          fi
+          echo "digest=$pushed" >> "$GITHUB_OUTPUT"
+          rm -f "$RUNNER_TEMP/image.oci.tar"
+
+      - name: Re-scan the pushed image from GHCR by digest
+        if: github.event.inputs.image == 'all' || github.event.inputs.image == matrix.image
+        shell: bash
+        env:
+          PUSHED_DIGEST: ${{ steps.push-image.outputs.digest }}
+          SKOPEO_IMAGE: quay.io/skopeo/stable:v1.22.3@sha256:064d2cefb512c97d5a22979599ca05b7198fd6176494a634e1f31bd6b5fbd77a
+        run: |
+          set -euo pipefail
+          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
+            -v "$HOME/.docker/config.json:/auth.json:ro" -v "$RUNNER_TEMP:/work" \
+            "$SKOPEO_IMAGE" copy --all --authfile /auth.json \
+            "docker://$PDPP_IMAGE@$PUSHED_DIGEST" oci-archive:/work/image-pushed.oci.tar
+          if ! bash deploy/docker/check-image-secrets.sh oci-archive "$RUNNER_TEMP/image-pushed.oci.tar" | tee "$RUNNER_TEMP/image-rescan.txt"; then
+            echo "::error::$PDPP_IMAGE@$PUSHED_DIGEST in GHCR carries a secret-looking file or could not be scanned."
+            exit 1
+          fi
+          if ! grep -qxF "SCANNED-DIGEST: $PUSHED_DIGEST" "$RUNNER_TEMP/image-rescan.txt"; then
+            echo "::error::GHCR returned a different image for $PDPP_IMAGE@$PUSHED_DIGEST."
+            exit 1
+          fi

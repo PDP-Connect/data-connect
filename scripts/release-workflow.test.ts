@@ -41,39 +41,80 @@ function readWorkflowStep(workflow: string, name: string) {
   return workflow.slice(start, end)
 }
 
-// Returns why the publish-core-image job could push an image it has not
-// scanned, or [] when every GHCR write follows the full-layer secret scan.
-function coreImageScanGaps(workflow: string) {
-  const job = workflow.slice(
-    workflow.indexOf("  publish-core-image:"),
-    workflow.indexOf("  promote-core-latest:")
-  )
+type ScannedPublish = {
+  job: string
+  build: string
+  scan: string
+  push: string
+  rescan: string
+  scanId: string
+  archive: string
+  // The only `if:` a scan or push step may carry. The dispatch publish filters
+  // its matrix per step; the release publish has no step conditions.
+  allowedIf?: string
+}
+
+const DIGEST_GUARD = '[[ ! "$SCANNED_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]'
+
+// Returns why a publish job could push an image it has not scanned, or []
+// when every GHCR write follows a passing full-layer secret scan of the same
+// archive. A scan or push step that can "pass" without its script succeeding
+// (continue-on-error, if: always(), or the default shell, which has no
+// pipefail and so hides the scanner's exit status behind `| tee`) counts too.
+function scannedPublishGaps(spec: ScannedPublish) {
+  const { job, archive } = spec
   const gaps: string[] = []
   const step = (name: string) => {
     const marker = `      - name: ${name}\n`
     return job.includes(marker) ? readWorkflowStep(job, name) : undefined
   }
-  const build = step("Build Core image without pushing")
-  const scan = step("Scan every layer of the built Core image for secret files")
-  const push = step("Push the scanned Core image")
-  const rescan = step("Re-scan the pushed Core image from GHCR by digest")
+  const build = step(spec.build)
+  const scan = step(spec.scan)
+  const push = step(spec.push)
+  const rescan = step(spec.rescan)
+  const jobHeader = job.slice(0, job.indexOf("\n    steps:\n"))
+  if (jobHeader.includes("continue-on-error"))
+    gaps.push("job has continue-on-error")
   if (!build?.includes("push: false")) gaps.push("build step pushes")
-  if (
-    !build?.includes("outputs: type=oci,dest=${{ runner.temp }}/core.oci.tar")
-  )
+  if (!build?.includes(`outputs: type=oci,dest=\${{ runner.temp }}/${archive}`))
     gaps.push("build step does not write the OCI archive")
+  // build-args values are recorded verbatim in mode=max provenance, and the
+  // scanner skips in-toto layers, so a secret there would be published.
+  const buildArgs = build?.match(/\n\s+build-args: \|\n((?:\s{12}.*\n)*)/)?.[1]
+  if (buildArgs === undefined || /secrets\.|github\.token/.test(buildArgs))
+    gaps.push("build-args carry a secret into provenance")
   if (
     !scan?.includes(
-      'check-image-secrets.sh oci-archive "$RUNNER_TEMP/core.oci.tar"'
+      `check-image-secrets.sh oci-archive "$RUNNER_TEMP/${archive}"`
     )
   )
     gaps.push("no scan of the built archive")
-  if (!push?.includes("--preserve-digests oci-archive:/work/core.oci.tar"))
+  for (const [label, text] of [
+    ["scan", scan],
+    ["push", push],
+  ] as const) {
+    if (text === undefined) continue
+    if (text.includes("continue-on-error"))
+      gaps.push(`${label} step has continue-on-error`)
+    for (const cond of text.match(/^ {8}if: .*$/gm) ?? [])
+      if (cond !== `        if: ${spec.allowedIf}`)
+        gaps.push(`${label} step has ${cond.trim()}`)
+    if (!/^ {8}shell: bash$/m.test(text))
+      gaps.push(`${label} step does not use shell: bash`)
+  }
+  if (!push?.includes(`--preserve-digests oci-archive:/work/${archive}`))
     gaps.push("push does not copy the scanned archive")
   if (!push?.includes('"$pushed" != "$SCANNED_DIGEST"'))
     gaps.push("push does not assert pushed digest equals scanned digest")
-  if (!push?.includes("SCANNED_DIGEST: ${{ steps.scan-core.outputs.digest }}"))
+  if (
+    !push?.includes(
+      `SCANNED_DIGEST: \${{ steps.${spec.scanId}.outputs.digest }}`
+    )
+  )
     gaps.push("push does not take the digest from the scan")
+  const guardAt = push?.indexOf(DIGEST_GUARD) ?? -1
+  if (guardAt === -1 || guardAt > (push?.indexOf("skopeo copy") ?? -1))
+    gaps.push("push does not check the scan digest before skopeo copy")
   if (!rescan?.includes('"docker://$PDPP_IMAGE@$PUSHED_DIGEST"'))
     gaps.push("no re-scan of the pushed digest")
   const order = [build, scan, push, rescan].map(text =>
@@ -93,6 +134,42 @@ function coreImageScanGaps(workflow: string) {
     if (at !== -1 && at < scanAt) gaps.push(`"${write}" before the scan`)
   }
   return gaps
+}
+
+function coreImageScanGaps(workflow: string) {
+  return scannedPublishGaps({
+    job: workflow.slice(
+      workflow.indexOf("  publish-core-image:"),
+      workflow.indexOf("  promote-core-latest:")
+    ),
+    build: "Build Core image without pushing",
+    scan: "Scan every layer of the built Core image for secret files",
+    push: "Push the scanned Core image",
+    rescan: "Re-scan the pushed Core image from GHCR by digest",
+    scanId: "scan-core",
+    archive: "core.oci.tar",
+  })
+}
+
+const dockerImagesWorkflowPath = resolve(
+  process.cwd(),
+  ".github/workflows/docker-images.yml"
+)
+
+// The manual diagnostic publish writes the same GHCR packages as a release.
+function dispatchImageScanGaps(workflow: string) {
+  const at = workflow.indexOf("\n  publish:\n")
+  return scannedPublishGaps({
+    job: at === -1 ? "" : workflow.slice(at + 1),
+    build: "Build image without pushing",
+    scan: "Scan every layer of the built image for secret files",
+    push: "Push the scanned image",
+    rescan: "Re-scan the pushed image from GHCR by digest",
+    scanId: "scan-image",
+    archive: "image.oci.tar",
+    allowedIf:
+      "github.event.inputs.image == 'all' || github.event.inputs.image == matrix.image",
+  })
 }
 
 function readWorkflowRunScript(workflow: string, name: string) {
@@ -418,6 +495,167 @@ describe("release workflow", () => {
     expect(coreImageScanGaps(rebuilds)).toContain(
       "push does not copy the scanned archive"
     )
+    // Reviewer mutants from the PR #260 review. Each let a dirty or unscanned
+    // image reach GHCR while this test still passed.
+    const push = readWorkflowStep(workflow, "Push the scanned Core image")
+    const r2 = workflow.replace(
+      scanStep,
+      scanStep.replace(
+        "        shell: bash\n",
+        "        continue-on-error: true\n        shell: bash\n"
+      )
+    )
+    expect(r2).not.toBe(workflow)
+    expect(coreImageScanGaps(r2)).toContain("scan step has continue-on-error")
+
+    const r3 = workflow.replace(
+      scanStep,
+      scanStep
+        .replace("        shell: bash\n", "")
+        .replace("          set -euo pipefail\n", "")
+    )
+    expect(r3).not.toBe(workflow)
+    expect(coreImageScanGaps(r3)).toContain(
+      "scan step does not use shell: bash"
+    )
+
+    const r5 = workflow.replace(
+      push,
+      push.replace(
+        "        id: push-core\n",
+        "        id: push-core\n        if: always()\n"
+      )
+    )
+    expect(r5).not.toBe(workflow)
+    expect(coreImageScanGaps(r5)).toContain("push step has if: always()")
+
+    const unguarded = workflow.replace(
+      push,
+      push.replace(DIGEST_GUARD, "false")
+    )
+    expect(unguarded).not.toBe(workflow)
+    expect(coreImageScanGaps(unguarded)).toContain(
+      "push does not check the scan digest before skopeo copy"
+    )
+
+    const secretArg = workflow.replace(
+      "            PDPP_REFERENCE_REVISION=${{ github.sha }}\n          labels: ${{ steps.meta.outputs.labels }}\n          outputs: type=oci,dest=${{ runner.temp }}/core.oci.tar",
+      "            PDPP_REFERENCE_REVISION=${{ github.sha }}\n            NPM_TOKEN=${{ secrets.NPM_TOKEN }}\n          labels: ${{ steps.meta.outputs.labels }}\n          outputs: type=oci,dest=${{ runner.temp }}/core.oci.tar"
+    )
+    expect(secretArg).not.toBe(workflow)
+    expect(coreImageScanGaps(secretArg)).toContain(
+      "build-args carry a secret into provenance"
+    )
+  })
+
+  it("gives the manual diagnostic publish the same scan-then-push gate", () => {
+    const workflow = readFileSync(dockerImagesWorkflowPath, "utf8")
+    expect(dispatchImageScanGaps(workflow)).toEqual([])
+
+    const direct = workflow
+      .replace(
+        "          outputs: type=oci,dest=${{ runner.temp }}/image.oci.tar,tar=true\n",
+        ""
+      )
+      .replace(
+        "          push: false\n          sbom: true\n          tags: ${{ steps.meta.outputs.tags }}\n          target: ${{ matrix.target }}\n\n      - name: Scan",
+        "          push: true\n          sbom: true\n          tags: ${{ steps.meta.outputs.tags }}\n          target: ${{ matrix.target }}\n\n      - name: Scan"
+      )
+    expect(direct).not.toBe(workflow)
+    expect(dispatchImageScanGaps(direct)).toEqual(
+      expect.arrayContaining([
+        "build step pushes",
+        '"push: true" before the scan',
+      ])
+    )
+
+    const always = workflow.replace(
+      "        id: push-image\n        if: github.event.inputs.image == 'all' || github.event.inputs.image == matrix.image\n",
+      "        id: push-image\n        if: always()\n"
+    )
+    expect(always).not.toBe(workflow)
+    expect(dispatchImageScanGaps(always)).toContain(
+      "push step has if: always()"
+    )
+  })
+
+  describe("scanned-image push script", () => {
+    // Runs the real push step with `docker` stubbed. The stub records every
+    // call; skopeo runs through `docker run`, so no call means no push.
+    function runPush(
+      workflowPath: string,
+      step: string,
+      env: Record<string, string>
+    ) {
+      const script = readWorkflowRunScript(
+        readFileSync(workflowPath, "utf8"),
+        step
+      )
+      const root = mkdtempSync(join(tmpdir(), "data-connect-push-"))
+      try {
+        const log = join(root, "docker.log")
+        const result = spawnSync(
+          "bash",
+          ["-c", `docker() { echo "$*" >> "${log}"; }\n${script}`],
+          {
+            encoding: "utf8",
+            env: {
+              ...process.env,
+              RUNNER_TEMP: root,
+              GITHUB_OUTPUT: join(root, "out"),
+              PDPP_IMAGE: "ghcr.io/pdp-connect/data-connect/core",
+              SKOPEO_IMAGE: "skopeo",
+              VERSION: "0.7.55",
+              ...env,
+            },
+          }
+        )
+        let calls = ""
+        try {
+          calls = readFileSync(log, "utf8")
+        } catch {}
+        return {
+          status: result.status,
+          stderr: result.stdout + result.stderr,
+          calls,
+        }
+      } finally {
+        rmSync(root, { recursive: true, force: true })
+      }
+    }
+
+    for (const [workflowPath, step, extra] of [
+      [releaseWorkflowPath, "Push the scanned Core image", {}],
+      [
+        dockerImagesWorkflowPath,
+        "Push the scanned image",
+        {
+          TAG_REF:
+            "ghcr.io/pdp-connect/data-connect/core:dispatch-sha-abc1234\n",
+        },
+      ],
+    ] as const) {
+      it(`${step}: refuses to push without a clean scan digest`, () => {
+        for (const digest of ["", "sha256:short", `sha256:${"A".repeat(64)}`]) {
+          const run = runPush(workflowPath, step, {
+            ...extra,
+            SCANNED_DIGEST: digest,
+          })
+          expect(run.status).toBe(1)
+          expect(run.stderr).toContain("refusing to push")
+          expect(run.calls).toBe("")
+        }
+        const ok = runPush(workflowPath, step, {
+          ...extra,
+          SCANNED_DIGEST: `sha256:${"b".repeat(64)}`,
+        })
+        expect(ok.calls).toContain("copy --all --preserve-digests")
+        // The stub registry serves different bytes, so the equality check
+        // must fail the step after the copy.
+        expect(ok.status).toBe(1)
+        expect(ok.stderr).toContain("differs from scanned digest")
+      })
+    }
   })
 
   it("pushes only versioned Core tags and serializes only latest promotion", () => {
