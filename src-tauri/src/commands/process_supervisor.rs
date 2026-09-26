@@ -27,6 +27,62 @@ use tauri::{AppHandle, Emitter};
 
 const SUPERVISOR_EVENT: &str = "process-supervisor";
 const READINESS_POLL_INTERVAL: Duration = Duration::from_millis(50);
+#[cfg(any(windows, test))]
+const WINDOWS_RUNTIME_ENVIRONMENT_KEYS: [&str; 7] = [
+    "SYSTEMROOT",
+    "SYSTEMDRIVE",
+    "WINDIR",
+    "TEMP",
+    "TMP",
+    "PATH",
+    "PATHEXT",
+];
+
+#[cfg(any(windows, test))]
+fn windows_child_environment(
+    inherited: impl IntoIterator<Item = (OsString, OsString)>,
+    configured: &BTreeMap<OsString, OsString>,
+) -> BTreeMap<OsString, OsString> {
+    let mut environment = BTreeMap::new();
+    for (key, value) in inherited {
+        if is_windows_runtime_environment_key(&key) {
+            set_case_insensitive_environment_value(&mut environment, key, value);
+        }
+    }
+    for (key, value) in configured {
+        set_case_insensitive_environment_value(&mut environment, key.clone(), value.clone());
+    }
+    environment
+}
+
+#[cfg(any(windows, test))]
+fn is_windows_runtime_environment_key(key: &OsStr) -> bool {
+    key.to_str().is_some_and(|key| {
+        WINDOWS_RUNTIME_ENVIRONMENT_KEYS
+            .iter()
+            .any(|required| key.eq_ignore_ascii_case(required))
+    })
+}
+
+#[cfg(any(windows, test))]
+fn set_case_insensitive_environment_value(
+    environment: &mut BTreeMap<OsString, OsString>,
+    key: OsString,
+    value: OsString,
+) {
+    if let Some(existing_key) = environment
+        .keys()
+        .find(|existing| {
+            existing
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&key.to_string_lossy())
+        })
+        .cloned()
+    {
+        environment.remove(&existing_key);
+    }
+    environment.insert(key, value);
+}
 
 #[cfg(unix)]
 type ProcessGroupRegistry = Arc<Mutex<BTreeSet<libc::pid_t>>>;
@@ -788,10 +844,20 @@ fn spawn_process(spec: &ProcessSpec, port: u16) -> Result<SpawnedProcess, Superv
         command.current_dir(cwd);
     }
 
-    if spec.env.clear {
+    let environment = if spec.env.clear {
         command.env_clear();
-    }
-    for (key, value) in &spec.env.vars {
+        #[cfg(windows)]
+        {
+            windows_child_environment(std::env::vars_os(), &spec.env.vars)
+        }
+        #[cfg(not(windows))]
+        {
+            spec.env.vars.clone()
+        }
+    } else {
+        spec.env.vars.clone()
+    };
+    for (key, value) in &environment {
         command.env(key, render_port(value, port));
     }
 
@@ -2223,6 +2289,40 @@ setInterval(() => {}, 1000);
             object.get("REPORT_PATH").and_then(Value::as_str),
             Some(report.path().to_str().unwrap())
         );
+    }
+
+    #[test]
+    fn windows_cleared_environment_preserves_runtime_variables() {
+        let inherited = [
+            ("sYsTeMrOoT", "C:\\Windows"),
+            ("SystemDrive", "C:"),
+            ("windir", "C:\\Windows"),
+            ("temp", "C:\\Temp"),
+            ("TMP", "C:\\Temp"),
+            ("Path", "C:\\Windows\\System32"),
+            ("PATHEXT", ".COM;.EXE;.BAT;.CMD"),
+            ("UNRELATED_SECRET", "do-not-forward"),
+        ]
+        .map(|(key, value)| (OsString::from(key), OsString::from(value)));
+        let configured =
+            BTreeMap::from([(OsString::from("NODE_ENV"), OsString::from("production"))]);
+        let environment = windows_child_environment(inherited, &configured);
+
+        for required in WINDOWS_RUNTIME_ENVIRONMENT_KEYS {
+            assert!(
+                environment
+                    .keys()
+                    .any(|key| key.to_string_lossy().eq_ignore_ascii_case(required)),
+                "Windows child environment must preserve {required}"
+            );
+        }
+        assert_eq!(
+            environment.get(OsStr::new("NODE_ENV")),
+            Some(&OsString::from("production"))
+        );
+        assert!(!environment.keys().any(|key| key
+            .to_string_lossy()
+            .eq_ignore_ascii_case("UNRELATED_SECRET")));
     }
 
     #[cfg(unix)]

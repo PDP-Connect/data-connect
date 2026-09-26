@@ -335,7 +335,7 @@ jobs:
           fi
 
       - name: Stage verified release artifacts
-        if: github.event_name == 'release'
+        if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.release_tag == '')
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: manual-install-${{ matrix.artifact_key }}
@@ -350,6 +350,78 @@ jobs:
       - name: Cleanup optional Apple keychain
         if: matrix.os_family == 'macos' && always() && env.APPLE_CERTIFICATE_AVAILABLE == 'true'
         run: security delete-keychain "$RUNNER_TEMP/app-signing.keychain-db" || true
+
+  clean-install-built-windows:
+    if: github.event_name == 'workflow_dispatch' && inputs.release_tag == ''
+    needs: build
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      EVIDENCE_DIR: ${{ github.workspace }}/clean-install-evidence
+    steps:
+      - name: Checkout acceptance script
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.21.0"
+
+      - name: Download branch-built Windows installer
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: manual-install-windows-x64
+          path: installer
+
+      - name: Install and launch on a clean Windows runner
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $appData = Join-Path $env:APPDATA 'dev.dataconnect'
+          if (Test-Path $appData) {
+            Write-Output "::error::$appData exists before install; the VM is not clean."
+            exit 1
+          }
+          $installer = Get-ChildItem 'installer' -Filter '*-setup.exe' | Select-Object -First 1
+          if (-not $installer) { Write-Output '::error::Branch-built Windows installer not found.'; exit 1 }
+          New-Item -ItemType Directory -Force -Path $env:EVIDENCE_DIR | Out-Null
+          $install = Start-Process -FilePath $installer.FullName -ArgumentList '/S' -Wait -PassThru
+          "installer exit code: $($install.ExitCode)" | Tee-Object -FilePath "$env:EVIDENCE_DIR/install.log"
+          if ($install.ExitCode -ne 0) { exit 1 }
+          $uninstall = Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall' |
+            Get-ItemProperty | Where-Object { $_.DisplayName -eq 'DataConnect' } | Select-Object -First 1
+          if (-not $uninstall) { Write-Output '::error::DataConnect uninstall entry not found'; exit 1 }
+          $installDir = $uninstall.InstallLocation.Trim('"')
+          $exe = Get-ChildItem $installDir -Filter *.exe |
+            Where-Object { $_.Name -notmatch '^(uninstall|pdpp-node)' } | Select-Object -First 1
+          if (-not $exe) { Write-Output '::error::No app executable in install directory'; exit 1 }
+          Start-Process -FilePath $exe.FullName
+          "APP_DATA_DIR=$appData" >> $env:GITHUB_ENV
+          "APP_LOG_DIR=$(Join-Path $env:LOCALAPPDATA 'dev.dataconnect\logs')" >> $env:GITHUB_ENV
+
+      - name: Assert fresh-install sidecars are serving
+        shell: bash
+        run: node scripts/clean-install-acceptance.mjs --app-data-dir "$APP_DATA_DIR" --log-file "$APP_LOG_DIR/DataConnect.log" --timeout-ms 300000
+
+      - name: Collect clean-install evidence
+        if: always()
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "$env:EVIDENCE_DIR/app-logs" | Out-Null
+          if (Test-Path "$env:APP_LOG_DIR") { Copy-Item "$env:APP_LOG_DIR\*" "$env:EVIDENCE_DIR/app-logs" -Recurse -Force }
+          if (Test-Path "$env:APP_DATA_DIR") { Get-ChildItem "$env:APP_DATA_DIR" -Recurse | Format-Table -AutoSize | Out-File "$env:EVIDENCE_DIR/app-data-listing.txt" }
+          Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,CommandLine | Format-Table -AutoSize -Wrap | Out-String -Width 4096 | Out-File "$env:EVIDENCE_DIR/processes.txt"
+
+      - name: Upload clean-install evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: clean-install-branch-windows-latest
+          path: clean-install-evidence
+          if-no-files-found: warn
+          retention-days: 14
 
   publish:
     if: github.event_name == 'release'
