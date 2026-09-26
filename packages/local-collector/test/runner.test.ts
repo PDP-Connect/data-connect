@@ -4267,12 +4267,13 @@ test("plain run installs a real SIGINT handler and an interrupt mid-run flushes 
     // interrupt deterministically instead of racing a real finish.
     const dir = await tempDir();
     const fixture = join(dir, "slow.mjs");
+    const readinessPath = join(dir, "record-emitted");
     await writeFile(
       fixture,
       // setInterval (never cleared) keeps the event loop alive; a bare
       // unresolved Promise does not hold Node open once the microtask queue
       // drains, so the child would exit on its own instead of hanging.
-      '  process.stdout.write(JSON.stringify({ type: "RECORD", stream: "messages", key: "m-1", data: { id: "m-1" }, emitted_at: new Date(0).toISOString() }) + "\\n");\n  setInterval(() => {}, 1000);\n'
+      `import { writeFileSync } from "node:fs";\nprocess.stdout.write(JSON.stringify({ type: "RECORD", stream: "messages", key: "m-1", data: { id: "m-1" }, emitted_at: new Date(0).toISOString() }) + "\\n", () => writeFileSync(${JSON.stringify(readinessPath)}, "emitted"));\nsetInterval(() => {}, 1000);\n`
     );
     const queuePath = await tempOutboxPath();
     const beforeInt = process.listenerCount("SIGINT");
@@ -4291,14 +4292,22 @@ test("plain run installs a real SIGINT handler and an interrupt mid-run flushes 
       streams: ["messages"],
     });
 
-    // Let the child spawn and emit its record, then interrupt like Ctrl+C
-    // would: invoke the freshly installed SIGINT handler directly (same
-    // technique as installInterruptAbort's tests above).
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    // The fixture creates this marker from stdout's write callback, so the
+    // record has been emitted before the test interrupts the child.
+    const readinessTimeoutMs = 5_000;
+    const readinessDeadline = Date.now() + readinessTimeoutMs;
+    while (!existsSync(readinessPath) && Date.now() < readinessDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    const recordEmitted = existsSync(readinessPath);
     assert.equal(process.listenerCount("SIGINT"), beforeInt + 1, "plain run must install a real SIGINT handler");
     (process.listeners("SIGINT").at(-1) as () => void)();
 
     await assert.rejects(runPromise);
+    assert.ok(
+      recordEmitted,
+      `timed out after ${readinessTimeoutMs}ms waiting for the fixture to emit its record`
+    );
     assert.equal(process.listenerCount("SIGINT"), beforeInt, "the handler must be removed once the run settles");
 
     const outbox = new LocalDeviceOutbox({ path: queuePath });
