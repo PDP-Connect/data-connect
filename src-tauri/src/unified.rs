@@ -751,24 +751,9 @@ fn ri_process_spec(
     app: &AppHandle,
     node_binary: &Path,
     root: &Path,
-    data_dir: &Path,
-    owner_password: &str,
-    owner_password_source: OwnerPasswordSource,
-    owner_credential_reveal_proof: &str,
-    credential_encryption_key: &str,
-    database_encryption_key: &str,
+    mut env: BTreeMap<OsString, OsString>,
     remote_access: &RemoteAccessConfig,
-    revoke_existing_sessions: bool,
 ) -> ProcessSpec {
-    let mut env = ri_environment(
-        data_dir,
-        owner_password,
-        owner_password_source,
-        owner_credential_reveal_proof,
-        credential_encryption_key,
-        database_encryption_key,
-        revoke_existing_sessions,
-    );
     env.extend(remote_access.fields.environment());
     add_browser_host_environment(app, &mut env);
     ProcessSpec {
@@ -816,6 +801,41 @@ fn ri_process_spec(
 fn ri_readiness_host_header(trusted_hosts: &str) -> Option<String> {
     let trimmed = trusted_hosts.trim();
     (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+/// Prepare `data_dir` for one RI start and return that start's RI
+/// environment. A recovery start (`revoke_existing_sessions`) also writes
+/// the owner-session reset file; the RI revokes owner sessions and bearers
+/// only when it sees both that file and `PDPP_RECOVERY_REVOKE_OWNER_SESSIONS`.
+/// Both inputs are made here, together, so a test of this function covers
+/// what `start_managed_stack` gives the RI.
+fn prepare_ri_start(
+    data_dir: &Path,
+    owner_password: &str,
+    owner_password_source: OwnerPasswordSource,
+    owner_credential_reveal_proof: &str,
+    credential_encryption_key: &str,
+    database_encryption_key: &str,
+    revoke_existing_sessions: bool,
+) -> Result<BTreeMap<OsString, OsString>, String> {
+    fs::create_dir_all(data_dir)
+        .map_err(|error| format!("Failed to create unified data directory: {error}"))?;
+    if revoke_existing_sessions {
+        crate::atomic_write::write_json_atomically(
+            &data_dir.join(RECOVERY_OWNER_SESSION_RESET_FILE),
+            &serde_json::json!({ "version": 1, "reason": "recovery" }),
+            "Failed to write recovery owner-session reset state",
+        )?;
+    }
+    Ok(ri_environment(
+        data_dir,
+        owner_password,
+        owner_password_source,
+        owner_credential_reveal_proof,
+        credential_encryption_key,
+        database_encryption_key,
+        revoke_existing_sessions,
+    ))
 }
 
 fn ri_environment(
@@ -1083,16 +1103,16 @@ fn start_managed_stack(
         .app_data_dir()
         .map_err(|error| format!("Failed to resolve DataConnect app-data directory: {error}"))?
         .join(UNIFIED_DB_DIRECTORY);
-    fs::create_dir_all(&data_dir)
-        .map_err(|error| format!("Failed to create unified data directory: {error}"))?;
-    if revoke_existing_sessions {
-        crate::atomic_write::write_json_atomically(
-            &data_dir.join(RECOVERY_OWNER_SESSION_RESET_FILE),
-            &serde_json::json!({ "version": 1, "reason": "recovery" }),
-            "Failed to write recovery owner-session reset state",
-        )?;
-    }
     let owner_credential_reveal_proof = owner_credential_reveal_proof_key()?;
+    let ri_env = prepare_ri_start(
+        &data_dir,
+        owner_password,
+        owner_password_source,
+        owner_credential_reveal_proof,
+        credential_encryption_key,
+        database_encryption_key,
+        revoke_existing_sessions,
+    )?;
 
     let sink = UnifiedEventSink { app: app.clone() };
     // One observer per supervisor (each owns its own label's lease file).
@@ -1111,19 +1131,7 @@ fn start_managed_stack(
     // tunnel's forward target (the console's port) is unaffected by it.
     let preferred_ri_port = read_preferred_ri_port(app);
     let ri = Supervisor::new(
-        ri_process_spec(
-            app,
-            &node_binary,
-            &ri_root,
-            &data_dir,
-            owner_password,
-            owner_password_source,
-            owner_credential_reveal_proof,
-            credential_encryption_key,
-            database_encryption_key,
-            remote_access,
-            revoke_existing_sessions,
-        ),
+        ri_process_spec(app, &node_binary, &ri_root, ri_env, remote_access),
         sink.clone(),
     )
     .with_observer(lease_observer())
@@ -6320,6 +6328,232 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
 
         assert!(applied.exists(), "applied marker removed: {error}");
         assert!(!path.exists());
+    }
+
+    fn node_on_test_path() -> PathBuf {
+        std::env::split_paths(&std::env::var_os("PATH").expect("test PATH"))
+            .map(|directory| directory.join(if cfg!(windows) { "node.exe" } else { "node" }))
+            .find(|candidate| candidate.is_file())
+            .expect("node executable in test PATH")
+    }
+
+    /// Starts `args` under `node` through the real supervisor, with
+    /// `environment` as its whole environment, the way `start_managed_stack`
+    /// starts the RI, and waits for the RI to print `READY`.
+    fn start_ri_with(
+        environment: BTreeMap<OsString, OsString>,
+        cwd: Option<PathBuf>,
+        args: Vec<OsString>,
+        deadline: Duration,
+    ) -> Result<crate::commands::process_supervisor::SupervisorHandle, String> {
+        let spec = ProcessSpec {
+            label: "reference-implementation".to_string(),
+            program: node_on_test_path(),
+            args,
+            cwd,
+            env: EnvironmentSpec::cleared(environment),
+            readiness: Readiness::StdoutMarker {
+                marker: "READY".to_string(),
+                deadline,
+            },
+            restart: RestartPolicy::Never,
+            process_group: true,
+            stop: StopPolicy {
+                grace: Duration::from_millis(300),
+                escalate: Duration::from_secs(1),
+                total: Duration::from_secs(2),
+            },
+            requested_port: None,
+        };
+        Supervisor::new(spec, DiscardingSink)
+            .start()
+            .map_err(|error| error.to_string())
+    }
+
+    /// The desktop half of a start: the v1 import writes the credential
+    /// marker (`mark_recovery_credential_state` calls
+    /// `write_credential_recovery_state`), then `start_managed_stack` calls
+    /// `prepare_ri_start` for the RI environment.
+    fn desktop_start_environment(
+        data_dir: &Path,
+        credential_key: &str,
+        database_key: &str,
+        recovery: bool,
+    ) -> BTreeMap<OsString, OsString> {
+        if recovery {
+            write_credential_recovery_state(&data_dir.join(CREDENTIAL_RECOVERY_STATE_FILE))
+                .expect("write v1 marker");
+        }
+        prepare_ri_start(
+            data_dir,
+            "owner-password-test-0927",
+            OwnerPasswordSource::DesktopGenerated,
+            "reveal-proof-test",
+            credential_key,
+            database_key,
+            recovery,
+        )
+        .expect("prepare RI start")
+    }
+
+    /// What the RI sees at startup, read the way
+    /// reference-implementation/server/index.ts reads it
+    /// (`readCredentialRecoveryStateMarker`, `applyRecoveryOwnerSessionReset`).
+    const RECORDING_FAKE_RI: &str = r#"
+const fs = require('fs');
+const path = require('path');
+const dir = process.env.PDPP_DATA_DIR;
+const readJson = (name) => {
+  const p = path.join(dir, name);
+  return fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, 'utf8')) : null;
+};
+const marker = readJson('credential-recovery-state.json');
+const markerAccepted = marker !== null && typeof marker === 'object' && !Array.isArray(marker)
+  && marker.version === 1 && marker.cause === 'legacy_v1_kit_missing_credential_key';
+const reset = readJson('owner-session-recovery-reset.json');
+fs.writeFileSync(path.join(dir, 'seen.json'), JSON.stringify({
+  revokeEnv: process.env.PDPP_RECOVERY_REVOKE_OWNER_SESSIONS ?? null,
+  marker, markerAccepted, reset,
+}));
+console.log('READY');
+setInterval(() => {}, 1000);
+"#;
+
+    #[test]
+    fn only_a_desktop_recovery_start_gives_the_ri_its_recovery_inputs() {
+        let seen = |recovery: bool| {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let data_dir = dir.path().join("unified");
+            let environment = desktop_start_environment(&data_dir, "cred", "db", recovery);
+            let script = dir.path().join("fake-ri.js");
+            fs::write(&script, RECORDING_FAKE_RI).expect("write fake RI");
+            let handle = start_ri_with(
+                environment,
+                None,
+                vec![script.into_os_string()],
+                Duration::from_secs(10),
+            )
+            .expect("fake RI starts");
+            let _ = handle.stop();
+            serde_json::from_str::<serde_json::Value>(
+                &fs::read_to_string(data_dir.join("seen.json")).expect("fake RI report"),
+            )
+            .expect("report is JSON")
+        };
+
+        let recovery = seen(true);
+        assert_eq!(recovery["revokeEnv"], "1", "{recovery}");
+        assert_eq!(recovery["markerAccepted"], true, "{recovery}");
+        assert!(recovery["reset"].is_object(), "no reset file: {recovery}");
+
+        let normal = seen(false);
+        assert_eq!(normal["revokeEnv"], serde_json::Value::Null, "{normal}");
+        assert_eq!(normal["marker"], serde_json::Value::Null, "{normal}");
+        assert_eq!(normal["reset"], serde_json::Value::Null, "{normal}");
+    }
+
+    /// The reference implementation's source directory, or `None` when its
+    /// Node dependencies (tsx and the SQLCipher binding) cannot load here.
+    /// The Rust CI job runs `npm ci --ignore-scripts`, which skips the native
+    /// SQLCipher build, so there this test prints why and returns.
+    fn runnable_reference_implementation() -> Option<PathBuf> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()?
+            .join("reference-implementation");
+        let probe = std::process::Command::new(node_on_test_path())
+            .args([
+                "--import",
+                "tsx",
+                "-e",
+                "new (require('better-sqlite3-multiple-ciphers'))(':memory:').close()",
+            ])
+            .current_dir(&root)
+            .output()
+            .ok()?;
+        probe.status.success().then_some(root)
+    }
+
+    #[test]
+    fn a_desktop_recovery_start_revokes_owner_sessions_and_bearers_in_the_real_ri() {
+        let Some(ri_root) = runnable_reference_implementation() else {
+            eprintln!(
+                "SKIPPED: reference-implementation Node dependencies cannot load; run `npm ci` to cover the real RI"
+            );
+            return;
+        };
+        let driver = ri_root.join("test/fixtures/desktop-recovery-ri-driver.ts");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().join("unified");
+        fs::create_dir_all(&data_dir).expect("data dir");
+        let database_key = "database-key-test-0927";
+        let seed_path = dir.path().join("seed.json");
+        let result_path = dir.path().join("result.json");
+
+        // Before the key was lost: a normal desktop start, then the owner
+        // signs in and mints a bearer on the encrypted database.
+        let seed = std::process::Command::new(node_on_test_path())
+            .arg("--import")
+            .arg("tsx")
+            .arg(&driver)
+            .arg("seed")
+            .arg(&seed_path)
+            .current_dir(&ri_root)
+            .env_clear()
+            .envs(desktop_start_environment(&data_dir, "cred-before", database_key, false))
+            .env("AS_PORT", "0")
+            .env("RS_PORT", "0")
+            .output()
+            .expect("run seed driver");
+        assert!(
+            seed.status.success(),
+            "seed failed: {}",
+            String::from_utf8_lossy(&seed.stderr)
+        );
+        let seeded: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&seed_path).expect("seed")).expect("json");
+        assert_eq!(seeded["sessionStatus"], 204, "session works before recovery");
+        assert_eq!(seeded["bearerStatus"], 200, "bearer works before recovery");
+        let header = fs::read(data_dir.join("pdpp.sqlite")).expect("database");
+        assert!(
+            !header.starts_with(b"SQLite format 3\0"),
+            "the database must be encrypted"
+        );
+
+        // A v1 recovery start: the same database key, a fresh credential key.
+        let fresh_credential_key =
+            crate::owner_credential::generate_recovered_v1_credential_encryption_key()
+                .expect("fresh key");
+        let environment =
+            desktop_start_environment(&data_dir, &fresh_credential_key, database_key, true);
+        let handle = start_ri_with(
+            environment,
+            Some(ri_root.clone()),
+            vec![
+                OsString::from("--import"),
+                OsString::from("tsx"),
+                driver.into_os_string(),
+                OsString::from("recover"),
+                result_path.clone().into_os_string(),
+                seed_path.into_os_string(),
+            ],
+            Duration::from_secs(120),
+        )
+        .expect("real RI starts for recovery");
+        let _ = handle.stop();
+
+        let result: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&result_path).expect("result"))
+                .expect("json");
+        assert_eq!(result["oldSessionStatus"], 401, "{result}");
+        assert_eq!(result["oldBearerStatus"], 401, "{result}");
+        assert_eq!(result["freshSessionStatus"], 204, "{result}");
+        assert!(data_dir
+            .join(format!("{RECOVERY_OWNER_SESSION_RESET_FILE}.applied"))
+            .exists());
+        assert!(data_dir
+            .join(format!("{CREDENTIAL_RECOVERY_STATE_FILE}.applied"))
+            .exists());
+        assert!(!data_dir.join(CREDENTIAL_RECOVERY_STATE_FILE).exists());
     }
 
     #[test]
