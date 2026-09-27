@@ -14,13 +14,61 @@ describe("isMainModule", () => {
     ).toBe(true)
   })
 
-  it("matches a Windows entrypoint with backslash separators", () => {
-    const moduleUrl =
-      "file:///D:/a/data-connect/scripts/resolve-connectors.js"
-    const argvPath = "D:\\a\\data-connect\\scripts\\resolve-connectors.js"
-    expect(moduleUrl).not.toBe(`file://${argvPath}`)
+  it("matches Windows separators, drive letter casing, and file URLs", () => {
     expect(
-      isMainModule(moduleUrl, argvPath, "win32")
+      isMainModule(
+        "file:///D:/a/data-connect/reference-implementation/server/index.ts",
+        "d:\\a\\data-connect\\reference-implementation\\server\\index.ts",
+        "win32"
+      )
+    ).toBe(true)
+  })
+
+  it("matches a Windows 8.3 path after realpath resolution", () => {
+    const realpath = value => value.replace("RUNNER~1", "runneradmin")
+    expect(
+      isMainModule(
+        "file:///C:/Users/runneradmin/work/server/index.ts",
+        "C:\\Users\\RUNNER~1\\work\\server\\index.ts",
+        "win32",
+        realpath
+      )
+    ).toBe(true)
+  })
+
+  it("matches a Windows symlink path after realpath resolution", () => {
+    const target = "C:\\Users\\runneradmin\\work\\server\\index.ts"
+    const symlink = "C:\\Users\\runneradmin\\work\\link\\index.ts"
+    const realpath = value => (value === symlink ? target : value)
+    expect(
+      isMainModule(
+        "file:///C:/Users/runneradmin/work/server/index.ts",
+        symlink,
+        "win32",
+        realpath
+      )
+    ).toBe(true)
+  })
+
+  it("matches Windows UNC file URLs", () => {
+    expect(
+      isMainModule(
+        "file://build-share/releases/app/server/index.ts",
+        "\\\\build-share\\releases\\app\\server\\index.ts",
+        "win32",
+        value => value
+      )
+    ).toBe(true)
+  })
+
+  it("matches Windows extended-length paths", () => {
+    expect(
+      isMainModule(
+        "file:///C:/Program%20Files/DataConnect/server/index.ts",
+        "\\\\?\\C:\\Program Files\\DataConnect\\server\\index.ts",
+        "win32",
+        value => value
+      )
     ).toBe(true)
   })
 

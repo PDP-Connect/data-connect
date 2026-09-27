@@ -68,6 +68,24 @@ wait_for_setup_token() {
   return 1
 }
 
+ensure_image_available() {
+  local image="$1"
+  if docker image inspect "$image" >/dev/null 2>&1; then
+    return 0
+  fi
+  for attempt in 1 2 3; do
+    if docker pull "$image"; then
+      return 0
+    fi
+    if (( attempt < 3 )); then
+      echo "docker-core-demo-smoke: retrying image pull for $image ($attempt/3)" >&2
+      sleep "$((attempt * 2))"
+    fi
+  done
+  echo "docker-core-demo-smoke: could not pull required image: $image" >&2
+  return 1
+}
+
 require_command docker
 require_command node
 require_command openssl
@@ -78,6 +96,8 @@ if (( free_kb < 30 * 1024 * 1024 )); then
   echo "docker-core-demo-smoke: requires at least 30 GiB free; found $((free_kb / 1024 / 1024)) GiB" >&2
   exit 1
 fi
+
+ensure_image_available "${PDPP_CORE_SMOKE_NGINX_IMAGE:-nginx:1.29-alpine}"
 
 if [[ "$IMAGE_BUILD" != "1" ]]; then
   revision="$(git -C "$REPOSITORY_ROOT" rev-parse HEAD)"
@@ -137,7 +157,7 @@ docker run --detach --name "$PROXY_CONTAINER" \
   --volume "$TEMP_ROOT/tunnel.crt:/etc/nginx/tunnel.crt:ro" \
   --volume "$TEMP_ROOT/tunnel.key:/etc/nginx/tunnel.key:ro" \
   --volume "$REPOSITORY_ROOT/scripts/fixtures/docker-core-smoke-cimd.json:/srv/cimd/docker-core-smoke-cimd.json:ro" \
-  nginx:1.29-alpine >/dev/null
+  --pull=never "${PDPP_CORE_SMOKE_NGINX_IMAGE:-nginx:1.29-alpine}" >/dev/null
 
 setup_token="$(wait_for_setup_token)"
 # The helper lives in /app so ESM resolves the image's own Patchright package.

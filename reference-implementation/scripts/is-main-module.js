@@ -4,8 +4,6 @@ import { realpathSync } from "node:fs"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 
-// Keep this helper self-contained: connector acceptance installs copy this
-// script without the reference-implementation tree.
 export function isMainModule(
   moduleUrl,
   argvPath,

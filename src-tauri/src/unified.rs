@@ -3289,8 +3289,9 @@ fn tick_autostart_watcher(app: &AppHandle) -> Result<(), String> {
         &root,
         chrono::Utc::now(),
         || {
-            manager
-                .is_enabled()
+            crate::commands::desktop_settings::missing_autostart_state_is_disabled(
+                manager.is_enabled(),
+            )
                 .map_err(|error| format!("Failed to read autostart state: {error}"))
         },
         || {
