@@ -75,6 +75,18 @@ pub(crate) const UNIFIED_DB_DIRECTORY: &str = "unified";
 const UNIFIED_DB_FILE: &str = "pdpp.sqlite";
 const CREDENTIAL_ENCRYPTION_KEY_ENV: &str = "PDPP_CREDENTIAL_ENCRYPTION_KEY";
 const DATABASE_ENCRYPTION_KEY_ENV: &str = "PDPP_DATABASE_ENCRYPTION_KEY";
+// Read by `applyRecoveryOwnerSessionReset` in
+// `reference-implementation/server/index.ts`: with the env var set to "1" and
+// the reset file present, the RI revokes every owner session and owner bearer
+// after DB initialization and before its listeners and scheduler start.
+const RECOVERY_REVOKE_OWNER_SESSIONS_ENV: &str = "PDPP_RECOVERY_REVOKE_OWNER_SESSIONS";
+const RECOVERY_OWNER_SESSION_RESET_FILE: &str = "owner-session-recovery-reset.json";
+// Read by `readCredentialRecoveryStateMarker` in
+// `reference-implementation/server/index.ts`, which accepts only
+// `{ "version": 1, "cause": "legacy_v1_kit_missing_credential_key" }` and
+// renames the file to `.applied` once the credential rows are rejected.
+const CREDENTIAL_RECOVERY_STATE_FILE: &str = "credential-recovery-state.json";
+const CREDENTIAL_KEY_LOST_CAUSE: &str = "legacy_v1_kit_missing_credential_key";
 // Read by `inspectNgrok` in `reference-implementation/server/remote-access-config.ts`
 // to tell a browser-reached self-hoster honestly that ngrok cannot activate
 // without this supervisor's config watcher and native tunnel supervision. Set
@@ -746,6 +758,7 @@ fn ri_process_spec(
     credential_encryption_key: &str,
     database_encryption_key: &str,
     remote_access: &RemoteAccessConfig,
+    revoke_existing_sessions: bool,
 ) -> ProcessSpec {
     let mut env = ri_environment(
         data_dir,
@@ -754,6 +767,7 @@ fn ri_process_spec(
         owner_credential_reveal_proof,
         credential_encryption_key,
         database_encryption_key,
+        revoke_existing_sessions,
     );
     env.extend(remote_access.fields.environment());
     add_browser_host_environment(app, &mut env);
@@ -811,6 +825,7 @@ fn ri_environment(
     owner_credential_reveal_proof: &str,
     credential_encryption_key: &str,
     database_encryption_key: &str,
+    revoke_existing_sessions: bool,
 ) -> BTreeMap<OsString, OsString> {
     let mut env = env_map(vec![
         (OsString::from("AS_PORT"), OsString::from("{port}")),
@@ -856,6 +871,12 @@ fn ri_environment(
             OsString::from("1"),
         ),
     ]);
+    if revoke_existing_sessions {
+        env.insert(
+            OsString::from(RECOVERY_REVOKE_OWNER_SESSIONS_ENV),
+            OsString::from("1"),
+        );
+    }
     if remote_access_configuration_supported() {
         env.insert(
             OsString::from(MANAGED_DESKTOP_HOST_ENV),
@@ -1031,6 +1052,7 @@ fn start_managed_stack(
     database_encryption_key: &str,
     remote_access: &RemoteAccessConfig,
     held_ngrok: Option<HeldNgrok>,
+    revoke_existing_sessions: bool,
 ) -> Result<ManagedStackStart, String> {
     let resource_dir = app
         .path()
@@ -1063,6 +1085,13 @@ fn start_managed_stack(
         .join(UNIFIED_DB_DIRECTORY);
     fs::create_dir_all(&data_dir)
         .map_err(|error| format!("Failed to create unified data directory: {error}"))?;
+    if revoke_existing_sessions {
+        crate::atomic_write::write_json_atomically(
+            &data_dir.join(RECOVERY_OWNER_SESSION_RESET_FILE),
+            &serde_json::json!({ "version": 1, "reason": "recovery" }),
+            "Failed to write recovery owner-session reset state",
+        )?;
+    }
     let owner_credential_reveal_proof = owner_credential_reveal_proof_key()?;
 
     let sink = UnifiedEventSink { app: app.clone() };
@@ -1093,6 +1122,7 @@ fn start_managed_stack(
             credential_encryption_key,
             database_encryption_key,
             remote_access,
+            revoke_existing_sessions,
         ),
         sink.clone(),
     )
@@ -2578,6 +2608,7 @@ async fn bootstrap_and_open_console(
                 &database_encryption_key_for_sidecar,
                 &remote_access_for_sidecars,
                 held_ngrok,
+                false,
             )
         })
         .await
@@ -2740,6 +2771,67 @@ async fn finish_bootstrap(
     Ok(())
 }
 
+fn credential_recovery_state_path(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_data_dir()
+        .map(|path| {
+            path.join(UNIFIED_DB_DIRECTORY)
+                .join(CREDENTIAL_RECOVERY_STATE_FILE)
+        })
+        .map_err(|error| format!("Failed to resolve DataConnect app-data directory: {error}"))
+}
+
+/// Record that a v1 kit restored the database without its credential key.
+/// Written atomically (temp file, fsync, rename) so the RI never reads a
+/// partial marker.
+fn mark_recovery_credential_state(app: &AppHandle) -> Result<(), String> {
+    write_credential_recovery_state(&credential_recovery_state_path(app)?)
+}
+
+fn write_credential_recovery_state(path: &Path) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            format!("Failed to create credential recovery state directory: {error}")
+        })?;
+    }
+    crate::atomic_write::write_json_atomically(
+        path,
+        &serde_json::json!({ "version": 1, "cause": CREDENTIAL_KEY_LOST_CAUSE }),
+        "Failed to write credential recovery state",
+    )
+}
+
+fn clear_recovery_credential_state(app: &AppHandle) -> Result<(), String> {
+    remove_credential_recovery_state(&credential_recovery_state_path(app)?)
+}
+
+fn remove_credential_recovery_state(path: &Path) -> Result<(), String> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "Failed to clear credential recovery state: {error}"
+        )),
+    }
+}
+
+fn credential_encryption_key_missing_for_sealed_credentials(error: &str) -> bool {
+    error == crate::owner_credential::CREDENTIAL_ENCRYPTION_KEY_MISSING_FOR_SEALED_CREDENTIALS
+}
+
+/// Settles the lost credential-key marker after a recovery start failed.
+/// The RI renames the marker to `.applied` only after the credential rows
+/// transition, so a marker still at `path` was never applied and is removed.
+/// This is safe: a failed import persists neither the database key nor the
+/// fresh credential key, so the next start goes through import again, and
+/// import rewrites or clears the marker. A `.applied` marker is not touched.
+fn discard_unconsumed_recovery_marker(path: &Path, created: bool) -> Result<(), String> {
+    if created {
+        remove_credential_recovery_state(path)?;
+    }
+    Ok(())
+}
+
 /// Recovery-window command: verify a candidate recovery code by actually
 /// starting the managed stack with it (Rust cannot decrypt/verify a
 /// SQLCipher file itself -- only `assertDatabaseKey` in
@@ -2765,6 +2857,8 @@ pub(crate) async fn import_database_encryption_recovery_code(
     // key opens the vault.
     let kit_credential_key = imported.credential_encryption_key;
     let mut restored_credential_key = None;
+    // Set only when this attempt wrote the v1 lost credential-key marker.
+    let mut created_v1_recovery_marker = false;
 
     let secrets_app = app.clone();
     let attach = attach_mode();
@@ -2783,7 +2877,10 @@ pub(crate) async fn import_database_encryption_recovery_code(
             secrets.password,
             secrets.remote_access,
             match secrets.credential_encryption_key {
-                Some(key) => key,
+                Some(key) => {
+                    clear_recovery_credential_state(&app)?;
+                    key
+                }
                 None => {
                     restored_credential_key = kit_credential_key.clone();
                     restored_credential_key.clone().ok_or_else(|| {
@@ -2824,13 +2921,36 @@ pub(crate) async fn import_database_encryption_recovery_code(
             })
             .await
             .map_err(|error| format!("Credential encryption key task failed: {error}"))?;
-            let credential_encryption_key = match (loaded_credential_key, &kit_credential_key) {
-                (Ok(key), _) => key,
-                (Err(_), Some(key)) => {
-                    restored_credential_key = Some(key.clone());
-                    key.clone()
+            let credential_encryption_key = match loaded_credential_key {
+                Ok(existing) => {
+                    clear_recovery_credential_state(&app)?;
+                    existing
                 }
-                (Err(error), None) => return Err(error),
+                Err(error)
+                    if credential_encryption_key_missing_for_sealed_credentials(&error)
+                        && kit_credential_key.is_none() =>
+                {
+                    // A v1 kit restores only the database key. The sealed
+                    // credentials can never be opened again, so start with a
+                    // fresh key and tell the RI to reject the old rows before
+                    // its scheduler can try them. The marker is written
+                    // before startup and the RI consumes it (renames it to
+                    // `.applied`) only after the rows transition.
+                    let fresh_key =
+                        crate::owner_credential::generate_recovered_v1_credential_encryption_key()?;
+                    mark_recovery_credential_state(&app)?;
+                    created_v1_recovery_marker = true;
+                    restored_credential_key = Some(fresh_key.clone());
+                    fresh_key
+                }
+                Err(error) => match &kit_credential_key {
+                    Some(key) => {
+                        clear_recovery_credential_state(&app)?;
+                        restored_credential_key = Some(key.clone());
+                        key.clone()
+                    }
+                    None => return Err(error),
+                },
             };
             (
                 configured_owner_password().unwrap_or(owner_password),
@@ -2863,6 +2983,10 @@ pub(crate) async fn import_database_encryption_recovery_code(
             &candidate_key_for_attempt,
             &remote_access_for_attempt,
             None,
+            // Whoever held a session before the key was lost must sign in
+            // again: the RI revokes owner sessions and bearers before it
+            // serves or schedules anything.
+            true,
         )
     })
     .await
@@ -2886,6 +3010,11 @@ pub(crate) async fn import_database_encryption_recovery_code(
     let (ri_origin, console_url) = match result {
         Ok(value) => value,
         Err(_) => {
+            // A marker the RI did not consume must not reach a later normal
+            // start, which would reject every connector credential.
+            if let Ok(path) = credential_recovery_state_path(&app) {
+                let _ = discard_unconsumed_recovery_marker(&path, created_v1_recovery_marker);
+            }
             // start_managed_stack failing partway through can leave one
             // sidecar up and the other not -- e.g. the RI itself refused to
             // open the vault (assertDatabaseKey threw). stop_stack's
@@ -2922,6 +3051,13 @@ pub(crate) async fn import_database_encryption_recovery_code(
                 "The code worked, but the key could not be saved for future launches: {error}"
             ));
         }
+    }
+    // The owner may not know the password this install holds, and the RI
+    // has just revoked their sessions: queue "Set your password" before the
+    // recovered console opens.
+    if let Err(error) = crate::owner_credential::request_owner_password_window_for_recovery(&app) {
+        teardown_managed_on_error(&app, true, StopReason::VaultKeyRejected);
+        return Err(error);
     }
 
     finish_bootstrap(
@@ -6046,6 +6182,7 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
             reveal_proof,
             credential_key,
             database_key,
+            false,
         );
 
         assert_eq!(
@@ -6061,6 +6198,125 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
         assert!(!debug.contains(reveal_proof));
         assert!(!debug.contains(credential_key));
         assert!(!debug.contains(database_key));
+    }
+
+    #[test]
+    fn only_the_recovery_startup_asks_the_ri_to_revoke_owner_sessions() {
+        let environment = |revoke| {
+            ri_environment(
+                Path::new("/tmp/unified"),
+                "owner-password-test",
+                OwnerPasswordSource::DesktopGenerated,
+                "reveal-proof-test",
+                "credential-key-test",
+                "database-key-test",
+                revoke,
+            )
+        };
+        let key = std::ffi::OsStr::new(RECOVERY_REVOKE_OWNER_SESSIONS_ENV);
+        assert_eq!(environment(true).get(key), Some(&OsString::from("1")));
+        assert_eq!(environment(false).get(key), None);
+    }
+
+    #[test]
+    fn the_credential_recovery_marker_matches_the_ri_reader() {
+        // `readCredentialRecoveryStateMarker` in
+        // reference-implementation/server/index.ts accepts only this shape.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(CREDENTIAL_RECOVERY_STATE_FILE);
+        write_credential_recovery_state(&path).expect("write marker");
+        let written: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).expect("read marker"))
+                .expect("marker is JSON");
+        assert_eq!(
+            written,
+            serde_json::json!({ "version": 1, "cause": "legacy_v1_kit_missing_credential_key" })
+        );
+    }
+
+    struct DiscardingSink;
+
+    impl EventSink for DiscardingSink {
+        fn emit(&self, _event: ProcessLifecycleEvent) {}
+    }
+
+    /// Runs `source` as a fake RI through the real supervisor, the way
+    /// `start_managed_stack` starts the RI, and returns the start error.
+    fn start_fake_ri(data_dir: &Path, source: &str) -> String {
+        let script = data_dir.join("fake-ri.js");
+        fs::write(&script, source).expect("write fake RI");
+        let node = std::env::split_paths(&std::env::var_os("PATH").expect("test PATH"))
+            .map(|directory| directory.join(if cfg!(windows) { "node.exe" } else { "node" }))
+            .find(|candidate| candidate.is_file())
+            .expect("node executable in test PATH");
+        let mut env = BTreeMap::new();
+        env.insert(OsString::from("PORT"), OsString::from("{port}"));
+        env.insert(OsString::from("PDPP_DATA_DIR"), data_dir.as_os_str().to_os_string());
+        let spec = ProcessSpec {
+            label: "reference-implementation".to_string(),
+            program: node,
+            args: vec![script.into_os_string()],
+            cwd: None,
+            env: EnvironmentSpec::cleared(env),
+            readiness: Readiness::StdoutMarker {
+                marker: "READY".to_string(),
+                deadline: Duration::from_secs(5),
+            },
+            restart: RestartPolicy::Bounded {
+                max: 2,
+                backoff: Duration::from_millis(20),
+            },
+            process_group: true,
+            stop: StopPolicy {
+                grace: Duration::from_millis(300),
+                escalate: Duration::from_secs(1),
+                total: Duration::from_secs(2),
+            },
+            requested_port: None,
+        };
+        match Supervisor::new(spec, DiscardingSink).start() {
+            Ok(handle) => {
+                let _ = handle.stop();
+                panic!("the fake RI must fail to start");
+            }
+            Err(error) => error.to_string(),
+        }
+    }
+
+    #[test]
+    fn a_rejected_recovery_key_leaves_no_credential_marker() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(CREDENTIAL_RECOVERY_STATE_FILE);
+        write_credential_recovery_state(&path).expect("write marker");
+
+        // Exits the way `assertDatabaseKey` does when SQLCipher refuses the
+        // key: before the RI reads the marker.
+        let error = start_fake_ri(
+            dir.path(),
+            "throw new Error('Could not open the encrypted SQLite vault at ' + process.env.PDPP_DATA_DIR + '/pdpp.sqlite. The key is wrong.');",
+        );
+        discard_unconsumed_recovery_marker(&path, true).expect("settle marker");
+
+        assert!(!path.exists(), "stale marker after refused start: {error}");
+    }
+
+    #[test]
+    fn a_startup_failure_after_the_marker_was_applied_keeps_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(CREDENTIAL_RECOVERY_STATE_FILE);
+        let applied = dir.path().join(format!("{CREDENTIAL_RECOVERY_STATE_FILE}.applied"));
+        write_credential_recovery_state(&path).expect("write marker");
+
+        // The RI opened the vault, transitioned the rows and consumed the
+        // marker, then failed before readiness.
+        let error = start_fake_ri(
+            dir.path(),
+            "const fs = require('fs'); const p = process.env.PDPP_DATA_DIR + '/credential-recovery-state.json'; if (fs.existsSync(p)) fs.renameSync(p, p + '.applied'); process.exit(1);",
+        );
+        discard_unconsumed_recovery_marker(&path, true).expect("settle marker");
+
+        assert!(applied.exists(), "applied marker removed: {error}");
+        assert!(!path.exists());
     }
 
     #[test]
