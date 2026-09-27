@@ -266,6 +266,10 @@ pub(crate) fn generate_recovered_v1_credential_encryption_key() -> Result<String
     Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
 
+/// Error returned by `load_or_create_credential_encryption_key` when the key
+/// is gone but sealed connector credentials still need it.
+pub(crate) const CREDENTIAL_ENCRYPTION_KEY_MISSING_FOR_SEALED_CREDENTIALS: &str = "Credential encryption key is missing while sealed connector credentials exist. Restore the key from the OS keychain or the credential-encryption-key app-data file; refusing to mint a replacement that would orphan those credentials.";
+
 /// Load the durable instance credential key, or create it only when no sealed
 /// connector credential would be orphaned by doing so.
 pub(crate) fn load_or_create_credential_encryption_key(
@@ -278,7 +282,7 @@ pub(crate) fn load_or_create_credential_encryption_key(
         &mut store,
         "Credential encryption key",
         || database_contains_sealed_credentials(database_path),
-        Some("Credential encryption key is missing while sealed connector credentials exist. Restore the key from the OS keychain or the credential-encryption-key app-data file; refusing to mint a replacement that would orphan those credentials."),
+        Some(CREDENTIAL_ENCRYPTION_KEY_MISSING_FOR_SEALED_CREDENTIALS),
     )
 }
 

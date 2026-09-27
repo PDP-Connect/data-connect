@@ -12,6 +12,7 @@ const ACTIONS_FILE = `${HERE}remote-access-actions.ts`
 const WINDOW_FILE = `${HERE}../../../../../../public/owner-password.html`
 const OWNER_CREDENTIAL_RUST_FILE = `${HERE}../../../../../../src-tauri/src/owner_credential.rs`
 const UNIFIED_RUST_FILE = `${HERE}../../../../../../src-tauri/src/unified.rs`
+const RECOVERY_CODE_RUST_FILE = `${HERE}../../../../../../src-tauri/src/recovery_code.rs`
 
 test("remote access opens the native owner-password window and retries the pending save", async () => {
   const setting = await readFile(SETTING_FILE, "utf8")
@@ -127,10 +128,15 @@ test("desktop recovery imports v2 kits before startup and treats v1 kits as lost
     rust.indexOf("pub(crate) async fn import_database_encryption_recovery_code")
   )
 
-  assert.match(rust, /decode_recovery_kit_for_import/)
-  assert.match(rust, /crate::recovery_code::decode_v2\(code\)/)
-  assert.match(rust, /crate::recovery_code::decode\(code\)/)
-  assert.match(rust, /LegacyV1KitMissingCredentialKey/)
+  const recoveryCode = await readFile(RECOVERY_CODE_RUST_FILE, "utf8")
+  const decodeForImport = recoveryCode.slice(
+    recoveryCode.indexOf("pub(crate) fn decode_for_import"),
+    recoveryCode.indexOf("pub(crate) fn encode_v2")
+  )
+  assert.match(command, /crate::recovery_code::decode_for_import\(&code\)/)
+  assert.match(decodeForImport, /match decode_v2\(code\)/)
+  assert.match(decodeForImport, /database_encryption_key: decode\(code\)\?/)
+  assert.match(rust, /CREDENTIAL_KEY_LOST_CAUSE: &str = "legacy_v1_kit_missing_credential_key"/)
   assert.doesNotMatch(rust, /RecoveredFromV2Kit/)
   assert.match(command, /clear_recovery_credential_state\(&app\)\?/)
   assert.match(command, /if created_v1_recovery_marker/)
@@ -143,22 +149,27 @@ test("desktop recovery imports v2 kits before startup and treats v1 kits as lost
   assert.match(loadedSecretsArm, /clear_recovery_credential_state\(&app\)\?/)
   const existingKeyArm = command.slice(
     command.indexOf("Ok(existing) =>"),
-    command.indexOf("Err(error) if credential_encryption_key_missing_for_sealed_credentials")
+    command.indexOf("if credential_encryption_key_missing_for_sealed_credentials(&error)")
   )
   assert.match(existingKeyArm, /clear_recovery_credential_state\(&app\)\?/)
   assert.match(command, /let _ = clear_recovery_credential_state\(&app\)/)
   assert.match(command, /save_credential_encryption_key\(&app, credential_key\)/)
-  assert.match(command, /request_owner_password_window_for_recovery\(&app\)\?/)
+  assert.match(command, /request_owner_password_window_for_recovery\(&app\)/)
   assert.match(rust, /revoke_existing_sessions: bool/)
-  assert.match(rust, /PDPP_RECOVERY_REVOKE_OWNER_SESSIONS/)
+  assert.match(rust, /RECOVERY_REVOKE_OWNER_SESSIONS_ENV: &str = "PDPP_RECOVERY_REVOKE_OWNER_SESSIONS"/)
+  assert.match(rust, /RECOVERY_OWNER_SESSION_RESET_FILE: &str = "owner-session-recovery-reset\.json"/)
   assert.match(await readFile(OWNER_CREDENTIAL_RUST_FILE, "utf8"), /owner-password-recovery-window-request\.json/)
+  assert.ok(
+    command.indexOf("decode_for_import(&code)") < command.indexOf("mark_recovery_credential_state("),
+    "an invalid kit must fail at decode, before any lost credential-key marker is written"
+  )
   assert.ok(
     command.indexOf("mark_recovery_credential_state(") <
       command.indexOf("start_managed_stack("),
     "legacy v1 recovery must record lost credential-key state before the managed stack can decrypt pending credentials or schedule connectors"
   )
   assert.ok(
-    command.indexOf("request_owner_password_window_for_recovery(&app)?") <
+    command.indexOf("request_owner_password_window_for_recovery(&app)") <
       command.indexOf("finish_bootstrap("),
     "recovery must queue Set your password before opening the recovered console"
   )
@@ -193,7 +204,7 @@ test("recovery startup revokes existing owner sessions before scheduler startup 
   )
   const finish = rust.slice(
     rust.indexOf("async fn finish_bootstrap"),
-    rust.indexOf("async fn revoke_other_owner_sessions_after_recovery")
+    rust.indexOf("fn credential_recovery_state_path")
   )
 
   assert.match(recoveryStart, /start_managed_stack\([\s\S]*None,[\s\S]*true,/)
