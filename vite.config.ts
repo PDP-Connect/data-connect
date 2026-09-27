@@ -55,7 +55,6 @@ export default defineConfig(({ mode }) => ({
       "scripts/ensure-pdpp-runtime.test.mjs",
       "scripts/release-github.test.mjs",
       "scripts/release-workflow.test.ts",
-      "scripts/reference-implementation-workflow-classification.test.ts",
       "scripts/mutation-falsification/*.test.ts",
       "scripts/check-dockerfile-copy-paths.test.ts",
       "scripts/check-flyio-deploy-env.test.ts",
