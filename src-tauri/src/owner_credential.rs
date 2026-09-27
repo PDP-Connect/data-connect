@@ -348,7 +348,8 @@ fn load_or_create_credential_encryption_key_with_store(
                 && message == CREDENTIAL_ENCRYPTION_KEY_MISSING_FOR_SEALED_CREDENTIALS =>
         {
             Err(format!(
-                "Could not read the credential encryption key from the OS keychain ({keychain_error}). Sealed connector credentials exist, so nothing was changed. Unlock the keychain and try again."
+                "Could not read the credential encryption key from the OS keychain ({keychain_error}). Sealed connector credentials exist, so nothing was changed. Unlock the keychain and try again. Only if this computer no longer has an OS keychain, delete {marker} and try again.",
+                marker = credential_key_in_keychain_marker(path).display()
             ))
         }
         (result, _) => result,
@@ -1422,7 +1423,8 @@ fn save_credential_encryption_key_with_store(
             Ok(())
         }
         Err(error) if credential_key_in_keychain_marker(path).exists() => Err(format!(
-            "Could not save the credential encryption key to the OS keychain ({error}). Unlock the keychain and try again."
+            "Could not save the credential encryption key to the OS keychain ({error}). Unlock the keychain and try again. Only if this computer no longer has an OS keychain, delete {marker} and try again.",
+            marker = credential_key_in_keychain_marker(path).display()
         )),
         Err(_) => write_owner_credential_file(path, credential),
     }
@@ -2126,6 +2128,48 @@ mod tests {
 
         assert!(!key_path.exists());
         assert_eq!(store.value, None);
+    }
+
+    #[test]
+    fn keychain_install_read_error_names_the_marker_and_the_only_exit() {
+        let directory = tempdir().expect("temp directory");
+        let key_path = directory.path().join("credential-encryption-key");
+        let database_path = directory.path().join("pdpp.sqlite");
+        fs::write(&database_path, [0u8; 16]).expect("encrypted database marker");
+        let marker = credential_key_in_keychain_marker(&key_path);
+        fs::write(&marker, b"").expect("keychain marker");
+        let mut store = MockKeyring::default();
+
+        let error = load_or_create_credential_encryption_key_with_store(
+            &key_path,
+            &database_path,
+            &mut store,
+        )
+        .expect_err("a keychain error must surface");
+
+        assert!(error.contains("Unlock the keychain and try again."));
+        assert!(error.contains(&format!(
+            "Only if this computer no longer has an OS keychain, delete {} and try again.",
+            marker.display()
+        )));
+    }
+
+    #[test]
+    fn keychain_install_save_error_names_the_marker_and_the_only_exit() {
+        let directory = tempdir().expect("temp directory");
+        let key_path = directory.path().join("credential-encryption-key");
+        let marker = credential_key_in_keychain_marker(&key_path);
+        fs::write(&marker, b"").expect("keychain marker");
+        let mut store = MockKeyring::default();
+
+        let error = save_credential_encryption_key_with_store(&key_path, &mut store, "fresh-key")
+            .expect_err("a keychain error must surface");
+
+        assert!(error.contains("Unlock the keychain and try again."));
+        assert!(error.contains(&format!(
+            "Only if this computer no longer has an OS keychain, delete {} and try again.",
+            marker.display()
+        )));
     }
 
     // File mode: the keychain always errors and the app-data file is the
