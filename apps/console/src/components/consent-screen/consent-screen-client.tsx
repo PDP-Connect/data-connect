@@ -47,7 +47,7 @@ import {
   IcTooltipContent,
   IcTooltipTrigger,
 } from "@pdpp/brand-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { PdppLogo } from "@/components/pdpp-logo.tsx";
 import { ThemeToggle } from "@/components/theme/theme-toggle.tsx";
 import styles from "./consent-screen.module.css";
@@ -513,6 +513,11 @@ export function ConsentScreen({
   });
   const [submitState, setSubmitState] = useState<ConsentSubmitState>("idle");
   const [submitError, setSubmitError] = useState<string | null>(null);
+  // Effects run only after hydration, so this marks the moment the inputs
+  // below have live React handlers. A toggle before that point changes only
+  // the DOM `checked` flag, and hydration keeps it without an onChange.
+  const [hydrated, setHydrated] = useState(false);
+  useEffect(() => setHydrated(true), []);
 
   const counts = useMemo(() => computeCounts(model.sources, selection), [model.sources, selection]);
 
@@ -691,7 +696,7 @@ export function ConsentScreen({
   const busy = submitState === "submitting";
 
   return (
-    <div className={styles.page}>
+    <div className={styles.page} data-hydrated={hydrated ? "true" : "false"}>
       <ConsentHeader client={model.client} />
       <div className={styles.grid}>
         <div className={styles.body}>

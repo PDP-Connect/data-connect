@@ -89,6 +89,14 @@ test("the screen renders Spotify's declared playlist label and scope details", a
   assert.ok(view.getByText(playlists.display.detail));
 });
 
+test("the screen marks itself hydrated only once effects run", async () => {
+  const { renderToString } = await import("react-dom/server");
+  const props = { acceptAction: async () => "", model, rejectAction: async () => "" };
+  assert.match(renderToString(createElement(ConsentScreen, props)), /data-hydrated="false"/);
+  const view = render(createElement(ConsentScreen, props));
+  assert.equal(view.container.querySelector("[data-hydrated]")?.getAttribute("data-hydrated"), "true");
+});
+
 test("field titles label the controls while descriptions appear once and raw names remain available", async () => {
   const titledModel = structuredClone(model);
   titledModel.sources[0].streams[0].fields = [
