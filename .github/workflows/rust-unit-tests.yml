@@ -107,3 +107,31 @@ jobs:
             CARGO_BUILD_JOBS=4 \
             TAURI_CONFIG='{"bundle":{"resources":null,"externalBin":[]}}' \
             cargo test --lib
+
+      - name: Prove the real-RI recovery test ran
+        # A skipped test passes silently under cargo test. Re-run this one
+        # test uncaptured (already compiled above) and require its marker.
+        working-directory: src-tauri
+        run: |
+          set -euo pipefail
+          test_home="$RUNNER_TEMP/dataconnect-rust-test-home"
+          test_tmp="$RUNNER_TEMP/dataconnect-rust-test-tmp"
+          CARGO_HOME="$HOME/.cargo" \
+            RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" \
+            HOME="$test_home" \
+            XDG_CONFIG_HOME="$test_home/.config" \
+            XDG_DATA_HOME="$test_home/.local/share" \
+            XDG_CACHE_HOME="$test_home/.cache" \
+            TMPDIR="$test_tmp" TMP="$test_tmp" TEMP="$test_tmp" \
+            CARGO_BUILD_JOBS=4 \
+            TAURI_CONFIG='{"bundle":{"resources":null,"externalBin":[]}}' \
+            cargo test --lib -- --exact \
+            unified::tests::a_desktop_recovery_start_revokes_owner_sessions_and_bearers_in_the_real_ri \
+            --nocapture 2>&1 | tee "$RUNNER_TEMP/real-ri-test.log" || {
+            echo "::error::real-RI recovery test did not print its RAN marker (skipped, renamed, or filtered out)"
+            exit 1
+          }
+          grep -q '^REAL-RI RECOVERY TEST RAN$' "$RUNNER_TEMP/real-ri-test.log" || {
+            echo "::error::real-RI recovery test did not print its RAN marker (skipped, renamed, or filtered out)"
+            exit 1
+          }

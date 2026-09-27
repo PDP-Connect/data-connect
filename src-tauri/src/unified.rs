@@ -6452,13 +6452,12 @@ setInterval(() => {}, 1000);
         assert_eq!(normal["reset"], serde_json::Value::Null, "{normal}");
     }
 
-    /// The reference implementation's source directory, or `None` when its
-    /// Node dependencies (tsx and the SQLCipher binding) cannot load here.
-    /// The Rust CI job runs `npm ci --ignore-scripts`, which skips the native
-    /// SQLCipher build, so there this test prints why and returns.
-    fn runnable_reference_implementation() -> Option<PathBuf> {
+    /// The reference implementation's source directory, or why its Node
+    /// dependencies (tsx and the SQLCipher binding) cannot load here.
+    fn runnable_reference_implementation() -> Result<PathBuf, String> {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()?
+            .parent()
+            .ok_or("src-tauri has no parent directory")?
             .join("reference-implementation");
         let probe = std::process::Command::new(node_on_test_path())
             .args([
@@ -6469,16 +6468,43 @@ setInterval(() => {}, 1000);
             ])
             .current_dir(&root)
             .output()
-            .ok()?;
-        probe.status.success().then_some(root)
+            .map_err(|error| format!("cannot run node: {error}"))?;
+        if probe.status.success() {
+            Ok(root)
+        } else {
+            let stderr = String::from_utf8_lossy(&probe.stderr);
+            // Node's stderr also echoes minified tsx source; keep the error.
+            let error = stderr.lines().find(|line| line.starts_with("Error"));
+            Err(error.unwrap_or(stderr.trim()).to_owned())
+        }
+    }
+
+    /// Resolves the real RI for a test, or explains why it cannot. Under CI
+    /// (`CI=true`) a missing prerequisite fails the test: a skipped test's
+    /// stderr is captured, so a skip would look like a pass. Locally it
+    /// prints the same message and returns `None` so the test can skip.
+    fn reference_implementation_or_skip() -> Option<PathBuf> {
+        let reason = match runnable_reference_implementation() {
+            Ok(root) => return Some(root),
+            Err(reason) => reason,
+        };
+        let message = format!(
+            "real-RI prerequisite missing: tsx or the SQLCipher binding \
+             (better-sqlite3-multiple-ciphers) cannot load in reference-implementation/. \
+             Provide them with the \"Install connector tooling\" (`npm ci --ignore-scripts`) \
+             and \"Build workspace packages\" steps of \
+             .github/workflows/rust-unit-tests.yml.\nnode said: {reason}"
+        );
+        if std::env::var("CI").as_deref() == Ok("true") {
+            panic!("{message}");
+        }
+        eprintln!("SKIPPED: {message}");
+        None
     }
 
     #[test]
     fn a_desktop_recovery_start_revokes_owner_sessions_and_bearers_in_the_real_ri() {
-        let Some(ri_root) = runnable_reference_implementation() else {
-            eprintln!(
-                "SKIPPED: reference-implementation Node dependencies cannot load; run `npm ci` to cover the real RI"
-            );
+        let Some(ri_root) = reference_implementation_or_skip() else {
             return;
         };
         let driver = ri_root.join("test/fixtures/desktop-recovery-ri-driver.ts");
@@ -6554,6 +6580,8 @@ setInterval(() => {}, 1000);
             .join(format!("{CREDENTIAL_RECOVERY_STATE_FILE}.applied"))
             .exists());
         assert!(!data_dir.join(CREDENTIAL_RECOVERY_STATE_FILE).exists());
+        // CI greps for this line to prove the test ran rather than skipped.
+        println!("REAL-RI RECOVERY TEST RAN");
     }
 
     #[test]
