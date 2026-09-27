@@ -27,9 +27,8 @@ const LEGACY_RUN_TIMELINE = /`pdpp run timeline|>pdpp run timeline/;
 const LEGACY_GRANT_TIMELINE = /`pdpp grant timeline|>pdpp grant timeline/;
 const LEGACY_TRACE_SHOW = /`pdpp trace show|>pdpp trace show/;
 
-// Files in my ownership scope that surface CLI copy. apps/site lives outside
-// this repo (it's a data-connect-console-app-era artifact that was never
-// brought over here alongside apps/console — see the report for this group).
+// Files in my ownership scope that surface CLI copy. The public site
+// (apps/site) lives outside this repository, so it is not scanned here.
 const SURFACED_FILES = [
   "apps/console/src/app/(console)/syncs/page.tsx",
   "apps/console/src/app/(console)/syncs/[runId]/page.tsx",
@@ -39,9 +38,13 @@ const SURFACED_FILES = [
   "apps/console/src/app/(console)/audit/[traceId]/page.tsx",
   "reference-implementation/vendor/operator-ui/src/components/peek.tsx",
   "reference-implementation/vendor/operator-ui/src/components/views/timeline-detail-view.tsx",
+  "reference-implementation/README.md",
 ];
 
 // Canonical patterns that must appear in the reference doc.
+const CANONICAL_REF_RUN = /pdpp ref run timeline/;
+const CANONICAL_REF_GRANT = /pdpp ref grant timeline/;
+const CANONICAL_REF_TRACE = /pdpp ref trace show/;
 const PDPP_REF_NAMESPACE = /pdpp ref/;
 const PDPP_CONNECT_COMMAND = /pdpp connect/;
 
@@ -72,6 +75,13 @@ test("no surfaced file advertises legacy bare pdpp run/grant/trace aliases", asy
       `${relPath}: found legacy 'pdpp trace show' - use 'pdpp ref trace show'`
     );
   }
+});
+
+test("reference-implementation README advertises canonical pdpp ref commands", async () => {
+  const src = await read("reference-implementation/README.md");
+  assert.match(src, CANONICAL_REF_RUN);
+  assert.match(src, CANONICAL_REF_GRANT);
+  assert.match(src, CANONICAL_REF_TRACE);
 });
 
 test("cli README advertises pdpp ref namespace", async () => {
