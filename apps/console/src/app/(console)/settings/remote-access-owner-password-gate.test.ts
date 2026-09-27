@@ -139,8 +139,7 @@ test("desktop recovery imports v2 kits before startup and treats v1 kits as lost
   assert.match(rust, /CREDENTIAL_KEY_LOST_CAUSE: &str = "legacy_v1_kit_missing_credential_key"/)
   assert.doesNotMatch(rust, /RecoveredFromV2Kit/)
   assert.match(command, /clear_recovery_credential_state\(&app\)\?/)
-  assert.match(command, /if created_v1_recovery_marker/)
-  assert.match(command, /recovery_attempt_failed_before_server_credential_transition/)
+  assert.match(command, /discard_unconsumed_recovery_marker\(&path, created_v1_recovery_marker\)/)
   assert.match(command, /credential_encryption_key_missing_for_sealed_credentials/)
   const loadedSecretsArm = command.slice(
     command.indexOf("Ok(secrets) =>"),
@@ -152,7 +151,6 @@ test("desktop recovery imports v2 kits before startup and treats v1 kits as lost
     command.indexOf("if credential_encryption_key_missing_for_sealed_credentials(&error)")
   )
   assert.match(existingKeyArm, /clear_recovery_credential_state\(&app\)\?/)
-  assert.match(command, /let _ = clear_recovery_credential_state\(&app\)/)
   assert.match(command, /save_credential_encryption_key\(&app, credential_key\)/)
   assert.match(command, /request_owner_password_window_for_recovery\(&app\)/)
   assert.match(rust, /revoke_existing_sessions: bool/)
@@ -175,24 +173,24 @@ test("desktop recovery imports v2 kits before startup and treats v1 kits as lost
   )
 })
 
-test("v1 recovery keeps the lost credential-key marker when server transition startup fails", async () => {
+test("v1 recovery discards only a marker the RI did not consume", async () => {
+  // Behavior is proven by the Rust tests that start a fake RI through the
+  // supervisor; this pins the wiring.
   const rust = await readFile(UNIFIED_RUST_FILE, "utf8")
   const helper = rust.slice(
-    rust.indexOf("fn recovery_attempt_failed_before_server_credential_transition"),
+    rust.indexOf("fn discard_unconsumed_recovery_marker"),
     rust.indexOf("/// Recovery-window command")
   )
   const command = rust.slice(
-    rust.indexOf("Err(error) => {", rust.indexOf("let (ri_origin, console_url) = match result")),
+    rust.indexOf("Err(_) => {", rust.indexOf("let (ri_origin, console_url) = match result")),
     rust.indexOf("teardown_managed_on_error(&app, true, StopReason::VaultKeyRejected)", rust.indexOf("let (ri_origin, console_url) = match result"))
   )
 
-  assert.match(helper, /Could not open the encrypted SQLite vault/)
-  assert.match(helper, /The SQLite vault at /)
-  assert.ok(
-    command.indexOf("recovery_attempt_failed_before_server_credential_transition(&error)") <
-      command.indexOf("let _ = clear_recovery_credential_state(&app)"),
-    "v1 recovery must only clear its marker for a proven database-key failure before server credential transition"
-  )
+  assert.match(helper, /remove_credential_recovery_state\(path\)/)
+  assert.doesNotMatch(helper, /\.applied"/)
+  assert.match(command, /discard_unconsumed_recovery_marker\(&path, created_v1_recovery_marker\)/)
+  assert.match(rust, /fn a_rejected_recovery_key_leaves_no_credential_marker/)
+  assert.match(rust, /fn a_startup_failure_after_the_marker_was_applied_keeps_it/)
 })
 
 test("recovery startup revokes existing owner sessions before scheduler startup and console exposure", async () => {

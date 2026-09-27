@@ -2819,13 +2819,17 @@ fn credential_encryption_key_missing_for_sealed_credentials(error: &str) -> bool
     error == crate::owner_credential::CREDENTIAL_ENCRYPTION_KEY_MISSING_FOR_SEALED_CREDENTIALS
 }
 
-/// True when the RI refused the candidate database key. `assertDatabaseKey`
-/// (`reference-implementation/server/sqlite-encryption.ts`) throws these
-/// messages before the RI reads the credential recovery marker, and the
-/// supervisor copies the RI's stderr tail into the start error.
-fn recovery_attempt_failed_before_server_credential_transition(error: &str) -> bool {
-    error.contains("Could not open the encrypted SQLite vault")
-        || error.contains("The SQLite vault at ")
+/// Settles the lost credential-key marker after a recovery start failed.
+/// The RI renames the marker to `.applied` only after the credential rows
+/// transition, so a marker still at `path` was never applied and is removed.
+/// This is safe: a failed import persists neither the database key nor the
+/// fresh credential key, so the next start goes through import again, and
+/// import rewrites or clears the marker. A `.applied` marker is not touched.
+fn discard_unconsumed_recovery_marker(path: &Path, created: bool) -> Result<(), String> {
+    if created {
+        remove_credential_recovery_state(path)?;
+    }
+    Ok(())
 }
 
 /// Recovery-window command: verify a candidate recovery code by actually
@@ -3005,15 +3009,11 @@ pub(crate) async fn import_database_encryption_recovery_code(
 
     let (ri_origin, console_url) = match result {
         Ok(value) => value,
-        Err(error) => {
-            // Clear the marker only when the RI provably refused the
-            // database key, which happens before it reads the marker. Any
-            // other failure may have happened after the credential rows
-            // transitioned, so the marker stays for the next startup.
-            if created_v1_recovery_marker
-                && recovery_attempt_failed_before_server_credential_transition(&error)
-            {
-                let _ = clear_recovery_credential_state(&app);
+        Err(_) => {
+            // A marker the RI did not consume must not reach a later normal
+            // start, which would reject every connector credential.
+            if let Ok(path) = credential_recovery_state_path(&app) {
+                let _ = discard_unconsumed_recovery_marker(&path, created_v1_recovery_marker);
             }
             // start_managed_stack failing partway through can leave one
             // sidecar up and the other not -- e.g. the RI itself refused to
@@ -6234,36 +6234,89 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
         );
     }
 
+    struct DiscardingSink;
+
+    impl EventSink for DiscardingSink {
+        fn emit(&self, _event: ProcessLifecycleEvent) {}
+    }
+
+    /// Runs `source` as a fake RI through the real supervisor, the way
+    /// `start_managed_stack` starts the RI, and returns the start error.
+    fn start_fake_ri(data_dir: &Path, source: &str) -> String {
+        let script = data_dir.join("fake-ri.js");
+        fs::write(&script, source).expect("write fake RI");
+        let node = std::env::split_paths(&std::env::var_os("PATH").expect("test PATH"))
+            .map(|directory| directory.join(if cfg!(windows) { "node.exe" } else { "node" }))
+            .find(|candidate| candidate.is_file())
+            .expect("node executable in test PATH");
+        let mut env = BTreeMap::new();
+        env.insert(OsString::from("PORT"), OsString::from("{port}"));
+        env.insert(OsString::from("PDPP_DATA_DIR"), data_dir.as_os_str().to_os_string());
+        let spec = ProcessSpec {
+            label: "reference-implementation".to_string(),
+            program: node,
+            args: vec![script.into_os_string()],
+            cwd: None,
+            env: EnvironmentSpec::cleared(env),
+            readiness: Readiness::StdoutMarker {
+                marker: "READY".to_string(),
+                deadline: Duration::from_secs(5),
+            },
+            restart: RestartPolicy::Bounded {
+                max: 2,
+                backoff: Duration::from_millis(20),
+            },
+            process_group: true,
+            stop: StopPolicy {
+                grace: Duration::from_millis(300),
+                escalate: Duration::from_secs(1),
+                total: Duration::from_secs(2),
+            },
+            requested_port: None,
+        };
+        match Supervisor::new(spec, DiscardingSink).start() {
+            Ok(handle) => {
+                let _ = handle.stop();
+                panic!("the fake RI must fail to start");
+            }
+            Err(error) => error.to_string(),
+        }
+    }
+
     #[test]
     fn a_rejected_recovery_key_leaves_no_credential_marker() {
-        // The shape `process_supervisor` reports when the RI exits before
-        // readiness, with `assertDatabaseKey`'s message in the stderr tail.
-        let error = "Failed to start staged RI: [reference-implementation] exited before readiness: exit_code=Some(1); stdout tail:\n\nstderr tail:\nError: Could not open the encrypted SQLite vault at /data/pdpp.sqlite";
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join(CREDENTIAL_RECOVERY_STATE_FILE);
         write_credential_recovery_state(&path).expect("write marker");
 
-        assert!(recovery_attempt_failed_before_server_credential_transition(
-            error
-        ));
-        remove_credential_recovery_state(&path).expect("clear marker");
-        assert!(!path.exists());
-        remove_credential_recovery_state(&path).expect("clearing twice is not an error");
+        // Exits the way `assertDatabaseKey` does when SQLCipher refuses the
+        // key: before the RI reads the marker.
+        let error = start_fake_ri(
+            dir.path(),
+            "throw new Error('Could not open the encrypted SQLite vault at ' + process.env.PDPP_DATA_DIR + '/pdpp.sqlite. The key is wrong.');",
+        );
+        discard_unconsumed_recovery_marker(&path, true).expect("settle marker");
+
+        assert!(!path.exists(), "stale marker after refused start: {error}");
     }
 
     #[test]
-    fn a_startup_failure_after_the_key_opened_keeps_the_credential_marker() {
-        // The RI opened the vault, so it may already have rejected the
-        // credential rows; the marker must survive for the next start.
-        for error in [
-            "Failed to start staged RI: [reference-implementation] exited before readiness: exit_code=Some(1); stdout tail:\n\nstderr tail:\nError: Credential recovery state could not be consumed after applying the lost-key transition",
-            "Console process exited before it answered: connection refused",
-        ] {
-            assert!(
-                !recovery_attempt_failed_before_server_credential_transition(error),
-                "{error}"
-            );
-        }
+    fn a_startup_failure_after_the_marker_was_applied_keeps_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(CREDENTIAL_RECOVERY_STATE_FILE);
+        let applied = dir.path().join(format!("{CREDENTIAL_RECOVERY_STATE_FILE}.applied"));
+        write_credential_recovery_state(&path).expect("write marker");
+
+        // The RI opened the vault, transitioned the rows and consumed the
+        // marker, then failed before readiness.
+        let error = start_fake_ri(
+            dir.path(),
+            "const fs = require('fs'); const p = process.env.PDPP_DATA_DIR + '/credential-recovery-state.json'; if (fs.existsSync(p)) fs.renameSync(p, p + '.applied'); process.exit(1);",
+        );
+        discard_unconsumed_recovery_marker(&path, true).expect("settle marker");
+
+        assert!(applied.exists(), "applied marker removed: {error}");
+        assert!(!path.exists());
     }
 
     #[test]
