@@ -118,7 +118,6 @@ jobs:
             esac
 
             case "$path" in
-              .github/workflows/reference-implementation.yml|\
               .npmrc|\
               package.json|\
               package-lock.json|\
