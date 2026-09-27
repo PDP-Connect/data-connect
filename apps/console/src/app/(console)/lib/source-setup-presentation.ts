@@ -64,8 +64,8 @@ export function sourceSetupContext(entry: ConnectorCatalogEntry): string | null 
 
 /**
  * A browser-bound connector whose manifest also declares static-secret
- * capture (e.g. Amazon, ChatGPT, Reddit): the dashboard's browser-session
- * page is a real, dedicated setup path for these regardless of whether the
+ * capture: the dashboard's browser-session page is a real, dedicated setup
+ * path for these regardless of whether the
  * connector has cleared the separate manual-browser-collector proof roster
  * (`isSupportedBrowserCollectorConnector`) that `owner_actionable` is gated
  * on server-side. That roster answers "has a human proven this exact
