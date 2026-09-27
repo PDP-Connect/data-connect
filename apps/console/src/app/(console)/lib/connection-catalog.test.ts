@@ -14,7 +14,7 @@
 import assert from "node:assert/strict";
 import { readdir, readFile } from "node:fs/promises";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { resolveCommittedManifestsDirForTests } from "./connector-manifests-dir.ts";
 import {
   browserBoundRunbookEntries,
   browserCollectorEntries,
@@ -45,6 +45,7 @@ import {
   connectorLookupKey,
 } from "./connector-install-presentation.ts";
 import {
+  browserBoundWithStoredCredentials,
   isRunnableAddOffer,
   publicTierLabel,
   sourceSetupAction,
@@ -102,15 +103,12 @@ function canonicalKeyFromManifestId(connectorId: string): string {
 }
 
 async function loadCommittedManifests(): Promise<CatalogManifestLike[]> {
-  // This test file lives at apps/console/src/app/(console)/lib/; the repo root is
-  // six segments up (lib → dashboard → app → src → console → apps → root).
-  const repoRoot = new URL("../../../../../../", import.meta.url);
-  const manifestsDir = new URL("packages/polyfill-connectors/manifests/", repoRoot);
-  const files = await readdir(fileURLToPath(manifestsDir));
+  const manifestsDir = resolveCommittedManifestsDirForTests();
+  const files = await readdir(manifestsDir);
   const jsonFiles = files.filter((file) => file.endsWith(".json"));
   const parsed = await Promise.all(
     jsonFiles.map(async (file) => {
-      const raw = await readFile(fileURLToPath(new URL(file, manifestsDir)), "utf8");
+      const raw = await readFile(`${manifestsDir}/${file}`, "utf8");
       return JSON.parse(raw) as CatalogManifestLike;
     })
   );
@@ -309,7 +307,12 @@ test("only proven-creatable dispositions carry an enrollment deep-link key", asy
   }
 });
 
-test("unproven browser-bound static-secret entries fail closed", async () => {
+test("unproven browser-bound static-secret entries get an honest Preview action, not a dead end", async () => {
+  // hasDashboardSetupPath() (source-setup-presentation.ts) deliberately keeps
+  // a real setup action for browser-bound static-secret connectors regardless
+  // of live-proof status -- see its doc comment and #188, "separate
+  // setup-path availability from live-proof status": collapsing this into
+  // "not available here" would hide a working form behind a dead-end claim.
   const catalog = buildConnectorCatalog(await loadCommittedManifests());
   const heb = catalog.find((entry) => entry.connectorKey === "heb");
   if (!heb) {
@@ -321,11 +324,14 @@ test("unproven browser-bound static-secret entries fail closed", async () => {
   assert.equal(heb.enrollmentKey, undefined);
   assert.equal(heb.supportState, "proof_gated");
   assert.equal(heb.proofGate, "static_secret_live_proof_missing");
-  assert.equal(sourceSetupStatus(heb).label, "Not available here");
-  assert.equal(sourceSetupAction(heb), null);
+  assert.equal(sourceSetupStatus(heb).label, "Preview");
+  assert.deepEqual(sourceSetupAction(heb), {
+    href: "/connect/browser-session/heb",
+    label: "Connect account",
+  });
   assert.equal(sourceSetupSecondaryAction(heb), null);
-  assert.doesNotMatch(sourceSetupGuidance(heb), SECURE_BROWSER_RE);
-  assert.doesNotMatch(sourceSetupGuidance(heb), SAVE_SIGN_IN_DETAILS_RE);
+  assert.match(sourceSetupGuidance(heb), SECURE_BROWSER_RE);
+  assert.match(sourceSetupGuidance(heb), SAVE_SIGN_IN_DETAILS_RE);
   assert.equal(
     browserCollectorEntries(catalog).some((entry) => entry.connectorKey === "heb"),
     false,
@@ -333,7 +339,9 @@ test("unproven browser-bound static-secret entries fail closed", async () => {
   );
 });
 
-test("browser-bound static-secret capability is not enough to create an account", () => {
+test("browser-bound static-secret capability always resolves to the browser-session account action", () => {
+  // hasDashboardSetupPath() keeps a real setup action for browser-bound
+  // static-secret connectors regardless of live-proof status (#188).
   const catalog = buildConnectorCatalog([
     {
       capabilities: { public_listing: { tier: "supported" } },
@@ -357,9 +365,12 @@ test("browser-bound static-secret capability is not enough to create an account"
   assert.equal(entry.modality, "browser_bound");
   assert.equal(entry.setupModality, "static_secret");
   assert.equal(entry.disposition, "static_secret_connect");
-  assert.equal(sourceSetupAction(entry), null);
+  assert.deepEqual(sourceSetupAction(entry), {
+    href: "/connect/browser-session/browser-sample",
+    label: "Connect account",
+  });
   assert.equal(sourceSetupSecondaryAction(entry), null);
-  assert.equal(sourceSetupStatus(entry).label, "Not available here");
+  assert.equal(sourceSetupStatus(entry).label, "Preview");
 });
 
 test("non-browser static-secret connectors keep the existing single capture path", () => {
@@ -527,7 +538,7 @@ test("wave-0807 static-secret connectors (Steam, Jellyfin, Apple Contacts) are e
   // and never demoted to "not available here" hiding a working form.
   const manifests = await loadCommittedManifests();
   const catalog = buildConnectorCatalog(manifests);
-  for (const key of ["steam", "jellyfin", "apple_contacts"]) {
+  for (const key of ["steam", "jellyfin", "apple-contacts"]) {
     const entry = catalog.find((e) => e.connectorKey === key);
     assert.ok(entry, `${key} must be in the catalog`);
     assert.equal(entry.disposition, "static_secret_experimental", `${key}: disposition`);
@@ -561,7 +572,7 @@ test("requested-connector reachability: Steam/Jellyfin/Apple Contacts/GroupMe ne
   // full @pdpp/polyfill-connectors package, and does not carry this file.
   const staticSecretInjectionModule = "@pdpp/polyfill-connectors/static-secret-injection";
   const { STATIC_SECRET_CONNECTOR_REGISTRY } = await import(staticSecretInjectionModule);
-  for (const key of ["steam", "jellyfin", "apple_contacts", "groupme"]) {
+  for (const key of ["steam", "jellyfin", "apple-contacts"]) {
     const entry = catalog.find((e) => e.connectorKey === key);
     assert.ok(entry, `${key} must be in the catalog`);
     assert.ok(
@@ -573,13 +584,24 @@ test("requested-connector reachability: Steam/Jellyfin/Apple Contacts/GroupMe ne
     assert.ok(action, `${key}: must have a real, non-null setup action`);
     assert.ok(action.href.length > 0, `${key}: setup action must target a real route`);
   }
-  // GroupMe is the pre-existing regression control. In this synthetic
-  // (no-owner-proof-state) catalog build it lands in the same experimental
-  // bucket as steam/jellyfin/apple_contacts; the live owner catalog is what
-  // ultimately decides "proven" vs "experimental" from real proof state. The
-  // guard here is narrower: GroupMe must never regress to unreachable.
+  // GroupMe is the pre-existing regression control, but its committed manifest
+  // now carries public_listing.tier "development" (it was "preview" when this
+  // test was written; see #55, "unblock the Move-B CI seam", which re-vendored
+  // the manifest package from the canonical data-connectors source and
+  // demoted it). A development-tier entry is unconditionally
+  // sourceSetupAvailability === "not_available_here" in this console
+  // (source-setup-presentation.ts), so GroupMe no longer belongs in the
+  // reachability loop above. The guard here is narrower and still meaningful:
+  // GroupMe must still resolve to a real, non-scaffold static-secret setup
+  // shape once its tier is promoted, so a future promotion is not silently
+  // stranded by a manifest/registry drift this test would otherwise miss.
+  assert.ok(
+    Object.hasOwn(STATIC_SECRET_CONNECTOR_REGISTRY, "groupme"),
+    "groupme must be present in STATIC_SECRET_CONNECTOR_REGISTRY for credential injection to work"
+  );
   const groupme = catalog.find((e) => e.connectorKey === "groupme");
   assert.ok(groupme);
+  assert.equal(groupme.publicTier, "development", "groupme: update this test if its manifest tier changes");
   assert.ok(
     groupme.disposition === "static_secret_connect" || groupme.disposition === "static_secret_experimental",
     `groupme: expected an actionable static-secret disposition, got '${groupme.disposition}'`
@@ -1249,6 +1271,13 @@ test("presentation consistency: helper functions agree with ownerActionable auth
   // self-test opt-in -- even though isOwnerActionableEntry is false for the
   // whole tier. A KNOWN scaffold never gets an action regardless of
   // disposition: clicking it can never collect anything.
+  //
+  // Exception: a browser-bound static_secret_connect entry (e.g. amazon, heb)
+  // always has a real browser-session action regardless of live-proof status
+  // -- hasDashboardSetupPath() deliberately keeps that path available (#188,
+  // "separate setup-path availability from live-proof status") even when
+  // isOwnerActionableEntry is false because the live-proof roster gate hasn't
+  // cleared.
   const manifests = await loadCommittedManifests();
   const catalog = buildConnectorCatalog(manifests);
 
@@ -1257,6 +1286,17 @@ test("presentation consistency: helper functions agree with ownerActionable auth
     const hasAction = sourceSetupAction(entry) !== null;
     const isDevelopmentSelfTestable =
       entry.publicTier === "development" && !entry.isKnownScaffold && DEVELOPMENT_SELF_TEST_DISPOSITIONS.has(entry.disposition);
+    const hasBrowserBoundStoredCredentialsSetupPath =
+      entry.disposition === "static_secret_connect" && browserBoundWithStoredCredentials(entry);
+
+    if (hasBrowserBoundStoredCredentialsSetupPath) {
+      assert.equal(
+        hasAction,
+        true,
+        `${entry.connectorKey}: a browser-bound static-secret entry must always expose its browser-session action`
+      );
+      continue;
+    }
 
     if (entry.supportState === "experimental") {
       assert.equal(isActionable, false, `${entry.connectorKey}: experimental must not be owner-actionable`);

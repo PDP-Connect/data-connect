@@ -92,7 +92,7 @@ test("transient install catalog notice retries once and keeps a manual retry act
   assert.doesNotMatch(src, /function scheduleTransientCatalogRetryReset/);
   assert.match(src, /function useConnectorCatalogRecovery\(enabled: boolean, busySnapshotId: string \| null\)/);
   assert.match(src, /const \[recoveryState, setRecoveryState\] = useState<ConnectorCatalogRecoveryState>\("exhausted"\);/);
-  assert.match(src, /const retryTimerRef = useRef<ReturnType<typeof window\.setTimeout> \| null>\(null\);/);
+  assert.match(src, /const retryTimerRef = useRef<number \| null>\(null\);/);
   assert.match(src, /if \(transientCatalogRefreshInFlight \|\| !busySnapshotId\) \{\s*return;\s*\}/);
   assert.match(src, /transientCatalogRefreshInFlight = true;/);
   assert.match(src, /transientCatalogPendingSnapshotId = busySnapshotId;/);
