@@ -7,7 +7,11 @@ on:
       - "connectors/**"
       - "pdpp-runtime/**"
       - "reference-implementation/vendor/**"
-      - "reference-implementation/server/autostart-store.ts"
+      - "reference-implementation/server/**"
+      - "reference-implementation/test/fixtures/desktop-recovery-ri-driver.ts"
+      - "reference-implementation/package.json"
+      - "packages/connector-protocol/**"
+      - "packages/collector-runtime/**"
       - "scripts/rust-test-path-filter.test.mjs"
       - "scripts/ensure-pdpp-runtime.js"
       - "scripts/is-main-module.js"
@@ -50,6 +54,18 @@ jobs:
 
       - name: Install connector tooling
         run: npm ci --ignore-scripts
+
+      - name: Build workspace packages
+        # The real-RI test in src-tauri/src/unified.rs boots
+        # reference-implementation/server/index.ts, which imports these
+        # packages from dist/. --ignore-scripts leaves dist/ unbuilt. Same
+        # build as reference-implementation.yml, plus read-core, whose dist/
+        # that workflow gets from the `prepare` script this job skips.
+        run: |
+          npm --prefix reference-implementation/vendor/read-core run build
+          npm --prefix packages/connector-protocol run build
+          npm --prefix packages/collector-runtime run build
+          npm --prefix reference-implementation/vendor/mcp-server run build
 
       - name: Resolve locked connector fixtures
         run: node scripts/resolve-connectors.js --install-locked
