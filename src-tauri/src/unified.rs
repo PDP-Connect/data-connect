@@ -3033,14 +3033,9 @@ pub(crate) async fn import_database_encryption_recovery_code(
     // persist now, before finishing the rest of bootstrap (which can itself
     // still fail for unrelated reasons -- login, console readiness -- but
     // the key having worked is independent of those).
-    if let Err(error) = crate::owner_credential::save_database_encryption_key(&app, &candidate_key)
-    {
-        log::error!("Recovery import: verified key could not be persisted to the OS keychain: {error}");
-        teardown_managed_on_error(&app, true, StopReason::VaultKeyRejected);
-        return Err(format!(
-            "The code worked, but the key could not be saved for future launches: {error}"
-        ));
-    }
+    // Save the credential key first: the recovery window reopens only while
+    // the database key is missing, so a failed credential-key save after a
+    // saved database key would leave no way back to the kit.
     if let Some(credential_key) = restored_credential_key.as_deref() {
         if let Err(error) =
             crate::owner_credential::save_credential_encryption_key(&app, credential_key)
@@ -3051,6 +3046,14 @@ pub(crate) async fn import_database_encryption_recovery_code(
                 "The code worked, but the key could not be saved for future launches: {error}"
             ));
         }
+    }
+    if let Err(error) = crate::owner_credential::save_database_encryption_key(&app, &candidate_key)
+    {
+        log::error!("Recovery import: verified key could not be persisted to the OS keychain: {error}");
+        teardown_managed_on_error(&app, true, StopReason::VaultKeyRejected);
+        return Err(format!(
+            "The code worked, but the key could not be saved for future launches: {error}"
+        ));
     }
     // The owner may not know the password this install holds, and the RI
     // has just revoked their sessions: queue "Set your password" before the
