@@ -29,22 +29,21 @@ on:
   pull_request: {}
   merge_group: {}
   push:
-    branches: [main]
+    branches: [main, integration/unified-stack]
   workflow_dispatch: {}
 
 concurrency:
-  # Keyed by ref for PRs and branches, so a ref's runs supersede each other but
-  # never a sibling's. main is keyed by sha instead, which is what actually gives
-  # every merge commit its own pass/fail record: a group holds at most one pending
-  # run, so a per-ref main group would have GitHub cancel the waiting run when the
-  # next merge arrives, leaving that commit permanently unjudged -- the same blind
-  # spot as having no push trigger at all. Merge traffic is high enough for that to
-  # bite: over the 30 days to 2026-09-11 main took 48 first-parent commits (26 in
+  # Keyed by ref for PRs and other branches, so a ref's runs supersede each other
+  # but never a sibling's. main and integration/unified-stack use sha keys, which
+  # give every push its own pass/fail record: a group holds at most one pending run, so
+  # a per-ref group would cancel a waiting run when the next merge arrives. On main,
+  # merge traffic is high enough for that to bite: over the 30 days to 2026-09-11 it
+  # took 48 first-parent commits (26 in
   # the last 7), with 11 gaps under 25 minutes and 3 runs of three commits inside
-  # 22 minutes, against a suite that takes about 21. Per-sha groups each hold one
-  # run, so main's runs proceed in parallel rather than queueing; at that rate it is
-  # at most 3 concurrent.
-  group: reference-implementation-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
+  # 22 minutes, against a suite that takes about 21. Per-sha groups let each push
+  # proceed in parallel rather than queueing; at that rate main reaches at most 3
+  # concurrent runs.
+  group: reference-implementation-${{ (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/integration/unified-stack') && github.sha || github.ref }}
   cancel-in-progress: true
 
 jobs:
