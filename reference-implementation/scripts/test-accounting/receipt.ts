@@ -165,6 +165,7 @@ export const POSTGRES_UNNAMED_SKIP_TEST_NAME_ROWS: readonly string[] = [
   "Postgres stores app-managed owner password verifiers",
   "Postgres fences owner login session issuance against password rotation",
   "Postgres owner-session store supports device replacement, revocation, and bearer inventory",
+  "PostgreSQL: post-persistence failure leaves one coherent activation",
 ];
 // Every row above uses a PER-TEST boolean `skip` (e.g. `skip: !PDPP_TEST_POSTGRES_URL`)
 // inside a file that still REGISTERS the test under every profile. Under
