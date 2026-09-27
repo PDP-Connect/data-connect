@@ -32,6 +32,17 @@ async function waitForResponse(page, urlPath, method, action) {
   return response;
 }
 
+async function waitForEnabled(locator, { timeout, describe }) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeout) {
+    if (await locator.isEnabled()) {
+      return;
+    }
+    await locator.page().waitForTimeout(100);
+  }
+  throw new Error(`${describe} stayed disabled for ${timeout}ms`);
+}
+
 function pkceChallenge(verifier) {
   return createHash("sha256").update(verifier).digest("base64url");
 }
@@ -95,8 +106,21 @@ try {
     const installRow = sourceRow.getByTestId("connector-install-row");
     const install = installRow.getByRole("button", { name: "Install", exact: true });
     await install.waitFor({ state: "visible" });
-    await install.click();
-    await installRow.locator('[role="status"], [role="alert"]').first().waitFor({ state: "visible", timeout: 60_000 });
+    // installConnectorAction is a Next.js server action: it POSTs to this same
+    // page (/sources/add) and the row's status text only re-renders after that
+    // response lands. Waiting on the DOM node alone (the prior approach) races
+    // the server action's own completion; tie the wait to the response itself.
+    let installResponse;
+    try {
+      installResponse = await waitForResponse(page, "/sources/add", "POST", () => install.click());
+    } catch (err) {
+      throw new Error(
+        `${connector} install action never completed within its bound; last row text=${(await installRow.innerText()).replace(/\s+/gu, " ")}`,
+        { cause: err }
+      );
+    }
+    assert.ok(installResponse.ok(), `${connector} install action returned ${installResponse.status()}`);
+    await installRow.locator('[role="status"], [role="alert"]').first().waitFor({ state: "visible" });
     const installResultText = (await installRow.innerText()).replace(/\s+/gu, " ");
     assert.match(installResultText, /Install complete/, `${connector} install failed: ${installResultText}`);
     await installRow.getByTestId("connector-package-status").filter({ hasText: /Installed|Active/i }).waitFor({ state: "visible" });
@@ -164,7 +188,28 @@ try {
   );
   await page.getByRole("heading", { name: /wants to read your data/ }).waitFor({ state: "visible" });
   await page.getByLabel("Share data from Claude Code").check();
-  await page.getByRole("button", { name: "Allow access", exact: true }).click();
+  const allowAccess = page.getByRole("button", { name: "Allow access", exact: true });
+  // The button stays disabled until React registers the checkbox's state
+  // update (nothingChosen) and settles out of any prior submit (busy); a
+  // pre-hydration or pre-re-render click on a disabled button silently no-ops
+  // and only surfaces as Playwright's own actionability timeout on .click().
+  // Wait for the real readiness signal (enabled) instead of the checkbox's
+  // visual state.
+  await waitForEnabled(allowAccess, { timeout: 15_000, describe: "consent Allow access button" });
+  // acceptConsentChallenge is a Next.js server action posting to this same
+  // /consent page; tie the wait to that response instead of the eventual
+  // full-document redirect so a slow response gives a clear cause, not a bare
+  // waitForURL timeout.
+  let acceptResponse;
+  try {
+    acceptResponse = await waitForResponse(page, "/consent", "POST", () => allowAccess.click());
+  } catch (err) {
+    throw new Error(
+      `consent accept action never completed within its bound; page=${(await page.locator("body").innerText()).slice(0, 500)}`,
+      { cause: err }
+    );
+  }
+  assert.ok(acceptResponse.ok(), `consent accept action returned ${acceptResponse.status()}`);
   await page.waitForURL(`${redirectUri}**`, { timeout: 45_000 });
   const callback = new URL(page.url());
   assert.equal(callback.searchParams.get("state"), state, "consent callback must preserve state");
