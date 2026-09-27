@@ -280,14 +280,52 @@ pub(crate) fn load_or_create_credential_encryption_key(
     load_or_create_credential_encryption_key_with_store(path, database_path, &mut store)
 }
 
+/// Durable record that this install's credential key lives in the OS
+/// keychain. It sits next to the key file and is written whenever the
+/// keychain returns or accepts the key.
+///
+/// A keychain error means different things on different installs. On a
+/// host with no working keychain (file mode, such as headless Linux without
+/// a Secret Service), every keychain call errors and the app-data file is
+/// the real store. On a keychain install, an error is transient (locked,
+/// prompt dismissed, timeout) and the keychain may still hold the key. The
+/// error text cannot separate the two, so this marker does.
+///
+/// Failure modes:
+/// - An install upgraded from a build without the marker has none until
+///   its first start with a working keychain. An outage before that gets
+///   the file-mode behaviour, which is the behaviour before the marker.
+/// - If the marker is lost together with the key file, the install is
+///   treated as file mode and a keychain error reaches the lost-key path.
+/// - If the keychain goes away for good after the marker was written, a
+///   missing key stays a retryable error instead of the lost-key path.
+///   Deleting the marker file restores the file-mode behaviour.
+const CREDENTIAL_KEY_IN_KEYCHAIN_MARKER_FILE: &str = "credential-encryption-key.in-keychain";
+
+fn credential_key_in_keychain_marker(key_path: &Path) -> PathBuf {
+    key_path.with_file_name(CREDENTIAL_KEY_IN_KEYCHAIN_MARKER_FILE)
+}
+
+fn mark_credential_key_in_keychain(key_path: &Path) {
+    let marker = credential_key_in_keychain_marker(key_path);
+    if marker.exists() {
+        return;
+    }
+    if let Err(error) = fs::write(&marker, b"") {
+        log::warn!("Could not record that the credential key is in the OS keychain: {error}");
+    }
+}
+
 fn load_or_create_credential_encryption_key_with_store(
     path: &Path,
     database_path: &Path,
     store: &mut impl CredentialStore,
 ) -> Result<String, String> {
+    let key_in_keychain = credential_key_in_keychain_marker(path).exists();
     let mut store = LoadErrorRecorder {
         inner: store,
         load_error: None,
+        keychain_used: false,
     };
     let result = load_or_create_secret_with_store(
         path,
@@ -296,13 +334,18 @@ fn load_or_create_credential_encryption_key_with_store(
         || database_contains_sealed_credentials(database_path),
         Some(CREDENTIAL_ENCRYPTION_KEY_MISSING_FOR_SEALED_CREDENTIALS),
     );
+    if result.is_ok() && store.keychain_used {
+        mark_credential_key_in_keychain(path);
+    }
     // The caller treats the missing-key message as "the key is lost" and
-    // rejects every sealed credential. Only a keychain that answered "no
-    // entry" proves that; a keychain error (locked, unavailable, timeout)
-    // may still hold the key, so report it as retryable instead.
+    // rejects every sealed credential. On a keychain install only a
+    // keychain that answered "no entry" proves that; a keychain error may
+    // still hold the key, so report it as retryable instead. In file mode
+    // the keychain always errors and the missing file is the lost key.
     match (result, store.load_error) {
         (Err(message), Some(keychain_error))
-            if message == CREDENTIAL_ENCRYPTION_KEY_MISSING_FOR_SEALED_CREDENTIALS =>
+            if key_in_keychain
+                && message == CREDENTIAL_ENCRYPTION_KEY_MISSING_FOR_SEALED_CREDENTIALS =>
         {
             Err(format!(
                 "Could not read the credential encryption key from the OS keychain ({keychain_error}). Sealed connector credentials exist, so nothing was changed. Unlock the keychain and try again."
@@ -317,19 +360,27 @@ fn load_or_create_credential_encryption_key_with_store(
 struct LoadErrorRecorder<'a, S: CredentialStore> {
     inner: &'a mut S,
     load_error: Option<String>,
+    /// The keychain returned a key or accepted a save.
+    keychain_used: bool,
 }
 
 impl<S: CredentialStore> CredentialStore for LoadErrorRecorder<'_, S> {
     fn load(&mut self) -> Result<Option<String>, String> {
         let result = self.inner.load();
-        if let Err(error) = &result {
-            self.load_error = Some(error.clone());
+        match &result {
+            Err(error) => self.load_error = Some(error.clone()),
+            Ok(Some(value)) if !value.trim().is_empty() => self.keychain_used = true,
+            Ok(_) => {}
         }
         result
     }
 
     fn save(&mut self, credential: &str) -> Result<(), String> {
-        self.inner.save(credential)
+        let result = self.inner.save(credential);
+        if result.is_ok() {
+            self.keychain_used = true;
+        }
+        result
     }
 }
 
@@ -1358,16 +1409,23 @@ fn save_credential_encryption_key_with_store(
         return Err("Credential encryption key cannot be empty".to_string());
     }
 
-    // No app-data fallback here: load prefers the keychain, so a key written
-    // only to the file while the keychain errors would be shadowed by the
-    // keychain's old key once it returns.
-    store.save(credential).map_err(|error| {
-        format!("Could not save the credential encryption key to the OS keychain: {error}")
-    })?;
-    if path.exists() {
-        write_owner_credential_file(path, credential)?;
+    // On a keychain install, no app-data fallback: load prefers the
+    // keychain, so a key written only to the file while the keychain errors
+    // would be shadowed by the keychain's old key once it returns. In file
+    // mode the file is the store. See CREDENTIAL_KEY_IN_KEYCHAIN_MARKER_FILE.
+    match store.save(credential) {
+        Ok(()) => {
+            if path.exists() {
+                write_owner_credential_file(path, credential)?;
+            }
+            mark_credential_key_in_keychain(path);
+            Ok(())
+        }
+        Err(error) if credential_key_in_keychain_marker(path).exists() => Err(format!(
+            "Could not save the credential encryption key to the OS keychain ({error}). Unlock the keychain and try again."
+        )),
+        Err(_) => write_owner_credential_file(path, credential),
     }
-    Ok(())
 }
 
 fn load_or_create_secret_with_store(
@@ -2009,6 +2067,7 @@ mod tests {
         let key_path = directory.path().join("credential-encryption-key");
         let database_path = directory.path().join("pdpp.sqlite");
         fs::write(&database_path, [0u8; 16]).expect("encrypted database marker");
+        fs::write(credential_key_in_keychain_marker(&key_path), b"").expect("keychain marker");
         let mut store = MockKeyring::default();
 
         let error = load_or_create_credential_encryption_key_with_store(
@@ -2059,6 +2118,7 @@ mod tests {
     fn saving_credential_key_while_keychain_errors_writes_no_file() {
         let directory = tempdir().expect("temp directory");
         let key_path = directory.path().join("credential-encryption-key");
+        fs::write(credential_key_in_keychain_marker(&key_path), b"").expect("keychain marker");
         let mut store = MockKeyring::default();
 
         save_credential_encryption_key_with_store(&key_path, &mut store, "fresh-key")
@@ -2066,6 +2126,116 @@ mod tests {
 
         assert!(!key_path.exists());
         assert_eq!(store.value, None);
+    }
+
+    // File mode: the keychain always errors and the app-data file is the
+    // store. No keychain marker exists.
+
+    #[test]
+    fn file_mode_first_run_creates_the_credential_key_file() {
+        let directory = tempdir().expect("temp directory");
+        let key_path = directory.path().join("credential-encryption-key");
+        let database_path = directory.path().join("pdpp.sqlite");
+        let mut store = MockKeyring::default();
+
+        let key = load_or_create_credential_encryption_key_with_store(
+            &key_path,
+            &database_path,
+            &mut store,
+        )
+        .expect("first-run key");
+
+        assert_eq!(fs::read_to_string(&key_path).expect("key file"), key);
+        assert!(!credential_key_in_keychain_marker(&key_path).exists());
+    }
+
+    #[test]
+    fn file_mode_normal_start_reads_the_credential_key_file() {
+        let directory = tempdir().expect("temp directory");
+        let key_path = directory.path().join("credential-encryption-key");
+        let database_path = directory.path().join("pdpp.sqlite");
+        fs::write(&database_path, [0u8; 16]).expect("encrypted database marker");
+        fs::write(&key_path, "file-key").expect("key file");
+        let mut store = MockKeyring::default();
+
+        let key = load_or_create_credential_encryption_key_with_store(
+            &key_path,
+            &database_path,
+            &mut store,
+        )
+        .expect("file key");
+
+        assert_eq!(key, "file-key");
+    }
+
+    #[test]
+    fn file_mode_restore_saves_the_credential_key_to_the_file() {
+        let directory = tempdir().expect("temp directory");
+        let key_path = directory.path().join("credential-encryption-key");
+        let database_path = directory.path().join("pdpp.sqlite");
+        fs::write(&database_path, [0u8; 16]).expect("encrypted database marker");
+        let mut store = MockKeyring::default();
+
+        save_credential_encryption_key_with_store(&key_path, &mut store, "kit-key")
+            .expect("file-mode save");
+        let key = load_or_create_credential_encryption_key_with_store(
+            &key_path,
+            &database_path,
+            &mut store,
+        )
+        .expect("later start");
+
+        assert_eq!(key, "kit-key");
+    }
+
+    #[test]
+    fn file_mode_lost_key_file_with_sealed_credentials_reports_the_lost_key() {
+        let directory = tempdir().expect("temp directory");
+        let key_path = directory.path().join("credential-encryption-key");
+        let database_path = directory.path().join("pdpp.sqlite");
+        fs::write(&database_path, [0u8; 16]).expect("encrypted database marker");
+        let mut store = MockKeyring::default();
+
+        let error = load_or_create_credential_encryption_key_with_store(
+            &key_path,
+            &database_path,
+            &mut store,
+        )
+        .expect_err("a lost key must not be replaced silently");
+
+        assert_eq!(
+            error,
+            CREDENTIAL_ENCRYPTION_KEY_MISSING_FOR_SEALED_CREDENTIALS
+        );
+        assert!(!key_path.exists());
+    }
+
+    #[test]
+    fn database_key_save_falls_back_to_the_file_when_keychain_errors() {
+        let directory = tempdir().expect("temp directory");
+        let key_path = directory.path().join("database-encryption-key");
+        let mut store = MockKeyring::default();
+
+        save_database_encryption_key_with_store(&key_path, &mut store, "db-key")
+            .expect("file fallback");
+
+        assert_eq!(fs::read_to_string(&key_path).expect("key file"), "db-key");
+    }
+
+    #[test]
+    fn keychain_resident_credential_key_writes_the_marker() {
+        let directory = tempdir().expect("temp directory");
+        let key_path = directory.path().join("credential-encryption-key");
+        let database_path = directory.path().join("pdpp.sqlite");
+        let mut store = MockKeyring {
+            value: Some("keychain-key".to_string()),
+            available: true,
+        };
+
+        load_or_create_credential_encryption_key_with_store(&key_path, &database_path, &mut store)
+            .expect("keychain key");
+
+        assert!(credential_key_in_keychain_marker(&key_path).exists());
     }
 
     #[test]
