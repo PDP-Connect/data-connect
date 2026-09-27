@@ -277,13 +277,60 @@ pub(crate) fn load_or_create_credential_encryption_key(
     database_path: &Path,
 ) -> Result<String, String> {
     let mut store = SystemKeyring::new(CREDENTIAL_ENCRYPTION_KEYRING_USERNAME);
-    load_or_create_secret_with_store(
+    load_or_create_credential_encryption_key_with_store(path, database_path, &mut store)
+}
+
+fn load_or_create_credential_encryption_key_with_store(
+    path: &Path,
+    database_path: &Path,
+    store: &mut impl CredentialStore,
+) -> Result<String, String> {
+    let mut store = LoadErrorRecorder {
+        inner: store,
+        load_error: None,
+    };
+    let result = load_or_create_secret_with_store(
         path,
         &mut store,
         "Credential encryption key",
         || database_contains_sealed_credentials(database_path),
         Some(CREDENTIAL_ENCRYPTION_KEY_MISSING_FOR_SEALED_CREDENTIALS),
-    )
+    );
+    // The caller treats the missing-key message as "the key is lost" and
+    // rejects every sealed credential. Only a keychain that answered "no
+    // entry" proves that; a keychain error (locked, unavailable, timeout)
+    // may still hold the key, so report it as retryable instead.
+    match (result, store.load_error) {
+        (Err(message), Some(keychain_error))
+            if message == CREDENTIAL_ENCRYPTION_KEY_MISSING_FOR_SEALED_CREDENTIALS =>
+        {
+            Err(format!(
+                "Could not read the credential encryption key from the OS keychain ({keychain_error}). Sealed connector credentials exist, so nothing was changed. Unlock the keychain and try again."
+            ))
+        }
+        (result, _) => result,
+    }
+}
+
+/// Remembers whether the keychain load failed, as opposed to answering "no
+/// entry".
+struct LoadErrorRecorder<'a, S: CredentialStore> {
+    inner: &'a mut S,
+    load_error: Option<String>,
+}
+
+impl<S: CredentialStore> CredentialStore for LoadErrorRecorder<'_, S> {
+    fn load(&mut self) -> Result<Option<String>, String> {
+        let result = self.inner.load();
+        if let Err(error) = &result {
+            self.load_error = Some(error.clone());
+        }
+        result
+    }
+
+    fn save(&mut self, credential: &str) -> Result<(), String> {
+        self.inner.save(credential)
+    }
 }
 
 /// Replace the owner password in the OS keychain, with the protected app-data
@@ -1311,14 +1358,16 @@ fn save_credential_encryption_key_with_store(
         return Err("Credential encryption key cannot be empty".to_string());
     }
 
-    if store.save(credential).is_ok() {
-        if path.exists() {
-            write_owner_credential_file(path, credential)?;
-        }
-        return Ok(());
+    // No app-data fallback here: load prefers the keychain, so a key written
+    // only to the file while the keychain errors would be shadowed by the
+    // keychain's old key once it returns.
+    store.save(credential).map_err(|error| {
+        format!("Could not save the credential encryption key to the OS keychain: {error}")
+    })?;
+    if path.exists() {
+        write_owner_credential_file(path, credential)?;
     }
-
-    write_owner_credential_file(path, credential)
+    Ok(())
 }
 
 fn load_or_create_secret_with_store(
@@ -1952,6 +2001,71 @@ mod tests {
             fs::read_to_string(key_path).expect("database key file"),
             key
         );
+    }
+
+    #[test]
+    fn keychain_error_with_sealed_credentials_is_retryable_and_changes_nothing() {
+        let directory = tempdir().expect("temp directory");
+        let key_path = directory.path().join("credential-encryption-key");
+        let database_path = directory.path().join("pdpp.sqlite");
+        fs::write(&database_path, [0u8; 16]).expect("encrypted database marker");
+        let mut store = MockKeyring::default();
+
+        let error = load_or_create_credential_encryption_key_with_store(
+            &key_path,
+            &database_path,
+            &mut store,
+        )
+        .expect_err("a keychain error must not mint a key");
+
+        // The unified bootstrap takes the lost-key path only on this exact
+        // message; a keychain error must never produce it.
+        assert_ne!(
+            error,
+            CREDENTIAL_ENCRYPTION_KEY_MISSING_FOR_SEALED_CREDENTIALS
+        );
+        assert!(error.contains("mock keyring unavailable"));
+        assert!(!key_path.exists());
+        assert_eq!(store.value, None);
+    }
+
+    #[test]
+    fn keychain_without_entry_and_sealed_credentials_reports_the_lost_key() {
+        let directory = tempdir().expect("temp directory");
+        let key_path = directory.path().join("credential-encryption-key");
+        let database_path = directory.path().join("pdpp.sqlite");
+        fs::write(&database_path, [0u8; 16]).expect("encrypted database marker");
+        let mut store = MockKeyring {
+            value: None,
+            available: true,
+        };
+
+        let error = load_or_create_credential_encryption_key_with_store(
+            &key_path,
+            &database_path,
+            &mut store,
+        )
+        .expect_err("a lost key must not be replaced silently");
+
+        assert_eq!(
+            error,
+            CREDENTIAL_ENCRYPTION_KEY_MISSING_FOR_SEALED_CREDENTIALS
+        );
+        assert!(!key_path.exists());
+        assert_eq!(store.value, None);
+    }
+
+    #[test]
+    fn saving_credential_key_while_keychain_errors_writes_no_file() {
+        let directory = tempdir().expect("temp directory");
+        let key_path = directory.path().join("credential-encryption-key");
+        let mut store = MockKeyring::default();
+
+        save_credential_encryption_key_with_store(&key_path, &mut store, "fresh-key")
+            .expect_err("a keychain error must surface");
+
+        assert!(!key_path.exists());
+        assert_eq!(store.value, None);
     }
 
     #[test]
