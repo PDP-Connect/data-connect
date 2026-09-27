@@ -2925,9 +2925,12 @@ setInterval(() => {}, 1000);
             r#"const fs = require('node:fs');
 const {{ spawn }} = require('node:child_process');
 const done = {:?};
-const child = spawn(process.execPath, ['-e', "process.on('SIGTERM', () => {{ require('node:fs').writeFileSync(process.env.DONE, 'terminated'); process.exit(0); }}); setInterval(() => {{}}, 1000);"], {{ env: {{ DONE: done }}, stdio: 'ignore' }});
-fs.writeFileSync({:?}, String(child.pid));
-console.log('GROUP-READY');
+const child = spawn(process.execPath, ['-e', "process.on('SIGTERM', () => {{ require('node:fs').writeFileSync(process.env.DONE, 'terminated'); process.exit(0); }}); process.stdout.write('armed'); setInterval(() => {{}}, 1000);"], {{ env: {{ DONE: done }}, stdio: ['ignore', 'pipe', 'ignore'] }});
+// Report ready only after the grandchild has installed its SIGTERM handler.
+child.stdout.once('data', () => {{
+  fs.writeFileSync({:?}, String(child.pid));
+  console.log('GROUP-READY');
+}});
 setInterval(() => {{}}, 1000);
 "#,
             grandchild_done.path().to_string_lossy(),
@@ -2938,7 +2941,7 @@ setInterval(() => {{}}, 1000);
             script.path(),
             Readiness::StdoutMarker {
                 marker: "GROUP-READY".to_string(),
-                deadline: Duration::from_secs(3),
+                deadline: Duration::from_secs(15),
             },
         );
         let handle = Supervisor::new(spec, ArcSink(Arc::clone(&sink)))
@@ -2946,7 +2949,7 @@ setInterval(() => {{}}, 1000);
             .unwrap();
         handle.stop().unwrap();
 
-        let deadline = Instant::now() + Duration::from_secs(2);
+        let deadline = Instant::now() + Duration::from_secs(15);
         while Instant::now() < deadline
             && fs::read_to_string(grandchild_done.path())
                 .unwrap()
@@ -2962,9 +2965,18 @@ setInterval(() => {{}}, 1000);
             .unwrap()
             .parse::<libc::pid_t>()
             .unwrap();
-        let result = unsafe { libc::kill(pid, 0) };
-        assert_eq!(result, -1);
-        assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
+        // The orphaned grandchild stays a zombie until its new parent reaps it,
+        // so poll until the pid is gone instead of checking once.
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let mut errno = None;
+        while Instant::now() < deadline {
+            if unsafe { libc::kill(pid, 0) } == -1 {
+                errno = io::Error::last_os_error().raw_os_error();
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(errno, Some(libc::ESRCH));
     }
 
     #[cfg(unix)]
