@@ -323,9 +323,8 @@ describe("release workflow", () => {
     )
   })
 
-  it("keeps signing optional and has no Vana or Corsali release dependency", () => {
+  it("does no macOS signing or notarization and has no Vana or Corsali release dependency", () => {
     const workflow = readReleaseWorkflow()
-    const signedBuild = readWorkflowStep(workflow, "Build signed Tauri app")
     const unsignedBuild = readWorkflowStep(workflow, "Build unsigned Tauri app")
     const finalizeBundles = readWorkflowStep(
       workflow,
@@ -333,28 +332,24 @@ describe("release workflow", () => {
     )
     const removeGeneratedDmgs = `find "$bundle_root/dmg" -maxdepth 1 -type f -name '*.dmg' -delete`
 
-    expect(workflow).toContain("APPLE_SIGNING_IDENTITY")
-    expect(signedBuild).toContain(
-      "github.event_name == 'release' && matrix.os_family == 'macos' && steps.apple-signing-availability.outputs.apple_signing_available == 'true'"
-    )
-    expect(signedBuild).toContain(
-      "APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}"
-    )
-    expect(unsignedBuild).toContain(
-      "steps.apple-signing-availability.outputs.apple_signing_available != 'true'"
-    )
-    expect(unsignedBuild).not.toContain("APPLE_SIGNING_IDENTITY")
-    expect(workflow).toContain(
-      "github.event_name == 'release' && secrets.APPLE_BUILD_CERTIFICATE_BASE64 || ''"
-    )
-    expect(workflow).toContain(
-      "github.event_name == 'release' && steps.apple-signing-availability.outputs.apple_signing_available == 'true' && secrets.APPLE_SIGNING_IDENTITY || ''"
-    )
-    expect(workflow).toContain("verification_args+=(--verify-code-signature)")
-    expect(workflow).toContain(
-      'codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" src-tauri/binaries/pdpp-node-${{ matrix.target }}'
-    )
-    expect(workflow).toContain("codesign --force --deep --options runtime")
+    // A downstream signer signs the attested DMG. This repository holds no
+    // Apple credentials and has no second, dormant signing path.
+    expect(workflow).not.toMatch(/secrets\.APPLE_|APPLE_SIGNING_IDENTITY/)
+    expect(workflow).not.toContain("apple-signing-availability")
+    expect(workflow).not.toMatch(/codesign --force|notarytool|stapler/)
+    expect(workflow).not.toMatch(/security (?:create|import|delete)-keychain/)
+    expect(workflow).not.toContain("--verify-code-signature")
+    expect(workflow).not.toContain("Build signed Tauri app")
+    expect(unsignedBuild).not.toMatch(/^\s+if:/m)
+    expect(finalizeBundles).not.toContain("env:")
+    // The signer applies these entitlements under the hardened runtime.
+    for (const path of [
+      "personal-server/entitlements.plist",
+      "playwright-runner/entitlements.plist",
+    ]) {
+      const entitlements = readFileSync(resolve(process.cwd(), path), "utf8")
+      expect(entitlements, path).toContain("com.apple.security.cs.allow-jit")
+    }
     expect(workflow).toContain(
       "node scripts/create-macos-dmg.mjs --volume-name DataConnect"
     )
@@ -369,72 +364,109 @@ describe("release workflow", () => {
     expect(workflow).not.toMatch(/vana\.(?:com|org)|corsali/i)
   })
 
-  it("keeps Apple signing release-only and uses immutable availability outputs", () => {
+  it("refuses a release checkout whose HEAD is not the release event commit", () => {
     const workflow = readReleaseWorkflow()
-    const availability = readWorkflowStep(
-      workflow,
-      "Determine Apple signing availability"
-    )
-
-    expect(workflow.indexOf(availability)).toBeLessThan(
-      workflow.indexOf("      - name: Checkout repository\n")
-    )
-    expect(availability).toContain("if: github.event_name == 'release'")
-    expect(availability).toContain("id: apple-signing-availability")
-    expect(availability).toContain("$GITHUB_OUTPUT")
-
-    const signingSteps = [
-      "Install optional Apple signing certificate",
-      "Optionally sign macOS helper binaries",
-      "Build signed Tauri app",
-      "Cleanup optional Apple keychain",
-    ]
-    for (const name of signingSteps) {
-      const step = readWorkflowStep(workflow, name)
-      expect(step, name).toMatch(
-        /if: .*github\.event_name == 'release'.*steps\.apple-signing-availability\.outputs\.(?:apple_certificate|apple_signing)_available == 'true'/
-      )
-      expect(step, name).not.toMatch(
-        /if: .*env\.APPLE_(?:CERTIFICATE|SIGNING)_AVAILABLE/
-      )
-    }
-
-    const finalize = readWorkflowStep(workflow, "Finalize platform bundles")
-    expect(finalize).toContain(
-      "github.event_name == 'release' && steps.apple-signing-availability.outputs.apple_signing_available == 'true' && secrets.APPLE_SIGNING_IDENTITY"
-    )
-    const finalizerCanSign = (eventName: string, available: boolean) =>
-      eventName === "release" &&
-      finalize.includes(
-        "github.event_name == 'release' && steps.apple-signing-availability.outputs.apple_signing_available == 'true' && secrets.APPLE_SIGNING_IDENTITY"
-      ) &&
-      available
-    expect(finalizerCanSign("workflow_dispatch", true)).toBe(false)
-    expect(finalizerCanSign("pull_request", true)).toBe(false)
-    expect(finalizerCanSign("release", true)).toBe(true)
-
-    for (const event of ["workflow_dispatch", "pull_request"]) {
-      for (const name of signingSteps) {
-        const gate = readWorkflowStep(workflow, name).match(/if: (.*)\n/)?.[1]
-        expect(gate, `${name} on ${event}`).toContain(
-          "github.event_name == 'release'"
+    const marker = "      - name: Verify checked-out release identity\n"
+    const scripts = workflow
+      .split(marker)
+      .slice(1)
+      .map(rest =>
+        readWorkflowRunScript(
+          marker + rest,
+          "Verify checked-out release identity"
         )
-        const output = gate?.match(
-          /steps\.apple-signing-availability\.outputs\.(apple_certificate|apple_signing)_available == 'true'/
-        )?.[1]
-        expect(output, name).toBeTruthy()
-        const canRun = (eventName: string, available: boolean) =>
-          eventName === "release" &&
-          gate?.includes(`outputs.${output}_available == 'true'`) &&
-          available
-        expect(canRun(event, true), `${name} on ${event}`).toBe(false)
-        expect(canRun("release", true), `${name} with availability`).toBe(true)
-      }
-    }
+      )
+    // The build job and the Core image job both check out the tag name.
+    expect(scripts).toHaveLength(2)
 
-    expect(workflow).not.toMatch(
-      /^\s+if: .*env\.APPLE_(?:CERTIFICATE|SIGNING)_AVAILABLE/m
+    const repo = mkdtempSync(join(tmpdir(), "release-head-sha-"))
+    try {
+      const git = (...args: string[]) =>
+        execFileSync("git", args, { cwd: repo, encoding: "utf8" }).trim()
+      git("init", "-q")
+      git(
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@t",
+        "commit",
+        "-q",
+        "--allow-empty",
+        "-m",
+        "a"
+      )
+      const eventSha = git("rev-parse", "HEAD")
+      git(
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@t",
+        "commit",
+        "-q",
+        "--allow-empty",
+        "-m",
+        "b"
+      )
+      const movedSha = git("rev-parse", "HEAD")
+      mkdirSync(join(repo, "scripts"))
+      writeFileSync(
+        join(repo, "scripts/verify-release-ref.mjs"),
+        'console.log("verify-release-ref ran")\n'
+      )
+
+      for (const script of scripts) {
+        const run = (githubSha: string) =>
+          spawnSync("bash", ["-c", script], {
+            cwd: repo,
+            encoding: "utf8",
+            env: {
+              ...process.env,
+              GITHUB_SHA: githubSha,
+              RELEASE_TAG: "v1.2.3",
+            },
+          })
+        const moved = run(eventSha)
+        expect(moved.status).toBe(1)
+        expect(moved.stdout).toContain(
+          `Checked-out commit ${movedSha} is not the release event commit ${eventSha}`
+        )
+        expect(moved.stdout).not.toContain("verify-release-ref ran")
+
+        const same = run(movedSha)
+        expect(same.status).toBe(0)
+        expect(same.stdout).toContain("verify-release-ref ran")
+      }
+    } finally {
+      rmSync(repo, { recursive: true, force: true })
+    }
+  })
+
+  it("attests each published DMG in the publish job only", () => {
+    const workflow = readReleaseWorkflow()
+    const publishJob = workflow.slice(
+      workflow.indexOf("\n  publish:\n"),
+      workflow.indexOf("\n  publish-core-image:\n")
     )
+    const attest = readWorkflowStep(workflow, "Attest macOS DMG provenance")
+
+    expect(publishJob).toContain(
+      "permissions:\n      contents: write\n      # Only for the DMG provenance attestation below.\n      id-token: write\n      attestations: write\n    steps:"
+    )
+    expect(attest).toMatch(
+      /uses: actions\/attest-build-provenance@[0-9a-f]{40} # v\d/
+    )
+    expect(attest).toContain(
+      "subject-path: release-artifacts/manual-install-macos-*/dmg/DataConnect_*.dmg"
+    )
+    expect(publishJob.indexOf(attest)).toBeGreaterThan(
+      publishJob.indexOf("- name: Download verified release artifacts")
+    )
+    expect(publishJob.indexOf(attest)).toBeLessThan(
+      publishJob.indexOf("- name: Publish complete platform set")
+    )
+    // No other job may mint OIDC tokens or write attestations.
+    expect(workflow.split("id-token: write").length - 1).toBe(1)
+    expect(workflow.split("attestations: write").length - 1).toBe(1)
   })
 
   it("finds exactly one branch installer in the preserved nsis artifact layout", () => {
