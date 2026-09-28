@@ -38,6 +38,7 @@ import {
   initiateOwnerDeviceAuthorization,
 } from "../server/auth.ts";
 import { canonicalConnectorKey, canonicalConnectorKeyFromManifest } from "../server/connector-key.ts";
+import { CONNECTOR_RUNTIME_OWNER_CLIENT_ID } from "../server/reference-local-defaults.ts";
 import {
   getConnectorSummaryEvidence,
   reconcileDirtyConnectorSummaryEvidence,
@@ -2401,7 +2402,9 @@ export function createController(opts: ControllerOptions = {}): Controller {
     opts.connectorPathResolver ||
     ((connectorId: string, manifest?: ConnectorManifest, options?: RunNowOptions) =>
       resolveActiveInstallFirstConnectorPath(connectorId, manifest, options, localSourceStore));
-  const ownerClientId = opts.ownerClientId || "cli_longview";
+  // A client of its own, not the public `cli_longview`, so the AS can hand
+  // every run the same live bearer without sharing one with a person's CLI.
+  const ownerClientId = opts.ownerClientId || CONNECTOR_RUNTIME_OWNER_CLIENT_ID;
   const ownerSubjectId = opts.ownerSubjectId || "owner_local";
   const schedulerStore = opts.schedulerStore || getDefaultSchedulerStore();
   const detailGapStore: ConnectorDetailGapReadStore =

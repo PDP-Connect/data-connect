@@ -9,6 +9,7 @@ import {
   ownerPasswordVerifierRevision,
 } from "./owner-password-verifier-store.ts";
 import type { OwnerBearerSummary, OwnerSessionRecord, OwnerSessionStore } from "../owner-session.ts";
+import { REUSED_OWNER_BEARER_CLIENT_IDS } from "../reference-local-defaults.ts";
 
 interface SessionRow {
   created_at: number | string;
@@ -235,6 +236,86 @@ function createDatabaseOwnerSessionStore(): OwnerSessionStore {
         .run(token, subjectId).changes > 0;
     },
   };
+}
+
+/**
+ * An approval this soon after the request had no person in the loop: the
+ * connector runtime requested and approved its own `cli_longview` bearer in
+ * one step. A person signing a CLI in takes longer than this.
+ */
+const IN_PROCESS_APPROVAL_MAX_SECONDS = 5;
+
+/** `labelOwnerSession` in owner-auth.ts for a sign-in with no user agent. */
+const UNLABELED_DESKTOP_SESSION_LABEL = "Unknown browser";
+
+/**
+ * Revoke the owner credentials first-party clients leaked on every start:
+ *   - For each `REUSED_OWNER_BEARER_CLIENT_IDS` client, every live bearer of
+ *     a subject except the newest, which is the one the next approval reuses.
+ *   - `cli_longview` bearers the connector runtime minted for itself. Nothing
+ *     uses them now that the runtime mints as its own client. A `cli_longview`
+ *     bearer a person approved is kept.
+ *   - Desktop sign-ins stored before the app labelled them "This computer":
+ *     no label and no user agent, so the server stored an "Unknown browser"
+ *     session per app start. The newest one of a subject is kept.
+ * Safe to run on every start: a second run revokes nothing.
+ */
+export async function revokeLeakedFirstPartyOwnerCredentials(
+  nowSeconds: number
+): Promise<{ bearers: number; sessions: number }> {
+  const pg = isPostgresStorageBackend();
+  const [live, revoked] = pg ? ["FALSE", "TRUE"] : ["0", "1"];
+  const param = (index: number) => (pg ? `$${index}` : "?");
+  const clientList = REUSED_OWNER_BEARER_CLIENT_IDS.map((_, index) => param(index + 1)).join(", ");
+  const approvalSeconds = pg
+    ? "EXTRACT(EPOCH FROM (approved_at::timestamptz - created_at::timestamptz))"
+    : "(julianday(approved_at) - julianday(created_at)) * 86400";
+  const supersededBearersSql = `UPDATE tokens SET revoked = ${revoked}
+      WHERE token_kind = 'owner' AND revoked = ${live} AND client_id IN (${clientList})
+        AND token_id <> (
+          SELECT kept.token_id FROM tokens AS kept
+           WHERE kept.token_kind = 'owner' AND kept.revoked = ${live}
+             AND kept.client_id = tokens.client_id AND kept.subject_id = tokens.subject_id
+           ORDER BY kept.expires_at DESC, kept.token_id DESC
+           LIMIT 1
+        )`;
+  const runtimeCliBearersSql = `UPDATE tokens SET revoked = ${revoked}
+      WHERE token_kind = 'owner' AND revoked = ${live} AND client_id = 'cli_longview'
+        AND token_id IN (
+          SELECT token_id FROM owner_device_auth
+           WHERE client_id = 'cli_longview' AND status = 'approved'
+             AND token_id IS NOT NULL AND approved_at IS NOT NULL
+             AND ${approvalSeconds} < ${IN_PROCESS_APPROVAL_MAX_SECONDS}
+        )`;
+  const unlabeledDesktop = (table: string) =>
+    `${table}.revoked_at IS NULL AND ${table}.device_key IS NULL AND ${table}.user_agent IS NULL
+     AND ${table}.label = '${UNLABELED_DESKTOP_SESSION_LABEL}'`;
+  const desktopSessionsSql = `UPDATE owner_sessions SET revoked_at = ${param(1)}
+      WHERE ${unlabeledDesktop("owner_sessions")}
+        AND id_hash <> (
+          SELECT kept.id_hash FROM owner_sessions AS kept
+           WHERE kept.subject_id = owner_sessions.subject_id AND ${unlabeledDesktop("kept")}
+           ORDER BY kept.created_at DESC, kept.id_hash DESC
+           LIMIT 1
+        )`;
+  if (pg) {
+    return await withPostgresTransaction(async (client) => {
+      const superseded = await client.query(supersededBearersSql, [...REUSED_OWNER_BEARER_CLIENT_IDS]);
+      const runtimeCli = await client.query(runtimeCliBearersSql);
+      const sessions = await client.query(desktopSessionsSql, [nowSeconds]);
+      return {
+        bearers: (superseded.rowCount ?? 0) + (runtimeCli.rowCount ?? 0),
+        sessions: sessions.rowCount ?? 0,
+      };
+    });
+  }
+  const db = getDb();
+  return db.transaction(() => ({
+    bearers:
+      db.prepare(supersededBearersSql).run(...REUSED_OWNER_BEARER_CLIENT_IDS).changes +
+      db.prepare(runtimeCliBearersSql).run().changes,
+    sessions: db.prepare(desktopSessionsSql).run(nowSeconds).changes,
+  }))();
 }
 
 let cachedStore: OwnerSessionStore | null = null;

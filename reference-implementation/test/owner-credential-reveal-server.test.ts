@@ -17,7 +17,7 @@ import { startServer } from "../server/index.ts";
 import { localOwnerCredentialRevealProofHeader } from "../server/routes/owner-credential-reveal.ts";
 
 const OWNER_SUBJECT_ID = "owner_local";
-const OWNER_CLIENT_ID = "cli_longview";
+const OWNER_CLIENT_ID = "pdpp_cli";
 const TEST_OWNER_PASSWORD = "correct-horse-battery-staple";
 
 interface CloseableServer {

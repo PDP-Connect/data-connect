@@ -92,7 +92,7 @@ import { appConfigPath, createAppConfigStore } from "./app-config-store.ts";
 import { autostartStatePath, createAutostartStore } from "./autostart-store.ts";
 import { createLiveRevisions, type LiveRevisions, registerDefaultLiveTopics } from "./live-revisions.ts";
 import { createRecoveryKeyStore } from "./recovery-key-store.ts";
-import { getOwnerSessionStore } from "./stores/owner-session-store.ts";
+import { getOwnerSessionStore, revokeLeakedFirstPartyOwnerCredentials } from "./stores/owner-session-store.ts";
 import { NekoSurfaceAllocatorClient } from "../runtime/neko-surface-allocator.ts";
 import { isClosedPipeWriteError } from "../runtime/pipe-errors.ts";
 import { hasForwardEvidenceDebt } from "../runtime/recovery-decision.ts";
@@ -331,7 +331,7 @@ import {
 } from "./ref-control.ts";
 import {
   DEFAULT_LOCAL_DCR_INITIAL_ACCESS_TOKEN,
-  DEFAULT_PRE_REGISTERED_PUBLIC_CLIENTS,
+  defaultPreRegisteredPublicClientsFor,
 } from "./reference-local-defaults.ts";
 import { resolveReferenceRevision, setReferenceRevisionHeader } from "./reference-revision.ts";
 import { servedRootLandingIfBrowser } from "./reference-root-landing.ts";
@@ -2953,7 +2953,7 @@ function validateNativeConfiguration(opts: ServerOpts = {}) {
 function defaultPreRegisteredPublicClients() {
   // Copy the shared frozen defaults into plain mutable entries so downstream
   // code that mutates metadata during seeding can operate normally.
-  return DEFAULT_PRE_REGISTERED_PUBLIC_CLIENTS.map((client) => ({
+  return defaultPreRegisteredPublicClientsFor().map((client) => ({
     ...client,
     metadata: { ...client.metadata },
   }));
@@ -8569,6 +8569,18 @@ export async function startServer(opts: ServerOpts = {}) {
     logger,
     subjectId: earlyOwnerAuthConfig.subjectId || OWNER_AUTH_DEFAULT_SUBJECT_ID,
   });
+  // Before the scheduler and console start and before the desktop signs in,
+  // so nothing holds a credential this revokes except the kept ones.
+  const leakedOwnerCredentials = await revokeLeakedFirstPartyOwnerCredentials(Math.floor(Date.now() / 1000));
+  if (leakedOwnerCredentials.bearers > 0 || leakedOwnerCredentials.sessions > 0) {
+    logger.warn(
+      {
+        owner_bearers_revoked: leakedOwnerCredentials.bearers,
+        owner_sessions_revoked: leakedOwnerCredentials.sessions,
+      },
+      "revoked duplicate owner bearers and sessions that the console, connector runtime and desktop sign-in left on earlier starts"
+    );
+  }
 
   // Boot-epoch reconciliation — STAGE 5.
   // Emit `controller.booted` as the FIRST spine event of this process

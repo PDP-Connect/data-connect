@@ -22,7 +22,7 @@
 import { isLocalOrPrivateRequestOrigin, type ResolvePublicUrlRequest } from "./metadata.ts";
 import {
   DEFAULT_LOCAL_DCR_INITIAL_ACCESS_TOKEN,
-  DEFAULT_PRE_REGISTERED_PUBLIC_CLIENTS,
+  defaultPreRegisteredPublicClientsFor,
 } from "./reference-local-defaults.ts";
 
 interface DcrOptions {
@@ -63,7 +63,7 @@ const PUBLIC_DCR_RATE_LIMIT_MAX = 120;
 function defaultPreRegisteredPublicClients() {
   // Copy the shared frozen defaults into plain mutable entries so downstream
   // code that mutates metadata during seeding can operate normally.
-  return DEFAULT_PRE_REGISTERED_PUBLIC_CLIENTS.map((client) => ({
+  return defaultPreRegisteredPublicClientsFor().map((client) => ({
     ...client,
     metadata: { ...client.metadata },
   }));

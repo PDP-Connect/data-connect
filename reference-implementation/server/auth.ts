@@ -70,6 +70,7 @@ import {
   SUPPORTED_AUTHORIZATION_CODE_CHALLENGE_METHODS,
 } from "./oauth-substrate/primitives.ts";
 import { isPostgresStorageBackend, postgresQuery, withPostgresTransaction } from "./postgres-storage.ts";
+import { REUSED_OWNER_BEARER_CLIENT_IDS } from "./reference-local-defaults.ts";
 import {
   lockOwnerPasswordVerifierRevision,
   ownerPasswordVerifierRevision,
@@ -480,6 +481,9 @@ export type OwnerDeviceApprovalFaultHook = (stage: "before_token_insert" | "afte
 export type AuthorizationDecisionFaultStage = "after_cas_before_event" | "after_event_before_commit";
 export type AuthorizationDecisionFaultHook = (stage: AuthorizationDecisionFaultStage) => void;
 
+/** Lifetime of an owner bearer. */
+const OWNER_TOKEN_TTL_MS = 365 * 24 * 60 * 60 * 1000;
+
 interface OwnerDeviceApprovalInput {
   authorizationFence?: { credentialRevision?: string | null; sessionIdHash?: string };
   clientId: string;
@@ -488,6 +492,12 @@ interface OwnerDeviceApprovalInput {
   expiresAt: string;
   faultHook?: OwnerDeviceApprovalFaultHook | undefined;
   pendingSnapshot: OwnerDeviceAuthRow;
+  /**
+   * Set for `REUSED_OWNER_BEARER_CLIENT_IDS`: approve with the subject's live
+   * owner bearer for this client if one expires after this instant, and
+   * insert `tokenId` only when none does.
+   */
+  reuseLiveTokenExpiringAfter?: string | undefined;
   subjectId: string;
   tokenId: string;
   tokenIssuedEvent: AuthSpineEventInput;
@@ -2899,15 +2909,33 @@ const postgresOwnerDeviceAuthStore: OwnerDeviceAuthStore = {
           ]
         );
       }
-      input.faultHook?.("before_token_insert");
-      await client.query(
-        `INSERT INTO tokens(token_id, grant_id, subject_id, client_id, token_kind, expires_at)
-         VALUES($1, NULL, $2, $3, 'owner', $4)`,
-        [input.tokenId, input.subjectId, input.clientId, input.expiresAt]
-      );
-      input.faultHook?.("after_token_insert");
+      // The oauth_clients row lock above serializes approvals for this client.
+      const reusedTokenId = input.reuseLiveTokenExpiringAfter
+        ? ((
+            await client.query<{ token_id: string }>(
+              `SELECT token_id FROM tokens
+               WHERE token_kind = 'owner' AND subject_id = $1 AND client_id = $2
+                 AND revoked = FALSE AND expires_at > $3
+               ORDER BY expires_at DESC
+               LIMIT 1`,
+              [input.subjectId, input.clientId, input.reuseLiveTokenExpiringAfter]
+            )
+          ).rows[0]?.token_id ?? null)
+        : null;
+      const tokenId = reusedTokenId ?? input.tokenId;
+      if (!reusedTokenId) {
+        input.faultHook?.("before_token_insert");
+        await client.query(
+          `INSERT INTO tokens(token_id, grant_id, subject_id, client_id, token_kind, expires_at)
+           VALUES($1, NULL, $2, $3, 'owner', $4)`,
+          [input.tokenId, input.subjectId, input.clientId, input.expiresAt]
+        );
+        input.faultHook?.("after_token_insert");
+      }
       await postgresEmitSpineEventInTransaction(client, input.consentApprovedEvent as SpineEventInput);
-      await postgresEmitSpineEventInTransaction(client, input.tokenIssuedEvent as SpineEventInput);
+      if (!reusedTokenId) {
+        await postgresEmitSpineEventInTransaction(client, input.tokenIssuedEvent as SpineEventInput);
+      }
       const approved = await client.query<OwnerDeviceAuthRow>(
         `UPDATE owner_device_auth
          SET status = 'approved',
@@ -2917,7 +2945,7 @@ const postgresOwnerDeviceAuthStore: OwnerDeviceAuthStore = {
          WHERE device_code = $1
            AND status = 'pending'
         RETURNING *`,
-        [input.deviceCode, input.subjectId, input.tokenId, nowIso()]
+        [input.deviceCode, input.subjectId, tokenId, nowIso()]
       );
       const [approvedRow] = approved.rows;
       return approvedRow as OwnerDeviceAuthRow;
@@ -3076,22 +3104,34 @@ const sqliteOwnerDeviceAuthStore: OwnerDeviceAuthStore = {
           nowIso(),
         ]);
       }
-      input.faultHook?.("before_token_insert");
-      exec(referenceQueries.authTokensInsertOwner, [input.tokenId, input.subjectId, input.clientId, input.expiresAt]);
-      input.faultHook?.("after_token_insert");
+      const reusedTokenId = input.reuseLiveTokenExpiringAfter
+        ? (getDb()
+            .prepare(
+              `SELECT token_id FROM tokens
+               WHERE token_kind = 'owner' AND subject_id = ? AND client_id = ?
+                 AND revoked = 0 AND expires_at > ?
+               ORDER BY expires_at DESC
+               LIMIT 1`
+            )
+            .get<{ token_id: string }>(input.subjectId, input.clientId, input.reuseLiveTokenExpiringAfter)?.token_id ??
+          null)
+        : null;
+      const tokenId = reusedTokenId ?? input.tokenId;
+      if (!reusedTokenId) {
+        input.faultHook?.("before_token_insert");
+        exec(referenceQueries.authTokensInsertOwner, [input.tokenId, input.subjectId, input.clientId, input.expiresAt]);
+        input.faultHook?.("after_token_insert");
+      }
       emitRawSpineEvent(input.consentApprovedEvent as SpineEventInput, getDb());
-      emitRawSpineEvent(input.tokenIssuedEvent as SpineEventInput, getDb());
-      exec(referenceQueries.authOwnerDeviceAuthMarkApproved, [
-        input.subjectId,
-        input.tokenId,
-        nowIso(),
-        input.deviceCode,
-      ]);
+      if (!reusedTokenId) {
+        emitRawSpineEvent(input.tokenIssuedEvent as SpineEventInput, getDb());
+      }
+      exec(referenceQueries.authOwnerDeviceAuthMarkApproved, [input.subjectId, tokenId, nowIso(), input.deviceCode]);
       return {
         ...row,
         status: "approved",
         subject_id: input.subjectId,
-        token_id: input.tokenId,
+        token_id: tokenId,
       };
     }),
   getByApprovalId: (approvalId) =>
@@ -11147,7 +11187,14 @@ export async function approveOwnerDeviceAuthorization(
 
   const traceContext = ownerDeviceTraceContext(pending);
   const token = generateToken();
-  const tokenExpiresAt = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString();
+  const now = Date.now();
+  const tokenExpiresAt = new Date(now + OWNER_TOKEN_TTL_MS).toISOString();
+  // Reuse a bearer only while it has at least half its life left, so a
+  // reused bearer never lives past a fresh one and a long-lived consumer is
+  // not handed one that is about to expire.
+  const reuseLiveTokenExpiringAfter = REUSED_OWNER_BEARER_CLIENT_IDS.includes(pending.client_id)
+    ? new Date(now + OWNER_TOKEN_TTL_MS / 2).toISOString()
+    : undefined;
   let approved: OwnerDeviceAuthRow;
   try {
     approved = await getOwnerDeviceAuthStore().approveAtomically({
@@ -11162,6 +11209,7 @@ export async function approveOwnerDeviceAuthorization(
       expiresAt: tokenExpiresAt,
       faultHook: opts.faultHook,
       pendingSnapshot: pending,
+      reuseLiveTokenExpiringAfter,
       subjectId,
       tokenId: token,
       tokenIssuedEvent: buildOwnerDeviceTokenIssuedEvent({
@@ -11180,7 +11228,13 @@ export async function approveOwnerDeviceAuthorization(
     throw err;
   }
 
-  return ownerDeviceApprovalResponse(approved, subjectId);
+  // A reused bearer, or one an earlier approval of this code issued, has less
+  // than a full lifetime left.
+  const expiresInSeconds =
+    approved.token_id === token
+      ? OWNER_TOKEN_TTL_MS / 1000
+      : Math.max(((await introspect(approved.token_id)).exp ?? 0) - Math.floor(Date.now() / 1000), 0);
+  return ownerDeviceApprovalResponse(approved, subjectId, expiresInSeconds);
 }
 
 export async function denyOwnerDeviceAuthorization(
@@ -11265,10 +11319,14 @@ function ownerDeviceExchangeError(row: OwnerDeviceAuthRow, code: string, message
   return attachOwnerDeviceTraceContext(err, row);
 }
 
-function ownerDeviceApprovalResponse(row: OwnerDeviceAuthRow, fallbackSubjectId: string): Record<string, unknown> {
+function ownerDeviceApprovalResponse(
+  row: OwnerDeviceAuthRow,
+  fallbackSubjectId: string,
+  expiresInSeconds: number
+): Record<string, unknown> {
   return {
     access_token: row.token_id,
-    expires_in: 365 * 24 * 60 * 60,
+    expires_in: expiresInSeconds,
     subject_id: row.subject_id || fallbackSubjectId,
     token_type: "Bearer",
   };
@@ -11639,7 +11697,7 @@ async function issueOwnerTokenRecord(
   meta: { traceContext?: TraceContext | null; clientId?: string | null; userCode?: string } = {}
 ): Promise<{ tokenId: string; expiresAt: string }> {
   const tokenId = generateToken();
-  const expiresAt = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString();
+  const expiresAt = new Date(Date.now() + OWNER_TOKEN_TTL_MS).toISOString();
   // Record the issuing client_id when the caller knows it (per-token DCR
   // path). Pre-DCR callers pass NULL and the row stays as before.
   // See openspec/changes/dcr-per-owner-token-with-revoke/.

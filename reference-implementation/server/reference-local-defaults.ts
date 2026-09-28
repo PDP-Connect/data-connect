@@ -22,29 +22,14 @@ export interface DefaultPreRegisteredPublicClient {
   };
 }
 
-export const DEFAULT_PRE_REGISTERED_PUBLIC_CLIENTS: readonly DefaultPreRegisteredPublicClient[] = Object.freeze([
-  {
-    client_id: "longview",
-    metadata: { client_name: "Longview", token_endpoint_auth_method: "none" },
-  },
-  {
-    client_id: "longview_planning_v1",
-    metadata: { client_name: "Longview", token_endpoint_auth_method: "none" },
-  },
-  {
-    client_id: "cli_longview",
-    metadata: { client_name: "Longview CLI", token_endpoint_auth_method: "none" },
-  },
+/**
+ * Clients product code signs in as: the console's owner bootstrap and
+ * operator bootstrap, the connector runtime, and the published `pdpp` CLI.
+ */
+export const PRODUCT_PRE_REGISTERED_PUBLIC_CLIENTS: readonly DefaultPreRegisteredPublicClient[] = Object.freeze([
   {
     client_id: "pdpp_cli",
     metadata: { client_name: "PDPP CLI", token_endpoint_auth_method: "none" },
-  },
-  {
-    client_id: "concert_recommendation_app",
-    metadata: {
-      client_name: "Concert Recommendation App",
-      token_endpoint_auth_method: "none",
-    },
   },
   {
     client_id: "pdpp-web-dashboard",
@@ -60,4 +45,68 @@ export const DEFAULT_PRE_REGISTERED_PUBLIC_CLIENTS: readonly DefaultPreRegistere
       token_endpoint_auth_method: "none",
     },
   },
+  {
+    client_id: "pdpp-connector-runtime",
+    metadata: {
+      client_name: "PDPP Connector Runtime",
+      token_endpoint_auth_method: "none",
+    },
+  },
+]);
+
+/** Example third-party apps for the reference demo. No product code uses them. */
+export const DEMO_PRE_REGISTERED_PUBLIC_CLIENTS: readonly DefaultPreRegisteredPublicClient[] = Object.freeze([
+  {
+    client_id: "longview",
+    metadata: { client_name: "Longview", token_endpoint_auth_method: "none" },
+  },
+  {
+    client_id: "longview_planning_v1",
+    metadata: { client_name: "Longview", token_endpoint_auth_method: "none" },
+  },
+  {
+    client_id: "cli_longview",
+    metadata: { client_name: "Longview CLI", token_endpoint_auth_method: "none" },
+  },
+  {
+    client_id: "concert_recommendation_app",
+    metadata: {
+      client_name: "Concert Recommendation App",
+      token_endpoint_auth_method: "none",
+    },
+  },
+]);
+
+export const DEFAULT_PRE_REGISTERED_PUBLIC_CLIENTS: readonly DefaultPreRegisteredPublicClient[] = Object.freeze([
+  ...DEMO_PRE_REGISTERED_PUBLIC_CLIENTS,
+  ...PRODUCT_PRE_REGISTERED_PUBLIC_CLIENTS,
+]);
+
+/**
+ * The pre-registered clients a server seeds when its caller does not pass
+ * its own list. Product builds leave the demo clients out unless
+ * `PDPP_ENABLE_DEMO_CLIENTS=1`: the Docker images set `NODE_ENV=production`
+ * (the stream playground's gate), and the desktop app starts the server with
+ * `PDPP_MANAGED_DESKTOP_HOST=1`.
+ */
+export function defaultPreRegisteredPublicClientsFor(
+  env: Readonly<Record<string, string | undefined>> = process.env
+): readonly DefaultPreRegisteredPublicClient[] {
+  const product = env.NODE_ENV === "production" || env.PDPP_MANAGED_DESKTOP_HOST === "1";
+  const demoEnabled = !product || env.PDPP_ENABLE_DEMO_CLIENTS === "1";
+  return demoEnabled ? DEFAULT_PRE_REGISTERED_PUBLIC_CLIENTS : PRODUCT_PRE_REGISTERED_PUBLIC_CLIENTS;
+}
+
+/** The client the connector runtime mints its owner bearer as. */
+export const CONNECTOR_RUNTIME_OWNER_CLIENT_ID = "pdpp-connector-runtime";
+
+/**
+ * First-party machine clients that hold one owner bearer per subject: the
+ * console and the connector runtime. They mint on every start or run, so a
+ * device-flow approval for one of them returns the subject's live bearer for
+ * that client instead of adding a new one.
+ */
+export const REUSED_OWNER_BEARER_CLIENT_IDS: readonly string[] = Object.freeze([
+  "pdpp-polyfill-owner-bootstrap",
+  CONNECTOR_RUNTIME_OWNER_CLIENT_ID,
 ]);
