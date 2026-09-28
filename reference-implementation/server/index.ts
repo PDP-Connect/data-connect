@@ -9812,6 +9812,9 @@ export async function resolveNekoBrowserSurfaceControllerOptions({
     options.beforeBrowserSurfaceLeaseRelease = (args: { readonly runId: string }) => {
       return hostAllocator.releaseRun(args.runId);
     };
+    options.describeBrowserSurfaceStartFailure = (args: { readonly runId: string }) => {
+      return hostAllocator.lastStartFailure(args.runId);
+    };
   }
 
   return options;

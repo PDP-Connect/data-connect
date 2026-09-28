@@ -394,6 +394,9 @@ interface SetupOptions {
   browserSurfaceReclaimRetryAttempts?: number;
   browserSurfaceReclaimRetryDelayMs?: number;
   connectorPathResolver?: ConnectorPathResolver;
+  describeBrowserSurfaceStartFailure?: (args: {
+    readonly runId: string;
+  }) => { readonly code: string; readonly message: string } | undefined;
   manager?: BrowserSurfaceLeaseManager;
   maxRunWallClockMs?: number;
   runConnectorImpl?: (
@@ -431,6 +434,7 @@ function setup(
     browserSurfaceReclaimRetryAttempts,
     browserSurfaceReclaimRetryDelayMs = 0,
     beforeBrowserSurfaceLeaseRelease,
+    describeBrowserSurfaceStartFailure,
     maxRunWallClockMs,
     runConnectorImpl,
     connectorPathResolver = () => "/tmp/connector.js",
@@ -477,6 +481,7 @@ function setup(
     ...(browserSurfaceReadinessProbe ? { browserSurfaceReadinessProbe } : {}),
     ...(browserSurfaceReadinessTimeoutMs === undefined ? {} : { browserSurfaceReadinessTimeoutMs }),
     ...(beforeBrowserSurfaceLeaseRelease ? { beforeBrowserSurfaceLeaseRelease } : {}),
+    ...(describeBrowserSurfaceStartFailure ? { describeBrowserSurfaceStartFailure } : {}),
     ...(browserSurfaceReclaimRetryAttempts === undefined ? {} : { browserSurfaceReclaimRetryAttempts }),
     browserSurfaceReclaimRetryDelayMs,
     connectorPathResolver,
@@ -605,6 +610,50 @@ test("host endpoint failure fails controller admission before connector spawn", 
   assert.equal(calls.runConnector, 0);
   assert.equal(hostCalls, 1);
   assert.equal(manager.getLease("lease_1")?.wait_reason, "surface_start_failed");
+});
+
+test("host endpoint 500 with a structured sandbox-unavailable body surfaces browser_surface_failure on the RunNowResult", async (t) => {
+  let hostCalls = 0;
+  const hostFetch = (async () => {
+    hostCalls += 1;
+    return {
+      json: async () => ({
+        error: "browser_sandbox_unavailable",
+        message:
+          "This Linux distribution blocks the bundled browser's sandbox. Install Google Chrome or Chromium from a .deb package.",
+      }),
+      ok: false,
+      status: 500,
+    } as Response;
+  }) as typeof fetch;
+  const hostAllocator = createHostBrowserSurfaceAllocator({
+    endpoint: "http://127.0.0.1:9916/agent",
+    fetchImpl: hostFetch,
+    headless: false,
+    token: "shared-secret",
+  });
+  const { calls, controller, manager } = setup(t, {
+    beforeBrowserSurfaceLeaseEnsure: (binding) => hostAllocator.bindRunToSurface(binding),
+    browserSurfaceAllocator: hostAllocator,
+    describeBrowserSurfaceStartFailure: (args) => hostAllocator.lastStartFailure(args.runId),
+    manager: createDynamicManager(),
+  });
+
+  const result = await controller.runNow("managed", {
+    manifest: MANIFEST,
+    ownerToken: "owner-token",
+    runId: "run_host_sandbox_unavailable",
+  });
+
+  assert.equal(result.status, "surface_failed");
+  assert.equal(calls.runConnector, 0);
+  assert.equal(hostCalls, 1);
+  assert.equal(manager.getLease("lease_1")?.wait_reason, "surface_start_failed");
+  assert.equal(result.browser_surface_failure?.code, "browser_sandbox_unavailable");
+  assert.match(
+    result.browser_surface_failure?.message ?? "",
+    /This Linux distribution blocks the bundled browser's sandbox/
+  );
 });
 
 test("host lease CDP URL reaches readiness and release uses the owning run identity", async (t) => {
