@@ -24,6 +24,7 @@
  */
 
 import { type ConnectorCatalogEntry, isExperimentalEntry, isOwnerActionableEntry } from "./connection-catalog.ts";
+import type { ConnectorInstallActivationState } from "./connector-install-presentation.ts";
 
 export interface SourceSetupStatus {
   /** One short owner-facing exception label; supported is the implied default. */
@@ -549,6 +550,27 @@ export function sourceSetupAction(entry: ConnectorCatalogEntry): SourceSetupActi
     default:
       return null;
   }
+}
+
+/**
+ * The setup action a catalog card renders, given the connector's package state
+ * (`null` when the install route is not available on this server). Every setup
+ * route reads the registered manifest from the reference, so a connector that is
+ * neither registered nor in the package catalog has no working action: its
+ * setup page answers 404.
+ */
+export function sourceSetupCardAction(
+  entry: ConnectorCatalogEntry,
+  packageState: ConnectorInstallActivationState | null,
+  packageAvailabilityUnknown: boolean
+): SourceSetupAction | null {
+  if (sourceSetupRowIsUnavailable(entry) || packageAvailabilityUnknown || packageState === "not_installed") {
+    return null;
+  }
+  if (packageState === "not_listed" && entry.registrationStatus !== "registered") {
+    return null;
+  }
+  return sourceSetupAction(entry);
 }
 
 export function sourceSetupSecondaryAction(_entry: ConnectorCatalogEntry): SourceSetupAction | null {

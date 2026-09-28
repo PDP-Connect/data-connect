@@ -22,7 +22,7 @@ test("source cards make package installation the next step before Add account", 
   )
   assert.match(
     source,
-    /const action = packageNeedsInstall \|\| packageAvailabilityUnknown \|\| isUnavailable \? null : sourceSetupAction\(entry\)/
+    /const action = sourceSetupCardAction\(entry, installModel\?\.activationState \?\? null, packageAvailabilityUnknown\)/
   )
   assert.match(source, /packageNeedsInstall && installModel\?\.action/)
   assert.match(source, /data-testid="connector-install-next-step"/)

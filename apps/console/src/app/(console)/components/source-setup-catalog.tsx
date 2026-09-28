@@ -16,7 +16,7 @@ import { connectorInstallRowModel, connectorLookupKey } from "../lib/connector-i
 import type { RefCountState } from "../lib/ref-client.ts";
 import {
   browserBoundWithStoredCredentials,
-  sourceSetupAction,
+  sourceSetupCardAction,
   sourceSetupAvailability,
   sourceSetupContext,
   sourceSetupGuidance,
@@ -459,7 +459,7 @@ function SourceSetupCard({
   const installModel = installLifecycle ? connectorInstallRowModel(entry, installLifecycle) : null;
   const packageAvailabilityUnknown = installCatalogTransientlyUnavailable && !installLifecycle?.installed;
   const packageNeedsInstall = !isUnavailable && installModel?.activationState === "not_installed";
-  const action = packageNeedsInstall || packageAvailabilityUnknown || isUnavailable ? null : sourceSetupAction(entry);
+  const action = sourceSetupCardAction(entry, installModel?.activationState ?? null, packageAvailabilityUnknown);
   const secondaryAction = sourceSetupSecondaryAction(entry);
   return (
     <li
