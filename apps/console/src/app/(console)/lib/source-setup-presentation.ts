@@ -207,7 +207,7 @@ export function sourceSetupStatus(entry: ConnectorCatalogEntry): SourceSetupStat
     // Collapsing these into one badge would hide exactly the distinction the
     // owner needs to decide whether clicking a card can do anything. "Not
     // built yet" reads as a known roadmap gap (part of the shared "not
-    // available yet" family with "Not packaged yet" below), never as a
+    // available yet" family), never as a
     // broken build.
     return entry.isKnownScaffold
       ? {

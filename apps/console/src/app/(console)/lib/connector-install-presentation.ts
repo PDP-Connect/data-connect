@@ -129,6 +129,19 @@ export function buildConnectorInstallLifecycleByConnector(
   return Object.fromEntries(lifecycleByConnector);
 }
 
+/**
+ * True when the owner can neither install nor set up this connector here: the
+ * package catalog has no artifact for it, no package is installed, and the
+ * reference has not registered it. `null` lifecycle means the install route is
+ * not available on this server, so there is no package fact to act on.
+ */
+export function isUninstallableCatalogEntry(
+  entry: ConnectorCatalogEntry,
+  lifecycle: ConnectorInstallLifecycle | null
+): boolean {
+  return lifecycle !== null && !lifecycle.catalog && !lifecycle.installed && entry.registrationStatus !== "registered";
+}
+
 export function connectorInstallRowModel(
   entry: ConnectorCatalogEntry,
   lifecycle: ConnectorInstallLifecycle
@@ -138,10 +151,10 @@ export function connectorInstallRowModel(
   const hostBlockReason = explicitBindingBlockReason(target?.bindings ?? installed?.bindings ?? {});
   let activationState: ConnectorInstallActivationState = "not_listed";
   // "not_listed" means the OCI catalog has never carried an artifact for
-  // this connector, so there is nothing to install and no action this owner
-  // can take — part of the shared "not available yet" family with the
-  // scaffold ("Not built yet") and development-hidden states.
-  let activationLabel = "Not packaged yet";
+  // this connector, so there is nothing to install. A registered connector in
+  // this state came with the app; an unregistered one is hidden from the
+  // Add data list (see `isUninstallableCatalogEntry`).
+  let activationLabel = entry.registrationStatus === "registered" ? "Included" : "Not available in this app";
   let action: ConnectorInstallAction | null = null;
 
   if (installed) {

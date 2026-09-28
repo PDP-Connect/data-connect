@@ -17,6 +17,7 @@ import {
   buildConnectorInstallLifecycleByConnector,
   connectorInstallRowModel,
   connectorLookupKey,
+  isUninstallableCatalogEntry,
   shortConnectorDigest,
 } from "./connector-install-presentation.ts";
 
@@ -184,4 +185,30 @@ test("a catalog row without latest=true does not invent an install target", () =
   });
   assert.equal(historical.activationState, "not_installed");
   assert.equal(historical.action, null);
+});
+
+test("a connector with no package, no install, and no registration is not installable", () => {
+  const catalog = parseConnectorInstallCatalogResponse(connectorInstallCatalogFixture).data;
+  const status = parseConnectorInstallStatusResponse(connectorInstallStatusFixture).data;
+  const lifecycles = buildConnectorInstallLifecycleByConnector(catalog, status);
+  const none = { catalog: null, installed: null };
+
+  // Slack as the owner saw it: listed by a local manifest, absent from the
+  // package catalog and install status, and not registered.
+  assert.equal(lifecycles.slack, undefined);
+  assert.equal(isUninstallableCatalogEntry(entry("slack"), none), true);
+
+  assert.equal(isUninstallableCatalogEntry({ ...entry("slack"), registrationStatus: "registered" }, none), false);
+  assert.equal(isUninstallableCatalogEntry(entry("github"), lifecycles.github ?? null), false);
+  assert.equal(isUninstallableCatalogEntry(entry("imessage"), lifecycles.imessage ?? null), false);
+  assert.equal(isUninstallableCatalogEntry(entry("slack"), null), false);
+});
+
+test("no package state reads Not packaged yet", () => {
+  const none = { catalog: null, installed: null };
+  const registered = connectorInstallRowModel({ ...entry("slack"), registrationStatus: "registered" }, none);
+  assert.equal(registered.activationState, "not_listed");
+  assert.equal(registered.activationLabel, "Included");
+  assert.equal(registered.action, null);
+  assert.notEqual(connectorInstallRowModel(entry("slack"), none).activationLabel, "Not packaged yet");
 });

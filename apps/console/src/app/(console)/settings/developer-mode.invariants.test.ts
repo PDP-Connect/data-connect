@@ -54,7 +54,7 @@ test("developer-only connector surfaces share one settings gate", async () => {
     readFile(SHELL_FILE, "utf8"),
   ])
 
-  assert.match(catalog, /filterCatalogForDevelopmentVisibility\(catalog, developerMode\)/)
+  assert.match(catalog, /filterCatalogForDevelopmentVisibility\(installableCatalog, developerMode\)/)
   assert.match(panel, /if \(!developerMode\) \{/)
   assert.match(setting, /setDeveloperMode\(event\.currentTarget\.checked\)/)
   assert.match(page, /<DeveloperModeSetting \/>/)
