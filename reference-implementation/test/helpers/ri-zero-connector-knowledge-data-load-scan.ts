@@ -157,20 +157,26 @@ const MANIFEST_ROOTS = [
  */
 const SANCTIONED_POLICY_RESOURCES: ReadonlyMap<string, ReadonlySet<string>> = new Map([]);
 
-const POLYFILL_MANIFEST_READ_SITE = "reference-implementation/server/polyfill-manifest-reconcile.ts:99";
+const POLYFILL_MANIFEST_READ_SITE = 'reference-implementation/server/polyfill-manifest-reconcile.ts::readManifestJson::readFile(path, "utf8")';
 
 /**
- * Closed, human-reviewed allowlist of call sites (file + 1-indexed line of
- * the read call) that consume JSON but were individually inspected and
- * confirmed to never carry connector/provider identity: CLI-operator-
- * supplied paths (cache files, stdin/`-`, artifact staging paths), quality-
- * ratchet/build tooling reading its own baseline/config files, and the
- * repo's own `package.json`. Each entry records WHY in a trailing comment so
+ * Closed, human-reviewed allowlist of call sites that consume JSON but were
+ * individually inspected and confirmed to never carry connector/provider
+ * identity: CLI-operator-supplied paths (cache files, stdin/`-`, artifact
+ * staging paths), quality-ratchet/build tooling reading its own
+ * baseline/config files, and the repo's own `package.json`. Each entry records WHY in a trailing comment so
  * a future reviewer can re-verify rather than trust the list blindly. Adding
  * an entry here is a real security decision, same bar as
- * `SANCTIONED_POLICY_RESOURCES` — it must be re-derived if the line moves
- * for an unrelated reason (a stale entry simply stops matching and the call
- * site starts failing the gate again, fail-closed by construction).
+ * `SANCTIONED_POLICY_RESOURCES`.
+ *
+ * Each entry is `<file>::<owner>::<call text>` (see `sanctionedSiteKey`): the
+ * nearest named function, method, or variable/property-assigned function,
+ * and the call's source with whitespace collapsed. An edit above the call
+ * does not move the key; an edit to the call itself or a rename of its owner
+ * does, and the site then fails the gate until someone re-reviews it. The
+ * whole-repository scan also requires each entry to match exactly one call
+ * site (`sanctionedCallSiteExactnessViolations`), so a dead entry or a copied
+ * call in the same function fails the gate.
  */
 const SANCTIONED_GENERIC_DATA_READ_CALL_SITES: ReadonlySet<string> = new Set([
   // cpu-quota.ts reads /proc/self/cgroup and /proc/self/mountinfo -- Linux
@@ -185,46 +191,32 @@ const SANCTIONED_GENERIC_DATA_READ_CALL_SITES: ReadonlySet<string> = new Set([
   // documented /proc/${pid}/status false-positive class (see this file's own
   // checkReadFileCall comment), not a connector/provider identity read.
   // cgroupMounted()'s own presence probe:
-  "reference-implementation/server/cpu-quota.ts:150",
+  'reference-implementation/server/cpu-quota.ts::cgroupMounted::readFileSync("/proc/self/cgroup", "utf8")',
   // resolveV2CgroupDir()'s mountinfo + cgroup reads:
-  "reference-implementation/server/cpu-quota.ts:580",
-  "reference-implementation/server/cpu-quota.ts:585",
+  'reference-implementation/server/cpu-quota.ts::resolveV2CgroupDir::probe.readFile("/proc/self/mountinfo")',
+  'reference-implementation/server/cpu-quota.ts::resolveV2CgroupDir::probe.readFile("/proc/self/cgroup")',
   // resolveV1ControllerDir()'s mountinfo + cgroup reads:
-  "reference-implementation/server/cpu-quota.ts:626",
-  "reference-implementation/server/cpu-quota.ts:631",
+  'reference-implementation/server/cpu-quota.ts::resolveV1ControllerDir::probe.readFile("/proc/self/mountinfo")',
+  'reference-implementation/server/cpu-quota.ts::resolveV1ControllerDir::probe.readFile("/proc/self/cgroup")',
   // readJson<T>(path): path is the CLI's own token-cache directory, operator/OS-derived, never connector-identity data.
-  "reference-implementation/cli/lib/cache.ts:125",
+  'reference-implementation/cli/lib/cache.ts::readJson::readFileSync(path, "utf8")',
   // readJsonInput(pathOrDash): explicit CLI `--file`/stdin argument, generic JSON-in-JSON-out CLI utility.
-  "reference-implementation/cli/lib/common.ts:35",
-  // check-direct-prepare-conformance.ts is itself a lint tool; it reads the file paths given to it by its own CLI arguments to scan their text, not connector policy.
-  "reference-implementation/scripts/check-direct-prepare-conformance.ts:102",
-  // run-tests.ts reads an optional operator-supplied --accounting-authority path; test-accounting shape, not connector identity.
-  "reference-implementation/scripts/run-tests.ts:90",
+  'reference-implementation/cli/lib/common.ts::readJsonInput::readFileSync(pathOrDash, "utf8")',
+  'reference-implementation/cli/lib/common.ts::readJsonInput::readFileSync(0, "utf8")',
   // deploy-canary.ts main() reads resolve(args.manifest) -- the operator's own
   // --manifest CLI argument, same class as cli/lib/common.ts:35. The file it
   // names is a canary metric manifest (checks, thresholds, artifact
   // assertions); parseManifest validates its shape and rejects anything else,
   // so it can carry no connector policy the harness would act on.
-  // Line-pinned by design: re-derive if an edit above the call site moves it.
-  "reference-implementation/scripts/canary/deploy-canary.ts:606",
+  'reference-implementation/scripts/canary/deploy-canary.ts::main::readFileSync(resolve(args.manifest), "utf8")',
   // apply-browser-surface-replacement-correction.ts reads an operator-supplied --artifact repair-script path.
-  "reference-implementation/scripts/repair/apply-browser-surface-replacement-correction.ts:112",
+  'reference-implementation/scripts/repair/apply-browser-surface-replacement-correction.ts::main::readFile(resolve(args.artifact || ""), "utf8")',
   // quality-ratchet tooling reads its own mass-baseline.json/package.json config, no connector identity.
-  "reference-implementation/scripts/quality-ratchet/measure-mass.ts:243",
-  "reference-implementation/scripts/quality-ratchet/mass-delta-report.ts:134",
-  "reference-implementation/scripts/quality-ratchet/check-mass-ratchet.ts:94",
+  'reference-implementation/scripts/quality-ratchet/measure-mass.ts::readPinnedBiomeVersion::readFile(packageJsonPath, "utf8")',
+  'reference-implementation/scripts/quality-ratchet/mass-delta-report.ts::baselineMass::readFile(BASELINE_PATH, "utf8")',
+  'reference-implementation/scripts/quality-ratchet/check-mass-ratchet.ts::readJsonFile::readFile(filePath, "utf8")',
   // reference-revision.ts reads the repo's own package.json for its version string.
-  "reference-implementation/server/reference-revision.ts:17",
-  // Recovery startup markers live under the operator's PDPP_DATA_DIR. Their
-  // JSON controls one-time recovery transitions and contains no connector or
-  // provider identity/policy; keep these exact read sites pinned so edits
-  // still require re-review.
-  // Re-derived 2026-09-28: the call sites moved from 2222/2292 to 2226/2296
-  // as part of the w20/owner-token-leak rebase onto integration/unified-stack
-  // (#292/#294/#295/#296/#297 added lines above them); the functions
-  // themselves are unchanged.
-  "reference-implementation/server/index.ts:2226",
-  "reference-implementation/server/index.ts:2296",
+  'reference-implementation/server/reference-revision.ts::readPackageVersion::readFileSync(PACKAGE_JSON_PATH, "utf8")',
   // createFileConnectorInstallStore() reads the operator-managed
   // PDPP_DATA_DIR connector activation state. Connector ids in this file are
   // runtime data supplied by the owner, not RI-committed provider knowledge.
@@ -232,7 +224,7 @@ const SANCTIONED_GENERIC_DATA_READ_CALL_SITES: ReadonlySet<string> = new Set([
   // feat/docker-connectors-from-catalog and feat/developer-connector-sources
   // (both merged 2026-09-16, after this entry was last pinned) added lines
   // above it -- the function itself is unchanged.
-  "reference-implementation/server/connector-install/index.ts:115",
+  'reference-implementation/server/connector-install/index.ts::read::readFileSync(statePath, "utf8")',
   // createFileLocalConnectorSourceStore() in local-source.ts: same shape and
   // reasoning as connector-install/index.ts above -- statePath is
   // join(dataDir, "connector-local-sources.json"), a fixed RI-owned literal
@@ -240,12 +232,29 @@ const SANCTIONED_GENERIC_DATA_READ_CALL_SITES: ReadonlySet<string> = new Set([
   // tracks developer-local source selections (opaque connectorId keys are
   // runtime data the operator supplied when adding a local source), not
   // RI-committed provider/connector policy.
-  "reference-implementation/server/connector-install/local-source.ts:327",
+  'reference-implementation/server/connector-install/local-source.ts::read::readFileSync(statePath, "utf8")',
+  // readCredentialRecoveryStateMarker() reads a fixed filename under
+  // PDPP_DATA_DIR ("credential-recovery-state.json"). This is operator/runtime
+  // recovery state written by the recovery kit, not RI-committed connector
+  // policy or provider identity data.
+  // Re-derived 2026-09-26: moving the cross-tree main-module helper into the
+  // RI tree added one import line before this fixed runtime-state read.
+  // Re-derived 2026-09-28: the ownerPasswordManagedByDesktop server option
+  // added two lines above it.
+  'reference-implementation/server/index.ts::readCredentialRecoveryStateMarker::readFileSync(recoveryStatePath, "utf8")',
+  // applyRecoveryOwnerSessionReset() reads a fixed filename under PDPP_DATA_DIR
+  // ("owner-session-recovery-reset.json"). It is consumed only as an owner
+  // session reset marker for recovered deployments.
+  // Re-derived 2026-09-26: moving the cross-tree main-module helper into the
+  // RI tree added one import line before this fixed runtime-state read.
+  // Re-derived 2026-09-28: the ownerPasswordManagedByDesktop server option
+  // added two lines above it.
+  'reference-implementation/server/index.ts::applyRecoveryOwnerSessionReset::readFileSync(resetPath, "utf8")',
   // readRequestState(path) reads owner-password window request state from
   // fixed filenames under PDPP_DATA_DIR. The JSON contains request status and
   // OS reauth handoff state, never connector/provider policy.
   // Re-derived 2026-09-28: ownerPasswordManagedByDesktop() was added above it.
-  "reference-implementation/server/owner-password-owner-set.ts:161",
+  'reference-implementation/server/owner-password-owner-set.ts::readRequestState::readFile(path, "utf8")',
   // readManifest(root) in local-source.ts: readFileSync(manifestPath, "utf8")
   // where manifestPath is confinedFile(root, MANIFEST_PATH, ...) --
   // MANIFEST_PATH is the fixed literal "profile/collection-profile.json" and
@@ -256,7 +265,7 @@ const SANCTIONED_GENERIC_DATA_READ_CALL_SITES: ReadonlySet<string> = new Set([
   // caller-supplied, the filename component is an RI-owned generic literal,
   // and this feature is explicitly unsigned/unregistered developer tooling
   // (see this file's own module doc comment), not connector catalog data.
-  "reference-implementation/server/connector-install/local-source.ts:150",
+  'reference-implementation/server/connector-install/local-source.ts::readManifest::readFileSync(manifestPath, "utf8")',
   // readManifestJson(path) in polyfill-manifest-reconcile.ts: both call sites
   // pass join(<manifest-dir>, entryName), where the dir is
   // defaultReferenceFixturesDir() (resolve()'d off the sanctioned reference
@@ -277,9 +286,6 @@ const SANCTIONED_GENERIC_DATA_READ_CALL_SITES: ReadonlySet<string> = new Set([
   // default shipped set moved to the verified install store and
   // defaultPolyfillManifestsDir() was removed -- the function itself is
   // unchanged.
-  // This entry is line-pinned by design (see this array's own doc comment
-  // above); it must be re-derived whenever an edit anywhere above the call
-  // site shifts it.
   POLYFILL_MANIFEST_READ_SITE,
   // readReviewedCompactionResidueMap() in version-disposition.ts:
   // readFileSync(path, "utf8") where `path` is compactionResidueReviewPath()
@@ -293,7 +299,7 @@ const SANCTIONED_GENERIC_DATA_READ_CALL_SITES: ReadonlySet<string> = new Set([
   // already covers (cache.ts:125, common.ts:35 above). Verified by direct
   // inspection: `path` here is never derived from a connector_id/stream, only
   // from an env var with a fixed /var/lib/pdpp-relative default.
-  "reference-implementation/server/version-disposition.ts:238",
+  'reference-implementation/server/version-disposition.ts::readReviewedCompactionResidueMap::readFileSync(path, "utf8")',
   // loadMappings(path) in connector-instance-groups-migrate.ts: readFileSync(path, "utf8")
   // where `path` is the operator's own CLI positional argument (the grouping
   // mappings JSON file), the same class of call this allowlist already
@@ -301,7 +307,7 @@ const SANCTIONED_GENERIC_DATA_READ_CALL_SITES: ReadonlySet<string> = new Set([
   // file path, never a connector-identity path. The mapping file's CONTENT is
   // owner/operator-authored evidence about connector_instance_id groupings
   // (opaque ids), not connector/provider policy data.
-  "reference-implementation/scripts/connector-instance-groups-migrate.ts:89",
+  'reference-implementation/scripts/connector-instance-groups-migrate.ts::loadMappings::readFileSync(path, "utf8")',
   // guardUndiciDispatcher() in hermetic/guard.ts: dynamic
   // import(pathToFileURL(resolved).href) where `resolved` is
   // `req.resolve("undici")` -- Node's OWN CommonJS module resolver (from a
@@ -323,9 +329,7 @@ const SANCTIONED_GENERIC_DATA_READ_CALL_SITES: ReadonlySet<string> = new Set([
   // `req.resolve(...)` from being MISREAD as `path.resolve(...)` and
   // fabricating a bogus relative-path violation instead of this correct,
   // narrower "genuinely unresolvable, but provably a code load" one).
-  // Line-pinned by design (see this array's own doc comment above); it must
-  // be re-derived if an edit above the call site moves it.
-  "reference-implementation/scripts/hermetic/guard.ts:426",
+  "reference-implementation/scripts/hermetic/guard.ts::guardUndiciDispatcher::import(pathToFileURL(resolved).href)",
   // readPolyfillManifests() in generate-connector-registry.ts:
   // readFileSync(resolve(manifestsDir, file), "utf8") where `manifestsDir =
   // process.env.PDPP_POLYFILL_MANIFESTS_DIR || resolve(packageSrcDir, "..",
@@ -345,9 +349,7 @@ const SANCTIONED_GENERIC_DATA_READ_CALL_SITES: ReadonlySet<string> = new Set([
   // call site); this one is functionally identical but ONE level of `||`
   // indirection deeper than the bounded folder follows. Verified by direct
   // inspection, not by the scanner.
-  // Line-pinned by design (see this array's own doc comment above); it must
-  // be re-derived if an edit above the call site moves it.
-  "reference-implementation/scripts/generate-connector-registry.ts:104",
+  'reference-implementation/scripts/generate-connector-registry.ts::readPolyfillManifests::readFileSync(resolve(manifestsDir, file), "utf8")',
   // readOwner(ownerPath) in with-local-full-suite-lock.mjs: readFileSync(ownerPath,
   // "utf8") where `ownerPath = resolve(lockPath, OWNER_NAME)`, `lockPath =
   // resolve(gitCommonDirectory(), LOCK_NAME)`, and `gitCommonDirectory()` runs
@@ -363,7 +365,7 @@ const SANCTIONED_GENERIC_DATA_READ_CALL_SITES: ReadonlySet<string> = new Set([
   // connector/provider policy data. Verified by direct inspection, not by
   // the scanner (no rule here folds an `execFileSync` call result as a path
   // anchor, matching this scanner's stated bounded-resolver scope).
-  "reference-implementation/scripts/test-accounting/with-local-full-suite-lock.mjs:44",
+  'reference-implementation/scripts/test-accounting/with-local-full-suite-lock.mjs::readOwner::readFileSync(ownerPath, "utf8")',
   // main(manifestPath, repoRoot) in check-test-backends.ts: readFileSync(manifestPath,
   // "utf8") where `manifestPath` is the operator's own CLI positional
   // argument (process.argv[2]), same class as deploy-canary.ts:606 and
@@ -372,9 +374,7 @@ const SANCTIONED_GENERIC_DATA_READ_CALL_SITES: ReadonlySet<string> = new Set([
   // per tracked test-file path); checkBackendManifest validates its shape
   // and rejects any entry that disagrees with the file's own imports, so it
   // can carry no connector/provider identity the harness would act on.
-  // Line-pinned by design (see this array's own doc comment above); it must
-  // be re-derived if an edit above the call site moves it.
-  "reference-implementation/scripts/check-test-backends.ts:285",
+  'reference-implementation/scripts/check-test-backends.ts::main::readFileSync(manifestPath, "utf8")',
 ]);
 
 /** Directory segments, relative to a production scan root (e.g. `server/`),
@@ -1396,7 +1396,8 @@ export function scanFileDataLoads(
   relPath: string,
   repoRoot: string,
   connectorKeys: ReadonlySet<string> = new Set(),
-  validationKinds: ReadonlySet<string> = new Set()
+  validationKinds: ReadonlySet<string> = new Set(),
+  sanctionedSiteHits?: Map<string, number>
 ): DataLoadViolation[] {
   const raw = readFileSync(absPath, "utf8");
   let program: Node;
@@ -1486,6 +1487,18 @@ export function scanFileDataLoads(
     return found;
   }
 
+  /** Allowlist lookup for one call site, keyed by content (see
+   * {@link sanctionedSiteKey}). Counts every hit in `sanctionedSiteHits` so
+   * the caller can check that each entry matches exactly one site. */
+  function isSanctionedSite(node: Node, ancestors: Node[]): boolean {
+    const key = sanctionedSiteKey(relPath, raw, node, ancestors);
+    if (!SANCTIONED_GENERIC_DATA_READ_CALL_SITES.has(key)) {
+      return false;
+    }
+    sanctionedSiteHits?.set(key, (sanctionedSiteHits.get(key) ?? 0) + 1);
+    return true;
+  }
+
   const violations: DataLoadViolation[] = [];
   const reportedLines = new Set<number>();
 
@@ -1570,19 +1583,23 @@ export function scanFileDataLoads(
   }
 
   /** Rule (6): eval(...) and child_process shell-exec calls, prohibited outright. Returns true if this call site was handled (report or no-op). */
-  function checkProhibitedEvasionMechanism(node: Node, callee: Node): boolean {
+  function checkProhibitedEvasionMechanism(node: Node, callee: Node, ancestors: Node[]): boolean {
     if (node.type !== "CallExpression" || !isProhibitedEvasionMechanismCall(callee, childProcessShellExecBindings)) {
       return false;
     }
-    const siteKey = `${relPath}:${lineOf(node)}`;
-    if (!SANCTIONED_GENERIC_DATA_READ_CALL_SITES.has(siteKey)) {
+    if (!isSanctionedSite(node, ancestors)) {
       report(node, "prohibited-data-load-evasion-mechanism");
     }
     return true;
   }
 
   /** require(...) reaching a sibling JSON/YAML resource. Returns true if this call site was handled. */
-  function checkRequireCall(node: Node, callee: Node, enclosingFunctionName: string | null): boolean {
+  function checkRequireCall(
+    node: Node,
+    callee: Node,
+    enclosingFunctionName: string | null,
+    ancestors: Node[]
+  ): boolean {
     if (!(node.type === "CallExpression" && isIdentifier(callee, "require"))) {
       return false;
     }
@@ -1590,26 +1607,26 @@ export function scanFileDataLoads(
     if (!first) {
       return true;
     }
-    return checkResolvedImportLikeSource(node, first, enclosingFunctionName);
+    return checkResolvedImportLikeSource(node, first, enclosingFunctionName, ancestors);
   }
 
   /** Dynamic `import(...)` reaching a sibling JSON/YAML resource. Babel parser
    * versions have represented this as either `ImportExpression.source` or
    * `CallExpression` with an `Import` callee, so support both AST shapes. */
-  function checkDynamicImportExpression(node: Node, enclosingFunctionName: string | null): boolean {
+  function checkDynamicImportExpression(node: Node, enclosingFunctionName: string | null, ancestors: Node[]): boolean {
     if (node.type === "ImportExpression") {
       const source = nodeField(node, "source");
       if (!source) {
         return true;
       }
-      return checkResolvedImportLikeSource(node, source, enclosingFunctionName);
+      return checkResolvedImportLikeSource(node, source, enclosingFunctionName, ancestors);
     }
     if (node.type === "CallExpression" && (node.callee as Node)?.type === "Import") {
       const [first] = nodeArrayField(node, "arguments");
       if (!first) {
         return true;
       }
-      return checkResolvedImportLikeSource(node, first, enclosingFunctionName);
+      return checkResolvedImportLikeSource(node, first, enclosingFunctionName, ancestors);
     }
     return false;
   }
@@ -1617,9 +1634,13 @@ export function scanFileDataLoads(
   /** Shared resolution/classification tail for `require(...)`'s and dynamic
    * `import(...)`'s first argument/`source`. Always returns true (the call site was
    * handled) — callers only reach this once they've confirmed the node shape matches. */
-  function checkResolvedImportLikeSource(node: Node, first: Node, enclosingFunctionName: string | null): boolean {
-    const siteKey = `${relPath}:${lineOf(node)}`;
-    if (SANCTIONED_GENERIC_DATA_READ_CALL_SITES.has(siteKey)) {
+  function checkResolvedImportLikeSource(
+    node: Node,
+    first: Node,
+    enclosingFunctionName: string | null,
+    ancestors: Node[]
+  ): boolean {
+    if (isSanctionedSite(node, ancestors)) {
       return true;
     }
     // A bare specifier (no leading "./" or "../") — an npm package name,
@@ -1650,7 +1671,8 @@ export function scanFileDataLoads(
     node: Node,
     callee: Node,
     parent: Node | null,
-    enclosingFunctionName: string | null
+    enclosingFunctionName: string | null,
+    ancestors: Node[]
   ): boolean {
     const name = node.type === "CallExpression" ? calleeName(callee) : null;
     if (!(node.type === "CallExpression" && (name === "readFileSync" || name === "readFile"))) {
@@ -1660,7 +1682,7 @@ export function scanFileDataLoads(
     if (!first) {
       return true;
     }
-    const siteKey = `${relPath}:${lineOf(node)}`;
+    const siteKey = sanctionedSiteKey(relPath, raw, node, ancestors);
     const second = nodeArrayField(node, "arguments")[1];
     // This one reviewed site is exempt only for the exact production shape:
     // awaited `readFile(path, "utf8")` whose result reaches JSON.parse.
@@ -1673,7 +1695,7 @@ export function scanFileDataLoads(
       second?.type === "StringLiteral" &&
       second.value === "utf8" &&
       flowsIntoJsonParse(node, parent);
-    if (SANCTIONED_GENERIC_DATA_READ_CALL_SITES.has(siteKey)) {
+    if (isSanctionedSite(node, ancestors)) {
       if (siteKey === POLYFILL_MANIFEST_READ_SITE && !matchesPolyfillManifestReadShape) {
         report(node, "unresolvable-data-resource-load");
       }
@@ -1722,7 +1744,8 @@ export function scanFileDataLoads(
     node: Node,
     callee: Node,
     parent: Node | null,
-    enclosingFunctionName: string | null
+    enclosingFunctionName: string | null,
+    ancestors: Node[]
   ): void {
     if (!(node.type === "NewExpression" && isIdentifier(callee, "URL"))) {
       return;
@@ -1737,8 +1760,7 @@ export function scanFileDataLoads(
     if (!(first && second && isImportMetaUrl(second))) {
       return;
     }
-    const siteKey = `${relPath}:${lineOf(node)}`;
-    if (SANCTIONED_GENERIC_DATA_READ_CALL_SITES.has(siteKey)) {
+    if (isSanctionedSite(node, ancestors)) {
       return;
     }
     const resolved = resolvePathArgument(first, analysis, enclosingFunctionName);
@@ -1753,7 +1775,7 @@ export function scanFileDataLoads(
     const enclosingFunctionName = enclosingFunctionNameOf(ancestors);
 
     if (node.type === "ImportExpression") {
-      checkDynamicImportExpression(node, enclosingFunctionName);
+      checkDynamicImportExpression(node, enclosingFunctionName, ancestors);
       return;
     }
     if (node.type !== "CallExpression" && node.type !== "NewExpression") {
@@ -1761,19 +1783,19 @@ export function scanFileDataLoads(
     }
     const callee = node.callee as Node;
 
-    if (checkProhibitedEvasionMechanism(node, callee)) {
+    if (checkProhibitedEvasionMechanism(node, callee, ancestors)) {
       return;
     }
-    if (checkRequireCall(node, callee, enclosingFunctionName)) {
+    if (checkRequireCall(node, callee, enclosingFunctionName, ancestors)) {
       return;
     }
-    if (checkDynamicImportExpression(node, enclosingFunctionName)) {
+    if (checkDynamicImportExpression(node, enclosingFunctionName, ancestors)) {
       return;
     }
-    if (checkReadFileCall(node, callee, parent, enclosingFunctionName)) {
+    if (checkReadFileCall(node, callee, parent, enclosingFunctionName, ancestors)) {
       return;
     }
-    checkStandaloneNewUrl(node, callee, parent, enclosingFunctionName);
+    checkStandaloneNewUrl(node, callee, parent, enclosingFunctionName, ancestors);
   });
 
   // Static `import x from "./y.json" with { type: "json" }` (or legacy
@@ -1799,14 +1821,87 @@ export function scanFileDataLoads(
       report(stmt, "unresolvable-data-resource-load");
       continue;
     }
-    const siteKey = `${relPath}:${lineOf(stmt)}`;
-    if (SANCTIONED_GENERIC_DATA_READ_CALL_SITES.has(siteKey)) {
+    if (isSanctionedSite(stmt, [program])) {
       continue;
     }
     const resolved: ResolvedPath = { kind: "static", relPath: joinRelative(analysis.fileDir, source.value as string) };
     classifyResolved(resolved, stmt);
   }
 
+  return violations;
+}
+
+/**
+ * Name of the nearest enclosing named function, method, or function/arrow
+ * assigned to a variable or property; `<module>` at top level. Anonymous
+ * functions are skipped. This is a stable label for allowlist keys only; it
+ * is not a resolver scope like `enclosingFunctionNameOf`.
+ */
+function allowlistOwnerNameOf(ancestors: Node[]): string {
+  for (let i = ancestors.length - 1; i >= 0; i -= 1) {
+    const name = ownNameOf(ancestors[i] as Node, ancestors[i - 1]);
+    if (name !== null) {
+      return name;
+    }
+  }
+  return "<module>";
+}
+
+/** The name a function-like node carries itself or through the variable or
+ * property it is assigned to; null for anything else. */
+function ownNameOf(node: Node, holder: Node | undefined): string | null {
+  let nameNode: Node | null | undefined = null;
+  if (node.type === "FunctionDeclaration" || node.type === "FunctionExpression") {
+    nameNode = node.id as Node | null | undefined;
+  } else if (node.type === "ClassMethod" || node.type === "ObjectMethod") {
+    nameNode = node.key as Node;
+  }
+  const isAnonymousFunction =
+    !nameNode && (node.type === "ArrowFunctionExpression" || node.type === "FunctionExpression");
+  if (isAnonymousFunction && holder?.type === "VariableDeclarator") {
+    nameNode = holder.id as Node;
+  } else if (isAnonymousFunction && (holder?.type === "ObjectProperty" || holder?.type === "ClassProperty")) {
+    nameNode = holder.key as Node;
+  }
+  return nameNode?.type === "Identifier" ? (nameNode.name as string) : null;
+}
+
+/**
+ * Allowlist key for one call site: `<file>::<owner>::<call text>`, where the
+ * owner comes from {@link allowlistOwnerNameOf} and the call text is the
+ * node's source with whitespace runs collapsed to one space. Unrelated edits
+ * above the call do not change the key.
+ */
+function sanctionedSiteKey(relPath: string, raw: string, node: Node, ancestors: Node[]): string {
+  const callText = raw
+    .slice(node.start ?? 0, node.end ?? 0)
+    .replace(/\s+/g, " ")
+    .trim();
+  return `${relPath}::${allowlistOwnerNameOf(ancestors)}::${callText}`;
+}
+
+/**
+ * Exactness check over a whole-repository scan: each allowlist entry must
+ * match exactly one call site. An entry that matches none is a dead pin; an
+ * entry that matches several would sanction a copied call nobody reviewed.
+ * `sanctionedSiteHits` is the map filled by `scanFileDataLoads` across every
+ * scanned file.
+ */
+export function sanctionedCallSiteExactnessViolations(
+  sanctionedSiteHits: ReadonlyMap<string, number>
+): DataLoadViolation[] {
+  const violations: DataLoadViolation[] = [];
+  for (const key of SANCTIONED_GENERIC_DATA_READ_CALL_SITES) {
+    const hits = sanctionedSiteHits.get(key) ?? 0;
+    if (hits !== 1) {
+      violations.push({
+        file: key.slice(0, key.indexOf("::")),
+        line: 0,
+        rule: hits === 0 ? "sanctioned-call-site-matches-no-site" : "sanctioned-call-site-matches-multiple-sites",
+        snippet: `${key} (${hits} matches)`,
+      });
+    }
+  }
   return violations;
 }
 
