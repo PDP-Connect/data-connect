@@ -59,7 +59,7 @@ test("unavailable rows never offer an install control and sort into a collapsed 
   // The primary action column must also stay empty for an unavailable row.
   assert.match(
     src,
-    /const action = packageNeedsInstall \|\| packageAvailabilityUnknown \|\| isUnavailable \? null : sourceSetupAction\(entry\);/
+    /const action = sourceSetupCardAction\(entry, installModel\?\.activationState \?\? null, packageAvailabilityUnknown\);/
   );
   // Unavailable rows collapse into their own disclosure, separate from the
   // primary scannable list, so N dead rows never sit in the middle of it.
@@ -71,7 +71,7 @@ test("transient install catalog failures disable unknown package actions without
   const src = await readFile(SOURCE_SETUP_CATALOG_FILE, "utf8");
   assert.match(src, /installCatalogTransientlyUnavailable = false/);
   assert.match(src, /const packageAvailabilityUnknown = installCatalogTransientlyUnavailable && !installLifecycle\?\.installed;/);
-  assert.match(src, /packageNeedsInstall \|\| packageAvailabilityUnknown \|\| isUnavailable \? null : sourceSetupAction\(entry\)/);
+  assert.match(src, /const action = sourceSetupCardAction\(entry, installModel\?\.activationState \?\? null, packageAvailabilityUnknown\)/);
   assert.match(src, /data-testid="connector-install-catalog-transient"/);
   assert.match(src, /Package availability is unknown while the catalog is busy; this page will retry once shortly\./);
   assert.match(src, /Package availability is unknown while the catalog is busy; use Retry to check again\./);
