@@ -12,7 +12,11 @@ import { ConnectorMark } from "./connector-mark.tsx";
 import { OpenExternalLink } from "./open-external-link.tsx";
 import type { ConnectorAcquisitionPath, ConnectorCatalogEntry } from "../lib/connection-catalog.ts";
 import type { ConnectorInstallLifecycle } from "../lib/connector-install-presentation.ts";
-import { connectorInstallRowModel, connectorLookupKey } from "../lib/connector-install-presentation.ts";
+import {
+  connectorInstallRowModel,
+  connectorLookupKey,
+  isUninstallableCatalogEntry,
+} from "../lib/connector-install-presentation.ts";
 import type { RefCountState } from "../lib/ref-client.ts";
 import {
   browserBoundWithStoredCredentials,
@@ -435,6 +439,16 @@ function ConnectorCatalogRecoveryNotice({
   );
 }
 
+function installLifecycleFor(
+  entry: ConnectorCatalogEntry,
+  installLifecycleByConnector: Readonly<Record<string, ConnectorInstallLifecycle>> | null | undefined
+): ConnectorInstallLifecycle | null {
+  if (installLifecycleByConnector === null) {
+    return null;
+  }
+  return installLifecycleByConnector?.[connectorLookupKey(entry.connectorKey)] ?? { catalog: null, installed: null };
+}
+
 function SourceSetupCard({
   entry,
   existingSources,
@@ -568,14 +582,7 @@ function SourceSetupCardList({
           existingSources={existingSourcesByConnector?.[entry.connectorKey] ?? []}
           installCatalogRecoveryState={installCatalogRecoveryState}
           installCatalogTransientlyUnavailable={installCatalogTransientlyUnavailable}
-          installLifecycle={
-            installLifecycleByConnector === null
-              ? null
-              : (installLifecycleByConnector?.[connectorLookupKey(entry.connectorKey)] ?? {
-                  catalog: null,
-                  installed: null,
-                })
-          }
+          installLifecycle={installLifecycleFor(entry, installLifecycleByConnector)}
           key={entry.connectorKey}
         />
       ))}
@@ -621,8 +628,13 @@ export function SourceSetupCatalog({
   // visibility; this surface never grows a second toggle for the same
   // concept. When it's off, the hidden count stays discoverable via the
   // quiet line below instead of a silently shrinking list.
-  const visibleCatalog = filterCatalogForDevelopmentVisibility(catalog, developerMode);
-  const hiddenDevelopmentCount = catalog.length - visibleCatalog.length;
+  // A connector with no package, no installed package, and no registration
+  // has nothing the owner can install or set up here, so it is not listed.
+  const installableCatalog = catalog.filter(
+    (entry) => !isUninstallableCatalogEntry(entry, installLifecycleFor(entry, installLifecycleByConnector))
+  );
+  const visibleCatalog = filterCatalogForDevelopmentVisibility(installableCatalog, developerMode);
+  const hiddenDevelopmentCount = installableCatalog.length - visibleCatalog.length;
   const filtered = filterSourceCatalog(visibleCatalog, query);
   // Every visible connector is one row. Tier, lifecycle exceptions, and
   // package activation are row properties, so Preview and In development do
