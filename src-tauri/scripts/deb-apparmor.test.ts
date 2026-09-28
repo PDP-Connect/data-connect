@@ -104,12 +104,16 @@ describe("bundled Chromium AppArmor profile", () => {
   )
 
   it.skipIf(!process.env.DATACONNECT_DEB)("is inside a built .deb", () => {
-    expect(debPaths()).toContain("/etc/apparmor.d/dataconnect-chromium")
+    expect(debPaths()).toContain(
+      "/usr/share/data-connect/apparmor/dataconnect-chromium"
+    )
   })
 
-  it("is packaged at /etc/apparmor.d/dataconnect-chromium", () => {
+  // Outside /etc/apparmor.d: post-install copies it there only if it parses.
+  it("is packaged at /usr/share/data-connect/apparmor/dataconnect-chromium", () => {
     expect(tauriConfig.bundle.linux.deb.files).toEqual({
-      "/etc/apparmor.d/dataconnect-chromium": "apparmor/dataconnect-chromium",
+      "/usr/share/data-connect/apparmor/dataconnect-chromium":
+        "apparmor/dataconnect-chromium",
     })
   })
 
@@ -142,15 +146,17 @@ describe("deb maintainer scripts", () => {
 
   function setup(options: {
     apparmor: boolean
-    parser: "ok" | "fails" | "absent"
+    // "rejects" fails the -Q parse check; "fails" fails only the -r load.
+    parser: "ok" | "rejects" | "fails" | "absent"
   }) {
     root = mkdtempSync(join(tmpdir(), "dataconnect-deb-apparmor-"))
     const bin = join(root, "bin")
     const sysfs = join(root, "apparmor")
+    const source = join(root, "source-dataconnect-chromium")
     const profile = join(root, "dataconnect-chromium")
     const calls = join(root, "calls")
     mkdirSync(bin)
-    writeFileSync(profile, profileText)
+    writeFileSync(source, profileText)
     const stub = (name: string, body: string) => {
       writeFileSync(join(bin, name), `#!/bin/sh\n${body}\n`)
       chmodSync(join(bin, name), 0o755)
@@ -159,7 +165,12 @@ describe("deb maintainer scripts", () => {
     if (options.parser !== "absent") {
       stub(
         "apparmor_parser",
-        `echo "$@" >> "${calls}"\n${options.parser === "fails" ? "exit 1" : "exit 0"}`
+        [
+          `echo "$@" >> "${calls}"`,
+          options.parser === "rejects" ? `[ "$1" = -Q ] && exit 1` : "",
+          options.parser === "fails" ? `[ "$1" = -r ] && exit 1` : "",
+          "exit 0",
+        ].join("\n")
       )
     }
     if (options.apparmor) {
@@ -175,6 +186,7 @@ describe("deb maintainer scripts", () => {
         encoding: "utf8",
         env: {
           DATACONNECT_APPARMOR_PROFILE: profile,
+          DATACONNECT_APPARMOR_SOURCE: source,
           DATACONNECT_APPARMOR_SYSFS: sysfs,
           // No /usr/sbin: the only apparmor_parser is the stub, if any.
           PATH: `${bin}:/usr/bin:/bin`,
@@ -182,7 +194,7 @@ describe("deb maintainer scripts", () => {
       })
     const parserCalls = () =>
       existsSync(calls) ? readFileSync(calls, "utf8") : ""
-    return { parserCalls, profile, run, sysfs }
+    return { parserCalls, profile, run, source, sysfs }
   }
 
   it("post-install does nothing when AppArmor is not in use", () => {
@@ -197,23 +209,35 @@ describe("deb maintainer scripts", () => {
     expect(run(postInstall, "configure").status).toBe(0)
   })
 
-  it("post-install loads the profile with apparmor_parser -r", () => {
-    const { parserCalls, profile, run } = setup({
+  it("post-install copies the profile and loads it with apparmor_parser -r", () => {
+    const { parserCalls, profile, run, source } = setup({
       apparmor: true,
       parser: "ok",
     })
     expect(run(postInstall, "configure").status).toBe(0)
-    expect(parserCalls()).toBe(`-r ${profile}\n`)
+    expect(readFileSync(profile, "utf8")).toBe(profileText)
+    expect(parserCalls()).toBe(`-Q -K ${source}\n-r ${profile}\n`)
+  })
+
+  it("post-install does not install the profile when apparmor_parser -Q rejects it", () => {
+    const { parserCalls, profile, run, source } = setup({
+      apparmor: true,
+      parser: "rejects",
+    })
+    expect(run(postInstall, "configure").status).toBe(0)
+    expect(existsSync(profile)).toBe(false)
+    expect(parserCalls()).toBe(`-Q -K ${source}\n`)
   })
 
   it("post-install does not fail the install when loading fails", () => {
-    const { parserCalls, run } = setup({ apparmor: true, parser: "fails" })
+    const { parserCalls, profile, run } = setup({ apparmor: true, parser: "fails" })
     expect(run(postInstall, "configure").status).toBe(0)
-    expect(parserCalls()).not.toBe("")
+    expect(parserCalls()).toContain(`-r ${profile}`)
   })
 
   it("post-remove unloads and removes the profile on remove", () => {
     const { profile, run, sysfs } = setup({ apparmor: true, parser: "ok" })
+    writeFileSync(profile, profileText)
     expect(run(postRemove, "remove").status).toBe(0)
     expect(readFileSync(join(sysfs, ".remove"), "utf8")).toBe(
       "dataconnect-chromium"
@@ -223,6 +247,7 @@ describe("deb maintainer scripts", () => {
 
   it("post-remove keeps the profile on upgrade", () => {
     const { profile, run, sysfs } = setup({ apparmor: true, parser: "ok" })
+    writeFileSync(profile, profileText)
     expect(run(postRemove, "upgrade", "0.7.60").status).toBe(0)
     expect(readFileSync(join(sysfs, ".remove"), "utf8")).toBe("")
     expect(existsSync(profile)).toBe(true)

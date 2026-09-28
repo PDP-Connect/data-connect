@@ -78,7 +78,7 @@
         ],
         "desktopTemplate": "desktop-template.desktop",
         "files": {
-          "/etc/apparmor.d/dataconnect-chromium": "apparmor/dataconnect-chromium"
+          "/usr/share/data-connect/apparmor/dataconnect-chromium": "apparmor/dataconnect-chromium"
         },
         "postInstallScript": "scripts/post-install.sh",
         "postRemoveScript": "scripts/post-remove.sh"

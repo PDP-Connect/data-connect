@@ -4,9 +4,9 @@
 # Re-index after removing the .desktop file.
 update-desktop-database -q /usr/share/applications || true
 
-# Unload the bundled Chromium's AppArmor profile. dpkg has already removed the
-# profile file, so remove the loaded profile by name. An upgrade keeps it:
-# the new package's post-install script reloads it.
+# Unload the bundled Chromium's AppArmor profile by name, then delete the
+# profile file: post-install copied it, so dpkg does not own it. An upgrade
+# keeps it: the new package's post-install script reloads it.
 apparmor_sysfs="${DATACONNECT_APPARMOR_SYSFS:-/sys/kernel/security/apparmor}"
 apparmor_profile="${DATACONNECT_APPARMOR_PROFILE:-/etc/apparmor.d/dataconnect-chromium}"
 case "$1" in
