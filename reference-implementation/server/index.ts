@@ -9799,9 +9799,14 @@ export async function resolveNekoBrowserSurfaceControllerOptions({
     // the already-retained surface before dispatch. Leaving this probe on its
     // five-second library default classified any slower semantic CDP command
     // as dead, which triggers destructive surface replacement.
-    browserSurfaceReadinessProbe: createDefaultBrowserSurfaceReadinessProbe(
-      runtimeConfig.dynamic ? { timeoutMs: runtimeConfig.dynamic.readinessTimeoutMs } : {}
-    ),
+    //
+    // Host mode hands the RI the local browser's own DevTools URL. Only the
+    // n.eko CDP proxy serves the window-settle route, so a host surface must
+    // not be required to answer it.
+    browserSurfaceReadinessProbe: createDefaultBrowserSurfaceReadinessProbe({
+      ...(runtimeConfig.dynamic ? { timeoutMs: runtimeConfig.dynamic.readinessTimeoutMs } : {}),
+      ...(runtimeConfig.host ? { requireWindowSettle: false } : {}),
+    }),
   };
 
   if (runtimeConfig.dynamic) {

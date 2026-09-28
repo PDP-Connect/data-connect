@@ -139,6 +139,13 @@ export const DEFAULT_MID_WAIT_SURFACE_LOSS_POLL_INTERVAL_MS = 10_000;
 
 export interface CreateDefaultBrowserSurfaceReadinessProbeOptions {
   readonly fetchImpl?: typeof fetch;
+  /**
+   * Require the n.eko CDP proxy's `/pdpp/window-settle` route (default true).
+   * Only the n.eko proxy serves it. A host surface's `cdp_url` is the local
+   * browser's own DevTools server, which answers 404, and its window belongs
+   * to the desktop window manager, so there is no framebuffer to settle.
+   */
+  readonly requireWindowSettle?: boolean;
   readonly timeoutMs?: number;
   readonly webSocketFactory?: BrowserSurfaceReadinessWebSocketFactory;
 }
@@ -258,7 +265,9 @@ export function createMidWaitSurfaceLossDetector(
  *   GET    <cdp_url>/json/list          → proves at least one page target exists.
  *   GET    <cdp_url>/pdpp/window-settle → proves the live n.eko surface
  *                                          exposes the required, read-only
- *                                          window-settlement behavior.
+ *                                          window-settlement behavior
+ *                                          (skipped when
+ *                                          `requireWindowSettle` is false).
  *   WS cmd <page-target>.webSocket...   → proves an existing page target
  *                                        accepts a semantic CDP command.
  *
@@ -282,9 +291,10 @@ export function createDefaultBrowserSurfaceReadinessProbe(
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1) {
     throw new Error("browser surface readiness probe timeoutMs must be a positive integer");
   }
+  const requireWindowSettle = options.requireWindowSettle ?? true;
   return {
     probe(surface) {
-      return probeBrowserSurfaceReadinessOverHttp(surface, fetchImpl, webSocketFactory, timeoutMs);
+      return probeBrowserSurfaceReadinessOverHttp(surface, fetchImpl, webSocketFactory, timeoutMs, requireWindowSettle);
     },
   };
 }
@@ -293,7 +303,8 @@ export async function probeBrowserSurfaceReadinessOverHttp(
   surface: BrowserSurface,
   fetchImpl: typeof fetch,
   webSocketFactory: BrowserSurfaceReadinessWebSocketFactory,
-  timeoutMs: number
+  timeoutMs: number,
+  requireWindowSettle = true
 ): Promise<BrowserSurfaceReadinessProbeResult> {
   const notReady = validateSurfaceShape(surface);
   if (notReady) {
@@ -331,6 +342,7 @@ export async function probeBrowserSurfaceReadinessOverHttp(
   return completeReadinessProbe({
     baseUrl,
     fetchImpl,
+    requireWindowSettle,
     targetListProjection,
     timeoutMs,
     versionPayload,
@@ -341,6 +353,7 @@ export async function probeBrowserSurfaceReadinessOverHttp(
 interface CompleteReadinessProbeInput {
   readonly baseUrl: string;
   readonly fetchImpl: typeof fetch;
+  readonly requireWindowSettle: boolean;
   readonly targetListProjection: Extract<TargetListProjectionResult, { ok: true }>;
   readonly timeoutMs: number;
   readonly versionPayload: DevtoolsVersionPayload;
@@ -348,9 +361,11 @@ interface CompleteReadinessProbeInput {
 }
 
 async function completeReadinessProbe(input: CompleteReadinessProbeInput): Promise<BrowserSurfaceReadinessProbeResult> {
-  const windowSettleFailure = await probeWindowSettleBehavior(input.baseUrl, input.fetchImpl, input.timeoutMs);
-  if (windowSettleFailure) {
-    return windowSettleFailure;
+  if (input.requireWindowSettle) {
+    const windowSettleFailure = await probeWindowSettleBehavior(input.baseUrl, input.fetchImpl, input.timeoutMs);
+    if (windowSettleFailure) {
+      return windowSettleFailure;
+    }
   }
 
   const targetCommandResult = await probeSemanticPageTarget(
