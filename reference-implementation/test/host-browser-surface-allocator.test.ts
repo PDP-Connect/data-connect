@@ -90,7 +90,7 @@ test("host mode refuses to boot without its bearer token", () => {
 	);
 });
 
-test("host mode defaults to generated browser-bound connectors and a safe dynamic cap", () => {
+test("host mode manages connectors by manifest browser binding with a safe dynamic cap", () => {
 	const config = parseNekoBrowserSurfaceRuntimeConfig({
 		PDPP_BROWSER_HEADLESS: "1",
 		PDPP_BROWSER_SURFACE_HOST_ENDPOINT: "http://127.0.0.1:9916/agent",
@@ -100,8 +100,17 @@ test("host mode defaults to generated browser-bound connectors and a safe dynami
 
 	assert.equal(config.host?.headless, true);
 	assert.equal(config.leaseConfig.surfaceMode, "dynamic");
-	assert.equal(config.leaseConfig.managedConnectors.has("chase"), true);
 	assert.equal(config.leaseConfig.surfaceCap, 2);
+	assert.equal(config.leaseConfig.managedConnectors, config.manifestManagedConnectors);
+	assert.equal(config.leaseConfig.managedConnectors.has("chase"), false);
+	config.manifestManagedConnectors?.observe("chase", {
+		runtime_requirements: { bindings: { browser: { required: true } } },
+	});
+	assert.equal(config.leaseConfig.managedConnectors.has("chase"), true);
+	config.manifestManagedConnectors?.observe("chase", {
+		runtime_requirements: { bindings: { network: { required: true } } },
+	});
+	assert.equal(config.leaseConfig.managedConnectors.has("chase"), false);
 });
 
 test("host lease POST returns the host CDP URL and release DELETE targets host surface_id", async () => {

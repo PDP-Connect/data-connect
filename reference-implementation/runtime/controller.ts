@@ -30,6 +30,7 @@ import {
   // biome-ignore lint/correctness/noUnresolvedImports: Biome cannot resolve this installed package export; Node and TypeScript resolve it.
 } from "@opendatalabs/remote-surface/leases";
 import { notifyNtfy } from "../server/polyfill-connectors-runtime.ts";
+import type { ManifestManagedConnectors } from "./browser-surface-leases.ts";
 import { getOne, referenceQueries } from "../lib/db.ts";
 import { createTraceContext, emitSpineEvent, getRunTerminalStatus, type SpineTraceContext } from "../lib/spine.ts";
 import {
@@ -547,6 +548,12 @@ export interface ControllerOptions {
   browserSurfaceHealthObservationTtlMs?: number;
   browserSurfaceLeaseManager?: BrowserSurfaceLeaseManager;
   browserSurfaceLeaseStore?: BrowserSurfaceLeaseStore;
+  /**
+   * Host mode without PDPP_NEKO_MANAGED_CONNECTORS: the lease manager's managed
+   * set, filled from manifests. `runNow` records each manifest it resolves, so
+   * a connector installed after boot gets a surface on its first run.
+   */
+  browserSurfaceManifestManagedConnectors?: Pick<ManifestManagedConnectors, "observe">;
   /**
    * Poll interval for the mid-wait surface-loss detector (ms). Defaults to
    * `DEFAULT_MID_WAIT_SURFACE_LOSS_POLL_INTERVAL_MS` (10 s). Tests set this
@@ -3822,6 +3829,7 @@ export function createController(opts: ControllerOptions = {}): Controller {
     if (!manifest) {
       throw new ControllerError(`Unknown connector: ${connectorId}`, "not_found");
     }
+    opts.browserSurfaceManifestManagedConnectors?.observe(connectorId, manifest);
     if (!options.sourceWebhookEvent) {
       assertNoConflictingActiveRun(key);
       await assertNoConflictingDurableActiveRun(key);
