@@ -14,7 +14,7 @@ import { spawnSync } from "node:child_process";
 import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -111,7 +111,17 @@ process.stdout.write(JSON.stringify(Object.keys(runtime.PRODUCTION_READY_CONNECT
       "--eval",
       probe,
     ],
-    { cwd, encoding: "utf8", env: { ...process.env, NODE_PATH: "" } }
+    {
+      cwd,
+      encoding: "utf8",
+      // A relative TSX_TSCONFIG_PATH (the mutation runner sets one) would
+      // resolve against the child's cwd, so pin it to this process's cwd.
+      env: {
+        ...process.env,
+        NODE_PATH: "",
+        ...(process.env.TSX_TSCONFIG_PATH ? { TSX_TSCONFIG_PATH: resolve(process.env.TSX_TSCONFIG_PATH) } : {}),
+      },
+    }
   );
   assert.equal(child.status, 0, child.stderr);
   return JSON.parse(child.stdout) as string[];
