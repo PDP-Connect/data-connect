@@ -7,6 +7,7 @@ import {
   normalizeStaticSecretCredentialCapture,
   type StaticSecretCredentialCaptureFieldLike,
   type StaticSecretFieldType,
+  CONFORMANCE_ROSTER_LOADED,
   KNOWN_SCAFFOLD_CONNECTORS,
   PRODUCTION_READY_CONNECTORS,
   credentialValidationMode,
@@ -608,6 +609,35 @@ export function isBrowserBoundConnector(connectorId: string | null | undefined):
     typeof connectorId === "string" &&
     (BROWSER_BOUND_CONNECTORS as readonly string[]).includes(canonicalConnectorKey(connectorId))
   );
+}
+
+export interface BrowserEnrollmentSupport {
+  /** The manifest declares a browser binding, so the browser-session flow applies. */
+  readonly browserBound: boolean;
+  /** The browser-session flow may add a new account for this connector. */
+  readonly canAddAccount: boolean;
+}
+
+/**
+ * Browser-session support from the connector's own manifest bindings, shared
+ * by the console's browser-session routes and the RI's enrollment-shell route
+ * so both give the same answer. A connector installed from the runtime catalog
+ * qualifies through its bindings, without a connector-key list.
+ *
+ * A known scaffold can never collect, so it cannot add an account. The
+ * scaffold list comes from the optional conformance roster; when the roster
+ * did not load, no connector can add an account, because a scaffold cannot be
+ * told apart from a real connector.
+ */
+export function browserEnrollmentSupport(
+  connectorKey: string,
+  manifest: ConnectorManifestLike | null
+): BrowserEnrollmentSupport {
+  const browserBound = classifyConnectorIntentModality(manifest) === "browser_bound";
+  return {
+    browserBound,
+    canAddAccount: browserBound && CONFORMANCE_ROSTER_LOADED && !isKnownScaffoldConnector(connectorKey),
+  };
 }
 
 export function classifyConnectorIntentModality(manifest: ConnectorManifestLike | null): ConnectorIntentModality {

@@ -31,7 +31,7 @@ import { notFound } from "next/navigation";
 import { OpenExternalLink } from "@/app/(console)/components/open-external-link.tsx";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
 import { ConnectorMark } from "@/app/(console)/components/connector-mark.tsx";
-import { isBrowserBoundConnector, isSupportedBrowserCollectorConnector } from "../../../lib/connection-modality.ts";
+import { loadBrowserConnectSupport } from "../../../lib/load-browser-connect-support.ts";
 import { getStaticSecretSetup, type StaticSecretSetupField } from "../../../lib/ref-client.ts";
 import { findManifestForConnectorId } from "../../../sources/lib/relationships.ts";
 import { listConnectorManifests } from "../../../lib/rs-client.ts";
@@ -162,7 +162,8 @@ export default async function BrowserSessionConnectPage({
   const connectorId = decodeURIComponent(rawConnectorId);
 
   // Only browser-bound connectors belong here.
-  if (!isBrowserBoundConnector(connectorId)) {
+  const browserConnect = await loadBrowserConnectSupport(connectorId);
+  if (!browserConnect.browserBound) {
     notFound();
   }
 
@@ -173,7 +174,7 @@ export default async function BrowserSessionConnectPage({
   };
 
   const repairMode = Boolean(pageParams.connectionId);
-  const supportedBrowserCollector = isSupportedBrowserCollectorConnector(connectorId);
+  const supportedBrowserCollector = browserConnect.canAddAccount;
   const storedCredentialSetup = supportedBrowserCollector
     ? await getStaticSecretSetup(connectorId).catch(() => null)
     : null;

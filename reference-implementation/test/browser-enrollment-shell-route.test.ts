@@ -305,6 +305,46 @@ test("browser-enrollment shell: rejects non-browser-bound connector (409)", asyn
   });
 });
 
+test("browser-enrollment shell: creates draft for a browser-bound connector outside the generated key list", async () => {
+  await withServer(async ({ asUrl }) => {
+    // A connector installed from the runtime catalog: its registered manifest
+    // declares a browser binding, and no generated key list names it.
+    const manifest = {
+      ...(loadManifest("amazon") as Record<string, unknown>),
+      connector_id: "acme-shop",
+      connector_key: "acme-shop",
+      display_name: "Acme Shop",
+    };
+    const registered = await fetch(`${asUrl}/connectors`, {
+      body: JSON.stringify(manifest),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    });
+    assert.equal(registered.status, 201, await registered.text());
+    const cookie = await ownerLogin(asUrl);
+    const res = await fetch(`${asUrl}/_ref/connectors/acme-shop/browser-enrollment-shell`, {
+      headers: { cookie },
+      method: "POST",
+    });
+    assert.equal(res.status, 201);
+    assert.equal((await jsonBody(res)).connector_id, "acme-shop");
+  });
+});
+
+test("browser-enrollment shell: rejects a known scaffold (409)", async () => {
+  await withServer(async ({ asUrl }) => {
+    await registerConnector(asUrl, "anthropic");
+    const cookie = await ownerLogin(asUrl);
+    const res = await fetch(`${asUrl}/_ref/connectors/anthropic/browser-enrollment-shell`, {
+      headers: { cookie },
+      method: "POST",
+    });
+    assert.equal(res.status, 409);
+    const body = await jsonBody(res);
+    assert.equal(asRecord(body.error).code, "connector_browser_setup_unavailable");
+  });
+});
+
 test("browser-enrollment shell: rejects unknown connector (404)", async () => {
   await withServer(async ({ asUrl }) => {
     const cookie = await ownerLogin(asUrl);
