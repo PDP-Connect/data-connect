@@ -95,34 +95,6 @@ jobs:
     runs-on: ${{ matrix.platform }}
 
     steps:
-      - name: Determine Apple signing availability
-        if: github.event_name == 'release'
-        id: apple-signing-availability
-        shell: bash
-        env:
-          APPLE_BUILD_CERTIFICATE_BASE64: ${{ github.event_name == 'release' && secrets.APPLE_BUILD_CERTIFICATE_BASE64 || '' }}
-          APPLE_SIGNING_IDENTITY: ${{ github.event_name == 'release' && secrets.APPLE_SIGNING_IDENTITY || '' }}
-          APPLE_ASC_API_KEY_KEY_BASE64: ${{ github.event_name == 'release' && secrets.APPLE_ASC_API_KEY_KEY_BASE64 || '' }}
-          APPLE_ASC_API_KEY_ID: ${{ github.event_name == 'release' && secrets.APPLE_ASC_API_KEY_ID || '' }}
-          APPLE_ASC_API_KEY_ISSUER_UUID: ${{ github.event_name == 'release' && secrets.APPLE_ASC_API_KEY_ISSUER_UUID || '' }}
-        run: |
-          set -euo pipefail
-          certificate_available=false
-          signing_available=false
-          notarization_available=false
-          if [[ -n "$APPLE_BUILD_CERTIFICATE_BASE64" ]]; then
-            certificate_available=true
-            if [[ -n "$APPLE_SIGNING_IDENTITY" ]]; then
-              signing_available=true
-              if [[ -n "$APPLE_ASC_API_KEY_KEY_BASE64" && -n "$APPLE_ASC_API_KEY_ID" && -n "$APPLE_ASC_API_KEY_ISSUER_UUID" ]]; then
-                notarization_available=true
-              fi
-            fi
-          fi
-          echo "apple_certificate_available=$certificate_available" >> "$GITHUB_OUTPUT"
-          echo "apple_signing_available=$signing_available" >> "$GITHUB_OUTPUT"
-          echo "apple_notarization_available=$notarization_available" >> "$GITHUB_OUTPUT"
-
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -170,23 +142,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
-      - name: Install optional Apple signing certificate
-        if: github.event_name == 'release' && matrix.os_family == 'macos' && steps.apple-signing-availability.outputs.apple_certificate_available == 'true'
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_BUILD_CERTIFICATE_BASE64 }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_BUILD_CERTIFICATE_PASSWORD }}
-        run: |
-          set -euo pipefail
-          certificate_path="$RUNNER_TEMP/build_certificate.p12"
-          keychain_path="$RUNNER_TEMP/app-signing.keychain-db"
-          echo -n "$APPLE_CERTIFICATE" | base64 --decode -o "$certificate_path"
-          security create-keychain -p "$APPLE_CERTIFICATE_PASSWORD" "$keychain_path"
-          security set-keychain-settings -lut 21600 "$keychain_path"
-          security unlock-keychain -p "$APPLE_CERTIFICATE_PASSWORD" "$keychain_path"
-          security import "$certificate_path" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain_path"
-          security set-key-partition-list -S apple-tool:,apple: -k "$APPLE_CERTIFICATE_PASSWORD" "$keychain_path"
-          security list-keychain -d user -s "$keychain_path"
-
       - name: Install frontend dependencies
         run: npm ci
 
@@ -233,17 +188,6 @@ jobs:
       - name: Verify staged reference implementation
         run: node scripts/verify-reference-stack.mjs --profile release
 
-      - name: Optionally sign macOS helper binaries
-        if: github.event_name == 'release' && matrix.os_family == 'macos' && steps.apple-signing-availability.outputs.apple_signing_available == 'true'
-        env:
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-        run: |
-          set -euo pipefail
-          codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" src-tauri/binaries/pdpp-node-${{ matrix.target }}
-          codesign --force --options runtime --timestamp --entitlements playwright-runner/entitlements.plist --sign "$APPLE_SIGNING_IDENTITY" playwright-runner/dist/${{ matrix.binary_name }}
-          codesign --force --options runtime --timestamp --entitlements personal-server/entitlements.plist --sign "$APPLE_SIGNING_IDENTITY" personal-server/dist/${{ matrix.ps_binary_name }}
-          find personal-server/dist/node_modules -name '*.node' -type f -exec codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" {} \;
-
       - name: Clear cached AppImage staging output
         if: matrix.os_family == 'linux'
         run: |
@@ -259,16 +203,14 @@ jobs:
       # then an orphaned diskimages-help process at teardown). Both macOS legs run it, so
       # both carry the risk. Restricting the macOS bundle to "app" skips it entirely; "app"
       # is the .app bundle the DMG step already depends on, so nothing else changes.
-      - name: Build signed Tauri app
-        if: github.event_name == 'release' && matrix.os_family == 'macos' && steps.apple-signing-availability.outputs.apple_signing_available == 'true'
-        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
-        env:
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-        with:
-          args: --target ${{ matrix.target }} --bundles app
-
+      #
+      # macOS code signing and notarization do not happen in this repository.
+      # The unsigned DMG published here carries a build-provenance attestation
+      # (see the publish job); a downstream signer verifies that attestation
+      # before it signs. The entitlement files that its hardened-runtime
+      # signature needs are personal-server/entitlements.plist and
+      # playwright-runner/entitlements.plist.
       - name: Build unsigned Tauri app
-        if: matrix.os_family != 'macos' || github.event_name != 'release' || steps.apple-signing-availability.outputs.apple_signing_available != 'true'
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
         env:
           ARCH: ${{ matrix.os_family == 'linux' && 'x86_64' || '' }}
@@ -277,8 +219,6 @@ jobs:
 
       - name: Finalize platform bundles
         shell: bash
-        env:
-          APPLE_SIGNING_IDENTITY: ${{ github.event_name == 'release' && steps.apple-signing-availability.outputs.apple_signing_available == 'true' && secrets.APPLE_SIGNING_IDENTITY || '' }}
         run: |
           set -euo pipefail
           bundle_root="src-tauri/target/${{ matrix.target }}/release/bundle"
@@ -302,39 +242,6 @@ jobs:
               mkdir -p "$destination"
               cp -R personal-server/dist/node_modules/. "$destination/"
 
-              if [ -n "$APPLE_SIGNING_IDENTITY" ]; then
-                ps_bin="$app/Contents/Resources/personal-server/dist/${{ matrix.ps_binary_name }}"
-                codesign --force --options runtime --timestamp --entitlements personal-server/entitlements.plist --sign "$APPLE_SIGNING_IDENTITY" "$ps_bin"
-                find "$destination" -name '*.node' -type f -exec codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" {} \;
-
-                sign_reference_stack() {
-                  local stack_root="$1"
-                  local candidate description code_bundle
-
-                  while IFS= read -r -d '' candidate; do
-                    description=$(file -b "$candidate")
-                    if [[ "$description" == *Mach-O* && ( "$description" == *executable* || "$description" == *shared\ library* || "$description" == *bundle* ) ]]; then
-                      codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$candidate"
-                    fi
-                  done < <(find "$stack_root" -type f -print0)
-
-                  while IFS= read -r -d '' code_bundle; do
-                    codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$code_bundle"
-                  done < <(find "$stack_root" -depth -type d \( \
-                    -name '*.app' -o -name '*.appex' -o -name '*.bundle' -o \
-                    -name '*.framework' -o -name '*.kext' -o -name '*.plugin' -o \
-                    -name '*.qlgenerator' -o -name '*.systemextension' -o -name '*.xpc' \
-                  \) -print0)
-
-                  node scripts/verify-reference-stack.mjs --root "$stack_root" --refresh-manifest
-                }
-
-                for stack_root in "$reference_destination/ri" "$reference_destination/console"; do
-                  sign_reference_stack "$stack_root"
-                done
-                codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$app"
-              fi
-
               version=$(node -p "require('./src-tauri/tauri.conf.json').version")
               arch=$(echo "${{ matrix.target }}" | cut -d- -f1)
               dmg_path="$bundle_root/dmg/DataConnect_${version}_${arch}.dmg"
@@ -350,9 +257,6 @@ jobs:
             verification_args=(--platform macos --expected-arch "${{ matrix.expected_arch }}" --bundle-root "$bundle_root")
             if [ "$stack_verification_enabled" = "true" ]; then
               verification_args+=(--verify-reference-stacks)
-            fi
-            if [ -n "$APPLE_SIGNING_IDENTITY" ]; then
-              verification_args+=(--verify-code-signature)
             fi
             node scripts/verify-bundled-personal-server.mjs "${verification_args[@]}"
           fi
@@ -374,42 +278,6 @@ jobs:
             fi
           fi
 
-      - name: Warn when notarization credentials are unavailable
-        if: github.event_name == 'release' && matrix.os_family == 'macos' && steps.apple-signing-availability.outputs.apple_signing_available == 'true' && steps.apple-signing-availability.outputs.apple_notarization_available != 'true'
-        run: echo "::warning::macOS artifacts will be signed but not notarized because App Store Connect credentials are not configured."
-
-      - name: Notarize and staple macOS DMGs
-        if: github.event_name == 'release' && matrix.os_family == 'macos' && steps.apple-signing-availability.outputs.apple_notarization_available == 'true'
-        env:
-          APPLE_ASC_API_KEY_KEY_BASE64: ${{ secrets.APPLE_ASC_API_KEY_KEY_BASE64 }}
-          APPLE_ASC_API_KEY_ID: ${{ secrets.APPLE_ASC_API_KEY_ID }}
-          APPLE_ASC_API_KEY_ISSUER_UUID: ${{ secrets.APPLE_ASC_API_KEY_ISSUER_UUID }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          umask 077
-          bundle_root="src-tauri/target/${{ matrix.target }}/release/bundle"
-          key_path="$RUNNER_TEMP/app-store-connect-key.p8"
-          trap 'rm -f "$key_path"' EXIT
-          printf '%s' "$APPLE_ASC_API_KEY_KEY_BASE64" | base64 --decode > "$key_path"
-
-          shopt -s nullglob
-          dmg_paths=("$bundle_root"/dmg/*.dmg)
-          if [ "${#dmg_paths[@]}" -eq 0 ]; then
-            echo "No macOS DMGs found to notarize."
-            exit 1
-          fi
-
-          for dmg_path in "${dmg_paths[@]}"; do
-            xcrun notarytool submit "$dmg_path" \
-              --key "$key_path" \
-              --key-id "$APPLE_ASC_API_KEY_ID" \
-              --issuer "$APPLE_ASC_API_KEY_ISSUER_UUID" \
-              --wait
-            xcrun stapler staple "$dmg_path"
-            xcrun stapler validate "$dmg_path"
-          done
-
       - name: Stage verified release artifacts
         if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.release_tag == '')
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -422,10 +290,6 @@ jobs:
             src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*.exe
           if-no-files-found: error
           retention-days: 1
-
-      - name: Cleanup optional Apple keychain
-        if: always() && github.event_name == 'release' && matrix.os_family == 'macos' && steps.apple-signing-availability.outputs.apple_certificate_available == 'true'
-        run: security delete-keychain "$RUNNER_TEMP/app-signing.keychain-db" || true
 
   clean-install-built-windows:
     if: github.event_name == 'workflow_dispatch' && inputs.release_tag == ''
@@ -506,12 +370,23 @@ jobs:
     runs-on: ubuntu-22.04
     permissions:
       contents: write
+      # Only for the DMG provenance attestation below.
+      id-token: write
+      attestations: write
     steps:
       - name: Download verified release artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: manual-install-*
           path: release-artifacts
+
+      # The downstream macOS signer runs `gh attestation verify` against this
+      # workflow and this tag's commit, and refuses to sign a DMG that has no
+      # matching attestation.
+      - name: Attest macOS DMG provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: release-artifacts/manual-install-macos-*/dmg/DataConnect_*.dmg
 
       - name: Publish complete platform set
         shell: bash
