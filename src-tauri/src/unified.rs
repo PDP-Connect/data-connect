@@ -16,7 +16,7 @@ use crate::commands::process_supervisor::{
 };
 use crate::commands::{
     attach_reference_server, login_reference_server_with_password,
-    login_reference_server_with_password_and_host,
+    login_reference_server_with_password_and_host, DESKTOP_OWNER_SESSION_LABEL,
 };
 use crate::owner_credential::{
     configured_owner_password, credential_encryption_key_path, database_encryption_key_path,
@@ -2722,6 +2722,7 @@ async fn finish_bootstrap(
         ri_origin,
         password,
         host_header.as_deref(),
+        Some(DESKTOP_OWNER_SESSION_LABEL),
     )
     .await
     {
