@@ -93,6 +93,8 @@ export function recordFetches(): { calls: string[]; restore: () => void } {
 
 interface StartedReference {
   asUrl: string;
+  /** The client a token was issued to, read by the reference server's introspection. */
+  clientIdOf: (token: string) => Promise<string | null | undefined>;
   rsUrl: string;
   stop: () => Promise<void>;
 }
@@ -118,6 +120,9 @@ export async function startReference(opts: Record<string, unknown>): Promise<Sta
     startServer: (opts: Record<string, unknown>) => Promise<unknown>;
   };
   const { closeDb } = (await import(`${serverDir}/db.ts`)) as { closeDb: () => void };
+  const { introspect } = (await import(`${serverDir}/auth.ts`)) as {
+    introspect: (token: string) => Promise<{ client_id?: string | null }>;
+  };
   const server = (await startServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0, ...opts })) as {
     asPort: number;
     asServer: CloseableServer;
@@ -132,6 +137,7 @@ export async function startReference(opts: Record<string, unknown>): Promise<Sta
   process.env.PDPP_RS_URL = rsUrl;
   return {
     asUrl,
+    clientIdOf: async (token) => (await introspect(token)).client_id,
     rsUrl,
     async stop() {
       server.schedulerManager?.stop?.();

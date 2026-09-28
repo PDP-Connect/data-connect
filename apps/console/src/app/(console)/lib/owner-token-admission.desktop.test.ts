@@ -11,6 +11,7 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
+import { CONSOLE_OWNER_CLIENT_ID } from "pdpp-reference-implementation/reference-local-defaults";
 import {
   asRequest,
   installNextRequestMocks,
@@ -63,6 +64,12 @@ test("desktop: admission asks the AS before returning a warm cached bearer", asy
   const before = asCalls().length;
   assert.equal(await asRequest(ownerCookie, () => getOwnerToken()), token);
   assert.ok(asCalls().length > before, "warm-cache admission still checks /owner/session");
+});
+
+test("desktop: the console mints as the client the reference server registers for it", async () => {
+  clearOwnerToken();
+  const token = await asRequest(ownerCookie, () => getOwnerToken());
+  assert.equal(await reference.clientIdOf(token), CONSOLE_OWNER_CLIENT_ID);
 });
 
 test("desktop: an anonymous request is refused even with a warm cache", async () => {
