@@ -467,6 +467,18 @@ jobs:
         run: |
           echo "PDPP_IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}/core" >> "$GITHUB_ENV"
 
+      # Fails in seconds if the pinned skopeo digest has been garbage-collected,
+      # instead of after the Core build and scan have already run.
+      - name: Pull pinned skopeo image
+        env:
+          SKOPEO_IMAGE: quay.io/skopeo/stable:v1.22.3-immutable@sha256:c0ee1f4edca5c01cb8d5611124f92f3cc47196ecab68aee5d0f90834e00574d5
+        run: |
+          set -euo pipefail
+          if ! docker pull "$SKOPEO_IMAGE"; then
+            echo "::error::Pinned skopeo image $SKOPEO_IMAGE could not be pulled. The pinned digest may have been garbage-collected from quay.io; re-pin SKOPEO_IMAGE (see .github/workflows/release.yml and docker-images.yml)."
+            exit 1
+          fi
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
 
@@ -539,7 +551,7 @@ jobs:
         env:
           SCANNED_DIGEST: ${{ steps.scan-core.outputs.digest }}
           VERSION: ${{ steps.meta.outputs.version }}
-          SKOPEO_IMAGE: quay.io/skopeo/stable:v1.22.3@sha256:064d2cefb512c97d5a22979599ca05b7198fd6176494a634e1f31bd6b5fbd77a
+          SKOPEO_IMAGE: quay.io/skopeo/stable:v1.22.3-immutable@sha256:c0ee1f4edca5c01cb8d5611124f92f3cc47196ecab68aee5d0f90834e00574d5
         run: |
           set -euo pipefail
           if [[ ! "$SCANNED_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
@@ -564,7 +576,7 @@ jobs:
         shell: bash
         env:
           PUSHED_DIGEST: ${{ steps.push-core.outputs.digest }}
-          SKOPEO_IMAGE: quay.io/skopeo/stable:v1.22.3@sha256:064d2cefb512c97d5a22979599ca05b7198fd6176494a634e1f31bd6b5fbd77a
+          SKOPEO_IMAGE: quay.io/skopeo/stable:v1.22.3-immutable@sha256:c0ee1f4edca5c01cb8d5611124f92f3cc47196ecab68aee5d0f90834e00574d5
         run: |
           set -euo pipefail
           docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \

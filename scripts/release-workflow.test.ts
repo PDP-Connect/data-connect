@@ -872,6 +872,68 @@ describe("release workflow", () => {
     }
   })
 
+  describe("skopeo pin", () => {
+    // A tag can be rebuilt and the old manifest garbage-collected out from
+    // under it (this happened to v1.22.3 on quay.io/skopeo/stable); a bare
+    // digest with no readable version is unauditable. Every reference must
+    // carry both.
+    const SKOPEO_PIN =
+      /quay\.io\/skopeo\/stable:[\w.-]+@sha256:[0-9a-f]{64}/g
+
+    function skopeoPins(workflow: string) {
+      return [...workflow.matchAll(SKOPEO_PIN)].map(m => m[0])
+    }
+
+    it("pins every skopeo image reference to tag@sha256", () => {
+      for (const workflow of [readReleaseWorkflow(), readFileSync(dockerImagesWorkflowPath, "utf8")]) {
+        const skopeoLines = workflow
+          .split("\n")
+          .filter(line => line.includes("SKOPEO_IMAGE:"))
+        expect(skopeoLines.length).toBeGreaterThan(0)
+        for (const line of skopeoLines) {
+          expect(line).toMatch(SKOPEO_PIN)
+        }
+      }
+    })
+
+    it("uses the same skopeo pin everywhere it appears", () => {
+      const pins = [
+        ...skopeoPins(readReleaseWorkflow()),
+        ...skopeoPins(readFileSync(dockerImagesWorkflowPath, "utf8")),
+      ]
+      expect(pins.length).toBeGreaterThan(0)
+      expect(new Set(pins).size).toBe(1)
+    })
+
+    it("pulls the pinned skopeo image before the Core build, in the release workflow", () => {
+      const job = readReleaseWorkflow().slice(
+        readReleaseWorkflow().indexOf("  publish-core-image:"),
+        readReleaseWorkflow().indexOf("  promote-core-latest:")
+      )
+      const pullAt = job.indexOf("- name: Pull pinned skopeo image")
+      const buildAt = job.indexOf("- name: Build Core image without pushing")
+      expect(pullAt).toBeGreaterThan(-1)
+      expect(buildAt).toBeGreaterThan(-1)
+      expect(pullAt).toBeLessThan(buildAt)
+      const pullStep = readWorkflowStep(job, "Pull pinned skopeo image")
+      expect(pullStep).toContain("docker pull")
+      expect(pullStep).toMatch(SKOPEO_PIN)
+    })
+
+    it("pulls the pinned skopeo image before the build, in the manual dispatch workflow", () => {
+      const workflow = readFileSync(dockerImagesWorkflowPath, "utf8")
+      const job = workflow.slice(workflow.indexOf("\n  publish:\n") + 1)
+      const pullAt = job.indexOf("- name: Pull pinned skopeo image")
+      const buildAt = job.indexOf("- name: Build image without pushing")
+      expect(pullAt).toBeGreaterThan(-1)
+      expect(buildAt).toBeGreaterThan(-1)
+      expect(pullAt).toBeLessThan(buildAt)
+      const pullStep = readWorkflowStep(job, "Pull pinned skopeo image")
+      expect(pullStep).toContain("docker pull")
+      expect(pullStep).toMatch(SKOPEO_PIN)
+    })
+  })
+
   it("pushes only versioned Core tags and serializes only latest promotion", () => {
     const workflow = readReleaseWorkflow()
     const publishCoreImage = workflow.slice(
