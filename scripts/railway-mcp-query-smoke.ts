@@ -358,7 +358,7 @@ export async function mintOwnerToken(
   subjectId: string,
   log: LogFn
 ): Promise<string> {
-  const clientId = "pdpp-polyfill-owner-bootstrap";
+  const clientId = "dataconnect-console";
   const deviceResp = await fetch(`${origin}/oauth/device_authorization`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },

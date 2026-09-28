@@ -47,6 +47,7 @@ import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { startServer as startServerUntyped } from "../server/index.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
 import { createSqliteSchedulerStore } from "../server/stores/scheduler-store.ts";
+import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
 
 const REGEXP_1 = /owner-agent/i;
 
@@ -66,7 +67,10 @@ interface ClosableServer {
 }
 
 async function startServer(opts: Record<string, unknown>): Promise<ClosableServer> {
-  const raw: Record<string, unknown> = await startServerUntyped(opts);
+  const raw: Record<string, unknown> = await startServerUntyped({
+    preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
+    ...opts,
+  });
   const result: ClosableServer = {
     asPort: raw.asPort as number,
     asServer: raw.asServer as CloseableHandle,

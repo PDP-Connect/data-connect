@@ -22,11 +22,17 @@ export interface DefaultPreRegisteredPublicClient {
   };
 }
 
+/** The client the console mints its owner bearer as. */
+export const CONSOLE_OWNER_CLIENT_ID = "dataconnect-console";
+
+/** The client the connector runtime mints its owner bearer as. */
+export const CONNECTOR_RUNTIME_OWNER_CLIENT_ID = "dataconnect-connector-runtime";
+
 /**
- * Clients product code signs in as: the console's owner bootstrap and
- * operator bootstrap, the connector runtime, and the published `pdpp` CLI.
+ * Clients product code signs in as: the published `pdpp` CLI, the console's
+ * operator bootstrap and owner bearer, and the connector runtime.
  */
-export const PRODUCT_PRE_REGISTERED_PUBLIC_CLIENTS: readonly DefaultPreRegisteredPublicClient[] = Object.freeze([
+export const DEFAULT_PRE_REGISTERED_PUBLIC_CLIENTS: readonly DefaultPreRegisteredPublicClient[] = Object.freeze([
   {
     client_id: "pdpp_cli",
     metadata: { client_name: "PDPP CLI", token_endpoint_auth_method: "none" },
@@ -39,66 +45,20 @@ export const PRODUCT_PRE_REGISTERED_PUBLIC_CLIENTS: readonly DefaultPreRegistere
     },
   },
   {
-    client_id: "pdpp-polyfill-owner-bootstrap",
+    client_id: CONSOLE_OWNER_CLIENT_ID,
     metadata: {
-      client_name: "PDPP Polyfill Owner Bootstrap",
+      client_name: "DataConnect console",
       token_endpoint_auth_method: "none",
     },
   },
   {
-    client_id: "pdpp-connector-runtime",
+    client_id: CONNECTOR_RUNTIME_OWNER_CLIENT_ID,
     metadata: {
-      client_name: "PDPP Connector Runtime",
+      client_name: "DataConnect connector runtime",
       token_endpoint_auth_method: "none",
     },
   },
 ]);
-
-/** Example third-party apps for the reference demo. No product code uses them. */
-export const DEMO_PRE_REGISTERED_PUBLIC_CLIENTS: readonly DefaultPreRegisteredPublicClient[] = Object.freeze([
-  {
-    client_id: "longview",
-    metadata: { client_name: "Longview", token_endpoint_auth_method: "none" },
-  },
-  {
-    client_id: "longview_planning_v1",
-    metadata: { client_name: "Longview", token_endpoint_auth_method: "none" },
-  },
-  {
-    client_id: "cli_longview",
-    metadata: { client_name: "Longview CLI", token_endpoint_auth_method: "none" },
-  },
-  {
-    client_id: "concert_recommendation_app",
-    metadata: {
-      client_name: "Concert Recommendation App",
-      token_endpoint_auth_method: "none",
-    },
-  },
-]);
-
-export const DEFAULT_PRE_REGISTERED_PUBLIC_CLIENTS: readonly DefaultPreRegisteredPublicClient[] = Object.freeze([
-  ...DEMO_PRE_REGISTERED_PUBLIC_CLIENTS,
-  ...PRODUCT_PRE_REGISTERED_PUBLIC_CLIENTS,
-]);
-
-/**
- * The pre-registered clients a server seeds when its caller does not pass
- * its own list. Product builds leave the demo clients out unless
- * `PDPP_ENABLE_DEMO_CLIENTS=1`: the Docker images set `NODE_ENV=production`
- * (the stream playground's gate), and the desktop app starts the server with
- * `PDPP_MANAGED_DESKTOP_HOST=1`.
- */
-export function defaultPreRegisteredPublicClientsFor(
-  env: Readonly<Record<string, string | undefined>> = process.env
-): readonly DefaultPreRegisteredPublicClient[] {
-  const product = env.NODE_ENV === "production" || env.PDPP_MANAGED_DESKTOP_HOST === "1";
-  const demoEnabled = !product || env.PDPP_ENABLE_DEMO_CLIENTS === "1";
-  return demoEnabled ? DEFAULT_PRE_REGISTERED_PUBLIC_CLIENTS : PRODUCT_PRE_REGISTERED_PUBLIC_CLIENTS;
-}
-
-/** The client the connector runtime mints its owner bearer as. */
-export const CONNECTOR_RUNTIME_OWNER_CLIENT_ID = "pdpp-connector-runtime";
 
 /**
  * First-party machine clients that hold one owner bearer per subject: the
@@ -107,6 +67,20 @@ export const CONNECTOR_RUNTIME_OWNER_CLIENT_ID = "pdpp-connector-runtime";
  * that client instead of adding a new one.
  */
 export const REUSED_OWNER_BEARER_CLIENT_IDS: readonly string[] = Object.freeze([
-  "pdpp-polyfill-owner-bootstrap",
+  CONSOLE_OWNER_CLIENT_ID,
   CONNECTOR_RUNTIME_OWNER_CLIENT_ID,
+]);
+
+/**
+ * Clients earlier versions pre-registered and no longer do: the console's
+ * and the connector runtime's old owner clients, and the demo apps. Startup
+ * revokes their credentials and deregisters them
+ * (`retireFormerPreRegisteredClients` in stores/owner-session-store.ts).
+ */
+export const RETIRED_PRE_REGISTERED_CLIENT_IDS: readonly string[] = Object.freeze([
+  "pdpp-polyfill-owner-bootstrap",
+  "cli_longview",
+  "longview",
+  "longview_planning_v1",
+  "concert_recommendation_app",
 ]);

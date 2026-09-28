@@ -11,6 +11,7 @@ import { createCimdDocument } from "../server/auth.ts";
 import { startServer } from "../server/index.ts";
 import { resolvePublicUrl, resolveSiblingPublicUrl } from "../server/metadata.ts";
 import { PDPP_REFERENCE_REVISION_HEADER } from "../server/reference-revision.ts";
+import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
 
 const TEST_DCR_INITIAL_ACCESS_TOKEN = "pdpp-reference-test-initial-access-token";
 const NORTHSTAR_PROVIDER_ID = "https://northstar.example/pdpp";
@@ -1147,6 +1148,7 @@ test("explicit browser-facing public urls drive metadata, device verification, a
     asPort: 0,
     asPublicUrl: publicOrigin,
     dbPath: ":memory:",
+    preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
     quiet: true,
     rsPort: 0,
     rsPublicUrl: publicOrigin,

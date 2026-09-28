@@ -24,6 +24,7 @@ import {
   admitOwnerRunConnection,
   makeDefaultAccountConnectorInstanceId,
 } from "../server/stores/connector-instance-store.ts";
+import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
 import { introspectionHeaders } from "./helpers/introspection.ts";
 import { TEST_INTROSPECTION_SERVER_OPTS } from "./helpers/introspection-test-credentials.ts";
 
@@ -1102,6 +1103,7 @@ async function withHarness(fn: (harness: Harness) => Promise<void>): Promise<voi
     asPort: 0,
     dbPath: ":memory:",
     dynamicClientRegistrationInitialAccessTokens: [TEST_DCR_INITIAL_ACCESS_TOKEN],
+    preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
     quiet: true,
     rsPort: 0,
     ...TEST_INTROSPECTION_SERVER_OPTS,
@@ -1134,6 +1136,7 @@ async function withNativeHarness(fn: (harness: NativeHarness) => Promise<void>):
     asPort: 0,
     dbPath: ":memory:",
     nativeManifest,
+    preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
     quiet: true,
     rsPort: 0,
     ...TEST_INTROSPECTION_SERVER_OPTS,
@@ -1572,7 +1575,14 @@ test("PDPP reference implementation integration", async (t) => {
       readFileSync(join(REFERENCE_IMPL_DIR, "fixtures/seed-manifests/spotify.json"), "utf8")
     );
 
-    let server = await startServer({ asPort: 0, dbPath, quiet: true, rsPort: 0, ...TEST_INTROSPECTION_SERVER_OPTS });
+    let server = await startServer({
+      asPort: 0,
+      dbPath,
+      preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
+      quiet: true,
+      rsPort: 0,
+      ...TEST_INTROSPECTION_SERVER_OPTS,
+    });
     const asUrl = `http://localhost:${server.asPort}`;
 
     try {
@@ -1598,6 +1608,7 @@ test("PDPP reference implementation integration", async (t) => {
       server = await startServer({
         asPort: server.asPort,
         dbPath,
+        preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
         quiet: true,
         rsPort: server.rsPort,
         ...TEST_INTROSPECTION_SERVER_OPTS,
@@ -1626,7 +1637,14 @@ test("PDPP reference implementation integration", async (t) => {
     const spotifyManifest = JSON.parse(
       readFileSync(join(REFERENCE_IMPL_DIR, "fixtures/seed-manifests/spotify.json"), "utf8")
     );
-    const server = await startServer({ asPort: 0, dbPath, quiet: true, rsPort: 0, ...TEST_INTROSPECTION_SERVER_OPTS });
+    const server = await startServer({
+      asPort: 0,
+      dbPath,
+      preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
+      quiet: true,
+      rsPort: 0,
+      ...TEST_INTROSPECTION_SERVER_OPTS,
+    });
     const asUrl = `http://localhost:${server.asPort}`;
 
     try {
@@ -1823,6 +1841,7 @@ test("PDPP reference implementation integration", async (t) => {
       asPublicUrl: publicOrigin,
       dbPath: ":memory:",
       dynamicClientRegistrationInitialAccessTokens: [TEST_DCR_INITIAL_ACCESS_TOKEN],
+      preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
       quiet: true,
       rsPort: 0,
       ...TEST_INTROSPECTION_SERVER_OPTS,
@@ -3568,6 +3587,7 @@ test("PDPP reference implementation integration", async (t) => {
       asPort: 0,
       dbPath: ":memory:",
       dynamicClientRegistrationInitialAccessTokens: [TEST_DCR_INITIAL_ACCESS_TOKEN],
+      preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
       quiet: true,
       rsPort: 0,
     });
@@ -3645,6 +3665,7 @@ test("PDPP reference implementation integration", async (t) => {
       asPort: 0,
       dbPath: ":memory:",
       dynamicClientRegistrationInitialAccessTokens: [TEST_DCR_INITIAL_ACCESS_TOKEN],
+      preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
       quiet: true,
       rsPort: 0,
     });
@@ -3691,6 +3712,7 @@ test("PDPP reference implementation integration", async (t) => {
         asPort: 0,
         dbPath: ":memory:",
         dynamicClientRegistrationInitialAccessTokens: [TEST_DCR_INITIAL_ACCESS_TOKEN],
+        preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
         quiet: true,
         rsPort: 0,
       });
@@ -3771,6 +3793,7 @@ test("PDPP reference implementation integration", async (t) => {
       asPort: 0,
       dbPath: ":memory:",
       dynamicClientRegistrationInitialAccessTokens: [TEST_DCR_INITIAL_ACCESS_TOKEN],
+      preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
       quiet: true,
       rsPort: 0,
     });
@@ -3881,6 +3904,7 @@ test("PDPP reference implementation integration", async (t) => {
         asPort: 0,
         dbPath: ":memory:",
         dynamicClientRegistrationInitialAccessTokens: [TEST_DCR_INITIAL_ACCESS_TOKEN],
+        preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
         quiet: true,
         rsPort: 0,
       });
@@ -4735,6 +4759,7 @@ test("PDPP reference implementation integration", async (t) => {
       asPort: 0,
       dbPath,
       nativeManifest,
+      preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
       quiet: true,
       rsPort: 0,
       ...TEST_INTROSPECTION_SERVER_OPTS,
@@ -4767,6 +4792,7 @@ test("PDPP reference implementation integration", async (t) => {
         asPort: server.asPort,
         dbPath,
         nativeManifest,
+        preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
         quiet: true,
         rsPort: server.rsPort,
         ...TEST_INTROSPECTION_SERVER_OPTS,
@@ -4816,6 +4842,7 @@ test("PDPP reference implementation integration", async (t) => {
       asPort: 0,
       dbPath,
       nativeManifest,
+      preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
       quiet: true,
       rsPort: 0,
       ...TEST_INTROSPECTION_SERVER_OPTS,
@@ -4848,6 +4875,7 @@ test("PDPP reference implementation integration", async (t) => {
         asPort: server.asPort,
         dbPath,
         nativeManifest,
+        preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
         quiet: true,
         rsPort: server.rsPort,
         ...TEST_INTROSPECTION_SERVER_OPTS,
@@ -4896,6 +4924,7 @@ test("PDPP reference implementation integration", async (t) => {
         asPort: 0,
         dbPath,
         dynamicClientRegistrationInitialAccessTokens: [TEST_DCR_INITIAL_ACCESS_TOKEN],
+        preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
         quiet: true,
         rsPort: 0,
       });
@@ -4953,6 +4982,7 @@ test("PDPP reference implementation integration", async (t) => {
           asPort: server.asPort,
           dbPath,
           dynamicClientRegistrationInitialAccessTokens: [TEST_DCR_INITIAL_ACCESS_TOKEN],
+          preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
           quiet: true,
           rsPort: server.rsPort,
         });
@@ -5052,6 +5082,7 @@ test("PDPP reference implementation integration", async (t) => {
         asPort: 0,
         dbPath,
         nativeManifest,
+        preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
         quiet: true,
         rsPort: 0,
         ...TEST_INTROSPECTION_SERVER_OPTS,
@@ -5092,6 +5123,7 @@ test("PDPP reference implementation integration", async (t) => {
           asPort: server.asPort,
           dbPath,
           nativeManifest,
+          preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
           quiet: true,
           rsPort: server.rsPort,
           ...TEST_INTROSPECTION_SERVER_OPTS,
@@ -5146,6 +5178,7 @@ test("PDPP reference implementation integration", async (t) => {
         asPort: 0,
         dbPath,
         dynamicClientRegistrationInitialAccessTokens: [TEST_DCR_INITIAL_ACCESS_TOKEN],
+        preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
         quiet: true,
         rsPort: 0,
         ...TEST_INTROSPECTION_SERVER_OPTS,
@@ -5192,6 +5225,7 @@ test("PDPP reference implementation integration", async (t) => {
           asPort: server.asPort,
           dbPath,
           dynamicClientRegistrationInitialAccessTokens: [TEST_DCR_INITIAL_ACCESS_TOKEN],
+          preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
           quiet: true,
           rsPort: server.rsPort,
           ...TEST_INTROSPECTION_SERVER_OPTS,
@@ -5253,6 +5287,7 @@ test("PDPP reference implementation integration", async (t) => {
         asPort: 0,
         dbPath,
         dynamicClientRegistrationInitialAccessTokens: [TEST_DCR_INITIAL_ACCESS_TOKEN],
+        preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
         quiet: true,
         rsPort: 0,
         ...TEST_INTROSPECTION_SERVER_OPTS,
@@ -5344,6 +5379,7 @@ test("PDPP reference implementation integration", async (t) => {
         asPort: 0,
         dbPath,
         dynamicClientRegistrationInitialAccessTokens: [TEST_DCR_INITIAL_ACCESS_TOKEN],
+        preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
         quiet: true,
         rsPort: 0,
         ...TEST_INTROSPECTION_SERVER_OPTS,

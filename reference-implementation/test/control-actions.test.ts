@@ -37,6 +37,7 @@ import { closeDb, getDb, initDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
 import { getDefaultConnectorAttentionStore } from "../server/stores/connector-attention-store.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
+import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
 import { resolveCredentialFreeFixtureRunEnv } from "./helpers/credential-free-run-fixture.ts";
 import { installCollectionProfiles, readCollectionProfileFixture } from "./helpers/installed-collection-profiles.ts";
 
@@ -250,6 +251,7 @@ async function withHarness(
     asPort: 0,
     connectionScopedRunEnvResolver: resolveCredentialFreeFixtureRunEnv,
     dbPath: ":memory:",
+    preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
     quiet: true,
     rsPort: 0,
     ...extraOptions,
@@ -711,6 +713,7 @@ test("GET /_ref/records/timeline honors limit and filters records by stream", as
   const server = (await startServer({
     asPort: 0,
     dbPath: ":memory:",
+    preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
     quiet: true,
     rsPort: 0,
   })) as TestServer;
@@ -1020,6 +1023,7 @@ test("controller startup reconciles abandoned controller-managed runs after rest
       asPort: 0,
       connectionScopedRunEnvResolver: resolveCredentialFreeFixtureRunEnv,
       dbPath,
+      preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
       quiet: true,
       rsPort: 0,
     })) as TestServer;
@@ -1138,6 +1142,7 @@ test("controller startup reconciles abandoned controller-managed runs after rest
       autoEnrollEligibleSchedules: false,
       connectionScopedRunEnvResolver: resolveCredentialFreeFixtureRunEnv,
       dbPath,
+      preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
       quiet: true,
       rsPort: 0,
     })) as TestServer;
@@ -1330,7 +1335,13 @@ test("schedule upsert returns policy_warning when interval is below minimum_inte
     version: "1.0.0",
   };
 
-  const server = (await startServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 })) as TestServer;
+  const server = (await startServer({
+    asPort: 0,
+    dbPath: ":memory:",
+    preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
+    quiet: true,
+    rsPort: 0,
+  })) as TestServer;
   const asUrl = `http://localhost:${server.asPort}`;
   try {
     await registerConnector(asUrl, manifest);
@@ -1391,7 +1402,13 @@ test("schedule upsert rejects enabling manual or background-unsafe connector pol
     version: "1.0.0",
   };
 
-  const server = (await startServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 })) as TestServer;
+  const server = (await startServer({
+    asPort: 0,
+    dbPath: ":memory:",
+    preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
+    quiet: true,
+    rsPort: 0,
+  })) as TestServer;
   const asUrl = `http://localhost:${server.asPort}`;
   try {
     await registerConnector(asUrl, manifest);
@@ -1446,7 +1463,13 @@ test("schedule upsert permits an interactive-login connector that declares backg
     version: "1.0.0",
   };
 
-  const server = (await startServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 })) as TestServer;
+  const server = (await startServer({
+    asPort: 0,
+    dbPath: ":memory:",
+    preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
+    quiet: true,
+    rsPort: 0,
+  })) as TestServer;
   const asUrl = `http://localhost:${server.asPort}`;
   try {
     await registerConnector(asUrl, manifest);
@@ -1499,7 +1522,13 @@ test("schedule upsert permits assisted-after-owner-auth schedules as unattended 
     version: "1.0.0",
   };
 
-  const server = (await startServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 })) as TestServer;
+  const server = (await startServer({
+    asPort: 0,
+    dbPath: ":memory:",
+    preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
+    quiet: true,
+    rsPort: 0,
+  })) as TestServer;
   const asUrl = `http://localhost:${server.asPort}`;
   try {
     await registerConnector(asUrl, manifest);
@@ -1546,7 +1575,13 @@ test("schedule resume rejects a disabled schedule when connector policy is backg
     version: "1.0.0",
   };
 
-  const server = (await startServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 })) as TestServer;
+  const server = (await startServer({
+    asPort: 0,
+    dbPath: ":memory:",
+    preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
+    quiet: true,
+    rsPort: 0,
+  })) as TestServer;
   const asUrl = `http://localhost:${server.asPort}`;
   try {
     await registerConnector(asUrl, manifest);
@@ -1618,7 +1653,13 @@ test("GET /_ref/schedules surfaces ineligibility_reason for a stale enabled row 
     version: "1.1.0",
   };
 
-  const server = (await startServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 })) as TestServer;
+  const server = (await startServer({
+    asPort: 0,
+    dbPath: ":memory:",
+    preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
+    quiet: true,
+    rsPort: 0,
+  })) as TestServer;
   const asUrl = `http://localhost:${server.asPort}`;
   try {
     await registerConnector(asUrl, baseManifest);
@@ -1726,7 +1767,13 @@ test("GET /_ref/schedules omits ineligibility_reason when persisted row is disab
     version: "1.0.0",
   };
 
-  const server = (await startServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 })) as TestServer;
+  const server = (await startServer({
+    asPort: 0,
+    dbPath: ":memory:",
+    preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
+    quiet: true,
+    rsPort: 0,
+  })) as TestServer;
   const asUrl = `http://localhost:${server.asPort}`;
   try {
     await registerConnector(asUrl, safeManifest);

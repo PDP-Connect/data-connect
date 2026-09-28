@@ -92,7 +92,7 @@ import { appConfigPath, createAppConfigStore } from "./app-config-store.ts";
 import { autostartStatePath, createAutostartStore } from "./autostart-store.ts";
 import { createLiveRevisions, type LiveRevisions, registerDefaultLiveTopics } from "./live-revisions.ts";
 import { createRecoveryKeyStore } from "./recovery-key-store.ts";
-import { getOwnerSessionStore, revokeLeakedFirstPartyOwnerCredentials } from "./stores/owner-session-store.ts";
+import { getOwnerSessionStore, retireFormerPreRegisteredClients } from "./stores/owner-session-store.ts";
 import { NekoSurfaceAllocatorClient } from "../runtime/neko-surface-allocator.ts";
 import { isClosedPipeWriteError } from "../runtime/pipe-errors.ts";
 import { hasForwardEvidenceDebt } from "../runtime/recovery-decision.ts";
@@ -331,7 +331,7 @@ import {
 } from "./ref-control.ts";
 import {
   DEFAULT_LOCAL_DCR_INITIAL_ACCESS_TOKEN,
-  defaultPreRegisteredPublicClientsFor,
+  DEFAULT_PRE_REGISTERED_PUBLIC_CLIENTS,
 } from "./reference-local-defaults.ts";
 import { resolveReferenceRevision, setReferenceRevisionHeader } from "./reference-revision.ts";
 import { servedRootLandingIfBrowser } from "./reference-root-landing.ts";
@@ -2953,7 +2953,7 @@ function validateNativeConfiguration(opts: ServerOpts = {}) {
 function defaultPreRegisteredPublicClients() {
   // Copy the shared frozen defaults into plain mutable entries so downstream
   // code that mutates metadata during seeding can operate normally.
-  return defaultPreRegisteredPublicClientsFor().map((client) => ({
+  return DEFAULT_PRE_REGISTERED_PUBLIC_CLIENTS.map((client) => ({
     ...client,
     metadata: { ...client.metadata },
   }));
@@ -2990,6 +2990,12 @@ function resolveDynamicClientRegistrationInitialAccessTokensForRequest(req: ReqL
 
 function resolvePreRegisteredPublicClients(opts: ServerOpts = {}) {
   return opts.preRegisteredPublicClients || defaultPreRegisteredPublicClients();
+}
+
+function preRegisteredClientIds(clients: unknown): string[] {
+  return (Array.isArray(clients) ? clients : [])
+    .map((client: { client_id?: unknown } | null) => client?.client_id)
+    .filter((id): id is string => typeof id === "string");
 }
 
 function createPublicDcrRateLimiter(config: { windowMs?: number; max?: number } | false = {}) {
@@ -8570,15 +8576,15 @@ export async function startServer(opts: ServerOpts = {}) {
     subjectId: earlyOwnerAuthConfig.subjectId || OWNER_AUTH_DEFAULT_SUBJECT_ID,
   });
   // Before the scheduler and console start and before the desktop signs in,
-  // so nothing holds a credential this revokes except the kept ones.
-  const leakedOwnerCredentials = await revokeLeakedFirstPartyOwnerCredentials(Math.floor(Date.now() / 1000));
-  if (leakedOwnerCredentials.bearers > 0 || leakedOwnerCredentials.sessions > 0) {
+  // so nothing holds a credential this revokes.
+  const retired = await retireFormerPreRegisteredClients(
+    Math.floor(Date.now() / 1000),
+    preRegisteredClientIds(resolvePreRegisteredPublicClients(opts))
+  );
+  if (Object.keys(retired.clients).length > 0 || retired.sessions > 0) {
     logger.warn(
-      {
-        owner_bearers_revoked: leakedOwnerCredentials.bearers,
-        owner_sessions_revoked: leakedOwnerCredentials.sessions,
-      },
-      "revoked duplicate owner bearers and sessions that the console, connector runtime and desktop sign-in left on earlier starts"
+      { owner_sessions_revoked: retired.sessions, retired_clients: retired.clients },
+      "revoked the credentials of clients earlier versions pre-registered, and the unlabelled desktop sessions earlier starts left"
     );
   }
 

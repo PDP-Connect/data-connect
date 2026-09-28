@@ -62,6 +62,7 @@ import {
   resolveSemanticPerConnectorLimit,
   semanticIndexDelete,
 } from "../server/search-semantic.ts";
+import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
 
 // ─── harness ────────────────────────────────────────────────────────────────
 
@@ -481,6 +482,7 @@ async function withHarness(
     asPort: 0,
     dbPath: ":memory:",
     dynamicClientRegistrationInitialAccessTokens: [TEST_DCR_INITIAL_ACCESS_TOKEN],
+    preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
     quiet: true,
     rsPort: 0,
     ...opts,
@@ -1376,6 +1378,7 @@ test("restart regression: semantic coverage survives process restart without re-
         asPort: 0,
         dbPath,
         dynamicClientRegistrationInitialAccessTokens: [TEST_DCR_INITIAL_ACCESS_TOKEN],
+        preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
         quiet: true,
         rsPort: 0,
       });
@@ -1411,6 +1414,7 @@ test("restart regression: semantic coverage survives process restart without re-
         asPort: 0,
         dbPath,
         dynamicClientRegistrationInitialAccessTokens: [TEST_DCR_INITIAL_ACCESS_TOKEN],
+        preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
         quiet: true,
         rsPort: 0,
       });
@@ -1460,6 +1464,7 @@ test("restart regression: streams with only empty semantic field values do not r
         asPort: 0,
         dbPath,
         dynamicClientRegistrationInitialAccessTokens: [TEST_DCR_INITIAL_ACCESS_TOKEN],
+        preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
         quiet: true,
         rsPort: 0,
       });
@@ -1488,6 +1493,7 @@ test("restart regression: streams with only empty semantic field values do not r
         asPort: 0,
         dbPath,
         dynamicClientRegistrationInitialAccessTokens: [TEST_DCR_INITIAL_ACCESS_TOKEN],
+        preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
         quiet: true,
         rsPort: 0,
         semanticRetrievalBackend: countingBackend,
@@ -1700,6 +1706,7 @@ test("interrupted semantic backfill with existing meta resumes instead of rebuil
         asPort: 0,
         dbPath,
         dynamicClientRegistrationInitialAccessTokens: [TEST_DCR_INITIAL_ACCESS_TOKEN],
+        preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
         quiet: true,
         rsPort: 0,
       });
@@ -1782,6 +1789,7 @@ test("interrupted semantic backfill with existing meta resumes instead of rebuil
         asPort: 0,
         dbPath,
         dynamicClientRegistrationInitialAccessTokens: [TEST_DCR_INITIAL_ACCESS_TOKEN],
+        preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
         quiet: true,
         rsPort: 0,
         semanticRetrievalBackend: countingBackend,
@@ -1825,6 +1833,7 @@ test("interrupted semantic backfill resumes and embeds only missing record-field
         asPort: 0,
         dbPath,
         dynamicClientRegistrationInitialAccessTokens: [TEST_DCR_INITIAL_ACCESS_TOKEN],
+        preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
         quiet: true,
         rsPort: 0,
         semanticRetrievalBackend: interruptingBackend,
@@ -1875,6 +1884,7 @@ test("interrupted semantic backfill resumes and embeds only missing record-field
         asPort: 0,
         dbPath,
         dynamicClientRegistrationInitialAccessTokens: [TEST_DCR_INITIAL_ACCESS_TOKEN],
+        preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
         quiet: true,
         rsPort: 0,
         semanticRetrievalBackend: countingBackend,
@@ -1940,6 +1950,7 @@ test("backend identity change flips index_state to stale until rebuild restores"
         asPort: 0,
         dbPath,
         dynamicClientRegistrationInitialAccessTokens: [TEST_DCR_INITIAL_ACCESS_TOKEN],
+        preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
         quiet: true,
         rsPort: 0,
       });
@@ -1976,6 +1987,7 @@ test("backend identity change flips index_state to stale until rebuild restores"
         asPort: 0,
         dbPath,
         dynamicClientRegistrationInitialAccessTokens: [TEST_DCR_INITIAL_ACCESS_TOKEN],
+        preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
         quiet: true,
         rsPort: 0,
         semanticRetrievalBackend: adapter,
@@ -2080,6 +2092,7 @@ test("shipped gmail manifest contributes semantic coverage after reconcile witho
       asPort: 0,
       dbPath,
       dynamicClientRegistrationInitialAccessTokens: [TEST_DCR_INITIAL_ACCESS_TOKEN],
+      preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
       quiet: true,
       rsPort: 0,
     });

@@ -112,19 +112,18 @@ Overrides:
   `pdpp_registration_modes_supported: ["pre_registered_public"]`.
 
 Default pre-registered public clients seeded at startup are the product
-clients `pdpp_cli`, `pdpp-web-dashboard`, `pdpp-polyfill-owner-bootstrap` (the
-console's owner bearer) and `pdpp-connector-runtime` (the connector runtime's
-owner bearer), plus the demo clients `longview`, `longview_planning_v1`,
-`cli_longview` and `concert_recommendation_app`. Product builds leave the demo
-clients out: a server started with `NODE_ENV=production` (the Docker images) or
-`PDPP_MANAGED_DESKTOP_HOST=1` (the desktop app) seeds only the product clients
-unless `PDPP_ENABLE_DEMO_CLIENTS=1`. Rows seeded by an earlier version stay
-registered. The console and the connector runtime hold one owner bearer per
-subject: an owner device approval for either client returns the live bearer
-that client already has while it has at least half its lifetime left, and
-startup revokes older duplicates. The pre-registered set is reference-local
-convenience; production deployments should supply their own
-`preRegisteredPublicClients` option.
+clients `pdpp_cli` (the published CLI), `pdpp-web-dashboard` (the console's
+operator bootstrap), `dataconnect-console` (the console's owner bearer) and
+`dataconnect-connector-runtime` (the connector runtime's owner bearer). The
+console and the connector runtime hold one owner bearer per subject: an owner
+device approval for either client returns the live bearer that client already
+has while it has at least half its lifetime left. Startup revokes the tokens
+and refresh tokens of clients earlier versions pre-registered and no longer do
+(`RETIRED_PRE_REGISTERED_CLIENT_IDS`), expires their pending owner device
+requests, and deletes their `oauth_clients` rows unless an active grant still
+names them or `preRegisteredPublicClients` lists them. The pre-registered set
+is reference-local convenience; production deployments should supply their
+own `preRegisteredPublicClients` option.
 
 ### Consent and grant issuance
 
