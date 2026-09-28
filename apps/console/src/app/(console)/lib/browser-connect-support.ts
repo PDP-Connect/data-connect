@@ -7,9 +7,10 @@
  *
  * A connector supports "Connect account" in the browser-session flow when an
  * installed package (or a local manifest) declares a `browser` binding. The
- * classification is the shared `classifyConnectorIntentModality` rule the
- * backend intent route uses, so the console and the owner-agent surface give
- * the same answer. Known scaffolds stay excluded: they can never collect.
+ * decision is the shared `browserEnrollmentSupport` rule that the RI's
+ * enrollment-shell route applies to the registered manifest, so the console
+ * and the RI give the same answer. Known scaffolds stay excluded: they can
+ * never collect. Without the conformance roster that rule adds no account.
  *
  * The console must not gate this on a connector-key list. A key list cannot
  * know about a connector that the owner installed from the runtime catalog,
@@ -18,9 +19,9 @@
  */
 
 import {
+  type BrowserEnrollmentSupport,
+  browserEnrollmentSupport,
   canonicalConnectorKey,
-  classifyConnectorIntentModality,
-  isKnownScaffoldConnector,
 } from "pdpp-reference-implementation/connection-setup-plan";
 
 export interface BindingSource {
@@ -29,12 +30,7 @@ export interface BindingSource {
   readonly bindings: Readonly<Record<string, unknown>> | null | undefined;
 }
 
-export interface BrowserConnectSupport {
-  /** The connector declares a browser binding: the browser-session routes apply. */
-  readonly browserBound: boolean;
-  /** A new account can be added through the browser-session flow. */
-  readonly canAddAccount: boolean;
-}
+export type BrowserConnectSupport = BrowserEnrollmentSupport;
 
 function sourceKey(source: BindingSource): string {
   return canonicalConnectorKey(source.connector_key ?? source.connector_id);
@@ -48,13 +44,16 @@ export function browserConnectSupport(
     return { browserBound: false, canAddAccount: false };
   }
   const key = canonicalConnectorKey(connectorId);
-  const browserBound = sources.some(
-    (source) =>
-      sourceKey(source) === key &&
-      classifyConnectorIntentModality({
+  const supports = sources
+    .filter((source) => sourceKey(source) === key)
+    .map((source) =>
+      browserEnrollmentSupport(key, {
         connector_id: source.connector_id,
         runtime_requirements: { bindings: source.bindings ?? null },
-      }) === "browser_bound"
-  );
-  return { browserBound, canAddAccount: browserBound && !isKnownScaffoldConnector(key) };
+      })
+    );
+  return {
+    browserBound: supports.some((support) => support.browserBound),
+    canAddAccount: supports.some((support) => support.canAddAccount),
+  };
 }

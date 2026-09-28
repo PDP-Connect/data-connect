@@ -4,13 +4,26 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { classifyConnectorIntentModality } from "pdpp-reference-implementation/connection-setup-plan";
+import {
+  classifyConnectorIntentModality,
+  isKnownScaffoldConnector,
+} from "pdpp-reference-implementation/connection-setup-plan";
 import { type BindingSource, browserConnectSupport } from "./browser-connect-support.ts";
 import { isSupportedBrowserCollectorConnector } from "./connection-modality.ts";
 import { parseConnectorInstallStatusResponse } from "./connector-install-contract.ts";
 import { connectorInstallStatusFixture } from "./connector-install-fixtures.ts";
 
 const BROWSER_SESSION_DIR = new URL("../connect/browser-session/[connectorId]/", import.meta.url);
+
+// browser-connect-support.no-roster.test.ts reruns this file with the
+// optional conformance roster made unresolvable, as in a packaged console that
+// cannot load @pdpp/polyfill-connectors. Then no connector can add an account.
+const ROSTER_ABSENT = process.env.PDPP_TEST_SIMULATE_NO_CONNECTOR_ROSTER === "1";
+const CAN_ADD_ACCOUNT = !ROSTER_ABSENT;
+
+test("the conformance roster is loaded exactly when this run expects it", () => {
+  assert.equal(isKnownScaffoldConnector("anthropic"), !ROSTER_ABSENT);
+});
 
 // Installed packages as the connector-install status route reports them. The
 // last one is a catalog-only browser-bound connector that no key list in the
@@ -33,19 +46,23 @@ test("every installed browser-bound connector can add an account", () => {
   const browserBound = installed.filter(isBrowserBinding);
   assert.equal(browserBound.length, 3);
   for (const source of browserBound) {
-    assert.deepEqual(browserConnectSupport(source.connector_id, installed), { browserBound: true, canAddAccount: true }, source.connector_id);
+    assert.deepEqual(
+      browserConnectSupport(source.connector_id, installed),
+      { browserBound: true, canAddAccount: CAN_ADD_ACCOUNT },
+      source.connector_id
+    );
   }
 });
 
 test("an installed browser-bound connector outside the old key list can add an account", () => {
   // The old console gate read a connector-key list, which rejected this one.
   assert.equal(isSupportedBrowserCollectorConnector("acme-shop"), false);
-  assert.equal(browserConnectSupport("acme-shop", installed).canAddAccount, true);
+  assert.equal(browserConnectSupport("acme-shop", installed).canAddAccount, CAN_ADD_ACCOUNT);
 });
 
 test("a registry-URL connector id matches the installed bare key", () => {
-  assert.equal(browserConnectSupport("https://registry.pdpp.dev/connectors/reddit", installed).canAddAccount, true);
-  assert.equal(browserConnectSupport("amazon", installed).canAddAccount, true);
+  assert.equal(browserConnectSupport("https://registry.pdpp.dev/connectors/reddit", installed).canAddAccount, CAN_ADD_ACCOUNT);
+  assert.equal(browserConnectSupport("amazon", installed).canAddAccount, CAN_ADD_ACCOUNT);
 });
 
 test("connectors without a browser binding do not use the browser-session flow", () => {
