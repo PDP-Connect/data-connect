@@ -10,7 +10,7 @@ Beats match the recording's captions. Say before switching screens: "The same lo
 | 5–7 | Consent: who, purpose, institutions, fields | "This is the one screen PDPP adds: who is asking, for what purpose, from which institutions, which fields." |
 | 8–9 | Unticking household members and health centre | "She unticks her household members and her health centre. Fields the service needs stay fixed." |
 | 10 | End date | "Access ends on 31 January 2027." |
-| 11 | Autorizar | "She approves. This is the Art. 17 express authorisation." |
+| 11 | Autorizar | "She approves. For her health record, this is the written consent Ley 172-13 asks for (Art. 76), recorded as Decreto 403-26 Art. 36 expects." |
 | 12 | Data received | "The service received only what she allowed: the due date from SNS, the household classification from SIUBEN." |
 | 13 | Not shared | "What she unticked never left the institutions. A request for it is refused." |
 | 14 | Mis autorizaciones, reads | "She sees every permission, and what was read and when." |
