@@ -9,6 +9,7 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   truncateSync,
   writeFileSync,
 } from "node:fs"
@@ -18,6 +19,7 @@ import { PassThrough } from "node:stream"
 import { describe, expect, it } from "vitest"
 import {
   assertBinaryArchitecture,
+  assertMacFrameworkLayout,
   assertPackagedBrowser,
   assertPackagedNode,
   assertPackagedReferenceStacks,
@@ -601,4 +603,97 @@ describe("bundled personal-server verifier", () => {
     },
     30_000
   )
+})
+
+describe("assertMacFrameworkLayout", () => {
+  const frameworkName = "Google Chrome for Testing Framework"
+  const version = "153.0.8010.12"
+
+  // The layout of the upstream Playwright chrome-mac-arm64 zip for
+  // chromium-1243: five relative symlinks around one version directory.
+  function writeBrowsers(root, { links = true } = {}) {
+    const browsers = join(root, "browsers")
+    const framework = join(
+      browsers,
+      "chromium-1243",
+      "chrome-mac-arm64",
+      "Google Chrome for Testing.app",
+      "Contents",
+      "Frameworks",
+      `${frameworkName}.framework`
+    )
+    const versionDirectory = join(framework, "Versions", version)
+    for (const directory of ["Resources", "Helpers", "Libraries"]) {
+      mkdirSync(join(versionDirectory, directory), { recursive: true })
+    }
+    writeFileSync(join(versionDirectory, frameworkName), "binary")
+    if (links) {
+      symlinkSync(version, join(framework, "Versions", "Current"))
+      for (const entry of [
+        frameworkName,
+        "Resources",
+        "Helpers",
+        "Libraries",
+      ]) {
+        symlinkSync(`Versions/Current/${entry}`, join(framework, entry))
+      }
+    }
+    return { browsers, framework }
+  }
+
+  function withBrowsers(options, check) {
+    const root = mkdtempSync(join(tmpdir(), "framework-layout-"))
+    try {
+      check(writeBrowsers(root, options))
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  }
+
+  it("accepts the upstream Chromium framework layout", () => {
+    withBrowsers({}, ({ browsers }) => {
+      expect(() => assertMacFrameworkLayout(browsers, "app")).not.toThrow()
+    })
+  })
+
+  it("rejects the v0.7.59 layout: links dropped, binary copied", () => {
+    withBrowsers({ links: false }, ({ browsers, framework }) => {
+      writeFileSync(join(framework, frameworkName), "binary")
+      expect(() => assertMacFrameworkLayout(browsers, "app")).toThrow(
+        /is missing Versions\/Current/
+      )
+    })
+  })
+
+  it("rejects a real file at the framework root", () => {
+    withBrowsers({}, ({ browsers, framework }) => {
+      rmSync(join(framework, frameworkName))
+      writeFileSync(join(framework, frameworkName), "binary")
+      expect(() => assertMacFrameworkLayout(browsers, "app")).toThrow(
+        `${frameworkName} must be a symlink, found a real file`
+      )
+    })
+  })
+
+  it("rejects an absolute link into the build host's cache", () => {
+    withBrowsers({}, ({ browsers, framework }) => {
+      const current = join(framework, "Versions", "Current")
+      rmSync(current)
+      symlinkSync(join(framework, "Versions", version), current)
+      expect(() => assertMacFrameworkLayout(browsers, "app")).toThrow(
+        /Versions\/Current -> .* must stay inside the framework/
+      )
+    })
+  })
+
+  it("rejects a bundle without a Chromium framework", () => {
+    const root = mkdtempSync(join(tmpdir(), "framework-layout-"))
+    try {
+      expect(() => assertMacFrameworkLayout(root, "app")).toThrow(
+        "app carries no Chromium framework"
+      )
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
 })

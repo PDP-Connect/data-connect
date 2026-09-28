@@ -6,7 +6,9 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  readlinkSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs"
 import { tmpdir } from "node:os"
@@ -362,6 +364,63 @@ describe("release workflow", () => {
     expect(workflow).not.toContain("VITE_PRIVY_CLIENT_ID")
     expect(workflow).not.toMatch(/msi\/\*\.msi/i)
     expect(workflow).not.toMatch(/vana\.(?:com|org)|corsali/i)
+  })
+
+  it("restores the Chromium framework symlinks after Tauri, before the DMG", () => {
+    const finalizeBundles = readWorkflowStep(
+      readReleaseWorkflow(),
+      "Finalize platform bundles"
+    )
+    const copyCommand =
+      'cp -R playwright-runner/dist/browsers "$browsers_destination"'
+    const start = finalizeBundles.indexOf("browsers_destination=")
+    const end = finalizeBundles.indexOf(copyCommand) + copyCommand.length
+    expect(start).toBeGreaterThan(-1)
+    expect(end).toBeGreaterThan(start)
+    expect(end).toBeLessThan(
+      finalizeBundles.indexOf("node scripts/create-macos-dmg.mjs")
+    )
+
+    const root = mkdtempSync(join(tmpdir(), "release-browsers-"))
+    try {
+      const frameworkPath = join(
+        "chromium-1243",
+        "chrome-mac-arm64",
+        "Google Chrome for Testing.app",
+        "Contents",
+        "Frameworks",
+        "F.framework"
+      )
+      // playwright-runner's build output keeps the upstream links.
+      const built = join(root, "playwright-runner", "dist", "browsers")
+      mkdirSync(join(built, frameworkPath, "Versions", "1.0"), {
+        recursive: true,
+      })
+      writeFileSync(join(built, frameworkPath, "Versions", "1.0", "F"), "bin")
+      symlinkSync("1.0", join(built, frameworkPath, "Versions", "Current"))
+      symlinkSync("Versions/Current/F", join(built, frameworkPath, "F"))
+      // Tauri's copy: no links, the binary copied to the root.
+      const app = join(root, "DataConnect.app")
+      const packaged = join(
+        app,
+        "Contents/Resources/playwright-runner/dist/browsers",
+        frameworkPath
+      )
+      mkdirSync(join(packaged, "Versions", "1.0"), { recursive: true })
+      writeFileSync(join(packaged, "Versions", "1.0", "F"), "bin")
+      writeFileSync(join(packaged, "F"), "bin")
+
+      execFileSync(
+        "bash",
+        ["-euo", "pipefail", "-c", finalizeBundles.slice(start, end)],
+        { cwd: root, env: { ...process.env, app } }
+      )
+
+      expect(readlinkSync(join(packaged, "Versions", "Current"))).toBe("1.0")
+      expect(readlinkSync(join(packaged, "F"))).toBe("Versions/Current/F")
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 
   it("refuses a release checkout whose HEAD is not the release event commit", () => {
