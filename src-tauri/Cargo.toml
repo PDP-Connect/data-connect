@@ -107,6 +107,11 @@ signal-hook = "0.4.4"
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18"
 
+# The WebKitGTK cookie test in unified.rs builds a real webview with the wry
+# that tauri already uses, with the same features.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+wry = { version = "0.55", default-features = false, features = ["protocol", "os-webview", "linux-body"] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 # run_lease.rs's process-identity check has no /proc filesystem to read on
 # macOS (Linux keeps its existing hand-rolled /proc/<pid>/stat parser,

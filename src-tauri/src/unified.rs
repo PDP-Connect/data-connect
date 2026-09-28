@@ -529,37 +529,15 @@ pub(crate) fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Erro
     // The console asks for the password window, OS re-auth and a stack
     // restart by writing request files under the data directory. Only these
     // watchers act on them; v0.7.59 never started them.
-    // A restart request left by the last session is covered by the startup
-    // bootstrap below, which also carries out the revocation it asked for.
-    let startup_session_reset =
-        match crate::owner_credential::absorb_pending_owner_password_stack_restart_request(
-            &app_handle,
-        ) {
-            Ok(Some(absorbed)) => {
-                log::info!(
-                    "Owner password stack-restart request {} from the last session is covered by this start",
-                    absorbed.request_id
-                );
-                absorbed.owner_session_reset
-            }
-            Ok(None) => None,
-            Err(error) => {
-                log::warn!("Could not absorb a pending owner password stack restart: {error}");
-                None
-            }
-        };
+    // A restart request left by the last session is carried out by the
+    // startup bootstrap below: `bootstrap_and_open_console` reads it, and
+    // completes it only once the stack is ready.
     crate::owner_credential::spawn_owner_password_window_watcher(app_handle.clone());
     crate::owner_credential::spawn_owner_os_reauth_watcher(app_handle.clone());
     crate::owner_credential::spawn_owner_password_stack_restart_watcher(app_handle.clone());
     tauri::async_runtime::spawn(async move {
         if let Err(failure) =
-            bootstrap_and_open_console(
-                app_handle.clone(),
-                should_show,
-                None,
-                startup_session_reset,
-            )
-            .await
+            bootstrap_and_open_console(app_handle.clone(), should_show, None, None).await
         {
             handle_bootstrap_failure(&app_handle, "Unified DataConnect startup", failure);
         }
@@ -867,7 +845,7 @@ impl OwnerSessionReset {
 /// `PDPP_RECOVERY_REVOKE_OWNER_SESSIONS`.
 /// Both inputs are made here, together, so a test of this function covers
 /// what `start_managed_stack` gives the RI.
-fn prepare_ri_start(
+pub(crate) fn prepare_ri_start(
     data_dir: &Path,
     owner_password: &str,
     owner_password_source: OwnerPasswordSource,
@@ -894,6 +872,35 @@ fn prepare_ri_start(
         database_encryption_key,
         owner_session_reset.is_some(),
     ))
+}
+
+/// The owner-session reset one start of the managed stack carries out, and
+/// the pending stack-restart request that start settles. A revoking request
+/// stays pending until a start that revokes reaches Ready, so a failed
+/// start, a restart watcher that gave up, or a quit cannot drop the
+/// revocation. Any start reads the saved password, so it also settles a
+/// request that does not revoke.
+pub(crate) fn owner_session_reset_for_start<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    requested: Option<OwnerSessionReset>,
+) -> (Option<OwnerSessionReset>, Option<u64>) {
+    match crate::owner_credential::pending_owner_password_stack_restart_request(app) {
+        Ok(Some(pending)) => {
+            log::info!(
+                "Owner password stack-restart request {} is carried out by this start",
+                pending.request_id
+            );
+            (
+                requested.or(pending.owner_session_reset),
+                Some(pending.request_id),
+            )
+        }
+        Ok(None) => (requested, None),
+        Err(error) => {
+            log::warn!("Could not read the owner password stack-restart request: {error}");
+            (requested, None)
+        }
+    }
 }
 
 fn ri_environment(
@@ -2554,7 +2561,7 @@ struct BootstrapSecrets {
 }
 
 #[derive(Clone, Copy)]
-enum OwnerPasswordSource {
+pub(crate) enum OwnerPasswordSource {
     Configured,
     DesktopGenerated,
 }
@@ -2669,6 +2676,13 @@ async fn bootstrap_and_open_console(
         .map_err(|error| BootstrapFailure::Other(format!("Bootstrap secrets task failed: {error}")))?
         .map_err(BootstrapFailure::from)?;
 
+    // Attach mode starts no stack, so it can carry out no restart request.
+    let (owner_session_reset, stack_restart_request_id) = if attach {
+        (owner_session_reset, None)
+    } else {
+        owner_session_reset_for_start(&app, owner_session_reset)
+    };
+
     let (ri_origin, console_url, managed) = if attach_mode() {
         let reference_status = attach_reference_server(app.clone()).await?;
         let ri_origin = reference_status
@@ -2719,6 +2733,7 @@ async fn bootstrap_and_open_console(
         should_show,
         &remote_access.fields.trusted_hosts,
         preserved_path,
+        stack_restart_request_id,
     )
     .await
     .map_err(BootstrapFailure::from)
@@ -2754,6 +2769,7 @@ async fn finish_bootstrap(
     should_show: bool,
     trusted_hosts: &str,
     preserved_path: Option<String>,
+    stack_restart_request_id: Option<u64>,
 ) -> Result<(), String> {
     let host_header = ri_readiness_host_header(trusted_hosts);
     let ri_origin_for_state = ri_origin.clone();
@@ -2855,6 +2871,15 @@ async fn finish_bootstrap(
         return Err(error);
     }
     spawn_console_deep_health_watch(console_origin_for_health_watch);
+    // No failure branch is left: this start carried out the restart request
+    // it read. Complete it before Ready, while the restart watcher still
+    // waits, so the watcher never runs it a second time.
+    if let Err(error) = crate::owner_credential::complete_owner_password_stack_restart_request(
+        app,
+        stack_restart_request_id,
+    ) {
+        log::warn!("Could not complete the owner password stack-restart request: {error}");
+    }
     set_status(app, UnifiedStatus::Ready);
     close_recovery_window(app);
     Ok(())
@@ -3164,6 +3189,9 @@ pub(crate) async fn import_database_encryption_recovery_code(
         // were on" to return to -- the recovery window is a distinct
         // surface from the console, and the console had never successfully
         // opened yet in this session.
+        None,
+        // This start revokes for recovery but does not read the
+        // stack-restart request; a later start still carries that out.
         None,
     )
     .await
@@ -3949,13 +3977,19 @@ fn owner_session_cookie(url: &tauri::Url, value: &str) -> Result<Cookie<'static>
 }
 
 fn owner_credential_reveal_cookie(url: &tauri::Url, value: &str) -> Result<Cookie<'static>, String> {
-    let _host = url
+    let host = url
         .host_str()
-        .ok_or_else(|| "Console URL has no cookie host".to_string())?;
-    Ok(Cookie::build((OWNER_CREDENTIAL_REVEAL_COOKIE, value.to_string()))
-        .path("/")
-        .http_only(true)
-        .build())
+        .ok_or_else(|| "Console URL has no cookie host".to_string())?
+        .to_string();
+    // wry turns a missing domain into "" and WebKitGTK then never sends the
+    // cookie, so the domain is required here, as for the session cookie.
+    Ok(
+        Cookie::build((OWNER_CREDENTIAL_REVEAL_COOKIE, value.to_string()))
+            .domain(host)
+            .path("/")
+            .http_only(true)
+            .build(),
+    )
 }
 
 /// Opens an external link clicked inside the console window in the owner's
@@ -7029,6 +7063,183 @@ setInterval(() => {}, 1000);
         println!("REAL-RI PASSWORD CHANGE TEST RAN");
     }
 
+    /// The owner changes the desktop password, and the first start after it
+    /// fails. The revocation must survive that failure: the next start that
+    /// succeeds signs out the old session and bearer. Before this, the
+    /// failed start (or the watcher giving up) completed the request, and the
+    /// next start ran with no reset, so the old session and bearer stayed
+    /// valid under the new password.
+    #[test]
+    fn a_password_change_whose_first_start_fails_is_revoked_by_the_next_start_in_the_real_ri() {
+        let Some(ri_root) = reference_implementation_or_skip() else {
+            return;
+        };
+        let root = tempfile::tempdir().expect("tempdir");
+        let app = crate::mock_app_with_data_dir(root.path());
+        let data_dir = app
+            .path()
+            .app_data_dir()
+            .expect("app data dir")
+            .join(UNIFIED_DB_DIRECTORY);
+        assert!(data_dir.starts_with(root.path()), "{data_dir:?}");
+        fs::create_dir_all(&data_dir).expect("data dir");
+        let driver = ri_root.join("test/fixtures/desktop-recovery-ri-driver.ts");
+        let seed_path = data_dir
+            .parent()
+            .expect("app data dir")
+            .join("driver-seed.json");
+
+        let old_password = "old-owner-password-0928";
+        let seeded = run_ri_driver(&ri_root, &data_dir, old_password, "seed", &[]);
+        assert_eq!(seeded["sessionStatus"], 204, "{seeded}");
+        assert_eq!(seeded["bearerStatus"], 200, "{seeded}");
+
+        let grant_id = "grant-test-0928-failed-start";
+        let request = run_ri_driver(
+            &ri_root,
+            &data_dir,
+            old_password,
+            "request-password-window",
+            &["change", grant_id],
+        );
+        let request_id = request["requestId"].as_u64().expect("request id");
+        crate::owner_credential::grant_owner_password_change_for_test(request_id, grant_id);
+        let window = tauri::WebviewWindowBuilder::new(&app, "owner-password", Default::default())
+            .build()
+            .expect("build the owner-password window");
+        let new_password = "new-owner-password-0928";
+        crate::invoke_from(
+            &window,
+            "set_desktop_owner_password",
+            serde_json::json!({ "password": new_password }),
+        )
+        .expect("the window saves the password");
+        let saved = crate::owner_credential::load_or_create_owner_credential(
+            &crate::owner_credential::owner_credential_path(app.handle()).expect("credential path"),
+        )
+        .expect("saved password");
+        assert_eq!(saved, new_password);
+
+        let start_args = |result_path: &Path| {
+            vec![
+                OsString::from("--import"),
+                OsString::from("tsx"),
+                driver.clone().into_os_string(),
+                OsString::from("recover"),
+                result_path.to_path_buf().into_os_string(),
+                seed_path.clone().into_os_string(),
+            ]
+        };
+
+        // The first start carries the revocation and fails before the RI
+        // serves: a wrong database key stands in for any such failure.
+        let (reset, carried) = owner_session_reset_for_start(app.handle(), None);
+        assert_eq!(reset, Some(OwnerSessionReset::PasswordChange));
+        let failing = prepare_ri_start(
+            &data_dir,
+            &saved,
+            OwnerPasswordSource::DesktopGenerated,
+            "reveal-proof-test",
+            "credential-key-test",
+            "wrong-database-key-0928",
+            reset,
+        )
+        .expect("prepare the failing start");
+        let failed_result = root.path().join("failed-start.json");
+        let failed = start_ri_with(
+            failing,
+            Some(ri_root.clone()),
+            start_args(&failed_result),
+            Duration::from_secs(60),
+        );
+        assert!(failed.is_err(), "the start with a wrong key must fail");
+        assert!(!failed_result.exists(), "the failed start must not serve");
+
+        // The next start, from "Open DataConnect" or the next launch, passes
+        // no reset of its own. The pending request supplies it.
+        let (reset, next_carried) = owner_session_reset_for_start(app.handle(), None);
+        assert_eq!(reset, Some(OwnerSessionReset::PasswordChange));
+        assert_eq!(next_carried, carried);
+        let environment = prepare_ri_start(
+            &data_dir,
+            &saved,
+            OwnerPasswordSource::DesktopGenerated,
+            "reveal-proof-test",
+            "credential-key-test",
+            "database-key-test-0928",
+            reset,
+        )
+        .expect("prepare the next start");
+        let result_path = root.path().join("next-start.json");
+        let handle = start_ri_with(
+            environment,
+            Some(ri_root.clone()),
+            start_args(&result_path),
+            Duration::from_secs(120),
+        )
+        .expect("real RI starts with the new password");
+        let _ = handle.stop();
+        let result: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&result_path).expect("result")).expect("json");
+        assert_eq!(result["oldSessionStatus"], 401, "{result}");
+        assert_eq!(result["oldBearerStatus"], 401, "{result}");
+        assert_eq!(result["freshSessionStatus"], 204, "{result}");
+
+        // That start reached Ready and completes the request: a later start
+        // does not revoke again.
+        crate::owner_credential::complete_owner_password_stack_restart_request(
+            app.handle(),
+            next_carried,
+        )
+        .expect("complete");
+        assert_eq!(
+            owner_session_reset_for_start(app.handle(), None),
+            (None, None)
+        );
+        println!("REAL-RI FAILED-START REVOCATION TEST RAN");
+    }
+
+    /// The tests of `owner_session_reset_for_start` stand in for the
+    /// bootstrap, which needs the real runtime. This pins the bootstrap to
+    /// it: each start reads the pending request before the stack starts, and
+    /// completes it after the last failure branch, before Ready.
+    #[test]
+    fn every_bootstrap_carries_out_the_pending_stack_restart_request() {
+        let source = include_str!("unified.rs");
+        let section = |from: &str, to: &str| {
+            let start = source.find(from).expect(from);
+            let end = start + source[start..].find(to).expect(to);
+            &source[start..end]
+        };
+        let bootstrap = section(
+            "async fn bootstrap_and_open_console(",
+            "async fn finish_bootstrap(",
+        );
+        let read = bootstrap
+            .find("owner_session_reset_for_start(&app, owner_session_reset)")
+            .expect("the bootstrap reads the pending request");
+        let start = bootstrap
+            .find("start_managed_stack(")
+            .expect("the bootstrap starts the stack");
+        assert!(read < start, "the request is read before the stack starts");
+        assert!(bootstrap.contains("stack_restart_request_id,\n    )\n    .await"));
+
+        let finish = section(
+            "async fn finish_bootstrap(",
+            "\n/// Recovery-window command",
+        );
+        let last_failure = finish
+            .rfind("teardown_managed_on_error(")
+            .expect("finish_bootstrap has failure branches");
+        let complete = finish
+            .find("complete_owner_password_stack_restart_request(")
+            .expect("finish_bootstrap completes the request");
+        let ready = finish
+            .find("set_status(app, UnifiedStatus::Ready)")
+            .expect("finish_bootstrap sets Ready");
+        assert!(last_failure < complete && complete < ready);
+    }
+
     #[test]
     fn a_pinned_console_port_reaches_the_console_process_spec() {
         let mut remote_access = off_remote_access_config();
@@ -7640,13 +7851,119 @@ setInterval(() => {}, 1000);
         assert_eq!(cookie.http_only(), Some(true));
     }
 
+    /// The console webview must send both cookies the desktop sets on it.
+    /// wry turns a cookie with no domain into a WebKitGTK cookie with domain
+    /// "", which WebKitGTK stores and never sends; the reveal cookie had no
+    /// domain until this test was written. This builds a real WebKitGTK
+    /// webview, sets the two cookies through wry as `set_cookies_then_navigate`
+    /// does, and records the Cookie header at a local HTTP server.
+    ///
+    /// It needs a display, so it is ignored by default. Run it on its own
+    /// display and session bus, never the desktop's:
+    ///
+    /// ```text
+    /// xvfb-run -a dbus-run-session -- cargo test --lib -- --ignored --exact \
+    ///     unified::tests::the_console_webview_sends_the_session_and_reveal_cookies --nocapture
+    /// ```
+    #[cfg(target_os = "linux")]
     #[test]
-    fn owner_credential_reveal_cookie_is_host_only_and_http_only() {
+    #[ignore = "needs a display: run under xvfb-run and dbus-run-session"]
+    fn the_console_webview_sends_the_session_and_reveal_cookies() {
+        use gtk::prelude::*;
+        use std::io::{BufRead, BufReader, Write};
+        use wry::WebViewBuilderExtUnix;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("local addr").port();
+        let (seen, requests) = std::sync::mpsc::channel::<String>();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+                let mut request_line = String::new();
+                let _ = reader.read_line(&mut request_line);
+                let mut cookie = String::new();
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                        break;
+                    }
+                    let line = line.trim_end();
+                    if line.is_empty() {
+                        break;
+                    }
+                    if let Some((name, value)) = line.split_once(':') {
+                        if name.eq_ignore_ascii_case("cookie") {
+                            cookie = value.trim().to_string();
+                        }
+                    }
+                }
+                if request_line.starts_with("GET /settings ") {
+                    let _ = seen.send(cookie);
+                }
+                let body = "<html><body>console</body></html>";
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+
+        gtk::init().expect("GTK needs a display: run under xvfb-run");
+        let window = gtk::Window::new(gtk::WindowType::Toplevel);
+        let webview = wry::WebViewBuilder::new()
+            .with_url("about:blank")
+            .build_gtk(&window)
+            .expect("build the webview");
+        window.show_all();
+        let url: tauri::Url = format!("http://127.0.0.1:{port}/").parse().expect("url");
+        for cookie in [
+            owner_session_cookie(&url, "session-value").expect("session cookie"),
+            owner_credential_reveal_cookie(&url, "reveal-value").expect("reveal cookie"),
+        ] {
+            webview.set_cookie(&cookie).expect("set cookie");
+        }
+        webview
+            .load_url(&format!("http://127.0.0.1:{port}/settings"))
+            .expect("load the console");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let cookie = loop {
+            while gtk::events_pending() {
+                gtk::main_iteration_do(false);
+            }
+            if let Ok(cookie) = requests.try_recv() {
+                break cookie;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the webview never requested /settings"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        println!("WEBKITGTK COOKIE HEADER: {cookie}");
+        let pairs: Vec<&str> = cookie.split("; ").collect();
+        assert!(
+            pairs.contains(&"pdpp_owner_session=session-value"),
+            "{cookie}"
+        );
+        assert!(
+            pairs.contains(&format!("{OWNER_CREDENTIAL_REVEAL_COOKIE}=reveal-value").as_str()),
+            "the reveal cookie was not sent: {cookie:?}"
+        );
+        println!("WEBKITGTK COOKIE TEST RAN");
+    }
+
+    #[test]
+    fn owner_credential_reveal_cookie_sets_the_console_host_and_is_http_only() {
         let url: tauri::Url = "http://127.0.0.1:4310/".parse().expect("test url");
         let cookie = owner_credential_reveal_cookie(&url, "reveal-proof").expect("reveal cookie");
         assert_eq!(cookie.name(), OWNER_CREDENTIAL_REVEAL_COOKIE);
         assert_eq!(cookie.value(), "reveal-proof");
-        assert_eq!(cookie.domain(), None);
+        assert_eq!(cookie.domain(), Some("127.0.0.1"));
+        let session = owner_session_cookie(&url, "session").expect("session cookie");
+        assert_eq!(cookie.domain(), session.domain());
         assert_eq!(cookie.path(), Some("/"));
         assert_eq!(cookie.http_only(), Some(true));
     }

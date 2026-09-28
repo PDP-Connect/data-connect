@@ -86,7 +86,7 @@ jobs:
       - name: Install Linux Tauri dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xvfb dbus
 
       - name: Test Rust library
         working-directory: src-tauri
@@ -133,5 +133,33 @@ jobs:
           }
           grep -q '^REAL-RI RECOVERY TEST RAN$' "$RUNNER_TEMP/real-ri-test.log" || {
             echo "::error::real-RI recovery test did not print its RAN marker (skipped, renamed, or filtered out)"
+            exit 1
+          }
+
+      - name: Prove the console webview sends the desktop's cookies
+        # The desktop signs the console webview in with cookies set through
+        # wry. WebKitGTK drops a cookie it will not send without an error, so
+        # this ignored test builds a real webview on its own X display and
+        # session bus and checks the Cookie header a local server receives.
+        working-directory: src-tauri
+        run: |
+          set -euo pipefail
+          test_home="$RUNNER_TEMP/dataconnect-rust-test-home"
+          test_tmp="$RUNNER_TEMP/dataconnect-rust-test-tmp"
+          CARGO_HOME="$HOME/.cargo" \
+            RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" \
+            HOME="$test_home" \
+            XDG_CONFIG_HOME="$test_home/.config" \
+            XDG_DATA_HOME="$test_home/.local/share" \
+            XDG_CACHE_HOME="$test_home/.cache" \
+            TMPDIR="$test_tmp" TMP="$test_tmp" TEMP="$test_tmp" \
+            CARGO_BUILD_JOBS=4 \
+            TAURI_CONFIG='{"bundle":{"resources":null,"externalBin":[]}}' \
+            xvfb-run -a dbus-run-session -- \
+            cargo test --lib -- --ignored --exact \
+            unified::tests::the_console_webview_sends_the_session_and_reveal_cookies \
+            --nocapture 2>&1 | tee "$RUNNER_TEMP/webkitgtk-cookie-test.log"
+          grep -q '^WEBKITGTK COOKIE TEST RAN$' "$RUNNER_TEMP/webkitgtk-cookie-test.log" || {
+            echo "::error::WebKitGTK cookie test did not print its RAN marker"
             exit 1
           }
