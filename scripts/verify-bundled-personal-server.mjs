@@ -9,6 +9,7 @@ import { readFileSync, statSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { basename, join, relative, resolve } from "node:path"
 import { createInterface } from "node:readline"
+import { assertStagedConsoleConnectors } from "./check-staged-console-connectors.mjs"
 import { isMainModule } from "./is-main-module.js"
 
 const REQUIRED_PATH_FRAGMENTS = [
@@ -299,6 +300,23 @@ export function assertPackagedReferenceStacks(root, artifactName) {
       fail(`${artifactName} is missing reference-stack/${stack}/manifest.json`)
     }
     const manifest = JSON.parse(readFileSync(manifestPath, "utf8"))
+
+    if (stack === "console") {
+      if (typeof manifest.server !== "string") {
+        fail(
+          `${artifactName} reference-stack/console/manifest.json has no server`
+        )
+      }
+      try {
+        assertStagedConsoleConnectors({
+          label: `${artifactName} reference-stack/console`,
+          serverRelativePath: manifest.server,
+          stageRoot: stackRoot,
+        })
+      } catch (error) {
+        fail(error instanceof Error ? error.message : String(error))
+      }
+    }
 
     if (Array.isArray(manifest.files)) {
       const prefixed = manifest.files[0]?.sha256?.startsWith("sha256:") ?? false

@@ -19,6 +19,7 @@ import {
 import { spawnSync } from "node:child_process"
 import { dirname, join, resolve, sep } from "node:path"
 import { fileURLToPath } from "node:url"
+import { assertStagedConsoleConnectors } from "./check-staged-console-connectors.mjs"
 import { isMainModule } from "./is-main-module.js"
 import {
   KEEP_GENERATIONS,
@@ -53,6 +54,19 @@ const CONNECTOR_MANIFEST_PACKAGE = join(
 // copy. Icons are looked up by name once a manifest's own bundled icon is
 // absent (see NOTICE for the third-party-brand posture this vendors under).
 const SIMPLE_ICONS_PACKAGE = join("node_modules", "simple-icons")
+
+// The console bundles reference-implementation/server/polyfill-connectors-
+// runtime.ts, which requires optional @pdpp/polyfill-connectors subpaths at
+// run time. The bundle reads members of only these three: the conformance
+// roster (which connectors can add an account, which are scaffolds), static-
+// secret capture normalization, and the credential validation mode. All three
+// are leaf ESM files. The other subpaths stay unstaged and resolve to null,
+// which the runtime module treats as "package absent".
+const CONSOLE_CONNECTOR_PACKAGE_MODULES = [
+  "src/connector-conformance-roster.js",
+  "src/static-secret-credential-capture.js",
+  "src/credential-probe.js",
+]
 
 // These are read by the generated Next server, the console's reference proxy,
 // or the imported reference-topology/auth helpers. The launcher inherits the
@@ -164,6 +178,17 @@ function stageConnectorManifestsPackage(root, stagedRuntimeDirectory) {
   cpSync(sourceManifestsDirectory, join(targetPackageDirectory, "manifests"), {
     recursive: true,
   })
+  // The bundled runtime also requires these modules through package.json's
+  // exports map (see CONSOLE_CONNECTOR_PACKAGE_MODULES).
+  for (const modulePath of CONSOLE_CONNECTOR_PACKAGE_MODULES) {
+    const sourceModulePath = join(sourcePackageDirectory, modulePath)
+    if (!existsSync(sourceModulePath)) {
+      fail(`connector package module is missing: ${sourceModulePath}`)
+    }
+    const targetModulePath = join(targetPackageDirectory, modulePath)
+    mkdirSync(dirname(targetModulePath), { recursive: true })
+    cpSync(sourceModulePath, targetModulePath)
+  }
 }
 
 function stageSimpleIconsPackage(root, stagedRuntimeDirectory) {
@@ -452,6 +477,16 @@ export function stageConsoleStack({
     fail(
       `staged connector manifests directory is empty: ${stagedManifestsDirectory}`
     )
+  }
+  // The same class of failure for the connector package's code: without the
+  // conformance roster the console refuses every new browser account.
+  try {
+    assertStagedConsoleConnectors({
+      stageRoot: targetDirectory,
+      serverRelativePath,
+    })
+  } catch (error) {
+    fail(error instanceof Error ? error.message : String(error))
   }
 
   return {

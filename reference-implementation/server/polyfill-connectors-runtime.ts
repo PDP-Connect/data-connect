@@ -157,28 +157,60 @@ interface OptionalModuleMap {
   readonly roster: Record<string, unknown> | null;
 }
 
-const optionalRequire = (() => {
+type OptionalRequire = (specifier: string) => unknown;
+
+/**
+ * Where to resolve the optional package from, in order.
+ *
+ * `import.meta.url` is this file when the RI runs it from source. The console
+ * bundles this module, and webpack replaces `import.meta.url` with the path on
+ * the machine that ran `next build`, which does not exist on the owner's
+ * machine. The packaged console runs with its cwd set to the staged runtime
+ * directory (`writeLauncher` in `scripts/ensure-console-stack.js`), and that
+ * directory's node_modules holds the staged package, so the cwd is the
+ * fallback.
+ */
+const optionalRequires: readonly OptionalRequire[] = (() => {
   if (typeof process === "undefined" || typeof process.getBuiltinModule !== "function") {
-    return null;
+    return [];
   }
   const moduleApi = process.getBuiltinModule("module") as {
     createRequire: (url: string | URL) => NodeRequire;
   };
-  return moduleApi.createRequire(import.meta.url);
+  const pathApi = process.getBuiltinModule("path") as { join: (...segments: string[]) => string };
+  return [moduleApi.createRequire(import.meta.url), moduleApi.createRequire(pathApi.join(process.cwd(), "noop.js"))];
 })();
 
-function requireOptional(specifier: string): Record<string, unknown> | null {
-  if (!optionalRequire) {
-    return null;
-  }
-  try {
-    return optionalRequire(specifier) as Record<string, unknown>;
-  } catch (error) {
-    if (error instanceof Error && "code" in error && (error.code === "ERR_MODULE_NOT_FOUND" || error.code === "MODULE_NOT_FOUND")) {
-      return null;
+function isModuleNotFound(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    "code" in error &&
+    (error.code === "ERR_MODULE_NOT_FOUND" || error.code === "MODULE_NOT_FOUND")
+  );
+}
+
+/**
+ * Returns the module from the first base that resolves `specifier`, or null
+ * when no base does. Errors other than "module not found" propagate.
+ */
+export function requireFromFirstResolvingBase(
+  requires: readonly OptionalRequire[],
+  specifier: string
+): Record<string, unknown> | null {
+  for (const requireFromBase of requires) {
+    try {
+      return requireFromBase(specifier) as Record<string, unknown>;
+    } catch (error) {
+      if (!isModuleNotFound(error)) {
+        throw error;
+      }
     }
-    throw error;
   }
+  return null;
+}
+
+function requireOptional(specifier: string): Record<string, unknown> | null {
+  return requireFromFirstResolvingBase(optionalRequires, specifier);
 }
 
 const optionalModules: OptionalModuleMap = {
