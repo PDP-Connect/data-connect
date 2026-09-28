@@ -248,7 +248,9 @@ test("counterweight: a custom third-party connector_id, unknown to every generat
     manifest: customManifest(thirdPartyId, { browser: { required: true } }),
   });
   assert.equal(browserBound.connectorModality, "browser_bound");
-  assert.equal(browserBound.catalogDisposition, "browser_bound_runbook");
+  // Not a known scaffold, so the shared browserEnrollmentSupport rule offers
+  // browser setup exactly as it would for a bundled connector.
+  assert.equal(browserBound.catalogDisposition, "browser_collector_manual");
 
   // A third-party static-secret connector with a real credential_capture
   // block reaches the same generic experimental path a first-party

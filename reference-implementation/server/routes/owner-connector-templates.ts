@@ -13,9 +13,9 @@
 // supported. Interactive browser setup remains owner-mediated in Console.
 
 import {
+  browserEnrollmentSupport,
   buildConnectionSetupPlan,
   isKnownScaffoldConnector,
-  isSupportedBrowserCollectorConnector,
   staticSecretCredentialCaptureFromManifest,
 } from "../connection-setup-plan.ts";
 import type { OwnerAgentControlAction } from "../metadata.ts";
@@ -192,11 +192,14 @@ export function isSupportedOwnerActionPlan(plan: ReturnType<typeof buildConnecti
 /**
  * Browser setup has a shipped owner-session route, but it is not an
  * owner-agent REST primitive: the owner must complete interactive login in
- * the secure browser. The planner's production-ready browser roster is the
- * proof for browser-backed static-secret entries; the manual disposition is
- * already the planner's proof-backed browser classification.
+ * the secure browser. `browserEnrollmentSupport`, the rule the console's
+ * browser-session routes use, decides browser-backed static-secret entries;
+ * the manual disposition already comes from the same rule in the planner.
  */
-export function isOwnerSessionBrowserActionPlan(plan: ReturnType<typeof buildConnectionSetupPlan>): boolean {
+export function isOwnerSessionBrowserActionPlan(
+  plan: ReturnType<typeof buildConnectionSetupPlan>,
+  manifest: ConnectorManifestLike
+): boolean {
   if (plan.connectorModality !== "browser_bound") {
     return false;
   }
@@ -206,12 +209,15 @@ export function isOwnerSessionBrowserActionPlan(plan: ReturnType<typeof buildCon
   return (
     plan.catalogDisposition === "static_secret_connect" &&
     plan.setupModality === "static_secret" &&
-    isSupportedBrowserCollectorConnector(plan.connectorKey)
+    browserEnrollmentSupport(plan.connectorKey, manifest).canAddAccount
   );
 }
 
-function isOwnerActionablePlan(plan: ReturnType<typeof buildConnectionSetupPlan>): boolean {
-  return isSupportedOwnerActionPlan(plan) || isOwnerSessionBrowserActionPlan(plan);
+function isOwnerActionablePlan(
+  plan: ReturnType<typeof buildConnectionSetupPlan>,
+  manifest: ConnectorManifestLike
+): boolean {
+  return isSupportedOwnerActionPlan(plan) || isOwnerSessionBrowserActionPlan(plan, manifest);
 }
 
 function isUatExposablePlan(
@@ -221,7 +227,7 @@ function isUatExposablePlan(
   allowlist?: ReadonlySet<string>
 ): boolean {
   const basePlan = [
-    isOwnerActionablePlan(plan),
+    isOwnerActionablePlan(plan, manifest),
     plan.catalogDisposition === "static_secret_experimental",
     plan.catalogDisposition === "static_secret_connect" &&
       plan.setupModality === "static_secret" &&
@@ -270,7 +276,7 @@ function buildTemplateSupportedActions(args: {
       },
     ];
   }
-  if (isActionable && isOwnerSessionBrowserActionPlan(args.plan)) {
+  if (isActionable && isOwnerSessionBrowserActionPlan(args.plan, args.manifest)) {
     return [
       {
         family: "initiate_connection",
@@ -300,7 +306,7 @@ function projectSetupPlan(
   // UAT exposure via uat_expose_unlisted_connectors does not modify setup_plan; it is a separate flag
   // for the console to enable testing without claiming Supported or Preview tier.
   const isActionableManifest = isActionablePublicListing(manifest);
-  const isActionablePlan = isOwnerActionablePlan(plan);
+  const isActionablePlan = isOwnerActionablePlan(plan, manifest);
   const ownerActionable = isActionableManifest && isActionablePlan;
   return {
     catalog_disposition: plan.catalogDisposition,

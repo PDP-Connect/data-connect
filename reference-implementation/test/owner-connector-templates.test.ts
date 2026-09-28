@@ -368,6 +368,35 @@ test("owner-template projection separates browser owner-session setup from owner
   });
 });
 
+test("owner-template setup plan offers a catalog-installed browser connector by the shared rule", async () => {
+  await withServer(async ({ asUrl, rsUrl }) => {
+    // acme-shop: a catalog-installed browser connector no bundled key list names.
+    const acmeManifest = loadManifest("amazon");
+    acmeManifest.connector_id = "acme-shop";
+    acmeManifest.connector_key = "acme-shop";
+    acmeManifest.display_name = "Acme Shop";
+    acmeManifest.setup = undefined;
+    acmeManifest.capabilities = { ...asRecord(acmeManifest.capabilities), public_listing: { tier: "preview" } };
+    await registerConnector(asUrl, acmeManifest);
+
+    const ownerToken = await issueOwnerToken(asUrl);
+    const { status, body } = await fetchJson(`${rsUrl}/v1/owner/connector-templates`, {
+      headers: { Authorization: `Bearer ${ownerToken}` },
+    });
+    assert.equal(status, 200);
+
+    const acme = byConnector(body, "acme-shop");
+    assert.deepEqual(acme.public_listing, { tier: "preview" });
+    const acmeSetupPlan = asRecord(acme.setup_plan);
+    assert.equal(acmeSetupPlan.catalog_disposition, "browser_collector_manual");
+    assert.equal(acmeSetupPlan.next_step_kind, "enroll_browser_collector");
+    assert.equal(acmeSetupPlan.enrollment_key, "acme-shop");
+    assert.equal(acmeSetupPlan.owner_actionable, true);
+    const acmeInitiate = actionByFamily(acme, "initiate_connection");
+    assert.equal(acmeInitiate.status, "owner_mediated");
+  });
+});
+
 test("owner-template readiness reflects configured provider authorization", async () => {
   // Readiness is measured against the settings the manifest declares, so a
   // "configured" deployment is described by supplying those settings rather
