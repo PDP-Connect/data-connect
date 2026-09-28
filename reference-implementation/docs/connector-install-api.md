@@ -70,3 +70,87 @@ transport rejects config and profile responses above 1 MiB before activation.
 The pinned core still needs a native config/profile-size option and oracle so
 the bound is owned and proven at the shared installer boundary; the RI wrapper
 is a temporary fail-closed guard for this lane.
+
+## Recover a legacy policy mismatch
+
+An imported legacy install whose registry manifest differs from its installed
+manifest has a `repair_required` activation in the database. It is absent from
+the runnable active list, appears in owner status with `activation_state:
+repair_required`, and install and update refuse it.
+The following offline runbook restores the **installed artifact's** manifest;
+it therefore rolls back any newer registry-only policy. Use it only after an
+operator has compared those two manifests and approved that rollback. If the
+newer policy must remain, publish a signed artifact with that policy and plan
+its replacement separately. Do not delete the activation row to unblock a run.
+
+1. Stop every server process using the database and `PDPP_DATA_DIR`. Back up
+   the database and the full data directory. For SQLite, copy the configured
+   `PDPP_DB_PATH` after shutdown. For PostgreSQL, use `pg_dump --format=custom`
+   against the configured database URL. Keep the backup until status is active.
+2. Inspect `connector_activations.record_json` and `connectors.manifest` for
+   the affected `connector_id`. Confirm the activation has state
+   `repair_required` and reason `Legacy registry and installed artifact
+   disagree`. Review the policy difference and approve restoring the manifest
+   embedded in `record_json`.
+3. From the repository root, set `CONNECTOR_ID`, `PDPP_DATA_DIR`, and either
+   `PDPP_DB_PATH` (SQLite) or `RECOVERY_DATABASE_URL` (PostgreSQL). Run this
+   maintenance command while the server remains stopped:
+
+```bash
+node --import tsx --input-type=module <<'JS'
+import { getConnectorActivation } from './reference-implementation/server/connector-install/activation-authority.ts';
+import { repairPendingConnectorActivations } from './reference-implementation/server/connector-install/index.ts';
+import { registerConnector } from './reference-implementation/server/auth.ts';
+import { closeDb, getDb, initDb } from './reference-implementation/server/db.ts';
+import { closePostgresStorage, initPostgresStorage, postgresQuery } from './reference-implementation/server/postgres-storage.ts';
+
+const id = process.env.CONNECTOR_ID;
+const dataDir = process.env.PDPP_DATA_DIR;
+const postgresUrl = process.env.RECOVERY_DATABASE_URL;
+if (!id || !dataDir || (!postgresUrl && !process.env.PDPP_DB_PATH)) {
+  throw new Error('Set CONNECTOR_ID, PDPP_DATA_DIR, and RECOVERY_DATABASE_URL or PDPP_DB_PATH');
+}
+initDb(postgresUrl ? ':memory:' : process.env.PDPP_DB_PATH);
+try {
+  if (postgresUrl) await initPostgresStorage({ backend: 'postgres', databaseUrl: postgresUrl });
+  const activation = await getConnectorActivation(id);
+  if (activation?.state !== 'repair_required' ||
+      activation.repairReason !== 'Legacy registry and installed artifact disagree') {
+    throw new Error('Expected the imported legacy mismatch; no change made');
+  }
+  await registerConnector(activation.record.manifest);
+  if (postgresUrl) {
+    await postgresQuery(
+      "UPDATE connector_activations SET repair_reason=$1 WHERE connector_id=$2 AND attempt_id=$3 AND state='repair_required'",
+      ['Operator approved legacy manifest restoration', id, activation.attemptId]
+    );
+  } else {
+    getDb().prepare(
+      "UPDATE connector_activations SET repair_reason=? WHERE connector_id=? AND attempt_id=? AND state='repair_required'"
+    ).run('Operator approved legacy manifest restoration', id, activation.attemptId);
+  }
+  const failures = await repairPendingConnectorActivations(
+    (manifest, options) => registerConnector(manifest, options), dataDir, id
+  );
+  const selected = await getConnectorActivation(id);
+  if (failures.length) {
+    const details = failures.map(({ connectorId, error }) => ({
+      connectorId,
+      error: error instanceof Error ? error.message : String(error),
+    }));
+    throw new Error(`Activation repair failed: ${JSON.stringify(details)}; ${id} is ${selected?.state ?? 'missing'}`);
+  }
+  if (selected?.state !== 'active') {
+    throw new Error(`Activation remains blocked: ${id} is ${selected?.state ?? 'missing'}`);
+  }
+  console.log(`Activation active: ${id}`);
+} finally {
+  if (postgresUrl) await closePostgresStorage();
+  closeDb();
+}
+JS
+```
+
+4. Restart the server and check `GET /v1/owner/connector-install/status` for
+   `activation_state: active` and the expected digest. If the command failed,
+   leave the connector blocked and investigate the error before retrying.

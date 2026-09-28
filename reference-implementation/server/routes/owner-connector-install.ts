@@ -5,6 +5,7 @@ import type {
   ConnectorCatalogEntry,
   ConnectorInstallRecord,
   ConnectorInstallService,
+  ConnectorInstallStatusRecord,
 } from "../connector-install/index.ts";
 import type { LocalConnectorSourceRecord } from "../connector-install/local-source.ts";
 import type { MiddlewareHandler, PdppErrorFn, RouteArg } from "./_route-contract.ts";
@@ -39,10 +40,12 @@ function projectCatalogEntry(entry: ConnectorCatalogEntry): Record<string, unkno
   };
 }
 
-function projectStatus(record: ConnectorInstallRecord): Record<string, unknown> {
+function projectStatus(record: ConnectorInstallRecord | ConnectorInstallStatusRecord): Record<string, unknown> {
+  const statusRecord = "activationState" in record ? record : null;
+  const activationState = statusRecord?.activationState ?? "active";
   return {
     activated_at: record.activatedAt,
-    activation_state: "active",
+    activation_state: activationState,
     bindings: record.bindings,
     config_digest: record.configDigest,
     connector_id: record.connectorId,
@@ -52,6 +55,9 @@ function projectStatus(record: ConnectorInstallRecord): Record<string, unknown> 
     provenance_sha256: record.provenanceSha256,
     registry: record.registry,
     repository: record.repository,
+    ...(statusRecord && activationState !== "active"
+      ? { repair_reason: statusRecord.repairReason }
+      : {}),
     tier: record.tier,
     version: record.version,
   };

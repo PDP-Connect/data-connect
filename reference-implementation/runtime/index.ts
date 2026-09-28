@@ -520,6 +520,8 @@ export interface RuntimeRunConnectorOptions {
   connectorId: string;
   connectorInstanceId?: string | null;
   connectorPath: string;
+  /** Recheck the caller's executable and activation generation after runtime setup, at the spawn boundary. */
+  verifyLaunchAuthority?: () => Promise<void>;
   /** Non-secret executable-source provenance stamped into run timeline events. */
   runSource?: {
     readonly connector_key?: string;
@@ -2843,6 +2845,28 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
     streamingRegistrationEnv,
   } = launchConfig;
 
+  const childEnv = composeConnectorChildEnvironment({
+    ...(approvedEnvironmentBindings ? { approvedBindings: approvedEnvironmentBindings } : {}),
+    approvedProxyConnectorIds: approvedProxyConnectorIds ?? [],
+    connectionEnv: {
+      allowedKeys: Object.keys(staticSecretLaunchEnv),
+      connectorId,
+      kind: "connection",
+      values: staticSecretLaunchEnv,
+    } satisfies ConnectorConnectionEnvironment,
+    connectorId,
+    explicitRunEnv: {
+      PDPP_CONNECTOR_ID: connectorId,
+      ...connectorInstanceEnv,
+      PDPP_OWNER_TOKEN: ownerToken,
+      PDPP_RS_URL: rsUrl,
+      ...streamingRegistrationEnv,
+      ...browserSurfaceLaunchEnv,
+      ...runAutomationEnv,
+    },
+    manifest,
+  });
+
   // `detached: true` puts the connector child into its OWN process group
   // (POSIX setsid), with the child's PID as the group leader. This is the
   // load-bearing half of the run-lifecycle lease invariant: a descendant
@@ -2859,29 +2883,10 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
   // as before. `detached` here only changes the process-GROUP topology, not
   // ownership of the handle. This is a Linux/Docker runtime (no Windows
   // support anywhere in the tree), so the POSIX process-group semantics hold.
+  await opts.verifyLaunchAuthority?.();
   const proc = spawn(process.execPath, args, {
     detached: true,
-    env: composeConnectorChildEnvironment({
-      ...(approvedEnvironmentBindings ? { approvedBindings: approvedEnvironmentBindings } : {}),
-      approvedProxyConnectorIds: approvedProxyConnectorIds ?? [],
-      connectionEnv: {
-        allowedKeys: Object.keys(staticSecretLaunchEnv),
-        connectorId,
-        kind: "connection",
-        values: staticSecretLaunchEnv,
-      } satisfies ConnectorConnectionEnvironment,
-      connectorId,
-      explicitRunEnv: {
-        PDPP_CONNECTOR_ID: connectorId,
-        ...connectorInstanceEnv,
-        PDPP_OWNER_TOKEN: ownerToken,
-        PDPP_RS_URL: rsUrl,
-        ...streamingRegistrationEnv,
-        ...browserSurfaceLaunchEnv,
-        ...runAutomationEnv,
-      },
-      manifest,
-    }),
+    env: childEnv,
     stdio: ["pipe", "pipe", "pipe"],
   });
 

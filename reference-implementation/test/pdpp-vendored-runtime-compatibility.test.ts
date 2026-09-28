@@ -39,7 +39,7 @@ test("withdrawn device runtime rejects unsupported events while protocol 0.0.3 v
   );
   assert.equal(runtime.COLLECTOR_RUNTIME_CAPABILITIES.protocolVersion, "0.0.3");
   assert.equal(runtime.COLLECTOR_RUNTIME_CAPABILITIES.protocolCapabilities.has("STREAM_EVIDENCE"), false);
-  assert.equal(runtime.COLLECTOR_RUNTIME_CAPABILITIES.protocolCapabilities.has("BLOB"), false);
+  assert.equal((runtime.COLLECTOR_RUNTIME_CAPABILITIES.protocolCapabilities as ReadonlySet<string>).has("BLOB"), false);
   assert.throws(
     () => runtime.assertPlacementOrThrow(emitter, runtime.COLLECTOR_RUNTIME_CAPABILITIES),
     (error: unknown) => {

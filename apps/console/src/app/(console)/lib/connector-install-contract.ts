@@ -28,6 +28,7 @@ export interface ConnectorInstallCatalogEntry {
 export interface ConnectorInstallStatus {
   /** A package may be installed before its first activation/run. */
   readonly activated_at: string | null;
+  readonly activation_state: "active" | "repair_required";
   readonly bindings: Readonly<Record<string, unknown>>;
   readonly config_digest: string;
   readonly connector_id: string;
@@ -37,6 +38,7 @@ export interface ConnectorInstallStatus {
   readonly provenance_sha256: string;
   readonly registry: string;
   readonly repository: string;
+  readonly repair_reason: string | null;
   readonly tier?: ConnectorInstallTier;
   readonly version: string;
 }
@@ -174,8 +176,13 @@ function readStatus(value: unknown, index: number): ConnectorInstallStatus {
   const context = `connector_install_status.data[${index}]`;
   const record = asRecord(value, context);
   const tier = readTier(record, "tier", context);
+  const activationState = record.activation_state ?? "active";
+  if (activationState !== "active" && activationState !== "repair_required") {
+    throw new ConnectorInstallContractError(`${context}.activation_state has an unknown state.`);
+  }
   return {
     activated_at: readNullableString(record, "activated_at", context),
+    activation_state: activationState,
     bindings: readBindings(record, context),
     config_digest: readDigest(record, "config_digest", context),
     connector_id: readString(record, "connector_id", context),
@@ -185,6 +192,7 @@ function readStatus(value: unknown, index: number): ConnectorInstallStatus {
     provenance_sha256: readDigest(record, "provenance_sha256", context),
     registry: readString(record, "registry", context),
     repository: readString(record, "repository", context),
+    repair_reason: readNullableString(record, "repair_reason", context),
     ...(tier ? { tier } : {}),
     version: readString(record, "version", context),
   };

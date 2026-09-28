@@ -1,0 +1,542 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
+import assert from "node:assert/strict";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test from "node:test";
+import { resolveActiveInstallFirstConnectorPath } from "../runtime/controller.ts";
+import { createScheduler } from "../runtime/scheduler.ts";
+import { __setRegisterConnectorPhaseHookForTest, getConnectorManifest, registerConnector } from "../server/auth.ts";
+import {
+  completeConnectorActivation,
+  getActiveConnectorActivationToken,
+  getConnectorActivation,
+  publishConnectorActivation,
+} from "../server/connector-install/activation-authority.ts";
+import { createConnectorInstallService, createConnectorInstallStore } from "../server/connector-install/index.ts";
+import { createFileLocalConnectorSourceStore } from "../server/connector-install/local-source.ts";
+import { closeDb, initDb } from "../server/db.ts";
+import { closePostgresStorage, initPostgresStorage } from "../server/postgres-storage.ts";
+import type { ActiveRunRecord, SchedulerRunHistoryRecord } from "../server/stores/scheduler-store.ts";
+import { withTemporaryPostgresDatabase } from "./helpers/postgres-temp-database.ts";
+
+const connectorId = "scheduled-activation";
+const REPAIR_FAILURE = /controlled repair failure/;
+const REPAIR_REQUIRED = /repair_required/;
+const first = {
+  config_digest: `sha256:${"c".repeat(64)}`,
+  connector_id: connectorId,
+  connector_key: connectorId,
+  digest: `sha256:${"a".repeat(64)}`,
+  version: "1.0.0",
+};
+const second = { ...first, digest: `sha256:${"b".repeat(64)}`, latest: true, version: "2.0.0" };
+
+function writeScheduledActivationFixture(root: string, selected: { version?: string }, marker: string): void {
+  mkdirSync(join(root, "profile"), { recursive: true });
+  mkdirSync(join(root, "dist"), { recursive: true });
+  writeFileSync(
+    join(root, "profile", "collection-profile.json"),
+    JSON.stringify({
+      capabilities: {
+        human_interaction: [],
+        refresh_policy: {
+          background_safe: true,
+          rationale: "Scheduled activation test fixture",
+          recommended_mode: "automatic",
+        },
+      },
+      connector_id: connectorId,
+      display_name: "Scheduled activation test",
+      manifest_uri: `https://sources.example/${connectorId}`,
+      protocol_version: "0.1.0",
+      streams: [
+        {
+          name: "items",
+          primary_key: ["id"],
+          schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+          selection: { fields: true, resources: true },
+          semantics: "append_only",
+        },
+      ],
+      version: selected.version,
+    })
+  );
+  writeFileSync(
+    join(root, "dist", "collection-profile.mjs"),
+    `import { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(marker)}, ${JSON.stringify(selected.version)});\nprocess.exit(0);\n`
+  );
+  writeFileSync(join(root, "provenance.json"), "{}\n");
+}
+
+function createScheduledActivationFixture(tmpPrefix: string) {
+  const dataDir = mkdtempSync(join(tmpdir(), tmpPrefix));
+  const previousDataDir = process.env.PDPP_DATA_DIR;
+  process.env.PDPP_DATA_DIR = dataDir;
+  const marker = join(dataDir, "old-bytes-spawned");
+  const store = createConnectorInstallStore();
+  const localStore = createFileLocalConnectorSourceStore(dataDir);
+  let current = first;
+
+  const service = createConnectorInstallService({
+    catalogLoader: async () => [current],
+    dataDir,
+    installArtifact: (root, selected) => writeScheduledActivationFixture(root, selected, marker),
+    registerManifest: (manifest, options) => registerConnector(manifest, options),
+    store,
+  });
+
+  return {
+    cleanup: () => {
+      if (previousDataDir === undefined) {
+        delete process.env.PDPP_DATA_DIR;
+      } else {
+        process.env.PDPP_DATA_DIR = previousDataDir;
+      }
+      rmSync(dataDir, { force: true, recursive: true });
+    },
+    dataDir,
+    localStore,
+    marker,
+    service,
+    setCurrent: (next: typeof first) => {
+      current = next;
+    },
+    store,
+  };
+}
+
+type ScheduledActivationFixture = ReturnType<typeof createScheduledActivationFixture>;
+type InstalledActivationRecord = Awaited<ReturnType<ScheduledActivationFixture["service"]["install"]>>;
+type LeaseActivationMutation = (args: {
+  fixture: ScheduledActivationFixture;
+  installed: InstalledActivationRecord;
+}) => Promise<void>;
+
+async function resolveInstalledImplementation(
+  localStore: ReturnType<typeof createFileLocalConnectorSourceStore>,
+  store: ReturnType<typeof createConnectorInstallStore>
+) {
+  const manifest = await getConnectorManifest(connectorId);
+  assert.ok(manifest);
+  const connectorPath = await resolveActiveInstallFirstConnectorPath(
+    connectorId,
+    manifest,
+    undefined,
+    localStore,
+    store
+  );
+  return connectorPath
+    ? { activationToken: await getActiveConnectorActivationToken(connectorId), connectorPath, manifest }
+    : null;
+}
+
+async function assertScheduledRunRejectsStaleActivation(): Promise<void> {
+  const fixture = createScheduledActivationFixture("pdpp-scheduled-activation-");
+  let scheduler: ReturnType<typeof createScheduler> | null = null;
+  try {
+    const { localStore, marker, service, store } = fixture;
+    const installed = await service.install(connectorId, first.digest);
+    const cachedPath = await resolveActiveInstallFirstConnectorPath(
+      connectorId,
+      installed.manifest,
+      undefined,
+      localStore,
+      store
+    );
+    assert.ok(cachedPath);
+    const completed: string[] = [];
+    scheduler = createScheduler({
+      admitRunConnection: async ({ connectorId: id, connectorInstanceId, ownerSubjectId }) => ({
+        connectorId: id,
+        connectorInstanceId: connectorInstanceId ?? id,
+        ownerSubjectId: ownerSubjectId ?? "owner_local",
+      }),
+      connectors: [
+        {
+          connectorId,
+          connectorInstanceId: connectorId,
+          connectorPath: cachedPath,
+          intervalMs: 25,
+          manifest: installed.manifest,
+          maxRetries: 0,
+          ownerSubjectId: "owner_local",
+          ownerToken: "scheduled-test-token",
+          resolveImplementation: () => resolveInstalledImplementation(localStore, store),
+        },
+      ],
+      onInteraction: () => undefined,
+      onRunComplete: (record) => completed.push(record.status),
+      readinessChecker: async () => ({ ready: true }),
+      rsUrl: "http://localhost.invalid",
+    });
+
+    fixture.setCurrent(second);
+    __setRegisterConnectorPhaseHookForTest((point) => {
+      if (point === "after-manifest-persisted") {
+        return Promise.reject(new Error("controlled repair failure"));
+      }
+      return Promise.resolve();
+    });
+    await assert.rejects(service.update(connectorId), REPAIR_FAILURE);
+    __setRegisterConnectorPhaseHookForTest(null);
+    assert.equal((await getConnectorActivation(connectorId))?.state, "repair_required");
+    await assert.rejects(
+      resolveActiveInstallFirstConnectorPath(connectorId, installed.manifest, undefined, localStore, store),
+      REPAIR_REQUIRED
+    );
+
+    scheduler.start();
+    const deadline = Date.now() + 5000;
+    while (completed.length === 0 && !existsSync(marker) && Date.now() < deadline) {
+      // biome-ignore lint/performance/noAwaitInLoops: Poll until the scheduled attempt starts or the bounded deadline expires.
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.ok(completed.length > 0 || existsSync(marker), "scheduler never attempted the run");
+    assert.equal(
+      existsSync(marker),
+      false,
+      `scheduled run executed cached ${existsSync(marker) ? readFileSync(marker, "utf8") : "unknown"} bytes`
+    );
+  } finally {
+    scheduler?.stop();
+    __setRegisterConnectorPhaseHookForTest(null);
+    fixture.cleanup();
+  }
+}
+
+async function assertScheduledRunRejectsActivationChangeDuringRuntimeAdmission(): Promise<void> {
+  const fixture = createScheduledActivationFixture("pdpp-scheduled-activation-admission-");
+  let scheduler: ReturnType<typeof createScheduler> | null = null;
+  let admissionCalls = 0;
+  let resolverCalls = 0;
+  try {
+    const { localStore, marker, service, store } = fixture;
+    const installed = await service.install(connectorId, first.digest);
+    const completed: string[] = [];
+    scheduler = createScheduler({
+      admitRunConnection: async ({ connectorId: id, connectorInstanceId, ownerSubjectId }) => {
+        admissionCalls += 1;
+        if (admissionCalls === 2) {
+          assert.equal(resolverCalls, 1, "fresh resolution must happen before runtime admission");
+          fixture.setCurrent(second);
+          __setRegisterConnectorPhaseHookForTest((point) => {
+            if (point === "after-manifest-persisted") {
+              return Promise.reject(new Error("controlled repair failure"));
+            }
+            return Promise.resolve();
+          });
+          await assert.rejects(service.update(connectorId), REPAIR_FAILURE);
+          __setRegisterConnectorPhaseHookForTest(null);
+          assert.equal((await getConnectorActivation(connectorId))?.state, "repair_required");
+          await assert.rejects(
+            resolveActiveInstallFirstConnectorPath(connectorId, installed.manifest, undefined, localStore, store),
+            REPAIR_REQUIRED
+          );
+        }
+        return {
+          connectorId: id,
+          connectorInstanceId: connectorInstanceId ?? id,
+          ownerSubjectId: ownerSubjectId ?? "owner_local",
+        };
+      },
+      connectors: [
+        {
+          connectorId,
+          connectorInstanceId: connectorId,
+          intervalMs: 25,
+          manifest: installed.manifest,
+          maxRetries: 0,
+          ownerSubjectId: "owner_local",
+          ownerToken: "scheduled-test-token",
+          resolveImplementation: () => {
+            resolverCalls += 1;
+            return resolveInstalledImplementation(localStore, store);
+          },
+        },
+      ],
+      onInteraction: () => undefined,
+      onRunComplete: (record) => completed.push(record.status),
+      readinessChecker: async () => ({ ready: true }),
+      rsUrl: "http://localhost.invalid",
+    });
+
+    scheduler.start();
+    const deadline = Date.now() + 5000;
+    while (completed.length === 0 && !existsSync(marker) && Date.now() < deadline) {
+      // biome-ignore lint/performance/noAwaitInLoops: Poll until the scheduled attempt starts or the bounded deadline expires.
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.ok(completed.length > 0 || existsSync(marker), "scheduler never attempted the run");
+    assert.equal(admissionCalls, 2, "runtime admission injection did not run");
+    assert.equal(resolverCalls, 2, "launch did not recheck authority after runtime admission");
+    assert.equal(
+      existsSync(marker),
+      false,
+      `scheduled run executed cached ${existsSync(marker) ? readFileSync(marker, "utf8") : "unknown"} bytes after activation changed during runtime admission`
+    );
+  } finally {
+    scheduler?.stop();
+    __setRegisterConnectorPhaseHookForTest(null);
+    fixture.cleanup();
+  }
+}
+
+async function assertScheduledRunRejectsActivationChangeDuringLeaseReservation(
+  mutateActivation: LeaseActivationMutation,
+  failureDetail: string
+): Promise<void> {
+  const fixture = createScheduledActivationFixture("pdpp-scheduled-activation-lease-");
+  let scheduler: ReturnType<typeof createScheduler> | null = null;
+  let leaseCalls = 0;
+  let resolverCalls = 0;
+  try {
+    const { localStore, marker, service, store } = fixture;
+    const installed = await service.install(connectorId, first.digest);
+    const completed: string[] = [];
+    scheduler = createScheduler({
+      admitRunConnection: async ({ connectorId: id, connectorInstanceId, ownerSubjectId }) => ({
+        connectorId: id,
+        connectorInstanceId: connectorInstanceId ?? id,
+        ownerSubjectId: ownerSubjectId ?? "owner_local",
+      }),
+      connectors: [
+        {
+          connectorId,
+          connectorInstanceId: connectorId,
+          intervalMs: 25,
+          manifest: installed.manifest,
+          maxRetries: 0,
+          ownerSubjectId: "owner_local",
+          ownerToken: "scheduled-test-token",
+          resolveImplementation: () => {
+            resolverCalls += 1;
+            return resolveInstalledImplementation(localStore, store);
+          },
+        },
+      ],
+      onInteraction: () => undefined,
+      onRunComplete: (record) => completed.push(record.status),
+      readinessChecker: async () => ({ ready: true }),
+      rsUrl: "http://localhost.invalid",
+      schedulerStore: {
+        appendRunHistory: (_record: SchedulerRunHistoryRecord) => undefined,
+        deleteActiveRun: () => undefined,
+        hasLegacySchedulerEventMarker: () => false,
+        listLastRunTimes: () => [],
+        listRunHistory: () => [],
+        upsertActiveRun: async (_record: ActiveRunRecord) => {
+          leaseCalls += 1;
+          if (leaseCalls === 1) {
+            assert.equal(resolverCalls, 1, "fresh resolution must happen before durable lease reservation");
+            await mutateActivation({ fixture, installed });
+          }
+          return true;
+        },
+        upsertLastRunTime: () => undefined,
+      },
+    });
+
+    scheduler.start();
+    const deadline = Date.now() + 5000;
+    while (completed.length === 0 && !existsSync(marker) && Date.now() < deadline) {
+      // biome-ignore lint/performance/noAwaitInLoops: Poll until the scheduled attempt starts or the bounded deadline expires.
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.ok(completed.length > 0 || existsSync(marker), "scheduler never attempted the run");
+    assert.equal(leaseCalls, 1, "durable lease reservation injection did not run");
+    assert.equal(
+      existsSync(marker),
+      false,
+      `scheduled run executed cached ${existsSync(marker) ? readFileSync(marker, "utf8") : "unknown"} bytes after activation changed during ${failureDetail}`
+    );
+  } finally {
+    scheduler?.stop();
+    __setRegisterConnectorPhaseHookForTest(null);
+    fixture.cleanup();
+  }
+}
+
+async function failUpdateDuringLeaseReservation({
+  fixture,
+  installed,
+}: {
+  fixture: ScheduledActivationFixture;
+  installed: InstalledActivationRecord;
+}): Promise<void> {
+  const { localStore, service, store } = fixture;
+  fixture.setCurrent(second);
+  __setRegisterConnectorPhaseHookForTest((point) => {
+    if (point === "after-manifest-persisted") {
+      return Promise.reject(new Error("controlled repair failure"));
+    }
+    return Promise.resolve();
+  });
+  await assert.rejects(service.update(connectorId), REPAIR_FAILURE);
+  __setRegisterConnectorPhaseHookForTest(null);
+  assert.equal((await getConnectorActivation(connectorId))?.state, "repair_required");
+  await assert.rejects(
+    resolveActiveInstallFirstConnectorPath(connectorId, installed.manifest, undefined, localStore, store),
+    REPAIR_REQUIRED
+  );
+}
+
+async function republishSameInstallDuringLeaseReservation({
+  installed,
+}: {
+  installed: InstalledActivationRecord;
+}): Promise<void> {
+  const activation = await publishConnectorActivation(installed);
+  await completeConnectorActivation(connectorId, activation.attemptId);
+  assert.equal((await getConnectorActivation(connectorId))?.state, "active");
+}
+
+test("SQLite: scheduled run rejects a stale executable after activation repair fails", async () => {
+  initDb(":memory:");
+  try {
+    await assertScheduledRunRejectsStaleActivation();
+  } finally {
+    closeDb();
+  }
+});
+
+test("SQLite: scheduled run rejects activation changes during runtime admission", async () => {
+  initDb(":memory:");
+  try {
+    await assertScheduledRunRejectsActivationChangeDuringRuntimeAdmission();
+  } finally {
+    closeDb();
+  }
+});
+
+test("SQLite: scheduled run rejects activation changes during durable lease reservation", async () => {
+  initDb(":memory:");
+  try {
+    await assertScheduledRunRejectsActivationChangeDuringLeaseReservation(
+      failUpdateDuringLeaseReservation,
+      "durable lease reservation"
+    );
+  } finally {
+    closeDb();
+  }
+});
+
+test("SQLite: scheduled run rejects same-path activation token changes during durable lease reservation", async () => {
+  initDb(":memory:");
+  try {
+    await assertScheduledRunRejectsActivationChangeDuringLeaseReservation(
+      republishSameInstallDuringLeaseReservation,
+      "durable lease reservation"
+    );
+  } finally {
+    closeDb();
+  }
+});
+
+test("PostgreSQL: scheduled run rejects a stale executable after activation repair fails", {
+  skip: !process.env.PDPP_TEST_POSTGRES_URL,
+}, async () => {
+  const url = process.env.PDPP_TEST_POSTGRES_URL;
+  assert.ok(url);
+  await withTemporaryPostgresDatabase(
+    {
+      closeConnections: closePostgresStorage,
+      connectionString: url,
+      databaseName: `pdpp_test_scheduled_activation_${Date.now().toString(36)}`,
+      templateName: null,
+    },
+    async (databaseUrl) => {
+      initDb(":memory:");
+      try {
+        await initPostgresStorage({ backend: "postgres", databaseUrl });
+        await assertScheduledRunRejectsStaleActivation();
+      } finally {
+        await closePostgresStorage();
+        closeDb();
+      }
+    }
+  );
+});
+
+test("PostgreSQL: scheduled run rejects activation changes during durable lease reservation", {
+  skip: !process.env.PDPP_TEST_POSTGRES_URL,
+}, async () => {
+  const url = process.env.PDPP_TEST_POSTGRES_URL;
+  assert.ok(url);
+  await withTemporaryPostgresDatabase(
+    {
+      closeConnections: closePostgresStorage,
+      connectionString: url,
+      databaseName: `pdpp_test_scheduled_activation_lease_${Date.now().toString(36)}`,
+      templateName: null,
+    },
+    async (databaseUrl) => {
+      initDb(":memory:");
+      try {
+        await initPostgresStorage({ backend: "postgres", databaseUrl });
+        await assertScheduledRunRejectsActivationChangeDuringLeaseReservation(
+          failUpdateDuringLeaseReservation,
+          "durable lease reservation"
+        );
+      } finally {
+        await closePostgresStorage();
+        closeDb();
+      }
+    }
+  );
+});
+
+test("PostgreSQL: scheduled run rejects same-path activation token changes during durable lease reservation", {
+  skip: !process.env.PDPP_TEST_POSTGRES_URL,
+}, async () => {
+  const url = process.env.PDPP_TEST_POSTGRES_URL;
+  assert.ok(url);
+  await withTemporaryPostgresDatabase(
+    {
+      closeConnections: closePostgresStorage,
+      connectionString: url,
+      databaseName: `pdpp_test_scheduled_activation_token_${Date.now().toString(36)}`,
+      templateName: null,
+    },
+    async (databaseUrl) => {
+      initDb(":memory:");
+      try {
+        await initPostgresStorage({ backend: "postgres", databaseUrl });
+        await assertScheduledRunRejectsActivationChangeDuringLeaseReservation(
+          republishSameInstallDuringLeaseReservation,
+          "durable lease reservation"
+        );
+      } finally {
+        await closePostgresStorage();
+        closeDb();
+      }
+    }
+  );
+});
+
+test("PostgreSQL: scheduled run rejects activation changes during runtime admission", {
+  skip: !process.env.PDPP_TEST_POSTGRES_URL,
+}, async () => {
+  const url = process.env.PDPP_TEST_POSTGRES_URL;
+  assert.ok(url);
+  await withTemporaryPostgresDatabase(
+    {
+      closeConnections: closePostgresStorage,
+      connectionString: url,
+      databaseName: `pdpp_test_scheduled_activation_admission_${Date.now().toString(36)}`,
+      templateName: null,
+    },
+    async (databaseUrl) => {
+      initDb(":memory:");
+      try {
+        await initPostgresStorage({ backend: "postgres", databaseUrl });
+        await assertScheduledRunRejectsActivationChangeDuringRuntimeAdmission();
+      } finally {
+        await closePostgresStorage();
+        closeDb();
+      }
+    }
+  );
+});

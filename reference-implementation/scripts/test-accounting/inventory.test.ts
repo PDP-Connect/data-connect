@@ -1288,3 +1288,7 @@ test("keeps every device-silence PostgreSQL skip title in the exact receipt mapp
     names
   );
 });
+test("keeps the connector-install activation PostgreSQL skip title in the exact receipt mapping", () => {
+  const name = "PostgreSQL: post-persistence failure leaves one coherent activation";
+  assert.ok(POSTGRES_UNNAMED_SKIP_TEST_NAME_ROWS.includes(name));
+});

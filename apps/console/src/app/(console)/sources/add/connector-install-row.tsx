@@ -13,7 +13,7 @@ function activationTone(state: ConnectorInstallRowModel["activationState"]): str
   if (state === "active") {
     return "text-status-success-fg";
   }
-  if (state === "update_available") {
+  if (state === "repair_required" || state === "update_available") {
     return "text-status-warning-fg";
   }
   return "text-muted-foreground";
@@ -97,6 +97,16 @@ export function ConnectorInstallRow({ compact = false, model }: { compact?: bool
       {model.hostBlockReason ? (
         <p className="pdpp-caption text-status-warning-fg" data-testid="connector-host-block">
           Host blocked: {model.hostBlockReason}
+        </p>
+      ) : null}
+      {model.activationReason ? (
+        <p className="pdpp-caption text-status-warning-fg" data-testid="connector-activation-reason">
+          {model.activationReason}
+        </p>
+      ) : null}
+      {model.operatorInstruction ? (
+        <p className="pdpp-caption text-muted-foreground" data-testid="connector-operator-instruction">
+          {model.operatorInstruction}
         </p>
       ) : null}
       {action ? (

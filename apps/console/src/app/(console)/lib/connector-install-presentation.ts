@@ -10,7 +10,12 @@ export interface ConnectorInstallLifecycle {
   readonly installed: ConnectorInstallStatus | null;
 }
 
-export type ConnectorInstallActivationState = "active" | "not_installed" | "not_listed" | "update_available";
+export type ConnectorInstallActivationState =
+  | "active"
+  | "not_installed"
+  | "not_listed"
+  | "repair_required"
+  | "update_available";
 
 export interface ConnectorInstallAction {
   readonly digest: string;
@@ -21,7 +26,9 @@ export interface ConnectorInstallAction {
 export interface ConnectorInstallRowModel {
   readonly action: ConnectorInstallAction | null;
   readonly activationLabel: string;
+  readonly activationReason: string | null;
   readonly activationState: ConnectorInstallActivationState;
+  readonly operatorInstruction: string | null;
   readonly connectorId: string;
   readonly hostBlockReason: string | null;
   readonly installedDigest: string | null;
@@ -145,8 +152,13 @@ export function connectorInstallRowModel(
   let action: ConnectorInstallAction | null = null;
 
   if (installed) {
-    activationState = digest && installed.digest !== digest ? "update_available" : "active";
-    activationLabel = activationState === "update_available" ? "Update available" : "Active";
+    if (installed.activation_state === "repair_required") {
+      activationState = "repair_required";
+      activationLabel = "Repair required";
+    } else {
+      activationState = digest && installed.digest !== digest ? "update_available" : "active";
+      activationLabel = activationState === "update_available" ? "Update available" : "Active";
+    }
   } else if (target) {
     activationState = "not_installed";
     activationLabel = "Not installed";
@@ -154,12 +166,13 @@ export function connectorInstallRowModel(
 
   if (digest && !hostBlockReason && !installed) {
     action = { digest, kind: "install", version: target?.version ?? "" };
-  } else if (digest && !hostBlockReason && installed && installed.digest !== digest) {
+  } else if (digest && !hostBlockReason && installed?.activation_state === "active" && installed.digest !== digest) {
     action = { digest, kind: "update", version: target?.version ?? "" };
   }
 
   return {
     activationLabel,
+    activationReason: installed?.repair_reason ?? null,
     activationState,
     action,
     connectorId: target?.connector_id ?? installed?.connector_id ?? entry.connectorKey,
@@ -167,6 +180,10 @@ export function connectorInstallRowModel(
     installedDigest: shortConnectorDigest(installed?.digest ?? null),
     installedDigestFull: installed?.digest ?? null,
     installedVersion: installed?.version ?? null,
+    operatorInstruction:
+      installed?.activation_state === "repair_required"
+        ? "Operator repair is required. Follow the connector install recovery runbook on the server host."
+        : null,
     targetVersion: target?.latest === true ? target.version : null,
     tier: tierFor(entry, lifecycle),
   };
