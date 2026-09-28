@@ -630,9 +630,13 @@ export function SourceSetupCatalog({
   // quiet line below instead of a silently shrinking list.
   // A connector with no package, no installed package, and no registration
   // has nothing the owner can install or set up here, so it is not listed.
-  const installableCatalog = catalog.filter(
-    (entry) => !isUninstallableCatalogEntry(entry, installLifecycleFor(entry, installLifecycleByConnector))
-  );
+  // While the package catalog is busy every lifecycle reads as "no package",
+  // so nothing is hidden until the catalog answers.
+  const installableCatalog = installCatalogTransientlyUnavailable
+    ? catalog
+    : catalog.filter(
+        (entry) => !isUninstallableCatalogEntry(entry, installLifecycleFor(entry, installLifecycleByConnector))
+      );
   const visibleCatalog = filterCatalogForDevelopmentVisibility(installableCatalog, developerMode);
   const hiddenDevelopmentCount = installableCatalog.length - visibleCatalog.length;
   const filtered = filterSourceCatalog(visibleCatalog, query);

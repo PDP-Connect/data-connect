@@ -129,7 +129,7 @@ test("uninstallable connectors are filtered out before the list is built", async
   const src = await readFile(SOURCE_SETUP_CATALOG_FILE, "utf8");
   assert.match(
     src,
-    /const installableCatalog = catalog\.filter\(\s*\(entry\) => !isUninstallableCatalogEntry\(entry, installLifecycleFor\(entry, installLifecycleByConnector\)\)\s*\);/
+    /const installableCatalog = installCatalogTransientlyUnavailable\s*\?\s*catalog\s*:\s*catalog\.filter\(\s*\(entry\) => !isUninstallableCatalogEntry\(entry, installLifecycleFor\(entry, installLifecycleByConnector\)\)\s*\);/
   );
   assert.match(src, /filterCatalogForDevelopmentVisibility\(installableCatalog, developerMode\)/);
 });
