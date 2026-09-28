@@ -92,7 +92,7 @@ import { appConfigPath, createAppConfigStore } from "./app-config-store.ts";
 import { autostartStatePath, createAutostartStore } from "./autostart-store.ts";
 import { createLiveRevisions, type LiveRevisions, registerDefaultLiveTopics } from "./live-revisions.ts";
 import { createRecoveryKeyStore } from "./recovery-key-store.ts";
-import { getOwnerSessionStore, retireFormerPreRegisteredClients } from "./stores/owner-session-store.ts";
+import { getOwnerSessionStore } from "./stores/owner-session-store.ts";
 import { NekoSurfaceAllocatorClient } from "../runtime/neko-surface-allocator.ts";
 import { isClosedPipeWriteError } from "../runtime/pipe-errors.ts";
 import { hasForwardEvidenceDebt } from "../runtime/recovery-decision.ts";
@@ -135,6 +135,7 @@ import {
   requireGrantContractAgainstManifest,
   requireResolvedPersistedGrantState,
   resolveOAuthClient,
+  retireFormerPreRegisteredClientsAtStartup,
   revokeGrant,
   revokeGrantPackage,
   revokeOwnerClientTokenByPublicId,
@@ -8577,7 +8578,7 @@ export async function startServer(opts: ServerOpts = {}) {
   });
   // Before the scheduler and console start and before the desktop signs in,
   // so nothing holds a credential this revokes.
-  const retired = await retireFormerPreRegisteredClients(
+  const retired = await retireFormerPreRegisteredClientsAtStartup(
     Math.floor(Date.now() / 1000),
     preRegisteredClientIds(resolvePreRegisteredPublicClients(opts))
   );

@@ -75,6 +75,7 @@ import {
   lockOwnerPasswordVerifierRevision,
   ownerPasswordVerifierRevision,
 } from "./stores/owner-password-verifier-store.ts";
+import { type RetiredClientCleanup, retireFormerPreRegisteredClients } from "./stores/owner-session-store.ts";
 import { buildGrantedAuthorizationDetail } from "./source-approved-authorization.ts";
 import { snapshotSourceDeclaration } from "./source-declaration.ts";
 import { snapshotContentAddressedSourceDeclarationFromLegacyConnectorManifest } from "./source-declaration-legacy-collection.ts";
@@ -482,7 +483,7 @@ export type AuthorizationDecisionFaultStage = "after_cas_before_event" | "after_
 export type AuthorizationDecisionFaultHook = (stage: AuthorizationDecisionFaultStage) => void;
 
 /** Lifetime of an owner bearer. */
-const OWNER_TOKEN_TTL_MS = 365 * 24 * 60 * 60 * 1000;
+export const OWNER_TOKEN_TTL_MS = 365 * 24 * 60 * 60 * 1000;
 
 interface OwnerDeviceApprovalInput {
   authorizationFence?: { credentialRevision?: string | null; sessionIdHash?: string };
@@ -2932,7 +2933,10 @@ const postgresOwnerDeviceAuthStore: OwnerDeviceAuthStore = {
         );
         input.faultHook?.("after_token_insert");
       }
-      await postgresEmitSpineEventInTransaction(client, input.consentApprovedEvent as SpineEventInput);
+      await postgresEmitSpineEventInTransaction(
+        client,
+        consentApprovedEventFor(input.consentApprovedEvent, reusedTokenId) as SpineEventInput
+      );
       if (!reusedTokenId) {
         await postgresEmitSpineEventInTransaction(client, input.tokenIssuedEvent as SpineEventInput);
       }
@@ -3122,7 +3126,7 @@ const sqliteOwnerDeviceAuthStore: OwnerDeviceAuthStore = {
         exec(referenceQueries.authTokensInsertOwner, [input.tokenId, input.subjectId, input.clientId, input.expiresAt]);
         input.faultHook?.("after_token_insert");
       }
-      emitRawSpineEvent(input.consentApprovedEvent as SpineEventInput, getDb());
+      emitRawSpineEvent(consentApprovedEventFor(input.consentApprovedEvent, reusedTokenId) as SpineEventInput, getDb());
       if (!reusedTokenId) {
         emitRawSpineEvent(input.tokenIssuedEvent as SpineEventInput, getDb());
       }
@@ -5147,16 +5151,47 @@ export async function deleteRegisteredClient(
 
   await getRegisteredClientStore().deleteByClientId(clientId);
 
+  await emitClientDeletedEvent({
+    actorId: actingSubjectId,
+    clientId,
+    counts: { disabledSubscriptionCount, revokedGrantIds, revokedOwnerTokenCount, revokedPackageIds },
+    registrationMode: "dynamic",
+    requestId,
+    traceId,
+  });
+
+  return { disabledSubscriptionCount, revokedGrantIds, revokedOwnerTokenCount, revokedPackageIds };
+}
+
+/**
+ * The `client.deleted` event. `actorId` is the subject who deleted the
+ * client, or null when the authorization server deleted it at startup.
+ */
+async function emitClientDeletedEvent({
+  actorId,
+  clientId,
+  counts,
+  registrationMode,
+  requestId,
+  traceId,
+}: {
+  actorId: string | null;
+  clientId: string;
+  counts: ClientAccessRevocationResult;
+  registrationMode: string;
+  requestId?: string | null | undefined;
+  traceId?: string | null | undefined;
+}): Promise<void> {
   await emitSpineEvent({
-    actor_id: actingSubjectId,
-    actor_type: "subject",
+    actor_id: actorId ?? "pdpp_as",
+    actor_type: actorId ? "subject" : "authorization_server",
     client_id: clientId,
     data: {
-      disabled_subscription_count: disabledSubscriptionCount,
-      registration_mode: "dynamic",
-      revoked_grant_count: revokedGrantIds.length,
-      revoked_owner_token_count: revokedOwnerTokenCount,
-      revoked_package_count: revokedPackageIds.length,
+      disabled_subscription_count: counts.disabledSubscriptionCount,
+      registration_mode: registrationMode,
+      revoked_grant_count: counts.revokedGrantIds.length,
+      revoked_owner_token_count: counts.revokedOwnerTokenCount,
+      revoked_package_count: counts.revokedPackageIds.length,
     },
     event_type: "client.deleted",
     object_id: clientId,
@@ -5164,12 +5199,41 @@ export async function deleteRegisteredClient(
     request_id: requestId,
     scenario_id: undefined,
     status: "succeeded",
-    subject_id: actingSubjectId,
-    subject_type: "subject",
+    subject_id: actorId ?? undefined,
+    subject_type: actorId ? "subject" : undefined,
     trace_id: traceId,
   });
+}
 
-  return { disabledSubscriptionCount, revokedGrantIds, revokedOwnerTokenCount, revokedPackageIds };
+/**
+ * Retire the pre-registered clients earlier versions left
+ * (`retireFormerPreRegisteredClients`), then finish each deletion it made the
+ * way `deleteRegisteredClient` does: disable the client's event subscriptions
+ * and write `client.deleted`.
+ */
+export async function retireFormerPreRegisteredClientsAtStartup(
+  nowSeconds: number,
+  registeredClientIds: readonly string[]
+): Promise<RetiredClientCleanup> {
+  const cleanup = await retireFormerPreRegisteredClients(nowSeconds, registeredClientIds);
+  await forEachSequential(
+    Object.entries(cleanup.clients).filter(([, counts]) => counts.deregistered),
+    async ([clientId, counts]) => {
+      const disabledSubscriptionCount = await disableClientEventSubscriptionsForDeletedClient(clientId);
+      await emitClientDeletedEvent({
+        actorId: null,
+        clientId,
+        counts: {
+          disabledSubscriptionCount,
+          revokedGrantIds: [],
+          revokedOwnerTokenCount: counts.bearers,
+          revokedPackageIds: [],
+        },
+        registrationMode: "pre_registered_public",
+      });
+    }
+  );
+  return cleanup;
 }
 
 async function disableClientEventSubscriptionsForDeletedClient(
@@ -11353,6 +11417,11 @@ function ownerDeviceTraceEventFields(
         trace_id: traceContext.trace_id,
       }
     : {};
+}
+
+/** Marks an owner-device `consent.approved` event whose approval reused a live bearer. */
+function consentApprovedEventFor(event: AuthSpineEventInput, reusedTokenId: string | null): AuthSpineEventInput {
+  return reusedTokenId ? { ...event, data: { ...(event.data as Record<string, unknown>), reused: true } } : event;
 }
 
 function buildOwnerDeviceConsentApprovedEvent({

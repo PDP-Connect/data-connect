@@ -19,6 +19,7 @@
  */
 
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { request } from "node:http";
 import { tmpdir } from "node:os";
@@ -31,13 +32,14 @@ import {
   initiateOwnerDeviceAuthorization,
   introspect,
   issueOwnerToken,
+  retireFormerPreRegisteredClientsAtStartup,
   seedPreRegisteredClients,
 } from "../server/auth.ts";
 import { closeDb, getDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
 import { closePostgresStorage, initPostgresStorage, postgresQuery } from "../server/postgres-storage.ts";
 import { DEFAULT_PRE_REGISTERED_PUBLIC_CLIENTS } from "../server/reference-local-defaults.ts";
-import { getOwnerSessionStore, retireFormerPreRegisteredClients } from "../server/stores/owner-session-store.ts";
+import { getOwnerSessionStore } from "../server/stores/owner-session-store.ts";
 import { DEMO_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
 import { dedicatedPostgresTestUrl } from "./helpers/dedicated-postgres-test-url.ts";
 
@@ -82,6 +84,7 @@ interface StartLog {
       bearers: number;
       deregistered: boolean;
       deviceRequests: number;
+      keptForActiveGrant: boolean;
       refreshTokens: number;
     }
   >;
@@ -480,30 +483,35 @@ test(
           bearers: 4,
           deregistered: true,
           deviceRequests: 1,
+          keptForActiveGrant: false,
           refreshTokens: 0,
         },
         concert_recommendation_app: {
           bearers: 2,
           deregistered: false,
           deviceRequests: 0,
+          keptForActiveGrant: true,
           refreshTokens: 0,
         },
         longview: {
           bearers: 3,
           deregistered: true,
           deviceRequests: 0,
+          keptForActiveGrant: false,
           refreshTokens: 1,
         },
         longview_planning_v1: {
           bearers: 2,
           deregistered: true,
           deviceRequests: 0,
+          keptForActiveGrant: false,
           refreshTokens: 0,
         },
         "pdpp-polyfill-owner-bootstrap": {
           bearers: 2,
           deregistered: true,
           deviceRequests: 0,
+          keptForActiveGrant: false,
           refreshTokens: 0,
         },
       });
@@ -558,6 +566,230 @@ test(
   })
 );
 
+function tokenRevoked(tokenId: string): number | undefined {
+  return getDb().prepare("SELECT revoked FROM tokens WHERE token_id = ?").get<{ revoked: number }>(tokenId)?.revoked;
+}
+
+function insertGrantToken(tokenId: string, grantId: string, clientId: string): void {
+  getDb()
+    .prepare(
+      `INSERT INTO tokens(token_id, grant_id, subject_id, client_id, token_kind, refresh_family_id, expires_at)
+       VALUES (?, ?, ?, ?, 'client', 'fam_concert', ?)`
+    )
+    .run(tokenId, grantId, SUBJECT, clientId, new Date(Date.now() + 3_600_000).toISOString());
+}
+
+function spineEvents(eventType: string, clientId: string): Record<string, unknown>[] {
+  return getDb()
+    .prepare("SELECT actor_type, data_json FROM spine_events WHERE event_type = ? AND client_id = ? ORDER BY event_seq")
+    .all<{ actor_type: string; data_json: string }>(eventType, clientId)
+    .map((row) => ({ actor_type: row.actor_type, ...(JSON.parse(row.data_json) as Record<string, unknown>) }));
+}
+
+test(
+  "startup keeps a retired client's grant tokens while an active grant names it, and cascades a deletion",
+  withDataDir(async (dataDir) => {
+    const dbPath = join(dataDir, "pdpp.sqlite");
+    const first = await start(dbPath);
+    let ownerBearer: string;
+    let pendingDeviceCode: string;
+    try {
+      await seedPreRegisteredClients(
+        DEMO_PRE_REGISTERED_PUBLIC_CLIENTS.map((client) => ({ ...client, metadata: { ...client.metadata } }))
+      );
+      const nowIso = new Date().toISOString();
+      getDb()
+        .prepare(
+          `INSERT INTO grants(grant_id, subject_id, client_id, grant_json, access_mode, status, issued_at)
+           VALUES ('grt_concert', ?, 'concert_recommendation_app', '{}', 'continuous', 'active', ?)`
+        )
+        .run(SUBJECT, nowIso);
+      insertGrantToken("tok_concert_before_upgrade", "grt_concert", "concert_recommendation_app");
+      getDb()
+        .prepare(
+          `INSERT INTO oauth_refresh_tokens(refresh_token_hash, family_id, generation, client_id, subject_id, grant_id, status, created_at)
+           VALUES ('rth_concert', 'fam_concert', 1, 'concert_recommendation_app', ?, 'grt_concert', 'active', ?)`
+        )
+        .run(SUBJECT, nowIso);
+      ownerBearer = await issueOwnerToken(SUBJECT, { clientId: "concert_recommendation_app" });
+      pendingDeviceCode = (await initiateOwnerDeviceAuthorization("concert_recommendation_app")).device_code as string;
+      // `longview` has no active grant, only an event subscription from a
+      // grant the owner revoked.
+      getDb()
+        .prepare(
+          `INSERT INTO client_event_subscriptions(subscription_id, grant_id, client_id, subject_id, callback_url,
+             secret_hash, secret_text, scope_json, status, created_at, updated_at)
+           VALUES ('sub_longview', 'grt_longview_revoked', 'longview', ?, 'https://example.test/hook',
+             'hash', 'secret', '{}', 'active', ?, ?)`
+        )
+        .run(SUBJECT, nowIso, nowIso);
+    } finally {
+      await stop(first.server);
+    }
+
+    const concertCredentials = () => ({
+      beforeUpgrade: tokenRevoked("tok_concert_before_upgrade"),
+      grant: getDb().prepare("SELECT status FROM grants WHERE grant_id = 'grt_concert'").get<{ status: string }>()
+        ?.status,
+      refresh: getDb()
+        .prepare("SELECT status FROM oauth_refresh_tokens WHERE refresh_token_hash = 'rth_concert'")
+        .get<{ status: string }>()?.status,
+    });
+
+    const upgrade = await start(dbPath);
+    try {
+      assert.deepEqual(concertCredentials(), { beforeUpgrade: 0, grant: "active", refresh: "active" });
+      assert.equal(await isActive(ownerBearer), false, "the retired client's owner bearer is revoked");
+      assert.equal(
+        getDb()
+          .prepare("SELECT status FROM owner_device_auth WHERE device_code = ?")
+          .get<{ status: string }>(pendingDeviceCode)?.status,
+        "expired"
+      );
+      assert.ok(registeredClientIds().includes("concert_recommendation_app"), "the client row stays");
+      assert.deepEqual(retirementLog(upgrade.warnings)?.retired_clients?.concert_recommendation_app, {
+        bearers: 1,
+        deregistered: false,
+        deviceRequests: 1,
+        keptForActiveGrant: true,
+        refreshTokens: 0,
+      });
+
+      assert.ok(!registeredClientIds().includes("longview"), "the client without an active grant is deleted");
+      assert.deepEqual(
+        getDb()
+          .prepare("SELECT status, disabled_reason FROM client_event_subscriptions WHERE subscription_id = 'sub_longview'")
+          .get(),
+        { disabled_reason: "client_deleted", status: "disabled_revoked" },
+        "a deleted client's event subscriptions are disabled"
+      );
+      assert.deepEqual(spineEvents("client.deleted", "longview"), [
+        {
+          actor_type: "authorization_server",
+          disabled_subscription_count: 1,
+          registration_mode: "pre_registered_public",
+          revoked_grant_count: 0,
+          revoked_owner_token_count: 0,
+          revoked_package_count: 0,
+        },
+      ]);
+      assert.deepEqual(spineEvents("client.deleted", "concert_recommendation_app"), [], "a kept client is not deleted");
+
+      // The app refreshes its access token after the upgrade.
+      insertGrantToken("tok_concert_after_upgrade", "grt_concert", "concert_recommendation_app");
+    } finally {
+      await stop(upgrade.server);
+    }
+
+    const again = await start(dbPath);
+    try {
+      assert.deepEqual(concertCredentials(), { beforeUpgrade: 0, grant: "active", refresh: "active" });
+      assert.equal(tokenRevoked("tok_concert_after_upgrade"), 0, "a token issued after the upgrade stays live");
+      assert.equal(retirementLog(again.warnings), undefined, "a second start retires nothing");
+      assert.equal(spineEvents("client.deleted", "longview").length, 1, "the deletion is recorded once");
+    } finally {
+      await stop(again.server);
+    }
+  })
+);
+
+/** Approve an owner device request the way the console and the runtime do. */
+async function approveAs(clientId: string, subjectId = SUBJECT): Promise<{ access_token: string; expires_in: number }> {
+  const device = await initiateOwnerDeviceAuthorization(clientId);
+  return (await approveOwnerDeviceAuthorization(device.user_code, subjectId)) as {
+    access_token: string;
+    expires_in: number;
+  };
+}
+
+const DAY_SECONDS = 24 * 60 * 60;
+
+/** Revoke an owner bearer the way Settings does, by its public id. */
+async function revokeInSettings(token: string): Promise<void> {
+  const publicId = `tok_${createHash("sha256").update(token).digest("base64url")}`;
+  assert.equal(await getOwnerSessionStore().revokeOwnerBearer(SUBJECT, publicId, nowSeconds()), true);
+}
+
+function setExpiry(token: string, secondsFromNow: number): void {
+  getDb()
+    .prepare("UPDATE tokens SET expires_at = ? WHERE token_id = ?")
+    .run(new Date(Date.now() + secondsFromNow * 1000).toISOString(), token);
+}
+
+test(
+  "an approval never reuses a revoked, another subject's, or half-expired bearer",
+  withDataDir(async (dataDir) => {
+    const { server } = await start(join(dataDir, "pdpp.sqlite"));
+    try {
+      const revokedBearer = (await approveAs(RUNTIME_CLIENT)).access_token;
+      await revokeInSettings(revokedBearer);
+      assert.equal(await isActive(revokedBearer), false);
+      const afterRevoke = (await approveAs(RUNTIME_CLIENT)).access_token;
+      assert.notEqual(afterRevoke, revokedBearer, "a revoked bearer is not reused");
+      assert.equal(await isActive(afterRevoke), true);
+
+      const otherSubject = "owner_other";
+      const othersBearer = await issueOwnerToken(otherSubject, { clientId: CONSOLE_CLIENT });
+      const othersRow = () => getDb().prepare("SELECT * FROM tokens WHERE token_id = ?").get(othersBearer);
+      const othersRowBefore = othersRow();
+      const mine = await approveAs(CONSOLE_CLIENT);
+      assert.notEqual(mine.access_token, othersBearer, "another subject's bearer is not returned");
+      assert.equal((await introspect(mine.access_token)).subject_id, SUBJECT);
+      assert.deepEqual(othersRow(), othersRowBefore, "the other subject's bearer is unchanged");
+
+      // Less than half of its lifetime left: not reused.
+      setExpiry(mine.access_token, 100 * DAY_SECONDS);
+      const fresh = await approveAs(CONSOLE_CLIENT);
+      assert.notEqual(fresh.access_token, mine.access_token, "a bearer below half its lifetime is not reused");
+      assert.equal(fresh.expires_in, 365 * DAY_SECONDS);
+
+      // More than half left: reused, with the lifetime it has left.
+      setExpiry(fresh.access_token, 200 * DAY_SECONDS);
+      const reused = await approveAs(CONSOLE_CLIENT);
+      assert.equal(reused.access_token, fresh.access_token);
+      assert.ok(
+        reused.expires_in <= 200 * DAY_SECONDS && reused.expires_in > 200 * DAY_SECONDS - 60,
+        `a reused bearer reports its remaining lifetime, got ${reused.expires_in}`
+      );
+      assert.deepEqual(
+        spineEvents("consent.approved", CONSOLE_CLIENT).map((event) => event.reused ?? false),
+        [false, false, true],
+        "consent.approved marks the approval that reused a bearer"
+      );
+    } finally {
+      await stop(server);
+    }
+  })
+);
+
+test(
+  "connector runs reuse the runtime's bearer without a device approval per run",
+  withDataDir(async (dataDir) => {
+    const { server } = await start(join(dataDir, "pdpp.sqlite"));
+    try {
+      const deviceRows = () =>
+        getDb()
+          .prepare("SELECT COUNT(*) AS n FROM owner_device_auth WHERE client_id = ?")
+          .get<{ n: number }>(RUNTIME_CLIENT)?.n;
+      const runs = 5;
+      const tokens = new Set<string>();
+      for (let run = 0; run < runs; run++) tokens.add(await server.controller.issueRuntimeOwnerToken(SUBJECT));
+      assert.equal(tokens.size, 1);
+      assert.equal(deviceRows(), 1, `${runs} runs create one device-auth row`);
+      assert.equal(spineEvents("consent.approved", RUNTIME_CLIENT).length, 1, "and one consent.approved event");
+
+      const [cached] = tokens;
+      await revokeInSettings(cached as string);
+      const afterRevoke = await server.controller.issueRuntimeOwnerToken(SUBJECT);
+      assert.notEqual(afterRevoke, cached, "a revoked cached bearer is replaced");
+      assert.equal(await isActive(afterRevoke), true);
+      assert.equal(deviceRows(), 2);
+    } finally {
+      await stop(server);
+    }
+  })
+);
+
 const POSTGRES_URL = dedicatedPostgresTestUrl(process.env.PDPP_TEST_POSTGRES_URL);
 
 if (POSTGRES_URL) {
@@ -605,6 +837,24 @@ if (POSTGRES_URL) {
          VALUES ('grt_pg_concert', $1, 'concert_recommendation_app', '{}', 'continuous', 'active', $2)`,
         [SUBJECT, new Date().toISOString()]
       );
+      // The concert app's grant-bound access token and refresh token.
+      await postgresQuery(
+        `INSERT INTO tokens(token_id, grant_id, subject_id, client_id, token_kind, refresh_family_id, expires_at)
+         VALUES ('tok_pg_concert', 'grt_pg_concert', $1, 'concert_recommendation_app', 'client', 'fam_pg_concert', $2)`,
+        [SUBJECT, new Date(Date.now() + 3_600_000).toISOString()]
+      );
+      await postgresQuery(
+        `INSERT INTO oauth_refresh_tokens(refresh_token_hash, family_id, generation, client_id, subject_id, grant_id, status, created_at)
+         VALUES ('rth_pg_concert', 'fam_pg_concert', 1, 'concert_recommendation_app', $1, 'grt_pg_concert', 'active', $2)`,
+        [SUBJECT, new Date().toISOString()]
+      );
+      await postgresQuery(
+        `INSERT INTO client_event_subscriptions(subscription_id, grant_id, client_id, subject_id, callback_url,
+           secret_hash, secret_text, scope_json, status, created_at, updated_at)
+         VALUES ('sub_pg_longview', 'grt_pg_longview_revoked', 'longview', $1, 'https://example.test/hook',
+           'hash', 'secret', '{}'::jsonb, 'active', $2, $2)`,
+        [SUBJECT, new Date().toISOString()]
+      );
       const now = nowSeconds();
       const session = (id: string, createdAt: number, label: string, userAgent: string | null) =>
         postgresQuery(
@@ -618,48 +868,83 @@ if (POSTGRES_URL) {
       await session("firefox_0000_004", now - 400, "Firefox", "Firefox/140.0");
 
       const productIds = DEFAULT_PRE_REGISTERED_PUBLIC_CLIENTS.map((client) => client.client_id);
-      assert.deepEqual(await retireFormerPreRegisteredClients(now, productIds), {
+      assert.deepEqual(await retireFormerPreRegisteredClientsAtStartup(now, productIds), {
         clients: {
           cli_longview: {
             bearers: 2,
             deregistered: true,
             deviceRequests: 0,
+            keptForActiveGrant: false,
             refreshTokens: 0,
           },
           concert_recommendation_app: {
             bearers: 1,
             deregistered: false,
             deviceRequests: 0,
+            keptForActiveGrant: true,
             refreshTokens: 0,
           },
           longview: {
             bearers: 1,
             deregistered: true,
             deviceRequests: 1,
+            keptForActiveGrant: false,
             refreshTokens: 1,
           },
           longview_planning_v1: {
             bearers: 1,
             deregistered: true,
             deviceRequests: 0,
+            keptForActiveGrant: false,
             refreshTokens: 0,
           },
           "pdpp-polyfill-owner-bootstrap": {
             bearers: 1,
             deregistered: true,
             deviceRequests: 0,
+            keptForActiveGrant: false,
             refreshTokens: 0,
           },
         },
         sessions: 2,
       });
       assert.deepEqual(
-        await retireFormerPreRegisteredClients(now, productIds),
+        await retireFormerPreRegisteredClientsAtStartup(now, productIds),
         { clients: {}, sessions: 0 },
         "a second run changes nothing"
       );
       for (const token of oldBearers) assert.equal(await isActive(token), false, "an old-id bearer is revoked");
       assert.equal(await isActive(keptBearer), true, "the pdpp_cli bearer still works");
+      assert.deepEqual(
+        {
+          refresh: (
+            await postgresQuery<{ status: string }>(
+              "SELECT status FROM oauth_refresh_tokens WHERE refresh_token_hash = 'rth_pg_concert'"
+            )
+          ).rows[0]?.status,
+          token: (await postgresQuery<{ revoked: boolean }>("SELECT revoked FROM tokens WHERE token_id = 'tok_pg_concert'"))
+            .rows[0]?.revoked,
+        },
+        { refresh: "active", token: false },
+        "the active grant's tokens stay live"
+      );
+      assert.deepEqual(
+        (
+          await postgresQuery(
+            "SELECT status, disabled_reason FROM client_event_subscriptions WHERE subscription_id = 'sub_pg_longview'"
+          )
+        ).rows,
+        [{ disabled_reason: "client_deleted", status: "disabled_revoked" }]
+      );
+      assert.deepEqual(
+        (
+          await postgresQuery<{ client_id: string }>(
+            "SELECT client_id FROM spine_events WHERE event_type = 'client.deleted' ORDER BY client_id"
+          )
+        ).rows.map((row) => row.client_id),
+        ["cli_longview", "longview", "longview_planning_v1", "pdpp-polyfill-owner-bootstrap"],
+        "each deleted client has one client.deleted event"
+      );
       assert.equal(
         (
           await postgresQuery<{ status: string }>("SELECT status FROM owner_device_auth WHERE device_code = $1", [
@@ -683,8 +968,34 @@ if (POSTGRES_URL) {
         ["concert_recommendation_app", ...PRODUCT_CLIENT_IDS].sort()
       );
 
+      const othersBearer = await issueOwnerToken("owner_other", { clientId: CONSOLE_CLIENT });
       const consoleBearer = await approveOwnerDevice(CONSOLE_CLIENT);
+      assert.notEqual(consoleBearer, othersBearer, "another subject's bearer is not returned");
+      assert.equal((await introspect(othersBearer)).subject_id, "owner_other");
       assert.equal(await approveOwnerDevice(CONSOLE_CLIENT), consoleBearer, "the console reuses its bearer");
+      assert.deepEqual(
+        (
+          await postgresQuery<{ reused: boolean | null }>(
+            `SELECT (data_json->>'reused')::boolean AS reused FROM spine_events
+              WHERE event_type = 'consent.approved' AND client_id = $1 ORDER BY event_seq`,
+            [CONSOLE_CLIENT]
+          )
+        ).rows.map((row) => row.reused ?? false),
+        [false, true],
+        "consent.approved marks the approval that reused a bearer"
+      );
+      await revokeInSettings(consoleBearer);
+      const afterRevoke = await approveOwnerDevice(CONSOLE_CLIENT);
+      assert.notEqual(afterRevoke, consoleBearer, "a revoked bearer is not reused");
+      assert.equal(await isActive(afterRevoke), true);
+      await postgresQuery("UPDATE tokens SET expires_at = $1 WHERE token_id = $2", [
+        new Date(Date.now() + 100 * DAY_SECONDS * 1000).toISOString(),
+        afterRevoke,
+      ]);
+      const device = await initiateOwnerDeviceAuthorization(CONSOLE_CLIENT);
+      const fresh = await approveOwnerDeviceAuthorization(device.user_code, SUBJECT);
+      assert.notEqual(fresh.access_token, afterRevoke, "a bearer below half its lifetime is not reused");
+      assert.equal(fresh.expires_in, 365 * DAY_SECONDS);
       const runtime = await approveOwnerDevice(RUNTIME_CLIENT);
       assert.equal(await approveOwnerDevice(RUNTIME_CLIENT), runtime, "runs reuse one bearer");
       const cli = await approveOwnerDevice("pdpp_cli");

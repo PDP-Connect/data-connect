@@ -75,7 +75,7 @@ export const REUSED_OWNER_BEARER_CLIENT_IDS: readonly string[] = Object.freeze([
  * Clients earlier versions pre-registered and no longer do: the console's
  * and the connector runtime's old owner clients, and the demo apps. Startup
  * revokes their credentials and deregisters them
- * (`retireFormerPreRegisteredClients` in stores/owner-session-store.ts).
+ * (`retireFormerPreRegisteredClientsAtStartup` in auth.ts).
  */
 export const RETIRED_PRE_REGISTERED_CLIENT_IDS: readonly string[] = Object.freeze([
   "pdpp-polyfill-owner-bootstrap",

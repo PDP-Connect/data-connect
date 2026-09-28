@@ -36,6 +36,8 @@ import {
   approveOwnerDeviceAuthorization,
   getConnectorManifest,
   initiateOwnerDeviceAuthorization,
+  introspect,
+  OWNER_TOKEN_TTL_MS,
 } from "../server/auth.ts";
 import { canonicalConnectorKey, canonicalConnectorKeyFromManifest } from "../server/connector-key.ts";
 import { CONNECTOR_RUNTIME_OWNER_CLIENT_ID } from "../server/reference-local-defaults.ts";
@@ -2689,7 +2691,31 @@ export function createController(opts: ControllerOptions = {}): Controller {
     return null;
   }
 
+  // The last bearer minted per subject. Every run and every scheduler refresh
+  // asks for one; approving a device request for each would add an
+  // owner_device_auth row and a consent.approved event each time.
+  const runtimeOwnerTokens = new Map<string, string>();
+
+  /**
+   * The subject's cached bearer while it is live and has at least half its
+   * lifetime left (the bound the server reuses a bearer under); otherwise a
+   * newly approved one.
+   */
   async function issueRuntimeOwnerToken(subjectId = ownerSubjectId): Promise<string> {
+    const cached = runtimeOwnerTokens.get(subjectId);
+    if (cached) {
+      const { active, exp } = await introspect(cached);
+      if (active && (exp ?? 0) * 1000 > Date.now() + OWNER_TOKEN_TTL_MS / 2) {
+        return cached;
+      }
+      runtimeOwnerTokens.delete(subjectId);
+    }
+    const token = await mintRuntimeOwnerToken(subjectId);
+    runtimeOwnerTokens.set(subjectId, token);
+    return token;
+  }
+
+  async function mintRuntimeOwnerToken(subjectId: string): Promise<string> {
     const baseUrl = opts.asPublicUrl || process.env.AS_PUBLIC_URL;
     const device = await initiateOwnerDeviceAuthorization(ownerClientId, baseUrl ? { baseUrl } : {});
     const approved = await approveOwnerDeviceAuthorization(device.user_code, subjectId);
