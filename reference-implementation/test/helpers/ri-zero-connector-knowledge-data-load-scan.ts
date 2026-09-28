@@ -243,17 +243,22 @@ const SANCTIONED_GENERIC_DATA_READ_CALL_SITES: ReadonlySet<string> = new Set([
   // policy or provider identity data.
   // Re-derived 2026-09-26: moving the cross-tree main-module helper into the
   // RI tree added one import line before this fixed runtime-state read.
-  "reference-implementation/server/index.ts:2223",
+  // Re-derived 2026-09-28: the ownerPasswordManagedByDesktop server option
+  // added two lines above it.
+  "reference-implementation/server/index.ts:2225",
   // applyRecoveryOwnerSessionReset() reads a fixed filename under PDPP_DATA_DIR
   // ("owner-session-recovery-reset.json"). It is consumed only as an owner
   // session reset marker for recovered deployments.
   // Re-derived 2026-09-26: moving the cross-tree main-module helper into the
   // RI tree added one import line before this fixed runtime-state read.
-  "reference-implementation/server/index.ts:2293",
+  // Re-derived 2026-09-28: the ownerPasswordManagedByDesktop server option
+  // added two lines above it.
+  "reference-implementation/server/index.ts:2295",
   // readRequestState(path) reads owner-password window request state from
   // fixed filenames under PDPP_DATA_DIR. The JSON contains request status and
   // OS reauth handoff state, never connector/provider policy.
-  "reference-implementation/server/owner-password-owner-set.ts:145",
+  // Re-derived 2026-09-28: ownerPasswordManagedByDesktop() was added above it.
+  "reference-implementation/server/owner-password-owner-set.ts:161",
   // readManifest(root) in local-source.ts: readFileSync(manifestPath, "utf8")
   // where manifestPath is confinedFile(root, MANIFEST_PATH, ...) --
   // MANIFEST_PATH is the fixed literal "profile/collection-profile.json" and

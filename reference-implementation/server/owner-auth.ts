@@ -139,6 +139,14 @@ interface SignedInPageOptions {
   themeChoice?: string;
 }
 
+/**
+ * Who supplies the owner password: "env" is an operator's
+ * `PDPP_OWNER_PASSWORD`, "desktop" is the DataConnect desktop keychain
+ * (delivered through the same variable), "app" is a verifier stored by
+ * `/setup` or a password change.
+ */
+export type OwnerCredentialSource = "app" | "env" | "desktop" | "disabled";
+
 export interface OwnerAuthPlaceholderOptions {
   /**
    * When owner auth is DISABLED (no password), this controls whether
@@ -170,6 +178,13 @@ export interface OwnerAuthPlaceholderOptions {
    */
   loginRateLimit?: OwnerLoginRateLimitConfig | false;
   password?: string | null;
+  /**
+   * The DataConnect desktop supplies `password` from its keychain
+   * (`ownerPasswordManagedByDesktop`). The source is then "desktop", and
+   * `/owner/password/change` points the owner to DataConnect Settings
+   * instead of to an environment variable they never set.
+   */
+  passwordManagedByDesktop?: boolean;
   passwordVerifier?: OwnerPasswordVerifier | null;
   providerName?: string;
   sameSite?: OwnerSessionSameSite;
@@ -580,7 +595,7 @@ interface OwnerAuthRouteContext {
   readonly loginRateLimiter: OwnerLoginRateLimiter;
   readonly notifySessionLogout: (req: AuthRequest) => void;
   readonly passwordMatches: (submitted: string) => Promise<OwnerPasswordMatch>;
-  readonly credentialSource: () => "app" | "env" | "disabled";
+  readonly credentialSource: () => OwnerCredentialSource;
   readonly changeAppPassword: (
     password: string,
     subjectId: string,
@@ -999,8 +1014,18 @@ function handleDisabledOwnerSession(
  *     a protected route. Redirects browsers to `/owner/login`, returns 401
  *     JSON to non-HTML callers.
  */
+function initialCredentialSource(
+  password: string | null | undefined,
+  passwordManagedByDesktop: boolean,
+  passwordVerifier: OwnerPasswordVerifier | null
+): OwnerCredentialSource {
+  if (password) return passwordManagedByDesktop ? "desktop" : "env";
+  return passwordVerifier ? "app" : "disabled";
+}
+
 export function createOwnerAuthPlaceholder({
   password,
+  passwordManagedByDesktop = false,
   passwordVerifier,
   subjectId,
   providerName = DATACONNECT_PRODUCT_IDENTITY.name,
@@ -1017,7 +1042,7 @@ export function createOwnerAuthPlaceholder({
   // so we fall back to the declared `null` sentinel the controller already
   // understands as "not provided."
   let activePasswordVerifier = passwordVerifier ?? null;
-  let credentialSource: "app" | "env" | "disabled" = password ? "env" : activePasswordVerifier ? "app" : "disabled";
+  let credentialSource = initialCredentialSource(password, passwordManagedByDesktop, activePasswordVerifier);
   const hasPasswordCredential =
     (typeof password === "string" && password.length > 0) ||
     passwordVerifier != null ||
@@ -1244,6 +1269,15 @@ export function createOwnerAuthPlaceholder({
 
     app.post("/owner/password/change", async (req, res) => {
       if (!isCsrfAuthorized(req, res, context)) return;
+      if (context.credentialSource() === "desktop") {
+        res.status(409).json({
+          error: {
+            code: "owner_password_desktop_managed",
+            message: "DataConnect manages this password. Change it in DataConnect Settings.",
+          },
+        });
+        return;
+      }
       if (context.credentialSource() === "env") {
         res.status(409).json({
           error: {

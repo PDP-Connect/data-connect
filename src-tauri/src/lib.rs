@@ -68,7 +68,7 @@ use commands::{get_autostart_enabled, set_autostart_enabled};
 use commands::export_database_encryption_recovery_code;
 #[cfg(desktop)]
 use unified::import_database_encryption_recovery_code;
-use tauri::{Listener, Manager};
+use tauri::{ipc::Invoke, Listener, Manager, Runtime};
 
 /// Label of the legacy desktop app's window, declared in tauri.conf.json.
 const LEGACY_MAIN_WINDOW_LABEL: &str = "main";
@@ -228,73 +228,7 @@ pub fn run() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![
-            get_platforms,
-            add_developer_connector_source,
-            list_developer_connector_sources,
-            reload_developer_connector_source,
-            remove_developer_connector_source,
-            select_developer_connector_source,
-            start_connector_run,
-            start_installed_pdpp_connector_run,
-            prepare_installed_pdpp_import,
-            stop_installed_pdpp_connector_run,
-            reset_installed_pdpp_browser_profile,
-            is_installed_pdpp_browser_setup_complete,
-            submit_installed_pdpp_interaction_response,
-            stop_connector_run,
-            check_connected_platforms,
-            check_browser_available,
-            download_browser,
-            download_chromium_rust,
-            test_nodejs,
-            debug_connector_paths,
-            get_user_data_path,
-            handle_download,
-            open_folder,
-            get_run_files,
-            write_export_data,
-            open_platform_export_folder,
-            open_personal_server_scope_folder,
-            load_runs,
-            load_run_export_data,
-            load_latest_source_export_preview,
-            load_latest_source_export_full,
-            load_source_export_preview_from_path,
-            load_source_export_full_from_path,
-            delete_exported_run,
-            check_connector_updates,
-            download_connector,
-            get_registry_url,
-            get_installed_connectors,
-            get_app_config,
-            set_app_config,
-            get_log_path,
-            start_personal_server,
-            stop_personal_server,
-            clear_personal_server_data,
-            get_personal_server_data_path,
-            get_personal_server_status,
-            list_browser_sessions,
-            clear_browser_session,
-            mark_export_synced,
-            start_reference_server,
-            stop_reference_server,
-            get_reference_server_status,
-            login_reference_server,
-            open_reference_server_view,
-            resize_reference_server_view,
-            hide_reference_server_view,
-            close_reference_server_view,
-            #[cfg(desktop)]
-            get_autostart_enabled,
-            #[cfg(desktop)]
-            set_autostart_enabled,
-            #[cfg(desktop)]
-            export_database_encryption_recovery_code,
-            #[cfg(desktop)]
-            import_database_encryption_recovery_code,
-        ])
+        .invoke_handler(app_invoke_handler())
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| match event {
@@ -330,6 +264,157 @@ pub fn run() {
         });
 }
 
+/// The app's one invoke handler. Commands in `RUNTIME_GENERIC_COMMANDS` go
+/// to `runtime_generic_invoke_handler`, which a test can build under
+/// `tauri::test::mock_builder()`; every other command goes to the list below,
+/// whose commands take the concrete Wry `AppHandle`.
+pub(crate) fn app_invoke_handler() -> impl Fn(Invoke) -> bool + Send + Sync + 'static {
+    route_invoke(
+        runtime_generic_invoke_handler(),
+        tauri::generate_handler![
+        get_platforms,
+        add_developer_connector_source,
+        list_developer_connector_sources,
+        reload_developer_connector_source,
+        remove_developer_connector_source,
+        select_developer_connector_source,
+        start_connector_run,
+        start_installed_pdpp_connector_run,
+        prepare_installed_pdpp_import,
+        stop_installed_pdpp_connector_run,
+        reset_installed_pdpp_browser_profile,
+        is_installed_pdpp_browser_setup_complete,
+        submit_installed_pdpp_interaction_response,
+        stop_connector_run,
+        check_connected_platforms,
+        check_browser_available,
+        download_browser,
+        download_chromium_rust,
+        test_nodejs,
+        debug_connector_paths,
+        get_user_data_path,
+        handle_download,
+        open_folder,
+        get_run_files,
+        write_export_data,
+        open_platform_export_folder,
+        open_personal_server_scope_folder,
+        load_runs,
+        load_run_export_data,
+        load_latest_source_export_preview,
+        load_latest_source_export_full,
+        load_source_export_preview_from_path,
+        load_source_export_full_from_path,
+        delete_exported_run,
+        check_connector_updates,
+        download_connector,
+        get_registry_url,
+        get_installed_connectors,
+        get_app_config,
+        set_app_config,
+        get_log_path,
+        start_personal_server,
+        stop_personal_server,
+        clear_personal_server_data,
+        get_personal_server_data_path,
+        get_personal_server_status,
+        list_browser_sessions,
+        clear_browser_session,
+        mark_export_synced,
+        start_reference_server,
+        stop_reference_server,
+        get_reference_server_status,
+        login_reference_server,
+        open_reference_server_view,
+        resize_reference_server_view,
+        hide_reference_server_view,
+        close_reference_server_view,
+        #[cfg(desktop)]
+        get_autostart_enabled,
+        #[cfg(desktop)]
+        set_autostart_enabled,
+        #[cfg(desktop)]
+        export_database_encryption_recovery_code,
+        #[cfg(desktop)]
+        import_database_encryption_recovery_code,
+        ],
+    )
+}
+
+/// Commands served by `runtime_generic_invoke_handler`. The native
+/// owner-password window (`public/owner-password.html`) calls
+/// `set_desktop_owner_password`; v0.7.59 registered no handler for it, so
+/// saving a password there failed with "command not found".
+#[cfg(desktop)]
+const RUNTIME_GENERIC_COMMANDS: &[&str] = &["set_desktop_owner_password"];
+#[cfg(not(desktop))]
+const RUNTIME_GENERIC_COMMANDS: &[&str] = &[];
+
+pub(crate) fn runtime_generic_invoke_handler<R: Runtime>(
+) -> impl Fn(Invoke<R>) -> bool + Send + Sync + 'static {
+    tauri::generate_handler![
+        #[cfg(desktop)]
+        owner_credential::set_desktop_owner_password,
+    ]
+}
+
+/// Send each invoke to `generic` if it names a `RUNTIME_GENERIC_COMMANDS`
+/// command, otherwise to `rest`. A generated handler consumes the invoke, so
+/// the choice is made by name before either one runs.
+fn route_invoke<R: Runtime>(
+    generic: impl Fn(Invoke<R>) -> bool + Send + Sync + 'static,
+    rest: impl Fn(Invoke<R>) -> bool + Send + Sync + 'static,
+) -> impl Fn(Invoke<R>) -> bool + Send + Sync + 'static {
+    move |invoke| {
+        if RUNTIME_GENERIC_COMMANDS.contains(&invoke.message.command()) {
+            generic(invoke)
+        } else {
+            rest(invoke)
+        }
+    }
+}
+
+/// A mock app built from the real tauri.conf.json (so the real capability
+/// files apply) and served by `route_invoke` with
+/// `runtime_generic_invoke_handler`, whose app-data directory is
+/// `data_root/app`. The path resolver joins the identifier onto the user
+/// data directory, and joining an absolute path replaces the base, so a test
+/// never resolves the installed app's real data directory.
+#[cfg(all(test, desktop))]
+pub(crate) fn mock_app_with_data_dir(
+    data_root: &std::path::Path,
+) -> tauri::App<tauri::test::MockRuntime> {
+    let mut context: tauri::Context<tauri::test::MockRuntime> = tauri::generate_context!();
+    context.config_mut().identifier = data_root.join("app").to_string_lossy().into_owned();
+    let app = tauri::test::mock_builder()
+        .invoke_handler(route_invoke(runtime_generic_invoke_handler(), |_| false))
+        .build(context)
+        .expect("build the mock app");
+    app.manage(owner_credential::ConfiguredOwnerPasswordForTest(None));
+    app
+}
+
+/// Send one IPC call from `webview`, as its page's `invoke()` would.
+#[cfg(all(test, desktop))]
+pub(crate) fn invoke_from(
+    webview: &tauri::WebviewWindow<tauri::test::MockRuntime>,
+    command: &str,
+    body: serde_json::Value,
+) -> Result<tauri::ipc::InvokeResponseBody, serde_json::Value> {
+    tauri::test::get_ipc_response(
+        webview,
+        tauri::webview::InvokeRequest {
+            cmd: command.into(),
+            callback: tauri::ipc::CallbackFn(0),
+            error: tauri::ipc::CallbackFn(1),
+            url: "tauri://localhost".parse().expect("app URL"),
+            body: tauri::ipc::InvokeBody::Json(body),
+            headers: Default::default(),
+            invoke_key: tauri::test::INVOKE_KEY.to_string(),
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -351,6 +436,61 @@ mod tests {
             app.webview_windows().is_empty(),
             "config created windows before setup: {:?}",
             app.webview_windows().keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// The native password window saves through `set_desktop_owner_password`.
+    /// Sent through the real routing to the real handler, from a webview
+    /// labelled like that window and under the real capability files, the
+    /// call must reach the command: with no pending window request it fails
+    /// on the command's own authority check, not with "command not found".
+    #[test]
+    fn the_password_window_command_is_registered() {
+        let data_root = tempfile::tempdir().expect("tempdir");
+        let app = mock_app_with_data_dir(data_root.path());
+        let window = tauri::WebviewWindowBuilder::new(&app, "owner-password", Default::default())
+            .build()
+            .expect("build the owner-password window");
+        let response = invoke_from(&window, "set_desktop_owner_password", serde_json::json!({
+            "password": "a-long-enough-owner-password",
+        }));
+        assert_eq!(
+            response.expect_err("no window request is pending"),
+            serde_json::json!("Open the password window from Settings before saving.")
+        );
+    }
+
+    /// The IPC ACL lets every local-origin webview call app commands, so the
+    /// legacy `main` window and the recovery window reach this command too.
+    /// Only the password window may pass to the command's authority check.
+    #[test]
+    fn only_the_password_window_may_save_a_password() {
+        let data_root = tempfile::tempdir().expect("tempdir");
+        let app = mock_app_with_data_dir(data_root.path());
+        for label in ["main", "recovery"] {
+            let window = tauri::WebviewWindowBuilder::new(&app, label, Default::default())
+                .build()
+                .expect("build a local webview");
+            let response = invoke_from(&window, "set_desktop_owner_password", serde_json::json!({
+                "password": "a-long-enough-owner-password",
+            }));
+            assert_eq!(
+                response.expect_err("refused by label"),
+                serde_json::json!(
+                    "Only the DataConnect password window can save the owner password."
+                ),
+                "{label}"
+            );
+        }
+        let window = tauri::WebviewWindowBuilder::new(&app, "owner-password", Default::default())
+            .build()
+            .expect("build the owner-password window");
+        let response = invoke_from(&window, "set_desktop_owner_password", serde_json::json!({
+            "password": "a-long-enough-owner-password",
+        }));
+        assert_eq!(
+            response.expect_err("reaches the authority check"),
+            serde_json::json!("Open the password window from Settings before saving.")
         );
     }
 

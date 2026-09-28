@@ -16,11 +16,20 @@
  *
  * All startup inputs come from the environment and PDPP_DATA_DIR, as they do
  * for the staged RI. This file makes no recovery inputs of its own.
+ *
+ * The owner-password tests in src-tauri/src/unified.rs use two more modes:
+ *   - `request-password-window`: writes the console's owner-password window
+ *     request (purpose argv[4]) with the RI's own writer, writes
+ *     `{ requestId }` to argv[3], and exits without starting a server.
+ *   - `turn-on-remote-access`: signs in, mints an owner bearer, asks to turn
+ *     remote access on from off, writes `{ status, code }` to argv[3], and
+ *     exits.
  */
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { startServer } from "../../server/index.ts";
+import { requestOwnerPasswordWindow } from "../../server/owner-password-owner-set.ts";
 
 const [mode, outputPath, seedPath] = process.argv.slice(2);
 const password = process.env.PDPP_OWNER_PASSWORD ?? "";
@@ -106,6 +115,12 @@ async function bearerStatus(rsUrl: string, bearer: string): Promise<number> {
   return (await fetch(`${rsUrl}/v1/owner/control`, { headers: { Authorization: `Bearer ${bearer}` } })).status;
 }
 
+if (mode === "request-password-window") {
+  const purpose = process.argv[4] === "change" ? "change" : "initial_setup";
+  writeFileSync(outputPath, JSON.stringify(await requestOwnerPasswordWindow(dataDir, { purpose })));
+  process.exit(0);
+}
+
 const server = await startServer({
   asPort: Number(process.env.AS_PORT ?? 0),
   dbPath: join(dataDir, "pdpp.sqlite"),
@@ -128,6 +143,27 @@ if (mode === "seed") {
       sessionStatus: await sessionStatus(asUrl, session),
     })
   );
+  process.exit(0);
+}
+
+if (mode === "turn-on-remote-access") {
+  const bearer = await mintOwnerBearer(asUrl, await login(asUrl));
+  const resp = await fetch(`${rsUrl}/v1/owner/remote-access/config`, {
+    body: JSON.stringify({
+      fields: {
+        PDPP_BIND_HOST: "127.0.0.1",
+        PDPP_REFERENCE_ORIGIN: "https://vault.example.com",
+        PDPP_TRUSTED_HOSTS: "vault.example.com",
+        PDPP_TRUSTED_PROXIES: "",
+      },
+      posture: "public_url",
+      provider: "user_supplied_origin",
+    }),
+    headers: { Authorization: `Bearer ${bearer}`, "Content-Type": "application/json" },
+    method: "POST",
+  });
+  const body = (await resp.json()) as { error?: { code?: string } };
+  writeFileSync(outputPath, JSON.stringify({ code: body.error?.code ?? null, status: resp.status }));
   process.exit(0);
 }
 

@@ -13,7 +13,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Manager, Runtime, WebviewUrl, WebviewWindowBuilder};
 
 const OWNER_CREDENTIAL_FILE: &str = "owner-credential";
 pub(crate) const OWNER_PASSWORD_OWNER_SET_MARKER_FILE: &str = "owner-password-owner-set.json";
@@ -109,6 +109,7 @@ impl CredentialStore for SystemKeyring {
         log::info!("OS keychain load: entry username={}", self.username);
         let started = Instant::now();
         let result = (|| {
+            refuse_keychain_under_test()?;
             let entry = keyring::Entry::new(KEYRING_SERVICE, &self.username)
                 .map_err(|error| format!("could not initialize OS keychain: {error}"))?;
             match entry.get_password() {
@@ -130,6 +131,7 @@ impl CredentialStore for SystemKeyring {
         log::info!("OS keychain save: entry username={}", self.username);
         let started = Instant::now();
         let result = (|| {
+            refuse_keychain_under_test()?;
             let entry = keyring::Entry::new(KEYRING_SERVICE, &self.username)
                 .map_err(|error| format!("could not initialize OS keychain: {error}"))?;
             entry
@@ -146,8 +148,20 @@ impl CredentialStore for SystemKeyring {
     }
 }
 
+/// Tests drive app-bound helpers such as `set_desktop_owner_password`
+/// through `tauri::test`. Its service name is the installed app's, so under
+/// `cargo test` the keychain is refused and the helpers fall back to the
+/// app-data file, which each test points at a temporary directory. A test
+/// can then never read or overwrite the owner's real keychain entry.
+fn refuse_keychain_under_test() -> Result<(), String> {
+    if cfg!(test) {
+        return Err("the OS keychain is not used under cargo test".to_string());
+    }
+    Ok(())
+}
+
 /// Resolve the app-data path used for the generated owner password.
-pub(crate) fn owner_credential_path(app: &AppHandle) -> Result<PathBuf, String> {
+pub(crate) fn owner_credential_path<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
     app.path()
         .app_data_dir()
         .map(|path| path.join(OWNER_CREDENTIAL_FILE))
@@ -387,13 +401,18 @@ impl<S: CredentialStore> CredentialStore for LoadErrorRecorder<'_, S> {
 
 /// Replace the owner password in the OS keychain, with the protected app-data
 /// file as the same headless fallback used by initial credential creation.
-pub(crate) fn save_owner_credential(app: &AppHandle, credential: &str) -> Result<(), String> {
+pub(crate) fn save_owner_credential<R: Runtime>(
+    app: &AppHandle<R>,
+    credential: &str,
+) -> Result<(), String> {
     let path = owner_credential_path(app)?;
     let mut store = SystemKeyring::owner();
     save_owner_credential_with_store(&path, &mut store, credential)
 }
 
-pub(crate) fn owner_password_owner_set_marker_path(app: &AppHandle) -> Result<PathBuf, String> {
+pub(crate) fn owner_password_owner_set_marker_path<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Result<PathBuf, String> {
     app.path()
         .app_data_dir()
         .map(|path| {
@@ -403,11 +422,13 @@ pub(crate) fn owner_password_owner_set_marker_path(app: &AppHandle) -> Result<Pa
         .map_err(|error| format!("Failed to resolve DataConnect app-data directory: {error}"))
 }
 
-pub(crate) fn owner_password_owner_set_marker_exists(app: &AppHandle) -> Result<bool, String> {
+pub(crate) fn owner_password_owner_set_marker_exists<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Result<bool, String> {
     Ok(owner_password_owner_set_marker_path(app)?.exists())
 }
 
-pub(crate) fn mark_owner_password_owner_set(app: &AppHandle) -> Result<(), String> {
+pub(crate) fn mark_owner_password_owner_set<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     let path = owner_password_owner_set_marker_path(app)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| {
@@ -425,7 +446,10 @@ pub(crate) fn mark_owner_password_owner_set(app: &AppHandle) -> Result<(), Strin
     )
 }
 
-fn owner_password_request_file_path(app: &AppHandle, file_name: &str) -> Result<PathBuf, String> {
+fn owner_password_request_file_path<R: Runtime>(
+    app: &AppHandle<R>,
+    file_name: &str,
+) -> Result<PathBuf, String> {
     app.path()
         .app_data_dir()
         .map(|path| {
@@ -435,15 +459,19 @@ fn owner_password_request_file_path(app: &AppHandle, file_name: &str) -> Result<
         .map_err(|error| format!("Failed to resolve DataConnect app-data directory: {error}"))
 }
 
-fn owner_password_window_request_path(app: &AppHandle) -> Result<PathBuf, String> {
+fn owner_password_window_request_path<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
     owner_password_request_file_path(app, OWNER_PASSWORD_WINDOW_REQUEST_FILE)
 }
 
-fn owner_password_recovery_window_request_path(app: &AppHandle) -> Result<PathBuf, String> {
+fn owner_password_recovery_window_request_path<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Result<PathBuf, String> {
     owner_password_request_file_path(app, OWNER_PASSWORD_RECOVERY_WINDOW_REQUEST_FILE)
 }
 
-fn owner_password_stack_restart_request_path(app: &AppHandle) -> Result<PathBuf, String> {
+fn owner_password_stack_restart_request_path<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Result<PathBuf, String> {
     owner_password_request_file_path(app, OWNER_PASSWORD_STACK_RESTART_REQUEST_FILE)
 }
 
@@ -451,8 +479,8 @@ fn owner_os_reauth_request_path(app: &AppHandle) -> Result<PathBuf, String> {
     owner_password_request_file_path(app, OWNER_OS_REAUTH_REQUEST_FILE)
 }
 
-fn owner_password_window_request_file_path(
-    app: &AppHandle,
+fn owner_password_window_request_file_path<R: Runtime>(
+    app: &AppHandle<R>,
     request_id: u64,
 ) -> Result<PathBuf, String> {
     owner_password_request_file_path(
@@ -641,7 +669,9 @@ fn complete_owner_os_reauth_request_at(
     save_owner_password_request_state(&path, &state, "owner OS re-auth result")
 }
 
-fn current_owner_password_window_request_id(app: &AppHandle) -> Result<Option<u64>, String> {
+fn current_owner_password_window_request_id<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Result<Option<u64>, String> {
     let recovery_path = owner_password_recovery_window_request_path(app)?;
     let recovery_state =
         load_owner_password_request_state(&recovery_path, "owner-password recovery request")?;
@@ -653,8 +683,8 @@ fn current_owner_password_window_request_id(app: &AppHandle) -> Result<Option<u6
     Ok(incomplete_owner_password_request_id(&state))
 }
 
-fn current_owner_password_window_request_state(
-    app: &AppHandle,
+fn current_owner_password_window_request_state<R: Runtime>(
+    app: &AppHandle<R>,
     request_id: u64,
 ) -> Result<OwnerPasswordRequestState, String> {
     let recovery_path = owner_password_recovery_window_request_path(app)?;
@@ -674,8 +704,8 @@ fn current_owner_password_window_request_state(
     load_owner_password_request_state(&index_path, "owner-password window request")
 }
 
-fn consume_owner_password_window_authority(
-    app: &AppHandle,
+fn consume_owner_password_window_authority<R: Runtime>(
+    app: &AppHandle<R>,
     request_id: Option<u64>,
 ) -> Result<(), String> {
     let request_id = request_id
@@ -731,8 +761,8 @@ fn consume_owner_password_window_authority(
     }
 }
 
-fn complete_owner_password_window_request(
-    app: &AppHandle,
+fn complete_owner_password_window_request<R: Runtime>(
+    app: &AppHandle<R>,
     request_id: Option<u64>,
 ) -> Result<(), String> {
     if let Some(request_id) = request_id {
@@ -757,12 +787,25 @@ fn complete_owner_password_window_request(
     Ok(())
 }
 
-pub(crate) fn capture_pending_owner_password_stack_restart_request_id(
-    app: &AppHandle,
+pub(crate) fn capture_pending_owner_password_stack_restart_request_id<R: Runtime>(
+    app: &AppHandle<R>,
 ) -> Result<Option<u64>, String> {
     let path = owner_password_stack_restart_request_path(app)?;
     let state = load_owner_password_request_state(&path, "owner-password stack-restart request")?;
     Ok(incomplete_owner_password_request_id(&state))
+}
+
+/// Called once at startup, before the watchers and the first bootstrap run.
+/// A restart request left pending by the last session (the owner quit before
+/// it ran) asks for what the startup bootstrap is about to do: start the
+/// stack with the saved password. Mark it complete so the watcher does not
+/// start a second bootstrap alongside the first.
+pub(crate) fn absorb_pending_owner_password_stack_restart_request<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Result<Option<u64>, String> {
+    let request_id = capture_pending_owner_password_stack_restart_request_id(app)?;
+    complete_owner_password_stack_restart_request(app, request_id)?;
+    Ok(request_id)
 }
 
 pub(crate) fn request_owner_password_window_for_recovery(app: &AppHandle) -> Result<(), String> {
@@ -780,8 +823,8 @@ pub(crate) fn request_owner_password_window_for_recovery(app: &AppHandle) -> Res
     save_owner_password_request_state(&path, &state, "owner-password recovery request")
 }
 
-pub(crate) fn complete_owner_password_stack_restart_request(
-    app: &AppHandle,
+pub(crate) fn complete_owner_password_stack_restart_request<R: Runtime>(
+    app: &AppHandle<R>,
     request_id: Option<u64>,
 ) -> Result<(), String> {
     if let Some(request_id) = request_id {
@@ -795,7 +838,9 @@ pub(crate) fn complete_owner_password_stack_restart_request(
     Ok(())
 }
 
-fn queue_delayed_owner_password_stack_restart_request(app: &AppHandle) -> Result<(), String> {
+fn queue_delayed_owner_password_stack_restart_request<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Result<(), String> {
     let path = owner_password_stack_restart_request_path(app)?;
     let mut state =
         load_owner_password_request_state(&path, "owner-password stack-restart request")?;
@@ -813,6 +858,10 @@ pub(crate) fn spawn_owner_password_window_watcher(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         loop {
             tokio::time::sleep(OWNER_PASSWORD_WINDOW_WATCHER_POLL_INTERVAL).await;
+            if crate::unified::shutdown_has_been_requested(&app) {
+                log::debug!("Owner password window watcher stopping: shutdown requested");
+                return;
+            }
             let now_unix_ms = match unix_time_ms_now() {
                 Ok(now) => now,
                 Err(error) => {
@@ -971,9 +1020,87 @@ pub(crate) fn spawn_owner_password_window_watcher(app: AppHandle) {
     });
 }
 
+/// How many times the watcher runs one stack-restart request before it
+/// gives up and marks the request complete. A restart that fails leaves the
+/// tray at "Error", and every later start (quit and reopen, or "Open
+/// DataConnect") reads the saved password anyway, so retrying forever only
+/// tears the stack down every few seconds. Three attempts ride out a slow or
+/// briefly busy sidecar.
+const OWNER_PASSWORD_STACK_RESTART_MAX_ATTEMPTS: u32 = 3;
+const OWNER_PASSWORD_STACK_RESTART_RETRY_DELAY: Duration = Duration::from_secs(5);
+
+#[derive(Debug, Default)]
+struct StackRestartWatcherState {
+    last_seen_request_id: u64,
+    failed_request_id: u64,
+    failed_attempts: u32,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum StackRestartPoll {
+    Idle,
+    Restarted,
+    Failed,
+    GaveUp,
+}
+
+/// One poll of the stack-restart request file at `path`. Waits while a start
+/// or restart of the stack is already running (`bootstrap_in_flight`): the
+/// running bootstrap reads the saved password itself, and a second one would
+/// race it for the same ports.
+async fn poll_owner_password_stack_restart_request<F, Fut>(
+    path: &Path,
+    watcher: &mut StackRestartWatcherState,
+    bootstrap_in_flight: bool,
+    now_unix_ms: u64,
+    restart: F,
+) -> Result<StackRestartPoll, String>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<(), String>>,
+{
+    const LABEL: &str = "owner-password stack-restart request";
+    if bootstrap_in_flight {
+        return Ok(StackRestartPoll::Idle);
+    }
+    let state = load_owner_password_request_state(path, LABEL)?;
+    let Some(request_id) =
+        pending_owner_password_request_id(&state, watcher.last_seen_request_id, now_unix_ms)
+    else {
+        return Ok(StackRestartPoll::Idle);
+    };
+    match restart().await {
+        Ok(()) => {
+            watcher.last_seen_request_id = request_id;
+            complete_owner_password_request_at(path, LABEL, request_id)?;
+            Ok(StackRestartPoll::Restarted)
+        }
+        Err(error) => {
+            if watcher.failed_request_id != request_id {
+                watcher.failed_request_id = request_id;
+                watcher.failed_attempts = 0;
+            }
+            watcher.failed_attempts += 1;
+            if watcher.failed_attempts < OWNER_PASSWORD_STACK_RESTART_MAX_ATTEMPTS {
+                log::warn!(
+                    "Owner password stack-restart request failed (attempt {} of {OWNER_PASSWORD_STACK_RESTART_MAX_ATTEMPTS}): {error}",
+                    watcher.failed_attempts
+                );
+                return Ok(StackRestartPoll::Failed);
+            }
+            log::error!(
+                "Owner password stack-restart request failed {OWNER_PASSWORD_STACK_RESTART_MAX_ATTEMPTS} times; giving up until the next start: {error}"
+            );
+            watcher.last_seen_request_id = request_id;
+            complete_owner_password_request_at(path, LABEL, request_id)?;
+            Ok(StackRestartPoll::GaveUp)
+        }
+    }
+}
+
 pub(crate) fn spawn_owner_password_stack_restart_watcher(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
-        let mut last_seen_request_id = 0_u64;
+        let mut watcher = StackRestartWatcherState::default();
         loop {
             tokio::time::sleep(OWNER_PASSWORD_WINDOW_WATCHER_POLL_INTERVAL).await;
             if crate::unified::shutdown_has_been_requested(&app) {
@@ -989,18 +1116,6 @@ pub(crate) fn spawn_owner_password_stack_restart_watcher(app: AppHandle) {
                     continue;
                 }
             };
-            let state = match load_owner_password_request_state(
-                &path,
-                "owner-password stack-restart request",
-            ) {
-                Ok(state) => state,
-                Err(error) => {
-                    log::warn!(
-                        "Owner password stack-restart watcher could not read request file: {error}"
-                    );
-                    continue;
-                }
-            };
             let now_unix_ms = match unix_time_ms_now() {
                 Ok(now) => now,
                 Err(error) => {
@@ -1010,27 +1125,23 @@ pub(crate) fn spawn_owner_password_stack_restart_watcher(app: AppHandle) {
                     continue;
                 }
             };
-            let Some(request_id) =
-                pending_owner_password_request_id(&state, last_seen_request_id, now_unix_ms)
-            else {
-                continue;
-            };
-            match crate::unified::restart_after_remote_access_config(app.clone()).await {
-                Ok(()) => {
-                    last_seen_request_id = request_id;
-                    if let Err(error) = complete_owner_password_request_at(
-                        &path,
-                        "owner-password stack-restart request",
-                        request_id,
-                    ) {
-                        log::warn!(
-                            "Owner password stack-restart watcher could not record completion: {error}"
-                        );
-                    }
+            let bootstrap_in_flight = crate::unified::stack_bootstrap_in_flight(&app);
+            let restart_app = app.clone();
+            match poll_owner_password_stack_restart_request(
+                &path,
+                &mut watcher,
+                bootstrap_in_flight,
+                now_unix_ms,
+                || crate::unified::restart_after_remote_access_config(restart_app),
+            )
+            .await
+            {
+                Ok(StackRestartPoll::Failed) => {
+                    tokio::time::sleep(OWNER_PASSWORD_STACK_RESTART_RETRY_DELAY).await;
                 }
+                Ok(_) => {}
                 Err(error) => {
-                    log::warn!("Owner password stack-restart request failed: {error}");
-                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    log::warn!("Owner password stack-restart watcher: {error}");
                 }
             }
         }
@@ -1212,13 +1323,35 @@ fn open_owner_password_window(app: &AppHandle) {
     }
 }
 
+/// Stands in for `DATACONNECT_OWNER_PASSWORD` / `PDPP_OWNER_PASSWORD` in a
+/// test app, so an IPC test gives the same answer whatever the developer's
+/// shell exports.
+#[cfg(test)]
+pub(crate) struct ConfiguredOwnerPasswordForTest(pub(crate) Option<String>);
+
+fn configured_owner_password_for<R: Runtime>(app: &AppHandle<R>) -> Option<String> {
+    #[cfg(test)]
+    if let Some(configured) = app.try_state::<ConfiguredOwnerPasswordForTest>() {
+        return configured.0.clone();
+    }
+    let _ = app;
+    configured_owner_password()
+}
+
+/// Every local-origin webview passes the IPC ACL for app commands, so the
+/// legacy `main` window and the recovery window could reach this command
+/// too. Only the password window may save a password.
 #[tauri::command]
-pub(crate) async fn set_desktop_owner_password(
-    app: AppHandle,
+pub(crate) async fn set_desktop_owner_password<R: Runtime>(
+    app: AppHandle<R>,
+    webview: tauri::WebviewWindow<R>,
     password: String,
 ) -> Result<(), String> {
+    if webview.label() != OWNER_PASSWORD_WINDOW_LABEL {
+        return Err("Only the DataConnect password window can save the owner password.".to_string());
+    }
     let window_request_id = current_owner_password_window_request_id(&app)?;
-    if configured_owner_password().is_some() {
+    if configured_owner_password_for(&app).is_some() {
         return Err(
             "This password is set by the environment. Change PDPP_OWNER_PASSWORD and restart DataConnect."
                 .to_string(),
@@ -1831,6 +1964,133 @@ mod tests {
         assert_eq!(state.request_id, 8);
         assert_eq!(state.completed_request_id, Some(7));
         assert_eq!(pending_owner_password_request_id(&state, 0, 1000), Some(8));
+    }
+
+    fn pending_stack_restart_request(path: &Path, request_id: u64) {
+        save_owner_password_request_state(
+            path,
+            &OwnerPasswordRequestState {
+                request_id,
+                ..Default::default()
+            },
+            "owner-password stack-restart request",
+        )
+        .expect("write restart request");
+    }
+
+    /// Polls once with a restart that counts its calls and returns `outcome`.
+    fn poll_stack_restart(
+        path: &Path,
+        watcher: &mut StackRestartWatcherState,
+        bootstrap_in_flight: bool,
+        restarts: &std::sync::atomic::AtomicU32,
+        outcome: Result<(), String>,
+    ) -> StackRestartPoll {
+        tauri::async_runtime::block_on(poll_owner_password_stack_restart_request(
+            path,
+            watcher,
+            bootstrap_in_flight,
+            u64::MAX,
+            || async {
+                restarts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                outcome
+            },
+        ))
+        .expect("poll")
+    }
+
+    /// The owner quit before the restart after their new password ran. The
+    /// next launch starts the stack with the saved password, so the leftover
+    /// request must not make the watcher start a second bootstrap beside it.
+    #[cfg(desktop)]
+    #[test]
+    fn a_restart_request_left_by_the_last_session_does_not_start_a_second_bootstrap() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let root = tempfile::tempdir().expect("tempdir");
+        let app = crate::mock_app_with_data_dir(root.path());
+        let path = owner_password_stack_restart_request_path(app.handle()).expect("path");
+        assert!(path.starts_with(root.path()), "{path:?}");
+        pending_stack_restart_request(&path, 41);
+
+        // What `unified::setup` does before it starts the watchers.
+        assert_eq!(
+            absorb_pending_owner_password_stack_restart_request(app.handle()).expect("absorb"),
+            Some(41)
+        );
+        let restarts = AtomicU32::new(0);
+        let mut watcher = StackRestartWatcherState::default();
+        assert_eq!(
+            poll_stack_restart(&path, &mut watcher, false, &restarts, Ok(())),
+            StackRestartPoll::Idle
+        );
+        assert_eq!(restarts.load(Ordering::SeqCst), 0);
+
+        // A request made during this session still runs.
+        pending_stack_restart_request(&path, 42);
+        assert_eq!(
+            poll_stack_restart(&path, &mut watcher, false, &restarts, Ok(())),
+            StackRestartPoll::Restarted
+        );
+        assert_eq!(restarts.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn the_restart_watcher_waits_while_the_stack_is_starting() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let root = tempfile::tempdir().expect("tempdir");
+        let path = root.path().join("restart.json");
+        pending_stack_restart_request(&path, 5);
+        let restarts = AtomicU32::new(0);
+        let mut watcher = StackRestartWatcherState::default();
+        assert_eq!(
+            poll_stack_restart(&path, &mut watcher, true, &restarts, Ok(())),
+            StackRestartPoll::Idle
+        );
+        assert_eq!(restarts.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            poll_stack_restart(&path, &mut watcher, false, &restarts, Ok(())),
+            StackRestartPoll::Restarted
+        );
+        assert_eq!(restarts.load(Ordering::SeqCst), 1);
+    }
+
+    /// A restart that keeps failing is tried a bounded number of times, then
+    /// the request is marked complete, instead of tearing the stack down
+    /// every few seconds for as long as the app runs.
+    #[test]
+    fn a_failing_restart_stops_retrying_after_the_attempt_cap() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let root = tempfile::tempdir().expect("tempdir");
+        let path = root.path().join("restart.json");
+        pending_stack_restart_request(&path, 9);
+        let restarts = AtomicU32::new(0);
+        let mut watcher = StackRestartWatcherState::default();
+        let polls: Vec<_> = (0..10)
+            .map(|_| {
+                poll_stack_restart(
+                    &path,
+                    &mut watcher,
+                    false,
+                    &restarts,
+                    Err("console never became ready".to_string()),
+                )
+            })
+            .collect();
+        assert_eq!(
+            restarts.load(Ordering::SeqCst),
+            OWNER_PASSWORD_STACK_RESTART_MAX_ATTEMPTS
+        );
+        assert_eq!(polls[0], StackRestartPoll::Failed);
+        assert_eq!(
+            polls[OWNER_PASSWORD_STACK_RESTART_MAX_ATTEMPTS as usize - 1],
+            StackRestartPoll::GaveUp
+        );
+        assert!(polls[OWNER_PASSWORD_STACK_RESTART_MAX_ATTEMPTS as usize..]
+            .iter()
+            .all(|poll| *poll == StackRestartPoll::Idle));
+        let state = load_owner_password_request_state(&path, "owner-password stack-restart request")
+            .expect("state");
+        assert_eq!(state.completed_request_id, Some(9));
     }
 
     #[test]

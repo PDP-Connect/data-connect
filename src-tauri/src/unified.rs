@@ -95,6 +95,11 @@ const CREDENTIAL_KEY_LOST_CAUSE: &str = "legacy_v1_kit_missing_credential_key";
 // either, so it is exactly as unable to activate ngrok as a plain self-hosted
 // deployment, and must report the same honest "unavailable" answer.
 const MANAGED_DESKTOP_HOST_ENV: &str = "PDPP_MANAGED_DESKTOP_HOST";
+// With `MANAGED_DESKTOP_HOST_ENV`, tells the RI and the console that the
+// desktop keychain supplies `PDPP_OWNER_PASSWORD`. The value stays
+// `desktop_generated` after the owner sets their own password in the
+// password window: read it as "the desktop manages this password", not
+// "the desktop generated the current value".
 const OWNER_PASSWORD_SOURCE_ENV: &str = "PDPP_OWNER_PASSWORD_SOURCE";
 const OWNER_PASSWORD_SOURCE_DESKTOP_GENERATED: &str = "desktop_generated";
 const OWNER_CREDENTIAL_REVEAL_PROOF_ENV: &str = "PDPP_OWNER_CREDENTIAL_REVEAL_PROOF";
@@ -521,6 +526,21 @@ pub(crate) fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Erro
     spawn_autostart_watcher(app_handle.clone());
     spawn_origin_verification_watcher(app_handle.clone());
     crate::commands::recovery_key::spawn_recovery_export_watcher(app_handle.clone());
+    // The console asks for the password window, OS re-auth and a stack
+    // restart by writing request files under the data directory. Only these
+    // watchers act on them; v0.7.59 never started them.
+    match crate::owner_credential::absorb_pending_owner_password_stack_restart_request(
+        &app_handle,
+    ) {
+        Ok(Some(request_id)) => log::info!(
+            "Owner password stack-restart request {request_id} from the last session is covered by this start"
+        ),
+        Ok(None) => {}
+        Err(error) => log::warn!("Could not absorb a pending owner password stack restart: {error}"),
+    }
+    crate::owner_credential::spawn_owner_password_window_watcher(app_handle.clone());
+    crate::owner_credential::spawn_owner_os_reauth_watcher(app_handle.clone());
+    crate::owner_credential::spawn_owner_password_stack_restart_watcher(app_handle.clone());
     tauri::async_runtime::spawn(async move {
         if let Err(failure) =
             bootstrap_and_open_console(app_handle.clone(), should_show, None).await
@@ -855,10 +875,6 @@ fn ri_environment(
             data_dir.join(UNIFIED_DB_FILE).into_os_string(),
         ),
         (
-            OsString::from("PDPP_DATA_DIR"),
-            data_dir.as_os_str().to_os_string(),
-        ),
-        (
             OsString::from("PDPP_OWNER_PASSWORD"),
             OsString::from(owner_password),
         ),
@@ -897,17 +913,8 @@ fn ri_environment(
             OsString::from("1"),
         );
     }
+    env.extend(managed_desktop_environment(data_dir, owner_password_source));
     if remote_access_configuration_supported() {
-        env.insert(
-            OsString::from(MANAGED_DESKTOP_HOST_ENV),
-            OsString::from("1"),
-        );
-        if matches!(owner_password_source, OwnerPasswordSource::DesktopGenerated) {
-            env.insert(
-                OsString::from(OWNER_PASSWORD_SOURCE_ENV),
-                OsString::from(OWNER_PASSWORD_SOURCE_DESKTOP_GENERATED),
-            );
-        }
         // The owner needs to know whether `cloudflared` is already installed
         // BEFORE they pick the Cloudflare Tunnel option and paste a token --
         // see `cloudflared_binary_is_installed`'s doc comment. Checked here,
@@ -927,13 +934,44 @@ fn ri_environment(
     env
 }
 
+/// The data directory and the managed-desktop flags, for both the RI and the
+/// console. One source keeps the two processes in agreement about who
+/// manages the owner password and where the request files the desktop
+/// watchers read are. In v0.7.59 only the RI got the flags: the console fell
+/// back to the RI's "env" answer, hid "Reveal password", and refused every
+/// desktop-mediated action.
+fn managed_desktop_environment(
+    data_dir: &Path,
+    owner_password_source: OwnerPasswordSource,
+) -> BTreeMap<OsString, OsString> {
+    let mut env = env_map(vec![(
+        OsString::from("PDPP_DATA_DIR"),
+        data_dir.as_os_str().to_os_string(),
+    )]);
+    if remote_access_configuration_supported() {
+        env.insert(
+            OsString::from(MANAGED_DESKTOP_HOST_ENV),
+            OsString::from("1"),
+        );
+        if matches!(owner_password_source, OwnerPasswordSource::DesktopGenerated) {
+            env.insert(
+                OsString::from(OWNER_PASSWORD_SOURCE_ENV),
+                OsString::from(OWNER_PASSWORD_SOURCE_DESKTOP_GENERATED),
+            );
+        }
+    }
+    env
+}
+
 fn console_process_spec(
     node_binary: &Path,
     root: &Path,
     ri_origin: &str,
     rs_origin: &str,
     owner_password: &str,
+    owner_password_source: OwnerPasswordSource,
     owner_credential_reveal_proof: &str,
+    data_dir: &Path,
     remote_access: &RemoteAccessConfig,
     stable_port: u16,
 ) -> ProcessSpec {
@@ -972,6 +1010,7 @@ fn console_process_spec(
             OsString::from(stable_port.to_string()),
         ),
     ]);
+    env.extend(managed_desktop_environment(data_dir, owner_password_source));
     if let Some(provider) = remote_access.provider.as_deref() {
         env.insert(
             OsString::from("PDPP_ACTIVE_TUNNEL_PROVIDER"),
@@ -1173,7 +1212,9 @@ fn start_managed_stack(
             &ri_origin,
             &rs_origin,
             owner_password,
+            owner_password_source,
             owner_credential_reveal_proof,
+            &data_dir,
             remote_access,
             console_port_plan.stable,
         ),
@@ -3126,10 +3167,34 @@ fn console_path_before_restart(app: &AppHandle) -> Option<String> {
     }
 }
 
+/// True while a start or restart of the managed stack is running.
+pub(crate) fn stack_bootstrap_in_flight(app: &AppHandle) -> bool {
+    app.try_state::<UnifiedRuntimeState>()
+        .and_then(|state| {
+            state
+                .status
+                .lock()
+                .ok()
+                .map(|status| matches!(*status, UnifiedStatus::Starting | UnifiedStatus::Restarting))
+        })
+        .unwrap_or(false)
+}
+
 pub(crate) async fn restart_after_remote_access_config(app: AppHandle) -> Result<(), String> {
     if !remote_access_configuration_supported() {
         return Err("Remote access requires the managed desktop stack".into());
     }
+    let result = restart_managed_stack(app.clone()).await;
+    // Without this a failed restart left the tray at "Restarting" or
+    // "Starting", and the owner-password restart watcher, which waits while
+    // a bootstrap runs, would wait forever.
+    if result.is_err() {
+        set_status(&app, UnifiedStatus::Error);
+    }
+    result
+}
+
+async fn restart_managed_stack(app: AppHandle) -> Result<(), String> {
     let preserved_path = console_path_before_restart(&app);
     set_status(&app, UnifiedStatus::Restarting);
     tokio::task::spawn_blocking({
@@ -5706,6 +5771,31 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
         );
     }
 
+    /// The owner-password window, OS re-auth and stack-restart requests are
+    /// files that only these watchers act on. v0.7.59 defined them but never
+    /// started them, so the console's requests were never served.
+    #[test]
+    fn setup_starts_the_owner_request_watchers() {
+        let source = include_str!("unified.rs");
+        let setup = source
+            .split_once("pub(crate) fn setup(")
+            .expect("setup")
+            .1
+            .split_once("\n}\n")
+            .expect("end of setup")
+            .0;
+        for watcher in [
+            "spawn_owner_password_window_watcher",
+            "spawn_owner_os_reauth_watcher",
+            "spawn_owner_password_stack_restart_watcher",
+        ] {
+            assert!(
+                contains_code(setup, &format!("crate::owner_credential::{watcher}(")),
+                "setup must start {watcher}"
+            );
+        }
+    }
+
     #[test]
     fn watcher_declaration_scan_requires_a_real_declaration() {
         let source = r##"
@@ -6137,7 +6227,9 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
             "http://127.0.0.1:1",
             "http://127.0.0.1:2",
             "owner-password",
+            OwnerPasswordSource::DesktopGenerated,
             "reveal-proof",
+            Path::new("/tmp/unified"),
             &crate::remote_access::off_remote_access_config(),
             crate::console_port::DEFAULT_CONSOLE_PORT,
         );
@@ -6158,6 +6250,63 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
         );
     }
 
+    /// The console decides what "Owner password" shows, and where it writes
+    /// the request files the desktop watchers read, from these variables.
+    /// In v0.7.59 only the RI got them, so the console fell back to the RI's
+    /// "env" answer and showed "uses PDPP_OWNER_PASSWORD" on the desktop.
+    #[test]
+    fn console_and_ri_receive_the_same_managed_desktop_flags() {
+        assert!(
+            remote_access_configuration_supported(),
+            "this test needs the managed-stack posture (no attach or legacy env vars)"
+        );
+        let data_dir = Path::new("/tmp/unified");
+        let environments = |source| {
+            let ri = ri_environment(
+                data_dir,
+                "owner-password-test",
+                source,
+                "reveal-proof-test",
+                "credential-key-test",
+                "database-key-test",
+                false,
+            );
+            let console = console_process_spec(
+                Path::new("/tmp/pdpp-node"),
+                Path::new("/tmp/console"),
+                "http://127.0.0.1:1",
+                "http://127.0.0.1:2",
+                "owner-password-test",
+                source,
+                "reveal-proof-test",
+                data_dir,
+                &crate::remote_access::off_remote_access_config(),
+                crate::console_port::DEFAULT_CONSOLE_PORT,
+            )
+            .env
+            .vars;
+            (ri, console)
+        };
+        let key = |name: &'static str| std::ffi::OsStr::new(name);
+
+        let (ri, console) = environments(OwnerPasswordSource::DesktopGenerated);
+        for name in [MANAGED_DESKTOP_HOST_ENV, OWNER_PASSWORD_SOURCE_ENV, "PDPP_DATA_DIR"] {
+            assert_eq!(console.get(key(name)), ri.get(key(name)), "{name}");
+        }
+        assert_eq!(console.get(key(MANAGED_DESKTOP_HOST_ENV)), Some(&OsString::from("1")));
+        assert_eq!(
+            console.get(key(OWNER_PASSWORD_SOURCE_ENV)),
+            Some(&OsString::from(OWNER_PASSWORD_SOURCE_DESKTOP_GENERATED))
+        );
+        assert_eq!(console.get(key("PDPP_DATA_DIR")), Some(&OsString::from("/tmp/unified")));
+
+        let (ri, console) = environments(OwnerPasswordSource::Configured);
+        for name in [MANAGED_DESKTOP_HOST_ENV, OWNER_PASSWORD_SOURCE_ENV, "PDPP_DATA_DIR"] {
+            assert_eq!(console.get(key(name)), ri.get(key(name)), "{name}");
+        }
+        assert_eq!(console.get(key(OWNER_PASSWORD_SOURCE_ENV)), None);
+    }
+
     #[test]
     fn the_console_receives_the_active_tunnel_provider_when_configured() {
         let mut remote_access = crate::remote_access::off_remote_access_config();
@@ -6168,7 +6317,9 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
             "http://127.0.0.1:1",
             "http://127.0.0.1:2",
             "owner-password",
+            OwnerPasswordSource::DesktopGenerated,
             "reveal-proof-test",
+            Path::new("/tmp/unified"),
             &remote_access,
             crate::console_port::DEFAULT_CONSOLE_PORT,
         );
@@ -6584,6 +6735,101 @@ setInterval(() => {}, 1000);
         println!("REAL-RI RECOVERY TEST RAN");
     }
 
+    /// Runs one mode of the real-RI driver to completion under the RI
+    /// environment a normal desktop start builds, and returns its output.
+    fn run_ri_driver(
+        ri_root: &Path,
+        data_dir: &Path,
+        owner_password: &str,
+        mode: &str,
+        extra_args: &[&str],
+    ) -> serde_json::Value {
+        let output = data_dir
+            .parent()
+            .expect("data dir parent")
+            .join(format!("driver-{mode}.json"));
+        let environment = prepare_ri_start(
+            data_dir,
+            owner_password,
+            OwnerPasswordSource::DesktopGenerated,
+            "reveal-proof-test",
+            "credential-key-test",
+            "database-key-test-0928",
+            false,
+        )
+        .expect("prepare RI start");
+        let run = std::process::Command::new(node_on_test_path())
+            .arg("--import")
+            .arg("tsx")
+            .arg(ri_root.join("test/fixtures/desktop-recovery-ri-driver.ts"))
+            .arg(mode)
+            .arg(&output)
+            .args(extra_args)
+            .current_dir(ri_root)
+            .env_clear()
+            .envs(environment)
+            .env("AS_PORT", "0")
+            .env("RS_PORT", "0")
+            .output()
+            .expect("run RI driver");
+        assert!(
+            run.status.success(),
+            "{mode} failed: {}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        serde_json::from_str(&fs::read_to_string(&output).expect("driver output"))
+            .expect("driver output is JSON")
+    }
+
+    /// A desktop owner sets their first password in the native window, then
+    /// turns remote access on. In v0.7.59 the window's save failed with
+    /// "command not found", so no owner-set marker was written and the RI
+    /// kept refusing the turn-on with `owner_password_required`.
+    #[test]
+    fn a_password_set_in_the_desktop_window_unlocks_remote_access_in_the_real_ri() {
+        let Some(ri_root) = reference_implementation_or_skip() else {
+            return;
+        };
+        let root = tempfile::tempdir().expect("tempdir");
+        let app = crate::mock_app_with_data_dir(root.path());
+        let data_dir = app
+            .path()
+            .app_data_dir()
+            .expect("app data dir")
+            .join(UNIFIED_DB_DIRECTORY);
+        assert!(data_dir.starts_with(root.path()), "{data_dir:?}");
+        fs::create_dir_all(&data_dir).expect("data dir");
+
+        let generated = "generated-owner-password-0928";
+        let before = run_ri_driver(&ri_root, &data_dir, generated, "turn-on-remote-access", &[]);
+        assert_eq!(before["status"], 409, "{before}");
+        assert_eq!(before["code"], "owner_password_required", "{before}");
+
+        // The console's "set a password first" step, then the native window.
+        run_ri_driver(&ri_root, &data_dir, generated, "request-password-window", &["initial_setup"]);
+        let window = tauri::WebviewWindowBuilder::new(&app, "owner-password", Default::default())
+            .build()
+            .expect("build the owner-password window");
+        let chosen = "owner-chosen-password-0928";
+        crate::invoke_from(
+            &window,
+            "set_desktop_owner_password",
+            serde_json::json!({ "password": chosen }),
+        )
+        .expect("the window saves the password");
+
+        // The next start reads the saved password, as `load_bootstrap_secrets`
+        // does (under cargo test the keychain is refused, so the app-data file).
+        let saved = crate::owner_credential::load_or_create_owner_credential(
+            &crate::owner_credential::owner_credential_path(app.handle()).expect("credential path"),
+        )
+        .expect("saved password");
+        assert_eq!(saved, chosen);
+        let after = run_ri_driver(&ri_root, &data_dir, &saved, "turn-on-remote-access", &[]);
+        assert_eq!(after["status"], 200, "{after}");
+        println!("REAL-RI REMOTE-ACCESS GATE TEST RAN");
+    }
+
     #[test]
     fn a_pinned_console_port_reaches_the_console_process_spec() {
         let mut remote_access = off_remote_access_config();
@@ -6599,7 +6845,9 @@ setInterval(() => {}, 1000);
             "http://127.0.0.1:7662",
             "http://127.0.0.1:7663",
             "owner-password-test",
+            OwnerPasswordSource::DesktopGenerated,
             "reveal-proof-test",
+            Path::new("/tmp/unified"),
             &remote_access,
             4310,
         );
@@ -6611,7 +6859,9 @@ setInterval(() => {}, 1000);
             "http://127.0.0.1:7662",
             "http://127.0.0.1:7663",
             "owner-password-test",
+            OwnerPasswordSource::DesktopGenerated,
             "reveal-proof-test",
+            Path::new("/tmp/unified"),
             &off_remote_access_config(),
             crate::console_port::DEFAULT_CONSOLE_PORT,
         );
@@ -6628,7 +6878,9 @@ setInterval(() => {}, 1000);
             "http://127.0.0.1:7662",
             "http://127.0.0.1:7663",
             "owner-password-test",
+            OwnerPasswordSource::DesktopGenerated,
             "reveal-proof-test",
+            Path::new("/tmp/unified"),
             &off_remote_access_config(),
             38739,
         );
