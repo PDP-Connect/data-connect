@@ -6,12 +6,14 @@ import { EventEmitter } from "node:events"
 import {
   mkdirSync,
   mkdtempSync,
+  readdirSync,
+  readFileSync,
   rmSync,
   truncateSync,
   writeFileSync,
 } from "node:fs"
 import { tmpdir } from "node:os"
-import { dirname, join } from "node:path"
+import { dirname, join, relative } from "node:path"
 import { PassThrough } from "node:stream"
 import { describe, expect, it } from "vitest"
 import {
@@ -26,6 +28,10 @@ import {
   readMacBundleExecutable,
   selectMacAppExecutables,
 } from "./verify-bundled-personal-server.mjs"
+import {
+  writeConnectorPackageModules,
+  writeConsoleServerBundle,
+} from "./staged-console-bundle.fixture.mjs"
 
 const runtimeEntries = [
   "usr/bin/pdpp-node",
@@ -77,6 +83,38 @@ function hashFile(contents, prefixed = true) {
   return prefixed ? `sha256:${digest}` : digest
 }
 
+function listFiles(directory) {
+  return readdirSync(directory, { recursive: true, withFileTypes: true })
+    .filter(entry => entry.isFile())
+    .map(entry => join(entry.parentPath, entry.name))
+}
+
+// A packaged console stack: launcher, server bundle, staged connector
+// package, and a manifest.json hashing all of them, as ensure-console-stack.js
+// writes it.
+function writePackagedConsoleStack(consoleRoot, bundleOptions) {
+  const runtimeDirectory = join(consoleRoot, "apps", "console")
+  mkdirSync(runtimeDirectory, { recursive: true })
+  writeFileSync(join(consoleRoot, "launch.mjs"), "#!/usr/bin/env node\n")
+  writeFileSync(join(runtimeDirectory, "server.js"), "operator console")
+  writeConsoleServerBundle(runtimeDirectory, bundleOptions)
+  writeConnectorPackageModules(
+    join(runtimeDirectory, "node_modules", "@pdpp", "polyfill-connectors")
+  )
+  const hashes = Object.fromEntries(
+    listFiles(consoleRoot)
+      .map(path => [
+        relative(consoleRoot, path).split("\\").join("/"),
+        hashFile(readFileSync(path)),
+      ])
+      .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+  )
+  writeFileSync(
+    join(consoleRoot, "manifest.json"),
+    JSON.stringify({ server: "apps/console/server.js", hashes })
+  )
+}
+
 describe("bundled personal-server verifier", () => {
   it("requires both packaged reference stacks and verifies their manifests", () => {
     const root = mkdtempSync(join(tmpdir(), "bundled-reference-stacks-"))
@@ -122,19 +160,7 @@ describe("bundled personal-server verifier", () => {
         })
       )
 
-      const consoleLaunch = "#!/usr/bin/env node\n"
-      const consolePayload = "operator console"
-      writeFileSync(join(consoleRoot, "launch.mjs"), consoleLaunch)
-      writeFileSync(join(consoleRoot, "payload.txt"), consolePayload)
-      writeFileSync(
-        join(consoleRoot, "manifest.json"),
-        JSON.stringify({
-          hashes: {
-            "launch.mjs": hashFile(consoleLaunch),
-            "payload.txt": hashFile(consolePayload),
-          },
-        })
-      )
+      writePackagedConsoleStack(consoleRoot)
 
       expect(() =>
         assertPackagedReferenceStacks(root, "DataConnect.deb")
@@ -144,6 +170,45 @@ describe("bundled personal-server verifier", () => {
       expect(() =>
         assertPackagedReferenceStacks(root, "DataConnect.deb")
       ).toThrow("reference-stack/ri manifest hashes do not match")
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it("rejects a packaged console that resolves the connector package only from the build checkout", () => {
+    const root = mkdtempSync(join(tmpdir(), "bundled-reference-stacks-"))
+    try {
+      const stacksRoot = join(
+        root,
+        "usr",
+        "lib",
+        "DataConnect",
+        "reference-stack"
+      )
+      const riRoot = join(stacksRoot, "ri")
+      mkdirSync(riRoot, { recursive: true })
+      writeFileSync(
+        join(riRoot, "manifest.json"),
+        JSON.stringify({ files: [] })
+      )
+      // The build checkout still has the package; the shipped bundle points
+      // its createRequire there instead of at the staged copy.
+      const buildCheckout = join(root, "build-checkout")
+      writeConnectorPackageModules(
+        join(buildCheckout, "node_modules", "@pdpp", "polyfill-connectors")
+      )
+      writePackagedConsoleStack(join(stacksRoot, "console"), {
+        resolveFrom: join(
+          buildCheckout,
+          "reference-implementation/server/polyfill-connectors-runtime.ts"
+        ),
+      })
+
+      expect(() =>
+        assertPackagedReferenceStacks(root, "DataConnect.deb")
+      ).toThrow(
+        "DataConnect.deb reference-stack/console cannot load @pdpp/polyfill-connectors"
+      )
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
