@@ -2664,6 +2664,13 @@ async fn bootstrap_and_open_console(
     set_status(&app, UnifiedStatus::Starting);
 
     let attach = attach_mode();
+    // Attach mode starts no stack, so it can carry out no restart request.
+    let (owner_session_reset, stack_restart_request_id) = if attach {
+        (owner_session_reset, None)
+    } else {
+        owner_session_reset_for_start(&app, owner_session_reset)
+    };
+
     let secrets_app = app.clone();
     let BootstrapSecrets {
         password,
@@ -2675,13 +2682,6 @@ async fn bootstrap_and_open_console(
         .await
         .map_err(|error| BootstrapFailure::Other(format!("Bootstrap secrets task failed: {error}")))?
         .map_err(BootstrapFailure::from)?;
-
-    // Attach mode starts no stack, so it can carry out no restart request.
-    let (owner_session_reset, stack_restart_request_id) = if attach {
-        (owner_session_reset, None)
-    } else {
-        owner_session_reset_for_start(&app, owner_session_reset)
-    };
 
     let (ri_origin, console_url, managed) = if attach_mode() {
         let reference_status = attach_reference_server(app.clone()).await?;
@@ -7222,6 +7222,10 @@ setInterval(() => {}, 1000);
             .find("start_managed_stack(")
             .expect("the bootstrap starts the stack");
         assert!(read < start, "the request is read before the stack starts");
+        let password = bootstrap
+            .find("load_bootstrap_secrets(")
+            .expect("the bootstrap reads the password");
+        assert!(read < password, "the request is read before the password");
         assert!(bootstrap.contains("stack_restart_request_id,\n    )\n    .await"));
 
         let finish = section(
