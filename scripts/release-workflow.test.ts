@@ -354,7 +354,15 @@ describe("release workflow", () => {
     expect(workflow).toContain(
       'codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" src-tauri/binaries/pdpp-node-${{ matrix.target }}'
     )
-    expect(workflow).toContain("codesign --force --deep --options runtime")
+    expect(workflow).not.toContain("codesign --force --deep --options runtime")
+    const notarize = readWorkflowStep(
+      workflow,
+      "Notarize and staple macOS DMGs"
+    )
+    expect(notarize).toContain(
+      "github.event_name == 'release' && matrix.os_family == 'macos' && steps.apple-signing-availability.outputs.apple_notarization_available == 'true'"
+    )
+    expect(workflow).not.toContain("env.APPLE_NOTARIZATION_AVAILABLE")
     expect(workflow).toContain(
       "node scripts/create-macos-dmg.mjs --volume-name DataConnect"
     )
