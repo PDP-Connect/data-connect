@@ -100,6 +100,7 @@ const riRoot = fileURLToPath(new URL("..", import.meta.url));
 const generatorScript = join(riRoot, "scripts/generate-connector-registry.ts");
 const trackedRegistryPath = join(riRoot, "server/generated/connector-registry.generated.ts");
 const OMISSION_PROBE_KEY_RE = /zzz-test-omission-probe/;
+const TS_NOCHECK_HEADER_RE = /^\/\/ @ts-nocheck\n/;
 
 test("connector-registry.generated.ts has not drifted from what regenerating from the manifests on disk would produce", () => {
   const scratchDir = mkdtempSync(join(tmpdir(), "connector-registry-drift-"));
@@ -110,7 +111,9 @@ test("connector-registry.generated.ts has not drifted from what regenerating fro
       stdio: "pipe",
     });
     const generated = readFileSync(scratchPath, "utf8");
-    const tracked = readFileSync(trackedRegistryPath, "utf8");
+    // Stryker's sandbox prefixes every TypeScript file with `// @ts-nocheck`;
+    // the header is not drift, so the mutation baseline must not fail on it.
+    const tracked = readFileSync(trackedRegistryPath, "utf8").replace(TS_NOCHECK_HEADER_RE, "");
     assert.equal(
       generated,
       tracked,
