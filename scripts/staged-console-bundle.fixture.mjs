@@ -27,10 +27,13 @@ module.exports = webpackRequire
  * `resolveFrom` is the base the bundled module resolves the package from: null
  * for the process cwd (the fixed runtime), or an absolute file path (the
  * build-time `import.meta.url` webpack wrote into the shipped bundle).
+ * `predicate` is the roster predicate the module exports: "supported"
+ * (isSupportedBrowserCollectorConnector) or "scaffold"
+ * (isKnownScaffoldConnector).
  */
 export function writeConsoleServerBundle(
   runtimeDirectory,
-  { resolveFrom = null } = {}
+  { predicate = "supported", resolveFrom = null } = {}
 ) {
   const serverDirectory = join(runtimeDirectory, ".next", "server")
   mkdirSync(join(serverDirectory, "chunks"), { recursive: true })
@@ -58,7 +61,10 @@ exports.modules = {
     optional("@pdpp/polyfill-connectors/static-secret-credential-capture")
     optional("@pdpp/polyfill-connectors/credential-probe")
     const ready = roster?.PRODUCTION_READY_CONNECTORS ?? {}
-    exports.isSupportedBrowserCollectorConnector = connector => Object.hasOwn(ready, connector)
+    const scaffolds = roster?.KNOWN_SCAFFOLD_CONNECTORS ?? []
+    exports.predicate = ${JSON.stringify(predicate)} === "supported"
+      ? connector => Object.hasOwn(ready, connector)
+      : connector => scaffolds.includes(connector)
   },
 }
 `
