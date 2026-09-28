@@ -13,7 +13,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Manager, Runtime, WebviewUrl, WebviewWindowBuilder};
 
 const OWNER_CREDENTIAL_FILE: &str = "owner-credential";
 pub(crate) const OWNER_PASSWORD_OWNER_SET_MARKER_FILE: &str = "owner-password-owner-set.json";
@@ -109,6 +109,7 @@ impl CredentialStore for SystemKeyring {
         log::info!("OS keychain load: entry username={}", self.username);
         let started = Instant::now();
         let result = (|| {
+            refuse_keychain_under_test()?;
             let entry = keyring::Entry::new(KEYRING_SERVICE, &self.username)
                 .map_err(|error| format!("could not initialize OS keychain: {error}"))?;
             match entry.get_password() {
@@ -130,6 +131,7 @@ impl CredentialStore for SystemKeyring {
         log::info!("OS keychain save: entry username={}", self.username);
         let started = Instant::now();
         let result = (|| {
+            refuse_keychain_under_test()?;
             let entry = keyring::Entry::new(KEYRING_SERVICE, &self.username)
                 .map_err(|error| format!("could not initialize OS keychain: {error}"))?;
             entry
@@ -146,8 +148,20 @@ impl CredentialStore for SystemKeyring {
     }
 }
 
+/// Tests drive app-bound helpers such as `set_desktop_owner_password`
+/// through `tauri::test`. Its service name is the installed app's, so under
+/// `cargo test` the keychain is refused and the helpers fall back to the
+/// app-data file, which each test points at a temporary directory. A test
+/// can then never read or overwrite the owner's real keychain entry.
+fn refuse_keychain_under_test() -> Result<(), String> {
+    if cfg!(test) {
+        return Err("the OS keychain is not used under cargo test".to_string());
+    }
+    Ok(())
+}
+
 /// Resolve the app-data path used for the generated owner password.
-pub(crate) fn owner_credential_path(app: &AppHandle) -> Result<PathBuf, String> {
+pub(crate) fn owner_credential_path<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
     app.path()
         .app_data_dir()
         .map(|path| path.join(OWNER_CREDENTIAL_FILE))
@@ -387,13 +401,18 @@ impl<S: CredentialStore> CredentialStore for LoadErrorRecorder<'_, S> {
 
 /// Replace the owner password in the OS keychain, with the protected app-data
 /// file as the same headless fallback used by initial credential creation.
-pub(crate) fn save_owner_credential(app: &AppHandle, credential: &str) -> Result<(), String> {
+pub(crate) fn save_owner_credential<R: Runtime>(
+    app: &AppHandle<R>,
+    credential: &str,
+) -> Result<(), String> {
     let path = owner_credential_path(app)?;
     let mut store = SystemKeyring::owner();
     save_owner_credential_with_store(&path, &mut store, credential)
 }
 
-pub(crate) fn owner_password_owner_set_marker_path(app: &AppHandle) -> Result<PathBuf, String> {
+pub(crate) fn owner_password_owner_set_marker_path<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Result<PathBuf, String> {
     app.path()
         .app_data_dir()
         .map(|path| {
@@ -403,11 +422,13 @@ pub(crate) fn owner_password_owner_set_marker_path(app: &AppHandle) -> Result<Pa
         .map_err(|error| format!("Failed to resolve DataConnect app-data directory: {error}"))
 }
 
-pub(crate) fn owner_password_owner_set_marker_exists(app: &AppHandle) -> Result<bool, String> {
+pub(crate) fn owner_password_owner_set_marker_exists<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Result<bool, String> {
     Ok(owner_password_owner_set_marker_path(app)?.exists())
 }
 
-pub(crate) fn mark_owner_password_owner_set(app: &AppHandle) -> Result<(), String> {
+pub(crate) fn mark_owner_password_owner_set<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     let path = owner_password_owner_set_marker_path(app)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| {
@@ -425,7 +446,10 @@ pub(crate) fn mark_owner_password_owner_set(app: &AppHandle) -> Result<(), Strin
     )
 }
 
-fn owner_password_request_file_path(app: &AppHandle, file_name: &str) -> Result<PathBuf, String> {
+fn owner_password_request_file_path<R: Runtime>(
+    app: &AppHandle<R>,
+    file_name: &str,
+) -> Result<PathBuf, String> {
     app.path()
         .app_data_dir()
         .map(|path| {
@@ -435,15 +459,19 @@ fn owner_password_request_file_path(app: &AppHandle, file_name: &str) -> Result<
         .map_err(|error| format!("Failed to resolve DataConnect app-data directory: {error}"))
 }
 
-fn owner_password_window_request_path(app: &AppHandle) -> Result<PathBuf, String> {
+fn owner_password_window_request_path<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
     owner_password_request_file_path(app, OWNER_PASSWORD_WINDOW_REQUEST_FILE)
 }
 
-fn owner_password_recovery_window_request_path(app: &AppHandle) -> Result<PathBuf, String> {
+fn owner_password_recovery_window_request_path<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Result<PathBuf, String> {
     owner_password_request_file_path(app, OWNER_PASSWORD_RECOVERY_WINDOW_REQUEST_FILE)
 }
 
-fn owner_password_stack_restart_request_path(app: &AppHandle) -> Result<PathBuf, String> {
+fn owner_password_stack_restart_request_path<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Result<PathBuf, String> {
     owner_password_request_file_path(app, OWNER_PASSWORD_STACK_RESTART_REQUEST_FILE)
 }
 
@@ -451,8 +479,8 @@ fn owner_os_reauth_request_path(app: &AppHandle) -> Result<PathBuf, String> {
     owner_password_request_file_path(app, OWNER_OS_REAUTH_REQUEST_FILE)
 }
 
-fn owner_password_window_request_file_path(
-    app: &AppHandle,
+fn owner_password_window_request_file_path<R: Runtime>(
+    app: &AppHandle<R>,
     request_id: u64,
 ) -> Result<PathBuf, String> {
     owner_password_request_file_path(
@@ -641,7 +669,9 @@ fn complete_owner_os_reauth_request_at(
     save_owner_password_request_state(&path, &state, "owner OS re-auth result")
 }
 
-fn current_owner_password_window_request_id(app: &AppHandle) -> Result<Option<u64>, String> {
+fn current_owner_password_window_request_id<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Result<Option<u64>, String> {
     let recovery_path = owner_password_recovery_window_request_path(app)?;
     let recovery_state =
         load_owner_password_request_state(&recovery_path, "owner-password recovery request")?;
@@ -653,8 +683,8 @@ fn current_owner_password_window_request_id(app: &AppHandle) -> Result<Option<u6
     Ok(incomplete_owner_password_request_id(&state))
 }
 
-fn current_owner_password_window_request_state(
-    app: &AppHandle,
+fn current_owner_password_window_request_state<R: Runtime>(
+    app: &AppHandle<R>,
     request_id: u64,
 ) -> Result<OwnerPasswordRequestState, String> {
     let recovery_path = owner_password_recovery_window_request_path(app)?;
@@ -674,8 +704,8 @@ fn current_owner_password_window_request_state(
     load_owner_password_request_state(&index_path, "owner-password window request")
 }
 
-fn consume_owner_password_window_authority(
-    app: &AppHandle,
+fn consume_owner_password_window_authority<R: Runtime>(
+    app: &AppHandle<R>,
     request_id: Option<u64>,
 ) -> Result<(), String> {
     let request_id = request_id
@@ -731,8 +761,8 @@ fn consume_owner_password_window_authority(
     }
 }
 
-fn complete_owner_password_window_request(
-    app: &AppHandle,
+fn complete_owner_password_window_request<R: Runtime>(
+    app: &AppHandle<R>,
     request_id: Option<u64>,
 ) -> Result<(), String> {
     if let Some(request_id) = request_id {
@@ -795,7 +825,9 @@ pub(crate) fn complete_owner_password_stack_restart_request(
     Ok(())
 }
 
-fn queue_delayed_owner_password_stack_restart_request(app: &AppHandle) -> Result<(), String> {
+fn queue_delayed_owner_password_stack_restart_request<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Result<(), String> {
     let path = owner_password_stack_restart_request_path(app)?;
     let mut state =
         load_owner_password_request_state(&path, "owner-password stack-restart request")?;
@@ -813,6 +845,10 @@ pub(crate) fn spawn_owner_password_window_watcher(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         loop {
             tokio::time::sleep(OWNER_PASSWORD_WINDOW_WATCHER_POLL_INTERVAL).await;
+            if crate::unified::shutdown_has_been_requested(&app) {
+                log::debug!("Owner password window watcher stopping: shutdown requested");
+                return;
+            }
             let now_unix_ms = match unix_time_ms_now() {
                 Ok(now) => now,
                 Err(error) => {
@@ -1213,8 +1249,8 @@ fn open_owner_password_window(app: &AppHandle) {
 }
 
 #[tauri::command]
-pub(crate) async fn set_desktop_owner_password(
-    app: AppHandle,
+pub(crate) async fn set_desktop_owner_password<R: Runtime>(
+    app: AppHandle<R>,
     password: String,
 ) -> Result<(), String> {
     let window_request_id = current_owner_password_window_request_id(&app)?;

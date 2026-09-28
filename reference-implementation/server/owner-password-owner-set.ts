@@ -90,6 +90,22 @@ function ownerRequestLockPath(dataDir: string): string {
   return join(unifiedDbDir(dataDir), ".owner-password-request.lock")
 }
 
+/**
+ * True when the DataConnect desktop supplies `PDPP_OWNER_PASSWORD` from its
+ * keychain. Only the desktop supervisor sets these two variables
+ * (`managed_desktop_environment` in src-tauri/src/unified.rs); no deploy
+ * target does. `desktop_generated` stays set after the owner picks their own
+ * password, so read it as "the desktop manages this password".
+ */
+export function ownerPasswordManagedByDesktop(
+  env: NodeJS.ProcessEnv = process.env
+): boolean {
+  return (
+    env.PDPP_MANAGED_DESKTOP_HOST === "1" &&
+    env.PDPP_OWNER_PASSWORD_SOURCE === "desktop_generated"
+  )
+}
+
 export async function ownerPasswordOwnerSet(dataDir: string): Promise<boolean> {
   try {
     await access(ownerPasswordOwnerSetMarkerPath(dataDir))

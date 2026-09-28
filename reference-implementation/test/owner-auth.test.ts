@@ -13,6 +13,7 @@ import { getOwnerDeviceAuthorizationByUserCode, initiateOwnerDeviceAuthorization
 import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
+import { ownerPasswordManagedByDesktop } from "../server/owner-password-owner-set.ts";
 import { createOwnerPasswordVerifier } from "../server/owner-password-verifier.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
 import { createOwnerPasswordVerifierStore, setOwnerPassword } from "../server/stores/owner-password-verifier-store.ts";
@@ -1589,6 +1590,68 @@ test("owner-auth: env-managed password change is rejected and source remains env
     assert.equal(response.status, 409);
     assert.equal(((await response.json()) as { error?: { code?: string } }).error?.code, "owner_password_env_managed");
   });
+});
+
+async function ownerPasswordSourceAndChange(asUrl: string): Promise<{
+  source: unknown;
+  status: number;
+  error: { code?: string; message?: string } | undefined;
+}> {
+  const { cookie } = await login(asUrl, TEST_PASSWORD);
+  assert.ok(cookie);
+  const source = await fetch(`${asUrl}/owner/password`, {
+    headers: { Accept: "application/json", Cookie: cookie },
+  });
+  const change = await fetch(`${asUrl}/owner/password/change`, {
+    body: JSON.stringify({ currentPassword: TEST_PASSWORD, newPassword: "another-long-password-here" }),
+    headers: { Accept: "application/json", "Content-Type": "application/json", Cookie: cookie },
+    method: "POST",
+  });
+  return {
+    error: ((await change.json()) as { error?: { code?: string; message?: string } }).error,
+    source: ((await source.json()) as { source?: unknown }).source,
+    status: change.status,
+  };
+}
+
+test("owner-auth: a desktop-managed password reports source desktop", async () => {
+  await withServer({ ownerAuthPassword: TEST_PASSWORD, ownerPasswordManagedByDesktop: true }, async ({ asUrl }) => {
+    assert.equal((await ownerPasswordSourceAndChange(asUrl)).source, "desktop");
+  });
+});
+
+test("owner-auth: a desktop-managed password change points to DataConnect Settings", async () => {
+  await withServer({ ownerAuthPassword: TEST_PASSWORD, ownerPasswordManagedByDesktop: true }, async ({ asUrl }) => {
+    const result = await ownerPasswordSourceAndChange(asUrl);
+    assert.equal(result.status, 409);
+    assert.deepEqual(result.error, {
+      code: "owner_password_desktop_managed",
+      message: "DataConnect manages this password. Change it in DataConnect Settings.",
+    });
+    assert.doesNotMatch(result.error?.message ?? "", /PDPP_OWNER_PASSWORD/);
+  });
+});
+
+test("owner-auth: without the desktop flags an operator password keeps the env source and message", async () => {
+  await withServer({ ownerAuthPassword: TEST_PASSWORD }, async ({ asUrl }) => {
+    const result = await ownerPasswordSourceAndChange(asUrl);
+    assert.equal(result.source, "env");
+    assert.equal(result.status, 409);
+    assert.deepEqual(result.error, {
+      code: "owner_password_env_managed",
+      message: "This password is set by PDPP_OWNER_PASSWORD. Change that environment variable and restart the server.",
+    });
+  });
+});
+
+test("owner-auth: the desktop source needs both desktop flags", () => {
+  assert.equal(
+    ownerPasswordManagedByDesktop({ PDPP_MANAGED_DESKTOP_HOST: "1", PDPP_OWNER_PASSWORD_SOURCE: "desktop_generated" }),
+    true
+  );
+  assert.equal(ownerPasswordManagedByDesktop({ PDPP_MANAGED_DESKTOP_HOST: "1" }), false);
+  assert.equal(ownerPasswordManagedByDesktop({ PDPP_OWNER_PASSWORD_SOURCE: "desktop_generated" }), false);
+  assert.equal(ownerPasswordManagedByDesktop({}), false);
 });
 
 test("owner-auth: desktop sign-in reuses one labeled This computer session row", async () => {

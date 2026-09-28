@@ -87,7 +87,7 @@ import {
 } from "./connector-install/index.ts";
 import { createFileLocalConnectorSourceStore } from "./connector-install/local-source.ts";
 import { createRemoteAccessConfigStore, remoteAccessConfigPath } from "./remote-access-store.ts";
-import { ownerPasswordOwnerSet } from "./owner-password-owner-set.ts";
+import { ownerPasswordManagedByDesktop, ownerPasswordOwnerSet } from "./owner-password-owner-set.ts";
 import { appConfigPath, createAppConfigStore } from "./app-config-store.ts";
 import { autostartStatePath, createAutostartStore } from "./autostart-store.ts";
 import { createLiveRevisions, type LiveRevisions, registerDefaultLiveTopics } from "./live-revisions.ts";
@@ -859,6 +859,8 @@ interface ServerOpts {
       }
     | false;
   ownerAuthPassword?: string;
+  /** The desktop supplies `ownerAuthPassword`; defaults to `ownerPasswordManagedByDesktop()`. */
+  ownerPasswordManagedByDesktop?: boolean;
   ownerAuthPasswordVerifier?: OwnerPasswordVerifier;
   /** Test seam: pause owner-device approval after auth capture and before persistence. */
   ownerDeviceApprovalBeforeDecision?: () => Promise<void> | void;
@@ -3143,10 +3145,13 @@ function resolveOwnerAuthPlaceholderConfig(opts: ServerOpts = {}) {
         ? Number(sessionTtlRaw.trim())
         : undefined;
   const loginRateLimit = resolveOwnerAuthLoginRateLimit(opts, readOwnerAuthEnv);
+  const passwordManagedByDesktop =
+    opts.ownerPasswordManagedByDesktop ?? (readOwnerAuthEnv && ownerPasswordManagedByDesktop());
   return {
     forceSecureCookies: Boolean(forceSecureCookies),
     loginRateLimit,
     password,
+    passwordManagedByDesktop,
     sameSite,
     sessionTtlSeconds,
     subjectId,
@@ -4886,6 +4891,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
   const lockConnectorRegistry = ownerExposurePosture ? ownerExposurePosture.lockConnectorRegistry : false;
   const ownerAuth = createOwnerAuthPlaceholder({
     password: ownerAuthConfig.password,
+    passwordManagedByDesktop: ownerAuthConfig.passwordManagedByDesktop,
     ...(opts.ownerAuthPasswordVerifier === undefined ? {} : { passwordVerifier: opts.ownerAuthPasswordVerifier }),
     ...(opts.ownerPasswordVerifierStore ? { passwordVerifierStore: opts.ownerPasswordVerifierStore } : {}),
     subjectId: ownerAuthConfig.subjectId,
@@ -7281,8 +7287,7 @@ function buildRsApp(opts: ServerOpts = {}) {
   // the password this process was started with, or null when owner auth is
   // disabled. Never mints or mutates a credential.
   const readOwnerPassword = (): string | null => rsOwnerAuthConfig.password || null;
-  const ownerCredentialRevealEnabled =
-    process.env.PDPP_MANAGED_DESKTOP_HOST === "1" && process.env.PDPP_OWNER_PASSWORD_SOURCE === "desktop_generated";
+  const ownerCredentialRevealEnabled = ownerPasswordManagedByDesktop();
   const ownerCredentialRevealProof = process.env.PDPP_OWNER_CREDENTIAL_REVEAL_PROOF?.trim() || null;
   const trustedMetadataHosts =
     opts.trustedMetadataHosts ?? (opts.ignoreAmbientPublicUrls ? null : process.env.PDPP_TRUSTED_HOSTS);
@@ -9151,6 +9156,7 @@ export async function startServer(opts: ServerOpts = {}) {
     ownerAuthForceSecureCookies: opts.ownerAuthForceSecureCookies,
     ownerAuthLoginRateLimit: opts.ownerAuthLoginRateLimit,
     ownerAuthPassword: opts.ownerAuthPassword,
+    ownerPasswordManagedByDesktop: opts.ownerPasswordManagedByDesktop,
     ownerAuthPasswordVerifier: ownerPasswordVerifier,
     ownerDeviceApprovalBeforeDecision: opts.ownerDeviceApprovalBeforeDecision,
     ownerSetupToken: ownerSetupToken ?? undefined,
