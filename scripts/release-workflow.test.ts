@@ -364,6 +364,83 @@ describe("release workflow", () => {
     expect(workflow).not.toMatch(/vana\.(?:com|org)|corsali/i)
   })
 
+  it("refuses a release checkout whose HEAD is not the release event commit", () => {
+    const workflow = readReleaseWorkflow()
+    const marker = "      - name: Verify checked-out release identity\n"
+    const scripts = workflow
+      .split(marker)
+      .slice(1)
+      .map(rest =>
+        readWorkflowRunScript(
+          marker + rest,
+          "Verify checked-out release identity"
+        )
+      )
+    // The build job and the Core image job both check out the tag name.
+    expect(scripts).toHaveLength(2)
+
+    const repo = mkdtempSync(join(tmpdir(), "release-head-sha-"))
+    try {
+      const git = (...args: string[]) =>
+        execFileSync("git", args, { cwd: repo, encoding: "utf8" }).trim()
+      git("init", "-q")
+      git(
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@t",
+        "commit",
+        "-q",
+        "--allow-empty",
+        "-m",
+        "a"
+      )
+      const eventSha = git("rev-parse", "HEAD")
+      git(
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@t",
+        "commit",
+        "-q",
+        "--allow-empty",
+        "-m",
+        "b"
+      )
+      const movedSha = git("rev-parse", "HEAD")
+      mkdirSync(join(repo, "scripts"))
+      writeFileSync(
+        join(repo, "scripts/verify-release-ref.mjs"),
+        'console.log("verify-release-ref ran")\n'
+      )
+
+      for (const script of scripts) {
+        const run = (githubSha: string) =>
+          spawnSync("bash", ["-c", script], {
+            cwd: repo,
+            encoding: "utf8",
+            env: {
+              ...process.env,
+              GITHUB_SHA: githubSha,
+              RELEASE_TAG: "v1.2.3",
+            },
+          })
+        const moved = run(eventSha)
+        expect(moved.status).toBe(1)
+        expect(moved.stdout).toContain(
+          `Checked-out commit ${movedSha} is not the release event commit ${eventSha}`
+        )
+        expect(moved.stdout).not.toContain("verify-release-ref ran")
+
+        const same = run(movedSha)
+        expect(same.status).toBe(0)
+        expect(same.stdout).toContain("verify-release-ref ran")
+      }
+    } finally {
+      rmSync(repo, { recursive: true, force: true })
+    }
+  })
+
   it("attests each published DMG in the publish job only", () => {
     const workflow = readReleaseWorkflow()
     const publishJob = workflow.slice(

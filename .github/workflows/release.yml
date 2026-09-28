@@ -109,6 +109,14 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
+          # The checkout resolves the tag name when it runs, but the
+          # attestation records GITHUB_SHA from the release event. Refuse if
+          # the tag moved in between, so the attested commit is the built one.
+          head_sha="$(git rev-parse 'HEAD^{commit}')"
+          if [ "$head_sha" != "$GITHUB_SHA" ]; then
+            echo "::error::Checked-out commit $head_sha is not the release event commit $GITHUB_SHA."
+            exit 1
+          fi
           node scripts/verify-release-ref.mjs --release-tag "$RELEASE_TAG"
 
       - name: Setup Node.js
@@ -442,6 +450,14 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
+          # The checkout resolves the tag name when it runs, but the
+          # attestation records GITHUB_SHA from the release event. Refuse if
+          # the tag moved in between, so the attested commit is the built one.
+          head_sha="$(git rev-parse 'HEAD^{commit}')"
+          if [ "$head_sha" != "$GITHUB_SHA" ]; then
+            echo "::error::Checked-out commit $head_sha is not the release event commit $GITHUB_SHA."
+            exit 1
+          fi
           node scripts/verify-release-ref.mjs --release-tag "$RELEASE_TAG"
 
       - name: Verify excluded connector type declarations
