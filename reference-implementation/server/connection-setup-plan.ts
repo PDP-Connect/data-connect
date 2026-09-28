@@ -996,7 +996,9 @@ function buildLocalCollectorSetupPlan(ctx: ConnectionSetupPlanContext): Connecti
 }
 
 function buildBrowserBoundSetupPlan(ctx: ConnectionSetupPlanContext): ConnectionSetupPlan {
-  const hasManualBrowserPath = isSupportedBrowserCollectorConnector(ctx.connectorKey);
+  // The same rule as the console's browser-session routes and the RI's
+  // enrollment-shell route. Production readiness is the tier badge, not a gate.
+  const hasManualBrowserPath = browserEnrollmentSupport(ctx.connectorKey, ctx.manifest).canAddAccount;
   return {
     catalogDisposition: hasManualBrowserPath ? "browser_collector_manual" : "browser_bound_runbook",
     connectorKey: ctx.connectorKey,
