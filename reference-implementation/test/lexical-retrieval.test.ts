@@ -45,6 +45,7 @@ import { closePostgresStorage } from "../server/postgres-storage.ts";
 import { drainConnectorInstanceIndexWork } from "../server/records.ts";
 import { createRequestConnectorInstanceStore } from "../server/request-store-factories.ts";
 import { buildSearchPlanForGrant, parseSearchParams } from "../server/search.ts";
+import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
 
 // ─── harness ────────────────────────────────────────────────────────────────
 
@@ -477,6 +478,7 @@ async function withHarness(opts: WithHarnessOpts, fn: (ctx: HarnessContext) => P
     asPort: 0,
     dbPath: ":memory:",
     dynamicClientRegistrationInitialAccessTokens: [TEST_DCR_INITIAL_ACCESS_TOKEN],
+    preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
     quiet: true,
     rsPort: 0,
     ...opts,
@@ -711,6 +713,7 @@ if (POSTGRES_URL) {
         asPort: 0,
         dbPath: ":memory:",
         dynamicClientRegistrationInitialAccessTokens: [TEST_DCR_INITIAL_ACCESS_TOKEN],
+        preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
         quiet: true,
         reconcilePolyfillManifests: false,
         rsPort: 0,
@@ -1598,6 +1601,7 @@ test("pre-existing records become searchable after lexical_fields are declared (
     asPort: 0,
     dbPath: ":memory:",
     dynamicClientRegistrationInitialAccessTokens: [TEST_DCR_INITIAL_ACCESS_TOKEN],
+    preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
     quiet: true,
     rsPort: 0,
   })) as StartedServer;
@@ -1768,6 +1772,7 @@ test("manifest update that swaps lexical_fields (same cardinality) rebuilds the 
     asPort: 0,
     dbPath: ":memory:",
     dynamicClientRegistrationInitialAccessTokens: [TEST_DCR_INITIAL_ACCESS_TOKEN],
+    preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
     quiet: true,
     rsPort: 0,
   })) as StartedServer;
@@ -1966,6 +1971,7 @@ test("startup backfills existing polyfill connectors without re-registration", a
       asPort: 0,
       dbPath,
       dynamicClientRegistrationInitialAccessTokens: [TEST_DCR_INITIAL_ACCESS_TOKEN],
+      preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
       quiet: true,
       rsPort: 0,
     })) as StartedServer;
@@ -2043,6 +2049,7 @@ test("startup backfill treats records with only empty lexical field values as in
       asPort: 0,
       dbPath,
       dynamicClientRegistrationInitialAccessTokens: [TEST_DCR_INITIAL_ACCESS_TOKEN],
+      preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
       quiet: true,
       rsPort: 0,
     })) as StartedServer;

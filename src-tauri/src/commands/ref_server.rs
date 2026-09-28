@@ -644,8 +644,14 @@ pub(crate) async fn login_reference_server_with_password(
     origin: String,
     password: &str,
 ) -> Result<ReferenceServerLoginResult, String> {
-    login_reference_server_with_password_and_host(origin, password, None).await
+    login_reference_server_with_password_and_host(origin, password, None, None).await
 }
+
+/// Session label the reference server treats as the desktop shell's own
+/// session (`issueSession` in reference-implementation/server/owner-auth.ts):
+/// a login with this label replaces the previous desktop-shell session instead
+/// of adding one, so an app start does not leave the last start's session live.
+pub(crate) const DESKTOP_OWNER_SESSION_LABEL: &str = "This computer";
 
 /// Same as `login_reference_server_with_password`, but overrides the `Host`
 /// header when `trusted_host` is `Some`. Needed for the same reason
@@ -657,10 +663,15 @@ pub(crate) async fn login_reference_server_with_password(
 /// bootstrap/restart that runs after ngrok has discovered an origin fails
 /// its own login step with `invalid_host` and tears the stack back down --
 /// reproduced live against a real ngrok tunnel.
+///
+/// `session_label` is sent as `X-PDPP-Owner-Session-Label`; pass
+/// `DESKTOP_OWNER_SESSION_LABEL` only for the one session the desktop shell
+/// keeps for its console window, because each such login revokes the last.
 pub(crate) async fn login_reference_server_with_password_and_host(
     origin: String,
     password: &str,
     trusted_host: Option<&str>,
+    session_label: Option<&str>,
 ) -> Result<ReferenceServerLoginResult, String> {
     // The server's own /owner/login handler answers a successful login with a
     // 302 redirect back to the login page (a browser-form-compatible shape),
@@ -683,6 +694,9 @@ pub(crate) async fn login_reference_server_with_password_and_host(
         .json(&serde_json::json!({ "password": password }));
     if let Some(host) = trusted_host {
         request = request.header(reqwest::header::HOST, host);
+    }
+    if let Some(label) = session_label {
+        request = request.header("X-PDPP-Owner-Session-Label", label);
     }
     let response = request
         .send()
@@ -776,6 +790,74 @@ mod tests {
             extract_owner_session_cookie("pdpp_owner_session=abc123; Path=/; HttpOnly"),
             Some("abc123".to_string())
         );
+    }
+
+    /// Answers one owner login like the reference server and returns the
+    /// raw request it received.
+    fn serve_one_login() -> (String, std::thread::JoinHandle<String>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind fake server");
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept login");
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 4096];
+            loop {
+                let read = stream.read(&mut buffer).expect("read login");
+                request.extend_from_slice(&buffer[..read]);
+                let text = String::from_utf8_lossy(&request);
+                if let Some(head_end) = text.find("\r\n\r\n") {
+                    let length = text[..head_end]
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())?
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= head_end + 4 + length || read == 0 {
+                        break;
+                    }
+                }
+            }
+            stream
+                .write_all(
+                    b"HTTP/1.1 302 Found\r\nLocation: /\r\nSet-Cookie: pdpp_owner_session=fresh; Path=/; HttpOnly\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .expect("answer login");
+            String::from_utf8_lossy(&request).to_ascii_lowercase()
+        });
+        (origin, handle)
+    }
+
+    #[tokio::test]
+    async fn desktop_login_asks_to_replace_the_desktop_shell_session() {
+        let (origin, server) = serve_one_login();
+        let login = login_reference_server_with_password_and_host(
+            origin,
+            "pw",
+            None,
+            Some(DESKTOP_OWNER_SESSION_LABEL),
+        )
+        .await
+        .expect("login succeeds");
+        assert_eq!(login.session_cookie, "fresh");
+        assert!(server
+            .join()
+            .unwrap()
+            .contains("\r\nx-pdpp-owner-session-label: this computer\r\n"));
+    }
+
+    #[tokio::test]
+    async fn unlabeled_login_sends_no_session_label() {
+        let (origin, server) = serve_one_login();
+        login_reference_server_with_password(origin, "pw")
+            .await
+            .expect("login succeeds");
+        assert!(!server
+            .join()
+            .unwrap()
+            .contains("x-pdpp-owner-session-label"));
     }
 
     #[test]

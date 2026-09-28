@@ -43,6 +43,7 @@ import { listSpineEventsPage, type SpineEventRecord } from "../lib/spine.ts";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { startServer as startServerUntyped } from "../server/index.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
+import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
 import { resolveCredentialFreeFixtureRunEnv } from "./helpers/credential-free-run-fixture.ts";
 
 const REGEXP_1 = /owner-agent/i;
@@ -71,6 +72,7 @@ interface StartServerOptions {
   connectorPathResolver?: () => string;
   dbPath?: string;
   ownerAuthPassword?: string;
+  preRegisteredPublicClients?: unknown;
   quiet?: boolean;
   rsPort?: number;
 }
@@ -187,6 +189,7 @@ async function withServer(fn: (handles: ServerHandles) => Promise<void>): Promis
     connectorPathResolver: () => connectorFixture.path,
     dbPath: ":memory:",
     ownerAuthPassword: "",
+    preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
     quiet: true,
     rsPort: 0,
   });

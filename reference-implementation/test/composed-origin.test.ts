@@ -19,6 +19,7 @@ import {
   createSqliteConnectorInstanceStore,
   makeDefaultAccountConnectorInstanceId,
 } from "../server/stores/connector-instance-store.ts";
+import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
 
 const TOP_REGEX_0 = /<input type="hidden" name="_csrf" value="([^"]+)"\s*\/>/;
 const TOP_REGEX_1 = /Longview/;
@@ -44,6 +45,7 @@ interface StartServerOptions {
   connectorPathResolver?: () => string;
   dbPath?: string;
   ownerAuthPassword?: string;
+  preRegisteredPublicClients?: unknown;
   quiet?: boolean;
   referenceMode?: string;
   referenceOrigin?: string;
@@ -561,6 +563,7 @@ test("composed controller runs ingest against the internal RS, not the public br
     asPort: 0,
     connectorPathResolver: () => fixture.connectorPath,
     dbPath: ":memory:",
+    preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
     quiet: true,
     referenceMode: "composed",
     referenceOrigin: publicOrigin.origin,
@@ -642,6 +645,7 @@ test("composed browser origin carries metadata, owner session, console, device f
     asPort: 0,
     dbPath: ":memory:",
     ownerAuthPassword: OWNER_PASSWORD,
+    preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
     quiet: true,
     referenceMode: "composed",
     referenceOrigin: webOrigin,

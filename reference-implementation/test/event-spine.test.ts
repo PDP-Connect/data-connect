@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
 import Database from "./helpers/sqlite-driver.ts";
 import { emitSpineEvent, type SpineEventRecord } from "../lib/spine.ts";
 import { runConnector } from "../runtime/index.ts";
@@ -204,6 +205,7 @@ interface StartServerOptions {
   asPort?: number;
   dbPath?: string;
   dynamicClientRegistrationInitialAccessTokens?: string[];
+  preRegisteredPublicClients?: unknown;
   quiet?: boolean;
   rsPort?: number;
 }
@@ -343,6 +345,7 @@ async function withHarness(fn: (ctx: HarnessContext) => Promise<void>): Promise<
     asPort: 0,
     dbPath: ":memory:",
     dynamicClientRegistrationInitialAccessTokens: [TEST_DCR_INITIAL_ACCESS_TOKEN],
+    preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
     quiet: true,
     rsPort: 0,
   });
@@ -393,6 +396,7 @@ async function withNativeHarness(fn: (ctx: NativeHarnessContext) => Promise<void
   const server = await startServer({
     asPort: 0,
     dbPath: ":memory:",
+    preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
     quiet: true,
     rsPort: 0,
     ...({ nativeManifest } as Record<string, unknown>),
@@ -2015,7 +2019,13 @@ rl.on('line', (line) => {
   });
 
   await t.test("captures per-stream checkpoint commit counts for multi-stream successful runs", async () => {
-    const server = await startServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+    const server = await startServer({
+      asPort: 0,
+      dbPath: ":memory:",
+      preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
+      quiet: true,
+      rsPort: 0,
+    });
     const asUrl = `http://localhost:${server.asPort}`;
     const rsUrl = `http://localhost:${server.rsPort}`;
     const manifest = {
@@ -2153,7 +2163,13 @@ rl.on('line', (line) => {
   });
 
   await t.test("captures partial checkpoint commit failures after DONE(succeeded)", async () => {
-    const server = await startServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+    const server = await startServer({
+      asPort: 0,
+      dbPath: ":memory:",
+      preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
+      quiet: true,
+      rsPort: 0,
+    });
     const asUrl = `http://localhost:${server.asPort}`;
     const manifest = {
       connector_id: "https://registry.pdpp.dev/connectors/event-spine-partial-checkpoint-failure-test",

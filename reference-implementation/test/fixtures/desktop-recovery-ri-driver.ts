@@ -71,8 +71,9 @@ async function login(asUrl: string): Promise<string> {
 }
 
 async function mintOwnerBearer(asUrl: string, session: string): Promise<string> {
-  // A client the reference server registers by default.
-  const clientId = "cli_longview";
+  // The published CLI's client, which a desktop server registers; it leaves
+  // the demo clients out.
+  const clientId = "pdpp_cli";
   const device = (await (
     await fetch(`${asUrl}/oauth/device_authorization`, {
       body: new URLSearchParams({ client_id: clientId }).toString(),

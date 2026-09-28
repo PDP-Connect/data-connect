@@ -152,7 +152,7 @@ async function ownerLogin(asUrl: string, password: string = OWNER_PASSWORD): Pro
 // static-secret-draft-connection-route.test.ts's `issueOwnerToken`) — the RS
 // ingest endpoint below is bearer-authenticated, not cookie-authenticated.
 async function issueOwnerToken(asUrl: string, subjectId: string = OWNER_SUBJECT_ID): Promise<string> {
-  const clientId = "cli_longview";
+  const clientId = "pdpp_cli";
   const deviceRes = await fetch(`${asUrl}/oauth/device_authorization`, {
     body: new URLSearchParams({ client_id: clientId }).toString(),
     headers: { "Content-Type": "application/x-www-form-urlencoded" },

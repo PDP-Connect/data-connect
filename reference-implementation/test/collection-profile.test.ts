@@ -42,6 +42,7 @@ import {
   admitOwnerRunConnection,
   createSqliteConnectorInstanceStore,
 } from "../server/stores/connector-instance-store.ts";
+import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
 
 type TestServer = Awaited<ReturnType<typeof startServer>>;
 
@@ -53,7 +54,7 @@ type TestServer = Awaited<ReturnType<typeof startServer>>;
 const trackedTestServers = new Set<TestServer>();
 
 async function startTestServer(opts: Parameters<typeof startServer>[0] = {}): Promise<TestServer> {
-  const server = await startServer(opts);
+  const server = await startServer({ preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS, ...opts });
   trackedTestServers.add(server);
   return server;
 }
@@ -1282,7 +1283,13 @@ test("Collection Profile conformance", async (t) => {
   await t.test(
     "an ordinary hosted run (no providedScope) folds the connection's declared collection_scope.since into every default stream's time_range",
     async () => {
-      const server = await startServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+      const server = await startServer({
+        asPort: 0,
+        dbPath: ":memory:",
+        preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
+        quiet: true,
+        rsPort: 0,
+      });
       const { asPort, rsPort } = server;
       const manifest = {
         ...MINIMAL_MANIFEST,
@@ -1347,7 +1354,13 @@ test("Collection Profile conformance", async (t) => {
   await t.test(
     "a declared collection_scope.since is folded ONLY into manifest streams with a non-empty consent_time_field — non-temporal streams stay unscoped",
     async () => {
-      const server = await startServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+      const server = await startServer({
+        asPort: 0,
+        dbPath: ":memory:",
+        preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
+        quiet: true,
+        rsPort: 0,
+      });
       const { asPort, rsPort } = server;
       const manifest = {
         ...MINIMAL_MANIFEST,
@@ -1419,7 +1432,13 @@ test("Collection Profile conformance", async (t) => {
   await t.test(
     "an ordinary hosted run with no declared collection_scope omits time_range entirely (unscoped, unchanged default behavior)",
     async () => {
-      const server = await startServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+      const server = await startServer({
+        asPort: 0,
+        dbPath: ":memory:",
+        preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
+        quiet: true,
+        rsPort: 0,
+      });
       const { asPort, rsPort } = server;
       const manifest = {
         ...MINIMAL_MANIFEST,
@@ -1859,7 +1878,13 @@ test("Collection Profile conformance", async (t) => {
       // seen ("acme-crm") gets the identical `manual_action_required` hint by
       // declaring the same recovery_hint, with a `code` and message sharing
       // nothing with ChatGPT's.
-      const server = await startServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+      const server = await startServer({
+        asPort: 0,
+        dbPath: ":memory:",
+        preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
+        quiet: true,
+        rsPort: 0,
+      });
       const { asPort, rsPort } = server;
       const { ownerToken, connectorId } = await setupConnector(server, asPort, {
         ...MINIMAL_MANIFEST,
@@ -1910,7 +1935,13 @@ test("Collection Profile conformance", async (t) => {
       // An out-of-vocabulary recovery_hint is not silently dropped or trusted —
       // the whole DONE is rejected as a protocol violation, same as any other
       // malformed connector-declared field (see the sibling SKIP_RESULT test).
-      const server = await startServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+      const server = await startServer({
+        asPort: 0,
+        dbPath: ":memory:",
+        preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
+        quiet: true,
+        rsPort: 0,
+      });
       const { asPort, rsPort } = server;
       const { ownerToken, connectorId } = await setupConnector(server, asPort, {
         ...MINIMAL_MANIFEST,
@@ -2172,7 +2203,13 @@ test("Collection Profile conformance", async (t) => {
   for (const testCase of RECOVERY_HINT_PRECEDENCE_CASES) {
     // biome-ignore lint/performance/noAwaitInLoops: Sequential test setup and assertion order is intentional.
     await t.test(`recovery_hint precedence: ${testCase.name}`, async () => {
-      const server = await startServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+      const server = await startServer({
+        asPort: 0,
+        dbPath: ":memory:",
+        preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
+        quiet: true,
+        rsPort: 0,
+      });
       const { asPort, rsPort } = server;
       const { ownerToken, connectorId } = await setupConnector(server, asPort, {
         ...MINIMAL_MANIFEST,
@@ -2232,7 +2269,13 @@ test("Collection Profile conformance", async (t) => {
   await t.test(
     "recovery_hint precedence: malformed hint fails closed even when the message matches the runtime's infrastructure text",
     async () => {
-      const server = await startServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+      const server = await startServer({
+        asPort: 0,
+        dbPath: ":memory:",
+        preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
+        quiet: true,
+        rsPort: 0,
+      });
       const { asPort, rsPort } = server;
       const { ownerToken, connectorId } = await setupConnector(server, asPort, {
         ...MINIMAL_MANIFEST,

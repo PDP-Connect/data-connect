@@ -182,7 +182,7 @@ interface TokenBody {
 }
 
 async function issueOwnerToken(asUrl: string, ownerSession: string): Promise<string> {
-  const clientId = "cli_longview";
+  const clientId = "pdpp_cli";
   const { body } = await fetchJson(`${asUrl}/oauth/device_authorization`, {
     body: JSON.stringify({ client_id: clientId }),
     headers: { "Content-Type": "application/json" },

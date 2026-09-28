@@ -135,6 +135,7 @@ import {
   requireGrantContractAgainstManifest,
   requireResolvedPersistedGrantState,
   resolveOAuthClient,
+  retireFormerPreRegisteredClientsAtStartup,
   revokeGrant,
   revokeGrantPackage,
   revokeOwnerClientTokenByPublicId,
@@ -2990,6 +2991,12 @@ function resolveDynamicClientRegistrationInitialAccessTokensForRequest(req: ReqL
 
 function resolvePreRegisteredPublicClients(opts: ServerOpts = {}) {
   return opts.preRegisteredPublicClients || defaultPreRegisteredPublicClients();
+}
+
+function preRegisteredClientIds(clients: unknown): string[] {
+  return (Array.isArray(clients) ? clients : [])
+    .map((client: { client_id?: unknown } | null) => client?.client_id)
+    .filter((id): id is string => typeof id === "string");
 }
 
 function createPublicDcrRateLimiter(config: { windowMs?: number; max?: number } | false = {}) {
@@ -8569,6 +8576,18 @@ export async function startServer(opts: ServerOpts = {}) {
     logger,
     subjectId: earlyOwnerAuthConfig.subjectId || OWNER_AUTH_DEFAULT_SUBJECT_ID,
   });
+  // Before the scheduler and console start and before the desktop signs in,
+  // so nothing holds a credential this revokes.
+  const retired = await retireFormerPreRegisteredClientsAtStartup(
+    Math.floor(Date.now() / 1000),
+    preRegisteredClientIds(resolvePreRegisteredPublicClients(opts))
+  );
+  if (Object.keys(retired.clients).length > 0 || retired.sessions > 0) {
+    logger.warn(
+      { owner_sessions_revoked: retired.sessions, retired_clients: retired.clients },
+      "revoked the credentials of clients earlier versions pre-registered, and the unlabelled desktop sessions earlier starts left"
+    );
+  }
 
   // Boot-epoch reconciliation — STAGE 5.
   // Emit `controller.booted` as the FIRST spine event of this process

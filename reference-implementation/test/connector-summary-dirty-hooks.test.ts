@@ -56,7 +56,7 @@ import { createSqliteConnectorInstanceStore } from "../server/stores/connector-i
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REFERENCE_IMPL_DIR = join(__dirname, "..");
 const OWNER_SUBJECT_ID = "owner_local";
-const OWNER_CLIENT_ID = "cli_longview";
+const OWNER_CLIENT_ID = "pdpp_cli";
 const NOW = "2026-06-17T00:00:00.000Z";
 
 // ── Record-ingest seam (task 2.2): no server needed ─────────────────────────

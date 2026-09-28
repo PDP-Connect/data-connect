@@ -9,6 +9,7 @@ import {
   ownerPasswordVerifierRevision,
 } from "./owner-password-verifier-store.ts";
 import type { OwnerBearerSummary, OwnerSessionRecord, OwnerSessionStore } from "../owner-session.ts";
+import { RETIRED_PRE_REGISTERED_CLIENT_IDS } from "../reference-local-defaults.ts";
 
 interface SessionRow {
   created_at: number | string;
@@ -235,6 +236,136 @@ function createDatabaseOwnerSessionStore(): OwnerSessionStore {
         .run(token, subjectId).changes > 0;
     },
   };
+}
+
+/** `labelOwnerSession` in owner-auth.ts for a sign-in with no user agent. */
+const UNLABELED_DESKTOP_SESSION_LABEL = "Unknown browser";
+
+/** What `retireFormerPreRegisteredClients` did to one retired client. */
+export interface RetiredClientCounts {
+  bearers: number;
+  deregistered: boolean;
+  deviceRequests: number;
+  /** An active grant names the client, so only its owner bearers were revoked. */
+  keptForActiveGrant: boolean;
+  refreshTokens: number;
+}
+
+export interface RetiredClientCleanup {
+  /** Only the retired clients this run changed, keyed by client id. */
+  clients: Record<string, RetiredClientCounts>;
+  sessions: number;
+}
+
+/**
+ * Remove the credentials that earlier versions left behind:
+ *   - For each `RETIRED_PRE_REGISTERED_CLIENT_IDS` client that the server
+ *     does not register on this start: revoke its owner bearers and expire
+ *     its pending owner device requests. Earlier versions let the console
+ *     and the connector runtime mint a new year-long owner bearer on every
+ *     start or run under two of these ids.
+ *     - If an active grant names the client, stop there: the grant's tokens
+ *       and refresh tokens stay live and the client row stays, so the app the
+ *       owner connected keeps working.
+ *     - Otherwise also revoke its other tokens and refresh tokens and delete
+ *       its `oauth_clients` row. `retireFormerPreRegisteredClientsAtStartup`
+ *       in auth.ts then records the deletion.
+ *   - Desktop sign-ins stored before the app labelled them "This computer":
+ *     no label and no user agent, so the server stored an "Unknown browser"
+ *     session per app start. The newest one of a subject is kept.
+ * One transaction. Safe to run on every start: a second run changes nothing
+ * that the first run left.
+ */
+export async function retireFormerPreRegisteredClients(
+  nowSeconds: number,
+  registeredClientIds: readonly string[]
+): Promise<RetiredClientCleanup> {
+  const pg = isPostgresStorageBackend();
+  const [live, revoked] = pg ? ["FALSE", "TRUE"] : ["0", "1"];
+  const param = (index: number) => (pg ? `$${index}` : "?");
+  const retiredIds = RETIRED_PRE_REGISTERED_CLIENT_IDS.filter((id) => !registeredClientIds.includes(id));
+  const revokedAtIso = new Date(nowSeconds * 1000).toISOString();
+  const activeGrantSql = `SELECT 1 AS found FROM grants WHERE client_id = ${param(1)} AND status = 'active' LIMIT 1`;
+  const ownerBearersSql = `UPDATE tokens SET revoked = ${revoked}
+      WHERE client_id = ${param(1)} AND revoked = ${live} AND token_kind = 'owner'`;
+  const tokensSql = `UPDATE tokens SET revoked = ${revoked} WHERE client_id = ${param(1)} AND revoked = ${live}`;
+  const refreshTokensSql = `UPDATE oauth_refresh_tokens SET status = 'revoked', revoked_at = ${param(1)}
+      WHERE client_id = ${param(2)} AND status = 'active'`;
+  const deviceRequestsSql = `UPDATE owner_device_auth SET status = 'expired'
+      WHERE client_id = ${param(1)} AND status = 'pending'`;
+  const deregisterSql = `DELETE FROM oauth_clients WHERE client_id = ${param(1)}`;
+  const unlabeledDesktop = (table: string) =>
+    `${table}.revoked_at IS NULL AND ${table}.device_key IS NULL AND ${table}.user_agent IS NULL
+     AND ${table}.label = '${UNLABELED_DESKTOP_SESSION_LABEL}'`;
+  const desktopSessionsSql = `UPDATE owner_sessions SET revoked_at = ${param(1)}
+      WHERE ${unlabeledDesktop("owner_sessions")}
+        AND id_hash <> (
+          SELECT kept.id_hash FROM owner_sessions AS kept
+           WHERE kept.subject_id = owner_sessions.subject_id AND ${unlabeledDesktop("kept")}
+           ORDER BY kept.created_at DESC, kept.id_hash DESC
+           LIMIT 1
+        )`;
+  const withChanges = (entries: [string, RetiredClientCounts][]) =>
+    Object.fromEntries(
+      entries.filter(([, c]) => c.bearers + c.refreshTokens + c.deviceRequests > 0 || c.deregistered)
+    );
+  if (pg) {
+    return await withPostgresTransaction(async (client) => {
+      const run = async (sql: string, params: unknown[]) => (await client.query(sql, params)).rowCount ?? 0;
+      const entries: [string, RetiredClientCounts][] = [];
+      for (const id of retiredIds) {
+        const keptForActiveGrant = (await client.query(activeGrantSql, [id])).rows.length > 0;
+        entries.push([
+          id,
+          keptForActiveGrant
+            ? {
+                bearers: await run(ownerBearersSql, [id]),
+                deregistered: false,
+                deviceRequests: await run(deviceRequestsSql, [id]),
+                keptForActiveGrant,
+                refreshTokens: 0,
+              }
+            : {
+                bearers: await run(tokensSql, [id]),
+                refreshTokens: await run(refreshTokensSql, [revokedAtIso, id]),
+                deviceRequests: await run(deviceRequestsSql, [id]),
+                deregistered: (await run(deregisterSql, [id])) > 0,
+                keptForActiveGrant,
+              },
+        ]);
+      }
+      const sessions = await run(desktopSessionsSql, [nowSeconds]);
+      return { clients: withChanges(entries), sessions };
+    });
+  }
+  const db = getDb();
+  const run = (sql: string, ...params: unknown[]) => db.prepare(sql).run(...params).changes;
+  return db.transaction(() => ({
+    clients: withChanges(
+      retiredIds.map((id): [string, RetiredClientCounts] => {
+        const keptForActiveGrant = db.prepare(activeGrantSql).get(id) !== undefined;
+        return [
+          id,
+          keptForActiveGrant
+            ? {
+                bearers: run(ownerBearersSql, id),
+                deregistered: false,
+                deviceRequests: run(deviceRequestsSql, id),
+                keptForActiveGrant,
+                refreshTokens: 0,
+              }
+            : {
+                bearers: run(tokensSql, id),
+                refreshTokens: run(refreshTokensSql, revokedAtIso, id),
+                deviceRequests: run(deviceRequestsSql, id),
+                deregistered: run(deregisterSql, id) > 0,
+                keptForActiveGrant,
+              },
+        ];
+      })
+    ),
+    sessions: run(desktopSessionsSql, nowSeconds),
+  }))();
 }
 
 let cachedStore: OwnerSessionStore | null = null;

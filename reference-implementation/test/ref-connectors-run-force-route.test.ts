@@ -343,7 +343,7 @@ function buildOwnerHarness() {
           body,
           params: { connectionId: "cin_chatgpt", ...params },
           query: {},
-          tokenInfo: { client_id: "cli_longview", pdpp_token_kind: "owner", subject_id: "owner_local" },
+          tokenInfo: { client_id: "pdpp_cli", pdpp_token_kind: "owner", subject_id: "owner_local" },
         },
         res
       );

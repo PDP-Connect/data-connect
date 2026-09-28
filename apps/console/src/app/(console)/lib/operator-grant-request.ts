@@ -138,7 +138,7 @@ export function createDefaultGrantRequestDraft(): GrantRequestDraft {
   return {
     accessMode: "single_use",
     clientId: "",
-    clientName: "Longview",
+    clientName: "Example app",
     clientUri: "",
     connectionId: "",
     fields: "",
@@ -422,7 +422,7 @@ export async function buildGrantRequestExamples(workspace: GrantRequestWorkspace
   return {
     registerCurl: `curl -sS -X POST '${asUrl}/oauth/register' \\\n  -H 'Content-Type: application/json' \\\n  -H 'Authorization: Bearer ${workspace.draft.initialAccessToken || "<initial-access-token>"}' \\\n  --data '${JSON.stringify(
       {
-        client_name: workspace.draft.clientName || "Longview",
+        client_name: workspace.draft.clientName || "Example app",
         ...(workspace.draft.clientUri ? { client_uri: workspace.draft.clientUri } : {}),
         ...(workspace.draft.redirectUri ? { redirect_uris: [workspace.draft.redirectUri] } : {}),
         token_endpoint_auth_method: "none",

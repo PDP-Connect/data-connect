@@ -43,6 +43,7 @@ import { getDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
 import { ingestRecord } from "../server/records.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
+import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
 
 const BEARER_PATTERN = /Bearer\s/i;
 
@@ -100,6 +101,7 @@ async function withServer(
     asPort: 0,
     dbPath: ":memory:",
     ownerAuthPassword: "",
+    preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
     quiet: true,
     rsPort: 0,
   })) as StartedServer;
