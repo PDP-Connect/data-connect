@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { NextResponse } from "next/server";
-import { isBrowserBoundConnector, isSupportedBrowserCollectorConnector } from "../../../../lib/connection-modality.ts";
+import { loadBrowserConnectSupport } from "../../../../lib/load-browser-connect-support.ts";
 import { requireDashboardAccess } from "../../../../lib/dashboard-access.ts";
 import {
   abandonBrowserEnrollmentShell,
@@ -205,7 +205,8 @@ export async function POST(request: Request, { params }: { params: Promise<Route
     return new NextResponse("Forbidden", { status: 403 });
   }
 
-  if (!isBrowserBoundConnector(connectorId)) {
+  const browserConnect = await loadBrowserConnectSupport(connectorId);
+  if (!browserConnect.browserBound) {
     return redirectToPublicPath(
       request,
       `/sources/add?error=${encodeURIComponent("This source does not use browser setup.")}`
@@ -228,7 +229,7 @@ export async function POST(request: Request, { params }: { params: Promise<Route
   }
 
   try {
-    if (!(isSupportedBrowserCollectorConnector(connectorId) || existingConnectionId)) {
+    if (!(browserConnect.canAddAccount || existingConnectionId)) {
       return redirectToPublicPath(
         request,
         `/sources/add?error=${encodeURIComponent("This browser-backed source is not available for self-service setup.")}`
