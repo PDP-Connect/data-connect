@@ -2330,7 +2330,22 @@ pub async fn check_browser_available(
         .ok()
         .and_then(|resource_dir| get_bundled_chromium_path(&resource_dir));
 
-    Ok(resolve_browser_status(system_browser, downloaded, bundled))
+    let mut status = resolve_browser_status(system_browser, downloaded.clone(), bundled.clone());
+    // A system browser comes from a distribution package, which ships the
+    // AppArmor profile its sandbox needs. A downloaded or bundled Chromium may
+    // be blocked, and `--version` does not exercise the sandbox, so start it.
+    if let Some(browser) = match status.browser_type.as_str() {
+        "downloaded" => downloaded,
+        "bundled" => bundled,
+        _ => None,
+    } {
+        let launch_error =
+            tauri::async_runtime::spawn_blocking(move || cached_browser_launch_error(&browser))
+                .await
+                .map_err(|error| format!("Browser launch check failed: {error}"))?;
+        status = apply_browser_launch_error(status, launch_error);
+    }
+    Ok(status)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -2338,6 +2353,92 @@ pub struct BrowserStatus {
     pub available: bool,
     pub browser_type: String,
     pub needs_download: bool,
+    /// Machine-readable reason when a browser is present but cannot start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+/// Mark the resolved browser unavailable when it cannot start its sandbox.
+/// A download would not help, because a downloaded Chromium has no AppArmor
+/// profile either.
+fn apply_browser_launch_error(
+    status: BrowserStatus,
+    launch_error: Option<super::browser_surface_host::BrowserLaunchError>,
+) -> BrowserStatus {
+    match launch_error {
+        Some(error) if error.is_sandbox_unavailable() => BrowserStatus {
+            available: false,
+            needs_download: false,
+            reason: Some(error.code.to_string()),
+            message: Some(error.message),
+            ..status
+        },
+        _ => status,
+    }
+}
+
+/// Launch results per browser binary, kept for the life of the process.
+static BROWSER_LAUNCH_CHECKS: std::sync::OnceLock<
+    std::sync::Mutex<HashMap<PathBuf, Option<super::browser_surface_host::BrowserLaunchError>>>,
+> = std::sync::OnceLock::new();
+
+fn cached_browser_launch_error(
+    browser: &Path,
+) -> Option<super::browser_surface_host::BrowserLaunchError> {
+    let cache = BROWSER_LAUNCH_CHECKS.get_or_init(Default::default);
+    if let Some(result) = cache
+        .lock()
+        .ok()
+        .and_then(|checks| checks.get(browser).cloned())
+    {
+        return result;
+    }
+    let result = probe_browser_launch(browser);
+    if let Ok(mut checks) = cache.lock() {
+        checks.insert(browser.to_path_buf(), result.clone());
+    }
+    result
+}
+
+/// Start the browser the way the host does, with a throwaway profile, then
+/// stop it. Only Linux restricts the sandbox this way.
+#[cfg(target_os = "linux")]
+pub(crate) fn probe_browser_launch(
+    browser: &Path,
+) -> Option<super::browser_surface_host::BrowserLaunchError> {
+    let profile = match tempfile::Builder::new()
+        .prefix("dataconnect-browser-check-")
+        .tempdir()
+    {
+        Ok(profile) => profile,
+        Err(error) => {
+            log::warn!("Skipping browser launch check: {error}");
+            return None;
+        }
+    };
+    match super::browser_surface_host::launch_browser(browser, profile.path(), true) {
+        Ok((mut child, _)) => {
+            let _ = super::pdpp_browser::terminate_browser(&mut child);
+            None
+        }
+        Err(error) => {
+            log::warn!(
+                "Browser launch check failed ({}): {}",
+                error.code,
+                error.message
+            );
+            Some(error)
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn probe_browser_launch(
+    _browser: &Path,
+) -> Option<super::browser_surface_host::BrowserLaunchError> {
+    None
 }
 
 fn resolve_browser_status(
@@ -2359,6 +2460,8 @@ fn resolve_browser_status(
         available: browser_type.is_some(),
         browser_type: browser_type.unwrap_or("none").to_string(),
         needs_download: browser_type.is_none(),
+        reason: None,
+        message: None,
     }
 }
 
@@ -3118,6 +3221,90 @@ mod tests {
         assert!(status.available);
         assert_eq!(status.browser_type, "bundled");
         assert!(!status.needs_download);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn write_script(dir: &Path, name: &str, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        std::fs::write(&path, body).expect("write script");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod script");
+        path
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn browser_preflight_reports_sandbox_blocked_bundled_browser_unavailable() {
+        let temp = tempdir().expect("tempdir");
+        // Truncated before Chromium's own workaround advice.
+        let blocked = write_script(
+            temp.path(),
+            "chrome",
+            "#!/bin/sh\necho '[1:1:0928/165834.918776:FATAL:zygote_host_impl_linux.cc:129] No usable sandbox! If you are running on Ubuntu 23.10+' >&2\nexit 133\n",
+        );
+
+        let status = super::apply_browser_launch_error(
+            resolve_browser_status(None, None, Some(blocked.clone())),
+            super::cached_browser_launch_error(&blocked),
+        );
+
+        assert!(!status.available);
+        assert!(!status.needs_download);
+        assert_eq!(status.browser_type, "bundled");
+        assert_eq!(
+            status.reason.as_deref(),
+            Some("browser_sandbox_unavailable")
+        );
+        assert!(status
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains(".deb package")));
+
+        // The result is cached per binary: a later fix to the file is not
+        // re-probed during this session.
+        std::fs::write(&blocked, "#!/bin/sh\nexit 1\n").expect("rewrite script");
+        assert!(super::cached_browser_launch_error(&blocked)
+            .is_some_and(|error| error.is_sandbox_unavailable()));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn browser_preflight_keeps_a_startable_bundled_browser_available() {
+        let temp = tempdir().expect("tempdir");
+        let working = write_script(
+            temp.path(),
+            "chrome",
+            "#!/bin/sh\nprintf '%s\\n' '{\"cdp_url\":\"http://127.0.0.1:9222\"}'\ntrap 'exit 0' TERM INT\nwhile :; do sleep 1; done\n",
+        );
+
+        let status = super::apply_browser_launch_error(
+            resolve_browser_status(None, None, Some(working.clone())),
+            super::probe_browser_launch(&working),
+        );
+
+        assert!(status.available);
+        assert_eq!(status.browser_type, "bundled");
+        assert_eq!(status.reason, None);
+    }
+
+    /// Live counterpart of the preflight tests; see the host's
+    /// `live_browser_launch_is_ready_or_reports_sandbox_unavailable`.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "needs a real Chromium in DATACONNECT_LIVE_BROWSER"]
+    fn live_browser_preflight_probe() {
+        let browser = PathBuf::from(
+            std::env::var("DATACONNECT_LIVE_BROWSER").expect("DATACONNECT_LIVE_BROWSER"),
+        );
+        let status = super::apply_browser_launch_error(
+            resolve_browser_status(None, None, Some(browser.clone())),
+            super::probe_browser_launch(&browser),
+        );
+        eprintln!("live preflight status: {status:?}");
+        assert!(
+            status.available || status.reason.as_deref() == Some("browser_sandbox_unavailable")
+        );
     }
 
     #[test]

@@ -24,10 +24,22 @@ export interface HostBrowserSurfaceAllocatorOptions {
 	readonly token: string;
 }
 
+export interface HostBrowserSurfaceStartFailure {
+	readonly code: string;
+	readonly message: string;
+}
+
 export interface HostBrowserSurfaceAllocator extends BrowserSurfaceAllocator {
 	readonly bindRunToSurface: (binding: HostBrowserSurfaceLeaseBinding) => void;
+	/** Last host-reported start failure recorded for this runId's lease POST, if any. */
+	readonly lastStartFailure: (
+		runId: string,
+	) => HostBrowserSurfaceStartFailure | undefined;
 	readonly releaseRun: (runId: string) => Promise<void>;
 }
+
+// Bound so a hostile/misbehaving host cannot use the error body to exhaust memory.
+const MAX_HOST_ERROR_FIELD_LENGTH = 1_000;
 
 export class HostBrowserSurfaceAllocatorError extends Error {
 	readonly code:
@@ -37,15 +49,28 @@ export class HostBrowserSurfaceAllocatorError extends Error {
 		| "host_browser_surface_missing_lease_context"
 		| "host_browser_surface_timeout"
 		| "host_browser_surface_unreachable";
+	/** The host's `error` field, when the HTTP error body parsed as JSON with one. */
+	readonly hostError?: string;
+	/** The host's `message` field, when the HTTP error body parsed as JSON with one. */
+	readonly hostMessage?: string;
 
 	constructor(
 		code: HostBrowserSurfaceAllocatorError["code"],
 		message: string,
-		options?: ErrorOptions,
+		options?: ErrorOptions & {
+			readonly hostError?: string;
+			readonly hostMessage?: string;
+		},
 	) {
 		super(message, options);
 		this.name = "HostBrowserSurfaceAllocatorError";
 		this.code = code;
+		if (options?.hostError !== undefined) {
+			this.hostError = options.hostError;
+		}
+		if (options?.hostMessage !== undefined) {
+			this.hostMessage = options.hostMessage;
+		}
 	}
 }
 
@@ -87,6 +112,10 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 	readonly #leasesBySurfaceId = new Map<string, HostLeaseRecord>();
 	readonly #pendingRunIdsBySurfaceId = new Map<string, string>();
 	readonly #surfaceIdsByRunId = new Map<string, string>();
+	readonly #lastStartFailureByRunId = new Map<
+		string,
+		HostBrowserSurfaceStartFailure
+	>();
 
 	constructor(options: HostBrowserSurfaceAllocatorOptions) {
 		this.#endpoint = normalizeEndpoint(options.endpoint);
@@ -108,6 +137,10 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 		this.#pendingRunIdsBySurfaceId.set(binding.surfaceId, binding.runId);
 	}
 
+	lastStartFailure(runId: string): HostBrowserSurfaceStartFailure | undefined {
+		return this.#lastStartFailureByRunId.get(runId);
+	}
+
 	async ensureSurface(
 		request: EnsureBrowserSurfaceRequest,
 	): Promise<BrowserSurface> {
@@ -122,11 +155,23 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 				`no run_id was bound for browser surface ${request.surfaceId}`,
 			);
 		}
-		const response = await this.#requestJson("POST", this.#leasesUrl(), {
-			run_id: runId,
-			connector_id: request.connectorId,
-			headless: this.#headless,
-		});
+		let response: unknown;
+		try {
+			response = await this.#requestJson("POST", this.#leasesUrl(), {
+				run_id: runId,
+				connector_id: request.connectorId,
+				headless: this.#headless,
+			});
+		} catch (error) {
+			if (error instanceof HostBrowserSurfaceAllocatorError) {
+				this.#lastStartFailureByRunId.set(runId, {
+					code: error.hostError ?? error.code,
+					message: error.hostMessage ?? error.message,
+				});
+			}
+			throw error;
+		}
+		this.#lastStartFailureByRunId.delete(runId);
 		const hostLease = parseHostSurfaceLeaseResponse(response);
 		const now = this.#now().toISOString();
 		const surface: BrowserSurface = {
@@ -174,6 +219,7 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 		if (pendingSurfaceId) {
 			this.#pendingRunIdsBySurfaceId.delete(pendingSurfaceId);
 		}
+		this.#lastStartFailureByRunId.delete(runId);
 	}
 
 	async stopSurface(
@@ -246,10 +292,7 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 				signal: controller.signal,
 			});
 			if (!response.ok) {
-				throw new HostBrowserSurfaceAllocatorError(
-					"host_browser_surface_http_error",
-					`host browser surface ${method} ${url} returned HTTP ${response.status}`,
-				);
+				throw await this.#buildHttpError(method, url, response);
 			}
 			return response;
 		} catch (error) {
@@ -272,6 +315,61 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 			clearTimeout(timeout);
 		}
 	}
+
+	async #buildHttpError(
+		method: "DELETE" | "POST",
+		url: string,
+		response: FetchResponseLike,
+	): Promise<HostBrowserSurfaceAllocatorError> {
+		const baseMessage = `host browser surface ${method} ${url} returned HTTP ${response.status}`;
+		let body: unknown;
+		try {
+			body = await response.json();
+		} catch {
+			return new HostBrowserSurfaceAllocatorError(
+				"host_browser_surface_http_error",
+				baseMessage,
+			);
+		}
+		if (!body || typeof body !== "object" || Array.isArray(body)) {
+			return new HostBrowserSurfaceAllocatorError(
+				"host_browser_surface_http_error",
+				baseMessage,
+			);
+		}
+		const record = body as Record<string, unknown>;
+		const hostError =
+			typeof record.error === "string"
+				? truncateHostErrorField(record.error)
+				: undefined;
+		const hostMessage =
+			typeof record.message === "string"
+				? truncateHostErrorField(record.message)
+				: undefined;
+		if (hostError === undefined && hostMessage === undefined) {
+			return new HostBrowserSurfaceAllocatorError(
+				"host_browser_surface_http_error",
+				baseMessage,
+			);
+		}
+		const detail = [hostError, hostMessage]
+			.filter((part) => part !== undefined)
+			.join(": ");
+		return new HostBrowserSurfaceAllocatorError(
+			"host_browser_surface_http_error",
+			`${baseMessage}: ${detail}`,
+			{
+				...(hostError !== undefined ? { hostError } : {}),
+				...(hostMessage !== undefined ? { hostMessage } : {}),
+			},
+		);
+	}
+}
+
+function truncateHostErrorField(value: string): string {
+	return value.length > MAX_HOST_ERROR_FIELD_LENGTH
+		? value.slice(0, MAX_HOST_ERROR_FIELD_LENGTH)
+		: value;
 }
 
 function normalizeEndpoint(endpoint: string): string {

@@ -25,6 +25,13 @@ const BROWSER_SURFACE_PATH: &str = "/browser-surface/leases";
 const MAX_HTTP_REQUEST_BYTES: usize = 64 * 1024;
 const BROWSER_START_TIMEOUT: Duration = Duration::from_secs(10);
 const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(5);
+/// Bytes of browser stderr kept for diagnosing a failed launch.
+const STDERR_TAIL_BYTES: usize = 8 * 1024;
+/// Chromium prints this when it cannot create its sandbox, for example when
+/// AppArmor restricts unprivileged user namespaces (Ubuntu 23.10+).
+const NO_USABLE_SANDBOX_SIGNATURE: &str = "No usable sandbox!";
+pub(crate) const BROWSER_SANDBOX_UNAVAILABLE: &str = "browser_sandbox_unavailable";
+const SURFACE_START_FAILED: &str = "surface_start_failed";
 
 #[derive(Debug, Deserialize)]
 struct AcquireRequest {
@@ -46,6 +53,53 @@ struct ErrorResponse<'a> {
     error: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     message: Option<String>,
+}
+
+/// A browser launch failure with a stable, machine-readable code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BrowserLaunchError {
+    pub code: &'static str,
+    pub message: String,
+}
+
+impl BrowserLaunchError {
+    fn start_failed(message: impl Into<String>) -> Self {
+        Self {
+            code: SURFACE_START_FAILED,
+            message: message.into(),
+        }
+    }
+
+    fn sandbox_unavailable() -> Self {
+        Self {
+            code: BROWSER_SANDBOX_UNAVAILABLE,
+            message: sandbox_unavailable_message(),
+        }
+    }
+
+    pub(crate) fn is_sandbox_unavailable(&self) -> bool {
+        self.code == BROWSER_SANDBOX_UNAVAILABLE
+    }
+}
+
+impl From<String> for BrowserLaunchError {
+    fn from(message: String) -> Self {
+        Self::start_failed(message)
+    }
+}
+
+impl From<&str> for BrowserLaunchError {
+    fn from(message: &str) -> Self {
+        Self::start_failed(message)
+    }
+}
+
+pub(crate) fn sandbox_unavailable_message() -> String {
+    "This Linux distribution blocks the sandbox of the browser that DataConnect \
+     bundles or downloads. Install Google Chrome or Chromium from a .deb package; \
+     DataConnect uses the first of /usr/bin/google-chrome, \
+     /usr/bin/google-chrome-stable, /usr/bin/chromium or /usr/bin/chromium-browser."
+        .into()
 }
 
 struct BrowserSurfaceLease {
@@ -82,7 +136,7 @@ impl HostState {
         }
     }
 
-    fn acquire(&self, request: AcquireRequest) -> Result<AcquireResponse, String> {
+    fn acquire(&self, request: AcquireRequest) -> Result<AcquireResponse, BrowserLaunchError> {
         validate_request_field("run_id", &request.run_id)?;
         validate_request_field("connector_id", &request.connector_id)?;
 
@@ -117,14 +171,17 @@ impl HostState {
             return Err(format!(
                 "Connector {:?} already owns a browser surface",
                 request.connector_id
-            ));
+            )
+            .into());
         }
 
         let profile_dir = self.profile_dir(&request.connector_id)?;
         let _ = fs::remove_file(profile_dir.join("DevToolsActivePort"));
 
         let browser = self.browser_path().ok_or_else(|| {
-            "No system, downloaded, or bundled Chromium browser is available for host browser surfaces".to_string()
+            BrowserLaunchError::start_failed(
+                "No system, downloaded, or bundled Chromium browser is available for host browser surfaces",
+            )
         })?;
         let (child, endpoint) = launch_browser(&browser, &profile_dir, request.headless)?;
         let surface_id = format!("host-surface-{}", Uuid::new_v4().as_simple());
@@ -354,26 +411,23 @@ fn stable_segment(value: &str) -> String {
     hex::encode(Sha256::digest(value.as_bytes()))
 }
 
-fn launch_browser(
+pub(crate) fn launch_browser(
     browser: &Path,
     profile_dir: &Path,
     headless: bool,
-) -> Result<(Child, String), String> {
+) -> Result<(Child, String), BrowserLaunchError> {
     let mut command = super::pdpp_browser::browser_command(browser, profile_dir, headless);
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        .stderr(Stdio::piped());
 
     let mut child = command
         .spawn()
         .map_err(|error| format!("Failed to launch host browser: {error}"))?;
-    let stdout = match child.stdout.take() {
-        Some(stdout) => stdout,
-        None => {
-            let _ = super::pdpp_browser::terminate_browser(&mut child);
-            return Err("Host browser stdout was not piped".into());
-        }
+    let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
+        let _ = super::pdpp_browser::terminate_browser(&mut child);
+        return Err("Host browser output was not piped".to_string().into());
     };
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
@@ -383,15 +437,67 @@ fn launch_browser(
             }
         }
     });
+    let stderr_tail = StderrTail::default();
+    let stderr_reader = stderr_tail.clone();
+    // Keep draining after readiness so a chatty browser never blocks on a
+    // full pipe; only the bounded tail is retained.
+    thread::spawn(move || {
+        let mut reader = BufReader::new(stderr);
+        let mut line = Vec::new();
+        while matches!(reader.read_until(b'\n', &mut line), Ok(read) if read > 0) {
+            stderr_reader.push_line(&String::from_utf8_lossy(&line));
+            line.clear();
+        }
+    });
 
-    wait_for_devtools_endpoint(profile_dir, child, receiver)
+    wait_for_devtools_endpoint(profile_dir, child, receiver, &stderr_tail)
+}
+
+/// The last `STDERR_TAIL_BYTES` of browser stderr, with URL query strings
+/// removed. Chromium stderr can name the pages it loads.
+#[derive(Clone, Default)]
+struct StderrTail(Arc<Mutex<std::collections::VecDeque<String>>>);
+
+impl StderrTail {
+    fn push_line(&self, line: &str) {
+        let line = redact_query_strings(line.trim_end());
+        let Ok(mut lines) = self.0.lock() else {
+            return;
+        };
+        lines.push_back(line);
+        let mut total: usize = lines.iter().map(String::len).sum();
+        while total > STDERR_TAIL_BYTES {
+            match lines.pop_front() {
+                Some(dropped) => total -= dropped.len(),
+                None => break,
+            }
+        }
+    }
+
+    fn snapshot(&self) -> String {
+        self.0
+            .lock()
+            .map(|lines| lines.iter().cloned().collect::<Vec<_>>().join("\n"))
+            .unwrap_or_default()
+    }
+}
+
+fn redact_query_strings(line: &str) -> String {
+    line.split(' ')
+        .map(|word| match (word.contains("://"), word.find(['?', '#'])) {
+            (true, Some(index)) => format!("{}?<redacted>", &word[..index]),
+            _ => word.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn wait_for_devtools_endpoint(
     profile_dir: &Path,
     mut child: Child,
     receiver: mpsc::Receiver<String>,
-) -> Result<(Child, String), String> {
+    stderr_tail: &StderrTail,
+) -> Result<(Child, String), BrowserLaunchError> {
     let deadline = Instant::now() + BROWSER_START_TIMEOUT;
     let active_port = profile_dir.join("DevToolsActivePort");
     while Instant::now() < deadline {
@@ -411,18 +517,43 @@ fn wait_for_devtools_endpoint(
             }
         }
         if let Ok(Some(status)) = child.try_wait() {
-            return Err(format!(
-                "Host browser exited before becoming ready: {status}"
-            ));
+            return Err(exited_before_ready(status, stderr_tail));
         }
         thread::sleep(Duration::from_millis(25));
     }
 
     let terminated = super::pdpp_browser::terminate_browser(&mut child);
     if terminated {
-        Err("Timed out waiting for host browser CDP endpoint".into())
+        Err("Timed out waiting for host browser CDP endpoint"
+            .to_string()
+            .into())
     } else {
-        Err("Timed out waiting for host browser CDP endpoint; termination failed".into())
+        Err(
+            "Timed out waiting for host browser CDP endpoint; termination failed"
+                .to_string()
+                .into(),
+        )
+    }
+}
+
+fn exited_before_ready(
+    status: std::process::ExitStatus,
+    stderr_tail: &StderrTail,
+) -> BrowserLaunchError {
+    // The stderr reader may still hold the last lines; give it a moment.
+    let deadline = Instant::now() + Duration::from_millis(500);
+    let mut tail = stderr_tail.snapshot();
+    while !tail.contains(NO_USABLE_SANDBOX_SIGNATURE) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(25));
+        tail = stderr_tail.snapshot();
+    }
+    log::warn!("Host browser exited before becoming ready ({status}); stderr tail:\n{tail}");
+    if tail.contains(NO_USABLE_SANDBOX_SIGNATURE) {
+        BrowserLaunchError::sandbox_unavailable()
+    } else {
+        BrowserLaunchError::start_failed(format!(
+            "Host browser exited before becoming ready: {status}"
+        ))
     }
 }
 
@@ -519,8 +650,8 @@ fn dispatch_request(request: HttpRequest, state: Arc<HostState>) -> Vec<u8> {
                 Err(error) => json_response(
                     "500 Internal Server Error",
                     &ErrorResponse {
-                        error: "surface_start_failed",
-                        message: Some(error),
+                        error: error.code,
+                        message: Some(error.message),
                     },
                     None,
                 ),
@@ -838,6 +969,117 @@ while :; do sleep 1; done
         let profile_dir = host.state.profile_dir("chase").expect("profile dir");
         let args = fs::read_to_string(profile_dir.join("args.txt")).expect("fake args");
         assert!(!args.contains("--headless=new"));
+    }
+
+    /// A browser that aborts the way Chromium does when AppArmor blocks its
+    /// user-namespace sandbox. The FATAL line is truncated before Chromium's
+    /// own workaround advice.
+    fn sandbox_blocked_browser(temp: &TempDir) -> PathBuf {
+        let path = temp.path().join("sandbox-blocked-browser.sh");
+        fs::write(
+            &path,
+            r#"#!/bin/sh
+echo '[1:1:0928/165834.918776:FATAL:content/browser/zygote_host/zygote_host_impl_linux.cc:129] No usable sandbox! If you are running on Ubuntu 23.10+ or another Linux distro that has disabled unprivileged user namespaces with AppArmor, see https://chromium.googlesource.com/chromium/src/+/main/docs/security/apparmor-userns-restrictions.md?from=test' >&2
+exit 133
+"#,
+        )
+        .expect("write sandbox-blocked browser");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
+            .expect("make sandbox-blocked browser executable");
+        path
+    }
+
+    #[test]
+    fn sandbox_abort_returns_browser_sandbox_unavailable() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let host = BrowserSurfaceHost::start_with_browser(
+            temp.path().join("app-data"),
+            None,
+            Some(sandbox_blocked_browser(&temp)),
+        )
+        .expect("start test host");
+        let response = request(
+            &host,
+            "POST",
+            BROWSER_SURFACE_PATH,
+            Some(host_token(&host)),
+            json!({
+                "run_id": "run-sandbox",
+                "connector_id": "github",
+                "headless": false,
+            }),
+        );
+        assert_eq!(response.status, 500);
+        let body: serde_json::Value = serde_json::from_slice(&response.body).expect("error body");
+        assert_eq!(body["error"], "browser_sandbox_unavailable");
+        let message = body["message"].as_str().expect("error message");
+        assert!(message.contains("Install Google Chrome or Chromium from a .deb package"));
+        assert!(message.contains("/usr/bin/google-chrome"));
+    }
+
+    /// Live check against a real Chromium, for example Playwright's, on a
+    /// host that restricts unprivileged user namespaces:
+    /// `DATACONNECT_LIVE_BROWSER=/path/to/chrome cargo test --lib live_browser -- --ignored`.
+    /// Run it on a private display with an isolated HOME.
+    #[test]
+    #[ignore = "needs a real Chromium in DATACONNECT_LIVE_BROWSER"]
+    fn live_browser_launch_is_ready_or_reports_sandbox_unavailable() {
+        let browser = PathBuf::from(
+            std::env::var("DATACONNECT_LIVE_BROWSER").expect("DATACONNECT_LIVE_BROWSER"),
+        );
+        let temp = tempfile::tempdir().expect("tempdir");
+        let host = BrowserSurfaceHost::start_with_browser(
+            temp.path().join("app-data"),
+            None,
+            Some(browser),
+        )
+        .expect("start test host");
+        let response = request(
+            &host,
+            "POST",
+            BROWSER_SURFACE_PATH,
+            Some(host_token(&host)),
+            json!({
+                "run_id": "run-live",
+                "connector_id": "github",
+                "headless": false,
+            }),
+        );
+        let body: serde_json::Value = serde_json::from_slice(&response.body).expect("body");
+        eprintln!("live host response: HTTP {} {body}", response.status);
+        assert!(
+            response.status == 200 || body["error"] == "browser_sandbox_unavailable",
+            "unexpected host response: HTTP {} {body}",
+            response.status
+        );
+    }
+
+    #[test]
+    fn early_exit_without_sandbox_signature_stays_surface_start_failed() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("crashing-browser.sh");
+        fs::write(&path, "#!/bin/sh\necho 'some other failure' >&2\nexit 1\n")
+            .expect("write crashing browser");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod");
+        let error = launch_browser(&path, temp.path(), true).expect_err("launch must fail");
+        assert_eq!(error.code, "surface_start_failed");
+        assert!(error.message.contains("exited before becoming ready"));
+    }
+
+    #[test]
+    fn stderr_tail_is_bounded_and_redacts_query_strings() {
+        let tail = StderrTail::default();
+        tail.push_line("loading https://bank.example/login?session=secret#frag done\n");
+        assert_eq!(
+            tail.snapshot(),
+            "loading https://bank.example/login?<redacted> done"
+        );
+        for _ in 0..2_000 {
+            tail.push_line("0123456789");
+        }
+        let snapshot = tail.snapshot();
+        assert!(snapshot.len() <= STDERR_TAIL_BYTES + 2_000);
+        assert!(!snapshot.contains("secret"));
     }
 
     #[test]

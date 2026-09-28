@@ -314,6 +314,13 @@ export interface RunNowResult {
   readonly automation_mode?: RunAutomationMode;
   readonly automation_summary?: string;
   readonly browser_surface?: BrowserSurfaceProjection;
+  /**
+   * The host allocator's own error code/message when the browser-surface lease
+   * ended surface_failed because the host's POST /browser-surface/leases 500'd
+   * (e.g. browser_sandbox_unavailable). Undefined when no structured host
+   * reason is known.
+   */
+  readonly browser_surface_failure?: { readonly code: string; readonly message: string };
   readonly run_id: string;
   readonly status?: "started" | BrowserSurfaceProjection["browser_surface_status"];
   readonly trace_id: string;
@@ -524,6 +531,14 @@ export interface ControllerOptions {
   }) => Promise<void> | void;
   /** Awaited before a managed surface lease becomes reusable after run cleanup. */
   beforeBrowserSurfaceLeaseRelease?: (args: { readonly runId: string }) => Promise<void> | void;
+  /**
+   * Resolves the host allocator's recorded start failure (code + message) for a
+   * run whose browser-surface lease just went surface_failed. Wired to the host
+   * allocator's `lastStartFailure` in host mode; undefined in dynamic/local mode.
+   */
+  describeBrowserSurfaceStartFailure?: (args: {
+    readonly runId: string;
+  }) => { readonly code: string; readonly message: string } | undefined;
   /**
    * Awaited before the runtime commits an interaction timeout. The reference
    * server uses this to restore (or retire) a presentation surface before a
@@ -2730,6 +2745,9 @@ export function createController(opts: ControllerOptions = {}): Controller {
     browserSurfaceAllocator: browserSurfaceAllocator ?? null,
     ...(opts.beforeBrowserSurfaceLeaseEnsure
       ? { beforeBrowserSurfaceLeaseEnsure: opts.beforeBrowserSurfaceLeaseEnsure }
+      : {}),
+    ...(opts.describeBrowserSurfaceStartFailure
+      ? { describeBrowserSurfaceStartFailure: opts.describeBrowserSurfaceStartFailure }
       : {}),
     browserSurfaceLeaseManager: browserSurfaceLeaseManager ?? null,
     browserSurfaceLeaseStore: browserSurfaceLeaseStore ?? null,

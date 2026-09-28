@@ -202,3 +202,109 @@ test("host endpoint failure terminalizes admission before a connector can start"
 	assert.equal(ready.lease.wait_reason, "surface_start_failed");
 	assert.equal(mock.calls.length, 1);
 });
+
+test("host endpoint 500 with a structured sandbox-unavailable body surfaces the host reason on the allocator error and lastStartFailure", async () => {
+	const mock = createMockHostEndpoint({
+		json: async () => ({
+			error: "browser_sandbox_unavailable",
+			message:
+				"This Linux distribution blocks the bundled browser's sandbox. Install Google Chrome or Chromium from a .deb package.",
+		}),
+		ok: false,
+		status: 500,
+	});
+	const allocator = hostAllocator(mock.fetchImpl);
+	allocator.bindRunToSurface({ runId: "run-sandbox", surfaceId: "surface_1" });
+
+	const request: EnsureBrowserSurfaceRequest = {
+		connectorId: "chase",
+		profileKey: "chase",
+		surfaceId: "surface_1",
+	};
+
+	let caught: unknown;
+	try {
+		await allocator.ensureSurface(request);
+	} catch (error) {
+		caught = error;
+	}
+	assert.ok(caught instanceof Error);
+	const err = caught as Error & { hostError?: string; hostMessage?: string };
+	assert.equal(err.hostError, "browser_sandbox_unavailable");
+	assert.match(
+		err.hostMessage ?? "",
+		/This Linux distribution blocks the bundled browser's sandbox/,
+	);
+	assert.match(err.message, /browser_sandbox_unavailable/);
+	assert.match(err.message, /This Linux distribution blocks/);
+
+	const failure = allocator.lastStartFailure("run-sandbox");
+	assert.equal(failure?.code, "browser_sandbox_unavailable");
+	assert.match(
+		failure?.message ?? "",
+		/This Linux distribution blocks the bundled browser's sandbox/,
+	);
+});
+
+test("host endpoint 500 with a structured body reaches lastStartFailure after ensureStartingSurfaceReady swallows the error", async () => {
+	const mock = createMockHostEndpoint({
+		json: async () => ({
+			error: "surface_start_failed",
+			message: "the neko container exited before CDP came up",
+		}),
+		ok: false,
+		status: 500,
+	});
+	const allocator = hostAllocator(mock.fetchImpl);
+	const manager = dynamicManager();
+	const acquired = manager.acquire({
+		connectorId: "chase",
+		profileKey: "chase",
+		runId: "run-surface-start-failed",
+	});
+	allocator.bindRunToSurface({
+		runId: "run-surface-start-failed",
+		surfaceId: "surface_1",
+	});
+
+	const ready = await manager.ensureStartingSurfaceReady({
+		allocator,
+		leaseId: acquired.lease.lease_id,
+	});
+
+	assert.equal(ready.lease.status, "surface_failed");
+	assert.equal(ready.lease.wait_reason, "surface_start_failed");
+
+	const failure = allocator.lastStartFailure("run-surface-start-failed");
+	assert.equal(failure?.code, "surface_start_failed");
+	assert.match(
+		failure?.message ?? "",
+		/the neko container exited before CDP came up/,
+	);
+});
+
+test("host endpoint 500 with a non-JSON body keeps today's plain HTTP-status message and records no structured failure", async () => {
+	const mock = createMockHostEndpoint({
+		json: async () => {
+			throw new SyntaxError("Unexpected token in JSON");
+		},
+		ok: false,
+		status: 500,
+	});
+	const allocator = hostAllocator(mock.fetchImpl);
+	allocator.bindRunToSurface({ runId: "run-nonjson", surfaceId: "surface_1" });
+
+	const request: EnsureBrowserSurfaceRequest = {
+		connectorId: "chase",
+		profileKey: "chase",
+		surfaceId: "surface_1",
+	};
+
+	await assert.rejects(
+		allocator.ensureSurface(request),
+		/returned HTTP 500$/,
+	);
+
+	const failure = allocator.lastStartFailure("run-nonjson");
+	assert.equal(failure?.code, "host_browser_surface_http_error");
+});

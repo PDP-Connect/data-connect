@@ -168,6 +168,16 @@ export interface BrowserSurfaceManagerDeps {
     readonly runId: string;
     readonly surfaceId: string;
   }) => Promise<void> | void;
+  /**
+   * Resolves the host allocator's recorded start failure (code + message) for a
+   * run whose lease just went surface_failed, so the reason the remote-surface
+   * lease manager's bare `catch {}` swallows can still reach the spine event
+   * and the RunNowResult. Returns undefined when no structured failure is known
+   * (e.g. dynamic/local allocator mode, or a non-HTTP failure).
+   */
+  readonly describeBrowserSurfaceStartFailure?: (args: {
+    readonly runId: string;
+  }) => { readonly code: string; readonly message: string } | undefined;
   readonly browserSurfaceLeaseManager: BrowserSurfaceLeaseManager | null;
   readonly browserSurfaceLeaseStore: BrowserSurfaceLeaseStore | null;
   readonly browserSurfaceMidWaitPollIntervalMs: number | undefined;
@@ -280,6 +290,7 @@ export function createBrowserSurfaceManager(deps: BrowserSurfaceManagerDeps): Br
     activeRunInteractions,
     browserSurfaceAllocator,
     beforeBrowserSurfaceLeaseEnsure,
+    describeBrowserSurfaceStartFailure,
     browserSurfaceLeaseManager,
     browserSurfaceLeaseStore,
     browserSurfaceReplacementReceiptStore,
@@ -356,7 +367,8 @@ export function createBrowserSurfaceManager(deps: BrowserSurfaceManagerDeps): Br
     connectorId: string,
     runId: string,
     traceContext: SpineTraceContext,
-    lease: BrowserSurfaceLease
+    lease: BrowserSurfaceLease,
+    extraData?: Record<string, unknown>
   ): Promise<void> {
     try {
       const connectorInstanceId = await requireConnectorInstanceIdForRun(runId);
@@ -368,6 +380,7 @@ export function createBrowserSurfaceManager(deps: BrowserSurfaceManagerDeps): Br
           connection_id: connectorInstanceId,
           connector_instance_id: connectorInstanceId,
           source: buildRunSource(connectorId),
+          ...extraData,
         },
         event_type: eventType,
         object_id: runId,
@@ -1194,13 +1207,15 @@ export function createBrowserSurfaceManager(deps: BrowserSurfaceManagerDeps): Br
     ctx: ManagedSurfaceContext,
     lease: BrowserSurfaceLease,
     status: NonNullable<RunNowResult["status"]>,
-    surfaceOverride?: BrowserSurfaceProjection
+    surfaceOverride?: BrowserSurfaceProjection,
+    browserSurfaceFailure?: { readonly code: string; readonly message: string }
   ): RunNowResult {
     return {
       browser_surface: surfaceOverride ?? projectBrowserSurfaceLease(lease),
       run_id: ctx.runId,
       status,
       trace_id: ctx.traceContext.trace_id,
+      ...(browserSurfaceFailure ? { browser_surface_failure: browserSurfaceFailure } : {}),
       ...ctx.automationMetadata,
     };
   }
@@ -1252,14 +1267,30 @@ export function createBrowserSurfaceManager(deps: BrowserSurfaceManagerDeps): Br
     const readyResult = await waitForStartingBrowserSurface(startingLease, connectorId, runId, traceContext);
     if (readyResult.lease.status === "surface_failed") {
       pendingBrowserSurfaceLaunches.delete(runId);
+      const browserSurfaceFailure = describeBrowserSurfaceStartFailure?.({ runId });
+      if (browserSurfaceFailure) {
+        log.warn?.(
+          `[controller] browser surface start failed for ${runId}: ${browserSurfaceFailure.code}: ${browserSurfaceFailure.message}`
+        );
+      }
       await emitBrowserSurfaceLeaseEvent(
         "run.browser_surface_failed",
         connectorId,
         runId,
         traceContext,
-        readyResult.lease
+        readyResult.lease,
+        browserSurfaceFailure ? { browser_surface_failure: browserSurfaceFailure } : undefined
       );
-      return { kind: "early_return", result: buildBrowserSurfaceEarlyReturn(ctx, readyResult.lease, "surface_failed") };
+      return {
+        kind: "early_return",
+        result: buildBrowserSurfaceEarlyReturn(
+          ctx,
+          readyResult.lease,
+          "surface_failed",
+          undefined,
+          browserSurfaceFailure
+        ),
+      };
     }
     const readySurface =
       readyResult.surface ??
