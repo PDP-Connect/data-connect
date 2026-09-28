@@ -529,6 +529,15 @@ pub(crate) fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Erro
     // The console asks for the password window, OS re-auth and a stack
     // restart by writing request files under the data directory. Only these
     // watchers act on them; v0.7.59 never started them.
+    match crate::owner_credential::absorb_pending_owner_password_stack_restart_request(
+        &app_handle,
+    ) {
+        Ok(Some(request_id)) => log::info!(
+            "Owner password stack-restart request {request_id} from the last session is covered by this start"
+        ),
+        Ok(None) => {}
+        Err(error) => log::warn!("Could not absorb a pending owner password stack restart: {error}"),
+    }
     crate::owner_credential::spawn_owner_password_window_watcher(app_handle.clone());
     crate::owner_credential::spawn_owner_os_reauth_watcher(app_handle.clone());
     crate::owner_credential::spawn_owner_password_stack_restart_watcher(app_handle.clone());
@@ -3158,10 +3167,34 @@ fn console_path_before_restart(app: &AppHandle) -> Option<String> {
     }
 }
 
+/// True while a start or restart of the managed stack is running.
+pub(crate) fn stack_bootstrap_in_flight(app: &AppHandle) -> bool {
+    app.try_state::<UnifiedRuntimeState>()
+        .and_then(|state| {
+            state
+                .status
+                .lock()
+                .ok()
+                .map(|status| matches!(*status, UnifiedStatus::Starting | UnifiedStatus::Restarting))
+        })
+        .unwrap_or(false)
+}
+
 pub(crate) async fn restart_after_remote_access_config(app: AppHandle) -> Result<(), String> {
     if !remote_access_configuration_supported() {
         return Err("Remote access requires the managed desktop stack".into());
     }
+    let result = restart_managed_stack(app.clone()).await;
+    // Without this a failed restart left the tray at "Restarting" or
+    // "Starting", and the owner-password restart watcher, which waits while
+    // a bootstrap runs, would wait forever.
+    if result.is_err() {
+        set_status(&app, UnifiedStatus::Error);
+    }
+    result
+}
+
+async fn restart_managed_stack(app: AppHandle) -> Result<(), String> {
     let preserved_path = console_path_before_restart(&app);
     set_status(&app, UnifiedStatus::Restarting);
     tokio::task::spawn_blocking({

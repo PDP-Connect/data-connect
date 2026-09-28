@@ -386,10 +386,12 @@ pub(crate) fn mock_app_with_data_dir(
 ) -> tauri::App<tauri::test::MockRuntime> {
     let mut context: tauri::Context<tauri::test::MockRuntime> = tauri::generate_context!();
     context.config_mut().identifier = data_root.join("app").to_string_lossy().into_owned();
-    tauri::test::mock_builder()
+    let app = tauri::test::mock_builder()
         .invoke_handler(route_invoke(runtime_generic_invoke_handler(), |_| false))
         .build(context)
-        .expect("build the mock app")
+        .expect("build the mock app");
+    app.manage(owner_credential::ConfiguredOwnerPasswordForTest(None));
+    app
 }
 
 /// Send one IPC call from `webview`, as its page's `invoke()` would.
@@ -454,6 +456,40 @@ mod tests {
         }));
         assert_eq!(
             response.expect_err("no window request is pending"),
+            serde_json::json!("Open the password window from Settings before saving.")
+        );
+    }
+
+    /// The IPC ACL lets every local-origin webview call app commands, so the
+    /// legacy `main` window and the recovery window reach this command too.
+    /// Only the password window may pass to the command's authority check.
+    #[test]
+    fn only_the_password_window_may_save_a_password() {
+        let data_root = tempfile::tempdir().expect("tempdir");
+        let app = mock_app_with_data_dir(data_root.path());
+        for label in ["main", "recovery"] {
+            let window = tauri::WebviewWindowBuilder::new(&app, label, Default::default())
+                .build()
+                .expect("build a local webview");
+            let response = invoke_from(&window, "set_desktop_owner_password", serde_json::json!({
+                "password": "a-long-enough-owner-password",
+            }));
+            assert_eq!(
+                response.expect_err("refused by label"),
+                serde_json::json!(
+                    "Only the DataConnect password window can save the owner password."
+                ),
+                "{label}"
+            );
+        }
+        let window = tauri::WebviewWindowBuilder::new(&app, "owner-password", Default::default())
+            .build()
+            .expect("build the owner-password window");
+        let response = invoke_from(&window, "set_desktop_owner_password", serde_json::json!({
+            "password": "a-long-enough-owner-password",
+        }));
+        assert_eq!(
+            response.expect_err("reaches the authority check"),
             serde_json::json!("Open the password window from Settings before saving.")
         );
     }
