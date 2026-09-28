@@ -209,7 +209,7 @@ test("recovery startup revokes existing owner sessions before scheduler startup 
     rust.indexOf("fn credential_recovery_state_path")
   )
 
-  assert.match(recoveryStart, /start_managed_stack\([\s\S]*None,[\s\S]*true,/)
+  assert.match(recoveryStart, /start_managed_stack\([\s\S]*None,[\s\S]*Some\(OwnerSessionReset::Recovery\),/)
   assert.match(server, /RECOVERY_REVOKE_OWNER_SESSIONS_ENV/)
   assert.match(server, /revokeAllSessions/)
   assert.match(server, /listOwnerBearers/)

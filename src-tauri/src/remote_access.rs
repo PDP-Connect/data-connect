@@ -17,7 +17,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, Runtime};
 
 pub(crate) const USER_SUPPLIED_ORIGIN_PROVIDER_ID: &str = "user_supplied_origin";
 const REMOTE_ACCESS_CONFIG_FILE: &str = "remote-access.json";
@@ -826,7 +826,7 @@ pub(crate) fn validate_remote_access_config(
 /// the desktop supervisor and the reference server's owner-authenticated
 /// remote-access routes (`server/routes/owner-remote-access.ts`) read and
 /// write one persisted config, never two.
-fn remote_access_config_path(app: &AppHandle) -> Result<PathBuf, String> {
+fn remote_access_config_path<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
     app.path()
         .app_data_dir()
         .map(|path| {
@@ -834,6 +834,27 @@ fn remote_access_config_path(app: &AppHandle) -> Result<PathBuf, String> {
                 .join(REMOTE_ACCESS_CONFIG_FILE)
         })
         .map_err(|error| format!("Failed to resolve DataConnect app-data directory: {error}"))
+}
+
+/// True when the saved posture is `off`: no remote device can have signed
+/// in. Reads only the `posture` field, so a config that fails full
+/// validation still answers. A file that cannot be read or parsed counts as
+/// not off, because the caller uses this to decide whether to revoke owner
+/// sessions, and a needless revocation only signs devices out.
+pub(crate) fn saved_remote_access_posture_is_off<R: Runtime>(app: &AppHandle<R>) -> bool {
+    let Ok(path) = remote_access_config_path(app) else {
+        return false;
+    };
+    let content = match fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return true,
+        Err(_) => return false,
+    };
+    serde_json::from_str::<serde_json::Value>(&content)
+        .ok()
+        .and_then(|config| config.get("posture").cloned())
+        .and_then(|posture| serde_json::from_value::<RemoteAccessPosture>(posture).ok())
+        == Some(RemoteAccessPosture::Off)
 }
 
 pub(crate) fn load_remote_access_config(app: &AppHandle) -> Result<RemoteAccessConfig, String> {

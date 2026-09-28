@@ -12,6 +12,7 @@ import {
   writeFile,
 } from "node:fs/promises"
 import { dirname, join } from "node:path"
+import { remoteAccessConfigPath } from "./remote-access-store.ts"
 
 export const OWNER_PASSWORD_OWNER_SET_MARKER_FILE =
   "owner-password-owner-set.json"
@@ -35,6 +36,8 @@ export interface OwnerPasswordWindowRequestState {
   grantId?: string
   grantConsumedRequestId?: number
   purpose?: "initial_setup" | "change"
+  revokeSessions?: boolean
+  revokeReason?: "password_change" | "recovery"
 }
 
 const OWNER_REAUTH_TIMEOUT_MS = 120_000
@@ -360,9 +363,39 @@ export function ownerOsReauthAllowsReveal(
   )
 }
 
+/**
+ * True when the saved remote-access posture is `off`, so no remote device
+ * can have signed in. Reads only `posture`; a file that cannot be read or
+ * parsed counts as not off, because a needless revocation only signs devices
+ * out. Mirrors `saved_remote_access_posture_is_off` in
+ * src-tauri/src/remote_access.rs.
+ */
+async function savedRemoteAccessPostureIsOff(dataDir: string): Promise<boolean> {
+  let content: string
+  try {
+    content = await readFile(remoteAccessConfigPath(dataDir), "utf8")
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT"
+  }
+  try {
+    return (JSON.parse(content) as { posture?: unknown }).posture === "off"
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Ask the desktop to restart the stack with the owner password just saved.
+ * The console calls this after the owner's first chosen password. When
+ * remote access is already on (an install from before the password gate), a
+ * phone may be signed in with the generated password, so the restart
+ * revokes every owner session and bearer. With remote access off, no remote
+ * device can be signed in and nothing is revoked.
+ */
 export async function requestOwnerPasswordStackRestart(
   dataDir: string
-): Promise<{ requestId: number }> {
+): Promise<{ requestId: number; revokeSessions: boolean }> {
+  const revokeSessions = !(await savedRemoteAccessPostureIsOff(dataDir))
   return withRequestLock(dataDir, async () => {
     const path = join(
       unifiedDbDir(dataDir),
@@ -370,7 +403,12 @@ export async function requestOwnerPasswordStackRestart(
     )
     const previous = await readIndexRequestState(path)
     const requestId = nextRequestId(previous)
-    await writeRequestStateAtomically(path, { requestId })
-    return { requestId }
+    await writeRequestStateAtomically(
+      path,
+      revokeSessions
+        ? { requestId, revokeReason: "password_change", revokeSessions: true }
+        : { requestId }
+    )
+    return { requestId, revokeSessions }
   })
 }

@@ -13,13 +13,19 @@
  *
  * The test signs in, stops the server, applies those inputs, starts a new
  * server on the same database, and checks the old owner session is refused.
+ *
+ * The desktop uses the same inputs after an owner password change, with
+ * reason "password_change" in the reset file. The RI logs that reason, so
+ * a password change is not reported as a recovery.
  */
 
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Writable } from "node:stream";
 import test from "node:test";
+import pino from "pino";
 import { closeDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
 
@@ -53,10 +59,23 @@ async function stop(server: StartedServer): Promise<void> {
   closeDb();
 }
 
-async function start(dbPath: string): Promise<{ server: StartedServer; asUrl: string }> {
+async function start(
+  dbPath: string,
+  logLines: string[] = []
+): Promise<{ server: StartedServer; asUrl: string }> {
+  const logger = pino(
+    { level: "warn" },
+    new Writable({
+      write(chunk, _encoding, callback) {
+        logLines.push(String(chunk));
+        callback();
+      },
+    })
+  );
   const server = (await startServer({
     asPort: 0,
     dbPath,
+    logger,
     ownerAuthPassword: TEST_PASSWORD,
     quiet: true,
     rsPort: 0,
@@ -121,7 +140,8 @@ test("desktop recovery startup revokes owner sessions issued before the recovery
       JSON.stringify({ version: 1, cause: "legacy_v1_kit_missing_credential_key" })
     );
 
-    const after = await start(dbPath);
+    const logLines: string[] = [];
+    const after = await start(dbPath, logLines);
     try {
       assert.equal(await sessionStatus(after.asUrl, oldSession), 401, "pre-recovery owner session is rejected");
       const fresh = await login(after.asUrl);
@@ -130,8 +150,66 @@ test("desktop recovery startup revokes owner sessions issued before the recovery
       await stop(after.server);
     }
     assert.ok(existsSync(join(dataDir, `${RESET_FILE}.applied`)), "RI consumed the reset file");
+    assert.ok(
+      logLines.some((line) => {
+        const entry = JSON.parse(line) as { msg?: string; reason?: string };
+        return (
+          entry.reason === "recovery" &&
+          entry.msg === "recovery startup revoked existing owner sessions and owner bearers before serving"
+        );
+      }),
+      "the RI logs the revocation as a recovery"
+    );
     assert.ok(existsSync(join(dataDir, `${MARKER_FILE}.applied`)), "RI consumed the credential marker");
     assert.ok(!existsSync(join(dataDir, MARKER_FILE)), "no unconsumed credential marker remains");
+  } finally {
+    if (previousDataDir === undefined) delete process.env.PDPP_DATA_DIR;
+    else process.env.PDPP_DATA_DIR = previousDataDir;
+    if (previousRevoke === undefined) delete process.env[REVOKE_ENV];
+    else process.env[REVOKE_ENV] = previousRevoke;
+    rmSync(dataDir, { force: true, recursive: true });
+  }
+});
+
+test("desktop password-change startup revokes owner sessions and logs a password change", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pdpp-desktop-password-change-"));
+  const previousDataDir = process.env.PDPP_DATA_DIR;
+  const previousRevoke = process.env[REVOKE_ENV];
+  process.env.PDPP_DATA_DIR = dataDir;
+  delete process.env[REVOKE_ENV];
+  const dbPath = join(dataDir, "pdpp.sqlite");
+  try {
+    const before = await start(dbPath);
+    let oldSession: string;
+    try {
+      oldSession = await login(before.asUrl);
+    } finally {
+      await stop(before.server);
+    }
+
+    // Password-change startup inputs, as written by the desktop.
+    process.env[REVOKE_ENV] = "1";
+    writeFileSync(join(dataDir, RESET_FILE), JSON.stringify({ version: 1, reason: "password_change" }));
+
+    const logLines: string[] = [];
+    const after = await start(dbPath, logLines);
+    try {
+      assert.equal(await sessionStatus(after.asUrl, oldSession), 401, "pre-change owner session is rejected");
+    } finally {
+      await stop(after.server);
+    }
+    const revoked = logLines
+      .map((line) => JSON.parse(line) as { msg?: string; reason?: string })
+      .filter((entry) => entry.msg?.includes("revoked existing owner sessions"));
+    assert.deepEqual(
+      revoked.map((entry) => [entry.reason, entry.msg]),
+      [
+        [
+          "password_change",
+          "owner password change revoked existing owner sessions and owner bearers before serving",
+        ],
+      ]
+    );
   } finally {
     if (previousDataDir === undefined) delete process.env.PDPP_DATA_DIR;
     else process.env.PDPP_DATA_DIR = previousDataDir;

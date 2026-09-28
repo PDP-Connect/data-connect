@@ -30,9 +30,9 @@ test("reveal is offered only for the RI's desktop source in the desktop's own we
     page,
     /canReveal=\{ownerPasswordSource === "desktop" && hasLocalRevealProof\}/
   )
-  assert.match(page, /hasLocalOwnerCredentialRevealProofCookie\(\)/)
+  assert.match(page, /hasValidLocalOwnerCredentialRevealProofCookie\(\)/)
   assert.doesNotMatch(page, /PDPP_OWNER_PASSWORD_SOURCE/)
-  assert.match(client, /ownerCredentialRevealProofCookie\(\)\) !== null/)
+  assert.match(client, /timingSafeEqual\(expectedBytes, presentedBytes\)/)
 })
 
 test("the reveal client uses the desktop-set reveal cookie, not request Host, as local provenance", async () => {
@@ -47,7 +47,7 @@ test("the reveal client uses the desktop-set reveal cookie, not request Host, as
     client,
     /ownerCredentialRevealHeadersForCookie\(await ownerCredentialRevealProofCookie\(\)\)/
   )
-  assert.match(client, /hasLocalOwnerCredentialRevealProofCookie/)
+  assert.match(client, /hasValidLocalOwnerCredentialRevealProofCookie/)
   assert.doesNotMatch(client, /headers\(\)/)
   assert.doesNotMatch(client, /requestHeaders\.get\("host"\)/)
   assert.doesNotMatch(client, /x-forwarded-host/)
@@ -126,13 +126,13 @@ test("Linux says there is no OS prompt yet, from the server render", async () =>
   assert.match(page, /linuxNoOsPrompt=\{process\.platform === "linux"\}/)
 })
 
-test("on Linux the local proof cookie gates reveal and change before any request is written", async () => {
+test("the verified local proof gates reveal and change before any request is written", async () => {
   const actions = await readFile(`${HERE}owner-password-actions.ts`, "utf8")
   assert.match(actions, /ownerOsReauthAllowsReveal/)
   assert.match(actions, /const reauth = await requireOwnerOsReauthGrant\(\)/)
   assert.ok(
-    actions.indexOf("hasLocalOwnerCredentialRevealProofCookie())") <
+    actions.indexOf("hasValidLocalOwnerCredentialRevealProofCookie())") <
       actions.indexOf("requestOwnerOsReauth(dataDir())"),
-    "the Linux local proof check must run before an OS reauth request is queued"
+    "the local proof check must run before an OS reauth request is queued"
   )
 })

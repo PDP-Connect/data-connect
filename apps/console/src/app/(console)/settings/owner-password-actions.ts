@@ -12,7 +12,7 @@ import {
   requestOwnerPasswordWindow,
 } from "pdpp-reference-implementation/owner-password-owner-set"
 import { requireDashboardAccess } from "../lib/dashboard-access.ts"
-import { hasLocalOwnerCredentialRevealProofCookie } from "../lib/owner-credential-client.ts"
+import { hasValidLocalOwnerCredentialRevealProofCookie } from "../lib/owner-credential-client.ts"
 import { redirectToOwnerLogin } from "../lib/login-redirect.ts"
 import { getAsInternalUrl, withOwnerSessionCookie } from "../lib/owner-token.ts"
 
@@ -47,9 +47,13 @@ type OwnerOsReauthResult =
     }
   | { ok: false; message: string }
 
-// Linux has no verified OS prompt yet (polkit), so there the desktop
-// webview's local proof cookie is the gate for both reveal and change.
-// Change adds no disclosure: whoever can reveal already holds the password.
+// Every action here starts an OS prompt or a window on the owner's desktop,
+// so it must come from the desktop's own webview: the verified local proof
+// cookie, checked before any request file is written. A browser reaching
+// the console over remote access cannot start either. Linux has no verified
+// OS prompt yet (polkit), so there the proof is the whole gate for reveal
+// and change. Change adds no disclosure: whoever can reveal already holds
+// the password.
 async function requireOwnerOsReauthGrant(): Promise<OwnerOsReauthResult> {
   await requireDashboardAccess("/settings")
   if (process.env.PDPP_MANAGED_DESKTOP_HOST !== "1") {
@@ -58,14 +62,11 @@ async function requireOwnerOsReauthGrant(): Promise<OwnerOsReauthResult> {
       message: "Open the DataConnect desktop app to confirm this action.",
     }
   }
-  if (
-    process.platform === "linux" &&
-    !(await hasLocalOwnerCredentialRevealProofCookie())
-  ) {
+  if (!(await hasValidLocalOwnerCredentialRevealProofCookie())) {
     return {
       ok: false,
       message:
-        "Open Settings from the local desktop app to reveal or change the owner password on Linux.",
+        "Open Settings from the local desktop app to reveal or change the owner password.",
     }
   }
   const { requestId } = await requestOwnerOsReauth(dataDir())
