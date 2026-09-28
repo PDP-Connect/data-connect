@@ -94,7 +94,7 @@ test("native OS reauth waits asynchronously and late callbacks cannot mint grant
   )
 })
 
-test("native grants are opaque purpose-bound tokens and Linux skipped auth cannot mint a write grant", async () => {
+test("native grants are opaque purpose-bound tokens minted after OS reauth or the Linux no-prompt result", async () => {
   const rust = await readFile(OWNER_CREDENTIAL_RUST_FILE, "utf8")
 
   assert.match(rust, /HashMap<String, OwnerReauthGrant>/)
@@ -102,12 +102,16 @@ test("native grants are opaque purpose-bound tokens and Linux skipped auth canno
   assert.match(rust, /purpose: "change"\.to_string\(\)/)
   assert.match(rust, /window_request_id: None/)
   assert.match(rust, /grant\.window_request_id = Some\(request_id\)/)
-  assert.match(rust, /status == "authenticated"/)
   assert.match(rust, /Ok\("skipped_linux_polkit_unverified"\)/)
+  // Linux has no verified OS prompt; the console gates a Linux change on
+  // the desktop webview's local proof cookie (owner-password-actions.test.ts).
+  const mint =
+    'if status == "authenticated" || status == "skipped_linux_polkit_unverified"'
   assert.ok(
-    rust.indexOf('if status == "authenticated"') <
-      rust.indexOf("let grant_id = uuid::Uuid::new_v4().to_string()"),
-    "write grants must be minted only for authenticated OS reauth results"
+    rust.indexOf(mint) >= 0 &&
+      rust.indexOf(mint) <
+        rust.indexOf("let grant_id = uuid::Uuid::new_v4().to_string()"),
+    "write grants must be minted only for an OS reauth result"
   )
 })
 

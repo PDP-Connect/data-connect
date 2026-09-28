@@ -65,6 +65,10 @@ struct OwnerPasswordRequestState {
     grant_consumed_request_id: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     purpose: Option<String>,
+    /// On a stack-restart request: the RI must revoke every owner session
+    /// and bearer when it starts again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    revoke_sessions: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -630,7 +634,10 @@ fn complete_owner_os_reauth_request_at(
         Ok(status) => {
             state.status = Some(status.to_string());
             state.error = None;
-            if status == "authenticated" {
+            // Linux has no verified OS prompt yet; the console lets a Linux
+            // change start only from the desktop's own webview (its local
+            // proof cookie), the same gate as reveal.
+            if status == "authenticated" || status == "skipped_linux_polkit_unverified" {
                 let expires_unix_ms = unix_time_ms_now()?.saturating_add(
                     OWNER_OS_REAUTH_GRANT_TTL
                         .as_millis()
@@ -704,10 +711,11 @@ fn current_owner_password_window_request_state<R: Runtime>(
     load_owner_password_request_state(&index_path, "owner-password window request")
 }
 
+/// Consume the window request's authority and return its purpose.
 fn consume_owner_password_window_authority<R: Runtime>(
     app: &AppHandle<R>,
     request_id: Option<u64>,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let request_id = request_id
         .ok_or_else(|| "Open the password window from Settings before saving.".to_string())?;
     let recovery_path = owner_password_recovery_window_request_path(app)?;
@@ -753,12 +761,13 @@ fn consume_owner_password_window_authority<R: Runtime>(
             return Err("This password window request is missing a supported purpose.".to_string())
         }
     }
-    if is_recovery_request {
+    let saved = if is_recovery_request {
         save_owner_password_request_state(&recovery_path, &state, "owner-password recovery request")
     } else {
         let request_path = owner_password_window_request_file_path(app, request_id)?;
         save_owner_password_request_state(&request_path, &state, "owner-password window request")
-    }
+    };
+    saved.map(|()| state.purpose.unwrap_or_default())
 }
 
 fn complete_owner_password_window_request<R: Runtime>(
@@ -838,8 +847,34 @@ pub(crate) fn complete_owner_password_stack_restart_request<R: Runtime>(
     Ok(())
 }
 
-fn queue_delayed_owner_password_stack_restart_request<R: Runtime>(
+/// Stands in for OS re-auth and the window watcher in tests: bind a live
+/// "change" grant to window request `request_id`, as the watcher does after
+/// the owner confirms.
+#[cfg(test)]
+pub(crate) fn grant_owner_password_change_for_test(request_id: u64, grant_id: &str) {
+    owner_reauth_grants()
+        .lock()
+        .expect("grant registry")
+        .insert(
+            grant_id.to_string(),
+            OwnerReauthGrant {
+                expires_unix_ms: unix_time_ms_now().expect("system time") + 60_000,
+                purpose: "change".to_string(),
+                reauth_request_id: 0,
+                window_request_id: Some(request_id),
+            },
+        );
+}
+
+/// Queue the stack restart that starts the RI with the password just saved.
+/// A change or a recovery restarts now and revokes every owner session and
+/// bearer: a replaced password must not leave a phone or a CLI token signed
+/// in. First-time setup keeps the delayed restart without revocation: the
+/// remote-access form that asked for it saves its config next, and that save
+/// restarts the stack sooner through the config watcher.
+fn queue_owner_password_stack_restart_request<R: Runtime>(
     app: &AppHandle<R>,
+    purpose: &str,
 ) -> Result<(), String> {
     let path = owner_password_stack_restart_request_path(app)?;
     let mut state =
@@ -850,7 +885,13 @@ fn queue_delayed_owner_password_stack_restart_request<R: Runtime>(
         .saturating_add(1)
         .max(1);
     state.request_id = next_request_id;
-    state.not_before_unix_ms = Some(unix_time_ms_now()?.saturating_add(180_000));
+    if purpose == "initial_setup" {
+        state.not_before_unix_ms = Some(unix_time_ms_now()?.saturating_add(180_000));
+        state.revoke_sessions = None;
+    } else {
+        state.not_before_unix_ms = None;
+        state.revoke_sessions = Some(true);
+    }
     save_owner_password_request_state(&path, &state, "owner-password stack-restart request")
 }
 
@@ -1056,7 +1097,7 @@ async fn poll_owner_password_stack_restart_request<F, Fut>(
     restart: F,
 ) -> Result<StackRestartPoll, String>
 where
-    F: FnOnce() -> Fut,
+    F: FnOnce(bool) -> Fut,
     Fut: std::future::Future<Output = Result<(), String>>,
 {
     const LABEL: &str = "owner-password stack-restart request";
@@ -1069,7 +1110,7 @@ where
     else {
         return Ok(StackRestartPoll::Idle);
     };
-    match restart().await {
+    match restart(state.revoke_sessions == Some(true)).await {
         Ok(()) => {
             watcher.last_seen_request_id = request_id;
             complete_owner_password_request_at(path, LABEL, request_id)?;
@@ -1132,7 +1173,9 @@ pub(crate) fn spawn_owner_password_stack_restart_watcher(app: AppHandle) {
                 &mut watcher,
                 bootstrap_in_flight,
                 now_unix_ms,
-                || crate::unified::restart_after_remote_access_config(restart_app),
+                |revoke_sessions| {
+                    crate::unified::restart_after_remote_access_config(restart_app, revoke_sessions)
+                },
             )
             .await
             {
@@ -1362,10 +1405,10 @@ pub(crate) async fn set_desktop_owner_password<R: Runtime>(
             "Owner passwords must be at least {OWNER_PASSWORD_MIN_LENGTH} characters long."
         ));
     }
-    consume_owner_password_window_authority(&app, window_request_id)?;
+    let purpose = consume_owner_password_window_authority(&app, window_request_id)?;
     save_owner_credential(&app, &password)?;
     mark_owner_password_owner_set(&app)?;
-    queue_delayed_owner_password_stack_restart_request(&app)?;
+    queue_owner_password_stack_restart_request(&app, &purpose)?;
     complete_owner_password_window_request(&app, window_request_id)?;
     if let Some(window) = app.get_webview_window(OWNER_PASSWORD_WINDOW_LABEL) {
         let _ = window.close();
@@ -1991,7 +2034,7 @@ mod tests {
             watcher,
             bootstrap_in_flight,
             u64::MAX,
-            || async {
+            |_revoke_sessions| async {
                 restarts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 outcome
             },

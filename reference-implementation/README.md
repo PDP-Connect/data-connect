@@ -315,7 +315,7 @@ Unauthenticated HTML requests to the protected routes redirect to `/owner/login?
 The placeholder is intentionally narrow:
 
 - no user table, no external IdP, no multi-user auth
-- stateless HMAC-signed session cookie - rotating `PDPP_OWNER_PASSWORD` invalidates existing sessions
+- owner sessions are stored in the database and are not bound to the password. Changing `PDPP_OWNER_PASSWORD` and restarting leaves existing sessions and owner bearers valid; revoke them under Settings > Owner sessions. A password change in the DataConnect desktop app restarts the server and revokes every owner session and bearer. A change through `/owner/password/change` (the app-managed password) keeps the session that made it and revokes the others
 - public protocol surfaces (`/oauth/par`, `/oauth/register`, `/oauth/token`, `/v1/*`, `/.well-known/*`) are **not** gated
 - the placeholder is still not a durable owner-auth story; it is only the current reference-local browser/session gate
 

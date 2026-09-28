@@ -22,10 +22,8 @@ import { revealOwnerCredentialAction } from "./owner-credential-actions.ts"
  * asked to type it.
  */
 export function OwnerCredentialSetting({
-  linuxLocalOnlyNoPromptNotice = null,
   reveal: suppliedReveal,
 }: {
-  linuxLocalOnlyNoPromptNotice?: string | null
   reveal?: typeof revealOwnerCredentialAction
 } = {}) {
   const reveal = suppliedReveal ?? revealOwnerCredentialAction
@@ -69,11 +67,6 @@ export function OwnerCredentialSetting({
       <p className="pdpp-caption text-muted-foreground">
         This is the password you type to sign in from another device, such as a phone reaching this Personal Server over its remote-access URL. Make sure no one else can see your screen before revealing it.
       </p>
-      {linuxLocalOnlyNoPromptNotice ? (
-        <p className="pdpp-caption text-muted-foreground" role="status">
-          {linuxLocalOnlyNoPromptNotice}
-        </p>
-      ) : null}
 
       {error ? (
         <p
@@ -86,7 +79,7 @@ export function OwnerCredentialSetting({
 
       {password ? (
         <div className="grid gap-2">
-          {linuxPolkitUnverified && !linuxLocalOnlyNoPromptNotice ? (
+          {linuxPolkitUnverified ? (
             <p className="pdpp-caption text-muted-foreground" role="status">
               This Linux build allows local-only reveal without an OS prompt until polkit is verified.
             </p>

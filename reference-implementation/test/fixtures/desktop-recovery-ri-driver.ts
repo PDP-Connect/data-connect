@@ -19,8 +19,9 @@
  *
  * The owner-password tests in src-tauri/src/unified.rs use two more modes:
  *   - `request-password-window`: writes the console's owner-password window
- *     request (purpose argv[4]) with the RI's own writer, writes
- *     `{ requestId }` to argv[3], and exits without starting a server.
+ *     request (purpose argv[4], re-auth grant id argv[5] for a change) with
+ *     the RI's own writer, writes `{ requestId }` to argv[3], and exits
+ *     without starting a server.
  *   - `turn-on-remote-access`: signs in, mints an owner bearer, asks to turn
  *     remote access on from off, writes `{ status, code }` to argv[3], and
  *     exits.
@@ -117,8 +118,12 @@ async function bearerStatus(rsUrl: string, bearer: string): Promise<number> {
 }
 
 if (mode === "request-password-window") {
-  const purpose = process.argv[4] === "change" ? "change" : "initial_setup";
-  writeFileSync(outputPath, JSON.stringify(await requestOwnerPasswordWindow(dataDir, { purpose })));
+  const [purposeArg, grantId] = process.argv.slice(4);
+  const purpose = purposeArg === "change" ? "change" : "initial_setup";
+  writeFileSync(
+    outputPath,
+    JSON.stringify(await requestOwnerPasswordWindow(dataDir, grantId ? { grantId, purpose } : { purpose }))
+  );
   process.exit(0);
 }
 

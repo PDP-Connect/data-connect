@@ -40,10 +40,6 @@ export async function hasLocalOwnerCredentialRevealProofCookie(): Promise<boolea
   return (await ownerCredentialRevealProofCookie()) !== null
 }
 
-export async function canShowOwnerCredentialRevealSetting(): Promise<boolean> {
-  return process.env.PDPP_OWNER_PASSWORD_SOURCE === "desktop_generated" && (await hasLocalOwnerCredentialRevealProofCookie())
-}
-
 export async function revealOwnerCredential(): Promise<string> {
   await verifyDashboardSession()
   const token = await getOwnerToken()

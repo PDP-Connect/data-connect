@@ -47,21 +47,15 @@ type OwnerOsReauthResult =
     }
   | { ok: false; message: string }
 
-async function requireOwnerOsReauthGrant(
-  options: { allowLinuxLocalReveal?: boolean } = {}
-): Promise<OwnerOsReauthResult> {
+// Linux has no verified OS prompt yet (polkit), so there the desktop
+// webview's local proof cookie is the gate for both reveal and change.
+// Change adds no disclosure: whoever can reveal already holds the password.
+async function requireOwnerOsReauthGrant(): Promise<OwnerOsReauthResult> {
   await requireDashboardAccess("/settings")
   if (process.env.PDPP_MANAGED_DESKTOP_HOST !== "1") {
     return {
       ok: false,
       message: "Open the DataConnect desktop app to confirm this action.",
-    }
-  }
-  if (process.platform === "linux" && !options.allowLinuxLocalReveal) {
-    return {
-      ok: false,
-      message:
-        "Linux owner password changes require verified OS re-authentication before this action is available.",
     }
   }
   if (
@@ -71,7 +65,7 @@ async function requireOwnerOsReauthGrant(
     return {
       ok: false,
       message:
-        "Open Settings from the local desktop app to reveal the owner password on Linux.",
+        "Open Settings from the local desktop app to reveal or change the owner password on Linux.",
     }
   }
   const { requestId } = await requestOwnerOsReauth(dataDir())
@@ -80,9 +74,10 @@ async function requireOwnerOsReauthGrant(
     const state = await readOwnerOsReauthRequest(dataDir(), requestId)
     if (state.completedRequestId === requestId) {
       if (state.error) return { ok: false, message: state.error }
-      const reauthSucceeded = options.allowLinuxLocalReveal
-        ? ownerOsReauthAllowsReveal(state, requestId)
-        : ownerOsReauthSucceeded(state, requestId)
+      const reauthSucceeded =
+        process.platform === "linux"
+          ? ownerOsReauthAllowsReveal(state, requestId)
+          : ownerOsReauthSucceeded(state, requestId)
       if (!reauthSucceeded) {
         return {
           ok: false,
@@ -105,9 +100,7 @@ async function requireOwnerOsReauthGrant(
 export async function requireOwnerOsReauthAction(): Promise<
   { ok: true; linuxPolkitUnverified: boolean } | { ok: false; message: string }
 > {
-  const result = await requireOwnerOsReauthGrant({
-    allowLinuxLocalReveal: true,
-  })
+  const result = await requireOwnerOsReauthGrant()
   if (!result.ok) return result
   return { linuxPolkitUnverified: result.linuxPolkitUnverified, ok: true }
 }

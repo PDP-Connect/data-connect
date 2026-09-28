@@ -5,11 +5,10 @@ import { PageHeader, Section } from "@pdpp/operator-ui/components/primitives"
 import type { Metadata } from "next"
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx"
 import { getProductIdentity } from "@/app/(console)/lib/product-identity.ts"
-import { canShowOwnerCredentialRevealSetting } from "../lib/owner-credential-client.ts"
+import { hasLocalOwnerCredentialRevealProofCookie } from "../lib/owner-credential-client.ts"
 import { AboutSection } from "./about-section.tsx"
 import { DesktopSettingsSetting } from "./desktop-settings-setting.tsx"
 import { DeveloperModeSetting } from "./developer-mode-setting.tsx"
-import { OwnerCredentialSetting } from "./owner-credential-setting.tsx"
 import { RecoveryKeySetting } from "./recovery-key-setting.tsx"
 import { RemoteAccessSetting } from "./remote-access-setting.tsx"
 import { OwnerSessionsSetting } from "./owner-sessions-setting.tsx"
@@ -23,15 +22,9 @@ export const metadata: Metadata = {
 
 export default async function SettingsPage() {
   const identity = getProductIdentity()
-  const linuxLocalOnlyNoPromptNotice =
-    process.env.PDPP_MANAGED_DESKTOP_HOST === "1" &&
-    process.env.PDPP_OWNER_PASSWORD_SOURCE === "desktop_generated" &&
-    process.platform === "linux"
-      ? "This Linux build allows local-only reveal without an OS prompt until polkit is verified. Password changes stay unavailable on Linux until OS re-auth is verified."
-      : null
-  const [showOwnerCredentialReveal, ownerSessions, ownerPasswordSource] =
+  const [hasLocalRevealProof, ownerSessions, ownerPasswordSource] =
     await Promise.all([
-      canShowOwnerCredentialRevealSetting(),
+      hasLocalOwnerCredentialRevealProofCookie(),
       loadOwnerSessionInventory(),
       loadOwnerPasswordSource(),
     ])
@@ -55,13 +48,20 @@ export default async function SettingsPage() {
         >
           <RemoteAccessSetting />
         </Section>
-        {showOwnerCredentialReveal ? (
+        {ownerPasswordSource ? (
           <Section
-            description="See the password another device needs to sign in to this Personal Server."
+            description={
+              ownerPasswordSource === "desktop"
+                ? "Sign in from another device, such as your phone over remote access."
+                : "Change the password used to sign in to this Personal Server."
+            }
             title="Owner password"
           >
-            <OwnerCredentialSetting
-              linuxLocalOnlyNoPromptNotice={linuxLocalOnlyNoPromptNotice}
+            <OwnerPasswordSetting
+              canReveal={ownerPasswordSource === "desktop" && hasLocalRevealProof}
+              linuxNoOsPrompt={process.platform === "linux"}
+              managedDesktop={process.env.PDPP_MANAGED_DESKTOP_HOST === "1"}
+              source={ownerPasswordSource}
             />
           </Section>
         ) : null}
@@ -73,17 +73,6 @@ export default async function SettingsPage() {
             <OwnerSessionsSetting
               bearers={ownerSessions.bearers}
               sessions={ownerSessions.sessions}
-            />
-          </Section>
-        ) : null}
-        {ownerPasswordSource ? (
-          <Section
-            description="Change the password used to sign in to this Personal Server."
-            title="Owner password"
-          >
-            <OwnerPasswordSetting
-              linuxLocalOnlyNoPromptNotice={linuxLocalOnlyNoPromptNotice}
-              source={ownerPasswordSource}
             />
           </Section>
         ) : null}
