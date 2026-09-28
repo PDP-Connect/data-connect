@@ -790,6 +790,25 @@ test(
   })
 );
 
+test(
+  "the runtime's cached bearer is per subject and replaced below half its lifetime",
+  withDataDir(async (dataDir) => {
+    const { server } = await start(join(dataDir, "pdpp.sqlite"));
+    try {
+      const mine = await server.controller.issueRuntimeOwnerToken(SUBJECT);
+      const theirs = await server.controller.issueRuntimeOwnerToken("owner_other");
+      assert.equal((await introspect(theirs)).subject_id, "owner_other", "a run for another subject gets that subject's bearer");
+      assert.equal((await introspect(mine)).subject_id, SUBJECT);
+      setExpiry(mine, 100 * DAY_SECONDS);
+      const replaced = await server.controller.issueRuntimeOwnerToken(SUBJECT);
+      assert.notEqual(replaced, mine, "a cached bearer below half its lifetime is replaced");
+      assert.ok(((await introspect(replaced)).exp ?? 0) * 1000 > Date.now() + 364 * DAY_SECONDS * 1000);
+    } finally {
+      await stop(server);
+    }
+  })
+);
+
 const POSTGRES_URL = dedicatedPostgresTestUrl(process.env.PDPP_TEST_POSTGRES_URL);
 
 if (POSTGRES_URL) {
