@@ -94,6 +94,7 @@ export const POSTGRES_TEMPLATE_ELIGIBLE_FILES: readonly string[] = [
   "test/local-coverage-state-parser-postgres.test.ts",
   "test/manual-upload-artifact-store-postgres.test.ts",
   "test/oauth-code-delivery-atomicity.test.ts",
+  "test/owner-connection-delete-orphans.test.ts",
   "test/owner-connection-revoke-credential-postgres.test.ts",
   "test/owner-device-approval-atomicity.test.ts",
   "test/owner-password-verifier.test.ts",
