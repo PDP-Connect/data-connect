@@ -57,7 +57,7 @@ export function RemoveSourceDialog({
           <AlertDialogTitle className="w-full text-left">
             Remove {name}
           </AlertDialogTitle>
-          <AlertDialogDescription className="w-full text-left">
+          <AlertDialogDescription className="w-full text-left text-small">
             Choose what to remove from this computer.
           </AlertDialogDescription>
         </AlertDialogHeader>
