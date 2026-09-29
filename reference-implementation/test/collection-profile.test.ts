@@ -6803,6 +6803,7 @@ rl.on('line', (line) => {
     process.stdout.write(JSON.stringify({ type: 'INTERACTION', request_id: 'otp_manual_1', kind: 'otp', message: 'Enter code', schema: { type: 'object', properties: { code: { type: 'string' } }, required: ['code'] }, timeout_seconds: 300 }) + '\\n');
     process.stdout.write(JSON.stringify({ type: 'ASSISTANCE_STATUS', assistance_request_id: 'otp_manual_1', status: 'resolved' }) + '\\n');
   } else if (msg.type === 'INTERACTION_RESPONSE') {
+    process.stdout.write(JSON.stringify({ type: 'ASSISTANCE_STATUS', assistance_request_id: 'otp_manual_1', status: 'resolved' }) + '\\n');
     process.stdout.write(JSON.stringify({ type: 'DONE', status: 'succeeded', records_emitted: 0 }) + '\\n');
     rl.close();
     process.exit(0);
@@ -6818,7 +6819,62 @@ rl.on('line', (line) => {
         connectorId,
         connectorPath,
         manifest: MINIMAL_MANIFEST,
-        onInteraction: async () => new Promise(() => {}),
+        onInteraction: async () =>
+          new Promise(() => {
+            // Keep the interaction pending until the connector advances the browser page.
+          }),
+        ownerToken,
+        persistState: true,
+        rsUrl: `http://localhost:${rsPort}`,
+        state: null,
+      });
+      assert.equal(result.status, "succeeded");
+    } finally {
+      rmSync(tmpDir, { force: true, recursive: true });
+      await closeServer(server);
+    }
+  });
+
+  await t.test("late OTP assistance status is ignored after a console response", async () => {
+    const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+    const { asPort, rsPort } = server;
+    const { ownerToken, connectorId } = await setupConnector(server, asPort);
+    const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-test-otp-late-status-"));
+    const connectorPath = join(tmpDir, "connector.mjs");
+    writeFileSync(
+      connectorPath,
+      `
+import { createInterface } from 'readline';
+const rl = createInterface({ input: process.stdin });
+let started = false;
+rl.on('line', (line) => {
+  const msg = JSON.parse(line);
+  if (msg.type === 'START' && !started) {
+    started = true;
+    process.stdout.write(JSON.stringify({ type: 'INTERACTION', request_id: 'otp_console_first', kind: 'otp', message: 'Enter code', schema: { type: 'object', properties: { code: { type: 'string' } }, required: ['code'] }, timeout_seconds: 300 }) + '\\n');
+  } else if (msg.type === 'INTERACTION_RESPONSE') {
+    process.stdout.write(JSON.stringify({ type: 'ASSISTANCE_STATUS', assistance_request_id: 'otp_console_first', status: 'resolved' }) + '\\n');
+    process.stdout.write(JSON.stringify({ type: 'DONE', status: 'succeeded', records_emitted: 0 }) + '\\n');
+    rl.close();
+    process.exit(0);
+  }
+});
+`,
+      "utf-8"
+    );
+
+    try {
+      const result = await runTestConnector({
+        collectionMode: "full_refresh",
+        connectorId,
+        connectorPath,
+        manifest: MINIMAL_MANIFEST,
+        onInteraction: async (message: unknown) => ({
+          data: { code: "123456" },
+          request_id: (message as InteractionMessage).request_id,
+          status: "success",
+          type: "INTERACTION_RESPONSE",
+        }),
         ownerToken,
         persistState: true,
         rsUrl: `http://localhost:${rsPort}`,
@@ -6925,8 +6981,8 @@ rl.on('line', (line) => {
 
       const hostResult = await runTestConnector({
         browserSurfaceEnv: {
-          PDPP_BROWSER_SURFACE_REQUIRED: "neko",
           PDPP_BROWSER_SURFACE_REMOTE_CDP_URL: "http://127.0.0.1:9222",
+          PDPP_BROWSER_SURFACE_REQUIRED: "neko",
         },
         collectionMode: "full_refresh",
         connectorId,
@@ -6952,16 +7008,14 @@ rl.on('line', (line) => {
       const { body: hostTimeline } = await fetchJson<TimelineBody>(
         `${asUrl}/_ref/runs/${encodeURIComponent(requireRunId(hostResult))}/timeline`
       );
-      const hostAssistance = (hostTimeline.data || []).find(
-        (event) => event.event_type === "run.assistance_requested"
-      );
+      const hostAssistance = (hostTimeline.data || []).find((event) => event.event_type === "run.assistance_requested");
       assert.ok(hostAssistance, "expected host-mode OTP assistance event");
       assert.equal(hostAssistance.data.owner_action, "provide_value");
       assert.equal(hostAssistance.data.attachments, undefined);
       assert.deepEqual(hostAssistance.data.input_schema, {
-        type: "object",
         properties: { code: { type: "string" } },
         required: ["code"],
+        type: "object",
       });
       assert.ok(
         !JSON.stringify(hostTimeline.data || []).includes("654321"),

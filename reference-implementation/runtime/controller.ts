@@ -4149,6 +4149,19 @@ export function createController(opts: ControllerOptions = {}): Controller {
       baseInteractionHandler
     );
     const handleAssistanceProgress = (msg: unknown) => {
+      const assistanceStatus = msg as Record<string, unknown>;
+      if (assistanceStatus.type === "ASSISTANCE_STATUS" && assistanceStatus.status === "resolved") {
+        const entry = activeRunInteractions.get(runId);
+        const pending = entry?.pending;
+        if (entry && pending?.kind === "otp" && pending.interaction_id === assistanceStatus.assistance_request_id) {
+          entry.pending = null;
+          pending.resolve({
+            request_id: pending.interaction_id,
+            status: "success",
+            type: "INTERACTION_RESPONSE",
+          });
+        }
+      }
       // Progress is persisted via the event spine, not this callback. The
       // one exception is nonblocking ASSISTANCE: the owner has to act
       // somewhere outside PDPP (e.g. approve a ChatGPT push in the app) and

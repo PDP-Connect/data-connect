@@ -4586,6 +4586,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
     let queueDrainedResolve: (() => void) | null = null;
     let pendingInteractionViolationReject: ((err: Error) => void) | null = null;
     let pendingInteractionAutoResolve: ((response: InteractionResponse) => void) | null = null;
+    const completedOtpInteractionRequestIds = new Set<string>();
     let terminateTimer: NodeJS.Timeout | null = null;
     let runtimeTimeoutReason: string | null = null;
 
@@ -5794,6 +5795,9 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       }
       recordInteractionRecoveryGap(msg, responseStatus, interactionStream);
       pendingInteraction = null;
+      if (msg.kind === "otp") {
+        completedOtpInteractionRequestIds.add(interactionRequestId);
+      }
       if (!writeChildStdin(`${JSON.stringify({ ...response, status: responseStatus })}\n`, "interaction_response")) {
         onProgress({ phase: "interaction_response", reason: childStdinClosedReason, type: "connector_stdin_closed" });
       }
@@ -5914,6 +5918,9 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
         ...(isNullish(msg.message) ? {} : { message: msg.message }),
       });
       if (!closed) {
+        if (completedOtpInteractionRequestIds.has(msg.assistance_request_id as string)) {
+          return;
+        }
         throw new Error(
           `Connector emitted ASSISTANCE_STATUS for unknown assistance_request_id: ${msg.assistance_request_id}`
         );
@@ -6011,6 +6018,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
             status: "success",
             type: "INTERACTION_RESPONSE",
           });
+          onProgress(msg);
           return;
         }
         if (failPendingInteraction(new Error(`Connector emitted ${msg.type} while waiting for INTERACTION_RESPONSE`))) {
