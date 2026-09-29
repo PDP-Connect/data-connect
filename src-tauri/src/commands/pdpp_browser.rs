@@ -212,6 +212,9 @@ impl PdppBrowserLease {
 impl Drop for PdppBrowserLease {
     fn drop(&mut self) {
         if self.termination_failed {
+            if let Some(child) = self.child.take() {
+                reap_child(child);
+            }
             if let Some(lock) = self.lease_lock.take() {
                 std::mem::forget(lock);
             }
@@ -341,7 +344,7 @@ fn wait_for_devtools_endpoint(
         if browser_child_exited(&mut child) {
             return Err(BrowserLaunchFailure {
                 message: "PDPP browser exited before becoming ready".into(),
-                terminated: terminate_browser(&mut child),
+                terminated: terminate_failed_launch(child),
             });
         }
         if let Ok(contents) = fs::read_to_string(&active_port) {
@@ -357,8 +360,17 @@ fn wait_for_devtools_endpoint(
     }
     Err(BrowserLaunchFailure {
         message: "Timed out waiting for PDPP browser CDP endpoint".into(),
-        terminated: terminate_browser(&mut child),
+        terminated: terminate_failed_launch(child),
     })
+}
+
+fn terminate_failed_launch(mut child: Child) -> bool {
+    if terminate_browser(&mut child) {
+        true
+    } else {
+        reap_child(child);
+        false
+    }
 }
 
 struct BrowserLaunchFailure {
@@ -399,6 +411,13 @@ pub(crate) fn terminate_browser(child: &mut Child) -> bool {
     }
 }
 
+pub(crate) fn reap_child(child: Child) {
+    thread::spawn(move || {
+        let mut child = child;
+        let _ = child.wait();
+    });
+}
+
 #[cfg(unix)]
 fn terminate_unix_browser(
     child: &mut Child,
@@ -410,13 +429,29 @@ fn terminate_unix_browser(
     }
     let process_group = child.id();
     signal_group(process_group, libc::SIGTERM);
-    let _ = wait_for_child_exit_without_reaping(child, BROWSER_STOP_WAIT);
+    match wait_for_child_exit_without_reaping(child, BROWSER_STOP_WAIT) {
+        Ok(true)
+            if wait_for_process_group_members_exit(
+                process_group,
+                child.id(),
+                BROWSER_STOP_WAIT,
+            ) =>
+        {
+            return child.wait().is_ok();
+        }
+        Err(_) => return false,
+        _ => {}
+    }
     // Do not signal if the child identity was lost while waiting.
     if child_exited_without_reaping(child).is_err() {
         return false;
     }
     signal_group(process_group, libc::SIGKILL);
-    if !wait_for_child_exit_without_reaping(child, BROWSER_STOP_WAIT) {
+    if !matches!(
+        wait_for_child_exit_without_reaping(child, BROWSER_STOP_WAIT),
+        Ok(true)
+    ) || !wait_for_process_group_members_exit(process_group, child.id(), BROWSER_STOP_WAIT)
+    {
         return false;
     }
     child.wait().is_ok()
@@ -451,25 +486,140 @@ fn signal_process_group(process_group: u32, signal: libc::c_int) {
     }
 }
 
-#[cfg(unix)]
-fn process_group_exists(process_group: u32) -> bool {
-    let result = unsafe { libc::kill(-(process_group as i32), 0) };
-    if result == 0 {
-        return true;
+#[cfg(target_os = "linux")]
+fn process_group_has_other_members(process_group: u32, leader_pid: u32) -> io::Result<bool> {
+    for entry in fs::read_dir("/proc")? {
+        let entry = entry?;
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if pid == leader_pid {
+            continue;
+        }
+        let stat = match fs::read_to_string(entry.path().join("stat")) {
+            Ok(stat) => stat,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        let Some((_, fields)) = stat.rsplit_once(") ") else {
+            continue;
+        };
+        let mut fields = fields.split_whitespace();
+        let Some(state) = fields.next() else { continue };
+        let Some(_) = fields.next() else { continue };
+        let Some(pgrp) = fields.next().and_then(|value| value.parse::<u32>().ok()) else {
+            continue;
+        };
+        if pgrp == process_group && state != "Z" && state != "X" {
+            return Ok(true);
+        }
     }
-    io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+    Ok(false)
+}
+
+#[cfg(target_os = "macos")]
+fn process_group_has_other_members(process_group: u32, leader_pid: u32) -> io::Result<bool> {
+    const PROC_PGRP_ONLY: u32 = 2;
+    let mut pids = vec![0 as libc::pid_t; 4096];
+    loop {
+        let size = std::mem::size_of_val(pids.as_slice());
+        let bytes = unsafe {
+            libc::proc_listpids(
+                PROC_PGRP_ONLY,
+                process_group,
+                pids.as_mut_ptr().cast(),
+                size as libc::c_int,
+            )
+        };
+        if bytes < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if bytes as usize >= size {
+            pids.resize(pids.len() * 2, 0);
+            continue;
+        }
+        for pid in pids
+            .iter()
+            .copied()
+            .take(bytes as usize / std::mem::size_of::<libc::pid_t>())
+        {
+            if pid <= 0 || pid as u32 == leader_pid {
+                continue;
+            }
+            let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+            let read = unsafe {
+                libc::proc_pidinfo(
+                    pid,
+                    libc::PROC_PIDTBSDINFO,
+                    0,
+                    (&mut info as *mut libc::proc_bsdinfo).cast(),
+                    std::mem::size_of_val(&info) as libc::c_int,
+                )
+            };
+            if read == std::mem::size_of_val(&info) as libc::c_int {
+                if info.pbi_pgid == process_group && info.pbi_status != libc::SZOMB {
+                    return Ok(true);
+                }
+            } else if read < 0 {
+                return Err(io::Error::last_os_error());
+            } else if read == 0 {
+                let result = unsafe { libc::kill(pid, 0) };
+                if result != 0 && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+                    continue;
+                }
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    "could not inspect a process group member",
+                ));
+            } else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "short process group member record",
+                ));
+            }
+        }
+        return Ok(false);
+    }
 }
 
 #[cfg(unix)]
-fn wait_for_child_exit_without_reaping(child: &Child, timeout: Duration) -> bool {
+fn wait_for_process_group_members_exit(
+    process_group: u32,
+    leader_pid: u32,
+    timeout: Duration,
+) -> bool {
+    let deadline = Instant::now() + timeout;
+    let mut saw_empty_group = false;
+    loop {
+        match process_group_has_other_members(process_group, leader_pid) {
+            Ok(false) if saw_empty_group => return true,
+            Ok(false) if Instant::now() < deadline => {
+                saw_empty_group = true;
+                thread::sleep(Duration::from_millis(20));
+            }
+            Ok(true) if Instant::now() < deadline => {
+                saw_empty_group = false;
+                thread::sleep(Duration::from_millis(20));
+            }
+            Ok(false) | Ok(true) | Err(_) => return false,
+        }
+    }
+}
+
+#[cfg(unix)]
+fn wait_for_child_exit_without_reaping(child: &Child, timeout: Duration) -> io::Result<bool> {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
-        if child_exited_without_reaping(child).unwrap_or(false) {
-            return true;
+        if child_exited_without_reaping(child)? {
+            return Ok(true);
         }
         thread::sleep(Duration::from_millis(20));
     }
-    false
+    Ok(false)
 }
 
 #[cfg(not(unix))]
@@ -486,19 +636,32 @@ fn wait_for_child_exit(child: &mut Child, timeout: Duration) -> bool {
 
 #[cfg(unix)]
 pub(crate) fn child_exited_without_reaping(child: &Child) -> io::Result<bool> {
-    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
-    let result = unsafe {
-        libc::waitid(
-            libc::P_PID,
-            child.id() as libc::id_t,
-            &mut info,
-            libc::WEXITED | libc::WNOWAIT | libc::WNOHANG,
-        )
-    };
-    if result != 0 {
-        return Err(io::Error::last_os_error());
-    }
+    let info = retry_interrupted(|| {
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let result = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                child.id() as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOWAIT | libc::WNOHANG,
+            )
+        };
+        if result != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(info)
+    })?;
     Ok(info.si_signo == libc::SIGCHLD)
+}
+
+#[cfg(unix)]
+fn retry_interrupted<T>(mut operation: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+    loop {
+        match operation() {
+            Err(error) if error.raw_os_error() == Some(libc::EINTR) => continue,
+            result => return result,
+        }
+    }
 }
 
 pub(crate) fn browser_child_exited(child: &mut Child) -> bool {
@@ -805,6 +968,74 @@ mod tests {
         let process_group = child.id();
 
         assert!(terminate_browser(&mut child));
-        assert!(!process_group_exists(process_group));
+        assert!(!process_group_has_other_members(process_group, child.id()).unwrap());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn terminate_does_not_report_success_while_group_member_remains() {
+        let temp = tempfile::tempdir().unwrap();
+        let pid_file = temp.path().join("descendant-pid");
+        let pid_file_arg = pid_file.to_string_lossy().into_owned();
+        let mut command = Command::new("sh");
+        command.args([
+            "-c",
+            "trap '' TERM; (trap '' TERM; exec sleep 30) & echo $! > \"$1\"; while ! kill -0 \"$(cat \"$1\")\" 2>/dev/null; do :; done; exit 0",
+            "sh",
+            &pid_file_arg,
+        ]);
+        command.process_group(0);
+        let mut child = command.spawn().expect("spawn test browser process tree");
+        let process_group = child.id();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !pid_file.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        while !child_exited_without_reaping(&child).unwrap() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(pid_file.exists(), "descendant must start before cleanup");
+        assert!(
+            child_exited_without_reaping(&child).unwrap(),
+            "leader must exit first"
+        );
+        let descendant_pid = fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap();
+        let descendant_stat = fs::read_to_string(format!("/proc/{descendant_pid}/stat")).unwrap();
+        let (_, descendant_fields) = descendant_stat.rsplit_once(") ").unwrap();
+        assert!(
+            !descendant_fields.starts_with('Z'),
+            "descendant must still be alive when cleanup starts"
+        );
+
+        // Hold the descendant alive past both signal attempts. Cleanup must
+        // refuse success while the non-leader member remains in the group.
+        let terminated = terminate_unix_browser(&mut child, |_, _| {});
+        signal_process_group(process_group, libc::SIGKILL);
+        let _ = child.wait();
+        assert!(
+            !terminated,
+            "a live descendant must prevent cleanup success"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn waitid_retries_interrupted_calls() {
+        let mut calls = 0;
+        let result = retry_interrupted(|| {
+            calls += 1;
+            if calls == 1 {
+                Err(io::Error::from_raw_os_error(libc::EINTR))
+            } else {
+                Ok(true)
+            }
+        });
+
+        assert!(matches!(result, Ok(true)));
+        assert_eq!(calls, 2);
     }
 }
