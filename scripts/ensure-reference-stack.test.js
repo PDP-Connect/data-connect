@@ -3,6 +3,7 @@
 
 import {
   chmodSync,
+  cpSync,
   existsSync,
   mkdtempSync,
   mkdirSync,
@@ -14,6 +15,7 @@ import {
 } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
+import { fileURLToPath } from "node:url"
 import { afterEach, describe, expect, it } from "vitest"
 import {
   buildManifest,
@@ -31,6 +33,7 @@ import {
 import { parseArgs as parseVerifyArgs } from "./verify-reference-stack.mjs"
 
 const temporaryRoots = []
+const projectRoot = dirname(dirname(fileURLToPath(import.meta.url)))
 
 function fixtureRoot() {
   const root = mkdtempSync(join(tmpdir(), "reference-stack-fixture-"))
@@ -57,6 +60,19 @@ function fixtureRoot() {
     join(root, "reference-implementation", "scripts", "is-main-module.js"),
     "export function isMainModule() { return true }\n"
   )
+  for (const file of [
+    "connector-dependency-loader.mjs",
+    "connector-dependency-loader-bootstrap.mjs",
+  ]) {
+    cpSync(
+      join(
+        projectRoot,
+        "reference-implementation",
+        file
+      ),
+      join(root, "reference-implementation", file)
+    )
+  }
   writeFileSync(join(root, "node_modules", "tsx", "package.json"), "{}\n")
   writeFileSync(
     join(root, "node_modules", "patchright", "package.json"),
@@ -309,7 +325,7 @@ describe("reference stack staging contract", () => {
       'console.info("[reference-implementation] launch entry started")'
     )
     expect(source).toContain('NODE_ENV: "production"')
-    expect(source).toContain('process.execPath, ["--import", "tsx"')
+    expect(source).toContain('process.execPath, [\n  "--import",\n  "tsx"')
     expect(source).toContain("PDPP_DB_PATH")
     expect(source).toContain(
       'PDPP_BIND_HOST: process.env.PDPP_BIND_HOST || "127.0.0.1"'
