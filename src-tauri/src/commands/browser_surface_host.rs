@@ -629,10 +629,17 @@ fn wait_for_devtools_endpoint(
 ) -> Result<(Child, String), BrowserLaunchError> {
     let deadline = Instant::now() + BROWSER_START_TIMEOUT;
     let active_port = profile_dir.join("DevToolsActivePort");
+    let probe = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_millis(300))
+        .no_proxy()
+        .build()
+        .map_err(|error| BrowserLaunchError::start_failed(error.to_string()))?;
     while Instant::now() < deadline {
         for line in receiver.try_iter() {
             if let Some(url) = cdp_url_from_json(&line) {
-                return Ok((child, url));
+                if devtools_http_ready(&probe, &url) {
+                    return Ok((child, url));
+                }
             }
         }
         if let Ok(contents) = fs::read_to_string(&active_port) {
@@ -642,7 +649,10 @@ fn wait_for_devtools_endpoint(
                 .and_then(|port| port.trim().parse::<u16>().ok())
                 .filter(|port| *port != 0)
             {
-                return Ok((child, format!("http://127.0.0.1:{port}")));
+                let url = format!("http://127.0.0.1:{port}");
+                if devtools_http_ready(&probe, &url) {
+                    return Ok((child, url));
+                }
             }
         }
         if let Ok(Some(status)) = child.try_wait() {
@@ -663,6 +673,22 @@ fn wait_for_devtools_endpoint(
                 .into(),
         )
     }
+}
+
+fn devtools_http_ready(client: &reqwest::blocking::Client, cdp_url: &str) -> bool {
+    let Ok(response) = client.get(format!("{cdp_url}/json/version")).send() else {
+        return false;
+    };
+    if !response.status().is_success() {
+        return false;
+    }
+    let Ok(version) = response.json::<serde_json::Value>() else {
+        return false;
+    };
+    version
+        .get("webSocketDebuggerUrl")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|url| url.starts_with("ws://") || url.starts_with("wss://"))
 }
 
 fn exited_before_ready(
@@ -987,6 +1013,36 @@ mod tests {
     fn fake_browser(temp: &TempDir) -> PathBuf {
         let path = temp.path().join("fake-browser.sh");
         fs::write(
+            temp.path().join("fake-devtools.py"),
+            r#"from http.server import BaseHTTPRequestHandler, HTTPServer
+import json
+from pathlib import Path
+import sys
+
+profile = Path(sys.argv[1])
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path != "/json/version":
+            self.send_error(404)
+            return
+        body = json.dumps({"webSocketDebuggerUrl": f"ws://127.0.0.1:{self.server.server_port}/devtools/browser/test"}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *_args):
+        pass
+
+server = HTTPServer(("127.0.0.1", 0), Handler)
+(profile / "DevToolsActivePort").write_text(f"{server.server_port}\n/devtools/browser/test\n")
+server.serve_forever()
+"#,
+        )
+        .expect("write fake DevTools server");
+        fs::write(
             &path,
             r#"#!/bin/sh
 profile=""
@@ -996,9 +1052,10 @@ for arg in "$@"; do
   esac
 done
 printf '%s\n' "$@" > "$profile/args.txt"
-printf '%s\n' '{"cdp_url":"http://127.0.0.1:9222"}'
-trap 'exit 0' TERM INT
-while :; do sleep 1; done
+python3 "$(dirname "$0")/fake-devtools.py" "$profile" &
+server_pid=$!
+trap 'kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true; exit 0' TERM INT
+wait "$server_pid"
 "#,
         )
         .expect("write fake browser");
@@ -1140,7 +1197,7 @@ while :; do sleep 1; done
         let temp = tempfile::tempdir().expect("tempdir");
         let host = start_test_host(&temp);
         let (surface_id, cdp_url, _) = acquire(&host, "github");
-        assert_eq!(cdp_url, "http://127.0.0.1:9222");
+        assert!(cdp_url.starts_with("http://127.0.0.1:"));
         let response = request(
             &host,
             "DELETE",
@@ -1159,7 +1216,7 @@ while :; do sleep 1; done
         assert!(args.contains("--remote-debugging-port=0"));
 
         let (surface_id, cdp_url, _) = acquire_with_headless(&host, "chase", false);
-        assert_eq!(cdp_url, "http://127.0.0.1:9222");
+        assert!(cdp_url.starts_with("http://127.0.0.1:"));
         let response = request(
             &host,
             "DELETE",
@@ -1174,6 +1231,82 @@ while :; do sleep 1; done
             .expect("profile dir");
         let args = fs::read_to_string(profile_dir.join("args.txt")).expect("fake args");
         assert!(!args.contains("--headless=new"));
+    }
+
+    #[test]
+    fn acquire_waits_until_the_devtools_http_endpoint_is_ready() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reservation = TcpListener::bind("127.0.0.1:0").expect("reserve port");
+        let address = reservation.local_addr().expect("port address");
+        drop(reservation);
+
+        let ready_server = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(200));
+            let listener = TcpListener::bind(address).expect("bind delayed DevTools endpoint");
+            listener
+                .set_nonblocking(true)
+                .expect("make DevTools endpoint nonblocking");
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let mut request = [0; 1024];
+                        let _ = stream.read(&mut request);
+                        let body = format!(
+                            r#"{{"webSocketDebuggerUrl":"ws://{}/devtools/browser/test"}}"#,
+                            address
+                        );
+                        write!(
+                            stream,
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        )
+                        .expect("write DevTools version response");
+                        return true;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(_) => return false,
+                }
+            }
+            false
+        });
+
+        let browser = temp.path().join("fake-browser-delayed.sh");
+        fs::write(
+            &browser,
+            format!(
+                "#!/bin/sh\nprofile=\"\"\nfor arg in \"$@\"; do\n  case \"$arg\" in\n    --user-data-dir=*) profile=\"${{arg#*=}}\" ;;\n  esac\ndone\nprintf '%s\\n' {} > \"$profile/DevToolsActivePort\"\ntrap 'exit 0' TERM INT\nwhile :; do sleep 1; done\n",
+                address.port()
+            ),
+        )
+        .expect("write delayed fake browser");
+        fs::set_permissions(&browser, fs::Permissions::from_mode(0o755))
+            .expect("make delayed fake browser executable");
+        let profile = temp.path().join("profile");
+        fs::create_dir_all(&profile).expect("create profile");
+
+        let started = Instant::now();
+        let launched = launch_browser(&browser, &profile, true);
+        let elapsed = started.elapsed();
+        let launch_succeeded = match launched {
+            Ok((mut child, endpoint)) => {
+                let _ = super::super::pdpp_browser::terminate_browser(&mut child);
+                assert_eq!(endpoint, format!("http://{address}"));
+                true
+            }
+            Err(_) => false,
+        };
+        let server_ready = ready_server.join().expect("DevTools server thread");
+
+        assert!(
+            server_ready,
+            "host must wait for a live /json/version response"
+        );
+        assert!(elapsed >= Duration::from_millis(200));
+        assert!(launch_succeeded);
     }
 
     #[test]
