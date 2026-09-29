@@ -6,7 +6,9 @@
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { requireDashboardAccess } from "../../lib/dashboard-access.ts";
+import { deleteConnectionWithRunCancel } from "../../lib/delete-connection-with-run-cancel.ts";
 import {
+  cancelRun,
   deleteConnection,
   deleteConnectionSchedule,
   deleteConnectorSchedule,
@@ -263,9 +265,12 @@ export async function resumeConnectionAction(formData: FormData) {
 
 // Danger-zone anchor on the connection detail page. The revoke/delete forms
 // scroll here after a redirect so the operator lands on the result banner.
-function dangerZoneHref(routeId: string, message?: string, error?: string): string {
+function dangerZoneHref(routeId: string, message?: string, error?: string, activeRunId?: string): string {
   const base = `/sources/${encodeURIComponent(routeId)}`;
   const params = new URLSearchParams();
+  if (activeRunId) {
+    params.set("active_run_id", activeRunId);
+  }
   if (message) {
     params.set("message", message);
   }
@@ -372,9 +377,11 @@ export async function reactivateConnectionAction(formData: FormData) {
  * reproduce the connection id (`confirm_delete` must equal `connection_id`) —
  * then calls the shared owner-session `/_ref` delete route. Delete erases
  * exactly that connection's records/state per the shipped contract and refuses
- * an active run (`run_active`) or a default-account binding (`default_account`)
- * exactly as the shared primitive does; those typed refusals are messaged in
- * place. A scripted POST without the matching confirmation never erases data.
+ * an active run (`run_active`) exactly as the shared primitive does; that
+ * refusal is messaged in place with the blocking run id, so the danger zone can
+ * offer "Cancel run and delete". When the form carries `cancel_run_id`, the
+ * action cancels that run and retries the delete. A scripted POST without the
+ * matching confirmation never erases data.
  */
 export async function deleteConnectionAction(formData: FormData) {
   const connectionId = asString(formData.get("connection_id"));
@@ -398,11 +405,14 @@ export async function deleteConnectionAction(formData: FormData) {
     );
   }
 
+  const cancelRunId = asString(formData.get("cancel_run_id")) || null;
+
   let message: string | undefined;
   let error: string | undefined;
+  let blockingRunId: string | undefined;
   let deleted = false;
   try {
-    const result = await deleteConnection(connectionId);
+    const result = await deleteConnectionWithRunCancel(connectionId, cancelRunId, { cancelRun, deleteConnection });
     if (result.status === "deleted") {
       deleted = true;
       const count = result.deletedRecordCount;
@@ -411,7 +421,10 @@ export async function deleteConnectionAction(formData: FormData) {
           ? `Connection deleted. ${count.toLocaleString()} record${count === 1 ? "" : "s"} for this connection were erased.`
           : "Connection deleted. Its records for this connection were erased.";
     } else if (result.status === "run_active") {
-      error = "A run is in flight for this connection. Cancel the run, then delete.";
+      blockingRunId = result.activeRunId;
+      error = result.cancelledRunId
+        ? "The run was asked to stop but is still finishing. Nothing was erased. Try the delete again in a moment."
+        : "A run is in flight for this connection. Nothing was erased. Cancel the run, then delete.";
     } else if (result.status === "default_account") {
       error = "This default-account connection can't be deleted from here. Revoke it to stop future collection.";
     } else {
@@ -428,5 +441,5 @@ export async function deleteConnectionAction(formData: FormData) {
   if (deleted) {
     redirect(recordsListHref(message ?? "Connection deleted."));
   }
-  redirect(dangerZoneHref(routeId, message, error));
+  redirect(dangerZoneHref(routeId, message, error, blockingRunId));
 }

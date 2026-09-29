@@ -97,6 +97,8 @@ export interface ResumeConnectionResult {
 export type DeleteConnectionOutcome = "deleted" | "run_active" | "default_account" | "not_found";
 
 export interface DeleteConnectionResult {
+  /** The in-flight run that blocked the delete, present only on `run_active`. */
+  activeRunId?: string;
   /** Non-secret deletion summary, present only on a successful `deleted`. */
   deletedRecordCount?: number;
   status: DeleteConnectionOutcome;
@@ -197,7 +199,8 @@ export function classifyDeleteConnectionResponse(
     };
   }
   if (status === 409 && errorCode === "connection_run_active") {
-    return { status: "run_active" };
+    const activeRunId = (body as { error?: { active_run_id?: unknown } } | null)?.error?.active_run_id;
+    return { status: "run_active", ...(typeof activeRunId === "string" ? { activeRunId } : {}) };
   }
   if (status === 409 && errorCode === "default_account_delete_unsupported") {
     return { status: "default_account" };

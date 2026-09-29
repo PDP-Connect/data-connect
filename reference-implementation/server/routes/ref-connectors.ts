@@ -22,6 +22,7 @@
 // `resolveOwnerConnectorNamespace` so the substrate lookup stays a single
 // implementation.
 
+import type { BrowserProfilePurger, BrowserProfilePurgeResult } from "../browser-profile-purge.ts";
 import {
   executeRefConnectorScheduleGet,
   RefConnectorScheduleGetNotFoundError,
@@ -156,12 +157,15 @@ interface OwnerNamespaceOptions {
 
 export interface MountRefConnectorsContext {
   canonicalConnectorKey: (value: string | null | undefined) => string | null;
+  // Clears the owner-delete tombstone of the owner's default-account identity
+  // for one connector. Called only by the explicit owner connector-run route.
+  clearDefaultAccountTombstone?: (input: { connectorId: string; ownerSubjectId: string }) => Promise<boolean> | boolean;
   createRequestConnectorInstanceStore: () => ConnectorInstanceStore;
   createTraceContext: (input?: { scenarioId?: string }) => TraceContext;
   // Connection-scoped destructive delete primitive — the SAME cascade the
   // owner-agent bearer delete route delegates to. Resolves + verifies owner
-  // ownership BEFORE any mutation, refuses active-run / default-account with the
-  // existing typed errors, purges exactly one connection's source-of-truth
+  // ownership BEFORE any mutation, refuses an active run with the existing
+  // typed error, purges exactly one connection's source-of-truth
   // records + state, and returns the non-secret deletion summary. Wired with the
   // same injected `purge` phases the bearer route receives so the console path
   // cannot diverge from the agent path.
@@ -210,6 +214,10 @@ export interface MountRefConnectorsContext {
   now?: () => string;
   onScheduleMutation?: () => Promise<unknown> | unknown;
   pdppError: PdppErrorFn;
+  // Post-commit browser-profile purge for delete and revoke
+  // (server/browser-profile-purge.ts). Never throws; its result is reported in
+  // the response and the audit event.
+  purgeBrowserProfile?: BrowserProfilePurger;
   requireOwnerSession: MiddlewareHandler;
   resolveOwnerConnectorNamespace: (
     req: unknown,
@@ -876,6 +884,7 @@ async function executeRunNow(
     force: boolean;
     ownerSubjectId: string | null;
     runAdmission: RunAdmission;
+    tombstoneCleared?: boolean;
   }
 ): Promise<void> {
   assertRemoteControlSupported(namespace);
@@ -908,6 +917,7 @@ async function executeRunNow(
     outcome: "succeeded",
     ownerSubjectId: audit.ownerSubjectId,
     runId: readRunId(started),
+    ...(audit.tombstoneCleared ? { tombstoneCleared: true } : {}),
   });
   res.status(202).json(started);
 }
@@ -924,6 +934,16 @@ export function mountRefConnectorRun(app: AppLike, ctx: MountRefConnectorsContex
       let connectorKey: string | null = null;
       try {
         const connectorId = decodeURIComponent(req.params.connectorId as string);
+        // An owner-session run addressed by connector id is the explicit
+        // "connect this source" action. If the owner deleted the default-account
+        // connection earlier, its tombstone would refuse the re-materialization
+        // below; the owner asking again is the one intent that clears it.
+        // Implicit paths (scheduler, ingest) never reach this and keep the guard.
+        const tombstoneCleared =
+          (await ctx.clearDefaultAccountTombstone?.({
+            connectorId: ctx.canonicalConnectorKey(connectorId) ?? connectorId,
+            ownerSubjectId,
+          })) === true;
         const namespace = await resolveRefConnectorNamespace(ctx, req, connectorId);
         connectionId = namespace.connectorInstanceId;
         connectorKey = ctx.canonicalConnectorKey(namespace.connectorId) ?? namespace.connectorId;
@@ -933,6 +953,7 @@ export function mountRefConnectorRun(app: AppLike, ctx: MountRefConnectorsContex
           force,
           ownerSubjectId,
           runAdmission: "collection",
+          tombstoneCleared,
         });
       } catch (err) {
         await emitConnectionControlAudit(ctx, res, {
@@ -1311,7 +1332,9 @@ async function emitConnectionControlAudit(
     operation: "run_now" | "revoke" | "delete" | "reactivate";
     outcome: "succeeded" | "failed";
     ownerSubjectId?: string | null;
+    profilePurge?: BrowserProfilePurgeResult | null;
     runId?: string | null;
+    tombstoneCleared?: boolean;
     trace?: TraceContext;
   }
 ): Promise<void> {
@@ -1333,6 +1356,8 @@ async function emitConnectionControlAudit(
             run_id: args.runId ?? null,
           }
         : {}),
+      ...(args.tombstoneCleared ? { tombstone_cleared: true } : {}),
+      ...(args.profilePurge ? { profile_purge: args.profilePurge } : {}),
       target_resource: args.operation === "run_now" ? "connection_run" : "connection",
       ...(args.deletionSummary
         ? {
@@ -1401,6 +1426,11 @@ export function mountRefConnectionRevoke(app: AppLike, ctx: MountRefConnectorsCo
         // (-> `store.updateStatus`) now marks summary evidence dirty in the
         // SAME transaction as the status write — a separate post-hoc call
         // here would be redundant, not additive.
+        // Revoke stops future collection, so the logged-in browser session goes
+        // too. A failure is reported, never a failed revoke.
+        const profilePurge = ctx.purgeBrowserProfile
+          ? await ctx.purgeBrowserProfile({ connectorInstanceId: connectionId, connectorKey })
+          : null;
         await emitConnectionControlAudit(ctx, res, {
           connectionId,
           connectorKey,
@@ -1408,6 +1438,7 @@ export function mountRefConnectionRevoke(app: AppLike, ctx: MountRefConnectorsCo
           operation: "revoke",
           outcome: "succeeded",
           ownerSubjectId,
+          profilePurge,
           trace,
         });
         res.status(200).json({
@@ -1415,6 +1446,7 @@ export function mountRefConnectionRevoke(app: AppLike, ctx: MountRefConnectorsCo
           connector_id: connectorKey,
           connector_key: connectorKey,
           object: "ref_connection_revoke",
+          ...(profilePurge ? { profile_purge: profilePurge } : {}),
           revoked_at: revoked.revokedAt ?? stamp,
           status: revoked.status ?? "revoked",
         });
@@ -1436,10 +1468,10 @@ export function mountRefConnectionRevoke(app: AppLike, ctx: MountRefConnectorsCo
 
 // DELETE /_ref/connections/:connectorInstanceId — owner-session delete of one
 // configured connection. Delegates to the shared `deleteConnection` cascade
-// (ownership + active-run + default-account guards live in the store), emits a
+// (ownership + active-run guards live in the store), emits a
 // non-secret delete audit with the deletion summary, and returns the summary so
 // the console can confirm what was erased. The store's typed
-// `connection_run_active` / `default_account_delete_unsupported` /
+// `connection_run_active` / `connection_is_grouping_canonical` /
 // `connector_instance_not_found` errors flow through `handleError` unchanged.
 export function mountRefConnectionDelete(app: AppLike, ctx: MountRefConnectorsContext): void {
   app.delete(
@@ -1463,6 +1495,11 @@ export function mountRefConnectionDelete(app: AppLike, ctx: MountRefConnectorsCo
           connectorInstanceId: connectionId,
           reason: "ref delete removed the connection from canonical state",
         });
+        // The data is gone; now remove the logged-in browser session. A failure
+        // is reported, never a failed delete.
+        const profilePurge = ctx.purgeBrowserProfile
+          ? await ctx.purgeBrowserProfile({ connectorInstanceId: connectionId, connectorKey })
+          : null;
         await emitConnectionControlAudit(ctx, res, {
           connectionId,
           connectorKey,
@@ -1471,6 +1508,7 @@ export function mountRefConnectionDelete(app: AppLike, ctx: MountRefConnectorsCo
           operation: "delete",
           outcome: "succeeded",
           ownerSubjectId,
+          profilePurge,
         });
         res.status(200).json({
           connection_id: summary.connection_id,
@@ -1481,6 +1519,7 @@ export function mountRefConnectionDelete(app: AppLike, ctx: MountRefConnectorsCo
           deleted_stream_count: summary.deleted_stream_count,
           device_refs_cleared: summary.device_refs_cleared,
           object: "ref_connection_delete",
+          ...(profilePurge ? { profile_purge: profilePurge } : {}),
           schedule_deleted: summary.schedule_deleted,
         });
       } catch (err) {

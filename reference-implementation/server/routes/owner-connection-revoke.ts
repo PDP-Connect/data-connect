@@ -62,6 +62,7 @@
 //        #"Owner-agent control mutations SHALL be auditable and secret-safe")
 //       design.md "Deferred: connection-revoke durability" → Unit 2.
 
+import type { BrowserProfilePurger, BrowserProfilePurgeResult } from "../browser-profile-purge.ts";
 import type { CredentialStateChange } from "../stores/connector-instance-credential-store.ts";
 import {
   auditActorKind,
@@ -152,6 +153,9 @@ export interface MountOwnerConnectionRevokeContext {
   // module does not import a clock. Defaults to `new Date().toISOString()`.
   now?: () => string;
   pdppError: PdppErrorFn;
+  // Post-commit browser-profile purge (server/browser-profile-purge.ts). Never
+  // throws; its result is reported in the response and the audit event.
+  purgeBrowserProfile?: BrowserProfilePurger;
   // Projects one active binding to the wire `{ connection_id, display_name? }`
   // shape used in `available_connections` (placeholder labels suppressed).
   projectBindingForWire: (instance: ActiveBinding) => WireConnection | null;
@@ -204,6 +208,7 @@ async function emitRevokeAudit(
     error?: unknown;
     outcome: "succeeded" | "failed";
     ownerSubjectId?: string | null;
+    profilePurge?: BrowserProfilePurgeResult | null;
     selector: "connection_id" | "connector_id";
     trace?: TraceContext;
   }
@@ -230,6 +235,7 @@ async function emitRevokeAudit(
       outcome: args.outcome,
       selector: args.selector,
       target_resource: "connection",
+      ...(args.profilePurge ? { profile_purge: args.profilePurge } : {}),
       ...(args.error
         ? {
             error: {
@@ -352,11 +358,18 @@ function buildRevokeHandler(
       // (-> `store.updateStatus`) now marks summary evidence dirty in the
       // SAME transaction as the status write — a separate post-hoc call
       // here would be redundant, not additive.
+      // Revoke stops future collection, so the source's logged-in browser
+      // session goes too. A failure is reported, never a failed revoke.
+      const profilePurge =
+        ctx.purgeBrowserProfile && connectionId && connectorKey
+          ? await ctx.purgeBrowserProfile({ connectorInstanceId: connectionId, connectorKey })
+          : null;
       await emitRevokeAudit(ctx, req, res, {
         connectionId,
         connectorKey,
         outcome: "succeeded",
         ownerSubjectId,
+        profilePurge,
         selector,
         trace,
       });
@@ -365,6 +378,7 @@ function buildRevokeHandler(
         connector_id: connectorKey,
         connector_key: connectorKey,
         object: "owner_connection_revoke",
+        ...(profilePurge ? { profile_purge: profilePurge } : {}),
         revoked_at: revoked.revokedAt ?? stamp,
         status: revoked.status ?? "revoked",
       });

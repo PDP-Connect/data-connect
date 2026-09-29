@@ -368,7 +368,13 @@ export default async function ConnectorPage({
   searchParams,
 }: {
   params: Promise<{ connector: string }>;
-  searchParams: Promise<{ connection_id?: string; demo?: string; error?: string; message?: string }>;
+  searchParams: Promise<{
+    active_run_id?: string;
+    connection_id?: string;
+    demo?: string;
+    error?: string;
+    message?: string;
+  }>;
 }) {
   const { connector } = await params;
   const routeId = decodeURIComponent(connector);
@@ -398,7 +404,15 @@ export default async function ConnectorPage({
   // its stall watchdog against real time. This page is `force-dynamic`, so the
   // instant is fresh on every request.
   const now = new Date().toISOString();
-  return <ConnectorPageView dangerError={sp.error} dangerMessage={sp.message} model={model} now={now} />;
+  return (
+    <ConnectorPageView
+      dangerActiveRunId={sp.active_run_id}
+      dangerError={sp.error}
+      dangerMessage={sp.message}
+      model={model}
+      now={now}
+    />
+  );
 }
 
 async function loadConnectorPageModel(
@@ -641,11 +655,14 @@ function StreamDisplayName({
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: this server view intentionally composes the detail evidence panels and their binding-aware actions in one owner-visible route.
 function ConnectorPageView({
   model,
+  dangerActiveRunId,
   dangerMessage,
   dangerError,
   now,
 }: {
   model: ConnectorPageModel;
+  /** The run that blocked a delete, forwarded from the delete action redirect. */
+  dangerActiveRunId?: string;
   dangerMessage?: string;
   dangerError?: string;
   /** Server render instant (ISO-8601) for the diagnostics recovery stall watchdog. */
@@ -930,6 +947,7 @@ function ConnectorPageView({
       {pausable ? <PauseConnectionSection connectionId={renameSelector} /> : null}
 
       <ConnectionDangerZone
+        activeRunId={dangerActiveRunId ?? scheduleActiveRunId}
         connectionId={connectorInstanceId ?? connectionId}
         error={dangerError}
         message={dangerMessage}

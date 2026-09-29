@@ -91,6 +91,14 @@ test("delete 409 connection_run_active maps to run_active", () => {
   });
 });
 
+test("delete 409 connection_run_active carries the blocking run id", () => {
+  const body = { error: { active_run_id: "run_42", code: "connection_run_active", message: "a run is active" } };
+  assert.deepEqual(classifyDeleteConnectionResponse(409, body, connectionControlErrorCode(body)), {
+    activeRunId: "run_42",
+    status: "run_active",
+  });
+});
+
 test("delete 409 default_account_delete_unsupported maps to default_account", () => {
   const body = { error: { code: "default_account_delete_unsupported", message: "revoke instead" } };
   assert.deepEqual(classifyDeleteConnectionResponse(409, body, connectionControlErrorCode(body)), {

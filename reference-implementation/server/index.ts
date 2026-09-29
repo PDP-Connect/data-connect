@@ -91,6 +91,7 @@ import { createRemoteAccessConfigStore, remoteAccessConfigPath } from "./remote-
 import { ownerPasswordManagedByDesktop, ownerPasswordOwnerSet } from "./owner-password-owner-set.ts";
 import { appConfigPath, createAppConfigStore } from "./app-config-store.ts";
 import { autostartStatePath, createAutostartStore } from "./autostart-store.ts";
+import { type BrowserProfilePurger, createBrowserProfilePurger } from "./browser-profile-purge.ts";
 import { createLiveRevisions, type LiveRevisions, registerDefaultLiveTopics } from "./live-revisions.ts";
 import { createRecoveryKeyStore } from "./recovery-key-store.ts";
 import { getOwnerSessionStore } from "./stores/owner-session-store.ts";
@@ -710,6 +711,7 @@ type ApiError = Error & {
 };
 
 interface PdppErrorBody {
+  active_run_id?: string;
   available_connections?: unknown[];
   code: unknown;
   message: unknown;
@@ -840,6 +842,7 @@ interface ServerOpts {
   lexicalRetrievalCapability?: unknown;
   lexicalRetrievalSupported?: boolean;
   logger?: LoggerLike;
+  purgeBrowserProfile?: BrowserProfilePurger;
   makePresentationAttachmentId?: (() => string) | null;
   makeStreamingBrowserSessionId?: (() => string) | null;
   maxRecordRejectionPageSize?: number;
@@ -1398,6 +1401,9 @@ function pdppError(
     body.error.param = param;
   }
   if (extras && typeof extras === "object") {
+    if (typeof extras.active_run_id === "string") {
+      body.error.active_run_id = extras.active_run_id;
+    }
     if (Array.isArray(extras.available_connections)) {
       body.error.available_connections = extras.available_connections;
     }
@@ -1582,6 +1588,9 @@ function handleError(res: ResLike, err: ApiError) {
   }
   if (typeof err.retry_with === "string") {
     extras.retry_with = err.retry_with;
+  }
+  if (code === "connection_run_active" && typeof err.active_run_id === "string") {
+    extras.active_run_id = err.active_run_id;
   }
   Object.assign(extras, recoveryAdmissionExtrasForWire(err));
   pdppError(res, status, code, err.message, err.param || null, extras);
@@ -6208,6 +6217,9 @@ export function buildAsApp(opts: ServerOpts = {}) {
 
   const refConnectorsContext = {
     canonicalConnectorKey,
+    purgeBrowserProfile: opts.purgeBrowserProfile ?? createBrowserProfilePurger({ logger: opts.logger ?? null }),
+    clearDefaultAccountTombstone: (input: { connectorId: string; ownerSubjectId: string }) =>
+      createRequestConnectorInstanceStore().clearDefaultAccountTombstone(input),
     createRequestConnectorInstanceStore,
     createTraceContext,
     deleteConnection: (connectorInstanceId: string, options: unknown) =>
@@ -7266,6 +7278,8 @@ function buildOwnerAgentOnboardingMetadata({
 }
 
 function buildRsApp(opts: ServerOpts = {}) {
+  const rsPurgeBrowserProfile =
+    opts.purgeBrowserProfile ?? createBrowserProfilePurger({ logger: opts.logger ?? null });
   const app = createApp({
     ...(opts.logger === null ? {} : { logger: opts.logger }),
   });
@@ -7919,6 +7933,7 @@ function buildRsApp(opts: ServerOpts = {}) {
   // openspec/changes/add-owner-agent-control-surface (tasks 3.1d/6.1d, design
   // "Deferred: connection-revoke durability" → Unit 2).
   mountOwnerConnectionRevoke(app, {
+    purgeBrowserProfile: rsPurgeBrowserProfile,
     AmbiguousConnectionError,
     canonicalConnectorKey,
     createTraceContext,
@@ -8086,9 +8101,9 @@ function buildRsApp(opts: ServerOpts = {}) {
   // connections, and the device edge. Ownership is verified in the store BEFORE
   // any mutation (foreign/unknown/repeat → connector_instance_not_found 404, no
   // existence leak — the same code the sibling owner-agent instance-control
-  // routes raise); an in-flight run → connection_run_active (409); a
-  // default-account binding → default_account_delete_unsupported (409, no silent
-  // re-materialization). The connector-only route auto-selects a single active
+  // routes raise); an in-flight run → connection_run_active (409). A
+  // default-account binding is deletable; its tombstone blocks silent
+  // re-materialization. The connector-only route auto-selects a single active
   // connection or returns a typed ambiguous_connection (409). The durable
   // source-of-truth cascade (records-family + schedule + device back-ref +
   // connector_instances row) is ONE all-or-nothing transaction per backend;
@@ -8096,6 +8111,7 @@ function buildRsApp(opts: ServerOpts = {}) {
   // commit. `/mcp` owner-bearer rejection is untouched. See
   // openspec/changes/add-owner-connection-delete-contract.
   mountOwnerConnectionDelete(app, {
+    purgeBrowserProfile: rsPurgeBrowserProfile,
     AmbiguousConnectionError,
     canonicalConnectorKey,
     createTraceContext,

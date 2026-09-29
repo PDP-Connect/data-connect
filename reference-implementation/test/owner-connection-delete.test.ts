@@ -30,9 +30,11 @@ const TOP_LEVEL_REGEX_2 = /owner-agent/i;
  *   - idempotency (I4): first delete 200, second 404 connector_instance_not_found;
  *   - foreign / unknown (I5): foreign-owner and unknown ids → 404, no
  *     cross-owner deletion, no existence leak;
- *   - default-account no-resurrection (I6 / Decision 1 fallback): a
- *     default-account connection is refused with default_account_delete_unsupported
- *     so its deterministic id cannot silently re-materialize;
+ *   - default-account delete (I6): a default-account connection is deletable;
+ *     the cascade erases its cursor and browser profile and writes a tombstone
+ *     so implicit materialization cannot silently re-create it, while an
+ *     explicit owner re-connect clears the tombstone and starts from an empty
+ *     cursor;
  *   - active-run refusal (I7): delete under an active-run lease → 409
  *     connection_run_active, no rows erased;
  *   - grants untouched (I10): a disclosure grant for the connector type is
@@ -47,7 +49,8 @@ const TOP_LEVEL_REGEX_2 = /owner-agent/i;
  */
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -952,6 +955,11 @@ test("owner-agent delete refuses while an active run lease exists (I7) and erase
     const del = await deleteConnection(rsUrl, ownerToken, `/v1/owner/connections/${cin}`);
     assert.equal(del.status, 409);
     assert.equal(deleteBody(del).error?.code, "connection_run_active");
+    assert.equal(
+      (deleteBody(del).error as Record<string, unknown> | undefined)?.active_run_id,
+      "run_cin_running",
+      "the refusal names the in-flight run so the console can cancel it"
+    );
 
     // Nothing erased: row, records, and the active-run lease all survive.
     assert.equal(getInstance(cin)?.status, "active", "row survives refused delete");
@@ -965,33 +973,192 @@ test("owner-agent delete refuses while an active run lease exists (I7) and erase
   });
 });
 
-test("owner-agent delete refuses a default-account connection (I6) so its deterministic id cannot re-materialize", async () => {
+// Points the local browser-profile purge at a throwaway root for one test.
+async function withProfileRoot(fn: (root: string) => Promise<void>): Promise<void> {
+  const previous = process.env.PDPP_BROWSER_PROFILE_ROOT;
+  const root = mkdtempSync(join(tmpdir(), "pdpp-profile-purge-"));
+  process.env.PDPP_BROWSER_PROFILE_ROOT = root;
+  try {
+    await fn(root);
+  } finally {
+    if (previous === undefined) {
+      delete process.env.PDPP_BROWSER_PROFILE_ROOT;
+    } else {
+      process.env.PDPP_BROWSER_PROFILE_ROOT = previous;
+    }
+    rmSync(root, { force: true, recursive: true });
+  }
+}
+
+function seedProfileDir(root: string, name: string): string {
+  const dir = join(root, name);
+  mkdirSync(join(dir, "Default"), { recursive: true });
+  writeFileSync(join(dir, "Default", "Cookies"), "session-cookie-fixture");
+  return dir;
+}
+
+function seedConnectorState(connectorId: string, connectorInstanceId: string, stream: string): void {
+  getDb()
+    .prepare(
+      "INSERT INTO connector_state(connector_id, connector_instance_id, stream, state_json, updated_at) VALUES(?, ?, ?, ?, ?)"
+    )
+    .run(connectorId, connectorInstanceId, stream, JSON.stringify({ cursor: "2026-05-30" }), NOW);
+  getDb()
+    .prepare(
+      "INSERT INTO grant_connector_state(grant_id, connector_id, connector_instance_id, stream, state_json, updated_at) VALUES(?, ?, ?, ?, ?, ?)"
+    )
+    .run("grt_fixture", connectorId, connectorInstanceId, stream, JSON.stringify({ cursor: "2026-05-30" }), NOW);
+}
+
+function countTombstones(connectorInstanceId: string): number {
+  return (
+    getDb()
+      .prepare("SELECT COUNT(*) AS n FROM connector_instance_tombstones WHERE connector_instance_id = ?")
+      .get(connectorInstanceId) as { n: number }
+  ).n;
+}
+
+test("owner-agent delete erases a default-account connection (I6): records, cursor, attention, browser profile; tombstone blocks implicit re-creation", async () => {
+  await withProfileRoot(async (profileRoot) => {
+    await withServer(async ({ asUrl, rsUrl }) => {
+      const manifest = await registerConnector(asUrl, loadReferenceManifest("github"));
+      const connectorKey = canonicalConnectorKey(manifest.connector_id);
+      assert.ok(connectorKey, "expected a canonical connector key");
+      const stream = manifest.streams[0]?.name;
+      assert.ok(stream, "expected the manifest to declare at least one stream");
+      const store = createSqliteConnectorInstanceStore();
+      const defaultId = makeDefaultAccountConnectorInstanceId(OWNER_SUBJECT_ID, connectorKey);
+      await store.ensureDefaultAccountConnection({
+        connectorId: connectorKey,
+        displayName: manifest.display_name || connectorKey,
+        now: NOW,
+        ownerSubjectId: OWNER_SUBJECT_ID,
+      });
+      assert.equal(getInstance(defaultId)?.status, "active");
+
+      const storageTarget = { connector_id: connectorKey, connector_instance_id: defaultId };
+      await ingestRecord(storageTarget, { data: { id: "rec_1", name: "alpha" }, key: "rec_1", stream });
+      seedAttention({ attentionId: "att_default", connectorId: connectorKey, connectorInstanceId: defaultId });
+      seedConnectorState(connectorKey, defaultId, stream);
+      seedSchedule(defaultId, connectorKey);
+      const profileDir = seedProfileDir(profileRoot, `github__${defaultId}`);
+      const siblingProfileDir = seedProfileDir(profileRoot, "github__cin_other_connection");
+      assert.equal(countRows("records", defaultId), 1, "records before");
+      assert.equal(countRows("connector_state", defaultId), 1, "cursor before");
+      assert.equal(countRows("grant_connector_state", defaultId), 1, "grant cursor before");
+      assert.equal(countRows("connector_attention_records", defaultId), 1, "attention before");
+
+      const ownerToken = await issueOwnerToken(asUrl);
+      const del = await deleteConnection(rsUrl, ownerToken, `/v1/owner/connections/${defaultId}`);
+      assert.equal(del.status, 200, JSON.stringify(del.body));
+      const body = deleteBody(del);
+      assert.equal(body.deleted, true);
+      assert.equal(body.deleted_record_count, 1);
+      assert.deepEqual(body.profile_purge, { removed: 1, status: "purged", target: "local" });
+
+      assert.equal(getInstance(defaultId), null, "connector_instances row gone");
+      assert.equal(countRows("records", defaultId), 0, "records erased");
+      assert.equal(countRows("connector_state", defaultId), 0, "cursor erased");
+      assert.equal(countRows("grant_connector_state", defaultId), 0, "grant cursor erased");
+      assert.equal(countRows("connector_attention_records", defaultId), 0, "attention erased");
+      assert.equal(scheduleRowCount(defaultId), 0, "schedule erased");
+      assert.equal(countTombstones(defaultId), 1, "tombstone written");
+      assert.equal(existsSync(profileDir), false, "the connection's browser profile is removed");
+      assert.equal(existsSync(siblingProfileDir), true, "another connection's profile is untouched");
+
+      const audit = findDeleteAuditEvent(del.resp);
+      assert.equal(audit.status, "succeeded");
+      assert.deepEqual((audit.data as Record<string, unknown>).profile_purge, {
+        removed: 1,
+        status: "purged",
+        target: "local",
+      });
+
+      // Implicit materialization (scheduler / ingest) must not bring it back.
+      await assert.rejects(
+        async () =>
+          await store.ensureDefaultAccountConnection({
+            connectorId: connectorKey,
+            now: NOW,
+            ownerSubjectId: OWNER_SUBJECT_ID,
+          }),
+        (err: unknown) => (err as { code?: string }).code === "connection_tombstoned"
+      );
+      assert.equal(getInstance(defaultId), null, "no silent re-creation");
+    });
+  });
+});
+
+test("an explicit owner re-connect after a default-account delete re-creates the connection with an empty cursor", async () => {
   await withServer(async ({ asUrl, rsUrl }) => {
     const manifest = await registerConnector(asUrl, loadReferenceManifest("github"));
     const connectorKey = canonicalConnectorKey(manifest.connector_id);
     assert.ok(connectorKey, "expected a canonical connector key");
+    const stream = manifest.streams[0]?.name;
+    assert.ok(stream, "expected the manifest to declare at least one stream");
     const store = createSqliteConnectorInstanceStore();
     const defaultId = makeDefaultAccountConnectorInstanceId(OWNER_SUBJECT_ID, connectorKey);
-    await store.ensureDefaultAccountConnection({
-      connectorId: connectorKey,
-      displayName: manifest.display_name || connectorKey,
-      now: NOW,
-      ownerSubjectId: OWNER_SUBJECT_ID,
-    });
-    assert.equal(getInstance(defaultId)?.status, "active");
+    await store.ensureDefaultAccountConnection({ connectorId: connectorKey, now: NOW, ownerSubjectId: OWNER_SUBJECT_ID });
+    seedConnectorState(connectorKey, defaultId, stream);
 
     const ownerToken = await issueOwnerToken(asUrl);
     const del = await deleteConnection(rsUrl, ownerToken, `/v1/owner/connections/${defaultId}`);
-    assert.equal(del.status, 409);
-    assert.equal(deleteBody(del).error?.code, "default_account_delete_unsupported");
+    assert.equal(del.status, 200, JSON.stringify(del.body));
 
-    // The default-account row is untouched (still active) — not hard-deleted and
-    // therefore not subject to silent re-materialization.
-    assert.equal(getInstance(defaultId)?.status, "active", "default-account row untouched");
+    // The explicit connect path (POST /_ref/connectors/:id/run) clears the
+    // tombstone, then materializes the default account again.
+    assert.equal(
+      store.clearDefaultAccountTombstone({ connectorId: connectorKey, ownerSubjectId: OWNER_SUBJECT_ID }),
+      true
+    );
+    assert.equal(countTombstones(defaultId), 0);
+    const readded = await store.ensureDefaultAccountConnection({
+      connectorId: connectorKey,
+      now: NOW,
+      ownerSubjectId: OWNER_SUBJECT_ID,
+    });
+    assert.equal(readded.connectorInstanceId, defaultId, "same deterministic id");
+    assert.equal(readded.status, "active");
+    assert.equal(countRows("connector_state", defaultId), 0, "the re-added source starts with no cursor (full backfill)");
+    assert.equal(
+      store.clearDefaultAccountTombstone({ connectorId: connectorKey, ownerSubjectId: OWNER_SUBJECT_ID }),
+      false,
+      "clearing is idempotent"
+    );
+  });
+});
 
-    const audit = findDeleteAuditEvent(del.resp);
-    assert.equal(audit.status, "failed");
-    assert.equal(auditData(audit).error?.code, "default_account_delete_unsupported");
+test("owner-agent revoke purges the connection's browser profile and keeps its records", async () => {
+  await withProfileRoot(async (profileRoot) => {
+    await withServer(async ({ asUrl, rsUrl }) => {
+      const manifest = await registerConnector(asUrl, loadReferenceManifest("spotify"));
+      const connectorKey = canonicalConnectorKey(manifest.connector_id);
+      assert.ok(connectorKey, "expected a canonical connector key");
+      const stream = manifest.streams[0]?.name;
+      assert.ok(stream);
+      const cin = "cin_revoke_profile";
+      await seedInstance({ connectorId: connectorKey, connectorInstanceId: cin, displayName: "R", sourceBindingKey: "r@x" });
+      await ingestRecord(
+        { connector_id: connectorKey, connector_instance_id: cin },
+        { data: { id: "rec_1", name: "kept" }, key: "rec_1", stream }
+      );
+      const profileDir = seedProfileDir(profileRoot, `spotify__${cin}`);
+
+      const ownerToken = await issueOwnerToken(asUrl);
+      const revoke = await fetchJson(`${rsUrl}/v1/owner/connections/${cin}/revoke`, {
+        headers: { Authorization: `Bearer ${ownerToken}`, "Content-Type": "application/json" },
+        method: "POST",
+      });
+      assert.equal(revoke.status, 200, JSON.stringify(revoke.body));
+      assert.deepEqual((revoke.body as Record<string, unknown>).profile_purge, {
+        removed: 1,
+        status: "purged",
+        target: "local",
+      });
+      assert.equal(existsSync(profileDir), false, "browser profile removed on revoke");
+      assert.equal(getInstance(cin)?.status, "revoked");
+      assert.equal(countRows("records", cin), 1, "revoke keeps records");
+    });
   });
 });
 

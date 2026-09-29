@@ -22,6 +22,9 @@ use tauri::{AppHandle, Manager};
 use uuid::Uuid;
 
 const BROWSER_SURFACE_PATH: &str = "/browser-surface/leases";
+/// `DELETE /browser-surface/profiles/<connector_id>` resets one connector's
+/// persistent profile after the owner deletes or revokes its source.
+const BROWSER_PROFILE_PATH: &str = "/browser-surface/profiles/";
 const MAX_HTTP_REQUEST_BYTES: usize = 64 * 1024;
 const BROWSER_START_TIMEOUT: Duration = Duration::from_secs(10);
 const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(5);
@@ -108,6 +111,13 @@ struct BrowserSurfaceLease {
     headless: bool,
     response: AcquireResponse,
     child: Child,
+}
+
+#[derive(Debug)]
+enum ProfileResetError {
+    Invalid(String),
+    InUse,
+    Failed(String),
 }
 
 struct HostState {
@@ -250,6 +260,54 @@ impl HostState {
                 log::warn!("Browser surface {surface_id} did not terminate cleanly");
             }
         }
+    }
+
+    /// Deletes one connector's persistent profile (its logged-in session).
+    /// Refuses while a lease for that connector is live, and holds the lease
+    /// lock so an acquire cannot race the removal. Never follows a symlink out
+    /// of the profile root. Returns whether a profile existed.
+    fn reset_profile(&self, connector_id: &str) -> Result<bool, ProfileResetError> {
+        validate_request_field("connector_id", connector_id).map_err(ProfileResetError::Invalid)?;
+        let leases = self.leases.lock().map_err(|_| {
+            ProfileResetError::Failed("Browser surface lease state is unavailable".into())
+        })?;
+        if leases
+            .values()
+            .any(|lease| lease.connector_id == connector_id)
+        {
+            return Err(ProfileResetError::InUse);
+        }
+        let candidate = self.profile_root.join(stable_segment(connector_id));
+        let metadata = match fs::symlink_metadata(&candidate) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => {
+                return Err(ProfileResetError::Failed(format!(
+                    "Failed to inspect browser profile: {error}"
+                )))
+            }
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(ProfileResetError::Failed(
+                "Browser surface profile is not a real directory".into(),
+            ));
+        }
+        let canonical_root = fs::canonicalize(&self.profile_root).map_err(|error| {
+            ProfileResetError::Failed(format!("Failed to confine browser surface root: {error}"))
+        })?;
+        let canonical_profile = fs::canonicalize(&candidate).map_err(|error| {
+            ProfileResetError::Failed(format!("Failed to confine browser profile: {error}"))
+        })?;
+        if canonical_profile == canonical_root || !canonical_profile.starts_with(&canonical_root) {
+            return Err(ProfileResetError::Failed(
+                "Browser surface profile escaped its root".into(),
+            ));
+        }
+        fs::remove_dir_all(&canonical_profile).map_err(|error| {
+            ProfileResetError::Failed(format!("Failed to delete browser profile: {error}"))
+        })?;
+        drop(leases);
+        Ok(true)
     }
 
     fn profile_dir(&self, connector_id: &str) -> Result<PathBuf, String> {
@@ -687,6 +745,42 @@ fn dispatch_request(request: HttpRequest, state: Arc<HostState>) -> Vec<u8> {
             state.release_run(run_id);
             empty_response("204 No Content")
         }
+        ("DELETE", path) if path.starts_with(BROWSER_PROFILE_PATH) => {
+            let connector_id = &path[BROWSER_PROFILE_PATH.len()..];
+            match state.reset_profile(connector_id) {
+                Ok(true) => empty_response("204 No Content"),
+                Ok(false) => empty_response("404 Not Found"),
+                Err(ProfileResetError::Invalid(message)) => json_response(
+                    "400 Bad Request",
+                    &ErrorResponse {
+                        error: "bad_request",
+                        message: Some(message),
+                    },
+                    None,
+                ),
+                Err(ProfileResetError::InUse) => json_response(
+                    "409 Conflict",
+                    &ErrorResponse {
+                        error: "profile_in_use",
+                        message: Some(
+                            "A browser surface for this connector is still running".into(),
+                        ),
+                    },
+                    None,
+                ),
+                Err(ProfileResetError::Failed(message)) => {
+                    log::error!("Browser profile reset failed: {message}");
+                    json_response(
+                        "500 Internal Server Error",
+                        &ErrorResponse {
+                            error: "profile_reset_failed",
+                            message: Some(message),
+                        },
+                        None,
+                    )
+                }
+            }
+        }
         _ => empty_response("404 Not Found"),
     }
 }
@@ -969,6 +1063,113 @@ while :; do sleep 1; done
         let profile_dir = host.state.profile_dir("chase").expect("profile dir");
         let args = fs::read_to_string(profile_dir.join("args.txt")).expect("fake args");
         assert!(!args.contains("--headless=new"));
+    }
+
+    #[test]
+    fn profile_reset_deletes_the_connector_profile_and_refuses_a_live_lease() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let host = start_test_host(&temp);
+        let (surface_id, _, _) = acquire(&host, "amazon");
+        let profile_dir = host.state.profile_dir("amazon").expect("profile dir");
+        fs::write(profile_dir.join("Cookies"), "session").expect("seed cookie");
+        let other_profile = host.state.profile_dir("reddit").expect("other profile dir");
+
+        let refused = request(
+            &host,
+            "DELETE",
+            &format!("{BROWSER_PROFILE_PATH}amazon"),
+            Some(host_token(&host)),
+            json!({}),
+        );
+        assert_eq!(refused.status, 409);
+        assert!(
+            profile_dir.join("Cookies").exists(),
+            "a live lease keeps its profile"
+        );
+
+        let released = request(
+            &host,
+            "DELETE",
+            &format!("{BROWSER_SURFACE_PATH}/{surface_id}"),
+            Some(host_token(&host)),
+            json!({}),
+        );
+        assert_eq!(released.status, 204);
+
+        let unauthorized = request(
+            &host,
+            "DELETE",
+            &format!("{BROWSER_PROFILE_PATH}amazon"),
+            None,
+            json!({}),
+        );
+        assert_eq!(unauthorized.status, 401);
+        assert!(profile_dir.exists());
+
+        let reset = request(
+            &host,
+            "DELETE",
+            &format!("{BROWSER_PROFILE_PATH}amazon"),
+            Some(host_token(&host)),
+            json!({}),
+        );
+        assert_eq!(reset.status, 204);
+        assert!(!profile_dir.exists(), "the profile is gone");
+        assert!(
+            other_profile.exists(),
+            "another connector's profile is untouched"
+        );
+
+        let again = request(
+            &host,
+            "DELETE",
+            &format!("{BROWSER_PROFILE_PATH}amazon"),
+            Some(host_token(&host)),
+            json!({}),
+        );
+        assert_eq!(
+            again.status, 404,
+            "an absent profile is reported, not an error"
+        );
+    }
+
+    #[test]
+    fn profile_reset_refuses_path_escapes_and_symlinks() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let host = start_test_host(&temp);
+        for connector_id in ["..", "a%2F..", "a/b", ""] {
+            let response = request(
+                &host,
+                "DELETE",
+                &format!("{BROWSER_PROFILE_PATH}{connector_id}"),
+                Some(host_token(&host)),
+                json!({}),
+            );
+            assert!(
+                response.status == 400 || response.status == 404,
+                "{connector_id:?} must be refused, got {}",
+                response.status
+            );
+        }
+
+        let outside = temp.path().join("outside");
+        fs::create_dir_all(&outside).expect("outside dir");
+        fs::write(outside.join("keep"), "precious").expect("outside file");
+        fs::create_dir_all(&host.state.profile_root).expect("profile root");
+        std::os::unix::fs::symlink(
+            &outside,
+            host.state.profile_root.join(stable_segment("linked")),
+        )
+        .expect("symlink");
+        let response = request(
+            &host,
+            "DELETE",
+            &format!("{BROWSER_PROFILE_PATH}linked"),
+            Some(host_token(&host)),
+            json!({}),
+        );
+        assert_eq!(response.status, 500);
+        assert!(outside.join("keep").exists(), "the symlink target survives");
     }
 
     /// A browser that aborts the way Chromium does when AppArmor blocks its

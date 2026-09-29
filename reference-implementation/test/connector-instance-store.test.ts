@@ -1262,8 +1262,8 @@ test("SQLite deleteConnection erases schedule + row + device back-ref and refuse
       "active-run row preserved, not erased, on refusal"
     );
 
-    // Default-account binding → typed default_account_delete_unsupported, no
-    // purge, row untouched (I6 / Decision 1 fallback).
+    // Default-account binding → deletable (I6): the cascade runs, a tombstone
+    // is written, and implicit re-materialization is refused.
     const defaultId = makeDefaultAccountConnectorInstanceId("owner_1", "reddit");
     await store.ensureDefaultAccountConnection({
       connectorId: "reddit",
@@ -1272,23 +1272,21 @@ test("SQLite deleteConnection erases schedule + row + device back-ref and refuse
       ownerSubjectId: "owner_1",
     });
     let defaultPurge = 0;
+    await store.deleteConnection(defaultId, {
+      now: LATER,
+      ownerSubjectId: "owner_1",
+      purge: stubPurge({
+        onDeleteRows: () => {
+          defaultPurge += 1;
+        },
+      }),
+    });
+    assert.equal(defaultPurge, 1, "default-account delete runs the purge");
+    assert.equal(store.get(defaultId), null, "default-account row removed");
     await assert.rejects(
-      () =>
-        store.deleteConnection(defaultId, {
-          now: LATER,
-          ownerSubjectId: "owner_1",
-          purge: stubPurge({
-            onDeleteRows: () => {
-              defaultPurge += 1;
-            },
-          }),
-        }),
-      (err) => err instanceof ConnectorInstanceDeleteError && err.code === "default_account_delete_unsupported"
+      async () => await store.ensureDefaultAccountConnection({ connectorId: "reddit", now: LATER, ownerSubjectId: "owner_1" }),
+      (err) => err instanceof ConnectorInstanceDeleteError && err.code === "connection_tombstoned"
     );
-    assert.equal(defaultPurge, 0, "default-account delete never reaches purge");
-    const defaultRowAfterRefusal = store.get(defaultId);
-    assert.ok(defaultRowAfterRefusal, "get must return the row");
-    assert.equal(defaultRowAfterRefusal.status, "active", "default-account row untouched");
   } finally {
     closeDb();
   }
