@@ -117,7 +117,7 @@ describe("RemoveSourceDialog", () => {
 
     expect(screen.getByRole("alert").textContent).toBe("Profile is in use")
     expect(
-      screen.getByRole("button", { name: "Signing out…” }).hasAttribute("disabled")
+      screen.getByRole("button", { name: "Signing out…" }).hasAttribute("disabled")
     ).toBe(true)
     expect(
       screen
