@@ -110,11 +110,12 @@ pub(super) fn has_legacy_data(app: &tauri::AppHandle, connector_id: &str, compan
     let profile_has_legacy =
         super::pdpp_browser::PdppBrowserLease::profile_exists(connector_id, &legacy_id)
             .unwrap_or(false);
-    let export_has_legacy = app
-        .path()
-        .app_data_dir()
-        .ok()
-        .is_some_and(|directory| directory.join("exported_data").join(company).exists());
+    let export_has_legacy = app.path().app_data_dir().ok().is_some_and(|directory| {
+        let export_root = directory.join("exported_data");
+        let sanitized_company = super::file_ops::sanitize_path_component(company);
+        super::file_ops::legacy_export_exists(&export_root, &sanitized_company, connector_id)
+            .unwrap_or(false)
+    });
     collection_has_legacy || profile_has_legacy || export_has_legacy
 }
 
@@ -242,6 +243,10 @@ mod tests {
         assert_eq!(
             legacy_connection_id("https://example.test/é"),
             "pdpp-7ab12d62-owner"
+        );
+        assert_eq!(
+            legacy_connection_id("https://example.test/😀"),
+            "pdpp-ac793152-owner"
         );
         assert_eq!(
             legacy_connection_id("http://example.test/connector"),

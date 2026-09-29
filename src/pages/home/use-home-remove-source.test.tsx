@@ -226,7 +226,7 @@ describe("useHomeRemoveSource", () => {
     expect(result.current.platform).toBeNull()
   })
 
-  it("signs out only the selected ChatGPT account profile", async () => {
+  it("signs out the migrated ChatGPT profile and its legacy session", async () => {
     const chatgpt = platform({
       id: "chatgpt-pdpp",
       company: "openai",
@@ -256,7 +256,7 @@ describe("useHomeRemoveSource", () => {
       "reset_installed_pdpp_browser_profile",
       { connectorId: "chatgpt-pdpp", connectionId: "chatgpt-pdpp-owner" },
     ])
-    expect(commands()).not.toContainEqual([
+    expect(commands()).toContainEqual([
       "clear_browser_session",
       { connectorId: "chatgpt-playwright" },
     ])
@@ -444,13 +444,11 @@ describe("useHomeRemoveSource", () => {
       "delete_exported_run",
       { exportPath: pdppRun.exportPath },
     ])
-    expect(commands()).not.toContainEqual([
+    expect(commands()).toContainEqual([
       "delete_exported_run",
       { exportPath: legacyRun.exportPath },
     ])
-    expect(store.getState().app.runs.map(entry => entry.id)).toEqual([
-      "chatgpt-playwright-1",
-    ])
+    expect(store.getState().app.runs).toEqual([])
   })
 
   it("deletes nothing when the sign-out is refused and surfaces the error", async () => {

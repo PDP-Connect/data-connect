@@ -94,7 +94,6 @@ vi.mock("@/hooks/usePlatforms", () => ({
         ? value.platforms
         : value.platforms.map((platform: { id?: string; runtime?: string; connectionId?: string }) =>
             platform.runtime === "pdpp-network" &&
-            !(platform.id === "github-pdpp" && value.platforms.length > 1) &&
             !platform.connectionId
               ? { ...platform, connectionId: "test-account" }
               : platform
@@ -113,6 +112,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 }))
 
 vi.mock("@/hooks/useConnector", () => ({
+  legacyPdppConnectionId: (id: string) => id === "github-pdpp" ? "default" : `${id}-owner`,
   installedPdppConnectionId: (platform: { id: string; runtime?: string }) =>
     platform.runtime === "pdpp-network" && platform.id !== "github-pdpp"
       ? platform.id.startsWith("https://")
@@ -1415,9 +1415,10 @@ describe("Home", () => {
           exportFrequency: null,
           vectorize_config: null,
           runtime: "pdpp-network",
+          connectionId: "default",
         },
       }
-      mockConnectedPlatforms = { "github-playwright": true }
+      mockConnectedPlatforms = { "github-playwright": true, "github-pdpp:default": true }
       mockUsePlatforms.mockReturnValue({
         platforms: platformIds.map(
           id => platformsById[id as keyof typeof platformsById]

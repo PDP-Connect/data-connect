@@ -4,7 +4,7 @@ import { useCallback, useRef, useState } from "react"
 import { invoke } from "@tauri-apps/api/core"
 import { useDispatch, useSelector } from "react-redux"
 import { useNavigate } from "react-router-dom"
-import { installedPdppConnectionId } from "@/hooks/useConnector"
+import { installedPdppConnectionId, legacyPdppConnectionId } from "@/hooks/useConnector"
 import {
   consoleDangerZonePath,
   referenceConnectorKey,
@@ -32,7 +32,9 @@ export function canSignOutOfSource(
     (platform.runtime === PDPP_NETWORK_RUNTIME &&
       platform.requiresBrowser === true &&
       installedPdppConnectionId(platform) !== null) ||
-    hasLegacyBrowserSession
+    (hasLegacyBrowserSession &&
+      (platform.runtime !== PDPP_NETWORK_RUNTIME ||
+        platform.connectionId === legacyPdppConnectionId(platform.id)))
   )
 }
 
@@ -143,7 +145,10 @@ export function useHomeRemoveSource(onRefreshPlatforms?: () => Promise<void>) {
           connectionId: installedPdppConnectionId(target),
         })
       }
-      if (target.runtime !== PDPP_NETWORK_RUNTIME) {
+      if (
+        target.runtime !== PDPP_NETWORK_RUNTIME ||
+        target.connectionId === legacyPdppConnectionId(target.id)
+      ) {
         for (const sourcePlatform of sourcePlatforms(target, platforms)) {
           if (sourcePlatform.runtime === PLAYWRIGHT_RUNTIME) {
             await invoke("clear_browser_session", {
@@ -210,7 +215,10 @@ export function useHomeRemoveSource(onRefreshPlatforms?: () => Promise<void>) {
           run.status !== "running" &&
           run.status !== "pending" &&
           targetPlatformIds.has(run.platformId) &&
-          (!target.connectionId || run.connectionId === target.connectionId)
+          (run.connectionId
+            ? run.connectionId === target.connectionId
+            : !target.connectionId ||
+              target.connectionId === legacyPdppConnectionId(target.id))
       )
       for (const run of sourceRuns) {
         if (run.exportPath) await deleteExportedRun(run.exportPath)

@@ -17,6 +17,7 @@ import {
   installedPdppConnectionId,
   installedPdppConnectionKey,
   isAuthenticationFailure,
+  legacyPdppConnectionId,
   useConnector,
 } from "@/hooks/useConnector"
 import type { Platform, RootState, Run } from "@/types"
@@ -584,18 +585,42 @@ export function Home() {
   // Separate available platforms (memoized to avoid re-filtering on every render)
   const connectedPlatformsList = useMemo(() => {
     const connectedByAccount = new Map<string, Platform>()
+    const hasConnectedAccountRun = (platform: Platform, canonicalId: string) =>
+      runs.some(run => {
+        const runCanonicalId = getPlatformRegistryEntry({
+          id: run.platformId,
+          name: run.name,
+          company: run.company,
+        })?.id ?? run.platformId
+        const isLegacyOwnerRun =
+          !run.connectionId &&
+          platform.connectionId === legacyPdppConnectionId(platform.id)
+        return (
+          (run.platformId === platform.id || runCanonicalId === canonicalId) &&
+          (run.connectionId === platform.connectionId || isLegacyOwnerRun) &&
+          (run.status === "success" || run.status === "partial") &&
+          Boolean(run.exportPath)
+        )
+      })
+    const connectedPdppCanonicalIds = new Set(
+      displayPlatforms
+        .filter(platform => platform.runtime === "pdpp-network")
+        .filter(platform => {
+          const canonicalId = getPlatformRegistryEntry(platform)?.id ?? platform.id
+          return platform.connectionId
+            ? isPlatformConnected(installedPdppConnectionKey(platform)) ||
+                hasConnectedAccountRun(platform, canonicalId)
+            : isPlatformConnected(platform.id) || connectedCanonicalIdsFromRuns.has(canonicalId)
+        })
+        .map(platform => getPlatformRegistryEntry(platform)?.id ?? platform.id)
+    )
 
     for (const platform of displayPlatforms) {
       const canonicalId = getPlatformRegistryEntry(platform)?.id ?? platform.id
+      if (platform.runtime !== "pdpp-network" && connectedPdppCanonicalIds.has(canonicalId)) continue
       const accountKey = installedPdppConnectionKey(platform)
       const isConnected = platform.connectionId
-        ? isPlatformConnected(accountKey) ||
-          runs.some(
-            run => run.platformId === platform.id &&
-              run.connectionId === platform.connectionId &&
-              (run.status === "success" || run.status === "partial") &&
-              Boolean(run.exportPath)
-          )
+        ? isPlatformConnected(accountKey) || hasConnectedAccountRun(platform, canonicalId)
         : isPlatformConnected(platform.id) ||
           connectedCanonicalIdsFromRuns.has(canonicalId)
       if (!isConnected) continue
@@ -603,11 +628,6 @@ export function Home() {
       const key = platform.connectionId
         ? `${canonicalId}:${platform.connectionId}`
         : canonicalId
-      const existing = connectedByAccount.get(key)
-      if (existing?.runtime === "pdpp-network" && platform.runtime !== "pdpp-network") {
-        continue
-      }
-
       connectedByAccount.set(
         key,
         platform.connectionId && !platform.accountLabel

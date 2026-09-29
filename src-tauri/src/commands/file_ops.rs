@@ -218,7 +218,7 @@ fn read_export_content(path: &Path) -> Result<serde_json::Value, String> {
     }
 }
 
-fn sanitize_path_component(input: &str) -> String {
+pub(super) fn sanitize_path_component(input: &str) -> String {
     let mut sanitized = String::with_capacity(input.len());
     for ch in input.chars() {
         match ch {
@@ -233,6 +233,155 @@ fn sanitize_path_component(input: &str) -> String {
         "unknown".to_string()
     } else {
         trimmed.to_string()
+    }
+}
+
+pub(super) fn legacy_export_exists(
+    export_root: &Path,
+    sanitized_company: &str,
+    platform_id: &str,
+) -> Result<bool, String> {
+    let company_dir = export_root.join(sanitized_company);
+    if !company_dir.exists() {
+        return Ok(false);
+    }
+    let legacy_connection_id = super::pdpp_connections::legacy_connection_id(platform_id);
+
+    for platform_entry in fs::read_dir(company_dir)
+        .map_err(|error| error.to_string())?
+        .flatten()
+    {
+        if !platform_entry.path().is_dir() {
+            continue;
+        }
+        for run_entry in fs::read_dir(platform_entry.path())
+            .map_err(|error| error.to_string())?
+            .flatten()
+        {
+            if !run_entry.path().is_dir() {
+                continue;
+            }
+            let run_directory_name = run_entry.file_name().to_string_lossy().into_owned();
+            if run_directory_name.ends_with(&format!("--{legacy_connection_id}")) {
+                match latest_export_platform_id(&run_entry.path())? {
+                    Some(export_platform_id) if export_platform_id == platform_id => {
+                        return Ok(true);
+                    }
+                    Some(_) => continue,
+                    None => return Ok(true),
+                }
+            }
+            if run_directory_name.contains("--") {
+                continue;
+            }
+
+            if latest_export_platform_id(&run_entry.path())?.as_deref() == Some(platform_id) {
+                return Ok(true);
+            }
+        }
+    }
+
+    Ok(false)
+}
+
+fn latest_export_platform_id(run_directory: &Path) -> Result<Option<String>, String> {
+    let latest_json = fs::read_dir(run_directory)
+        .map_err(|error| error.to_string())?
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.extension().is_none_or(|extension| extension != "json") {
+                return None;
+            }
+            let stem = path.file_stem()?.to_string_lossy();
+            let (_, timestamp) = stem.rsplit_once('_')?;
+            let timestamp = timestamp.parse::<u64>().ok()?;
+            Some((path, timestamp))
+        })
+        .max_by_key(|(_, timestamp)| *timestamp);
+    let Some((json_path, _)) = latest_json else {
+        return Ok(None);
+    };
+    let Ok(content) = fs::read_to_string(&json_path) else {
+        return Ok(None);
+    };
+    let Ok(data) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return Ok(None);
+    };
+    let inferred_platform_id = json_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .and_then(|stem| stem.rsplit_once('_').map(|(platform_id, _)| platform_id))
+        .unwrap_or("");
+    let platform_id = data
+        .get("platformId")
+        .and_then(|value| value.as_str())
+        .unwrap_or(inferred_platform_id);
+
+    Ok(Some(platform_id.to_owned()))
+}
+
+#[cfg(test)]
+mod legacy_export_tests {
+    use super::legacy_export_exists;
+    use std::fs;
+
+    #[test]
+    fn legacy_export_check_ignores_another_accounts_suffixed_export() {
+        let root = tempfile::tempdir().unwrap();
+        let second_account = root
+            .path()
+            .join("OpenAI/ChatGPT/run-b--connection-bbbb");
+        fs::create_dir_all(&second_account).unwrap();
+        fs::write(
+            second_account.join("chatgpt-pdpp_2.json"),
+            serde_json::json!({"platformId": "chatgpt-pdpp", "connectionId": "connection-bbbb"}).to_string(),
+        )
+        .unwrap();
+
+        assert!(!legacy_export_exists(root.path(), "OpenAI", "chatgpt-pdpp").unwrap());
+    }
+
+    #[test]
+    fn legacy_export_check_accepts_the_migrated_accounts_suffixed_export() {
+        let root = tempfile::tempdir().unwrap();
+        let legacy_account = root
+            .path()
+            .join("OpenAI/ChatGPT/run-a--chatgpt-pdpp-owner");
+        fs::create_dir_all(&legacy_account).unwrap();
+
+        assert!(legacy_export_exists(root.path(), "OpenAI", "chatgpt-pdpp").unwrap());
+    }
+
+    #[test]
+    fn legacy_export_check_ignores_another_connector_in_the_same_company_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let other_connector = root.path().join("OpenAI/OtherApp/legacy-run");
+        fs::create_dir_all(&other_connector).unwrap();
+        fs::write(
+            other_connector.join("other-pdpp_2.json"),
+            serde_json::json!({"platformId": "other-pdpp"}).to_string(),
+        )
+        .unwrap();
+
+        assert!(!legacy_export_exists(root.path(), "OpenAI", "chatgpt-pdpp").unwrap());
+        assert!(legacy_export_exists(root.path(), "OpenAI", "other-pdpp").unwrap());
+    }
+
+    #[test]
+    fn legacy_export_check_ignores_a_suffixed_export_attributed_to_another_connector() {
+        let root = tempfile::tempdir().unwrap();
+        let other_connector = root
+            .path()
+            .join("OpenAI/OtherApp/legacy-run--chatgpt-pdpp-owner");
+        fs::create_dir_all(&other_connector).unwrap();
+        fs::write(
+            other_connector.join("other-pdpp_2.json"),
+            serde_json::json!({"platformId": "other-pdpp"}).to_string(),
+        )
+        .unwrap();
+
+        assert!(!legacy_export_exists(root.path(), "OpenAI", "chatgpt-pdpp").unwrap());
     }
 }
 

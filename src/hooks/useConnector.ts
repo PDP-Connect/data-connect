@@ -31,6 +31,17 @@ function localConnectorToken(connectorId: string): string {
     : connectorId
 }
 
+export function legacyPdppConnectionId(connectorId: string): string {
+  if (connectorId === "github-pdpp") return "default"
+  if (!URI_CONNECTOR_ID.test(connectorId)) return `${connectorId}-owner`
+
+  let hash = 2166136261
+  for (let index = 0; index < connectorId.length; index += 1) {
+    hash = Math.imul(hash ^ connectorId.charCodeAt(index), 16777619)
+  }
+  return `pdpp-${(hash >>> 0).toString(16).padStart(8, "0")}-owner`
+}
+
 function runIdForPlatform(platform: Platform, timestamp: number): string {
   if (platform.runtime === PDPP_NETWORK_RUNTIME && platform.connectionId) {
     return `${localConnectorToken(platform.id)}-${stableConnectorHash(platform.connectionId)}-${timestamp}`

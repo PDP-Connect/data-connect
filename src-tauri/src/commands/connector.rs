@@ -2355,10 +2355,15 @@ pub async fn check_connected_platforms(
                 let key = format!("{id}:{connection_id}");
                 let legacy_connection = super::pdpp_connections::legacy_connection_id(&id);
                 let has_legacy_export = connection_id == &legacy_connection
-                    && (data_dir.join(&id).exists()
-                        || id_to_company
-                            .get(&id)
-                            .is_some_and(|company| data_dir.join(company).exists()));
+                    && id_to_company.get(&id).is_some_and(|company| {
+                        let sanitized_company = super::file_ops::sanitize_path_component(company);
+                        super::file_ops::legacy_export_exists(
+                            &data_dir,
+                            &sanitized_company,
+                            &id,
+                        )
+                        .unwrap_or(false)
+                    });
                 connected.insert(
                     key,
                     has_legacy_export || exported_connection_exists(&data_dir, connection_id)?,

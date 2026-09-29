@@ -4,6 +4,18 @@ import { act, renderHook } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { Platform } from "../types"
 
+describe("legacyPdppConnectionId", () => {
+  it("matches the stored legacy ids for built-in and URI connectors", async () => {
+    const { legacyPdppConnectionId } = await import("./useConnector")
+
+    expect(legacyPdppConnectionId("chatgpt-pdpp")).toBe("chatgpt-pdpp-owner")
+    expect(legacyPdppConnectionId("github-pdpp")).toBe("default")
+    expect(legacyPdppConnectionId("https://example.test/😀")).toBe(
+      "pdpp-ac793152-owner"
+    )
+  })
+})
+
 const mockInvoke = vi.fn()
 const mockDispatch = vi.fn()
 let currentRuns: Array<Record<string, unknown>> = []
