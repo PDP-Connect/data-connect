@@ -1391,6 +1391,23 @@ export function createSqliteConnectorInstanceStore() {
         // from scratch rather than resume the deleted source's cursor.
         exec(referenceQueries.connectorInstancesDeleteConnectorStateByInstance, [connectorInstanceId]);
         exec(referenceQueries.connectorInstancesDeleteGrantConnectorStateByInstance, [connectorInstanceId]);
+        // Same reason for every per-connection table with no FK cascade: the
+        // re-added id must not inherit the deleted source's gap queue,
+        // cadence anchor, webhook/device replay receipts, derived projection
+        // rows, or fragment grouping. Kept by design: spine_events,
+        // run_history, grants, tombstones, stream_evidence_run_registry (a
+        // run_id claim must never become reusable), and the browser-surface
+        // replacement ledger.
+        exec(referenceQueries.connectorInstancesDeleteDetailGapsByInstance, [connectorInstanceId]);
+        exec(referenceQueries.connectorInstancesDeleteSchedulerLastRunTimeByInstance, [connectorInstanceId]);
+        exec(referenceQueries.connectorInstancesDeleteSourceWebhookRunReceiptsByInstance, [connectorInstanceId]);
+        exec(referenceQueries.connectorInstancesDeleteDeviceIngestBatchOutcomesByInstance, [connectorInstanceId]);
+        exec(referenceQueries.connectorInstancesDeleteRetainedSizeConnectionByInstance, [connectorInstanceId]);
+        exec(referenceQueries.connectorInstancesDeleteRetainedSizeStreamByInstance, [connectorInstanceId]);
+        exec(referenceQueries.connectorInstancesDeleteRetainedSizeRecordFamilyByInstance, [connectorInstanceId]);
+        exec(referenceQueries.connectorInstancesDeleteSearchIndexDirtyByInstance, [connectorInstanceId]);
+        exec(referenceQueries.connectorInstancesDeleteSummaryEvidenceRepairChunkByInstance, [connectorInstanceId]);
+        exec(referenceQueries.connectorInstanceGroupsDeleteByFragment, [connectorInstanceId]);
         const schedule = exec(referenceQueries.controllerDeleteSchedule, [connectorInstanceId]);
         const device = exec(referenceQueries.deviceExportersClearSourceInstanceConnectorRef, [
           stamp,
@@ -2312,6 +2329,22 @@ export function createPostgresConnectorInstanceStore() {
           await client.query("DELETE FROM grant_connector_state WHERE connector_instance_id = $1", [
             connectorInstanceId,
           ]);
+          // Per-connection tables with no FK cascade (see the SQLite arm).
+          for (const table of [
+            "connector_detail_gaps",
+            "scheduler_last_run_times",
+            "source_webhook_run_receipts",
+            "device_ingest_batch_outcomes",
+            "retained_size_connection",
+            "retained_size_stream",
+            "retained_size_record_family",
+            "search_index_dirty",
+            "connector_summary_evidence_repair_chunk",
+            "connector_instance_groups",
+          ]) {
+            // biome-ignore lint/performance/noAwaitInLoops: statements share one transaction client and run in order.
+            await client.query(`DELETE FROM ${table} WHERE connector_instance_id = $1`, [connectorInstanceId]);
+          }
           const schedule = await client.query("DELETE FROM connector_schedules WHERE connector_instance_id = $1", [
             connectorInstanceId,
           ]);

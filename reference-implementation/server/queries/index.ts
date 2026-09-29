@@ -289,9 +289,18 @@ export interface ReferenceQueryRegistry extends Readonly<Record<string, Register
   readonly connectorInstancesCountActiveByOwnerConnectorIds: ReadManyQuery;
   readonly connectorInstancesDeleteById: MutationQuery;
   readonly connectorInstancesDeleteConnectorStateByInstance: MutationQuery;
+  readonly connectorInstancesDeleteDetailGapsByInstance: MutationQuery;
+  readonly connectorInstancesDeleteDeviceIngestBatchOutcomesByInstance: MutationQuery;
   readonly connectorInstancesDeleteGrantConnectorStateByInstance: MutationQuery;
   readonly connectorInstancesDeleteManifestWriteViolationsByConnectorInstance: MutationQuery;
+  readonly connectorInstancesDeleteRetainedSizeConnectionByInstance: MutationQuery;
+  readonly connectorInstancesDeleteRetainedSizeRecordFamilyByInstance: MutationQuery;
+  readonly connectorInstancesDeleteRetainedSizeStreamByInstance: MutationQuery;
+  readonly connectorInstancesDeleteSchedulerLastRunTimeByInstance: MutationQuery;
+  readonly connectorInstancesDeleteSearchIndexDirtyByInstance: MutationQuery;
+  readonly connectorInstancesDeleteSourceWebhookRunReceiptsByInstance: MutationQuery;
   readonly connectorInstancesDeleteSummaryEvidenceByConnectorInstance: MutationQuery;
+  readonly connectorInstancesDeleteSummaryEvidenceRepairChunkByInstance: MutationQuery;
   readonly connectorInstancesDeleteTombstoneByBinding: MutationQuery;
   readonly connectorInstancesGetByBinding: ReadOneQuery;
   readonly connectorInstancesGetById: ReadOneQuery;
