@@ -65,12 +65,18 @@ export interface CitizenGrantsDeps {
   listGrantEvents: (grantId: string) => Promise<SpineEventLike[]>;
   listSpineCorrelations: Parameters<typeof executeRefSpineCorrelationsList>[1]["listSpineCorrelations"];
   readGrant: (grantId: string) => Promise<GrantRow | null>;
+  /** Last demo reset (ISO); authorizations issued before it are hidden. */
+  readResetAt?: () => Promise<string | null>;
 }
 
 export interface CitizenRevokeDeps {
   packageIdForGrant: (grantId: string) => Promise<string | null>;
   revokeGrant: (grantId: string) => Promise<void>;
   revokePackage: (packageId: string) => Promise<void>;
+}
+
+export interface CitizenResetDeps extends CitizenGrantsDeps, CitizenRevokeDeps {
+  writeResetAt: (iso: string) => Promise<void>;
 }
 
 // Newest grants first; the demo owner has a handful.
@@ -217,8 +223,11 @@ export async function listCitizenAuthorizations(
     { isInternalConnectorId, listSpineCorrelations: deps.listSpineCorrelations }
   );
   const summaries = envelope.data as readonly Parameters<typeof loadGrant>[1][];
+  // Hide what a demo reset cleared (no reset: NaN, nothing hidden).
+  const resetAt = Date.parse((await deps.readResetAt?.()) ?? "");
+  const isVisible = (grant: CitizenGrant) => Number.isNaN(resetAt) || Date.parse(grant.issuedAt) > resetAt;
   const grants = (await Promise.all(summaries.map((summary) => loadGrant(deps, summary)))).filter(
-    (grant): grant is CitizenGrant => grant !== null
+    (grant): grant is CitizenGrant => grant !== null && isVisible(grant)
   );
   // Newest first; stable member order inside one consent.
   grants.sort((a, b) => b.issuedAt.localeCompare(a.issuedAt) || a.grantId.localeCompare(b.grantId));
@@ -233,4 +242,18 @@ export async function revokeCitizenAuthorization(deps: CitizenRevokeDeps, grantI
     return;
   }
   await deps.revokeGrant(grantId);
+}
+
+/**
+ * DR demo reset: revoke every active authorization (so recipients lose
+ * access), then hide everything issued so far. Records and clients stay.
+ */
+export async function resetCitizenDemo(deps: CitizenResetDeps, now: number = Date.now()): Promise<void> {
+  const auths = await listCitizenAuthorizations(deps, now);
+  const activeGrantIds = auths.flatMap((auth) =>
+    auth.status === "active" && auth.grantIds[0] ? [auth.grantIds[0]] : []
+  );
+  await Promise.all(activeGrantIds.map((grantId) => revokeCitizenAuthorization(deps, grantId)));
+
+  await deps.writeResetAt(new Date(now).toISOString());
 }

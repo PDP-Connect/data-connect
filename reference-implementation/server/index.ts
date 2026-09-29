@@ -636,6 +636,7 @@ import { createStreamingSessionStore } from "./streaming/sessions.ts";
 import { buildLogger, createApp } from "./transport.ts";
 import { demoLangCookie, requestedDemoLang } from "./demo-i18n.ts";
 import { type MountOwnerAutorizacionesContext, mountOwnerAutorizaciones } from "./routes/owner-autorizaciones.ts";
+import { createCitizenResetStore } from "./citizen-reset-store.ts";
 import {
   createWebPushSubscriptionStore,
   fanoutEscalationWebPush,
@@ -7124,7 +7125,14 @@ export function buildAsApp(opts: ServerOpts = {}) {
   mountAsGrantRevoke(app, asGrantRevokeContext as unknown as Parameters<typeof mountAsGrantRevoke>[1]);
 
   // DR demo: citizen "Mis autorizaciones" page; revokes through the same
-  // operation + side effects as the grant revoke route above.
+  // operation + side effects as the grant revoke route above. The reset
+  // marker sits beside the database so it lives on the same volume.
+  const citizenDbPath = opts.dbPath || DB_PATH;
+  const citizenResetStore = createCitizenResetStore(
+    citizenDbPath === ":memory:"
+      ? process.env.PDPP_DATA_DIR || path.join(process.cwd(), "data")
+      : path.dirname(citizenDbPath)
+  );
   mountOwnerAutorizaciones(app as unknown as Parameters<typeof mountOwnerAutorizaciones>[0], {
     ensureCsrfToken: ownerAuth.ensureCsrfToken as unknown as MountOwnerAutorizacionesContext["ensureCsrfToken"],
     handleError: handleError as unknown as MountOwnerAutorizacionesContext["handleError"],
@@ -7138,6 +7146,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
     ...(opts.logger ? { logger: opts.logger as NonNullable<MountOwnerAutorizacionesContext["logger"]> } : {}),
     packageIdForGrant: (grantId) => getGrantPackageIdForGrant(grantId),
     readGrant: readCitizenGrantRow,
+    readResetAt: citizenResetStore.read,
     renderCsrfField: (token) => ownerAuth.renderCsrfField(token),
     requireCsrf: ownerAuth.requireCsrf as unknown as MountOwnerAutorizacionesContext["requireCsrf"],
     requireOwnerSession: ownerAuth.requireOwnerSession as unknown as MountOwnerAutorizacionesContext["requireOwnerSession"],
@@ -7148,6 +7157,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
     revokePackage: async (packageId) => {
       await revokeGrantPackage(packageId, { request_id: generateSpineId("req") });
     },
+    writeResetAt: citizenResetStore.write,
   });
 
   // Client event subscriptions are mounted on the RESOURCE SERVER under

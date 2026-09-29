@@ -8,11 +8,14 @@
 //
 // Usage:
 //   PORTAL_URL=http://localhost:8866 OWNER_PASSWORD=... SHOTS_DIR=./tmp/proactivos \
-//   [CHROMIUM_PATH=...] [LANG=en] [DENY_REPLAY=1] [DESELECT=1] node scripts/demo-dr/proactivos-e2e.mjs
+//   [CHROMIUM_PATH=...] [LANG=en] [DENY_REPLAY=1] [DESELECT=1] [RESET=1] node scripts/demo-dr/proactivos-e2e.mjs
 //
 // DESELECT=1 unticks the SIUBEN household-members stream and the SNS health
 // centre field on consent, then checks /listo marks them "not shared", the
 // token grants neither, and the SNS record arrives without centro_salud.
+// RESET=1 finally approves a fresh consent, presses "Reiniciar demostración"
+// in Mis autorizaciones, and checks the page is empty and the portal is cut
+// off. It leaves the live demo clean.
 // DENY_REPLAY=1 tolerates a PDPP /consent/deny that does not redirect back
 // (replays error=access_denied); by default that is a failure.
 
@@ -26,6 +29,7 @@ const SHOTS_DIR = process.env.SHOTS_DIR ?? "tmp/proactivos-e2e";
 const LANG = process.env.LANG === "en" ? "en" : "es";
 const DENY_REPLAY = process.env.DENY_REPLAY === "1";
 const DESELECT = process.env.DESELECT === "1";
+const RESET = process.env.RESET === "1";
 const NAV_TIMEOUT_MS = 30_000;
 
 // Expected values from the fictitious seed (contract: María + Luis household).
@@ -299,6 +303,29 @@ try {
   check(page.url() === `${PORTAL_URL}/`, "denial lands on the offer");
   check((await page.locator("[data-notice='denied']").count()) === 1, "denial message shown");
   check((await page.locator(SEL.member).count()) === 0, "no data shown after denial");
+
+  // 8. Demo reset: an active consent, then "Reiniciar demostración" clears it.
+  if (RESET) {
+    await clickYes(page);
+    await signInIfAsked(page);
+    await page.waitForURL(/\/consent/, { timeout: NAV_TIMEOUT_MS });
+    await approveConsent(page);
+    check((await page.locator(SEL.grant).getAttribute("data-grant-status")) === "active", "fresh consent active before reset");
+
+    const resetTab = await context.newPage();
+    await resetTab.goto(misAutHref);
+    await Promise.all([resetTab.waitForLoadState("load"), resetTab.locator("button[data-demo-reset]").click()]);
+    await resetTab.waitForURL(/reiniciada=1/, { timeout: NAV_TIMEOUT_MS });
+    await shot(resetTab, "mis-autorizaciones-reset");
+    check((await resetTab.locator("[data-reset-banner]").count()) === 1, "reset banner shown");
+    check((await resetTab.locator("[data-grant-id]").count()) === 0, "no authorizations after reset");
+    await resetTab.close();
+
+    await page.bringToFront();
+    await clickReRead(page);
+    await shot(page, "listo-after-reset");
+    check((await page.locator("[data-notice='revoked']").count()) === 1, "portal cut off after reset");
+  }
 
   console.log("All checks passed.");
 } catch (err) {

@@ -9,20 +9,23 @@
 //   POST /owner/autorizaciones/:grantId/revocar   owner session + CSRF
 //        └─ revokes (whole package when one consent made several grants)
 //           then 303 → /owner/autorizaciones?revocada=1
+//   POST /owner/autorizaciones/reiniciar          owner session + CSRF
+//        └─ demo reset: revokes all, hides all, 303 → ?reiniciada=1
 //
 //   ┌ header card: Mis autorizaciones · subtitle · [revoked banner] ┐
 //   ├ card[data-grant-id]: app · status badge                       │
 //   │   Para qué · Datos (source → stream → field chips) · Hasta    │
 //   │   Lo que se leyó: time · stream, newest first                 │
 //   │   [ Revocar ]  (active only)                                  │
+//   ├ [ Reiniciar demostración ]                                    │
 //   └───────────────────────────────────────────────────────────────┘
 
 import {
   type CitizenAuthorization,
   type CitizenGrantStatus,
-  type CitizenGrantsDeps,
-  type CitizenRevokeDeps,
+  type CitizenResetDeps,
   listCitizenAuthorizations,
+  resetCitizenDemo,
   revokeCitizenAuthorization,
 } from "../citizen-grants.ts";
 import { CITIZEN_GLYPHS, renderCitizenCard, renderCitizenDocument } from "../citizen-ui.ts";
@@ -49,7 +52,7 @@ interface AppLike {
   post: (path: string, ...handlers: (MiddlewareHandler | RouteHandler)[]) => unknown;
 }
 
-export interface MountOwnerAutorizacionesContext extends CitizenGrantsDeps, CitizenRevokeDeps {
+export interface MountOwnerAutorizacionesContext extends CitizenResetDeps {
   ensureCsrfToken: (req: RouteRequest, res: RouteResponse) => string;
   handleError: (res: unknown, err: unknown) => void;
   logger?: { warn?: (obj: Record<string, unknown>, msg: string) => void };
@@ -60,6 +63,22 @@ export interface MountOwnerAutorizacionesContext extends CitizenGrantsDeps, Citi
 
 export const AUTORIZACIONES_PATH = "/owner/autorizaciones";
 const REVOKED_QUERY = "revocada";
+const RESET_QUERY = "reiniciada";
+const RESET_PATH = `${AUTORIZACIONES_PATH}/reiniciar`;
+
+// Banner after a redirect; the value is also the query key that asks for it.
+const Notice = { None: "", Reset: RESET_QUERY, Revoked: REVOKED_QUERY } as const;
+type Notice = (typeof Notice)[keyof typeof Notice];
+
+function noticeOf(req: RouteRequest): Notice {
+  if (req.query?.[REVOKED_QUERY] === "1") {
+    return Notice.Revoked;
+  }
+  if (req.query?.[RESET_QUERY] === "1") {
+    return Notice.Reset;
+  }
+  return Notice.None;
+}
 const HTTP_SEE_OTHER = 303;
 const DR_TIME_ZONE = "America/Santo_Domingo";
 // Enough to show the pattern of reads without an endless list.
@@ -136,6 +155,8 @@ const PAGE_CSS = `
 .cu-reads li:first-child { border-top: 0; }
 .cu-reads time { color: var(--cu-text-muted); }
 .cu-reads-empty { margin: 0 0 22px; font-size: 13px; color: var(--cu-text-muted); }
+.cu-reset { margin-top: 18px; text-align: center; }
+.cu-reset button { background: none; border: 0; padding: 4px; font: inherit; font-size: 13px; color: var(--cu-text-muted); text-decoration: underline; cursor: pointer; }
 .cu-ok { background: #E6F4EA; border: 1px solid #A8D5B5; color: #1E6B34; border-radius: 8px; padding: 10px 14px; margin: 0 0 18px; font-size: 13px; font-weight: 500; }
 @media (max-width: 720px) { .cu-reads li { grid-template-columns: 1fr; gap: 2px; } }
 `;
@@ -239,14 +260,35 @@ function renderAuthorization(auth: CitizenAuthorization, csrfField: string, lang
 </article>`;
 }
 
-function renderPage(auths: CitizenAuthorization[], csrfField: string, lang: DemoLang, revoked: boolean): string {
+// Demo only: lets anyone with the password start the story from scratch.
+function renderResetForm(csrfField: string, lang: DemoLang): string {
+  return `<form class="cu-reset" method="POST" action="${RESET_PATH}">${csrfField}<button type="submit" data-demo-reset>${pickLang(
+    lang,
+    "Reiniciar demostración (revoca y borra todas las autorizaciones)",
+    "Reset demo (revokes and clears every authorization)"
+  )}</button></form>`;
+}
+
+function renderBanner(notice: Notice, lang: DemoLang): string {
   const t = (es: string, en: string) => pickLang(lang, es, en);
-  const banner = revoked
-    ? `<div class="cu-ok" role="status" data-revoke-banner>${t(
-        "Autorización revocada. Esa entidad ya no puede leer sus datos.",
-        "Authorization revoked. That organisation can no longer read your data."
-      )}</div>`
-    : "";
+  if (notice === Notice.Revoked) {
+    return `<div class="cu-ok" role="status" data-revoke-banner>${t(
+      "Autorización revocada. Esa entidad ya no puede leer sus datos.",
+      "Authorization revoked. That organisation can no longer read your data."
+    )}</div>`;
+  }
+  if (notice === Notice.Reset) {
+    return `<div class="cu-ok" role="status" data-reset-banner>${t(
+      "Demostración reiniciada. Puede empezar de nuevo desde Servicios Proactivos.",
+      "Demo reset. You can start again from Servicios Proactivos."
+    )}</div>`;
+  }
+  return "";
+}
+
+function renderPage(auths: CitizenAuthorization[], csrfField: string, lang: DemoLang, notice: Notice): string {
+  const t = (es: string, en: string) => pickLang(lang, es, en);
+  const banner = renderBanner(notice, lang);
   const intro = `${banner}<p class="cu-text">${t(
     "Aquí ve a quién permitió consultar sus datos, qué se leyó y cuándo. Puede revocar un permiso en cualquier momento.",
     "Here you see who you allowed to look at your data, what was read and when. You can revoke a permission at any time."
@@ -262,7 +304,7 @@ function renderPage(auths: CitizenAuthorization[], csrfField: string, lang: Demo
   const cards = auths.length
     ? auths.map((auth) => renderAuthorization(auth, csrfField, lang)).join("\n")
     : `<p class="cu-text">${t("Todavía no ha autorizado a ninguna entidad.", "You have not authorized anyone yet.")}</p>`;
-  return `<style>${PAGE_CSS}</style>${header}<section class="cu-grants" aria-label="${t("Autorizaciones", "Authorizations")}">${cards}</section>`;
+  return `<style>${PAGE_CSS}</style>${header}<section class="cu-grants" aria-label="${t("Autorizaciones", "Authorizations")}">${cards}</section>${renderResetForm(csrfField, lang)}`;
 }
 
 export function mountOwnerAutorizaciones(app: AppLike, ctx: MountOwnerAutorizacionesContext): void {
@@ -276,19 +318,30 @@ export function mountOwnerAutorizaciones(app: AppLike, ctx: MountOwnerAutorizaci
       return;
     }
     const csrfField = ctx.renderCsrfField(ctx.ensureCsrfToken(req, res));
-    const revoked = req.query?.[REVOKED_QUERY] === "1";
-    const currentUrl = revoked ? `${AUTORIZACIONES_PATH}?${REVOKED_QUERY}=1` : AUTORIZACIONES_PATH;
+    const notice = noticeOf(req);
+    const currentUrl = notice ? `${AUTORIZACIONES_PATH}?${notice}=1` : AUTORIZACIONES_PATH;
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     res.setHeader("Cache-Control", "no-store");
     res.status(200).send(
       renderCitizenDocument({
-        body: renderPage(auths, csrfField, lang, revoked),
+        body: renderPage(auths, csrfField, lang, notice),
         currentUrl,
         lang,
         shell: "citizen-grants",
         title: pickLang(lang, "Mis autorizaciones (simulación)", "My authorizations (simulation)"),
       })
     );
+  });
+
+  // Registered before /:grantId/revocar; distinct paths, order is for reading only.
+  app.post(RESET_PATH, ctx.requireOwnerSession, ctx.requireCsrf, async (_req: RouteRequest, res: RouteResponse) => {
+    try {
+      await resetCitizenDemo(ctx);
+    } catch (err) {
+      ctx.handleError(res, err);
+      return;
+    }
+    res.redirect(HTTP_SEE_OTHER, `${AUTORIZACIONES_PATH}?${RESET_QUERY}=1`);
   });
 
   app.post(

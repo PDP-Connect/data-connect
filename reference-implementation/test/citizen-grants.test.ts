@@ -8,9 +8,11 @@ import { test } from "node:test";
 import {
   type CitizenGrantsDeps,
   listCitizenAuthorizations,
+  resetCitizenDemo,
   revokeCitizenAuthorization,
 } from "../server/citizen-grants.ts";
 import { citizenLangHref, renderCitizenDocument } from "../server/citizen-ui.ts";
+import { mountOwnerAutorizaciones } from "../server/routes/owner-autorizaciones.ts";
 
 const NOW = Date.parse("2026-10-01T12:00:00Z");
 const END = "2027-02-01T03:59:59.000Z";
@@ -108,6 +110,98 @@ test("revoking a packaged grant revokes the whole package; a lone grant revokes 
   await revokeCitizenAuthorization(revokeDeps, "grt_old");
 
   assert.deepEqual(calls, ["package:gpkg_1", "grant:grt_old"]);
+});
+
+test("a demo reset hides every authorization issued before it", async () => {
+  const auths = await listCitizenAuthorizations({ ...deps, readResetAt: async () => "2026-09-10T00:00:00Z" }, NOW);
+
+  assert.deepEqual(
+    auths.map((auth) => auth.grantIds),
+    [["grt_siuben", "grt_sns"]]
+  );
+});
+
+test("a demo reset revokes only active authorizations, then records the reset time", async () => {
+  const calls: string[] = [];
+  let resetAt: string | null = null;
+
+  await resetCitizenDemo(
+    {
+      ...deps,
+      packageIdForGrant: async (id) => (id === "grt_siuben" ? "gpkg_1" : null),
+      revokeGrant: (id) => {
+        calls.push(`grant:${id}`);
+        return Promise.resolve();
+      },
+      revokePackage: (id) => {
+        calls.push(`package:${id}`);
+        return Promise.resolve();
+      },
+      writeResetAt: (iso) => {
+        resetAt = iso;
+        return Promise.resolve();
+      },
+    },
+    NOW
+  );
+
+  assert.deepEqual(calls, ["package:gpkg_1"]);
+  assert.equal(resetAt, new Date(NOW).toISOString());
+});
+
+test("Mis autorizaciones offers a reset and confirms it after the redirect", async () => {
+  type Handler = (req: unknown, res: unknown) => Promise<void>;
+  const routes = new Map<string, Handler>();
+  const pass = (_req: unknown, _res: unknown, next: () => void) => next();
+  const app = {
+    get: (path: string, ...handlers: unknown[]) => routes.set(`GET ${path}`, handlers.at(-1) as Handler),
+    post: (path: string, ...handlers: unknown[]) => routes.set(`POST ${path}`, handlers.at(-1) as Handler),
+  };
+  let resetAt: string | null = null;
+  mountOwnerAutorizaciones(app, {
+    ...deps,
+    ensureCsrfToken: () => "tok",
+    handleError: (_res, err) => {
+      throw err;
+    },
+    packageIdForGrant: async () => null,
+    readResetAt: async () => resetAt,
+    renderCsrfField: (token) => `<input name="_csrf" value="${token}">`,
+    requireCsrf: pass as never,
+    requireOwnerSession: pass as never,
+    revokeGrant: async () => undefined,
+    revokePackage: async () => undefined,
+    writeResetAt: (iso) => {
+      resetAt = iso;
+      return Promise.resolve();
+    },
+  });
+  const response = () => {
+    const res = {
+      body: "",
+      location: "",
+      redirect: (status: number | string, url?: string) => {
+        res.location = `${status} ${url}`;
+      },
+      send: (body: string) => {
+        res.body = body;
+      },
+      setHeader: () => undefined,
+      status: () => res,
+    };
+    return res;
+  };
+
+  const post = response();
+  await routes.get("POST /owner/autorizaciones/reiniciar")?.({ headers: {} }, post);
+  assert.equal(post.location, "303 /owner/autorizaciones?reiniciada=1");
+  assert.ok(resetAt);
+
+  const page = response();
+  await routes.get("GET /owner/autorizaciones")?.({ headers: {}, query: { reiniciada: "1" } }, page);
+  assert.ok(page.body.includes("data-reset-banner"));
+  assert.ok(page.body.includes('action="/owner/autorizaciones/reiniciar"'));
+  assert.ok(page.body.includes("Todavía no ha autorizado a ninguna entidad."));
 });
 
 test("language toggle keeps the current query and marks the active language", () => {
