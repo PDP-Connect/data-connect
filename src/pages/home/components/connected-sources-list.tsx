@@ -19,7 +19,12 @@ import { getLastRunLabel } from "@/lib/platform/ui"
 import { getPlatformRegistryEntry } from "@/lib/platform/utils"
 import { resolvePlatformLogo } from "@/lib/platform/resolve-platform-logo"
 import type { Platform, Run } from "@/types"
-import { ChevronRightIcon, KeyRoundIcon, RotateCcwIcon } from "lucide-react"
+import {
+  ChevronRightIcon,
+  KeyRoundIcon,
+  RotateCcwIcon,
+  Trash2Icon,
+} from "lucide-react"
 import { Link } from "react-router-dom"
 import { isBlockingRun } from "./available-sources-list.policy"
 import { getPlatformSourceLabel } from "./available-sources-list.lib"
@@ -32,6 +37,7 @@ interface ConnectedSourcesListProps {
   onSyncSource?: (platform: Platform) => void
   onReconnectSource?: (platform: Platform) => void
   onReplaceCredentials?: (platform: Platform) => void
+  onRemoveSource?: (platform: Platform) => void
 }
 
 type OnboardingMessageState = "empty" | "early" | "mature"
@@ -53,6 +59,7 @@ export function ConnectedSourcesList({
   onSyncSource,
   onReconnectSource,
   onReplaceCredentials,
+  onRemoveSource,
 }: ConnectedSourcesListProps) {
   const inFlightSyncPlatformIdsRef = useRef<Set<string>>(new Set())
   const syncFeedbackTimeoutsRef = useRef<
@@ -184,6 +191,7 @@ export function ConnectedSourcesList({
             (platform.id === "github-pdpp" ||
               platform.setup?.modality === "static_secret") &&
             !hasActiveRun
+          const canRemove = Boolean(onRemoveSource) && !hasActiveRun
           const syncTooltipCopy =
             hasActiveRun || syncFeedbackState === "backgrounding"
               ? "Fetching in background"
@@ -236,6 +244,22 @@ export function ConnectedSourcesList({
                       </TooltipTrigger>
                       <TooltipContent side="top">
                         Reset this browser session and reconnect
+                      </TooltipContent>
+                    </Tooltip>
+                  ) : null}
+                  {canRemove ? (
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <SourceRowActionButton
+                          className="px-2"
+                          onClick={() => onRemoveSource?.(platform)}
+                          aria-label={`Remove ${platform.name}`}
+                        >
+                          <Trash2Icon aria-hidden />
+                        </SourceRowActionButton>
+                      </TooltipTrigger>
+                      <TooltipContent side="top">
+                        Remove this source
                       </TooltipContent>
                     </Tooltip>
                   ) : null}

@@ -165,4 +165,43 @@ describe("ConnectedSourcesList sync click guard", () => {
     )
     expect(onReplaceCredentials).toHaveBeenCalledWith(platform)
   })
+
+  it("offers Remove for every connected source except while it runs", () => {
+    const onRemoveSource = vi.fn()
+    render(
+      <MemoryRouter>
+        <TooltipProvider delayDuration={0}>
+          <ConnectedSourcesList
+            platforms={[
+              PLATFORM,
+              { ...PLATFORM, id: "amazon-pdpp", name: "Amazon" },
+              { ...PLATFORM, id: "reddit-pdpp", name: "Reddit" },
+            ]}
+            runs={[
+              {
+                id: "reddit-run",
+                platformId: "reddit-pdpp",
+                filename: "reddit-pdpp",
+                isConnected: false,
+                startDate: new Date().toISOString(),
+                status: "running",
+                url: "",
+                company: "Reddit",
+                name: "Reddit",
+                logs: "",
+              },
+            ]}
+            onRemoveSource={onRemoveSource}
+          />
+        </TooltipProvider>
+      </MemoryRouter>
+    )
+
+    expect(screen.getByRole("button", { name: "Remove ChatGPT" })).toBeTruthy()
+    expect(screen.queryByRole("button", { name: "Remove Reddit" })).toBeNull()
+    fireEvent.click(screen.getByRole("button", { name: "Remove Amazon" }))
+    expect(onRemoveSource).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "amazon-pdpp" })
+    )
+  })
 })

@@ -898,6 +898,49 @@ describe("Home", () => {
     }
   )
 
+  it("explains removal and opens the source's console danger zone", async () => {
+    mockUsePlatforms.mockReturnValue({
+      platforms: [
+        {
+          id: "amazon-pdpp",
+          company: "Amazon",
+          name: "Amazon",
+          filename: "amazon-pdpp",
+          description: "Amazon PDPP export",
+          isUpdated: false,
+          logoURL: "",
+          needsConnection: true,
+          connectURL: null,
+          connectSelector: null,
+          exportFrequency: null,
+          vectorize_config: null,
+          runtime: "pdpp-network",
+        },
+      ],
+      connectedPlatforms: { "amazon-pdpp": true },
+      loadPlatforms: vi.fn(),
+      refreshConnectedStatus: vi.fn(),
+      getPlatformById: vi.fn(),
+      isPlatformConnected: vi.fn(() => true),
+    })
+
+    renderHome()
+    fireEvent.click(screen.getByRole("button", { name: "Remove Amazon" }))
+
+    const dialog = await screen.findByRole("alertdialog")
+    expect(dialog.textContent).toContain(
+      "Apps you granted access stay authorized."
+    )
+    expect(dialog.textContent).toContain("This cannot be undone.")
+    fireEvent.click(
+      screen.getByRole("button", { name: "Open Server & Repairs" })
+    )
+
+    expect(mockNavigate).toHaveBeenCalledWith(
+      "/server-repairs?path=%2Fsources%2Famazon%23danger-zone"
+    )
+  })
+
   it("resets an expired ChatGPT session and returns the owner to setup", async () => {
     mockInvoke.mockImplementation(command =>
       command === "reset_installed_pdpp_browser_profile"
