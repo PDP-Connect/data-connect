@@ -527,6 +527,7 @@ export interface ControllerOptions {
   asPublicUrl?: string;
   /** Binds a host-provided browser lease to the run before the host is asked to allocate it. */
   beforeBrowserSurfaceLeaseEnsure?: (args: {
+    readonly connectionId: string | null;
     readonly runId: string;
     readonly surfaceId: string;
   }) => Promise<void> | void;

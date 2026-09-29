@@ -22,6 +22,11 @@ use tauri::{AppHandle, Manager};
 use uuid::Uuid;
 
 const BROWSER_SURFACE_PATH: &str = "/browser-surface/leases";
+/// `DELETE /browser-surface/profiles/<connector_id>/<connection_id>` resets one
+/// connection's persistent profile after the owner deletes or revokes it.
+/// `?legacy=remove` also removes the pre-connection per-connector profile; the
+/// RI sends it only when no other connection of the connector exists.
+const BROWSER_PROFILE_PATH: &str = "/browser-surface/profiles/";
 const MAX_HTTP_REQUEST_BYTES: usize = 64 * 1024;
 const BROWSER_START_TIMEOUT: Duration = Duration::from_secs(10);
 const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(5);
@@ -38,6 +43,13 @@ struct AcquireRequest {
     /// Stable idempotency key for acquisition and cancellation.
     run_id: String,
     connector_id: String,
+    /// The RI connection (account) the run collects for. Every connection has
+    /// its own profile, so an acquire without one is refused.
+    connection_id: String,
+    /// True only when this is the owner's single connection of the connector:
+    /// the old per-connector profile may then be moved to this connection.
+    #[serde(default)]
+    migrate_connector_profile: bool,
     #[serde(default)]
     headless: bool,
 }
@@ -105,9 +117,17 @@ pub(crate) fn sandbox_unavailable_message() -> String {
 struct BrowserSurfaceLease {
     run_id: String,
     connector_id: String,
+    connection_id: String,
     headless: bool,
     response: AcquireResponse,
     child: Child,
+}
+
+#[derive(Debug)]
+enum ProfileResetError {
+    Invalid(String),
+    InUse,
+    Failed(String),
 }
 
 struct HostState {
@@ -139,8 +159,9 @@ impl HostState {
     fn acquire(&self, request: AcquireRequest) -> Result<AcquireResponse, BrowserLaunchError> {
         validate_request_field("run_id", &request.run_id)?;
         validate_request_field("connector_id", &request.connector_id)?;
+        validate_request_field("connection_id", &request.connection_id)?;
 
-        // Admission and launch are serialized. A connector has exactly one
+        // Admission and launch are serialized. A connection has exactly one
         // persistent profile, so a second launch must not race the first
         // launch or reuse its profile while the first browser is still alive.
         let mut leases = self
@@ -159,23 +180,30 @@ impl HostState {
             return Err("Run id has already been released".into());
         }
         if let Some(lease) = leases.values().find(|lease| lease.run_id == request.run_id) {
-            if lease.connector_id != request.connector_id || lease.headless != request.headless {
+            if lease.connector_id != request.connector_id
+                || lease.connection_id != request.connection_id
+                || lease.headless != request.headless
+            {
                 return Err("Run id is already bound to a different browser request".into());
             }
             return Ok(lease.response.clone());
         }
-        if leases
-            .values()
-            .any(|lease| lease.connector_id == request.connector_id)
-        {
+        if leases.values().any(|lease| {
+            lease.connector_id == request.connector_id
+                && lease.connection_id == request.connection_id
+        }) {
             return Err(format!(
-                "Connector {:?} already owns a browser surface",
-                request.connector_id
+                "Connection {:?} of connector {:?} already owns a browser surface",
+                request.connection_id, request.connector_id
             )
             .into());
         }
 
-        let profile_dir = self.profile_dir(&request.connector_id)?;
+        let profile_dir = self.profile_dir(
+            &request.connector_id,
+            &request.connection_id,
+            request.migrate_connector_profile,
+        )?;
         let _ = fs::remove_file(profile_dir.join("DevToolsActivePort"));
 
         let browser = self.browser_path().ok_or_else(|| {
@@ -194,6 +222,7 @@ impl HostState {
             BrowserSurfaceLease {
                 run_id: request.run_id,
                 connector_id: request.connector_id,
+                connection_id: request.connection_id,
                 headless: request.headless,
                 response: response.clone(),
                 child,
@@ -252,12 +281,106 @@ impl HostState {
         }
     }
 
-    fn profile_dir(&self, connector_id: &str) -> Result<PathBuf, String> {
+    /// Deletes one connection's persistent profile (its logged-in session),
+    /// and the old per-connector profile when `remove_legacy` is set. Refuses
+    /// while that connection has a live lease, and holds the lease lock so an
+    /// acquire cannot race the removal. Never follows a symlink out of the
+    /// profile root. Returns whether a profile existed.
+    fn reset_profile(
+        &self,
+        connector_id: &str,
+        connection_id: &str,
+        remove_legacy: bool,
+    ) -> Result<bool, ProfileResetError> {
+        validate_request_field("connector_id", connector_id).map_err(ProfileResetError::Invalid)?;
+        validate_request_field("connection_id", connection_id)
+            .map_err(ProfileResetError::Invalid)?;
+        let leases = self.leases.lock().map_err(|_| {
+            ProfileResetError::Failed("Browser surface lease state is unavailable".into())
+        })?;
+        if leases
+            .values()
+            .any(|lease| lease.connector_id == connector_id && lease.connection_id == connection_id)
+        {
+            return Err(ProfileResetError::InUse);
+        }
+        let mut removed =
+            self.remove_profile_segment(&connection_profile_segment(connector_id, connection_id))?;
+        if remove_legacy {
+            removed |= self.remove_profile_segment(&stable_segment(connector_id))?;
+        }
+        drop(leases);
+        Ok(removed)
+    }
+
+    fn remove_profile_segment(&self, segment: &str) -> Result<bool, ProfileResetError> {
+        let candidate = self.profile_root.join(segment);
+        let metadata = match fs::symlink_metadata(&candidate) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => {
+                return Err(ProfileResetError::Failed(format!(
+                    "Failed to inspect browser profile: {error}"
+                )))
+            }
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(ProfileResetError::Failed(
+                "Browser surface profile is not a real directory".into(),
+            ));
+        }
+        let canonical_root = fs::canonicalize(&self.profile_root).map_err(|error| {
+            ProfileResetError::Failed(format!("Failed to confine browser surface root: {error}"))
+        })?;
+        let canonical_profile = fs::canonicalize(&candidate).map_err(|error| {
+            ProfileResetError::Failed(format!("Failed to confine browser profile: {error}"))
+        })?;
+        if canonical_profile == canonical_root || !canonical_profile.starts_with(&canonical_root) {
+            return Err(ProfileResetError::Failed(
+                "Browser surface profile escaped its root".into(),
+            ));
+        }
+        fs::remove_dir_all(&canonical_profile).map_err(|error| {
+            ProfileResetError::Failed(format!("Failed to delete browser profile: {error}"))
+        })?;
+        Ok(true)
+    }
+
+    /// The connection's profile directory. Before profiles were keyed by
+    /// connection, the host kept one profile per connector. When this
+    /// connection has no profile yet and that old profile exists, it is moved
+    /// here only if `migrate_connector_profile` says this is the owner's single
+    /// connection of the connector; otherwise the old profile is left alone and
+    /// this connection starts clean, because it cannot be told whose it is.
+    fn profile_dir(
+        &self,
+        connector_id: &str,
+        connection_id: &str,
+        migrate_connector_profile: bool,
+    ) -> Result<PathBuf, String> {
         fs::create_dir_all(&self.profile_root)
             .map_err(|error| format!("Failed to create browser surface root: {error}"))?;
         let canonical_root = fs::canonicalize(&self.profile_root)
             .map_err(|error| format!("Failed to confine browser surface root: {error}"))?;
-        let profile_dir = canonical_root.join(stable_segment(connector_id));
+        let profile_dir =
+            canonical_root.join(connection_profile_segment(connector_id, connection_id));
+        let legacy_dir = canonical_root.join(stable_segment(connector_id));
+        let legacy_is_real_dir = fs::symlink_metadata(&legacy_dir)
+            .map(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+            .unwrap_or(false);
+        if !profile_dir.exists() && legacy_is_real_dir {
+            if migrate_connector_profile {
+                fs::rename(&legacy_dir, &profile_dir)
+                    .map_err(|error| format!("Failed to move browser profile: {error}"))?;
+                log::info!(
+                    "Moved the per-connector browser profile of {connector_id:?} to connection {connection_id:?}"
+                );
+            } else {
+                log::warn!(
+                    "Left the per-connector browser profile of {connector_id:?} in place: the owner has more than one connection of it, so connection {connection_id:?} starts with a new profile"
+                );
+            }
+        }
         fs::create_dir_all(&profile_dir)
             .map_err(|error| format!("Failed to create browser profile: {error}"))?;
         let canonical_profile = fs::canonicalize(&profile_dir)
@@ -404,6 +527,12 @@ fn validate_request_field(name: &str, value: &str) -> Result<(), String> {
         return Err(format!("{name} must be a non-empty URL-safe value"));
     }
     Ok(())
+}
+
+/// One profile per connection: the connector id and the RI connection id
+/// together name the directory, so two accounts never share a session.
+fn connection_profile_segment(connector_id: &str, connection_id: &str) -> String {
+    stable_segment(&format!("{connector_id}:{connection_id}"))
 }
 
 fn stable_segment(value: &str) -> String {
@@ -687,6 +816,57 @@ fn dispatch_request(request: HttpRequest, state: Arc<HostState>) -> Vec<u8> {
             state.release_run(run_id);
             empty_response("204 No Content")
         }
+        ("DELETE", path) if path.starts_with(BROWSER_PROFILE_PATH) => {
+            let (target, query) = path[BROWSER_PROFILE_PATH.len()..]
+                .split_once('?')
+                .unwrap_or((&path[BROWSER_PROFILE_PATH.len()..], ""));
+            let remove_legacy = query == "legacy=remove";
+            let Some((connector_id, connection_id)) = target.split_once('/') else {
+                return json_response(
+                    "400 Bad Request",
+                    &ErrorResponse {
+                        error: "bad_request",
+                        message: Some(
+                            "Expected /browser-surface/profiles/<connector>/<connection>".into(),
+                        ),
+                    },
+                    None,
+                );
+            };
+            match state.reset_profile(connector_id, connection_id, remove_legacy) {
+                Ok(true) => empty_response("204 No Content"),
+                Ok(false) => empty_response("404 Not Found"),
+                Err(ProfileResetError::Invalid(message)) => json_response(
+                    "400 Bad Request",
+                    &ErrorResponse {
+                        error: "bad_request",
+                        message: Some(message),
+                    },
+                    None,
+                ),
+                Err(ProfileResetError::InUse) => json_response(
+                    "409 Conflict",
+                    &ErrorResponse {
+                        error: "profile_in_use",
+                        message: Some(
+                            "A browser surface for this connection is still running".into(),
+                        ),
+                    },
+                    None,
+                ),
+                Err(ProfileResetError::Failed(message)) => {
+                    log::error!("Browser profile reset failed: {message}");
+                    json_response(
+                        "500 Internal Server Error",
+                        &ErrorResponse {
+                            error: "profile_reset_failed",
+                            message: Some(message),
+                        },
+                        None,
+                    )
+                }
+            }
+        }
         _ => empty_response("404 Not Found"),
     }
 }
@@ -884,14 +1064,32 @@ while :; do sleep 1; done
         connector_id: &str,
         headless: bool,
     ) -> (String, String, u32) {
+        acquire_connection(
+            host,
+            connector_id,
+            &format!("cin-{connector_id}"),
+            headless,
+            false,
+        )
+    }
+
+    fn acquire_connection(
+        host: &BrowserSurfaceHost,
+        connector_id: &str,
+        connection_id: &str,
+        headless: bool,
+        migrate_connector_profile: bool,
+    ) -> (String, String, u32) {
         let response = request(
             host,
             "POST",
             BROWSER_SURFACE_PATH,
             Some(host_token(host)),
             json!({
-                "run_id": format!("run-{connector_id}"),
+                "run_id": format!("run-{connector_id}-{connection_id}"),
                 "connector_id": connector_id,
+                "connection_id": connection_id,
+                "migrate_connector_profile": migrate_connector_profile,
                 "headless": headless,
             }),
         );
@@ -921,6 +1119,7 @@ while :; do sleep 1; done
             json!({
                 "run_id": "run-1",
                 "connector_id": "github",
+                "connection_id": "cin-github",
                 "headless": true,
             }),
         );
@@ -951,7 +1150,10 @@ while :; do sleep 1; done
         );
         assert_eq!(response.status, 204);
 
-        let profile_dir = host.state.profile_dir("github").expect("profile dir");
+        let profile_dir = host
+            .state
+            .profile_dir("github", "cin-github", false)
+            .expect("profile dir");
         let args = fs::read_to_string(profile_dir.join("args.txt")).expect("fake args");
         assert!(args.contains("--headless=new"));
         assert!(args.contains("--remote-debugging-port=0"));
@@ -966,9 +1168,330 @@ while :; do sleep 1; done
             json!({}),
         );
         assert_eq!(response.status, 204);
-        let profile_dir = host.state.profile_dir("chase").expect("profile dir");
+        let profile_dir = host
+            .state
+            .profile_dir("chase", "cin-chase", false)
+            .expect("profile dir");
         let args = fs::read_to_string(profile_dir.join("args.txt")).expect("fake args");
         assert!(!args.contains("--headless=new"));
+    }
+
+    #[test]
+    fn profile_reset_deletes_the_connector_profile_and_refuses_a_live_lease() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let host = start_test_host(&temp);
+        let (surface_id, _, _) = acquire(&host, "amazon");
+        let profile_dir = host
+            .state
+            .profile_dir("amazon", "cin-amazon", false)
+            .expect("profile dir");
+        fs::write(profile_dir.join("Cookies"), "session").expect("seed cookie");
+        let other_profile = host
+            .state
+            .profile_dir("reddit", "cin-reddit", false)
+            .expect("other profile dir");
+
+        let refused = request(
+            &host,
+            "DELETE",
+            &format!("{BROWSER_PROFILE_PATH}amazon/cin-amazon"),
+            Some(host_token(&host)),
+            json!({}),
+        );
+        assert_eq!(refused.status, 409);
+        assert!(
+            profile_dir.join("Cookies").exists(),
+            "a live lease keeps its profile"
+        );
+
+        let released = request(
+            &host,
+            "DELETE",
+            &format!("{BROWSER_SURFACE_PATH}/{surface_id}"),
+            Some(host_token(&host)),
+            json!({}),
+        );
+        assert_eq!(released.status, 204);
+
+        let unauthorized = request(
+            &host,
+            "DELETE",
+            &format!("{BROWSER_PROFILE_PATH}amazon/cin-amazon"),
+            None,
+            json!({}),
+        );
+        assert_eq!(unauthorized.status, 401);
+        assert!(profile_dir.exists());
+
+        let reset = request(
+            &host,
+            "DELETE",
+            &format!("{BROWSER_PROFILE_PATH}amazon/cin-amazon"),
+            Some(host_token(&host)),
+            json!({}),
+        );
+        assert_eq!(reset.status, 204);
+        assert!(!profile_dir.exists(), "the profile is gone");
+        assert!(
+            other_profile.exists(),
+            "another connector's profile is untouched"
+        );
+
+        let again = request(
+            &host,
+            "DELETE",
+            &format!("{BROWSER_PROFILE_PATH}amazon/cin-amazon"),
+            Some(host_token(&host)),
+            json!({}),
+        );
+        assert_eq!(
+            again.status, 404,
+            "an absent profile is reported, not an error"
+        );
+    }
+
+    #[test]
+    fn profile_reset_refuses_path_escapes_and_symlinks() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let host = start_test_host(&temp);
+        for target in [
+            "../cin",
+            "a%2F../cin",
+            "a/b/c",
+            "",
+            "amazon",
+            "amazon/..",
+            "amazon/",
+        ] {
+            let response = request(
+                &host,
+                "DELETE",
+                &format!("{BROWSER_PROFILE_PATH}{target}"),
+                Some(host_token(&host)),
+                json!({}),
+            );
+            assert!(
+                response.status == 400 || response.status == 404,
+                "{target:?} must be refused, got {}",
+                response.status
+            );
+        }
+
+        let outside = temp.path().join("outside");
+        fs::create_dir_all(&outside).expect("outside dir");
+        fs::write(outside.join("keep"), "precious").expect("outside file");
+        fs::create_dir_all(&host.state.profile_root).expect("profile root");
+        std::os::unix::fs::symlink(
+            &outside,
+            host.state
+                .profile_root
+                .join(connection_profile_segment("linked", "cin-linked")),
+        )
+        .expect("symlink");
+        let response = request(
+            &host,
+            "DELETE",
+            &format!("{BROWSER_PROFILE_PATH}linked/cin-linked"),
+            Some(host_token(&host)),
+            json!({}),
+        );
+        assert_eq!(response.status, 500);
+        assert!(outside.join("keep").exists(), "the symlink target survives");
+    }
+
+    fn profile_dirs(host: &BrowserSurfaceHost) -> Vec<PathBuf> {
+        let mut dirs: Vec<PathBuf> = fs::read_dir(&host.state.profile_root)
+            .map(|entries| {
+                entries
+                    .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+                    .filter(|path| path.is_dir())
+                    .collect()
+            })
+            .unwrap_or_default();
+        dirs.sort();
+        dirs
+    }
+
+    fn release_surface(host: &BrowserSurfaceHost, surface_id: &str) {
+        let response = request(
+            host,
+            "DELETE",
+            &format!("{BROWSER_SURFACE_PATH}/{surface_id}"),
+            Some(host_token(host)),
+            json!({}),
+        );
+        assert_eq!(response.status, 204);
+    }
+
+    /// The owner's test: two accounts of one connector each keep their own
+    /// signed-in profile, and removing one leaves the other signed in.
+    #[test]
+    fn two_connections_of_one_connector_keep_separate_profiles_and_reset_removes_only_one() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let host = start_test_host(&temp);
+
+        let (surface_a, _, _) = acquire_connection(&host, "amazon", "cin_a", true, false);
+        let dirs = profile_dirs(&host);
+        assert_eq!(dirs.len(), 1);
+        let dir_a = dirs[0].clone();
+        fs::write(dir_a.join("Cookies"), "session-a").expect("seed cookie a");
+        release_surface(&host, &surface_a);
+
+        let (surface_b, _, _) = acquire_connection(&host, "amazon", "cin_b", true, false);
+        let dirs = profile_dirs(&host);
+        assert_eq!(
+            dirs.len(),
+            2,
+            "each connection gets its own profile directory"
+        );
+        let dir_b = dirs
+            .iter()
+            .find(|dir| **dir != dir_a)
+            .expect("second profile")
+            .clone();
+        assert!(
+            !dir_b.join("Cookies").exists(),
+            "connection b does not see connection a's session"
+        );
+        fs::write(dir_b.join("Cookies"), "session-b").expect("seed cookie b");
+        release_surface(&host, &surface_b);
+
+        let reset = request(
+            &host,
+            "DELETE",
+            &format!("{BROWSER_PROFILE_PATH}amazon/cin_a"),
+            Some(host_token(&host)),
+            json!({}),
+        );
+        assert_eq!(reset.status, 204);
+        assert!(!dir_a.exists(), "the removed connection's profile is gone");
+        assert_eq!(
+            fs::read_to_string(dir_b.join("Cookies")).expect("cookie b"),
+            "session-b",
+            "the other connection's session is untouched"
+        );
+
+        let (surface_b, _, _) = acquire_connection(&host, "amazon", "cin_b", true, false);
+        assert_eq!(profile_dirs(&host), vec![dir_b.clone()]);
+        assert_eq!(
+            fs::read_to_string(dir_b.join("Cookies")).expect("cookie b"),
+            "session-b",
+            "the other connection can still acquire its signed-in profile"
+        );
+        release_surface(&host, &surface_b);
+    }
+
+    #[test]
+    fn two_connections_of_one_connector_can_hold_surfaces_at_once() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let host = start_test_host(&temp);
+        let (surface_a, _, _) = acquire_connection(&host, "amazon", "cin_a", true, false);
+        let (surface_b, _, _) = acquire_connection(&host, "amazon", "cin_b", true, false);
+        assert_ne!(surface_a, surface_b);
+        let refused = request(
+            &host,
+            "DELETE",
+            &format!("{BROWSER_PROFILE_PATH}amazon/cin_a"),
+            Some(host_token(&host)),
+            json!({}),
+        );
+        assert_eq!(refused.status, 409, "a live connection keeps its profile");
+        release_surface(&host, &surface_a);
+        release_surface(&host, &surface_b);
+    }
+
+    #[test]
+    fn acquire_without_a_connection_id_is_refused() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let host = start_test_host(&temp);
+        let response = request(
+            &host,
+            "POST",
+            BROWSER_SURFACE_PATH,
+            Some(host_token(&host)),
+            json!({ "run_id": "run-1", "connector_id": "amazon", "headless": true }),
+        );
+        assert_eq!(response.status, 400);
+        let response = request(
+            &host,
+            "POST",
+            BROWSER_SURFACE_PATH,
+            Some(host_token(&host)),
+            json!({ "run_id": "run-2", "connector_id": "amazon", "connection_id": "../x", "headless": true }),
+        );
+        assert_eq!(response.status, 500);
+        assert!(
+            profile_dirs(&host).is_empty(),
+            "no shared profile is created"
+        );
+    }
+
+    fn seed_legacy_profile(host: &BrowserSurfaceHost, connector_id: &str) -> PathBuf {
+        let legacy = host.state.profile_root.join(stable_segment(connector_id));
+        fs::create_dir_all(legacy.join("Default")).expect("legacy profile");
+        fs::write(legacy.join("Default").join("Cookies"), "legacy-session").expect("legacy cookie");
+        legacy
+    }
+
+    #[test]
+    fn a_single_connection_takes_over_the_old_per_connector_profile() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let host = start_test_host(&temp);
+        let legacy = seed_legacy_profile(&host, "amazon");
+
+        let (surface, _, _) = acquire_connection(&host, "amazon", "cin_only", true, true);
+        release_surface(&host, &surface);
+
+        assert!(!legacy.exists(), "the old profile was moved, not copied");
+        let moved = host
+            .state
+            .profile_dir("amazon", "cin_only", false)
+            .expect("profile dir");
+        assert_eq!(
+            fs::read_to_string(moved.join("Default").join("Cookies")).expect("moved cookie"),
+            "legacy-session",
+            "the owner stays signed in"
+        );
+    }
+
+    #[test]
+    fn with_several_connections_the_old_profile_is_left_and_each_starts_clean() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let host = start_test_host(&temp);
+        let legacy = seed_legacy_profile(&host, "amazon");
+
+        let (surface_a, _, _) = acquire_connection(&host, "amazon", "cin_a", true, false);
+        let (surface_b, _, _) = acquire_connection(&host, "amazon", "cin_b", true, false);
+        release_surface(&host, &surface_a);
+        release_surface(&host, &surface_b);
+
+        assert!(legacy.join("Default").join("Cookies").exists());
+        for connection in ["cin_a", "cin_b"] {
+            let dir = host
+                .state
+                .profile_dir("amazon", connection, false)
+                .expect("profile dir");
+            assert!(!dir.join("Default").join("Cookies").exists());
+        }
+    }
+
+    #[test]
+    fn reset_with_legacy_remove_also_deletes_the_old_per_connector_profile() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let host = start_test_host(&temp);
+        let legacy = seed_legacy_profile(&host, "amazon");
+        let kept = seed_legacy_profile(&host, "reddit");
+
+        let reset = request(
+            &host,
+            "DELETE",
+            &format!("{BROWSER_PROFILE_PATH}amazon/cin_only?legacy=remove"),
+            Some(host_token(&host)),
+            json!({}),
+        );
+        assert_eq!(reset.status, 204);
+        assert!(!legacy.exists());
+        assert!(kept.exists(), "another connector's profile is untouched");
     }
 
     /// A browser that aborts the way Chromium does when AppArmor blocks its
@@ -1006,6 +1529,7 @@ exit 133
             json!({
                 "run_id": "run-sandbox",
                 "connector_id": "github",
+                "connection_id": "cin-github",
                 "headless": false,
             }),
         );
@@ -1042,6 +1566,7 @@ exit 133
             json!({
                 "run_id": "run-live",
                 "connector_id": "github",
+                "connection_id": "cin-github",
                 "headless": false,
             }),
         );
@@ -1089,6 +1614,7 @@ exit 133
         let payload = json!({
             "run_id": "run-lost-response",
             "connector_id": "github",
+                "connection_id": "cin-github",
             "headless": true,
         });
 
@@ -1145,6 +1671,7 @@ exit 133
             json!({
                 "run_id": "run-lost-response",
                 "connector_id": "github",
+                "connection_id": "cin-github",
                 "headless": true,
             }),
         );

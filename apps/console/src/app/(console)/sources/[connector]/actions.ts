@@ -6,13 +6,17 @@
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { requireDashboardAccess } from "../../lib/dashboard-access.ts";
+import { profilePurgeSentence } from "../../lib/connection-control-result.ts";
+import { deleteConnectionWithRunCancel } from "../../lib/delete-connection-with-run-cancel.ts";
 import {
+  cancelRun,
   deleteConnection,
   deleteConnectionSchedule,
   deleteConnectorSchedule,
   pauseConnection,
   pauseConnectionSchedule,
   pauseConnectorSchedule,
+  purgeConnectionBrowserProfile,
   reactivateConnection,
   resumeConnection,
   resumeConnectionSchedule,
@@ -263,9 +267,12 @@ export async function resumeConnectionAction(formData: FormData) {
 
 // Danger-zone anchor on the connection detail page. The revoke/delete forms
 // scroll here after a redirect so the operator lands on the result banner.
-function dangerZoneHref(routeId: string, message?: string, error?: string): string {
+function dangerZoneHref(routeId: string, message?: string, error?: string, activeRunId?: string): string {
   const base = `/sources/${encodeURIComponent(routeId)}`;
   const params = new URLSearchParams();
+  if (activeRunId) {
+    params.set("active_run_id", activeRunId);
+  }
   if (message) {
     params.set("message", message);
   }
@@ -276,13 +283,18 @@ function dangerZoneHref(routeId: string, message?: string, error?: string): stri
   return `${base}${query ? `?${query}` : ""}#danger-zone`;
 }
 
-function recordsListHref(message?: string, error?: string): string {
+// `purgeRetryId` names a removed connection whose saved browser session could
+// not be removed; the Sources list then offers "Remove saved browser session".
+function recordsListHref(message?: string, error?: string, purgeRetryId?: string): string {
   const params = new URLSearchParams();
   if (message) {
     params.set("message", message);
   }
   if (error) {
     params.set("error", error);
+  }
+  if (purgeRetryId) {
+    params.set("purge_retry", purgeRetryId);
   }
   const query = params.toString();
   return `/sources${query ? `?${query}` : ""}`;
@@ -312,18 +324,64 @@ export async function revokeConnectionAction(formData: FormData) {
 
   let message: string | undefined;
   let error: string | undefined;
+  let purgeFailed = false;
   try {
     const result = await revokeConnection(connectionId);
     message =
       result.status === "already_revoked"
         ? "This connection was already revoked. Future collection is stopped; its records are retained."
         : "Connection revoked. Future collection is stopped; already-collected records and grants are retained.";
+    purgeFailed = result.profilePurge?.status === "failed";
+    message = withPurgeSentence(message, profilePurgeSentence(result.profilePurge));
   } catch (err) {
     error = errorMessage(err);
   }
   revalidatePath("/sources");
   revalidatePath(`/sources/${encodeURIComponent(routeId)}`);
-  redirect(error ? dangerZoneHref(routeId, message, error) : recordsListHref(message));
+  if (error) {
+    redirect(dangerZoneHref(routeId, message, error));
+  }
+  // A failed purge is shown as an error banner with the retry button.
+  redirect(purgeFailed ? recordsListHref(undefined, message, connectionId) : recordsListHref(message));
+}
+
+function withPurgeSentence(message: string, purgeSentence: string | null): string {
+  return purgeSentence ? `${message} ${purgeSentence}` : message;
+}
+
+/**
+ * Retry the saved-browser-session removal for a revoked or deleted connection
+ * whose delete or revoke reported a failed purge (for example, a browser still
+ * held the profile). Re-verifies the owner session, then calls the owner-session
+ * `POST /_ref/connections/:id/browser-profile/purge` route.
+ */
+export async function purgeBrowserProfileAction(formData: FormData) {
+  const connectionId = asString(formData.get("connection_id"));
+  await requireDashboardAccess(recordsListHref());
+  if (!connectionId) {
+    redirect(recordsListHref(undefined, "No connection was named, so no browser session was removed."));
+  }
+  let message: string | undefined;
+  let error: string | undefined;
+  let retryId: string | undefined;
+  try {
+    const result = await purgeConnectionBrowserProfile(connectionId);
+    if (result.status === "not_found") {
+      error = "No removed connection with this id was found.";
+    } else if (result.status === "not_removed") {
+      error = "This connection is still active, so its browser session is in use. Revoke or delete it first.";
+    } else if (result.profilePurge?.status === "failed") {
+      error = profilePurgeSentence(result.profilePurge) ?? undefined;
+      retryId = connectionId;
+    } else {
+      message = "The saved browser session was removed.";
+    }
+  } catch (err) {
+    error = errorMessage(err);
+    retryId = connectionId;
+  }
+  revalidatePath("/sources");
+  redirect(recordsListHref(message, error, retryId));
 }
 
 /**
@@ -372,9 +430,11 @@ export async function reactivateConnectionAction(formData: FormData) {
  * reproduce the connection id (`confirm_delete` must equal `connection_id`) —
  * then calls the shared owner-session `/_ref` delete route. Delete erases
  * exactly that connection's records/state per the shipped contract and refuses
- * an active run (`run_active`) or a default-account binding (`default_account`)
- * exactly as the shared primitive does; those typed refusals are messaged in
- * place. A scripted POST without the matching confirmation never erases data.
+ * an active run (`run_active`) exactly as the shared primitive does; that
+ * refusal is messaged in place with the blocking run id, so the danger zone can
+ * offer "Cancel run and delete". When the form carries `cancel_run_id`, the
+ * action cancels that run and retries the delete. A scripted POST without the
+ * matching confirmation never erases data.
  */
 export async function deleteConnectionAction(formData: FormData) {
   const connectionId = asString(formData.get("connection_id"));
@@ -398,11 +458,15 @@ export async function deleteConnectionAction(formData: FormData) {
     );
   }
 
+  const cancelRunId = asString(formData.get("cancel_run_id")) || null;
+
   let message: string | undefined;
   let error: string | undefined;
+  let blockingRunId: string | undefined;
   let deleted = false;
+  let purgeFailed = false;
   try {
-    const result = await deleteConnection(connectionId);
+    const result = await deleteConnectionWithRunCancel(connectionId, cancelRunId, { cancelRun, deleteConnection });
     if (result.status === "deleted") {
       deleted = true;
       const count = result.deletedRecordCount;
@@ -410,8 +474,13 @@ export async function deleteConnectionAction(formData: FormData) {
         typeof count === "number"
           ? `Connection deleted. ${count.toLocaleString()} record${count === 1 ? "" : "s"} for this connection were erased.`
           : "Connection deleted. Its records for this connection were erased.";
+      purgeFailed = result.profilePurge?.status === "failed";
+      message = withPurgeSentence(message, profilePurgeSentence(result.profilePurge));
     } else if (result.status === "run_active") {
-      error = "A run is in flight for this connection. Cancel the run, then delete.";
+      blockingRunId = result.activeRunId;
+      error = result.cancelledRunId
+        ? "The run was asked to stop but is still finishing. Nothing was erased. Try the delete again in a moment."
+        : "A run is in flight for this connection. Nothing was erased. Cancel the run, then delete.";
     } else if (result.status === "default_account") {
       error = "This default-account connection can't be deleted from here. Revoke it to stop future collection.";
     } else {
@@ -426,7 +495,11 @@ export async function deleteConnectionAction(formData: FormData) {
   // connections list, where the deleted row is now absent. A refusal stays on
   // the detail page with the typed banner.
   if (deleted) {
-    redirect(recordsListHref(message ?? "Connection deleted."));
+    const deletedMessage = message ?? "Connection deleted.";
+    // A failed purge is shown as an error banner with the retry button.
+    redirect(
+      purgeFailed ? recordsListHref(undefined, deletedMessage, connectionId) : recordsListHref(deletedMessage)
+    );
   }
-  redirect(dangerZoneHref(routeId, message, error));
+  redirect(dangerZoneHref(routeId, message, error, blockingRunId));
 }

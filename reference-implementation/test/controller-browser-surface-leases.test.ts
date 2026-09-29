@@ -602,6 +602,7 @@ test("host endpoint failure fails controller admission before connector spawn", 
 
   const result = await controller.runNow("managed", {
     manifest: MANIFEST,
+    connectorInstanceId: "cin_managed",
     ownerToken: "owner-token",
     runId: "run_host_down",
   });
@@ -641,6 +642,7 @@ test("host endpoint 500 with a structured sandbox-unavailable body surfaces brow
 
   const result = await controller.runNow("managed", {
     manifest: MANIFEST,
+    connectorInstanceId: "cin_managed",
     ownerToken: "owner-token",
     runId: "run_host_sandbox_unavailable",
   });
@@ -658,10 +660,14 @@ test("host endpoint 500 with a structured sandbox-unavailable body surfaces brow
 
 test("host lease CDP URL reaches readiness and release uses the owning run identity", async (t) => {
   const hostRequests: { method: string; url: string }[] = [];
+  const hostBodies: unknown[] = [];
   const hostFetch = (async (input: string | URL | Request, init?: RequestInit) => {
     const method = init?.method ?? "GET";
     const url = String(input);
     hostRequests.push({ method, url });
+    if (typeof init?.body === "string") {
+      hostBodies.push(JSON.parse(init.body));
+    }
     if (method === "POST") {
       return {
         json: async () => ({ cdp_url: "http://127.0.0.1:9222/host-cdp", surface_id: "host-surface-8" }),
@@ -693,6 +699,7 @@ test("host lease CDP URL reaches readiness and release uses the owning run ident
 
   const result = await controller.runNow("managed", {
     manifest: MANIFEST,
+    connectorInstanceId: "cin_managed",
     ownerToken: "owner-token",
     runId: "run_host_ready",
   });
@@ -708,6 +715,8 @@ test("host lease CDP URL reaches readiness and release uses the owning run ident
       ["DELETE", "http://127.0.0.1:9916/agent/browser-surface/runs/run_host_ready"],
     ]
   );
+  // The host keys the browser profile by this connection, never by connector alone.
+  assert.equal((hostBodies[0] as { connection_id?: string }).connection_id, "cin_managed");
 });
 
 test("watchdog cleanup keeps a managed lease unavailable until the presentation terminalizer settles", async (t) => {

@@ -165,6 +165,8 @@ export interface BrowserSurfaceManagerDeps {
   readonly activeRunInteractions: Map<string, ActiveRunInteraction>;
   readonly browserSurfaceAllocator: BrowserSurfaceAllocator | null;
   readonly beforeBrowserSurfaceLeaseEnsure?: (args: {
+    /** The connection the run collects for (the lease's surface subject). */
+    readonly connectionId: string | null;
     readonly runId: string;
     readonly surfaceId: string;
   }) => Promise<void> | void;
@@ -815,7 +817,11 @@ export function createBrowserSurfaceManager(deps: BrowserSurfaceManagerDeps): Br
     allocator: BrowserSurfaceAllocator
   ): Promise<{ lease: BrowserSurfaceLease; surface?: BrowserSurface }> {
     if (lease.surface_id) {
-      await beforeBrowserSurfaceLeaseEnsure?.({ runId: lease.run_id, surfaceId: lease.surface_id });
+      await beforeBrowserSurfaceLeaseEnsure?.({
+        connectionId: lease.surface_subject_id ?? null,
+        runId: lease.run_id,
+        surfaceId: lease.surface_id,
+      });
     }
     const readyResult = await leaseManager.ensureStartingSurfaceReady({
       allocator,

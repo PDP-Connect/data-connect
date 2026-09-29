@@ -535,11 +535,10 @@ export function isExpectedMissingConnectorInstance(err: unknown): boolean {
 }
 
 // Thrown by `deleteConnection` when the cascade is refused for a typed reason
-// (an in-flight run holds the active-run lease, or the connection is a
-// default-account binding whose deterministic id would silently re-materialize
-// — see Decision 1). The route maps `code` to the HTTP status via
-// `codeToStatus` (connection_run_active → 409, default_account_delete_unsupported
-// → 409). Distinct from ConnectorInstanceResolutionError so a delete-refusal is
+// (an in-flight run holds the active-run lease, or the connection is the
+// canonical identity of grouped fragments). The route maps `code` to the HTTP
+// status via `codeToStatus` (connection_run_active → 409,
+// connection_is_grouping_canonical → 409). Distinct from ConnectorInstanceResolutionError so a delete-refusal is
 // never confused with a not-found/ownership outcome.
 export class ConnectorInstanceDeleteError extends Error {
   code: string;
@@ -555,18 +554,21 @@ export class ConnectorInstanceDeleteError extends Error {
 // Shared precondition check for `deleteConnection` on both backends. Resolves
 // the row, verifies owner ownership BEFORE any mutation (foreign/unknown id →
 // connector_instance_not_found, which the route maps to 404 without leaking
-// existence — invariant I5), refuses an in-flight active run (I7), and refuses a
-// default-account binding whose deterministic id would re-materialize (I6,
-// Decision 1 fallback: typed-unsupported rather than a half-built tombstone).
-// Returns the resolved instance when the delete may proceed.
+// existence — invariant I5), and refuses an in-flight active run (I7). A
+// default-account binding IS deletable: the tombstone written by the cascade
+// blocks the next implicit `ensureDefaultAccountConnection` from silently
+// re-materializing it, and only an explicit owner connect clears that tombstone
+// (`clearDefaultAccountTombstone`). Returns the resolved instance when the delete may proceed.
 function assertDeletableConnection(
   instance: ConnectorInstance | null,
   {
+    activeRunId = null,
     connectorInstanceId,
     ownerSubjectId,
     hasActiveRun,
     inboundFragmentCount = 0,
   }: {
+    activeRunId?: string | null;
     connectorInstanceId: string;
     ownerSubjectId: string;
     hasActiveRun: boolean;
@@ -586,7 +588,9 @@ function assertDeletableConnection(
     throw new ConnectorInstanceDeleteError(
       "connection_run_active",
       `Connection '${connectorInstanceId}' has an active collection run; stop or await the run before deleting.`,
-      { connectorInstanceId, ownerSubjectId }
+      // `active_run_id` is surfaced on the wire so the console can offer to
+      // cancel exactly that run before retrying the delete.
+      { active_run_id: activeRunId, connectorInstanceId, ownerSubjectId }
     );
   }
   if (inboundFragmentCount > 0) {
@@ -606,23 +610,6 @@ function assertDeletableConnection(
       "connection_is_grouping_canonical",
       `Connection '${connectorInstanceId}' is the canonical identity for ${inboundFragmentCount} grouped fragment connection(s); deleting it would orphan their records on every summary surface. Ungroup those fragments first, then delete this connection.`,
       { connectorInstanceId, inboundFragmentCount, ownerSubjectId }
-    );
-  }
-  if (instance.sourceKind === "account" && instance.sourceBindingKey === DEFAULT_ACCOUNT_SOURCE_BINDING_KEY) {
-    // The default-account id is deterministic, so a hard row delete would be
-    // silently re-materialized to active (with zero records) by the next
-    // `ensureDefaultAccountConnection` read. A tombstone ledger now exists
-    // (see fix-owner-delete-resurrection) and WOULD block that
-    // materialization the same way it blocks device-exporter re-enroll — but
-    // default-account delete stays typed-unsupported regardless, rather than
-    // changing this route's behavior as a side effect of the tombstone fix.
-    // Device-collected and explicit (non-default) account connections have
-    // non-deterministic binding keys and are deletable. See
-    // add-owner-connection-delete-contract Decision 1.
-    throw new ConnectorInstanceDeleteError(
-      "default_account_delete_unsupported",
-      `Connection '${connectorInstanceId}' is a default-account binding; deleting it is not supported, because the deterministic default-account id would otherwise be resolved outside the normal upsert path. Revoke it instead, or re-initiate to replace it.`,
-      { connectorId: instance.connectorId, connectorInstanceId, ownerSubjectId }
     );
   }
   return instance;
@@ -1369,13 +1356,16 @@ export function createSqliteConnectorInstanceStore() {
     ) {
       const instanceLookup = this.get(connectorInstanceId);
       const activeRuns = allowUnboundedReadAcknowledged<ActiveRunRow>(referenceQueries.controllerListActiveRuns);
-      const hasActiveRun = activeRuns.some((run) => run.connector_instance_id === connectorInstanceId);
+      const activeRun = activeRuns.find((run) => run.connector_instance_id === connectorInstanceId);
+      const hasActiveRun = activeRun !== undefined;
+      const activeRunIdForError = activeRun?.run_id ?? null;
       const inboundFragmentCount = Number(
         getOne<{ fragment_count: number }>(referenceQueries.connectorInstanceGroupsCountByCanonical, [
           connectorInstanceId,
         ])?.fragment_count ?? 0
       );
       const instance = assertDeletableConnection(instanceLookup, {
+        activeRunId: activeRunIdForError,
         connectorInstanceId,
         hasActiveRun,
         inboundFragmentCount,
@@ -1396,6 +1386,28 @@ export function createSqliteConnectorInstanceStore() {
           connectorInstanceId,
         ]);
         exec(referenceQueries.connectorInstancesDeleteSummaryEvidenceByConnectorInstance, [connectorInstanceId]);
+        // The cursor has no FK to connector_instances, so erase it here: a
+        // re-added connection with the same deterministic id must backfill
+        // from scratch rather than resume the deleted source's cursor.
+        exec(referenceQueries.connectorInstancesDeleteConnectorStateByInstance, [connectorInstanceId]);
+        exec(referenceQueries.connectorInstancesDeleteGrantConnectorStateByInstance, [connectorInstanceId]);
+        // Same reason for every per-connection table with no FK cascade: the
+        // re-added id must not inherit the deleted source's gap queue,
+        // cadence anchor, webhook/device replay receipts, derived projection
+        // rows, or fragment grouping. Kept by design: spine_events,
+        // run_history, grants, tombstones, stream_evidence_run_registry (a
+        // run_id claim must never become reusable), and the browser-surface
+        // replacement ledger.
+        exec(referenceQueries.connectorInstancesDeleteDetailGapsByInstance, [connectorInstanceId]);
+        exec(referenceQueries.connectorInstancesDeleteSchedulerLastRunTimeByInstance, [connectorInstanceId]);
+        exec(referenceQueries.connectorInstancesDeleteSourceWebhookRunReceiptsByInstance, [connectorInstanceId]);
+        exec(referenceQueries.connectorInstancesDeleteDeviceIngestBatchOutcomesByInstance, [connectorInstanceId]);
+        exec(referenceQueries.connectorInstancesDeleteRetainedSizeConnectionByInstance, [connectorInstanceId]);
+        exec(referenceQueries.connectorInstancesDeleteRetainedSizeStreamByInstance, [connectorInstanceId]);
+        exec(referenceQueries.connectorInstancesDeleteRetainedSizeRecordFamilyByInstance, [connectorInstanceId]);
+        exec(referenceQueries.connectorInstancesDeleteSearchIndexDirtyByInstance, [connectorInstanceId]);
+        exec(referenceQueries.connectorInstancesDeleteSummaryEvidenceRepairChunkByInstance, [connectorInstanceId]);
+        exec(referenceQueries.connectorInstanceGroupsDeleteByFragment, [connectorInstanceId]);
         const schedule = exec(referenceQueries.controllerDeleteSchedule, [connectorInstanceId]);
         const device = exec(referenceQueries.deviceExportersClearSourceInstanceConnectorRef, [
           stamp,
@@ -1529,9 +1541,35 @@ export function createSqliteConnectorInstanceStore() {
       );
     },
 
+    // Clears the owner-delete tombstone of this owner's default-account
+    // identity for `connectorId`, so the next materialization re-creates the
+    // connection. Call ONLY from an explicit owner connect; implicit paths
+    // (scheduler, ingest) must keep respecting the tombstone. Returns whether a
+    // tombstone existed.
+    clearDefaultAccountTombstone({ ownerSubjectId, connectorId }: { ownerSubjectId: string; connectorId: string }) {
+      const result = exec(referenceQueries.connectorInstancesDeleteTombstoneByBinding, [
+        ownerSubjectId,
+        connectorId,
+        "account",
+        DEFAULT_ACCOUNT_SOURCE_BINDING_KEY,
+      ]);
+      // biome-ignore lint/suspicious/noUnnecessaryConditions: TypeScript boundary permits nullish input; this guard preserves runtime behavior.
+      return (result?.changes ?? 0) > 0;
+    },
+
+    // Reads the tombstone of one deleted connection id. Used only by the
+    // owner-session browser-profile purge retry.
+    getTombstoneByConnectionId(connectorInstanceId: string): ConnectorInstanceTombstone | null {
+      return mapTombstone(
+        getOne<ConnectorInstanceTombstoneRow>(referenceQueries.connectorInstancesGetTombstoneByConnectionId, [
+          connectorInstanceId,
+        ])
+      );
+    },
+
     // Reads the tombstone (if any) for one identity. Consulted ONLY by
-    // `upsert`'s no-existing-row path; no other read surface in the system
-    // queries this table. See openspec/changes/fix-owner-delete-resurrection.
+    // `upsert`'s no-existing-row path (the purge retry reads by connection id
+    // instead). See openspec/changes/fix-owner-delete-resurrection.
     getTombstoneByBinding({
       ownerSubjectId,
       connectorId,
@@ -2251,17 +2289,19 @@ export function createPostgresConnectorInstanceStore() {
       }
     ) {
       const instanceLookup = await this.get(connectorInstanceId);
-      const activeRuns = await postgresQuery(
-        "SELECT connector_instance_id FROM controller_active_runs WHERE connector_instance_id = $1",
+      const activeRuns = await postgresQuery<{ run_id: string }>(
+        "SELECT run_id FROM controller_active_runs WHERE connector_instance_id = $1",
         [connectorInstanceId]
       );
       const hasActiveRun = activeRuns.rows.length > 0;
+      const activeRunIdForError = activeRuns.rows[0]?.run_id ?? null;
       const inboundFragments = await postgresQuery<{ fragment_count: string }>(
         "SELECT COUNT(*) AS fragment_count FROM connector_instance_groups WHERE canonical_connector_instance_id = $1",
         [connectorInstanceId]
       );
       const inboundFragmentCount = Number(inboundFragments.rows[0]?.fragment_count ?? 0);
       const instance = assertDeletableConnection(instanceLookup, {
+        activeRunId: activeRunIdForError,
         connectorInstanceId,
         hasActiveRun,
         inboundFragmentCount,
@@ -2284,6 +2324,27 @@ export function createPostgresConnectorInstanceStore() {
           await client.query("DELETE FROM connector_summary_evidence WHERE connector_instance_id = $1", [
             connectorInstanceId,
           ]);
+          // Cursor purge (no FK; see the SQLite arm).
+          await client.query("DELETE FROM connector_state WHERE connector_instance_id = $1", [connectorInstanceId]);
+          await client.query("DELETE FROM grant_connector_state WHERE connector_instance_id = $1", [
+            connectorInstanceId,
+          ]);
+          // Per-connection tables with no FK cascade (see the SQLite arm).
+          for (const table of [
+            "connector_detail_gaps",
+            "scheduler_last_run_times",
+            "source_webhook_run_receipts",
+            "device_ingest_batch_outcomes",
+            "retained_size_connection",
+            "retained_size_stream",
+            "retained_size_record_family",
+            "search_index_dirty",
+            "connector_summary_evidence_repair_chunk",
+            "connector_instance_groups",
+          ]) {
+            // biome-ignore lint/performance/noAwaitInLoops: statements share one transaction client and run in order.
+            await client.query(`DELETE FROM ${table} WHERE connector_instance_id = $1`, [connectorInstanceId]);
+          }
           const schedule = await client.query("DELETE FROM connector_schedules WHERE connector_instance_id = $1", [
             connectorInstanceId,
           ]);
@@ -2425,9 +2486,38 @@ export function createPostgresConnectorInstanceStore() {
       return row ? mapInstance(row) : null;
     },
 
+    // Postgres twin of the SQLite `clearDefaultAccountTombstone`.
+    async clearDefaultAccountTombstone({
+      ownerSubjectId,
+      connectorId,
+    }: {
+      ownerSubjectId: string;
+      connectorId: string;
+    }): Promise<boolean> {
+      const result = await postgresQuery(
+        `DELETE FROM connector_instance_tombstones
+         WHERE owner_subject_id = $1 AND connector_id = $2 AND source_kind = $3 AND source_binding_key = $4`,
+        [ownerSubjectId, connectorId, "account", DEFAULT_ACCOUNT_SOURCE_BINDING_KEY]
+      );
+      return Number(result.rowCount ?? 0) > 0;
+    },
+
+    // Postgres twin of the SQLite `getTombstoneByConnectionId`.
+    async getTombstoneByConnectionId(connectorInstanceId: string): Promise<ConnectorInstanceTombstone | null> {
+      const result = await postgresQuery<ConnectorInstanceTombstoneRow>(
+        `SELECT connector_instance_id, owner_subject_id, connector_id, source_kind, source_binding_key, deleted_at
+         FROM connector_instance_tombstones
+         WHERE connector_instance_id = $1
+         LIMIT 1`,
+        [connectorInstanceId]
+      );
+      const row: ConnectorInstanceTombstoneRow | undefined = result.rows[0];
+      return mapTombstone(row);
+    },
+
     // Reads the tombstone (if any) for one identity. Consulted ONLY by
-    // `upsert`'s no-existing-row path; no other read surface in the system
-    // queries this table. See openspec/changes/fix-owner-delete-resurrection.
+    // `upsert`'s no-existing-row path (the purge retry reads by connection id
+    // instead). See openspec/changes/fix-owner-delete-resurrection.
     async getTombstoneByBinding({
       ownerSubjectId,
       connectorId,

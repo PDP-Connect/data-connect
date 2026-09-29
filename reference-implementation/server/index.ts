@@ -91,6 +91,7 @@ import { createRemoteAccessConfigStore, remoteAccessConfigPath } from "./remote-
 import { ownerPasswordManagedByDesktop, ownerPasswordOwnerSet } from "./owner-password-owner-set.ts";
 import { appConfigPath, createAppConfigStore } from "./app-config-store.ts";
 import { autostartStatePath, createAutostartStore } from "./autostart-store.ts";
+import { type BrowserProfilePurger, createBrowserProfilePurger } from "./browser-profile-purge.ts";
 import { createLiveRevisions, type LiveRevisions, registerDefaultLiveTopics } from "./live-revisions.ts";
 import { createRecoveryKeyStore } from "./recovery-key-store.ts";
 import { getOwnerSessionStore } from "./stores/owner-session-store.ts";
@@ -408,6 +409,7 @@ import { mountRefConnectionConfirmCoverageHorizon } from "./routes/ref-connectio
 import { mountRefConnectionPause } from "./routes/ref-connection-pause.ts";
 import { HISTORICAL_ARCHIVE_SOURCE_BINDING_KIND, mountRefConnectionResume } from "./routes/ref-connection-resume.ts";
 import {
+  mountRefConnectionBrowserProfilePurge,
   mountRefConnectionDelete,
   mountRefConnectionDetail,
   mountRefConnectionReactivate,
@@ -710,6 +712,7 @@ type ApiError = Error & {
 };
 
 interface PdppErrorBody {
+  active_run_id?: string;
   available_connections?: unknown[];
   code: unknown;
   message: unknown;
@@ -840,6 +843,7 @@ interface ServerOpts {
   lexicalRetrievalCapability?: unknown;
   lexicalRetrievalSupported?: boolean;
   logger?: LoggerLike;
+  purgeBrowserProfile?: BrowserProfilePurger;
   makePresentationAttachmentId?: (() => string) | null;
   makeStreamingBrowserSessionId?: (() => string) | null;
   maxRecordRejectionPageSize?: number;
@@ -1398,6 +1402,9 @@ function pdppError(
     body.error.param = param;
   }
   if (extras && typeof extras === "object") {
+    if (typeof extras.active_run_id === "string") {
+      body.error.active_run_id = extras.active_run_id;
+    }
     if (Array.isArray(extras.available_connections)) {
       body.error.available_connections = extras.available_connections;
     }
@@ -1582,6 +1589,9 @@ function handleError(res: ResLike, err: ApiError) {
   }
   if (typeof err.retry_with === "string") {
     extras.retry_with = err.retry_with;
+  }
+  if (code === "connection_run_active" && typeof err.active_run_id === "string") {
+    extras.active_run_id = err.active_run_id;
   }
   Object.assign(extras, recoveryAdmissionExtrasForWire(err));
   pdppError(res, status, code, err.message, err.param || null, extras);
@@ -2194,6 +2204,49 @@ function resolveSingleConnectorIdQueryValue(rawConnectorId: unknown) {
 
 function getOwnerTokenSubjectId(req: ReqLike) {
   return req.tokenInfo?.subject_id || OWNER_AUTH_DEFAULT_SUBJECT_ID;
+}
+
+// The desktop host may still hold an old per-connector profile; the purger
+// removes it only when the owner has no other connection of that connector.
+function createOwnerBrowserProfilePurger(opts: ServerOpts): BrowserProfilePurger {
+  return (
+    opts.purgeBrowserProfile ??
+    createBrowserProfilePurger({
+      countOtherConnections: async ({ connectorKey, connectorInstanceId, ownerSubjectId }) => {
+        const instances = await createRequestConnectorInstanceStore().listByOwnerIncludingDrafts(ownerSubjectId);
+        return instances.filter(
+          (instance) =>
+            instance.connectorInstanceId !== connectorInstanceId &&
+            canonicalConnectorKey(instance.connectorId) === connectorKey
+        ).length;
+      },
+      isConnectionRunActive: async (connectorInstanceId) =>
+        Boolean(await createRequestConnectorInstanceStore().getActiveRun(connectorInstanceId)),
+      logger: opts.logger ?? null,
+    })
+  );
+}
+
+// The owner's connections (any status, drafts included) of the same connector
+// as `connectorInstanceId`, other than it. Browser profiles are per
+// connection; the old per-connector profile can be attributed to a connection
+// only when this count is zero.
+async function countOtherConnectionsOfConnector(connectorInstanceId: string): Promise<number | null> {
+  const store = createRequestConnectorInstanceStore();
+  const instance = await store.get(connectorInstanceId);
+  if (!instance) {
+    return null;
+  }
+  const connectorKey = canonicalConnectorKey(instance.connectorId);
+  const instances = await store.listByOwnerIncludingDrafts(instance.ownerSubjectId);
+  return instances.filter(
+    (other) =>
+      other.connectorInstanceId !== connectorInstanceId && canonicalConnectorKey(other.connectorId) === connectorKey
+  ).length;
+}
+
+async function isOnlyConnectionOfItsConnector(connectorInstanceId: string): Promise<boolean> {
+  return (await countOtherConnectionsOfConnector(connectorInstanceId)) === 0;
 }
 
 function createRequestConnectorInstanceStore() {
@@ -6208,6 +6261,9 @@ export function buildAsApp(opts: ServerOpts = {}) {
 
   const refConnectorsContext = {
     canonicalConnectorKey,
+    purgeBrowserProfile: createOwnerBrowserProfilePurger(opts),
+    clearDefaultAccountTombstone: (input: { connectorId: string; ownerSubjectId: string }) =>
+      createRequestConnectorInstanceStore().clearDefaultAccountTombstone(input),
     createRequestConnectorInstanceStore,
     createTraceContext,
     deleteConnection: (connectorInstanceId: string, options: unknown) =>
@@ -7018,6 +7074,10 @@ export function buildAsApp(opts: ServerOpts = {}) {
     refConnectorsContext as unknown as Parameters<typeof mountRefConnectionReactivate>[1]
   );
   mountRefConnectionDelete(app, refConnectorsContext as unknown as Parameters<typeof mountRefConnectionDelete>[1]);
+  mountRefConnectionBrowserProfilePurge(
+    app,
+    refConnectorsContext as unknown as Parameters<typeof mountRefConnectionBrowserProfilePurge>[1]
+  );
 
   if (!nativeMode) {
     // Polyfill-only connector registry: register/detail semantics live in
@@ -7266,6 +7326,7 @@ function buildOwnerAgentOnboardingMetadata({
 }
 
 function buildRsApp(opts: ServerOpts = {}) {
+  const rsPurgeBrowserProfile = createOwnerBrowserProfilePurger(opts);
   const app = createApp({
     ...(opts.logger === null ? {} : { logger: opts.logger }),
   });
@@ -7919,6 +7980,7 @@ function buildRsApp(opts: ServerOpts = {}) {
   // openspec/changes/add-owner-agent-control-surface (tasks 3.1d/6.1d, design
   // "Deferred: connection-revoke durability" → Unit 2).
   mountOwnerConnectionRevoke(app, {
+    purgeBrowserProfile: rsPurgeBrowserProfile,
     AmbiguousConnectionError,
     canonicalConnectorKey,
     createTraceContext,
@@ -8086,9 +8148,9 @@ function buildRsApp(opts: ServerOpts = {}) {
   // connections, and the device edge. Ownership is verified in the store BEFORE
   // any mutation (foreign/unknown/repeat → connector_instance_not_found 404, no
   // existence leak — the same code the sibling owner-agent instance-control
-  // routes raise); an in-flight run → connection_run_active (409); a
-  // default-account binding → default_account_delete_unsupported (409, no silent
-  // re-materialization). The connector-only route auto-selects a single active
+  // routes raise); an in-flight run → connection_run_active (409). A
+  // default-account binding is deletable; its tombstone blocks silent
+  // re-materialization. The connector-only route auto-selects a single active
   // connection or returns a typed ambiguous_connection (409). The durable
   // source-of-truth cascade (records-family + schedule + device back-ref +
   // connector_instances row) is ONE all-or-nothing transaction per backend;
@@ -8096,6 +8158,7 @@ function buildRsApp(opts: ServerOpts = {}) {
   // commit. `/mcp` owner-bearer rejection is untouched. See
   // openspec/changes/add-owner-connection-delete-contract.
   mountOwnerConnectionDelete(app, {
+    purgeBrowserProfile: rsPurgeBrowserProfile,
     AmbiguousConnectionError,
     canonicalConnectorKey,
     createTraceContext,
@@ -9873,8 +9936,16 @@ export async function resolveNekoBrowserSurfaceControllerOptions({
     options.browserSurfaceAllocatorScopeId = runtimeConfig.host.endpoint;
     options.browserSurfaceReadinessTimeoutMs = DEFAULT_NEKO_READINESS_TIMEOUT_MS;
     options.browserSurfaceLeaseSweepIntervalMs = runtimeConfig.leaseSweepIntervalMs;
-    options.beforeBrowserSurfaceLeaseEnsure = (args: { readonly runId: string; readonly surfaceId: string }) => {
-      hostAllocator.bindRunToSurface(args);
+    options.beforeBrowserSurfaceLeaseEnsure = async (args: {
+      readonly connectionId: string | null;
+      readonly runId: string;
+      readonly surfaceId: string;
+    }) => {
+      hostAllocator.bindRunToSurface({
+        migrateConnectorProfile: args.connectionId ? await isOnlyConnectionOfItsConnector(args.connectionId) : false,
+        runId: args.runId,
+        surfaceId: args.surfaceId,
+      });
     };
     options.beforeBrowserSurfaceLeaseRelease = (args: { readonly runId: string }) => {
       return hostAllocator.releaseRun(args.runId);

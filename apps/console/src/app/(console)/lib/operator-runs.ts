@@ -3,6 +3,8 @@
 
 import { type CancelRunResult, cancelRunErrorCode, classifyCancelRunResponse } from "./cancel-run-result.ts";
 import {
+  type BrowserProfilePurgeResult,
+  classifyBrowserProfilePurgeResponse,
   classifyDeleteConnectionResponse,
   classifyPauseConnectionResponse,
   classifyReactivateConnectionResponse,
@@ -508,6 +510,19 @@ export async function resumeConnection(connectionId: string): Promise<ResumeConn
  * route. Returns a typed outcome so the console can message each refusal in
  * place rather than via a generic error boundary.
  */
+/**
+ * Retry the saved-browser-session purge for a revoked or deleted connection via
+ * the owner-session `POST /_ref/connections/:id/browser-profile/purge` route.
+ * Used when a delete or revoke reported `profile_purge.status: "failed"`.
+ */
+export async function purgeConnectionBrowserProfile(connectionId: string): Promise<BrowserProfilePurgeResult> {
+  const response = await fetchAs(connectionControlPath(connectionId, "/browser-profile/purge"), {
+    method: "POST",
+  });
+  const body = await readBody(response);
+  return classifyBrowserProfilePurgeResponse(response.status, body, connectionControlErrorCode(body));
+}
+
 export async function deleteConnection(connectionId: string): Promise<DeleteConnectionResult> {
   const response = await fetchAs(connectionControlPath(connectionId, ""), {
     method: "DELETE",
