@@ -32,13 +32,6 @@ Say first: "The same login you run today, then one screen."
 
 Back to slide 8: "That screen is what the first implementation builds beside Cuenta Única."
 
-## Rules from the guide
-
-- Show nothing beyond the consent flow: no operator console, dashboards, settings or network views.
-- No AI. The AI-assistant (MCP) path in README.md is not part of this demo.
-- Never debug in front of the room: hotspot, then the recording, then the three lines on slide 8 spoken.
-- Questions about what is behind the screen go to slides 13 and 14 and the technical note.
-
 ## How it maps to slide 14
 
 | Step | Here |
@@ -53,7 +46,7 @@ Not shown: X-Road between the recipient and the institutions; the real Cuenta Ú
 
 ## Known limits
 
-- One fictitious citizen is shared by everyone with the password; reset before presenting.
+- One fictitious citizen is shared by everyone with the password. To start clean, press **Reiniciar demostración** at the bottom of Mis autorizaciones: it revokes and clears every authorization.
 - The end date is declared by the requester. The spec's grant has `expires_at`, but its request has no field for it, so this is a reference extension.
 - "What was read and when" in Mis autorizaciones is our implementation; the core spec defines no citizen-facing access log (§11–12).
 - The citizen can untick any requested stream and optional field; the spec defines owner choice only for streams the client marks optional (§5). Schema-required fields stay locked, as the spec requires.

@@ -78,7 +78,11 @@ The earlier MIVHED portal (`scripts/demo-dr/mived-portal`, app `mived-demo-rd`) 
 
 ## Reset before presenting
 
-Removes every grant and record, re-seeds, and restarts the portal so it re-registers its client. Mis autorizaciones then shows only what is created in the room.
+Quick reset, from the browser: **Reiniciar demostración** at the bottom of
+Mis autorizaciones revokes every authorization and hides them. Records and
+the portal's client stay; no restart.
+
+Full reset, from a terminal: removes every grant and record, re-seeds, and restarts the portal so it re-registers its client. Mis autorizaciones then shows only what is created in the room.
 
 ```sh
 OWNER_PASSWORD=… scripts/demo-dr/reset-live.sh
