@@ -603,7 +603,11 @@ const root = dirname(fileURLToPath(import.meta.url))
 const dataDir = resolve(process.env.PDPP_DATA_DIR || process.env.PDPP_REFERENCE_DATA_DIR || join(root, "data"))
 const dbPath = resolve(process.env.PDPP_DB_PATH || join(dataDir, "pdpp.sqlite"))
 mkdirSync(dataDir, { recursive: true })
-const child = spawn(process.execPath, ["--import", "tsx", "reference-implementation/server/index.ts"], {
+const child = spawn(process.execPath, [
+  "--import",
+  "tsx",
+  "reference-implementation/server/index.ts",
+], {
   cwd: root,
   env: {
     ...process.env,
@@ -700,6 +704,8 @@ export function verifyReferenceStackRoot(stageRoot) {
     "launch.mjs",
     "manifest.json",
     "reference-implementation/scripts/is-main-module.js",
+    "reference-implementation/connector-dependency-loader.mjs",
+    "reference-implementation/connector-dependency-loader-bootstrap.mjs",
     "reference-implementation/server/index.ts",
     "node_modules/tsx/package.json",
     "node_modules/patchright/package.json",

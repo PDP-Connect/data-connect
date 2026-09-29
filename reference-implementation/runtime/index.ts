@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import { join as joinPath } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { validateRuntimeContinuationFact } from "@pdpp/connector-protocol/connector-runtime-protocol";
+import { connectorChildArgs } from "../connector-dependency-loader.mjs";
 import { emitControllerBootedAndStashEpoch } from "../lib/controller-boot.ts";
 import type { SpineEventInput, SpineEventRecord } from "../lib/spine.ts";
 import { createTraceContext, emitSpineEvent, getCurrentBootEpoch } from "../lib/spine.ts";
@@ -2522,7 +2523,11 @@ function buildConnectorLaunchConfig({
     ...(triggerKind ? { PDPP_RUN_TRIGGER_KIND: triggerKind } : {}),
     ...(automationMode ? { PDPP_RUN_AUTOMATION_MODE: automationMode } : {}),
   };
-  const args = connectorPath.endsWith(".ts") ? ["--import", "tsx/esm", connectorPath] : [connectorPath];
+  const dependencyLoaderBootstrapUrl = new URL(
+    "../connector-dependency-loader-bootstrap.mjs",
+    import.meta.url
+  ).href;
+  const args = connectorChildArgs(connectorPath, dependencyLoaderBootstrapUrl);
   return {
     args,
     browserSurfaceLaunchEnv,
