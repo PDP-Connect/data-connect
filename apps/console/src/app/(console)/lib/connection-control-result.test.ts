@@ -240,14 +240,10 @@ test("revoke 200 carries the profile_purge and ignores a malformed one", () => {
   });
 });
 
-test("the banner sentence names a failed or shared purge and stays silent otherwise", () => {
+test("the banner sentence names a failed purge and stays silent otherwise", () => {
   assert.equal(
     profilePurgeSentence({ message: "a browser is still using it", status: "failed" }),
     "The saved browser session could not be removed (a browser is still using it)."
-  );
-  assert.equal(
-    profilePurgeSentence({ message: "The saved browser session is shared with 1 other account.", status: "shared" }),
-    "The saved browser session is shared with 1 other account."
   );
   assert.equal(profilePurgeSentence({ status: "purged" }), null);
   assert.equal(profilePurgeSentence({ status: "absent" }), null);

@@ -60,13 +60,12 @@ export interface RevokeConnectionResult {
 /**
  * The reference server's `profile_purge` field: what happened to the saved
  * browser session (the logged-in browser profile) after a delete or revoke
- * committed. `failed` means the session is still on disk; `shared` means the
- * desktop kept it because another account of the source still uses it.
+ * committed. `failed` means the session is still on disk.
  */
 export interface ProfilePurgeReport {
   errorCode?: string;
   message?: string;
-  status: "purged" | "absent" | "shared" | "failed";
+  status: "purged" | "absent" | "failed";
 }
 
 export function parseProfilePurge(body: unknown): ProfilePurgeReport | undefined {
@@ -75,7 +74,7 @@ export function parseProfilePurge(body: unknown): ProfilePurgeReport | undefined
     return undefined;
   }
   const { error_code: errorCode, message, status } = raw as Record<string, unknown>;
-  if (status !== "purged" && status !== "absent" && status !== "shared" && status !== "failed") {
+  if (status !== "purged" && status !== "absent" && status !== "failed") {
     return undefined;
   }
   return {
@@ -93,9 +92,6 @@ export function parseProfilePurge(body: unknown): ProfilePurgeReport | undefined
 export function profilePurgeSentence(purge: ProfilePurgeReport | undefined): string | null {
   if (purge?.status === "failed") {
     return `The saved browser session could not be removed (${purge.message ?? purge.errorCode ?? "unknown error"}).`;
-  }
-  if (purge?.status === "shared") {
-    return purge.message ?? "The saved browser session is shared with another account of this source, so it was kept.";
   }
   return null;
 }

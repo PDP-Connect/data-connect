@@ -44,7 +44,7 @@ interface Props {
 export function ConnectionDangerZone({ activeRunId = null, connectionId, error, message }: Props) {
   return (
     <Section
-      description="These actions affect only this connection's records and settings. Sibling connections of the same connector type keep theirs. On the desktop app, every account of one source shares a single saved browser session, so that session stays signed in while another account of the source is still connected."
+      description="These actions affect only this connection. Sibling connections of the same connector type, and their saved browser sessions, are untouched."
       id="danger-zone"
       title="Danger zone"
     >

@@ -55,7 +55,7 @@ const DZ_REVOKE_RETAINED_RE = /retained/i;
 const DZ_REVOKE_FUTURE_RE = /future collection/i;
 const DZ_REVOKE_NO_ERASE_RE = /does not erase anything/i;
 const DZ_REVOKE_SIGNS_OUT_RE = /Stops future collection and signs out the saved browser session/;
-const DZ_SHARED_SESSION_RE = /every account of one source shares a single saved browser session/;
+const DZ_SIBLING_SESSION_RE = /Sibling connections of the same connector type, and their saved browser sessions, are untouched/;
 const DZ_DELETE_ERASES_RE = /[Ee]rases this connection's records/;
 /**
  * Delete must distinguish itself from revoke. The copy states this positively —
@@ -134,9 +134,9 @@ test("revoke copy retains records, stops future collection, and says it signs ou
   assert.doesNotMatch(dz, DZ_REVOKE_NO_ERASE_RE, "revoke now removes the saved browser session");
 });
 
-test("the danger zone states that the desktop shares one browser session across a source's accounts", async () => {
+test("the danger zone says sibling connections keep their own browser sessions", async () => {
   const dz = await read(DANGER_ZONE_FILE);
-  assert.match(dz, DZ_SHARED_SESSION_RE);
+  assert.match(dz, DZ_SIBLING_SESSION_RE);
 });
 
 test("delete and revoke surface a failed browser-session purge and offer the retry on the Sources list", async () => {

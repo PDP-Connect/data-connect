@@ -50,7 +50,7 @@ const TOP_LEVEL_REGEX_2 = /owner-agent/i;
 
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage } from "node:http";
 import { hostname, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -1225,6 +1225,69 @@ test("a delete that finds a live browser reports the failed purge; the retry rou
   });
 });
 
+// The owner's test on the RI (Core) path: two accounts of one connector each
+// keep their own browser profile, and deleting one leaves the other signed in.
+test("deleting one of two connections of a connector removes only its profile; the other still launches on its own", async () => {
+  await withProfileRoot(async (profileRoot) => {
+    await withServer(async ({ asUrl }) => {
+      await registerConnector(asUrl, loadReferenceManifest("spotify"));
+      await seedInstance({ connectorId: "spotify", connectorInstanceId: "cin_acct_a", displayName: "A", sourceBindingKey: "a@x" });
+      await seedInstance({ connectorId: "spotify", connectorInstanceId: "cin_acct_b", displayName: "B", sourceBindingKey: "b@x" });
+      const dirA = seedProfileDir(profileRoot, "spotify__cin_acct_a");
+      const dirB = seedProfileDir(profileRoot, "spotify__cin_acct_b");
+      writeFileSync(join(dirB, "pdpp-session-marker"), "account-b");
+
+      const del = await fetchJson(`${asUrl}/_ref/connections/cin_acct_a`, { method: "DELETE" });
+
+      assert.equal(del.status, 200, JSON.stringify(del.body));
+      assert.deepEqual(purgeOf(del), { removed: 1, status: "purged", target: "local" });
+      assert.equal(existsSync(dirA), false, "the deleted account's profile is gone");
+      assert.equal(readFileSync(join(dirB, "Default", "Cookies"), "utf8"), "session-cookie-fixture");
+
+      // The connector runtime names a connection's profile
+      // `<profileName>__<connectionId>`; launching it for account B reuses B's
+      // surviving directory.
+      const { acquireIsolatedBrowser } = await import("@pdpp/polyfill-connectors/browser-launch");
+      const browser = await acquireIsolatedBrowser({ headless: true, profileName: "spotify__cin_acct_b" });
+      try {
+        const page = await browser.context.newPage();
+        await page.goto("data:text/html,account-b");
+        assert.equal(readFileSync(join(dirB, "pdpp-session-marker"), "utf8"), "account-b");
+        assert.ok(
+          readdirSync(join(dirB, "Default")).length > 1,
+          "Chromium wrote its profile into account B's own directory"
+        );
+        assert.deepEqual(readdirSync(profileRoot), ["spotify__cin_acct_b"]);
+      } finally {
+        await browser.release();
+      }
+      assert.equal(existsSync(dirA), false, "launching B does not recreate A's profile");
+    });
+  });
+});
+
+test("a revoke during a run keeps the profile (no lock needed) and the retry purges it once the run ends", async () => {
+  await withProfileRoot(async (profileRoot) => {
+    await withServer(async ({ asUrl }) => {
+      await registerConnector(asUrl, loadReferenceManifest("spotify"));
+      const cin = "cin_purge_headless";
+      await seedInstance({ connectorId: "spotify", connectorInstanceId: cin, displayName: "H", sourceBindingKey: "h@x" });
+      const profileDir = seedProfileDir(profileRoot, `spotify__${cin}`);
+      seedActiveRun(cin, "spotify");
+
+      const revoke = await fetchJson(`${asUrl}/_ref/connections/${cin}/revoke`, { method: "POST" });
+      assert.equal(revoke.status, 200, JSON.stringify(revoke.body));
+      assert.equal(purgeOf(revoke)?.error_code, "profile_purge_in_use");
+      assert.equal(existsSync(join(profileDir, "Default", "Cookies")), true, "the running browser keeps its profile");
+
+      getDb().prepare("DELETE FROM controller_active_runs WHERE connector_instance_id = ?").run(cin);
+      const retry = await retryPurge(asUrl, cin);
+      assert.deepEqual(purgeOf(retry), { removed: 1, status: "purged", target: "local" });
+      assert.equal(existsSync(profileDir), false);
+    });
+  });
+});
+
 test("a delete clears a dangling SingletonLock left by a dead browser and removes the session", async () => {
   await withProfileRoot(async (profileRoot) => {
     await withServer(async ({ asUrl }) => {
@@ -1326,7 +1389,7 @@ async function withFakeDesktopHost(
   }
 }
 
-test("in desktop host mode the shared connector session is kept while another account is active, then reset", async () => {
+test("in desktop host mode a delete resets only that connection's host profile", async () => {
   await withFakeDesktopHost(async (hostRequests) => {
     await withServer(async ({ asUrl }) => {
       await registerConnector(asUrl, loadReferenceManifest("spotify"));
@@ -1335,16 +1398,22 @@ test("in desktop host mode the shared connector session is kept while another ac
 
       const first = await fetchJson(`${asUrl}/_ref/connections/cin_host_a`, { method: "DELETE" });
       assert.equal(first.status, 200, JSON.stringify(first.body));
-      assert.equal(purgeOf(first)?.status, "shared");
-      assert.equal(purgeOf(first)?.other_connection_count, 1);
-      assert.match(String(purgeOf(first)?.message), /shared with 1 other account/);
-      assert.equal(hostRequests.length, 0, "the shared host profile is not reset");
+      assert.deepEqual(purgeOf(first), { removed: 1, status: "purged", target: "host" });
 
       const second = await fetchJson(`${asUrl}/_ref/connections/cin_host_b/revoke`, { method: "POST" });
       assert.equal(second.status, 200, JSON.stringify(second.body));
       assert.deepEqual(purgeOf(second), { removed: 1, status: "purged", target: "host" });
       assert.deepEqual(hostRequests, [
-        { authorization: "Bearer host-token-fixture", method: "DELETE", url: "/browser-surface/profiles/spotify" },
+        {
+          authorization: "Bearer host-token-fixture",
+          method: "DELETE",
+          url: "/browser-surface/profiles/spotify/cin_host_a",
+        },
+        {
+          authorization: "Bearer host-token-fixture",
+          method: "DELETE",
+          url: "/browser-surface/profiles/spotify/cin_host_b?legacy=remove",
+        },
       ]);
     });
   });

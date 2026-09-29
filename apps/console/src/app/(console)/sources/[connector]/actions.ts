@@ -373,8 +373,6 @@ export async function purgeBrowserProfileAction(formData: FormData) {
     } else if (result.profilePurge?.status === "failed") {
       error = profilePurgeSentence(result.profilePurge) ?? undefined;
       retryId = connectionId;
-    } else if (result.profilePurge?.status === "shared") {
-      message = profilePurgeSentence(result.profilePurge) ?? undefined;
     } else {
       message = "The saved browser session was removed.";
     }

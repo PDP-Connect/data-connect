@@ -15,6 +15,8 @@ import {
 	createHostBrowserSurfaceAllocator,
 	type HostBrowserSurfaceAllocator,
 } from "../runtime/host-browser-surface-allocator.ts";
+import { createBrowserProfilePurger } from "../server/browser-profile-purge.ts";
+import { canonicalConnectorKey } from "../server/connector-key.ts";
 
 interface MockResponse {
 	readonly json: () => Promise<unknown>;
@@ -127,7 +129,8 @@ test("host lease POST returns the host CDP URL and release DELETE targets host s
 
 	const request: EnsureBrowserSurfaceRequest = {
 		connectorId: "chase",
-		profileKey: "chase",
+		profileKey: "chase:cin_chase",
+		surfaceSubjectId: "cin_chase",
 		surfaceId: "surface_1",
 	};
 	const surface = await allocator.ensureSurface(request);
@@ -135,8 +138,10 @@ test("host lease POST returns the host CDP URL and release DELETE targets host s
 	assert.equal(surface.cdp_url, "http://127.0.0.1:9222/host-cdp");
 	assert.equal(surface.stream_base_url, "");
 	assert.deepEqual(JSON.parse(mock.calls[0]?.body ?? "{}"), {
+		connection_id: "cin_chase",
 		connector_id: "chase",
 		headless: false,
+		migrate_connector_profile: false,
 		run_id: "run-7",
 	});
 	assert.equal(mock.calls[0]?.headers?.Authorization, "Bearer shared-secret");
@@ -170,7 +175,8 @@ test("release after a lost acquire response targets the stable run id", async ()
 	allocator.bindRunToSurface({ runId: "run-lost-response", surfaceId: "surface_1" });
 	const request: EnsureBrowserSurfaceRequest = {
 		connectorId: "chase",
-		profileKey: "chase",
+		profileKey: "chase:cin_chase",
+		surfaceSubjectId: "cin_chase",
 		surfaceId: "surface_1",
 	};
 
@@ -195,7 +201,8 @@ test("host endpoint failure terminalizes admission before a connector can start"
 	const manager = dynamicManager();
 	const acquired = manager.acquire({
 		connectorId: "chase",
-		profileKey: "chase",
+		profileKey: "chase:cin_chase",
+		surfaceSubjectId: "cin_chase",
 		runId: "run-down",
 	});
 	assert.equal(acquired.lease.status, "starting_surface");
@@ -227,7 +234,8 @@ test("host endpoint 500 with a structured sandbox-unavailable body surfaces the 
 
 	const request: EnsureBrowserSurfaceRequest = {
 		connectorId: "chase",
-		profileKey: "chase",
+		profileKey: "chase:cin_chase",
+		surfaceSubjectId: "cin_chase",
 		surfaceId: "surface_1",
 	};
 
@@ -268,7 +276,8 @@ test("host endpoint 500 with a structured body reaches lastStartFailure after en
 	const manager = dynamicManager();
 	const acquired = manager.acquire({
 		connectorId: "chase",
-		profileKey: "chase",
+		profileKey: "chase:cin_chase",
+		surfaceSubjectId: "cin_chase",
 		runId: "run-surface-start-failed",
 	});
 	allocator.bindRunToSurface({
@@ -305,7 +314,8 @@ test("host endpoint 500 with a non-JSON body keeps today's plain HTTP-status mes
 
 	const request: EnsureBrowserSurfaceRequest = {
 		connectorId: "chase",
-		profileKey: "chase",
+		profileKey: "chase:cin_chase",
+		surfaceSubjectId: "cin_chase",
 		surfaceId: "surface_1",
 	};
 
@@ -316,4 +326,94 @@ test("host endpoint 500 with a non-JSON body keeps today's plain HTTP-status mes
 
 	const failure = allocator.lastStartFailure("run-nonjson");
 	assert.equal(failure?.code, "host_browser_surface_http_error");
+});
+
+function okHostEndpoint() {
+	return createMockHostEndpoint({
+		json: async () => ({
+			cdp_url: "http://127.0.0.1:9222/host-cdp",
+			surface_id: "host-surface-1",
+		}),
+		ok: true,
+		status: 200,
+	});
+}
+
+test("host lease POST refuses a lease without a connection instead of sharing a connector profile", async () => {
+	const mock = okHostEndpoint();
+	const allocator = hostAllocator(mock.fetchImpl);
+	allocator.bindRunToSurface({ runId: "run-1", surfaceId: "surface_1" });
+
+	await assert.rejects(
+		allocator.ensureSurface({
+			connectorId: "chase",
+			profileKey: "chase",
+			surfaceId: "surface_1",
+		}),
+		/no connection id was bound/,
+	);
+	assert.equal(mock.calls.length, 0, "the host is never asked for a shared profile");
+});
+
+test("host lease POST carries the migration flag bound for the run", async () => {
+	const mock = okHostEndpoint();
+	const allocator = hostAllocator(mock.fetchImpl);
+	allocator.bindRunToSurface({
+		migrateConnectorProfile: true,
+		runId: "run-1",
+		surfaceId: "surface_1",
+	});
+
+	await allocator.ensureSurface({
+		connectorId: "chase",
+		profileKey: "chase:cin_only",
+		surfaceId: "surface_1",
+		surfaceSubjectId: "cin_only",
+	});
+
+	const body = JSON.parse(mock.calls[0]?.body ?? "{}");
+	assert.equal(body.connection_id, "cin_only");
+	assert.equal(body.migrate_connector_profile, true);
+});
+
+test("a URL-form connector id leases and purges the same host profile key", async () => {
+	const mock = okHostEndpoint();
+	const allocator = hostAllocator(mock.fetchImpl);
+	allocator.bindRunToSurface({ runId: "run-1", surfaceId: "surface_1" });
+	await allocator.ensureSurface({
+		connectorId: "https://registry.pdpp.dev/connectors/github",
+		profileKey: "https://registry.pdpp.dev/connectors/github:cin_gh",
+		surfaceId: "surface_1",
+		surfaceSubjectId: "cin_gh",
+	});
+	const lease = JSON.parse(mock.calls[0]?.body ?? "{}");
+
+	// The desktop host stores one profile per (connector_id, connection_id);
+	// model it and let the RI purge address it.
+	const hostProfiles = new Set([`${lease.connector_id}/${lease.connection_id}`]);
+	const purgeCalls: string[] = [];
+	const purge = createBrowserProfilePurger({
+		env: {
+			PDPP_BROWSER_SURFACE_HOST_ENDPOINT: "http://127.0.0.1:9916/agent",
+			PDPP_BROWSER_SURFACE_HOST_TOKEN: "shared-secret",
+			PDPP_BROWSER_SURFACE_MODE: "host",
+		},
+		fetchImpl: (async (url: string) => {
+			purgeCalls.push(url);
+			const key = decodeURIComponent(
+				new URL(url).pathname.replace("/agent/browser-surface/profiles/", ""),
+			);
+			return new Response(null, { status: hostProfiles.delete(key) ? 204 : 404 });
+		}) as typeof fetch,
+		logger: null,
+	});
+	const result = await purge({
+		connectorInstanceId: "cin_gh",
+		connectorKey:
+			canonicalConnectorKey("https://registry.pdpp.dev/connectors/github") ?? "",
+	});
+
+	assert.equal(lease.connector_id, "github");
+	assert.deepEqual(result, { removed: 1, status: "purged", target: "host" });
+	assert.equal(hostProfiles.size, 0, "the leased profile is the one purged");
 });

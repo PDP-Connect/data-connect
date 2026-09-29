@@ -2206,26 +2206,47 @@ function getOwnerTokenSubjectId(req: ReqLike) {
   return req.tokenInfo?.subject_id || OWNER_AUTH_DEFAULT_SUBJECT_ID;
 }
 
-// The desktop host keys a browser profile by connector, so the purger must know
-// whether the owner still has another connection of that connector (active or
-// paused; drafts are not listed).
+// The desktop host may still hold an old per-connector profile; the purger
+// removes it only when the owner has no other connection of that connector.
 function createOwnerBrowserProfilePurger(opts: ServerOpts): BrowserProfilePurger {
   return (
     opts.purgeBrowserProfile ??
     createBrowserProfilePurger({
-      countOtherActiveConnections: async ({ connectorKey, connectorInstanceId, ownerSubjectId }) => {
-        const instances = await createRequestConnectorInstanceStore().listByOwner(ownerSubjectId);
+      countOtherConnections: async ({ connectorKey, connectorInstanceId, ownerSubjectId }) => {
+        const instances = await createRequestConnectorInstanceStore().listByOwnerIncludingDrafts(ownerSubjectId);
         return instances.filter(
           (instance) =>
-            // A paused connection still uses the session when it resumes.
-            instance.status !== "revoked" &&
             instance.connectorInstanceId !== connectorInstanceId &&
             canonicalConnectorKey(instance.connectorId) === connectorKey
         ).length;
       },
+      isConnectionRunActive: async (connectorInstanceId) =>
+        Boolean(await createRequestConnectorInstanceStore().getActiveRun(connectorInstanceId)),
       logger: opts.logger ?? null,
     })
   );
+}
+
+// The owner's connections (any status, drafts included) of the same connector
+// as `connectorInstanceId`, other than it. Browser profiles are per
+// connection; the old per-connector profile can be attributed to a connection
+// only when this count is zero.
+async function countOtherConnectionsOfConnector(connectorInstanceId: string): Promise<number | null> {
+  const store = createRequestConnectorInstanceStore();
+  const instance = await store.get(connectorInstanceId);
+  if (!instance) {
+    return null;
+  }
+  const connectorKey = canonicalConnectorKey(instance.connectorId);
+  const instances = await store.listByOwnerIncludingDrafts(instance.ownerSubjectId);
+  return instances.filter(
+    (other) =>
+      other.connectorInstanceId !== connectorInstanceId && canonicalConnectorKey(other.connectorId) === connectorKey
+  ).length;
+}
+
+async function isOnlyConnectionOfItsConnector(connectorInstanceId: string): Promise<boolean> {
+  return (await countOtherConnectionsOfConnector(connectorInstanceId)) === 0;
 }
 
 function createRequestConnectorInstanceStore() {
@@ -9915,8 +9936,16 @@ export async function resolveNekoBrowserSurfaceControllerOptions({
     options.browserSurfaceAllocatorScopeId = runtimeConfig.host.endpoint;
     options.browserSurfaceReadinessTimeoutMs = DEFAULT_NEKO_READINESS_TIMEOUT_MS;
     options.browserSurfaceLeaseSweepIntervalMs = runtimeConfig.leaseSweepIntervalMs;
-    options.beforeBrowserSurfaceLeaseEnsure = (args: { readonly runId: string; readonly surfaceId: string }) => {
-      hostAllocator.bindRunToSurface(args);
+    options.beforeBrowserSurfaceLeaseEnsure = async (args: {
+      readonly connectionId: string | null;
+      readonly runId: string;
+      readonly surfaceId: string;
+    }) => {
+      hostAllocator.bindRunToSurface({
+        migrateConnectorProfile: args.connectionId ? await isOnlyConnectionOfItsConnector(args.connectionId) : false,
+        runId: args.runId,
+        surfaceId: args.surfaceId,
+      });
     };
     options.beforeBrowserSurfaceLeaseRelease = (args: { readonly runId: string }) => {
       return hostAllocator.releaseRun(args.runId);

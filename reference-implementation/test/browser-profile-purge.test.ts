@@ -132,7 +132,7 @@ test("host mode asks the desktop host to reset the connector profile with the be
 
   assert.deepEqual(result, { removed: 1, status: "purged", target: "host" });
   assert.equal(calls.length, 1);
-  assert.equal(calls[0]?.url, "http://127.0.0.1:9/browser-surface/profiles/amazon");
+  assert.equal(calls[0]?.url, "http://127.0.0.1:9/browser-surface/profiles/amazon/cin_a");
   assert.equal(calls[0]?.init.method, "DELETE");
   assert.deepEqual(calls[0]?.init.headers, { Authorization: "Bearer host-token-fixture" });
 });
@@ -175,13 +175,13 @@ test("an unreachable host is reported as a failed purge, not an exception", asyn
   assert.equal(logged.length, 1);
 });
 
-test("host mode keeps a session another active connection of the connector still shares", async () => {
+test("host mode resets only this connection's profile while the owner has other connections of the connector", async () => {
   const calls: string[] = [];
   const counted: unknown[] = [];
   const purge = createBrowserProfilePurger({
-    countOtherActiveConnections: (input) => {
+    countOtherConnections: (input) => {
       counted.push(input);
-      return 2;
+      return 1;
     },
     env: hostEnv(),
     fetchImpl: (async (url: string) => {
@@ -193,17 +193,15 @@ test("host mode keeps a session another active connection of the connector still
 
   const result = await purge({ connectorInstanceId: "cin_a", connectorKey: "amazon", ownerSubjectId: "owner_1" });
 
-  assert.equal(result.status, "shared");
-  assert.equal(result.status === "shared" ? result.other_connection_count : null, 2);
-  assert.match(result.status === "shared" ? result.message : "", /shared with 2 other accounts/);
-  assert.equal(calls.length, 0, "the host profile is not reset");
+  assert.deepEqual(result, { removed: 1, status: "purged", target: "host" });
+  assert.deepEqual(calls, ["http://127.0.0.1:9/browser-surface/profiles/amazon/cin_a"]);
   assert.deepEqual(counted, [{ connectorInstanceId: "cin_a", connectorKey: "amazon", ownerSubjectId: "owner_1" }]);
 });
 
-test("host mode resets the session when no other active connection shares it", async () => {
+test("host mode also removes the old per-connector profile when this was the owner's only connection", async () => {
   const calls: string[] = [];
   const purge = createBrowserProfilePurger({
-    countOtherActiveConnections: () => 0,
+    countOtherConnections: () => 0,
     env: hostEnv(),
     fetchImpl: (async (url: string) => {
       calls.push(url);
@@ -215,20 +213,25 @@ test("host mode resets the session when no other active connection shares it", a
   const result = await purge({ connectorInstanceId: "cin_a", connectorKey: "amazon", ownerSubjectId: "owner_1" });
 
   assert.deepEqual(result, { removed: 1, status: "purged", target: "host" });
-  assert.equal(calls.length, 1);
+  assert.deepEqual(calls, ["http://127.0.0.1:9/browser-surface/profiles/amazon/cin_a?legacy=remove"]);
 });
 
-test("local mode never reports shared: each Core connection has its own profile", async () => {
+test("a connection with a run in progress keeps its profile even without a SingletonLock (headless shell)", async () => {
   await withTempDir(async (root) => {
-    seedProfile(root, "amazon__cin_a");
+    const live = seedProfile(root, "amazon__cin_run");
+    let active = true;
     const purge = createBrowserProfilePurger({
-      countOtherActiveConnections: () => 3,
       env: { PDPP_BROWSER_PROFILE_ROOT: root },
+      isConnectionRunActive: (id) => id === "cin_run" && active,
       logger: null,
     });
 
-    const result = await purge({ connectorInstanceId: "cin_a", connectorKey: "amazon", ownerSubjectId: "owner_1" });
+    const during = await purge({ connectorInstanceId: "cin_run", connectorKey: "amazon" });
+    assert.equal(during.status === "failed" ? during.error_code : null, "profile_purge_in_use");
+    assert.equal(existsSync(join(live, "Cookies")), true);
 
-    assert.deepEqual(result, { removed: 1, status: "purged", target: "local" });
+    active = false;
+    const after = await purge({ connectorInstanceId: "cin_run", connectorKey: "amazon" });
+    assert.deepEqual(after, { removed: 1, status: "purged", target: "local" });
   });
 });

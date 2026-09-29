@@ -15,11 +15,12 @@
 //     matches the `__<connectorInstanceId>` suffix instead.
 //   - Desktop host (`PDPP_BROWSER_SURFACE_MODE=host`): the Tauri host owns the
 //     profile; the RI asks it over the existing authenticated loopback
-//     contract (`DELETE <endpoint>/browser-surface/profiles/<connector_key>`,
-//     docs/host-capability-provider-contract.md). The host keys that profile
-//     by connector only, so every connection of one connector shares it.
-//     While the owner still has another connection of the connector that is
-//     not revoked, the purge keeps the session and reports `shared` instead.
+//     contract (`DELETE <endpoint>/browser-surface/profiles/<connector_key>/
+//     <connectorInstanceId>`, docs/host-capability-provider-contract.md). The
+//     host keeps one profile per connection. Before that it kept one per
+//     connector; when the owner has no other connection of the connector, the
+//     purge also asks the host to remove that old profile (`?legacy=remove`),
+//     because it can only have belonged to this connection.
 //
 // The purge never throws: the delete or revoke has already committed, so a
 // purge failure is logged and returned for the route to report.
@@ -32,12 +33,6 @@ export type BrowserProfilePurgeResult =
   | { readonly status: "purged"; readonly target: "host" | "local"; readonly removed: number }
   | { readonly status: "absent"; readonly target: "host" | "local" }
   | {
-      readonly status: "shared";
-      readonly target: "host";
-      readonly other_connection_count: number;
-      readonly message: string;
-    }
-  | {
       readonly status: "failed";
       readonly target: "host" | "local";
       readonly error_code: string;
@@ -47,13 +42,14 @@ export type BrowserProfilePurgeResult =
 export interface BrowserProfilePurgeInput {
   readonly connectorKey: string;
   readonly connectorInstanceId: string;
-  // Needed to find the owner's other connections that share a host profile.
+  // Needed to decide whether the host's old per-connector profile is this
+  // connection's.
   readonly ownerSubjectId?: string | null;
 }
 
-// Counts the owner's connections of `connectorKey`, other than
-// `connectorInstanceId`, that can still use the session (not revoked).
-export type CountOtherActiveConnections = (input: {
+// Counts the owner's connections of `connectorKey` other than
+// `connectorInstanceId`, in any status.
+export type CountOtherConnections = (input: {
   readonly connectorKey: string;
   readonly connectorInstanceId: string;
   readonly ownerSubjectId: string;
@@ -215,10 +211,14 @@ export async function purgeLocalBrowserProfiles(
 
 async function purgeHostBrowserProfile(
   { endpoint, token }: { endpoint: string; token: string },
-  connectorKey: string,
+  {
+    connectorInstanceId,
+    connectorKey,
+    removeLegacy,
+  }: { connectorInstanceId: string; connectorKey: string; removeLegacy: boolean },
   fetchImpl: typeof fetch
 ): Promise<BrowserProfilePurgeResult> {
-  const url = `${endpoint.replace(/\/+$/u, "")}/browser-surface/profiles/${encodeURIComponent(connectorKey)}`;
+  const url = `${endpoint.replace(/\/+$/u, "")}/browser-surface/profiles/${encodeURIComponent(connectorKey)}/${encodeURIComponent(connectorInstanceId)}${removeLegacy ? "?legacy=remove" : ""}`;
   const response = await fetchImpl(url, {
     headers: { Authorization: `Bearer ${token}` },
     method: "DELETE",
@@ -247,19 +247,21 @@ async function purgeHostBrowserProfile(
   };
 }
 
-export function sharedHostProfileMessage(otherConnectionCount: number): string {
-  const others = otherConnectionCount === 1 ? "1 other account" : `${otherConnectionCount} other accounts`;
-  return `The saved browser session is shared with ${others} of this source on this desktop, so it was kept. Remove the other accounts to sign out.`;
-}
+const RUN_ACTIVE_MESSAGE =
+  "A collection run for this connection is still in progress, so its browser session was kept. Retry the browser-session removal after the run ends.";
 
 export function createBrowserProfilePurger({
-  countOtherActiveConnections,
+  countOtherConnections,
   env = process.env,
+  isConnectionRunActive,
   fetchImpl = fetch,
   logger,
 }: {
-  countOtherActiveConnections?: CountOtherActiveConnections;
+  countOtherConnections?: CountOtherConnections;
   env?: NodeJS.ProcessEnv;
+  // A headless browser (chrome-headless-shell) writes no SingletonLock, so the
+  // lock check alone cannot see a live run. The run registry can.
+  isConnectionRunActive?: (connectorInstanceId: string) => Promise<boolean> | boolean;
   fetchImpl?: typeof fetch;
   logger?: PurgeLogger | null;
 } = {}): BrowserProfilePurger {
@@ -271,19 +273,18 @@ export function createBrowserProfilePurger({
     const target = hostMode ? "host" : "local";
     let result: BrowserProfilePurgeResult;
     try {
-      const otherConnectionCount =
-        hostMode && countOtherActiveConnections && ownerSubjectId
-          ? await countOtherActiveConnections({ connectorInstanceId, connectorKey, ownerSubjectId })
-          : 0;
-      if (otherConnectionCount > 0) {
-        result = {
-          message: sharedHostProfileMessage(otherConnectionCount),
-          other_connection_count: otherConnectionCount,
-          status: "shared",
-          target: "host",
-        };
+      if (await isConnectionRunActive?.(connectorInstanceId)) {
+        result = { error_code: "profile_purge_in_use", message: RUN_ACTIVE_MESSAGE, status: "failed", target };
       } else if (hostMode) {
-        result = await purgeHostBrowserProfile({ endpoint: hostEndpoint, token: hostToken }, connectorKey, fetchImpl);
+        const removeLegacy =
+          countOtherConnections && ownerSubjectId
+            ? (await countOtherConnections({ connectorInstanceId, connectorKey, ownerSubjectId })) === 0
+            : false;
+        result = await purgeHostBrowserProfile(
+          { endpoint: hostEndpoint, token: hostToken },
+          { connectorInstanceId, connectorKey, removeLegacy },
+          fetchImpl
+        );
       } else {
         result = await purgeLocalBrowserProfiles(resolveLocalBrowserProfileRoot(env), connectorInstanceId);
       }

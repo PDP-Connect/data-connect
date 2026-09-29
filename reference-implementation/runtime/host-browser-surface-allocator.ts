@@ -7,10 +7,16 @@ import type {
 	EnsureBrowserSurfaceRequest,
 	StopBrowserSurfaceRequest,
 } from "@opendatalabs/remote-surface/leases";
+import { canonicalConnectorKey } from "../server/connector-key.ts";
 
 const DEFAULT_HOST_REQUEST_TIMEOUT_MS = 5_000;
 
 export interface HostBrowserSurfaceLeaseBinding {
+	/**
+	 * True only when the owner has exactly one connection of this connector,
+	 * so the host may move its old per-connector profile to this connection.
+	 */
+	readonly migrateConnectorProfile?: boolean;
 	readonly runId: string;
 	readonly surfaceId: string;
 }
@@ -111,6 +117,7 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 	readonly #token: string;
 	readonly #leasesBySurfaceId = new Map<string, HostLeaseRecord>();
 	readonly #pendingRunIdsBySurfaceId = new Map<string, string>();
+	readonly #migrateProfileBySurfaceId = new Map<string, boolean>();
 	readonly #surfaceIdsByRunId = new Map<string, string>();
 	readonly #lastStartFailureByRunId = new Map<
 		string,
@@ -135,6 +142,10 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 
 	bindRunToSurface(binding: HostBrowserSurfaceLeaseBinding): void {
 		this.#pendingRunIdsBySurfaceId.set(binding.surfaceId, binding.runId);
+		this.#migrateProfileBySurfaceId.set(
+			binding.surfaceId,
+			binding.migrateConnectorProfile === true,
+		);
 	}
 
 	lastStartFailure(runId: string): HostBrowserSurfaceStartFailure | undefined {
@@ -155,11 +166,27 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 				`no run_id was bound for browser surface ${request.surfaceId}`,
 			);
 		}
+		// The host keeps one browser profile per connection. A lease without a
+		// connection would fall back to a profile shared by every account of
+		// the connector, so it is refused instead.
+		const connectionId = request.surfaceSubjectId?.trim();
+		if (!connectionId) {
+			throw new HostBrowserSurfaceAllocatorError(
+				"host_browser_surface_missing_lease_context",
+				`no connection id was bound for browser surface ${request.surfaceId}`,
+			);
+		}
 		let response: unknown;
 		try {
 			response = await this.#requestJson("POST", this.#leasesUrl(), {
 				run_id: runId,
-				connector_id: request.connectorId,
+				// Canonical, so the host profile key matches the one the RI's
+				// post-delete purge sends (server/browser-profile-purge.ts).
+				connector_id:
+					canonicalConnectorKey(request.connectorId) ?? request.connectorId,
+				connection_id: connectionId,
+				migrate_connector_profile:
+					this.#migrateProfileBySurfaceId.get(request.surfaceId) === true,
 				headless: this.#headless,
 			});
 		} catch (error) {
@@ -193,6 +220,7 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 		this.#leasesBySurfaceId.set(request.surfaceId, record);
 		this.#surfaceIdsByRunId.set(runId, request.surfaceId);
 		this.#pendingRunIdsBySurfaceId.delete(request.surfaceId);
+		this.#migrateProfileBySurfaceId.delete(request.surfaceId);
 		return surface;
 	}
 
@@ -218,6 +246,7 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 		}
 		if (pendingSurfaceId) {
 			this.#pendingRunIdsBySurfaceId.delete(pendingSurfaceId);
+			this.#migrateProfileBySurfaceId.delete(pendingSurfaceId);
 		}
 		this.#lastStartFailureByRunId.delete(runId);
 	}
