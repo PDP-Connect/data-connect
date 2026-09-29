@@ -101,7 +101,9 @@ function answer(handlers: Handlers) {
 
 const localRemovalHandlers: Handlers = {
   reference_server_has_connection: () => false,
+  list_browser_sessions: () => [],
   reset_installed_pdpp_browser_profile: () => undefined,
+  clear_browser_session: () => undefined,
   clear_pdpp_collection_state: () => undefined,
   delete_exported_run: () => undefined,
   check_connected_platforms: () => ({
@@ -147,6 +149,7 @@ describe("useHomeRemoveSource", () => {
 
     expect(commands()).toEqual([
       ["reference_server_has_connection", { connectorKey: "amazon" }],
+      ["list_browser_sessions", undefined],
       [
         "reset_installed_pdpp_browser_profile",
         { connectorId: "amazon-pdpp", connectionId: "amazon-pdpp-owner" },
@@ -187,6 +190,68 @@ describe("useHomeRemoveSource", () => {
 
     expect(commands()).toEqual([
       ["reference_server_has_connection", { connectorKey: "ynab" }],
+      ["list_browser_sessions", undefined],
+    ])
+  })
+
+  it("signs out of a legacy browser source when its saved session exists", async () => {
+    const linkedin = platform({
+      id: "linkedin-playwright",
+      company: "linkedin",
+      name: "LinkedIn",
+      filename: "linkedin-playwright",
+      runtime: "playwright-runtime",
+    })
+    answer({
+      ...localRemovalHandlers,
+      list_browser_sessions: () => [{ connectorId: "linkedin-playwright" }],
+    })
+    const { result } = renderHook(() => useHomeRemoveSource(), { wrapper })
+
+    act(() => result.current.request(linkedin))
+    await waitFor(() => expect(result.current.canSignOut).toBe(true))
+    await act(() => result.current.signOut())
+
+    expect(commands()).toContainEqual([
+      "clear_browser_session",
+      { connectorId: "linkedin-playwright" },
+    ])
+    expect(result.current.platform).toBeNull()
+  })
+
+  it("clears both ChatGPT browser profiles when signing out of its merged row", async () => {
+    const chatgpt = platform({
+      id: "chatgpt-pdpp",
+      company: "openai",
+      name: "ChatGPT",
+      filename: "chatgpt-pdpp",
+      runtime: "pdpp-network",
+      requiresBrowser: true,
+    })
+    const chatgptLegacy = platform({
+      id: "chatgpt-playwright",
+      company: "openai",
+      name: "ChatGPT",
+      filename: "chatgpt-playwright",
+      runtime: "playwright-runtime",
+    })
+    store.dispatch(setPlatforms([chatgpt, chatgptLegacy]))
+    answer({
+      ...localRemovalHandlers,
+      list_browser_sessions: () => [{ connectorId: "chatgpt-playwright" }],
+    })
+    const { result } = renderHook(() => useHomeRemoveSource(), { wrapper })
+
+    act(() => result.current.request(chatgpt))
+    await act(() => result.current.signOut())
+
+    expect(commands()).toContainEqual([
+      "reset_installed_pdpp_browser_profile",
+      { connectorId: "chatgpt-pdpp", connectionId: "chatgpt-pdpp-owner" },
+    ])
+    expect(commands()).toContainEqual([
+      "clear_browser_session",
+      { connectorId: "chatgpt-playwright" },
     ])
   })
 
@@ -199,6 +264,7 @@ describe("useHomeRemoveSource", () => {
 
     expect(commands()).toEqual([
       ["reference_server_has_connection", { connectorKey: "amazon" }],
+      ["list_browser_sessions", undefined],
       [
         "reset_installed_pdpp_browser_profile",
         { connectorId: "amazon-pdpp", connectionId: "amazon-pdpp-owner" },
@@ -231,6 +297,7 @@ describe("useHomeRemoveSource", () => {
 
     expect(commands()).toEqual([
       ["reference_server_has_connection", { connectorKey: "ynab" }],
+      ["list_browser_sessions", undefined],
       ["clear_pdpp_collection_state", { connectorId: "ynab-pdpp" }],
       [
         "delete_exported_run",
@@ -249,6 +316,93 @@ describe("useHomeRemoveSource", () => {
     expect(result.current.platform).toBeNull()
   })
 
+  it("removes Claude runs without removing Claude Code runs", async () => {
+    const claude = platform({
+      id: "claude-export-playwright",
+      company: "anthropic",
+      name: "Claude",
+      filename: "claude-export-playwright",
+      runtime: "playwright-runtime",
+    })
+    const claudeCode = platform({
+      id: "claude-code-local",
+      company: "anthropic",
+      name: "Claude Code",
+      filename: "claude-code-local",
+      runtime: "playwright-runtime",
+    })
+    const claudeRun = run("claude-1", claude)
+    const claudeCodeRun = run("claude-code-1", claudeCode)
+    store.dispatch(setPlatforms([claude, claudeCode]))
+    store.dispatch(setRuns([claudeRun, claudeCodeRun]))
+    answer({
+      ...localRemovalHandlers,
+      check_connected_platforms: () => ({
+        "claude-export-playwright": false,
+        "claude-code-local": true,
+      }),
+    })
+    const { result } = renderHook(() => useHomeRemoveSource(), { wrapper })
+
+    act(() => result.current.request(claude))
+    await act(() => result.current.removeLocalData())
+
+    expect(commands()).toContainEqual([
+      "delete_exported_run",
+      { exportPath: claudeRun.exportPath },
+    ])
+    expect(commands()).not.toContainEqual([
+      "delete_exported_run",
+      { exportPath: claudeCodeRun.exportPath },
+    ])
+    expect(store.getState().app.runs.map(entry => entry.id)).toEqual([
+      "claude-code-1",
+    ])
+  })
+
+  it("removes runs for both ChatGPT connector IDs", async () => {
+    const chatgpt = platform({
+      id: "chatgpt-pdpp",
+      company: "openai",
+      name: "ChatGPT",
+      filename: "chatgpt-pdpp",
+      runtime: "pdpp-network",
+      requiresBrowser: true,
+    })
+    const chatgptLegacy = platform({
+      id: "chatgpt-playwright",
+      company: "openai",
+      name: "ChatGPT",
+      filename: "chatgpt-playwright",
+      runtime: "playwright-runtime",
+    })
+    const pdppRun = run("chatgpt-pdpp-1", chatgpt)
+    const legacyRun = run("chatgpt-playwright-1", chatgptLegacy)
+    store.dispatch(setPlatforms([chatgpt, chatgptLegacy]))
+    store.dispatch(setRuns([pdppRun, legacyRun]))
+    answer({
+      ...localRemovalHandlers,
+      check_connected_platforms: () => ({
+        "chatgpt-pdpp": false,
+        "chatgpt-playwright": false,
+      }),
+    })
+    const { result } = renderHook(() => useHomeRemoveSource(), { wrapper })
+
+    act(() => result.current.request(chatgpt))
+    await act(() => result.current.removeLocalData())
+
+    expect(commands()).toContainEqual([
+      "delete_exported_run",
+      { exportPath: pdppRun.exportPath },
+    ])
+    expect(commands()).toContainEqual([
+      "delete_exported_run",
+      { exportPath: legacyRun.exportPath },
+    ])
+    expect(store.getState().app.runs).toEqual([])
+  })
+
   it("deletes nothing when the sign-out is refused and surfaces the error", async () => {
     answer({
       ...localRemovalHandlers,
@@ -263,6 +417,7 @@ describe("useHomeRemoveSource", () => {
 
     expect(commands().map(([command]) => command)).toEqual([
       "reference_server_has_connection",
+      "list_browser_sessions",
       "reset_installed_pdpp_browser_profile",
     ])
     expect(store.getState().app.runs).toHaveLength(4)
@@ -314,14 +469,14 @@ describe("useHomeRemoveSource", () => {
     const { result } = renderHook(() => useHomeRemoveSource(), { wrapper })
 
     act(() => result.current.request(BROWSER))
-    await waitFor(() => expect(mockInvoke).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledTimes(2))
     expect(result.current.hasServerConnection).toBe(false)
     act(() => result.current.openServerRepairs())
     expect(mockNavigate).not.toHaveBeenCalled()
 
     mockInvoke.mockClear()
     act(() => result.current.request(platform({ runtime: "vanilla" })))
-    expect(mockInvoke).not.toHaveBeenCalled()
+    expect(commands()).toEqual([["list_browser_sessions", undefined]])
     expect(result.current.hasServerConnection).toBe(false)
   })
 })

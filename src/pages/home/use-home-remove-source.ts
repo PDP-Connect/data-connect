@@ -10,41 +10,60 @@ import {
   referenceConnectorKey,
   serverRepairsHref,
 } from "@/lib/platform/console-source-path"
-import { getPlatformRegistryEntry } from "@/lib/platform/utils"
+import { getPlatformRegistryEntryById } from "@/lib/platform/utils"
 import { deleteExportedRun } from "@/lib/tauri-paths"
 import { deleteRun, setConnectedPlatforms } from "@/state/store"
-import type { Platform, RootState, Run } from "@/types"
+import type { Platform, RootState } from "@/types"
 
 const PDPP_NETWORK_RUNTIME = "pdpp-network"
+const PLAYWRIGHT_RUNTIME = "playwright-runtime"
 
 export type RemoveSourceAction = "sign-out" | "remove"
 
 /**
- * A browser-based installed PDPP connector keeps a saved browser session on
- * this computer, which `reset_installed_pdpp_browser_profile` deletes.
+ * A source has a saved session when its installed PDPP profile is available or
+ * a matching legacy Playwright profile exists on this computer.
  */
-export function canSignOutOfSource(platform: Platform): boolean {
+export function canSignOutOfSource(
+  platform: Platform,
+  hasLegacyBrowserSession = false
+): boolean {
   return (
-    platform.runtime === PDPP_NETWORK_RUNTIME &&
-    platform.requiresBrowser === true &&
-    installedPdppConnectionId(platform) !== null
+    (platform.runtime === PDPP_NETWORK_RUNTIME &&
+      platform.requiresBrowser === true &&
+      installedPdppConnectionId(platform) !== null) ||
+    hasLegacyBrowserSession
   )
 }
 
-function canonicalSourceId(platform: {
-  id: string
-  name?: string
-  company?: string
-}) {
-  return getPlatformRegistryEntry(platform)?.id ?? platform.id
+function sourcePlatformIds(platform: Platform): Set<string> {
+  return new Set([
+    platform.id,
+    ...(getPlatformRegistryEntryById(platform.id)?.platformIds ?? []),
+  ])
 }
 
-function runCanonicalSourceId(run: Run) {
-  return canonicalSourceId({
-    id: run.platformId,
-    name: run.name,
-    company: run.company,
-  })
+function sourcePlatforms(
+  platform: Platform,
+  platforms: Platform[]
+): Platform[] {
+  const ids = sourcePlatformIds(platform)
+  return [platform, ...platforms.filter(entry => ids.has(entry.id))].filter(
+    (entry, index, entries) =>
+      entries.findIndex(candidate => candidate.id === entry.id) === index
+  )
+}
+
+function hasLegacyBrowserSession(
+  target: Platform,
+  platforms: Platform[],
+  browserSessionIds: string[]
+): boolean {
+  return sourcePlatforms(target, platforms).some(
+    entry =>
+      entry.runtime === PLAYWRIGHT_RUNTIME &&
+      browserSessionIds.includes(entry.filename)
+  )
 }
 
 function errorMessage(error: unknown): string {
@@ -67,6 +86,7 @@ export function useHomeRemoveSource() {
   const [pending, setPending] = useState<RemoveSourceAction | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [hasServerConnection, setHasServerConnection] = useState(false)
+  const [browserSessionIds, setBrowserSessionIds] = useState<string[]>([])
   const requestIdRef = useRef(0)
 
   const request = useCallback((target: Platform) => {
@@ -75,14 +95,25 @@ export function useHomeRemoveSource() {
     setPending(null)
     setError(null)
     setHasServerConnection(false)
+    setBrowserSessionIds([])
     const connectorKey = referenceConnectorKey(target)
-    if (!connectorKey) return
-    invoke<boolean>("reference_server_has_connection", { connectorKey })
-      .then(found => {
-        if (requestIdRef.current === requestId) setHasServerConnection(found)
+    if (connectorKey) {
+      invoke<boolean>("reference_server_has_connection", { connectorKey })
+        .then(found => {
+          if (requestIdRef.current === requestId) setHasServerConnection(found)
+        })
+        .catch(() => {
+          // An unknown answer hides the link; it must never point at a 404.
+        })
+    }
+    invoke<Array<{ connectorId: string }>>("list_browser_sessions")
+      .then(sessions => {
+        if (requestIdRef.current === requestId) {
+          setBrowserSessionIds(sessions.map(session => session.connectorId))
+        }
       })
       .catch(() => {
-        // An unknown answer hides the link; it must never point at a 404.
+        if (requestIdRef.current === requestId) setBrowserSessionIds([])
       })
   }, [])
 
@@ -92,6 +123,7 @@ export function useHomeRemoveSource() {
     setPending(null)
     setError(null)
     setHasServerConnection(false)
+    setBrowserSessionIds([])
   }, [])
 
   const cancel = useCallback(() => {
@@ -99,16 +131,39 @@ export function useHomeRemoveSource() {
     close()
   }, [close, pending])
 
-  const signOutIfBrowserSource = useCallback(async (target: Platform) => {
-    if (!canSignOutOfSource(target)) return
-    await invoke("reset_installed_pdpp_browser_profile", {
-      connectorId: target.id,
-      connectionId: installedPdppConnectionId(target),
-    })
-  }, [])
+  const signOutIfBrowserSource = useCallback(
+    async (target: Platform) => {
+      if (
+        target.runtime === PDPP_NETWORK_RUNTIME &&
+        target.requiresBrowser === true &&
+        installedPdppConnectionId(target) !== null
+      ) {
+        await invoke("reset_installed_pdpp_browser_profile", {
+          connectorId: target.id,
+          connectionId: installedPdppConnectionId(target),
+        })
+      }
+      for (const sourcePlatform of sourcePlatforms(target, platforms)) {
+        if (sourcePlatform.runtime === PLAYWRIGHT_RUNTIME) {
+          await invoke("clear_browser_session", {
+            connectorId: sourcePlatform.filename,
+          })
+        }
+      }
+    },
+    [platforms]
+  )
 
   const signOut = useCallback(async () => {
-    if (!platform || pending || !canSignOutOfSource(platform)) return
+    if (
+      !platform ||
+      pending ||
+      !canSignOutOfSource(
+        platform,
+        hasLegacyBrowserSession(platform, platforms, browserSessionIds)
+      )
+    )
+      return
     setPending("sign-out")
     setError(null)
     try {
@@ -118,7 +173,14 @@ export function useHomeRemoveSource() {
       setError(errorMessage(err))
       setPending(null)
     }
-  }, [close, pending, platform, signOutIfBrowserSource])
+  }, [
+    browserSessionIds,
+    close,
+    pending,
+    platform,
+    platforms,
+    signOutIfBrowserSource,
+  ])
 
   const removeLocalData = useCallback(async () => {
     if (!platform || pending) return
@@ -133,13 +195,12 @@ export function useHomeRemoveSource() {
         await invoke("clear_pdpp_collection_state", { connectorId: target.id })
       }
 
-      const sourceId = canonicalSourceId(target)
+      const targetPlatformIds = sourcePlatformIds(target)
       const sourceRuns = runs.filter(
         run =>
           run.status !== "running" &&
           run.status !== "pending" &&
-          (run.platformId === target.id ||
-            runCanonicalSourceId(run) === sourceId)
+          targetPlatformIds.has(run.platformId)
       )
       for (const run of sourceRuns) {
         if (run.exportPath) await deleteExportedRun(run.exportPath)
@@ -154,7 +215,7 @@ export function useHomeRemoveSource() {
         )
         dispatch(setConnectedPlatforms(connected))
         const stillConnected = platforms.some(
-          entry => connected[entry.id] && canonicalSourceId(entry) === sourceId
+          entry => connected[entry.id] && targetPlatformIds.has(entry.id)
         )
         if (stillConnected) {
           setError(
@@ -190,7 +251,12 @@ export function useHomeRemoveSource() {
     platform,
     request,
     cancel,
-    canSignOut: platform ? canSignOutOfSource(platform) : false,
+    canSignOut: platform
+      ? canSignOutOfSource(
+          platform,
+          hasLegacyBrowserSession(platform, platforms, browserSessionIds)
+        )
+      : false,
     hasServerConnection,
     pending,
     error,

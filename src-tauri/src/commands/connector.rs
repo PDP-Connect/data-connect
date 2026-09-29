@@ -2805,24 +2805,46 @@ pub async fn clear_browser_session(connector_id: String) -> Result<(), String> {
         .or_else(|_| std::env::var("USERPROFILE"))
         .map_err(|_| "Could not determine home directory".to_string())?;
 
-    let profile_dir = PathBuf::from(&home)
-        .join(".dataconnect")
-        .join("browser-profiles")
-        .join(&connector_id);
-
-    if !profile_dir.exists() {
-        return Ok(());
-    }
-
-    // Verify the path is within browser-profiles to prevent directory traversal
     let profiles_parent = PathBuf::from(&home)
         .join(".dataconnect")
         .join("browser-profiles");
-    if !profile_dir.starts_with(&profiles_parent) {
+
+    clear_browser_session_from_profiles(&profiles_parent, &connector_id)
+}
+
+fn clear_browser_session_from_profiles(
+    profiles_parent: &Path,
+    connector_id: &str,
+) -> Result<(), String> {
+    if connector_id.is_empty()
+        || connector_id == "."
+        || connector_id == ".."
+        || !connector_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+    {
         return Err("Invalid connector ID".to_string());
     }
 
-    fs::remove_dir_all(&profile_dir)
+    if !profiles_parent.exists() {
+        return Ok(());
+    }
+
+    let canonical_profiles_parent = fs::canonicalize(profiles_parent)
+        .map_err(|e| format!("Failed to resolve browser-profiles directory: {e}"))?;
+    let profile_dir = profiles_parent.join(connector_id);
+    if !profile_dir.exists() {
+        return Ok(());
+    }
+    let canonical_profile_dir = fs::canonicalize(&profile_dir)
+        .map_err(|e| format!("Failed to resolve browser profile: {e}"))?;
+    if canonical_profile_dir == canonical_profiles_parent
+        || !canonical_profile_dir.starts_with(&canonical_profiles_parent)
+    {
+        return Err("Invalid connector ID".to_string());
+    }
+
+    fs::remove_dir_all(&canonical_profile_dir)
         .map_err(|e| format!("Failed to delete browser profile: {}", e))?;
 
     log::info!("Cleared browser session for connector: {}", connector_id);
@@ -3033,10 +3055,11 @@ pub async fn download_chromium_rust(app: AppHandle) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        get_bundled_chromium_path_for_platform, get_downloaded_chromium_path_in_home,
-        manifest_looks_like_connector, pdpp_streams_to_dataconnect_scopes,
-        resolve_automation_browser_path_from, resolve_browser_status, resolve_icon_path,
-        ActivePdppPlatformManifest, ActivePdppStream, ConnectorMetadata,
+        clear_browser_session_from_profiles, get_bundled_chromium_path_for_platform,
+        get_downloaded_chromium_path_in_home, manifest_looks_like_connector,
+        pdpp_streams_to_dataconnect_scopes, resolve_automation_browser_path_from,
+        resolve_browser_status, resolve_icon_path, ActivePdppPlatformManifest, ActivePdppStream,
+        ConnectorMetadata,
     };
     use serde_json::json;
     use std::path::{Path, PathBuf};
@@ -3047,6 +3070,28 @@ mod tests {
         std::fs::create_dir_all(path.parent().expect("file parent")).expect("create parent");
         std::fs::write(&path, "fixture").expect("write fixture");
         path
+    }
+
+    #[test]
+    fn clear_browser_session_rejects_paths_outside_profiles() {
+        let temp = tempdir().expect("temporary directory");
+        let profiles = temp.path().join(".dataconnect/browser-profiles");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&profiles).expect("create profiles root");
+        let outside_file = create_file(&outside, "keep.txt");
+
+        for connector_id in ["..", "nested/connector", outside.to_str().unwrap()] {
+            assert!(clear_browser_session_from_profiles(&profiles, connector_id).is_err());
+            assert_eq!(std::fs::read_to_string(&outside_file).unwrap(), "fixture");
+        }
+
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&outside, profiles.join("outside-link"))
+                .expect("create profile symlink");
+            assert!(clear_browser_session_from_profiles(&profiles, "outside-link").is_err());
+            assert_eq!(std::fs::read_to_string(&outside_file).unwrap(), "fixture");
+        }
     }
 
     fn connector_metadata() -> ConnectorMetadata {

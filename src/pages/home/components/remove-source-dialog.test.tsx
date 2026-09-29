@@ -53,7 +53,7 @@ describe("RemoveSourceDialog", () => {
     const dialog = screen.getByRole("alertdialog")
 
     expect(dialog.textContent).toContain(
-      "Sign out deletes the saved Amazon browser session on this computer."
+      "Sign out deletes the saved browser sessions for Amazon on this computer."
     )
     expect(dialog.textContent).toContain("Signs out, then deletes the data")
     expect(dialog.textContent).toContain(
@@ -66,6 +66,24 @@ describe("RemoveSourceDialog", () => {
     expect(handlers.onSignOut).toHaveBeenCalledTimes(1)
     expect(handlers.onRemoveLocalData).toHaveBeenCalledTimes(1)
     expect(handlers.onCancel).not.toHaveBeenCalled()
+  })
+
+  it("does not claim a legacy connector has a PDPP sync position", () => {
+    const legacy: Platform = {
+      ...AMAZON,
+      id: "linkedin-playwright",
+      company: "linkedin",
+      name: "LinkedIn",
+      filename: "linkedin-playwright",
+      runtime: "playwright-runtime",
+      requiresBrowser: false,
+    }
+    renderDialog({ platform: legacy, canSignOut: true })
+    const dialog = screen.getByRole("alertdialog")
+
+    expect(dialog.textContent).toContain("browser sessions for LinkedIn")
+    expect(dialog.textContent).not.toContain("sync position")
+    expect(dialog.textContent).not.toContain("next import starts")
   })
 
   it("hides sign-out and its claim for a source without a browser session", () => {
@@ -99,7 +117,7 @@ describe("RemoveSourceDialog", () => {
 
     expect(screen.getByRole("alert").textContent).toBe("Profile is in use")
     expect(
-      screen.getByRole("button", { name: "Signing out…" }).hasAttribute("disabled")
+      screen.getByRole("button", { name: "Signing out…” }).hasAttribute("disabled")
     ).toBe(true)
     expect(
       screen

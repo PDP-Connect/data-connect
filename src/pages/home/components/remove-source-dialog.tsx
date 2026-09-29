@@ -43,6 +43,7 @@ export function RemoveSourceDialog({
   onOpenServerRepairs,
 }: RemoveSourceDialogProps) {
   const name = platform?.name
+  const isPdppSource = platform?.runtime === "pdpp-network"
   const busy = pending !== null
 
   return (
@@ -65,9 +66,8 @@ export function RemoveSourceDialog({
           {canSignOut ? (
             <div className="grid gap-2">
               <Text as="p" intent="small" muted>
-                Sign out deletes the saved {name} browser session on this
-                computer. Your saved data stays, and {name} stays in this
-                list.
+                Sign out deletes the saved browser sessions for {name} on this
+                computer. Your saved data stays, and {name} stays in this list.
               </Text>
               <Button
                 type="button"
@@ -82,10 +82,14 @@ export function RemoveSourceDialog({
           ) : null}
           <div className="grid gap-2">
             <Text as="p" intent="small" muted>
-              {canSignOut ? "Signs out, then deletes" : "Deletes"} the data
-              this app saved for {name} on this computer, including its sync
-              position, and removes {name} from this list. The next import
-              starts from the beginning. This cannot be undone.
+              {canSignOut ? "Signs out, then deletes" : "Deletes"} the data this
+              app saved for {name} on this computer
+              {isPdppSource ? ", including its sync position" : ""}, and removes{" "}
+              {name} from this list.
+              {isPdppSource
+                ? " The next import starts from the beginning."
+                : ""}{" "}
+              This cannot be undone.
             </Text>
             <Button
               type="button"
@@ -105,8 +109,8 @@ export function RemoveSourceDialog({
             </Text>
           ) : null}
           <Text as="p" intent="small" muted>
-            Copies already sent to your server do not change. Server copies,
-            if any, are managed in Server & Repairs.
+            Copies already sent to your server do not change. Server copies, if
+            any, are managed in Server & Repairs.
           </Text>
           {hasServerConnection ? (
             <Button
