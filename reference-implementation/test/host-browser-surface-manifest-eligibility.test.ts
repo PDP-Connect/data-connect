@@ -17,11 +17,11 @@ import {
 import type { RuntimeRunConnectorOptions } from "../runtime/index.ts";
 import { closeDb, initDb } from "../server/db.ts";
 import { resolveNekoBrowserSurfaceControllerOptions as resolveUntyped } from "../server/index.ts";
+import { createSqliteBrowserSurfaceLeaseStore } from "../server/stores/browser-surface-lease-store.ts";
 import type {
 	ActiveRunRecord,
 	SchedulerStore,
 } from "../server/stores/scheduler-store.ts";
-import { createSqliteBrowserSurfaceLeaseStore } from "../server/stores/browser-surface-lease-store.ts";
 import { makeTemporaryDbPath } from "./helpers/temp-dir.ts";
 
 const HOST_ENV = {
@@ -47,6 +47,8 @@ const ACME_API_MANIFEST = {
 	streams: [],
 	version: "1.0.0",
 };
+
+const ACME_SHOP_CONNECTION_ID = "cin_acme_shop";
 
 interface KnownManifest {
 	connectorId: string;
@@ -82,8 +84,12 @@ function createSchedulerStore(): SchedulerStore {
 
 // Stands in for the desktop host agent: it hands out one browser surface per
 // lease and releases it by run id.
-function stubHostAgent(t: TestContext): { requests: string[] } {
+function stubHostAgent(t: TestContext): {
+	acquireBodies: Record<string, unknown>[];
+	requests: string[];
+} {
 	const requests: string[] = [];
+	const acquireBodies: Record<string, unknown>[] = [];
 	const originalFetch = globalThis.fetch;
 	globalThis.fetch = (async (
 		input: string | URL | Request,
@@ -92,6 +98,18 @@ function stubHostAgent(t: TestContext): { requests: string[] } {
 		const method = init?.method ?? "GET";
 		requests.push(`${method} ${String(input)}`);
 		if (method === "POST") {
+			const body =
+				typeof init?.body === "string"
+					? (JSON.parse(init.body) as Record<string, unknown>)
+					: {};
+			acquireBodies.push(body);
+			if (typeof body.connection_id !== "string" || !body.connection_id) {
+				return {
+					json: async () => ({ error: "connection_id_required" }),
+					ok: false,
+					status: 400,
+				} as Response;
+			}
 			return {
 				json: async () => ({
 					cdp_url: "http://127.0.0.1:9222/host-cdp",
@@ -106,7 +124,7 @@ function stubHostAgent(t: TestContext): { requests: string[] } {
 	t.after(() => {
 		globalThis.fetch = originalFetch;
 	});
-	return { requests };
+	return { acquireBodies, requests };
 }
 
 const READY_PROBE: BrowserSurfaceReadinessProbe = {
@@ -142,7 +160,9 @@ async function setup(
 		admitRunConnection: ({ connectorId, connectorInstanceId }) =>
 			Promise.resolve({
 				connectorId,
-				connectorInstanceId: connectorInstanceId ?? connectorId,
+				// Default-account admission resolves to a concrete connection row.
+				connectorInstanceId:
+					connectorInstanceId ?? `cin_${connectorId.replaceAll("-", "_")}`,
 				ownerSubjectId: "owner_local",
 			}),
 		browserSurfaceReadinessProbe: READY_PROBE,
@@ -188,10 +208,14 @@ test("a catalog-installed browser connector known at boot gets a host surface an
 		"POST http://127.0.0.1:9916/agent/browser-surface/leases",
 		"DELETE http://127.0.0.1:9916/agent/browser-surface/runs/run_acme_boot",
 	]);
+	assert.equal(
+		hostAgent.acquireBodies[0]?.connection_id,
+		ACME_SHOP_CONNECTION_ID,
+	);
 });
 
 test("a browser connector installed after boot gets a host surface on its first run", async (t) => {
-	const { controller, spawned } = await setup(t, []);
+	const { controller, hostAgent, spawned } = await setup(t, []);
 
 	const result = await controller.runNow("acme-shop", {
 		manifest: ACME_SHOP_MANIFEST,
@@ -201,6 +225,10 @@ test("a browser connector installed after boot gets a host surface on its first 
 	await controller.drainActiveRuns(1000);
 
 	assert.equal(result.status, "started");
+	assert.equal(
+		hostAgent.acquireBodies[0]?.connection_id,
+		ACME_SHOP_CONNECTION_ID,
+	);
 	assert.equal(
 		spawned[0]?.browserSurfaceEnv?.PDPP_BROWSER_SURFACE_REQUIRED,
 		"neko",
