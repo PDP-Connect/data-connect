@@ -20,12 +20,10 @@ import type { OwnerPasswordSource } from "./owner-password-data.ts"
  */
 export function OwnerPasswordSetting({
   canReveal = false,
-  linuxNoOsPrompt = false,
   managedDesktop = false,
   source,
 }: {
   canReveal?: boolean
-  linuxNoOsPrompt?: boolean
   managedDesktop?: boolean
   source: OwnerPasswordSource
 }) {
@@ -136,9 +134,9 @@ export function OwnerPasswordSetting({
     return (
       <div className="grid justify-items-start gap-3">
         <p className="pdpp-caption text-muted-foreground">
-          DataConnect created this password and keeps it in your system
-          keychain. This computer signs in automatically, so you only need it
-          on other devices.
+          DataConnect keeps this password in your system keychain for signing
+          in on other devices. Changing it signs out other browser sessions and
+          command-line tokens and restarts the server.
         </p>
         {canReveal ? <OwnerCredentialSetting /> : null}
         {message ? (
@@ -152,18 +150,8 @@ export function OwnerPasswordSetting({
           onClick={() => void requestDesktopChange()}
           type="button"
         >
-          {busy ? "Checking…" : "Set a new password"}
+          {busy ? "Checking…" : "Change password"}
         </button>
-        <p className="pdpp-caption text-muted-foreground">
-          {linuxNoOsPrompt
-            ? "No OS prompt on Linux yet."
-            : "Your computer asks you to confirm first."}
-        </p>
-        <p className="pdpp-caption text-muted-foreground">
-          Setting a new password signs out every other browser and
-          command-line token. DataConnect restarts its server to apply it.
-          This computer stays signed in.
-        </p>
       </div>
     )
   }

@@ -18,6 +18,7 @@ test("the settings page mounts one Owner password section that holds reveal", as
   assert.equal(page.match(/title="Owner password"/g)?.length, 1)
   assert.doesNotMatch(page, /<OwnerCredentialSetting/)
   assert.match(passwordSetting, /canReveal \? <OwnerCredentialSetting \/> : null/)
+  assert.doesNotMatch(page, /Sign in from another device, such as your phone over remote access/)
 })
 
 test("reveal is offered only for the RI's desktop source in the desktop's own webview", async () => {
@@ -74,19 +75,15 @@ test("the reveal client forwards the cookie value as the proof for RI verificati
   assert.match(client, /\[LOCAL_REVEAL_PROOF_HEADER\]: proof/)
 })
 
-test("the warning copy is about screen visibility, not custody of a written-down copy", async () => {
-  // This is the LIVE login credential (typed on other devices routinely),
-  // not an offline backup transcribed once during an incident like the
-  // vault recovery key -- the risk that matters here is who can see the
-  // screen right now, not where a written copy ends up.
+test("the reveal warning is about screen visibility", async () => {
   const setting = await readFile(SETTING_FILE, "utf8")
   const warningMatch = setting.match(
     /<p className="pdpp-caption text-muted-foreground">\s*([\s\S]*?)\s*<\/p>/
   )
   assert.ok(warningMatch, "expected a rendered warning paragraph")
   const warningText = warningMatch?.[1] ?? ""
-  assert.match(warningText, /sign in from another device/)
   assert.match(warningText, /no one else can see your screen/)
+  assert.doesNotMatch(warningText, /sign in from another device/)
 })
 
 test("the setting goes through the server action, not a direct fetch or invoke() call", async () => {
@@ -121,9 +118,12 @@ test("the action calls the owner-credential client and requires dashboard access
   assert.match(actions, /revealOwnerCredential\(\)/)
 })
 
-test("Linux says there is no OS prompt yet, from the server render", async () => {
+test("the desktop password setting has one shared action target", async () => {
   const page = await readFile(PAGE_FILE, "utf8")
-  assert.match(page, /linuxNoOsPrompt=\{process\.platform === "linux"\}/)
+  const setting = await readFile(`${HERE}owner-password-setting.tsx`, "utf8")
+  assert.match(page, /id="owner-password"[\s\S]*?title="Owner password"/)
+  assert.match(setting, /Change password/)
+  assert.doesNotMatch(setting, /No OS prompt on Linux yet\./)
 })
 
 test("the verified local proof gates reveal and change before any request is written", async () => {

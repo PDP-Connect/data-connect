@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url"
 
 const HERE = fileURLToPath(new URL(".", import.meta.url))
 const SETTING_FILE = `${HERE}remote-access-setting.tsx`
+const SETTINGS_PAGE_FILE = `${HERE}page.tsx`
 const ACTIONS_FILE = `${HERE}remote-access-actions.ts`
 const WINDOW_FILE = `${HERE}../../../../../../public/owner-password.html`
 const OWNER_CREDENTIAL_RUST_FILE = `${HERE}../../../../../../src-tauri/src/owner_credential.rs`
@@ -40,11 +41,14 @@ test("remote-access first setup opens the desktop owner-password window without 
   assert.match(actions, /requestOwnerPasswordStackRestart/)
 })
 
-test("the migration banner can set the password and request restart for existing remote installs", async () => {
+test("the migration banner links to the shared password action", async () => {
   const setting = await readFile(SETTING_FILE, "utf8")
+  const page = await readFile(SETTINGS_PAGE_FILE, "utf8")
 
-  assert.match(setting, /setOwnerPasswordForMigration/)
-  assert.match(setting, /Set owner password/)
+  assert.match(setting, /href="#owner-password"/)
+  assert.match(setting, /Change password/)
+  assert.match(page, /id="owner-password"[\s\S]*?title="Owner password"/)
+  assert.doesNotMatch(setting, /setOwnerPasswordForMigration/)
   assert.match(setting, /showOwnerPasswordMigrationBanner/)
 })
 

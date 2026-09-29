@@ -50,16 +50,16 @@ export default async function SettingsPage() {
         </Section>
         {ownerPasswordSource ? (
           <Section
+            id="owner-password"
             description={
-              ownerPasswordSource === "desktop"
-                ? "Sign in from another device, such as your phone over remote access."
-                : "Change the password used to sign in to this Personal Server."
+              ownerPasswordSource === "env"
+                ? "Change the password used to sign in to this Personal Server."
+                : undefined
             }
             title="Owner password"
           >
             <OwnerPasswordSetting
               canReveal={ownerPasswordSource === "desktop" && hasLocalRevealProof}
-              linuxNoOsPrompt={process.platform === "linux"}
               managedDesktop={process.env.PDPP_MANAGED_DESKTOP_HOST === "1"}
               source={ownerPasswordSource}
             />

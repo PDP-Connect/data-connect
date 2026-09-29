@@ -567,38 +567,6 @@ export function RemoteAccessSetting({
     }
   }
 
-  const setOwnerPasswordForMigration = async () => {
-    setWaitingForOwnerPassword(true)
-    setBusy(true)
-    setError("Set an owner password in the DataConnect window that just opened.")
-    try {
-      const opened = await requestOwnerPasswordWindow()
-      if (!opened.ok) {
-        setError(opened.message)
-        return
-      }
-      for (let attempt = 0; attempt < 120; attempt += 1) {
-        await new Promise(resolve => setTimeout(resolve, 1000))
-        const state = await loadRemoteAccessState()
-        setOwnerPasswordOwnerSet(state.ownerPasswordOwnerSet)
-        if (!state.ownerPasswordOwnerSet) continue
-        const restart = await restartAfterOwnerPasswordSet()
-        if (!restart.ok) {
-          setError(restart.message)
-          return
-        }
-        setError("Owner password saved. DataConnect is restarting.")
-        return
-      }
-      setError("The owner password window is still waiting. Save the password there, then try again.")
-    } catch (reason) {
-      setError(String(reason))
-    } finally {
-      setWaitingForOwnerPassword(false)
-      setBusy(false)
-    }
-  }
-
   /**
    * Resubmits `pendingRiskyConfig` exactly as it was built, plus the
    * acknowledgement flag the route requires to bypass its own 409. Runs the
@@ -993,18 +961,15 @@ export function RemoteAccessSetting({
       {showOwnerPasswordMigrationBanner ? (
         <div className="grid gap-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
           <p>
-            Remote access is on with the original generated password. It still
-            works, but set your own owner password from this computer when you
-            are ready.
+            Remote access is on with the original generated password. Change it
+            when you are ready.
           </p>
-          <button
-            className="justify-self-start rounded-md border border-amber-700/40 px-3 py-1.5 text-sm hover:bg-amber-100 disabled:opacity-50"
-            disabled={busy || desktopUnavailable}
-            onClick={() => void setOwnerPasswordForMigration()}
-            type="button"
+          <a
+            className="justify-self-start rounded-md border border-amber-700/40 px-3 py-1.5 text-sm hover:bg-amber-100"
+            href="#owner-password"
           >
-            Set owner password
-          </button>
+            Change password
+          </a>
         </div>
       ) : null}
 
