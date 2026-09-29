@@ -263,11 +263,12 @@ test("host endpoint 500 with a structured sandbox-unavailable body surfaces the 
 	);
 });
 
-test("host endpoint 500 with a structured body reaches lastStartFailure after ensureStartingSurfaceReady swallows the error", async () => {
+test("browser_profile_in_use reaches lastStartFailure after ensureStartingSurfaceReady swallows the host error", async () => {
 	const mock = createMockHostEndpoint({
 		json: async () => ({
-			error: "surface_start_failed",
-			message: "the neko container exited before CDP came up",
+			error: "browser_profile_in_use",
+			message:
+				"A DataConnect browser window for this account is still open. Close it and try again.",
 		}),
 		ok: false,
 		status: 500,
@@ -278,10 +279,10 @@ test("host endpoint 500 with a structured body reaches lastStartFailure after en
 		connectorId: "chase",
 		profileKey: "chase:cin_chase",
 		surfaceSubjectId: "cin_chase",
-		runId: "run-surface-start-failed",
+		runId: "run-profile-in-use",
 	});
 	allocator.bindRunToSurface({
-		runId: "run-surface-start-failed",
+		runId: "run-profile-in-use",
 		surfaceId: "surface_1",
 	});
 
@@ -293,11 +294,11 @@ test("host endpoint 500 with a structured body reaches lastStartFailure after en
 	assert.equal(ready.lease.status, "surface_failed");
 	assert.equal(ready.lease.wait_reason, "surface_start_failed");
 
-	const failure = allocator.lastStartFailure("run-surface-start-failed");
-	assert.equal(failure?.code, "surface_start_failed");
+	const failure = allocator.lastStartFailure("run-profile-in-use");
+	assert.equal(failure?.code, "browser_profile_in_use");
 	assert.match(
 		failure?.message ?? "",
-		/the neko container exited before CDP came up/,
+		/A DataConnect browser window for this account is still open/,
 	);
 });
 
