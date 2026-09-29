@@ -1,3 +1,6 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 // Removing the legacy ChatGPT row must preserve every PDPP account's runs.
 import { act, renderHook } from "@testing-library/react"
 import type { ReactNode } from "react"
