@@ -16,11 +16,17 @@ pub struct FileInfo {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RunData {
+    #[serde(rename = "platformId", skip_serializing_if = "Option::is_none")]
+    pub platform_id: Option<String>,
     pub company: String,
     pub name: String,
     #[serde(rename = "runID")]
     pub run_id: String,
     pub timestamp: u64,
+    #[serde(rename = "connectionId", skip_serializing_if = "Option::is_none")]
+    pub connection_id: Option<String>,
+    #[serde(rename = "accountLabel", skip_serializing_if = "Option::is_none")]
+    pub account_label: Option<String>,
     pub content: serde_json::Value,
 }
 
@@ -212,7 +218,7 @@ fn read_export_content(path: &Path) -> Result<serde_json::Value, String> {
     }
 }
 
-fn sanitize_path_component(input: &str) -> String {
+pub(super) fn sanitize_path_component(input: &str) -> String {
     let mut sanitized = String::with_capacity(input.len());
     for ch in input.chars() {
         match ch {
@@ -227,6 +233,155 @@ fn sanitize_path_component(input: &str) -> String {
         "unknown".to_string()
     } else {
         trimmed.to_string()
+    }
+}
+
+pub(super) fn legacy_export_exists(
+    export_root: &Path,
+    sanitized_company: &str,
+    platform_id: &str,
+) -> Result<bool, String> {
+    let company_dir = export_root.join(sanitized_company);
+    if !company_dir.exists() {
+        return Ok(false);
+    }
+    let legacy_connection_id = super::pdpp_connections::legacy_connection_id(platform_id);
+
+    for platform_entry in fs::read_dir(company_dir)
+        .map_err(|error| error.to_string())?
+        .flatten()
+    {
+        if !platform_entry.path().is_dir() {
+            continue;
+        }
+        for run_entry in fs::read_dir(platform_entry.path())
+            .map_err(|error| error.to_string())?
+            .flatten()
+        {
+            if !run_entry.path().is_dir() {
+                continue;
+            }
+            let run_directory_name = run_entry.file_name().to_string_lossy().into_owned();
+            if run_directory_name.ends_with(&format!("--{legacy_connection_id}")) {
+                match latest_export_platform_id(&run_entry.path())? {
+                    Some(export_platform_id) if export_platform_id == platform_id => {
+                        return Ok(true);
+                    }
+                    Some(_) => continue,
+                    None => return Ok(true),
+                }
+            }
+            if run_directory_name.contains("--") {
+                continue;
+            }
+
+            if latest_export_platform_id(&run_entry.path())?.as_deref() == Some(platform_id) {
+                return Ok(true);
+            }
+        }
+    }
+
+    Ok(false)
+}
+
+fn latest_export_platform_id(run_directory: &Path) -> Result<Option<String>, String> {
+    let latest_json = fs::read_dir(run_directory)
+        .map_err(|error| error.to_string())?
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.extension().is_none_or(|extension| extension != "json") {
+                return None;
+            }
+            let stem = path.file_stem()?.to_string_lossy();
+            let (_, timestamp) = stem.rsplit_once('_')?;
+            let timestamp = timestamp.parse::<u64>().ok()?;
+            Some((path, timestamp))
+        })
+        .max_by_key(|(_, timestamp)| *timestamp);
+    let Some((json_path, _)) = latest_json else {
+        return Ok(None);
+    };
+    let Ok(content) = fs::read_to_string(&json_path) else {
+        return Ok(None);
+    };
+    let Ok(data) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return Ok(None);
+    };
+    let inferred_platform_id = json_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .and_then(|stem| stem.rsplit_once('_').map(|(platform_id, _)| platform_id))
+        .unwrap_or("");
+    let platform_id = data
+        .get("platformId")
+        .and_then(|value| value.as_str())
+        .unwrap_or(inferred_platform_id);
+
+    Ok(Some(platform_id.to_owned()))
+}
+
+#[cfg(test)]
+mod legacy_export_tests {
+    use super::legacy_export_exists;
+    use std::fs;
+
+    #[test]
+    fn legacy_export_check_ignores_another_accounts_suffixed_export() {
+        let root = tempfile::tempdir().unwrap();
+        let second_account = root
+            .path()
+            .join("OpenAI/ChatGPT/run-b--connection-bbbb");
+        fs::create_dir_all(&second_account).unwrap();
+        fs::write(
+            second_account.join("chatgpt-pdpp_2.json"),
+            serde_json::json!({"platformId": "chatgpt-pdpp", "connectionId": "connection-bbbb"}).to_string(),
+        )
+        .unwrap();
+
+        assert!(!legacy_export_exists(root.path(), "OpenAI", "chatgpt-pdpp").unwrap());
+    }
+
+    #[test]
+    fn legacy_export_check_accepts_the_migrated_accounts_suffixed_export() {
+        let root = tempfile::tempdir().unwrap();
+        let legacy_account = root
+            .path()
+            .join("OpenAI/ChatGPT/run-a--chatgpt-pdpp-owner");
+        fs::create_dir_all(&legacy_account).unwrap();
+
+        assert!(legacy_export_exists(root.path(), "OpenAI", "chatgpt-pdpp").unwrap());
+    }
+
+    #[test]
+    fn legacy_export_check_ignores_another_connector_in_the_same_company_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let other_connector = root.path().join("OpenAI/OtherApp/legacy-run");
+        fs::create_dir_all(&other_connector).unwrap();
+        fs::write(
+            other_connector.join("other-pdpp_2.json"),
+            serde_json::json!({"platformId": "other-pdpp"}).to_string(),
+        )
+        .unwrap();
+
+        assert!(!legacy_export_exists(root.path(), "OpenAI", "chatgpt-pdpp").unwrap());
+        assert!(legacy_export_exists(root.path(), "OpenAI", "other-pdpp").unwrap());
+    }
+
+    #[test]
+    fn legacy_export_check_ignores_a_suffixed_export_attributed_to_another_connector() {
+        let root = tempfile::tempdir().unwrap();
+        let other_connector = root
+            .path()
+            .join("OpenAI/OtherApp/legacy-run--chatgpt-pdpp-owner");
+        fs::create_dir_all(&other_connector).unwrap();
+        fs::write(
+            other_connector.join("other-pdpp_2.json"),
+            serde_json::json!({"platformId": "other-pdpp"}).to_string(),
+        )
+        .unwrap();
+
+        assert!(!legacy_export_exists(root.path(), "OpenAI", "chatgpt-pdpp").unwrap());
     }
 }
 
@@ -330,6 +485,8 @@ pub async fn write_export_data(
     company: String,
     name: Option<String>, // Optional display name from frontend
     data: String, // JSON string from frontend
+    connection_id: Option<String>,
+    account_label: Option<String>,
 ) -> Result<String, String> {
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -351,6 +508,12 @@ pub async fn write_export_data(
 
     let safe_company = sanitize_path_component(&company);
     let safe_name = sanitize_path_component(&name);
+    let run_directory = if let Some(connection_id) = connection_id.as_deref() {
+        super::pdpp_installed_connector::validate_connection_id(connection_id)?;
+        format!("{run_id}--{connection_id}")
+    } else {
+        run_id.clone()
+    };
 
     let data_dir = app
         .path()
@@ -359,7 +522,7 @@ pub async fn write_export_data(
         .join("exported_data")
         .join(&safe_company)
         .join(&safe_name)
-        .join(&run_id);
+        .join(&run_directory);
 
     fs::create_dir_all(&data_dir)
         .map_err(|e| format!("Failed to create export directory: {}", e))?;
@@ -367,10 +530,13 @@ pub async fn write_export_data(
     let file_path = data_dir.join(format!("{}_{}.json", platform_id, timestamp));
 
     let export_data = RunData {
+        platform_id: Some(platform_id.clone()),
         company,
         name,
         run_id,
         timestamp,
+        connection_id,
+        account_label,
         content,
     };
 
@@ -390,6 +556,10 @@ pub struct SavedRun {
     pub id: String,
     #[serde(rename = "platformId")]
     pub platform_id: String,
+    #[serde(rename = "connectionId")]
+    pub connection_id: Option<String>,
+    #[serde(rename = "accountLabel")]
+    pub account_label: Option<String>,
     pub filename: String,
     pub company: String,
     pub name: String,
@@ -421,6 +591,24 @@ pub async fn load_runs(app: AppHandle) -> Result<Vec<SavedRun>, String> {
     if !data_dir.exists() {
         return Ok(Vec::new());
     }
+
+    let loaded_platforms = super::connector::get_platforms(app.clone()).await.unwrap_or_default();
+    let mut account_ordinals = std::collections::HashMap::<String, usize>::new();
+    let account_labels: std::collections::HashMap<String, String> = loaded_platforms.iter()
+        .filter_map(|platform| {
+            let connection_id = platform.connection_id.as_ref()?;
+            let ordinal = account_ordinals.entry(platform.id.clone()).or_default();
+            *ordinal += 1;
+            Some((
+                format!("{}:{connection_id}", platform.id),
+                platform.account_label.clone().unwrap_or_else(|| format!("Account {ordinal}")),
+            ))
+        })
+        .collect();
+    let pdpp_ids: std::collections::HashSet<String> = loaded_platforms.into_iter()
+        .filter(|platform| platform.runtime.as_deref() == Some("pdpp-network"))
+        .map(|platform| platform.id)
+        .collect();
 
     let mut runs = Vec::new();
 
@@ -535,6 +723,35 @@ pub async fn load_runs(app: AppHandle) -> Result<Vec<SavedRun>, String> {
                                 .and_then(|v| v.as_str())
                                 .map(|s| s.to_string())
                                 .unwrap_or_else(|| platform_name.clone());
+                            let inferred_platform_id = json_path.file_stem()
+                                .and_then(|stem| stem.to_str())
+                                .and_then(|stem| stem.rsplit_once('_').map(|(platform_id, _)| platform_id))
+                                .unwrap_or(&platform_name);
+                            let stored_platform_id = data.get("platformId")
+                                .and_then(|value| value.as_str())
+                                .map(str::to_owned)
+                                .unwrap_or_else(|| inferred_platform_id.to_owned());
+                            let connection_id = data.get("connectionId")
+                                .and_then(|value| value.as_str())
+                                .map(str::to_owned)
+                                .or_else(|| pdpp_ids.contains(&stored_platform_id)
+                                    .then(|| super::pdpp_connections::legacy_connection_id(&stored_platform_id)));
+                            let account_label = data.get("accountLabel")
+                                .and_then(|value| value.as_str())
+                                .map(str::to_owned)
+                                .or_else(|| data.pointer("/content/userInfo/email").and_then(|value| value.as_str()).map(str::to_owned))
+                                .or_else(|| data.pointer("/content/userInfo/name").and_then(|value| value.as_str()).map(str::to_owned))
+                                .or_else(|| {
+                                    connection_id.as_ref().and_then(|connection_id| {
+                                        account_labels
+                                            .get(&format!("{}:{connection_id}", stored_platform_id))
+                                            .cloned()
+                                    })
+                                });
+                            let stored_run_id = data.get("runID")
+                                .and_then(|value| value.as_str())
+                                .unwrap_or(&run_id)
+                                .to_owned();
 
                             // Convert timestamp to ISO date string
                             let start_date = chrono::DateTime::from_timestamp(timestamp as i64, 0)
@@ -542,8 +759,10 @@ pub async fn load_runs(app: AppHandle) -> Result<Vec<SavedRun>, String> {
                                 .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
 
                             runs.push(SavedRun {
-                                id: run_id.clone(),
-                                platform_id: platform_name.clone(),
+                                id: stored_run_id,
+                                platform_id: stored_platform_id,
+                                connection_id,
+                                account_label,
                                 filename: platform_name.clone(),
                                 company: company.clone(),
                                 name: display_name,

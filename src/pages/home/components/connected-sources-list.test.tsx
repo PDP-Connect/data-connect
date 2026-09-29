@@ -67,6 +67,44 @@ describe("ConnectedSourcesList sync click guard", () => {
     )
   })
 
+  it("renders separate rows and actions for accounts of the same connector", () => {
+    const accountOne = {
+      ...PLATFORM,
+      id: "chatgpt-pdpp",
+      runtime: "pdpp-network",
+      connectionId: "chatgpt-one",
+      accountLabel: "one@example.test",
+    }
+    const accountTwo = {
+      ...accountOne,
+      connectionId: "chatgpt-two",
+      accountLabel: "Account 2",
+    }
+    const onAddAccount = vi.fn()
+    const { container } = render(
+      <MemoryRouter>
+        <TooltipProvider delayDuration={0}>
+          <ConnectedSourcesList
+            platforms={[accountOne, accountTwo]}
+            runs={[]}
+            onSyncSource={() => undefined}
+            onOpenRuns={() => undefined}
+            onAddAccount={onAddAccount}
+          />
+        </TooltipProvider>
+      </MemoryRouter>
+    )
+
+    expect(screen.getByText("ChatGPT · one@example.test")).toBeTruthy()
+    expect(screen.getByText("ChatGPT · Account 2")).toBeTruthy()
+    expect(container.querySelectorAll('[data-slot="source-row-main-button"]')).toHaveLength(2)
+    expect(container.querySelector('[aria-label="Open ChatGPT · one@example.test"]')).toBeTruthy()
+    expect(container.querySelector('[aria-label="Open ChatGPT · Account 2"]')).toBeTruthy()
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Add another ChatGPT account" })[0])
+    expect(onAddAccount).toHaveBeenCalledWith(accountOne)
+  })
+
   it("describes the local Personal Server without linking to its legacy page", () => {
     render(
       <MemoryRouter>

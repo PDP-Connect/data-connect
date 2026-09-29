@@ -21,6 +21,8 @@ export interface Platform {
   setup?: PdppSetup | null
   /** Installed PDPP connector that keeps a saved browser session on this computer. */
   requiresBrowser?: boolean | null
+  connectionId?: string | null
+  accountLabel?: string | null
 }
 
 export type PdppSetup = PdppStaticSecretSetup | PdppManualOrUploadSetup
@@ -57,6 +59,8 @@ export interface ProgressPhase {
 export interface Run {
   id: string
   platformId: string
+  connectionId?: string | null
+  accountLabel?: string | null
   filename: string
   runtime?: string | null
   isConnected: boolean

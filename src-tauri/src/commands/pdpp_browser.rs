@@ -199,6 +199,14 @@ impl PdppBrowserLease {
         validate_owner_id(owner_id)?;
         Ok(profile_dir(&profile_root()?, connector_id, owner_id).is_dir())
     }
+
+    pub(super) fn profile_exists_at(root: &Path, connector_id: &str, owner_id: &str) -> bool {
+        profile_dir(root, connector_id, owner_id).is_dir()
+    }
+
+    pub(super) fn profile_path_at(root: &Path, connector_id: &str, owner_id: &str) -> PathBuf {
+        profile_dir(root, connector_id, owner_id)
+    }
 }
 
 impl Drop for PdppBrowserLease {
@@ -608,6 +616,39 @@ mod tests {
         drop(lease);
         reset_profile_in(root.path(), "chatgpt-pdpp", "alice").unwrap();
         assert!(!profile.exists());
+    }
+
+    #[test]
+    fn reset_deletes_one_account_profile_and_preserves_its_sibling() {
+        let root = tempfile::tempdir().unwrap();
+        let first = PdppBrowserLease::fixture(
+            root.path(),
+            "chatgpt-pdpp",
+            "account-one",
+            "run-1",
+        )
+        .unwrap();
+        let first_profile = first.profile_dir().to_owned();
+        drop(first);
+        let second = PdppBrowserLease::fixture(
+            root.path(),
+            "chatgpt-pdpp",
+            "account-two",
+            "run-2",
+        )
+        .unwrap();
+        let second_profile = second.profile_dir().to_owned();
+        fs::write(first_profile.join("Cookies"), "first-session").unwrap();
+        fs::write(second_profile.join("Cookies"), "second-session").unwrap();
+        drop(second);
+
+        reset_profile_in(root.path(), "chatgpt-pdpp", "account-one").unwrap();
+
+        assert!(!first_profile.exists());
+        assert_eq!(
+            fs::read_to_string(second_profile.join("Cookies")).unwrap(),
+            "second-session"
+        );
     }
 
     #[test]

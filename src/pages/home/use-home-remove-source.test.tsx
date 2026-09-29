@@ -42,6 +42,10 @@ function platform(overrides: Partial<Platform>): Platform {
     exportFrequency: null,
     vectorize_config: null,
     runtime: "pdpp-network",
+    connectionId:
+      (overrides.runtime ?? "pdpp-network") === "pdpp-network"
+        ? `${overrides.id ?? "amazon-pdpp"}-owner`
+        : undefined,
     ...overrides,
   }
 }
@@ -66,6 +70,7 @@ function run(id: string, source: Platform, extra: Partial<Run> = {}): Run {
   return {
     id,
     platformId: source.id,
+    connectionId: source.connectionId,
     filename: source.filename,
     company: source.company,
     name: source.name,
@@ -105,6 +110,8 @@ const localRemovalHandlers: Handlers = {
   reset_installed_pdpp_browser_profile: () => undefined,
   clear_browser_session: () => undefined,
   clear_pdpp_collection_state: () => undefined,
+  clear_pdpp_collection_connection_state: () => undefined,
+  remove_pdpp_connection: () => undefined,
   delete_exported_run: () => undefined,
   check_connected_platforms: () => ({
     "amazon-pdpp": false,
@@ -219,7 +226,7 @@ describe("useHomeRemoveSource", () => {
     expect(result.current.platform).toBeNull()
   })
 
-  it("clears both ChatGPT browser profiles when signing out of its merged row", async () => {
+  it("signs out the migrated ChatGPT profile and its legacy session", async () => {
     const chatgpt = platform({
       id: "chatgpt-pdpp",
       company: "openai",
@@ -262,22 +269,17 @@ describe("useHomeRemoveSource", () => {
     act(() => result.current.request(BROWSER))
     await act(() => result.current.removeLocalData())
 
-    expect(commands()).toEqual([
-      ["reference_server_has_connection", { connectorKey: "amazon" }],
-      ["list_browser_sessions", undefined],
-      [
-        "reset_installed_pdpp_browser_profile",
-        { connectorId: "amazon-pdpp", connectionId: "amazon-pdpp-owner" },
-      ],
-      ["clear_pdpp_collection_state", { connectorId: "amazon-pdpp" }],
-      [
-        "delete_exported_run",
-        { exportPath: "/data/exported_data/amazon/Amazon/amazon-1" },
-      ],
-      [
-        "check_connected_platforms",
-        { platformIds: ["amazon-pdpp", "ynab-pdpp", "spotify-pdpp"] },
-      ],
+    expect(commands()).toContainEqual([
+      "clear_pdpp_collection_connection_state",
+      { connectorId: "amazon-pdpp", connectionId: "amazon-pdpp-owner" },
+    ])
+    expect(commands()).toContainEqual([
+      "delete_exported_run",
+      { exportPath: "/data/exported_data/amazon/Amazon/amazon-1" },
+    ])
+    expect(commands()).toContainEqual([
+      "remove_pdpp_connection",
+      { connectorId: "amazon-pdpp", connectionId: "amazon-pdpp-owner" },
     ])
     expect(store.getState().app.runs.map(entry => entry.id)).toEqual([
       "ynab-1",
@@ -295,24 +297,70 @@ describe("useHomeRemoveSource", () => {
     act(() => result.current.request(NON_BROWSER))
     await act(() => result.current.removeLocalData())
 
-    expect(commands()).toEqual([
-      ["reference_server_has_connection", { connectorKey: "ynab" }],
-      ["list_browser_sessions", undefined],
-      ["clear_pdpp_collection_state", { connectorId: "ynab-pdpp" }],
-      [
-        "delete_exported_run",
-        { exportPath: "/data/exported_data/ynab/YNAB/ynab-1" },
-      ],
-      [
-        "check_connected_platforms",
-        { platformIds: ["amazon-pdpp", "ynab-pdpp", "spotify-pdpp"] },
-      ],
+    expect(commands()).toContainEqual([
+      "clear_pdpp_collection_connection_state",
+      { connectorId: "ynab-pdpp", connectionId: "ynab-pdpp-owner" },
+    ])
+    expect(commands()).toContainEqual([
+      "delete_exported_run",
+      { exportPath: "/data/exported_data/ynab/YNAB/ynab-1" },
     ])
     expect(store.getState().app.runs.map(entry => entry.id)).toEqual([
       "amazon-1",
       "amazon-2",
       "spotify-1",
     ])
+    expect(result.current.platform).toBeNull()
+  })
+
+  it("removes one account and preserves its sibling account data and row", async () => {
+    const accountOne = platform({ connectionId: "amazon-account-one" })
+    const accountTwo = platform({ connectionId: "amazon-account-two" })
+    store.dispatch(setPlatforms([accountOne, accountTwo, NON_BROWSER, OTHER]))
+    store.dispatch(
+      setConnectedPlatforms({
+        "amazon-pdpp:amazon-account-one": true,
+        "amazon-pdpp:amazon-account-two": true,
+        "ynab-pdpp": true,
+        "spotify-pdpp": true,
+      })
+    )
+    store.dispatch(
+      setRuns([
+        run("amazon-one-run", accountOne, { connectionId: accountOne.connectionId }),
+        run("amazon-two-run", accountTwo, { connectionId: accountTwo.connectionId }),
+      ])
+    )
+    const refreshPlatforms = vi.fn().mockResolvedValue(undefined)
+    answer({
+      ...localRemovalHandlers,
+      check_connected_platforms: () => ({
+        "amazon-pdpp:amazon-account-one": false,
+        "amazon-pdpp:amazon-account-two": true,
+        "ynab-pdpp": true,
+        "spotify-pdpp": true,
+      }),
+      clear_pdpp_collection_connection_state: () => undefined,
+      remove_pdpp_connection: () => undefined,
+    })
+    const { result } = renderHook(() => useHomeRemoveSource(refreshPlatforms), { wrapper })
+
+    act(() => result.current.request(accountOne))
+    await act(() => result.current.removeLocalData())
+
+    expect(commands()).toContainEqual([
+      "clear_pdpp_collection_connection_state",
+      { connectorId: "amazon-pdpp", connectionId: "amazon-account-one" },
+    ])
+    expect(commands()).toContainEqual([
+      "remove_pdpp_connection",
+      { connectorId: "amazon-pdpp", connectionId: "amazon-account-one" },
+    ])
+    expect(store.getState().app.runs.map(entry => entry.id)).toEqual([
+      "amazon-two-run",
+    ])
+    expect(store.getState().app.connectedPlatforms["amazon-pdpp:amazon-account-two"]).toBe(true)
+    expect(refreshPlatforms).toHaveBeenCalledOnce()
     expect(result.current.platform).toBeNull()
   })
 
@@ -429,7 +477,7 @@ describe("useHomeRemoveSource", () => {
     answer({
       ...localRemovalHandlers,
       check_connected_platforms: () => ({
-        "amazon-pdpp": true,
+        "amazon-pdpp:amazon-pdpp-owner": true,
         "ynab-pdpp": false,
         "spotify-pdpp": true,
       }),

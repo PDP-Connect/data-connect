@@ -31,7 +31,21 @@ function localConnectorToken(connectorId: string): string {
     : connectorId
 }
 
+export function legacyPdppConnectionId(connectorId: string): string {
+  if (connectorId === "github-pdpp") return "default"
+  if (!URI_CONNECTOR_ID.test(connectorId)) return `${connectorId}-owner`
+
+  let hash = 2166136261
+  for (let index = 0; index < connectorId.length; index += 1) {
+    hash = Math.imul(hash ^ connectorId.charCodeAt(index), 16777619)
+  }
+  return `pdpp-${(hash >>> 0).toString(16).padStart(8, "0")}-owner`
+}
+
 function runIdForPlatform(platform: Platform, timestamp: number): string {
+  if (platform.runtime === PDPP_NETWORK_RUNTIME && platform.connectionId) {
+    return `${localConnectorToken(platform.id)}-${stableConnectorHash(platform.connectionId)}-${timestamp}`
+  }
   return URI_CONNECTOR_ID.test(platform.id)
     ? `${localConnectorToken(platform.id)}-${timestamp}`
     : `${platform.id}-${timestamp}`
@@ -43,10 +57,13 @@ function runIdForPlatform(platform: Platform, timestamp: number): string {
  * lands in one connection scope and the run looks for it in another.
  */
 export function installedPdppConnectionId(platform: Platform): string | null {
-  return platform.runtime === PDPP_NETWORK_RUNTIME &&
-    platform.id !== "github-pdpp"
-    ? `${localConnectorToken(platform.id)}-owner`
+  return platform.runtime === PDPP_NETWORK_RUNTIME
+    ? platform.connectionId ?? null
     : null
+}
+
+export function installedPdppConnectionKey(platform: Platform): string {
+  return `${platform.id}:${installedPdppConnectionId(platform) ?? "default"}`
 }
 
 interface StartImportOptions {
@@ -145,6 +162,8 @@ export function useConnector() {
       const newRun: Run = {
         id: runId,
         platformId: platform.id,
+        connectionId: installedPdppConnectionId(platform),
+        accountLabel: platform.accountLabel ?? null,
         filename: platform.filename,
         runtime: platform.runtime,
         isConnected: false,

@@ -4,7 +4,7 @@ import { useCallback, useRef, useState } from "react"
 import { invoke } from "@tauri-apps/api/core"
 import { useDispatch, useSelector } from "react-redux"
 import { useNavigate } from "react-router-dom"
-import { installedPdppConnectionId } from "@/hooks/useConnector"
+import { installedPdppConnectionId, legacyPdppConnectionId } from "@/hooks/useConnector"
 import {
   consoleDangerZonePath,
   referenceConnectorKey,
@@ -32,7 +32,9 @@ export function canSignOutOfSource(
     (platform.runtime === PDPP_NETWORK_RUNTIME &&
       platform.requiresBrowser === true &&
       installedPdppConnectionId(platform) !== null) ||
-    hasLegacyBrowserSession
+    (hasLegacyBrowserSession &&
+      (platform.runtime !== PDPP_NETWORK_RUNTIME ||
+        platform.connectionId === legacyPdppConnectionId(platform.id)))
   )
 }
 
@@ -77,7 +79,7 @@ function errorMessage(error: unknown): string {
  * PDPP collection state and the run history. Server copies are managed in
  * Server & Repairs, which is linked only when the server holds a connection.
  */
-export function useHomeRemoveSource() {
+export function useHomeRemoveSource(onRefreshPlatforms?: () => Promise<void>) {
   const navigate = useNavigate()
   const dispatch = useDispatch()
   const runs = useSelector((state: RootState) => state.app.runs)
@@ -143,11 +145,16 @@ export function useHomeRemoveSource() {
           connectionId: installedPdppConnectionId(target),
         })
       }
-      for (const sourcePlatform of sourcePlatforms(target, platforms)) {
-        if (sourcePlatform.runtime === PLAYWRIGHT_RUNTIME) {
-          await invoke("clear_browser_session", {
-            connectorId: sourcePlatform.filename,
-          })
+      if (
+        target.runtime !== PDPP_NETWORK_RUNTIME ||
+        target.connectionId === legacyPdppConnectionId(target.id)
+      ) {
+        for (const sourcePlatform of sourcePlatforms(target, platforms)) {
+          if (sourcePlatform.runtime === PLAYWRIGHT_RUNTIME) {
+            await invoke("clear_browser_session", {
+              connectorId: sourcePlatform.filename,
+            })
+          }
         }
       }
     },
@@ -192,7 +199,14 @@ export function useHomeRemoveSource() {
       // browser session, and then nothing else is touched.
       await signOutIfBrowserSource(target)
       if (target.runtime === PDPP_NETWORK_RUNTIME) {
-        await invoke("clear_pdpp_collection_state", { connectorId: target.id })
+        if (target.connectionId) {
+          await invoke("clear_pdpp_collection_connection_state", {
+            connectorId: target.id,
+            connectionId: target.connectionId,
+          })
+        } else {
+          await invoke("clear_pdpp_collection_state", { connectorId: target.id })
+        }
       }
 
       const targetPlatformIds = sourcePlatformIds(target)
@@ -200,23 +214,38 @@ export function useHomeRemoveSource() {
         run =>
           run.status !== "running" &&
           run.status !== "pending" &&
-          targetPlatformIds.has(run.platformId)
+          targetPlatformIds.has(run.platformId) &&
+          (run.connectionId
+            ? run.connectionId === target.connectionId
+            : !target.connectionId ||
+              target.connectionId === legacyPdppConnectionId(target.id))
       )
       for (const run of sourceRuns) {
         if (run.exportPath) await deleteExportedRun(run.exportPath)
         dispatch(deleteRun(run.id))
       }
 
-      const platformIds = platforms.map(entry => entry.id)
+      const platformIds = [...new Set(platforms.map(entry => entry.id))]
+      const connectionIds = platforms.reduce<Record<string, string[]>>(
+        (byPlatform, entry) => {
+          if (entry.connectionId) {
+            byPlatform[entry.id] ??= []
+            byPlatform[entry.id].push(entry.connectionId)
+          }
+          return byPlatform
+        },
+        {}
+      )
       if (platformIds.length > 0) {
         const connected = await invoke<Record<string, boolean>>(
           "check_connected_platforms",
-          { platformIds }
+          { platformIds, connectionIds }
         )
         dispatch(setConnectedPlatforms(connected))
-        const stillConnected = platforms.some(
-          entry => connected[entry.id] && targetPlatformIds.has(entry.id)
-        )
+        const targetKey = target.connectionId
+          ? `${target.id}:${target.connectionId}`
+          : target.id
+        const stillConnected = Boolean(connected[targetKey])
         if (stillConnected) {
           setError(
             `Some saved files for ${target.name} are still on this computer, so it still shows in this list.`
@@ -224,6 +253,13 @@ export function useHomeRemoveSource() {
           setPending(null)
           return
         }
+      }
+      if (target.runtime === PDPP_NETWORK_RUNTIME && target.connectionId) {
+        await invoke("remove_pdpp_connection", {
+          connectorId: target.id,
+          connectionId: target.connectionId,
+        })
+        await onRefreshPlatforms?.()
       }
       close()
     } catch (err) {
@@ -238,6 +274,7 @@ export function useHomeRemoveSource() {
     platforms,
     runs,
     signOutIfBrowserSource,
+    onRefreshPlatforms,
   ])
 
   const openServerRepairs = useCallback(() => {
