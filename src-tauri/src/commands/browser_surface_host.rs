@@ -29,6 +29,7 @@ const BROWSER_SURFACE_PATH: &str = "/browser-surface/leases";
 const BROWSER_PROFILE_PATH: &str = "/browser-surface/profiles/";
 const MAX_HTTP_REQUEST_BYTES: usize = 64 * 1024;
 const BROWSER_START_TIMEOUT: Duration = Duration::from_secs(10);
+const DEVTOOLS_PROBE_TIMEOUT: Duration = Duration::from_millis(300);
 const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(5);
 /// Bytes of browser stderr kept for diagnosing a failed launch.
 const STDERR_TAIL_BYTES: usize = 8 * 1024;
@@ -630,14 +631,19 @@ fn wait_for_devtools_endpoint(
     let deadline = Instant::now() + BROWSER_START_TIMEOUT;
     let active_port = profile_dir.join("DevToolsActivePort");
     let probe = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_millis(300))
         .no_proxy()
         .build()
         .map_err(|error| BrowserLaunchError::start_failed(error.to_string()))?;
     while Instant::now() < deadline {
-        for line in receiver.try_iter() {
+        if let Ok(Some(status)) = child.try_wait() {
+            return Err(exited_before_ready(status, stderr_tail));
+        }
+        for line in receiver.try_iter().take(1) {
             if let Some(url) = cdp_url_from_json(&line) {
-                if devtools_http_ready(&probe, &url) {
+                if devtools_http_ready(&probe, &url, deadline) {
+                    if let Ok(Some(status)) = child.try_wait() {
+                        return Err(exited_before_ready(status, stderr_tail));
+                    }
                     return Ok((child, url));
                 }
             }
@@ -650,7 +656,10 @@ fn wait_for_devtools_endpoint(
                 .filter(|port| *port != 0)
             {
                 let url = format!("http://127.0.0.1:{port}");
-                if devtools_http_ready(&probe, &url) {
+                if devtools_http_ready(&probe, &url, deadline) {
+                    if let Ok(Some(status)) = child.try_wait() {
+                        return Err(exited_before_ready(status, stderr_tail));
+                    }
                     return Ok((child, url));
                 }
             }
@@ -658,7 +667,11 @@ fn wait_for_devtools_endpoint(
         if let Ok(Some(status)) = child.try_wait() {
             return Err(exited_before_ready(status, stderr_tail));
         }
-        thread::sleep(Duration::from_millis(25));
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(25).min(remaining));
     }
 
     let terminated = super::pdpp_browser::terminate_browser(&mut child);
@@ -675,8 +688,21 @@ fn wait_for_devtools_endpoint(
     }
 }
 
-fn devtools_http_ready(client: &reqwest::blocking::Client, cdp_url: &str) -> bool {
-    let Ok(response) = client.get(format!("{cdp_url}/json/version")).send() else {
+fn devtools_http_ready(
+    client: &reqwest::blocking::Client,
+    cdp_url: &str,
+    deadline: Instant,
+) -> bool {
+    let Some(timeout) = devtools_probe_timeout(deadline) else {
+        return false;
+    };
+    let request = client
+        .get(format!("{cdp_url}/json/version"))
+        .timeout(timeout);
+    if Instant::now() >= deadline {
+        return false;
+    }
+    let Ok(response) = request.send() else {
         return false;
     };
     if !response.status().is_success() {
@@ -685,10 +711,46 @@ fn devtools_http_ready(client: &reqwest::blocking::Client, cdp_url: &str) -> boo
     let Ok(version) = response.json::<serde_json::Value>() else {
         return false;
     };
-    version
+    let has_browser_websocket = version
         .get("webSocketDebuggerUrl")
         .and_then(serde_json::Value::as_str)
-        .is_some_and(|url| url.starts_with("ws://") || url.starts_with("wss://"))
+        .is_some_and(is_websocket_url);
+    if !has_browser_websocket {
+        return false;
+    }
+
+    let Some(timeout) = devtools_probe_timeout(deadline) else {
+        return false;
+    };
+    let request = client.get(format!("{cdp_url}/json/list")).timeout(timeout);
+    if Instant::now() >= deadline {
+        return false;
+    }
+    let Ok(response) = request.send() else {
+        return false;
+    };
+    if !response.status().is_success() {
+        return false;
+    }
+    let Ok(targets) = response.json::<Vec<serde_json::Value>>() else {
+        return false;
+    };
+    targets.iter().any(|target| {
+        target.get("type").and_then(serde_json::Value::as_str) == Some("page")
+            && target
+                .get("webSocketDebuggerUrl")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(is_websocket_url)
+    })
+}
+
+fn devtools_probe_timeout(deadline: Instant) -> Option<Duration> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    (!remaining.is_zero()).then_some(DEVTOOLS_PROBE_TIMEOUT.min(remaining))
+}
+
+fn is_websocket_url(url: &str) -> bool {
+    url.starts_with("ws://") || url.starts_with("wss://")
 }
 
 fn exited_before_ready(
@@ -1018,15 +1080,24 @@ mod tests {
 import json
 from pathlib import Path
 import sys
+import time
 
 profile = Path(sys.argv[1])
+started = time.monotonic()
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path != "/json/version":
+        if self.path == "/json/version":
+            value = {"webSocketDebuggerUrl": f"ws://127.0.0.1:{self.server.server_port}/devtools/browser/test"}
+        elif self.path == "/json/list":
+            value = [] if time.monotonic() - started < 0.3 else [{
+                "type": "page",
+                "webSocketDebuggerUrl": f"ws://127.0.0.1:{self.server.server_port}/devtools/page/test",
+            }]
+        else:
             self.send_error(404)
             return
-        body = json.dumps({"webSocketDebuggerUrl": f"ws://127.0.0.1:{self.server.server_port}/devtools/browser/test"}).encode()
+        body = json.dumps(value).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -1196,7 +1267,12 @@ wait "$server_pid"
     fn acquire_launches_fake_browser_and_returns_cdp_url() {
         let temp = tempfile::tempdir().expect("tempdir");
         let host = start_test_host(&temp);
+        let started = Instant::now();
         let (surface_id, cdp_url, _) = acquire(&host, "github");
+        assert!(
+            started.elapsed() >= Duration::from_millis(300),
+            "acquire must wait until /json/list has a usable page target"
+        );
         assert!(cdp_url.starts_with("http://127.0.0.1:"));
         let response = request(
             &host,
@@ -1234,6 +1310,62 @@ wait "$server_pid"
     }
 
     #[test]
+    fn slow_stdout_probes_do_not_extend_the_launch_deadline() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind slow DevTools server");
+        let address = listener.local_addr().expect("server address");
+        let stop_server = Arc::new(AtomicBool::new(false));
+        let server_stop = Arc::clone(&stop_server);
+        let server = thread::spawn(move || {
+            listener
+                .set_nonblocking(true)
+                .expect("make slow server nonblocking");
+            let deadline = Instant::now() + BROWSER_START_TIMEOUT + Duration::from_secs(1);
+            while Instant::now() < deadline && !server_stop.load(Ordering::Acquire) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let mut request = [0; 1024];
+                        let _ = stream.read(&mut request);
+                        thread::sleep(Duration::from_millis(250));
+                        let _ = stream.write_all(
+                            b"HTTP/1.1 503 Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        );
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => return,
+                }
+            }
+        });
+        let browser = temp.path().join("fake-browser-slow.sh");
+        fs::write(
+            &browser,
+            format!(
+                "#!/bin/sh\nfor i in $(seq 1 100); do printf '{{\"cdp_url\":\"http://{address}\"}}\\n'; done\ntrap 'exit 0' TERM INT\nwhile :; do sleep 1; done\n"
+            ),
+        )
+        .expect("write slow fake browser");
+        fs::set_permissions(&browser, fs::Permissions::from_mode(0o755))
+            .expect("make slow fake browser executable");
+        let profile = temp.path().join("profile");
+        fs::create_dir_all(&profile).expect("create profile");
+
+        let started = Instant::now();
+        let result = launch_browser(&browser, &profile, true);
+        let elapsed = started.elapsed();
+        stop_server.store(true, Ordering::Release);
+        let server_joined = server.join();
+
+        assert!(result.is_err(), "unready endpoint must time out");
+        assert!(
+            elapsed <= BROWSER_START_TIMEOUT + Duration::from_millis(300),
+            "launch took {elapsed:?}, beyond the deadline and one short probe"
+        );
+        server_joined.expect("slow server thread");
+    }
+
+    #[test]
     fn acquire_waits_until_the_devtools_http_endpoint_is_ready() {
         let temp = tempfile::tempdir().expect("tempdir");
         let reservation = TcpListener::bind("127.0.0.1:0").expect("reserve port");
@@ -1247,15 +1379,23 @@ wait "$server_pid"
                 .set_nonblocking(true)
                 .expect("make DevTools endpoint nonblocking");
             let deadline = Instant::now() + Duration::from_secs(2);
+            let mut requests = 0;
             while Instant::now() < deadline {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
                         let mut request = [0; 1024];
                         let _ = stream.read(&mut request);
-                        let body = format!(
-                            r#"{{"webSocketDebuggerUrl":"ws://{}/devtools/browser/test"}}"#,
-                            address
-                        );
+                        let body = if request.starts_with(b"GET /json/version ") {
+                            format!(
+                                r#"{{"webSocketDebuggerUrl":"ws://{}/devtools/browser/test"}}"#,
+                                address
+                            )
+                        } else {
+                            format!(
+                                r#"[{{"type":"page","webSocketDebuggerUrl":"ws://{}/devtools/page/test"}}]"#,
+                                address
+                            )
+                        };
                         write!(
                             stream,
                             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -1263,7 +1403,10 @@ wait "$server_pid"
                             body
                         )
                         .expect("write DevTools version response");
-                        return true;
+                        requests += 1;
+                        if requests == 2 {
+                            return true;
+                        }
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(10));
