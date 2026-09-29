@@ -199,6 +199,14 @@ impl PdppBrowserLease {
         validate_owner_id(owner_id)?;
         Ok(profile_dir(&profile_root()?, connector_id, owner_id).is_dir())
     }
+
+    pub(super) fn profile_exists_at(root: &Path, connector_id: &str, owner_id: &str) -> bool {
+        profile_dir(root, connector_id, owner_id).is_dir()
+    }
+
+    pub(super) fn profile_path_at(root: &Path, connector_id: &str, owner_id: &str) -> PathBuf {
+        profile_dir(root, connector_id, owner_id)
+    }
 }
 
 impl Drop for PdppBrowserLease {

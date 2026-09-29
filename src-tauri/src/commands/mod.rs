@@ -13,6 +13,7 @@ pub(crate) mod oci_catalog;
 pub(crate) mod oci_verify;
 pub mod pdpp_browser;
 pub mod pdpp_collection_state;
+pub mod pdpp_connections;
 pub mod pdpp_connector;
 pub mod pdpp_installed_connector;
 pub mod pdpp_manual_import;

@@ -42,7 +42,9 @@ export function RemoveSourceDialog({
   onRemoveLocalData,
   onOpenServerRepairs,
 }: RemoveSourceDialogProps) {
-  const name = platform?.name
+  const name = platform?.accountLabel
+    ? `${platform.name} · ${platform.accountLabel}`
+    : platform?.name
   const isPdppSource = platform?.runtime === "pdpp-network"
   const busy = pending !== null
 

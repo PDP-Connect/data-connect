@@ -16,11 +16,17 @@ pub struct FileInfo {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RunData {
+    #[serde(rename = "platformId", skip_serializing_if = "Option::is_none")]
+    pub platform_id: Option<String>,
     pub company: String,
     pub name: String,
     #[serde(rename = "runID")]
     pub run_id: String,
     pub timestamp: u64,
+    #[serde(rename = "connectionId", skip_serializing_if = "Option::is_none")]
+    pub connection_id: Option<String>,
+    #[serde(rename = "accountLabel", skip_serializing_if = "Option::is_none")]
+    pub account_label: Option<String>,
     pub content: serde_json::Value,
 }
 
@@ -330,6 +336,8 @@ pub async fn write_export_data(
     company: String,
     name: Option<String>, // Optional display name from frontend
     data: String, // JSON string from frontend
+    connection_id: Option<String>,
+    account_label: Option<String>,
 ) -> Result<String, String> {
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -351,6 +359,12 @@ pub async fn write_export_data(
 
     let safe_company = sanitize_path_component(&company);
     let safe_name = sanitize_path_component(&name);
+    let run_directory = if let Some(connection_id) = connection_id.as_deref() {
+        super::pdpp_installed_connector::validate_connection_id(connection_id)?;
+        format!("{run_id}--{connection_id}")
+    } else {
+        run_id.clone()
+    };
 
     let data_dir = app
         .path()
@@ -359,7 +373,7 @@ pub async fn write_export_data(
         .join("exported_data")
         .join(&safe_company)
         .join(&safe_name)
-        .join(&run_id);
+        .join(&run_directory);
 
     fs::create_dir_all(&data_dir)
         .map_err(|e| format!("Failed to create export directory: {}", e))?;
@@ -367,10 +381,13 @@ pub async fn write_export_data(
     let file_path = data_dir.join(format!("{}_{}.json", platform_id, timestamp));
 
     let export_data = RunData {
+        platform_id: Some(platform_id.clone()),
         company,
         name,
         run_id,
         timestamp,
+        connection_id,
+        account_label,
         content,
     };
 
@@ -390,6 +407,10 @@ pub struct SavedRun {
     pub id: String,
     #[serde(rename = "platformId")]
     pub platform_id: String,
+    #[serde(rename = "connectionId")]
+    pub connection_id: Option<String>,
+    #[serde(rename = "accountLabel")]
+    pub account_label: Option<String>,
     pub filename: String,
     pub company: String,
     pub name: String,
@@ -421,6 +442,24 @@ pub async fn load_runs(app: AppHandle) -> Result<Vec<SavedRun>, String> {
     if !data_dir.exists() {
         return Ok(Vec::new());
     }
+
+    let loaded_platforms = super::connector::get_platforms(app.clone()).await.unwrap_or_default();
+    let mut account_ordinals = std::collections::HashMap::<String, usize>::new();
+    let account_labels: std::collections::HashMap<String, String> = loaded_platforms.iter()
+        .filter_map(|platform| {
+            let connection_id = platform.connection_id.as_ref()?;
+            let ordinal = account_ordinals.entry(platform.id.clone()).or_default();
+            *ordinal += 1;
+            Some((
+                format!("{}:{connection_id}", platform.id),
+                platform.account_label.clone().unwrap_or_else(|| format!("Account {ordinal}")),
+            ))
+        })
+        .collect();
+    let pdpp_ids: std::collections::HashSet<String> = loaded_platforms.into_iter()
+        .filter(|platform| platform.runtime.as_deref() == Some("pdpp-network"))
+        .map(|platform| platform.id)
+        .collect();
 
     let mut runs = Vec::new();
 
@@ -535,6 +574,30 @@ pub async fn load_runs(app: AppHandle) -> Result<Vec<SavedRun>, String> {
                                 .and_then(|v| v.as_str())
                                 .map(|s| s.to_string())
                                 .unwrap_or_else(|| platform_name.clone());
+                            let inferred_platform_id = json_path.file_stem()
+                                .and_then(|stem| stem.to_str())
+                                .and_then(|stem| stem.rsplit_once('_').map(|(platform_id, _)| platform_id))
+                                .unwrap_or(&platform_name);
+                            let stored_platform_id = data.get("platformId")
+                                .and_then(|value| value.as_str())
+                                .map(str::to_owned)
+                                .unwrap_or_else(|| inferred_platform_id.to_owned());
+                            let connection_id = data.get("connectionId")
+                                .and_then(|value| value.as_str())
+                                .map(str::to_owned)
+                                .or_else(|| pdpp_ids.contains(&stored_platform_id)
+                                    .then(|| super::pdpp_connections::legacy_connection_id(&stored_platform_id)));
+                            let account_label = data.get("accountLabel")
+                                .and_then(|value| value.as_str())
+                                .map(str::to_owned)
+                                .or_else(|| data.pointer("/content/userInfo/email").and_then(|value| value.as_str()).map(str::to_owned))
+                                .or_else(|| data.pointer("/content/userInfo/name").and_then(|value| value.as_str()).map(str::to_owned))
+                                .or_else(|| connection_id.as_ref()
+                                    .and_then(|connection_id| account_labels.get(&format!("{}:{connection_id}")).cloned()));
+                            let stored_run_id = data.get("runID")
+                                .and_then(|value| value.as_str())
+                                .unwrap_or(&run_id)
+                                .to_owned();
 
                             // Convert timestamp to ISO date string
                             let start_date = chrono::DateTime::from_timestamp(timestamp as i64, 0)
@@ -542,8 +605,10 @@ pub async fn load_runs(app: AppHandle) -> Result<Vec<SavedRun>, String> {
                                 .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
 
                             runs.push(SavedRun {
-                                id: run_id.clone(),
-                                platform_id: platform_name.clone(),
+                                id: stored_run_id,
+                                platform_id: stored_platform_id,
+                                connection_id,
+                                account_label,
                                 filename: platform_name.clone(),
                                 company: company.clone(),
                                 name: display_name,

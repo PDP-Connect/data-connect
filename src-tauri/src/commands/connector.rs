@@ -118,6 +118,10 @@ pub struct Platform {
     /// browser binding, so the desktop keeps a saved browser session for it.
     #[serde(rename = "requiresBrowser", skip_serializing_if = "Option::is_none")]
     pub requires_browser: Option<bool>,
+    #[serde(rename = "connectionId", skip_serializing_if = "Option::is_none")]
+    pub connection_id: Option<String>,
+    #[serde(rename = "accountLabel", skip_serializing_if = "Option::is_none")]
+    pub account_label: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -488,6 +492,8 @@ fn platform_from_metadata(
         source_path: None,
         active_source: None,
         requires_browser: None,
+        connection_id: None,
+        account_label: None,
     }
 }
 
@@ -709,6 +715,8 @@ pub(super) fn load_pdpp_platforms_with_resource_dir(
             source_path: local_source.then(|| install.root_path.clone()),
             active_source: local_source.then_some(active_source),
             requires_browser: Some(requires_browser),
+            connection_id: None,
+            account_label: None,
         });
     }
 
@@ -787,8 +795,35 @@ pub async fn get_platforms(app: AppHandle) -> Result<Vec<Platform>, String> {
             platforms.push(platform);
         }
     }
-    log::info!("Loaded {} total platforms", platforms.len());
-    Ok(platforms)
+    let mut expanded = Vec::new();
+    for platform in platforms {
+        if platform.runtime.as_deref() != Some("pdpp-network") {
+            expanded.push(platform);
+            continue;
+        }
+        let mut accounts = super::pdpp_connections::stored_connections(&platform.id)?;
+        if accounts.is_empty()
+            && super::pdpp_connections::has_legacy_data(&app, &platform.id, &platform.company)
+        {
+            accounts.push(super::pdpp_connections::ensure_pdpp_connection(
+                app.clone(),
+                platform.id.clone(),
+                platform.company.clone(),
+            )?);
+        }
+        if accounts.is_empty() {
+            expanded.push(platform);
+            continue;
+        }
+        for account in accounts {
+            let mut account_platform = platform.clone();
+            account_platform.connection_id = Some(account.connection_id);
+            account_platform.account_label = account.account_label;
+            expanded.push(account_platform);
+        }
+    }
+    log::info!("Loaded {} total platforms", expanded.len());
+    Ok(expanded)
 }
 
 /// Active connector windows
@@ -2294,6 +2329,7 @@ pub async fn stop_connector_run(app: AppHandle, run_id: String) -> Result<(), St
 pub async fn check_connected_platforms(
     app: AppHandle,
     platform_ids: Vec<String>,
+    connection_ids: Option<HashMap<String, Vec<String>>>,
 ) -> Result<HashMap<String, bool>, String> {
     let mut connected = HashMap::new();
 
@@ -2311,6 +2347,25 @@ pub async fn check_connected_platforms(
         .collect();
 
     for id in platform_ids {
+        if let Some(accounts) = connection_ids
+            .as_ref()
+            .and_then(|connections| connections.get(&id))
+        {
+            for connection_id in accounts {
+                let key = format!("{id}:{connection_id}");
+                let legacy_connection = super::pdpp_connections::legacy_connection_id(&id);
+                let has_legacy_export = connection_id == &legacy_connection
+                    && (data_dir.join(&id).exists()
+                        || id_to_company
+                            .get(&id)
+                            .is_some_and(|company| data_dir.join(company).exists()));
+                connected.insert(
+                    key,
+                    has_legacy_export || exported_connection_exists(&data_dir, connection_id)?,
+                );
+            }
+            continue;
+        }
         // Check by platform ID directory or company name directory
         let exists = data_dir.join(&id).exists()
             || id_to_company
@@ -2321,6 +2376,62 @@ pub async fn check_connected_platforms(
     }
 
     Ok(connected)
+}
+
+fn exported_connection_exists(
+    export_root: &std::path::Path,
+    connection_id: &str,
+) -> Result<bool, String> {
+    if !export_root.exists() {
+        return Ok(false);
+    }
+    let mut directories = vec![export_root.to_path_buf()];
+    while let Some(directory) = directories.pop() {
+        for entry in fs::read_dir(directory)
+            .map_err(|error| error.to_string())?
+            .flatten()
+        {
+            let path = entry.path();
+            if path.is_dir() {
+                if path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.ends_with(&format!("--{connection_id}")))
+                {
+                    return Ok(true);
+                }
+                directories.push(path);
+            }
+        }
+    }
+    Ok(false)
+}
+
+#[cfg(test)]
+mod connection_export_tests {
+    use super::exported_connection_exists;
+    use std::fs;
+
+    #[test]
+    fn exported_data_presence_is_scoped_to_the_connection_id() {
+        let root = tempfile::tempdir().unwrap();
+        for (connection_id, run_id) in [("account-a", "run-a"), ("account-b", "run-b")] {
+            let run_dir = root
+                .path()
+                .join("OpenAI/ChatGPT")
+                .join(format!("{run_id}--{connection_id}"));
+            fs::create_dir_all(&run_dir).unwrap();
+            fs::write(
+                run_dir.join("chatgpt-pdpp_1.json"),
+                serde_json::json!({"connectionId": connection_id}).to_string(),
+            )
+            .unwrap();
+        }
+
+        assert!(exported_connection_exists(root.path(), "account-a").unwrap());
+        assert!(exported_connection_exists(root.path(), "account-b").unwrap());
+        assert!(!exported_connection_exists(root.path(), "account-c").unwrap());
+    }
 }
 
 /// Get the user data path

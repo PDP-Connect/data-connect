@@ -276,7 +276,7 @@ describe("useHomeRemoveSource", () => {
       ],
       [
         "check_connected_platforms",
-        { platformIds: ["amazon-pdpp", "ynab-pdpp", "spotify-pdpp"] },
+        { platformIds: ["amazon-pdpp", "ynab-pdpp", "spotify-pdpp"], connectionIds: {} },
       ],
     ])
     expect(store.getState().app.runs.map(entry => entry.id)).toEqual([
@@ -305,7 +305,7 @@ describe("useHomeRemoveSource", () => {
       ],
       [
         "check_connected_platforms",
-        { platformIds: ["amazon-pdpp", "ynab-pdpp", "spotify-pdpp"] },
+        { platformIds: ["amazon-pdpp", "ynab-pdpp", "spotify-pdpp"], connectionIds: {} },
       ],
     ])
     expect(store.getState().app.runs.map(entry => entry.id)).toEqual([
@@ -313,6 +313,57 @@ describe("useHomeRemoveSource", () => {
       "amazon-2",
       "spotify-1",
     ])
+    expect(result.current.platform).toBeNull()
+  })
+
+  it("removes one account and preserves its sibling account data and row", async () => {
+    const accountOne = platform({ connectionId: "amazon-account-one" })
+    const accountTwo = platform({ connectionId: "amazon-account-two" })
+    store.dispatch(setPlatforms([accountOne, accountTwo, NON_BROWSER, OTHER]))
+    store.dispatch(
+      setConnectedPlatforms({
+        "amazon-pdpp:amazon-account-one": true,
+        "amazon-pdpp:amazon-account-two": true,
+        "ynab-pdpp": true,
+        "spotify-pdpp": true,
+      })
+    )
+    store.dispatch(
+      setRuns([
+        run("amazon-one-run", accountOne, { connectionId: accountOne.connectionId }),
+        run("amazon-two-run", accountTwo, { connectionId: accountTwo.connectionId }),
+      ])
+    )
+    const refreshPlatforms = vi.fn().mockResolvedValue(undefined)
+    answer({
+      ...localRemovalHandlers,
+      check_connected_platforms: () => ({
+        "amazon-pdpp:amazon-account-one": false,
+        "amazon-pdpp:amazon-account-two": true,
+        "ynab-pdpp": true,
+        "spotify-pdpp": true,
+      }),
+      clear_pdpp_collection_connection_state: () => undefined,
+      remove_pdpp_connection: () => undefined,
+    })
+    const { result } = renderHook(() => useHomeRemoveSource(refreshPlatforms), { wrapper })
+
+    act(() => result.current.request(accountOne))
+    await act(() => result.current.removeLocalData())
+
+    expect(commands()).toContainEqual([
+      "clear_pdpp_collection_connection_state",
+      { connectorId: "amazon-pdpp", connectionId: "amazon-account-one" },
+    ])
+    expect(commands()).toContainEqual([
+      "remove_pdpp_connection",
+      { connectorId: "amazon-pdpp", connectionId: "amazon-account-one" },
+    ])
+    expect(store.getState().app.runs.map(entry => entry.id)).toEqual([
+      "amazon-two-run",
+    ])
+    expect(store.getState().app.connectedPlatforms["amazon-pdpp:amazon-account-two"]).toBe(true)
+    expect(refreshPlatforms).toHaveBeenCalledOnce()
     expect(result.current.platform).toBeNull()
   })
 

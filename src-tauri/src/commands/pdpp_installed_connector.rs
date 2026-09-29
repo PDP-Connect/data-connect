@@ -10,7 +10,7 @@ use super::pdpp_browser::{PdppBrowserBinding, PdppBrowserLease};
 use super::pdpp_collection_state::{
     clear_connection_setup_complete, commit_terminal_run, is_connection_setup_complete,
     load_connection_state, mark_connection_setup_complete, stage_succeeded_run,
-    PdppCollectionConnectionState, DEFAULT_CONNECTION_ID,
+    PdppCollectionConnectionState,
 };
 use super::pdpp_connector::{
     supervise_pdpp_connector, PdppConnectorCommand, PdppEvent, PdppInteractionResponder,
@@ -20,6 +20,7 @@ use super::pdpp_connector::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs;
@@ -288,7 +289,7 @@ fn prepare_run(
     let control = register_run(
         &request.run_id,
         &request.connector_id,
-        request.connection_id(),
+        request.connection_id().as_ref(),
     )?;
     Ok(PreparedPdppRun { control, import })
 }
@@ -302,7 +303,7 @@ fn claim_request_import(
         .map(|path| {
             super::pdpp_manual_import::ImportedDirectory::claim(
                 &request.connector_id,
-                request.connection_id(),
+                request.connection_id().as_ref(),
                 path,
             )
         })
@@ -336,14 +337,15 @@ fn start_installed_pdpp_connector_run_impl(
     import: Option<super::pdpp_manual_import::ImportedDirectory>,
 ) -> Result<InstalledPdppRunCompletion, String> {
     validate_request_metadata(&request)?;
+    let connection_id = request.connection_id();
     let resource_dir = app.path().resource_dir().ok();
     let runtime_root = resolve_pdpp_runtime_root(resource_dir.as_deref())?;
     let (resolved, _import) = resolve_connector_for_run(&request, import, || {
         resolve_active_installed_pdpp_connector(&request.connector_id, &runtime_root)
     })?;
     validate_request(&request, &resolved.manifest)?;
-    let saved_state = load_connection_state(&resolved.connector_id, request.connection_id())?;
-    let setup_complete = browser_setup_complete(&resolved, request.connection_id())?;
+    let saved_state = load_connection_state(&resolved.connector_id, connection_id.as_ref())?;
+    let setup_complete = browser_setup_complete(&resolved, connection_id.as_ref())?;
     let secrets = resolve_child_secrets_for_connection(&request, &resolved, setup_complete)?;
     let start_state = persisted_start_state(&request, &saved_state);
     let export_accumulator = Arc::new(Mutex::new(PdppExportAccumulator::default()));
@@ -403,7 +405,7 @@ fn start_installed_pdpp_connector_run_impl(
         commit_terminal_run(
             &result.status,
             &resolved.connector_id,
-            request.connection_id(),
+            connection_id.as_ref(),
             &request.collection_mode,
             &snapshot_reset_streams,
             &records_by_stream,
@@ -414,7 +416,7 @@ fn start_installed_pdpp_connector_run_impl(
         // commit have succeeded. A failed launch, login, cancellation, or
         // timeout must leave the next attempt in owner-attended setup.
         if should_mark_browser_setup_complete(&resolved, &request, &result.status) {
-            mark_connection_setup_complete(&resolved.connector_id, request.connection_id())?;
+            mark_connection_setup_complete(&resolved.connector_id, connection_id.as_ref())?;
         }
         Some(export)
     } else {
@@ -771,7 +773,7 @@ fn validate_request_metadata(request: &StartInstalledPdppConnectorRequest) -> Re
             "PDPP timeoutSeconds must be between 1 and {MAX_TIMEOUT_SECONDS}"
         ));
     }
-    validate_connection_id(request.connection_id())?;
+    validate_connection_id(request.connection_id().as_ref())?;
     Ok(())
 }
 
@@ -787,7 +789,7 @@ fn validate_run_id(run_id: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_connection_id(connection_id: &str) -> Result<(), String> {
+pub(super) fn validate_connection_id(connection_id: &str) -> Result<(), String> {
     if connection_id.is_empty()
         || connection_id.len() > MAX_RUN_ID_BYTES
         || !connection_id
@@ -823,11 +825,16 @@ fn persisted_start_state(
 }
 
 impl StartInstalledPdppConnectorRequest {
-    fn connection_id(&self) -> &str {
+    fn connection_id(&self) -> Cow<'_, str> {
         self.connection_id
             .as_deref()
             .filter(|connection_id| !connection_id.is_empty())
-            .unwrap_or(DEFAULT_CONNECTION_ID)
+            .map(Cow::Borrowed)
+            .unwrap_or_else(|| {
+                Cow::Owned(super::pdpp_connections::legacy_connection_id(
+                    &self.connector_id,
+                ))
+            })
     }
 }
 
@@ -1445,7 +1452,7 @@ fn resolve_child_secrets_for_connection(
             .ok_or("manual/upload PDPP connector requires importDirectory")?;
         let import_directory = super::pdpp_manual_import::validate_import_directory(
             &resolved.connector_id,
-            request.connection_id(),
+            connection_id.as_ref(),
             import_directory,
         )?;
         let import_env = manual_upload_import_env(&resolved.manifest).ok_or(
@@ -2462,6 +2469,7 @@ fn redact_secrets(value: &str, secrets: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::pdpp_collection_state::DEFAULT_CONNECTION_ID;
     use tempfile::TempDir;
 
     const CHATGPT_CONNECTOR_INSTALL_ID: &str = "chatgpt-pdpp";

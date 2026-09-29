@@ -127,6 +127,8 @@ describe("useEvents", () => {
       company: "LinkedIn",
       name: "LinkedIn",
       data: expect.any(String),
+      connectionId: null,
+      accountLabel: null,
     })
     expect(mockDispatch).toHaveBeenCalledWith({
       type: "app/updateExportStatus",
@@ -284,6 +286,8 @@ describe("useEvents", () => {
       company: "GitHub",
       name: "github-pdpp",
       data: expect.any(String),
+      connectionId: null,
+      accountLabel: null,
     })
     expect(currentRuns[0].exportData).toEqual(
       expect.objectContaining({
@@ -390,6 +394,8 @@ describe("useEvents", () => {
       company: "GitHub",
       name: "github-pdpp",
       data: expect.any(String),
+      connectionId: null,
+      accountLabel: null,
     })
     const writeCall = mockInvoke.mock.calls.find(
       ([command]) => command === "write_export_data"

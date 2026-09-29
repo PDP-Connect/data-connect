@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import { useNavigate, useSearchParams } from "react-router-dom"
 import { useSelector } from "react-redux"
+import { invoke } from "@tauri-apps/api/core"
 import { getAppRegistryEntry } from "@/apps/registry"
 import {
   buildGrantSearchParams,
@@ -22,7 +23,7 @@ import {
   trackSessionClaimFailed,
 } from "@/lib/telemetry/events"
 import { usePlatforms } from "@/hooks/usePlatforms"
-import { useConnector } from "@/hooks/useConnector"
+import { installedPdppConnectionKey, useConnector } from "@/hooks/useConnector"
 import {
   getAllAvailableScopes,
   getPlatformRegistryEntryById,
@@ -209,8 +210,13 @@ export function useConnectPage(): UseConnectPageResult {
     requestedTelemetryPlatform,
   ])
 
-  const { platforms, isPlatformConnected, platformsLoaded, platformLoadError } =
-    usePlatforms()
+  const {
+    platforms,
+    isPlatformConnected,
+    platformsLoaded,
+    platformLoadError,
+    loadPlatforms,
+  } = usePlatforms()
   const { startImport } = useConnector()
   const [connectRunId, setConnectRunId] = useState<string | null>(null)
   const activeRun = useSelector((state: RootState) =>
@@ -232,7 +238,11 @@ export function useConnectPage(): UseConnectPageResult {
 
   const isCheckingPlatforms = !platformsLoaded
   const isAlreadyConnected = connectPlatform
-    ? isPlatformConnected(connectPlatform.id)
+    ? isPlatformConnected(
+        connectPlatform.connectionId
+          ? installedPdppConnectionKey(connectPlatform)
+          : connectPlatform.id
+      )
     : false
 
   const dataSourceLabel = getPrimaryDataSourceLabel(grantScopes)
@@ -384,7 +394,16 @@ export function useConnectPage(): UseConnectPageResult {
       (hasGrantSession && !prefetched)
     )
       return
-    const runId = await startImport(connectPlatform)
+    let platform = connectPlatform
+    if (platform.runtime === "pdpp-network" && !platform.connectionId) {
+      const account = await invoke<{ connectionId: string; accountLabel?: string | null }>(
+        "ensure_pdpp_connection",
+        { connectorId: platform.id, company: platform.company }
+      )
+      platform = { ...platform, ...account }
+      await loadPlatforms()
+    }
+    const runId = await startImport(platform)
     if (!runId) return
     setConnectRunId(runId)
   }

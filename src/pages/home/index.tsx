@@ -15,6 +15,7 @@ import { useSelector } from "react-redux"
 import { usePlatforms } from "@/hooks/usePlatforms"
 import {
   installedPdppConnectionId,
+  installedPdppConnectionKey,
   isAuthenticationFailure,
   useConnector,
 } from "@/hooks/useConnector"
@@ -86,8 +87,8 @@ const sessionCredentialsByConnection = new Map<
 >()
 const credentialPromptRequiredByConnection = new Set<string>()
 
-function sessionCredentialKey(platform: Platform) {
-  return `${platform.id}:${installedPdppConnectionId(platform) ?? "default"}`
+export function sessionCredentialKey(platform: Platform) {
+  return installedPdppConnectionKey(platform)
 }
 
 function rememberSessionCredential(
@@ -299,7 +300,21 @@ export function Home() {
   const { open: openManualUpload } = manualUpload
 
   const handleImportSource = useCallback(
-    (platform: Platform) => {
+    async (requestedPlatform: Platform) => {
+      let platform = requestedPlatform
+      if (platform.runtime === "pdpp-network" && !platform.connectionId) {
+        try {
+          const account = await invoke<{ connectionId: string; accountLabel?: string | null }>(
+            "ensure_pdpp_connection",
+            { connectorId: platform.id, company: platform.company }
+          )
+          platform = { ...platform, ...account }
+          await loadPlatforms()
+        } catch (error) {
+          console.error("Failed to prepare account connection:", error)
+          return
+        }
+      }
       if (platform.setup?.modality === "manual_or_upload") {
         openManualUpload(platform)
         return
@@ -353,7 +368,23 @@ export function Home() {
 
       void runImportSource(platform)
     },
-    [openManualUpload, runImportSource, runs]
+    [loadPlatforms, openManualUpload, runImportSource, runs]
+  )
+
+  const handleAddAccount = useCallback(
+    async (platform: Platform) => {
+      try {
+        const account = await invoke<{ connectionId: string; accountLabel?: string | null }>(
+          "create_pdpp_connection",
+          { connectorId: platform.id }
+        )
+        await loadPlatforms()
+        await handleImportSource({ ...platform, ...account })
+      } catch (error) {
+        console.error("Failed to add account:", error)
+      }
+    },
+    [handleImportSource, loadPlatforms]
   )
 
   useEffect(() => {
@@ -552,23 +583,38 @@ export function Home() {
 
   // Separate available platforms (memoized to avoid re-filtering on every render)
   const connectedPlatformsList = useMemo(() => {
-    const connectedByCanonicalId = new Map<string, Platform>()
+    const connectedByAccount = new Map<string, Platform>()
 
     for (const platform of displayPlatforms) {
       const canonicalId = getPlatformRegistryEntry(platform)?.id ?? platform.id
-      const isConnected =
-        isPlatformConnected(platform.id) ||
-        connectedCanonicalIdsFromRuns.has(canonicalId)
+      const accountKey = installedPdppConnectionKey(platform)
+      const isConnected = platform.connectionId
+        ? isPlatformConnected(accountKey) ||
+          runs.some(
+            run => run.platformId === platform.id &&
+              run.connectionId === platform.connectionId &&
+              (run.status === "success" || run.status === "partial") &&
+              Boolean(run.exportPath)
+          )
+        : isPlatformConnected(platform.id) ||
+          connectedCanonicalIdsFromRuns.has(canonicalId)
       if (!isConnected) continue
 
-      const existing = connectedByCanonicalId.get(canonicalId)
-      if (!existing || platform.runtime === "pdpp-network") {
-        connectedByCanonicalId.set(canonicalId, platform)
-      }
+      connectedByAccount.set(
+        platform.connectionId ? `${canonicalId}:${platform.connectionId}` : canonicalId,
+        platform.connectionId && !platform.accountLabel
+          ? {
+              ...platform,
+              accountLabel: runs.find(
+                run => run.connectionId === platform.connectionId && run.accountLabel
+              )?.accountLabel ?? null,
+            }
+          : platform
+      )
     }
 
-    return [...connectedByCanonicalId.values()]
-  }, [connectedCanonicalIdsFromRuns, displayPlatforms, isPlatformConnected])
+    return [...connectedByAccount.values()]
+  }, [connectedCanonicalIdsFromRuns, displayPlatforms, isPlatformConnected, runs])
 
   const connectedPlatformIds = useMemo(
     () => connectedPlatformsList.map(platform => platform.id),
@@ -627,7 +673,7 @@ export function Home() {
     [navigate]
   )
 
-  const removeSource = useHomeRemoveSource()
+  const removeSource = useHomeRemoveSource(loadPlatforms)
 
   return (
     <PageContainer>
@@ -644,6 +690,7 @@ export function Home() {
           onReconnectSource={handleReconnectSource}
           onReplaceCredentials={handleReplaceCredentials}
           onRemoveSource={removeSource.request}
+          onAddAccount={handleAddAccount}
         />
         <AvailableSourcesList
           platforms={homeImportSourcesDebug.platforms}
