@@ -44,7 +44,7 @@ interface Props {
 export function ConnectionDangerZone({ activeRunId = null, connectionId, error, message }: Props) {
   return (
     <Section
-      description="These actions affect only this connection. Sibling connections of the same connector type are untouched."
+      description="These actions affect only this connection's records and settings. Sibling connections of the same connector type keep theirs. On the desktop app, every account of one source shares a single saved browser session, so that session stays signed in while another account of the source is still connected."
       id="danger-zone"
       title="Danger zone"
     >
@@ -80,7 +80,7 @@ function RevokeForm({ connectionId }: { connectionId: string }) {
       <h3 className="pdpp-body font-medium text-foreground">Revoke</h3>
       <p className="pdpp-caption text-muted-foreground">
         Stops future collection and signs out the saved browser session for this source. Records, grants, and audit
-        history are retained — revoke does not erase anything. To resume, reconnect this source.
+        history are retained. To resume, reconnect this source.
       </p>
       <form action={revokeConnectionAction} className="mt-1 flex flex-wrap items-center gap-3">
         <input name="connection_id" type="hidden" value={connectionId} />

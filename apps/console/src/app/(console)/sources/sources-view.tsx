@@ -547,8 +547,8 @@ function InstancePassport({
         ) : null}
         {instance.revoked && !instance.setupFailed ? (
           <p className="rr-s-revoked-note">
-            Future collection is stopped. Already-collected records stay visible and searchable; revoke does not erase
-            anything.
+            Future collection is stopped. Revoke signs out the saved browser session; already-collected records stay
+            visible and searchable.
           </p>
         ) : null}
       </SheetBody>
@@ -930,8 +930,8 @@ function RevokeCeremony({
     <form action={revokeAction} className="rr-s-revoke" data-testid="sources-revoke-ceremony">
       <input name="connection_id" type="hidden" value={connectionId} />
       <p className="rr-s-revoke__copy">
-        Revoke stops future collection for this connection. Already-collected records, grants, and audit history are
-        retained — revoke does not erase anything.
+        Revoke stops future collection for this connection and signs out its saved browser session. Already-collected
+        records, grants, and audit history are retained.
       </p>
       <label className="rr-s-revoke__check">
         <input name="confirm_revoke" type="checkbox" value="yes" />

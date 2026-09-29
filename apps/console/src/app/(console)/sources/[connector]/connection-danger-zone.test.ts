@@ -54,6 +54,8 @@ const DZ_NULL_GUIDANCE_RE = /nothing to revoke or delete/i;
 const DZ_REVOKE_RETAINED_RE = /retained/i;
 const DZ_REVOKE_FUTURE_RE = /future collection/i;
 const DZ_REVOKE_NO_ERASE_RE = /does not erase anything/i;
+const DZ_REVOKE_SIGNS_OUT_RE = /Stops future collection and signs out the saved browser session/;
+const DZ_SHARED_SESSION_RE = /every account of one source shares a single saved browser session/;
 const DZ_DELETE_ERASES_RE = /[Ee]rases this connection's records/;
 /**
  * Delete must distinguish itself from revoke. The copy states this positively —
@@ -91,9 +93,19 @@ const ACT_FORWARDS_BLOCKING_RUN_RE = /dangerZoneHref\(routeId, message, error, b
 const ACT_REVALIDATE_RE = /revalidatePath\("\/sources"\)/;
 const ACT_RUN_ACTIVE_RE = /result\.status === "run_active"/;
 const ACT_DEFAULT_ACCOUNT_RE = /result\.status === "default_account"/;
-const ACT_DELETE_REDIRECT_LIST_RE = /redirect\(recordsListHref\(message \?\? "Connection deleted\."\)\)/;
+const ACT_DELETE_REDIRECT_LIST_RE =
+  /purgeFailed \? recordsListHref\(undefined, deletedMessage, connectionId\) : recordsListHref\(deletedMessage\)/;
 const ACT_REVOKE_REDIRECT_LIST_RE =
-  /redirect\(error \? dangerZoneHref\(routeId, message, error\) : recordsListHref\(message\)\)/;
+  /purgeFailed \? recordsListHref\(undefined, message, connectionId\) : recordsListHref\(message\)/;
+const ACT_PURGE_FAILED_RE = /purgeFailed = result\.profilePurge\?\.status === "failed";/g;
+const ACT_PURGE_SENTENCE_RE = /withPurgeSentence\(message, profilePurgeSentence\(result\.profilePurge\)\)/g;
+const ACT_PURGE_RETRY_FN_RE = /export async function purgeBrowserProfileAction/;
+const ACT_PURGE_RETRY_WRAPPER_RE = /await purgeConnectionBrowserProfile\(connectionId\)/;
+const SOURCES_PAGE_FILE = `${HERE}../page.tsx`;
+const LIST_RETRY_FORM_RE = /error && purgeRetryId \?/;
+const LIST_RETRY_ACTION_RE = /action=\{purgeBrowserProfileAction\}/;
+const LIST_RETRY_LABEL_RE = />\s*Remove saved browser session\s*</;
+const LIST_READS_RETRY_PARAM_RE = /purgeRetryId=\{params\.purge_retry\}/;
 const ACT_DANGER_ANCHOR_RE = /#danger-zone/;
 
 async function read(file: string): Promise<string> {
@@ -114,11 +126,30 @@ test("a connector with no addressable connection renders disabled guidance, not 
   assert.match(dz, DZ_NULL_GUIDANCE_RE);
 });
 
-test("revoke copy retains records and stops only future collection, never claims erasure", async () => {
+test("revoke copy retains records, stops future collection, and says it signs out the browser session", async () => {
   const dz = await read(DANGER_ZONE_FILE);
   assert.match(dz, DZ_REVOKE_RETAINED_RE);
   assert.match(dz, DZ_REVOKE_FUTURE_RE);
-  assert.match(dz, DZ_REVOKE_NO_ERASE_RE);
+  assert.match(dz, DZ_REVOKE_SIGNS_OUT_RE);
+  assert.doesNotMatch(dz, DZ_REVOKE_NO_ERASE_RE, "revoke now removes the saved browser session");
+});
+
+test("the danger zone states that the desktop shares one browser session across a source's accounts", async () => {
+  const dz = await read(DANGER_ZONE_FILE);
+  assert.match(dz, DZ_SHARED_SESSION_RE);
+});
+
+test("delete and revoke surface a failed browser-session purge and offer the retry on the Sources list", async () => {
+  const actions = await read(ACTIONS_FILE);
+  assert.equal(actions.match(ACT_PURGE_FAILED_RE)?.length, 2, "both actions read profile_purge");
+  assert.equal(actions.match(ACT_PURGE_SENTENCE_RE)?.length, 2, "both actions add the purge sentence");
+  assert.match(actions, ACT_PURGE_RETRY_FN_RE);
+  assert.match(actions, ACT_PURGE_RETRY_WRAPPER_RE);
+  const list = await read(SOURCES_PAGE_FILE);
+  assert.match(list, LIST_RETRY_FORM_RE);
+  assert.match(list, LIST_RETRY_ACTION_RE);
+  assert.match(list, LIST_RETRY_LABEL_RE);
+  assert.match(list, LIST_READS_RETRY_PARAM_RE);
 });
 
 test("delete copy erases this connection, discloses grants, and offers cancel-run for an in-flight run", async () => {

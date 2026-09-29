@@ -329,7 +329,7 @@ function buildDeleteHandler(
       // The data is gone; now remove the source's logged-in browser session.
       // A failure is reported, never turned into a failed delete.
       const profilePurge = ctx.purgeBrowserProfile
-        ? await ctx.purgeBrowserProfile({ connectorInstanceId: connectionId, connectorKey })
+        ? await ctx.purgeBrowserProfile({ connectorInstanceId: connectionId, connectorKey, ownerSubjectId })
         : null;
 
       await emitDeleteAudit(ctx, req, res, {

@@ -296,6 +296,7 @@ export interface ReferenceQueryRegistry extends Readonly<Record<string, Register
   readonly connectorInstancesGetByBinding: ReadOneQuery;
   readonly connectorInstancesGetById: ReadOneQuery;
   readonly connectorInstancesGetTombstoneByBinding: ReadOneQuery;
+  readonly connectorInstancesGetTombstoneByConnectionId: ReadOneQuery;
   readonly connectorInstancesInsert: MutationQuery;
   readonly connectorInstancesInsertTombstone: MutationQuery;
   readonly connectorInstancesListActiveByOwnerConnector: ReadManyQuery;

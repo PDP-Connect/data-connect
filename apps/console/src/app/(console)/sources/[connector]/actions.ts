@@ -6,6 +6,7 @@
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { requireDashboardAccess } from "../../lib/dashboard-access.ts";
+import { profilePurgeSentence } from "../../lib/connection-control-result.ts";
 import { deleteConnectionWithRunCancel } from "../../lib/delete-connection-with-run-cancel.ts";
 import {
   cancelRun,
@@ -15,6 +16,7 @@ import {
   pauseConnection,
   pauseConnectionSchedule,
   pauseConnectorSchedule,
+  purgeConnectionBrowserProfile,
   reactivateConnection,
   resumeConnection,
   resumeConnectionSchedule,
@@ -281,13 +283,18 @@ function dangerZoneHref(routeId: string, message?: string, error?: string, activ
   return `${base}${query ? `?${query}` : ""}#danger-zone`;
 }
 
-function recordsListHref(message?: string, error?: string): string {
+// `purgeRetryId` names a removed connection whose saved browser session could
+// not be removed; the Sources list then offers "Remove saved browser session".
+function recordsListHref(message?: string, error?: string, purgeRetryId?: string): string {
   const params = new URLSearchParams();
   if (message) {
     params.set("message", message);
   }
   if (error) {
     params.set("error", error);
+  }
+  if (purgeRetryId) {
+    params.set("purge_retry", purgeRetryId);
   }
   const query = params.toString();
   return `/sources${query ? `?${query}` : ""}`;
@@ -317,18 +324,66 @@ export async function revokeConnectionAction(formData: FormData) {
 
   let message: string | undefined;
   let error: string | undefined;
+  let purgeFailed = false;
   try {
     const result = await revokeConnection(connectionId);
     message =
       result.status === "already_revoked"
         ? "This connection was already revoked. Future collection is stopped; its records are retained."
         : "Connection revoked. Future collection is stopped; already-collected records and grants are retained.";
+    purgeFailed = result.profilePurge?.status === "failed";
+    message = withPurgeSentence(message, profilePurgeSentence(result.profilePurge));
   } catch (err) {
     error = errorMessage(err);
   }
   revalidatePath("/sources");
   revalidatePath(`/sources/${encodeURIComponent(routeId)}`);
-  redirect(error ? dangerZoneHref(routeId, message, error) : recordsListHref(message));
+  if (error) {
+    redirect(dangerZoneHref(routeId, message, error));
+  }
+  // A failed purge is shown as an error banner with the retry button.
+  redirect(purgeFailed ? recordsListHref(undefined, message, connectionId) : recordsListHref(message));
+}
+
+function withPurgeSentence(message: string, purgeSentence: string | null): string {
+  return purgeSentence ? `${message} ${purgeSentence}` : message;
+}
+
+/**
+ * Retry the saved-browser-session removal for a revoked or deleted connection
+ * whose delete or revoke reported a failed purge (for example, a browser still
+ * held the profile). Re-verifies the owner session, then calls the owner-session
+ * `POST /_ref/connections/:id/browser-profile/purge` route.
+ */
+export async function purgeBrowserProfileAction(formData: FormData) {
+  const connectionId = asString(formData.get("connection_id"));
+  await requireDashboardAccess(recordsListHref());
+  if (!connectionId) {
+    redirect(recordsListHref(undefined, "No connection was named, so no browser session was removed."));
+  }
+  let message: string | undefined;
+  let error: string | undefined;
+  let retryId: string | undefined;
+  try {
+    const result = await purgeConnectionBrowserProfile(connectionId);
+    if (result.status === "not_found") {
+      error = "No removed connection with this id was found.";
+    } else if (result.status === "not_removed") {
+      error = "This connection is still active, so its browser session is in use. Revoke or delete it first.";
+    } else if (result.profilePurge?.status === "failed") {
+      error = profilePurgeSentence(result.profilePurge) ?? undefined;
+      retryId = connectionId;
+    } else if (result.profilePurge?.status === "shared") {
+      message = profilePurgeSentence(result.profilePurge) ?? undefined;
+    } else {
+      message = "The saved browser session was removed.";
+    }
+  } catch (err) {
+    error = errorMessage(err);
+    retryId = connectionId;
+  }
+  revalidatePath("/sources");
+  redirect(recordsListHref(message, error, retryId));
 }
 
 /**
@@ -411,6 +466,7 @@ export async function deleteConnectionAction(formData: FormData) {
   let error: string | undefined;
   let blockingRunId: string | undefined;
   let deleted = false;
+  let purgeFailed = false;
   try {
     const result = await deleteConnectionWithRunCancel(connectionId, cancelRunId, { cancelRun, deleteConnection });
     if (result.status === "deleted") {
@@ -420,6 +476,8 @@ export async function deleteConnectionAction(formData: FormData) {
         typeof count === "number"
           ? `Connection deleted. ${count.toLocaleString()} record${count === 1 ? "" : "s"} for this connection were erased.`
           : "Connection deleted. Its records for this connection were erased.";
+      purgeFailed = result.profilePurge?.status === "failed";
+      message = withPurgeSentence(message, profilePurgeSentence(result.profilePurge));
     } else if (result.status === "run_active") {
       blockingRunId = result.activeRunId;
       error = result.cancelledRunId
@@ -439,7 +497,11 @@ export async function deleteConnectionAction(formData: FormData) {
   // connections list, where the deleted row is now absent. A refusal stays on
   // the detail page with the typed banner.
   if (deleted) {
-    redirect(recordsListHref(message ?? "Connection deleted."));
+    const deletedMessage = message ?? "Connection deleted.";
+    // A failed purge is shown as an error banner with the retry button.
+    redirect(
+      purgeFailed ? recordsListHref(undefined, deletedMessage, connectionId) : recordsListHref(deletedMessage)
+    );
   }
   redirect(dangerZoneHref(routeId, message, error, blockingRunId));
 }

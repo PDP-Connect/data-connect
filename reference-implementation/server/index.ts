@@ -409,6 +409,7 @@ import { mountRefConnectionConfirmCoverageHorizon } from "./routes/ref-connectio
 import { mountRefConnectionPause } from "./routes/ref-connection-pause.ts";
 import { HISTORICAL_ARCHIVE_SOURCE_BINDING_KIND, mountRefConnectionResume } from "./routes/ref-connection-resume.ts";
 import {
+  mountRefConnectionBrowserProfilePurge,
   mountRefConnectionDelete,
   mountRefConnectionDetail,
   mountRefConnectionReactivate,
@@ -2203,6 +2204,28 @@ function resolveSingleConnectorIdQueryValue(rawConnectorId: unknown) {
 
 function getOwnerTokenSubjectId(req: ReqLike) {
   return req.tokenInfo?.subject_id || OWNER_AUTH_DEFAULT_SUBJECT_ID;
+}
+
+// The desktop host keys a browser profile by connector, so the purger must know
+// whether the owner still has another connection of that connector (active or
+// paused; drafts are not listed).
+function createOwnerBrowserProfilePurger(opts: ServerOpts): BrowserProfilePurger {
+  return (
+    opts.purgeBrowserProfile ??
+    createBrowserProfilePurger({
+      countOtherActiveConnections: async ({ connectorKey, connectorInstanceId, ownerSubjectId }) => {
+        const instances = await createRequestConnectorInstanceStore().listByOwner(ownerSubjectId);
+        return instances.filter(
+          (instance) =>
+            // A paused connection still uses the session when it resumes.
+            instance.status !== "revoked" &&
+            instance.connectorInstanceId !== connectorInstanceId &&
+            canonicalConnectorKey(instance.connectorId) === connectorKey
+        ).length;
+      },
+      logger: opts.logger ?? null,
+    })
+  );
 }
 
 function createRequestConnectorInstanceStore() {
@@ -6217,7 +6240,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
 
   const refConnectorsContext = {
     canonicalConnectorKey,
-    purgeBrowserProfile: opts.purgeBrowserProfile ?? createBrowserProfilePurger({ logger: opts.logger ?? null }),
+    purgeBrowserProfile: createOwnerBrowserProfilePurger(opts),
     clearDefaultAccountTombstone: (input: { connectorId: string; ownerSubjectId: string }) =>
       createRequestConnectorInstanceStore().clearDefaultAccountTombstone(input),
     createRequestConnectorInstanceStore,
@@ -7030,6 +7053,10 @@ export function buildAsApp(opts: ServerOpts = {}) {
     refConnectorsContext as unknown as Parameters<typeof mountRefConnectionReactivate>[1]
   );
   mountRefConnectionDelete(app, refConnectorsContext as unknown as Parameters<typeof mountRefConnectionDelete>[1]);
+  mountRefConnectionBrowserProfilePurge(
+    app,
+    refConnectorsContext as unknown as Parameters<typeof mountRefConnectionBrowserProfilePurge>[1]
+  );
 
   if (!nativeMode) {
     // Polyfill-only connector registry: register/detail semantics live in
@@ -7278,8 +7305,7 @@ function buildOwnerAgentOnboardingMetadata({
 }
 
 function buildRsApp(opts: ServerOpts = {}) {
-  const rsPurgeBrowserProfile =
-    opts.purgeBrowserProfile ?? createBrowserProfilePurger({ logger: opts.logger ?? null });
+  const rsPurgeBrowserProfile = createOwnerBrowserProfilePurger(opts);
   const app = createApp({
     ...(opts.logger === null ? {} : { logger: opts.logger }),
   });

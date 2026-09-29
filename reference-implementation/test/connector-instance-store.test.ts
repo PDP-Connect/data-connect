@@ -216,6 +216,12 @@ interface ConformanceStoreLike {
     now?: string;
   }) => ConnectorInstanceLike | Promise<ConnectorInstanceLike>;
   get: (connectorInstanceId: string) => (ConnectorInstanceLike | null) | Promise<ConnectorInstanceLike | null>;
+  getTombstoneByConnectionId: (
+    connectorInstanceId: string
+  ) =>
+    | { connectorId: string; ownerSubjectId: string }
+    | null
+    | Promise<{ connectorId: string; ownerSubjectId: string } | null>;
   getByBinding: (args: {
     ownerSubjectId: string;
     connectorId: string;
@@ -807,6 +813,14 @@ async function runConformance({
     purge: stubPurge(),
   });
   assert.equal(await driver.call("get", codexOriginal.connectorInstanceId), null, "row is gone after delete");
+  // The browser-profile purge retry finds a deleted connection by its id.
+  const tombstoneById = (await driver.call("getTombstoneByConnectionId", codexOriginal.connectorInstanceId)) as {
+    connectorId: string;
+    ownerSubjectId: string;
+  } | null;
+  assert.equal(tombstoneById?.connectorId, "codex");
+  assert.equal(tombstoneById?.ownerSubjectId, "owner_6");
+  assert.equal(await driver.call("getTombstoneByConnectionId", "cin_never_deleted"), null);
 
   // The resurrection attempt: a DIFFERENT device_id/source_instance_id (a
   // genuinely new enrollment), same owner/connector/source_kind/binding.

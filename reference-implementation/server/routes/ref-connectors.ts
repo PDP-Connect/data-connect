@@ -87,6 +87,7 @@ interface ConnectorInstanceRow {
   readonly connectorInstanceId: string;
   readonly createdAt?: string | null;
   readonly displayName?: string | null;
+  readonly ownerSubjectId?: string | null;
   readonly revokedAt?: string | null;
   readonly sourceBinding?: unknown;
   readonly sourceKind?: string | null;
@@ -105,8 +106,16 @@ interface ConnectorNamespace {
   readonly connectorInstanceId: string;
 }
 
+interface ConnectorInstanceTombstoneRow {
+  readonly connectorId: string;
+  readonly ownerSubjectId: string;
+}
+
 interface ConnectorInstanceStore {
   get: (connectorInstanceId: string) => Promise<ConnectorInstanceRow | null> | ConnectorInstanceRow | null;
+  getTombstoneByConnectionId?: (
+    connectorInstanceId: string
+  ) => Promise<ConnectorInstanceTombstoneRow | null> | ConnectorInstanceTombstoneRow | null;
   listByOwner: (ownerSubjectId: string) => Promise<ConnectorInstanceRow[]> | ConnectorInstanceRow[];
   setDisplayName: (
     connectorInstanceId: string,
@@ -1327,9 +1336,10 @@ async function emitConnectionControlAudit(
       | "owner_agent.connection.run"
       | "owner_agent.connection.revoke"
       | "owner_agent.connection.delete"
-      | "owner_agent.connection.reactivate";
+      | "owner_agent.connection.reactivate"
+      | "owner_agent.connection.browser_profile_purge";
     force?: boolean;
-    operation: "run_now" | "revoke" | "delete" | "reactivate";
+    operation: "run_now" | "revoke" | "delete" | "reactivate" | "purge_browser_profile";
     outcome: "succeeded" | "failed";
     ownerSubjectId?: string | null;
     profilePurge?: BrowserProfilePurgeResult | null;
@@ -1429,7 +1439,7 @@ export function mountRefConnectionRevoke(app: AppLike, ctx: MountRefConnectorsCo
         // Revoke stops future collection, so the logged-in browser session goes
         // too. A failure is reported, never a failed revoke.
         const profilePurge = ctx.purgeBrowserProfile
-          ? await ctx.purgeBrowserProfile({ connectorInstanceId: connectionId, connectorKey })
+          ? await ctx.purgeBrowserProfile({ connectorInstanceId: connectionId, connectorKey, ownerSubjectId })
           : null;
         await emitConnectionControlAudit(ctx, res, {
           connectionId,
@@ -1457,6 +1467,83 @@ export function mountRefConnectionRevoke(app: AppLike, ctx: MountRefConnectorsCo
           error: err,
           eventType: "owner_agent.connection.revoke",
           operation: "revoke",
+          outcome: "failed",
+          ownerSubjectId,
+        });
+        ctx.handleError(res, err);
+      }
+    }
+  );
+}
+
+// POST /_ref/connections/:connectorInstanceId/browser-profile/purge — owner-
+// session retry of the post-commit browser-profile purge. A delete or revoke
+// reports `profile_purge.status: "failed"` when the purge could not run (for
+// example a browser still held the profile); a second delete or revoke cannot
+// reach the purge again, so this route runs the same purger for a connection
+// that is already removed: revoked (the row still exists) or deleted (its
+// tombstone records the owner and connector). An active connection is refused,
+// because its session is still in use.
+export function mountRefConnectionBrowserProfilePurge(app: AppLike, ctx: MountRefConnectorsContext): void {
+  app.post(
+    "/_ref/connections/:connectorInstanceId/browser-profile/purge",
+    ctx.requireOwnerSession,
+    async (req: RouteRequest, res: RouteResponse) => {
+      const ownerSubjectId = ctx.getOwnerSubjectId(req);
+      let connectionId: string | null = null;
+      let connectorKey: string | null = null;
+      try {
+        connectionId = decodeURIComponent(req.params.connectorInstanceId as string);
+        const store = ctx.createRequestConnectorInstanceStore();
+        const instance = await store.get(connectionId);
+        let connectorId: string | null = null;
+        if (instance) {
+          if (instance.ownerSubjectId === ownerSubjectId && instance.status !== "revoked") {
+            ctx.pdppError(
+              res,
+              409,
+              "connection_not_removed",
+              "This connection is not revoked or deleted, so its browser session is still in use."
+            );
+            return;
+          }
+          connectorId = instance.ownerSubjectId === ownerSubjectId ? instance.connectorId : null;
+        } else {
+          const tombstone = (await store.getTombstoneByConnectionId?.(connectionId)) ?? null;
+          connectorId = tombstone?.ownerSubjectId === ownerSubjectId ? tombstone.connectorId : null;
+        }
+        if (!(connectorId && ctx.purgeBrowserProfile)) {
+          ctx.pdppError(res, 404, "connector_instance_not_found", "No removed connection with this id was found.");
+          return;
+        }
+        connectorKey = ctx.canonicalConnectorKey(connectorId) ?? connectorId;
+        const profilePurge = await ctx.purgeBrowserProfile({
+          connectorInstanceId: connectionId,
+          connectorKey,
+          ownerSubjectId,
+        });
+        await emitConnectionControlAudit(ctx, res, {
+          connectionId,
+          connectorKey,
+          eventType: "owner_agent.connection.browser_profile_purge",
+          operation: "purge_browser_profile",
+          outcome: "succeeded",
+          ownerSubjectId,
+          profilePurge,
+        });
+        res.status(200).json({
+          connection_id: connectionId,
+          connector_key: connectorKey,
+          object: "ref_connection_browser_profile_purge",
+          profile_purge: profilePurge,
+        });
+      } catch (err) {
+        await emitConnectionControlAudit(ctx, res, {
+          connectionId,
+          connectorKey,
+          error: err,
+          eventType: "owner_agent.connection.browser_profile_purge",
+          operation: "purge_browser_profile",
           outcome: "failed",
           ownerSubjectId,
         });
@@ -1498,7 +1585,7 @@ export function mountRefConnectionDelete(app: AppLike, ctx: MountRefConnectorsCo
         // The data is gone; now remove the logged-in browser session. A failure
         // is reported, never a failed delete.
         const profilePurge = ctx.purgeBrowserProfile
-          ? await ctx.purgeBrowserProfile({ connectorInstanceId: connectionId, connectorKey })
+          ? await ctx.purgeBrowserProfile({ connectorInstanceId: connectionId, connectorKey, ownerSubjectId })
           : null;
         await emitConnectionControlAudit(ctx, res, {
           connectionId,

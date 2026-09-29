@@ -16,18 +16,27 @@
 //   - Desktop host (`PDPP_BROWSER_SURFACE_MODE=host`): the Tauri host owns the
 //     profile; the RI asks it over the existing authenticated loopback
 //     contract (`DELETE <endpoint>/browser-surface/profiles/<connector_key>`,
-//     docs/host-capability-provider-contract.md).
+//     docs/host-capability-provider-contract.md). The host keys that profile
+//     by connector only, so every connection of one connector shares it.
+//     While the owner still has another connection of the connector that is
+//     not revoked, the purge keeps the session and reports `shared` instead.
 //
 // The purge never throws: the delete or revoke has already committed, so a
 // purge failure is logged and returned for the route to report.
 
-import { lstat, readdir, realpath, rm } from "node:fs/promises";
-import { homedir } from "node:os";
+import { lstat, readdir, readlink, realpath, rm, unlink } from "node:fs/promises";
+import { homedir, hostname } from "node:os";
 import { isAbsolute, join, relative } from "node:path";
 
 export type BrowserProfilePurgeResult =
   | { readonly status: "purged"; readonly target: "host" | "local"; readonly removed: number }
   | { readonly status: "absent"; readonly target: "host" | "local" }
+  | {
+      readonly status: "shared";
+      readonly target: "host";
+      readonly other_connection_count: number;
+      readonly message: string;
+    }
   | {
       readonly status: "failed";
       readonly target: "host" | "local";
@@ -38,7 +47,17 @@ export type BrowserProfilePurgeResult =
 export interface BrowserProfilePurgeInput {
   readonly connectorKey: string;
   readonly connectorInstanceId: string;
+  // Needed to find the owner's other connections that share a host profile.
+  readonly ownerSubjectId?: string | null;
 }
+
+// Counts the owner's connections of `connectorKey`, other than
+// `connectorInstanceId`, that can still use the session (not revoked).
+export type CountOtherActiveConnections = (input: {
+  readonly connectorKey: string;
+  readonly connectorInstanceId: string;
+  readonly ownerSubjectId: string;
+}) => Promise<number> | number;
 
 export type BrowserProfilePurger = (input: BrowserProfilePurgeInput) => Promise<BrowserProfilePurgeResult>;
 
@@ -58,21 +77,64 @@ export function resolveLocalBrowserProfileRoot(env: NodeJS.ProcessEnv = process.
   return env.PDPP_BROWSER_PROFILE_ROOT?.trim() || join(homedir(), ".pdpp", "profiles");
 }
 
-async function pathExists(path: string): Promise<boolean> {
+function isInside(root: string, candidate: string): boolean {
+  const rel = relative(root, candidate);
+  return rel.length > 0 && !rel.startsWith("..") && !isAbsolute(rel);
+}
+
+// Chromium's singleton files (`SingletonLock` -> `<hostname>-<pid>`,
+// `SingletonCookie`, `SingletonSocket`). Mirrors
+// packages/polyfill-connectors/src/profile-lock.ts; the RI cannot import it
+// because the Docker reference image does not ship that package.
+const SINGLETON_FILE_NAMES = ["SingletonLock", "SingletonCookie", "SingletonSocket"] as const;
+
+function processIsAlive(pid: number): boolean {
   try {
-    await lstat(path);
+    process.kill(pid, 0);
     return true;
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+    // EPERM: the pid exists but belongs to another user.
+    return (err as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+// A lock is live only when it names this host and a running pid. Chromium
+// leaves the lock behind when it dies non-gracefully (SIGKILL, OOM, a
+// cancelled run), and that residue must not block the purge forever.
+async function isLiveSingletonLock(profileDir: string): Promise<boolean> {
+  let target: string;
+  try {
+    target = await readlink(join(profileDir, "SingletonLock"));
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") {
+      return false;
+    }
+    if (code === "EINVAL") {
+      // A regular file, not Chromium's symlink: no owner to check.
       return false;
     }
     throw err;
   }
+  const separator = target.lastIndexOf("-");
+  const lockHost = separator > 0 ? target.slice(0, separator) : "";
+  const pid = Number(target.slice(separator + 1));
+  if (lockHost !== hostname() || !Number.isSafeInteger(pid) || pid <= 0) {
+    return false;
+  }
+  return processIsAlive(pid);
 }
 
-function isInside(root: string, candidate: string): boolean {
-  const rel = relative(root, candidate);
-  return rel.length > 0 && !rel.startsWith("..") && !isAbsolute(rel);
+async function removeChromiumSingletonResidue(profileDir: string): Promise<void> {
+  for (const name of SINGLETON_FILE_NAMES) {
+    try {
+      await unlink(join(profileDir, name));
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw err;
+      }
+    }
+  }
 }
 
 // Removes every `<profileName>__<connectorInstanceId>` directory directly under
@@ -134,15 +196,17 @@ export async function purgeLocalBrowserProfiles(
     }
     // Chromium holds `SingletonLock` while it runs against the profile (for
     // example a revoke while a run is still collecting). Removing a live
-    // profile would corrupt that run, so refuse and report instead.
-    if (await pathExists(join(resolved, "SingletonLock"))) {
+    // profile would corrupt that run, so refuse and report instead. A lock
+    // left behind by a crashed or killed browser is residue: clear it and go on.
+    if (await isLiveSingletonLock(resolved)) {
       return {
         error_code: "profile_purge_in_use",
-        message: `Refused to remove '${entry}': a browser is still using it. Remove the source again after the run ends.`,
+        message: `Refused to remove '${entry}': a browser is still using it. Retry the browser-session removal after the run ends.`,
         status: "failed",
         target: "local",
       };
     }
+    await removeChromiumSingletonResidue(resolved);
     await rm(resolved, { force: true, recursive: true });
     removed += 1;
   }
@@ -183,11 +247,18 @@ async function purgeHostBrowserProfile(
   };
 }
 
+export function sharedHostProfileMessage(otherConnectionCount: number): string {
+  const others = otherConnectionCount === 1 ? "1 other account" : `${otherConnectionCount} other accounts`;
+  return `The saved browser session is shared with ${others} of this source on this desktop, so it was kept. Remove the other accounts to sign out.`;
+}
+
 export function createBrowserProfilePurger({
+  countOtherActiveConnections,
   env = process.env,
   fetchImpl = fetch,
   logger,
 }: {
+  countOtherActiveConnections?: CountOtherActiveConnections;
   env?: NodeJS.ProcessEnv;
   fetchImpl?: typeof fetch;
   logger?: PurgeLogger | null;
@@ -196,13 +267,26 @@ export function createBrowserProfilePurger({
   const hostMode = env.PDPP_BROWSER_SURFACE_MODE?.trim() === "host";
   const hostEndpoint = env.PDPP_BROWSER_SURFACE_HOST_ENDPOINT?.trim() ?? "";
   const hostToken = env.PDPP_BROWSER_SURFACE_HOST_TOKEN?.trim() ?? "";
-  return async ({ connectorKey, connectorInstanceId }) => {
+  return async ({ connectorKey, connectorInstanceId, ownerSubjectId }) => {
     const target = hostMode ? "host" : "local";
     let result: BrowserProfilePurgeResult;
     try {
-      result = hostMode
-        ? await purgeHostBrowserProfile({ endpoint: hostEndpoint, token: hostToken }, connectorKey, fetchImpl)
-        : await purgeLocalBrowserProfiles(resolveLocalBrowserProfileRoot(env), connectorInstanceId);
+      const otherConnectionCount =
+        hostMode && countOtherActiveConnections && ownerSubjectId
+          ? await countOtherActiveConnections({ connectorInstanceId, connectorKey, ownerSubjectId })
+          : 0;
+      if (otherConnectionCount > 0) {
+        result = {
+          message: sharedHostProfileMessage(otherConnectionCount),
+          other_connection_count: otherConnectionCount,
+          status: "shared",
+          target: "host",
+        };
+      } else if (hostMode) {
+        result = await purgeHostBrowserProfile({ endpoint: hostEndpoint, token: hostToken }, connectorKey, fetchImpl);
+      } else {
+        result = await purgeLocalBrowserProfiles(resolveLocalBrowserProfileRoot(env), connectorInstanceId);
+      }
     } catch (err) {
       result = {
         error_code: "profile_purge_failed",

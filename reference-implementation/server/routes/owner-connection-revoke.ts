@@ -362,7 +362,7 @@ function buildRevokeHandler(
       // session goes too. A failure is reported, never a failed revoke.
       const profilePurge =
         ctx.purgeBrowserProfile && connectionId && connectorKey
-          ? await ctx.purgeBrowserProfile({ connectorInstanceId: connectionId, connectorKey })
+          ? await ctx.purgeBrowserProfile({ connectorInstanceId: connectionId, connectorKey, ownerSubjectId })
           : null;
       await emitRevokeAudit(ctx, req, res, {
         connectionId,

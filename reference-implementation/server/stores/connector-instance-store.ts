@@ -1540,9 +1540,19 @@ export function createSqliteConnectorInstanceStore() {
       return (result?.changes ?? 0) > 0;
     },
 
+    // Reads the tombstone of one deleted connection id. Used only by the
+    // owner-session browser-profile purge retry.
+    getTombstoneByConnectionId(connectorInstanceId: string): ConnectorInstanceTombstone | null {
+      return mapTombstone(
+        getOne<ConnectorInstanceTombstoneRow>(referenceQueries.connectorInstancesGetTombstoneByConnectionId, [
+          connectorInstanceId,
+        ])
+      );
+    },
+
     // Reads the tombstone (if any) for one identity. Consulted ONLY by
-    // `upsert`'s no-existing-row path; no other read surface in the system
-    // queries this table. See openspec/changes/fix-owner-delete-resurrection.
+    // `upsert`'s no-existing-row path (the purge retry reads by connection id
+    // instead). See openspec/changes/fix-owner-delete-resurrection.
     getTombstoneByBinding({
       ownerSubjectId,
       connectorId,
@@ -2459,9 +2469,22 @@ export function createPostgresConnectorInstanceStore() {
       return Number(result.rowCount ?? 0) > 0;
     },
 
+    // Postgres twin of the SQLite `getTombstoneByConnectionId`.
+    async getTombstoneByConnectionId(connectorInstanceId: string): Promise<ConnectorInstanceTombstone | null> {
+      const result = await postgresQuery<ConnectorInstanceTombstoneRow>(
+        `SELECT connector_instance_id, owner_subject_id, connector_id, source_kind, source_binding_key, deleted_at
+         FROM connector_instance_tombstones
+         WHERE connector_instance_id = $1
+         LIMIT 1`,
+        [connectorInstanceId]
+      );
+      const row: ConnectorInstanceTombstoneRow | undefined = result.rows[0];
+      return mapTombstone(row);
+    },
+
     // Reads the tombstone (if any) for one identity. Consulted ONLY by
-    // `upsert`'s no-existing-row path; no other read surface in the system
-    // queries this table. See openspec/changes/fix-owner-delete-resurrection.
+    // `upsert`'s no-existing-row path (the purge retry reads by connection id
+    // instead). See openspec/changes/fix-owner-delete-resurrection.
     async getTombstoneByBinding({
       ownerSubjectId,
       connectorId,

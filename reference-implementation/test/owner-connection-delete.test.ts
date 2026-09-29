@@ -49,8 +49,10 @@ const TOP_LEVEL_REGEX_2 = /owner-agent/i;
  */
 
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { spawn } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { createServer, type IncomingMessage } from "node:http";
+import { hostname, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -1158,6 +1160,192 @@ test("owner-agent revoke purges the connection's browser profile and keeps its r
       assert.equal(existsSync(profileDir), false, "browser profile removed on revoke");
       assert.equal(getInstance(cin)?.status, "revoked");
       assert.equal(countRows("records", cin), 1, "revoke keeps records");
+    });
+  });
+});
+
+// A live stand-in for the browser that holds a profile: SingletonLock names
+// this host and the child's pid, exactly as Chromium writes it.
+async function withLiveBrowserLock(profileDir: string, fn: (stop: () => Promise<void>) => Promise<void>): Promise<void> {
+  const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+  const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
+  symlinkSync(`${hostname()}-${child.pid}`, join(profileDir, "SingletonLock"));
+  const stop = async () => {
+    child.kill("SIGKILL");
+    await exited;
+  };
+  try {
+    await fn(stop);
+  } finally {
+    await stop();
+  }
+}
+
+function purgeOf(result: JsonResult): Record<string, unknown> | undefined {
+  return (result.body as { profile_purge?: Record<string, unknown> } | null)?.profile_purge;
+}
+
+async function retryPurge(asUrl: string, connectionId: string): Promise<JsonResult> {
+  return await fetchJson(`${asUrl}/_ref/connections/${encodeURIComponent(connectionId)}/browser-profile/purge`, {
+    method: "POST",
+  });
+}
+
+test("a delete that finds a live browser reports the failed purge; the retry route removes the session after the run ends", async () => {
+  await withProfileRoot(async (profileRoot) => {
+    await withServer(async ({ asUrl }) => {
+      await registerConnector(asUrl, loadReferenceManifest("spotify"));
+      const cin = "cin_purge_live";
+      await seedInstance({ connectorId: "spotify", connectorInstanceId: cin, displayName: "L", sourceBindingKey: "l@x" });
+      const profileDir = seedProfileDir(profileRoot, `spotify__${cin}`);
+
+      await withLiveBrowserLock(profileDir, async (stopBrowser) => {
+        const del = await fetchJson(`${asUrl}/_ref/connections/${cin}`, { method: "DELETE" });
+        assert.equal(del.status, 200, JSON.stringify(del.body));
+        assert.equal(purgeOf(del)?.status, "failed");
+        assert.equal(purgeOf(del)?.error_code, "profile_purge_in_use");
+        assert.doesNotMatch(String(purgeOf(del)?.message), /again/, "the owner is not told to remove again");
+        assert.equal(existsSync(join(profileDir, "Default", "Cookies")), true, "the live session is left alone");
+        assert.equal(getInstance(cin), null, "the delete itself committed");
+
+        const whileRunning = await retryPurge(asUrl, cin);
+        assert.equal(whileRunning.status, 200, JSON.stringify(whileRunning.body));
+        assert.equal(purgeOf(whileRunning)?.error_code, "profile_purge_in_use");
+
+        await stopBrowser();
+        const afterRun = await retryPurge(asUrl, cin);
+        assert.equal(afterRun.status, 200, JSON.stringify(afterRun.body));
+        assert.deepEqual(purgeOf(afterRun), { removed: 1, status: "purged", target: "local" });
+        assert.equal(existsSync(profileDir), false, "the retry removed the saved session");
+      });
+
+      const again = await retryPurge(asUrl, cin);
+      assert.deepEqual(purgeOf(again), { status: "absent", target: "local" });
+    });
+  });
+});
+
+test("a delete clears a dangling SingletonLock left by a dead browser and removes the session", async () => {
+  await withProfileRoot(async (profileRoot) => {
+    await withServer(async ({ asUrl }) => {
+      await registerConnector(asUrl, loadReferenceManifest("spotify"));
+      const cin = "cin_purge_stale";
+      await seedInstance({ connectorId: "spotify", connectorInstanceId: cin, displayName: "S", sourceBindingKey: "s@x" });
+      const profileDir = seedProfileDir(profileRoot, `spotify__${cin}`);
+      symlinkSync("somehost-99999", join(profileDir, "SingletonLock"));
+
+      const del = await fetchJson(`${asUrl}/_ref/connections/${cin}`, { method: "DELETE" });
+
+      assert.equal(del.status, 200, JSON.stringify(del.body));
+      assert.deepEqual(purgeOf(del), { removed: 1, status: "purged", target: "local" });
+      assert.equal(existsSync(profileDir), false);
+    });
+  });
+});
+
+test("the purge retry accepts a revoked connection and refuses an active, unknown, or foreign one", async () => {
+  await withProfileRoot(async (profileRoot) => {
+    await withServer(async ({ asUrl }) => {
+      await registerConnector(asUrl, loadReferenceManifest("spotify"));
+      const revokedId = "cin_purge_revoked";
+      await seedInstance({
+        connectorId: "spotify",
+        connectorInstanceId: revokedId,
+        displayName: "R",
+        sourceBindingKey: "r@x",
+      });
+      const profileDir = seedProfileDir(profileRoot, `spotify__${revokedId}`);
+      await withLiveBrowserLock(profileDir, async (stopBrowser) => {
+        const revoke = await fetchJson(`${asUrl}/_ref/connections/${revokedId}/revoke`, { method: "POST" });
+        assert.equal(revoke.status, 200, JSON.stringify(revoke.body));
+        assert.equal(purgeOf(revoke)?.error_code, "profile_purge_in_use");
+        await stopBrowser();
+        const retry = await retryPurge(asUrl, revokedId);
+        assert.deepEqual(purgeOf(retry), { removed: 1, status: "purged", target: "local" });
+        assert.equal(existsSync(profileDir), false);
+      });
+
+      const activeId = "cin_purge_active";
+      await seedInstance({ connectorId: "spotify", connectorInstanceId: activeId, displayName: "A", sourceBindingKey: "a@x" });
+      const activeProfile = seedProfileDir(profileRoot, `spotify__${activeId}`);
+      const active = await retryPurge(asUrl, activeId);
+      assert.equal(active.status, 409, JSON.stringify(active.body));
+      assert.equal((active.body as { error?: { code?: string } }).error?.code, "connection_not_removed");
+      assert.equal(existsSync(activeProfile), true, "an active connection keeps its session");
+
+      const unknown = await retryPurge(asUrl, "cin_never_existed");
+      assert.equal(unknown.status, 404);
+
+      const foreignId = "cin_purge_foreign";
+      await seedInstance({
+        connectorId: "spotify",
+        connectorInstanceId: foreignId,
+        displayName: "F",
+        ownerSubjectId: "owner_other",
+        sourceBindingKey: "f@x",
+        status: "revoked",
+      });
+      const foreignProfile = seedProfileDir(profileRoot, `spotify__${foreignId}`);
+      const foreign = await retryPurge(asUrl, foreignId);
+      assert.equal(foreign.status, 404, "another owner's connection is not found");
+      assert.equal(existsSync(foreignProfile), true);
+    });
+  });
+});
+
+async function withFakeDesktopHost(
+  fn: (requests: { method: string; url: string; authorization: string }[]) => Promise<void>
+): Promise<void> {
+  const requests: { method: string; url: string; authorization: string }[] = [];
+  const host = createServer((req: IncomingMessage, res) => {
+    requests.push({ authorization: req.headers.authorization ?? "", method: req.method ?? "", url: req.url ?? "" });
+    res.statusCode = 204;
+    res.end();
+  });
+  await new Promise<void>((resolve) => host.listen(0, "127.0.0.1", resolve));
+  const address = host.address();
+  const port = typeof address === "object" && address ? address.port : 0;
+  const keys = ["PDPP_BROWSER_SURFACE_MODE", "PDPP_BROWSER_SURFACE_HOST_ENDPOINT", "PDPP_BROWSER_SURFACE_HOST_TOKEN"];
+  const previous = keys.map((key) => process.env[key]);
+  process.env.PDPP_BROWSER_SURFACE_MODE = "host";
+  process.env.PDPP_BROWSER_SURFACE_HOST_ENDPOINT = `http://127.0.0.1:${port}`;
+  process.env.PDPP_BROWSER_SURFACE_HOST_TOKEN = "host-token-fixture";
+  try {
+    await fn(requests);
+  } finally {
+    keys.forEach((key, index) => {
+      const value = previous[index];
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    });
+    host.closeAllConnections();
+    await new Promise((resolve) => host.close(resolve));
+  }
+}
+
+test("in desktop host mode the shared connector session is kept while another account is active, then reset", async () => {
+  await withFakeDesktopHost(async (hostRequests) => {
+    await withServer(async ({ asUrl }) => {
+      await registerConnector(asUrl, loadReferenceManifest("spotify"));
+      await seedInstance({ connectorId: "spotify", connectorInstanceId: "cin_host_a", displayName: "A", sourceBindingKey: "a@x" });
+      await seedInstance({ connectorId: "spotify", connectorInstanceId: "cin_host_b", displayName: "B", sourceBindingKey: "b@x" });
+
+      const first = await fetchJson(`${asUrl}/_ref/connections/cin_host_a`, { method: "DELETE" });
+      assert.equal(first.status, 200, JSON.stringify(first.body));
+      assert.equal(purgeOf(first)?.status, "shared");
+      assert.equal(purgeOf(first)?.other_connection_count, 1);
+      assert.match(String(purgeOf(first)?.message), /shared with 1 other account/);
+      assert.equal(hostRequests.length, 0, "the shared host profile is not reset");
+
+      const second = await fetchJson(`${asUrl}/_ref/connections/cin_host_b/revoke`, { method: "POST" });
+      assert.equal(second.status, 200, JSON.stringify(second.body));
+      assert.deepEqual(purgeOf(second), { removed: 1, status: "purged", target: "host" });
+      assert.deepEqual(hostRequests, [
+        { authorization: "Bearer host-token-fixture", method: "DELETE", url: "/browser-surface/profiles/spotify" },
+      ]);
     });
   });
 });
