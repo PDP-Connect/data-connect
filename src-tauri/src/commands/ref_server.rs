@@ -740,6 +740,99 @@ fn extract_owner_session_cookie(header: &str) -> Option<String> {
     (!value.is_empty()).then_some(value.to_string())
 }
 
+/// Owner session reused by `reference_server_has_connection`, keyed by the
+/// origin it was issued for, so repeated checks do not each add a session.
+static REF_SERVER_CHECK_SESSION: Mutex<Option<(String, String)>> = Mutex::new(None);
+
+/// Whether the running reference server holds exactly one connection (active
+/// or revoked) for `connector_key`. The console's `/sources/<key>` page
+/// resolves a connector key only when it names one connection, so with none or
+/// several it would 404. Returns `false` when this app has no running
+/// reference server or no owner password, so the caller never links to a
+/// console page the server cannot show.
+#[tauri::command]
+pub async fn reference_server_has_connection(connector_key: String) -> Result<bool, String> {
+    if connector_key.is_empty()
+        || !connector_key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    {
+        return Err("Connector key must be a plain reference connector key".into());
+    }
+    let status = get_reference_server_status()?;
+    let Some(origin) = status.origin.filter(|_| status.running) else {
+        return Ok(false);
+    };
+    let Ok(password) = std::env::var("PDPP_OWNER_PASSWORD") else {
+        return Ok(false);
+    };
+
+    let cached = REF_SERVER_CHECK_SESSION
+        .lock()
+        .map_err(|e| e.to_string())?
+        .clone()
+        .filter(|(cached_origin, _)| cached_origin == &origin)
+        .map(|(_, cookie)| cookie);
+    if let Some(cookie) = cached {
+        if let Some(found) = query_reference_connections(&origin, &cookie, &connector_key).await? {
+            return Ok(found);
+        }
+    }
+
+    let login = login_reference_server_with_password(origin.clone(), &password).await?;
+    *REF_SERVER_CHECK_SESSION.lock().map_err(|e| e.to_string())? =
+        Some((origin.clone(), login.session_cookie.clone()));
+    query_reference_connections(&origin, &login.session_cookie, &connector_key)
+        .await?
+        .ok_or_else(|| "Reference server rejected a fresh owner session".to_string())
+}
+
+/// `Some(exactly_one)` for an answered query, `None` when the session is not
+/// accepted (so the caller can sign in again).
+async fn query_reference_connections(
+    origin: &str,
+    session_cookie: &str,
+    connector_key: &str,
+) -> Result<Option<bool>, String> {
+    let url = format!("{}/_ref/connections", origin.trim_end_matches('/'));
+    // A denied browser-style request redirects to the login page; do not
+    // follow it, so a stale session reads as "sign in again".
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
+    let response = client
+        .get(&url)
+        .query(&[("connector_id", connector_key)])
+        .header("Accept", "application/json")
+        .header(
+            reqwest::header::COOKIE,
+            format!("pdpp_owner_session={session_cookie}"),
+        )
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+        .map_err(|e| format!("Failed to reach {url}: {e}"))?;
+    let status = response.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED || status.is_redirection() {
+        return Ok(None);
+    }
+    if !status.is_success() {
+        return Err(format!(
+            "Reference server connection list failed: HTTP {status}"
+        ));
+    }
+    let body: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| format!("Reference server connection list was not JSON: {e}"))?;
+    let data = body
+        .get("data")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("Reference server connection list has no data array")?;
+    Ok(Some(data.len() == 1))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -795,6 +888,13 @@ mod tests {
     /// Answers one owner login like the reference server and returns the
     /// raw request it received.
     fn serve_one_login() -> (String, std::thread::JoinHandle<String>) {
+        serve_one(
+            b"HTTP/1.1 302 Found\r\nLocation: /\r\nSet-Cookie: pdpp_owner_session=fresh; Path=/; HttpOnly\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        )
+    }
+
+    /// Answers one request with `response` and returns the raw request.
+    fn serve_one(response: &'static [u8]) -> (String, std::thread::JoinHandle<String>) {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind fake server");
         let origin = format!("http://{}", listener.local_addr().unwrap());
@@ -820,11 +920,7 @@ mod tests {
                     }
                 }
             }
-            stream
-                .write_all(
-                    b"HTTP/1.1 302 Found\r\nLocation: /\r\nSet-Cookie: pdpp_owner_session=fresh; Path=/; HttpOnly\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                )
-                .expect("answer login");
+            stream.write_all(response).expect("answer request");
             String::from_utf8_lossy(&request).to_ascii_lowercase()
         });
         (origin, handle)
@@ -858,6 +954,76 @@ mod tests {
             .join()
             .unwrap()
             .contains("x-pdpp-owner-session-label"));
+    }
+
+    fn json_ok(body: &str) -> &'static [u8] {
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        Box::leak(response.into_bytes().into_boxed_slice())
+    }
+
+    #[tokio::test]
+    async fn connection_query_is_false_when_the_key_names_several_connections() {
+        let (origin, server) = serve_one(json_ok(
+            r#"{"data":[{"connector_id":"amazon"},{"connector_id":"amazon"}],"object":"list"}"#,
+        ));
+        let found = query_reference_connections(&origin, "sess", "amazon")
+            .await
+            .expect("query succeeds");
+        assert_eq!(
+            found,
+            Some(false),
+            "a connector-key link would 404 with two connections"
+        );
+        server.join().expect("fake server");
+    }
+
+    #[tokio::test]
+    async fn connection_query_sends_the_owner_session_and_reads_the_list() {
+        let (origin, server) = serve_one(json_ok(
+            r#"{"data":[{"connector_id":"amazon"}],"object":"list"}"#,
+        ));
+        let found = query_reference_connections(&origin, "sess", "amazon")
+            .await
+            .expect("query succeeds");
+        assert_eq!(found, Some(true));
+        let request = server.join().unwrap();
+        assert!(request.starts_with("get /_ref/connections?connector_id=amazon "));
+        assert!(request.contains("\r\ncookie: pdpp_owner_session=sess\r\n"));
+    }
+
+    #[tokio::test]
+    async fn connection_query_reports_an_empty_list_as_absent() {
+        let (origin, server) = serve_one(json_ok(r#"{"data":[],"object":"list"}"#));
+        let found = query_reference_connections(&origin, "sess", "amazon")
+            .await
+            .expect("query succeeds");
+        assert_eq!(found, Some(false));
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn connection_query_treats_a_denied_session_as_sign_in_again() {
+        let (origin, server) = serve_one(
+            b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        );
+        let found = query_reference_connections(&origin, "stale", "amazon")
+            .await
+            .expect("query answers");
+        assert_eq!(found, None);
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn connection_check_refuses_a_key_that_is_not_plain() {
+        assert!(reference_server_has_connection("../x".into())
+            .await
+            .is_err());
+        assert!(reference_server_has_connection(String::new())
+            .await
+            .is_err());
     }
 
     #[test]

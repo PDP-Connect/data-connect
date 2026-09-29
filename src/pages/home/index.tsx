@@ -658,8 +658,14 @@ export function Home() {
 
       <RemoveSourceDialog
         platform={removeSource.platform}
+        canSignOut={removeSource.canSignOut}
+        hasServerConnection={removeSource.hasServerConnection}
+        pending={removeSource.pending}
+        error={removeSource.error}
         onCancel={removeSource.cancel}
-        onConfirm={removeSource.confirm}
+        onSignOut={removeSource.signOut}
+        onRemoveLocalData={removeSource.removeLocalData}
+        onOpenServerRepairs={removeSource.openServerRepairs}
       />
 
       {/* DEV ONLY SHORTCUT: RickRoll /connect link */}

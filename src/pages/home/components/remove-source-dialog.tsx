@@ -1,9 +1,9 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 import { Text } from "@/components/typography/text"
+import { Button } from "@/components/ui/button"
 import {
   AlertDialog,
-  AlertDialogAction,
   AlertDialogCancel,
   AlertDialogContent,
   AlertDialogDescription,
@@ -12,22 +12,39 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog"
 import type { Platform } from "@/types"
+import type { RemoveSourceAction } from "../use-home-remove-source"
 
 interface RemoveSourceDialogProps {
   platform: Platform | null
+  canSignOut: boolean
+  hasServerConnection: boolean
+  pending: RemoveSourceAction | null
+  error: string | null
   onCancel: () => void
-  onConfirm: (platform: Platform) => void
+  onSignOut: () => void
+  onRemoveLocalData: () => void
+  onOpenServerRepairs: () => void
 }
 
 /**
- * Explains the two ways to remove a source, then hands off to the console
- * danger zone, which owns the confirmed Revoke and Delete controls.
+ * Offers the local removal choices for a home-screen source. The row comes
+ * from data on this computer, so each choice changes only that data; server
+ * copies stay in Server & Repairs.
  */
 export function RemoveSourceDialog({
   platform,
+  canSignOut,
+  hasServerConnection,
+  pending,
+  error,
   onCancel,
-  onConfirm,
+  onSignOut,
+  onRemoveLocalData,
+  onOpenServerRepairs,
 }: RemoveSourceDialogProps) {
+  const name = platform?.name
+  const busy = pending !== null
+
   return (
     <AlertDialog
       open={Boolean(platform)}
@@ -38,36 +55,75 @@ export function RemoveSourceDialog({
       <AlertDialogContent size="sm" className="max-w-[380px]!">
         <AlertDialogHeader>
           <AlertDialogTitle className="w-full text-left">
-            Remove {platform?.name}
+            Remove {name}
           </AlertDialogTitle>
-          <AlertDialogDescription className="text-left">
-            You can revoke or delete this source in Server & Repairs.
+          <AlertDialogDescription className="w-full text-left">
+            Choose what to remove from this computer.
           </AlertDialogDescription>
         </AlertDialogHeader>
-        <div className="grid gap-2">
+        <div className="grid gap-4">
+          {canSignOut ? (
+            <div className="grid gap-2">
+              <Text as="p" intent="small" muted>
+                Sign out deletes the saved {name} browser session on this
+                computer. Your saved data stays, and {name} stays in this
+                list.
+              </Text>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={busy}
+                onClick={onSignOut}
+              >
+                {pending === "sign-out" ? "Signing out…" : "Sign out"}
+              </Button>
+            </div>
+          ) : null}
+          <div className="grid gap-2">
+            <Text as="p" intent="small" muted>
+              {canSignOut ? "Signs out, then deletes" : "Deletes"} the data
+              this app saved for {name} on this computer, including its sync
+              position, and removes {name} from this list. The next import
+              starts from the beginning. This cannot be undone.
+            </Text>
+            <Button
+              type="button"
+              variant="destructive"
+              size="sm"
+              disabled={busy}
+              onClick={onRemoveLocalData}
+            >
+              {pending === "remove"
+                ? "Removing…"
+                : "Remove and delete local data"}
+            </Button>
+          </div>
+          {error ? (
+            <Text as="p" intent="small" color="destructive" role="alert">
+              {error}
+            </Text>
+          ) : null}
           <Text as="p" intent="small" muted>
-            Revoke stops future collection and signs out the saved browser
-            session. Your records are kept.
+            Copies already sent to your server do not change. Server copies,
+            if any, are managed in Server & Repairs.
           </Text>
-          <Text as="p" intent="small" muted>
-            Delete permanently erases this source’s records, its sync position
-            and the saved browser session. This cannot be undone.
-          </Text>
-          <Text as="p" intent="small" muted>
-            Apps you granted access stay authorized. They stop receiving this
-            source’s data and keep any copies they already received.
-          </Text>
+          {hasServerConnection ? (
+            <Button
+              type="button"
+              variant="link"
+              size="sm"
+              disabled={busy}
+              onClick={onOpenServerRepairs}
+            >
+              Open Server & Repairs
+            </Button>
+          ) : null}
         </div>
         <AlertDialogFooter>
-          <AlertDialogCancel size="sm">Cancel</AlertDialogCancel>
-          <AlertDialogAction
-            size="sm"
-            onClick={() => {
-              if (platform) onConfirm(platform)
-            }}
-          >
-            Open Server & Repairs
-          </AlertDialogAction>
+          <AlertDialogCancel size="sm" className="col-span-2" disabled={busy}>
+            Cancel
+          </AlertDialogCancel>
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>

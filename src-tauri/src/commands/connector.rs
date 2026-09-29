@@ -114,6 +114,10 @@ pub struct Platform {
     pub source_path: Option<String>,
     #[serde(rename = "activeSource", skip_serializing_if = "Option::is_none")]
     pub active_source: Option<bool>,
+    /// For an installed PDPP connector: whether its manifest requires the
+    /// browser binding, so the desktop keeps a saved browser session for it.
+    #[serde(rename = "requiresBrowser", skip_serializing_if = "Option::is_none")]
+    pub requires_browser: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -126,6 +130,19 @@ struct ActivePdppPlatformManifest {
     brand: Option<ActivePdppBrand>,
     setup: Option<ActivePdppSetup>,
     streams: Vec<ActivePdppStream>,
+    #[serde(default)]
+    runtime_requirements: Option<serde_json::Value>,
+}
+
+impl ActivePdppPlatformManifest {
+    /// Mirrors `requires_browser` in pdpp_installed_connector.rs.
+    fn requires_browser(&self) -> bool {
+        self.runtime_requirements
+            .as_ref()
+            .and_then(|requirements| requirements.pointer("/bindings/browser/required"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -470,6 +487,7 @@ fn platform_from_metadata(
         source_id: None,
         source_path: None,
         active_source: None,
+        requires_browser: None,
     }
 }
 
@@ -608,6 +626,7 @@ pub(super) fn load_pdpp_platforms_with_resource_dir(
         let Ok(manifest) = serde_json::from_str::<ActivePdppPlatformManifest>(&content) else {
             continue;
         };
+        let requires_browser = manifest.requires_browser();
 
         let connector_key = manifest
             .connector_key
@@ -689,6 +708,7 @@ pub(super) fn load_pdpp_platforms_with_resource_dir(
             source_id: local_source.then_some(source_id),
             source_path: local_source.then(|| install.root_path.clone()),
             active_source: local_source.then_some(active_source),
+            requires_browser: Some(requires_browser),
         });
     }
 

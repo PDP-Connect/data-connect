@@ -130,6 +130,38 @@ fn update_connection_setup_complete_at(
     write_state_file_atomically(path, &file)
 }
 
+/// Removes every connection's records, checkpoints and setup marker for one
+/// connector, so the next run of that connector starts from an empty cursor.
+/// The desktop calls this when the owner removes the source and its local data.
+#[tauri::command]
+pub fn clear_pdpp_collection_state(connector_id: String) -> Result<(), String> {
+    clear_connector_state_at(&collection_state_path()?, &connector_id)
+}
+
+pub fn clear_connector_state_at(path: &Path, connector_id: &str) -> Result<(), String> {
+    if connector_id.trim().is_empty() {
+        return Err("PDPP collection state clear requires a connector id".into());
+    }
+    let _guard = COLLECTION_STATE_LOCK
+        .lock()
+        .map_err(|_| "PDPP collection state lock is unavailable")?;
+    if !path.exists() {
+        return Ok(());
+    }
+    let _file_lock = lock_state_file(path)?;
+    let mut file = read_state_file(path)?;
+    let removed_connections = file.connectors.remove(connector_id).is_some();
+    let removed_setup = file
+        .setup_complete_connections
+        .remove(connector_id)
+        .is_some();
+    if !removed_connections && !removed_setup {
+        return Ok(());
+    }
+    file.version = 1;
+    write_state_file_atomically(path, &file)
+}
+
 /// Commit a terminal run only when the validated protocol result succeeded.
 /// Failed, cancelled, and timed-out runs return without touching durable state.
 pub fn commit_terminal_run(
@@ -421,6 +453,66 @@ mod tests {
 
         update_connection_setup_complete_at(&path, "chatgpt-pdpp", "owner-a", false).unwrap();
         assert!(!is_connection_setup_complete_at(&path, "chatgpt-pdpp", "owner-a").unwrap());
+    }
+
+    #[test]
+    fn clearing_a_connector_drops_its_state_and_setup_marker_but_keeps_other_connectors() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state.json");
+        let records = HashMap::from([("repositories".into(), vec![record("one", None, "first")])]);
+        for connection in ["owner-a", "owner-b"] {
+            commit_succeeded_run_at(
+                &path,
+                "amazon-pdpp",
+                connection,
+                "incremental",
+                &["repositories".into()],
+                &records,
+                &HashMap::from([("repositories".into(), json!({ "cursor": connection }))]),
+            )
+            .unwrap();
+        }
+        update_connection_setup_complete_at(&path, "amazon-pdpp", "owner-a", true).unwrap();
+        commit_succeeded_run_at(
+            &path,
+            "github-pdpp",
+            "default",
+            "incremental",
+            &["repositories".into()],
+            &records,
+            &HashMap::from([("repositories".into(), json!({ "cursor": "kept" }))]),
+        )
+        .unwrap();
+        update_connection_setup_complete_at(&path, "github-pdpp", "default", true).unwrap();
+
+        clear_connector_state_at(&path, "amazon-pdpp").unwrap();
+
+        for connection in ["owner-a", "owner-b"] {
+            let cleared = load_connection_state_at(&path, "amazon-pdpp", connection).unwrap();
+            assert!(cleared.checkpoints.is_empty());
+            assert!(cleared.snapshot_by_stream.is_empty());
+            assert!(cleared.raw_records_by_stream.is_empty());
+        }
+        assert!(!is_connection_setup_complete_at(&path, "amazon-pdpp", "owner-a").unwrap());
+        assert!(!fs::read_to_string(&path).unwrap().contains("amazon-pdpp"));
+
+        let kept = load_connection_state_at(&path, "github-pdpp", "default").unwrap();
+        assert_eq!(
+            kept.checkpoints,
+            HashMap::from([("repositories".into(), json!({ "cursor": "kept" }))])
+        );
+        assert_eq!(kept.snapshot_by_stream["repositories"].len(), 1);
+        assert!(is_connection_setup_complete_at(&path, "github-pdpp", "default").unwrap());
+    }
+
+    #[test]
+    fn clearing_without_a_state_file_creates_nothing_and_rejects_an_empty_id() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state.json");
+
+        clear_connector_state_at(&path, "amazon-pdpp").unwrap();
+        assert!(!path.exists());
+        assert!(clear_connector_state_at(&path, " ").is_err());
     }
 
     #[test]

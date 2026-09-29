@@ -2630,6 +2630,43 @@ mod tests {
     }
 
     #[test]
+    fn discovered_platform_reports_whether_it_keeps_a_browser_session() {
+        let resource_temp = tempfile::tempdir().unwrap();
+        let runtime = resource_temp.path().join("pdpp-runtime");
+        fs::create_dir_all(runtime.join("node_modules/p-queue")).unwrap();
+        fs::create_dir_all(runtime.join("node_modules/patchright")).unwrap();
+        fs::write(runtime.join("connector-loader.mjs"), "export {};\n").unwrap();
+        fs::write(
+            runtime.join("connector-loader-bootstrap.mjs"),
+            "export {};\n",
+        )
+        .unwrap();
+        fs::write(runtime.join("node_modules/p-queue/package.json"), "{}\n").unwrap();
+        fs::write(runtime.join("node_modules/patchright/package.json"), "{}\n").unwrap();
+        for (bindings, expected) in [
+            (json!({ "network": { "required": true } }), false),
+            (
+                json!({ "network": { "required": true }, "browser": { "required": true } }),
+                true,
+            ),
+        ] {
+            let mut manifest = github_manifest();
+            manifest["runtime_requirements"]["bindings"] = bindings;
+            let (temp, mut install) = install_fixture(manifest, success_script());
+            install.root_path = temp.path().to_string_lossy().into_owned();
+            let platforms = super::super::connector::load_pdpp_platforms_with_resource_dir(
+                [install],
+                Some(resource_temp.path()),
+            );
+            assert_eq!(platforms[0].requires_browser, Some(expected));
+            assert_eq!(
+                serde_json::to_value(&platforms[0]).unwrap()["requiresBrowser"],
+                json!(expected)
+            );
+        }
+    }
+
+    #[test]
     fn ynab_is_discovered_scoped_run_and_exported_from_its_manifest() {
         let manifest: Value = serde_json::from_str(include_str!(
             "../../tests/fixtures/ynab.collection-profile.origin-main.json"
