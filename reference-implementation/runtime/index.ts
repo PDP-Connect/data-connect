@@ -2211,13 +2211,10 @@ function validateAssistanceMessage(msg: ConnectorMessage, scopeByStream: ScopeBy
   validateAssistanceAttachments(msg.attachments);
 }
 
-function hasBrowserSurfaceLaunchEnv(env: Record<string, string> | null | undefined): boolean {
-  return Boolean(
-    env &&
-      typeof env === "object" &&
-      (optionalNonEmptyEnv(env.PDPP_BROWSER_SURFACE_STREAM_BASE_URL) ||
-        optionalNonEmptyEnv(env.PDPP_BROWSER_SURFACE_REMOTE_CDP_URL))
-  );
+function hasBrowserSurfaceStream(env: Record<string, string> | null | undefined): boolean {
+  // Remote CDP can point to host-owned Chrome; only a stream URL enables the
+  // remote browser action shown by the console.
+  return Boolean(env && typeof env === "object" && optionalNonEmptyEnv(env.PDPP_BROWSER_SURFACE_STREAM_BASE_URL));
 }
 
 function buildAssistanceRequestedDataFromInteraction(
@@ -4588,6 +4585,8 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
     let leaseAccountingPromise: Promise<unknown> | null = null;
     let queueDrainedResolve: (() => void) | null = null;
     let pendingInteractionViolationReject: ((err: Error) => void) | null = null;
+    let pendingInteractionAutoResolve: ((response: InteractionResponse) => void) | null = null;
+    const completedOtpInteractionRequestIds = new Set<string>();
     let terminateTimer: NodeJS.Timeout | null = null;
     let runtimeTimeoutReason: string | null = null;
 
@@ -5704,7 +5703,8 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       interactionHandler: (message: ConnectorMessage) => unknown,
       requestId: string,
       timeoutSeconds: number | null | undefined,
-      violation: Promise<InteractionResponse>
+      violation: Promise<InteractionResponse>,
+      autoResolve: Promise<InteractionResponse>
     ): Promise<InteractionResponse> {
       let timeoutHandle: NodeJS.Timeout | null = null;
       try {
@@ -5732,6 +5732,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
           );
         }
         waitForResponse.push(violation);
+        waitForResponse.push(autoResolve);
         return await Promise.race(waitForResponse);
       } finally {
         if (timeoutHandle) {
@@ -5794,10 +5795,14 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       }
       recordInteractionRecoveryGap(msg, responseStatus, interactionStream);
       pendingInteraction = null;
+      if (msg.kind === "otp") {
+        completedOtpInteractionRequestIds.add(interactionRequestId);
+      }
       if (!writeChildStdin(`${JSON.stringify({ ...response, status: responseStatus })}\n`, "interaction_response")) {
         onProgress({ phase: "interaction_response", reason: childStdinClosedReason, type: "connector_stdin_closed" });
       }
       pendingInteractionViolationReject = null;
+      pendingInteractionAutoResolve = null;
     }
 
     function recordInteractionRecoveryGap(
@@ -5842,6 +5847,9 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       const pendingInteractionViolation = new Promise<InteractionResponse>((_, rejectWaiting) => {
         pendingInteractionViolationReject = rejectWaiting;
       });
+      const pendingInteractionAutoResolution = new Promise<InteractionResponse>((resolveResponse) => {
+        pendingInteractionAutoResolve = resolveResponse;
+      });
       pendingInteractionViolation.catch(() => {
         // The protocol violation is observed by the owning queue.
       });
@@ -5871,7 +5879,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
         actor_id: connectorId,
         actor_type: "runtime",
         data: buildAssistanceRequestedDataFromInteraction(msg, runSource, {
-          browserSurfaceAvailable: hasBrowserSurfaceLaunchEnv(browserSurfaceLaunchEnv),
+          browserSurfaceAvailable: hasBrowserSurfaceStream(browserSurfaceLaunchEnv),
         }),
         event_type: "run.assistance_requested",
         interaction_id: interactionRequestId,
@@ -5897,7 +5905,8 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
         onInteraction,
         interactionRequestId,
         interactionTimeoutSeconds,
-        pendingInteractionViolation
+        pendingInteractionViolation,
+        pendingInteractionAutoResolution
       );
 
       await completeInteractionResponse(msg, response, interactionRequestId, interactionStream);
@@ -5909,6 +5918,9 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
         ...(isNullish(msg.message) ? {} : { message: msg.message }),
       });
       if (!closed) {
+        if (completedOtpInteractionRequestIds.has(msg.assistance_request_id as string)) {
+          return;
+        }
         throw new Error(
           `Connector emitted ASSISTANCE_STATUS for unknown assistance_request_id: ${msg.assistance_request_id}`
         );
@@ -5994,6 +6006,21 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       }
       try {
         const msg = JSON.parse(line);
+        if (
+          msg.type === "ASSISTANCE_STATUS" &&
+          msg.status === "resolved" &&
+          pendingInteraction?.kind === "otp" &&
+          msg.assistance_request_id === pendingInteraction.request_id &&
+          pendingInteractionAutoResolve
+        ) {
+          pendingInteractionAutoResolve({
+            request_id: pendingInteraction.request_id as string,
+            status: "success",
+            type: "INTERACTION_RESPONSE",
+          });
+          onProgress(msg);
+          return;
+        }
         if (failPendingInteraction(new Error(`Connector emitted ${msg.type} while waiting for INTERACTION_RESPONSE`))) {
           return;
         }
