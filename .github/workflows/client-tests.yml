@@ -62,7 +62,7 @@ jobs:
         run: npm run typecheck
 
   test-client:
-    name: test client
+    name: test client and console
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -87,6 +87,9 @@ jobs:
         env:
           NEXT_TELEMETRY_DISABLED: "1"
         run: npm run build --workspace=apps/console
+
+      - name: Test console Node suite
+        run: npm test --workspace=apps/console
 
       - name: Test copied standalone skill routes
         env:
