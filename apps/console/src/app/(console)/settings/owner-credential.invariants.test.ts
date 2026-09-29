@@ -11,30 +11,28 @@ const SETTING_FILE = `${HERE}owner-credential-setting.tsx`
 const ACTIONS_FILE = `${HERE}owner-credential-actions.ts`
 const PAGE_FILE = `${HERE}page.tsx`
 
-test("the settings page mounts the Owner password section with the owner credential component", async () => {
+test("the settings page mounts one Owner password section that holds reveal", async () => {
   const page = await readFile(PAGE_FILE, "utf8")
+  const passwordSetting = await readFile(`${HERE}owner-password-setting.tsx`, "utf8")
   assert.match(page, /export default async function SettingsPage/)
-  assert.match(page, /canShowOwnerCredentialRevealSetting\(\)/)
-  assert.match(page, /Promise\.all\(\[/)
-  assert.match(page, /canShowOwnerCredentialRevealSetting\(\),/)
-  assert.match(page, /showOwnerCredentialReveal \? \(/)
-  assert.match(
-    page,
-    /<OwnerCredentialSetting[\s\S]*linuxLocalOnlyNoPromptNotice=\{linuxLocalOnlyNoPromptNotice\}/
-  )
-  assert.match(page, /title="Owner password"/)
+  assert.equal(page.match(/title="Owner password"/g)?.length, 1)
+  assert.doesNotMatch(page, /<OwnerCredentialSetting/)
+  assert.match(passwordSetting, /canReveal \? <OwnerCredentialSetting \/> : null/)
 })
 
-test("the owner password section is hidden unless the desktop generated-credential marker is present", async () => {
+test("reveal is offered only for the RI's desktop source in the desktop's own webview", async () => {
+  const page = await readFile(PAGE_FILE, "utf8")
   const client = await readFile(
     `${HERE}../lib/owner-credential-client.ts`,
     "utf8"
   )
   assert.match(
-    client,
-    /process\.env\.PDPP_OWNER_PASSWORD_SOURCE === "desktop_generated"/
+    page,
+    /canReveal=\{ownerPasswordSource === "desktop" && hasLocalRevealProof\}/
   )
-  assert.match(client, /ownerCredentialRevealProofCookie\(\)\) !== null/)
+  assert.match(page, /hasValidLocalOwnerCredentialRevealProofCookie\(\)/)
+  assert.doesNotMatch(page, /PDPP_OWNER_PASSWORD_SOURCE/)
+  assert.match(client, /timingSafeEqual\(expectedBytes, presentedBytes\)/)
 })
 
 test("the reveal client uses the desktop-set reveal cookie, not request Host, as local provenance", async () => {
@@ -49,7 +47,7 @@ test("the reveal client uses the desktop-set reveal cookie, not request Host, as
     client,
     /ownerCredentialRevealHeadersForCookie\(await ownerCredentialRevealProofCookie\(\)\)/
   )
-  assert.match(client, /hasLocalOwnerCredentialRevealProofCookie/)
+  assert.match(client, /hasValidLocalOwnerCredentialRevealProofCookie/)
   assert.doesNotMatch(client, /headers\(\)/)
   assert.doesNotMatch(client, /requestHeaders\.get\("host"\)/)
   assert.doesNotMatch(client, /x-forwarded-host/)
@@ -123,62 +121,18 @@ test("the action calls the owner-credential client and requires dashboard access
   assert.match(actions, /revealOwnerCredential\(\)/)
 })
 
-test("Linux local-only reveal warning is server-rendered before either action starts", async () => {
+test("Linux says there is no OS prompt yet, from the server render", async () => {
   const page = await readFile(PAGE_FILE, "utf8")
-  const setting = await readFile(SETTING_FILE, "utf8")
-  assert.match(page, /process\.platform === "linux"/)
-  assert.match(page, /polkit is verified/)
-  assert.match(
-    page,
-    /OwnerCredentialSetting[\s\S]*linuxLocalOnlyNoPromptNotice=\{linuxLocalOnlyNoPromptNotice\}/
-  )
-  assert.match(
-    page,
-    /Password changes stay unavailable on Linux until OS re-auth is verified/
-  )
-  assert.match(
-    page,
-    /OwnerPasswordSetting[\s\S]*linuxLocalOnlyNoPromptNotice=\{linuxLocalOnlyNoPromptNotice\}/
-  )
-  assert.match(setting, /linuxLocalOnlyNoPromptNotice/)
-  const passwordSetting = await readFile(
-    `${HERE}owner-password-setting.tsx`,
-    "utf8"
-  )
-  assert.match(
-    passwordSetting,
-    /disabled=\{busy \|\| Boolean\(linuxLocalOnlyNoPromptNotice\)\}/
-  )
-  assert.match(
-    passwordSetting,
-    /Password change is unavailable on Linux until OS re-auth is verified/
-  )
+  assert.match(page, /linuxNoOsPrompt=\{process\.platform === "linux"\}/)
 })
 
-test("Linux local-only reveal requires the desktop local proof cookie and change does not use the fallback", async () => {
+test("the verified local proof gates reveal and change before any request is written", async () => {
   const actions = await readFile(`${HERE}owner-password-actions.ts`, "utf8")
-  assert.match(actions, /hasLocalOwnerCredentialRevealProofCookie/)
-  assert.match(actions, /process\.platform === "linux"/)
-  assert.match(actions, /allowLinuxLocalReveal/)
-  assert.match(
-    actions,
-    /Linux owner password changes require verified OS re-authentication/
-  )
-  assert.match(
-    actions,
-    /Open Settings from the local desktop app to reveal the owner password on Linux/
-  )
-  assert.match(
-    actions,
-    /requireOwnerOsReauthGrant\(\{[\s\S]*allowLinuxLocalReveal: true,[\s\S]*\}\)/
-  )
   assert.match(actions, /ownerOsReauthAllowsReveal/)
-  assert.match(actions, /state\.status === "skipped_linux_polkit_unverified"/)
   assert.match(actions, /const reauth = await requireOwnerOsReauthGrant\(\)/)
   assert.ok(
-    actions.indexOf(
-      'process.platform === "linux" && !options.allowLinuxLocalReveal'
-    ) < actions.indexOf("requestOwnerOsReauth(dataDir())"),
-    "Linux password changes must be denied before queuing a no-prompt reauth request"
+    actions.indexOf("hasValidLocalOwnerCredentialRevealProofCookie())") <
+      actions.indexOf("requestOwnerOsReauth(dataDir())"),
+    "the local proof check must run before an OS reauth request is queued"
   )
 })

@@ -65,6 +65,25 @@ struct OwnerPasswordRequestState {
     grant_consumed_request_id: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     purpose: Option<String>,
+    /// On a stack-restart request: the RI must revoke every owner session
+    /// and bearer when it starts again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    revoke_sessions: Option<bool>,
+    /// Why `revoke_sessions` is set: "password_change" or "recovery".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    revoke_reason: Option<String>,
+}
+
+/// The revocation a stack-restart request asks for. A request without a
+/// reason (written before the field existed) counts as a password change.
+fn owner_session_reset_for(
+    state: &OwnerPasswordRequestState,
+) -> Option<crate::unified::OwnerSessionReset> {
+    use crate::unified::OwnerSessionReset;
+    (state.revoke_sessions == Some(true)).then(|| match state.revoke_reason.as_deref() {
+        Some("recovery") => OwnerSessionReset::Recovery,
+        _ => OwnerSessionReset::PasswordChange,
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -630,7 +649,10 @@ fn complete_owner_os_reauth_request_at(
         Ok(status) => {
             state.status = Some(status.to_string());
             state.error = None;
-            if status == "authenticated" {
+            // Linux has no verified OS prompt yet; the console lets a Linux
+            // change start only from the desktop's own webview (its local
+            // proof cookie), the same gate as reveal.
+            if status == "authenticated" || status == "skipped_linux_polkit_unverified" {
                 let expires_unix_ms = unix_time_ms_now()?.saturating_add(
                     OWNER_OS_REAUTH_GRANT_TTL
                         .as_millis()
@@ -704,10 +726,11 @@ fn current_owner_password_window_request_state<R: Runtime>(
     load_owner_password_request_state(&index_path, "owner-password window request")
 }
 
+/// Consume the window request's authority and return its purpose.
 fn consume_owner_password_window_authority<R: Runtime>(
     app: &AppHandle<R>,
     request_id: Option<u64>,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let request_id = request_id
         .ok_or_else(|| "Open the password window from Settings before saving.".to_string())?;
     let recovery_path = owner_password_recovery_window_request_path(app)?;
@@ -753,12 +776,13 @@ fn consume_owner_password_window_authority<R: Runtime>(
             return Err("This password window request is missing a supported purpose.".to_string())
         }
     }
-    if is_recovery_request {
+    let saved = if is_recovery_request {
         save_owner_password_request_state(&recovery_path, &state, "owner-password recovery request")
     } else {
         let request_path = owner_password_window_request_file_path(app, request_id)?;
         save_owner_password_request_state(&request_path, &state, "owner-password window request")
-    }
+    };
+    saved.map(|()| state.purpose.unwrap_or_default())
 }
 
 fn complete_owner_password_window_request<R: Runtime>(
@@ -787,25 +811,27 @@ fn complete_owner_password_window_request<R: Runtime>(
     Ok(())
 }
 
-pub(crate) fn capture_pending_owner_password_stack_restart_request_id<R: Runtime>(
-    app: &AppHandle<R>,
-) -> Result<Option<u64>, String> {
-    let path = owner_password_stack_restart_request_path(app)?;
-    let state = load_owner_password_request_state(&path, "owner-password stack-restart request")?;
-    Ok(incomplete_owner_password_request_id(&state))
+/// A stack-restart request that no start has carried out yet.
+pub(crate) struct PendingStackRestartRequest {
+    pub(crate) request_id: u64,
+    pub(crate) owner_session_reset: Option<crate::unified::OwnerSessionReset>,
 }
 
-/// Called once at startup, before the watchers and the first bootstrap run.
-/// A restart request left pending by the last session (the owner quit before
-/// it ran) asks for what the startup bootstrap is about to do: start the
-/// stack with the saved password. Mark it complete so the watcher does not
-/// start a second bootstrap alongside the first.
-pub(crate) fn absorb_pending_owner_password_stack_restart_request<R: Runtime>(
+/// The stack-restart request still waiting for a start, with the revocation
+/// it asks for. Reading it does not complete it: the start that carries it
+/// out completes it once the stack is ready, so a start that fails, or a
+/// quit before any start, leaves it for the next one.
+pub(crate) fn pending_owner_password_stack_restart_request<R: Runtime>(
     app: &AppHandle<R>,
-) -> Result<Option<u64>, String> {
-    let request_id = capture_pending_owner_password_stack_restart_request_id(app)?;
-    complete_owner_password_stack_restart_request(app, request_id)?;
-    Ok(request_id)
+) -> Result<Option<PendingStackRestartRequest>, String> {
+    let path = owner_password_stack_restart_request_path(app)?;
+    let state = load_owner_password_request_state(&path, "owner-password stack-restart request")?;
+    Ok(
+        incomplete_owner_password_request_id(&state).map(|request_id| PendingStackRestartRequest {
+            request_id,
+            owner_session_reset: owner_session_reset_for(&state),
+        }),
+    )
 }
 
 pub(crate) fn request_owner_password_window_for_recovery(app: &AppHandle) -> Result<(), String> {
@@ -838,8 +864,37 @@ pub(crate) fn complete_owner_password_stack_restart_request<R: Runtime>(
     Ok(())
 }
 
-fn queue_delayed_owner_password_stack_restart_request<R: Runtime>(
+/// Stands in for OS re-auth and the window watcher in tests: bind a live
+/// "change" grant to window request `request_id`, as the watcher does after
+/// the owner confirms.
+#[cfg(test)]
+pub(crate) fn grant_owner_password_change_for_test(request_id: u64, grant_id: &str) {
+    owner_reauth_grants()
+        .lock()
+        .expect("grant registry")
+        .insert(
+            grant_id.to_string(),
+            OwnerReauthGrant {
+                expires_unix_ms: unix_time_ms_now().expect("system time") + 60_000,
+                purpose: "change".to_string(),
+                reauth_request_id: 0,
+                window_request_id: Some(request_id),
+            },
+        );
+}
+
+/// Queue the stack restart that starts the RI with the password just saved.
+/// A change or a recovery restarts now and revokes every owner session and
+/// bearer: a replaced password must not leave a phone or a CLI token signed
+/// in. First-time setup with remote access off keeps the delayed restart
+/// without revocation: no remote device can be signed in, and the
+/// remote-access form that asked for it saves its config next, which
+/// restarts the stack sooner through the config watcher. First-time setup
+/// with remote access already on (an install from before the password gate)
+/// is a change: a phone may be signed in with the generated password.
+fn queue_owner_password_stack_restart_request<R: Runtime>(
     app: &AppHandle<R>,
+    purpose: &str,
 ) -> Result<(), String> {
     let path = owner_password_stack_restart_request_path(app)?;
     let mut state =
@@ -850,7 +905,19 @@ fn queue_delayed_owner_password_stack_restart_request<R: Runtime>(
         .saturating_add(1)
         .max(1);
     state.request_id = next_request_id;
-    state.not_before_unix_ms = Some(unix_time_ms_now()?.saturating_add(180_000));
+    let revoke_reason = match purpose {
+        "recovery" => Some("recovery"),
+        "initial_setup" if crate::remote_access::saved_remote_access_posture_is_off(app) => None,
+        _ => Some("password_change"),
+    };
+    if revoke_reason.is_none() {
+        state.not_before_unix_ms = Some(unix_time_ms_now()?.saturating_add(180_000));
+        state.revoke_sessions = None;
+    } else {
+        state.not_before_unix_ms = None;
+        state.revoke_sessions = Some(true);
+    }
+    state.revoke_reason = revoke_reason.map(str::to_string);
     save_owner_password_request_state(&path, &state, "owner-password stack-restart request")
 }
 
@@ -1056,7 +1123,7 @@ async fn poll_owner_password_stack_restart_request<F, Fut>(
     restart: F,
 ) -> Result<StackRestartPoll, String>
 where
-    F: FnOnce() -> Fut,
+    F: FnOnce(Option<crate::unified::OwnerSessionReset>) -> Fut,
     Fut: std::future::Future<Output = Result<(), String>>,
 {
     const LABEL: &str = "owner-password stack-restart request";
@@ -1069,7 +1136,7 @@ where
     else {
         return Ok(StackRestartPoll::Idle);
     };
-    match restart().await {
+    match restart(owner_session_reset_for(&state)).await {
         Ok(()) => {
             watcher.last_seen_request_id = request_id;
             complete_owner_password_request_at(path, LABEL, request_id)?;
@@ -1092,7 +1159,11 @@ where
                 "Owner password stack-restart request failed {OWNER_PASSWORD_STACK_RESTART_MAX_ATTEMPTS} times; giving up until the next start: {error}"
             );
             watcher.last_seen_request_id = request_id;
-            complete_owner_password_request_at(path, LABEL, request_id)?;
+            // A revoking request stays pending: the next start of the stack
+            // reads it and revokes, and completes it only once it is ready.
+            if owner_session_reset_for(&state).is_none() {
+                complete_owner_password_request_at(path, LABEL, request_id)?;
+            }
             Ok(StackRestartPoll::GaveUp)
         }
     }
@@ -1132,7 +1203,12 @@ pub(crate) fn spawn_owner_password_stack_restart_watcher(app: AppHandle) {
                 &mut watcher,
                 bootstrap_in_flight,
                 now_unix_ms,
-                || crate::unified::restart_after_remote_access_config(restart_app),
+                |owner_session_reset| {
+                    crate::unified::restart_after_remote_access_config(
+                        restart_app,
+                        owner_session_reset,
+                    )
+                },
             )
             .await
             {
@@ -1362,10 +1438,10 @@ pub(crate) async fn set_desktop_owner_password<R: Runtime>(
             "Owner passwords must be at least {OWNER_PASSWORD_MIN_LENGTH} characters long."
         ));
     }
-    consume_owner_password_window_authority(&app, window_request_id)?;
+    let purpose = consume_owner_password_window_authority(&app, window_request_id)?;
     save_owner_credential(&app, &password)?;
     mark_owner_password_owner_set(&app)?;
-    queue_delayed_owner_password_stack_restart_request(&app)?;
+    queue_owner_password_stack_restart_request(&app, &purpose)?;
     complete_owner_password_window_request(&app, window_request_id)?;
     if let Some(window) = app.get_webview_window(OWNER_PASSWORD_WINDOW_LABEL) {
         let _ = window.close();
@@ -1991,12 +2067,28 @@ mod tests {
             watcher,
             bootstrap_in_flight,
             u64::MAX,
-            || async {
+            |_revoke_sessions| async {
                 restarts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 outcome
             },
         ))
         .expect("poll")
+    }
+
+    /// Writes a pending restart request that revokes owner sessions, as a
+    /// password change queues it.
+    fn pending_revoking_stack_restart_request(path: &Path, request_id: u64) {
+        save_owner_password_request_state(
+            path,
+            &OwnerPasswordRequestState {
+                request_id,
+                revoke_sessions: Some(true),
+                revoke_reason: Some("password_change".to_string()),
+                ..Default::default()
+            },
+            "owner-password stack-restart request",
+        )
+        .expect("write restart request");
     }
 
     /// The owner quit before the restart after their new password ran. The
@@ -2012,13 +2104,19 @@ mod tests {
         assert!(path.starts_with(root.path()), "{path:?}");
         pending_stack_restart_request(&path, 41);
 
-        // What `unified::setup` does before it starts the watchers.
-        assert_eq!(
-            absorb_pending_owner_password_stack_restart_request(app.handle()).expect("absorb"),
-            Some(41)
-        );
+        // The startup bootstrap reads the request (`bootstrap_and_open_console`).
+        let (reset, carried) = crate::unified::owner_session_reset_for_start(app.handle(), None);
+        assert_eq!(reset, None);
+        assert_eq!(carried, Some(41));
         let restarts = AtomicU32::new(0);
         let mut watcher = StackRestartWatcherState::default();
+        // While it runs, the watcher waits.
+        assert_eq!(
+            poll_stack_restart(&path, &mut watcher, true, &restarts, Ok(())),
+            StackRestartPoll::Idle
+        );
+        // It reaches Ready and completes the request (`finish_bootstrap`).
+        complete_owner_password_stack_restart_request(app.handle(), carried).expect("complete");
         assert_eq!(
             poll_stack_restart(&path, &mut watcher, false, &restarts, Ok(())),
             StackRestartPoll::Idle
@@ -2032,6 +2130,177 @@ mod tests {
             StackRestartPoll::Restarted
         );
         assert_eq!(restarts.load(Ordering::SeqCst), 1);
+    }
+
+    /// The owner changed the password and quit before the restart ran, and
+    /// the startup bootstrap that carries the revocation fails. The request
+    /// must stay pending, so that "Open DataConnect", which starts with no
+    /// reset of its own, still revokes the old sessions.
+    #[cfg(desktop)]
+    #[test]
+    fn a_revoking_request_stays_pending_when_the_start_that_carries_it_fails() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let app = crate::mock_app_with_data_dir(root.path());
+        let path = owner_password_stack_restart_request_path(app.handle()).expect("path");
+        pending_revoking_stack_restart_request(&path, 3);
+
+        let startup = crate::unified::owner_session_reset_for_start(app.handle(), None);
+        assert_eq!(
+            startup,
+            (
+                Some(crate::unified::OwnerSessionReset::PasswordChange),
+                Some(3)
+            )
+        );
+        // The startup bootstrap fails: it never reaches Ready, so nothing
+        // completes the request.
+        let state =
+            load_owner_password_request_state(&path, "owner-password stack-restart request")
+                .expect("state");
+        assert_eq!(state.completed_request_id, None, "{state:?}");
+        assert_eq!(state.revoke_sessions, Some(true), "{state:?}");
+
+        // `focus_or_bootstrap` passes no reset; the request supplies it.
+        let reopen = crate::unified::owner_session_reset_for_start(app.handle(), None);
+        assert_eq!(
+            reopen,
+            (
+                Some(crate::unified::OwnerSessionReset::PasswordChange),
+                Some(3)
+            )
+        );
+    }
+
+    /// The watcher gives up on a revoking restart after the attempt cap. It
+    /// must not drop the revocation: the request stays pending, the watcher
+    /// does not retry it, and the next start revokes.
+    #[cfg(desktop)]
+    #[test]
+    fn a_revoking_request_the_watcher_gave_up_on_is_revoked_by_the_next_start() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let root = tempfile::tempdir().expect("tempdir");
+        let app = crate::mock_app_with_data_dir(root.path());
+        let path = owner_password_stack_restart_request_path(app.handle()).expect("path");
+        pending_revoking_stack_restart_request(&path, 9);
+        let restarts = AtomicU32::new(0);
+        let mut watcher = StackRestartWatcherState::default();
+        let polls: Vec<_> = (0..10)
+            .map(|_| {
+                poll_stack_restart(
+                    &path,
+                    &mut watcher,
+                    false,
+                    &restarts,
+                    Err("console never became ready".to_string()),
+                )
+            })
+            .collect();
+        assert_eq!(
+            restarts.load(Ordering::SeqCst),
+            OWNER_PASSWORD_STACK_RESTART_MAX_ATTEMPTS
+        );
+        assert_eq!(
+            polls[OWNER_PASSWORD_STACK_RESTART_MAX_ATTEMPTS as usize - 1],
+            StackRestartPoll::GaveUp
+        );
+        assert!(polls[OWNER_PASSWORD_STACK_RESTART_MAX_ATTEMPTS as usize..]
+            .iter()
+            .all(|poll| *poll == StackRestartPoll::Idle));
+        let state =
+            load_owner_password_request_state(&path, "owner-password stack-restart request")
+                .expect("state");
+        assert_eq!(state.completed_request_id, None, "{state:?}");
+        assert_eq!(state.revoke_sessions, Some(true), "{state:?}");
+
+        // The next start: what `bootstrap_and_open_console` gives
+        // `start_managed_stack`, which gives it to `prepare_ri_start`.
+        let (reset, carried) = crate::unified::owner_session_reset_for_start(app.handle(), None);
+        assert_eq!(
+            reset,
+            Some(crate::unified::OwnerSessionReset::PasswordChange)
+        );
+        assert_eq!(carried, Some(9));
+        let data_dir = root.path().join("ri-data");
+        let environment = crate::unified::prepare_ri_start(
+            &data_dir,
+            "owner-password-test",
+            crate::unified::OwnerPasswordSource::DesktopGenerated,
+            "reveal-proof-test",
+            "credential-key-test",
+            "database-key-test",
+            reset,
+        )
+        .expect("prepare RI start");
+        assert_eq!(
+            environment.get(std::ffi::OsStr::new("PDPP_RECOVERY_REVOKE_OWNER_SESSIONS")),
+            Some(&std::ffi::OsString::from("1"))
+        );
+        let written: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(data_dir.join("owner-session-recovery-reset.json"))
+                .expect("reset file"),
+        )
+        .expect("reset file is JSON");
+        assert_eq!(written["reason"], "password_change");
+
+        // That start reaches Ready and completes the request; the watcher
+        // stays idle.
+        complete_owner_password_stack_restart_request(app.handle(), carried).expect("complete");
+        assert_eq!(
+            poll_stack_restart(&path, &mut watcher, false, &restarts, Ok(())),
+            StackRestartPoll::Idle
+        );
+        assert_eq!(
+            crate::unified::owner_session_reset_for_start(app.handle(), None),
+            (None, None)
+        );
+    }
+
+    /// Writes the saved remote-access posture where the desktop and the RI
+    /// read it, then queues the restart for a first chosen password.
+    #[cfg(desktop)]
+    fn first_password_restart_request(posture: Option<&str>) -> OwnerPasswordRequestState {
+        let root = tempfile::tempdir().expect("tempdir");
+        let app = crate::mock_app_with_data_dir(root.path());
+        let path = owner_password_stack_restart_request_path(app.handle()).expect("path");
+        if let Some(posture) = posture {
+            fs::create_dir_all(path.parent().expect("data dir")).expect("data dir");
+            fs::write(
+                path.with_file_name("remote-access.json"),
+                serde_json::json!({ "posture": posture }).to_string(),
+            )
+            .expect("write remote-access config");
+        }
+        queue_owner_password_stack_restart_request(app.handle(), "initial_setup")
+            .expect("queue restart");
+        load_owner_password_request_state(&path, "owner-password stack-restart request")
+            .expect("restart request")
+    }
+
+    /// True first setup: remote access is off, so no remote device can be
+    /// signed in. The restart waits and revokes nothing.
+    #[cfg(desktop)]
+    #[test]
+    fn a_first_password_with_remote_access_off_does_not_revoke() {
+        for posture in [None, Some("off")] {
+            let state = first_password_restart_request(posture);
+            assert!(state.not_before_unix_ms.is_some(), "{posture:?}: {state:?}");
+            assert_eq!(state.revoke_sessions, None, "{posture:?}");
+            assert_eq!(state.revoke_reason, None, "{posture:?}");
+        }
+    }
+
+    /// An install from before the password gate may have remote access on,
+    /// with a phone signed in with the revealed generated password. The first
+    /// chosen password must sign that phone out.
+    #[cfg(desktop)]
+    #[test]
+    fn a_first_password_with_remote_access_on_revokes_now() {
+        for posture in ["my_devices_only", "public_url", "not-json-posture"] {
+            let state = first_password_restart_request(Some(posture));
+            assert_eq!(state.not_before_unix_ms, None, "{posture}");
+            assert_eq!(state.revoke_sessions, Some(true), "{posture}");
+            assert_eq!(state.revoke_reason.as_deref(), Some("password_change"), "{posture}");
+        }
     }
 
     #[test]
@@ -2055,8 +2324,8 @@ mod tests {
     }
 
     /// A restart that keeps failing is tried a bounded number of times, then
-    /// the request is marked complete, instead of tearing the stack down
-    /// every few seconds for as long as the app runs.
+    /// a request that does not revoke is marked complete, instead of tearing
+    /// the stack down every few seconds for as long as the app runs.
     #[test]
     fn a_failing_restart_stops_retrying_after_the_attempt_cap() {
         use std::sync::atomic::{AtomicU32, Ordering};

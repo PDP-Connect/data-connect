@@ -12,7 +12,7 @@ import {
   requestOwnerPasswordWindow,
 } from "pdpp-reference-implementation/owner-password-owner-set"
 import { requireDashboardAccess } from "../lib/dashboard-access.ts"
-import { hasLocalOwnerCredentialRevealProofCookie } from "../lib/owner-credential-client.ts"
+import { hasValidLocalOwnerCredentialRevealProofCookie } from "../lib/owner-credential-client.ts"
 import { redirectToOwnerLogin } from "../lib/login-redirect.ts"
 import { getAsInternalUrl, withOwnerSessionCookie } from "../lib/owner-token.ts"
 
@@ -47,9 +47,14 @@ type OwnerOsReauthResult =
     }
   | { ok: false; message: string }
 
-async function requireOwnerOsReauthGrant(
-  options: { allowLinuxLocalReveal?: boolean } = {}
-): Promise<OwnerOsReauthResult> {
+// Every action here starts an OS prompt or a window on the owner's desktop,
+// so it must come from the desktop's own webview: the verified local proof
+// cookie, checked before any request file is written. A browser reaching
+// the console over remote access cannot start either. Linux has no verified
+// OS prompt yet (polkit), so there the proof is the whole gate for reveal
+// and change. Change adds no disclosure: whoever can reveal already holds
+// the password.
+async function requireOwnerOsReauthGrant(): Promise<OwnerOsReauthResult> {
   await requireDashboardAccess("/settings")
   if (process.env.PDPP_MANAGED_DESKTOP_HOST !== "1") {
     return {
@@ -57,21 +62,11 @@ async function requireOwnerOsReauthGrant(
       message: "Open the DataConnect desktop app to confirm this action.",
     }
   }
-  if (process.platform === "linux" && !options.allowLinuxLocalReveal) {
+  if (!(await hasValidLocalOwnerCredentialRevealProofCookie())) {
     return {
       ok: false,
       message:
-        "Linux owner password changes require verified OS re-authentication before this action is available.",
-    }
-  }
-  if (
-    process.platform === "linux" &&
-    !(await hasLocalOwnerCredentialRevealProofCookie())
-  ) {
-    return {
-      ok: false,
-      message:
-        "Open Settings from the local desktop app to reveal the owner password on Linux.",
+        "Open Settings from the local desktop app to reveal or change the owner password.",
     }
   }
   const { requestId } = await requestOwnerOsReauth(dataDir())
@@ -80,9 +75,10 @@ async function requireOwnerOsReauthGrant(
     const state = await readOwnerOsReauthRequest(dataDir(), requestId)
     if (state.completedRequestId === requestId) {
       if (state.error) return { ok: false, message: state.error }
-      const reauthSucceeded = options.allowLinuxLocalReveal
-        ? ownerOsReauthAllowsReveal(state, requestId)
-        : ownerOsReauthSucceeded(state, requestId)
+      const reauthSucceeded =
+        process.platform === "linux"
+          ? ownerOsReauthAllowsReveal(state, requestId)
+          : ownerOsReauthSucceeded(state, requestId)
       if (!reauthSucceeded) {
         return {
           ok: false,
@@ -105,9 +101,7 @@ async function requireOwnerOsReauthGrant(
 export async function requireOwnerOsReauthAction(): Promise<
   { ok: true; linuxPolkitUnverified: boolean } | { ok: false; message: string }
 > {
-  const result = await requireOwnerOsReauthGrant({
-    allowLinuxLocalReveal: true,
-  })
+  const result = await requireOwnerOsReauthGrant()
   if (!result.ok) return result
   return { linuxPolkitUnverified: result.linuxPolkitUnverified, ok: true }
 }

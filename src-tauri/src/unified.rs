@@ -529,21 +529,15 @@ pub(crate) fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Erro
     // The console asks for the password window, OS re-auth and a stack
     // restart by writing request files under the data directory. Only these
     // watchers act on them; v0.7.59 never started them.
-    match crate::owner_credential::absorb_pending_owner_password_stack_restart_request(
-        &app_handle,
-    ) {
-        Ok(Some(request_id)) => log::info!(
-            "Owner password stack-restart request {request_id} from the last session is covered by this start"
-        ),
-        Ok(None) => {}
-        Err(error) => log::warn!("Could not absorb a pending owner password stack restart: {error}"),
-    }
+    // A restart request left by the last session is carried out by the
+    // startup bootstrap below: `bootstrap_and_open_console` reads it, and
+    // completes it only once the stack is ready.
     crate::owner_credential::spawn_owner_password_window_watcher(app_handle.clone());
     crate::owner_credential::spawn_owner_os_reauth_watcher(app_handle.clone());
     crate::owner_credential::spawn_owner_password_stack_restart_watcher(app_handle.clone());
     tauri::async_runtime::spawn(async move {
         if let Err(failure) =
-            bootstrap_and_open_console(app_handle.clone(), should_show, None).await
+            bootstrap_and_open_console(app_handle.clone(), should_show, None, None).await
         {
             handle_bootstrap_failure(&app_handle, "Unified DataConnect startup", failure);
         }
@@ -586,7 +580,7 @@ pub(crate) fn focus_or_bootstrap(app: AppHandle) {
         return;
     }
     tauri::async_runtime::spawn(async move {
-        if let Err(failure) = bootstrap_and_open_console(app.clone(), true, None).await {
+        if let Err(failure) = bootstrap_and_open_console(app.clone(), true, None, None).await {
             handle_bootstrap_failure(&app, "Opening the DataConnect console", failure);
         }
     });
@@ -823,28 +817,50 @@ fn ri_readiness_host_header(trusted_hosts: &str) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
+/// Why a start revokes every owner session and bearer. The RI logs the
+/// reason from the reset file.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum OwnerSessionReset {
+    /// A recovery-code start (#280), or a password saved from the recovery
+    /// window.
+    Recovery,
+    /// The owner replaced the password in Settings, or chose their first
+    /// password while remote access was already on.
+    PasswordChange,
+}
+
+impl OwnerSessionReset {
+    fn reason(self) -> &'static str {
+        match self {
+            Self::Recovery => "recovery",
+            Self::PasswordChange => "password_change",
+        }
+    }
+}
+
 /// Prepare `data_dir` for one RI start and return that start's RI
-/// environment. A recovery start (`revoke_existing_sessions`) also writes
-/// the owner-session reset file; the RI revokes owner sessions and bearers
-/// only when it sees both that file and `PDPP_RECOVERY_REVOKE_OWNER_SESSIONS`.
+/// environment. A start with an `owner_session_reset` also writes the
+/// owner-session reset file with its reason; the RI revokes owner sessions
+/// and bearers only when it sees both that file and
+/// `PDPP_RECOVERY_REVOKE_OWNER_SESSIONS`.
 /// Both inputs are made here, together, so a test of this function covers
 /// what `start_managed_stack` gives the RI.
-fn prepare_ri_start(
+pub(crate) fn prepare_ri_start(
     data_dir: &Path,
     owner_password: &str,
     owner_password_source: OwnerPasswordSource,
     owner_credential_reveal_proof: &str,
     credential_encryption_key: &str,
     database_encryption_key: &str,
-    revoke_existing_sessions: bool,
+    owner_session_reset: Option<OwnerSessionReset>,
 ) -> Result<BTreeMap<OsString, OsString>, String> {
     fs::create_dir_all(data_dir)
         .map_err(|error| format!("Failed to create unified data directory: {error}"))?;
-    if revoke_existing_sessions {
+    if let Some(reset) = owner_session_reset {
         crate::atomic_write::write_json_atomically(
             &data_dir.join(RECOVERY_OWNER_SESSION_RESET_FILE),
-            &serde_json::json!({ "version": 1, "reason": "recovery" }),
-            "Failed to write recovery owner-session reset state",
+            &serde_json::json!({ "version": 1, "reason": reset.reason() }),
+            "Failed to write owner-session reset state",
         )?;
     }
     Ok(ri_environment(
@@ -854,8 +870,37 @@ fn prepare_ri_start(
         owner_credential_reveal_proof,
         credential_encryption_key,
         database_encryption_key,
-        revoke_existing_sessions,
+        owner_session_reset.is_some(),
     ))
+}
+
+/// The owner-session reset one start of the managed stack carries out, and
+/// the pending stack-restart request that start settles. A revoking request
+/// stays pending until a start that revokes reaches Ready, so a failed
+/// start, a restart watcher that gave up, or a quit cannot drop the
+/// revocation. Any start reads the saved password, so it also settles a
+/// request that does not revoke.
+pub(crate) fn owner_session_reset_for_start<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    requested: Option<OwnerSessionReset>,
+) -> (Option<OwnerSessionReset>, Option<u64>) {
+    match crate::owner_credential::pending_owner_password_stack_restart_request(app) {
+        Ok(Some(pending)) => {
+            log::info!(
+                "Owner password stack-restart request {} is carried out by this start",
+                pending.request_id
+            );
+            (
+                requested.or(pending.owner_session_reset),
+                Some(pending.request_id),
+            )
+        }
+        Ok(None) => (requested, None),
+        Err(error) => {
+            log::warn!("Could not read the owner password stack-restart request: {error}");
+            (requested, None)
+        }
+    }
 }
 
 fn ri_environment(
@@ -1111,7 +1156,7 @@ fn start_managed_stack(
     database_encryption_key: &str,
     remote_access: &RemoteAccessConfig,
     held_ngrok: Option<HeldNgrok>,
-    revoke_existing_sessions: bool,
+    owner_session_reset: Option<OwnerSessionReset>,
 ) -> Result<ManagedStackStart, String> {
     let resource_dir = app
         .path()
@@ -1150,7 +1195,7 @@ fn start_managed_stack(
         owner_credential_reveal_proof,
         credential_encryption_key,
         database_encryption_key,
-        revoke_existing_sessions,
+        owner_session_reset,
     )?;
 
     let sink = UnifiedEventSink { app: app.clone() };
@@ -2516,7 +2561,7 @@ struct BootstrapSecrets {
 }
 
 #[derive(Clone, Copy)]
-enum OwnerPasswordSource {
+pub(crate) enum OwnerPasswordSource {
     Configured,
     DesktopGenerated,
 }
@@ -2614,10 +2659,18 @@ async fn bootstrap_and_open_console(
     app: AppHandle,
     should_show: bool,
     preserved_path: Option<String>,
+    owner_session_reset: Option<OwnerSessionReset>,
 ) -> Result<(), BootstrapFailure> {
     set_status(&app, UnifiedStatus::Starting);
 
     let attach = attach_mode();
+    // Attach mode starts no stack, so it can carry out no restart request.
+    let (owner_session_reset, stack_restart_request_id) = if attach {
+        (owner_session_reset, None)
+    } else {
+        owner_session_reset_for_start(&app, owner_session_reset)
+    };
+
     let secrets_app = app.clone();
     let BootstrapSecrets {
         password,
@@ -2657,7 +2710,7 @@ async fn bootstrap_and_open_console(
                 &database_encryption_key_for_sidecar,
                 &remote_access_for_sidecars,
                 held_ngrok,
-                false,
+                owner_session_reset,
             )
         })
         .await
@@ -2680,6 +2733,7 @@ async fn bootstrap_and_open_console(
         should_show,
         &remote_access.fields.trusted_hosts,
         preserved_path,
+        stack_restart_request_id,
     )
     .await
     .map_err(BootstrapFailure::from)
@@ -2715,6 +2769,7 @@ async fn finish_bootstrap(
     should_show: bool,
     trusted_hosts: &str,
     preserved_path: Option<String>,
+    stack_restart_request_id: Option<u64>,
 ) -> Result<(), String> {
     let host_header = ri_readiness_host_header(trusted_hosts);
     let ri_origin_for_state = ri_origin.clone();
@@ -2816,6 +2871,15 @@ async fn finish_bootstrap(
         return Err(error);
     }
     spawn_console_deep_health_watch(console_origin_for_health_watch);
+    // No failure branch is left: this start carried out the restart request
+    // it read. Complete it before Ready, while the restart watcher still
+    // waits, so the watcher never runs it a second time.
+    if let Err(error) = crate::owner_credential::complete_owner_password_stack_restart_request(
+        app,
+        stack_restart_request_id,
+    ) {
+        log::warn!("Could not complete the owner password stack-restart request: {error}");
+    }
     set_status(app, UnifiedStatus::Ready);
     close_recovery_window(app);
     Ok(())
@@ -3036,7 +3100,7 @@ pub(crate) async fn import_database_encryption_recovery_code(
             // Whoever held a session before the key was lost must sign in
             // again: the RI revokes owner sessions and bearers before it
             // serves or schedules anything.
-            true,
+            Some(OwnerSessionReset::Recovery),
         )
     })
     .await
@@ -3126,6 +3190,9 @@ pub(crate) async fn import_database_encryption_recovery_code(
         // surface from the console, and the console had never successfully
         // opened yet in this session.
         None,
+        // This start revokes for recovery but does not read the
+        // stack-restart request; a later start still carries that out.
+        None,
     )
     .await
 }
@@ -3181,11 +3248,18 @@ pub(crate) fn stack_bootstrap_in_flight(app: &AppHandle) -> bool {
         .unwrap_or(false)
 }
 
-pub(crate) async fn restart_after_remote_access_config(app: AppHandle) -> Result<(), String> {
+/// Restart the managed stack after a config or owner-password change. With
+/// an `owner_session_reset` the RI revokes every owner session and bearer
+/// before it serves (the #280 recovery mechanism, see `prepare_ri_start`);
+/// the desktop then signs its own webview in again with the new password.
+pub(crate) async fn restart_after_remote_access_config(
+    app: AppHandle,
+    owner_session_reset: Option<OwnerSessionReset>,
+) -> Result<(), String> {
     if !remote_access_configuration_supported() {
         return Err("Remote access requires the managed desktop stack".into());
     }
-    let result = restart_managed_stack(app.clone()).await;
+    let result = restart_managed_stack(app.clone(), owner_session_reset).await;
     // Without this a failed restart left the tray at "Restarting" or
     // "Starting", and the owner-password restart watcher, which waits while
     // a bootstrap runs, would wait forever.
@@ -3195,7 +3269,10 @@ pub(crate) async fn restart_after_remote_access_config(app: AppHandle) -> Result
     result
 }
 
-async fn restart_managed_stack(app: AppHandle) -> Result<(), String> {
+async fn restart_managed_stack(
+    app: AppHandle,
+    owner_session_reset: Option<OwnerSessionReset>,
+) -> Result<(), String> {
     let preserved_path = console_path_before_restart(&app);
     set_status(&app, UnifiedStatus::Restarting);
     tokio::task::spawn_blocking({
@@ -3216,7 +3293,7 @@ async fn restart_managed_stack(app: AppHandle) -> Result<(), String> {
     // not the moment to also introduce new recovery-window UI; the tray
     // status still reaches NeedsRecovery on the NEXT natural bootstrap
     // attempt (app relaunch or "Open console"), which does open it.
-    bootstrap_and_open_console(app, true, preserved_path)
+    bootstrap_and_open_console(app, true, preserved_path, owner_session_reset)
         .await
         .map_err(|failure| match failure {
             BootstrapFailure::NeedsRecovery => {
@@ -3477,7 +3554,7 @@ pub(crate) fn spawn_remote_access_config_watcher(app: AppHandle) {
             }
             log::info!("Remote-access config changed on disk; restarting the managed stack");
             last_applied = current;
-            if let Err(error) = restart_after_remote_access_config(app.clone()).await {
+            if let Err(error) = restart_after_remote_access_config(app.clone(), None).await {
                 log::error!(
                     "Automatic restart after a remote-access config change failed: {error}"
                 );
@@ -3900,13 +3977,19 @@ fn owner_session_cookie(url: &tauri::Url, value: &str) -> Result<Cookie<'static>
 }
 
 fn owner_credential_reveal_cookie(url: &tauri::Url, value: &str) -> Result<Cookie<'static>, String> {
-    let _host = url
+    let host = url
         .host_str()
-        .ok_or_else(|| "Console URL has no cookie host".to_string())?;
-    Ok(Cookie::build((OWNER_CREDENTIAL_REVEAL_COOKIE, value.to_string()))
-        .path("/")
-        .http_only(true)
-        .build())
+        .ok_or_else(|| "Console URL has no cookie host".to_string())?
+        .to_string();
+    // wry turns a missing domain into "" and WebKitGTK then never sends the
+    // cookie, so the domain is required here, as for the session cookie.
+    Ok(
+        Cookie::build((OWNER_CREDENTIAL_REVEAL_COOKIE, value.to_string()))
+            .domain(host)
+            .path("/")
+            .http_only(true)
+            .build(),
+    )
 }
 
 /// Opens an external link clicked inside the console window in the owner's
@@ -6543,7 +6626,7 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
             "reveal-proof-test",
             credential_key,
             database_key,
-            recovery,
+            recovery.then_some(OwnerSessionReset::Recovery),
         )
         .expect("prepare RI start")
     }
@@ -6756,7 +6839,7 @@ setInterval(() => {}, 1000);
             "reveal-proof-test",
             "credential-key-test",
             "database-key-test-0928",
-            false,
+            None,
         )
         .expect("prepare RI start");
         let run = std::process::Command::new(node_on_test_path())
@@ -6818,6 +6901,15 @@ setInterval(() => {}, 1000);
             serde_json::json!({ "password": chosen }),
         )
         .expect("the window saves the password");
+        // First-time setup does not restart now or revoke: the remote-access
+        // save that follows restarts the stack through the config watcher.
+        let restart: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(data_dir.join("owner-password-stack-restart-request.json"))
+                .expect("restart request"),
+        )
+        .expect("restart request is JSON");
+        assert!(restart["notBeforeUnixMs"].is_u64(), "{restart}");
+        assert_eq!(restart["revokeSessions"], serde_json::Value::Null, "{restart}");
 
         // The next start reads the saved password, as `load_bootstrap_secrets`
         // does (under cargo test the keychain is refused, so the app-data file).
@@ -6829,6 +6921,327 @@ setInterval(() => {}, 1000);
         let after = run_ri_driver(&ri_root, &data_dir, &saved, "turn-on-remote-access", &[]);
         assert_eq!(after["status"], 200, "{after}");
         println!("REAL-RI REMOTE-ACCESS GATE TEST RAN");
+    }
+
+    /// The RI logs why it revoked owner sessions from the reset file's
+    /// reason. A password change must not be logged as a recovery.
+    #[test]
+    fn the_owner_session_reset_file_names_its_reason() {
+        for (reset, reason) in [
+            (OwnerSessionReset::Recovery, "recovery"),
+            (OwnerSessionReset::PasswordChange, "password_change"),
+        ] {
+            let root = tempfile::tempdir().expect("tempdir");
+            let environment = prepare_ri_start(
+                root.path(),
+                "owner-password-test",
+                OwnerPasswordSource::DesktopGenerated,
+                "reveal-proof-test",
+                "credential-key-test",
+                "database-key-test",
+                Some(reset),
+            )
+            .expect("prepare RI start");
+            let written: serde_json::Value = serde_json::from_str(
+                &fs::read_to_string(root.path().join(RECOVERY_OWNER_SESSION_RESET_FILE))
+                    .expect("reset file"),
+            )
+            .expect("reset file is JSON");
+            assert_eq!(written, serde_json::json!({ "version": 1, "reason": reason }));
+            assert_eq!(
+                environment.get(&OsString::from(RECOVERY_REVOKE_OWNER_SESSIONS_ENV)),
+                Some(&OsString::from("1"))
+            );
+        }
+    }
+
+    /// The owner changes the desktop password in the native window. The
+    /// restart that applies it must sign out every other browser and CLI
+    /// token: owner sessions live in the database and are not bound to the
+    /// password, so before this only a recovery start revoked them and a
+    /// phone signed in with the old password stayed signed in.
+    #[test]
+    fn a_desktop_password_change_revokes_owner_sessions_and_bearers_in_the_real_ri() {
+        let Some(ri_root) = reference_implementation_or_skip() else {
+            return;
+        };
+        let root = tempfile::tempdir().expect("tempdir");
+        let app = crate::mock_app_with_data_dir(root.path());
+        let data_dir = app
+            .path()
+            .app_data_dir()
+            .expect("app data dir")
+            .join(UNIFIED_DB_DIRECTORY);
+        assert!(data_dir.starts_with(root.path()), "{data_dir:?}");
+        fs::create_dir_all(&data_dir).expect("data dir");
+
+        let old_password = "old-owner-password-0928";
+        let seeded = run_ri_driver(&ri_root, &data_dir, old_password, "seed", &[]);
+        assert_eq!(seeded["sessionStatus"], 204, "{seeded}");
+        assert_eq!(seeded["bearerStatus"], 200, "{seeded}");
+
+        // Settings asks for the window after OS re-auth; the grant stands in
+        // for the confirmed re-auth.
+        let grant_id = "grant-test-0928";
+        let request = run_ri_driver(
+            &ri_root,
+            &data_dir,
+            old_password,
+            "request-password-window",
+            &["change", grant_id],
+        );
+        let request_id = request["requestId"].as_u64().expect("request id");
+        crate::owner_credential::grant_owner_password_change_for_test(request_id, grant_id);
+        let window = tauri::WebviewWindowBuilder::new(&app, "owner-password", Default::default())
+            .build()
+            .expect("build the owner-password window");
+        let new_password = "new-owner-password-0928";
+        crate::invoke_from(
+            &window,
+            "set_desktop_owner_password",
+            serde_json::json!({ "password": new_password }),
+        )
+        .expect("the window saves the password");
+
+        // The restart the stack-restart watcher runs for that request.
+        let restart: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(data_dir.join("owner-password-stack-restart-request.json"))
+                .expect("restart request"),
+        )
+        .expect("restart request is JSON");
+        assert_eq!(restart["revokeSessions"], true, "{restart}");
+        assert_eq!(restart["revokeReason"], "password_change", "{restart}");
+        let saved = crate::owner_credential::load_or_create_owner_credential(
+            &crate::owner_credential::owner_credential_path(app.handle()).expect("credential path"),
+        )
+        .expect("saved password");
+        assert_eq!(saved, new_password);
+        let result_path = root.path().join("change-result.json");
+        let environment = prepare_ri_start(
+            &data_dir,
+            &saved,
+            OwnerPasswordSource::DesktopGenerated,
+            "reveal-proof-test",
+            "credential-key-test",
+            "database-key-test-0928",
+            Some(OwnerSessionReset::PasswordChange),
+        )
+        .expect("prepare RI start");
+        let handle = start_ri_with(
+            environment,
+            Some(ri_root.clone()),
+            vec![
+                OsString::from("--import"),
+                OsString::from("tsx"),
+                ri_root
+                    .join("test/fixtures/desktop-recovery-ri-driver.ts")
+                    .into_os_string(),
+                OsString::from("recover"),
+                result_path.clone().into_os_string(),
+                data_dir
+                    .parent()
+                    .expect("app data dir")
+                    .join("driver-seed.json")
+                    .into_os_string(),
+            ],
+            Duration::from_secs(120),
+        )
+        .expect("real RI starts with the new password");
+        let _ = handle.stop();
+
+        let result: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&result_path).expect("result"))
+                .expect("json");
+        assert_eq!(result["oldSessionStatus"], 401, "{result}");
+        assert_eq!(result["oldBearerStatus"], 401, "{result}");
+        assert_eq!(result["freshSessionStatus"], 204, "{result}");
+        assert_eq!(
+            restart["notBeforeUnixMs"],
+            serde_json::Value::Null,
+            "a change restarts now, not after the first-setup delay: {restart}"
+        );
+        println!("REAL-RI PASSWORD CHANGE TEST RAN");
+    }
+
+    /// The owner changes the desktop password, and the first start after it
+    /// fails. The revocation must survive that failure: the next start that
+    /// succeeds signs out the old session and bearer. Before this, the
+    /// failed start (or the watcher giving up) completed the request, and the
+    /// next start ran with no reset, so the old session and bearer stayed
+    /// valid under the new password.
+    #[test]
+    fn a_password_change_whose_first_start_fails_is_revoked_by_the_next_start_in_the_real_ri() {
+        let Some(ri_root) = reference_implementation_or_skip() else {
+            return;
+        };
+        let root = tempfile::tempdir().expect("tempdir");
+        let app = crate::mock_app_with_data_dir(root.path());
+        let data_dir = app
+            .path()
+            .app_data_dir()
+            .expect("app data dir")
+            .join(UNIFIED_DB_DIRECTORY);
+        assert!(data_dir.starts_with(root.path()), "{data_dir:?}");
+        fs::create_dir_all(&data_dir).expect("data dir");
+        let driver = ri_root.join("test/fixtures/desktop-recovery-ri-driver.ts");
+        let seed_path = data_dir
+            .parent()
+            .expect("app data dir")
+            .join("driver-seed.json");
+
+        let old_password = "old-owner-password-0928";
+        let seeded = run_ri_driver(&ri_root, &data_dir, old_password, "seed", &[]);
+        assert_eq!(seeded["sessionStatus"], 204, "{seeded}");
+        assert_eq!(seeded["bearerStatus"], 200, "{seeded}");
+
+        let grant_id = "grant-test-0928-failed-start";
+        let request = run_ri_driver(
+            &ri_root,
+            &data_dir,
+            old_password,
+            "request-password-window",
+            &["change", grant_id],
+        );
+        let request_id = request["requestId"].as_u64().expect("request id");
+        crate::owner_credential::grant_owner_password_change_for_test(request_id, grant_id);
+        let window = tauri::WebviewWindowBuilder::new(&app, "owner-password", Default::default())
+            .build()
+            .expect("build the owner-password window");
+        let new_password = "new-owner-password-0928";
+        crate::invoke_from(
+            &window,
+            "set_desktop_owner_password",
+            serde_json::json!({ "password": new_password }),
+        )
+        .expect("the window saves the password");
+        let saved = crate::owner_credential::load_or_create_owner_credential(
+            &crate::owner_credential::owner_credential_path(app.handle()).expect("credential path"),
+        )
+        .expect("saved password");
+        assert_eq!(saved, new_password);
+
+        let start_args = |result_path: &Path| {
+            vec![
+                OsString::from("--import"),
+                OsString::from("tsx"),
+                driver.clone().into_os_string(),
+                OsString::from("recover"),
+                result_path.to_path_buf().into_os_string(),
+                seed_path.clone().into_os_string(),
+            ]
+        };
+
+        // The first start carries the revocation and fails before the RI
+        // serves: a wrong database key stands in for any such failure.
+        let (reset, carried) = owner_session_reset_for_start(app.handle(), None);
+        assert_eq!(reset, Some(OwnerSessionReset::PasswordChange));
+        let failing = prepare_ri_start(
+            &data_dir,
+            &saved,
+            OwnerPasswordSource::DesktopGenerated,
+            "reveal-proof-test",
+            "credential-key-test",
+            "wrong-database-key-0928",
+            reset,
+        )
+        .expect("prepare the failing start");
+        let failed_result = root.path().join("failed-start.json");
+        let failed = start_ri_with(
+            failing,
+            Some(ri_root.clone()),
+            start_args(&failed_result),
+            Duration::from_secs(60),
+        );
+        assert!(failed.is_err(), "the start with a wrong key must fail");
+        assert!(!failed_result.exists(), "the failed start must not serve");
+
+        // The next start, from "Open DataConnect" or the next launch, passes
+        // no reset of its own. The pending request supplies it.
+        let (reset, next_carried) = owner_session_reset_for_start(app.handle(), None);
+        assert_eq!(reset, Some(OwnerSessionReset::PasswordChange));
+        assert_eq!(next_carried, carried);
+        let environment = prepare_ri_start(
+            &data_dir,
+            &saved,
+            OwnerPasswordSource::DesktopGenerated,
+            "reveal-proof-test",
+            "credential-key-test",
+            "database-key-test-0928",
+            reset,
+        )
+        .expect("prepare the next start");
+        let result_path = root.path().join("next-start.json");
+        let handle = start_ri_with(
+            environment,
+            Some(ri_root.clone()),
+            start_args(&result_path),
+            Duration::from_secs(120),
+        )
+        .expect("real RI starts with the new password");
+        let _ = handle.stop();
+        let result: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&result_path).expect("result")).expect("json");
+        assert_eq!(result["oldSessionStatus"], 401, "{result}");
+        assert_eq!(result["oldBearerStatus"], 401, "{result}");
+        assert_eq!(result["freshSessionStatus"], 204, "{result}");
+
+        // That start reached Ready and completes the request: a later start
+        // does not revoke again.
+        crate::owner_credential::complete_owner_password_stack_restart_request(
+            app.handle(),
+            next_carried,
+        )
+        .expect("complete");
+        assert_eq!(
+            owner_session_reset_for_start(app.handle(), None),
+            (None, None)
+        );
+        println!("REAL-RI FAILED-START REVOCATION TEST RAN");
+    }
+
+    /// The tests of `owner_session_reset_for_start` stand in for the
+    /// bootstrap, which needs the real runtime. This pins the bootstrap to
+    /// it: each start reads the pending request before the stack starts, and
+    /// completes it after the last failure branch, before Ready.
+    #[test]
+    fn every_bootstrap_carries_out_the_pending_stack_restart_request() {
+        let source = include_str!("unified.rs");
+        let section = |from: &str, to: &str| {
+            let start = source.find(from).expect(from);
+            let end = start + source[start..].find(to).expect(to);
+            &source[start..end]
+        };
+        let bootstrap = section(
+            "async fn bootstrap_and_open_console(",
+            "async fn finish_bootstrap(",
+        );
+        let read = bootstrap
+            .find("owner_session_reset_for_start(&app, owner_session_reset)")
+            .expect("the bootstrap reads the pending request");
+        let start = bootstrap
+            .find("start_managed_stack(")
+            .expect("the bootstrap starts the stack");
+        assert!(read < start, "the request is read before the stack starts");
+        let password = bootstrap
+            .find("load_bootstrap_secrets(")
+            .expect("the bootstrap reads the password");
+        assert!(read < password, "the request is read before the password");
+        assert!(bootstrap.contains("stack_restart_request_id,\n    )\n    .await"));
+
+        let finish = section(
+            "async fn finish_bootstrap(",
+            "\n/// Recovery-window command",
+        );
+        let last_failure = finish
+            .rfind("teardown_managed_on_error(")
+            .expect("finish_bootstrap has failure branches");
+        let complete = finish
+            .find("complete_owner_password_stack_restart_request(")
+            .expect("finish_bootstrap completes the request");
+        let ready = finish
+            .find("set_status(app, UnifiedStatus::Ready)")
+            .expect("finish_bootstrap sets Ready");
+        assert!(last_failure < complete && complete < ready);
     }
 
     #[test]
@@ -7442,13 +7855,119 @@ setInterval(() => {}, 1000);
         assert_eq!(cookie.http_only(), Some(true));
     }
 
+    /// The console webview must send both cookies the desktop sets on it.
+    /// wry turns a cookie with no domain into a WebKitGTK cookie with domain
+    /// "", which WebKitGTK stores and never sends; the reveal cookie had no
+    /// domain until this test was written. This builds a real WebKitGTK
+    /// webview, sets the two cookies through wry as `set_cookies_then_navigate`
+    /// does, and records the Cookie header at a local HTTP server.
+    ///
+    /// It needs a display, so it is ignored by default. Run it on its own
+    /// display and session bus, never the desktop's:
+    ///
+    /// ```text
+    /// xvfb-run -a dbus-run-session -- cargo test --lib -- --ignored --exact \
+    ///     unified::tests::the_console_webview_sends_the_session_and_reveal_cookies --nocapture
+    /// ```
+    #[cfg(target_os = "linux")]
     #[test]
-    fn owner_credential_reveal_cookie_is_host_only_and_http_only() {
+    #[ignore = "needs a display: run under xvfb-run and dbus-run-session"]
+    fn the_console_webview_sends_the_session_and_reveal_cookies() {
+        use gtk::prelude::*;
+        use std::io::{BufRead, BufReader, Write};
+        use wry::WebViewBuilderExtUnix;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("local addr").port();
+        let (seen, requests) = std::sync::mpsc::channel::<String>();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+                let mut request_line = String::new();
+                let _ = reader.read_line(&mut request_line);
+                let mut cookie = String::new();
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                        break;
+                    }
+                    let line = line.trim_end();
+                    if line.is_empty() {
+                        break;
+                    }
+                    if let Some((name, value)) = line.split_once(':') {
+                        if name.eq_ignore_ascii_case("cookie") {
+                            cookie = value.trim().to_string();
+                        }
+                    }
+                }
+                if request_line.starts_with("GET /settings ") {
+                    let _ = seen.send(cookie);
+                }
+                let body = "<html><body>console</body></html>";
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+
+        gtk::init().expect("GTK needs a display: run under xvfb-run");
+        let window = gtk::Window::new(gtk::WindowType::Toplevel);
+        let webview = wry::WebViewBuilder::new()
+            .with_url("about:blank")
+            .build_gtk(&window)
+            .expect("build the webview");
+        window.show_all();
+        let url: tauri::Url = format!("http://127.0.0.1:{port}/").parse().expect("url");
+        for cookie in [
+            owner_session_cookie(&url, "session-value").expect("session cookie"),
+            owner_credential_reveal_cookie(&url, "reveal-value").expect("reveal cookie"),
+        ] {
+            webview.set_cookie(&cookie).expect("set cookie");
+        }
+        webview
+            .load_url(&format!("http://127.0.0.1:{port}/settings"))
+            .expect("load the console");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let cookie = loop {
+            while gtk::events_pending() {
+                gtk::main_iteration_do(false);
+            }
+            if let Ok(cookie) = requests.try_recv() {
+                break cookie;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the webview never requested /settings"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        println!("WEBKITGTK COOKIE HEADER: {cookie}");
+        let pairs: Vec<&str> = cookie.split("; ").collect();
+        assert!(
+            pairs.contains(&"pdpp_owner_session=session-value"),
+            "{cookie}"
+        );
+        assert!(
+            pairs.contains(&format!("{OWNER_CREDENTIAL_REVEAL_COOKIE}=reveal-value").as_str()),
+            "the reveal cookie was not sent: {cookie:?}"
+        );
+        println!("WEBKITGTK COOKIE TEST RAN");
+    }
+
+    #[test]
+    fn owner_credential_reveal_cookie_sets_the_console_host_and_is_http_only() {
         let url: tauri::Url = "http://127.0.0.1:4310/".parse().expect("test url");
         let cookie = owner_credential_reveal_cookie(&url, "reveal-proof").expect("reveal cookie");
         assert_eq!(cookie.name(), OWNER_CREDENTIAL_REVEAL_COOKIE);
         assert_eq!(cookie.value(), "reveal-proof");
-        assert_eq!(cookie.domain(), None);
+        assert_eq!(cookie.domain(), Some("127.0.0.1"));
+        let session = owner_session_cookie(&url, "session").expect("session cookie");
+        assert_eq!(cookie.domain(), session.domain());
         assert_eq!(cookie.path(), Some("/"));
         assert_eq!(cookie.http_only(), Some(true));
     }

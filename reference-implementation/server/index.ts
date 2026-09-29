@@ -2293,13 +2293,18 @@ async function applyRecoveryOwnerSessionReset({
   if (!existsSync(resetPath)) {
     return;
   }
+  let resetState: unknown;
   try {
-    JSON.parse(readFileSync(resetPath, "utf8"));
+    resetState = JSON.parse(readFileSync(resetPath, "utf8"));
   } catch (err) {
     throw new Error("Recovery owner-session reset state could not be read; refusing to serve recovered owner sessions.", {
       cause: err,
     });
   }
+  // The desktop also revokes after an owner password change (reason
+  // "password_change"). Any other or missing reason is a recovery.
+  const reason =
+    (resetState as { reason?: unknown } | null)?.reason === "password_change" ? "password_change" : "recovery";
 
   const sessionStore = getOwnerSessionStore();
   const nowSeconds = Math.floor(Date.now() / 1000);
@@ -2316,8 +2321,10 @@ async function applyRecoveryOwnerSessionReset({
     });
   }
   logger.warn(
-    { owner_bearers_revoked: ownerBearers.length, ownerSubjectId: subjectId },
-    "recovery startup revoked existing owner sessions and owner bearers before serving"
+    { owner_bearers_revoked: ownerBearers.length, ownerSubjectId: subjectId, reason },
+    reason === "password_change"
+      ? "owner password change revoked existing owner sessions and owner bearers before serving"
+      : "recovery startup revoked existing owner sessions and owner bearers before serving"
   );
 }
 

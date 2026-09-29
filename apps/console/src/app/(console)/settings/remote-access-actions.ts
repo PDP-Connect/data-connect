@@ -13,6 +13,7 @@ import {
   setRemoteAccessConfig,
 } from "../lib/remote-access-client.ts"
 import { requireDashboardAccess } from "../lib/dashboard-access.ts"
+import { hasValidLocalOwnerCredentialRevealProofCookie } from "../lib/owner-credential-client.ts"
 import {
   ownerPasswordOwnerSet,
   requestOwnerPasswordStackRestart,
@@ -151,6 +152,14 @@ export async function requestOwnerPasswordWindowAction(): Promise<
       message: "Open the DataConnect desktop app to set the owner password.",
     }
   }
+  // The window opens on the owner's desktop; only the desktop's own webview
+  // may ask for it, not a browser reaching the console over remote access.
+  if (!(await hasValidLocalOwnerCredentialRevealProofCookie())) {
+    return {
+      ok: false,
+      message: "Open Settings from the local desktop app to set the owner password.",
+    }
+  }
   try {
     if (await ownerPasswordOwnerSet(process.env.PDPP_DATA_DIR || "data")) {
       return {
@@ -175,6 +184,12 @@ export async function restartAfterOwnerPasswordSetAction(): Promise<
     return {
       ok: false,
       message: "Open the DataConnect desktop app to apply the owner password.",
+    }
+  }
+  if (!(await hasValidLocalOwnerCredentialRevealProofCookie())) {
+    return {
+      ok: false,
+      message: "Open Settings from the local desktop app to apply the owner password.",
     }
   }
   try {
