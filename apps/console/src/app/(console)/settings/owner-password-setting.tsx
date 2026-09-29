@@ -134,8 +134,8 @@ export function OwnerPasswordSetting({
     return (
       <div className="grid justify-items-start gap-3">
         <p className="pdpp-caption text-muted-foreground">
-          DataConnect keeps this password in your system keychain for signing
-          in on other devices. Changing it signs out other browser sessions and
+          DataConnect stores this password on this computer for signing in on
+          other devices. Changing it signs out other browser sessions and
           command-line tokens and restarts the server.
         </p>
         {canReveal ? <OwnerCredentialSetting /> : null}

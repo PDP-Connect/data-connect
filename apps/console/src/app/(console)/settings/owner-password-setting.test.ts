@@ -46,14 +46,14 @@ async function render(
   return renderToStaticMarkup(createElement(OwnerPasswordSetting, props))
 }
 
-test("a desktop-managed password says DataConnect keeps it, not that an env var sets it", async () => {
+test("desktop password copy describes local storage without naming a storage mechanism", async () => {
   const html = await render({ canReveal: true, source: "desktop" })
-  assert.match(html, /keeps this password in your system\s+keychain/)
+  assert.match(html, /stores this password on this computer for signing in\s+on other devices/)
   assert.match(html, /Reveal password/)
   assert.match(html, /Change password/)
   assert.match(html, /signs out other browser sessions and\s+command-line tokens/)
   assert.match(html, /Make sure no one else can see your screen/)
-  assert.equal((html.match(/system\s+keychain/g) ?? []).length, 1)
+  assert.doesNotMatch(html, /keychain/)
   assert.equal((html.match(/signing in\s+on other devices/g) ?? []).length, 1)
   assert.doesNotMatch(html, /PDPP_OWNER_PASSWORD/)
 })
