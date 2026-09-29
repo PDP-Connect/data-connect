@@ -993,17 +993,16 @@ export function RemoteAccessSetting({
       {showOwnerPasswordMigrationBanner ? (
         <div className="grid gap-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
           <p>
-            Remote access is on with the original generated password. It still
-            works, but set your own owner password from this computer when you
-            are ready.
+            Remote access is on with the original generated password. Change it
+            when you are ready.
           </p>
           <button
-            className="justify-self-start rounded-md border border-amber-700/40 px-3 py-1.5 text-sm hover:bg-amber-100 disabled:opacity-50"
+            className="justify-self-start rounded-md border border-amber-700/40 px-3 py-1.5 text-sm hover:bg-amber-100"
             disabled={busy || desktopUnavailable}
             onClick={() => void setOwnerPasswordForMigration()}
             type="button"
           >
-            Set owner password
+            Change password
           </button>
         </div>
       ) : null}

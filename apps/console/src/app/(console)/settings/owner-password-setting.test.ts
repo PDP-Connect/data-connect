@@ -46,32 +46,32 @@ async function render(
   return renderToStaticMarkup(createElement(OwnerPasswordSetting, props))
 }
 
-test("a desktop-managed password says DataConnect keeps it, not that an env var sets it", async () => {
+test("desktop password copy describes local storage without naming a storage mechanism", async () => {
   const html = await render({ canReveal: true, source: "desktop" })
-  assert.match(html, /keeps it in your system\s+keychain/)
+  assert.match(html, /stores this password on this computer for signing in\s+on other devices/)
   assert.match(html, /Reveal password/)
-  assert.match(html, /Set a new password/)
-  assert.match(html, /Your computer asks you to confirm first\./)
-  assert.match(html, /signs out every other browser and\s+command-line token/)
+  assert.match(html, /Change password/)
+  assert.match(html, /signs out other browser sessions and\s+command-line tokens/)
+  assert.match(html, /Make sure no one else can see your screen/)
+  assert.doesNotMatch(html, /keychain/)
+  assert.equal((html.match(/signing in\s+on other devices/g) ?? []).length, 1)
   assert.doesNotMatch(html, /PDPP_OWNER_PASSWORD/)
 })
 
 test("reveal appears only where the desktop webview can prove it is local", async () => {
   const html = await render({ canReveal: false, source: "desktop" })
   assert.doesNotMatch(html, /Reveal password/)
-  assert.match(html, /Set a new password/)
+  assert.match(html, /Change password/)
 })
 
-test("on Linux the desktop copy says there is no OS prompt yet and change stays available", async () => {
+test("the desktop copy omits the Linux OS prompt message and change stays available", async () => {
   const html = await render({
     canReveal: true,
-    linuxNoOsPrompt: true,
     source: "desktop",
   })
-  assert.match(html, /No OS prompt on Linux yet\./)
   assert.match(html, /Reveal password/)
-  assert.match(html, /<button[^>]*type="button"[^>]*>Set a new password</)
-  assert.doesNotMatch(html, /<button[^>]*disabled=""[^>]*>Set a new password</)
+  assert.match(html, /<button[^>]*type="button"[^>]*>Change password</)
+  assert.doesNotMatch(html, /No OS prompt on Linux yet\./)
 })
 
 test("an operator's PDPP_OWNER_PASSWORD keeps the env copy", async () => {

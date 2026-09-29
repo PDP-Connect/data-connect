@@ -65,7 +65,7 @@ export function OwnerCredentialSetting({
   return (
     <div className="grid gap-3">
       <p className="pdpp-caption text-muted-foreground">
-        This is the password you type to sign in from another device, such as a phone reaching this Personal Server over its remote-access URL. Make sure no one else can see your screen before revealing it.
+        Make sure no one else can see your screen before revealing the password.
       </p>
 
       {error ? (
