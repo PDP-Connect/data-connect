@@ -45,7 +45,7 @@ Back to slide 8: "That screen is what the first implementation builds beside Cue
 |---|---|
 | 01–02 Sign in to Cuenta Única; it tells the authorisation server who this is | Simulated Cuenta Única sign-in (password stands in for the real login and cédula claim) |
 | 03 The recipient asked for fields, purpose, window; the consent screen shows them | Servicios Proactivos sends the request; the one screen shows it |
-| 04 Approve; the grant is recorded; the recipient gets a token | Autorizar; one grant covering both institutions |
+| 04 Approve; the grant is recorded; the recipient gets a token | Autorizar; one approval, one grant per institution (the spec binds a grant to a single source) |
 | 05–06 Recipient calls the service; resource server returns only granted fields | Reads of the SNS and SIUBEN records, only the requested fields |
 | 07 Release logged | "What was read" in Mis autorizaciones |
 
@@ -54,7 +54,9 @@ Not shown: X-Road between the recipient and the institutions; the real Cuenta Ú
 ## Known limits
 
 - One fictitious citizen is shared by everyone with the password; reset before presenting.
-- The end date is declared by the requester (reference extension; the published spec has no field for it yet).
+- The end date is declared by the requester. The spec's grant has `expires_at`, but its request has no field for it, so this is a reference extension.
+- "What was read and when" in Mis autorizaciones is our implementation; the core spec defines no citizen-facing access log (§11–12).
+- The citizen can untick any requested stream and optional field; the spec defines owner choice only for streams the client marks optional (§5). Schema-required fields stay locked, as the spec requires.
 
 ## Verify
 
