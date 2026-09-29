@@ -15,6 +15,7 @@ import {
   // biome-ignore lint/correctness/noUnresolvedImports: Biome cannot resolve this installed package export; Node and TypeScript resolve it.
 } from "@opendatalabs/remote-surface/leases";
 
+import { classifyConnectorIntentModality, type ConnectorManifestLike } from "../server/connection-setup-plan.ts";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { BROWSER_BOUND_KEYS } from "../server/generated/connector-registry.generated.ts";
 import { connectorRetainsSurfaceProcess } from "./browser-surface/retained-surface-connectors.ts";
@@ -49,6 +50,35 @@ export interface NekoBrowserSurfaceRuntimeConfig {
   readonly host?: HostBrowserSurfaceRuntimeConfig;
   readonly leaseConfig: BrowserSurfaceLeaseConfig;
   readonly leaseSweepIntervalMs: number;
+  /**
+   * Set in host mode when PDPP_NEKO_MANAGED_CONNECTORS is unset. It is the
+   * same object as `leaseConfig.managedConnectors`, filled from connector
+   * manifests instead of from an env list.
+   */
+  readonly manifestManagedConnectors?: ManifestManagedConnectors;
+}
+
+/**
+ * The connectors that get a managed browser surface, decided by each
+ * connector's own manifest: a connector qualifies when its manifest declares a
+ * browser binding. A connector installed from the catalog qualifies the same
+ * way as a bundled one, without a connector-key list.
+ *
+ * The lease manager reads membership synchronously, so the server records each
+ * manifest it knows at boot and each manifest a run resolves.
+ */
+export class ManifestManagedConnectors extends Set<string> {
+  observe(connectorId: string, manifest: ConnectorManifestLike | null): void {
+    const aliases = managedConnectorAliases(connectorId);
+    const browserBound = classifyConnectorIntentModality(manifest) === "browser_bound";
+    for (const alias of aliases) {
+      if (browserBound) {
+        this.add(alias);
+      } else {
+        this.delete(alias);
+      }
+    }
+  }
 }
 
 /** Durable cross-run profile identity, drawn from the lease. */
@@ -261,13 +291,22 @@ export function parseNekoBrowserSurfaceRuntimeConfig(
 }
 
 function parseHostBrowserSurfaceRuntimeConfig(env: NodeJS.ProcessEnv): NekoBrowserSurfaceRuntimeConfig {
+  // PDPP_NEKO_MANAGED_CONNECTORS is an operator override that limits host
+  // surfaces to the listed connectors. Without it, every connector whose
+  // manifest declares a browser binding gets a host surface.
   const configuredConnectorIds = splitCsv(env.PDPP_NEKO_MANAGED_CONNECTORS);
+  const manifestManagedConnectors = configuredConnectorIds.length > 0 ? undefined : new ManifestManagedConnectors();
+  const managedConnectors =
+    manifestManagedConnectors ?? new Set(configuredConnectorIds.flatMap(managedConnectorAliases));
+  // Cap sizing only, not eligibility: the bundled browser connectors are the
+  // ones whose surface-retention policy is known, so they size the reserve.
   const managedConnectorIds = configuredConnectorIds.length > 0 ? configuredConnectorIds : BROWSER_BOUND_KEYS;
-  const managedConnectors = new Set(managedConnectorIds.flatMap(managedConnectorAliases));
-  const defaultSurfaceCap =
-    managedConnectors.size === 0 ? 0 : Math.max(1, countRetainedManagedConnectors(managedConnectorIds) + 1);
+  const managesConnectors = manifestManagedConnectors !== undefined || managedConnectors.size > 0;
+  const defaultSurfaceCap = managesConnectors
+    ? Math.max(1, countRetainedManagedConnectors(managedConnectorIds) + 1)
+    : 0;
   const surfaceCap = parseIntegerEnv(env.PDPP_NEKO_SURFACE_CAP, "PDPP_NEKO_SURFACE_CAP", defaultSurfaceCap);
-  if (managedConnectors.size > 0 && surfaceCap < 1) {
+  if (managesConnectors && surfaceCap < 1) {
     throw new Error("PDPP_NEKO_SURFACE_CAP must be an integer >= 1 when browser host mode manages connectors");
   }
   assertRetainedManagedConnectorReserve(surfaceCap, managedConnectorIds);
@@ -303,6 +342,7 @@ function parseHostBrowserSurfaceRuntimeConfig(env: NodeJS.ProcessEnv): NekoBrows
     },
     leaseConfig,
     leaseSweepIntervalMs,
+    ...(manifestManagedConnectors ? { manifestManagedConnectors } : {}),
   };
 }
 

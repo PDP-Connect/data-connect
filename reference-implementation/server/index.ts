@@ -84,6 +84,7 @@ import {
   createConnectorInstallService,
   createConnectorInstallStore,
   inspectActiveConnector,
+  listVerifiedActiveConnectors,
 } from "./connector-install/index.ts";
 import { createFileLocalConnectorSourceStore } from "./connector-install/local-source.ts";
 import { createRemoteAccessConfigStore, remoteAccessConfigPath } from "./remote-access-store.ts";
@@ -160,7 +161,7 @@ import {
   listGrantedConnectionsForStream,
   projectBindingForWire,
 } from "./connection-identity.ts";
-import { connectionConfigEntriesFromManifest } from "./connection-setup-plan.ts";
+import { type ConnectorManifestLike, connectionConfigEntriesFromManifest } from "./connection-setup-plan.ts";
 import {
   type ConnectorInstanceWriteOwnership,
   withConnectorInstanceWrite,
@@ -9750,16 +9751,50 @@ export function armBrowserSurfaceLeaseSweepAfterBoot(
   timer.start();
 }
 
+// Every connector manifest this server knows at boot: verified active installs
+// first, then registered manifests. A manifest that fails to load is skipped;
+// that connector's next run records its manifest.
+async function listKnownConnectorManifestsForBrowserSurfaces(): Promise<{ connectorId: string; manifest: unknown }[]> {
+  const known = new Map<string, unknown>();
+  const { verified } = await listVerifiedActiveConnectors(createConnectorInstallStore()).catch(() => ({
+    verified: [],
+  }));
+  for (const record of verified) {
+    known.set(record.connectorId, record.manifest);
+  }
+  for (const connectorId of await listRegisteredConnectorIds().catch(() => [])) {
+    if (!known.has(connectorId)) {
+      // biome-ignore lint/performance/noAwaitInLoops: Boot-time, sequential reads keep the catalog store unloaded.
+      known.set(connectorId, await getConnectorManifest(connectorId).catch(() => null));
+    }
+  }
+  return [...known].map(([connectorId, manifest]) => ({ connectorId, manifest }));
+}
+
 export async function resolveNekoBrowserSurfaceControllerOptions({
   env = process.env,
   getBrowserSurfaceLeaseStore = getDefaultBrowserSurfaceLeaseStore,
   createBrowserSurfaceAllocator = (options: { baseUrl: string }) => new NekoSurfaceAllocatorClient(options),
+  listKnownConnectorManifests = listKnownConnectorManifestsForBrowserSurfaces,
+}: {
+  env?: NodeJS.ProcessEnv;
+  getBrowserSurfaceLeaseStore?: typeof getDefaultBrowserSurfaceLeaseStore;
+  createBrowserSurfaceAllocator?: (options: { baseUrl: string }) => NekoSurfaceAllocatorClient;
+  listKnownConnectorManifests?: () => Promise<readonly { connectorId: string; manifest: unknown }[]>;
 } = {}) {
   const runtimeConfig = parseNekoBrowserSurfaceRuntimeConfig(env);
+  const { manifestManagedConnectors } = runtimeConfig;
   const browserSurfaceLeaseStore =
-    runtimeConfig.leaseConfig.managedConnectors.size > 0 ? getBrowserSurfaceLeaseStore() : null;
+    manifestManagedConnectors || runtimeConfig.leaseConfig.managedConnectors.size > 0
+      ? getBrowserSurfaceLeaseStore()
+      : null;
   if (!browserSurfaceLeaseStore) {
     return {} as Record<string, unknown>;
+  }
+  if (manifestManagedConnectors) {
+    for (const { connectorId, manifest } of await listKnownConnectorManifests()) {
+      manifestManagedConnectors.observe(connectorId, manifest as ConnectorManifestLike | null);
+    }
   }
 
   await browserSurfaceLeaseStore.repairStaleSurfaceActiveLeases();
@@ -9790,6 +9825,7 @@ export async function resolveNekoBrowserSurfaceControllerOptions({
   const options: Record<string, unknown> = {
     browserSurfaceLeaseManager,
     browserSurfaceLeaseStore,
+    ...(manifestManagedConnectors ? { browserSurfaceManifestManagedConnectors: manifestManagedConnectors } : {}),
     // Preflight readiness gate: proves the managed n.eko / CDP surface is
     // actually live before the connector child is spawned. Prevents the
     // "ask the human for an OTP and discover the CDP socket was already
