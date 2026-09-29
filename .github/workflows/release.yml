@@ -250,6 +250,15 @@ jobs:
               mkdir -p "$destination"
               cp -R personal-server/dist/node_modules/. "$destination/"
 
+              # Tauri's resource copy drops directory symlinks and copies the
+              # target of each file symlink. That breaks the Chromium
+              # framework layout (Versions/Current and its root links), and
+              # codesign then rejects the framework. cp -R copies symlinks as
+              # links. verify-bundled-personal-server.mjs checks the layout.
+              browsers_destination="$app/Contents/Resources/playwright-runner/dist/browsers"
+              rm -rf "$browsers_destination"
+              cp -R playwright-runner/dist/browsers "$browsers_destination"
+
               version=$(node -p "require('./src-tauri/tauri.conf.json').version")
               arch=$(echo "${{ matrix.target }}" | cut -d- -f1)
               dmg_path="$bundle_root/dmg/DataConnect_${version}_${arch}.dmg"

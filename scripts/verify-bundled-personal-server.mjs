@@ -5,9 +5,17 @@
 import { createHash } from "node:crypto"
 import { spawn, spawnSync } from "node:child_process"
 import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs"
-import { readFileSync, statSync } from "node:fs"
+import { lstatSync, readFileSync, readlinkSync, statSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { basename, join, relative, resolve } from "node:path"
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from "node:path"
 import { createInterface } from "node:readline"
 import { assertStagedConsoleConnectors } from "./check-staged-console-connectors.mjs"
 import { isMainModule } from "./is-main-module.js"
@@ -184,6 +192,70 @@ export function assertPackagedBrowser(entries, artifactName, platform) {
     })
   if (!hasBrowserExecutable) {
     fail(`${artifactName} is missing its packaged Chromium executable`)
+  }
+}
+
+// A macOS framework keeps its content in Versions/<version>. Versions/Current
+// is a relative symlink to that directory, and each other entry at the
+// framework root (the binary, Resources, Helpers, Libraries) is a relative
+// symlink into Versions/Current. `codesign --verify --strict` rejects a
+// framework whose root holds real files: "embedded framework contains
+// modified or invalid version". Tauri's resource copy drops directory
+// symlinks and copies the target of a file symlink. v0.7.59 shipped a
+// Chromium framework in that state, and the downstream signer could not
+// sign it.
+function findFrameworks(root) {
+  return readdirSync(root, { withFileTypes: true }).flatMap(entry => {
+    // Dirent reports a symlink as a symlink, so links are not followed.
+    if (!entry.isDirectory()) return []
+    const child = join(root, entry.name)
+    const nested = findFrameworks(child)
+    return entry.name.endsWith(".framework") ? [child, ...nested] : nested
+  })
+}
+
+function assertFrameworkLink(framework, entry, label) {
+  const link = join(framework, entry)
+  let stats
+  try {
+    stats = lstatSync(link)
+  } catch {
+    fail(`${label} is missing ${entry}`)
+  }
+  if (!stats.isSymbolicLink()) {
+    const kind = stats.isDirectory() ? "directory" : "file"
+    fail(`${label}: ${entry} must be a symlink, found a real ${kind}`)
+  }
+  const target = readlinkSync(link)
+  const resolved = resolve(dirname(link), target)
+  if (isAbsolute(target) || !resolved.startsWith(framework + sep)) {
+    fail(`${label}: ${entry} -> ${target} must stay inside the framework`)
+  }
+  if (!existsSync(link)) fail(`${label}: ${entry} -> ${target} is dangling`)
+  return target
+}
+
+export function assertMacFrameworkLayout(browsersRoot, artifactName) {
+  const frameworks = existsSync(browsersRoot)
+    ? findFrameworks(browsersRoot)
+    : []
+  if (frameworks.length === 0) {
+    fail(`${artifactName} carries no Chromium framework under ${browsersRoot}`)
+  }
+  for (const framework of frameworks) {
+    const label = `${artifactName} ${relative(browsersRoot, framework)}`
+    const current = join("Versions", "Current")
+    assertFrameworkLink(framework, current, label)
+    if (!statSync(join(framework, current)).isDirectory()) {
+      fail(`${label}: ${current} must point to a version directory`)
+    }
+    for (const entry of readdirSync(framework)) {
+      if (entry === "Versions") continue
+      const target = assertFrameworkLink(framework, entry, label)
+      if (!target.startsWith("Versions/Current/")) {
+        fail(`${label}: ${entry} -> ${target} must point into Versions/Current`)
+      }
+    }
   }
 }
 
@@ -553,6 +625,10 @@ function verifyMacApp(
   }
   assertPackagedNode(entries, artifactName, "macos")
   assertPackagedBrowser(entries, artifactName, "macos")
+  assertMacFrameworkLayout(
+    join(app, "Contents", "Resources", "playwright-runner", "dist", "browsers"),
+    artifactName
+  )
 
   const executableDirectory = join(app, "Contents", "MacOS")
   const executableNames = readdirSync(executableDirectory, {
