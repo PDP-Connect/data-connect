@@ -55,6 +55,8 @@ import {
   resolveHomeImportSourcesUiDebugState,
 } from "./home-import-sources-ui-debug"
 import { useHomeManualUpload } from "./use-home-manual-upload"
+import { useHomeRemoveSource } from "./use-home-remove-source"
+import { RemoveSourceDialog } from "./components/remove-source-dialog"
 
 type PendingPdppInteraction = {
   runId: string
@@ -625,6 +627,8 @@ export function Home() {
     [navigate]
   )
 
+  const removeSource = useHomeRemoveSource()
+
   return (
     <PageContainer>
       <div className="space-y-w8">
@@ -639,6 +643,7 @@ export function Home() {
           onSyncSource={handleImportSource}
           onReconnectSource={handleReconnectSource}
           onReplaceCredentials={handleReplaceCredentials}
+          onRemoveSource={removeSource.request}
         />
         <AvailableSourcesList
           platforms={homeImportSourcesDebug.platforms}
@@ -650,6 +655,18 @@ export function Home() {
           className="pt-2"
         />
       </div>
+
+      <RemoveSourceDialog
+        platform={removeSource.platform}
+        canSignOut={removeSource.canSignOut}
+        hasServerConnection={removeSource.hasServerConnection}
+        pending={removeSource.pending}
+        error={removeSource.error}
+        onCancel={removeSource.cancel}
+        onSignOut={removeSource.signOut}
+        onRemoveLocalData={removeSource.removeLocalData}
+        onOpenServerRepairs={removeSource.openServerRepairs}
+      />
 
       {/* DEV ONLY SHORTCUT: RickRoll /connect link */}
       <AlertDialog

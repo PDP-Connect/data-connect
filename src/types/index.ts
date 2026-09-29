@@ -19,6 +19,8 @@ export interface Platform {
   scopes?: string[] | null
   /** Declarative setup shape for installed PDPP connectors. */
   setup?: PdppSetup | null
+  /** Installed PDPP connector that keeps a saved browser session on this computer. */
+  requiresBrowser?: boolean | null
 }
 
 export type PdppSetup = PdppStaticSecretSetup | PdppManualOrUploadSetup

@@ -30,7 +30,10 @@ const isTauriRuntime = () =>
  * unlike usePersonalServer this is not app-wide, since the reference server
  * is opt-in surface, not something the whole app depends on at boot.
  */
-export function useReferenceServer(containerRef: React.RefObject<HTMLElement | null>) {
+export function useReferenceServer(
+  containerRef: React.RefObject<HTMLElement | null>,
+  initialPath: string | null = null
+) {
   const [lifecycle, setLifecycle] = useState<ReferenceServerLifecycle>("idle")
   const [error, setError] = useState<string | null>(null)
   const [origin, setOrigin] = useState<string | null>(null)
@@ -51,13 +54,15 @@ export function useReferenceServer(containerRef: React.RefObject<HTMLElement | n
       if (!el) return
       const rect = el.getBoundingClientRect()
       await invoke("open_reference_server_view", {
-        origin: viewOrigin,
+        // The native view navigates to this URL as given, so a validated
+        // console path opens that page instead of the console root.
+        origin: initialPath ? new URL(initialPath, viewOrigin).href : viewOrigin,
         sessionCookie,
         bounds: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
       })
       viewOpenedRef.current = true
     },
-    [containerRef]
+    [containerRef, initialPath]
   )
 
   const connect = useCallback(async () => {

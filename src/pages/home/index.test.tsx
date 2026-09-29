@@ -142,13 +142,19 @@ vi.mock("react-redux", async () => {
       selector: (state: {
         app: {
           runs: typeof mockRuns
+          platforms: never[]
           connectorUpdates: never[]
           isCheckingUpdates: boolean
         }
       }) => unknown
     ) =>
       selector({
-        app: { runs: mockRuns, connectorUpdates: [], isCheckingUpdates: false },
+        app: {
+          runs: mockRuns,
+          platforms: [],
+          connectorUpdates: [],
+          isCheckingUpdates: false,
+        },
       }),
   }
 })
@@ -897,6 +903,63 @@ describe("Home", () => {
       )
     }
   )
+
+  it("signs a browser source out from the Remove dialog and links the server copy", async () => {
+    mockInvoke.mockImplementation(command =>
+      Promise.resolve(
+        command === "reference_server_has_connection" ? true : undefined
+      )
+    )
+    mockUsePlatforms.mockReturnValue({
+      platforms: [
+        {
+          id: "amazon-pdpp",
+          company: "Amazon",
+          name: "Amazon",
+          filename: "amazon-pdpp",
+          description: "Amazon PDPP export",
+          isUpdated: false,
+          logoURL: "",
+          needsConnection: true,
+          connectURL: null,
+          connectSelector: null,
+          exportFrequency: null,
+          vectorize_config: null,
+          runtime: "pdpp-network",
+          requiresBrowser: true,
+        },
+      ],
+      connectedPlatforms: { "amazon-pdpp": true },
+      loadPlatforms: vi.fn(),
+      refreshConnectedStatus: vi.fn(),
+      getPlatformById: vi.fn(),
+      isPlatformConnected: vi.fn(() => true),
+    })
+
+    renderHome()
+    fireEvent.click(screen.getByRole("button", { name: "Remove Amazon" }))
+
+    const dialog = await screen.findByRole("alertdialog")
+    expect(dialog.textContent).toContain("This cannot be undone.")
+    expect(
+      screen.getByRole("button", { name: "Remove and delete local data" })
+    ).toBeTruthy()
+    expect(
+      await screen.findByRole("button", { name: "Open Server & Repairs" })
+    ).toBeTruthy()
+    expect(mockInvoke).toHaveBeenCalledWith("reference_server_has_connection", {
+      connectorKey: "amazon",
+    })
+
+    fireEvent.click(screen.getByRole("button", { name: "Sign out" }))
+
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull())
+    expect(mockInvoke).toHaveBeenCalledWith(
+      "reset_installed_pdpp_browser_profile",
+      { connectorId: "amazon-pdpp", connectionId: "amazon-pdpp-owner" }
+    )
+    expect(mockNavigate).not.toHaveBeenCalled()
+  })
 
   it("resets an expired ChatGPT session and returns the owner to setup", async () => {
     mockInvoke.mockImplementation(command =>

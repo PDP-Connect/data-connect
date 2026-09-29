@@ -3,7 +3,7 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { TooltipProvider } from "@/components/ui/tooltip"
-import type { Platform } from "@/types"
+import type { Platform, Run } from "@/types"
 import { MemoryRouter } from "react-router-dom"
 import { ConnectedSourcesList } from "./connected-sources-list"
 
@@ -164,5 +164,80 @@ describe("ConnectedSourcesList sync click guard", () => {
       screen.getByRole("button", { name: "Replace credentials for YNAB" })
     )
     expect(onReplaceCredentials).toHaveBeenCalledWith(platform)
+  })
+
+  it("offers Remove for every connected source except while it runs", () => {
+    const onRemoveSource = vi.fn()
+    render(
+      <MemoryRouter>
+        <TooltipProvider delayDuration={0}>
+          <ConnectedSourcesList
+            platforms={[
+              PLATFORM,
+              { ...PLATFORM, id: "amazon-pdpp", name: "Amazon" },
+              { ...PLATFORM, id: "reddit-pdpp", name: "Reddit" },
+            ]}
+            runs={[
+              {
+                id: "reddit-run",
+                platformId: "reddit-pdpp",
+                filename: "reddit-pdpp",
+                isConnected: false,
+                startDate: new Date().toISOString(),
+                status: "running",
+                url: "",
+                company: "Reddit",
+                name: "Reddit",
+                logs: "",
+              },
+            ]}
+            onRemoveSource={onRemoveSource}
+          />
+        </TooltipProvider>
+      </MemoryRouter>
+    )
+
+    expect(screen.getByRole("button", { name: "Remove ChatGPT" })).toBeTruthy()
+    expect(screen.queryByRole("button", { name: "Remove Reddit" })).toBeNull()
+    fireEvent.click(screen.getByRole("button", { name: "Remove Amazon" }))
+    expect(onRemoveSource).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "amazon-pdpp" })
+    )
+  })
+
+  it("offers Remove again once the source's run ends", () => {
+    const reddit = { ...PLATFORM, id: "reddit-pdpp", name: "Reddit" }
+    const run: Run = {
+      id: "reddit-run",
+      platformId: "reddit-pdpp",
+      filename: "reddit-pdpp",
+      isConnected: false,
+      startDate: new Date().toISOString(),
+      status: "running",
+      url: "",
+      company: "Reddit",
+      name: "Reddit",
+      logs: "",
+    }
+    const renderList = (runs: Run[]) => (
+      <MemoryRouter>
+        <TooltipProvider delayDuration={0}>
+          <ConnectedSourcesList
+            platforms={[reddit]}
+            runs={runs}
+            onRemoveSource={() => undefined}
+          />
+        </TooltipProvider>
+      </MemoryRouter>
+    )
+    const { rerender } = render(renderList([run]))
+    expect(screen.queryByRole("button", { name: "Remove Reddit" })).toBeNull()
+
+    rerender(
+      renderList([
+        { ...run, status: "success", endDate: new Date().toISOString() },
+      ])
+    )
+    expect(screen.getByRole("button", { name: "Remove Reddit" })).toBeTruthy()
   })
 })
