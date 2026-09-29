@@ -741,15 +741,15 @@ fn wait_for_devtools_endpoint(
             )
         })?;
     while Instant::now() < deadline {
-        if let Ok(Some(status)) = child.try_wait() {
-            let error = exited_before_ready(status, stderr_tail);
+        if super::pdpp_browser::browser_child_exited(&mut child) {
+            let error = exited_before_ready(stderr_tail);
             return Err(terminate_failed_launch(&mut child, error));
         }
         for line in receiver.try_iter().take(1) {
             if let Some(url) = cdp_url_from_json(&line) {
                 if devtools_http_ready(&probe, &url, deadline) {
-                    if let Ok(Some(status)) = child.try_wait() {
-                        let error = exited_before_ready(status, stderr_tail);
+                    if super::pdpp_browser::browser_child_exited(&mut child) {
+                        let error = exited_before_ready(stderr_tail);
                         return Err(terminate_failed_launch(&mut child, error));
                     }
                     return Ok((child, url));
@@ -765,16 +765,16 @@ fn wait_for_devtools_endpoint(
             {
                 let url = format!("http://127.0.0.1:{port}");
                 if devtools_http_ready(&probe, &url, deadline) {
-                    if let Ok(Some(status)) = child.try_wait() {
-                        let error = exited_before_ready(status, stderr_tail);
+                    if super::pdpp_browser::browser_child_exited(&mut child) {
+                        let error = exited_before_ready(stderr_tail);
                         return Err(terminate_failed_launch(&mut child, error));
                     }
                     return Ok((child, url));
                 }
             }
         }
-        if let Ok(Some(status)) = child.try_wait() {
-            let error = exited_before_ready(status, stderr_tail);
+        if super::pdpp_browser::browser_child_exited(&mut child) {
+            let error = exited_before_ready(stderr_tail);
             return Err(terminate_failed_launch(&mut child, error));
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -880,10 +880,7 @@ fn is_websocket_url(url: &str) -> bool {
     url.starts_with("ws://") || url.starts_with("wss://")
 }
 
-fn exited_before_ready(
-    status: std::process::ExitStatus,
-    stderr_tail: &StderrTail,
-) -> BrowserLaunchError {
+fn exited_before_ready(stderr_tail: &StderrTail) -> BrowserLaunchError {
     // The stderr reader may still hold the last lines; give it a moment.
     let deadline = Instant::now() + Duration::from_millis(500);
     let mut tail = stderr_tail.snapshot();
@@ -891,13 +888,11 @@ fn exited_before_ready(
         thread::sleep(Duration::from_millis(25));
         tail = stderr_tail.snapshot();
     }
-    log::warn!("Host browser exited before becoming ready ({status}); stderr tail:\n{tail}");
+    log::warn!("Host browser exited before becoming ready; stderr tail:\n{tail}");
     if tail.contains(NO_USABLE_SANDBOX_SIGNATURE) {
         BrowserLaunchError::sandbox_unavailable()
     } else {
-        BrowserLaunchError::start_failed(format!(
-            "Host browser exited before becoming ready: {status}"
-        ))
+        BrowserLaunchError::start_failed("Host browser exited before becoming ready")
     }
 }
 
