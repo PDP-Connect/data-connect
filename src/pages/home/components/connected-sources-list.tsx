@@ -200,11 +200,15 @@ export function ConnectedSourcesList({
           const accountOrdinal = platforms
             .slice(0, index + 1)
             .filter(candidate => candidate.id === platform.id).length
+          const sourceLabel = platform.connectionId
+            ? platform.name
+            : getPlatformSourceLabel(platform)
           const rowLabel = platform.accountLabel
-            ? `${getPlatformSourceLabel(platform)} · ${platform.accountLabel}`
+            ? `${sourceLabel} · ${platform.accountLabel}`
             : accountCount > 1
-              ? `${getPlatformSourceLabel(platform)} · Account ${accountOrdinal}`
-              : getPlatformSourceLabel(platform)
+              ? `${sourceLabel} · Account ${accountOrdinal}`
+              : sourceLabel
+          const actionLabel = platform.connectionId ? rowLabel : platform.name
           const isSyncDisabled =
             !onSyncSource ||
             hasBlockingRun ||
@@ -295,7 +299,7 @@ export function ConnectedSourcesList({
                         <SourceRowActionButton
                           className="px-2"
                           onClick={() => onRemoveSource?.(platform)}
-                          aria-label={`Remove ${rowLabel}`}
+                          aria-label={`Remove ${actionLabel}`}
                         >
                           <Trash2Icon aria-hidden />
                         </SourceRowActionButton>
@@ -315,7 +319,7 @@ export function ConnectedSourcesList({
                             : undefined
                         }
                         disabled={isSyncDisabled}
-                        aria-label={`Fetch latest data for ${rowLabel}`}
+                        aria-label={`Fetch latest data for ${actionLabel}`}
                       >
                         {syncFeedbackState ? (
                           <Text

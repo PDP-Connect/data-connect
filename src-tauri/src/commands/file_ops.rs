@@ -592,8 +592,13 @@ pub async fn load_runs(app: AppHandle) -> Result<Vec<SavedRun>, String> {
                                 .map(str::to_owned)
                                 .or_else(|| data.pointer("/content/userInfo/email").and_then(|value| value.as_str()).map(str::to_owned))
                                 .or_else(|| data.pointer("/content/userInfo/name").and_then(|value| value.as_str()).map(str::to_owned))
-                                .or_else(|| connection_id.as_ref()
-                                    .and_then(|connection_id| account_labels.get(&format!("{}:{connection_id}")).cloned()));
+                                .or_else(|| {
+                                    connection_id.as_ref().and_then(|connection_id| {
+                                        account_labels
+                                            .get(&format!("{}:{connection_id}", stored_platform_id))
+                                            .cloned()
+                                    })
+                                });
                             let stored_run_id = data.get("runID")
                                 .and_then(|value| value.as_str())
                                 .unwrap_or(&run_id)

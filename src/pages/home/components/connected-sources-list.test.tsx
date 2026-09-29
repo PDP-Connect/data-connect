@@ -81,7 +81,7 @@ describe("ConnectedSourcesList sync click guard", () => {
       accountLabel: "Account 2",
     }
     const onAddAccount = vi.fn()
-    render(
+    const { container } = render(
       <MemoryRouter>
         <TooltipProvider delayDuration={0}>
           <ConnectedSourcesList
@@ -97,8 +97,9 @@ describe("ConnectedSourcesList sync click guard", () => {
 
     expect(screen.getByText("ChatGPT · one@example.test")).toBeTruthy()
     expect(screen.getByText("ChatGPT · Account 2")).toBeTruthy()
-    expect(screen.getByRole("button", { name: "Open ChatGPT · one@example.test" })).toBeTruthy()
-    expect(screen.getByRole("button", { name: "Open ChatGPT · Account 2" })).toBeTruthy()
+    expect(container.querySelectorAll('[data-slot="source-row-main-button"]')).toHaveLength(2)
+    expect(container.querySelector('[aria-label="Open ChatGPT · one@example.test"]')).toBeTruthy()
+    expect(container.querySelector('[aria-label="Open ChatGPT · Account 2"]')).toBeTruthy()
 
     fireEvent.click(screen.getAllByRole("button", { name: "Add another ChatGPT account" })[0])
     expect(onAddAccount).toHaveBeenCalledWith(accountOne)

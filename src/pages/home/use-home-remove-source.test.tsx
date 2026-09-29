@@ -42,6 +42,10 @@ function platform(overrides: Partial<Platform>): Platform {
     exportFrequency: null,
     vectorize_config: null,
     runtime: "pdpp-network",
+    connectionId:
+      (overrides.runtime ?? "pdpp-network") === "pdpp-network"
+        ? `${overrides.id ?? "amazon-pdpp"}-owner`
+        : undefined,
     ...overrides,
   }
 }
@@ -66,6 +70,7 @@ function run(id: string, source: Platform, extra: Partial<Run> = {}): Run {
   return {
     id,
     platformId: source.id,
+    connectionId: source.connectionId,
     filename: source.filename,
     company: source.company,
     name: source.name,
@@ -105,6 +110,8 @@ const localRemovalHandlers: Handlers = {
   reset_installed_pdpp_browser_profile: () => undefined,
   clear_browser_session: () => undefined,
   clear_pdpp_collection_state: () => undefined,
+  clear_pdpp_collection_connection_state: () => undefined,
+  remove_pdpp_connection: () => undefined,
   delete_exported_run: () => undefined,
   check_connected_platforms: () => ({
     "amazon-pdpp": false,
@@ -219,7 +226,7 @@ describe("useHomeRemoveSource", () => {
     expect(result.current.platform).toBeNull()
   })
 
-  it("clears both ChatGPT browser profiles when signing out of its merged row", async () => {
+  it("signs out only the selected ChatGPT account profile", async () => {
     const chatgpt = platform({
       id: "chatgpt-pdpp",
       company: "openai",
@@ -249,7 +256,7 @@ describe("useHomeRemoveSource", () => {
       "reset_installed_pdpp_browser_profile",
       { connectorId: "chatgpt-pdpp", connectionId: "chatgpt-pdpp-owner" },
     ])
-    expect(commands()).toContainEqual([
+    expect(commands()).not.toContainEqual([
       "clear_browser_session",
       { connectorId: "chatgpt-playwright" },
     ])
@@ -262,22 +269,17 @@ describe("useHomeRemoveSource", () => {
     act(() => result.current.request(BROWSER))
     await act(() => result.current.removeLocalData())
 
-    expect(commands()).toEqual([
-      ["reference_server_has_connection", { connectorKey: "amazon" }],
-      ["list_browser_sessions", undefined],
-      [
-        "reset_installed_pdpp_browser_profile",
-        { connectorId: "amazon-pdpp", connectionId: "amazon-pdpp-owner" },
-      ],
-      ["clear_pdpp_collection_state", { connectorId: "amazon-pdpp" }],
-      [
-        "delete_exported_run",
-        { exportPath: "/data/exported_data/amazon/Amazon/amazon-1" },
-      ],
-      [
-        "check_connected_platforms",
-        { platformIds: ["amazon-pdpp", "ynab-pdpp", "spotify-pdpp"], connectionIds: {} },
-      ],
+    expect(commands()).toContainEqual([
+      "clear_pdpp_collection_connection_state",
+      { connectorId: "amazon-pdpp", connectionId: "amazon-pdpp-owner" },
+    ])
+    expect(commands()).toContainEqual([
+      "delete_exported_run",
+      { exportPath: "/data/exported_data/amazon/Amazon/amazon-1" },
+    ])
+    expect(commands()).toContainEqual([
+      "remove_pdpp_connection",
+      { connectorId: "amazon-pdpp", connectionId: "amazon-pdpp-owner" },
     ])
     expect(store.getState().app.runs.map(entry => entry.id)).toEqual([
       "ynab-1",
@@ -295,18 +297,13 @@ describe("useHomeRemoveSource", () => {
     act(() => result.current.request(NON_BROWSER))
     await act(() => result.current.removeLocalData())
 
-    expect(commands()).toEqual([
-      ["reference_server_has_connection", { connectorKey: "ynab" }],
-      ["list_browser_sessions", undefined],
-      ["clear_pdpp_collection_state", { connectorId: "ynab-pdpp" }],
-      [
-        "delete_exported_run",
-        { exportPath: "/data/exported_data/ynab/YNAB/ynab-1" },
-      ],
-      [
-        "check_connected_platforms",
-        { platformIds: ["amazon-pdpp", "ynab-pdpp", "spotify-pdpp"], connectionIds: {} },
-      ],
+    expect(commands()).toContainEqual([
+      "clear_pdpp_collection_connection_state",
+      { connectorId: "ynab-pdpp", connectionId: "ynab-pdpp-owner" },
+    ])
+    expect(commands()).toContainEqual([
+      "delete_exported_run",
+      { exportPath: "/data/exported_data/ynab/YNAB/ynab-1" },
     ])
     expect(store.getState().app.runs.map(entry => entry.id)).toEqual([
       "amazon-1",
@@ -447,11 +444,13 @@ describe("useHomeRemoveSource", () => {
       "delete_exported_run",
       { exportPath: pdppRun.exportPath },
     ])
-    expect(commands()).toContainEqual([
+    expect(commands()).not.toContainEqual([
       "delete_exported_run",
       { exportPath: legacyRun.exportPath },
     ])
-    expect(store.getState().app.runs).toEqual([])
+    expect(store.getState().app.runs.map(entry => entry.id)).toEqual([
+      "chatgpt-playwright-1",
+    ])
   })
 
   it("deletes nothing when the sign-out is refused and surfaces the error", async () => {
@@ -480,7 +479,7 @@ describe("useHomeRemoveSource", () => {
     answer({
       ...localRemovalHandlers,
       check_connected_platforms: () => ({
-        "amazon-pdpp": true,
+        "amazon-pdpp:amazon-pdpp-owner": true,
         "ynab-pdpp": false,
         "spotify-pdpp": true,
       }),

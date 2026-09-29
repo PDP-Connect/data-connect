@@ -1442,6 +1442,7 @@ fn resolve_child_secrets_for_connection(
     resolved: &ResolvedInstalledPdppConnector,
     setup_complete: bool,
 ) -> Result<PdppChildSecrets, String> {
+    let connection_id = request.connection_id();
     if is_manual_upload_connector(&resolved.manifest) {
         if request.github_token.is_some() || request.setup_secrets.is_some() {
             return Err("manual/upload PDPP connectors do not accept credentials".into());
@@ -3572,6 +3573,19 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
             timeout_seconds: Some(5),
             import_directory: None,
         }
+    }
+
+    #[test]
+    fn request_connection_id_reuses_legacy_owner_id_unless_an_account_id_is_supplied() {
+        let mut request = request_with_token("test-token");
+        request.connector_id = "chatgpt-pdpp".into();
+        assert_eq!(request.connection_id().into_owned(), "chatgpt-pdpp-owner");
+
+        request.connection_id = Some("connection-account-two".into());
+        assert_eq!(
+            request.connection_id().into_owned(),
+            "connection-account-two"
+        );
     }
 
     fn sorted_env_bytes(environment: &HashMap<String, String>) -> Vec<u8> {

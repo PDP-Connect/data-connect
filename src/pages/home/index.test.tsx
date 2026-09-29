@@ -23,6 +23,8 @@ const mockStartImport = vi.fn()
 const mockStopExport = vi.fn()
 const mockNavigate = vi.fn()
 const mockRefreshConnectedStatus = vi.fn()
+const mockLoadPlatforms = vi.fn().mockResolvedValue(undefined)
+let mockPreserveMissingConnectionIds = false
 const mockInvoke = vi.fn()
 const mockListen = vi.fn()
 let mockConnectedPlatforms: Record<string, boolean> = {}
@@ -84,7 +86,22 @@ vi.mock("react-router-dom", async () => {
 })
 
 vi.mock("@/hooks/usePlatforms", () => ({
-  usePlatforms: () => mockUsePlatforms(),
+  usePlatforms: () => {
+    const value = mockUsePlatforms()
+    return {
+      ...value,
+      platforms: mockPreserveMissingConnectionIds
+        ? value.platforms
+        : value.platforms.map((platform: { id?: string; runtime?: string; connectionId?: string }) =>
+            platform.runtime === "pdpp-network" &&
+            !(platform.id === "github-pdpp" && value.platforms.length > 1) &&
+            !platform.connectionId
+              ? { ...platform, connectionId: "test-account" }
+              : platform
+          ),
+      loadPlatforms: value.loadPlatforms ?? mockLoadPlatforms,
+    }
+  },
 }))
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -197,13 +214,18 @@ function openManualUpload() {
 
 describe("Home", () => {
   beforeEach(() => {
+    mockPreserveMissingConnectionIds = false
     clearSessionCredentialCache()
     mockStartImport.mockReset()
     mockStopExport.mockReset()
     mockNavigate.mockReset()
     mockRefreshConnectedStatus.mockReset()
     mockInvoke.mockReset()
-    mockInvoke.mockResolvedValue(false)
+    mockInvoke.mockImplementation(async (command: string) =>
+      command === "ensure_pdpp_connection"
+        ? { connectionId: "test-account", accountLabel: "Account 1" }
+        : false
+    )
     mockListen.mockReset()
     mockListen.mockResolvedValue(() => undefined)
     mockConnectedPlatforms = {}
@@ -279,11 +301,13 @@ describe("Home", () => {
 
     expect(screen.getByText("ChatGPT · Account 1")).toBeTruthy()
     expect(screen.getByText("ChatGPT · Account 2")).toBeTruthy()
-    expect(screen.getByRole("button", { name: "Open ChatGPT · Account 1" })).toBeTruthy()
-    expect(screen.getByRole("button", { name: "Open ChatGPT · Account 2" })).toBeTruthy()
+    expect(document.querySelectorAll('[data-slot="source-row-main-button"]')).toHaveLength(2)
+    expect(document.querySelector('[aria-label="Open ChatGPT · Account 1"]')).toBeTruthy()
+    expect(document.querySelector('[aria-label="Open ChatGPT · Account 2"]')).toBeTruthy()
   })
 
   it("persists a real connection id before the first installed connector run", async () => {
+    mockPreserveMissingConnectionIds = true
     const platform = {
       id: "chatgpt-pdpp",
       company: "OpenAI",
@@ -1360,7 +1384,7 @@ describe("Home", () => {
     ],
   ])(
     "shows one canonical GitHub source when both runtimes are connected (%s)",
-    (_ordering, platformIds) => {
+    async (_ordering, platformIds) => {
       const platformsById = {
         "github-playwright": {
           id: "github-playwright",
@@ -1451,7 +1475,8 @@ describe("Home", () => {
       )
       expect(mockStartImport).not.toHaveBeenCalled()
 
-      fireEvent.change(screen.getByLabelText(/personal access token/i), {
+      const tokenInput = await screen.findByLabelText(/personal access token/i)
+      fireEvent.change(tokenInput, {
         target: { value: "ghp_sync_transient" },
       })
       fireEvent.click(screen.getByRole("button", { name: /start import/i }))

@@ -619,6 +619,39 @@ mod tests {
     }
 
     #[test]
+    fn reset_deletes_one_account_profile_and_preserves_its_sibling() {
+        let root = tempfile::tempdir().unwrap();
+        let first = PdppBrowserLease::fixture(
+            root.path(),
+            "chatgpt-pdpp",
+            "account-one",
+            "run-1",
+        )
+        .unwrap();
+        let first_profile = first.profile_dir().to_owned();
+        drop(first);
+        let second = PdppBrowserLease::fixture(
+            root.path(),
+            "chatgpt-pdpp",
+            "account-two",
+            "run-2",
+        )
+        .unwrap();
+        let second_profile = second.profile_dir().to_owned();
+        fs::write(first_profile.join("Cookies"), "first-session").unwrap();
+        fs::write(second_profile.join("Cookies"), "second-session").unwrap();
+        drop(second);
+
+        reset_profile_in(root.path(), "chatgpt-pdpp", "account-one").unwrap();
+
+        assert!(!first_profile.exists());
+        assert_eq!(
+            fs::read_to_string(second_profile.join("Cookies")).unwrap(),
+            "second-session"
+        );
+    }
+
+    #[test]
     fn refuses_implicit_or_unsafe_browser_owners() {
         assert!(validate_owner_id("").is_err());
         assert!(validate_owner_id("../other-owner").is_err());

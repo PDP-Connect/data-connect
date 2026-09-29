@@ -288,6 +288,7 @@ describe("useConnector.startImport", () => {
         ...TEST_PLATFORM,
         id: "github-pdpp",
         runtime: "pdpp-network",
+        connectionId: "default",
       })
     })
 

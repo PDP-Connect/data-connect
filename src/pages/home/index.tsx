@@ -600,8 +600,16 @@ export function Home() {
           connectedCanonicalIdsFromRuns.has(canonicalId)
       if (!isConnected) continue
 
+      const key = platform.connectionId
+        ? `${canonicalId}:${platform.connectionId}`
+        : canonicalId
+      const existing = connectedByAccount.get(key)
+      if (existing?.runtime === "pdpp-network" && platform.runtime !== "pdpp-network") {
+        continue
+      }
+
       connectedByAccount.set(
-        platform.connectionId ? `${canonicalId}:${platform.connectionId}` : canonicalId,
+        key,
         platform.connectionId && !platform.accountLabel
           ? {
               ...platform,
