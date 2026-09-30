@@ -2211,7 +2211,7 @@ function validateAssistanceMessage(msg: ConnectorMessage, scopeByStream: ScopeBy
   validateAssistanceAttachments(msg.attachments);
 }
 
-function hasBrowserSurfaceStream(env: Record<string, string> | null | undefined): boolean {
+export function hasBrowserSurfaceStream(env: Record<string, string> | null | undefined): boolean {
   // A stream URL enables a remote surface, while a CDP URL enables the leased
   // host browser companion. Both are real browser-control capabilities.
   return Boolean(
@@ -2222,7 +2222,7 @@ function hasBrowserSurfaceStream(env: Record<string, string> | null | undefined)
   );
 }
 
-function buildAssistanceRequestedDataFromInteraction(
+export function buildAssistanceRequestedDataFromInteraction(
   msg: ConnectorMessage,
   runSource: { id: string; kind: string },
   options: { browserSurfaceAvailable?: boolean } = {}
