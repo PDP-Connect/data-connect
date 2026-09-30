@@ -59,6 +59,9 @@ const nextConfig = {
   },
   outputFileTracingRoot: path.join(__dirname, "../.."),
   reactStrictMode: true,
+  typescript: {
+    tsconfigPath: "tsconfig.build.json",
+  },
   // biome-ignore lint/suspicious/useAwait: Preserves an established runtime, ordering, async, accessibility, or source-shape contract; covered by package verification.
   async redirects() {
     return [

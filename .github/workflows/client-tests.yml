@@ -83,6 +83,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Typecheck console
+        run: npm run types:check --workspace=apps/console
+
       - name: Build console standalone server
         env:
           NEXT_TELEMETRY_DISABLED: "1"
