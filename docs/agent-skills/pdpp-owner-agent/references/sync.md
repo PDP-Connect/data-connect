@@ -2,8 +2,9 @@
 
 This is the deeper reference for keeping a trusted local owner agent's view of all
 current and future owner data token-efficient. Read `SKILL.md` and
-`daisy-runbook.md` first. Everything here assumes a valid owner-level bearer read at
-call time from `~/applications/daisy/.pi/agent/pdpp-owner-agent.json` and never echoed.
+`owner-agent-runbook.md` first. Everything here assumes a valid owner-level bearer read at
+call time from `~/.pdpp/owner-agents/<host>.json` and never echoed. Replace
+`<host>` with the resource host used during onboarding.
 
 The owner-agent profile reuses the same `/v1/*` read shapes as the grant-scoped
 `pdpp-data-access` skill; the difference is the credential and the goal (a durable,
@@ -54,7 +55,7 @@ Persist, per `(stream, connection_id)`:
 - the timestamp of the last successful sync;
 - the last schema/stream-metadata refresh time.
 
-Keep this in Daisy's local state store (the operator's machine), not in prompts or logs.
+Keep this in a trusted local agent's local state store (the operator's machine), not in prompts or logs.
 Cursors are not secrets, but the records they let you fetch are the operator's data —
 treat the local mirror with the same care as the credential's directory.
 
@@ -82,7 +83,7 @@ again — rotate to replace a lost secret. Event payloads carry source identity 
 
 ### Otherwise, poll with backoff
 
-Most local owner agents — including a laptop-resident Daisy with no public callback — do
+Most local owner agents — including a laptop-resident assistant with no public callback — do
 **not** have a durable valid-TLS HTTPS receiver. In that case:
 
 - Use cursor polling: periodically run the incremental sync from stored cursors.
@@ -100,7 +101,7 @@ If you are unsure whether your receiver qualifies, you do not qualify — poll.
 For each `(stream, connection_id)` with a stored cursor:
 
 ```bash
-TOKEN="$(jq -r '.access_token' "$HOME/applications/daisy/.pi/agent/pdpp-owner-agent.json")"
+TOKEN="$(jq -r '.access_token' "$HOME/.pdpp/owner-agents/<host>.json")"
 curl -fsS \
   "$RS_URL/v1/streams/<stream>/records?connection_id=<id>&changes_since=<stored-cursor>&limit=100" \
   -H "Authorization: Bearer $TOKEN" \

@@ -60,7 +60,7 @@ test("console agent skill catalog lists the served skills and files", async () =
     [
       "pdpp-owner-agent/SKILL.md",
       "pdpp-owner-agent/references/control-surface.md",
-      "pdpp-owner-agent/references/daisy-runbook.md",
+      "pdpp-owner-agent/references/owner-agent-runbook.md",
       "pdpp-owner-agent/references/sync.md",
     ]
   );

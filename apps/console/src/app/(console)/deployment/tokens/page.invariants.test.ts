@@ -29,7 +29,7 @@ const PAGE_FILE = `${HERE}page.tsx`;
 const BOUNDARY_HEADING_RE = /operator and trusted-agent access only/i;
 const TRUSTED_AGENT_FRAMING_RE = /trusted local agents?/i;
 const OWNER_AGENT_COMMAND_RE = /pdpp owner-agent onboard/;
-const DAISY_CREDENTIAL_PATH_RE = /pdpp-owner-agent\.json/;
+const OWNER_AGENT_CREDENTIAL_RE = /--client-name.*local assistant/s;
 const NO_BEARER_CHAT_RE = /No bearer needs to be\s+.*pasted into chat/i;
 const MANUAL_DEBUG_RE = /Manual\/debug bearer/i;
 const MCP_SCOPED_FLOW_HINT_RE = /\/mcp/;
@@ -48,7 +48,7 @@ test("tokens page calls out the operator/trusted-agent boundary in copy", async 
 test("tokens page leads with the owner-agent onboarding path instead of bearer copy", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
   assert.match(src, OWNER_AGENT_COMMAND_RE);
-  assert.match(src, DAISY_CREDENTIAL_PATH_RE);
+  assert.match(src, OWNER_AGENT_CREDENTIAL_RE);
   assert.match(src, NO_BEARER_CHAT_RE);
   assert.match(src, MANUAL_DEBUG_RE);
 });

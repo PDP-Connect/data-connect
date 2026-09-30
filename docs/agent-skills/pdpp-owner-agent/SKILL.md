@@ -1,6 +1,6 @@
 ---
 name: pdpp-owner-agent
-description: Use ONLY when you are a trusted local owner agent that the operator has explicitly authorized to act as themselves against their own PDPP reference instance — for example a local assistant such as Daisy running on the owner's machine. This profile uses an owner-level REST/control-plane credential obtained through browser-mediated owner approval, and teaches token-efficient initial and incremental sync of all current and future owner data. This is owner-level local automation, not the default agent path. Routine third-party, coding-agent, and task-scoped assistants MUST use the grant-scoped pdpp-data-access skill instead.
+description: Use ONLY when you are a trusted local owner agent that the operator has explicitly authorized to act as themselves against their own PDPP reference instance — for example, a local assistant running on the operator's machine. This profile uses an owner-level REST/control-plane credential obtained through browser-mediated owner approval, and teaches token-efficient initial and incremental sync of all current and future owner data. This is owner-level local automation, not the default agent path. Routine third-party, coding-agent, and task-scoped assistants MUST use the grant-scoped pdpp-data-access skill instead.
 ---
 
 # PDPP Owner-Agent Onboarding
@@ -37,7 +37,7 @@ This skill has four jobs:
    supported actions, list and label connection instances, and initiate new connections as
    typed, owner-mediated intents — without ever bypassing a provider step.
 
-The companion runbook in `references/daisy-runbook.md` walks the end-to-end flow from
+The companion runbook in `references/owner-agent-runbook.md` walks the end-to-end flow from
 an entrypoint URL through initial and incremental sync. `references/sync.md` is the
 deeper reference for query shapes, cursors, and the callback-vs-polling decision.
 `references/control-surface.md` covers the owner-agent control plane — discovering
@@ -113,8 +113,8 @@ After the operator approves, poll the `token_endpoint` with
 `authorization_pending` / `slow_down` (keep polling), `access_denied` (denied — stop), and
 `expired_token` (start over). On success the response contains the owner `access_token`;
 write it to the local credential target (see §3) and surface only non-secret status.
-`pdpp owner-agent onboard <entrypoint> --credential-file ~/applications/daisy/.pi/agent/pdpp-owner-agent.json`
-performs all of this without printing the bearer and writes to the path used below.
+`pdpp owner-agent onboard <entrypoint>` performs all of this without printing the bearer
+and writes to `~/.pdpp/owner-agents/<host>.json`.
 
 This is separate from grant-scoped MCP device authorization. MCP device setup includes
 the `/mcp` `resource` and PDPP `authorization_details`, then redeems a client token.
@@ -128,17 +128,18 @@ onboarding path for this profile.
 ### 3. Store the credential locally, read it at call time
 
 The credential lands in the operator's local credential target with restrictive file
-permissions. For Daisy, the first supported target is:
+permissions. For a trusted local agent, the first supported target is:
 
-`~/applications/daisy/.pi/agent/pdpp-owner-agent.json`
+`~/.pdpp/owner-agents/<host>.json`
 
 The file is JSON and contains the bearer as `access_token`; it must be written with mode
 `0600`.
+Replace `<host>` in the examples below with the resource host used during onboarding.
 
 Read it only at the moment of a call, and never echo it:
 
 ```bash
-TOKEN="$(jq -r '.access_token' "$HOME/applications/daisy/.pi/agent/pdpp-owner-agent.json")"
+TOKEN="$(jq -r '.access_token' "$HOME/.pdpp/owner-agents/<host>.json")"
 curl -fsS "$RS_URL/v1/schema" -H "Authorization: Bearer $TOKEN" | jq .
 unset TOKEN
 ```
@@ -186,7 +187,7 @@ valid-TLS HTTPS callback receiver:
   response body — persist it securely at that moment; the server stores only a hash and
   will not return it again (rotate to replace a lost one). Event payloads carry source
   identity plus a `changes_since` cursor, never record bodies; fetch changed records via §4.
-- **You do not** (most local agents, including a laptop-resident Daisy with no public
+- **You do not** (most local agents, including a laptop-resident assistant with no public
   callback) → **use cursor polling with backoff**, plus periodic schema refresh. Do not
   attempt callback delivery to an unreachable local endpoint.
 
