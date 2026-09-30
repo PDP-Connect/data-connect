@@ -4544,7 +4544,7 @@ mod tests {
     use std::io;
     use std::net::TcpListener;
     use std::path::Path;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Condvar, Mutex};
     use std::thread;
     use std::time::Instant;
     use tempfile::{tempdir, NamedTempFile};
@@ -4559,12 +4559,68 @@ mod tests {
         assert!(!notice.contains("hunter2") && !notice.contains("s-1"), "{notice}");
     }
 
+    const FAKE_READINESS_DEADLINE: Duration = Duration::from_secs(3);
+    const FAKE_RESTART_BACKOFF: Duration = Duration::from_millis(25);
+    const FAKE_STOP_TOTAL: Duration = Duration::from_secs(2);
+
     #[derive(Clone, Default)]
-    struct RecordingSink(Arc<Mutex<Vec<ProcessLifecycleEvent>>>);
+    struct RecordingSink(Arc<(Mutex<Vec<ProcessLifecycleEvent>>, Condvar)>);
 
     impl EventSink for RecordingSink {
         fn emit(&self, event: ProcessLifecycleEvent) {
-            self.0.lock().expect("lifecycle events lock").push(event);
+            let (events, changed) = &*self.0;
+            events.lock().expect("lifecycle events lock").push(event);
+            changed.notify_all();
+        }
+    }
+
+    fn wait_for_fake_ri_restart(
+        events: &Arc<(Mutex<Vec<ProcessLifecycleEvent>>, Condvar)>,
+        idle_window: Duration,
+    ) -> Result<Vec<ProcessLifecycleEvent>, String> {
+        let (events_lock, changed) = &**events;
+        let mut events = events_lock
+            .lock()
+            .map_err(|_| "lifecycle events lock poisoned".to_string())?;
+        let mut last_ri_event_count = events
+            .iter()
+            .filter(|event| event.label == RI_LABEL)
+            .count();
+        let mut last_progress_at = Instant::now();
+
+        loop {
+            let ready_count = events
+                .iter()
+                .filter(|event| {
+                    event.label == RI_LABEL && matches!(event.state, LifecycleState::Ready)
+                })
+                .count();
+            let restarted = events.iter().any(|event| {
+                event.label == RI_LABEL && matches!(event.state, LifecycleState::Restarting)
+            });
+            if ready_count >= 2 && restarted {
+                return Ok(events.clone());
+            }
+
+            let idle_remaining = idle_window.saturating_sub(last_progress_at.elapsed());
+            if idle_remaining.is_zero() {
+                return Err(format!(
+                    "no RI lifecycle progress for {idle_window:?}; observed {last_ri_event_count} RI events"
+                ));
+            }
+            events = changed
+                .wait_timeout(events, idle_remaining)
+                .map_err(|_| "lifecycle events lock poisoned while waiting".to_string())?
+                .0;
+
+            let current_ri_event_count = events
+                .iter()
+                .filter(|event| event.label == RI_LABEL)
+                .count();
+            if current_ri_event_count > last_ri_event_count {
+                last_ri_event_count = current_ri_event_count;
+                last_progress_at = Instant::now();
+            }
         }
     }
 
@@ -5223,7 +5279,7 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
             stop: StopPolicy {
                 grace: Duration::from_millis(300),
                 escalate: Duration::from_secs(1),
-                total: Duration::from_secs(2),
+                total: FAKE_STOP_TOTAL,
             },
             requested_port: None,
         }
@@ -5248,7 +5304,7 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
                 ri_env,
                 Readiness::HttpGet {
                     url_from_port: format!("http://127.0.0.1:{{port+1}}{RI_HEALTH_PATH}"),
-                    deadline: Duration::from_secs(3),
+                    deadline: FAKE_READINESS_DEADLINE,
                     host_header: None,
                 },
                 ri_restart,
@@ -5265,7 +5321,7 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
                 BTreeMap::from([(OsString::from("PORT"), OsString::from("{port}"))]),
                 Readiness::HttpGet {
                     url_from_port: "http://127.0.0.1:{port}/".to_string(),
-                    deadline: Duration::from_secs(3),
+                    deadline: FAKE_READINESS_DEADLINE,
                     host_header: None,
                 },
                 RestartPolicy::Bounded {
@@ -7924,36 +7980,31 @@ setInterval(() => {}, 1000);
         let console_script = fake_console_script();
         let events = RecordingSink::default();
         let observed = Arc::clone(&events.0);
+        let restart_max = 1;
+        let restart_backoff = FAKE_RESTART_BACKOFF;
         let (mut stack, _, _) = fake_stack(
             ri_script.path(),
             console_script.path(),
             events,
             RestartPolicy::Bounded {
-                max: 1,
-                backoff: Duration::from_millis(25),
+                max: restart_max,
+                backoff: restart_backoff,
             },
             BTreeMap::new(),
         );
 
-        let deadline = Instant::now() + Duration::from_secs(3);
-        while Instant::now() < deadline {
-            let events = observed.lock().expect("lifecycle events lock");
-            let ready_count = events
-                .iter()
-                .filter(|event| {
-                    event.label == RI_LABEL && matches!(event.state, LifecycleState::Ready)
-                })
-                .count();
-            let restarted = events.iter().any(|event| {
-                event.label == RI_LABEL && matches!(event.state, LifecycleState::Restarting)
-            });
-            drop(events);
-            if ready_count >= 2 && restarted {
-                break;
-            }
-            thread::sleep(Duration::from_millis(20));
-        }
-        let events = observed.lock().expect("lifecycle events lock");
+        // An idle period covers the fake supervisor's full readiness, stop,
+        // restart-backoff, and poll budgets for each configured attempt. Every
+        // new RI event restarts that bounded window, so healthy progress under
+        // CI load does not race a wall-clock deadline.
+        let idle_window = (FAKE_READINESS_DEADLINE
+            + restart_backoff
+            + FAKE_STOP_TOTAL
+            + crate::commands::process_supervisor::READINESS_POLL_INTERVAL)
+            * restart_max.saturating_add(1);
+        let observed_events = wait_for_fake_ri_restart(&observed, idle_window);
+        stack.stop().expect("fake stack should stop");
+        let events = observed_events.expect("RI restart lifecycle events should arrive");
         assert!(events.iter().any(|event| {
             event.label == RI_LABEL && matches!(event.state, LifecycleState::Restarting)
         }));
@@ -7966,8 +8017,6 @@ setInterval(() => {}, 1000);
                 .count()
                 >= 2
         );
-        drop(events);
-        stack.stop().expect("fake stack should stop");
     }
 
     #[test]

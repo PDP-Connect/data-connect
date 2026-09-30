@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 
 const SUPERVISOR_EVENT: &str = "process-supervisor";
-const READINESS_POLL_INTERVAL: Duration = Duration::from_millis(50);
+pub(crate) const READINESS_POLL_INTERVAL: Duration = Duration::from_millis(50);
 #[cfg(any(windows, test))]
 const WINDOWS_RUNTIME_ENVIRONMENT_KEYS: [&str; 7] = [
     "SYSTEMROOT",
