@@ -249,17 +249,45 @@ test("resolved companion preserves the backend remote-selection capability", () 
   assert.equal(typeof companion.readRemoteSelection, "function");
 });
 
-test("installed companion factory accepts a host lease and resolves its exact registered page", async () => {
+test("installed companion factory streams frames and forwards input on the exact host page", async () => {
   const resolutions: string[][] = [];
+  const urls: string[] = [];
+  const commands: { method: string }[] = [];
+  const frames: unknown[] = [];
+  const messageListeners: ((event: { data: string }) => void)[] = [];
+  let readyState = 0;
+  const socket = {
+    addEventListener(name: string, listener: (event: never) => void) {
+      if (name === "message") messageListeners.push(listener as unknown as (event: { data: string }) => void);
+      if (name === "open") queueMicrotask(() => listener({} as never));
+    },
+    close() {
+      readyState = 3;
+    },
+    get readyState() {
+      return readyState;
+    },
+    send(raw: string) {
+      const command = JSON.parse(raw) as { id: number; method: string };
+      commands.push(command);
+      queueMicrotask(() => {
+        for (const listener of messageListeners) {
+          listener({ data: JSON.stringify({ id: command.id, result: {} }) });
+        }
+      });
+    },
+  };
+  function FakeSocket(this: unknown, url: string) {
+    urls.push(url);
+    readyState = 1;
+    return socket;
+  }
   const factory = createDefaultStreamingCompanionFactory({
     resolveTargetForInteraction: (runId, interactionId) => {
       resolutions.push([String(runId), String(interactionId)]);
       return "ws://127.0.0.1:9222/devtools/page/leased-page";
     },
-    // No CDP connection is opened by resolveBackend; this only proves the
-    // production factory accepts the route's leased-host target shape.
-    // biome-ignore lint/suspicious/noEmptyBlockStatements: factory lazily opens the socket only on start.
-    WebSocketCtor() {},
+    WebSocketCtor: FakeSocket as unknown as typeof WebSocket,
   });
   assert.ok(factory);
   const companion = factory({
@@ -269,6 +297,28 @@ test("installed companion factory accepts a host lease and resolves its exact re
     target: { backend: "cdp", cdp_http_url: "http://127.0.0.1:9222", lease_id: "lease_1" },
   });
   assert.ok(companion);
-  assert.equal(await companion.resolveBackend(), "cdp");
+  companion.onFrame((frame) => frames.push(frame));
+  const start = companion.start({ height: 480, width: 320 });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(urls, ["ws://127.0.0.1:9222/devtools/page/leased-page"]);
+  await start;
+  for (const listener of messageListeners) {
+    listener({
+      data: JSON.stringify({
+        method: "Page.screencastFrame",
+        params: { data: "ZmFrZQ==", metadata: { device_height: 480, device_width: 320 }, sessionId: 17 },
+      }),
+    });
+  }
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(frames.length, 1, JSON.stringify({ commands, listenerCount: messageListeners.length }));
+  assert.deepEqual(frames[0], {
+    data: "ZmFrZQ==",
+    metadata: { device_height: 480, device_width: 320 },
+    sessionId: 17,
+  });
+  await companion.dispatch({ action: "click", button: 0, type: "mouse", x: 8, y: 9 });
+  assert.equal(commands.filter(({ method }) => method === "Input.dispatchMouseEvent").length, 2);
   assert.deepEqual(resolutions, [["run_host_factory", "int_host_factory"]]);
+  await companion.stop();
 });
