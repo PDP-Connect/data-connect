@@ -7,7 +7,7 @@
  * Connector manifests own provider credential fields and their metadata. The
  * console owns the small amount of workflow state that is common to every
  * source setup form: the optional connection name and, for browser sessions,
- * the choice to save optional sign-in details. Keeping those two contracts
+ * the manifest's required or optional sign-in details. Keeping those contracts
  * here prevents the three capture forms from quietly inventing different
  * labels or promises.
  */
@@ -22,6 +22,10 @@ export interface ConnectionNameFieldContract {
   readonly placeholder: string;
 }
 
+/** Required sign-in details are always sealed before the first run, so the form says so. */
+const REQUIRED_CAPTURE_STORAGE_NOTE =
+  "DataConnect stores these details encrypted on this device and uses them only for this source.";
+
 export function connectionNameFieldContract(displayName: string): ConnectionNameFieldContract {
   return {
     helpText: "Used only when creating a new source. You can rename it later.",
@@ -32,16 +36,17 @@ export function connectionNameFieldContract(displayName: string): ConnectionName
   };
 }
 
-export interface BrowserOptionalCredentialContract {
+export interface BrowserCredentialContract {
   readonly checkboxLabel: "Save these details to assist initial sign-in or repair.";
   readonly checkboxName: "remember_sign_in_details";
   readonly description: string;
   readonly fields: readonly StaticSecretSetupField[];
-  readonly title: "Optional saved sign-in details";
+  readonly required: boolean;
+  readonly title: string;
 }
 
 export interface BrowserSessionFormContract {
-  readonly optionalCredentials: BrowserOptionalCredentialContract | null;
+  readonly credentialCapture: BrowserCredentialContract | null;
   readonly repairLoginDescription: string;
   readonly setupDescription: string;
 }
@@ -54,7 +59,7 @@ export interface BrowserSessionFormContract {
 export function browserSessionFormContract(setup: StaticSecretSetup | null): BrowserSessionFormContract {
   if (!setup) {
     return {
-      optionalCredentials: null,
+      credentialCapture: null,
       repairLoginDescription:
         "This flow uses the browser session directly; it does not collect provider credentials and does not promise unattended reconnection.",
       setupDescription:
@@ -63,23 +68,27 @@ export function browserSessionFormContract(setup: StaticSecretSetup | null): Bro
   }
 
   return {
-    optionalCredentials: {
+    credentialCapture: {
       checkboxLabel: "Save these details to assist initial sign-in or repair.",
       checkboxName: "remember_sign_in_details",
-      description:
-        "Interactive sign-in is valid. Leave these fields blank to sign in in the secure browser; save them only if they may help with initial sign-in or repair. CAPTCHA, OTP, passkeys, and other human steps stay in the browser, and unattended reconnection is not guaranteed.",
+      description: setup.credential_capture.required
+        ? `${setup.credential_capture.description ?? "Enter these details to start the first sync. Verification may continue in the secure browser."} ${REQUIRED_CAPTURE_STORAGE_NOTE}`
+        : "Interactive sign-in is valid. Leave these fields blank to sign in in the secure browser; save them only if they may help with initial sign-in or repair. CAPTCHA, OTP, passkeys, and other human steps stay in the browser, and unattended reconnection is not guaranteed.",
       fields: setup.credential_capture.fields,
-      title: "Optional saved sign-in details",
+      required: setup.credential_capture.required,
+      title: setup.credential_capture.required ? setup.credential_capture.label : "Optional saved sign-in details",
     },
-    repairLoginDescription:
-      "Optional encrypted sign-in details may assist repair, but they do not replace the secure browser or guarantee unattended reconnection.",
-    setupDescription:
-      "Create a new account in a secure browser. Interactive sign-in is valid; optional saved sign-in details can assist initial sign-in or repair, but they do not guarantee unattended reconnection.",
+    repairLoginDescription: setup.credential_capture.required
+      ? "The saved sign-in details start collection; complete any verification in the secure browser."
+      : "Optional encrypted sign-in details may assist repair, but they do not replace the secure browser or guarantee unattended reconnection.",
+    setupDescription: setup.credential_capture.required
+      ? "Enter the sign-in details required for this source. Complete any verification in the secure browser."
+      : "Create a new account in a secure browser. Interactive sign-in is valid; optional saved sign-in details can assist initial sign-in or repair, but they do not guarantee unattended reconnection.",
   };
 }
 
-export function optionalCredentialFieldLabel(field: StaticSecretSetupField): string {
-  return `${field.label} (optional)`;
+export function browserCredentialFieldLabel(field: StaticSecretSetupField, required: boolean): string {
+  return required ? field.label : `${field.label} (optional)`;
 }
 
 export interface StaticSecretFormContract {

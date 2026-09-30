@@ -165,7 +165,7 @@ function sourceMethodLine(entry: ConnectorCatalogEntry, existingSourceCount: num
     return developmentMethodLine(entry);
   }
   if (browserBoundWithStoredCredentials(entry) && entry.disposition === "static_secret_connect") {
-    return "Connect in a secure browser; interactive sign-in is valid, with optional saved details for repair.";
+    return "Connect with this source's sign-in details and complete any required steps in the secure browser.";
   }
   if (sourceSetupAvailability(entry) === "not_available_here") {
     return "No proven setup path is available in this dashboard.";

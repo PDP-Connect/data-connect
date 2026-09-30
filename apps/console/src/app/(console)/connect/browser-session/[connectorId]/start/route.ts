@@ -12,10 +12,7 @@ import {
   StaticSecretValidationError,
 } from "../../../../lib/ref-client.ts";
 import { originMatchesHost, redirectToPublicPath } from "../../../../lib/same-origin-route.ts";
-import {
-  type OptionalBrowserCredentialSubmission,
-  optionalBrowserCredentialSubmission,
-} from "../browser-session-credential-form.ts";
+import { type BrowserCredentialSubmission, browserCredentialSubmission } from "../browser-session-credential-form.ts";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -31,7 +28,10 @@ function pagePath(connectorId: string): string {
 function errorPath(
   connectorId: string,
   message: string,
-  options: { connectionId?: string | null; setupFields?: Record<string, string> } = {}
+  options: {
+    connectionId?: string | null;
+    setupFields?: Record<string, string>;
+  } = {},
 ): string {
   const query = new URLSearchParams({ error: message });
   if (options.connectionId) {
@@ -86,29 +86,26 @@ class BrowserCredentialFormError extends Error {
   }
 }
 
-interface OptionalCredentialSubmission {
+interface CredentialSubmission {
   readonly credentialKind: string;
   readonly setupFields: Record<string, string>;
-  readonly submission: OptionalBrowserCredentialSubmission;
+  readonly submission: BrowserCredentialSubmission;
 }
 
-async function readOptionalCredentialSubmission(
-  connectorId: string,
-  formData: FormData
-): Promise<OptionalCredentialSubmission | null> {
+async function readCredentialSubmission(connectorId: string, formData: FormData): Promise<CredentialSubmission | null> {
   const remember = formData.get("remember_sign_in_details");
-  if (remember !== "1" && remember !== "true") {
+  if (remember !== "1" && remember !== "true" && formData.get("credential_capture_required") !== "1") {
     return null;
   }
   const setup = await getStaticSecretSetup(connectorId);
-  const result = optionalBrowserCredentialSubmission(setup, formData);
+  const result = browserCredentialSubmission(setup, formData);
   if (result === null) {
     return null;
   }
   if (setup.deployment_readiness.state !== "ready") {
     throw new BrowserCredentialFormError(
       setup.deployment_readiness.guidance ?? "Credential storage is not ready.",
-      result.ok ? result.submission.setupFields : result.setupFields
+      result.ok ? result.submission.setupFields : result.setupFields,
     );
   }
   if (!result.ok) {
@@ -121,10 +118,7 @@ async function readOptionalCredentialSubmission(
   };
 }
 
-async function captureOptionalCredential(
-  connectionId: string,
-  submission: OptionalCredentialSubmission
-): Promise<void> {
+async function captureCredential(connectionId: string, submission: CredentialSubmission): Promise<void> {
   await captureStaticSecretCredential({
     connectionId,
     credentialKind: submission.credentialKind,
@@ -133,22 +127,25 @@ async function captureOptionalCredential(
 }
 
 function launchPath(connectorId: string, connectionId: string, draft: boolean): string {
-  const query = new URLSearchParams({ connection_id: connectionId, draft: draft ? "1" : "0" });
+  const query = new URLSearchParams({
+    connection_id: connectionId,
+    draft: draft ? "1" : "0",
+  });
   return `${pagePath(connectorId)}/launch?${query.toString()}`;
 }
 
-async function captureOptionalCredentialOrRedirect(
+async function captureCredentialOrRedirect(
   request: Request,
   connectorId: string,
   connectionId: string,
-  optionalCredential: OptionalCredentialSubmission | null,
-  abandonOnFailure: boolean
+  credential: CredentialSubmission | null,
+  abandonOnFailure: boolean,
 ): Promise<NextResponse | null> {
-  if (!optionalCredential) {
+  if (!credential) {
     return null;
   }
   try {
-    await captureOptionalCredential(connectionId, optionalCredential);
+    await captureCredential(connectionId, credential);
     return null;
   } catch (err) {
     if (abandonOnFailure) {
@@ -163,13 +160,13 @@ async function captureOptionalCredentialOrRedirect(
     // than flattening every failure into one generic line the owner cannot act
     // on. The fallback stays for transport-level failures with no envelope.
     const message =
-      err instanceof StaticSecretValidationError ? err.message : "Could not save the optional sign-in details.";
+      err instanceof StaticSecretValidationError ? err.message : "Could not save the sign-in details.";
     return redirectToPublicPath(
       request,
       errorPath(connectorId, message, {
         connectionId: abandonOnFailure ? null : connectionId,
-        setupFields: optionalCredential.setupFields,
-      })
+        setupFields: credential.setupFields,
+      }),
     );
   }
 }
@@ -178,17 +175,11 @@ async function startNewBrowserEnrollment(
   request: Request,
   connectorId: string,
   formData: FormData,
-  optionalCredential: OptionalCredentialSubmission | null
+  credential: CredentialSubmission | null,
 ): Promise<NextResponse> {
   const displayName = readOptionalDisplayNameField(formData);
   const shell = await createBrowserEnrollmentShell(connectorId, { displayName });
-  const captureError = await captureOptionalCredentialOrRedirect(
-    request,
-    connectorId,
-    shell.connection_id,
-    optionalCredential,
-    true
-  );
+  const captureError = await captureCredentialOrRedirect(request, connectorId, shell.connection_id, credential, true);
   if (captureError) {
     return captureError;
   }
@@ -209,7 +200,7 @@ export async function POST(request: Request, { params }: { params: Promise<Route
   if (!browserConnect.browserBound) {
     return redirectToPublicPath(
       request,
-      `/sources/add?error=${encodeURIComponent("This source does not use browser setup.")}`
+      `/sources/add?error=${encodeURIComponent("This source does not use browser setup.")}`,
     );
   }
 
@@ -232,27 +223,27 @@ export async function POST(request: Request, { params }: { params: Promise<Route
     if (!(browserConnect.canAddAccount || existingConnectionId)) {
       return redirectToPublicPath(
         request,
-        `/sources/add?error=${encodeURIComponent("This browser-backed source is not available for self-service setup.")}`
+        `/sources/add?error=${encodeURIComponent("This browser-backed source is not available for self-service setup.")}`,
       );
     }
 
-    let optionalCredential: OptionalCredentialSubmission | null;
+    let credential: CredentialSubmission | null;
     try {
-      optionalCredential = await readOptionalCredentialSubmission(connectorId, formData);
+      credential = await readCredentialSubmission(connectorId, formData);
     } catch (err) {
       if (err instanceof BrowserCredentialFormError) {
         return redirectToPublicPath(request, errorPath(connectorId, err.message, { setupFields: err.setupFields }));
       }
-      return redirectToPublicPath(request, errorPath(connectorId, "Could not load the optional sign-in details form."));
+      return redirectToPublicPath(request, errorPath(connectorId, "Could not load the sign-in details form."));
     }
 
     if (existingConnectionId) {
-      const captureError = await captureOptionalCredentialOrRedirect(
+      const captureError = await captureCredentialOrRedirect(
         request,
         connectorId,
         existingConnectionId,
-        optionalCredential,
-        false
+        credential,
+        false,
       );
       if (captureError) {
         return captureError;
@@ -260,7 +251,7 @@ export async function POST(request: Request, { params }: { params: Promise<Route
       return redirectToPublicPath(request, launchPath(connectorId, existingConnectionId, false));
     }
 
-    return await startNewBrowserEnrollment(request, connectorId, formData, optionalCredential);
+    return await startNewBrowserEnrollment(request, connectorId, formData, credential);
   } catch (err) {
     const message = err instanceof Error ? err.message : "Failed to start browser session";
     return redirectToPublicPath(request, errorPath(connectorId, message));
