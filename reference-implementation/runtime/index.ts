@@ -2212,9 +2212,14 @@ function validateAssistanceMessage(msg: ConnectorMessage, scopeByStream: ScopeBy
 }
 
 function hasBrowserSurfaceStream(env: Record<string, string> | null | undefined): boolean {
-  // Remote CDP can point to host-owned Chrome; only a stream URL enables the
-  // remote browser action shown by the console.
-  return Boolean(env && typeof env === "object" && optionalNonEmptyEnv(env.PDPP_BROWSER_SURFACE_STREAM_BASE_URL));
+  // A stream URL enables a remote surface, while a CDP URL enables the leased
+  // host browser companion. Both are real browser-control capabilities.
+  return Boolean(
+    env &&
+      typeof env === "object" &&
+      (optionalNonEmptyEnv(env.PDPP_BROWSER_SURFACE_STREAM_BASE_URL) ||
+        optionalNonEmptyEnv(env.PDPP_BROWSER_SURFACE_REMOTE_CDP_URL))
+  );
 }
 
 function buildAssistanceRequestedDataFromInteraction(

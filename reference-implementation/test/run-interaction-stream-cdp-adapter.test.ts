@@ -582,6 +582,33 @@ test("cdp adapter dispatch() routes a touch tap through Input.dispatchMouseEvent
   await stopAndDrain(companion, sock.peer);
 });
 
+test("cdp adapter rejects oversized and malformed input before emitting CDP commands", async () => {
+  const { FakeSocket, sockets } = makeFakeSocketCtor();
+  const companion = createCdpCompanion({
+    browser_session_id: "bs_bounded_input",
+    WebSocketCtor: FakeSocket,
+    wsUrl: "ws://fake/page",
+  });
+  const startPromise = companion.start();
+  await flush();
+  const sock = findSocket(sockets, "ws://fake/page");
+  assert.ok(sock);
+  await startAndDrainNoViewport(sock.peer);
+  await startPromise;
+  const before = sock.peer.messages.filter((message) => message.method?.startsWith("Input.")).length;
+
+  await assert.rejects(
+    companion.dispatch({ type: "paste", text: "x".repeat(16_385) }),
+    (error: Error & { code?: string }) => error.code === "invalid_input"
+  );
+  await assert.rejects(
+    companion.dispatch({ action: "click", secret: "unexpected", type: "mouse", x: 3, y: 4 }),
+    (error: Error & { code?: string }) => error.code === "invalid_input"
+  );
+  assert.equal(sock.peer.messages.filter((message) => message.method?.startsWith("Input.")).length, before);
+  await stopAndDrain(companion, sock.peer);
+});
+
 test("cdp adapter surfaces CDP error responses via dispatch()", async () => {
   const { FakeSocket, sockets } = makeFakeSocketCtor();
   const companion = createCdpCompanion({
@@ -659,18 +686,21 @@ test("createDefaultStreamingCompanionFactory returns a factory when resolver is 
   assert.equal(typeof factory, "function");
 });
 
-test("host CDP lease streams its page and forwards owner input", async () => {
+test("host CDP lease streams only the exact registered page and forwards owner input", async () => {
   const { FakeSocket, sockets } = makeFakeSocketCtor();
   const requestedUrls: string[] = [];
   const factory = createDefaultStreamingCompanionFactory({
     fetchImpl: async (input) => {
       requestedUrls.push(String(input));
       return {
-        json: async () => [{ type: "page", webSocketDebuggerUrl: "ws://fake/host-page" }],
+        json: async () => [
+          { targetId: "unrelated", type: "page", webSocketDebuggerUrl: "ws://127.0.0.1:9222/devtools/page/unrelated" },
+          { targetId: "leased", type: "page", webSocketDebuggerUrl: "ws://127.0.0.1:9222/devtools/page/leased-page" },
+        ],
         ok: true,
       } as Response;
     },
-    resolveTargetForInteraction: () => null,
+    resolveTargetForInteraction: () => "ws://127.0.0.1:9222/devtools/page/leased-page",
     WebSocketCtor: FakeSocket as unknown as typeof WebSocket,
   });
   assert.ok(factory);
@@ -685,9 +715,9 @@ test("host CDP lease streams its page and forwards owner input", async () => {
   companion.onFrame((frame) => frames.push(frame));
   const startPromise = companion.start({ height: 480, width: 320 });
   await flush();
-  assert.deepEqual(requestedUrls, ["http://127.0.0.1:9222/json/list"]);
-  const sock = findSocket(sockets, "ws://fake/host-page");
-  assert.ok(sock, "adapter connected to the page advertised by the host CDP endpoint");
+  assert.deepEqual(requestedUrls, []);
+  const sock = findSocket(sockets, "ws://127.0.0.1:9222/devtools/page/leased-page");
+  assert.ok(sock, "adapter connected to the exact registered page target");
   await startAndDrainViewport(sock.peer);
   await startPromise;
 

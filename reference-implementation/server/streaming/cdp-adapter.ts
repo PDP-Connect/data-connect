@@ -51,6 +51,7 @@ import type {
  * surfaces as a 4xx on the input POST).
  */
 import { mapInputEventToCdp } from "./cdp-companion.ts";
+import { parseReferenceWireInputPayload } from "./protocol-wire.ts";
 
 type CdpMethod = string;
 
@@ -288,7 +289,6 @@ function cdpParams(value: unknown): CdpCommandParams {
 
 const DEFAULT_COMMAND_TIMEOUT_MS = 10_000;
 const DEFAULT_OPEN_TIMEOUT_MS = 5000;
-const HOST_CDP_TARGET_TIMEOUT_MS = 5000;
 
 function codedError(message: string, code: string, properties: CdpJsonObject = {}): CodedError {
   return Object.assign(new Error(message), { code, ...properties });
@@ -302,8 +302,8 @@ function isObject(value: unknown): value is CdpJsonObject {
   return value !== null && typeof value === "object";
 }
 
-function hostPageTargetResolver(cdpHttpUrl: string, fetchImpl: typeof fetch): ResolveTarget {
-  return async () => {
+function hostPageTargetResolver(cdpHttpUrl: string, resolveExactTarget: ResolveTarget): ResolveTarget {
+  return async (runId, interactionId) => {
     let endpoint: URL;
     try {
       endpoint = new URL(cdpHttpUrl);
@@ -313,39 +313,25 @@ function hostPageTargetResolver(cdpHttpUrl: string, fetchImpl: typeof fetch): Re
     } catch {
       throw codedError("Host Chrome DevTools endpoint is invalid", "host_cdp_unavailable");
     }
-    endpoint.pathname = `${endpoint.pathname.replace(/\/+$/, "")}/json/list`;
-    endpoint.search = "";
-    endpoint.hash = "";
-
-    let targets: unknown;
-    try {
-      const response = await fetchImpl(endpoint.href, { signal: AbortSignal.timeout(HOST_CDP_TARGET_TIMEOUT_MS) });
-      if (!response.ok) {
-        throw new Error("CDP target list request failed");
-      }
-      targets = await response.json();
-    } catch {
-      throw codedError("Host Chrome did not return its page targets", "host_cdp_unavailable");
-    }
-
-    if (!Array.isArray(targets)) {
-      throw codedError("Host Chrome returned an invalid page target list", "host_cdp_unavailable");
-    }
-    const page = targets.find((target) => {
-      if (!isObject(target) || target.type !== "page" || typeof target.webSocketDebuggerUrl !== "string") {
-        return false;
-      }
-      try {
-        const protocol = new URL(target.webSocketDebuggerUrl).protocol;
-        return protocol === "ws:" || protocol === "wss:";
-      } catch {
-        return false;
-      }
-    });
-    if (!isObject(page) || typeof page.webSocketDebuggerUrl !== "string") {
+    const wsUrl = await Promise.resolve(resolveExactTarget(runId, interactionId));
+    if (typeof wsUrl !== "string") {
       throw codedError("Host Chrome has no streamable page target", "streaming_target_unregistered");
     }
-    return page.webSocketDebuggerUrl;
+    let page: URL;
+    try {
+      page = new URL(wsUrl);
+    } catch {
+      throw codedError("Host Chrome page target is invalid", "streaming_target_unregistered");
+    }
+    const endpointPort = endpoint.port || (endpoint.protocol === "https:" ? "443" : "80");
+    const pagePort = page.port || (page.protocol === "wss:" ? "443" : "80");
+    const compatibleProtocols =
+      (endpoint.protocol === "http:" && page.protocol === "ws:") ||
+      (endpoint.protocol === "https:" && page.protocol === "wss:");
+    if (!compatibleProtocols || endpoint.hostname !== page.hostname || endpointPort !== pagePort) {
+      throw codedError("Registered page does not belong to the leased host browser", "host_cdp_target_mismatch");
+    }
+    return wsUrl;
   };
 }
 
@@ -757,7 +743,7 @@ export function createDefaultStreamingCompanionFactory({
     const targetResolver =
       target?.backend === "cdp"
         ? typeof target.cdp_http_url === "string"
-          ? hostPageTargetResolver(target.cdp_http_url, fetchImpl)
+          ? hostPageTargetResolver(target.cdp_http_url, resolveTargetForInteraction)
           : () => null
         : resolveTargetForInteraction;
     return createResolvedCompanion({
@@ -1434,6 +1420,7 @@ export function createCdpCompanion({
 
   // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: This adapter deliberately keeps the three assembled-session channels and the legacy CDP fallback in one explicit dispatch boundary.
   async function dispatch(event: unknown): Promise<void> {
+    event = parseReferenceWireInputPayload(event);
     if (isObject(event) && typeof event.type === "string") {
       if (event.type === "pointer" || event.type === "keyboard" || event.type === "text") {
         if (!backendLifecycle) {

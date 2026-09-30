@@ -105,6 +105,8 @@ interface StreamingController {
 }
 
 interface OwnerAuth {
+  enabled?: boolean;
+  readOwnerAuthorizationFence?: (req: unknown) => Promise<{ sessionIdHash?: string } | null>;
   requireOwnerSession: RouteHandler;
 }
 
@@ -112,7 +114,9 @@ interface StreamingSession {
   browser_session_id: string;
   expires_at: number;
   interaction_id: string;
+  owner_session_hash?: string | null;
   run_id: string;
+  token_hash?: string;
   viewport: ReferenceWireViewportPayload | null;
 }
 
@@ -124,6 +128,7 @@ interface StreamingSessions {
     browser_session_id: string;
     idempotency_key: string | null;
     interaction_id: string;
+    owner_session_hash?: string;
     run_id: string;
     viewport: ReferenceWireViewportPayload | null;
   }) => { idempotency_replayed: boolean; session: StreamingSession; token: string };
@@ -906,6 +911,7 @@ export function registerStreamingRoutes({
   // Bearer records expire by design. A presentation lifecycle cannot: it owns
   // a mutated shared screen until restoration or safe retirement completes.
   const presentationLifecycles = new Map<string, PresentationLifecycle>();
+  const hostLeaseTargets = new Map<string, BrowserSurfaceTarget>();
   // Serialize controller viewport requests before they reach a companion. The
   // n.eko companion also fences screen mutations, but this host-level queue
   // preserves request order across every streaming backend and reconnect.
@@ -1079,17 +1085,94 @@ export function registerStreamingRoutes({
     return companion;
   }
 
+  async function ownerSessionHashForRequest(req: StreamingRequest): Promise<string | null> {
+    if (typeof ownerAuth.readOwnerAuthorizationFence === "function") {
+      const fence = await ownerAuth.readOwnerAuthorizationFence(req);
+      return fence?.sessionIdHash ?? (ownerAuth.enabled === true ? null : "open-session");
+    }
+    return ownerAuth.enabled === true ? null : "open-session";
+  }
+
+  async function hostOwnerAuthorized(req: StreamingRequest, session: StreamingSession): Promise<boolean> {
+    if (!session.owner_session_hash) return true;
+    const ownerHash = await ownerSessionHashForRequest(req);
+    return ownerHash !== null && ownerHash === session.owner_session_hash;
+  }
+
+  function hostLeaseIsCurrent(session: StreamingSession): boolean {
+    const target = session.token_hash ? hostLeaseTargets.get(session.token_hash) : undefined;
+    if (!target || !browserSurfaceLeaseManager) return target === undefined;
+    const lease = browserSurfaceLeaseManager
+      .listLeases()
+      .find((candidate) => candidate.lease_id === target.lease_id && candidate.run_id === session.run_id);
+    const surface = browserSurfaceLeaseManager.getSurface(target.surface_id);
+    if (!(lease?.status === "leased" && surface?.health === "ready")) return false;
+    if (
+      lease.surface_id !== target.surface_id ||
+      lease.profile_key !== target.profile_key ||
+      surface.active_lease_id !== target.lease_id ||
+      surface.connector_id !== lease.connector_id ||
+      surface.profile_key !== target.profile_key
+    ) {
+      return false;
+    }
+    try {
+      return new URL(surface.cdp_url || "").origin === new URL(target.cdp_http_url || "").origin;
+    } catch {
+      return false;
+    }
+  }
+
+  async function retireLostHostLease(session: StreamingSession): Promise<void> {
+    const lifecycle = presentationLifecycleFor(session.run_id, session.interaction_id);
+    if (lifecycle) {
+      await terminalizePresentation(lifecycle, { invalidateBearer: true, reason: "browser_surface_lease_lost" });
+    } else {
+      streamingSessions.invalidate({
+        interaction_id: session.interaction_id,
+        reason: "browser_surface_lease_lost",
+        run_id: session.run_id,
+      });
+      const companion = getCompanion({
+        browserSessionId: session.browser_session_id,
+        interactionId: session.interaction_id,
+        runId: session.run_id,
+      });
+      await companion?.stop().catch(() => undefined);
+    }
+    if (session.token_hash) hostLeaseTargets.delete(session.token_hash);
+  }
+
+  async function validateHostSession(
+    req: StreamingRequest,
+    res: StreamingReply,
+    session: StreamingSession
+  ): Promise<boolean> {
+    if (!(await hostOwnerAuthorized(req, session))) {
+      pdppError(res, 401, "owner_session_mismatch", "The owner session that minted this stream is required.");
+      return false;
+    }
+    if (!hostLeaseIsCurrent(session)) {
+      await retireLostHostLease(session);
+      pdppError(res, 410, "browser_surface_lease_lost", "The leased browser surface is no longer available.");
+      return false;
+    }
+    return true;
+  }
+
   async function mintStreamSession({
     body,
     companionFactory: factory,
     interactionId,
     mintScope,
+    ownerSessionHash,
     runId,
   }: {
     body: RecordFields;
     companionFactory: CompanionFactory;
     interactionId: string;
     mintScope: { kind: string; target: BrowserSurfaceTarget | null };
+    ownerSessionHash: string | null;
     runId: string;
   }): Promise<RecordFields> {
     const viewport = pickViewport(body.viewport);
@@ -1109,9 +1192,18 @@ export function registerStreamingRoutes({
       browser_session_id: browserSessionId,
       idempotency_key: idempotencyKey,
       interaction_id: interactionId,
+      ...(mintScope.target?.backend === "cdp" && mintScope.target.lease_id
+        ? { owner_session_hash: ownerSessionHash ?? "open-session" }
+        : {}),
       run_id: runId,
       viewport,
     });
+    if (mintScope.target?.backend === "cdp" && mintScope.target.lease_id) {
+      if (session.owner_session_hash !== (ownerSessionHash ?? "open-session")) {
+        throw mintError(409, "owner_session_mismatch", "This stream belongs to another owner session.");
+      }
+      if (session.token_hash) hostLeaseTargets.set(session.token_hash, mintScope.target);
+    }
 
     const priorLifecycle = presentationLifecycleFor(runId, interactionId);
     if (priorLifecycle && priorLifecycle.browser_session_id !== session.browser_session_id) {
@@ -1166,10 +1258,10 @@ export function registerStreamingRoutes({
     };
   }
 
-  function authorizeStreamAttachment(
+  async function authorizeStreamAttachment(
     req: StreamingRequest,
     res: StreamingReply
-  ): { companion: StreamingCompanion; controllingAttachment: boolean; session: StreamingSession } | null {
+  ): Promise<{ companion: StreamingCompanion; controllingAttachment: boolean; session: StreamingSession } | null> {
     let session: StreamingSession;
     try {
       session = streamingSessions.attach({ token: req.params.token });
@@ -1178,6 +1270,7 @@ export function registerStreamingRoutes({
       pdppError(res, status, errorCode(err, "invalid_token"), errorMessage(err, "invalid token"));
       return null;
     }
+    if (!(await validateHostSession(req, res, session))) return null;
     const companion = getCompanion({
       browserSessionId: session.browser_session_id,
       interactionId: session.interaction_id,
@@ -1200,10 +1293,10 @@ export function registerStreamingRoutes({
     }
   }
 
-  function authorizeControllingCompanion(
+  async function authorizeControllingCompanion(
     req: StreamingRequest,
     res: StreamingReply
-  ): { companion: StreamingCompanion; session: StreamingSession } | null {
+  ): Promise<{ companion: StreamingCompanion; session: StreamingSession } | null> {
     let session: StreamingSession;
     try {
       session = streamingSessions.authorize({ token: req.params.token });
@@ -1212,6 +1305,7 @@ export function registerStreamingRoutes({
       pdppError(res, status, errorCode(err, "invalid_token"), errorMessage(err, "invalid token"));
       return null;
     }
+    if (!(await validateHostSession(req, res, session))) return null;
     if (!isControllingPresentationAttachment(session, req)) {
       pdppError(
         res,
@@ -2099,11 +2193,16 @@ body>p{display:none!important}
           "Streaming companion is not configured on this server. The connector runtime must register a CDP page-target ws URL for the run via the run-target registry, or a streamingCompanionFactory must be injected, to enable run-interaction streaming."
         );
       }
+      const ownerSessionHash = await ownerSessionHashForRequest(req);
+      if (mintScope.target?.backend === "cdp" && mintScope.target.lease_id && ownerSessionHash === null) {
+        return pdppError(res, 401, "owner_session_required", "A valid owner session is required for host browser streaming.");
+      }
       const responseBody = await mintStreamSession({
         body,
         companionFactory,
         interactionId,
         mintScope,
+        ownerSessionHash,
         runId,
       });
       return res.status(201).json(responseBody);
@@ -2183,7 +2282,7 @@ body>p{display:none!important}
 
   // ── SSE attach (token-only) ───────────────────────────────────────────────
   app.get("/_ref/run-interaction-streams/:token/events", async (req, res) => {
-    const authorized = authorizeStreamAttachment(req, res);
+    const authorized = await authorizeStreamAttachment(req, res);
     if (!authorized) {
       return;
     }
@@ -2252,6 +2351,14 @@ body>p{display:none!important}
     // keepaliveTimeout on Fastify/HTTP intermediaries (default 30s).
     // SSE comments (lines starting with `:`) are ignored by EventSource clients.
     const keepAliveInterval = setInterval(() => {
+      if (!hostLeaseIsCurrent(session)) {
+        void retireLostHostLease(session).finally(() => {
+          writeEvent("error", { code: "browser_surface_lease_lost", message: "The leased browser surface is no longer available." });
+          raw.end();
+          closePerConnection();
+        });
+        return;
+      }
       try {
         raw.write(": keepalive\n\n");
       } catch {
@@ -2365,7 +2472,7 @@ body>p{display:none!important}
 
   // ── Input dispatch (token-only) ───────────────────────────────────────────
   app.post("/_ref/run-interaction-streams/:token/input", async (req, res) => {
-    const authorized = authorizeControllingCompanion(req, res);
+    const authorized = await authorizeControllingCompanion(req, res);
     if (!authorized) {
       return;
     }
@@ -2374,7 +2481,12 @@ body>p{display:none!important}
     // correlationId (set by the phone-side overlay). The body is the raw
     // wire shape (type/action/x/y/...), so we record it verbatim minus the
     // correlationId promoted to a top-level field.
-    const body = parseReferenceWireInputPayload(req.body);
+    let body: RecordFields;
+    try {
+      body = parseReferenceWireInputPayload(req.body);
+    } catch (err) {
+      return pdppError(res, 400, errorCode(err, "invalid_input"), errorMessage(err, "invalid input"));
+    }
     const correlationId = typeof body.correlationId === "string" ? body.correlationId : null;
     const wireSeq = typeof body.wireSeq === "number" ? body.wireSeq : null;
     const receivedAtMs = Date.now();
@@ -2423,7 +2535,7 @@ body>p{display:none!important}
   // remote page selection.
   // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: This route is the explicit validation boundary for two clipboard directions and their distinct failure semantics.
   app.post("/_ref/run-interaction-streams/:token/clipboard", async (req, res) => {
-    const authorized = authorizeControllingCompanion(req, res);
+    const authorized = await authorizeControllingCompanion(req, res);
     if (!authorized) {
       return;
     }

@@ -248,3 +248,27 @@ test("resolved companion preserves the backend remote-selection capability", () 
   assert.ok(companion, "expected a companion for valid companion ids");
   assert.equal(typeof companion.readRemoteSelection, "function");
 });
+
+test("installed companion factory accepts a host lease and resolves its exact registered page", async () => {
+  const resolutions: string[][] = [];
+  const factory = createDefaultStreamingCompanionFactory({
+    resolveTargetForInteraction: (runId, interactionId) => {
+      resolutions.push([String(runId), String(interactionId)]);
+      return "ws://127.0.0.1:9222/devtools/page/leased-page";
+    },
+    // No CDP connection is opened by resolveBackend; this only proves the
+    // production factory accepts the route's leased-host target shape.
+    // biome-ignore lint/suspicious/noEmptyBlockStatements: factory lazily opens the socket only on start.
+    WebSocketCtor() {},
+  });
+  assert.ok(factory);
+  const companion = factory({
+    browser_session_id: "bs_host_factory",
+    interaction_id: "int_host_factory",
+    run_id: "run_host_factory",
+    target: { backend: "cdp", cdp_http_url: "http://127.0.0.1:9222", lease_id: "lease_1" },
+  });
+  assert.ok(companion);
+  assert.equal(await companion.resolveBackend(), "cdp");
+  assert.deepEqual(resolutions, [["run_host_factory", "int_host_factory"]]);
+});

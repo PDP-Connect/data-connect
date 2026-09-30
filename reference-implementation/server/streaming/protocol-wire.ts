@@ -17,11 +17,47 @@ export interface ReferenceWireViewportPayload {
   width: number;
 }
 
+const INPUT_FIELDS: Record<string, ReadonlySet<string>> = {
+  clipboard: new Set(["action", "text", "type", "correlationId", "wireSeq"]),
+  keyboard: new Set(["action", "code", "key", "location", "modifiers", "repeat", "type", "correlationId", "wireSeq"]),
+  mouse: new Set(["action", "button", "x", "y", "correlationId", "wireSeq", "type"]),
+  paste: new Set(["text", "type", "correlationId", "wireSeq"]),
+  pointer: new Set(["action", "button", "height", "pointerId", "pointerType", "pressure", "tiltX", "tiltY", "type", "width", "x", "y", "correlationId", "wireSeq"]),
+  scroll: new Set(["deltaX", "deltaY", "x", "y", "type", "correlationId", "wireSeq"]),
+  text: new Set(["action", "text", "type", "correlationId", "wireSeq"]),
+  touch: new Set(["action", "id", "x", "y", "type", "correlationId", "wireSeq"]),
+  viewport: new Set(["deviceScaleFactor", "hasTouch", "height", "mobile", "screenHeight", "screenWidth", "type", "userAgent", "width", "correlationId", "wireSeq"]),
+};
+const MAX_INPUT_TEXT_LENGTH = 16_384;
+const MAX_INPUT_COORDINATE = 32_768;
+
+function invalidInput(): Error & { code: string } {
+  const error = new Error("Input event is malformed or exceeds supported limits") as Error & { code: string };
+  error.code = "invalid_input";
+  return error;
+}
+
 export function parseReferenceWireInputPayload(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return {};
+    throw invalidInput();
   }
-  return value as Record<string, unknown>;
+  const input = value as Record<string, unknown>;
+  const fields = typeof input.type === "string" ? INPUT_FIELDS[input.type] : undefined;
+  if (!fields || Object.keys(input).some((key) => !fields.has(key))) {
+    throw invalidInput();
+  }
+  for (const [key, child] of Object.entries(input)) {
+    if (typeof child === "string" && child.length > (key === "text" ? MAX_INPUT_TEXT_LENGTH : 512)) {
+      throw invalidInput();
+    }
+    if (typeof child === "number" && (!Number.isFinite(child) || Math.abs(child) > MAX_INPUT_COORDINATE)) {
+      throw invalidInput();
+    }
+  }
+  if (typeof input.text === "string" && input.text.length > MAX_INPUT_TEXT_LENGTH) {
+    throw invalidInput();
+  }
+  return input;
 }
 
 export function normalizeReferenceWireViewportPayload(value: unknown): ReferenceWireViewportPayload | null {

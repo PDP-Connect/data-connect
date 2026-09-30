@@ -1148,6 +1148,53 @@ test("mint streams a host lease through its CDP endpoint", async () => {
   );
 });
 
+test("attached host stream loses attach and input authority when its lease is released", async () => {
+  const connectorId = "https://registry.pdpp.dev/connectors/spotify";
+  const leaseManager = makeLeaseManager({ connectorId, hostCdp: true });
+  await withHarness(
+    { browserSurfaceLeaseManager: leaseManager },
+    async ({ asUrl, spotifyManifest, companions }) => {
+      const started = await startRun(asUrl, spotifyManifest.connector_id);
+      const acquired = leaseManager.acquire({ connectorId, profileKey: "profile_dynamic_1", runId: started.run_id });
+      const pending = await waitForPendingInteraction(asUrl, started.run_id);
+      const mint = await fetchJson(`${asUrl}/_ref/runs/${encodeURIComponent(started.run_id)}/run-interaction-stream`, {
+        body: JSON.stringify({ interaction_id: pending.interaction_id }),
+        headers: { "Content-Type": "application/json" },
+        method: "POST",
+      });
+      assert.equal(mint.status, 201);
+      const body = mint.body as MintBody;
+      const abort = new AbortController();
+      const stream = await fetch(`${asUrl}${body.viewer_path}`, { signal: abort.signal });
+      assert.equal(stream.status, 200);
+      const attachmentCookie = presentationAttachmentCookie(stream);
+      assert.ok(stream.body);
+      const reader = stream.body.getReader();
+      await reader.read();
+      const companion = companions.find((entry) => entry.run_id === started.run_id)?.companion;
+      assert.ok(companion);
+
+      leaseManager.release({
+        fencingToken: acquired.lease.fencing_token,
+        leaseId: acquired.lease.lease_id,
+      });
+      const input = await fetchJson(`${asUrl}${body.input_path}`, {
+        body: JSON.stringify({ action: "click", type: "mouse", x: 1, y: 1 }),
+        headers: { "Content-Type": "application/json", Cookie: attachmentCookie },
+        method: "POST",
+      });
+      assert.equal(input.status, 410);
+      assert.equal((input.body as MintBody).error?.code, "browser_surface_lease_lost");
+      assert.equal(companion.inputs.length, 0);
+      assert.equal(companion.started(), false);
+
+      abort.abort();
+      await reader.cancel().catch(() => undefined);
+      await cancelRun(asUrl, started.run_id, pending.interaction_id);
+    }
+  );
+});
+
 test("mint accepts current no-response browser-surface assistance backed by a leased surface", async () => {
   const connectorId = "https://registry.pdpp.dev/connectors/spotify";
   const leaseManager = makeLeaseManager({ connectorId });
@@ -3139,6 +3186,16 @@ test("input POST dispatches to the companion after attach and rejects bad input"
     });
     assert.equal(bad.status, 400);
     assert.equal((bad.body as MintBody).error?.code, "invalid_input");
+
+    const dispatchedBeforeMalformedInput = trackedInputs.length;
+    const oversized = await fetchJson(`${asUrl}${(mint.body as MintBody).input_path}`, {
+      body: JSON.stringify({ text: "x".repeat(16_385), type: "paste" }),
+      headers: { "Content-Type": "application/json", Cookie: attachmentCookie },
+      method: "POST",
+    });
+    assert.equal(oversized.status, 400);
+    assert.equal((oversized.body as MintBody).error?.code, "invalid_input");
+    assert.equal(trackedInputs.length, dispatchedBeforeMalformedInput, "malformed input must not reach the companion");
 
     ac.abort();
     try {
