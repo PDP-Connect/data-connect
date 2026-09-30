@@ -469,9 +469,11 @@ test("connector run ingests its record when remote access is enabled", async () 
   const ownerPassword = "fixture-owner-password";
   const reachabilityContract = parseReachabilityContract({
     env: {
-      PDPP_BIND_HOST: "127.0.0.1",
+      PDPP_BIND_HOST: "0.0.0.0",
       PDPP_REFERENCE_ORIGIN: "https://reference.example",
-      PDPP_TRUSTED_HOSTS: "reference.example",
+      // The test client dials loopback; leave the bind-all self-call authority
+      // (0.0.0.0) untrusted so the regression reaches the connector ingest.
+      PDPP_TRUSTED_HOSTS: "reference.example,127.0.0.1",
     },
   });
 
@@ -507,22 +509,35 @@ test("connector run ingests its record when remote access is enabled", async () 
       });
 
       const ownerToken = await issueOwnerToken(asUrl, OWNER_SUBJECT_ID, "https://reference.example", ownerCookie, csrf);
-      const response = await postRun(rsUrl, ownerToken, "/v1/owner/connections/cin_invalid_host_fixture/run");
-      assert.equal(response.status, 202);
-      const runId = response.body?.run_id;
-      assert.equal(typeof runId, "string");
+      const originalFetch = globalThis.fetch;
+      const fetchHosts: string[] = [];
+      globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+        const url = input instanceof Request ? input.url : String(input);
+        fetchHosts.push(new URL(url).hostname);
+        return originalFetch(input, init);
+      }) as typeof fetch;
+      try {
+        const response = await postRun(rsUrl, ownerToken, "/v1/owner/connections/cin_invalid_host_fixture/run");
+        assert.equal(response.status, 202);
+        const runId = response.body?.run_id;
+        assert.equal(typeof runId, "string");
 
-      const deadline = Date.now() + 5_000;
-      let terminal = null;
-      while (Date.now() < deadline && !terminal) {
-        terminal = await getRunTerminalEvent(runId as string);
-        if (!terminal) {
-          await new Promise((resolve) => setTimeout(resolve, 25));
+        const deadline = Date.now() + 5_000;
+        let terminal = null;
+        while (Date.now() < deadline && !terminal) {
+          terminal = await getRunTerminalEvent(runId as string);
+          if (!terminal) {
+            await new Promise((resolve) => setTimeout(resolve, 25));
+          }
         }
+        assert.ok(terminal, "fixture connector run should reach a terminal event");
+        assert.equal(terminal.status, "completed");
+        assert.equal(terminal.data?.records_emitted, 1);
+        assert.ok(fetchHosts.length > 0, "the run should make observable HTTP calls");
+        assert.ok(!fetchHosts.includes("0.0.0.0"), "no self-call should use Host: 0.0.0.0");
+      } finally {
+        globalThis.fetch = originalFetch;
       }
-      assert.ok(terminal, "fixture connector run should reach a terminal event");
-      assert.equal(terminal.status, "completed");
-      assert.equal(terminal.data?.records_emitted, 1);
     },
     { emitRecord: true, ownerAuthPassword: ownerPassword, reachabilityContract }
   );

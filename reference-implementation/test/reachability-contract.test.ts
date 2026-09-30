@@ -10,9 +10,18 @@ import {
   evaluateReachabilityRequest,
   isRemoteOriginRequest,
   parseReachabilityContract,
+  selfCallUrlHostForBindHost,
   validateReachabilityContract,
   type ReachabilityContract,
 } from "../server/reachability-contract.ts"
+
+test("self-call URL host maps wildcard binds and brackets IPv6 literals", () => {
+  assert.equal(selfCallUrlHostForBindHost("0.0.0.0"), "127.0.0.1")
+  assert.equal(selfCallUrlHostForBindHost("::"), "[::1]")
+  assert.equal(selfCallUrlHostForBindHost("127.0.0.1"), "127.0.0.1")
+  assert.equal(selfCallUrlHostForBindHost("::1"), "[::1]")
+  assert.equal(selfCallUrlHostForBindHost("reference.internal"), "reference.internal")
+})
 
 function request(
   headers: Record<string, string>,
@@ -160,6 +169,19 @@ test("R3d a bind-all posture (0.0.0.0) does not get the loopback Host exemption"
     hosted: true,
   })
   assert.equal(decision?.status, 400)
+  assert.equal(decision?.code, "invalid_host")
+})
+
+test("a wildcard bind accepts its mapped Host only from an actual loopback peer", () => {
+  const contract = hostedContract({
+    PDPP_BIND_HOST: "0.0.0.0",
+    PDPP_TRUSTED_HOSTS: "vault.example",
+  })
+  const selfCall = request({ host: "127.0.0.1:38365" }, "::ffff:127.0.0.1")
+  assert.equal(evaluateReachabilityRequest(selfCall, contract, { hosted: true }), null)
+
+  const remote = request({ host: "127.0.0.1:38365" }, "203.0.113.9")
+  const decision = evaluateReachabilityRequest(remote, contract, { hosted: true })
   assert.equal(decision?.code, "invalid_host")
 })
 

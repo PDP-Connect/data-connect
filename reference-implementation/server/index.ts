@@ -260,6 +260,7 @@ import {
   isLoopbackOriginHost,
   isNonLoopbackBindHost,
   parseReachabilityContract,
+  selfCallUrlHostForBindHost,
   validateReachabilityContract,
 } from "./reachability-contract.ts";
 import { createPackageRsClient, createRsClient } from "./package-rs-client.ts";
@@ -7373,10 +7374,7 @@ function buildRsApp(opts: ServerOpts = {}) {
   }
   const introspectionBindHost =
     opts.reachabilityContract?.bindHost || process.env.PDPP_BIND_HOST?.trim() || "127.0.0.1";
-  const introspectionUrlHost =
-    introspectionBindHost.includes(":") && !introspectionBindHost.startsWith("[")
-      ? `[${introspectionBindHost}]`
-      : introspectionBindHost;
+  const introspectionUrlHost = selfCallUrlHostForBindHost(introspectionBindHost);
   const introspectToken = createRemoteIntrospector({
     ...rsIntrospectionCredentials,
     endpoint: opts.rsIntrospectionEndpoint ?? `http://${introspectionUrlHost}:${opts.asPort ?? AS_PORT}/introspect`,
@@ -9311,6 +9309,7 @@ export async function startServer(opts: ServerOpts = {}) {
   }
   const asPort = (asServer.address() as import("net").AddressInfo).port;
   const bindUrlHost = bindHost.includes(":") && !bindHost.startsWith("[") ? `[${bindHost}]` : bindHost;
+  const selfCallUrlHost = selfCallUrlHostForBindHost(bindHost);
   const asPublicUrl = configuredAsPublicUrl || configuredAsIssuer || `http://${bindUrlHost}:${asPort}`;
   // Update the controller's lazy reference-base-URL view now that the AS
   // listener has actually allocated a port. Spawned connector children
@@ -9328,7 +9327,7 @@ export async function startServer(opts: ServerOpts = {}) {
   // Both child and parent run on the same host (Mode A: in-process
   // controller spawns the connector subprocess), so loopback is always
   // reachable and is the right hop.
-  runtimeContext.referenceBaseUrl = `http://${bindUrlHost}:${asPort}`;
+  runtimeContext.referenceBaseUrl = `http://${selfCallUrlHost}:${asPort}`;
   logger.info({ port: asPort, url: `http://${bindUrlHost}:${asPort}` }, "authorization server listening");
   warnIfLoopbackOriginPortDisagreesWithBoundPort("configured AS public origin", configuredAsPublicUrl, asPort);
 
@@ -9373,7 +9372,7 @@ export async function startServer(opts: ServerOpts = {}) {
     // Spec: openspec/changes/route-hosted-mcp-adapter-self-calls-internally/
     rsInternalUrl: explicitRsInternalUrl,
     rsIntrospectionCredentials: introspectionCredentials,
-    rsIntrospectionEndpoint: opts.rsIntrospectionEndpoint ?? `http://${bindUrlHost}:${asPort}/introspect`,
+    rsIntrospectionEndpoint: opts.rsIntrospectionEndpoint ?? `http://${selfCallUrlHost}:${asPort}/introspect`,
     rsPublicUrl: configuredRsPublicUrl,
     semanticRetrievalCapability: opts.semanticRetrievalCapability,
     // Semantic retrieval experimental extension knobs — see search-semantic.js
@@ -9389,7 +9388,7 @@ export async function startServer(opts: ServerOpts = {}) {
   // Controller-managed runs are server-side work. Even in composed mode, they
   // should post ingest/state traffic directly to the local RS listener rather
   // than routing large NDJSON payloads through the browser-facing web origin.
-  runtimeContext.rsUrl = `http://${bindUrlHost}:${rsPort}`;
+  runtimeContext.rsUrl = `http://${selfCallUrlHost}:${rsPort}`;
   await controller.promoteBrowserSurfaceLeasesAfterBoot();
   logger.info({ port: rsPort, url: `http://${bindUrlHost}:${rsPort}` }, "resource server listening");
   warnIfLoopbackOriginPortDisagreesWithBoundPort("configured RS public origin", configuredRsPublicUrl, rsPort);
