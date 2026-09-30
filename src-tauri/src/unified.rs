@@ -164,6 +164,10 @@ struct UnifiedRuntimeState {
     session_cookie: Mutex<Option<String>>,
     sidecars_ready: Mutex<BTreeSet<String>>,
     stack: Mutex<Option<UnifiedStack>>,
+    /// Serializes every operation that can start the managed stack. The
+    /// config watcher can observe tunnel fields before bootstrap has stored
+    /// its handles, so teardown and restart must wait for that bootstrap.
+    stack_start_gate: std::sync::Arc<tokio::sync::Mutex<()>>,
     shutdown: Mutex<ShutdownState>,
     /// The live ngrok session, held OUTSIDE `stack` so a config-change
     /// restart (`restart_after_remote_access_config`, which tears down and
@@ -1266,8 +1270,19 @@ fn start_managed_stack(
         sink.clone(),
     )
     .with_observer(lease_observer())
-    .start_on_port(console_port_plan.preferred)
-    .map_err(|error| format!("Failed to start staged console: {error}"))?;
+    .start_on_port(console_port_plan.preferred);
+    let console = match console {
+        Ok(console) => console,
+        Err(error) => {
+            let ri_stop = ri.stop().err().map(|stop| stop.to_string());
+            return Err(match ri_stop {
+                Some(stop) => format!(
+                    "Failed to start staged console: {error}; failed to stop staged RI: {stop}"
+                ),
+                None => format!("Failed to start staged console: {error}"),
+            });
+        }
+    };
     report_console_port_outcome(
         app,
         &data_dir,
@@ -2661,6 +2676,26 @@ async fn bootstrap_and_open_console(
     preserved_path: Option<String>,
     owner_session_reset: Option<OwnerSessionReset>,
 ) -> Result<(), BootstrapFailure> {
+    let start_gate = app.state::<UnifiedRuntimeState>().stack_start_gate.clone();
+    let Ok(_start_guard) = start_gate.try_lock_owned() else {
+        log::debug!("Ignoring duplicate unified stack bootstrap while one is in flight");
+        return Ok(());
+    };
+    bootstrap_and_open_console_with_stack_guard(
+        app,
+        should_show,
+        preserved_path,
+        owner_session_reset,
+    )
+    .await
+}
+
+async fn bootstrap_and_open_console_with_stack_guard(
+    app: AppHandle,
+    should_show: bool,
+    preserved_path: Option<String>,
+    owner_session_reset: Option<OwnerSessionReset>,
+) -> Result<(), BootstrapFailure> {
     set_status(&app, UnifiedStatus::Starting);
 
     let attach = attach_mode();
@@ -2960,6 +2995,10 @@ pub(crate) async fn import_database_encryption_recovery_code(
     app: AppHandle,
     code: String,
 ) -> Result<(), String> {
+    let start_gate = app.state::<UnifiedRuntimeState>().stack_start_gate.clone();
+    let _start_guard = start_gate
+        .try_lock_owned()
+        .map_err(|_| "A DataConnect stack start or restart is already in progress".to_string())?;
     let imported = crate::recovery_code::decode_for_import(&code).map_err(|error| {
         log::info!("Recovery import: rejected at decode stage ({error})");
         "That code is not a valid recovery code. Check for a typo and try again.".to_string()
@@ -3273,6 +3312,8 @@ async fn restart_managed_stack(
     app: AppHandle,
     owner_session_reset: Option<OwnerSessionReset>,
 ) -> Result<(), String> {
+    let start_gate = app.state::<UnifiedRuntimeState>().stack_start_gate.clone();
+    let _start_guard = start_gate.lock_owned().await;
     let preserved_path = console_path_before_restart(&app);
     set_status(&app, UnifiedStatus::Restarting);
     tokio::task::spawn_blocking({
@@ -3293,7 +3334,7 @@ async fn restart_managed_stack(
     // not the moment to also introduce new recovery-window UI; the tray
     // status still reaches NeedsRecovery on the NEXT natural bootstrap
     // attempt (app relaunch or "Open console"), which does open it.
-    bootstrap_and_open_console(app, true, preserved_path, owner_session_reset)
+    bootstrap_and_open_console_with_stack_guard(app, true, preserved_path, owner_session_reset)
         .await
         .map_err(|failure| match failure {
             BootstrapFailure::NeedsRecovery => {
@@ -7242,6 +7283,65 @@ setInterval(() => {}, 1000);
             .find("set_status(app, UnifiedStatus::Ready)")
             .expect("finish_bootstrap sets Ready");
         assert!(last_failure < complete && complete < ready);
+    }
+
+    #[test]
+    fn stack_bootstrap_claims_the_single_flight_guard_before_starting_sidecars() {
+        let source = include_str!("unified.rs");
+        let start = source
+            .find("async fn bootstrap_and_open_console(")
+            .expect("bootstrap entry point exists");
+        let end = start
+            + source[start..]
+                .find("async fn finish_bootstrap(")
+                .expect("bootstrap ends before finish_bootstrap");
+        let bootstrap = &source[start..end];
+        let guard = bootstrap
+            .find("try_lock_owned()")
+            .expect("stack bootstrap must claim the single-flight guard");
+        let start = bootstrap
+            .find("start_managed_stack(")
+            .expect("bootstrap starts all managed sidecars");
+        let stored = bootstrap
+            .find("store_stack(&app, result.stack)")
+            .expect("bootstrap stores the handles for the started stack");
+        let finish = bootstrap
+            .find("finish_bootstrap(")
+            .expect("bootstrap finishes using the same RI and console origins");
+        assert!(
+            guard < start && start < stored && stored < finish,
+            "the guard must span sidecar start, handle storage, and console bootstrap"
+        );
+
+        let managed_start = source
+            .split_once("fn start_managed_stack(")
+            .expect("managed stack start exists")
+            .1
+            .split_once("fn resolve_ngrok_options(")
+            .expect("managed stack start ends before ngrok option resolution")
+            .0;
+        assert!(
+            managed_start.contains("&ri_origin,\n            &rs_origin,"),
+            "the console must target the RI started by this same guarded stack operation"
+        );
+
+        let restart = source
+            .split_once("async fn restart_managed_stack(")
+            .expect("managed restart entry point exists")
+            .1
+            .split_once("const REMOTE_ACCESS_CONFIG_POLL_INTERVAL")
+            .expect("managed restart ends before watcher constants")
+            .0;
+        let restart_guard = restart
+            .find("lock_owned().await")
+            .expect("restart waits for an in-flight stack start");
+        let teardown = restart
+            .find("teardown(&app, StopReason::ConfigChange)")
+            .expect("restart stops the current stack before starting another");
+        let restart_start = restart
+            .find("bootstrap_and_open_console_with_stack_guard(")
+            .expect("restart starts under the acquired stack guard");
+        assert!(restart_guard < teardown && teardown < restart_start);
     }
 
     #[test]
