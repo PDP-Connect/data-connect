@@ -1,6 +1,8 @@
-# DR demo on Fly.io (`pdpp-demo-rd`)
+# DR demo on Fly.io
 
-One always-on `shared-cpu-1x` / 1 GB machine in `iad`, SQLite on a 1 GB volume at
+Two apps: `pdpp-demo-rd` (PDPP server) and `proactivos-demo-rd` (portal).
+
+`pdpp-demo-rd`: one always-on `shared-cpu-1x` / 1 GB machine in `iad`, SQLite on a 1 GB volume at
 `/var/lib/pdpp`. No Postgres. Config: [`fly.toml`](./fly.toml).
 
 ```
@@ -45,14 +47,9 @@ curl -fsS "$ORIGIN/.well-known/oauth-authorization-server" | jq .issuer
 
 ORIGIN=$ORIGIN OWNER_PASSWORD='<owner-password>' \
   node --import tsx scripts/demo-dr/seed-remote.ts
-
-AS_URL=$ORIGIN RS_URL=$ORIGIN OWNER_PASSWORD='<owner-password>' \
-  SHOTS_DIR=tmp/demo-dr-fly \
-  node scripts/demo-dr/e2e-check.mjs
-# If Playwright's Chromium is missing, add:
-#   CHROMIUM_PATH="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-# REVOKE=1 also exercises revocation (leaves a revoked grant in /grants).
 ```
+
+Verify with the portal e2e once the portal is deployed (below).
 
 Re-running the seed is safe: records upsert by key.
 
@@ -71,24 +68,24 @@ Stateless; its OAuth client registers itself with the PDPP app on first use.
 ```sh
 fly apps create proactivos-demo-rd -o <org>
 (cd scripts/demo-dr/proactivos-portal && fly deploy --ha=false)   # one machine: sessions are in memory
-LANG=es PORTAL_URL=https://proactivos-demo-rd.fly.dev OWNER_PASSWORD=… node scripts/demo-dr/proactivos-e2e.mjs
+LANG=es RESET=1 PORTAL_URL=https://proactivos-demo-rd.fly.dev OWNER_PASSWORD=… node scripts/demo-dr/proactivos-e2e.mjs
+# If Playwright's Chromium is missing, add:
+#   CHROMIUM_PATH="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 ```
 
-The earlier MIVHED portal (`scripts/demo-dr/mived-portal`, app `mived-demo-rd`) is superseded.
-
-## Reset before presenting
+## Reset
 
 Quick reset, from the browser: **Reiniciar demostración** at the bottom of
 Mis autorizaciones revokes every authorization and hides them. Records and
 the portal's client stay; no restart.
 
-Full reset, from a terminal: removes every grant and record, re-seeds, and restarts the portal so it re-registers its client. Mis autorizaciones then shows only what is created in the room.
+Full reset, from a terminal: removes every grant and record, re-seeds, and restarts the portal so it re-registers its client. Use it if the data itself needs restoring.
 
 ```sh
 OWNER_PASSWORD=… scripts/demo-dr/reset-live.sh
 ```
 
-## Fallback recording
+## Recording
 
 ```sh
 LANG=es PORTAL_URL=https://proactivos-demo-rd.fly.dev OWNER_PASSWORD=… VIDEO_DIR=./video node scripts/demo-dr/record-demo.mjs
@@ -101,6 +98,5 @@ Each run creates and revokes a grant, so reset afterwards.
 ```sh
 fly apps destroy "$APP" --yes    # also deletes the machine and volume
 fly apps destroy proactivos-demo-rd --yes
-fly apps destroy mived-demo-rd --yes   # superseded portal, if still running
 fly volumes list --app "$APP"    # expect: app not found
 ```

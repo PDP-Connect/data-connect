@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# DR citizen-assistant demo runner.
+# DR demo runner: the PDPP server with the fictitious records.
 #
 #   scripts/demo-dr/demo.sh seed                 # load the fictitious SNS + SIUBEN + INTRANT records (once)
 #   scripts/demo-dr/demo.sh start [PUBLIC_ORIGIN] # run reference server + console on one origin

@@ -1,37 +1,118 @@
-# DR citizen-assistant demo
+# PDPP demo for the Dominican Republic: the consent screen
 
-A contextualised demo of the PDPP grant flow for the Dominican Republic. It is not an integration with any state system: the login simulates Cuenta Única, the citizen and every record are fictitious, and one laptop plays every box in the architecture diagram.
+> **Resumen.** Demostración del flujo de consentimiento PDPP con datos ficticios. Servicios Proactivos (simulado) pide, una sola vez, el control prenatal de María (SNS) y su ficha de hogar (SIUBEN), para un propósito y hasta una fecha. María inicia sesión con una Cuenta Única simulada, ve una sola pantalla de consentimiento, autoriza, y luego ve y revoca el permiso en "Mis autorizaciones". No es una integración con ningún sistema del Estado.
 
-What the audience sees:
+A working demo of the PDPP grant flow, set in a Dominican Republic scenario. Every person and record is fictitious. Nothing here connects to a state system: the sign-in simulates Cuenta Única, the institutions are seeded test data, and one server plays the authorization server and every institution's resource server.
 
-1. In Claude or ChatGPT, the citizen asks a question about their benefits and licence.
-2. The assistant has no access yet, so the connector opens a Cuenta Única-style sign-in (cédula + password).
-3. A Spanish consent screen lists two sources: **SIUBEN** (household classification, household members) and **INTRANT** (driving licence). The citizen approves SIUBEN only.
-4. The assistant answers from the SIUBEN records. Asked about the licence, it is refused (`stream_not_allowed`).
-5. The console's **Grants** page shows every read, including the refused one. Revoking the package there cuts the assistant off.
+## Try it
 
-How this maps to the slide-11 diagram: the simulated login stands in for Cuenta Única (steps 1–2); the consent screen and grant ledger are the PDPP authorisation server (steps 3–4); the resource server that serves granted fields only is the same process (step 6). There is no X-Road hop (step 5) and no institution database (step 7).
+| What | URL |
+|---|---|
+| Start here: Servicios Proactivos (simulated) | https://proactivos-demo-rd.fly.dev (`?lang=en` for English) |
+| Mis autorizaciones (simulated Soy Yo RD view) | https://pdpp-demo-rd.fly.dev/owner/autorizaciones |
+
+The password is shared separately. The cédula is pre-filled (`000-1234567-8`); only the password is checked. Every page has an **ES | EN** toggle.
+
+Everyone with the password shares the same citizen, María. To start from a clean slate, press **Reiniciar demostración** at the bottom of Mis autorizaciones: it revokes every authorization and clears the list.
+
+Walkthrough, step by step: [DEMO.md](./DEMO.md).
+
+## The story
+
+María is pregnant. Servicios Proactivos offers to arrange her baby's vaccinations and the child benefit at birth, without her applying. To do that it asks, once, for two records:
+
+| Institution | Record | Fields asked for |
+|---|---|---|
+| SNS | Prenatal care (`control_prenatal`) | name, health centre, weeks of pregnancy, expected due date |
+| SIUBEN | Household classification (`clasificacion_hogar`) | ICV group and description, household size, municipality, province |
+| SIUBEN | Household members (`miembros_hogar`) | name, relationship, age |
+
+Purpose: *"Preparar la vacunación de su bebé y el bono por hijo al nacer, sin que usted tenga que solicitarlos."* Until: 31 January 2027.
+
+She can untick the household members and optional fields such as the health centre. Fields the service cannot act without stay locked.
+
+## How it works
+
+```
+ browser                 Servicios Proactivos              PDPP server
+ (María)                 proactivos-demo-rd                pdpp-demo-rd
+ ───────                 ────────────────────              ──────────────────────────
+ "Decir sí"        ──▶   registers as a client (once)  ──▶ POST /oauth/register
+                   ◀──   redirect: what, why, until when
+ ─────────────────────────────────────────────────────────▶ /oauth/authorize
+                                                            Cuenta Única-style sign-in
+                                                            one consent screen
+                                                            Autorizar → one grant per institution
+ ◀──────────────────────────────────────────────────────── redirect with code
+                         exchange code for a token     ──▶ POST /oauth/token
+                         read granted records          ──▶ GET /v1/streams/…/records
+                                                            (only granted fields; read logged)
+ "Listo": what arrived
+ Mis autorizaciones ──────────────────────────────────────▶ what she allowed, what was read, Revocar
+```
+
+Mapped to the steps of the grant flow:
+
+| Step | In this demo |
+|---|---|
+| Sign in; the authorization server learns who this is | Simulated Cuenta Única sign-in. The password stands in for the real login and cédula claim. |
+| The recipient asks for fields, purpose, end date; the consent screen shows them | Servicios Proactivos sends the request; one screen shows it. |
+| Approve; the grant is recorded; the recipient gets a token | Autorizar. One approval creates one grant per institution, since a PDPP grant is bound to a single source. |
+| The recipient calls the institution; only granted fields come back | Reads of the SNS and SIUBEN records, filtered to the granted fields. |
+| The release is logged | "Lo que se leyó" in Mis autorizaciones. |
+
+Not shown: X-Road between the recipient and the institutions, the real Cuenta Única, and Soy Yo RD. Mis autorizaciones is a simulated view of how it could look there.
+
+## Where the demo goes beyond the PDPP spec
+
+- **End date.** Requested by the recipient. The spec's grant has `expires_at`, but its request has no field for it, so this is a reference extension.
+- **Read log for the citizen.** "What was read and when" is this implementation's. The core spec defines no citizen-facing access log (§11–12).
+- **Unticking.** The citizen can untick any requested stream and optional field. The spec defines owner choice only for streams the client marks optional (§5). Schema-required fields stay locked, as the spec requires.
 
 ## Fictitious data
 
-One citizen, cédula `000-1234567-8` (the `000` prefix is never issued):
+One household, keyed by cédula `000-1234567-8` (the `000` prefix is never issued):
 
-| Source | Stream | Contents |
+| Institution | Record | Contents |
 |---|---|---|
-| SIUBEN | `clasificacion_hogar` | ICV-2 (pobreza moderada), score 38.6, 4 members, Aliméntate + Bono Gas Hogar, Santo Domingo Este |
-| SIUBEN | `miembros_hogar` | 4 members: jefa de hogar, cónyuge, two school-age children |
-| INTRANT | `licencias_conducir` | Categoría 2, expires **2026-11-14** (soon), corrective lenses |
+| SNS | `control_prenatal` | María Altagracia Rosario Peña, 32 weeks, due 20 November 2026, Hospital Materno Infantil (demo) |
+| SIUBEN | `clasificacion_hogar` | ICV-2 (pobreza moderada), 2 members, Aliméntate, Santo Domingo Este |
+| SIUBEN | `miembros_hogar` | María (jefa del hogar), Luis Manuel Pérez Santos (cónyuge) |
+| INTRANT | `licencias_conducir` | Seeded but not requested; shows that nothing unasked is shared |
 
-Edit `reference-implementation/connectors/seed/index.ts` (the "Dominican Republic demo fixtures" block) and the manifests in `reference-implementation/fixtures/seed-manifests/{siuben,intrant}.json` to change it, then `demo.sh reset && demo.sh seed`.
+## Where the code is
 
-## Setup (once)
+This branch is the PDPP reference implementation plus the demo. The demo-specific parts:
+
+| Part | Path |
+|---|---|
+| Servicios Proactivos portal (zero-dependency Node) | [`proactivos-portal/`](./proactivos-portal) |
+| Cuenta Única-style sign-in | `reference-implementation/server/owner-auth.ts` |
+| Consent screen (Spanish/English, unticking) | `reference-implementation/server/routes/as-consent-ui-helpers.ts`, `as-consent.ts` |
+| Mis autorizaciones (list, revoke, reset) | `reference-implementation/server/routes/owner-autorizaciones.ts`, `citizen-grants.ts` |
+| Page shell, language toggle | `reference-implementation/server/citizen-ui.ts`, `demo-i18n.ts` |
+| Institutions (source manifests) | `reference-implementation/fixtures/seed-manifests/{sns,siuben,intrant}.json` |
+| Fictitious records | `reference-implementation/connectors/seed/index.ts` ("Dominican Republic demo fixtures") |
+
+Demo branch, not production code: some existing tests pin English copy that the demo changed to Spanish.
+
+## Run it locally
+
+Needs Node 24.15 or later.
 
 ```bash
 npm ci
-scripts/demo-dr/demo.sh seed
+scripts/demo-dr/demo.sh seed                                   # load the fictitious records (once)
+PDPP_OWNER_PASSWORD='choose-one' scripts/demo-dr/demo.sh start # PDPP server on http://localhost:3000
+
+# second terminal
+cd scripts/demo-dr/proactivos-portal
+PDPP_ORIGIN=http://localhost:3000 node server.mjs              # portal on http://localhost:8080
 ```
 
-`npm ci` note: `@opendatalabs/data-connectors-tools` is pinned to a commit (`6c71697`) that is not on any branch of `PDP-Connect/data-connectors`, so npm's mirror clone can fail with `reference is not a tree`. If it does, install with a git wrapper that fetches the SHA on demand:
+Open http://localhost:8080. `scripts/demo-dr/demo.sh reset` deletes the local database.
+
+If `npm ci` fails with `reference is not a tree`: `@opendatalabs/data-connectors-tools` is pinned to a commit that npm's mirror clone cannot fetch. Install with a git wrapper that fetches the SHA on demand:
 
 ```bash
 cat > /tmp/gitwrap.sh <<'EOF'
@@ -46,61 +127,24 @@ EOF
 chmod +x /tmp/gitwrap.sh && npm ci --git=/tmp/gitwrap.sh
 ```
 
-## Run
+## Check it end to end
 
-Hosted instance for the team: see [FLY.md](./FLY.md) (`https://pdpp-demo-rd.fly.dev`). The working-session demo (Servicios Proactivos, no AI) is in [DEMO.md](./DEMO.md); the AI-assistant path below is not part of it.
-
-
-The connectors in Claude and ChatGPT need a public HTTPS URL. Start the tunnel first, because the server must know its public origin at boot:
+Plays the whole flow in a headless browser (offer, sign-in, consent, data received, revoke, refused re-read, denial) and saves screenshots. `RESET=1` finishes with a demo reset.
 
 ```bash
-cloudflared tunnel --url http://localhost:3000        # note the https://….trycloudflare.com URL
-PDPP_OWNER_PASSWORD='choose-one' scripts/demo-dr/demo.sh start https://….trycloudflare.com
+LANG=es RESET=1 PORTAL_URL=http://localhost:8080 OWNER_PASSWORD='choose-one' \
+  node scripts/demo-dr/proactivos-e2e.mjs
 ```
 
-A quick tunnel gets a new URL every run, which means re-adding the connector each time. For the event, use a named Cloudflare tunnel or a reserved ngrok domain so the URL stays fixed.
+Set `CHROMIUM_PATH` if Playwright's bundled browser is not installed. `DESELECT=1` also checks that unticked items never leave the institution.
 
-Local only (no connectors, browser flow and e2e check only): `PDPP_OWNER_PASSWORD=… scripts/demo-dr/demo.sh start`.
+## Other files
 
-## Connect the assistants
-
-- **Claude**: add a custom connector with the URL `https://<origin>/mcp`. Claude registers itself (dynamic client registration) and opens the sign-in page.
-- **ChatGPT**: add an MCP connector (developer mode) with the URL `https://<origin>/mcp` and OAuth authentication.
-
-Menu names in both products change often; the only input either needs is the `/mcp` URL. Try both at least a day before the demo.
-
-## Suggested script
-
-1. *"¿Para qué programas sociales podría calificar mi hogar? ¿Y cuándo vence mi licencia de conducir?"*
-2. Sign in (cédula is pre-filled; type the password). On the consent screen, tick SIUBEN, leave INTRANT unticked, optionally open SIUBEN to narrow fields or dates, pick when access ends (90 días / 1 año / sin fecha de fin), then **Autorizar acceso**.
-3. The assistant answers about the household (ICV-2, current programmes, school-age children) and says it cannot see the licence.
-4. Open `https://<origin>/grants`: every read is listed, including "Query rejected" for the licence.
-5. Open the grant package, tick the confirmation, **Revoke package**. Ask the assistant again: it can no longer read.
-
-## Verify before presenting
-
-With the demo running (`start`), this plays an MCP client end to end in headless Chromium and saves screenshots:
-
-```bash
-REVOKE=1 AS_URL=http://localhost:3000 RS_URL=http://localhost:3000 \
-OWNER_PASSWORD='choose-one' SHOTS_DIR=/tmp/demo-dr-shots node scripts/demo-dr/e2e-check.mjs
-```
-
-Set `CHROMIUM_PATH` if Playwright's bundled browser is not installed. Run it against a fresh database (`reset` + `seed`): the revoke step opens the newest grant package.
-
-## Known gaps (say them out loud)
-
-- The server-assigned purpose is the same for every app.
-- The cédula field is decorative; the password is the real check. There is no Cuenta Única, OIDC or `cedula` claim involved.
-- The console (grants, revoke) is in English; only the citizen-facing pages are in Spanish.
-- `pdpp seed` prints "Dataset summary … records: 0"; that summary call has no owner session. The records are there.
-
-## What changed on this branch
-
-- `reference-implementation/fixtures/seed-manifests/{siuben,intrant}.json`: the two sources.
-- `reference-implementation/connectors/seed/index.ts`: the fictitious records.
-- `reference-implementation/server/owner-auth.ts`: sign-in page styled as simulated Cuenta Única.
-- `reference-implementation/server/routes/as-consent-ui-helpers.ts`: consent picker in Spanish.
-- `reference-implementation/server/hosted-ui.ts`: `lang="es"`, `#003876` primary colour, "datos ficticios" banner.
-
-Existing tests that pin the English copy of those pages fail on this branch; that is expected for a demo branch and is why this should not be merged into the main line as is.
+| File | Purpose |
+|---|---|
+| [DEMO.md](./DEMO.md) | Step-by-step walkthrough |
+| [FLY.md](./FLY.md) | Hosting on Fly.io: deploy, seed, reset, tear down |
+| `record-demo.mjs` | Records the flow as video, paced for narration |
+| `reset-live.sh` | Full reset of the hosted demo (wipe and re-seed) |
+| `seed-remote.ts` | Seeds a hosted server over HTTPS |
+| `e2e-check.mjs` | Checks the MCP client path; not part of this demo |

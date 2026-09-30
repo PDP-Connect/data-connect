@@ -1,4 +1,4 @@
-# fly.toml — DR citizen-assistant demo (pdpp-demo-rd), 2-week internal demo.
+# fly.toml — DR demo PDPP server (pdpp-demo-rd).
 #
 # Cheapest useful shape: one always-on shared-cpu-1x machine, SQLite on a Fly
 # volume, no Postgres. Based on deploy/flyio/fly.toml.
