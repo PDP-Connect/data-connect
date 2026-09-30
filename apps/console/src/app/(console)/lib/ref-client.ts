@@ -1856,6 +1856,7 @@ export async function listConnectorSummaries(
     return (await refFetch("/_ref/connectors", {
       connection: options.connectionRouteId,
       profile: options.profile,
+      sources_visibility: options.sourcesVisibility ? 1 : undefined,
     })) as RefConnectorSummariesResponse;
   }
   // Unscoped callers always page — the reference's unbounded compat branch

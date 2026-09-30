@@ -26,6 +26,8 @@ interface Props {
   error?: string;
   /** Result banner forwarded from the server action redirect. */
   message?: string;
+  /** Setup-failed shells have no collection state or authorization to revoke. */
+  setupFailed?: boolean;
 }
 
 /**
@@ -42,7 +44,7 @@ interface Props {
  * and retries. Both confirmations are enforced again on the server — the client
  * gating is a guardrail, not the gate.
  */
-export function ConnectionDangerZone({ activeRunId = null, connectionId, error, message }: Props) {
+export function ConnectionDangerZone({ activeRunId = null, connectionId, error, message, setupFailed = false }: Props) {
   return (
     <Section
       description="These actions affect only this connection. Sibling connections of the same connector type, and their saved browser sessions, are untouched."
@@ -66,10 +68,14 @@ export function ConnectionDangerZone({ activeRunId = null, connectionId, error, 
         </p>
       ) : (
         <div className="flex flex-col gap-6 rounded-md border border-border p-4">
-          <RevokeForm connectionId={connectionId} />
-          <div className="border-border border-t" />
-          <ResetSourceForm connectionId={connectionId} />
-          <div className="border-border border-t" />
+          {setupFailed ? null : (
+            <>
+              <RevokeForm connectionId={connectionId} />
+              <div className="border-border border-t" />
+              <ResetSourceForm connectionId={connectionId} />
+              <div className="border-border border-t" />
+            </>
+          )}
           <DeleteForm activeRunId={activeRunId} connectionId={connectionId} />
         </div>
       )}

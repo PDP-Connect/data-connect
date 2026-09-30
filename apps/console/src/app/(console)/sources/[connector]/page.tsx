@@ -7,6 +7,7 @@ import {
   formatConnectorKeyForDisplay,
   formatConnectorNameForDisplay,
   isFallbackConnectionLabel,
+  isSetupFailedSource,
   streamDisplayLabel,
 } from "@pdpp/display";
 import { CopyButton } from "@pdpp/operator-ui/components/copy-button";
@@ -75,7 +76,12 @@ import { isUnexpectedStreamDeclaration, streamCountLabel } from "../../lib/strea
 import { connectorInstanceIdForConnection, resolveConnectionForRecordsRoute } from "../connection-route.ts";
 import { findManifestForConnectorId } from "../lib/relationships.ts";
 import { formatConnectorHeaderCount } from "../sources-view-model.ts";
-import { pauseConnectionAction, resumeConnectionAction, resumeConnectorScheduleAction } from "./actions.ts";
+import {
+  pauseConnectionAction,
+  resumeConnectionAction,
+  resumeConnectorScheduleAction,
+  resumeSetupConnectionAction,
+} from "./actions.ts";
 import { acknowledgeConnectionLossAction, confirmCoverageHorizonAction } from "./confirmation-actions.ts";
 import type { ConfigRevisionWire, ConnectionConfigWire } from "./connection-config-view-model.ts";
 import { ConnectionConfiguration } from "./connection-configuration.tsx";
@@ -183,6 +189,7 @@ export interface ConnectorPageModel {
   retainedStorage: { breakdown: string | null; total: string } | null;
   schedule: RefSchedule | null;
   scheduleError: string | null;
+  setupFailed: boolean;
   /** Connection-scoped source-binding kind for binding-first repair routing. */
   sourceBindingKind: string | null;
   sourceInstances: DeviceSourceInstance[];
@@ -556,6 +563,7 @@ async function loadConnectorPageModel(
     // Connection-scoped binding kind, so repair routing is binding-first (a
     // browser-session connection reconnects its session, not a static secret).
     sourceBindingKind: summary.source_binding_kind ?? null,
+    setupFailed: isSetupFailedSource(summary),
     streams,
     totalRecords,
     ...diagnostics,
@@ -694,6 +702,7 @@ function ConnectorPageView({
     retainedStorage,
     schedule,
     scheduleError,
+    setupFailed,
     sourceBindingKind,
     sourceInstances,
     sourceInstancesError,
@@ -786,6 +795,7 @@ function ConnectorPageView({
             renderedAction={connectionPrimaryAction}
             revoked={revoked}
             running={running}
+            setupFailed={setupFailed}
             storedCredentialUpdateHref={storedCredentialUpdateHref}
             syncIdleLabel={syncIdleLabel}
           />
@@ -831,7 +841,11 @@ function ConnectorPageView({
 
       {streakDots.length > 0 ? <StreakStrip dots={streakDots} /> : null}
 
-      {revoked ? <RevokedConnectionSection connectorId={connectorId} revokedAt={overview.revokedAt ?? null} /> : null}
+      {revoked && !setupFailed ? (
+        <RevokedConnectionSection connectorId={connectorId} revokedAt={overview.revokedAt ?? null} />
+      ) : null}
+
+      {setupFailed ? <ResumeSetupSection connectionId={connectionId} /> : null}
 
       {pausedHistoricalArchive ? <PausedHistoricalArchiveSection credentialUpdateHref={credentialUpdateHref} /> : null}
 
@@ -951,6 +965,7 @@ function ConnectorPageView({
         connectionId={connectorInstanceId ?? connectionId}
         error={dangerError}
         message={dangerMessage}
+        setupFailed={setupFailed}
       />
     </RecordroomShellWithPalette>
   );
@@ -969,6 +984,7 @@ function ConnectorHeaderActions({
   renderedAction,
   revoked,
   running,
+  setupFailed,
   storedCredentialUpdateHref,
   syncIdleLabel,
 }: {
@@ -984,6 +1000,7 @@ function ConnectorHeaderActions({
   renderedAction: RefRequiredAction | null;
   revoked: boolean;
   running: boolean;
+  setupFailed: boolean;
   storedCredentialUpdateHref: string | null;
   syncIdleLabel: string;
 }) {
@@ -1021,6 +1038,7 @@ function ConnectorHeaderActions({
         renderedAction={renderedAction}
         revoked={revoked}
         running={running}
+        setupFailed={setupFailed}
         storedCredentialUpdateHref={storedCredentialUpdateHref}
         syncIdleLabel={syncIdleLabel}
       />
@@ -1039,6 +1057,7 @@ function ConnectorPrimaryHeaderAction({
   renderedAction,
   revoked,
   running,
+  setupFailed,
   storedCredentialUpdateHref,
   syncIdleLabel,
 }: {
@@ -1052,6 +1071,7 @@ function ConnectorPrimaryHeaderAction({
   renderedAction: RefRequiredAction | null;
   revoked: boolean;
   running: boolean;
+  setupFailed: boolean;
   storedCredentialUpdateHref: string | null;
   syncIdleLabel: string;
 }) {
@@ -1060,6 +1080,9 @@ function ConnectorPrimaryHeaderAction({
       ? renderedAction
       : null;
 
+  if (setupFailed) {
+    return null;
+  }
   if (revoked) {
     return (
       <Link
@@ -1726,6 +1749,22 @@ function PausedHistoricalArchiveSection({ credentialUpdateHref }: { credentialUp
       <Link className={buttonVariants({ size: "sm", variant: "default" })} href={credentialUpdateHref}>
         Reconnect
       </Link>
+    </Section>
+  );
+}
+
+function ResumeSetupSection({ connectionId }: { connectionId: string }) {
+  return (
+    <Section
+      description="Continue setup for this connection. The same connection will be kept."
+      title="Setup never completed"
+    >
+      <form action={resumeSetupConnectionAction}>
+        <input name="connection_id" type="hidden" value={connectionId} />
+        <IcButton data-testid="setup-failed-resume-setup" size="sm" type="submit" variant="default">
+          Resume setup
+        </IcButton>
+      </form>
     </Section>
   );
 }
