@@ -87,6 +87,10 @@ export const BACKUP_TABLE_INVENTORY: Record<string, BackupTableInventoryEntry> =
     classification: "backup_required",
     reason: "Verified connector catalog high-water state prevents catalog rollback after restore.",
   },
+  connector_lifecycle_locks: {
+    classification: "backup_required",
+    reason: "Lifecycle fences remain durable until their owning process exits and stale owners are reclaimed.",
+  },
   connector_installs: {
     classification: "backup_required",
     reason: "Verified connector artifact records and activation state are required to resolve installed code after restore.",

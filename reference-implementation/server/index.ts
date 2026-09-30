@@ -85,7 +85,13 @@ import {
   createConnectorInstallStore,
   inspectActiveConnector,
   listVerifiedActiveConnectors,
+  reconcileConnectorUninstalls,
 } from "./connector-install/index.ts";
+import { removeConnectorActivation } from "./connector-install/activation-authority.ts";
+import {
+  connectorLifecycleDataDir,
+  withConnectorLifecycleLock,
+} from "./connector-lifecycle-lock.ts";
 import { createFileLocalConnectorSourceStore } from "./connector-install/local-source.ts";
 import { createRemoteAccessConfigStore, remoteAccessConfigPath } from "./remote-access-store.ts";
 import { ownerPasswordManagedByDesktop, ownerPasswordOwnerSet } from "./owner-password-owner-set.ts";
@@ -8378,6 +8384,36 @@ function buildRsApp(opts: ServerOpts = {}) {
       opts.connectorInstallService ??
       createConnectorInstallService({
         registerManifest: (manifest) => registerConnector(manifest),
+        removeActivation: removeConnectorActivation,
+        assertUninstallAllowed: async (connectorId) => {
+          const activeRun = isPostgresStorageBackend()
+            ? (await postgresQuery<{ run_id: string }>(
+                "SELECT run_id FROM controller_active_runs WHERE connector_id=$1 ORDER BY started_at LIMIT 1",
+                [connectorId]
+              )).rows[0]
+            : getDb()
+                .prepare("SELECT run_id FROM controller_active_runs WHERE connector_id=? ORDER BY started_at LIMIT 1")
+                .get<{ run_id: string }>(connectorId);
+          if (activeRun) {
+            throw Object.assign(new Error(`Cannot uninstall ${connectorId} while run ${activeRun.run_id} is active.`), {
+              code: "connector_run_active",
+            });
+          }
+          const ids = isPostgresStorageBackend()
+            ? (await postgresQuery<{ connector_instance_id: string }>(
+                "SELECT connector_instance_id FROM connector_instances WHERE connector_id=$1 ORDER BY connector_instance_id",
+                [connectorId]
+              )).rows.map((row) => row.connector_instance_id)
+            : getDb().prepare(
+                "SELECT connector_instance_id FROM connector_instances WHERE connector_id=? ORDER BY connector_instance_id"
+              ).all<{ connector_instance_id: string }>(connectorId).map((row) => row.connector_instance_id);
+          if (ids.length) {
+            const error = new Error(`Cannot uninstall ${connectorId}: ${ids.length} source${ids.length === 1 ? "" : "s"} still use this connector.`) as Error & { code: string; connection_ids: string[] };
+            error.code = "connector_in_use";
+            error.connection_ids = ids;
+            throw error;
+          }
+        },
       }),
   } as unknown as Parameters<typeof mountOwnerConnectorInstall>[1]);
 
@@ -8623,6 +8659,9 @@ export async function startServer(opts: ServerOpts = {}) {
       : { bootstrapLockTimeoutMs: opts.postgresBootstrapLockTimeoutMs }),
     log: (msg: string) => logger.info(msg),
   });
+  const uninstallRecoveryStore = createConnectorInstallStore();
+  const uninstallDataDir = connectorLifecycleDataDir();
+  await reconcileConnectorUninstalls(uninstallDataDir, uninstallRecoveryStore, removeConnectorActivation);
   const configuredOwnerPassword =
     typeof earlyOwnerAuthConfig.password === "string" && earlyOwnerAuthConfig.password.length > 0;
   const ownerPasswordStore = createOwnerPasswordVerifierStore();
@@ -10237,10 +10276,12 @@ function createReferenceSchedulerManager({
           );
           continue;
         }
-        const connectorPath = await Promise.resolve(
-          connectorPathResolver(connectorId, manifest, {
-            priorityClass: "background",
-          })
+        const connectorPath = await withConnectorLifecycleLock(connectorLifecycleDataDir(), connectorId, () =>
+          Promise.resolve(
+            connectorPathResolver(connectorId, manifest, {
+              priorityClass: "background",
+            })
+          )
         );
         if (!connectorPath) {
           logger?.warn?.({ connector_id: connectorId }, "skipping scheduled connector without runnable implementation");

@@ -102,6 +102,8 @@ export const codeToStatus: Readonly<Record<string, number>> = {
   connection_is_grouping_canonical: 409,
   connection_not_found: 404,
   connection_run_active: 409,
+  connector_in_use: 409,
+  connector_run_active: 409,
   connection_tombstoned: 409,
   connector_instance_busy: 503,
   // A revision exists but is not in a state the requested transition allows

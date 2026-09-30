@@ -176,6 +176,12 @@ import {
   withConnectorInstanceControlPlaneWrite,
   withConnectorInstanceWrite,
 } from "../connector-instance-write-coordinator.ts";
+import {
+  assertConnectorLifecycleAvailable,
+  connectorLifecycleDataDir,
+  withConnectorLifecycleLock,
+  withConnectorLifecycleLockSync,
+} from "../connector-lifecycle-lock.ts";
 import type { PostgresTransactionClient } from "../postgres-storage.ts";
 import { postgresQuery, withPostgresTransaction } from "../postgres-storage.ts";
 import {
@@ -2039,24 +2045,26 @@ export function createSqliteConnectorInstanceStore() {
       }
     },
   };
+  const upsertWithoutLifecycleLock = store.upsert;
+  store.upsert = (record: ConnectorInstanceUpsertRecord) => {
+    const connectorId = normalizeRecord(record).connectorId;
+    const dataDir = connectorLifecycleDataDir();
+    return withConnectorLifecycleLockSync(dataDir, connectorId, () => {
+      assertConnectorLifecycleAvailable(dataDir, connectorId);
+      return upsertWithoutLifecycleLock.call(store, record);
+    });
+  };
   const deleteConnectionUncoordinated = store.deleteConnection;
   store.deleteConnection = (connectorInstanceId, options) =>
     withConnectorInstanceWrite(connectorInstanceId, () =>
       deleteConnectionUncoordinated.call(store, connectorInstanceId, options)
     );
-  // `upsert` is NOT wrapped in write coordination here: better-sqlite3 is
-  // synchronous and single-connection per process, so there is no genuine
-  // multi-process race to close on this backend (unlike Postgres — see the
-  // Postgres arm's `upsert` wrap and its rationale). Wrapping this
-  // synchronous method in the async coordinator would silently change its
-  // sync-\>async calling contract for every existing caller. The tombstone
-  // guard inside `upsert` itself (see `assertIdentityNotTombstoned` above)
-  // is already sufficient here: a single-process, single-connection SQLite
-  // handle can never interleave the tombstone check and the INSERT with a
-  // concurrent delete on a DIFFERENT connection.
+  // The synchronous SQLite write uses the synchronous lifecycle fence. It
+  // fails fast when an async uninstall owns the fence, so it cannot block the
+  // event loop that uninstall needs to finish.
   return Object.assign(store, {
     async upsertForEnrollment(record: ConnectorInstanceUpsertRecord): Promise<ConnectorInstance | null> {
-      return await store.upsert(record);
+      return store.upsert(record);
     },
   });
 }
@@ -3087,14 +3095,26 @@ export function createPostgresConnectorInstanceStore() {
   // See openspec/changes/fix-owner-delete-resurrection and
   // harden-connector-instance-write-fence-transaction-native.
   const upsertUncoordinated = store.upsert;
-  store.upsert = (record) =>
-    withConnectorInstanceWrite(normalizeRecord(record).connectorInstanceId, () =>
-      upsertUncoordinated.call(store, record)
-    );
-  return Object.assign(store, {
-    upsertForEnrollment: (record: ConnectorInstanceUpsertRecord) =>
-      withConnectorInstanceControlPlaneWrite(normalizeRecord(record).connectorInstanceId, () =>
+  store.upsert = (record) => {
+    const connectorId = normalizeRecord(record).connectorId;
+    const dataDir = connectorLifecycleDataDir();
+    return withConnectorLifecycleLock(dataDir, connectorId, async () => {
+      assertConnectorLifecycleAvailable(dataDir, connectorId);
+      return await withConnectorInstanceWrite(normalizeRecord(record).connectorInstanceId, () =>
         upsertUncoordinated.call(store, record)
-      ),
+      );
+    });
+  };
+  return Object.assign(store, {
+    upsertForEnrollment: (record: ConnectorInstanceUpsertRecord) => {
+      const connectorId = normalizeRecord(record).connectorId;
+      const dataDir = connectorLifecycleDataDir();
+      return withConnectorLifecycleLock(dataDir, connectorId, async () => {
+        assertConnectorLifecycleAvailable(dataDir, connectorId);
+        return await withConnectorInstanceControlPlaneWrite(normalizeRecord(record).connectorInstanceId, () =>
+          upsertUncoordinated.call(store, record)
+        );
+      });
+    },
   });
 }

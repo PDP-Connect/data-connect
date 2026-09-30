@@ -233,10 +233,8 @@ impl HostState {
         let mut browsers = match self.browsers.lock() {
             Ok(browsers) => browsers,
             Err(_) => {
-                let _ = terminate_failed_launch(
-                    child,
-                    BrowserLaunchError::start_failed("Browser process state is unavailable"),
-                );
+                let mut child = child;
+                let _ = super::pdpp_browser::terminate_browser(&mut child);
                 return Err("Browser process state is unavailable".into());
             }
         };
@@ -305,12 +303,12 @@ impl HostState {
             }
         }
         if let Ok(mut browsers) = self.browsers.lock() {
-            for (pid, mut child) in std::mem::take(&mut *browsers) {
-                if !super::pdpp_browser::terminate_browser(&mut child) {
+            for (pid, child) in browsers.iter_mut() {
+                if !super::pdpp_browser::terminate_browser(child) {
                     log::warn!("Tracked browser {pid} did not terminate cleanly during shutdown");
-                    super::pdpp_browser::reap_child(child);
                 }
             }
+            browsers.clear();
         }
     }
 
@@ -659,10 +657,8 @@ pub(crate) fn launch_browser(
         .spawn()
         .map_err(|error| format!("Failed to launch host browser: {error}"))?;
     let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
-        return Err(terminate_failed_launch(
-            child,
-            BrowserLaunchError::start_failed("Host browser output was not piped"),
-        ));
+        let _ = super::pdpp_browser::terminate_browser(&mut child);
+        return Err("Host browser output was not piped".to_string().into());
     };
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
@@ -735,26 +731,26 @@ fn wait_for_devtools_endpoint(
 ) -> Result<(Child, String), BrowserLaunchError> {
     let deadline = Instant::now() + BROWSER_START_TIMEOUT;
     let active_port = profile_dir.join("DevToolsActivePort");
-    let probe = match reqwest::blocking::Client::builder().no_proxy().build() {
-        Ok(probe) => probe,
-        Err(error) => {
-            return Err(terminate_failed_launch(
-                child,
+    let probe = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .build()
+        .map_err(|error| {
+            terminate_failed_launch(
+                &mut child,
                 BrowserLaunchError::start_failed(error.to_string()),
-            ));
-        }
-    };
+            )
+        })?;
     while Instant::now() < deadline {
         if super::pdpp_browser::browser_child_exited(&mut child) {
             let error = exited_before_ready(stderr_tail);
-            return Err(terminate_failed_launch(child, error));
+            return Err(terminate_failed_launch(&mut child, error));
         }
         for line in receiver.try_iter().take(1) {
             if let Some(url) = cdp_url_from_json(&line) {
                 if devtools_http_ready(&probe, &url, deadline) {
                     if super::pdpp_browser::browser_child_exited(&mut child) {
                         let error = exited_before_ready(stderr_tail);
-                        return Err(terminate_failed_launch(child, error));
+                        return Err(terminate_failed_launch(&mut child, error));
                     }
                     return Ok((child, url));
                 }
@@ -771,7 +767,7 @@ fn wait_for_devtools_endpoint(
                 if devtools_http_ready(&probe, &url, deadline) {
                     if super::pdpp_browser::browser_child_exited(&mut child) {
                         let error = exited_before_ready(stderr_tail);
-                        return Err(terminate_failed_launch(child, error));
+                        return Err(terminate_failed_launch(&mut child, error));
                     }
                     return Ok((child, url));
                 }
@@ -779,7 +775,7 @@ fn wait_for_devtools_endpoint(
         }
         if super::pdpp_browser::browser_child_exited(&mut child) {
             let error = exited_before_ready(stderr_tail);
-            return Err(terminate_failed_launch(child, error));
+            return Err(terminate_failed_launch(&mut child, error));
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
@@ -789,23 +785,14 @@ fn wait_for_devtools_endpoint(
     }
 
     Err(terminate_failed_launch(
-        child,
+        &mut child,
         BrowserLaunchError::start_failed("Timed out waiting for host browser CDP endpoint"),
     ))
 }
 
-fn terminate_failed_launch(child: Child, error: BrowserLaunchError) -> BrowserLaunchError {
-    terminate_failed_launch_with(child, error, super::pdpp_browser::terminate_browser)
-}
-
-fn terminate_failed_launch_with(
-    mut child: Child,
-    mut error: BrowserLaunchError,
-    terminate: impl FnOnce(&mut Child) -> bool,
-) -> BrowserLaunchError {
-    if !terminate(&mut child) {
+fn terminate_failed_launch(child: &mut Child, mut error: BrowserLaunchError) -> BrowserLaunchError {
+    if !super::pdpp_browser::terminate_browser(child) {
         error.message.push_str("; termination failed");
-        super::pdpp_browser::reap_child(child);
     }
     error
 }
@@ -1210,39 +1197,6 @@ mod tests {
             .expect("read isolated test hostname")
             .trim()
             .to_string()
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn failed_launch_reaps_child_when_termination_times_out() {
-        let child = Command::new("sh")
-            .args(["-c", "sleep 0.1; exit 0"])
-            .spawn()
-            .expect("spawn failed-launch child");
-        let pid = child.id();
-
-        let error = terminate_failed_launch_with(
-            child,
-            BrowserLaunchError::start_failed("injected launch failure"),
-            |_| false,
-        );
-        assert!(error.message.contains("termination failed"));
-
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while Instant::now() < deadline {
-            let stat = fs::read_to_string(format!("/proc/{pid}/stat"));
-            match stat
-                .ok()
-                .and_then(|stat| stat.rsplit_once(") ").map(|(_, fields)| fields.to_string()))
-            {
-                Some(fields) if fields.starts_with('Z') => {
-                    panic!("failed launch child {pid} was left as a zombie")
-                }
-                None => return,
-                _ => thread::sleep(Duration::from_millis(10)),
-            }
-        }
-        panic!("failed launch child {pid} was not reaped before the deadline");
     }
 
     struct TestResponse {

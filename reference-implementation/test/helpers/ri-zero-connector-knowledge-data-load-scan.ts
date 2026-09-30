@@ -375,6 +375,11 @@ const SANCTIONED_GENERIC_DATA_READ_CALL_SITES: ReadonlySet<string> = new Set([
   // and rejects any entry that disagrees with the file's own imports, so it
   // can carry no connector/provider identity the harness would act on.
   'reference-implementation/scripts/check-test-backends.ts::main::readFileSync(manifestPath, "utf8")',
+  // readConnectorUninstallJournal() reads the uninstall operation journal.
+  // Its connector ID and root paths are validated against the configured
+  // connector root before reconciliation; it stores prior install metadata
+  // and filesystem moves, not executable connector policy.
+  'reference-implementation/server/connector-uninstall-journal.ts::readConnectorUninstallJournal::readFileSync(path, "utf8")',
 ]);
 
 /** Directory segments, relative to a production scan root (e.g. `server/`),
