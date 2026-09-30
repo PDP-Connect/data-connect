@@ -2429,6 +2429,7 @@ export async function createDeviceEnrollmentCode(
 export interface StaticSecretSetupField {
   autocomplete: string | null;
   description: string | null;
+  env?: string[];
   help_text: string | null;
   help_url: string | null;
   identity: boolean;

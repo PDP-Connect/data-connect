@@ -6,8 +6,8 @@ import test from "node:test";
 import type { StaticSecretSetup } from "./ref-client.ts";
 import {
   browserSessionFormContract,
+  browserCredentialFieldLabel,
   connectionNameFieldContract,
-  optionalCredentialFieldLabel,
   staticSecretFormContract,
 } from "./source-setup-form-contract.ts";
 
@@ -72,21 +72,35 @@ test("connection-name contract is app-owned and shared across source forms", () 
   });
 });
 
-test("browser credential contract makes interactive sign-in and optional fields explicit", () => {
+test("required browser credential capture uses manifest labels without an optional sign-in claim", () => {
   const contract = browserSessionFormContract(SETUP);
-  assert.ok(contract.optionalCredentials);
-  assert.match(contract.setupDescription, INTERACTIVE_SIGN_IN_RE);
-  assert.match(contract.optionalCredentials.description, LEAVE_FIELDS_BLANK_RE);
-  assert.match(contract.optionalCredentials.description, UNATTENDED_RECONNECTION_RE);
+  assert.ok(contract.credentialCapture);
+  assert.equal(contract.credentialCapture.required, true);
+  assert.equal(contract.credentialCapture.title, SETUP.credential_capture.label);
+  assert.doesNotMatch(contract.setupDescription, INTERACTIVE_SIGN_IN_RE);
   const usernameField = SETUP.credential_capture.fields.find((field) => field.name === "username");
   assert.ok(usernameField);
-  assert.equal(optionalCredentialFieldLabel(usernameField), "Username (optional)");
-  assert.deepEqual(contract.optionalCredentials.fields, SETUP.credential_capture.fields);
+  assert.equal(browserCredentialFieldLabel(usernameField, true), "Username");
+  assert.deepEqual(contract.credentialCapture.fields, SETUP.credential_capture.fields);
+});
+
+test("optional browser credential capture keeps the opt-in and browser sign-in path", () => {
+  const optionalSetup = {
+    ...SETUP,
+    credential_capture: { ...SETUP.credential_capture, required: false },
+  };
+  const contract = browserSessionFormContract(optionalSetup);
+  assert.ok(contract.credentialCapture);
+  assert.equal(contract.credentialCapture.required, false);
+  assert.match(contract.setupDescription, INTERACTIVE_SIGN_IN_RE);
+  assert.match(contract.credentialCapture.description, LEAVE_FIELDS_BLANK_RE);
+  assert.match(contract.credentialCapture.description, UNATTENDED_RECONNECTION_RE);
+  assert.equal(browserCredentialFieldLabel(optionalSetup.credential_capture.fields[0]!, false), "Username (optional)");
 });
 
 test("browser-only start has no optional credential section or automatic-login promise", () => {
   const contract = browserSessionFormContract(null);
-  assert.equal(contract.optionalCredentials, null);
+  assert.equal(contract.credentialCapture, null);
   assert.match(contract.setupDescription, NO_PROVIDER_CREDENTIALS_RE);
   assert.match(contract.setupDescription, NO_UNATTENDED_RECONNECTION_RE);
   assert.doesNotMatch(contract.setupDescription, AUTOMATIC_LOGIN_RE);

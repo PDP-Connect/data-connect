@@ -460,7 +460,8 @@ test("static-secret setup descriptor is manifest-authored and readiness-gated", 
       assert.equal(body.validation, "synchronous");
       assert.ok(
         credentialCaptureOf(body).fields.some(
-          (field) => field.name === "account_email" && field.type === "email" && field.secret === false
+          (field) => field.name === "account_email" && field.type === "email" && field.secret === false &&
+            Array.isArray(field.env) && field.env.includes("GMAIL_ADDRESS")
         ),
         "Gmail manifest must declare the account email field"
       );
