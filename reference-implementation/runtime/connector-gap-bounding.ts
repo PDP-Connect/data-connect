@@ -213,7 +213,10 @@ export function boundConnectorErrorMessage(value: unknown, declaredReasonTokens?
   if (typeof value !== "string") {
     return null;
   }
-  const { text } = redactStderrTail(value, declaredReasonTokens ? { declaredReasonTokens } : {});
+  const redacted = redactStderrTail(value, declaredReasonTokens ? { declaredReasonTokens } : {}).text;
+  const text = redacted
+    .replace(/^\s*[╔╚╠╟╞╧╤╥╙╘╒╓╔╚╩╦╬═─━┌┐└┘├┤┬┴┼│║╭╮╰╯]+[^\S\r\n]*.*[╗╝╣╢╡╛╧╤╥╜╛╕╖╩╦╬═─━┐┘┤┬┴┼│║╮╯]\s*$/gm, "")
+    .replace(/\n{3,}/g, "\n\n");
   if (text.length <= CONNECTOR_ERROR_MESSAGE_MAX) {
     return text;
   }

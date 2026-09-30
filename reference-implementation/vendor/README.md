@@ -250,3 +250,9 @@ connector cutover; later pins change manifests this reference implementation
 does not yet accept (for example `heb` stream selections without `resources`).
 The bundled `claude_code` source stays at data-connectors@5f17986, as
 `packages/polyfill-connectors/vendor-source.json` records.
+
+**Update (2026-09-30):** the packed connector runtime includes the host Chrome CDP
+patch from PDP-Connect PR #329. The upstream data-connectors pin predates this seam;
+`scripts/check-polyfill-connectors-tarball-freshness.mjs` applies the same patch to its
+rebuild before comparing package contents. The installed-package regression test
+`test/connector-runtime-vendored-host-cdp.test.ts` guards the runtime shipped in the app.
