@@ -8873,6 +8873,8 @@ export async function startServer(opts: ServerOpts = {}) {
     // PDPP_REFERENCE_ORIGIN.
     referenceBaseUrl: configuredAsPublicUrl || null,
     rsUrl: configuredRsPublicUrl || null,
+    selfCallReferenceBaseUrl: null as string | null,
+    selfCallRsUrl: null as string | null,
   };
   const resolvedOwnerAuthConfig = earlyOwnerAuthConfig;
   const ownerAuthSubjectId = resolvedOwnerAuthConfig.subjectId || OWNER_AUTH_DEFAULT_SUBJECT_ID;
@@ -9310,7 +9312,7 @@ export async function startServer(opts: ServerOpts = {}) {
   const asPort = (asServer.address() as import("net").AddressInfo).port;
   const bindUrlHost = bindHost.includes(":") && !bindHost.startsWith("[") ? `[${bindHost}]` : bindHost;
   const selfCallUrlHost = selfCallUrlHostForBindHost(bindHost);
-  const asPublicUrl = configuredAsPublicUrl || configuredAsIssuer || `http://${bindUrlHost}:${asPort}`;
+  const asPublicUrl = configuredAsPublicUrl || configuredAsIssuer || `http://localhost:${asPort}`;
   // Update the controller's lazy reference-base-URL view now that the AS
   // listener has actually allocated a port. Spawned connector children
   // PUT their streaming-target registration here.
@@ -9327,7 +9329,8 @@ export async function startServer(opts: ServerOpts = {}) {
   // Both child and parent run on the same host (Mode A: in-process
   // controller spawns the connector subprocess), so loopback is always
   // reachable and is the right hop.
-  runtimeContext.referenceBaseUrl = `http://${selfCallUrlHost}:${asPort}`;
+  runtimeContext.referenceBaseUrl = `http://localhost:${asPort}`;
+  runtimeContext.selfCallReferenceBaseUrl = `http://${selfCallUrlHost}:${asPort}`;
   logger.info({ port: asPort, url: `http://${bindUrlHost}:${asPort}` }, "authorization server listening");
   warnIfLoopbackOriginPortDisagreesWithBoundPort("configured AS public origin", configuredAsPublicUrl, asPort);
 
@@ -9388,7 +9391,8 @@ export async function startServer(opts: ServerOpts = {}) {
   // Controller-managed runs are server-side work. Even in composed mode, they
   // should post ingest/state traffic directly to the local RS listener rather
   // than routing large NDJSON payloads through the browser-facing web origin.
-  runtimeContext.rsUrl = `http://${selfCallUrlHost}:${rsPort}`;
+  runtimeContext.rsUrl = `http://localhost:${rsPort}`;
+  runtimeContext.selfCallRsUrl = `http://${selfCallUrlHost}:${rsPort}`;
   await controller.promoteBrowserSurfaceLeasesAfterBoot();
   logger.info({ port: rsPort, url: `http://${bindUrlHost}:${rsPort}` }, "resource server listening");
   warnIfLoopbackOriginPortDisagreesWithBoundPort("configured RS public origin", configuredRsPublicUrl, rsPort);
@@ -10095,7 +10099,12 @@ function createReferenceSchedulerManager({
   controller: Controller;
   connectorEnvironmentPolicy?: ConnectorEnvironmentPolicy;
   logger: LoggerLike;
-  runtimeContext: { rsUrl: string | null; referenceBaseUrl: string | null };
+  runtimeContext: {
+    rsUrl: string | null;
+    referenceBaseUrl: string | null;
+    selfCallRsUrl: string | null;
+    selfCallReferenceBaseUrl: string | null;
+  };
   schedulerStore?: SchedulerStore;
   connectorPathResolver?: (
     connectorId: string,
@@ -10311,8 +10320,10 @@ function createReferenceSchedulerManager({
           }
         : {}),
       logger,
-      ...(runtimeContext.rsUrl === null ? {} : { rsUrl: runtimeContext.rsUrl }),
-      ...(runtimeContext.referenceBaseUrl === null ? {} : { referenceBaseUrl: runtimeContext.referenceBaseUrl }),
+      ...(runtimeContext.selfCallRsUrl ? { rsUrl: runtimeContext.selfCallRsUrl } : {}),
+      ...(runtimeContext.selfCallReferenceBaseUrl === null
+        ? {}
+        : { referenceBaseUrl: runtimeContext.selfCallReferenceBaseUrl }),
       admitRunConnection: async ({ connectorId, connectorInstanceId, ownerSubjectId: admittedOwnerSubjectId }) => {
         const namespace = await admitOwnerRunConnection({
           connectorId,
