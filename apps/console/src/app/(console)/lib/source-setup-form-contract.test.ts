@@ -82,6 +82,8 @@ test("required browser credential capture uses manifest labels without an option
   assert.ok(usernameField);
   assert.equal(browserCredentialFieldLabel(usernameField, true), "Username");
   assert.deepEqual(contract.credentialCapture.fields, SETUP.credential_capture.fields);
+  assert.match(contract.credentialCapture.description, /^Manifest-authored sign-in details\. /);
+  assert.match(contract.credentialCapture.description, /stores these details encrypted on this device/);
 });
 
 test("optional browser credential capture keeps the opt-in and browser sign-in path", () => {

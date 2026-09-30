@@ -22,6 +22,10 @@ export interface ConnectionNameFieldContract {
   readonly placeholder: string;
 }
 
+/** Required sign-in details are always sealed before the first run, so the form says so. */
+const REQUIRED_CAPTURE_STORAGE_NOTE =
+  "DataConnect stores these details encrypted on this device and uses them only for this source.";
+
 export function connectionNameFieldContract(displayName: string): ConnectionNameFieldContract {
   return {
     helpText: "Used only when creating a new source. You can rename it later.",
@@ -68,8 +72,7 @@ export function browserSessionFormContract(setup: StaticSecretSetup | null): Bro
       checkboxLabel: "Save these details to assist initial sign-in or repair.",
       checkboxName: "remember_sign_in_details",
       description: setup.credential_capture.required
-        ? (setup.credential_capture.description ??
-          "Enter these details to start the first sync. Verification may continue in the secure browser.")
+        ? `${setup.credential_capture.description ?? "Enter these details to start the first sync. Verification may continue in the secure browser."} ${REQUIRED_CAPTURE_STORAGE_NOTE}`
         : "Interactive sign-in is valid. Leave these fields blank to sign in in the secure browser; save them only if they may help with initial sign-in or repair. CAPTCHA, OTP, passkeys, and other human steps stay in the browser, and unattended reconnection is not guaranteed.",
       fields: setup.credential_capture.fields,
       required: setup.credential_capture.required,
