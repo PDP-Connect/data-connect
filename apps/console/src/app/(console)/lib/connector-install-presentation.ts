@@ -23,6 +23,7 @@ export interface ConnectorInstallRowModel {
   readonly activationLabel: string;
   readonly activationState: ConnectorInstallActivationState;
   readonly connectorId: string;
+  readonly connectorKey: string;
   readonly hostBlockReason: string | null;
   readonly installedDigest: string | null;
   readonly installedDigestFull: string | null;
@@ -176,6 +177,7 @@ export function connectorInstallRowModel(
     activationState,
     action,
     connectorId: target?.connector_id ?? installed?.connector_id ?? entry.connectorKey,
+    connectorKey: entry.connectorKey,
     hostBlockReason,
     installedDigest: shortConnectorDigest(installed?.digest ?? null),
     installedDigestFull: installed?.digest ?? null,

@@ -33,6 +33,12 @@ import {
   referenceQueries,
   writeTransaction,
 } from "../../lib/db.ts";
+import {
+  assertConnectorLifecycleAvailable,
+  connectorLifecycleDataDir,
+  withConnectorLifecycleLock,
+  withConnectorLifecycleLockSync,
+} from "../connector-lifecycle-lock.ts";
 import { OWNER_AUTH_DEFAULT_SUBJECT_ID } from "../owner-auth.ts";
 import {
   getStorageBackendKind,
@@ -1001,25 +1007,31 @@ export function createSqliteSchedulerStore(): SchedulerStore {
     },
 
     upsertActiveRun(record) {
-      // Fail closed: a live row already present for the connector instance
-      // must preserve the incumbent row rather than replacing it.
-      const result = exec(referenceQueries.controllerUpsertActiveRun, activeRunInsertParameters(record));
-      return result.changes > 0;
+      return withConnectorLifecycleLockSync(connectorLifecycleDataDir(), record.connector_id, () => {
+        assertConnectorLifecycleAvailable(connectorLifecycleDataDir(), record.connector_id);
+        // Fail closed: a live row already present for the connector instance
+        // must preserve the incumbent row rather than replacing it.
+        const result = exec(referenceQueries.controllerUpsertActiveRun, activeRunInsertParameters(record));
+        return result.changes > 0;
+      });
     },
 
     resetStateAndUpsertActiveRun(record) {
       const connectorInstanceId = record.connector_instance_id ?? record.connector_id;
-      try {
-        return writeTransaction(() => {
-          exec(referenceQueries.connectorInstancesDeleteConnectorStateByInstance, [connectorInstanceId]);
-          const result = exec(referenceQueries.controllerUpsertActiveRun, activeRunInsertParameters(record));
-          if (result.changes === 0) throw new ActiveRunConflictRollback();
-          return true;
-        });
-      } catch (error) {
-        if (error instanceof ActiveRunConflictRollback) return false;
-        throw error;
-      }
+      return withConnectorLifecycleLockSync(connectorLifecycleDataDir(), record.connector_id, () => {
+        assertConnectorLifecycleAvailable(connectorLifecycleDataDir(), record.connector_id);
+        try {
+          return writeTransaction(() => {
+            exec(referenceQueries.connectorInstancesDeleteConnectorStateByInstance, [connectorInstanceId]);
+            const result = exec(referenceQueries.controllerUpsertActiveRun, activeRunInsertParameters(record));
+            if (result.changes === 0) throw new ActiveRunConflictRollback();
+            return true;
+          });
+        } catch (error) {
+          if (error instanceof ActiveRunConflictRollback) return false;
+          throw error;
+        }
+      });
     },
 
     upsertLastRunTime(connectorInstanceId, lastRunTimeMs, updatedAt, connectorId = connectorInstanceId) {
@@ -1637,41 +1649,47 @@ export function createPostgresSchedulerStore(): SchedulerStore {
     },
 
     async upsertActiveRun(record) {
-      const result = await postgresQuery(
-        `INSERT INTO controller_active_runs(connector_instance_id, connector_id, run_id, trace_id, scenario_id, started_at, run_generation)
+      return await withConnectorLifecycleLock(connectorLifecycleDataDir(), record.connector_id, async () => {
+        assertConnectorLifecycleAvailable(connectorLifecycleDataDir(), record.connector_id);
+        const result = await postgresQuery(
+          `INSERT INTO controller_active_runs(connector_instance_id, connector_id, run_id, trace_id, scenario_id, started_at, run_generation)
          VALUES($1, $2, $3, $4, $5, $6, $7)
       ON CONFLICT (connector_instance_id) DO NOTHING`,
-        [
-          record.connector_instance_id ?? record.connector_id,
-          record.connector_id,
-          record.run_id,
-          record.trace_id,
-          record.scenario_id,
-          record.started_at,
-          record.run_generation,
-        ]
-      );
-      return (result.rowCount ?? 0) > 0;
+          [
+            record.connector_instance_id ?? record.connector_id,
+            record.connector_id,
+            record.run_id,
+            record.trace_id,
+            record.scenario_id,
+            record.started_at,
+            record.run_generation,
+          ]
+        );
+        return (result.rowCount ?? 0) > 0;
+      });
     },
 
     async resetStateAndUpsertActiveRun(record) {
       const connectorInstanceId = record.connector_instance_id ?? record.connector_id;
-      try {
-        await withPostgresTransaction(async (client) => {
-          await client.query("DELETE FROM connector_state WHERE connector_instance_id = $1", [connectorInstanceId]);
-          const result = await client.query(
-            `INSERT INTO controller_active_runs(connector_instance_id, connector_id, run_id, trace_id, scenario_id, started_at, run_generation)
-             VALUES($1, $2, $3, $4, $5, $6, $7)
-             ON CONFLICT (connector_instance_id) DO NOTHING`,
-            activeRunInsertParameters(record)
-          );
-          if ((result.rowCount ?? 0) === 0) throw new ActiveRunConflictRollback();
-        });
-        return true;
-      } catch (error) {
-        if (error instanceof ActiveRunConflictRollback) return false;
-        throw error;
-      }
+      return await withConnectorLifecycleLock(connectorLifecycleDataDir(), record.connector_id, async () => {
+        assertConnectorLifecycleAvailable(connectorLifecycleDataDir(), record.connector_id);
+        try {
+          await withPostgresTransaction(async (client) => {
+            await client.query("DELETE FROM connector_state WHERE connector_instance_id = $1", [connectorInstanceId]);
+            const result = await client.query(
+              `INSERT INTO controller_active_runs(connector_instance_id, connector_id, run_id, trace_id, scenario_id, started_at, run_generation)
+               VALUES($1, $2, $3, $4, $5, $6, $7)
+               ON CONFLICT (connector_instance_id) DO NOTHING`,
+              activeRunInsertParameters(record)
+            );
+            if ((result.rowCount ?? 0) === 0) throw new ActiveRunConflictRollback();
+          });
+          return true;
+        } catch (error) {
+          if (error instanceof ActiveRunConflictRollback) return false;
+          throw error;
+        }
+      });
     },
 
     async upsertLastRunTime(connectorInstanceId, lastRunTimeMs, updatedAt, connectorId = connectorInstanceId) {

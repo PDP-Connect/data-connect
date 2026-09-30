@@ -137,6 +137,19 @@ export function mountOwnerConnectorInstall(
       options.handleError(res, error);
     }
   };
+  const uninstallHandler: Handler = async (req, res) => {
+    const connectorKey = bodyString(req, "connector_key");
+    if (!connectorKey) {
+      options.pdppError(res, 400, "invalid_request", "connector_key is required", "connector_key");
+      return;
+    }
+    try {
+      await options.service.uninstall(connectorKey);
+      res.json({ data: { connector_key: connectorKey, uninstalled: true }, object: "connector_uninstall" });
+    } catch (error) {
+      options.handleError(res, error);
+    }
+  };
   const localSourcesHandler: Handler = async (_req, res) => {
     try {
       const records = options.service.listLocalSources ? await options.service.listLocalSources() : [];
@@ -224,6 +237,7 @@ export function mountOwnerConnectorInstall(
   app.get("/v1/owner/connector-install/local-sources", ...guarded, localSourcesHandler);
   app.post("/v1/owner/connector-install/install", ...guarded, installHandler);
   app.post("/v1/owner/connector-install/update", ...guarded, updateHandler);
+  app.post("/v1/owner/connector-install/uninstall", ...guarded, uninstallHandler);
   app.post("/v1/owner/connector-install/local-sources/add", ...guarded, localAddHandler);
   app.post("/v1/owner/connector-install/local-sources/reload", ...guarded, localReloadHandler);
   app.post("/v1/owner/connector-install/local-sources/remove", ...guarded, localRemoveHandler);

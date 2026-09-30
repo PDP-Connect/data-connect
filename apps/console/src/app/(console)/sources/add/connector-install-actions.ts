@@ -11,6 +11,7 @@ import {
   removeConnectorLocalSource,
   selectConnectorLocalSource,
   updateConnector,
+  uninstallConnector,
 } from "../../lib/connector-install-client.ts";
 import { requireDashboardAccess } from "../../lib/dashboard-access.ts";
 
@@ -56,6 +57,19 @@ export async function updateConnectorAction(connectorId: string): Promise<Connec
   }
   try {
     await updateConnector(normalizedConnectorId);
+    revalidatePath("/sources/add");
+    return { ok: true };
+  } catch (err) {
+    return { message: actionMessage(err), ok: false };
+  }
+}
+
+export async function uninstallConnectorAction(connectorKey: string): Promise<ConnectorInstallActionResult> {
+  await requireDashboardAccess("/sources/add");
+  const normalizedKey = connectorKey.trim();
+  if (!normalizedKey) return { message: "The connector package target is incomplete.", ok: false };
+  try {
+    await uninstallConnector(normalizedKey);
     revalidatePath("/sources/add");
     return { ok: true };
   } catch (err) {

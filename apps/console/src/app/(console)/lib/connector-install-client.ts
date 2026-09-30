@@ -131,6 +131,13 @@ export async function updateConnector(connectorId: string): Promise<ConnectorIns
   return parseStatusRecord(payload);
 }
 
+export async function uninstallConnector(connectorKey: string): Promise<void> {
+  await connectorInstallFetch("/v1/owner/connector-install/uninstall", {
+    body: JSON.stringify({ connector_key: connectorKey }),
+    method: "POST",
+  });
+}
+
 export async function addConnectorLocalSource(sourcePath: string): Promise<ConnectorLocalSource> {
   const payload = await connectorInstallFetch("/v1/owner/connector-install/local-sources/add", {
     body: JSON.stringify({ source_path: sourcePath }),

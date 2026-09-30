@@ -24,6 +24,19 @@ import {
 import { dirname, join, resolve, sep } from "node:path";
 import { canonicalConnectorKey } from "../connector-key.ts";
 import {
+  assertConnectorLifecycleAvailable,
+  clearConnectorLifecycleUninstalled,
+  markConnectorLifecycleUninstalled,
+  withConnectorLifecycleLock,
+} from "../connector-lifecycle-lock.ts";
+import {
+  deleteConnectorUninstallJournal,
+  listConnectorUninstallJournalIds,
+  reconcileConnectorUninstallJournal,
+  writeConnectorUninstallJournal,
+  type ConnectorUninstallRootMove,
+} from "../connector-uninstall-journal.ts";
+import {
   createFileLocalConnectorSourceStore,
   type LocalConnectorSourceRecord,
   type LocalConnectorSourceStore,
@@ -92,15 +105,42 @@ export interface ConnectorInstallStore {
   activate: (record: ConnectorInstallRecord) => Promise<void>;
   readonly dataDir?: string;
   deactivate: (connectorId: string) => Promise<void>;
+  deactivateAndRemoveActivation?: (connectorId: string) => Promise<void>;
   getActive: (connectorId: string) => Promise<ConnectorInstallRecord | null>;
   getCatalogHighWater: () => Promise<string | null>;
   listActive: () => Promise<readonly ConnectorInstallRecord[]>;
   setCatalogHighWater: (value: string) => Promise<void>;
 }
 
+export async function reconcileConnectorUninstalls(
+  dataDir: string,
+  store: ConnectorInstallStore,
+  removeActivation: (connectorId: string) => Promise<void>
+): Promise<void> {
+  for (const connectorId of listConnectorUninstallJournalIds(dataDir)) {
+    await withConnectorLifecycleLock(dataDir, connectorId, async () => {
+      await reconcileConnectorUninstallJournal(dataDir, connectorId, {
+        clearUninstalledMarker: (id) => clearConnectorLifecycleUninstalled(dataDir, id),
+        getActive: (id) => store.getActive(id),
+        restoreActive: (record) => store.activate(record),
+      });
+      if (!(await store.getActive(connectorId))) {
+        await store.deactivate(connectorId);
+        await removeActivation(connectorId);
+      } else {
+        clearConnectorLifecycleUninstalled(dataDir, connectorId);
+      }
+    });
+  }
+}
+
 export type ActiveConnectorInspection =
   | { readonly status: "none" }
-  | { readonly status: "active"; readonly record: ConnectorInstallRecord; readonly path: string }
+  | {
+      readonly status: "active";
+      readonly record: ConnectorInstallRecord;
+      readonly path: string;
+    }
   | { readonly status: "invalid"; readonly reason: string };
 
 /** A durable, file-local store. PDPP_DATA_DIR is a persistent volume in production. */
@@ -211,6 +251,21 @@ export function createConnectorInstallStore(): ConnectorInstallStore {
       (await sqlite()).execDynamicSqlAcknowledged("DELETE FROM connector_installs WHERE connector_id = ?", [
         connectorId,
       ]);
+    },
+    async deactivateAndRemoveActivation(connectorId) {
+      const pg = await postgres();
+      if (pg.isPostgresStorageBackend()) {
+        await pg.withPostgresTransaction(async (client) => {
+          await client.query("DELETE FROM connector_installs WHERE connector_id = $1", [connectorId]);
+          await client.query("DELETE FROM connector_activations WHERE connector_id = $1", [connectorId]);
+        });
+        return;
+      }
+      const db = await sqlite();
+      db.writeTransaction(() => {
+        db.execDynamicSqlAcknowledged("DELETE FROM connector_installs WHERE connector_id = ?", [connectorId]);
+        db.execDynamicSqlAcknowledged("DELETE FROM connector_activations WHERE connector_id = ?", [connectorId]);
+      });
     },
     async getActive(connectorId) {
       const pg = await postgres();
@@ -418,7 +473,9 @@ function acquireDirectoryLock(dataDir: string, lockName: string, busyMessage: st
       throw new Error(busyMessage, { cause: error });
     }
   }
-  writeFileSync(join(lockDir, "pid"), `${String(process.pid)}\n`, { mode: 0o600 });
+  writeFileSync(join(lockDir, "pid"), `${String(process.pid)}\n`, {
+    mode: 0o600,
+  });
   let released = false;
   return () => {
     if (released) {
@@ -518,7 +575,10 @@ export async function inspectActiveConnector(
  * that discovers profiles by manifest cannot read an unverified one.
  */
 export async function listVerifiedActiveConnectors(store: ConnectorInstallStore): Promise<{
-  readonly invalid: readonly { readonly connectorId: string; readonly reason: string }[];
+  readonly invalid: readonly {
+    readonly connectorId: string;
+    readonly reason: string;
+  }[];
   readonly verified: readonly ConnectorInstallRecord[];
 }> {
   const invalid: { connectorId: string; reason: string }[] = [];
@@ -529,7 +589,10 @@ export async function listVerifiedActiveConnectors(store: ConnectorInstallStore)
     if (inspected.status === "active") {
       verified.push(inspected.record);
     } else if (inspected.status === "invalid") {
-      invalid.push({ connectorId: record.connectorId, reason: inspected.reason });
+      invalid.push({
+        connectorId: record.connectorId,
+        reason: inspected.reason,
+      });
     }
   }
   return { invalid, verified };
@@ -540,8 +603,16 @@ export async function resolveActiveConnectorPath(
   store: ConnectorInstallStore,
   connectorId: string
 ): Promise<string | null> {
-  const inspected = await inspectActiveConnector(store, connectorId);
-  return inspected.status === "active" ? inspected.path : null;
+  const dataDir = store.dataDir;
+  if (!dataDir) {
+    const inspected = await inspectActiveConnector(store, connectorId);
+    return inspected.status === "active" ? inspected.path : null;
+  }
+  return await withConnectorLifecycleLock(dataDir, connectorId, async () => {
+    assertConnectorLifecycleAvailable(dataDir, connectorId);
+    const inspected = await inspectActiveConnector(store, connectorId);
+    return inspected.status === "active" ? inspected.path : null;
+  });
 }
 
 function verifyStoredRecord(root: string, active: ConnectorInstallRecord, dataDir?: string): ConnectorInstallRecord {
@@ -724,6 +795,7 @@ export interface ConnectorInstallService {
   selectLocalSource?: (connectorKey: string, sourceId: string | null) => Promise<void>;
   status: () => Promise<readonly ConnectorInstallRecord[]>;
   update: (connectorId: string) => Promise<ConnectorInstallRecord>;
+  uninstall: (connectorKey: string) => Promise<void>;
 }
 
 export function createConnectorInstallService(options: {
@@ -734,6 +806,8 @@ export function createConnectorInstallService(options: {
   readonly installArtifact?: InstallArtifact;
   readonly localSourceStore?: LocalConnectorSourceStore;
   readonly registerManifest: (manifest: Record<string, unknown>) => Promise<unknown>;
+  readonly assertUninstallAllowed?: (connectorId: string) => Promise<void>;
+  readonly removeActivation?: (connectorId: string) => Promise<void>;
 }): ConnectorInstallService {
   const dataDir =
     options.dataDir ||
@@ -795,24 +869,17 @@ export function createConnectorInstallService(options: {
       }
     }
   };
-  const installEntry = async (connectorId: string, entry: ConnectorCatalogEntry): Promise<ConnectorInstallRecord> => {
-    const release = acquireInstallLock(dataDir);
-    try {
+  const installEntryCore = async (
+    connectorId: string,
+    entry: ConnectorCatalogEntry
+  ): Promise<ConnectorInstallRecord> => {
       const root = join(dataDir, "connectors", connectorId, entry.digest);
       const existing = await store.getActive(connectorId);
       if (existsSync(root)) {
         if (existing && existing.digest === entry.digest && resolve(existing.root) === resolve(root)) {
           const inspected = await inspectActiveConnector(store, connectorId);
           if (inspected.status === "active") {
-            return await reuseExistingInstall(
-              root,
-              entry,
-              existing,
-              existing,
-              dataDir,
-              options.registerManifest,
-              store
-            );
+          return await reuseExistingInstall(root, entry, existing, existing, dataDir, options.registerManifest, store);
           }
           removePublishedRootSafely(root, dataDir, connectorId, entry.digest);
           if (existsSync(root)) {
@@ -859,6 +926,15 @@ export function createConnectorInstallService(options: {
         root,
         store,
       });
+  };
+  const installEntry = async (connectorId: string, entry: ConnectorCatalogEntry): Promise<ConnectorInstallRecord> => {
+    const release = acquireInstallLock(dataDir);
+    try {
+      return await withConnectorLifecycleLock(dataDir, connectorId, async () => {
+        const record = await installEntryCore(connectorId, entry);
+        clearConnectorLifecycleUninstalled(dataDir, connectorId);
+        return record;
+      });
     } finally {
       release();
     }
@@ -871,7 +947,105 @@ export function createConnectorInstallService(options: {
       throw new Error("Connector digest is not present in the verified catalog.");
     }
     assertCatalogEntry(entry, connectorId, digest);
-    return installEntry(connectorId, entry);
+    return await installEntry(connectorId, entry);
+  };
+  const uninstall = async (connectorKey: string): Promise<void> => {
+    if (!CONNECTOR_ID.test(connectorKey)) throw new Error("Connector key is invalid.");
+    if (!options.assertUninstallAllowed || !options.removeActivation) {
+      throw new Error("Connector uninstall is unavailable.");
+    }
+    const assertUninstallAllowed = options.assertUninstallAllowed;
+    const removeActivation = options.removeActivation;
+    const release = acquireInstallLock(dataDir);
+    try {
+      const record = (await store.listActive()).find(
+        (candidate) =>
+          candidate.connectorId === connectorKey || canonicalManifestKey(candidate.manifest) === connectorKey
+      );
+      if (!record) throw new Error("Connector is not installed.");
+      const connectorId = record.connectorId;
+      await withConnectorLifecycleLock(dataDir, connectorId, async () => {
+        await assertUninstallAllowed(connectorId);
+        const connectorDir = join(dataDir, "connectors", connectorId);
+        assertNoSymlinkComponents(dataDir);
+        assertNoSymlinkComponents(connectorDir);
+        const retainedEntries = existsSync(connectorDir) ? readdirSync(connectorDir, { withFileTypes: true }) : [];
+        if (retainedEntries.some((entry) => !entry.isDirectory())) {
+          throw new Error("Connector install directory contains an unexpected or symbolic-link entry.");
+        }
+        const roots = retainedEntries.map((entry) => join(connectorDir, entry.name));
+        const rootMoves: ConnectorUninstallRootMove[] = roots.map((root, index) => ({
+          moved: join(connectorDir, `.uninstall-${process.pid}-${Date.now()}-${index}`),
+          original: root,
+        }));
+        writeConnectorUninstallJournal(dataDir, {
+          connectorId,
+          priorActiveRecord: record,
+          rootMoves,
+        });
+        markConnectorLifecycleUninstalled(dataDir, connectorId);
+        const staged: Array<{ original: string; moved: string }> = [];
+        let restoreActiveRecord = false;
+        try {
+          for (const move of rootMoves) {
+            assertNoSymlinkComponents(move.original);
+            renameSync(move.original, move.moved);
+            staged.push(move);
+          }
+          if (store.deactivateAndRemoveActivation) {
+            await store.deactivateAndRemoveActivation(connectorId);
+          } else {
+            await store.deactivate(connectorId);
+            restoreActiveRecord = true;
+            await removeActivation(connectorId);
+          }
+        } catch (error) {
+          for (const item of [...staged].reverse()) {
+            if (existsSync(item.moved)) renameSync(item.moved, item.original);
+          }
+          if (restoreActiveRecord) {
+            try {
+              await store.activate(record);
+            } catch (rollbackError) {
+              const restored = await store.getActive(connectorId).catch(() => null);
+              if (
+                restored?.digest === record.digest &&
+                resolve(restored.root) === resolve(record.root) &&
+                staged.every((item) => existsSync(item.original))
+              ) {
+                clearConnectorLifecycleUninstalled(dataDir, connectorId);
+                deleteConnectorUninstallJournal(dataDir, connectorId);
+              }
+              throw new AggregateError([error, rollbackError], "Connector uninstall failed and rollback failed.", {
+                cause: rollbackError,
+              });
+            }
+          }
+          if (staged.every((item) => existsSync(item.original))) {
+            clearConnectorLifecycleUninstalled(dataDir, connectorId);
+            deleteConnectorUninstallJournal(dataDir, connectorId);
+          }
+          throw error;
+        }
+        for (const item of staged) {
+          try {
+            rmSync(item.moved, { force: true, recursive: true });
+          } catch {
+            // The active pointers are already removed; a stale staged tree is not runnable.
+          }
+        }
+        try {
+          if (existsSync(connectorDir) && readdirSync(connectorDir).length === 0) {
+            rmSync(connectorDir, { force: true, recursive: true });
+          }
+        } catch {
+          // The install and activation pointers are gone; an empty parent is inert.
+        }
+        deleteConnectorUninstallJournal(dataDir, connectorId);
+      });
+    } finally {
+      release();
+    }
   };
   const resolveManifestFromCatalog = async (connectorId: string): Promise<Record<string, unknown> | null> => {
     const entry = (await catalog()).find(
@@ -928,6 +1102,7 @@ export function createConnectorInstallService(options: {
     removeLocalSource: (sourceId) => localSourceStore.remove(sourceId),
     selectLocalSource: (connectorKey, sourceId) => localSourceStore.select(connectorKey, sourceId),
     status: async () => (await listVerifiedActiveConnectors(store)).verified,
+    uninstall,
     async update(connectorId) {
       const entries = await catalog();
       const candidates = entries.filter((entry) => entry.connector_id === connectorId);
@@ -936,7 +1111,7 @@ export function createConnectorInstallService(options: {
         throw new Error("Connector has no verified update target.");
       }
       assertCatalogEntry(candidate, connectorId, candidate.digest);
-      return installEntry(connectorId, candidate);
+      return await installEntry(connectorId, candidate);
     },
   };
 }
@@ -1039,7 +1214,10 @@ function extractManifestLayerDigests(buffer: Buffer): {
   }
 }
 
-export function createConfigLimitedFetch(baseFetch: FetchLike, expectedManifestDigest?: string): {
+export function createConfigLimitedFetch(
+  baseFetch: FetchLike,
+  expectedManifestDigest?: string
+): {
   readonly fetchImpl: typeof fetch;
   readonly configDigest: () => string | null;
 } {

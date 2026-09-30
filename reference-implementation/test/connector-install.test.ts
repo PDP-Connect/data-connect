@@ -8,6 +8,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -24,8 +25,13 @@ import {
   createFileConnectorInstallStore,
   inspectActiveConnector,
   normalizeCoreInstallLayout,
+  reconcileConnectorUninstalls,
   resolveActiveConnectorPath,
 } from "../server/connector-install/index.ts";
+import { closeDb, getDb, initDb } from "../server/db.ts";
+import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
+import { createSqliteSchedulerStore } from "../server/stores/scheduler-store.ts";
+import { writeConnectorUninstallJournal } from "../server/connector-uninstall-journal.ts";
 import { mountOwnerConnectorInstall } from "../server/routes/owner-connector-install.ts";
 
 const digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -96,6 +102,281 @@ test("installs into an immutable digest root and resolves the active verified en
     );
     assert.equal((await service.status())[0]?.tier, "supported");
   } finally {
+    rmSync(dataDir, { force: true, recursive: true });
+  }
+});
+
+test("uninstall removes the installed artifact and active record when no source uses it", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pdpp-connector-uninstall-"));
+  closeDb();
+  initDb(join(dataDir, "pdpp.sqlite"));
+  const store = createFileConnectorInstallStore(dataDir);
+  const service = createConnectorInstallService({
+    assertUninstallAllowed: async () => {},
+    catalogLoader: async () => [entry],
+    dataDir,
+    installArtifact: (root) => writeFixture(root),
+    registerManifest: () => Promise.resolve(),
+    removeActivation: () => Promise.resolve(),
+    store,
+  });
+  try {
+    const active = await service.install("github", digest);
+    await service.uninstall("github");
+    assert.equal(existsSync(active.root), false);
+    assert.equal(await store.getActive("github"), null);
+  } finally {
+    closeDb();
+    rmSync(dataDir, { force: true, recursive: true });
+  }
+});
+
+test("uninstall refuses sources including revoked connections", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pdpp-connector-uninstall-in-use-"));
+  closeDb();
+  initDb(join(dataDir, "pdpp.sqlite"));
+  const store = createFileConnectorInstallStore(dataDir);
+  const service = createConnectorInstallService({
+    assertUninstallAllowed: async () => {
+      const error = new Error("Cannot uninstall github: 2 sources still use this connector.") as Error & {
+        code: string;
+      };
+      error.code = "connector_in_use";
+      throw error;
+    },
+    catalogLoader: async () => [entry],
+    dataDir,
+    installArtifact: (root) => writeFixture(root),
+    registerManifest: () => Promise.resolve(),
+    removeActivation: () => Promise.resolve(),
+    store,
+  });
+  try {
+    const active = await service.install("github", digest);
+    await assert.rejects(service.uninstall("github"), /2 sources still use this connector/);
+    assert.equal((await store.getActive("github"))?.digest, digest);
+    assert.equal(existsSync(active.root), true);
+  } finally {
+    closeDb();
+    rmSync(dataDir, { force: true, recursive: true });
+  }
+});
+
+test("failed uninstall activation removal restores the installed artifact and record", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pdpp-connector-uninstall-fail-"));
+  closeDb();
+  initDb(join(dataDir, "pdpp.sqlite"));
+  const store = createFileConnectorInstallStore(dataDir);
+  const service = createConnectorInstallService({
+    assertUninstallAllowed: async () => {},
+    catalogLoader: async () => [entry],
+    dataDir,
+    installArtifact: (root) => writeFixture(root),
+    registerManifest: () => Promise.resolve(),
+    removeActivation: async () => {
+      throw new Error("activation removal failed");
+    },
+    store,
+  });
+  try {
+    const active = await service.install("github", digest);
+    await assert.rejects(service.uninstall("github"), /activation removal failed/);
+    assert.equal((await store.getActive("github"))?.digest, digest);
+    assert.equal(existsSync(join(active.root, "dist", "collection-profile.mjs")), true);
+  } finally {
+    closeDb();
+    rmSync(dataDir, { force: true, recursive: true });
+  }
+});
+
+test("a rollback error is explicit and the original entrypoint remains runnable", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pdpp-connector-uninstall-rollback-error-"));
+  closeDb();
+  initDb(join(dataDir, "pdpp.sqlite"));
+  const backingStore = createFileConnectorInstallStore(dataDir);
+  let activationWrites = 0;
+  const store = {
+    ...backingStore,
+    activate: async (record: Parameters<typeof backingStore.activate>[0]) => {
+      await backingStore.activate(record);
+      activationWrites += 1;
+      if (activationWrites === 2) throw new Error("restore confirmation failed");
+    },
+  };
+  const service = createConnectorInstallService({
+    assertUninstallAllowed: async () => {},
+    catalogLoader: async () => [entry],
+    dataDir,
+    installArtifact: (root) => writeFixture(root),
+    registerManifest: () => Promise.resolve(),
+    removeActivation: async () => {
+      throw new Error("activation removal failed");
+    },
+    store,
+  });
+  try {
+    const active = await service.install("github", digest);
+    await assert.rejects(service.uninstall("github"), /rollback failed/);
+    assert.equal(await resolveActiveConnectorPath(backingStore, "github"), join(active.root, active.entrypointPath));
+  } finally {
+    closeDb();
+    rmSync(dataDir, { force: true, recursive: true });
+  }
+});
+
+test("an atomic uninstall failure leaves the prior active pointer and entrypoint intact", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pdpp-connector-uninstall-atomic-failure-"));
+  closeDb();
+  initDb(join(dataDir, "pdpp.sqlite"));
+  const backingStore = createFileConnectorInstallStore(dataDir);
+  const store = {
+    ...backingStore,
+    activate: (record: Parameters<typeof backingStore.activate>[0]) => backingStore.activate(record),
+    deactivateAndRemoveActivation: async () => {
+      throw new Error("activation transaction failed");
+    },
+  };
+  const service = createConnectorInstallService({
+    assertUninstallAllowed: async () => {},
+    catalogLoader: async () => [entry],
+    dataDir,
+    installArtifact: (root) => writeFixture(root),
+    registerManifest: () => Promise.resolve(),
+    removeActivation: async () => assert.fail("atomic store owns pointer removal"),
+    store,
+  });
+  try {
+    const active = await service.install("github", digest);
+    await assert.rejects(service.uninstall("github"), /activation transaction failed/);
+    assert.equal((await backingStore.getActive("github"))?.entrypointPath, active.entrypointPath);
+    assert.equal(await resolveActiveConnectorPath(backingStore, "github"), join(active.root, active.entrypointPath));
+    assert.equal(existsSync(join(active.root, "dist", "collection-profile.mjs")), true);
+  } finally {
+    closeDb();
+    rmSync(dataDir, { force: true, recursive: true });
+  }
+});
+
+test("startup recovery restores the original entrypoint at each root-move crash point", async () => {
+  for (const { name, moveCount } of [
+    { moveCount: 0, name: "before moves" },
+    { moveCount: 1, name: "during moves" },
+    { moveCount: Number.POSITIVE_INFINITY, name: "after moves" },
+  ]) {
+    const dataDir = mkdtempSync(join(tmpdir(), `pdpp-connector-uninstall-restart-${name.replace(/ /g, "-")}-`));
+    closeDb();
+    initDb(join(dataDir, "pdpp.sqlite"));
+    const store = createFileConnectorInstallStore(dataDir);
+    const service = createConnectorInstallService({
+      catalogLoader: async () => [entry],
+      dataDir,
+      installArtifact: (root) => writeFixture(root),
+      registerManifest: () => Promise.resolve(),
+      store,
+    });
+    try {
+      const active = await service.install("github", digest);
+      const connectorDir = join(dataDir, "connectors", "github");
+      const moves = readdirSync(connectorDir, { withFileTypes: true }).map((item, index) => ({
+        moved: join(connectorDir, `.uninstall-restart-${index}`),
+        original: join(connectorDir, item.name),
+      }));
+      writeConnectorUninstallJournal(dataDir, { connectorId: "github", priorActiveRecord: active, rootMoves: moves });
+      for (const move of moves.slice(0, moveCount)) renameSync(move.original, move.moved);
+
+      await reconcileConnectorUninstalls(dataDir, store, async () => {});
+
+      assert.equal(await resolveActiveConnectorPath(store, "github"), join(active.root, active.entrypointPath), name);
+      assert.equal(existsSync(join(active.root, active.entrypointPath)), true, name);
+    } finally {
+      closeDb();
+      rmSync(dataDir, { force: true, recursive: true });
+    }
+  }
+});
+
+test("a second store handle cannot create a source while uninstall owns the database fence", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pdpp-connector-uninstall-fence-"));
+  const previousDataDir = process.env.PDPP_DATA_DIR;
+  const previousPreloadDir = process.env.PDPP_CONNECTOR_PRELOAD_DIR;
+  process.env.PDPP_DATA_DIR = dataDir;
+  delete process.env.PDPP_CONNECTOR_PRELOAD_DIR;
+  initDb(join(dataDir, "pdpp.sqlite"));
+  getDb()
+    .prepare("INSERT INTO connectors(connector_id, manifest, created_at) VALUES (?, ?, ?)")
+    .run("github", JSON.stringify({ connector_id: "github" }), new Date().toISOString());
+  const instanceStore = createSqliteConnectorInstanceStore();
+  const competingInstanceStore = createSqliteConnectorInstanceStore();
+  let releaseCheck!: () => void;
+  let checkStarted!: () => void;
+  const started = new Promise<void>((resolve) => (checkStarted = resolve));
+  const holdCheck = new Promise<void>((resolve) => (releaseCheck = resolve));
+  let setupCompleted = false;
+  const service = createConnectorInstallService({
+    assertUninstallAllowed: async () => {
+      checkStarted();
+      await holdCheck;
+    },
+    catalogLoader: async () => [entry],
+    dataDir,
+    installArtifact: (root) => writeFixture(root),
+    registerManifest: () => Promise.resolve(),
+    removeActivation: async () => {
+      return;
+    },
+    store: createFileConnectorInstallStore(dataDir),
+  });
+  try {
+    await service.install("github", digest);
+    const uninstalling = service.uninstall("github");
+    await started;
+    const now = new Date().toISOString();
+    const settingUp = competingInstanceStore
+      .upsertForEnrollment({
+        connectorId: "github",
+        connectorInstanceId: "source-1",
+        createdAt: now,
+        ownerSubjectId: "owner-1",
+        sourceBinding: { account_hint: "owner" },
+        sourceBindingKey: "owner",
+        sourceKind: "account",
+        updatedAt: now,
+      })
+      .then((created) => {
+        setupCompleted = true;
+        return created;
+      });
+    const setupRejected = assert.rejects(settingUp, /Connector lifecycle operation is busy|Connector is not installed/);
+    const schedulerStore = createSqliteSchedulerStore();
+    for (const trigger of ["scheduled", "recovery"] as const) {
+      assert.throws(
+        () =>
+          schedulerStore.upsertActiveRun({
+            connector_id: "github",
+            connector_instance_id: `source-${trigger}`,
+            run_generation: 1,
+            run_id: `run-${trigger}`,
+            scenario_id: "scenario-1",
+            started_at: now,
+            trace_id: `trace-${trigger}`,
+          }),
+        /Connector lifecycle operation is busy/
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(setupCompleted, false);
+    assert.equal(await instanceStore.get("source-1"), null);
+    releaseCheck();
+    await uninstalling;
+    await setupRejected;
+    assert.equal(await instanceStore.get("source-1"), null);
+  } finally {
+    releaseCheck();
+    closeDb();
+    if (previousDataDir === undefined) delete process.env.PDPP_DATA_DIR;
+    else process.env.PDPP_DATA_DIR = previousDataDir;
+    if (previousPreloadDir === undefined) delete process.env.PDPP_CONNECTOR_PRELOAD_DIR;
+    else process.env.PDPP_CONNECTOR_PRELOAD_DIR = previousPreloadDir;
     rmSync(dataDir, { force: true, recursive: true });
   }
 });
@@ -550,10 +831,7 @@ test("normalizes the pinned core collection-profiles layout before verification"
     writeFixture(join(root, "collection-profiles", "github"));
     mkdirSync(join(root, "collection-profiles", "github", "licenses"), { recursive: true });
     mkdirSync(join(root, "collection-profiles", "github", "assets"), { recursive: true });
-    writeFileSync(
-      join(root, "collection-profiles", "github", "source-declaration.json"),
-      verifiedSourceDeclaration
-    );
+    writeFileSync(join(root, "collection-profiles", "github", "source-declaration.json"), verifiedSourceDeclaration);
     writeFileSync(join(root, "collection-profiles", "github", "licenses", "NOTICE"), "notice");
     writeFileSync(join(root, "collection-profiles", "github", "assets", "icon.svg"), "<svg />");
     normalizeCoreInstallLayout(root, "github", verifiedSourceDeclaration);
@@ -585,10 +863,7 @@ test("normalization rejects source declaration bytes different from installer-co
   const verifiedSourceDeclaration = Buffer.from('{"source":"verified"}\n');
   try {
     writeFixture(join(root, "collection-profiles", "github"));
-    writeFileSync(
-      join(root, "collection-profiles", "github", "source-declaration.json"),
-      '{"source":"changed"}\n'
-    );
+    writeFileSync(join(root, "collection-profiles", "github", "source-declaration.json"), '{"source":"changed"}\n');
     assert.throws(
       () => normalizeCoreInstallLayout(root, "github", verifiedSourceDeclaration),
       /does not match installer-core verification/
@@ -791,6 +1066,7 @@ test("owner install route rejects missing installation fields", async () => {
     service: {
       catalog: async () => [],
       install: async () => assert.fail("should not install"),
+      uninstall: async () => assert.fail("should not uninstall"),
       status: async () => [],
       update: async () => assert.fail("should not update"),
     },
@@ -816,11 +1092,109 @@ test("owner install route rejects missing installation fields", async () => {
   assert.equal(registrations.get("POST /v1/owner/connector-install/install")?.[1], ownerGuard);
 });
 
-test("owner catalog route returns the verified catalog projection", async () => {
+test("owner uninstall route calls the service and returns the completed action", async () => {
   type RegisteredHandler = (
-    req: Record<string, never>,
-    res: { json: (value: unknown) => unknown }
+    req: { body?: Record<string, unknown> },
+    res: { json: (body: unknown) => unknown; status: (code: number) => unknown }
   ) => Promise<void>;
+  let handler: RegisteredHandler | undefined;
+  let calledWith: string | undefined;
+  const app = {
+    get() {
+      return this;
+    },
+    post(path: string, ...args: unknown[]) {
+      if (path.endsWith("/uninstall")) handler = args.at(-1) as RegisteredHandler;
+      return this;
+    },
+  };
+  mountOwnerConnectorInstall(app as never, {
+    handleError: (_res, error) => assert.fail(String(error)),
+    pdppError: (_res, status, code) => assert.fail(`${status} ${code}`),
+    requireOwner: () => undefined,
+    requireToken: () => undefined,
+    service: {
+      catalog: async () => [],
+      install: async () => assert.fail("unexpected install"),
+      uninstall: async (connectorId) => {
+        calledWith = connectorId;
+      },
+      status: async () => [],
+      update: async () => assert.fail("unexpected update"),
+    },
+  });
+  let body: unknown;
+  assert.ok(handler);
+  await handler(
+    { body: { connector_key: "github" } },
+    {
+      json(value) {
+        body = value;
+        return this;
+      },
+      status() {
+        return this;
+      },
+    }
+  );
+  assert.equal(calledWith, "github");
+  assert.deepEqual(body, { data: { connector_key: "github", uninstalled: true }, object: "connector_uninstall" });
+});
+
+test("owner uninstall route returns the source count refusal", async () => {
+  type RegisteredHandler = (
+    req: { body?: Record<string, unknown> },
+    res: { json: (body: unknown) => unknown; status: (code: number) => unknown }
+  ) => Promise<void>;
+  let handler: RegisteredHandler | undefined;
+  let seenError: unknown;
+  const app = {
+    get() {
+      return this;
+    },
+    post(path: string, ...args: unknown[]) {
+      if (path.endsWith("/uninstall")) handler = args.at(-1) as RegisteredHandler;
+      return this;
+    },
+  };
+  mountOwnerConnectorInstall(app as never, {
+    handleError: (_res, error) => {
+      seenError = error;
+    },
+    pdppError: (_res, status, code) => assert.fail(`${status} ${code}`),
+    requireOwner: () => undefined,
+    requireToken: () => undefined,
+    service: {
+      catalog: async () => [],
+      install: async () => assert.fail("unexpected install"),
+      uninstall: async () => {
+        throw Object.assign(new Error("Cannot uninstall github: 3 sources still use this connector."), {
+          code: "connector_in_use",
+          connection_ids: ["source-1", "source-2", "source-3"],
+        });
+      },
+      status: async () => [],
+      update: async () => assert.fail("unexpected update"),
+    },
+  });
+  assert.ok(handler);
+  await handler(
+    { body: { connector_key: "github" } },
+    {
+      json() {
+        return this;
+      },
+      status() {
+        return this;
+      },
+    }
+  );
+  assert.equal((seenError as { code: string }).code, "connector_in_use");
+  assert.match((seenError as Error).message, /3 sources still use this connector/);
+});
+
+test("owner catalog route returns the verified catalog projection", async () => {
+  type RegisteredHandler = (req: Record<string, never>, res: { json: (value: unknown) => unknown }) => Promise<void>;
   const routes = new Map<string, RegisteredHandler>();
   const app = {
     get(path: string, ...args: unknown[]) {
@@ -847,17 +1221,21 @@ test("owner catalog route returns the verified catalog projection", async () => 
         },
       ],
       install: async () => assert.fail("should not install"),
+      uninstall: async () => assert.fail("should not uninstall"),
       status: async () => [],
       update: async () => assert.fail("should not update"),
     },
   });
   let body: unknown;
-  await routes.get("GET /v1/owner/connector-install/catalog")?.({}, {
-    json(value: unknown) {
-      body = value;
-      return this;
-    },
-  });
+  await routes.get("GET /v1/owner/connector-install/catalog")?.(
+    {},
+    {
+      json(value: unknown) {
+        body = value;
+        return this;
+      },
+    }
+  );
   assert.deepEqual(body, {
     data: [
       {

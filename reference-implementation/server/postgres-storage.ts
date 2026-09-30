@@ -1602,6 +1602,12 @@ async function bootstrapPostgresSchemaOnce({
         updated_at TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS connector_lifecycle_locks (
+        connector_id TEXT PRIMARY KEY,
+        owner_token TEXT NOT NULL,
+        owner_pid INTEGER NOT NULL
+      );
+
       CREATE TABLE IF NOT EXISTS connector_activations (
         connector_id TEXT PRIMARY KEY,
         state TEXT NOT NULL CHECK (state IN ('active', 'repair_required')),

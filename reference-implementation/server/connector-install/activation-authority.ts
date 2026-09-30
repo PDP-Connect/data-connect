@@ -395,6 +395,15 @@ export async function getConnectorActivation(connectorId: string): Promise<Conne
   return parseRow(row);
 }
 
+/** Remove only the runnable activation; connector registration stays for audit history. */
+export async function removeConnectorActivation(connectorId: string): Promise<void> {
+  if (isPostgresStorageBackend()) {
+    await postgresQuery("DELETE FROM connector_activations WHERE connector_id=$1", [connectorId]);
+    return;
+  }
+  getDb().prepare("DELETE FROM connector_activations WHERE connector_id=?").run(connectorId);
+}
+
 export async function listRunnableConnectorActivations(): Promise<readonly ConnectorActivation[]> {
   await migrateListedLegacyActivations();
   const rows = isPostgresStorageBackend()

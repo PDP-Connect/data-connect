@@ -41,6 +41,11 @@ import {
   OWNER_TOKEN_TTL_MS,
 } from "../server/auth.ts";
 import { canonicalConnectorKey, canonicalConnectorKeyFromManifest } from "../server/connector-key.ts";
+import {
+  assertConnectorLifecycleAvailable,
+  connectorLifecycleDataDir,
+  withConnectorLifecycleLock,
+} from "../server/connector-lifecycle-lock.ts";
 import { CONNECTOR_RUNTIME_OWNER_CLIENT_ID } from "../server/reference-local-defaults.ts";
 import {
   getConnectorSummaryEvidence,
@@ -4020,6 +4025,15 @@ export function createController(opts: ControllerOptions = {}): Controller {
 
   // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Run admission owns ordered source-webhook replay, active-run, browser-surface, and runtime-launch state transitions.
   async function runNow(connectorId: string, options: RunNowOptions = {}): Promise<RunNowResult> {
+    const lifecycleId = canonicalConnectorKey(connectorId) ?? connectorId;
+    const dataDir = connectorLifecycleDataDir();
+    return withConnectorLifecycleLock(dataDir, lifecycleId, () => {
+      assertConnectorLifecycleAvailable(dataDir, lifecycleId);
+      return runNowUnlocked(connectorId, options);
+    });
+  }
+
+  async function runNowUnlocked(connectorId: string, options: RunNowOptions = {}): Promise<RunNowResult> {
     const runOwnerSubjectId = options.ownerSubjectId ?? ownerSubjectId;
     const admittedConnection = await resolveAdmittedRunConnection(
       opts,
