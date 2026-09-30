@@ -2340,10 +2340,14 @@ function optionalNonEmptyEnv(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
-function buildBrowserSurfaceLaunchEnv({
+export function buildBrowserSurfaceLaunchEnv({
+  connectorId,
+  connectorInstanceId,
   browserSurfaceLease,
   browserSurfaceEnv,
 }: {
+  connectorId?: string;
+  connectorInstanceId?: string | null;
   browserSurfaceEnv?: RuntimeBrowserSurfaceEnv | null;
   browserSurfaceLease?: RuntimeBrowserSurfaceLease | null;
 }): Record<string, string> {
@@ -2378,6 +2382,18 @@ function buildBrowserSurfaceLaunchEnv({
     optionalNonEmptyEnv(source.browserSurfaceRequired) ||
     (streamBaseUrl ? "neko" : remoteCdpUrl ? "host" : null);
 
+  const legacyProfileName = [connectorId, connectorInstanceId]
+    .map((value) => optionalNonEmptyEnv(value))
+    .filter((value): value is string => value !== null)
+    .join("__");
+  // Published collection profiles bundle their own older connector runtime.
+  // Until those artifacts are rebuilt, give its legacy profile-keyed resolver
+  // the same host CDP endpoint while keeping the generic host contract intact.
+  const legacyHostCdpAlias =
+    required?.toLowerCase() === "host" && remoteCdpUrl && /^[A-Za-z0-9_-]+$/.test(legacyProfileName)
+      ? { [`PDPP_${legacyProfileName.toUpperCase()}_REMOTE_CDP_URL`]: remoteCdpUrl }
+      : {};
+
   return {
     ...(required ? { PDPP_BROWSER_SURFACE_REQUIRED: required } : {}),
     ...(leaseId ? { PDPP_BROWSER_SURFACE_LEASE_ID: leaseId } : {}),
@@ -2385,6 +2401,7 @@ function buildBrowserSurfaceLaunchEnv({
     ...(surfaceId ? { PDPP_BROWSER_SURFACE_ID: surfaceId } : {}),
     ...(remoteCdpUrl ? { PDPP_BROWSER_SURFACE_REMOTE_CDP_URL: remoteCdpUrl } : {}),
     ...(streamBaseUrl ? { PDPP_BROWSER_SURFACE_STREAM_BASE_URL: streamBaseUrl } : {}),
+    ...legacyHostCdpAlias,
   };
 }
 
@@ -2508,6 +2525,8 @@ function buildConnectorLaunchConfig({
   const browserSurfaceLaunchEnv = buildBrowserSurfaceLaunchEnv({
     browserSurfaceEnv: browserSurfaceEnv ?? null,
     browserSurfaceLease: browserSurfaceLease ?? null,
+    connectorId,
+    connectorInstanceId,
   });
   const staticSecretLaunchEnv = staticSecretEnv && typeof staticSecretEnv === "object" ? staticSecretEnv : {};
   const connectorInstanceEnv = normalizedConnectorInstanceId
