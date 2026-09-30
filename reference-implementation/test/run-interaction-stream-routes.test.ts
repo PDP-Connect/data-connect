@@ -274,6 +274,20 @@ async function fetchJson(url: string, opts: RequestInit = {}): Promise<FetchJson
   return { body, headers: resp.headers, status: resp.status };
 }
 
+async function ownerSessionCookie(asUrl: string, password: string): Promise<string> {
+  const response = await fetch(`${asUrl}/owner/login`, {
+    body: JSON.stringify({ password, return_to: "/" }),
+    headers: { "Content-Type": "application/json" },
+    method: "POST",
+    redirect: "manual",
+  });
+  const cookie = (response.headers.getSetCookie?.() ?? [])
+    .find((value) => value.startsWith("pdpp_owner_session="))
+    ?.split(";", 1)[0];
+  assert.ok(cookie, "owner login should issue a session cookie");
+  return cookie;
+}
+
 function presentationAttachmentCookie(response: Response): string {
   const raw = response.headers.getSetCookie?.()[0] || response.headers.get("set-cookie");
   assert.ok(raw, "SSE attach must establish a presentation attachment cookie");
@@ -362,12 +376,15 @@ interface PendingInteractionEvent extends TimelineEvent {
 async function waitForPendingInteraction(
   asUrl: string,
   runId: string,
-  timeoutMs = 5000
+  timeoutMs = 5000,
+  cookie?: string
 ): Promise<PendingInteractionEvent> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     // biome-ignore lint/performance/noAwaitInLoops: Sequential test setup and assertion order is intentional.
-    const { body } = await fetchJson(`${asUrl}/_ref/runs/${encodeURIComponent(runId)}/timeline`);
+    const { body } = await fetchJson(`${asUrl}/_ref/runs/${encodeURIComponent(runId)}/timeline`, {
+      ...(cookie ? { headers: { Cookie: cookie } } : {}),
+    });
     const timeline = body as Partial<TimelineBody> | null;
     if (timeline && Array.isArray(timeline.data)) {
       const required = timeline.data.find((event) => event.event_type === "run.interaction_required");
@@ -739,6 +756,7 @@ interface HarnessOptions extends Record<string, unknown> {
   manifestName?: string;
   nekoProxyAutoLogin?: unknown;
   nekoWindowSettleProbe?: (endpoint: string) => Promise<unknown>;
+  ownerAuthPassword?: string;
   registerTarget?: boolean;
   streamingClearTimeout?: (timer: unknown) => void;
   streamingCompanionFactory?: StartServerOptions["streamingCompanionFactory"];
@@ -859,6 +877,7 @@ async function withHarness(options: HarnessOptions | null, fn: (ctx: HarnessCont
     isNekoProxyTargetApproved: harnessOptions.isNekoProxyTargetApproved,
     makeStreamingBrowserSessionId: harnessOptions.makeStreamingBrowserSessionId,
     nekoProxyAutoLogin: harnessOptions.nekoProxyAutoLogin,
+    ...(harnessOptions.ownerAuthPassword ? { ownerAuthPassword: harnessOptions.ownerAuthPassword } : {}),
     nekoWindowSettleProbe:
       harnessOptions.nekoWindowSettleProbe ??
       (async () => ({ json: async () => ({ height: 900, settled: true, width: 1440 }), ok: true })),
@@ -967,16 +986,19 @@ async function withExpiredPresentation(
   );
 }
 
-async function startRun(asUrl: string, connectorId: string): Promise<StartedRun> {
-  const r = await fetch(`${asUrl}/_ref/connectors/${encodeURIComponent(connectorId)}/run`, { method: "POST" });
+async function startRun(asUrl: string, connectorId: string, cookie?: string): Promise<StartedRun> {
+  const r = await fetch(`${asUrl}/_ref/connectors/${encodeURIComponent(connectorId)}/run`, {
+    ...(cookie ? { headers: { Cookie: cookie } } : {}),
+    method: "POST",
+  });
   assert.equal(r.status, 202);
   return (await r.json()) as StartedRun;
 }
 
-async function cancelRun(asUrl: string, runId: string, interactionId: string): Promise<void> {
+async function cancelRun(asUrl: string, runId: string, interactionId: string, cookie?: string): Promise<void> {
   const response = await fetch(`${asUrl}/_ref/runs/${encodeURIComponent(runId)}/interaction`, {
     body: JSON.stringify({ interaction_id: interactionId, status: "cancelled" }),
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...(cookie ? { Cookie: cookie } : {}) },
     method: "POST",
   });
   const responseBody = await response.text();
@@ -1191,6 +1213,53 @@ test("attached host stream loses attach and input authority when its lease is re
       abort.abort();
       await reader.cancel().catch(() => undefined);
       await cancelRun(asUrl, started.run_id, pending.interaction_id);
+    }
+  );
+});
+
+test("host stream attachment and input require the owner session that minted it", async () => {
+  const connectorId = "https://registry.pdpp.dev/connectors/spotify";
+  const leaseManager = makeLeaseManager({ connectorId, hostCdp: true });
+  const password = "stream-owner-test-password";
+  await withHarness(
+    { browserSurfaceLeaseManager: leaseManager, ownerAuthPassword: password },
+    async ({ asUrl, spotifyManifest }) => {
+      const ownerCookie = await ownerSessionCookie(asUrl, password);
+      const started = await startRun(asUrl, spotifyManifest.connector_id, ownerCookie);
+      let interactionId = "int_stream_1";
+      try {
+        leaseManager.acquire({ connectorId, profileKey: "profile_dynamic_1", runId: started.run_id });
+        const pending = await waitForPendingInteraction(asUrl, started.run_id, 5000, ownerCookie);
+        interactionId = pending.interaction_id;
+        const mint = await fetchJson(`${asUrl}/_ref/runs/${encodeURIComponent(started.run_id)}/run-interaction-stream`, {
+          body: JSON.stringify({ interaction_id: pending.interaction_id }),
+          headers: { "Content-Type": "application/json", Cookie: ownerCookie },
+          method: "POST",
+        });
+        assert.equal(mint.status, 201, JSON.stringify(mint.body));
+        const body = mint.body as MintBody;
+        const unauthenticatedAttach = await fetch(`${asUrl}${body.viewer_path}`);
+        assert.equal(unauthenticatedAttach.status, 401);
+        await unauthenticatedAttach.body?.cancel();
+
+        const abort = new AbortController();
+        const attached = await fetch(`${asUrl}${body.viewer_path}`, {
+          headers: { Cookie: ownerCookie },
+          signal: abort.signal,
+        });
+        assert.equal(attached.status, 200);
+        const attachmentCookie = presentationAttachmentCookie(attached);
+        const input = await fetchJson(`${asUrl}${body.input_path}`, {
+          body: JSON.stringify({ action: "click", type: "mouse", x: 1, y: 1 }),
+          headers: { "Content-Type": "application/json", Cookie: attachmentCookie },
+          method: "POST",
+        });
+        assert.equal(input.status, 401);
+        abort.abort();
+        await attached.body?.cancel().catch(() => undefined);
+      } finally {
+        await cancelRun(asUrl, started.run_id, interactionId, ownerCookie).catch(() => undefined);
+      }
     }
   );
 });
