@@ -2278,10 +2278,18 @@ fn teardown_stack<R: tauri::Runtime>(
         Some(deadline) => stack.stop_until(deadline),
         None => stack.stop(),
     });
+    crate::commands::release_browser_surface_host_leases(app);
     if reason.stops_tunnel() {
         stop_held_ngrok(app);
     }
     result
+}
+
+#[cfg(test)]
+pub(crate) fn teardown_config_change_without_stack_for_test<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Result<(), String> {
+    teardown_stack(app, StopReason::ConfigChange, None, None)
 }
 
 /// `teardown` for the startup-error paths, which are no-ops when the stack

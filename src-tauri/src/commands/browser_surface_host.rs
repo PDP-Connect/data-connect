@@ -293,15 +293,7 @@ impl HostState {
 
     fn shutdown(&self) {
         self.closed.store(true, Ordering::Release);
-        let Ok(mut leases) = self.leases.lock() else {
-            log::error!("Browser surface lease state is poisoned during shutdown");
-            return;
-        };
-        for (surface_id, lease) in leases.drain() {
-            if !self.terminate_tracked_browser(lease.browser_pid) {
-                log::warn!("Browser surface {surface_id} did not terminate cleanly");
-            }
-        }
+        self.release_all_leases();
         if let Ok(mut browsers) = self.browsers.lock() {
             for (pid, child) in browsers.iter_mut() {
                 if !super::pdpp_browser::terminate_browser(child) {
@@ -309,6 +301,23 @@ impl HostState {
                 }
             }
             browsers.clear();
+        }
+    }
+
+    fn release_all_leases(&self) {
+        let Ok(mut leases) = self.leases.lock() else {
+            log::error!("Browser surface lease state is poisoned during stack teardown");
+            return;
+        };
+        for (surface_id, lease) in leases.drain() {
+            if let Ok(mut cancelled_runs) = self.cancelled_runs.lock() {
+                cancelled_runs.insert(lease.run_id);
+            }
+            if !self.terminate_tracked_browser(lease.browser_pid) {
+                log::warn!(
+                    "Browser surface {surface_id} did not terminate cleanly during stack teardown"
+                );
+            }
         }
     }
 
@@ -602,6 +611,14 @@ pub fn browser_surface_host_env_pairs(app: &AppHandle) -> Option<Vec<(&'static s
 pub fn cleanup_browser_surface_host(app: &AppHandle) {
     if let Some(host) = app.try_state::<BrowserSurfaceHost>() {
         host.shutdown();
+    }
+}
+
+/// Release all browsers after the managed RI stack stops while keeping the
+/// app-level host available for the replacement RI process.
+pub fn release_browser_surface_host_leases<R: tauri::Runtime>(app: &AppHandle<R>) {
+    if let Some(host) = app.try_state::<BrowserSurfaceHost>() {
+        host.state.release_all_leases();
     }
 }
 
@@ -984,16 +1001,26 @@ fn dispatch_request(request: HttpRequest, state: Arc<HostState>) -> Vec<u8> {
                     None,
                 );
             };
+            let run_id = payload.run_id.clone();
+            let connector_id = payload.connector_id.clone();
+            let connection_id = payload.connection_id.clone();
             match state.acquire(payload) {
                 Ok(response) => json_response("200 OK", &response, None),
-                Err(error) => json_response(
-                    "500 Internal Server Error",
-                    &ErrorResponse {
-                        error: error.code,
-                        message: Some(error.message),
-                    },
-                    None,
-                ),
+                Err(error) => {
+                    log::warn!(
+                        "Refused browser surface lease for run {run_id} ({connector_id}/{connection_id}): {} ({})",
+                        error.message,
+                        error.code
+                    );
+                    json_response(
+                        "500 Internal Server Error",
+                        &ErrorResponse {
+                            error: error.code,
+                            message: Some(error.message),
+                        },
+                        None,
+                    )
+                }
             }
         }
         ("DELETE", path) if path.starts_with("/browser-surface/leases/") => {
@@ -1340,13 +1367,31 @@ wait "$server_pid"
         headless: bool,
         migrate_connector_profile: bool,
     ) -> (String, String, u32) {
+        acquire_connection_for_run(
+            host,
+            &format!("run-{connector_id}-{connection_id}"),
+            connector_id,
+            connection_id,
+            headless,
+            migrate_connector_profile,
+        )
+    }
+
+    fn acquire_connection_for_run(
+        host: &BrowserSurfaceHost,
+        run_id: &str,
+        connector_id: &str,
+        connection_id: &str,
+        headless: bool,
+        migrate_connector_profile: bool,
+    ) -> (String, String, u32) {
         let response = request(
             host,
             "POST",
             BROWSER_SURFACE_PATH,
             Some(host_token(host)),
             json!({
-                "run_id": format!("run-{connector_id}-{connection_id}"),
+                "run_id": run_id,
                 "connector_id": connector_id,
                 "connection_id": connection_id,
                 "migrate_connector_profile": migrate_connector_profile,
@@ -2416,6 +2461,79 @@ exit 133
         host.shutdown();
         wait_for_process_exit(first_pid);
         wait_for_process_exit(second_pid);
+    }
+
+    #[test]
+    fn duplicate_live_connection_lease_is_refused_by_the_host_guard() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let host = start_test_host(&temp);
+        let (_, _, first_pid) = acquire_connection_for_run(
+            &host,
+            "run-before-restart",
+            "reddit",
+            "cin_shared",
+            true,
+            false,
+        );
+
+        let response = request(
+            &host,
+            "POST",
+            BROWSER_SURFACE_PATH,
+            Some(host_token(&host)),
+            json!({
+                "run_id": "run-after-restart",
+                "connector_id": "reddit",
+                "connection_id": "cin_shared",
+                "headless": true,
+            }),
+        );
+
+        assert_eq!(response.status, 500);
+        let body: serde_json::Value = serde_json::from_slice(&response.body).expect("error body");
+        assert_eq!(body["error"], BROWSER_PROFILE_IN_USE);
+        assert_eq!(body["message"], BROWSER_PROFILE_IN_USE_MESSAGE);
+        host.shutdown();
+        wait_for_process_exit(first_pid);
+    }
+
+    #[test]
+    fn stack_restart_release_allows_the_connection_to_acquire_again() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let host = start_test_host(&temp);
+        let (_, _, old_pid) = acquire_connection_for_run(
+            &host,
+            "run-before-restart",
+            "reddit",
+            "cin_shared",
+            true,
+            false,
+        );
+
+        let app = tauri::test::mock_app();
+        app.manage(host);
+        let host = app.state::<BrowserSurfaceHost>();
+        crate::unified::teardown_config_change_without_stack_for_test(&app.handle().clone())
+            .expect("stack restart teardown");
+        wait_for_process_exit(old_pid);
+        let (surface_id, _, new_pid) = acquire_connection_for_run(
+            &host,
+            "run-after-restart",
+            "reddit",
+            "cin_shared",
+            true,
+            false,
+        );
+
+        assert!(host
+            .state
+            .leases
+            .lock()
+            .expect("lease state")
+            .contains_key(&surface_id));
+        assert_ne!(old_pid, new_pid);
+        host.shutdown();
+        wait_for_process_exit(new_pid);
     }
 
     #[test]

@@ -100,8 +100,11 @@ interface SchedulerStoreCalls {
   persistActiveRun: number;
 }
 
-function createSchedulerStore(calls: SchedulerStoreCalls): SchedulerStore {
-  const activeRuns = new Map<string, ActiveRunRecord>();
+function createSchedulerStore(
+  calls: SchedulerStoreCalls,
+  initialActiveRuns: readonly ActiveRunRecord[] = []
+): SchedulerStore {
+  const activeRuns = new Map(initialActiveRuns.map((record) => [record.run_id, record]));
   const store: SchedulerStore = {
     appendRunHistory: () => undefined,
     createSchedule: () => undefined,
@@ -231,6 +234,8 @@ function createMemoryBrowserSurfaceLeaseStore({
 }
 
 interface CreateManagerOptions {
+  initialLeases?: BrowserSurfaceLease[];
+  initialSurfaces?: BrowserSurface[];
   leaseWaitTimeoutMs?: number;
   managedConnectors?: Set<string>;
   now?: () => Date;
@@ -262,6 +267,8 @@ function createManager(options: CreateManagerOptions = {}): BrowserSurfaceLeaseM
       staticStreamBaseUrl: "http://127.0.0.1:8080",
       surfaceMode: staticProfileKey ? "static" : "dynamic",
     },
+    ...(options.initialLeases ? { initialLeases: options.initialLeases } : {}),
+    ...(options.initialSurfaces ? { initialSurfaces: options.initialSurfaces } : {}),
     makeLeaseId: () => {
       leaseSeq += 1;
       return `lease_${leaseSeq}`;
@@ -382,6 +389,7 @@ function createBlockedAllocator(): { allocator: BrowserSurfaceAllocator; unblock
 }
 
 interface SetupOptions {
+  initialActiveRuns?: readonly ActiveRunRecord[];
   beforeBrowserSurfaceLeaseEnsure?: (args: {
     readonly runId: string;
     readonly surfaceId: string;
@@ -427,6 +435,7 @@ function setup(
   {
     beforeBrowserSurfaceLeaseEnsure,
     manager = createManager(),
+    initialActiveRuns,
     browserSurfaceAllocator,
     browserSurfaceLeaseStore,
     browserSurfaceReadinessProbe,
@@ -464,7 +473,7 @@ function setup(
     runConnector: 0,
     runConnectorOpts: [],
   };
-  const schedulerStore = createSchedulerStore(calls);
+  const schedulerStore = createSchedulerStore(calls, initialActiveRuns);
   const controller = createController({
     admitRunConnection: fakeAdmitRunConnection(),
     // Queued/deferred leases are promoted later without a live caller-supplied
@@ -2383,6 +2392,77 @@ test("sweep DOES reconcile a leased run whose surface the allocator confirms is 
 
   releaseFirst();
   await controller.drainActiveRuns(1000);
+});
+
+test("boot releases an abandoned host lease when its run has no persisted connector instance id", async (t) => {
+  const runId = "run_abandoned_without_instance_id";
+  const leaseId = "lease_abandoned_without_instance_id";
+  const surfaceId = "neko-static";
+  const manager = createManager({
+    initialLeases: [
+      {
+        connector_id: "managed",
+        expires_at: "2026-05-12T12:05:00.000Z",
+        fencing_token: 1,
+        lease_id: leaseId,
+        leased_at: "2026-05-12T12:00:01.000Z",
+        priority_class: "interactive",
+        profile_key: "managed-profile",
+        requested_at: "2026-05-12T12:00:00.000Z",
+        run_id: runId,
+        status: "leased",
+        surface_id: surfaceId,
+      },
+    ],
+    initialSurfaces: [
+      {
+        active_lease_id: leaseId,
+        backend: "neko",
+        cdp_url: "http://host-surface:9222",
+        connector_id: "managed",
+        created_at: "2026-05-12T12:00:00.000Z",
+        health: "ready",
+        last_used_at: "2026-05-12T12:00:00.000Z",
+        profile_key: "managed-profile",
+        stream_base_url: "http://host-surface:8080",
+        surface_id: surfaceId,
+      },
+    ],
+  });
+  const hostReleaseRequests: string[] = [];
+  const hostAllocator = createHostBrowserSurfaceAllocator({
+    endpoint: "http://127.0.0.1:45855",
+    fetchImpl: (input, init) => {
+      hostReleaseRequests.push(`${init?.method} ${input}`);
+      return Promise.resolve(new Response(null, { status: 204 }));
+    },
+    headless: true,
+    token: "test-token",
+  });
+  const { controller } = setup(t, {
+    browserSurfaceAllocator: hostAllocator,
+    initialActiveRuns: [
+      {
+        connector_id: "managed",
+        run_generation: 1,
+        run_id: runId,
+        scenario_id: "scenario_abandoned",
+        started_at: "2026-05-12T12:00:00.000Z",
+        trace_id: "trace_abandoned",
+      },
+    ],
+    manager,
+  });
+  assert.equal(manager.getLease(leaseId)?.status, "leased");
+
+  await controller.reconcileBrowserSurfaceLeasesAfterBoot();
+
+  assert.equal(manager.getLease(leaseId)?.status, "released", JSON.stringify(manager.listLeases()));
+  assert.ok(
+    hostReleaseRequests.includes(`DELETE http://127.0.0.1:45855/browser-surface/runs/${runId}`),
+    `boot reconciliation must release the app-host lease even when no active run row can bind an event; requests: ${hostReleaseRequests}`
+  );
+  assert.deepEqual(listRunEventTypes(runId), [], "an unbound lease event is skipped honestly");
 });
 
 test("boot coalesces duplicate ready scope loss while preserving historical failed successors", async (t) => {
