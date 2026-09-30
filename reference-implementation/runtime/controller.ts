@@ -284,6 +284,8 @@ export interface RunNowOptions {
    * `deriveCollectionState`.
    */
   fullRefresh?: boolean;
+  /** Atomically clear owner sync state with admission of this full-refresh run. */
+  resetState?: boolean;
   manifest?: ConnectorManifest;
   /** Authenticated subject used by the server admission boundary. */
   ownerSubjectId?: string;
@@ -3173,6 +3175,7 @@ export function createController(opts: ControllerOptions = {}): Controller {
     readonly connectorInstanceId: string;
     readonly key: string;
     readonly runId: string;
+    readonly resetState?: boolean;
     readonly sourceWebhookEvent?: SourceWebhookRunEvent;
     readonly sourceWebhookOwnerSubjectId?: string;
     readonly startedAt: string;
@@ -3225,7 +3228,14 @@ export function createController(opts: ControllerOptions = {}): Controller {
       }
       inserted = true;
     } else {
-      inserted = await persistActiveRun(activeRun);
+      if (input.resetState) {
+        if (!schedulerStore.resetStateAndUpsertActiveRun) {
+          throw new ControllerError("Atomic source reset is unavailable.", "reset_state_unavailable");
+        }
+        inserted = await schedulerStore.resetStateAndUpsertActiveRun(activeRun);
+      } else {
+        inserted = await persistActiveRun(activeRun);
+      }
     }
     if (inserted === false) {
       throw new ControllerError(`Connector already has an active run: ${input.runId}`, "run_already_active", {
@@ -4056,11 +4066,16 @@ export function createController(opts: ControllerOptions = {}): Controller {
     // option. Pass an explicit `{ connector_id, connector_instance_id }` object
     // so an explicit connection run reads its own durable state and defaults to
     // incremental when that state is non-empty.
+    if (options.resetState && !options.fullRefresh) {
+      throw new ControllerError("Reset state requires a full-refresh run.", "invalid_reset_run");
+    }
     const { state, collectionMode } = deriveCollectionState(
-      (await getSyncState({
-        connector_id: admittedConnectorId,
-        connector_instance_id: connectorInstanceId,
-      })) as { state?: unknown } | null,
+      options.resetState
+        ? null
+        : ((await getSyncState({
+            connector_id: admittedConnectorId,
+            connector_instance_id: connectorInstanceId,
+          })) as { state?: unknown } | null),
       options.fullRefresh === true
     );
     const ownerToken = options.ownerToken || (await issueRuntimeOwnerToken(runOwnerSubjectId));
@@ -4078,6 +4093,7 @@ export function createController(opts: ControllerOptions = {}): Controller {
       connectorInstanceId,
       key,
       runId,
+      ...(options.resetState ? { resetState: true } : {}),
       ...(sourceWebhookEvent ? { sourceWebhookEvent, sourceWebhookOwnerSubjectId: runOwnerSubjectId } : {}),
       startedAt,
       traceContext,

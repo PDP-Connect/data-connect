@@ -451,6 +451,18 @@ export async function revokeConnection(connectionId: string): Promise<RevokeConn
   return classifyRevokeConnectionResponse(response.status, body, connectionControlErrorCode(body));
 }
 
+export async function resetConnectionState(connectionId: string): Promise<{ run_id: string }> {
+  const response = await fetchAs(connectionControlPath(connectionId, "/reset-state"), { method: "POST" });
+  const body = await readBody(response);
+  if (!response.ok) throw new Error(describeError(body, `source state reset failed (${response.status})`));
+  const runId =
+    typeof body === "object" && body !== null && "run_id" in body && typeof body.run_id === "string"
+      ? body.run_id
+      : null;
+  if (!runId) throw new Error("Source reset did not start a full sync run.");
+  return { run_id: runId };
+}
+
 /**
  * Owner-reactivate one revoked connection via the owner-session
  * `POST /_ref/connections/:id/reactivate` route. The clean inverse of revoke:

@@ -263,6 +263,7 @@ export interface MountRefConnectorsContext {
     }
   ) => Promise<unknown>;
   setReferenceTraceId: (res: RouteResponse, traceId: string) => void;
+  resetConnectionState?: (input: { connectorInstanceId: string; ownerSubjectId: string }) => Promise<unknown>;
   setScheduleEnabled: (
     connectorId: string,
     enabled: boolean,
@@ -1548,6 +1549,35 @@ export function mountRefConnectionBrowserProfilePurge(app: AppLike, ctx: MountRe
           ownerSubjectId,
         });
         ctx.handleError(res, err);
+      }
+    }
+  );
+}
+
+export function mountRefConnectionResetState(app: AppLike, ctx: MountRefConnectorsContext): void {
+  app.post(
+    "/_ref/connections/:connectorInstanceId/reset-state",
+    ctx.requireOwnerSession,
+    async (req: RouteRequest, res: RouteResponse) => {
+      try {
+        if (!ctx.resetConnectionState) throw new Error("Connection state reset is unavailable.");
+        const connectorInstanceId = decodeURIComponent(req.params.connectorInstanceId as string);
+        const ownerSubjectId = ctx.getOwnerSubjectId(req);
+        const namespace = await ctx.resolveOwnerConnectorNamespace(req, null, { connectorInstanceId });
+        const started = (await ctx.resetConnectionState({
+          connectorInstanceId: namespace.connectorInstanceId,
+          ownerSubjectId,
+        })) as { run_id?: unknown };
+        if (typeof started?.run_id !== "string") throw new Error("Reset did not admit a full sync run.");
+        res.status(202).json({
+          connection_id: namespace.connectorInstanceId,
+          connector_id: namespace.connectorId,
+          object: "ref_connection_state_reset",
+          reset: true,
+          run_id: started.run_id,
+        });
+      } catch (error) {
+        ctx.handleError(res, error);
       }
     }
   );

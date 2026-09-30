@@ -18,6 +18,7 @@ import {
   pauseConnectorSchedule,
   purgeConnectionBrowserProfile,
   reactivateConnection,
+  resetConnectionState,
   resumeConnection,
   resumeConnectionSchedule,
   resumeConnectorSchedule,
@@ -78,6 +79,19 @@ export async function runConnectorNowAction(formData: FormData) {
 }
 
 export type RenameConnectionResult = { ok: true; display_name: string } | { ok: false; message: string };
+
+export type ResetConnectionStateResult = { ok: true; run_id?: string } | { ok: false; message: string };
+
+export async function resetAndSyncConnectionAction(connectionId: string): Promise<ResetConnectionStateResult> {
+  await requireDashboardAccess(connectorHref(connectionId));
+  try {
+    const result = await resetConnectionState(connectionId);
+    revalidatePath(`/sources/${encodeURIComponent(connectionId)}`);
+    return { ok: true, run_id: result.run_id };
+  } catch (err) {
+    return { message: errorMessage(err), ok: false };
+  }
+}
 
 /**
  * Owner-rename a connection's `display_name`. Rename always targets a

@@ -367,6 +367,7 @@ import { mountHostedUiCss } from "./routes/hosted-ui-asset.ts";
 import { mountOwnerConnectionCollectionScope } from "./routes/owner-connection-collection-scope.ts";
 import { mountOwnerConnectionConfig } from "./routes/owner-connection-config.ts";
 import { mountOwnerConnectionDelete } from "./routes/owner-connection-delete.ts";
+import { mountOwnerConnectionResetState } from "./routes/owner-connection-reset-state.ts";
 import { mountOwnerConnectionDiagnostics } from "./routes/owner-connection-diagnostics.ts";
 import { mountOwnerConnectionIntent } from "./routes/owner-connection-intent.ts";
 import { mountOwnerConnectionPause } from "./routes/owner-connection-pause.ts";
@@ -411,6 +412,7 @@ import { HISTORICAL_ARCHIVE_SOURCE_BINDING_KIND, mountRefConnectionResume } from
 import {
   mountRefConnectionBrowserProfilePurge,
   mountRefConnectionDelete,
+  mountRefConnectionResetState,
   mountRefConnectionDetail,
   mountRefConnectionReactivate,
   mountRefConnectionRevoke,
@@ -2251,6 +2253,40 @@ async function isOnlyConnectionOfItsConnector(connectorInstanceId: string): Prom
 
 function createRequestConnectorInstanceStore() {
   return isPostgresStorageBackend() ? createPostgresConnectorInstanceStore() : createSqliteConnectorInstanceStore();
+}
+
+async function resetOwnerConnectionAndStartFullSync({
+  connectorInstanceId,
+  ownerSubjectId,
+  controller,
+}: {
+  connectorInstanceId: string;
+  ownerSubjectId: string;
+  controller: Controller | null;
+}): Promise<unknown> {
+  const store = createRequestConnectorInstanceStore();
+  const instance = await store.get(connectorInstanceId);
+  if (!instance || instance.ownerSubjectId !== ownerSubjectId) {
+    const error = new Error("Connection was not found.") as Error & { code: string };
+    error.code = "connector_instance_not_found";
+    throw error;
+  }
+  if (!controller) throw new Error("Connection reset is unavailable because the collection runtime is not ready.");
+  const started = await controller.runNow(instance.connectorId, {
+    connectorInstanceId,
+    fullRefresh: true,
+    ownerSubjectId,
+    resetState: true,
+  });
+  await emitSpineEvent({
+    actor_id: ownerSubjectId,
+    actor_type: "owner",
+    object_id: connectorInstanceId,
+    object_type: "connection",
+    event_type: "owner_agent.connection.reset_state",
+    data: { connector_id: instance.connectorId, connection_id: connectorInstanceId },
+  });
+  return started;
 }
 
 function createRequestConnectorInstanceCredentialStore() {
@@ -6261,6 +6297,8 @@ export function buildAsApp(opts: ServerOpts = {}) {
 
   const refConnectorsContext = {
     canonicalConnectorKey,
+    resetConnectionState: (input: { connectorInstanceId: string; ownerSubjectId: string }) =>
+      resetOwnerConnectionAndStartFullSync({ ...input, controller }),
     purgeBrowserProfile: createOwnerBrowserProfilePurger(opts),
     clearDefaultAccountTombstone: (input: { connectorId: string; ownerSubjectId: string }) =>
       createRequestConnectorInstanceStore().clearDefaultAccountTombstone(input),
@@ -7074,6 +7112,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
     refConnectorsContext as unknown as Parameters<typeof mountRefConnectionReactivate>[1]
   );
   mountRefConnectionDelete(app, refConnectorsContext as unknown as Parameters<typeof mountRefConnectionDelete>[1]);
+  mountRefConnectionResetState(app, refConnectorsContext as unknown as Parameters<typeof mountRefConnectionResetState>[1]);
   mountRefConnectionBrowserProfilePurge(
     app,
     refConnectorsContext as unknown as Parameters<typeof mountRefConnectionBrowserProfilePurge>[1]
@@ -8202,6 +8241,16 @@ function buildRsApp(opts: ServerOpts = {}) {
     resolveOwnerConnectorNamespace,
     setReferenceTraceId,
   } as unknown as Parameters<typeof mountOwnerConnectionDelete>[1]);
+
+  mountOwnerConnectionResetState(app, {
+    requireOwner,
+    requireToken,
+    getOwnerSubjectId: getOwnerTokenSubjectId,
+    resetConnectionState: (input: { connectorInstanceId: string; ownerSubjectId: string }) =>
+      resetOwnerConnectionAndStartFullSync({ ...input, controller: opts.controller ?? null }),
+    handleError,
+    pdppError,
+  } as unknown as Parameters<typeof mountOwnerConnectionResetState>[1]);
 
   // GET /v1/owner/connections/:connectionId/diagnostics and
   // GET /v1/owner/connectors/:connectorId/diagnostics are the bearer-authed

@@ -300,6 +300,8 @@ export interface SchedulerStore {
   setScheduleEnabled: (connectorInstanceId: string, enabled: boolean, updatedAt: string) => Promise<void> | void;
   updateSchedule: (connectorInstanceId: string, patch: ScheduleUpdate) => Promise<void> | void;
   upsertActiveRun: (record: ActiveRunRecord) => Promise<boolean> | boolean;
+  /** Clear one connection's owner cursor and claim its run in one transaction. */
+  resetStateAndUpsertActiveRun?: (record: ActiveRunRecord) => Promise<boolean> | boolean;
   upsertLastRunTime: (
     connectorInstanceId: string,
     lastRunTimeMs: number,
@@ -1005,6 +1007,21 @@ export function createSqliteSchedulerStore(): SchedulerStore {
       return result.changes > 0;
     },
 
+    resetStateAndUpsertActiveRun(record) {
+      const connectorInstanceId = record.connector_instance_id ?? record.connector_id;
+      try {
+        return writeTransaction(() => {
+          exec(referenceQueries.connectorInstancesDeleteConnectorStateByInstance, [connectorInstanceId]);
+          const result = exec(referenceQueries.controllerUpsertActiveRun, activeRunInsertParameters(record));
+          if (result.changes === 0) throw new ActiveRunConflictRollback();
+          return true;
+        });
+      } catch (error) {
+        if (error instanceof ActiveRunConflictRollback) return false;
+        throw error;
+      }
+    },
+
     upsertLastRunTime(connectorInstanceId, lastRunTimeMs, updatedAt, connectorId = connectorInstanceId) {
       exec(referenceQueries.controllerUpsertSchedulerLastRunTime, [
         connectorInstanceId,
@@ -1637,6 +1654,26 @@ export function createPostgresSchedulerStore(): SchedulerStore {
       return (result.rowCount ?? 0) > 0;
     },
 
+    async resetStateAndUpsertActiveRun(record) {
+      const connectorInstanceId = record.connector_instance_id ?? record.connector_id;
+      try {
+        await withPostgresTransaction(async (client) => {
+          await client.query("DELETE FROM connector_state WHERE connector_instance_id = $1", [connectorInstanceId]);
+          const result = await client.query(
+            `INSERT INTO controller_active_runs(connector_instance_id, connector_id, run_id, trace_id, scenario_id, started_at, run_generation)
+             VALUES($1, $2, $3, $4, $5, $6, $7)
+             ON CONFLICT (connector_instance_id) DO NOTHING`,
+            activeRunInsertParameters(record)
+          );
+          if ((result.rowCount ?? 0) === 0) throw new ActiveRunConflictRollback();
+        });
+        return true;
+      } catch (error) {
+        if (error instanceof ActiveRunConflictRollback) return false;
+        throw error;
+      }
+    },
+
     async upsertLastRunTime(connectorInstanceId, lastRunTimeMs, updatedAt, connectorId = connectorInstanceId) {
       await postgresQuery(
         `INSERT INTO scheduler_last_run_times(connector_instance_id, connector_id, last_run_time_ms, updated_at)
@@ -1650,6 +1687,8 @@ export function createPostgresSchedulerStore(): SchedulerStore {
     },
   };
 }
+
+class ActiveRunConflictRollback extends Error {}
 
 export function createSchedulerStore(): SchedulerStore {
   return isPostgresStorageBackend() ? createPostgresSchedulerStore() : createSqliteSchedulerStore();
