@@ -708,7 +708,7 @@ function createCdpEventRouter({
  */
 export function createDefaultStreamingCompanionFactory({
   resolveTargetForInteraction,
-  fetchImpl = globalThis.fetch,
+  fetchImpl: _fetchImpl = globalThis.fetch,
   WebSocketCtor = globalThis.WebSocket,
   logger,
   commandTimeoutMs,
@@ -728,6 +728,7 @@ export function createDefaultStreamingCompanionFactory({
       target?: BrowserSurfaceStreamingTarget | null;
     }) => CdpCompanion | null)
   | null {
+  void _fetchImpl;
   if (typeof resolveTargetForInteraction !== "function") {
     return null;
   }
