@@ -1618,6 +1618,40 @@ test(
 );
 
 test(
+  "a pending gap reported by a later run increments its attempt count and same-error streak",
+  withTempDb(async () => {
+    const store = createSqliteConnectorDetailGapStore();
+    const first = await store.upsertPendingGap({
+      connectorId: "chase",
+      connectorInstanceId: "cin_chase_personal",
+      lastError: { class: "qfx_download_failed", message: "Timed out" },
+      lastRunId: "run_chase_1",
+      now: "2026-09-28T12:00:00.000Z",
+      reason: "temporary_unavailable",
+      recordKey: "activity-account-key",
+      stream: "transactions",
+    });
+    assert.ok(first);
+    const second = await store.upsertPendingGap({
+      connectorId: "chase",
+      connectorInstanceId: "cin_chase_personal",
+      lastError: { class: "qfx_download_failed", message: "Timed out" },
+      lastRunId: "run_chase_2",
+      now: "2026-09-29T12:00:00.000Z",
+      reason: "temporary_unavailable",
+      recordKey: "activity-account-key",
+      stream: "transactions",
+    });
+
+    assert.ok(second);
+    assert.equal(second.gap_id, first.gap_id);
+    assert.equal(second.attempt_count, 1, "one later failed run is one retry attempt");
+    assert.equal(second.last_attempt_at, "2026-09-29T12:00:00.000Z");
+    assert.equal((second.last_error as { consecutive_same_error_count?: number }).consecutive_same_error_count, 2);
+  })
+);
+
+test(
   "listPendingGapsForConnector returns gaps across every connector instance for diagnostics",
   withTempDb(async () => {
     const store = createSqliteConnectorDetailGapStore();

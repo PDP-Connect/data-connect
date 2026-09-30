@@ -36,6 +36,7 @@ import {
   type ProgressMode,
   type RenderedVerdict,
   type ScheduleEvidence,
+  type StreamGapFailureEvidence,
   type StreamRollup,
   synthesizeRenderedVerdict,
 } from "./rendered-verdict.ts";
@@ -68,6 +69,77 @@ export interface CollectionReportEntryLike {
    */
   readonly skipped?: { readonly recovery_action?: string | null } | null;
   readonly stream: string;
+}
+
+/** Internal subset of a durable pending gap. It never reaches the wire. */
+export interface PendingGapFailureLike {
+  readonly last_attempt_at?: unknown;
+  readonly last_error?: unknown;
+  readonly last_run_id?: unknown;
+  readonly reason?: unknown;
+  readonly record_key?: unknown;
+  readonly stream?: unknown;
+  readonly updated_at?: unknown;
+}
+
+function gapFailureEvidence(
+  gaps: readonly PendingGapFailureLike[],
+  readLimit: number | null | undefined
+): ReadonlyMap<string, StreamGapFailureEvidence> {
+  const keyCountIsFloor = typeof readLimit === "number" && readLimit > 0 && gaps.length >= Math.floor(readLimit);
+  const records = gaps.flatMap((gap) => {
+    if (typeof gap.stream !== "string" || !/^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(gap.stream)) return [];
+    if (typeof gap.reason !== "string" || !/^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(gap.reason)) return [];
+    const lastError = gap.last_error && typeof gap.last_error === "object" ? gap.last_error as Record<string, unknown> : {};
+    const rawClass = lastError.errorClass ?? lastError.class;
+    const errorClass = typeof rawClass === "string" && /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(rawClass) ? rawClass : null;
+    const rawTime = gap.last_attempt_at ?? gap.updated_at;
+    const latestAt = typeof rawTime === "string" && Number.isFinite(Date.parse(rawTime)) ? rawTime : null;
+    const latestRunId = typeof gap.last_run_id === "string" && /^[A-Za-z0-9_-]{1,96}$/.test(gap.last_run_id) ? gap.last_run_id : null;
+    const message = typeof lastError.message === "string"
+      ? /\b(?:timed?\s*out|timeout)\b/i.test(lastError.message) ? "timed out"
+        : /\b(?:socket|network|connection reset|connection failed)\b/i.test(lastError.message) ? "network connection failed"
+          : /\b(?:parse|malformed|invalid format)\b/i.test(lastError.message) ? "file could not be read"
+            : /\b(?:denied|forbidden|unauthori[sz]ed)\b/i.test(lastError.message) ? "access was denied" : null
+      : null;
+    const rawStreak = lastError.consecutive_same_error_count;
+    return [{
+      errorClass,
+      key: typeof gap.record_key === "string" && gap.record_key.length > 0,
+      latestAt,
+      latestRunId,
+      message,
+      reason: gap.reason,
+      sameErrorCount: typeof rawStreak === "number" && Number.isSafeInteger(rawStreak) && rawStreak > 0 ? rawStreak : 1,
+      stream: gap.stream,
+    }];
+  });
+  const latest = new Map<string, (typeof records)[number]>();
+  for (const record of records) {
+    const prior = latest.get(record.stream);
+    if (!prior || (record.latestAt ?? "") >= (prior.latestAt ?? "")) latest.set(record.stream, record);
+  }
+  const result = new Map<string, StreamGapFailureEvidence>();
+  for (const [stream, record] of latest) {
+    const matching = records.filter((candidate) =>
+      candidate.stream === stream && candidate.reason === record.reason && candidate.errorClass === record.errorClass
+    );
+    const affectedStreams = [...new Set([...latest]
+      .filter(([, candidate]) => candidate.reason === record.reason && candidate.errorClass === record.errorClass)
+      .map(([name]) => name))].sort();
+    result.set(stream, {
+      affected_streams: affectedStreams,
+      consecutive_same_error_count: record.sameErrorCount,
+      error_class: record.errorClass,
+      key_count: matching.filter((candidate) => candidate.key).length || matching.length,
+      key_count_is_floor: keyCountIsFloor,
+      latest_at: record.latestAt,
+      latest_run_id: record.latestRunId,
+      message: record.message,
+      reason: record.reason,
+    });
+  }
+  return result;
 }
 
 /**
@@ -132,9 +204,12 @@ export function streamPriority(stream: ManifestStreamLike | undefined): StreamRo
 export function buildStreamRollups(
   report: readonly CollectionReportEntryLike[],
   manifestStreams: readonly ManifestStreamLike[],
-  snapshot: ConnectionHealthSnapshot
+  snapshot: ConnectionHealthSnapshot,
+  pendingGaps: readonly PendingGapFailureLike[] = [],
+  pendingGapsReadLimit?: number | null
 ): StreamRollup[] {
   const streamByName = new Map(manifestStreams.map((s) => [s.name, s]));
+  const failuresByStream = gapFailureEvidence(pendingGaps, pendingGapsReadLimit);
   const attentionOpen = snapshot.axes.attention !== "none";
   return report.map((entry) => {
     const manifestStream = streamByName.get(entry.stream);
@@ -177,6 +252,7 @@ export function buildStreamRollups(
       considered: entry.considered === "unknown" ? null : entry.considered,
       coverage: entry.coverage_condition,
       gap_retryable: retryable,
+      gap_failure: failuresByStream.get(entry.stream) ?? null,
       priority: effectivePriority,
       recovery_action: entry.skipped?.recovery_action ?? null,
       stream_id: entry.stream,
@@ -277,13 +353,22 @@ export function synthesizeConnectorVerdict(input: {
   readonly snapshot: ConnectionHealthSnapshot;
   readonly report: readonly CollectionReportEntryLike[];
   readonly manifestStreams: readonly ManifestStreamLike[];
+  /** Durable pending rows for owner-safe per-stream failure wording. */
+  readonly pendingGaps?: readonly PendingGapFailureLike[];
+  readonly pendingGapsReadLimit?: number | null;
   readonly refresh: ConnectionRefreshEvidence | null;
   readonly progress: ProgressEvidence | null;
   readonly runtimeOk?: boolean;
   /** Optional instance-schedule evidence for `reattach_schedule` (Wave 10a). */
   readonly scheduleEvidence?: ScheduleEvidence | null;
 }): RenderedVerdict {
-  const streams = buildStreamRollups(input.report, input.manifestStreams, input.snapshot);
+  const streams = buildStreamRollups(
+    input.report,
+    input.manifestStreams,
+    input.snapshot,
+    input.pendingGaps,
+    input.pendingGapsReadLimit
+  );
   return synthesizeRenderedVerdict(
     input.snapshot,
     streams,

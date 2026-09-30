@@ -730,6 +730,53 @@ test("toSourceInstanceView surfaces server-owned collection report facts per str
   assert.equal(threads?.collection, null, "streams without collection report facts stay explicitly unavailable");
 });
 
+test("toSourceInstanceView carries an informative retryable-gap sentence onto its stream row", () => {
+  const view = toSourceInstanceView(
+    summary({
+      rendered_verdict: renderedVerdict({
+        streams: [
+          {
+            action_ref: null,
+            collected: 0,
+            considered: 1,
+            coverage: "retryable_gap",
+            disposition: "resumable",
+            statement: "The connector could not download the activity file for 1 key (timed out); the next run will retry.",
+            stream_id: "messages",
+          },
+        ],
+      }),
+    })
+  );
+
+  assert.equal(
+    view.streams.find((stream) => stream.name === "messages")?.gapStatement,
+    "The connector could not download the activity file for 1 key (timed out); the next run will retry."
+  );
+});
+
+test("toSourceInstanceView omits the generic retry sentence from stream rows", () => {
+  const view = toSourceInstanceView(
+    summary({
+      rendered_verdict: renderedVerdict({
+        streams: [
+          {
+            action_ref: null,
+            collected: 0,
+            considered: 1,
+            coverage: "retryable_gap",
+            disposition: "resumable",
+            statement: "The next run is expected to fill the rest.",
+            stream_id: "messages",
+          },
+        ],
+      }),
+    })
+  );
+
+  assert.equal(view.streams.find((stream) => stream.name === "messages")?.gapStatement, null);
+});
+
 test("toSourceInstanceView surfaces retained stream counts without conflating them with latest collection", () => {
   const view = toSourceInstanceView(
     summary({

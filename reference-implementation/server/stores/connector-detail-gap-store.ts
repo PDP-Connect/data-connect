@@ -333,6 +333,16 @@ function encodeJson(value: unknown): string | null {
   return value === null || value === undefined ? null : JSON.stringify(value);
 }
 
+function withInitialSameErrorCount(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return value;
+  }
+  const metadata = value as Record<string, unknown>;
+  return typeof metadata.class === "string" && metadata.class.length > 0
+    ? { ...metadata, consecutive_same_error_count: 1 }
+    : value;
+}
+
 function parseJson(value: unknown): unknown {
   if (value === null || value === undefined) {
     return null;
@@ -1687,6 +1697,7 @@ export function createSqliteConnectorDetailGapStore() {
     async upsertPendingGap(input: UpsertGapInput): Promise<DetailGap | null> {
       const gap = normalizeGapInput(input);
       const detailLocatorJson = encodeJson(gap.detailLocator);
+      const lastErrorJson = encodeJson(withInitialSameErrorCount(gap.lastError));
       // REVIEWED-DYNAMIC: connector_detail_gaps is owned by this store and
       // not yet represented in the static query registry.
       execDynamicSqlAcknowledged(
@@ -1737,8 +1748,24 @@ export function createSqliteConnectorDetailGapStore() {
               THEN 'recovered'
             ELSE 'pending'
           END,
+          attempt_count = connector_detail_gaps.attempt_count + CASE
+            WHEN excluded.last_run_id IS NOT NULL AND excluded.last_run_id IS NOT connector_detail_gaps.last_run_id THEN 1
+            ELSE 0
+          END,
+          last_attempt_at = CASE
+            WHEN excluded.last_run_id IS NOT NULL AND excluded.last_run_id IS NOT connector_detail_gaps.last_run_id THEN excluded.updated_at
+            ELSE connector_detail_gaps.last_attempt_at
+          END,
           next_attempt_after = excluded.next_attempt_after,
-          last_error_json = excluded.last_error_json,
+          last_error_json = CASE
+            WHEN json_extract(excluded.last_error_json, '$.class') IS NULL THEN excluded.last_error_json
+            ELSE json_set(excluded.last_error_json, '$.consecutive_same_error_count', CASE
+              WHEN json_extract(excluded.last_error_json, '$.class') = json_extract(connector_detail_gaps.last_error_json, '$.class')
+                THEN COALESCE(json_extract(connector_detail_gaps.last_error_json, '$.consecutive_same_error_count'), 1)
+                  + CASE WHEN excluded.last_run_id IS NOT connector_detail_gaps.last_run_id THEN 1 ELSE 0 END
+              ELSE 1
+            END)
+          END,
           last_run_id = excluded.last_run_id,
           updated_at = excluded.updated_at
         -- Identity conflict target = the natural key, with the volatile locator
@@ -1761,8 +1788,24 @@ export function createSqliteConnectorDetailGapStore() {
               THEN 'recovered'
             ELSE 'pending'
           END,
+          attempt_count = connector_detail_gaps.attempt_count + CASE
+            WHEN excluded.last_run_id IS NOT NULL AND excluded.last_run_id IS NOT connector_detail_gaps.last_run_id THEN 1
+            ELSE 0
+          END,
+          last_attempt_at = CASE
+            WHEN excluded.last_run_id IS NOT NULL AND excluded.last_run_id IS NOT connector_detail_gaps.last_run_id THEN excluded.updated_at
+            ELSE connector_detail_gaps.last_attempt_at
+          END,
           next_attempt_after = excluded.next_attempt_after,
-          last_error_json = excluded.last_error_json,
+          last_error_json = CASE
+            WHEN json_extract(excluded.last_error_json, '$.class') IS NULL THEN excluded.last_error_json
+            ELSE json_set(excluded.last_error_json, '$.consecutive_same_error_count', CASE
+              WHEN json_extract(excluded.last_error_json, '$.class') = json_extract(connector_detail_gaps.last_error_json, '$.class')
+                THEN COALESCE(json_extract(connector_detail_gaps.last_error_json, '$.consecutive_same_error_count'), 1)
+                  + CASE WHEN excluded.last_run_id IS NOT connector_detail_gaps.last_run_id THEN 1 ELSE 0 END
+              ELSE 1
+            END)
+          END,
           last_run_id = excluded.last_run_id,
           updated_at = excluded.updated_at
       `,
@@ -1780,7 +1823,7 @@ export function createSqliteConnectorDetailGapStore() {
           encodeJson(gap.scope),
           gap.reason,
           gap.nextAttemptAfter,
-          encodeJson(gap.lastError),
+          lastErrorJson,
           gap.discoveredRunId,
           gap.lastRunId,
           gap.now,
@@ -2328,6 +2371,7 @@ export function createPostgresConnectorDetailGapStore() {
     },
     async upsertPendingGap(input: UpsertGapInput): Promise<DetailGap | null> {
       const gap = normalizeGapInput(input);
+      const lastErrorJson = encodeJson(withInitialSameErrorCount(gap.lastError));
       const result = await postgresQuery<DetailGapRow>(
         `
         INSERT INTO connector_detail_gaps(
@@ -2378,8 +2422,24 @@ export function createPostgresConnectorDetailGapStore() {
               THEN 'recovered'
             ELSE 'pending'
           END,
+          attempt_count = connector_detail_gaps.attempt_count + CASE
+            WHEN EXCLUDED.last_run_id IS NOT NULL AND EXCLUDED.last_run_id IS DISTINCT FROM connector_detail_gaps.last_run_id THEN 1
+            ELSE 0
+          END,
+          last_attempt_at = CASE
+            WHEN EXCLUDED.last_run_id IS NOT NULL AND EXCLUDED.last_run_id IS DISTINCT FROM connector_detail_gaps.last_run_id THEN EXCLUDED.updated_at
+            ELSE connector_detail_gaps.last_attempt_at
+          END,
           next_attempt_after = EXCLUDED.next_attempt_after,
-          last_error_json = EXCLUDED.last_error_json,
+          last_error_json = CASE
+            WHEN EXCLUDED.last_error_json ->> 'class' IS NULL THEN EXCLUDED.last_error_json
+            ELSE jsonb_set(EXCLUDED.last_error_json, '{consecutive_same_error_count}', to_jsonb(CASE
+              WHEN EXCLUDED.last_error_json ->> 'class' = connector_detail_gaps.last_error_json ->> 'class'
+                THEN COALESCE((connector_detail_gaps.last_error_json ->> 'consecutive_same_error_count')::integer, 1)
+                  + CASE WHEN EXCLUDED.last_run_id IS DISTINCT FROM connector_detail_gaps.last_run_id THEN 1 ELSE 0 END
+              ELSE 1
+            END), true)
+          END,
           last_run_id = EXCLUDED.last_run_id,
           updated_at = EXCLUDED.updated_at
         RETURNING *
@@ -2398,7 +2458,7 @@ export function createPostgresConnectorDetailGapStore() {
           encodeJson(gap.scope),
           gap.reason,
           gap.nextAttemptAfter,
-          encodeJson(gap.lastError),
+          lastErrorJson,
           gap.discoveredRunId,
           gap.lastRunId,
           gap.now,
