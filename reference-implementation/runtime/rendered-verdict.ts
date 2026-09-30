@@ -2710,30 +2710,22 @@ function streamStatement(
   }
 }
 
+const GAP_FAILURE_ACTIONS: ReadonlyMap<string, string> = new Map([
+  ["download_button_click_failed", "start the activity file download"],
+  ["qfx_download_failed", "download the activity file"],
+  ["qfx_parse_failed", "read the activity file"],
+]);
+
+const GAP_FAILURE_REASONS: ReadonlyMap<string, string> = new Map([
+  ["rate_limited", "rate limited"],
+  ["temporary_unavailable", "temporarily unavailable"],
+]);
+
 function gapFailureStatement(gap: StreamGapFailureEvidence): string {
-  const errorClass = gap.error_class?.toLowerCase() ?? "";
-  const action =
-    errorClass === "qfx_download_failed"
-      ? "download the activity file"
-      : errorClass === "qfx_parse_failed"
-        ? "read the activity file"
-        : errorClass === "download_button_click_failed"
-          ? "start the activity file download"
-          : "retrieve the missing data";
-  const keyLabel = gap.key_count === 1 ? "key" : "keys";
-  const keyCountLabel = `${gap.key_count_is_floor ? "at least " : ""}${gap.key_count.toLocaleString()} ${keyLabel}`;
-  const reason = gap.reason === "temporary_unavailable" ? "temporarily unavailable" : gap.reason.replaceAll("_", " ");
-  const details = [
-    gap.message,
-    reason,
-    gap.error_class ? `error class ${gap.error_class}` : null,
-    gap.affected_streams.length ? `affected streams ${gap.affected_streams.join(", ")}` : null,
-    gap.consecutive_same_error_count === 2 ? "failed twice for the same reason" : null,
-    gap.consecutive_same_error_count > 2 ? "failed repeatedly for the same reason" : null,
-    gap.latest_run_id ? `latest run ${gap.latest_run_id}` : null,
-    gap.latest_at ? `at ${gap.latest_at}` : null,
-  ].filter((detail): detail is string => detail !== null);
-  return `The connector could not ${action} for ${keyCountLabel} (${details.join("; ")}); the next run will retry.`;
+  const action = GAP_FAILURE_ACTIONS.get(gap.error_class?.toLowerCase() ?? "") ?? "retrieve the missing data";
+  const reason = GAP_FAILURE_REASONS.get(gap.reason) ?? "a problem occurred";
+  const details = [reason, gap.message].filter((detail): detail is string => detail !== null);
+  return `The connector could not ${action} (${details.join("; ")}); the next run will retry.`;
 }
 
 // ─── Detail + suppressed routing ────────────────────────────────────────────

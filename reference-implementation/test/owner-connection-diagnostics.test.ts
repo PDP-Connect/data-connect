@@ -325,11 +325,16 @@ interface DetailGapRecord {
 }
 
 interface ConnectorDetailGapStoreLike {
+  claimPendingGaps: (
+    gapIds: readonly (string | null | undefined)[],
+    options: { leaseExpiresAt?: string | null; leaseId?: string | null; runId?: string | null }
+  ) => Promise<string[]>;
   markGapStatus: (
     gapId: string,
     status: string,
     options?: DetailGapMarkStatusOptions
   ) => Promise<DetailGapRecord | null>;
+  settleLeasedGapRecovered: (lease: { gapId?: unknown; leaseId?: unknown; runId?: unknown }) => Promise<DetailGapRecord | null>;
   upsertPendingGap: (input: DetailGapUpsertInput) => Promise<DetailGapRecord | null>;
 }
 
@@ -720,23 +725,44 @@ test("owner diagnostics carries a sanitized latest pending gap reason into its s
     });
 
     const gapStore = detailGapStore();
-    await gapStore.upsertPendingGap({
+    const firstGap = await gapStore.upsertPendingGap({
       connectorId: connectorKey,
       connectorInstanceId: "cin_spotify_gap_reason",
-      lastError: { class: "qfx_download_failed", message: "Timed out for account 1234567890" },
+      lastError: { class: "qfx_download_failed_9876543210", message: "Timed out for account 1234567890; email owner@example.test" },
       lastRunId: "run_chase_1",
       now: "2026-09-28T12:00:00.000Z",
-      reason: "temporary_unavailable",
+      reason: "account_1234567890",
       recordKey: "private-account-key",
       stream: "tracks",
     });
+    assert.ok(firstGap);
     await gapStore.upsertPendingGap({
       connectorId: connectorKey,
       connectorInstanceId: "cin_spotify_gap_reason",
-      lastError: { class: "qfx_download_failed", message: "Timed out for account 1234567890" },
+      lastError: { class: "qfx_download_failed_9876543210", message: "Timed out for account 1234567890; email owner@example.test" },
       lastRunId: "run_chase_2",
       now: "2026-09-29T12:00:00.000Z",
-      reason: "temporary_unavailable",
+      reason: "account_1234567890",
+      recordKey: "private-account-key",
+      stream: "tracks",
+    });
+    const recoveryLease = { gapId: firstGap.gap_id, leaseId: "lease_chase_2", runId: "run_chase_2" };
+    assert.deepEqual(
+      await gapStore.claimPendingGaps([firstGap.gap_id], {
+        leaseExpiresAt: "2026-09-30T12:00:00.000Z",
+        leaseId: recoveryLease.leaseId,
+        runId: recoveryLease.runId,
+      }),
+      [firstGap.gap_id]
+    );
+    assert.ok(await gapStore.settleLeasedGapRecovered(recoveryLease));
+    await gapStore.upsertPendingGap({
+      connectorId: connectorKey,
+      connectorInstanceId: "cin_spotify_gap_reason",
+      lastError: { class: "qfx_download_failed_9876543210", message: "Timed out for account 1234567890; email owner@example.test" },
+      lastRunId: "run_chase_3",
+      now: "2026-09-30T12:00:00.000Z",
+      reason: "account_1234567890",
       recordKey: "private-account-key",
       stream: "tracks",
     });
@@ -755,16 +781,13 @@ test("owner diagnostics carries a sanitized latest pending gap reason into its s
     };
     const stream = verdict.streams?.find((row) => row.stream_id === "tracks");
     assert.ok(stream?.statement, "the diagnostics response includes the tracks verdict");
-    assert.match(stream.statement, /temporarily unavailable/i);
-    assert.match(stream.statement, /qfx_download_failed/);
+    assert.match(stream.statement, /retrieve the missing data/i);
+    assert.match(stream.statement, /a problem occurred/i);
     assert.match(stream.statement, /timed out/i);
-    assert.match(stream.statement, /1 key/);
-    assert.match(stream.statement, /failed twice for the same reason/i);
-    assert.match(stream.statement, /run_chase_2/);
-    assert.match(stream.statement, /2026-09-29/);
-    assert.doesNotMatch(stream.statement, /1234567890|private-account-key|gap-reason@example\.com/);
+    assert.doesNotMatch(stream.statement, /failed twice|failed repeatedly/i);
+    assert.doesNotMatch(stream.statement, /1234567890|9876543210|owner@example\.test|private-account-key|gap-reason@example\.com|run_chase_|2026-09-29|tracks/);
     assert.equal(verdict.detail?.detail_gap_backlog?.pending_other, 1);
-    assert.equal(verdict.detail?.detail_gap_backlog?.max_attempt_count, 1);
+    assert.equal(verdict.detail?.detail_gap_backlog?.max_attempt_count, 3);
   });
 });
 

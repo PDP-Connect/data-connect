@@ -1761,8 +1761,12 @@ export function createSqliteConnectorDetailGapStore() {
             WHEN json_extract(excluded.last_error_json, '$.class') IS NULL THEN excluded.last_error_json
             ELSE json_set(excluded.last_error_json, '$.consecutive_same_error_count', CASE
               WHEN json_extract(excluded.last_error_json, '$.class') = json_extract(connector_detail_gaps.last_error_json, '$.class')
-                THEN COALESCE(json_extract(connector_detail_gaps.last_error_json, '$.consecutive_same_error_count'), 1)
-                  + CASE WHEN excluded.last_run_id IS NOT connector_detail_gaps.last_run_id THEN 1 ELSE 0 END
+                THEN CASE
+                  WHEN connector_detail_gaps.status = 'recovered' THEN 1
+                  WHEN excluded.last_run_id IS NOT NULL AND excluded.last_run_id IS NOT connector_detail_gaps.last_run_id
+                    THEN COALESCE(json_extract(connector_detail_gaps.last_error_json, '$.consecutive_same_error_count'), 1) + 1
+                  ELSE COALESCE(json_extract(connector_detail_gaps.last_error_json, '$.consecutive_same_error_count'), 1)
+                END
               ELSE 1
             END)
           END,
@@ -1801,8 +1805,12 @@ export function createSqliteConnectorDetailGapStore() {
             WHEN json_extract(excluded.last_error_json, '$.class') IS NULL THEN excluded.last_error_json
             ELSE json_set(excluded.last_error_json, '$.consecutive_same_error_count', CASE
               WHEN json_extract(excluded.last_error_json, '$.class') = json_extract(connector_detail_gaps.last_error_json, '$.class')
-                THEN COALESCE(json_extract(connector_detail_gaps.last_error_json, '$.consecutive_same_error_count'), 1)
-                  + CASE WHEN excluded.last_run_id IS NOT connector_detail_gaps.last_run_id THEN 1 ELSE 0 END
+                THEN CASE
+                  WHEN connector_detail_gaps.status = 'recovered' THEN 1
+                  WHEN excluded.last_run_id IS NOT NULL AND excluded.last_run_id IS NOT connector_detail_gaps.last_run_id
+                    THEN COALESCE(json_extract(connector_detail_gaps.last_error_json, '$.consecutive_same_error_count'), 1) + 1
+                  ELSE COALESCE(json_extract(connector_detail_gaps.last_error_json, '$.consecutive_same_error_count'), 1)
+                END
               ELSE 1
             END)
           END,
@@ -2435,8 +2443,12 @@ export function createPostgresConnectorDetailGapStore() {
             WHEN EXCLUDED.last_error_json ->> 'class' IS NULL THEN EXCLUDED.last_error_json
             ELSE jsonb_set(EXCLUDED.last_error_json, '{consecutive_same_error_count}', to_jsonb(CASE
               WHEN EXCLUDED.last_error_json ->> 'class' = connector_detail_gaps.last_error_json ->> 'class'
-                THEN COALESCE((connector_detail_gaps.last_error_json ->> 'consecutive_same_error_count')::integer, 1)
-                  + CASE WHEN EXCLUDED.last_run_id IS DISTINCT FROM connector_detail_gaps.last_run_id THEN 1 ELSE 0 END
+                THEN CASE
+                  WHEN connector_detail_gaps.status = 'recovered' THEN 1
+                  WHEN EXCLUDED.last_run_id IS NOT NULL AND EXCLUDED.last_run_id IS DISTINCT FROM connector_detail_gaps.last_run_id
+                    THEN COALESCE((connector_detail_gaps.last_error_json ->> 'consecutive_same_error_count')::integer, 1) + 1
+                  ELSE COALESCE((connector_detail_gaps.last_error_json ->> 'consecutive_same_error_count')::integer, 1)
+                END
               ELSE 1
             END), true)
           END,
