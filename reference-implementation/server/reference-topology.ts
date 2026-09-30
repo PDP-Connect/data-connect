@@ -17,8 +17,8 @@ export const REFERENCE_MODE_DIRECT = "direct";
 export const REFERENCE_MODE_COMPOSED = "composed";
 
 export const DEFAULT_REFERENCE_BROWSER_ORIGIN = "http://localhost:3002";
-export const DEFAULT_AS_INTERNAL_URL = "http://localhost:7662";
-export const DEFAULT_RS_INTERNAL_URL = "http://localhost:7663";
+export const DEFAULT_AS_INTERNAL_URL = "http://127.0.0.1:7662";
+export const DEFAULT_RS_INTERNAL_URL = "http://127.0.0.1:7663";
 
 export type ReferenceMode = typeof REFERENCE_MODE_DIRECT | typeof REFERENCE_MODE_COMPOSED;
 

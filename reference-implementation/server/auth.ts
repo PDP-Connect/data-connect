@@ -1340,8 +1340,14 @@ export function parsePendingConsentRequestUri(requestUri: unknown): string | nul
 }
 
 export function buildPendingConsentAuthorizationUrl(requestUri: string, opts: { baseUrl?: string } = {}): string {
-  const baseUrl = opts.baseUrl || process.env.AS_PUBLIC_URL || `http://localhost:${process.env.AS_PORT || "7662"}`;
+  const baseUrl = opts.baseUrl || process.env.AS_PUBLIC_URL || defaultAsBaseUrl();
   return `${baseUrl}/consent?request_uri=${encodeURIComponent(requestUri)}`;
+}
+
+function defaultAsBaseUrl(): string {
+  const bindHost = process.env.PDPP_BIND_HOST?.trim() || "127.0.0.1";
+  const urlHost = bindHost.includes(":") && !bindHost.startsWith("[") ? `[${bindHost}]` : bindHost;
+  return `http://${urlHost}:${process.env.AS_PORT || "7662"}`;
 }
 
 export function configureNativeManifest(manifest: DbRow | null = null): void {
@@ -5954,8 +5960,7 @@ export async function initiateGrant(
 
     const deviceCode = generateId("dc");
     const userCode = randomBytes(3).toString("hex").toUpperCase();
-    const verificationBaseUrl =
-      opts.baseUrl || process.env.AS_PUBLIC_URL || `http://localhost:${process.env.AS_PORT || "7662"}`;
+    const verificationBaseUrl = opts.baseUrl || process.env.AS_PUBLIC_URL || defaultAsBaseUrl();
     const expiresAt = expiresInIso(300);
 
     await createPendingConsent(deviceCode, userCode, normalized, expiresAt);
@@ -6087,8 +6092,7 @@ async function initiateStagedGrantBatch(
 
     const deviceCode = generateId("dc");
     const userCode = randomBytes(3).toString("hex").toUpperCase();
-    const verificationBaseUrl =
-      opts.baseUrl || process.env.AS_PUBLIC_URL || `http://localhost:${process.env.AS_PORT || "7662"}`;
+    const verificationBaseUrl = opts.baseUrl || process.env.AS_PUBLIC_URL || defaultAsBaseUrl();
     const expiresAt = expiresInIso(300);
 
     await createPendingConsent(deviceCode, userCode, batch, expiresAt);
@@ -11114,8 +11118,7 @@ export async function initiateOwnerDeviceAuthorization(
 
     const deviceCode = generateId("dc_owner");
     const userCode = randomBytes(3).toString("hex").toUpperCase();
-    const verificationBaseUrl =
-      opts.baseUrl || process.env.AS_PUBLIC_URL || `http://localhost:${process.env.AS_PORT || "7662"}`;
+    const verificationBaseUrl = opts.baseUrl || process.env.AS_PUBLIC_URL || defaultAsBaseUrl();
     const expiresIn = opts.expiresIn || 300;
     const interval = opts.interval || 1;
     const expiresAt = expiresInIso(expiresIn);

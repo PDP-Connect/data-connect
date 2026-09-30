@@ -120,7 +120,7 @@ export interface MountRsHostedMcpContext {
    * EXPLICITLY from `opts.rsInternalUrl` or the operator's `PDPP_RS_URL`
    * (see `startServer`) — a loopback/cluster address, NOT request-derived from
    * `Host`/`X-Forwarded-*`. NOTE: it is intentionally NOT the bare
-   * `referenceTopology.rsInternalUrl` default (`http://localhost:7663`): that
+   * `referenceTopology.rsInternalUrl` default (`http://127.0.0.1:7663`): that
    * default is skipped so ephemeral-port test harnesses and deployments that
    * do not set `PDPP_RS_URL` resolve this to null and fall back to the public
    * resource (current behavior preserved). Used as the child fetch base only;
