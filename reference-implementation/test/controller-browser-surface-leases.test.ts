@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
+import { mkdirSync, rmSync } from "node:fs";
+import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import {
   type BrowserSurface,
@@ -18,6 +20,8 @@ import {
   createBrowserSurfaceReplacementLedger,
   type ReplacementReceipt,
 } from "../runtime/browser-surface/replacement-receipt-ledger.ts";
+import { createBrowserSurfaceManager } from "../runtime/browser-surface/run-coordinator.ts";
+import { createTraceContext } from "../lib/spine.ts";
 import type { BrowserSurfaceReadinessProbe } from "../runtime/browser-surface-readiness.ts";
 import {
   __resetControllerInteractionStateForTests,
@@ -2687,6 +2691,122 @@ test("boot coalesces duplicate ready scope loss while preserving historical fail
     ["started", "completed"],
     "the one coalesced live loss resolves only when its same-profile successor proves readiness"
   );
+});
+
+test("host retry abandons a persisted loss receipt after two RI restarts", async (t) => {
+  const scratchDir = join(process.cwd(), ".tmp", `replacement-retry-${process.pid}`);
+  mkdirSync(scratchDir, { recursive: true });
+  const dbPath = join(scratchDir, "test.sqlite");
+  closeDb();
+  initDb(dbPath);
+  t.after(() => {
+    closeDb();
+    rmSync(scratchDir, { force: true, recursive: true });
+  });
+
+  const readySurface: BrowserSurface = {
+    backend: "neko",
+    cdp_url: "http://old-host:9222",
+    connector_id: "managed",
+    container_id: "old-container",
+    created_at: "2026-05-12T12:00:00.000Z",
+    health: "ready",
+    last_used_at: "2026-05-12T12:00:00.000Z",
+    profile_key: "managed-profile:connection_retry",
+    stream_base_url: "http://old-host:8080",
+    surface_id: "surface_old",
+    surface_subject_id: "connection_retry",
+  };
+  const leaseStore = createSqliteBrowserSurfaceLeaseStore();
+  const receiptStore = getDefaultBrowserSurfaceReplacementReceiptStore();
+  await leaseStore.upsertSurface(readySurface);
+
+  let leaseSeq = 0;
+  let surfaceSeq = 0;
+  const makeLeaseManager = (initialSurfaces: BrowserSurface[]) =>
+    new BrowserSurfaceLeaseManager({
+      config: {
+        defaultPriorityClass: "background",
+        idleTtlMs: 600_000,
+        leaseWaitTimeoutMs: 60_000,
+        managedConnectors: new Set(["managed"]),
+        priorityRanks: DEFAULT_NEKO_PRIORITY_RANKS,
+        surfaceCap: 2,
+        surfaceMode: "dynamic",
+      },
+      initialSurfaces,
+      makeLeaseId: () => `lease_${++leaseSeq}`,
+      makeSurfaceId: () => `surface_${++surfaceSeq}`,
+      nextFencingToken: () => 1,
+    });
+  const makeManager = (
+    browserSurfaceLeaseManager: BrowserSurfaceLeaseManager,
+    browserSurfaceAllocator: BrowserSurfaceAllocator,
+    beforeBrowserSurfaceLeaseEnsure?: (args: { runId: string; surfaceId: string }) => void
+  ) =>
+    createBrowserSurfaceManager({
+      activeRunInteractions: new Map(),
+      browserSurfaceAllocator,
+      ...(beforeBrowserSurfaceLeaseEnsure ? { beforeBrowserSurfaceLeaseEnsure } : {}),
+      browserSurfaceLeaseManager,
+      browserSurfaceLeaseStore: leaseStore,
+      browserSurfaceMidWaitPollIntervalMs: undefined,
+      browserSurfaceReadinessProbe: null,
+      browserSurfaceReadinessTimeoutMs: undefined,
+      browserSurfaceReplacementReceiptStore: receiptStore,
+      listPersistedActiveRuns: async () => [],
+      log: { warn: () => undefined },
+      pendingBrowserSurfaceLaunches: new Map(),
+      scheduleRun: () => undefined,
+      startupControllerRunReconciliation: Promise.resolve(),
+    });
+
+  // RI restart 1 observes that the ready connection surface is gone from its
+  // fresh host and stores an external-loss started receipt.
+  const restartOne = makeManager(makeLeaseManager([readySurface]), {
+    ensureSurface: async () => { throw new Error("unexpected ensure during restart"); },
+    getSurfaceStatus: async () => null,
+    listSurfaces: async () => [],
+    stopSurface: async () => null,
+  });
+  await restartOne.reconcileBrowserSurfaceLeasesAfterBoot();
+  const started = (await receiptStore.list()).find((receipt) => receipt.phase === "started");
+  assert.ok(started, "restart 1 persists a started receipt for the lost surface");
+
+  // RI restart 2 has a fresh process ledger over the same durable stores. The
+  // host successfully starts a new endpoint for the original connection.
+  const hostAllocator = createHostBrowserSurfaceAllocator({
+    endpoint: "http://127.0.0.1:9916/agent",
+    fetchImpl: async () =>
+      new Response(JSON.stringify({ cdp_url: "http://127.0.0.1:39383", surface_id: "host_surface_new" }), {
+        headers: { "content-type": "application/json" },
+        status: 200,
+      }),
+    headless: true,
+    token: "test-token",
+  });
+  const leaseManager = makeLeaseManager([{ ...readySurface, health: "unhealthy" }]);
+  const restartTwo = makeManager(leaseManager, hostAllocator, ({ runId, surfaceId }) =>
+    hostAllocator.bindRunToSurface({ runId, surfaceId })
+  );
+  const result = await restartTwo.acquireManagedBrowserSurfaceForRun({
+    automationMetadata: { automation_mode: "manual_only", automation_summary: "", trigger_kind: "retry" },
+    connectorId: "managed",
+    connectorInstanceId: "connection_retry",
+    manifest: MANIFEST,
+    options: { ownerToken: "test-token" },
+    runId: "run_retry_same_connection",
+    traceContext: createTraceContext(),
+  });
+
+  const retryLease = leaseManager.listLeases().find((lease) => lease.run_id === "run_retry_same_connection");
+  const receipts = (await receiptStore.list()).filter(
+    (receipt) => receipt.connection_id === "connection_retry" && receipt.profile_key === "managed-profile:connection_retry"
+  );
+  assert.equal(retryLease?.status, "leased");
+  assert.equal(result.kind, "ready");
+  assert.equal(receipts.at(-1)?.phase, "terminal", JSON.stringify({ receipts, retryLease, result }));
+  assert.equal(receipts.at(-1)?.terminal_outcome, "abandoned");
 });
 
 test("overlapping sweep calls: the second is a no-op while the first is in flight", async (t) => {
