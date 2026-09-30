@@ -1636,6 +1636,11 @@ test("mint accepts a pending otp interaction for browser-backed verification flo
   await withHarness({ kind: "otp" }, async ({ asUrl, spotifyManifest }) => {
     const started = await startRun(asUrl, spotifyManifest.connector_id);
     const pending = await waitForPendingInteraction(asUrl, started.run_id);
+    const timeline = (await fetchJson(`${asUrl}/_ref/runs/${encodeURIComponent(started.run_id)}/timeline`))
+      .body as TimelineBody;
+    const assistance = timeline.data.find((event) => event.event_type === "run.assistance_requested");
+    assert.equal(assistance?.data?.owner_action, "provide_value");
+    assert.equal(assistance?.data?.attachments, undefined);
     const mint = await fetchJson(`${asUrl}/_ref/runs/${encodeURIComponent(started.run_id)}/run-interaction-stream`, {
       body: JSON.stringify({
         interaction_id: pending.interaction_id,

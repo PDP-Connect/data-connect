@@ -86,6 +86,7 @@ function toStreamingSessionRecord(session: SurfaceSessionRecord): StreamingSessi
     run_id: session.surfaceSessionId,
     token_hash: session.tokenHash,
     viewport: session.viewport,
+    owner_session_hash: null,
   };
 }
 

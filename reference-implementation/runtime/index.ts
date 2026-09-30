@@ -2376,7 +2376,7 @@ function buildBrowserSurfaceLaunchEnv({
     optionalNonEmptyEnv(explicit.PDPP_BROWSER_SURFACE_REQUIRED) ||
     optionalNonEmptyEnv(source.required) ||
     optionalNonEmptyEnv(source.browserSurfaceRequired) ||
-    (remoteCdpUrl ? "neko" : null);
+    (streamBaseUrl ? "neko" : remoteCdpUrl ? "host" : null);
 
   return {
     ...(required ? { PDPP_BROWSER_SURFACE_REQUIRED: required } : {}),
