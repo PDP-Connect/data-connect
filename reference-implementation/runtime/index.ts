@@ -2493,6 +2493,7 @@ function buildConnectorLaunchConfig({
   automationMode,
   browserSurfaceEnv,
   browserSurfaceLease,
+  connectorId,
   connectorInstanceId,
   connectorPath,
   referenceBaseUrl,
@@ -2505,6 +2506,7 @@ function buildConnectorLaunchConfig({
   | "automationMode"
   | "browserSurfaceEnv"
   | "browserSurfaceLease"
+  | "connectorId"
   | "connectorInstanceId"
   | "connectorPath"
   | "referenceBaseUrl"
@@ -2851,6 +2853,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
     automationMode,
     browserSurfaceEnv,
     browserSurfaceLease,
+    connectorId,
     connectorInstanceId: resolvedConnectorInstanceId,
     connectorPath,
     referenceBaseUrl,
