@@ -164,6 +164,10 @@ struct UnifiedRuntimeState {
     session_cookie: Mutex<Option<String>>,
     sidecars_ready: Mutex<BTreeSet<String>>,
     stack: Mutex<Option<UnifiedStack>>,
+    /// Serializes every operation that can start the managed stack. The
+    /// config watcher can observe tunnel fields before bootstrap has stored
+    /// its handles, so teardown and restart must wait for that bootstrap.
+    stack_start_gate: std::sync::Arc<tokio::sync::Mutex<()>>,
     shutdown: Mutex<ShutdownState>,
     /// The live ngrok session, held OUTSIDE `stack` so a config-change
     /// restart (`restart_after_remote_access_config`, which tears down and
@@ -174,6 +178,44 @@ struct UnifiedRuntimeState {
     /// owner just adopted stale before the console ever loaded it. See
     /// `reuse_or_start_ngrok_provider`.
     ngrok: Mutex<Option<HeldNgrok>>,
+}
+
+/// Run a stack lifecycle operation while holding the shared gate.
+/// The operation future provides a controllable seam for lifecycle tests.
+async fn with_stack_start_gate<T, Fut>(
+    gate: std::sync::Arc<tokio::sync::Mutex<()>>,
+    operation: impl FnOnce() -> Fut,
+) -> T
+where
+    Fut: std::future::Future<Output = T>,
+{
+    let _guard = gate.lock_owned().await;
+    operation().await
+}
+
+async fn try_with_stack_start_gate<T, Fut>(
+    gate: std::sync::Arc<tokio::sync::Mutex<()>>,
+    operation: impl FnOnce() -> Fut,
+) -> Result<T, ()>
+where
+    Fut: std::future::Future<Output = T>,
+{
+    let Ok(_guard) = gate.try_lock_owned() else {
+        return Err(());
+    };
+    Ok(operation().await)
+}
+
+async fn try_recovery_start<T, Fut>(
+    gate: std::sync::Arc<tokio::sync::Mutex<()>>,
+    operation: impl FnOnce() -> Fut,
+) -> Result<T, String>
+where
+    Fut: std::future::Future<Output = T>,
+{
+    try_with_stack_start_gate(gate, operation)
+        .await
+        .map_err(|()| "A DataConnect stack start or restart is already in progress".to_string())
 }
 
 /// A live ngrok tunnel plus enough of its own configuration to tell whether
@@ -1266,8 +1308,19 @@ fn start_managed_stack(
         sink.clone(),
     )
     .with_observer(lease_observer())
-    .start_on_port(console_port_plan.preferred)
-    .map_err(|error| format!("Failed to start staged console: {error}"))?;
+    .start_on_port(console_port_plan.preferred);
+    let console = match console {
+        Ok(console) => console,
+        Err(error) => {
+            let ri_stop = ri.stop().err().map(|stop| stop.to_string());
+            return Err(match ri_stop {
+                Some(stop) => format!(
+                    "Failed to start staged console: {error}; failed to stop staged RI: {stop}"
+                ),
+                None => format!("Failed to start staged console: {error}"),
+            });
+        }
+    };
     report_console_port_outcome(
         app,
         &data_dir,
@@ -2661,6 +2714,31 @@ async fn bootstrap_and_open_console(
     preserved_path: Option<String>,
     owner_session_reset: Option<OwnerSessionReset>,
 ) -> Result<(), BootstrapFailure> {
+    let start_gate = app.state::<UnifiedRuntimeState>().stack_start_gate.clone();
+    match try_with_stack_start_gate(start_gate, || {
+        bootstrap_and_open_console_with_stack_guard(
+            app,
+            should_show,
+            preserved_path,
+            owner_session_reset,
+        )
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(()) => {
+            log::debug!("Ignoring duplicate unified stack bootstrap while one is in flight");
+            Ok(())
+        }
+    }
+}
+
+async fn bootstrap_and_open_console_with_stack_guard(
+    app: AppHandle,
+    should_show: bool,
+    preserved_path: Option<String>,
+    owner_session_reset: Option<OwnerSessionReset>,
+) -> Result<(), BootstrapFailure> {
     set_status(&app, UnifiedStatus::Starting);
 
     let attach = attach_mode();
@@ -2957,6 +3035,17 @@ fn discard_unconsumed_recovery_marker(path: &Path, created: bool) -> Result<(), 
 /// outcome and generic stage names.
 #[tauri::command]
 pub(crate) async fn import_database_encryption_recovery_code(
+    app: AppHandle,
+    code: String,
+) -> Result<(), String> {
+    let start_gate = app.state::<UnifiedRuntimeState>().stack_start_gate.clone();
+    try_recovery_start(start_gate, || {
+        import_database_encryption_recovery_code_with_stack_guard(app, code)
+    })
+    .await?
+}
+
+async fn import_database_encryption_recovery_code_with_stack_guard(
     app: AppHandle,
     code: String,
 ) -> Result<(), String> {
@@ -3273,6 +3362,17 @@ async fn restart_managed_stack(
     app: AppHandle,
     owner_session_reset: Option<OwnerSessionReset>,
 ) -> Result<(), String> {
+    let start_gate = app.state::<UnifiedRuntimeState>().stack_start_gate.clone();
+    with_stack_start_gate(start_gate, || {
+        restart_managed_stack_with_stack_guard(app, owner_session_reset)
+    })
+    .await
+}
+
+async fn restart_managed_stack_with_stack_guard(
+    app: AppHandle,
+    owner_session_reset: Option<OwnerSessionReset>,
+) -> Result<(), String> {
     let preserved_path = console_path_before_restart(&app);
     set_status(&app, UnifiedStatus::Restarting);
     tokio::task::spawn_blocking({
@@ -3293,7 +3393,7 @@ async fn restart_managed_stack(
     // not the moment to also introduce new recovery-window UI; the tray
     // status still reaches NeedsRecovery on the NEXT natural bootstrap
     // attempt (app relaunch or "Open console"), which does open it.
-    bootstrap_and_open_console(app, true, preserved_path, owner_session_reset)
+    bootstrap_and_open_console_with_stack_guard(app, true, preserved_path, owner_session_reset)
         .await
         .map_err(|failure| match failure {
             BootstrapFailure::NeedsRecovery => {
@@ -7242,6 +7342,156 @@ setInterval(() => {}, 1000);
             .find("set_status(app, UnifiedStatus::Ready)")
             .expect("finish_bootstrap sets Ready");
         assert!(last_failure < complete && complete < ready);
+    }
+
+    #[tokio::test]
+    async fn config_restart_waits_for_cloudflare_bootstrap_to_store_before_teardown() {
+        let gate = Arc::new(tokio::sync::Mutex::new(()));
+        let lifecycle = Arc::new(Mutex::new((Vec::<&'static str>::new(), None::<usize>)));
+        let (cloudflare_applied_tx, cloudflare_applied_rx) = tokio::sync::oneshot::channel();
+        let (continue_bootstrap_tx, continue_bootstrap_rx) = tokio::sync::oneshot::channel();
+
+        let bootstrap = {
+            let gate = gate.clone();
+            let lifecycle = lifecycle.clone();
+            tokio::spawn(async move {
+                try_with_stack_start_gate(gate, || async move {
+                    lifecycle.lock().unwrap().0.push("start:1");
+                    lifecycle.lock().unwrap().0.push("cloudflare-applied");
+                    cloudflare_applied_tx.send(()).unwrap();
+                    continue_bootstrap_rx.await.unwrap();
+                    let mut state = lifecycle.lock().unwrap();
+                    state.1 = Some(1);
+                    state.0.push("store:1");
+                    state.0.push("finish-bootstrap");
+                })
+                .await
+                .unwrap();
+            })
+        };
+
+        cloudflare_applied_rx.await.unwrap();
+        let (restart_entered_tx, restart_entered_rx) = tokio::sync::oneshot::channel();
+        let restart = {
+            let lifecycle = lifecycle.clone();
+            tokio::spawn(with_stack_start_gate(gate, || async move {
+                let _ = restart_entered_tx.send(());
+                let mut state = lifecycle.lock().unwrap();
+                let stored = state.1.take();
+                match stored {
+                    Some(stack) => state.0.push(if stack == 1 {
+                        "teardown:1"
+                    } else {
+                        "teardown:unknown"
+                    }),
+                    None => state.0.push("teardown:empty"),
+                }
+                state.0.push("start:2");
+                state.1 = Some(2);
+                state.0.push("store:2");
+                state.0.push("finish-bootstrap");
+            }))
+        };
+        let restart_entered_while_bootstrap_paused =
+            tokio::time::timeout(Duration::from_millis(10), restart_entered_rx)
+                .await
+                .is_ok();
+
+        continue_bootstrap_tx.send(()).unwrap();
+        bootstrap.await.unwrap();
+        restart.await.unwrap();
+        assert!(
+            !restart_entered_while_bootstrap_paused,
+            "restart must wait for bootstrap to store and finish; lifecycle: {:?}",
+            lifecycle.lock().unwrap().0
+        );
+        assert_eq!(
+            lifecycle.lock().unwrap().0,
+            [
+                "start:1",
+                "cloudflare-applied",
+                "store:1",
+                "finish-bootstrap",
+                "teardown:1",
+                "start:2",
+                "store:2",
+                "finish-bootstrap"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_access_restart_tears_down_the_stored_stack_once_and_replaces_it_once() {
+        let gate = Arc::new(tokio::sync::Mutex::new(()));
+        let lifecycle = Arc::new(Mutex::new((Vec::<&'static str>::new(), None::<usize>)));
+        try_with_stack_start_gate(gate.clone(), || {
+            let lifecycle = lifecycle.clone();
+            async move {
+                lifecycle.lock().unwrap().0.push("start:1");
+                lifecycle.lock().unwrap().1 = Some(1);
+                lifecycle.lock().unwrap().0.push("store:1");
+                lifecycle.lock().unwrap().0.push("finish-bootstrap");
+            }
+        })
+        .await
+        .unwrap();
+
+        with_stack_start_gate(gate, || {
+            let lifecycle = lifecycle.clone();
+            async move {
+                let mut state = lifecycle.lock().unwrap();
+                assert_eq!(state.1.take(), Some(1));
+                state.0.push("teardown:1");
+                state.0.push("start:2");
+                state.1 = Some(2);
+                state.0.push("store:2");
+                state.0.push("finish-bootstrap");
+            }
+        })
+        .await;
+        let state = lifecycle.lock().unwrap();
+        assert_eq!(state.1, Some(2));
+        assert_eq!(
+            state
+                .0
+                .iter()
+                .filter(|event| **event == "teardown:1")
+                .count(),
+            1
+        );
+        assert_eq!(
+            state
+                .0
+                .iter()
+                .filter(|event| event.starts_with("start:"))
+                .count(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_reports_busy_then_stores_one_stack_after_gate_release() {
+        let gate = Arc::new(tokio::sync::Mutex::new(()));
+        let start_guard = gate.clone().lock_owned().await;
+        let stores = Arc::new(Mutex::new(0));
+        let busy = try_recovery_start(gate.clone(), || async {
+            *stores.lock().unwrap() += 1;
+        })
+        .await;
+        assert_eq!(
+            busy.unwrap_err(),
+            "A DataConnect stack start or restart is already in progress"
+        );
+        assert_eq!(*stores.lock().unwrap(), 0);
+
+        drop(start_guard);
+        try_with_stack_start_gate(gate, || {
+            let stores = stores.clone();
+            async move { *stores.lock().unwrap() += 1 }
+        })
+        .await
+        .unwrap();
+        assert_eq!(*stores.lock().unwrap(), 1);
     }
 
     #[test]
