@@ -247,10 +247,7 @@ export default async function RunDetailPage({
           connectorId
             ? [
                 { href: dashboardRoutes.section.runs, label: "Syncs" },
-                {
-                  href: `/sources/${encodeURIComponent(connectorId)}`,
-                  label: connectorId,
-                },
+                { href: `/sources/${encodeURIComponent(connectorId)}`, label: connectorId },
                 { label: "Sync" },
               ]
             : [{ href: dashboardRoutes.section.runs, label: "Syncs" }, { label: "Sync" }]
@@ -664,8 +661,8 @@ function SkippedWithoutGapRecord({ skipped }: { skipped: SkippedStreamSummary })
       ) : null}
       {skipped.unexplainedCount > 0 ? (
         <p className="pdpp-caption mt-1.5 text-muted-foreground">
-          {skipped.unexplainedCount} of these recorded no reason, so DataConnect cannot tell you whether anything is
-          missing for {skipped.unexplainedCount === 1 ? "it" : "them"}.
+          {skipped.unexplainedCount} of these recorded no reason, so DataConnect cannot tell you whether anything is missing for{" "}
+          {skipped.unexplainedCount === 1 ? "it" : "them"}.
         </p>
       ) : null}
     </div>
