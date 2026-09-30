@@ -4527,6 +4527,69 @@ rl.on('line', (line) => {
     });
   });
 
+  await t.test("OTP page advance resolves the interaction before a following DONE", async () => {
+    await withHarness(async ({ asUrl, rsUrl, spotifyManifest }) => {
+      const ownerToken = await issueOwnerToken(asUrl, "u1");
+      const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-event-spine-otp-page-advance-"));
+      try {
+        for (const withLeadingProgress of [false, true]) {
+          const connectorPath = join(tmpDir, `connector-${withLeadingProgress}.mjs`);
+          writeFileSync(
+            connectorPath,
+            `
+import { createInterface } from 'readline';
+const rl = createInterface({ input: process.stdin });
+rl.on('line', (line) => {
+  if (JSON.parse(line).type !== 'START') return;
+  const messages = [];
+  if (${withLeadingProgress}) messages.push({ type: 'PROGRESS', message: 'Signing in' });
+  messages.push({
+    type: 'INTERACTION', request_id: 'chase_otp_${withLeadingProgress}', kind: 'otp', message: 'Enter the code',
+    schema: { type: 'object', properties: { code: { type: 'string' } }, required: ['code'] },
+    timeout_seconds: 0.5
+  });
+  messages.push({
+    type: 'ASSISTANCE_STATUS', assistance_request_id: 'chase_otp_${withLeadingProgress}', status: 'resolved'
+  });
+  messages.push({ type: 'DONE', status: 'succeeded', records_emitted: 0 });
+  process.stdout.write(messages.map((message) => JSON.stringify(message)).join('\\n') + '\\n');
+});
+`,
+            "utf8"
+          );
+
+          // biome-ignore lint/performance/noAwaitInLoops: Each run must finish before the next uses this harness.
+          const result = await runConnector({
+            admitRunConnection: fakeAdmitRunConnection(),
+            collectionMode: "full_refresh",
+            connectorId: spotifyManifest.connector_id,
+            connectorPath,
+            manifest: spotifyManifest,
+            onInteraction: async () =>
+              new Promise(() => {
+                /* intentionally waits for the page to advance */
+              }),
+            ownerToken,
+            rsUrl,
+            state: null,
+          });
+          assert.equal(result.status, "succeeded");
+
+          const { body: runTimeline } = await fetchJson<TraceTimelineBody>(
+            `${asUrl}/_ref/runs/${encodeURIComponent(requirePathSegment(result.run_id, "result.run_id"))}/timeline`
+          );
+          const completed = (runTimeline.data || []).filter(
+            (event) => event.event_type === "run.interaction_completed"
+          );
+          assert.deepEqual(completed.map((event) => event.status), ["success"]);
+          assert.equal((runTimeline.data || []).filter((event) => event.event_type === "run.completed").length, 1);
+        }
+      } finally {
+        rmSync(tmpDir, { force: true, recursive: true });
+      }
+    });
+  });
+
   await t.test(
     "captures blocked interaction terminal violations without recording completion or terminal success artifacts",
     async () => {
