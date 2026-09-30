@@ -5,8 +5,9 @@
 
 import { IcButton, IcInput } from "@pdpp/brand-react";
 import { Section } from "@pdpp/operator-ui/components/primitives";
-import { useState } from "react";
-import { deleteConnectionAction, revokeConnectionAction } from "./actions.ts";
+import { useRouter } from "next/navigation";
+import { useState, useTransition } from "react";
+import { deleteConnectionAction, resetAndSyncConnectionAction, revokeConnectionAction } from "./actions.ts";
 
 interface Props {
   /**
@@ -67,10 +68,61 @@ export function ConnectionDangerZone({ activeRunId = null, connectionId, error, 
         <div className="flex flex-col gap-6 rounded-md border border-border p-4">
           <RevokeForm connectionId={connectionId} />
           <div className="border-border border-t" />
+          <ResetSourceForm connectionId={connectionId} />
+          <div className="border-border border-t" />
           <DeleteForm activeRunId={activeRunId} connectionId={connectionId} />
         </div>
       )}
     </Section>
+  );
+}
+
+function ResetSourceForm({ connectionId }: { connectionId: string }) {
+  const router = useRouter();
+  const [confirmed, setConfirmed] = useState(false);
+  const [message, setMessage] = useState<{ text: string; tone: "error" | "success" } | null>(null);
+  const [isPending, startTransition] = useTransition();
+  return (
+    <div className="flex flex-col gap-2">
+      <h3 className="pdpp-body font-medium text-foreground">Reset and re-sync</h3>
+      <p className="pdpp-caption text-muted-foreground">
+        Clears this source’s cursor and sync checkpoints, then starts a full sync. Records, credentials, and browser
+        profile are kept.
+      </p>
+      <label className="pdpp-caption flex items-center gap-2 text-muted-foreground">
+        <input checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} type="checkbox" />
+        <span>Clear sync state and start a full sync for {connectionId}.</span>
+      </label>
+      <div className="flex flex-wrap items-center gap-3">
+        <IcButton
+          disabled={!confirmed || isPending}
+          onClick={() => {
+            setMessage(null);
+            startTransition(async () => {
+              const result = await resetAndSyncConnectionAction(connectionId);
+              if (result.ok) router.refresh();
+              setMessage(
+                result.ok
+                  ? { text: "Sync state cleared. Full sync started.", tone: "success" }
+                  : { text: result.message, tone: "error" }
+              );
+            });
+          }}
+          type="button"
+        >
+          {isPending ? "Resetting…" : "Reset and re-sync"}
+        </IcButton>
+        {message ? (
+          <span
+            aria-live="polite"
+            className={`pdpp-caption ${message.tone === "error" ? "text-destructive" : "text-status-success-fg"}`}
+            role={message.tone === "error" ? "alert" : "status"}
+          >
+            {message.text}
+          </span>
+        ) : null}
+      </div>
+    </div>
   );
 }
 

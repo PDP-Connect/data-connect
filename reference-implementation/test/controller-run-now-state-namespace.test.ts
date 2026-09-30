@@ -315,6 +315,29 @@ test("default-namespace state does NOT satisfy an explicit connection run", asyn
   assert.equal(at(calls, 0).collectionMode, "full_refresh");
 });
 
+test("reset-state run clears its connection cursor and launches one full refresh", async (t) => {
+  freshDb(t);
+  await putSyncState({ connector_id: AMAZON, connector_instance_id: "cin_reset" }, SEEDED_ORDERS_STATE);
+
+  const calls: RuntimeRunConnectorOptions[] = [];
+  const controller = makeController(calls);
+  const started = await controller.runNow(AMAZON, {
+    connectorInstanceId: "cin_reset",
+    fullRefresh: true,
+    manifest: AMAZON_MANIFEST,
+    ownerToken: "owner-token",
+    resetState: true,
+    runId: "run_reset",
+  });
+  await controller.drainActiveRuns(1000);
+
+  assert.equal(started.run_id, "run_reset");
+  assert.equal(calls.length, 1);
+  assert.equal(at(calls, 0).collectionMode, "full_refresh");
+  assert.equal(at(calls, 0).state, null);
+  assert.deepEqual((await getSyncState({ connector_id: AMAZON, connector_instance_id: "cin_reset" })).state, {});
+});
+
 test("two connections of the same connector derive mode from their own state", async (t) => {
   freshDb(t);
 
