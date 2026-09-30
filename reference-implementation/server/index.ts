@@ -260,6 +260,7 @@ import {
   isLoopbackOriginHost,
   isNonLoopbackBindHost,
   parseReachabilityContract,
+  selfCallUrlHostForBindHost,
   validateReachabilityContract,
 } from "./reachability-contract.ts";
 import { createPackageRsClient, createRsClient } from "./package-rs-client.ts";
@@ -7410,9 +7411,12 @@ function buildRsApp(opts: ServerOpts = {}) {
   if (!rsIntrospectionCredentials) {
     throw new Error("RS introspection credentials must be configured");
   }
+  const introspectionBindHost =
+    opts.reachabilityContract?.bindHost || process.env.PDPP_BIND_HOST?.trim() || "127.0.0.1";
+  const introspectionUrlHost = selfCallUrlHostForBindHost(introspectionBindHost);
   const introspectToken = createRemoteIntrospector({
     ...rsIntrospectionCredentials,
-    endpoint: opts.rsIntrospectionEndpoint ?? `http://127.0.0.1:${opts.asPort ?? AS_PORT}/introspect`,
+    endpoint: opts.rsIntrospectionEndpoint ?? `http://${introspectionUrlHost}:${opts.asPort ?? AS_PORT}/introspect`,
     expectedAudience: opts.resolveIntrospectionAudience ?? (() => explicitResource ?? null),
     expectedIssuer: opts.resolveIntrospectionIssuer ?? (() => opts.asIssuer ?? opts.asPublicUrl ?? null),
     ...(opts.introspectionFetch ? { fetchImpl: opts.introspectionFetch } : {}),
@@ -8860,7 +8864,7 @@ export async function startServer(opts: ServerOpts = {}) {
   // (F1: avoid hairpinning PATCH self-calls through the public edge that 405s
   // PATCH). Only honor an EXPLICITLY configured internal base — `opts.rsInternalUrl`
   // or the operator's `PDPP_RS_URL` — because that is the only value known to
-  // point at the live RS. The bare `DEFAULT_RS_INTERNAL_URL` (localhost:7663) is
+  // point at the live RS. The bare `DEFAULT_RS_INTERNAL_URL` (127.0.0.1:7663) is
   // deliberately NOT used as an implicit internal base: in ephemeral-port
   // harnesses (rsPort:0) and any deployment where the default does not match the
   // realized listener it would misroute self-calls. When no explicit internal
@@ -8918,6 +8922,8 @@ export async function startServer(opts: ServerOpts = {}) {
     // PDPP_REFERENCE_ORIGIN.
     referenceBaseUrl: configuredAsPublicUrl || null,
     rsUrl: configuredRsPublicUrl || null,
+    selfCallReferenceBaseUrl: null as string | null,
+    selfCallRsUrl: null as string | null,
   };
   const resolvedOwnerAuthConfig = earlyOwnerAuthConfig;
   const ownerAuthSubjectId = resolvedOwnerAuthConfig.subjectId || OWNER_AUTH_DEFAULT_SUBJECT_ID;
@@ -9353,6 +9359,8 @@ export async function startServer(opts: ServerOpts = {}) {
     });
   }
   const asPort = (asServer.address() as import("net").AddressInfo).port;
+  const bindUrlHost = bindHost.includes(":") && !bindHost.startsWith("[") ? `[${bindHost}]` : bindHost;
+  const selfCallUrlHost = selfCallUrlHostForBindHost(bindHost);
   const asPublicUrl = configuredAsPublicUrl || configuredAsIssuer || `http://localhost:${asPort}`;
   // Update the controller's lazy reference-base-URL view now that the AS
   // listener has actually allocated a port. Spawned connector children
@@ -9370,8 +9378,9 @@ export async function startServer(opts: ServerOpts = {}) {
   // Both child and parent run on the same host (Mode A: in-process
   // controller spawns the connector subprocess), so loopback is always
   // reachable and is the right hop.
-  runtimeContext.referenceBaseUrl = `http://127.0.0.1:${asPort}`;
-  logger.info({ port: asPort, url: `http://localhost:${asPort}` }, "authorization server listening");
+  runtimeContext.referenceBaseUrl = `http://localhost:${asPort}`;
+  runtimeContext.selfCallReferenceBaseUrl = `http://${selfCallUrlHost}:${asPort}`;
+  logger.info({ port: asPort, url: `http://${bindUrlHost}:${asPort}` }, "authorization server listening");
   warnIfLoopbackOriginPortDisagreesWithBoundPort("configured AS public origin", configuredAsPublicUrl, asPort);
 
   const rsApp = buildRsApp({
@@ -9415,7 +9424,7 @@ export async function startServer(opts: ServerOpts = {}) {
     // Spec: openspec/changes/route-hosted-mcp-adapter-self-calls-internally/
     rsInternalUrl: explicitRsInternalUrl,
     rsIntrospectionCredentials: introspectionCredentials,
-    rsIntrospectionEndpoint: opts.rsIntrospectionEndpoint ?? `http://127.0.0.1:${asPort}/introspect`,
+    rsIntrospectionEndpoint: opts.rsIntrospectionEndpoint ?? `http://${selfCallUrlHost}:${asPort}/introspect`,
     rsPublicUrl: configuredRsPublicUrl,
     semanticRetrievalCapability: opts.semanticRetrievalCapability,
     // Semantic retrieval experimental extension knobs — see search-semantic.js
@@ -9432,8 +9441,9 @@ export async function startServer(opts: ServerOpts = {}) {
   // should post ingest/state traffic directly to the local RS listener rather
   // than routing large NDJSON payloads through the browser-facing web origin.
   runtimeContext.rsUrl = `http://localhost:${rsPort}`;
+  runtimeContext.selfCallRsUrl = `http://${selfCallUrlHost}:${rsPort}`;
   await controller.promoteBrowserSurfaceLeasesAfterBoot();
-  logger.info({ port: rsPort, url: `http://localhost:${rsPort}` }, "resource server listening");
+  logger.info({ port: rsPort, url: `http://${bindUrlHost}:${rsPort}` }, "resource server listening");
   warnIfLoopbackOriginPortDisagreesWithBoundPort("configured RS public origin", configuredRsPublicUrl, rsPort);
 
   // HNSW is a derived acceleration structure. Its durable builder is bounded,
@@ -10138,7 +10148,12 @@ function createReferenceSchedulerManager({
   controller: Controller;
   connectorEnvironmentPolicy?: ConnectorEnvironmentPolicy;
   logger: LoggerLike;
-  runtimeContext: { rsUrl: string | null; referenceBaseUrl: string | null };
+  runtimeContext: {
+    rsUrl: string | null;
+    referenceBaseUrl: string | null;
+    selfCallRsUrl: string | null;
+    selfCallReferenceBaseUrl: string | null;
+  };
   schedulerStore?: SchedulerStore;
   connectorPathResolver?: (
     connectorId: string,
@@ -10354,8 +10369,10 @@ function createReferenceSchedulerManager({
           }
         : {}),
       logger,
-      ...(runtimeContext.rsUrl === null ? {} : { rsUrl: runtimeContext.rsUrl }),
-      ...(runtimeContext.referenceBaseUrl === null ? {} : { referenceBaseUrl: runtimeContext.referenceBaseUrl }),
+      ...(runtimeContext.selfCallRsUrl ? { rsUrl: runtimeContext.selfCallRsUrl } : {}),
+      ...(runtimeContext.selfCallReferenceBaseUrl === null
+        ? {}
+        : { referenceBaseUrl: runtimeContext.selfCallReferenceBaseUrl }),
       admitRunConnection: async ({ connectorId, connectorInstanceId, ownerSubjectId: admittedOwnerSubjectId }) => {
         const namespace = await admitOwnerRunConnection({
           connectorId,

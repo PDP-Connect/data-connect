@@ -133,6 +133,25 @@ export function isLoopbackBindHost(host: string | null | undefined): boolean {
   )
 }
 
+export function selfCallUrlHostForBindHost(bindHost: string): string {
+  const host = stripBrackets(bindHost.trim())
+  if (host === "0.0.0.0") {
+    return "127.0.0.1"
+  }
+  if (host === "::") {
+    return "[::1]"
+  }
+  return isIP(host) === 6 ? `[${host}]` : host
+}
+
+function isLoopbackRemoteAddress(address: string | undefined): boolean {
+  if (!address) {
+    return false
+  }
+  const normalized = address.toLowerCase().replace(/^::ffff:/, "")
+  return normalized === "::1" || normalized.startsWith("127.")
+}
+
 export function isLoopbackOriginHost(hostname: string): boolean {
   const normalized = normalizeHostname(stripBrackets(hostname))
   return (
@@ -490,6 +509,20 @@ export function isAllowedRequestHost(
     !fromTrustedProxy &&
     isLoopbackBindHost(contract.bindHost) &&
     request.hostname === normalizeHostname(stripBrackets(contract.bindHost))
+  ) {
+    return true
+  }
+  const loopbackSelfCallHost = selfCallUrlHostForBindHost(contract.bindHost)
+  const wildcardBind = ["0.0.0.0", "::"].includes(stripBrackets(contract.bindHost))
+  // Bind-all self-calls use a mapped loopback URL host. Trust that host only
+  // on a real loopback TCP connection and never through a forwarded header.
+  if (
+    !fromTrustedProxy &&
+    wildcardBind &&
+    request.hostname === normalizeHostname(stripBrackets(loopbackSelfCallHost)) &&
+    isLoopbackRemoteAddress(
+      req.socket?.remoteAddress ?? req.raw?.socket?.remoteAddress ?? req.connection?.remoteAddress
+    )
   ) {
     return true
   }

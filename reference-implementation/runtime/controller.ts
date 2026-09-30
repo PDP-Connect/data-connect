@@ -662,11 +662,16 @@ export interface ControllerOptions {
   runtime?: unknown;
   /**
    * Mutable runtime-context bag the surrounding server populates after
-   * its listeners are bound. The controller reads `rsUrl` and the new
-   * `referenceBaseUrl` lazily so it picks up the realized values once
-   * the AS server has actually allocated its port.
+   * its listeners are bound. The controller reads self-call URLs lazily so
+   * it picks up realized values once the AS and RS listeners allocate their
+   * ports; public URLs remain separate for discovery and token identity.
    */
-  runtimeContext?: { rsUrl?: string | null; referenceBaseUrl?: string | null };
+  runtimeContext?: {
+    rsUrl?: string | null;
+    referenceBaseUrl?: string | null;
+    selfCallRsUrl?: string | null;
+    selfCallReferenceBaseUrl?: string | null;
+  };
   scheduler?: unknown;
   // Optional store override; defaults to the configured storage-backed singleton.
   // Tests use this to substitute fakes without touching module-scoped state.
@@ -2679,7 +2684,9 @@ export function createController(opts: ControllerOptions = {}): Controller {
     if (typeof opts.rsUrl === "string" && opts.rsUrl) {
       return opts.rsUrl;
     }
-    const contextUrl = opts.runtimeContext?.rsUrl;
+    const { runtimeContext } = opts;
+    const contextUrl =
+      runtimeContext && "selfCallRsUrl" in runtimeContext ? runtimeContext.selfCallRsUrl : runtimeContext?.rsUrl;
     if (typeof contextUrl === "string" && contextUrl) {
       return contextUrl;
     }
@@ -2689,9 +2696,8 @@ export function createController(opts: ControllerOptions = {}): Controller {
   /**
    * Resolve the AS base URL the spawned connector child should PUT its
    * streaming-target registration to. Read lazily because the surrounding
-   * server populates `runtimeContext.referenceBaseUrl` AFTER its listener
-   * has actually allocated a port (the same pattern `runtimeContext.rsUrl`
-   * uses).
+   * server populates the internal self-call URL AFTER its listener has
+   * actually allocated a port (the same pattern the RS self-call URL uses).
    *
    * IMPORTANT: this URL is for SERVER-TO-SERVER traffic between the
    * connector child and the AS Fastify listener (both on the same host
@@ -2701,15 +2707,19 @@ export function createController(opts: ControllerOptions = {}): Controller {
    * `/admin/runs/:runId/interactions/:interactionId/streaming-target`,
    * so passing the public URL here surfaces as a silent registration
    * 404 and `companion_start_failed` later. The server populates
-   * `runtimeContext.referenceBaseUrl` with the AS loopback URL for
-   * exactly this reason; we no longer fall back to `opts.asPublicUrl`
-   * or `PDPP_REFERENCE_ORIGIN` (both are public/browser-facing URLs).
+   * `runtimeContext.selfCallReferenceBaseUrl` with the AS loopback URL for
+   * exactly this reason. The public `referenceBaseUrl` is never used as a
+   * self-call fallback.
    *
    * Returns `null` when the context URL is not yet populated so
    * `runConnector` skips the env block entirely.
    */
   function currentReferenceBaseUrl(): string | null {
-    const contextUrl = opts.runtimeContext?.referenceBaseUrl;
+    const { runtimeContext } = opts;
+    const contextUrl =
+      runtimeContext && "selfCallReferenceBaseUrl" in runtimeContext
+        ? runtimeContext.selfCallReferenceBaseUrl
+        : runtimeContext?.referenceBaseUrl;
     if (typeof contextUrl === "string" && contextUrl) {
       return contextUrl;
     }

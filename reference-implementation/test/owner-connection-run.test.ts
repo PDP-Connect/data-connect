@@ -39,9 +39,10 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { listSpineEventsPage, type SpineEventRecord } from "../lib/spine.ts";
+import { getRunTerminalEvent, listSpineEventsPage, type SpineEventRecord } from "../lib/spine.ts";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { startServer as startServerUntyped } from "../server/index.ts";
+import { parseReachabilityContract, type ReachabilityContract } from "../server/reachability-contract.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
 import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
 import { resolveCredentialFreeFixtureRunEnv } from "./helpers/credential-free-run-fixture.ts";
@@ -75,6 +76,7 @@ interface StartServerOptions {
   preRegisteredPublicClients?: unknown;
   quiet?: boolean;
   rsPort?: number;
+  reachabilityContract?: ReachabilityContract;
 }
 
 async function startServer(opts: StartServerOptions): Promise<ClosableServer> {
@@ -149,9 +151,12 @@ interface ConnectorFixture {
 
 // A connector that completes immediately on START so run-now returns a 202
 // handle and the run drains without lingering on teardown.
-function buildImmediateConnectorFixture(tmpDir: string): ConnectorFixture {
+function buildImmediateConnectorFixture(tmpDir: string, emitRecord = false): ConnectorFixture {
   const path = join(tmpDir, "connector.mjs");
   const startPath = join(tmpDir, "start.json");
+  const record = emitRecord
+    ? `process.stdout.write(JSON.stringify({ type: 'RECORD', stream: 'repositories', key: 'one', data: { id: 'one', name: 'one', full_name: 'fixture/one' }, emitted_at: new Date().toISOString() }) + '\\n');`
+    : "";
   writeFileSync(
     path,
     `
@@ -164,7 +169,8 @@ rl.on('line', (line) => {
   try { msg = JSON.parse(line); } catch { return; }
   if (msg.type === 'START') {
     writeFileSync(${JSON.stringify(startPath)}, JSON.stringify(msg));
-    process.stdout.write(JSON.stringify({ type: 'DONE', status: 'succeeded', records_emitted: 0 }) + '\\n');
+    ${record}
+    process.stdout.write(JSON.stringify({ type: 'DONE', status: 'succeeded', records_emitted: ${emitRecord ? 1 : 0} }) + '\\n');
     rl.close();
     process.exit(0);
   }
@@ -181,20 +187,24 @@ interface ServerHandles {
   startPath: string;
 }
 
-async function withServer(fn: (handles: ServerHandles) => Promise<void>): Promise<void> {
+async function withServer(
+  fn: (handles: ServerHandles) => Promise<void>,
+  options: { emitRecord?: boolean; ownerAuthPassword?: string; reachabilityContract?: ReachabilityContract } = {}
+): Promise<void> {
   const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-owner-run-"));
-  const connectorFixture = buildImmediateConnectorFixture(tmpDir);
+  const connectorFixture = buildImmediateConnectorFixture(tmpDir, options.emitRecord);
   const server = await startServer({
     asPort: 0,
     connectorPathResolver: () => connectorFixture.path,
     dbPath: ":memory:",
-    ownerAuthPassword: "",
+    ownerAuthPassword: options.ownerAuthPassword ?? "",
     preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
     quiet: true,
     rsPort: 0,
+    ...(options.reachabilityContract ? { reachabilityContract: options.reachabilityContract } : {}),
   });
-  const asUrl = `http://localhost:${server.asPort}`;
-  const rsUrl = `http://localhost:${server.rsPort}`;
+  const asUrl = `http://127.0.0.1:${server.asPort}`;
+  const rsUrl = `http://127.0.0.1:${server.rsPort}`;
   try {
     await fn({ asUrl, rsUrl, startPath: connectorFixture.startPath });
   } finally {
@@ -204,17 +214,27 @@ async function withServer(fn: (handles: ServerHandles) => Promise<void>): Promis
 }
 
 // Device-code exchange yields an owner-kind bearer (pdpp_token_kind: "owner").
-async function issueOwnerToken(asUrl: string, subjectId = OWNER_SUBJECT_ID): Promise<string> {
+async function issueOwnerToken(
+  asUrl: string,
+  subjectId = OWNER_SUBJECT_ID,
+  origin?: string,
+  cookie?: string,
+  csrf?: string
+): Promise<string> {
   const device = (
     await fetchJson(`${asUrl}/oauth/device_authorization`, {
       body: new URLSearchParams({ client_id: OWNER_CLIENT_ID }).toString(),
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      headers: { "Content-Type": "application/x-www-form-urlencoded", ...(origin ? { Origin: origin } : {}) },
       method: "POST",
     })
   ).body as { device_code: string; user_code: string };
   await fetch(`${asUrl}/device/approve`, {
-    body: new URLSearchParams({ subject_id: subjectId, user_code: device.user_code }).toString(),
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ _csrf: csrf ?? "", subject_id: subjectId, user_code: device.user_code }).toString(),
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+      ...(origin ? { Origin: origin } : {}),
+      ...(cookie ? { Cookie: cookie } : {}),
+    },
     method: "POST",
   });
   const tok = (
@@ -224,11 +244,11 @@ async function issueOwnerToken(asUrl: string, subjectId = OWNER_SUBJECT_ID): Pro
         device_code: device.device_code,
         grant_type: "urn:ietf:params:oauth:grant-type:device_code",
       }).toString(),
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      headers: { "Content-Type": "application/x-www-form-urlencoded", ...(origin ? { Origin: origin } : {}) },
       method: "POST",
     })
-  ).body as { access_token?: string };
-  assert.ok(tok.access_token, "device exchange should issue an owner token");
+  ).body as { access_token?: string; error?: string };
+  assert.ok(tok.access_token, `device exchange should issue an owner token (${tok.error ?? "no error code"})`);
   return tok.access_token as string;
 }
 
@@ -310,10 +330,14 @@ function mustFirstStreamName(manifest: ReferenceManifest): string {
   return stream.name;
 }
 
-async function registerConnector(asUrl: string, manifest: ReferenceManifest): Promise<ReferenceManifest> {
+async function registerConnector(
+  asUrl: string,
+  manifest: ReferenceManifest,
+  cookie?: string
+): Promise<ReferenceManifest> {
   const resp = await fetch(`${asUrl}/connectors`, {
     body: JSON.stringify(manifest),
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...(cookie ? { Cookie: cookie } : {}) },
     method: "POST",
   });
   assert.equal(resp.status, 201, `register ${manifest.connector_id} failed: ${resp.status}`);
@@ -439,6 +463,84 @@ test("owner-agent bearer starts an instance-scoped connection run (202) and audi
     assert.equal(audit.data?.forced, false);
     assert.equal(audit.data?.run_id, run.body.run_id, "audit records the run handle id");
   });
+});
+
+test("connector run ingests its record when remote access is enabled", async () => {
+  const ownerPassword = "fixture-owner-password";
+  const reachabilityContract = parseReachabilityContract({
+    env: {
+      PDPP_BIND_HOST: "0.0.0.0",
+      PDPP_REFERENCE_ORIGIN: "https://reference.example",
+      // The test client dials loopback; leave the bind-all self-call authority
+      // (0.0.0.0) untrusted so the regression reaches the connector ingest.
+      PDPP_TRUSTED_HOSTS: "reference.example,127.0.0.1",
+    },
+  });
+
+  await withServer(
+    async ({ asUrl, rsUrl }) => {
+      const loginPage = await fetch(`${asUrl}/owner/login`, { headers: { Accept: "text/html" } });
+      const csrfCookie = loginPage.headers
+        .getSetCookie()
+        .map((header) => header.split(";", 1)[0])
+        .find((cookie) => cookie?.startsWith("pdpp_owner_csrf="));
+      const csrf = (await loginPage.text()).match(/name="_csrf" value="([^"]+)"/)?.[1];
+      assert.ok(csrfCookie && csrf, "owner login page should issue a CSRF token");
+      const login = await fetch(`${asUrl}/owner/login`, {
+        body: new URLSearchParams({ _csrf: csrf, password: ownerPassword, return_to: "/" }).toString(),
+        headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: csrfCookie },
+        method: "POST",
+        redirect: "manual",
+      });
+      const sessionCookie = login.headers
+        .getSetCookie()
+        .map((header) => header.split(";", 1)[0])
+        .find((cookie) => cookie?.startsWith("pdpp_owner_session="));
+      assert.ok(sessionCookie, "owner login should establish the session needed to register a connector");
+      const ownerCookie = `${sessionCookie}; ${csrfCookie}`;
+      const manifest = loadReferenceManifest("github");
+      const registered = await registerConnector(asUrl, manifest, ownerCookie);
+      const connectorKey = mustCanonicalConnectorKey(registered.connector_id);
+      await seedInstance({
+        connectorId: connectorKey,
+        connectorInstanceId: "cin_invalid_host_fixture",
+        displayName: "Invalid host fixture",
+        sourceBindingKey: "fixture-account",
+      });
+
+      const ownerToken = await issueOwnerToken(asUrl, OWNER_SUBJECT_ID, "https://reference.example", ownerCookie, csrf);
+      const originalFetch = globalThis.fetch;
+      const fetchHosts: string[] = [];
+      globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+        const url = input instanceof Request ? input.url : String(input);
+        fetchHosts.push(new URL(url).hostname);
+        return originalFetch(input, init);
+      }) as typeof fetch;
+      try {
+        const response = await postRun(rsUrl, ownerToken, "/v1/owner/connections/cin_invalid_host_fixture/run");
+        assert.equal(response.status, 202);
+        const runId = response.body?.run_id;
+        assert.equal(typeof runId, "string");
+
+        const deadline = Date.now() + 5_000;
+        let terminal = null;
+        while (Date.now() < deadline && !terminal) {
+          terminal = await getRunTerminalEvent(runId as string);
+          if (!terminal) {
+            await new Promise((resolve) => setTimeout(resolve, 25));
+          }
+        }
+        assert.ok(terminal, "fixture connector run should reach a terminal event");
+        assert.equal(terminal.status, "completed");
+        assert.equal(terminal.data?.records_emitted, 1);
+        assert.ok(fetchHosts.length > 0, "the run should make observable HTTP calls");
+        assert.ok(!fetchHosts.includes("0.0.0.0"), "no self-call should use Host: 0.0.0.0");
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    },
+    { emitRecord: true, ownerAuthPassword: ownerPassword, reachabilityContract }
+  );
 });
 
 test("owner-agent connection force run audits the forced admission path", async () => {
