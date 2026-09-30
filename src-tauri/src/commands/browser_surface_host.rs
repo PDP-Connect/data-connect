@@ -664,7 +664,16 @@ pub(crate) fn launch_browser(
     profile_dir: &Path,
     headless: bool,
 ) -> Result<(Child, String), BrowserLaunchError> {
-    let mut command = super::pdpp_browser::browser_command(browser, profile_dir, headless);
+    let mut command = super::pdpp_browser::browser_command_with_args(
+        browser,
+        profile_dir,
+        headless,
+        &[
+            "--disable-background-timer-throttling",
+            "--disable-renderer-backgrounding",
+            "--disable-backgrounding-occluded-windows",
+        ],
+    );
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -1466,6 +1475,9 @@ wait "$server_pid"
         let args = fs::read_to_string(profile_dir.join("args.txt")).expect("fake args");
         assert!(args.contains("--headless=new"));
         assert!(args.contains("--remote-debugging-port=0"));
+        assert!(args.contains("--disable-background-timer-throttling"));
+        assert!(args.contains("--disable-renderer-backgrounding"));
+        assert!(args.contains("--disable-backgrounding-occluded-windows"));
 
         let (surface_id, cdp_url, _) = acquire_with_headless(&host, "chase", false);
         assert!(cdp_url.starts_with("http://127.0.0.1:"));

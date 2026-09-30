@@ -198,14 +198,14 @@ interface BrowserSurfaceLeaseManager {
 }
 
 interface BrowserSurfaceTarget {
-  backend: "neko";
-  base_url: string;
+  backend: "cdp" | "neko";
+  base_url?: string;
   cdp_http_url?: string;
   interaction_id: string;
   lease_id: string;
   profile_key: string;
   surface_id: string;
-  window_settle_endpoint: string;
+  window_settle_endpoint?: string;
 }
 
 interface PresentationLifecycle {
@@ -1712,8 +1712,19 @@ export function registerStreamingRoutes({
     if (surface.profile_key !== lease.profile_key) {
       return null;
     }
-    if (!surface.stream_base_url) {
+    const isHostCdpSurface = !surface.stream_base_url && Boolean(surface.cdp_url);
+    if (!surface.stream_base_url && !isHostCdpSurface) {
       return null;
+    }
+    if (isHostCdpSurface) {
+      return {
+        backend: "cdp",
+        ...(surface.cdp_url ? { cdp_http_url: surface.cdp_url } : {}),
+        interaction_id: assistanceId,
+        lease_id: lease.lease_id,
+        profile_key: lease.profile_key,
+        surface_id: surface.surface_id,
+      };
     }
     // The surface's persisted endpoint is diagnostic/legacy lifecycle data;
     // the live, no-query behavior probe above is the only attachment gate.
@@ -1722,7 +1733,7 @@ export function registerStreamingRoutes({
     const windowSettleEndpoint = await assertManagedSurfaceWindowSettleBehavior(surface);
     return {
       backend: "neko",
-      base_url: surface.stream_base_url,
+      ...(surface.stream_base_url ? { base_url: surface.stream_base_url } : {}),
       ...(surface.cdp_url ? { cdp_http_url: surface.cdp_url } : {}),
       interaction_id: assistanceId,
       lease_id: lease.lease_id,

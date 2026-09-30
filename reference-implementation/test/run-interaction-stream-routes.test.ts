@@ -152,6 +152,7 @@ test("viewport wire normalizes before validating so fractional dimensions never 
 
 interface MakeLeaseManagerOptions {
   connectorId?: string;
+  hostCdp?: boolean;
   initialActiveLease?: boolean;
   profileKey?: string;
   runId?: string;
@@ -163,6 +164,7 @@ interface MakeLeaseManagerOptions {
 
 function makeLeaseManager({
   connectorId = "chatgpt",
+  hostCdp = false,
   profileKey = "profile_dynamic_1",
   runId = "run_dynamic_1",
   surfaceHealth = "ready",
@@ -191,10 +193,10 @@ function makeLeaseManager({
     initialSurfaces: [
       {
         backend: "neko",
-        cdp_url: "http://neko:9222",
+        cdp_url: hostCdp ? "http://127.0.0.1:9222" : "http://neko:9222",
         connector_id: connectorId,
         profile_key: profileKey,
-        stream_base_url: "http://10.88.0.4:6080/_ref/browser-surfaces/surface_dynamic_1",
+        stream_base_url: hostCdp ? "" : "http://10.88.0.4:6080/_ref/browser-surfaces/surface_dynamic_1",
         surface_id: "surface_dynamic_1",
         ...(surfaceSubjectId ? { surface_subject_id: surfaceSubjectId } : {}),
         ...(withSettleEndpoint ? { window_settle_endpoint: "http://neko:9222/pdpp/window-settle" } : {}),
@@ -739,6 +741,7 @@ interface HarnessOptions extends Record<string, unknown> {
   nekoWindowSettleProbe?: (endpoint: string) => Promise<unknown>;
   registerTarget?: boolean;
   streamingClearTimeout?: (timer: unknown) => void;
+  streamingCompanionFactory?: StartServerOptions["streamingCompanionFactory"];
   streamingLogger?: unknown;
   streamingNow?: () => number;
   streamingSessionStore?: unknown;
@@ -862,7 +865,10 @@ async function withHarness(options: HarnessOptions | null, fn: (ctx: HarnessCont
     quiet: true,
     rsPort: 0,
     streamingClearTimeout: harnessOptions.streamingClearTimeout,
-    streamingCompanionFactory,
+    streamingCompanionFactory:
+      harnessOptions.streamingCompanionFactory === undefined
+        ? streamingCompanionFactory
+        : (harnessOptions.streamingCompanionFactory as NonNullable<StartServerOptions["streamingCompanionFactory"]>),
     streamingLogger: harnessOptions.streamingLogger,
     streamingNow: harnessOptions.streamingNow,
     streamingSessionStore: harnessOptions.streamingSessionStore,
@@ -1101,6 +1107,45 @@ test("mint accepts a pending manual_action interaction", async () => {
     assert.equal(assistanceCancelled.interaction_id, pending.interaction_id);
     assert.equal(assistanceCancelled.data?.status, "cancelled");
   });
+});
+
+test("mint streams a host lease through its CDP endpoint", async () => {
+  const connectorId = "https://registry.pdpp.dev/connectors/spotify";
+  const leaseManager = makeLeaseManager({ connectorId, hostCdp: true });
+  let seenTarget: Record<string, unknown> | null = null;
+
+  await withHarness(
+    {
+      browserSurfaceLeaseManager: leaseManager,
+      streamingCompanionFactory: ({ browser_session_id, target }) => {
+        seenTarget = target as Record<string, unknown> | null;
+        return createMockCompanion({ browser_session_id });
+      },
+    },
+    async ({ asUrl, spotifyManifest }) => {
+      const started = await startRun(asUrl, spotifyManifest.connector_id);
+      leaseManager.acquire({
+        connectorId,
+        profileKey: "profile_dynamic_1",
+        runId: started.run_id,
+      });
+      const pending = await waitForPendingInteraction(asUrl, started.run_id);
+      try {
+        const mint = await fetchJson(`${asUrl}/_ref/runs/${encodeURIComponent(started.run_id)}/run-interaction-stream`, {
+          body: JSON.stringify({ interaction_id: pending.interaction_id, viewport: { height: 600, width: 800 } }),
+          headers: { "Content-Type": "application/json" },
+          method: "POST",
+        });
+
+        assert.equal(mint.status, 201, JSON.stringify(mint.body));
+        assert.equal((mint.body as MintBody).object, "run_interaction_stream_session");
+        assert.equal(seenTarget?.backend, "cdp");
+        assert.equal(seenTarget?.cdp_http_url, "http://127.0.0.1:9222");
+      } finally {
+        await cancelRun(asUrl, started.run_id, pending.interaction_id);
+      }
+    }
+  );
 });
 
 test("mint accepts current no-response browser-surface assistance backed by a leased surface", async () => {
