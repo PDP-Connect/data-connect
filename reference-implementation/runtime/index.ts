@@ -4586,6 +4586,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
     let queueDrainedResolve: (() => void) | null = null;
     let pendingInteractionViolationReject: ((err: Error) => void) | null = null;
     let pendingInteractionAutoResolve: ((response: InteractionResponse) => void) | null = null;
+    let pendingInteractionAutoResolutionStatus: ConnectorMessage | null = null;
     const completedOtpInteractionRequestIds = new Set<string>();
     let terminateTimer: NodeJS.Timeout | null = null;
     let runtimeTimeoutReason: string | null = null;
@@ -4795,13 +4796,32 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
     }
 
     function failPendingInteraction(err: Error): boolean {
-      if (!(pendingInteraction && pendingInteractionViolationReject)) {
+      if (!(pendingInteraction && pendingInteractionViolationReject) || pendingInteractionAutoResolutionStatus) {
         return false;
       }
       const rejectPendingInteraction = pendingInteractionViolationReject;
       pendingInteractionViolationReject = null;
       rejectPendingInteraction(err);
       terminateChild();
+      return true;
+    }
+
+    function resolvePendingOtpInteraction(msg: ConnectorMessage): boolean {
+      if (
+        msg.type !== "ASSISTANCE_STATUS" ||
+        msg.status !== "resolved" ||
+        pendingInteraction?.kind !== "otp" ||
+        msg.assistance_request_id !== pendingInteraction.request_id ||
+        !pendingInteractionAutoResolve
+      ) {
+        return false;
+      }
+      pendingInteractionAutoResolutionStatus = msg;
+      pendingInteractionAutoResolve({
+        request_id: pendingInteraction.request_id as string,
+        status: "success",
+        type: "INTERACTION_RESPONSE",
+      });
       return true;
     }
 
@@ -5803,6 +5823,10 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       }
       pendingInteractionViolationReject = null;
       pendingInteractionAutoResolve = null;
+      if (pendingInteractionAutoResolutionStatus) {
+        onProgress(pendingInteractionAutoResolutionStatus);
+        pendingInteractionAutoResolutionStatus = null;
+      }
     }
 
     function recordInteractionRecoveryGap(
@@ -5853,6 +5877,14 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       pendingInteractionViolation.catch(() => {
         // The protocol violation is observed by the owning queue.
       });
+      const [queuedMessage] = msgQueue;
+      if (queuedMessage) {
+        if (resolvePendingOtpInteraction(queuedMessage)) {
+          msgQueue.shift();
+        } else {
+          failPendingInteraction(new Error(`Connector emitted ${queuedMessage.type} while waiting for INTERACTION_RESPONSE`));
+        }
+      }
 
       await emitSpineEventTracked({
         actor_id: connectorId,
@@ -6006,19 +6038,10 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       }
       try {
         const msg = JSON.parse(line);
-        if (
-          msg.type === "ASSISTANCE_STATUS" &&
-          msg.status === "resolved" &&
-          pendingInteraction?.kind === "otp" &&
-          msg.assistance_request_id === pendingInteraction.request_id &&
-          pendingInteractionAutoResolve
-        ) {
-          pendingInteractionAutoResolve({
-            request_id: pendingInteraction.request_id as string,
-            status: "success",
-            type: "INTERACTION_RESPONSE",
-          });
-          onProgress(msg);
+        if (resolvePendingOtpInteraction(msg)) {
+          // The matching resolution releases the protocol gate immediately.
+          // DONE can arrive on the next line before the async interaction
+          // completion clears pendingInteraction.
           return;
         }
         if (failPendingInteraction(new Error(`Connector emitted ${msg.type} while waiting for INTERACTION_RESPONSE`))) {
