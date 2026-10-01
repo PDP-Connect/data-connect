@@ -2315,6 +2315,17 @@ body>p{display:none!important}
     }
 
     const unsubscribe = companion.onFrame((frame) => {
+      // A released or reassigned lease must stop frame delivery immediately,
+      // not only at the next 15s keepalive poll. Check before every write so
+      // a lease lost between polls cannot leak a frame to a stale attachment.
+      if (!hostLeaseIsCurrent(session)) {
+        void retireLostHostLease(session).finally(() => {
+          writeEvent("error", { code: "browser_surface_lease_lost", message: "The leased browser surface is no longer available." });
+          raw.end();
+          closePerConnection();
+        });
+        return;
+      }
       writeEvent("frame", buildReferenceWireFramePayload(frame));
       // CDP `Page.startScreencast` only delivers the next frame after the
       // previous one is acknowledged. Without this ack the stream stalls

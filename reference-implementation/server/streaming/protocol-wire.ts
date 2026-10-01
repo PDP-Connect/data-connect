@@ -17,19 +17,148 @@ export interface ReferenceWireViewportPayload {
   width: number;
 }
 
-const INPUT_FIELDS: Record<string, ReadonlySet<string>> = {
-  clipboard: new Set(["action", "text", "type", "correlationId", "wireSeq"]),
-  keyboard: new Set(["action", "code", "key", "location", "modifiers", "repeat", "type", "correlationId", "wireSeq"]),
-  mouse: new Set(["action", "button", "x", "y", "correlationId", "wireSeq", "type"]),
-  paste: new Set(["text", "type", "correlationId", "wireSeq"]),
-  pointer: new Set(["action", "button", "height", "pointerId", "pointerType", "pressure", "tiltX", "tiltY", "type", "width", "x", "y", "correlationId", "wireSeq"]),
-  scroll: new Set(["deltaX", "deltaY", "x", "y", "type", "correlationId", "wireSeq"]),
-  text: new Set(["action", "text", "type", "correlationId", "wireSeq"]),
-  touch: new Set(["action", "id", "x", "y", "type", "correlationId", "wireSeq"]),
-  viewport: new Set(["deviceScaleFactor", "hasTouch", "height", "mobile", "screenHeight", "screenWidth", "type", "userAgent", "width", "correlationId", "wireSeq"]),
-};
 const MAX_INPUT_TEXT_LENGTH = 16_384;
 const MAX_INPUT_COORDINATE = 32_768;
+const MAX_INPUT_STRING_LENGTH = 512;
+const MAX_WIRE_SEQ = Number.MAX_SAFE_INTEGER;
+
+type FieldKind = "string" | "number" | "boolean";
+
+interface FieldSpec {
+  readonly kind: FieldKind;
+  readonly enum?: ReadonlySet<string>;
+  readonly max?: number;
+  readonly maxLength?: number;
+  readonly min?: number;
+}
+
+interface TypeSpec {
+  // Fields every event of this type must include.
+  readonly required: ReadonlySet<string>;
+  // Validator for each allowed field (required or optional). A key absent
+  // from this map is not an allowed field.
+  readonly fields: Readonly<Record<string, FieldSpec>>;
+}
+
+// Fields carried by every wire input event regardless of type: telemetry
+// correlation only, never interpreted as CDP input.
+const COMMON_FIELDS: Readonly<Record<string, FieldSpec>> = {
+  correlationId: { kind: "string", maxLength: MAX_INPUT_STRING_LENGTH },
+  type: { kind: "string", maxLength: MAX_INPUT_STRING_LENGTH },
+  wireSeq: { kind: "number", max: MAX_WIRE_SEQ, min: 0 },
+};
+
+const COORDINATE: FieldSpec = { kind: "number", max: MAX_INPUT_COORDINATE, min: -MAX_INPUT_COORDINATE };
+const DELTA: FieldSpec = { kind: "number", max: MAX_INPUT_COORDINATE, min: -MAX_INPUT_COORDINATE };
+
+// Closed, type-specific schemas. Each event type dispatched to a CDP command
+// (directly or via the Remote Surface backend) is validated against its own
+// allowed-field set, required fields, action enum, and bounded numeric/string
+// ranges before `cdp-adapter.ts`'s `dispatch()` ever sees it.
+const TYPE_SPECS: Record<string, TypeSpec> = {
+  clipboard: {
+    fields: {
+      ...COMMON_FIELDS,
+      action: { enum: new Set(["local_to_remote", "remote_to_local"]), kind: "string" },
+      text: { kind: "string", maxLength: MAX_INPUT_TEXT_LENGTH },
+    },
+    required: new Set(["action"]),
+  },
+  keyboard: {
+    fields: {
+      ...COMMON_FIELDS,
+      action: { enum: new Set(["keydown", "keyup"]), kind: "string" },
+      code: { kind: "string", maxLength: MAX_INPUT_STRING_LENGTH },
+      key: { kind: "string", maxLength: MAX_INPUT_STRING_LENGTH },
+      location: { kind: "number", max: 3, min: 0 },
+      modifiers: { kind: "number", max: 0b1111, min: 0 },
+      repeat: { kind: "boolean" },
+    },
+    required: new Set(["action", "key"]),
+  },
+  mouse: {
+    fields: {
+      ...COMMON_FIELDS,
+      action: { enum: new Set(["click", "dblclick", "mousedown", "mousemove", "mouseup"]), kind: "string" },
+      button: { kind: "number", max: 2, min: 0 },
+      x: COORDINATE,
+      y: COORDINATE,
+    },
+    required: new Set(["action", "x", "y"]),
+  },
+  paste: {
+    fields: {
+      ...COMMON_FIELDS,
+      text: { kind: "string", maxLength: MAX_INPUT_TEXT_LENGTH },
+    },
+    required: new Set(["text"]),
+  },
+  pointer: {
+    fields: {
+      ...COMMON_FIELDS,
+      action: { enum: new Set(["pointercancel", "pointerdown", "pointermove", "pointerup", "wheel"]), kind: "string" },
+      button: { kind: "number", max: 4, min: -1 },
+      buttons: { kind: "number", max: 31, min: 0 },
+      clickCount: { kind: "number", max: 16, min: 0 },
+      deltaX: DELTA,
+      deltaY: DELTA,
+      gestureBoundary: { kind: "boolean" },
+      height: { kind: "number", max: MAX_INPUT_COORDINATE, min: 0 },
+      pointerId: { kind: "number", max: MAX_WIRE_SEQ, min: 0 },
+      pointerType: { enum: new Set(["mouse", "pen", "touch"]), kind: "string" },
+      pressure: { kind: "number", max: 1, min: 0 },
+      source: { kind: "string", maxLength: MAX_INPUT_STRING_LENGTH },
+      tiltX: { kind: "number", max: 90, min: -90 },
+      tiltY: { kind: "number", max: 90, min: -90 },
+      width: { kind: "number", max: MAX_INPUT_COORDINATE, min: 0 },
+      x: COORDINATE,
+      y: COORDINATE,
+    },
+    required: new Set(["action", "x", "y"]),
+  },
+  scroll: {
+    fields: {
+      ...COMMON_FIELDS,
+      deltaX: DELTA,
+      deltaY: DELTA,
+      x: COORDINATE,
+      y: COORDINATE,
+    },
+    required: new Set(["deltaX", "deltaY", "x", "y"]),
+  },
+  text: {
+    fields: {
+      ...COMMON_FIELDS,
+      action: { enum: new Set(["commit", "start", "update"]), kind: "string" },
+      text: { kind: "string", maxLength: MAX_INPUT_TEXT_LENGTH },
+    },
+    required: new Set(["text"]),
+  },
+  touch: {
+    fields: {
+      ...COMMON_FIELDS,
+      action: { enum: new Set(["touchend", "touchmove", "touchstart"]), kind: "string" },
+      id: { kind: "number", max: MAX_WIRE_SEQ, min: 0 },
+      x: COORDINATE,
+      y: COORDINATE,
+    },
+    required: new Set(["action", "x", "y"]),
+  },
+  viewport: {
+    fields: {
+      ...COMMON_FIELDS,
+      deviceScaleFactor: { kind: "number", max: 8, min: 0 },
+      hasTouch: { kind: "boolean" },
+      height: { kind: "number", max: MAX_INPUT_COORDINATE, min: 1 },
+      mobile: { kind: "boolean" },
+      screenHeight: { kind: "number", max: MAX_INPUT_COORDINATE, min: 1 },
+      screenWidth: { kind: "number", max: MAX_INPUT_COORDINATE, min: 1 },
+      userAgent: { kind: "string", maxLength: MAX_INPUT_STRING_LENGTH },
+      width: { kind: "number", max: MAX_INPUT_COORDINATE, min: 1 },
+    },
+    required: new Set(["height", "width"]),
+  },
+};
 
 function invalidInput(): Error & { code: string } {
   const error = new Error("Input event is malformed or exceeds supported limits") as Error & { code: string };
@@ -37,25 +166,61 @@ function invalidInput(): Error & { code: string } {
   return error;
 }
 
+function validateField(key: string, value: unknown, spec: FieldSpec): void {
+  if (spec.kind === "boolean") {
+    if (typeof value !== "boolean") {
+      throw invalidInput();
+    }
+    return;
+  }
+  if (spec.kind === "string") {
+    if (typeof value !== "string") {
+      throw invalidInput();
+    }
+    if (value.length > (spec.maxLength ?? MAX_INPUT_STRING_LENGTH)) {
+      throw invalidInput();
+    }
+    if (spec.enum && !spec.enum.has(value)) {
+      throw invalidInput();
+    }
+    return;
+  }
+  // kind === "number"
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw invalidInput();
+  }
+  if (spec.min !== undefined && value < spec.min) {
+    throw invalidInput();
+  }
+  if (spec.max !== undefined && value > spec.max) {
+    throw invalidInput();
+  }
+  void key;
+}
+
 export function parseReferenceWireInputPayload(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw invalidInput();
   }
   const input = value as Record<string, unknown>;
-  const fields = typeof input.type === "string" ? INPUT_FIELDS[input.type] : undefined;
-  if (!fields || Object.keys(input).some((key) => !fields.has(key))) {
+  const spec = typeof input.type === "string" ? TYPE_SPECS[input.type] : undefined;
+  if (!spec) {
     throw invalidInput();
   }
-  for (const [key, child] of Object.entries(input)) {
-    if (typeof child === "string" && child.length > (key === "text" ? MAX_INPUT_TEXT_LENGTH : 512)) {
+  for (const key of Object.keys(input)) {
+    const fieldSpec = spec.fields[key];
+    if (!fieldSpec) {
       throw invalidInput();
     }
-    if (typeof child === "number" && (!Number.isFinite(child) || Math.abs(child) > MAX_INPUT_COORDINATE)) {
-      throw invalidInput();
-    }
+    // Every allowed field must be a primitive matching its declared kind;
+    // nested objects/arrays (e.g. `{ x: { nested: "x" } }`) are rejected
+    // before dispatch rather than silently passed through.
+    validateField(key, input[key], fieldSpec);
   }
-  if (typeof input.text === "string" && input.text.length > MAX_INPUT_TEXT_LENGTH) {
-    throw invalidInput();
+  for (const key of spec.required) {
+    if (!(key in input)) {
+      throw invalidInput();
+    }
   }
   return input;
 }

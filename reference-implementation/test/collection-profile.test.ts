@@ -7010,8 +7010,12 @@ rl.on('line', (line) => {
       );
       const hostAssistance = (hostTimeline.data || []).find((event) => event.event_type === "run.assistance_requested");
       assert.ok(hostAssistance, "expected host-mode OTP assistance event");
-      assert.equal(hostAssistance.data.owner_action, "provide_value");
-      assert.equal(hostAssistance.data.attachments, undefined);
+      // PDPP_BROWSER_SURFACE_REMOTE_CDP_URL is a real browser-control
+      // capability (hasBrowserSurfaceStream in runtime/index.ts), the same
+      // as the stream-base-url case above, so host-mode OTP also gets the
+      // streaming companion attachment rather than a bare provide_value.
+      assert.equal(hostAssistance.data.owner_action, "operate_attachment");
+      assert.deepEqual(hostAssistance.data.attachments, [{ kind: "browser_surface", role: "streaming_companion" }]);
       assert.deepEqual(hostAssistance.data.input_schema, {
         properties: { code: { type: "string" } },
         required: ["code"],

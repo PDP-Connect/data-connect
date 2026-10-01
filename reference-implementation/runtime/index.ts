@@ -2528,7 +2528,7 @@ function buildConnectorLaunchConfig({
     browserSurfaceEnv: browserSurfaceEnv ?? null,
     browserSurfaceLease: browserSurfaceLease ?? null,
     connectorId,
-    connectorInstanceId,
+    connectorInstanceId: connectorInstanceId ?? null,
   });
   const staticSecretLaunchEnv = staticSecretEnv && typeof staticSecretEnv === "object" ? staticSecretEnv : {};
   const connectorInstanceEnv = normalizedConnectorInstanceId

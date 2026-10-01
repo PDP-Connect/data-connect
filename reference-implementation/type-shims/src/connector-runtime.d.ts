@@ -124,6 +124,9 @@ export type BrowserLaunchSource = {
     readonly profileKey?: string;
     readonly remoteCdpUrl: string;
 } | {
+    readonly kind: "managed_host_cdp";
+    readonly remoteCdpUrl: string;
+} | {
     readonly envKey: string;
     readonly kind: "legacy_remote_cdp";
     readonly remoteCdpUrl: string;

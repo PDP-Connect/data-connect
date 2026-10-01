@@ -1217,6 +1217,81 @@ test("attached host stream loses attach and input authority when its lease is re
   );
 });
 
+test("attached host stream stops frame delivery as soon as its lease is lost, before the next keepalive poll", async () => {
+  // routes.ts polls hostLeaseIsCurrent() every 15s on an open SSE connection
+  // and revalidates on the next attach/input request, but a frame pushed
+  // between a lease release and that poll must not reach the viewer. The
+  // companion's onFrame callback must check the lease itself.
+  const connectorId = "https://registry.pdpp.dev/connectors/spotify";
+  const leaseManager = makeLeaseManager({ connectorId, hostCdp: true });
+  await withHarness(
+    { browserSurfaceLeaseManager: leaseManager },
+    async ({ asUrl, spotifyManifest, companions }) => {
+      const started = await startRun(asUrl, spotifyManifest.connector_id);
+      const acquired = leaseManager.acquire({ connectorId, profileKey: "profile_dynamic_1", runId: started.run_id });
+      const pending = await waitForPendingInteraction(asUrl, started.run_id);
+      const mint = await fetchJson(`${asUrl}/_ref/runs/${encodeURIComponent(started.run_id)}/run-interaction-stream`, {
+        body: JSON.stringify({ interaction_id: pending.interaction_id }),
+        headers: { "Content-Type": "application/json" },
+        method: "POST",
+      });
+      assert.equal(mint.status, 201);
+      const body = mint.body as MintBody;
+
+      const abort = new AbortController();
+      const sseResp = await fetch(`${asUrl}${body.viewer_path}`, { signal: abort.signal });
+      assert.equal(sseResp.status, 200);
+      assert.ok(sseResp.body);
+      const reader = sseResp.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      async function readRawBytes(deadlineMs: number): Promise<void> {
+        const deadline = Date.now() + deadlineMs;
+        while (Date.now() < deadline) {
+          // biome-ignore lint/performance/noAwaitInLoops: Sequential test polling is intentional here.
+          const { value, done } = await reader.read();
+          if (done) {
+            return;
+          }
+          buffer += decoder.decode(value, { stream: true });
+          return;
+        }
+      }
+      await readRawBytes(1000); // prime "attached"
+      assert.ok(buffer.includes("event: attached"));
+      buffer = "";
+
+      const companion = companions.find((entry) => entry.run_id === started.run_id)?.companion;
+      assert.ok(companion);
+
+      leaseManager.release({
+        fencingToken: acquired.lease.fencing_token,
+        leaseId: acquired.lease.lease_id,
+      });
+      // Push a frame immediately after release, well before the 15s keepalive poll.
+      companion.pushFrame({ data: "AFTER_RELEASE", sessionId: 1 });
+
+      const frameDeadline = Date.now() + 2000;
+      let sawError = false;
+      while (Date.now() < frameDeadline) {
+        // biome-ignore lint/performance/noAwaitInLoops: Sequential test polling is intentional here.
+        await readRawBytes(200);
+        if (buffer.includes("event: error") && buffer.includes("browser_surface_lease_lost")) {
+          sawError = true;
+          break;
+        }
+      }
+      assert.ok(sawError, "lease loss must surface an error event instead of forwarding the frame");
+      assert.ok(!buffer.includes("event: frame"), "no frame may be delivered after the lease is lost");
+      assert.ok(!buffer.includes("AFTER_RELEASE"), "the post-release frame payload must never reach the viewer");
+
+      abort.abort();
+      await reader.cancel().catch(() => undefined);
+      await cancelRun(asUrl, started.run_id, pending.interaction_id);
+    }
+  );
+});
+
 test("host stream attachment and input require the owner session that minted it", async () => {
   const connectorId = "https://registry.pdpp.dev/connectors/spotify";
   const leaseManager = makeLeaseManager({ connectorId, hostCdp: true });
@@ -3270,6 +3345,61 @@ test("input POST dispatches to the companion after attach and rejects bad input"
     assert.equal(oversized.status, 400);
     assert.equal((oversized.body as MintBody).error?.code, "invalid_input");
     assert.equal(trackedInputs.length, dispatchedBeforeMalformedInput, "malformed input must not reach the companion");
+
+    // A nested object in place of a declared numeric field must be rejected
+    // before dispatch, not coerced or silently forwarded. Matches the head
+    // probe from the security re-check: {type:"pointer",action:"pointermove",x:{nested:"x"},y:1}.
+    const dispatchedBeforeNestedObjectInput = trackedInputs.length;
+    const nestedObjectField = await fetchJson(`${asUrl}${(mint.body as MintBody).input_path}`, {
+      body: JSON.stringify({ action: "pointermove", type: "pointer", x: { nested: "x" }, y: 1 }),
+      headers: { "Content-Type": "application/json", Cookie: attachmentCookie },
+      method: "POST",
+    });
+    assert.equal(nestedObjectField.status, 400);
+    assert.equal((nestedObjectField.body as MintBody).error?.code, "invalid_input");
+    assert.equal(
+      trackedInputs.length,
+      dispatchedBeforeNestedObjectInput,
+      "a nested-object field value must never reach the companion or CDP"
+    );
+
+    // Same for an array value in place of a declared field.
+    const dispatchedBeforeArrayInput = trackedInputs.length;
+    const arrayField = await fetchJson(`${asUrl}${(mint.body as MintBody).input_path}`, {
+      body: JSON.stringify({ action: "pointermove", type: "pointer", x: [1, 2], y: 1 }),
+      headers: { "Content-Type": "application/json", Cookie: attachmentCookie },
+      method: "POST",
+    });
+    assert.equal(arrayField.status, 400);
+    assert.equal((arrayField.body as MintBody).error?.code, "invalid_input");
+    assert.equal(trackedInputs.length, dispatchedBeforeArrayInput, "an array field value must never reach the companion or CDP");
+
+    // A required field that is simply missing must also be rejected, not
+    // defaulted or forwarded with `undefined`.
+    const dispatchedBeforeMissingRequired = trackedInputs.length;
+    const missingRequired = await fetchJson(`${asUrl}${(mint.body as MintBody).input_path}`, {
+      body: JSON.stringify({ action: "pointerdown", type: "pointer", y: 1 }),
+      headers: { "Content-Type": "application/json", Cookie: attachmentCookie },
+      method: "POST",
+    });
+    assert.equal(missingRequired.status, 400);
+    assert.equal((missingRequired.body as MintBody).error?.code, "invalid_input");
+    assert.equal(
+      trackedInputs.length,
+      dispatchedBeforeMissingRequired,
+      "a missing required field must never reach the companion or CDP"
+    );
+
+    // An action outside the type's closed enum must also be rejected.
+    const dispatchedBeforeBadAction = trackedInputs.length;
+    const badAction = await fetchJson(`${asUrl}${(mint.body as MintBody).input_path}`, {
+      body: JSON.stringify({ action: "pointerexplode", type: "pointer", x: 1, y: 1 }),
+      headers: { "Content-Type": "application/json", Cookie: attachmentCookie },
+      method: "POST",
+    });
+    assert.equal(badAction.status, 400);
+    assert.equal((badAction.body as MintBody).error?.code, "invalid_input");
+    assert.equal(trackedInputs.length, dispatchedBeforeBadAction, "an out-of-enum action must never reach the companion or CDP");
 
     ac.abort();
     try {
