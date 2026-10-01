@@ -14,7 +14,9 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { createRequire } from "node:module";
+import { pathToFileURL } from "node:url";
 import test from "node:test";
 
 import {
@@ -45,6 +47,11 @@ const RE_SYMBOLIC_LINK = /symbolic-link/;
 const RE_UPDATE_FAILED = /crashed while staging update/;
 const RE_UPDATE_TARGET_MISSING = /no verified update target/;
 const RE_REGISTRATION_FAILED = /manifest registration failed/;
+const require = createRequire(import.meta.url);
+const installerCorePath = require.resolve("@opendatalabs/data-connectors-tools/installer-core");
+const { assertCatalog } = await import(
+  pathToFileURL(join(dirname(installerCorePath), "catalog-schema.mjs")).href
+);
 const entry: ConnectorCatalogEntry = {
   bindings: { browser: "optional" },
   config_digest: configDigest,
@@ -54,6 +61,36 @@ const entry: ConnectorCatalogEntry = {
   tier: "supported",
   version: "1.0.0",
 };
+
+test("pinned catalog schema accepts binding features and rejects unknown binding fields", () => {
+  const catalog = {
+    catalog_version: "1.0",
+    generated_at: "2026-09-30T12:00:00Z",
+    source_commit: "a".repeat(40),
+    connectors: [
+      {
+        connector_key: "github",
+        connector_id: "https://github.com/PDP-Connect/data-connectors/connectors/github",
+        display_name: "GitHub",
+        tier: "supported",
+        runtime_requirements: {
+          bindings: {
+            browser: { required: true, features: ["page_navigation", "page_content_read"] },
+            network: { required: true, features: ["host_http_request", "same_origin_page_fetch"] },
+          },
+        },
+        setup: { modality: "static_secret" },
+        latest: { version: "1.0.0", digest },
+        versions: [{ version: "1.0.0", digest }],
+      },
+    ],
+  };
+
+  assert.equal(assertCatalog(catalog), catalog);
+  const invalidCatalog = structuredClone(catalog);
+  invalidCatalog.connectors[0].runtime_requirements.bindings.browser.unrecognized = true;
+  assert.throws(() => assertCatalog(invalidCatalog), /must NOT have additional properties/);
+});
 
 test("PDPP_CONNECTOR_PRELOAD_DIR selects the file-backed install store", () => {
   const previous = process.env.PDPP_CONNECTOR_PRELOAD_DIR;
