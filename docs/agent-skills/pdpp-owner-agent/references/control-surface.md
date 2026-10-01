@@ -3,9 +3,10 @@
 This is the reference for the owner-agent **control plane** — discovering what
 control actions a reference instance supports, listing and labeling connection
 instances, and initiating a new connection as a typed intent. Read `SKILL.md`
-and `daisy-runbook.md` first; `sync.md` covers reading data once a connection
+and `owner-agent-runbook.md` first; `sync.md` covers reading data once a connection
 exists. Everything here assumes a valid owner-level bearer read at call time
-from `~/applications/daisy/.pi/agent/pdpp-owner-agent.json` and never echoed.
+from `~/.pdpp/owner-agents/<host>.json` and never echoed. Replace `<host>` in
+the examples with the resource host used during onboarding.
 
 The control plane is owner-bearer `/v1/owner/*` REST. It is **not** `/mcp`, and
 it is not for routine grant-scoped agents (see "Boundary" below). A trusted owner
@@ -23,7 +24,7 @@ the capability document and the connection listing and prints them without ever
 echoing the bearer:
 
 ```bash
-pdpp owner-agent control --credential-file ~/applications/daisy/.pi/agent/pdpp-owner-agent.json
+pdpp owner-agent control --credential-file "$HOME/.pdpp/owner-agents/<host>.json"
 ```
 
 Output is non-secret only: action families with their `status`
@@ -38,7 +39,7 @@ in shell traces or process listings:
 
 ```bash
 node --input-type=module <<'NODE'
-const credentialPath = `${process.env.HOME}/applications/daisy/.pi/agent/pdpp-owner-agent.json`;
+const credentialPath = `${process.env.HOME}/.pdpp/owner-agents/<host>.json`;
 const { readFile } = await import('node:fs/promises');
 const credential = JSON.parse(await readFile(credentialPath, 'utf8'));
 const rsUrl = process.env.RS_URL ?? credential.resource;
@@ -69,7 +70,7 @@ the connector type.
 
 ```bash
 node --input-type=module <<'NODE'
-const credentialPath = `${process.env.HOME}/applications/daisy/.pi/agent/pdpp-owner-agent.json`;
+const credentialPath = `${process.env.HOME}/.pdpp/owner-agents/<host>.json`;
 const { readFile } = await import('node:fs/promises');
 const credential = JSON.parse(await readFile(credentialPath, 'utf8'));
 const rsUrl = process.env.RS_URL ?? credential.resource;
@@ -106,7 +107,7 @@ name. Give it an owner-meaningful label with the `rename_connection` action:
 node --input-type=module <<'NODE'
 const connectionId = process.env.PDPP_CONNECTION_ID;
 if (!connectionId) throw new Error('Set PDPP_CONNECTION_ID first.');
-const credentialPath = `${process.env.HOME}/applications/daisy/.pi/agent/pdpp-owner-agent.json`;
+const credentialPath = `${process.env.HOME}/.pdpp/owner-agents/<host>.json`;
 const { readFile } = await import('node:fs/promises');
 const credential = JSON.parse(await readFile(credentialPath, 'utf8'));
 const rsUrl = (process.env.RS_URL ?? credential.resource).replace(/\/$/, '');
@@ -144,7 +145,7 @@ provider step for you.
 node --input-type=module <<'NODE'
 const connectorId = process.env.PDPP_CONNECTOR_ID;
 if (!connectorId) throw new Error('Set PDPP_CONNECTOR_ID first.');
-const credentialPath = `${process.env.HOME}/applications/daisy/.pi/agent/pdpp-owner-agent.json`;
+const credentialPath = `${process.env.HOME}/.pdpp/owner-agents/<host>.json`;
 const { readFile } = await import('node:fs/promises');
 const credential = JSON.parse(await readFile(credentialPath, 'utf8'));
 const rsUrl = (process.env.RS_URL ?? credential.resource).replace(/\/$/, '');
@@ -199,7 +200,7 @@ primitive ships. The current implementation and acceptance coverage are in
 This control plane is for the **trusted local owner agent only**. Keep the two
 profiles distinct:
 
-- **Trusted local owner agents** (Daisy/Simon-style, running on the operator's
+- **Trusted local owner agents** (running on the operator's
   machine, explicitly authorized to act as the operator) MAY use the owner-bearer
   `/v1/owner/*` control surface and owner-bearer `/v1/*` reads.
 - **Routine chat-hosted agents, external clients, and task-scoped assistants**

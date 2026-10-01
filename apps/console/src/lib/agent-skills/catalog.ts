@@ -270,7 +270,7 @@ export function ownerAgentOnboardingLLMSIndex(): string {
   return [
     "## Trusted owner-agent onboarding (owner-level local automation)",
     "",
-    "Only for a local agent the operator has explicitly authorized to act as themselves (e.g. a local assistant such as Daisy). Routine third-party, coding-agent, and task-scoped assistants are NOT this profile - they use the grant-scoped `pdpp-data-access` skill above.",
+    "Only for a local agent the operator has explicitly authorized to act as themselves. Routine third-party, coding-agent, and task-scoped assistants are NOT this profile - they use the grant-scoped `pdpp-data-access` skill above.",
     "",
     `- Canonical onboarding metadata: ${PROTECTED_RESOURCE_METADATA_PATH} on this operator origin. When owner-agent onboarding is enabled, the \`pdpp_owner_agent_onboarding\` advisory block names every surface (owner approval / device authorization, token, schema, streams, query base, introspection, revocation, event subscriptions).`,
     `- Owner-agent onboarding guidance: ${WELL_KNOWN_BASE_PATH}/${OWNER_AGENT_SKILL_ROUTE_PATH}`,

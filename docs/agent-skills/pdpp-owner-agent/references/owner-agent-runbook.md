@@ -1,22 +1,24 @@
-# Daisy owner-agent runbook
+# Trusted owner-agent runbook
 
-This runbook is the end-to-end path for a trusted local owner agent — Daisy is the
+This runbook is the end-to-end path for a trusted local owner agent — a local assistant is the
 worked example — from a single entrypoint URL through approval, local credential
 storage, initial sync, and incremental sync. It is owner-level local automation. Read
 `SKILL.md` first; read `sync.md` for the deeper query and callback-vs-polling reference.
 
 Conventions used below:
 
-- `$ENTRYPOINT` — the operator's reference instance origin (what the operator hands Daisy).
+- `$ENTRYPOINT` — the operator's reference instance origin (what the operator hands a trusted local agent).
 - `$RS_URL`, `$AS_URL` — resolved from discovery, not assumed.
 - `read-owner-cred` — read `access_token` from
-  `~/applications/daisy/.pi/agent/pdpp-owner-agent.json` without printing it.
+  `~/.pdpp/owner-agents/<host>.json` without printing it.
+
+Replace `<host>` in the examples with the resource host used during onboarding.
 
 Never print the bearer at any step. Status output is non-secret metadata only.
 
 ## Step 0 — Confirm you are the authorized owner agent
 
-Daisy runs locally as the operator's assistant and the operator has explicitly chosen the
+A local assistant runs on the operator's machine, and the operator has explicitly chosen the
 owner-agent profile. If that is not unambiguously true, stop and use the grant-scoped
 `pdpp-data-access` skill instead. Owner-level access is not the default.
 
@@ -62,7 +64,7 @@ stop. Do not scrape owner pages or invent a bearer.
 ## Step 2 — Owner approval via device authorization
 
 Onboarding is an RFC 8628 device-authorization flow. The reliable path is
-`pdpp owner-agent onboard <entrypoint> --credential-file ~/applications/daisy/.pi/agent/pdpp-owner-agent.json`,
+`pdpp owner-agent onboard <entrypoint> --credential-file "$HOME/.pdpp/owner-agents/<host>.json"`,
 which runs every sub-step below and writes to the explicit target without printing the
 credential. In `reference-implementation/vendor/cli/src/owner-agent/credential-store.ts`,
 an explicit `--credential-file` wins; otherwise the CLI defaults to
@@ -101,7 +103,7 @@ do not retry silently.
 
 The approved flow writes the owner credential to:
 
-`~/applications/daisy/.pi/agent/pdpp-owner-agent.json`
+`~/.pdpp/owner-agents/<host>.json`
 
 Pass this target explicitly to the CLI. In
 `reference-implementation/vendor/cli/src/owner-agent/credential-store.ts`, an explicit
@@ -112,8 +114,8 @@ The file is JSON, mode `0600`, and contains the bearer as `access_token`. Verify
 reading it at call time and hitting compact schema — without echoing the token:
 
 ```bash
-TOKEN="$(jq -r '.access_token' "$HOME/applications/daisy/.pi/agent/pdpp-owner-agent.json")"
-SCHEMA_URL="$(jq -r '.schema_compact_endpoint // (.resource + "/v1/schema?view=compact")' "$HOME/applications/daisy/.pi/agent/pdpp-owner-agent.json")"
+TOKEN="$(jq -r '.access_token' "$HOME/.pdpp/owner-agents/<host>.json")"
+SCHEMA_URL="$(jq -r '.schema_compact_endpoint // (.resource + "/v1/schema?view=compact")' "$HOME/.pdpp/owner-agents/<host>.json")"
 curl -fsS "$SCHEMA_URL" -H "Authorization: Bearer $TOKEN" | jq '.connectors[].name'
 unset TOKEN
 unset SCHEMA_URL
@@ -125,7 +127,7 @@ expiry, revocation handle. Never the bearer.
 Confirm the boundary holds (this should fail, and that is correct):
 
 ```bash
-TOKEN="$(jq -r '.access_token' "$HOME/applications/daisy/.pi/agent/pdpp-owner-agent.json")"
+TOKEN="$(jq -r '.access_token' "$HOME/.pdpp/owner-agents/<host>.json")"
 curl -s -o /dev/null -w '%{http_code}\n' "$RS_URL/mcp" -H "Authorization: Bearer $TOKEN"
 unset TOKEN
 # Expect a rejection. /mcp is the grant-scoped client transport, not owner-agent REST.
@@ -142,7 +144,7 @@ unset TOKEN
    you do not re-list before every read:
 
    ```bash
-   TOKEN="$(jq -r '.access_token' "$HOME/applications/daisy/.pi/agent/pdpp-owner-agent.json")"
+   TOKEN="$(jq -r '.access_token' "$HOME/.pdpp/owner-agents/<host>.json")"
    curl -fsS "$RS_URL/v1/streams" -H "Authorization: Bearer $TOKEN" \
      | jq '.data | map({name, connection_id})'
    unset TOKEN
@@ -153,7 +155,7 @@ unset TOKEN
    `connection_id` alone identifies its connector. Pass both when useful, and attribute
    every record by its `connection_id`.
 4. Persist sync state **per `(stream, connection_id)`** — the latest pagination cursor and
-   the last `changes_since` value — to Daisy's local state. This is what makes future syncs
+   the last `changes_since` value — to the local agent's state. This is what makes future syncs
    cheap.
 
 Do not pull full record bodies or blobs you do not need. Fetch attachment bytes only by
@@ -164,7 +166,7 @@ following `blob_ref.fetch_url`.
 On every refresh, do not rescan. For each stream/connection, resume from the stored cursor:
 
 ```bash
-TOKEN="$(jq -r '.access_token' "$HOME/applications/daisy/.pi/agent/pdpp-owner-agent.json")"
+TOKEN="$(jq -r '.access_token' "$HOME/.pdpp/owner-agents/<host>.json")"
 curl -fsS \
   "$RS_URL/v1/streams/<stream>/records?connector_id=<connector_id>&connection_id=<id>&changes_since=<stored-cursor>&limit=100" \
   -H "Authorization: Bearer $TOKEN" \
@@ -190,7 +192,7 @@ plane at `/v1/owner/*`. The full reference is `references/control-surface.md`; t
 one-shot, non-secret entrypoint is:
 
 ```bash
-pdpp owner-agent control --credential-file "$HOME/applications/daisy/.pi/agent/pdpp-owner-agent.json"
+pdpp owner-agent control --credential-file "$HOME/.pdpp/owner-agents/<host>.json"
 ```
 
 It prints the supported control actions (each with a typed `status`) and every configured
@@ -220,7 +222,7 @@ Decide once, per `sync.md`:
   `changes_since` cursor. **Create/rotate returns a one-time `whsec_` signing secret in the
   response body.** Persist it securely at that moment — the server stores only a hash and
   will not return it again. If you lose it, rotate to get a new one.
-- **No durable receiver** (typical for a laptop-resident Daisy) → poll Step 5 on a backoff
+- **No durable receiver** (typical for a laptop-resident assistant) → poll Step 5 on a backoff
   schedule plus periodic metadata refresh. Do not point a subscription at an unreachable
   local callback.
 
@@ -230,7 +232,7 @@ The operator can revoke the owner-agent credential from the dashboard at any tim
 introspection reports inactive, or a call returns revoked/inactive, stop using the
 credential and tell the operator. Do not silently re-onboard.
 
-## Prompt to give Daisy
+## Prompt to give a trusted local agent
 
 A concise, copy-pasteable first-run prompt for a reference deployment at
 `https://your-pdpp-host.example.com` (substitute your instance's origin). It encodes the
@@ -244,7 +246,7 @@ entrypoint-first flow without leaking any secret:
 > `device_authorization_endpoint`, show me the `verification_uri_complete` (the
 > `/device?user_code=...` page) to approve in my browser, and wait. After I approve, poll
 > the `token_endpoint`, and store the issued credential at
-> `~/applications/daisy/.pi/agent/pdpp-owner-agent.json` with mode 0600 using the CLI's
+> `~/.pdpp/owner-agents/<host>.json` with mode 0600 using the CLI's
 > `--credential-file` option. Never print the bearer; confirm with non-secret status
 > only (token kind, subject, expiry).
 >

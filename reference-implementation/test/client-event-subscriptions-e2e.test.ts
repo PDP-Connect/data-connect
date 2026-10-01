@@ -581,7 +581,7 @@ test("trusted owner-agent event subscriptions deliver signed hints and are revok
     const ownerSubjectId = "e2e_owner";
     const registered = await registerDynamicClient(
       {
-        client_name: "Daisy owner-agent event subscription e2e",
+        client_name: "Local owner agent event subscription e2e",
         token_endpoint_auth_method: "none",
       },
       { issuer_subject_id: ownerSubjectId }

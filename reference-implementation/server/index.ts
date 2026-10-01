@@ -7313,7 +7313,7 @@ function buildAgentDiscoveryMetadata(
 }
 
 // Build the advisory `pdpp_owner_agent_onboarding` block for a trusted local
-// owner agent (e.g. Daisy). This is non-normative reference metadata — NOT a
+// owner agent. This is non-normative reference metadata — NOT a
 // PDPP Core requirement — that names the owner-level REST automation profile
 // and the surfaces needed to onboard and keep an incremental local view.
 //

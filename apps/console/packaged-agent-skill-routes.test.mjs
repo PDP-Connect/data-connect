@@ -29,10 +29,10 @@ test("skill reference completeness detects a removed served file", () => {
   const servedPaths = new Set([
     "pdpp-owner-agent/SKILL.md",
     "pdpp-owner-agent/references/control-surface.md",
-    "pdpp-owner-agent/references/daisy-runbook.md",
+    "pdpp-owner-agent/references/owner-agent-runbook.md",
     "pdpp-owner-agent/references/sync.md",
   ]);
-  servedPaths.delete("pdpp-owner-agent/references/daisy-runbook.md");
+  servedPaths.delete("pdpp-owner-agent/references/owner-agent-runbook.md");
   assert.throws(() => assertSkillReferencesServed("pdpp-owner-agent", ownerSkillPath, references, servedPaths));
 });
 
