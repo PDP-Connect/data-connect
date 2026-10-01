@@ -113,6 +113,24 @@ const AMAZON_MANIFEST = {
   streams: [],
   version: "1.0.0",
 };
+const REDDIT_CONNECTOR = "reddit";
+const REDDIT_MANIFEST = {
+  connector_id: REDDIT_CONNECTOR,
+  name: "Reddit",
+  runtime_requirements: { bindings: { browser: { required: true } } },
+  setup: {
+    modality: "static_secret",
+    credential_capture: {
+      kind: "username_password",
+      fields: [
+        { name: "username", type: "text", secret: true, env: ["REDDIT_USERNAME"] },
+        { name: "password", type: "password", secret: true, env: ["REDDIT_PASSWORD"] },
+      ],
+    },
+  },
+  streams: [],
+  version: "1.0.0",
+};
 const NON_SECRET_CONNECTOR = "claude_code";
 const NON_SECRET_MANIFEST = {
   connector_id: NON_SECRET_CONNECTOR,
@@ -125,6 +143,7 @@ const MANIFEST_BY_CONNECTOR: Readonly<Record<string, unknown>> = {
   [AMAZON_CONNECTOR]: AMAZON_MANIFEST,
   [CHATGPT_CONNECTOR]: CHATGPT_MANIFEST,
   [GMAIL_CONNECTOR]: GMAIL_MANIFEST,
+  [REDDIT_CONNECTOR]: REDDIT_MANIFEST,
   [NON_SECRET_CONNECTOR]: NON_SECRET_MANIFEST,
 };
 
@@ -390,6 +409,37 @@ test("a captured Amazon username/password credential is injected into the connec
   assert.equal(calls.length, 1);
   assert.deepEqual(at(calls, 0).staticSecretEnv, {
     AMAZON_PASSWORD: "amazon password here",
+  });
+});
+
+test("the first browser enrollment run receives both sealed Reddit fields", async (t) => {
+  freshDb(t);
+  seedConnectorInstance({
+    connectorId: REDDIT_CONNECTOR,
+    connectorInstanceId: "cin_reddit",
+    ownerSubjectId: "owner_1",
+    sourceBinding: { kind: "browser_enrollment_shell" },
+  });
+  await captureStore().capture({
+    connectorInstanceId: "cin_reddit",
+    credentialKind: "username_password",
+    now: "2026-06-01T12:00:00.000Z",
+    ownerSubjectId: "owner_1",
+    secret: JSON.stringify({ username: "synthetic-user", password: "synthetic-password" }),
+  });
+  const calls: RuntimeRunConnectorOptions[] = [];
+  const controller = makeController(calls);
+  await controller.runNow(REDDIT_CONNECTOR, {
+    connectorInstanceId: "cin_reddit",
+    manifest: REDDIT_MANIFEST,
+    ownerToken: "owner-token",
+    runId: "run_reddit",
+  });
+  await controller.drainActiveRuns(1000);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(at(calls, 0).staticSecretEnv, {
+    REDDIT_USERNAME: "synthetic-user",
+    REDDIT_PASSWORD: "synthetic-password",
   });
 });
 

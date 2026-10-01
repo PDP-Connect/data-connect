@@ -36,10 +36,10 @@ import { getStaticSecretSetup, type StaticSecretSetupField } from "../../../lib/
 import { findManifestForConnectorId } from "../../../sources/lib/relationships.ts";
 import { listConnectorManifests } from "../../../lib/rs-client.ts";
 import {
-  type BrowserOptionalCredentialContract,
+  type BrowserCredentialContract,
   browserSessionFormContract,
+  browserCredentialFieldLabel,
   connectionNameFieldContract,
-  optionalCredentialFieldLabel,
 } from "../../../lib/source-setup-form-contract.ts";
 
 export const dynamic = "force-dynamic";
@@ -71,41 +71,45 @@ function inputType(field: StaticSecretSetupField): "email" | "password" | "text"
   return field.type === "email" || field.type === "password" ? field.type : "text";
 }
 
-function OptionalStoredCredentialFields({
+function StoredCredentialFields({
   credentials,
   searchParams,
 }: {
-  credentials: BrowserOptionalCredentialContract;
+  credentials: BrowserCredentialContract;
   searchParams: Record<string, string | string[] | undefined>;
 }) {
   return (
     <fieldset
       className="grid gap-3 rounded-lg border border-border/70 bg-muted/20 p-4"
-      data-testid="browser-optional-credentials"
+      data-testid="browser-credential-capture"
     >
       <legend className="pdpp-eyebrow px-1 text-foreground">{credentials.title}</legend>
       <p className="pdpp-caption text-muted-foreground">{credentials.description}</p>
-      <label className="flex items-start gap-2" htmlFor="browser-remember-sign-in">
-        <input
-          className="mt-0.5 size-4 rounded border-border accent-primary"
-          id="browser-remember-sign-in"
-          name={credentials.checkboxName}
-          type="checkbox"
-          value="1"
-        />
-        <span className="pdpp-caption text-foreground">{credentials.checkboxLabel}</span>
-      </label>
+      {credentials.required ? (
+        <input name="credential_capture_required" type="hidden" value="1" />
+      ) : (
+        <label className="flex items-start gap-2" htmlFor="browser-remember-sign-in">
+          <input
+            className="mt-0.5 size-4 rounded border-border accent-primary"
+            id="browser-remember-sign-in"
+            name={credentials.checkboxName}
+            type="checkbox"
+            value="1"
+          />
+          <span className="pdpp-caption text-foreground">{credentials.checkboxLabel}</span>
+        </label>
+      )}
       <div className="grid gap-3 border-border/60 border-t pt-3" data-testid="browser-credential-fields">
         {credentials.fields.map((field) => (
           <label className="grid gap-1" htmlFor={`browser-credential-${field.name}`} key={field.name}>
-            <span className="pdpp-eyebrow">{optionalCredentialFieldLabel(field)}</span>
+            <span className="pdpp-eyebrow">{browserCredentialFieldLabel(field, credentials.required)}</span>
             <IcInput
               autoComplete={field.autocomplete ?? (field.secret ? "off" : undefined)}
-              defaultValue={firstValue(searchParams[`field_${field.name}`])}
+              defaultValue={field.secret ? undefined : firstValue(searchParams[`field_${field.name}`])}
               id={`browser-credential-${field.name}`}
               name={field.name}
               placeholder={field.placeholder ?? undefined}
-              required={false}
+              required={credentials.required && field.required}
               type={inputType(field)}
             />
             {field.description || field.help_text || field.help_url ? (
@@ -114,10 +118,7 @@ function OptionalStoredCredentialFields({
                 {field.help_url ? (
                   <>
                     {" "}
-                    <OpenExternalLink
-                      className="underline decoration-dotted underline-offset-4"
-                      href={field.help_url}
-                    >
+                    <OpenExternalLink className="underline decoration-dotted underline-offset-4" href={field.help_url}>
                       Open provider setup page in a new tab
                     </OpenExternalLink>
                   </>
@@ -207,14 +208,18 @@ export default async function BrowserSessionConnectPage({
               />
               <span className="pdpp-caption text-muted-foreground">{connectionName.helpText}</span>
             </label>
-            {browserFormContract.optionalCredentials ? (
-              <OptionalStoredCredentialFields
-                credentials={browserFormContract.optionalCredentials}
+            {browserFormContract.credentialCapture ? (
+              <StoredCredentialFields
+                credentials={browserFormContract.credentialCapture}
                 searchParams={resolvedSearchParams}
               />
             ) : null}
             <button
-              className={buttonVariants({ className: "w-full justify-center", size: "lg", variant: "default" })}
+              className={buttonVariants({
+                className: "w-full justify-center",
+                size: "lg",
+                variant: "default",
+              })}
               type="submit"
             >
               {primaryActionLabel}
@@ -302,14 +307,18 @@ export default async function BrowserSessionConnectPage({
             {pageParams.connectionId ? (
               <input name="connection_id" type="hidden" value={pageParams.connectionId} />
             ) : null}
-            {browserFormContract.optionalCredentials ? (
-              <OptionalStoredCredentialFields
-                credentials={browserFormContract.optionalCredentials}
+            {browserFormContract.credentialCapture ? (
+              <StoredCredentialFields
+                credentials={browserFormContract.credentialCapture}
                 searchParams={resolvedSearchParams}
               />
             ) : null}
             <button
-              className={buttonVariants({ className: "w-full justify-center", size: "lg", variant: "default" })}
+              className={buttonVariants({
+                className: "w-full justify-center",
+                size: "lg",
+                variant: "default",
+              })}
               type="submit"
             >
               {primaryActionLabel}

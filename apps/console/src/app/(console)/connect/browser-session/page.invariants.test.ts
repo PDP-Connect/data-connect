@@ -24,7 +24,7 @@ const SECURE_BROWSER_COPY_RE = /secure browser/;
 const OPERATOR_ARTIFACT_RE = /browser-collector runbook|\bneko\b|n\.eko|hosted Chromium/;
 const SERVER_ACTION_TRANSPORT_RE = /startBrowserEnrollmentAction|from "\.\/actions\.ts"|<form action=\{[^}]+Action/;
 const POST_ROUTE_TRANSPORT_RE =
-  /<form action=\{`\/connect\/browser-session\/\$\{encodeURIComponent\(connectorId\)\}\/start`\} method="post">/;
+  /<form\s+action=\{`\/connect\/browser-session\/\$\{encodeURIComponent\(connectorId\)\}\/start`\}\s+method="post">/;
 const PAGE_SETUP_DESCRIPTION_RE = /browserFormContract\.setupDescription/;
 const PAGE_NEW_ACCOUNT_COPY_RE = /Create a new account/;
 const PAGE_OPTIONAL_LABEL_RE = /connectionName\.label/;
@@ -92,6 +92,15 @@ test("browser-session setup page keeps the new-account form and reconnect escape
   assert.match(src, PAGE_PRIMARY_ACTION_LABEL_RE);
   assert.match(src, PAGE_HOW_IT_WORKS_ACTION_RE);
   assert.doesNotMatch(src, PAGE_CONNECTION_ID_FIELD_RE);
+});
+
+test("required manifest capture posts through the credential route and does not echo secret fields", async () => {
+  const [page, route] = await Promise.all([readFile(PAGE_FILE, "utf8"), readFile(START_ROUTE_FILE, "utf8")]);
+  assert.match(page, /name="credential_capture_required" type="hidden" value="1"/);
+  assert.match(page, /required=\{credentials\.required && field\.required\}/);
+  assert.match(page, /defaultValue=\{[\s\S]{0,100}field\.secret[\s\S]{0,100}firstValue/);
+  assert.match(route, /formData\.get\("credential_capture_required"\) !== "1"/);
+  assert.match(route, /await captureStaticSecretCredential\(/);
 });
 
 test("browser-session start uses a normal POST route, not Server Action fetch transport", async () => {

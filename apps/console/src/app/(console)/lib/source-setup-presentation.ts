@@ -452,7 +452,7 @@ export function sourceSetupGuidance(entry: ConnectorCatalogEntry): string {
     return unclassifiedSetupGuidance(entry);
   }
   if (browserBoundWithStoredCredentials(entry)) {
-    return "Sign in in the secure browser. Saving sign-in details is optional and may help with setup or repair, but one-time codes, passkeys, and other human steps still happen in the browser. Automatic reconnection is not guaranteed.";
+    return "Enter this source's sign-in details when requested. Complete one-time codes, passkeys, and other human steps in the secure browser. Automatic reconnection is not guaranteed.";
   }
   switch (entry.disposition) {
     case "local_collector_enroll":
@@ -508,8 +508,8 @@ export function sourceSetupAction(entry: ConnectorCatalogEntry): SourceSetupActi
     return null;
   }
   // Browser-bound connectors that also declare credential capture still start
-  // from the one browser-session path. The optional saved-sign-in-details
-  // fields live inside that page rather than becoming a second picker choice.
+  // from the one browser-session path. Manifest sign-in fields live inside
+  // that page rather than becoming a second picker choice.
   if (browserBoundWithStoredCredentials(entry)) {
     return {
       href: `/connect/browser-session/${encodeURIComponent(entry.connectorKey)}`,
@@ -574,7 +574,7 @@ export function sourceSetupCardAction(
 }
 
 export function sourceSetupSecondaryAction(_entry: ConnectorCatalogEntry): SourceSetupAction | null {
-  // Stored credentials are an optional part of the browser-session page. Keep
+  // Stored credentials are part of the browser-session page. Keep
   // the Add Source catalog to one primary account-connect action so the legacy
   // static-secret route cannot look like an equal setup modality.
   return null;

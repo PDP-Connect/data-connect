@@ -47,7 +47,7 @@ export async function resolveConnectionForRecordsRoute(
   // first; if it does not resolve (wrong owner, deleted, typo'd link), fall
   // through to the normal route-id resolution rather than failing outright.
   if (explicitConnectionId) {
-    const scoped = await listConnectorSummaries({ connectionRouteId: explicitConnectionId });
+    const scoped = await listConnectorSummaries({ connectionRouteId: explicitConnectionId, sourcesVisibility: true });
     const exact = scoped.data.find(
       (summary) =>
         summary.connection_id === explicitConnectionId || summary.connector_instance_id === explicitConnectionId
@@ -62,7 +62,7 @@ export async function resolveConnectionForRecordsRoute(
   // hydrates every connector to find one. The local fallback below is defensive
   // for older references; current references should already have made the
   // ambiguity decision before returning data.
-  const response = await listConnectorSummaries({ connectionRouteId: routeId });
+  const response = await listConnectorSummaries({ connectionRouteId: routeId, sourcesVisibility: true });
   const byIdentityOrConnectorId =
     response.data.find((summary) => summary.connection_id === routeId || summary.connector_instance_id === routeId) ??
     response.data.find((summary) => summary.connector_id === routeId) ??
