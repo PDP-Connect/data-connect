@@ -5,9 +5,11 @@
 
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
+import { isSetupFailedSource } from "@pdpp/display";
 import { requireDashboardAccess } from "../../lib/dashboard-access.ts";
 import { profilePurgeSentence } from "../../lib/connection-control-result.ts";
 import { deleteConnectionWithRunCancel } from "../../lib/delete-connection-with-run-cancel.ts";
+import { listConnectorSummaries } from "../../lib/ref-client.ts";
 import {
   cancelRun,
   deleteConnection,
@@ -436,6 +438,41 @@ export async function reactivateConnectionAction(formData: FormData) {
   revalidatePath("/sources");
   revalidatePath(`/sources/${encodeURIComponent(routeId)}`);
   redirect(error ? recordsListHref(message, error) : recordsListHref(message));
+}
+
+/**
+ * Resume one setup-failed shell. The source-visibility projection is checked
+ * again on the server before the revoked connection is reactivated, then the
+ * existing setup-status route chooses its binding-specific repair form while
+ * retaining this connection id.
+ */
+export async function resumeSetupConnectionAction(formData: FormData) {
+  const connectionId = asString(formData.get("connection_id"));
+  await requireDashboardAccess(connectorHref(connectionId));
+  if (!connectionId) {
+    redirect("/sources");
+  }
+
+  const summaries = await listConnectorSummaries({ connectionRouteId: connectionId, sourcesVisibility: true }).catch(
+    (err: unknown) => redirect(connectorHref(connectionId, undefined, errorMessage(err)))
+  );
+  const setupFailed = summaries.data.find(
+    (summary) => summary.connection_id === connectionId && isSetupFailedSource(summary)
+  );
+  if (!setupFailed) {
+    redirect(connectorHref(connectionId, undefined, "This setup attempt is no longer available."));
+  }
+
+  const result = await reactivateConnection(connectionId).catch((err: unknown) =>
+    redirect(connectorHref(connectionId, undefined, errorMessage(err)))
+  );
+  if (result.status !== "reactivated") {
+    redirect(connectorHref(connectionId, undefined, "This setup attempt is no longer available."));
+  }
+  revalidatePath("/sources");
+  revalidatePath(`/sources/${encodeURIComponent(connectionId)}`);
+
+  redirect(`/connect/status/${encodeURIComponent(connectionId)}`);
 }
 
 /**

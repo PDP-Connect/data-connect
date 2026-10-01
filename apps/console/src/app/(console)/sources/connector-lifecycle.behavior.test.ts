@@ -42,6 +42,9 @@ const component = (async () => {
   mock.module(new URL("../lib/delete-connection-with-run-cancel.ts", import.meta.url).href, {
     namedExports: { deleteConnectionWithRunCancel: async () => ({ status: "deleted" }) },
   });
+  mock.module(new URL("../lib/ref-client.ts", import.meta.url).href, {
+    namedExports: { listConnectorSummaries: async () => ({ data: [] }) },
+  });
   mock.module(new URL("../lib/operator-runs.ts", import.meta.url).href, {
     namedExports: {
       cancelRun: async () => ({}),
