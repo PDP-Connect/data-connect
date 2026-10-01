@@ -1292,6 +1292,84 @@ test("attached host stream stops frame delivery as soon as its lease is lost, be
   );
 });
 
+test("attached host stream stops out-of-band events as soon as its lease is lost, before any frame or keepalive", async () => {
+  // Frame delivery is gated against hostLeaseIsCurrent(), but url_changed,
+  // popup_opened and popup_closed events are a separate delivery path
+  // (companion.onEvent) and must be gated the same way. Without the check, a
+  // stale viewer can keep receiving the browser's URLs (which can carry
+  // tokens or account data) after the lease has moved on, until a later
+  // frame or the 15s keepalive ends the stream.
+  const connectorId = "https://registry.pdpp.dev/connectors/spotify";
+  const leaseManager = makeLeaseManager({ connectorId, hostCdp: true });
+  await withHarness(
+    { browserSurfaceLeaseManager: leaseManager },
+    async ({ asUrl, spotifyManifest, companions }) => {
+      const started = await startRun(asUrl, spotifyManifest.connector_id);
+      const acquired = leaseManager.acquire({ connectorId, profileKey: "profile_dynamic_1", runId: started.run_id });
+      const pending = await waitForPendingInteraction(asUrl, started.run_id);
+      const mint = await fetchJson(`${asUrl}/_ref/runs/${encodeURIComponent(started.run_id)}/run-interaction-stream`, {
+        body: JSON.stringify({ interaction_id: pending.interaction_id }),
+        headers: { "Content-Type": "application/json" },
+        method: "POST",
+      });
+      assert.equal(mint.status, 201);
+      const body = mint.body as MintBody;
+
+      const abort = new AbortController();
+      const sseResp = await fetch(`${asUrl}${body.viewer_path}`, { signal: abort.signal });
+      assert.equal(sseResp.status, 200);
+      assert.ok(sseResp.body);
+      const reader = sseResp.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      async function readRawBytes(deadlineMs: number): Promise<void> {
+        const deadline = Date.now() + deadlineMs;
+        while (Date.now() < deadline) {
+          // biome-ignore lint/performance/noAwaitInLoops: Sequential test polling is intentional here.
+          const { value, done } = await reader.read();
+          if (done) {
+            return;
+          }
+          buffer += decoder.decode(value, { stream: true });
+          return;
+        }
+      }
+      await readRawBytes(1000); // prime "attached"
+      assert.ok(buffer.includes("event: attached"));
+      buffer = "";
+
+      const companion = companions.find((entry) => entry.run_id === started.run_id)?.companion;
+      assert.ok(companion);
+
+      leaseManager.release({
+        fencingToken: acquired.lease.fencing_token,
+        leaseId: acquired.lease.lease_id,
+      });
+      // Push an out-of-band event immediately after release, before any
+      // frame or the 15s keepalive poll.
+      companion.pushEvent({ kind: "url_changed", url: "https://secret.example/AFTER_RELEASE_URL" });
+
+      const deadline = Date.now() + 2000;
+      let sawError = false;
+      while (Date.now() < deadline) {
+        // biome-ignore lint/performance/noAwaitInLoops: Sequential test polling is intentional here.
+        await readRawBytes(200);
+        if (buffer.includes("event: error") && buffer.includes("browser_surface_lease_lost")) {
+          sawError = true;
+          break;
+        }
+      }
+      assert.ok(sawError, "lease loss must surface an error event instead of forwarding the url_changed event");
+      assert.ok(!buffer.includes("event: url_changed"), "no url_changed event may be delivered after the lease is lost");
+      assert.ok(!buffer.includes("AFTER_RELEASE"), "the post-release URL must never reach the viewer");
+
+      abort.abort();
+      await reader.cancel().catch(() => undefined);
+      await cancelRun(asUrl, started.run_id, pending.interaction_id);
+    }
+  );
+});
+
 test("host stream attachment and input require the owner session that minted it", async () => {
   const connectorId = "https://registry.pdpp.dev/connectors/spotify";
   const leaseManager = makeLeaseManager({ connectorId, hostCdp: true });

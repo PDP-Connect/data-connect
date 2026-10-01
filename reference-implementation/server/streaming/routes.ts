@@ -2314,16 +2314,35 @@ body>p{display:none!important}
       writeEvent("presentation_observer", { browser_session_id: session.browser_session_id });
     }
 
-    const unsubscribe = companion.onFrame((frame) => {
-      // A released or reassigned lease must stop frame delivery immediately,
-      // not only at the next 15s keepalive poll. Check before every write so
-      // a lease lost between polls cannot leak a frame to a stale attachment.
-      if (!hostLeaseIsCurrent(session)) {
-        void retireLostHostLease(session).finally(() => {
+    // A released or reassigned lease must stop every delivery path
+    // immediately — frames, out-of-band events, and the keepalive poll —
+    // not only at the next 15s tick. `closePerConnection` runs synchronously
+    // before the async retire so no further write can land on this
+    // connection once loss is detected, and the once-guard means only one
+    // of the three call sites ever reaches the retire/error/end sequence
+    // even if more than one fires for the same connection.
+    let leaseLostHandled = false;
+    function handleLeaseLost(): void {
+      if (leaseLostHandled) {
+        return;
+      }
+      leaseLostHandled = true;
+      closePerConnection();
+      void retireLostHostLease(session).finally(() => {
+        try {
           writeEvent("error", { code: "browser_surface_lease_lost", message: "The leased browser surface is no longer available." });
           raw.end();
-          closePerConnection();
-        });
+        } catch {
+          /* socket may already be gone */
+        }
+      });
+    }
+
+    const unsubscribe = companion.onFrame((frame) => {
+      // Check before every write so a lease lost between polls cannot leak
+      // a frame to a stale attachment.
+      if (!hostLeaseIsCurrent(session)) {
+        handleLeaseLost();
         return;
       }
       writeEvent("frame", buildReferenceWireFramePayload(frame));
@@ -2347,6 +2366,10 @@ body>p{display:none!important}
     const unsubscribeEvents =
       typeof companion.onEvent === "function"
         ? companion.onEvent((event) => {
+            if (!hostLeaseIsCurrent(session)) {
+              handleLeaseLost();
+              return;
+            }
             const payload = buildReferenceWireCompanionEventPayload(event);
             if (!payload) {
               return;
@@ -2363,11 +2386,7 @@ body>p{display:none!important}
     // SSE comments (lines starting with `:`) are ignored by EventSource clients.
     const keepAliveInterval = setInterval(() => {
       if (!hostLeaseIsCurrent(session)) {
-        void retireLostHostLease(session).finally(() => {
-          writeEvent("error", { code: "browser_surface_lease_lost", message: "The leased browser surface is no longer available." });
-          raw.end();
-          closePerConnection();
-        });
+        handleLeaseLost();
         return;
       }
       try {
