@@ -87,8 +87,13 @@ test("pinned catalog schema accepts binding features and rejects unknown binding
   };
 
   assert.equal(assertCatalog(catalog), catalog);
-  const invalidCatalog = structuredClone(catalog);
-  invalidCatalog.connectors[0].runtime_requirements.bindings.browser.unrecognized = true;
+  // Deliberately untyped: the point is a property the schema does not declare.
+  const invalidCatalog = structuredClone(catalog) as unknown as {
+    connectors: Array<{ runtime_requirements: { bindings: { browser: Record<string, unknown> } } }>;
+  };
+  const firstConnector = invalidCatalog.connectors[0];
+  assert.ok(firstConnector);
+  firstConnector.runtime_requirements.bindings.browser.unrecognized = true;
   assert.throws(() => assertCatalog(invalidCatalog), /must NOT have additional properties/);
 });
 
