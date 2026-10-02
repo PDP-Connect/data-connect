@@ -2211,13 +2211,18 @@ function validateAssistanceMessage(msg: ConnectorMessage, scopeByStream: ScopeBy
   validateAssistanceAttachments(msg.attachments);
 }
 
-function hasBrowserSurfaceStream(env: Record<string, string> | null | undefined): boolean {
-  // Remote CDP can point to host-owned Chrome; only a stream URL enables the
-  // remote browser action shown by the console.
-  return Boolean(env && typeof env === "object" && optionalNonEmptyEnv(env.PDPP_BROWSER_SURFACE_STREAM_BASE_URL));
+export function hasBrowserSurfaceStream(env: Record<string, string> | null | undefined): boolean {
+  // A stream URL enables a remote surface, while a CDP URL enables the leased
+  // host browser companion. Both are real browser-control capabilities.
+  return Boolean(
+    env &&
+      typeof env === "object" &&
+      (optionalNonEmptyEnv(env.PDPP_BROWSER_SURFACE_STREAM_BASE_URL) ||
+        optionalNonEmptyEnv(env.PDPP_BROWSER_SURFACE_REMOTE_CDP_URL))
+  );
 }
 
-function buildAssistanceRequestedDataFromInteraction(
+export function buildAssistanceRequestedDataFromInteraction(
   msg: ConnectorMessage,
   runSource: { id: string; kind: string },
   options: { browserSurfaceAvailable?: boolean } = {}
@@ -2335,10 +2340,14 @@ function optionalNonEmptyEnv(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
-function buildBrowserSurfaceLaunchEnv({
+export function buildBrowserSurfaceLaunchEnv({
+  connectorId,
+  connectorInstanceId,
   browserSurfaceLease,
   browserSurfaceEnv,
 }: {
+  connectorId?: string;
+  connectorInstanceId?: string | null;
   browserSurfaceEnv?: RuntimeBrowserSurfaceEnv | null;
   browserSurfaceLease?: RuntimeBrowserSurfaceLease | null;
 }): Record<string, string> {
@@ -2371,7 +2380,19 @@ function buildBrowserSurfaceLaunchEnv({
     optionalNonEmptyEnv(explicit.PDPP_BROWSER_SURFACE_REQUIRED) ||
     optionalNonEmptyEnv(source.required) ||
     optionalNonEmptyEnv(source.browserSurfaceRequired) ||
-    (remoteCdpUrl ? "neko" : null);
+    (streamBaseUrl ? "neko" : remoteCdpUrl ? "host" : null);
+
+  const legacyProfileName = [connectorId, connectorInstanceId]
+    .map((value) => optionalNonEmptyEnv(value))
+    .filter((value): value is string => value !== null)
+    .join("__");
+  // Published collection profiles bundle their own older connector runtime.
+  // Until those artifacts are rebuilt, give its legacy profile-keyed resolver
+  // the same host CDP endpoint while keeping the generic host contract intact.
+  const legacyHostCdpAlias =
+    required?.toLowerCase() === "host" && remoteCdpUrl && /^[A-Za-z0-9_-]+$/.test(legacyProfileName)
+      ? { [`PDPP_${legacyProfileName.toUpperCase()}_REMOTE_CDP_URL`]: remoteCdpUrl }
+      : {};
 
   return {
     ...(required ? { PDPP_BROWSER_SURFACE_REQUIRED: required } : {}),
@@ -2380,6 +2401,7 @@ function buildBrowserSurfaceLaunchEnv({
     ...(surfaceId ? { PDPP_BROWSER_SURFACE_ID: surfaceId } : {}),
     ...(remoteCdpUrl ? { PDPP_BROWSER_SURFACE_REMOTE_CDP_URL: remoteCdpUrl } : {}),
     ...(streamBaseUrl ? { PDPP_BROWSER_SURFACE_STREAM_BASE_URL: streamBaseUrl } : {}),
+    ...legacyHostCdpAlias,
   };
 }
 
@@ -2471,6 +2493,7 @@ function buildConnectorLaunchConfig({
   automationMode,
   browserSurfaceEnv,
   browserSurfaceLease,
+  connectorId,
   connectorInstanceId,
   connectorPath,
   referenceBaseUrl,
@@ -2483,6 +2506,7 @@ function buildConnectorLaunchConfig({
   | "automationMode"
   | "browserSurfaceEnv"
   | "browserSurfaceLease"
+  | "connectorId"
   | "connectorInstanceId"
   | "connectorPath"
   | "referenceBaseUrl"
@@ -2503,6 +2527,8 @@ function buildConnectorLaunchConfig({
   const browserSurfaceLaunchEnv = buildBrowserSurfaceLaunchEnv({
     browserSurfaceEnv: browserSurfaceEnv ?? null,
     browserSurfaceLease: browserSurfaceLease ?? null,
+    connectorId,
+    connectorInstanceId: connectorInstanceId ?? null,
   });
   const staticSecretLaunchEnv = staticSecretEnv && typeof staticSecretEnv === "object" ? staticSecretEnv : {};
   const connectorInstanceEnv = normalizedConnectorInstanceId
@@ -2827,6 +2853,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
     automationMode,
     browserSurfaceEnv,
     browserSurfaceLease,
+    connectorId,
     connectorInstanceId: resolvedConnectorInstanceId,
     connectorPath,
     referenceBaseUrl,

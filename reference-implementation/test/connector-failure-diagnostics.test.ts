@@ -118,6 +118,17 @@ test("redactStderrTail: tolerates empty/null input", () => {
   assert.deepEqual(redactStderrTail(null), { redacted: false, text: "" });
 });
 
+test("boundConnectorErrorMessage keeps the cause after Playwright's box border", async () => {
+  const { boundConnectorErrorMessage } = await import("../runtime/connector-gap-bounding.ts");
+  const border = `╔${"═".repeat(900)}╗\n`;
+  const result = boundConnectorErrorMessage(
+    `${border}Error: browserType.launchPersistentContext: executable is unavailable\n${border}`,
+  );
+
+  assert.ok(result?.includes("executable is unavailable"));
+  assert.ok((result?.length ?? Infinity) <= 500);
+});
+
 // ─── 3. Spawn proof — runtime persists the diagnostic on connector exit ──────
 
 const TEST_MANIFEST = {

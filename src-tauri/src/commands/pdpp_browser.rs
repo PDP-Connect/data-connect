@@ -423,6 +423,15 @@ fn terminate_unix_browser(
 }
 
 pub(crate) fn browser_command(browser: &Path, profile_dir: &Path, headless: bool) -> Command {
+    browser_command_with_args(browser, profile_dir, headless, &[])
+}
+
+pub(crate) fn browser_command_with_args(
+    browser: &Path,
+    profile_dir: &Path,
+    headless: bool,
+    additional_args: &[&str],
+) -> Command {
     let mut command = Command::new(browser);
     command
         .arg(format!("--user-data-dir={}", profile_dir.display()))
@@ -431,7 +440,8 @@ pub(crate) fn browser_command(browser: &Path, profile_dir: &Path, headless: bool
             "--remote-debugging-port=0",
             "--no-first-run",
             "--no-default-browser-check",
-        ]);
+        ])
+        .args(additional_args);
     if headless {
         command.arg("--headless=new");
     }

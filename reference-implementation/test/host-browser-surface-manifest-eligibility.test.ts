@@ -196,9 +196,12 @@ test("a catalog-installed browser connector known at boot gets a host surface an
 
 	assert.equal(result.status, "started");
 	assert.equal(spawned.length, 1);
+	// No stream base URL is configured in this suite (pure host CDP mode),
+	// so browserSurfaceLeaseEnv now reports "host" rather than "neko" — see
+	// runtime/browser-surface-leases.ts:122.
 	assert.equal(
 		spawned[0]?.browserSurfaceEnv?.PDPP_BROWSER_SURFACE_REQUIRED,
-		"neko",
+		"host",
 	);
 	assert.equal(
 		spawned[0]?.browserSurfaceEnv?.PDPP_BROWSER_SURFACE_REMOTE_CDP_URL,
@@ -229,9 +232,12 @@ test("a browser connector installed after boot gets a host surface on its first 
 		hostAgent.acquireBodies[0]?.connection_id,
 		ACME_SHOP_CONNECTION_ID,
 	);
+	// No stream base URL is configured in this suite (pure host CDP mode),
+	// so browserSurfaceLeaseEnv now reports "host" rather than "neko" — see
+	// runtime/browser-surface-leases.ts:122.
 	assert.equal(
 		spawned[0]?.browserSurfaceEnv?.PDPP_BROWSER_SURFACE_REQUIRED,
-		"neko",
+		"host",
 	);
 });
 

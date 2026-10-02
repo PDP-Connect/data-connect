@@ -119,7 +119,7 @@ export function browserSurfaceLeaseEnv(lease: BrowserSurfaceLease, surface: Brow
     PDPP_BROWSER_SURFACE_LEASE_ID: profile.leaseId,
     PDPP_BROWSER_SURFACE_PROFILE_KEY: profile.profileKey,
     PDPP_BROWSER_SURFACE_REMOTE_CDP_URL: transport.remoteCdpUrl,
-    PDPP_BROWSER_SURFACE_REQUIRED: "neko",
+    PDPP_BROWSER_SURFACE_REQUIRED: channel.streamBaseUrl ? "neko" : "host",
     PDPP_BROWSER_SURFACE_STREAM_BASE_URL: channel.streamBaseUrl,
   };
 }
