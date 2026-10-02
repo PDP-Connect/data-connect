@@ -16,12 +16,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import {
-  buildConnectionScopedSecretEnv,
-  isStaticSecretCaptureOptional,
-  isStaticSecretConnector,
-  type RecoveredStaticSecret,
-} from "@pdpp/polyfill-connectors/static-secret-injection";
 import { createScheduler } from "../runtime/scheduler.ts";
 import type { ConnectorSchedule, RunRecord } from "../runtime/scheduler-domain-types.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
@@ -64,6 +58,13 @@ const MARKER_REASON = "terminal:authentication_error";
 const MARKER_COMPLETED_AT = "2026-08-11T12:00:10.000Z";
 const BACKGROUND_SAFE_MANIFEST = {
   capabilities: { refresh_policy: { background_safe: true, recommended_mode: "automatic" } },
+  setup: {
+    modality: "static_secret",
+    credential_capture: {
+      kind: "personal_access_token",
+      fields: [{ name: "token", type: "password", secret: true, env: ["GITHUB_PERSONAL_ACCESS_TOKEN", "GITHUB_TOKEN"] }],
+    },
+  },
   streams: [{ name: "items" }],
 };
 
@@ -221,13 +222,10 @@ async function runSchedules({
     resolveStaticSecretRunEnv: ({ connectorId, connectorInstanceId, ownerSubjectId }) => {
       resolverCalls.push({ connectorInstanceId, ownerSubjectId });
       return resolveStaticSecretRunEnv({
-        buildConnectionScopedSecretEnv: (id, recovered, sourceBinding) =>
-          buildConnectionScopedSecretEnv(id, recovered as RecoveredStaticSecret, sourceBinding),
         connectorId,
         connectorInstanceId,
         credentialStore,
-        isStaticSecretCaptureOptional,
-        isStaticSecretConnector,
+        manifest: BACKGROUND_SAFE_MANIFEST,
         ownerSubjectId,
         sourceBinding: null,
       });

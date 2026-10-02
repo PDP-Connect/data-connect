@@ -50,8 +50,14 @@ export function createOwnerDeviceAuthStore(): unknown {
      * @returns {Promise<{ access_token: string, token_type: 'Bearer', expires_in: number, subject_id: string }>}
      */
     // biome-ignore lint/suspicious/useAwait: The async signature is part of this caller-facing contract.
-    async approve(userCode: string, subjectId?: string): Promise<unknown> {
-      return approveOwnerDeviceAuthorization(userCode, subjectId);
+    async approve(
+      userCode: string,
+      subjectId?: string,
+      authorizationFence?: { credentialRevision?: string | null; sessionIdHash?: string }
+    ): Promise<unknown> {
+      return approveOwnerDeviceAuthorization(userCode, subjectId, {
+        ...(authorizationFence === undefined ? {} : { authorizationFence }),
+      });
     },
 
     /**

@@ -8,9 +8,7 @@
 // stderr, logs, or dashboard status tables.
 //
 // Target resolution:
-//   - An explicit `--credential-file <path>` always wins. Daisy's first
-//     supported target is `~/applications/daisy/.pi/agent/pdpp-owner-agent.json`;
-//     the operator passes it explicitly.
+//   - An explicit `--credential-file <path>` always wins.
 //   - Otherwise a safe default under the user home is used:
 //     `~/.pdpp/owner-agents/<host>.json`. This is intentionally rooted in the
 //     home directory, not a project-local `.pdpp/`, so an owner-level bearer is
@@ -147,7 +145,7 @@ export function buildCredentialRecord({
     expires_at: expiresAt,
     scope,
     // Backward-compatible nested credential block for callers that adopted the
-    // first CLI preview. Daisy and the owner-agent runbook read the top-level
+    // first CLI preview. Local assistants and the owner-agent runbook read the top-level
     // access_token.
     credential: {
       access_token: credential.access_token,

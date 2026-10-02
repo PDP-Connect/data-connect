@@ -21,7 +21,8 @@ const ROUTE_FILE = `${HERE}connection-route.ts`;
 
 // The resolver must pass the route id through so the reference projects ONLY
 // that connection (a 0-or-1 list)...
-const SCOPED_SUMMARY_FETCH = /listConnectorSummaries\(\s*\{\s*connectionRouteId:\s*routeId\s*\}\s*\)/;
+const SCOPED_SUMMARY_FETCH =
+  /listConnectorSummaries\(\s*\{\s*connectionRouteId:\s*routeId,\s*sourcesVisibility:\s*true\s*\}\s*\)/;
 // ...and must NOT call the unscoped, all-connector form.
 const UNSCOPED_SUMMARY_FETCH = /listConnectorSummaries\(\s*\)/;
 // Exact match on connection / instance identity is preferred...
@@ -100,4 +101,14 @@ test("display_name fallback resolves to null (not an arbitrary first pick) when 
   // The only reference to `matches[0]` must be gated behind the length === 1
   // check on the same return line — never an unconditional first pick.
   assert.match(body, DISPLAY_NAME_GATED_FIRST_PICK);
+});
+
+test("scoped detail lookups include setup-failed sources in the reference projection", async () => {
+  const src = await readFile(ROUTE_FILE, "utf8");
+  const body = resolverBody(src);
+  assert.equal(
+    body.match(/sourcesVisibility:\s*true/g)?.length,
+    2,
+    "both explicit-id and route-id detail lookups must use the setup-failed visibility projection"
+  );
 });

@@ -55,6 +55,10 @@ import {
   resolveFanInBindings,
 } from "./connection-identity.ts";
 import { withConnectorInstanceWrite } from "./connector-instance-write-coordinator.ts";
+import {
+  assertConnectorManifestStreamSubsetSync,
+  assertConnectorManifestStreamSubsetWithClient,
+} from "./connector-manifest-write-fence.ts";
 import { assertGrantedManifestReadAuthority, assertOwnerSearchFilterAuthority } from "./manifest-read-authority.ts";
 import { OWNER_AUTH_DEFAULT_SUBJECT_ID } from "./owner-auth.ts";
 import {
@@ -75,7 +79,7 @@ import {
   postgresLexicalSearch,
 } from "./postgres-search.ts";
 import type { PostgresTransactionClient } from "./postgres-storage.ts";
-import { isPostgresStorageBackend, postgresQuery } from "./postgres-storage.ts";
+import { isPostgresStorageBackend, postgresQuery, withPostgresTransaction } from "./postgres-storage.ts";
 import { compileRequestFilters, passesGrantRecordConstraints, passesRequestFilters } from "./record-filters.ts";
 import { mapSearchFanout } from "./search-fanout.ts";
 import { sqliteCountIndexableTextValues } from "./search-index-counts.ts";
@@ -344,6 +348,19 @@ export function __setLexicalBackfillPhaseHookForTest(hook: LexicalBackfillPhaseH
 
 async function maybeLexicalBackfillPhaseForTest(point: string, context: JsonObject): Promise<void> {
   await lexicalBackfillPhaseHook?.(point, context);
+}
+
+async function assertLexicalBackfillManifestCurrent(
+  connectorId: string,
+  manifest: LexicalBackfillManifest
+): Promise<void> {
+  if (isPostgresStorageBackend()) {
+    await withPostgresTransaction((client) =>
+      assertConnectorManifestStreamSubsetWithClient(client, connectorId, manifest as unknown as Record<string, unknown>)
+    );
+    return;
+  }
+  assertConnectorManifestStreamSubsetSync(connectorId, manifest as unknown as Record<string, unknown>);
 }
 const lexicalBackfillJobs = new Map<string, LexicalBackfillJob>();
 
@@ -1449,6 +1466,7 @@ export async function lexicalIndexBackfillForManifest({
         connectorId,
         connectorInstanceId,
       });
+      await assertLexicalBackfillManifestCurrent(connectorId, manifest);
       // No connector-instance writer-admission fence here. The scan +
       // per-page durable write below is the SAME shape records.ts's
       // maintainRecordIndexesWithinPermit already uses for live-ingest

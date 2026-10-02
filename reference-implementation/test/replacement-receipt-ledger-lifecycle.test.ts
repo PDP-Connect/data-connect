@@ -277,6 +277,52 @@ test("pre-claim ensure failure terminalizes the durable started receipt", async 
   }
 });
 
+test("replacement observer logs the underlying post-host terminal persistence error", async () => {
+  const sourceLedger = createBrowserSurfaceReplacementLedger();
+  const started = sourceLedger.start({
+    cause: "external_or_host_loss",
+    connection_id: "connection-1",
+    connector_id: "chatgpt",
+    idempotency_key: "persisted-host-loss",
+    profile_key: "chatgpt",
+    surface_id: "surface-1",
+    surface_subject_id: "connection-1",
+  });
+  const persistedError = new Error("terminal receipt store unavailable");
+  const observerErrors: unknown[] = [];
+  const { container_id: _containerId, ...hostSurface } = surface;
+  let hostCalls = 0;
+  const observed = createReplacementObservingAllocator(
+    {
+      ensureSurface: async () => {
+        hostCalls += 1;
+        return hostSurface;
+      },
+      getSurfaceStatus: async () => null,
+      listSurfaces: async () => [hostSurface],
+      stopSurface: async () => null,
+    },
+    {
+      findPendingForScope: async () => started,
+      ledger: createBrowserSurfaceReplacementLedger(),
+      onObserverError: (error) => observerErrors.push(error),
+      persist: async (receipt) => {
+        if (receipt.phase === "terminal") {
+          throw persistedError;
+        }
+        return receipt;
+      },
+    }
+  );
+
+  await assert.rejects(
+    () => observed.ensureSurface({ connectorId: "chatgpt", profileKey: "chatgpt", surfaceId: "surface-1" }),
+    persistedError
+  );
+  assert.equal(hostCalls, 1, "the host returned before terminal persistence failed");
+  assert.deepEqual(observerErrors, [persistedError]);
+});
+
 test("pre-claim ensure returning the same generation is terminally abandoned", async () => {
   initDb();
   try {

@@ -8,21 +8,23 @@
  * Starts on port 7662 (AS/introspection) and 7663 (RS query API).
  */
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, renameSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { isMainModule } from "../scripts/is-main-module.js";
 // biome-ignore lint/correctness/noUnresolvedImports: Biome cannot resolve this installed package export; Node and TypeScript resolve it.
 import type { BrowserSurfaceAllocator, BrowserSurfaceLeaseManager } from "@opendatalabs/remote-surface/leases";
 import { handleStreamableHttpRequest } from "@pdpp/mcp-server/server";
 // biome-ignore lint/correctness/noUnresolvedImports: Biome cannot resolve this installed package export; Node and TypeScript resolve it.
 import type { FastifyBaseLogger } from "fastify";
+import { DATACONNECT_PRODUCT_IDENTITY } from "../vendor/brand-react/src/product-identity.ts";
 import {
   createPdppCliCommand,
   getPdppCliPackageInfo,
   PDPP_CLI_DEFAULT_CLIENT_ID,
 } from "../vendor/cli/src/package-info.ts";
-import type { ProviderAuthManifestLike } from "@pdpp/polyfill-connectors/provider-auth-adapter";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import type { ProviderAuthManifestLike } from "./polyfill-connectors-runtime.ts";
+import { loadCredentialProbeHelpers } from "./polyfill-connectors-runtime.ts";
 import {
   evaluateStreamHealthAuthority,
   type OwnerSourcesDomEvidence,
@@ -58,9 +60,11 @@ import {
   createBrowserSurfaceLeaseSweepTimer,
 } from "../runtime/browser-surface-lease-sweep-timer.ts";
 import {
+  DEFAULT_NEKO_READINESS_TIMEOUT_MS,
   DEFAULT_NEKO_LEASE_SWEEP_INTERVAL_MS,
   parseNekoBrowserSurfaceRuntimeConfig,
 } from "../runtime/browser-surface-leases.ts";
+import { createHostBrowserSurfaceAllocator } from "../runtime/host-browser-surface-allocator.ts";
 import {
   type BrowserSurfaceReadinessProbe,
   createDefaultBrowserSurfaceReadinessProbe,
@@ -74,8 +78,29 @@ import {
   type Controller,
   createController,
   getScheduleIneligibilityReason,
-  resolveDefaultConnectorPath,
+  resolveActiveInstallFirstConnectorPath,
 } from "../runtime/controller.ts";
+import {
+  createConnectorInstallService,
+  createConnectorInstallStore,
+  inspectActiveConnector,
+  listVerifiedActiveConnectors,
+  reconcileConnectorUninstalls,
+} from "./connector-install/index.ts";
+import { removeConnectorActivation } from "./connector-install/activation-authority.ts";
+import {
+  connectorLifecycleDataDir,
+  withConnectorLifecycleLock,
+} from "./connector-lifecycle-lock.ts";
+import { createFileLocalConnectorSourceStore } from "./connector-install/local-source.ts";
+import { createRemoteAccessConfigStore, remoteAccessConfigPath } from "./remote-access-store.ts";
+import { ownerPasswordManagedByDesktop, ownerPasswordOwnerSet } from "./owner-password-owner-set.ts";
+import { appConfigPath, createAppConfigStore } from "./app-config-store.ts";
+import { autostartStatePath, createAutostartStore } from "./autostart-store.ts";
+import { type BrowserProfilePurger, createBrowserProfilePurger } from "./browser-profile-purge.ts";
+import { createLiveRevisions, type LiveRevisions, registerDefaultLiveTopics } from "./live-revisions.ts";
+import { createRecoveryKeyStore } from "./recovery-key-store.ts";
+import { getOwnerSessionStore } from "./stores/owner-session-store.ts";
 import { NekoSurfaceAllocatorClient } from "../runtime/neko-surface-allocator.ts";
 import { isClosedPipeWriteError } from "../runtime/pipe-errors.ts";
 import { hasForwardEvidenceDebt } from "../runtime/recovery-decision.ts";
@@ -89,6 +114,7 @@ import {
   configureNativeManifest,
   consumeConsentExchangeCode,
   countGrantPackagesForOwner,
+  authenticateOAuthTokenClient,
   createCimdDocument,
   createConsentExchangeCode,
   createHostedMcpGrantPackage,
@@ -117,6 +143,7 @@ import {
   requireGrantContractAgainstManifest,
   requireResolvedPersistedGrantState,
   resolveOAuthClient,
+  retireFormerPreRegisteredClientsAtStartup,
   revokeGrant,
   revokeGrantPackage,
   revokeOwnerClientTokenByPublicId,
@@ -141,12 +168,12 @@ import {
   listGrantedConnectionsForStream,
   projectBindingForWire,
 } from "./connection-identity.ts";
-import { connectionConfigEntriesFromManifest } from "./connection-setup-plan.ts";
+import { type ConnectorManifestLike, connectionConfigEntriesFromManifest } from "./connection-setup-plan.ts";
 import {
   type ConnectorInstanceWriteOwnership,
   withConnectorInstanceWrite,
 } from "./connector-instance-write-coordinator.ts";
-import { canonicalConnectorKey, isInternalConnectorId, legacyLocalAliasMap } from "./connector-key.ts";
+import { canonicalConnectorKey, isInternalConnectorId } from "./connector-key.ts";
 import {
   CONNECTOR_MAINTENANCE_SWEEP_INTERVAL_MS,
   createResumableConnectorMaintenanceSweep,
@@ -176,7 +203,7 @@ import {
 } from "./deployment-diagnostics.ts";
 import { composeFleetHealthVerdict } from "./fleet-health.ts";
 import { deriveReferenceFreshness } from "./freshness.ts";
-import { LOCAL_COLLECTOR_PROVEN_KEYS } from "./generated/connector-registry.generated.ts";
+import { readLocalCollectorProfile } from "./local-collector-profiles.ts";
 import {
   encodeHostedMcpSelection,
   encodeHostedMcpStreamSelection,
@@ -209,6 +236,7 @@ import {
   buildOwnerConnectionSupportedActions,
   buildProtectedResourceMetadata,
   buildSemanticRetrievalCapability,
+  forwardedPublicOrigin,
   isLocalOrPrivateRequestOrigin,
   isTrustedMetadataRequestOrigin,
   protectedResourceMetadataUrlForResource,
@@ -219,7 +247,28 @@ import {
 } from "./metadata.ts";
 import { unresolvedOwnerActionEvidenceFromSummary } from "./owner-action-gate.ts";
 import { createOwnerAuthPlaceholder, OWNER_AUTH_DEFAULT_SUBJECT_ID } from "./owner-auth.ts";
+import { mountOwnerSetupRoutes } from "./owner-setup.ts";
 import { resolveOwnerExposurePosture } from "./owner-exposure-posture.ts";
+import {
+  createOwnerPasswordVerifier,
+  OWNER_PASSWORD_MIN_LENGTH,
+  ownerPasswordLength,
+  parseOwnerPasswordVerifier,
+  type OwnerPasswordVerifier,
+} from "./owner-password-verifier.ts";
+import {
+  createOwnerPasswordVerifierStore,
+  importLegacyOwnerPasswordFile,
+} from "./stores/owner-password-verifier-store.ts";
+import {
+  type ReachabilityContract,
+  evaluateReachabilityRequest,
+  isLoopbackOriginHost,
+  isNonLoopbackBindHost,
+  parseReachabilityContract,
+  selfCallUrlHostForBindHost,
+  validateReachabilityContract,
+} from "./reachability-contract.ts";
 import { createPackageRsClient, createRsClient } from "./package-rs-client.ts";
 import { reconcilePolyfillManifests } from "./polyfill-manifest-reconcile.ts";
 import { postgresPersistContentAddressedBlob } from "./postgres-records.ts";
@@ -320,10 +369,12 @@ import { mountAsDeviceAuthorization, mountAsIntrospect, mountAsToken } from "./r
 import { mountAsPar } from "./routes/as-par.ts";
 import { mountAsPolyfillConnectorDetail, mountAsPolyfillConnectorRegister } from "./routes/as-polyfill-connectors.ts";
 import { mountClientMetadata } from "./routes/client-metadata.ts";
+import { mountClientLogo } from "./routes/client-logo.ts";
 import { mountHostedUiCss } from "./routes/hosted-ui-asset.ts";
 import { mountOwnerConnectionCollectionScope } from "./routes/owner-connection-collection-scope.ts";
 import { mountOwnerConnectionConfig } from "./routes/owner-connection-config.ts";
 import { mountOwnerConnectionDelete } from "./routes/owner-connection-delete.ts";
+import { mountOwnerConnectionResetState } from "./routes/owner-connection-reset-state.ts";
 import { mountOwnerConnectionDiagnostics } from "./routes/owner-connection-diagnostics.ts";
 import { mountOwnerConnectionIntent } from "./routes/owner-connection-intent.ts";
 import { mountOwnerConnectionPause } from "./routes/owner-connection-pause.ts";
@@ -334,7 +385,15 @@ import { mountOwnerConnectionRun } from "./routes/owner-connection-run.ts";
 import { mountOwnerConnectionSchedule } from "./routes/owner-connection-schedule.ts";
 import { mountOwnerConnectionRename, mountOwnerConnectionsList } from "./routes/owner-connections.ts";
 import { mountOwnerConnectorTemplates, parseUatConnectorAllowlist } from "./routes/owner-connector-templates.ts";
+import { mountOwnerConnectorInstall } from "./routes/owner-connector-install.ts";
 import { mountOwnerControl } from "./routes/owner-control.ts";
+import { mountOwnerRemoteAccess } from "./routes/owner-remote-access.ts";
+import { mountOwnerAppConfig } from "./routes/owner-app-config.ts";
+import { mountOwnerAutostart } from "./routes/owner-autostart.ts";
+import { mountOwnerLiveAs, mountOwnerLiveRs } from "./routes/owner-live.ts";
+import { mountOwnerRecoveryKey } from "./routes/owner-recovery-key.ts";
+import { createServerRecoveryKitExporter, mountOwnerRecoveryKit } from "./routes/owner-recovery-kit.ts";
+import { hasLocalOwnerCredentialRevealProof, mountOwnerCredentialReveal } from "./routes/owner-credential-reveal.ts";
 import {
   mountRefApprovals,
   mountRefCimdClientDocuments,
@@ -358,7 +417,9 @@ import { mountRefConnectionConfirmCoverageHorizon } from "./routes/ref-connectio
 import { mountRefConnectionPause } from "./routes/ref-connection-pause.ts";
 import { HISTORICAL_ARCHIVE_SOURCE_BINDING_KIND, mountRefConnectionResume } from "./routes/ref-connection-resume.ts";
 import {
+  mountRefConnectionBrowserProfilePurge,
   mountRefConnectionDelete,
+  mountRefConnectionResetState,
   mountRefConnectionDetail,
   mountRefConnectionReactivate,
   mountRefConnectionRevoke,
@@ -532,6 +593,7 @@ import {
   resolveOwnerConnectorInstanceNamespace,
 } from "./stores/connector-instance-store.ts";
 import { createConsentStore } from "./stores/consent-store.ts";
+import { createConsentChallengeStore } from "./stores/consent-challenge-store.ts";
 import {
   createDeviceExporterStore,
   DeviceBatchConflictError,
@@ -568,7 +630,10 @@ import {
 import { getDefaultSchedulerStore, type SchedulerStore } from "./stores/scheduler-store.ts";
 import { countDirtySearchIndexScopes } from "./stores/search-index-dirty-store.ts";
 import { getDefaultSourceWebhookEventStore } from "./stores/source-webhook-event-store.ts";
-import { resolveStaticSecretRunEnv } from "./stores/static-secret-run-credentials.ts";
+import {
+  isStaticSecretProfileManifest,
+  resolveStaticSecretRunEnv,
+} from "./stores/static-secret-run-credentials.ts";
 import {
   createDefaultStreamingCompanionFactory,
   type StreamingCompanionFactory,
@@ -625,6 +690,8 @@ interface ReqLike {
     on?: (...args: unknown[]) => void;
     off?: (...args: unknown[]) => void;
     removeListener?: (...args: unknown[]) => void;
+    socket?: { remoteAddress?: string };
+    url?: string;
   };
   socket?: { remoteAddress?: string };
   tokenInfo?: TokenInfo;
@@ -654,6 +721,7 @@ type ApiError = Error & {
 };
 
 interface PdppErrorBody {
+  active_run_id?: string;
   available_connections?: unknown[];
   code: unknown;
   message: unknown;
@@ -737,12 +805,14 @@ interface ServerOpts {
   } | null;
   agentConnectTtlMs?: number;
   agentDiscoveryOrigin?: string | null;
+  connectorInstallService?: ReturnType<typeof createConnectorInstallService>;
   asIssuer?: string | null;
   asPort?: number;
   asPublicUrl?: string | null;
   autoEnrollEligibleSchedules?: boolean;
   awaitStartupBackfill?: boolean;
   bindHost?: string;
+  reachabilityContract?: ReachabilityContract | null;
   browserSurfaceAllocator?: BrowserSurfaceAllocator;
   browserSurfaceLeaseManager?: BrowserSurfaceLeaseManager | null;
   browserSurfaceLeaseStore?: BrowserSurfaceLeaseStore;
@@ -750,6 +820,7 @@ interface ServerOpts {
   cancelScheduledRun?: ((runId: string) => unknown) | null;
   cimdEnabled?: boolean;
   cimdFetchDependencies?: CimdFetchDependencies;
+  clientLogoFetchDependencies?: import("./client-logo-cache.ts").FetchClientLogoOptions;
   clientEventSubscriptionsCapability?: unknown;
   clientEventSubscriptionsSupported?: boolean;
   configuredProviderAuthConnectorKeys?: readonly string[];
@@ -773,12 +844,15 @@ interface ServerOpts {
   isNekoProxyTargetApproved?:
     | ((
         descriptor: unknown,
-        context: { session?: { interaction_id?: string | null; run_id?: string | null } | undefined }
+        context: {
+          session?: { interaction_id?: string | null; run_id?: string | null } | undefined;
+        }
       ) => boolean)
     | null;
   lexicalRetrievalCapability?: unknown;
   lexicalRetrievalSupported?: boolean;
   logger?: LoggerLike;
+  purgeBrowserProfile?: BrowserProfilePurger;
   makePresentationAttachmentId?: (() => string) | null;
   makeStreamingBrowserSessionId?: (() => string) | null;
   maxRecordRejectionPageSize?: number;
@@ -790,17 +864,39 @@ interface ServerOpts {
   onManualUploadValidationTask?: (task: Promise<void>) => void;
   onScheduleMutation?: (() => void) | null;
   ownerAuthForceSecureCookies?: boolean;
+  /** Login-attempt throttling for `POST /owner/login`. `false` disables it (tests only). */
+  ownerAuthLoginRateLimit?:
+    | {
+        windowMs?: number;
+        max?: number;
+        maxLocal?: number;
+        trustedProxies?: string | null;
+      }
+    | false;
   ownerAuthPassword?: string;
+  /** The desktop supplies `ownerAuthPassword`; defaults to `ownerPasswordManagedByDesktop()`. */
+  ownerPasswordManagedByDesktop?: boolean;
+  ownerAuthPasswordVerifier?: OwnerPasswordVerifier;
+  /** Test seam: pause owner-device approval after auth capture and before persistence. */
+  ownerDeviceApprovalBeforeDecision?: () => Promise<void> | void;
+  ownerSetupToken?: string;
+  ownerPasswordVerifierStore?: ReturnType<typeof createOwnerPasswordVerifierStore>;
   ownerAuthSameSite?: string;
   ownerAuthSessionTtlSeconds?: number;
+  /** Revision registry for the owner live channel; defaults to one per process. */
+  ownerLive?: LiveRevisions;
+  /** Owner live channel ping/session-revocation check interval; test-only override of LIVE_PING_INTERVAL_MS. */
+  ownerLivePingIntervalMs?: number;
   ownerAuthSubjectId?: string;
   ownerExposurePosture?: {
     allowUnauthenticatedOwnerWhenDisabled: boolean;
     lockConnectorRegistry: boolean;
+    ownerAuthRequired?: boolean;
     refuseBootReason?: string | null;
     hosted?: boolean;
     bindsNonLoopback?: boolean;
   } | null;
+  trustedProxies?: string | null;
   ownerToken?: string | null;
   postgresBootstrapLockTimeoutMs?: number;
   postgresSemanticHnswMaintenanceImpl?: typeof schedulePostgresSemanticHnswMaintenance;
@@ -813,7 +909,10 @@ interface ServerOpts {
   priorityClass?: string;
   providerAuthExchanger?: ProviderAuthExchanger | null;
   providerName?: string | null;
-  publicDynamicClientRegistrationRateLimit?: { windowMs?: number; max?: number } | null;
+  publicDynamicClientRegistrationRateLimit?: {
+    windowMs?: number;
+    max?: number;
+  } | null;
   quiet?: boolean;
   reconcilePolyfillManifests?: boolean;
   reconcilePolyfillManifestsImpl?: typeof reconcilePolyfillManifests;
@@ -916,7 +1015,11 @@ function configuredNativeSourceId(opts: ServerOpts): string | null {
   return typeof source?.id === "string" && source.id ? source.id : null;
 }
 interface OwnerDeviceAuthStore {
-  approve: (userCode: string, subjectId?: string) => Promise<unknown>;
+  approve: (
+    userCode: string,
+    subjectId?: string,
+    authorizationFence?: { credentialRevision?: string | null; sessionIdHash?: string }
+  ) => Promise<unknown>;
   deny: (userCode: string, subjectId?: string) => Promise<void>;
   exchangeDeviceCode: (input: { clientId: string; deviceCode: string }) => Promise<unknown>;
   getByApprovalId: (approvalId: string) => Promise<unknown>;
@@ -926,12 +1029,33 @@ interface OwnerDeviceAuthStore {
 
 const AS_PORT = Number.parseInt(process.env.AS_PORT || "7662", 10);
 const RS_PORT = Number.parseInt(process.env.RS_PORT || "7663", 10);
+
+// One live-revision registry per process, shared by the AS app (which serves
+// the `/_ref/owner-live` SSE route) and the RS app (whose owner stores bump it
+// on write). See live-revisions.ts.
+let processOwnerLive: LiveRevisions | null = null;
+function resolveOwnerLive(opts: ServerOpts): LiveRevisions {
+  if (opts.ownerLive) {
+    return opts.ownerLive;
+  }
+  if (!processOwnerLive) {
+    const dataDir = process.env.PDPP_DATA_DIR || path.join(process.cwd(), "data");
+    processOwnerLive = createLiveRevisions();
+    registerDefaultLiveTopics(processOwnerLive, {
+      appConfigPath: appConfigPath(),
+      autostartPath: autostartStatePath(dataDir),
+      remoteAccessPath: remoteAccessConfigPath(dataDir),
+    });
+  }
+  return processOwnerLive;
+}
 const DB_PATH = process.env.PDPP_DB_PATH || process.env.DB_PATH || ":memory:";
 // PDPP_INSTANCE_NAME is the operator-facing name for this instance:
 // PDPP_PROVIDER_NAME is preserved as a fallback for deployments that only
-// set the older var, so nothing already running breaks.
+// set the older var, so nothing already running breaks. An unnamed instance
+// carries the product name.
 const PDPP_PROVIDER_NAME =
-  process.env.PDPP_INSTANCE_NAME || process.env.PDPP_PROVIDER_NAME || "PDPP Reference Provider";
+  process.env.PDPP_INSTANCE_NAME || process.env.PDPP_PROVIDER_NAME || DATACONNECT_PRODUCT_IDENTITY.name;
 const PDPP_PROVIDER_CONNECT_VERSION = process.env.PDPP_PROVIDER_CONNECT_VERSION || "draft-2026-04-16";
 const PDPP_ENABLE_DYNAMIC_CLIENT_REGISTRATION = process.env.PDPP_ENABLE_DYNAMIC_CLIENT_REGISTRATION !== "0";
 const PDPP_DCR_INITIAL_ACCESS_TOKENS = (process.env.PDPP_DCR_INITIAL_ACCESS_TOKENS || "")
@@ -1172,10 +1296,18 @@ async function runRetrievalStartupBackfill({
     try {
       logger.info({ connectorId }, "retrieval startup backfill connector started");
       // biome-ignore lint/performance/noAwaitInLoops: Work is intentionally sequential to preserve ordering and state transitions.
-      await lexicalIndexBackfillForManifest({ log: (msg) => logger.info(msg), manifest: manifest as never, signal });
+      await lexicalIndexBackfillForManifest({
+        log: (msg) => logger.info(msg),
+        manifest: manifest as never,
+        signal,
+      });
       const semanticBackend = getSemanticBackend();
       if (semanticBackend?.available()) {
-        await semanticIndexBackfillForManifest({ log: (msg) => logger.info(msg), manifest: manifest as never, signal });
+        await semanticIndexBackfillForManifest({
+          log: (msg) => logger.info(msg),
+          manifest: manifest as never,
+          signal,
+        });
       }
       logger.info({ connectorId }, "retrieval startup backfill connector completed");
     } catch (err) {
@@ -1272,11 +1404,16 @@ function pdppError(
   extras: Record<string, unknown> | null = null
 ) {
   const typedRes = res as ResLike;
-  const body: { error: PdppErrorBody } = { error: { code, message, type: typeFor(status) } };
+  const body: { error: PdppErrorBody } = {
+    error: { code, message, type: typeFor(status) },
+  };
   if (param) {
     body.error.param = param;
   }
   if (extras && typeof extras === "object") {
+    if (typeof extras.active_run_id === "string") {
+      body.error.active_run_id = extras.active_run_id;
+    }
     if (Array.isArray(extras.available_connections)) {
       body.error.available_connections = extras.available_connections;
     }
@@ -1340,6 +1477,13 @@ function resolveTrustedProtectedResourceMetadataUrl(
   }
 }
 
+function reachabilityContractIsHosted(contract: ReachabilityContract): boolean {
+  return (
+    isNonLoopbackBindHost(contract.bindHost) ||
+    (contract.referenceOrigin !== null && !isLoopbackOriginHost(new URL(contract.referenceOrigin).hostname))
+  );
+}
+
 function getProtectedResourceMetadataUrl(res: ResLike) {
   const metadataUrl = res.locals?.[PROTECTED_RESOURCE_METADATA_URL_LOCAL];
   return typeof metadataUrl === "string" && metadataUrl ? metadataUrl : null;
@@ -1365,33 +1509,19 @@ function generateReferenceSecret(prefix: string, bytes = 24) {
   return `${prefix}_${randomBytes(bytes).toString("base64url")}`;
 }
 
-// Canonical local-collector connector_key -> its manifest's filename. Both
-// sides are manifest-derived, never hand-listed: LOCAL_COLLECTOR_PROVEN_KEYS
-// is every manifest declaring capabilities.proven.local_collector, and
-// legacyLocalAliasMap() carries the historical snake_case bundle id those
-// manifest files are still named after (`claude_code.json`). The catalog row,
-// the connector_instances row, and the record storage target all use the
-// canonical key (`claude-code`) so a legacy-alias enroll cannot fork the
-// connector type away from its canonical identity.
-const REFERENCE_LOCAL_CONNECTOR_MANIFEST_FILENAMES: ReadonlyMap<string, string> = new Map(
-  LOCAL_COLLECTOR_PROVEN_KEYS.map((connectorKey) => {
-    const legacyAlias = Object.entries(legacyLocalAliasMap()).find(([, canonical]) => canonical === connectorKey)?.[0];
-    return [connectorKey, `${legacyAlias ?? connectorKey}.json`];
-  })
-);
-
+// The local collector runs these connectors on the owner's device, so the
+// enrollment manifest is the pinned Collection Profile the collector installs
+// (see local-collector-profiles.ts), keyed by canonical connector_key. The
+// catalog row, the connector_instances row, and the record storage target all
+// use the canonical key (`claude-code`) so a legacy-alias enroll cannot fork
+// the connector type away from its canonical identity.
 function readReferenceLocalConnectorCatalogManifest(connectorId: string) {
   const connectorKey = canonicalConnectorKey(connectorId) ?? connectorId;
-  const entryName = REFERENCE_LOCAL_CONNECTOR_MANIFEST_FILENAMES.get(connectorKey);
-  if (!entryName) {
-    return null;
-  }
   try {
-    const entry = readPolyfillManifests().find((candidate) => candidate.file === entryName);
-    if (!entry) {
-      throw new Error(`no polyfill manifest found for ${entryName}`);
+    const manifest = readLocalCollectorProfile(connectorKey);
+    if (!manifest) {
+      return null;
     }
-    const manifest = entry.manifest as Record<string, unknown>;
     return {
       ...manifest,
       connector_id: connectorKey,
@@ -1422,7 +1552,9 @@ async function ensureReferenceConnectorCatalogEntry(
     // index); real retrieval-index maintenance happens on the ingest write path
     // and on any manifest (re)registration. See
     // decouple-device-enrollment-from-ingest-writer-admission design D1.
-    await registerConnector(localCollectorManifest, { backfillRetrievalIndexes: false });
+    await registerConnector(localCollectorManifest, {
+      backfillRetrievalIndexes: false,
+    });
     return;
   }
   const connectorKey = canonicalConnectorKey(connectorId) ?? connectorId;
@@ -1466,6 +1598,9 @@ function handleError(res: ResLike, err: ApiError) {
   }
   if (typeof err.retry_with === "string") {
     extras.retry_with = err.retry_with;
+  }
+  if (code === "connection_run_active" && typeof err.active_run_id === "string") {
+    extras.active_run_id = err.active_run_id;
   }
   Object.assign(extras, recoveryAdmissionExtrasForWire(err));
   pdppError(res, status, code, err.message, err.param || null, extras);
@@ -1635,7 +1770,11 @@ function inferAuthGateQueryContext(req: ReqLike, _tokenInfo: TokenInfo = {}) {
     };
   }
   if (segments.length === 5 && segments[3] === "records") {
-    return { queryShape: "record_detail", requestedRecordId: segments[4], streamId: segments[2] };
+    return {
+      queryShape: "record_detail",
+      requestedRecordId: segments[4],
+      streamId: segments[2],
+    };
   }
 
   return null;
@@ -2076,14 +2215,213 @@ function getOwnerTokenSubjectId(req: ReqLike) {
   return req.tokenInfo?.subject_id || OWNER_AUTH_DEFAULT_SUBJECT_ID;
 }
 
+// The desktop host may still hold an old per-connector profile; the purger
+// removes it only when the owner has no other connection of that connector.
+function createOwnerBrowserProfilePurger(opts: ServerOpts): BrowserProfilePurger {
+  return (
+    opts.purgeBrowserProfile ??
+    createBrowserProfilePurger({
+      countOtherConnections: async ({ connectorKey, connectorInstanceId, ownerSubjectId }) => {
+        const instances = await createRequestConnectorInstanceStore().listByOwnerIncludingDrafts(ownerSubjectId);
+        return instances.filter(
+          (instance) =>
+            instance.connectorInstanceId !== connectorInstanceId &&
+            canonicalConnectorKey(instance.connectorId) === connectorKey
+        ).length;
+      },
+      isConnectionRunActive: async (connectorInstanceId) =>
+        Boolean(await createRequestConnectorInstanceStore().getActiveRun(connectorInstanceId)),
+      logger: opts.logger ?? null,
+    })
+  );
+}
+
+// The owner's connections (any status, drafts included) of the same connector
+// as `connectorInstanceId`, other than it. Browser profiles are per
+// connection; the old per-connector profile can be attributed to a connection
+// only when this count is zero.
+async function countOtherConnectionsOfConnector(connectorInstanceId: string): Promise<number | null> {
+  const store = createRequestConnectorInstanceStore();
+  const instance = await store.get(connectorInstanceId);
+  if (!instance) {
+    return null;
+  }
+  const connectorKey = canonicalConnectorKey(instance.connectorId);
+  const instances = await store.listByOwnerIncludingDrafts(instance.ownerSubjectId);
+  return instances.filter(
+    (other) =>
+      other.connectorInstanceId !== connectorInstanceId && canonicalConnectorKey(other.connectorId) === connectorKey
+  ).length;
+}
+
+async function isOnlyConnectionOfItsConnector(connectorInstanceId: string): Promise<boolean> {
+  return (await countOtherConnectionsOfConnector(connectorInstanceId)) === 0;
+}
+
 function createRequestConnectorInstanceStore() {
   return isPostgresStorageBackend() ? createPostgresConnectorInstanceStore() : createSqliteConnectorInstanceStore();
+}
+
+async function resetOwnerConnectionAndStartFullSync({
+  connectorInstanceId,
+  ownerSubjectId,
+  controller,
+}: {
+  connectorInstanceId: string;
+  ownerSubjectId: string;
+  controller: Controller | null;
+}): Promise<unknown> {
+  const store = createRequestConnectorInstanceStore();
+  const instance = await store.get(connectorInstanceId);
+  if (!instance || instance.ownerSubjectId !== ownerSubjectId) {
+    const error = new Error("Connection was not found.") as Error & { code: string };
+    error.code = "connector_instance_not_found";
+    throw error;
+  }
+  if (!controller) throw new Error("Connection reset is unavailable because the collection runtime is not ready.");
+  const started = await controller.runNow(instance.connectorId, {
+    connectorInstanceId,
+    fullRefresh: true,
+    ownerSubjectId,
+    resetState: true,
+  });
+  await emitSpineEvent({
+    actor_id: ownerSubjectId,
+    actor_type: "owner",
+    object_id: connectorInstanceId,
+    object_type: "connection",
+    event_type: "owner_agent.connection.reset_state",
+    data: { connector_id: instance.connectorId, connection_id: connectorInstanceId },
+  });
+  return started;
 }
 
 function createRequestConnectorInstanceCredentialStore() {
   return isPostgresStorageBackend()
     ? createPostgresConnectorInstanceCredentialStore()
     : createSqliteConnectorInstanceCredentialStore();
+}
+
+const CREDENTIAL_RECOVERY_STATE_FILE = "credential-recovery-state.json";
+const CREDENTIAL_KEY_LOST_CAUSE = "legacy_v1_kit_missing_credential_key";
+const RECOVERY_REVOKE_OWNER_SESSIONS_ENV = "PDPP_RECOVERY_REVOKE_OWNER_SESSIONS";
+const RECOVERY_OWNER_SESSION_RESET_FILE = "owner-session-recovery-reset.json";
+
+interface CredentialRecoveryStateMarker {
+  readonly path: string;
+  readonly appliedPath: string;
+}
+
+function readCredentialRecoveryStateMarker(dataDir: string): CredentialRecoveryStateMarker | null {
+  const recoveryStatePath = path.join(dataDir, CREDENTIAL_RECOVERY_STATE_FILE);
+  if (!existsSync(recoveryStatePath)) {
+    return null;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(recoveryStatePath, "utf8"));
+  } catch (err) {
+    throw new Error("Credential recovery state could not be read; refusing to start scheduled connector work.", {
+      cause: err,
+    });
+  }
+
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("Credential recovery state is malformed; refusing to start scheduled connector work.");
+  }
+
+  const state = parsed as Record<string, unknown>;
+  if (state.version !== 1) {
+    throw new Error("Credential recovery state version is unsupported; refusing to start scheduled connector work.");
+  }
+  if (state.cause !== CREDENTIAL_KEY_LOST_CAUSE) {
+    throw new Error("Credential recovery state cause is unsupported; refusing to start scheduled connector work.");
+  }
+
+  return {
+    path: recoveryStatePath,
+    appliedPath: `${recoveryStatePath}.applied`,
+  };
+}
+
+async function applyCredentialKeyLostRecoveryState({
+  dataDir,
+  logger,
+}: {
+  dataDir: string;
+  logger: FastifyBaseLogger;
+}): Promise<void> {
+  const marker = readCredentialRecoveryStateMarker(dataDir);
+  if (!marker) {
+    return;
+  }
+
+  const changed = await createRequestConnectorInstanceCredentialStore().markActiveRejectedForLostCredentialKey({
+    now: new Date().toISOString(),
+  });
+  try {
+    renameSync(marker.path, marker.appliedPath);
+  } catch (err) {
+    throw new Error("Credential recovery state could not be consumed after applying the lost-key transition; refusing to start scheduled connector work.", {
+      cause: err,
+    });
+  }
+  logger.warn(
+    { credential_rows_rejected: changed },
+    "legacy v1 recovery kit restored the database without the credential-vault key; saved connector credentials require reconnect"
+  );
+}
+
+async function applyRecoveryOwnerSessionReset({
+  dataDir,
+  logger,
+  subjectId,
+}: {
+  dataDir: string;
+  logger: FastifyBaseLogger;
+  subjectId: string;
+}): Promise<void> {
+  if (process.env[RECOVERY_REVOKE_OWNER_SESSIONS_ENV] !== "1") {
+    return;
+  }
+  const resetPath = path.join(dataDir, RECOVERY_OWNER_SESSION_RESET_FILE);
+  if (!existsSync(resetPath)) {
+    return;
+  }
+  let resetState: unknown;
+  try {
+    resetState = JSON.parse(readFileSync(resetPath, "utf8"));
+  } catch (err) {
+    throw new Error("Recovery owner-session reset state could not be read; refusing to serve recovered owner sessions.", {
+      cause: err,
+    });
+  }
+  // The desktop also revokes after an owner password change (reason
+  // "password_change"). Any other or missing reason is a recovery.
+  const reason =
+    (resetState as { reason?: unknown } | null)?.reason === "password_change" ? "password_change" : "recovery";
+
+  const sessionStore = getOwnerSessionStore();
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  await sessionStore.revokeAllSessions(subjectId, nowSeconds);
+  const ownerBearers = await sessionStore.listOwnerBearers(subjectId, nowSeconds);
+  for (const bearer of ownerBearers) {
+    await sessionStore.revokeOwnerBearer(subjectId, bearer.id, nowSeconds);
+  }
+  try {
+    renameSync(resetPath, `${resetPath}.applied`);
+  } catch (err) {
+    throw new Error("Recovery owner-session reset state could not be consumed after revocation; refusing to serve recovered owner sessions.", {
+      cause: err,
+    });
+  }
+  logger.warn(
+    { owner_bearers_revoked: ownerBearers.length, ownerSubjectId: subjectId, reason },
+    reason === "password_change"
+      ? "owner password change revoked existing owner sessions and owner bearers before serving"
+      : "recovery startup revoked existing owner sessions and owner bearers before serving"
+  );
 }
 
 function createRequestAcquisitionBatchStore() {
@@ -2104,19 +2442,6 @@ function createRequestRecordRejectionStore() {
   return createRecordRejectionStore();
 }
 
-// Lazily loads the pure static-secret injection helpers from the
-// polyfill-connectors runner slice. The reference server reaches connector
-// code by relative path (it does not declare the package as a dependency), so
-// this mirrors the controller's `await import("../../packages/...")` idiom and
-// caches the resolved module after the first run.
-let staticSecretInjectionModulePromise: Promise<Record<string, unknown>> | null = null;
-function loadStaticSecretInjectionHelpers() {
-  if (!staticSecretInjectionModulePromise) {
-    staticSecretInjectionModulePromise = import("@pdpp/polyfill-connectors/static-secret-injection");
-  }
-  return staticSecretInjectionModulePromise;
-}
-
 // Build the route-facing static-secret credential prober. The reference-only
 // probe seam lives in the connector package: the pure orchestration
 // (`probeCredential`, `hasCredentialProbe`) and the live transport factory,
@@ -2126,45 +2451,22 @@ function loadStaticSecretInjectionHelpers() {
 // or grant-scoped reads. Resolved once at startup and injected, so the route
 // stays synchronous and tests inject a deterministic double instead.
 async function buildStaticSecretCredentialProber() {
-  const [probe, transport, adapter] = await Promise.all([
-    import("@pdpp/polyfill-connectors/credential-probe"),
-    import("@pdpp/polyfill-connectors/credential-probe-transport"),
+  const [probe, adapter] = await Promise.all([
+    loadCredentialProbeHelpers(),
     import("./stores/static-secret-credential-probe.ts"),
   ]);
   return (adapter.createStaticSecretCredentialProber as unknown as (args: Record<string, unknown>) => unknown)({
-    createLiveCredentialProbeTransport: transport.createLiveCredentialProbeTransport,
+    createLiveCredentialProbeTransport: probe.createLiveCredentialProbeTransport,
     hasCredentialProbe: probe.hasCredentialProbe,
     probeCredential: probe.probeCredential,
   });
 }
 
-// Builds the controller's connection-scoped static-secret resolver (design
-// Decision 5). For a static-secret connector that HAS an active stored
-// credential, it returns the env fragment carrying only that connection's
-// secret; the run then authenticates with that explicit per-connection
-// capability. It returns `null` for non-static-secret connectors, for
-// browser-session source bindings that have no optional stored login
-// credential, AND for any connector whose manifest declares
-// `credential_capture.required: false` regardless of how this particular
-// connection's `sourceBinding.kind` happens to be set — see
-// `resolveStaticSecretRunEnv`'s doc. A missing/revoked/deleted credential on a
-// true REQUIRED static-secret connection still fails closed: the run seam
-// throws and the run is refused before any child can use an undeclared
-// provider-account secret.
-//
-// `isStaticSecretCaptureOptional` is load-bearing and must be passed. This
-// function is the resolver the LIVE server actually installs (both the
-// controller path for manual runs and the scheduler path for automatic ones);
-// `server/connection-scoped-run-env.ts` holds a second, structurally identical
-// implementation used by `scheduler-manager-factory.ts` and the test suite.
-// The two drifted: the leaf module passed this argument and this copy did not,
-// so on the live path a `captureRequired: false` connector (venmo) whose
-// connection was bound as anything other than a browser session — e.g. an
-// unpromoted `browser_enrollment_shell`, or a `historical_archive` — hit
-// `recoverSecret`'s throw instead of the intended `null`, and the run was
-// refused rather than proceeding to the connector's own manual sign-in
-// fallback. `connection-scoped-run-env-parity.test.ts` now pins the two
-// implementations to the same argument set so this cannot drift again silently.
+// Resolves run secrets from the installed connector profile and the connection's
+// encrypted credential row. Required credentials fail closed when missing,
+// revoked, or rejected; optional captures and browser-session connections may
+// proceed without a stored secret. The child receives only this connection's
+// env fragment.
 function buildControllerStaticSecretRunEnvResolver() {
   return async ({
     connectorId,
@@ -2175,24 +2477,15 @@ function buildControllerStaticSecretRunEnvResolver() {
     connectorInstanceId: string;
     ownerSubjectId: string;
   }) => {
-    const { isStaticSecretCaptureOptional, isStaticSecretConnector, buildConnectionScopedSecretEnv } =
-      (await loadStaticSecretInjectionHelpers()) as {
-        isStaticSecretCaptureOptional: (id: string) => boolean;
-        isStaticSecretConnector: (id: string) => boolean;
-        buildConnectionScopedSecretEnv: (...args: unknown[]) => unknown;
-      };
-    if (!isStaticSecretConnector(connectorId)) {
-      return null;
-    }
-    const credentialStore = createRequestConnectorInstanceCredentialStore();
-    const connectorInstance = await createRequestConnectorInstanceStore().get(connectorInstanceId);
-    return await (resolveStaticSecretRunEnv as (args: Record<string, unknown>) => Promise<unknown>)({
-      buildConnectionScopedSecretEnv,
+    const [manifest, connectorInstance] = await Promise.all([
+      resolveRegisteredConnectorManifest(connectorId).catch(() => null),
+      createRequestConnectorInstanceStore().get(connectorInstanceId),
+    ]);
+    return await resolveStaticSecretRunEnv({
       connectorId,
       connectorInstanceId,
-      credentialStore,
-      isStaticSecretCaptureOptional,
-      isStaticSecretConnector,
+      credentialStore: createRequestConnectorInstanceCredentialStore(),
+      manifest,
       ownerSubjectId,
       sourceBinding: connectorInstance?.sourceBinding ?? null,
     });
@@ -2232,7 +2525,9 @@ function buildControllerManualUploadRunEnvResolver() {
     ) {
       return null;
     }
-    return { [binding.import_dir_env_var as string]: binding.import_dir as string };
+    return {
+      [binding.import_dir_env_var as string]: binding.import_dir as string,
+    };
   };
 }
 
@@ -2268,8 +2563,11 @@ function providerIdentityGroupDescriptorFromManifests(
   const fieldsByLogicalKey = new Map<string, ProviderIdentityGroupDescriptor["fields"][number]>();
   let providerIdentityLabel: string | null = null;
   for (const manifest of manifests) {
-    const auth = (manifest as unknown as { capabilities?: { auth?: Record<string, unknown> | null } }).capabilities
-      ?.auth;
+    const auth = (
+      manifest as unknown as {
+        capabilities?: { auth?: Record<string, unknown> | null };
+      }
+    ).capabilities?.auth;
     if (!providerIdentityLabel && typeof auth?.provider_identity_label === "string") {
       providerIdentityLabel = auth.provider_identity_label.trim() || null;
     }
@@ -2290,19 +2588,35 @@ function providerIdentityGroupDescriptorFromManifests(
  * connection-setup-plan.ts's manifest-shape acceptance (bare string, legacy
  * `{key,...}`, or current `{logical_key,...}`) so this never re-derives its
  * own parsing of the same manifest data. */
-function connectionConfigDeploymentFieldsFromManifest(
-  manifest: ConnectorManifest
-): readonly { envAlias: string | null; label: string; logicalKey: string; secret: boolean }[] {
-  const declared = (manifest as unknown as { capabilities?: { auth?: { deployment_config?: unknown } | null } })
-    .capabilities?.auth?.deployment_config;
+function connectionConfigDeploymentFieldsFromManifest(manifest: ConnectorManifest): readonly {
+  envAlias: string | null;
+  label: string;
+  logicalKey: string;
+  secret: boolean;
+}[] {
+  const declared = (
+    manifest as unknown as {
+      capabilities?: { auth?: { deployment_config?: unknown } | null };
+    }
+  ).capabilities?.auth?.deployment_config;
   if (!Array.isArray(declared)) {
     return [];
   }
-  const out: { envAlias: string | null; label: string; logicalKey: string; secret: boolean }[] = [];
+  const out: {
+    envAlias: string | null;
+    label: string;
+    logicalKey: string;
+    secret: boolean;
+  }[] = [];
   for (const entry of declared) {
     if (typeof entry === "string") {
       if (entry.trim()) {
-        out.push({ envAlias: null, label: entry.trim(), logicalKey: entry.trim(), secret: false });
+        out.push({
+          envAlias: null,
+          label: entry.trim(),
+          logicalKey: entry.trim(),
+          secret: false,
+        });
       }
       continue;
     }
@@ -2330,8 +2644,11 @@ function connectionConfigDeploymentFieldsFromManifest(
 }
 
 function manifestProviderIdentityGroup(manifest: ConnectorManifest): string | null {
-  const raw = (manifest as unknown as { capabilities?: { auth?: { provider_identity_group?: unknown } | null } })
-    .capabilities?.auth?.provider_identity_group;
+  const raw = (
+    manifest as unknown as {
+      capabilities?: { auth?: { provider_identity_group?: unknown } | null };
+    }
+  ).capabilities?.auth?.provider_identity_group;
   return typeof raw === "string" && raw.trim() ? raw.trim() : null;
 }
 
@@ -2383,7 +2700,9 @@ async function listProviderIdentityGroups(): Promise<readonly ProviderIdentityGr
 function buildGenericProviderAuthExchanger(
   credentialStoreFactory: () => ReturnType<typeof createRequestConnectorInstanceCredentialStore>
 ): ProviderAuthExchanger {
-  const deploymentConfigResolver = createDeploymentConfigResolver({ store: createRequestProviderAppConfigStore() });
+  const deploymentConfigResolver = createDeploymentConfigResolver({
+    store: createRequestProviderAppConfigStore(),
+  });
   return createGenericProviderAuthDispatch({
     credentialStoreFactory,
     deploymentConfigResolver,
@@ -2420,11 +2739,17 @@ async function resolveProviderAuthDeploymentEnv(
   if (entries.length === 0) {
     return env;
   }
-  const resolver = createDeploymentConfigResolver({ store: createRequestProviderAppConfigStore() });
+  const resolver = createDeploymentConfigResolver({
+    store: createRequestProviderAppConfigStore(),
+  });
   await Promise.all(
     entries.map(async (entry) => {
       const key = entry.envAlias ?? entry.logicalKey;
-      const value = await resolver({ envAlias: entry.envAlias, identityGroup, logicalKey: entry.logicalKey });
+      const value = await resolver({
+        envAlias: entry.envAlias,
+        identityGroup,
+        logicalKey: entry.logicalKey,
+      });
       if (value) {
         env[key] = value;
       }
@@ -2456,8 +2781,15 @@ function buildControllerProviderAuthRunEnvResolver() {
       connectorInstanceId,
       credentialStore: createRequestConnectorInstanceCredentialStore(),
       legacyBundleFieldAliases:
-        (manifest as { capabilities?: { auth?: { legacy_bundle_field_aliases?: Record<string, string> | null } } })
-          ?.capabilities?.auth?.legacy_bundle_field_aliases ?? null,
+        (
+          manifest as {
+            capabilities?: {
+              auth?: {
+                legacy_bundle_field_aliases?: Record<string, string> | null;
+              };
+            };
+          }
+        )?.capabilities?.auth?.legacy_bundle_field_aliases ?? null,
       ownerSubjectId,
       sourceBinding: connectorInstance?.sourceBinding ?? null,
     });
@@ -2765,6 +3097,12 @@ function resolvePreRegisteredPublicClients(opts: ServerOpts = {}) {
   return opts.preRegisteredPublicClients || defaultPreRegisteredPublicClients();
 }
 
+function preRegisteredClientIds(clients: unknown): string[] {
+  return (Array.isArray(clients) ? clients : [])
+    .map((client: { client_id?: unknown } | null) => client?.client_id)
+    .filter((id): id is string => typeof id === "string");
+}
+
 function createPublicDcrRateLimiter(config: { windowMs?: number; max?: number } | false = {}) {
   if (config === false) {
     return { check: () => null };
@@ -2917,7 +3255,60 @@ function resolveOwnerAuthPlaceholderConfig(opts: ServerOpts = {}) {
         typeof sessionTtlRaw === "string" && /^[1-9]\d*$/.test(sessionTtlRaw.trim())
         ? Number(sessionTtlRaw.trim())
         : undefined;
-  return { forceSecureCookies: Boolean(forceSecureCookies), password, sameSite, sessionTtlSeconds, subjectId };
+  const loginRateLimit = resolveOwnerAuthLoginRateLimit(opts, readOwnerAuthEnv);
+  const passwordManagedByDesktop =
+    opts.ownerPasswordManagedByDesktop ?? (readOwnerAuthEnv && ownerPasswordManagedByDesktop());
+  return {
+    forceSecureCookies: Boolean(forceSecureCookies),
+    loginRateLimit,
+    password,
+    passwordManagedByDesktop,
+    sameSite,
+    sessionTtlSeconds,
+    subjectId,
+  };
+}
+
+function envPositiveInt(readEnv: boolean, name: string): number | undefined {
+  if (!readEnv) {
+    return undefined;
+  }
+  const raw = process.env[name];
+  if (typeof raw !== "string" || !/^[1-9]\d*$/.test(raw.trim())) {
+    return undefined;
+  }
+  return Number(raw.trim());
+}
+
+function resolveOwnerAuthLoginRateLimit(
+  opts: ServerOpts,
+  readOwnerAuthEnv: boolean
+):
+  | {
+      windowMs?: number;
+      max?: number;
+      maxLocal?: number;
+      trustedProxies?: string | null;
+    }
+  | false {
+  // Explicit `false` (test fixtures only) disables throttling outright.
+  if (opts.ownerAuthLoginRateLimit === false) {
+    return false;
+  }
+  const fromOpts = opts.ownerAuthLoginRateLimit ?? {};
+  const max = fromOpts.max ?? envPositiveInt(readOwnerAuthEnv, "PDPP_OWNER_LOGIN_RATE_LIMIT_MAX");
+  const maxLocal = fromOpts.maxLocal ?? envPositiveInt(readOwnerAuthEnv, "PDPP_OWNER_LOGIN_RATE_LIMIT_MAX_LOCAL");
+  const windowMs = fromOpts.windowMs ?? envPositiveInt(readOwnerAuthEnv, "PDPP_OWNER_LOGIN_RATE_LIMIT_WINDOW_MS");
+  return {
+    ...(max === undefined ? {} : { max }),
+    ...(maxLocal === undefined ? {} : { maxLocal }),
+    ...(windowMs === undefined ? {} : { windowMs }),
+    trustedProxies:
+      fromOpts.trustedProxies ??
+      opts.trustedProxies ??
+      (readOwnerAuthEnv ? process.env.PDPP_TRUSTED_PROXIES : null) ??
+      null,
+  };
 }
 
 function buildSourceDescriptor(sourceBinding: { kind?: string; id?: string } | null = null) {
@@ -3037,9 +3428,18 @@ async function resolveGrantManifest(tokenInfo: TokenInfo | null | undefined, opt
 }
 
 async function resolveRegisteredConnectorManifest(connectorId: string) {
+  // The installed signed artifact is the production source of truth. Core may
+  // skip manifest-table persistence, so OAuth and other routes must resolve
+  // its active, integrity-checked manifest before falling back to the table.
+  const activeInstall = await inspectActiveConnector(createConnectorInstallStore(), connectorId);
+  if (activeInstall.status === "active") {
+    return activeInstall.record.manifest;
+  }
   const manifest = await getConnectorManifest(connectorId);
   if (!manifest) {
-    throw Object.assign(new Error(`Unknown connector: ${connectorId}`), { code: "not_found" });
+    throw Object.assign(new Error(`Unknown connector: ${connectorId}`), {
+      code: "not_found",
+    });
   }
   return manifest;
 }
@@ -3077,7 +3477,11 @@ interface ActivateDraftConnectionStore {
     | Promise<{ status?: string; sourceBinding?: unknown } | null>;
   promoteSetupBinding: (
     connectorInstanceId: string,
-    args: { fromKind: string; sourceBinding: Record<string, unknown>; updatedAt: string }
+    args: {
+      fromKind: string;
+      sourceBinding: Record<string, unknown>;
+      updatedAt: string;
+    }
   ) => { instance: unknown; promoted: boolean } | Promise<{ instance: unknown; promoted: boolean }>;
 }
 
@@ -3107,7 +3511,10 @@ export async function activateDraftConnection(
           sourceBinding: promotion(current.sourceBinding as Record<string, unknown>, now),
           updatedAt: now,
         })
-      : { instance: await store.activateDraft(connectorInstanceId), promoted: true };
+      : {
+          instance: await store.activateDraft(connectorInstanceId),
+          promoted: true,
+        };
   if (!promoted) {
     return null;
   }
@@ -3137,7 +3544,9 @@ function createActivationScheduleAttacher(controller: unknown) {
 }
 
 function buildGrantInvalidError(): ApiError {
-  return Object.assign(new Error("Grant is malformed or no longer valid"), { code: "grant_invalid" }) as ApiError;
+  return Object.assign(new Error("Grant is malformed or no longer valid"), {
+    code: "grant_invalid",
+  }) as ApiError;
 }
 
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: This protocol transition owns ordered state invariants that must remain local.
@@ -3165,7 +3574,9 @@ export async function resolveGrantScopedStateGrant(connectorId: string, grantId:
       ).rows[0] || null
     : getOne(referenceQueries.grantsGetScopedStateById, [grantId]);
   if (!row) {
-    throw Object.assign(new Error(`Unknown grant: ${grantId}`), { code: "not_found" });
+    throw Object.assign(new Error(`Unknown grant: ${grantId}`), {
+      code: "not_found",
+    });
   }
 
   const rowTraceId = (row as Record<string, unknown>).trace_id as string | null | undefined;
@@ -3743,7 +4154,10 @@ async function listSubjectVisibleStreamSummaries({
           >,
           streamName,
         });
-        bindings = resolved.bindings as Array<{ connectorId: string; connectorInstanceId: string }>;
+        bindings = resolved.bindings as Array<{
+          connectorId: string;
+          connectorInstanceId: string;
+        }>;
       } catch (error) {
         if (error instanceof Error && (error as Error & { code?: string }).code === "connection_not_found") {
           return;
@@ -3807,7 +4221,10 @@ async function buildConnectorSchemaItem({
   // Streams the loaded manifest declares — lets the expand-capabilities builder
   // distinguish "target stream not granted" from "target stream unknown".
   const manifestStreamNames = new Set(manifestStreamsArr.map((stream) => stream.name as string));
-  const freshnessEvidence = await getConnectorFreshnessEvidence({ manifest, storageBinding });
+  const freshnessEvidence = await getConnectorFreshnessEvidence({
+    manifest,
+    storageBinding,
+  });
 
   const streams = await Promise.all(
     visibleStreams.map(async (manifestStream) => {
@@ -3880,7 +4297,10 @@ async function buildConnectorDiscoveryItem({
         .map((streamGrant) => manifestStreamsArr.find((stream) => stream.name === streamGrant.name))
         .filter(Boolean) as Record<string, unknown>[])
     : manifestStreamsArr;
-  const freshnessEvidence = await getConnectorFreshnessEvidence({ manifest, storageBinding });
+  const freshnessEvidence = await getConnectorFreshnessEvidence({
+    manifest,
+    storageBinding,
+  });
 
   const item: Record<string, unknown> = {
     object: "connector",
@@ -4266,7 +4686,9 @@ async function persistContentAddressedBlobWithinFence({
     const rawRow = getOne(referenceQueries.blobsGetStoredById, [blobId]);
     const row = rawRow as Record<string, unknown> | null | undefined;
     if (!row || row.sha256 !== sha256 || Number(row.size_bytes) !== sizeBytes) {
-      throw Object.assign(new Error("Blob storage collision"), { code: "api_error" }) as unknown as ApiError;
+      throw Object.assign(new Error("Blob storage collision"), {
+        code: "api_error",
+      }) as unknown as ApiError;
     }
 
     const bindingResult = exec(referenceQueries.blobsInsertBinding, [
@@ -4313,7 +4735,10 @@ async function getVisibleStreamFreshness({
   stream: string;
   manifest: Record<string, unknown>;
 }) {
-  const freshnessEvidence = await getConnectorFreshnessEvidence({ manifest, storageBinding });
+  const freshnessEvidence = await getConnectorFreshnessEvidence({
+    manifest,
+    storageBinding,
+  });
   const grant =
     tokenInfo?.pdpp_token_kind === "owner"
       ? null
@@ -4346,7 +4771,9 @@ async function recyclePresentationSurface({
   browserSessionId = null as string | null,
   leaseId: _leaseId = null as string | null,
   logger = null as { warn?: (...args: unknown[]) => void } | null,
-  presentationScreenStateStore = null as { markRecycled?: (id: string, ts: string) => Promise<void> } | null,
+  presentationScreenStateStore = null as {
+    markRecycled?: (id: string, ts: string) => Promise<void>;
+  } | null,
   surfaceId = null as string | null,
   browserSurfaceAllocator = null as Record<string, unknown> | null,
   browserSurfaceLeaseManager = null as Record<string, unknown> | null,
@@ -4390,7 +4817,10 @@ async function recyclePresentationSurface({
     }
     if (typeof (browserSurfaceAllocator as Record<string, unknown> | null)?.stopSurface === "function") {
       const alloc = browserSurfaceAllocator as Record<string, unknown>;
-      await (alloc.stopSurface as (args: unknown) => Promise<void>)({ reason: "surface_failed", surfaceId });
+      await (alloc.stopSurface as (args: unknown) => Promise<void>)({
+        reason: "surface_failed",
+        surfaceId,
+      });
       retired = true;
     }
   } catch (err) {
@@ -4513,12 +4943,30 @@ export async function evaluateOwnerStreamCoverageAuthority({
   // owner-owed row keeps firing the global system banner and the owner-vs-system
   // split becomes dead code. Return the whole shape the composer's contract
   // asks for.
-  return { classCounts: authority.classCounts, status: authority.coverageStatus };
+  return {
+    classCounts: authority.classCounts,
+    status: authority.coverageStatus,
+  };
 }
 
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: This protocol transition owns ordered state invariants that must remain local.
 export function buildAsApp(opts: ServerOpts = {}) {
-  const app = createApp({ ...(opts.logger === null ? {} : { logger: opts.logger }) });
+  const app = createApp({
+    ...(opts.logger === null ? {} : { logger: opts.logger }),
+  });
+  const reachabilityContract = opts.reachabilityContract ?? parseReachabilityContract();
+  const hosted = opts.ownerExposurePosture?.hosted ?? reachabilityContractIsHosted(reachabilityContract);
+  app.use(((req: ReqLike, res: ResLike, next: () => void) => {
+    const decision = evaluateReachabilityRequest(req, reachabilityContract, {
+      hosted,
+      mcpSurface: true,
+    });
+    if (decision) {
+      pdppError(res, decision.status, decision.code, decision.message);
+      return;
+    }
+    next();
+  }) as unknown as Parameters<typeof app.use>[0]);
   const nativeMode = !!resolveNativeManifest(opts);
   const providerName = resolveProviderName(opts);
   const referenceRevision = resolveReferenceRevision({
@@ -4554,6 +5002,9 @@ export function buildAsApp(opts: ServerOpts = {}) {
   const lockConnectorRegistry = ownerExposurePosture ? ownerExposurePosture.lockConnectorRegistry : false;
   const ownerAuth = createOwnerAuthPlaceholder({
     password: ownerAuthConfig.password,
+    passwordManagedByDesktop: ownerAuthConfig.passwordManagedByDesktop,
+    ...(opts.ownerAuthPasswordVerifier === undefined ? {} : { passwordVerifier: opts.ownerAuthPasswordVerifier }),
+    ...(opts.ownerPasswordVerifierStore ? { passwordVerifierStore: opts.ownerPasswordVerifierStore } : {}),
     subjectId: ownerAuthConfig.subjectId,
     ...(ownerAuthConfig.sessionTtlSeconds === null || ownerAuthConfig.sessionTtlSeconds === undefined
       ? {}
@@ -4562,8 +5013,11 @@ export function buildAsApp(opts: ServerOpts = {}) {
     // biome-ignore lint/suspicious/noUnnecessaryConditions: TypeScript boundary permits nullish input; this guard preserves runtime behavior.
     ...(ownerAuthConfig.sameSite === null || ownerAuthConfig.sameSite === undefined
       ? {}
-      : { sameSite: ownerAuthConfig.sameSite as import("./owner-session.ts").OwnerSessionSameSite }),
+      : {
+          sameSite: ownerAuthConfig.sameSite as import("./owner-session.ts").OwnerSessionSameSite,
+        }),
     allowUnauthenticatedWhenDisabled: allowUnauthenticatedOwnerWhenDisabled,
+    loginRateLimit: ownerAuthConfig.loginRateLimit,
     providerName,
   });
   app.use((..._args: never[]) => {
@@ -4602,6 +5056,15 @@ export function buildAsApp(opts: ServerOpts = {}) {
   // `PDPP_OWNER_PASSWORD` is set, and is a no-op otherwise. See
   // `reference-implementation/server/owner-auth.js`.
   ownerAuth.attachRoutes(app);
+
+  if (opts.ownerSetupToken && opts.ownerPasswordVerifierStore && !ownerAuthConfig.password) {
+    mountOwnerSetupRoutes(app as unknown as Parameters<typeof mountOwnerSetupRoutes>[0], {
+      ownerAuth,
+      passwordStore: opts.ownerPasswordVerifierStore,
+      rateLimit: ownerAuthConfig.loginRateLimit === false ? {} : ownerAuthConfig.loginRateLimit,
+      token: opts.ownerSetupToken,
+    });
+  }
 
   function getOwnerSubjectId(req: ReqLike): string {
     return (
@@ -4715,7 +5178,9 @@ export function buildAsApp(opts: ServerOpts = {}) {
   const runTargetRegistry =
     opts.runTargetRegistry ||
     (createRunTargetRegistry as (...args: unknown[]) => import("./streaming/run-target-registry.ts").RunTargetRegistry)(
-      { ...(opts.streamingLogger === null ? {} : { logger: opts.streamingLogger }) }
+      {
+        ...(opts.streamingLogger === null ? {} : { logger: opts.streamingLogger }),
+      }
     );
   runTargetRegistry.attachRoutes(app, requireDeviceExporterCredential);
 
@@ -4858,6 +5323,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
     getCimdDocument: getCimdDocument as unknown as Parameters<typeof mountClientMetadata>[1]["getCimdDocument"],
     resolvePublicUrl: resolvePublicUrl as unknown as Parameters<typeof mountClientMetadata>[1]["resolvePublicUrl"],
   });
+  mountClientLogo(app as unknown as Parameters<typeof mountClientLogo>[0]);
 
   // DCR register/delete routes — extracted to routes/as-dcr.ts per
   // openspec/changes/split-reference-server-by-route-family.
@@ -4906,7 +5372,15 @@ export function buildAsApp(opts: ServerOpts = {}) {
     canonicalConnectorKey,
     encodeHostedMcpSelection,
     encodeHostedMcpStreamSelection,
-    getConnectorManifest,
+    getConnectorManifest: async (connectorId: string) => {
+      const registered = await getConnectorManifest(connectorId);
+      if (registered) {
+        return registered;
+      }
+      return (
+        (await opts.connectorInstallService?.resolveManifestFromCatalog?.(connectorId)) ?? null
+      );
+    },
     hostedMcpSourceKey,
     isInternalConnectorId,
     listActiveBindingsForGrant,
@@ -4938,7 +5412,9 @@ export function buildAsApp(opts: ServerOpts = {}) {
   // delegation, same auth-code staging and redirect.
   mountAsAuthorize(app, {
     asPublicUrl: opts.asPublicUrl || null,
+    ...(opts.clientLogoFetchDependencies ? { clientLogoFetchOptions: opts.clientLogoFetchDependencies } : {}),
     consentPickerCaps: consentPickerCaps as unknown as Parameters<typeof mountAsAuthorize>[1]["consentPickerCaps"],
+    consentChallengeStore: createConsentChallengeStore(),
     consentStore: consentStore as unknown as Parameters<typeof mountAsAuthorize>[1]["consentStore"],
     consentUi: consentUi as unknown as Parameters<typeof mountAsAuthorize>[1]["consentUi"],
     createHostedMcpGrantPackage: createHostedMcpGrantPackage as unknown as Parameters<
@@ -4966,6 +5442,13 @@ export function buildAsApp(opts: ServerOpts = {}) {
     requireOwnerSession: ownerAuth.requireOwnerSession as unknown as Parameters<
       typeof mountAsAuthorize
     >[1]["requireOwnerSession"],
+    ...(revokeGrantPackage
+      ? {
+          revokeGrantPackage: revokeGrantPackage as unknown as NonNullable<
+            Parameters<typeof mountAsAuthorize>[1]["revokeGrantPackage"]
+          >,
+        }
+      : {}),
     resolvePublicUrl: resolvePublicUrl as unknown as Parameters<typeof mountAsAuthorize>[1]["resolvePublicUrl"],
     selectionParsers: {
       parseHostedMcpSelections: parseHostedMcpSelections as unknown as Parameters<
@@ -5056,12 +5539,33 @@ export function buildAsApp(opts: ServerOpts = {}) {
       typeof args.deviceCode === "string" && args.deviceCode.startsWith("dc_owner_")
         ? ownerDeviceAuthStore.exchangeDeviceCode(args)
         : exchangeGrantScopedDeviceCode(args),
-    exchangeOAuthAuthorizationCode,
-    exchangeOAuthRefreshToken,
+    authenticateOAuthTokenClient: (args: Parameters<typeof authenticateOAuthTokenClient>[0]) =>
+      authenticateOAuthTokenClient({
+        ...args,
+        ...(opts.cimdFetchDependencies ? { cimdFetchDependencies: opts.cimdFetchDependencies } : {}),
+      }),
+    exchangeOAuthAuthorizationCode: (args: Parameters<typeof exchangeOAuthAuthorizationCode>[0]) =>
+      exchangeOAuthAuthorizationCode({
+        ...args,
+        ...(opts.cimdFetchDependencies ? { cimdFetchDependencies: opts.cimdFetchDependencies } : {}),
+      }),
+    exchangeOAuthRefreshToken: (args: Parameters<typeof exchangeOAuthRefreshToken>[0]) =>
+      exchangeOAuthRefreshToken({
+        ...args,
+        ...(opts.cimdFetchDependencies ? { cimdFetchDependencies: opts.cimdFetchDependencies } : {}),
+      }),
     oauthError,
     resolveBaseUrl: (req: unknown) => {
       const explicitBaseUrl = opts.asPublicUrl || (opts.ignoreAmbientPublicUrls ? null : process.env.AS_PUBLIC_URL);
       return resolvePublicUrl(req as Parameters<typeof resolvePublicUrl>[0], explicitBaseUrl);
+    },
+    resolveTokenEndpoint: (req: unknown) => {
+      const explicitIssuer =
+        opts.asIssuer ||
+        opts.asPublicUrl ||
+        (opts.ignoreAmbientPublicUrls ? null : process.env.AS_ISSUER || process.env.AS_PUBLIC_URL);
+      const issuer = explicitIssuer || resolvePublicUrl(req as Parameters<typeof resolvePublicUrl>[0], null);
+      return `${issuer.replace(/\/+$/, "")}/oauth/token`;
     },
     setReferenceTraceId,
   };
@@ -5074,7 +5578,12 @@ export function buildAsApp(opts: ServerOpts = {}) {
   // same hosted-UI HTML rendering, same error mapping.
   mountAsDeviceUi(app, {
     deviceDecision: {
-      approve: (userCode: string, subjectId: string) => ownerDeviceAuthStore.approve(userCode, subjectId),
+      approve: (
+        userCode: string,
+        subjectId: string,
+        authorizationFence?: { credentialRevision?: string | null; sessionIdHash?: string }
+      ) =>
+        ownerDeviceAuthStore.approve(userCode, subjectId, authorizationFence),
       deny: (userCode: string, subjectId: string) => ownerDeviceAuthStore.deny(userCode, subjectId),
       getByApprovalId: (approvalId: string) => ownerDeviceAuthStore.getByApprovalId(approvalId),
     },
@@ -5083,6 +5592,13 @@ export function buildAsApp(opts: ServerOpts = {}) {
     oauthError,
     ownerAuthDefaultSubjectId: OWNER_AUTH_DEFAULT_SUBJECT_ID,
     ownerAuthEnabled: ownerAuth.enabled,
+    readOwnerAuthorizationFence: (req: unknown) =>
+      ownerAuth.readOwnerAuthorizationFence(
+        req as Parameters<typeof ownerAuth.readOwnerAuthorizationFence>[0]
+      ),
+    ...(opts.ownerDeviceApprovalBeforeDecision
+      ? { beforeOwnerDeviceApproval: opts.ownerDeviceApprovalBeforeDecision }
+      : {}),
     ownerSubjectId: ownerAuth.subjectId,
     providerName,
     renderCsrfField: (token: string) => ownerAuth.renderCsrfField(token),
@@ -5235,7 +5751,9 @@ export function buildAsApp(opts: ServerOpts = {}) {
             let pairing = null;
             try {
               const subjectId = getOwnerSubjectId(req as ReqLike);
-              const exporterStoreCast = deviceExporterStore as { listDevices: (...args: unknown[]) => unknown };
+              const exporterStoreCast = deviceExporterStore as {
+                listDevices: (...args: unknown[]) => unknown;
+              };
               const devices = await exporterStoreCast.listDevices(subjectId);
               const activeDevices = Array.isArray(devices)
                 ? (devices as Record<string, unknown>[]).filter((d) => d.status === "active")
@@ -5427,7 +5945,11 @@ export function buildAsApp(opts: ServerOpts = {}) {
       runTargetRegistry.forceUnregister({ interactionId, runId }),
     isNekoProxyTargetApproved: (
       target: unknown,
-      { session }: { session?: { interaction_id?: string | null; run_id?: string | null } }
+      {
+        session,
+      }: {
+        session?: { interaction_id?: string | null; run_id?: string | null };
+      }
     ) =>
       (typeof opts.isNekoProxyTargetApproved === "function" &&
         opts.isNekoProxyTargetApproved(target as Parameters<NonNullable<typeof opts.isNekoProxyTargetApproved>>[0], {
@@ -5552,24 +6074,49 @@ export function buildAsApp(opts: ServerOpts = {}) {
         // blocked in structured browser assistance rather than a legacy
         // pending INTERACTION. Retire every presentation lifecycle here;
         // finalizeRunCleanup also purges every registry target and nonce.
-        await streamingRoutes.restoreOrRetirePresentationForRun({ reason: "run_cancelled", run_id: runId });
+        await streamingRoutes.restoreOrRetirePresentationForRun({
+          reason: "run_cancelled",
+          run_id: runId,
+        });
         return await originalCancelRun(runId, requestingOwnerSubjectId);
       };
     }
     if (opts.presentationTerminalBarrier && typeof opts.presentationTerminalBarrier === "object") {
       const barrierCast = opts.presentationTerminalBarrier as Record<string, unknown>;
       barrierCast.invoke = async (args: unknown) => {
-        const a = args as { interactionId: string; reason: string; runId: string };
+        const a = args as {
+          interactionId: string;
+          reason: string;
+          runId: string;
+        };
         await restorePresentationBeforeTerminal(a.runId, a.interactionId, a.reason);
       };
       barrierCast.releaseLease = async (args: unknown) => {
         const a = args as { runId: string };
-        await streamingRoutes.restoreOrRetirePresentationForRun({ reason: "run_cleanup", run_id: a.runId });
+        await streamingRoutes.restoreOrRetirePresentationForRun({
+          reason: "run_cleanup",
+          run_id: a.runId,
+        });
       };
     }
   }
 
-  (registerInboxRoutes as (...args: unknown[]) => void)(app, { controller, handleError, ownerAuth, pdppError });
+  (registerInboxRoutes as (...args: unknown[]) => void)(app, {
+    controller,
+    handleError,
+    ownerAuth,
+    pdppError,
+  });
+
+  mountOwnerLiveAs(app, {
+    isOwnerSessionActive: async (req: Parameters<typeof ownerAuth.readOwnerSession>[0]) =>
+      !ownerAuth.enabled || Boolean(await ownerAuth.readOwnerSession(req)),
+    live: resolveOwnerLive(opts),
+    onSessionLogout: ownerAuth.onSessionLogout,
+    pdppError,
+    pingIntervalMs: opts.ownerLivePingIntervalMs,
+    requireOwnerSession: ownerAuth.requireOwnerSession,
+  } as unknown as Parameters<typeof mountOwnerLiveAs>[1]);
 
   // Operator-only stream-playground route. Lazy-launches a long-lived patchright
   // headless browser whose first page is pinned to a self-contained data:
@@ -5647,9 +6194,13 @@ export function buildAsApp(opts: ServerOpts = {}) {
   mountRefRunCancel(app, {
     cancelRun: async (runId: string, requestingOwnerSubjectId: string) => {
       if (!controller) {
-        return { run_id: runId, status: "no_active_run" } as unknown as Parameters<
-          typeof mountRefRunCancel
-        >[1]["cancelRun"] extends (id: string, owner: string) => Promise<infer R>
+        return {
+          run_id: runId,
+          status: "no_active_run",
+        } as unknown as Parameters<typeof mountRefRunCancel>[1]["cancelRun"] extends (
+          id: string,
+          owner: string
+        ) => Promise<infer R>
           ? R
           : never;
       }
@@ -5753,6 +6304,11 @@ export function buildAsApp(opts: ServerOpts = {}) {
 
   const refConnectorsContext = {
     canonicalConnectorKey,
+    resetConnectionState: (input: { connectorInstanceId: string; ownerSubjectId: string }) =>
+      resetOwnerConnectionAndStartFullSync({ ...input, controller }),
+    purgeBrowserProfile: createOwnerBrowserProfilePurger(opts),
+    clearDefaultAccountTombstone: (input: { connectorId: string; ownerSubjectId: string }) =>
+      createRequestConnectorInstanceStore().clearDefaultAccountTombstone(input),
     createRequestConnectorInstanceStore,
     createTraceContext,
     deleteConnection: (connectorInstanceId: string, options: unknown) =>
@@ -5765,7 +6321,10 @@ export function buildAsApp(opts: ServerOpts = {}) {
               { connectorInstanceId: id, ownerSubjectId }
             ),
           deleteRecordRejectionsSqlite: (id: string, ownerSubjectId: string) =>
-            deleteSqliteRecordRejectionsForConnectionWithinTransaction({ connectorInstanceId: id, ownerSubjectId }),
+            deleteSqliteRecordRejectionsForConnectionWithinTransaction({
+              connectorInstanceId: id,
+              ownerSubjectId,
+            }),
           deleteRecordRowsPostgres: (client: unknown, id: string) =>
             deleteConnectionRecordRowsPostgres(client as Parameters<typeof deleteConnectionRecordRowsPostgres>[0], id),
           deleteRecordRowsSqlite: (id: string) => deleteConnectionRecordRowsSqlite(id),
@@ -5796,7 +6355,10 @@ export function buildAsApp(opts: ServerOpts = {}) {
         ownerSubjectId,
         visibleConnections: inventory,
       });
-      const streamHealth = await evaluateOwnerStreamCoverageAuthority({ referenceRevision, summaries });
+      const streamHealth = await evaluateOwnerStreamCoverageAuthority({
+        referenceRevision,
+        summaries,
+      });
       return composeFleetHealthVerdict({
         inventory,
         runtime: getRuntimeStatus(),
@@ -5904,7 +6466,10 @@ export function buildAsApp(opts: ServerOpts = {}) {
         fleet_health: composeFleetHealthVerdict({
           inventory: fleetInventory,
           runtime: getRuntimeStatus(),
-          streamHealth: await evaluateOwnerStreamCoverageAuthority({ referenceRevision, summaries: fullSummaries }),
+          streamHealth: await evaluateOwnerStreamCoverageAuthority({
+            referenceRevision,
+            summaries: fullSummaries,
+          }),
           summaries: fullSummaries as unknown as Parameters<typeof composeFleetHealthVerdict>[0]["summaries"],
         }),
       };
@@ -6224,6 +6789,12 @@ export function buildAsApp(opts: ServerOpts = {}) {
     setReferenceTraceId,
   } as unknown as Parameters<typeof mountRefStaticSecretDraftConnection>[1]);
 
+  const connectorInstallService =
+    opts.connectorInstallService ??
+    createConnectorInstallService({
+      registerManifest: (manifest) => registerConnector(manifest),
+    });
+
   {
     const resolvedDbPath = opts.dbPath || DB_PATH;
     const importBaseDir =
@@ -6244,6 +6815,12 @@ export function buildAsApp(opts: ServerOpts = {}) {
       onManualUploadValidationTask: opts.onManualUploadValidationTask,
       pdppError,
       requireOwnerSession: ownerAuth.requireOwnerSession,
+      resolveActiveConnectorManifest: async (connectorId: string) => {
+        const inspected = await inspectActiveConnector(createConnectorInstallStore(), connectorId);
+        return inspected.status === "active" ? inspected.record.manifest : null;
+      },
+      resolveCatalogConnectorManifest: (connectorId: string) =>
+        connectorInstallService.resolveManifestFromCatalog?.(connectorId) ?? Promise.resolve(null),
       resolveRegisteredConnectorManifest,
       setReferenceTraceId,
     } as unknown as Parameters<typeof mountRefManualUploadDraftConnection>[1]);
@@ -6325,6 +6902,12 @@ export function buildAsApp(opts: ServerOpts = {}) {
     generateSpineId,
     getOwnerSubjectId,
     handleError,
+    // A trusted proxy is not guaranteed to attach x-forwarded-host to every
+    // request in a flow (see resolveCallbackBaseUrl below); this reports
+    // only whether THIS request carries that header, so the callback route
+    // can tell "no signal" apart from "an explicit, conflicting claim."
+    hasForwardedOriginSignal: (req: unknown) =>
+      forwardedPublicOrigin(req as Parameters<typeof forwardedPublicOrigin>[0]) !== null,
     pdppError,
     pendingAuthStore,
     requireOwnerSession: ownerAuth.requireOwnerSession,
@@ -6363,7 +6946,10 @@ export function buildAsApp(opts: ServerOpts = {}) {
           store.setMany({
             identityGroup: args.identityGroup,
             updatedAt: args.updatedAt,
-            values: Object.entries(args.values).map(([logicalKey, value]) => ({ logicalKey, value })),
+            values: Object.entries(args.values).map(([logicalKey, value]) => ({
+              logicalKey,
+              value,
+            })),
           }),
       };
     },
@@ -6533,6 +7119,11 @@ export function buildAsApp(opts: ServerOpts = {}) {
     refConnectorsContext as unknown as Parameters<typeof mountRefConnectionReactivate>[1]
   );
   mountRefConnectionDelete(app, refConnectorsContext as unknown as Parameters<typeof mountRefConnectionDelete>[1]);
+  mountRefConnectionResetState(app, refConnectorsContext as unknown as Parameters<typeof mountRefConnectionResetState>[1]);
+  mountRefConnectionBrowserProfilePurge(
+    app,
+    refConnectorsContext as unknown as Parameters<typeof mountRefConnectionBrowserProfilePurge>[1]
+  );
 
   if (!nativeMode) {
     // Polyfill-only connector registry: register/detail semantics live in
@@ -6667,7 +7258,11 @@ function buildAgentDiscoveryMetadata(
     noOwnerToken = true,
     docsOrigin = origin,
     mcpAuthorization = null,
-  }: { noOwnerToken?: boolean; docsOrigin?: string | null; mcpAuthorization?: unknown } = {}
+  }: {
+    noOwnerToken?: boolean;
+    docsOrigin?: string | null;
+    mcpAuthorization?: unknown;
+  } = {}
 ) {
   if (!origin) {
     return null;
@@ -6718,7 +7313,7 @@ function buildAgentDiscoveryMetadata(
 }
 
 // Build the advisory `pdpp_owner_agent_onboarding` block for a trusted local
-// owner agent (e.g. Daisy). This is non-normative reference metadata — NOT a
+// owner agent. This is non-normative reference metadata — NOT a
 // PDPP Core requirement — that names the owner-level REST automation profile
 // and the surfaces needed to onboard and keep an incremental local view.
 //
@@ -6777,7 +7372,23 @@ function buildOwnerAgentOnboardingMetadata({
 }
 
 function buildRsApp(opts: ServerOpts = {}) {
-  const app = createApp({ ...(opts.logger === null ? {} : { logger: opts.logger }) });
+  const rsPurgeBrowserProfile = createOwnerBrowserProfilePurger(opts);
+  const app = createApp({
+    ...(opts.logger === null ? {} : { logger: opts.logger }),
+  });
+  const reachabilityContract = opts.reachabilityContract ?? parseReachabilityContract();
+  const hosted = opts.ownerExposurePosture?.hosted ?? reachabilityContractIsHosted(reachabilityContract);
+  app.use(((req: ReqLike, res: ResLike, next: () => void) => {
+    const decision = evaluateReachabilityRequest(req, reachabilityContract, {
+      hosted,
+      mcpSurface: true,
+    });
+    if (decision) {
+      pdppError(res, decision.status, decision.code, decision.message);
+      return;
+    }
+    next();
+  }) as unknown as Parameters<typeof app.use>[0]);
   const nativeMode = !!resolveNativeManifest(opts);
   const providerName = resolveProviderName(opts);
   const referenceRevision = resolveReferenceRevision({
@@ -6792,16 +7403,26 @@ function buildRsApp(opts: ServerOpts = {}) {
   // behavior). startServer intentionally does NOT pass the bare default here.
   // Spec: openspec/changes/route-hosted-mcp-adapter-self-calls-internally/
   const internalResource = opts.rsInternalUrl ?? null;
-  const rsOwnerSubjectId = resolveOwnerAuthPlaceholderConfig(opts).subjectId || OWNER_AUTH_DEFAULT_SUBJECT_ID;
+  const rsOwnerAuthConfig = resolveOwnerAuthPlaceholderConfig(opts);
+  const rsOwnerSubjectId = rsOwnerAuthConfig.subjectId || OWNER_AUTH_DEFAULT_SUBJECT_ID;
+  // Pure accessor for GET /v1/owner/credential/reveal (routes/owner-credential-reveal.ts):
+  // the password this process was started with, or null when owner auth is
+  // disabled. Never mints or mutates a credential.
+  const readOwnerPassword = (): string | null => rsOwnerAuthConfig.password || null;
+  const ownerCredentialRevealEnabled = ownerPasswordManagedByDesktop();
+  const ownerCredentialRevealProof = process.env.PDPP_OWNER_CREDENTIAL_REVEAL_PROOF?.trim() || null;
   const trustedMetadataHosts =
     opts.trustedMetadataHosts ?? (opts.ignoreAmbientPublicUrls ? null : process.env.PDPP_TRUSTED_HOSTS);
   const rsIntrospectionCredentials = opts.rsIntrospectionCredentials ?? readIntrospectionCredentialsFromEnv();
   if (!rsIntrospectionCredentials) {
     throw new Error("RS introspection credentials must be configured");
   }
+  const introspectionBindHost =
+    opts.reachabilityContract?.bindHost || process.env.PDPP_BIND_HOST?.trim() || "127.0.0.1";
+  const introspectionUrlHost = selfCallUrlHostForBindHost(introspectionBindHost);
   const introspectToken = createRemoteIntrospector({
     ...rsIntrospectionCredentials,
-    endpoint: opts.rsIntrospectionEndpoint ?? `http://127.0.0.1:${opts.asPort ?? AS_PORT}/introspect`,
+    endpoint: opts.rsIntrospectionEndpoint ?? `http://${introspectionUrlHost}:${opts.asPort ?? AS_PORT}/introspect`,
     expectedAudience: opts.resolveIntrospectionAudience ?? (() => explicitResource ?? null),
     expectedIssuer: opts.resolveIntrospectionIssuer ?? (() => opts.asIssuer ?? opts.asPublicUrl ?? null),
     ...(opts.introspectionFetch ? { fetchImpl: opts.introspectionFetch } : {}),
@@ -6858,6 +7479,7 @@ function buildRsApp(opts: ServerOpts = {}) {
     handleStreamableHttpRequest,
     internalResource,
     pdppError,
+    reachabilityContract,
     referenceRevision,
     requireClientOrMcpPackage,
     requireToken,
@@ -6916,14 +7538,18 @@ function buildRsApp(opts: ServerOpts = {}) {
     insertOrReplayRecordRejection: async ({
       code,
       ...input
-    }: Omit<InsertOrReplayRecordRejectionInput, "reasonCode"> & { code: string }) => {
+    }: Omit<InsertOrReplayRecordRejectionInput, "reasonCode"> & {
+      code: string;
+    }) => {
       const receipt = await insertOrReplayHostedRecordRejection(
         {
           ...input,
           reasonCode: code,
         },
         opts.hostedRecordRejectionAfterInsertBeforeCommit
-          ? { afterInsertOrReplayBeforeCommit: opts.hostedRecordRejectionAfterInsertBeforeCommit }
+          ? {
+              afterInsertOrReplayBeforeCommit: opts.hostedRecordRejectionAfterInsertBeforeCommit,
+            }
           : {}
       );
       return {
@@ -7035,7 +7661,11 @@ function buildRsApp(opts: ServerOpts = {}) {
     }: {
       lexicalAvailable: unknown;
       semanticAvailable: unknown;
-    }) => (buildHybridRetrievalCapability as (...args: unknown[]) => unknown)({ lexicalAvailable, semanticAvailable }),
+    }) =>
+      (buildHybridRetrievalCapability as (...args: unknown[]) => unknown)({
+        lexicalAvailable,
+        semanticAvailable,
+      }),
     buildOwnerAgentOnboardingMetadata,
     buildProtectedResourceMetadata,
     explicitResource,
@@ -7063,7 +7693,9 @@ function buildRsApp(opts: ServerOpts = {}) {
         return opts.lexicalRetrievalCapability;
       }
       if (opts.lexicalRetrievalSupported !== false) {
-        return buildLexicalRetrievalCapability({ indexState: await computeLexicalIndexState() });
+        return buildLexicalRetrievalCapability({
+          indexState: await computeLexicalIndexState(),
+        });
       }
       return null;
     },
@@ -7301,7 +7933,10 @@ function buildRsApp(opts: ServerOpts = {}) {
         reason: string;
       }) => {
         invalidateConnectorSummariesCache();
-        await markConnectorSummaryEvidenceDirty?.({ connectorInstanceId, reason });
+        await markConnectorSummaryEvidenceDirty?.({
+          connectorInstanceId,
+          reason,
+        });
       },
       getOwnerTokenSubjectId,
       getSyncState,
@@ -7394,6 +8029,7 @@ function buildRsApp(opts: ServerOpts = {}) {
   // openspec/changes/add-owner-agent-control-surface (tasks 3.1d/6.1d, design
   // "Deferred: connection-revoke durability" → Unit 2).
   mountOwnerConnectionRevoke(app, {
+    purgeBrowserProfile: rsPurgeBrowserProfile,
     AmbiguousConnectionError,
     canonicalConnectorKey,
     createTraceContext,
@@ -7561,9 +8197,9 @@ function buildRsApp(opts: ServerOpts = {}) {
   // connections, and the device edge. Ownership is verified in the store BEFORE
   // any mutation (foreign/unknown/repeat → connector_instance_not_found 404, no
   // existence leak — the same code the sibling owner-agent instance-control
-  // routes raise); an in-flight run → connection_run_active (409); a
-  // default-account binding → default_account_delete_unsupported (409, no silent
-  // re-materialization). The connector-only route auto-selects a single active
+  // routes raise); an in-flight run → connection_run_active (409). A
+  // default-account binding is deletable; its tombstone blocks silent
+  // re-materialization. The connector-only route auto-selects a single active
   // connection or returns a typed ambiguous_connection (409). The durable
   // source-of-truth cascade (records-family + schedule + device back-ref +
   // connector_instances row) is ONE all-or-nothing transaction per backend;
@@ -7571,6 +8207,7 @@ function buildRsApp(opts: ServerOpts = {}) {
   // commit. `/mcp` owner-bearer rejection is untouched. See
   // openspec/changes/add-owner-connection-delete-contract.
   mountOwnerConnectionDelete(app, {
+    purgeBrowserProfile: rsPurgeBrowserProfile,
     AmbiguousConnectionError,
     canonicalConnectorKey,
     createTraceContext,
@@ -7587,7 +8224,10 @@ function buildRsApp(opts: ServerOpts = {}) {
               { connectorInstanceId: id, ownerSubjectId }
             ),
           deleteRecordRejectionsSqlite: (id: string, ownerSubjectId: string) =>
-            deleteSqliteRecordRejectionsForConnectionWithinTransaction({ connectorInstanceId: id, ownerSubjectId }),
+            deleteSqliteRecordRejectionsForConnectionWithinTransaction({
+              connectorInstanceId: id,
+              ownerSubjectId,
+            }),
           deleteRecordRowsPostgres: (client: unknown, id: string) =>
             deleteConnectionRecordRowsPostgres(client as Parameters<typeof deleteConnectionRecordRowsPostgres>[0], id),
           deleteRecordRowsSqlite: (id: string) => deleteConnectionRecordRowsSqlite(id),
@@ -7611,6 +8251,16 @@ function buildRsApp(opts: ServerOpts = {}) {
     resolveOwnerConnectorNamespace,
     setReferenceTraceId,
   } as unknown as Parameters<typeof mountOwnerConnectionDelete>[1]);
+
+  mountOwnerConnectionResetState(app, {
+    requireOwner,
+    requireToken,
+    getOwnerSubjectId: getOwnerTokenSubjectId,
+    resetConnectionState: (input: { connectorInstanceId: string; ownerSubjectId: string }) =>
+      resetOwnerConnectionAndStartFullSync({ ...input, controller: opts.controller ?? null }),
+    handleError,
+    pdppError,
+  } as unknown as Parameters<typeof mountOwnerConnectionResetState>[1]);
 
   // GET /v1/owner/connections/:connectionId/diagnostics and
   // GET /v1/owner/connectors/:connectorId/diagnostics are the bearer-authed
@@ -7722,6 +8372,132 @@ function buildRsApp(opts: ServerOpts = {}) {
     uatExposeUnlistedConnectors: process.env.PDPP_EXPOSE_UNPROVEN_CONNECTORS_UAT === "1",
   } as unknown as Parameters<typeof mountOwnerConnectorTemplates>[1]);
 
+  // OCI artifact mutation is intentionally separate from connector-instance
+  // setup. The service records executable artifact identity under PDPP_DATA_DIR
+  // and registers only a verified installed manifest.
+  mountOwnerConnectorInstall(app, {
+    handleError,
+    pdppError,
+    requireOwner,
+    requireToken,
+    service:
+      opts.connectorInstallService ??
+      createConnectorInstallService({
+        registerManifest: (manifest) => registerConnector(manifest),
+        removeActivation: removeConnectorActivation,
+        assertUninstallAllowed: async (connectorId) => {
+          const activeRun = isPostgresStorageBackend()
+            ? (await postgresQuery<{ run_id: string }>(
+                "SELECT run_id FROM controller_active_runs WHERE connector_id=$1 ORDER BY started_at LIMIT 1",
+                [connectorId]
+              )).rows[0]
+            : getDb()
+                .prepare("SELECT run_id FROM controller_active_runs WHERE connector_id=? ORDER BY started_at LIMIT 1")
+                .get<{ run_id: string }>(connectorId);
+          if (activeRun) {
+            throw Object.assign(new Error(`Cannot uninstall ${connectorId} while run ${activeRun.run_id} is active.`), {
+              code: "connector_run_active",
+            });
+          }
+          const ids = isPostgresStorageBackend()
+            ? (await postgresQuery<{ connector_instance_id: string }>(
+                "SELECT connector_instance_id FROM connector_instances WHERE connector_id=$1 ORDER BY connector_instance_id",
+                [connectorId]
+              )).rows.map((row) => row.connector_instance_id)
+            : getDb().prepare(
+                "SELECT connector_instance_id FROM connector_instances WHERE connector_id=? ORDER BY connector_instance_id"
+              ).all<{ connector_instance_id: string }>(connectorId).map((row) => row.connector_instance_id);
+          if (ids.length) {
+            const error = new Error(`Cannot uninstall ${connectorId}: ${ids.length} source${ids.length === 1 ? "" : "s"} still use this connector.`) as Error & { code: string; connection_ids: string[] };
+            error.code = "connector_in_use";
+            error.connection_ids = ids;
+            throw error;
+          }
+        },
+      }),
+  } as unknown as Parameters<typeof mountOwnerConnectorInstall>[1]);
+
+  // Owner-authenticated HTTP routes for both remote-access providers
+  // (config read/write/inspect). See routes/owner-remote-access.ts for the
+  // full rationale, including how ngrok's authtoken handoff and native
+  // tunnel supervision stay split across this route and the Tauri host.
+  mountOwnerRemoteAccess(app, {
+    contract: reachabilityContract,
+    handleError,
+    pdppError,
+    requireOwner,
+    requireToken,
+    ownerPasswordOwnerSet: () =>
+      ownerPasswordOwnerSet(process.env.PDPP_DATA_DIR || path.join(process.cwd(), "data")),
+    store: createRemoteAccessConfigStore(process.env.PDPP_DATA_DIR || path.join(process.cwd(), "data"), () =>
+      resolveOwnerLive(opts).bump("remote-access")
+    ),
+  } as unknown as Parameters<typeof mountOwnerRemoteAccess>[1]);
+
+  // Owner-authenticated HTTP routes for the generic desktop app-config blob
+  // (storageProvider/serverMode/selfHostedUrl/startMinimized/closeToTray).
+  // See routes/owner-app-config.ts: same injection-gap rationale as
+  // owner-remote-access.ts, but this file has no OS side effect on write so
+  // it is persisted directly, no Rust-side watcher involved.
+  mountOwnerAppConfig(app, {
+    handleError,
+    pdppError,
+    requireOwner,
+    requireToken,
+    store: createAppConfigStore(() => resolveOwnerLive(opts).bump("desktop.app-config")),
+  } as unknown as Parameters<typeof mountOwnerAppConfig>[1]);
+
+  // Owner-authenticated HTTP routes for launch-at-login. Unlike app-config,
+  // autostart is an imperative OS action only the Tauri/Rust process can
+  // perform, so this route hands off to a command file the desktop app's
+  // spawn_autostart_watcher polls and answers. See routes/owner-autostart.ts.
+  mountOwnerAutostart(app, {
+    handleError,
+    pdppError,
+    requireOwner,
+    requireToken,
+    store: createAutostartStore(process.env.PDPP_DATA_DIR || path.join(process.cwd(), "data"), () =>
+      resolveOwnerLive(opts).bump("desktop.autostart")
+    ),
+  } as unknown as Parameters<typeof mountOwnerAutostart>[1]);
+
+  mountOwnerLiveRs(app, {
+    live: resolveOwnerLive(opts),
+    requireOwner,
+    requireToken,
+  } as unknown as Parameters<typeof mountOwnerLiveRs>[1]);
+
+  // Owner-authenticated HTTP route for exporting the desktop database
+  // encryption key as a printable recovery code. See
+  // routes/owner-recovery-key.ts for the full rationale: this route is a
+  // pure relay over short-lived per-command result files, never a
+  // computation of the code itself.
+  mountOwnerRecoveryKey(app, {
+    handleError,
+    requireOwner,
+    requireToken,
+    store: createRecoveryKeyStore(process.env.PDPP_DATA_DIR || path.join(process.cwd(), "data")),
+  } as unknown as Parameters<typeof mountOwnerRecoveryKey>[1]);
+
+  mountOwnerRecoveryKit(app, {
+    exporter: createServerRecoveryKitExporter(),
+    handleError,
+    requireOwner,
+    requireToken,
+  } as unknown as Parameters<typeof mountOwnerRecoveryKit>[1]);
+
+  // Owner-authenticated HTTP route for revealing the owner's own login
+  // password, so it can be typed into a second device's login page. See
+  // routes/owner-credential-reveal.ts for the full rationale.
+  mountOwnerCredentialReveal(app, {
+    handleError,
+    isEligibleForReveal: (req: { headers?: Record<string, string | string[] | undefined> }) =>
+      ownerCredentialRevealEnabled && hasLocalOwnerCredentialRevealProof(req, ownerCredentialRevealProof),
+    readOwnerPassword,
+    requireOwner,
+    requireToken,
+  } as unknown as Parameters<typeof mountOwnerCredentialReveal>[1]);
+
   // GET /v1/owner/control is the bearer-authed owner-agent control entrypoint:
   // a non-secret capability document that names every owner-agent control
   // action family, marks supported vs owner-mediated vs unsupported, and links
@@ -7818,10 +8594,40 @@ function buildRsApp(opts: ServerOpts = {}) {
 export async function startServer(opts: ServerOpts = {}) {
   const introspectionCredentials = resolveIntrospectionCredentials(opts);
   const logger = opts.logger ?? buildLogger({ quiet: !!opts.quiet });
+  const requestedAsPort = opts.asPort ?? AS_PORT;
+  const requestedRsPort = opts.rsPort ?? RS_PORT;
+  const ignoreAmbientPublicUrls =
+    opts.ignoreAmbientPublicUrls ??
+    ((requestedAsPort === 0 || requestedRsPort === 0) &&
+      !opts.asPublicUrl &&
+      !opts.rsPublicUrl &&
+      !opts.asIssuer &&
+      opts.referenceOrigin === undefined);
+  const reachabilityEnv =
+    ignoreAmbientPublicUrls && opts.referenceOrigin === undefined
+      ? { ...process.env, PDPP_REFERENCE_ORIGIN: undefined }
+      : process.env;
+  const reachabilityContract =
+    opts.reachabilityContract ??
+    parseReachabilityContract({
+      env: reachabilityEnv,
+      bindHost: opts.bindHost,
+      referenceOrigin: opts.referenceOrigin,
+      trustedHosts: opts.trustedMetadataHosts,
+      trustedProxies: opts.trustedProxies,
+    });
+  const reachabilityHosted = reachabilityContractIsHosted(reachabilityContract);
+  validateReachabilityContract(reachabilityContract, reachabilityHosted);
+  const earlyOwnerAuthConfig = resolveOwnerAuthPlaceholderConfig(opts);
   const connectorEnvironmentPolicy = resolveConnectorEnvironmentPolicy(opts);
   setConnectorSummaryReconcileObservationSink(createConnectorSummaryReconcileObservationSink(logger));
   const nativeConfig = validateNativeConfiguration(opts);
-  const storageBackend = (resolveStorageBackend as (...args: unknown[]) => { backend: string; databaseUrl?: string })({
+  const storageBackend = (
+    resolveStorageBackend as (...args: unknown[]) => {
+      backend: string;
+      databaseUrl?: string;
+    }
+  )({
     opts,
   });
   // Storage-mode boundary: in Postgres mode, Postgres owns runtime persistence,
@@ -7853,6 +8659,62 @@ export async function startServer(opts: ServerOpts = {}) {
       : { bootstrapLockTimeoutMs: opts.postgresBootstrapLockTimeoutMs }),
     log: (msg: string) => logger.info(msg),
   });
+  const uninstallRecoveryStore = createConnectorInstallStore();
+  const uninstallDataDir = connectorLifecycleDataDir();
+  await reconcileConnectorUninstalls(uninstallDataDir, uninstallRecoveryStore, removeConnectorActivation);
+  const configuredOwnerPassword =
+    typeof earlyOwnerAuthConfig.password === "string" && earlyOwnerAuthConfig.password.length > 0;
+  const ownerPasswordStore = createOwnerPasswordVerifierStore();
+  let ownerPasswordVerifier: OwnerPasswordVerifier | null = null;
+  const suppliedOwnerPasswordVerifier = opts.ownerAuthPasswordVerifier
+    ? parseOwnerPasswordVerifier(opts.ownerAuthPasswordVerifier)
+    : null;
+  const ownerPasswordDatabaseIsDurable = ownerPasswordStore.isDurable();
+  if (ownerPasswordDatabaseIsDurable) {
+    const ownerPasswordDbPath = opts.dbPath || process.env.PDPP_DB_PATH || process.env.DB_PATH;
+    const legacyOwnerPasswordPath =
+      ownerPasswordDbPath && ownerPasswordDbPath !== ":memory:"
+        ? path.join(path.dirname(ownerPasswordDbPath), "owner-password")
+        : "/var/lib/pdpp/owner-password";
+    const legacyImport = await importLegacyOwnerPasswordFile(
+      legacyOwnerPasswordPath,
+      ownerPasswordStore,
+      createOwnerPasswordVerifier
+    );
+    if (legacyImport.imported) logger.info("imported the legacy owner password into the database verifier store");
+    ownerPasswordVerifier = suppliedOwnerPasswordVerifier ?? legacyImport.verifier;
+  } else {
+    ownerPasswordVerifier = suppliedOwnerPasswordVerifier ?? (await ownerPasswordStore.read());
+  }
+  const ownerExposurePosture = resolveOwnerExposurePosture({
+    bindHost: reachabilityContract.bindHost,
+    env: process.env,
+    hasOwnerPassword:
+      (typeof earlyOwnerAuthConfig.password === "string" && earlyOwnerAuthConfig.password.length > 0) ||
+      ownerPasswordVerifier !== null,
+    referenceOrigin: reachabilityContract.referenceOrigin,
+  });
+  const ownerAuthRequired = ownerExposurePosture.ownerAuthRequired ?? ownerExposurePosture.hosted === true;
+  const ownerSetupToken =
+    ownerAuthRequired && !configuredOwnerPassword && ownerPasswordVerifier === null
+      ? (opts.ownerSetupToken ?? randomBytes(32).toString("base64url"))
+      : null;
+  if (ownerSetupToken) {
+    logger.warn({ setupToken: ownerSetupToken }, "Owner setup is required; claim this instance at /setup");
+  }
+  if (ownerExposurePosture.refuseBootReason) {
+    throw new Error(ownerExposurePosture.refuseBootReason);
+  }
+  if (
+    !process.env.NODE_TEST_CONTEXT &&
+    typeof earlyOwnerAuthConfig.password === "string" &&
+    ownerPasswordLength(earlyOwnerAuthConfig.password) < OWNER_PASSWORD_MIN_LENGTH
+  ) {
+    logger.warn(
+      { minimumLength: OWNER_PASSWORD_MIN_LENGTH },
+      "configured owner password is shorter than the recommended minimum"
+    );
+  }
   if (storageBackend.backend === "postgres") {
     logger.info("postgres runtime storage initialized");
   }
@@ -7867,6 +8729,29 @@ export async function startServer(opts: ServerOpts = {}) {
   });
   logger.info("database initialized");
 
+  const runtimeDataDir = process.env.PDPP_DATA_DIR || path.join(process.cwd(), "data");
+  await applyCredentialKeyLostRecoveryState({
+    dataDir: runtimeDataDir,
+    logger,
+  });
+  await applyRecoveryOwnerSessionReset({
+    dataDir: runtimeDataDir,
+    logger,
+    subjectId: earlyOwnerAuthConfig.subjectId || OWNER_AUTH_DEFAULT_SUBJECT_ID,
+  });
+  // Before the scheduler and console start and before the desktop signs in,
+  // so nothing holds a credential this revokes.
+  const retired = await retireFormerPreRegisteredClientsAtStartup(
+    Math.floor(Date.now() / 1000),
+    preRegisteredClientIds(resolvePreRegisteredPublicClients(opts))
+  );
+  if (Object.keys(retired.clients).length > 0 || retired.sessions > 0) {
+    logger.warn(
+      { owner_sessions_revoked: retired.sessions, retired_clients: retired.clients },
+      "revoked the credentials of clients earlier versions pre-registered, and the unlabelled desktop sessions earlier starts left"
+    );
+  }
+
   // Boot-epoch reconciliation — STAGE 5.
   // Emit `controller.booted` as the FIRST spine event of this process
   // incarnation, then stash {boot_epoch, seq, controller_id} in the
@@ -7880,7 +8765,11 @@ export async function startServer(opts: ServerOpts = {}) {
   // See docs/run-reconciliation-design-brief.md §3.4.
   const bootEpoch = await emitControllerBootedAndStashEpoch();
   logger.info(
-    { boot_epoch: bootEpoch.boot_epoch, controller_id: bootEpoch.controller_id, seq: bootEpoch.seq },
+    {
+      boot_epoch: bootEpoch.boot_epoch,
+      controller_id: bootEpoch.controller_id,
+      seq: bootEpoch.seq,
+    },
     "controller booted"
   );
 
@@ -7996,14 +8885,9 @@ export async function startServer(opts: ServerOpts = {}) {
     process.env.PDPP_PROVIDER_NAME ||
     PDPP_PROVIDER_NAME;
 
-  const requestedAsPort = opts.asPort ?? AS_PORT;
-  const requestedRsPort = opts.rsPort ?? RS_PORT;
-  const ignoreAmbientPublicUrls =
-    opts.ignoreAmbientPublicUrls ??
-    ((requestedAsPort === 0 || requestedRsPort === 0) && !opts.asPublicUrl && !opts.rsPublicUrl && !opts.asIssuer);
   const referenceTopology = resolveReferenceTopology({
     ...(opts.referenceMode === null ? {} : { explicitMode: opts.referenceMode }),
-    ...(opts.referenceOrigin === null ? {} : { referenceOrigin: opts.referenceOrigin }),
+    referenceOrigin: reachabilityContract.referenceOrigin,
     ...(opts.asPublicUrl === null ? {} : { asPublicUrl: opts.asPublicUrl }),
     ...(opts.rsPublicUrl === null ? {} : { rsPublicUrl: opts.rsPublicUrl }),
     ignoreAmbient: ignoreAmbientPublicUrls,
@@ -8019,7 +8903,7 @@ export async function startServer(opts: ServerOpts = {}) {
   // (F1: avoid hairpinning PATCH self-calls through the public edge that 405s
   // PATCH). Only honor an EXPLICITLY configured internal base — `opts.rsInternalUrl`
   // or the operator's `PDPP_RS_URL` — because that is the only value known to
-  // point at the live RS. The bare `DEFAULT_RS_INTERNAL_URL` (localhost:7663) is
+  // point at the live RS. The bare `DEFAULT_RS_INTERNAL_URL` (127.0.0.1:7663) is
   // deliberately NOT used as an implicit internal base: in ephemeral-port
   // harnesses (rsPort:0) and any deployment where the default does not match the
   // realized listener it would misroute self-calls. When no explicit internal
@@ -8062,7 +8946,11 @@ export async function startServer(opts: ServerOpts = {}) {
       return;
     }
     logger.warn(
-      { boundPort, configuredOrigin: explicitUrl, configuredPort: explicitPort },
+      {
+        boundPort,
+        configuredOrigin: explicitUrl,
+        configuredPort: explicitPort,
+      },
       `${label} names port ${explicitPort}, but this listener is bound to port ${boundPort} — a direct client with no reverse proxy in front (no x-forwarded-host) will be told to re-authenticate against the wrong port. If this node is fronted by a proxy/TLS terminator on purpose, this warning is expected; otherwise update the origin to match the published port.`
     );
   };
@@ -8073,43 +8961,11 @@ export async function startServer(opts: ServerOpts = {}) {
     // PDPP_REFERENCE_ORIGIN.
     referenceBaseUrl: configuredAsPublicUrl || null,
     rsUrl: configuredRsPublicUrl || null,
+    selfCallReferenceBaseUrl: null as string | null,
+    selfCallRsUrl: null as string | null,
   };
-  const resolvedOwnerAuthConfig = resolveOwnerAuthPlaceholderConfig(opts);
+  const resolvedOwnerAuthConfig = earlyOwnerAuthConfig;
   const ownerAuthSubjectId = resolvedOwnerAuthConfig.subjectId || OWNER_AUTH_DEFAULT_SUBJECT_ID;
-
-  // ── Owner-exposure posture (security audit S-1 / S-2, lane A1) ────────────
-  // Decide whether this deployment is internet-facing. In a hosted posture an
-  // unset PDPP_OWNER_PASSWORD is a full bypass of the owner control plane, so
-  // we FAIL CLOSED: refuse to boot. In a local-dev (loopback) posture we keep
-  // the password-optional convenience and the open `requireOwnerSession`
-  // fall-through. The posture also gates `POST /connectors` (manifest upsert)
-  // so a one-request grant-wipe DoS is not reachable unauthenticated on a
-  // hosted surface. See server/owner-exposure-posture.ts for the signal logic.
-  const ownerExposurePosture = resolveOwnerExposurePosture({
-    bindHost: opts.bindHost,
-    env: process.env,
-    hasOwnerPassword:
-      typeof resolvedOwnerAuthConfig.password === "string" && resolvedOwnerAuthConfig.password.length > 0,
-    isTestContext: !!process.env.NODE_TEST_CONTEXT,
-    publicUrlOption: configuredAsPublicUrl,
-  });
-  if (ownerExposurePosture.refuseBootReason) {
-    // Throw BEFORE any listener binds. The CLI entrypoint's `.catch` exits(1)
-    // with the fatal log line; the test harness sees a rejected promise.
-    throw new Error(ownerExposurePosture.refuseBootReason);
-  }
-  if (
-    !ownerExposurePosture.hosted &&
-    ownerExposurePosture.bindsNonLoopback &&
-    !(typeof resolvedOwnerAuthConfig.password === "string" && resolvedOwnerAuthConfig.password.length > 0)
-  ) {
-    // Local-dev posture that still binds a non-loopback interface without a
-    // password — not refused (could be a deliberate LAN demo), but loud.
-    logger.warn(
-      { bindHost: opts.bindHost ?? "(all interfaces)" },
-      "reference server is binding a non-loopback interface with PDPP_OWNER_PASSWORD unset — the owner control plane (/_ref, connector registry) is reachable without authentication. Set PDPP_OWNER_PASSWORD to gate it."
-    );
-  }
 
   const webPushConfig = opts.webPushConfig || resolveWebPushConfig();
   const webPushStore = opts.webPushSubscriptionStore || createWebPushSubscriptionStore();
@@ -8148,10 +9004,14 @@ export async function startServer(opts: ServerOpts = {}) {
   const controller = createController({
     ...(configuredAsPublicUrl === null ? {} : { asPublicUrl: configuredAsPublicUrl }),
     ...(connectorEnvironmentPolicy.approvedBindings.length > 0
-      ? { approvedEnvironmentBindings: connectorEnvironmentPolicy.approvedBindings }
+      ? {
+          approvedEnvironmentBindings: connectorEnvironmentPolicy.approvedBindings,
+        }
       : {}),
     ...(connectorEnvironmentPolicy.approvedProxyConnectorIds.length > 0
-      ? { approvedProxyConnectorIds: connectorEnvironmentPolicy.approvedProxyConnectorIds }
+      ? {
+          approvedProxyConnectorIds: connectorEnvironmentPolicy.approvedProxyConnectorIds,
+        }
       : {}),
     admitRunConnection: async ({ connectorId, connectorInstanceId, ownerSubjectId, runAdmission }) => {
       const namespace =
@@ -8169,9 +9029,13 @@ export async function startServer(opts: ServerOpts = {}) {
               connectorInstanceStore: createRequestConnectorInstanceStore(),
               ownerSubjectId,
             });
-      return { connectorId: namespace.connectorId, connectorInstanceId: namespace.connectorInstanceId };
+      return {
+        connectorId: namespace.connectorId,
+        connectorInstanceId: namespace.connectorInstanceId,
+      };
     },
     ownerSubjectId: ownerAuthSubjectId,
+    localConnectorSourceStore: createFileLocalConnectorSourceStore(),
     resolveOwnerSubjectIdForConnectorInstance: async (connectorInstanceId) =>
       (await createRequestConnectorInstanceStore().get(connectorInstanceId))?.ownerSubjectId ?? null,
     ...(opts.connectorPathResolver === null
@@ -8319,7 +9183,9 @@ export async function startServer(opts: ServerOpts = {}) {
           }
           postgresDerivedIndexMaintenanceInFlight = true;
           try {
-            const receipt = await runPostgresDerivedIndexMaintenance({ window: postgresDerivedIndexMaintenanceWindow });
+            const receipt = await runPostgresDerivedIndexMaintenance({
+              window: postgresDerivedIndexMaintenanceWindow,
+            });
             logger.info?.({ receipt }, "postgres derived-index maintenance completed");
           } finally {
             postgresDerivedIndexMaintenanceInFlight = false;
@@ -8440,14 +9306,23 @@ export async function startServer(opts: ServerOpts = {}) {
   const providerAuthExchanger =
     opts.providerAuthExchanger ?? buildGenericProviderAuthExchanger(createRequestConnectorInstanceCredentialStore);
 
+  const connectorInstallService =
+    opts.connectorInstallService ??
+    createConnectorInstallService({
+      registerManifest: (manifest) => registerConnector(manifest),
+    });
   const asApp = buildAsApp({
     acceptedCollectorProtocolVersions: opts.acceptedCollectorProtocolVersions,
     acceptedProviderNativeRevision: opts.acceptedProviderNativeRevision,
     agentConnectTtlMs: opts.agentConnectTtlMs,
     asIssuer: configuredAsIssuer,
     asPublicUrl: configuredAsPublicUrl,
+    clientLogoFetchDependencies: opts.clientLogoFetchDependencies,
     cimdFetchDependencies: opts.cimdFetchDependencies,
+    connectorInstallService,
     controller,
+    ownerLive: resolveOwnerLive(opts),
+    ownerLivePingIntervalMs: opts.ownerLivePingIntervalMs,
     dbPath: opts.dbPath || DB_PATH,
     dynamicClientRegistrationInitialAccessTokens: resolveDynamicClientRegistrationInitialAccessTokens(opts),
     enableDynamicClientRegistration: resolveDynamicClientRegistrationEnabled(opts),
@@ -8463,12 +9338,19 @@ export async function startServer(opts: ServerOpts = {}) {
     nekoWindowSettleProbe: opts.nekoWindowSettleProbe,
     onManualUploadValidationTask: opts.onManualUploadValidationTask,
     ownerAuthForceSecureCookies: opts.ownerAuthForceSecureCookies,
+    ownerAuthLoginRateLimit: opts.ownerAuthLoginRateLimit,
     ownerAuthPassword: opts.ownerAuthPassword,
+    ownerPasswordManagedByDesktop: opts.ownerPasswordManagedByDesktop,
+    ownerAuthPasswordVerifier: ownerPasswordVerifier,
+    ownerDeviceApprovalBeforeDecision: opts.ownerDeviceApprovalBeforeDecision,
+    ownerSetupToken: ownerSetupToken ?? undefined,
+    ownerPasswordVerifierStore: ownerPasswordStore,
     ownerAuthSameSite: opts.ownerAuthSameSite,
     ownerAuthSubjectId: opts.ownerAuthSubjectId,
     // Owner-exposure posture: gates the disabled-auth fall-through and the
     // connector-registry lock (security audit S-1 / S-2, lane A1).
     ownerExposurePosture,
+    reachabilityContract,
     preRegisteredPublicClients: resolvePreRegisteredPublicClients(opts),
     presentationScreenStateStore,
     presentationTerminalBarrier,
@@ -8498,11 +9380,10 @@ export async function startServer(opts: ServerOpts = {}) {
     staticSecretAutoResume: opts.staticSecretAutoResume,
   } as unknown as ServerOpts);
 
-  // opts.bindHost — restrict listening interface (e.g. '127.0.0.1'). Default
-  // is undefined which lets Node bind to all interfaces. Passing '127.0.0.1'
-  // keeps the server off the LAN/public internet.
+  // The normalized contract always supplies a bind host. The loopback default
+  // keeps the server off the LAN/public internet unless an operator opts in.
   // biome-ignore lint/style/useDestructuring: Explicit property or positional access documents this compatibility boundary.
-  const bindHost = opts.bindHost;
+  const bindHost = reachabilityContract.bindHost;
 
   const asServer = await asApp.listen(requestedAsPort, bindHost);
   if (typeof (asApp as unknown as Record<string, unknown>).__pdppStreamingUpgradeHandler === "function") {
@@ -8517,6 +9398,8 @@ export async function startServer(opts: ServerOpts = {}) {
     });
   }
   const asPort = (asServer.address() as import("net").AddressInfo).port;
+  const bindUrlHost = bindHost.includes(":") && !bindHost.startsWith("[") ? `[${bindHost}]` : bindHost;
+  const selfCallUrlHost = selfCallUrlHostForBindHost(bindHost);
   const asPublicUrl = configuredAsPublicUrl || configuredAsIssuer || `http://localhost:${asPort}`;
   // Update the controller's lazy reference-base-URL view now that the AS
   // listener has actually allocated a port. Spawned connector children
@@ -8534,17 +9417,21 @@ export async function startServer(opts: ServerOpts = {}) {
   // Both child and parent run on the same host (Mode A: in-process
   // controller spawns the connector subprocess), so loopback is always
   // reachable and is the right hop.
-  runtimeContext.referenceBaseUrl = `http://127.0.0.1:${asPort}`;
-  logger.info({ port: asPort, url: `http://localhost:${asPort}` }, "authorization server listening");
+  runtimeContext.referenceBaseUrl = `http://localhost:${asPort}`;
+  runtimeContext.selfCallReferenceBaseUrl = `http://${selfCallUrlHost}:${asPort}`;
+  logger.info({ port: asPort, url: `http://${bindUrlHost}:${asPort}` }, "authorization server listening");
   warnIfLoopbackOriginPortDisagreesWithBoundPort("configured AS public origin", configuredAsPublicUrl, asPort);
 
   const rsApp = buildRsApp({
+    connectorInstallService,
     agentDiscoveryOrigin: referenceTopology.browserOrigin,
     asIssuer: configuredAsIssuer || asPublicUrl,
     asPort,
     asPublicUrl,
     configuredProviderAuthConnectorKeys,
     controller,
+    ownerLive: resolveOwnerLive(opts),
+    ownerAuthPassword: opts.ownerAuthPassword,
     hostedRecordRejectionAfterInsertBeforeCommit: opts.hostedRecordRejectionAfterInsertBeforeCommit,
     hybridRetrievalCapability: opts.hybridRetrievalCapability,
     // Hybrid retrieval experimental extension knobs — see search-hybrid.js +
@@ -8567,6 +9454,7 @@ export async function startServer(opts: ServerOpts = {}) {
     onScheduleMutation: () => schedulerManager?.refresh(),
     providerName,
     referenceRevision: opts.referenceRevision,
+    reachabilityContract,
     resolveIntrospectionAudience: () => configuredRsPublicUrl || runtimeContext.rsUrl,
     resolveIntrospectionIssuer: () => configuredAsIssuer || runtimeContext.referenceBaseUrl,
     // Explicitly-configured internal RS base for the hosted-MCP adapter's
@@ -8575,7 +9463,7 @@ export async function startServer(opts: ServerOpts = {}) {
     // Spec: openspec/changes/route-hosted-mcp-adapter-self-calls-internally/
     rsInternalUrl: explicitRsInternalUrl,
     rsIntrospectionCredentials: introspectionCredentials,
-    rsIntrospectionEndpoint: opts.rsIntrospectionEndpoint ?? `http://127.0.0.1:${asPort}/introspect`,
+    rsIntrospectionEndpoint: opts.rsIntrospectionEndpoint ?? `http://${selfCallUrlHost}:${asPort}/introspect`,
     rsPublicUrl: configuredRsPublicUrl,
     semanticRetrievalCapability: opts.semanticRetrievalCapability,
     // Semantic retrieval experimental extension knobs — see search-semantic.js
@@ -8592,8 +9480,9 @@ export async function startServer(opts: ServerOpts = {}) {
   // should post ingest/state traffic directly to the local RS listener rather
   // than routing large NDJSON payloads through the browser-facing web origin.
   runtimeContext.rsUrl = `http://localhost:${rsPort}`;
+  runtimeContext.selfCallRsUrl = `http://${selfCallUrlHost}:${rsPort}`;
   await controller.promoteBrowserSurfaceLeasesAfterBoot();
-  logger.info({ port: rsPort, url: `http://localhost:${rsPort}` }, "resource server listening");
+  logger.info({ port: rsPort, url: `http://${bindUrlHost}:${rsPort}` }, "resource server listening");
   warnIfLoopbackOriginPortDisagreesWithBoundPort("configured RS public origin", configuredRsPublicUrl, rsPort);
 
   // HNSW is a derived acceleration structure. Its durable builder is bounded,
@@ -8657,10 +9546,8 @@ export async function startServer(opts: ServerOpts = {}) {
       // recovered here.
       hasStoredCredential: async (connectorId: string) => {
         const canonicalId = canonicalConnectorKey(connectorId) ?? connectorId;
-        const { isStaticSecretConnector } = (await loadStaticSecretInjectionHelpers()) as {
-          isStaticSecretConnector: (id: string) => boolean;
-        };
-        if (!isStaticSecretConnector(canonicalId)) {
+        const manifest = await resolveRegisteredConnectorManifest(canonicalId).catch(() => null);
+        if (!isStaticSecretProfileManifest(manifest)) {
           return false;
         }
         const instances = await createRequestConnectorInstanceStore().listActiveByConnector(
@@ -8690,8 +9577,13 @@ export async function startServer(opts: ServerOpts = {}) {
         return instances.map((instance) => instance.connectorInstanceId);
       },
       listConnectors: async () => {
-        const manifests = await collectValidRegisteredConnectorManifests({ logger });
-        return manifests.map(({ connectorId, manifest }) => ({ connector_id: connectorId, manifest }));
+        const manifests = await collectValidRegisteredConnectorManifests({
+          logger,
+        });
+        return manifests.map(({ connectorId, manifest }) => ({
+          connector_id: connectorId,
+          manifest,
+        }));
       },
       log: (msg) => logger.info(msg),
       recordSkipReason: recordAutoEnrollDecision,
@@ -8704,7 +9596,7 @@ export async function startServer(opts: ServerOpts = {}) {
   schedulerManager = createReferenceSchedulerManager({
     connectionScopedRunEnvResolver,
     connectorEnvironmentPolicy,
-    connectorPathResolver: opts.connectorPathResolver || resolveDefaultConnectorPath,
+    connectorPathResolver: opts.connectorPathResolver || resolveActiveInstallFirstConnectorPath,
     controller,
     logger,
     ownerSubjectId: ownerAuthSubjectId,
@@ -9027,16 +9919,50 @@ export function armBrowserSurfaceLeaseSweepAfterBoot(
   timer.start();
 }
 
+// Every connector manifest this server knows at boot: verified active installs
+// first, then registered manifests. A manifest that fails to load is skipped;
+// that connector's next run records its manifest.
+async function listKnownConnectorManifestsForBrowserSurfaces(): Promise<{ connectorId: string; manifest: unknown }[]> {
+  const known = new Map<string, unknown>();
+  const { verified } = await listVerifiedActiveConnectors(createConnectorInstallStore()).catch(() => ({
+    verified: [],
+  }));
+  for (const record of verified) {
+    known.set(record.connectorId, record.manifest);
+  }
+  for (const connectorId of await listRegisteredConnectorIds().catch(() => [])) {
+    if (!known.has(connectorId)) {
+      // biome-ignore lint/performance/noAwaitInLoops: Boot-time, sequential reads keep the catalog store unloaded.
+      known.set(connectorId, await getConnectorManifest(connectorId).catch(() => null));
+    }
+  }
+  return [...known].map(([connectorId, manifest]) => ({ connectorId, manifest }));
+}
+
 export async function resolveNekoBrowserSurfaceControllerOptions({
   env = process.env,
   getBrowserSurfaceLeaseStore = getDefaultBrowserSurfaceLeaseStore,
   createBrowserSurfaceAllocator = (options: { baseUrl: string }) => new NekoSurfaceAllocatorClient(options),
+  listKnownConnectorManifests = listKnownConnectorManifestsForBrowserSurfaces,
+}: {
+  env?: NodeJS.ProcessEnv;
+  getBrowserSurfaceLeaseStore?: typeof getDefaultBrowserSurfaceLeaseStore;
+  createBrowserSurfaceAllocator?: (options: { baseUrl: string }) => NekoSurfaceAllocatorClient;
+  listKnownConnectorManifests?: () => Promise<readonly { connectorId: string; manifest: unknown }[]>;
 } = {}) {
   const runtimeConfig = parseNekoBrowserSurfaceRuntimeConfig(env);
+  const { manifestManagedConnectors } = runtimeConfig;
   const browserSurfaceLeaseStore =
-    runtimeConfig.leaseConfig.managedConnectors.size > 0 ? getBrowserSurfaceLeaseStore() : null;
+    manifestManagedConnectors || runtimeConfig.leaseConfig.managedConnectors.size > 0
+      ? getBrowserSurfaceLeaseStore()
+      : null;
   if (!browserSurfaceLeaseStore) {
     return {} as Record<string, unknown>;
+  }
+  if (manifestManagedConnectors) {
+    for (const { connectorId, manifest } of await listKnownConnectorManifests()) {
+      manifestManagedConnectors.observe(connectorId, manifest as ConnectorManifestLike | null);
+    }
   }
 
   await browserSurfaceLeaseStore.repairStaleSurfaceActiveLeases();
@@ -9067,6 +9993,7 @@ export async function resolveNekoBrowserSurfaceControllerOptions({
   const options: Record<string, unknown> = {
     browserSurfaceLeaseManager,
     browserSurfaceLeaseStore,
+    ...(manifestManagedConnectors ? { browserSurfaceManifestManagedConnectors: manifestManagedConnectors } : {}),
     // Preflight readiness gate: proves the managed n.eko / CDP surface is
     // actually live before the connector child is spawned. Prevents the
     // "ask the human for an OTP and discover the CDP socket was already
@@ -9076,9 +10003,14 @@ export async function resolveNekoBrowserSurfaceControllerOptions({
     // the already-retained surface before dispatch. Leaving this probe on its
     // five-second library default classified any slower semantic CDP command
     // as dead, which triggers destructive surface replacement.
-    browserSurfaceReadinessProbe: createDefaultBrowserSurfaceReadinessProbe(
-      runtimeConfig.dynamic ? { timeoutMs: runtimeConfig.dynamic.readinessTimeoutMs } : {}
-    ),
+    //
+    // Host mode hands the RI the local browser's own DevTools URL. Only the
+    // n.eko CDP proxy serves the window-settle route, so a host surface must
+    // not be required to answer it.
+    browserSurfaceReadinessProbe: createDefaultBrowserSurfaceReadinessProbe({
+      ...(runtimeConfig.dynamic ? { timeoutMs: runtimeConfig.dynamic.readinessTimeoutMs } : {}),
+      ...(runtimeConfig.host ? { requireWindowSettle: false } : {}),
+    }),
   };
 
   if (runtimeConfig.dynamic) {
@@ -9090,6 +10022,35 @@ export async function resolveNekoBrowserSurfaceControllerOptions({
     options.browserSurfaceAllocatorScopeId = runtimeConfig.dynamic.allocatorUrl;
     options.browserSurfaceReadinessTimeoutMs = runtimeConfig.dynamic.readinessTimeoutMs;
     options.browserSurfaceLeaseSweepIntervalMs = runtimeConfig.leaseSweepIntervalMs;
+  }
+
+  if (runtimeConfig.host) {
+    const hostAllocator = createHostBrowserSurfaceAllocator({
+      endpoint: runtimeConfig.host.endpoint,
+      headless: runtimeConfig.host.headless,
+      token: runtimeConfig.host.token,
+    });
+    options.browserSurfaceAllocator = hostAllocator;
+    options.browserSurfaceAllocatorScopeId = runtimeConfig.host.endpoint;
+    options.browserSurfaceReadinessTimeoutMs = DEFAULT_NEKO_READINESS_TIMEOUT_MS;
+    options.browserSurfaceLeaseSweepIntervalMs = runtimeConfig.leaseSweepIntervalMs;
+    options.beforeBrowserSurfaceLeaseEnsure = async (args: {
+      readonly connectionId: string | null;
+      readonly runId: string;
+      readonly surfaceId: string;
+    }) => {
+      hostAllocator.bindRunToSurface({
+        migrateConnectorProfile: args.connectionId ? await isOnlyConnectionOfItsConnector(args.connectionId) : false,
+        runId: args.runId,
+        surfaceId: args.surfaceId,
+      });
+    };
+    options.beforeBrowserSurfaceLeaseRelease = (args: { readonly runId: string }) => {
+      return hostAllocator.releaseRun(args.runId);
+    };
+    options.describeBrowserSurfaceStartFailure = (args: { readonly runId: string }) => {
+      return hostAllocator.lastStartFailure(args.runId);
+    };
   }
 
   return options;
@@ -9114,7 +10075,11 @@ export function isManagedNekoSurfaceApproved(
     runId,
     interactionId,
     browserSurfaceLeaseManager,
-  }: { runId?: string | null; interactionId?: string | null; browserSurfaceLeaseManager?: unknown } = {}
+  }: {
+    runId?: string | null;
+    interactionId?: string | null;
+    browserSurfaceLeaseManager?: unknown;
+  } = {}
 ) {
   if (!(browserSurfaceLeaseManager && target) || typeof target !== "object") {
     return false;
@@ -9179,7 +10144,13 @@ export function isManagedNekoSurfaceApproved(
 // reader to ignore the message. A genuine fault (owner/connector mismatch,
 // inactive instance, store failure) still reports at warn with its stack.
 function logScheduleRefreshSkip(
-  logger: { debug?: (...args: unknown[]) => void; warn?: (...args: unknown[]) => void } | null | undefined,
+  logger:
+    | {
+        debug?: (...args: unknown[]) => void;
+        warn?: (...args: unknown[]) => void;
+      }
+    | null
+    | undefined,
   schedule: { connector_id?: string; connector_instance_id?: string } | null | undefined,
   err: unknown
 ): void {
@@ -9207,7 +10178,7 @@ function createReferenceSchedulerManager({
   logger,
   runtimeContext,
   schedulerStore = getDefaultSchedulerStore(),
-  connectorPathResolver = resolveDefaultConnectorPath,
+  connectorPathResolver = resolveActiveInstallFirstConnectorPath,
   ownerSubjectId = OWNER_AUTH_DEFAULT_SUBJECT_ID,
   webPushConfig = resolveWebPushConfig(),
   webPushSubscriptionStore = createWebPushSubscriptionStore(),
@@ -9216,7 +10187,12 @@ function createReferenceSchedulerManager({
   controller: Controller;
   connectorEnvironmentPolicy?: ConnectorEnvironmentPolicy;
   logger: LoggerLike;
-  runtimeContext: { rsUrl: string | null; referenceBaseUrl: string | null };
+  runtimeContext: {
+    rsUrl: string | null;
+    referenceBaseUrl: string | null;
+    selfCallRsUrl: string | null;
+    selfCallReferenceBaseUrl: string | null;
+  };
   schedulerStore?: SchedulerStore;
   connectorPathResolver?: (
     connectorId: string,
@@ -9261,7 +10237,12 @@ function createReferenceSchedulerManager({
   }: {
     connectorId: string;
     connectorInstanceId: string;
-  }) => connectionScopedRunEnvResolver({ connectorId, connectorInstanceId, ownerSubjectId });
+  }) =>
+    connectionScopedRunEnvResolver({
+      connectorId,
+      connectorInstanceId,
+      ownerSubjectId,
+    });
 
   async function buildConnectors() {
     const schedules = await Promise.resolve(schedulerStore.listSchedules());
@@ -9295,8 +10276,12 @@ function createReferenceSchedulerManager({
           );
           continue;
         }
-        const connectorPath = await Promise.resolve(
-          connectorPathResolver(connectorId, manifest, { priorityClass: "background" })
+        const connectorPath = await withConnectorLifecycleLock(connectorLifecycleDataDir(), connectorId, () =>
+          Promise.resolve(
+            connectorPathResolver(connectorId, manifest, {
+              priorityClass: "background",
+            })
+          )
         );
         if (!connectorPath) {
           logger?.warn?.({ connector_id: connectorId }, "skipping scheduled connector without runnable implementation");
@@ -9342,7 +10327,11 @@ function createReferenceSchedulerManager({
       ? // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: This protocol transition owns ordered state invariants that must remain local.
         ((async (connectorId: string, opts: Parameters<RunManagedFn>[1]) => {
           const bslm = (
-            controller as unknown as { browserSurfaceLeaseManager: { isManagedConnector: (id: string) => boolean } }
+            controller as unknown as {
+              browserSurfaceLeaseManager: {
+                isManagedConnector: (id: string) => boolean;
+              };
+            }
           ).browserSurfaceLeaseManager;
           if (!bslm.isManagedConnector(connectorId)) {
             return null;
@@ -9411,14 +10400,20 @@ function createReferenceSchedulerManager({
     scheduler = createScheduler({
       connectors,
       ...(connectorEnvironmentPolicy?.approvedBindings.length
-        ? { approvedEnvironmentBindings: connectorEnvironmentPolicy.approvedBindings }
+        ? {
+            approvedEnvironmentBindings: connectorEnvironmentPolicy.approvedBindings,
+          }
         : {}),
       ...(connectorEnvironmentPolicy?.approvedProxyConnectorIds.length
-        ? { approvedProxyConnectorIds: connectorEnvironmentPolicy.approvedProxyConnectorIds }
+        ? {
+            approvedProxyConnectorIds: connectorEnvironmentPolicy.approvedProxyConnectorIds,
+          }
         : {}),
       logger,
-      ...(runtimeContext.rsUrl === null ? {} : { rsUrl: runtimeContext.rsUrl }),
-      ...(runtimeContext.referenceBaseUrl === null ? {} : { referenceBaseUrl: runtimeContext.referenceBaseUrl }),
+      ...(runtimeContext.selfCallRsUrl ? { rsUrl: runtimeContext.selfCallRsUrl } : {}),
+      ...(runtimeContext.selfCallReferenceBaseUrl === null
+        ? {}
+        : { referenceBaseUrl: runtimeContext.selfCallReferenceBaseUrl }),
       admitRunConnection: async ({ connectorId, connectorInstanceId, ownerSubjectId: admittedOwnerSubjectId }) => {
         const namespace = await admitOwnerRunConnection({
           connectorId,
@@ -9510,7 +10505,9 @@ function createReferenceSchedulerManager({
               opts: { limit: number }
             ) => Promise<Record<string, unknown>[] | null | undefined>;
           };
-          const rows = await store.listPendingGapsForConnector(connectorId, { limit: 200 });
+          const rows = await store.listPendingGapsForConnector(connectorId, {
+            limit: 200,
+          });
           const instanceKey = connectorInstanceId || connectorId;
           let count = 0;
           for (const row of rows ?? []) {
@@ -9551,7 +10548,9 @@ function createReferenceSchedulerManager({
             opts: { limit: number }
           ) => Promise<Record<string, unknown>[] | null | undefined>;
         };
-        const rows = await store.listPendingGapsForConnector(connectorId, { limit: 200 });
+        const rows = await store.listPendingGapsForConnector(connectorId, {
+          limit: 200,
+        });
         const instanceKey = connectorInstanceId || connectorId;
         // biome-ignore lint/suspicious/noEvolvingTypes: This runtime-untyped boundary requires staged type narrowing.
         const gaps = [];
@@ -9618,7 +10617,10 @@ function createReferenceSchedulerManager({
           if (!isAttentionHealthRelevant(record, nowIso)) {
             continue;
           }
-          return { key: record.dedupe_key || record.id, reason: record.reason_code };
+          return {
+            key: record.dedupe_key || record.id,
+            reason: record.reason_code,
+          };
         }
         try {
           const routeId = connectorInstanceId || connectorId;
@@ -9891,7 +10893,7 @@ export async function shutdownStorageClose(
 // listeners from the library surface would accumulate on every call and
 // cross-contaminate tests. These handlers fire only when server/index.ts is
 // run directly as `node server/index.ts`.
-if (process.argv[1]?.endsWith("server/index.ts")) {
+if (isMainModule(import.meta.url, process.argv[1])) {
   const cliLogger = buildLogger();
   let shuttingDown = false;
   let pipeWarnEmitted = false;
@@ -9996,7 +10998,11 @@ if (process.argv[1]?.endsWith("server/index.ts")) {
     // re-acquire the WAL writer immediately after this one exits).
     const closeTimeout = (
       srv:
-        | { close?: (cb: () => void) => void; closeAllConnections?: () => void; closeIdleConnections?: () => void }
+        | {
+            close?: (cb: () => void) => void;
+            closeAllConnections?: () => void;
+            closeIdleConnections?: () => void;
+          }
         | null
         | undefined
     ) =>
@@ -10111,7 +11117,10 @@ if (process.argv[1]?.endsWith("server/index.ts")) {
   process.on("SIGTERM", exitOnSignal("SIGTERM"));
   process.on("SIGINT", exitOnSignal("SIGINT"));
 
-  startServer({ logger: cliLogger })
+  startServer({
+    ...(process.env.PDPP_BIND_HOST ? { bindHost: process.env.PDPP_BIND_HOST } : {}),
+    logger: cliLogger,
+  })
     .then((result) => {
       server.asServer = result.asServer;
       server.rsServer = result.rsServer;

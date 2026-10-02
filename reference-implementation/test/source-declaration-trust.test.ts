@@ -5,8 +5,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
 import tls from "node:tls";
-// biome-ignore lint/correctness/noUnresolvedImports: Node and TypeScript resolve this declared runtime dependency.
-import Database from "better-sqlite3";
+import Database from "./helpers/sqlite-driver.ts";
 import { Pool } from "pg";
 import {
   createLiveDeclarationRetrievalDependencies,

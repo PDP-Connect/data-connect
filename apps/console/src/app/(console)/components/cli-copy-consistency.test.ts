@@ -27,7 +27,8 @@ const LEGACY_RUN_TIMELINE = /`pdpp run timeline|>pdpp run timeline/;
 const LEGACY_GRANT_TIMELINE = /`pdpp grant timeline|>pdpp grant timeline/;
 const LEGACY_TRACE_SHOW = /`pdpp trace show|>pdpp trace show/;
 
-// Files in my ownership scope that surface CLI copy.
+// Files in my ownership scope that surface CLI copy. The public site
+// (apps/site) lives outside this repository, so it is not scanned here.
 const SURFACED_FILES = [
   "apps/console/src/app/(console)/syncs/page.tsx",
   "apps/console/src/app/(console)/syncs/[runId]/page.tsx",
@@ -35,15 +36,9 @@ const SURFACED_FILES = [
   "apps/console/src/app/(console)/grants/[grantId]/page.tsx",
   "apps/console/src/app/(console)/audit/page.tsx",
   "apps/console/src/app/(console)/audit/[traceId]/page.tsx",
-  "apps/site/src/app/sandbox/runs/page.tsx",
-  "apps/site/src/app/sandbox/runs/[runId]/page.tsx",
-  "apps/site/src/app/sandbox/grants/page.tsx",
-  "apps/site/src/app/sandbox/grants/[grantId]/page.tsx",
-  "apps/site/src/app/sandbox/traces/page.tsx",
-  "apps/site/src/app/sandbox/traces/[traceId]/page.tsx",
-  "packages/operator-ui/src/components/peek.tsx",
-  "packages/operator-ui/src/components/views/timeline-detail-view.tsx",
-  "apps/site/content/docs/reference-implementation.md",
+  "reference-implementation/vendor/operator-ui/src/components/peek.tsx",
+  "reference-implementation/vendor/operator-ui/src/components/views/timeline-detail-view.tsx",
+  "reference-implementation/README.md",
 ];
 
 // Canonical patterns that must appear in the reference doc.
@@ -82,15 +77,15 @@ test("no surfaced file advertises legacy bare pdpp run/grant/trace aliases", asy
   }
 });
 
-test("reference-implementation.md advertises canonical pdpp ref commands", async () => {
-  const src = await read("apps/site/content/docs/reference-implementation.md");
+test("reference-implementation README advertises canonical pdpp ref commands", async () => {
+  const src = await read("reference-implementation/README.md");
   assert.match(src, CANONICAL_REF_RUN);
   assert.match(src, CANONICAL_REF_GRANT);
   assert.match(src, CANONICAL_REF_TRACE);
 });
 
 test("cli README advertises pdpp ref namespace", async () => {
-  const src = await read("packages/cli/README.md");
+  const src = await read("reference-implementation/vendor/cli/README.md");
   assert.match(src, PDPP_REF_NAMESPACE);
   assert.match(src, PDPP_CONNECT_COMMAND);
 });
@@ -100,13 +95,13 @@ test("cli README advertises pdpp ref namespace", async () => {
 // command got `command not found: pdpp`. The peek + detail surfaces must now
 // also render a zero-install one-shot form (`npx -y @pdpp/cli ref ...`).
 test("peek pane surfaces a zero-install npx invocation", async () => {
-  const src = await read("packages/operator-ui/src/components/peek.tsx");
+  const src = await read("reference-implementation/vendor/operator-ui/src/components/peek.tsx");
   assert.match(src, NO_INSTALL_HELPER, "peek pane must derive the no-install form via the shared helper");
   assert.match(src, PEEK_NO_INSTALL_HOOK, "peek pane must render the no-install form with a stable test hook");
 });
 
 test("timeline detail view surfaces a zero-install npx invocation", async () => {
-  const src = await read("packages/operator-ui/src/components/views/timeline-detail-view.tsx");
+  const src = await read("reference-implementation/vendor/operator-ui/src/components/views/timeline-detail-view.tsx");
   assert.match(src, NO_INSTALL_HELPER);
   assert.match(src, DETAIL_NO_INSTALL_HOOK);
 });

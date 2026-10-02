@@ -45,6 +45,7 @@ import { type ConnectorManifestLike, classifyConnectorIntentModality } from "../
 import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { startServer } from "../server/index.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
+import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
 
 const OWNER_SUBJECT_ID = "owner_local";
 const PROTOCOL_HEADERS = { "X-PDPP-Collector-Protocol": COLLECTOR_PROTOCOL_VERSION };
@@ -94,6 +95,7 @@ async function withServer(fn: (ctx: { asUrl: string; rsUrl: string }) => Promise
     asPort: 0,
     dbPath: ":memory:",
     ownerAuthPassword: "",
+    preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
     quiet: true,
     rsPort: 0,
   })) as StartedServer;

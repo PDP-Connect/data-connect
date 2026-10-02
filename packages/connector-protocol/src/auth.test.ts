@@ -266,5 +266,6 @@ test("the credentials prompt makes no false persistence promise", async () => {
   const message = spy.calls[0]?.message ?? "";
   assert.doesNotMatch(message, /\.env\.local/, "the prompt must not tell the owner to edit .env.local");
   assert.doesNotMatch(message, /persistence/i, "the prompt must not promise persistence it does not provide");
-  assert.match(message, /NOTION_API_TOKEN/, "the prompt must still name what it needs");
+  assert.match(message, /credentials for this run/, "the prompt must say what the interaction supplies");
+  assert.doesNotMatch(message, /NOTION_API_TOKEN/, "the owner-facing message must not show a raw env name");
 });

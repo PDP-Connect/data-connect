@@ -117,7 +117,11 @@ import {
 } from "./browser-surface-selection.ts";
 import { deriveCadenceLateness } from "./cadence-lateness.ts";
 import { mapWithConcurrency as runWithConcurrency } from "./concurrency.ts";
-import { manualUploadSetupFromManifest, staticSecretCredentialCaptureFromManifest } from "./connection-setup-plan.ts";
+import {
+  classifyConnectorIntentModality,
+  manualUploadSetupFromManifest,
+  staticSecretCredentialCaptureFromManifest,
+} from "./connection-setup-plan.ts";
 import {
   type CoverageEvidenceStrategy,
   deriveStreamCoverageCondition,
@@ -7600,7 +7604,10 @@ function manifestHasBrowserBinding(manifest: ConnectorManifest): boolean {
 // `PDPP_NEKO_MANAGED_CONNECTORS` (CSV, canonical-key or raw connector id) is
 // the authoritative source of "which connectors get a leased neko surface"
 // -- reference-implementation/runtime/browser-surface-leases.ts parses the
-// same variable for the allocator/lease-manager side. `PDPP_NEKO_CDP_HTTP_URL`
+// same variable for the allocator/lease-manager side. Host mode uses the same
+// override when present; otherwise every connector whose manifest declares a
+// browser binding gets a host surface, as in ManifestManagedConnectors.
+// `PDPP_NEKO_CDP_HTTP_URL`
 // (single shared static-mode surface) and `PDPP_BROWSER_SURFACE_REMOTE_CDP_URL`
 // (operator-forced pin, docker-compose.yml's "point ALL browser connectors at
 // one remote CDP endpoint" escape hatch) both mean every browser-bound
@@ -7609,9 +7616,19 @@ function manifestHasBrowserBinding(manifest: ConnectorManifest): boolean {
 // runtime/scheduler-readiness.ts and `managedDisplayAvailable` in
 // packages/polyfill-connectors/src/browser-launch.ts, for the same
 // cross-package-import reason documented at scheduler-readiness.ts:143.
-function connectorUsesNekoSurface(connectorId: string, env: NodeJS.ProcessEnv = process.env): boolean {
+function connectorUsesNekoSurface(
+  connectorId: string,
+  manifest: ConnectorManifest,
+  env: NodeJS.ProcessEnv = process.env
+): boolean {
   if (env.PDPP_BROWSER_SURFACE_REMOTE_CDP_URL?.trim() || env.PDPP_NEKO_CDP_HTTP_URL?.trim()) {
     return true;
+  }
+  if (env.PDPP_BROWSER_SURFACE_MODE?.trim() === "host") {
+    const managedConnectorsCsv = env.PDPP_NEKO_MANAGED_CONNECTORS?.trim();
+    if (!managedConnectorsCsv) {
+      return classifyConnectorIntentModality(manifest) === "browser_bound";
+    }
   }
   const managedConnectorsCsv = env.PDPP_NEKO_MANAGED_CONNECTORS?.trim();
   if (!managedConnectorsCsv) {
@@ -7871,7 +7888,7 @@ async function projectConnectorSummaryForInstance(
         })
       : getConnectorAttentionProjection(connectorId, { connectorInstanceId }),
     getConnectorBrowserSurfaceProjection(connectorId, {
-      connectorUsesNekoSurface: connectorUsesNekoSurface(connectorId),
+      connectorUsesNekoSurface: connectorUsesNekoSurface(connectorId, manifest),
       manifestHasBrowserBinding: manifestHasBrowserBinding(manifest),
       profileKey: browserSurfaceProfileKey,
       store: sharedBrowserSurfaceReader,

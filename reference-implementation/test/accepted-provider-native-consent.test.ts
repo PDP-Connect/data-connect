@@ -5,8 +5,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { validateResponse } from "@pdpp/reference-contract";
-// biome-ignore lint/correctness/noUnresolvedImports: Node and TypeScript resolve this declared runtime dependency.
-import Database from "better-sqlite3";
+import Database from "./helpers/sqlite-driver.ts";
 
 import {
   initiateGrant,

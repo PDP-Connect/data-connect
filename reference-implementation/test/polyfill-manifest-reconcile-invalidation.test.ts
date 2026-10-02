@@ -33,6 +33,7 @@ import { closeDb, getDb, initDb } from "../server/db.ts";
 import { reconcilePolyfillManifests } from "../server/polyfill-manifest-reconcile.ts";
 import { ingestRecord as ingestRecordUntyped } from "../server/records.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
+import { installCollectionProfiles, readCollectionProfileFixture } from "./helpers/installed-collection-profiles.ts";
 
 const REGEXP_1 = /seed-flip/;
 const REGEXP_2 = /2 record/;
@@ -1089,5 +1090,50 @@ test(
 
     assert.equal(summary.scanned, 1, "the manifest file was scanned");
     assert.equal(summary.disabled_reason, null, "a real scan carries no disabled_reason");
+  })
+);
+
+test(
+  "reconciliation from the install store repairs a persisted manifest that drifted from the installed profile",
+  withTmpDb(async ({ dir }) => {
+    const installed = readCollectionProfileFixture("gmail") as unknown as Manifest;
+    const { store } = await installCollectionProfiles(join(dir, "installs"), [installed as Record<string, unknown>]);
+    await registerConnector({ ...installed, display_name: "Stale persisted name" });
+
+    const summary = await reconcilePolyfillManifests({
+      enabled: true,
+      installStore: store,
+      log: () => {
+        /* intentionally empty */
+      },
+      referenceFixturesDir: writeManifestsDir(dir, "reference", {}),
+    });
+
+    assert.equal(summary.scanned, 1);
+    assert.equal(summary.updated, 1, "the drifted row is re-registered from the verified install");
+    assert.equal((await getConnectorManifest(installed.connector_id))?.display_name, installed.display_name);
+  })
+);
+
+test(
+  "reconciliation from the install store skips an install whose bytes changed",
+  withTmpDb(async ({ dir }) => {
+    const { records, store } = await installCollectionProfiles(join(dir, "installs"), [
+      readCollectionProfileFixture("gmail"),
+    ]);
+    writeFileSync(join(records[0]?.root ?? "", "dist", "collection-profile.mjs"), "tampered\n");
+
+    const lines: string[] = [];
+    const summary = await reconcilePolyfillManifests({
+      enabled: true,
+      installStore: store,
+      log: (line) => lines.push(line),
+      referenceFixturesDir: writeManifestsDir(dir, "reference", {}),
+    });
+
+    assert.equal(summary.scanned, 1);
+    assert.equal(summary.errors, 1, "an unverified install counts as an error");
+    assert.equal(summary.registered, 0, "an unverified install's manifest is never registered");
+    assert.ok(lines.some((line) => line.includes("skipping unverified install gmail")));
   })
 );

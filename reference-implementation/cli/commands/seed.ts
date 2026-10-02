@@ -8,6 +8,7 @@ import { SUPPORTED_SEED_CONNECTOR_KEYS } from "../../connectors/seed/index.ts";
 import { canonicalConnectorKey } from "../../server/connector-key.ts";
 import { initDb } from "../../server/db.ts";
 import { initPostgresStorage, isPostgresStorageBackend, resolveStorageBackend } from "../../server/postgres-storage.ts";
+import { CONSOLE_OWNER_CLIENT_ID } from "../../server/reference-local-defaults.ts";
 import {
   admitOwnerRunConnection,
   createPostgresConnectorInstanceStore,
@@ -82,7 +83,6 @@ function readDefaultConnectors(): string[] {
 }
 
 const DEFAULT_CONNECTORS = readDefaultConnectors();
-const OWNER_BOOTSTRAP_CLIENT = "pdpp-polyfill-owner-bootstrap";
 
 // A connector manifest, loaded from manifests/<name>.json: only the fields
 // this command actually reads are typed; the manifest is otherwise passed
@@ -384,7 +384,7 @@ interface TokenResponseBody {
 }
 
 async function issueOwnerToken(asUrl: string | true, subjectId: CliFlags["subject"] | string): Promise<string> {
-  const clientId = OWNER_BOOTSTRAP_CLIENT;
+  const clientId = CONSOLE_OWNER_CLIENT_ID;
 
   const deviceRes = await fetch(`${asUrl}/oauth/device_authorization`, {
     body: new URLSearchParams({ client_id: clientId }).toString(),

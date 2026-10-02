@@ -44,6 +44,7 @@ import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { getDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
+import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
 import { runConsentHandoffRestartFixture } from "./helpers/consent-handoff-restart-fixture.ts";
 import { introspectionHeaders } from "./helpers/introspection.ts";
 import { TEST_RS_INTROSPECTION_CREDENTIALS } from "./helpers/introspection-test-credentials.ts";
@@ -231,6 +232,7 @@ async function withHarness(fn: (ctx: HarnessContext) => Promise<void>): Promise<
     asPort: 0,
     dbPath: ":memory:",
     introspectionCallerCredentials: TEST_RS_INTROSPECTION_CREDENTIALS,
+    preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
     quiet: true,
     rsPort: 0,
   });

@@ -44,6 +44,8 @@ export {
 } from "./dialog.tsx";
 // ─── Endorse (status badge — only home of state color) ────────────
 export { Endorse } from "./endorse.tsx";
+// ─── Tooltip and popover (anchored, non-modal explanations) ───────────────
+export { IcPopover, IcPopoverClose, IcPopoverPopup, IcPopoverTrigger } from "./popover.tsx";
 export type { IcInputProps } from "./input.tsx";
 // ─── Input + Field ────────────────────────────────────────────────
 export { IcField, IcInput } from "./input.tsx";
@@ -82,6 +84,10 @@ export { Sheet, SheetBody, SheetFoot, SheetHead, SheetSerial, SheetTitle } from 
 // ─── Shell frame (RecordroomShell + nav data) ─────────────────────
 export type { NavGroup, NavItem } from "./shell-frame.tsx";
 export { isNavItemActive, NAV_GROUPS, NAV_ITEMS, RecordroomShell } from "./shell-frame.tsx";
+export {
+  DATACONNECT_PRODUCT_IDENTITY,
+} from "./product-identity.ts";
+export type { ProductIdentity } from "./product-identity.ts";
 // ─── Surface wrappers ─────────────────────────────────────────────
 export { HumanSurface, ProtocolSurface } from "./surface.tsx";
 // ─── Table ────────────────────────────────────────────────────────
@@ -96,6 +102,7 @@ export {
 export { Tag } from "./tag.tsx";
 export type { TextColor, TextProps, TextSize } from "./text.tsx";
 export { Text } from "./text.tsx";
+export { IcTooltip, IcTooltipContent, IcTooltipTrigger } from "./tooltip.tsx";
 // ─── Text (shared typographic primitive) ──────────────────────────
 export { textVariants } from "./text-variants.ts";
 // ─── Timestamp ────────────────────────────────────────────────────

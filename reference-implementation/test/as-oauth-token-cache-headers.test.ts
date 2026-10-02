@@ -164,6 +164,26 @@ test("every successful token response branch sets OAuth cache-prevention headers
   );
 });
 
+test("CIMD client assertions use the advertised token endpoint", async () => {
+  let authenticatedTokenEndpoint: string | undefined;
+  const context = {
+    ...contextFor({}),
+    authenticateOAuthTokenClient: async ({ tokenEndpoint }: { tokenEndpoint: string }) => {
+      authenticatedTokenEndpoint = tokenEndpoint;
+      return "https://client.example/metadata";
+    },
+    resolveTokenEndpoint: () => "https://oauth.example/oauth/token",
+  } satisfies MountAsTokenContext;
+
+  const response = await invokeTokenRoute(
+    { code: "code", grant_type: "authorization_code" },
+    context
+  );
+
+  assert.equal(response.statusCode, 200);
+  assert.equal(authenticatedTokenEndpoint, "https://oauth.example/oauth/token");
+});
+
 test("token errors and unsupported grants do not receive token-success headers", async () => {
   const errorResponse = await invokeTokenRoute(
     { client_id: "client", code: "reused", grant_type: "authorization_code" },

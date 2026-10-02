@@ -53,13 +53,13 @@ function assertRejects(clientArg: ClientWithRedirectUris | null, redirectUri: st
 
 test("buildHostedMcpAuthorizationDetailsForConnector: wildcard continuous read detail for the connector", () => {
   const details = buildHostedMcpAuthorizationDetailsForConnector("amazon");
+  // Hosted-MCP clients declare no retention commitment; the server must not invent one.
   assert.deepEqual(details, [
     {
       access_mode: "continuous",
       purpose_code: "https://pdpp.dev/purpose/agent_context",
       purpose_description:
         "Provide selected personal data as context to this MCP client acting as your personal AI agent.",
-      retention: { max_duration: "P90D", on_expiry: "delete" },
       source: { id: "amazon", kind: "connector" },
       streams: [{ name: "*" }],
       type: "https://pdpp.dev/data-access",

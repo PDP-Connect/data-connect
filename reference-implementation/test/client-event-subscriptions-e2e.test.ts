@@ -32,6 +32,7 @@ import { startServer } from "../server/index.ts";
 import { createRequestConnectorInstanceStore } from "../server/request-store-factories.ts";
 import { getSubscriptionSummary } from "../server/stores/client-event-subscription-store.ts";
 import { makeDefaultAccountConnectorInstanceId } from "../server/stores/connector-instance-store.ts";
+import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REFERENCE_IMPL_DIR = join(__dirname, "..");
@@ -359,6 +360,7 @@ test("client event subscriptions deliver signed hints end-to-end", async () => {
   const server = (await startServer({
     asPort: 0,
     dbPath: ":memory:",
+    preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
     quiet: true,
     rsPort: 0,
   })) as TestServer;
@@ -495,6 +497,7 @@ test("grant revoke disables subscription and notifies client", async () => {
   const server = (await startServer({
     asPort: 0,
     dbPath: ":memory:",
+    preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
     quiet: true,
     rsPort: 0,
   })) as TestServer;
@@ -557,6 +560,7 @@ test("trusted owner-agent event subscriptions deliver signed hints and are revok
   const server = (await startServer({
     asPort: 0,
     dbPath: ":memory:",
+    preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
     quiet: true,
     rsPort: 0,
   })) as TestServer;
@@ -577,7 +581,7 @@ test("trusted owner-agent event subscriptions deliver signed hints and are revok
     const ownerSubjectId = "e2e_owner";
     const registered = await registerDynamicClient(
       {
-        client_name: "Daisy owner-agent event subscription e2e",
+        client_name: "Local owner agent event subscription e2e",
         token_endpoint_auth_method: "none",
       },
       { issuer_subject_id: ownerSubjectId }
@@ -685,7 +689,13 @@ test("trusted owner-agent event subscriptions deliver signed hints and are revok
 });
 
 test("discovery: RS protected-resource metadata advertises client_event_subscriptions", async () => {
-  const server = (await startServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 })) as TestServer;
+  const server = (await startServer({
+    asPort: 0,
+    dbPath: ":memory:",
+    preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
+    quiet: true,
+    rsPort: 0,
+  })) as TestServer;
   const rsUrl = `http://localhost:${server.rsPort}`;
   try {
     interface ClientEventSubscriptionsCapability {
@@ -781,7 +791,13 @@ test("discovery: RS protected-resource metadata advertises client_event_subscrip
 });
 
 test("registered owner bearer cannot see client-grant subscriptions", async () => {
-  const server = (await startServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 })) as TestServer;
+  const server = (await startServer({
+    asPort: 0,
+    dbPath: ":memory:",
+    preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
+    quiet: true,
+    rsPort: 0,
+  })) as TestServer;
   const asUrl = `http://localhost:${server.asPort}`;
   const rsUrl = `http://localhost:${server.rsPort}`;
   const receiver = await startReceiver();
@@ -813,7 +829,13 @@ test("registered owner bearer cannot see client-grant subscriptions", async () =
 });
 
 test("unregistered owner bearer cannot use event-subscription endpoints", async () => {
-  const server = (await startServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 })) as TestServer;
+  const server = (await startServer({
+    asPort: 0,
+    dbPath: ":memory:",
+    preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
+    quiet: true,
+    rsPort: 0,
+  })) as TestServer;
   const rsUrl = `http://localhost:${server.rsPort}`;
   try {
     const ownerToken = await issueOwnerTokenRecord("e2e_owner");

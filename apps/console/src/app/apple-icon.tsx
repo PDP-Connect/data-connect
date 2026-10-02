@@ -1,22 +1,19 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { LAUNCH_COLORS } from "@pdpp/brand/launch-colors";
-import { ImageResponse } from "next/og";
+import { LAUNCH_COLORS } from "@pdpp/brand/launch-colors"
+import { ImageResponse } from "next/og"
 
-export const size = { height: 180, width: 180 };
-export const contentType = "image/png";
+export const size = { height: 180, width: 180 }
+export const contentType = "image/png"
 
-// Apple touch icon for the iOS home screen — the console's two-rectangle PDPP
-// mark (matching src/app/icon.svg) on the LIGHT launch background. Without this
-// file iOS defaults the home-screen icon background to white.
+// Apple touch icon for the iOS home screen. DataConnect uses the same light
+// launch background here as the web console. Without this file iOS defaults
+// the home-screen icon background to white.
 //
 // next/og renders via satori, which can't read oklch() or CSS vars, so the
-// glyph colors are the design's sRGB tokens and the plate background is sourced
-// from LAUNCH_COLORS.light (the single source of truth):
-//   oklch(0.52 0.11 45)   → #a05533  (human / copper)
-//   oklch(0.58 0.18 253)  → #2c73d9  (protocol / blue)
-//   oklch(0.985 0.005 85) → #fbfaf5  (counter / paper)
+// background is sourced from LAUNCH_COLORS.light and the mark uses literal
+// sRGB values from the DataConnect artwork.
 export default function AppleIcon() {
   return new ImageResponse(
     <div
@@ -29,12 +26,43 @@ export default function AppleIcon() {
         width: "100%",
       }}
     >
-      <svg aria-label="PDPP mark" height="120" role="img" viewBox="0 0 32 32" width="120">
-        <rect fill="#a05533" height="22" rx="2" width="10" x="5" y="5" />
-        <rect fill="#2c73d9" height="22" rx="2" width="12" x="15" y="5" />
-        <circle cx="18" cy="12" fill="#fbfaf5" r="3" />
+      <svg
+        aria-label="DataConnect mark"
+        height="132"
+        role="img"
+        viewBox="0 0 832 832"
+        width="132"
+      >
+        <defs>
+          <linearGradient
+            id="dataconnect-apple-icon-bg"
+            x1="416"
+            x2="416"
+            y1="0"
+            y2="832"
+            gradientUnits="userSpaceOnUse"
+          >
+            <stop offset="0.100024" stopColor="#304DC0" />
+            <stop offset="0.578171" stopColor="#121265" />
+            <stop offset="0.956731" stopColor="#090939" />
+          </linearGradient>
+        </defs>
+        <rect
+          fill="url(#dataconnect-apple-icon-bg)"
+          height="832"
+          rx="183"
+          width="832"
+        />
+        <path
+          d="M188.955 197.596C309.404 197.596 407.047 295.552 407.047 416C407.047 536.449 309.404 634.405 188.955 634.405C187.051 634.405 185.153 634.38 183.262 634.332C161.511 633.772 150.635 633.492 140.716 623.315C130.797 613.137 130.797 599.88 130.797 573.367V258.633C130.797 232.12 130.797 218.864 140.716 208.686C150.636 198.508 161.511 198.229 183.262 197.669C185.154 197.621 187.051 197.596 188.955 197.596Z"
+          fill="white"
+        />
+        <path
+          d="M657.638 634.404C537.19 634.404 439.547 536.449 439.547 416.001C439.547 295.552 537.19 197.596 657.638 197.596C659.542 197.596 661.44 197.621 663.332 197.669C685.082 198.229 695.958 198.509 705.877 208.686C715.797 218.864 715.797 232.121 715.797 258.634L715.797 573.368C715.797 599.88 715.797 613.136 705.877 623.314C695.957 633.492 685.082 633.772 663.331 634.331C661.44 634.379 659.542 634.404 657.638 634.404Z"
+          fill="white"
+        />
       </svg>
     </div>,
     { ...size }
-  );
+  )
 }

@@ -8,8 +8,13 @@ import { createRequire } from "node:module";
 import { createInterface } from "node:readline";
 
 const require = createRequire(import.meta.url);
-// biome-ignore lint/correctness/noUnresolvedImports: better-sqlite3 is loaded dynamically in this standalone subprocess.
-const Database = require("better-sqlite3");
+// This standalone subprocess cannot import server/sqlite-driver.ts (no TS
+// loader here), so it names the driver package directly. It must stay the
+// SAME package server/sqlite-driver.ts resolves -- this fixture opens the
+// database `initDb` owns, so a different native build would neither read an
+// encrypted vault nor contend for its write lock.
+// biome-ignore lint/correctness/noUnresolvedImports: the driver is loaded dynamically in this standalone subprocess.
+const Database = require("better-sqlite3-multiple-ciphers");
 const dbPath = process.env.PDPP_SUMMARY_LIVE_WRITER_DB_PATH;
 const connectorInstanceId = process.env.PDPP_SUMMARY_LIVE_WRITER_CONNECTOR_INSTANCE_ID;
 const markerPath = process.env.PDPP_TEST_SOURCE_REVISION_INSTALL_LOCK_PATH;

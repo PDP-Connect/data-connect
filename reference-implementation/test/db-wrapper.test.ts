@@ -21,8 +21,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 // biome-ignore lint/correctness/noUnresolvedImports: localized test assertion preserves its explicit contract.
 import type BetterSqlite3 from "better-sqlite3";
-// biome-ignore lint/correctness/noUnresolvedImports: localized test assertion preserves its explicit contract.
-import Database from "better-sqlite3";
+import Database from "./helpers/sqlite-driver.ts";
 import {
   allowUnboundedReadAcknowledged,
   decodeCursor,

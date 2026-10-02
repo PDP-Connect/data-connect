@@ -30,8 +30,7 @@
  * Imports below use RELATIVE paths into each package's source (not the
  * package specifiers), matching this package's build: `tsconfig.build.json`
  * compiles both packages' source directly into this package's own `dist/`
- * tree (the same vendoring already used for the bundled polyfill-connectors
- * connectors), so the published tarball ships self-contained and never
+ * tree, so the published tarball ships self-contained and never
  * depends on either package being installed. A bare package-specifier import
  * would emit unresolvable in the compiled output, since this package's
  * `dist/` ships with no `node_modules`.
@@ -39,9 +38,6 @@
  * Spec: openspec/changes/publish-pdpp-local-collector/design.md §1–§3.
  */
 
-import { existsSync } from "node:fs";
-import { extname } from "node:path";
-import { fileURLToPath } from "node:url";
 import {
   COLLECTOR_RUNTIME_CAPABILITIES as POLYFILL_COLLECTOR_RUNTIME_CAPABILITIES,
   COLLECTOR_PROTOCOL_VERSION as PROTOCOL_VERSION,
@@ -49,6 +45,7 @@ import {
 } from "../../collector-runtime/src/index.ts";
 import type { ConnectorProtocolCapability } from "../../connector-protocol/src/connector-runtime-protocol.ts";
 import type { LocalCollectorDefinition } from "../../connector-protocol/src/collector-definition.ts";
+import { managedConnectorCommand } from "./managed/managed-definitions.ts";
 
 // biome-ignore lint/performance/noBarrelFile: Preserves established ordered async behavior, boundary contract, or dynamic test-harness type where a mechanical rewrite would change semantics.
 export {
@@ -164,11 +161,11 @@ export const COLLECTOR_RUNTIME_CAPABILITIES: RuntimeCapabilityProfile = {
  * Spec: openspec/changes/publish-pdpp-local-collector/design.md §3.
  */
 export interface BundledConnectorEntry {
-  /** Argv to feed `runCollectorConnector` (typically `tsx <entry>`). */
+  /** Argv to feed `runCollectorConnector`: the installed entrypoint module. */
   readonly args: readonly string[];
   /** Bindings the connector requires from the collector runtime profile. */
   readonly bindings: Readonly<Record<string, { required: boolean }>>;
-  /** Default executable; `tsx` for the source-only TypeScript entrypoints. */
+  /** Executable: this process's own Node binary (see `managedConnectorCommand`). */
   readonly command: string;
   /** Stable connector id (matches the manifest + ingest envelope). */
   readonly connector_id: string;
@@ -191,43 +188,12 @@ export interface BundledConnectorEntry {
 /** A frozen, id-keyed registry of runnable bundled connector entries. */
 export type BundledConnectorRegistry = Readonly<Record<string, BundledConnectorEntry>>;
 
-/**
- * Resolve a connector's spawnable entry module from its `entry` directory
- * name, preferring the built `.js` (published tarball / repo `dist/`) and
- * falling back to the `.ts` source (monorepo `tsx` dev). Generic over the id:
- * the runtime hardcodes no connector name here.
- *
- * The connector entry lives under the collector's own `dist/` tree, emitted
- * next to this runner module — the collector build compiles the bundled
- * connectors into `dist/polyfill-connectors/connectors/<entry>/`.
- */
-export function resolveBundledConnectorEntry(entry: string): string {
-  const built = fileURLToPath(new URL(`../../polyfill-connectors/connectors/${entry}/index.js`, import.meta.url));
-  if (existsSync(built)) {
-    return built;
-  }
-  return fileURLToPath(new URL(`../../polyfill-connectors/connectors/${entry}/index.ts`, import.meta.url));
-}
-
-/**
- * `.ts` entrypoints (monorepo dev) still need `tsx` on PATH to transpile on
- * the fly. A built `.js` entrypoint needs no transpiler — spawning it with
- * `process.execPath` (this process's own Node binary) rather than the
- * literal string `"node"` means the child runs under the exact interpreter
- * already running the collector, regardless of what (if anything) a `node`
- * on the spawned child's PATH would resolve to.
- */
-function commandForEntry(entry: string): string {
-  return extname(entry) === ".ts" ? "tsx" : process.execPath;
-}
-
 /** Turn one injected {@link LocalCollectorDefinition} into a runnable entry. */
-function toBundledEntry(definition: LocalCollectorDefinition): BundledConnectorEntry {
-  const resolvedEntry = resolveBundledConnectorEntry(definition.entry);
+function toBundledEntry(definition: LocalCollectorDefinition, entrypoint: string): BundledConnectorEntry {
   return Object.freeze({
     connector_id: definition.connector_id,
-    command: commandForEntry(resolvedEntry),
-    args: Object.freeze([resolvedEntry]) as readonly string[],
+    command: managedConnectorCommand(entrypoint),
+    args: Object.freeze([entrypoint]) as readonly string[],
     bindings: definition.bindings,
     protocol_capabilities: Object.freeze([
       ...definition.protocol_capabilities,
@@ -254,18 +220,28 @@ function toBundledEntry(definition: LocalCollectorDefinition): BundledConnectorE
  *
  * This is the runtime's whole knowledge of "which connectors can run": it is
  * empty until a composition root passes definitions in. The published
- * collector's `bin` injects `LOCAL_COLLECTOR_DEFINITIONS` from
- * `@pdpp/polyfill-connectors/collectors`; tests inject their own set.
+ * collector's `bin` injects the definitions it holds a Collection Profile pin
+ * for; tests inject their own set.
+ *
+ * `entrypoints` maps each `connector_id` to the absolute path of its installed
+ * entrypoint module (see `managedEntrypointIndex`). The runtime does not
+ * locate connector code itself; a definition without an entrypoint is a
+ * composition error, not a connector to skip.
  */
 export function createBundledConnectorRegistry(
-  definitions: readonly LocalCollectorDefinition[]
+  definitions: readonly LocalCollectorDefinition[],
+  entrypoints: ReadonlyMap<string, string>
 ): BundledConnectorRegistry {
   const registry: Record<string, BundledConnectorEntry> = {};
   for (const definition of definitions) {
     if (registry[definition.connector_id]) {
       throw new Error(`duplicate local collector definition for connector_id "${definition.connector_id}"`);
     }
-    registry[definition.connector_id] = toBundledEntry(definition);
+    const entrypoint = entrypoints.get(definition.connector_id);
+    if (entrypoint === undefined) {
+      throw new Error(`no installed entrypoint was supplied for connector_id "${definition.connector_id}"`);
+    }
+    registry[definition.connector_id] = toBundledEntry(definition, entrypoint);
   }
   return Object.freeze(registry);
 }

@@ -152,6 +152,7 @@ test("viewport wire normalizes before validating so fractional dimensions never 
 
 interface MakeLeaseManagerOptions {
   connectorId?: string;
+  hostCdp?: boolean;
   initialActiveLease?: boolean;
   profileKey?: string;
   runId?: string;
@@ -163,6 +164,7 @@ interface MakeLeaseManagerOptions {
 
 function makeLeaseManager({
   connectorId = "chatgpt",
+  hostCdp = false,
   profileKey = "profile_dynamic_1",
   runId = "run_dynamic_1",
   surfaceHealth = "ready",
@@ -191,10 +193,10 @@ function makeLeaseManager({
     initialSurfaces: [
       {
         backend: "neko",
-        cdp_url: "http://neko:9222",
+        cdp_url: hostCdp ? "http://127.0.0.1:9222" : "http://neko:9222",
         connector_id: connectorId,
         profile_key: profileKey,
-        stream_base_url: "http://10.88.0.4:6080/_ref/browser-surfaces/surface_dynamic_1",
+        stream_base_url: hostCdp ? "" : "http://10.88.0.4:6080/_ref/browser-surfaces/surface_dynamic_1",
         surface_id: "surface_dynamic_1",
         ...(surfaceSubjectId ? { surface_subject_id: surfaceSubjectId } : {}),
         ...(withSettleEndpoint ? { window_settle_endpoint: "http://neko:9222/pdpp/window-settle" } : {}),
@@ -270,6 +272,20 @@ async function fetchJson(url: string, opts: RequestInit = {}): Promise<FetchJson
     body = text;
   }
   return { body, headers: resp.headers, status: resp.status };
+}
+
+async function ownerSessionCookie(asUrl: string, password: string): Promise<string> {
+  const response = await fetch(`${asUrl}/owner/login`, {
+    body: JSON.stringify({ password, return_to: "/" }),
+    headers: { "Content-Type": "application/json" },
+    method: "POST",
+    redirect: "manual",
+  });
+  const cookie = (response.headers.getSetCookie?.() ?? [])
+    .find((value) => value.startsWith("pdpp_owner_session="))
+    ?.split(";", 1)[0];
+  assert.ok(cookie, "owner login should issue a session cookie");
+  return cookie;
 }
 
 function presentationAttachmentCookie(response: Response): string {
@@ -360,12 +376,15 @@ interface PendingInteractionEvent extends TimelineEvent {
 async function waitForPendingInteraction(
   asUrl: string,
   runId: string,
-  timeoutMs = 5000
+  timeoutMs = 5000,
+  cookie?: string
 ): Promise<PendingInteractionEvent> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     // biome-ignore lint/performance/noAwaitInLoops: Sequential test setup and assertion order is intentional.
-    const { body } = await fetchJson(`${asUrl}/_ref/runs/${encodeURIComponent(runId)}/timeline`);
+    const { body } = await fetchJson(`${asUrl}/_ref/runs/${encodeURIComponent(runId)}/timeline`, {
+      ...(cookie ? { headers: { Cookie: cookie } } : {}),
+    });
     const timeline = body as Partial<TimelineBody> | null;
     if (timeline && Array.isArray(timeline.data)) {
       const required = timeline.data.find((event) => event.event_type === "run.interaction_required");
@@ -737,8 +756,10 @@ interface HarnessOptions extends Record<string, unknown> {
   manifestName?: string;
   nekoProxyAutoLogin?: unknown;
   nekoWindowSettleProbe?: (endpoint: string) => Promise<unknown>;
+  ownerAuthPassword?: string;
   registerTarget?: boolean;
   streamingClearTimeout?: (timer: unknown) => void;
+  streamingCompanionFactory?: StartServerOptions["streamingCompanionFactory"];
   streamingLogger?: unknown;
   streamingNow?: () => number;
   streamingSessionStore?: unknown;
@@ -856,13 +877,17 @@ async function withHarness(options: HarnessOptions | null, fn: (ctx: HarnessCont
     isNekoProxyTargetApproved: harnessOptions.isNekoProxyTargetApproved,
     makeStreamingBrowserSessionId: harnessOptions.makeStreamingBrowserSessionId,
     nekoProxyAutoLogin: harnessOptions.nekoProxyAutoLogin,
+    ...(harnessOptions.ownerAuthPassword ? { ownerAuthPassword: harnessOptions.ownerAuthPassword } : {}),
     nekoWindowSettleProbe:
       harnessOptions.nekoWindowSettleProbe ??
       (async () => ({ json: async () => ({ height: 900, settled: true, width: 1440 }), ok: true })),
     quiet: true,
     rsPort: 0,
     streamingClearTimeout: harnessOptions.streamingClearTimeout,
-    streamingCompanionFactory,
+    streamingCompanionFactory:
+      harnessOptions.streamingCompanionFactory === undefined
+        ? streamingCompanionFactory
+        : (harnessOptions.streamingCompanionFactory as NonNullable<StartServerOptions["streamingCompanionFactory"]>),
     streamingLogger: harnessOptions.streamingLogger,
     streamingNow: harnessOptions.streamingNow,
     streamingSessionStore: harnessOptions.streamingSessionStore,
@@ -961,16 +986,19 @@ async function withExpiredPresentation(
   );
 }
 
-async function startRun(asUrl: string, connectorId: string): Promise<StartedRun> {
-  const r = await fetch(`${asUrl}/_ref/connectors/${encodeURIComponent(connectorId)}/run`, { method: "POST" });
+async function startRun(asUrl: string, connectorId: string, cookie?: string): Promise<StartedRun> {
+  const r = await fetch(`${asUrl}/_ref/connectors/${encodeURIComponent(connectorId)}/run`, {
+    ...(cookie ? { headers: { Cookie: cookie } } : {}),
+    method: "POST",
+  });
   assert.equal(r.status, 202);
   return (await r.json()) as StartedRun;
 }
 
-async function cancelRun(asUrl: string, runId: string, interactionId: string): Promise<void> {
+async function cancelRun(asUrl: string, runId: string, interactionId: string, cookie?: string): Promise<void> {
   const response = await fetch(`${asUrl}/_ref/runs/${encodeURIComponent(runId)}/interaction`, {
     body: JSON.stringify({ interaction_id: interactionId, status: "cancelled" }),
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...(cookie ? { Cookie: cookie } : {}) },
     method: "POST",
   });
   const responseBody = await response.text();
@@ -1101,6 +1129,292 @@ test("mint accepts a pending manual_action interaction", async () => {
     assert.equal(assistanceCancelled.interaction_id, pending.interaction_id);
     assert.equal(assistanceCancelled.data?.status, "cancelled");
   });
+});
+
+test("mint streams a host lease through its CDP endpoint", async () => {
+  const connectorId = "https://registry.pdpp.dev/connectors/spotify";
+  const leaseManager = makeLeaseManager({ connectorId, hostCdp: true });
+  let seenTarget: Record<string, unknown> | null = null;
+
+  await withHarness(
+    {
+      browserSurfaceLeaseManager: leaseManager,
+      streamingCompanionFactory: ({ browser_session_id, target }) => {
+        seenTarget = target as Record<string, unknown> | null;
+        return createMockCompanion({ browser_session_id });
+      },
+    },
+    async ({ asUrl, spotifyManifest }) => {
+      const started = await startRun(asUrl, spotifyManifest.connector_id);
+      leaseManager.acquire({
+        connectorId,
+        profileKey: "profile_dynamic_1",
+        runId: started.run_id,
+      });
+      const pending = await waitForPendingInteraction(asUrl, started.run_id);
+      try {
+        const mint = await fetchJson(`${asUrl}/_ref/runs/${encodeURIComponent(started.run_id)}/run-interaction-stream`, {
+          body: JSON.stringify({ interaction_id: pending.interaction_id, viewport: { height: 600, width: 800 } }),
+          headers: { "Content-Type": "application/json" },
+          method: "POST",
+        });
+
+        assert.equal(mint.status, 201, JSON.stringify(mint.body));
+        assert.equal((mint.body as MintBody).object, "run_interaction_stream_session");
+        assert.equal(seenTarget?.backend, "cdp");
+        assert.equal(seenTarget?.cdp_http_url, "http://127.0.0.1:9222");
+      } finally {
+        await cancelRun(asUrl, started.run_id, pending.interaction_id);
+      }
+    }
+  );
+});
+
+test("attached host stream loses attach and input authority when its lease is released", async () => {
+  const connectorId = "https://registry.pdpp.dev/connectors/spotify";
+  const leaseManager = makeLeaseManager({ connectorId, hostCdp: true });
+  await withHarness(
+    { browserSurfaceLeaseManager: leaseManager },
+    async ({ asUrl, spotifyManifest, companions }) => {
+      const started = await startRun(asUrl, spotifyManifest.connector_id);
+      const acquired = leaseManager.acquire({ connectorId, profileKey: "profile_dynamic_1", runId: started.run_id });
+      const pending = await waitForPendingInteraction(asUrl, started.run_id);
+      const mint = await fetchJson(`${asUrl}/_ref/runs/${encodeURIComponent(started.run_id)}/run-interaction-stream`, {
+        body: JSON.stringify({ interaction_id: pending.interaction_id }),
+        headers: { "Content-Type": "application/json" },
+        method: "POST",
+      });
+      assert.equal(mint.status, 201);
+      const body = mint.body as MintBody;
+      const abort = new AbortController();
+      const stream = await fetch(`${asUrl}${body.viewer_path}`, { signal: abort.signal });
+      assert.equal(stream.status, 200);
+      const attachmentCookie = presentationAttachmentCookie(stream);
+      assert.ok(stream.body);
+      const reader = stream.body.getReader();
+      await reader.read();
+      const companion = companions.find((entry) => entry.run_id === started.run_id)?.companion;
+      assert.ok(companion);
+
+      leaseManager.release({
+        fencingToken: acquired.lease.fencing_token,
+        leaseId: acquired.lease.lease_id,
+      });
+      const input = await fetchJson(`${asUrl}${body.input_path}`, {
+        body: JSON.stringify({ action: "click", type: "mouse", x: 1, y: 1 }),
+        headers: { "Content-Type": "application/json", Cookie: attachmentCookie },
+        method: "POST",
+      });
+      assert.equal(input.status, 410);
+      assert.equal((input.body as MintBody).error?.code, "browser_surface_lease_lost");
+      assert.equal(companion.inputs.length, 0);
+      assert.equal(companion.started(), false);
+
+      abort.abort();
+      await reader.cancel().catch(() => undefined);
+      await cancelRun(asUrl, started.run_id, pending.interaction_id);
+    }
+  );
+});
+
+test("attached host stream stops frame delivery as soon as its lease is lost, before the next keepalive poll", async () => {
+  // routes.ts polls hostLeaseIsCurrent() every 15s on an open SSE connection
+  // and revalidates on the next attach/input request, but a frame pushed
+  // between a lease release and that poll must not reach the viewer. The
+  // companion's onFrame callback must check the lease itself.
+  const connectorId = "https://registry.pdpp.dev/connectors/spotify";
+  const leaseManager = makeLeaseManager({ connectorId, hostCdp: true });
+  await withHarness(
+    { browserSurfaceLeaseManager: leaseManager },
+    async ({ asUrl, spotifyManifest, companions }) => {
+      const started = await startRun(asUrl, spotifyManifest.connector_id);
+      const acquired = leaseManager.acquire({ connectorId, profileKey: "profile_dynamic_1", runId: started.run_id });
+      const pending = await waitForPendingInteraction(asUrl, started.run_id);
+      const mint = await fetchJson(`${asUrl}/_ref/runs/${encodeURIComponent(started.run_id)}/run-interaction-stream`, {
+        body: JSON.stringify({ interaction_id: pending.interaction_id }),
+        headers: { "Content-Type": "application/json" },
+        method: "POST",
+      });
+      assert.equal(mint.status, 201);
+      const body = mint.body as MintBody;
+
+      const abort = new AbortController();
+      const sseResp = await fetch(`${asUrl}${body.viewer_path}`, { signal: abort.signal });
+      assert.equal(sseResp.status, 200);
+      assert.ok(sseResp.body);
+      const reader = sseResp.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      async function readRawBytes(deadlineMs: number): Promise<void> {
+        const deadline = Date.now() + deadlineMs;
+        while (Date.now() < deadline) {
+          // biome-ignore lint/performance/noAwaitInLoops: Sequential test polling is intentional here.
+          const { value, done } = await reader.read();
+          if (done) {
+            return;
+          }
+          buffer += decoder.decode(value, { stream: true });
+          return;
+        }
+      }
+      await readRawBytes(1000); // prime "attached"
+      assert.ok(buffer.includes("event: attached"));
+      buffer = "";
+
+      const companion = companions.find((entry) => entry.run_id === started.run_id)?.companion;
+      assert.ok(companion);
+
+      leaseManager.release({
+        fencingToken: acquired.lease.fencing_token,
+        leaseId: acquired.lease.lease_id,
+      });
+      // Push a frame immediately after release, well before the 15s keepalive poll.
+      companion.pushFrame({ data: "AFTER_RELEASE", sessionId: 1 });
+
+      const frameDeadline = Date.now() + 2000;
+      let sawError = false;
+      while (Date.now() < frameDeadline) {
+        // biome-ignore lint/performance/noAwaitInLoops: Sequential test polling is intentional here.
+        await readRawBytes(200);
+        if (buffer.includes("event: error") && buffer.includes("browser_surface_lease_lost")) {
+          sawError = true;
+          break;
+        }
+      }
+      assert.ok(sawError, "lease loss must surface an error event instead of forwarding the frame");
+      assert.ok(!buffer.includes("event: frame"), "no frame may be delivered after the lease is lost");
+      assert.ok(!buffer.includes("AFTER_RELEASE"), "the post-release frame payload must never reach the viewer");
+
+      abort.abort();
+      await reader.cancel().catch(() => undefined);
+      await cancelRun(asUrl, started.run_id, pending.interaction_id);
+    }
+  );
+});
+
+test("attached host stream stops out-of-band events as soon as its lease is lost, before any frame or keepalive", async () => {
+  // Frame delivery is gated against hostLeaseIsCurrent(), but url_changed,
+  // popup_opened and popup_closed events are a separate delivery path
+  // (companion.onEvent) and must be gated the same way. Without the check, a
+  // stale viewer can keep receiving the browser's URLs (which can carry
+  // tokens or account data) after the lease has moved on, until a later
+  // frame or the 15s keepalive ends the stream.
+  const connectorId = "https://registry.pdpp.dev/connectors/spotify";
+  const leaseManager = makeLeaseManager({ connectorId, hostCdp: true });
+  await withHarness(
+    { browserSurfaceLeaseManager: leaseManager },
+    async ({ asUrl, spotifyManifest, companions }) => {
+      const started = await startRun(asUrl, spotifyManifest.connector_id);
+      const acquired = leaseManager.acquire({ connectorId, profileKey: "profile_dynamic_1", runId: started.run_id });
+      const pending = await waitForPendingInteraction(asUrl, started.run_id);
+      const mint = await fetchJson(`${asUrl}/_ref/runs/${encodeURIComponent(started.run_id)}/run-interaction-stream`, {
+        body: JSON.stringify({ interaction_id: pending.interaction_id }),
+        headers: { "Content-Type": "application/json" },
+        method: "POST",
+      });
+      assert.equal(mint.status, 201);
+      const body = mint.body as MintBody;
+
+      const abort = new AbortController();
+      const sseResp = await fetch(`${asUrl}${body.viewer_path}`, { signal: abort.signal });
+      assert.equal(sseResp.status, 200);
+      assert.ok(sseResp.body);
+      const reader = sseResp.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      async function readRawBytes(deadlineMs: number): Promise<void> {
+        const deadline = Date.now() + deadlineMs;
+        while (Date.now() < deadline) {
+          // biome-ignore lint/performance/noAwaitInLoops: Sequential test polling is intentional here.
+          const { value, done } = await reader.read();
+          if (done) {
+            return;
+          }
+          buffer += decoder.decode(value, { stream: true });
+          return;
+        }
+      }
+      await readRawBytes(1000); // prime "attached"
+      assert.ok(buffer.includes("event: attached"));
+      buffer = "";
+
+      const companion = companions.find((entry) => entry.run_id === started.run_id)?.companion;
+      assert.ok(companion);
+
+      leaseManager.release({
+        fencingToken: acquired.lease.fencing_token,
+        leaseId: acquired.lease.lease_id,
+      });
+      // Push an out-of-band event immediately after release, before any
+      // frame or the 15s keepalive poll.
+      companion.pushEvent({ kind: "url_changed", url: "https://secret.example/AFTER_RELEASE_URL" });
+
+      const deadline = Date.now() + 2000;
+      let sawError = false;
+      while (Date.now() < deadline) {
+        // biome-ignore lint/performance/noAwaitInLoops: Sequential test polling is intentional here.
+        await readRawBytes(200);
+        if (buffer.includes("event: error") && buffer.includes("browser_surface_lease_lost")) {
+          sawError = true;
+          break;
+        }
+      }
+      assert.ok(sawError, "lease loss must surface an error event instead of forwarding the url_changed event");
+      assert.ok(!buffer.includes("event: url_changed"), "no url_changed event may be delivered after the lease is lost");
+      assert.ok(!buffer.includes("AFTER_RELEASE"), "the post-release URL must never reach the viewer");
+
+      abort.abort();
+      await reader.cancel().catch(() => undefined);
+      await cancelRun(asUrl, started.run_id, pending.interaction_id);
+    }
+  );
+});
+
+test("host stream attachment and input require the owner session that minted it", async () => {
+  const connectorId = "https://registry.pdpp.dev/connectors/spotify";
+  const leaseManager = makeLeaseManager({ connectorId, hostCdp: true });
+  const password = "stream-owner-test-password";
+  await withHarness(
+    { browserSurfaceLeaseManager: leaseManager, ownerAuthPassword: password },
+    async ({ asUrl, spotifyManifest }) => {
+      const ownerCookie = await ownerSessionCookie(asUrl, password);
+      const started = await startRun(asUrl, spotifyManifest.connector_id, ownerCookie);
+      let interactionId = "int_stream_1";
+      try {
+        leaseManager.acquire({ connectorId, profileKey: "profile_dynamic_1", runId: started.run_id });
+        const pending = await waitForPendingInteraction(asUrl, started.run_id, 5000, ownerCookie);
+        interactionId = pending.interaction_id;
+        const mint = await fetchJson(`${asUrl}/_ref/runs/${encodeURIComponent(started.run_id)}/run-interaction-stream`, {
+          body: JSON.stringify({ interaction_id: pending.interaction_id }),
+          headers: { "Content-Type": "application/json", Cookie: ownerCookie },
+          method: "POST",
+        });
+        assert.equal(mint.status, 201, JSON.stringify(mint.body));
+        const body = mint.body as MintBody;
+        const unauthenticatedAttach = await fetch(`${asUrl}${body.viewer_path}`);
+        assert.equal(unauthenticatedAttach.status, 401);
+        await unauthenticatedAttach.body?.cancel();
+
+        const abort = new AbortController();
+        const attached = await fetch(`${asUrl}${body.viewer_path}`, {
+          headers: { Cookie: ownerCookie },
+          signal: abort.signal,
+        });
+        assert.equal(attached.status, 200);
+        const attachmentCookie = presentationAttachmentCookie(attached);
+        const input = await fetchJson(`${asUrl}${body.input_path}`, {
+          body: JSON.stringify({ action: "click", type: "mouse", x: 1, y: 1 }),
+          headers: { "Content-Type": "application/json", Cookie: attachmentCookie },
+          method: "POST",
+        });
+        assert.equal(input.status, 401);
+        abort.abort();
+        await attached.body?.cancel().catch(() => undefined);
+      } finally {
+        await cancelRun(asUrl, started.run_id, interactionId, ownerCookie).catch(() => undefined);
+      }
+    }
+  );
 });
 
 test("mint accepts current no-response browser-surface assistance backed by a leased surface", async () => {
@@ -1544,6 +1858,11 @@ test("mint accepts a pending otp interaction for browser-backed verification flo
   await withHarness({ kind: "otp" }, async ({ asUrl, spotifyManifest }) => {
     const started = await startRun(asUrl, spotifyManifest.connector_id);
     const pending = await waitForPendingInteraction(asUrl, started.run_id);
+    const timeline = (await fetchJson(`${asUrl}/_ref/runs/${encodeURIComponent(started.run_id)}/timeline`))
+      .body as TimelineBody;
+    const assistance = timeline.data.find((event) => event.event_type === "run.assistance_requested");
+    assert.equal(assistance?.data?.owner_action, "provide_value");
+    assert.equal(assistance?.data?.attachments, undefined);
     const mint = await fetchJson(`${asUrl}/_ref/runs/${encodeURIComponent(started.run_id)}/run-interaction-stream`, {
       body: JSON.stringify({
         interaction_id: pending.interaction_id,
@@ -3094,6 +3413,71 @@ test("input POST dispatches to the companion after attach and rejects bad input"
     });
     assert.equal(bad.status, 400);
     assert.equal((bad.body as MintBody).error?.code, "invalid_input");
+
+    const dispatchedBeforeMalformedInput = trackedInputs.length;
+    const oversized = await fetchJson(`${asUrl}${(mint.body as MintBody).input_path}`, {
+      body: JSON.stringify({ text: "x".repeat(16_385), type: "paste" }),
+      headers: { "Content-Type": "application/json", Cookie: attachmentCookie },
+      method: "POST",
+    });
+    assert.equal(oversized.status, 400);
+    assert.equal((oversized.body as MintBody).error?.code, "invalid_input");
+    assert.equal(trackedInputs.length, dispatchedBeforeMalformedInput, "malformed input must not reach the companion");
+
+    // A nested object in place of a declared numeric field must be rejected
+    // before dispatch, not coerced or silently forwarded. Matches the head
+    // probe from the security re-check: {type:"pointer",action:"pointermove",x:{nested:"x"},y:1}.
+    const dispatchedBeforeNestedObjectInput = trackedInputs.length;
+    const nestedObjectField = await fetchJson(`${asUrl}${(mint.body as MintBody).input_path}`, {
+      body: JSON.stringify({ action: "pointermove", type: "pointer", x: { nested: "x" }, y: 1 }),
+      headers: { "Content-Type": "application/json", Cookie: attachmentCookie },
+      method: "POST",
+    });
+    assert.equal(nestedObjectField.status, 400);
+    assert.equal((nestedObjectField.body as MintBody).error?.code, "invalid_input");
+    assert.equal(
+      trackedInputs.length,
+      dispatchedBeforeNestedObjectInput,
+      "a nested-object field value must never reach the companion or CDP"
+    );
+
+    // Same for an array value in place of a declared field.
+    const dispatchedBeforeArrayInput = trackedInputs.length;
+    const arrayField = await fetchJson(`${asUrl}${(mint.body as MintBody).input_path}`, {
+      body: JSON.stringify({ action: "pointermove", type: "pointer", x: [1, 2], y: 1 }),
+      headers: { "Content-Type": "application/json", Cookie: attachmentCookie },
+      method: "POST",
+    });
+    assert.equal(arrayField.status, 400);
+    assert.equal((arrayField.body as MintBody).error?.code, "invalid_input");
+    assert.equal(trackedInputs.length, dispatchedBeforeArrayInput, "an array field value must never reach the companion or CDP");
+
+    // A required field that is simply missing must also be rejected, not
+    // defaulted or forwarded with `undefined`.
+    const dispatchedBeforeMissingRequired = trackedInputs.length;
+    const missingRequired = await fetchJson(`${asUrl}${(mint.body as MintBody).input_path}`, {
+      body: JSON.stringify({ action: "pointerdown", type: "pointer", y: 1 }),
+      headers: { "Content-Type": "application/json", Cookie: attachmentCookie },
+      method: "POST",
+    });
+    assert.equal(missingRequired.status, 400);
+    assert.equal((missingRequired.body as MintBody).error?.code, "invalid_input");
+    assert.equal(
+      trackedInputs.length,
+      dispatchedBeforeMissingRequired,
+      "a missing required field must never reach the companion or CDP"
+    );
+
+    // An action outside the type's closed enum must also be rejected.
+    const dispatchedBeforeBadAction = trackedInputs.length;
+    const badAction = await fetchJson(`${asUrl}${(mint.body as MintBody).input_path}`, {
+      body: JSON.stringify({ action: "pointerexplode", type: "pointer", x: 1, y: 1 }),
+      headers: { "Content-Type": "application/json", Cookie: attachmentCookie },
+      method: "POST",
+    });
+    assert.equal(badAction.status, 400);
+    assert.equal((badAction.body as MintBody).error?.code, "invalid_input");
+    assert.equal(trackedInputs.length, dispatchedBeforeBadAction, "an out-of-enum action must never reach the companion or CDP");
 
     ac.abort();
     try {

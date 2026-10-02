@@ -21,8 +21,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-// biome-ignore lint/correctness/noUnresolvedImports: better-sqlite3 is the real driver under test.
-import Database from "better-sqlite3";
+import Database from "./helpers/sqlite-driver.ts";
 import { createTraceContext, emitSpineEvent } from "../lib/spine.ts";
 import { createAttention, transition } from "../runtime/attention.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";

@@ -21,6 +21,7 @@ import {
   admitOwnerRunConnection,
   makeDefaultAccountConnectorInstanceId,
 } from "../server/stores/connector-instance-store.ts";
+import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
 import {
   TEST_INTROSPECTION_SERVER_OPTS,
   TEST_RS_INTROSPECTION_CREDENTIALS,
@@ -425,6 +426,7 @@ async function withHarness(fn: (ctx: HarnessContext) => Promise<void>) {
     asPort: 0,
     dbPath: ":memory:",
     dynamicClientRegistrationInitialAccessTokens: [TEST_DCR_INITIAL_ACCESS_TOKEN],
+    preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
     quiet: true,
     rsPort: 0,
     ...TEST_INTROSPECTION_SERVER_OPTS,
@@ -457,6 +459,7 @@ async function withNativeHarness(fn: (ctx: NativeHarnessContext) => Promise<void
     asPort: 0,
     dbPath: ":memory:",
     nativeManifest,
+    preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
     quiet: true,
     rsPort: 0,
     ...TEST_INTROSPECTION_SERVER_OPTS,
@@ -890,6 +893,7 @@ async function withMalformedPolyfillClientGrant(fn: (ctx: MalformedPolyfillClien
     asPort: 0,
     dbPath,
     dynamicClientRegistrationInitialAccessTokens: [TEST_DCR_INITIAL_ACCESS_TOKEN],
+    preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
     quiet: true,
     rsPort: 0,
   });
@@ -947,6 +951,7 @@ async function withMalformedPolyfillClientGrant(fn: (ctx: MalformedPolyfillClien
       asPort: server.asPort,
       dbPath,
       dynamicClientRegistrationInitialAccessTokens: [TEST_DCR_INITIAL_ACCESS_TOKEN],
+      preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
       quiet: true,
       rsPort: server.rsPort,
       ...TEST_INTROSPECTION_SERVER_OPTS,
@@ -1204,6 +1209,7 @@ test("PDPP CLI smoke", async (t) => {
       asPort: 0,
       dbPath,
       nativeManifest,
+      preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
       quiet: true,
       rsPort: 0,
       ...TEST_INTROSPECTION_SERVER_OPTS,
@@ -1228,6 +1234,7 @@ test("PDPP CLI smoke", async (t) => {
         asPort: server.asPort,
         dbPath,
         nativeManifest,
+        preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
         quiet: true,
         rsPort: server.rsPort,
         ...TEST_INTROSPECTION_SERVER_OPTS,
@@ -1689,7 +1696,7 @@ test("PDPP CLI smoke", async (t) => {
       assert.equal(result.json.authorization_server, asUrl);
       assert.deepEqual(result.json.authorization_servers_advertised, [asUrl]);
       assert.equal(result.json.authorization_server_advertised, true);
-      assert.equal(result.json.resource_name, "PDPP Reference Provider Resource Server");
+      assert.equal(result.json.resource_name, "DataConnect Resource Server");
       assert.equal(result.json.pdpp_self_export_supported, true);
       assert.equal(result.json.device_authorization_supported, true);
       assert.equal(result.json.pushed_authorization_request_supported, true);
@@ -1698,7 +1705,8 @@ test("PDPP CLI smoke", async (t) => {
       assert.equal(result.json.authorization_endpoint, `${asUrl}/oauth/authorize`);
       assert.deepEqual(result.json.response_types_supported, ["code"]);
       assert.deepEqual(result.json.code_challenge_methods_supported, ["S256"]);
-      assert.deepEqual(result.json.token_endpoint_auth_methods_supported, ["none"]);
+      assert.deepEqual(result.json.token_endpoint_auth_methods_supported, ["none", "private_key_jwt"]);
+      assert.deepEqual(result.json.token_endpoint_auth_signing_alg_values_supported, ["RS256"]);
       const providerConnectCapabilities = result.json.pdpp_provider_connect_capabilities;
       assert.ok(Array.isArray(providerConnectCapabilities));
       assert.ok(providerConnectCapabilities.includes("owner_self_export"));
@@ -3681,6 +3689,7 @@ test("PDPP CLI smoke", async (t) => {
     const server = await startServer({
       asPort: 0,
       dbPath: ":memory:",
+      preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
       quiet: true,
       rsPort: 0,
       ...TEST_INTROSPECTION_SERVER_OPTS,
@@ -7292,6 +7301,7 @@ rl.on('line', (line) => {
       asPort: 0,
       dbPath: ":memory:",
       dynamicClientRegistrationInitialAccessTokens: [TEST_DCR_INITIAL_ACCESS_TOKEN],
+      preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
       quiet: true,
       rsPort: 0,
       ...TEST_INTROSPECTION_SERVER_OPTS,
@@ -7929,6 +7939,7 @@ rl.on('line', (line) => {
         asPort: 0,
         dbPath,
         nativeManifest,
+        preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
         quiet: true,
         rsPort: 0,
         ...TEST_INTROSPECTION_SERVER_OPTS,
@@ -7961,6 +7972,7 @@ rl.on('line', (line) => {
           asPort: server.asPort,
           dbPath,
           nativeManifest,
+          preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
           quiet: true,
           rsPort: server.rsPort,
           ...TEST_INTROSPECTION_SERVER_OPTS,
@@ -8070,6 +8082,7 @@ rl.on('line', (line) => {
             asPort: server.asPort,
             dbPath,
             nativeManifest,
+            preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
             quiet: true,
             rsPort: server.rsPort,
             ...TEST_INTROSPECTION_SERVER_OPTS,
@@ -8115,6 +8128,7 @@ rl.on('line', (line) => {
         asPort: 0,
         dbPath,
         nativeManifest,
+        preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
         quiet: true,
         rsPort: 0,
         ...TEST_INTROSPECTION_SERVER_OPTS,
@@ -8196,6 +8210,7 @@ rl.on('line', (line) => {
               asPort: server.asPort,
               dbPath,
               nativeManifest,
+              preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
               quiet: true,
               rsPort: server.rsPort,
               ...TEST_INTROSPECTION_SERVER_OPTS,
@@ -8241,6 +8256,7 @@ rl.on('line', (line) => {
           asPort: 0,
           dbPath,
           nativeManifest,
+          preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
           quiet: true,
           rsPort: 0,
           ...TEST_INTROSPECTION_SERVER_OPTS,
@@ -8349,6 +8365,7 @@ rl.on('line', (line) => {
         asPort: 0,
         dbPath,
         nativeManifest,
+        preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
         quiet: true,
         rsPort: 0,
         ...TEST_INTROSPECTION_SERVER_OPTS,
@@ -8373,6 +8390,7 @@ rl.on('line', (line) => {
           asPort: server.asPort,
           dbPath,
           nativeManifest,
+          preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
           quiet: true,
           rsPort: server.rsPort,
         });

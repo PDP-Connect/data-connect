@@ -153,38 +153,76 @@ function isQsParser(value: unknown): value is QsParser {
 }
 
 function loadQsParser(): QsParser {
-  const loaded: unknown = createRequire(import.meta.url)("qs");
+  const loaded: unknown = localRequire("qs");
   if (isQsParser(loaded)) {
     return loaded;
   }
   throw new Error("qs must expose parse(value, options)");
 }
 
+const localRequire = createRequire(import.meta.url);
 const qs = loadQsParser();
+
+function canResolvePrettyTransport(): boolean {
+  try {
+    localRequire.resolve("pino-pretty");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function makeLoggerOptions({
+  quiet = false,
+  nodeEnv = process.env.NODE_ENV,
+  prettyTransportAvailable = canResolvePrettyTransport,
+}: {
+  quiet?: boolean;
+  nodeEnv?: string;
+  prettyTransportAvailable?: () => boolean;
+} = {}): Parameters<typeof pino>[0] {
+  if (quiet) {
+    return { level: "silent" };
+  }
+
+  const options: Parameters<typeof pino>[0] = {
+    level: process.env.LOG_LEVEL ?? "info",
+    redact: { censor: "<redacted>", paths: REDACT_PATHS },
+    timestamp: pino.stdTimeFunctions.isoTime,
+  };
+  if (nodeEnv !== "production") {
+    let prettyAvailable = false;
+    try {
+      prettyAvailable = prettyTransportAvailable();
+    } catch {
+      // An optional development formatter must not prevent server startup.
+    }
+    if (prettyAvailable) {
+      options.transport = {
+        options: { colorize: true, translateTime: "SYS:HH:MM:ss.l" },
+        target: "pino-pretty",
+      };
+    }
+  }
+  return options;
+}
 
 /**
  * Build the Pino logger this transport hands to Fastify. Callers pass the
  * `quiet` flag from startServer() so test harnesses that want no stdout
  * chatter get `level: 'silent'` regardless of NODE_ENV.
  */
-export function buildLogger({ quiet = false }: { quiet?: boolean } = {}) {
-  if (quiet) {
-    return pino({ level: "silent" });
-  }
-  const isProd = process.env.NODE_ENV === "production";
-  const options: Parameters<typeof pino>[0] = {
-    level: process.env.LOG_LEVEL ?? "info",
-    redact: { censor: "<redacted>", paths: REDACT_PATHS },
-    timestamp: pino.stdTimeFunctions.isoTime,
-  };
-  if (!isProd) {
-    options.transport = {
-      options: { colorize: true, translateTime: "SYS:HH:MM:ss.l" },
-      target: "pino-pretty",
-    };
-  }
-  return pino(options);
+export function buildLogger({
+  quiet = false,
+  prettyTransportAvailable = canResolvePrettyTransport,
+}: {
+  quiet?: boolean;
+  prettyTransportAvailable?: () => boolean;
+} = {}) {
+  return pino(makeLoggerOptions({ quiet, prettyTransportAvailable }));
 }
+
+export const __test = { makeLoggerOptions };
 
 // Index route manifests by operation id so route registration can pick them
 // up by name and attach the JSON-Schema directly onto the Fastify route.

@@ -53,6 +53,7 @@ export interface AsAuthorizationServerMetadataBuilderInput {
   readonly responseTypesSupported: readonly string[];
   readonly tokenEndpoint: string;
   readonly tokenEndpointAuthMethodsSupported: readonly string[];
+  readonly tokenEndpointAuthSigningAlgValuesSupported: readonly string[];
 }
 
 export interface AsAuthorizationServerMetadataDependencies {
@@ -103,6 +104,7 @@ export function executeAsAuthorizationServerMetadata(
     registrationModesSupported,
     responseTypesSupported: ["code"],
     tokenEndpoint: `${issuer}/oauth/token`,
-    tokenEndpointAuthMethodsSupported: ["none"],
+    tokenEndpointAuthMethodsSupported: ["none", "private_key_jwt"],
+    tokenEndpointAuthSigningAlgValuesSupported: ["RS256"],
   });
 }

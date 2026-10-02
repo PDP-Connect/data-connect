@@ -57,10 +57,13 @@ interface BrowserSurfaceLeaseManagerLike {
 
 interface ResolvedNekoOptions {
   browserSurfaceAllocator?: TestAllocator;
+  browserSurfaceAllocatorScopeId?: string;
   browserSurfaceLeaseManager?: BrowserSurfaceLeaseManagerLike;
   browserSurfaceLeaseStore?: TestLeaseStore;
   browserSurfaceReadinessProbe?: { probe: (input: Record<string, unknown>) => Promise<{ ok: boolean }> };
   browserSurfaceReadinessTimeoutMs?: number;
+  beforeBrowserSurfaceLeaseEnsure?: (args: { readonly runId: string; readonly surfaceId: string }) => void;
+  beforeBrowserSurfaceLeaseRelease?: (args: { readonly runId: string }) => Promise<void>;
 }
 
 interface ResolveNekoBrowserSurfaceControllerOptionsArgs {
@@ -137,6 +140,85 @@ test("n.eko dynamic runtime config builds allocator and readiness controller opt
   assert.deepEqual(allocatorOptions, [{ baseUrl: "http://allocator.test/api" }]);
 });
 
+test("host runtime config builds allocator and run-lifecycle wiring", async () => {
+  const options = await resolveNekoBrowserSurfaceControllerOptions({
+    env: {
+      PDPP_BROWSER_SURFACE_HOST_ENDPOINT: "http://host-agent.test/api",
+      PDPP_BROWSER_SURFACE_HOST_TOKEN: "shared-secret",
+      PDPP_BROWSER_SURFACE_MODE: "host",
+      PDPP_NEKO_MANAGED_CONNECTORS: "connector-a",
+      PDPP_NEKO_SURFACE_CAP: "1",
+    },
+    getBrowserSurfaceLeaseStore: () => createEmptyLeaseStore(),
+  });
+
+  assert.ok(options.browserSurfaceAllocator);
+  assert.equal(options.browserSurfaceAllocatorScopeId, "http://host-agent.test/api");
+  assert.equal(options.browserSurfaceReadinessTimeoutMs, 120_000);
+  assert.equal(typeof options.beforeBrowserSurfaceLeaseEnsure, "function");
+  assert.equal(typeof options.beforeBrowserSurfaceLeaseRelease, "function");
+});
+
+type ListenerType = "open" | "message" | "error" | "close";
+// Standard WebSocket readyState constants, both as static members (for the
+// constructor-type check against the real `typeof WebSocket`) and as
+// instance members (per the WebSocket interface) -- the readiness probe
+// itself never reads readyState, but the real constructor type requires
+// both.
+class FakeWebSocket implements BrowserSurfaceReadinessWebSocketLike {
+  static readonly CONNECTING = 0;
+  static readonly OPEN = 1;
+  static readonly CLOSING = 2;
+  static readonly CLOSED = 3;
+  readonly CONNECTING = 0;
+  readonly OPEN = 1;
+  readonly CLOSING = 2;
+  readonly CLOSED = 3;
+  readonly #listeners: Record<ListenerType, Array<(event: { readonly data?: unknown }) => void>> = {
+    close: [],
+    error: [],
+    message: [],
+    open: [],
+  };
+  constructor() {
+    queueMicrotask(() => this.#emit("open", {}));
+  }
+  addEventListener(type: ListenerType, listener: (event: { readonly data?: unknown }) => void): void {
+    this.#listeners[type].push(listener);
+  }
+  close(): void {
+    /* intentionally empty */
+  }
+  send(raw: string): void {
+    const request = JSON.parse(raw);
+    setTimeout(
+      () =>
+        this.#emit("message", {
+          data: JSON.stringify({ id: request.id, result: { frameTree: { frame: { id: "root" } } } }),
+        }),
+      12
+    );
+  }
+  #emit(type: ListenerType, event: { readonly data?: unknown }): void {
+    for (const listener of this.#listeners[type]) {
+      listener(event);
+    }
+  }
+}
+// The real DOM `WebSocket` type carries dozens of members
+// (binaryType/bufferedAmount/onopen/...) FakeWebSocket does not implement
+// and never needs to -- the readiness probe only calls
+// addEventListener/close/send (BrowserSurfaceReadinessWebSocketLike,
+// implemented above). The two constructor types don't overlap enough for
+// a direct cast, so this substitutes through a same-shape function type
+// (the constructor signature actually invoked: `new (url) => the
+// structural instance shape`) rather than assigning through a bare
+// `unknown` variable, mirroring the two-hop pattern this repo already
+// uses for genuinely disjoint types (records-instance-namespace.test.ts's
+// buildSemanticSearchPlanForGrant).
+type WebSocketConstructorLike = new (url: string) => BrowserSurfaceReadinessWebSocketLike;
+const fakeWebSocketCtor: WebSocketConstructorLike = FakeWebSocket;
+
 interface FakeFetchResponse {
   json: () => Promise<unknown>;
   ok: boolean;
@@ -186,65 +268,6 @@ test("dynamic readiness budget governs the semantic CDP preflight, not the five-
   };
   globalThis.fetch = fakeFetch as typeof fetch;
 
-  type ListenerType = "open" | "message" | "error" | "close";
-  // Standard WebSocket readyState constants, both as static members (for the
-  // constructor-type check against the real `typeof WebSocket`) and as
-  // instance members (per the WebSocket interface) -- the readiness probe
-  // itself never reads readyState, but the real constructor type requires
-  // both.
-  class FakeWebSocket implements BrowserSurfaceReadinessWebSocketLike {
-    static readonly CONNECTING = 0;
-    static readonly OPEN = 1;
-    static readonly CLOSING = 2;
-    static readonly CLOSED = 3;
-    readonly CONNECTING = 0;
-    readonly OPEN = 1;
-    readonly CLOSING = 2;
-    readonly CLOSED = 3;
-    readonly #listeners: Record<ListenerType, Array<(event: { readonly data?: unknown }) => void>> = {
-      close: [],
-      error: [],
-      message: [],
-      open: [],
-    };
-    constructor() {
-      queueMicrotask(() => this.#emit("open", {}));
-    }
-    addEventListener(type: ListenerType, listener: (event: { readonly data?: unknown }) => void): void {
-      this.#listeners[type].push(listener);
-    }
-    close(): void {
-      /* intentionally empty */
-    }
-    send(raw: string): void {
-      const request = JSON.parse(raw);
-      setTimeout(
-        () =>
-          this.#emit("message", {
-            data: JSON.stringify({ id: request.id, result: { frameTree: { frame: { id: "root" } } } }),
-          }),
-        12
-      );
-    }
-    #emit(type: ListenerType, event: { readonly data?: unknown }): void {
-      for (const listener of this.#listeners[type]) {
-        listener(event);
-      }
-    }
-  }
-  // The real DOM `WebSocket` type carries dozens of members
-  // (binaryType/bufferedAmount/onopen/...) FakeWebSocket does not implement
-  // and never needs to -- the readiness probe only calls
-  // addEventListener/close/send (BrowserSurfaceReadinessWebSocketLike,
-  // implemented above). The two constructor types don't overlap enough for
-  // a direct cast, so this substitutes through a same-shape function type
-  // (the constructor signature actually invoked: `new (url) => the
-  // structural instance shape`) rather than assigning through a bare
-  // `unknown` variable, mirroring the two-hop pattern this repo already
-  // uses for genuinely disjoint types (records-instance-namespace.test.ts's
-  // buildSemanticSearchPlanForGrant).
-  type WebSocketConstructorLike = new (url: string) => BrowserSurfaceReadinessWebSocketLike;
-  const fakeWebSocketCtor: WebSocketConstructorLike = FakeWebSocket;
   globalThis.WebSocket = fakeWebSocketCtor as typeof WebSocket;
 
   const options = await resolveNekoBrowserSurfaceControllerOptions({
@@ -268,6 +291,76 @@ test("dynamic readiness budget governs the semantic CDP preflight, not the five-
     surface_id: "surface-1",
   });
   assert.equal(result.ok, true, "a 12ms semantic CDP response must use the configured 25ms dynamic budget");
+});
+
+test("host mode readiness accepts a plain DevTools server; n.eko mode still requires window-settle", async (t) => {
+  const originalFetch = globalThis.fetch;
+  const originalWebSocket = globalThis.WebSocket;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+    globalThis.WebSocket = originalWebSocket;
+  });
+
+  // Models a browser's own DevTools HTTP server: it serves /json/* and
+  // answers 404 for the n.eko proxy's /pdpp/window-settle route.
+  const requestedPaths: string[] = [];
+  // biome-ignore lint/suspicious/useAwait: Async callback preserves the dependency contract and rejection timing.
+  const fakeFetch = async (url: string | Request | URL): Promise<FakeFetchResponse> => {
+    const { pathname } = new URL(String(url));
+    requestedPaths.push(pathname);
+    if (pathname === "/json/version") {
+      return {
+        json: async () => ({ Browser: "Chrome/test", webSocketDebuggerUrl: "ws://127.0.0.1:9333/browser" }),
+        ok: true,
+        status: 200,
+      };
+    }
+    if (pathname === "/json/list") {
+      return {
+        json: async () => [
+          { id: "page-1", type: "page", url: "about:blank", webSocketDebuggerUrl: "ws://127.0.0.1:9333/page-1" },
+        ],
+        ok: true,
+        status: 200,
+      };
+    }
+    return { json: async () => ({}), ok: false, status: 404 };
+  };
+  globalThis.fetch = fakeFetch as typeof fetch;
+  globalThis.WebSocket = fakeWebSocketCtor as typeof WebSocket;
+  const surface = { cdp_url: "http://127.0.0.1:9333", health: "ready", surface_id: "surface-1" };
+
+  const hostOptions = await resolveNekoBrowserSurfaceControllerOptions({
+    env: {
+      PDPP_BROWSER_SURFACE_HOST_ENDPOINT: "http://host-agent.test/api",
+      PDPP_BROWSER_SURFACE_HOST_TOKEN: "shared-secret",
+      PDPP_BROWSER_SURFACE_MODE: "host",
+      PDPP_NEKO_MANAGED_CONNECTORS: "connector-a",
+      PDPP_NEKO_SURFACE_CAP: "1",
+    },
+    getBrowserSurfaceLeaseStore: () => createEmptyLeaseStore(),
+  });
+  assert.ok(hostOptions.browserSurfaceReadinessProbe, "host mode must produce a readiness probe");
+  const hostResult = await hostOptions.browserSurfaceReadinessProbe.probe(surface);
+  assert.equal(hostResult.ok, true, "a live host browser is ready without the n.eko window-settle route");
+  assert.deepEqual(requestedPaths, ["/json/version", "/json/list"]);
+
+  const nekoOptions = await resolveNekoBrowserSurfaceControllerOptions({
+    createBrowserSurfaceAllocator: () => ({ ensureSurface: async () => undefined }),
+    env: {
+      PDPP_NEKO_ALLOCATOR_URL: "http://allocator.test/api",
+      PDPP_NEKO_MANAGED_CONNECTORS: "connector-a",
+      PDPP_NEKO_PROFILE_STORAGE_POLICY: "persistent",
+      PDPP_NEKO_PROFILE_STORAGE_ROOT: "/var/lib/pdpp/neko-profiles",
+      PDPP_NEKO_SURFACE_CAP: "2",
+      PDPP_NEKO_SURFACE_MODE: "dynamic",
+    },
+    getBrowserSurfaceLeaseStore: () => createEmptyLeaseStore(),
+  });
+  assert.ok(nekoOptions.browserSurfaceReadinessProbe, "dynamic mode must produce a readiness probe");
+  const nekoResult = await nekoOptions.browserSurfaceReadinessProbe.probe(surface);
+  assert.equal(nekoResult.ok, false);
+  assert.equal((nekoResult as { code?: string }).code, "browser_surface_window_settle_unavailable");
 });
 
 test("n.eko runtime config treats canonical connector URLs as matching short connector ids", async () => {

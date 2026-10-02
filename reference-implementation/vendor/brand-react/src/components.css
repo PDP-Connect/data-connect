@@ -16,6 +16,24 @@
    ═══════════════════════════════════════════════════════════════════════════ */
 
 /* ─── Sheet — the basic paper artifact ─────────────────────────── */
+.pdpp-tooltip,
+.pdpp-popover {
+  max-width: min(22rem, calc(100vw - 2rem));
+  padding: 0.5rem 0.625rem;
+  color: var(--foreground);
+  font-family: var(--font-sans);
+  font-size: 0.75rem;
+  line-height: 1.4;
+  background: var(--card);
+  border: 1px solid var(--border-strong);
+}
+.pdpp-tooltip {
+  pointer-events: none;
+}
+.pdpp-popover {
+  z-index: 20;
+}
+
 .pdpp-sheet {
   background: var(--card);
   border: 1px solid var(--border-strong);

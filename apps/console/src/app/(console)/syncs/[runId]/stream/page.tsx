@@ -4,6 +4,7 @@
 import { buttonVariants } from "@pdpp/brand-react";
 import type { Viewport } from "next";
 import { notFound } from "next/navigation";
+import { ConnectorMark } from "../../../components/connector-mark.tsx";
 import { ServerUnreachable } from "../../../components/server-unreachable.tsx";
 import { ReferenceServerUnreachableError } from "../../../lib/owner-token.ts";
 import {
@@ -14,6 +15,7 @@ import {
   type SpineEvent,
   type TimelineEnvelope,
 } from "../../../lib/ref-client.ts";
+import { listConnectorManifests } from "../../../lib/rs-client.ts";
 import {
   getCurrentBrowserSurfaceAssistance,
   getCurrentRunAssistance,
@@ -242,10 +244,21 @@ export default async function RunInteractionStreamPage({
   const connectorId = getConnectorIdFromTimeline(envelope.events);
   const connectorInstanceId = runStatus?.connector_instance_id ?? getConnectorInstanceIdFromTimeline(envelope.events);
   const connector = await resolveConnectorContext(connectorId, connectorInstanceId);
+  const connectorWithIcon = connector
+    ? {
+        ...connector,
+        icon:
+          (await listConnectorManifests().catch(() => []))
+            .find(
+              (manifest) =>
+                manifest.connector_id === connector.connectorId || manifest.connector_key === connector.connectorId
+            )?.icon ?? null,
+      }
+    : null;
 
   if (!streamableAssistance) {
     return renderNoAssistanceSurface({
-      connector,
+      connector: connectorWithIcon,
       connectorInstanceId,
       currentAssistance,
       envelope,
@@ -256,7 +269,7 @@ export default async function RunInteractionStreamPage({
 
   return (
     <StreamSurface
-      connector={connector}
+      connector={connectorWithIcon}
       interactionId={streamableAssistance.id}
       interactionKind="manual_action"
       interactionMessage={streamableAssistance.message}
@@ -296,7 +309,10 @@ function RunEndedSurface({
     <main className="mx-auto flex min-h-dvh w-full max-w-md flex-col justify-center px-5 py-8">
       <section className={sectionClass}>
         <p className="pdpp-eyebrow text-muted-foreground">run {statusLabel}</p>
-        <h1 className="pdpp-heading mt-3 text-balance text-foreground">{title}</h1>
+        <h1 className="pdpp-heading mt-3 flex items-center gap-2 text-balance text-foreground">
+          {connector ? <ConnectorMark icon={connector.icon} name={subject} /> : null}
+          <span>{title}</span>
+        </h1>
         <p className="mt-3 text-muted-foreground text-sm leading-6">{description}</p>
         <RunDetailLink runId={runId} />
       </section>
@@ -397,8 +413,18 @@ function UnavailableStreamSurface({ connector, runId }: { connector: ConnectorCo
         <p className="pdpp-eyebrow text-muted-foreground">stream unavailable</p>
         <h1 className="pdpp-heading mt-3 text-balance text-foreground">Waiting for a browser surface</h1>
         <p className="mt-3 text-muted-foreground text-sm leading-6">
-          {connector ? `${connector.displayName} needs browser control. ` : "This run needs browser control. "}Keep this
-          page open while the secure browser prepares. The page updates automatically when it is ready.
+          {connector ? (
+            <>
+              <span className="mr-1 inline-flex items-center gap-2 align-middle">
+                <ConnectorMark icon={connector.icon} name={connector.displayName} />
+                {connector.displayName}
+              </span>{" "}
+              needs browser control. Keep this page open while the secure browser prepares. The page updates
+              automatically when it is ready.
+            </>
+          ) : (
+            "This run needs browser control. Keep this page open while the secure browser prepares. The page updates automatically when it is ready."
+          )}
         </p>
         <RunDetailLink runId={runId} />
       </section>

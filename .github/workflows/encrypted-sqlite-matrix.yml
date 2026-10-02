@@ -1,0 +1,93 @@
+name: Encrypted SQLite and sqlite-vec matrix
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/encrypted-sqlite-matrix.yml"
+      - "package-lock.json"
+      - "reference-implementation/package.json"
+      - "reference-implementation/server/db.ts"
+      - "reference-implementation/server/sqlite-encryption.ts"
+      - "reference-implementation/test/sqlite-encryption-vector-matrix.test.mjs"
+  merge_group: {}
+  push:
+    branches:
+      - main
+      - integration/unified-stack
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS arm64
+            runner: macos-15
+            target: aarch64-apple-darwin
+            node_platform: darwin
+            node_arch: arm64
+          - name: macOS x64
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
+            node_platform: darwin
+            node_arch: x64
+          - name: Linux x64
+            runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            node_platform: linux
+            node_arch: x64
+          - name: Windows x64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            node_platform: win32
+            node_arch: x64
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.21.0"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify Node target
+        shell: bash
+        env:
+          EXPECTED_NODE_PLATFORM: ${{ matrix.node_platform }}
+          EXPECTED_NODE_ARCH: ${{ matrix.node_arch }}
+        run: |
+          node -e '
+            const [expectedPlatform, expectedArch] = process.argv.slice(1);
+            if (process.versions.node !== "24.21.0") throw new Error(`expected Node 24.21.0, got ${process.versions.node}`);
+            if (process.platform !== expectedPlatform) throw new Error(`expected ${expectedPlatform}, got ${process.platform}`);
+            if (process.arch !== expectedArch) throw new Error(`expected ${expectedArch}, got ${process.arch}`);
+            console.log(`${process.version} ${process.platform}/${process.arch}`);
+          ' "$EXPECTED_NODE_PLATFORM" "$EXPECTED_NODE_ARCH"
+
+      - name: Run encrypted SQLite verification
+        shell: bash
+        run: |
+          set -o pipefail
+          result=0
+          npm --prefix reference-implementation run test:sqlite-encryption-matrix 2>&1 | tee "$RUNNER_TEMP/encrypted-sqlite-matrix.txt" || result=$?
+          {
+            echo "## ${{ matrix.name }} (${{ matrix.target }})"
+            echo '```text'
+            cat "$RUNNER_TEMP/encrypted-sqlite-matrix.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$result"

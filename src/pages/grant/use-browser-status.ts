@@ -7,6 +7,8 @@ interface BrowserStatus {
   available: boolean
   browser_type: string
   needs_download: boolean
+  reason?: string
+  message?: string
 }
 
 type BrowserSetupStatus = "checking" | "needs_browser" | "downloading" | "ready" | "error"
@@ -81,6 +83,10 @@ export function useBrowserStatus(): BrowserSetupState {
         if (result.available) {
           console.log("Browser available")
           setStatus("ready")
+        } else if (!result.needs_download) {
+          // A browser is present but cannot start; a download would not help.
+          setError(result.message ?? "DataConnect found a browser but cannot start it.")
+          setStatus("error")
         } else {
           console.log("No browser found, waiting for user action")
           setStatus("needs_browser")
@@ -117,6 +123,9 @@ export function useBrowserStatus(): BrowserSetupState {
       if (result.available) {
         console.log("Browser available")
         setStatus("ready")
+      } else if (!result.needs_download) {
+        setError(result.message ?? "DataConnect found a browser but cannot start it.")
+        setStatus("error")
       } else {
         console.log("No browser found, waiting for user action")
         setStatus("needs_browser")

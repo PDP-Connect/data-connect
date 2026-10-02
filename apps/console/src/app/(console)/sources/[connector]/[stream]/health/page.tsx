@@ -7,10 +7,22 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { Fragment } from "react";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
+import { ConnectorMark } from "@/app/(console)/components/connector-mark.tsx";
 import { ServerUnreachable } from "../../../../components/server-unreachable.tsx";
 import { ReferenceServerUnreachableError, ResourceServerHttpError } from "../../../../lib/owner-token.ts";
-import { type FieldHealth, type StreamHealth, streamHealth } from "../../../../lib/rs-client.ts";
-import { connectorInstanceIdForConnection, resolveConnectionForRecordsRoute } from "../../../connection-route.ts";
+import {
+  type ConnectorManifest,
+  type FieldHealth,
+  type StreamHealth,
+  listConnectorManifests,
+  streamHealth,
+} from "../../../../lib/rs-client.ts";
+import {
+  connectorInstanceIdForConnection,
+  resolveConnectionForRecordsRoute,
+  sourceLabelForConnection,
+} from "../../../connection-route.ts";
+import { findManifestForConnectorId } from "../../../lib/relationships.ts";
 
 export const dynamic = "force-dynamic";
 
@@ -39,6 +51,8 @@ export default async function StreamHealthPage({
   let health: StreamHealth;
   let connectorId = routeId;
   let connectionId = routeId;
+  let sourceLabel = routeId;
+  let connectorIcon: ConnectorManifest["icon"] = null;
   try {
     const connection = await resolveConnectionForRecordsRoute(routeId);
     if (!connection) {
@@ -46,10 +60,16 @@ export default async function StreamHealthPage({
     }
     connectorId = connection.connector_id;
     connectionId = connection.connection_id;
-    health = await streamHealth(connectorId, streamName, {
-      connectorInstanceId: connectorInstanceIdForConnection(connection),
-      sampleSize,
-    });
+    sourceLabel = sourceLabelForConnection(connection);
+    const [manifests, streamHealthResult] = await Promise.all([
+      listConnectorManifests().catch(() => []),
+      streamHealth(connectorId, streamName, {
+        connectorInstanceId: connectorInstanceIdForConnection(connection),
+        sampleSize,
+      }),
+    ]);
+    connectorIcon = findManifestForConnectorId(manifests, connectorId)?.icon ?? null;
+    health = streamHealthResult;
   } catch (err) {
     if (err instanceof ReferenceServerUnreachableError) {
       return (
@@ -66,12 +86,27 @@ export default async function StreamHealthPage({
       // pages already handle this; the health view is reachable from the list
       // page's "Stream health →" link, so it must degrade the same calm way
       // instead of crashing to the records segment error boundary.
-      return <StreamHealthUnavailable connectionId={connectionId} streamName={streamName} />;
+      return (
+        <StreamHealthUnavailable
+          connectionId={connectionId}
+          connectorIcon={connectorIcon}
+          sourceLabel={sourceLabel}
+          streamName={streamName}
+        />
+      );
     }
     throw err;
   }
 
-  return <StreamHealthReport connectionId={connectionId} health={health} streamName={streamName} />;
+  return (
+    <StreamHealthReport
+      connectionId={connectionId}
+      connectorIcon={connectorIcon}
+      health={health}
+      sourceLabel={sourceLabel}
+      streamName={streamName}
+    />
+  );
 }
 
 // Success render for the health view. Extracted from the page loader so the
@@ -79,11 +114,15 @@ export default async function StreamHealthPage({
 // render branches live here, in a presentational component.
 function StreamHealthReport({
   connectionId,
+  connectorIcon,
   health,
+  sourceLabel,
   streamName,
 }: {
   connectionId: string;
+  connectorIcon: ConnectorManifest["icon"];
   health: StreamHealth;
+  sourceLabel: string;
   streamName: string;
 }) {
   const { fields, summary, emittedAt, cursorField, cursorRange } = health;
@@ -103,6 +142,12 @@ function StreamHealthReport({
             sample {health.sampled.toLocaleString()} / {health.totalRecords.toLocaleString()}
             {health.limited ? " · sample-based" : ""}
           </>
+        }
+        description={
+          <span className="inline-flex items-center gap-2">
+            <ConnectorMark className="size-5 shrink-0" icon={connectorIcon} name={sourceLabel} />
+            <span>Source {sourceLabel}</span>
+          </span>
         }
         title={
           <>
@@ -236,7 +281,17 @@ function StreamHealthReport({
 // stream-list page's `not available` surface so a retired/renamed stream
 // reached via the "Stream health →" link degrades calmly instead of crashing
 // to the records segment error boundary.
-function StreamHealthUnavailable({ connectionId, streamName }: { connectionId: string; streamName: string }) {
+function StreamHealthUnavailable({
+  connectionId,
+  connectorIcon,
+  sourceLabel,
+  streamName,
+}: {
+  connectionId: string;
+  connectorIcon: ConnectorManifest["icon"];
+  sourceLabel: string;
+  streamName: string;
+}) {
   return (
     <RecordroomShellWithPalette>
       <PageHeader
@@ -246,6 +301,12 @@ function StreamHealthUnavailable({ connectionId, streamName }: { connectionId: s
           { label: streamName },
           { label: "health" },
         ]}
+        description={
+          <span className="inline-flex items-center gap-2">
+            <ConnectorMark className="size-5 shrink-0" icon={connectorIcon} name={sourceLabel} />
+            <span>Source {sourceLabel}</span>
+          </span>
+        }
         title={
           <>
             <code className="font-mono">{streamName}</code>{" "}

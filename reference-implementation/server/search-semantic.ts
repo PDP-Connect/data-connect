@@ -66,6 +66,10 @@ import {
   resolveFanInBindings,
 } from "./connection-identity.ts";
 import { withConnectorInstanceWrite } from "./connector-instance-write-coordinator.ts";
+import {
+  assertConnectorManifestStreamSubsetSync,
+  assertConnectorManifestStreamSubsetWithClient,
+} from "./connector-manifest-write-fence.ts";
 import { getDb } from "./db.ts";
 import { intraOpNumThreadsForWorkLimit, resolveEmbeddingConcurrency } from "./embedding-concurrency.ts";
 import { LocalTransformerExecutor } from "./local-transformer-executor.ts";
@@ -98,7 +102,7 @@ import {
   postgresUpsertSemanticProgress,
 } from "./postgres-search.ts";
 import type { PostgresTransactionClient } from "./postgres-storage.ts";
-import { isPostgresStorageBackend, postgresQuery } from "./postgres-storage.ts";
+import { isPostgresStorageBackend, postgresQuery, withPostgresTransaction } from "./postgres-storage.ts";
 import type { CompiledFilter } from "./record-filters.ts";
 import { compileRequestFilters, passesGrantRecordConstraints, passesRequestFilters } from "./record-filters.ts";
 import { mapSearchFanout } from "./search-fanout.ts";
@@ -2539,6 +2543,7 @@ async function rebuildSemanticIndexForStream({
   progressJob = null,
   existingKeys = null,
   signal = null,
+  manifest,
 }: {
   connectorId: string;
   connectorInstanceId: string;
@@ -2548,6 +2553,7 @@ async function rebuildSemanticIndexForStream({
   progressJob?: SemanticBackfillJob | null;
   existingKeys?: Set<string> | null;
   signal?: AbortSignal | null;
+  manifest: SemanticBackfillManifest;
 }): Promise<number> {
   const usePostgres = isPostgresStorageBackend();
   const index = usePostgres ? null : ensureVectorIndex();
@@ -2620,6 +2626,13 @@ async function rebuildSemanticIndexForStream({
     // writing — a row a concurrent delete/newer-write has since superseded
     // is skipped, not resurrected). Held for O(one page's write), never
     // O(the whole rebuild).
+    if (usePostgres) {
+      await withPostgresTransaction((client) =>
+        assertConnectorManifestStreamSubsetWithClient(client, connectorId, manifest)
+      );
+    } else {
+      assertConnectorManifestStreamSubsetSync(connectorId, manifest);
+    }
     await withConnectorInstanceWrite(connectorInstanceId, async () => {
       if (usePostgres) {
         await postgresSemanticIndexInsertManyGuarded({ connectorId, connectorInstanceId, entries, stream });
@@ -2742,6 +2755,19 @@ interface SemanticBackfillIdentity {
   modelId: string;
 }
 
+async function assertSemanticBackfillManifestCurrent(
+  connectorId: string,
+  manifest: SemanticBackfillManifest
+): Promise<void> {
+  if (isPostgresStorageBackend()) {
+    await withPostgresTransaction((client) =>
+      assertConnectorManifestStreamSubsetWithClient(client, connectorId, manifest)
+    );
+    return;
+  }
+  assertConnectorManifestStreamSubsetSync(connectorId, manifest);
+}
+
 interface SemanticBackfillContext {
   connectorId: string;
   currentIdentity: SemanticBackfillIdentity;
@@ -2749,6 +2775,7 @@ interface SemanticBackfillContext {
   currentModel: string;
   index: SemanticIndex | null;
   log: (message: string) => void;
+  manifest: SemanticBackfillManifest;
   signal: AbortSignal | null;
   usePostgres: boolean;
   vectorIndex: SemanticIndex;
@@ -2994,6 +3021,7 @@ async function rebuildSemanticBackfillInstance({
     recordsToScan,
     signal,
     stream,
+    manifest: context.manifest,
   });
   log(
     `[PDPP] Semantic index rebuild completed for ${connectorId} stream='${stream}' ` +
@@ -3161,6 +3189,7 @@ export async function semanticIndexBackfillForManifest({
     return;
   }
   const connectorId = manifest.connector_id;
+  await assertSemanticBackfillManifestCurrent(connectorId, manifest);
   const connectorInstanceIds = await resolveSemanticBackfillConnectorInstanceIds({ connectorId, manifest });
   await runSequential(connectorInstanceIds, async (connectorInstanceId) => {
     // No connector-instance writer-admission fence around the whole
@@ -3251,6 +3280,7 @@ async function backfillSemanticIndexForConnectorInstance({
           currentModel,
           index,
           log,
+          manifest,
           signal,
           usePostgres,
           vectorIndex,

@@ -3,6 +3,8 @@
 
 import { type CancelRunResult, cancelRunErrorCode, classifyCancelRunResponse } from "./cancel-run-result.ts";
 import {
+  type BrowserProfilePurgeResult,
+  classifyBrowserProfilePurgeResponse,
   classifyDeleteConnectionResponse,
   classifyPauseConnectionResponse,
   classifyReactivateConnectionResponse,
@@ -449,6 +451,18 @@ export async function revokeConnection(connectionId: string): Promise<RevokeConn
   return classifyRevokeConnectionResponse(response.status, body, connectionControlErrorCode(body));
 }
 
+export async function resetConnectionState(connectionId: string): Promise<{ run_id: string }> {
+  const response = await fetchAs(connectionControlPath(connectionId, "/reset-state"), { method: "POST" });
+  const body = await readBody(response);
+  if (!response.ok) throw new Error(describeError(body, `source state reset failed (${response.status})`));
+  const runId =
+    typeof body === "object" && body !== null && "run_id" in body && typeof body.run_id === "string"
+      ? body.run_id
+      : null;
+  if (!runId) throw new Error("Source reset did not start a full sync run.");
+  return { run_id: runId };
+}
+
 /**
  * Owner-reactivate one revoked connection via the owner-session
  * `POST /_ref/connections/:id/reactivate` route. The clean inverse of revoke:
@@ -508,6 +522,19 @@ export async function resumeConnection(connectionId: string): Promise<ResumeConn
  * route. Returns a typed outcome so the console can message each refusal in
  * place rather than via a generic error boundary.
  */
+/**
+ * Retry the saved-browser-session purge for a revoked or deleted connection via
+ * the owner-session `POST /_ref/connections/:id/browser-profile/purge` route.
+ * Used when a delete or revoke reported `profile_purge.status: "failed"`.
+ */
+export async function purgeConnectionBrowserProfile(connectionId: string): Promise<BrowserProfilePurgeResult> {
+  const response = await fetchAs(connectionControlPath(connectionId, "/browser-profile/purge"), {
+    method: "POST",
+  });
+  const body = await readBody(response);
+  return classifyBrowserProfilePurgeResponse(response.status, body, connectionControlErrorCode(body));
+}
+
 export async function deleteConnection(connectionId: string): Promise<DeleteConnectionResult> {
   const response = await fetchAs(connectionControlPath(connectionId, ""), {
     method: "DELETE",

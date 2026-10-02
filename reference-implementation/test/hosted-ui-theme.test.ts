@@ -12,15 +12,15 @@ test("hosted owner UI supports CSS-only dark mode for login and approval pages",
   assert.match(HOSTED_UI_CSS, /color-scheme:\s*dark/);
   assert.match(HOSTED_UI_CSS, /html\[data-theme="dark"\]/);
   assert.match(HOSTED_UI_CSS, /html\[data-theme="system"\]/);
-  assert.match(HOSTED_UI_CSS, /--background:\s*oklch\(0\.16/);
-  assert.match(HOSTED_UI_CSS, /--card:\s*oklch\(0\.205/);
+  assert.match(HOSTED_UI_CSS, /--background:\s*oklch\(0\.17/);
+  assert.match(HOSTED_UI_CSS, /--card:\s*oklch\(0\.21/);
 });
 
 test("hosted owner documents stay framework-free while loading the shared stylesheet", () => {
   const html = renderHostedDocument({
     body: '<section class="hosted-ui-surface" data-surface="human">Sign in</section>',
-    providerName: "PDPP Reference Provider",
-    title: "PDPP Reference Provider - Owner sign-in",
+    providerName: "DataConnect",
+    title: "DataConnect - Owner sign-in",
   });
 
   assert.match(html, /<link rel="stylesheet" href="\/__pdpp\/hosted-ui\.css" \/>/);
@@ -35,9 +35,9 @@ test("hosted owner documents honor the dashboard theme cookie when present", () 
 
   const html = renderHostedDocument({
     body: '<section class="hosted-ui-surface" data-surface="human">Sign in</section>',
-    providerName: "PDPP Reference Provider",
+    providerName: "DataConnect",
     themeChoice: "dark",
-    title: "PDPP Reference Provider - Owner sign-in",
+    title: "DataConnect - Owner sign-in",
   });
 
   assert.match(html, /<html lang="en" data-theme="dark">/);

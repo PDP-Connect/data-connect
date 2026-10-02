@@ -323,7 +323,12 @@ test("W3: the Upcoming projection gets the SAME insertion-point skeleton (mobile
 // EXISTING keyframe (rr-x-row-pending-sweep) — no new token, no new keyframe.
 
 const BRAND_CSS_SRC = readFileSync(
-  fileURLToPath(new URL("../../../../../../packages/pdpp-brand-react/src/components.css", import.meta.url)),
+  fileURLToPath(
+    new URL(
+      "../../../../../../reference-implementation/vendor/brand-react/src/components.css",
+      import.meta.url
+    )
+  ),
   "utf8"
 );
 

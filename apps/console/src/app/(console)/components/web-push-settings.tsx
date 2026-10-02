@@ -247,7 +247,7 @@ function vapidRow(config: WebPushConfig): DiagnosticRow {
 function swRow(swState: "registered" | "absent" | "unknown" | "unsupported"): DiagnosticRow {
   const label = "Service worker registered";
   if (swState === "registered") {
-    return { detail: "The PDPP service worker controls /.", label, state: "ok" };
+    return { detail: "The DataConnect service worker controls /.", label, state: "ok" };
   }
   if (swState === "absent") {
     return { detail: "Not registered yet - use Enable this device.", label, state: "warn" };
@@ -332,7 +332,7 @@ function deviceStatus({
   if (unavailable) {
     return {
       detail: unavailable,
-      title: "This browser cannot receive PDPP notifications.",
+      title: "This browser cannot receive DataConnect notifications.",
     };
   }
   if (permission === "unknown" && swState === "unknown") {
@@ -361,7 +361,7 @@ function deviceStatus({
   }
   if (permission === "granted") {
     return {
-      detail: "Enable this device once so PDPP can send alerts here.",
+      detail: "Enable this device once so DataConnect can send alerts here.",
       title: "Notifications are allowed, but this device is not subscribed.",
     };
   }
@@ -661,7 +661,7 @@ export function WebPushSettings({
         }));
       const response = await fetch("/_ref/web-push/subscriptions", {
         body: JSON.stringify({
-          device_label: "PDPP browser",
+          device_label: "DataConnect browser",
           platform: navigator.platform || null,
           subscription: subscription.toJSON(),
         }),
@@ -750,7 +750,7 @@ export function WebPushSettings({
   // pushManager.subscribe() — installing the PWA does not create a push
   // subscription on its own.
   const caveat =
-    "Mobile browsers may require opening the installed PDPP app before notifications can arrive. Each phone, tablet, and browser profile must be enabled separately.";
+    "Mobile browsers may require opening the installed DataConnect app before notifications can arrive. Each phone, tablet, and browser profile must be enabled separately.";
 
   const [lastSubscription] = subscriptions;
   const matchesThisBrowser = endpoint ? subscriptions.some((s) => s.endpoint === endpoint && !s.revoked_at) : false;

@@ -1,7 +1,7 @@
 {
   "name": "@pdpp/local-collector",
   "version": "0.0.1",
-  "description": "Local collector runtime for PDPP: filesystem-class connectors (Claude Code, Codex, Google Takeout, iMessage, Apple Photos, Google Messages) plus the device-exporter ingest client.",
+  "description": "Local collector runtime for PDPP: installs pinned, signed Collection Profiles for filesystem-class connectors (Claude Code, Codex, Google Takeout, iMessage, Apple Photos) and runs them with the device-exporter ingest client.",
   "keywords": [
     "pdpp",
     "personal-data",
@@ -45,17 +45,22 @@
   ],
   "scripts": {
     "build": "npm run build --workspace=@pdpp/connector-protocol --workspace=@pdpp/collector-runtime && rm -rf dist && tsc -p tsconfig.build.json && tsx scripts/postbuild.ts",
-    "derive:connector-sources": "tsx scripts/write-derived-connector-sources.ts",
     "prepack": "npm run build",
     "pack-install-run": "node --import tsx scripts/pack-install-run.ts",
+    "pin:collection-profiles": "tsx scripts/pin-collection-profiles.ts",
     "test": "tsx scripts/run-tests.ts",
     "validate:package": "tsx scripts/validate-package.ts",
     "verify": "npm test && npm run validate:package && npm run pack-install-run"
   },
   "dependencies": {
+    "@sigstore/bundle": "^5.0.0",
+    "ajv": "^8.20.0",
+    "sigstore": "^5.0.0",
+    "tar": "^7.5.22",
     "zod": "^4.6.5"
   },
   "devDependencies": {
+    "@opendatalabs/data-connectors-tools": "github:PDP-Connect/data-connectors#6c71697a1523926fe8d475cd243a8219ea21aa5b",
     "@pdpp/collector-runtime": "0.0.1",
     "@pdpp/connector-protocol": "0.0.1",
     "playwright": "^1.63.0",

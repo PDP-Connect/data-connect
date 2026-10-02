@@ -23,6 +23,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
+import { ConnectorMark } from "@/app/(console)/components/connector-mark.tsx";
 import { ServerUnreachable } from "../../../components/server-unreachable.tsx";
 import { ReferenceServerUnreachableError } from "../../../lib/owner-token.ts";
 import {
@@ -31,6 +32,7 @@ import {
   getCumulativeClientAccess,
   getGrantPackage,
 } from "../../../lib/ref-client.ts";
+import { listConnectorManifests } from "../../../lib/rs-client.ts";
 import { technicalClientCaption } from "../../client-caption.ts";
 import { revokePackageAction } from "./revoke-action.ts";
 
@@ -57,6 +59,13 @@ export default async function GrantPackageDetailPage({
   const sp = await searchParams;
 
   let pkg: Awaited<ReturnType<typeof getGrantPackage>>;
+  const connectorManifests = await listConnectorManifests().catch(() => []);
+  const connectorIcons = Object.fromEntries(
+    connectorManifests.flatMap((manifest) => [
+      [manifest.connector_id, manifest.icon] as const,
+      ...(manifest.connector_key ? ([[manifest.connector_key, manifest.icon]] as const) : []),
+    ])
+  );
   try {
     pkg = await getGrantPackage(packageId);
   } catch (err) {
@@ -182,7 +191,7 @@ export default async function GrantPackageDetailPage({
           <DataList>
             {pkg.children.map((child) => (
               <li key={child.grant_id}>
-                <ChildRow child={child} />
+                <ChildRow child={child} connectorIcons={connectorIcons} />
               </li>
             ))}
           </DataList>
@@ -258,10 +267,17 @@ export default async function GrantPackageDetailPage({
   );
 }
 
-function ChildRow({ child }: { child: GrantPackageChild }) {
+function ChildRow({
+  child,
+  connectorIcons,
+}: {
+  child: GrantPackageChild;
+  connectorIcons: Readonly<Record<string, import("@pdpp/brand-react").ConnectorIconLike | null | undefined>>;
+}) {
   const grantHref = `/grants/${encodeURIComponent(child.grant_id)}`;
   const sourceLabel = describeSource(child.source);
   const memberStatus = child.member_status === child.grant_status ? null : child.member_status;
+  const connectorId = child.source?.kind === "connector" ? child.source.connector_id ?? child.source.id : null;
   return (
     <Link className="block px-3 py-2.5 transition-colors hover:bg-muted/40" href={grantHref}>
       <div className="flex flex-wrap items-baseline justify-between gap-2">
@@ -277,6 +293,13 @@ function ChildRow({ child }: { child: GrantPackageChild }) {
         </div>
       </div>
       <div className="pdpp-caption mt-1 text-muted-foreground">
+        {connectorId ? (
+          <ConnectorMark
+            className="mr-2 inline-block size-5 align-[-0.2em]"
+            icon={connectorIcons[connectorId]}
+            name={sourceLabel}
+          />
+        ) : null}
         {sourceLabel}
         {child.revoked_at ? (
           <>

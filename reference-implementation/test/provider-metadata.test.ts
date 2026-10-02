@@ -11,6 +11,7 @@ import { createCimdDocument } from "../server/auth.ts";
 import { startServer } from "../server/index.ts";
 import { resolvePublicUrl, resolveSiblingPublicUrl } from "../server/metadata.ts";
 import { PDPP_REFERENCE_REVISION_HEADER } from "../server/reference-revision.ts";
+import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
 
 const TEST_DCR_INITIAL_ACCESS_TOKEN = "pdpp-reference-test-initial-access-token";
 const NORTHSTAR_PROVIDER_ID = "https://northstar.example/pdpp";
@@ -632,6 +633,7 @@ test("owner-agent onboarding rebases to the forwarded public origin and never na
     referenceOrigin: localOrigin,
     rsPort: 0,
     rsPublicUrl: localOrigin,
+    trustedProxies: "127.0.0.1",
     trustedMetadataHosts: "laptop-dev.example",
   });
   const rsUrl = `http://localhost:${server.rsPort}`;
@@ -680,6 +682,7 @@ test("proxied composed metadata rebases localhost defaults to the forwarded publ
     referenceOrigin: localOrigin,
     rsPort: 0,
     rsPublicUrl: localOrigin,
+    trustedProxies: "127.0.0.1",
     trustedMetadataHosts: "laptop-dev.example",
   });
   const asUrl = `http://localhost:${server.asPort}`;
@@ -883,6 +886,7 @@ test("operator-supplied DCR token remains advertised for public metadata", async
     dynamicClientRegistrationInitialAccessTokens: [TEST_DCR_INITIAL_ACCESS_TOKEN],
     quiet: true,
     rsPort: 0,
+    trustedProxies: "127.0.0.1",
     trustedMetadataHosts: publicHost,
   });
   const asUrl = `http://localhost:${server.asPort}`;
@@ -956,6 +960,7 @@ test("provider metadata rejects unconfigured public Host and X-Forwarded-Host va
     dbPath: ":memory:",
     quiet: true,
     rsPort: 0,
+    trustedProxies: "127.0.0.1",
     trustedMetadataHosts: "",
   });
   const asUrl = `http://localhost:${server.asPort}`;
@@ -994,6 +999,7 @@ test("PDPP_TRUSTED_HOSTS permits explicit public host-derived metadata allowlist
       dbPath: ":memory:",
       quiet: true,
       rsPort: 0,
+      trustedProxies: "127.0.0.1",
     });
     const asUrl = `http://localhost:${server.asPort}`;
     const rsUrl = `http://localhost:${server.rsPort}`;
@@ -1055,7 +1061,7 @@ test("provider metadata routes expose current honest capability set", async () =
     const protectedResource = await fetchJson(`${rsUrl}/.well-known/oauth-protected-resource`);
     assert.equal(protectedResource.status, 200);
     assert.equal(protectedResource.body.resource, rsUrl);
-    assert.equal(protectedResource.body.resource_name, "PDPP Reference Provider Resource Server");
+    assert.equal(protectedResource.body.resource_name, "DataConnect Resource Server");
     assert.deepEqual(protectedResource.body.authorization_servers, [asUrl]);
     assert.deepEqual(protectedResource.body.bearer_methods_supported, ["header"]);
     assert.equal(protectedResource.body.pdpp_provider_connect_version, "draft-2026-04-16");
@@ -1083,7 +1089,8 @@ test("provider metadata routes expose current honest capability set", async () =
       "https://pdpp.dev/data-access",
     ]);
     assert.equal(authorizationServer.body.token_endpoint, `${asUrl}/oauth/token`);
-    assert.deepEqual(authorizationServer.body.token_endpoint_auth_methods_supported, ["none"]);
+    assert.deepEqual(authorizationServer.body.token_endpoint_auth_methods_supported, ["none", "private_key_jwt"]);
+    assert.deepEqual(authorizationServer.body.token_endpoint_auth_signing_alg_values_supported, ["RS256"]);
     assert.equal(authorizationServer.body.device_authorization_endpoint, `${asUrl}/oauth/device_authorization`);
     assertDeviceAuthorizationProfiles(authorizationServer.body);
     assert.equal(authorizationServer.body.agent_connect_endpoint, `${asUrl}/agent-connect`);
@@ -1141,6 +1148,7 @@ test("explicit browser-facing public urls drive metadata, device verification, a
     asPort: 0,
     asPublicUrl: publicOrigin,
     dbPath: ":memory:",
+    preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
     quiet: true,
     rsPort: 0,
     rsPublicUrl: publicOrigin,
@@ -1314,6 +1322,7 @@ test("public forwarded host advertises self-registration and rejects bogus beare
     dbPath: ":memory:",
     quiet: true,
     rsPort: 0,
+    trustedProxies: "127.0.0.1",
     trustedMetadataHosts: publicHost,
   });
   const asUrl = `http://localhost:${server.asPort}`;
@@ -1492,6 +1501,7 @@ test("native provider metadata surfaces the native provider name", async () => {
     quiet: true,
     rsPort: 0,
     sourceDeclarationUri,
+    trustedProxies: "127.0.0.1",
     trustedMetadataHosts: "northstar.example.test",
   });
   const asUrl = `http://localhost:${server.asPort}`;

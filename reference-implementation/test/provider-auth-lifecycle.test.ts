@@ -257,12 +257,17 @@ async function withDeploymentEnv<T>(values: Record<string, string>, operation: (
 // so connection-setup-plan.ts's manifest-driven deployment readiness reads
 // ready for test_provider — pass false for a test that specifically wants
 // needs_config (deployment config missing).
+// `trustedProxies` declares which peers may set x-forwarded-* headers. The
+// reachability contract discards those headers from any other peer, so a test
+// that needs a forwarded host to reach the request boundary must declare the
+// loopback address the test client connects from.
 async function withServer(
   exchanger: ProviderAuthExchanger,
   {
     configuredKeys = ["test_provider"],
     deploymentConfigured = true,
-  }: { configuredKeys?: string[]; deploymentConfigured?: boolean },
+    trustedProxies,
+  }: { configuredKeys?: string[]; deploymentConfigured?: boolean; trustedProxies?: string },
   fn: (handles: { asUrl: string; rsUrl: string; server: TestServer }) => Promise<void>
 ): Promise<void> {
   await withDeploymentEnv(deploymentConfigured ? TEST_PROVIDER_DEPLOYMENT_ENV : {}, async () => {
@@ -270,6 +275,7 @@ async function withServer(
       asPort: 0,
       autoEnrollEligibleSchedules: false,
       configuredProviderAuthConnectorKeys: configuredKeys,
+      ...(trustedProxies === undefined ? {} : { trustedProxies }),
       dbPath: ":memory:",
       ownerAuthPassword: "",
       ownerAuthSubjectId: OWNER_SUBJECT_ID,
@@ -452,7 +458,11 @@ test("callback with unrecognized state does not create a connection", async () =
 
 test("callback whose recomputed redirect_uri differs from the one used at initiate is rejected before code exchange", async () => {
   const exchanger = buildTestExchanger();
-  await withServer(exchanger, {}, async ({ asUrl }) => {
+  // Declare the loopback peer this test connects from as a trusted proxy.
+  // Without it the reachability contract discards the spoofed x-forwarded-host
+  // below, the callback recomputes the legitimate redirect_uri, and the
+  // mismatch branch under test is never reached.
+  await withServer(exchanger, { trustedProxies: "127.0.0.1/32,::1/128" }, async ({ asUrl }) => {
     const session = OPEN_SESSION_COOKIE;
     const { body: initBody } = await initiateProviderAuth(asUrl, session, "test_provider");
     assert.equal(initBody.object, "provider_auth_initiate");
@@ -503,6 +513,52 @@ test("callback whose recomputed redirect_uri matches the one used at initiate pr
     assert.equal(status, 201, `expected 201, got ${status}: ${JSON.stringify(body)}`);
     assert.equal(exchanger.calls.exchange.length, 1);
     assert.equal(exchanger.calls.exchange[0]?.redirectUri, initBody.next_step.redirect_uri);
+  });
+});
+
+// A trusted reverse proxy in front of a loopback-bound server (no declared
+// PDPP_REFERENCE_ORIGIN / AS_PUBLIC_URL -- the plain "run it behind nginx/
+// ngrok on localhost" deployment) presents x-forwarded-host on requests it
+// forwards. Nothing about the DEPLOYMENT changes between the owner's
+// initiate call and the provider's callback a few seconds later, but the
+// proxy is not guaranteed to attach identical forwarding headers to both
+// legs (e.g. it forwards x-forwarded-host on the initial page load but the
+// OAuth callback redirect is a fresh connection the proxy handles with a
+// stripped or defaulted header). Both requests come from the same trusted
+// peer and neither is malicious; the recomputed redirect_uri must still bind
+// to what was actually used at initiate.
+test("callback via a trusted proxy without a forwarded-host header still matches the initiate redirect_uri", async () => {
+  const exchanger = buildTestExchanger();
+  await withServer(exchanger, { trustedProxies: "127.0.0.1/32,::1/128" }, async ({ asUrl }) => {
+    const session = OPEN_SESSION_COOKIE;
+    // The initiate request is forwarded through the trusted proxy, presenting
+    // the deployment's real public host.
+    const initWithProxyHeaders = await fetchJson(
+      `${asUrl}/_ref/connectors/test_provider/provider-auth-initiate`,
+      {
+        headers: { "Content-Type": "application/json", Cookie: session, "x-forwarded-host": "vault.local:8443", "x-forwarded-proto": "https" },
+        method: "POST",
+      }
+    );
+    const initiatedRedirectUri = initWithProxyHeaders.body.next_step.redirect_uri;
+    assert.equal(initiatedRedirectUri, "https://vault.local:8443/_ref/provider-auth/callback");
+
+    const stateToken = requiredStateToken(exchanger.calls.initiate[exchanger.calls.initiate.length - 1]?.state);
+
+    // The callback arrives through the same trusted proxy/peer, but this
+    // particular connection did not carry x-forwarded-host (e.g. the proxy's
+    // callback route omits it, or the browser's redirect bypasses the proxy
+    // hop that adds it). The peer is still trusted; nothing forged the
+    // request. The redirect_uri binding recorded at initiate must still hold.
+    const { status, body } = await fetchJson(`${asUrl}/_ref/provider-auth/callback?code=somecode&state=${stateToken}`);
+
+    assert.equal(
+      status,
+      201,
+      `a legitimate callback through a trusted proxy must not be rejected as a redirect_uri mismatch: ${JSON.stringify(body)}`
+    );
+    assert.equal(exchanger.calls.exchange.length, 1, "code exchange must proceed for a stable, legitimate deployment");
+    assert.equal(exchanger.calls.exchange[0]?.redirectUri, initiatedRedirectUri);
   });
 });
 

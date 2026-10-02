@@ -16,10 +16,10 @@
 // + the active-run/lease overlay using the existing status vocabulary.
 
 import assert from "node:assert/strict";
-import { createRequire } from "node:module";
 import test from "node:test";
 import { emitSpineEvent } from "../lib/spine.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
+import { SqliteDriver } from "../server/sqlite-driver.ts";
 import { getConnectorSummaryForRoute } from "../server/ref-control.ts";
 import {
   createResumableRunHistoryBackfillStage,
@@ -33,7 +33,7 @@ const SPINE_EVENTS_STATEMENT_PATTERN = /\bspine_events\b/i;
 // method observes every `db.prepare(...)` call the Proxy cache wrapper
 // (withCachedPrepare, server/db.ts) delegates to, including the
 // cache-miss-only calls a naive per-instance wrap would under-count.
-const BetterSqlite3Database = createRequire(import.meta.url)("better-sqlite3") as {
+const BetterSqlite3Database = SqliteDriver as unknown as {
   readonly prototype: { prepare: (this: unknown, sql: string) => unknown };
 };
 

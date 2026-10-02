@@ -8,8 +8,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-// biome-ignore lint/correctness/noUnresolvedImports: Biome resolver lacks this runtime-supported dependency export shape.
-import Database from "better-sqlite3";
+import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
+import Database from "./helpers/sqlite-driver.ts";
 import { emitSpineEvent, type SpineEventRecord } from "../lib/spine.ts";
 import { runConnector } from "../runtime/index.ts";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
@@ -205,6 +205,7 @@ interface StartServerOptions {
   asPort?: number;
   dbPath?: string;
   dynamicClientRegistrationInitialAccessTokens?: string[];
+  preRegisteredPublicClients?: unknown;
   quiet?: boolean;
   rsPort?: number;
 }
@@ -344,6 +345,7 @@ async function withHarness(fn: (ctx: HarnessContext) => Promise<void>): Promise<
     asPort: 0,
     dbPath: ":memory:",
     dynamicClientRegistrationInitialAccessTokens: [TEST_DCR_INITIAL_ACCESS_TOKEN],
+    preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
     quiet: true,
     rsPort: 0,
   });
@@ -394,6 +396,7 @@ async function withNativeHarness(fn: (ctx: NativeHarnessContext) => Promise<void
   const server = await startServer({
     asPort: 0,
     dbPath: ":memory:",
+    preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
     quiet: true,
     rsPort: 0,
     ...({ nativeManifest } as Record<string, unknown>),
@@ -2016,7 +2019,13 @@ rl.on('line', (line) => {
   });
 
   await t.test("captures per-stream checkpoint commit counts for multi-stream successful runs", async () => {
-    const server = await startServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+    const server = await startServer({
+      asPort: 0,
+      dbPath: ":memory:",
+      preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
+      quiet: true,
+      rsPort: 0,
+    });
     const asUrl = `http://localhost:${server.asPort}`;
     const rsUrl = `http://localhost:${server.rsPort}`;
     const manifest = {
@@ -2154,7 +2163,13 @@ rl.on('line', (line) => {
   });
 
   await t.test("captures partial checkpoint commit failures after DONE(succeeded)", async () => {
-    const server = await startServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+    const server = await startServer({
+      asPort: 0,
+      dbPath: ":memory:",
+      preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
+      quiet: true,
+      rsPort: 0,
+    });
     const asUrl = `http://localhost:${server.asPort}`;
     const manifest = {
       connector_id: "https://registry.pdpp.dev/connectors/event-spine-partial-checkpoint-failure-test",
@@ -4505,6 +4520,69 @@ rl.on('line', (line) => {
             !("connector_id" in event.data),
             `${event.event_type} should use source descriptors instead of raw connector_id`
           );
+        }
+      } finally {
+        rmSync(tmpDir, { force: true, recursive: true });
+      }
+    });
+  });
+
+  await t.test("OTP page advance resolves the interaction before a following DONE", async () => {
+    await withHarness(async ({ asUrl, rsUrl, spotifyManifest }) => {
+      const ownerToken = await issueOwnerToken(asUrl, "u1");
+      const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-event-spine-otp-page-advance-"));
+      try {
+        for (const withLeadingProgress of [false, true]) {
+          const connectorPath = join(tmpDir, `connector-${withLeadingProgress}.mjs`);
+          writeFileSync(
+            connectorPath,
+            `
+import { createInterface } from 'readline';
+const rl = createInterface({ input: process.stdin });
+rl.on('line', (line) => {
+  if (JSON.parse(line).type !== 'START') return;
+  const messages = [];
+  if (${withLeadingProgress}) messages.push({ type: 'PROGRESS', message: 'Signing in' });
+  messages.push({
+    type: 'INTERACTION', request_id: 'chase_otp_${withLeadingProgress}', kind: 'otp', message: 'Enter the code',
+    schema: { type: 'object', properties: { code: { type: 'string' } }, required: ['code'] },
+    timeout_seconds: 0.5
+  });
+  messages.push({
+    type: 'ASSISTANCE_STATUS', assistance_request_id: 'chase_otp_${withLeadingProgress}', status: 'resolved'
+  });
+  messages.push({ type: 'DONE', status: 'succeeded', records_emitted: 0 });
+  process.stdout.write(messages.map((message) => JSON.stringify(message)).join('\\n') + '\\n');
+});
+`,
+            "utf8"
+          );
+
+          // biome-ignore lint/performance/noAwaitInLoops: Each run must finish before the next uses this harness.
+          const result = await runConnector({
+            admitRunConnection: fakeAdmitRunConnection(),
+            collectionMode: "full_refresh",
+            connectorId: spotifyManifest.connector_id,
+            connectorPath,
+            manifest: spotifyManifest,
+            onInteraction: async () =>
+              new Promise(() => {
+                /* intentionally waits for the page to advance */
+              }),
+            ownerToken,
+            rsUrl,
+            state: null,
+          });
+          assert.equal(result.status, "succeeded");
+
+          const { body: runTimeline } = await fetchJson<TraceTimelineBody>(
+            `${asUrl}/_ref/runs/${encodeURIComponent(requirePathSegment(result.run_id, "result.run_id"))}/timeline`
+          );
+          const completed = (runTimeline.data || []).filter(
+            (event) => event.event_type === "run.interaction_completed"
+          );
+          assert.deepEqual(completed.map((event) => event.status), ["success"]);
+          assert.equal((runTimeline.data || []).filter((event) => event.event_type === "run.completed").length, 1);
         }
       } finally {
         rmSync(tmpDir, { force: true, recursive: true });

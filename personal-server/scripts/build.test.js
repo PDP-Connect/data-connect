@@ -1,7 +1,13 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 import assert from "node:assert/strict"
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
+import {
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs"
 import { pathToFileURL } from "node:url"
 import { tmpdir } from "node:os"
 import { basename, dirname, join } from "node:path"
@@ -9,6 +15,7 @@ import { after, describe, it } from "node:test"
 import {
   assertImportsStayInsideDist,
   listProductionDependencyPaths,
+  pruneUnsatisfiableAddons,
   resolveImportOnlyExport,
 } from "./build.js"
 
@@ -256,5 +263,34 @@ describe("artifact boundary", () => {
     assert.throws(() => assertImportsStayInsideDist([file], root), {
       message: /2 import\(s\)/,
     })
+  })
+})
+
+describe("Linux native addon staging", () => {
+  const roots = []
+  after(() => {
+    for (const root of roots) rmSync(root, { recursive: true, force: true })
+  })
+
+  it("prunes foreign-architecture ELF addons and keeps the native one", () => {
+    const root = mkdtempSync(join(tmpdir(), "native-addon-"))
+    roots.push(root)
+    const native = join(root, "linux-x64.node")
+    const foreign = join(root, "linux-arm64.node")
+    for (const addon of [native, foreign]) writeFileSync(addon, "fixture addon\n")
+
+    pruneUnsatisfiableAddons({
+      addons: [native, foreign],
+      distRoot: root,
+      platformName: "linux",
+      hostMachine: "Advanced Micro Devices X86-64",
+      hostLibc: "libc.so.6",
+      machineForAddon: addon =>
+        addon === native ? "Advanced Micro Devices X86-64" : "AArch64",
+      libcForAddon: () => "libc.so.6",
+    })
+
+    assert.equal(existsSync(native), true)
+    assert.equal(existsSync(foreign), false)
   })
 })

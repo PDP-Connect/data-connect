@@ -6,8 +6,8 @@
 // Pure, dependency-free lookup tables extracted from `server/index.js` under
 // the `split-reference-server-by-route-family` pattern. These encode the
 // HTTP-status ↔ error-`type`/`code` contract that EVERY typed-error envelope
-// the public read/MCP surface emits depends on (the envelopes external Claude /
-// Daisy / ChatGPT consume): e.g. `ambiguous_connection → 409`,
+// the public read/MCP surface emits depends on (the envelopes external clients
+// such as Claude and ChatGPT consume): e.g. `ambiguous_connection → 409`,
 // `connection_not_found → 404`, `insufficient_scope → 403`,
 // `cursor_expired → 410`. Kept side-effect-free and closure-free so they are
 // unit-testable in isolation and safe to import anywhere; the impure response
@@ -102,6 +102,8 @@ export const codeToStatus: Readonly<Record<string, number>> = {
   connection_is_grouping_canonical: 409,
   connection_not_found: 404,
   connection_run_active: 409,
+  connector_in_use: 409,
+  connector_run_active: 409,
   connection_tombstoned: 409,
   connector_instance_busy: 503,
   // A revision exists but is not in a state the requested transition allows
