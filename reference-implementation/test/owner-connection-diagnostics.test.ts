@@ -305,6 +305,8 @@ interface DiagnosticsResponseBody {
 interface DetailGapUpsertInput {
   connectorId: string;
   connectorInstanceId: string;
+  lastError?: unknown;
+  lastRunId?: string;
   nextAttemptAfter?: string;
   now?: string;
   reason: string;
@@ -323,11 +325,16 @@ interface DetailGapRecord {
 }
 
 interface ConnectorDetailGapStoreLike {
+  claimPendingGaps: (
+    gapIds: readonly (string | null | undefined)[],
+    options: { leaseExpiresAt?: string | null; leaseId?: string | null; runId?: string | null }
+  ) => Promise<string[]>;
   markGapStatus: (
     gapId: string,
     status: string,
     options?: DetailGapMarkStatusOptions
   ) => Promise<DetailGapRecord | null>;
+  settleLeasedGapRecovered: (lease: { gapId?: unknown; leaseId?: unknown; runId?: unknown }) => Promise<DetailGapRecord | null>;
   upsertPendingGap: (input: DetailGapUpsertInput) => Promise<DetailGapRecord | null>;
 }
 
@@ -704,6 +711,85 @@ test("owner-agent control document advertises inspect_diagnostics as supported w
 // `connector_detail_gaps` rows — no fabricated evidence, no new store.
 
 const RECOVERY_STALL_CADENCE_MS = 6 * 60 * 60 * 1000;
+
+test("owner diagnostics carries a sanitized latest pending gap reason into its stream verdict", async () => {
+  await withServer(async ({ asUrl, rsUrl }) => {
+    const manifest = await registerConnector(asUrl, loadReferenceManifest("spotify"));
+    const connectorKey = canonicalConnectorKey(manifest.connector_id);
+    assert.ok(connectorKey, "expected a canonical connector key");
+    await seedInstance({
+      connectorId: connectorKey,
+      connectorInstanceId: "cin_spotify_gap_reason",
+      displayName: "gap reason connection",
+      sourceBindingKey: "gap-reason@example.com",
+    });
+
+    const gapStore = detailGapStore();
+    const firstGap = await gapStore.upsertPendingGap({
+      connectorId: connectorKey,
+      connectorInstanceId: "cin_spotify_gap_reason",
+      lastError: { class: "qfx_download_failed_9876543210", message: "Timed out for account 1234567890; email owner@example.test" },
+      lastRunId: "run_chase_1",
+      now: "2026-09-28T12:00:00.000Z",
+      reason: "account_1234567890",
+      recordKey: "private-account-key",
+      stream: "tracks",
+    });
+    assert.ok(firstGap);
+    await gapStore.upsertPendingGap({
+      connectorId: connectorKey,
+      connectorInstanceId: "cin_spotify_gap_reason",
+      lastError: { class: "qfx_download_failed_9876543210", message: "Timed out for account 1234567890; email owner@example.test" },
+      lastRunId: "run_chase_2",
+      now: "2026-09-29T12:00:00.000Z",
+      reason: "account_1234567890",
+      recordKey: "private-account-key",
+      stream: "tracks",
+    });
+    const recoveryLease = { gapId: firstGap.gap_id, leaseId: "lease_chase_2", runId: "run_chase_2" };
+    assert.deepEqual(
+      await gapStore.claimPendingGaps([firstGap.gap_id], {
+        leaseExpiresAt: "2026-09-30T12:00:00.000Z",
+        leaseId: recoveryLease.leaseId,
+        runId: recoveryLease.runId,
+      }),
+      [firstGap.gap_id]
+    );
+    assert.ok(await gapStore.settleLeasedGapRecovered(recoveryLease));
+    await gapStore.upsertPendingGap({
+      connectorId: connectorKey,
+      connectorInstanceId: "cin_spotify_gap_reason",
+      lastError: { class: "qfx_download_failed_9876543210", message: "Timed out for account 1234567890; email owner@example.test" },
+      lastRunId: "run_chase_3",
+      now: "2026-09-30T12:00:00.000Z",
+      reason: "account_1234567890",
+      recordKey: "private-account-key",
+      stream: "tracks",
+    });
+
+    const ownerToken = await issueOwnerToken(asUrl);
+    const { status, body: rawBody } = await getDiagnostics(
+      rsUrl,
+      ownerToken,
+      "/v1/owner/connections/cin_spotify_gap_reason/diagnostics"
+    );
+    const body = rawBody as DiagnosticsResponseBody;
+    assert.equal(status, 200);
+    const verdict = body.rendered_verdict as {
+      detail?: { detail_gap_backlog?: { max_attempt_count?: number; pending_other?: number } };
+      streams?: { statement?: string; stream_id?: string }[];
+    };
+    const stream = verdict.streams?.find((row) => row.stream_id === "tracks");
+    assert.ok(stream?.statement, "the diagnostics response includes the tracks verdict");
+    assert.match(stream.statement, /retrieve the missing data/i);
+    assert.match(stream.statement, /a problem occurred/i);
+    assert.match(stream.statement, /timed out/i);
+    assert.doesNotMatch(stream.statement, /failed twice|failed repeatedly/i);
+    assert.doesNotMatch(stream.statement, /1234567890|9876543210|owner@example\.test|private-account-key|gap-reason@example\.com|run_chase_|2026-09-29|tracks/);
+    assert.equal(verdict.detail?.detail_gap_backlog?.pending_other, 1);
+    assert.equal(verdict.detail?.detail_gap_backlog?.max_attempt_count, 3);
+  });
+});
 
 test("2.6 diagnostics answers why_not_now=cooldown for a fully-cooling-down backlog", async () => {
   await withServer(async ({ asUrl, rsUrl }) => {

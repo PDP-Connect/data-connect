@@ -26,6 +26,7 @@ const SOURCE_ROW_MARKER_RE = /data-pdpp-source-row=\{instance\.connectionId \?\?
 const SOURCE_SCOPE_MARKER_RE = /data-pdpp-source-scope=\{instance\.sourceScope\}/g;
 const STREAM_ROW_MARKER_RE =
   /data-connection-id=\{connectionId\}[\s\S]*data-pdpp-stream-row="true"[\s\S]*data-stream-name=\{stream\.name\}/;
+const STREAM_GAP_STATEMENT_RE = /stream\.gapStatement \? <span className="rr-s-stream-subfact">\{stream\.gapStatement\}<\/span>/;
 
 test("SourcesView resets passport-local state when the selected source changes", async () => {
   const src = await readFile(SOURCES_VIEW_FILE, "utf8");
@@ -74,6 +75,11 @@ test("SourcesView emits stable source and stream row markers for acceptance evid
     "mobile and desktop source rows must declare lifecycle scope"
   );
   assert.match(src, STREAM_ROW_MARKER_RE);
+});
+
+test("SourcesView renders an informative gap sentence in the existing stream row", async () => {
+  const src = await readFile(SOURCES_VIEW_FILE, "utf8");
+  assert.match(src, STREAM_GAP_STATEMENT_RE);
 });
 
 const SOURCES_VIEW_CSS_FILE = `${HERE}sources-view.css`;

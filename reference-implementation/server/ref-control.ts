@@ -646,11 +646,12 @@ export interface PendingDetailGapSummary {
    */
   readonly detail_locator?: unknown;
   readonly last_attempt_at?: unknown;
+  readonly last_run_id?: unknown;
+  readonly record_key?: unknown;
   /**
    * Durable `connector_detail_gaps.last_error_json`, as parsed by `rowToGap`.
-   * Optional/`unknown` because only the terminal-gap unfillable-proof read
-   * (`listTerminalGapsForConnector`) populates it; the ordinary pending-gap
-   * projection never needed it before {@link isProvenUnfillableGap}.
+   * The owner verdict reads only its safe class, short message category, and
+   * consecutive same-class count; it never copies arbitrary message text.
    */
   readonly last_error?: unknown;
   readonly next_attempt_after?: unknown;
@@ -6656,6 +6657,8 @@ function buildRenderedVerdictForSummary(input: {
   readonly localDeviceLastIngestAt: string | null;
   readonly manifestStreams: readonly VerdictManifestStreamLike[];
   readonly observedAt: string;
+  readonly pendingGaps: readonly PendingDetailGapSummary[];
+  readonly pendingGapsReadLimit: number;
   readonly refreshPolicy: unknown;
   /**
    * Retained-record count, or `null` when no measurement stands behind it.
@@ -6717,6 +6720,8 @@ function buildRenderedVerdictForSummary(input: {
     acknowledgedLoss: input.acknowledgedLoss,
     attention: structuredAttention,
     manifestStreams: input.manifestStreams,
+    pendingGaps: input.pendingGaps,
+    pendingGapsReadLimit: input.pendingGapsReadLimit,
     progress: progressEvidence,
     refresh,
     report: input.collectionReport,
@@ -7055,6 +7060,8 @@ function synthesizeConnectorSummary(input: ConnectorSummarySynthesisInput): Conn
     localDeviceLastIngestAt: localDeviceProgress?.last_ingest_at ?? null,
     manifestStreams: (manifest.streams ?? []) as VerdictManifestStreamLike[],
     observedAt: nowIso,
+    pendingGaps: detailGaps.gaps,
+    pendingGapsReadLimit: detailGaps.readLimit,
     refreshPolicy,
     retainedRecords: retainedRecordsForVerdict,
     runtimeOk,

@@ -730,6 +730,84 @@ test("toSourceInstanceView surfaces server-owned collection report facts per str
   assert.equal(threads?.collection, null, "streams without collection report facts stay explicitly unavailable");
 });
 
+test("toSourceInstanceView carries the sanitized server gap sentence onto its stream row", async () => {
+  const runtimeModulePath = new URL(
+    "../../../../../../reference-implementation/runtime/connector-verdict-input.ts",
+    import.meta.url
+  ).href;
+  const { synthesizeConnectorVerdict } = await import(runtimeModulePath);
+  const snapshot = {
+    axes: { attention: "none", coverage: "partial", freshness: "fresh", outbox: "idle", remote_surface: "none" },
+    badges: { stale: false, syncing: false },
+    collection_rate: null,
+    conditions: [],
+    coverage_horizons: [],
+    detail_gap_backlog: null,
+    dominant_condition_id: null,
+    ephemeral_browser_runtime: null,
+    forward_disposition: "resumable",
+    last_success_at: null,
+    local_device_outbox_counts: null,
+    next_action: null,
+    next_attempt_at: null,
+    reason_code: null,
+    remote_surface: null,
+    state: "degraded",
+    supporting_condition_ids: [],
+    unknown_reasons: [],
+  };
+  const serverVerdict = synthesizeConnectorVerdict({
+    snapshot,
+    report: [{ collected: 0, considered: 1, coverage_condition: "partial", pending_detail_gaps: 1, stream: "messages" }],
+    manifestStreams: [{ name: "messages" }],
+    pendingGaps: [{
+      last_attempt_at: "2026-09-29T12:00:00.000Z",
+      last_error: {
+        class: "qfx_download_failed_9876543210",
+        consecutive_same_error_count: 2,
+        message: "Timed out for account 1234567890; email owner@example.test",
+      },
+      last_run_id: "run_chase_2",
+      reason: "account_1234567890",
+      record_key: "private-account-key",
+      stream: "messages",
+    }],
+    refresh: null,
+    progress: null,
+  });
+  const view = toSourceInstanceView(
+    summary({
+      rendered_verdict: serverVerdict,
+    })
+  );
+
+  const sentence = view.streams.find((stream) => stream.name === "messages")?.gapStatement ?? "";
+  assert.equal(sentence, "The connector could not retrieve the missing data (a problem occurred; timed out); the next run will retry.");
+  assert.doesNotMatch(sentence, /1234567890|9876543210|owner@example\.test|private-account-key|run_chase_|2026-09-29|failed twice/);
+});
+
+test("toSourceInstanceView omits the generic retry sentence from stream rows", () => {
+  const view = toSourceInstanceView(
+    summary({
+      rendered_verdict: renderedVerdict({
+        streams: [
+          {
+            action_ref: null,
+            collected: 0,
+            considered: 1,
+            coverage: "retryable_gap",
+            disposition: "resumable",
+            statement: "The next run is expected to fill the rest.",
+            stream_id: "messages",
+          },
+        ],
+      }),
+    })
+  );
+
+  assert.equal(view.streams.find((stream) => stream.name === "messages")?.gapStatement, null);
+});
+
 test("toSourceInstanceView surfaces retained stream counts without conflating them with latest collection", () => {
   const view = toSourceInstanceView(
     summary({

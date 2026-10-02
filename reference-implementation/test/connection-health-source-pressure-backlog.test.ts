@@ -99,20 +99,20 @@ test("backlog: only non-source-pressure gaps reports 0 pending", () => {
   assert.equal(rollup.pending_other_is_floor, false);
 });
 
-test("backlog: max_attempt_count is the max across source-pressure gaps", () => {
+test("backlog: max_attempt_count is the max across all pending gaps", () => {
   const rollup = deriveSourcePressureBacklog({
     pendingGaps: [
       gap({ attemptCount: 1 }),
       gap({ attemptCount: 4 }),
       gap({ attemptCount: 2 }),
-      // non-pressure gap with a high attempt count must not contribute
+      // Non-pressure attempts still belong to the visible backlog total.
       gap({ attemptCount: 99, reason: "not_found" }),
     ],
     unreadable: false,
   });
   assert.ok(rollup);
   assert.equal(rollup.pending, 3);
-  assert.equal(rollup.max_attempt_count, 4);
+  assert.equal(rollup.max_attempt_count, 99);
 });
 
 test("backlog: next_attempt_at is the latest gap-authored floor", () => {

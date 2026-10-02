@@ -1618,6 +1618,116 @@ test(
 );
 
 test(
+  "a pending gap reported by a later run increments its attempt count and same-error streak",
+  withTempDb(async () => {
+    const store = createSqliteConnectorDetailGapStore();
+    const first = await store.upsertPendingGap({
+      connectorId: "chase",
+      connectorInstanceId: "cin_chase_personal",
+      lastError: { class: "qfx_download_failed", message: "Timed out" },
+      lastRunId: "run_chase_1",
+      now: "2026-09-28T12:00:00.000Z",
+      reason: "temporary_unavailable",
+      recordKey: "activity-account-key",
+      stream: "transactions",
+    });
+    assert.ok(first);
+    const second = await store.upsertPendingGap({
+      connectorId: "chase",
+      connectorInstanceId: "cin_chase_personal",
+      lastError: { class: "qfx_download_failed", message: "Timed out" },
+      lastRunId: "run_chase_2",
+      now: "2026-09-29T12:00:00.000Z",
+      reason: "temporary_unavailable",
+      recordKey: "activity-account-key",
+      stream: "transactions",
+    });
+
+    assert.ok(second);
+    assert.equal(second.gap_id, first.gap_id);
+    assert.equal(second.attempt_count, 1, "one later failed run is one retry attempt");
+    assert.equal(second.last_attempt_at, "2026-09-29T12:00:00.000Z");
+    assert.equal((second.last_error as { consecutive_same_error_count?: number }).consecutive_same_error_count, 2);
+  })
+);
+
+test(
+  "a recovered gap restarts its same-error streak when it fails again",
+  withTempDb(async () => {
+    const store = createSqliteConnectorDetailGapStore();
+    const first = await store.upsertPendingGap({
+      connectorId: "chase",
+      connectorInstanceId: "cin_chase_recovered_streak",
+      lastError: { class: "qfx_download_failed", message: "Timed out" },
+      lastRunId: "run_1",
+      reason: "temporary_unavailable",
+      recordKey: "activity-account-key",
+      stream: "transactions",
+    });
+    assert.ok(first);
+    await store.upsertPendingGap({
+      connectorId: "chase",
+      connectorInstanceId: "cin_chase_recovered_streak",
+      lastError: { class: "qfx_download_failed", message: "Timed out" },
+      lastRunId: "run_2",
+      reason: "temporary_unavailable",
+      recordKey: "activity-account-key",
+      stream: "transactions",
+    });
+    const lease = { gapId: first.gap_id, leaseId: "lease_2", runId: "run_2" };
+    assert.deepEqual(
+      await store.claimPendingGaps([first.gap_id], {
+        leaseExpiresAt: "2026-09-30T12:00:00.000Z",
+        leaseId: lease.leaseId,
+        runId: lease.runId,
+      }),
+      [first.gap_id]
+    );
+    assert.ok(await store.settleLeasedGapRecovered(lease));
+    const failedAgain = await store.upsertPendingGap({
+      connectorId: "chase",
+      connectorInstanceId: "cin_chase_recovered_streak",
+      lastError: { class: "qfx_download_failed", message: "Timed out" },
+      lastRunId: "run_3",
+      reason: "temporary_unavailable",
+      recordKey: "activity-account-key",
+      stream: "transactions",
+    });
+
+    assert.ok(failedAgain);
+    assert.equal((failedAgain.last_error as { consecutive_same_error_count?: number }).consecutive_same_error_count, 1);
+  })
+);
+
+test(
+  "a null-run re-upsert does not increment the same-error streak",
+  withTempDb(async () => {
+    const store = createSqliteConnectorDetailGapStore();
+    const first = await store.upsertPendingGap({
+      connectorId: "chase",
+      connectorInstanceId: "cin_chase_null_run_streak",
+      lastError: { class: "qfx_download_failed", message: "Timed out" },
+      lastRunId: "run_1",
+      reason: "temporary_unavailable",
+      recordKey: "activity-account-key",
+      stream: "transactions",
+    });
+    assert.ok(first);
+    const reUpserted = await store.upsertPendingGap({
+      connectorId: "chase",
+      connectorInstanceId: "cin_chase_null_run_streak",
+      lastError: { class: "qfx_download_failed", message: "Timed out" },
+      reason: "temporary_unavailable",
+      recordKey: "activity-account-key",
+      stream: "transactions",
+    });
+
+    assert.ok(reUpserted);
+    assert.equal((reUpserted.last_error as { consecutive_same_error_count?: number }).consecutive_same_error_count, 1);
+  })
+);
+
+test(
   "listPendingGapsForConnector returns gaps across every connector instance for diagnostics",
   withTempDb(async () => {
     const store = createSqliteConnectorDetailGapStore();
@@ -3637,6 +3747,96 @@ test(
 const POSTGRES_URL = process.env.PDPP_TEST_POSTGRES_URL;
 
 if (POSTGRES_URL) {
+  test("Postgres resets the same-error streak after recovery", async () => {
+    const suffix = `${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
+    const connectorId = `gap_pg_recovered_streak_${suffix}`;
+    const connectorInstanceId = `cin_pg_recovered_streak_${suffix}`;
+    initDb(":memory:");
+    await initPostgresStorage({ backend: "postgres", databaseUrl: POSTGRES_URL });
+    try {
+      const store = createPostgresConnectorDetailGapStore();
+      const first = await store.upsertPendingGap({
+        connectorId,
+        connectorInstanceId,
+        lastError: { class: "qfx_download_failed", message: "Timed out" },
+        lastRunId: "run_1",
+        reason: "temporary_unavailable",
+        recordKey: "activity-account-key",
+        stream: "transactions",
+      });
+      assert.ok(first);
+      await store.upsertPendingGap({
+        connectorId,
+        connectorInstanceId,
+        lastError: { class: "qfx_download_failed", message: "Timed out" },
+        lastRunId: "run_2",
+        reason: "temporary_unavailable",
+        recordKey: "activity-account-key",
+        stream: "transactions",
+      });
+      const lease = { gapId: first.gap_id, leaseId: "lease_2", runId: "run_2" };
+      assert.deepEqual(
+        await store.claimPendingGaps([first.gap_id], {
+          leaseExpiresAt: "2026-09-30T12:00:00.000Z",
+          leaseId: lease.leaseId,
+          runId: lease.runId,
+        }),
+        [first.gap_id]
+      );
+      assert.ok(await store.settleLeasedGapRecovered(lease));
+      const failedAgain = await store.upsertPendingGap({
+        connectorId,
+        connectorInstanceId,
+        lastError: { class: "qfx_download_failed", message: "Timed out" },
+        lastRunId: "run_3",
+        reason: "temporary_unavailable",
+        recordKey: "activity-account-key",
+        stream: "transactions",
+      });
+      assert.ok(failedAgain);
+      assert.equal((failedAgain.last_error as { consecutive_same_error_count?: number }).consecutive_same_error_count, 1);
+    } finally {
+      await postgresQuery("DELETE FROM connector_detail_gaps WHERE connector_instance_id = $1", [connectorInstanceId]);
+      await closePostgresStorage();
+      closeDb();
+    }
+  });
+
+  test("Postgres null-run re-upserts do not increment the same-error streak", async () => {
+    const suffix = `${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
+    const connectorId = `gap_pg_null_run_streak_${suffix}`;
+    const connectorInstanceId = `cin_pg_null_run_streak_${suffix}`;
+    initDb(":memory:");
+    await initPostgresStorage({ backend: "postgres", databaseUrl: POSTGRES_URL });
+    try {
+      const store = createPostgresConnectorDetailGapStore();
+      const first = await store.upsertPendingGap({
+        connectorId,
+        connectorInstanceId,
+        lastError: { class: "qfx_download_failed", message: "Timed out" },
+        lastRunId: "run_1",
+        reason: "temporary_unavailable",
+        recordKey: "activity-account-key",
+        stream: "transactions",
+      });
+      assert.ok(first);
+      const reUpserted = await store.upsertPendingGap({
+        connectorId,
+        connectorInstanceId,
+        lastError: { class: "qfx_download_failed", message: "Timed out" },
+        reason: "temporary_unavailable",
+        recordKey: "activity-account-key",
+        stream: "transactions",
+      });
+      assert.ok(reUpserted);
+      assert.equal((reUpserted.last_error as { consecutive_same_error_count?: number }).consecutive_same_error_count, 1);
+    } finally {
+      await postgresQuery("DELETE FROM connector_detail_gaps WHERE connector_instance_id = $1", [connectorInstanceId]);
+      await closePostgresStorage();
+      closeDb();
+    }
+  });
+
   test("Postgres store refuses to requeue too_large even when --reason=too_large is named explicitly", async () => {
     const suffix = `${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
     const connectorId = `gap_pg_too_large_refusal_${suffix}`;

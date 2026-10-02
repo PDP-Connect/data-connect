@@ -558,11 +558,11 @@ export function rollupOutboxDiagnosticCounts(
  *   - `recovered` is optional and `null` when no cheap count-by-status
  *     aggregate is available; otherwise it carries the exact reason-scoped
  *     recovered count supplied by the store projection.
- *   - `max_attempt_count` / `next_attempt_at` mirror the cooldown's
- *     `maxAttemptCount` / earliest gap-authored retry floor. `next_attempt_at`
- *     here is the *backlog's* retry floor (Retry-After / cooldown), which can be
- *     set for a manual connector even when the connection-level
- *     `next_attempt_at` (the scheduler's next automatic dispatch) is `null`.
+ *   - `max_attempt_count` is the maximum attempt count across all pending gaps.
+ *     `next_attempt_at` is the latest source-pressure gap's retry floor
+ *     (Retry-After / cooldown), which can be set for a manual connector even
+ *     when the connection-level `next_attempt_at` (the scheduler's next
+ *     automatic dispatch) is `null`.
  *
  * The rollup carries only non-negative integer counts and an optional
  * ISO-8601 timestamp — never a stream body, locator, record payload, source or
@@ -647,8 +647,8 @@ export interface ConnectionDetailGapBacklogEvidence {
  *   - `pending_other` counts pending non-source-pressure gaps in the same
  *     bounded read. It is diagnostic honesty only: surfaces use it to avoid
  *     rendering "caught up" while cap/budget-deferred detail gaps remain.
- *   - `max_attempt_count` is the max `attemptCount` across the source-pressure
- *     gaps (mirrors the cooldown governor).
+ *   - `max_attempt_count` is the max `attemptCount` across all pending gaps so
+ *     non-pressure failures remain visible in the backlog diagnostics.
  *   - `next_attempt_at` is the latest gap-authored `nextAttemptAfter` floor
  *     across the source-pressure gaps, or `null` when none is set.
  *   - `recovered` is passed through verbatim (`null` when not computed).
@@ -665,7 +665,7 @@ export function deriveSourcePressureBacklog(
   const pending = pressureGaps.length;
   const totalReturned = (evidence.pendingGaps ?? []).length;
   const pendingOther = Math.max(0, totalReturned - pending);
-  const maxAttemptCount = pressureGaps.reduce((max, gap) => {
+  const maxAttemptCount = (evidence.pendingGaps ?? []).reduce((max, gap) => {
     const attempt = gap.attemptCount;
     if (typeof attempt !== "number" || !Number.isFinite(attempt) || attempt < 0) {
       return max;
