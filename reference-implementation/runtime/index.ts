@@ -62,6 +62,8 @@ import {
   normalizeGapScope,
   VIOLATION_LIST_MAX,
 } from "./connector-gap-bounding.ts";
+import type { ConnectorDiagnosticLines } from "./connector-diagnostic-lines.ts";
+import { createConnectorDiagnosticLineCollector, redactConnectorDiagnosticLine } from "./connector-diagnostic-lines.ts";
 import { describeCursorBandViolation, evaluateCursorBand } from "./cursor-band-contiguity.ts";
 import { declaredReasonTokensFor } from "./declared-reason-tokens.ts";
 import { createDetailGapPageReader, validateDetailGapsPageRequest } from "./detail-gap-paging.ts";
@@ -1304,6 +1306,41 @@ function buildStderrTailDiagnostic(
     redacted,
     text: redactedText,
     truncated: Boolean(tail.truncated),
+  };
+}
+
+/**
+ * Persistable data for `run.connector_diagnostics_recorded`, or null when the
+ * connector wrote no diagnostic lines. Each line is redacted by
+ * `redactConnectorDiagnosticLine`, including by identity against
+ * `knownSecrets`.
+ *
+ * The lines are connector-authored and untrusted. They are owner-local: the
+ * event is readable only through owner-session `_ref` surfaces, and the
+ * collection profile forbids sending diagnostics off the deployment without
+ * an owner action.
+ */
+function buildConnectorDiagnosticLinesData(
+  collected: ConnectorDiagnosticLines,
+  knownSecrets: readonly string[]
+): Record<string, unknown> | null {
+  if (collected.lines.length === 0) {
+    return null;
+  }
+  let redacted = false;
+  const lines = collected.lines.map((line) => {
+    const result = redactConnectorDiagnosticLine(line, knownSecrets);
+    redacted ||= result.redacted;
+    return result.text;
+  });
+  return {
+    lines,
+    lines_kept: lines.length,
+    lines_observed: collected.lines_observed,
+    object: "connector_diagnostic_lines",
+    redacted,
+    truncated: collected.truncated,
+    visibility: "owner_local",
   };
 }
 
@@ -3032,7 +3069,13 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
   // evidence was truncated. See
   // openspec/changes/persist-connector-failure-diagnostics.
   const stderrTail = createStderrTailBuffer();
-  proc.stderr.on("data", (d) => stderrTail.append(d));
+  // Diagnostic lines from `connectorDiagnostic()`, kept for every run (not
+  // only failures). See runtime/connector-diagnostic-lines.ts.
+  const diagnosticLines = createConnectorDiagnosticLineCollector();
+  proc.stderr.on("data", (d) => {
+    stderrTail.append(d);
+    diagnosticLines.append(d);
+  });
 
   // Byte-level buffer; split only on LF. Each chunk from proc.stdout is a
   // Buffer (no encoding set) so multi-byte UTF-8 characters are preserved
@@ -6538,6 +6581,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
         });
       }
       const stderrTailDiagnostic = buildStderrTailDiagnostic(stderrTailRaw, runKnownSecrets);
+      const connectorDiagnosticLines = buildConnectorDiagnosticLinesData(diagnosticLines.finalize(), runKnownSecrets);
 
       // Drain the connector's own async message queue BEFORE entering
       // the inner try/catch below: a throw here (from `waitForQueueDrain`
@@ -6558,6 +6602,28 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       // is what guarantees cleanup here, not the inner catch or any of
       // this run's own terminal-finalization handlers.
       testOnlyTerminalProcessingFaultInjector?.();
+
+      // Persist diagnostic lines before the terminal event so the run
+      // timeline keeps its terminal event last. A write failure must not
+      // change the run's outcome.
+      if (connectorDiagnosticLines && !terminalEventRecorded) {
+        try {
+          await emitRunSpineEvent({
+            actor_id: connectorId,
+            actor_type: "runtime",
+            data: connectorDiagnosticLines,
+            event_type: "run.connector_diagnostics_recorded",
+            object_id: runId,
+            object_type: "run",
+            run_id: runId,
+            scenario_id: traceContext.scenario_id,
+            status: "recorded",
+            trace_id: traceContext.trace_id,
+          });
+        } catch (caughtEmitErr) {
+          onProgress({ error: (caughtEmitErr as Error).message, type: "spine_error" });
+        }
+      }
 
       try {
         if (!terminalEventRecorded) {
