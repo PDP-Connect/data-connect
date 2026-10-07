@@ -343,6 +343,24 @@ export function describeTunnelError(tunnelError: string): TunnelErrorGuidance {
   return { message: tunnelError, suggestSwitchTo: null }
 }
 
+/**
+ * A remote access change restarts the desktop stack
+ * (`spawn_remote_access_config_watcher` in `src-tauri/src/unified.rs`). A
+ * request this page makes while the console is down fails at the network
+ * level, and the browser reports only a bare TypeError: "Load failed"
+ * (WebKit, the desktop webview), "Failed to fetch" (Chromium), or
+ * "NetworkError when attempting to fetch resource." (Firefox). Show the
+ * owner what that means instead. Every other failure keeps its own message.
+ */
+export function describeRemoteAccessFailure(reason: unknown, during: "read" | "save"): string {
+  const lostConnection =
+    reason instanceof TypeError && /load failed|failed to fetch|networkerror/i.test(reason.message)
+  if (!lostConnection) return String(reason)
+  return during === "read"
+    ? "DataConnect is restarting or not answering. Reconnecting…"
+    : "DataConnect stopped answering before it confirmed this change, usually because it is restarting. Check this setting when the page reconnects."
+}
+
 export type RemoteAccessOriginDisplay =
   | { kind: "error"; guidance: TunnelErrorGuidance }
   | { kind: "waiting" }
