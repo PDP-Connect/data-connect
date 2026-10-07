@@ -42,6 +42,12 @@ import net from "node:net";
 import tls from "node:tls";
 import { isNullish } from "../../lib/nullish.ts";
 import { emitSpineEvent } from "../../lib/spine.ts";
+import {
+  createSpineRunStatusReader,
+  REF_RUN_LINK_BASE,
+  type RunStatusController,
+  readRunStatus,
+} from "../run-status-read-model.ts";
 import { createInputTelemetry } from "./input-telemetry.ts";
 import type { ReferenceWireViewportPayload } from "./protocol-wire.ts";
 import {
@@ -49,7 +55,9 @@ import {
   buildReferenceWireBackendReadyPayload,
   buildReferenceWireCompanionEventPayload,
   buildReferenceWireFramePayload,
+  buildReferenceWireRunEndedPayload,
   normalizeReferenceWireViewportPayload,
+  type RunEndedSource,
   parseReferenceWireInputPayload,
   parseReferenceWireInputTelemetryCursor,
 } from "./protocol-wire.ts";
@@ -285,6 +293,13 @@ interface RegisterStreamingRoutesOptions {
   onPresentationRestoreFailure?: PresentationFailureHandler | null;
   ownerAuth: OwnerAuth;
   presentationAttachmentCookieName?: string;
+  /**
+   * Run-status lookup used to tell a viewer the run's real outcome when its
+   * stream ends. Defaults to the shared run-status read model
+   * (server/run-status-read-model.ts), the same projection `GET /_ref/runs/:id`
+   * serves.
+   */
+  readRunStatusForStream?: ((runId: string) => Promise<RunEndedSource | null>) | null;
   setTimeoutImpl?: (handler: () => void, delayMs: number) => Timer;
   streamingSessions: StreamingSessions;
 }
@@ -858,6 +873,7 @@ export function registerStreamingRoutes({
   setTimeoutImpl = setTimeout,
   clearTimeoutImpl = clearTimeout,
   logger = null,
+  readRunStatusForStream = null,
 }: RegisterStreamingRoutesOptions): {
   _internal: {
     companions: Map<string, StreamingCompanion>;
@@ -874,6 +890,7 @@ export function registerStreamingRoutes({
     reason: string;
     run_id: string;
   }) => Promise<void>;
+  notifyRunEnded: (input: { run_id: string }) => void;
   restoreOrRetirePresentationForRun: (input: { reason: string; run_id: string }) => Promise<void>;
 } {
   if (!(app && ownerAuth && streamingSessions)) {
@@ -1143,6 +1160,55 @@ export function registerStreamingRoutes({
     if (session.token_hash) hostLeaseTargets.delete(session.token_hash);
   }
 
+  const readRunStatusForEnd =
+    readRunStatusForStream ??
+    ((runId: string) =>
+      readRunStatus(
+        createSpineRunStatusReader(controller as unknown as RunStatusController | null),
+        runId,
+        REF_RUN_LINK_BASE
+      ));
+
+  /**
+   * The `run_ended` payload when the run behind a stream is over, else `null`.
+   * A stream that stops because its run ended must report that outcome, not a
+   * transport or lease error. A failed lookup reads as "still live" so the
+   * caller keeps its existing error.
+   */
+  async function readRunEnded(runId: string): Promise<ReturnType<typeof buildReferenceWireRunEndedPayload>> {
+    try {
+      return buildReferenceWireRunEndedPayload(await readRunStatusForEnd(runId));
+    } catch {
+      return null;
+    }
+  }
+
+  // Open SSE attachments per run. The controller's run-cleanup barrier calls
+  // `notifyRunEnded` after the run settles, so an attached viewer learns the
+  // outcome at once instead of at the next keepalive or lease probe.
+  const runEndListeners = new Map<string, Set<() => void>>();
+
+  function onRunEnded(runId: string, listener: () => void): () => void {
+    let listeners = runEndListeners.get(runId);
+    if (!listeners) {
+      listeners = new Set();
+      runEndListeners.set(runId, listeners);
+    }
+    listeners.add(listener);
+    return () => {
+      listeners.delete(listener);
+      if (listeners.size === 0 && runEndListeners.get(runId) === listeners) {
+        runEndListeners.delete(runId);
+      }
+    };
+  }
+
+  function notifyRunEnded({ run_id }: { run_id: string }): void {
+    for (const listener of [...(runEndListeners.get(run_id) ?? [])]) {
+      listener();
+    }
+  }
+
   async function validateHostSession(
     req: StreamingRequest,
     res: StreamingReply,
@@ -1154,6 +1220,10 @@ export function registerStreamingRoutes({
     }
     if (!hostLeaseIsCurrent(session)) {
       await retireLostHostLease(session);
+      if (await readRunEnded(session.run_id)) {
+        pdppError(res, 410, "run_ended", "The run behind this stream has ended.");
+        return false;
+      }
       pdppError(res, 410, "browser_surface_lease_lost", "The leased browser surface is no longer available.");
       return false;
     }
@@ -2321,22 +2391,45 @@ body>p{display:none!important}
     // connection once loss is detected, and the once-guard means only one
     // of the three call sites ever reaches the retire/error/end sequence
     // even if more than one fires for the same connection.
-    let leaseLostHandled = false;
-    function handleLeaseLost(): void {
-      if (leaseLostHandled) {
+    //
+    // Lease loss is only a lease error while the run is live. When the run
+    // has ended (its lease is released at run cleanup), the viewer gets
+    // `run_ended` with the run's outcome instead.
+    let streamEndHandled = false;
+    function endStream(cause: "lease_lost" | "run_ended"): void {
+      if (streamEndHandled) {
         return;
       }
-      leaseLostHandled = true;
+      streamEndHandled = true;
       closePerConnection();
-      void retireLostHostLease(session).finally(() => {
+      void (async () => {
+        if (cause === "lease_lost") {
+          await retireLostHostLease(session).catch(() => undefined);
+        }
+        const ended = await readRunEnded(session.run_id);
         try {
-          writeEvent("error", { code: "browser_surface_lease_lost", message: "The leased browser surface is no longer available." });
+          if (ended) {
+            writeEvent("run_ended", ended);
+          } else if (cause === "lease_lost") {
+            writeEvent("error", {
+              code: "browser_surface_lease_lost",
+              message: "The leased browser surface is no longer available.",
+            });
+          } else {
+            // Run cleanup fired but no terminal state is readable yet; say
+            // the run ended without inventing an outcome.
+            writeEvent("run_ended", { failure: null, run_id: session.run_id, status: null, terminal_reason: null });
+          }
           raw.end();
         } catch {
           /* socket may already be gone */
         }
-      });
+      })();
     }
+    function handleLeaseLost(): void {
+      endStream("lease_lost");
+    }
+    const unsubscribeRunEnded = onRunEnded(session.run_id, () => endStream("run_ended"));
 
     const unsubscribe = companion.onFrame((frame) => {
       // Check before every write so a lease lost between polls cannot leak
@@ -2414,6 +2507,7 @@ body>p{display:none!important}
       }
       perConnectionClosed = true;
       clearInterval(keepAliveInterval);
+      unsubscribeRunEnded();
       try {
         unsubscribe();
       } catch {
@@ -2811,6 +2905,11 @@ body>p{display:none!important}
      * ends. Invalidates the token and tears down the companion if any.
      */
     invalidateForInteractionResolved,
+    /**
+     * Hook for the controller's run-cleanup barrier (after the run settles):
+     * every open attachment for the run reports the run's outcome and closes.
+     */
+    notifyRunEnded,
     restoreOrRetirePresentationForRun,
   };
 }

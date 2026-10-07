@@ -130,6 +130,7 @@ import {
 import { claimPopupNotice, createPopupNoticeSeenRegistry } from "./stream-popup-notice-dedupe.ts";
 import { beginPresentationSession } from "./stream-presentation-session.ts";
 import { classifyStreamReachFailure, type StreamReachProbeResult } from "./stream-reach-diagnostics.ts";
+import { describeEndedRun } from "./stream-state.ts";
 import { createStreamSurfaceMeasureCoordinator } from "./stream-surface-measure-gate.ts";
 import {
   cancelActiveViewerPresses,
@@ -144,7 +145,7 @@ import {
   viewportLayoutFromInfo,
 } from "./stream-viewer-geometry.ts";
 import { normalizedPointerButton, readablePointerInput } from "./stream-viewer-pointer-input.ts";
-import { parseAttachedMessage } from "./stream-viewer-protocol.ts";
+import { parseAttachedMessage, parseRunEndedMessage } from "./stream-viewer-protocol.ts";
 import {
   createPdppRemoteSurfaceTransport,
   type PdppRemoteSurfaceTransport,
@@ -310,7 +311,7 @@ type DisplayState = "connecting" | "live" | "trouble";
  * Internal cause of trouble — used to phrase the orientation-card message
  * when the overlay closes back to Stage 1, and to gate auto-retry.
  */
-type TroubleCause = "expired" | "unavailable" | "network" | null;
+type TroubleCause = "expired" | "unavailable" | "network" | "run_ended" | null;
 
 interface ConnectionStatus {
   cause: TroubleCause;
@@ -2418,6 +2419,22 @@ function StreamStage({
           return;
         }
         callbacks.onTransportError();
+      });
+      // The run behind this stream ended (finished, failed, cancelled). Show
+      // its outcome, not a transport error, and stop: there is nothing to
+      // reconnect to. The resolution poll then swaps this page for the ended
+      // or resolved surface.
+      source.addEventListener("run_ended", (ev) => {
+        const ended = parseRunEndedMessage(streamEventData(ev));
+        onStatus({
+          cause: "run_ended",
+          display: "trouble",
+          troubleMessage: describeEndedRun({
+            failureMessage: ended?.failure?.message ?? null,
+            status: ended?.status ?? null,
+          }),
+        });
+        source.close();
       });
     },
     [

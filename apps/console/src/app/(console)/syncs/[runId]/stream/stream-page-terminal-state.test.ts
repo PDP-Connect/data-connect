@@ -5,7 +5,12 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { resolveNoAssistanceEndedTerminalStatus, selectNoAssistanceStreamState } from "./stream-state.ts";
+import {
+  describeEndedRun,
+  resolveNoAssistanceEndedTerminalStatus,
+  selectNoAssistanceStreamState,
+} from "./stream-state.ts";
+import { parseRunEndedMessage } from "./stream-viewer-protocol.ts";
 
 const pageSource = readFileSync(fileURLToPath(new URL("./page.tsx", import.meta.url)), "utf8");
 const streamViewerSource = readFileSync(fileURLToPath(new URL("./stream-viewer.tsx", import.meta.url)), "utf8");
@@ -234,4 +239,57 @@ test("resolved browser stream offers reliable navigation instead of blocked tab 
   assert.match(streamViewerSource, RESOLVED_SURFACE_RUN_LINK_RE);
   assert.doesNotMatch(streamViewerSource, WINDOW_CLOSE_RE);
   assert.doesNotMatch(streamViewerSource, CLOSE_TAB_COPY_RE);
+});
+
+// A connector can exit (or the runtime can fail the run) while a browser step
+// is still open, so the timeline keeps an unresolved assistance request. The
+// run's terminal state must win: the page shows the outcome, never a stream
+// whose browser surface was already released.
+const TERMINAL_STATE_BEFORE_STREAM_RE =
+  /const runEnded =\s*selectNoAssistanceStreamState\([\s\S]{0,260}\) !== "running";\s*if \(!streamableAssistance \|\| runEnded\) \{\s*return renderNoAssistanceSurface\(/;
+const ENDED_BEFORE_ASSISTANCE_RE =
+  /noAssistanceState === "ended"[\s\S]{0,900}requiresBrowserSurfaceAssistance\(currentAssistance\)/;
+const ENDED_SURFACE_FAILURE_MESSAGE_RE = /failureMessage=\{runStatus\?\.failure\?\.message \?\? null\}/;
+const VIEWER_RUN_ENDED_LISTENER_RE =
+  /addEventListener\("run_ended"[\s\S]{0,420}describeEndedRun\([\s\S]{0,200}source\.close\(\)/;
+
+test("stream page shows a terminal run's outcome even when an assistance request is still open", () => {
+  assert.match(pageSource, TERMINAL_STATE_BEFORE_STREAM_RE);
+  assert.match(pageSource, ENDED_BEFORE_ASSISTANCE_RE);
+  assert.match(pageSource, ENDED_SURFACE_FAILURE_MESSAGE_RE);
+});
+
+test("ended-run copy names the true outcome and the owner-safe failure message", () => {
+  assert.equal(
+    describeEndedRun({
+      failureMessage: "Connector emitted DONE while waiting for INTERACTION_RESPONSE",
+      status: "failed",
+    }),
+    "This sync failed: Connector emitted DONE while waiting for INTERACTION_RESPONSE"
+  );
+  assert.equal(describeEndedRun({ failureMessage: null, status: "failed" }), "This sync failed.");
+  assert.equal(describeEndedRun({ failureMessage: null, status: "completed" }), "This sync finished.");
+  assert.equal(describeEndedRun({ failureMessage: null, status: "cancelled" }), "This sync was cancelled.");
+  assert.equal(describeEndedRun({ failureMessage: null, status: null }), "This sync has ended.");
+});
+
+test("viewer turns a run_ended stream event into the run's outcome and stops reconnecting", () => {
+  assert.match(streamViewerSource, VIEWER_RUN_ENDED_LISTENER_RE);
+  assert.deepEqual(
+    parseRunEndedMessage(
+      JSON.stringify({
+        failure: { message: "Boom", reason: "connector_protocol_violation" },
+        run_id: "run_1",
+        status: "failed",
+        terminal_reason: "connector_protocol_violation",
+      })
+    ),
+    {
+      failure: { message: "Boom", reason: "connector_protocol_violation" },
+      run_id: "run_1",
+      status: "failed",
+      terminal_reason: "connector_protocol_violation",
+    }
+  );
+  assert.equal(parseRunEndedMessage("not json"), null);
 });
