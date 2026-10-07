@@ -146,7 +146,12 @@ interface SchedulerManagerOptions {
   ) => Parameters<typeof getScheduleIneligibilityReason>[0];
   readonly logger: Logger;
   readonly ownerSubjectId: string;
-  readonly runtimeContext: { rsUrl: string; referenceBaseUrl: string | null };
+  readonly runtimeContext: {
+    rsUrl: string;
+    referenceBaseUrl: string | null;
+    selfCallRsUrl?: string | null;
+    selfCallReferenceBaseUrl?: string | null;
+  };
   readonly schedulerStore: NonNullable<SchedulerOptions["schedulerStore"]> & {
     listSchedules: () => Promise<readonly ScheduleRow[]> | readonly ScheduleRow[];
   };
@@ -515,6 +520,11 @@ export function createReferenceSchedulerManager({
       return;
     }
     const managedRunner = createRunManagedConnectorViaController(controller);
+    const schedulerReferenceBaseUrl =
+      "selfCallReferenceBaseUrl" in runtimeContext
+        ? runtimeContext.selfCallReferenceBaseUrl
+        : runtimeContext.referenceBaseUrl;
+    const schedulerRsUrl = "selfCallRsUrl" in runtimeContext ? runtimeContext.selfCallRsUrl : runtimeContext.rsUrl;
     scheduler = createScheduler({
       admitRunConnection: async ({ connectorId, connectorInstanceId, ownerSubjectId: requestedOwnerSubjectId }) => {
         if (typeof requestedOwnerSubjectId !== "string" || requestedOwnerSubjectId.trim().length === 0) {
@@ -539,9 +549,9 @@ export function createReferenceSchedulerManager({
       ...(connectorEnvironmentPolicy?.approvedProxyConnectorIds.length
         ? { approvedProxyConnectorIds: connectorEnvironmentPolicy.approvedProxyConnectorIds }
         : {}),
-      referenceBaseUrl: runtimeContext.referenceBaseUrl,
+      referenceBaseUrl: schedulerReferenceBaseUrl,
       resolveStaticSecretRunEnv: resolveScheduledConnectionScopedRunEnv,
-      rsUrl: runtimeContext.rsUrl,
+      ...(schedulerRsUrl ? { rsUrl: schedulerRsUrl } : {}),
       schedulerStore,
       // Route managed-connector scheduled runs through controller.runNow so
       // they acquire the neko browser-surface lease (warm persistent profile,

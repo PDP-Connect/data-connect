@@ -3,6 +3,7 @@
 
 import { allowUnboundedReadAcknowledged, exec, getOne, referenceQueries, writeTransaction } from "../../lib/db.ts";
 import { postgresQuery, withPostgresTransaction } from "../postgres-storage.ts";
+import { createConfigPrecedenceResolver } from "./config-precedence-resolver.ts";
 import { createCredentialCipherFromEnv } from "./credential-encryption.ts";
 
 interface ProviderAppConfigRow {
@@ -380,6 +381,13 @@ export type DeploymentConfigResolver = (args: {
  * deploys where the DB has never been configured -- it is consulted only
  * when the store has no value. Callers of the returned function never see
  * or handle env var names beyond the `envAlias` they pass in.
+ *
+ * This is one `identityGroup`-scoped instance of the general config
+ * precedence rule in `config-precedence-resolver.ts` -- kept as its own
+ * function (rather than inlined at call sites) because every caller here
+ * already has an `identityGroup` and thinks in `logicalKey` terms, not the
+ * generic resolver's flat `key`. No provider-app-config key is
+ * platform-owned, so the exception list is always empty here.
  */
 export function createDeploymentConfigResolver({
   env = process.env,
@@ -397,14 +405,10 @@ export function createDeploymentConfigResolver({
     identityGroup: string;
     logicalKey: string;
   }) => {
-    // store.get() returns null for an unset key or the sealed value it was
-    // given -- set() already rejects an empty-string value before sealing,
-    // so a non-null result here is never blank and needs no further check.
-    const fromStore = await store.get({ identityGroup, logicalKey });
-    if (fromStore !== null) {
-      return fromStore;
-    }
-    const fromEnv = envAlias ? env[envAlias] : undefined;
-    return typeof fromEnv === "string" && fromEnv.trim() ? fromEnv.trim() : null;
+    const resolver = createConfigPrecedenceResolver({
+      env,
+      getStoredValue: (key) => store.get({ identityGroup, logicalKey: key }),
+    });
+    return resolver(envAlias === undefined ? { key: logicalKey } : { envAlias, key: logicalKey });
   };
 }

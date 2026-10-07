@@ -7,11 +7,12 @@
  *
  * The honesty contract from
  * `openspec/changes/add-connector-public-listing-honesty/` says any
- * first-party manifest under `packages/polyfill-connectors/manifests/`
- * that declares an owner-visible lifecycle tier SHALL be
+ * first-party manifest that declares an owner-visible lifecycle tier SHALL be
  * visible in the reference connector catalog after the reference starts up —
  * even on a fresh database, before any schedule, run, or connection row
- * exists.
+ * exists. The first-party manifests are the profiles of the verified
+ * connector installs; this test installs checked-in published profiles
+ * (test/fixtures/collection-profiles/) through the real install service.
  *
  * `openspec/changes/separate-connector-catalog-from-connections/` refines
  * what "visible in the catalog" means: catalog completeness is owned by the
@@ -23,8 +24,8 @@
  * able to discover the full catalog.
  *
  * This test exercises both halves end to end:
- *   1. Initialize a fresh DB.
- *   2. Run `reconcilePolyfillManifests` against the real shipped manifests.
+ *   1. Initialize a fresh DB and install the fixture profiles.
+ *   2. Run `reconcilePolyfillManifests` against the verified installs.
  *   3. Catalog completeness: every listed=true first-party manifest resolves
  *      via `listPublicCatalogConnectorIds()` — which reads registered
  *      manifests, independent of any connection row — and is recognized as a
@@ -45,18 +46,20 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
 import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import type { ConnectorInstallStore } from "../server/connector-install/index.ts";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { validateConnectorManifest } from "../server/connector-manifest-validation.ts";
 import { closeDb, initDb } from "../server/db.ts";
-import { defaultPolyfillManifestsDir, reconcilePolyfillManifests } from "../server/polyfill-manifest-reconcile.ts";
+import { reconcilePolyfillManifests } from "../server/polyfill-manifest-reconcile.ts";
 import { listConnectorSummaries, listPublicCatalogConnectorIds } from "../server/ref-control.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
+import { installCollectionProfiles, readCollectionProfileFixture } from "./helpers/installed-collection-profiles.ts";
 
 const REFERENCE_OWNER_SUBJECT_ID = "owner_local";
+const INSTALLED_PROFILE_KEYS = ["github", "gmail", "ical", "ynab"] as const;
 
 interface FirstPartyManifestFixture {
   capabilities?: { public_listing?: { tier?: string } };
@@ -64,7 +67,7 @@ interface FirstPartyManifestFixture {
 }
 
 function firstPartyManifests(): FirstPartyManifestFixture[] {
-  return readPolyfillManifests().map((entry) => entry.manifest as FirstPartyManifestFixture);
+  return INSTALLED_PROFILE_KEYS.map((key) => readCollectionProfileFixture(key) as FirstPartyManifestFixture);
 }
 
 // The operator catalog projects connectors under their canonical connector
@@ -97,12 +100,16 @@ function developmentConnectorIds(): string[] {
   return ids.sort();
 }
 
-function withTmpDb(fn: () => Promise<void>): () => Promise<void> {
+function withTmpDb(fn: (installStore: ConnectorInstallStore) => Promise<void>): () => Promise<void> {
   return async () => {
     const dir = mkdtempSync(join(tmpdir(), "pdpp-public-catalog-completeness-"));
     initDb(join(dir, "pdpp.sqlite"));
     try {
-      await fn();
+      const { store } = await installCollectionProfiles(
+        join(dir, "connector-installs"),
+        firstPartyManifests() as Record<string, unknown>[]
+      );
+      await fn(store);
     } finally {
       closeDb();
       rmSync(dir, { force: true, recursive: true });
@@ -110,18 +117,26 @@ function withTmpDb(fn: () => Promise<void>): () => Promise<void> {
   };
 }
 
-test("defaultPolyfillManifestsDir resolves to the shipped first-party manifests dir", () => {
-  // Defensive: if defaultPolyfillManifestsDir() ever drifts, every
-  // subsequent assertion in this file becomes vacuously true. Pin the
-  // expected location so the gap repair stays load-bearing — computed
-  // independently via the installed package's own `./manifests` export
-  // rather than a hardcoded path, since the manifests now ship inside
-  // `@pdpp/polyfill-connectors`, not a repo-relative directory.
-  const manifestRegistryUrl = import.meta.resolve("@pdpp/polyfill-connectors/manifests");
-  const expectedDir = join(dirname(fileURLToPath(manifestRegistryUrl)), "..", "manifests");
-  assert.equal(defaultPolyfillManifestsDir(), expectedDir);
-});
+test(
+  "startup reconciliation scans exactly the verified installs",
+  withTmpDb(async (installStore) => {
+    // Defensive: if the reconcile source ever drifts from the install store,
+    // every later assertion in this file becomes vacuously true.
+    const summary = await reconcilePolyfillManifests({
+      enabled: true,
+      installStore,
+      log: () => {
+        /* intentionally empty */
+      },
+    });
+    assert.equal(summary.disabled_reason, null);
+    assert.equal(summary.scanned, INSTALLED_PROFILE_KEYS.length);
+  })
+);
 
+// This check still reads the pinned development package's manifest set. It
+// validates connector data rather than a reference-implementation manifest
+// source, and moves to the published profiles when that pin is removed.
 test("every shipped first-party manifest passes the live registration validator", () => {
   const failures: string[] = [];
   for (const entry of readPolyfillManifests()) {
@@ -140,7 +155,7 @@ test("every shipped first-party manifest passes the live registration validator"
 
 test(
   "every owner-visible first-party manifest is catalog-visible after startup reconciliation, with no connection row",
-  withTmpDb(async () => {
+  withTmpDb(async (installStore) => {
     const expectedListed = ownerVisibleConnectorIds();
     assert.ok(
       expectedListed.length > 0,
@@ -149,6 +164,7 @@ test(
 
     const summary = await reconcilePolyfillManifests({
       enabled: true,
+      installStore,
       log: () => {
         /* intentionally empty */
       },
@@ -178,9 +194,10 @@ test(
 
 test(
   "a fresh-DB catalog read projects zero connections and persists no phantom connection rows",
-  withTmpDb(async () => {
+  withTmpDb(async (installStore) => {
     await reconcilePolyfillManifests({
       enabled: true,
+      installStore,
       log: () => {
         /* intentionally empty */
       },
@@ -216,7 +233,7 @@ test(
 
 test(
   "Development first-party manifests stay out of the public catalog",
-  withTmpDb(async () => {
+  withTmpDb(async (installStore) => {
     const hidden = developmentConnectorIds();
     assert.ok(
       hidden.length > 0,
@@ -225,6 +242,7 @@ test(
 
     await reconcilePolyfillManifests({
       enabled: true,
+      installStore,
       log: () => {
         /* intentionally empty */
       },

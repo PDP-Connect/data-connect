@@ -24,6 +24,7 @@
 import { RecordroomShell } from "@pdpp/brand-react";
 import type { ReactNode } from "react";
 import { useCommandPalette } from "./command-palette.tsx";
+import { LiveStatusStrip } from "./live-provider.tsx";
 
 interface RecordroomShellWithPaletteProps {
   build?: string;
@@ -35,6 +36,7 @@ export function RecordroomShellWithPalette({ build, children, host }: Recordroom
   const { toggle } = useCommandPalette();
   return (
     <RecordroomShell build={build} host={host} onJump={toggle}>
+      <LiveStatusStrip />
       {children}
     </RecordroomShell>
   );

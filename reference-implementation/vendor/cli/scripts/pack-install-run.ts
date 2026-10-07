@@ -17,7 +17,6 @@ import { promisify } from "node:util";
 // script runs via tsx inside the monorepo, never from the packed tarball
 // itself. Only the CLI command under test executes from the installed
 // tarball via npx.
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 import { startServer } from "../../../reference-implementation/server/index.ts";
 import { CREDENTIAL_ENCRYPTION_KEY_ENV } from "../../../reference-implementation/server/stores/credential-encryption.ts";
 import {
@@ -45,11 +44,16 @@ const FIXTURE_CREDENTIAL_ENCRYPTION_KEY = "pdpp-cli-pack-smoke-credential-key";
 // static-secret manifests only) — see reference-implementation/test/
 // static-secret-draft-connection-route.test.ts's "pre-first-record" case,
 // which this fixture mirrors exactly.
-const gmailManifestEntry = readPolyfillManifests().find((candidate) => candidate.file === "gmail.json");
-if (!gmailManifestEntry) {
-  throw new Error("no polyfill manifest found for gmail.json");
-}
-const FIXTURE_MANIFEST = gmailManifestEntry.manifest as {
+// The published gmail Collection Profile manifest, checked in as a test
+// fixture (see reference-implementation/test/fixtures/collection-profiles/).
+const FIXTURE_MANIFEST = JSON.parse(
+  readFileSync(
+    fileURLToPath(
+      new URL("../../../test/fixtures/collection-profiles/gmail.json", import.meta.url)
+    ),
+    "utf8"
+  )
+) as {
   connector_id: string;
   connector_key?: string;
   [key: string]: unknown;

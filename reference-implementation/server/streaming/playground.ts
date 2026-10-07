@@ -20,11 +20,23 @@
  * before invoking.
  */
 
-import type { IsolatedBrowser } from "@pdpp/polyfill-connectors/browser-launch";
+import { loadBrowserHelpers } from "../polyfill-connectors-runtime.ts";
 import { emitRemoteTelemetry } from "./remote-telemetry-registry.ts";
 import type { RunTargetRegistry } from "./run-target-registry.ts";
 
-type PlaygroundPage = ReturnType<IsolatedBrowser["context"]["pages"]>[number];
+interface PlaygroundPage {
+  close: () => Promise<void>;
+  exposeBinding: (name: string, callback: (source: unknown, payload: unknown) => void) => Promise<void>;
+  goto: (url: string, options: { timeout: number; waitUntil: "load" }) => Promise<unknown>;
+}
+
+interface IsolatedBrowser {
+  readonly context: {
+    newPage: () => Promise<PlaygroundPage>;
+    pages: () => readonly PlaygroundPage[];
+  };
+  readonly release: () => Promise<void>;
+}
 
 type PlaygroundBackend = "cdp" | "neko" | "neko-remote-cdp";
 
@@ -1034,8 +1046,14 @@ export function createPlayground(options?: PlaygroundFactoryOptions) {
     // Dynamic import: keeps patchright off the cold-start path for
     // production builds that never instantiate the playground. The two
     // imports follow the same conventions as the connector runtime.
-    const { acquireIsolatedBrowser } = await import("@pdpp/polyfill-connectors/browser-launch");
-    const { resolveWsUrlForExactPage } = await import("@pdpp/polyfill-connectors/browser-handoff");
+    const browserHelpers = await loadBrowserHelpers();
+    if (!(browserHelpers.acquireIsolatedBrowser && browserHelpers.resolveWsUrlForExactPage)) {
+      throw new Error("The stream playground requires the catalog connector browser runtime.");
+    }
+    const acquireIsolatedBrowser = browserHelpers.acquireIsolatedBrowser as unknown as (
+      options: Record<string, unknown>
+    ) => Promise<IsolatedBrowser>;
+    const resolveWsUrlForExactPage = browserHelpers.resolveWsUrlForExactPage;
 
     log("info", "playground_launching");
     const isolated = await acquireIsolatedBrowser({
@@ -1151,8 +1169,14 @@ export function createPlayground(options?: PlaygroundFactoryOptions) {
     const remoteCdpUrl = String(
       env.PDPP_STREAM_PLAYGROUND_NEKO_CDP_HTTP_URL || env.PDPP_NEKO_CDP_HTTP_URL || "http://neko:9223"
     ).trim();
-    const { acquireBrowserForConnector } = await import("@pdpp/polyfill-connectors/browser-launch");
-    const { resolveWsUrlForExactPage } = await import("@pdpp/polyfill-connectors/browser-handoff");
+    const browserHelpers = await loadBrowserHelpers();
+    if (!(browserHelpers.acquireBrowserForConnector && browserHelpers.resolveWsUrlForExactPage)) {
+      throw new Error("The stream playground requires the catalog connector browser runtime.");
+    }
+    const acquireBrowserForConnector = browserHelpers.acquireBrowserForConnector as unknown as (
+      options: Record<string, unknown>
+    ) => Promise<IsolatedBrowser>;
+    const resolveWsUrlForExactPage = browserHelpers.resolveWsUrlForExactPage;
 
     log("info", "playground_launching", { backend: "neko-remote-cdp", remoteCdpUrl });
     const isolated = await acquireBrowserForConnector({

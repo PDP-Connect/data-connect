@@ -9,7 +9,8 @@ import { type SyntheticEvent, useState, useTransition } from "react";
 import { type RunInteractionActionState, submitRunInteractionAction } from "./actions.ts";
 
 interface InteractionField {
-  format: "password" | "text";
+  autocomplete?: string | null;
+  format: "email" | "password" | "text";
   label: string | null;
   name: string;
   required: boolean;
@@ -21,11 +22,12 @@ interface Props {
   kind: "credentials" | "otp" | "manual_action" | string;
   message: string;
   runId: string;
+  submitLabel?: string | null;
 }
 
 const INITIAL: RunInteractionActionState = { error: null, status: null };
 
-export function RunInteractionForm({ runId, interactionId, kind, message, fields }: Props) {
+export function RunInteractionForm({ runId, interactionId, kind, message, fields, submitLabel }: Props) {
   const router = useRouter();
   const [isPending, startTransition] = useTransition();
   const [state, setState] = useState<RunInteractionActionState>(INITIAL);
@@ -55,10 +57,17 @@ export function RunInteractionForm({ runId, interactionId, kind, message, fields
 
   const effectiveFields =
     kind === "otp" && fields.length === 0
-      ? [{ format: "text" as const, label: "Code", name: "code", required: true }]
+      ? [
+          {
+            format: "text" as const,
+            label: "Code",
+            name: "code",
+            required: true,
+          },
+        ]
       : fields;
   const showFields = kind !== "manual_action" && effectiveFields.length > 0;
-  const submitLabel = getSubmitLabel(kind);
+  const effectiveSubmitLabel = submitLabel ?? getSubmitLabel(kind);
 
   return (
     <form
@@ -79,12 +88,12 @@ export function RunInteractionForm({ runId, interactionId, kind, message, fields
                   {field.required ? <span aria-hidden="true"> *</span> : null}
                 </span>
                 <IcInput
-                  autoComplete="off"
+                  autoComplete={field.autocomplete ?? "off"}
                   id={fieldId}
                   name={field.name}
                   required={field.required}
                   spellCheck={false}
-                  type={field.format === "password" ? "password" : "text"}
+                  type={field.format}
                 />
               </label>
             );
@@ -101,7 +110,7 @@ export function RunInteractionForm({ runId, interactionId, kind, message, fields
       ) : null}
       <div className="flex flex-wrap gap-2">
         <IcButton disabled={isPending} size="sm" type="submit">
-          {isPending ? "Submitting…" : submitLabel}
+          {isPending ? "Submitting…" : effectiveSubmitLabel}
         </IcButton>
         <IcButton disabled={isPending} onClick={handleCancel} size="sm" type="button" variant="ghost">
           Cancel interaction

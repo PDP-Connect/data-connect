@@ -286,7 +286,7 @@ export default async function DashboardPage({
   const host = stripScheme(await safe(() => getReferencePublicOrigin(), "this server"));
 
   return (
-    <RecordroomShellWithPalette build="pdpp 0.1.0" host={host}>
+    <RecordroomShellWithPalette host={host}>
       <StandingOverview
         data={data}
         grantsHref={HREFS.grants}

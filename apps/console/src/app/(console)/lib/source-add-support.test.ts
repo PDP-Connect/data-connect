@@ -157,14 +157,23 @@ test("supported browser collector source is self-service and routes to browser-s
   assert.doesNotMatch(support.supportLabel, DEMOTION_COPY_RE);
 });
 
-test("proof-gated browser runbook stays unavailable for self-service setup", () => {
-  const map = buildSourceAddSupport([browserBoundManifest("some_browser_source")]);
-  const support = resolveSourceAddSupport(map, "some_browser_source");
+test("a known-scaffold browser runbook stays unavailable for self-service setup", () => {
+  const map = buildSourceAddSupport([browserBoundManifest("anthropic")]);
+  const support = resolveSourceAddSupport(map, "anthropic");
   assert.ok(support);
   assert.equal(support.support, "not_self_service");
   assert.equal(support.action, null);
   assert.match(support.supportLabel, NOT_SELF_SERVICE_RE);
   assert.doesNotMatch(support.supportLabel, DEMOTION_COPY_RE);
+});
+
+test("a browser source no key list names gets browser self-service setup", () => {
+  const map = buildSourceAddSupport([browserBoundManifest("some_browser_source")]);
+  const support = resolveSourceAddSupport(map, "some_browser_source");
+  assert.ok(support);
+  assert.equal(support.support, "self_service");
+  assert.ok(support.action);
+  assert.match(support.action.href, /\/connect\/browser-session\/some_browser_source/);
 });
 
 test("unshipped manual upload path stays unavailable for self-service setup", () => {

@@ -97,6 +97,8 @@ import {
   useTransition,
 } from "react";
 import { PdppLogo } from "@/components/pdpp-logo.tsx";
+import { ConnectorMark } from "../../../components/connector-mark.tsx";
+import type { ConnectorContext } from "./connector-context-resolution.ts";
 import { submitRunInteractionAction } from "../actions.ts";
 import { type MintedStreamSession, mintStreamSessionAction, reportStreamReachFailureAction } from "./actions.ts";
 import {
@@ -151,11 +153,6 @@ import { getMountedNekoViewerSession } from "./stream-viewer-session-readiness.t
 import { createViewportWriters } from "./stream-viewport-writer.ts";
 import { sampleVideoSharpnessTelemetry } from "./stream-visual-quality.ts";
 import { STREAMING_UNAVAILABLE_TAG } from "./streaming-protocol.ts";
-
-interface ConnectorContext {
-  connectorId: string;
-  displayName: string;
-}
 
 interface StreamSurfaceProps {
   /** Open the Stage-2 overlay on mount (preview only). */
@@ -1580,6 +1577,7 @@ export function StreamSurface({
       <div className="pdpp-stream-orientation-shell mx-auto flex min-h-dvh w-full max-w-md flex-col items-stretch justify-center px-5 py-16">
         <OrientationCard
           buttonLabel="Open browser"
+          connectorIcon={connector?.icon}
           connectorName={connector?.displayName}
           isMinting={isMinting}
           message={interactionMessage}
@@ -1624,6 +1622,7 @@ function WordmarkCorner() {
 
 interface OrientationCardProps {
   buttonLabel: string;
+  connectorIcon?: ConnectorContext["icon"];
   connectorName?: string;
   /** While the click handler is awaiting the mint POST. Disables the button + flips the label. */
   isMinting: boolean;
@@ -1634,6 +1633,7 @@ interface OrientationCardProps {
 
 function OrientationCard({
   buttonLabel,
+  connectorIcon,
   connectorName,
   isMinting,
   message,
@@ -1658,7 +1658,12 @@ function OrientationCard({
       className="flex flex-col gap-5 rounded-lg px-5 py-6 sm:px-6 sm:py-7"
       data-surface="human"
     >
-      {connectorName ? <p className="pdpp-eyebrow text-foreground">{connectorName}</p> : null}
+      {connectorName ? (
+        <p className="flex items-center gap-2 pdpp-eyebrow text-foreground">
+          <ConnectorMark icon={connectorIcon} name={connectorName} />
+          {connectorName}
+        </p>
+      ) : null}
       <p className="pdpp-body-lg text-foreground" id="stream-orientation-title">
         {message}
       </p>
@@ -5945,7 +5950,10 @@ export function ResolvedSurface({ connector, runId }: { connector: ConnectorCont
           data-surface="human"
         >
           <p className="pdpp-body-lg text-foreground" id="stream-resolved-title">
-            {subject} is back on it.
+            <span className="flex items-center gap-2">
+              <ConnectorMark icon={connector?.icon} name={subject} />
+              {subject} is back on it.
+            </span>
           </p>
           <p className="pdpp-body text-foreground">
             The browser step is complete. You can close this tab with your browser controls, or view run details.
@@ -5988,7 +5996,12 @@ function UnsupportedSurface({
           className="flex flex-col gap-5 rounded-lg px-5 py-6 sm:px-6 sm:py-7"
           data-surface="human"
         >
-          {connector ? <p className="pdpp-eyebrow text-foreground">{connector.displayName}</p> : null}
+          {connector ? (
+            <p className="flex items-center gap-2 pdpp-eyebrow text-foreground">
+              <ConnectorMark icon={connector.icon} name={connector.displayName} />
+              {connector.displayName}
+            </p>
+          ) : null}
           <p className="pdpp-body-lg text-foreground" id="stream-unsupported-title">
             {interactionMessage}
           </p>

@@ -9,6 +9,7 @@ import { buildBlobAffordance, buildPeekFields } from "@pdpp/operator-ui/componen
 import { declaredRolesFromCapabilities } from "@pdpp/operator-ui/explore/explore-data-assembler";
 import { notFound } from "next/navigation";
 import { RecordInspector } from "@/app/(console)/components/record-inspector.tsx";
+import { ConnectorMark } from "@/app/(console)/components/connector-mark.tsx";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
 import { ServerUnreachable } from "../../../../components/server-unreachable.tsx";
 import { WarningsBanner } from "../../../../components/warnings-banner.tsx";
@@ -21,6 +22,7 @@ import {
 } from "../../../../lib/record-timestamps.ts";
 import {
   type ExpandCapability,
+  type ConnectorManifest,
   getRecord,
   getStreamMetadata,
   listConnectorManifests,
@@ -73,6 +75,7 @@ export default async function RecordDetailPage({
   // whose declared `has_one` points back at the displayed (parent) stream, for
   // reverse parent → filtered-child-list links.
   let connectorStreams: ManifestStream[] = [];
+  let connectorIcon: ConnectorManifest["icon"] = null;
   try {
     const connection = await resolveConnectionForRecordsRoute(routeId);
     if (!connection) {
@@ -95,6 +98,7 @@ export default async function RecordDetailPage({
     recordMetadata = metadataResult;
     expandCapabilities = Array.isArray(metadataResult?.expand_capabilities) ? metadataResult.expand_capabilities : [];
     const connectorManifest = findManifestForConnectorId(manifests, connection.connector_id);
+    connectorIcon = connectorManifest?.icon ?? null;
     connectorStreams = (connectorManifest?.streams ?? []) as ManifestStream[];
     childManifestStream = connectorStreams.find((s) => s.name === streamName);
     const parentMetadata = await Promise.all(
@@ -234,6 +238,10 @@ export default async function RecordDetailPage({
         ]}
         description={
           <>
+            <span className="mr-2 inline-flex items-center gap-2">
+              <ConnectorMark className="size-5 shrink-0" icon={connectorIcon} name={sourceLabel} />
+              <span>{sourceLabel}</span>
+            </span>
             {ts.label} <IcTimestamp className="text-foreground" value={ts.value} />
             {ts.secondary ? (
               <>

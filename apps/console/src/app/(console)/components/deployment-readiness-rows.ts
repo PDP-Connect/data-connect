@@ -13,6 +13,7 @@ import type { DeploymentDiagnostics } from "../lib/ref-client.ts";
 export type ReadinessStatus = "ok" | "warn" | "error" | "info" | "unknown";
 
 export interface ReadinessRow {
+  action?: { label: string; onClick: () => void };
   check: string;
   detail: string;
   hint?: string;
@@ -106,14 +107,16 @@ export function ownerPasswordRow(inputs: ServerInputs): ReadinessRow {
   };
 }
 
-export function referenceOriginRow(inputs: ServerInputs, browserOrigin: string | null): ReadinessRow {
+export function referenceOriginRow(
+  inputs: ServerInputs,
+  browserOrigin: string | null,
+  action?: ReadinessRow["action"]
+): ReadinessRow {
   if (!inputs.referenceOriginConfigured) {
     return {
       check: "Reference origin alignment",
-      detail:
-        "PDPP_REFERENCE_ORIGIN is not set. The deployment will infer the origin from request headers, which is brittle behind proxies.",
-      hint: "Set `PDPP_REFERENCE_ORIGIN` to the URL you are visiting (e.g. `https://<podid>-3002.proxy.runpod.net`). Mismatches break the MCP and OAuth callback flows.",
-      status: "warn",
+      detail: "Loopback deployment; no public origin needed.",
+      status: "ok",
     };
   }
   if (browserOrigin === null) {
@@ -135,8 +138,9 @@ export function referenceOriginRow(inputs: ServerInputs, browserOrigin: string |
   return {
     check: "Reference origin alignment",
     detail: `PDPP_REFERENCE_ORIGIN=${configured}; you are viewing this dashboard from ${observed}.`,
-    hint: "Set `PDPP_REFERENCE_ORIGIN` to the URL you are visiting (e.g. `https://<podid>-3002.proxy.runpod.net`). Mismatches break the MCP and OAuth callback flows.",
-    status: "warn",
+    hint: "Set PDPP_REFERENCE_ORIGIN to the browser origin and restart; the button copies the assignment.",
+    status: "error",
+    ...(action ? { action } : {}),
   };
 }
 

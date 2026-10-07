@@ -14,7 +14,7 @@ supports four command namespaces:
   asking for an owner bearer token.
 
 - **`pdpp owner-agent <onboard|status|control|connectors|setup|revoke>`** — trusted owner-agent
-  onboarding for a local agent that acts as the operator (for example Daisy).
+  onboarding for a local assistant the operator has authorized to act on their behalf.
   This is owner-level local automation, deliberately separate from the default
   grant-scoped `pdpp connect` path; ordinary agents should not use it.
   `onboard <entrypoint-url>` discovers the `pdpp_owner_agent_onboarding`
@@ -22,9 +22,8 @@ supports four command namespaces:
   authorization-server metadata), runs browser-mediated owner approval, and
   writes the issued credential to a local file with `0600` permissions. The
   bearer is never printed; only the verification URL, code, and non-secret
-  status are shown. Pass `--credential-file` to target Daisy's first supported
-  path `~/applications/daisy/.pi/agent/pdpp-owner-agent.json`; otherwise the
-  credential defaults to `~/.pdpp/owner-agents/<host>.json` and stores the
+  status are shown. The credential defaults to `~/.pdpp/owner-agents/<host>.json`; pass
+  `--credential-file` to choose another location. The file stores the
   bearer as top-level `access_token` for local agents. `status` introspects the
   stored credential. `control` lists the non-secret owner-agent control
   capabilities (`GET /v1/owner/control`) and configured connection instances

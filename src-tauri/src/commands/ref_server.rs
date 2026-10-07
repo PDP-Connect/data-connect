@@ -84,10 +84,15 @@ fn configured_checkout_dir() -> Result<Option<PathBuf>, String> {
 }
 
 fn configured_server_url() -> Option<String> {
-    std::env::var("PDPP_REFERENCE_SERVER_URL")
+    std::env::var("DATACONNECT_RI_URL")
+        .or_else(|_| std::env::var("PDPP_REFERENCE_SERVER_URL"))
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn configured_server_origin() -> String {
+    configured_server_url().unwrap_or_else(|| DEFAULT_REFERENCE_SERVER_URL.to_string())
 }
 
 fn resolve_reference_server_target(
@@ -130,6 +135,22 @@ async fn wait_for_health(origin: String) -> bool {
 /// `reference-server-ready` on success, `reference-server-error` on failure.
 #[tauri::command]
 pub async fn start_reference_server(app: AppHandle) -> Result<ReferenceServerStatus, String> {
+    start_reference_server_internal(app, true).await
+}
+
+/// Attach to an already-running reference server without consulting the
+/// legacy checkout-spawn setting. The unified tray uses this until the A3
+/// supervisor owns sidecar startup.
+pub(crate) async fn attach_reference_server(
+    app: AppHandle,
+) -> Result<ReferenceServerStatus, String> {
+    start_reference_server_internal(app, false).await
+}
+
+async fn start_reference_server_internal(
+    app: AppHandle,
+    allow_spawn: bool,
+) -> Result<ReferenceServerStatus, String> {
     use std::io::{BufRead, BufReader};
     use std::process::{Command, Stdio};
 
@@ -165,17 +186,61 @@ pub async fn start_reference_server(app: AppHandle) -> Result<ReferenceServerSta
         }
     };
 
-    let checkout_dir = match configured_checkout_dir() {
-        Ok(checkout_dir) => checkout_dir,
-        Err(message) => {
+    let checkout_dir = if allow_spawn {
+        match configured_checkout_dir() {
+            Ok(checkout_dir) => checkout_dir,
+            Err(message) => {
+                clear_starting();
+                let _ = app.emit(
+                    "reference-server-error",
+                    serde_json::json!({ "message": message }),
+                );
+                return Err(message);
+            }
+        }
+    } else {
+        None
+    };
+
+    if !allow_spawn {
+        // Dev-mode fallback: no local pdpp checkout configured. Health-check
+        // whatever is already listening at PDPP_REFERENCE_SERVER_URL instead
+        // of spawning anything.
+        let origin = configured_server_origin();
+        log::info!(
+            "PDPP_REFERENCE_CHECKOUT not set; attaching to already-running reference server at {}",
+            origin
+        );
+        if wait_for_health(origin.clone()).await {
+            if let Ok(mut guard) = REF_SERVER_ORIGIN.lock() {
+                *guard = Some(origin.clone());
+            }
+            if let Ok(mut guard) = REF_SERVER_OWNS_PROCESS.lock() {
+                *guard = false;
+            }
             clear_starting();
             let _ = app.emit(
-                "reference-server-error",
-                serde_json::json!({ "message": message }),
+                "reference-server-ready",
+                serde_json::json!({ "origin": origin, "managed": false }),
             );
-            return Err(message);
+            return Ok(ReferenceServerStatus {
+                running: true,
+                origin: Some(origin),
+                managed: false,
+            });
         }
-    };
+        clear_starting();
+        let message = format!(
+            "No reference server answered {} within {:?}.",
+            health_check_url(&origin),
+            HEALTH_WAIT_TIMEOUT
+        );
+        let _ = app.emit(
+            "reference-server-error",
+            serde_json::json!({ "message": message }),
+        );
+        return Err(message);
+    }
     let target = match resolve_reference_server_target(checkout_dir, configured_server_url()) {
         Ok(target) => target,
         Err(message) => {
@@ -572,6 +637,42 @@ pub async fn login_reference_server(origin: String) -> Result<ReferenceServerLog
             .to_string()
     })?;
 
+    login_reference_server_with_password(origin, &password).await
+}
+
+pub(crate) async fn login_reference_server_with_password(
+    origin: String,
+    password: &str,
+) -> Result<ReferenceServerLoginResult, String> {
+    login_reference_server_with_password_and_host(origin, password, None, None).await
+}
+
+/// Session label the reference server treats as the desktop shell's own
+/// session (`issueSession` in reference-implementation/server/owner-auth.ts):
+/// a login with this label replaces the previous desktop-shell session instead
+/// of adding one, so an app start does not leave the last start's session live.
+pub(crate) const DESKTOP_OWNER_SESSION_LABEL: &str = "This computer";
+
+/// Same as `login_reference_server_with_password`, but overrides the `Host`
+/// header when `trusted_host` is `Some`. Needed for the same reason
+/// `Readiness::HttpGet`'s `host_header` was added
+/// (`commands/process_supervisor.rs`): once a public origin is configured,
+/// the reference server's `isAllowedRequestHost` rejects any request whose
+/// `Host` header isn't in `PDPP_TRUSTED_HOSTS`, and this login call dials
+/// `127.0.0.1` just like that readiness probe did. Without this, every
+/// bootstrap/restart that runs after ngrok has discovered an origin fails
+/// its own login step with `invalid_host` and tears the stack back down --
+/// reproduced live against a real ngrok tunnel.
+///
+/// `session_label` is sent as `X-PDPP-Owner-Session-Label`; pass
+/// `DESKTOP_OWNER_SESSION_LABEL` only for the one session the desktop shell
+/// keeps for its console window, because each such login revokes the last.
+pub(crate) async fn login_reference_server_with_password_and_host(
+    origin: String,
+    password: &str,
+    trusted_host: Option<&str>,
+    session_label: Option<&str>,
+) -> Result<ReferenceServerLoginResult, String> {
     // The server's own /owner/login handler answers a successful login with a
     // 302 redirect back to the login page (a browser-form-compatible shape),
     // setting pdpp_owner_session on THAT response, not on whatever it
@@ -586,11 +687,18 @@ pub async fn login_reference_server(origin: String) -> Result<ReferenceServerLog
         .build()
         .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
     let login_url = format!("{}/owner/login", origin.trim_end_matches('/'));
-    let response = client
+    let mut request = client
         .post(&login_url)
         .header("Accept", "application/json")
         .header("Content-Type", "application/json")
-        .json(&serde_json::json!({ "password": password }))
+        .json(&serde_json::json!({ "password": password }));
+    if let Some(host) = trusted_host {
+        request = request.header(reqwest::header::HOST, host);
+    }
+    if let Some(label) = session_label {
+        request = request.header("X-PDPP-Owner-Session-Label", label);
+    }
+    let response = request
         .send()
         .await
         .map_err(|e| format!("Failed to reach {}: {}", login_url, e))?;
@@ -608,8 +716,7 @@ pub async fn login_reference_server(origin: String) -> Result<ReferenceServerLog
         .get_all(reqwest::header::SET_COOKIE)
         .iter()
         .filter_map(|v| v.to_str().ok())
-        .find(|v| v.starts_with("pdpp_owner_session="))
-        .map(|v| v.to_string());
+        .find_map(extract_owner_session_cookie);
 
     let Some(raw_cookie) = set_cookie_header else {
         return Err(
@@ -618,23 +725,117 @@ pub async fn login_reference_server(origin: String) -> Result<ReferenceServerLog
         );
     };
 
-    // Extract just the cookie value (between '=' and the first ';').
-    let value = raw_cookie
-        .split_once('=')
-        .map(|(_, rest)| rest.split(';').next().unwrap_or("").to_string())
-        .ok_or_else(|| "Malformed Set-Cookie header from reference server".to_string())?;
-
     Ok(ReferenceServerLoginResult {
-        session_cookie: value,
+        session_cookie: raw_cookie,
         origin,
     })
 }
 
+fn extract_owner_session_cookie(header: &str) -> Option<String> {
+    let value = header
+        .strip_prefix("pdpp_owner_session=")?
+        .split(';')
+        .next()?
+        .trim();
+    (!value.is_empty()).then_some(value.to_string())
+}
+
+/// Owner session reused by `reference_server_has_connection`, keyed by the
+/// origin it was issued for, so repeated checks do not each add a session.
+static REF_SERVER_CHECK_SESSION: Mutex<Option<(String, String)>> = Mutex::new(None);
+
+/// Whether the running reference server holds exactly one connection (active
+/// or revoked) for `connector_key`. The console's `/sources/<key>` page
+/// resolves a connector key only when it names one connection, so with none or
+/// several it would 404. Returns `false` when this app has no running
+/// reference server or no owner password, so the caller never links to a
+/// console page the server cannot show.
+#[tauri::command]
+pub async fn reference_server_has_connection(connector_key: String) -> Result<bool, String> {
+    if connector_key.is_empty()
+        || !connector_key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    {
+        return Err("Connector key must be a plain reference connector key".into());
+    }
+    let status = get_reference_server_status()?;
+    let Some(origin) = status.origin.filter(|_| status.running) else {
+        return Ok(false);
+    };
+    let Ok(password) = std::env::var("PDPP_OWNER_PASSWORD") else {
+        return Ok(false);
+    };
+
+    let cached = REF_SERVER_CHECK_SESSION
+        .lock()
+        .map_err(|e| e.to_string())?
+        .clone()
+        .filter(|(cached_origin, _)| cached_origin == &origin)
+        .map(|(_, cookie)| cookie);
+    if let Some(cookie) = cached {
+        if let Some(found) = query_reference_connections(&origin, &cookie, &connector_key).await? {
+            return Ok(found);
+        }
+    }
+
+    let login = login_reference_server_with_password(origin.clone(), &password).await?;
+    *REF_SERVER_CHECK_SESSION.lock().map_err(|e| e.to_string())? =
+        Some((origin.clone(), login.session_cookie.clone()));
+    query_reference_connections(&origin, &login.session_cookie, &connector_key)
+        .await?
+        .ok_or_else(|| "Reference server rejected a fresh owner session".to_string())
+}
+
+/// `Some(exactly_one)` for an answered query, `None` when the session is not
+/// accepted (so the caller can sign in again).
+async fn query_reference_connections(
+    origin: &str,
+    session_cookie: &str,
+    connector_key: &str,
+) -> Result<Option<bool>, String> {
+    let url = format!("{}/_ref/connections", origin.trim_end_matches('/'));
+    // A denied browser-style request redirects to the login page; do not
+    // follow it, so a stale session reads as "sign in again".
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
+    let response = client
+        .get(&url)
+        .query(&[("connector_id", connector_key)])
+        .header("Accept", "application/json")
+        .header(
+            reqwest::header::COOKIE,
+            format!("pdpp_owner_session={session_cookie}"),
+        )
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+        .map_err(|e| format!("Failed to reach {url}: {e}"))?;
+    let status = response.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED || status.is_redirection() {
+        return Ok(None);
+    }
+    if !status.is_success() {
+        return Err(format!(
+            "Reference server connection list failed: HTTP {status}"
+        ));
+    }
+    let body: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| format!("Reference server connection list was not JSON: {e}"))?;
+    let data = body
+        .get("data")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("Reference server connection list has no data array")?;
+    Ok(Some(data.len() == 1))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{
-        resolve_reference_server_target, ReferenceServerTarget, OPERATOR_TOOLS_UNAVAILABLE,
-    };
+    use super::*;
     use std::path::PathBuf;
 
     #[test]
@@ -674,5 +875,166 @@ mod tests {
             .expect_err("the bundled Personal Server is not a reference operator host");
 
         assert_eq!(error, OPERATOR_TOOLS_UNAVAILABLE);
+    }
+
+    #[test]
+    fn extracts_owner_session_cookie_value_without_attributes() {
+        assert_eq!(
+            extract_owner_session_cookie("pdpp_owner_session=abc123; Path=/; HttpOnly"),
+            Some("abc123".to_string())
+        );
+    }
+
+    /// Answers one owner login like the reference server and returns the
+    /// raw request it received.
+    fn serve_one_login() -> (String, std::thread::JoinHandle<String>) {
+        serve_one(
+            b"HTTP/1.1 302 Found\r\nLocation: /\r\nSet-Cookie: pdpp_owner_session=fresh; Path=/; HttpOnly\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        )
+    }
+
+    /// Answers one request with `response` and returns the raw request.
+    fn serve_one(response: &'static [u8]) -> (String, std::thread::JoinHandle<String>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind fake server");
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept login");
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 4096];
+            loop {
+                let read = stream.read(&mut buffer).expect("read login");
+                request.extend_from_slice(&buffer[..read]);
+                let text = String::from_utf8_lossy(&request);
+                if let Some(head_end) = text.find("\r\n\r\n") {
+                    let length = text[..head_end]
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())?
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= head_end + 4 + length || read == 0 {
+                        break;
+                    }
+                }
+            }
+            stream.write_all(response).expect("answer request");
+            String::from_utf8_lossy(&request).to_ascii_lowercase()
+        });
+        (origin, handle)
+    }
+
+    #[tokio::test]
+    async fn desktop_login_asks_to_replace_the_desktop_shell_session() {
+        let (origin, server) = serve_one_login();
+        let login = login_reference_server_with_password_and_host(
+            origin,
+            "pw",
+            None,
+            Some(DESKTOP_OWNER_SESSION_LABEL),
+        )
+        .await
+        .expect("login succeeds");
+        assert_eq!(login.session_cookie, "fresh");
+        assert!(server
+            .join()
+            .unwrap()
+            .contains("\r\nx-pdpp-owner-session-label: this computer\r\n"));
+    }
+
+    #[tokio::test]
+    async fn unlabeled_login_sends_no_session_label() {
+        let (origin, server) = serve_one_login();
+        login_reference_server_with_password(origin, "pw")
+            .await
+            .expect("login succeeds");
+        assert!(!server
+            .join()
+            .unwrap()
+            .contains("x-pdpp-owner-session-label"));
+    }
+
+    fn json_ok(body: &str) -> &'static [u8] {
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        Box::leak(response.into_bytes().into_boxed_slice())
+    }
+
+    #[tokio::test]
+    async fn connection_query_is_false_when_the_key_names_several_connections() {
+        let (origin, server) = serve_one(json_ok(
+            r#"{"data":[{"connector_id":"amazon"},{"connector_id":"amazon"}],"object":"list"}"#,
+        ));
+        let found = query_reference_connections(&origin, "sess", "amazon")
+            .await
+            .expect("query succeeds");
+        assert_eq!(
+            found,
+            Some(false),
+            "a connector-key link would 404 with two connections"
+        );
+        server.join().expect("fake server");
+    }
+
+    #[tokio::test]
+    async fn connection_query_sends_the_owner_session_and_reads_the_list() {
+        let (origin, server) = serve_one(json_ok(
+            r#"{"data":[{"connector_id":"amazon"}],"object":"list"}"#,
+        ));
+        let found = query_reference_connections(&origin, "sess", "amazon")
+            .await
+            .expect("query succeeds");
+        assert_eq!(found, Some(true));
+        let request = server.join().unwrap();
+        assert!(request.starts_with("get /_ref/connections?connector_id=amazon "));
+        assert!(request.contains("\r\ncookie: pdpp_owner_session=sess\r\n"));
+    }
+
+    #[tokio::test]
+    async fn connection_query_reports_an_empty_list_as_absent() {
+        let (origin, server) = serve_one(json_ok(r#"{"data":[],"object":"list"}"#));
+        let found = query_reference_connections(&origin, "sess", "amazon")
+            .await
+            .expect("query succeeds");
+        assert_eq!(found, Some(false));
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn connection_query_treats_a_denied_session_as_sign_in_again() {
+        let (origin, server) = serve_one(
+            b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        );
+        let found = query_reference_connections(&origin, "stale", "amazon")
+            .await
+            .expect("query answers");
+        assert_eq!(found, None);
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn connection_check_refuses_a_key_that_is_not_plain() {
+        assert!(reference_server_has_connection("../x".into())
+            .await
+            .is_err());
+        assert!(reference_server_has_connection(String::new())
+            .await
+            .is_err());
+    }
+
+    #[test]
+    fn rejects_other_or_empty_cookie_headers() {
+        assert_eq!(
+            extract_owner_session_cookie("pdpp_owner_csrf=abc123; Path=/"),
+            None
+        );
+        assert_eq!(
+            extract_owner_session_cookie("pdpp_owner_session=; Path=/"),
+            None
+        );
     }
 }

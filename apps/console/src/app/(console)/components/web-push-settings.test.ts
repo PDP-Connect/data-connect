@@ -74,9 +74,9 @@ const SSR_SAFE_DIAGNOSTIC_PUSHMANAGER_PATTERN = /hasWindowFeature\("PushManager"
 const SSR_SAFE_DIAGNOSTIC_NOTIFICATION_PATTERN = /hasWindowFeature\("Notification"\)/;
 const SSR_SAFE_DIAGNOSTIC_SERVICE_WORKER_PATTERN = /hasNavigatorFeature\("serviceWorker"\)/;
 const SVG_CSS_COLOR_FUNCTION_PATTERN = /oklch\(|lab\(|lch\(|color\(/i;
-const SVG_BACKGROUND_PATTERN = /<rect(?=[^>]*width="32")(?=[^>]*height="32")(?=[^>]*fill="#f8f6f0")[^>]*>/;
-const SVG_BRAND_COPPER_PATTERN = /fill="#a05533"/;
-const SVG_BRAND_BLUE_PATTERN = /fill="#2c73d9"/;
+const DATACONNECT_ICON_PATTERN = /const DATACONNECT_ICON =/;
+const DATACONNECT_ICON_GRADIENT_PATTERN = /stop-color="#304DC0"/;
+const DATACONNECT_ICON_WORDMARK_PATTERN = /aria-label="DataConnect"/;
 const ENABLE_CLEARS_TEST_STATUS_PATTERN = /async function enable\(\)[\s\S]*?setBusy\(true\);\s*setTestStatus\(null\);/;
 const DISABLE_CLEARS_TEST_STATUS_PATTERN =
   /async function disable\(\)[\s\S]*?setBusy\(true\);\s*setTestStatus\(null\);/;
@@ -94,7 +94,7 @@ test("WebPushSettings renders unsupported, denied-permission, insecure-context, 
     "Notification",
     'Notification.permission === "denied"',
     "Server VAPID keys are not configured",
-    "Mobile browsers may require opening the installed PDPP app before notifications can arrive",
+    "Mobile browsers may require opening the installed DataConnect app before notifications can arrive",
     "Installing the PWA only adds the app icon",
   ]) {
     assert.match(src, new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
@@ -125,11 +125,11 @@ test("dashboard service worker fails closed and click-through targets clean owne
 });
 
 test("dashboard launcher SVG icon uses Android-safe paint values", async () => {
-  const src = await readFile(join(APP_ROOT, "src", "app", "icon.svg"), "utf8");
+  const src = await readFile(join(APP_ROOT, "src", "app", "icon.tsx"), "utf8");
   assert.doesNotMatch(src, SVG_CSS_COLOR_FUNCTION_PATTERN);
-  assert.match(src, SVG_BACKGROUND_PATTERN);
-  assert.match(src, SVG_BRAND_COPPER_PATTERN);
-  assert.match(src, SVG_BRAND_BLUE_PATTERN);
+  assert.match(src, DATACONNECT_ICON_PATTERN);
+  assert.match(src, DATACONNECT_ICON_GRADIENT_PATTERN);
+  assert.match(src, DATACONNECT_ICON_WORDMARK_PATTERN);
 });
 
 test("dashboard notification setup registers, posts, reuses, and deletes browser subscriptions", async () => {

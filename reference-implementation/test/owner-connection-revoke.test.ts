@@ -53,6 +53,7 @@ import {
   createSqliteConnectorInstanceStore,
   makeDefaultAccountConnectorInstanceId,
 } from "../server/stores/connector-instance-store.ts";
+import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
 
 /**
  * server/index.js (startServer) and server/records.js (ingestRecord) are
@@ -88,7 +89,10 @@ interface StartServerOptions {
 }
 
 async function startServer(opts: StartServerOptions): Promise<ClosableServer> {
-  const raw: Record<string, unknown> = await startServerUntyped(opts);
+  const raw: Record<string, unknown> = await startServerUntyped({
+    preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
+    ...opts,
+  });
   const result: ClosableServer = {
     asPort: raw.asPort as number,
     asServer: raw.asServer as CloseableHandle,

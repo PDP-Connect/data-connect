@@ -96,7 +96,8 @@ test("executeAsAuthorizationServerMetadata: pins the fixed OAuth capability voca
   const out = build({ dynamicClientRegistrationEnabled: true, issuer: "https://x" });
   assert.deepEqual(out.codeChallengeMethodsSupported, ["S256"], "PKCE S256 only");
   assert.deepEqual(out.responseTypesSupported, ["code"], "code response type only");
-  assert.deepEqual(out.tokenEndpointAuthMethodsSupported, ["none"]);
+  assert.deepEqual(out.tokenEndpointAuthMethodsSupported, ["none", "private_key_jwt"]);
+  assert.deepEqual(out.tokenEndpointAuthSigningAlgValuesSupported, ["RS256"]);
   assert.ok(out.grantTypesSupported.includes("refresh_token"));
   assert.ok(out.grantTypesSupported.includes("authorization_code"));
   assert.ok(out.grantTypesSupported.includes("urn:ietf:params:oauth:grant-type:device_code"));

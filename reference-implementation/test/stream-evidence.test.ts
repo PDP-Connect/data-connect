@@ -110,7 +110,7 @@ async function fetchJson<T = Record<string, unknown>>(
 }
 
 async function issueOwnerToken(asUrl: string, subjectId = "test_user"): Promise<string> {
-  const clientId = "cli_longview";
+  const clientId = "pdpp_cli";
   const { body: device } = await fetchJson<{ device_code: string; user_code: string }>(
     `${asUrl}/oauth/device_authorization`,
     {

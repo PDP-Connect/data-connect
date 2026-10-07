@@ -1239,7 +1239,7 @@ test("runCollectorConnector rejects promptly when the connector command is missi
         runCollectorConnector({
           baseUrl: harness.url,
           connector: {
-            args: ["connectors/claude_code/index.ts"],
+            args: ["connectors/fixture/index.ts"],
             command: "__pdpp_missing_connector_command__",
             connector_id: "fixture-missing-command",
             env: { PATH: "operator-bin" },

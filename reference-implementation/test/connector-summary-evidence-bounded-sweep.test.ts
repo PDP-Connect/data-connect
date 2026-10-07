@@ -38,8 +38,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-// biome-ignore lint/correctness/noUnresolvedImports: Biome resolver cannot model this installed package export
-import Database from "better-sqlite3";
+import Database from "./helpers/sqlite-driver.ts";
 import { reconcileConnectorSummaryEvidence } from "../server/connector-summary-evidence-engine.ts";
 import {
   runBoundedSummaryEvidenceSweep,

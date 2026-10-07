@@ -3,6 +3,7 @@
 import assert from "node:assert/strict"
 import {
   chmodSync,
+  existsSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
@@ -16,7 +17,9 @@ import test from "node:test"
 
 import {
   findPersonalServerDist,
+  findResourceRoot,
   restorePersonalServer,
+  restoreReferenceStacks,
 } from "./finalize-linux-appimage.js"
 
 test("restores the personal-server runtime tree in a nested AppDir", () => {
@@ -58,6 +61,50 @@ test("restores the personal-server runtime tree in a nested AppDir", () => {
       ),
       "module exports"
     )
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("restores both reference-stack roots in a nested AppDir", () => {
+  const root = mkdtempSync(
+    join(homedir(), ".tmp", "finalize-linux-reference-stack-test-")
+  )
+  try {
+    const source = join(root, "staged-reference-stack")
+    const appDir = join(root, "DataConnect.AppDir")
+    const appResources = join(
+      appDir,
+      "usr",
+      "lib",
+      "DataConnect",
+      "reference-stack"
+    )
+
+    for (const name of ["ri", "console"]) {
+      mkdirSync(join(source, name), { recursive: true })
+      writeFileSync(join(source, name, "manifest.json"), `${name} manifest`)
+      mkdirSync(join(appResources, name), { recursive: true })
+      writeFileSync(join(appResources, name, "stale.txt"), "stale")
+    }
+
+    assert.equal(
+      findResourceRoot(appDir, "reference-stack/ri"),
+      join(appResources, "ri")
+    )
+    const destinations = restoreReferenceStacks(appDir, source)
+
+    assert.deepEqual(destinations, {
+      ri: join(appResources, "ri"),
+      console: join(appResources, "console"),
+    })
+    for (const name of ["ri", "console"]) {
+      assert.equal(
+        readFileSync(join(appResources, name, "manifest.json"), "utf8"),
+        `${name} manifest`
+      )
+      assert.equal(existsSync(join(appResources, name, "stale.txt")), false)
+    }
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

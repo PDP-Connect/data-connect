@@ -428,7 +428,7 @@ export function OwnerTokenRequired() {
     <div className="rounded-md px-4 py-3" data-surface="human">
       <h2 className="pdpp-title text-foreground">Owner token required</h2>
       <p className="pdpp-body mt-1 text-muted-foreground">
-        This surface reads the owner self-export record APIs. When placeholder owner auth is enabled, the dashboard
+        This surface reads the owner self-export record APIs. When owner sign-in is enabled, the dashboard
         cannot auto-approve a device flow in the background.
       </p>
       <div className="mt-3 flex flex-wrap gap-2">

@@ -10,10 +10,10 @@ import { buildDensityCookie, DENSITY_KEY, normalizeDensity } from "./density-sta
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const PROVIDER_FILE = `${HERE}density-provider.tsx`;
 const LAYOUT_FILE = `${HERE}../../app/layout.tsx`;
-const BRAND_UTILITIES_FILE = `${HERE}../../../../../packages/pdpp-brand/styles/utilities.css`;
-const BRAND_BASE_FILE = `${HERE}../../../../../packages/pdpp-brand/styles/base.css`;
-const BRAND_SEMANTIC_FILE = `${HERE}../../../../../packages/pdpp-brand/styles/tokens/semantic.css`;
-const BRAND_PRIMITIVE_FILE = `${HERE}../../../../../packages/pdpp-brand/styles/tokens/primitive.css`;
+const BRAND_UTILITIES_FILE = `${HERE}../../../../../reference-implementation/vendor/brand/styles/utilities.css`;
+const BRAND_BASE_FILE = `${HERE}../../../../../reference-implementation/vendor/brand/styles/base.css`;
+const BRAND_SEMANTIC_FILE = `${HERE}../../../../../reference-implementation/vendor/brand/styles/tokens/semantic.css`;
+const BRAND_PRIMITIVE_FILE = `${HERE}../../../../../reference-implementation/vendor/brand/styles/tokens/primitive.css`;
 
 const NEXT_HEADERS_IMPORT_RE = /from "next\/headers"/;
 const LAYOUT_NORMALIZES_DENSITY_RE = /normalizeDensity\(cookieStore\.get\(DENSITY_KEY\)\?\.value\)/;

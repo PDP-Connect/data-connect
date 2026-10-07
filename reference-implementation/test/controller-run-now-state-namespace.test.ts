@@ -14,6 +14,8 @@ import { closeDb, getDb, initDb } from "../server/db.ts";
 import { OWNER_AUTH_DEFAULT_SUBJECT_ID } from "../server/owner-auth.ts";
 import { getSyncState, putSyncState } from "../server/records.ts";
 import { makeDefaultAccountConnectorInstanceId } from "../server/stores/connector-instance-store.ts";
+import { withConnectorLifecycleLock } from "../server/connector-lifecycle-lock.ts";
+
 
 /** Asserts index i exists and returns it typed — avoids noUncheckedIndexedAccess churn on calls[i] throughout this file. */
 function at<T>(items: readonly T[], index: number): T {
@@ -113,6 +115,7 @@ interface DetailGapReadStoreFixture {
 }
 
 interface MakeControllerOverrides {
+  connectorPathResolver?: ControllerOptions["connectorPathResolver"];
   detailGapStore?: DetailGapReadStoreFixture;
   runConnectorImpl?: ControllerOptions["runConnectorImpl"];
 }
@@ -139,7 +142,7 @@ function makeController(calls: RuntimeRunConnectorOptions[], overrides: MakeCont
   // surface, so the stubbed runConnectorImpl is reached directly.
   return createController({
     admitRunConnection: fakeAdmitRunConnection(),
-    connectorPathResolver: () => "/tmp/connector.ts",
+    connectorPathResolver: overrides.connectorPathResolver ?? (() => "/tmp/connector.ts"),
     ...(overrides.detailGapStore ? { detailGapStore: overrides.detailGapStore } : {}),
     logger: { error: () => undefined, warn: () => undefined },
     ownerSubjectId: "owner_1",
@@ -151,6 +154,42 @@ function makeController(calls: RuntimeRunConnectorOptions[], overrides: MakeCont
       }),
   });
 }
+
+test("manual run path resolution holds the connector database fence through admission", async (t) => {
+  freshDb(t);
+  let releaseResolution!: () => void;
+  let resolutionStarted!: () => void;
+  const resolutionGate = new Promise<void>((resolve) => (releaseResolution = resolve));
+  const started = new Promise<void>((resolve) => (resolutionStarted = resolve));
+  const controller = makeController([], {
+    connectorPathResolver: async () => {
+      resolutionStarted();
+      await resolutionGate;
+      return "/tmp/connector.ts";
+    },
+  });
+  const run = controller.runNow(AMAZON, {
+    connectorInstanceId: "cin_lock",
+    manifest: AMAZON_MANIFEST,
+    ownerToken: "owner-token",
+    runId: "run_lock",
+  });
+  let competingLockAcquired = false;
+  const competingLock = withConnectorLifecycleLock("unused", AMAZON, async () => {
+    competingLockAcquired = true;
+  });
+  try {
+    await started;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(competingLockAcquired, false);
+  } finally {
+    releaseResolution();
+  }
+  await run;
+  await competingLock;
+  assert.equal(competingLockAcquired, true);
+  await controller.drainActiveRuns(1000);
+});
 
 async function drainUntilIdle(controller: ReturnType<typeof createController>, limit = 5) {
   for await (const _ of Array.from({ length: limit })) {
@@ -313,6 +352,29 @@ test("default-namespace state does NOT satisfy an explicit connection run", asyn
   // connection and reports full_refresh.
   assert.equal(at(calls, 0).state, null);
   assert.equal(at(calls, 0).collectionMode, "full_refresh");
+});
+
+test("reset-state run clears its connection cursor and launches one full refresh", async (t) => {
+  freshDb(t);
+  await putSyncState({ connector_id: AMAZON, connector_instance_id: "cin_reset" }, SEEDED_ORDERS_STATE);
+
+  const calls: RuntimeRunConnectorOptions[] = [];
+  const controller = makeController(calls);
+  const started = await controller.runNow(AMAZON, {
+    connectorInstanceId: "cin_reset",
+    fullRefresh: true,
+    manifest: AMAZON_MANIFEST,
+    ownerToken: "owner-token",
+    resetState: true,
+    runId: "run_reset",
+  });
+  await controller.drainActiveRuns(1000);
+
+  assert.equal(started.run_id, "run_reset");
+  assert.equal(calls.length, 1);
+  assert.equal(at(calls, 0).collectionMode, "full_refresh");
+  assert.equal(at(calls, 0).state, null);
+  assert.deepEqual((await getSyncState({ connector_id: AMAZON, connector_instance_id: "cin_reset" })).state, {});
 });
 
 test("two connections of the same connector derive mode from their own state", async (t) => {

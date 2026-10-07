@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
+import { mkdirSync, rmSync } from "node:fs";
+import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import {
   type BrowserSurface,
@@ -18,6 +20,8 @@ import {
   createBrowserSurfaceReplacementLedger,
   type ReplacementReceipt,
 } from "../runtime/browser-surface/replacement-receipt-ledger.ts";
+import { createBrowserSurfaceManager } from "../runtime/browser-surface/run-coordinator.ts";
+import { createTraceContext } from "../lib/spine.ts";
 import type { BrowserSurfaceReadinessProbe } from "../runtime/browser-surface-readiness.ts";
 import {
   __resetControllerInteractionStateForTests,
@@ -25,6 +29,7 @@ import {
   createController,
 } from "../runtime/controller.ts";
 import type { RuntimeRunConnectorOptions, RuntimeRunConnectorResult } from "../runtime/index.ts";
+import { createHostBrowserSurfaceAllocator } from "../runtime/host-browser-surface-allocator.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
 import type {
   BrowserSurfaceLeaseStore,
@@ -99,8 +104,11 @@ interface SchedulerStoreCalls {
   persistActiveRun: number;
 }
 
-function createSchedulerStore(calls: SchedulerStoreCalls): SchedulerStore {
-  const activeRuns = new Map<string, ActiveRunRecord>();
+function createSchedulerStore(
+  calls: SchedulerStoreCalls,
+  initialActiveRuns: readonly ActiveRunRecord[] = []
+): SchedulerStore {
+  const activeRuns = new Map(initialActiveRuns.map((record) => [record.run_id, record]));
   const store: SchedulerStore = {
     appendRunHistory: () => undefined,
     createSchedule: () => undefined,
@@ -230,6 +238,8 @@ function createMemoryBrowserSurfaceLeaseStore({
 }
 
 interface CreateManagerOptions {
+  initialLeases?: BrowserSurfaceLease[];
+  initialSurfaces?: BrowserSurface[];
   leaseWaitTimeoutMs?: number;
   managedConnectors?: Set<string>;
   now?: () => Date;
@@ -261,6 +271,8 @@ function createManager(options: CreateManagerOptions = {}): BrowserSurfaceLeaseM
       staticStreamBaseUrl: "http://127.0.0.1:8080",
       surfaceMode: staticProfileKey ? "static" : "dynamic",
     },
+    ...(options.initialLeases ? { initialLeases: options.initialLeases } : {}),
+    ...(options.initialSurfaces ? { initialSurfaces: options.initialSurfaces } : {}),
     makeLeaseId: () => {
       leaseSeq += 1;
       return `lease_${leaseSeq}`;
@@ -381,6 +393,11 @@ function createBlockedAllocator(): { allocator: BrowserSurfaceAllocator; unblock
 }
 
 interface SetupOptions {
+  initialActiveRuns?: readonly ActiveRunRecord[];
+  beforeBrowserSurfaceLeaseEnsure?: (args: {
+    readonly runId: string;
+    readonly surfaceId: string;
+  }) => Promise<void> | void;
   beforeBrowserSurfaceLeaseRelease?: (args: { readonly runId: string }) => Promise<void> | void;
   browserSurfaceAllocator?: BrowserSurfaceAllocator;
   browserSurfaceLeaseStore?: BrowserSurfaceLeaseStore;
@@ -389,6 +406,9 @@ interface SetupOptions {
   browserSurfaceReclaimRetryAttempts?: number;
   browserSurfaceReclaimRetryDelayMs?: number;
   connectorPathResolver?: ConnectorPathResolver;
+  describeBrowserSurfaceStartFailure?: (args: {
+    readonly runId: string;
+  }) => { readonly code: string; readonly message: string } | undefined;
   manager?: BrowserSurfaceLeaseManager;
   maxRunWallClockMs?: number;
   runConnectorImpl?: (
@@ -417,7 +437,9 @@ function setupIsolatedControllerDb(t: TestContext): void {
 function setup(
   t: TestContext,
   {
+    beforeBrowserSurfaceLeaseEnsure,
     manager = createManager(),
+    initialActiveRuns,
     browserSurfaceAllocator,
     browserSurfaceLeaseStore,
     browserSurfaceReadinessProbe,
@@ -425,6 +447,7 @@ function setup(
     browserSurfaceReclaimRetryAttempts,
     browserSurfaceReclaimRetryDelayMs = 0,
     beforeBrowserSurfaceLeaseRelease,
+    describeBrowserSurfaceStartFailure,
     maxRunWallClockMs,
     runConnectorImpl,
     connectorPathResolver = () => "/tmp/connector.js",
@@ -454,7 +477,7 @@ function setup(
     runConnector: 0,
     runConnectorOpts: [],
   };
-  const schedulerStore = createSchedulerStore(calls);
+  const schedulerStore = createSchedulerStore(calls, initialActiveRuns);
   const controller = createController({
     admitRunConnection: fakeAdmitRunConnection(),
     // Queued/deferred leases are promoted later without a live caller-supplied
@@ -465,11 +488,13 @@ function setup(
     // production's real resolver would for the single-account convention.
     resolveOwnerSubjectIdForConnectorInstance: async () => "owner_local",
     ...(browserSurfaceAllocator ? { browserSurfaceAllocator } : {}),
+    ...(beforeBrowserSurfaceLeaseEnsure ? { beforeBrowserSurfaceLeaseEnsure } : {}),
     browserSurfaceLeaseManager: manager,
     ...(browserSurfaceLeaseStore ? { browserSurfaceLeaseStore } : {}),
     ...(browserSurfaceReadinessProbe ? { browserSurfaceReadinessProbe } : {}),
     ...(browserSurfaceReadinessTimeoutMs === undefined ? {} : { browserSurfaceReadinessTimeoutMs }),
     ...(beforeBrowserSurfaceLeaseRelease ? { beforeBrowserSurfaceLeaseRelease } : {}),
+    ...(describeBrowserSurfaceStartFailure ? { describeBrowserSurfaceStartFailure } : {}),
     ...(browserSurfaceReclaimRetryAttempts === undefined ? {} : { browserSurfaceReclaimRetryAttempts }),
     browserSurfaceReclaimRetryDelayMs,
     connectorPathResolver,
@@ -564,6 +589,147 @@ test("managed free surface leases and spawns with browser-surface env", async (t
   assert.equal(firstOpts.browserSurfaceEnv?.PDPP_BROWSER_SURFACE_LEASE_ID, "lease_1");
   assert.equal(firstOpts.browserSurfaceEnv?.PDPP_BROWSER_SURFACE_PROFILE_KEY, "managed-profile");
   assert.equal(manager.getLease("lease_1")?.status, "released");
+});
+
+test("host endpoint failure fails controller admission before connector spawn", async (t) => {
+  let hostCalls = 0;
+  const hostFetch = (async () => {
+    hostCalls += 1;
+    return {
+      json: async () => ({}),
+      ok: false,
+      status: 503,
+    } as Response;
+  }) as typeof fetch;
+  const hostAllocator = createHostBrowserSurfaceAllocator({
+    endpoint: "http://127.0.0.1:9916/agent",
+    fetchImpl: hostFetch,
+    headless: false,
+    token: "shared-secret",
+  });
+  const { calls, controller, manager } = setup(t, {
+    beforeBrowserSurfaceLeaseEnsure: (binding) => hostAllocator.bindRunToSurface(binding),
+    browserSurfaceAllocator: hostAllocator,
+    manager: createDynamicManager(),
+  });
+
+  const result = await controller.runNow("managed", {
+    manifest: MANIFEST,
+    connectorInstanceId: "cin_managed",
+    ownerToken: "owner-token",
+    runId: "run_host_down",
+  });
+
+  assert.equal(result.status, "surface_failed");
+  assert.equal(calls.runConnector, 0);
+  assert.equal(hostCalls, 1);
+  assert.equal(manager.getLease("lease_1")?.wait_reason, "surface_start_failed");
+});
+
+test("host endpoint 500 with a structured sandbox-unavailable body surfaces browser_surface_failure on the RunNowResult", async (t) => {
+  let hostCalls = 0;
+  const hostFetch = (async () => {
+    hostCalls += 1;
+    return {
+      json: async () => ({
+        error: "browser_sandbox_unavailable",
+        message:
+          "This Linux distribution blocks the bundled browser's sandbox. Install Google Chrome or Chromium from a .deb package.",
+      }),
+      ok: false,
+      status: 500,
+    } as Response;
+  }) as typeof fetch;
+  const hostAllocator = createHostBrowserSurfaceAllocator({
+    endpoint: "http://127.0.0.1:9916/agent",
+    fetchImpl: hostFetch,
+    headless: false,
+    token: "shared-secret",
+  });
+  const { calls, controller, manager } = setup(t, {
+    beforeBrowserSurfaceLeaseEnsure: (binding) => hostAllocator.bindRunToSurface(binding),
+    browserSurfaceAllocator: hostAllocator,
+    describeBrowserSurfaceStartFailure: (args) => hostAllocator.lastStartFailure(args.runId),
+    manager: createDynamicManager(),
+  });
+
+  const result = await controller.runNow("managed", {
+    manifest: MANIFEST,
+    connectorInstanceId: "cin_managed",
+    ownerToken: "owner-token",
+    runId: "run_host_sandbox_unavailable",
+  });
+
+  assert.equal(result.status, "surface_failed");
+  assert.equal(calls.runConnector, 0);
+  assert.equal(hostCalls, 1);
+  assert.equal(manager.getLease("lease_1")?.wait_reason, "surface_start_failed");
+  assert.equal(result.browser_surface_failure?.code, "browser_sandbox_unavailable");
+  assert.match(
+    result.browser_surface_failure?.message ?? "",
+    /This Linux distribution blocks the bundled browser's sandbox/
+  );
+});
+
+test("host lease CDP URL reaches readiness and release uses the owning run identity", async (t) => {
+  const hostRequests: { method: string; url: string }[] = [];
+  const hostBodies: unknown[] = [];
+  const hostFetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const method = init?.method ?? "GET";
+    const url = String(input);
+    hostRequests.push({ method, url });
+    if (typeof init?.body === "string") {
+      hostBodies.push(JSON.parse(init.body));
+    }
+    if (method === "POST") {
+      return {
+        json: async () => ({ cdp_url: "http://127.0.0.1:9222/host-cdp", surface_id: "host-surface-8" }),
+        ok: true,
+        status: 200,
+      } as Response;
+    }
+    return { json: async () => ({}), ok: true, status: 204 } as Response;
+  }) as typeof fetch;
+  const hostAllocator = createHostBrowserSurfaceAllocator({
+    endpoint: "http://127.0.0.1:9916/agent",
+    fetchImpl: hostFetch,
+    headless: false,
+    token: "shared-secret",
+  });
+  let probedCdpUrl: string | undefined;
+  const { calls, controller } = setup(t, {
+    beforeBrowserSurfaceLeaseEnsure: (binding) => hostAllocator.bindRunToSurface(binding),
+    beforeBrowserSurfaceLeaseRelease: (binding) => hostAllocator.releaseRun(binding.runId),
+    browserSurfaceAllocator: hostAllocator,
+    browserSurfaceReadinessProbe: {
+      probe: async (surface) => {
+        probedCdpUrl = surface.cdp_url;
+        return { ok: true, pageTargetCount: 1 };
+      },
+    },
+    manager: createDynamicManager(),
+  });
+
+  const result = await controller.runNow("managed", {
+    manifest: MANIFEST,
+    connectorInstanceId: "cin_managed",
+    ownerToken: "owner-token",
+    runId: "run_host_ready",
+  });
+  await controller.drainActiveRuns(1000);
+
+  assert.equal(result.status, "started");
+  assert.equal(probedCdpUrl, "http://127.0.0.1:9222/host-cdp");
+  assert.equal(calls.runConnectorOpts[0]?.browserSurfaceEnv?.PDPP_BROWSER_SURFACE_REMOTE_CDP_URL, probedCdpUrl);
+  assert.deepEqual(
+    hostRequests.map(({ method, url }) => [method, url]),
+    [
+      ["POST", "http://127.0.0.1:9916/agent/browser-surface/leases"],
+      ["DELETE", "http://127.0.0.1:9916/agent/browser-surface/runs/run_host_ready"],
+    ]
+  );
+  // The host keys the browser profile by this connection, never by connector alone.
+  assert.equal((hostBodies[0] as { connection_id?: string }).connection_id, "cin_managed");
 });
 
 test("watchdog cleanup keeps a managed lease unavailable until the presentation terminalizer settles", async (t) => {
@@ -2232,6 +2398,77 @@ test("sweep DOES reconcile a leased run whose surface the allocator confirms is 
   await controller.drainActiveRuns(1000);
 });
 
+test("boot releases an abandoned host lease when its run has no persisted connector instance id", async (t) => {
+  const runId = "run_abandoned_without_instance_id";
+  const leaseId = "lease_abandoned_without_instance_id";
+  const surfaceId = "neko-static";
+  const manager = createManager({
+    initialLeases: [
+      {
+        connector_id: "managed",
+        expires_at: "2026-05-12T12:05:00.000Z",
+        fencing_token: 1,
+        lease_id: leaseId,
+        leased_at: "2026-05-12T12:00:01.000Z",
+        priority_class: "interactive",
+        profile_key: "managed-profile",
+        requested_at: "2026-05-12T12:00:00.000Z",
+        run_id: runId,
+        status: "leased",
+        surface_id: surfaceId,
+      },
+    ],
+    initialSurfaces: [
+      {
+        active_lease_id: leaseId,
+        backend: "neko",
+        cdp_url: "http://host-surface:9222",
+        connector_id: "managed",
+        created_at: "2026-05-12T12:00:00.000Z",
+        health: "ready",
+        last_used_at: "2026-05-12T12:00:00.000Z",
+        profile_key: "managed-profile",
+        stream_base_url: "http://host-surface:8080",
+        surface_id: surfaceId,
+      },
+    ],
+  });
+  const hostReleaseRequests: string[] = [];
+  const hostAllocator = createHostBrowserSurfaceAllocator({
+    endpoint: "http://127.0.0.1:45855",
+    fetchImpl: (input, init) => {
+      hostReleaseRequests.push(`${init?.method} ${input}`);
+      return Promise.resolve(new Response(null, { status: 204 }));
+    },
+    headless: true,
+    token: "test-token",
+  });
+  const { controller } = setup(t, {
+    browserSurfaceAllocator: hostAllocator,
+    initialActiveRuns: [
+      {
+        connector_id: "managed",
+        run_generation: 1,
+        run_id: runId,
+        scenario_id: "scenario_abandoned",
+        started_at: "2026-05-12T12:00:00.000Z",
+        trace_id: "trace_abandoned",
+      },
+    ],
+    manager,
+  });
+  assert.equal(manager.getLease(leaseId)?.status, "leased");
+
+  await controller.reconcileBrowserSurfaceLeasesAfterBoot();
+
+  assert.equal(manager.getLease(leaseId)?.status, "released", JSON.stringify(manager.listLeases()));
+  assert.ok(
+    hostReleaseRequests.includes(`DELETE http://127.0.0.1:45855/browser-surface/runs/${runId}`),
+    `boot reconciliation must release the app-host lease even when no active run row can bind an event; requests: ${hostReleaseRequests}`
+  );
+  assert.deepEqual(listRunEventTypes(runId), [], "an unbound lease event is skipped honestly");
+});
+
 test("boot coalesces duplicate ready scope loss while preserving historical failed successors", async (t) => {
   const historicalProfiles = [
     { count: 52, profileKey: "managed-profile:acct-a", subjectId: "acct-a" },
@@ -2454,6 +2691,122 @@ test("boot coalesces duplicate ready scope loss while preserving historical fail
     ["started", "completed"],
     "the one coalesced live loss resolves only when its same-profile successor proves readiness"
   );
+});
+
+test("host retry abandons a persisted loss receipt after two RI restarts", async (t) => {
+  const scratchDir = join(process.cwd(), ".tmp", `replacement-retry-${process.pid}`);
+  mkdirSync(scratchDir, { recursive: true });
+  const dbPath = join(scratchDir, "test.sqlite");
+  closeDb();
+  initDb(dbPath);
+  t.after(() => {
+    closeDb();
+    rmSync(scratchDir, { force: true, recursive: true });
+  });
+
+  const readySurface: BrowserSurface = {
+    backend: "neko",
+    cdp_url: "http://old-host:9222",
+    connector_id: "managed",
+    container_id: "old-container",
+    created_at: "2026-05-12T12:00:00.000Z",
+    health: "ready",
+    last_used_at: "2026-05-12T12:00:00.000Z",
+    profile_key: "managed-profile:connection_retry",
+    stream_base_url: "http://old-host:8080",
+    surface_id: "surface_old",
+    surface_subject_id: "connection_retry",
+  };
+  const leaseStore = createSqliteBrowserSurfaceLeaseStore();
+  const receiptStore = getDefaultBrowserSurfaceReplacementReceiptStore();
+  await leaseStore.upsertSurface(readySurface);
+
+  let leaseSeq = 0;
+  let surfaceSeq = 0;
+  const makeLeaseManager = (initialSurfaces: BrowserSurface[]) =>
+    new BrowserSurfaceLeaseManager({
+      config: {
+        defaultPriorityClass: "background",
+        idleTtlMs: 600_000,
+        leaseWaitTimeoutMs: 60_000,
+        managedConnectors: new Set(["managed"]),
+        priorityRanks: DEFAULT_NEKO_PRIORITY_RANKS,
+        surfaceCap: 2,
+        surfaceMode: "dynamic",
+      },
+      initialSurfaces,
+      makeLeaseId: () => `lease_${++leaseSeq}`,
+      makeSurfaceId: () => `surface_${++surfaceSeq}`,
+      nextFencingToken: () => 1,
+    });
+  const makeManager = (
+    browserSurfaceLeaseManager: BrowserSurfaceLeaseManager,
+    browserSurfaceAllocator: BrowserSurfaceAllocator,
+    beforeBrowserSurfaceLeaseEnsure?: (args: { runId: string; surfaceId: string }) => void
+  ) =>
+    createBrowserSurfaceManager({
+      activeRunInteractions: new Map(),
+      browserSurfaceAllocator,
+      ...(beforeBrowserSurfaceLeaseEnsure ? { beforeBrowserSurfaceLeaseEnsure } : {}),
+      browserSurfaceLeaseManager,
+      browserSurfaceLeaseStore: leaseStore,
+      browserSurfaceMidWaitPollIntervalMs: undefined,
+      browserSurfaceReadinessProbe: null,
+      browserSurfaceReadinessTimeoutMs: undefined,
+      browserSurfaceReplacementReceiptStore: receiptStore,
+      listPersistedActiveRuns: async () => [],
+      log: { warn: () => undefined },
+      pendingBrowserSurfaceLaunches: new Map(),
+      scheduleRun: () => undefined,
+      startupControllerRunReconciliation: Promise.resolve(),
+    });
+
+  // RI restart 1 observes that the ready connection surface is gone from its
+  // fresh host and stores an external-loss started receipt.
+  const restartOne = makeManager(makeLeaseManager([readySurface]), {
+    ensureSurface: async () => { throw new Error("unexpected ensure during restart"); },
+    getSurfaceStatus: async () => null,
+    listSurfaces: async () => [],
+    stopSurface: async () => null,
+  });
+  await restartOne.reconcileBrowserSurfaceLeasesAfterBoot();
+  const started = (await receiptStore.list()).find((receipt) => receipt.phase === "started");
+  assert.ok(started, "restart 1 persists a started receipt for the lost surface");
+
+  // RI restart 2 has a fresh process ledger over the same durable stores. The
+  // host successfully starts a new endpoint for the original connection.
+  const hostAllocator = createHostBrowserSurfaceAllocator({
+    endpoint: "http://127.0.0.1:9916/agent",
+    fetchImpl: async () =>
+      new Response(JSON.stringify({ cdp_url: "http://127.0.0.1:39383", surface_id: "host_surface_new" }), {
+        headers: { "content-type": "application/json" },
+        status: 200,
+      }),
+    headless: true,
+    token: "test-token",
+  });
+  const leaseManager = makeLeaseManager([{ ...readySurface, health: "unhealthy" }]);
+  const restartTwo = makeManager(leaseManager, hostAllocator, ({ runId, surfaceId }) =>
+    hostAllocator.bindRunToSurface({ runId, surfaceId })
+  );
+  const result = await restartTwo.acquireManagedBrowserSurfaceForRun({
+    automationMetadata: { automation_mode: "manual_only", automation_summary: "", trigger_kind: "retry" },
+    connectorId: "managed",
+    connectorInstanceId: "connection_retry",
+    manifest: MANIFEST,
+    options: { ownerToken: "test-token" },
+    runId: "run_retry_same_connection",
+    traceContext: createTraceContext(),
+  });
+
+  const retryLease = leaseManager.listLeases().find((lease) => lease.run_id === "run_retry_same_connection");
+  const receipts = (await receiptStore.list()).filter(
+    (receipt) => receipt.connection_id === "connection_retry" && receipt.profile_key === "managed-profile:connection_retry"
+  );
+  assert.equal(retryLease?.status, "leased");
+  assert.equal(result.kind, "ready");
+  assert.equal(receipts.at(-1)?.phase, "terminal", JSON.stringify({ receipts, retryLease, result }));
+  assert.equal(receipts.at(-1)?.terminal_outcome, "abandoned");
 });
 
 test("overlapping sweep calls: the second is a no-op while the first is in flight", async (t) => {

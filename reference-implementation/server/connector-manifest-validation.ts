@@ -10,12 +10,13 @@
  * logic.
  */
 
+import { tuningEnvironmentKeyOwner } from "../runtime/connector-child-environment.ts";
 import {
   normalizeStaticSecretCredentialCapture,
   StaticSecretCredentialCaptureError,
   type StaticSecretCredentialCaptureLike,
-} from "@pdpp/polyfill-connectors/static-secret-credential-capture";
-import { canonicalConnectorKey, isConnectorKey } from "./connector-key.ts";
+} from "./polyfill-connectors-runtime.ts";
+import { canonicalConnectorKey, canonicalConnectorKeyFromManifest, isConnectorKey } from "./connector-key.ts";
 import { publicListingTierError } from "./public-listing-tier.ts";
 import { refreshPolicyContradictions } from "./refresh-policy-consistency.ts";
 
@@ -582,6 +583,43 @@ function validateLocalPaths(req: Record<string, unknown>, code: string): void {
   }
 }
 
+const TUNING_ENVIRONMENT_KEY = /^[A-Z][A-Z0-9_]*$/;
+
+// Validates `runtime_requirements.tuning_environment`: the operator tuning
+// knobs a connector reads. A first-party manifest may only declare keys in its
+// own PDPP_<KEY>_ namespace; the runtime would drop any other key at spawn, so
+// the mistake fails here instead of silently at run time.
+function validateTuningEnvironment(manifest: Record<string, unknown>, req: Record<string, unknown>, code: string) {
+  const declared = req.tuning_environment;
+  if (declared === undefined) {
+    return;
+  }
+  if (!Array.isArray(declared)) {
+    throw invalidConnectorManifest("runtime_requirements.tuning_environment must be an array when declared", code);
+  }
+  // The same identity registration stores and the runtime spawns with.
+  const firstPartyKey = canonicalConnectorKey(canonicalConnectorKeyFromManifest(manifest) ?? manifest.connector_id);
+  const seen = new Set<string>();
+  for (const [index, key] of declared.entries()) {
+    if (typeof key !== "string" || !TUNING_ENVIRONMENT_KEY.test(key)) {
+      throw invalidConnectorManifest(
+        `runtime_requirements.tuning_environment[${index}] must be an upper-case environment key`,
+        code
+      );
+    }
+    if (seen.has(key)) {
+      throw invalidConnectorManifest(`runtime_requirements.tuning_environment duplicates ${key}`, code);
+    }
+    seen.add(key);
+    if (firstPartyKey !== null && tuningEnvironmentKeyOwner(key) !== firstPartyKey) {
+      throw invalidConnectorManifest(
+        `runtime_requirements.tuning_environment[${index}] ${key} is outside the ${firstPartyKey} tuning namespace`,
+        code
+      );
+    }
+  }
+}
+
 // Decomposed into per-section validators (bindings, external_tools, tool detect).
 // Full manifest validation keeps main's hardened `detect.executable` contract;
 // runtime-requirements-only calls keep the branch's direct-helper compatibility
@@ -595,6 +633,7 @@ export function validateRuntimeRequirements(manifest: Record<string, unknown>, c
     throw invalidConnectorManifest("runtime_requirements must be an object when declared", code);
   }
   const req = requirements as Record<string, unknown>;
+  validateTuningEnvironment(manifest, req, code);
   if (!validateRuntimeBindings(req, code)) {
     return;
   }

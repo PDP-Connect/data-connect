@@ -27,6 +27,7 @@
  * ceremony without a live server. The live path never imports the fixtures
  * when `demo` is absent.
  */
+import { IcButton } from "@pdpp/brand-react";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
 import {
   ConnectorSummaryPageError,
@@ -39,7 +40,7 @@ import { isActiveConnectorRunSummaryStatus } from "../lib/connector-run-summary-
 import { liveDashboardDataSource } from "../lib/data-source.ts";
 import { getReferencePublicOrigin, ReferenceServerUnreachableError } from "../lib/owner-token.ts";
 import { listConnectorManifests } from "../lib/rs-client.ts";
-import { reactivateConnectionAction, revokeConnectionAction } from "./[connector]/actions.ts";
+import { purgeBrowserProfileAction, reactivateConnectionAction, revokeConnectionAction } from "./[connector]/actions.ts";
 import { RecordsPagePoller } from "./records-page-poller.tsx";
 import { SOURCE_ACCESS_NOTE } from "./sources-copy.ts";
 import { SourcesView } from "./sources-view.tsx";
@@ -87,6 +88,7 @@ export default async function RecordsIndexPage({
     error?: string;
     message?: string;
     page_cursor?: string;
+    purge_retry?: string;
   }>;
 }) {
   const params = searchParams ? await searchParams : {};
@@ -105,7 +107,7 @@ export default async function RecordsIndexPage({
     // screenshot-able without a live version-stats route.
     const churnAdvisory = buildSourcesChurnAdvisory(buildSourcesDemoChurnRows(scenario));
     return (
-      <RecordroomShellWithPalette build="pdpp 0.1.0" host={host}>
+      <RecordroomShellWithPalette host={host}>
         <SourcesHeader notice={`Seeded demo · ${scenario} · fictional data`} />
         {/* interactive=false: the demo never reaches a live server, so the
             mutating Sync/Revoke controls are read-only here. */}
@@ -123,7 +125,7 @@ export default async function RecordsIndexPage({
   } catch (err) {
     if (err instanceof ReferenceServerUnreachableError) {
       return (
-        <RecordroomShellWithPalette build="pdpp 0.1.0" host={host}>
+        <RecordroomShellWithPalette host={host}>
           <SourcesHeader />
           <ServerUnreachable />
         </RecordroomShellWithPalette>
@@ -134,8 +136,8 @@ export default async function RecordsIndexPage({
 
   if (page.kind === "error") {
     return (
-      <RecordroomShellWithPalette build="pdpp 0.1.0" host={host}>
-        <SourcesHeader error={params.error} message={params.message} />
+      <RecordroomShellWithPalette host={host}>
+        <SourcesHeader error={params.error} message={params.message} purgeRetryId={params.purge_retry} />
         <ConnectorSummaryPageError basePath={SOURCES_PATH} currentParams={params} message={page.message} />
       </RecordroomShellWithPalette>
     );
@@ -152,8 +154,8 @@ export default async function RecordsIndexPage({
   ).length;
 
   return (
-    <RecordroomShellWithPalette build="pdpp 0.1.0" host={host}>
-      <SourcesHeader error={params.error} message={params.message} />
+    <RecordroomShellWithPalette host={host}>
+      <SourcesHeader error={params.error} message={params.message} purgeRetryId={params.purge_retry} />
       <SourcesView
         instances={instances}
         interactive={true}
@@ -173,7 +175,17 @@ export default async function RecordsIndexPage({
   );
 }
 
-function SourcesHeader({ error, message, notice }: { error?: string; message?: string; notice?: string }) {
+function SourcesHeader({
+  error,
+  message,
+  notice,
+  purgeRetryId,
+}: {
+  error?: string;
+  message?: string;
+  notice?: string;
+  purgeRetryId?: string;
+}) {
   return (
     <header data-pdpp-reference-revision={REFERENCE_REVISION} style={{ marginBottom: 24, maxWidth: 760 }}>
       <h1 className="pdpp-heading text-foreground" style={{ margin: "0 0 4px" }}>
@@ -198,6 +210,16 @@ function SourcesHeader({ error, message, notice }: { error?: string; message?: s
         <div className="rr-s-toast" data-tone="error" role="status" style={{ marginTop: 12 }}>
           {error}
         </div>
+      ) : null}
+      {error && purgeRetryId ? (
+        // The connection is already revoked or deleted; only its saved browser
+        // session is left. The retry runs the same purge again.
+        <form action={purgeBrowserProfileAction} data-testid="sources-purge-retry" style={{ marginTop: 8 }}>
+          <input name="connection_id" type="hidden" value={purgeRetryId} />
+          <IcButton size="sm" type="submit" variant="destructive">
+            Remove saved browser session
+          </IcButton>
+        </form>
       ) : null}
       {message && !error ? (
         <div className="rr-s-toast" data-tone="ok" role="status" style={{ marginTop: 12 }}>

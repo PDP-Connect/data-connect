@@ -87,6 +87,15 @@ export default {
 
   inPlace: false,
 
+  // Fail closed on untested static module initialization. Several script files
+  // are CLIs whose imports define option schemas and constants before tests
+  // reach their exported pure helpers. Static mutants in that top-level code
+  // have no reliable per-test owner and turned into timeout-heavy trials in
+  // this cohort. Stryker marks them ignored rather than killed or survived;
+  // the projection step already treats ignored/incomplete evidence separately
+  // and does not turn it into a pass.
+  ignoreStatic: true,
+
   // Matches the client cohort's exclusions: the sandbox is a copy of the working
   // tree, and nothing here is read by a `scripts/` test. The last three entries
   // are the same developer-machine EISDIR workaround the client configuration

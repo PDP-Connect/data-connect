@@ -3,8 +3,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Restore the pkg personal-server binary after Tauri's Linux bundler runs
- * patchelf on resource ELF files, then rebuild the AppImage from that AppDir.
+ * Restore the pkg personal-server binary and staged stacks after Tauri's Linux
+ * bundler runs patchelf on resource ELF files, then rebuild the AppImage.
  */
 
 import { spawnSync } from "node:child_process"
@@ -31,6 +31,13 @@ const defaultAppImageDir = join(
 )
 const appImageDir = resolve(process.argv[3] || defaultAppImageDir)
 const sourceDist = join(ROOT, "personal-server", "dist")
+const sourceReferenceStack = join(
+  ROOT,
+  "src-tauri",
+  "target",
+  "release",
+  "reference-stack"
+)
 
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, { stdio: "inherit", ...options })
@@ -57,6 +64,29 @@ export function findPersonalServerDist(root) {
     if (found) return found
   }
   return null
+}
+
+export function findResourceRoot(root, resourcePath) {
+  const segments = resourcePath.split("/").filter(Boolean)
+  const matches = []
+
+  function visit(current) {
+    const candidate = join(current, ...segments)
+    if (existsSync(candidate)) matches.push(candidate)
+
+    for (const entry of readdirSync(current, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue
+      visit(join(current, entry.name))
+    }
+  }
+
+  visit(root)
+  if (matches.length > 1) {
+    throw new Error(
+      `multiple ${resourcePath} roots found in ${root}: ${matches.join(", ")}`
+    )
+  }
+  return matches[0] || null
 }
 
 function repack(appDir, appImage) {
@@ -117,8 +147,35 @@ export function restorePersonalServer(appDir, source = sourceDist) {
   return destinationDist
 }
 
+export function restoreReferenceStacks(appDir, source = sourceReferenceStack) {
+  const roots = ["ri", "console"]
+  const destinations = {}
+
+  for (const root of roots) {
+    const sourceRoot = join(source, root)
+    if (!existsSync(sourceRoot)) {
+      throw new Error(`reference-stack/${root} is not staged at ${sourceRoot}`)
+    }
+
+    const destinationRoot = findResourceRoot(
+      appDir,
+      join("reference-stack", root)
+    )
+    if (!destinationRoot) {
+      throw new Error(`reference-stack/${root} not found in ${appDir}`)
+    }
+
+    rmSync(destinationRoot, { recursive: true, force: true })
+    cpSync(sourceRoot, destinationRoot, { recursive: true })
+    destinations[root] = destinationRoot
+  }
+
+  return destinations
+}
+
 function finalize(appDir, appImage) {
   restorePersonalServer(appDir)
+  restoreReferenceStacks(appDir)
   repack(appDir, appImage)
   console.log(`[finalize-linux-appimage] Finalized ${basename(appImage)}`)
 }

@@ -1,8 +1,8 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { connectorRetainsSurfaceProcess as policyRetainsSurfaceProcess } from "@pdpp/polyfill-connectors/browser-surface-policy";
 import { canonicalConnectorKey } from "../../server/connector-key.ts";
+import { connectorRetainsSurfaceProcess as policyRetainsSurfaceProcess } from "../../server/polyfill-connectors-runtime.ts";
 
 /**
  * Reference-side adapter over the shared connector-runtime browser-surface

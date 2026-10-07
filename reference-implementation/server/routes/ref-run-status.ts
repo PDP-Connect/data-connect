@@ -99,7 +99,12 @@ export interface RunStatusFailureSummary {
   readonly connector_error_message: string | null;
   readonly message: string | null;
   readonly origin: string | null;
+  readonly recovery_hint?: { readonly action: "refresh_credentials"; readonly retryable: false } | null;
   readonly reason: string | null;
+}
+
+function isConnectorAuthFailure(code: string | null): boolean {
+  return code !== null && /(?:^|[_-])auth(?:entication)?[_-](?:failed|failure)$/.test(code);
 }
 
 export interface RunStatusBody {
@@ -188,10 +193,16 @@ function buildFailureSummary(terminal: RunStatusTerminalEvent): RunStatusFailure
   if (terminal.status !== "failed" && terminal.status !== "abandoned") {
     return null;
   }
+  const connectorError = readString(terminal.data, "connector_error_message");
+  const authFailure = isConnectorAuthFailure(connectorError);
   return {
-    connector_error_message: readString(terminal.data, "connector_error_message"),
-    message: readString(terminal.data, "failure_message") ?? readString(terminal.data, "message"),
+    connector_error_message: connectorError,
+    message:
+      readString(terminal.data, "failure_message") ??
+      readString(terminal.data, "message") ??
+      (authFailure ? "Your saved sign-in is no longer accepted. Reconnect this source to sync again." : null),
     origin: readString(terminal.data, "failure_origin"),
+    ...(authFailure ? { recovery_hint: { action: "refresh_credentials" as const, retryable: false as const } } : {}),
     reason: readString(terminal.data, "reason") ?? readString(terminal.data, "failure_reason"),
   };
 }

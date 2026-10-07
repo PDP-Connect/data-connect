@@ -35,6 +35,7 @@ import { createInterface } from "node:readline";
 import { canonicalConnectorKey } from "../../server/connector-key.ts";
 import { startServer } from "../../server/index.ts";
 import { createSqliteConnectorInstanceStore } from "../../server/stores/connector-instance-store.ts";
+import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./demo-clients.ts";
 
 const OWNER_SUBJECT_ID = "owner_local";
 const NOW = "2026-05-31T00:00:00.000Z";
@@ -159,6 +160,7 @@ async function main(): Promise<void> {
     asPort: 0,
     dbPath,
     introspectionCallerCredentials,
+    preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
     quiet: true,
     rsPort: 0,
   });

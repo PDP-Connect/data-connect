@@ -13,6 +13,7 @@ import { isPagedRequest, parseConnectorSummaryPageState } from "../components/co
 import { ServerUnreachable } from "../components/server-unreachable.tsx";
 import { ReferenceServerUnreachableError } from "../lib/owner-token.ts";
 import { listConnectorSummaries } from "../lib/ref-client.ts";
+import { listConnectorManifests } from "../lib/rs-client.ts";
 import { ScheduleRow } from "./schedule-row.tsx";
 import { SchedulesPoller } from "./schedules-poller.tsx";
 
@@ -29,6 +30,13 @@ export default async function SchedulesPage({ searchParams }: { searchParams?: P
   const pageState = parseConnectorSummaryPageState(params);
 
   let page: Awaited<ReturnType<typeof fetchSchedulesPage>>;
+  const connectorManifests = await listConnectorManifests().catch(() => []);
+  const connectorIcons = Object.fromEntries(
+    connectorManifests.flatMap((manifest) => [
+      [manifest.connector_id, manifest.icon] as const,
+      ...(manifest.connector_key ? ([[manifest.connector_key, manifest.icon]] as const) : []),
+    ])
+  );
   try {
     page = await fetchSchedulesPage(pageState);
   } catch (err) {
@@ -64,6 +72,7 @@ export default async function SchedulesPage({ searchParams }: { searchParams?: P
         description="Set automatic refresh cadences for your connectors. Keep high-friction ones (banks, browser-based) manual or infrequent."
         renderRow={(summary) => (
           <ScheduleRow
+            connectorIcon={connectorIcons[summary.connector_id]}
             key={summary.connection_id ?? summary.connector_instance_id ?? summary.connector_id}
             runsHref="/syncs"
             summary={summary}

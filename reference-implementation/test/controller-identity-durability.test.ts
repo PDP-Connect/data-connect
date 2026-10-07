@@ -30,8 +30,7 @@
 import assert from "node:assert/strict";
 import os from "node:os";
 import test from "node:test";
-// biome-ignore lint/correctness/noUnresolvedImports: Biome resolver lacks this runtime-supported dependency export shape.
-import Database from "better-sqlite3";
+import Database from "./helpers/sqlite-driver.ts";
 import { emitControllerBootedAndStashEpoch, reconcileOrphanedRunsAtBoot } from "../lib/controller-boot.ts";
 import { clearCurrentBootEpoch } from "../lib/spine.ts";
 import { closeDb, initDb } from "../server/db.ts";

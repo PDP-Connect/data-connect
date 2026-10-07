@@ -28,10 +28,20 @@ export function usePlatforms() {
       dispatch(setPlatforms(loadedPlatforms))
 
       // Check which platforms are connected
-      const platformIds = loadedPlatforms.map(p => p.id)
+      const platformIds = [...new Set(loadedPlatforms.map(p => p.id))]
+      const connectionIds = loadedPlatforms.reduce<Record<string, string[]>>(
+        (byPlatform, platform) => {
+          if (platform.connectionId) {
+            byPlatform[platform.id] ??= []
+            byPlatform[platform.id].push(platform.connectionId)
+          }
+          return byPlatform
+        },
+        {}
+      )
       const connected = await invoke<Record<string, boolean>>(
         "check_connected_platforms",
-        { platformIds }
+        { platformIds, connectionIds }
       )
       dispatch(setConnectedPlatforms(connected))
     } catch (error) {
@@ -52,10 +62,20 @@ export function usePlatforms() {
     if (platforms.length === 0) return
 
     try {
-      const platformIds = platforms.map(p => p.id)
+      const platformIds = [...new Set(platforms.map(p => p.id))]
+      const connectionIds = platforms.reduce<Record<string, string[]>>(
+        (byPlatform, platform) => {
+          if (platform.connectionId) {
+            byPlatform[platform.id] ??= []
+            byPlatform[platform.id].push(platform.connectionId)
+          }
+          return byPlatform
+        },
+        {}
+      )
       const connected = await invoke<Record<string, boolean>>(
         "check_connected_platforms",
-        { platformIds }
+        { platformIds, connectionIds }
       )
       dispatch(setConnectedPlatforms(connected))
     } catch (error) {

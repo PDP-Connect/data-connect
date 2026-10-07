@@ -5,15 +5,18 @@ import { buttonVariants, IcButton, IcTimestamp } from "@pdpp/brand-react";
 import { formatSourceForDisplay } from "@pdpp/display";
 import { StatusBadge } from "@pdpp/operator-ui/components/primitives";
 import Link from "next/link";
+import { ConnectorMark } from "@/app/(console)/components/connector-mark.tsx";
 import type { PendingApproval } from "../lib/ref-client.ts";
 import { technicalClientCaption } from "./client-caption.ts";
 
 /** Queue row only. It can route to review or deny; grant issuance is absent. */
 export function PendingApprovalRow({
   approval,
+  connectorIcons = {},
   denyAction,
 }: {
   approval: PendingApproval;
+  connectorIcons?: Readonly<Record<string, import("@pdpp/brand-react").ConnectorIconLike | null | undefined>>;
   denyAction: (formData: FormData) => void | Promise<void>;
 }) {
   const previewStreams = Array.isArray(approval.grant_preview?.streams)
@@ -23,6 +26,7 @@ export function PendingApprovalRow({
       })
     : [];
   const denialTarget = approval.kind === "consent" ? "data-access request" : "owner-device authorization";
+  const connectorId = approval.grant_preview?.source?.kind === "connector" ? approval.grant_preview.source.connector_id ?? approval.grant_preview.source.id : null;
 
   return (
     <div className="grid gap-3 p-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-start">
@@ -35,6 +39,7 @@ export function PendingApprovalRow({
           <StatusBadge status={approval.kind} />
         </div>
         <div className="pdpp-caption mt-1 break-words text-muted-foreground">
+          {connectorId ? <ConnectorMark className="mr-2 inline-block size-5 align-[-0.2em]" icon={connectorIcons[connectorId]} name={connectorId} /> : null}
           {technicalClientCaption(approval.client_id) ?? "client —"}
           {approval.grant_preview?.source ? ` · source ${formatSourceForDisplay(approval.grant_preview.source)}` : ""}
           {previewStreams.length ? ` · streams ${previewStreams.join(", ")}` : ""}

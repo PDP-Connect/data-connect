@@ -7,6 +7,7 @@ import {
   formatConnectorKeyForDisplay,
   formatConnectorNameForDisplay,
   isFallbackConnectionLabel,
+  isSetupFailedSource,
   streamDisplayLabel,
 } from "@pdpp/display";
 import { CopyButton } from "@pdpp/operator-ui/components/copy-button";
@@ -21,6 +22,7 @@ import {
   staticSecretCredentialCaptureFromManifest,
 } from "pdpp-reference-implementation/connection-setup-plan";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
+import { ConnectorMark } from "@/app/(console)/components/connector-mark.tsx";
 import { ServerUnreachable } from "../../components/server-unreachable.tsx";
 import {
   formatStreamCollectionFacts,
@@ -74,7 +76,12 @@ import { isUnexpectedStreamDeclaration, streamCountLabel } from "../../lib/strea
 import { connectorInstanceIdForConnection, resolveConnectionForRecordsRoute } from "../connection-route.ts";
 import { findManifestForConnectorId } from "../lib/relationships.ts";
 import { formatConnectorHeaderCount } from "../sources-view-model.ts";
-import { pauseConnectionAction, resumeConnectionAction, resumeConnectorScheduleAction } from "./actions.ts";
+import {
+  pauseConnectionAction,
+  resumeConnectionAction,
+  resumeConnectorScheduleAction,
+  resumeSetupConnectionAction,
+} from "./actions.ts";
 import { acknowledgeConnectionLossAction, confirmCoverageHorizonAction } from "./confirmation-actions.ts";
 import type { ConfigRevisionWire, ConnectionConfigWire } from "./connection-config-view-model.ts";
 import { ConnectionConfiguration } from "./connection-configuration.tsx";
@@ -182,6 +189,7 @@ export interface ConnectorPageModel {
   retainedStorage: { breakdown: string | null; total: string } | null;
   schedule: RefSchedule | null;
   scheduleError: string | null;
+  setupFailed: boolean;
   /** Connection-scoped source-binding kind for binding-first repair routing. */
   sourceBindingKind: string | null;
   sourceInstances: DeviceSourceInstance[];
@@ -367,7 +375,13 @@ export default async function ConnectorPage({
   searchParams,
 }: {
   params: Promise<{ connector: string }>;
-  searchParams: Promise<{ connection_id?: string; demo?: string; error?: string; message?: string }>;
+  searchParams: Promise<{
+    active_run_id?: string;
+    connection_id?: string;
+    demo?: string;
+    error?: string;
+    message?: string;
+  }>;
 }) {
   const { connector } = await params;
   const routeId = decodeURIComponent(connector);
@@ -397,7 +411,15 @@ export default async function ConnectorPage({
   // its stall watchdog against real time. This page is `force-dynamic`, so the
   // instant is fresh on every request.
   const now = new Date().toISOString();
-  return <ConnectorPageView dangerError={sp.error} dangerMessage={sp.message} model={model} now={now} />;
+  return (
+    <ConnectorPageView
+      dangerActiveRunId={sp.active_run_id}
+      dangerError={sp.error}
+      dangerMessage={sp.message}
+      model={model}
+      now={now}
+    />
+  );
 }
 
 async function loadConnectorPageModel(
@@ -541,6 +563,7 @@ async function loadConnectorPageModel(
     // Connection-scoped binding kind, so repair routing is binding-first (a
     // browser-session connection reconnects its session, not a static secret).
     sourceBindingKind: summary.source_binding_kind ?? null,
+    setupFailed: isSetupFailedSource(summary),
     streams,
     totalRecords,
     ...diagnostics,
@@ -640,11 +663,14 @@ function StreamDisplayName({
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: this server view intentionally composes the detail evidence panels and their binding-aware actions in one owner-visible route.
 function ConnectorPageView({
   model,
+  dangerActiveRunId,
   dangerMessage,
   dangerError,
   now,
 }: {
   model: ConnectorPageModel;
+  /** The run that blocked a delete, forwarded from the delete action redirect. */
+  dangerActiveRunId?: string;
   dangerMessage?: string;
   dangerError?: string;
   /** Server render instant (ISO-8601) for the diagnostics recovery stall watchdog. */
@@ -676,6 +702,7 @@ function ConnectorPageView({
     retainedStorage,
     schedule,
     scheduleError,
+    setupFailed,
     sourceBindingKind,
     sourceInstances,
     sourceInstancesError,
@@ -768,6 +795,7 @@ function ConnectorPageView({
             renderedAction={connectionPrimaryAction}
             revoked={revoked}
             running={running}
+            setupFailed={setupFailed}
             storedCredentialUpdateHref={storedCredentialUpdateHref}
             syncIdleLabel={syncIdleLabel}
           />
@@ -799,6 +827,7 @@ function ConnectorPageView({
         }
         title={
           <span className="inline-flex items-center gap-2">
+            <ConnectorMark className="size-6 shrink-0" icon={manifest.icon} name={displayName} />
             {displayName}
             <RenameConnection
               connectionId={renameSelector}
@@ -812,7 +841,11 @@ function ConnectorPageView({
 
       {streakDots.length > 0 ? <StreakStrip dots={streakDots} /> : null}
 
-      {revoked ? <RevokedConnectionSection connectorId={connectorId} revokedAt={overview.revokedAt ?? null} /> : null}
+      {revoked && !setupFailed ? (
+        <RevokedConnectionSection connectorId={connectorId} revokedAt={overview.revokedAt ?? null} />
+      ) : null}
+
+      {setupFailed ? <ResumeSetupSection connectionId={connectionId} /> : null}
 
       {pausedHistoricalArchive ? <PausedHistoricalArchiveSection credentialUpdateHref={credentialUpdateHref} /> : null}
 
@@ -928,9 +961,11 @@ function ConnectorPageView({
       {pausable ? <PauseConnectionSection connectionId={renameSelector} /> : null}
 
       <ConnectionDangerZone
+        activeRunId={dangerActiveRunId ?? scheduleActiveRunId}
         connectionId={connectorInstanceId ?? connectionId}
         error={dangerError}
         message={dangerMessage}
+        setupFailed={setupFailed}
       />
     </RecordroomShellWithPalette>
   );
@@ -949,6 +984,7 @@ function ConnectorHeaderActions({
   renderedAction,
   revoked,
   running,
+  setupFailed,
   storedCredentialUpdateHref,
   syncIdleLabel,
 }: {
@@ -964,6 +1000,7 @@ function ConnectorHeaderActions({
   renderedAction: RefRequiredAction | null;
   revoked: boolean;
   running: boolean;
+  setupFailed: boolean;
   storedCredentialUpdateHref: string | null;
   syncIdleLabel: string;
 }) {
@@ -1001,6 +1038,7 @@ function ConnectorHeaderActions({
         renderedAction={renderedAction}
         revoked={revoked}
         running={running}
+        setupFailed={setupFailed}
         storedCredentialUpdateHref={storedCredentialUpdateHref}
         syncIdleLabel={syncIdleLabel}
       />
@@ -1019,6 +1057,7 @@ function ConnectorPrimaryHeaderAction({
   renderedAction,
   revoked,
   running,
+  setupFailed,
   storedCredentialUpdateHref,
   syncIdleLabel,
 }: {
@@ -1032,6 +1071,7 @@ function ConnectorPrimaryHeaderAction({
   renderedAction: RefRequiredAction | null;
   revoked: boolean;
   running: boolean;
+  setupFailed: boolean;
   storedCredentialUpdateHref: string | null;
   syncIdleLabel: string;
 }) {
@@ -1040,6 +1080,9 @@ function ConnectorPrimaryHeaderAction({
       ? renderedAction
       : null;
 
+  if (setupFailed) {
+    return null;
+  }
   if (revoked) {
     return (
       <Link
@@ -1706,6 +1749,22 @@ function PausedHistoricalArchiveSection({ credentialUpdateHref }: { credentialUp
       <Link className={buttonVariants({ size: "sm", variant: "default" })} href={credentialUpdateHref}>
         Reconnect
       </Link>
+    </Section>
+  );
+}
+
+function ResumeSetupSection({ connectionId }: { connectionId: string }) {
+  return (
+    <Section
+      description="Continue setup for this connection. The same connection will be kept."
+      title="Setup never completed"
+    >
+      <form action={resumeSetupConnectionAction}>
+        <input name="connection_id" type="hidden" value={connectionId} />
+        <IcButton data-testid="setup-failed-resume-setup" size="sm" type="submit" variant="default">
+          Resume setup
+        </IcButton>
+      </form>
     </Section>
   );
 }

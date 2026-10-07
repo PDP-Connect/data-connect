@@ -282,6 +282,7 @@ export function buildRecoveryDemoModel(): ConnectorPageModel {
     retainedStorage: { breakdown: "current 4.50 MB · history 1.20 MB", total: "5.70 MB" },
     schedule: null,
     scheduleError: null,
+    setupFailed: false,
     sourceBindingKind: null,
     sourceInstances,
     sourceInstancesError: null,

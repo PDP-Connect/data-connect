@@ -17,10 +17,10 @@
 //      weakest signal exactly where each mutant costs the most, so this cohort
 //      carries no result cache and every run is cold.
 //
-// The reference implementation runs TypeScript sources directly under Node's
-// native type stripping, so there is no build step to instrument: the sandbox
-// contains mutated `.ts` files and Node executes them as-is. That removes the
-// source/emitted parity question this cohort would otherwise have.
+// The reference implementation runs TypeScript sources directly under Node.
+// The shared mutation cohort also runs the brand-react popover DOM test, which
+// imports TSX and CSS, so tsx and the package's CSS stub are registered here.
+// There is no build step to instrument: the sandbox contains the source files.
 //
 // No duration, budget, mutant-count, or admission threshold appears here.
 
@@ -62,7 +62,7 @@ export default {
     // runner can express it. `--test` on explicit paths keeps the selection
     // visible in the retained command string, so a reader of the receipt can
     // see exactly which tests a survivor survived.
-    command: `node --test ${selectedTestArguments().join(" ")}`,
+    command: `TSX_TSCONFIG_PATH=vendor/brand-react/tsconfig.json node --import tsx --import ./vendor/brand-react/css-stub-register.ts --test ${selectedTestArguments().join(" ")}`,
   },
 
   // Populated from the pull request diff by the workflow; empty means this

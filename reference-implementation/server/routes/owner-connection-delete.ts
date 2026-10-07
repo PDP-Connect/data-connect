@@ -45,9 +45,13 @@
 //     or rejects with a typed ambiguous_connection (409) carrying the available
 //     connection_id values and retry_with: connection_id.
 //   - delete refuses with connection_run_active (409) when an active-run lease
-//     exists for the id (I7), and with default_account_delete_unsupported (409)
-//     for a default-account binding whose deterministic id would silently
-//     re-materialize (I6 / Decision 1 fallback). Both are raised by the store.
+//     exists for the id (I7), raised by the store. A default-account binding is
+//     deletable (I6): the cascade writes a tombstone so its deterministic id is
+//     not silently re-materialized, and erases its cursor so an explicit owner
+//     re-connect backfills from scratch.
+//   - after the commit, the connection's browser profile is purged (the
+//     logged-in session); the result is `profile_purge` in the response and
+//     audit. A failed purge is reported, never a failed delete.
 //
 // Every delete attempt (success and failure) emits non-secret
 // owner_agent.connection.delete spine evidence: actor kind, client id/name,
@@ -63,6 +67,7 @@
 //       reference-owner-agent-control-surface/spec.md
 //       reference-connector-instances/spec.md
 
+import type { BrowserProfilePurger, BrowserProfilePurgeResult } from "../browser-profile-purge.ts";
 import {
   auditActorKind,
   buildAuditTrace,
@@ -127,7 +132,7 @@ export interface MountOwnerConnectionDeleteContext {
   canonicalConnectorKey: (value: string | null | undefined) => string | null;
   createTraceContext: (input?: { scenarioId?: string }) => TraceContext;
   // Connection-scoped destructive delete primitive. Resolves + verifies owner
-  // ownership BEFORE any mutation, refuses active-run / default-account, purges
+  // ownership BEFORE any mutation, refuses an active run, purges
   // data + state, deletes the row, returns the non-secret deletion summary.
   deleteConnection: (
     connectorInstanceId: string,
@@ -151,6 +156,9 @@ export interface MountOwnerConnectionDeleteContext {
   markConnectorSummaryEvidenceDirty?: (input: { connectorInstanceId: string; reason?: string }) => Promise<void> | void;
   now?: () => string;
   pdppError: PdppErrorFn;
+  // Post-commit browser-profile purge (server/browser-profile-purge.ts). Never
+  // throws; its result is reported in the response and the audit event.
+  purgeBrowserProfile?: BrowserProfilePurger;
   projectBindingForWire: (instance: ActiveBinding) => WireConnection | null;
   requireOwner: MiddlewareHandler;
   requireToken: MiddlewareHandler;
@@ -184,6 +192,7 @@ async function emitDeleteAudit(
     error?: unknown;
     outcome: "succeeded" | "failed";
     ownerSubjectId?: string | null;
+    profilePurge?: BrowserProfilePurgeResult | null;
     selector: "connection_id" | "connector_id";
     summary?: DeleteSummary | null;
   }
@@ -220,6 +229,7 @@ async function emitDeleteAudit(
             },
           }
         : {}),
+      ...(args.profilePurge ? { profile_purge: args.profilePurge } : {}),
       ...(args.error
         ? {
             error: {
@@ -271,7 +281,7 @@ function buildDeleteRequireOwner(
 // Shared handler body for both routes. For the connector-only selector it
 // resolves the single active connection (or throws typed ambiguity); for the
 // connection_id selector it deletes the addressed id directly (ownership +
-// existence + run-active + default-account guards live in the store). On
+// existence + run-active guards live in the store). On
 // success returns 200 with the non-secret deletion summary so the agent can
 // confirm exactly what was erased.
 function buildDeleteHandler(
@@ -316,12 +326,18 @@ function buildDeleteHandler(
         connectorInstanceId: connectionId,
         reason: "owner delete removed the connection from canonical state",
       });
+      // The data is gone; now remove the source's logged-in browser session.
+      // A failure is reported, never turned into a failed delete.
+      const profilePurge = ctx.purgeBrowserProfile
+        ? await ctx.purgeBrowserProfile({ connectorInstanceId: connectionId, connectorKey, ownerSubjectId })
+        : null;
 
       await emitDeleteAudit(ctx, req, res, {
         connectionId,
         connectorKey,
         outcome: "succeeded",
         ownerSubjectId,
+        profilePurge,
         selector,
         summary,
       });
@@ -334,6 +350,7 @@ function buildDeleteHandler(
         deleted_stream_count: summary.deleted_stream_count,
         device_refs_cleared: summary.device_refs_cleared,
         object: "owner_connection_delete",
+        ...(profilePurge ? { profile_purge: profilePurge } : {}),
         schedule_deleted: summary.schedule_deleted,
       });
     } catch (err) {

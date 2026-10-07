@@ -83,6 +83,7 @@ interface ResumeHookCall {
 function buildHarness(
   mount: MountRefRun,
   harnessOptions: {
+    clearDefaultAccountTombstone?: (input: { connectorId: string; ownerSubjectId: string }) => boolean;
     draftConnectionId?: string;
     resumeHistoricalArchiveConnectionIfPaused?: (input: ResumeHookCall) => Promise<boolean>;
   } = {}
@@ -110,6 +111,9 @@ function buildHarness(
   };
   const ctx: MountRefConnectorsContext = {
     canonicalConnectorKey: (value) => value ?? null,
+    ...(harnessOptions.clearDefaultAccountTombstone
+      ? { clearDefaultAccountTombstone: harnessOptions.clearDefaultAccountTombstone }
+      : {}),
     createRequestConnectorInstanceStore: () => {
       throw new Error("createRequestConnectorInstanceStore is not used by this route family");
     },
@@ -343,7 +347,7 @@ function buildOwnerHarness() {
           body,
           params: { connectionId: "cin_chatgpt", ...params },
           query: {},
-          tokenInfo: { client_id: "cli_longview", pdpp_token_kind: "owner", subject_id: "owner_local" },
+          tokenInfo: { client_id: "pdpp_cli", pdpp_token_kind: "owner", subject_id: "owner_local" },
         },
         res
       );
@@ -428,6 +432,40 @@ test("POST /_ref/connectors/:id/run forwards explicit force override to the cont
   assert.equal(firstEvent.event_type, "owner_agent.connection.run");
   assert.equal(firstEvent.data?.forced, true);
   assert.equal(firstEvent.data?.connection_id, "cin_chatgpt");
+});
+
+test("POST /_ref/connectors/:id/run clears the default-account tombstone, and audits it", async () => {
+  const cleared: { connectorId: string; ownerSubjectId: string }[] = [];
+  const harness = buildHarness(mountRefConnectorRun, {
+    clearDefaultAccountTombstone: (input) => {
+      cleared.push(input);
+      return true;
+    },
+  });
+
+  const res = await harness.invoke({ params: { connectorId: "amazon" } });
+
+  assert.equal(res.statusCode, 202);
+  assert.deepEqual(cleared, [{ connectorId: "amazon", ownerSubjectId: "owner_local" }]);
+  assert.equal(harness.calls.resolveOwnerConnectorNamespace.length, 1);
+  const [firstEvent] = harness.calls.emitSpineEvent;
+  assert.ok(firstEvent);
+  assert.equal((firstEvent.data as Record<string, unknown> | undefined)?.tombstone_cleared, true);
+});
+
+test("POST /_ref/connections/:id/run never clears a tombstone (only the explicit connector connect does)", async () => {
+  let called = false;
+  const harness = buildHarness(mountRefConnectionRun, {
+    clearDefaultAccountTombstone: () => {
+      called = true;
+      return true;
+    },
+  });
+
+  const res = await harness.invoke({ params: { connectorInstanceId: "cin_chatgpt" } });
+
+  assert.equal(res.statusCode, 202);
+  assert.equal(called, false);
 });
 
 test("POST /_ref/connections/:id/run uses the typed draft enrollment admission", async () => {

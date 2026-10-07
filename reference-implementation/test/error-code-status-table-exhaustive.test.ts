@@ -50,6 +50,8 @@ const EXPECTED_CODE_TO_STATUS = {
   connection_not_found: 404,
   connection_run_active: 409,
   connection_tombstoned: 409,
+  connector_in_use: 409,
+  connector_run_active: 409,
   connector_instance_busy: 503,
   // The three config-revision codes. `stale_write` is a propose() whose
   // baseRevision/baseEpoch missed the current pointer, and `not_proposed` is a

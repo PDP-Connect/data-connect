@@ -68,6 +68,7 @@ import {
 export interface ResolveWsUrlOptions {
   readonly host: string;
   readonly port: number;
+  readonly protocol?: "ws" | "wss";
 }
 
 /**
@@ -89,7 +90,7 @@ export async function resolveWsUrlForExactPage(page: Page, opts: ResolveWsUrlOpt
     if (targetInfo.type !== "page") {
       throw new Error(`expected page target, got type=${targetInfo.type}`);
     }
-    return `ws://${opts.host}:${String(opts.port)}/devtools/page/${targetInfo.targetId}`;
+    return `${opts.protocol ?? "ws"}://${opts.host}:${String(opts.port)}/devtools/page/${targetInfo.targetId}`;
   } finally {
     // Best-effort detach; if the page is already gone Playwright may reject
     // — that's irrelevant to our caller, which only needs the wsUrl.
@@ -127,19 +128,37 @@ const BROWSER_SURFACE_STREAM_BASE_URL_ENV = "PDPP_BROWSER_SURFACE_STREAM_BASE_UR
 interface ResolvedCdpEndpoint {
   readonly host: string;
   readonly port: number;
+  readonly protocol: "ws" | "wss";
 }
 
 function resolveCdpEndpointFromEnv(env: NodeJS.ProcessEnv): ResolvedCdpEndpoint | undefined {
   const host = env[BROWSER_CDP_HOST_ENV]?.trim();
   const portRaw = env[BROWSER_CDP_PORT_ENV]?.trim();
   if (!(host && portRaw)) {
-    return;
+    if (nonEmptyEnv(env, BROWSER_SURFACE_REQUIRED_ENV)?.toLowerCase() !== "host") {
+      return;
+    }
+    const remoteCdpUrl = nonEmptyEnv(env, BROWSER_SURFACE_REMOTE_CDP_URL_ENV);
+    if (!remoteCdpUrl) return;
+    try {
+      const endpoint = new URL(remoteCdpUrl);
+      if ((endpoint.protocol !== "http:" && endpoint.protocol !== "https:") || endpoint.username || endpoint.password) {
+        return;
+      }
+      return {
+        host: endpoint.hostname,
+        port: Number(endpoint.port || (endpoint.protocol === "https:" ? 443 : 80)),
+        protocol: endpoint.protocol === "https:" ? "wss" : "ws",
+      };
+    } catch {
+      return;
+    }
   }
   const port = Number.parseInt(portRaw, 10);
   if (!(Number.isFinite(port) && port > 0)) {
     return;
   }
-  return { host, port };
+  return { host, port, protocol: "ws" };
 }
 
 function nonEmptyEnv(env: NodeJS.ProcessEnv, key: string): string | undefined {

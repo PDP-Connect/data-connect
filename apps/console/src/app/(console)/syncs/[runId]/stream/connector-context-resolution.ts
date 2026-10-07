@@ -19,10 +19,12 @@
  */
 
 import { formatConnectorNameForDisplay } from "@pdpp/display";
+import type { ConnectorIconLike } from "@pdpp/brand-react";
 
 export interface ConnectorContext {
   connectorId: string;
   displayName: string;
+  icon?: ConnectorIconLike | null;
 }
 
 interface ConnectorSummaryLike {

@@ -4,7 +4,7 @@
 // Unit tests for the typed-error status/type tables extracted from
 // server/index.js into server/routes/ref-error-status.ts. These pin the
 // HTTP-status ↔ error-`type`/`code` contract that the typed-error envelopes
-// (consumed by external Claude / Daisy / ChatGPT) advertise. Before this
+// (consumed by external clients such as Claude and ChatGPT) advertise. Before this
 // extraction the tables had no direct unit coverage.
 
 import assert from "node:assert/strict";

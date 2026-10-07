@@ -36,7 +36,15 @@ const CIMD_CACHE_MIN_TTL_MS = 60_000; // 60 s
 const CIMD_CACHE_MAX_TTL_MS = 24 * 60 * 60 * 1000; // 24 h
 
 // Security-relevant fields: changes here trigger grant/token revocation
-const SECURITY_RELEVANT_FIELDS = ["redirect_uris", "token_endpoint_auth_method", "jwks", "jwks_uri"];
+const SECURITY_RELEVANT_FIELDS = [
+  "redirect_uris",
+  "grant_types",
+  "response_types",
+  "token_endpoint_auth_method",
+  "token_endpoint_auth_signing_alg",
+  "jwks",
+  "jwks_uri",
+];
 
 // In-memory cache: clientId → { doc, expiresAt, securityHash }
 export type CimdDocument = Record<string, unknown>;
@@ -512,12 +520,50 @@ export async function fetchCimdDocument(
     throw cimdFetchFailure(clientId, `CIMD document client_id mismatch: expected ${clientId}, got ${doc.client_id}`);
   }
 
-  // Reject shared-secret / non-public-client auth methods
-  if (doc.token_endpoint_auth_method && doc.token_endpoint_auth_method !== "none") {
+  // CIMD private_key_jwt is supported at the token endpoint. Other confidential
+  // methods remain unsupported; DCR continues to accept public clients only.
+  const authMethod = doc.token_endpoint_auth_method || "none";
+  if (authMethod !== "none" && authMethod !== "private_key_jwt") {
     throw cimdFetchFailure(
       clientId,
-      `CIMD document uses unsupported token_endpoint_auth_method: ${doc.token_endpoint_auth_method}`
+      `CIMD document uses unsupported token_endpoint_auth_method: ${authMethod}`
     );
+  }
+
+  if (authMethod === "private_key_jwt") {
+    const hasInlineJwks = doc.jwks !== undefined;
+    const hasJwksUri = doc.jwks_uri !== undefined;
+    const signingAlg = doc.token_endpoint_auth_signing_alg;
+    if (
+      hasInlineJwks === hasJwksUri ||
+      (signingAlg !== undefined && signingAlg !== "RS256")
+    ) {
+      throw cimdFetchFailure(clientId, "CIMD private_key_jwt requires one RS256 public key source");
+    }
+    if (hasInlineJwks) {
+      if (
+        typeof doc.jwks !== "object" ||
+        doc.jwks === null ||
+        Array.isArray(doc.jwks) ||
+        !Array.isArray((doc.jwks as Record<string, unknown>).keys) ||
+        ((doc.jwks as Record<string, unknown>).keys as unknown[]).length === 0
+      ) {
+        throw cimdFetchFailure(clientId, "CIMD private_key_jwt jwks must contain public keys");
+      }
+    } else {
+      let jwksUrl: URL;
+      try {
+        if (typeof doc.jwks_uri !== "string") {
+          throw new Error("jwks_uri must be a string");
+        }
+        jwksUrl = new URL(doc.jwks_uri);
+      } catch {
+        throw cimdFetchFailure(clientId, "CIMD private_key_jwt jwks_uri must be a valid HTTPS URL");
+      }
+      if (jwksUrl.protocol !== "https:" || jwksUrl.username || jwksUrl.password || jwksUrl.hash || !jwksUrl.pathname) {
+        throw cimdFetchFailure(clientId, "CIMD private_key_jwt jwks_uri must be a valid HTTPS URL");
+      }
+    }
   }
 
   if (doc.client_secret !== null && doc.client_secret !== undefined) {
@@ -566,6 +612,7 @@ export function invalidateCimdCache(clientId: string): void {
  * This mirrors the shape returned by getRegisteredClient() in auth.js.
  */
 export function buildCimdRegisteredClient(clientId: string, doc: CimdDocument) {
+  const authMethod = typeof doc.token_endpoint_auth_method === "string" ? doc.token_endpoint_auth_method : "none";
   return {
     client_id: clientId,
     client_secret: null,
@@ -579,11 +626,18 @@ export function buildCimdRegisteredClient(clientId: string, doc: CimdDocument) {
       // secondary disclosures. RFC 7591-aligned field names.
       policy_uri: doc.policy_uri || null,
       redirect_uris: Array.isArray(doc.redirect_uris) ? doc.redirect_uris : [],
-      token_endpoint_auth_method: doc.token_endpoint_auth_method || "none",
+      ...(Array.isArray(doc.grant_types) ? { grant_types: doc.grant_types } : {}),
+      ...(Array.isArray(doc.response_types) ? { response_types: doc.response_types } : {}),
+      ...(doc.jwks !== undefined ? { jwks: doc.jwks } : {}),
+      ...(typeof doc.jwks_uri === "string" ? { jwks_uri: doc.jwks_uri } : {}),
+      ...(typeof doc.token_endpoint_auth_signing_alg === "string"
+        ? { token_endpoint_auth_signing_alg: doc.token_endpoint_auth_signing_alg }
+        : {}),
+      token_endpoint_auth_method: authMethod,
       tos_uri: doc.tos_uri || null,
     },
     registration_mode: "client_id_metadata_document",
-    token_endpoint_auth_method: doc.token_endpoint_auth_method || "none",
+    token_endpoint_auth_method: authMethod,
     updated_at: null,
   };
 }

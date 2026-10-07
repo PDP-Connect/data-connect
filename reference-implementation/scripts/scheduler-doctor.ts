@@ -30,11 +30,10 @@
 //
 // Auth:
 //   - When PDPP_OWNER_PASSWORD is set (the production/Docker default),
-//     mint a short-lived owner-session cookie locally using the same
-//     derivation as `server/owner-session.ts`.
+//     log in via `/owner/login` and use the issued owner-session cookie.
 //   - When unset (open local-dev mode), the server lets the request through.
 
-import { deriveOwnerSessionSecret, encodeOwnerSession, OWNER_SESSION_COOKIE_NAME } from "../server/owner-session.ts";
+import { resolveOwnerAuthForLive } from "./lib/owner-session.ts";
 
 /** Parsed CLI flags: `--flag=value`, `--flag value`, or bare `--flag` (boolean). */
 type CliFlags = Record<string, string | boolean>;
@@ -107,16 +106,17 @@ const asUrl =
   process.env.AS_URL ||
   process.env.PDPP_AS_URL ||
   `http://localhost:${process.env.AS_PORT || 7662}`;
-const ownerPassword = process.env.PDPP_OWNER_PASSWORD || "";
-const ownerSubjectId = process.env.PDPP_OWNER_SUBJECT_ID || "owner_local";
 const jsonOnly = !!args.json;
 
-const cookieHeader = ownerPassword ? buildOwnerCookieHeader(ownerPassword, ownerSubjectId) : "";
-
 const baseUrl = asUrl.replace(/\/$/, "");
+const ownerAuth = await resolveOwnerAuthForLive({ base: baseUrl, env: process.env, fetchImpl: fetch });
+if (ownerAuth.error) {
+  fail(`owner auth failed: ${ownerAuth.error}`);
+}
+
 const headers: Record<string, string> = {
   Accept: "application/json",
-  ...(cookieHeader ? { Cookie: cookieHeader } : {}),
+  ...(ownerAuth.header.cookie ? { Cookie: ownerAuth.header.cookie } : {}),
 };
 
 const listingUrl = `${baseUrl}/_ref/schedules`;
@@ -263,13 +263,6 @@ function parseArgs(argv: string[]): CliFlags {
     }
   }
   return out;
-}
-
-function buildOwnerCookieHeader(password: string, subjectId: string): string {
-  const secret = deriveOwnerSessionSecret(password);
-  const nowSeconds = Math.floor(Date.now() / 1000);
-  const cookieValue = encodeOwnerSession({ exp: nowSeconds + 300, iat: nowSeconds, sub: subjectId }, secret);
-  return `${OWNER_SESSION_COOKIE_NAME}=${encodeURIComponent(cookieValue)}`;
 }
 
 function verdictFor(entryRaw: unknown): PersistedVerdict {

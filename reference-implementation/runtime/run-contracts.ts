@@ -62,6 +62,13 @@ export interface RunNowResult {
   readonly automation_mode?: RunAutomationMode;
   readonly automation_summary?: string;
   readonly browser_surface?: BrowserSurfaceProjection;
+  /**
+   * The host allocator's own error code/message when the browser-surface lease
+   * ended surface_failed because the host's POST /browser-surface/leases 500'd
+   * (e.g. browser_sandbox_unavailable). Undefined when no structured host
+   * reason is known.
+   */
+  readonly browser_surface_failure?: { readonly code: string; readonly message: string };
   readonly run_id: string;
   readonly status?: "started" | BrowserSurfaceProjection["browser_surface_status"];
   readonly trace_id: string;
