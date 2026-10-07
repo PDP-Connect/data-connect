@@ -1981,7 +1981,9 @@ rl.on('line', (line) => {
     assert.ok(knownGap, "expected a known gap entry");
     assert.equal(knownGap.kind, "skip_result");
     assert.equal(knownGap.severity, "transient");
-    assert.equal(knownGap.recovery_hint?.action, "retry_by_runtime");
+    // The connector sent no recovery_hint; none is inferred from the reason
+    // or the message (Collection Profile 0.2.0, Section 5.5).
+    assert.equal(knownGap.recovery_hint?.action, "unknown");
     assert.deepEqual(knownGap.scope?.resource_ids, ["item_1"]);
 
     const stats = scheduler.getStats();
@@ -2236,7 +2238,10 @@ rl.on('line', (line) => {
   }
 });
 
-test("scheduler retries connector-declared retryable failures and records the succeeding attempt", async () => {
+// Collection Profile 0.2.0, Section 5.11: `DONE.error.retryable` is a
+// connector claim, and a runtime MUST NOT start an automatic retry because of
+// it. The next scheduled run collects again.
+test("scheduler does not retry a connector-declared retryable failure", async () => {
   const manifest = {
     connector_id: "scheduler-retryable-terminal-error",
     display_name: "Scheduler Retryable Terminal Error Connector",
@@ -2353,15 +2358,13 @@ rl.on('line', (line) => {
 
     const [record] = completedRuns;
     assert.ok(record, "expected a completed run record");
-    assert.equal(record.status, "succeeded");
-    assert.equal(record.attempt, 2);
-    assert.equal(record.failureReason, null);
-    assert.equal(record.terminalReason, null);
-    assert.equal(record.connectorError, null);
-    assert.equal(record.recordsEmitted, 1);
+    assert.equal(record.status, "failed");
+    assert.equal(record.attempt, 1);
+    assert.equal(record.terminalReason, "connector_reported_failed");
+    assert.deepEqual(record.connectorError, { message: "Rate limited, retry later", retryable: true });
 
     const attempts = readFileSync(attemptsPath, "utf8").trim().split("\n").filter(Boolean);
-    assert.equal(attempts.length, 2, "retryable terminal failures should be retried once before succeeding");
+    assert.equal(attempts.length, 1, "a connector's retryable claim must not start a retry");
   } finally {
     rmSync(tmpDir, { force: true, recursive: true });
     await closeServer(server);
