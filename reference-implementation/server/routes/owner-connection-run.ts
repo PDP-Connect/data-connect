@@ -45,6 +45,7 @@
 //         → "Mutation fails")
 
 import { isNullish } from "../../lib/nullish.ts";
+import { ownerRunLinks } from "../run-status-read-model.ts";
 
 import {
   auditActorKind,
@@ -268,6 +269,16 @@ function buildRunRequireOwner(
   };
 }
 
+// The run handle plus `links` to the owner-bearer run routes, so an agent can
+// follow the run it started without the cookie `/_ref` surface.
+function withOwnerRunLinks(started: unknown): unknown {
+  const runId = readRunId(started);
+  if (runId === null || !started || typeof started !== "object") {
+    return started;
+  }
+  return { ...started, links: ownerRunLinks(runId) };
+}
+
 function readRunId(started: unknown): string | null {
   const id = (started as { run_id?: unknown } | null)?.run_id;
   return typeof id === "string" ? id : null;
@@ -326,8 +337,8 @@ function readRunResources(req: RouteRequest): Readonly<Record<string, readonly s
 // Shared handler body for both routes. `selector` chooses connector-only vs
 // connection-scoped addressing; the namespace-resolution and ambiguity path is
 // identical to the schedule routes. On success the controller's run handle is
-// returned as 202 (the run resolves asynchronously; callers poll the run
-// projection).
+// returned as 202 with `links.run` / `links.timeline` (the run resolves
+// asynchronously; callers poll `GET /v1/owner/runs/{run_id}`).
 function buildRunHandler(
   ctx: MountOwnerConnectionRunContext,
   selector: "connection_id" | "connector_id"
@@ -406,7 +417,7 @@ function buildRunHandler(
         runId: readRunId(started),
         selector,
       });
-      res.status(202).json(started);
+      res.status(202).json(withOwnerRunLinks(started));
     } catch (err) {
       await emitRunAudit(ctx, req, res, {
         connectionId,

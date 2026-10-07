@@ -31,6 +31,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { MiddlewareHandler } from "../server/routes/_route-contract.ts";
 import { type MountRefRunCancelContext, mountRefRunCancel, type RunCancelResult } from "../server/routes/run-cancel.ts";
+import { runControlAuditStub } from "./helpers/run-control-audit-stub.ts";
 
 const REGEXP_1 = /controller exploded/;
 
@@ -94,6 +95,7 @@ function makeRes(): FakeResponse {
 
 function makeCtx(overrides: Partial<MountRefRunCancelContext> = {}): MountRefRunCancelContext {
   return {
+    ...runControlAuditStub(),
     controller: {
       cancelRun: async (runId: string): Promise<RunCancelResult> => ({ run_id: runId, status: "cancel_requested" }),
     },

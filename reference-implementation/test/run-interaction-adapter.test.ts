@@ -36,6 +36,7 @@ import {
   mountRefDevPlaygroundSession,
   mountRefRunInteraction,
 } from "../server/routes/run-interaction.ts";
+import { runControlAuditStub } from "./helpers/run-control-audit-stub.ts";
 
 const BACKEND_UNREACHABLE = /backend unreachable/;
 const CONTROLLER_EXPLODED = /controller exploded/;
@@ -112,12 +113,14 @@ function makeRes(): FakeResponse {
 
 function makeInteractionCtx(overrides: Partial<MountRefRunInteractionContext> = {}): MountRefRunInteractionContext {
   return {
+    ...runControlAuditStub(),
     controller: {
       respondToInteraction: (_runId: string, input) => ({ status: input.status }),
     },
     handleError: (_res: unknown, err: unknown) => {
       throw err;
     },
+    ownerSubjectId: "owner_local",
     pdppError: (res, status, code, message, param) => {
       (res as FakeResponse).status(status).json({ error: { code, message, ...(param ? { param } : {}) } });
     },
@@ -239,6 +242,67 @@ test("run-interaction adapter: success with status=success delivers 202 ack", as
   assert.equal(firstCall.runId, "run_abc");
   assert.equal(firstCall.input.interaction_id, "int_1");
   assert.deepEqual(firstCall.input.data, { username: "alice" });
+});
+
+test("run-interaction adapter: the audit records ids and statuses, never the answer data", async () => {
+  const events: Record<string, unknown>[] = [];
+  const app = makeApp();
+  mountRefRunInteraction(app, makeInteractionCtx({ ...runControlAuditStub(events) }));
+  const res = makeRes();
+  await routeHandler(app, INTERACTION_ROUTE)(
+    { body: { data: { code: "918273" }, interaction_id: "int_1", status: "success" }, params: { runId: "run_abc" } },
+    res
+  );
+  assert.equal(res._status, 202);
+  assert.equal(events.length, 1);
+  const [event] = events;
+  assert.ok(event);
+  assert.equal(event.event_type, "owner.run.interaction_answer");
+  assert.equal(event.status, "succeeded");
+  assert.equal(event.object_id, "run_abc");
+  assert.deepEqual(event.data, {
+    actor_kind: "owner_session",
+    auth_token_kind: null,
+    client_id: null,
+    client_name: null,
+    has_data: true,
+    interaction_id: "int_1",
+    interaction_status: "success",
+    operation: "answer_interaction",
+    outcome: "succeeded",
+    run_id: "run_abc",
+    target_resource: "run",
+  });
+  assert.ok(!JSON.stringify(event).includes("918273"), "the answer never reaches the audit event");
+});
+
+test("run-interaction adapter: another owner's active run → 403 run_owner_mismatch, nothing answered", async () => {
+  const calls: string[] = [];
+  const events: Record<string, unknown>[] = [];
+  const app = makeApp();
+  mountRefRunInteraction(
+    app,
+    makeInteractionCtx({
+      ...runControlAuditStub(events),
+      controller: {
+        getActiveRunOwnerSubjectId: () => "owner_other",
+        respondToInteraction: (runId: string, input) => {
+          calls.push(runId);
+          return { status: input.status };
+        },
+      },
+    })
+  );
+  const res = makeRes();
+  await routeHandler(app, INTERACTION_ROUTE)(
+    { body: { interaction_id: "int_1", status: "success" }, params: { runId: "run_abc" } },
+    res
+  );
+  assert.equal(res._status, 403);
+  assert.equal(bodyError(res).code, "run_owner_mismatch");
+  assert.deepEqual(calls, []);
+  assert.equal(events.length, 1);
+  assert.equal(events[0]?.status, "failed");
 });
 
 test("run-interaction adapter: success with status=cancelled delivers 202 ack", async () => {

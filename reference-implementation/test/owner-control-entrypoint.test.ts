@@ -405,22 +405,22 @@ test("control document marks supported families with method + absolute URL", asy
   });
 });
 
-test("control document advertises cancel_run honestly: typed, run-scoped, no owner-agent bearer URL", async () => {
+test("control document advertises cancel_run as a supported, run-scoped owner-agent route", async () => {
   await withServer(async ({ asUrl, rsUrl }) => {
     const ownerToken = await issueOwnerToken(asUrl);
     const { body } = await fetchJson(`${rsUrl}/v1/owner/control`, {
       headers: { Authorization: `Bearer ${ownerToken}` },
     });
 
-    // cancel_run is served only over the owner-session reference route
-    // (`POST /_ref/runs/{run_id}/cancel`) in this tranche; the owner-agent
-    // bearer route is deferred (R.2). So the catalog NAMES the action with a
-    // typed status but advertises no bearer method/URL — the honesty rule.
+    // cancel_run is served over the owner-agent bearer route
+    // (`POST /v1/owner/runs/{run_id}/cancel`), the same handler as the
+    // owner-session `/_ref` route. It is keyed on run_id, so its URL keeps the
+    // literal `{run_id}` placeholder.
     const cancelRun = actionByFamily(body, "cancel_run");
     assert.ok(cancelRun.family, "cancel_run must be named in the catalog");
-    assert.equal(cancelRun.status, "owner_mediated");
-    assert.equal(cancelRun.method, null, "no owner-agent bearer method while only the owner-session route serves it");
-    assert.equal(cancelRun.url, null, "no owner-agent bearer url while only the owner-session route serves it");
+    assert.equal(cancelRun.status, "supported");
+    assert.equal(cancelRun.method, "POST");
+    assert.equal(cancelRun.url, `${rsUrl}/v1/owner/runs/{run_id}/cancel`);
     // It is described as run-scoped, non-destructive, and distinct from the
     // connection lifecycle actions.
     assert.match(String(cancelRun.reason), TOP_LEVEL_REGEX_10);

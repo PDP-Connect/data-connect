@@ -74,14 +74,21 @@ test("buildOwnerAgentControlSurface: a supported family resolves method + absolu
   assert.equal(list.url, "https://rs.example.com/v1/owner/connections", `url: ${list.url}`);
 });
 
-test("buildOwnerAgentControlSurface: an owner_mediated family projects method:null, url:null", () => {
+test("buildOwnerAgentControlSurface: run-scoped families keep the {run_id} placeholder literal", () => {
   const surface = buildOwnerAgentControlSurface({ resource: "https://rs.example.com" });
-  const cancel = surface.actions.find((a) => a.family === "cancel_run");
-  assert.ok(cancel, "expected a cancel_run action");
-  assert.equal(cancel.status, "owner_mediated");
-  assert.equal(cancel.method, null, "owner_mediated must not advertise a method");
-  assert.equal(cancel.url, null, "owner_mediated must not advertise a URL");
-  assert.ok(typeof cancel.reason === "string" && cancel.reason.length > 0, "still carries a reason");
+  for (const [family, method, path] of [
+    ["cancel_run", "POST", "/v1/owner/runs/{run_id}/cancel"],
+    ["answer_interaction", "POST", "/v1/owner/runs/{run_id}/interaction"],
+    ["inspect_run", "GET", "/v1/owner/runs/{run_id}"],
+    ["list_runs", "GET", "/v1/owner/runs"],
+  ] as const) {
+    const action = surface.actions.find((a) => a.family === family);
+    assert.ok(action, `expected a ${family} action`);
+    assert.equal(action.status, "supported");
+    assert.equal(action.method, method);
+    assert.equal(action.url, `https://rs.example.com${path}`, `${family} url: ${action.url}`);
+    assert.ok(typeof action.reason === "string" && action.reason.length > 0, "still carries a reason");
+  }
 });
 
 test("buildOwnerAgentControlSurface: the surface catalog keeps the {connection_id} placeholder literal", () => {
@@ -134,16 +141,15 @@ test("buildOwnerConnectionSupportedActions: supported instance action substitute
   assert.equal(run.url?.includes("{connection_id}"), false, "placeholder must be gone");
 });
 
-test("buildOwnerConnectionSupportedActions: an owner_mediated instance family stays method:null, url:null", () => {
+test("buildOwnerConnectionSupportedActions: run-scoped families are never projected onto a connection", () => {
   const actions = buildOwnerConnectionSupportedActions({
     connectionId: "cin_1",
     resource: "https://rs.example.com",
   });
-  const cancel = actions.find((a) => a.family === "cancel_run");
-  assert.ok(cancel, "expected a cancel_run action");
-  assert.equal(cancel.status, "owner_mediated");
-  assert.equal(cancel.method, null);
-  assert.equal(cancel.url, null, "no URL substitution for a non-supported family");
+  const families = actions.map((a) => a.family);
+  for (const runScoped of ["cancel_run", "answer_interaction", "inspect_run", "list_runs"]) {
+    assert.equal(families.includes(runScoped), false, `${runScoped} is run-scoped and must be excluded`);
+  }
 });
 
 // --- stripTrailingSlash -----------------------------------------------------

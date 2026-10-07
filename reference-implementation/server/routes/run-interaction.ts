@@ -14,6 +14,9 @@
 //     pending interaction for a live controller-managed run. This is NOT a
 //     public PDPP protocol endpoint. Submitted data is not written to any
 //     spine event payload, .env.local, or persistent config.
+//     `buildRunInteractionHandler` is also mounted at
+//     `POST /v1/owner/runs/:runId/interaction` behind the owner bearer
+//     (`owner-runs.ts`), so both surfaces share one implementation.
 //   POST /_ref/dev/playground/session    — developer/testing surface,
 //     gated at the call site on NODE_ENV !== 'production' or
 //     PDPP_ENABLE_STREAM_PLAYGROUND=1. Owner-session required when
@@ -21,13 +24,22 @@
 
 import { isNullish } from "../../lib/nullish.ts";
 import type { MiddlewareHandler, PdppErrorFn, RouteArg } from "./_route-contract.ts";
+import {
+  decodeRunIdParam,
+  emitRunControlAudit,
+  type RunControlAuditContext,
+  type RunControlRejection,
+  type RunControlRequest,
+  type RunControlSurface,
+  resolveRunControlActor,
+} from "./_run-control.ts";
 
 // Express-shaped surface, structurally typed to avoid pulling in transport
 // ambient types. Config objects (e.g. `{ contract: 'opId' }`) may appear
 // in the args list alongside middlewares and the final handler, matching
 // transport.js's registration convention.
 
-interface RouteRequest {
+interface RouteRequest extends RunControlRequest {
   readonly body?: unknown;
   readonly params: Readonly<Record<string, string>>;
   readonly query?: Readonly<Record<string, unknown>>;
@@ -45,6 +57,9 @@ interface AppLike {
 }
 
 export interface RunInteractionController {
+  // The run's admitted owner while it is active, or null when the controller
+  // does not track one (not active, or not owner-admitted).
+  getActiveRunOwnerSubjectId?: (runId: string) => string | null;
   respondToInteraction: (
     runId: string,
     input: {
@@ -55,16 +70,158 @@ export interface RunInteractionController {
   ) => { readonly status: string } | Promise<{ readonly status: string }>;
 }
 
-export interface MountRefRunInteractionContext {
+// Everything the shared interaction-answer handler needs, on either surface.
+export interface RunInteractionContext extends RunControlAuditContext<RouteResponse> {
   readonly controller: RunInteractionController | null | undefined;
   handleError: (res: unknown, err: unknown) => void;
   pdppError: PdppErrorFn;
+}
+
+export interface MountRefRunInteractionContext extends RunInteractionContext {
   requireOwnerSession: MiddlewareHandler;
 }
 
-function isPromiseLike<T>(value: T | Promise<T>): value is Promise<T> {
-  // biome-ignore lint/suspicious/noUnnecessaryConditions: TypeScript boundary permits nullish input; this guard preserves runtime behavior.
-  return typeof (value as Promise<T>)?.then === "function";
+interface InteractionRejection extends RunControlRejection {
+  readonly message: string;
+  readonly param?: string;
+}
+
+interface InteractionAnswer {
+  readonly data: Record<string, unknown> | null | undefined;
+  readonly interaction_id: string;
+  readonly status: "success" | "cancelled";
+}
+
+// Validates the answer body. Returns the typed rejection for the first
+// failing field, or the answer.
+function readInteractionAnswer(rawBody: unknown): InteractionAnswer | InteractionRejection {
+  const body =
+    rawBody !== null && typeof rawBody === "object"
+      ? (rawBody as Record<string, unknown>)
+      : ({} as Record<string, unknown>);
+  if (typeof body.interaction_id !== "string" || !body.interaction_id.trim()) {
+    return {
+      code: "invalid_request",
+      http_status: 400,
+      message: "interaction_id is required",
+      param: "interaction_id",
+    };
+  }
+  if (body.status !== "success" && body.status !== "cancelled") {
+    return {
+      code: "invalid_status",
+      http_status: 400,
+      message: 'status must be "success" or "cancelled"',
+      param: "status",
+    };
+  }
+  if (!isNullish(body.data) && (typeof body.data !== "object" || Array.isArray(body.data))) {
+    return { code: "invalid_request", http_status: 400, message: "data must be an object if provided", param: "data" };
+  }
+  return {
+    data: body.data as Record<string, unknown> | null | undefined,
+    interaction_id: body.interaction_id,
+    status: body.status,
+  };
+}
+
+function isRejection(value: InteractionAnswer | InteractionRejection): value is InteractionRejection {
+  return "code" in value;
+}
+
+// The run's admitted owner must be the requesting owner, the same rule
+// `cancelRun` enforces: a bare run id is never enough to answer another
+// owner's interaction. Runs the controller does not track an owner for are
+// left to `respondToInteraction`'s own typed errors.
+function ownerMismatchRejection(
+  controller: RunInteractionController,
+  runId: string,
+  ownerSubjectId: string
+): InteractionRejection | null {
+  const admittedOwner = controller.getActiveRunOwnerSubjectId?.(runId) ?? null;
+  if (admittedOwner === null || admittedOwner === ownerSubjectId) {
+    return null;
+  }
+  return {
+    code: "run_owner_mismatch",
+    http_status: 403,
+    message: `Run ${runId} does not belong to owner '${ownerSubjectId}'.`,
+  };
+}
+
+// The one interaction-answer handler. `surface` decides only who the
+// requesting owner is; validation, the owner check, the controller call, the
+// 202 body, and the `owner.run.interaction_answer` audit are the same on both
+// route families.
+//
+// Answer `data` can carry secrets (passwords, OTP codes). It goes only to
+// `respondToInteraction`, which hands it to the waiting connector. It is never
+// written to the audit event, the spine, a log line, or the response.
+export function buildRunInteractionHandler(ctx: RunInteractionContext, surface: RunControlSurface): RouteHandler {
+  return async (req: RouteRequest, res: RouteResponse) => {
+    const runId = decodeRunIdParam(req.params.runId as string);
+    const actor = resolveRunControlActor(surface, req, ctx.ownerSubjectId);
+    let facts: Record<string, string | boolean | null> = {};
+    const reject = async (rejection: InteractionRejection) => {
+      await emitRunControlAudit(ctx, actor, res, {
+        error: rejection,
+        facts,
+        operation: "answer_interaction",
+        outcome: "failed",
+        runId,
+      });
+      return ctx.pdppError(res, rejection.http_status, rejection.code, rejection.message, rejection.param);
+    };
+    try {
+      const { controller } = ctx;
+      if (!controller || typeof controller.respondToInteraction !== "function") {
+        return await reject({
+          code: "not_found",
+          http_status: 404,
+          message: "Controller is not configured on this server",
+        });
+      }
+      const answer = readInteractionAnswer(req.body);
+      if (isRejection(answer)) {
+        return await reject(answer);
+      }
+      facts = {
+        has_data: !isNullish(answer.data),
+        interaction_id: answer.interaction_id,
+        interaction_status: answer.status,
+      };
+      const mismatch = ownerMismatchRejection(controller, runId, actor.ownerSubjectId);
+      if (mismatch) {
+        return await reject(mismatch);
+      }
+      const resolved = await controller.respondToInteraction(runId, {
+        data: answer.data,
+        interaction_id: answer.interaction_id,
+        status: answer.status,
+      });
+      await emitRunControlAudit(ctx, actor, res, {
+        facts,
+        operation: "answer_interaction",
+        outcome: "succeeded",
+        runId,
+      });
+      return res.status(202).json({
+        interaction_id: answer.interaction_id,
+        object: "run_interaction_ack",
+        run_id: runId,
+        status: resolved.status,
+      });
+    } catch (err) {
+      await emitRunControlAudit(ctx, actor, res, {
+        error: err,
+        facts,
+        operation: "answer_interaction",
+        outcome: "failed",
+        runId,
+      });
+      return ctx.handleError(res, err);
+    }
+  };
 }
 
 export function mountRefRunInteraction(app: AppLike, ctx: MountRefRunInteractionContext): void {
@@ -72,45 +229,7 @@ export function mountRefRunInteraction(app: AppLike, ctx: MountRefRunInteraction
     "/_ref/runs/:runId/interaction",
     { contract: "refRunInteraction" },
     ctx.requireOwnerSession,
-    (req: RouteRequest, res: RouteResponse) => {
-      try {
-        if (!ctx.controller || typeof ctx.controller.respondToInteraction !== "function") {
-          return ctx.pdppError(res, 404, "not_found", "Controller is not configured on this server");
-        }
-        const runId = decodeURIComponent(req.params.runId as string);
-        const body =
-          req.body !== null && typeof req.body === "object"
-            ? (req.body as Record<string, unknown>)
-            : ({} as Record<string, unknown>);
-        if (typeof body.interaction_id !== "string" || !body.interaction_id.trim()) {
-          return ctx.pdppError(res, 400, "invalid_request", "interaction_id is required", "interaction_id");
-        }
-        if (body.status !== "success" && body.status !== "cancelled") {
-          return ctx.pdppError(res, 400, "invalid_status", 'status must be "success" or "cancelled"', "status");
-        }
-        if (!isNullish(body.data) && (typeof body.data !== "object" || Array.isArray(body.data))) {
-          return ctx.pdppError(res, 400, "invalid_request", "data must be an object if provided", "data");
-        }
-        const result = ctx.controller.respondToInteraction(runId, {
-          data: body.data as Record<string, unknown> | null | undefined,
-          interaction_id: body.interaction_id as string,
-          status: body.status as string,
-        });
-        const acknowledge = (resolved: { readonly status: string }) =>
-          res.status(202).json({
-            interaction_id: body.interaction_id,
-            object: "run_interaction_ack",
-            run_id: runId,
-            status: resolved.status,
-          });
-        if (isPromiseLike(result)) {
-          return result.then(acknowledge).catch((err) => ctx.handleError(res, err));
-        }
-        return acknowledge(result);
-      } catch (err) {
-        return ctx.handleError(res, err);
-      }
-    }
+    buildRunInteractionHandler(ctx, "owner_session")
   );
 }
 
