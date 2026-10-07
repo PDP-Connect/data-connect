@@ -46,14 +46,22 @@ export interface HostBlobMessage {
 const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
 const SPOOL_BASENAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
+/** Order strings by UTF-16 code unit, the order a bare sort() uses. */
+function compareCodeUnits(a: string, b: string): number {
+  if (a < b) {
+    return -1;
+  }
+  return a > b ? 1 : 0;
+}
+
 /** Validate an untrusted BLOB event before resolving a path or reading bytes. */
 export function validateHostBlobMessage(value: unknown): asserts value is HostBlobMessage {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new Error("Connector emitted invalid BLOB message");
   }
   const message = value as Record<string, unknown>;
-  const fields = Object.keys(message).sort();
-  const expected = ["file", "key", "mime_type", "sha256", "size_bytes", "stream", "type"].sort();
+  const fields = Object.keys(message).sort(compareCodeUnits);
+  const expected = ["file", "key", "mime_type", "sha256", "size_bytes", "stream", "type"].sort(compareCodeUnits);
   if (
     fields.length !== expected.length ||
     fields.some((field, index) => field !== expected[index]) ||
