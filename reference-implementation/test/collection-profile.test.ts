@@ -1534,6 +1534,74 @@ test("Collection Profile conformance", async (t) => {
   );
 
   await t.test(
+    "a stored legacy collection_scope.since with no offset still runs, read at its earliest instant (+14:00)",
+    async () => {
+      const server = await startServer({
+        asPort: 0,
+        dbPath: ":memory:",
+        preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
+        quiet: true,
+        rsPort: 0,
+      });
+      const { asPort, rsPort } = server;
+      const temporalStream = (name: string, format: string) => ({
+        consent_time_field: "occurred",
+        name,
+        primary_key: ["id"],
+        schema: {
+          properties: { id: { type: "string" }, occurred: { format, type: "string" }, value: { type: "string" } },
+          required: ["value"],
+          type: "object",
+        },
+        semantics: "append_only",
+      });
+      const manifest = {
+        ...MINIMAL_MANIFEST,
+        connector_id: "test-hosted-legacy-offsetless-scope",
+        streams: [temporalStream("dated", "date"), temporalStream("instants", "date-time")],
+      };
+      const { ownerToken, connectorId } = await setupConnector(server, asPort, manifest);
+      const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-hosted-legacy-offsetless-scope-"));
+      const capturePath = join(tmpDir, "start.json");
+      const { connectorPath, cleanup } = createStartCaptureConnector(capturePath);
+      // Written raw, as the route stored it before it required an offset;
+      // buildStoredCollectionScope would canonicalize it.
+      const legacyStoredScope = {
+        declared_at: "2026-09-01T00:00:00.000Z",
+        fingerprint: "since=2026-09-05T08:30:00",
+        scope: { since: "2026-09-05T08:30:00" },
+      };
+
+      try {
+        const result = await runTestConnector({
+          collectionMode: "full_refresh",
+          connectorId,
+          connectorPath,
+          manifest,
+          onInteraction: async () => ({}),
+          ownerToken,
+          persistState: true,
+          rsUrl: `http://localhost:${rsPort}`,
+          state: { [COLLECTION_SCOPE_STATE_KEY]: legacyStoredScope },
+        });
+
+        assert.equal(result.status, "succeeded");
+        const captured = JSON.parse(readFileSync(capturePath, "utf8"));
+        assert.deepEqual(captured.scope, {
+          streams: [
+            { name: "dated", time_range: { since: "2026-09-05" } },
+            { name: "instants", time_range: { since: "2026-09-05T08:30:00+14:00" } },
+          ],
+        });
+      } finally {
+        cleanup();
+        rmSync(tmpDir, { force: true, recursive: true });
+        await closeServer(server);
+      }
+    }
+  );
+
+  await t.test(
     "an ordinary hosted run with no declared collection_scope omits time_range entirely (unscoped, unchanged default behavior)",
     async () => {
       const server = await startServer({

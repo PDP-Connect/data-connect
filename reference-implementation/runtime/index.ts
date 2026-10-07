@@ -1553,14 +1553,13 @@ function buildStartScope(
   //
   // The bound is stated in each consent field's format, and a field with no
   // date or date-time format gets none: see `runtime/owner-time-window.ts`.
+  // A stored value with no offset is read at the earliest instant it could
+  // mean. A stored value that is not RFC 3339 at all (accepted by an older
+  // route) gets no bound rather than failing the owner's run: that collects
+  // more than the window, never less.
   const ownerSince = isNullish(declaredCollectionScopeSince)
     ? null
     : parseOwnerWindowSince(declaredCollectionScopeSince);
-  if (!isNullish(declaredCollectionScopeSince) && !ownerSince) {
-    throw new Error(
-      `The connection's collection_scope.since '${declaredCollectionScopeSince}' is not an RFC 3339 full-date or date-time with an offset; declare the collection scope again`
-    );
-  }
   const streams = (manifest?.streams || [])
     .filter((stream) => !streamUnsupportedInDefaultScope(stream))
     .map((stream) => {
