@@ -169,6 +169,9 @@ export default async function RunDetailPage({
       />
       <ViolationDiagnosis failure={failure} />
       <ConnectorStderrTailSection failure={failure} />
+      <ConnectorDiagnosticLinesSection
+        event={events.find((e) => e.event_type === "run.connector_diagnostics_recorded")}
+      />
     </>
   );
   // The connector name is the owner's route back to the thing this run belongs
@@ -813,6 +816,66 @@ function extractStderrTail(failure: SpineEvent | undefined): StderrTailDiagnosti
     text,
     truncated: candidate.truncated === true,
   };
+}
+
+/**
+ * Connector diagnostic lines (`[<source>-diagnostic] <event> {...}`) the
+ * runtime kept for this run, whatever its outcome. Owner-local and
+ * connector-authored, so labelled as untrusted like the stderr tail.
+ */
+interface ConnectorDiagnosticLinesData {
+  lines: string[];
+  linesObserved: number;
+  redacted: boolean;
+  truncated: boolean;
+}
+
+function extractDiagnosticLines(event: SpineEvent | undefined): ConnectorDiagnosticLinesData | null {
+  const data = event?.data as Record<string, unknown> | undefined;
+  if (!(data && Array.isArray(data.lines))) {
+    return null;
+  }
+  const lines = data.lines.filter((line): line is string => typeof line === "string");
+  if (lines.length === 0) {
+    return null;
+  }
+  return {
+    lines,
+    linesObserved: typeof data.lines_observed === "number" ? data.lines_observed : lines.length,
+    redacted: data.redacted === true,
+    truncated: data.truncated === true,
+  };
+}
+
+function ConnectorDiagnosticLinesSection({ event }: { event: SpineEvent | undefined }) {
+  const diagnostics = extractDiagnosticLines(event);
+  if (!diagnostics) {
+    return null;
+  }
+  const notes = [`${diagnostics.lines.length.toLocaleString()} of ${diagnostics.linesObserved.toLocaleString()} lines`];
+  if (diagnostics.truncated) {
+    notes.push("truncated");
+  }
+  if (diagnostics.redacted) {
+    notes.push("redacted");
+  }
+  return (
+    <section className="mb-8 rounded-md border border-border/70 bg-muted/20 px-4 py-3">
+      <details>
+        <summary className="cursor-pointer list-none">
+          <span className="pdpp-eyebrow mr-3">Connector diagnostics</span>
+          <span className="pdpp-caption text-muted-foreground">{notes.join(" · ")} · click to expand</span>
+        </summary>
+        <p className="pdpp-caption mt-3 text-muted-foreground">
+          Technical detail the connector wrote during this run. It is connector-authored and kept on this deployment
+          only. Use it to debug the connector, not as a verified PDPP result.
+        </p>
+        <pre className="pdpp-caption mt-3 max-h-96 overflow-auto whitespace-pre-wrap break-all rounded-md border border-border/60 bg-background/70 p-3 font-mono text-foreground/90">
+          {diagnostics.lines.join("\n")}
+        </pre>
+      </details>
+    </section>
+  );
 }
 
 function ConnectorStderrTailSection({ failure }: { failure: SpineEvent | undefined }) {
