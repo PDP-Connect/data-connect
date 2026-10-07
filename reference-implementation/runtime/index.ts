@@ -88,6 +88,7 @@ import {
   nextIngestRetryDelayMs,
   parseIngestRetryAfterMs,
 } from "./ingest-retry.ts";
+import { ownerWindowTimeRange, parseOwnerWindowSince } from "./owner-time-window.ts";
 import { isClosedPipeWriteError } from "./pipe-errors.ts";
 import {
   validateProgressAttachmentHydrationFailureOutcome,
@@ -1501,6 +1502,11 @@ function validateStartScopeStream(streamScope: StreamScope, manifestStream: Mani
     throw new Error(`START.scope stream '${streamScope.name}' fields must be an array of non-empty field names`);
   }
   validateStartScopeTimeRange(streamScope);
+  if (!isNullish(streamScope.time_range) && !manifestStream.consent_time_field) {
+    throw new Error(
+      `START.scope stream '${streamScope.name}' has no consent_time_field, so it must not include time_range`
+    );
+  }
   return {
     ...streamScope,
     ...(Array.isArray(streamScope.fields) ? { fields: buildScopeFields(streamScope, manifestStream) } : {}),
@@ -1544,14 +1550,23 @@ function buildStartScope(
   // stream given a `time_range` would have it silently ignored downstream
   // too, so omitting it here keeps the START message honest about which
   // streams the boundary actually applies to).
+  //
+  // The bound is stated in each consent field's format, and a field with no
+  // date or date-time format gets none: see `runtime/owner-time-window.ts`.
+  const ownerSince = isNullish(declaredCollectionScopeSince)
+    ? null
+    : parseOwnerWindowSince(declaredCollectionScopeSince);
+  if (!isNullish(declaredCollectionScopeSince) && !ownerSince) {
+    throw new Error(
+      `The connection's collection_scope.since '${declaredCollectionScopeSince}' is not an RFC 3339 full-date or date-time with an offset; declare the collection scope again`
+    );
+  }
   const streams = (manifest?.streams || [])
     .filter((stream) => !streamUnsupportedInDefaultScope(stream))
-    .map((stream) => ({
-      name: stream.name,
-      ...(declaredCollectionScopeSince && stream.consent_time_field
-        ? { time_range: { since: declaredCollectionScopeSince } }
-        : {}),
-    }));
+    .map((stream) => {
+      const timeRange = ownerSince ? ownerWindowTimeRange(stream, ownerSince) : null;
+      return { name: stream.name, ...(timeRange ? { time_range: timeRange } : {}) };
+    });
   if (!streams.length) {
     throw new Error("START.scope requires at least one stream");
   }
