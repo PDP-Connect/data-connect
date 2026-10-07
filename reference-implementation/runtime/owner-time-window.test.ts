@@ -4,7 +4,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { consentTimeFormat, ownerWindowTimeRange, parseOwnerWindowSince } from "./owner-time-window.ts";
+import {
+  canonicalOwnerWindowSince,
+  consentTimeFormat,
+  isDeclarableOwnerWindowSince,
+  ownerWindowTimeRange,
+  parseOwnerWindowSince,
+} from "./owner-time-window.ts";
 
 function stream(field: Record<string, unknown> | undefined, consentTimeField: string | null = "occurred") {
   return {
@@ -50,9 +56,39 @@ test("a field with no date or date-time format, or no consent field, gets no bou
   assert.equal(consentTimeFormat(undefined), null);
 });
 
-test("only an RFC 3339 full-date or date-time with an offset is an owner window bound", () => {
+test("a stored date-time with no offset is read at its earliest instant, +14:00", () => {
+  const owner = since("2026-09-05T08:30:00.25");
+  assert.equal(owner.kind, "local_date_time");
+  assert.deepEqual(ownerWindowTimeRange(stream(DATE_TIME), owner), { since: "2026-09-05T08:30:00.25+14:00" });
+  assert.deepEqual(ownerWindowTimeRange(stream(DATE), owner), { since: "2026-09-05" });
+});
+
+test("canonicalization rewrites legacy values to the instant the runtime already uses", () => {
+  assert.equal(canonicalOwnerWindowSince("2026-09-05"), "2026-09-05T00:00:00+14:00");
+  assert.equal(canonicalOwnerWindowSince("2026-09-05T08:30:00"), "2026-09-05T08:30:00+14:00");
+  assert.equal(canonicalOwnerWindowSince("2026-09-05T08:30:00-04:00"), "2026-09-05T08:30:00-04:00");
+  // Unreadable values are left for the caller; the runtime sends no bound for them.
+  assert.equal(canonicalOwnerWindowSince("Sep 5 2026"), "Sep 5 2026");
+  // The canonical form renders to the same bounds as the legacy value.
+  for (const legacy of ["2026-09-05", "2026-09-05T08:30:00"]) {
+    for (const field of [DATE, DATE_TIME]) {
+      assert.deepEqual(
+        ownerWindowTimeRange(stream(field), since(canonicalOwnerWindowSince(legacy))),
+        ownerWindowTimeRange(stream(field), since(legacy))
+      );
+    }
+  }
+});
+
+test("an owner may declare only an RFC 3339 date-time with an offset", () => {
+  assert.equal(isDeclarableOwnerWindowSince("2026-09-05T00:00:00-04:00"), true);
+  assert.equal(isDeclarableOwnerWindowSince("2026-09-05t00:00:00.123456z"), true);
+  assert.equal(isDeclarableOwnerWindowSince("2026-09-05"), false);
+  assert.equal(isDeclarableOwnerWindowSince("2026-09-05T00:00:00"), false);
+});
+
+test("values that are not RFC 3339 do not parse", () => {
   for (const value of [
-    "2026-09-05T00:00:00",
     "2026-09-05 00:00:00Z",
     "Sep 5 2026",
     "2026-02-30",
@@ -65,5 +101,4 @@ test("only an RFC 3339 full-date or date-time with an offset is an owner window 
   }
   assert.equal(parseOwnerWindowSince(1_757_044_800), null);
   assert.ok(parseOwnerWindowSince("2028-02-29"));
-  assert.ok(parseOwnerWindowSince("2026-09-05t00:00:00.123456z"));
 });
