@@ -88,6 +88,27 @@ fn create_legacy_main_window<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::R
     Ok(())
 }
 
+/// Size at which the app log rotates. The plugin default (40 KB) held only
+/// minutes of sidecar output.
+const LOG_MAX_FILE_BYTES: u128 = 10 * 1024 * 1024;
+/// Rotated files kept next to the active one, so the log directory holds at
+/// most (1 + 4) x 10 MiB = 50 MiB. Syncthing ships the same 10 MiB file size
+/// with 3 old files; VS Code keeps its last 10 sessions.
+const LOG_ROTATED_FILES_KEPT: usize = 4;
+
+/// The app log: the Tauri app plus every sidecar's stdout/stderr, which the
+/// process supervisor forwards line by line. The plugin's default rotation
+/// (`KeepOne`) deletes the full file, which destroyed the evidence of a failed
+/// run minutes after it happened; `KeepSome` renames it to a dated file instead.
+fn desktop_log_builder() -> tauri_plugin_log::Builder {
+    tauri_plugin_log::Builder::default()
+        .level(log::LevelFilter::Info)
+        .max_file_size(LOG_MAX_FILE_BYTES)
+        .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepSome(
+            LOG_ROTATED_FILES_KEPT,
+        ))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // rustls cannot pick a process-level CryptoProvider when both `ring` and
@@ -171,11 +192,7 @@ pub fn run() {
             // Enable logging in both debug and release builds, writing to both stdout and a file
             // Default targets are already [Stdout, LogDir] — do NOT add
             // .target() calls or each log line gets written twice.
-            app.handle().plugin(
-                tauri_plugin_log::Builder::default()
-                    .level(log::LevelFilter::Info)
-                    .build(),
-            )?;
+            app.handle().plugin(desktop_log_builder().build())?;
 
             let version = app.config().version.clone().unwrap_or_default();
             log::info!("DataConnect v{} starting", version);
@@ -499,6 +516,108 @@ mod tests {
         assert_eq!(
             response.expect_err("reaches the authority check"),
             serde_json::json!("Open the password window from Settings before saving.")
+        );
+    }
+
+    /// Writes info lines of about 1 KiB until the active log file shrinks,
+    /// which means the plugin rotated it.
+    fn fill_until_rotation(logger: &dyn log::Log, active: &std::path::Path) {
+        let padding = "x".repeat(1024);
+        let mut last_len = 0;
+        loop {
+            for _ in 0..256 {
+                logger.log(
+                    &log::Record::builder()
+                        .level(log::Level::Info)
+                        .args(format_args!("[reference] stdout: {padding}"))
+                        .build(),
+                );
+            }
+            let len = std::fs::metadata(active).map(|m| m.len()).unwrap_or(0);
+            if len < last_len {
+                return;
+            }
+            last_len = len;
+        }
+    }
+
+    fn log_dir_contents(dir: &std::path::Path) -> Vec<(String, u64, String)> {
+        let mut files: Vec<_> = std::fs::read_dir(dir)
+            .expect("read the log dir")
+            .map(|entry| {
+                let path = entry.expect("dir entry").path();
+                let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                let len = std::fs::metadata(&path).expect("metadata").len();
+                let text = std::fs::read_to_string(&path).expect("read log file");
+                (name, len, text)
+            })
+            .collect();
+        files.sort();
+        files
+    }
+
+    /// A failed run must still be in the log after the next rotation, and
+    /// the log directory must stay within a fixed disk budget however long
+    /// the app runs. This drives the real plugin logger with the production
+    /// limits. Rotated files are named to the second, so the test waits a
+    /// second between rotations, as any real 10 MiB of logging does.
+    #[test]
+    fn desktop_log_keeps_rotated_history_within_a_disk_budget() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let active = dir.path().join("DataConnect.log");
+        let app = tauri::test::mock_app();
+        let (_plugin, _level, logger) = desktop_log_builder()
+            .clear_targets()
+            .target(tauri_plugin_log::Target::new(
+                tauri_plugin_log::TargetKind::Folder {
+                    path: dir.path().to_path_buf(),
+                    file_name: Some("DataConnect".into()),
+                },
+            ))
+            .split(app.handle())
+            .expect("build the file logger");
+
+        logger.log(
+            &log::Record::builder()
+                .level(log::Level::Error)
+                .args(format_args!("run r-1 failed: marker-7f3a"))
+                .build(),
+        );
+        fill_until_rotation(logger.as_ref(), &active);
+        assert!(
+            log_dir_contents(dir.path())
+                .iter()
+                .any(|(_, _, text)| text.contains("marker-7f3a")),
+            "the failed run's line was deleted by the first rotation"
+        );
+
+        for _ in 0..LOG_ROTATED_FILES_KEPT + 1 {
+            std::thread::sleep(std::time::Duration::from_millis(1100));
+            fill_until_rotation(logger.as_ref(), &active);
+        }
+        let files = log_dir_contents(dir.path());
+        let names: Vec<_> = files.iter().map(|(name, _, _)| name.as_str()).collect();
+        assert_eq!(
+            files.len(),
+            LOG_ROTATED_FILES_KEPT + 1,
+            "expected the active file plus {LOG_ROTATED_FILES_KEPT} rotated files: {names:?}"
+        );
+        assert!(
+            names
+                .iter()
+                .all(|name| name.starts_with("DataConnect") && name.ends_with(".log")),
+            "{names:?}"
+        );
+        let total: u64 = files.iter().map(|(_, len, _)| len).sum();
+        assert!(
+            total <= (LOG_ROTATED_FILES_KEPT as u64 + 1) * LOG_MAX_FILE_BYTES as u64,
+            "log dir holds {total} bytes"
+        );
+        assert!(
+            !files
+                .iter()
+                .any(|(_, _, text)| text.contains("marker-7f3a")),
+            "the oldest rotated file must be deleted once the budget is full"
         );
     }
 
