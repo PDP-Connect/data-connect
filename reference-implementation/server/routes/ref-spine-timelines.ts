@@ -107,15 +107,26 @@ function parseTimelinePageOptions(
   return { cursor, limit };
 }
 
-function mountTimeline(
-  app: AppLike,
-  ctx: MountRefSpineTimelinesContext,
-  routePath: string,
+export interface TimelineHandlerContext {
+  getRunTerminalStatus: MountRefSpineTimelinesContext["getRunTerminalStatus"];
+  handleError: MountRefSpineTimelinesContext["handleError"];
+  listSpineEventsPage: MountRefSpineTimelinesContext["listSpineEventsPage"];
+  pdppError: PdppErrorFn;
+}
+
+/**
+ * The timeline handler every owner surface mounts behind its own auth guard.
+ * The owner-bearer `GET /v1/owner/runs/:runId/timeline`
+ * (server/routes/owner-runs.ts) reuses it for the run kind, so pagination,
+ * 404/`invalid_cursor` mapping, and live-bearer redaction stay identical.
+ */
+export function buildTimelineHandler(
+  ctx: TimelineHandlerContext,
   kind: RefSpineEventsKind,
   idParamKey: string,
   notFoundMessage: string
-): void {
-  app.get(routePath, ctx.requireOwnerSession, async (req: RouteRequest, res: RouteResponse) => {
+): RouteHandler {
+  return async (req: RouteRequest, res: RouteResponse) => {
     try {
       // Express route matching guarantees the id param is present whenever
       // this handler fires (the path pattern requires a non-empty segment).
@@ -150,7 +161,18 @@ function mountTimeline(
       }
       ctx.handleError(res, err);
     }
-  });
+  };
+}
+
+function mountTimeline(
+  app: AppLike,
+  ctx: MountRefSpineTimelinesContext,
+  routePath: string,
+  kind: RefSpineEventsKind,
+  idParamKey: string,
+  notFoundMessage: string
+): void {
+  app.get(routePath, ctx.requireOwnerSession, buildTimelineHandler(ctx, kind, idParamKey, notFoundMessage));
 }
 
 export function mountRefTraceTimeline(app: AppLike, ctx: MountRefSpineTimelinesContext): void {

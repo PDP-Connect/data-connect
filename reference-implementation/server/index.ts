@@ -37,7 +37,6 @@ import {
   createTraceContext,
   emitSpineEvent,
   generateSpineId,
-  getRunStartedEvent,
   getRunTerminalEvent,
   getRunTerminalStatus,
   listSpineCorrelations,
@@ -501,7 +500,9 @@ import {
   type ProviderAuthExchanger,
 } from "./routes/ref-provider-auth.ts";
 import { mountRefRecordRejections } from "./routes/ref-record-rejections.ts";
+import { mountOwnerRuns } from "./routes/owner-runs.ts";
 import { mountRefRunStatus } from "./routes/ref-run-status.ts";
+import { createSpineRunStatusReader } from "./run-status-read-model.ts";
 import { mountRefGrants, mountRefRuns, mountRefTraces } from "./routes/ref-spine-correlations.ts";
 import { mountRefGrantTimeline, mountRefRunTimeline, mountRefTraceTimeline } from "./routes/ref-spine-timelines.ts";
 import { mountRefStaticSecretCredentialCapture } from "./routes/ref-static-secret-credentials.ts";
@@ -5866,17 +5867,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
   // a typed `not_found` envelope.
   // See openspec/changes/surface-run-handle-resolvability.
   mountRefRunStatus(app, {
-    controller,
-    getLatestRunEvent: async (runId: string) => {
-      const page = await listSpineEventsPage("run", runId, { limit: 20 });
-      return (page.events.at(-1) ?? null) as unknown as Parameters<
-        typeof mountRefRunStatus
-      >[1]["getLatestRunEvent"] extends (id: string) => Promise<infer R>
-        ? R
-        : never;
-    },
-    getRunStartedEvent: (runId: string) => getRunStartedEvent(runId),
-    getRunTerminalEvent: (runId: string) => getRunTerminalEvent(runId),
+    ...createSpineRunStatusReader(controller),
     handleError,
     pdppError,
     requireOwnerSession: ownerAuth.requireOwnerSession,
@@ -8296,6 +8287,27 @@ function buildRsApp(opts: ServerOpts = {}) {
     resolveOwnerConnectorNamespace,
     setReferenceTraceId,
   } as unknown as Parameters<typeof mountOwnerConnectionDiagnostics>[1]);
+
+  // GET /v1/owner/runs/:runId and GET /v1/owner/runs/:runId/timeline are the
+  // owner-bearer siblings of the cookie-authed /_ref run reads. They mount the
+  // same handlers over the same run-status read model, so an owner agent that
+  // started a run can see how it ended and why, with the same redaction the
+  // console applies.
+  mountOwnerRuns(app, {
+    ...createSpineRunStatusReader(opts.controller),
+    getRunTerminalStatus: (runId: string) => getRunTerminalStatus(runId),
+    handleError,
+    // biome-ignore lint/suspicious/noShadow: The local name follows the external payload vocabulary at this boundary.
+    listSpineEventsPage: (kind: string, id: string, pageOpts: unknown) =>
+      listSpineEventsPage(
+        kind as Parameters<typeof listSpineEventsPage>[0],
+        id,
+        pageOpts as Parameters<typeof listSpineEventsPage>[2]
+      ),
+    pdppError,
+    requireOwner,
+    requireToken,
+  } as unknown as Parameters<typeof mountOwnerRuns>[1]);
 
   // POST /v1/owner/connections/intents is the bearer-authed owner-agent
   // connection-initiation route: a trusted local owner agent asks "how do I add
