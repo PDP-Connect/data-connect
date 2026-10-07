@@ -15,6 +15,7 @@
 // object satisfies the structural constraint (all six do) is accepted by
 // TypeScript without additional coupling.
 
+import { type OwnerActor, type OwnerSurface, ownerActorAuditData } from "./_owner-actor.ts";
 import type { TraceContext, WireConnection } from "./_route-contract.ts";
 import { codeToStatus } from "./ref-error-status.ts";
 
@@ -150,4 +151,133 @@ export function httpStatusForOperationError(err: unknown): number {
   // biome-ignore lint/suspicious/noUnnecessaryConditions: TypeScript boundary permits nullish input; this guard preserves runtime behavior.
   const code = (err as { code?: unknown })?.code;
   return typeof code === "string" ? (codeToStatus[code] ?? 500) : 500;
+}
+
+// ---- shared connection controls across both route families -----------------
+
+// How one route mounts a shared connection-control handler: the auth surface,
+// how the target is addressed, the route param that carries it, and how the
+// route resolves the requesting owner. The cookie `/_ref/connections/:id/...`
+// routes and the bearer `/v1/owner/{connections,connectors}/:id/...` routes
+// mount the same handler with different bindings.
+export interface ConnectionControlBinding {
+  readonly ownerSubjectId: (req: unknown) => string;
+  readonly param: "connectionId" | "connectorId" | "connectorInstanceId";
+  readonly selector: "connection_id" | "connector_id";
+  readonly surface: OwnerSurface;
+}
+
+export function ownerSessionConnectionBinding(getOwnerSubjectId: (req: unknown) => string): ConnectionControlBinding {
+  return {
+    ownerSubjectId: getOwnerSubjectId,
+    param: "connectorInstanceId",
+    selector: "connection_id",
+    surface: "owner_session",
+  };
+}
+
+export function ownerBearerConnectionBinding(
+  getOwnerTokenSubjectId: (req: unknown) => string,
+  selector: "connection_id" | "connector_id"
+): ConnectionControlBinding {
+  return {
+    ownerSubjectId: getOwnerTokenSubjectId,
+    param: selector === "connection_id" ? "connectionId" : "connectorId",
+    selector,
+    surface: "owner_bearer",
+  };
+}
+
+// A typed rejection a handler answered itself (as opposed to an error it
+// passed to `handleError`), for the audit's `error` block.
+export interface ConnectionControlRejection {
+  readonly code: string;
+  readonly http_status: number;
+}
+
+function connectionAuditError(error: unknown): Record<string, unknown> {
+  if (!error) {
+    return {};
+  }
+  const { code, http_status: httpStatus } = error as { code?: unknown; http_status?: unknown };
+  return {
+    error: {
+      code: typeof code === "string" ? code : "api_error",
+      http_status: typeof httpStatus === "number" ? httpStatus : httpStatusForOperationError(error),
+    },
+  };
+}
+
+export interface OwnerConnectionAuditContext {
+  emitSpineEvent: (event: Record<string, unknown>) => Promise<unknown>;
+}
+
+export interface OwnerConnectionAuditArgs {
+  readonly connectionId: string | null;
+  readonly connectorKey: string | null;
+  readonly error?: unknown;
+  /** Operation-specific, non-secret audit facts (e.g. `profile_purge`, `label_status`). */
+  readonly facts?: Readonly<Record<string, unknown>>;
+  readonly operation: "revoke" | "reactivate" | "rename_connection";
+  readonly outcome: "succeeded" | "failed";
+  readonly selector: "connection_id" | "connector_id";
+  readonly trace: TraceContext;
+}
+
+const OWNER_CONNECTION_AUDIT_EVENT_TYPE: Record<OwnerConnectionAuditArgs["operation"], string> = {
+  reactivate: "owner_agent.connection.reactivate",
+  rename_connection: "owner_agent.connection.rename",
+  revoke: "owner_agent.connection.revoke",
+};
+
+// Emits one non-secret audit event for a shared connection control, on either
+// surface. The event type is the same on both; `actor_type` and the actor
+// fields in `data` name the surface. Never carries a bearer token, a session
+// credential, or a provider secret.
+export async function emitOwnerConnectionAudit(
+  ctx: OwnerConnectionAuditContext,
+  actor: OwnerActor,
+  args: OwnerConnectionAuditArgs
+): Promise<void> {
+  await ctx.emitSpineEvent({
+    actor_id: actor.actorId,
+    actor_type: actor.actorKind,
+    client_id: actor.clientId,
+    data: {
+      ...ownerActorAuditData(actor),
+      connection_id: args.connectionId,
+      connector_key: args.connectorKey,
+      operation: args.operation,
+      outcome: args.outcome,
+      selector: args.selector,
+      target_resource: "connection",
+      ...args.facts,
+      ...connectionAuditError(args.error),
+    },
+    event_type: OWNER_CONNECTION_AUDIT_EVENT_TYPE[args.operation],
+    object_id: args.connectionId || args.connectorKey || "unknown_connection",
+    object_type: "connection",
+    request_id: args.trace.request_id,
+    scenario_id: args.trace.scenario_id,
+    status: args.outcome,
+    subject_id: actor.ownerSubjectId,
+    subject_type: "subject",
+    trace_id: args.trace.trace_id,
+  });
+}
+
+// Narrows a shared handler context to one that can address a connection by
+// connector type. Only the bearer `/v1/owner/connectors/:connectorId/...`
+// bindings take that path, and their mounts always pass these fields; the
+// cookie routes address a connection id only and do not wire them.
+export function requireConnectorAddressing<T extends object, K extends keyof T>(
+  ctx: T,
+  keys: readonly K[]
+): T & Required<Pick<T, K>> {
+  for (const key of keys) {
+    if (ctx[key] === undefined) {
+      throw new Error(`connector_id addressing requires ${String(key)} on the route context`);
+    }
+  }
+  return ctx as T & Required<Pick<T, K>>;
 }

@@ -1874,7 +1874,7 @@ export async function listConnectorSummaries(
 }
 
 /**
- * One `ref_connection` row from `GET /_ref/connections` — the reference's
+ * One `owner_connection` row from `GET /_ref/connections` — the reference's
  * OWNER-SCOPED, connector_id-filterable connection identity list
  * (`mountRefConnectionsList`, reference-implementation/server/routes/ref-connectors.ts:527`).
  * Distinct from and leaner than `RefConnectorSummary`: no `total_records`,
@@ -1884,11 +1884,16 @@ export async function listConnectorSummaries(
  * scoped by connector identity, not by fleet size.
  */
 export interface RefConnection {
+  /** Stable selector; equal to `connector_instance_id`, which is kept as an alias. */
+  connection_id: string;
   connector_id: string;
   connector_instance_id: string;
+  connector_key: string;
   created_at: string;
   display_name: string;
-  object: "ref_connection";
+  /** `owner_set` for an owner-chosen label, `fallback` for a storage placeholder. */
+  label_status: "owner_set" | "fallback";
+  object: "owner_connection";
   revoked_at: string | null;
   schedule: unknown;
   source_binding: unknown;

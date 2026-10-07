@@ -326,25 +326,25 @@ test("GET /_ref/connections projects display_name and schedule for seeded instan
     assert.equal(rows.length, 1);
     const [row] = rows;
     assert.ok(row);
-    assert.equal(row.object, "ref_connection");
+    assert.equal(row.object, "owner_connection");
     assert.equal(row.connector_instance_id, SPOTIFY_INSTANCE_ID);
     assert.equal(row.display_name, "Spotify - test");
     assert.equal(row.schedule, null);
   });
 });
 
-test("GET /_ref/connections/:connectorInstanceId returns ref_connection envelope", async () => {
+test("GET /_ref/connections/:connectorInstanceId returns owner_connection envelope", async () => {
   await withServer(async ({ asUrl }) => {
     const manifest = await registerSpotifyManifest(asUrl);
     await seedSpotifyInstance(connectorKeyForManifest(manifest));
     const { status, body } = await fetchJson<RefConnectionRow>(`${asUrl}/_ref/connections/${SPOTIFY_INSTANCE_ID}`);
     assert.equal(status, 200);
-    assert.equal(body.object, "ref_connection");
+    assert.equal(body.object, "owner_connection");
     assert.equal(body.connector_instance_id, SPOTIFY_INSTANCE_ID);
   });
 });
 
-test("GET /_ref/connector-instances/:connectorInstanceId returns ref_connection envelope (alias)", async () => {
+test("GET /_ref/connector-instances/:connectorInstanceId returns owner_connection envelope (alias)", async () => {
   await withServer(async ({ asUrl }) => {
     const manifest = await registerSpotifyManifest(asUrl);
     await seedSpotifyInstance(connectorKeyForManifest(manifest));
@@ -352,7 +352,7 @@ test("GET /_ref/connector-instances/:connectorInstanceId returns ref_connection 
       `${asUrl}/_ref/connector-instances/${SPOTIFY_INSTANCE_ID}`
     );
     assert.equal(status, 200);
-    assert.equal(body.object, "ref_connection");
+    assert.equal(body.object, "owner_connection");
     assert.equal(body.connector_instance_id, SPOTIFY_INSTANCE_ID);
   });
 });
@@ -382,7 +382,7 @@ test("PATCH /_ref/connections/:connectorInstanceId updates owner-facing display_
       method: "PATCH",
     });
     assert.equal(status, 200);
-    assert.equal(body.object, "ref_connection");
+    assert.equal(body.object, "owner_connection");
     assert.equal(body.connector_instance_id, SPOTIFY_INSTANCE_ID);
     assert.equal(body.display_name, "Renamed");
   });
@@ -529,7 +529,7 @@ test("POST /_ref/connections/:id/revoke flips one instance to revoked via the sh
       { method: "POST" }
     );
     assert.equal(status, 200);
-    assert.equal(body.object, "ref_connection_revoke");
+    assert.equal(body.object, "owner_connection_revoke");
     assert.equal(body.connection_id, SPOTIFY_INSTANCE_ID);
     assert.equal(body.status, "revoked");
     assert.ok(body.revoked_at, "revoke response carries revoked_at");
@@ -678,7 +678,7 @@ test("GET /_ref/connections/:id projects canonical connector_key for pre-migrati
       `${asUrl}/_ref/connections/${PRE_MIGRATION_INSTANCE_ID}`
     );
     assert.equal(status, 200);
-    assert.equal(body.object, "ref_connection");
+    assert.equal(body.object, "owner_connection");
     assert.equal(
       body.connector_id,
       "spotify",

@@ -7,16 +7,14 @@
 //   POST /v1/owner/connections/:connectionId/revoke
 //   POST /v1/owner/connectors/:connectorId/revoke
 //
-// These are the owner-agent (bearer) connection-scoped revoke siblings of the
-// run/schedule control routes. There is no cookie-authed `/_ref` revoke route
-// to share with: revoke is a NEW owner-agent control surface built directly on
-// the existing connector-instance store soft-flip primitive
-// (`connectorInstanceStore.updateStatus(id, { status: 'revoked' })`). The route
-// adds NO new destructive semantic — it shares that existing store primitive
-// under the same owner-bearer auth adapter (`requireToken` + `requireOwner`)
-// the run/schedule routes use, without teaching `requireOwnerSession` (cookie)
-// a second identity source. `/mcp` owner-bearer rejection
-// (`requireClientOrMcpPackage`) is untouched.
+// They and the owner-session `POST /_ref/connections/:connectorInstanceId/revoke`
+// route (`ref-connectors.ts`) mount ONE handler, `buildConnectionRevokeHandler`,
+// built on the connector-instance store soft-flip primitive
+// (`connectorInstanceStore.updateStatus(id, { status: 'revoked' })`). The
+// routes differ only in their auth adapter (`requireToken` + `requireOwner`
+// bearer vs `requireOwnerSession` cookie), in how the target is addressed
+// (the cookie route takes a connection id only), and in the audit actor.
+// `/mcp` owner-bearer rejection (`requireClientOrMcpPackage`) is untouched.
 //
 // What revoke is (and is NOT):
 //   - Revoke stops a connection's FUTURE collection: it flips exactly one
@@ -62,13 +60,15 @@
 //        #"Owner-agent control mutations SHALL be auditable and secret-safe")
 //       design.md "Deferred: connection-revoke durability" → Unit 2.
 
-import type { BrowserProfilePurger, BrowserProfilePurgeResult } from "../browser-profile-purge.ts";
+import type { BrowserProfilePurger } from "../browser-profile-purge.ts";
 import type { CredentialStateChange } from "../stores/connector-instance-credential-store.ts";
+import { resolveOwnerActor, startOwnerAuditTrace } from "./_owner-actor.ts";
 import {
-  auditActorKind,
-  buildAuditTrace,
-  httpStatusForOperationError,
+  type ConnectionControlBinding,
+  emitOwnerConnectionAudit,
+  ownerBearerConnectionBinding,
   readConnectionTarget,
+  requireConnectorAddressing,
   rethrowAsAmbiguousConnection,
 } from "./_owner-connection-helpers.ts";
 import type {
@@ -87,6 +87,7 @@ import type {
 // `server/routes/owner-connection-run.ts`.
 
 interface RouteRequest {
+  readonly ownerSession?: { readonly sub?: string | null } | null;
   readonly params: Readonly<Record<string, string>>;
   readonly query: Readonly<Record<string, unknown>>;
   readonly tokenInfo?: {
@@ -153,12 +154,12 @@ export interface MountOwnerConnectionRevokeContext {
   // module does not import a clock. Defaults to `new Date().toISOString()`.
   now?: () => string;
   pdppError: PdppErrorFn;
-  // Post-commit browser-profile purge (server/browser-profile-purge.ts). Never
-  // throws; its result is reported in the response and the audit event.
-  purgeBrowserProfile?: BrowserProfilePurger;
   // Projects one active binding to the wire `{ connection_id, display_name? }`
   // shape used in `available_connections` (placeholder labels suppressed).
   projectBindingForWire: (instance: ActiveBinding) => WireConnection | null;
+  // Post-commit browser-profile purge (server/browser-profile-purge.ts). Never
+  // throws; its result is reported in the response and the audit event.
+  purgeBrowserProfile?: BrowserProfilePurger;
   requireOwner: MiddlewareHandler;
   requireToken: MiddlewareHandler;
   // Owner-scoped connector-instance namespace resolution. Verifies owner
@@ -194,67 +195,137 @@ export interface MountOwnerConnectionRevokeContext {
   ) => Promise<RevokedInstance> | RevokedInstance;
 }
 
-// Emits one non-secret `owner_agent.connection.revoke` spine event. The
-// `selector` records whether the action was addressed by `connection_id` or by
-// `connector_id` (the latter is the path that can be ambiguous). The audit
-// never carries the bearer token or any provider secret.
-async function emitRevokeAudit(
-  ctx: MountOwnerConnectionRevokeContext,
+// The context the shared revoke handler needs on either surface. The
+// connector-only fields (`AmbiguousConnectionError`,
+// `listActiveBindingsForGrant`, `projectBindingForWire`) are read only by the
+// bearer `/v1/owner/connectors/:connectorId/revoke` binding.
+type ConnectorAddressingKey = "AmbiguousConnectionError" | "listActiveBindingsForGrant" | "projectBindingForWire";
+const CONNECTOR_ADDRESSING_KEYS: readonly ConnectorAddressingKey[] = [
+  "AmbiguousConnectionError",
+  "listActiveBindingsForGrant",
+  "projectBindingForWire",
+];
+
+export type ConnectionRevokeContext = Omit<
+  MountOwnerConnectionRevokeContext,
+  ConnectorAddressingKey | "getOwnerTokenSubjectId" | "requireOwner" | "requireToken"
+> &
+  Partial<Pick<MountOwnerConnectionRevokeContext, ConnectorAddressingKey>>;
+
+// Resolves the connection to revoke. `connection_id` addressing verifies owner
+// ownership and active status (foreign/unknown → connector_instance_not_found
+// 404; already revoked → connector_instance_inactive 400). `connector_id`
+// addressing auto-selects the single active connection or throws the typed
+// `ambiguous_connection` (409). `allowDefaultAccount: false` so an
+// unmaterialized default account is never created just to revoke it.
+async function resolveRevokeNamespace(
+  ctx: ConnectionRevokeContext,
   req: RouteRequest,
-  res: RouteResponse,
-  args: {
-    connectionId?: string | null;
-    connectorKey?: string | null;
-    error?: unknown;
-    outcome: "succeeded" | "failed";
-    ownerSubjectId?: string | null;
-    profilePurge?: BrowserProfilePurgeResult | null;
-    selector: "connection_id" | "connector_id";
-    trace?: TraceContext;
+  binding: ConnectionControlBinding,
+  ownerSubjectId: string,
+  target: { connectionId: string | null; connectorKey: string | null }
+): Promise<ConnectorNamespace> {
+  const addressed = decodeURIComponent(req.params[binding.param] as string);
+  if (binding.selector === "connection_id") {
+    target.connectionId = addressed;
+    return await ctx.resolveOwnerConnectorNamespace(req, null, {
+      allowDefaultAccount: false,
+      connectorInstanceId: addressed,
+      ownerSubjectId,
+    });
   }
-): Promise<void> {
-  const trace = args.trace ?? buildAuditTrace(ctx, req, res);
-  const clientId = typeof req.tokenInfo?.client_id === "string" ? req.tokenInfo.client_id : null;
-  const clientName = typeof req.tokenInfo?.client_name === "string" ? req.tokenInfo.client_name : null;
-  const actorKind = auditActorKind(req);
-  const ownerSubjectId =
-    args.ownerSubjectId ?? (typeof req.tokenInfo?.subject_id === "string" ? req.tokenInfo.subject_id : null);
-  const code = (args.error as { code?: unknown } | null)?.code;
-  await ctx.emitSpineEvent({
-    actor_id: clientId ?? ownerSubjectId ?? actorKind,
-    actor_type: actorKind,
-    client_id: clientId,
-    data: {
-      actor_kind: actorKind,
-      auth_token_kind: req.tokenInfo?.pdpp_token_kind ?? null,
-      client_id: clientId,
-      client_name: clientName,
-      connection_id: args.connectionId ?? null,
-      connector_key: args.connectorKey ?? null,
-      operation: "revoke",
-      outcome: args.outcome,
-      selector: args.selector,
-      target_resource: "connection",
-      ...(args.profilePurge ? { profile_purge: args.profilePurge } : {}),
-      ...(args.error
-        ? {
-            error: {
-              code: typeof code === "string" ? code : "api_error",
-              http_status: httpStatusForOperationError(args.error),
-            },
-          }
-        : {}),
-    },
-    event_type: "owner_agent.connection.revoke",
-    object_id: args.connectionId || args.connectorKey || "unknown_connection",
-    object_type: "connection",
-    request_id: trace.request_id,
-    scenario_id: trace.scenario_id,
-    status: args.outcome,
-    subject_id: ownerSubjectId,
-    subject_type: "subject",
-    trace_id: trace.trace_id,
-  });
+  target.connectorKey = ctx.canonicalConnectorKey(addressed) ?? addressed;
+  try {
+    return await ctx.resolveOwnerConnectorNamespace(req, addressed, {
+      allowDefaultAccount: false,
+      ownerSubjectId,
+    });
+  } catch (resolveErr) {
+    return await rethrowAsAmbiguousConnection(
+      requireConnectorAddressing(ctx, CONNECTOR_ADDRESSING_KEYS),
+      resolveErr,
+      ownerSubjectId,
+      target.connectorKey
+    );
+  }
+}
+
+// The one revoke handler. The cookie `POST /_ref/connections/:id/revoke` route
+// and both bearer revoke routes mount it; `binding` decides only how the
+// target is addressed and who the actor is. Resolution, the soft flip (which
+// also revokes the stored credential), the browser-profile purge, the
+// `owner_agent.connection.revoke` audit, the typed errors, and the 200
+// `owner_connection_revoke` body are the same on every route.
+export function buildConnectionRevokeHandler(
+  ctx: ConnectionRevokeContext,
+  binding: ConnectionControlBinding
+): RouteHandler {
+  return async (req: RouteRequest, res: RouteResponse) => {
+    const ownerSubjectId = binding.ownerSubjectId(req);
+    const actor = resolveOwnerActor(binding.surface, req, ownerSubjectId);
+    const trace = startOwnerAuditTrace(ctx, actor, res);
+    const target: { connectionId: string | null; connectorKey: string | null } = {
+      connectionId: null,
+      connectorKey: null,
+    };
+    const audit = (outcome: "succeeded" | "failed", extra: { error?: unknown; facts?: Record<string, unknown> }) =>
+      emitOwnerConnectionAudit(ctx, actor, {
+        ...target,
+        ...extra,
+        operation: "revoke",
+        outcome,
+        selector: binding.selector,
+        trace,
+      });
+    try {
+      const namespace = await resolveRevokeNamespace(ctx, req, binding, ownerSubjectId, target);
+      target.connectionId = namespace.connectorInstanceId;
+      target.connectorKey = ctx.canonicalConnectorKey(namespace.connectorId) ?? namespace.connectorId;
+
+      const stamp = ctx.now ? ctx.now() : new Date().toISOString();
+      const revoked = await Promise.resolve(
+        ctx.updateConnectorInstanceStatus(namespace.connectorInstanceId, {
+          credentialStateChange: {
+            actorId: actor.actorId,
+            actorType: actor.actorKind,
+            cause: "owner_revoked",
+            requestId: trace.request_id,
+            traceId: trace.trace_id,
+          },
+          revokedAt: stamp,
+          sourceBindingPatch: { revocation_reason: "owner_revoked" },
+          status: "revoked",
+          updatedAt: stamp,
+        })
+      );
+      ctx.invalidateConnectorSummariesCache?.();
+      // `updateConnectorInstanceStatus` (-> `store.updateStatus`) marks summary
+      // evidence dirty in the SAME transaction as the status write — a separate
+      // post-hoc call here would be redundant, not additive.
+      // Revoke stops future collection, so the source's logged-in browser
+      // session goes too. A failure is reported, never a failed revoke.
+      const profilePurge = ctx.purgeBrowserProfile
+        ? await ctx.purgeBrowserProfile({
+            connectorInstanceId: target.connectionId,
+            connectorKey: target.connectorKey,
+            ownerSubjectId,
+          })
+        : null;
+      await audit("succeeded", profilePurge ? { facts: { profile_purge: profilePurge } } : {});
+      res.status(200).json({
+        connection_id: target.connectionId,
+        connector_id: target.connectorKey,
+        connector_key: target.connectorKey,
+        object: "owner_connection_revoke",
+        ...(profilePurge ? { profile_purge: profilePurge } : {}),
+        revoked_at: revoked.revokedAt ?? stamp,
+        status: revoked.status ?? "revoked",
+      });
+    } catch (err) {
+      await audit("failed", { error: err });
+      ctx.handleError(res, err);
+    }
+  };
 }
 
 // Separate owner guard that emits a failed-authorization audit event before
@@ -272,127 +343,16 @@ function buildRevokeRequireOwner(
     }
     const err = new Error("Owner token required") as Error & { code: string };
     err.code = "permission_error";
-    const { connectionId, connectorKey } = readConnectionTarget(ctx, req, selector);
-    await emitRevokeAudit(ctx, req, res, {
-      connectionId,
-      connectorKey,
+    const actor = resolveOwnerActor("owner_bearer", req, ctx.getOwnerTokenSubjectId(req));
+    await emitOwnerConnectionAudit(ctx, actor, {
+      ...readConnectionTarget(ctx, req, selector),
       error: err,
+      operation: "revoke",
       outcome: "failed",
-      ownerSubjectId: typeof req.tokenInfo?.subject_id === "string" ? req.tokenInfo.subject_id : null,
       selector,
+      trace: startOwnerAuditTrace(ctx, actor, res),
     });
     ctx.pdppError(res, 403, "permission_error", "Owner token required");
-  };
-}
-
-// Shared handler body for both routes. `selector` chooses connector-only vs
-// connection-scoped addressing; the namespace-resolution and ambiguity path is
-// identical to the run/schedule routes. On success the soft-flipped connection
-// is returned as 200 `{ object: "owner_connection_revoke", connection_id,
-// connector_key, status: "revoked", revoked_at }`.
-function buildRevokeHandler(
-  ctx: MountOwnerConnectionRevokeContext,
-  selector: "connection_id" | "connector_id"
-): RouteHandler {
-  return async (req: RouteRequest, res: RouteResponse) => {
-    const ownerSubjectId = ctx.getOwnerTokenSubjectId(req);
-    let connectionId: string | null = null;
-    let connectorKey: string | null = null;
-    try {
-      let namespace: ConnectorNamespace;
-      if (selector === "connection_id") {
-        const addressed = decodeURIComponent(req.params.connectionId as string);
-        connectionId = addressed;
-        // Resolve by connection_id (== connector_instance_id). The resolver
-        // verifies the connection belongs to this owner and is active; a
-        // foreign or unknown id surfaces as connector_instance_not_found (404),
-        // and an already-revoked connection surfaces as
-        // connector_instance_inactive (400), making a repeat revoke a clean
-        // typed 4xx. allowDefaultAccount:false so an unmaterialized default
-        // account is never created just to revoke it.
-        namespace = await ctx.resolveOwnerConnectorNamespace(req, null, {
-          allowDefaultAccount: false,
-          connectorInstanceId: addressed,
-          ownerSubjectId,
-        });
-      } else {
-        const rawConnectorId = decodeURIComponent(req.params.connectorId as string);
-        connectorKey = ctx.canonicalConnectorKey(rawConnectorId) ?? rawConnectorId;
-        try {
-          // connector-only addressing: auto-select the single active
-          // connection, or throw ambiguity when more than one exists.
-          namespace = await ctx.resolveOwnerConnectorNamespace(req, rawConnectorId, {
-            allowDefaultAccount: false,
-            ownerSubjectId,
-          });
-        } catch (resolveErr) {
-          await rethrowAsAmbiguousConnection(ctx, resolveErr, ownerSubjectId, connectorKey);
-          // rethrowAsAmbiguousConnection always throws; unreachable.
-          return;
-        }
-      }
-      connectionId = namespace.connectorInstanceId;
-      connectorKey = ctx.canonicalConnectorKey(namespace.connectorId) ?? namespace.connectorId;
-
-      const stamp = ctx.now ? ctx.now() : new Date().toISOString();
-      const trace = buildAuditTrace(ctx, req, res);
-      const actorType = auditActorKind(req);
-      const actorId = typeof req.tokenInfo?.client_id === "string" ? req.tokenInfo.client_id : ownerSubjectId;
-      const revoked = await Promise.resolve(
-        ctx.updateConnectorInstanceStatus(namespace.connectorInstanceId, {
-          credentialStateChange: {
-            actorId,
-            actorType,
-            cause: "owner_revoked",
-            requestId: trace.request_id,
-            traceId: trace.trace_id,
-          },
-          revokedAt: stamp,
-          sourceBindingPatch: { revocation_reason: "owner_revoked" },
-          status: "revoked",
-          updatedAt: stamp,
-        })
-      );
-      ctx.invalidateConnectorSummariesCache?.();
-      // Terminal-gate revision (2026-07-29): `updateConnectorInstanceStatus`
-      // (-> `store.updateStatus`) now marks summary evidence dirty in the
-      // SAME transaction as the status write — a separate post-hoc call
-      // here would be redundant, not additive.
-      // Revoke stops future collection, so the source's logged-in browser
-      // session goes too. A failure is reported, never a failed revoke.
-      const profilePurge =
-        ctx.purgeBrowserProfile && connectionId && connectorKey
-          ? await ctx.purgeBrowserProfile({ connectorInstanceId: connectionId, connectorKey, ownerSubjectId })
-          : null;
-      await emitRevokeAudit(ctx, req, res, {
-        connectionId,
-        connectorKey,
-        outcome: "succeeded",
-        ownerSubjectId,
-        profilePurge,
-        selector,
-        trace,
-      });
-      res.status(200).json({
-        connection_id: connectionId,
-        connector_id: connectorKey,
-        connector_key: connectorKey,
-        object: "owner_connection_revoke",
-        ...(profilePurge ? { profile_purge: profilePurge } : {}),
-        revoked_at: revoked.revokedAt ?? stamp,
-        status: revoked.status ?? "revoked",
-      });
-    } catch (err) {
-      await emitRevokeAudit(ctx, req, res, {
-        connectionId,
-        connectorKey,
-        error: err,
-        outcome: "failed",
-        ownerSubjectId,
-        selector,
-      });
-      ctx.handleError(res, err);
-    }
   };
 }
 
@@ -402,13 +362,13 @@ export function mountOwnerConnectionRevoke(app: AppLike, ctx: MountOwnerConnecti
     { contract: "ownerRevokeConnection" },
     ctx.requireToken,
     buildRevokeRequireOwner(ctx, "connection_id"),
-    buildRevokeHandler(ctx, "connection_id")
+    buildConnectionRevokeHandler(ctx, ownerBearerConnectionBinding(ctx.getOwnerTokenSubjectId, "connection_id"))
   );
   app.post(
     "/v1/owner/connectors/:connectorId/revoke",
     { contract: "ownerRevokeConnector" },
     ctx.requireToken,
     buildRevokeRequireOwner(ctx, "connector_id"),
-    buildRevokeHandler(ctx, "connector_id")
+    buildConnectionRevokeHandler(ctx, ownerBearerConnectionBinding(ctx.getOwnerTokenSubjectId, "connector_id"))
   );
 }

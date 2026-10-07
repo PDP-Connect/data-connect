@@ -711,7 +711,7 @@ test("reference connections list and detail expose owner-facing instance labels"
     const detailResp = await fetchJson<RefConnectionDetailBody>(`${asUrl}/_ref/connections/cin_spotify_work`);
     assert.equal(detailResp.status, 200);
     assert.ok(detailResp.body, "expected a connection detail body");
-    assert.equal(detailResp.body.object, "ref_connection");
+    assert.equal(detailResp.body.object, "owner_connection");
     assert.equal(detailResp.body.connector_id, canonicalConnectorId);
     assert.equal(detailResp.body.connector_instance_id, "cin_spotify_work");
     assert.equal(detailResp.body.display_name, "Spotify - work");

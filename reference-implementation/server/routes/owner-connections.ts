@@ -6,7 +6,9 @@
 // (rename).
 //
 // This is the owner-agent (bearer) sibling of the cookie-authed
-// `/_ref/connections` listing in `server/routes/ref-connectors.ts`. Per the
+// `GET /_ref/connections` listing and `PATCH /_ref/connections/:id` rename in
+// `server/routes/ref-connectors.ts`; both families mount the handlers built
+// here (`buildConnectionsListHandler`, `buildConnectionRenameHandler`). Per the
 // owner-agent control-surface audit (Lane B) it lives in the `/v1/owner/*`
 // route family so it reuses the existing owner-bearer guards
 // (`requireToken` + `requireOwner`) without teaching `requireOwnerSession`
@@ -28,7 +30,12 @@
 //         instance operations")
 
 import type { OwnerAgentControlAction } from "../metadata.ts";
-import { auditActorKind, buildAuditTrace } from "./_owner-connection-helpers.ts";
+import { resolveOwnerActor, startOwnerAuditTrace } from "./_owner-actor.ts";
+import {
+  type ConnectionControlBinding,
+  emitOwnerConnectionAudit,
+  ownerBearerConnectionBinding,
+} from "./_owner-connection-helpers.ts";
 import type { MiddlewareHandler, PdppErrorFn, RouteArg, TraceContext } from "./_route-contract.ts";
 
 // Express-shaped surface, structurally typed to avoid pulling in the
@@ -37,6 +44,7 @@ import type { MiddlewareHandler, PdppErrorFn, RouteArg, TraceContext } from "./_
 
 interface RouteRequest {
   readonly body?: unknown;
+  readonly ownerSession?: { readonly sub?: string | null } | null;
   readonly params: Readonly<Record<string, string>>;
   readonly query: Readonly<Record<string, unknown>>;
   readonly tokenInfo?: {
@@ -49,6 +57,7 @@ interface RouteRequest {
 }
 
 interface RouteResponse {
+  end: () => unknown;
   getHeader: (name: string) => string | number | string[] | undefined;
   json: (body: unknown) => unknown;
   setHeader: (name: string, value: string) => void;
@@ -137,61 +146,88 @@ export interface MountOwnerConnectionsContext {
   setReferenceTraceId: (res: RouteResponse, traceId: string) => void;
 }
 
-// Owner-agent projection of a connector instance. Standardizes on
-// `connection_id` as the stable selector and keeps `connector_instance_id`
-// as a deprecated alias for compatibility with older clients. Emits both
-// `connector_id` and `connector_key` (canonicalized) so an agent can match
-// the connector type regardless of which identifier it persisted. Surfaces
-// `label_status` so an agent can tell an owner-chosen label
-// (`owner_set`) from a storage-layer fallback (`fallback`, i.e.
-// label-needed) without re-deriving the placeholder rules.
-function projectOwnerConnection(
-  ctx: MountOwnerConnectionsContext,
+// The context the shared list and rename handlers need on either surface.
+// `buildOwnerConnectionSupportedActions` and `resolveResource` are read only
+// on the bearer surface (see `projectOwnerConnection`).
+export type ConnectionsContext = Omit<
+  MountOwnerConnectionsContext,
+  | "buildOwnerConnectionSupportedActions"
+  | "getOwnerTokenSubjectId"
+  | "requireOwner"
+  | "requireToken"
+  | "resolveResource"
+> &
+  Partial<Pick<MountOwnerConnectionsContext, "buildOwnerConnectionSupportedActions" | "resolveResource">>;
+
+// Owner projection of a connector instance: one row shape for a connection on
+// every owner surface (the cookie `/_ref/connections` routes and the bearer
+// `/v1/owner/connections` routes). Standardizes on `connection_id` as the
+// stable selector and keeps `connector_instance_id` as a deprecated alias for
+// compatibility with older clients. Emits both `connector_id` and
+// `connector_key` (canonicalized) so a caller can match the connector type
+// regardless of which identifier it persisted. Surfaces `label_status` so a
+// caller can tell an owner-chosen label (`owner_set`) from a storage-layer
+// fallback (`fallback`, i.e. label-needed) without re-deriving the
+// placeholder rules.
+export function projectOwnerConnectionRow(
+  ctx: Pick<ConnectionsContext, "canonicalConnectorKey" | "projectStorageDisplayName">,
   instance: ConnectorInstanceRow,
-  schedulesByInstanceId: ReadonlyMap<string, unknown>,
-  resource: string
+  schedulesByInstanceId: ReadonlyMap<string, unknown>
 ): Record<string, unknown> {
   const connectorKey = ctx.canonicalConnectorKey(instance.connectorId) ?? instance.connectorId;
   const ownerMeaningfulName = ctx.projectStorageDisplayName(instance.displayName, {
     connectorId: connectorKey,
     connectorInstanceId: instance.connectorInstanceId,
   });
-  const labelStatus = ownerMeaningfulName ? "owner_set" : "fallback";
   return {
     connection_id: instance.connectorInstanceId,
     connector_id: connectorKey,
     // Deprecated alias for the stable `connection_id` selector. Kept for
-    // compatibility; agents SHOULD persist `connection_id`.
+    // compatibility; callers SHOULD persist `connection_id`.
     connector_instance_id: instance.connectorInstanceId,
     connector_key: connectorKey,
     created_at: instance.createdAt,
     // The raw stored display name (may be a fallback). `label_status`
-    // tells the agent whether this is owner-meaningful or label-needed.
+    // tells the caller whether this is owner-meaningful or label-needed.
     display_name: instance.displayName,
-    label_status: labelStatus,
+    label_status: ownerMeaningfulName ? "owner_set" : "fallback",
     object: "owner_connection",
     revoked_at: instance.revokedAt,
     schedule: schedulesByInstanceId.get(instance.connectorInstanceId) || null,
     source_binding: instance.sourceBinding,
     source_kind: instance.sourceKind,
     status: instance.status,
-    // Capability-advertised, instance-scoped control actions for this exact
-    // connection (design.md #5). Projected from the same control catalog
-    // `GET /v1/owner/control` reads. Supported actions (`rename_connection`)
-    // carry this connection's concrete URL; unavailable actions are marked
-    // `owner_mediated`/`unsupported` with a typed reason rather than omitted, so
-    // an agent never probes a 404 and the fallback/label-needed row always names
-    // its supported rename action.
-    supported_actions: ctx.buildOwnerConnectionSupportedActions({
-      connectionId: instance.connectorInstanceId,
-      resource,
-    }),
     updated_at: instance.updatedAt,
   };
 }
 
+// On the bearer surface each row also carries `supported_actions`: the
+// instance-scoped owner-agent control actions for this exact connection,
+// projected from the same catalog `GET /v1/owner/control` reads. Their URLs
+// point into the bearer route family, so the cookie surface omits them, the
+// same way run-status `links` follow the caller's route family.
+function projectOwnerConnection(
+  ctx: ConnectionsContext,
+  binding: ConnectionControlBinding,
+  req: RouteRequest,
+  instance: ConnectorInstanceRow,
+  schedulesByInstanceId: ReadonlyMap<string, unknown>
+): Record<string, unknown> {
+  const row = projectOwnerConnectionRow(ctx, instance, schedulesByInstanceId);
+  if (binding.surface !== "owner_bearer" || !ctx.buildOwnerConnectionSupportedActions || !ctx.resolveResource) {
+    return row;
+  }
+  return {
+    ...row,
+    supported_actions: ctx.buildOwnerConnectionSupportedActions({
+      connectionId: instance.connectorInstanceId,
+      resource: ctx.resolveResource(req),
+    }),
+  };
+}
+
 function connectorIdMatchesFilter(
-  ctx: MountOwnerConnectionsContext,
+  ctx: ConnectionsContext,
   instance: ConnectorInstanceRow,
   connectorId: string | null
 ): boolean {
@@ -201,101 +237,104 @@ function connectorIdMatchesFilter(
   return (ctx.canonicalConnectorKey(instance.connectorId) ?? instance.connectorId) === connectorId;
 }
 
-function httpStatusForAuditError(err: unknown): number {
-  // biome-ignore lint/suspicious/noUnnecessaryConditions: TypeScript boundary permits nullish input; this guard preserves runtime behavior.
-  const code = (err as { code?: unknown })?.code;
-  if (code === "invalid_request") {
-    return 400;
-  }
-  if (code === "authentication_error") {
-    return 401;
-  }
-  if (code === "permission_error") {
-    return 403;
-  }
-  if (code === "connector_instance_not_found") {
-    return 404;
-  }
-  return 500;
+async function schedulesByConnection(ctx: ConnectionsContext): Promise<Map<string, unknown>> {
+  const schedules = await ctx.listSchedules();
+  return new Map<string, unknown>(
+    schedules
+      .filter((schedule) => schedule?.connector_instance_id)
+      .map((schedule) => [schedule.connector_instance_id as string, schedule])
+  );
 }
 
 function stringOrNull(value: unknown): string | null {
   return typeof value === "string" ? value : null;
 }
 
-interface OwnerConnectionRenameAuditArgs {
-  connectionId: string;
-  connectorKey?: string | null;
-  displayNameSupplied?: boolean;
-  error?: unknown;
-  labelStatus?: string | null;
-  outcome: "succeeded" | "failed";
-  ownerSubjectId?: string | null;
-}
-
-function buildOwnerConnectionRenameAuditError(error: unknown): Record<string, unknown> {
-  if (!error) {
-    return {};
-  }
-  // biome-ignore lint/style/useDestructuring: Explicit property or positional access documents this compatibility boundary.
-  const code = (error as { code?: unknown }).code;
-  return {
-    error: {
-      code: typeof code === "string" ? code : "api_error",
-      http_status: httpStatusForAuditError(error),
-    },
+// The one connection-list handler, mounted by `GET /_ref/connections` and
+// `GET /v1/owner/connections`. Lists every configured connection the owner
+// has, filtered by `connector_id` (canonicalized, so a URL-shaped registry id
+// matches the canonical key instances are stored under) and `status`.
+export function buildConnectionsListHandler(ctx: ConnectionsContext, binding: ConnectionControlBinding): RouteHandler {
+  return async (req: RouteRequest, res: RouteResponse) => {
+    try {
+      const ownerSubjectId = binding.ownerSubjectId(req);
+      const rawConnectorId = ctx.resolveSingleConnectorIdQueryValue(req.query.connector_id);
+      const connectorId = rawConnectorId
+        ? (ctx.canonicalConnectorKey(rawConnectorId) ?? rawConnectorId)
+        : rawConnectorId;
+      const status = ctx.resolveSingleConnectorIdQueryValue(req.query.status);
+      const store = ctx.createRequestConnectorInstanceStore();
+      const instances = await store.listByOwner(ownerSubjectId);
+      const schedules = await schedulesByConnection(ctx);
+      const data = instances
+        .filter((instance) => connectorIdMatchesFilter(ctx, instance, connectorId))
+        .filter((instance) => !status || instance.status === status)
+        .map((instance) => projectOwnerConnection(ctx, binding, req, instance, schedules));
+      res.json({ data, object: "list" });
+    } catch (err) {
+      ctx.handleError(res, err);
+    }
   };
 }
 
-function buildOwnerConnectionRenameAuditData(
-  req: RouteRequest,
-  args: OwnerConnectionRenameAuditArgs,
-  actorKind: string,
-  clientId: string | null,
-  clientName: string | null
-): Record<string, unknown> {
-  return {
-    actor_kind: actorKind,
-    auth_token_kind: req.tokenInfo?.pdpp_token_kind ?? null,
-    client_id: clientId,
-    client_name: clientName,
-    connection_id: args.connectionId,
-    connector_key: args.connectorKey ?? null,
-    display_name_supplied: args.displayNameSupplied ?? true,
-    label_status: args.labelStatus ?? null,
-    operation: "rename_connection",
-    outcome: args.outcome,
-    target_resource: "connection",
-    ...buildOwnerConnectionRenameAuditError(args.error),
+// The one rename handler, mounted by `PATCH /_ref/connections/:id` and
+// `PATCH /v1/owner/connections/:connectionId`. It validates `display_name`
+// at the boundary (a typed 400 before the store is touched), then renames
+// through `store.setDisplayName`, whose update is owner-scoped: a connection
+// id that belongs to another owner, or to no one, matches zero rows and
+// surfaces as `connector_instance_not_found` (404). Any owned connection can
+// be renamed whatever its status. Every attempt emits
+// `owner_agent.connection.rename`; the response is the renamed row.
+export function buildConnectionRenameHandler(ctx: ConnectionsContext, binding: ConnectionControlBinding): RouteHandler {
+  return async (req: RouteRequest, res: RouteResponse) => {
+    const ownerSubjectId = binding.ownerSubjectId(req);
+    const actor = resolveOwnerActor(binding.surface, req, ownerSubjectId);
+    const trace = startOwnerAuditTrace(ctx, actor, res);
+    const connectionId = decodeURIComponent(req.params[binding.param] as string);
+    const body = (req.body as Record<string, unknown> | null) || {};
+    const audit = (
+      outcome: "succeeded" | "failed",
+      args: { connectorKey?: string | null; error?: unknown; facts: Record<string, unknown> }
+    ) =>
+      emitOwnerConnectionAudit(ctx, actor, {
+        connectionId,
+        connectorKey: args.connectorKey ?? null,
+        ...(args.error ? { error: args.error } : {}),
+        facts: args.facts,
+        operation: "rename_connection",
+        outcome,
+        selector: binding.selector,
+        trace,
+      });
+    const failedFacts = { display_name_supplied: Object.hasOwn(body, "display_name"), label_status: null };
+    try {
+      const displayName = body.display_name;
+      if (typeof displayName !== "string" || !displayName.trim()) {
+        await audit("failed", { error: { code: "invalid_request", http_status: 400 }, facts: failedFacts });
+        ctx.pdppError(res, 400, "invalid_request", "display_name must be a non-empty string", "display_name");
+        return;
+      }
+      const store = ctx.createRequestConnectorInstanceStore();
+      const updated = await store.setDisplayName(connectionId, {
+        displayName: displayName.trim(),
+        ownerSubjectId,
+        updatedAt: ctx.now ? ctx.now() : new Date().toISOString(),
+      });
+      ctx.invalidateConnectorSummariesCache?.();
+      // `store.setDisplayName` marks summary evidence dirty in the SAME
+      // transaction as the display_name write — a separate post-hoc call here
+      // would be redundant, not additive.
+      const projected = projectOwnerConnection(ctx, binding, req, updated, await schedulesByConnection(ctx));
+      await audit("succeeded", {
+        connectorKey: stringOrNull(projected.connector_key),
+        facts: { display_name_supplied: true, label_status: stringOrNull(projected.label_status) },
+      });
+      res.json(projected);
+    } catch (err) {
+      await audit("failed", { error: err, facts: failedFacts });
+      ctx.handleError(res, err);
+    }
   };
-}
-
-async function emitOwnerConnectionRenameAudit(
-  ctx: MountOwnerConnectionsContext,
-  req: RouteRequest,
-  res: RouteResponse,
-  args: OwnerConnectionRenameAuditArgs
-): Promise<void> {
-  const trace = buildAuditTrace(ctx, req, res);
-  const clientId = stringOrNull(req.tokenInfo?.client_id);
-  const clientName = stringOrNull(req.tokenInfo?.client_name);
-  const actorKind = auditActorKind(req);
-  const ownerSubjectId = args.ownerSubjectId ?? stringOrNull(req.tokenInfo?.subject_id);
-  await ctx.emitSpineEvent({
-    actor_id: clientId ?? ownerSubjectId ?? actorKind,
-    actor_type: actorKind,
-    client_id: clientId,
-    data: buildOwnerConnectionRenameAuditData(req, args, actorKind, clientId, clientName),
-    event_type: "owner_agent.connection.rename",
-    object_id: args.connectionId || "unknown_connection",
-    object_type: "connection",
-    request_id: trace.request_id,
-    scenario_id: trace.scenario_id,
-    status: args.outcome,
-    subject_id: ownerSubjectId,
-    subject_type: "subject",
-    trace_id: trace.trace_id,
-  });
 }
 
 function buildOwnerConnectionRenameRequireOwner(ctx: MountOwnerConnectionsContext): MiddlewareHandler {
@@ -305,139 +344,48 @@ function buildOwnerConnectionRenameRequireOwner(ctx: MountOwnerConnectionsContex
       await next();
       return;
     }
-    const connectionId = decodeURIComponent(req.params.connectionId as string);
     const err = new Error("Owner token required") as Error & { code: string };
     err.code = "permission_error";
-    await emitOwnerConnectionRenameAudit(ctx, req, res, {
-      connectionId,
+    const actor = resolveOwnerActor("owner_bearer", req, ctx.getOwnerTokenSubjectId(req));
+    await emitOwnerConnectionAudit(ctx, actor, {
+      connectionId: decodeURIComponent(req.params.connectionId as string),
+      connectorKey: null,
       error: err,
+      facts: { display_name_supplied: true, label_status: null },
+      operation: "rename_connection",
       outcome: "failed",
-      ownerSubjectId: typeof req.tokenInfo?.subject_id === "string" ? req.tokenInfo.subject_id : null,
+      selector: "connection_id",
+      trace: startOwnerAuditTrace(ctx, actor, res),
     });
     ctx.pdppError(res, 403, "permission_error", "Owner token required");
   };
 }
 
-async function validateOwnerConnectionRename(
-  ctx: MountOwnerConnectionsContext,
-  req: RouteRequest,
-  res: RouteResponse,
-  connectionId: string
-): Promise<{ displayName: string } | null> {
-  const body = (req.body as Record<string, unknown> | null) || {};
-  const displayName = body.display_name;
-  // Validate at the boundary so a malformed request is a typed 400 before
-  // the store is touched, matching the `/_ref` PATCH behaviour and the
-  // contract's `display_name` body schema.
-  if (typeof displayName !== "string" || !displayName.trim()) {
-    const err = new Error("display_name must be a non-empty string") as Error & { code: string; param: string };
-    err.code = "invalid_request";
-    err.param = "display_name";
-    await emitOwnerConnectionRenameAudit(ctx, req, res, {
-      connectionId,
-      displayNameSupplied: Object.hasOwn(body, "display_name"),
-      error: err,
-      outcome: "failed",
-      ownerSubjectId: ctx.getOwnerTokenSubjectId(req),
-    });
-    ctx.pdppError(res, 400, "invalid_request", "display_name must be a non-empty string", "display_name");
-    return null;
-  }
-  return { displayName: displayName.trim() };
-}
-
-async function performOwnerConnectionRename(
-  ctx: MountOwnerConnectionsContext,
-  req: RouteRequest,
-  connectionId: string,
-  displayName: string
-): Promise<{ projected: Record<string, unknown>; ownerSubjectId: string }> {
-  const ownerSubjectId = ctx.getOwnerTokenSubjectId(req);
-  const store = ctx.createRequestConnectorInstanceStore();
-  const updated = await store.setDisplayName(connectionId, {
-    displayName,
-    ownerSubjectId,
-    updatedAt: ctx.now ? ctx.now() : new Date().toISOString(),
-  });
-  ctx.invalidateConnectorSummariesCache?.();
-  // Terminal-gate revision (2026-07-29): `store.setDisplayName` now marks
-  // summary evidence dirty in the SAME transaction as the display_name write
-  // (server/stores/connector-instance-store.ts) — a separate post-hoc call
-  // here would be redundant, not additive.
-  const schedules = await ctx.listSchedules();
-  const schedulesByInstanceId = new Map<string, unknown>(
-    schedules
-      .filter((schedule) => schedule?.connector_instance_id)
-      .map((schedule) => [schedule.connector_instance_id as string, schedule])
-  );
-  const resource = ctx.resolveResource(req);
-  const projected = projectOwnerConnection(ctx, updated, schedulesByInstanceId, resource);
-  return { ownerSubjectId, projected };
-}
-
 // GET /v1/owner/connections — bearer-authed owner-agent listing of every
-// configured connection instance for the authenticated owner. Mirrors the
-// cookie-authed `/_ref/connections` listing's filtering and projection
-// semantics but emits the owner-agent contract (`connection_id`,
-// `connector_key`, `label_status`).
+// configured connection instance for the authenticated owner. Same handler as
+// the cookie-authed `GET /_ref/connections`.
 export function mountOwnerConnectionsList(app: AppLike, ctx: MountOwnerConnectionsContext): void {
   app.get(
     "/v1/owner/connections",
     { contract: "ownerListConnections" },
     ctx.requireToken,
     ctx.requireOwner,
-    async (req: RouteRequest, res: RouteResponse) => {
-      try {
-        const ownerSubjectId = ctx.getOwnerTokenSubjectId(req);
-        const resource = ctx.resolveResource(req);
-        const rawConnectorId = ctx.resolveSingleConnectorIdQueryValue(req.query.connector_id);
-        // Canonicalize the owner-supplied connector_id filter so a URL-shaped
-        // value (e.g. https://registry.pdpp.dev/connectors/amazon) matches the
-        // canonical key the instances are stored under. Same boundary handling
-        // as `/_ref/connections`.
-        const connectorId = rawConnectorId
-          ? (ctx.canonicalConnectorKey(rawConnectorId) ?? rawConnectorId)
-          : rawConnectorId;
-        const status = ctx.resolveSingleConnectorIdQueryValue(req.query.status);
-        const store = ctx.createRequestConnectorInstanceStore();
-        const instances = await store.listByOwner(ownerSubjectId);
-        const schedules = await ctx.listSchedules();
-        const schedulesByInstanceId = new Map<string, unknown>(
-          schedules
-            .filter((schedule) => schedule?.connector_instance_id)
-            .map((schedule) => [schedule.connector_instance_id as string, schedule])
-        );
-        const data = instances
-          .filter((instance) => connectorIdMatchesFilter(ctx, instance, connectorId))
-          .filter((instance) => !status || instance.status === status)
-          .map((instance) => projectOwnerConnection(ctx, instance, schedulesByInstanceId, resource));
-        res.json({ data, object: "list" });
-      } catch (err) {
-        ctx.handleError(res, err);
-      }
-    }
+    buildConnectionsListHandler(ctx, ownerBearerConnectionBinding(ctx.getOwnerTokenSubjectId, "connection_id"))
   );
 }
 
 // PATCH /v1/owner/connections/:connectionId — bearer-authed owner-agent rename
-// of a connection's owner-meaningful `display_name`. This is the owner-agent
-// (bearer) sibling of the cookie-authed `PATCH /_ref/connections/:id` route. It
-// shares the connector-instance store's rename semantics
-// (`store.setDisplayName`, owner-scoped WHERE clause, ≤200-char validation) so
-// the two auth surfaces converge on one mutation path, while keeping their auth
-// adapters (`requireToken` + `requireOwner` vs `requireOwnerSession`) separate.
+// of a connection's owner-meaningful `display_name`. Same handler as the
+// cookie-authed `PATCH /_ref/connections/:id` route; the two auth adapters
+// (`requireToken` + `requireOwner` vs `requireOwnerSession`) stay separate.
 //
-// The store's update is owner-scoped: a `connection_id` belonging to another
-// owner matches zero rows and surfaces as `connector_instance_not_found` (404),
-// so a stolen id cannot cross owners even though no separate preflight runs.
-//
-// On success the row is re-projected through `projectOwnerConnection`, so the
-// response carries the owner-agent contract (`connection_id`, `connector_key`,
-// `label_status`) and an owner-set rename reports `label_status: "owner_set"`.
+// On success the row is re-projected through `projectOwnerConnection`, so an
+// owner-set rename reports `label_status: "owner_set"`.
 //
 // Auth: owner bearer (`pdpp_token_kind: "owner"`). Client and `mcp_package`
-// bearers are rejected with 403 by `requireOwner`; a missing bearer is rejected
-// with 401 by `requireToken`. `/mcp` owner-bearer rejection is untouched.
+// bearers are rejected with 403 (after a failed-authorization audit); a
+// missing bearer is rejected with 401 by `requireToken`. `/mcp` owner-bearer
+// rejection is untouched.
 //
 // Spec: openspec/changes/add-owner-agent-control-surface/specs/
 //       reference-owner-agent-control-surface/spec.md
@@ -449,37 +397,6 @@ export function mountOwnerConnectionRename(app: AppLike, ctx: MountOwnerConnecti
     { contract: "ownerSetConnectionDisplayName" },
     ctx.requireToken,
     buildOwnerConnectionRenameRequireOwner(ctx),
-    async (req: RouteRequest, res: RouteResponse) => {
-      try {
-        const connectionId = decodeURIComponent(req.params.connectionId as string);
-        const renameInput = await validateOwnerConnectionRename(ctx, req, res, connectionId);
-        if (!renameInput) {
-          return;
-        }
-        const { projected, ownerSubjectId } = await performOwnerConnectionRename(
-          ctx,
-          req,
-          connectionId,
-          renameInput.displayName
-        );
-        await emitOwnerConnectionRenameAudit(ctx, req, res, {
-          connectionId,
-          connectorKey: stringOrNull(projected.connector_key),
-          labelStatus: stringOrNull(projected.label_status),
-          outcome: "succeeded",
-          ownerSubjectId,
-        });
-        res.json(projected);
-      } catch (err) {
-        const connectionId = decodeURIComponent(req.params.connectionId as string);
-        await emitOwnerConnectionRenameAudit(ctx, req, res, {
-          connectionId,
-          error: err,
-          outcome: "failed",
-          ownerSubjectId: ctx.getOwnerTokenSubjectId(req),
-        });
-        ctx.handleError(res, err);
-      }
-    }
+    buildConnectionRenameHandler(ctx, ownerBearerConnectionBinding(ctx.getOwnerTokenSubjectId, "connection_id"))
   );
 }
