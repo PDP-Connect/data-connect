@@ -28,7 +28,6 @@
     "deep-link:default",
     "clipboard-manager:allow-write-text",
     "http:default",
-    "mcp-bridge:default",
     {
       "identifier": "http:allow-fetch",
       "allow": [
