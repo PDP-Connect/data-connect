@@ -52,9 +52,16 @@ flate2 = "1.0"
 fs2 = "0.4"
 tar = "0.4"
 tempfile = "3"
-tauri-plugin-mcp-bridge = "0.13.0"
 tauri-plugin-clipboard-manager = "2.3.2"
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
+
+# `tauri-plugin-mcp-bridge` 0.13.0 pins `webview2-com` 0.38 and `windows` 0.61, while
+# `wry` 0.57 (Tauri 2.12) uses `webview2-com` 0.39 and `windows` 0.62. The bridge's
+# Windows screenshot code then fails to compile against wry's WebView2 types. The
+# bridge is a debug-only developer tool, so build it everywhere except Windows
+# until an upstream release moves to `webview2-com` 0.39.
+[target.'cfg(not(windows))'.dependencies]
+tauri-plugin-mcp-bridge = "0.13.0"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

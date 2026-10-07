@@ -1,0 +1,8 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "mcp-bridge",
+  "description": "Debug MCP bridge permissions; the plugin is not built on Windows",
+  "windows": ["main", "connector-*"],
+  "platforms": ["linux", "macOS"],
+  "permissions": ["mcp-bridge:default"]
+}

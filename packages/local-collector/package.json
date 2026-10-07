@@ -59,7 +59,7 @@
     "@pdpp/collector-runtime": "0.0.1",
     "@pdpp/connector-protocol": "0.0.1",
     "playwright": "^1.63.0",
-    "tsx": "^4.23.13"
+    "tsx": "^4.23.15"
   },
   "engines": {
     "node": ">=22.14.0"
