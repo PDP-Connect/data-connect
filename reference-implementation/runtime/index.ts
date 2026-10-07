@@ -4822,6 +4822,28 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       });
     }
 
+    /**
+     * The violation for a connector message that arrived while
+     * INTERACTION_RESPONSE was pending. The run still fails as a protocol
+     * violation, but a DONE's own valid `error` is the connector's stated
+     * cause, so it is kept as `connector_error` instead of being discarded.
+     * Its `recovery_hint` is dropped: the runtime terminated the child, so the
+     * recovery action stays the runtime's call.
+     */
+    function pendingInteractionOutputViolation(msg: ConnectorMessage): RuntimeRunError {
+      const violation: RuntimeRunError = new Error(
+        `Connector emitted ${msg.type} while waiting for INTERACTION_RESPONSE`
+      );
+      if (msg.type === "DONE") {
+        const doneError = validateDoneError(msg.status, msg.error as Parameters<typeof validateDoneError>[1]);
+        if (doneError && !(doneError instanceof Error)) {
+          const { recovery_hint: _droppedRecoveryHint, ...connectorError } = doneError;
+          violation.connector_error = connectorError;
+        }
+      }
+      return violation;
+    }
+
     function failPendingInteraction(err: Error): boolean {
       if (!(pendingInteraction && pendingInteractionViolationReject) || pendingInteractionAutoResolutionStatus) {
         return false;
@@ -4862,8 +4884,12 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       err.failure_reason = failureReason;
       err.checkpoint_summary = checkpointSummary;
       err.terminal_reason = failureReason;
-      err.connector_error = null;
-      err.known_gaps = buildKnownGapsForTerminal(failureReason, null);
+      // Only the open-interaction gate attaches one: the error of a DONE that
+      // arrived while INTERACTION_RESPONSE was pending (see
+      // `pendingInteractionOutputViolation`). Every other failure here has none.
+      const connectorError = err.connector_error ?? null;
+      err.connector_error = connectorError;
+      err.known_gaps = buildKnownGapsForTerminal(failureReason, connectorError);
       const runtimeFailureMessage = runtimeAuthoredFailureMessage(err, null);
       const runtimeFailure = runtimeFailureDiagnostic(err);
       err.runtime_retryable = runtimeFailure?.retryable ?? null;
@@ -4875,7 +4901,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
             actor_id: connectorId,
             actor_type: "runtime",
             data: buildRunTerminalData({
-              connectorError: null,
+              connectorError,
               failureMessage: runtimeFailureMessage,
               failureOrigin: runtimeFailureMessage ? "runtime" : null,
               ingestFailure: err.ingest_failure || null,
@@ -5909,7 +5935,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
         if (resolvePendingOtpInteraction(queuedMessage)) {
           msgQueue.shift();
         } else {
-          failPendingInteraction(new Error(`Connector emitted ${queuedMessage.type} while waiting for INTERACTION_RESPONSE`));
+          failPendingInteraction(pendingInteractionOutputViolation(queuedMessage));
         }
       }
 
@@ -6071,7 +6097,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
           // completion clears pendingInteraction.
           return;
         }
-        if (failPendingInteraction(new Error(`Connector emitted ${msg.type} while waiting for INTERACTION_RESPONSE`))) {
+        if (failPendingInteraction(pendingInteractionOutputViolation(msg))) {
           return;
         }
         msgQueue.push(msg);
