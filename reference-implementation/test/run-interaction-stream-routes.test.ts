@@ -27,6 +27,7 @@ import {
   DEFAULT_NEKO_PRIORITY_RANKS,
   // biome-ignore lint/correctness/noUnresolvedImports: Biome resolver lacks this runtime-supported dependency export shape.
 } from "@opendatalabs/remote-surface/leases";
+import { REMOTE_SURFACE_INPUT_FIXTURES } from "@opendatalabs/remote-surface/testing";
 import {
   __resetControllerInteractionStateForTests,
   type Controller,
@@ -42,6 +43,7 @@ import {
   createSqliteConnectorInstanceStore,
   makeDefaultAccountConnectorInstanceId,
 } from "../server/stores/connector-instance-store.ts";
+import { createCdpCompanion } from "../server/streaming/cdp-adapter.ts";
 import { createMockCompanion, type MockCompanion } from "../server/streaming/cdp-companion.ts";
 import { createNekoCompanion as createNekoCompanionUntyped } from "../server/streaming/neko-adapter.ts";
 import { normalizeReferenceWireViewportPayload } from "../server/streaming/protocol-wire.ts";
@@ -3283,6 +3285,135 @@ test("n.eko status keeps native control available separate from strict stealth p
         /* aborted */
       }
       await cancelRun(asUrl, started.run_id, pending.interaction_id);
+    }
+  );
+});
+
+/**
+ * A CDP page socket that answers every command with an empty result and
+ * records it, so the real `createCdpCompanion` (and the Remote Surface CDP
+ * backend inside it) runs end to end behind the `/input` route.
+ */
+interface RecordedCdpCall {
+  method: string;
+  params: Record<string, unknown>;
+}
+type SocketListener = (event: { data?: string }) => void;
+
+function makeAutoAnsweringCdpSocket(): { calls: RecordedCdpCall[]; ctor: typeof WebSocket } {
+  const calls: RecordedCdpCall[] = [];
+  function AutoAnsweringSocket(this: unknown) {
+    const listeners: Record<string, SocketListener[]> = { close: [], error: [], message: [], open: [] };
+    let readyState = 0;
+    const emit = (name: string, event: { data?: string }) => {
+      for (const listener of listeners[name] ?? []) {
+        listener(event);
+      }
+    };
+    queueMicrotask(() => {
+      readyState = 1;
+      emit("open", {});
+    });
+    return {
+      addEventListener(name: string, listener: SocketListener) {
+        listeners[name]?.push(listener);
+      },
+      close() {
+        readyState = 3;
+        emit("close", {});
+      },
+      get readyState() {
+        return readyState;
+      },
+      send(data: string) {
+        const message = JSON.parse(data) as { id: number; method: string; params?: Record<string, unknown> };
+        calls.push({ method: message.method, params: message.params ?? {} });
+        queueMicrotask(() => emit("message", { data: JSON.stringify({ id: message.id, result: {} }) }));
+      },
+    };
+  }
+  return { calls, ctor: AutoAnsweringSocket as unknown as typeof WebSocket };
+}
+
+// Bodies the console viewer (`@opendatalabs/remote-surface` 1.5.2 client)
+// was observed sending from a desktop browser and from the phone soft
+// keyboard bridge. Each must reach CDP through `/input`.
+const DESKTOP_VIEWER_INPUT_BODIES = [
+  { action: "pointerdown", button: 0, buttons: 1, pointerId: 1, pointerType: "mouse", type: "pointer", x: 400, y: 250 },
+  { action: "pointerup", button: 0, buttons: 0, pointerId: 1, pointerType: "mouse", type: "pointer", x: 400, y: 250 },
+  { action: "keydown", code: "KeyA", key: "a", modifiers: [], type: "keyboard" },
+  { action: "keyup", code: "KeyA", key: "a", modifiers: [], type: "keyboard" },
+  { action: "keydown", code: "KeyA", key: "A", modifiers: ["Shift"], type: "keyboard" },
+  { action: "keydown", code: "Backspace", key: "Backspace", modifiers: [], type: "keyboard" },
+  { action: "keydown", code: "Enter", key: "Enter", modifiers: [], type: "keyboard" },
+];
+const SOFT_KEYBOARD_INPUT_BODIES = [
+  { text: "a", type: "text" },
+  { action: "keydown", keysym: 65_288, type: "keyboard" },
+  { action: "keyup", keysym: 65_288, type: "keyboard" },
+  { action: "keydown", keysym: 65_293, type: "keyboard" },
+  { action: "keydown", keysym: 65_288, modifiers: ["Control"], type: "keyboard" },
+];
+
+test("input POST accepts the Remote Surface input protocol the viewer sends and dispatches it to CDP", async () => {
+  const sockets: ReturnType<typeof makeAutoAnsweringCdpSocket>[] = [];
+  await withHarness(
+    {
+      makeCompanion: ({ browser_session_id }: CompanionSpawnArgs) => {
+        const socket = makeAutoAnsweringCdpSocket();
+        sockets.push(socket);
+        return createCdpCompanion({
+          browser_session_id,
+          WebSocketCtor: socket.ctor,
+          wsUrl: "ws://127.0.0.1:9/devtools/page/x",
+        });
+      },
+    },
+    async ({ asUrl, spotifyManifest }) => {
+      const started = await startRun(asUrl, spotifyManifest.connector_id);
+      const pending = await waitForPendingInteraction(asUrl, started.run_id);
+      const mint = await fetchJson(`${asUrl}/_ref/runs/${encodeURIComponent(started.run_id)}/run-interaction-stream`, {
+        body: JSON.stringify({ interaction_id: pending.interaction_id }),
+        headers: { "Content-Type": "application/json" },
+        method: "POST",
+      });
+      assert.equal(mint.status, 201, JSON.stringify(mint.body));
+      const ac = new AbortController();
+      const sseResp = await fetch(`${asUrl}${(mint.body as MintBody).viewer_path}`, { signal: ac.signal });
+      assert.equal(sseResp.status, 200);
+      const attachmentCookie = presentationAttachmentCookie(sseResp);
+      assert.ok(sseResp.body);
+      const reader = sseResp.body.getReader();
+      await reader.read();
+      try {
+        // The library's clipboard fixture is not an /input body: the host's
+        // clipboard channel is the separate /clipboard route.
+        const libraryFixtures = REMOTE_SURFACE_INPUT_FIXTURES.filter((fixture) => fixture.type !== "clipboard");
+        assert.ok(libraryFixtures.some((fixture) => fixture.type === "keyboard"));
+        const bodies = [...libraryFixtures, ...DESKTOP_VIEWER_INPUT_BODIES, ...SOFT_KEYBOARD_INPUT_BODIES];
+        const [socket] = sockets;
+        assert.ok(socket, "the real CDP companion opened its page socket");
+        const failures: string[] = [];
+        for (const body of bodies) {
+          const before = socket.calls.length;
+          const response = await fetchJson(`${asUrl}${(mint.body as MintBody).input_path}`, {
+            body: JSON.stringify(body),
+            headers: { "Content-Type": "application/json", Cookie: attachmentCookie },
+            method: "POST",
+          });
+          const sent = socket.calls.slice(before).map((call) => call.method);
+          const expected =
+            body.type === "keyboard" ? "Input.dispatchKeyEvent" : body.type === "text" ? "Input.insertText" : null;
+          if (response.status !== 202 || (expected && !sent.includes(expected))) {
+            failures.push(`${response.status} ${JSON.stringify(body)} sent ${JSON.stringify(sent)}`);
+          }
+        }
+        assert.deepEqual(failures, []);
+      } finally {
+        ac.abort();
+        await reader.cancel().catch(() => undefined);
+        await cancelRun(asUrl, started.run_id, pending.interaction_id);
+      }
     }
   );
 });
