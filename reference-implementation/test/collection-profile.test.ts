@@ -2083,7 +2083,7 @@ test("Collection Profile conformance", async (t) => {
     );
   });
 
-  await t.test("pre-progress browser profile attach race remains runtime-retryable", async () => {
+  await t.test("connector text that names a browser-profile attach failure does not become retry_by_runtime", async () => {
     const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
     const { asPort, rsPort } = server;
     const { ownerToken, connectorId } = await setupConnector(server, asPort, {
@@ -2122,8 +2122,9 @@ test("Collection Profile conformance", async (t) => {
       const runFailedGap = result.known_gaps.find((gap) => gap.kind === "run_failed");
       assert.ok(runFailedGap, `expected run_failed known gap, got ${JSON.stringify(result.known_gaps)}`);
       assert.equal(runFailedGap.reason, "connector_reported_failed");
-      assert.equal(runFailedGap.recovery_hint?.action, "retry_by_runtime");
-      assert.equal(runFailedGap.recovery_hint?.retryable, true);
+      // The message is connector text, not runtime evidence (Section 5.5).
+      assert.equal(runFailedGap.recovery_hint?.action, "unknown");
+      assert.equal(runFailedGap.recovery_hint?.retryable, false);
 
       const asUrl = `http://localhost:${asPort}`;
       const { body: runTimeline } = await fetchJson<TimelineBody>(
@@ -2131,21 +2132,19 @@ test("Collection Profile conformance", async (t) => {
       );
       const failedEvent = (runTimeline.data || []).find((event) => event.event_type === "run.failed");
       assert.ok(failedEvent, "expected a failedEvent timeline event to be present");
-      const retryableKnownGaps = knownGapsOf(failedEvent);
-      assert.equal(retryableKnownGaps[0]?.recovery_hint?.action, "retry_by_runtime");
-      assert.equal(retryableKnownGaps[0]?.recovery_hint?.retryable, true);
+      const failedKnownGaps = knownGapsOf(failedEvent);
+      assert.equal(failedKnownGaps[0]?.recovery_hint?.action, "unknown");
+      assert.equal(failedKnownGaps[0]?.recovery_hint?.retryable, false);
     } finally {
       cleanup();
       await closeServer(server);
     }
   });
 
-  // Precedence matrix for DONE.error.recovery_hint vs. the runtime's
-  // CDP/browser-infrastructure text fallback (isRuntimeRetryableBrowserProfileError):
-  // a present, valid hint is authoritative and MUST win outright, even over
-  // message text that would otherwise match the runtime's own infrastructure
-  // heuristic. That heuristic is a fallback for an ABSENT hint only — see
-  // recoveryHintFromTerminalConnectorError in runtime/index.ts.
+  // DONE.error.recovery_hint matrix. A present, valid hint is kept as sent,
+  // whatever the message says. An absent hint stays `unknown`: the runtime
+  // never derives an action from `message`, `code`, or `retryable`
+  // (Collection Profile 0.2.0, Sections 5.5 and 5.11).
   const SESSION_CLOSED_MESSAGE =
     "chatgpt_preprogress_failure: runtime_exception: could not open browser profile: Protocol error (Network.setCacheDisabled): Internal server error, session closed.";
 
@@ -2173,25 +2172,35 @@ test("Collection Profile conformance", async (t) => {
     },
     {
       connectorErrorOverrides: {},
-      expectedAction: "retry_by_runtime",
-      expectedRetryable: true,
+      expectedAction: "unknown",
+      expectedRetryable: false,
       message: SESSION_CLOSED_MESSAGE,
-      name: "absent hint with the same CDP/session-closed text falls through to the runtime's retryable infrastructure default",
+      name: "absent hint with CDP/session-closed text stays unknown",
     },
     {
       connectorErrorOverrides: {},
-      expectedAction: "retry_by_runtime",
-      expectedRetryable: true,
+      expectedAction: "unknown",
+      expectedRetryable: false,
       message: "acme_crm_unexpected_shutdown: worker process exited",
-      name: "absent hint with an unrelated retryable failure still falls through to the runtime-retryable default",
+      name: "absent hint with retryable:true stays unknown",
       retryableFlag: true,
     },
     {
-      // Absent hint, retryable:false, and a message that matches neither the
-      // runtime's infrastructure text nor any of normalizeRecoveryHint's
-      // generic inference vocabulary: recoveryHintFromTerminalConnectorError
-      // returns null and buildKnownGap's own fail-closed inference yields the
-      // non-retryable `unknown` action — never a fabricated retry.
+      connectorErrorOverrides: {},
+      expectedAction: "unknown",
+      expectedRetryable: false,
+      message: "acme_crm_login_failed: auth token expired",
+      name: "absent hint with sign-in words in the message stays unknown",
+    },
+    {
+      connectorErrorOverrides: {},
+      expectedAction: "unknown",
+      expectedRetryable: false,
+      message: "acme_crm_rate_limited: upstream returned 429",
+      name: "absent hint with rate-limit words in the message stays unknown",
+      retryableFlag: true,
+    },
+    {
       connectorErrorOverrides: {},
       expectedAction: "unknown",
       expectedRetryable: false,
@@ -3699,7 +3708,9 @@ rl.on('line', (line) => {
       assert.equal(skippedEvent.data.message, "Platform returned 429");
       const skippedKnownGap = knownGapOf(skippedEvent);
       assert.equal(skippedKnownGap.kind, "skip_result");
-      assert.equal(skippedKnownGap.recovery_hint?.action, "retry_by_runtime");
+      // No recovery_hint was sent. The runtime does not infer one from the
+      // reason or the message (Collection Profile 0.2.0, Section 5.5).
+      assert.deepEqual(skippedKnownGap.recovery_hint, { action: "unknown", retryable: false });
 
       const completedEvent = (runTimeline.data || []).find((event) => event.event_type === "run.completed");
       assert.ok(completedEvent, "expected run.completed event");

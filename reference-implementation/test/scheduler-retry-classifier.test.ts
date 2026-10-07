@@ -13,7 +13,8 @@
  *     window boundaries.
  *   - shouldRetryRunFailure: null/undefined err; the ordered short-circuit
  *     through http status -> failure_reason -> terminal_reason ->
- *     connector_error.retryable; and the default-retry fall-through.
+ *     connector-reported failure (never retried) -> runtime verdict; and the
+ *     default-retry fall-through for failures the runtime observed itself.
  *   - isTerminalGrantFailure: the four grant reasons vs non-members and
  *     null/undefined.
  *
@@ -30,6 +31,7 @@ import {
   isTerminalGrantFailure,
   NON_RETRYABLE_FAILURE_REASONS,
   NON_RETRYABLE_TERMINAL_REASONS,
+  runRequiresOwnerAuthRepair,
   shouldRetryRunFailure,
   TERMINAL_GRANT_FAILURE_REASONS,
 } from "../runtime/scheduler-retry-classifier.ts";
@@ -108,9 +110,26 @@ test("shouldRetryRunFailure honors an explicit runtime retryability verdict", ()
   assert.equal(shouldRetryRunFailure({ runtime_retryable: true, terminal_reason: "authentication_error" }), false);
 });
 
-test("shouldRetryRunFailure retries when connector_error.retryable is true or unset", () => {
-  assert.equal(shouldRetryRunFailure({ connector_error: { retryable: true } }), true);
-  assert.equal(shouldRetryRunFailure({ connector_error: {} }), true);
+// Collection Profile 0.2.0, Section 5.11: `DONE.error.retryable` and a
+// recovery hint are connector claims. A runtime MUST NOT start an automatic
+// retry because of either.
+test("shouldRetryRunFailure does not retry a connector-reported failure because of its retryable claim", () => {
+  assert.equal(shouldRetryRunFailure({ connector_error: { retryable: true } }), false);
+  assert.equal(shouldRetryRunFailure({ connector_error: {} }), false);
+  assert.equal(
+    shouldRetryRunFailure({
+      connector_error: { message: "upstream 503", retryable: true },
+      known_gaps: [{ kind: "run_failed", recovery_hint: { action: "retry_by_runtime", retryable: true } }],
+    }),
+    false
+  );
+});
+
+test("shouldRetryRunFailure keeps retrying a failure the runtime observed itself", () => {
+  // No DONE.error: a crash or an exit without DONE.
+  assert.equal(shouldRetryRunFailure({ connector_error: null, failure_reason: "runtime_error" }), true);
+  // A runtime-side network failure with a structured cause code.
+  assert.equal(shouldRetryRunFailure({ connector_error: null, runtime_retryable: true }), true);
 });
 
 test("shouldRetryRunFailure keeps an owner-action gap non-retryable over connector retryability", () => {
@@ -131,13 +150,12 @@ test("shouldRetryRunFailure lets a non-fatal reason with a retryable status thro
   );
 });
 
-test('shouldRetryRunFailure retries a proven provider-unavailable session-establishment failure whose message contains "session_failed"', () => {
+test('a connector-declared retryable provider outage whose message contains "session_failed" is not retried in the same tick and is not marked as needing a sign-in', () => {
   // buildSessionEstablishTerminalError prefixes EVERY session-establishment
-  // failure with `${name}_session_failed:`, retryable or not. A connector
-  // that proved a provider outage (USAA's source_unavailable classifier) and
-  // declared it retryable via its own retryablePattern must not have that
-  // explicit signal overridden by the "session_failed" substring, which the
-  // owner-auth message heuristic would otherwise treat as a login failure.
+  // failure with `${name}_session_failed:`, retryable or not. The connector's
+  // retryable claim no longer starts a retry (Section 5.11); the next
+  // scheduled run collects again. It still keeps the "session_failed"
+  // substring from marking the connection as needing a sign-in.
   const err = {
     connector_error: {
       message:
@@ -148,26 +166,8 @@ test('shouldRetryRunFailure retries a proven provider-unavailable session-establ
     known_gaps: null,
     terminal_reason: null,
   };
-  assert.equal(shouldRetryRunFailure(err), true);
-});
-
-test("shouldRetryRunFailure does not override a present runtime-retry hint with owner-auth message text", () => {
-  assert.equal(
-    shouldRetryRunFailure({
-      connector_error: {
-        message: "source_unavailable: upstream 503",
-        retryable: true,
-      },
-      known_gaps: [
-        {
-          kind: "run_failed",
-          message: "provider_session_failed: source_unavailable: upstream 503",
-          recovery_hint: { action: "retry_by_runtime", retryable: true },
-        },
-      ],
-    }),
-    true
-  );
+  assert.equal(shouldRetryRunFailure(err), false);
+  assert.equal(runRequiresOwnerAuthRepair(err), false);
 });
 
 test("shouldRetryRunFailure still denies a real session_required/session_expired auth failure", () => {
