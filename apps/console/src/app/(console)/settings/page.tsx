@@ -37,12 +37,6 @@ export default async function SettingsPage() {
           title="Settings"
         />
         <Section
-          description="Reveal connector surfaces intended for local development and connector testing."
-          title="Developer mode"
-        >
-          <DeveloperModeSetting />
-        </Section>
-        <Section
           description="Choose a local-only posture or configure a proxy you control. Remote access always keeps the Personal Server on loopback."
           title="Remote access"
         >
@@ -89,6 +83,12 @@ export default async function SettingsPage() {
           <RecoveryKeySetting />
         </Section>
         <AboutSection identity={identity} />
+        <Section
+          description="Reveal connector surfaces intended for local development and connector testing."
+          title="Developer mode"
+        >
+          <DeveloperModeSetting />
+        </Section>
       </main>
     </RecordroomShellWithPalette>
   )

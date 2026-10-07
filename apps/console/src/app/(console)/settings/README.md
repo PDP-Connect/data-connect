@@ -33,7 +33,8 @@
 
 ## Behavior
 
-- Developer mode is off by default.
+- Developer mode is off by default. It is the last section on the page, below
+  About, because it is for connector development, not everyday use.
 - When enabled, the Add source page shows the developer connector sources panel and the development connector filter.
 - Remote access is Off by default. Public URL requires an HTTPS origin and an
   owner password in the same blocking flow.
