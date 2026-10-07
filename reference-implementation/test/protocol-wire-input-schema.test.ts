@@ -123,3 +123,56 @@ test("accepts a well-formed viewport event and rejects one missing a required fi
 	assert.equal(parsed.width, 390);
 	assertRejected({ type: "viewport", width: 390 });
 });
+
+test("keyboard modifiers are a bounded list of key names, as the Remote Surface viewer sends them", () => {
+	const parsed = parseReferenceWireInputPayload({
+		action: "keydown",
+		code: "KeyA",
+		key: "A",
+		modifiers: ["Shift", "Control"],
+		type: "keyboard",
+	});
+	assert.deepEqual(parsed.modifiers, ["Shift", "Control"]);
+	assertRejected({
+		action: "keydown",
+		key: "a",
+		modifiers: ["Hyper"],
+		type: "keyboard",
+	});
+	assertRejected({
+		action: "keydown",
+		key: "a",
+		modifiers: [{ name: "Shift" }],
+		type: "keyboard",
+	});
+	assertRejected({
+		action: "keydown",
+		key: "a",
+		modifiers: ["Alt", "Control", "Meta", "Shift", "Shift"],
+		type: "keyboard",
+	});
+	// No sender uses the legacy CDP bitmask on this route.
+	assertRejected({
+		action: "keydown",
+		key: "a",
+		modifiers: 2,
+		type: "keyboard",
+	});
+});
+
+test("keyboard accepts a keysym-only special key and requires one of key, code, or keysym", () => {
+	const parsed = parseReferenceWireInputPayload({
+		action: "keydown",
+		keysym: 65_288,
+		type: "keyboard",
+	});
+	assert.equal(parsed.keysym, 65_288);
+	assertRejected({ action: "keydown", type: "keyboard" });
+	assertRejected({ action: "keydown", keysym: -1, type: "keyboard" });
+	assertRejected({ action: "keydown", keysym: 0x2000_0000, type: "keyboard" });
+});
+
+test("accepts the neko viewer's bare remote-copy request and nothing else on it", () => {
+	assert.equal(parseReferenceWireInputPayload({ type: "copy" }).type, "copy");
+	assertRejected({ text: "x", type: "copy" });
+});
