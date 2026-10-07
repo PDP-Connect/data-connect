@@ -47,7 +47,7 @@ pub fn run() {
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_clipboard_manager::init());
 
-    #[cfg(debug_assertions)]
+    #[cfg(all(debug_assertions, not(windows)))]
     let builder = builder.plugin(tauri_plugin_mcp_bridge::init());
 
     builder
