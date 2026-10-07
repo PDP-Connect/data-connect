@@ -8003,6 +8003,113 @@ rl.on('line', (line) => {
   );
 
   await t.test(
+    "runtime keeps a failed DONE's error as connector_error when DONE arrives while waiting for INTERACTION_RESPONSE",
+    async () => {
+      const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+      const { asPort, rsPort } = server;
+      const { ownerToken, connectorId } = await setupConnector(server, asPort);
+      const asUrl = `http://localhost:${asPort}`;
+
+      const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-test-int-blocked-done-error-"));
+      const connectorPath = join(tmpDir, "connector.mjs");
+      writeFileSync(
+        connectorPath,
+        `
+import { createInterface } from 'readline';
+process.on('SIGTERM', () => process.exit(1));
+const rl = createInterface({ input: process.stdin });
+let started = false;
+rl.on('line', (line) => {
+  const msg = JSON.parse(line);
+  if (msg.type === 'START' && !started) {
+    started = true;
+    process.stdout.write(JSON.stringify({
+      type: 'INTERACTION',
+      request_id: 'int_blocked_done_error_1',
+      kind: 'otp',
+      message: 'Enter the code',
+      schema: { type: 'object', properties: { code: { type: 'string' } }, required: ['code'] },
+      timeout_seconds: 300
+    }) + '\\n');
+    setTimeout(() => {
+      process.stdout.write(JSON.stringify({
+        type: 'DONE',
+        status: 'failed',
+        records_emitted: 0,
+        error: {
+          message: 'sign_in_probe_failed: probe page was refused',
+          code: 'sign_in_probe_failed',
+          retryable: false,
+          recovery_hint: 'refresh_credentials'
+        }
+      }) + '\\n');
+    }, 10);
+  }
+});
+`,
+        "utf-8"
+      );
+
+      try {
+        let rejected: RuntimeRunConnectorError | undefined;
+        await assert.rejects(
+          async () => {
+            await runTestConnector({
+              collectionMode: "full_refresh",
+              connectorId,
+              connectorPath,
+              manifest: MINIMAL_MANIFEST,
+              onInteraction: async () => new Promise(() => undefined),
+              ownerToken,
+              persistState: true,
+              rsUrl: `http://localhost:${rsPort}`,
+              state: null,
+            });
+          },
+          (err) => {
+            rejected = asRuntimeError(err);
+            return true;
+          }
+        );
+        assert.ok(rejected);
+        // Still a protocol violation: the connector broke the INTERACTION wait.
+        assert.equal(rejected.message, "Connector emitted DONE while waiting for INTERACTION_RESPONSE");
+        assert.equal(rejected.failure_reason, "connector_protocol_violation");
+        // But the connector's own cause is kept. Its recovery_hint is not:
+        // the runtime terminated the child and owns the recovery action.
+        assert.deepEqual(rejected.connector_error, {
+          code: "sign_in_probe_failed",
+          message: "sign_in_probe_failed: probe page was refused",
+          retryable: false,
+        });
+
+        const { body: runTimeline } = await fetchJson<TimelineBody>(
+          `${asUrl}/_ref/runs/${encodeURIComponent(requireRunId(rejected))}/timeline`
+        );
+        const failedEvent = (runTimeline.data || []).find((event) => event.event_type === "run.failed");
+        assert.ok(failedEvent, "expected run.failed for DONE emitted during an open interaction");
+        assert.equal(failedEvent.data.reason, "connector_protocol_violation");
+        assert.equal(failedEvent.data.failure_message, "Connector emitted DONE while waiting for INTERACTION_RESPONSE");
+        assert.equal(failedEvent.data.connector_error_message, "sign_in_probe_failed: probe page was refused");
+        assert.equal(failedEvent.data.connector_error_code, "sign_in_probe_failed");
+        const runFailedGap = ((failedEvent.data.known_gaps as Record<string, unknown>[] | undefined) || []).find(
+          (gap) => gap.kind === "run_failed"
+        );
+        assert.ok(runFailedGap, "expected a run_failed known gap");
+        assert.equal(runFailedGap.reason, "connector_protocol_violation");
+        assert.notEqual(
+          (runFailedGap.recovery_hint as { action?: string } | undefined)?.action,
+          "refresh_credentials",
+          "a protocol violation must not adopt the connector's recovery_hint"
+        );
+      } finally {
+        rmSync(tmpDir, { force: true, recursive: true });
+        await closeServer(server);
+      }
+    }
+  );
+
+  await t.test(
     "runtime rejects invalid JSONL emitted while waiting for INTERACTION_RESPONSE and does not record completion artifacts",
     async () => {
       const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
