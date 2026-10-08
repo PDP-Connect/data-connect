@@ -142,6 +142,7 @@ export function mountTrainingLease(
     rt: TrainingLeaseRuntime,
     grantId: string,
     clientId: string,
+    acquisitionGrantIds?: string[],
   ) {
     const grant = await ctx.readGrantForProcessing(grantId);
     if (grant && grant.status === "revoked") {
@@ -151,8 +152,33 @@ export function mountTrainingLease(
     if (!grant || grant.client_id !== clientId) {
       return null;
     }
-    const out = rt.store.issueLease({ clientId, grantId });
+    // Held-data prototype (B3): the acquisition copies the client will train
+    // on must belong to the same client and owner. Whether the training grant
+    // covers their data needs lineage the RI does not have; it is not checked.
+    for (const a of acquisitionGrantIds ?? []) {
+      const acq = a === grantId ? grant : await ctx.readGrantForProcessing(a);
+      if (!acq || acq.client_id !== clientId || acq.subject_id !== grant.subject_id) {
+        return null;
+      }
+    }
+    const out = rt.store.issueLease({
+      clientId,
+      grantId,
+      ...(acquisitionGrantIds ? { acquisitionGrantIds } : {}),
+    });
     return out.ok ? out : null;
+  }
+
+  /** Held-data prototype (B3): optional `acquisition_grant_ids`, a non-empty array of grant ids. */
+  function acquisitionIds(body: Record<string, unknown>): string[] | undefined | null {
+    const v = body.acquisition_grant_ids;
+    if (v === undefined) {
+      return undefined;
+    }
+    if (!Array.isArray(v) || v.length === 0 || !v.every((x) => typeof x === "string" && x.length > 0)) {
+      return null;
+    }
+    return v as string[];
   }
 
   function leaseBody(
@@ -180,7 +206,8 @@ export function mountTrainingLease(
     if (!limiter.allow(rateKey, rt.rateLimitPerMinute, rt.now())) {
       return res.status(429).json({ error: "slow_down" });
     }
-    if (!grantId) {
+    const acq = acquisitionIds(body);
+    if (!grantId || acq === null) {
       return res.status(400).json(NO_LEASE);
     }
 
@@ -201,7 +228,7 @@ export function mountTrainingLease(
       if (!clientId) {
         return res.status(401).json({ error: "invalid_client" });
       }
-      const out = await issueIfLive(rt, grantId, clientId);
+      const out = await issueIfLive(rt, grantId, clientId, acq);
       return out
         ? res.status(200).json(leaseBody(out, rt))
         : res.status(400).json(NO_LEASE);
@@ -228,7 +255,7 @@ export function mountTrainingLease(
       if (!renewed.ok || renewed.grantId !== grantId) {
         return res.status(400).json(NO_LEASE);
       }
-      const out = await issueIfLive(rt, grantId, renewed.clientId);
+      const out = await issueIfLive(rt, grantId, renewed.clientId, acq);
       if (!out) {
         return res.status(400).json(NO_LEASE);
       }
@@ -254,7 +281,7 @@ export function mountTrainingLease(
       ) {
         return res.status(400).json(NO_LEASE);
       }
-      const out = await issueIfLive(rt, grantId, info.client_id);
+      const out = await issueIfLive(rt, grantId, info.client_id, acq);
       if (!out) {
         return res.status(400).json(NO_LEASE);
       }
