@@ -314,7 +314,7 @@ export class HeldDataAuthority {
       jkt = null;
     } else if (input.recoveryCode) {
       const rc = this.#creds.get(credentialDigest(input.recoveryCode));
-      if (!rc || rc.kind !== "recovery" || rc.disabled || !rc.grantIds.has(input.grantId)) {
+      if (rc?.kind !== "recovery" || rc.disabled || !rc.grantIds.has(input.grantId)) {
         return null;
       }
       this.disableCredential(input.recoveryCode, "recovery_code_used");
@@ -592,6 +592,11 @@ export class HeldDataAuthority {
   isKnown(grantId: string): boolean {
     this.#refresh();
     return this.#grants.has(grantId);
+  }
+
+  grantsOfClient(clientId: string): string[] {
+    this.#refresh();
+    return [...this.#grants.values()].filter((f) => f.grant.client_id === clientId).map((f) => f.grant.grant_id);
   }
 
   grantClient(grantId: string): string | null {

@@ -116,6 +116,8 @@ import {
   countGrantPackagesForOwner,
   authenticateOAuthTokenClient,
   endProcessingAuthorityForGrant,
+  ensureHeldDataGrant,
+  prepareHeldDataStatusToken,
   readGrantForProcessing,
   createCimdDocument,
   createConsentExchangeCode,
@@ -161,6 +163,14 @@ import {
   type TrainingLeaseRuntimeOptions,
   trainingLeaseOptionsFromEnv,
 } from "./training-lease/runtime.ts";
+import {
+  createHeldDataRuntime,
+  getHeldDataRuntime,
+  type HeldDataRuntimeOptions,
+  heldDataOptionsFromEnv,
+  installHeldDataRuntime,
+} from "./held-data/runtime.ts";
+import { mountHeldData } from "./routes/held-data.ts";
 import { autoEnrollEligibleSchedules } from "./auto-enroll-eligible-schedules.ts";
 import type { CimdFetchDependencies } from "./cimd.ts";
 import { acquireDefaultDeliveryWorker, getDefaultDeliveryWorker } from "./client-event-delivery-worker.ts";
@@ -836,6 +846,13 @@ interface ServerOpts {
    * PDPP_EXPERIMENTAL_AI_TRAINING_LEASES=1 with PDPP_TRAINING_AUTHORITY_DIR.
    */
   experimentalAiTrainingLeases?: (Omit<TrainingLeaseRuntimeOptions, "issuer"> & { issuer?: string }) | null;
+  /**
+   * PROTOTYPE, off by default: the held-data lifecycle (owner dispositions,
+   * erasure operations, the grant-lifecycle status operation). Env
+   * equivalent: PDPP_EXPERIMENTAL_HELD_DATA_LIFECYCLE=1 with
+   * PDPP_AUTHORITY_JOURNAL_DIR. Shares the lease journal when both run.
+   */
+  experimentalHeldDataLifecycle?: HeldDataRuntimeOptions | null;
   clientLogoFetchDependencies?: import("./client-logo-cache.ts").FetchClientLogoOptions;
   clientEventSubscriptionsCapability?: unknown;
   clientEventSubscriptionsSupported?: boolean;
@@ -7265,6 +7282,22 @@ export function buildAsApp(opts: ServerOpts = {}) {
     runtime: getTrainingLeaseRuntime,
   });
 
+  // PROTOTYPE, off by default: held-data lifecycle routes. Every handler
+  // answers 404 while no held-data runtime is installed.
+  mountHeldData(app as unknown as Parameters<typeof mountHeldData>[0], {
+    authenticateOAuthTokenClient: (args) =>
+      authenticateOAuthTokenClient({
+        ...args,
+        ...(opts.cimdFetchDependencies ? { cimdFetchDependencies: opts.cimdFetchDependencies } : {}),
+      }),
+    ensureGrant: ensureHeldDataGrant,
+    introspect: introspect as unknown as Parameters<typeof mountHeldData>[1]["introspect"],
+    prepareStatusToken: prepareHeldDataStatusToken,
+    resolveBaseUrl: (req: unknown) =>
+      resolvePublicUrl(req as Parameters<typeof resolvePublicUrl>[0], explicitAsBaseUrl),
+    runtime: getHeldDataRuntime,
+  });
+
   // Client event subscriptions are mounted on the RESOURCE SERVER under
   // `/v1/event-subscriptions` (see buildRsApp). They are the same kind of
   // RI-extension surface as `/v1/streams/:s/records`: ordinary clients use
@@ -9841,6 +9874,30 @@ export async function startServer(opts: ServerOpts = {}) {
         installTrainingLeaseRuntime(null);
       }
       trainingLeaseRuntime.close();
+    });
+  }
+  // PROTOTYPE, off by default: install the held-data lifecycle runtime. It
+  // appends to the lease journal when the lease prototype runs too (B3).
+  const heldDataOptions =
+    opts.experimentalHeldDataLifecycle === undefined
+      ? heldDataOptionsFromEnv(process.env)
+      : opts.experimentalHeldDataLifecycle;
+  if (heldDataOptions) {
+    const leaseJournal = getTrainingLeaseRuntime()?.journalPath;
+    const journalPath =
+      heldDataOptions.journalPath ??
+      leaseJournal ??
+      (heldDataOptions.journalDir ? path.join(heldDataOptions.journalDir, "authority.journal") : null);
+    if (!journalPath) {
+      throw new Error("experimentalHeldDataLifecycle needs journalPath or journalDir");
+    }
+    const heldDataRuntime = createHeldDataRuntime({ ...heldDataOptions, journalPath });
+    installHeldDataRuntime(heldDataRuntime);
+    asServer.once("close", () => {
+      if (getHeldDataRuntime() === heldDataRuntime) {
+        installHeldDataRuntime(null);
+      }
+      heldDataRuntime.close();
     });
   }
   rsServer.once("close", () => {

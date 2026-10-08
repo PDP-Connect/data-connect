@@ -33,8 +33,32 @@ import { executeAsGrantRevoke } from "../../operations/as-grant-revoke/index.ts"
 import type { PdppErrorFn, RouteArg } from "./_route-contract.ts";
 
 interface RouteRequest {
+  readonly body?: unknown;
   readonly headers: Readonly<Record<string, string | string[] | undefined>>;
   readonly params: Readonly<Record<string, string>>;
+}
+
+/** Experimental held-data prototype: how the grant is ending. Ignored unless that runtime is installed. */
+interface LifecycleEnding {
+  path: "owner_withdrawal" | "one_child_withdrawal" | "narrowing" | "client_revocation";
+  disposition?: "keep" | "delete" | null;
+  keptStreams?: string[];
+}
+
+const OWNER_ENDINGS = new Set(["owner_withdrawal", "one_child_withdrawal", "narrowing"]);
+
+function lifecycleEnding(body: unknown, tokenInfo: unknown): LifecycleEnding {
+  const b = (body && typeof body === "object" ? body : {}) as Record<string, unknown>;
+  const disposition = b.pdpp_disposition === "keep" || b.pdpp_disposition === "delete" ? b.pdpp_disposition : null;
+  const isOwner = (tokenInfo as IntrospectInfo | undefined)?.pdpp_token_kind === "owner";
+  if (!isOwner) {
+    return { path: "client_revocation", disposition };
+  }
+  const path = typeof b.pdpp_ending === "string" && OWNER_ENDINGS.has(b.pdpp_ending) ? b.pdpp_ending : "owner_withdrawal";
+  const kept = Array.isArray(b.pdpp_kept_streams)
+    ? b.pdpp_kept_streams.filter((x): x is string => typeof x === "string")
+    : undefined;
+  return { path: path as LifecycleEnding["path"], disposition, ...(kept ? { keptStreams: kept } : {}) };
 }
 
 interface RouteResponse {
@@ -70,7 +94,7 @@ export interface MountAsGrantRevokeContext {
   /** Revokes the grant row, returns trace_id for header propagation. */
   revokeGrant: (
     grantId: string,
-    context: { request_id: string }
+    context: { request_id: string; lifecycle?: LifecycleEnding }
   ) => Promise<{ trace_id?: string | null; [extra: string]: unknown }>;
   setReferenceTraceId: (res: unknown, traceId: string) => void;
 }
@@ -140,9 +164,10 @@ export function mountAsGrantRevoke(app: AppLike, ctx: MountAsGrantRevokeContext)
     try {
       const requestId = ctx.ensureRequestId(res) as string;
       const grantId = req.params.grantId as string;
+      const lifecycle = lifecycleEnding(req.body, req.tokenInfo);
       const output: AsGrantRevokeOutput = await executeAsGrantRevoke(
         { grantId, requestId },
-        { revokeGrant: ctx.revokeGrant }
+        { revokeGrant: (id, context) => ctx.revokeGrant(id, { ...context, lifecycle }) }
       );
       if (output.traceId) {
         ctx.setReferenceTraceId(res, output.traceId);
