@@ -127,6 +127,8 @@ export interface MountAsAuthorizationServerMetadataContext {
   ) => boolean;
   resolveExplicitIssuer: () => string | null;
   resolvePreRegisteredPublicClients: () => unknown[];
+  /** Experimental AI-training prototype: empty unless the runtime is installed. */
+  resolveProcessingPermissionsSupported?: () => readonly string[];
   resolvePublicUrl: (req: unknown, explicit: unknown) => string;
   trustedMetadataHosts: unknown;
 }
@@ -152,6 +154,9 @@ export function mountAsAuthorizationServerMetadata(app: AppLike, ctx: MountAsAut
           preRegisteredPublicClients: ctx.publicClientMetadataForAuthorizationServer(
             ctx.resolvePreRegisteredPublicClients()
           ),
+          ...(ctx.resolveProcessingPermissionsSupported
+            ? { processingPermissionsSupported: ctx.resolveProcessingPermissionsSupported() }
+            : {}),
         },
         { buildAuthorizationServerMetadata: ctx.buildAuthorizationServerMetadata }
       )
