@@ -10835,6 +10835,10 @@ export async function exchangeOAuthRefreshToken({
   }
 
   const refreshTokenHash = hashOAuthRefreshToken(refreshToken);
+  // Experimental held-data prototype: no token for a grant whose ending is journaled.
+  if (await heldDataRefreshBlocked(refreshTokenHash)) {
+    throw buildOAuthRefreshTokenError("invalid_grant", "Refresh token is invalid");
+  }
   const successorToken = generateOAuthRefreshToken();
   const rotatedAt = nowIso();
   const outcome = await rotateOAuthRefreshToken({
@@ -12446,6 +12450,68 @@ export async function endHeldDataForGrant(grantId: string, ending: HeldDataEndin
     disposition: ending?.disposition ?? null,
     ...(ending?.keptStreams ? { keptStreams: ending.keptStreams } : {}),
   });
+}
+
+/**
+ * Current client authentication for a lifecycle write by a public client
+ * (Core: an active access token, the current refresh token of a family, or a
+ * recovered lifecycle credential, covering the grant). Returns the client id.
+ */
+export async function heldDataWriteClient(token: string, grantId: string): Promise<string | null> {
+  const rt = getHeldDataRuntime();
+  if (!(rt && token)) {
+    return null;
+  }
+  const recovered = rt.authority.statusCredentialClient(token, grantId);
+  if (recovered) {
+    return recovered;
+  }
+  const info = await introspect(token);
+  if (info.active === true && info.pdpp_token_kind === "client" && info.grant_id === grantId && info.client_id) {
+    return info.client_id;
+  }
+  const hash = hashOAuthRefreshToken(token);
+  const refresh = isPostgresStorageBackend()
+    ? await pgOne<{ client_id: string; grant_id: string | null; package_id: string | null; status: string }>(
+        "SELECT client_id, grant_id, package_id, status FROM oauth_refresh_tokens WHERE refresh_token_hash = $1",
+        [hash]
+      )
+    : getOne<{ client_id: string; grant_id: string | null; package_id: string | null; status: string }>(
+        referenceQueries.authOauthRefreshTokensGetByToken,
+        [hash]
+      );
+  if (refresh?.status !== "active") {
+    return null;
+  }
+  if (refresh.grant_id === grantId) {
+    return refresh.client_id;
+  }
+  if (refresh.package_id) {
+    const members = await getGrantPackageStore().listAllMembers(refresh.package_id);
+    return members.some((m) => m.grant_id === grantId) ? refresh.client_id : null;
+  }
+  return null;
+}
+
+/**
+ * Token issuance must be ordered against journaled endings (Core: Lifecycle
+ * durability). A refresh exchange for a grant whose ending is journaled is
+ * refused even if a restored main database says the grant is active.
+ */
+async function heldDataRefreshBlocked(refreshTokenHash: string): Promise<boolean> {
+  if (!getHeldDataRuntime()) {
+    return false;
+  }
+  const row = isPostgresStorageBackend()
+    ? await pgOne<{ grant_id: string | null; package_id: string | null }>(
+        "SELECT grant_id, package_id FROM oauth_refresh_tokens WHERE refresh_token_hash = $1",
+        [refreshTokenHash]
+      )
+    : getOne<{ grant_id: string | null; package_id: string | null }>(
+        referenceQueries.authOauthRefreshTokensGetByToken,
+        [refreshTokenHash]
+      );
+  return heldDataEndedOrLost(row?.grant_id);
 }
 
 /** Read guard: the journal records an ending (a restored main database cannot reopen reads). */

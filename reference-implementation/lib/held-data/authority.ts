@@ -141,6 +141,8 @@ export interface StatusAnswer {
    */
   ordinary_use: "permitted" | "stopped" | "custody_only";
   assessed_at: number;
+  /** The grant's `expires_at`, if any. */
+  expires_at: number | null;
   /** Journal position this answer is ordered after. */
   as_position: number;
 }
@@ -426,6 +428,8 @@ export class HeldDataAuthority {
     kind: "receipt" | "completion";
     outcome?: "deleted" | "exception";
     detail?: string;
+    /** Client-reported time of the event (Core `reported_at`). Default: now. */
+    reportedAt?: number;
   }): boolean {
     this.#requireWritable();
     this.#refresh();
@@ -440,7 +444,13 @@ export class HeldDataAuthority {
     }
     if (input.kind === "receipt") {
       if (e.receiptAt === null) {
-        this.#append({ t: "hd_receipt", id: randomUUID(), grant_id: input.grantId, op: input.operationId, at: this.#o.now() });
+        this.#append({
+          t: "hd_receipt",
+          id: randomUUID(),
+          grant_id: input.grantId,
+          op: input.operationId,
+          at: input.reportedAt ?? this.#o.now(),
+        });
       }
       return true;
     }
@@ -452,7 +462,7 @@ export class HeldDataAuthority {
         op: input.operationId,
         outcome: input.outcome ?? "deleted",
         detail: input.detail ?? null,
-        at: this.#o.now(),
+        at: input.reportedAt ?? this.#o.now(),
       });
     }
     return true;
@@ -594,6 +604,16 @@ export class HeldDataAuthority {
     return this.#grants.has(grantId);
   }
 
+  /**
+   * A recovered lifecycle credential is current authentication for writes
+   * (Core: "an unexpired lifecycle recovery token"). Returns its client.
+   */
+  statusCredentialClient(token: string, grantId: string): string | null {
+    this.#refresh();
+    const c = this.#creds.get(credentialDigest(token));
+    return c && c.kind === "status" && !c.disabled && c.grantIds.has(grantId) ? c.clientId : null;
+  }
+
   grantsOfClient(clientId: string): string[] {
     this.#refresh();
     return [...this.#grants.values()].filter((f) => f.grant.client_id === clientId).map((f) => f.grant.grant_id);
@@ -639,6 +659,7 @@ export class HeldDataAuthority {
       })),
       ordinary_use: ordinaryUse,
       assessed_at: now,
+      expires_at: g.expires_at,
       as_position: this.#position,
     };
   }

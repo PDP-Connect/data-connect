@@ -67,6 +67,13 @@ export interface MountHeldDataContext {
   /** Register a grant from the main database if the journal has not seen it (lazy registration). */
   ensureGrant: (grantId: string) => Promise<boolean>;
   introspect: (token: string) => Promise<IntrospectInfo>;
+  /** Revoke a grant through the RI's revocation funnel, with how it is ending. */
+  revokeGrant: (
+    grantId: string,
+    context: { lifecycle: { path: "owner_withdrawal" | "client_revocation"; disposition: "delete" } }
+  ) => Promise<unknown>;
+  /** Current client authentication for a write: the client id, or null. */
+  writeClient: (token: string, grantId: string) => Promise<string | null>;
   /** Record the digest of a token the journal has not seen yet (lazy registration from the main database). */
   prepareStatusToken: (token: string) => Promise<void>;
   resolveBaseUrl: (req: unknown) => string;
@@ -86,19 +93,42 @@ function iso(ms: number | null | undefined): string | null {
   return typeof ms === "number" ? new Date(ms).toISOString() : null;
 }
 
-/** Wire form of one status result: times as RFC 3339 strings. */
-export function statusWire(r: StatusResult): Record<string, unknown> {
+/**
+ * Wire form of one result, in the Core draft's members (`rev/held-data`
+ * 699e8b71bd, Grant lifecycle operation). `as_position` is a prototype
+ * addition: the journal position the answer is ordered after.
+ */
+export function statusWire(r: StatusResult, stopUseBoundMs: number): Record<string, unknown> {
   if ("error" in r) {
     return r;
   }
+  let readState = "active";
+  let endedAt: number | null = null;
+  if (r.ending) {
+    readState = "revoked";
+    endedAt = r.ending.ended_at;
+  } else if (r.grant_state === "expired") {
+    readState = "expired";
+    endedAt = r.expires_at;
+  }
+  const erase = r.erasures.find((e) => e.scope.streams === "all");
   return {
-    ...r,
+    grant_id: r.grant_id,
     assessed_at: iso(r.assessed_at),
-    ending: r.ending ? { ...r.ending, ended_at: iso(r.ending.ended_at) } : null,
-    erasures: r.erasures.map((e) => ({
-      ...e,
-      accepted_at: iso(e.accepted_at),
-    })),
+    read_state: readState,
+    ...(endedAt === null ? {} : { ended_at: iso(endedAt) }),
+    held_data: erase ? "erase" : "permitted",
+    ...(erase
+      ? {
+          erasure: {
+            instruction_id: erase.operation_id,
+            accepted_at: iso(erase.accepted_at),
+            effective_at: iso(erase.accepted_at),
+            stop_use_by: iso(erase.accepted_at + stopUseBoundMs),
+          },
+        }
+      : {}),
+    as_position: r.as_position,
   };
 }
 
@@ -158,34 +188,83 @@ export function mountHeldData(app: AppLike, ctx: MountHeldDataContext): void {
       return res.status(404).json({ error: "not_found" });
     }
     res.setHeader("Cache-Control", "no-store");
+    res.setHeader("Pragma", "no-cache");
     const body = req.body ?? {};
     const path = "/oauth/grant-lifecycle";
     const { url } = endpoint(req, path);
+    const grantIds = (Array.isArray(body.grant_id) ? body.grant_id : [body.grant_id]).filter(
+      (x): x is string => typeof x === "string" && x.length > 0
+    );
+    const report = body.report === undefined ? null : body.report;
+    const disposition = body.pdpp_disposition === undefined ? null : body.pdpp_disposition;
+    const isWrite = report !== null || disposition !== null;
+    const reportKinds = ["received", "completed", "retained"];
+    const reportedAt = typeof body.reported_at === "string" ? Date.parse(body.reported_at) : Number.NaN;
+    const invalid =
+      grantIds.length === 0 ||
+      (report !== null && disposition !== null) ||
+      (report !== null && !reportKinds.includes(String(report))) ||
+      (disposition !== null && disposition !== "delete") ||
+      (isWrite && grantIds.length !== 1) ||
+      (report !== null && (!str(body.instruction_id) || !Number.isFinite(reportedAt) || reportedAt > rt.now())) ||
+      (report === "retained" && !str(body.retained_until));
+    if (invalid) {
+      return res.status(400).json({ error: "invalid_request" });
+    }
     const clientId = await clientFromAssertion(req, path);
     if (body.client_assertion !== undefined && !clientId) {
       return res.status(401).json({ error: "invalid_client" });
     }
-    const presented = tokenFrom(req);
-    if (presented) {
-      await ctx.prepareStatusToken(presented.token);
+    const token = str(body.token) ?? tokenFrom(req)?.token ?? null;
+    if (token) {
+      await ctx.prepareStatusToken(token);
     }
-    const principal = rt.authority.authenticateRead({
-      token: presented?.token ?? null,
-      dpopJkt: dpopJkt(req, rt, url),
-      clientId,
-    });
+    const principal = rt.authority.authenticateRead({ token, dpopJkt: dpopJkt(req, rt, url), clientId });
     if (!principal) {
-      return res.status(401).json({ error: "invalid_token" });
-    }
-    const ids = Array.isArray(body.grant_ids)
-      ? body.grant_ids.filter((x): x is string => typeof x === "string")
-      : [str(body.grant_id)].filter((x): x is string => x !== null);
-    if (ids.length === 0) {
-      return res.status(400).json({ error: "invalid_request" });
+      return res.status(401).json({ error: token ? "invalid_token" : "invalid_client" });
     }
     try {
-      const results = rt.authority.status(principal, ids);
-      return res.status(200).json({ grants: results.map(statusWire) });
+      if (!isWrite) {
+        const results = rt.authority.status(principal, grantIds);
+        return res.status(200).json({ grants: results.map((r) => statusWire(r, rt.stopUseBoundMs)) });
+      }
+      const grantId = grantIds[0] as string;
+      const [visible] = rt.authority.status(principal, [grantId]);
+      if (!visible || "error" in visible) {
+        return res.status(200).json({ grants: [{ grant_id: grantId, error: "invalid_grant" }] });
+      }
+      // Writes need current client authentication; an old token never authenticates one.
+      const writer =
+        (clientId && rt.authority.grantClient(grantId) === clientId ? clientId : null) ??
+        (token ? await ctx.writeClient(token, grantId) : null);
+      if (!writer) {
+        return res.status(200).json({ grants: [{ grant_id: grantId, error: "current_authentication_required" }] });
+      }
+      if (report !== null) {
+        const ok = rt.authority.report({
+          clientId: writer,
+          grantId,
+          operationId: str(body.instruction_id) as string,
+          kind: report === "received" ? "receipt" : "completion",
+          ...(report === "retained"
+            ? {
+                outcome: "exception" as const,
+                detail: `retained_until=${String(body.retained_until)}${typeof body.retention_basis === "string" ? `; basis=${body.retention_basis}` : ""}`,
+              }
+            : {}),
+          reportedAt,
+        });
+        if (!ok) {
+          return res.status(200).json({ grants: [{ grant_id: grantId, error: "invalid_instruction" }] });
+        }
+      } else if (visible.ending || visible.grant_state === "expired") {
+        rt.authority.requestErasure({ grantId, origin: "client_pdpp_disposition" });
+      } else {
+        // Records the instruction and ends the grant (Core: Erasure, Instruction).
+        await ctx.revokeGrant(grantId, { lifecycle: { path: "client_revocation", disposition: "delete" } });
+      }
+      const after = rt.authority.status(principal, [grantId]);
+      return res.status(200).json({ grants: after.map((r) => statusWire(r, rt.stopUseBoundMs)) });
     } catch (err) {
       if (err instanceof AuthorityUnavailableError) {
         res.setHeader("Retry-After", "60");
@@ -193,46 +272,6 @@ export function mountHeldData(app: AppLike, ctx: MountHeldDataContext): void {
       }
       throw err;
     }
-  });
-
-  app.post("/oauth/grant-lifecycle/report", async (req, res) => {
-    const rt = ctx.runtime();
-    if (!rt) {
-      return res.status(404).json({ error: "not_found" });
-    }
-    res.setHeader("Cache-Control", "no-store");
-    const body = req.body ?? {};
-    const grantId = str(body.grant_id);
-    const operationId = str(body.operation_id);
-    const kind = body.kind === "receipt" || body.kind === "completion" ? body.kind : null;
-    if (!(grantId && operationId && kind)) {
-      return res.status(400).json({ error: "invalid_request" });
-    }
-    // Current client authentication only (K3): an old token never authenticates a write.
-    let clientId = await clientFromAssertion(req, "/oauth/grant-lifecycle/report");
-    const presented = tokenFrom(req);
-    if (!clientId && presented) {
-      try {
-        const info = await ctx.introspect(presented.token);
-        if (info.active === true && info.pdpp_token_kind === "client" && info.grant_id === grantId && info.client_id) {
-          clientId = info.client_id;
-        }
-      } catch {
-        clientId = null;
-      }
-    }
-    if (!clientId) {
-      return res.status(401).json({ error: "invalid_token" });
-    }
-    const ok = rt.authority.report({
-      clientId,
-      grantId,
-      operationId,
-      kind,
-      ...(body.outcome === "exception" ? { outcome: "exception" as const } : {}),
-      ...(typeof body.detail === "string" ? { detail: body.detail } : {}),
-    });
-    return ok ? res.status(200).json({ recorded: true }) : res.status(400).json({ error: "invalid_grant" });
   });
 
   app.post("/oauth/grant-lifecycle/recover", async (req, res) => {
@@ -327,7 +366,16 @@ export function mountHeldData(app: AppLike, ctx: MountHeldDataContext): void {
     if (!(await ctx.ensureGrant(grantId))) {
       return res.status(404).json({ error: "not_found" });
     }
-    rt.authority.elect({ grantId, disposition: "delete" });
+    // An instruction that takes effect while the grant is active also revokes it (Core: Erasure).
+    const [answer] = rt.authority.status(
+      { clientId: rt.authority.grantClient(grantId) ?? "", grantIds: new Set([grantId]), clientAuthenticated: false },
+      [grantId]
+    );
+    if (answer && !("error" in answer) && answer.grant_state === "active") {
+      await ctx.revokeGrant(grantId, { lifecycle: { path: "owner_withdrawal", disposition: "delete" } });
+    } else {
+      rt.authority.elect({ grantId, disposition: "delete" });
+    }
     return res.status(200).json(ownerRecord(rt, grantId));
   });
 

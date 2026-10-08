@@ -117,6 +117,7 @@ import {
   authenticateOAuthTokenClient,
   endProcessingAuthorityForGrant,
   ensureHeldDataGrant,
+  heldDataWriteClient,
   prepareHeldDataStatusToken,
   readGrantForProcessing,
   createCimdDocument,
@@ -7293,6 +7294,8 @@ export function buildAsApp(opts: ServerOpts = {}) {
     ensureGrant: ensureHeldDataGrant,
     introspect: introspect as unknown as Parameters<typeof mountHeldData>[1]["introspect"],
     prepareStatusToken: prepareHeldDataStatusToken,
+    revokeGrant: (grantId, context) => revokeGrant(grantId, context),
+    writeClient: heldDataWriteClient,
     resolveBaseUrl: (req: unknown) =>
       resolvePublicUrl(req as Parameters<typeof resolvePublicUrl>[0], explicitAsBaseUrl),
     runtime: getHeldDataRuntime,

@@ -236,11 +236,16 @@ async function registerSecondConnector(h: Harness): Promise<string> {
   return manifest.connector_id;
 }
 
-async function status(h: Harness, token: string, grantId: string) {
+/** The grant lifecycle operation, in the Core draft's form encoding. */
+async function lifecycle(h: Harness, params: Record<string, string>) {
   return fetchJson<{ grants: Record<string, unknown>[]; error?: string }>(
     `${h.asUrl}/oauth/grant-lifecycle`,
-    json({ grant_id: grantId }, { Authorization: `Bearer ${token}` }),
+    form(params),
   );
+}
+
+async function status(h: Harness, token: string, grantId: string) {
+  return lifecycle(h, { grant_id: grantId, token });
 }
 
 async function revoke(h: Harness, bearer: string, grantId: string, body: Record<string, unknown> = {}) {
@@ -292,9 +297,9 @@ describe("held-data lifecycle over HTTP", () => {
         assert.equal(await rsRead(h, g.token), 403);
         const s = await status(h, g.token, g.grantId);
         assert.equal(s.status, 200, JSON.stringify(s.body));
-        assert.equal(s.body.grants[0]?.grant_state, "ended");
-        assert.equal(s.body.grants[0]?.ordinary_use, "permitted");
-        assert.equal((s.body.grants[0]?.ending as { disposition?: string } | undefined)?.disposition, "keep");
+        assert.equal(s.body.grants[0]?.read_state, "revoked");
+        assert.equal(s.body.grants[0]?.held_data, "permitted");
+        assert.ok(s.body.grants[0]?.ended_at);
       },
       heldDataOpts(),
     );
@@ -338,18 +343,18 @@ describe("held-data lifecycle over HTTP", () => {
         const op = (rec.body.erasures as Record<string, unknown>[])[0];
         assert.ok(op?.delivered_at);
         assert.equal(op?.delete_by, null);
-        const receipt = await fetchJson(
-          `${h.asUrl}/oauth/grant-lifecycle/report`,
-          json(
-            {
-              grant_id: g.grantId,
-              operation_id: op?.operation_id,
-              kind: "receipt",
-            },
-            { Authorization: `Bearer ${g.token}` },
-          ),
+        const receipt = await lifecycle(h, {
+          grant_id: g.grantId,
+          instruction_id: String(op?.operation_id),
+          report: "received",
+          reported_at: new Date().toISOString(),
+          token: g.token,
+        });
+        assert.deepEqual(
+          receipt.body.grants?.[0],
+          { grant_id: g.grantId, error: "current_authentication_required" },
+          "the revoked token cannot authenticate a write"
         );
-        assert.equal(receipt.status, 401, "the revoked token cannot authenticate a write");
       },
       heldDataOpts(),
     );
@@ -368,12 +373,12 @@ describe("held-data lifecycle over HTTP", () => {
           .run("2000-01-01T00:00:00.000Z", g.grantId);
         assert.equal(await rsRead(h, g.token), 403);
         const before = await status(h, g.token, g.grantId);
-        assert.equal(before.body.grants[0]?.grant_state, "expired");
-        assert.equal(before.body.grants[0]?.ordinary_use, "permitted");
+        assert.equal(before.body.grants[0]?.read_state, "expired");
+        assert.equal(before.body.grants[0]?.held_data, "permitted");
         const erase = await owner(h, `/v1/owner/grants/${g.grantId}/lifecycle/erase`, "POST");
         assert.equal(erase.status, 200, JSON.stringify(erase.body));
         const after = await status(h, g.token, g.grantId);
-        assert.equal(after.body.grants[0]?.ordinary_use, "stopped");
+        assert.equal(after.body.grants[0]?.held_data, "erase");
         assert.equal(await rsRead(h, g.token), 403, "status never reopens reads");
       },
       heldDataOpts(),
@@ -393,7 +398,7 @@ describe("held-data lifecycle over HTTP", () => {
         getDb().prepare("UPDATE tokens SET revoked = 0 WHERE grant_id = ?").run(g.grantId);
         assert.equal(await rsRead(h, g.token), 403, "the journal's ending blocks reads");
         const s = await status(h, g.token, g.grantId);
-        assert.equal(s.body.grants[0]?.ordinary_use, "stopped");
+        assert.equal(s.body.grants[0]?.held_data, "erase");
       },
       heldDataOpts(),
     );
@@ -425,8 +430,8 @@ describe("held-data lifecycle over HTTP", () => {
         assert.equal(replay.status, 400);
         const s = await status(h, g.refreshToken, g.grantId);
         assert.equal(s.status, 200, JSON.stringify(s.body));
-        assert.equal(s.body.grants[0]?.grant_state, "active");
-        assert.equal(s.body.grants[0]?.ending, null);
+        assert.equal(s.body.grants[0]?.read_state, "active");
+        assert.equal(s.body.grants[0]?.held_data, "permitted");
         assert.equal(getHeldDataRuntime()?.authority.hasEnded(g.grantId), false);
       },
       heldDataOpts(),
@@ -511,7 +516,7 @@ describe("held-data lifecycle over HTTP", () => {
           assert.equal(rt?.authority.ownerView(g.grantId, DAY)?.erasures.length, 1);
         }
         const s = await status(h, g2.refreshToken, g2.grantId);
-        assert.equal(s.body.grants[0]?.ordinary_use, "stopped", "a deleted client's tokens still read status");
+        assert.equal(s.body.grants[0]?.held_data, "erase", "a deleted client's tokens still read status");
       },
       heldDataOpts(),
     );
@@ -587,6 +592,109 @@ describe("held-data lifecycle over HTTP", () => {
         assert.equal(plain.status, 200, "G2 itself is live");
       },
       heldDataOpts(),
+    );
+  });
+
+  it("Core wire: a public client writes with its current refresh token; a superseded one and a future reported_at are refused; the owner sees a deletion date only after receipt", async () => {
+    await withServer(
+      false,
+      async (h) => {
+        const clientId = await registerPublicClient(h);
+        const g = await authCodeGrant(h, clientId);
+        const r1 = await fetchJson<{ refresh_token: string }>(
+          `${h.asUrl}/oauth/token`,
+          form({ client_id: clientId, grant_type: "refresh_token", refresh_token: g.refreshToken })
+        );
+        assert.equal(r1.status, 200);
+        const erase = await owner(h, `/v1/owner/grants/${g.grantId}/lifecycle/erase`, "POST");
+        assert.equal(erase.status, 200, JSON.stringify(erase.body));
+        assert.equal(await rsRead(h, g.accessToken), 403, "an erase on an active grant also revokes it");
+        const q = await status(h, g.refreshToken, g.grantId);
+        const erasure = q.body.grants[0]?.erasure as { instruction_id: string; stop_use_by: string; accepted_at: string };
+        assert.equal(q.body.grants[0]?.held_data, "erase");
+        assert.equal(Date.parse(erasure.stop_use_by) - Date.parse(erasure.accepted_at), 2 * DAY);
+        const receivedAt = new Date().toISOString();
+        const write = { grant_id: g.grantId, instruction_id: erasure.instruction_id, report: "received", reported_at: receivedAt };
+        const future = await lifecycle(h, { ...write, reported_at: new Date(Date.now() + DAY).toISOString(), token: r1.body.refresh_token });
+        assert.equal(future.status, 400);
+        const superseded = await lifecycle(h, { ...write, token: g.refreshToken });
+        assert.equal(superseded.body.grants[0]?.error, "current_authentication_required");
+        const both = await lifecycle(h, { ...write, pdpp_disposition: "delete", token: r1.body.refresh_token });
+        assert.equal(both.status, 400);
+        const before = await owner(h, `/v1/owner/grants/${g.grantId}/lifecycle`);
+        assert.equal((before.body.erasures as Record<string, unknown>[])[0]?.delete_by, null);
+        // Revocation revoked the refresh family too, so a revoked grant's public client has no current token left.
+        const current = await lifecycle(h, { ...write, token: r1.body.refresh_token });
+        assert.equal(current.body.grants[0]?.error, "current_authentication_required");
+        const code = await owner(h, `/v1/owner/grants/${g.grantId}/lifecycle/recovery-code`, "POST");
+        const rec = await fetchJson<{ status_credential: string }>(
+          `${h.asUrl}/oauth/grant-lifecycle/recover`,
+          json({ grant_id: g.grantId, recovery_code: code.body.recovery_code })
+        );
+        const viaRecovery = await lifecycle(h, { ...write, token: rec.body.status_credential });
+        assert.equal(viaRecovery.body.grants[0]?.held_data, "erase", JSON.stringify(viaRecovery.body));
+        const afterRec = await owner(h, `/v1/owner/grants/${g.grantId}/lifecycle`);
+        const op = (afterRec.body.erasures as Record<string, unknown>[])[0];
+        assert.equal(op?.receipt_at, receivedAt);
+        assert.equal(Date.parse(String(op?.delete_by)) - Date.parse(receivedAt), 30 * DAY);
+      },
+      heldDataOpts()
+    );
+  });
+
+  it("Core wire: pdpp_disposition=delete from a client with current authentication records the instruction and ends the grant", async () => {
+    await withServer(
+      false,
+      async (h) => {
+        const g = await ordinaryGrant(h);
+        const w = await lifecycle(h, { grant_id: g.grantId, pdpp_disposition: "delete", token: g.token });
+        assert.equal(w.status, 200, JSON.stringify(w.body));
+        assert.equal(w.body.grants[0]?.held_data, "erase");
+        assert.equal(w.body.grants[0]?.read_state, "revoked");
+        assert.equal(await rsRead(h, g.token), 403);
+      },
+      heldDataOpts()
+    );
+  });
+
+  it("D2: unknown, foreign and uncovered grants get identical invalid_grant entries", async () => {
+    await withServer(
+      false,
+      async (h) => {
+        const mine = await ordinaryGrant(h);
+        const clientId = await registerPublicClient(h);
+        const theirs = await authCodeGrant(h, clientId);
+        const foreign = await status(h, mine.token, theirs.grantId);
+        const unknown = await status(h, mine.token, "grt_does_not_exist");
+        assert.equal(foreign.status, unknown.status);
+        assert.deepEqual(foreign.body.grants[0], { grant_id: theirs.grantId, error: "invalid_grant" });
+        assert.deepEqual(unknown.body.grants[0], { grant_id: "grt_does_not_exist", error: "invalid_grant" });
+        const bad = await status(h, "not-a-token", mine.grantId);
+        assert.equal(bad.status, 401);
+      },
+      heldDataOpts()
+    );
+  });
+
+  it("D1: after a main-database restore resurrects a revoked continuous grant, the refresh exchange issues no token", async () => {
+    await withServer(
+      false,
+      async (h) => {
+        const clientId = await registerPublicClient(h);
+        const g = await authCodeGrant(h, clientId);
+        await revoke(h, h.ownerToken, g.grantId, { pdpp_disposition: "delete" });
+        getDb().prepare("UPDATE grants SET status = 'active' WHERE grant_id = ?").run(g.grantId);
+        getDb().prepare("UPDATE tokens SET revoked = 0 WHERE grant_id = ?").run(g.grantId);
+        getDb()
+          .prepare("UPDATE oauth_refresh_tokens SET status = 'active', revoked_at = NULL WHERE grant_id = ?")
+          .run(g.grantId);
+        const r = await fetchJson(
+          `${h.asUrl}/oauth/token`,
+          form({ client_id: clientId, grant_type: "refresh_token", refresh_token: g.refreshToken })
+        );
+        assert.equal(r.status, 400, JSON.stringify(r.body));
+      },
+      heldDataOpts()
     );
   });
 });

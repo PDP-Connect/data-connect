@@ -38,6 +38,8 @@ export interface HeldDataRuntime {
   readonly now: () => number;
   readonly deletionPeriodMs: number;
   readonly pauseThresholdMs: number;
+  /** Core stop-use bound (48 h): `stop_use_by` = effective time + this. */
+  readonly stopUseBoundMs: number;
   close(): void;
 }
 
@@ -63,6 +65,7 @@ export function createHeldDataRuntime(opts: HeldDataRuntimeOptions & { journalPa
     now,
     deletionPeriodMs: opts.deletionPeriodMs ?? 30 * 24 * 60 * 60 * 1000,
     pauseThresholdMs: opts.pauseThresholdMs ?? 7 * 24 * 60 * 60 * 1000,
+    stopUseBoundMs: 48 * 60 * 60 * 1000,
     close() {
       // The authority holds no open handles.
     },

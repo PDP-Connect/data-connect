@@ -65,6 +65,8 @@ export type ReportTransport = (r: {
   operationId: string;
   kind: "receipt" | "completion";
   outcome?: "deleted" | "exception";
+  /** Client time of the event: first receipt, or completion. */
+  reportedAt?: number;
 }) => Promise<boolean>;
 
 /** Where the app keeps the copy and its derivatives. */
@@ -412,7 +414,13 @@ export class HeldDataClient {
       return;
     }
     try {
-      const ok = await this.#report({ grantId, operationId, kind, ...(kind === "completion" ? { outcome: "deleted" } : {}) });
+      const ok = await this.#report({
+        grantId,
+        operationId,
+        kind,
+        reportedAt: kind === "receipt" ? e.receivedAt : (e.disposedAt ?? this.#now()),
+        ...(kind === "completion" ? { outcome: "deleted" } : {}),
+      });
       if (ok && kind === "receipt") {
         e.receiptReported = true;
       } else if (ok) {

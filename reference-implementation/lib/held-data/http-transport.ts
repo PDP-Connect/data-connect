@@ -2,8 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * HTTP transports for HeldDataClient against the RI's prototype endpoints
- * (`/oauth/grant-lifecycle`, `/oauth/grant-lifecycle/report`).
+ * HTTP transports for HeldDataClient against the grant lifecycle operation,
+ * in the Core draft's wire form (`rev/held-data` 699e8b71bd): a form-encoded
+ * POST to `/oauth/grant-lifecycle` with `grant_id` and `token`, answered with
+ * `{ grants: [{ grant_id, assessed_at, read_state, held_data, erasure? }] }`.
+ * Writes (`report=received|completed`) go to the same endpoint.
  *
  * PROTOTYPE: experimental held-data lifecycle work, off by default.
  */
@@ -14,7 +17,7 @@ function ms(v: unknown): number {
   return typeof v === "string" ? Date.parse(v) : Number.NaN;
 }
 
-/** Parse one wire result. Anything malformed is treated as no answer. */
+/** Parse one wire entry. Anything malformed is treated as no answer. */
 export function parseStatusWire(raw: unknown): StatusResult | null {
   if (!raw || typeof raw !== "object") {
     return null;
@@ -23,39 +26,54 @@ export function parseStatusWire(raw: unknown): StatusResult | null {
   if (typeof r.grant_id !== "string") {
     return null;
   }
-  if (r.error === "invalid_grant") {
+  if (typeof r.error === "string") {
     return { grant_id: r.grant_id, error: "invalid_grant" };
   }
   const assessed = ms(r.assessed_at);
-  if (!Number.isFinite(assessed) || typeof r.as_position !== "number" || !Array.isArray(r.erasures)) {
+  if (!Number.isFinite(assessed) || (r.held_data !== "permitted" && r.held_data !== "erase")) {
     return null;
   }
-  const ending = r.ending as Record<string, unknown> | null;
+  const erasure = r.erasure as Record<string, unknown> | undefined;
+  if (r.held_data === "erase" && !(erasure && typeof erasure.instruction_id === "string")) {
+    return null;
+  }
+  const endedAt = ms(r.ended_at);
+  let grantState: "active" | "expired" | "ended" = "active";
+  if (r.read_state === "revoked") {
+    grantState = "ended";
+  } else if (r.read_state === "expired") {
+    grantState = "expired";
+  }
   return {
     grant_id: r.grant_id,
-    grant_state: r.grant_state as "active" | "expired" | "ended",
-    ending: ending
-      ? {
-          path: ending.path as never,
-          ended_at: ms(ending.ended_at),
-          disposition: (ending.disposition ?? null) as never,
-          owner_notice_required: ending.owner_notice_required === true,
-        }
-      : null,
-    erasures: (r.erasures as Record<string, unknown>[]).map((e) => ({
-      operation_id: String(e.operation_id),
-      scope: e.scope as never,
-      accepted_at: ms(e.accepted_at),
-    })),
-    ordinary_use: r.ordinary_use as "permitted" | "stopped" | "custody_only",
+    grant_state: grantState,
+    ending:
+      r.read_state === "revoked"
+        ? { path: "owner_withdrawal", ended_at: endedAt, disposition: null, owner_notice_required: false }
+        : null,
+    erasures:
+      erasure && typeof erasure.instruction_id === "string"
+        ? [{ operation_id: erasure.instruction_id, scope: { streams: "all" }, accepted_at: ms(erasure.accepted_at) }]
+        : [],
+    ordinary_use: r.held_data === "erase" ? "stopped" : "permitted",
     assessed_at: assessed,
-    as_position: r.as_position,
+    expires_at: r.read_state === "expired" && Number.isFinite(endedAt) ? endedAt : null,
+    // Not in the Core draft; without it the client's ordering check is a no-op.
+    as_position: typeof r.as_position === "number" ? r.as_position : 0,
+  };
+}
+
+function formBody(o: Record<string, string>): RequestInit {
+  return {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams(o).toString(),
   };
 }
 
 export function httpStatusTransport(o: {
   asBaseUrl: string;
-  /** Lifecycle credential per grant (an access, refresh or status credential). */
+  /** Lifecycle credential per grant: any access or refresh token issued for it, or a recovered credential. */
   credentialFor: (grantId: string) => string | null;
   fetchImpl?: typeof fetch;
 }): StatusTransport {
@@ -70,14 +88,7 @@ export function httpStatusTransport(o: {
       }
       let resp: Response;
       try {
-        resp = await f(`${o.asBaseUrl}/oauth/grant-lifecycle`, {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${token}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({ grant_id: grantId }),
-        });
+        resp = await f(`${o.asBaseUrl}/oauth/grant-lifecycle`, formBody({ grant_id: grantId, token }));
       } catch {
         return { ok: false, reason: "unreachable" };
       }
@@ -102,7 +113,7 @@ export function httpStatusTransport(o: {
 
 export function httpReportTransport(o: {
   asBaseUrl: string;
-  /** Current authentication for a write: an active access token, or null if none. */
+  /** Current authentication for a write: an active access token, the current refresh token, or null. */
   currentTokenFor: (grantId: string) => string | null;
   fetchImpl?: typeof fetch;
 }): ReportTransport {
@@ -112,19 +123,20 @@ export function httpReportTransport(o: {
     if (!token) {
       return false;
     }
-    const resp = await f(`${o.asBaseUrl}/oauth/grant-lifecycle/report`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
+    const resp = await f(
+      `${o.asBaseUrl}/oauth/grant-lifecycle`,
+      formBody({
         grant_id: r.grantId,
-        operation_id: r.operationId,
-        kind: r.kind,
-        outcome: r.outcome,
-      }),
-    });
-    return resp.ok;
+        token,
+        report: r.kind === "receipt" ? "received" : "completed",
+        instruction_id: r.operationId,
+        reported_at: new Date(r.reportedAt ?? Date.now()).toISOString(),
+      })
+    );
+    if (!resp.ok) {
+      return false;
+    }
+    const body = (await resp.json()) as { grants?: { error?: string }[] };
+    return !body.grants?.[0]?.error;
   };
 }
