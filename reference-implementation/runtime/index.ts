@@ -4725,6 +4725,16 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       // buffered in the parent; only the single handler currently in flight
       // remains, and its ingest transport observes this cancellation signal.
       msgQueue.length = 0;
+      // An INTERACTION handler waits for an owner answer or its own timeout
+      // (600 s for a bank OTP), and the close path waits for that handler.
+      // Settle the wait as cancelled so the run ends after the kill grace.
+      if (pendingInteraction && pendingInteractionAutoResolve) {
+        pendingInteractionAutoResolve({
+          request_id: pendingInteraction.request_id as string,
+          status: "cancelled",
+          type: "INTERACTION_RESPONSE",
+        });
+      }
       terminateChild();
     }
     if (cancelSignal) {
