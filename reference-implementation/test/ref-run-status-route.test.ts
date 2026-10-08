@@ -333,7 +333,9 @@ test("run-status route: completed run has no failure summary", async (t) => {
   assert.equal(res._body.failure, null);
 });
 
-test("run-status route: connector auth error code gets generic reconnect guidance", async (t) => {
+// Collection Profile 0.2.0, Sections 5.5 and 5.11: no action is inferred
+// from the connector's error text, and that text stays visible.
+test("run-status route: a connector auth error code is kept as the connector's text, with no inferred guidance", async (t) => {
   freshDb(t);
   await emitStarted("run_auth_failed");
   await emitFailed("run_auth_failed", { connectorErrorMessage: "ynab_auth_failed" });
@@ -343,9 +345,12 @@ test("run-status route: connector auth error code gets generic reconnect guidanc
   const res = makeRes();
   await getRoute(app, ROUTE)({ params: { runId: "run_auth_failed" } }, res);
 
-  assert.equal(res._body.failure?.connector_error_message, "ynab_auth_failed");
-  assert.match(res._body.failure?.message ?? "", /Reconnect this source/);
-  assert.deepEqual(res._body.failure?.recovery_hint, { action: "refresh_credentials", retryable: false });
+  assert.deepEqual(res._body.failure, {
+    connector_error_message: "ynab_auth_failed",
+    message: null,
+    origin: "connector",
+    reason: "connector_reported_failed",
+  });
 });
 
 test("run-status route: known_gaps passes through from the terminal event, window-independent of the timeline page", async (t) => {

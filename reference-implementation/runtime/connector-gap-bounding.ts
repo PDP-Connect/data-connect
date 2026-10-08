@@ -208,12 +208,27 @@ export function boundGapString(value: unknown): string | null {
  * collapsed to `[REDACTED]` — see that module's doc for why a categorical,
  * connector-declared fault-class name (e.g. `venmo_probe_transport_error`)
  * is not the kind of secret that heuristic exists to catch.
+ *
+ * Error codes made of lowercase words (`additional_browser_page_forbidden`)
+ * are kept for every connector, declared or not: `stderr-redact.ts`'s
+ * `keepSnakeCaseWords` states why that shape is not a machine-generated
+ * secret. `knownSecrets` are the credentials the run handed the connector;
+ * they are redacted by identity whatever their shape, which covers a
+ * passphrase that the word rule would otherwise keep.
  */
-export function boundConnectorErrorMessage(value: unknown, declaredReasonTokens?: ReadonlySet<string>): string | null {
+export function boundConnectorErrorMessage(
+  value: unknown,
+  declaredReasonTokens?: ReadonlySet<string>,
+  knownSecrets?: readonly string[]
+): string | null {
   if (typeof value !== "string") {
     return null;
   }
-  const redacted = redactStderrTail(value, declaredReasonTokens ? { declaredReasonTokens } : {}).text;
+  const redacted = redactStderrTail(value, {
+    keepSnakeCaseWords: true,
+    ...(declaredReasonTokens ? { declaredReasonTokens } : {}),
+    ...(knownSecrets ? { knownSecrets } : {}),
+  }).text;
   const text = redacted
     .replace(/^\s*[╔╚╠╟╞╧╤╥╙╘╒╓╔╚╩╦╬═─━┌┐└┘├┤┬┴┼│║╭╮╰╯]+[^\S\r\n]*.*[╗╝╣╢╡╛╧╤╥╜╛╕╖╩╦╬═─━┐┘┤┬┴┼│║╮╯]\s*$/gm, "")
     .replace(/\n{3,}/g, "\n\n");
