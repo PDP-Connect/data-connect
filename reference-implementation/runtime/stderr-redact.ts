@@ -75,6 +75,9 @@ const PEM_BLOCK_RE = /-----BEGIN [A-Z0-9 ]+-----[\s\S]*?-----END [A-Z0-9 ]+-----
 
 const OTP_RE = /\b\d{6}\b/g;
 const LONG_OPAQUE_RE = /\b[A-Za-z0-9_-]{24,}\b/g;
+// Two or more lowercase ASCII words joined by single underscores, with no
+// digit, no capital, and no hyphen. See `keepSnakeCaseWords`.
+const SNAKE_CASE_WORDS_RE = /^[a-z]+(?:_[a-z]+)+$/;
 
 export interface RedactedStderr {
   redacted: boolean;
@@ -120,6 +123,35 @@ export interface StderrRedactionOptions {
    * was not already; it tells redaction what to look for.
    */
   readonly knownSecrets?: Iterable<string>;
+  /**
+   * Keep a `LONG_OPAQUE_RE` match that is only lowercase words joined by
+   * underscores, such as `additional_browser_page_forbidden`. Omitted callers
+   * get byte-identical behaviour to before.
+   *
+   * WHY THIS SHAPE IS SAFE TO KEEP IN AN OWNER-FACING ERROR MESSAGE
+   * ---------------------------------------------------------------
+   * `LONG_OPAQUE_RE` exists for machine-generated secrets: API keys, bearer
+   * and session tokens, signed values. Their random part is base62, base64,
+   * or hex, so it holds digits or capitals. For a 24-character base62 body
+   * the chance of neither is (26/62)^24, about 1e-9; for hex it is
+   * (6/16)^24, about 6e-11. Prefixed key formats (`sk_live_…`, `ghp_…`) carry
+   * the same random body. A run of lowercase words is an identifier that a
+   * person wrote, such as an error code.
+   *
+   * The earlier objection to a shape rule was personal data:
+   * `tim_nunamaker_gmail_com` is snake_case too. This rule is not the
+   * personal-data control and never was. The same name and address in their
+   * usual form (`Tim Nunamaker`, `tim.nunamaker@gmail.com`) never matched
+   * `LONG_OPAQUE_RE` and pass through unchanged today. Redacting every long
+   * error code to protect only the snake_case spelling of a name destroyed the
+   * cause of every such failure and protected almost nothing.
+   *
+   * The remaining risk is a human-chosen passphrase spelled in lowercase
+   * snake_case. The keyed-marker rule still redacts it after `password=`, and
+   * a caller that keeps word tokens SHOULD also pass `knownSecrets`, so a
+   * credential the run holds is redacted by identity whatever its shape.
+   */
+  readonly keepSnakeCaseWords?: boolean;
 }
 
 /**
@@ -215,6 +247,9 @@ export function redactStderrTail(text: unknown, options: StderrRedactionOptions 
   // A declared reason token is preserved verbatim; everything else redacts
   // exactly as it always has. `declared` is empty for every caller that does
   // not opt in, so this branch is byte-identical to the previous behaviour.
-  next = next.replace(LONG_OPAQUE_RE, (match) => (declared?.has(match) ? match : "[REDACTED]"));
+  const keepWords = options.keepSnakeCaseWords === true;
+  next = next.replace(LONG_OPAQUE_RE, (match) =>
+    declared?.has(match) || (keepWords && SNAKE_CASE_WORDS_RE.test(match)) ? match : "[REDACTED]"
+  );
   return { redacted: next !== text, text: next };
 }

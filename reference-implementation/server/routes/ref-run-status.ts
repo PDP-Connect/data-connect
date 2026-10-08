@@ -99,12 +99,7 @@ export interface RunStatusFailureSummary {
   readonly connector_error_message: string | null;
   readonly message: string | null;
   readonly origin: string | null;
-  readonly recovery_hint?: { readonly action: "refresh_credentials"; readonly retryable: false } | null;
   readonly reason: string | null;
-}
-
-function isConnectorAuthFailure(code: string | null): boolean {
-  return code !== null && /(?:^|[_-])auth(?:entication)?[_-](?:failed|failure)$/.test(code);
 }
 
 export interface RunStatusBody {
@@ -189,20 +184,20 @@ function readConnectorId(event: RunStatusLifecycleEvent | null): string | null {
 // runtime-authored, bounded fields already persisted on the terminal spine
 // event (`buildRunTerminalData` / the controller's launch-failure emit) —
 // no new secret surface beyond what the timeline route serves.
+//
+// The summary never derives a diagnosis or a recovery action from the
+// connector's error text, and it always keeps that text. Collection Profile
+// 0.2.0, Section 5.5: a runtime MUST NOT infer a connector-requested action
+// from `message` or an error code. Section 5.11: the connector's
+// `DONE.error.message` stays visible to the owner.
 function buildFailureSummary(terminal: RunStatusTerminalEvent): RunStatusFailureSummary | null {
   if (terminal.status !== "failed" && terminal.status !== "abandoned") {
     return null;
   }
-  const connectorError = readString(terminal.data, "connector_error_message");
-  const authFailure = isConnectorAuthFailure(connectorError);
   return {
-    connector_error_message: connectorError,
-    message:
-      readString(terminal.data, "failure_message") ??
-      readString(terminal.data, "message") ??
-      (authFailure ? "Your saved sign-in is no longer accepted. Reconnect this source to sync again." : null),
+    connector_error_message: readString(terminal.data, "connector_error_message"),
+    message: readString(terminal.data, "failure_message") ?? readString(terminal.data, "message"),
     origin: readString(terminal.data, "failure_origin"),
-    ...(authFailure ? { recovery_hint: { action: "refresh_credentials" as const, retryable: false as const } } : {}),
     reason: readString(terminal.data, "reason") ?? readString(terminal.data, "failure_reason"),
   };
 }

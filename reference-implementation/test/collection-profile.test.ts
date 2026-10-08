@@ -8835,6 +8835,60 @@ rl.on('line', (line) => {
     }
   });
 
+  await t.test(
+    "DONE.error.message keeps a lowercase error code and still redacts machine secrets and the run's credential",
+    async () => {
+      const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+      const { asPort, rsPort } = server;
+      const { ownerToken, connectorId } = await setupConnector(server, asPort);
+      // A lowercase snake_case passphrase is the shape the word rule keeps, so
+      // only identity redaction can catch it.
+      const runCredential = "correct_horse_battery_staple";
+      // Assembled at runtime so secret scanners do not flag the fixture.
+      const machineSecret = ["sk", "live", "51HxYzAbCdEfGhIjKlMnOp"].join("_");
+      const { connectorPath, cleanup } = createTestConnector([
+        {
+          error: {
+            message: `chase_unexpected: additional_browser_page_forbidden: use the owned run page; login failed for ${runCredential}; key ${machineSecret}`,
+            retryable: false,
+          },
+          records_emitted: 0,
+          status: "failed",
+          type: "DONE",
+        },
+      ]);
+
+      try {
+        const result = await runTestConnector({
+          collectionMode: "full_refresh",
+          connectorId,
+          connectorPath,
+          manifest: MINIMAL_MANIFEST,
+          onInteraction: async () => ({}),
+          ownerToken,
+          persistState: true,
+          rsUrl: `http://localhost:${rsPort}`,
+          state: null,
+          staticSecretEnv: { TEST_CONNECTION_PASSWORD: runCredential },
+        });
+        assert.equal(result.status, "failed");
+
+        const { body: runTimeline } = await fetchJson<TimelineBody>(
+          `http://localhost:${asPort}/_ref/runs/${encodeURIComponent(requireRunId(result))}/timeline`
+        );
+        const failedEvent = (runTimeline.data || []).find((event) => event.event_type === "run.failed");
+        assert.ok(failedEvent, "expected run.failed");
+        assert.equal(
+          failedEvent.data.connector_error_message,
+          "chase_unexpected: additional_browser_page_forbidden: use the owned run page; login failed for [REDACTED]; key [REDACTED]"
+        );
+      } finally {
+        cleanup();
+        await closeServer(server);
+      }
+    }
+  );
+
   await t.test("DONE(failed) after staging multiple stream checkpoints still commits none of them", async () => {
     const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
     const { asPort, rsPort } = server;
