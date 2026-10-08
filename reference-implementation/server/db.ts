@@ -872,6 +872,12 @@ CREATE TABLE IF NOT EXISTS grants (
   client_id      TEXT NOT NULL,
   storage_binding_json TEXT,
   grant_json     TEXT NOT NULL,
+  -- The trust signal the AS relied on to accept this client's identity, when it
+  -- relied on one (spec-core.md#trust-registry-queries). Nullable: a grant issued
+  -- to a pre-registered client relied on no assertion, and a grant issued before
+  -- this column existed recorded none. It sits beside grant_json rather than
+  -- inside it because the resolved-grant contract is closed to extra members.
+  trust_signal_json TEXT,
   access_mode    TEXT NOT NULL,
   status         TEXT NOT NULL DEFAULT 'active',
   consumed       INTEGER NOT NULL DEFAULT 0,
@@ -6346,6 +6352,10 @@ CREATE INDEX IF NOT EXISTS idx_blob_bindings_record ON blob_bindings(connector_i
   // as NULL, which the sweep treats as orphaned because no live process
   // claims them. See the column comment on manual_upload_artifacts.
   runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "manual_upload_artifacts", "owner_epoch", "TEXT"));
+  // Additive and NULL-tolerant. Grants issued before this column existed recorded
+  // no reliance record, and NULL says exactly that; back-filling one would invent
+  // a signal the server never relied on. See the column comment on grants.
+  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "grants", "trust_signal_json", "TEXT"));
   raw.exec(
     `CREATE INDEX IF NOT EXISTS idx_spine_events_run_terminal
       ON spine_events(run_id, event_type, event_seq DESC)

@@ -173,7 +173,11 @@ export function projectSourceIntrospectionWireContext(value: unknown): JsonObjec
     return { ...info };
   }
   const grant = parseCoreResolvedGrant(info.grant);
-  const { grant: _internalGrant, ...bindingAndLifecycle } = info;
+  const {
+    grant: _internalGrant,
+    grant_trust_signal: relianceRecord,
+    ...bindingAndLifecycle
+  } = info;
   return {
     ...bindingAndLifecycle,
     authorization_details: [buildGrantedAuthorizationDetail(grant)],
@@ -185,6 +189,12 @@ export function projectSourceIntrospectionWireContext(value: unknown): JsonObjec
       source: grant.source,
       source_declaration: grant.source_declaration,
       subject_id: info.subject_id,
+      // The trust signal the AS relied on to accept this client's identity
+      // (spec-core.md#trust-registry-queries). Present only when it relied on one:
+      // a relying party has to be able to read back which signal was relied on and
+      // when, because a status may be withdrawn after issuance. Absent means the
+      // AS relied on no assertion, which is a different claim from an empty one.
+      ...(relianceRecord ? { trust_signal: relianceRecord } : {}),
     },
   };
 }
