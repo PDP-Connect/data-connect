@@ -23,7 +23,12 @@ import {
   scheduleSemanticEmbeddingWarmup,
 } from "../server/search-semantic.ts";
 
-let nextPid = 40_000;
+// The executor samples a child's RSS from /proc/<pid>/status on Linux. Fake
+// children must use pids no real process can hold, or a live process that
+// happens to own the pid leaks its RSS into telemetry. Linux caps pids at
+// PID_MAX_LIMIT (2^22 on 64-bit), so pids above it never exist.
+const LINUX_PID_MAX_LIMIT = 4_194_304;
+let nextPid = LINUX_PID_MAX_LIMIT + 1;
 const SPAWN_PRIVACY_PATTERN = /secret input|do not expose this/;
 const STDIN_PRIVACY_PATTERN = /secret input|stdin failure/;
 const SUPERVISOR_CONTRACT_PATTERN = /PDPP_LOCAL_TRANSFORMER_SUPERVISOR_RESTART_CONTRACT=1/;
