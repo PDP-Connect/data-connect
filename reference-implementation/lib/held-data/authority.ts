@@ -35,7 +35,9 @@ export type EndingPath =
   | "narrowing"
   | "client_revocation"
   | "security_revocation"
-  | "decommission";
+  | "decommission"
+  /** The grant ended before the lifecycle journal saw it (flag turned on over existing data). */
+  | "unrecorded";
 
 const OWNER_PATHS: ReadonlySet<EndingPath> = new Set([
   "owner_withdrawal",
@@ -85,6 +87,7 @@ type Entry =
       at: number;
     }
   | { t: "erase"; id: string; grant_id: string; scope: ErasureScope; origin: string; at: number }
+  | { t: "hd_keep"; id: string; grant_id: string; at: number }
   | { t: "hd_delivered" | "hd_receipt"; id: string; grant_id: string; op: string; at: number }
   | {
       t: "hd_complete";
@@ -111,6 +114,8 @@ interface ErasureFacts {
 interface GrantFacts {
   grant: GrantEntry;
   end: EndEntry | null;
+  /** The owner chose keep after an ending that recorded no disposition. */
+  keptAt: number | null;
   erasures: ErasureFacts[];
 }
 
@@ -122,7 +127,7 @@ interface CredentialFacts {
   disabled: string | null;
 }
 
-/** The answer for one grant. Member names are the prototype's (no Core text yet). */
+/** The answer for one grant, before mapping to the Core wire (server/routes/held-data.ts). */
 export interface StatusAnswer {
   grant_id: string;
   /** Read state only. It is not the ordinary-use assessment. */
@@ -192,10 +197,22 @@ export class HeldDataAuthority {
   readonly #grants = new Map<string, GrantFacts>();
   readonly #creds = new Map<string, CredentialFacts>();
   readonly #ops = new Map<string, { grantId: string; index: number }>();
+  /** Digests disabled for lifecycle compromise, whether or not registered. */
+  readonly #disabled = new Map<string, string>();
+  #corrupt = false;
   #position = 0;
   #epoch: string | null = null;
   /** Set when the epoch marker names a history this journal does not hold. */
-  readonly lost: boolean;
+  readonly #lostHistory: boolean;
+
+  /**
+   * The authority cannot establish its terminal-event history: the journal
+   * the epoch marker names is gone, or a complete journal line is unreadable.
+   * Every answer and write then fails closed.
+   */
+  get lost(): boolean {
+    return this.#lostHistory || this.#corrupt;
+  }
 
   private constructor(o: HeldDataAuthorityOptions) {
     this.#o = o;
@@ -203,7 +220,7 @@ export class HeldDataAuthority {
     this.#refresh();
     const marker =
       o.epochMarkerPath && existsSync(o.epochMarkerPath) ? readFileSync(o.epochMarkerPath, "utf8").trim() : null;
-    this.lost = marker !== null && marker !== this.#epoch;
+    this.#lostHistory = marker !== null && marker !== this.#epoch;
     if (!(this.lost || this.#epoch || o.primaryHead)) {
       const id = `hdepoch_${randomUUID()}`;
       this.#append({ t: "hd_epoch", id, grant_id: "", at: o.now() });
@@ -274,14 +291,16 @@ export class HeldDataAuthority {
     this.#requireWritable();
     this.#refresh();
     const digest = credentialDigest(token);
-    const cred = this.#creds.get(digest);
-    if (!cred) {
+    if (this.#disabled.has(digest)) {
       return;
     }
+    // Recorded by digest even when the journal has not seen the credential
+    // yet (registration is lazy), so a later registration stays disabled.
+    const cred = this.#creds.get(digest);
     this.#append({
       t: "hd_cred_disable",
       id: randomUUID(),
-      grant_id: [...cred.grantIds][0] ?? "",
+      grant_id: cred ? ([...cred.grantIds][0] ?? "") : "",
       digest,
       reason,
       at: this.#o.now(),
@@ -345,8 +364,6 @@ export class HeldDataAuthority {
     grantId: string;
     path: EndingPath;
     disposition?: Disposition | null;
-    /** Narrowing: streams the replacement grant still covers; delete erases the rest. */
-    keptStreams?: readonly string[];
   }): { endedAt: number; erasure: { operationId: string; acceptedAt: number } | null } {
     this.#requireWritable();
     const disposition = input.disposition ?? null;
@@ -376,10 +393,33 @@ export class HeldDataAuthority {
     if (disposition !== "delete") {
       return { endedAt, erasure: null };
     }
-    const scope: ErasureScope = input.keptStreams
-      ? { streams: facts.grant.streams.filter((s) => !input.keptStreams?.includes(s)) }
-      : { streams: "all" };
-    return { endedAt, erasure: this.requestErasure({ grantId: input.grantId, scope, origin: input.path }) };
+    // One instruction covers all held data of the grant, narrowing included
+    // (Core). The client reads again under the new grant what it still needs.
+    return { endedAt, erasure: this.requestErasure({ grantId: input.grantId, origin: input.path }) };
+  }
+
+  /** Record that a grant had already ended in the main database before the journal saw it. */
+  markEndedBeforeTracking(grantId: string, endedAtMs: number): void {
+    this.#requireWritable();
+    this.#refresh();
+    const facts = this.#grants.get(grantId);
+    if (facts && !facts.end) {
+      this.#append({
+        t: "hd_end",
+        id: randomUUID(),
+        grant_id: grantId,
+        path: "unrecorded",
+        disposition: null,
+        owner_notice_required: true,
+        at: endedAtMs,
+      });
+    }
+  }
+
+  /** True if this token was disabled for lifecycle compromise. */
+  isDisabled(token: string): boolean {
+    this.#refresh();
+    return this.#disabled.has(credentialDigest(token));
   }
 
   /**
@@ -404,13 +444,20 @@ export class HeldDataAuthority {
       return { operationId: covering.entry.id, acceptedAt: covering.entry.at };
     }
     const id = `hdop_${randomUUID()}`;
-    this.#append({ t: "erase", id, grant_id: input.grantId, scope, origin: input.origin, at: this.#o.now() });
-    return { operationId: id, acceptedAt: this.#o.now() };
+    const at = this.#o.now();
+    this.#append({ t: "erase", id, grant_id: input.grantId, scope, origin: input.origin, at });
+    return { operationId: id, acceptedAt: at };
   }
 
   /** Owner disposition after a path that recorded none (security revocation), or a later erase. */
   elect(input: { grantId: string; disposition: Disposition }): { operationId: string; acceptedAt: number } | null {
     if (input.disposition === "keep") {
+      this.#requireWritable();
+      this.#refresh();
+      const facts = this.#grants.get(input.grantId);
+      if (facts && facts.keptAt === null && facts.erasures.length === 0) {
+        this.#append({ t: "hd_keep", id: randomUUID(), grant_id: input.grantId, at: this.#o.now() });
+      }
       return null;
     }
     return this.requestErasure({ grantId: input.grantId, origin: "owner_election" });
@@ -482,6 +529,9 @@ export class HeldDataAuthority {
     clientId?: string | null;
   }): ReadPrincipal | null {
     this.#refresh();
+    if (this.lost) {
+      throw new AuthorityUnavailableError("authority history cannot be established");
+    }
     if (!input.token) {
       if (!input.clientId) {
         return null;
@@ -649,7 +699,7 @@ export class HeldDataAuthority {
             path: facts.end.path,
             ended_at: facts.end.at,
             disposition: facts.end.disposition,
-            owner_notice_required: facts.end.owner_notice_required,
+            owner_notice_required: facts.end.owner_notice_required && facts.keptAt === null && facts.erasures.length === 0,
           }
         : null,
       erasures: facts.erasures.map((e) => ({
@@ -688,7 +738,15 @@ export class HeldDataAuthority {
   }
 
   #refresh(): void {
-    this.#reader.refresh((e, seq) => this.#apply(e, seq));
+    if (this.#corrupt) {
+      return;
+    }
+    try {
+      this.#reader.refresh((e, seq) => this.#apply(e, seq));
+    } catch {
+      // A terminal event may be in the unreadable line: fail closed.
+      this.#corrupt = true;
+    }
   }
 
   #apply(e: Entry, seq: number): void {
@@ -699,7 +757,7 @@ export class HeldDataAuthority {
         return;
       case "hd_grant":
         if (!this.#grants.has(e.grant_id)) {
-          this.#grants.set(e.grant_id, { grant: e, end: null, erasures: [] });
+          this.#grants.set(e.grant_id, { grant: e, end: null, keptAt: null, erasures: [] });
         }
         return;
       case "hd_cred": {
@@ -712,16 +770,26 @@ export class HeldDataAuthority {
           clientId: g.grant.client_id,
           kind: e.kind,
           jkt: e.jkt,
-          disabled: null,
+          disabled: this.#disabled.get(e.digest) ?? null,
         };
         c.grantIds.add(e.grant_id);
         this.#creds.set(e.digest, c);
         return;
       }
       case "hd_cred_disable": {
+        if (!this.#disabled.has(e.digest)) {
+          this.#disabled.set(e.digest, e.reason);
+        }
         const c = this.#creds.get(e.digest);
         if (c) {
           c.disabled ??= e.reason;
+        }
+        return;
+      }
+      case "hd_keep": {
+        const g = this.#grants.get(e.grant_id);
+        if (g) {
+          g.keptAt ??= e.at;
         }
         return;
       }

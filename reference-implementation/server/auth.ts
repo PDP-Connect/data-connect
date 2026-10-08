@@ -12305,10 +12305,10 @@ export async function readGrantForProcessing(
 export interface HeldDataEnding {
   path: EndingPath;
   disposition?: Disposition | null;
-  keptStreams?: string[];
 }
 
 interface HeldDataGrantRow extends DbRow {
+  status: string;
   client_id: string;
   subject_id: string;
   expires_at: string | null;
@@ -12326,7 +12326,7 @@ export async function ensureHeldDataGrant(grantId: string): Promise<boolean> {
   }
   const row = isPostgresStorageBackend()
     ? await pgOne<HeldDataGrantRow>(
-        "SELECT client_id, subject_id, expires_at, grant_json::text AS grant_json FROM grants WHERE grant_id = $1",
+        "SELECT status, client_id, subject_id, expires_at, grant_json::text AS grant_json FROM grants WHERE grant_id = $1",
         [grantId]
       )
     : getOne<HeldDataGrantRow>(referenceQueries.authGrantsGetForRevocation, [grantId]);
@@ -12355,6 +12355,10 @@ export async function ensureHeldDataGrant(grantId: string): Promise<boolean> {
     streams,
     expiresAtMs: row.expires_at ? Date.parse(row.expires_at) : null,
   });
+  if (row.status === "revoked") {
+    // Ended before the journal saw it; the main database holds no ending time.
+    rt.authority.markEndedBeforeTracking(grantId, rt.now());
+  }
   return true;
 }
 
@@ -12365,7 +12369,7 @@ export async function ensureHeldDataGrant(grantId: string): Promise<boolean> {
  */
 export async function prepareHeldDataStatusToken(token: string): Promise<void> {
   const rt = getHeldDataRuntime();
-  if (!(rt && token) || rt.authority.authenticateRead({ token })) {
+  if (!(rt && token) || rt.authority.lost || rt.authority.isDisabled(token) || rt.authority.authenticateRead({ token })) {
     return;
   }
   let grantIds: string[] = [];
@@ -12448,7 +12452,6 @@ export async function endHeldDataForGrant(grantId: string, ending: HeldDataEndin
     grantId,
     path: ending?.path ?? "security_revocation",
     disposition: ending?.disposition ?? null,
-    ...(ending?.keptStreams ? { keptStreams: ending.keptStreams } : {}),
   });
 }
 
@@ -12470,17 +12473,37 @@ export async function heldDataWriteClient(token: string, grantId: string): Promi
   if (info.active === true && info.pdpp_token_kind === "client" && info.grant_id === grantId && info.client_id) {
     return info.client_id;
   }
+  const packageId = (info as { grant_package_id?: unknown }).grant_package_id;
+  if (info.active === true && info.pdpp_token_kind === "mcp_package" && isNonEmptyString(packageId) && info.client_id) {
+    const members = await getGrantPackageStore().listAllMembers(packageId);
+    return members.some((m) => m.grant_id === grantId) ? info.client_id : null;
+  }
   const hash = hashOAuthRefreshToken(token);
   const refresh = isPostgresStorageBackend()
-    ? await pgOne<{ client_id: string; grant_id: string | null; package_id: string | null; status: string }>(
-        "SELECT client_id, grant_id, package_id, status FROM oauth_refresh_tokens WHERE refresh_token_hash = $1",
+    ? await pgOne<{
+        client_id: string;
+        grant_id: string | null;
+        package_id: string | null;
+        status: string;
+        expires_at: string | null;
+      }>(
+        "SELECT client_id, grant_id, package_id, status, expires_at FROM oauth_refresh_tokens WHERE refresh_token_hash = $1",
         [hash]
       )
-    : getOne<{ client_id: string; grant_id: string | null; package_id: string | null; status: string }>(
-        referenceQueries.authOauthRefreshTokensGetByToken,
-        [hash]
-      );
-  if (refresh?.status !== "active") {
+    : getOne<{
+        client_id: string;
+        grant_id: string | null;
+        package_id: string | null;
+        status: string;
+        expires_at: string | null;
+      }>(referenceQueries.authOauthRefreshTokensGetByToken, [hash]);
+  // Current means: the family's active member, unexpired, and for a grant the
+  // journal has not ended (a restored main database can resurrect the row).
+  if (
+    refresh?.status !== "active" ||
+    (refresh.expires_at && Date.parse(refresh.expires_at) <= Date.now()) ||
+    heldDataEndedOrLost(refresh.grant_id)
+  ) {
     return null;
   }
   if (refresh.grant_id === grantId) {
@@ -12511,6 +12534,11 @@ async function heldDataRefreshBlocked(refreshTokenHash: string): Promise<boolean
         referenceQueries.authOauthRefreshTokensGetByToken,
         [refreshTokenHash]
       );
+  if (isNonEmptyString(row?.package_id)) {
+    // A package token covers each child; refuse it only once every child has ended.
+    const members = await getGrantPackageStore().listAllMembers(row.package_id);
+    return members.length > 0 && members.every((m) => heldDataEndedOrLost(m.grant_id));
+  }
   return heldDataEndedOrLost(row?.grant_id);
 }
 

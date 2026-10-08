@@ -42,7 +42,6 @@ interface RouteRequest {
 interface LifecycleEnding {
   path: "owner_withdrawal" | "one_child_withdrawal" | "narrowing" | "client_revocation";
   disposition?: "keep" | "delete" | null;
-  keptStreams?: string[];
 }
 
 const OWNER_ENDINGS = new Set(["owner_withdrawal", "one_child_withdrawal", "narrowing"]);
@@ -55,10 +54,7 @@ function lifecycleEnding(body: unknown, tokenInfo: unknown): LifecycleEnding {
     return { path: "client_revocation", disposition };
   }
   const path = typeof b.pdpp_ending === "string" && OWNER_ENDINGS.has(b.pdpp_ending) ? b.pdpp_ending : "owner_withdrawal";
-  const kept = Array.isArray(b.pdpp_kept_streams)
-    ? b.pdpp_kept_streams.filter((x): x is string => typeof x === "string")
-    : undefined;
-  return { path: path as LifecycleEnding["path"], disposition, ...(kept ? { keptStreams: kept } : {}) };
+  return { path: path as LifecycleEnding["path"], disposition };
 }
 
 interface RouteResponse {

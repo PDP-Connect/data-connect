@@ -93,8 +93,8 @@ export function httpStatusTransport(o: {
         return { ok: false, reason: "unreachable" };
       }
       if (resp.status === 401) {
-        results.push({ grant_id: grantId, error: "invalid_grant" });
-        continue;
+        // Not an answer: counts as a failed attempt, retried at the retry delay.
+        return { ok: false, reason: "invalid_token" };
       }
       if (!resp.ok) {
         return { ok: false, reason: `http_${resp.status}` };

@@ -110,6 +110,8 @@ interface HeldGrant {
   firstAcquiredAt: number;
   freshnessOrigin: number | null;
   custodyOnly: boolean;
+  /** Known locally: the grant carries a processing permission, so it has no surviving use. */
+  processingPermission: boolean;
   lastPosition: number;
   erasures: Map<string, HeldErasure>;
   deletedAt: number | null;
@@ -160,14 +162,17 @@ export class HeldDataClient {
    * first-acquisition time; rereads and resyncs never move it. Record delivery
    * is not an assessment, so this never makes data usable.
    */
-  acquire(grantId: string): void {
+  acquire(grantId: string, o: { processingPermission?: boolean } = {}): void {
     const now = this.#now();
-    if (!this.#grants.has(grantId)) {
+    const prior = this.#grants.get(grantId);
+    // A read after disposal is a new acquisition with its own clocks.
+    if (!prior || prior.deletedAt !== null) {
       this.#grants.set(grantId, {
         grantId,
         firstAcquiredAt: now,
         freshnessOrigin: null,
         custodyOnly: false,
+        processingPermission: o.processingPermission ?? false,
         lastPosition: 0,
         erasures: new Map(),
         deletedAt: null,
@@ -192,7 +197,7 @@ export class HeldDataClient {
     if (g.needsReconcile) {
       return { ok: false, reason: "reconcile_required" };
     }
-    if (g.custodyOnly) {
+    if (g.custodyOnly || g.processingPermission) {
       return { ok: false, reason: "custody_only" };
     }
     if (g.freshnessOrigin === null) {
@@ -315,8 +320,8 @@ export class HeldDataClient {
         g.needsReconcile = false;
       }
     }
-    const now = this.#now();
-    this.#nextAttemptAt = now + (failed ? this.policy.retryMs : this.policy.cadenceMs);
+    // The interval runs between attempt starts, so a slow answer does not stretch it.
+    this.#nextAttemptAt = sentAt + (failed ? this.policy.retryMs : this.policy.cadenceMs);
     this.#disposeDue();
     this.#relayAll();
   }
@@ -345,7 +350,9 @@ export class HeldDataClient {
       this.#receiveErasure(g.grantId, e.operation_id, e.scope);
     }
     g.custodyOnly = res.ordinary_use === "custody_only";
-    if (res.ordinary_use === "permitted") {
+    // Custody-only is still a positive assessment: it refreshes the origin
+    // (and so the long-stop) even though it permits no use.
+    if (res.ordinary_use !== "stopped") {
       const origin =
         this.policy.freshnessOrigin === "request_sent" ? Math.min(res.assessed_at, sentAt) : res.assessed_at;
       // Never moved backwards by an older (delayed or replayed) answer.

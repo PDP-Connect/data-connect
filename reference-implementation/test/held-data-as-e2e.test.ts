@@ -12,7 +12,7 @@
  */
 import assert from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
-import { mkdtempSync } from "node:fs";
+import { appendFileSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -595,7 +595,7 @@ describe("held-data lifecycle over HTTP", () => {
     );
   });
 
-  it("Core wire: a public client writes with its current refresh token; a superseded one and a future reported_at are refused; the owner sees a deletion date only after receipt", async () => {
+  it("Core wire: after an owner erase, the public client's superseded and current refresh tokens both fail to write (revocation killed the family); only a recovered credential can report receipt, and only then is a deletion date shown", async () => {
     await withServer(
       false,
       async (h) => {
@@ -695,6 +695,81 @@ describe("held-data lifecycle over HTTP", () => {
         assert.equal(r.status, 400, JSON.stringify(r.body));
       },
       heldDataOpts()
+    );
+  });
+
+  it("review fix: a public client's current refresh token authenticates pdpp_disposition=delete; an expired one and one for a journal-ended grant do not", async () => {
+    await withServer(
+      false,
+      async (h) => {
+        const clientId = await registerPublicClient(h);
+        const live = await authCodeGrant(h, clientId);
+        const ok = await lifecycle(h, { grant_id: live.grantId, pdpp_disposition: "delete", token: live.refreshToken });
+        assert.equal(ok.body.grants[0]?.held_data, "erase", JSON.stringify(ok.body));
+        assert.equal(await rsRead(h, live.accessToken), 403);
+
+        const expired = await authCodeGrant(h, clientId);
+        getDb()
+          .prepare("UPDATE oauth_refresh_tokens SET expires_at = ? WHERE grant_id = ?")
+          .run("2000-01-01T00:00:00.000Z", expired.grantId);
+        const e = await lifecycle(h, { grant_id: expired.grantId, pdpp_disposition: "delete", token: expired.refreshToken });
+        assert.equal(e.body.grants[0]?.error, "current_authentication_required");
+        assert.equal(getHeldDataRuntime()?.authority.hasEnded(expired.grantId), false, "nothing was revoked");
+
+        const restored = await authCodeGrant(h, clientId);
+        await revoke(h, h.ownerToken, restored.grantId, { pdpp_disposition: "keep" });
+        getDb()
+          .prepare("UPDATE oauth_refresh_tokens SET status = 'active', revoked_at = NULL WHERE grant_id = ?")
+          .run(restored.grantId);
+        const r = await lifecycle(h, { grant_id: restored.grantId, pdpp_disposition: "delete", token: restored.refreshToken });
+        assert.equal(r.body.grants[0]?.error, "current_authentication_required");
+      },
+      heldDataOpts()
+    );
+  });
+
+  it("review fix: narrowing with delete reaches the client as `erase` (whole old copy, Core)", async () => {
+    await withServer(
+      false,
+      async (h) => {
+        const g = await ordinaryGrant(h);
+        const n = await revoke(h, h.ownerToken, g.grantId, { pdpp_disposition: "delete", pdpp_ending: "narrowing" });
+        assert.equal(n.status, 200, JSON.stringify(n.body));
+        const s = await status(h, g.token, g.grantId);
+        assert.equal(s.body.grants[0]?.held_data, "erase");
+      },
+      heldDataOpts()
+    );
+  });
+
+  it("review fix: a grant revoked before the journal saw it reads `revoked`, not `active`", async () => {
+    await withServer(
+      false,
+      async (h) => {
+        const g = await ordinaryGrant(h);
+        getDb().prepare("UPDATE grants SET status = 'revoked' WHERE grant_id = ?").run(g.grantId);
+        const s = await status(h, g.token, g.grantId);
+        assert.equal(s.body.grants[0]?.read_state, "revoked", JSON.stringify(s.body));
+        assert.equal(s.body.grants[0]?.held_data, "permitted");
+      },
+      heldDataOpts()
+    );
+  });
+
+  it("review fix: an unreadable journal line makes the operation answer 503 temporarily_unavailable with Retry-After", async () => {
+    const opts = heldDataOpts();
+    await withServer(
+      false,
+      async (h) => {
+        const g = await ordinaryGrant(h);
+        assert.equal((await status(h, g.token, g.grantId)).status, 200);
+        appendFileSync(join(opts.experimentalHeldDataLifecycle.journalDir, "authority.journal"), "{torn\n");
+        const resp = await fetch(`${h.asUrl}/oauth/grant-lifecycle`, form({ grant_id: g.grantId, token: g.token }));
+        assert.equal(resp.status, 503);
+        assert.equal(resp.headers.get("retry-after"), "60");
+        assert.equal(await rsRead(h, g.token), 403, "reads fail closed too");
+      },
+      opts
     );
   });
 });

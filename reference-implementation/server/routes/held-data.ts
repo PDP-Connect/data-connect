@@ -2,26 +2,29 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * HTTP adapter for the experimental held-data lifecycle prototype
- * (integration-v2 K2, K3, K4). Every handler answers 404 while no runtime is
- * installed.
+ * HTTP adapter for the experimental held-data lifecycle prototype: the Core
+ * draft's grant lifecycle operation (`rev/held-data` 699e8b71bd) plus owner
+ * routes. Every handler answers 404 while no runtime is installed.
  *
- *   POST /oauth/grant-lifecycle            status read (K3)
- *   POST /oauth/grant-lifecycle/report     receipt / completion (client write)
+ *   POST /oauth/grant-lifecycle            queries and writes (Core)
  *   POST /oauth/grant-lifecycle/recover    replace lifecycle authentication
  *   GET  /v1/owner/grants/:grantId/lifecycle             owner record
  *   POST /v1/owner/grants/:grantId/lifecycle/erase       later erase / election
  *   POST /v1/owner/grants/:grantId/lifecycle/recovery-code
  *
- * Status read authentication: `Authorization: Bearer|DPoP <token>` with any
+ * Queries: the form parameter `token` (or an `Authorization` header) with any
  * access or refresh token the AS issued for the grant, active or not (the AS
  * keeps digests), plus a DPoP proof when the token was bound; or
  * `client_assertion` for a confidential client, which may then batch.
- * Writes need current authentication: an active access token for the grant,
- * or a client assertion. A status-only credential never authenticates a write.
+ * Writes (`report`, `pdpp_disposition=delete`) need current authentication:
+ * an active access or package token covering the grant, the current
+ * unexpired refresh token, a recovered lifecycle credential (Core's recovery
+ * token), or a client assertion.
  *
- * Member names are the prototype's own; Core text did not exist yet. The name
- * is not `pdpp_grant_status`, which already means read activity (K7).
+ * Recovery differs from Core: the owner hands the client a one-time code
+ * instead of approving a `grant-lifecycle` authorization request. Answers
+ * carry `as_position`, a prototype addition (the journal position the answer
+ * is ordered after).
  *
  * PROTOTYPE: not for merge until the Core held-data text is final.
  */
@@ -216,14 +219,14 @@ export function mountHeldData(app: AppLike, ctx: MountHeldDataContext): void {
       return res.status(401).json({ error: "invalid_client" });
     }
     const token = str(body.token) ?? tokenFrom(req)?.token ?? null;
-    if (token) {
-      await ctx.prepareStatusToken(token);
-    }
-    const principal = rt.authority.authenticateRead({ token, dpopJkt: dpopJkt(req, rt, url), clientId });
-    if (!principal) {
-      return res.status(401).json({ error: token ? "invalid_token" : "invalid_client" });
-    }
     try {
+      if (token) {
+        await ctx.prepareStatusToken(token);
+      }
+      const principal = rt.authority.authenticateRead({ token, dpopJkt: dpopJkt(req, rt, url), clientId });
+      if (!principal) {
+        return res.status(401).json({ error: token ? "invalid_token" : "invalid_client" });
+      }
       if (!isWrite) {
         const results = rt.authority.status(principal, grantIds);
         return res.status(200).json({ grants: results.map((r) => statusWire(r, rt.stopUseBoundMs)) });

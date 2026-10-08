@@ -34,7 +34,10 @@ export function appendJournalEntry(path: string, entry: JournalEntryBase): void 
   }
 }
 
-/** Incremental reader. `refresh` calls `apply` once per new entry, in journal order. */
+/**
+ * Incremental reader. `refresh` calls `apply` once per new entry, in journal
+ * order. It throws on a complete line that does not parse.
+ */
 export class JournalReader<E extends JournalEntryBase = JournalEntryBase> {
   readonly #path: string;
   #offset = 0;
@@ -70,7 +73,9 @@ export class JournalReader<E extends JournalEntryBase = JournalEntryBase> {
         try {
           e = JSON.parse(line) as E;
         } catch {
-          continue;
+          // A complete line that does not parse may hold a terminal event.
+          // Skipping it would fail open; the caller decides how to fail closed.
+          throw new Error(`authority journal ${this.#path}: unreadable entry after sequence ${this.#seq}`);
         }
         this.#seq += 1;
         apply(e, this.#seq);
