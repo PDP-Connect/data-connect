@@ -1287,6 +1287,10 @@ export function buildClientEventSubscriptionsCapability({
 // `additionalProperties: false` expectations and keeps the published
 // document free of `null` / `undefined` keys.
 export interface AuthorizationServerMetadataInput {
+  /** Experimental AI-training prototype; emitted only when permissions are supported. */
+  processingLeaseEndpoint?: string | null;
+  processingLeaseJwksUri?: string | null;
+  processingPermissionsSupported?: readonly string[] | null;
   agentConnectEndpoint?: string | null;
   authorizationDetailsTypesSupported?: readonly string[] | null;
   authorizationEndpoint?: string | null;
@@ -1326,6 +1330,9 @@ export interface AuthorizationServerMetadata {
   pdpp_authorization_details_types_supported?: readonly string[];
   pdpp_device_authorization_profiles_supported?: readonly Record<string, unknown>[];
   pdpp_pre_registered_public_clients?: readonly AuthorizationServerPublicClient[];
+  pdpp_processing_lease_endpoint?: string;
+  pdpp_processing_lease_jwks_uri?: string;
+  pdpp_processing_permissions_supported?: readonly string[];
   pdpp_provider_connect_capabilities: Record<string, unknown>;
   pdpp_registration_modes_supported?: readonly string[];
   pushed_authorization_request_endpoint?: string;
@@ -1356,6 +1363,9 @@ export function buildAuthorizationServerMetadata({
   agentConnectEndpoint,
   grantTypesSupported,
   responseTypesSupported,
+  processingPermissionsSupported,
+  processingLeaseEndpoint,
+  processingLeaseJwksUri,
 }: AuthorizationServerMetadataInput): AuthorizationServerMetadata {
   const metadata: AuthorizationServerMetadata = {
     introspection_endpoint: introspectionEndpoint,
@@ -1415,6 +1425,11 @@ export function buildAuthorizationServerMetadata({
   }
   if (grantTypesSupported?.length) {
     metadata.grant_types_supported = grantTypesSupported;
+  }
+  if (processingPermissionsSupported?.length && processingLeaseEndpoint && processingLeaseJwksUri) {
+    metadata.pdpp_processing_permissions_supported = processingPermissionsSupported;
+    metadata.pdpp_processing_lease_endpoint = processingLeaseEndpoint;
+    metadata.pdpp_processing_lease_jwks_uri = processingLeaseJwksUri;
   }
 
   return metadata;

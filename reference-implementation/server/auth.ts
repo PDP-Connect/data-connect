@@ -91,6 +91,11 @@ import {
   resolveOwnerConnectorInstanceNamespace,
 } from "./stores/connector-instance-store.ts";
 import {
+  extractProcessingPermissions,
+  getTrainingLeaseRuntime,
+  ProcessingPermissionsError,
+} from "./training-lease/runtime.ts";
+import {
   buildDomainControlTrustSignal,
   parseTrustSignal,
   serializeTrustSignal,
@@ -166,6 +171,8 @@ interface RawStreamSelection {
 interface GrantSelection {
   access_mode: string;
   client_claims?: unknown | undefined;
+  /** Experimental AI-training prototype; present only when the runtime is installed. */
+  processing_permissions?: string[] | undefined;
   purpose_code: string;
   purpose_description?: string | undefined;
   retention?: unknown | undefined;
@@ -960,6 +967,7 @@ const SUPPORTED_PENDING_CLIENT_FIELDS = new Set(["client_display", "client_id", 
 const SUPPORTED_PENDING_SELECTION_FIELDS = new Set([
   "access_mode",
   "client_claims",
+  "processing_permissions",
   "purpose_code",
   "purpose_description",
   "retention",
@@ -1815,15 +1823,26 @@ async function resolveAuthorizationDetailBindings(
 async function normalizeAuthorizationDetail(
   rawDetail: unknown,
   index: number,
-  opts: InitiateGrantOptions = {}
+  opts: InitiateGrantOptions = {},
+  allowProcessingPermissions = false
 ): Promise<{ selection: GrantSelection; source_binding: SourceBinding; storage_binding: StorageBinding }> {
-  const detail = requireAuthorizationDetailInput(rawDetail, index);
+  // Experimental AI-training prototype. With no runtime installed this is
+  // skipped and the closed contract schema rejects the member, as before.
+  let detailInput = rawDetail;
+  let processingPermissions: string[] = [];
+  if (getTrainingLeaseRuntime()) {
+    ({ detail: detailInput, permissions: processingPermissions } = extractProcessingPermissions(rawDetail, {
+      allow: allowProcessingPermissions,
+    }));
+  }
+  const detail = requireAuthorizationDetailInput(detailInput, index);
   const { sourceBinding, storageBinding } = await resolveAuthorizationDetailBindings(detail, index, opts);
 
   return {
     selection: {
       access_mode: detail.access_mode,
       client_claims: detail.client_claims || undefined,
+      ...(processingPermissions.length > 0 ? { processing_permissions: processingPermissions } : {}),
       purpose_code: detail.purpose_code as string,
       purpose_description: isNonEmptyString(detail.purpose_description) ? detail.purpose_description : undefined,
       retention: detail.retention || undefined,
@@ -1853,7 +1872,7 @@ async function normalizePendingGrantRequest(
   if (input.parent_package_id !== undefined && input.parent_package_id !== null) {
     invalidGrantInitiationRequest("parent_package_id is only supported on the staged batch path");
   }
-  const entry = await normalizeAuthorizationDetail(envelope.authorization_details[0], 0, opts);
+  const entry = await normalizeAuthorizationDetail(envelope.authorization_details[0], 0, opts, true);
   if (
     opts.acceptedProviderNativeRevision &&
     entry.source_binding.id !== opts.acceptedProviderNativeRevision.source.id
@@ -3695,6 +3714,11 @@ function buildApprovalReviewArtifact(input: {
     ai_training_consented: input.aiTrainingConsented,
     client: input.client,
     client_claims: normalizeApprovalReviewClientClaims(selection.client_claims),
+    // Experimental AI-training prototype: the permission set is NOT bound into
+    // this artifact. The contract's reviewConsent schema is closed, so binding
+    // it (as Core requires) needs a reference-contract change. The set stays
+    // in the immutable pending request, and review requires an explicit
+    // selection of it.
     expires_at: input.expiresAt,
     purpose_code: selection.purpose_code,
     purpose_description: selection.purpose_description ?? null,
@@ -4086,6 +4110,32 @@ function coerceAiTrainingConsent(value: unknown): boolean | null {
   const err = bindingError("invalid_request", "ai_training_consented must be a boolean");
   err.param = "ai_training_consented";
   throw err;
+}
+
+/**
+ * Experimental AI-training prototype (Core: processing-permission consent; AI
+ * training consent). A detail carrying a permission needs the owner's distinct
+ * affirmative selection, and a training grant gets a reviewed `expires_at`.
+ * Returns that expiry, or null when the selection carries no permission.
+ */
+function reviewedProcessingPermissionExpiry(selection: GrantSelection, approved: unknown): string | null {
+  const permissions = selection.processing_permissions ?? [];
+  if (permissions.length === 0) {
+    return null;
+  }
+  const runtime = getTrainingLeaseRuntime();
+  if (!runtime) {
+    throw new ProcessingPermissionsError("processing_permissions is not supported by this authorization server");
+  }
+  if (!(approved === true || approved === "true" || approved === "1" || approved === "on")) {
+    const err = bindingError(
+      "invalid_request",
+      "processing_permissions_approved must be an affirmative selection of the requested processing permissions"
+    );
+    err.param = "processing_permissions_approved";
+    throw err;
+  }
+  return new Date(runtime.now() + runtime.trainingGrantLifetimeMs).toISOString();
 }
 
 function requireReviewedAiTrainingConsent(selection: GrantSelection, aiTrainingConsented: boolean | null): void {
@@ -6485,6 +6535,8 @@ function narrowResolvedSelectionForSource(
 
 interface PendingConsentDisplayOptions extends Record<string, unknown> {
   ai_training_consented?: unknown;
+  /** Experimental AI-training prototype: the owner's distinct affirmative selection of the permission. */
+  processing_permissions_approved?: unknown;
   approvedSourceIndexes?: number[] | null;
   confirmedApproveAll?: boolean;
   finalizeReview?: boolean;
@@ -7441,13 +7493,15 @@ export async function getPendingConsent(
     if (opts.finalizeReview && opts.subjectId) {
       const aiTrainingConsented = coerceAiTrainingConsent(opts.ai_training_consented);
       requireReviewedAiTrainingConsent(request.selection, aiTrainingConsented);
+      const trainingExpiresAt = reviewedProcessingPermissionExpiry(request.selection, opts.processing_permissions_approved);
       const artifact = buildApprovalReviewArtifact({
         aiTrainingConsented,
         client: request.client,
         expiresAt:
-          request.selection.access_mode === "single_use"
+          trainingExpiresAt ??
+          (request.selection.access_mode === "single_use"
             ? new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
-            : null,
+            : null),
         request,
         resolvedStreams: resolvedStreams ?? [],
         subjectId: opts.subjectId,
@@ -7571,6 +7625,12 @@ export async function approveGrant(
   const grantId = generateId("grt");
   const issuedAt = nowIso();
   const { expiresAt } = reviewed;
+  const processingPermissions = selection.processing_permissions ?? [];
+  const trainingRuntime = processingPermissions.length > 0 ? getTrainingLeaseRuntime() : null;
+  if (processingPermissions.length > 0 && !(trainingRuntime && expiresAt)) {
+    // Never issue an ordinary grant in place of a processing-permission detail.
+    throw new ProcessingPermissionsError("processing_permissions cannot be issued by this authorization server");
+  }
 
   const persistedStorageBinding = normalizeStorageBinding(storageBinding);
   const approvalArtifact = buildApprovalReviewArtifact({
@@ -7604,6 +7664,18 @@ export async function approveGrant(
     ) as unknown as import("./core-source-authorization.ts").RetainedCoreConsentSnapshot,
     subjectId,
   }) as GrantEnvelope;
+
+  if (trainingRuntime && expiresAt) {
+    // The authority record (outside the main database) is created before the
+    // grant commits, so no training grant exists without one. A grant commit
+    // that fails afterwards leaves an orphan record that no grant can use.
+    trainingRuntime.store.createAuthority({
+      clientId: registeredClient.client_id,
+      grantId,
+      subjectId,
+      trainingExpiresAtMs: Date.parse(expiresAt),
+    });
+  }
 
   const token = await persistApprovedSingleGrantAtomically({
     accessMode: selection.access_mode,
@@ -12118,6 +12190,11 @@ export async function revokeGrant(
     : getOne<GrantRevocationRow>(referenceQueries.authGrantsGetForRevocation, [grantId]);
 
   const parsedGrant = row0 ? await requireRevocablePersistedGrant(row0, grantId, context) : null;
+  // Experimental AI-training prototype (lease note L4): end processing
+  // authority BEFORE read access, so a failure between the two never leaves a
+  // revoked grant still renewing leases. A failure here does not block the
+  // revocation; the owner sees "pending" until a later status read completes it.
+  await endProcessingAuthorityForGrant(grantId, "grant_revoked");
   await revokeGrantStorage(grantId);
   if (row0 && parsedGrant) {
     await emitGrantRevoked(row0, parsedGrant, grantId, context);
@@ -12127,4 +12204,35 @@ export async function revokeGrant(
     request_id: context.request_id || null,
     trace_id: row0?.trace_id || null,
   };
+}
+
+// ─── Experimental AI-training prototype hooks ───────────────────────────────
+
+/** End processing authority for a grant that is ending. Never throws. */
+export async function endProcessingAuthorityForGrant(grantId: string, reason: string): Promise<void> {
+  const runtime = getTrainingLeaseRuntime();
+  if (!runtime) {
+    return;
+  }
+  try {
+    runtime.store.withdraw({ grantId, reason });
+  } catch {
+    // Reconciled on the next owner status read or lease request.
+  }
+}
+
+/** Read-side grant facts the lease endpoint needs. */
+export async function readGrantForProcessing(
+  grantId: string
+): Promise<{ client_id: string; expires_at: string | null; status: string; subject_id: string } | null> {
+  const row = isPostgresStorageBackend()
+    ? await pgOne<{ client_id: string; expires_at: string | null; status: string; subject_id: string }>(
+        "SELECT client_id, expires_at, status, subject_id FROM grants WHERE grant_id = $1",
+        [grantId]
+      )
+    : getOne<{ client_id: string; expires_at: string | null; status: string; subject_id: string }>(
+        referenceQueries.authGrantsGetForRevocation,
+        [grantId]
+      );
+  return row ?? null;
 }

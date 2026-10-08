@@ -115,6 +115,8 @@ import {
   consumeConsentExchangeCode,
   countGrantPackagesForOwner,
   authenticateOAuthTokenClient,
+  endProcessingAuthorityForGrant,
+  readGrantForProcessing,
   createCimdDocument,
   createConsentExchangeCode,
   createHostedMcpGrantPackage,
@@ -151,6 +153,14 @@ import {
   stageOAuthAuthorizationCodeRequest,
   updateRegisteredClientName,
 } from "./auth.ts";
+import { mountTrainingLease } from "./routes/training-lease.ts";
+import {
+  createTrainingLeaseRuntime,
+  getTrainingLeaseRuntime,
+  installTrainingLeaseRuntime,
+  type TrainingLeaseRuntimeOptions,
+  trainingLeaseOptionsFromEnv,
+} from "./training-lease/runtime.ts";
 import { autoEnrollEligibleSchedules } from "./auto-enroll-eligible-schedules.ts";
 import type { CimdFetchDependencies } from "./cimd.ts";
 import { acquireDefaultDeliveryWorker, getDefaultDeliveryWorker } from "./client-event-delivery-worker.ts";
@@ -820,6 +830,12 @@ interface ServerOpts {
   cancelScheduledRun?: ((runId: string) => unknown) | null;
   cimdEnabled?: boolean;
   cimdFetchDependencies?: CimdFetchDependencies;
+  /**
+   * PROTOTYPE, off by default: the AI-training processing permission and its
+   * lease endpoint (draft AI Training Profile). Env equivalent:
+   * PDPP_EXPERIMENTAL_AI_TRAINING_LEASES=1 with PDPP_TRAINING_AUTHORITY_DIR.
+   */
+  experimentalAiTrainingLeases?: (Omit<TrainingLeaseRuntimeOptions, "issuer"> & { issuer?: string }) | null;
   clientLogoFetchDependencies?: import("./client-logo-cache.ts").FetchClientLogoOptions;
   clientEventSubscriptionsCapability?: unknown;
   clientEventSubscriptionsSupported?: boolean;
@@ -5308,6 +5324,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
       (opts.ignoreAmbientPublicUrls ? null : process.env.AS_ISSUER || process.env.AS_PUBLIC_URL) ||
       null,
     resolvePreRegisteredPublicClients: () => resolvePreRegisteredPublicClients(opts) as unknown[],
+    resolveProcessingPermissionsSupported: () => getTrainingLeaseRuntime()?.supportedPermissions ?? [],
     resolvePublicUrl: resolvePublicUrl as unknown as Parameters<
       typeof mountAsAuthorizationServerMetadata
     >[1]["resolvePublicUrl"],
@@ -7231,6 +7248,22 @@ export function buildAsApp(opts: ServerOpts = {}) {
     setReferenceTraceId,
   };
   mountAsGrantRevoke(app, asGrantRevokeContext as unknown as Parameters<typeof mountAsGrantRevoke>[1]);
+
+  // PROTOTYPE, off by default: AI-training lease routes. Every handler answers
+  // 404 while no training-lease runtime is installed.
+  mountTrainingLease(app as unknown as Parameters<typeof mountTrainingLease>[0], {
+    authenticateOAuthTokenClient: (args) =>
+      authenticateOAuthTokenClient({
+        ...args,
+        ...(opts.cimdFetchDependencies ? { cimdFetchDependencies: opts.cimdFetchDependencies } : {}),
+      }),
+    endProcessingAuthorityForGrant,
+    introspect: introspect as unknown as Parameters<typeof mountTrainingLease>[1]["introspect"],
+    readGrantForProcessing,
+    resolveBaseUrl: (req: unknown) =>
+      resolvePublicUrl(req as Parameters<typeof resolvePublicUrl>[0], explicitAsBaseUrl),
+    runtime: getTrainingLeaseRuntime,
+  });
 
   // Client event subscriptions are mounted on the RESOURCE SERVER under
   // `/v1/event-subscriptions` (see buildRsApp). They are the same kind of
@@ -9791,6 +9824,25 @@ export async function startServer(opts: ServerOpts = {}) {
   asServer.once("close", () => {
     releaseDeliveryWorkerLease(0);
   });
+  // PROTOTYPE, off by default: install the AI-training lease runtime once the
+  // AS issuer is known (ephemeral test ports resolve only after listen).
+  const trainingLeaseOptions =
+    opts.experimentalAiTrainingLeases === undefined
+      ? trainingLeaseOptionsFromEnv(process.env, configuredAsIssuer ?? `http://localhost:${asPort}`)
+      : opts.experimentalAiTrainingLeases;
+  if (trainingLeaseOptions) {
+    const trainingLeaseRuntime = createTrainingLeaseRuntime({
+      ...trainingLeaseOptions,
+      issuer: trainingLeaseOptions.issuer ?? configuredAsIssuer ?? `http://localhost:${asPort}`,
+    });
+    installTrainingLeaseRuntime(trainingLeaseRuntime);
+    asServer.once("close", () => {
+      if (getTrainingLeaseRuntime() === trainingLeaseRuntime) {
+        installTrainingLeaseRuntime(null);
+      }
+      trainingLeaseRuntime.close();
+    });
+  }
   rsServer.once("close", () => {
     releaseDeliveryWorkerLease(1);
   });
