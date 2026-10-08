@@ -129,6 +129,48 @@ test("boundConnectorErrorMessage keeps the cause after Playwright's box border",
   assert.ok((result?.length ?? Infinity) <= 500);
 });
 
+// An error code built from lowercase words is not a machine-generated secret:
+// see `keepSnakeCaseWords` in runtime/stderr-redact.ts for the rule and why it
+// is safe. Without it, `LONG_OPAQUE_RE` turned every long code into
+// `[REDACTED]` and the owner lost the cause of the failure.
+test("boundConnectorErrorMessage keeps an undeclared lowercase snake_case error code", async () => {
+  const { boundConnectorErrorMessage } = await import("../runtime/connector-gap-bounding.ts");
+  const message = "chase_unexpected: additional_browser_page_forbidden: use the owned run page";
+  assert.equal(boundConnectorErrorMessage(message), message);
+  assert.equal(
+    boundConnectorErrorMessage("heb_session_failed: login_form_never_appeared"),
+    "heb_session_failed: login_form_never_appeared"
+  );
+});
+
+test("boundConnectorErrorMessage still redacts machine-generated secrets", async () => {
+  const { boundConnectorErrorMessage } = await import("../runtime/connector-gap-bounding.ts");
+  // Assembled at runtime so secret scanners do not flag the fixtures.
+  const secrets = [
+    ["sk", "live", "51HxYzAbCdEfGhIjKlMnOp"].join("_"),
+    ["ghp", "16CharactersXXXXXXXXXXXXXXXXXXXX"].join("_"),
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+    "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6",
+    "0f4c2a9e-7b1d-4e3a-9c8b-2d6f1a0e5b7c",
+    // Lowercase, but one run with no underscore: not a word list.
+    "qwertyuiopasdfghjklzxcvbnm",
+  ];
+  for (const secret of secrets) {
+    const result = boundConnectorErrorMessage(`request failed: ${secret}`) ?? "";
+    assert.ok(!result.includes(secret), `secret survived: ${result}`);
+  }
+  assert.equal(boundConnectorErrorMessage("password=hunter2 rejected"), "password=[REDACTED] rejected");
+});
+
+test("boundConnectorErrorMessage redacts a run credential by identity, even in lowercase snake_case", async () => {
+  const { boundConnectorErrorMessage } = await import("../runtime/connector-gap-bounding.ts");
+  const passphrase = "correct_horse_battery_staple";
+  assert.equal(
+    boundConnectorErrorMessage(`login failed for ${passphrase}`, undefined, [passphrase]),
+    "login failed for [REDACTED]"
+  );
+});
+
 // ─── 3. Spawn proof — runtime persists the diagnostic on connector exit ──────
 
 const TEST_MANIFEST = {

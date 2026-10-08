@@ -2871,6 +2871,22 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
     staticSecretLaunchEnv,
     streamingRegistrationEnv,
   } = launchConfig;
+  // These are the credential values this run resolved and injected into the
+  // connector child's environment, passed so redaction can match them by
+  // IDENTITY. A connector that prints a password into an unlabelled stderr
+  // line ("Login failed for <password>") or into its DONE error message
+  // matches no shape rule and otherwise reaches a durable spine event
+  // verbatim — proven against the deployed head, with a real owner
+  // credential. See stderr-redact.ts.
+  //
+  // The set is every live secret THIS run handed the child, not just the
+  // connection's own credential: `ownerToken` and the streaming registration
+  // token are bearer credentials in the same environment, so a child that
+  // echoes one leaks it the same way. Scoping to what was actually injected
+  // keeps this a fact about the run rather than a guess about the connector.
+  const runKnownSecrets = [...Object.values(staticSecretLaunchEnv), ownerToken, streamingRegistrationToken].filter(
+    (value): value is string => typeof value === "string" && value.length > 0
+  );
 
   // `detached: true` puts the connector child into its OWN process group
   // (POSIX setsid), with the child's PID as the group leader. This is the
@@ -3611,7 +3627,8 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       // declaration generically and never learns a connector name.
       data.connector_error_message = boundConnectorErrorMessage(
         connectorError.message,
-        declaredReasonTokensFor(manifest)
+        declaredReasonTokensFor(manifest),
+        runKnownSecrets
       );
     }
     // Unlike `message`, `code` is copied without redaction — it is a typed,
@@ -6610,22 +6627,8 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       // not a lower-trust sink than the retained evidence, so it gets the
       // same treatment.
       //
-      // These are the credential values this run resolved and injected into
-      // the connector child's environment, passed so redaction can match them
-      // by IDENTITY. A connector that prints a password into an unlabelled
-      // stderr line ("Login failed for <password>") matches no shape rule and
-      // otherwise reaches a durable spine event verbatim — proven against the
-      // deployed head, with a real owner credential. See stderr-redact.ts.
-      //
-      // The set is every live secret THIS run handed the child, not just the
-      // connection's own credential: `ownerToken` and the streaming
-      // registration token are bearer credentials in the same environment, so
-      // a child that echoes one into stderr leaks it the same way. Scoping to
-      // what was actually injected keeps this a fact about the run rather than
-      // a guess about the connector.
-      const runKnownSecrets = [...Object.values(staticSecretLaunchEnv), ownerToken, streamingRegistrationToken].filter(
-        (value): value is string => typeof value === "string" && value.length > 0
-      );
+      // `runKnownSecrets` (declared after the launch config) lets redaction
+      // match this run's credentials by IDENTITY.
       if (stderrTailRaw.text) {
         onProgress({
           text: redactStderrTail(stderrTailRaw.text, { knownSecrets: runKnownSecrets }).text,
