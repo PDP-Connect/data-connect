@@ -6469,6 +6469,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
     markConnectorSummaryEvidenceDirty,
     onScheduleMutation: opts.onScheduleMutation,
     pdppError,
+    projectStorageDisplayName,
     reconcileDirtyConnectorSummaryEvidence,
     requireOwnerSession: ownerAuth.requireOwnerSession,
     resolveOwnerConnectorNamespace,

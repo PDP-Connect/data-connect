@@ -164,6 +164,7 @@ function buildHarness({
     pdppError(_res, status, code, _message, param) {
       calls.pdppError.push({ code, param, status });
     },
+    projectStorageDisplayName: () => unusedByThisRoute("projectStorageDisplayName"),
     requireOwnerSession: (_req: unknown, _res: unknown, next: unknown) =>
       typeof next === "function" ? next() : undefined,
     resolveOwnerConnectorNamespace: () => unusedByThisRoute("resolveOwnerConnectorNamespace"),

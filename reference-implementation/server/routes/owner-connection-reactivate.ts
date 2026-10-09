@@ -17,6 +17,10 @@
 // + the resolver's active-only default) prevents any silent resurrection by
 // system processes, so reactivation remains an explicit owner act.
 //
+// These routes and the owner-session
+// `POST /_ref/connections/:connectorInstanceId/reactivate` route
+// (`ref-connectors.ts`) mount ONE handler, `buildConnectionReactivateHandler`.
+//
 // Key design choices that mirror `owner-connection-revoke.ts`:
 //   - Same auth adapter: `requireToken` + `requireOwner` (bearer owner-kind).
 //   - Same resolver (`resolveOwnerConnectorNamespace`) but with
@@ -42,11 +46,14 @@
 // Spec: openspec/changes/add-mcp-cimd-client-identity/tasks.md
 //       (reactivate as clean inverse of revoke)
 
+import { resolveOwnerActor, startOwnerAuditTrace } from "./_owner-actor.ts";
 import {
-  auditActorKind,
-  buildAuditTrace,
-  httpStatusForOperationError,
+  type ConnectionControlBinding,
+  type ConnectionControlRejection,
+  emitOwnerConnectionAudit,
+  ownerBearerConnectionBinding,
   readConnectionTarget,
+  requireConnectorAddressing,
 } from "./_owner-connection-helpers.ts";
 import type {
   ActiveBinding,
@@ -61,6 +68,7 @@ import type {
 
 // Express-shaped surface, structurally typed (mirrors owner-connection-revoke.ts).
 interface RouteRequest {
+  readonly ownerSession?: { readonly sub?: string | null } | null;
   readonly params: Readonly<Record<string, string>>;
   readonly query: Readonly<Record<string, unknown>>;
   readonly tokenInfo?: {
@@ -155,108 +163,25 @@ export interface MountOwnerConnectionReactivateContext {
   ) => Promise<ReactivatedInstance> | ReactivatedInstance;
 }
 
-// Emits one non-secret `owner_agent.connection.reactivate` spine event.
-// The selector records whether the action was addressed by `connection_id` or
-// by `connector_id`. No bearer token or provider secret is ever logged.
-async function emitReactivateAudit(
-  ctx: MountOwnerConnectionReactivateContext,
-  req: RouteRequest,
-  res: RouteResponse,
-  args: {
-    connectionId?: string | null;
-    connectorKey?: string | null;
-    error?: unknown;
-    outcome: "succeeded" | "failed";
-    ownerSubjectId?: string | null;
-    selector: "connection_id" | "connector_id";
-  }
-): Promise<void> {
-  const trace = buildAuditTrace(ctx, req, res);
-  const clientId = readTokenString(req.tokenInfo?.client_id);
-  const clientName = readTokenString(req.tokenInfo?.client_name);
-  const actorKind = auditActorKind(req);
-  const ownerSubjectId = resolveAuditOwnerSubjectId(req, args.ownerSubjectId);
-  await ctx.emitSpineEvent({
-    actor_id: clientId ?? ownerSubjectId ?? actorKind,
-    actor_type: actorKind,
-    client_id: clientId,
-    data: {
-      actor_kind: actorKind,
-      auth_token_kind: req.tokenInfo?.pdpp_token_kind ?? null,
-      client_id: clientId,
-      client_name: clientName,
-      connection_id: args.connectionId ?? null,
-      connector_key: args.connectorKey ?? null,
-      operation: "reactivate",
-      outcome: args.outcome,
-      selector: args.selector,
-      target_resource: "connection",
-      ...reactivateAuditError(args.error),
-    },
-    event_type: "owner_agent.connection.reactivate",
-    object_id: reactivateObjectId(args),
-    object_type: "connection",
-    request_id: trace.request_id,
-    scenario_id: trace.scenario_id,
-    status: args.outcome,
-    subject_id: ownerSubjectId,
-    subject_type: "subject",
-    trace_id: trace.trace_id,
-  });
-}
+// The context the shared reactivate handler needs on either surface. The
+// connector-only fields (`AmbiguousConnectionError`,
+// `listRevokedConnectionsForConnector`, `projectBindingForWire`) are read only
+// by the bearer `/v1/owner/connectors/:connectorId/reactivate` binding.
+type ConnectorAddressingKey =
+  | "AmbiguousConnectionError"
+  | "listRevokedConnectionsForConnector"
+  | "projectBindingForWire";
+const CONNECTOR_ADDRESSING_KEYS: readonly ConnectorAddressingKey[] = [
+  "AmbiguousConnectionError",
+  "listRevokedConnectionsForConnector",
+  "projectBindingForWire",
+];
 
-function readTokenString(value: string | null | undefined): string | null {
-  return typeof value === "string" ? value : null;
-}
-
-function resolveAuditOwnerSubjectId(req: RouteRequest, ownerSubjectId?: string | null): string | null {
-  return ownerSubjectId ?? readTokenString(req.tokenInfo?.subject_id);
-}
-
-function reactivateObjectId(args: { connectionId?: string | null; connectorKey?: string | null }): string {
-  return args.connectionId || args.connectorKey || "unknown_connection";
-}
-
-function reactivateAuditError(error: unknown): Record<string, unknown> {
-  if (!error) {
-    return {};
-  }
-  const code = (error as { code?: unknown } | null)?.code;
-  return {
-    error: {
-      code: typeof code === "string" ? code : "api_error",
-      http_status: httpStatusForOperationError(error),
-    },
-  };
-}
-
-// Owner-token guard mirroring buildRevokeRequireOwner. Emits a failed-
-// authorization audit before rejecting a non-owner bearer so the audit
-// trail is complete for client/mcp_package bearers that reach the route.
-function buildReactivateRequireOwner(
-  ctx: MountOwnerConnectionReactivateContext,
-  selector: "connection_id" | "connector_id"
-): MiddlewareHandler {
-  return async (...args: unknown[]) => {
-    const [req, res, next] = args as [RouteRequest, RouteResponse, NextFn];
-    if (req.tokenInfo?.pdpp_token_kind === "owner") {
-      await next();
-      return;
-    }
-    const err = new Error("Owner token required") as Error & { code: string };
-    err.code = "permission_error";
-    const { connectionId, connectorKey } = readConnectionTarget(ctx, req, selector);
-    await emitReactivateAudit(ctx, req, res, {
-      connectionId,
-      connectorKey,
-      error: err,
-      outcome: "failed",
-      ownerSubjectId: typeof req.tokenInfo?.subject_id === "string" ? req.tokenInfo.subject_id : null,
-      selector,
-    });
-    ctx.pdppError(res, 403, "permission_error", "Owner token required");
-  };
-}
+export type ConnectionReactivateContext = Omit<
+  MountOwnerConnectionReactivateContext,
+  ConnectorAddressingKey | "getOwnerTokenSubjectId" | "listActiveBindingsForGrant" | "requireOwner" | "requireToken"
+> &
+  Partial<Pick<MountOwnerConnectionReactivateContext, ConnectorAddressingKey>>;
 
 // Resolve the single REVOKED connection for a connector-keyed reactivate.
 // Mirrors resolveActiveByConnector but for `status = 'revoked'` rows:
@@ -264,7 +189,7 @@ function buildReactivateRequireOwner(
 //   - multiple revoked connections → ambiguous_connection (409)
 //   - exactly one → return its connectorInstanceId
 async function resolveRevokedConnectorNamespace(
-  ctx: MountOwnerConnectionReactivateContext,
+  ctx: Pick<MountOwnerConnectionReactivateContext, ConnectorAddressingKey>,
   ownerSubjectId: string,
   connectorKey: string
 ): Promise<ConnectorNamespace> {
@@ -297,14 +222,32 @@ async function resolveRevokedConnectorNamespace(
   };
 }
 
-async function resolveConnectionReactivateNamespace(
-  ctx: MountOwnerConnectionReactivateContext,
+interface NotRevokedRejection extends ConnectionControlRejection {
+  readonly message: string;
+}
+
+// Resolves the connection to reactivate, or returns the typed 409 rejection
+// for a connection that exists but is not revoked. `allowStatuses:
+// ['revoked']` keeps ownership verification (foreign/unknown id →
+// connector_instance_not_found 404) and turns the active-status gate into a
+// revoked-status gate; its `connector_instance_inactive` is re-labelled
+// `connector_instance_not_revoked` (409).
+async function resolveReactivateNamespace(
+  ctx: ConnectionReactivateContext,
   req: RouteRequest,
-  res: RouteResponse,
+  binding: ConnectionControlBinding,
   ownerSubjectId: string,
   target: ReactivateTarget
-): Promise<ConnectorNamespace | null> {
-  const addressed = decodeURIComponent(req.params.connectionId as string);
+): Promise<ConnectorNamespace | NotRevokedRejection> {
+  const addressed = decodeURIComponent(req.params[binding.param] as string);
+  if (binding.selector === "connector_id") {
+    target.connectorKey = ctx.canonicalConnectorKey(addressed) ?? addressed;
+    return resolveRevokedConnectorNamespace(
+      requireConnectorAddressing(ctx, CONNECTOR_ADDRESSING_KEYS),
+      ownerSubjectId,
+      target.connectorKey
+    );
+  }
   target.connectionId = addressed;
   try {
     return await ctx.resolveOwnerConnectorNamespace(req, null, {
@@ -314,57 +257,27 @@ async function resolveConnectionReactivateNamespace(
       ownerSubjectId,
     });
   } catch (resolveErr) {
-    // biome-ignore lint/suspicious/noUnnecessaryConditions: TypeScript boundary permits nullish input; this guard preserves runtime behavior.
-    const code = (resolveErr as { code?: unknown })?.code;
+    const code = (resolveErr as { code?: unknown } | null)?.code;
     if (code === "connector_instance_inactive") {
-      ctx.pdppError(
-        res,
-        409,
-        "connector_instance_not_revoked",
-        `Connection '${addressed}' is not revoked; only revoked connections can be reactivated.`
-      );
-      return null;
+      return {
+        code: "connector_instance_not_revoked",
+        http_status: 409,
+        message: `Connection '${addressed}' is not revoked; only revoked connections can be reactivated.`,
+      };
     }
     throw resolveErr;
   }
 }
 
-// biome-ignore lint/suspicious/useAwait: The async signature is part of this caller-facing contract.
-async function resolveConnectorReactivateNamespace(
-  ctx: MountOwnerConnectionReactivateContext,
-  ownerSubjectId: string,
-  target: ReactivateTarget,
-  req: RouteRequest
-): Promise<ConnectorNamespace> {
-  const rawConnectorId = decodeURIComponent(req.params.connectorId as string);
-  target.connectorKey = ctx.canonicalConnectorKey(rawConnectorId) ?? rawConnectorId;
-  return resolveRevokedConnectorNamespace(ctx, ownerSubjectId, target.connectorKey);
-}
-
-// biome-ignore lint/suspicious/useAwait: The async signature is part of this caller-facing contract.
-async function resolveReactivateNamespace(
-  ctx: MountOwnerConnectionReactivateContext,
-  req: RouteRequest,
-  res: RouteResponse,
-  ownerSubjectId: string,
-  selector: "connection_id" | "connector_id",
-  target: ReactivateTarget
-): Promise<ConnectorNamespace | null> {
-  if (selector === "connection_id") {
-    return resolveConnectionReactivateNamespace(ctx, req, res, ownerSubjectId, target);
-  }
-  return resolveConnectorReactivateNamespace(ctx, ownerSubjectId, target, req);
-}
-
-function reactivateTimestamp(ctx: MountOwnerConnectionReactivateContext): string {
-  return ctx.now ? ctx.now() : new Date().toISOString();
+function isNotRevokedRejection(value: ConnectorNamespace | NotRevokedRejection): value is NotRevokedRejection {
+  return "http_status" in value;
 }
 
 async function applyReactivate(
-  ctx: MountOwnerConnectionReactivateContext,
+  ctx: ConnectionReactivateContext,
   connectorInstanceId: string
 ): Promise<{ reactivated: ReactivatedInstance; stamp: string }> {
-  const stamp = reactivateTimestamp(ctx);
+  const stamp = ctx.now ? ctx.now() : new Date().toISOString();
   const reactivated = await Promise.resolve(
     ctx.updateConnectorInstanceStatus(connectorInstanceId, {
       revokedAt: null,
@@ -373,75 +286,88 @@ async function applyReactivate(
     })
   );
   ctx.invalidateConnectorSummariesCache?.();
-  // Terminal-gate revision (2026-07-29): `updateConnectorInstanceStatus`
-  // (-> `store.updateStatus`) now marks summary evidence dirty in the SAME
-  // transaction as the status write — a separate post-hoc call here would
-  // be redundant, not additive.
+  // `updateConnectorInstanceStatus` (-> `store.updateStatus`) marks summary
+  // evidence dirty in the SAME transaction as the status write — a separate
+  // post-hoc call here would be redundant, not additive.
   return { reactivated, stamp };
 }
 
-function reactivateResponse(
-  connectionId: string | null,
-  connectorKey: string | null,
-  reactivated: ReactivatedInstance,
-  stamp: string
-): Record<string, unknown> {
-  return {
-    connection_id: connectionId,
-    connector_id: connectorKey,
-    connector_key: connectorKey,
-    object: "owner_connection_reactivate",
-    reactivated_at: stamp,
-    status: reactivated.status ?? "active",
+// The one reactivate handler. The cookie `POST /_ref/connections/:id/reactivate`
+// route and both bearer reactivate routes mount it; `binding` decides only how
+// the target is addressed and who the actor is. On success it returns 200
+// `{ object: "owner_connection_reactivate", connection_id, connector_key,
+// status: "active", reactivated_at }`. Every attempt, including the typed 409
+// for a connection that is not revoked, emits `owner_agent.connection.reactivate`.
+export function buildConnectionReactivateHandler(
+  ctx: ConnectionReactivateContext,
+  binding: ConnectionControlBinding
+): RouteHandler {
+  return async (req: RouteRequest, res: RouteResponse) => {
+    const ownerSubjectId = binding.ownerSubjectId(req);
+    const actor = resolveOwnerActor(binding.surface, req, ownerSubjectId);
+    const trace = startOwnerAuditTrace(ctx, actor, res);
+    const target: ReactivateTarget = { connectionId: null, connectorKey: null };
+    const audit = (outcome: "succeeded" | "failed", error?: unknown) =>
+      emitOwnerConnectionAudit(ctx, actor, {
+        ...target,
+        ...(error ? { error } : {}),
+        operation: "reactivate",
+        outcome,
+        selector: binding.selector,
+        trace,
+      });
+    try {
+      const resolved = await resolveReactivateNamespace(ctx, req, binding, ownerSubjectId, target);
+      if (isNotRevokedRejection(resolved)) {
+        await audit("failed", resolved);
+        ctx.pdppError(res, resolved.http_status, resolved.code, resolved.message);
+        return;
+      }
+      target.connectionId = resolved.connectorInstanceId;
+      target.connectorKey = ctx.canonicalConnectorKey(resolved.connectorId) ?? resolved.connectorId;
+
+      const { reactivated, stamp } = await applyReactivate(ctx, resolved.connectorInstanceId);
+      await audit("succeeded");
+      res.status(200).json({
+        connection_id: target.connectionId,
+        connector_id: target.connectorKey,
+        connector_key: target.connectorKey,
+        object: "owner_connection_reactivate",
+        reactivated_at: stamp,
+        status: reactivated.status ?? "active",
+      });
+    } catch (err) {
+      await audit("failed", err);
+      ctx.handleError(res, err);
+    }
   };
 }
 
-// Shared handler body for both reactivate routes. Resolves the namespace with
-// `allowStatuses: ['revoked']` so that:
-//   - a foreign/unknown id → connector_instance_not_found (404)
-//   - an already-active (non-revoked) connection → connector_instance_inactive
-//     (400) from the resolver, which the handler re-labels as
-//     connector_instance_not_revoked (409) to give callers a typed guard
-//   - a revoked connection → resolved, then flipped to active
-//
-// On success returns 200 `{ object: "owner_connection_reactivate",
-// connection_id, connector_key, status: "active", reactivated_at }`.
-function buildReactivateHandler(
+// Owner-token guard mirroring buildRevokeRequireOwner. Emits a failed-
+// authorization audit before rejecting a non-owner bearer so the audit
+// trail is complete for client/mcp_package bearers that reach the route.
+function buildReactivateRequireOwner(
   ctx: MountOwnerConnectionReactivateContext,
   selector: "connection_id" | "connector_id"
-): RouteHandler {
-  return async (req: RouteRequest, res: RouteResponse) => {
-    const ownerSubjectId = ctx.getOwnerTokenSubjectId(req);
-    const target: ReactivateTarget = { connectionId: null, connectorKey: null };
-    try {
-      const namespace = await resolveReactivateNamespace(ctx, req, res, ownerSubjectId, selector, target);
-      if (!namespace) {
-        return;
-      }
-
-      target.connectionId = namespace.connectorInstanceId;
-      target.connectorKey = ctx.canonicalConnectorKey(namespace.connectorId) ?? namespace.connectorId;
-
-      const { reactivated, stamp } = await applyReactivate(ctx, namespace.connectorInstanceId);
-      await emitReactivateAudit(ctx, req, res, {
-        connectionId: target.connectionId,
-        connectorKey: target.connectorKey,
-        outcome: "succeeded",
-        ownerSubjectId,
-        selector,
-      });
-      res.status(200).json(reactivateResponse(target.connectionId, target.connectorKey, reactivated, stamp));
-    } catch (err) {
-      await emitReactivateAudit(ctx, req, res, {
-        connectionId: target.connectionId,
-        connectorKey: target.connectorKey,
-        error: err,
-        outcome: "failed",
-        ownerSubjectId,
-        selector,
-      });
-      ctx.handleError(res, err);
+): MiddlewareHandler {
+  return async (...args: unknown[]) => {
+    const [req, res, next] = args as [RouteRequest, RouteResponse, NextFn];
+    if (req.tokenInfo?.pdpp_token_kind === "owner") {
+      await next();
+      return;
     }
+    const err = new Error("Owner token required") as Error & { code: string };
+    err.code = "permission_error";
+    const actor = resolveOwnerActor("owner_bearer", req, ctx.getOwnerTokenSubjectId(req));
+    await emitOwnerConnectionAudit(ctx, actor, {
+      ...readConnectionTarget(ctx, req, selector),
+      error: err,
+      operation: "reactivate",
+      outcome: "failed",
+      selector,
+      trace: startOwnerAuditTrace(ctx, actor, res),
+    });
+    ctx.pdppError(res, 403, "permission_error", "Owner token required");
   };
 }
 
@@ -451,13 +377,13 @@ export function mountOwnerConnectionReactivate(app: AppLike, ctx: MountOwnerConn
     { contract: "ownerReactivateConnection" },
     ctx.requireToken,
     buildReactivateRequireOwner(ctx, "connection_id"),
-    buildReactivateHandler(ctx, "connection_id")
+    buildConnectionReactivateHandler(ctx, ownerBearerConnectionBinding(ctx.getOwnerTokenSubjectId, "connection_id"))
   );
   app.post(
     "/v1/owner/connectors/:connectorId/reactivate",
     { contract: "ownerReactivateConnector" },
     ctx.requireToken,
     buildReactivateRequireOwner(ctx, "connector_id"),
-    buildReactivateHandler(ctx, "connector_id")
+    buildConnectionReactivateHandler(ctx, ownerBearerConnectionBinding(ctx.getOwnerTokenSubjectId, "connector_id"))
   );
 }

@@ -15,7 +15,7 @@
 // mapping, owner-subject namespace resolution, and the
 // `onScheduleMutation` callback are unchanged.
 //
-// `projectRefConnection`, `sendRefConnectionDetail`, `resolveRefConnectorNamespace`,
+// `sendRefConnectionDetail`, `resolveRefConnectorNamespace`,
 // and `resolveRefConnectionNamespace` move here from the `buildAsApp`
 // closure in `server/index.js` because all call sites are within this
 // route family. Namespace resolution still flows through the host-supplied
@@ -48,8 +48,16 @@ import {
 import type { RunAdmission } from "../../runtime/controller.ts";
 import type { FleetHealthVerdict } from "../fleet-health.ts";
 import type { CredentialStateChange } from "../stores/connector-instance-credential-store.ts";
+import { ownerSessionConnectionBinding } from "./_owner-connection-helpers.ts";
 import type { MiddlewareHandler, PdppErrorFn, RouteArg } from "./_route-contract.ts";
 import { assertRemoteControlSupported } from "./_route-contract.ts";
+import { buildConnectionReactivateHandler } from "./owner-connection-reactivate.ts";
+import { buildConnectionRevokeHandler } from "./owner-connection-revoke.ts";
+import {
+  buildConnectionRenameHandler,
+  buildConnectionsListHandler,
+  projectOwnerConnectionRow,
+} from "./owner-connections.ts";
 
 // Express-shaped surface, structurally typed to avoid pulling in the
 // transport's `.js` ambient types. Matches the pattern established in
@@ -223,6 +231,12 @@ export interface MountRefConnectorsContext {
   now?: () => string;
   onScheduleMutation?: () => Promise<unknown> | unknown;
   pdppError: PdppErrorFn;
+  // Filters a stored `display_name` to an owner-meaningful label, or `null`
+  // for a storage-layer placeholder; drives `label_status` on connection rows.
+  projectStorageDisplayName: (
+    displayName: string | null | undefined,
+    options: { connectorId?: string | null; connectorInstanceId?: string | null }
+  ) => string | null;
   // Post-commit browser-profile purge for delete and revoke
   // (server/browser-profile-purge.ts). Never throws; its result is reported in
   // the response and the audit event.
@@ -322,32 +336,6 @@ function resolveRefConnectionNamespace(
   });
 }
 
-// Moved from the `buildAsApp` closure in `server/index.js`. Owner-facing
-// projection of a connector instance; the second argument lets list and
-// PATCH callers attach the matching schedule from a pre-fetched map.
-// The third argument canonicalizes connector_id at the response boundary
-// so URL-shaped registry IDs never appear in owner-facing API responses
-// even if the storage row pre-dates the canonical-key migration.
-function projectRefConnection(
-  instance: ConnectorInstanceRow,
-  schedulesByInstanceId: ReadonlyMap<string, unknown> = new Map(),
-  canonicalizeConnectorId: (id: string) => string | null = (id) => id
-): Record<string, unknown> {
-  return {
-    connector_id: canonicalizeConnectorId(instance.connectorId) ?? instance.connectorId,
-    connector_instance_id: instance.connectorInstanceId,
-    created_at: instance.createdAt,
-    display_name: instance.displayName,
-    object: "ref_connection",
-    revoked_at: instance.revokedAt,
-    schedule: schedulesByInstanceId.get(instance.connectorInstanceId) || null,
-    source_binding: instance.sourceBinding,
-    source_kind: instance.sourceKind,
-    status: instance.status,
-    updated_at: instance.updatedAt,
-  };
-}
-
 function connectorIdMatchesFilter(
   ctx: MountRefConnectorsContext,
   instance: ConnectorInstanceRow,
@@ -382,7 +370,7 @@ async function sendRefConnectionDetail(
   // implementation did the same, so the deprecated alias route keeps
   // returning a projection rather than 404'ing.
   const source = instance ?? (namespace as unknown as ConnectorInstanceRow);
-  res.json(projectRefConnection(source, schedulesByInstanceId, (id) => ctx.canonicalConnectorKey(id)));
+  res.json(projectOwnerConnectionRow(ctx, source, schedulesByInstanceId));
 }
 
 // ─── Connector summary list / detail ────────────────────────────────────
@@ -621,42 +609,14 @@ export function mountRefConnectorScheduleGet(app: AppLike, ctx: MountRefConnecto
 // ─── Connection list / detail / display-name PATCH ──────────────────────
 
 export function mountRefConnectionsList(app: AppLike, ctx: MountRefConnectorsContext): void {
+  // Same handler as `GET /v1/owner/connections` (`owner-connections.ts`):
+  // same filters (connector_id canonicalized, status) and the same
+  // `owner_connection` rows, minus the bearer-only `supported_actions`.
   app.get(
     "/_ref/connections",
     { contract: "refListConnections" },
     ctx.requireOwnerSession,
-    async (req: RouteRequest, res: RouteResponse) => {
-      try {
-        const ownerSubjectId = ctx.getOwnerSubjectId(req);
-        const rawConnectorId = ctx.resolveSingleConnectorIdQueryValue(req.query.connector_id);
-        // Canonicalize the owner-supplied connector_id filter so a URL-shaped
-        // value (e.g. https://registry.pdpp.dev/connectors/spotify) matches the
-        // canonical key the instances are stored under. Accept the legacy alias
-        // at the boundary, then compare canonically. See canonicalize-connector-keys
-        // Decision 1: connector instances bind to canonical keys only.
-        const connectorId = rawConnectorId
-          ? (ctx.canonicalConnectorKey(rawConnectorId) ?? rawConnectorId)
-          : rawConnectorId;
-        const status = ctx.resolveSingleConnectorIdQueryValue(req.query.status);
-        const store = ctx.createRequestConnectorInstanceStore();
-        const instances = await store.listByOwner(ownerSubjectId);
-        const schedules = await ctx.listSchedules();
-        const schedulesByInstanceId = new Map<string, unknown>(
-          schedules
-            .filter((schedule) => schedule?.connector_instance_id)
-            .map((schedule) => [schedule.connector_instance_id as string, schedule])
-        );
-        const data = instances
-          .filter((instance) => connectorIdMatchesFilter(ctx, instance, connectorId))
-          .filter((instance) => !status || instance.status === status)
-          .map((instance) =>
-            projectRefConnection(instance, schedulesByInstanceId, (id) => ctx.canonicalConnectorKey(id))
-          );
-        res.json({ data, object: "list" });
-      } catch (err) {
-        ctx.handleError(res, err);
-      }
-    }
+    buildConnectionsListHandler(ctx, ownerSessionConnectionBinding(ctx.getOwnerSubjectId))
   );
 }
 
@@ -681,7 +641,7 @@ export function mountRefConnectorInstancesList(app: AppLike, ctx: MountRefConnec
         const data = instances
           .filter((instance) => connectorIdMatchesFilter(ctx, instance, connectorId))
           .filter((instance) => !status || instance.status === status)
-          .map((instance) => projectRefConnection(instance, new Map(), (id) => ctx.canonicalConnectorKey(id)));
+          .map((instance) => projectOwnerConnectionRow(ctx, instance, new Map()));
         res.json({ data, object: "list" });
       } catch (err) {
         ctx.handleError(res, err);
@@ -725,7 +685,9 @@ export function mountRefConnectorInstanceDetail(app: AppLike, ctx: MountRefConne
 // PATCH /_ref/connections/:connectorInstanceId — owner-authenticated
 // mutation of the owner-meaningful `display_name` carried on the
 // public read contract. Operator-only surface; grant-authorized tokens
-// SHALL NOT reach this route (gated by `ctx.requireOwnerSession`).
+// SHALL NOT reach this route (gated by `ctx.requireOwnerSession`). Same
+// handler as `PATCH /v1/owner/connections/:connectionId`
+// (`buildConnectionRenameHandler` in `owner-connections.ts`).
 //
 // Spec: openspec/changes/expose-connection-identity-on-public-read/
 //       specs/reference-implementation-architecture/spec.md
@@ -735,45 +697,7 @@ export function mountRefConnectionSetDisplayName(app: AppLike, ctx: MountRefConn
     "/_ref/connections/:connectorInstanceId",
     { contract: "refSetConnectionDisplayName" },
     ctx.requireOwnerSession,
-    async (req: RouteRequest, res: RouteResponse) => {
-      try {
-        const connectorInstanceId = decodeURIComponent(req.params.connectorInstanceId as string);
-        const body = (req.body as Record<string, unknown> | null) || {};
-        const displayName = body.display_name;
-        if (typeof displayName !== "string" || !displayName.trim()) {
-          ctx.pdppError(res, 400, "invalid_request", "display_name must be a non-empty string", "display_name");
-          return;
-        }
-        const ownerSubjectId = ctx.getOwnerSubjectId(req);
-        // Confirm the instance belongs to this owner before mutating; the
-        // store also enforces this in its WHERE clause so a stolen id
-        // cannot cross owners even if this preflight is skipped.
-        await resolveRefConnectionNamespace(ctx, req, connectorInstanceId);
-        const store = ctx.createRequestConnectorInstanceStore();
-        const updated = await store.setDisplayName(connectorInstanceId, {
-          displayName: displayName.trim(),
-          ownerSubjectId,
-          updatedAt: new Date().toISOString(),
-        });
-        ctx.invalidateConnectorSummariesCache?.();
-        // Terminal-gate revision (2026-07-29): `store.setDisplayName` now
-        // marks summary evidence dirty in the SAME transaction as the
-        // display_name write (server/stores/connector-instance-store.ts) —
-        // a separate post-hoc call here would be redundant, not additive.
-        const schedule = await ctx.getSchedule(updated.connectorId, {
-          connectorInstanceId: updated.connectorInstanceId,
-        });
-        res.json(
-          projectRefConnection(
-            updated,
-            new Map<string, unknown>(schedule ? [[updated.connectorInstanceId, schedule]] : []),
-            (id) => ctx.canonicalConnectorKey(id)
-          )
-        );
-      } catch (err) {
-        ctx.handleError(res, err);
-      }
-    }
+    buildConnectionRenameHandler(ctx, ownerSessionConnectionBinding(ctx.getOwnerSubjectId))
   );
 }
 
@@ -1335,12 +1259,10 @@ async function emitConnectionControlAudit(
     error?: unknown;
     eventType:
       | "owner_agent.connection.run"
-      | "owner_agent.connection.revoke"
       | "owner_agent.connection.delete"
-      | "owner_agent.connection.reactivate"
       | "owner_agent.connection.browser_profile_purge";
     force?: boolean;
-    operation: "run_now" | "revoke" | "delete" | "reactivate" | "purge_browser_profile";
+    operation: "run_now" | "delete" | "purge_browser_profile";
     outcome: "succeeded" | "failed";
     ownerSubjectId?: string | null;
     profilePurge?: BrowserProfilePurgeResult | null;
@@ -1395,85 +1317,18 @@ async function emitConnectionControlAudit(
 }
 
 // POST /_ref/connections/:connectorInstanceId/revoke — owner-session revoke of
-// one configured connection. Resolves + owner-verifies the connection through
-// the shared namespace resolver, flips exactly that instance to `revoked` via
-// the shared store primitive, and emits a non-secret revoke audit. Zero cascade:
-// already-collected records, grants, and audit are preserved; a repeat revoke
-// surfaces the store's typed `connector_instance_inactive` through `handleError`.
+// one configured connection. Same handler as the bearer revoke routes
+// (`buildConnectionRevokeHandler` in `owner-connection-revoke.ts`): resolve +
+// owner-verify, flip exactly that instance (and its stored credential) to
+// `revoked`, purge the browser profile, audit. Zero cascade: already-collected
+// records, grants, and audit are preserved; a repeat revoke surfaces the typed
+// `connector_instance_inactive` through `handleError`.
 export function mountRefConnectionRevoke(app: AppLike, ctx: MountRefConnectorsContext): void {
   app.post(
     "/_ref/connections/:connectorInstanceId/revoke",
     { contract: "refRevokeConnection" },
     ctx.requireOwnerSession,
-    async (req: RouteRequest, res: RouteResponse) => {
-      const ownerSubjectId = ctx.getOwnerSubjectId(req);
-      let connectionId: string | null = null;
-      let connectorKey: string | null = null;
-      try {
-        const connectorInstanceId = decodeURIComponent(req.params.connectorInstanceId as string);
-        connectionId = connectorInstanceId;
-        const namespace = await resolveRefConnectionNamespace(ctx, req, connectorInstanceId);
-        connectionId = namespace.connectorInstanceId;
-        connectorKey = ctx.canonicalConnectorKey(namespace.connectorId) ?? namespace.connectorId;
-        const stamp = ctx.now ? ctx.now() : new Date().toISOString();
-        const trace = buildConnectionControlAuditTrace(ctx, res);
-        const revoked = await Promise.resolve(
-          ctx.updateConnectorInstanceStatus(namespace.connectorInstanceId, {
-            credentialStateChange: {
-              actorId: ownerSubjectId,
-              actorType: "owner_session",
-              cause: "owner_revoked",
-              requestId: trace.request_id,
-              traceId: trace.trace_id,
-            },
-            revokedAt: stamp,
-            sourceBindingPatch: { revocation_reason: "owner_revoked" },
-            status: "revoked",
-            updatedAt: stamp,
-          })
-        );
-        ctx.invalidateConnectorSummariesCache?.();
-        // Terminal-gate revision (2026-07-29): `updateConnectorInstanceStatus`
-        // (-> `store.updateStatus`) now marks summary evidence dirty in the
-        // SAME transaction as the status write — a separate post-hoc call
-        // here would be redundant, not additive.
-        // Revoke stops future collection, so the logged-in browser session goes
-        // too. A failure is reported, never a failed revoke.
-        const profilePurge = ctx.purgeBrowserProfile
-          ? await ctx.purgeBrowserProfile({ connectorInstanceId: connectionId, connectorKey, ownerSubjectId })
-          : null;
-        await emitConnectionControlAudit(ctx, res, {
-          connectionId,
-          connectorKey,
-          eventType: "owner_agent.connection.revoke",
-          operation: "revoke",
-          outcome: "succeeded",
-          ownerSubjectId,
-          profilePurge,
-          trace,
-        });
-        res.status(200).json({
-          connection_id: connectionId,
-          connector_id: connectorKey,
-          connector_key: connectorKey,
-          object: "ref_connection_revoke",
-          ...(profilePurge ? { profile_purge: profilePurge } : {}),
-          revoked_at: revoked.revokedAt ?? stamp,
-          status: revoked.status ?? "revoked",
-        });
-      } catch (err) {
-        await emitConnectionControlAudit(ctx, res, {
-          connectionId,
-          connectorKey,
-          error: err,
-          eventType: "owner_agent.connection.revoke",
-          operation: "revoke",
-          outcome: "failed",
-          ownerSubjectId,
-        });
-        ctx.handleError(res, err);
-      }
-    }
+    buildConnectionRevokeHandler(ctx, ownerSessionConnectionBinding(ctx.getOwnerSubjectId))
   );
 }
 
@@ -1656,91 +1511,19 @@ export function mountRefConnectionDelete(app: AppLike, ctx: MountRefConnectorsCo
 }
 
 // POST /_ref/connections/:connectorInstanceId/reactivate — owner-session
-// reactivate of one revoked connection. Resolves through the shared namespace
-// resolver with `allowStatuses: ['revoked']` so only a revoked instance is
-// accepted (active → connector_instance_inactive → re-labeled
-// connector_instance_not_revoked 409; foreign/unknown → not_found 404). Flips
-// the instance from `revoked` to `active`, clears `revoked_at`, and emits a
-// non-secret reactivate audit. Zero cascade: already-collected records, grants,
-// schedule, and spine evidence are untouched. Credential freshness is delegated
-// to the next collection run exactly as Plaid's update-mode pattern does.
+// reactivate of one revoked connection. Same handler as the bearer reactivate
+// routes (`buildConnectionReactivateHandler` in
+// `owner-connection-reactivate.ts`): only a revoked instance is accepted
+// (active → connector_instance_not_revoked 409; foreign/unknown → not_found
+// 404); it flips back to `active` and clears `revoked_at`. Zero cascade:
+// already-collected records, grants, schedule, and spine evidence are
+// untouched. Credential freshness is delegated to the next collection run
+// exactly as Plaid's update-mode pattern does.
 export function mountRefConnectionReactivate(app: AppLike, ctx: MountRefConnectorsContext): void {
   app.post(
     "/_ref/connections/:connectorInstanceId/reactivate",
     { contract: "refReactivateConnection" },
     ctx.requireOwnerSession,
-    async (req: RouteRequest, res: RouteResponse) => {
-      const ownerSubjectId = ctx.getOwnerSubjectId(req);
-      let connectionId: string | null = null;
-      let connectorKey: string | null = null;
-      try {
-        const connectorInstanceId = decodeURIComponent(req.params.connectorInstanceId as string);
-        connectionId = connectorInstanceId;
-        // Resolve with allowStatuses: ['revoked'] — ownership is verified,
-        // active connections surface as connector_instance_inactive (400) which
-        // we re-label as connector_instance_not_revoked (409).
-        let namespace: ConnectorNamespace;
-        try {
-          namespace = await resolveRefConnectionNamespace(ctx, req, connectorInstanceId, {
-            allowStatuses: ["revoked"],
-          });
-        } catch (resolveErr) {
-          // biome-ignore lint/suspicious/noUnnecessaryConditions: TypeScript boundary permits nullish input; this guard preserves runtime behavior.
-          const code = (resolveErr as { code?: unknown })?.code;
-          if (code === "connector_instance_inactive") {
-            ctx.pdppError(
-              res,
-              409,
-              "connector_instance_not_revoked",
-              `Connection '${connectorInstanceId}' is not revoked; only revoked connections can be reactivated.`
-            );
-            return;
-          }
-          throw resolveErr;
-        }
-        connectionId = namespace.connectorInstanceId;
-        connectorKey = ctx.canonicalConnectorKey(namespace.connectorId) ?? namespace.connectorId;
-        const stamp = ctx.now ? ctx.now() : new Date().toISOString();
-        const reactivated = await Promise.resolve(
-          ctx.updateConnectorInstanceStatus(namespace.connectorInstanceId, {
-            revokedAt: null,
-            status: "active",
-            updatedAt: stamp,
-          })
-        );
-        ctx.invalidateConnectorSummariesCache?.();
-        // Terminal-gate revision (2026-07-29): `updateConnectorInstanceStatus`
-        // (-> `store.updateStatus`) now marks summary evidence dirty in the
-        // SAME transaction as the status write — a separate post-hoc call
-        // here would be redundant, not additive.
-        await emitConnectionControlAudit(ctx, res, {
-          connectionId,
-          connectorKey,
-          eventType: "owner_agent.connection.reactivate",
-          operation: "reactivate",
-          outcome: "succeeded",
-          ownerSubjectId,
-        });
-        res.status(200).json({
-          connection_id: connectionId,
-          connector_id: connectorKey,
-          connector_key: connectorKey,
-          object: "ref_connection_reactivate",
-          reactivated_at: stamp,
-          status: reactivated.status ?? "active",
-        });
-      } catch (err) {
-        await emitConnectionControlAudit(ctx, res, {
-          connectionId,
-          connectorKey,
-          error: err,
-          eventType: "owner_agent.connection.reactivate",
-          operation: "reactivate",
-          outcome: "failed",
-          ownerSubjectId,
-        });
-        ctx.handleError(res, err);
-      }
-    }
+    buildConnectionReactivateHandler(ctx, ownerSessionConnectionBinding(ctx.getOwnerSubjectId))
   );
 }

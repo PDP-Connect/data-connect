@@ -151,6 +151,9 @@ function buildHarness(
       err.code = code;
       throw err;
     },
+    projectStorageDisplayName: () => {
+      throw new Error("the run route does not project connection rows");
+    },
     requireOwnerSession: (_req, _res, next) => (typeof next === "function" ? next() : undefined),
     ...(harnessOptions.resumeHistoricalArchiveConnectionIfPaused ? { resumeHistoricalArchiveConnectionIfPaused } : {}),
     resolveOwnerConnectorNamespace(_req, connectorId, options = {}) {

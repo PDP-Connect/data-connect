@@ -51,6 +51,7 @@ function fleetHealthTestContext(
     getSchedule: unusedContextMember("getSchedule"),
     listSchedules: unusedContextMember("listSchedules"),
     pdppError: unusedContextMember("pdppError"),
+    projectStorageDisplayName: unusedContextMember("projectStorageDisplayName"),
     resolveOwnerConnectorNamespace: unusedContextMember("resolveOwnerConnectorNamespace"),
     resolveRegisteredConnectorManifest: unusedContextMember("resolveRegisteredConnectorManifest"),
     resolveSingleConnectorIdQueryValue: unusedContextMember("resolveSingleConnectorIdQueryValue"),

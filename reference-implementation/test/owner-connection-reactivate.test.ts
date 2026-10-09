@@ -589,7 +589,7 @@ test("owner-session /_ref reactivate mirrors bearer: flips revoked->active, emit
       200,
       `/_ref reactivate must return 200, got ${reactivateResp.status}: ${JSON.stringify(reactivateResp.body)}`
     );
-    assert.equal(reactivateBody(reactivateResp).object, "ref_connection_reactivate");
+    assert.equal(reactivateBody(reactivateResp).object, "owner_connection_reactivate");
     assert.equal(reactivateBody(reactivateResp).status, "active");
 
     // Connection is active, revoked_at cleared, record intact.
