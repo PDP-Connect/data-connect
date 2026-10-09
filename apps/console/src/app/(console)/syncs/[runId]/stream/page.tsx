@@ -30,6 +30,7 @@ import {
 } from "./connector-context-resolution.ts";
 import { NoAssistanceRunPoller } from "./no-assistance-run-poller.tsx";
 import {
+  describeEndedRun,
   type NoAssistanceEndedStatus,
   resolveNoAssistanceEndedTerminalStatus,
   selectNoAssistanceStreamState,
@@ -141,12 +142,10 @@ function renderNoAssistanceSurface({
   runId: string;
   runStatus: RunStatusEnvelope | null;
 }) {
-  if (currentAssistance && requiresBrowserSurfaceAssistance(currentAssistance)) {
-    return <UnavailableStreamSurface connector={connector} runId={runId} />;
-  }
-  if (currentAssistance?.ownerAction === "act_elsewhere" && currentAssistance.responseContract === "none") {
-    return <ExternalApprovalSurface assistance={currentAssistance} runId={runId} />;
-  }
+  // A run that has ended has no live assistance, whatever the timeline's last
+  // assistance request says: a connector can exit (or the runtime can fail
+  // the run) while a browser step is still open. Check the terminal state
+  // first so the page shows the run's outcome, not a stale stream.
   const noAssistanceState = selectNoAssistanceStreamState({
     // biome-ignore lint/suspicious/noUnnecessaryConditions: runStatus is nullable; tsc rejects removing this.
     runHandleStatus: runStatus?.status ?? null,
@@ -159,6 +158,8 @@ function renderNoAssistanceSurface({
     return (
       <RunEndedSurface
         connector={connector}
+        // biome-ignore lint/suspicious/noUnnecessaryConditions: runStatus is nullable; tsc rejects removing this.
+        failureMessage={runStatus?.failure?.message ?? null}
         runId={runId}
         terminalStatus={resolveNoAssistanceEndedTerminalStatus({
           // biome-ignore lint/suspicious/noUnnecessaryConditions: runStatus is nullable; tsc rejects removing this.
@@ -167,6 +168,12 @@ function renderNoAssistanceSurface({
         })}
       />
     );
+  }
+  if (currentAssistance && requiresBrowserSurfaceAssistance(currentAssistance)) {
+    return <UnavailableStreamSurface connector={connector} runId={runId} />;
+  }
+  if (currentAssistance?.ownerAction === "act_elsewhere" && currentAssistance.responseContract === "none") {
+    return <ExternalApprovalSurface assistance={currentAssistance} runId={runId} />;
   }
   if (hasActiveBrowserSurface(envelope.events)) {
     return <PreparingBrowserSurface connectionId={connectorInstanceId} runId={runId} />;
@@ -256,7 +263,13 @@ export default async function RunInteractionStreamPage({
       }
     : null;
 
-  if (!streamableAssistance) {
+  const runEnded =
+    selectNoAssistanceStreamState({
+      // biome-ignore lint/suspicious/noUnnecessaryConditions: runStatus is nullable; tsc rejects removing this.
+      runHandleStatus: runStatus?.status ?? null,
+      terminalStatus: envelope.terminal_status,
+    }) !== "running";
+  if (!streamableAssistance || runEnded) {
     return renderNoAssistanceSurface({
       connector: connectorWithIcon,
       connectorInstanceId,
@@ -281,10 +294,12 @@ export default async function RunInteractionStreamPage({
 
 function RunEndedSurface({
   connector,
+  failureMessage,
   runId,
   terminalStatus,
 }: {
   connector: ConnectorContext | null;
+  failureMessage: string | null;
   runId: string;
   terminalStatus: NoAssistanceEndedStatus;
 }) {
@@ -292,8 +307,7 @@ function RunEndedSurface({
   const subject = connector?.displayName ?? "This run";
   let statusLabel = "failed";
   let title = `${subject} needs a look.`;
-  let description =
-    "The browser step is no longer waiting, but the run did not complete successfully. View run details for the exact failure and next action.";
+  let description = `${describeEndedRun({ failureMessage, status: terminalStatus })} View run details for the next action.`;
   let sectionClass = "rounded-3xl border border-destructive/30 bg-destructive/5 p-6 shadow-2xl shadow-black/10";
   if (terminalStatus === "cancelled") {
     statusLabel = "cancelled";

@@ -1370,6 +1370,76 @@ test("attached host stream stops out-of-band events as soon as its lease is lost
   );
 });
 
+test("attached host stream reports the run's outcome, not a lost lease, when the run ends", async () => {
+  // The run ends while the owner is watching (here: the pending interaction
+  // is cancelled and the connector exits). Run cleanup releases the browser
+  // lease, so a lease probe alone would call this a lost surface. The viewer
+  // must instead get `run_ended` with the run's terminal status from the
+  // shared run-status read model, the same body GET /_ref/runs/:id serves.
+  const connectorId = "https://registry.pdpp.dev/connectors/spotify";
+  const leaseManager = makeLeaseManager({ connectorId, hostCdp: true });
+  await withHarness(
+    { browserSurfaceLeaseManager: leaseManager },
+    async ({ asUrl, spotifyManifest }) => {
+      const started = await startRun(asUrl, spotifyManifest.connector_id);
+      leaseManager.acquire({ connectorId, profileKey: "profile_dynamic_1", runId: started.run_id });
+      const pending = await waitForPendingInteraction(asUrl, started.run_id);
+      const mint = await fetchJson(`${asUrl}/_ref/runs/${encodeURIComponent(started.run_id)}/run-interaction-stream`, {
+        body: JSON.stringify({ interaction_id: pending.interaction_id }),
+        headers: { "Content-Type": "application/json" },
+        method: "POST",
+      });
+      assert.equal(mint.status, 201);
+      const body = mint.body as MintBody;
+
+      const abort = new AbortController();
+      const sseResp = await fetch(`${asUrl}${body.viewer_path}`, { signal: abort.signal });
+      assert.equal(sseResp.status, 200);
+      assert.ok(sseResp.body);
+      const reader = sseResp.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let done = false;
+      async function readChunk(): Promise<void> {
+        const chunk = await reader.read();
+        done = chunk.done;
+        if (chunk.value) {
+          buffer += decoder.decode(chunk.value, { stream: true });
+        }
+      }
+      await readChunk(); // "attached"
+      assert.ok(buffer.includes("event: attached"));
+      buffer = "";
+
+      await cancelRun(asUrl, started.run_id, pending.interaction_id);
+      const deadline = Date.now() + 5000;
+      while (!(done || buffer.includes("event: run_ended")) && Date.now() < deadline) {
+        // biome-ignore lint/performance/noAwaitInLoops: Sequential stream reads are intentional here.
+        await readChunk();
+      }
+      const runEndedLine = buffer.split("\n\n").find((block) => block.startsWith("event: run_ended"));
+      assert.ok(runEndedLine, `expected a run_ended event, got: ${buffer}`);
+      assert.ok(!buffer.includes("browser_surface_lease_lost"), "an ended run must not read as a lost lease");
+      const payload = JSON.parse(runEndedLine.split("\ndata: ")[1] ?? "null") as {
+        run_id: string;
+        status: string;
+        terminal_reason: string | null;
+      };
+      const runStatus = (await fetchJson(`${asUrl}/_ref/runs/${encodeURIComponent(started.run_id)}`)).body as {
+        status: string;
+        terminal_reason: string | null;
+      };
+      assert.equal(payload.run_id, started.run_id);
+      assert.equal(payload.status, runStatus.status);
+      assert.notEqual(payload.status, "active");
+      assert.equal(payload.terminal_reason, runStatus.terminal_reason);
+
+      abort.abort();
+      await reader.cancel().catch(() => undefined);
+    }
+  );
+});
+
 test("host stream attachment and input require the owner session that minted it", async () => {
   const connectorId = "https://registry.pdpp.dev/connectors/spotify";
   const leaseManager = makeLeaseManager({ connectorId, hostCdp: true });

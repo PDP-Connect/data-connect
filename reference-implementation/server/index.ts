@@ -6084,10 +6084,16 @@ export function buildAsApp(opts: ServerOpts = {}) {
       };
       barrierCast.releaseLease = async (args: unknown) => {
         const a = args as { runId: string };
-        await streamingRoutes.restoreOrRetirePresentationForRun({
-          reason: "run_cleanup",
-          run_id: a.runId,
-        });
+        try {
+          await streamingRoutes.restoreOrRetirePresentationForRun({
+            reason: "run_cleanup",
+            run_id: a.runId,
+          });
+        } finally {
+          // The run has settled: open viewers report its outcome instead of
+          // waiting for a lease probe to call it a lost surface.
+          streamingRoutes.notifyRunEnded({ run_id: a.runId });
+        }
       };
     }
   }

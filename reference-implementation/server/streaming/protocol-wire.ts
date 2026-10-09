@@ -397,3 +397,46 @@ function toJsonValueOrNull(value: unknown): JsonValue {
 function nullableString(value: unknown): string | null {
   return typeof value === "string" ? value : null;
 }
+
+/**
+ * Run statuses (from the shared run-status read model) that mean the run is
+ * over. `active` and the pre-launch browser-surface waits
+ * (`waiting_for_browser_surface`, `starting_surface`, `leased`) are not.
+ */
+const ENDED_RUN_STATUSES: ReadonlySet<string> = new Set([
+  "abandoned",
+  "cancelled",
+  "completed",
+  "deferred",
+  "expired",
+  "failed",
+  "released",
+  "surface_failed",
+]);
+
+/** The run-status fields `run_ended` carries. Structural slice of `RunStatusBody`. */
+export interface RunEndedSource {
+  readonly failure: { readonly message: string | null; readonly reason: string | null } | null;
+  readonly run_id: string;
+  readonly status: string;
+  readonly terminal_reason: string | null;
+}
+
+/**
+ * SSE `run_ended` payload: the run behind this stream is over, so the viewer
+ * shows the run's outcome instead of a transport error. Returns `null` while
+ * the run is still live. `failure.message` is the runtime-authored, bounded
+ * message the owner already sees on the run status route; connector-authored
+ * error text is not forwarded.
+ */
+export function buildReferenceWireRunEndedPayload(run: RunEndedSource | null): JsonObject | null {
+  if (!(run && ENDED_RUN_STATUSES.has(run.status))) {
+    return null;
+  }
+  return {
+    failure: run.failure ? { message: run.failure.message, reason: run.failure.reason } : null,
+    run_id: run.run_id,
+    status: run.status,
+    terminal_reason: run.terminal_reason,
+  };
+}

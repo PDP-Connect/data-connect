@@ -3,6 +3,7 @@
 
 import type { StreamViewport } from "@opendatalabs/remote-surface/client";
 import type { ProtocolParseResult } from "@opendatalabs/remote-surface/protocol";
+import type { RunHandleStatus } from "../../../lib/ref-client.ts";
 
 export interface AttachedMessage {
   browser_session_id: string;
@@ -96,4 +97,40 @@ export function parseAttachedMessage(data: string): ProtocolParseResult<Attached
     run_id: runId.value,
     viewport: viewport.value,
   });
+}
+
+/**
+ * `run_ended` SSE payload (reference-implementation
+ * server/streaming/protocol-wire.ts `buildReferenceWireRunEndedPayload`).
+ * `status` is a run-status value, or `null` when the run ended but no
+ * terminal state was readable yet.
+ */
+export interface RunEndedMessage {
+  failure: { message: string | null; reason: string | null } | null;
+  run_id: string | null;
+  status: RunHandleStatus | null;
+  terminal_reason: string | null;
+}
+
+function nullableString(payload: JsonObject, key: string): string | null {
+  const value = payload[key];
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+/** Lenient: a malformed payload still means the run ended, with no detail. */
+export function parseRunEndedMessage(data: string): RunEndedMessage | null {
+  const parsed = parseJsonObject(data);
+  if (!parsed.ok) {
+    return null;
+  }
+  const payload = parsed.value;
+  const failure = isObject(payload.failure)
+    ? { message: nullableString(payload.failure, "message"), reason: nullableString(payload.failure, "reason") }
+    : null;
+  return {
+    failure,
+    run_id: nullableString(payload, "run_id"),
+    status: nullableString(payload, "status") as RunHandleStatus | null,
+    terminal_reason: nullableString(payload, "terminal_reason"),
+  };
 }
