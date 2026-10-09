@@ -7,6 +7,7 @@ import { test } from "node:test";
 import {
   canonicalOwnerWindowSince,
   consentTimeFormat,
+  describeReceivedSince,
   isDeclarableOwnerWindowSince,
   ownerWindowTimeRange,
   parseOwnerWindowSince,
@@ -101,4 +102,11 @@ test("values that are not RFC 3339 do not parse", () => {
   }
   assert.equal(parseOwnerWindowSince(1_757_044_800), null);
   assert.ok(parseOwnerWindowSince("2028-02-29"));
+});
+
+test("describeReceivedSince never coerces a non-string value", () => {
+  assert.equal(describeReceivedSince("2026-09-05"), "2026-09-05");
+  assert.equal(describeReceivedSince({ toString: null }), "a value of type object");
+  assert.equal(describeReceivedSince(42), "a value of type number");
+  assert.equal(describeReceivedSince(["x"]), "a value of type array");
 });

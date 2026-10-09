@@ -560,14 +560,22 @@ test("owner-agent intent rejects a collection_scope.since without an offset with
     const ownerToken = await issueOwnerToken(asUrl);
     // A full-date or a zoneless date-time names no instant: the runtime would
     // have to guess the owner's time zone to bound a date-time field.
-    for (const since of ["last tuesday", "2026-09-05", "2026-09-05T00:00:00"]) {
+    // An object whose toString is not callable must still get the typed 400,
+    // not a 500 from building the error message.
+    for (const since of [
+      "last tuesday",
+      "2026-09-05",
+      "2026-09-05T00:00:00",
+      { toString: null } as unknown as string,
+      42 as unknown as string,
+    ]) {
       // biome-ignore lint/performance/noAwaitInLoops: each case is one request against the same server; order keeps failures readable.
       const { status, body: rawBody } = await createIntent(rsUrl, ownerToken, {
         collection_scope: { since },
         connector_id: "codex",
       });
       const body = rawBody as IntentResponseBody;
-      assert.equal(status, 400, since);
+      assert.equal(status, 400, String(JSON.stringify(since)));
       // biome-ignore lint/suspicious/noUnnecessaryConditions: the runtime fixture deliberately exercises an absent or nullable boundary value.
       assert.equal(body?.error?.code, "invalid_request");
       // biome-ignore lint/suspicious/noUnnecessaryConditions: the runtime fixture deliberately exercises an absent or nullable boundary value.

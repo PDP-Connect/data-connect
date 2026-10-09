@@ -182,6 +182,18 @@ export function ownerWindowTimeRange(
  * the owner's offset, so a full-date is accepted only when it is already
  * stored.
  */
+/**
+ * Describe a rejected `since` for an error message. Never coerces arbitrary
+ * JSON: `String()` on an object such as `{"toString": null}` throws, which
+ * would turn a typed 400 into a 500.
+ */
+export function describeReceivedSince(value: unknown): string {
+  if (typeof value === "string") {
+    return value;
+  }
+  return `a value of type ${Array.isArray(value) ? "array" : typeof value}`;
+}
+
 export const OWNER_WINDOW_SINCE_REQUIREMENT =
   "an RFC 3339 date-time with an offset, for example 2026-09-05T00:00:00-04:00 for the start of 5 Sep in UTC-4";
 
