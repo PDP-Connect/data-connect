@@ -222,6 +222,13 @@ import {
   getDefaultSchedulerStore,
   type ProductRunHistoryRecord,
 } from "./stores/scheduler-store.ts";
+import {
+  createSpineRunStatusReader,
+  OWNER_RUN_LINK_BASE,
+  type RunStatusController,
+  type RunStatusFailureSummary,
+  readRunStatus,
+} from "./run-status-read-model.ts";
 
 // ─── Shared domain types ────────────────────────────────────────────────────
 
@@ -9426,8 +9433,17 @@ export async function getConnectorDetail(
 // map a miss to a typed 404 instead of fabricating an empty diagnostic.
 
 export interface OwnerConnectionDiagnosticsRun {
+  /**
+   * Bounded failure summary from the shared run-status read model — the same
+   * object `GET /v1/owner/runs/:runId` and `GET /_ref/runs/:runId` return.
+   * `null` when the run did not fail or has no terminal event.
+   */
+  readonly failure: RunStatusFailureSummary | null;
+  /** `failure.reason`, kept as a flat field for existing readers. */
   readonly failure_reason: string | null;
   readonly finished_at: string | null;
+  /** Owner-bearer run detail and timeline; `null` when the run has no id. */
+  readonly links: { readonly run: string; readonly timeline: string } | null;
   readonly run_id: string | null;
   readonly started_at: string | null;
   readonly status: string;
@@ -9536,16 +9552,39 @@ function emptyRecoveryDiagnostics(unreadable: boolean): OwnerConnectionDiagnosti
 }
 
 // Projects a `ConnectorRunSummary` to the diagnostics-facing run shape. Only the
-// non-secret status/timing/run-id fields are surfaced; gap arrays and event
-// counts stay in the richer summary surface.
-function projectDiagnosticsRun(run: ConnectorRunSummary | null): OwnerConnectionDiagnosticsRun | null {
+// non-secret status/timing/run-id fields come from the summary; the failure
+// summary comes from the shared run-status read model (`readRunStatus`) so it
+// matches `GET /v1/owner/runs/:runId` exactly. The run-history row alone cannot
+// supply it: the general executor stores its terminal reason in
+// `terminal_reason` and leaves `failure_reason` null (run-history-writer.ts),
+// and it never stores the runtime's `failure_message`.
+async function projectDiagnosticsRun(
+  run: ConnectorRunSummary | null,
+  controller: ControllerLike | null | undefined
+): Promise<OwnerConnectionDiagnosticsRun | null> {
   if (!run) {
     return null;
   }
+  const runId = run.run_id ?? null;
+  const runStatus = runId
+    ? await readRunStatus(
+        createSpineRunStatusReader(controller as RunStatusController | null | undefined),
+        runId,
+        OWNER_RUN_LINK_BASE
+      )
+    : null;
+  const failure = runStatus?.failure ?? null;
   return {
-    failure_reason: run.failure_reason ?? null,
+    failure,
+    failure_reason: failure?.reason ?? run.failure_reason ?? null,
     finished_at: run.finished_at ?? null,
-    run_id: run.run_id ?? null,
+    links: runId
+      ? {
+          run: `${OWNER_RUN_LINK_BASE}/${encodeURIComponent(runId)}`,
+          timeline: `${OWNER_RUN_LINK_BASE}/${encodeURIComponent(runId)}/timeline`,
+        }
+      : null,
+    run_id: runId,
     started_at: run.started_at,
     status: run.status,
   };
@@ -9605,8 +9644,8 @@ export async function getOwnerConnectionDiagnostics(
     // is the honest "no ingest evidence on this connection" state — never a
     // sibling connection's ingest time.
     last_ingest_at: summary.local_device_progress?.last_ingest_at ?? null,
-    last_run: projectDiagnosticsRun(summary.last_run),
-    last_successful_run: projectDiagnosticsRun(summary.last_successful_run),
+    last_run: await projectDiagnosticsRun(summary.last_run, controller),
+    last_successful_run: await projectDiagnosticsRun(summary.last_successful_run, controller),
     object: "owner_connection_diagnostics",
     recovery,
     rendered_verdict: summary.rendered_verdict,
