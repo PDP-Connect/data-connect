@@ -115,6 +115,17 @@ export type RunLinkBase = "/_ref/runs" | "/v1/owner/runs";
 export const REF_RUN_LINK_BASE: RunLinkBase = "/_ref/runs";
 export const OWNER_RUN_LINK_BASE: RunLinkBase = "/v1/owner/runs";
 
+/**
+ * Owner-bearer links for one run: its status and its timeline. The run-now
+ * 202 and diagnostics `last_run` both hand an owner agent these links.
+ */
+export function ownerRunLinks(runId: string): { readonly run: string; readonly timeline: string } {
+  return {
+    run: `${OWNER_RUN_LINK_BASE}/${encodeURIComponent(runId)}`,
+    ...timelineLink(runId, OWNER_RUN_LINK_BASE),
+  };
+}
+
 function timelineLink(runId: string, linkBase: RunLinkBase): { timeline: string } {
   return { timeline: `${linkBase}/${encodeURIComponent(runId)}/timeline` };
 }

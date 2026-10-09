@@ -225,6 +225,7 @@ import {
 import {
   createSpineRunStatusReader,
   OWNER_RUN_LINK_BASE,
+  ownerRunLinks,
   type RunStatusController,
   type RunStatusFailureSummary,
   readRunStatus,
@@ -9578,12 +9579,7 @@ async function projectDiagnosticsRun(
     failure,
     failure_reason: failure?.reason ?? run.failure_reason ?? null,
     finished_at: run.finished_at ?? null,
-    links: runId
-      ? {
-          run: `${OWNER_RUN_LINK_BASE}/${encodeURIComponent(runId)}`,
-          timeline: `${OWNER_RUN_LINK_BASE}/${encodeURIComponent(runId)}/timeline`,
-        }
-      : null,
+    links: runId ? ownerRunLinks(runId) : null,
     run_id: runId,
     started_at: run.started_at,
     status: run.status,

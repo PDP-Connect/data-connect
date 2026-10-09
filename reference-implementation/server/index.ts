@@ -522,7 +522,8 @@ import {
 import { mountRsHostedMcp } from "./routes/rs-hosted-mcp.ts";
 import { mountRsBlobsUpload, mountRsEventSubscriptions, mountRsMutation } from "./routes/rs-mutation.ts";
 import { mountRsBlobRead, mountRsReadQueries } from "./routes/rs-read.ts";
-import { mountRefRunCancel } from "./routes/run-cancel.ts";
+import { restoreRunPresentationForOwner } from "./routes/_run-control.ts";
+import { mountRefRunCancel, type RunCancelResult } from "./routes/run-cancel.ts";
 import { mountRefDevPlaygroundSession, mountRefRunInteraction } from "./routes/run-interaction.ts";
 import { mountRefSourceWebhooks } from "./routes/source-webhooks.ts";
 import {
@@ -2214,6 +2215,27 @@ function resolveSingleConnectorIdQueryValue(rawConnectorId: unknown) {
 
 function getOwnerTokenSubjectId(req: ReqLike) {
   return req.tokenInfo?.subject_id || OWNER_AUTH_DEFAULT_SUBJECT_ID;
+}
+
+// The cancel-run primitive both run-cancel route families call
+// (`POST /_ref/runs/:runId/cancel` and `POST /v1/owner/runs/:runId/cancel`).
+// It asks the controller first; when the controller has no active run with
+// that id, it asks the scheduler, which owns runs the controller does not
+// track.
+function createOwnerRunCancel(
+  controller: { cancelRun: (runId: string, ownerSubjectId: string) => Promise<RunCancelResult> } | null | undefined,
+  cancelScheduledRun: ((runId: string) => unknown) | null | undefined
+): (runId: string, requestingOwnerSubjectId: string) => Promise<RunCancelResult> {
+  return async (runId, requestingOwnerSubjectId) => {
+    if (!controller) {
+      return { run_id: runId, status: "no_active_run" };
+    }
+    const controllerResult = await controller.cancelRun(runId, requestingOwnerSubjectId);
+    if (controllerResult.status !== "no_active_run") {
+      return controllerResult;
+    }
+    return ((await cancelScheduledRun?.(runId)) as RunCancelResult | null | undefined) ?? controllerResult;
+  };
 }
 
 // The desktop host may still hold an old per-connector profile; the purger
@@ -6065,10 +6087,15 @@ export function buildAsApp(opts: ServerOpts = {}) {
         // blocked in structured browser assistance rather than a legacy
         // pending INTERACTION. Retire every presentation lifecycle here;
         // finalizeRunCleanup also purges every registry target and nonce.
-        await streamingRoutes.restoreOrRetirePresentationForRun({
-          reason: "run_cancelled",
-          run_id: runId,
-        });
+        await restoreRunPresentationForOwner(
+          runId,
+          controller.getActiveRunOwnerSubjectId(runId),
+          requestingOwnerSubjectId,
+          () => streamingRoutes.restoreOrRetirePresentationForRun({
+            reason: "run_cancelled",
+            run_id: runId,
+          })
+        );
         return await originalCancelRun(runId, requestingOwnerSubjectId);
       };
     }
@@ -6172,49 +6199,36 @@ export function buildAsApp(opts: ServerOpts = {}) {
   // same response envelope, same error codes.
   mountRefRunInteraction(app, {
     controller,
+    createTraceContext,
+    emitSpineEvent,
+    ensureRequestId,
     handleError,
+    logger: opts.logger,
+    ownerSubjectId: ownerAuth.subjectId || OWNER_AUTH_DEFAULT_SUBJECT_ID,
     pdppError,
     requireOwnerSession: ownerAuth.requireOwnerSession,
+    setReferenceTraceId,
   } as unknown as Parameters<typeof mountRefRunInteraction>[1]);
 
   // Reference-only, owner-only control surface: cancel a single active
   // controller-managed run by run id. Stops only the targeted run, preserves
   // already-collected records, and does not touch sibling runs, schedules,
-  // grants, or connections. Mutation-only; not a public PDPP API.
+  // grants, or connections. Mutation-only; not a public PDPP API. The bearer
+  // sibling `POST /v1/owner/runs/:runId/cancel` (buildRsApp) mounts the same
+  // handler over the same `createOwnerRunCancel`.
   // See openspec/changes/add-owner-run-cancellation-control.
   mountRefRunCancel(app, {
-    cancelRun: async (runId: string, requestingOwnerSubjectId: string) => {
-      if (!controller) {
-        return {
-          run_id: runId,
-          status: "no_active_run",
-        } as unknown as Parameters<typeof mountRefRunCancel>[1]["cancelRun"] extends (
-          id: string,
-          owner: string
-        ) => Promise<infer R>
-          ? R
-          : never;
-      }
-      const controllerResult = await controller.cancelRun(runId, requestingOwnerSubjectId);
-      if (controllerResult.status !== "no_active_run") {
-        return controllerResult as unknown as Parameters<typeof mountRefRunCancel>[1]["cancelRun"] extends (
-          id: string,
-          owner: string
-        ) => Promise<infer R>
-          ? R
-          : never;
-      }
-      return ((await opts.cancelScheduledRun?.(runId)) ?? controllerResult) as unknown as Parameters<
-        typeof mountRefRunCancel
-      >[1]["cancelRun"] extends (id: string, owner: string) => Promise<infer R>
-        ? R
-        : never;
-    },
+    cancelRun: createOwnerRunCancel(controller, opts.cancelScheduledRun),
     controller,
+    createTraceContext,
+    emitSpineEvent,
+    ensureRequestId,
     handleError,
+    logger: opts.logger,
     ownerSubjectId: ownerAuth.subjectId || OWNER_AUTH_DEFAULT_SUBJECT_ID,
     pdppError,
     requireOwnerSession: ownerAuth.requireOwnerSession,
+    setReferenceTraceId,
   } as unknown as Parameters<typeof mountRefRunCancel>[1]);
 
   // `/_ref/dataset/*` and `/_ref/records/version-stats` routes extracted to
@@ -8288,15 +8302,28 @@ function buildRsApp(opts: ServerOpts = {}) {
     setReferenceTraceId,
   } as unknown as Parameters<typeof mountOwnerConnectionDiagnostics>[1]);
 
-  // GET /v1/owner/runs/:runId and GET /v1/owner/runs/:runId/timeline are the
-  // owner-bearer siblings of the cookie-authed /_ref run reads. They mount the
-  // same handlers over the same run-status read model, so an owner agent that
-  // started a run can see how it ended and why, with the same redaction the
-  // console applies.
+  // /v1/owner/runs (list), /v1/owner/runs/:runId (status, timeline, cancel,
+  // interaction) are the owner-bearer siblings of the cookie-authed /_ref run
+  // routes. They mount the same handlers over the same read model, cancel
+  // primitive, and controller, so an owner agent that started a run can see
+  // how it ended, stop it, or answer its pending interaction, with the same
+  // validation, audit, and redaction the console gets.
   mountOwnerRuns(app, {
     ...createSpineRunStatusReader(opts.controller),
+    cancelRun: createOwnerRunCancel(
+      opts.controller as Parameters<typeof createOwnerRunCancel>[0],
+      opts.cancelScheduledRun
+    ),
+    canonicalConnectorKey,
+    controller: opts.controller,
+    createTraceContext,
+    emitSpineEvent,
+    ensureRequestId,
     getRunTerminalStatus: (runId: string) => getRunTerminalStatus(runId),
     handleError,
+    listSpineCorrelations: (kind: string, filters: Record<string, unknown>) => listSpineCorrelations(kind, filters),
+    logger: opts.logger,
+    ownerSubjectId: OWNER_AUTH_DEFAULT_SUBJECT_ID,
     // biome-ignore lint/suspicious/noShadow: The local name follows the external payload vocabulary at this boundary.
     listSpineEventsPage: (kind: string, id: string, pageOpts: unknown) =>
       listSpineEventsPage(
@@ -8307,6 +8334,7 @@ function buildRsApp(opts: ServerOpts = {}) {
     pdppError,
     requireOwner,
     requireToken,
+    setReferenceTraceId,
   } as unknown as Parameters<typeof mountOwnerRuns>[1]);
 
   // POST /v1/owner/connections/intents is the bearer-authed owner-agent
@@ -9435,6 +9463,9 @@ export async function startServer(opts: ServerOpts = {}) {
   warnIfLoopbackOriginPortDisagreesWithBoundPort("configured AS public origin", configuredAsPublicUrl, asPort);
 
   const rsApp = buildRsApp({
+    // Scheduler fallback for the owner-bearer run cancel route, the same
+    // callback `buildAsApp` receives for `/_ref/runs/:runId/cancel`.
+    cancelScheduledRun: (runId: string) => schedulerManager?.cancelRun?.(runId) ?? null,
     connectorInstallService,
     agentDiscoveryOrigin: referenceTopology.browserOrigin,
     asIssuer: configuredAsIssuer || asPublicUrl,

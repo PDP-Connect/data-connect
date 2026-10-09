@@ -576,26 +576,47 @@ const OWNER_AGENT_CONTROL_ACTION_CATALOG: readonly OwnerAgentControlActionDescri
     // placeholder; the per-connection projection substitutes the concrete id.
     urlTemplate: (rs) => `${rs}/v1/owner/connections/{connection_id}/run`,
   },
-  // Owner-mediated in this build: a trusted owner agent can discover that
-  // single-run cancellation exists, but it is served only over the owner-session
-  // reference control plane (`POST /_ref/runs/{run_id}/cancel`), not yet over the
-  // owner-agent bearer surface — so the catalog names it without advertising a
-  // bearer method/URL it does not serve (honesty rule; the owner-agent bearer
-  // route is the deferred R.2 slice). `cancel_run` is run-scoped (keyed on the
-  // active `run_id`, not `connection_id`) and is non-destructive: it stops one
-  // in-flight run and preserves that connection's already-collected records,
-  // schedule, grants, and configuration. It is deliberately distinct from
-  // `run_connection` (start), `revoke_connection` (stop future collection), and
-  // `delete_connection` (erase the past). See
-  // openspec/changes/add-owner-run-cancellation-control.
+  // Supported in this build: a trusted owner agent cancels one active run by
+  // run_id. Run-scoped (keyed on the active `run_id`, not `connection_id`), so
+  // it is a surface family whose URL carries a literal `{run_id}` placeholder
+  // and is never projected onto a connection row. Same handler and cancel
+  // primitive as the owner-session `POST /_ref/runs/{run_id}/cancel`. It is
+  // non-destructive: it stops one in-flight run and preserves that
+  // connection's already-collected records, schedule, grants, and
+  // configuration. It is deliberately distinct from `run_connection` (start),
+  // `revoke_connection` (stop future collection), and `delete_connection`
+  // (erase the past). See openspec/changes/add-owner-run-cancellation-control.
   {
     family: "cancel_run",
-    method: null,
+    method: "POST",
     reason:
-      "Cancel a single active run by its run_id. Non-destructive and run-scoped: it stops only that one in-flight run and preserves the connection's already-collected records, schedule, grants, and configuration — distinct from run_connection (start), revoke_connection (stop future collection), and delete_connection (erase the past). Served today only over the owner-session reference control plane (`POST /_ref/runs/{run_id}/cancel`, owner cookie); no owner-agent bearer route is offered yet, so no method/URL is advertised here. The run terminals as run.cancelled (owner_cancelled, or owner_cancel_forced if the connector child had to be force-terminated), never as a generic connector-exit failure.",
-    scope: "instance",
-    status: "owner_mediated",
-    urlTemplate: null,
+      "Cancel a single active run by its run_id. Non-destructive and run-scoped: it stops only that one in-flight run and preserves the connection's already-collected records, schedule, grants, and configuration — distinct from run_connection (start), revoke_connection (stop future collection), and delete_connection (erase the past). Returns 202 run_cancel_ack; an unknown or finished run returns a typed no_active_run (404) or run_already_terminal (409). The run terminals as run.cancelled (owner_cancelled, or owner_cancel_forced if the connector child had to be force-terminated), never as a generic connector-exit failure.",
+    scope: "surface",
+    status: "supported",
+    urlTemplate: (rs) => `${rs}/v1/owner/runs/{run_id}/cancel`,
+  },
+  // Supported in this build: a trusted owner agent answers a run's pending
+  // interaction (for example an OTP prompt) by run_id. Same handler as the
+  // owner-session `POST /_ref/runs/{run_id}/interaction`.
+  {
+    family: "answer_interaction",
+    method: "POST",
+    reason:
+      'Answer the pending interaction of an active run by run_id. Body: { interaction_id, status: "success" | "cancelled", data? }. Read interaction_id from the run timeline (`run.interaction_required`). The answer goes only to the waiting connector; it is never stored or logged. Returns 202 run_interaction_ack; a stale interaction_id returns interaction_id_mismatch (409) and a run with nothing pending returns no_pending_interaction (409).',
+    scope: "surface",
+    status: "supported",
+    urlTemplate: (rs) => `${rs}/v1/owner/runs/{run_id}/interaction`,
+  },
+  // Supported in this build: a trusted owner agent lists runs. Same handler as
+  // the owner-session `GET /_ref/runs`.
+  {
+    family: "list_runs",
+    method: "GET",
+    reason:
+      "List runs as run_summary rows (run_id, status, source, needs_input, first_at, last_at). Filters: connector_id, status, since, until, q; paginate with limit and cursor (next_cursor). GET inspect_run for one run's detail.",
+    scope: "surface",
+    status: "supported",
+    urlTemplate: (rs) => `${rs}/v1/owner/runs`,
   },
   // Supported in this build: a trusted owner agent reads one run's status and
   // timeline by run_id. Run-scoped, not connection-scoped, so it is a surface
@@ -606,7 +627,7 @@ const OWNER_AGENT_CONTROL_ACTION_CATALOG: readonly OwnerAgentControlActionDescri
     family: "inspect_run",
     method: "GET",
     reason:
-      "Read one run by run_id: status (active/completed/failed/cancelled/abandoned or a browser-surface state), started/completed timestamps, terminal_reason, and a bounded failure summary (reason, origin, owner-safe message). GET this URL with a run_id from a run_connection 202 or from diagnostics last_run. GET `/v1/owner/runs/{run_id}/timeline` for the run's redacted, paginated events (limit, cursor). Unknown run ids return a typed not_found (404).",
+      "Read one run by run_id: status (active/completed/failed/cancelled/abandoned or a browser-surface state), started/completed timestamps, terminal_reason, and a bounded failure summary (reason, origin, owner-safe message). GET this URL with a run_id from a run_connection 202 (links.run), list_runs, or diagnostics last_run. GET `/v1/owner/runs/{run_id}/timeline` for the run's redacted, paginated events (limit, cursor). Unknown run ids return a typed not_found (404).",
     scope: "surface",
     status: "supported",
     urlTemplate: (rs) => `${rs}/v1/owner/runs/{run_id}`,
