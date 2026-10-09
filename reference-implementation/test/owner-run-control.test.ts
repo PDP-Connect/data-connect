@@ -34,6 +34,9 @@ import pino from "pino";
 import { listSpineEventsPage } from "../lib/spine.ts";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { startServer } from "../server/index.ts";
+import { resolveRunControlActor, restoreRunPresentationForOwner } from "../server/routes/_run-control.ts";
+import { buildRunCancelHandler } from "../server/routes/run-cancel.ts";
+import { buildRunInteractionHandler } from "../server/routes/run-interaction.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
 import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
 import { resolveCredentialFreeFixtureRunEnv } from "./helpers/credential-free-run-fixture.ts";
@@ -595,4 +598,138 @@ test("a client (non-owner) bearer and a missing bearer cannot reach the run cont
 
     await endRun(asUrl, runId, interactionId);
   });
+});
+
+test("cancel rejects a mismatched owner before active presentation cleanup", async () => {
+  const actor = resolveRunControlActor("owner_bearer", {
+    tokenInfo: { pdpp_token_kind: "owner", subject_id: "another_owner" },
+  }, OWNER_SUBJECT_ID);
+  const presentation = { active: true };
+  let cleanupCalls = 0;
+  await assert.rejects(
+    restoreRunPresentationForOwner("run_presented", OWNER_SUBJECT_ID, actor.ownerSubjectId, async () => {
+      cleanupCalls += 1;
+      presentation.active = false;
+    }),
+    { code: "run_owner_mismatch", http_status: 403 }
+  );
+  assert.equal(cleanupCalls, 0);
+  assert.equal(presentation.active, true);
+});
+
+async function assertRejectingAuditPreservesOutcome(
+  route: "cancel" | "interaction",
+  controllerRejects: boolean
+): Promise<void> {
+  for (const surface of ["owner_session", "owner_bearer"] as const) {
+    const originalError = Object.assign(new Error("controller rejected"), {
+      code: "run_owner_mismatch",
+      http_status: 403,
+    });
+    const handledErrors: unknown[] = [];
+    const auditEvents: Record<string, unknown>[] = [];
+    const warnings: unknown[] = [];
+    let mutations = 0;
+    let statusCode = 0;
+    let responseBody: unknown;
+    const res = {
+      json(body: unknown) {
+        responseBody = body;
+        return res;
+      },
+      status(code: number) {
+        statusCode = code;
+        return res;
+      },
+    };
+    const ctx = {
+      controller: {
+        cancelRun: async (runId: string, ownerSubjectId: string) => {
+          mutations += 1;
+          assert.equal(ownerSubjectId, OWNER_SUBJECT_ID);
+          if (controllerRejects) {
+            throw originalError;
+          }
+          return { run_id: runId, status: "cancel_requested" };
+        },
+        getActiveRunOwnerSubjectId: () => OWNER_SUBJECT_ID,
+        respondToInteraction: async (
+          _runId: string,
+          input: { readonly data?: Record<string, unknown> | null | undefined }
+        ) => {
+          mutations += 1;
+          assert.equal(input.data?.code, OTP_SECRET);
+          if (controllerRejects) {
+            throw originalError;
+          }
+          return { status: "resolved" };
+        },
+      },
+      createTraceContext: () => ({ request_id: "req_audit", scenario_id: "scenario_audit", trace_id: "trace_audit" }),
+      emitSpineEvent: async (event: Record<string, unknown>) => {
+        auditEvents.push(event);
+        // An emitter error can itself contain secrets; do not log its text.
+        throw new Error(OTP_SECRET);
+      },
+      ensureRequestId: () => "req_audit",
+      handleError: (_res: unknown, err: unknown) => {
+        handledErrors.push(err);
+        res.status(403).json({ error: { code: originalError.code } });
+      },
+      logger: {
+        warn: (obj: Record<string, unknown>, msg: string) => {
+          warnings.push({ ...obj, msg });
+        },
+      },
+      ownerSubjectId: OWNER_SUBJECT_ID,
+      pdppError: () => assert.fail("unexpected typed rejection"),
+      setReferenceTraceId: () => undefined,
+    };
+    const handler = route === "cancel"
+      ? buildRunCancelHandler(ctx, surface)
+      : buildRunInteractionHandler(ctx, surface);
+    // biome-ignore lint/performance/noAwaitInLoops: Both auth surfaces exercise the same handler independently.
+    await handler({
+      body: { data: { code: OTP_SECRET }, interaction_id: "int_audit", status: "success" },
+      ownerSession: { sub: OWNER_SUBJECT_ID },
+      params: { runId: "run_audit" },
+      tokenInfo: { pdpp_token_kind: "owner", subject_id: OWNER_SUBJECT_ID },
+    }, res);
+    assert.equal(mutations, 1);
+    assert.equal(auditEvents.length, 1, "audit failure is not retried as a mutation failure");
+    assert.equal(auditEvents[0]?.status, controllerRejects ? "failed" : "succeeded");
+    assert.deepEqual(handledErrors, controllerRejects ? [originalError] : []);
+    if (controllerRejects) {
+      assert.equal(handledErrors[0], originalError, "handleError receives the original error");
+      assert.equal(statusCode, 403);
+      assert.deepEqual(responseBody, { error: { code: "run_owner_mismatch" } });
+    } else {
+      assert.equal(statusCode, 202);
+      assert.deepEqual(responseBody, route === "cancel"
+        ? { object: "run_cancel_ack", run_id: "run_audit", status: "cancel_requested" }
+        : { interaction_id: "int_audit", object: "run_interaction_ack", run_id: "run_audit", status: "resolved" });
+    }
+    assert.deepEqual(warnings, [{
+      msg: "run_control_audit_failed",
+      operation: route === "cancel" ? "cancel_run" : "answer_interaction",
+      outcome: controllerRejects ? "failed" : "succeeded",
+    }]);
+    assert.ok(!JSON.stringify({ auditEvents, responseBody, warnings }).includes(OTP_SECRET));
+  }
+}
+
+test("cancel preserves success when audit emission rejects", async () => {
+  await assertRejectingAuditPreservesOutcome("cancel", false);
+});
+
+test("cancel preserves the controller error when failure audit emission rejects", async () => {
+  await assertRejectingAuditPreservesOutcome("cancel", true);
+});
+
+test("interaction preserves success when audit emission rejects", async () => {
+  await assertRejectingAuditPreservesOutcome("interaction", false);
+});
+
+test("interaction preserves the controller error when failure audit emission rejects", async () => {
+  await assertRejectingAuditPreservesOutcome("interaction", true);
 });

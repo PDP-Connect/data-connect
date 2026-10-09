@@ -25,7 +25,7 @@
 import type { MiddlewareHandler, PdppErrorFn } from "./_route-contract.ts";
 import {
   decodeRunIdParam,
-  emitRunControlAudit,
+  emitRunControlAuditSafely,
   type RunControlAuditContext,
   type RunControlRejection,
   type RunControlRequest,
@@ -118,7 +118,7 @@ export function buildRunCancelHandler(ctx: RunCancelContext, surface: RunControl
     const runId = decodeRunIdParam(req.params.runId as string);
     const actor = resolveRunControlActor(surface, req, ctx.ownerSubjectId);
     const reject = async (rejection: CancelRejection, param?: string) => {
-      await emitRunControlAudit(ctx, actor, res, {
+      await emitRunControlAuditSafely(ctx, actor, res, {
         error: rejection,
         operation: "cancel_run",
         outcome: "failed",
@@ -139,7 +139,7 @@ export function buildRunCancelHandler(ctx: RunCancelContext, surface: RunControl
       if (rejection) {
         return await reject(rejection, "run_id");
       }
-      await emitRunControlAudit(ctx, actor, res, {
+      await emitRunControlAuditSafely(ctx, actor, res, {
         facts: { cancel_status: result.status },
         operation: "cancel_run",
         outcome: "succeeded",
@@ -151,7 +151,7 @@ export function buildRunCancelHandler(ctx: RunCancelContext, surface: RunControl
         status: result.status,
       });
     } catch (err) {
-      await emitRunControlAudit(ctx, actor, res, { error: err, operation: "cancel_run", outcome: "failed", runId });
+      await emitRunControlAuditSafely(ctx, actor, res, { error: err, operation: "cancel_run", outcome: "failed", runId });
       return ctx.handleError(res, err);
     }
   };

@@ -40,11 +40,31 @@ export function decodeRunIdParam(raw: string): string {
   }
 }
 
+// Presentation teardown is a side effect, so reject a different owner before
+// invoking it. The controller retains its own check when cancellation starts.
+export async function restoreRunPresentationForOwner(
+  runId: string,
+  admittedOwnerSubjectId: string | null,
+  requestingOwnerSubjectId: string,
+  restorePresentation: () => Promise<void>
+): Promise<void> {
+  if (admittedOwnerSubjectId !== null && admittedOwnerSubjectId !== requestingOwnerSubjectId) {
+    throw Object.assign(new Error(`Run ${runId} does not belong to owner '${requestingOwnerSubjectId}'.`), {
+      code: "run_owner_mismatch",
+      http_status: 403,
+    });
+  }
+  await restorePresentation();
+}
+
 export type RunControlSurface = OwnerSurface;
 export type RunControlRequest = OwnerActorRequest;
 
 export interface RunControlAuditContext<Response> extends OwnerAuditTraceContext<Response> {
   emitSpineEvent: (event: Record<string, unknown>) => Promise<unknown>;
+  readonly logger?: {
+    warn: (obj: Record<string, unknown>, msg: string) => void;
+  } | undefined;
   /** Owner subject for a request that carries none (owner auth disabled, or a bearer without `subject_id`). */
   readonly ownerSubjectId: string;
 }
@@ -131,4 +151,22 @@ export async function emitRunControlAudit<Response>(
     subject_type: "subject",
     trace_id: trace.trace_id,
   });
+}
+
+// Audit is best-effort: it must not change a mutation's result or mask the
+// original controller error. Do not log the emitter error or answer data.
+export async function emitRunControlAuditSafely<Response>(
+  ctx: RunControlAuditContext<Response>,
+  actor: OwnerActor,
+  res: Response,
+  args: RunControlAuditArgs
+): Promise<void> {
+  try {
+    await emitRunControlAudit(ctx, actor, res, args);
+  } catch {
+    ctx.logger?.warn(
+      { operation: args.operation, outcome: args.outcome },
+      "run_control_audit_failed"
+    );
+  }
 }

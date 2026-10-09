@@ -522,6 +522,7 @@ import {
 import { mountRsHostedMcp } from "./routes/rs-hosted-mcp.ts";
 import { mountRsBlobsUpload, mountRsEventSubscriptions, mountRsMutation } from "./routes/rs-mutation.ts";
 import { mountRsBlobRead, mountRsReadQueries } from "./routes/rs-read.ts";
+import { restoreRunPresentationForOwner } from "./routes/_run-control.ts";
 import { mountRefRunCancel, type RunCancelResult } from "./routes/run-cancel.ts";
 import { mountRefDevPlaygroundSession, mountRefRunInteraction } from "./routes/run-interaction.ts";
 import { mountRefSourceWebhooks } from "./routes/source-webhooks.ts";
@@ -6086,10 +6087,15 @@ export function buildAsApp(opts: ServerOpts = {}) {
         // blocked in structured browser assistance rather than a legacy
         // pending INTERACTION. Retire every presentation lifecycle here;
         // finalizeRunCleanup also purges every registry target and nonce.
-        await streamingRoutes.restoreOrRetirePresentationForRun({
-          reason: "run_cancelled",
-          run_id: runId,
-        });
+        await restoreRunPresentationForOwner(
+          runId,
+          controller.getActiveRunOwnerSubjectId(runId),
+          requestingOwnerSubjectId,
+          () => streamingRoutes.restoreOrRetirePresentationForRun({
+            reason: "run_cancelled",
+            run_id: runId,
+          })
+        );
         return await originalCancelRun(runId, requestingOwnerSubjectId);
       };
     }
@@ -6197,6 +6203,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
     emitSpineEvent,
     ensureRequestId,
     handleError,
+    logger: opts.logger,
     ownerSubjectId: ownerAuth.subjectId || OWNER_AUTH_DEFAULT_SUBJECT_ID,
     pdppError,
     requireOwnerSession: ownerAuth.requireOwnerSession,
@@ -6217,6 +6224,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
     emitSpineEvent,
     ensureRequestId,
     handleError,
+    logger: opts.logger,
     ownerSubjectId: ownerAuth.subjectId || OWNER_AUTH_DEFAULT_SUBJECT_ID,
     pdppError,
     requireOwnerSession: ownerAuth.requireOwnerSession,
@@ -8314,6 +8322,7 @@ function buildRsApp(opts: ServerOpts = {}) {
     getRunTerminalStatus: (runId: string) => getRunTerminalStatus(runId),
     handleError,
     listSpineCorrelations: (kind: string, filters: Record<string, unknown>) => listSpineCorrelations(kind, filters),
+    logger: opts.logger,
     ownerSubjectId: OWNER_AUTH_DEFAULT_SUBJECT_ID,
     // biome-ignore lint/suspicious/noShadow: The local name follows the external payload vocabulary at this boundary.
     listSpineEventsPage: (kind: string, id: string, pageOpts: unknown) =>

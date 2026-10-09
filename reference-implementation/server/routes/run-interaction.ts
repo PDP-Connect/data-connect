@@ -26,7 +26,7 @@ import { isNullish } from "../../lib/nullish.ts";
 import type { MiddlewareHandler, PdppErrorFn, RouteArg } from "./_route-contract.ts";
 import {
   decodeRunIdParam,
-  emitRunControlAudit,
+  emitRunControlAuditSafely,
   type RunControlAuditContext,
   type RunControlRejection,
   type RunControlRequest,
@@ -163,7 +163,7 @@ export function buildRunInteractionHandler(ctx: RunInteractionContext, surface: 
     const actor = resolveRunControlActor(surface, req, ctx.ownerSubjectId);
     let facts: Record<string, string | boolean | null> = {};
     const reject = async (rejection: InteractionRejection) => {
-      await emitRunControlAudit(ctx, actor, res, {
+      await emitRunControlAuditSafely(ctx, actor, res, {
         error: rejection,
         facts,
         operation: "answer_interaction",
@@ -199,7 +199,7 @@ export function buildRunInteractionHandler(ctx: RunInteractionContext, surface: 
         interaction_id: answer.interaction_id,
         status: answer.status,
       });
-      await emitRunControlAudit(ctx, actor, res, {
+      await emitRunControlAuditSafely(ctx, actor, res, {
         facts,
         operation: "answer_interaction",
         outcome: "succeeded",
@@ -212,7 +212,7 @@ export function buildRunInteractionHandler(ctx: RunInteractionContext, surface: 
         status: resolved.status,
       });
     } catch (err) {
-      await emitRunControlAudit(ctx, actor, res, {
+      await emitRunControlAuditSafely(ctx, actor, res, {
         error: err,
         facts,
         operation: "answer_interaction",
