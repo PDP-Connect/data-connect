@@ -770,9 +770,9 @@ test("Collection Profile conformance", async (t) => {
     const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-start-capture-"));
     const capturePath = join(tmpDir, "start.json");
     const { connectorPath, cleanup } = createStartCaptureConnector(capturePath);
-    const scope = {
-      streams: [{ fields: ["id"], name: "items", time_range: { since: "2026-01-01T00:00:00Z" } }],
-    };
+    // MINIMAL_MANIFEST's stream has no consent_time_field, so START must not
+    // carry a time_range for it (Collection Profile 5.1).
+    const scope = { streams: [{ fields: ["id"], name: "items" }] };
 
     try {
       const result = await runTestConnector({
@@ -1147,6 +1147,34 @@ test("Collection Profile conformance", async (t) => {
     }
   );
 
+  await t.test("runtime rejects explicit START.scope time_range on a stream without a consent_time_field", async () => {
+    const { connectorPath, cleanup } = createTestConnector([{ records_emitted: 0, status: "succeeded", type: "DONE" }]);
+
+    try {
+      await assert.rejects(
+        () =>
+          runTestConnector({
+            collectionMode: "full_refresh",
+            connectorId: "test",
+            connectorPath,
+            manifest: MINIMAL_MANIFEST,
+            onInteraction: async () => ({}),
+            ownerToken: "test",
+            persistState: true,
+            rsUrl: "http://localhost:9999",
+            scope: {
+              streams: [{ name: "items", time_range: { since: "2026-09-05T00:00:00Z" } }],
+            },
+            state: null,
+          }),
+        // biome-ignore lint/performance/useTopLevelRegex: localized test assertion preserves its explicit contract.
+        /START\.scope stream 'items' has no consent_time_field, so it must not include time_range/
+      );
+    } finally {
+      cleanup();
+    }
+  });
+
   await t.test("runtime rejects unresolved START.scope view selectors instead of passing them through", async () => {
     const { connectorPath, cleanup } = createTestConnector([{ records_emitted: 0, status: "succeeded", type: "DONE" }]);
 
@@ -1302,7 +1330,7 @@ test("Collection Profile conformance", async (t) => {
             schema: {
               properties: {
                 id: { type: "string" },
-                source_updated_at: { type: "string" },
+                source_updated_at: { format: "date-time", type: "string" },
                 value: { type: "string" },
               },
               required: ["value"],
@@ -1373,7 +1401,7 @@ test("Collection Profile conformance", async (t) => {
             schema: {
               properties: {
                 id: { type: "string" },
-                source_updated_at: { type: "string" },
+                source_updated_at: { format: "date-time", type: "string" },
                 value: { type: "string" },
               },
               required: ["value"],
@@ -1420,6 +1448,150 @@ test("Collection Profile conformance", async (t) => {
         const captured = JSON.parse(readFileSync(capturePath, "utf8"));
         assert.deepEqual(captured.scope, {
           streams: [{ name: "temporal_items", time_range: { since: declaredSince } }, { name: "non_temporal_items" }],
+        });
+      } finally {
+        cleanup();
+        rmSync(tmpDir, { force: true, recursive: true });
+        await closeServer(server);
+      }
+    }
+  );
+
+  await t.test(
+    "a declared collection_scope.since reaches each temporal stream in its consent field's format (Collection Profile 5.1)",
+    async () => {
+      const server = await startServer({
+        asPort: 0,
+        dbPath: ":memory:",
+        preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
+        quiet: true,
+        rsPort: 0,
+      });
+      const { asPort, rsPort } = server;
+      const temporalStream = (name: string, field: Record<string, unknown>) => ({
+        consent_time_field: "occurred",
+        name,
+        primary_key: ["id"],
+        schema: {
+          properties: { id: { type: "string" }, occurred: field, value: { type: "string" } },
+          required: ["value"],
+          type: "object",
+        },
+        semantics: "append_only",
+      });
+      const manifest = {
+        ...MINIMAL_MANIFEST,
+        connector_id: "test-hosted-owner-window-by-format",
+        streams: [
+          temporalStream("dated", { format: "date", type: "string" }),
+          temporalStream("nullable_dated", { format: "date", type: ["string", "null"] }),
+          temporalStream("instants", { format: "date-time", type: "string" }),
+          temporalStream("epoch_seconds", { type: "integer" }),
+          temporalStream("formatless", { type: "string" }),
+        ],
+      };
+      const { ownerToken, connectorId } = await setupConnector(server, asPort, manifest);
+      const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-hosted-owner-window-by-format-"));
+      const capturePath = join(tmpDir, "start.json");
+      const { connectorPath, cleanup } = createStartCaptureConnector(capturePath);
+      // "Since 5 Sep" for an owner in UTC-4.
+      const declaredSince = "2026-09-05T00:00:00-04:00";
+      const storedScope = buildStoredCollectionScope({ since: declaredSince }, "2026-09-06T00:00:00.000Z");
+
+      try {
+        const result = await runTestConnector({
+          collectionMode: "full_refresh",
+          connectorId,
+          connectorPath,
+          manifest,
+          onInteraction: async () => ({}),
+          ownerToken,
+          persistState: true,
+          rsUrl: `http://localhost:${rsPort}`,
+          state: { [COLLECTION_SCOPE_STATE_KEY]: storedScope },
+        });
+
+        assert.equal(result.status, "succeeded");
+        const captured = JSON.parse(readFileSync(capturePath, "utf8"));
+        assert.deepEqual(captured.scope, {
+          streams: [
+            // A date field gets a full-date, the owner's calendar day.
+            { name: "dated", time_range: { since: "2026-09-05" } },
+            { name: "nullable_dated", time_range: { since: "2026-09-05" } },
+            // A date-time field gets the owner's instant unchanged.
+            { name: "instants", time_range: { since: declaredSince } },
+            // A field with no date or date-time format cannot take a bound.
+            { name: "epoch_seconds" },
+            { name: "formatless" },
+          ],
+        });
+      } finally {
+        cleanup();
+        rmSync(tmpDir, { force: true, recursive: true });
+        await closeServer(server);
+      }
+    }
+  );
+
+  await t.test(
+    "a stored legacy collection_scope.since with no offset still runs, read at its earliest instant (+14:00)",
+    async () => {
+      const server = await startServer({
+        asPort: 0,
+        dbPath: ":memory:",
+        preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
+        quiet: true,
+        rsPort: 0,
+      });
+      const { asPort, rsPort } = server;
+      const temporalStream = (name: string, format: string) => ({
+        consent_time_field: "occurred",
+        name,
+        primary_key: ["id"],
+        schema: {
+          properties: { id: { type: "string" }, occurred: { format, type: "string" }, value: { type: "string" } },
+          required: ["value"],
+          type: "object",
+        },
+        semantics: "append_only",
+      });
+      const manifest = {
+        ...MINIMAL_MANIFEST,
+        connector_id: "test-hosted-legacy-offsetless-scope",
+        streams: [temporalStream("dated", "date"), temporalStream("instants", "date-time")],
+      };
+      const { ownerToken, connectorId } = await setupConnector(server, asPort, manifest);
+      const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-hosted-legacy-offsetless-scope-"));
+      const capturePath = join(tmpDir, "start.json");
+      const { connectorPath, cleanup } = createStartCaptureConnector(capturePath);
+      // Written raw, as the route stored it before it required an offset;
+      // buildStoredCollectionScope would canonicalize it.
+      const legacyStoredScope = {
+        declared_at: "2026-09-01T00:00:00.000Z",
+        fingerprint: "since=2026-09-05T08:30:00",
+        scope: { since: "2026-09-05T08:30:00" },
+      };
+
+      try {
+        const result = await runTestConnector({
+          collectionMode: "full_refresh",
+          connectorId,
+          connectorPath,
+          manifest,
+          onInteraction: async () => ({}),
+          ownerToken,
+          persistState: true,
+          rsUrl: `http://localhost:${rsPort}`,
+          state: { [COLLECTION_SCOPE_STATE_KEY]: legacyStoredScope },
+        });
+
+        assert.equal(result.status, "succeeded");
+        const captured = JSON.parse(readFileSync(capturePath, "utf8"));
+        assert.deepEqual(captured.scope, {
+          streams: [
+            { name: "dated", time_range: { since: "2026-09-05" } },
+            { name: "instants", time_range: { since: "2026-09-05T08:30:00+14:00" } },
+          ],
         });
       } finally {
         cleanup();
