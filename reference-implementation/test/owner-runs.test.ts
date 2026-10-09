@@ -18,6 +18,7 @@
  *     `links` differ) and the same timeline envelope for the same run;
  *   - parity: both return the same typed 404 for an unknown run;
  *   - a request without a bearer is rejected (401);
+ *   - an active non-owner client bearer is rejected on both run reads (403);
  *   - diagnostics `last_run` carries the same failure summary as the run read.
  */
 
@@ -113,6 +114,47 @@ async function issueOwnerToken(asUrl: string): Promise<string> {
   ).body as { access_token?: string };
   assert.ok(tok.access_token, "device exchange should issue an owner token");
   return tok.access_token;
+}
+
+// Consent approval yields an active client-kind bearer, not an owner bearer.
+async function issueClientToken(asUrl: string, connectorId: string): Promise<string> {
+  const postJson = (url: string, body: Record<string, unknown>): Promise<JsonResult> =>
+    fetchJson(url, {
+      body: JSON.stringify(body),
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      method: "POST",
+    });
+  const par = (
+    await postJson(`${asUrl}/oauth/par`, {
+      authorization_details: [
+        {
+          access_mode: "continuous",
+          purpose_code: "https://pdpp.dev/purpose/analytics",
+          purpose_description: "owner run read boundary test",
+          source: { id: connectorId, kind: "connector" },
+          streams: [{ fields: ["id"], instance_ids: [CONNECTION_ID], name: "top_artists" }],
+          type: "https://pdpp.dev/data-access",
+        },
+      ],
+      client_id: "longview",
+    })
+  ).body as { request_uri?: string };
+  assert.ok(par.request_uri, "PAR should return a request_uri");
+  const review = (
+    await postJson(`${asUrl}/consent/review`, {
+      request_uri: par.request_uri,
+      subject_id: OWNER_SUBJECT_ID,
+    })
+  ).body as { approval_review_revision?: string; request_uri?: string };
+  assert.ok(review.approval_review_revision);
+  const approved = (
+    await postJson(`${asUrl}/consent/approve`, {
+      approval_review_revision: review.approval_review_revision,
+      request_uri: review.request_uri,
+    })
+  ).body as { token?: string };
+  assert.ok(approved.token, "consent approval should issue a client grant token");
+  return approved.token;
 }
 
 // Registers a reference connector and one active connection for it; returns
@@ -250,6 +292,24 @@ test("owner run reads reject a request without a bearer", async () => {
     await seedProtocolViolationRun(await seedConnection(asUrl));
     assert.equal((await fetchJson(`${rsUrl}/v1/owner/runs/${RUN_ID}`)).status, 401);
     assert.equal((await fetchJson(`${rsUrl}/v1/owner/runs/${RUN_ID}/timeline`)).status, 401);
+  });
+});
+
+test("owner run reads reject an active non-owner client bearer", async () => {
+  await withServer(async ({ asUrl, rsUrl }) => {
+    const connectorId = await seedConnection(asUrl);
+    await seedProtocolViolationRun(connectorId);
+    // PAR names the source by its manifest URI, not the canonical key the run is stamped with.
+    const manifest = JSON.parse(
+      readFileSync(join(REFERENCE_IMPL_DIR, "fixtures", "seed-manifests", "spotify.json"), "utf8")
+    ) as { connector_id: string };
+    const auth = { headers: { Authorization: `Bearer ${await issueClientToken(asUrl, manifest.connector_id)}` } };
+
+    for (const path of [`/v1/owner/runs/${RUN_ID}`, `/v1/owner/runs/${RUN_ID}/timeline`]) {
+      const { body, status } = await fetchJson(`${rsUrl}${path}`, auth);
+      assert.equal(status, 403, path);
+      assert.equal((body.error as Record<string, unknown>).code, "permission_error", path);
+    }
   });
 });
 
