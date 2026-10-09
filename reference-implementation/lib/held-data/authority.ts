@@ -17,8 +17,15 @@
  * PROTOTYPE: experimental held-data lifecycle work, off by default.
  */
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { appendJournalEntry, JournalReader } from "../authority-journal/journal.ts";
+import { existsSync, statSync } from "node:fs";
+import {
+  appendJournalEntry,
+  JournalReader,
+  journalCoversEvidence,
+  readLossEvidence,
+  registerLossEvidence,
+  writeLossEvidence,
+} from "../authority-journal/journal.ts";
 
 export type Disposition = "keep" | "delete";
 
@@ -97,6 +104,8 @@ type Entry =
       outcome: "deleted" | "exception";
       detail: string | null;
       at: number;
+      /** AS time the report arrived (`at` is the client-reported time). */
+      received_at?: number;
     };
 
 type GrantEntry = Extract<Entry, { t: "hd_grant" }>;
@@ -109,6 +118,12 @@ interface ErasureFacts {
   deliveredAt: number | null;
   receiptAt: number | null;
   completion: { at: number; outcome: "deleted" | "exception"; detail: string | null } | null;
+  /**
+   * `retained` reports (deletion complete except legally retained data), in
+   * order. A later report with different terms corrects an earlier one
+   * without overwriting it. None of them is completion.
+   */
+  retained: { reportedAt: number; receivedAt: number; detail: string | null }[];
 }
 
 interface GrantFacts {
@@ -211,22 +226,28 @@ export class HeldDataAuthority {
    * Every answer and write then fails closed.
    */
   get lost(): boolean {
-    return this.#lostHistory || this.#corrupt;
+    return this.#lostHistory || this.#corrupt || (!this.#o.primaryHead && !journalCoversEvidence(this.#o.journalPath));
   }
 
   private constructor(o: HeldDataAuthorityOptions) {
     this.#o = o;
     this.#reader = new JournalReader<Entry>(o.journalPath);
     this.#refresh();
-    const marker =
-      o.epochMarkerPath && existsSync(o.epochMarkerPath) ? readFileSync(o.epochMarkerPath, "utf8").trim() : null;
-    this.#lostHistory = marker !== null && marker !== this.#epoch;
+    const evidence = o.epochMarkerPath ? readLossEvidence(o.epochMarkerPath) : null;
+    if (o.epochMarkerPath && !o.primaryHead) {
+      registerLossEvidence(o.journalPath, o.epochMarkerPath);
+    }
+    // Lost: the evidence names another history, or this journal is shorter
+    // than the evidence (an acknowledged terminal event was rolled back).
+    this.#lostHistory =
+      evidence !== null &&
+      (evidence.epoch !== this.#epoch || !existsSync(o.journalPath) || statSync(o.journalPath).size < evidence.bytes);
     if (!(this.lost || this.#epoch || o.primaryHead)) {
       const id = `hdepoch_${randomUUID()}`;
       this.#append({ t: "hd_epoch", id, grant_id: "", at: o.now() });
     }
-    if (!this.lost && o.epochMarkerPath && this.#epoch) {
-      writeFileSync(o.epochMarkerPath, this.#epoch);
+    if (!this.lost && o.epochMarkerPath && this.#epoch && !o.primaryHead && evidence?.epoch !== this.#epoch) {
+      writeLossEvidence(o.epochMarkerPath, { epoch: this.#epoch, bytes: statSync(o.journalPath).size });
     }
   }
 
@@ -416,6 +437,12 @@ export class HeldDataAuthority {
     }
   }
 
+  /** The kind a credential was recorded as, or null if unknown. */
+  credentialKind(token: string): CredentialKind | null {
+    this.#refresh();
+    return this.#creds.get(credentialDigest(token))?.kind ?? null;
+  }
+
   /** True if this token was disabled for lifecycle compromise. */
   isDisabled(token: string): boolean {
     this.#refresh();
@@ -472,7 +499,8 @@ export class HeldDataAuthority {
     clientId: string;
     grantId: string;
     operationId: string;
-    kind: "receipt" | "completion";
+    kind: "receipt" | "completion" | "retained";
+    /** Legacy form of `retained`: `completion` with outcome `exception`. */
     outcome?: "deleted" | "exception";
     detail?: string;
     /** Client-reported time of the event (Core `reported_at`). Default: now. */
@@ -501,15 +529,34 @@ export class HeldDataAuthority {
       }
       return true;
     }
+    const retained = input.kind === "retained" || input.outcome === "exception";
+    const detail = input.detail ?? null;
+    if (retained) {
+      // Each retained report with new terms is kept; an identical repeat changes nothing.
+      if (e.retained.at(-1)?.detail !== detail) {
+        this.#append({
+          t: "hd_complete",
+          id: randomUUID(),
+          grant_id: input.grantId,
+          op: input.operationId,
+          outcome: "exception",
+          detail,
+          at: input.reportedAt ?? this.#o.now(),
+          received_at: this.#o.now(),
+        });
+      }
+      return true;
+    }
     if (e.completion === null) {
       this.#append({
         t: "hd_complete",
         id: randomUUID(),
         grant_id: input.grantId,
         op: input.operationId,
-        outcome: input.outcome ?? "deleted",
-        detail: input.detail ?? null,
+        outcome: "deleted",
+        detail,
         at: input.reportedAt ?? this.#o.now(),
+        received_at: this.#o.now(),
       });
     }
     return true;
@@ -538,7 +585,8 @@ export class HeldDataAuthority {
       }
       const grantIds = new Set<string>();
       for (const [id, f] of this.#grants) {
-        if (f.grant.client_id === input.clientId && f.grant.confidential) {
+        // Client authentication proves the client; each grant issued to it is authorized.
+        if (f.grant.client_id === input.clientId) {
           grantIds.add(id);
         }
       }
@@ -589,7 +637,9 @@ export class HeldDataAuthority {
       // K4: a positive answer must be ordered against every acknowledged
       // terminal event. A replica that cannot show it is current may still
       // serve a negative answer, which is terminal and cannot go stale.
-      if (answer.ordinary_use === "permitted" && !current) {
+      // Custody-only is a positive assessment too (it refreshes the long-stop),
+      // so only an erasure answer may come from a view that cannot be shown current.
+      if (answer.ordinary_use !== "stopped" && !current) {
         throw new AuthorityUnavailableError("replica cannot confirm it is current");
       }
       out.push(answer);
@@ -620,6 +670,7 @@ export class HeldDataAuthority {
       receipt_at: number | null;
       delete_by: number | null;
       completion: ErasureFacts["completion"];
+      retained: ErasureFacts["retained"];
     }[];
   } | null {
     this.#refresh();
@@ -639,6 +690,7 @@ export class HeldDataAuthority {
         receipt_at: e.receiptAt,
         delete_by: e.receiptAt === null ? null : e.receiptAt + deletionPeriodMs,
         completion: e.completion,
+        retained: e.retained,
       })),
     };
   }
@@ -804,7 +856,7 @@ export class HeldDataAuthority {
         const g = this.#grants.get(e.grant_id);
         if (g) {
           this.#ops.set(e.id, { grantId: e.grant_id, index: g.erasures.length });
-          g.erasures.push({ entry: e, seq, deliveredAt: null, receiptAt: null, completion: null });
+          g.erasures.push({ entry: e, seq, deliveredAt: null, receiptAt: null, completion: null, retained: [] });
         }
         return;
       }
@@ -817,7 +869,11 @@ export class HeldDataAuthority {
           return;
         }
         if (e.t === "hd_complete") {
-          f.completion ??= { at: e.at, outcome: e.outcome, detail: e.detail };
+          if (e.outcome === "exception") {
+            f.retained.push({ reportedAt: e.at, receivedAt: e.received_at ?? e.at, detail: e.detail });
+          } else {
+            f.completion ??= { at: e.at, outcome: e.outcome, detail: e.detail };
+          }
         } else if (e.t === "hd_delivered") {
           f.deliveredAt ??= e.at;
         } else {

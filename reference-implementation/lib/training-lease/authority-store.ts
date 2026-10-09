@@ -35,7 +35,7 @@ import { randomUUID } from "node:crypto";
 import { closeSync, fstatSync, openSync, readSync } from "node:fs";
 import type BetterSqlite3 from "better-sqlite3";
 import { SqliteDriver } from "../../server/sqlite-driver.ts";
-import { appendJournalEntry, JournalReader } from "../authority-journal/journal.ts";
+import { appendJournalEntry, JournalReader, journalCoversEvidence } from "../authority-journal/journal.ts";
 import {
   AI_TRAINING_PERMISSION,
   LEASE_JWS_TYP,
@@ -429,6 +429,11 @@ export class TrainingAuthorityStore {
     } | null = null;
     let failure: IssueRefusal | null = null;
     const requestedAcq = input.acquisitionGrantIds ? [...new Set(input.acquisitionGrantIds)] : undefined;
+    // Held-data prototype (Core: Lifecycle durability): a journal that lost an
+    // acknowledged terminal event, per its loss-detection evidence, issues nothing.
+    if (!journalCoversEvidence(this.#o.journalPath)) {
+      return { ok: false, reason: "unavailable" };
+    }
     try {
       this.#store
         .transaction(() => {

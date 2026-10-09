@@ -12305,6 +12305,11 @@ export async function readGrantForProcessing(
 export interface HeldDataEnding {
   path: EndingPath;
   disposition?: Disposition | null;
+  /**
+   * With a client-conveyed `delete`: the owner's choice time in the client,
+   * which is the first receipt. Absent, no receipt is recorded.
+   */
+  reportedAt?: number;
 }
 
 interface HeldDataGrantRow extends DbRow {
@@ -12448,11 +12453,21 @@ export async function endHeldDataForGrant(grantId: string, ending: HeldDataEndin
     return;
   }
   requireHeldDataDisposition(ending);
-  rt.authority.end({
+  const ended = rt.authority.end({
     grantId,
     path: ending?.path ?? "security_revocation",
     disposition: ending?.disposition ?? null,
   });
+  const clientId = rt.authority.grantClient(grantId);
+  if (ended.erasure && ending?.reportedAt !== undefined && clientId) {
+    rt.authority.report({
+      clientId,
+      grantId,
+      operationId: ended.erasure.operationId,
+      kind: "receipt",
+      reportedAt: ending.reportedAt,
+    });
+  }
 }
 
 /**

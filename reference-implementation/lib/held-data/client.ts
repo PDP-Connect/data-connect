@@ -57,7 +57,11 @@ export const DEFAULT_POLICY: LifecyclePolicy = {
 
 export type StatusTransport = (
   grantIds: readonly string[],
-) => Promise<{ ok: true; results: StatusResult[] } | { ok: false; reason: string }>;
+) => Promise<
+  | { ok: true; results: StatusResult[] }
+  /** `retryAfterMs`: a server-directed wait (HTTP 429 or 503 `Retry-After`). */
+  | { ok: false; reason: string; retryAfterMs?: number }
+>;
 
 /** Client writes (receipt, completion). Need current client authentication. */
 export type ReportTransport = (r: {
@@ -78,6 +82,8 @@ export interface HeldStore {
 /** K8: what a downstream holder receives. Absolute times only. */
 export interface DownstreamNotice {
   grantId: string;
+  /** Client time the notice was issued, so a holder can order reordered deliveries. */
+  issuedAt?: number;
   /** Stop ordinary use at this instant unless a later notice extends it. */
   useUntil: number | null;
   /** Erasures, each with its original absolute deadline. */
@@ -162,10 +168,17 @@ export class HeldDataClient {
    * first-acquisition time; rereads and resyncs never move it. Record delivery
    * is not an assessment, so this never makes data usable.
    */
-  acquire(grantId: string, o: { processingPermission?: boolean } = {}): void {
+  acquire(grantId: string, o: { processingPermission?: boolean } = {}): boolean {
     const now = this.#now();
     const prior = this.#grants.get(grantId);
-    // A read after disposal is a new acquisition with its own clocks.
+    // Erasure is terminal: a late delivery under an erased grant is not an
+    // acquisition. The caller must not keep it.
+    if (prior && [...prior.erasures.values()].some((e) => e.scope.streams === "all")) {
+      this.#log(grantId, "disposed", "late_delivery_under_erasure");
+      return false;
+    }
+    // A read after a long-stop or retention disposal is a new acquisition with
+    // its own clocks; the ordering state is kept.
     if (!prior || prior.deletedAt !== null) {
       this.#grants.set(grantId, {
         grantId,
@@ -173,8 +186,8 @@ export class HeldDataClient {
         freshnessOrigin: null,
         custodyOnly: false,
         processingPermission: o.processingPermission ?? false,
-        lastPosition: 0,
-        erasures: new Map(),
+        lastPosition: prior?.lastPosition ?? 0,
+        erasures: prior?.erasures ?? new Map(),
         deletedAt: null,
         deleteReason: null,
         needsReconcile: false,
@@ -183,6 +196,7 @@ export class HeldDataClient {
       // The first check is due 24 h after first acquisition.
       this.#nextAttemptAt = Math.min(this.#nextAttemptAt ?? Number.POSITIVE_INFINITY, now + this.policy.cadenceMs);
     }
+    return true;
   }
 
   /** The gate the app checks before every use. */
@@ -287,6 +301,8 @@ export class HeldDataClient {
 
   /** Attempt status for every held grant now. */
   async reconcile(): Promise<void> {
+    // Overdue disposal comes before any new assessment, on every entry path.
+    this.#disposeDue();
     const held = [...this.#grants.values()].filter((g) => g.deletedAt === null).map((g) => g.grantId);
     const sentAt = this.#now();
     if (held.length === 0) {
@@ -294,6 +310,7 @@ export class HeldDataClient {
       return;
     }
     let failed = false;
+    let retryAfterMs = 0;
     const groups = this.#batch ? [held] : held.map((id) => [id]);
     for (const ids of groups) {
       let r: Awaited<ReturnType<StatusTransport>>;
@@ -304,13 +321,24 @@ export class HeldDataClient {
       }
       if (!r.ok) {
         failed = true;
+        retryAfterMs = Math.max(retryAfterMs, r.retryAfterMs ?? 0);
         for (const id of ids) {
           this.#log(id, "status_failed", r.reason);
         }
         continue;
       }
-      for (const res of r.results) {
-        this.#apply(res, sentAt);
+      // A grant counts as answered only with exactly one lifecycle answer for
+      // it. A per-grant error, a missing entry or a duplicate is a failed
+      // attempt for that grant, retried within the retry interval.
+      for (const id of ids) {
+        const entries = r.results.filter((x) => x.grant_id === id);
+        const only = entries.length === 1 ? entries[0] : undefined;
+        if (!only || "error" in only) {
+          failed = true;
+          this.#log(id, "status_failed", only && "error" in only ? only.error : "no_answer");
+          continue;
+        }
+        this.#apply(only, sentAt);
       }
     }
     // The attempt was made; the threshold rule now governs use.
@@ -321,7 +349,7 @@ export class HeldDataClient {
       }
     }
     // The interval runs between attempt starts, so a slow answer does not stretch it.
-    this.#nextAttemptAt = sentAt + (failed ? this.policy.retryMs : this.policy.cadenceMs);
+    this.#nextAttemptAt = sentAt + (failed ? Math.max(this.policy.retryMs, retryAfterMs) : this.policy.cadenceMs);
     this.#disposeDue();
     this.#relayAll();
   }
@@ -443,6 +471,7 @@ export class HeldDataClient {
       const decision = this.canUse(g.grantId);
       const notice: DownstreamNotice = {
         grantId: g.grantId,
+        issuedAt: this.#now(),
         useUntil: decision.ok ? decision.until : null,
         erasures: [...g.erasures].map(([operationId, e]) => ({ operationId, scope: e.scope, deleteBy: e.deleteBy })),
         deleteAllBy: this.deleteBy(g.grantId),

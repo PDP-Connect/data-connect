@@ -34,7 +34,10 @@ export class ToyApp implements HeldStore {
 
   /** Store records from a read. Rereads replace the copy; they never move lifecycle clocks. */
   sync(grantId: string, records: ToyRecord[]): void {
-    this.#client?.acquire(grantId);
+    if (this.#client && !this.#client.acquire(grantId)) {
+      // A late delivery under an erased grant is dropped, not stored.
+      return;
+    }
     const prior = this.records.get(grantId) ?? [];
     const merged = new Map(prior.map((r) => [r.id, r]));
     for (const r of records) {
@@ -127,23 +130,45 @@ export class ToySubprocessor implements Downstream {
     this.notices.push(structuredClone(n));
   }
 
+  /** The most recently issued notice (delivery can be reordered). */
   latest(grantId: string): DownstreamNotice | undefined {
-    return this.notices.filter((n) => n.grantId === grantId).at(-1);
+    const mine = this.notices.filter((n) => n.grantId === grantId);
+    return mine.reduce<DownstreamNotice | undefined>(
+      (best, n) => (best === undefined || (n.issuedAt ?? -Infinity) >= (best.issuedAt ?? -Infinity) ? n : best),
+      undefined
+    );
+  }
+
+  /**
+   * Terminal facts merged over every notice ever received: an erasure is never
+   * forgotten, and each deadline is the earliest one relayed.
+   */
+  terminal(grantId: string): { erased: boolean; deleteBy: number | null } {
+    let erased = false;
+    let deleteBy: number | null = null;
+    for (const n of this.notices.filter((x) => x.grantId === grantId)) {
+      for (const d of [n.deleteAllBy, ...n.erasures.map((e) => e.deleteBy)]) {
+        if (typeof d === "number") {
+          deleteBy = deleteBy === null ? d : Math.min(deleteBy, d);
+        }
+      }
+      erased ||= n.erasures.some((e) => e.scope.streams === "all");
+    }
+    return { erased, deleteBy };
   }
 
   canUse(grantId: string): boolean {
     const n = this.latest(grantId);
-    return this.held.has(grantId) && n?.useUntil != null && this.#now() < n.useUntil;
+    return (
+      this.held.has(grantId) && !this.terminal(grantId).erased && n?.useUntil != null && this.#now() < n.useUntil
+    );
   }
 
   /** Dispose of everything whose relayed deadline has passed. */
   tick(): void {
     for (const grantId of [...this.held.keys()]) {
-      const n = this.latest(grantId);
-      const deadlines = [n?.deleteAllBy, ...(n?.erasures.map((e) => e.deleteBy) ?? [])].filter(
-        (x): x is number => typeof x === "number"
-      );
-      if (deadlines.some((d) => this.#now() >= d)) {
+      const { deleteBy } = this.terminal(grantId);
+      if (deleteBy !== null && this.#now() >= deleteBy) {
         this.held.delete(grantId);
       }
     }

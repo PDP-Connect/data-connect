@@ -11,7 +11,7 @@
  * PROTOTYPE: experimental held-data lifecycle work, off by default.
  */
 import assert from "node:assert/strict";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, generateKeyPairSync, type KeyObject, randomBytes, sign } from "node:crypto";
 import { appendFileSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -19,6 +19,8 @@ import { describe, it } from "node:test";
 import { ToyApp } from "../examples/held-data-toy-app/app.ts";
 import { HeldDataClient } from "../lib/held-data/client.ts";
 import { httpStatusTransport } from "../lib/held-data/http-transport.ts";
+import { makeDpopProof, thumbprint } from "../lib/training-lease/dpop.ts";
+import { generateEd25519KeyPair } from "../lib/training-lease/jws.ts";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { getDb } from "../server/db.ts";
 import { getHeldDataRuntime } from "../server/held-data/runtime.ts";
@@ -105,11 +107,16 @@ async function registerPublicClient(h: Harness): Promise<string> {
 }
 
 /** Authorization-code flow for a continuous grant: the only RI flow with refresh tokens. */
-async function authCodeGrant(h: Harness, clientId: string) {
+async function authCodeGrant(
+  h: Harness,
+  clientId: string,
+  opts: { redirect?: string; tokenAuth?: (tokenEndpoint: string) => Record<string, string> } = {},
+) {
+  const redirect = opts.redirect ?? REDIRECT;
   const verifier = randomBytes(32).toString("base64url");
   const authorize = new URL(`${h.asUrl}/oauth/authorize`);
   authorize.searchParams.set("client_id", clientId);
-  authorize.searchParams.set("redirect_uri", REDIRECT);
+  authorize.searchParams.set("redirect_uri", redirect);
   authorize.searchParams.set("response_type", "code");
   authorize.searchParams.set("state", "s1");
   authorize.searchParams.set("code_challenge", createHash("sha256").update(verifier).digest("base64url"));
@@ -142,11 +149,11 @@ async function authCodeGrant(h: Harness, clientId: string) {
   }>(
     `${h.asUrl}/oauth/token`,
     form({
-      client_id: clientId,
+      ...(opts.tokenAuth ? opts.tokenAuth(`${h.asUrl}/oauth/token`) : { client_id: clientId }),
       code,
       code_verifier: verifier,
       grant_type: "authorization_code",
-      redirect_uri: REDIRECT,
+      redirect_uri: redirect,
     }),
   );
   assert.equal(token.status, 200, JSON.stringify(token.body));
@@ -269,6 +276,48 @@ async function owner(h: Harness, path: string, method: "GET" | "POST" = "GET") {
     method,
     ...(method === "POST" ? { body: "{}" } : {}),
   });
+}
+
+function cimdClient() {
+  const clientId = `https://app.example/oauth/${randomBytes(6).toString("hex")}/client.json`;
+  const jwksUri = `${new URL(clientId).origin}/oauth/jwks.json`;
+  const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const jwks = { keys: [{ ...publicKey.export({ format: "jwk" }), alg: "RS256", kid: "k1", use: "sig" }] };
+  const doc = {
+    client_id: clientId,
+    client_name: "Confidential App",
+    grant_types: ["authorization_code", "refresh_token"],
+    jwks_uri: jwksUri,
+    redirect_uris: [`${new URL(clientId).origin}/callback`],
+    response_types: ["code"],
+    token_endpoint_auth_method: "private_key_jwt",
+    token_endpoint_auth_signing_alg: "RS256",
+  };
+  return { clientId, doc, jwks, jwksUri, privateKey };
+}
+
+/** private_key_jwt client authentication parameters. `jti: null` omits the claim. */
+function clientAuth(
+  c: { clientId: string; privateKey: KeyObject },
+  audience: string,
+  o: { jti?: string | null } = {},
+): Record<string, string> {
+  const now = Math.floor(Date.now() / 1000);
+  const enc = (v: unknown) => Buffer.from(JSON.stringify(v)).toString("base64url");
+  const jti = o.jti === undefined ? randomBytes(8).toString("hex") : o.jti;
+  const input = `${enc({ alg: "RS256", kid: "k1", typ: "JWT" })}.${enc({
+    aud: audience,
+    exp: now + 60,
+    iat: now,
+    iss: c.clientId,
+    ...(jti === null ? {} : { jti }),
+    sub: c.clientId,
+  })}`;
+  return {
+    client_assertion: `${input}.${sign("RSA-SHA256", Buffer.from(input), c.privateKey).toString("base64url")}`,
+    client_assertion_type: "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+    client_id: c.clientId,
+  };
 }
 
 describe("held-data lifecycle over HTTP", () => {
@@ -770,6 +819,134 @@ describe("held-data lifecycle over HTTP", () => {
         assert.equal(await rsRead(h, g.token), 403, "reads fail closed too");
       },
       opts
+    );
+  });
+
+  it("red-team RT8 (finding 2): a client-conveyed delete records receipt only from reported_at, never from the request's arrival", async () => {
+    await withServer(
+      false,
+      async (h) => {
+        const withTime = await ordinaryGrant(h);
+        const ownerChoice = new Date(Date.now() - 20 * DAY).toISOString();
+        const w = await lifecycle(h, {
+          grant_id: withTime.grantId,
+          pdpp_disposition: "delete",
+          reported_at: ownerChoice,
+          token: withTime.token,
+        });
+        assert.equal(w.body.grants[0]?.held_data, "erase", JSON.stringify(w.body));
+        const rec = await owner(h, `/v1/owner/grants/${withTime.grantId}/lifecycle`);
+        const op = (rec.body.erasures as Record<string, unknown>[])[0];
+        assert.equal(op?.receipt_at, ownerChoice);
+        assert.equal(Date.parse(String(op?.delete_by)) - Date.parse(ownerChoice), 30 * DAY);
+
+        const without = await ordinaryGrant(h);
+        await lifecycle(h, { grant_id: without.grantId, pdpp_disposition: "delete", token: without.token });
+        const rec2 = await owner(h, `/v1/owner/grants/${without.grantId}/lifecycle`);
+        const op2 = (rec2.body.erasures as Record<string, unknown>[])[0];
+        assert.equal(op2?.receipt_at, null, "arrival is not receipt");
+        assert.equal(op2?.delete_by, null);
+
+        const future = await ordinaryGrant(h);
+        const f = await lifecycle(h, {
+          grant_id: future.grantId,
+          pdpp_disposition: "delete",
+          reported_at: new Date(Date.now() + DAY).toISOString(),
+          token: future.token,
+        });
+        assert.equal(f.status, 400);
+
+        const viaRevoke = await ordinaryGrant(h);
+        const r = await revoke(h, viaRevoke.token, viaRevoke.grantId, {
+          pdpp_disposition: "delete",
+          reported_at: ownerChoice,
+        });
+        assert.equal(r.status, 200, JSON.stringify(r.body));
+        const rec3 = await owner(h, `/v1/owner/grants/${viaRevoke.grantId}/lifecycle`);
+        assert.equal((rec3.body.erasures as Record<string, unknown>[])[0]?.receipt_at, ownerChoice);
+      },
+      heldDataOpts(),
+    );
+  });
+
+  it("red-team RT12 (finding 6): a DPoP-bound lifecycle token needs a proof with `ath`, and a proof is accepted once", async () => {
+    await withServer(
+      false,
+      async (h) => {
+        const g = await ordinaryGrant(h);
+        assert.equal((await status(h, g.token, g.grantId)).status, 200);
+        const key = generateEd25519KeyPair();
+        const jkt = thumbprint(key.publicJwk as unknown as Record<string, unknown>) as string;
+        const bound = `bound-${randomBytes(12).toString("hex")}`;
+        getHeldDataRuntime()?.authority.recordCredential({ token: bound, grantIds: [g.grantId], kind: "access", jkt });
+        const url = `${h.asUrl}/oauth/grant-lifecycle`;
+        const proof = (withAth: boolean) =>
+          makeDpopProof({
+            iatS: Math.floor(Date.now() / 1000),
+            jti: randomBytes(12).toString("hex"),
+            method: "POST",
+            privateKey: key.privateKey,
+            publicJwk: key.publicJwk as unknown as Record<string, unknown>,
+            url,
+            ...(withAth ? { accessToken: bound } : {}),
+          });
+        const send = (p: string) =>
+          fetchJson<{ grants?: Record<string, unknown>[] }>(url, {
+            ...form({ grant_id: g.grantId, token: bound }),
+            headers: { "Content-Type": "application/x-www-form-urlencoded", DPoP: p },
+          });
+        assert.equal((await send(proof(false))).status, 401, "no ath");
+        const good = proof(true);
+        assert.equal((await send(good)).status, 200, "with ath");
+        assert.equal((await send(good)).status, 401, "replayed proof");
+      },
+      heldDataOpts(),
+    );
+  });
+
+  it("red-team RT13 (finding 6) and RT9 (finding 11): a client assertion needs aud = issuer and a fresh jti; retained then completed are both kept", async () => {
+    const c = cimdClient();
+    const cimdFetchDependencies = {
+      dnsLookupImpl: async () => [{ address: "93.184.216.34", family: 4 }],
+      fetchImpl: async (input: unknown) =>
+        new Response(JSON.stringify(String(input) === c.jwksUri ? c.jwks : c.doc), {
+          headers: { "Content-Type": "application/json" },
+          status: 200,
+        }),
+      isGlobalUnicastAddressImpl: () => true,
+    };
+    await withServer(
+      false,
+      async (h) => {
+        const g = await authCodeGrant(h, c.clientId, {
+          redirect: c.doc.redirect_uris[0] as string,
+          tokenAuth: (aud) => clientAuth(c, aud),
+        });
+        const issuer = h.asUrl;
+        const q = (auth: Record<string, string>, extra: Record<string, string> = {}) =>
+          lifecycle(h, { grant_id: g.grantId, ...auth, ...extra });
+        assert.equal((await q(clientAuth(c, issuer, { jti: null }))).status, 401, "missing jti");
+        assert.equal((await q(clientAuth(c, `${h.asUrl}/oauth/grant-lifecycle`))).status, 401, "endpoint audience");
+        const once = clientAuth(c, issuer);
+        const ok = await q(once);
+        assert.equal(ok.status, 200, JSON.stringify(ok.body));
+        assert.equal(ok.body.grants[0]?.held_data, "permitted", JSON.stringify(ok.body));
+        assert.equal((await q(once)).status, 401, "replayed assertion");
+
+        const erase = await owner(h, `/v1/owner/grants/${g.grantId}/lifecycle/erase`, "POST");
+        assert.equal(erase.status, 200);
+        const instruction = (await q(clientAuth(c, issuer))).body.grants[0]?.erasure as { instruction_id: string };
+        const at = (d: number) => new Date(Date.now() - d * DAY).toISOString();
+        const write = (extra: Record<string, string>) =>
+          q(clientAuth(c, issuer), { instruction_id: instruction.instruction_id, ...extra });
+        assert.equal((await write({ report: "retained", reported_at: at(3), retained_until: "2030-01-01T00:00:00Z" })).status, 200);
+        assert.equal((await write({ report: "retained", reported_at: at(2), retained_until: "2031-01-01T00:00:00Z" })).status, 200);
+        assert.equal((await write({ report: "completed", reported_at: at(1) })).status, 200);
+        const view = getHeldDataRuntime()?.authority.ownerView(g.grantId, 30 * DAY)?.erasures[0];
+        assert.equal(view?.completion?.outcome, "deleted");
+        assert.equal(view?.retained.length, 2);
+      },
+      { ...heldDataOpts(), cimdFetchDependencies } as never,
     );
   });
 });

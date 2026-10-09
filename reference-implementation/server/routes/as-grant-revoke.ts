@@ -42,6 +42,7 @@ interface RouteRequest {
 interface LifecycleEnding {
   path: "owner_withdrawal" | "one_child_withdrawal" | "narrowing" | "client_revocation";
   disposition?: "keep" | "delete" | null;
+  reportedAt?: number;
 }
 
 const OWNER_ENDINGS = new Set(["owner_withdrawal", "one_child_withdrawal", "narrowing"]);
@@ -51,7 +52,11 @@ function lifecycleEnding(body: unknown, tokenInfo: unknown): LifecycleEnding {
   const disposition = b.pdpp_disposition === "keep" || b.pdpp_disposition === "delete" ? b.pdpp_disposition : null;
   const isOwner = (tokenInfo as IntrospectInfo | undefined)?.pdpp_token_kind === "owner";
   if (!isOwner) {
-    return { path: "client_revocation", disposition };
+    // With delete, `reported_at` is the owner's choice time in the client: the
+    // first receipt. NaN marks a malformed value for the handler to reject.
+    const reportedAt =
+      disposition === "delete" && b.reported_at !== undefined ? Date.parse(String(b.reported_at)) : undefined;
+    return { path: "client_revocation", disposition, ...(reportedAt === undefined ? {} : { reportedAt }) };
   }
   const path = typeof b.pdpp_ending === "string" && OWNER_ENDINGS.has(b.pdpp_ending) ? b.pdpp_ending : "owner_withdrawal";
   return { path: path as LifecycleEnding["path"], disposition };
@@ -161,6 +166,10 @@ export function mountAsGrantRevoke(app: AppLike, ctx: MountAsGrantRevokeContext)
       const requestId = ctx.ensureRequestId(res) as string;
       const grantId = req.params.grantId as string;
       const lifecycle = lifecycleEnding(req.body, req.tokenInfo);
+      if (lifecycle.reportedAt !== undefined && !(lifecycle.reportedAt <= Date.now())) {
+        ctx.pdppError(res, 400, "invalid_request", "reported_at must be a time no later than the request");
+        return;
+      }
       const output: AsGrantRevokeOutput = await executeAsGrantRevoke(
         { grantId, requestId },
         { revokeGrant: (id, context) => ctx.revokeGrant(id, { ...context, lifecycle }) }

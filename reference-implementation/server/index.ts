@@ -7296,6 +7296,9 @@ export function buildAsApp(opts: ServerOpts = {}) {
     prepareStatusToken: prepareHeldDataStatusToken,
     revokeGrant: (grantId, context) => revokeGrant(grantId, context),
     writeClient: heldDataWriteClient,
+    // The metadata `issuer` is resolved the same way (root-and-discovery.ts).
+    issuer: (req: unknown) =>
+      resolvePublicUrl(req as Parameters<typeof resolvePublicUrl>[0], explicitAsBaseUrl).replace(/\/+$/, ""),
     resolveBaseUrl: (req: unknown) =>
       resolvePublicUrl(req as Parameters<typeof resolvePublicUrl>[0], explicitAsBaseUrl),
     runtime: getHeldDataRuntime,

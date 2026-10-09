@@ -31,6 +31,8 @@ export interface HeldDataRuntimeOptions {
   deletionPeriodMs?: number;
   /** OD-4, the delivery-independent stop-use bound shown to the owner. Default 7 days. */
   pauseThresholdMs?: number;
+  /** OD-5, the long-stop shown to the owner as a bound without receipt. Default 90 days; null: off. */
+  longStopMs?: number | null;
 }
 
 export interface HeldDataRuntime {
@@ -38,6 +40,7 @@ export interface HeldDataRuntime {
   readonly now: () => number;
   readonly deletionPeriodMs: number;
   readonly pauseThresholdMs: number;
+  readonly longStopMs: number | null;
   /** Core stop-use bound (48 h): `stop_use_by` = effective time + this. */
   readonly stopUseBoundMs: number;
   close(): void;
@@ -66,6 +69,7 @@ export function createHeldDataRuntime(opts: HeldDataRuntimeOptions & { journalPa
     deletionPeriodMs: opts.deletionPeriodMs ?? 30 * 24 * 60 * 60 * 1000,
     pauseThresholdMs: opts.pauseThresholdMs ?? 7 * 24 * 60 * 60 * 1000,
     stopUseBoundMs: 48 * 60 * 60 * 1000,
+    longStopMs: opts.longStopMs === undefined ? 90 * 24 * 60 * 60 * 1000 : opts.longStopMs,
     close() {
       // The authority holds no open handles.
     },

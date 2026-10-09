@@ -30,7 +30,7 @@
  */
 import type { StatusResult } from "../../lib/held-data/authority.ts";
 import { AuthorityUnavailableError } from "../../lib/held-data/authority.ts";
-import { checkDpopProof } from "../../lib/training-lease/dpop.ts";
+import { checkDpopProof, DPOP_MAX_AGE_S } from "../../lib/training-lease/dpop.ts";
 import type { HeldDataRuntime } from "../held-data/runtime.ts";
 
 interface RouteRequest {
@@ -75,6 +75,8 @@ export interface MountHeldDataContext {
     grantId: string,
     context: { lifecycle: { path: "owner_withdrawal" | "client_revocation"; disposition: "delete" } }
   ) => Promise<unknown>;
+  /** The AS issuer identifier: the required `aud` of a client assertion. */
+  issuer: (req: unknown) => string;
   /** Current client authentication for a write: the client id, or null. */
   writeClient: (token: string, grantId: string) => Promise<string | null>;
   /** Record the digest of a token the journal has not seen yet (lazy registration from the main database). */
@@ -152,37 +154,87 @@ export function mountHeldData(app: AppLike, ctx: MountHeldDataContext): void {
     return { baseUrl, url: `${baseUrl}${path}` };
   }
 
-  async function clientFromAssertion(req: RouteRequest, path: string): Promise<string | null> {
+  // Replay caches (Core: Assertions and proofs). Keys live until the
+  // assertion or proof could no longer be accepted anyway.
+  const seenAssertions = new Map<string, number>();
+  const seenProofs = new Map<string, number>();
+  function firstUse(cache: Map<string, number>, key: string, untilMs: number, nowMs: number): boolean {
+    for (const [k, until] of cache) {
+      if (until <= nowMs) {
+        cache.delete(k);
+      }
+    }
+    if (cache.has(key)) {
+      return false;
+    }
+    cache.set(key, untilMs);
+    return true;
+  }
+
+  /**
+   * Client assertion for the lifecycle operation: `aud` MUST be the AS issuer
+   * identifier and `jti` MUST be present and unused for that client.
+   */
+  async function clientFromAssertion(req: RouteRequest, _path: string): Promise<string | null> {
     const body = req.body ?? {};
     if (body.client_assertion === undefined) {
       return null;
     }
-    const { baseUrl, url } = endpoint(req, path);
+    const rt = ctx.runtime();
+    let claims: Record<string, unknown>;
     try {
-      return await ctx.authenticateOAuthTokenClient({
+      claims = JSON.parse(
+        Buffer.from(String(body.client_assertion).split(".")[1] ?? "", "base64url").toString("utf8")
+      ) as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+    if (typeof claims.jti !== "string" || claims.jti.length === 0 || typeof claims.exp !== "number" || !rt) {
+      return null;
+    }
+    const { baseUrl } = endpoint(req, _path);
+    let clientId: string | null;
+    try {
+      clientId = await ctx.authenticateOAuthTokenClient({
         baseUrl,
         clientAssertion: body.client_assertion,
         clientAssertionType: body.client_assertion_type,
         clientId: body.client_id,
-        tokenEndpoint: url,
+        // The verifier checks `aud` against this value: the issuer identifier.
+        tokenEndpoint: ctx.issuer(req),
       });
     } catch {
       return null;
     }
+    if (!clientId) {
+      return null;
+    }
+    return firstUse(seenAssertions, `${clientId} ${claims.jti}`, claims.exp * 1000, rt.now()) ? clientId : null;
   }
 
-  function dpopJkt(req: RouteRequest, rt: HeldDataRuntime, url: string): string | null {
+  /**
+   * The key thumbprint of a valid DPoP proof (RFC 9449 §4.3), or null. With
+   * an access token the proof must carry its `ath`; a proof `jti` is accepted
+   * once.
+   */
+  function dpopJkt(req: RouteRequest, rt: HeldDataRuntime, url: string, token: string | null): string | null {
     const proof = header(req, "dpop");
     if (!proof) {
       return null;
     }
+    const accessToken = token && rt.authority.credentialKind(token) === "access" ? token : null;
     const c = checkDpopProof({
       method: "POST",
       nowS: Math.floor(rt.now() / 1000),
       proof,
       url,
+      ...(accessToken ? { accessToken } : {}),
     });
-    return c.ok ? c.jkt : null;
+    if (!c.ok) {
+      return null;
+    }
+    const nowMs = rt.now();
+    return firstUse(seenProofs, `${c.jkt} ${c.jti}`, (c.iat + DPOP_MAX_AGE_S) * 1000 + 1, nowMs) ? c.jkt : null;
   }
 
   app.post("/oauth/grant-lifecycle", async (req, res) => {
@@ -210,7 +262,14 @@ export function mountHeldData(app: AppLike, ctx: MountHeldDataContext): void {
       (disposition !== null && disposition !== "delete") ||
       (isWrite && grantIds.length !== 1) ||
       (report !== null && (!str(body.instruction_id) || !Number.isFinite(reportedAt) || reportedAt > rt.now())) ||
-      (report === "retained" && !str(body.retained_until));
+      // With pdpp_disposition, reported_at is optional: the owner's choice time in the client.
+      (disposition !== null &&
+        body.reported_at !== undefined &&
+        (!Number.isFinite(reportedAt) || reportedAt > rt.now())) ||
+      (report === "retained" &&
+        (!str(body.retained_until) ||
+          !Number.isFinite(Date.parse(String(body.retained_until))) ||
+          Date.parse(String(body.retained_until)) < reportedAt));
     if (invalid) {
       return res.status(400).json({ error: "invalid_request" });
     }
@@ -218,12 +277,18 @@ export function mountHeldData(app: AppLike, ctx: MountHeldDataContext): void {
     if (body.client_assertion !== undefined && !clientId) {
       return res.status(401).json({ error: "invalid_client" });
     }
+    if (clientId) {
+      // Lazy registration: a client-authenticated query names grants the journal may not have seen.
+      for (const id of grantIds) {
+        await ctx.ensureGrant(id);
+      }
+    }
     const token = str(body.token) ?? tokenFrom(req)?.token ?? null;
     try {
       if (token) {
         await ctx.prepareStatusToken(token);
       }
-      const principal = rt.authority.authenticateRead({ token, dpopJkt: dpopJkt(req, rt, url), clientId });
+      const principal = rt.authority.authenticateRead({ token, dpopJkt: dpopJkt(req, rt, url, token), clientId });
       if (!principal) {
         return res.status(401).json({ error: token ? "invalid_token" : "invalid_client" });
       }
@@ -248,10 +313,9 @@ export function mountHeldData(app: AppLike, ctx: MountHeldDataContext): void {
           clientId: writer,
           grantId,
           operationId: str(body.instruction_id) as string,
-          kind: report === "received" ? "receipt" : "completion",
+          kind: report === "received" ? "receipt" : report === "retained" ? "retained" : "completion",
           ...(report === "retained"
             ? {
-                outcome: "exception" as const,
                 detail: `retained_until=${String(body.retained_until)}${typeof body.retention_basis === "string" ? `; basis=${body.retention_basis}` : ""}`,
               }
             : {}),
@@ -265,6 +329,16 @@ export function mountHeldData(app: AppLike, ctx: MountHeldDataContext): void {
       } else {
         // Records the instruction and ends the grant (Core: Erasure, Instruction).
         await ctx.revokeGrant(grantId, { lifecycle: { path: "client_revocation", disposition: "delete" } });
+      }
+      // The owner's choice in the client is the first receipt. Its time is
+      // recorded only when the client reports it; the request's arrival is
+      // never taken as the receipt time.
+      if (disposition !== null && Number.isFinite(reportedAt)) {
+        const [answer] = rt.authority.status(principal, [grantId]);
+        const op = answer && !("error" in answer) ? answer.erasures[0]?.operation_id : undefined;
+        if (op) {
+          rt.authority.report({ clientId: writer, grantId, operationId: op, kind: "receipt", reportedAt });
+        }
       }
       const after = rt.authority.status(principal, [grantId]);
       return res.status(200).json({ grants: after.map((r) => statusWire(r, rt.stopUseBoundMs)) });
@@ -291,7 +365,7 @@ export function mountHeldData(app: AppLike, ctx: MountHeldDataContext): void {
     }
     const credential = rt.authority.replaceStatusCredential({
       grantId,
-      jkt: dpopJkt(req, rt, endpoint(req, path).url),
+      jkt: dpopJkt(req, rt, endpoint(req, path).url, null),
       clientId: await clientFromAssertion(req, path),
       recoveryCode: str(body.recovery_code),
     });
@@ -338,8 +412,15 @@ export function mountHeldData(app: AppLike, ctx: MountHeldDataContext): void {
         delete_by: iso(e.delete_by),
         // B1: the only bound that holds without delivery.
         use_stops_by: iso(e.accepted_at + rt.pauseThresholdMs),
+        // Bounds that hold without receipt (Core: AS records and owner statements).
+        deleted_by_without_receipt: rt.longStopMs === null ? null : iso(e.accepted_at + rt.longStopMs),
+        retained: e.retained.map((r) => ({
+          reported_at: iso(r.reportedAt),
+          received_at: iso(r.receivedAt),
+          detail: r.detail,
+        })),
         completion: e.completion ? { ...e.completion, at: iso(e.completion.at) } : null,
-        owner_message: ownerMessage(e, rt.pauseThresholdMs),
+        owner_message: ownerMessage(e, rt.pauseThresholdMs, rt.longStopMs),
       })),
     };
   }
@@ -407,17 +488,25 @@ function ownerMessage(
     receipt_at: number | null;
     delete_by: number | null;
     completion: { outcome: string } | null;
+    retained: unknown[];
   },
   pauseThresholdMs: number,
+  longStopMs: number | null,
 ): string {
   if (e.completion) {
-    return e.completion.outcome === "deleted"
-      ? "The app reported that it deleted this data."
-      : "The app reported that it could not delete all of this data.";
+    return "The app reported that it deleted this data.";
   }
-  const stop = new Date(e.accepted_at + pauseThresholdMs).toISOString();
+  if (e.retained.length > 0) {
+    return "The app reported that it deleted this data except data the law requires it to keep. That data is not reported as deleted.";
+  }
+  const at = (ms: number) => new Date(ms).toISOString();
   if (e.receipt_at !== null && e.delete_by !== null) {
-    return `Deletion request recorded and received by the app. Apps that follow PDPP stop using this data now and delete it by ${new Date(e.delete_by).toISOString()}.`;
+    return `Deletion request recorded and receipt reported by the app. Apps that follow PDPP stop using this data within 48 hours if they can reach this server and delete it by ${at(e.delete_by)}.`;
   }
-  return `Deletion request recorded. The app has not confirmed it yet. Apps that follow PDPP stop using this data by ${stop} at the latest; the deletion date is set when the app receives the request.`;
+  const stage = e.delivered_at === null ? "not yet sent to the app" : "sent to the app; receipt not reported";
+  const longStop =
+    longStopMs === null
+      ? "Without receipt, PDPP sets no deletion date."
+      : `Without receipt, apps that follow PDPP delete it by ${at(e.accepted_at + longStopMs)}.`;
+  return `Deletion request recorded, ${stage}. Apps that follow PDPP stop using this data by ${at(e.accepted_at + pauseThresholdMs)} in every case. ${longStop}`;
 }

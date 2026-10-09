@@ -97,7 +97,13 @@ export function httpStatusTransport(o: {
         return { ok: false, reason: "invalid_token" };
       }
       if (!resp.ok) {
-        return { ok: false, reason: `http_${resp.status}` };
+        // 429 and 503 are failed attempts; a `Retry-After` in seconds sets the wait.
+        const retryAfterS = Number(resp.headers.get("retry-after"));
+        return {
+          ok: false,
+          reason: `http_${resp.status}`,
+          ...(Number.isFinite(retryAfterS) && retryAfterS > 0 ? { retryAfterMs: retryAfterS * 1000 } : {}),
+        };
       }
       const body = (await resp.json()) as { grants?: unknown[] };
       for (const g of body.grants ?? []) {

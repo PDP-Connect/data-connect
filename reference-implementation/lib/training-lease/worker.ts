@@ -47,8 +47,8 @@ export interface InputLineage {
   grantId: string;
   clientId: string;
   /**
-   * Held-data prototype (B3): the grant the input copy was acquired under,
-   * when it differs from the training grant. The lease must name it.
+   * Held-data prototype (B3): the grant the input copy was acquired under.
+   * Absent: the training grant itself. The lease must cover it.
    */
   acquisitionGrantId?: string;
 }
@@ -142,11 +142,10 @@ export function validateLeaseStatic(
   if (claims.grant_id !== lineage.grantId) {
     return { ok: false, reason: "wrong_grant" };
   }
-  if (
-    lineage.acquisitionGrantId !== undefined &&
-    lineage.acquisitionGrantId !== lineage.grantId &&
-    !(Array.isArray(claims.acq) && claims.acq.includes(lineage.acquisitionGrantId))
-  ) {
+  // B3: the lease covers the copies it names; with no list, only the
+  // training grant's own copy. An explicit list adds no implicit own copy.
+  const covered = Array.isArray(claims.acq) ? claims.acq : [claims.grant_id];
+  if (!covered.includes(lineage.acquisitionGrantId ?? lineage.grantId)) {
     return { ok: false, reason: "acquisition_not_covered" };
   }
   if ((claims.exp - claims.iat) * 1000 > MAX_LEASE_LIFETIME_MS) {
