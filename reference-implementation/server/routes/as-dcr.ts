@@ -235,7 +235,20 @@ export function mountAsDcr(app: AppLike, ctx: MountAsDcrContext): void {
         requestId: traceContext.request_id,
         traceId: traceContext.trace_id,
       },
-      { deleteRegisteredClient: ctx.deleteRegisteredClient }
+      {
+        // Experimental held-data prototype: the owner's disposition for every
+        // grant of the client, from `?pdpp_disposition=` (ignored unless that
+        // runtime is installed).
+        deleteRegisteredClient: (clientId, context) => {
+          const q = (req as { query?: Record<string, unknown> }).query ?? {};
+          const disposition =
+            q.pdpp_disposition === "keep" || q.pdpp_disposition === "delete" ? q.pdpp_disposition : null;
+          return ctx.deleteRegisteredClient(clientId, {
+            ...context,
+            lifecycle: { path: "client_disconnect", disposition },
+          } as typeof context);
+        },
+      }
     );
 
     if (outcome.outcome === "success") {

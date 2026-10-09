@@ -65,6 +65,8 @@ export function checkDpopProof(input: {
   method: string;
   url: string;
   nowS: number;
+  /** When set, the proof MUST carry `ath`, the hash of this access token (RFC 9449 §4.2). */
+  accessToken?: string;
 }): DpopCheck {
   if (typeof input.proof !== "string") {
     return { ok: false, reason: "missing_proof" };
@@ -127,6 +129,12 @@ export function checkDpopProof(input: {
   ) {
     return { ok: false, reason: "stale_iat" };
   }
+  if (
+    input.accessToken !== undefined &&
+    payload.ath !== b64url(createHash("sha256").update(input.accessToken).digest())
+  ) {
+    return { ok: false, reason: "wrong_ath" };
+  }
   return { ok: true, jkt, jti: payload.jti, iat: payload.iat };
 }
 
@@ -138,11 +146,21 @@ export function makeDpopProof(input: {
   url: string;
   jti: string;
   iatS: number;
+  /** Access token to bind with `ath`. */
+  accessToken?: string;
 }): string {
   // signCompactJws always sets alg EdDSA.
   return signCompactJws(
     { typ: "dpop+jwt", jwk: input.publicJwk },
-    { jti: input.jti, htm: input.method, htu: input.url, iat: input.iatS },
+    {
+      jti: input.jti,
+      htm: input.method,
+      htu: input.url,
+      iat: input.iatS,
+      ...(input.accessToken === undefined
+        ? {}
+        : { ath: b64url(createHash("sha256").update(input.accessToken).digest()) }),
+    },
     input.privateKey,
   );
 }

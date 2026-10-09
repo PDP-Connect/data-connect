@@ -373,7 +373,18 @@ export function mountRefGrantPackagesRevoke(app: AppLike, ctx: MountRefGrantsCon
           return;
         }
         const xRequestId = req.headers["x-request-id"];
-        const revokeOpts: { request_id?: string } = typeof xRequestId === "string" ? { request_id: xRequestId } : {};
+        // Experimental held-data prototype: the owner's disposition for every
+        // child (ignored unless that runtime is installed).
+        const reqBody = (req as { body?: Record<string, unknown> | null }).body ?? {};
+        const disposition =
+          reqBody.pdpp_disposition === "keep" || reqBody.pdpp_disposition === "delete" ? reqBody.pdpp_disposition : null;
+        const revokeOpts: {
+          request_id?: string;
+          lifecycle?: { path: "package_disconnect"; disposition: "keep" | "delete" | null };
+        } = {
+          ...(typeof xRequestId === "string" ? { request_id: xRequestId } : {}),
+          lifecycle: { path: "package_disconnect", disposition },
+        };
         const result = await ctx.revokeGrantPackage(id, revokeOpts);
         const after = await ctx.getGrantPackageForOwner(id);
         const body = {

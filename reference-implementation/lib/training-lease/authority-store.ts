@@ -32,16 +32,10 @@
  * PROTOTYPE: experimental AI Training Profile work, off by default.
  */
 import { randomUUID } from "node:crypto";
-import {
-  closeSync,
-  fstatSync,
-  fsyncSync,
-  openSync,
-  readSync,
-  writeSync,
-} from "node:fs";
+import { closeSync, fstatSync, openSync, readSync } from "node:fs";
 import type BetterSqlite3 from "better-sqlite3";
 import { SqliteDriver } from "../../server/sqlite-driver.ts";
+import { appendJournalEntry, JournalReader, journalCoversEvidence } from "../authority-journal/journal.ts";
 import {
   AI_TRAINING_PERMISSION,
   LEASE_JWS_TYP,
@@ -104,6 +98,8 @@ export interface LeaseClaimsOut {
   permission: string;
   iat: number;
   exp: number;
+  /** B3: acquisition grants whose copies the lease covers. Absent: the training grant's own copy. */
+  acq?: string[];
 }
 
 export type IssueRefusal =
@@ -111,6 +107,7 @@ export type IssueRefusal =
   | "wrong_client"
   | "withdrawn"
   | "expired"
+  | "acquisition_erased"
   | "unavailable";
 
 export type IssueOutcome =
@@ -147,6 +144,8 @@ type JournalEntry =
       iat_ms: number;
       exp_ms: number;
       node: string;
+      /** B3: acquisition grants whose copies this lease covers, when named. */
+      acq?: string[];
     }
   | {
       t: "tombstone";
@@ -169,21 +168,32 @@ interface GrantFacts {
   } | null;
 }
 
+/** A lifecycle erasure entry (lib/held-data), seen here only for B3 ordering. */
+interface ErasureEntry {
+  t: "erase";
+  id: string;
+  grant_id: string;
+  at: number;
+}
+
 /**
- * Incremental reader of the journal. Each node keeps one and reads only the
- * bytes appended since its last read.
+ * Per-grant index over the shared authority journal. Each node keeps one and
+ * reads only the bytes appended since its last read. Entry types this store
+ * does not own (held-data lifecycle entries) are ignored, except erasures,
+ * which bound lease issuance for the acquisition copies they cover (B3).
  */
 class JournalIndex {
-  readonly #path: string;
-  #offset = 0;
-  #seq = 0;
-  #remainder = "";
+  readonly #reader: JournalReader<JournalEntry | ErasureEntry>;
   readonly grants = new Map<string, GrantFacts>();
+  /** First erasure of each grant's copy, by journal sequence. */
+  readonly erasures = new Map<string, { seq: number; at: number }>();
+  /** B3: latest `exp` of a returnable lease naming each acquisition grant, before its erasure. */
+  readonly acquisitionMaxExp = new Map<string, number>();
   /** Sequence numbers, only for entries this node is waiting on (see watch). */
   readonly #watched = new Map<string, number | null>();
 
   constructor(path: string) {
-    this.#path = path;
+    this.#reader = new JournalReader(path);
   }
 
   watch(id: string): void {
@@ -207,39 +217,21 @@ class JournalIndex {
   }
 
   refresh(): void {
-    const fd = openSync(this.#path, "a+");
-    try {
-      const size = fstatSync(fd).size;
-      if (size <= this.#offset) {
-        return;
-      }
-      const buf = Buffer.alloc(size - this.#offset);
-      readSync(fd, buf, 0, buf.length, this.#offset);
-      this.#offset = size;
-      const text = this.#remainder + buf.toString("utf8");
-      const lines = text.split("\n");
-      this.#remainder = lines.pop() ?? "";
-      for (const line of lines) {
-        if (line.trim().length === 0) {
-          continue;
-        }
-        let e: JournalEntry;
-        try {
-          e = JSON.parse(line) as JournalEntry;
-        } catch {
-          continue;
-        }
-        this.#apply(e);
-      }
-    } finally {
-      closeSync(fd);
-    }
+    this.#reader.refresh((e, seq) => this.#apply(e, seq));
   }
 
-  #apply(e: JournalEntry): void {
-    this.#seq += 1;
+  #apply(e: JournalEntry | ErasureEntry, seq: number): void {
     if (this.#watched.has(e.id)) {
-      this.#watched.set(e.id, this.#seq);
+      this.#watched.set(e.id, seq);
+    }
+    if (e.t === "erase") {
+      if (!this.erasures.has(e.grant_id)) {
+        this.erasures.set(e.grant_id, { at: e.at, seq });
+      }
+      return;
+    }
+    if (e.t !== "create" && e.t !== "issue" && e.t !== "tombstone") {
+      return;
     }
     const f = this.facts(e.grant_id);
     if (e.t === "create") {
@@ -249,11 +241,18 @@ class JournalIndex {
       // it does not move T.
       if (!f.tombstone) {
         f.maxExpMs = Math.max(f.maxExpMs ?? 0, e.exp_ms);
+        // A lease naming an acquisition grant that is already erased is never
+        // returned (post-append check), so it does not move that grant's T.
+        for (const a of e.acq ?? []) {
+          if (!this.erasures.has(a)) {
+            this.acquisitionMaxExp.set(a, Math.max(this.acquisitionMaxExp.get(a) ?? 0, e.exp_ms));
+          }
+        }
       }
     } else if (!f.tombstone) {
       f.tombstone = {
         id: e.id,
-        seq: this.#seq,
+        seq,
         reason: e.reason,
         at: e.at,
         stopByMs: Math.max(f.maxExpMs ?? 0, e.at),
@@ -263,13 +262,7 @@ class JournalIndex {
 }
 
 function appendJournal(path: string, entry: JournalEntry): void {
-  const fd = openSync(path, "a");
-  try {
-    writeSync(fd, `${JSON.stringify(entry)}\n`);
-    fsyncSync(fd);
-  } finally {
-    closeSync(fd);
-  }
+  appendJournalEntry(path, entry);
 }
 
 const SCHEMA = `
@@ -413,7 +406,17 @@ export class TrainingAuthorityStore {
   }
 
   /** L3 issuance. Returns no lease after any ending (L4). */
-  issueLease(input: { grantId: string; clientId: string }): IssueOutcome {
+  issueLease(input: {
+    grantId: string;
+    clientId: string;
+    /**
+     * B3: acquisition grants whose copies the caller will train on. The
+     * caller has already checked that each belongs to the same client and
+     * owner and that the training grant covers it. Erased ones are dropped;
+     * if none is left, no lease.
+     */
+    acquisitionGrantIds?: readonly string[];
+  }): IssueOutcome {
     const now = this.#o.now();
     let committed: {
       entryId: string;
@@ -422,8 +425,15 @@ export class TrainingAuthorityStore {
       iatS: number;
       expS: number;
       pem: string;
+      acq: string[] | undefined;
     } | null = null;
     let failure: IssueRefusal | null = null;
+    const requestedAcq = input.acquisitionGrantIds ? [...new Set(input.acquisitionGrantIds)] : undefined;
+    // Held-data prototype (Core: Lifecycle durability): a journal that lost an
+    // acknowledged terminal event, per its loss-detection evidence, issues nothing.
+    if (!journalCoversEvidence(this.#o.journalPath)) {
+      return { ok: false, reason: "unavailable" };
+    }
     try {
       this.#store
         .transaction(() => {
@@ -465,6 +475,11 @@ export class TrainingAuthorityStore {
             failure = "expired";
             return;
           }
+          const acq = requestedAcq?.filter((a) => !this.#journal.erasures.has(a));
+          if (requestedAcq && acq?.length === 0) {
+            failure = "acquisition_erased";
+            return;
+          }
           const jti = randomUUID();
           const entryId = randomUUID();
           this.#journal.watch(entryId);
@@ -477,6 +492,7 @@ export class TrainingAuthorityStore {
             iat_ms: iatS * 1000,
             exp_ms: expS * 1000,
             node: this.nodeId,
+            ...(acq ? { acq } : {}),
           });
           this.#store
             .prepare(
@@ -495,6 +511,7 @@ export class TrainingAuthorityStore {
             iatS,
             expS,
             pem: key.private_pem,
+            acq,
           };
         })
         .immediate();
@@ -512,6 +529,7 @@ export class TrainingAuthorityStore {
       iatS: number;
       expS: number;
       pem: string;
+      acq: string[] | undefined;
     };
     this.#o.afterIssueJournaledForTest?.();
     // Post-append check: a tombstone ordered before this `issue` entry (from a
@@ -526,6 +544,11 @@ export class TrainingAuthorityStore {
     if (mine === undefined || (tomb && tomb.seq < mine)) {
       return { ok: false, reason: "withdrawn" };
     }
+    // B3: an erasure ordered before this entry ends issuance for that copy.
+    // The lease is not returned; the caller may ask again for the rest.
+    if (c.acq?.some((a) => (this.#journal.erasures.get(a)?.seq ?? Number.POSITIVE_INFINITY) < mine)) {
+      return { ok: false, reason: "acquisition_erased" };
+    }
     const claims: LeaseClaimsOut = {
       iss: this.issuer,
       aud: input.clientId,
@@ -534,6 +557,7 @@ export class TrainingAuthorityStore {
       permission: AI_TRAINING_PERMISSION,
       iat: c.iatS,
       exp: c.expS,
+      ...(c.acq ? { acq: c.acq } : {}),
     };
     const lease = signCompactJws(
       { typ: LEASE_JWS_TYP, kid: c.kid },
@@ -621,6 +645,19 @@ export class TrainingAuthorityStore {
       state: "active",
       maxExpMs: row.max_exp_ms,
       trainingExpiresAtMs: row.training_expires_at_ms,
+    };
+  }
+
+  /**
+   * B3: when training on one acquisition copy stops. After that copy's
+   * erasure, no returned lease names it with a later `exp`. Null when no
+   * lease ever named it.
+   */
+  acquisitionStopsBy(acquisitionGrantId: string): { stopsByMs: number | null; erasedAtMs: number | null } {
+    this.#journal.refresh();
+    return {
+      erasedAtMs: this.#journal.erasures.get(acquisitionGrantId)?.at ?? null,
+      stopsByMs: this.#journal.acquisitionMaxExp.get(acquisitionGrantId) ?? null,
     };
   }
 

@@ -42,6 +42,8 @@ export interface TrainingLeaseRuntimeOptions {
 
 export interface TrainingLeaseRuntime {
   readonly store: TrainingAuthorityStore;
+  /** The shared authority journal (the held-data prototype appends to it too). */
+  readonly journalPath: string;
   readonly credentials: LeaseCredentialStore;
   readonly now: () => number;
   readonly issuer: string;
@@ -69,9 +71,10 @@ export function createTrainingLeaseRuntime(
   const now = opts.now ?? Date.now;
   const journalDir = opts.journalDir ?? opts.storeDir;
   const storePath = join(opts.storeDir, "training-authority.sqlite");
+  const journalPath = join(journalDir, "training-authority.journal");
   const store = TrainingAuthorityStore.open({
     storePath,
-    journalPath: join(journalDir, "training-authority.journal"),
+    journalPath,
     issuer: opts.issuer,
     nodeId: opts.nodeId ?? `as-${randomBytes(4).toString("hex")}`,
     now,
@@ -82,6 +85,7 @@ export function createTrainingLeaseRuntime(
   const credentials = LeaseCredentialStore.open({ storePath, now });
   return {
     store,
+    journalPath,
     credentials,
     now,
     issuer: opts.issuer,
