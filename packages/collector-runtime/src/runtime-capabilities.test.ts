@@ -12,8 +12,10 @@ import {
   diffRequiredProtocolCapabilities,
   evaluatePlacement,
   PROVIDER_RUNTIME_CAPABILITIES,
+  RUNTIME_BINDING_INVALID_CODE,
   RUNTIME_CAPABILITY_MISMATCH_CODE,
   RUNTIME_CAPABILITY_UNDECLARED_CODE,
+  RuntimeBindingInvalidError,
   RuntimeCapabilityMismatchError,
   RuntimeCapabilityUndeclaredError,
 } from "./runtime-capabilities.ts";
@@ -104,6 +106,79 @@ test("partial browser support refuses omitted features but permits an explicit e
     ).kind,
     "ok"
   );
+});
+
+test("evaluatePlacement rejects JSON null and non-array binding features with a typed result", () => {
+  const partialRuntime = { ...COLLECTOR_RUNTIME_CAPABILITIES, partialBindings: new Set(["browser"]) };
+  for (const features of [null, "page_navigation", 0, false, {}]) {
+    for (const required of [false, true]) {
+      const connector: ConnectorPlacementInput = JSON.parse(
+        JSON.stringify({
+          ...browserConnector,
+          runtime_requirements: { bindings: { browser: { features, required } } },
+        })
+      );
+      for (const runtime of [partialRuntime, COLLECTOR_RUNTIME_CAPABILITIES, PROVIDER_RUNTIME_CAPABILITIES]) {
+        assert.deepEqual(evaluatePlacement(connector, runtime), {
+          connectorId: connector.connector_id,
+          kind: "malformed_bindings",
+          runtime: runtime.id,
+        });
+        assert.throws(() => assertPlacementOrThrow(connector, runtime), (error: unknown) => {
+          assert.ok(error instanceof RuntimeBindingInvalidError);
+          assert.equal(error.code, RUNTIME_BINDING_INVALID_CODE);
+          assert.equal(error.connectorId, connector.connector_id);
+          assert.equal(error.runtime, runtime.id);
+          return true;
+        });
+      }
+    }
+  }
+});
+
+test("evaluatePlacement rejects malformed binding requirement shapes before matching", () => {
+  const malformedRequirements = [
+    null,
+    [],
+    "browser",
+    { bindings: null },
+    { bindings: [] },
+    { bindings: "browser" },
+    ...[null, [], true, "browser", { required: "true" }, { required: null }].map((browser) => ({
+      bindings: { browser },
+    })),
+    ...[[null], [0], [""], [" "], ["page_navigation", null], ["page_navigation", "page_navigation"]].map(
+      (features) => ({ bindings: { browser: { features, required: true } } })
+    ),
+  ];
+  for (const runtime_requirements of malformedRequirements) {
+    const connector: ConnectorPlacementInput = JSON.parse(
+      JSON.stringify({ ...browserConnector, runtime_requirements })
+    );
+    assert.equal(evaluatePlacement(connector, COLLECTOR_RUNTIME_CAPABILITIES).kind, "malformed_bindings");
+  }
+});
+
+test("evaluatePlacement preserves absent bindings and explicit empty feature arrays", () => {
+  const partialRuntime = { ...COLLECTOR_RUNTIME_CAPABILITIES, partialBindings: new Set(["browser"]) };
+  for (const runtime_requirements of [{}, { bindings: {} }]) {
+    assert.deepEqual(evaluatePlacement({ ...browserConnector, runtime_requirements }, partialRuntime), {
+      kind: "ok",
+      satisfied: [],
+    });
+  }
+  for (const required of [false, true]) {
+    const connector: ConnectorPlacementInput = JSON.parse(
+      JSON.stringify({
+        ...browserConnector,
+        runtime_requirements: { bindings: { browser: { features: [], required } } },
+      })
+    );
+    assert.deepEqual(evaluatePlacement(connector, partialRuntime), {
+      kind: "ok",
+      satisfied: required ? ["browser"] : [],
+    });
+  }
 });
 
 test("collector runtime does not advertise STREAM_EVIDENCE: no local-collector connector emits it and there is no durable delivery path", () => {

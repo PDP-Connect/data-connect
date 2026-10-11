@@ -130,6 +130,12 @@ export type RuntimeCapabilityName = RuntimeBindingName | ConnectorProtocolCapabi
 export type PlacementDecision =
   | { readonly kind: "ok"; readonly satisfied: readonly RuntimeBindingName[] }
   | {
+      /** A JSON/JavaScript caller supplied malformed binding requirements. */
+      readonly kind: "malformed_bindings";
+      readonly runtime: string;
+      readonly connectorId: string;
+    }
+  | {
       readonly kind: "missing_capability";
       readonly missing: readonly RuntimeCapabilityName[];
       readonly missingFeatures?: readonly MissingBindingFeatures[];
@@ -205,6 +211,40 @@ function hasMalformedCapabilities(connector: ConnectorPlacementInput): boolean {
   return !isConnectorProtocolCapabilityArray(connector.protocol_capabilities);
 }
 
+function isRequirementObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/** Validate untyped inputs before the matcher can treat features as a list. */
+function hasMalformedBindings(requirements: unknown): boolean {
+  if (requirements === undefined) {
+    return false;
+  }
+  if (!isRequirementObject(requirements)) {
+    return true;
+  }
+  const { bindings } = requirements;
+  if (bindings === undefined) {
+    return false;
+  }
+  if (!isRequirementObject(bindings)) {
+    return true;
+  }
+  return Object.values(bindings).some((requirement) => {
+    if (!isRequirementObject(requirement)) {
+      return true;
+    }
+    const { features, required } = requirement;
+    return (
+      (required !== undefined && typeof required !== "boolean") ||
+      (features !== undefined &&
+        (!Array.isArray(features) ||
+          features.some((feature) => typeof feature !== "string" || !feature.trim().length) ||
+          new Set(features).size !== features.length))
+    );
+  });
+}
+
 /**
  * Pre-spawn placement decision. Compares connector requirements against
  * runtime capabilities and returns a typed result the orchestrator can
@@ -218,6 +258,13 @@ export function evaluatePlacement(
     return {
       connectorId: connector.connector_id,
       kind: "undeclared_capabilities",
+      runtime: runtime.id,
+    };
+  }
+  if (hasMalformedBindings(connector.runtime_requirements)) {
+    return {
+      connectorId: connector.connector_id,
+      kind: "malformed_bindings",
       runtime: runtime.id,
     };
   }
@@ -317,6 +364,25 @@ export class RuntimeCapabilityUndeclaredError extends Error {
   }
 }
 
+export const RUNTIME_BINDING_INVALID_CODE = "runtime_binding_invalid";
+
+export class RuntimeBindingInvalidError extends Error {
+  readonly code = RUNTIME_BINDING_INVALID_CODE;
+  readonly runtime: string;
+  readonly connectorId: string;
+
+  constructor(args: { connectorId: string; runtime: string }) {
+    super(
+      `Connector '${args.connectorId}' has malformed 'runtime_requirements.bindings' for runtime '${args.runtime}'. ` +
+        "Each binding must be an object with an optional boolean 'required' and an optional " +
+        "'features' array of unique non-empty strings."
+    );
+    this.name = "RuntimeBindingInvalidError";
+    this.runtime = args.runtime;
+    this.connectorId = args.connectorId;
+  }
+}
+
 /**
  * Convenience: throw a typed mismatch error if placement is not ok.
  * Returns the satisfied bindings on success so callers can record them
@@ -329,6 +395,12 @@ export function assertPlacementOrThrow(
   const decision = evaluatePlacement(connector, runtime);
   if (decision.kind === "ok") {
     return decision.satisfied;
+  }
+  if (decision.kind === "malformed_bindings") {
+    throw new RuntimeBindingInvalidError({
+      connectorId: decision.connectorId,
+      runtime: decision.runtime,
+    });
   }
   if (decision.kind === "undeclared_capabilities") {
     throw new RuntimeCapabilityUndeclaredError({

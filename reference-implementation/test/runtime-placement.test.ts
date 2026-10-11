@@ -2,10 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
+import childProcess, { spawn } from "node:child_process";
+import { once } from "node:events";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
+import test, { mock } from "node:test";
+import { placeCollectionProfile } from "../runtime/collection-profile-placement.ts";
 import { type RuntimeRunConnectorOptions, runConnector } from "../runtime/index.ts";
 import { validateConnectorManifest } from "../server/connector-manifest-validation.ts";
 import { closeDb, initDb } from "../server/db.ts";
@@ -16,12 +20,18 @@ const manifest = {
   streams: [{ name: "items", primary_key: ["id"], schema: { properties: { id: { type: "string" } } } }],
 };
 
-// A real child writes its marker before reading START. This proves that a
-// placement refusal happens before any connector code executes (CP §4).
+function assertNotSpawned(spawnCalls: number, marker: string): void {
+  assert.equal(spawnCalls, 0, "placement must refuse before calling spawn");
+  assert.equal(existsSync(marker), false);
+}
+
+// Count calls at the actual spawn boundary, synchronously. The child marker
+// remains additional evidence of execution and records START on success.
 async function withConnector(
   fn: (
     run: (declaration: RuntimeRunConnectorOptions["manifest"]) => ReturnType<typeof runConnector>,
-    marker: string
+    marker: string,
+    spawnCalls: () => number
   ) => Promise<void>,
   messages: unknown[] = [{ records_emitted: 0, status: "succeeded", type: "DONE" }]
 ): Promise<void> {
@@ -41,6 +51,9 @@ async function withConnector(
     });
   `
   );
+  const spawnSpy = mock.method(childProcess, "spawn");
+  // Update the named ESM import used by runtime/index.ts as well.
+  syncBuiltinESMExports();
   try {
     await fn(
       (declaration) =>
@@ -59,23 +72,49 @@ async function withConnector(
           persistState: false,
           rsUrl: "http://127.0.0.1:1",
         }),
-      marker
+      marker,
+      () => spawnSpy.mock.callCount()
     );
   } finally {
+    spawnSpy.mock.restore();
+    syncBuiltinESMExports();
     closeDb();
     rmSync(dir, { force: true, recursive: true });
   }
 }
 
+test("the pre-spawn oracle detects a gate-after-spawn mutation", async () => {
+  await withConnector(async (_run, marker, spawnCalls) => {
+    // Negative control: deliberately put the real placement gate after spawn.
+    // This child never writes the marker, so marker absence alone cannot catch it.
+    const child = spawn(process.execPath, ["-e", ""], { stdio: "ignore" });
+    const closed = once(child, "close");
+    try {
+      assert.throws(() => placeCollectionProfile(manifest.connector_id, { protocol_capabilities: ["BLOB"] }), {
+        code: "runtime_capability_mismatch",
+        missing: ["BLOB"],
+      });
+      assert.equal(existsSync(marker), false);
+      assert.throws(() => assertNotSpawned(spawnCalls(), marker), {
+        actual: 1,
+        code: "ERR_ASSERTION",
+        expected: 0,
+      });
+    } finally {
+      await closed;
+    }
+  });
+});
+
 test("placement refuses BLOB and OBSERVATION with a typed reason before spawn", async () => {
   for (const capability of ["BLOB", "OBSERVATION"]) {
     // biome-ignore lint/performance/noAwaitInLoops: the runtime store uses one process-global database.
-    await withConnector(async (run, marker) => {
+    await withConnector(async (run, marker, spawnCalls) => {
       await assert.rejects(run({ ...manifest, protocol_capabilities: [capability] }), {
         code: "runtime_capability_mismatch",
         missing: [capability],
       });
-      assert.equal(existsSync(marker), false);
+      assertNotSpawned(spawnCalls(), marker);
     });
   }
 });
@@ -85,17 +124,17 @@ test("malformed protocol capabilities refuse with a typed reason before spawn", 
     // Serialized artifacts arrive without TypeScript's manifest guarantees.
     const declaration = JSON.parse(JSON.stringify({ ...manifest, protocol_capabilities: capabilities }));
     // biome-ignore lint/performance/noAwaitInLoops: the runtime store uses one process-global database.
-    await withConnector(async (run, marker) => {
+    await withConnector(async (run, marker, spawnCalls) => {
       await assert.rejects(run(declaration), {
         code: "runtime_capability_undeclared",
       });
-      assert.equal(existsSync(marker), false);
+      assertNotSpawned(spawnCalls(), marker);
     });
   }
 });
 
 test("placement refuses unsupported required binding features before spawn", async () => {
-  await withConnector(async (run, marker) => {
+  await withConnector(async (run, marker, spawnCalls) => {
     await assert.rejects(
       run({
         ...manifest,
@@ -111,7 +150,7 @@ test("placement refuses unsupported required binding features before spawn", asy
         missingFeatures: [{ binding: "browser", features: ["example.com/unsupported_feature"] }],
       }
     );
-    assert.equal(existsSync(marker), false);
+    assertNotSpawned(spawnCalls(), marker);
   });
 });
 
@@ -120,15 +159,16 @@ test("extension bindings install; required unsupported extensions refuse before 
     const declaration = { ...manifest, runtime_requirements: { bindings: { "example.com/scanner": { required } } } };
     assert.doesNotThrow(() => validateConnectorManifest(declaration));
     // biome-ignore lint/performance/noAwaitInLoops: the runtime store uses one process-global database.
-    await withConnector(async (run, marker) => {
+    await withConnector(async (run, marker, spawnCalls) => {
       if (required) {
         await assert.rejects(run(declaration), {
           code: "runtime_capability_mismatch",
           missing: ["example.com/scanner"],
         });
-        assert.equal(existsSync(marker), false);
+        assertNotSpawned(spawnCalls(), marker);
       } else {
         assert.equal((await run(declaration)).status, "succeeded");
+        assert.equal(spawnCalls(), 1);
         assert.equal(Object.hasOwn(JSON.parse(readFileSync(marker, "utf8")).bindings, "example.com/scanner"), false);
       }
     });
@@ -151,7 +191,7 @@ test("removed interactive and malformed extension names are rejected even when o
 });
 
 test("optional unsupported features are omitted and valid catalog feature names still run", async () => {
-  await withConnector(async (run, marker) => {
+  await withConnector(async (run, marker, spawnCalls) => {
     assert.equal(
       (
         await run({
@@ -166,6 +206,7 @@ test("optional unsupported features are omitted and valid catalog feature names 
       ).status,
       "succeeded"
     );
+    assert.equal(spawnCalls(), 1);
     const start = JSON.parse(readFileSync(marker, "utf8"));
     assert.equal(Object.hasOwn(start.bindings, "browser"), false);
     assert.equal(Object.hasOwn(start.bindings, "interactive"), false);
@@ -209,7 +250,7 @@ test("STREAM_EVIDENCE must be declared before its message is accepted", async ()
 });
 
 test("the runtime rejects removed optional binding names before spawn", async () => {
-  await withConnector(async (run, marker) => {
+  await withConnector(async (run, marker, spawnCalls) => {
     await assert.rejects(
       run({
         ...manifest,
@@ -221,12 +262,12 @@ test("the runtime rejects removed optional binding names before spawn", async ()
       }),
       { code: "runtime_binding_invalid" }
     );
-    assert.equal(existsSync(marker), false);
+    assertNotSpawned(spawnCalls(), marker);
   });
 });
 
 test("all portable browser features and the host_http_request legacy placement remain available", async () => {
-  await withConnector(async (run, marker) => {
+  await withConnector(async (run, marker, spawnCalls) => {
     assert.equal(
       (
         await run({
@@ -257,6 +298,7 @@ test("all portable browser features and the host_http_request legacy placement r
       ).status,
       "succeeded"
     );
+    assert.equal(spawnCalls(), 1);
     assert.ok(Object.hasOwn(JSON.parse(readFileSync(marker, "utf8")).bindings, "browser"));
   });
 });
