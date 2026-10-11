@@ -2221,6 +2221,7 @@ describe("RFC 7009 held-data revocation", () => {
       async (h) => {
         const clientId = await registerPublicClient(h);
         const g = await authCodeGrant(h, clientId);
+        assert.equal((await introspect(g.accessToken)).active, true);
         assert.equal(
           (
             await revokeToken(h, {
@@ -2232,6 +2233,7 @@ describe("RFC 7009 held-data revocation", () => {
           ).status,
           200
         );
+        assert.equal((await introspect(g.accessToken)).active, false, "RFC 7009 must disable the access token");
         assert.equal((await status(h, g.accessToken, g.grantId)).body.grants[0]?.read_state, "active");
         const rotation = await fetchJson(
           `${h.asUrl}/oauth/token`,
@@ -2970,3 +2972,19 @@ it('owner keep after security revocation is applied on replay',async()=>{
  },opts);
 });
 
+it('restored revoked access token authenticates new erasure',async()=>{
+ await withServer(false,async h=>{
+  const clientId=await registerPublicClient(h);
+  const g=await authCodeGrant(h,clientId);
+  const r=await fetchJson(h.asUrl+'/oauth/revoke',form({client_id:clientId,token:g.accessToken}));
+  assert.equal(r.status,200);
+  assert.equal((await introspect(g.accessToken)).active,false);
+  getDb().prepare('UPDATE tokens SET revoked = 0 WHERE token_id = ?').run(g.accessToken);
+  const active=(await introspect(g.accessToken)).active;
+  const write=await lifecycle(h,{token:g.accessToken,grant_id:g.grantId,pdpp_disposition:'delete'});
+  console.log('ACCESS_RESTORE',JSON.stringify({revoke:r.status,introspectionActive:active,writeHeldData:write.body.grants[0]?.held_data,writeError:write.body.grants[0]?.error??null}));
+  assert.equal(active, false);
+  assert.equal(write.body.grants[0]?.error,'current_authentication_required');
+  assert.equal((await status(h, g.accessToken, g.grantId)).body.grants[0]?.held_data, 'permitted');
+ },heldDataOpts());
+});

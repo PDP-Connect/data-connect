@@ -12101,6 +12101,10 @@ export async function introspect(token: unknown): Promise<TokenIntrospectionResu
     };
   }
 
+  if (getHeldDataRuntime()?.authority.isDisabled(token) || getHeldDataRuntime()?.authority.accessCredentialRevoked(token)) {
+    return { active: false, inactive_reason: "token_revoked", ...getInactiveTokenBinding(row) };
+  }
+
   if (row.refresh_family_id && !row.refresh_family_active) {
     return {
       active: false,
@@ -12375,6 +12379,7 @@ export async function revokeOAuthToken(input: {
       });
     }
   } else {
+    rt?.authority.revokeAccessCredential(token);
     await getTokenStore().revokeByTokenId(token, clientId);
   }
 }

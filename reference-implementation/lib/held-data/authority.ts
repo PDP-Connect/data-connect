@@ -131,6 +131,7 @@ type Entry =
   | { t: "hd_decommission_offer"; id: string; grant_id: ""; grants: string[]; at: number }
   | { t: "hd_decommission"; id: string; grant_id: ""; offer_id: string; at: number }
   | { t: "hd_window"; id: string; grant_id: string; window_end: number; at: number }
+  | { t: "hd_access_revoke"; id: string; grant_id: string; digest: string; at: number }
   | { t: "hd_keep"; id: string; grant_id: string; at: number }
   | {
       t: "hd_delivered" | "hd_receipt";
@@ -270,6 +271,7 @@ export class HeldDataAuthority {
   readonly #ops = new Map<string, { grantId: string; index: number }>();
   /** Digests disabled for lifecycle compromise, whether or not registered. */
   readonly #disabled = new Map<string, string>();
+  readonly #revokedAccess = new Set<string>();
   readonly #revokedFamilies = new Set<string>();
   readonly #pendingRevocations = new Map<string, Extract<Entry, { t: "hd_revoke_pending" }>>();
   #corrupt = false;
@@ -470,6 +472,21 @@ export class HeldDataAuthority {
       reason,
       at: this.#o.now(),
     });
+  }
+
+  /** Revoke data access and lifecycle writes; retain historical status-query authentication. */
+  revokeAccessCredential(token: string): void {
+    this.#requireWritable();
+    this.#refresh();
+    const digest = credentialDigest(token);
+    if (!this.#revokedAccess.has(digest)) {
+      this.#append({ t: "hd_access_revoke", id: randomUUID(), grant_id: "", digest, at: this.#o.now() });
+    }
+  }
+
+  accessCredentialRevoked(token: string): boolean {
+    this.#refresh();
+    return this.#revokedAccess.has(credentialDigest(token));
   }
 
   /** Persist the authenticated disposition before applying package children. */
@@ -1023,6 +1040,7 @@ export class HeldDataAuthority {
       this.#creds.clear();
       this.#ops.clear();
       this.#disabled.clear();
+      this.#revokedAccess.clear();
       this.#entryIds.clear();
       this.#position = 0;
       this.#epoch = null;
@@ -1321,6 +1339,9 @@ export class HeldDataAuthority {
         return;
       case "hd_family_revoke":
         this.#revokedFamilies.add(e.family_id);
+        return;
+      case "hd_access_revoke":
+        this.#revokedAccess.add(e.digest);
         return;
       case "hd_cred_disable": {
         if (!this.#disabled.has(e.digest)) {

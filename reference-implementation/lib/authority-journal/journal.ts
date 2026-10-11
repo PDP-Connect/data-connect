@@ -46,7 +46,7 @@ export interface JournalEntryBase {
  * loss-detection evidence first.
  */
 const TERMINAL_TYPES: ReadonlySet<string> = new Set([
-  "tombstone", "hd_end", "erase", "hd_keep", "hd_cred_disable", "hd_pending_inbox", "hd_family_revoke", "hd_revoke_pending",
+  "tombstone", "hd_end", "erase", "hd_keep", "hd_cred_disable", "hd_access_revoke", "hd_pending_inbox", "hd_family_revoke", "hd_revoke_pending",
   "hd_decommission", "hd_advance", "hd_window",
 ]);
 
