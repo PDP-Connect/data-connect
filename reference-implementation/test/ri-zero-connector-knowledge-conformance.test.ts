@@ -242,17 +242,9 @@ test("falsifiability (rule 3 counterweight): a real hardcoded provider host is s
 // already exists on disk — it throws immediately instead of clobbering a
 // real production file.
 //
-// `SANCTIONED_POLICY_RESOURCES` (ri-zero-connector-knowledge-data-load-
-// scan.ts) is EMPTY as of `ri-zero-knowledge-terminal-revise-0810` — both
-// production files that used to load a sibling RI-owned JSON registry
-// through it (compact-record-history.ts, version-disposition.ts) now read
-// their connector-fact half from a real manifest and their owner-judgment
-// half from operator runtime state instead (see that constant's own doc
-// comment). There is accordingly no longer a real allowlisted relPath to
-// exercise end-to-end, so the `withSyntheticContentAtRealPath` helper this
-// section previously used ONLY for that one test has been removed along with
-// the test — if a future change adds a genuine `SANCTIONED_POLICY_RESOURCES`
-// entry, re-add an equivalent real-relPath falsifiability test alongside it.
+// The pinned Collection Profile schema is the sole SANCTIONED_POLICY_RESOURCES
+// entry. Its counterweight below uses the exact consumer/resource pair in an
+// isolated tree, proving that allowlisted content still rejects connector facts.
 
 function withSyntheticProductionFile<T>(fileName: string, contents: string, run: (relPath: string) => T): T {
   const relPath = `reference-implementation/server/${fileName}`;
@@ -2901,6 +2893,93 @@ test("a hardcoded OTP denylist under scripts/canary/ is caught, exactly like the
     );
   });
 });
+
+test("Collection Profile schema pin permits only its reviewed consumer and remains connector-neutral", () => {
+  const root = mkdtempSync(join(tmpdir(), "pdpp-binding-schema-boundary-"));
+  const consumer = "reference-implementation/lib/collection-profile-bindings.ts";
+  const schema = "reference-implementation/lib/collection-profile/connector-manifest.schema.json";
+  mkdirSync(dirname(join(root, schema)), { recursive: true });
+  writeFileSync(
+    join(root, consumer),
+    'import schema from "./collection-profile/connector-manifest.schema.json" with { type: "json" };'
+  );
+  try {
+    writeFileSync(join(root, schema), JSON.stringify({ type: "object" }));
+    assert.deepEqual(scanFileDataLoads(join(root, consumer), consumer, root), []);
+    assert.ok(
+      scanFileDataLoads(join(root, consumer), "reference-implementation/lib/other.ts", root).some(
+        (v) => v.rule === "unsanctioned-policy-resource-path"
+      )
+    );
+    writeFileSync(join(root, schema), JSON.stringify({ provider: "gmail" }));
+    assert.ok(
+      scanFileDataLoads(join(root, consumer), consumer, root, new Set(["gmail"])).some(
+        (v) => v.rule === "hardcoded-connector-literal-in-ri-owned-json"
+      )
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Collection Profile parser provenance preserves the exact reviewed manifest-read boundary", () => {
+  for (const [source, expectedClean] of [
+    ["../lib/collection-profile-bindings.ts", true],
+    ["../lib/unreviewed-parser.ts", false]
+  ] as const) {
+    withSyntheticProductionFile(
+      "synthetic-profile-parser-boundary.ts",
+      [
+        'import { readFile } from "node:fs/promises";',
+        `import { parseManifestJson } from "${source}";`,
+        "async function readManifestJson(path: string) {",
+        '  const raw = await readFile(path, "utf8");',
+        "  return parseManifestJson(raw);",
+        "}"
+      ].join("\n"),
+      (relPath) => {
+        const violations = scanFileDataLoads(
+          join(repoRoot, relPath),
+          "reference-implementation/server/polyfill-manifest-reconcile.ts",
+          repoRoot
+        );
+        assert.equal(violations.length === 0, expectedClean, JSON.stringify(violations));
+      }
+    );
+  }
+});
+
+for (const [name, parameters, prefix, suffix] of [
+  ["parameter", "path: string, parseManifestJson: (value: string) => unknown", "", ""],
+  ["function", "path: string", "function parseManifestJson(value: string) { return value; }", ""],
+  ["variable", "path: string", "const parseManifestJson = (value: string) => value;", ""],
+  ["destructuring", "path: string", "const { parseManifestJson } = unreviewed;", ""],
+  ["catch", "path: string", "try { throw null; } catch (parseManifestJson) {", "}"]
+] as const) {
+  test(`Collection Profile parser import cannot be shadowed by a ${name} binding`, () => {
+    withSyntheticProductionFile(
+      "synthetic-profile-parser-shadow.ts",
+      [
+        'import { readFile } from "node:fs/promises";',
+        'import { parseManifestJson } from "../lib/collection-profile-bindings.ts";',
+        `async function readManifestJson(${parameters}) {`,
+        prefix,
+        '  const raw = await readFile(path, "utf8");',
+        "  return parseManifestJson(raw);",
+        suffix,
+        "}"
+      ].join("\n"),
+      (relPath) => {
+        const violations = scanFileDataLoads(
+          join(repoRoot, relPath),
+          "reference-implementation/server/polyfill-manifest-reconcile.ts",
+          repoRoot
+        );
+        assert.ok(violations.length > 0, "a shadowed parser cannot satisfy the reviewed manifest-read boundary");
+      }
+    );
+  });
+}
 
 test("rule (5) runs under scripts/canary/: an unsanctioned sibling data load is flagged", () => {
   withSyntheticCanaryFile(

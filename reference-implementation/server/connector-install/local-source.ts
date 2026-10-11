@@ -20,6 +20,7 @@ import {
   writeFileSync,
 } from "node:fs"
 import { isAbsolute, join, relative, resolve, sep } from "node:path"
+import { parseManifestJson } from "../../lib/collection-profile-bindings.ts"
 import { canonicalConnectorKey } from "../connector-key.ts"
 
 const MANIFEST_PATH = "profile/collection-profile.json"
@@ -147,7 +148,7 @@ function readManifest(root: string): {
   }
   let parsed: unknown
   try {
-    parsed = JSON.parse(readFileSync(manifestPath, "utf8"))
+    parsed = parseManifestJson(readFileSync(manifestPath, "utf8"))
   } catch (error) {
     throw new Error(
       `Collection Profile manifest is invalid: ${error instanceof Error ? error.message : String(error)}`,

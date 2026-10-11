@@ -24,7 +24,8 @@
  *      (data-only in this codebase; never used to load executable code) and
  *      `require`/dynamic `import`/static json-attribute imports whose target
  *      resolves to (or cannot be proven not to be) a `.json`/`.yaml`/`.yml`
- *      resource, or whose result flows into `JSON.parse`.
+ *      resource, or whose result flows into `JSON.parse` or the reviewed
+ *      Collection Profile manifest parser.
  *   2. Statically resolves each call's path argument via a bounded,
  *      single-file constant-folder: string/template literals,
  *      `join`/`resolve` call trees, `import.meta.url`/`__dirname`
@@ -137,7 +138,7 @@ const MANIFEST_ROOTS = [
  * file-path pairs, so it does not reintroduce the violation class the guard
  * exists to forbid.
  *
- * Empty as of `ri-zero-knowledge-terminal-revise-0810`: the two production
+ * Since `ri-zero-knowledge-terminal-revise-0810`, the two production
  * files that used to load a sibling RI-owned JSON registry through this
  * allowlist no longer do. `compact-record-history.ts`'s per-connector
  * fingerprint-exclusion policy is read generically from each connector's own
@@ -150,12 +151,19 @@ const MANIFEST_ROOTS = [
  * external state read at request time, never RI-committed source or
  * RI-committed JSON, so it was never a candidate for this allowlist either
  * (see `reference-implementation/server/version-disposition.ts`'s own module
- * doc comment). Left as an explicit empty Map (not deleted) so a future
- * legitimate RI-owned sibling registry has an obvious, documented place to
+ * doc comment). The map below now pins the Collection Profile's normative
+ * schema to its sole reviewed validator, without admitting connector facts.
+ * A future legitimate RI-owned sibling registry has a documented place to
  * register — adding an entry here is a real security decision, same bar as
  * `SANCTIONED_GENERIC_DATA_READ_CALL_SITES` below.
  */
-const SANCTIONED_POLICY_RESOURCES: ReadonlyMap<string, ReadonlySet<string>> = new Map([]);
+const SANCTIONED_POLICY_RESOURCES: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+  // Protocol schema pinned to data-connectors PR #298, not connector policy.
+  [
+    "reference-implementation/lib/collection-profile-bindings.ts",
+    new Set(["reference-implementation/lib/collection-profile/connector-manifest.schema.json"])
+  ]
+]);
 
 const POLYFILL_MANIFEST_READ_SITE = 'reference-implementation/server/polyfill-manifest-reconcile.ts::readManifestJson::readFile(path, "utf8")';
 
@@ -1447,6 +1455,72 @@ export function scanFileDataLoads(
   };
   const childProcessShellExecBindings = collectChildProcessShellExecBindings(program);
 
+  // Recognize the reviewed duplicate-key parser only through its actual import.
+  // An unrelated function with the same name cannot satisfy the read boundary.
+  const manifestParserNames = new Set<string>();
+  for (const stmt of nodeArrayField(program, "body")) {
+    const source = nodeField(stmt, "source");
+    if (
+      stmt.type !== "ImportDeclaration" ||
+      source?.type !== "StringLiteral" ||
+      joinRelative(analysis.fileDir, source.value as string) !==
+        "reference-implementation/lib/collection-profile-bindings.ts"
+    ) {
+      continue;
+    }
+    for (const specifier of nodeArrayField(stmt, "specifiers")) {
+      const imported = nodeField(specifier, "imported");
+      const local = nodeField(specifier, "local");
+      if (imported?.type === "Identifier" && imported.name === "parseManifestJson" && local?.type === "Identifier") {
+        manifestParserNames.add(local.name as string);
+      }
+    }
+  }
+
+  // This scanner uses file-wide name tables, so fail closed if any other
+  // declaration binds an imported parser's name, even in an unrelated scope.
+  function excludeShadowedParser(pattern: Node | undefined): void {
+    if (!pattern) return;
+    if (pattern.type === "Identifier") {
+      manifestParserNames.delete(pattern.name as string);
+    } else if (pattern.type === "ObjectPattern") {
+      for (const property of nodeArrayField(pattern, "properties")) {
+        excludeShadowedParser(nodeField(property, property.type === "RestElement" ? "argument" : "value"));
+      }
+    } else if (pattern.type === "ArrayPattern") {
+      for (const element of nodeArrayField(pattern, "elements")) excludeShadowedParser(element);
+    } else if (pattern.type === "AssignmentPattern" || pattern.type === "RestElement") {
+      excludeShadowedParser(nodeField(pattern, pattern.type === "AssignmentPattern" ? "left" : "argument"));
+    } else if (pattern.type === "TSParameterProperty") {
+      excludeShadowedParser(nodeField(pattern, "parameter"));
+    }
+  }
+  walk(program, (node) => {
+    if (
+      node.type === "VariableDeclarator" ||
+      node.type === "FunctionDeclaration" ||
+      node.type === "FunctionExpression" ||
+      node.type === "ClassDeclaration" ||
+      node.type === "ClassExpression" ||
+      node.type === "TSEnumDeclaration" ||
+      node.type === "TSModuleDeclaration"
+    ) {
+      excludeShadowedParser(nodeField(node, "id"));
+    }
+    for (const parameter of nodeArrayField(node, "params")) excludeShadowedParser(parameter);
+    if (node.type === "CatchClause") excludeShadowedParser(nodeField(node, "param"));
+  });
+
+  function isJsonParser(callee: Node | undefined): boolean {
+    return Boolean(
+      callee &&
+        ((callee.type === "Identifier" && manifestParserNames.has(callee.name as string)) ||
+          (callee.type === "MemberExpression" &&
+            isIdentifier(callee.object as Node, "JSON") &&
+            isIdentifier(callee.property as Node, "parse")))
+    );
+  }
+
   // Build declarator-init -> name map up front so flowsIntoJsonParse's
   // variable-binding branch can resolve `const raw = readFileSync(...)`.
   const declaratorNameByInit = new Map<Node, string>();
@@ -1459,10 +1533,7 @@ export function scanFileDataLoads(
   function flowsIntoJsonParse(callNode: Node, parent: Node | null): boolean {
     if (
       parent?.type === "CallExpression" &&
-      // biome-ignore lint/suspicious/noUnnecessaryConditions: false positive -- `parent.callee` is `unknown` on Node's index signature; the `as Node` cast changes the STATIC type only, not runtime nullability. `tsc --strict` raises no error on this file.
-      (parent.callee as Node)?.type === "MemberExpression" &&
-      isIdentifier((parent.callee as Node).object as Node, "JSON") &&
-      isIdentifier((parent.callee as Node).property as Node, "parse")
+      isJsonParser(parent.callee as Node)
     ) {
       return true;
     }
@@ -1478,10 +1549,7 @@ export function scanFileDataLoads(
       }
       if (
         n.type === "CallExpression" &&
-        // biome-ignore lint/suspicious/noUnnecessaryConditions: false positive -- `n.callee` is `unknown` on Node's index signature; the `as Node` cast changes the STATIC type only, not runtime nullability. `tsc --strict` raises no error on this file.
-        (n.callee as Node)?.type === "MemberExpression" &&
-        isIdentifier((n.callee as Node).object as Node, "JSON") &&
-        isIdentifier((n.callee as Node).property as Node, "parse")
+        isJsonParser(n.callee as Node)
       ) {
         const [arg] = nodeArrayField(n, "arguments");
         if (arg && isIdentifier(arg, boundName)) {
@@ -1690,7 +1758,8 @@ export function scanFileDataLoads(
     const siteKey = sanctionedSiteKey(relPath, raw, node, ancestors);
     const second = nodeArrayField(node, "arguments")[1];
     // This one reviewed site is exempt only for the exact production shape:
-    // awaited `readFile(path, "utf8")` whose result reaches JSON.parse.
+    // awaited `readFile(path, "utf8")` whose result reaches JSON.parse or
+    // the exact reviewed Collection Profile parser import above.
     // A line match with a different read shape fails closed below.
     const matchesPolyfillManifestReadShape =
       isIdentifier(callee, "readFile") &&
@@ -1714,10 +1783,10 @@ export function scanFileDataLoads(
     // `new URL("./policy", import.meta.url)`). A dynamic/interpolated
     // path with no extension (e.g. `/proc/${pid}/status`) is a runtime OS
     // path, not a renamed data file, and is correctly out of scope unless
-    // it is separately JSON.parse-consumed.
+    // it is separately consumed by a recognized JSON parser.
     const looksLikeDataPath = isFullyStatic && isDataResourceExtension(extname(resolved.relPath));
     if (!(consumesJson || looksLikeDataPath)) {
-      // Neither JSON.parse-consumed nor resolved to a data-shaped
+      // Neither JSON-parser-consumed nor resolved to a data-shaped
       // extension: out of rule (5)'s scope (e.g. a DDL .js-as-text read,
       // a .gitignore read, a /proc status read, a raw secret-key-file
       // read). If the path is unresolvable AND the read is never

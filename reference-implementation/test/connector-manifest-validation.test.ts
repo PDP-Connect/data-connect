@@ -63,6 +63,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  assertRequiredBindings,
+  bindingInstanceKind,
+  negotiateBindingInstances,
+} from "../lib/collection-profile-bindings.ts";
+import {
   invalidConnectorManifest,
   isMinMaxAggregateFieldSchema,
   isNumericAggregateFieldSchema,
@@ -777,4 +782,151 @@ test("validateConnectorManifest accepts a well-formed secret credential_capture 
 
 test("validateConnectorManifest accepts a manifest with no credential_capture at all", () => {
   assert.doesNotThrow(() => validateConnectorManifest(manifestWithStream({})));
+});
+
+// Collection Profile PR #298, sections 3.3.1–3.3.8. Pure validation cases
+// distinguish kind-selected shapes from the former key-only allow-list.
+test("named binding instances select typed constraints and features by kind", () => {
+  const bindings = {
+    chase_site: {
+      kind: "browser",
+      interface: "browser@1",
+      required: true,
+      features: ["page_navigation", "page_input"],
+      constraints: { navigate: ["https://secure.chase.com"], connect: ["wss://ws.chase.com"] }
+    },
+    mailbox: {
+      kind: "network",
+      required: true,
+      constraints: { hosts: ["imaps://imap.gmail.com", { setup_field: "base_url" }] }
+    },
+    export_files: {
+      kind: "filesystem",
+      required: true,
+      constraints: {
+        inputs: [{ env_var: "EXPORT_DIR", kind: "dir", access: "read" }],
+        outputs: [{ slot: "scratch", access: "write" }]
+      }
+    },
+    keyring: {
+      kind: "desktop_session",
+      required: false,
+      rationale: "Unwrap the export key.",
+      constraints: { items: [{ service: "os_keyring", selector: "export-key", operations: ["unwrap"] }] }
+    },
+    "example.com/custom": { required: false, interface: "example.com/custom@1" }
+  };
+  assert.doesNotThrow(() => validateConnectorManifest({ ...manifestWithStream(), runtime_requirements: { bindings } }));
+});
+
+const invalidBindingDeclarations = [
+  ["missing required", "network", {}],
+  ["shorthand kind", "browser", { required: true, kind: "browser" }],
+  ["interface kind", "browser", { required: true, interface: "network@1" }],
+  ["interface zero", "network", { required: true, interface: "network@0" }],
+  ["interface leading zero", "network", { required: true, interface: "network@01" }],
+  ["extension interface kind", "example.com/custom", { required: false, interface: "browser@1" }],
+  ["missing named kind", "chase_site", { required: true }],
+  ["wrong feature kind", "browser", { required: true, features: ["same_origin_page_fetch"] }],
+  ["filesystem feature", "filesystem", { required: true, features: [] }],
+  ["uppercase host", "browser", { required: true, constraints: { navigate: ["https://CHASE.com"] } }],
+  ["default port", "browser", { required: true, constraints: { navigate: ["https://chase.com:443"] } }],
+  ["IPv4 looking host", "network", { required: true, constraints: { hosts: ["2130706433"] } }],
+  ["noncanonical IPv6", "network", { required: true, constraints: { hosts: ["https://[0:0:0:0:0:0:0:1]"] } }],
+  ["navigation websocket", "browser", { required: true, constraints: { navigate: ["wss://ws.example.com"] } }],
+  ["host path", "network", { required: true, constraints: { hosts: ["https://example.com/api"] } }],
+  ["endpoint missing port", "network", { required: true, constraints: { hosts: ["custom://example.com"] } }],
+  ["duplicate hosts", "network", { required: true, constraints: { hosts: ["example.com", "example.com"] } }],
+  [
+    "bad setup reference",
+    "network",
+    { required: true, constraints: { hosts: [{ setup_field: "base_url", allow_private: "yes" }] } }
+  ],
+  ["empty hosts", "network", { required: true, constraints: { hosts: [] } }],
+  ["unknown constraint", "browser", { required: true, constraints: { hosts: ["example.com"] } }],
+  [
+    "duplicate input env",
+    "filesystem",
+    {
+      required: true,
+      inputs: [
+        { env_var: "EXPORT", kind: "dir", access: "read" },
+        { env_var: "EXPORT", kind: "file", access: "read" }
+      ]
+    }
+  ],
+  [
+    "disagreeing aliases",
+    "filesystem",
+    {
+      required: true,
+      inputs: [{ env_var: "EXPORT", kind: "dir", access: "read" }],
+      constraints: { inputs: [{ env_var: "EXPORT", kind: "file", access: "read" }] }
+    }
+  ],
+  [
+    "durable scratch",
+    "filesystem",
+    { required: true, constraints: { outputs: [{ slot: "scratch", access: "write", durable: true }] } }
+  ],
+  [
+    "wrong desktop operation",
+    "desktop_session",
+    { required: true, constraints: { items: [{ service: "keyring", selector: "key", operations: ["write"] }] } }
+  ]
+] as const;
+for (const [scenario, key, declaration] of invalidBindingDeclarations) {
+  test(`binding validation rejects ${scenario}`, () => {
+    assert.throws(() =>
+      validateConnectorManifest({ ...manifestWithStream(), runtime_requirements: { bindings: { [key]: declaration } } })
+    );
+  });
+}
+
+test("shorthand bindings and legacy browser host_http_request stay valid", () => {
+  assert.doesNotThrow(() =>
+    validateConnectorManifest({
+      ...manifestWithStream(),
+      runtime_requirements: {
+        bindings: {
+          browser: { required: true, features: ["host_http_request"] },
+          network: { required: true, features: ["same_origin_page_fetch", "host_http_request"] },
+          filesystem: { required: true }
+        }
+      }
+    })
+  );
+});
+
+test("filesystem aliases compare whole entries as sets without rewriting legacy manifests", () => {
+  const first = { env_var: "FIRST", kind: "dir", access: "read" };
+  const second = { env_var: "SECOND", kind: "file", access: "read", accepted_extensions: [".zip"] };
+  const manifest = {
+    ...manifestWithStream(),
+    runtime_requirements: {
+      bindings: {
+        filesystem: { required: true, inputs: [first, second], constraints: { inputs: [second, first] } }
+      }
+    }
+  };
+  const before = structuredClone(manifest);
+  assert.doesNotThrow(() => validateConnectorManifest(manifest));
+  assert.deepEqual(manifest, before);
+});
+
+test("binding negotiation exposes instance placement before required-binding failure and keeps handles opaque", () => {
+  const handle = { secretHandle: Symbol("opaque child-only handle") };
+  const requested = {
+    site: { kind: "browser", required: true },
+    keyring: { kind: "desktop_session", required: true },
+    "example.com/optional": { required: false }
+  };
+  const result = negotiateBindingInstances(requested, { browser: { handle } });
+  assert.equal(bindingInstanceKind("site", requested.site), "browser");
+  assert.equal(result.bindings.site?.handle, handle);
+  assert.equal(result.bindings.site?.kind, "browser");
+  assert.equal(Object.hasOwn(result.bindings, "keyring"), false);
+  assert.equal(Object.hasOwn(result.bindings, "example.com/optional"), false);
+  assert.deepEqual(result.missingRequiredBindings, [{ instanceKey: "keyring", kind: "desktop_session" }]);
+  assert.throws(() => assertRequiredBindings(result), /required binding: keyring \(desktop_session\)/);
 });

@@ -139,3 +139,21 @@ test("runtime binding required flag must be boolean", async () => {
     assert.match(body.error.message, /browser\.required must be a boolean/u);
   });
 });
+
+test("manifest registration rejects duplicate JSON keys before parsing can hide them", async () => {
+  await withHarness(async ({ asUrl }) => {
+    const raw = JSON.stringify(makeManifest({ bindings: { network: { required: true } } }));
+    for (const body of [
+      raw.replace('"required":true', '"required":false,"required":true'),
+      raw.replace('"required":true', '"required":false,"\\u0072equired":true'),
+      raw.replace('"type":"string"', '"type":"integer","type":"string"')
+    ]) {
+      const response = await fetch(`${asUrl}/connectors`, {
+        body,
+        headers: { "Content-Type": "application/json" },
+        method: "POST"
+      });
+      assert.equal(response.status, 400, await response.text());
+    }
+  });
+});

@@ -74,7 +74,7 @@ test("validateRuntimeRequirements: returns when runtime_requirements is absent",
 test("validateRuntimeRequirements: accepts valid bindings", () => {
   assert.equal(
     validateRuntimeRequirements(
-      { runtime_requirements: { bindings: { browser: { required: true }, network: {} } } },
+      { runtime_requirements: { bindings: { browser: { required: true }, network: { required: false } } } },
       CODE
     ),
     undefined

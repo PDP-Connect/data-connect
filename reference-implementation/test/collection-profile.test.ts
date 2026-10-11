@@ -3534,7 +3534,7 @@ rl.on('line', (line) => {
       ...MINIMAL_MANIFEST,
       runtime_requirements: {
         bindings: {
-          browser_automation: { required: true },
+          keyring: { kind: "desktop_session", required: true },
         },
       },
     };
@@ -3560,7 +3560,7 @@ rl.on('line', (line) => {
             state: null,
           }),
         // biome-ignore lint/performance/useTopLevelRegex: localized test assertion preserves its explicit contract.
-        /binding/i,
+        /required binding: keyring \(desktop_session\)/i,
         "Should reject when required binding is not available"
       );
     } finally {
@@ -3568,12 +3568,12 @@ rl.on('line', (line) => {
     }
   });
 
-  await t.test("runtime satisfies required interactive bindings and advertises them in START", async () => {
+  await t.test("runtime resolves a named interactive browser instance and advertises it in START", async () => {
     const manifestWithInteractiveBinding = {
       ...MINIMAL_MANIFEST,
       runtime_requirements: {
         bindings: {
-          interactive: { required: true },
+          interactive: { kind: "browser", required: true },
         },
       },
     };
@@ -3609,7 +3609,7 @@ rl.on('line', (line) => {
       assert.deepEqual(captured.bindings, {
         browser: {},
         filesystem: {},
-        interactive: {},
+        interactive: { kind: "browser" },
         network: {},
       });
     } finally {
@@ -11259,3 +11259,78 @@ async function issueOwnerToken(asUrl: string, subjectId = "owner_local"): Promis
   assert.ok(tokenBody.access_token, "expected access_token from token exchange");
   return tokenBody.access_token;
 }
+
+test("START resolves multiple named instances by kind and omits unsupported optional extensions", async () => {
+  const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+  const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-named-bindings-"));
+  const capturePath = join(tmpDir, "start.json");
+  const { connectorPath, cleanup } = createStartCaptureConnector(capturePath);
+  const declaration = {
+    kind: "browser",
+    interface: "browser@1",
+    required: true,
+    features: ["page_navigation"],
+    constraints: { navigate: ["https://example.com"] }
+  };
+  try {
+    const result = await runTestConnector({
+      admitRunConnection: fakeEchoAdmitRunConnection(),
+      collectionMode: "full_refresh",
+      connectorId: "test",
+      connectorPath,
+      manifest: {
+        ...MINIMAL_MANIFEST,
+        runtime_requirements: {
+          bindings: {
+            first_site: declaration,
+            second_site: { ...declaration, constraints: { navigate: ["https://other.example.com"] } },
+            export_files: {
+              kind: "filesystem",
+              required: true,
+              inputs: [{ env_var: "EXPORT", kind: "dir", access: "read" }],
+              constraints: { outputs: [{ slot: "scratch", access: "write" }] }
+            },
+            api: {
+              kind: "network",
+              required: true,
+              constraints: { hosts: ["https://api.example.com", { setup_field: "base_url" }] }
+            },
+            "example.com/optional": { required: false },
+            interactive: { kind: "desktop_session", required: false }
+          }
+        }
+      },
+      onInteraction: async () => ({}),
+      ownerToken: "test",
+      persistState: true,
+      rsUrl: "http://localhost:9999",
+      state: null
+    });
+    assert.equal(result.status, "succeeded");
+    const captured = JSON.parse(readFileSync(capturePath, "utf8"));
+    assert.deepEqual(captured.bindings.first_site, {
+      kind: "browser",
+      interface: "browser@1",
+      features: ["page_navigation"],
+      constraints: declaration.constraints
+    });
+    assert.deepEqual(captured.bindings.second_site.constraints, { navigate: ["https://other.example.com"] });
+    assert.deepEqual(captured.bindings.export_files, {
+      kind: "filesystem",
+      constraints: {
+        inputs: [{ env_var: "EXPORT", kind: "dir", access: "read" }],
+        outputs: [{ slot: "scratch", access: "write" }]
+      }
+    });
+    assert.deepEqual(captured.bindings.api, {
+      kind: "network",
+      constraints: { hosts: ["https://api.example.com", { setup_field: "base_url" }] }
+    });
+    assert.equal(Object.hasOwn(captured.bindings, "example.com/optional"), false);
+    assert.equal(Object.hasOwn(captured.bindings, "interactive"), false);
+  } finally {
+    cleanup();
+    rmSync(tmpDir, { force: true, recursive: true });
+    await closeServer(server);
+  }
+});

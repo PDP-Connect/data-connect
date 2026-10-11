@@ -16,6 +16,12 @@ import { join as joinPath } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { validateRuntimeContinuationFact } from "@pdpp/connector-protocol/connector-runtime-protocol";
 import { connectorChildArgs } from "../connector-dependency-loader.mjs";
+import {
+  assertRequiredBindings,
+  type BindingDeclarations,
+  type BindingDescriptors,
+  negotiateBindingInstances,
+} from "../lib/collection-profile-bindings.ts";
 import { emitControllerBootedAndStashEpoch } from "../lib/controller-boot.ts";
 import type { SpineEventInput, SpineEventRecord } from "../lib/spine.ts";
 import { createTraceContext, emitSpineEvent, getCurrentBootEpoch } from "../lib/spine.ts";
@@ -144,7 +150,7 @@ interface ManifestStream {
 }
 
 interface ConnectorManifest {
-  runtime_requirements?: { bindings?: Record<string, { required?: boolean }> } | null;
+  runtime_requirements?: { bindings?: BindingDeclarations } | null;
   storage_binding?: { connector_instance_id?: string | null } | null;
   streams?: ManifestStream[] | null;
   [key: string]: unknown;
@@ -177,12 +183,7 @@ interface AttachmentOutcome {
 }
 
 /** Runtime-advertised child bindings (Collection Profile START.bindings). */
-interface AvailableBindings {
-  browser: Record<string, never>;
-  filesystem: Record<string, never>;
-  interactive?: Record<string, never>;
-  network: Record<string, never>;
-}
+type AvailableBindings = BindingDescriptors;
 
 /** RS ingest response, after `readIngestResponse` proves the counters and receipt vector. */
 type IngestResult = StrictIngestResult;
@@ -2405,17 +2406,6 @@ export function buildBrowserSurfaceLaunchEnv({
   };
 }
 
-function validateRequiredRuntimeBindings(
-  requiredBindings: Record<string, { required?: boolean }>,
-  availableBindings: AvailableBindings
-): void {
-  for (const [binding, req] of Object.entries(requiredBindings)) {
-    if (req.required && !(binding in availableBindings)) {
-      throw new Error(`Runtime cannot satisfy required binding: ${binding}`);
-    }
-  }
-}
-
 function requestedRuntimeStreams(scope: { streams?: unknown } | null): Set<string> | null {
   if (!Array.isArray(scope?.streams)) {
     return null;
@@ -2789,9 +2779,9 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
 
   // Check binding requirements
   const requiredBindings = manifest.runtime_requirements?.bindings || {};
-  const availableBindings = buildAvailableBindings(onInteraction);
-
-  validateRequiredRuntimeBindings(requiredBindings, availableBindings);
+  const bindingNegotiation = negotiateBindingInstances(requiredBindings, buildAvailableBindings(onInteraction));
+  const availableBindings = bindingNegotiation.bindings;
+  assertRequiredBindings(bindingNegotiation);
 
   const explicitlyRequestedStreams = requestedRuntimeStreams(providedScope);
   const declaredCollectionScope = readStoredCollectionScope(state).scope;

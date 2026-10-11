@@ -10,6 +10,7 @@
  * logic.
  */
 
+import { validateBindingDeclarations } from "../lib/collection-profile-bindings.ts";
 import { tuningEnvironmentKeyOwner } from "../runtime/connector-child-environment.ts";
 import {
   normalizeStaticSecretCredentialCapture,
@@ -269,7 +270,6 @@ export const RUNTIME_REQUIREMENT_BINDINGS = new Set([
   "browser",
   "desktop_session",
   "filesystem",
-  "interactive",
   "network",
 ]);
 export const STREAM_AVAILABILITY_STATES = new Set(["supported", "unsupported_in_mode", "experimental", "deprecated"]);
@@ -323,7 +323,10 @@ function validateRuntimeBindings(req: Record<string, unknown>, code: string): bo
     throw invalidConnectorManifest("runtime_requirements.bindings must be an object when declared", code);
   }
   const bindingsObj = bindings as Record<string, unknown>;
-  const unknownBindings = Object.keys(bindingsObj).filter((binding) => !RUNTIME_REQUIREMENT_BINDINGS.has(binding));
+  const unknownBindings = Object.keys(bindingsObj).filter((binding) =>
+    !RUNTIME_REQUIREMENT_BINDINGS.has(binding) && !binding.includes("/") &&
+    !(bindingsObj[binding] && typeof bindingsObj[binding] === "object" && "kind" in (bindingsObj[binding] as object))
+  );
   if (unknownBindings.length) {
     throw invalidConnectorManifest(
       `runtime_requirements.bindings has unsupported keys: ${unknownBindings.join(", ")}`,
@@ -338,6 +341,11 @@ function validateRuntimeBindings(req: Record<string, unknown>, code: string): bo
     if (reqObj.required !== undefined && typeof reqObj.required !== "boolean") {
       throw invalidConnectorManifest(`runtime_requirements.bindings.${binding}.required must be a boolean`, code);
     }
+  }
+  try {
+    validateBindingDeclarations(bindingsObj);
+  } catch (error) {
+    throw invalidConnectorManifest(error instanceof Error ? error.message : String(error), code);
   }
   return true;
 }

@@ -1296,3 +1296,28 @@ test("owner catalog route returns the verified catalog projection", async () => 
     object: "connector_install_catalog",
   });
 });
+
+test("duplicate manifest JSON keys cannot be activated", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pdpp-duplicate-manifest-"));
+  try {
+    const service = createConnectorInstallService({
+      catalogLoader: async () => [entry],
+      dataDir,
+      installArtifact: (root) => {
+        writeFixture(root);
+        const path = join(root, "profile", "collection-profile.json");
+        const original = readFileSync(path, "utf8");
+        writeFileSync(
+          path,
+          original.replace("{", '{"runtime_requirements":{"bindings":{"network":{"required":false,"required":true}}},')
+        );
+      },
+      registerManifest: () => Promise.resolve(),
+      store: createFileConnectorInstallStore(dataDir)
+    });
+    await assert.rejects(() => service.install("github", digest), /duplicate.*key/i);
+    assert.deepEqual(await service.status(), []);
+  } finally {
+    rmSync(dataDir, { force: true, recursive: true });
+  }
+});

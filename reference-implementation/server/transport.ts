@@ -53,6 +53,7 @@ declare module "fastify" {
 }
 
 import { publicManifests, referenceManifests } from "@pdpp/reference-contract";
+import { parseManifestJson } from "../lib/collection-profile-bindings.ts";
 import {
   applyRequestValidation,
   applyResponseValidation,
@@ -436,13 +437,17 @@ function buildFastify({ loggerInstance }: { loggerInstance: FastifyBaseLogger })
   // payloads so routes like `POST /grants/:id/revoke` (no body, header still
   // JSON) reach their handlers instead of failing at the transport.
   fastify.removeContentTypeParser("application/json");
-  fastify.addContentTypeParser("application/json", { parseAs: "string" }, (_req, body, done) => {
+  fastify.addContentTypeParser("application/json", { parseAs: "string" }, (request, body, done) => {
     if (!body) {
       done(null, {});
       return;
     }
     try {
-      done(null, JSON.parse(typeof body === "string" ? body : body.toString()));
+      const text = typeof body === "string" ? body : body.toString();
+      // Only the connector-registration body is manifest text. Check it before
+      // JSON.parse discards duplicate keys, including keys below bindings.
+      const isManifest = request.method === "POST" && request.url.split("?")[0] === "/connectors";
+      done(null, isManifest ? parseManifestJson(text) : JSON.parse(text));
     } catch (error: unknown) {
       const err = error instanceof Error ? error : new Error(String(error));
       Object.assign(err, { statusCode: 400 });
