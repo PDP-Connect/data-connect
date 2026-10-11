@@ -1300,6 +1300,7 @@ export interface AuthorizationServerMetadataInput {
   deviceAuthorizationProfilesSupported?: readonly Record<string, unknown>[] | null;
   grantTypesSupported?: readonly string[] | null;
   introspectionEndpoint: string;
+  revocationEndpoint?: string | null;
   issuer: string;
   preRegisteredPublicClients?: readonly AuthorizationServerPublicClient[] | null;
   providerConnectCapabilities: Record<string, unknown>;
@@ -1326,6 +1327,7 @@ export interface AuthorizationServerMetadata {
   device_authorization_endpoint?: string;
   grant_types_supported?: readonly string[];
   introspection_endpoint: string;
+  revocation_endpoint?: string;
   issuer: string;
   pdpp_authorization_details_types_supported?: readonly string[];
   pdpp_device_authorization_profiles_supported?: readonly Record<string, unknown>[];
@@ -1346,6 +1348,7 @@ export interface AuthorizationServerMetadata {
 export function buildAuthorizationServerMetadata({
   issuer,
   introspectionEndpoint,
+  revocationEndpoint,
   pushedAuthorizationRequestEndpoint,
   registrationEndpoint,
   providerConnectCapabilities,
@@ -1372,6 +1375,9 @@ export function buildAuthorizationServerMetadata({
     issuer,
     pdpp_provider_connect_capabilities: providerConnectCapabilities,
   };
+  if (revocationEndpoint) {
+    metadata.revocation_endpoint = revocationEndpoint;
+  }
 
   if (pushedAuthorizationRequestEndpoint) {
     metadata.pushed_authorization_request_endpoint = pushedAuthorizationRequestEndpoint;

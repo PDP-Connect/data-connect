@@ -17,10 +17,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { ToyApp } from "../examples/held-data-toy-app/app.ts";
+import { HeldDataAuthority } from "../lib/held-data/authority.ts";
 import { HeldDataClient } from "../lib/held-data/client.ts";
 import { httpStatusTransport } from "../lib/held-data/http-transport.ts";
 import { makeDpopProof, thumbprint } from "../lib/training-lease/dpop.ts";
 import { generateEd25519KeyPair } from "../lib/training-lease/jws.ts";
+import { ensureHeldDataGrant } from "../server/auth.ts";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { getDb } from "../server/db.ts";
 import { getHeldDataRuntime } from "../server/held-data/runtime.ts";
@@ -210,6 +212,7 @@ async function packageFlow(h: Harness, clientId: string, connectorIds: string[])
   const token = await fetchJson<{
     grant_package_id: string;
     access_token: string;
+    refresh_token: string;
   }>(
     `${h.asUrl}/oauth/token`,
     form({
@@ -228,6 +231,7 @@ async function packageFlow(h: Harness, clientId: string, connectorIds: string[])
   return {
     packageId: token.body.grant_package_id,
     packageToken: token.body.access_token,
+    refreshToken: token.body.refresh_token,
     children: detail.body.children.map((c) => c.grant_id),
   };
 }
@@ -947,6 +951,716 @@ describe("held-data lifecycle over HTTP", () => {
         assert.equal(view?.retained.length, 2);
       },
       { ...heldDataOpts(), cimdFetchDependencies } as never,
+    );
+  });
+});
+
+async function revokeToken(h: Harness, params: Record<string, string>) {
+  const response = await fetch(`${h.asUrl}/oauth/revoke`, form(params));
+  const body = await response.text();
+  return {
+    status: response.status,
+    body: body ? (JSON.parse(body) as { error?: string }) : null,
+  };
+}
+
+describe("RFC 7009 held-data revocation", () => {
+  it("RFC 7009 metadata advertises revocation_endpoint with the flag on and off", async () => {
+    for (const opts of [{}, heldDataOpts()]) {
+      await withServer(
+        false,
+        async (h) => {
+          const metadata = await fetchJson<{ revocation_endpoint: string }>(
+            `${h.asUrl}/.well-known/oauth-authorization-server`
+          );
+          assert.equal(metadata.body.revocation_endpoint, `${h.asUrl}/oauth/revoke`);
+        },
+        opts
+      );
+    }
+  });
+
+  it("RFC 7009 flag off revokes credentials only and ignores lifecycle extensions", async () => {
+    await withServer(false, async (h) => {
+      const clientId = await registerPublicClient(h);
+      const g = await authCodeGrant(h, clientId);
+      const r = await revokeToken(h, {
+        client_id: clientId,
+        token: g.refreshToken,
+        pdpp_disposition: "bogus",
+        reported_at: "bogus",
+      });
+      assert.equal(r.status, 200);
+      assert.equal(r.body, null, "RFC success is empty");
+      assert.equal(getDb().prepare("SELECT status FROM grants WHERE grant_id = ?").get(g.grantId)?.status, "active");
+      const refresh = await fetchJson<{ error: string }>(
+        `${h.asUrl}/oauth/token`,
+        form({
+          client_id: clientId,
+          grant_type: "refresh_token",
+          refresh_token: g.refreshToken,
+        })
+      );
+      assert.equal(refresh.status, 400);
+      assert.equal(refresh.body.error, "invalid_grant");
+      assert.equal((await status(h, g.accessToken, g.grantId)).status, 404);
+    });
+  });
+
+  for (const disposition of ["keep", "delete"] as const) {
+    it(`RFC 7009 P4 public current refresh token ${disposition}: status and owner-choice receipt`, async () => {
+      const clock = { now: Date.now() };
+      await withServer(
+        false,
+        async (h) => {
+          const clientId = await registerPublicClient(h);
+          const g = await authCodeGrant(h, clientId);
+          const choice = new Date(clock.now).toISOString();
+          const app = new ToyApp();
+          let reachable = true;
+          const transport = httpStatusTransport({
+            asBaseUrl: h.asUrl,
+            credentialFor: () => g.refreshToken,
+          });
+          const client = new HeldDataClient({
+            now: () => clock.now,
+            store: app,
+            policy: { disposeAt: "deadline" },
+            status: (ids) => (reachable ? transport(ids) : Promise.resolve({ ok: false, reason: "unreachable" })),
+          });
+          app.attach(client);
+          app.sync(g.grantId, [{ id: "a1", stream: "top_artists", text: "radiohead" }]);
+          await client.reconcile();
+          assert.equal(client.canUse(g.grantId).ok, true);
+          if (disposition === "delete") {
+            reachable = false;
+            client.ownerDelete(g.grantId);
+            assert.deepEqual(client.canUse(g.grantId), {
+              ok: false,
+              reason: "erased",
+            });
+            assert.equal(client.deleteBy(g.grantId), clock.now + 30 * DAY);
+            clock.now += 20 * DAY;
+            await client.tick();
+            assert.equal(app.holds(g.grantId).records, 1, "clock advanced without an AS answer");
+            reachable = true;
+          }
+          const r = await revokeToken(h, {
+            client_id: clientId,
+            token: g.refreshToken,
+            pdpp_disposition: disposition,
+            reported_at: choice,
+          });
+          assert.equal(r.status, 200);
+          const answer = (await status(h, g.refreshToken, g.grantId)).body.grants[0];
+          assert.equal(answer?.read_state, "revoked");
+          assert.equal(answer?.held_data, disposition === "delete" ? "erase" : "permitted");
+          assert.equal(
+            getHeldDataRuntime()?.authority.ownerView(g.grantId, 30 * DAY)?.ending?.path,
+            "client_revocation"
+          );
+          assert.equal(await rsRead(h, g.accessToken), 403);
+          const record = await owner(h, `/v1/owner/grants/${g.grantId}/lifecycle`);
+          const erasure = (record.body.erasures as Record<string, unknown>[])[0];
+          if (disposition === "delete") {
+            assert.equal(erasure?.receipt_at, choice);
+            assert.equal(Date.parse(String(erasure?.delete_by)), Date.parse(choice) + 30 * DAY);
+            await client.reconcile();
+            assert.equal(
+              client.deleteBy(g.grantId),
+              Date.parse(choice) + 30 * DAY,
+              "late AS delivery cannot restart the local clock"
+            );
+            clock.now = Date.parse(choice) + 30 * DAY;
+            await client.tick();
+            assert.deepEqual(client.canUse(g.grantId), {
+              ok: false,
+              reason: "deleted",
+            });
+            assert.equal(app.holds(g.grantId).records, 0);
+          } else {
+            assert.equal(erasure, undefined);
+          }
+        },
+        heldDataOpts(clock)
+      );
+    });
+  }
+
+  it("RFC 7009 P4 delete without reported_at records no receipt or receipt-based date; retry does not restart clocks", async () => {
+    const clock = { now: Date.now() };
+    await withServer(
+      false,
+      async (h) => {
+        const clientId = await registerPublicClient(h);
+        const g = await authCodeGrant(h, clientId);
+        const params = {
+          client_id: clientId,
+          token: g.refreshToken,
+          pdpp_disposition: "delete",
+        };
+        assert.equal((await revokeToken(h, params)).status, 200);
+        const first = getHeldDataRuntime()?.authority.ownerView(g.grantId, 30 * DAY);
+        clock.now += DAY;
+        assert.equal(
+          (
+            await revokeToken(h, {
+              ...params,
+              reported_at: new Date(clock.now).toISOString(),
+            })
+          ).status,
+          200
+        );
+        const after = getHeldDataRuntime()?.authority.ownerView(g.grantId, 30 * DAY);
+        assert.deepEqual(after?.ending, first?.ending);
+        assert.deepEqual(after?.erasures, first?.erasures);
+        assert.equal(after?.erasures[0]?.receipt_at, null);
+        assert.equal(after?.erasures[0]?.delete_by, null);
+        assert.equal((await status(h, g.refreshToken, g.grantId)).body.grants[0]?.held_data, "erase");
+      },
+      heldDataOpts(clock)
+    );
+  });
+
+  it("RFC 7009 P4 superseded refresh token ends the family and grants but records no disposition", async () => {
+    await withServer(
+      false,
+      async (h) => {
+        const clientId = await registerPublicClient(h);
+        const g = await authCodeGrant(h, clientId);
+        const rotated = await fetchJson<{
+          access_token: string;
+          refresh_token: string;
+        }>(
+          `${h.asUrl}/oauth/token`,
+          form({
+            client_id: clientId,
+            grant_type: "refresh_token",
+            refresh_token: g.refreshToken,
+          })
+        );
+        assert.equal(rotated.status, 200);
+        assert.equal(
+          (
+            await revokeToken(h, {
+              client_id: clientId,
+              token: g.refreshToken,
+              pdpp_disposition: "delete",
+            })
+          ).status,
+          200
+        );
+        const answer = (await status(h, g.refreshToken, g.grantId)).body.grants[0];
+        assert.equal(answer?.read_state, "revoked");
+        assert.equal(answer?.held_data, "permitted");
+        assert.equal(getHeldDataRuntime()?.authority.ownerView(g.grantId, 30 * DAY)?.ending?.disposition, null);
+        const refresh = await fetchJson<{ error: string }>(
+          `${h.asUrl}/oauth/token`,
+          form({
+            client_id: clientId,
+            grant_type: "refresh_token",
+            refresh_token: rotated.body.refresh_token,
+          })
+        );
+        assert.equal(refresh.body.error, "invalid_grant");
+        assert.equal(await rsRead(h, rotated.body.access_token), 403);
+      },
+      heldDataOpts()
+    );
+  });
+
+  it("RFC 7009 P5 bare refresh revocation and already-ended token preserve permitted held data", async () => {
+    await withServer(
+      false,
+      async (h) => {
+        const clientId = await registerPublicClient(h);
+        const g = await authCodeGrant(h, clientId);
+        assert.equal((await revokeToken(h, { client_id: clientId, token: g.refreshToken })).status, 200);
+        assert.equal(
+          (
+            await revokeToken(h, {
+              client_id: clientId,
+              token: g.refreshToken,
+              pdpp_disposition: "delete",
+            })
+          ).status,
+          200
+        );
+        const answer = (await status(h, g.refreshToken, g.grantId)).body.grants[0];
+        assert.equal(answer?.read_state, "revoked");
+        assert.equal(answer?.held_data, "permitted");
+        assert.equal(answer?.erasure, undefined);
+      },
+      heldDataOpts()
+    );
+  });
+
+  it("RFC 7009 P5 access token ends only itself when a family covers the grant, even a replay-revoked family", async () => {
+    await withServer(
+      false,
+      async (h) => {
+        const clientId = await registerPublicClient(h);
+        const g = await authCodeGrant(h, clientId);
+        assert.equal(
+          (
+            await revokeToken(h, {
+              client_id: clientId,
+              token: g.accessToken,
+              token_type_hint: "refresh_token",
+              pdpp_disposition: "delete",
+            })
+          ).status,
+          200
+        );
+        assert.equal((await status(h, g.accessToken, g.grantId)).body.grants[0]?.read_state, "active");
+        const rotation = await fetchJson(
+          `${h.asUrl}/oauth/token`,
+          form({
+            client_id: clientId,
+            grant_type: "refresh_token",
+            refresh_token: g.refreshToken,
+          })
+        );
+        assert.equal(rotation.status, 200);
+        assert.equal(
+          (
+            await fetchJson(
+              `${h.asUrl}/oauth/token`,
+              form({
+                client_id: clientId,
+                grant_type: "refresh_token",
+                refresh_token: g.refreshToken,
+              })
+            )
+          ).status,
+          400
+        );
+        assert.equal((await revokeToken(h, { client_id: clientId, token: g.accessToken })).status, 200);
+        assert.equal((await status(h, g.accessToken, g.grantId)).body.grants[0]?.read_state, "active");
+      },
+      heldDataOpts()
+    );
+  });
+
+  it("RFC 7009 P5 access token without a refresh family ends its grant without erasure", async () => {
+    await withServer(
+      false,
+      async (h) => {
+        const g = await ordinaryGrant(h);
+        const clientId = getDb().prepare("SELECT client_id FROM grants WHERE grant_id = ?").get(g.grantId)
+          ?.client_id as string;
+        assert.equal((await revokeToken(h, { client_id: clientId, token: g.token })).status, 200);
+        const answer = (await status(h, g.token, g.grantId)).body.grants[0];
+        assert.equal(answer?.read_state, "revoked");
+        assert.equal(answer?.held_data, "permitted");
+      },
+      heldDataOpts()
+    );
+  });
+
+  it("RFC 7009 disabled lifecycle token still revokes, but cannot convey a disposition", async () => {
+    await withServer(
+      false,
+      async (h) => {
+        const clientId = await registerPublicClient(h);
+        const g = await authCodeGrant(h, clientId);
+        getHeldDataRuntime()?.authority.disableCredential(g.refreshToken);
+        assert.equal(
+          (
+            await revokeToken(h, {
+              client_id: clientId,
+              token: g.refreshToken,
+              pdpp_disposition: "delete",
+            })
+          ).status,
+          200
+        );
+        assert.equal((await status(h, g.refreshToken, g.grantId)).status, 401);
+        const answer = (await status(h, g.accessToken, g.grantId)).body.grants[0];
+        assert.equal(answer?.read_state, "revoked");
+        assert.equal(answer?.held_data, "permitted");
+      },
+      heldDataOpts()
+    );
+  });
+
+  it("RFC 7009 package refresh delete reaches active and earlier-ended children", async () => {
+    await withServer(
+      false,
+      async (h) => {
+        const clientId = await registerPublicClient(h);
+        const pkg = await packageFlow(h, clientId, [h.connectorId, await registerSecondConnector(h)]);
+        const [a, b] = pkg.children as [string, string];
+        await revoke(h, h.ownerToken, a, { pdpp_disposition: "keep" });
+        assert.equal(
+          (
+            await revokeToken(h, {
+              client_id: clientId,
+              token: pkg.refreshToken,
+              pdpp_disposition: "delete",
+              reported_at: new Date(Date.now() - DAY).toISOString(),
+            })
+          ).status,
+          200
+        );
+        for (const id of [a, b]) {
+          const answer = (await status(h, pkg.refreshToken, id)).body.grants[0];
+          assert.equal(answer?.read_state, "revoked");
+          assert.equal(answer?.held_data, "erase");
+        }
+        assert.equal(
+          (
+            await fetchJson(
+              `${h.asUrl}/oauth/token`,
+              form({
+                client_id: clientId,
+                grant_type: "refresh_token",
+                refresh_token: pkg.refreshToken,
+              })
+            )
+          ).status,
+          400
+        );
+      },
+      heldDataOpts()
+    );
+  });
+
+  for (const disposition of ["keep", "delete"] as const) {
+    it(`RFC 7009 confidential ${disposition} requires client authentication, including for unknown tokens`, async () => {
+      const c = cimdClient();
+      const cimdFetchDependencies = {
+        dnsLookupImpl: async () => [{ address: "93.184.216.34", family: 4 }],
+        fetchImpl: async (input: unknown) =>
+          new Response(JSON.stringify(String(input) === c.jwksUri ? c.jwks : c.doc), {
+            headers: { "Content-Type": "application/json" },
+            status: 200,
+          }),
+        isGlobalUnicastAddressImpl: () => true,
+      };
+      await withServer(
+        false,
+        async (h) => {
+          const g = await authCodeGrant(h, c.clientId, {
+            redirect: c.doc.redirect_uris[0] as string,
+            tokenAuth: (aud) => clientAuth(c, aud),
+          });
+          assert.equal((await revokeToken(h, { client_id: c.clientId, token: "unknown" })).status, 401);
+          assert.equal(
+            (
+              await revokeToken(h, {
+                client_id: c.clientId,
+                token: g.refreshToken,
+              })
+            ).status,
+            401
+          );
+          assert.equal(
+            (
+              await revokeToken(h, {
+                ...clientAuth(c, `${h.asUrl}/oauth/revoke`),
+                token: g.refreshToken,
+                pdpp_disposition: disposition,
+              })
+            ).status,
+            200
+          );
+          const answer = (
+            await lifecycle(h, {
+              ...clientAuth(c, h.asUrl),
+              grant_id: g.grantId,
+            })
+          ).body.grants[0];
+          assert.equal(answer?.read_state, "revoked");
+          assert.equal(answer?.held_data, disposition === "delete" ? "erase" : "permitted");
+          assert.equal(
+            (
+              await revokeToken(h, {
+                ...clientAuth(c, `${h.asUrl}/oauth/revoke`),
+                token: "unknown",
+              })
+            ).status,
+            200
+          );
+        },
+        { ...heldDataOpts(), cimdFetchDependencies } as never
+      );
+    });
+  }
+
+  it("RFC 7009 unknown tokens and unknown hints return 200; malformed extensions and unsupported token kinds fail", async () => {
+    const clock = { now: Date.now() };
+    await withServer(
+      false,
+      async (h) => {
+        const clientId = await registerPublicClient(h);
+        assert.equal(
+          (
+            await revokeToken(h, {
+              client_id: clientId,
+              token: "unknown",
+              token_type_hint: "unknown",
+            })
+          ).status,
+          200
+        );
+        assert.equal((await revokeToken(h, { client_id: clientId })).body?.error, "invalid_request");
+        getDb().prepare("UPDATE tokens SET client_id = ? WHERE token_id = ?").run(clientId, h.ownerToken);
+        assert.equal(
+          (await revokeToken(h, { client_id: clientId, token: h.ownerToken })).body?.error,
+          "unsupported_token_type"
+        );
+        const g = await authCodeGrant(h, clientId);
+        const foreign = await registerPublicClient(h);
+        assert.equal(
+          (
+            await revokeToken(h, {
+              client_id: foreign,
+              token: g.refreshToken,
+              pdpp_disposition: "delete",
+            })
+          ).status,
+          400
+        );
+        assert.equal((await status(h, g.refreshToken, g.grantId)).body.grants[0]?.read_state, "active");
+        for (const extra of [
+          { pdpp_disposition: "bogus" },
+          { pdpp_disposition: "delete", reported_at: "bogus" },
+          {
+            pdpp_disposition: "delete",
+            reported_at: new Date(clock.now + DAY).toISOString(),
+          },
+        ]) {
+          assert.equal(
+            (
+              await revokeToken(h, {
+                client_id: clientId,
+                token: g.refreshToken,
+                ...extra,
+              })
+            ).body?.error,
+            "invalid_request"
+          );
+          assert.equal((await status(h, g.refreshToken, g.grantId)).body.grants[0]?.read_state, "active");
+        }
+      },
+      heldDataOpts(clock)
+    );
+  });
+});
+
+describe("RFC 7009 validation regressions", () => {
+  it("RFC 7009 refuses a token issued to another client", async () => {
+    await withServer(
+      false,
+      async (h) => {
+        const clientId = await registerPublicClient(h);
+        const g = await authCodeGrant(h, clientId);
+        const foreign = await registerPublicClient(h);
+        const result = await revokeToken(h, {
+          client_id: foreign,
+          token: g.refreshToken,
+        });
+        assert.equal(result.status, 400);
+        assert.equal(result.body?.error, "invalid_grant");
+        assert.equal((await status(h, g.refreshToken, g.grantId)).body.grants[0]?.read_state, "active");
+      },
+      heldDataOpts()
+    );
+  });
+
+  it("RFC 7009 reported_at must be RFC 3339, not a Date.parse shorthand", async () => {
+    await withServer(
+      false,
+      async (h) => {
+        const clientId = await registerPublicClient(h);
+        const g = await authCodeGrant(h, clientId);
+        for (const reported_at of ["2000", "2000-02-30T00:00:00Z", "2001-02-29T00:00:00Z"]) {
+          const result = await revokeToken(h, {
+            client_id: clientId,
+            token: g.refreshToken,
+            pdpp_disposition: "delete",
+            reported_at,
+          });
+          assert.equal(result.status, 400);
+          assert.equal(result.body?.error, "invalid_request");
+        }
+        assert.equal((await status(h, g.refreshToken, g.grantId)).body.grants[0]?.read_state, "active");
+      },
+      heldDataOpts()
+    );
+  });
+});
+
+describe("RFC 7009 restore authentication", () => {
+  it("RFC 7009 restored package refresh token cannot add erasure after every child has ended", async () => {
+    const opts = heldDataOpts();
+    const journalPath = join(opts.experimentalHeldDataLifecycle.journalDir, "revoke-restore.jsonl");
+    await withServer(
+      false,
+      async (h) => {
+        const clientId = await registerPublicClient(h);
+        const pkg = await packageFlow(h, clientId, [h.connectorId, await registerSecondConnector(h)]);
+        assert.equal((await revokeToken(h, { client_id: clientId, token: pkg.refreshToken })).status, 200);
+        assert.equal(
+          getDb().prepare("SELECT status FROM oauth_refresh_tokens WHERE package_id = ?").get(pkg.packageId)?.status,
+          "revoked"
+        );
+        const familyId = getDb()
+          .prepare("SELECT family_id FROM oauth_refresh_tokens WHERE package_id = ?")
+          .get(pkg.packageId)?.family_id as string;
+        assert.equal(HeldDataAuthority.open({ journalPath, now: Date.now }).refreshFamilyRevoked(familyId), true);
+        getDb()
+          .prepare("UPDATE oauth_refresh_tokens SET status = 'active', revoked_at = NULL WHERE package_id = ?")
+          .run(pkg.packageId);
+        assert.equal(
+          (await revokeToken(h, { client_id: clientId, token: pkg.refreshToken, pdpp_disposition: "delete" })).status,
+          200
+        );
+        for (const id of pkg.children) {
+          const answer = (await status(h, pkg.refreshToken, id)).body.grants[0];
+          assert.equal(answer?.read_state, "revoked");
+          assert.equal(answer?.held_data, "permitted");
+        }
+      },
+      { experimentalHeldDataLifecycle: { ...opts.experimentalHeldDataLifecycle, journalPath } }
+    );
+  });
+});
+
+describe("RFC 7009 partial package revocation", () => {
+  it("RFC 7009 P1a partial package returns 503 with per-child states; retry keeps recorded clocks", async () => {
+    const clock = { now: Date.now() };
+    await withServer(
+      false,
+      async (h) => {
+        const clientId = await registerPublicClient(h);
+        const pkg = await packageFlow(h, clientId, [h.connectorId, await registerSecondConnector(h)]);
+        const [broken, healthy] = pkg.children as [string, string];
+        await revoke(h, h.ownerToken, broken, { pdpp_disposition: "keep" });
+        const original = getDb().prepare("SELECT grant_json FROM grants WHERE grant_id = ?").get(broken)?.grant_json;
+        getDb()
+          .prepare("UPDATE grants SET grant_json = ? WHERE grant_id = ?")
+          .run('{"not":"a valid persisted grant"}', broken);
+        const params = {
+          client_id: clientId,
+          token: pkg.refreshToken,
+          pdpp_disposition: "delete",
+          reported_at: new Date(clock.now).toISOString(),
+        };
+        const partial = await fetchJson<{ error: string; grants: { grant_id: string; state: string }[] }>(
+          `${h.asUrl}/oauth/revoke`,
+          form(params)
+        );
+        assert.equal(partial.status, 503);
+        assert.equal(partial.body.error, "temporarily_unavailable");
+        assert.deepEqual(partial.body.grants, [
+          { grant_id: broken, state: "pending" },
+          { grant_id: healthy, state: "recorded" },
+        ]);
+        const first = getHeldDataRuntime()?.authority.ownerView(healthy, 30 * DAY);
+        assert.equal(first?.erasures.length, 1);
+        getDb().prepare("UPDATE grants SET grant_json = ? WHERE grant_id = ?").run(original, broken);
+        clock.now += DAY;
+        assert.equal(
+          (
+            await revokeToken(h, {
+              ...params,
+              pdpp_disposition: "keep",
+              reported_at: new Date(clock.now).toISOString(),
+            })
+          ).status,
+          200
+        );
+        const after = getHeldDataRuntime()?.authority.ownerView(healthy, 30 * DAY);
+        assert.deepEqual(after?.ending, first?.ending);
+        assert.deepEqual(after?.erasures, first?.erasures);
+        assert.equal(
+          getHeldDataRuntime()?.authority.ownerView(broken, 30 * DAY)?.erasures[0]?.receipt_at,
+          Date.parse(params.reported_at)
+        );
+        for (const id of pkg.children) {
+          assert.equal((await status(h, pkg.refreshToken, id)).body.grants[0]?.held_data, "erase");
+        }
+      },
+      heldDataOpts(clock)
+    );
+  });
+});
+
+describe("RFC 7009 bound credentials", () => {
+  it("RFC 7009 bound refresh disposition needs a fresh DPoP proof for the revocation URL", async () => {
+    const clock = { now: Date.now() };
+    await withServer(
+      false,
+      async (h) => {
+        const clientId = await registerPublicClient(h);
+        const key = generateEd25519KeyPair();
+        const jkt = thumbprint(key.publicJwk as unknown as Record<string, unknown>) as string;
+        const proof = makeDpopProof({
+          iatS: Math.floor(clock.now / 1000),
+          jti: randomBytes(12).toString("hex"),
+          method: "POST",
+          privateKey: key.privateKey,
+          publicJwk: key.publicJwk as unknown as Record<string, unknown>,
+          url: `${h.asUrl}/oauth/revoke`,
+        });
+        let attempt = 0;
+        for (const [dpop, expected] of [
+          [undefined, "permitted"],
+          [proof, "erase"],
+          [proof, "permitted"],
+        ] as const) {
+          if (attempt++ === 2) clock.now = (Math.floor(clock.now / 1000) + 300) * 1000 + 500;
+          const g = await authCodeGrant(h, clientId);
+          await ensureHeldDataGrant(g.grantId);
+          getHeldDataRuntime()?.authority.recordCredential({
+            token: g.refreshToken,
+            grantIds: [g.grantId],
+            kind: "refresh",
+            jkt,
+          });
+          const response = await fetch(`${h.asUrl}/oauth/revoke`, {
+            ...form({ client_id: clientId, token: g.refreshToken, pdpp_disposition: "delete" }),
+            ...(dpop ? { headers: { "Content-Type": "application/x-www-form-urlencoded", DPoP: dpop } } : {}),
+          });
+          assert.equal(response.status, 200);
+          const answer = getHeldDataRuntime()?.authority.ownerView(g.grantId, 30 * DAY);
+          assert.equal(answer?.erasures.length, expected === "erase" ? 1 : 0, dpop ? "fresh proof only" : "no proof");
+        }
+      },
+      heldDataOpts(clock)
+    );
+  });
+});
+
+describe("RFC 7009 owner-package restore", () => {
+  it("RFC 7009 owner-revoked package refresh cannot convey delete after a database restore", async () => {
+    await withServer(
+      false,
+      async (h) => {
+        const clientId = await registerPublicClient(h);
+        const pkg = await packageFlow(h, clientId, [h.connectorId, await registerSecondConnector(h)]);
+        assert.equal(
+          (
+            await fetchJson(
+              `${h.asUrl}/_ref/grant-packages/${pkg.packageId}/revoke`,
+              json({ pdpp_disposition: "keep" })
+            )
+          ).status,
+          200
+        );
+        getDb()
+          .prepare("UPDATE oauth_refresh_tokens SET status = 'active', revoked_at = NULL WHERE package_id = ?")
+          .run(pkg.packageId);
+        assert.equal(
+          (await revokeToken(h, { client_id: clientId, token: pkg.refreshToken, pdpp_disposition: "delete" })).status,
+          200
+        );
+        for (const id of pkg.children)
+          assert.equal(getHeldDataRuntime()?.authority.ownerView(id, 30 * DAY)?.erasures.length, 0);
+      },
+      heldDataOpts()
     );
   });
 });
