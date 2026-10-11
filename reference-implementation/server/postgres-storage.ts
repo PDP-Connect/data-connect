@@ -13,6 +13,7 @@
  */
 
 import { createHash } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { writeFileSync } from "node:fs";
 import { type Pool as PgPool, Pool, type PoolClient, type QueryResultRow } from "pg";
 import {
@@ -920,7 +921,16 @@ async function migratePostgresRetainedSizeRejectionColumns(client: PoolClient): 
 }
 
 export function postgresQuery<Row extends QueryResultRow = QueryResultRow>(sql: string, params: unknown[] = []) {
-  return getPostgresPool().query<Row>(sql, params);
+  return (postgresReadSnapshot.getStore() ?? getPostgresPool()).query<Row>(sql, params);
+}
+
+const postgresReadSnapshot = new AsyncLocalStorage<PoolClient>();
+
+export async function withPostgresReadSnapshot<T>(read: () => Promise<T>): Promise<T> {
+  if (postgresReadSnapshot.getStore()) {
+    return read();
+  }
+  return withPostgresReadOnlyTransaction((client) => postgresReadSnapshot.run(client, read));
 }
 
 async function migratePostgresRecordRejectionBytePayload(client: PoolClient): Promise<void> {
@@ -1077,6 +1087,24 @@ export async function postgresQueryBounded<Row extends QueryResultRow = QueryRes
   params: unknown[],
   timeoutMs: number
 ): Promise<{ rowCount: number | null; rows: Row[] }> {
+  const snapshot = postgresReadSnapshot.getStore();
+  if (snapshot) {
+    const previousTimeout = await snapshot.query<{ statement_timeout: string }>("SHOW statement_timeout");
+    await snapshot.query("SAVEPOINT postgres_bounded_query");
+    try {
+      await snapshot.query(`SET LOCAL statement_timeout = ${Math.max(1, Math.floor(timeoutMs))}`);
+      const result = await snapshot.query<Row>(sql, params);
+      await snapshot.query("SELECT set_config('statement_timeout', $1, true)", [
+        previousTimeout.rows[0]?.statement_timeout ?? "0",
+      ]);
+      await snapshot.query("RELEASE SAVEPOINT postgres_bounded_query");
+      return { rowCount: result.rowCount, rows: result.rows };
+    } catch (error) {
+      await snapshot.query("ROLLBACK TO SAVEPOINT postgres_bounded_query");
+      await snapshot.query("RELEASE SAVEPOINT postgres_bounded_query");
+      throw asPostgresStatementTimeoutError(error) ?? error;
+    }
+  }
   const client = await getPostgresPool().connect();
   try {
     await client.query("BEGIN");
@@ -3641,6 +3669,39 @@ async function bootstrapPostgresSchemaOnce({
     `);
 
     await client.query(`CREATE TABLE IF NOT EXISTS pairwise_query_sessions (token TEXT PRIMARY KEY, state_json TEXT NOT NULL)`);
+    await client.query(`ALTER TABLE pairwise_query_sessions
+      ADD COLUMN IF NOT EXISTS expires_at BIGINT NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS page_expires_at BIGINT NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS byte_count BIGINT NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS context_digest TEXT NOT NULL DEFAULT '',
+      ADD COLUMN IF NOT EXISTS created_at BIGINT NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS grant_id TEXT NOT NULL DEFAULT '',
+      ADD COLUMN IF NOT EXISTS grant_digest TEXT NOT NULL DEFAULT '',
+      ADD COLUMN IF NOT EXISTS checkpoint_issued INTEGER NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS checkpoint_issued_at BIGINT NOT NULL DEFAULT -1,
+      ADD COLUMN IF NOT EXISTS checkpoint_bytes BIGINT NOT NULL DEFAULT 0`);
+    await client.query(`CREATE TABLE IF NOT EXISTS pairwise_query_issuer_key (id INTEGER PRIMARY KEY CHECK (id = 1), key TEXT NOT NULL)`);
+    await client.query(`ALTER TABLE pairwise_query_issuer_key ADD COLUMN IF NOT EXISTS erase_generation BIGINT NOT NULL DEFAULT 0`);
+    await client.query(`CREATE TABLE IF NOT EXISTS pairwise_query_scope_epochs (
+  scope_key TEXT PRIMARY KEY,
+  connector_instance_id TEXT NOT NULL,
+  stream TEXT NOT NULL,
+  grant_id TEXT NOT NULL,
+  generation BIGINT NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_pairwise_scope_epoch_pair ON pairwise_query_scope_epochs(connector_instance_id,stream);
+CREATE INDEX IF NOT EXISTS idx_pairwise_scope_epoch_grant ON pairwise_query_scope_epochs(grant_id);
+CREATE TABLE IF NOT EXISTS pairwise_query_session_scopes (
+  token TEXT NOT NULL REFERENCES pairwise_query_sessions(token) ON DELETE CASCADE,
+  connector_instance_id TEXT NOT NULL,
+  stream TEXT NOT NULL,
+  PRIMARY KEY(token,connector_instance_id,stream)
+);
+CREATE INDEX IF NOT EXISTS idx_pairwise_session_scope_pair ON pairwise_query_session_scopes(connector_instance_id,stream,token);
+
+`);
+    await client.query("DELETE FROM pairwise_query_sessions WHERE grant_digest='' OR checkpoint_issued_at<0");
+    await client.query("CREATE INDEX IF NOT EXISTS idx_pairwise_session_grant ON pairwise_query_sessions(grant_id,page_expires_at)");
     await client.query(`CREATE TABLE IF NOT EXISTS pairwise_identity_handles (
       issuer TEXT NOT NULL,
       subject_id TEXT NOT NULL,

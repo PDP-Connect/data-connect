@@ -168,6 +168,7 @@ export const codeToStatus: Readonly<Record<string, number>> = {
   // may retry after `next_eligible_at`. 425 Too Early is the closest standard
   // status for "this request is valid but the server is not ready to act yet."
   provider_pressure_cooldown: 425,
+  query_capacity_exceeded: 503,
   query_not_found: 404,
   resource_limit: 413,
   run_already_active: 409,

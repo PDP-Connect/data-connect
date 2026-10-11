@@ -74,6 +74,10 @@ import {
   projectPairwiseGrant,
   resolvePairwiseInstanceHandle,
 } from "./pairwise-identity.ts";
+import {
+  invalidatePairwiseQuerySessionsPostgres,
+  invalidatePairwiseQuerySessionsSqlite,
+} from "./pairwise-query-sessions.ts";
 import { isPostgresStorageBackend, postgresQuery, withPostgresTransaction } from "./postgres-storage.ts";
 import { REUSED_OWNER_BEARER_CLIENT_IDS } from "./reference-local-defaults.ts";
 import { buildGrantedAuthorizationDetail } from "./source-approved-authorization.ts";
@@ -12241,17 +12245,23 @@ async function requireRevocablePersistedGrant(
 
 async function revokeGrantStorage(grantId: string): Promise<void> {
   if (isPostgresStorageBackend()) {
-    await pgExec("UPDATE grants SET status = 'revoked' WHERE grant_id = $1", [grantId]);
-    await pgExec("UPDATE tokens SET revoked = TRUE WHERE grant_id = $1", [grantId]);
-    await pgExec(
-      "UPDATE oauth_refresh_tokens SET status = 'revoked', revoked_at = $1 WHERE grant_id = $2 AND status = 'active'",
-      [nowIso(), grantId]
-    );
+    await withPostgresTransaction(async (client) => {
+      await invalidatePairwiseQuerySessionsPostgres({ grantId }, client);
+      await client.query("UPDATE grants SET status = 'revoked' WHERE grant_id = $1", [grantId]);
+      await client.query("UPDATE tokens SET revoked = TRUE WHERE grant_id = $1", [grantId]);
+      await client.query(
+        "UPDATE oauth_refresh_tokens SET status = 'revoked', revoked_at = $1 WHERE grant_id = $2 AND status = 'active'",
+        [nowIso(), grantId]
+      );
+    });
     return;
   }
-  exec(referenceQueries.authGrantsMarkRevoked, [grantId]);
-  exec(referenceQueries.authTokensRevokeByGrant, [grantId]);
-  exec(referenceQueries.authOauthRefreshTokensRevokeByGrant, [nowIso(), grantId]);
+  writeTransaction(() => {
+    invalidatePairwiseQuerySessionsSqlite({ grantId });
+    exec(referenceQueries.authGrantsMarkRevoked, [grantId]);
+    exec(referenceQueries.authTokensRevokeByGrant, [grantId]);
+    exec(referenceQueries.authOauthRefreshTokensRevokeByGrant, [nowIso(), grantId]);
+  });
 }
 
 async function emitGrantRevoked(

@@ -27,6 +27,7 @@ import {
 import { canonicalConnectorKey } from "./connector-key.ts";
 import { assertConnectorManifestStreamSubsetWithClient } from "./connector-manifest-write-fence.ts";
 import { assertGrantedManifestReadAuthority, assertManifestReadAuthority } from "./manifest-read-authority.ts";
+import { invalidatePairwiseQuerySessionsPostgres } from "./pairwise-query-sessions.ts";
 import {
   isPostgresStorageBackend,
   postgresQuery as rawPostgresQuery,
@@ -1750,6 +1751,7 @@ async function writePostgresIngestMutation({
         effectiveEmittedAt,
       ]
     );
+    await invalidatePairwiseQuerySessionsPostgres({ connectorInstanceId, stream }, client);
   } else {
     const stored = await client.query(
       `INSERT INTO records
@@ -2917,6 +2919,7 @@ export function postgresDeleteAllRecords(storageTarget: StorageTarget, stream: s
       const deletedRecordCount = Number(countResult.rows[0]?.count || 0);
       await advancePostgresRecordResetGenerationForStreams(client, connectorInstanceId, [stream]);
       await deletePostgresRecordTailForPair(client, connectorInstanceId, stream);
+      await invalidatePairwiseQuerySessionsPostgres({ connectorInstanceId, stream }, client);
       return deletedRecordCount;
     },
     { lockConnectorInstanceId: connectorInstanceId }

@@ -22,6 +22,7 @@
  */
 
 import { createHash } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { load as loadSqliteVec } from "sqlite-vec";
@@ -32,7 +33,7 @@ import {
 import { canonicalConnectorKey } from "./connector-key.ts";
 import { RECORD_REJECTION_GENERATION, recordRejectionReplayKey } from "./record-rejection-replay-key.ts";
 import { SqliteDriver } from "./sqlite-driver.ts";
-import { openSqliteDatabase, type SqliteEncryptionOptions } from "./sqlite-encryption.ts";
+import { openSqliteDatabase, resolveDatabaseEncryptionKey, type SqliteEncryptionOptions } from "./sqlite-encryption.ts";
 import { bumpStorageGeneration } from "./storage-generation.ts";
 
 const DEFAULT_SQLITE_BUSY_TIMEOUT_MS = 30_000;
@@ -57,6 +58,7 @@ interface SqliteDatabase {
   loadExtension: (file: string, entrypoint?: string) => void;
   pragma: (source: string, options?: { simple?: boolean }) => unknown;
   prepare: (sql: string) => SqliteStatement;
+  serialize: () => Buffer;
   transaction: <T>(fn: () => T) => (() => T) & { immediate: () => T };
 }
 type VectorIndexKind = "sqlite-vec" | "blob-flat";
@@ -276,11 +278,63 @@ const BROWSER_SURFACE_LEASE_CREATE_TABLE_NAME_PATTERN =
   /^(CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?)(?:"browser_surface_leases"|browser_surface_leases)/i;
 
 let db: DatabaseHandle | null = null;
+const sqliteReadSnapshot = new AsyncLocalStorage<DatabaseHandle>();
+let sqliteSnapshotSource: { path: string; encryptionKey: string | null; timeout: number } | null = null;
 let sqliteStoreCacheGeneration = 0;
 let sqliteStoreCacheIdentity = "sqlite:closed:0";
 
 export function getDb(): DatabaseHandle {
-  return db as DatabaseHandle;
+  return (sqliteReadSnapshot.getStore() ?? db) as DatabaseHandle;
+}
+
+export async function withSqliteReadSnapshot<T>(read: () => Promise<T>): Promise<T> {
+  if (sqliteReadSnapshot.getStore()) {
+    return read();
+  }
+  const source = db;
+  const config = sqliteSnapshotSource;
+  if (!source || !config) {
+    throw new Error("SQLite database is not initialized");
+  }
+  let input: string | Buffer = config.path;
+  if (config.path === ":memory:") {
+    const bytes =
+      Number(source.pragma("page_count", { simple: true })) * Number(source.pragma("page_size", { simple: true }));
+    if (bytes > 64 * 1024 * 1024) {
+      throw Object.assign(
+        new Error("In-memory query snapshot exceeds the database copy limit; narrow the query or use file-backed storage"),
+        { code: "resource_limit" }
+      );
+    }
+    input = source.serialize();
+  }
+  const SnapshotDriver = Database as unknown as new (
+    input: string | Buffer,
+    options: { readonly: boolean; timeout: number }
+  ) => SqliteDatabase & { key: (key: Buffer) => number };
+  const reader = new SnapshotDriver(input, { readonly: typeof input === "string", timeout: config.timeout });
+  try {
+    if (config.encryptionKey && typeof input === "string") {
+      reader.key(Buffer.from(config.encryptionKey, "utf8"));
+    }
+    Object.defineProperty(reader, "vectorIndexKind", { value: source.vectorIndexKind });
+    reader.pragma("query_only = ON");
+    reader.exec("BEGIN");
+    try {
+      const result = await sqliteReadSnapshot.run(withCachedPrepare(reader), read);
+      reader.exec("COMMIT");
+      return result;
+    } catch (error) {
+      try {
+        reader.exec("ROLLBACK");
+      } catch {
+        /* Preserve the read error. */
+      }
+      throw error;
+    }
+  } finally {
+    reader.close();
+  }
 }
 
 export function getSqliteStoreCacheIdentity(): string {
@@ -898,8 +952,41 @@ CREATE INDEX IF NOT EXISTS idx_record_acquisition_provenance_record
 
 CREATE TABLE IF NOT EXISTS pairwise_query_sessions (
   token TEXT PRIMARY KEY,
-  state_json TEXT NOT NULL
+  state_json TEXT NOT NULL,
+  expires_at INTEGER NOT NULL DEFAULT 0,
+  page_expires_at INTEGER NOT NULL DEFAULT 0,
+  byte_count INTEGER NOT NULL DEFAULT 0,
+  context_digest TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL DEFAULT 0,
+  grant_id TEXT NOT NULL DEFAULT '',
+  grant_digest TEXT NOT NULL DEFAULT '',
+  checkpoint_issued INTEGER NOT NULL DEFAULT 0,
+  checkpoint_issued_at INTEGER NOT NULL DEFAULT -1,
+  checkpoint_bytes INTEGER NOT NULL DEFAULT 0
 );
+
+CREATE TABLE IF NOT EXISTS pairwise_query_issuer_key (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  key TEXT NOT NULL,
+  erase_generation INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS pairwise_query_scope_epochs (
+  scope_key TEXT PRIMARY KEY,
+  connector_instance_id TEXT NOT NULL,
+  stream TEXT NOT NULL,
+  grant_id TEXT NOT NULL,
+  generation INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_pairwise_scope_epoch_pair ON pairwise_query_scope_epochs(connector_instance_id,stream);
+CREATE INDEX IF NOT EXISTS idx_pairwise_scope_epoch_grant ON pairwise_query_scope_epochs(grant_id);
+CREATE TABLE IF NOT EXISTS pairwise_query_session_scopes (
+  token TEXT NOT NULL REFERENCES pairwise_query_sessions(token) ON DELETE CASCADE,
+  connector_instance_id TEXT NOT NULL,
+  stream TEXT NOT NULL,
+  PRIMARY KEY(token,connector_instance_id,stream)
+);
+CREATE INDEX IF NOT EXISTS idx_pairwise_session_scope_pair ON pairwise_query_session_scopes(connector_instance_id,stream,token);
 
 CREATE TABLE IF NOT EXISTS pairwise_identity_handles (
   issuer TEXT NOT NULL,
@@ -6155,6 +6242,19 @@ export function initDb(path = ":memory:", opts: InitDbOptions = {}): DatabaseHan
   runWithSqliteBusyRetrySync(() => raw.exec(SCHEMA), {
     onRetry: opts.onSchemaRetry,
   });
+  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "pairwise_query_sessions", "expires_at", "INTEGER NOT NULL DEFAULT 0"));
+  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "pairwise_query_sessions", "page_expires_at", "INTEGER NOT NULL DEFAULT 0"));
+  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "pairwise_query_sessions", "byte_count", "INTEGER NOT NULL DEFAULT 0"));
+  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "pairwise_query_sessions", "context_digest", "TEXT NOT NULL DEFAULT ''"));
+  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "pairwise_query_sessions", "created_at", "INTEGER NOT NULL DEFAULT 0"));
+  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "pairwise_query_issuer_key", "erase_generation", "INTEGER NOT NULL DEFAULT 0"));
+  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "pairwise_query_sessions", "grant_id", "TEXT NOT NULL DEFAULT ''"));
+  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "pairwise_query_sessions", "grant_digest", "TEXT NOT NULL DEFAULT ''"));
+  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "pairwise_query_sessions", "checkpoint_issued", "INTEGER NOT NULL DEFAULT 0"));
+  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "pairwise_query_sessions", "checkpoint_bytes", "INTEGER NOT NULL DEFAULT 0"));
+  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "pairwise_query_sessions", "checkpoint_issued_at", "INTEGER NOT NULL DEFAULT -1"));
+  runWithSqliteBusyRetrySync(() => raw.exec("DELETE FROM pairwise_query_sessions WHERE grant_digest='' OR checkpoint_issued_at<0"));
+  runWithSqliteBusyRetrySync(() => raw.exec("CREATE INDEX IF NOT EXISTS idx_pairwise_session_grant ON pairwise_query_sessions(grant_id,page_expires_at)"));
   // Older registries contain only the uniqueness key. Keep those claims
   // spent, but leave them without a replay payload so the store fails closed
   // instead of fabricating terminal evidence from an incomplete row.
@@ -6628,6 +6728,7 @@ CREATE TABLE IF NOT EXISTS cimd_client_documents (
     raw.transaction(() => ensureConnectorSummarySourceRevisionPrimitive(raw)).immediate()
   );
   db = withCachedPrepare(raw);
+  sqliteSnapshotSource = { path, encryptionKey: resolveDatabaseEncryptionKey(opts.encryptionKey), timeout: busyTimeoutMs };
   // Stamp the chosen vector-index backend onto the wrapped db so
   // search-semantic.js can select without re-probing. The Proxy's
   // get-handler falls through to Reflect for non-`prepare` properties,

@@ -2045,7 +2045,11 @@ function buildRecordsListDeps(
         streamName: stream,
       });
       const pairwiseBindings = await pairwiseReadBindings(ctx, tokenInfo, bindings, sourceDescriptor);
-      const result = (await ctx.queryRecordsAcrossBindings(pairwiseBindings, stream, grant, params, m, {
+      const retainedGrant =
+        pairwiseInstanceIdentityEnabled() && tokenInfo.pdpp_token_kind === "client" && grant
+          ? { ...grant, grant_id: tokenInfo.grant_id ?? null }
+          : grant;
+      const result = (await ctx.queryRecordsAcrossBindings(pairwiseBindings, stream, retainedGrant, params, m, {
         extraWarnings: resolverWarnings || [],
       })) as Record<string, unknown>;
       if (pairwiseInstanceIdentityEnabled() && Array.isArray(result.data)) {

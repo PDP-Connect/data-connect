@@ -378,7 +378,8 @@ test("pairwise changes pages preserve duplicate keys and order tombstones by ins
           grant,
           {
             order: "asc",
-            ...(cursor ? { cursor } : { changes_since: "beginning" }),
+            changes_since: "beginning",
+            ...(cursor ? { cursor } : {}),
             limit: "1",
           },
           baseManifest

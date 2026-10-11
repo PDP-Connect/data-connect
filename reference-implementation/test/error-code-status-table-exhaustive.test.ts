@@ -51,7 +51,6 @@ const EXPECTED_CODE_TO_STATUS = {
   connection_run_active: 409,
   connection_tombstoned: 409,
   connector_in_use: 409,
-  connector_run_active: 409,
   connector_instance_busy: 503,
   // The three config-revision codes. `stale_write` is a propose() whose
   // baseRevision/baseEpoch missed the current pointer, and `not_proposed` is a
@@ -73,6 +72,7 @@ const EXPECTED_CODE_TO_STATUS = {
   connector_instance_selector_required: 400,
   connector_instance_store_required: 500,
   connector_invalid: 400,
+  connector_run_active: 409,
   // The submitted value cannot be a secret (mask, placeholder, or whitespace
   // only). 400 because it is the owner's to correct in the form, not a server
   // fault — an unmapped code would fall through to 500 and read as our failure.
@@ -108,6 +108,8 @@ const EXPECTED_CODE_TO_STATUS = {
   not_found: 404,
   owner_subject_required: 400,
   provider_pressure_cooldown: 425,
+  // Flagged pairwise reads have exhausted temporary retained-page capacity.
+  query_capacity_exceeded: 503,
   query_not_found: 404,
   resource_limit: 413,
   run_already_active: 409,

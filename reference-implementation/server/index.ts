@@ -12,6 +12,7 @@ import { existsSync, readFileSync, renameSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { pairwiseInstanceIdentityEnabled } from "./pairwise-identity.ts";
+import { sweepPairwiseQuerySessions } from "./pairwise-query-sessions.ts";
 import { isMainModule } from "../scripts/is-main-module.js";
 // biome-ignore lint/correctness/noUnresolvedImports: Biome cannot resolve this installed package export; Node and TypeScript resolve it.
 import type { BrowserSurfaceAllocator, BrowserSurfaceLeaseManager } from "@opendatalabs/remote-surface/leases";
@@ -1405,6 +1406,9 @@ function pdppError(
   extras: Record<string, unknown> | null = null
 ) {
   const typedRes = res as ResLike;
+  if (status === 503 && code === "query_capacity_exceeded") {
+    typedRes.setHeader("Retry-After", "60");
+  }
   const body: { error: PdppErrorBody } = {
     error: { code, message, type: typeFor(status) },
   };
@@ -8791,6 +8795,11 @@ export async function startServer(opts: ServerOpts = {}) {
     log: (msg: string) => logger.info(msg),
   });
   const uninstallRecoveryStore = createConnectorInstallStore();
+  try {
+    await sweepPairwiseQuerySessions();
+  } catch (err) {
+    logger.warn({ err: err instanceof Error ? err.message : String(err) }, "pairwise query startup reclamation failed");
+  }
   const uninstallDataDir = connectorLifecycleDataDir();
   await reconcileConnectorUninstalls(uninstallDataDir, uninstallRecoveryStore, removeConnectorActivation);
   const configuredOwnerPassword =
@@ -9286,7 +9295,14 @@ export async function startServer(opts: ServerOpts = {}) {
         "connector-maintenance sweep tick failed"
       );
     },
-    sweep: () => connectorMaintenanceSweep.run(),
+    sweep: async () => {
+      try {
+        await sweepPairwiseQuerySessions();
+      } catch (err) {
+        logger.warn({ err: err instanceof Error ? err.message : String(err) }, "pairwise query reclamation failed");
+      }
+      await connectorMaintenanceSweep.run();
+    },
   });
   function stopConnectorMaintenanceSweep() {
     connectorMaintenanceSweepTimer.stop();

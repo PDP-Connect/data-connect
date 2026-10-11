@@ -26,8 +26,8 @@ import { registerConnector } from "../server/auth.ts";
 import { startServer } from "../server/index.ts";
 import { OWNER_AUTH_DEFAULT_SUBJECT_ID } from "../server/owner-auth.ts";
 import {
+  buildPairwiseOwnerBindings,
   getPairwiseHandle,
-  OWNER_PAIRWISE_CLIENT_ID,
   pairwiseInstanceIdentityEnabled,
 } from "../server/pairwise-identity.ts";
 import { ingestRecord } from "../server/records.ts";
@@ -712,14 +712,22 @@ test("pairwise owner blob reads require a selector, isolate the selected instanc
       });
       const ownerToken = await getOwnerToken(server);
       const headers = { Authorization: `Bearer ${ownerToken}` };
-      const scope = {
-        clientId: OWNER_PAIRWISE_CLIENT_ID,
-        kind: "instance" as const,
-        sourceId: CONNECTOR_ID,
-        subjectId: OWNER_AUTH_DEFAULT_SUBJECT_ID,
-      };
-      const handleA = await getPairwiseHandle({ ...scope, internalId: INSTANCE_A });
-      const handleB = await getPairwiseHandle({ ...scope, internalId: INSTANCE_B });
+      const ownerBindings = await buildPairwiseOwnerBindings(OWNER_AUTH_DEFAULT_SUBJECT_ID);
+      const bindingA = ownerBindings.find(
+        (binding) => binding.source_id === SOURCE_ID && binding.rs_instance === INSTANCE_A
+      );
+      const bindingB = ownerBindings.find(
+        (binding) => binding.source_id === SOURCE_ID && binding.rs_instance === INSTANCE_B
+      );
+      assert.ok(bindingA);
+      assert.ok(bindingB);
+      const handleA = bindingA.instance_id;
+      const handleB = bindingB.instance_id;
+      assert.equal(
+        ownerBindings.find((binding) => binding.source_id === CONNECTOR_ID && binding.rs_instance === INSTANCE_A)
+          ?.instance_id,
+        handleA
+      );
       const url = `http://localhost:${server.rsPort}/v1/blobs/${blobId}?connector_id=${CONNECTOR_ID}`;
       assert.equal((await fetch(url, { headers })).status, 400);
       assert.equal((await fetch(`${url}&instance_id=${handleA}&instance_id=${handleB}`, { headers })).status, 400);

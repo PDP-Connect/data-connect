@@ -19,11 +19,23 @@ export const BACKUP_TABLE_INVENTORY: Record<string, BackupTableInventoryEntry> =
   },
   pairwise_query_sessions: {
     classification: "backup_required",
-    reason: "Opaque fan-in cursors retain their query snapshots and checkpoint vectors across restart.",
+    reason: "Unexpired fan-in snapshots and checkpoints survive restart at the restored database recovery point.",
+  },
+  pairwise_query_scope_epochs: {
+    classification: "backup_required",
+    reason: "Scoped erasure and grant generations fence retained-session admission at the database recovery point.",
+  },
+  pairwise_query_session_scopes: {
+    classification: "backup_required",
+    reason: "Indexed retained-session dependencies preserve targeted source and expanded-child payload cleanup.",
+  },
+  pairwise_query_issuer_key: {
+    classification: "backup_required",
+    reason: "Decrypts retained cursors and authenticates the expired-checkpoint distinction at the database recovery point.",
   },
   pairwise_identity_handles: {
     classification: "backup_required",
-    reason: "Immutable client identity handles must survive restart and restore without reassignment.",
+    reason: "Client identity handles present at the database recovery point survive restart and restore; later issuance requires a separately retained ledger for rollback continuity.",
   },
   blob_bindings: {
     classification: "backup_required",

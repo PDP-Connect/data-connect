@@ -9,6 +9,145 @@ import { createRequestConnectorInstanceStore } from "../server/request-store-fac
 import { withTemporaryPostgresDatabase } from "./helpers/postgres-temp-database.ts";
 import { bearer, startPr89OAuthHarness } from "./seam-spike/pr89-oauth-harness.ts";
 
+const retryAfterSecondsPattern = /^\d+$/;
+const narrowingGuidancePattern = /narrow/i;
+
+test("pairwise changes-page HTTP cursor rejects removal of changes_since", async () => {
+  const prior = process.env.PDPP_EXPERIMENTAL_PAIRWISE_INSTANCE_IDENTITY;
+  process.env.PDPP_EXPERIMENTAL_PAIRWISE_INSTANCE_IDENTITY = "1";
+  const harness = await startPr89OAuthHarness({ databaseUrl: null });
+  harness.setIntrospectionInterceptor(async (input, init) => {
+    const response = await fetch(input, init);
+    if (!response.ok) {
+      return response;
+    }
+    const body = (await response.json()) as {
+      authorization_details: {
+        grant: { streams: { resources?: string[] }[] };
+      }[];
+    };
+    // Authenticated AS test double grants the stream rather than one fixture resource.
+    for (const detail of body.authorization_details) {
+      for (const stream of detail.grant.streams) {
+        Reflect.deleteProperty(stream, "resources");
+      }
+    }
+    return new Response(JSON.stringify(body), {
+      headers: response.headers,
+      status: response.status,
+    });
+  });
+  try {
+    for (const id of ["artist:41", "artist:42", "artist:43"]) {
+      // biome-ignore lint/performance/noAwaitInLoops: preserve deterministic change versions in the fixture.
+      await harness.ingest({
+        data: { id, name: id, observed_at: "2026-03-01T00:00:00Z" },
+        emitted_at: "2026-03-01T00:00:00Z",
+        key: id,
+        stream: "top_artists",
+      });
+    }
+    const headers = bearer(harness.token);
+    const first = await fetch(`${harness.rsUrl}/v1/streams/top_artists/records?changes_since=beginning&limit=1`, {
+      headers,
+    });
+    const page = (await first.json()) as { next_cursor: string };
+    assert.equal(first.status, 200, JSON.stringify(page));
+    assert.ok(page.next_cursor);
+    const continuation = await fetch(
+      `${harness.rsUrl}/v1/streams/top_artists/records?${new URLSearchParams({ cursor: page.next_cursor, limit: "1" })}`,
+      { headers }
+    );
+    const failure = (await continuation.json()) as { error: { code: string } };
+    assert.equal(continuation.status, 400, JSON.stringify(failure));
+    assert.equal(failure.error.code, "invalid_cursor");
+  } finally {
+    await harness.close();
+    if (prior === undefined) {
+      Reflect.deleteProperty(process.env, "PDPP_EXPERIMENTAL_PAIRWISE_INSTANCE_IDENTITY");
+    } else {
+      process.env.PDPP_EXPERIMENTAL_PAIRWISE_INSTANCE_IDENTITY = prior;
+    }
+  }
+});
+
+test("pairwise HTTP capacity distinguishes temporary quota from an oversized query", async () => {
+  const settings = [
+    "PDPP_EXPERIMENTAL_PAIRWISE_INSTANCE_IDENTITY",
+    "PDPP_PAIRWISE_QUERY_MAX_SESSIONS",
+    "PDPP_PAIRWISE_QUERY_MAX_SNAPSHOT_BYTES",
+  ] as const;
+  const prior = settings.map((key) => process.env[key]);
+  process.env.PDPP_EXPERIMENTAL_PAIRWISE_INSTANCE_IDENTITY = "1";
+  process.env.PDPP_PAIRWISE_QUERY_MAX_SESSIONS = "1";
+  const harness = await startPr89OAuthHarness({ databaseUrl: null });
+  harness.setIntrospectionInterceptor(async (input, init) => {
+    const response = await fetch(input, init);
+    if (!response.ok) {
+      return response;
+    }
+    const body = (await response.json()) as {
+      authorization_details: {
+        grant: { streams: { resources?: string[] }[] };
+      }[];
+    };
+    for (const detail of body.authorization_details) {
+      for (const stream of detail.grant.streams) {
+        Reflect.deleteProperty(stream, "resources");
+      }
+    }
+    return new Response(JSON.stringify(body), {
+      headers: response.headers,
+      status: response.status,
+    });
+  });
+  try {
+    for (const id of ["artist:41", "artist:42"]) {
+      // biome-ignore lint/performance/noAwaitInLoops: preserve deterministic fixture ordering.
+      await harness.ingest({
+        data: {
+          id,
+          name: "x".repeat(2048),
+          observed_at: "2026-03-01T00:00:00Z",
+        },
+        emitted_at: "2026-03-01T00:00:00Z",
+        key: id,
+        stream: "top_artists",
+      });
+    }
+    const headers = bearer(harness.token);
+    const url = `${harness.rsUrl}/v1/streams/top_artists/records?limit=1`;
+    const first = await fetch(url, { headers });
+    assert.equal(first.status, 200);
+    const exhausted = await fetch(url, { headers });
+    assert.equal(exhausted.status, 503);
+    assert.match(exhausted.headers.get("Retry-After") ?? "", retryAfterSecondsPattern);
+    const quotaFailure = (await exhausted.json()) as {
+      error: { code: string };
+    };
+    assert.equal(quotaFailure.error.code, "query_capacity_exceeded");
+    process.env.PDPP_PAIRWISE_QUERY_MAX_SNAPSHOT_BYTES = "1024";
+    const oversized = await fetch(url, { headers });
+    const permanentFailure = (await oversized.json()) as {
+      error: { code: string; message: string };
+    };
+    assert.equal(oversized.status, 413, JSON.stringify(permanentFailure));
+    assert.equal(permanentFailure.error.code, "resource_limit");
+    assert.match(permanentFailure.error.message, narrowingGuidancePattern);
+    assert.equal(oversized.headers.get("Retry-After"), null);
+  } finally {
+    await harness.close();
+    for (const [index, key] of settings.entries()) {
+      const value = prior[index];
+      if (value === undefined) {
+        Reflect.deleteProperty(process.env, key);
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
+});
+
 async function provePairwiseHttp(databaseUrl: string | null): Promise<void> {
   process.env.PDPP_EXPERIMENTAL_PAIRWISE_INSTANCE_IDENTITY = "1";
   const harness = await startPr89OAuthHarness({ databaseUrl, lexical: true });
