@@ -496,13 +496,9 @@ export class HeldDataClient {
     if (this.#highWaterMs >= until) {
       return { ok: false, reason: "stale" };
     }
-    if (!this.#persist()) {
-      return { ok: false, reason: "state_unavailable" };
-    }
-    // Durable writes take time. Sample once more, with no I/O after it, so a write that
-    // crossed a deadline cannot license use past it.
-    const written = this.#now();
-    if (this.#clockUncertain) {
+    // Durable writes take time: decide on the sample taken after the write.
+    const written = this.#commit();
+    if (written === null) {
       return { ok: false, reason: "state_unavailable" };
     }
     const due = this.deleteBy(grantId);
@@ -983,6 +979,23 @@ export class HeldDataClient {
       this.#timeAnchor = { wall: this.#highWaterMs, mono };
     }
     return this.#highWaterMs;
+  }
+
+  /**
+   * Durable write, then one more clock sample with no I/O after it, so a write that crossed a
+   * deadline cannot license use or storage past it. Null: the state or the clock cannot show that
+   * a deadline remains ahead, so disposal is due (Core) and has been done.
+   */
+  #commit(): number | null {
+    if (!this.#persist()) {
+      return null;
+    }
+    const at = this.#now();
+    if (this.#clockUncertain) {
+      this.#disposeDue(at);
+      return null;
+    }
+    return at;
   }
 
   #persist(): boolean {
