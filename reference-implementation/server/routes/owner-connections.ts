@@ -2,13 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // HTTP adapter for the bearer-authed owner-agent control surface routes
-// `GET /v1/owner/connections` and `PATCH /v1/owner/connections/:connectionId`
+// `GET /v1/owner/connections`, `GET /v1/owner/connections/:connectionId`,
+// and `PATCH /v1/owner/connections/:connectionId`
 // (rename).
 //
 // This is the owner-agent (bearer) sibling of the cookie-authed
-// `GET /_ref/connections` listing and `PATCH /_ref/connections/:id` rename in
+// `GET /_ref/connections` listing, `GET /_ref/connections/:id` detail,
+// and `PATCH /_ref/connections/:id` rename in
 // `server/routes/ref-connectors.ts`; both families mount the handlers built
-// here (`buildConnectionsListHandler`, `buildConnectionRenameHandler`). Per the
+// here (`buildConnectionsListHandler`, `buildConnectionDetailHandler`,
+// `buildConnectionRenameHandler`). Per the
 // owner-agent control-surface audit (Lane B) it lives in the `/v1/owner/*`
 // route family so it reuses the existing owner-bearer guards
 // (`requireToken` + `requireOwner`) without teaching `requireOwnerSession`
@@ -36,7 +39,7 @@ import {
   emitOwnerConnectionAudit,
   ownerBearerConnectionBinding,
 } from "./_owner-connection-helpers.ts";
-import type { MiddlewareHandler, PdppErrorFn, RouteArg, TraceContext } from "./_route-contract.ts";
+import type { ConnectorNamespace, MiddlewareHandler, PdppErrorFn, RouteArg, TraceContext } from "./_route-contract.ts";
 
 // Express-shaped surface, structurally typed to avoid pulling in the
 // transport's `.js` ambient types. Matches the pattern established in
@@ -134,7 +137,10 @@ export interface MountOwnerConnectionsContext {
   // with public read on what counts as "label-needed".
   projectStorageDisplayName: (
     displayName: string | null | undefined,
-    options: { connectorId?: string | null; connectorInstanceId?: string | null }
+    options: {
+      connectorId?: string | null;
+      connectorInstanceId?: string | null;
+    }
   ) => string | null;
   requireOwner: MiddlewareHandler;
   requireToken: MiddlewareHandler;
@@ -199,6 +205,63 @@ export function projectOwnerConnectionRow(
     status: instance.status,
     updated_at: instance.updatedAt,
   };
+}
+
+// Detail uses the same row on both surfaces, including the legacy cookie alias.
+export interface ConnectionDetailContext {
+  canonicalConnectorKey: ConnectionsContext["canonicalConnectorKey"];
+  createRequestConnectorInstanceStore: ConnectionsContext["createRequestConnectorInstanceStore"];
+  getSchedule: (connectorId: string, options: { connectorInstanceId?: string | null }) => Promise<unknown> | unknown;
+  handleError: ConnectionsContext["handleError"];
+  projectStorageDisplayName: ConnectionsContext["projectStorageDisplayName"];
+  resolveOwnerConnectorNamespace: (
+    req: unknown,
+    connectorId: string | null,
+    options: {
+      allowDefaultAccount: boolean;
+      connectorInstanceId: string;
+      ownerSubjectId: string;
+    }
+  ) => Promise<ConnectorNamespace>;
+}
+
+export function buildConnectionDetailHandler(
+  ctx: ConnectionDetailContext,
+  binding: ConnectionControlBinding
+): RouteHandler {
+  return async (req, res) => {
+    try {
+      const connectorInstanceId = decodeURIComponent(req.params[binding.param] as string);
+      const namespace = await ctx.resolveOwnerConnectorNamespace(req, null, {
+        allowDefaultAccount: false,
+        connectorInstanceId,
+        ownerSubjectId: binding.ownerSubjectId(req),
+      });
+      const instance = await ctx.createRequestConnectorInstanceStore().get(namespace.connectorInstanceId);
+      const schedule = await ctx.getSchedule(namespace.connectorId, {
+        connectorInstanceId: namespace.connectorInstanceId,
+      });
+      const schedules = new Map<string, unknown>(schedule ? [[namespace.connectorInstanceId, schedule]] : []);
+      // Preserve the existing cookie detail fallback when the resolver has a
+      // namespace but the store has no row (also used by the legacy alias).
+      res.json(projectOwnerConnectionRow(ctx, instance ?? namespace, schedules));
+    } catch (err) {
+      ctx.handleError(res, err);
+    }
+  };
+}
+
+export function mountOwnerConnectionDetail(
+  app: Pick<AppLike, "get">,
+  ctx: ConnectionDetailContext &
+    Pick<MountOwnerConnectionsContext, "getOwnerTokenSubjectId" | "requireToken" | "requireOwner">
+): void {
+  app.get(
+    "/v1/owner/connections/:connectionId",
+    ctx.requireToken,
+    ctx.requireOwner,
+    buildConnectionDetailHandler(ctx, ownerBearerConnectionBinding(ctx.getOwnerTokenSubjectId, "connection_id"))
+  );
 }
 
 // On the bearer surface each row also carries `supported_actions`: the
@@ -294,7 +357,11 @@ export function buildConnectionRenameHandler(ctx: ConnectionsContext, binding: C
     const body = (req.body as Record<string, unknown> | null) || {};
     const audit = (
       outcome: "succeeded" | "failed",
-      args: { connectorKey?: string | null; error?: unknown; facts: Record<string, unknown> }
+      args: {
+        connectorKey?: string | null;
+        error?: unknown;
+        facts: Record<string, unknown>;
+      }
     ) =>
       emitOwnerConnectionAudit(ctx, actor, {
         connectionId,

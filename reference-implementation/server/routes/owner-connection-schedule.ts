@@ -4,6 +4,8 @@
 // HTTP adapter for the bearer-authed owner-agent schedule lifecycle control
 // routes:
 //
+//   PUT    /v1/owner/connections/:connectionId/schedule
+//   PUT    /v1/owner/connectors/:connectorId/schedule
 //   POST   /v1/owner/connections/:connectionId/schedule/pause
 //   POST   /v1/owner/connections/:connectionId/schedule/resume
 //   POST   /v1/owner/connectors/:connectorId/schedule/pause
@@ -13,15 +15,16 @@
 //
 // These are the owner-agent (bearer) siblings of the cookie-authed
 // `/_ref/connections/:id/schedule/{pause,resume}`,
-// `/_ref/connectors/:id/schedule/{pause,resume}`, and the two
-// `/_ref/.../schedule` DELETE routes in `server/routes/ref-connectors.ts`. They
+// `/_ref/connectors/:id/schedule/{pause,resume}`, and the
+// `/_ref/.../schedule` PUT and DELETE routes in `server/routes/ref-connectors.ts`. They
 // live in the `/v1/owner/*` route family and reuse the existing owner-bearer
 // guards (`requireToken` + `requireOwner`) without teaching
 // `requireOwnerSession` (cookie) a second identity source. `/mcp` owner-bearer
 // rejection (`requireClientOrMcpPackage`) is untouched.
 //
 // Both surfaces converge on ONE mutation path per operation — the controller's
-// `setScheduleEnabled` (pause/resume) and `deleteSchedule` (delete), each
+// `upsertSchedule` (create/replace), `setScheduleEnabled` (pause/resume), and
+// `deleteSchedule` (delete), each
 // owner-scoped via the connector-instance namespace resolver — under separate
 // auth adapters, so the schedule semantics (schedule-not-found 404,
 // automation-ineligibility 400 on resume, delete returns 204 / typed 404 when
@@ -34,10 +37,11 @@
 //   - the `:connectorId` routes are addressed by connector type only; the
 //     resolver auto-selects the connector's single active connection. When the
 //     owner has more than one active connection for that connector the request
-//     is rejected with a typed `ambiguous_connection` (409) carrying the
+//     pause/resume/delete reject with `ambiguous_connection` (409) carrying the
 //     available `connection_id` values (+ owner-meaningful labels) and
 //     `retry_with: connection_id`, instead of guessing which connection to act
-//     on.
+//     on. PUT preserves the cookie route's `ambiguous_connector_instance`
+//     (400) error. No operation guesses which connection to mutate.
 //
 // Every mutation (success and failure) emits non-secret
 // `owner_agent.connection.schedule` spine evidence: actor kind, client
@@ -51,10 +55,13 @@
 //        #"Owner-agent control mutations SHALL be auditable and secret-safe"
 //         → "Mutation fails")
 
+import { type OwnerActor, resolveOwnerActor, startOwnerAuditTrace } from "./_owner-actor.ts";
 import {
   auditActorKind,
   buildAuditTrace,
+  type ConnectionControlBinding,
   httpStatusForOperationError,
+  ownerBearerConnectionBinding,
   readConnectionTarget,
   rethrowAsAmbiguousConnection,
 } from "./_owner-connection-helpers.ts";
@@ -75,6 +82,8 @@ import { assertRemoteControlSupported } from "./_route-contract.ts";
 // `server/routes/owner-connections.ts`.
 
 interface RouteRequest {
+  readonly body?: unknown;
+  readonly ownerSession?: { readonly sub?: string | null } | null;
   readonly params: Readonly<Record<string, string>>;
   readonly query: Readonly<Record<string, unknown>>;
   readonly tokenInfo?: {
@@ -97,11 +106,12 @@ interface RouteResponse {
 type RouteHandler = (req: RouteRequest, res: RouteResponse) => unknown | Promise<unknown>;
 type NextFn = () => unknown | Promise<unknown>;
 
-// The three schedule lifecycle operations this adapter exposes over the
+// The schedule operations this adapter exposes over the
 // owner-agent bearer surface. `pause_schedule`/`resume_schedule` toggle the
 // enabled flag via `setScheduleEnabled`; `delete_schedule` removes the row via
-// `deleteSchedule`. The value is recorded verbatim in the audit event.
-type ScheduleOperation = "pause_schedule" | "resume_schedule" | "delete_schedule";
+// `deleteSchedule`; `upsert_schedule` creates or replaces via `upsertSchedule`.
+// The value is recorded verbatim in the audit event.
+type ScheduleOperation = "pause_schedule" | "resume_schedule" | "delete_schedule" | "upsert_schedule";
 
 interface AppLike {
   delete: (path: string, ...args: RouteArg<RouteHandler>[]) => AppLike;
@@ -175,11 +185,18 @@ export interface MountOwnerConnectionScheduleContext {
 // `selector` records whether the action was addressed by `connection_id` or by
 // `connector_id` (the latter is the path that can be ambiguous). The audit
 // never carries the bearer token or any provider secret.
+type ScheduleAuditContext = Pick<
+  MountOwnerConnectionScheduleContext,
+  "createTraceContext" | "emitSpineEvent" | "ensureRequestId" | "setReferenceTraceId"
+>;
+
 async function emitScheduleAudit(
-  ctx: MountOwnerConnectionScheduleContext,
+  ctx: ScheduleAuditContext,
   req: RouteRequest,
   res: RouteResponse,
   args: {
+    actor?: OwnerActor;
+    trace?: TraceContext;
     connectionId?: string | null;
     connectorKey?: string | null;
     operation: ScheduleOperation;
@@ -189,22 +206,26 @@ async function emitScheduleAudit(
     selector: "connection_id" | "connector_id";
   }
 ): Promise<void> {
-  const trace = buildAuditTrace(ctx, req, res);
-  const clientId = typeof req.tokenInfo?.client_id === "string" ? req.tokenInfo.client_id : null;
-  const clientName = typeof req.tokenInfo?.client_name === "string" ? req.tokenInfo.client_name : null;
-  const actorKind = auditActorKind(req);
+  const trace = args.trace ?? buildAuditTrace(ctx, req, res);
+  const tokenClientId = typeof req.tokenInfo?.client_id === "string" ? req.tokenInfo.client_id : null;
+  const tokenClientName = typeof req.tokenInfo?.client_name === "string" ? req.tokenInfo.client_name : null;
+  const clientId = args.actor ? args.actor.clientId : tokenClientId;
+  const clientName = args.actor ? args.actor.clientName : tokenClientName;
+  const actorKind = args.actor?.actorKind ?? auditActorKind(req);
   const ownerSubjectId =
-    args.ownerSubjectId ?? (typeof req.tokenInfo?.subject_id === "string" ? req.tokenInfo.subject_id : null);
+    args.actor?.ownerSubjectId ??
+    args.ownerSubjectId ??
+    (typeof req.tokenInfo?.subject_id === "string" ? req.tokenInfo.subject_id : null);
   // biome-ignore lint/style/useDestructuring: Explicit property or positional access documents this compatibility boundary.
   const operation = args.operation;
   const code = (args.error as { code?: unknown } | null)?.code;
   await ctx.emitSpineEvent({
-    actor_id: clientId ?? ownerSubjectId ?? actorKind,
+    actor_id: args.actor?.actorId ?? clientId ?? ownerSubjectId ?? actorKind,
     actor_type: actorKind,
     client_id: clientId,
     data: {
       actor_kind: actorKind,
-      auth_token_kind: req.tokenInfo?.pdpp_token_kind ?? null,
+      auth_token_kind: args.actor ? args.actor.authTokenKind : (req.tokenInfo?.pdpp_token_kind ?? null),
       client_id: clientId,
       client_name: clientName,
       connection_id: args.connectionId ?? null,
@@ -238,7 +259,7 @@ async function emitScheduleAudit(
 // a non-owner bearer, mirroring the rename route. Keeps the audit trail
 // complete for client/mcp_package bearers that reach the route.
 function buildScheduleRequireOwner(
-  ctx: MountOwnerConnectionScheduleContext,
+  ctx: ScheduleAuditContext & Pick<MountOwnerConnectionScheduleContext, "canonicalConnectorKey" | "pdppError">,
   selector: "connection_id" | "connector_id",
   operation: ScheduleOperation
 ): MiddlewareHandler {
@@ -434,4 +455,119 @@ export function mountOwnerConnectionSchedule(app: AppLike, ctx: MountOwnerConnec
     buildScheduleRequireOwner(ctx, "connector_id", "delete_schedule"),
     buildScheduleHandler(ctx, "connector_id", "delete_schedule")
   );
+}
+
+// Schedule create and replacement share validation, persistence, response and
+// audit on every owner surface. The controller owns schedule body validation.
+export interface ConnectionScheduleUpsertContext extends ScheduleAuditContext {
+  canonicalConnectorKey: MountOwnerConnectionScheduleContext["canonicalConnectorKey"];
+  handleError: MountOwnerConnectionScheduleContext["handleError"];
+  invalidateConnectorSummariesCache?: MountOwnerConnectionScheduleContext["invalidateConnectorSummariesCache"];
+  markConnectorSummaryEvidenceDirty?: MountOwnerConnectionScheduleContext["markConnectorSummaryEvidenceDirty"];
+  onScheduleMutation?: MountOwnerConnectionScheduleContext["onScheduleMutation"];
+  pdppError: PdppErrorFn;
+  resolveOwnerConnectorNamespace: MountOwnerConnectionScheduleContext["resolveOwnerConnectorNamespace"];
+  resolveRegisteredConnectorManifest: (connectorId: string) => Promise<unknown>;
+  upsertSchedule: (
+    connectorId: string,
+    input: unknown,
+    options: { connectorInstanceId?: string | null }
+  ) => Promise<{
+    readonly schedule: unknown;
+    readonly policy_warning?: unknown;
+  }>;
+}
+
+export function buildConnectionScheduleUpsertHandler(
+  ctx: ConnectionScheduleUpsertContext,
+  binding: ConnectionControlBinding
+): RouteHandler {
+  return async (req, res) => {
+    const ownerSubjectId = binding.ownerSubjectId(req);
+    const actor = resolveOwnerActor(binding.surface, req, ownerSubjectId);
+    const trace = startOwnerAuditTrace(ctx, actor, res);
+    let connectionId: string | null = null;
+    let connectorKey: string | null = null;
+    try {
+      const target = decodeURIComponent(req.params[binding.param] as string);
+      if (binding.selector === "connector_id") {
+        connectorKey = ctx.canonicalConnectorKey(target) ?? target;
+        // Preserve the connector-keyed cookie route's manifest-first ordering.
+        await ctx.resolveRegisteredConnectorManifest(target);
+      } else {
+        connectionId = target;
+      }
+      const namespace = await ctx.resolveOwnerConnectorNamespace(
+        req,
+        binding.selector === "connector_id" ? target : null,
+        {
+          ...(binding.selector === "connection_id" ? { allowDefaultAccount: false, connectorInstanceId: target } : {}),
+          ownerSubjectId,
+        }
+      );
+      connectionId = namespace.connectorInstanceId;
+      connectorKey = ctx.canonicalConnectorKey(namespace.connectorId) ?? namespace.connectorId;
+      assertRemoteControlSupported(namespace);
+      if (binding.selector === "connection_id") {
+        await ctx.resolveRegisteredConnectorManifest(namespace.connectorId);
+      }
+      const result = await ctx.upsertSchedule(namespace.connectorId, req.body || {}, {
+        connectorInstanceId: namespace.connectorInstanceId,
+      });
+      await ctx.onScheduleMutation?.();
+      ctx.invalidateConnectorSummariesCache?.();
+      await ctx.markConnectorSummaryEvidenceDirty?.({
+        connectorInstanceId: namespace.connectorInstanceId,
+        reason: "owner schedule upsert changed connection schedule evidence",
+      });
+      await emitScheduleAudit(ctx, req, res, {
+        actor,
+        trace,
+        connectionId,
+        connectorKey,
+        ownerSubjectId,
+        operation: "upsert_schedule",
+        outcome: "succeeded",
+        selector: binding.selector,
+      });
+      res.json(
+        result.policy_warning
+          ? {
+              ...(result.schedule as Record<string, unknown>),
+              policy_warning: result.policy_warning,
+            }
+          : result.schedule
+      );
+    } catch (error) {
+      await emitScheduleAudit(ctx, req, res, {
+        actor,
+        trace,
+        connectionId,
+        connectorKey,
+        ownerSubjectId,
+        error,
+        operation: "upsert_schedule",
+        outcome: "failed",
+        selector: binding.selector,
+      });
+      ctx.handleError(res, error);
+    }
+  };
+}
+
+export function mountOwnerConnectionScheduleUpsert(
+  app: { put: (path: string, ...args: RouteArg<RouteHandler>[]) => unknown },
+  ctx: ConnectionScheduleUpsertContext &
+    Pick<MountOwnerConnectionScheduleContext, "getOwnerTokenSubjectId" | "requireToken">
+): void {
+  for (const selector of ["connection_id", "connector_id"] as const) {
+    const binding = ownerBearerConnectionBinding(ctx.getOwnerTokenSubjectId, selector);
+    const path = selector === "connection_id" ? "connections/:connectionId" : "connectors/:connectorId";
+    app.put(
+      `/v1/owner/${path}/schedule`,
+      ctx.requireToken,
+      buildScheduleRequireOwner(ctx, selector, "upsert_schedule"),
+      buildConnectionScheduleUpsertHandler(ctx, binding)
+    );
+  }
 }

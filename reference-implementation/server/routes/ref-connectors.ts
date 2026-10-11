@@ -15,14 +15,13 @@
 // mapping, owner-subject namespace resolution, and the
 // `onScheduleMutation` callback are unchanged.
 //
-// `sendRefConnectionDetail`, `resolveRefConnectorNamespace`,
+// `resolveRefConnectorNamespace`,
 // and `resolveRefConnectionNamespace` move here from the `buildAsApp`
 // closure in `server/index.js` because all call sites are within this
 // route family. Namespace resolution still flows through the host-supplied
 // `resolveOwnerConnectorNamespace` so the substrate lookup stays a single
 // implementation.
 
-import type { BrowserProfilePurger, BrowserProfilePurgeResult } from "../browser-profile-purge.ts";
 import {
   executeRefConnectorScheduleGet,
   RefConnectorScheduleGetNotFoundError,
@@ -46,6 +45,7 @@ import {
   parseConnectorSummaryPageRequest,
 } from "../../operations/ref-connectors-list/pagination.ts";
 import type { RunAdmission } from "../../runtime/controller.ts";
+import type { BrowserProfilePurgeResult, BrowserProfilePurger } from "../browser-profile-purge.ts";
 import type { FleetHealthVerdict } from "../fleet-health.ts";
 import type { CredentialStateChange } from "../stores/connector-instance-credential-store.ts";
 import { ownerSessionConnectionBinding } from "./_owner-connection-helpers.ts";
@@ -53,7 +53,9 @@ import type { MiddlewareHandler, PdppErrorFn, RouteArg } from "./_route-contract
 import { assertRemoteControlSupported } from "./_route-contract.ts";
 import { buildConnectionReactivateHandler } from "./owner-connection-reactivate.ts";
 import { buildConnectionRevokeHandler } from "./owner-connection-revoke.ts";
+import { buildConnectionScheduleUpsertHandler } from "./owner-connection-schedule.ts";
 import {
+  buildConnectionDetailHandler,
   buildConnectionRenameHandler,
   buildConnectionsListHandler,
   projectOwnerConnectionRow,
@@ -235,7 +237,10 @@ export interface MountRefConnectorsContext {
   // for a storage-layer placeholder; drives `label_status` on connection rows.
   projectStorageDisplayName: (
     displayName: string | null | undefined,
-    options: { connectorId?: string | null; connectorInstanceId?: string | null }
+    options: {
+      connectorId?: string | null;
+      connectorInstanceId?: string | null;
+    }
   ) => string | null;
   // Post-commit browser-profile purge for delete and revoke
   // (server/browser-profile-purge.ts). Never throws; its result is reported in
@@ -345,32 +350,6 @@ function connectorIdMatchesFilter(
     return true;
   }
   return (ctx.canonicalConnectorKey(instance.connectorId) ?? instance.connectorId) === connectorId;
-}
-
-// Moved from the `buildAsApp` closure in `server/index.js`. Both the
-// canonical `/_ref/connections/:id` route and the legacy
-// `/_ref/connector-instances/:id` alias delegate here; behaviour
-// (namespace resolution, store read, schedule lookup, projection) is
-// identical between them.
-async function sendRefConnectionDetail(
-  ctx: MountRefConnectorsContext,
-  req: unknown,
-  res: RouteResponse,
-  connectorInstanceId: string
-): Promise<void> {
-  const namespace = await resolveRefConnectionNamespace(ctx, req, connectorInstanceId);
-  const store = ctx.createRequestConnectorInstanceStore();
-  const instance = await store.get(namespace.connectorInstanceId);
-  const schedule = await ctx.getSchedule(namespace.connectorId, {
-    connectorInstanceId: namespace.connectorInstanceId,
-  });
-  const schedulesByInstanceId = new Map<string, unknown>(schedule ? [[namespace.connectorInstanceId, schedule]] : []);
-  // Fall back to the namespace bag (which carries `connectorInstanceId`
-  // and `connectorId`) when the store has no row — the previous inline
-  // implementation did the same, so the deprecated alias route keeps
-  // returning a projection rather than 404'ing.
-  const source = instance ?? (namespace as unknown as ConnectorInstanceRow);
-  res.json(projectOwnerConnectionRow(ctx, source, schedulesByInstanceId));
 }
 
 // ─── Connector summary list / detail ────────────────────────────────────
@@ -655,14 +634,7 @@ export function mountRefConnectionDetail(app: AppLike, ctx: MountRefConnectorsCo
     "/_ref/connections/:connectorInstanceId",
     { contract: "refGetConnection" },
     ctx.requireOwnerSession,
-    async (req: RouteRequest, res: RouteResponse) => {
-      try {
-        const connectorInstanceId = decodeURIComponent(req.params.connectorInstanceId as string);
-        await sendRefConnectionDetail(ctx, req, res, connectorInstanceId);
-      } catch (err) {
-        ctx.handleError(res, err);
-      }
-    }
+    buildConnectionDetailHandler(ctx, ownerSessionConnectionBinding(ctx.getOwnerSubjectId))
   );
 }
 
@@ -671,14 +643,7 @@ export function mountRefConnectorInstanceDetail(app: AppLike, ctx: MountRefConne
     "/_ref/connector-instances/:connectorInstanceId",
     { contract: "refGetConnectorInstance" },
     ctx.requireOwnerSession,
-    async (req: RouteRequest, res: RouteResponse) => {
-      try {
-        const connectorInstanceId = decodeURIComponent(req.params.connectorInstanceId as string);
-        await sendRefConnectionDetail(ctx, req, res, connectorInstanceId);
-      } catch (err) {
-        ctx.handleError(res, err);
-      }
-    }
+    buildConnectionDetailHandler(ctx, ownerSessionConnectionBinding(ctx.getOwnerSubjectId))
   );
 }
 
@@ -980,33 +945,12 @@ export function mountRefConnectorScheduleUpsert(app: AppLike, ctx: MountRefConne
     "/_ref/connectors/:connectorId/schedule",
     { contract: "refPutConnectorSchedule" },
     ctx.requireOwnerSession,
-    async (req: RouteRequest, res: RouteResponse) => {
-      try {
-        const connectorId = decodeURIComponent(req.params.connectorId as string);
-        await ctx.resolveRegisteredConnectorManifest(connectorId);
-        const namespace = await resolveRefConnectorNamespace(ctx, req, connectorId);
-        assertRemoteControlSupported(namespace);
-        const result = await ctx.upsertSchedule(namespace.connectorId, req.body || {}, {
-          connectorInstanceId: namespace.connectorInstanceId,
-        });
-        await ctx.onScheduleMutation?.();
-        ctx.invalidateConnectorSummariesCache?.();
-        // Scoped, awaited dirty marking: a schedule upsert changes this
-        // connection's schedule/refresh-policy evidence. Instance id known.
-        await ctx.markConnectorSummaryEvidenceDirty?.({
-          connectorInstanceId: namespace.connectorInstanceId,
-          reason: "ref schedule upsert changed connection schedule evidence",
-        });
-        // Include policy_warning in the response so dashboard can surface
-        // it without a second round-trip.
-        const responseBody = result.policy_warning
-          ? { ...(result.schedule as Record<string, unknown>), policy_warning: result.policy_warning }
-          : result.schedule;
-        res.json(responseBody);
-      } catch (err) {
-        ctx.handleError(res, err);
-      }
-    }
+    buildConnectionScheduleUpsertHandler(ctx, {
+      ownerSubjectId: ctx.getOwnerSubjectId,
+      param: "connectorId",
+      selector: "connector_id",
+      surface: "owner_session",
+    })
   );
 }
 
@@ -1015,31 +959,7 @@ export function mountRefConnectionScheduleUpsert(app: AppLike, ctx: MountRefConn
     "/_ref/connections/:connectorInstanceId/schedule",
     { contract: "refPutConnectionSchedule" },
     ctx.requireOwnerSession,
-    async (req: RouteRequest, res: RouteResponse) => {
-      try {
-        const connectorInstanceId = decodeURIComponent(req.params.connectorInstanceId as string);
-        const namespace = await resolveRefConnectionNamespace(ctx, req, connectorInstanceId);
-        assertRemoteControlSupported(namespace);
-        await ctx.resolveRegisteredConnectorManifest(namespace.connectorId);
-        const result = await ctx.upsertSchedule(namespace.connectorId, req.body || {}, {
-          connectorInstanceId: namespace.connectorInstanceId,
-        });
-        await ctx.onScheduleMutation?.();
-        ctx.invalidateConnectorSummariesCache?.();
-        // Scoped, awaited dirty marking: a schedule upsert changes this
-        // connection's schedule/refresh-policy evidence. Instance id known.
-        await ctx.markConnectorSummaryEvidenceDirty?.({
-          connectorInstanceId: namespace.connectorInstanceId,
-          reason: "ref schedule upsert changed connection schedule evidence",
-        });
-        const responseBody = result.policy_warning
-          ? { ...(result.schedule as Record<string, unknown>), policy_warning: result.policy_warning }
-          : result.schedule;
-        res.json(responseBody);
-      } catch (err) {
-        ctx.handleError(res, err);
-      }
-    }
+    buildConnectionScheduleUpsertHandler(ctx, ownerSessionConnectionBinding(ctx.getOwnerSubjectId))
   );
 }
 

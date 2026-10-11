@@ -381,8 +381,12 @@ import { mountOwnerConnectionReactivate } from "./routes/owner-connection-reacti
 import { applyResume, mountOwnerConnectionResume } from "./routes/owner-connection-resume.ts";
 import { mountOwnerConnectionRevoke } from "./routes/owner-connection-revoke.ts";
 import { mountOwnerConnectionRun } from "./routes/owner-connection-run.ts";
-import { mountOwnerConnectionSchedule } from "./routes/owner-connection-schedule.ts";
-import { mountOwnerConnectionRename, mountOwnerConnectionsList } from "./routes/owner-connections.ts";
+import { mountOwnerConnectionSchedule, mountOwnerConnectionScheduleUpsert } from "./routes/owner-connection-schedule.ts";
+import {
+  mountOwnerConnectionDetail,
+  mountOwnerConnectionRename,
+  mountOwnerConnectionsList,
+} from "./routes/owner-connections.ts";
 import { mountOwnerConnectorTemplates, parseUatConnectorAllowlist } from "./routes/owner-connector-templates.ts";
 import { mountOwnerConnectorInstall } from "./routes/owner-connector-install.ts";
 import { mountOwnerControl } from "./routes/owner-control.ts";
@@ -5075,10 +5079,9 @@ export function buildAsApp(opts: ServerOpts = {}) {
     );
   }
 
-  // `resolveRefConnectorNamespace`, `resolveRefConnectionNamespace`,
-  // `projectRefConnection`, and `sendRefConnectionDetail` moved to
-  // `server/routes/ref-connectors.ts` along with the routes that consumed
-  // them. The host still exposes `resolveOwnerConnectorNamespace`,
+  // Cookie namespace helpers live in `server/routes/ref-connectors.ts`;
+  // connection detail and row projection are shared with the bearer routes
+  // through `server/routes/owner-connections.ts`. The host still exposes `resolveOwnerConnectorNamespace`,
   // `getOwnerSubjectId`, `createRequestConnectorInstanceStore`, and the
   // controller surface; the adapter wires those into the per-route
   // helpers.
@@ -7848,6 +7851,18 @@ function buildRsApp(opts: ServerOpts = {}) {
   };
   mountOwnerConnectionsList(app, ownerConnectionsContext as unknown as Parameters<typeof mountOwnerConnectionsList>[1]);
 
+  mountOwnerConnectionDetail(app, {
+    ...ownerConnectionsContext,
+    getSchedule: (connectorId: string, options: { connectorInstanceId?: string | null }) =>
+      opts.controller
+        ? opts.controller.getSchedule(
+            connectorId,
+            options as Parameters<NonNullable<typeof opts.controller>["getSchedule"]>[1]
+          )
+        : null,
+    resolveOwnerConnectorNamespace,
+  } as unknown as Parameters<typeof mountOwnerConnectionDetail>[1]);
+
   // PATCH /v1/owner/connections/:connectionId is the bearer-authed owner-agent
   // rename: a trusted local owner agent labels a connection (e.g. "the owner personal"
   // / "Shared Amazon") without a browser owner session or `/_ref` session cookie.
@@ -7907,6 +7922,29 @@ function buildRsApp(opts: ServerOpts = {}) {
         options
       ),
   } as unknown as Parameters<typeof mountOwnerConnectionSchedule>[1]);
+
+  mountOwnerConnectionScheduleUpsert(app, {
+    canonicalConnectorKey,
+    createTraceContext,
+    emitSpineEvent,
+    ensureRequestId,
+    getOwnerTokenSubjectId,
+    handleError,
+    invalidateConnectorSummariesCache,
+    markConnectorSummaryEvidenceDirty,
+    onScheduleMutation: opts.onScheduleMutation,
+    pdppError,
+    requireToken,
+    resolveOwnerConnectorNamespace,
+    resolveRegisteredConnectorManifest,
+    setReferenceTraceId,
+    upsertSchedule: (connectorId: string, input: unknown, options: unknown) =>
+      opts.controller?.upsertSchedule(
+        connectorId,
+        input as Parameters<NonNullable<typeof opts.controller>["upsertSchedule"]>[1],
+        options as Parameters<NonNullable<typeof opts.controller>["upsertSchedule"]>[2]
+      ),
+  } as unknown as Parameters<typeof mountOwnerConnectionScheduleUpsert>[1]);
 
   // The owner's read/write surface for a local connection's declared collection
   // boundary. Without this the scope machinery is unreachable and every run is
