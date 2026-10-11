@@ -26,6 +26,8 @@ export class ToyApp implements HeldStore {
   readonly index = new Map<string, Set<string>>();
   /** Derivative: grant -> record count summary. */
   readonly summaries = new Map<string, string>();
+  /** Derivative over several grants: the record keys of every input grant, rebuilt whenever one changes. */
+  readonly digests = new Map<string, { grants: string[]; entries: string[] }>();
   #client: HeldDataClient | null = null;
 
   attach(client: HeldDataClient): void {
@@ -86,6 +88,22 @@ export class ToyApp implements HeldStore {
       }
     }
     this.summaries.set(grantId, `${this.records.get(grantId)?.length ?? 0} records`);
+    this.#rebuildDigests();
+  }
+
+  /** Create a derivative from the records of several grants. */
+  buildDigest(name: string, grants: string[]): void {
+    this.digests.set(name, { grants, entries: [] });
+    this.#rebuildDigests();
+  }
+
+  #rebuildDigests(): void {
+    for (const [name, d] of this.digests) {
+      d.entries = d.grants.flatMap((g) => (this.records.get(g) ?? []).map((r) => `${g}:${r.id}`));
+      if (d.entries.length === 0) {
+        this.digests.delete(name);
+      }
+    }
   }
 
   /** An ordinary use: search. Returns null when the gate refuses. */

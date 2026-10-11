@@ -747,6 +747,61 @@ describe("held-data lifecycle over HTTP", () => {
     );
   });
 
+  it("P2: withdrawing child A of a package: A answers erase, B still reads and answers permitted, and a derivative of A and B is rebuilt without A", async () => {
+    const clock = { now: Date.now() };
+    await withServer(
+      false,
+      async (h) => {
+        const github = await registerSecondConnector(h);
+        const clientId = await registerPublicClient(h);
+        const pkg = await packageFlow(h, clientId, [h.connectorId, github]);
+        const childOf = (connector: string) =>
+          pkg.children.find((id) => {
+            const row = getDb().prepare("SELECT grant_json FROM grants WHERE grant_id = ?").get(id) as { grant_json: string };
+            return row.grant_json.includes(connector);
+          }) as string;
+        const b = childOf(h.connectorId);
+        const a = childOf(github);
+        assert.ok(a && b && a !== b);
+
+        // Package tokens reach only the hosted MCP endpoint, which reads through getGrantPackageAccess.
+        // That fan-out is the RS-side observation of which children the package token can still read.
+        const readable = async () =>
+          ((await getGrantPackageAccess(pkg.packageId))?.members as { grant_id: string }[]).map((m) => m.grant_id);
+        const app = new ToyApp();
+        const client = new HeldDataClient({
+          now: () => clock.now,
+          store: app,
+          status: httpStatusTransport({ asBaseUrl: h.asUrl, credentialFor: () => pkg.refreshToken }),
+        });
+        app.attach(client);
+        app.sync(a, [{ id: "a1", stream: "messages", text: "alphaonly shared" }]);
+        app.sync(b, [{ id: "b1", stream: "messages", text: "bravoonly shared" }]);
+        app.buildDigest("ab", [a, b]);
+        await client.reconcile();
+        assert.equal(client.canUse(a).ok && client.canUse(b).ok, true, "both children are usable before the withdrawal");
+        assert.deepEqual(app.digests.get("ab")?.entries, [`${a}:a1`, `${b}:b1`]);
+        assert.deepEqual((await readable()).sort(), [a, b].sort(), "the package token reads both children before the withdrawal");
+
+        const out = await revoke(h, h.ownerToken, a, { pdpp_disposition: "delete", pdpp_ending: "one_child_withdrawal" });
+        assert.equal(out.status, 200, JSON.stringify(out.body));
+        assert.equal((await status(h, pkg.refreshToken, a)).body.grants[0]?.held_data, "erase", "A answers erase");
+        assert.equal((await status(h, pkg.refreshToken, b)).body.grants[0]?.held_data, "permitted", "B answers permitted");
+        assert.deepEqual(await readable(), [b], "B still reads through the package token; A does not");
+        assert.equal((await introspect(pkg.packageToken)).active, true);
+
+        await client.reconcile();
+        assert.equal(client.canUse(a).ok, false);
+        assert.deepEqual(app.holds(a), { records: 0, indexEntries: 0, summary: false }, "A and its derivatives are gone");
+        assert.equal(client.canUse(b).ok, true);
+        assert.deepEqual(app.search(b, "bravoonly"), [`${b}:b1`], "B is still searchable");
+        assert.deepEqual(app.search(b, "shared"), [`${b}:b1`]);
+        assert.deepEqual(app.digests.get("ab")?.entries, [`${b}:b1`], "the A+B derivative is rebuilt without A");
+      },
+      heldDataOpts(clock),
+    );
+  });
+
   it("P8: after refresh replay the successor refresh token and the family's access tokens are revoked, and no erasure instruction exists", async () => {
     await withServer(
       false,
