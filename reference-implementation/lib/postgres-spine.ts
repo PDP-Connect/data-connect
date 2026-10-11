@@ -728,6 +728,12 @@ async function projectSummaryStatus(id: string, events: SpineEventRecord[]): Pro
     return (await hasPostgresActiveRunLease(runId)) ? "in_progress" : "failed";
   }
 
+  // Match SQLite for the pre-start window and historical authority events
+  // whose audit-write status defaulted to "ok".
+  if (events.some((event) => event.event_type === "run.effective_authority")) {
+    return "pending";
+  }
+
   return latestKnownEventStatus(events);
 }
 

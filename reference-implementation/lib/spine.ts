@@ -1149,6 +1149,12 @@ function pickSummaryStatus(events: readonly SpineEventRecord[]): string {
     return hasActiveRunLease(runId) ? "in_progress" : "failed";
   }
 
+  // A successful authority audit does not certify connector execution,
+  // including legacy events whose storage default was "succeeded".
+  if (events.some((event) => event.event_type === "run.effective_authority")) {
+    return "pending";
+  }
+
   return findLatestStatus(events, () => true) ?? "unknown";
 }
 
