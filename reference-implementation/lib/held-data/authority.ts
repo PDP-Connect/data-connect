@@ -387,7 +387,7 @@ export class HeldDataAuthority {
   }
 
   completeDecommission(offerId: string): void {
-    return this.#ordered(() => this.#completeDecommission(offerId));
+    this.#ordered(() => this.#completeDecommission(offerId));
   }
 
   #completeDecommission(offerId: string): void {
@@ -422,7 +422,7 @@ export class HeldDataAuthority {
 
   /** Remember the first single-use read window; it never opens a second time. */
   recordReadWindow(grantId: string, windowEnd: number): void {
-    return this.#ordered(() => this.#recordReadWindow(grantId, windowEnd));
+    this.#ordered(() => this.#recordReadWindow(grantId, windowEnd));
   }
 
   #recordReadWindow(grantId: string, windowEnd: number): void {
@@ -1048,7 +1048,12 @@ export class HeldDataAuthority {
       for (const action of this.#pending?.pending() ?? []) {
         const grantId = action.grant.grantId;
         if (!this.#grants.has(grantId)) this.#append(this.#grantEntry(action.grant));
-        if (action.kind === "end" && !this.#grants.get(grantId)?.end) {
+        const restored = this.#grants.get(grantId);
+        const acceleratesAdvance = action.kind === "elect" && action.disposition === "delete" &&
+          !restored?.end && restored?.erasures.some((e) => e.entry.t === "hd_advance") &&
+          (restored.grant.expires_at === null || action.acceptedAt < restored.grant.expires_at);
+        const endsGrant = action.kind === "end" || acceleratesAdvance;
+        if (endsGrant && !restored?.end) {
           this.#append({
             t: "hd_end",
             id: `${action.id}_end`,
@@ -1059,6 +1064,8 @@ export class HeldDataAuthority {
             at: action.acceptedAt,
           });
         }
+        const facts = this.#grants.get(grantId);
+        if (facts?.end) this.#activateAdvance(facts, facts.end.at);
         if (
           action.disposition === "delete" &&
           !this.#grants.get(grantId)?.erasures.some((e) => e.entry.scope.streams === "all")
@@ -1080,7 +1087,7 @@ export class HeldDataAuthority {
             at: action.acceptedAt,
           });
         }
-        if (action.kind === "end" && !this.#entryIds.has(`${action.id}_processing`)) {
+        if (endsGrant && !this.#entryIds.has(`${action.id}_processing`)) {
           this.#append({
             t: "tombstone",
             id: `${action.id}_processing`,
@@ -1263,8 +1270,11 @@ export class HeldDataAuthority {
 
   #apply(e: Entry, seq: number): void {
     this.#position = seq;
-    if (this.#entryIds.has(e.id)) return;
-    this.#entryIds.add(e.id);
+    // An advance election and its activation retain one operation ID, but
+    // each is a distinct fact. Retried activations still apply only once.
+    const entryId = e.t === "hd_advance" ? `advance:${e.id}` : e.id;
+    if (this.#entryIds.has(entryId)) return;
+    this.#entryIds.add(entryId);
     switch (e.t) {
       case "hd_pending_inbox":
         this.#pendingEpoch ??= e.inbox_epoch;
