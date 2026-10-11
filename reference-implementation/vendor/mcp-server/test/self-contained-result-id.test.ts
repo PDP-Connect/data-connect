@@ -139,10 +139,11 @@ function makeMultiSourceFetch() {
   return { fetch, calls };
 }
 
-function jsonResponse(body: unknown) {
+function jsonResponse(body: unknown, init: ResponseInit = {}) {
   return new Response(JSON.stringify(body), {
     status: 200,
     headers: { "content-type": "application/json" },
+    ...init,
   });
 }
 
@@ -359,4 +360,309 @@ test("hits without a connection keep plain stream:record_id ids", async () => {
 
   await client.close();
   await server.close();
+});
+
+// Core #387 gives clients instance handles, not storage connection identifiers.
+// #389 requires readers to tolerate unknown response members. This fixture
+// refuses an unscoped fetch so the content-only journey proves identity survives.
+function makePairwiseInstanceFetch() {
+  const calls: FetchCall[] = [];
+  const blobUrl = "https://provider.test/v1/blobs/blob-1?instance_id=inst_pairwise";
+  const record = {
+    object: "record",
+    id: "o1",
+    stream: "orders",
+    instance_id: "inst_pairwise",
+    emitted_at: "2026-10-10T00:00:00Z",
+    data: {
+      title: "Pairwise order",
+      text: "Pasta maker",
+      blob_ref: { blob_id: "blob-1", fetch_url: blobUrl },
+    },
+    future_member: { opaque: ["profile extension"] },
+  };
+  // biome-ignore lint/suspicious/useAwait: injected fetch contract requires Promise<Response>.
+  const fetch = async (urlInput: string | Request | URL, init: RequestInit = {}) => {
+    const url = new URL(urlInput.toString());
+    calls.push({ url: url.toString(), method: init.method ?? "GET" });
+    if (url.pathname === "/v1/search") {
+      return jsonResponse({
+        hits: [
+          {
+            id: "o1",
+            stream: "orders",
+            instance_id: "inst_pairwise",
+            title: "Pairwise order",
+          },
+        ],
+      });
+    }
+    if (url.pathname === "/v1/streams/orders/records") {
+      return jsonResponse({
+        object: "list",
+        data: [record],
+        has_more: false,
+        future_envelope_member: { opaque: true },
+      });
+    }
+    if (url.pathname === "/v1/streams/orders/records/o1") {
+      if (url.searchParams.get("instance_id") !== "inst_pairwise" || url.searchParams.has("connection_id")) {
+        return jsonResponse(
+          {
+            error: {
+              type: "permission_error",
+              code: "grant_invalid",
+              message: "Instance handle required",
+            },
+          },
+          { status: 403 },
+        );
+      }
+      return jsonResponse(record);
+    }
+    return new Response(null, { status: 404 });
+  };
+  return { fetch, calls, record, blobUrl };
+}
+
+test("pairwise instance search completes fetch and resource reads from one opaque content handle", async (t) => {
+  const { fetch, calls } = makePairwiseInstanceFetch();
+  const { client, server } = await connectClient(fetch);
+  t.after(async () => {
+    await client.close();
+    await server.close();
+  });
+  const searchResult = await client.callTool({
+    name: "search",
+    arguments: { q: "pasta" },
+  });
+  const id = FIRST_FETCH_ID_S.exec(firstText(searchResult))?.[1];
+  assert.ok(id);
+  assert.ok(id.startsWith("pdpp://record/"), "pairwise identity requires an opaque record handle");
+  const structured = searchResult.structuredContent as {
+    results: Array<{ instance_id?: string; connection_id?: string }>;
+  };
+  assert.equal(structured.results[0]?.instance_id, "inst_pairwise");
+  assert.equal(structured.results[0]?.connection_id, undefined);
+  const fetchResult = await client.callTool({
+    name: "fetch",
+    arguments: { id },
+  });
+  assert.equal(fetchResult.isError, undefined, firstText(fetchResult));
+  const document = JSON.parse(firstText(fetchResult));
+  assert.equal(document.id, id);
+  assert.equal(document.metadata.instance_id, "inst_pairwise");
+  const ladder = (
+    fetchResult.structuredContent as {
+      content_ladder: { id: string; field_windows: Array<{ read: { args: { id: string } } }> };
+    }
+  ).content_ladder;
+  assert.equal(ladder.id, id);
+  assert.equal(ladder.field_windows[0]?.read.args.id, id);
+  assert.equal(
+    document.metadata.future_member,
+    undefined,
+    "unknown envelope extension is ignored by document projection",
+  );
+  assert.equal(new URL(document.url).searchParams.get("instance_id"), "inst_pairwise");
+  const resource = await client.readResource({ uri: id });
+  const content = resource.contents[0] as { text?: string };
+  assert.equal(JSON.parse(content.text ?? "{}").instance_id, "inst_pairwise");
+  const recordCalls = calls.map((call) => new URL(call.url)).filter((url) => url.pathname.endsWith("/records/o1"));
+  assert.equal(recordCalls.length, 2);
+  for (const url of recordCalls) {
+    assert.equal(url.searchParams.get("instance_id"), "inst_pairwise");
+    assert.equal(url.searchParams.has("connection_id"), false);
+  }
+});
+
+test("instance-scoped query and explicit fetch preserve unknown members and blob fetch URLs", async (t) => {
+  const { fetch, calls, record, blobUrl } = makePairwiseInstanceFetch();
+  const { client, server } = await connectClient(fetch);
+  t.after(async () => {
+    await client.close();
+    await server.close();
+  });
+  const queryResult = await client.callTool({
+    name: "query_records",
+    arguments: { stream: "orders", instance_id: "inst_pairwise" },
+  });
+  assert.equal(queryResult.isError, undefined, firstText(queryResult));
+  const envelope = (
+    queryResult.structuredContent as {
+      data: { data: unknown[]; future_envelope_member?: unknown };
+    }
+  ).data;
+  assert.deepEqual(envelope.data, [record]);
+  assert.deepEqual(envelope.future_envelope_member, { opaque: true });
+  assert.equal(record.data.blob_ref.fetch_url, blobUrl);
+  assert.equal((envelope.data[0] as typeof record).data.blob_ref.fetch_url, blobUrl);
+  const fetched = await client.callTool({
+    name: "fetch",
+    arguments: { id: "orders:o1", instance_id: "inst_pairwise" },
+  });
+  assert.equal(fetched.isError, undefined, firstText(fetched));
+  assert.equal(
+    (fetched.structuredContent as { metadata: { instance_id?: string } }).metadata.instance_id,
+    "inst_pairwise",
+  );
+  assert.equal(
+    new URL((fetched.structuredContent as { url: string }).url).searchParams.get("instance_id"),
+    "inst_pairwise",
+  );
+  const recordCalls = calls.map((call) => new URL(call.url)).filter((url) => url.pathname.includes("/records"));
+  assert.equal(recordCalls.length, 2);
+  for (const url of recordCalls) {
+    assert.equal(url.searchParams.get("instance_id"), "inst_pairwise");
+    assert.equal(url.searchParams.has("connection_id"), false);
+  }
+});
+
+test("fetch rejects conflicting instance handles and mixed connection selectors before an RS call", async (t) => {
+  const { fetch, calls } = makePairwiseInstanceFetch();
+  const { client, server } = await connectClient(fetch);
+  t.after(async () => {
+    await client.close();
+    await server.close();
+  });
+  const id =
+    "pdpp://record/" +
+    Buffer.from(
+      JSON.stringify({
+        v: 1,
+        kind: "record",
+        instance_id: "inst_pairwise",
+        stream: "orders",
+        record_id: "o1",
+      }),
+    ).toString("base64url");
+  for (const args of [
+    { id, instance_id: "inst_other" },
+    { id, connection_id: "raw_connection" },
+    { id: "raw_connection/orders:o1", instance_id: "inst_pairwise" },
+    {
+      id: "orders:o1",
+      instance_id: "inst_pairwise",
+      connection_id: "raw_connection",
+    },
+  ]) {
+    // biome-ignore lint/performance/noAwaitInLoops: one recording client checks that no case reaches the RS.
+    const result = await client.callTool({ name: "fetch", arguments: args });
+    assert.equal(result.isError, true);
+    assert.equal((result.structuredContent as { error?: { code?: string } }).error?.code, "conflicting_instance_id");
+  }
+  assert.deepEqual(calls, []);
+  const agreeing = await client.callTool({
+    name: "fetch",
+    arguments: { id, instance_id: "inst_pairwise" },
+  });
+  assert.equal(agreeing.isError, undefined, firstText(agreeing));
+});
+
+const NEXT_FIELD_READ_ARGS = /next read_record_field args=(.+)/;
+const FIELD_EXCERPT = /excerpt/;
+
+test("instance search evidence supports field reads, paging, and field-window resources without connection selectors", async (t) => {
+  const calls: URL[] = [];
+  // biome-ignore lint/suspicious/useAwait: injected fetch requires Promise<Response>.
+  const fetch = async (input: string | Request | URL) => {
+    const url = new URL(input.toString());
+    calls.push(url);
+    if (url.pathname === "/v1/search") {
+      return jsonResponse({
+        hits: [
+          {
+            id: "o1",
+            stream: "orders",
+            instance_id: "inst_pairwise",
+            evidence_excerpts: [{ field_path: "text", preview_text: "excerpt", truncated: true }],
+          },
+        ],
+      });
+    }
+    if (url.pathname.endsWith("/field-window")) {
+      if (url.searchParams.get("instance_id") !== "inst_pairwise" || url.searchParams.has("connection_id")) {
+        return jsonResponse({ error: { code: "wrong_identity" } }, { status: 403 });
+      }
+      return jsonResponse({
+        object: "field_window",
+        stream: "orders",
+        record_id: "o1",
+        instance_id: "inst_pairwise",
+        field: { path: "text", type: "string" },
+        window: {
+          text: "excerpt",
+          start_chars: 0,
+          end_chars: 7,
+          total_chars: 14,
+          limit_chars: 7,
+          complete: false,
+          next_offset_chars: 7,
+          previous_offset_chars: null,
+        },
+      });
+    }
+    return new Response(null, { status: 404 });
+  };
+  const { client, server } = await connectClient(fetch);
+  t.after(async () => {
+    await client.close();
+    await server.close();
+  });
+  const search = await client.callTool({ name: "search", arguments: { q: "excerpt" } });
+  const id = FIRST_FETCH_ID_S.exec(firstText(search))?.[1];
+  assert.ok(id);
+  const ladder = (
+    search.structuredContent as {
+      content_ladder: {
+        records: Array<{ id: string; field_windows: Array<{ read: { args: Record<string, unknown> } }> }>;
+      };
+    }
+  ).content_ladder.records[0];
+  assert.ok(ladder);
+  assert.equal(ladder.id, id);
+  const evidenceArgs = ladder.field_windows[0]?.read.args;
+  assert.ok(evidenceArgs);
+  assert.equal(evidenceArgs.id, id);
+  const read = await client.callTool({ name: "read_record_field", arguments: { ...evidenceArgs, limit_chars: 7 } });
+  assert.equal(read.isError, undefined, firstText(read));
+  const record = (read.structuredContent as { record: { id: string; instance_id?: string; connection_id?: string } })
+    .record;
+  assert.equal(record.instance_id, "inst_pairwise");
+  assert.equal(record.connection_id, undefined);
+  assert.equal(record.id, id);
+  const next = NEXT_FIELD_READ_ARGS.exec(firstText(read))?.[1];
+  assert.ok(next);
+  const paged = await client.callTool({ name: "read_record_field", arguments: JSON.parse(next) });
+  assert.equal(paged.isError, undefined, firstText(paged));
+  const resourceUri =
+    "pdpp://field-window/" +
+    Buffer.from(
+      JSON.stringify({
+        v: 1,
+        kind: "field-window",
+        instance_id: "inst_pairwise",
+        stream: "orders",
+        record_id: "o1",
+        field_path: "text",
+        offset_chars: 7,
+      }),
+    ).toString("base64url");
+  const resource = await client.readResource({ uri: resourceUri });
+  assert.match((resource.contents[0] as { text: string }).text, FIELD_EXCERPT);
+  const explicit = await client.callTool({
+    name: "read_record_field",
+    arguments: { instance_id: "inst_pairwise", stream: "orders", record_id: "o1", field_path: "text" },
+  });
+  assert.equal(explicit.isError, undefined, firstText(explicit));
+  const conflicting = await client.callTool({
+    name: "read_record_field",
+    arguments: { instance_id: "inst_pairwise", connection_id: "raw_connection", stream: "orders", record_id: "o1", field_path: "text" },
+  });
+  assert.equal(conflicting.isError, true);
+  assert.equal(calls.filter((url) => url.pathname.endsWith("/field-window")).length, 4);
+  for (const url of calls.filter((item) => item.pathname.endsWith("/field-window"))) {
+    assert.equal(url.searchParams.get("instance_id"), "inst_pairwise");
+    assert.equal(url.searchParams.has("connection_id"), false);
+  }
 });

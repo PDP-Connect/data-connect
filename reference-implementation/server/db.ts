@@ -896,6 +896,22 @@ CREATE TABLE IF NOT EXISTS record_acquisition_provenance (
 CREATE INDEX IF NOT EXISTS idx_record_acquisition_provenance_record
   ON record_acquisition_provenance(connector_instance_id, stream, record_key);
 
+CREATE TABLE IF NOT EXISTS pairwise_query_sessions (
+  token TEXT PRIMARY KEY,
+  state_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS pairwise_identity_handles (
+  issuer TEXT NOT NULL,
+  subject_id TEXT NOT NULL,
+  client_id TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('subject','grantor','instance')),
+  source_id TEXT NOT NULL,
+  internal_id TEXT NOT NULL,
+  handle TEXT NOT NULL UNIQUE,
+  PRIMARY KEY (issuer,subject_id,client_id,kind,source_id,internal_id)
+);
+
 CREATE TABLE IF NOT EXISTS grants (
   grant_id       TEXT PRIMARY KEY,
   subject_id     TEXT NOT NULL,

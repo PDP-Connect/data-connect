@@ -61,6 +61,7 @@ import {
 } from "./connector-manifest-write-fence.ts";
 import { assertGrantedManifestReadAuthority, assertOwnerSearchFilterAuthority } from "./manifest-read-authority.ts";
 import { OWNER_AUTH_DEFAULT_SUBJECT_ID } from "./owner-auth.ts";
+import { filterPairwiseSearchBindings, type PairwiseInstanceBinding } from "./pairwise-identity.ts";
 import {
   postgresLexicalCandidateLimit,
   postgresLexicalCountIndexableTextValues,
@@ -221,6 +222,7 @@ type LexicalBackfillPhaseHook = ((point: string, context: JsonObject) => void | 
 interface SearchRequest {
   query: Record<string, unknown>;
 }
+
 interface SearchTokenInfo {
   client_id?: string | null;
   grant?: LexicalGrant & {
@@ -228,6 +230,7 @@ interface SearchTokenInfo {
     subject?: { id?: string | null };
   };
   grant_id?: string | null;
+  pdpp_instance_bindings?: PairwiseInstanceBinding[];
   pdpp_token_kind: "owner" | "client";
   subject_id?: string | null;
 }
@@ -1599,10 +1602,11 @@ function createLexicalSearchNativeDependencies({
     getAdvertisement: () => advertisement,
     listOwnerVisibleBindings: async () => {
       const connectorIds = await resolveOwnerVisibleConnectorIds();
-      return await listActiveOwnerBindingsForConnectors({
+      const bindings = await listActiveOwnerBindingsForConnectors({
         connectorIds,
         ownerSubjectId,
       });
+      return await filterPairwiseSearchBindings(bindings, tokenInfo);
     },
     listOwnerVisibleConnectorIds: () => resolveOwnerVisibleConnectorIds(),
     loadSnapshot: (snapshotId) => loadSnapshot(snapshotId),
@@ -1629,7 +1633,8 @@ function createLexicalSearchNativeDependencies({
         ownerSubjectId: ownerSubjectIdForGrant,
         requestConnectionId: connectionId,
       });
-      return bindings.map((b) => ({
+      const coveredBindings = await filterPairwiseSearchBindings(bindings, tokenInfo);
+      return coveredBindings.map((b) => ({
         connectorInstanceId: b.connectorInstanceId,
         manifest: {
           ...baseManifest,

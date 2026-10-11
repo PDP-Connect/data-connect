@@ -12,8 +12,11 @@ import { validateResponse } from "@pdpp/reference-contract";
 
 import {
   approveGrant,
+  consumeConsentExchangeCode,
+  createConsentExchangeCode,
   getPendingConsent,
   initiateGrant,
+  introspect,
   parsePendingConsentRequestUri,
   registerConnector,
   seedPreRegisteredClients,
@@ -21,6 +24,7 @@ import {
 import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
+import { getPairwiseHandle, pairwiseInstanceIdentityEnabled } from "../server/pairwise-identity.ts";
 import { closePostgresStorage, initPostgresStorage, postgresQuery } from "../server/postgres-storage.ts";
 import { createRequestConnectorInstanceStore } from "../server/request-store-factories.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
@@ -176,6 +180,15 @@ async function stage(stream: Record<string, unknown> = { name: "top_artists", vi
 }
 
 async function stageBatch(accessMode: "continuous" | "single_use" = "continuous"): Promise<string> {
+  const instanceId = pairwiseInstanceIdentityEnabled()
+    ? await getPairwiseHandle({
+        clientId: CLIENT_ID,
+        internalId: INSTANCE_ID,
+        kind: "instance",
+        sourceId: SOURCE_ID,
+        subjectId: "owner_local",
+      })
+    : INSTANCE_ID;
   const initiated = await initiateGrant(
     {
       authorization_details: [
@@ -183,14 +196,14 @@ async function stageBatch(accessMode: "continuous" | "single_use" = "continuous"
           access_mode: accessMode,
           purpose_code: "https://pdpp.dev/purpose/personalization",
           source: { id: SOURCE_ID, kind: "connector" },
-          streams: [{ instance_ids: [INSTANCE_ID], name: "top_artists", view: "basic" }],
+          streams: [{ instance_ids: [instanceId], name: "top_artists", view: "basic" }],
           type: "https://pdpp.dev/data-access",
         },
         {
           access_mode: accessMode,
           purpose_code: "https://pdpp.dev/purpose/personalization",
           source: { id: SOURCE_ID, kind: "connector" },
-          streams: [{ instance_ids: [INSTANCE_ID], name: "top_artists", view: "basic" }],
+          streams: [{ instance_ids: [instanceId], name: "top_artists", view: "basic" }],
           type: "https://pdpp.dev/data-access",
         },
       ],
@@ -1183,4 +1196,155 @@ test("request source kind may be omitted and is derived from retained declaratio
     id: SOURCE_ID,
     kind: "connector",
   });
+});
+
+test("pairwise review binds the exact client handles issued in a grant", async () => {
+  const previous = process.env.PDPP_EXPERIMENTAL_PAIRWISE_INSTANCE_IDENTITY;
+  process.env.PDPP_EXPERIMENTAL_PAIRWISE_INSTANCE_IDENTITY = "1";
+  try {
+    await setup();
+    const deviceCode = await stage();
+    const review = await getPendingConsent(deviceCode, { finalizeReview: true, subjectId: "owner_local" });
+    const artifact = review?.review as { subject: { id: string }; resolved_streams: { instance_ids: string[] }[] };
+    assert.notEqual(artifact.subject.id, "owner_local");
+    assert.notEqual(artifact.resolved_streams[0]?.instance_ids[0], INSTANCE_ID);
+    const approved = await approveGrant(deviceCode, "owner_local", {
+      approval_review_revision: review?.reviewRevision,
+    });
+    assert.deepEqual(approved.grant.subject, artifact.subject);
+    assert.deepEqual(approved.grant.streams, artifact.resolved_streams);
+    const info = await introspect(approved.token);
+    assert.equal(info.subject_id, "owner_local", "RS retains internal enforcement subject");
+    assert.deepEqual((info.pairwise_grant as { subject: unknown }).subject, artifact.subject);
+    const bindings = info.pdpp_instance_bindings as { instance_id: string; rs_instance: string }[];
+    assert.equal(bindings[0]?.instance_id, artifact.resolved_streams[0]?.instance_ids[0]);
+    assert.equal(bindings[0]?.rs_instance, INSTANCE_ID);
+    const resumed = await approveGrant(deviceCode, "owner_local");
+    assert.deepEqual(resumed.grant, approved.grant, "approval retries keep the same client identifiers");
+    assert.deepEqual(
+      info.pairwise_source_primary_keys,
+      { top_artists: ["id"] },
+      "key metadata comes from retained review declaration"
+    );
+    const code = await createConsentExchangeCode({
+      grant: approved.grant,
+      grantId: String(approved.grant.grant_id),
+      token: approved.token,
+    });
+    const exchanged = await consumeConsentExchangeCode(code);
+    assert.equal(exchanged.ok, true);
+    assert.deepEqual(exchanged.grant, approved.grant, "consent exchange does not leak internal identifiers");
+    const handle = artifact.resolved_streams[0]?.instance_ids[0];
+    assert.ok(handle);
+    const repeatedCode = await stage({ instance_ids: [handle], name: "top_artists", view: "basic" });
+    const repeatedReview = await getPendingConsent(repeatedCode, { finalizeReview: true, subjectId: "owner_local" });
+    assert.ok(repeatedReview);
+    assert.deepEqual(
+      (repeatedReview.review as { resolved_streams: unknown }).resolved_streams,
+      artifact.resolved_streams,
+      "later selection reuses this client's handles"
+    );
+    const otherClientHandle = await getPairwiseHandle({
+      clientId: "other_client",
+      internalId: INSTANCE_ID,
+      kind: "instance",
+      sourceId: SOURCE_ID,
+      subjectId: "owner_local",
+    });
+    await Promise.all(
+      [INSTANCE_ID, otherClientHandle].map(async (foreignHandle) => {
+        const foreignCode = await stage({ instance_ids: [foreignHandle], name: "top_artists", view: "basic" });
+        await assert.rejects(
+          () => getPendingConsent(foreignCode, { finalizeReview: true, subjectId: "owner_local" }),
+          /unknown for this client and source/
+        );
+      })
+    );
+  } finally {
+    if (previous === undefined) {
+      delete process.env.PDPP_EXPERIMENTAL_PAIRWISE_INSTANCE_IDENTITY;
+    } else {
+      process.env.PDPP_EXPERIMENTAL_PAIRWISE_INSTANCE_IDENTITY = previous;
+    }
+  }
+});
+
+test("pairwise batch review keeps one stable client subject and exact child instance handles", async () => {
+  const previous = process.env.PDPP_EXPERIMENTAL_PAIRWISE_INSTANCE_IDENTITY;
+  process.env.PDPP_EXPERIMENTAL_PAIRWISE_INSTANCE_IDENTITY = "1";
+  try {
+    await setup();
+    const deviceCode = await stageBatch();
+    const review = await getPendingConsent(deviceCode, {
+      approvedSourceIndexes: [0, 1],
+      finalizeReview: true,
+      subjectId: "owner_local",
+    });
+    const artifact = review?.review as { subject: { id: string }; sources: { resolved_streams: unknown[] }[] };
+    assert.notEqual(artifact.subject.id, "owner_local");
+    const approved = await approveGrant(deviceCode, "owner_local", {
+      approval_review_revision: review?.reviewRevision,
+    });
+    const children = getDb().prepare("SELECT grant_json FROM grants ORDER BY grant_id").all<{ grant_json: string }>();
+    assert.equal(children.length, 2);
+    const info = await import("../server/pairwise-identity.ts");
+    await Promise.all(
+      children.map(async (row) => {
+        const projected = await info.projectPairwiseGrant(JSON.parse(row.grant_json));
+        assert.deepEqual(projected.subject, artifact.subject);
+        assert.deepEqual(projected.streams, artifact.sources[0]?.resolved_streams);
+      })
+    );
+    assert.equal(approved.grant.package, true);
+  } finally {
+    if (previous === undefined) {
+      delete process.env.PDPP_EXPERIMENTAL_PAIRWISE_INSTANCE_IDENTITY;
+    } else {
+      process.env.PDPP_EXPERIMENTAL_PAIRWISE_INSTANCE_IDENTITY = previous;
+    }
+  }
+});
+
+test("pairwise PostgreSQL review, issuance and exchange retain exact client handles", {
+  skip: POSTGRES_URL ? false : "PDPP_TEST_POSTGRES_URL unset",
+}, async () => {
+  assert.ok(POSTGRES_URL);
+  const previous = process.env.PDPP_EXPERIMENTAL_PAIRWISE_INSTANCE_IDENTITY;
+  process.env.PDPP_EXPERIMENTAL_PAIRWISE_INSTANCE_IDENTITY = "1";
+  try {
+    await withTemporaryPostgresDatabase(
+      {
+        closeConnections: closePostgresStorage,
+        connectionString: POSTGRES_URL,
+        databaseName: "pdpp_test_pairwise_review",
+        templateName: null,
+      },
+      async (databaseUrl) => {
+        await setup("postgres", databaseUrl);
+        const deviceCode = await stage();
+        const review = await getPendingConsent(deviceCode, { finalizeReview: true, subjectId: "owner_local" });
+        const approved = await approveGrant(deviceCode, "owner_local", {
+          approval_review_revision: review?.reviewRevision,
+        });
+        const artifact = review?.review as { subject: unknown; resolved_streams: unknown };
+        assert.deepEqual(approved.grant.subject, artifact.subject);
+        assert.deepEqual(approved.grant.streams, artifact.resolved_streams);
+        const info = await introspect(approved.token);
+        assert.equal(info.subject_id, "owner_local");
+        assert.deepEqual(info.pairwise_source_primary_keys, { top_artists: ["id"] });
+        const code = await createConsentExchangeCode({
+          grant: approved.grant,
+          grantId: String(approved.grant.grant_id),
+          token: approved.token,
+        });
+        assert.deepEqual((await consumeConsentExchangeCode(code)).grant, approved.grant);
+      }
+    );
+  } finally {
+    if (previous === undefined) {
+      delete process.env.PDPP_EXPERIMENTAL_PAIRWISE_INSTANCE_IDENTITY;
+    } else {
+      process.env.PDPP_EXPERIMENTAL_PAIRWISE_INSTANCE_IDENTITY = previous;
+    }
+  }
 });

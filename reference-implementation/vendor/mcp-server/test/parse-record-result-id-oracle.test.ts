@@ -65,3 +65,37 @@ test("parseRecordResultId rejects malformed ids", () => {
   assert.throws(() => parseRecordResultId("orders:"));
   assert.throws(() => parseRecordResultId(":o1"));
 });
+
+test("parseRecordResultId decodes an instance-only opaque handle without inventing a connection", () => {
+  const id =
+    "pdpp://record/" +
+    Buffer.from(
+      JSON.stringify({
+        v: 1,
+        kind: "record",
+        instance_id: "inst_pairwise",
+        stream: "orders",
+        record_id: "o1",
+      }),
+    ).toString("base64url");
+  assert.deepEqual(parseRecordResultId(id), {
+    connectionId: null,
+    instanceId: "inst_pairwise",
+    stream: "orders",
+    recordId: "o1",
+  });
+  for (const instance_id of ["", "../instance", 1]) {
+    const invalid =
+      "pdpp://record/" +
+      Buffer.from(
+        JSON.stringify({
+          v: 1,
+          kind: "record",
+          instance_id,
+          stream: "orders",
+          record_id: "o1",
+        }),
+      ).toString("base64url");
+    assert.throws(() => parseRecordResultId(invalid));
+  }
+});

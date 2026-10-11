@@ -3640,6 +3640,18 @@ async function bootstrapPostgresSchemaOnce({
         ON client_event_attempts(queue_id, attempt_id);
     `);
 
+    await client.query(`CREATE TABLE IF NOT EXISTS pairwise_query_sessions (token TEXT PRIMARY KEY, state_json TEXT NOT NULL)`);
+    await client.query(`CREATE TABLE IF NOT EXISTS pairwise_identity_handles (
+      issuer TEXT NOT NULL,
+      subject_id TEXT NOT NULL,
+      client_id TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK (kind IN ('subject','grantor','instance')),
+      source_id TEXT NOT NULL,
+      internal_id TEXT NOT NULL,
+      handle TEXT NOT NULL UNIQUE,
+      PRIMARY KEY (issuer,subject_id,client_id,kind,source_id,internal_id)
+    )`);
+
     // Deployment-scoped provider app config (e.g. a shared OAuth client
     // id/secret), keyed generically by (identity_group, logical_key) --
     // never by an env-var literal. Mirrors the SQLite `provider_app_config`

@@ -1,12 +1,14 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 import { setImmediate as yieldImmediate } from "node:timers/promises";
-import { parseCoverageDiagnosticsStateSnapshot } from "./polyfill-connectors-runtime.ts";
 /**
  * PDPP Resource Server — record storage and grant-enforced query
  */
 import { getDb } from "./db.ts";
 import { assertGrantedManifestReadAuthority, assertManifestReadAuthority } from "./manifest-read-authority.ts";
+import { pairwiseInstanceIdentityEnabled } from "./pairwise-identity.ts";
+import { loadPairwiseQueryState, savePairwiseQueryState } from "./pairwise-query-sessions.ts";
+import { parseCoverageDiagnosticsStateSnapshot } from "./polyfill-connectors-runtime.ts";
 import type { ComputedLexicalFields } from "./search.ts";
 import type { ComputedSemanticEntries } from "./search-semantic.ts";
 
@@ -61,8 +63,8 @@ import {
 } from "./connection-identity.ts";
 import {
   ConnectorInstanceAdmissionError,
-  connectorInstanceLockWaitMs,
   type ConnectorInstanceWriteOwnership,
+  connectorInstanceLockWaitMs,
   withConnectorInstanceWrite,
 } from "./connector-instance-write-coordinator.ts";
 import { canonicalConnectorKey } from "./connector-key.ts";
@@ -346,6 +348,7 @@ interface ResponseRecord {
   emitted_at: string;
   expanded?: Record<string, unknown>;
   id: string;
+  instance_id?: string;
   meta?: RecordResponseMeta;
   object: "record";
   // Logical byte length of this record's current `record_json` (SQLite:
@@ -497,6 +500,7 @@ interface ReadBinding {
   connectorId: string;
   connectorInstanceId: string;
   displayName?: string | null;
+  instanceId?: string;
 }
 interface ReadWarning {
   code?: string;
@@ -7490,6 +7494,235 @@ function finalizeFanInListWindow(
  *   `count_downgraded` warning. The previous behavior (carrying whichever
  *   binding's count ran last) is removed.
  */
+interface PairwiseListState {
+  changes_since?: string;
+  checkpoints: Record<string, string>;
+  context: string;
+  data: ResponseRecord[];
+  kind: "page" | "checkpoint";
+  offset: number;
+}
+
+function canonicalPairwiseContext(value: unknown): string {
+  return JSON.stringify(value, (_key, entry: unknown) =>
+    entry && typeof entry === "object" && !Array.isArray(entry)
+      ? Object.fromEntries(Object.entries(entry).sort(([a], [b]) => a.localeCompare(b)))
+      : entry
+  );
+}
+
+async function requirePairwiseListState(
+  token: string,
+  context: string,
+  kind: PairwiseListState["kind"],
+  changesSince?: string
+): Promise<PairwiseListState> {
+  const state = await loadPairwiseQueryState(token);
+  if (
+    !(
+      state &&
+      typeof state === "object" &&
+      "context" in state &&
+      state.context === context &&
+      "kind" in state &&
+      state.kind === kind &&
+      (kind !== "page" ||
+        changesSince === undefined ||
+        ("changes_since" in state && state.changes_since === changesSince))
+    )
+  ) {
+    throw codedError("Cursor does not match this query context", "invalid_cursor");
+  }
+  return state as PairwiseListState;
+}
+
+async function queryPairwiseRecordsAcrossBindings(
+  bindings: readonly ReadBinding[],
+  stream: string,
+  grant: ReadGrant,
+  params: RequestParams,
+  manifest: ReadManifest | null
+): Promise<ListResponse> {
+  const { cursor: _cursor, changes_since: _changesSince, limit: _limit, ...queryContext } = params;
+  const context = canonicalPairwiseContext({
+    bindings: bindings.map((binding) => [binding.connectorInstanceId, binding.instanceId]).sort(),
+    grant,
+    queryContext,
+    stream,
+  });
+  const { limit } = clampRecordsPageLimit(params.limit);
+  const manifestStreamForQuery = manifest?.streams?.find((candidate) => candidate.name === stream) ?? null;
+  const order = resolveListOrder(
+    params.order,
+    validateTopLevelQueryParams({ ...queryContext, limit: params.limit }, manifestStreamForQuery)
+  );
+  const requestedProjection = Array.isArray(params.fields)
+    ? params.fields
+    : typeof params.fields === "string"
+      ? params.fields
+          .split(",")
+          .map((field) => field.trim())
+          .filter(Boolean)
+      : null;
+  const grantedFields = grant.streams.find((entry) => entry.name === stream)?.fields;
+  if (
+    requestedProjection &&
+    grantedFields &&
+    !grantedFields.includes("*") &&
+    requestedProjection.some((field) => !grantedFields.includes(field))
+  ) {
+    throw codedError("Requested fields are outside the grant", "field_not_granted");
+  }
+  let state: PairwiseListState;
+  if (typeof params.cursor === "string") {
+    state = await requirePairwiseListState(
+      params.cursor,
+      context,
+      "page",
+      typeof params.changes_since === "string" ? params.changes_since : undefined
+    );
+  } else {
+    const prior =
+      typeof params.changes_since === "string" && params.changes_since !== "beginning"
+        ? await requirePairwiseListState(params.changes_since, context, "checkpoint")
+        : null;
+    state = {
+      checkpoints: {},
+      context,
+      data: [],
+      kind: "page",
+      offset: 0,
+      ...(typeof params.changes_since === "string" ? { changes_since: params.changes_since } : {}),
+    };
+    const manifestStream = manifest?.streams?.find((candidate) => candidate.name === stream);
+    const cursorField = manifestStream?.cursor_field;
+    const sortValues = new Map<ResponseRecord, unknown>();
+    const primaryKeyValues = new Map<ResponseRecord, unknown[]>();
+    const primaryKeyFields = normalizePrimaryKey(manifestStream?.primary_key);
+    for (const binding of bindings) {
+      const target = buildBindingStorageTarget(binding.connectorId, binding.connectorInstanceId);
+      const perParams: RequestParams = {
+        ...params,
+        connection_id: undefined,
+        connector_instance_id: undefined,
+        cursor: undefined,
+        limit: "1000",
+      };
+      delete perParams.instance_id;
+      delete perParams.fields;
+      if (params.changes_since) {
+        perParams.changes_since = prior?.checkpoints[binding.connectorInstanceId] ?? "beginning";
+      }
+      if (params.changes_since) { delete perParams.order; }
+      // Sorting may need a hidden cursor field. The final response always uses the original projection.
+      const sortFields = [...primaryKeyFields, ...(cursorField ? [cursorField] : [])];
+      const queryGrant = params.changes_since
+        ? grant
+        : {
+            ...grant,
+            streams: grant.streams.map((entry) =>
+              entry.name === stream && entry.fields
+                ? {
+                    ...entry,
+                    fields: [...new Set([...entry.fields, ...sortFields])],
+                  }
+                : entry
+            ),
+          };
+      do {
+        const result = await queryRecords(target, stream, queryGrant, perParams, manifest);
+        for (const record of result.data) {
+          sortValues.set(record, cursorField ? record.data?.[cursorField] : undefined);
+          primaryKeyValues.set(
+            record,
+            primaryKeyFields.map((field) => record.data?.[field])
+          );
+          record.instance_id = binding.instanceId ?? binding.connectorInstanceId;
+          record.connection_id = binding.connectorInstanceId;
+          const fields = grant.streams.find((entry) => entry.name === stream)?.fields;
+          if (record.data) {
+            record.data = Object.fromEntries(
+              Object.entries(record.data).filter(
+                ([name]) =>
+                  (!fields || fields.includes("*") || fields.includes(name)) &&
+                  (!requestedProjection || requestedProjection.includes(name))
+              )
+            );
+          }
+          state.data.push(record);
+        }
+        if (result.next_changes_since) { state.checkpoints[binding.connectorInstanceId] = result.next_changes_since; }
+        perParams.cursor = result.next_cursor ?? undefined;
+        if (perParams.cursor) { delete perParams.changes_since; }
+      } while (perParams.cursor);
+    }
+    const direction = order === "DESC" ? -1 : 1;
+    state.data.sort((a, b) => {
+      if (!params.changes_since && cursorField) {
+        const left = sortValues.get(a);
+        const right = sortValues.get(b);
+        const missingLeft = left === undefined || left === null || left === "";
+        const missingRight = right === undefined || right === null || right === "";
+        if (missingLeft !== missingRight) { return missingLeft ? 1 : -1; }
+        const cursorDifference = compareComparableValues(left, right, getFieldSchema(manifestStream, cursorField));
+        if (cursorDifference) { return cursorDifference * direction; }
+      }
+      const instanceDifference = String(a.instance_id).localeCompare(String(b.instance_id));
+      if (instanceDifference) { return instanceDifference * direction; }
+      if (params.changes_since) { return a.id.localeCompare(b.id) * direction; }
+      const { cursor_field: _sortCursorField, ...keyManifest } = manifestStream ?? {};
+      return compareLogicalPositions(
+        { primary_key: primaryKeyValues.get(a) ?? [] },
+        { primary_key: primaryKeyValues.get(b) ?? [] },
+        keyManifest,
+        direction === 1 ? "ASC" : "DESC"
+      );
+    });
+  }
+  const data: ResponseRecord[] = [];
+  while (state.offset < state.data.length && data.length < limit) {
+    const record = state.data[state.offset++]!;
+    if (!record.deleted && state.changes_since) {
+      const binding = bindings.find((candidate) => candidate.connectorInstanceId === record.connection_id);
+      if (!binding) { throw codedError("Snapshot instance binding is missing", "invalid_cursor"); }
+      try {
+        await getRecord(
+          buildBindingStorageTarget(binding.connectorId, binding.connectorInstanceId),
+          stream,
+          record.id,
+          {
+            streams: [
+              {
+                fields: ["*"],
+                instance_ids: [binding.connectorInstanceId],
+                name: stream,
+              },
+            ],
+          },
+          manifest
+        );
+      } catch (error) {
+        if (error && typeof error === "object" && "code" in error && error.code === "not_found") { continue; }
+        throw error;
+      }
+    }
+    data.push(record);
+  }
+  const hasMore = state.offset < state.data.length;
+  const response: ListResponse = { data, has_more: hasMore, object: "list" };
+  if (hasMore) { response.next_cursor = await savePairwiseQueryState(state); }
+  else if (state.changes_since) {
+    response.next_changes_since = await savePairwiseQueryState({
+      ...state,
+      context,
+      data: [],
+      kind: "checkpoint",
+      offset: 0,
+    });
+  }
+  return response;
+}
+
 export async function queryRecordsAcrossBindings(
   bindings: readonly ReadBinding[],
   stream: string,
@@ -7505,6 +7738,10 @@ export async function queryRecordsAcrossBindings(
   });
 
   const extraWarnings = Array.isArray(opts.extraWarnings) ? opts.extraWarnings : [];
+
+  if (pairwiseInstanceIdentityEnabled()) {
+    return queryPairwiseRecordsAcrossBindings(bindings, stream, grant, requestParams, manifest);
+  }
 
   if (bindings.length === 1) {
     const binding = requireSingleBinding(bindings);
@@ -7617,6 +7854,10 @@ export async function getRecordAcrossBindings(
 ): Promise<ResponseRecord> {
   assertManifestReadAuthority(manifest?.streams ? { streams: manifest.streams } : null, stream, { actor: "internal" });
   ensureBindingsOrThrow(bindings, { connectorId: bindings?.[0]?.connectorId });
+
+  if (pairwiseInstanceIdentityEnabled() && bindings.length > 1 && !requestParams.instance_id) {
+    throw codedError("instance_id is required when the query context covers more than one instance", "invalid_request");
+  }
 
   const extraWarnings = Array.isArray(opts.extraWarnings) ? opts.extraWarnings : [];
 

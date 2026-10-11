@@ -17,6 +17,14 @@ export const BACKUP_TABLE_INVENTORY: Record<string, BackupTableInventoryEntry> =
     classification: "backup_required",
     reason: "Agent-connect handoff attempts and recovery bindings are durable authorization delivery state.",
   },
+  pairwise_query_sessions: {
+    classification: "backup_required",
+    reason: "Opaque fan-in cursors retain their query snapshots and checkpoint vectors across restart.",
+  },
+  pairwise_identity_handles: {
+    classification: "backup_required",
+    reason: "Immutable client identity handles must survive restart and restore without reassignment.",
+  },
   blob_bindings: {
     classification: "backup_required",
     reason: "Binds durable blob bytes to records and JSON paths.",

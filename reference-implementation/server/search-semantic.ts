@@ -75,6 +75,7 @@ import { intraOpNumThreadsForWorkLimit, resolveEmbeddingConcurrency } from "./em
 import { LocalTransformerExecutor } from "./local-transformer-executor.ts";
 import { assertGrantedManifestReadAuthority, assertOwnerSearchFilterAuthority } from "./manifest-read-authority.ts";
 import { OWNER_AUTH_DEFAULT_SUBJECT_ID } from "./owner-auth.ts";
+import { filterPairwiseSearchBindings, type PairwiseInstanceBinding } from "./pairwise-identity.ts";
 import {
   postgresAnySemanticProgressRow,
   postgresCountIndexableSemanticValues,
@@ -169,6 +170,7 @@ interface SemanticRequestTokenInfo {
   client_id?: string | null;
   grant?: SemanticGrant;
   grant_id?: string | null;
+  pdpp_instance_bindings?: PairwiseInstanceBinding[];
   pdpp_token_kind: "owner" | "client";
   subject_id?: string | null;
 }
@@ -3017,11 +3019,11 @@ async function rebuildSemanticBackfillInstance({
     connectorInstanceId,
     declaredFields,
     existingKeys,
+    manifest: context.manifest,
     progressJob: rebuildingJob,
     recordsToScan,
     signal,
     stream,
-    manifest: context.manifest,
   });
   log(
     `[PDPP] Semantic index rebuild completed for ${connectorId} stream='${stream}' ` +
@@ -3892,10 +3894,11 @@ export async function runSemanticSearch({
       hydrateSemanticSearchResult({ hit: hit as SearchSemanticSnapshotResult & { topField: string } }),
     listOwnerVisibleBindings: async () => {
       const connectorIds = await resolveOwnerVisibleConnectorIds();
-      return await listActiveOwnerBindingsForConnectors({
+      const bindings = await listActiveOwnerBindingsForConnectors({
         connectorIds,
         ownerSubjectId,
       });
+      return await filterPairwiseSearchBindings(bindings, tokenInfo);
     },
     listOwnerVisibleConnectorIds: () => resolveOwnerVisibleConnectorIds(),
     loadSnapshot: (snapshotId) => loadSemanticSnapshot(snapshotId),
@@ -3928,7 +3931,8 @@ export async function runSemanticSearch({
         ownerSubjectId: ownerSubjectIdForGrant,
         requestConnectionId: connectionId,
       });
-      return bindings.map((b) => ({
+      const coveredBindings = await filterPairwiseSearchBindings(bindings, tokenInfo);
+      return coveredBindings.map((b) => ({
         connectorInstanceId: b.connectorInstanceId,
         manifest: {
           ...baseManifest,

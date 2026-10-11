@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { canonicalConnectorKeyFromManifest } from "../../server/connector-key.ts";
 import { closeDb } from "../../server/db.ts";
 import { startServer } from "../../server/index.ts";
+import { getPairwiseHandle, pairwiseInstanceIdentityEnabled } from "../../server/pairwise-identity.ts";
 import { closePostgresStorage } from "../../server/postgres-storage.ts";
 import { ingestRecord } from "../../server/records.ts";
 import {
@@ -91,11 +92,12 @@ function manifest(declaration: Record<string, unknown>, connectorKey: string): R
 async function seedInstances(
   connectorManifest: Record<string, unknown>,
   connectorKey: string,
-  instanceIds: readonly string[]
+  instanceIds: readonly string[],
+  postgres = Boolean(POSTGRES_URL)
 ): Promise<void> {
   const connectorId = canonicalConnectorKeyFromManifest(connectorManifest);
   assert.equal(connectorId, connectorKey);
-  const store = POSTGRES_URL ? createPostgresConnectorInstanceStore() : createSqliteConnectorInstanceStore();
+  const store = postgres ? createPostgresConnectorInstanceStore() : createSqliteConnectorInstanceStore();
   const now = new Date().toISOString();
   await Promise.all(
     instanceIds.map((instanceId) =>
@@ -182,7 +184,10 @@ async function issueToken(
   assert.ok(callbackLocation);
   const code = new URL(callbackLocation).searchParams.get("code");
   assert.ok(code);
-  const { body, response } = await fetchJson<{ access_token: string; grant_id: string }>(`${asUrl}/oauth/token`, {
+  const { body, response } = await fetchJson<{
+    access_token: string;
+    grant_id: string;
+  }>(`${asUrl}/oauth/token`, {
     body: new URLSearchParams({
       client_id: clientId,
       code,
@@ -199,13 +204,16 @@ async function issueToken(
   return { grantId: body.grant_id, token: body.access_token };
 }
 
-export async function startPr89OAuthHarness(): Promise<Pr89OAuthHarness> {
+export async function startPr89OAuthHarness(
+  options: { databaseUrl?: string | null; lexical?: boolean } = {}
+): Promise<Pr89OAuthHarness> {
+  const postgresUrl = options.databaseUrl === undefined ? POSTGRES_URL : options.databaseUrl;
   const tempBase = join(homedir(), ".tmp");
   mkdirSync(tempBase, { recursive: true });
   const tempDir = mkdtempSync(join(tempBase, "pdpp-pr89-seam-"));
   const previousDatabaseUrl = process.env.PDPP_DATABASE_URL;
-  if (POSTGRES_URL) {
-    process.env.PDPP_DATABASE_URL = POSTGRES_URL;
+  if (postgresUrl) {
+    process.env.PDPP_DATABASE_URL = postgresUrl;
   } else {
     delete process.env.PDPP_DATABASE_URL;
   }
@@ -240,14 +248,37 @@ export async function startPr89OAuthHarness(): Promise<Pr89OAuthHarness> {
     requestStreams[0] = { ...requestStreams[0], instance_ids: [instanceId] };
     requestStreams[1] = { ...requestStreams[1], instance_ids: [optionalInstanceId] };
     const connectorManifest = manifest(declaration, connectorKey);
+    if (options.lexical) {
+      const streams = structuredClone(connectorManifest.streams) as Record<string, unknown>[];
+      streams[0] = {
+        ...streams[0],
+        query: { search: { lexical_fields: ["name"] } },
+      };
+      connectorManifest.streams = streams;
+    }
     const registered = await fetch(`${asUrl}/connectors`, {
       body: JSON.stringify(connectorManifest),
       headers: { "Content-Type": "application/json" },
       method: "POST",
     });
     assert.equal(registered.status, 201);
-    await seedInstances(connectorManifest, connectorKey, [instanceId, optionalInstanceId]);
+    await seedInstances(connectorManifest, connectorKey, [instanceId, optionalInstanceId], Boolean(postgresUrl));
     const clientId = await registerClient(asUrl);
+    if (pairwiseInstanceIdentityEnabled())
+      for (const stream of requestStreams) {
+        if (Array.isArray(stream.instance_ids))
+          stream.instance_ids = await Promise.all(
+            stream.instance_ids.map((internalId) =>
+              getPairwiseHandle({
+                kind: "instance",
+                subjectId: "owner_local",
+                clientId,
+                sourceId: String(declarationSource.id),
+                internalId: String(internalId),
+              })
+            )
+          );
+      }
     const { grantId, token } = await issueToken(asUrl, clientId, requestDetail);
     let asClosed = false;
     return {

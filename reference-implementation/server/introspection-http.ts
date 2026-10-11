@@ -2,7 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { createHash, timingSafeEqual } from "node:crypto";
-import { resolveSourceIntrospectionContext, SourceIntrospectionContextError } from "./source-introspection-context.ts";
+import { pairwiseInstanceIdentityEnabled } from "./pairwise-identity.ts";
+import {
+  resolveSourceIntrospectionContext,
+  SourceIntrospectionContextError,
+  validatePairwiseInstanceBindings,
+} from "./source-introspection-context.ts";
 
 const BASIC_AUTHORIZATION_PATTERN = /^Basic\s+([^\s]+)$/i;
 
@@ -109,6 +114,9 @@ function validateClientAuthorizationContext(info: Record<string, unknown>): Remo
     Object.assign(info, resolveSourceIntrospectionContext(info));
     return null;
   } catch (error: unknown) {
+    if (pairwiseInstanceIdentityEnabled()) {
+      return inactive("grant_invalid");
+    }
     return inactive(error instanceof SourceIntrospectionContextError ? error.code : "context.rights_missing");
   }
 }
@@ -141,6 +149,13 @@ function validatePackageAuthorizationContext(info: Record<string, unknown>): Rem
 }
 
 function validateOwnerAuthorizationContext(info: Record<string, unknown>): RemoteIntrospectionInfo | null {
+  if (pairwiseInstanceIdentityEnabled()) {
+    try {
+      validatePairwiseInstanceBindings(info.pdpp_instance_bindings, true);
+    } catch {
+      return inactive("grant_invalid");
+    }
+  }
   return isNonEmptyString(info.subject_id) ? null : inactive("context.identity_mismatch");
 }
 
