@@ -819,7 +819,7 @@ interface ServerOpts {
   browserSurfaceLeaseManager?: BrowserSurfaceLeaseManager | null;
   browserSurfaceLeaseStore?: BrowserSurfaceLeaseStore;
   browserSurfaceReadinessProbe?: BrowserSurfaceReadinessProbe;
-  cancelScheduledRun?: ((runId: string) => unknown) | null;
+  cancelScheduledRun?: ((runId: string, requestingOwnerSubjectId: string) => unknown) | null;
   cimdEnabled?: boolean;
   cimdFetchDependencies?: CimdFetchDependencies;
   clientLogoFetchDependencies?: import("./client-logo-cache.ts").FetchClientLogoOptions;
@@ -2222,9 +2222,9 @@ function getOwnerTokenSubjectId(req: ReqLike) {
 // It asks the controller first; when the controller has no active run with
 // that id, it asks the scheduler, which owns runs the controller does not
 // track.
-function createOwnerRunCancel(
+export function createOwnerRunCancel(
   controller: { cancelRun: (runId: string, ownerSubjectId: string) => Promise<RunCancelResult> } | null | undefined,
-  cancelScheduledRun: ((runId: string) => unknown) | null | undefined
+  cancelScheduledRun: ((runId: string, requestingOwnerSubjectId: string) => unknown) | null | undefined
 ): (runId: string, requestingOwnerSubjectId: string) => Promise<RunCancelResult> {
   return async (runId, requestingOwnerSubjectId) => {
     if (!controller) {
@@ -2234,7 +2234,10 @@ function createOwnerRunCancel(
     if (controllerResult.status !== "no_active_run") {
       return controllerResult;
     }
-    return ((await cancelScheduledRun?.(runId)) as RunCancelResult | null | undefined) ?? controllerResult;
+    return (
+      ((await cancelScheduledRun?.(runId, requestingOwnerSubjectId)) as RunCancelResult | null | undefined) ??
+      controllerResult
+    );
   };
 }
 
@@ -9237,7 +9240,7 @@ export async function startServer(opts: ServerOpts = {}) {
     postgresDerivedIndexMaintenanceTimer?.stop();
   }
   let schedulerManager: {
-    cancelRun: (runId: string) => { status: string; run_id: string };
+    cancelRun: (runId: string, requestingOwnerSubjectId: string) => RunCancelResult;
     refresh: () => Promise<void>;
     start: () => Promise<void>;
     stop: () => void;
@@ -9411,7 +9414,8 @@ export async function startServer(opts: ServerOpts = {}) {
     webPushConfig,
     webPushSubscriptionStore: webPushStore,
     ...(browserSurfaceControllerOptions as Record<string, unknown>),
-    cancelScheduledRun: (runId: string) => schedulerManager?.cancelRun?.(runId) ?? null,
+    cancelScheduledRun: (runId: string, requestingOwnerSubjectId: string) =>
+      schedulerManager?.cancelRun?.(runId, requestingOwnerSubjectId) ?? null,
     configuredProviderAuthConnectorKeys,
     logger,
     onScheduleMutation: () => schedulerManager?.refresh(),
@@ -9465,7 +9469,8 @@ export async function startServer(opts: ServerOpts = {}) {
   const rsApp = buildRsApp({
     // Scheduler fallback for the owner-bearer run cancel route, the same
     // callback `buildAsApp` receives for `/_ref/runs/:runId/cancel`.
-    cancelScheduledRun: (runId: string) => schedulerManager?.cancelRun?.(runId) ?? null,
+    cancelScheduledRun: (runId: string, requestingOwnerSubjectId: string) =>
+      schedulerManager?.cancelRun?.(runId, requestingOwnerSubjectId) ?? null,
     connectorInstallService,
     agentDiscoveryOrigin: referenceTopology.browserOrigin,
     asIssuer: configuredAsIssuer || asPublicUrl,
@@ -10214,6 +10219,38 @@ function logScheduleRefreshSkip(
   );
 }
 
+// Direct scheduler runs share the manager's admitted owner. Keep authorization
+// beside the registration so every caller checks before the cancellation effect.
+export function createScheduledRunCancellationRegistry(ownerSubjectId: string) {
+  const directRunCancellations = new Map<string, { runId: string; cancel: () => void }>();
+
+  function registerRunCancellation(registration: { runId: string; cancel: () => void }) {
+    directRunCancellations.set(registration.runId, registration);
+    return () => {
+      if (directRunCancellations.get(registration.runId) === registration) {
+        directRunCancellations.delete(registration.runId);
+      }
+    };
+  }
+
+  function cancelRun(runId: string, requestingOwnerSubjectId: string): RunCancelResult {
+    const registration = directRunCancellations.get(runId);
+    if (!registration) {
+      return { run_id: runId, status: "no_active_run" };
+    }
+    if (requestingOwnerSubjectId !== ownerSubjectId) {
+      throw Object.assign(new Error(`Run ${runId} does not belong to the requesting owner.`), {
+        code: "run_owner_mismatch",
+        http_status: 403,
+      });
+    }
+    registration.cancel();
+    return { run_id: runId, status: "cancel_requested" };
+  }
+
+  return { cancelRun, registerRunCancellation };
+}
+
 function createReferenceSchedulerManager({
   connectionScopedRunEnvResolver = buildConnectionScopedRunEnvResolver(),
   controller,
@@ -10246,28 +10283,10 @@ function createReferenceSchedulerManager({
   webPushConfig?: WebPushConfig;
   webPushSubscriptionStore?: WebPushSubscriptionStore;
 }) {
-  const directRunCancellations = new Map<string, { runId: string; cancel: () => void }>();
+  const { cancelRun, registerRunCancellation } = createScheduledRunCancellationRegistry(ownerSubjectId);
   let scheduler: import("../runtime/scheduler.ts").Scheduler | null = null;
   let stopped = false;
   let refreshChain = Promise.resolve();
-
-  function registerRunCancellation(registration: { runId: string; cancel: () => void }) {
-    directRunCancellations.set(registration.runId, registration);
-    return () => {
-      if (directRunCancellations.get(registration.runId) === registration) {
-        directRunCancellations.delete(registration.runId);
-      }
-    };
-  }
-
-  function cancelRun(runId: string) {
-    const registration = directRunCancellations.get(runId);
-    if (!registration) {
-      return { run_id: runId, status: "no_active_run" };
-    }
-    registration.cancel();
-    return { run_id: runId, status: "cancel_requested" };
-  }
 
   // The SAME connection-scoped setup-material resolver the controller uses for
   // manual runs, bound to the scheduler's owner subject. Scheduled and manual

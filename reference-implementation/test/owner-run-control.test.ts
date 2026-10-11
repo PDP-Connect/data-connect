@@ -33,13 +33,14 @@ import pino from "pino";
 
 import { listSpineEventsPage } from "../lib/spine.ts";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
-import { startServer } from "../server/index.ts";
+import { createOwnerRunCancel, createScheduledRunCancellationRegistry, startServer } from "../server/index.ts";
 import { resolveRunControlActor, restoreRunPresentationForOwner } from "../server/routes/_run-control.ts";
 import { buildRunCancelHandler } from "../server/routes/run-cancel.ts";
 import { buildRunInteractionHandler } from "../server/routes/run-interaction.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
 import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
 import { resolveCredentialFreeFixtureRunEnv } from "./helpers/credential-free-run-fixture.ts";
+import { runControlAuditStub } from "./helpers/run-control-audit-stub.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REFERENCE_IMPL_DIR = join(__dirname, "..");
@@ -599,6 +600,80 @@ test("a client (non-owner) bearer and a missing bearer cannot reach the run cont
     await endRun(asUrl, runId, interactionId);
   });
 });
+
+for (const surface of ["owner_bearer", "owner_session"] as const) {
+  test(`scheduler-only cancellation authorizes the ${surface} owner before invoking cancellation`, async () => {
+    const runId = "run_scheduler_only";
+    const registry = createScheduledRunCancellationRegistry(OWNER_SUBJECT_ID);
+    let cancellationCalls = 0;
+    const unregister = registry.registerRunCancellation({
+      cancel: () => {
+        cancellationCalls += 1;
+      },
+      runId,
+    });
+    const controllerCalls: { ownerSubjectId: string; runId: string }[] = [];
+    const controller = {
+      cancelRun: (requestedRunId: string, ownerSubjectId: string) => {
+        controllerCalls.push({ ownerSubjectId, runId: requestedRunId });
+        return Promise.resolve({ run_id: requestedRunId, status: "no_active_run" });
+      },
+    };
+    const auditEvents: Record<string, unknown>[] = [];
+    let statusCode = 0;
+    let responseBody: unknown;
+    const res = {
+      json(body: unknown) {
+        responseBody = body;
+        return res;
+      },
+      status(code: number) {
+        statusCode = code;
+        return res;
+      },
+    };
+    const handler = buildRunCancelHandler({
+      ...runControlAuditStub(auditEvents),
+      cancelRun: createOwnerRunCancel(controller, registry.cancelRun),
+      controller,
+      handleError: (_res: unknown, err: unknown) => {
+        assert.ok(err instanceof Error);
+        const rejection = err as Error & { code: string; http_status: number };
+        assert.equal(rejection.code, "run_owner_mismatch");
+        assert.equal(rejection.http_status, 403);
+        res.status(rejection.http_status).json({ error: { code: rejection.code } });
+      },
+      ownerSubjectId: OWNER_SUBJECT_ID,
+      pdppError: () => assert.fail("unexpected typed rejection"),
+    }, surface);
+    const request = (subjectId: string) => ({
+      ownerSession: { sub: subjectId },
+      params: { runId },
+      tokenInfo: { pdpp_token_kind: "owner", subject_id: subjectId },
+    });
+
+    await handler(request("another_owner"), res);
+    assert.equal(statusCode, 403);
+    assert.deepEqual(responseBody, { error: { code: "run_owner_mismatch" } });
+    assert.equal(cancellationCalls, 0, "a different owner cannot invoke the registered cancellation");
+    assert.equal(auditEvents[0]?.status, "failed");
+
+    // Rejection leaves the same registration available to its admitted owner.
+    await handler(request(OWNER_SUBJECT_ID), res);
+    assert.equal(statusCode, 202);
+    assert.deepEqual(responseBody, { object: "run_cancel_ack", run_id: runId, status: "cancel_requested" });
+    assert.equal(cancellationCalls, 1);
+    assert.equal(auditEvents[1]?.status, "succeeded");
+    assert.deepEqual(controllerCalls, [
+      { ownerSubjectId: "another_owner", runId },
+      { ownerSubjectId: OWNER_SUBJECT_ID, runId },
+    ]);
+
+    unregister();
+    assert.deepEqual(registry.cancelRun(runId, "another_owner"), { run_id: runId, status: "no_active_run" });
+    assert.equal(cancellationCalls, 1);
+  });
+}
 
 test("cancel rejects a mismatched owner before active presentation cleanup", async () => {
   const actor = resolveRunControlActor("owner_bearer", {
