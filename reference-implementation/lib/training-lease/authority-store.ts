@@ -184,6 +184,13 @@ interface AdvanceErasureEntry {
   effective_at: number | null;
 }
 
+interface HeldGrantEndEntry {
+  t: "hd_end";
+  id: string;
+  grant_id: string;
+  at: number;
+}
+
 /**
  * Per-grant index over the shared authority journal. Each node keeps one and
  * reads only the bytes appended since its last read. Entry types this store
@@ -191,10 +198,12 @@ interface AdvanceErasureEntry {
  * which bound lease issuance for the acquisition copies they cover (B3).
  */
 class JournalIndex {
-  readonly #reader: JournalReader<JournalEntry | ErasureEntry | AdvanceErasureEntry>;
+  readonly #reader: JournalReader<JournalEntry | ErasureEntry | AdvanceErasureEntry | HeldGrantEndEntry>;
   readonly grants = new Map<string, GrantFacts>();
   /** First erasure of each grant's copy, by journal sequence. */
-  readonly erasures = new Map<string, { seq: number; at: number; scheduled: boolean }>();
+  readonly erasures = new Map<string, { seq: number; at: number }>();
+  readonly advances = new Map<string, { seq: number; at: number | null }>();
+  readonly ends = new Map<string, number>();
   /** B3: latest `exp` of a returnable lease naming each acquisition grant, before its erasure. */
   readonly acquisitionMaxExp = new Map<string, number>();
   /** Sequence numbers, only for entries this node is waiting on (see watch). */
@@ -228,16 +237,28 @@ class JournalIndex {
     this.#reader.refresh((e, seq) => this.#apply(e, seq));
   }
 
-  #apply(e: JournalEntry | ErasureEntry | AdvanceErasureEntry, seq: number): void {
+  advanceDeadline(grantId: string): number | null {
+    const advance = this.advances.get(grantId);
+    if (!advance) return null;
+    const at = Math.min(advance.at ?? Number.POSITIVE_INFINITY, this.ends.get(grantId) ?? Number.POSITIVE_INFINITY);
+    return Number.isFinite(at) ? at : null;
+  }
+
+  #apply(e: JournalEntry | ErasureEntry | AdvanceErasureEntry | HeldGrantEndEntry, seq: number): void {
     if (this.#watched.has(e.id)) {
       this.#watched.set(e.id, seq);
     }
-    if (e.t === "erase" || e.t === "hd_advance") {
-      const at = e.t === "erase" ? e.at : e.effective_at;
+    if (e.t === "hd_advance") {
+      if (!this.advances.has(e.grant_id)) this.advances.set(e.grant_id, { seq, at: e.effective_at });
+      return;
+    }
+    if (e.t === "hd_end") {
+      if (!this.ends.has(e.grant_id)) this.ends.set(e.grant_id, e.at);
+      return;
+    }
+    if (e.t === "erase") {
       const prior = this.erasures.get(e.grant_id);
-      if (at !== null && (!prior || at < prior.at || (e.t === "erase" && prior.scheduled))) {
-        this.erasures.set(e.grant_id, { at: Math.min(at, prior?.at ?? at), seq, scheduled: e.t === "hd_advance" });
-      }
+      if (!prior) this.erasures.set(e.grant_id, { at: e.at, seq });
       return;
     }
     if (e.t !== "create" && e.t !== "issue" && e.t !== "tombstone") {
@@ -255,7 +276,8 @@ class JournalIndex {
         // returned (post-append check), so it does not move that grant's T.
         for (const a of e.acq ?? []) {
           const erasure = this.erasures.get(a);
-          if (!erasure || (erasure.scheduled && e.exp_ms <= erasure.at)) {
+          const advanceBy = this.advanceDeadline(a);
+          if (!erasure && (advanceBy === null || e.exp_ms <= advanceBy)) {
             this.acquisitionMaxExp.set(a, Math.max(this.acquisitionMaxExp.get(a) ?? 0, e.exp_ms));
           }
         }
@@ -477,13 +499,14 @@ export class TrainingAuthorityStore {
           }
           const eligible = (requestedAcq ?? [input.grantId]).filter((a) => {
             const erasure = this.#journal.erasures.get(a);
-            return !erasure || (erasure.scheduled && now < erasure.at);
+            const advanceBy = this.#journal.advanceDeadline(a);
+            return !erasure && (advanceBy === null || now < advanceBy);
           });
           if (eligible.length === 0) {
             failure = "acquisition_erased";
             return;
           }
-          const effectiveAt = Math.min(...eligible.map((a) => this.#journal.erasures.get(a)?.at ?? Number.POSITIVE_INFINITY));
+          const effectiveAt = Math.min(...eligible.map((a) => this.#journal.advanceDeadline(a) ?? Number.POSITIVE_INFINITY));
           const iatS = Math.floor(now / 1000);
           const expS = Math.floor(
             Math.min(
@@ -569,10 +592,8 @@ export class TrainingAuthorityStore {
     // The lease is not returned; the caller may ask again for the rest.
     if ((c.acq ?? [input.grantId]).some((a) => {
       const erasure = this.#journal.erasures.get(a);
-      return erasure && (
-        (erasure.scheduled && c.expS * 1000 > erasure.at) ||
-        (erasure.seq < mine && (!erasure.scheduled || erasure.at <= now))
-      );
+      const advanceBy = this.#journal.advanceDeadline(a);
+      return (advanceBy !== null && c.expS * 1000 > advanceBy) || (erasure && erasure.seq < mine);
     })) {
       return { ok: false, reason: "acquisition_erased" };
     }
@@ -683,7 +704,7 @@ export class TrainingAuthorityStore {
   acquisitionStopsBy(acquisitionGrantId: string): { stopsByMs: number | null; erasedAtMs: number | null } {
     this.#journal.refresh();
     return {
-      erasedAtMs: this.#journal.erasures.get(acquisitionGrantId)?.at ?? null,
+      erasedAtMs: this.#journal.erasures.get(acquisitionGrantId)?.at ?? this.#journal.advanceDeadline(acquisitionGrantId),
       stopsByMs: this.#journal.acquisitionMaxExp.get(acquisitionGrantId) ?? null,
     };
   }

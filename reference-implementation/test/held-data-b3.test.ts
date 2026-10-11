@@ -19,7 +19,7 @@ import { HOUR, MIN, T0, tempDir } from "./helpers/held-data-sim.ts";
 
 const ISS = "https://as.example";
 
-function setup(hooks: { afterIssue?: () => void } = {}) {
+function setup(hooks: { afterIssue?: () => void; heldExpiresInMs?: number } = {}) {
   const dir = tempDir("pdpp-held-b3-");
   let t = T0;
   const journalPath = join(dir, "authority.journal");
@@ -35,7 +35,7 @@ function setup(hooks: { afterIssue?: () => void } = {}) {
   for (const g of ["G1", "G3"]) {
     held.registerGrant({ grantId: g, clientId: "app", subjectId: "owner", confidential: false, streams: ["messages"], expiresAtMs: null });
   }
-  held.registerGrant({ grantId: "G2", clientId: "app", subjectId: "owner", confidential: false, trainingOnly: true, streams: ["messages"], expiresAtMs: T0 + 30 * 24 * HOUR });
+  held.registerGrant({ grantId: "G2", clientId: "app", subjectId: "owner", confidential: false, trainingOnly: true, streams: ["messages"], expiresAtMs: T0 + (hooks.heldExpiresInMs ?? 30 * 24 * HOUR) });
   leases.createAuthority({ clientId: "app", grantId: "G2", subjectId: "owner", trainingExpiresAtMs: T0 + 30 * 24 * HOUR });
   return {
     held,
@@ -146,10 +146,12 @@ describe("lane F: advance elections bound processing authority", () => {
   });
 
   it("an advance instruction on the lease's own copy also constrains an implicit acquisition", () => {
-    const s = setup();
+    const s = setup({ heldExpiresInMs: 15 * MIN });
     s.held.electAdvance("G2");
-    assert.equal(s.leases.issueLease({ grantId: "G2", clientId: "app" }).ok, true);
-    s.held.requestErasure({ grantId: "G2", origin: "owner_election" });
+    const issued = s.leases.issueLease({ grantId: "G2", clientId: "app" });
+    assert.ok(issued.ok);
+    assert.equal(issued.claims.exp * 1000, T0 + 15 * MIN);
+    s.advance(15 * MIN);
     const denied = s.leases.issueLease({ grantId: "G2", clientId: "app" });
     assert.equal(denied.ok, false);
     assert.ok(!denied.ok && denied.reason === "acquisition_erased");
