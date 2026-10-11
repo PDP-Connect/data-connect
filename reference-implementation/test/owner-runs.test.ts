@@ -32,6 +32,7 @@ import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { startServer } from "../server/index.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
 import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
+import { assertRunResponseContract } from "./helpers/run-contract.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REFERENCE_IMPL_DIR = join(__dirname, "..");
@@ -61,7 +62,9 @@ interface JsonResult {
 async function fetchJson(url: string, opts: RequestInit = {}): Promise<JsonResult> {
   const resp = await fetch(url, opts);
   const text = await resp.text();
-  return { body: text ? (JSON.parse(text) as Record<string, unknown>) : {}, status: resp.status };
+  const body = text ? (JSON.parse(text) as Record<string, unknown>) : {};
+  assertRunResponseContract(url, opts.method ?? "GET", resp.status, body);
+  return { body, status: resp.status };
 }
 
 async function withServer(fn: (ctx: { asUrl: string; rsUrl: string }) => Promise<void>): Promise<void> {

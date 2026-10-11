@@ -41,6 +41,8 @@ import { createSqliteConnectorInstanceStore } from "../server/stores/connector-i
 import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
 import { resolveCredentialFreeFixtureRunEnv } from "./helpers/credential-free-run-fixture.ts";
 
+import { assertRunResponseContract } from "./helpers/run-contract.ts";
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REFERENCE_IMPL_DIR = join(__dirname, "..");
 const OWNER_SUBJECT_ID = "owner_local";
@@ -82,8 +84,10 @@ interface SpineEventLike {
 async function fetchJson(url: string, opts: RequestInit = {}): Promise<JsonResult> {
   const resp = await fetch(url, opts);
   const text = await resp.text();
+  const body = text ? (JSON.parse(text) as Record<string, unknown>) : {};
+  assertRunResponseContract(url, opts.method ?? "GET", resp.status, body);
   return {
-    body: text ? (JSON.parse(text) as Record<string, unknown>) : {},
+    body,
     headers: resp.headers,
     status: resp.status,
   };

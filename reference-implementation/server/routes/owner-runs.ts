@@ -24,7 +24,7 @@
 // how it ended, stop it, or answer the OTP prompt that blocks it.
 
 import { OWNER_RUN_LINK_BASE } from "../run-status-read-model.ts";
-import type { MiddlewareHandler } from "./_route-contract.ts";
+import type { MiddlewareHandler, RouteArg } from "./_route-contract.ts";
 import { buildRunStatusHandler, type RunStatusHandlerContext } from "./ref-run-status.ts";
 import { buildSpineCorrelationListHandler, type MountRefSpineCorrelationsContext } from "./ref-spine-correlations.ts";
 import { buildTimelineHandler, type TimelineHandlerContext } from "./ref-spine-timelines.ts";
@@ -39,8 +39,8 @@ type RouteHandler =
   | ReturnType<typeof buildRunInteractionHandler>;
 
 interface AppLike {
-  get: (path: string, ...handlers: (MiddlewareHandler | RouteHandler)[]) => AppLike;
-  post: (path: string, ...handlers: (MiddlewareHandler | RouteHandler)[]) => AppLike;
+  get: (path: string, ...handlers: RouteArg<RouteHandler>[]) => AppLike;
+  post: (path: string, ...handlers: RouteArg<RouteHandler>[]) => AppLike;
 }
 
 export interface MountOwnerRunsContext
@@ -62,22 +62,37 @@ export interface MountOwnerRunsContext
 }
 
 export function mountOwnerRuns(app: AppLike, ctx: MountOwnerRunsContext): void {
-  app.get("/v1/owner/runs", ctx.requireToken, ctx.requireOwner, buildSpineCorrelationListHandler(ctx, "run"));
-  app.get("/v1/owner/runs/:runId", ctx.requireToken, ctx.requireOwner, buildRunStatusHandler(ctx, OWNER_RUN_LINK_BASE));
+  app.get(
+    "/v1/owner/runs",
+    { contract: "ownerListRuns" },
+    ctx.requireToken,
+    ctx.requireOwner,
+    buildSpineCorrelationListHandler(ctx, "run")
+  );
+  app.get(
+    "/v1/owner/runs/:runId",
+    { contract: "ownerGetRunStatus" },
+    ctx.requireToken,
+    ctx.requireOwner,
+    buildRunStatusHandler(ctx, OWNER_RUN_LINK_BASE)
+  );
   app.get(
     "/v1/owner/runs/:runId/timeline",
+    { contract: "ownerGetRunTimeline" },
     ctx.requireToken,
     ctx.requireOwner,
     buildTimelineHandler(ctx, "run", "runId", "Run timeline not found")
   );
   app.post(
     "/v1/owner/runs/:runId/cancel",
+    { contract: "ownerCancelRun" },
     ctx.requireToken,
     ctx.requireOwner,
     buildRunCancelHandler(ctx, "owner_bearer")
   );
   app.post(
     "/v1/owner/runs/:runId/interaction",
+    { contract: "ownerRunInteraction" },
     ctx.requireToken,
     ctx.requireOwner,
     buildRunInteractionHandler(ctx, "owner_bearer")

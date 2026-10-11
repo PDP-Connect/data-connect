@@ -21,7 +21,7 @@ import {
   type RefSpineCorrelationPage,
 } from "../../operations/ref-spine-correlations-list/index.ts";
 import { isInternalConnectorId } from "../connector-key.ts";
-import type { MiddlewareHandler } from "./_route-contract.ts";
+import type { MiddlewareHandler, RouteArg } from "./_route-contract.ts";
 
 // Express-shaped surface, structurally typed to avoid pulling in the
 // transport's `.js` ambient types. Matches the pattern established in
@@ -38,7 +38,7 @@ interface RouteResponse {
 type RouteHandler = (req: RouteRequest, res: RouteResponse) => unknown;
 
 interface AppLike {
-  get: (path: string, ...handlers: (MiddlewareHandler | RouteHandler)[]) => AppLike;
+  get: (path: string, ...handlers: RouteArg<RouteHandler>[]) => AppLike;
 }
 
 export interface MountRefSpineCorrelationsContext {
@@ -120,7 +120,8 @@ function mountKind(
   path: string,
   kind: RefSpineCorrelationKind
 ): void {
-  app.get(path, ctx.requireOwnerSession, buildSpineCorrelationListHandler(ctx, kind));
+  const contract = kind === "run" ? [{ contract: "refListRuns" }] : [];
+  app.get(path, ...contract, ctx.requireOwnerSession, buildSpineCorrelationListHandler(ctx, kind));
 }
 
 // Spine correlation list routes delegate envelope assembly to the canonical

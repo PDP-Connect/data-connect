@@ -25,7 +25,7 @@ import {
   type RefSpineEventsPageInputPagination,
   type RefSpineRunTerminalStatus,
 } from "../../operations/ref-spine-events-page/index.ts";
-import type { MiddlewareHandler, PdppErrorFn } from "./_route-contract.ts";
+import type { MiddlewareHandler, PdppErrorFn, RouteArg } from "./_route-contract.ts";
 
 // Express-shaped surface, structurally typed to avoid pulling in the
 // transport's `.js` ambient types. Matches the pattern established in
@@ -43,7 +43,7 @@ interface RouteResponse {
 type RouteHandler = (req: RouteRequest, res: RouteResponse) => unknown | Promise<unknown>;
 
 interface AppLike {
-  get: (path: string, ...handlers: (MiddlewareHandler | RouteHandler)[]) => AppLike;
+  get: (path: string, ...handlers: RouteArg<RouteHandler>[]) => AppLike;
 }
 
 interface TimelinePageOptions {
@@ -172,7 +172,13 @@ function mountTimeline(
   idParamKey: string,
   notFoundMessage: string
 ): void {
-  app.get(routePath, ctx.requireOwnerSession, buildTimelineHandler(ctx, kind, idParamKey, notFoundMessage));
+  const contract = kind === "run" ? [{ contract: "refGetRunTimeline" }] : [];
+  app.get(
+    routePath,
+    ...contract,
+    ctx.requireOwnerSession,
+    buildTimelineHandler(ctx, kind, idParamKey, notFoundMessage)
+  );
 }
 
 export function mountRefTraceTimeline(app: AppLike, ctx: MountRefSpineTimelinesContext): void {
