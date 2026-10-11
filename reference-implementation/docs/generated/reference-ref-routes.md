@@ -68,7 +68,16 @@ Generated from `packages/reference-contract/src/reference/`. Reference-designate
 | **POST** | `/_ref/connections/{connectorInstanceId}/revoke` | `refRevokeConnection` | Owner-session: revoke one configured connection, addressed by `connection_id`. Flips the connection to status `revoked` so no future run/ingest lands; already-collected records, grants, spine evidence, device rows, and sibling connections are untouched (zero cascade). A double-revoke returns a typed `connector_instance_inactive` (400). Owner-session only (operator console); shares the same connector-instance store soft-flip primitive and audit event type as the owner-agent bearer `ownerRevokeConnection` route under a cookie auth adapter. |
 | **POST** | `/_ref/connections/{connectorInstanceId}/reactivate` | `refReactivateConnection` | Owner-session: reactivate one revoked connection, addressed by `connection_id`. The clean inverse of `refRevokeConnection`: flips the connection from `revoked` back to `active`, clears `revoked_at`, and resumes future collection. Already-collected records, grants, schedule, and audit spine are untouched (zero cascade). A non-revoked (active/draft) connection returns `connector_instance_not_revoked` (409). A foreign/unknown id returns `connector_instance_not_found` (404). Owner-session only (operator console); shares the same connector-instance store soft-flip primitive and audit event type as the owner-agent bearer `ownerReactivateConnection` route under a cookie auth adapter. |
 | **DELETE** | `/_ref/connections/{connectorInstanceId}` | `refDeleteConnection` | Owner-session: DESTRUCTIVELY delete one configured connection, addressed by `connection_id`. Erases exactly that connection's records, history, blobs, search indices, and attention, deletes its schedule, clears its device source-instance back-reference, and removes the connector_instances row — keyed strictly on one connection_id, never widening to connector_id (sibling connections untouched). A connection with an in-flight run is REFUSED (`connection_run_active` 409), and a default-account binding is REFUSED (`default_account_delete_unsupported` 409). A repeat/unknown/foreign-owner id returns a typed `connector_instance_not_found` (404). PRESERVES the audit spine (appending an owner_agent.connection.delete event), disclosure grants, and the device edge. Owner-session only (operator console); shares the same `deleteConnection` cascade and audit event type as the owner-agent bearer `ownerDeleteConnection` route under a cookie auth adapter. |
-| **POST** | `/_ref/runs/{runId}/interaction` | `refRunInteraction` | Owner-only control surface: answer the current pending interaction for an active controller-managed run. Reference-only; not part of the public PDPP API. |
+| **GET** | `/_ref/runs` | `refListRuns` | List owner-visible runs with correlation filters and pagination. |
+| **GET** | `/_ref/runs/{runId}` | `refGetRunStatus` | Read run status, failure summary, and timeline link. |
+| **GET** | `/_ref/runs/{runId}/timeline` | `refGetRunTimeline` | Read paginated, redacted run events and terminal status. |
+| **POST** | `/_ref/runs/{runId}/cancel` | `refCancelRun` | Request cancellation of an active run. |
+| **POST** | `/_ref/runs/{runId}/interaction` | `refRunInteraction` | Answer the pending interaction without echoing submitted data. |
+| **GET** | `/v1/owner/runs` | `ownerListRuns` | List owner-visible runs with correlation filters and pagination. |
+| **GET** | `/v1/owner/runs/{runId}` | `ownerGetRunStatus` | Read run status, failure summary, and timeline link. |
+| **GET** | `/v1/owner/runs/{runId}/timeline` | `ownerGetRunTimeline` | Read paginated, redacted run events and terminal status. |
+| **POST** | `/v1/owner/runs/{runId}/cancel` | `ownerCancelRun` | Request cancellation of an active run. |
+| **POST** | `/v1/owner/runs/{runId}/interaction` | `ownerRunInteraction` | Answer the pending interaction without echoing submitted data. |
 | **GET** | `/_ref/records/timeline` | `refRecordsTimeline` | Server-backed cross-connector recent-record feed for the Records > Timeline UI. |
 | **GET** | `/_ref/dataset/summary` | `refDatasetSummary` | Projection-backed dataset summary: record counts, retained-history bytes, timespan bounds, top connectors, and freshness metadata. |
 | **GET** | `/_ref/dataset/summary/streams` | `refDatasetSummaryStreams` | Per-(connector_id, stream) rows from the dataset-summary projection. NULL/dirty time bounds pass through honestly. |
@@ -1267,11 +1276,106 @@ Owner-session: DESTRUCTIVELY delete one configured connection, addressed by `con
 - `404` — Not found
 - `409` — Conflict (e.g. run_already_active)
 
+## refListRuns
+
+`GET /_ref/runs`
+
+List owner-visible runs with correlation filters and pagination.
+
+### Query parameters
+
+- `client_id` — string
+- `connector_id` — string
+- `cursor` — string
+- `grant_id` — string
+- `q` — string
+- `since` — string
+- `source_id` — string
+- `source_kind` — string
+- `status` — string
+- `until` — string
+- `limit` — string|number
+
+### Responses
+
+- `200` — JSON body
+- `400` — Invalid request (invalid_request, invalid_status, or invalid_cursor)
+- `401` — Owner session required (HTML requests redirect to login)
+- `403` — Permission denied (including run_owner_mismatch)
+- `404` — Not found (not_found or no_active_run)
+- `409` — Conflict: api_error with run_already_terminal, no_pending_interaction, or interaction_id_mismatch
+- `500` — Unexpected server error
+
+## refGetRunStatus
+
+`GET /_ref/runs/{runId}`
+
+Read run status, failure summary, and timeline link.
+
+### Path parameters
+
+- `runId` — string
+
+### Responses
+
+- `200` — JSON body
+- `400` — Invalid request (invalid_request, invalid_status, or invalid_cursor)
+- `401` — Owner session required (HTML requests redirect to login)
+- `403` — Permission denied (including run_owner_mismatch)
+- `404` — Not found (not_found or no_active_run)
+- `409` — Conflict: api_error with run_already_terminal, no_pending_interaction, or interaction_id_mismatch
+- `500` — Unexpected server error
+
+## refGetRunTimeline
+
+`GET /_ref/runs/{runId}/timeline`
+
+Read paginated, redacted run events and terminal status.
+
+### Query parameters
+
+- `cursor` — string
+- `limit` — any
+
+### Path parameters
+
+- `runId` — string
+
+### Responses
+
+- `200` — JSON body
+- `400` — Invalid request (invalid_request, invalid_status, or invalid_cursor)
+- `401` — Owner session required (HTML requests redirect to login)
+- `403` — Permission denied (including run_owner_mismatch)
+- `404` — Not found (not_found or no_active_run)
+- `409` — Conflict: api_error with run_already_terminal, no_pending_interaction, or interaction_id_mismatch
+- `500` — Unexpected server error
+
+## refCancelRun
+
+`POST /_ref/runs/{runId}/cancel`
+
+Request cancellation of an active run.
+
+### Path parameters
+
+- `runId` — string
+
+### Responses
+
+- `202` — JSON body
+- `400` — Invalid request (invalid_request, invalid_status, or invalid_cursor)
+- `401` — Owner session required (HTML requests redirect to login)
+- `403` — Permission denied (including run_owner_mismatch)
+- `404` — Not found (not_found or no_active_run)
+- `409` — Conflict: api_error with run_already_terminal, no_pending_interaction, or interaction_id_mismatch
+- `500` — Unexpected server error
+
 ## refRunInteraction
 
 `POST /_ref/runs/{runId}/interaction`
 
-Owner-only control surface: answer the current pending interaction for an active controller-managed run. Reference-only; not part of the public PDPP API.
+Answer the pending interaction without echoing submitted data.
 
 ### Path parameters
 
@@ -1280,16 +1384,141 @@ Owner-only control surface: answer the current pending interaction for an active
 ### Request body
 
 `application/json`
-- `data` — object
+- `data` — object|null
 - `interaction_id` (required) — string
 - `status` (required) — enum `success | cancelled`
 
 ### Responses
 
-- `202` — Accepted
-- `400` — Invalid request
-- `404` — Not found
-- `409` — Conflict (e.g. run_already_active)
+- `202` — JSON body
+- `400` — Invalid request (invalid_request, invalid_status, or invalid_cursor)
+- `401` — Owner session required (HTML requests redirect to login)
+- `403` — Permission denied (including run_owner_mismatch)
+- `404` — Not found (not_found or no_active_run)
+- `409` — Conflict: api_error with run_already_terminal, no_pending_interaction, or interaction_id_mismatch
+- `500` — Unexpected server error
+
+## ownerListRuns
+
+`GET /v1/owner/runs`
+
+List owner-visible runs with correlation filters and pagination.
+
+### Query parameters
+
+- `client_id` — string
+- `connector_id` — string
+- `cursor` — string
+- `grant_id` — string
+- `q` — string
+- `since` — string
+- `source_id` — string
+- `source_kind` — string
+- `status` — string
+- `until` — string
+- `limit` — string|number
+
+### Responses
+
+- `200` — JSON body
+- `400` — Invalid request (invalid_request, invalid_status, or invalid_cursor)
+- `401` — Bearer authentication required
+- `403` — Permission denied (including run_owner_mismatch)
+- `404` — Not found (not_found or no_active_run)
+- `409` — Conflict: api_error with run_already_terminal, no_pending_interaction, or interaction_id_mismatch
+- `500` — Unexpected server error
+
+## ownerGetRunStatus
+
+`GET /v1/owner/runs/{runId}`
+
+Read run status, failure summary, and timeline link.
+
+### Path parameters
+
+- `runId` — string
+
+### Responses
+
+- `200` — JSON body
+- `400` — Invalid request (invalid_request, invalid_status, or invalid_cursor)
+- `401` — Bearer authentication required
+- `403` — Permission denied (including run_owner_mismatch)
+- `404` — Not found (not_found or no_active_run)
+- `409` — Conflict: api_error with run_already_terminal, no_pending_interaction, or interaction_id_mismatch
+- `500` — Unexpected server error
+
+## ownerGetRunTimeline
+
+`GET /v1/owner/runs/{runId}/timeline`
+
+Read paginated, redacted run events and terminal status.
+
+### Query parameters
+
+- `cursor` — string
+- `limit` — any
+
+### Path parameters
+
+- `runId` — string
+
+### Responses
+
+- `200` — JSON body
+- `400` — Invalid request (invalid_request, invalid_status, or invalid_cursor)
+- `401` — Bearer authentication required
+- `403` — Permission denied (including run_owner_mismatch)
+- `404` — Not found (not_found or no_active_run)
+- `409` — Conflict: api_error with run_already_terminal, no_pending_interaction, or interaction_id_mismatch
+- `500` — Unexpected server error
+
+## ownerCancelRun
+
+`POST /v1/owner/runs/{runId}/cancel`
+
+Request cancellation of an active run.
+
+### Path parameters
+
+- `runId` — string
+
+### Responses
+
+- `202` — JSON body
+- `400` — Invalid request (invalid_request, invalid_status, or invalid_cursor)
+- `401` — Bearer authentication required
+- `403` — Permission denied (including run_owner_mismatch)
+- `404` — Not found (not_found or no_active_run)
+- `409` — Conflict: api_error with run_already_terminal, no_pending_interaction, or interaction_id_mismatch
+- `500` — Unexpected server error
+
+## ownerRunInteraction
+
+`POST /v1/owner/runs/{runId}/interaction`
+
+Answer the pending interaction without echoing submitted data.
+
+### Path parameters
+
+- `runId` — string
+
+### Request body
+
+`application/json`
+- `data` — object|null
+- `interaction_id` (required) — string
+- `status` (required) — enum `success | cancelled`
+
+### Responses
+
+- `202` — JSON body
+- `400` — Invalid request (invalid_request, invalid_status, or invalid_cursor)
+- `401` — Bearer authentication required
+- `403` — Permission denied (including run_owner_mismatch)
+- `404` — Not found (not_found or no_active_run)
+- `409` — Conflict: api_error with run_already_terminal, no_pending_interaction, or interaction_id_mismatch
+- `500` — Unexpected server error
 
 ## refRecordsTimeline
 

@@ -17,6 +17,8 @@ const checkedGeneratedPaths = [
   "src/lib/platform/registry.generated.ts",
 ];
 
+run("node", ["scripts/reference-contract-artifacts.mjs", "--check"]);
+
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, { cwd: root, stdio: "inherit", ...options });
   if (result.status !== 0) {

@@ -22,7 +22,7 @@
 //
 // See openspec/changes/add-owner-run-cancellation-control.
 
-import type { MiddlewareHandler, PdppErrorFn } from "./_route-contract.ts";
+import type { MiddlewareHandler, PdppErrorFn, RouteArg } from "./_route-contract.ts";
 import {
   decodeRunIdParam,
   emitRunControlAuditSafely,
@@ -45,7 +45,7 @@ interface RouteResponse {
 type RouteHandler = (req: RouteRequest, res: RouteResponse) => unknown | Promise<unknown>;
 
 interface AppLike {
-  post: (path: string, ...args: (MiddlewareHandler | RouteHandler)[]) => AppLike;
+  post: (path: string, ...args: RouteArg<RouteHandler>[]) => AppLike;
 }
 
 export interface RunCancelResult {
@@ -151,12 +151,22 @@ export function buildRunCancelHandler(ctx: RunCancelContext, surface: RunControl
         status: result.status,
       });
     } catch (err) {
-      await emitRunControlAuditSafely(ctx, actor, res, { error: err, operation: "cancel_run", outcome: "failed", runId });
+      await emitRunControlAuditSafely(ctx, actor, res, {
+        error: err,
+        operation: "cancel_run",
+        outcome: "failed",
+        runId,
+      });
       return ctx.handleError(res, err);
     }
   };
 }
 
 export function mountRefRunCancel(app: AppLike, ctx: MountRefRunCancelContext): void {
-  app.post("/_ref/runs/:runId/cancel", ctx.requireOwnerSession, buildRunCancelHandler(ctx, "owner_session"));
+  app.post(
+    "/_ref/runs/:runId/cancel",
+    { contract: "refCancelRun" },
+    ctx.requireOwnerSession,
+    buildRunCancelHandler(ctx, "owner_session")
+  );
 }

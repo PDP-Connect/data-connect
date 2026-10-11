@@ -21,7 +21,7 @@
 // See openspec/changes/surface-run-handle-resolvability.
 
 import { REF_RUN_LINK_BASE, type RunLinkBase, type RunStatusReader, readRunStatus } from "../run-status-read-model.ts";
-import type { MiddlewareHandler, PdppErrorFn } from "./_route-contract.ts";
+import type { MiddlewareHandler, PdppErrorFn, RouteArg } from "./_route-contract.ts";
 
 export interface RunStatusRouteRequest {
   readonly params: Readonly<Record<string, string>>;
@@ -34,7 +34,7 @@ export interface RunStatusRouteResponse {
 type RouteHandler = (req: RunStatusRouteRequest, res: RunStatusRouteResponse) => unknown | Promise<unknown>;
 
 interface AppLike {
-  get: (path: string, ...handlers: (MiddlewareHandler | RouteHandler)[]) => AppLike;
+  get: (path: string, ...handlers: RouteArg<RouteHandler>[]) => AppLike;
 }
 
 export interface RunStatusHandlerContext extends RunStatusReader {
@@ -63,5 +63,10 @@ export function buildRunStatusHandler(ctx: RunStatusHandlerContext, linkBase: Ru
 }
 
 export function mountRefRunStatus(app: AppLike, ctx: MountRefRunStatusContext): void {
-  app.get("/_ref/runs/:runId", ctx.requireOwnerSession, buildRunStatusHandler(ctx, REF_RUN_LINK_BASE));
+  app.get(
+    "/_ref/runs/:runId",
+    { contract: "refGetRunStatus" },
+    ctx.requireOwnerSession,
+    buildRunStatusHandler(ctx, REF_RUN_LINK_BASE)
+  );
 }

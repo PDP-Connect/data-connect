@@ -20,6 +20,7 @@
  */
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import { publicManifests, referenceManifests } from "@pdpp/reference-contract";
@@ -27,7 +28,49 @@ import { startServer as startServerUntyped } from "../server/index.ts";
 import { createApp as createAppUntyped } from "../server/transport.ts";
 
 const ALL_MANIFESTS = [...publicManifests, ...referenceManifests];
+
+const RUN_CONTRACT_ROUTES = [
+  ["GET", "/runs", "ListRuns"],
+  ["GET", "/runs/{runId}", "GetRunStatus"],
+  ["GET", "/runs/{runId}/timeline", "GetRunTimeline"],
+  ["POST", "/runs/{runId}/cancel", "CancelRun"],
+  ["POST", "/runs/{runId}/interaction", "RunInteraction"],
+] as const;
 const UNKNOWN_CONTRACT_OPERATION_ERROR = /Unknown reference-contract operation id for POST \/bogus: notARealOp/;
+
+// Reverse coverage for the run control surface: manifest-to-route checks alone
+// cannot detect a route that was omitted from the contract package entirely.
+test("both run route families have exact contract bindings and published OpenAPI operations", async () => {
+  const full = JSON.parse(readFileSync(new URL("../openapi/reference-full.openapi.json", import.meta.url), "utf8")) as {
+    paths: Record<string, Record<string, { operationId: string; responses: unknown }>>;
+  };
+  const server = await startServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+  try {
+    const routes = [
+      ...(server.asServer.__pdppRegisteredRoutes ?? []),
+      ...(server.rsServer.__pdppRegisteredRoutes ?? []),
+    ];
+    for (const [prefix, family] of [
+      ["/_ref", "ref"],
+      ["/v1/owner", "owner"],
+    ] as const) {
+      for (const [method, suffix, operation] of RUN_CONTRACT_ROUTES) {
+        const path = `${prefix}${suffix}`;
+        const operationId = `${family}${operation}`;
+        const manifests = ALL_MANIFESTS.filter((manifest) => manifest.method === method && manifest.path === path);
+        assert.equal(manifests.length, 1, `${method} ${path} needs exactly one manifest`);
+        assert.equal(manifests[0]?.id, operationId, `${method} ${path} operation id`);
+        const bindings = routes.filter((route) => route.method === method && route.url === curlyToColonPath(path));
+        assert.equal(bindings.length, 1, `${method} ${path} needs exactly one route binding`);
+        assert.equal(bindings[0]?.contractOp, operationId, `${method} ${path} contract binding`);
+        assert.equal(full.paths[path]?.[method.toLowerCase()]?.operationId, operationId, `${method} ${path} OpenAPI`);
+      }
+    }
+  } finally {
+    server.asServer.close();
+    server.rsServer.close();
+  }
+});
 
 interface OnRouteOptions {
   config?: { pdppContractOp?: string };

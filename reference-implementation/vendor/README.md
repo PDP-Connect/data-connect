@@ -1,65 +1,55 @@
 # Vendored cross-repo dependency tarballs (transitional)
 
-## `@pdpp/reference-contract` — pinned tarball, not a registry release (Move B decision Q2, interim)
+## `@pdpp/reference-contract` — compiled snapshot of the canonical contract
 
-Move B's own decisions doc asked for either a published, pinned npm release, or a
-generated snapshot. A real `npm publish` needs registry credentials this move did not
-have available, so this pins the same way `PDP-Connect/pdpp`'s own `vendor/` directory
-already pins `@pdpp/collector-runtime` and `@pdpp/connector-protocol` from data-connect
-(see that repo's `vendor/README.md` for the precedent this mirrors) — a committed tarball
-built with a plain `npm pack`, referenced via a `file:` dependency, with its digest
-recorded below.
+`PDP-Connect/pdpp` owns the route manifests, schemas, validators, OpenAPI, and
+documentation generators in `packages/reference-contract`. This repository
+consumes a compiled snapshot through
+`file:./vendor/pdpp-reference-contract-0.1.0.tgz`.
 
-`pdpp-reference-contract-0.1.0.tgz` was originally built via `npm pack` from
-`packages/reference-contract` at `PDP-Connect/pdpp` commit
-`0d3deca19186a2185a6a15ab76c71352d10e627e` (`main`, 2026-09-02). SHA-256 is recorded in
-`SHA256SUMS` in this directory.
+The packed `package.json` records the exact repository, commit SHA, and package
+path in `vendorSource`. Read that field for the current source provenance;
+`SHA256SUMS` and the root lockfile bind the compiled artifact's bytes.
 
-`reference-implementation/package.json` depends on it via
-`"file:./vendor/pdpp-reference-contract-0.1.0.tgz"`.
+Rebuild from a local pdpp checkout and a full, committed source SHA:
 
-**Update (2026-09-02, data-connect seam-fix): compiled JS, not raw `.ts`, is now
-vendored.** The package ships raw TypeScript source with no build step in `pdpp` itself
-(`main`/`exports` there point directly at `./src/*.ts`) — that is fine inside `pdpp`'s
-own repo, where Node's native type-stripping applies normally to first-party source, but
-once vendored as a tarball unpacked into THIS repo's `node_modules`, every one of those
-files sits under `node_modules`, and Node deliberately refuses to strip types there
-(`ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`) as a fixed platform policy. This broke
-the `pdpp` CLI (`reference-implementation/cli/index.ts`) the moment any command reached a
-`server/*.ts` file that imports `@pdpp/reference-contract` — a real defect for any real
-invocation of this repo's CLI, not just a test-harness quirk (confirmed live: `node
-cli/index.ts --help` crashed with this exact error before this fix).
-
-Since `pdpp` itself is out of scope to change from here (this fix originates in
-`PDP-Connect/data-connect`, and the true fix — publishing `@pdpp/reference-contract` with
-a compiled-JS build — is the owner's call to make in `pdpp`), this repo's OWN vendoring
-step now compiles the tarball's contents before packing, rather than shipping a
-byte-identical `npm pack` of the source directory. Re-derivable:
-
-```
-npm pack packages/reference-contract   # from a pdpp checkout at the pinned commit
-tar -xzf pdpp-reference-contract-0.1.0.tgz -C /tmp/rc && cd /tmp/rc/package
-# add a temporary build tsconfig: noEmit:false, outDir:"./dist", rootDir:"./src",
-# rewriteRelativeImportExtensions:true, declaration:true, include: src/**/*.ts + src/**/*.js
-npx tsc -p tsconfig.build.json && rm tsconfig.build.json
-# edit package.json: exports/main/types point at ./dist/... instead of ./src/...
-# (9 exports subpaths + main + types; src/ stays in the tarball too, unedited, for
-# anyone reading/debugging — only the exports map changed)
-npm pack .
+```sh
+node scripts/revendor-reference-contract.mjs /path/to/pdpp <full-commit-sha>
 ```
 
-`src/` (raw TypeScript, for reference/debugging) and `test/` ship in the tarball
-alongside the new `dist/` (compiled JS + `.d.ts`); only `exports`/`main`/`types` in
-`package.json` changed to point at `dist/`. Every one of the 9 `exports` subpaths was
-verified to import and resolve cleanly from the compiled output before repacking.
+The builder archives only the pinned commit's package, so uncommitted source
+changes do not enter the artifact. It compiles `src/` with the existing compiler
+and dependencies in a unique directory under `~/.tmp`, rewrites package
+entrypoints to `dist/*.js` with `dist/*.d.ts` types, records source provenance,
+and runs `npm pack --ignore-scripts`. It updates this tarball, its checksum,
+and only its root lockfile integrity. It removes only its own scratch directory;
+it does not install dependencies or change the source checkout.
 
-**Swapping to a real registry release is still a one-line change** once the owner
-publishes `@pdpp/reference-contract` (ideally WITH a real build step, so this repo can
-depend on a published semver range instead of carrying its own compile-and-repack step):
-replace the `file:` path in `reference-implementation/package.json` with the published
-semver range (e.g. `^0.1.0`), delete this tarball and its `SHA256SUMS` line, run `npm
-install`. No other code changes are needed — the package's public surface (all 9
-`exports` subpaths) is unchanged from the source it was packed from, only compiled.
+The data-connect root must have existing dependencies and a TypeScript compiler
+(`node_modules/typescript/bin/tsc`, or `node_modules/.bin/tsc`). When the source
+package has its own `node_modules`, the scratch package uses those dependencies
+for compilation; otherwise it uses the data-connect root dependencies. The
+contract requires AJV 8, so a root installation with AJV 6 needs the source
+package's dependencies available. Compiler and dependency versions must match
+when comparing rebuilt artifacts byte for byte.
+
+The compiled `./docs` export exposes the canonical documentation generator.
+After making the rebuilt package available to the consumer, regenerate and
+check the derived OpenAPI and route documentation from the repository root:
+
+```sh
+npm run reference-contract:generate
+npm run reference-contract:check-generated
+```
+
+These commands use `scripts/reference-contract-artifacts.mjs`; `--check`
+compares every generated artifact with the canonical package's output. Node
+loads compiled JavaScript from the vendored package because it does not strip
+TypeScript inside `node_modules`.
+
+A future registry release can replace the `file:` dependency once the owner
+publishes the compiled package. Remove this tarball and its checksum entry and
+refresh the lockfile as part of that migration.
 
 ## `@pdpp/polyfill-connectors` — pinned tarball, canonical `data-connectors` package (Move B seam closure)
 
