@@ -7536,3 +7536,151 @@ for (const invalidDecision of ["stale review", "bad expiry", "empty selection"] 
     }
   });
 }
+
+// P5(1): exercise real consent, persisted grants, HTTP MCP and re-consent.
+test("prototype MCP profile selects explicit children and replacement tokens reject old grant selectors", async () => {
+  const previousFlag = process.env.PDPP_PROTOTYPE_MCP_PROFILE;
+  process.env.PDPP_PROTOTYPE_MCP_PROFILE = "1";
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+  const rsUrl = `http://localhost:${server.rsPort}`;
+  try {
+    const spotify = await registerAuthorizedSpotify(asUrl);
+    const github = await registerAuthorizedGithub(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+    const issue = () =>
+      completeMultiSourcePackageFlow({ asUrl, client, connectorIds: [spotify.connector_id, github.connector_id] });
+    const first = await issue();
+    let callId = 1;
+    const call = (token: string, name: string, args: Record<string, unknown>) =>
+      postMcpJson(rsUrl, token, {
+        id: callId++,
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: { arguments: args, name },
+      });
+    const discovery = await call(first.accessToken, "list_package_children", {});
+    assert.equal(discovery.status, 200);
+    const children = (resultOf(discovery).structuredContent as Record<string, unknown>).children as Array<{
+      grant_id: string;
+      status: string;
+      streams: Array<{ name: string; instance_ids: string[] }>;
+    }>;
+    assert.equal(children.length, 2);
+    assert.ok(children.every((child) => child.status === "active"));
+    for (const child of children) {
+      assert.deepEqual(Object.keys(child).sort(), ["grant_id", "mode", "purpose", "source", "status", "streams"]);
+      assert.ok(child.streams.every((stream) => stream.instance_ids.length > 0));
+    }
+    const selected = mustExist(children[0], "package has a selected child");
+    const missing = await call(first.accessToken, "schema", {});
+    assert.equal(missing.status, 200);
+    assert.equal(resultOf(missing).isError, true);
+    const selectedSchema = await call(first.accessToken, "schema", { grant_id: selected.grant_id });
+    assert.equal(selectedSchema.status, 200);
+    assert.equal(resultOf(selectedSchema).isError, undefined);
+    const schema = structuredContentData(resultOf(selectedSchema));
+    assert.equal(schemaPackageMetadata(schema), null, "selected schema carries no merged package metadata");
+
+    // Real minting on the same connections creates new grant identities.
+    const second = await issue();
+    const firstAccess = await getGrantPackageAccess(first.packageId);
+    const secondAccess = await getGrantPackageAccess(second.packageId);
+    const connectionIds = (access: Record<string, unknown> | null) =>
+      (mustExist(access, "package access exists").members as Array<{ connection_id: string }>).map((member) => member.connection_id).sort();
+    assert.deepEqual(connectionIds(secondAccess), connectionIds(firstAccess), "re-consent preserves connection_id");
+    const oldPackageStillWorks = await call(first.accessToken, "schema", { grant_id: selected.grant_id });
+    assert.equal(
+      resultOf(oldPackageStillWorks).isError,
+      undefined,
+      "new consent does not itself revoke the old package grant"
+    );
+    const nextDiscovery = await call(second.accessToken, "list_package_children", {});
+    const nextChildren = (resultOf(nextDiscovery).structuredContent as Record<string, unknown>)
+      .children as typeof children;
+    assert.equal(nextChildren.length, 2);
+    for (const child of children) {
+      assert.ok(!nextChildren.some((next) => next.grant_id === child.grant_id));
+      assert.ok(
+        nextChildren.some((next) => JSON.stringify(next.streams) === JSON.stringify(child.streams)),
+        "connection/instance handles stay stable across re-consent"
+      );
+    }
+    const otherChild = mustExist(children.find((child) => child.grant_id !== selected.grant_id), "package has another child");
+    const otherStream = mustExist(otherChild.streams[0], "other child covers a stream");
+    const otherConnection = mustExist(otherStream.instance_ids[0], "other stream covers a connection");
+    const selectedStream = mustExist(selected.streams[0], "selected child covers a stream").name;
+    for (const [name, args] of [
+      ["query_records", { stream: selectedStream, connection_id: otherConnection }],
+      ["fetch", { id: `${otherConnection}/${selectedStream}:uncovered-record` }],
+      ["read_record_field", { id: `${otherConnection}/${selectedStream}:uncovered-record`, field_path: "text" }],
+    ] as Array<[string, Record<string, unknown>]>) {
+      const conflict = await call(first.accessToken, name, { ...args, grant_id: selected.grant_id });
+      assert.equal(conflict.status, 200);
+      assert.equal(resultOf(conflict).isError, true, `${name} cannot use another child's connection`);
+    }
+    const expiredChild = mustExist(nextChildren[0], "replacement package has a child");
+    getDb()
+      .prepare("UPDATE tokens SET expires_at = ? WHERE grant_id = ?")
+      .run("2000-01-01T00:00:00.000Z", expiredChild.grant_id);
+    const expired = await call(second.accessToken, "schema", { grant_id: expiredChild.grant_id });
+    assert.equal(expired.status, 200);
+    assert.equal(resultOf(expired).isError, true);
+    assert.equal(
+      ((resultOf(expired).structuredContent as Record<string, unknown>).error as Record<string, unknown>).code,
+      "package_child_inactive"
+    );
+
+    const oldSelector = await call(second.accessToken, "schema", { grant_id: selected.grant_id });
+    assert.equal(oldSelector.status, 200);
+    assert.equal(resultOf(oldSelector).isError, true);
+    assert.equal(
+      ((resultOf(oldSelector).structuredContent as Record<string, unknown>).error as Record<string, unknown>).code,
+      "unknown_grant_selector"
+    );
+
+    await revokeGrant(selected.grant_id, { request_id: "prototype-profile-child-revoke" });
+    const ended = await call(first.accessToken, "schema", { grant_id: selected.grant_id });
+    assert.equal(ended.status, 200);
+    assert.equal(resultOf(ended).isError, true);
+    assert.deepEqual(
+      ((resultOf(ended).structuredContent as Record<string, unknown>).error as Record<string, unknown>).grant_id,
+      selected.grant_id
+    );
+    assert.equal(
+      ((resultOf(ended).structuredContent as Record<string, unknown>).error as Record<string, unknown>).code,
+      "package_child_inactive"
+    );
+    const afterDiscovery = await call(first.accessToken, "list_package_children", {});
+    const afterChildren = (resultOf(afterDiscovery).structuredContent as Record<string, unknown>)
+      .children as typeof children;
+    assert.equal(afterChildren.find((child) => child.grant_id === selected.grant_id)?.status, "revoked");
+    const other = mustExist(children.find((child) => child.grant_id !== selected.grant_id), "package has a live sibling");
+    const live = await call(first.accessToken, "schema", { grant_id: other.grant_id });
+    assert.equal(resultOf(live).isError, undefined);
+    await revokeGrant(other.grant_id, { request_id: "prototype-profile-last-child-revoke" });
+    const inactiveResponse = await fetch(`${rsUrl}/mcp`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${first.accessToken}`,
+        Accept: "application/json, text/event-stream",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        id: 99,
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: { name: "schema", arguments: { grant_id: other.grant_id } },
+      }),
+    });
+    assert.equal(inactiveResponse.status, 401);
+    assert.match(inactiveResponse.headers.get("www-authenticate") || "", /error="invalid_token"/);
+  } finally {
+    await closeServer(server);
+    if (previousFlag === undefined) {
+      delete process.env.PDPP_PROTOTYPE_MCP_PROFILE;
+    } else {
+      process.env.PDPP_PROTOTYPE_MCP_PROFILE = previousFlag;
+    }
+  }
+});

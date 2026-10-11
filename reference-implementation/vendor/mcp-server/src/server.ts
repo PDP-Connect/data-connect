@@ -4,6 +4,7 @@
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
+import { buildPackageProfileTools, PACKAGE_PROFILE_INSTRUCTIONS, type PackageProfile } from "./package-profile.ts";
 import { RsClient } from "./rs-client.ts";
 import { buildResourceTemplates, buildTools } from "./tools.ts";
 
@@ -31,6 +32,7 @@ interface CreatePdppMcpServerOptions {
   fetch?: typeof fetch;
   providerUrl: string;
   rsClient?: RsClient;
+  packageProfile?: PackageProfile;
   serverIcons?: ServerIcon[];
   serverName?: string;
   serverVersion?: string;
@@ -48,6 +50,7 @@ export function createPdppMcpServer({
   providerUrl,
   accessToken,
   rsClient,
+  packageProfile,
   fetch: fetchImpl = globalThis.fetch,
   serverName = DEFAULT_SERVER_NAME,
   serverVersion = DEFAULT_SERVER_VERSION,
@@ -56,7 +59,8 @@ export function createPdppMcpServer({
   // Callers may inject a custom RsClient-compatible adapter (e.g. the hosted
   // adapter's PackageRsClient fan-out). Otherwise we build a single-bearer
   // RsClient from the supplied accessToken.
-  const rs = rsClient ?? new RsClient({ providerUrl, accessToken, fetch: fetchImpl });
+  const rs =
+    rsClient ?? packageProfile?.children[0]?.rs ?? new RsClient({ providerUrl, accessToken, fetch: fetchImpl });
   const serverInfo: { name: string; version: string; icons?: ServerIcon[] } = {
     name: serverName,
     version: serverVersion,
@@ -65,10 +69,12 @@ export function createPdppMcpServer({
     serverInfo.icons = serverIcons;
   }
   const server = new McpServer(serverInfo, {
-    instructions: PDPP_MCP_INSTRUCTIONS,
+    instructions: packageProfile ? PACKAGE_PROFILE_INSTRUCTIONS : PDPP_MCP_INSTRUCTIONS,
   });
 
-  const tools = buildTools({ rs, providerUrl });
+  const tools = packageProfile
+    ? buildPackageProfileTools(packageProfile, providerUrl)
+    : buildTools({ rs, providerUrl });
   for (const tool of tools) {
     const config: {
       title: string;
@@ -94,7 +100,7 @@ export function createPdppMcpServer({
     });
   }
 
-  for (const template of buildResourceTemplates({ rs, providerUrl })) {
+  for (const template of packageProfile ? [] : buildResourceTemplates({ rs, providerUrl })) {
     server.registerResource(
       template.name,
       new ResourceTemplate(template.uriTemplate, { list: undefined }),

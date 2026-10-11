@@ -775,6 +775,7 @@ interface GrantPackageStore {
   }) => MaybePromise<StoreWriteResult>;
   listActiveMembers: (packageId: string) => MaybePromise<readonly GrantPackageMemberRow[]>;
   listAllMembers: (packageId: string) => MaybePromise<readonly GrantPackageMemberRow[]>;
+  listProfileMembers: (packageId: string) => MaybePromise<readonly GrantPackageMemberRow[]>;
   markMemberRevoked: (input: {
     packageId: string;
     grantId: string;
@@ -8038,6 +8039,27 @@ const postgresGrantPackageStore: GrantPackageStore = {
         [packageId]
       )
     ).rows,
+  listProfileMembers: async (packageId) =>
+    (
+      await postgresQuery<GrantPackageMemberRow>(
+        `SELECT gm.package_id, gm.grant_id, gm.token_id, gm.source_json::text AS source_json,
+              gm.status AS member_status, gm.added_at, gm.revoked_at,
+              g.status AS grant_status, g.grant_json::text AS grant_json,
+              g.grant_id AS persisted_grant_id, g.subject_id AS grant_subject_id,
+              g.client_id AS grant_client_id, g.access_mode AS grant_access_mode,
+              g.expires_at AS grant_expires_at,
+              g.storage_binding_json::text AS storage_binding_json,
+              t.grant_id AS token_grant_id, t.subject_id AS token_subject_id,
+              t.client_id AS token_client_id, t.revoked AS token_revoked,
+              t.expires_at AS token_expires_at
+       FROM grant_package_members gm
+       JOIN grants g ON gm.grant_id = g.grant_id
+       JOIN tokens t ON gm.token_id = t.token_id
+       WHERE gm.package_id = $1
+       ORDER BY gm.added_at, gm.grant_id`,
+        [packageId]
+      )
+    ).rows,
   listAllMembers: async (packageId) =>
     (
       await postgresQuery<GrantPackageMemberRow>(
@@ -8196,6 +8218,8 @@ const sqliteGrantPackageStore: GrantPackageStore = {
     exec(referenceQueries.authTokensInsertMcpPackage, [tokenId, packageId, subjectId, clientId, expiresAt]),
   listActiveMembers: (packageId) =>
     readAllMemberPages(referenceQueries.authGrantPackageMembersListActiveByPackage, packageId),
+  listProfileMembers: (packageId) =>
+    readAllMemberPages(referenceQueries.authGrantPackageMembersListProfileByPackage, packageId),
   listAllMembers: (packageId) =>
     readAllMemberPages(referenceQueries.authGrantPackageMembersListAllByPackage, packageId),
   markMemberRevoked: ({ packageId, grantId, revokedAt }) =>
@@ -9051,7 +9075,10 @@ export async function createHostedMcpGrantPackage({
  * Returns `null` when the package itself is missing or revoked. An active
  * package with all members revoked returns `{ package, members: [] }`.
  */
-export async function getGrantPackageAccess(packageId: unknown): Promise<Record<string, unknown> | null> {
+export async function getGrantPackageAccess(
+  packageId: unknown,
+  { includeInactive = false } = {}
+): Promise<Record<string, unknown> | null> {
   if (!isNonEmptyString(packageId)) {
     return null;
   }
@@ -9062,14 +9089,20 @@ export async function getGrantPackageAccess(packageId: unknown): Promise<Record<
     return null;
   }
 
-  const memberRows = await store.listActiveMembers(packageId);
+  const memberRows = includeInactive
+    ? await store.listProfileMembers(packageId)
+    : await store.listActiveMembers(packageId);
 
-  const activeMembers: Record<string, unknown>[] = [];
+  const resolvedMembers: Record<string, unknown>[] = [];
   await forEachSequential(memberRows, async (row) => {
-    if (row.grant_status !== "active" || row.token_revoked) {
-      return;
-    }
+    let status =
+      row.grant_status === "active" && (!includeInactive || row.member_status === "active") && !row.token_revoked
+        ? "active"
+        : "revoked";
     if (row.token_expires_at && new Date(row.token_expires_at).getTime() <= Date.now()) {
+      status = "expired";
+    }
+    if (!includeInactive && status !== "active") {
       return;
     }
     let grantState: ReturnType<typeof requirePersistedGrantState>;
@@ -9077,6 +9110,13 @@ export async function getGrantPackageAccess(packageId: unknown): Promise<Record<
       grantState = requirePersistedGrantState(row);
     } catch {
       return;
+    }
+    if (
+      includeInactive &&
+      typeof grantState.grant.expires_at === "string" &&
+      Date.parse(grantState.grant.expires_at) <= Date.now()
+    ) {
+      status = "expired";
     }
     const grantSubjectId = isRecord(grantState.grant.subject) ? grantState.grant.subject.id : null;
     const grantClientId = isRecord(grantState.grant.client) ? grantState.grant.client.client_id : null;
@@ -9094,7 +9134,8 @@ export async function getGrantPackageAccess(packageId: unknown): Promise<Record<
       parsePackageJson(row.source_json) || describeGrantSource(grantState.grant),
       { ownerSubjectId: grantPackage.subject_id }
     );
-    activeMembers.push({
+    resolvedMembers.push({
+      ...(includeInactive ? { status } : {}),
       connection_id: persistedSource?.connection_id || null,
       grant: grantState.grant,
       grant_id: row.grant_id,
@@ -9106,7 +9147,7 @@ export async function getGrantPackageAccess(packageId: unknown): Promise<Record<
   });
 
   return {
-    members: activeMembers,
+    members: resolvedMembers,
     package: grantPackage,
   };
 }

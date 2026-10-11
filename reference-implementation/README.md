@@ -15,6 +15,25 @@ It is not the public site or the operator console. The public site in
 console in `apps/console/` fronts a running instance. The runnable
 implementation lives here.
 
+## MCP profile prototype
+
+Set `PDPP_PROTOTYPE_MCP_PROFILE=1` to enable the P5(1) prototype on hosted `/mcp`
+package tokens. The default is off. Ordinary Core client tokens keep their existing
+MCP surface. Package clients call `list_package_children`, then pass one `grant_id`
+to each of the six read tools. Schema and search use only the selected child;
+there is no cross-child merge or implicit selection. Discovery returns the child's
+approved source, purpose, stream names and grant `instance_ids`, mode, and status.
+
+An inactive child returns HTTP 200 with MCP `isError` and `package_child_inactive`.
+The client must not retry that call; it can ask the owner for new access. A package
+with no active child returns HTTP 401 with Bearer `invalid_token`. Re-consent mints
+new `grant_id` values, even when connection identifiers stay the same. Package
+resource templates are unavailable; use tools with the explicit selector.
+
+This slice still calls the existing single-grant RS read endpoints with child
+bearers. Package RS endpoints, pairwise identity changes, freshness and presentation
+inputs belong to later slices. This flag does not claim full MCP profile conformance.
+
 ## What it proves today
 
 The current provider-connect story is intentionally thin and honest. It proves:
