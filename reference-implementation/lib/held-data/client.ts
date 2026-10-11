@@ -728,6 +728,15 @@ export class HeldDataClient {
           this.#log(id, "status_failed", only && "error" in only ? only.error : "no_answer");
           continue;
         }
+        // The write for an earlier grant in this loop can pass this grant's deadline. Dispose against
+        // the old assessment first, so the answer cannot move a deadline that already passed.
+        this.#disposeDue();
+        if (this.#stateUnavailable || this.#clockUncertain) {
+          return;
+        }
+        if (this.#grants.get(id)?.deletedAt != null) {
+          continue;
+        }
         this.#apply(only, sentAt);
         if (!this.#persist()) {
           return;
