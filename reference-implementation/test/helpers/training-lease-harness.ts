@@ -16,7 +16,9 @@ import {
   generateEd25519KeyPair,
 } from "../../lib/training-lease/jws.ts";
 import { canonicalConnectorKey } from "../../server/connector-key.ts";
+import { getDb } from "../../server/db.ts";
 import { startServer } from "../../server/index.ts";
+import { closePostgresStorage, isPostgresStorageBackend, postgresQuery } from "../../server/postgres-storage.ts";
 import { createRequestConnectorInstanceStore } from "../../server/request-store-factories.ts";
 import { makeDefaultAccountConnectorInstanceId } from "../../server/stores/connector-instance-store.ts";
 import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "../fixtures/demo-clients.ts";
@@ -28,7 +30,8 @@ export const HOUR = 60 * 60 * 1000;
 export const MIN = 60 * 1000;
 const tempDirs: string[] = [];
 
-after(() => {
+after(async () => {
+  await closePostgresStorage();
   for (const d of tempDirs) {
     rmSync(d, { force: true, recursive: true });
   }
@@ -67,6 +70,22 @@ export async function fetchJson<T = Record<string, unknown>>(
     body = text;
   }
   return { body: body as T, status: resp.status };
+}
+
+/** Mutate the database the running AS actually reads, including restore/fault fixtures. */
+export async function mutateMainDatabase(sql: string, params: string[], postgresSql = sql): Promise<void> {
+  let changed: number;
+  if (isPostgresStorageBackend()) {
+    let index = 0;
+    const query = postgresSql.replaceAll("?", () => {
+      index += 1;
+      return `$${index}`;
+    });
+    changed = (await postgresQuery(query, params)).rowCount ?? 0;
+  } else {
+    changed = getDb().prepare(sql).run(...params).changes;
+  }
+  assert.ok(changed > 0, "the fixture must change a row in the active backend");
 }
 
 export const json = (
