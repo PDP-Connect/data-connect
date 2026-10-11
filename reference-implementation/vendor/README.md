@@ -16,6 +16,36 @@ the RI dependency and workspace lock, and update both filename references in
 `scripts/ensure-reference-stack.js`. npm 12 returns pack JSON keyed by package name;
 older npm versions return an array.
 
+The executable procedure is `scripts/repack-reference-contract.mjs` (relative to
+the RI root). It requires the signed source commit above, a clean source package,
+and installed source-lock dependencies: TypeScript 7.0.2 and AJV 8.20.0. It compiles
+only `src/**/*.ts` and `src/**/*.js`; the shipped config also includes tests, so
+overriding `rootDir` alone is insufficient. Run from the RI root:
+
+```sh
+node scripts/repack-reference-contract.mjs \
+  --source /path/to/pinned-pdpp-checkout \
+  --output /path/to/empty-disk-backed-directory
+```
+
+The helper makes two independent source-pack/build/repack passes, compares their
+content manifests and digests, and checks the active `SHA256SUMS` entry. It writes
+`receipt.json` with the commit/signature check, Node/npm/compiler/AJV versions,
+per-file hashes, and both pack digests. The verified toolchain was Node 24.21.0,
+npm 12.2.0, TypeScript 7.0.2 and AJV 8.20.0; all 18 source and 36 compiled files
+match the archive, whose SHA-256 is
+`0f9534e5b6c7a8d2fe81a1806ed0aeecce9c9dabd17b1e9f7bb472cda7d9a023`.
+The opt-in regression runs the same procedure and compares package contents:
+
+```sh
+PDPP_REFERENCE_CONTRACT_SOURCE=/path/to/pinned-pdpp-checkout \
+PDPP_REFERENCE_CONTRACT_OUTPUT=/path/to/another-empty-disk-backed-directory \
+  node --test scripts/repack-reference-contract.test.mjs
+```
+
+No network checkout, source-tree mutation, or replacement of an existing output
+directory is performed. CI explicitly skips this oracle when those paths are absent.
+
 # Vendored cross-repo dependency tarballs (transitional)
 
 ## `@pdpp/reference-contract` — pinned tarball, not a registry release (Move B decision Q2, interim)
