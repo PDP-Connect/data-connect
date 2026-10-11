@@ -68,6 +68,44 @@ const streamEvidenceConnector = {
   runtime_requirements: { bindings: {} },
 };
 
+test("collector placement matches binding features and explains missing features", () => {
+  const connector = {
+    ...browserConnector,
+    runtime_requirements: {
+      bindings: {
+        browser: { features: ["page_navigation", "missing_feature"], required: true },
+      },
+    },
+  };
+  assert.throws(() => assertPlacementOrThrow(connector, COLLECTOR_RUNTIME_CAPABILITIES), {
+    code: RUNTIME_CAPABILITY_MISMATCH_CODE,
+    missing: ["browser"],
+    missingFeatures: [{ binding: "browser", features: ["missing_feature"] }],
+  });
+});
+
+test("partial browser support refuses omitted features but permits an explicit empty list", () => {
+  const partialRuntime = { ...COLLECTOR_RUNTIME_CAPABILITIES, partialBindings: new Set(["browser"]) };
+  assert.throws(() => assertPlacementOrThrow(browserConnector, partialRuntime), {
+    code: RUNTIME_CAPABILITY_MISMATCH_CODE,
+    unspecifiedFeatures: ["browser"],
+  });
+  assert.equal(
+    evaluatePlacement(
+      {
+        ...browserConnector,
+        runtime_requirements: {
+          bindings: {
+            browser: { features: [], required: true },
+          },
+        },
+      },
+      partialRuntime
+    ).kind,
+    "ok"
+  );
+});
+
 test("collector runtime does not advertise STREAM_EVIDENCE: no local-collector connector emits it and there is no durable delivery path", () => {
   assert.equal(COLLECTOR_RUNTIME_CAPABILITIES.protocolVersion, CONNECTOR_PROTOCOL_VERSION);
   assert.equal(COLLECTOR_RUNTIME_CAPABILITIES.protocolCapabilities.has("STREAM_EVIDENCE"), false);
@@ -230,7 +268,7 @@ test("assertPlacementOrThrow throws RuntimeCapabilityMismatchError with stable c
         // Diagnostic must not leak credentials or owner data — the
         // message references the binding name and runtime id only.
         assert.match(err.message, /browser/);
-        assert.match(err.message, /collector/i);
+        assert.match(err.message, /advertises all its required bindings, features and protocol capabilities/i);
       }
       return true;
     }

@@ -163,6 +163,7 @@ function manifest(connectorId: string) {
     connector_id: connectorId,
     display_name: connectorId,
     manifest_uri: `https://sources.example/${connectorId}`,
+    protocol_capabilities: ["STREAM_EVIDENCE"],
     protocol_version: "0.1.0",
     streams: [
       {
@@ -199,6 +200,7 @@ function compoundKeyManifest(connectorId: string) {
     connector_id: connectorId,
     display_name: connectorId,
     manifest_uri: `https://sources.example/${connectorId}`,
+    protocol_capabilities: ["STREAM_EVIDENCE"],
     protocol_version: "0.1.0",
     streams: [
       {
@@ -1131,6 +1133,7 @@ test("STREAM_EVIDENCE: a batch that gets a forced 503 then succeeds is retried w
       manifest: {
         connector_id: connectorId,
         display_name: "Real 503 Retry Test Connector",
+        protocol_capabilities: ["STREAM_EVIDENCE"],
         protocol_version: "0.1.0",
         streams: [
           {
@@ -1215,6 +1218,7 @@ test("mutation control: a permanently-rejected (non-retryable) 4xx is never retr
         manifest: {
           connector_id: connectorId,
           display_name: "4xx No-Retry Test Connector",
+          protocol_capabilities: ["STREAM_EVIDENCE"],
           protocol_version: "0.1.0",
           streams: [
             {
@@ -1776,6 +1780,7 @@ function manyStateStreamChildrenManifest(connectorId: string) {
     connector_id: connectorId,
     display_name: connectorId,
     manifest_uri: `https://sources.example/${connectorId}`,
+    protocol_capabilities: ["STREAM_EVIDENCE"],
     protocol_version: "0.1.0",
     streams: [
       {
@@ -2368,6 +2373,7 @@ test("mutation control: a DETAIL_GAP_RECOVERED for a DIFFERENT stream after STRE
       connector_id: "stream-evidence-recovery-different-stream-ok",
       display_name: "stream-evidence-recovery-different-stream-ok",
       manifest_uri: "https://sources.example/stream-evidence-recovery-different-stream-ok",
+      protocol_capabilities: ["STREAM_EVIDENCE"],
       protocol_version: "0.1.0",
       streams: [
         {

@@ -797,7 +797,6 @@ test("Collection Profile conformance", async (t) => {
       assert.deepEqual(captured.bindings, {
         browser: {},
         filesystem: {},
-        interactive: {},
         network: {},
       });
       assert.ok(!("config" in captured), "legacy START.config should be absent");
@@ -3568,17 +3567,13 @@ rl.on('line', (line) => {
     }
   });
 
-  await t.test("runtime satisfies required interactive bindings and advertises them in START", async () => {
-    const manifestWithInteractiveBinding = {
+  await t.test("runtime supports declared human interaction without an interactive binding", async () => {
+    const manifestWithHumanInteraction = {
       ...MINIMAL_MANIFEST,
-      runtime_requirements: {
-        bindings: {
-          interactive: { required: true },
-        },
-      },
+      capabilities: { human_interaction: ["manual_action"] },
     };
 
-    const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-interactive-binding-capture-"));
+    const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-human-interaction-capture-"));
     const capturePath = join(tmpDir, "start.json");
     const { connectorPath, cleanup } = createStartCaptureConnector(capturePath);
 
@@ -3591,7 +3586,7 @@ rl.on('line', (line) => {
         collectionMode: "full_refresh",
         connectorId: "test",
         connectorPath,
-        manifest: manifestWithInteractiveBinding,
+        manifest: manifestWithHumanInteraction,
         onInteraction: async () => ({
           data: {},
           request_id: "unused",
@@ -3609,7 +3604,6 @@ rl.on('line', (line) => {
       assert.deepEqual(captured.bindings, {
         browser: {},
         filesystem: {},
-        interactive: {},
         network: {},
       });
     } finally {
@@ -3619,9 +3613,9 @@ rl.on('line', (line) => {
   });
 
   await t.test(
-    "runtime omits interactive from START.bindings when interaction handling is explicitly disabled",
+    "runtime advertises registry bindings when interaction handling is explicitly disabled",
     async () => {
-      const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-no-interactive-binding-capture-"));
+      const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-disabled-interaction-capture-"));
       const capturePath = join(tmpDir, "start.json");
       const { connectorPath, cleanup } = createStartCaptureConnector(capturePath);
 
@@ -8674,7 +8668,7 @@ rl.on('line', (line) => {
   });
 
   await t.test(
-    "runtime rejects INTERACTION when START.bindings omit interactive and records no interaction artifacts",
+    "runtime rejects INTERACTION when interaction handling is disabled and records no interaction artifacts",
     async () => {
       const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
       const { asPort, rsPort } = server;
@@ -8726,7 +8720,7 @@ rl.on('line', (line) => {
             rejected = asRuntimeError(err);
             assert.equal(rejected.failure_reason, "connector_protocol_violation");
             // biome-ignore lint/performance/useTopLevelRegex: localized test assertion preserves its explicit contract.
-            assert.match(rejected.message, /START\.bindings omitted interactive/);
+            assert.match(rejected.message, /runtime interaction handling is disabled/);
             assert.equal(checkpointSummaryOf(rejected).records_flushed, 0);
             assert.equal(checkpointSummaryOf(rejected).buffered_records_dropped, 0);
             assert.equal(checkpointSummaryOf(rejected).state_streams_staged, 0);
@@ -8746,7 +8740,7 @@ rl.on('line', (line) => {
         const failedEvent = (runTimeline.data || []).find((event) => event.event_type === "run.failed");
         assert.ok(
           failedEvent,
-          "run.failed should be emitted when INTERACTION arrives without an advertised interactive binding"
+          "run.failed should be emitted when INTERACTION arrives while interaction handling is disabled"
         );
         assert.equal(failedEvent.data.reason, "connector_protocol_violation");
         assert.equal(failedEvent.data.records_flushed, 0);

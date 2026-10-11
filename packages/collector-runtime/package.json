@@ -29,6 +29,14 @@
     "./local-device-envelope": {
       "types": "./dist/local-device-envelope.d.ts",
       "import": "./dist/local-device-envelope.js"
+    },
+    "./runtime-binding-support": {
+      "types": "./dist/runtime-binding-support.d.ts",
+      "import": "./dist/runtime-binding-support.js"
+    },
+    "./runtime-capabilities": {
+      "types": "./dist/runtime-capabilities.d.ts",
+      "import": "./dist/runtime-capabilities.js"
     }
   },
   "files": [
@@ -82,6 +90,14 @@
       "./local-device-envelope": {
         "types": "./dist/local-device-envelope.d.ts",
         "import": "./dist/local-device-envelope.js"
+      },
+      "./runtime-binding-support": {
+        "types": "./dist/runtime-binding-support.d.ts",
+        "import": "./dist/runtime-binding-support.js"
+      },
+      "./runtime-capabilities": {
+        "types": "./dist/runtime-capabilities.d.ts",
+        "import": "./dist/runtime-capabilities.js"
       }
     },
     "provenance": true,
