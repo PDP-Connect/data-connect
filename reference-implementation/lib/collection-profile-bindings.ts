@@ -69,6 +69,12 @@ export function validateBindingDeclarations(bindings: unknown): asserts bindings
     );
   }
   for (const [key, declaration] of Object.entries(bindings as BindingDeclarations)) {
+    // START.bindings.interactive is the legacy host interaction-capability
+    // signal. Until that signal has its own namespace, an author-local name
+    // must not manufacture it or hide it through optional-kind negotiation.
+    if (key === "interactive") {
+      throw new Error("runtime_requirements.bindings.interactive is reserved for the host interaction capability");
+    }
     const kind = bindingInstanceKind(key, declaration);
     if (declaration.interface !== undefined) {
       const prefix = `${kind}@`;

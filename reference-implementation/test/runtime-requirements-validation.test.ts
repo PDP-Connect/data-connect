@@ -33,6 +33,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { negotiateBindingInstances, type BindingDescriptors } from "../lib/collection-profile-bindings.ts";
 import { validateRuntimeRequirements } from "../server/connector-manifest-validation.ts";
 
 const CODE = "invalid_connector_manifest";
@@ -100,6 +101,55 @@ test("validateRuntimeRequirements: rejects non-object requirements or bindings",
 
 test("validateRuntimeRequirements: rejects an unsupported binding key", () => {
   assertRejects({ runtime_requirements: { bindings: { gpu: {} } } }, "bindings has unsupported keys: gpu");
+});
+
+test("validateRuntimeRequirements: reserves interactive for the host interaction capability", () => {
+  for (const declaration of [
+    { kind: "browser", required: true },
+    { kind: "desktop_session", required: false },
+  ]) {
+    assertRejects(
+      { runtime_requirements: { bindings: { interactive: declaration } } },
+      "bindings.interactive is reserved for the host interaction capability"
+    );
+  }
+});
+
+test("binding negotiation rejects interactive aliases with and without a host handler", () => {
+  for (const hasInteractionHandler of [false, true]) {
+    const available: BindingDescriptors = { browser: {}, filesystem: {}, network: {} };
+    if (hasInteractionHandler) available.interactive = {};
+    const before = structuredClone(available);
+    for (const declaration of [
+      { kind: "browser", required: true },
+      { kind: "desktop_session", required: false },
+    ]) {
+      assert.throws(
+        () => negotiateBindingInstances({ interactive: declaration }, available),
+        { message: "runtime_requirements.bindings.interactive is reserved for the host interaction capability" }
+      );
+      assert.deepEqual(available, before);
+    }
+  }
+});
+
+test("noncolliding named bindings preserve the host interaction capability", () => {
+  for (const hasInteractionHandler of [false, true]) {
+    const available: BindingDescriptors = { browser: {}, filesystem: {}, network: {} };
+    if (hasInteractionHandler) available.interactive = {};
+    const result = negotiateBindingInstances(
+      {
+        site: { kind: "browser", required: true },
+        desktop: { kind: "desktop_session", required: false },
+      },
+      available
+    );
+    assert.equal(Object.hasOwn(result.bindings, "interactive"), hasInteractionHandler);
+    if (hasInteractionHandler) assert.deepEqual(result.bindings.interactive, {});
+    assert.deepEqual(result.bindings.site, { kind: "browser" });
+    assert.equal(Object.hasOwn(result.bindings, "desktop"), false);
+    assert.deepEqual(result.missingRequiredBindings, []);
+  }
 });
 
 test("validateRuntimeRequirements: rejects a non-object binding value and a non-boolean required", () => {
