@@ -7537,6 +7537,62 @@ for (const invalidDecision of ["stale review", "bad expiry", "empty selection"] 
   });
 }
 
+// Two ingestible sources with the same stream name and the same record keys.
+// Only the subject differs, so a read that ignores the foreign connection and
+// falls back to the selected child's own record is observable.
+const PROFILE_SHARED_KEYS = ["profile-shared-1", "profile-shared-2", "profile-shared-3"];
+const PROFILE_SEARCH_TERM = "profilelexterm";
+
+function profileChildManifest(connectorId: string): ConnectorManifest {
+  const manifest = structuredClone(pinConnectorManifest()) as ConnectorManifest & {
+    source_declaration: { source: { id: string }; streams: Record<string, unknown>[] };
+  };
+  const query = { search: { lexical_fields: ["subject"] } };
+  manifest.connector_id = connectorId;
+  manifest.display_name = `Profile child ${connectorId}`;
+  manifest.source_declaration.source.id = `https://registry.pdpp.dev/connectors/${connectorId}`;
+  for (const stream of manifest.source_declaration.streams) {
+    stream.query = query;
+  }
+  for (const stream of manifest.streams) {
+    stream.query = query;
+  }
+  return manifest;
+}
+
+function profileSentinel(connectionId: string): string {
+  return `sentinel-${connectionId}`;
+}
+
+async function registerProfileChild(asUrl: string, connectorId: string): Promise<ConnectorManifest> {
+  const manifest = profileChildManifest(connectorId);
+  const { status } = await fetchJson(`${asUrl}/connectors`, {
+    body: JSON.stringify(manifest),
+    headers: { "Content-Type": "application/json" },
+    method: "POST",
+  });
+  assert.equal(status, 201);
+  const connectionId = await seedDefaultHostedInstance(manifest);
+  for (const [index, key] of PROFILE_SHARED_KEYS.entries()) {
+    const receivedAt = `2026-05-18T12:0${index}:00.000Z`;
+    // biome-ignore lint/performance/noAwaitInLoops: Seed in order before issuing grants and taking a search snapshot.
+    await ingestRecord(
+      { connector_id: connectorId, connector_instance_id: connectionId },
+      {
+        data: {
+          id: key,
+          received_at: receivedAt,
+          subject: `${PROFILE_SEARCH_TERM} ${profileSentinel(connectionId)} ${key}`,
+        },
+        emitted_at: receivedAt,
+        key,
+        stream: PIN_STREAM,
+      }
+    );
+  }
+  return manifest;
+}
+
 // P5(1): exercise real consent, persisted grants, HTTP MCP and re-consent.
 test("prototype MCP profile selects explicit children and replacement tokens reject old grant selectors", async () => {
   const previousFlag = process.env.PDPP_PROTOTYPE_MCP_PROFILE;
@@ -7545,11 +7601,11 @@ test("prototype MCP profile selects explicit children and replacement tokens rej
   const asUrl = `http://localhost:${server.asPort}`;
   const rsUrl = `http://localhost:${server.rsPort}`;
   try {
-    const spotify = await registerAuthorizedSpotify(asUrl);
-    const github = await registerAuthorizedGithub(asUrl);
+    const childA = await registerProfileChild(asUrl, "profile-child-a");
+    const childB = await registerProfileChild(asUrl, "profile-child-b");
     const client = await registerAuthCodeClient(asUrl);
     const issue = () =>
-      completeMultiSourcePackageFlow({ asUrl, client, connectorIds: [spotify.connector_id, github.connector_id] });
+      completeMultiSourcePackageFlow({ asUrl, client, connectorIds: [childA.connector_id, childB.connector_id] });
     const first = await issue();
     let callId = 1;
     const call = (token: string, name: string, args: Record<string, unknown>) =>
@@ -7582,12 +7638,62 @@ test("prototype MCP profile selects explicit children and replacement tokens rej
     const schema = structuredContentData(resultOf(selectedSchema));
     assert.equal(schemaPackageMetadata(schema), null, "selected schema carries no merged package metadata");
 
+    // A rejection proves isolation only after both records are readable under
+    // their own child. The shared key also catches ignoring a foreign binding.
+    for (const child of children) {
+      const stream = mustExist(child.streams[0], "child covers a stream");
+      const connection = mustExist(stream.instance_ids[0], "stream covers a connection");
+      // biome-ignore lint/performance/noAwaitInLoops: Complete own-record controls before rejected cross-child calls.
+      const ownRecord = await call(first.accessToken, "fetch", {
+        grant_id: child.grant_id,
+        id: `${connection}/${stream.name}:profile-shared-1`,
+      });
+      assert.equal(resultOf(ownRecord).isError, undefined, "each child's real record must be readable");
+      assert.ok(JSON.stringify(resultOf(ownRecord)).includes(profileSentinel(connection)));
+      const ownField = await call(first.accessToken, "read_record_field", {
+        field_path: "subject",
+        grant_id: child.grant_id,
+        id: `${connection}/${stream.name}:profile-shared-1`,
+      });
+      assert.equal(resultOf(ownField).isError, undefined, "each child's real field must be readable");
+      assert.ok(JSON.stringify(resultOf(ownField)).includes(profileSentinel(connection)));
+      const ownQuery = await call(first.accessToken, "query_records", {
+        connection_id: connection,
+        grant_id: child.grant_id,
+        stream: stream.name,
+      });
+      assert.equal(resultOf(ownQuery).isError, undefined, "each child's own query scope must be readable");
+      assert.equal(
+        (structuredContentData(resultOf(ownQuery)).data as unknown[]).length,
+        PROFILE_SHARED_KEYS.length,
+        "own query returns every seeded record"
+      );
+      assert.ok(JSON.stringify(resultOf(ownQuery)).includes(profileSentinel(connection)));
+    }
+
+    // Old-token lexical pagination: one hit per page, so a real cursor exists.
+    const searchArgs = { limit: 1, mode: "lexical", q: PROFILE_SEARCH_TERM };
+    const oldFirstPage = await call(first.accessToken, "search", { ...searchArgs, grant_id: selected.grant_id });
+    assert.equal(resultOf(oldFirstPage).isError, undefined);
+    const oldSearchCursor = mustExist(
+      structuredContentData(resultOf(oldFirstPage)).next_cursor as string | undefined,
+      "limit=1 over 3 matching records yields a lexical cursor"
+    );
+    const oldSecondPage = await call(first.accessToken, "search", {
+      ...searchArgs,
+      cursor: oldSearchCursor,
+      grant_id: selected.grant_id,
+    });
+    assert.equal(resultOf(oldSecondPage).isError, undefined, "old child + old cursor resumes");
+
     // Real minting on the same connections creates new grant identities.
     const second = await issue();
     const firstAccess = await getGrantPackageAccess(first.packageId);
     const secondAccess = await getGrantPackageAccess(second.packageId);
     const connectionIds = (access: Record<string, unknown> | null) =>
-      (mustExist(access, "package access exists").members as Array<{ connection_id: string }>).map((member) => member.connection_id).sort();
+      (mustExist(access, "package access exists").members as Array<{ connection_id: string }>)
+        .map((member) => member.connection_id)
+        .sort();
     assert.deepEqual(connectionIds(secondAccess), connectionIds(firstAccess), "re-consent preserves connection_id");
     const oldPackageStillWorks = await call(first.accessToken, "schema", { grant_id: selected.grant_id });
     assert.equal(
@@ -7606,20 +7712,47 @@ test("prototype MCP profile selects explicit children and replacement tokens rej
         "connection/instance handles stay stable across re-consent"
       );
     }
-    const otherChild = mustExist(children.find((child) => child.grant_id !== selected.grant_id), "package has another child");
+    const otherChild = mustExist(
+      children.find((child) => child.grant_id !== selected.grant_id),
+      "package has another child"
+    );
     const otherStream = mustExist(otherChild.streams[0], "other child covers a stream");
     const otherConnection = mustExist(otherStream.instance_ids[0], "other stream covers a connection");
     const selectedStream = mustExist(selected.streams[0], "selected child covers a stream").name;
+    const selectedConnection = mustExist(selected.streams[0]?.instance_ids[0], "selected stream covers a connection");
+    const otherSentinel = profileSentinel(otherConnection);
     for (const [name, args] of [
-      ["query_records", { stream: selectedStream, connection_id: otherConnection }],
-      ["fetch", { id: `${otherConnection}/${selectedStream}:uncovered-record` }],
-      ["read_record_field", { id: `${otherConnection}/${selectedStream}:uncovered-record`, field_path: "text" }],
-    ] as Array<[string, Record<string, unknown>]>) {
+      ["query_records", { connection_id: otherConnection, stream: selectedStream }],
+      ["search", { connection_id: otherConnection, mode: "lexical", q: PROFILE_SEARCH_TERM }],
+      ...PROFILE_SHARED_KEYS.flatMap(
+        (key): [string, Record<string, unknown>][] => [
+          ["fetch", { id: `${otherConnection}/${selectedStream}:${key}` }],
+          ["read_record_field", { field_path: "subject", id: `${otherConnection}/${selectedStream}:${key}` }],
+        ]
+      ),
+    ] as [string, Record<string, unknown>][]) {
+      // biome-ignore lint/performance/noAwaitInLoops: Each rejected call uses the same persisted authorization state.
       const conflict = await call(first.accessToken, name, { ...args, grant_id: selected.grant_id });
       assert.equal(conflict.status, 200);
       assert.equal(resultOf(conflict).isError, true, `${name} cannot use another child's connection`);
+      assert.ok(
+        !JSON.stringify(resultOf(conflict)).includes(otherSentinel),
+        `${name} must not disclose the sibling's record`
+      );
+      assert.ok(
+        !JSON.stringify(resultOf(conflict)).includes(profileSentinel(selectedConnection)),
+        `${name} must not fall back to the selected child's own same-key record`
+      );
+      assert.equal(
+        ((resultOf(conflict).structuredContent as Record<string, unknown>).error as Record<string, unknown>).code,
+        name === "search" ? "connection_not_found" : "context.instance_mismatch",
+        `${name} fails with the cross-child error contract`
+      );
     }
-    const expiredChild = mustExist(nextChildren[0], "replacement package has a child");
+    const expiredChild = mustExist(
+      nextChildren.find((child) => child.streams[0]?.instance_ids[0] !== selectedConnection),
+      "replacement package has a sibling child to expire"
+    );
     getDb()
       .prepare("UPDATE tokens SET expires_at = ? WHERE grant_id = ?")
       .run("2000-01-01T00:00:00.000Z", expiredChild.grant_id);
@@ -7639,6 +7772,98 @@ test("prototype MCP profile selects explicit children and replacement tokens rej
       "unknown_grant_selector"
     );
 
+    // Recovery: use saved stream/instance hints to discover candidates, then
+    // inspect the complete persisted grant before choosing. This fixture does
+    // not establish a host's inspection of an OAuth authorization result.
+    const [savedStream] = selected.streams;
+    const replacements = nextChildren.filter(
+      (child) =>
+        child.status === "active" &&
+        child.streams.some(
+          (stream) =>
+            stream.name === savedStream?.name &&
+            stream.instance_ids.some((id) => savedStream?.instance_ids.includes(id))
+        )
+    );
+    assert.equal(replacements.length, 1, "fixture is unambiguous: one replacement child matches the saved hints");
+    const replacement = mustExist(replacements[0], "replacement child matches the saved stream and instance");
+    assert.notEqual(replacement.grant_id, selected.grant_id);
+    assert.deepEqual(
+      { ...replacement, grant_id: selected.grant_id },
+      selected,
+      "replacement discovery metadata matches the saved child except for its identity"
+    );
+    const replacementMember = mustExist(
+      (mustExist(secondAccess, "replacement package has full grants").members as GrantPackageMember[]).find(
+        (member) => member.grant_id === replacement.grant_id
+      ),
+      "candidate has a complete persisted grant"
+    );
+    const savedMember = mustExist(
+      (mustExist(firstAccess, "old package has full grants").members as GrantPackageMember[]).find(
+        (member) => member.grant_id === selected.grant_id
+      ),
+      "saved child has a complete persisted grant"
+    );
+    const { grant_id: _oldId, issued_at: _oldIssued, expires_at: oldExpiry, ...savedTerms } = savedMember.grant;
+    const {
+      grant_id: _newId,
+      issued_at: _newIssued,
+      expires_at: newExpiry,
+      ...replacementTerms
+    } = replacementMember.grant;
+    assert.deepEqual(
+      replacementTerms,
+      savedTerms,
+      "inspect replacement restrictions, including fields and stream time bounds"
+    );
+    assert.ok(Date.parse(String(newExpiry)) > Date.now(), "inspect the replacement grant's own expiry");
+    assert.ok(
+      Date.parse(String(newExpiry)) >= Date.parse(String(oldExpiry)),
+      "new consent starts a fresh expiry period"
+    );
+    for (const key of PROFILE_SHARED_KEYS) {
+      // biome-ignore lint/performance/noAwaitInLoops: Verify recovery before replaying the saved cursor.
+      const recovered = await call(second.accessToken, "fetch", {
+        grant_id: replacement.grant_id,
+        id: `${selectedConnection}/${selectedStream}:${key}`,
+      });
+      assert.equal(resultOf(recovered).isError, undefined, "replacement child reads the same source records");
+      assert.ok(JSON.stringify(resultOf(recovered)).includes(profileSentinel(selectedConnection)));
+    }
+    const staleCursor = await call(second.accessToken, "search", {
+      ...searchArgs,
+      cursor: oldSearchCursor,
+      grant_id: replacement.grant_id,
+    });
+    assert.equal(staleCursor.status, 200);
+    assert.equal(resultOf(staleCursor).isError, true, "a cursor minted for the old grant authority is rejected");
+    const staleError = (resultOf(staleCursor).structuredContent as Record<string, unknown>).error as Record<
+      string,
+      unknown
+    >;
+    assert.equal(staleError.code, "invalid_cursor");
+    assert.match(String(staleError.message), /Cursor does not match this query and grant authority/);
+    const restartedFirst = await call(second.accessToken, "search", { ...searchArgs, grant_id: replacement.grant_id });
+    assert.equal(resultOf(restartedFirst).isError, undefined, "restarting without the old cursor succeeds");
+    const restartedCursor = mustExist(
+      structuredContentData(resultOf(restartedFirst)).next_cursor as string | undefined,
+      "restarted search mints a cursor under the replacement child"
+    );
+    const restartedSecond = await call(second.accessToken, "search", {
+      ...searchArgs,
+      cursor: restartedCursor,
+      grant_id: replacement.grant_id,
+    });
+    assert.equal(resultOf(restartedSecond).isError, undefined, "new cursor pages under the replacement child");
+    const hitIds = (response: JsonResponse) =>
+      ((resultOf(response).structuredContent as Record<string, unknown>).results as Array<{ id: string }>).map(
+        (hit) => hit.id
+      );
+    assert.equal(hitIds(restartedFirst).length, 1);
+    assert.equal(hitIds(restartedSecond).length, 1);
+    assert.notEqual(hitIds(restartedSecond)[0], hitIds(restartedFirst)[0], "pagination progresses");
+
     await revokeGrant(selected.grant_id, { request_id: "prototype-profile-child-revoke" });
     const ended = await call(first.accessToken, "schema", { grant_id: selected.grant_id });
     assert.equal(ended.status, 200);
@@ -7655,23 +7880,26 @@ test("prototype MCP profile selects explicit children and replacement tokens rej
     const afterChildren = (resultOf(afterDiscovery).structuredContent as Record<string, unknown>)
       .children as typeof children;
     assert.equal(afterChildren.find((child) => child.grant_id === selected.grant_id)?.status, "revoked");
-    const other = mustExist(children.find((child) => child.grant_id !== selected.grant_id), "package has a live sibling");
+    const other = mustExist(
+      children.find((child) => child.grant_id !== selected.grant_id),
+      "package has a live sibling"
+    );
     const live = await call(first.accessToken, "schema", { grant_id: other.grant_id });
     assert.equal(resultOf(live).isError, undefined);
     await revokeGrant(other.grant_id, { request_id: "prototype-profile-last-child-revoke" });
     const inactiveResponse = await fetch(`${rsUrl}/mcp`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${first.accessToken}`,
-        Accept: "application/json, text/event-stream",
-        "Content-Type": "application/json",
-      },
       body: JSON.stringify({
         id: 99,
         jsonrpc: "2.0",
         method: "tools/call",
-        params: { name: "schema", arguments: { grant_id: other.grant_id } },
+        params: { arguments: { grant_id: other.grant_id }, name: "schema" },
       }),
+      headers: {
+        Accept: "application/json, text/event-stream",
+        Authorization: `Bearer ${first.accessToken}`,
+        "Content-Type": "application/json",
+      },
+      method: "POST",
     });
     assert.equal(inactiveResponse.status, 401);
     assert.match(inactiveResponse.headers.get("www-authenticate") || "", /error="invalid_token"/);

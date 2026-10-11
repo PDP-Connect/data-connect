@@ -30,6 +30,13 @@ with no active child returns HTTP 401 with Bearer `invalid_token`. Re-consent mi
 new `grant_id` values, even when connection identifiers stay the same. Package
 resource templates are unavailable; use tools with the explicit selector.
 
+After replacing authorization, inspect the complete new result, rediscover the
+children and choose explicitly. Source and instance handles are discovery hints;
+several children may cover the same source. Restart grant-bound searches without
+their old cursors. A new selector does not renew a saved search cursor. Tool errors
+all carry `isError` and text, but SDK input-validation errors have no structured
+error envelope. Read the text as well as any structured error.
+
 This slice still calls the existing single-grant RS read endpoints with child
 bearers. Package RS endpoints, pairwise identity changes, freshness and presentation
 inputs belong to later slices. This flag does not claim full MCP profile conformance.
