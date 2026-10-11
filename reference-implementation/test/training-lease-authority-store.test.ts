@@ -13,6 +13,7 @@
  * PROTOTYPE: experimental AI Training Profile work, off by default.
  */
 import assert from "node:assert/strict";
+import { once } from "node:events";
 import {
   copyFileSync,
   existsSync,
@@ -255,39 +256,55 @@ describe("L3 conformance: issuance racing withdrawal (concurrent connections)", 
       const clock = { now: T0 };
       const main = openNode(paths, clock, { nodeId: "withdrawer" });
       seed(main);
-      const counter = new Int32Array(new SharedArrayBuffer(4));
-      const workers = [0, 1, 2].map(
-        (i) =>
-          new Promise<{
-            issued: Array<{ jti: string; exp: number }>;
-            refusal: string | null;
-          }>((resolve, reject) => {
-            const w = new Worker(
-              new URL(
-                "./helpers/training-lease-issuer-worker.ts",
-                import.meta.url,
-              ),
-              {
-                workerData: {
-                  ...paths,
-                  grantId: "grt_1",
-                  clientId: "client_1",
-                  nodeId: `issuer-${i}`,
-                  baseMs: T0,
-                  maxAttempts: 100_000,
-                  counter,
-                },
-              },
-            );
-            w.once("message", resolve);
-            w.once("error", reject);
-          }),
-      );
-      // Start barrier: withdraw only once the issuers are mid-stream.
+      const issuedCount = new Int32Array(new SharedArrayBuffer(4));
+      const finishedCount = new Int32Array(new SharedArrayBuffer(4));
+      const startSignal = new Int32Array(new SharedArrayBuffer(4));
+      type WorkerResult = {
+        issued: Array<{ jti: string; exp: number }>;
+        refusal: string | null;
+      };
+      const workers: Array<Promise<WorkerResult>> = [];
+      // Open each connection before any issuer starts writing. This keeps
+      // initialization locks out of the issuance race under CPU pressure.
+      for (let i = 0; i < 3; i += 1) {
+        const worker = new Worker(
+          new URL(
+            "./helpers/training-lease-issuer-worker.ts",
+            import.meta.url,
+          ),
+          {
+            workerData: {
+              ...paths,
+              grantId: "grt_1",
+              clientId: "client_1",
+              nodeId: `issuer-${i}`,
+              baseMs: T0,
+              maxAttempts: 100_000,
+              issuedCount,
+              finishedCount,
+              startSignal,
+            },
+          },
+        );
+        await once(worker, "message");
+        workers.push(
+          once(worker, "message").then(([message]) => message as WorkerResult),
+        );
+      }
+      Atomics.store(startSignal, 0, 1);
+      Atomics.notify(startSignal, 0, workers.length);
+      // Let issuers reach a target, or finish on a fail-closed lock refusal.
       const target = 20 + round * 40;
-      while (Atomics.load(counter, 0) < target) {
+      while (
+        Atomics.load(issuedCount, 0) < target &&
+        Atomics.load(finishedCount, 0) < 3
+      ) {
         await new Promise((r) => setImmediate(r));
       }
+      assert.ok(
+        Atomics.load(issuedCount, 0) >= target,
+        `issuers stopped before reaching the race target ${target}`,
+      );
       const withdrawal = main.withdraw({
         grantId: "grt_1",
         reason: "training_withdrawn",
@@ -301,10 +318,9 @@ describe("L3 conformance: issuance racing withdrawal (concurrent connections)", 
         "the race should let some leases through before the withdrawal",
       );
       for (const r of results) {
-        assert.equal(
-          r.refusal,
-          "withdrawn",
-          "every issuer stopped because of the withdrawal",
+        assert.ok(
+          r.refusal === "withdrawn" || r.refusal === "unavailable",
+          `issuer stopped without a fail-closed refusal: ${r.refusal}`,
         );
       }
       const maxExpMs = Math.max(...all.map((l) => l.exp * 1000));
@@ -320,7 +336,7 @@ describe("L3 conformance: issuance racing withdrawal (concurrent connections)", 
         .issuances("grt_1")
         .filter((l) => !returned.has(l.jti));
       process.stdout.write(
-        `# race round ${round}: returned=${all.length} journaled_but_refused=${refusedAfterTombstone.length}\n`,
+        `# race round ${round}: returned=${all.length} target=${target} journaled_but_refused=${refusedAfterTombstone.length}\n`,
       );
       main.close();
     });

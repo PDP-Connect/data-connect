@@ -18,7 +18,9 @@ interface Input {
   nodeId: string;
   baseMs: number;
   maxAttempts: number;
-  counter: Int32Array;
+  issuedCount: Int32Array;
+  finishedCount: Int32Array;
+  startSignal: Int32Array;
 }
 
 const input = workerData as Input;
@@ -30,6 +32,8 @@ const store = TrainingAuthorityStore.open({
   nodeId: input.nodeId,
   now: () => input.baseMs + tick * 1000,
 });
+parentPort?.postMessage({ type: "ready" });
+Atomics.wait(input.startSignal, 0, 0);
 const issued: Array<{ jti: string; exp: number }> = [];
 let refusal: string | null = null;
 for (let i = 0; i < input.maxAttempts; i += 1) {
@@ -40,11 +44,13 @@ for (let i = 0; i < input.maxAttempts; i += 1) {
   });
   if (out.ok) {
     issued.push({ jti: out.claims.jti, exp: out.claims.exp });
-    Atomics.add(input.counter, 0, 1);
+    Atomics.add(input.issuedCount, 0, 1);
   } else {
     refusal = out.reason;
     break;
   }
 }
+refusal ??= "attempts_exhausted";
 store.close();
-parentPort?.postMessage({ issued, refusal });
+Atomics.add(input.finishedCount, 0, 1);
+parentPort?.postMessage({ type: "result", issued, refusal });
