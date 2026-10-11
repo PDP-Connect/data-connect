@@ -84,7 +84,9 @@ export class ToyApp implements HeldStore {
       return null;
     }
     const result = this.search(job.grantId, job.word);
-    if (result === null) {
+    // The work takes time. Check the gate again after it, before reporting complete use or
+    // returning the result: use that crossed the bound is cancelled (Core C2).
+    if (result === null || !this.#client?.canUse(job.grantId).ok) {
       this.#cancel(job);
       return null;
     }

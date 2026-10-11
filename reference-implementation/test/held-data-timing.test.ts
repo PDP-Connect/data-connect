@@ -214,6 +214,24 @@ describe("held-data timing traces (converge-r1-astra §3)", () => {
       assert.ok(sim.app.observations.some((o) => o.kind === "cancel" && o.grantId === "g1"));
     });
 
+    it("work whose search crosses the bound is cancelled, not completed", async () => {
+      const sim = await started({ policy: { pauseThresholdMs: 48 * HOUR } });
+      const s = sim.t;
+      const job = sim.app.enqueue("g1", "hello");
+      sim.t = s + 48 * HOUR - MIN;
+      assert.equal(sim.app.start(job), true);
+      // The gate passes at the start of the search; traversing the index takes the clock past s + threshold.
+      const get = sim.app.index.get.bind(sim.app.index);
+      sim.app.index.get = (word) => {
+        sim.t = s + 48 * HOUR + MIN;
+        return get(word);
+      };
+      assert.equal(sim.app.finish(job), null, "no result is returned for work that finished after the bound");
+      assert.equal(job.state, "cancelled");
+      assert.deepEqual(sim.app.observations.filter((o) => o.kind === "complete"), []);
+      assert.ok(sim.app.observations.some((o) => o.kind === "cancel" && o.at >= s + 48 * HOUR));
+    });
+
     it("receipt before the bound: work stops at once on receipt, on the declared clock, and nothing completes after it", async () => {
       const sim = await started({ policy: { pauseThresholdMs: 48 * HOUR } });
       const inFlight = sim.app.enqueue("g1", "hello");
