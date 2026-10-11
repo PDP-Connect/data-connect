@@ -18,6 +18,7 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 import { ToyApp } from "../examples/held-data-toy-app/app.ts";
 import { HeldDataClient } from "../lib/held-data/client.ts";
+import { HeldDataAuthority } from "../lib/held-data/authority.ts";
 import { httpStatusTransport } from "../lib/held-data/http-transport.ts";
 import { makeDpopProof, thumbprint } from "../lib/training-lease/dpop.ts";
 import { generateEd25519KeyPair } from "../lib/training-lease/jws.ts";
@@ -948,5 +949,179 @@ describe("held-data lifecycle over HTTP", () => {
       },
       { ...heldDataOpts(), cimdFetchDependencies } as never,
     );
+  });
+});
+
+
+describe("lane F: lifecycle discovery", () => {
+  it("advertises pdpp_grant_lifecycle_endpoint only with the flag on", async () => {
+    await withServer(false, async (h) => {
+      const metadata = await fetchJson<Record<string, unknown>>(`${h.asUrl}/.well-known/oauth-authorization-server`);
+      assert.equal(metadata.status, 200);
+      assert.equal(metadata.body.pdpp_grant_lifecycle_endpoint, `${metadata.body.issuer}/oauth/grant-lifecycle`);
+    }, heldDataOpts());
+  });
+
+  it("omits pdpp_grant_lifecycle_endpoint with the flag off", async () => {
+    await withServer(false, async (h) => {
+      const metadata = await fetchJson<Record<string, unknown>>(`${h.asUrl}/.well-known/oauth-authorization-server`);
+      assert.equal(metadata.status, 200);
+      assert.equal(Object.hasOwn(metadata.body, "pdpp_grant_lifecycle_endpoint"), false);
+    });
+  });
+});
+
+
+describe("lane F: single-use read window", () => {
+  it("returns window_closed with surviving use and no deletion instruction", async () => {
+    const clock = { now: Date.now() };
+    await withServer(false, async (h) => {
+      const expiry = clock.now + 10 * DAY;
+      const windowEnd = clock.now + 60_000;
+      const g = await ordinaryGrant(h, { access_mode: "single_use" });
+      getDb().prepare("UPDATE grants SET expires_at = ?, grant_json = json_set(grant_json, '$.expires_at', ?) WHERE grant_id = ?")
+        .run(new Date(expiry).toISOString(), new Date(expiry).toISOString(), g.grantId);
+      getDb().prepare("UPDATE tokens SET expires_at = ? WHERE token_id = ?").run(new Date(windowEnd).toISOString(), g.token);
+      const initial = await status(h, g.token, g.grantId);
+      assert.equal(initial.status, 200, JSON.stringify(initial.body));
+      assert.equal(initial.body.grants[0]!.read_state, "active");
+      clock.now = windowEnd;
+      const closed = await status(h, g.token, g.grantId);
+      assert.equal(closed.body.grants[0]!.read_state, "window_closed");
+      assert.equal(closed.body.grants[0]!.held_data, "permitted");
+      assert.equal(Object.hasOwn(closed.body.grants[0]!, "ended_at"), false);
+      assert.equal(Object.hasOwn(closed.body.grants[0]!, "erasure"), false);
+      const app = new ToyApp();
+      const client = new HeldDataClient({ now: () => clock.now, store: app,
+        status: httpStatusTransport({ asBaseUrl: h.asUrl, credentialFor: () => g.token }),
+      });
+      app.attach(client);
+      app.sync(g.grantId, [{ id: "r1", stream: "messages", text: "survives" }]);
+      await client.reconcile();
+      assert.equal(client.grantState(g.grantId)?.readState, "window_closed");
+      assert.equal(client.canUse(g.grantId).ok, true);
+      assert.equal(client.deleteBy(g.grantId), clock.now + 90 * DAY);
+      clock.now = expiry;
+      assert.equal((await status(h, g.token, g.grantId)).body.grants[0]!.read_state, "expired");
+      assert.equal((await owner(h, `/v1/owner/grants/${g.grantId}/lifecycle/erase`, "POST")).status, 200);
+      const erased = await status(h, g.token, g.grantId);
+      assert.equal(erased.body.grants[0]!.read_state, "expired");
+      assert.equal(erased.body.grants[0]!.held_data, "erase");
+      await client.reconcile();
+      assert.equal(app.holds(g.grantId).records, 0);
+    }, heldDataOpts(clock));
+  });
+});
+
+
+describe("lane F: P9 decommission", () => {
+  it("offers all grants, requires dispositions, persists retirement, and the client pauses then deletes", async () => {
+    const clock = { now: Date.now() };
+    await withServer(false, async (h) => {
+      const live = await ordinaryGrant(h, { access_mode: "continuous" });
+      const consumed = await ordinaryGrant(h, { access_mode: "single_use" });
+      const ended = await ordinaryGrant(h, { access_mode: "continuous" });
+      await revoke(h, h.ownerToken, ended.grantId, { pdpp_disposition: "keep" });
+      const app = new ToyApp();
+      const client = new HeldDataClient({ now: () => clock.now, store: app,
+        status: httpStatusTransport({ asBaseUrl: h.asUrl, credentialFor: () => live.token }),
+      });
+      app.attach(client);
+      app.sync(live.grantId, [{ id: "r1", stream: "messages", text: "held" }]);
+      await client.reconcile();
+      const origin = clock.now;
+      const path = "/v1/owner/lifecycle/decommission";
+      const offer = await owner(h, path);
+      assert.equal(offer.status, 200, JSON.stringify(offer.body));
+      const grants = offer.body.grants as { grant_id: string; choices: string[]; grant: Record<string, unknown> | null }[];
+      assert.deepEqual(grants.map((g) => g.grant_id).sort(), [live.grantId, consumed.grantId, ended.grantId].sort());
+      for (const g of grants) {
+        assert.deepEqual(g.choices, ["keep", "delete"]);
+        assert.equal(Object.hasOwn(g, "disposition"), false);
+        assert.equal(g.grant?.grant_id, g.grant_id);
+        assert.ok(g.grant && Object.hasOwn(g.grant, "access_mode"));
+      }
+      assert.equal(offer.body.pause_threshold_ms, 7 * DAY);
+      assert.equal(offer.body.long_stop_ms, 90 * DAY);
+      assert.match(String(offer.body.owner_message), /pause.*positive assessment.*delete/i);
+      const send = (body: unknown) => fetchJson<Record<string, unknown>>(`${h.asUrl}${path}`,
+        json(body, { Authorization: `Bearer ${h.ownerToken}` }));
+      assert.equal((await send({ offer_id: offer.body.offer_id })).status, 400);
+      assert.equal((await status(h, live.token, live.grantId)).status, 200);
+      const complete = await send({ offer_id: offer.body.offer_id,
+        dispositions: Object.fromEntries(grants.map((g) => [g.grant_id, "keep"])),
+      });
+      assert.equal(complete.status, 200, JSON.stringify(complete.body));
+      assert.equal(complete.body.decommissioned, true);
+      const rt = getHeldDataRuntime();
+      assert.ok(rt);
+      assert.equal(rt.authority.decommissioned, true);
+      const reopened = HeldDataAuthority.open({ journalPath: rt.authority.journalPath, now: () => clock.now });
+      assert.equal(reopened.decommissioned, true);
+      assert.equal((await status(h, live.token, live.grantId)).status, 503);
+      clock.now = origin + 7 * DAY;
+      await client.tick();
+      assert.equal(client.canUse(live.grantId).ok, false);
+      assert.equal(app.holds(live.grantId).records, 1);
+      clock.now = origin + 90 * DAY;
+      await client.tick();
+      assert.equal(app.holds(live.grantId).records, 0);
+      assert.equal(app.holds(live.grantId).summary, false);
+      assert.equal(app.holds(live.grantId).indexEntries, 0);
+    }, heldDataOpts(clock));
+  });
+
+  it("keeps decommission routes absent with the flag off", async () => {
+    await withServer(false, async (h) => {
+      assert.equal((await owner(h, "/v1/owner/lifecycle/decommission")).status, 404);
+      assert.equal((await owner(h, "/v1/owner/lifecycle/decommission", "POST")).status, 404);
+    });
+  });
+});
+
+
+describe("lane F: P6 advance election over HTTP", () => {
+  it("keeps reads before expiry, reports acceptance and effective time separately, and erases at expiry", async () => {
+    const clock = { now: Date.now() };
+    await withServer(false, async (h) => {
+      const g = await ordinaryGrant(h, { access_mode: "continuous" });
+      const accepted = clock.now;
+      const expiry = clock.now + DAY;
+      getDb().prepare("UPDATE grants SET expires_at = ?, grant_json = json_set(grant_json, '$.expires_at', ?) WHERE grant_id = ?")
+        .run(new Date(expiry).toISOString(), new Date(expiry).toISOString(), g.grantId);
+      getDb().prepare("UPDATE tokens SET expires_at = ? WHERE token_id = ?").run(new Date(expiry).toISOString(), g.token);
+      const elected = await owner(h, `/v1/owner/grants/${g.grantId}/lifecycle/elect-delete`, "POST");
+      assert.equal(elected.status, 200, JSON.stringify(elected.body));
+      const instruction = (elected.body.erasures as Record<string, unknown>[])[0]!;
+      assert.equal(instruction.accepted_at, new Date(accepted).toISOString());
+      assert.equal(instruction.effective_at, new Date(expiry).toISOString());
+      assert.equal(instruction.delivered_at, null);
+      assert.equal(instruction.use_stops_by, new Date(expiry + 7 * DAY).toISOString());
+      assert.equal((await status(h, g.token, g.grantId)).body.grants[0]!.held_data, "permitted");
+      assert.equal(await rsRead(h, g.token), 200);
+      const app = new ToyApp();
+      const client = new HeldDataClient({ now: () => clock.now, store: app,
+        status: httpStatusTransport({ asBaseUrl: h.asUrl, credentialFor: () => g.token }),
+        policy: { disposeAt: "deadline" },
+      });
+      app.attach(client);
+      app.sync(g.grantId, [{ id: "r", stream: "messages", text: "held" }]);
+      await client.reconcile();
+      assert.equal(client.canUse(g.grantId).ok, true);
+      clock.now = expiry;
+      const expired = (await status(h, g.token, g.grantId)).body.grants[0]!;
+      assert.equal(expired.read_state, "expired");
+      assert.equal(expired.held_data, "erase");
+      const e = expired.erasure as Record<string, unknown>;
+      assert.equal(e.instruction_id, instruction.operation_id);
+      assert.equal(e.accepted_at, new Date(accepted).toISOString());
+      assert.equal(e.effective_at, new Date(expiry).toISOString());
+      await client.reconcile();
+      assert.equal(client.canUse(g.grantId).ok, false);
+      assert.equal(client.deleteBy(g.grantId), expiry + 30 * DAY);
+      clock.now += 30 * DAY;
+      await client.tick();
+      assert.equal(app.holds(g.grantId).records, 0);
+    }, heldDataOpts(clock));
   });
 });

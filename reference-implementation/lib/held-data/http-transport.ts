@@ -38,11 +38,13 @@ export function parseStatusWire(raw: unknown): StatusResult | null {
     return null;
   }
   const endedAt = ms(r.ended_at);
-  let grantState: "active" | "expired" | "ended" = "active";
+  let grantState: "active" | "window_closed" | "expired" | "ended" = "active";
   if (r.read_state === "revoked") {
     grantState = "ended";
   } else if (r.read_state === "expired") {
     grantState = "expired";
+  } else if (r.read_state === "window_closed") {
+    grantState = "window_closed";
   }
   return {
     grant_id: r.grant_id,
@@ -53,7 +55,7 @@ export function parseStatusWire(raw: unknown): StatusResult | null {
         : null,
     erasures:
       erasure && typeof erasure.instruction_id === "string"
-        ? [{ operation_id: erasure.instruction_id, scope: { streams: "all" }, accepted_at: ms(erasure.accepted_at) }]
+        ? [{ operation_id: erasure.instruction_id, scope: { streams: "all" }, accepted_at: ms(erasure.accepted_at), effective_at: ms(erasure.effective_at) }]
         : [],
     ordinary_use: r.held_data === "erase" ? "stopped" : "permitted",
     assessed_at: assessed,

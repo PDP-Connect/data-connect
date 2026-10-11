@@ -16,7 +16,7 @@
  *
  * PROTOTYPE: experimental held-data lifecycle work, off by default.
  */
-import type { ErasureScope, StatusResult } from "./authority.ts";
+import type { ErasureScope, StatusAnswer, StatusResult } from "./authority.ts";
 
 export const HOUR_MS = 60 * 60 * 1000;
 export const DAY_MS = 24 * HOUR_MS;
@@ -73,10 +73,26 @@ export type ReportTransport = (r: {
   reportedAt?: number;
 }) => Promise<boolean>;
 
+/** Acquisition identity and, when known, the delivered record version. */
+export interface HeldRecordRef {
+  id: string;
+  stream: string;
+  sourceId?: string;
+  instanceId?: string;
+  version?: string;
+}
+
+interface HeldRecord {
+  ref: HeldRecordRef;
+  firstAcquiredAt: number;
+}
+
 /** Where the app keeps the copy and its derivatives. */
 export interface HeldStore {
   /** Remove the covered records and every derivative built from them. */
   dispose(grantId: string, scope: ErasureScope): void;
+  /** Remove these versions and delete or regenerate every derivative that used them. */
+  disposeRecords?(grantId: string, records: readonly HeldRecordRef[]): void;
 }
 
 /** K8: what a downstream holder receives. Absolute times only. */
@@ -113,6 +129,7 @@ interface HeldErasure {
 
 interface HeldGrant {
   grantId: string;
+  readState: StatusAnswer["grant_state"];
   firstAcquiredAt: number;
   freshnessOrigin: number | null;
   custodyOnly: boolean;
@@ -123,6 +140,8 @@ interface HeldGrant {
   deletedAt: number | null;
   deleteReason: string | null;
   needsReconcile: boolean;
+  recordsTracked: boolean;
+  records: Map<string, HeldRecord>;
 }
 
 export interface LifecycleEvent {
@@ -141,6 +160,8 @@ export class HeldDataClient {
   readonly #downstream: Downstream[];
   readonly #grants = new Map<string, HeldGrant>();
   readonly #batch: boolean;
+  /** Acquisition clocks survive grant changes and disposal; versions share identity only when ambiguous. */
+  readonly #acquisitions = new Map<string, Map<string | undefined, number>>();
   #nextAttemptAt: number | null = null;
   readonly events: LifecycleEvent[] = [];
 
@@ -182,6 +203,7 @@ export class HeldDataClient {
     if (!prior || prior.deletedAt !== null) {
       this.#grants.set(grantId, {
         grantId,
+        readState: prior?.readState ?? "active",
         firstAcquiredAt: now,
         freshnessOrigin: null,
         custodyOnly: false,
@@ -191,6 +213,8 @@ export class HeldDataClient {
         deletedAt: null,
         deleteReason: null,
         needsReconcile: false,
+        recordsTracked: false,
+        records: new Map(),
       });
       this.#log(grantId, "acquire");
       // The first check is due 24 h after first acquisition.
@@ -199,8 +223,52 @@ export class HeldDataClient {
     return true;
   }
 
+  /** Record delivery per record; the returned set excludes copies whose retention already ended. */
+  acquireRecords<T extends HeldRecordRef>(grantId: string, records: readonly T[]): T[] {
+    if (this.policy.retentionCeilingMs !== null && !this.#store.disposeRecords) {
+      throw new Error("per-record retention requires a store with disposeRecords");
+    }
+    const priorGrant = this.#grants.get(grantId);
+    if (priorGrant && [...priorGrant.erasures.values()].some((e) => e.scope.streams === "all")) {
+      return [];
+    }
+    const now = this.#now();
+    const eligible: { ref: T; key: string; firstAcquiredAt: number }[] = [];
+    for (const ref of records) {
+      const identity = JSON.stringify([ref.sourceId ?? null, ref.instanceId ?? null, ref.stream, ref.id]);
+      const versions = this.#acquisitions.get(identity) ?? new Map<string | undefined, number>();
+      const prior = ref.version === undefined
+        ? Math.min(now, ...versions.values())
+        : Math.min(now, versions.get(ref.version) ?? now, versions.get(undefined) ?? now);
+      versions.set(ref.version, prior);
+      this.#acquisitions.set(identity, versions);
+      if (this.policy.retentionCeilingMs !== null && now >= prior + this.policy.retentionCeilingMs) {
+        continue;
+      }
+      eligible.push({ ref, key: JSON.stringify([identity, ref.version ?? null]), firstAcquiredAt: prior });
+    }
+    if (eligible.length === 0 || !this.acquire(grantId)) {
+      return [];
+    }
+    const g = this.#grants.get(grantId);
+    if (!g) {
+      return [];
+    }
+    g.recordsTracked = true;
+    for (const r of eligible) {
+      g.records.set(r.key, { ref: {
+        id: r.ref.id, stream: r.ref.stream,
+        ...(r.ref.sourceId === undefined ? {} : { sourceId: r.ref.sourceId }),
+        ...(r.ref.instanceId === undefined ? {} : { instanceId: r.ref.instanceId }),
+        ...(r.ref.version === undefined ? {} : { version: r.ref.version }),
+      }, firstAcquiredAt: r.firstAcquiredAt });
+    }
+    return eligible.map((r) => r.ref);
+  }
+
   /** The gate the app checks before every use. */
   canUse(grantId: string): UseDecision {
+    this.#disposeDue();
     const g = this.#grants.get(grantId);
     if (!g || g.deletedAt !== null) {
       return { ok: false, reason: "deleted" };
@@ -245,7 +313,13 @@ export class HeldDataClient {
     }
     const candidates: number[] = [];
     if (this.policy.retentionCeilingMs !== null) {
-      candidates.push(g.firstAcquiredAt + this.policy.retentionCeilingMs);
+      if (g.recordsTracked) {
+        for (const r of g.records.values()) {
+          candidates.push(r.firstAcquiredAt + this.policy.retentionCeilingMs);
+        }
+      } else {
+        candidates.push(g.firstAcquiredAt + this.policy.retentionCeilingMs);
+      }
     }
     if (this.policy.longStopMs !== null) {
       candidates.push((g.freshnessOrigin ?? g.firstAcquiredAt) + this.policy.longStopMs);
@@ -374,6 +448,7 @@ export class HeldDataClient {
       return;
     }
     g.lastPosition = res.as_position;
+    g.readState = res.grant_state;
     for (const e of res.erasures) {
       this.#receiveErasure(g.grantId, e.operation_id, e.scope);
     }
@@ -424,13 +499,21 @@ export class HeldDataClient {
           if (e.scope.streams === "all") {
             g.deletedAt = now;
             g.deleteReason = "erasure";
+            g.records.clear();
           }
         }
       }
       if (g.deletedAt !== null) {
         continue;
       }
-      const by = this.deleteBy(g.grantId);
+      const grantDeadlines: number[] = [];
+      if (this.policy.longStopMs !== null) {
+        grantDeadlines.push((g.freshnessOrigin ?? g.firstAcquiredAt) + this.policy.longStopMs);
+      }
+      if (!g.recordsTracked && this.policy.retentionCeilingMs !== null) {
+        grantDeadlines.push(g.firstAcquiredAt + this.policy.retentionCeilingMs);
+      }
+      const by = grantDeadlines.length ? Math.min(...grantDeadlines) : null;
       if (by !== null && now >= by) {
         this.#store.dispose(g.grantId, { streams: "all" });
         g.deletedAt = now;
@@ -439,6 +522,25 @@ export class HeldDataClient {
             ? "retention_ceiling"
             : "long_stop";
         this.#log(g.grantId, "disposed", g.deleteReason);
+        g.records.clear();
+      }
+      if (g.deletedAt === null && g.recordsTracked && this.policy.retentionCeilingMs !== null) {
+        const retentionCeilingMs = this.policy.retentionCeilingMs;
+        const due = [...g.records].filter(([, r]) => now >= r.firstAcquiredAt + retentionCeilingMs);
+        if (due.length > 0) {
+          if (!this.#store.disposeRecords) {
+            throw new Error("per-record retention requires a store with disposeRecords");
+          }
+          this.#store.disposeRecords(g.grantId, due.map(([, r]) => r.ref));
+          for (const [key] of due) {
+            g.records.delete(key);
+          }
+          this.#log(g.grantId, "disposed", "retention_ceiling");
+          if (g.records.size === 0) {
+            g.deletedAt = now;
+            g.deleteReason = "retention_ceiling";
+          }
+        }
       }
     }
   }

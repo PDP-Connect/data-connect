@@ -117,6 +117,7 @@ import {
   authenticateOAuthTokenClient,
   endProcessingAuthorityForGrant,
   ensureHeldDataGrant,
+  prepareHeldDataDecommission,
   heldDataWriteClient,
   prepareHeldDataStatusToken,
   readGrantForProcessing,
@@ -5343,6 +5344,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
       null,
     resolvePreRegisteredPublicClients: () => resolvePreRegisteredPublicClients(opts) as unknown[],
     resolveProcessingPermissionsSupported: () => getTrainingLeaseRuntime()?.supportedPermissions ?? [],
+    resolveHeldDataLifecycleEnabled: () => getHeldDataRuntime() !== null,
     resolvePublicUrl: resolvePublicUrl as unknown as Parameters<
       typeof mountAsAuthorizationServerMetadata
     >[1]["resolvePublicUrl"],
@@ -7292,6 +7294,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
         ...(opts.cimdFetchDependencies ? { cimdFetchDependencies: opts.cimdFetchDependencies } : {}),
       }),
     ensureGrant: ensureHeldDataGrant,
+    prepareDecommission: prepareHeldDataDecommission,
     introspect: introspect as unknown as Parameters<typeof mountHeldData>[1]["introspect"],
     prepareStatusToken: prepareHeldDataStatusToken,
     revokeGrant: (grantId, context) => revokeGrant(grantId, context),

@@ -93,7 +93,11 @@ type Entry =
       owner_notice_required: boolean;
       at: number;
     }
-  | { t: "erase"; id: string; grant_id: string; scope: ErasureScope; origin: string; at: number }
+  | { t: "erase"; id: string; grant_id: string; scope: ErasureScope; origin: string; at: number; accepted_at?: number }
+  | { t: "hd_advance"; id: string; grant_id: string; scope: ErasureScope; origin: string; at: number; effective_at: number | null }
+  | { t: "hd_decommission_offer"; id: string; grant_id: ""; grants: string[]; at: number }
+  | { t: "hd_decommission"; id: string; grant_id: ""; offer_id: string; at: number }
+  | { t: "hd_window"; id: string; grant_id: string; window_end: number; at: number }
   | { t: "hd_keep"; id: string; grant_id: string; at: number }
   | { t: "hd_delivered" | "hd_receipt"; id: string; grant_id: string; op: string; at: number }
   | {
@@ -110,7 +114,7 @@ type Entry =
 
 type GrantEntry = Extract<Entry, { t: "hd_grant" }>;
 type EndEntry = Extract<Entry, { t: "hd_end" }>;
-type EraseEntry = Extract<Entry, { t: "erase" }>;
+type EraseEntry = Extract<Entry, { t: "erase" | "hd_advance" }>;
 
 interface ErasureFacts {
   entry: EraseEntry;
@@ -128,6 +132,7 @@ interface ErasureFacts {
 
 interface GrantFacts {
   grant: GrantEntry;
+  readWindowEnd: number | null;
   end: EndEntry | null;
   /** The owner chose keep after an ending that recorded no disposition. */
   keptAt: number | null;
@@ -146,14 +151,14 @@ interface CredentialFacts {
 export interface StatusAnswer {
   grant_id: string;
   /** Read state only. It is not the ordinary-use assessment. */
-  grant_state: "active" | "expired" | "ended";
+  grant_state: "active" | "window_closed" | "expired" | "ended";
   ending: {
     path: EndingPath;
     ended_at: number;
     disposition: Disposition | null;
     owner_notice_required: boolean;
   } | null;
-  erasures: { operation_id: string; scope: ErasureScope; accepted_at: number }[];
+  erasures: { operation_id: string; scope: ErasureScope; accepted_at: number; effective_at?: number }[];
   /**
    * `permitted`: ordinary use may continue for data no listed erasure covers.
    * `stopped`: an erasure covers the whole copy. `custody_only`: a
@@ -217,6 +222,8 @@ export class HeldDataAuthority {
   #corrupt = false;
   #position = 0;
   #epoch: string | null = null;
+  #decommissionOffer: { id: string; grants: string[] } | null = null;
+  #decommissioned = false;
   /** Set when the epoch marker names a history this journal does not hold. */
   readonly #lostHistory: boolean;
 
@@ -260,6 +267,42 @@ export class HeldDataAuthority {
     return this.#position;
   }
 
+  get journalPath(): string {
+    return this.#o.journalPath;
+  }
+
+  get decommissioned(): boolean {
+    this.#refresh();
+    return this.#decommissioned;
+  }
+
+  allGrantIds(): string[] {
+    this.#refresh();
+    return [...this.#grants.keys()].sort();
+  }
+
+  /** Persist the complete set offered before the owner can retire lifecycle service. */
+  offerDecommission(): { id: string; grants: string[] } {
+    this.#requireWritable();
+    const grants = this.allGrantIds();
+    const id = randomUUID();
+    this.#append({ t: "hd_decommission_offer", id, grant_id: "", grants, at: this.#o.now() });
+    return { id, grants };
+  }
+
+  decommissionOfferMatches(id: string, grants: string[]): boolean {
+    this.#refresh();
+    return this.#decommissionOffer?.id === id && JSON.stringify(this.#decommissionOffer.grants) === JSON.stringify([...grants].sort());
+  }
+
+  completeDecommission(offerId: string): void {
+    this.#requireWritable();
+    if (!this.decommissionOfferMatches(offerId, this.allGrantIds())) {
+      throw new Error("decommission offer is stale");
+    }
+    this.#append({ t: "hd_decommission", id: randomUUID(), grant_id: "", offer_id: offerId, at: this.#o.now() });
+  }
+
   // ─── Writes ────────────────────────────────────────────────────────────────
 
   registerGrant(g: {
@@ -288,6 +331,16 @@ export class HeldDataAuthority {
       expires_at: g.expiresAtMs,
       at: this.#o.now(),
     });
+  }
+
+  /** Remember the first single-use read window; it never opens a second time. */
+  recordReadWindow(grantId: string, windowEnd: number): void {
+    this.#requireWritable();
+    this.#refresh();
+    const g = this.#grants.get(grantId);
+    if (g && g.readWindowEnd === null && Number.isFinite(windowEnd)) {
+      this.#append({ t: "hd_window", id: randomUUID(), grant_id: grantId, window_end: windowEnd, at: this.#o.now() });
+    }
   }
 
   /** Record a digest of a token issued for one or more grants (K3: digests, not tokens). */
@@ -411,6 +464,7 @@ export class HeldDataAuthority {
       });
     }
     const endedAt = this.#grants.get(input.grantId)?.end?.at ?? this.#o.now();
+    this.#activateAdvance(facts, endedAt);
     if (disposition !== "delete") {
       return { endedAt, erasure: null };
     }
@@ -468,11 +522,37 @@ export class HeldDataAuthority {
     const scope = input.scope ?? { streams: "all" };
     const covering = facts.erasures.find((e) => scopeCovers(e.entry.scope, scope));
     if (covering) {
-      return { operationId: covering.entry.id, acceptedAt: covering.entry.at };
+      if (covering.entry.t === "hd_advance" && !facts.end &&
+          (facts.grant.expires_at === null || this.#o.now() < facts.grant.expires_at)) {
+        this.end({ grantId: input.grantId, path: "owner_withdrawal", disposition: "delete" });
+      }
+      return { operationId: covering.entry.id, acceptedAt: this.#acceptedAt(covering) };
     }
     const id = `hdop_${randomUUID()}`;
     const at = this.#o.now();
     this.#append({ t: "erase", id, grant_id: input.grantId, scope, origin: input.origin, at });
+    return { operationId: id, acceptedAt: at };
+  }
+
+  /** Optional Core advance election: durable now, effective only at grant end. */
+  electAdvance(grantId: string): { operationId: string; acceptedAt: number } {
+    this.#requireWritable();
+    this.#refresh();
+    const facts = this.#grants.get(grantId);
+    if (!facts) {
+      throw new Error(`unknown grant ${grantId}`);
+    }
+    const existing = facts.erasures.find((e) => e.entry.scope.streams === "all");
+    if (existing) {
+      return { operationId: existing.entry.id, acceptedAt: this.#acceptedAt(existing) };
+    }
+    if (facts.end || (facts.grant.expires_at !== null && this.#o.now() >= facts.grant.expires_at)) {
+      return this.requestErasure({ grantId, origin: "owner_election" });
+    }
+    const id = `hdop_${randomUUID()}`;
+    const at = this.#o.now();
+    this.#append({ t: "hd_advance", id, grant_id: grantId, scope: { streams: "all" },
+      origin: "advance_election", at, effective_at: facts.grant.expires_at });
     return { operationId: id, acceptedAt: at };
   }
 
@@ -514,7 +594,8 @@ export class HeldDataAuthority {
       return false;
     }
     const e = facts.erasures[op.index];
-    if (!e) {
+    const effectiveAt = e ? this.#effectiveAt(facts, e) : null;
+    if (!e || effectiveAt === null || effectiveAt > this.#o.now()) {
       return false;
     }
     if (input.kind === "receipt") {
@@ -616,6 +697,9 @@ export class HeldDataAuthority {
    * Serving an erasure records its delivery.
    */
   status(principal: ReadPrincipal, grantIds: readonly string[]): StatusResult[] {
+    if (this.decommissioned) {
+      throw new AuthorityUnavailableError("AS is decommissioned; lifecycle service has retired");
+    }
     if (this.lost) {
       throw new AuthorityUnavailableError("authority history was lost; no lifecycle answer can be given");
     }
@@ -666,6 +750,7 @@ export class HeldDataAuthority {
       operation_id: string;
       scope: ErasureScope;
       accepted_at: number;
+      effective_at: number | null;
       delivered_at: number | null;
       receipt_at: number | null;
       delete_by: number | null;
@@ -685,7 +770,8 @@ export class HeldDataAuthority {
       erasures: facts.erasures.map((e) => ({
         operation_id: e.entry.id,
         scope: e.entry.scope,
-        accepted_at: e.entry.at,
+        accepted_at: this.#acceptedAt(e),
+        effective_at: this.#effectiveAt(facts, e),
         delivered_at: e.deliveredAt,
         receipt_at: e.receiptAt,
         delete_by: e.receiptAt === null ? null : e.receiptAt + deletionPeriodMs,
@@ -730,12 +816,18 @@ export class HeldDataAuthority {
 
   #answer(facts: GrantFacts, now: number): StatusAnswer {
     const g = facts.grant;
-    const wholeErased = facts.erasures.some((e) => e.entry.scope.streams === "all");
+    const effective = facts.erasures.filter((e) => {
+      const at = this.#effectiveAt(facts, e);
+      return at !== null && at <= now;
+    });
+    const wholeErased = effective.some((e) => e.entry.scope.streams === "all");
     let grantState: StatusAnswer["grant_state"] = "active";
     if (facts.end) {
       grantState = "ended";
     } else if (g.expires_at !== null && now >= g.expires_at) {
       grantState = "expired";
+    } else if (facts.readWindowEnd !== null && now >= facts.readWindowEnd) {
+      grantState = "window_closed";
     }
     let ordinaryUse: StatusAnswer["ordinary_use"] = "permitted";
     if (wholeErased) {
@@ -754,10 +846,11 @@ export class HeldDataAuthority {
             owner_notice_required: facts.end.owner_notice_required && facts.keptAt === null && facts.erasures.length === 0,
           }
         : null,
-      erasures: facts.erasures.map((e) => ({
+      erasures: effective.map((e) => ({
         operation_id: e.entry.id,
         scope: e.entry.scope,
-        accepted_at: e.entry.at,
+        accepted_at: this.#acceptedAt(e),
+        effective_at: this.#effectiveAt(facts, e) ?? e.entry.at,
       })),
       ordinary_use: ordinaryUse,
       assessed_at: now,
@@ -766,16 +859,42 @@ export class HeldDataAuthority {
     };
   }
 
+  #acceptedAt(e: ErasureFacts): number {
+    return e.entry.t === "erase" ? e.entry.accepted_at ?? e.entry.at : e.entry.at;
+  }
+
+  #effectiveAt(facts: GrantFacts, e: ErasureFacts): number | null {
+    if (e.entry.t === "erase") {
+      return e.entry.at;
+    }
+    const times = [facts.end?.at, e.entry.effective_at].filter((t): t is number => typeof t === "number");
+    return times.length ? Math.min(...times) : null;
+  }
+
+  #activateAdvance(facts: GrantFacts, endedAt: number): void {
+    for (const e of facts.erasures) {
+      if (e.entry.t === "hd_advance") {
+        const effectiveAt = Math.min(endedAt, e.entry.effective_at ?? Number.POSITIVE_INFINITY);
+        this.#append({ t: "erase", id: e.entry.id, grant_id: facts.grant.grant_id, scope: e.entry.scope,
+          origin: e.entry.origin, at: effectiveAt, accepted_at: e.entry.at });
+      }
+    }
+  }
+
   #recordDeliveries(grantId: string, now: number): void {
     const facts = this.#grants.get(grantId);
     for (const e of facts?.erasures ?? []) {
-      if (e.deliveredAt === null) {
+      const effectiveAt = facts ? this.#effectiveAt(facts, e) : null;
+      if (e.deliveredAt === null && effectiveAt !== null && effectiveAt <= now) {
         this.#append({ t: "hd_delivered", id: randomUUID(), grant_id: grantId, op: e.entry.id, at: now });
       }
     }
   }
 
   #requireWritable(): void {
+    if (this.decommissioned) {
+      throw new AuthorityUnavailableError("AS is decommissioned");
+    }
     if (this.lost) {
       throw new AuthorityUnavailableError("authority history was lost");
     }
@@ -807,11 +926,24 @@ export class HeldDataAuthority {
       case "hd_epoch":
         this.#epoch ??= e.id;
         return;
+      case "hd_decommission_offer":
+        this.#decommissionOffer = { id: e.id, grants: e.grants };
+        return;
+      case "hd_decommission":
+        this.#decommissioned = true;
+        return;
       case "hd_grant":
         if (!this.#grants.has(e.grant_id)) {
-          this.#grants.set(e.grant_id, { grant: e, end: null, keptAt: null, erasures: [] });
+          this.#grants.set(e.grant_id, { grant: e, readWindowEnd: null, end: null, keptAt: null, erasures: [] });
         }
         return;
+      case "hd_window": {
+        const g = this.#grants.get(e.grant_id);
+        if (g) {
+          g.readWindowEnd ??= e.window_end;
+        }
+        return;
+      }
       case "hd_cred": {
         const g = this.#grants.get(e.grant_id);
         if (!g) {
@@ -852,9 +984,19 @@ export class HeldDataAuthority {
         }
         return;
       }
+      case "hd_advance":
       case "erase": {
         const g = this.#grants.get(e.grant_id);
         if (g) {
+          const existing = this.#ops.get(e.id);
+          if (existing && e.t === "erase") {
+            const prior = g.erasures[existing.index];
+            if (prior && prior.entry.t === "hd_advance") {
+              prior.entry = e;
+              prior.seq = seq;
+            }
+            return;
+          }
           this.#ops.set(e.id, { grantId: e.grant_id, index: g.erasures.length });
           g.erasures.push({ entry: e, seq, deliveredAt: null, receiptAt: null, completion: null, retained: [] });
         }

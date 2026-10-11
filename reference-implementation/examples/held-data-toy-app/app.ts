@@ -12,9 +12,9 @@
  * PROTOTYPE: experimental held-data lifecycle work, off by default.
  */
 import type { ErasureScope } from "../../lib/held-data/authority.ts";
-import type { Downstream, DownstreamNotice, HeldDataClient, HeldStore } from "../../lib/held-data/client.ts";
+import type { Downstream, DownstreamNotice, HeldDataClient, HeldRecordRef, HeldStore } from "../../lib/held-data/client.ts";
 
-export interface ToyRecord {
+export interface ToyRecord extends HeldRecordRef {
   id: string;
   stream: string;
   text: string;
@@ -34,9 +34,13 @@ export class ToyApp implements HeldStore {
 
   /** Store records from a read. Rereads replace the copy; they never move lifecycle clocks. */
   sync(grantId: string, records: ToyRecord[]): void {
-    if (this.#client && !this.#client.acquire(grantId)) {
-      // A late delivery under an erased grant is dropped, not stored.
-      return;
+    if (this.#client) {
+      records = this.#client.acquireRecords(grantId, records);
+      if (records.length === 0) {
+        // A late delivery under an erased grant is dropped, not stored.
+        // The same applies to a version whose retention ceiling passed.
+        return;
+      }
     }
     const prior = this.records.get(grantId) ?? [];
     const merged = new Map(prior.map((r) => [r.id, r]));
@@ -88,6 +92,23 @@ export class ToyApp implements HeldStore {
     } else {
       this.records.set(grantId, keep);
     }
+    this.reindex(grantId);
+    if (keep.length === 0) {
+      this.summaries.delete(grantId);
+    }
+  }
+
+  disposeRecords(grantId: string, records: readonly HeldRecordRef[]): void {
+    const current = this.records.get(grantId) ?? [];
+    const keep = current.filter((r) => !records.some((expired) =>
+      expired.id === r.id && expired.stream === r.stream && expired.version === r.version
+    ));
+    if (keep.length) {
+      this.records.set(grantId, keep);
+    } else {
+      this.records.delete(grantId);
+    }
+    // A mixed summary/index is regenerated without the expired inputs.
     this.reindex(grantId);
     if (keep.length === 0) {
       this.summaries.delete(grantId);
