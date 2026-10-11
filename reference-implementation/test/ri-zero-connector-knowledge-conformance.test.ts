@@ -740,6 +740,21 @@ test("falsifiability: a genuinely unresolvable JSON.parse(readFileSync(...)) cal
   );
 });
 
+test("repack helper's signed-source metadata and artifact digest reads are exact tooling call sites", () => {
+  const relPath = "reference-implementation/scripts/repack-reference-contract.mjs";
+  const hits = new Map<string, number>();
+  const violations = scanFileDataLoads(join(repoRoot, relPath), relPath, repoRoot, new Set(), new Set(), hits);
+  const expectedSites = [
+    `${relPath}::readJson::readFileSync(path, "utf8")`,
+    `${relPath}::<module>::readFileSync( join(RI_ROOT, "vendor/SHA256SUMS"), "utf8", )`,
+  ];
+
+  assert.deepEqual(violations, []);
+  for (const site of expectedSites) {
+    assert.equal(hits.get(site), 1, `reviewed build-tool read must occur exactly once: ${site}`);
+  }
+});
+
 // --- Rule (5) fix: a path argument reached through a PROVEN validated-path
 // helper (safePath/safeLeasePath-shaped) is not "unresolvable" -----------
 //
