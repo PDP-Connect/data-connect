@@ -252,8 +252,10 @@ function shortfallMessages(): Record<string, unknown>[] {
       parent_stream: "holdings",
       reason: "temporary_unavailable",
       record_key: "K",
+      reference_only: true,
       retryable: true,
-      stream: "activity",
+      status: "pending",
+      stream: "valuations",
       type: "DETAIL_GAP",
     },
     {
@@ -262,7 +264,7 @@ function shortfallMessages(): Record<string, unknown>[] {
       reference_only: true,
       required_keys: ["K"],
       state_stream: "holdings",
-      stream: "activity",
+      stream: "valuations",
       type: "DETAIL_COVERAGE",
     },
     // Sibling child stream: same unreachable key, honestly declared as a gap,
@@ -273,7 +275,7 @@ function shortfallMessages(): Record<string, unknown>[] {
       reference_only: true,
       required_keys: ["K"],
       state_stream: "holdings",
-      stream: "valuations",
+      stream: "activity",
       type: "DETAIL_COVERAGE",
     },
     { cursor: { page: "1" }, stream: "holdings", type: "STATE" },
@@ -549,7 +551,9 @@ test("a durable gap cannot satisfy the same detail key under a different parent"
       parent_stream: "holdings",
       reason: "temporary_unavailable",
       record_key: "K",
+      reference_only: true,
       retryable: true,
+      status: "pending",
       stream: "valuations",
       type: "DETAIL_GAP",
     },
@@ -617,9 +621,9 @@ test("a legacy parentless gap cannot authorize one parent of a manifest-declared
 
   const { result, thrown } = await runShortfall(server, ownerToken, messages, undefined, ["activity", "valuations"]);
 
-  assert.equal(thrown, null);
-  assert.equal(result?.checkpoint_summary?.state_streams_committed, 0);
-  assert.ok(result?.known_gaps?.some((gap) => gap.reason === "detail_coverage_incomplete"));
+  assert.equal(result, null);
+  // biome-ignore lint/performance/useTopLevelRegex: local assertion states the wire contract.
+  assert.match(String(thrown), /invalid DETAIL_GAP.parent_stream/);
 });
 
 test("a staged parent without its required detail coverage report cannot commit", async (t) => {

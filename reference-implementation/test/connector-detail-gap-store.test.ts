@@ -7,7 +7,6 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import Database from "./helpers/sqlite-driver.ts";
 import type { RuntimeRunConnectorOptions, RuntimeRunConnectorResult } from "../runtime/index.ts";
 import { runConnector } from "../runtime/index.ts";
 import { DEFAULT_QUARANTINE_POLICY } from "../runtime/recovery-quarantine.ts";
@@ -19,6 +18,7 @@ import {
   sanitizeDetailGapMetadata,
 } from "../server/stores/connector-detail-gap-store.ts";
 import { makeDefaultAccountConnectorInstanceId } from "../server/stores/connector-instance-store.ts";
+import Database from "./helpers/sqlite-driver.ts";
 
 // `runtime/index.ts` (the ambient signature for the still-JS runtime
 // entrypoint) does not yet declare `detailGapStore` — the runtime itself
@@ -663,7 +663,9 @@ async function assertConnectorEmittedDetailGapRoundTrip({
     parent_stream: "conversation_list",
     reason: "upstream_pressure",
     record_key: "conv_deferred",
+    reference_only: true,
     retryable: true,
+    status: "pending",
     stream: "messages",
     type: "DETAIL_GAP",
   };
@@ -673,7 +675,7 @@ async function assertConnectorEmittedDetailGapRoundTrip({
     connectorInstanceId,
     detailGapStore: store,
     grantId,
-    manifest: { streams: [{ name: "messages" }] },
+    manifest: { streams: [{ name: "messages", parent_streams: ["conversation_list"] }, { name: "conversation_list" }] },
     // biome-ignore lint/suspicious/noEmptyBlockStatements: intentional no-op test double represents an optional side effect.
     onProgress: () => {},
     ownerToken: "owner",
@@ -1865,7 +1867,7 @@ test(
     };
     const { connectorPath, cleanup } = createConnector([
       {
-        detail_locator: { conversation_id: "conv_1" },
+        detail_locator: { conversation_id: "conv_1", kind: "test.detail" },
         last_error: {
           message: "pressure",
           network_pressure: networkPressure,
@@ -1874,7 +1876,9 @@ test(
         parent_stream: "conversation_list",
         reason: "upstream_pressure",
         record_key: "conv_1",
+        reference_only: true,
         retryable: true,
+        status: "pending",
         stream: "conversations",
         type: "DETAIL_GAP",
       },
@@ -1888,7 +1892,9 @@ test(
         connectorId: "chatgpt",
         connectorPath,
         detailGapStore,
-        manifest: { streams: [{ name: "conversations" }] },
+        manifest: {
+          streams: [{ name: "conversations", parent_streams: ["conversation_list"] }, { name: "conversation_list" }],
+        },
         onProgress: (msg) => {
           progressMessages.push(msg as MockGap);
         },
@@ -2572,6 +2578,7 @@ test(
         record_key: orderId,
         reference_only: true,
         retryable: true,
+        status: "pending",
         stream: "order_items",
         type: "DETAIL_GAP",
       },
@@ -2585,7 +2592,7 @@ test(
         connectorPath,
         detailGapStore: store,
         grantId: "grant_1",
-        manifest: { streams: [{ name: "order_items" }] },
+        manifest: { streams: [{ name: "order_items", parent_streams: ["orders"] }, { name: "orders" }] },
         // biome-ignore lint/suspicious/noEmptyBlockStatements: intentional no-op test double represents an optional side effect.
         onProgress: () => {},
         ownerToken: "owner",
@@ -2646,6 +2653,7 @@ test(
         record_key: orderId,
         reference_only: true,
         retryable: true,
+        status: "pending",
         stream: "order_items",
         type: "DETAIL_GAP",
       },
@@ -2659,7 +2667,7 @@ test(
         connectorPath,
         detailGapStore: store,
         grantId: "grant_1",
-        manifest: { streams: [{ name: "order_items" }] },
+        manifest: { streams: [{ name: "order_items", parent_streams: ["orders"] }, { name: "orders" }] },
         // biome-ignore lint/suspicious/noEmptyBlockStatements: intentional no-op test double represents an optional side effect.
         onProgress: () => {},
         ownerToken: "owner",
@@ -2925,6 +2933,121 @@ test(
   })
 );
 
+for (const echoGapId of [false, true]) {
+  test(
+    `portable sole-parent DETAIL_GAP settles a legacy parentless lease (gap_id=${echoGapId})`,
+    withTempDb(async () => {
+      const store = createSqliteConnectorDetailGapStore();
+      const seeded = await store.upsertPendingGap({
+        connectorId: "chatgpt",
+        detailLocator: { kind: "item" },
+        grantId: "grant_1",
+        reason: "temporary_unavailable",
+        recordKey: "legacy",
+        stream: "messages",
+      });
+      assert.ok(seeded);
+      const { connectorPath, cleanup } = createConnector([
+        {
+          ...(echoGapId ? { gap_id: seeded.gap_id } : {}),
+          detail_locator: { kind: "item" },
+          reason: "temporary_unavailable",
+          record_key: "legacy",
+          reference_only: true,
+          retryable: true,
+          status: "pending",
+          stream: "messages",
+          type: "DETAIL_GAP",
+        },
+        { records_emitted: 0, status: "succeeded", type: "DONE" },
+      ]);
+      try {
+        const result = await runConnectorWithGapStore({
+          admitRunConnection: fakeAdmitRunConnection(),
+          connectorId: "chatgpt",
+          connectorPath,
+          detailGapStore: store,
+          grantId: "grant_1",
+          manifest: { streams: [{ name: "messages", parent_streams: ["items"] }, { name: "items" }] },
+          onProgress: () => {
+            /* Keep the fixture quiet. */
+          },
+          ownerToken: "owner",
+          persistState: false,
+        });
+        assert.equal(result.status, "succeeded");
+        const pending = await store.listPendingGaps({ connectorId: "chatgpt", grantId: "grant_1" });
+        assert.equal(pending.length, 1, "re-deferral must not mint a duplicate identity");
+        assert.equal(pending[0]?.gap_id, seeded.gap_id);
+        assert.equal(pending[0]?.attempt_count, 1, "the served lease was settled, rather than released untouched");
+        assert.equal(pending[0]?.lease_id, null);
+        assert.deepEqual(result.known_gaps?.find((gap) => gap.kind === "detail_gap")?.scope, {
+          parent_stream: null,
+          record_key: "legacy",
+        });
+      } finally {
+        cleanup();
+      }
+    })
+  );
+}
+
+test(
+  "portable sole-parent DETAIL_GAP prefers an exact lease over a coexisting legacy parentless lease",
+  withTempDb(async () => {
+    const store = createSqliteConnectorDetailGapStore();
+    const input = {
+      connectorId: "chatgpt",
+      detailLocator: { kind: "item" },
+      grantId: "grant_1",
+      reason: "temporary_unavailable",
+      recordKey: "same_key",
+      stream: "messages",
+    };
+    const legacy = await store.upsertPendingGap(input);
+    const exact = await store.upsertPendingGap({ ...input, parentStream: "items" });
+    assert.ok(legacy && exact);
+    const { connectorPath, cleanup } = createConnector([
+      {
+        detail_locator: { kind: "item" },
+        reason: "temporary_unavailable",
+        record_key: "same_key",
+        reference_only: true,
+        retryable: true,
+        status: "pending",
+        stream: "messages",
+        type: "DETAIL_GAP",
+      },
+      { records_emitted: 0, status: "succeeded", type: "DONE" },
+    ]);
+    try {
+      await runConnectorWithGapStore({
+        admitRunConnection: fakeAdmitRunConnection(),
+        connectorId: "chatgpt",
+        connectorPath,
+        detailGapStore: store,
+        grantId: "grant_1",
+        manifest: { streams: [{ name: "messages", parent_streams: ["items"] }, { name: "items" }] },
+        onProgress: () => {
+          /* Keep the fixture quiet. */
+        },
+        ownerToken: "owner",
+        persistState: false,
+      });
+      assert.equal((await store.getGapById(exact.gap_id))?.attempt_count, 1, "the exact lease was settled");
+      assert.equal(
+        (await store.getGapById(legacy.gap_id))?.attempt_count,
+        0,
+        "the legacy lease was released untouched"
+      );
+      const pending = await store.listPendingGaps({ connectorId: "chatgpt", grantId: "grant_1" });
+      assert.equal(pending.length, 2, "both original identities survive");
+    } finally {
+      cleanup();
+    }
+  })
+);
+
 // ─── Durable lease acceptance tests ──────────────────────────────────────────
 //
 // These tests prove the lease fix: gaps marked in_progress when served are
@@ -3114,7 +3237,7 @@ test(
 );
 
 test(
-  "failed, cancelled, and crashed run completion waits for durable outstanding-lease release",
+  "failed, invalid-cancelled, and crashed run completion waits for durable outstanding-lease release",
   withTempDb(async () => {
     for (const scenario of [
       {
@@ -3130,7 +3253,7 @@ test(
         name: "failed",
       },
       {
-        expectedStatus: "cancelled",
+        expectedStatus: "protocol_violation",
         messages: [
           {
             error: { message: "synthetic cancellation", retryable: false },
@@ -3184,9 +3307,18 @@ test(
           onProgress: () => {},
           ownerToken: "owner",
           persistState: false,
-        }).finally(() => {
-          settled = true;
-        });
+        })
+          .catch((error: unknown) => {
+            if (scenario.expectedStatus !== "protocol_violation") {
+              throw error;
+            }
+            // biome-ignore lint/performance/useTopLevelRegex: local assertion states the wire contract.
+            assert.match(String(error), /invalid DONE status: cancelled/);
+            return { status: "protocol_violation" };
+          })
+          .finally(() => {
+            settled = true;
+          });
         await new Promise((resolve) => setTimeout(resolve, 25));
         assert.equal(settled, false, `${scenario.name} must not complete before lease release is durable`);
         releaseStoreWrite();
@@ -4430,7 +4562,12 @@ test(
     };
     const { connectorPath, cleanup } = createConnector([
       {
-        detail_locator: { conversation_id: "conv_1" },
+        detail_locator: { conversation_id: "conv_1", kind: "test.detail" },
+        reason: "temporary_unavailable",
+        record_key: "conv_1",
+        reference_only: true,
+        retryable: true,
+        status: "pending",
         stream: "conversations",
         type: "DETAIL_GAP",
       },
@@ -4490,7 +4627,9 @@ test(
           admitRunConnection: fakeAdmitRunConnection(),
           connectorId: "chatgpt",
           connectorPath,
-          manifest: { streams: [{ name: "conversation_list" }, { name: "conversations" }] },
+          manifest: {
+            streams: [{ name: "conversation_list" }, { name: "conversations", parent_streams: ["conversation_list"] }],
+          },
           // biome-ignore lint/suspicious/noEmptyBlockStatements: intentional no-op test double represents an optional side effect.
           onProgress: () => {},
           ownerToken: "owner",
@@ -4543,12 +4682,14 @@ test(
       };
       const { connectorPath, cleanup } = createConnector([
         {
-          detail_locator: { conversation_id: "conv_1" },
+          detail_locator: { conversation_id: "conv_1", kind: "test.detail" },
           list_cursor: { after: "cursor_30" },
           parent_stream: "conversation_list",
           reason: "upstream_pressure",
           record_key: "conv_1",
+          reference_only: true,
           retryable: true,
+          status: "pending",
           stream: "conversations",
           type: "DETAIL_GAP",
         },
@@ -4571,7 +4712,9 @@ test(
           connectorId: "chatgpt",
           connectorPath,
           detailGapStore,
-          manifest: { streams: [{ name: "conversation_list" }, { name: "conversations" }] },
+          manifest: {
+            streams: [{ name: "conversation_list" }, { name: "conversations", parent_streams: ["conversation_list"] }],
+          },
           // biome-ignore lint/suspicious/noEmptyBlockStatements: intentional no-op test double represents an optional side effect.
           onProgress: () => {},
           ownerToken: "owner",
@@ -4621,7 +4764,8 @@ test(
       },
       {
         exitCode: 1,
-        expectReject: null,
+        // biome-ignore lint/performance/useTopLevelRegex: test assertion states the wire contract.
+        expectReject: /invalid DONE status: cancelled/,
         messages: [
           { cursor: { after: "cursor_30" }, stream: "conversation_list", type: "STATE" },
           {

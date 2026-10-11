@@ -20,7 +20,7 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -754,6 +754,348 @@ function buildCoEmittedStreamManifest(connectorId = "test-co-emitted-stream") {
     ],
   };
 }
+
+test("portable message envelopes reject missing fields and contradictory success", async (t) => {
+  const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+  const { asPort, rsPort } = server;
+  const { ownerToken, connectorId } = await setupConnector(server, asPort);
+  const skip = { message: "Source cannot filter", reason: "scope_not_supported", stream: "items", type: "SKIP_RESULT" };
+  const gap = {
+    detail_locator: { id: "1", kind: "item" },
+    reason: "temporary_unavailable",
+    record_key: "1",
+    reference_only: true,
+    retryable: true,
+    status: "pending",
+    stream: "items",
+    type: "DETAIL_GAP",
+  };
+  const cases: Record<string, unknown>[][] = [];
+  for (const field of ["stream", "reason", "message"]) {
+    const invalid: Record<string, unknown> = { ...skip };
+    delete invalid[field];
+    cases.push([invalid]);
+  }
+  for (const field of ["reference_only", "status", "record_key", "reason", "retryable", "detail_locator"]) {
+    const invalid: Record<string, unknown> = { ...gap };
+    delete invalid[field];
+    cases.push([invalid]);
+  }
+  cases.push(
+    [{ ...skip, recovery_hint: null }],
+    [{ ...gap, retryable: false }],
+    [{ ...gap, reason: "made_up" }],
+    [{ ...gap, detail_locator: {} }],
+    [
+      { cursor: { after: "unfinished" }, stream: "items", type: "STATE" },
+      { ...skip, reason: "stream_collection_failed" },
+    ],
+    [
+      { ...skip, reason: "stream_collection_failed" },
+      {
+        error: { code: "other_failure", message: "failed", retryable: false },
+        records_emitted: 0,
+        status: "failed",
+        type: "DONE",
+      },
+    ]
+  );
+  try {
+    for (const messages of cases) {
+      // biome-ignore lint/performance/noAwaitInLoops: subtests share an isolated server and must run sequentially.
+      await t.test(JSON.stringify(messages), async () => {
+        const { connectorPath, cleanup } = createTestConnector([
+          ...messages,
+          ...(messages.some((message) => message.type === "DONE")
+            ? []
+            : [{ records_emitted: 0, status: "succeeded", type: "DONE" }]),
+        ]);
+        try {
+          await assert.rejects(
+            runTestConnector({
+              collectionMode: "full_refresh",
+              connectorId,
+              connectorPath,
+              manifest: MINIMAL_MANIFEST,
+              onInteraction: async () => ({}),
+              ownerToken,
+              persistState: true,
+              rsUrl: `http://localhost:${rsPort}`,
+              state: null,
+            }),
+            (err) => {
+              assert.equal(
+                asRuntimeError(err).failure_reason,
+                "connector_protocol_violation",
+                JSON.stringify(messages)
+              );
+              return true;
+            },
+            JSON.stringify(messages)
+          );
+        } finally {
+          cleanup();
+        }
+      });
+    }
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test("portable open members and required strings accept spec-valid shapes", async (t) => {
+  const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+  const { asPort, rsPort } = server;
+  const { ownerToken, connectorId } = await setupConnector(server, asPort);
+  const cases = [
+    { message: "", reason: "", stream: "items", type: "SKIP_RESULT" },
+    {
+      message: "omitted",
+      reason: "custom",
+      recovery_hint: { action: "unknown", extra: "ignored" },
+      stream: "items",
+      type: "SKIP_RESULT",
+    },
+    {
+      detail_locator: { kind: "" },
+      reason: "temporary_unavailable",
+      record_key: "",
+      reference_only: true,
+      retryable: true,
+      status: "pending",
+      stream: "items",
+      type: "DETAIL_GAP",
+    },
+    {
+      error: {
+        extra: "ignored",
+        message: "failed",
+        recovery_hint: { action: "unknown", extra: "ignored" },
+        retryable: false,
+      },
+      records_emitted: 0,
+      status: "failed",
+      type: "DONE",
+    },
+  ];
+  try {
+    for (const message of cases) {
+      // biome-ignore lint/performance/noAwaitInLoops: fixtures share one isolated server.
+      await t.test(JSON.stringify(message), async () => {
+        const { connectorPath, cleanup } = createTestConnector([
+          message,
+          ...(message.type === "DONE" ? [] : [{ records_emitted: 0, status: "succeeded", type: "DONE" }]),
+        ]);
+        try {
+          const result = await runTestConnector({
+            connectorId,
+            connectorPath,
+            manifest: MINIMAL_MANIFEST,
+            ownerToken,
+            persistState: false,
+            rsUrl: `http://localhost:${rsPort}`,
+            state: null,
+          });
+          assert.equal(result.status, message.type === "DONE" ? "failed" : "succeeded");
+          if (message.type === "DONE") {
+            assert.deepEqual(result.connector_error, {
+              message: "failed",
+              recovery_hint: { action: "unknown" },
+              retryable: false,
+            });
+          }
+        } finally {
+          cleanup();
+        }
+      });
+    }
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test("portable detail gaps validate manifest parents and keep retryable out of recovery hints", async (t) => {
+  const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+  const { asPort, rsPort } = server;
+  const base = buildMultiStreamManifest("portable-gap-parents");
+  const manifest = {
+    ...base,
+    streams: [
+      ...base.streams,
+      {
+        ...MINIMAL_MANIFEST.streams[0],
+        coverage_strategy: "parent_detail_accounting",
+        name: "one_detail",
+        parent_streams: ["items"],
+      },
+      {
+        ...MINIMAL_MANIFEST.streams[0],
+        coverage_strategy: "parent_detail_accounting",
+        name: "two_detail",
+        parent_streams: ["items", "other_items"],
+      },
+    ],
+  };
+  const { ownerToken, connectorId } = await setupConnector(server, asPort, manifest);
+  const gap = {
+    detail_locator: { kind: "item" },
+    reason: "temporary_unavailable",
+    record_key: 0,
+    reference_only: true,
+    retryable: true,
+    status: "pending",
+    stream: "one_detail",
+    type: "DETAIL_GAP",
+  };
+  try {
+    for (const invalid of [
+      { ...gap, stream: "two_detail" },
+      { ...gap, parent_stream: "other_items" },
+      { ...gap, parent_stream: null },
+    ]) {
+      // biome-ignore lint/performance/noAwaitInLoops: subtests share an isolated server and must run sequentially.
+      await t.test(`invalid parent ${JSON.stringify(invalid)}`, async () => {
+        const { connectorPath, cleanup } = createTestConnector([
+          invalid,
+          { records_emitted: 0, status: "succeeded", type: "DONE" },
+        ]);
+        try {
+          await assert.rejects(
+            runTestConnector({
+              connectorId,
+              connectorPath,
+              manifest,
+              ownerToken,
+              persistState: false,
+              rsUrl: `http://localhost:${rsPort}`,
+              state: null,
+            }),
+            // biome-ignore lint/performance/useTopLevelRegex: local assertion states the wire contract.
+            /invalid DETAIL_GAP.parent_stream/
+          );
+        } finally {
+          cleanup();
+        }
+      });
+    }
+    for (const valid of [
+      gap,
+      { ...gap, parent_stream: "items", record_key: "" },
+      { ...gap, parent_stream: "other_items", stream: "two_detail" },
+    ]) {
+      // biome-ignore lint/performance/noAwaitInLoops: subtests share an isolated server and must run sequentially.
+      await t.test(`valid parent ${JSON.stringify(valid)}`, async () => {
+        const { connectorPath, cleanup } = createTestConnector([
+          valid,
+          { records_emitted: 0, status: "succeeded", type: "DONE" },
+        ]);
+        try {
+          const result = await runTestConnector({
+            connectorId,
+            connectorPath,
+            manifest,
+            ownerToken,
+            persistState: false,
+            rsUrl: `http://localhost:${rsPort}`,
+            state: null,
+          });
+          assert.equal(result.status, "succeeded");
+          const knownGap = result.known_gaps?.find((entry) => entry.kind === "detail_gap");
+          assert.equal(knownGap?.recovery_hint?.action, "unknown");
+          const { body: timeline } = await fetchJson<TimelineBody>(
+            `http://localhost:${asPort}/_ref/runs/${encodeURIComponent(requireRunId(result))}/timeline`
+          );
+          const recorded = (timeline.data || []).find((entry) => entry.event_type === "run.detail_gap_recorded");
+          assert.ok(recorded);
+          assert.equal(recorded.data.parent_stream, "parent_stream" in valid ? valid.parent_stream : "items");
+        } finally {
+          cleanup();
+        }
+      });
+    }
+    for (const [shape, locator] of [
+      ["nested", { kind: "item", nested: { credential: ownerToken } }],
+      ["deep", { kind: "item", nested: { credential: ownerToken } }],
+      [
+        "wide",
+        {
+          kind: "item",
+          wide: {
+            ...Object.fromEntries(Array.from({ length: 100_000 }, (_, i) => [`slot_${i}`, 0])),
+            credential: ownerToken,
+          },
+        },
+      ],
+    ] as const) {
+      // biome-ignore lint/performance/noAwaitInLoops: each shape uses an isolated connector and trace file.
+      await t.test(`runtime-known secrets cannot enter ${shape} DETAIL_GAP locators or traces`, async () => {
+        const { connectorPath, cleanup } = createTestConnector([
+          { ...gap, detail_locator: locator },
+          { records_emitted: 0, status: "succeeded", type: "DONE" },
+        ]);
+        // Flush wide lines; build deep JSON without hitting the producer's stringify limit.
+        let script = readFileSync(connectorPath, "utf8").replace(
+          "process.exit(exitCode);",
+          "process.exitCode = exitCode;"
+        );
+        if (shape === "deep") {
+          script = script.replace(
+            "process.stdout.write(JSON.stringify(m) + '\\n');",
+            `process.stdout.write(m.type === 'DETAIL_GAP'
+              ? JSON.stringify(m).slice(0, -1) + ',"diagnostics":' + '['.repeat(10000) + '0' + ']'.repeat(10000) + '}\\n'
+              : JSON.stringify(m) + '\\n');`
+          );
+        }
+        writeFileSync(connectorPath, script);
+        const traceDir = mkdtempSync(join(tmpdir(), "cp7-gap-trace-"));
+        const previousTraceDir = process.env.PDPP_TRACE_DIR;
+        process.env.PDPP_TRACE_DIR = traceDir;
+        try {
+          let rejection: Error | undefined;
+          await assert.rejects(
+            runTestConnector({
+              connectorId,
+              connectorPath,
+              manifest,
+              onProgress: () => {
+                /* Avoid logging the synthetic credential fixture. */
+              },
+              ownerToken,
+              persistState: false,
+              rsUrl: `http://localhost:${rsPort}`,
+              state: null,
+            }),
+            (error) => {
+              rejection = error as Error;
+              return true;
+            }
+          );
+          const trace = readdirSync(traceDir)
+            .map((name) => readFileSync(join(traceDir, name), "utf8"))
+            .join("\n");
+          assert.ok(trace.includes("DETAIL_GAP"), "the rejected message remains diagnosable");
+          assert.equal(trace.includes(ownerToken), false, "the rejected locator must not leak into debug tracing");
+          if (shape === "deep") {
+            assert.ok(trace.includes('"trace_redaction_failed":true'), "sanitizer failures produce a safe marker");
+          }
+          assert.ok(rejection);
+          // biome-ignore lint/performance/useTopLevelRegex: local assertion states the no-secret locator contract.
+          assert.match(rejection.message, /contains a runtime-known secret/);
+        } finally {
+          if (previousTraceDir === undefined) {
+            delete process.env.PDPP_TRACE_DIR;
+          } else {
+            process.env.PDPP_TRACE_DIR = previousTraceDir;
+          }
+          rmSync(traceDir, { force: true, recursive: true });
+          cleanup();
+        }
+      });
+    }
+  } finally {
+    await closeServer(server);
+  }
+});
 
 test("Collection Profile conformance", async (t) => {
   t.after(async () => {
@@ -1752,7 +2094,7 @@ test("Collection Profile conformance", async (t) => {
         type: "RECORD",
       },
       { cursor: { cursor: "cursor_should_not_persist" }, stream: "items", type: "STATE" },
-      { records_emitted: 1, status: "failed", type: "DONE" },
+      { error: { message: "synthetic failure", retryable: false }, records_emitted: 1, status: "failed", type: "DONE" },
     ]);
 
     try {
@@ -4890,7 +5232,15 @@ rl.on('line', (line) => {
   });
 
   await t.test("2.2a: a pending DETAIL_GAP shows pending_detail_gaps>=1 by count, not restated locators", async () => {
-    const manifest = buildMultiStreamManifest("facts-pending-detail-gap");
+    const base = buildMultiStreamManifest("facts-pending-detail-gap");
+    const manifest = {
+      ...base,
+      streams: base.streams.map((stream) =>
+        stream.name === "other_items"
+          ? { ...stream, coverage_strategy: "parent_detail_accounting", parent_streams: ["items"] }
+          : stream
+      ),
+    };
     const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
     const { asPort, rsPort } = server;
     const { ownerToken, connectorId } = await setupConnector(server, asPort, manifest);
@@ -4905,10 +5255,13 @@ rl.on('line', (line) => {
         type: "RECORD",
       },
       {
+        detail_locator: { id: "i1", kind: "item" },
         parent_stream: "items",
         reason: "temporary_unavailable",
         record_key: "i1",
+        reference_only: true,
         retryable: true,
+        status: "pending",
         stream: "other_items",
         type: "DETAIL_GAP",
       },
@@ -5640,7 +5993,7 @@ rl.on('line', (line) => {
   if (msg.type === 'INTERACTION_RESPONSE') {
     process.stdout.write(JSON.stringify({
       type: 'DONE',
-      status: 'cancelled',
+      status: 'failed',
       records_emitted: 0,
       error: { message: 'manual login cancelled', retryable: false },
     }) + '\\n');
@@ -5670,12 +6023,12 @@ rl.on('line', (line) => {
         state: null,
       });
 
-      assert.equal(result.status, "cancelled");
+      assert.equal(result.status, "failed");
       const { body: runTimeline } = await fetchJson<TimelineBody>(
         `${asUrl}/_ref/runs/${encodeURIComponent(requireRunId(result))}/timeline`
       );
       const failedEvent = (runTimeline.data || []).find((event) => event.event_type === "run.failed");
-      assert.ok(failedEvent, "expected run.failed event for cancelled terminal status");
+      assert.ok(failedEvent, "expected run.failed event after the interaction was cancelled");
       const interactionGap = knownGapsOf(failedEvent).find((gap) => gap.kind === "interaction_required");
       assert.ok(interactionGap, "expected interaction-required known gap");
       assert.equal(interactionGap.recovery_hint?.action, "manual_action_required");
@@ -5694,7 +6047,7 @@ rl.on('line', (line) => {
     const asUrl = `http://localhost:${asPort}`;
 
     const { connectorPath, cleanup } = createTestConnector([
-      { message: "missing reason content should fail", reason: "", stream: "items", type: "SKIP_RESULT" },
+      { message: "a non-string reason should fail", reason: false, stream: "items", type: "SKIP_RESULT" },
       { records_emitted: 0, status: "succeeded", type: "DONE" },
     ]);
 
@@ -8859,7 +9212,7 @@ rl.on('line', (line) => {
         type: "RECORD",
       },
       { cursor: { cursor: "cursor_other_done_failed" }, stream: "other_items", type: "STATE" },
-      { records_emitted: 2, status: "failed", type: "DONE" },
+      { error: { message: "synthetic failure", retryable: false }, records_emitted: 2, status: "failed", type: "DONE" },
     ]);
 
     try {
@@ -8977,74 +9330,52 @@ rl.on('line', (line) => {
     }
   );
 
-  await t.test(
-    "DONE.error with unsupported fields is rejected as a protocol violation before terminal artifacts are recorded as connector failures",
-    async () => {
-      const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
-      const { asPort, rsPort } = server;
-      const { ownerToken, connectorId } = await setupConnector(server, asPort);
-      const asUrl = `http://localhost:${asPort}`;
+  await t.test("DONE.error extra members are accepted without entering terminal artifacts", async () => {
+    const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+    const { asPort, rsPort } = server;
+    const { ownerToken, connectorId } = await setupConnector(server, asPort);
+    const asUrl = `http://localhost:${asPort}`;
 
-      const { connectorPath, cleanup } = createTestConnector([
-        {
-          error: { hint: "upstream_rate_limit", message: "rate limited", retryable: true },
-          records_emitted: 0,
-          status: "failed",
-          type: "DONE",
-        },
-      ]);
+    const { connectorPath, cleanup } = createTestConnector([
+      {
+        error: { hint: "upstream_rate_limit", message: "rate limited", retryable: true },
+        records_emitted: 0,
+        status: "failed",
+        type: "DONE",
+      },
+    ]);
 
-      try {
-        let capturedError: RuntimeRunConnectorError | undefined;
-        await assert.rejects(
-          runTestConnector({
-            collectionMode: "full_refresh",
-            connectorId,
-            connectorPath,
-            manifest: MINIMAL_MANIFEST,
-            onInteraction: async () => ({}),
-            ownerToken,
-            persistState: true,
-            rsUrl: `http://localhost:${rsPort}`,
-            state: null,
-          }),
-          (err) => {
-            capturedError = asRuntimeError(err);
-            assert.equal(capturedError.failure_reason, "connector_protocol_violation");
-            // biome-ignore lint/performance/useTopLevelRegex: localized test assertion preserves its explicit contract.
-            assert.match(capturedError.message, /Connector emitted invalid DONE\.error: unsupported fields hint/);
-            assert.equal(checkpointSummaryOf(capturedError).records_flushed, 0);
-            assert.equal(checkpointSummaryOf(capturedError).buffered_records_dropped, 0);
-            assert.equal(checkpointSummaryOf(capturedError).commit_status, "not_committed");
-            assert.equal(capturedError.terminal_reason, "connector_protocol_violation");
-            assert.equal(capturedError.connector_error, null);
-            return true;
-          }
-        );
+    try {
+      const result = await runTestConnector({
+        collectionMode: "full_refresh",
+        connectorId,
+        connectorPath,
+        manifest: MINIMAL_MANIFEST,
+        ownerToken,
+        persistState: true,
+        rsUrl: `http://localhost:${rsPort}`,
+        state: null,
+      });
+      assert.equal(result.status, "failed");
+      assert.deepEqual(result.connector_error, { message: "rate limited", retryable: true });
 
-        const { body: runTimeline } = await fetchJson<TimelineBody>(
-          `${asUrl}/_ref/runs/${encodeURIComponent(requireRunId(capturedError))}/timeline`
-        );
-        const failedEvent = (runTimeline.data || []).find((event) => event.event_type === "run.failed");
-        assert.ok(failedEvent, "run.failed should be emitted for DONE.error envelopes with unsupported fields");
-        assert.equal(failedEvent.data.reason, "connector_protocol_violation");
-        assert.equal(failedEvent.data.records_flushed, 0);
-        assert.equal(failedEvent.data.buffered_records_dropped, 0);
-        assert.equal(failedEvent.data.checkpoint_commit_status, "not_committed");
-        assert.ok(
-          !("connector_error_message" in failedEvent.data),
-          "unsupported DONE.error fields must not enter durable artifacts"
-        );
-        assert.ok(
-          !("connector_error_retryable" in failedEvent.data),
-          "unsupported DONE.error fields must not enter durable artifacts"
-        );
-      } finally {
-        cleanup();
-        await closeServer(server);
-      }
+      const { body: runTimeline } = await fetchJson<TimelineBody>(
+        `${asUrl}/_ref/runs/${encodeURIComponent(requireRunId(result))}/timeline`
+      );
+      const failedEvent = (runTimeline.data || []).find((event) => event.event_type === "run.failed");
+      assert.ok(failedEvent, "run.failed should record the valid connector failure");
+      assert.equal(failedEvent.data.reason, "connector_reported_failed");
+      assert.equal(failedEvent.data.records_flushed, 0);
+      assert.equal(failedEvent.data.buffered_records_dropped, 0);
+      assert.equal(failedEvent.data.checkpoint_commit_status, "not_committed");
+      assert.equal(failedEvent.data.connector_error_message, "rate limited");
+      assert.equal(failedEvent.data.connector_error_retryable, true);
+      assert.ok(!("hint" in failedEvent.data), "extra error members are not terminal fields");
+    } finally {
+      cleanup();
+      await closeServer(server);
     }
-  );
+  });
 
   await t.test(
     "DONE(succeeded) with terminal error details is rejected as a protocol violation before success artifacts are recorded",
@@ -9119,33 +9450,33 @@ rl.on('line', (line) => {
     }
   );
 
-  await t.test(
-    "DONE(cancelled) after staging a checkpoint commits nothing and records a cancelled terminal run",
-    async () => {
-      const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
-      const { asPort, rsPort } = server;
-      const { ownerToken, connectorId } = await setupConnector(server, asPort);
-      const asUrl = `http://localhost:${asPort}`;
+  await t.test("DONE(cancelled) after staging a checkpoint is rejected and commits nothing", async () => {
+    const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+    const { asPort, rsPort } = server;
+    const { ownerToken, connectorId } = await setupConnector(server, asPort);
+    const asUrl = `http://localhost:${asPort}`;
 
-      const { connectorPath, cleanup } = createTestConnector([
-        {
-          data: { id: "cancelled_terminal_record", value: "before_cancelled_done" },
-          emitted_at: new Date().toISOString(),
-          key: "cancelled_terminal_record",
-          stream: "items",
-          type: "RECORD",
-        },
-        { cursor: { cursor: "cursor_before_cancelled_done" }, stream: "items", type: "STATE" },
-        {
-          error: { message: "User denied follow-up verification", retryable: false },
-          records_emitted: 1,
-          status: "cancelled",
-          type: "DONE",
-        },
-      ]);
+    const { connectorPath, cleanup } = createTestConnector([
+      {
+        data: { id: "cancelled_terminal_record", value: "before_cancelled_done" },
+        emitted_at: new Date().toISOString(),
+        key: "cancelled_terminal_record",
+        stream: "items",
+        type: "RECORD",
+      },
+      { cursor: { cursor: "cursor_before_cancelled_done" }, stream: "items", type: "STATE" },
+      {
+        error: { message: "User denied follow-up verification", retryable: false },
+        records_emitted: 1,
+        status: "cancelled",
+        type: "DONE",
+      },
+    ]);
 
-      try {
-        const result = await runTestConnector({
+    try {
+      let capturedError: RuntimeRunConnectorError | undefined;
+      await assert.rejects(
+        runTestConnector({
           collectionMode: "incremental",
           connectorId,
           connectorPath,
@@ -9155,61 +9486,61 @@ rl.on('line', (line) => {
           persistState: true,
           rsUrl: `http://localhost:${rsPort}`,
           state: null,
-        });
+        }),
+        (err) => {
+          capturedError = asRuntimeError(err);
+          return capturedError.failure_reason === "connector_protocol_violation";
+        }
+      );
+      assert.ok(capturedError);
+      const result = capturedError;
+      assert.equal(checkpointSummaryOf(result).commit_status, "not_committed");
+      assert.equal(checkpointSummaryOf(result).records_flushed, 1);
+      assert.equal(checkpointSummaryOf(result).buffered_records_dropped, 0);
+      assert.equal(checkpointSummaryOf(result).state_streams_staged, 1);
+      assert.equal(checkpointSummaryOf(result).state_streams_committed, 0);
+      assert.equal(result.connector_error, null);
 
-        assert.equal(result.status, "cancelled");
-        assert.equal(result.exit_code, 1);
-        assert.equal(checkpointSummaryOf(result).commit_status, "not_committed");
-        assert.equal(checkpointSummaryOf(result).records_flushed, 1);
-        assert.equal(checkpointSummaryOf(result).buffered_records_dropped, 0);
-        assert.equal(checkpointSummaryOf(result).state_streams_staged, 1);
-        assert.equal(checkpointSummaryOf(result).state_streams_committed, 0);
-        assert.deepEqual(result.connector_error, {
-          message: "User denied follow-up verification",
-          retryable: false,
-        });
+      const state = await loadSyncState(connectorId, ownerToken, { rsUrl: `http://localhost:${rsPort}` });
+      assert.ok(!state?.items, "STATE should not persist when DONE status is cancelled");
 
-        const state = await loadSyncState(connectorId, ownerToken, { rsUrl: `http://localhost:${rsPort}` });
-        assert.ok(!state?.items, "STATE should not persist when DONE status is cancelled");
+      const bodyRecords = await fetchRecords(rsPort, connectorId, ownerToken, "&limit=10");
+      const records = bodyRecords;
+      const found = records.find((record) => record.data?.id === "cancelled_terminal_record");
+      assert.ok(
+        found,
+        "records flushed before DONE(cancelled) should remain durable under the checkpointed streaming model"
+      );
 
-        const bodyRecords = await fetchRecords(rsPort, connectorId, ownerToken, "&limit=10");
-        const records = bodyRecords;
-        const found = records.find((record) => record.data?.id === "cancelled_terminal_record");
-        assert.ok(
-          found,
-          "records flushed before DONE(cancelled) should remain durable under the checkpointed streaming model"
-        );
+      const { body: runTimeline } = await fetchJson<TimelineBody>(
+        `${asUrl}/_ref/runs/${encodeURIComponent(requireRunId(result))}/timeline`
+      );
+      const runTypes = (runTimeline.data || []).map((event) => event.event_type);
+      assert.ok(runTypes.includes("run.state_staged"));
+      assert.ok(!runTypes.includes("run.state_advanced"));
+      assert.ok(!runTypes.includes("run.completed"));
+      assert.ok(runTypes.includes("run.failed"));
 
-        const { body: runTimeline } = await fetchJson<TimelineBody>(
-          `${asUrl}/_ref/runs/${encodeURIComponent(requireRunId(result))}/timeline`
-        );
-        const runTypes = (runTimeline.data || []).map((event) => event.event_type);
-        assert.ok(runTypes.includes("run.state_staged"));
-        assert.ok(!runTypes.includes("run.state_advanced"));
-        assert.ok(!runTypes.includes("run.completed"));
-        assert.ok(runTypes.includes("run.failed"));
-
-        const failedEvent = (runTimeline.data || []).find((event) => event.event_type === "run.failed");
-        assert.ok(failedEvent, "run.failed should be emitted when the connector reports DONE(cancelled)");
-        assert.equal(failedEvent.status, "cancelled");
-        assert.equal(failedEvent.data.reason, "connector_reported_cancelled");
-        assert.equal(failedEvent.data.records_flushed, 1);
-        assert.equal(failedEvent.data.buffered_records_dropped, 0);
-        assert.equal(failedEvent.data.state_streams_staged, 1);
-        assert.equal(failedEvent.data.state_streams_committed, 0);
-        assert.equal(failedEvent.data.checkpoint_commit_status, "not_committed");
-        assert.equal(failedEvent.data.exit_code, undefined);
-        assert.equal(failedEvent.data.connector_error_message, "User denied follow-up verification");
-        assert.equal(failedEvent.data.connector_error_retryable, false);
-      } finally {
-        cleanup();
-        await closeServer(server);
-      }
+      const failedEvent = (runTimeline.data || []).find((event) => event.event_type === "run.failed");
+      assert.ok(failedEvent, "run.failed should be emitted when the connector reports DONE(cancelled)");
+      assert.equal(failedEvent.status, "failed");
+      assert.equal(failedEvent.data.reason, "connector_protocol_violation");
+      assert.equal(failedEvent.data.records_flushed, 1);
+      assert.equal(failedEvent.data.buffered_records_dropped, 0);
+      assert.equal(failedEvent.data.state_streams_staged, 1);
+      assert.equal(failedEvent.data.state_streams_committed, 0);
+      assert.equal(failedEvent.data.checkpoint_commit_status, "not_committed");
+      assert.equal(failedEvent.data.exit_code, undefined);
+      assert.equal(failedEvent.data.connector_error_message, undefined);
+      assert.equal(failedEvent.data.connector_error_retryable, undefined);
+    } finally {
+      cleanup();
+      await closeServer(server);
     }
-  );
+  });
 
   await t.test(
-    "DONE(cancelled) with an exit code of 0 is treated as a protocol violation and commits no checkpoints",
+    "DONE(failed) with an exit code of 0 is treated as a protocol violation and commits no checkpoints",
     async () => {
       const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
       const { asPort, rsPort } = server;
@@ -9230,18 +9561,19 @@ rl.on('line', (line) => {
   process.stdout.write(JSON.stringify({
     type: 'RECORD',
     stream: 'items',
-    key: 'done_cancelled_exit_mismatch',
-    data: { id: 'done_cancelled_exit_mismatch', value: 'before_cancelled_exit_mismatch' },
+    key: 'done_failed_exit_mismatch',
+    data: { id: 'done_failed_exit_mismatch', value: 'before_failed_exit_mismatch' },
     emitted_at: new Date().toISOString(),
   }) + '\\n');
   process.stdout.write(JSON.stringify({
     type: 'STATE',
     stream: 'items',
-    cursor: { cursor: 'cursor_done_cancelled_exit_mismatch' },
+    cursor: { cursor: 'cursor_done_failed_exit_mismatch' },
   }) + '\\n');
   process.stdout.write(JSON.stringify({
     type: 'DONE',
-    status: 'cancelled',
+    status: 'failed',
+    error: { message: 'failed', retryable: false },
     records_emitted: 1,
   }) + '\\n');
   rl.close();
@@ -9279,14 +9611,14 @@ rl.on('line', (line) => {
         );
 
         const state = await loadSyncState(connectorId, ownerToken, { rsUrl: `http://localhost:${rsPort}` });
-        assert.ok(!state?.items, "STATE should not persist when DONE(cancelled) exits with code 0");
+        assert.ok(!state?.items, "STATE should not persist when DONE(failed) exits with code 0");
 
         const bodyRecords = await fetchRecords(rsPort, connectorId, ownerToken, "&limit=10");
         const records = bodyRecords;
-        const found = records.find((record) => record.data?.id === "done_cancelled_exit_mismatch");
-        assert.ok(found, "records flushed before the DONE(cancelled) exit mismatch should remain durable");
+        const found = records.find((record) => record.data?.id === "done_failed_exit_mismatch");
+        assert.ok(found, "records flushed before the DONE(failed) exit mismatch should remain durable");
 
-        assert.ok(capturedError?.run_id, "run_id should be attached to cancelled DONE/exit protocol violations");
+        assert.ok(capturedError?.run_id, "run_id should be attached to failed DONE/exit protocol violations");
         const { body: runTimeline } = await fetchJson<TimelineBody>(
           `${asUrl}/_ref/runs/${encodeURIComponent(requireRunId(capturedError))}/timeline`
         );
@@ -9297,7 +9629,7 @@ rl.on('line', (line) => {
         assert.ok(runTypes.includes("run.failed"));
 
         const failedEvent = (runTimeline.data || []).find((event) => event.event_type === "run.failed");
-        assert.ok(failedEvent, "run.failed should be emitted for DONE(cancelled)/exit protocol violations");
+        assert.ok(failedEvent, "run.failed should be emitted for DONE(failed)/exit protocol violations");
         assert.equal(failedEvent.data.reason, "connector_protocol_violation");
         assert.equal(failedEvent.data.exit_code, 0);
         assert.equal(failedEvent.data.records_flushed, 1);
@@ -9313,7 +9645,7 @@ rl.on('line', (line) => {
   );
 
   await t.test(
-    "DONE(cancelled) with mismatched records_emitted is treated as a protocol violation and still commits no checkpoints",
+    "DONE(failed) with mismatched records_emitted is treated as a protocol violation and still commits no checkpoints",
     async () => {
       const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
       const { asPort, rsPort } = server;
@@ -9334,18 +9666,19 @@ rl.on('line', (line) => {
   process.stdout.write(JSON.stringify({
     type: 'RECORD',
     stream: 'items',
-    key: 'done_cancelled_count_mismatch',
-    data: { id: 'done_cancelled_count_mismatch', value: 'before_cancelled_count_mismatch' },
+    key: 'done_failed_count_mismatch',
+    data: { id: 'done_failed_count_mismatch', value: 'before_failed_count_mismatch' },
     emitted_at: new Date().toISOString(),
   }) + '\\n');
   process.stdout.write(JSON.stringify({
     type: 'STATE',
     stream: 'items',
-    cursor: { cursor: 'cursor_done_cancelled_count_mismatch' },
+    cursor: { cursor: 'cursor_done_failed_count_mismatch' },
   }) + '\\n');
   process.stdout.write(JSON.stringify({
     type: 'DONE',
-    status: 'cancelled',
+    status: 'failed',
+    error: { message: 'failed', retryable: false },
     records_emitted: 2,
   }) + '\\n');
   rl.close();
@@ -9385,16 +9718,16 @@ rl.on('line', (line) => {
         );
 
         const state = await loadSyncState(connectorId, ownerToken, { rsUrl: `http://localhost:${rsPort}` });
-        assert.ok(!state?.items, "STATE should not persist when DONE(cancelled) reports the wrong record count");
+        assert.ok(!state?.items, "STATE should not persist when DONE(failed) reports the wrong record count");
 
         const bodyRecords = await fetchRecords(rsPort, connectorId, ownerToken, "&limit=10");
         const records = bodyRecords;
-        const found = records.find((record) => record.data?.id === "done_cancelled_count_mismatch");
-        assert.ok(found, "records flushed before the cancelled terminal count mismatch should remain durable");
+        const found = records.find((record) => record.data?.id === "done_failed_count_mismatch");
+        assert.ok(found, "records flushed before the failed terminal count mismatch should remain durable");
 
         assert.ok(
           capturedError?.run_id,
-          "run_id should be attached to cancelled DONE.records_emitted protocol violations"
+          "run_id should be attached to failed DONE.records_emitted protocol violations"
         );
         const { body: runTimeline } = await fetchJson<TimelineBody>(
           `${asUrl}/_ref/runs/${encodeURIComponent(requireRunId(capturedError))}/timeline`
@@ -9406,7 +9739,7 @@ rl.on('line', (line) => {
         assert.ok(runTypes.includes("run.failed"));
 
         const failedEvent = (runTimeline.data || []).find((event) => event.event_type === "run.failed");
-        assert.ok(failedEvent, "run.failed should be emitted for cancelled DONE.records_emitted protocol violations");
+        assert.ok(failedEvent, "run.failed should be emitted for failed DONE.records_emitted protocol violations");
         assert.equal(failedEvent.data.reason, "connector_protocol_violation");
         assert.equal(failedEvent.data.records_emitted, 1);
         assert.equal(failedEvent.data.reported_records_emitted, 2);
@@ -10116,7 +10449,7 @@ rl.on('line', (line) => {
     stream: 'items',
     cursor: { cursor: 'cursor_done_failed_exit_mismatch' },
   }) + '\\n');
-  process.stdout.write(JSON.stringify({
+  process.stdout.write(JSON.stringify({ error: { message: "synthetic failure", retryable: false },
     type: 'DONE',
     status: 'failed',
     records_emitted: 1,
@@ -10331,7 +10664,7 @@ rl.on('line', (line) => {
     stream: 'items',
     cursor: { cursor: 'cursor_done_failed_count_mismatch' },
   }) + '\\n');
-  process.stdout.write(JSON.stringify({
+  process.stdout.write(JSON.stringify({ error: { message: "synthetic failure", retryable: false },
     type: 'DONE',
     status: 'failed',
     records_emitted: 2,

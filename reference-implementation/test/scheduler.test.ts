@@ -1994,11 +1994,11 @@ rl.on('line', (line) => {
   }
 });
 
-test("scheduler preserves connector-declared terminal error details from cancelled runs", async () => {
+test("scheduler preserves connector-declared terminal error details when verification is declined", async () => {
   const manifest = {
-    connector_id: "scheduler-cancelled-terminal-error-test",
-    display_name: "Scheduler Cancelled Terminal Error Test Connector",
-    manifest_uri: "https://registry.pdpp.dev/connectors/scheduler-cancelled-terminal-error-test",
+    connector_id: "scheduler-verification-declined-error-test",
+    display_name: "Scheduler Verification Declined Error Test Connector",
+    manifest_uri: "https://registry.pdpp.dev/connectors/scheduler-verification-declined-error-test",
     protocol_version: "0.1.0",
     streams: [
       {
@@ -2018,7 +2018,7 @@ test("scheduler preserves connector-declared terminal error details from cancell
     ],
     version: "1.0.0",
   };
-  const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-scheduler-cancelled-terminal-error-"));
+  const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-scheduler-verification-declined-error-"));
   const connectorPath = join(tmpDir, "connector.mjs");
   writeFileSync(
     connectorPath,
@@ -2031,13 +2031,13 @@ rl.on('line', (line) => {
   process.stdout.write(JSON.stringify({
     type: 'RECORD',
     stream: 'items',
-    key: 'scheduler_cancelled_terminal_error',
-    data: { id: 'scheduler_cancelled_terminal_error', value: 'before cancellation' },
+    key: 'scheduler_verification_declined',
+    data: { id: 'scheduler_verification_declined', value: 'before verification declined' },
     emitted_at: new Date().toISOString(),
   }) + '\\n');
   process.stdout.write(JSON.stringify({
     type: 'DONE',
-    status: 'cancelled',
+    status: 'failed',
     records_emitted: 1,
     error: { message: 'User denied follow-up verification', retryable: false },
   }) + '\\n');
@@ -2061,7 +2061,7 @@ rl.on('line', (line) => {
     });
     assert.equal(registerResp.status, 201);
 
-    const ownerToken = await issueOwnerToken(asUrl, "scheduler_cancelled_terminal_error_user");
+    const ownerToken = await issueOwnerToken(asUrl, "scheduler_verification_declined_user");
     const scheduler = createScheduler({
       admitRunConnection: fakeAdmitRunConnection(),
       connectors: [
@@ -2072,7 +2072,7 @@ rl.on('line', (line) => {
           intervalMs: 60_000,
           manifest,
           maxRetries: 0,
-          ownerSubjectId: "scheduler_cancelled_terminal_error_user",
+          ownerSubjectId: "scheduler_verification_declined_user",
           ownerToken,
         },
       ],
@@ -2091,9 +2091,9 @@ rl.on('line', (line) => {
 
     const [record] = completedRuns;
     assert.ok(record, "expected a completed run record");
-    assert.equal(record.status, "cancelled");
+    assert.equal(record.status, "failed");
     assert.equal(record.failureReason, null);
-    assert.equal(record.terminalReason, "connector_reported_cancelled");
+    assert.equal(record.terminalReason, "connector_reported_failed");
     assert.deepEqual(record.connectorError, {
       message: "User denied follow-up verification",
       retryable: false,
@@ -2119,7 +2119,7 @@ rl.on('line', (line) => {
     const stats = scheduler.getStats();
     const connectorStats = stats[manifest.connector_id];
     assert.ok(connectorStats, "expected stats for the connector");
-    assert.equal(connectorStats.lastRun?.terminalReason, "connector_reported_cancelled");
+    assert.equal(connectorStats.lastRun?.terminalReason, "connector_reported_failed");
     assert.deepEqual(connectorStats.lastRun?.connectorError, {
       message: "User denied follow-up verification",
       retryable: false,

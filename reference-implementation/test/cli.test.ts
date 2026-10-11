@@ -6583,11 +6583,11 @@ rl.on('line', (line) => {
   });
 
   await t.test(
-    "run timeline keeps connector-declared terminal error details inspectable on cancelled runs",
+    "run timeline keeps connector-declared terminal error details inspectable when verification is declined",
     async () => {
       await withHarness(async ({ asUrl, rsUrl, spotifyManifest }) => {
         const ownerToken = await issueOwnerToken(asUrl, "cli_owner");
-        const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-cli-run-terminal-cancelled-"));
+        const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-cli-run-verification-declined-"));
         const connectorPath = join(tmpDir, "connector.mjs");
         writeFileSync(
           connectorPath,
@@ -6600,13 +6600,13 @@ rl.on('line', (line) => {
   process.stdout.write(JSON.stringify({
     type: 'RECORD',
     stream: 'top_artists',
-    key: 'cli_terminal_cancelled',
-    data: { id: 'cli_terminal_cancelled', value: 'before terminal cancellation' },
+    key: 'cli_verification_declined',
+    data: { id: 'cli_verification_declined', value: 'before verification declined' },
     emitted_at: new Date().toISOString(),
   }) + '\\n');
   process.stdout.write(JSON.stringify({
     type: 'DONE',
-    status: 'cancelled',
+    status: 'failed',
     records_emitted: 1,
     error: { message: 'User denied follow-up verification', retryable: false },
   }) + '\\n');
@@ -6630,8 +6630,8 @@ rl.on('line', (line) => {
             state: null,
           });
 
-          assert.equal(result.status, "cancelled");
-          assert.equal(result.terminal_reason, "connector_reported_cancelled");
+          assert.equal(result.status, "failed");
+          assert.equal(result.terminal_reason, "connector_reported_failed");
 
           const timeline = await runCli([
             "run",
@@ -6645,17 +6645,17 @@ rl.on('line', (line) => {
           assert.ok(timeline.json, "expected CLI --format json output to parse");
 
           const failedEvent = (timeline.json.data || []).find((event) => event.event_type === "run.failed");
-          assert.ok(failedEvent, "run timeline should include run.failed for connector-declared cancellations");
-          assert.equal(failedEvent.status, "cancelled");
+          assert.ok(failedEvent, "run timeline should include run.failed for failed verification");
+          assert.equal(failedEvent.status, "failed");
           assert.equal(asRecord(failedEvent.data?.source).kind, "connector");
           assert.equal(asRecord(failedEvent.data?.source).id, SPOTIFY_CONNECTOR_KEY);
-          assert.equal(failedEvent.data?.reason, "connector_reported_cancelled");
+          assert.equal(failedEvent.data?.reason, "connector_reported_failed");
           assert.equal(failedEvent.data?.connector_error_message, "User denied follow-up verification");
           assert.equal(failedEvent.data?.connector_error_retryable, false);
           assert.equal(failedEvent.data?.checkpoint_commit_status, "not_committed");
 
           const completedEvent = (timeline.json.data || []).find((event) => event.event_type === "run.completed");
-          assert.equal(completedEvent, undefined, "connector-declared cancelled runs should not include run.completed");
+          assert.equal(completedEvent, undefined, "failed verification runs should not include run.completed");
           assert.equal(timeline.stderr, "");
         } finally {
           rmSync(tmpDir, { force: true, recursive: true });
@@ -6910,6 +6910,7 @@ rl.on('line', (line) => {
   process.stdout.write(JSON.stringify({
     type: 'DONE',
     status: '${scenario.doneStatus}',
+    ...('${scenario.doneStatus}' === 'failed' ? { error: { message: 'failed', retryable: false } } : {}),
     records_emitted: ${scenario.recordsEmitted},
   }) + '\\n');
   rl.close();

@@ -57,9 +57,7 @@
 // zero-connector-knowledge conformance guard, see
 // `test/ri-zero-connector-knowledge-conformance.test.ts`; the same rule is why
 // `runtime/declared-reason-tokens.ts` stopped importing a connector's token
-// list). The two also run in different processes, exactly like
-// `connector-gap-bounding.ts`'s `CONNECTOR_ERROR_CODE_RE` and its connector-side
-// twin: they cannot literally share a module, but the CONTRACT must match.
+// list). The two run in different processes but use the same redaction contract.
 
 // URL-embedded userinfo: https://user:secret@host or http://user:secret@host
 // Captures protocol so we can preserve it; replaces "user:pass" with [REDACTED].
