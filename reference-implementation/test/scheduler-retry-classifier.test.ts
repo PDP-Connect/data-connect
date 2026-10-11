@@ -30,6 +30,7 @@ import {
   isTerminalGrantFailure,
   NON_RETRYABLE_FAILURE_REASONS,
   NON_RETRYABLE_TERMINAL_REASONS,
+  runRequiresOwnerAuthRepair,
   shouldRetryRunFailure,
   TERMINAL_GRANT_FAILURE_REASONS,
 } from "../runtime/scheduler-retry-classifier.ts";
@@ -113,11 +114,11 @@ test("shouldRetryRunFailure retries when connector_error.retryable is true or un
   assert.equal(shouldRetryRunFailure({ connector_error: {} }), true);
 });
 
-test("shouldRetryRunFailure keeps an owner-action gap non-retryable over connector retryability", () => {
+test("shouldRetryRunFailure keeps a runtime interaction outcome non-retryable over connector retryability", () => {
   assert.equal(
     shouldRetryRunFailure({
       connector_error: { retryable: true },
-      known_gaps: [{ kind: "run_failed", recovery_hint: { action: "manual_action_required", retryable: false } }],
+      known_gaps: [{ kind: "interaction_required", reason: "interaction_timeout" }],
     }),
     false
   );
@@ -170,7 +171,7 @@ test("shouldRetryRunFailure does not override a present runtime-retry hint with 
   );
 });
 
-test("shouldRetryRunFailure still denies a real session_required/session_expired auth failure", () => {
+test("shouldRetryRunFailure denies a non-retryable connector error without inferring auth from its text", () => {
   assert.equal(
     shouldRetryRunFailure({
       connector_error: { message: "usaa_session_failed: usaa_session_required", retryable: false },
@@ -178,11 +179,62 @@ test("shouldRetryRunFailure still denies a real session_required/session_expired
     false
   );
   assert.equal(
-    shouldRetryRunFailure({
+    runRequiresOwnerAuthRepair({
       connector_error: { message: "chatgpt_session_expired" },
     }),
     false
   );
+});
+
+test("runRequiresOwnerAuthRepair ignores connector text, reasons and recovery suggestions", () => {
+  for (const message of [
+    "401 unauthorized",
+    "403 forbidden",
+    "credential_rejected",
+    "session_required",
+    "session_expired",
+    "provider_session_failed",
+  ]) {
+    assert.equal(runRequiresOwnerAuthRepair({ connector_error: { message } }), false, message);
+    for (const hint of [
+      undefined,
+      "refresh_credentials",
+      { action: "refresh_credentials" },
+      { action: "manual_action_required" },
+    ]) {
+      for (const kind of ["run_failed", "skip_result"]) {
+        assert.equal(
+          runRequiresOwnerAuthRepair({
+            known_gaps: [{ kind, message, reason: "manual_action_required", recovery_hint: hint }],
+          }),
+          false
+        );
+      }
+    }
+  }
+  assert.equal(runRequiresOwnerAuthRepair(null), false);
+  assert.equal(runRequiresOwnerAuthRepair({ failure_reason: "provider_session_failed" }), false);
+});
+
+test("runRequiresOwnerAuthRepair uses only the runtime's unsettled interaction outcome", () => {
+  for (const reason of ["interaction_cancelled", "interaction_timeout"]) {
+    assert.equal(
+      runRequiresOwnerAuthRepair({
+        connector_error: { retryable: true },
+        known_gaps: [{ kind: "interaction_required", reason }],
+      }),
+      true
+    );
+    assert.equal(runRequiresOwnerAuthRepair({ known_gaps: [{ kind: "skip_result", reason }] }), false);
+  }
+  for (const reason of ["interaction_success", "credential_rejected", undefined]) {
+    assert.equal(
+      runRequiresOwnerAuthRepair({
+        known_gaps: [{ kind: "interaction_required", reason, recovery_hint: { action: "refresh_credentials" } }],
+      }),
+      false
+    );
+  }
 });
 
 // ─── isTerminalGrantFailure ──────────────────────────────────────────────

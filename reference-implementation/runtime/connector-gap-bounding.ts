@@ -1040,7 +1040,8 @@ export function buildKnownGap({
   continuation = null,
 }: BuildKnownGapInput): Record<string, unknown> {
   const safeReason = boundGapString(reason) || "unknown";
-  const safeMessage = boundGapString(message);
+  // Redact before the gap's shorter bound can cut an unlabelled key in half.
+  const safeMessage = boundGapString(boundConnectorErrorMessage(message));
   const normalizedSeverity = classifyKnownGapSeverity({
     explicitSelection,
     kind,

@@ -188,8 +188,8 @@ const GENERIC_RUN_FAILED_GAP_REASONS: ReadonlySet<string> = new Set([
  * generic wrapper's own `recovery_hint` (typically absent or `"unknown"`)
  * would otherwise independently force the whole run terminal even though the
  * connector already gave a more specific, non-terminal read of the same
- * event — the same shape `credentialReasonFromGenericFailure` in
- * `ref-control.ts` already defers to for credential-reason derivation (§10-C).
+ * event. This affects coverage only; connector wording and hints do not
+ * establish credential rejection.
  * Only the generic wrapper defers: a `run_failed` gap that already carries
  * its own `retry_by_runtime`/`manual_action_required` hint is handled by the
  * ordinary per-gap checks above and never reaches this predicate's caller.

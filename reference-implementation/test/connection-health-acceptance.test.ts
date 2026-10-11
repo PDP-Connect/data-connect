@@ -104,21 +104,9 @@ function failedRun(overrides: Partial<ConnectorRunSummary> = {}): ConnectorRunSu
   };
 }
 
-function chatGptSessionRequiredRun(): ConnectorRunSummary {
-  return failedRun({
-    failure_reason: "connector_reported_failed",
-    known_gaps: [
-      {
-        kind: "run_failed",
-        message:
-          "chatgpt_preprogress_failure: refresh_credentials: chatgpt_session_failed: chatgpt_session_required: ChatGPT session is not active.",
-        reason: "connector_reported_failed",
-        recovery_hint: { action: "refresh_credentials", retryable: false },
-        severity: "actionable",
-        stream: null,
-      },
-    ],
-  });
+function runtimeSessionRequiredRun(): ConnectorRunSummary {
+  // A typed runtime readiness result, independent of connector text or hints.
+  return failedRun({ failure_reason: "session_required" });
 }
 
 function readyBrowserSurface(): ConnectionRemoteSurfaceEvidence {
@@ -525,7 +513,7 @@ test("acceptance 7.1: expired prompt does not heal unresolved session-readiness 
     attentionRecords: [terminalOtpAttention("expired")],
     browserSessionRepairCapable: true,
     freshness: FRESH,
-    lastRun: chatGptSessionRequiredRun(),
+    lastRun: runtimeSessionRequiredRun(),
     lastSuccessfulRun: null,
     nowIso: NOW,
     remoteSurface: readyBrowserSurface(),
@@ -1208,48 +1196,50 @@ test("acceptance 7.3: no manifest policy keeps the prior complete behaviour inta
   assert.equal(snap.axes.coverage, "complete");
 });
 
-// ─── §10-C: a flattened auth failure must surface as a credential prompt ──────
-
-test("§10-C: a failed run whose known_gap is an auth 401 (flattened to a generic reason) drives a credential prompt, not a silent failure", () => {
-  // The live ChatGPT case: a terminal 401 is reported as the GENERIC
-  // `connector_reported_failed`, but the auth signal survives in the gap's
-  // `recovery_hint.action` + message. `firstDegradingKnownGapReason` must
-  // surface a credential reason so the headline routes to a reconnect path
-  // (and the §10-F escalation push) instead of a silent generic failure.
-  const run = failedRun({
-    failure_reason: "connector_reported_failed",
-    known_gaps: [
-      {
-        kind: "run_failed",
-        message: "apiFetch got 401 on GET /conversation/abc (auth - not retryable)",
-        reason: "connector_reported_failed",
-        recovery_hint: { action: "refresh_credentials", retryable: false },
-        severity: "actionable",
-        stream: null,
-      },
-    ],
-  });
-  const snap = projectConnectorSummaryConnectionHealth({
-    freshness: FRESH,
-    lastRun: run,
-    lastSuccessfulRun: null,
-    schedule: { enabled: true },
-  });
-  // The credential signal is recovered: the connection is NOT silently
-  // generic-failed. It surfaces a credentials condition that drives the
-  // owner-facing reconnect path (the same `isCredentialReason` gate the
-  // dashboard reads for its "Reconnect" CTA).
-  assert.notEqual(snap.state, "healthy");
-  const credentialCondition = snap.conditions?.find((c) => c.type === "CredentialsValid" && c.status === "false");
-  assert.ok(
-    credentialCondition,
-    `expected a CredentialsValid:false condition (reconnect prompt), got conditions: ${JSON.stringify(snap.conditions?.map((c) => `${c.type}:${c.status}`))}`
-  );
-  assert.equal(credentialCondition.remediation?.action, "refresh_credentials");
+// Collection Profile 0.2.0 Sections 5.5 and 5.11: connector claims do not authorize repair.
+test("connector auth text and hints do not manufacture a reconnect instruction", () => {
+  for (const message of [
+    "apiFetch got 401",
+    "403 forbidden",
+    "authentication_error",
+    "credential_rejected",
+    "session_required",
+    "session_expired",
+    "invalid_token",
+  ]) {
+    for (const recoveryHint of [undefined, { action: "refresh_credentials", retryable: false }]) {
+      const run = failedRun({
+        failure_reason: "connector_reported_failed",
+        known_gaps: [
+          {
+            kind: "run_failed",
+            message,
+            reason: "connector_reported_failed",
+            recovery_hint: recoveryHint,
+            severity: "actionable",
+          },
+        ],
+      });
+      const snap = projectConnectorSummaryConnectionHealth({
+        browserSessionRepairCapable: true,
+        credential: { capable: true, present: true, rejected: false },
+        freshness: FRESH,
+        lastRun: run,
+        lastSuccessfulRun: null,
+        schedule: { enabled: true },
+      });
+      assert.notEqual(snap.state, "healthy");
+      assert.equal(
+        snap.conditions?.find((c) => c.type === "CredentialsValid" && c.status === "false"),
+        undefined,
+        message
+      );
+    }
+  }
 });
 
-test("§10-C: a browser-capable idle ChatGPT session-required gap projects session repair", () => {
-  const run = chatGptSessionRequiredRun();
+test("a runtime session-required gate projects browser session repair", () => {
+  const run = runtimeSessionRequiredRun();
   const snap = projectConnectorSummaryConnectionHealth({
     browserSessionRepairCapable: true,
     freshness: FRESH,
@@ -1268,7 +1258,7 @@ test("§10-C: a browser-capable idle ChatGPT session-required gap projects sessi
   });
 
   const credentialCondition = snap.conditions?.find((c) => c.type === "CredentialsValid" && c.status === "false");
-  assert.ok(credentialCondition, "session-required gap should produce a reconnect condition");
+  assert.ok(credentialCondition, "runtime readiness evidence should produce a reconnect condition");
   assert.equal(credentialCondition.reason, "session_required");
   assert.equal(credentialCondition.remediation?.action, "refresh_credentials");
   assert.equal(credentialCondition.remediation?.surface?.kind, "browser_session");
@@ -1287,7 +1277,7 @@ test("§10-C: ref-control preserves exact typed provider-proof dedupe", () => {
   };
   const base = {
     freshness: FRESH,
-    lastRun: chatGptSessionRequiredRun(),
+    lastRun: runtimeSessionRequiredRun(),
     lastSuccessfulRun: null,
     remoteSurface: readyBrowserSurface(),
     schedule: { enabled: true },
@@ -1447,47 +1437,43 @@ test("§10-C control: a login-flow stall with a competing manual_action gap does
   );
 });
 
-test("§10-C control: a genuine 401/403 auth failure still drives a credential prompt EVEN alongside a competing manual_action gap", () => {
-  // Evidence-specific guard against over-correction: a competing
-  // manual_action gap must defer to a DEFINITIVE credential-rejection signal
-  // (401/403/authentication_error/credential_rejected/invalid_token), never
-  // suppress one. This is the control the memory/task instruction calls for —
-  // do not broadly suppress authentication_error or credential reasons when
-  // current credentials are actually invalid.
+test("a connector 401 alongside a runtime interaction timeout does not prove credential rejection", () => {
   const run = failedRun({
     failure_reason: "connector_reported_failed",
     known_gaps: [
       {
         kind: "interaction_required",
-        message: "Manual action requested for an unrelated interactive step.",
         reason: "interaction_timeout",
-        recovery_hint: { action: "manual_action_required", retryable: false },
+        recovery_hint: { action: "manual_action_required" },
         severity: "actionable",
-        stream: null,
       },
       {
         kind: "run_failed",
-        message: "apiFetch got 401 on GET /accounts (auth - not retryable)",
+        message: "apiFetch got 401",
         reason: "connector_reported_failed",
-        recovery_hint: { action: "refresh_credentials", retryable: false },
+        recovery_hint: { action: "refresh_credentials" },
         severity: "actionable",
-        stream: null,
       },
     ],
   });
+  const base = { freshness: FRESH, lastRun: run, lastSuccessfulRun: null, schedule: { enabled: true } };
   const snap = projectConnectorSummaryConnectionHealth({
+    ...base,
     credential: { capable: true, present: true, rejected: false },
-    freshness: FRESH,
-    lastRun: run,
-    lastSuccessfulRun: null,
-    schedule: { enabled: true },
   });
-  const credentialCondition = snap.conditions?.find((c) => c.type === "CredentialsValid" && c.status === "false");
-  assert.ok(
-    credentialCondition,
-    "a definitive 401 signal must still drive a credential prompt even alongside a competing manual_action gap"
+  assert.equal(
+    snap.conditions?.find((c) => c.type === "CredentialsValid" && c.status === "false"),
+    undefined
   );
-  assert.equal(credentialCondition.remediation?.action, "refresh_credentials");
+  // Durable credential-store evidence still requires repair, even with the same connector report.
+  const rejected = projectConnectorSummaryConnectionHealth({
+    ...base,
+    credential: { capable: true, present: true, rejected: true },
+  });
+  assert.equal(
+    rejected.conditions?.find((c) => c.type === "CredentialsValid" && c.status === "false")?.remediation?.action,
+    "refresh_credentials"
+  );
 });
 
 test("stale skip regression: a scheduler-generated attention-skip's own error text must not manufacture a credential_rejected condition for a present, unrejected credential", () => {

@@ -2009,27 +2009,15 @@ test(
   })
 );
 
-// Live wedge regression (dondochaka, cin_e4ab231c7d49b8f59e4c80ed): after an
-// attended browser-session repair times out, the next scheduled run's
-// DOM/API auth probe reports a definitive auth failure (401/unauthorized)
-// wrapped in ChatGPT's `_session_failed` terminal-error prefix. The known-gap
-// classifier flattens this to the generic "credential_rejected" reason
-// literal, which — matched only against MESSAGE TEXT — would route to
-// stored-credential capture. This connection has no credential row at all
-// (`credential === null`) and IS browser-session-bound
-// (`browserSessionRepairCapable === true`): the durable connection-binding
-// authority in `credentialsValidCondition` (connection-health.ts) must win
-// over that generic message-text classification and route to browser-session
-// repair instead, per reference-connection-health's connection-binding-scoped
-// stored-credential-presence rule.
+// Collection Profile 0.2.0 §5.11: binding capability does not prove sign-in rejection.
 test(
-  "ChatGPT-shaped browser_collector connection with no credential row: a generic credential_rejected reason still projects browser_session repair, never stored_credential (binding authority beats message text)",
+  "browser_collector binding and connector auth claims do not manufacture a reauth action",
   withTmpDb(async () => {
     seedBrowserBoundStaticSecretConnector();
     await seedInstance({
       connectorId: CHATGPT_SHAPED_CONNECTOR_ID,
       connectorInstanceId: CHATGPT_SHAPED_INSTANCE_ID,
-      displayName: "ChatGPT - dondochaka-like",
+      displayName: "ChatGPT - browser auth claims",
       sourceBinding: { device: "personal", kind: "browser_collector" },
       sourceBindingKey: "browser-static-secret",
       sourceKind: "account",
@@ -2073,29 +2061,16 @@ test(
     assert.ok(scoped, "the browser_collector connection projects a summary");
 
     const credentials = scoped.connection_health.conditions?.find((c) => c.type === "CredentialsValid");
-    assert.equal(credentials?.status, "false");
-    assert.notEqual(
-      credentials?.reason,
-      CONNECTION_CONDITION_REASONS.CREDENTIAL_REJECTED,
-      "a definitive auth failure wrapped in session_failed must not collapse to credential_rejected"
-    );
+    assert.equal(credentials?.status, "unknown");
+    assert.equal(credentials?.remediation, null);
     assert.equal(
-      credentials?.remediation?.surface?.kind,
-      "browser_session",
-      "browser-session-bound connection must repair by session, never stored_credential capture"
-    );
-    assert.doesNotMatch(credentials?.message ?? "", REJECTED_PATTERN);
-    assert.equal(
-      scoped.rendered_verdict.required_actions.find((action) => action.kind === "reauth")?.surface?.kind,
-      "browser_session"
+      scoped.rendered_verdict.required_actions.find((action) => action.kind === "reauth"),
+      undefined,
+      "connector text and hints do not justify reconnecting this browser binding"
     );
 
-    // No prior attended-repair interaction was seeded (it timed out and
-    // resolved/expired) and no run is currently active: the connection must
-    // read as idle-blocked, never as an in-progress "Collecting" state, and
-    // must carry exactly one reauth action — not a second, conflicting
-    // credential-capture action for the same failure.
-    assert.equal(scoped.connection_health.axes.attention, "none", "no open attention after a timed-out repair");
+    // A failed collection remains idle without diagnosing invalid credentials.
+    assert.equal(scoped.connection_health.axes.attention, "none", "no open attention from connector auth claims");
     assert.equal(scoped.connection_health.badges.syncing, false, "no active run is in flight");
     assert.doesNotMatch(
       scoped.rendered_verdict.progress.headline,
@@ -2103,7 +2078,7 @@ test(
       "idle blocked connection must not claim active collection"
     );
     const reauthActions = scoped.rendered_verdict.required_actions.filter((action) => action.kind === "reauth");
-    assert.equal(reauthActions.length, 1, "exactly one reauth action — no conflicting stored-credential action too");
+    assert.equal(reauthActions.length, 0, "auth claims do not create a required repair action");
   })
 );
 

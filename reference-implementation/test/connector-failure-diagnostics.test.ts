@@ -131,6 +131,24 @@ test("boundConnectorErrorMessage keeps the cause after Playwright's box border",
 
 // ─── 3. Spawn proof — runtime persists the diagnostic on connector exit ──────
 
+test("known-gap messages redact unlabelled keys with the connector error sanitizer before bounding", async () => {
+  const { boundConnectorErrorMessage, boundGapString, buildKnownGap } = await import(
+    "../runtime/connector-gap-bounding.ts"
+  );
+  for (const secret of [
+    ["sk", "live", "51HxYzAbCdEfGhIjKlMnOp"].join("_"),
+    "abcdefghij1234567890abcdefghij1234",
+    "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6",
+    "qwertyuiopasdfghjklzxcvbnm",
+    "X".repeat(250),
+  ]) {
+    const message = `request failed: ${secret}; password=hunter2; code 482913`;
+    const gap = buildKnownGap({ kind: "run_failed", message });
+    assert.equal(gap.message, boundGapString(boundConnectorErrorMessage(message)));
+    assert.ok(!String(gap.message).includes(secret.slice(0, 24)));
+  }
+});
+
 const TEST_MANIFEST = {
   connector_id: "https://registry.pdpp.dev/connectors/test-failure-diagnostics-stub",
   runtime_requirements: {},
