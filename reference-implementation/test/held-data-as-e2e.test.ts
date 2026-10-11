@@ -747,6 +747,40 @@ describe("held-data lifecycle over HTTP", () => {
     );
   });
 
+  it("P8: after refresh replay the successor refresh token and the family's access tokens are revoked, and no erasure instruction exists", async () => {
+    await withServer(
+      false,
+      async (h) => {
+        const clientId = await registerPublicClient(h);
+        const g = await authCodeGrant(h, clientId);
+        const refresh = (refresh_token: string) =>
+          fetchJson<{ access_token: string; refresh_token: string }>(
+            `${h.asUrl}/oauth/token`,
+            form({ client_id: clientId, grant_type: "refresh_token", refresh_token }),
+          );
+        const r1 = await refresh(g.refreshToken);
+        assert.equal(r1.status, 200, JSON.stringify(r1.body));
+        assert.equal((await introspect(g.accessToken)).active, true, "before the replay the original access token is live");
+        assert.equal((await introspect(r1.body.access_token)).active, true, "before the replay the successor access token is live");
+        assert.equal((await refresh(g.refreshToken)).status, 400, "replay of the superseded refresh token");
+
+        assert.equal((await refresh(r1.body.refresh_token)).status, 400, "the successor refresh token is revoked");
+        assert.equal((await introspect(g.accessToken)).active, false, "the original access token is revoked");
+        assert.equal((await introspect(r1.body.access_token)).active, false, "the successor access token is revoked");
+        assert.notEqual(await rsRead(h, g.accessToken), 200);
+        assert.notEqual(await rsRead(h, r1.body.access_token), 200);
+
+        const rt = getHeldDataRuntime();
+        assert.equal(rt?.authority.hasEnded(g.grantId), false, "the grant does not end");
+        assert.deepEqual(rt?.authority.ownerView(g.grantId, DAY)?.erasures ?? [], [], "no erasure instruction exists");
+        const s = await status(h, g.refreshToken, g.grantId);
+        assert.equal(s.body.grants[0]?.held_data, "permitted");
+        assert.equal(s.body.grants[0]?.erasure, undefined);
+      },
+      heldDataOpts(),
+    );
+  });
+
   it("package disconnect: rejected without a disposition; delete covers every child including one withdrawn earlier with keep; partial failure is reported per child", async () => {
     await withServer(
       false,
@@ -854,6 +888,53 @@ describe("held-data lifecycle over HTTP", () => {
           json({ grant_id: g.grantId, recovery_code: code.body.recovery_code }),
         );
         assert.equal(reuse.status, 400);
+      },
+      heldDataOpts(),
+    );
+  });
+
+  it("D3: a recovery credential approved for grant A cannot query or write grant B, and is not active at introspection", async () => {
+    await withServer(
+      false,
+      async (h) => {
+        const a = await ordinaryGrant(h);
+        const b = await ordinaryGrant(h);
+        const instruction = async (grantId: string) => {
+          const erase = await owner(h, `/v1/owner/grants/${grantId}/lifecycle/erase`, "POST");
+          assert.equal(erase.status, 200, JSON.stringify(erase.body));
+          const q = await status(h, grantId === a.grantId ? a.token : b.token, grantId);
+          return (q.body.grants[0]?.erasure as { instruction_id: string }).instruction_id;
+        };
+        const aInstruction = await instruction(a.grantId);
+        const bInstruction = await instruction(b.grantId);
+        getHeldDataRuntime()?.authority.disableCredential(a.token);
+        const code = await owner(h, `/v1/owner/grants/${a.grantId}/lifecycle/recovery-code`, "POST");
+        const rec = await fetchJson<{ status_credential: string }>(
+          `${h.asUrl}/oauth/grant-lifecycle/recover`,
+          json({ grant_id: a.grantId, recovery_code: code.body.recovery_code }),
+        );
+        assert.equal(rec.status, 200, JSON.stringify(rec.body));
+        const cred = rec.body.status_credential;
+        assert.equal((await introspect(cred)).active, false, "a recovery credential is not an active access token");
+        const reportedAt = new Date().toISOString();
+        const write = (grantId: string, instructionId: string) =>
+          lifecycle(h, { grant_id: grantId, instruction_id: instructionId, report: "received", reported_at: reportedAt, token: cred });
+        // Approved grant A: query and write both succeed.
+        const qa = await status(h, cred, a.grantId);
+        assert.equal(qa.body.grants[0]?.held_data, "erase", JSON.stringify(qa.body));
+        const wa = await write(a.grantId, aInstruction);
+        assert.equal(wa.body.grants[0]?.held_data, "erase", JSON.stringify(wa.body));
+        // Grant B was never approved for this credential: neither the query nor the write is answered.
+        const qb = await status(h, cred, b.grantId);
+        const answeredB = qb.status === 200 && qb.body.grants.some((g) => g.held_data !== undefined);
+        assert.equal(answeredB, false, `query of B: ${qb.status} ${JSON.stringify(qb.body)}`);
+        const wb = await write(b.grantId, bInstruction);
+        const wroteB = wb.status === 200 && wb.body.grants.some((g) => g.held_data !== undefined);
+        assert.equal(wroteB, false, `write to B: ${wb.status} ${JSON.stringify(wb.body)}`);
+        const bView = await owner(h, `/v1/owner/grants/${b.grantId}/lifecycle`);
+        assert.equal((bView.body.erasures as Record<string, unknown>[])[0]?.receipt_at, null, "no receipt was recorded for B");
+        // B's own credential still works: the refusal is scoping, not an outage.
+        assert.equal((await status(h, b.token, b.grantId)).body.grants[0]?.held_data, "erase");
       },
       heldDataOpts(),
     );
