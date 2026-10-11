@@ -252,7 +252,8 @@ export function mountAsDcr(app: AppLike, ctx: MountAsDcrContext): void {
     );
 
     if (outcome.outcome === "success") {
-      res.status(outcome.status).end();
+      if (outcome.lifecycle) res.status(outcome.status).json({ lifecycle: outcome.lifecycle });
+      else res.status(outcome.status).end();
       return;
     }
     ctx.pdppError(res, outcome.status, outcome.errorCode, outcome.errorMessage);

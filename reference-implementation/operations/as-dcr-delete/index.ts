@@ -37,13 +37,14 @@ export interface DcrDeleteDependencies {
       actingSubjectId: string;
       requestId: string;
       traceId: string;
-    }
-  ) => Promise<void> | void;
+    },
+  ) => Promise<void> | Promise<{ lifecycle?: unknown }> | void | { lifecycle?: unknown };
 }
 
 export interface DcrDeleteSuccessOutcome {
   readonly outcome: "success";
-  readonly status: 204;
+  readonly status: 204 | 202;
+  readonly lifecycle?: unknown;
 }
 
 export interface DcrDeleteFailureOutcome {
@@ -70,12 +71,14 @@ export async function executeAsDcrDelete(
   deps: DcrDeleteDependencies
 ): Promise<DcrDeleteOutcome> {
   try {
-    await deps.deleteRegisteredClient(input.clientId, {
+    const result = await deps.deleteRegisteredClient(input.clientId, {
       actingSubjectId: input.actingSubjectId,
       requestId: input.requestId,
       traceId: input.traceId,
     });
-    return { outcome: "success", status: 204 };
+    return result?.lifecycle
+      ? { outcome: "success", status: 202, lifecycle: result.lifecycle }
+      : { outcome: "success", status: 204 };
   } catch (err) {
     // biome-ignore lint/suspicious/noUnnecessaryConditions: Preserves established ordered async behavior, boundary contract, or dynamic test-harness type where a mechanical rewrite would change semantics.
     const errCode = (err as { code?: string })?.code || "invalid_request";

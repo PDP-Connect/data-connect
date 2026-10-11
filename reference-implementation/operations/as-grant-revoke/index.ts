@@ -38,7 +38,7 @@ export interface AsGrantRevokeDependencies {
 }
 
 export interface AsGrantRevokeOutput {
-  readonly envelope: { readonly revoked: true };
+  readonly envelope: { readonly revoked: true; readonly lifecycle?: unknown };
   readonly traceId: string | null;
 }
 
@@ -50,7 +50,10 @@ export async function executeAsGrantRevoke(
     request_id: input.requestId,
   });
   return {
-    envelope: { revoked: true },
+    envelope: {
+      revoked: true,
+      ...(result.lifecycle ? { lifecycle: result.lifecycle } : {}),
+    },
     // biome-ignore lint/suspicious/noUnnecessaryConditions: Preserves established ordered async behavior, boundary contract, or dynamic test-harness type where a mechanical rewrite would change semantics.
     traceId: result?.trace_id ?? null,
   };

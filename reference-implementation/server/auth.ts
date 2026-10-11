@@ -96,7 +96,7 @@ import {
   ProcessingPermissionsError,
 } from "./training-lease/runtime.ts";
 import { getHeldDataRuntime } from "./held-data/runtime.ts";
-import type { Disposition, EndingPath } from "../lib/held-data/authority.ts";
+import type { Disposition, EndingPath, GrantRegistration } from "../lib/held-data/authority.ts";
 import {
   buildDomainControlTrustSignal,
   parseTrustSignal,
@@ -5041,7 +5041,7 @@ async function revokeClientAccessArtifacts(
         ...(traceId === undefined ? {} : { trace_id: traceId }),
         ...(lifecycle ? { lifecycle: { ...lifecycle, path: "package_disconnect" as const } } : {}),
       });
-      if (result.status !== "revoked") {
+      if (result.status !== "revoked" && result.status !== "pending") {
         const err: AuthError = new Error(`Failed to revoke every child grant in package ${row.package_id}`);
         err.code = "grant_package_revoke_partial";
         err.result = result;
@@ -5061,7 +5061,12 @@ async function revokeClientAccessArtifacts(
   // ones this call revokes.
   const heldData = getHeldDataRuntime();
   if (heldData && lifecycle) {
-    for (const grantId of heldData.authority.grantsOfClient(clientId)) {
+    const knownIds = new Set(heldData.authority.grantsOfClient(clientId));
+    const allRows = isPostgresStorageBackend()
+      ? (await postgresQuery<DbRow>("SELECT grant_id FROM grants WHERE client_id = $1 ORDER BY issued_at ASC", [clientId])).rows
+      : allowUnboundedReadAcknowledged<DbRow>(referenceQueries.authGrantsListAllIdsByClientId, [clientId]);
+    for (const row of allRows) if (isNonEmptyString(row.grant_id)) knownIds.add(row.grant_id);
+    for (const grantId of knownIds) {
       if (!revokedGrantIds.includes(grantId)) {
         await endHeldDataForGrant(grantId, lifecycle);
       }
@@ -5198,6 +5203,7 @@ export async function deleteRegisteredClient(
   revokedPackageIds: string[];
   revokedOwnerTokenCount: number;
   disabledSubscriptionCount: number;
+  lifecycle?: { status: "pending"; grants: { grant_id: string; status: "pending" }[] };
 }> {
   if (!isNonEmptyString(clientId)) {
     const err: AuthError = new Error("client_id is required");
@@ -5242,7 +5248,10 @@ export async function deleteRegisteredClient(
     traceId,
   });
 
-  return { disabledSubscriptionCount, revokedGrantIds, revokedOwnerTokenCount, revokedPackageIds };
+  const pending = getHeldDataRuntime()?.authority.pendingActions().filter((a) => a.grant.clientId === clientId) ?? [];
+  return { disabledSubscriptionCount, revokedGrantIds, revokedOwnerTokenCount, revokedPackageIds,
+    ...(pending.length ? { lifecycle: { status: "pending" as const, grants: [...new Set(pending.map((a) => a.grant.grantId))].map((grant_id) => ({ grant_id, status: "pending" as const })) } } : {}),
+  };
 }
 
 /**
@@ -7919,6 +7928,7 @@ export async function exchangeGrantScopedDeviceCode({
   clientId: string;
   deviceCode: string;
 }): Promise<Record<string, unknown>> {
+  if (getHeldDataRuntime()?.authority.lost) throw bindingError("invalid_grant", "authority history unavailable or actions pending");
   if (!(clientId && deviceCode)) {
     throw buildGrantScopedDeviceExchangeError("invalid_request", "client_id and device_code are required");
   }
@@ -8589,6 +8599,7 @@ async function issuePackageToken(
   expiresAt: string | null = null,
   meta: { traceContext?: TraceContext | null; source?: string } = {}
 ): Promise<string> {
+  if (getHeldDataRuntime()?.authority.lost) throw bindingError("invalid_grant", "authority history unavailable or actions pending");
   const packageRow = await getGrantPackageStore().getPackageById(packageId);
   const grantPackage = normalizePackageRow(packageRow);
   if (
@@ -9820,12 +9831,21 @@ export async function revokeGrantPackage(
     status: "succeeded",
     trace_id: context.trace_id || undefined,
   });
+  const heldData = getHeldDataRuntime();
+  const lifecycleGrants = heldData
+    ? (await getGrantPackageStore().listAllMembers(packageId)).map((m) => ({
+        grant_id: m.grant_id,
+        status: heldData.authority.pendingActions(m.grant_id).length ? "pending" : "recorded",
+      }))
+    : [];
+  const lifecyclePending = lifecycleGrants.some((g) => g.status === "pending");
   return {
+    ...(heldData ? { lifecycle: { status: lifecyclePending ? "pending" : "recorded", grants: lifecycleGrants } } : {}),
     not_revoked_child_grants: [],
     package_id: packageId,
     revoked_at: now,
     revoked_child_grants: revokedChildGrants,
-    status: "revoked",
+    status: lifecyclePending ? "pending" : "revoked",
   };
 }
 
@@ -10240,6 +10260,7 @@ export async function exchangeOAuthAuthorizationCode({
   issuerBase?: string | null;
   cimdFetchDependencies?: CimdFetchDependencies;
 }): Promise<Record<string, unknown>> {
+  if (getHeldDataRuntime()?.authority.lost) throw bindingError("invalid_grant", "authority history unavailable or actions pending");
   const normalized = requireOAuthAuthorizationCodeExchangeInput({ clientId, code, codeVerifier, redirectUri });
   const oauthCodeStore = getOAuthCodeStore();
   const row = requireRedeemableOAuthAuthorizationCode(
@@ -11819,6 +11840,7 @@ export async function issueToken(
   expiresAt: string | null,
   meta: { traceContext?: TraceContext | null; source?: string } = {}
 ): Promise<string> {
+  if (heldDataEndedOrLost(grantId)) throw bindingError("invalid_grant", "authority history unavailable or actions pending");
   if (isPostgresStorageBackend()) {
     const { tokenId, grantRow, persistedGrant } = await withPostgresTransaction((client) =>
       insertPostgresGrantToken(client, { clientId, expiresAt, grantId, subjectId })
@@ -12227,7 +12249,7 @@ async function emitGrantRevoked(
 export async function revokeGrant(
   grantId: string,
   context: GrantRevocationContext = {}
-): Promise<{ request_id: string | null; trace_id: string | null }> {
+): Promise<{ request_id: string | null; trace_id: string | null; lifecycle?: { status: "pending"; grant_id: string } }> {
   const row0 = isPostgresStorageBackend()
     ? await pgOne<GrantRevocationRow>(
         `SELECT client_id, subject_id, trace_id, scenario_id,
@@ -12260,6 +12282,7 @@ export async function revokeGrant(
   return {
     request_id: context.request_id || null,
     trace_id: row0?.trace_id || null,
+    ...(getHeldDataRuntime()?.authority.pendingActions(grantId).length ? { lifecycle: { status: "pending" as const, grant_id: grantId } } : {}),
   };
 }
 
@@ -12268,7 +12291,8 @@ export async function revokeGrant(
 /** End processing authority for a grant that is ending. Never throws. */
 export async function endProcessingAuthorityForGrant(grantId: string, reason: string): Promise<void> {
   const runtime = getTrainingLeaseRuntime();
-  if (!runtime) {
+  if (!runtime || getHeldDataRuntime()?.authority.lost) {
+    // D4 replay will record processing withdrawal once the full history is restored.
     return;
   }
   try {
@@ -12320,15 +12344,10 @@ interface HeldDataGrantRow extends DbRow {
   grant_json: string | null;
 }
 
-/** Register a grant in the lifecycle journal from the main database. False if the grant is unknown. */
-export async function ensureHeldDataGrant(grantId: string): Promise<boolean> {
+/** Read identity for a pending owner action without trusting it as lifecycle authority. */
+async function readHeldDataGrant(grantId: string): Promise<{ grant: GrantRegistration; revoked: boolean } | null> {
   const rt = getHeldDataRuntime();
-  if (!rt) {
-    return false;
-  }
-  if (rt.authority.isKnown(grantId)) {
-    return true;
-  }
+  if (!rt) return null;
   const row = isPostgresStorageBackend()
     ? await pgOne<HeldDataGrantRow>(
         "SELECT status, client_id, subject_id, expires_at, grant_json::text AS grant_json FROM grants WHERE grant_id = $1",
@@ -12336,7 +12355,7 @@ export async function ensureHeldDataGrant(grantId: string): Promise<boolean> {
       )
     : getOne<HeldDataGrantRow>(referenceQueries.authGrantsGetForRevocation, [grantId]);
   if (!row) {
-    return false;
+    return null;
   }
   let streams: string[] = [];
   let trainingOnly = false;
@@ -12348,10 +12367,10 @@ export async function ensureHeldDataGrant(grantId: string): Promise<boolean> {
     // An unparseable grant still gets a lifecycle record, with no streams.
   }
   // A training detail is training-only: keeping it never permits ordinary use (A1 F4).
-  const trainingState = getTrainingLeaseRuntime()?.store.status(grantId).state;
+  const trainingState = rt.authority.lost ? undefined : getTrainingLeaseRuntime()?.store.status(grantId).state;
   trainingOnly ||= trainingState !== undefined && trainingState !== "unknown";
   const client = await getRegisteredClient(row.client_id);
-  rt.authority.registerGrant({
+  return { grant: {
     grantId,
     clientId: row.client_id,
     subjectId: row.subject_id,
@@ -12359,8 +12378,21 @@ export async function ensureHeldDataGrant(grantId: string): Promise<boolean> {
     trainingOnly,
     streams,
     expiresAtMs: row.expires_at ? Date.parse(row.expires_at) : null,
-  });
-  if (row.status === "revoked") {
+  }, revoked: row.status === "revoked" };
+}
+
+/** Register a grant in the lifecycle journal from the main database. False if the grant is unknown. */
+export async function ensureHeldDataGrant(grantId: string): Promise<boolean> {
+  const rt = getHeldDataRuntime();
+  if (!rt) return false;
+  if (rt.authority.isKnown(grantId)) return true;
+  const row = await readHeldDataGrant(grantId);
+  if (!row) return false;
+  // Owner views and actions may inspect main-database identity while history
+  // is unavailable. It never becomes authority until recovery applies an action.
+  if (rt.authority.lost) return true;
+  rt.authority.registerGrant(row.grant);
+  if (row.revoked) {
     // Ended before the journal saw it; the main database holds no ending time.
     rt.authority.markEndedBeforeTracking(grantId, rt.now());
   }
@@ -12449,17 +12481,24 @@ export function requireHeldDataDisposition(ending: HeldDataEnding | undefined): 
  */
 export async function endHeldDataForGrant(grantId: string, ending: HeldDataEnding | undefined): Promise<void> {
   const rt = getHeldDataRuntime();
-  if (!(rt && (await ensureHeldDataGrant(grantId)))) {
-    return;
-  }
+  if (!rt) return;
   requireHeldDataDisposition(ending);
+  // Read the surviving identity before the synchronous intake section. A
+  // loss or recovery during this await must not drop or mis-bind the action.
+  const staged = await readHeldDataGrant(grantId);
+  if (!staged && !rt.authority.isKnown(grantId)) return;
+  if (!rt.authority.lost && staged && !rt.authority.isKnown(grantId)) {
+    rt.authority.registerGrant(staged.grant);
+    if (staged.revoked) rt.authority.markEndedBeforeTracking(grantId, rt.now());
+  }
   const ended = rt.authority.end({
     grantId,
     path: ending?.path ?? "security_revocation",
     disposition: ending?.disposition ?? null,
+    ...(staged ? { grant: staged.grant } : {}),
   });
   const clientId = rt.authority.grantClient(grantId);
-  if (ended.erasure && ending?.reportedAt !== undefined && clientId) {
+  if (!ended.pending && ended.erasure && ending?.reportedAt !== undefined && clientId) {
     rt.authority.report({
       clientId,
       grantId,
