@@ -43,6 +43,9 @@ interface ExpandedList {
   has_more: boolean;
   object: string;
 }
+interface DiscoveryList {
+  data: { instance_id: string; name: string; record_count: number }[];
+}
 interface SearchList {
   data: { instance_id: string; record_url: string }[];
 }
@@ -222,6 +225,7 @@ test("pairwise owner source aliases reuse one handle across records, discovery, 
     assert.ok(instance);
     const local = instance.connectorId,
       canonical = (h.declaration.source as { id: string }).id;
+    assert.notEqual(local, canonical, "the equality below is vacuous unless the two source names differ");
     await h.ingest({
       data: {
         blob_ref: { blob_id: "alias-blob" },
@@ -258,6 +262,8 @@ test("pairwise owner source aliases reuse one handle across records, discovery, 
     assert.equal(localHandle, canonicalHandle, "one stored owner instance has one handle across source aliases");
     const handles = new Set<string>();
     {
+      // Owner HTTP routes address a source by its local connector key. The canonical name is a binding alias only
+      // (it answers "Unknown source" as connector_id), so the route blocks run for `local`.
       const source = local;
       const query = new URLSearchParams({ connector_id: source, instance_id: canonicalHandle });
       const listQuery = new URLSearchParams({ connector_id: source });
@@ -267,11 +273,10 @@ test("pairwise owner source aliases reuse one handle across records, discovery, 
       handles.add(first.instance_id);
       const detail = await json<ResponseRecord>(h, `/v1/streams/top_artists/records/artist%3A42?${query}`, headers);
       handles.add(detail.instance_id);
-      const discovery = await json(h, `/v1/streams?connector_id=${encodeURIComponent(source)}`, headers);
-      assert.ok(
-        JSON.stringify(discovery).includes(canonicalHandle),
-        `discovery uses the record's owner handle: ${JSON.stringify(discovery)}`
-      );
+      const discovery = await json<DiscoveryList>(h, `/v1/streams?connector_id=${encodeURIComponent(source)}`, headers);
+      const entry = discovery.data.find((item) => item.name === "top_artists" && item.instance_id === canonicalHandle);
+      assert.ok(entry, "discovery lists top_artists under the record's owner handle");
+      assert.equal(entry.record_count, 1);
       const blob = await fetch(`${h.rsUrl}/v1/blobs/alias-blob?${query}`, { headers });
       assert.equal(blob.status, 200, await blob.clone().text());
       assert.equal(await blob.text(), "alias");
@@ -297,6 +302,8 @@ test("pairwise owner source aliases reuse one handle across records, discovery, 
         method: "DELETE",
       });
       assert.equal(response.status, 204, await response.clone().text());
+      const afterDelete = await fetch(`${h.rsUrl}/v1/streams/top_artists/records/artist%3A42?${query}`, { headers });
+      assert.equal(afterDelete.status, 404, "record is gone after DELETE");
     }
   });
 });

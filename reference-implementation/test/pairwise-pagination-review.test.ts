@@ -14,6 +14,8 @@ import { OWNER_AUTH_DEFAULT_SUBJECT_ID } from "../server/owner-auth.ts";
 import {
   invalidatePairwiseQuerySessionsPostgres,
   invalidatePairwiseQuerySessionsSqlite,
+  loadPairwiseQueryState,
+  savePairwiseQueryState,
   sweepPairwiseQuerySessions,
 } from "../server/pairwise-query-sessions.ts";
 import {
@@ -602,35 +604,19 @@ for (const backend of ["SQLite", "PostgreSQL"] as const) {
     });
   });
 
-  test(`${backend}: unrelated erasure does not scan retained payload bodies`, options, async (context) => {
+  test(`${backend}: unrelated erasure keeps another instance's retained snapshot readable`, options, async () => {
     await withFixture(backend, async () => {
       const [binding] = bindings;
       assert.ok(binding);
-      await query({ limit: "1" }, [binding]);
-      const broadSql = "SELECT token,state_json FROM pairwise_query_sessions WHERE page_expires_at > 0";
-      if (backend === "SQLite") {
-        const prototype = Object.getPrototypeOf(getDb().prepare(broadSql)) as { all: (...args: unknown[]) => unknown };
-        const original = prototype.all;
-        context.mock.method(prototype, "all", function (this: { source?: string }, ...args: unknown[]) {
-          assert.notEqual(
-            this.source,
-            broadSql,
-            "cleanup must use indexed scope metadata before loading affected JSON"
-          );
-          return Reflect.apply(original, this, args);
-        });
-        eraseFixtureConnection(backend, "account_b");
-      } else {
-        await withPostgresTransaction(async (client) => {
-          const original = client.query.bind(client);
-          context.mock.method(client, "query", (sql: string, ...args: unknown[]) => {
-            assert.notEqual(sql, broadSql, "cleanup must use indexed scope metadata before loading affected JSON");
-            return (original as (...args: unknown[]) => unknown)(sql, ...args);
-          });
-          await deleteConnectionRecordRowsPostgres(client, "account_b");
-        });
-      }
-      context.mock.restoreAll();
+      const first = await query({ limit: "1", order: "asc" }, [binding]);
+      assert.ok(first.next_cursor);
+      const before = await retained(backend);
+      assert.equal(before.rows, 1);
+      assert.equal(before.records, 2);
+      await eraseFixtureConnection(backend, "account_b");
+      assert.deepEqual(await retained(backend), before, "erasing another instance must not touch this snapshot");
+      const second = await query({ cursor: first.next_cursor, limit: "1", order: "asc" }, [binding]);
+      assert.deepEqual([...first.data, ...second.data].map((record) => record.id), ["0-0", "0-1"]);
     });
   });
 
@@ -958,15 +944,69 @@ for (const backend of ["SQLite", "PostgreSQL"] as const) {
     });
   }
 
+  // changes_since is bound twice: in the AEAD-sealed token (checked by loadPairwiseQueryState) and in the stored
+  // page state (checked by requirePairwiseListState). The end-to-end loop above cannot tell which layer rejected,
+  // so each layer gets a test that the other layer cannot satisfy.
+  test(`${backend}: token layer rejects a changes_since the token was not issued for`, options, async () => {
+    await withFixture(backend, async () => {
+      const token = await savePairwiseQueryState({
+        changes_since: "cp-a",
+        context: "unit-context",
+        data: [],
+        kind: "page",
+        offset: 0,
+        retention: { generations: {}, grantDigest: "", grantId: "", scopes: [] },
+      });
+      for (const changesSince of ["cp-b", undefined]) {
+        await assert.rejects(
+          loadPairwiseQueryState(token, { changesSince, context: "unit-context", kind: "page" }),
+          (error) => hasCode(error, "invalid_cursor")
+        );
+      }
+      assert.ok(await loadPairwiseQueryState(token, { changesSince: "cp-a", context: "unit-context", kind: "page" }));
+    });
+  });
+
+  test(`${backend}: stored-state layer rejects a changes_since the sealed token still matches`, options, async () => {
+    await withFixture(backend, async () => {
+      const params = { changes_since: "beginning", limit: "1", order: "asc" } as const;
+      const first = await query(params);
+      assert.ok(first.next_cursor);
+      const sessionsSql = "SELECT token,state_json FROM pairwise_query_sessions";
+      const rows =
+        backend === "PostgreSQL"
+          ? (await postgresQuery<{ state_json: string; token: string }>(sessionsSql)).rows
+          : getDb().prepare(sessionsSql).all<{ state_json: string; token: string }>();
+      assert.equal(rows.length, 1);
+      const [row] = rows;
+      assert.ok(row);
+      const stored = JSON.parse(row.state_json);
+      assert.equal(stored.changes_since, "beginning");
+      const tampered = JSON.stringify({ ...stored, changes_since: "other-checkpoint" });
+      if (backend === "PostgreSQL") {
+        await postgresQuery("UPDATE pairwise_query_sessions SET state_json=$1 WHERE token=$2", [tampered, row.token]);
+      } else {
+        getDb().prepare("UPDATE pairwise_query_sessions SET state_json=? WHERE token=?").run(tampered, row.token);
+      }
+      await assert.rejects(query({ ...params, cursor: first.next_cursor }), (error) =>
+        hasCode(error, "invalid_cursor")
+      );
+    });
+  });
+
   test(`${backend}: pairwise scan retains one immutable snapshot and linear payload bytes`, options, async () => {
     await withFixture(backend, async () => {
       let page = await query({ limit: "1", order: "asc" });
+      assert.ok(page.next_cursor, "a four-record scan at limit 1 must paginate");
+      const seen = page.data.map((record) => record.id);
       const firstStorage = await retained(backend);
       assert.equal(firstStorage.records, 4);
       while (page.next_cursor) {
         // biome-ignore lint/performance/noAwaitInLoops: the next request depends on the preceding page cursor.
         page = await query({ cursor: page.next_cursor, limit: "1", order: "asc" });
+        seen.push(...page.data.map((record) => record.id));
       }
+      assert.deepEqual(seen, ["0-0", "0-1", "1-0", "1-1"]);
       const after = await retained(backend);
       assert.deepEqual(after, firstStorage, "paging must not duplicate snapshot rows, record copies or JSON bytes");
     });
