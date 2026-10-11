@@ -555,4 +555,120 @@ describe("client safety (RT6, RT10 and persisted state)", () => {
     assert.equal(app.search("g", "hello"), null);
     assert.equal(app.holds("g").records, 0, "the record is disposed, not merely refused");
   });
+
+  describe("write-ahead: each licensing write on its own, from a successfully initialized state", () => {
+    /** Counts writes after `start()`; the write numbered `failAt` throws. Everything before it succeeds. */
+    function countingStorage() {
+      const storage = new MemoryClientCheckpointStorage();
+      const write = storage.write.bind(storage);
+      const ctl = { writes: 0, failAt: null as number | null };
+      storage.write = (value) => {
+        ctl.writes += 1;
+        if (ctl.failAt === ctl.writes) {
+          throw new Error("disk full");
+        }
+        write(value);
+      };
+      return {
+        storage,
+        ctl,
+        start(failAt: number | null) {
+          ctl.writes = 0;
+          ctl.failAt = failAt;
+        },
+      };
+    }
+    const erasureAnswer = (now: () => number): StatusTransport => async (ids) => ({
+      ok: true,
+      results: ids.map((grant_id) => ({
+        as_position: 2, assessed_at: now(), ending: { reason: "owner_revoked", effective_at: now() }, erasures: [{
+          operation_id: "op1", scope: { streams: "all" as const }, effective_at: now(), accepted_at: now(),
+        }], expires_at: null, grant_id, grant_state: "ended" as const, ordinary_use: "stopped" as const,
+      })),
+    }) as unknown as ReturnType<StatusTransport>;
+
+    /**
+     * Run `scenario` once without failure and once failing exactly the write that precedes the licensed
+     * effect. `licensedAt` is the number of writes made when the effect happened, or null if it did not.
+     * The pinned count makes a removed or added write visible: review it, do not just update it.
+     */
+    async function proveLicensingWrite(
+      scenario: (failAt: number | null) => Promise<{ licensedAt: number | null }>,
+      pinnedWrites: number
+    ) {
+      const baseline = await scenario(null);
+      assert.equal(baseline.licensedAt, pinnedWrites, "the licensed effect follows exactly the pinned number of writes");
+      const failed = await scenario(pinnedWrites);
+      assert.equal(failed.licensedAt, null, "failing the last write before the effect must withhold the effect");
+    }
+
+    it("acquisition: the copy is kept only after the clock write", async () => {
+      await proveLicensingWrite(async (failAt) => {
+        const h = countingStorage();
+        const app = new ToyApp();
+        const c = new HeldDataClient({ initialize: true, now: () => T0, status: unavailable, storage: h.storage, store: app });
+        app.attach(c);
+        h.start(failAt);
+        app.sync("g", record);
+        return { licensedAt: app.holds("g").records > 0 ? h.ctl.writes : null };
+      }, 1);
+    });
+
+    it("use: ok only after the write that follows the guards", async () => {
+      await proveLicensingWrite(async (failAt) => {
+        const h = countingStorage();
+        const app = new ToyApp();
+        const c = new HeldDataClient({ initialize: true, now: () => T0, status: positive(() => T0), storage: h.storage, store: app });
+        app.attach(c);
+        app.sync("g", record);
+        await c.reconcile();
+        h.start(failAt);
+        // Writes: the pre-guard checkpoint, then the licensing checkpoint.
+        return { licensedAt: c.canUse("g").ok ? h.ctl.writes : null };
+      }, 2);
+    });
+
+    it("relay: downstream is told to use only after the write that precedes the notice", async () => {
+      await proveLicensingWrite(async (failAt) => {
+        const h = countingStorage();
+        const app = new ToyApp();
+        let licensedAt: number | null = null;
+        const c = new HeldDataClient({
+          downstream: [{ relay: (n) => {
+            if (n.useUntil !== null) licensedAt = h.ctl.writes;
+          } }],
+          initialize: true, now: () => T0, status: unavailable, storage: h.storage, store: app,
+        });
+        app.attach(c);
+        app.sync("g", record);
+        h.start(failAt);
+        // The token response is the assessment that licenses use and triggers the relay.
+        c.onTokenResponse({ grantIds: ["g"], sentAt: T0 });
+        return { licensedAt };
+      }, 7);
+    });
+
+    for (const kind of ["receipt", "completion"] as const) {
+      it(`report: a ${kind} is reported only after the write that records it`, async () => {
+        await proveLicensingWrite(async (failAt) => {
+          const h = countingStorage();
+          const app = new ToyApp();
+          let licensedAt: number | null = null;
+          const c = new HeldDataClient({
+            initialize: true, now: () => T0, status: erasureAnswer(() => T0), storage: h.storage, store: app,
+            policy: { disposeAt: kind === "receipt" ? "deadline" : "promptly" },
+            report: async (r) => {
+              if (r.kind === kind && licensedAt === null) licensedAt = h.ctl.writes;
+              return true;
+            },
+          });
+          app.attach(c);
+          app.sync("g", record);
+          h.start(failAt);
+          await c.reconcile();
+          return { licensedAt };
+        }, kind === "receipt" ? 2 : 7);
+      });
+    }
+  });
 });
