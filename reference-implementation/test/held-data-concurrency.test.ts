@@ -144,7 +144,8 @@ for (const scenario of ["startup", "erase", "status"] as const) {
     const [firstWorker, secondWorker] = workers;
     const [firstMessage, secondMessage] = messages;
     assert.ok(firstWorker && secondWorker && firstMessage && secondMessage);
-    await Promise.all(messages.map((next) => next()));
+    const ready = await Promise.all(messages.map((next) => next()));
+    assert.deepEqual(ready.map((message) => message.type), ["ready", "ready"]);
     firstWorker.postMessage("run");
     assert.equal((await firstMessage()).type, "checkpoint");
     secondWorker.postMessage("run");

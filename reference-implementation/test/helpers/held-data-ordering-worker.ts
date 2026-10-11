@@ -26,11 +26,12 @@ const now = () => {
 // This only observes the lock; all reads and writes still use the real FS.
 const mkdir = fs.mkdirSync;
 let notified = false;
+let running = false;
 fs.mkdirSync = ((...args: Parameters<typeof mkdir>) => {
   try {
     return mkdir(...args);
   } catch (error) {
-    if (!notified && String(args[0]) === `${journalPath}.lock` && (error as NodeJS.ErrnoException).code === "EEXIST") {
+    if (running && !notified && String(args[0]) === `${journalPath}.lock` && (error as NodeJS.ErrnoException).code === "EEXIST") {
       notified = true;
       port.postMessage({ type: "contended" });
     }
@@ -41,6 +42,7 @@ syncBuiltinESMExports();
 let authority = scenario === "startup" ? null : HeldDataAuthority.open({ epochMarkerPath, journalPath, now });
 port.postMessage({ type: "ready" });
 port.on("message", () => {
+  running = true;
   armed = true;
   let result: unknown;
   if (scenario === "startup") {
