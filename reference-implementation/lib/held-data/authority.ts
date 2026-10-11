@@ -24,6 +24,7 @@ import {
   journalCoversEvidence,
   readLossEvidence,
   registerLossEvidence,
+  withJournalLock,
   writeLossEvidence,
 } from "../authority-journal/journal.ts";
 
@@ -252,7 +253,14 @@ export class HeldDataAuthority {
   }
 
   static open(o: HeldDataAuthorityOptions): HeldDataAuthority {
+    if (o.epochMarkerPath && !o.primaryHead) {
+      return withJournalLock(o.journalPath, () => new HeldDataAuthority(o));
+    }
     return new HeldDataAuthority(o);
+  }
+
+  #ordered<T>(run: () => T): T {
+    return this.#o.epochMarkerPath && !this.#o.primaryHead ? withJournalLock(this.#o.journalPath, run) : run();
   }
 
   get position(): number {
@@ -459,6 +467,13 @@ export class HeldDataAuthority {
     operationId: string;
     acceptedAt: number;
   } {
+    return this.#ordered(() => this.#requestErasure(input));
+  }
+
+  #requestErasure(input: Parameters<HeldDataAuthority["requestErasure"]>[0]): {
+    operationId: string;
+    acceptedAt: number;
+  } {
     this.#requireWritable();
     this.#refresh();
     const facts = this.#grants.get(input.grantId);
@@ -616,6 +631,10 @@ export class HeldDataAuthority {
    * Serving an erasure records its delivery.
    */
   status(principal: ReadPrincipal, grantIds: readonly string[]): StatusResult[] {
+    return this.#ordered(() => this.#status(principal, grantIds));
+  }
+
+  #status(principal: ReadPrincipal, grantIds: readonly string[]): StatusResult[] {
     if (this.lost) {
       throw new AuthorityUnavailableError("authority history was lost; no lifecycle answer can be given");
     }

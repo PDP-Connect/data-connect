@@ -20,10 +20,12 @@ import {
   existsSync,
   fstatSync,
   fsyncSync,
+  mkdirSync,
   openSync,
   readFileSync,
   readSync,
   renameSync,
+  rmdirSync,
   statSync,
   writeFileSync,
   writeSync,
@@ -57,6 +59,44 @@ export interface LossEvidence {
 }
 
 const evidencePaths = new Map<string, string>();
+const heldLocks = new Set<string>();
+const lockWait = new Int32Array(new SharedArrayBuffer(4));
+
+/**
+ * Same-host prototype lock. All processes must use the same journal path and
+ * bind the same evidence file. A crashed holder leaves the lock in place:
+ * stop all writers and establish history before an operator removes it.
+ * Never steal a lock on age alone. The bound fails a request rather than
+ * hanging forever. Re-entry is safe because every callback is synchronous.
+ */
+export function withJournalLock<T>(path: string, run: () => T): T {
+  if (heldLocks.has(path)) {
+    return run();
+  }
+  const lockPath = `${path}.lock`;
+  const deadline = performance.now() + 30_000;
+  for (;;) {
+    try {
+      mkdirSync(lockPath);
+      break;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+        throw error;
+      }
+      if (performance.now() >= deadline) {
+        throw new Error(`authority journal lock unavailable: ${lockPath}`);
+      }
+      Atomics.wait(lockWait, 0, 0, 1);
+    }
+  }
+  heldLocks.add(path);
+  try {
+    return run();
+  } finally {
+    heldLocks.delete(path);
+    rmdirSync(lockPath);
+  }
+}
 
 /** Bind a journal to its evidence file. Appends of terminal events then advance it. */
 export function registerLossEvidence(journalPath: string, evidencePath: string): void {
@@ -119,6 +159,14 @@ export function journalCoversEvidence(journalPath: string): boolean {
 }
 
 export function appendJournalEntry(path: string, entry: JournalEntryBase): void {
+  // Held-data evidence is opt-in; lease-only/flag-off behavior stays intact.
+  if (evidencePaths.has(path)) {
+    return withJournalLock(path, () => appendEntry(path, entry));
+  }
+  appendEntry(path, entry);
+}
+
+function appendEntry(path: string, entry: JournalEntryBase): void {
   const fd = openSync(path, "a");
   let size = 0;
   try {
