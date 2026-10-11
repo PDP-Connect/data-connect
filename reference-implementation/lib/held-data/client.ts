@@ -157,16 +157,32 @@ const policySchema = z.object({
   longStopMs: interval.nullable(), retentionCeilingMs: interval.nullable(),
   freshnessOrigin: z.enum(["request_sent", "assessed_at"]), disposeAt: z.enum(["promptly", "deadline"]),
 });
+const refSchema = z.object({
+  id: z.string(), stream: z.string(), sourceId: z.string().optional(), instanceId: z.string().optional(),
+  version: z.string().optional(),
+}).transform((ref): HeldRecordRef => ({
+  id: ref.id, stream: ref.stream,
+  ...(ref.sourceId === undefined ? {} : { sourceId: ref.sourceId }),
+  ...(ref.instanceId === undefined ? {} : { instanceId: ref.instanceId }),
+  ...(ref.version === undefined ? {} : { version: ref.version }),
+}));
 const checkpointSchema = z.object({
   version: z.literal(1), revision: z.number().int().nonnegative(), policy: policySchema,
   highWaterMs: time, clockUncertain: z.boolean(), nextAttemptAt: time.nullable(),
   tokenOrigins: z.array(z.tuple([z.string(), z.object({ origin: time, processingPermission: z.boolean() })])),
   tokenRequests: z.array(z.tuple([z.string(), time])),
+  // [record identity, [[version or null (unknown/ambiguous), first acquisition time]]]
+  acquisitions: z.array(z.tuple([z.string(), z.array(z.tuple([z.string().nullable(), time]))])).optional(),
   grants: z.array(z.object({
     grantId: z.string(), firstAcquiredAt: time, freshnessOrigin: time.nullable(), custodyOnly: z.boolean(),
     processingPermission: z.boolean(), lastPosition: z.number().int().nonnegative(),
     deletedAt: time.nullable(), deleteReason: z.string().nullable(), needsReconcile: z.boolean(),
     pendingDeletionReason: z.string().nullable(),
+    // Added with per-record retention. Absent in older checkpoints: restored as untracked, so the
+    // grant-level ceiling (never later than the record clocks) applies.
+    readState: z.enum(["active", "window_closed", "expired", "ended"]).optional(),
+    recordsTracked: z.boolean().optional(),
+    records: z.array(z.tuple([z.string(), z.object({ ref: refSchema, firstAcquiredAt: time })])).optional(),
     erasures: z.array(z.tuple([z.string(), z.object({
       scope: z.object({ streams: z.union([z.literal("all"), z.array(z.string())]) }),
       receivedAt: time, deleteBy: time, disposedAt: time.nullable(), receiptReported: z.boolean(),
@@ -253,14 +269,16 @@ export class HeldDataClient {
         for (const g of cp.grants) {
           this.#grants.set(g.grantId, {
             ...g,
-            readState: "active",
-            recordsTracked: false,
-            records: new Map(),
+            readState: g.readState ?? "active",
+            recordsTracked: g.recordsTracked ?? false,
+            records: new Map(g.records ?? []),
             erasures: new Map(g.erasures),
             needsReconcile: true,
           });
         }
-
+        for (const [identity, versions] of cp.acquisitions ?? []) {
+          this.#acquisitions.set(identity, new Map(versions.map(([v, at]) => [v ?? undefined, at])));
+        }
       }
     } catch {
       this.#stateUnavailable = true;
@@ -274,6 +292,11 @@ export class HeldDataClient {
    * is not an assessment, so this never makes data usable.
    */
   acquire(grantId: string, o: { processingPermission?: boolean } = {}): boolean {
+    return this.#register(grantId, o) && this.#persist();
+  }
+
+  /** Create or revive the grant entry in memory; the caller persists. */
+  #register(grantId: string, o: { processingPermission?: boolean } = {}): boolean {
     const now = this.#now();
     if (this.#stateUnavailable || this.#clockUncertain) {
       this.#disposeDue();
@@ -310,7 +333,7 @@ export class HeldDataClient {
       // The first check is due 24 h after first acquisition.
       this.#nextAttemptAt = Math.min(this.#nextAttemptAt ?? Number.POSITIVE_INFINITY, now + this.policy.cadenceMs);
     }
-    return this.#persist();
+    return true;
   }
 
   /** Record delivery per record; the returned set excludes copies whose retention already ended. */
@@ -342,7 +365,12 @@ export class HeldDataClient {
       }
       eligible.push({ ref, key: JSON.stringify([identity, ref.version ?? null]), firstAcquiredAt: prior });
     }
-    if (eligible.length === 0 || !this.acquire(grantId)) {
+    // Clocks, grant entry and per-record state go in one write, before the caller may keep anything.
+    if (eligible.length === 0) {
+      this.#persist();
+      return [];
+    }
+    if (!this.#register(grantId)) {
       return [];
     }
     const g = this.#grants.get(grantId);
@@ -358,7 +386,7 @@ export class HeldDataClient {
         ...(r.ref.version === undefined ? {} : { version: r.ref.version }),
       }, firstAcquiredAt: r.firstAcquiredAt });
     }
-    return eligible.map((r) => r.ref);
+    return this.#persist() ? eligible.map((r) => r.ref) : [];
   }
 
   /** The gate the app checks before every use. */
@@ -848,7 +876,10 @@ export class HeldDataClient {
         highWaterMs: this.#highWaterMs, clockUncertain: this.#clockUncertain, nextAttemptAt: this.#nextAttemptAt,
         tokenOrigins: [...this.#tokenOrigins],
         tokenRequests: [...this.#tokenRequests],
-        grants: [...this.#grants.values()].map((g) => ({ ...g, erasures: [...g.erasures] })),
+        acquisitions: [...this.#acquisitions].map(([identity, versions]) => [
+          identity, [...versions].map(([v, at]) => [v ?? null, at]),
+        ]),
+        grants: [...this.#grants.values()].map((g) => ({ ...g, records: [...g.records], erasures: [...g.erasures] })),
       }));
       return true;
     } catch {
