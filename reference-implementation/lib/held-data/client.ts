@@ -297,10 +297,19 @@ export class HeldDataClient {
    * is not an assessment, so this never makes data usable.
    */
   acquire(grantId: string, o: { processingPermission?: boolean } = {}): boolean {
+    const prior = this.#grants.get(grantId);
+    // A legacy copy has no record identities, so reacquiring it after its ceiling cannot be told
+    // from a new copy. The ceiling stays with the original acquisition.
+    const ceilingClock = prior?.deletedAt != null && prior.deleteReason === "retention_ceiling" ? prior.legacyAcquiredAt : null;
     if (!this.#register(grantId, o)) return false;
     const g = this.#grants.get(grantId);
     if (!g) return false;
-    g.legacyAcquiredAt = Math.min(g.legacyAcquiredAt ?? Number.POSITIVE_INFINITY, g.firstAcquiredAt);
+    g.legacyAcquiredAt = Math.min(g.legacyAcquiredAt ?? Number.POSITIVE_INFINITY, ceilingClock ?? Number.POSITIVE_INFINITY, g.firstAcquiredAt);
+    if (this.policy.retentionCeilingMs !== null && this.#now() >= g.legacyAcquiredAt + this.policy.retentionCeilingMs) {
+      // Nothing may be kept: dispose now and report that the caller must not store the copy.
+      this.#disposeDue();
+      return false;
+    }
     return this.#persist();
   }
 

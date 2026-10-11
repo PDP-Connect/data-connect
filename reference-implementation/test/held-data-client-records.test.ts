@@ -140,4 +140,28 @@ describe("client record clocks in the durable checkpoint", () => {
     assert.deepEqual(restored.records.get("g")?.map((r) => r.id), ["b"]);
     assert.deepEqual(restored.search("g", "bravo"), ["g:b"]);
   });
+
+  it("reacquiring a legacy copy after its retention ceiling does not restart the ceiling", () => {
+    let t = T0;
+    const store = new Store();
+    const c = new HeldDataClient({
+      now: () => t, status: unavailable, store, initialize: true, policy: { retentionCeilingMs: ceiling, longStopMs: null },
+    });
+    assert.equal(c.acquire("g"), true);
+    store.held.add("g");
+    t += ceiling;
+    void c.canUse("g");
+    assert.equal(c.grantState("g")?.deleteReason, "retention_ceiling");
+    assert.equal(store.held.has("g"), false);
+
+    t += DAY;
+    const kept = c.acquire("g");
+    if (kept) {
+      store.held.add("g");
+    }
+    const by = c.deleteBy("g");
+    assert.ok(!kept || (by !== null && by <= T0 + ceiling), `reacquired copy must stay past its original ceiling; deleteBy=${by === null ? by : (by - T0) / DAY}d`);
+    void c.canUse("g");
+    assert.equal(store.held.has("g"), false, "the reacquired legacy copy is disposed at once");
+  });
 });
