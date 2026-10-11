@@ -19,9 +19,9 @@ import {
   type Jwks,
   validateLeaseStatic,
 } from "../lib/training-lease/worker.ts";
-import { getDb } from "../server/db.ts";
 import {
   fetchJson,
+  mutateMainDatabase,
   issueTrainingGrant,
   json,
   leaseExpMs,
@@ -322,9 +322,7 @@ describe("flag on: leases, endings and the owner's stop time", () => {
         method: "POST",
       });
       // What a restore from a pre-revocation backup does to this row.
-      getDb()
-        .prepare("UPDATE grants SET status = 'active' WHERE grant_id = ?")
-        .run(g.grant.grant_id);
+      await mutateMainDatabase("UPDATE grants SET status = 'active' WHERE grant_id = ?", [g.grant.grant_id]);
       assert.equal((await c.renew()).status, 400);
     });
   });
@@ -436,9 +434,7 @@ describe("flag on: L5 public-client credential chain", () => {
       const g = await issueTrainingGrant(h);
       const c = new PublicLeaseClient(h, g.grant.grant_id);
       await c.bootstrap(g.token);
-      getDb()
-        .prepare("UPDATE tokens SET revoked = 1 WHERE grant_id = ?")
-        .run(g.grant.grant_id);
+      await mutateMainDatabase("UPDATE tokens SET revoked = TRUE WHERE grant_id = ?", [g.grant.grant_id]);
       const read = await fetch(`${h.rsUrl}/v1/streams/top_artists/records`, {
         headers: { Authorization: `Bearer ${g.token}` },
       });
