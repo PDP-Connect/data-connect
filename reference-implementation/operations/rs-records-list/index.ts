@@ -34,7 +34,11 @@
  *     block fields populated from operation inputs and result counts.
  */
 
-import { normalizeProjectionFields, projectRecordEnvelope } from "../read-projection.ts";
+import {
+  normalizeProjectionFields,
+  projectRecordEnvelope,
+  resolveResponseProjectionFields,
+} from "../read-projection.ts";
 
 export interface RecordsListSourceDescriptor {
   id: string;
@@ -58,7 +62,7 @@ export type RecordsListActor =
  */
 export interface RecordsListManifestStream {
   name: string;
-  schema?: { properties?: Record<string, unknown> };
+  schema?: { properties?: Record<string, unknown>; required?: string[] };
   views?: Array<{ id: string; fields: string[] }>;
   [extra: string]: unknown;
 }
@@ -105,6 +109,8 @@ export interface RecordsListDependencies {
    * carry blob refs).
    */
   decorateRecord: (record: Record<string, unknown>) => Record<string, unknown>;
+  /** Host-controlled prototype capability; omitted hosts retain legacy projection. */
+  experimentalRecordUpdatesEnabled?: () => boolean;
   /**
    * Resolved grant the host derived for this request. For client actors this
    * is the token's grant; for owner actors the operation will overwrite this
@@ -296,10 +302,22 @@ export async function executeRecordsList(
 
   const rawResult = await dependencies.queryRecords(input.streamName, grant, input.requestParams, manifest);
 
-  const projectionFields = normalizeProjectionFields(input.requestParams.fields);
-  const decoratedData = rawResult.data.map((record) =>
-    projectRecordEnvelope(dependencies.decorateRecord(record), projectionFields)
-  );
+  const projectionFields = dependencies.experimentalRecordUpdatesEnabled?.()
+    ? resolveResponseProjectionFields(
+        input.requestParams.fields,
+        mStream?.schema?.required ?? [],
+        input.actor.kind === "client"
+          ? (grant.streams.find((stream) => stream.name === input.streamName)?.fields ?? null)
+          : null
+      )
+    : normalizeProjectionFields(input.requestParams.fields);
+  const decoratedData = rawResult.data.map((record) => {
+    const decorated = dependencies.decorateRecord(record);
+    if (dependencies.experimentalRecordUpdatesEnabled?.() === true && decorated.deleted === true) {
+      return decorated;
+    }
+    return projectRecordEnvelope(decorated, projectionFields);
+  });
   const decoratedResult: RecordsListQueryResult = {
     ...rawResult,
     data: decoratedData,

@@ -223,10 +223,21 @@ for (const backend of ["sqlite", "postgres"] as const) {
 					};
 					assert.deepEqual(
 						projected.data[0]?.data,
-						{ id: "a" },
+						{ id: "a", value: "updated" },
 						"resolved owner projection omits absent optional and out-of-projection stored values",
 					);
 				}
+				const sparseDetail = await fetch(
+					`${rsUrl}/v1/streams/state/records/a?connector_id=${connectorId}&connector_instance_id=${connectorInstanceId}&fields=id,optional`,
+					{ headers: { Authorization: authorization } },
+				);
+				assert.equal(sparseDetail.status, 200);
+				assert.deepEqual(
+					((await sparseDetail.json()) as { data: Record<string, unknown> })
+						.data,
+					{ id: "a", value: "updated" },
+					"owner detail projection retains required fields and omits removed fields",
+				);
 				const malformed = await ingest("state", [
 					{
 						data: null,

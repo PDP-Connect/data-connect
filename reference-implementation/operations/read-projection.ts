@@ -11,6 +11,24 @@ export function normalizeProjectionFields(value: unknown): string[] | null {
   return fields.length > 0 ? [...new Set(fields)] : null;
 }
 
+/** Sparse responses retain required fields without widening a frozen grant. */
+export function resolveResponseProjectionFields(
+  value: unknown,
+  requiredFields: readonly string[],
+  authorizedFields: readonly string[] | null = null
+): string[] | null {
+  const requestedFields = normalizeProjectionFields(value);
+  let fields = authorizedFields === null ? requestedFields : [...authorizedFields];
+  if (requestedFields && authorizedFields !== null) {
+    fields = requestedFields.filter((field) => authorizedFields.includes(field));
+  }
+  if (fields === null) {
+    return null;
+  }
+  const required = requiredFields.filter((field) => authorizedFields === null || authorizedFields.includes(field));
+  return [...new Set([...required, ...fields])];
+}
+
 export function projectRecordEnvelope<T extends Record<string, unknown>>(
   record: T,
   fields: readonly string[] | null | undefined

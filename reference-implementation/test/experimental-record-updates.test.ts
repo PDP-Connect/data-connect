@@ -3,8 +3,15 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
+import { executeRecordsList } from "../operations/rs-records-list/index.ts";
 import { assertValidRecordEnvelope } from "../runtime/record-message-validator.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
+import {
+	BOOTSTRAP_MAX_RECORDS,
+	continueBootstrapPage,
+	retainedBootstrapRecordIds,
+	startBootstrapPage,
+} from "../server/experimental-record-bootstrap.ts";
 import { EXPERIMENTAL_PARTIAL_UPDATE_TYPE } from "../server/experimental-record-updates.ts";
 import { deriveReferenceFreshness } from "../server/freshness.ts";
 import {
@@ -20,6 +27,7 @@ import {
 	queryRecords,
 	setClientEventEnqueueHook,
 } from "../server/records.ts";
+import { bumpStorageGeneration } from "../server/storage-generation.ts";
 import { dedicatedPostgresTestUrl } from "./helpers/dedicated-postgres-test-url.ts";
 import { withTemporaryPostgresDatabase } from "./helpers/postgres-temp-database.ts";
 
@@ -43,7 +51,13 @@ const schema = {
 };
 const manifest = {
 	streams: [
-		...["events", "state"].map((name) => ({
+		...[
+			"events",
+			"state",
+			"bootstrap",
+			"bootstrap-followup",
+			"bootstrap-order",
+		].map((name) => ({
 			consent_time_field: "created_at",
 			cursor_field: "created_at",
 			name,
@@ -117,6 +131,27 @@ function rows() {
 	return getDb()
 		.prepare("SELECT record_json, emitted_at, version FROM records")
 		.all();
+}
+
+interface HistoryRow {
+	record_json: unknown;
+	version: number | string;
+}
+function assertCompleteHistory(
+	history: HistoryRow[],
+	expected: Array<{ data: unknown; version: number }>,
+): void {
+	assert.deepEqual(
+		history.map((row) => ({
+			data:
+				typeof row.record_json === "string"
+					? JSON.parse(row.record_json)
+					: row.record_json,
+			version: Number(row.version),
+		})),
+		expected,
+		"every changed write must retain its complete snapshot in version order",
+	);
 }
 
 const postgresUrl = dedicatedPostgresTestUrl(
@@ -296,16 +331,23 @@ for (const backend of ["sqlite", "postgres"] as const) {
 						);
 						assert.equal(beginning.data.length, 2);
 						const cursor = beginning.next_changes_since;
-						if (cursor) {
-							const afterRetry = await queryRecords(
-								target,
-								"events",
-								grant,
-								{ changes_since: cursor },
-								manifest,
-							);
-							assert.equal(afterRetry.data.length, 0);
-						}
+						assert.ok(
+							cursor,
+							"the completed beginning session must issue a retry cursor",
+						);
+						assert.equal(
+							(await write(snapshot())).changed,
+							false,
+							"retry after saving the session cursor",
+						);
+						const afterRetry = await queryRecords(
+							target,
+							"events",
+							grant,
+							{ changes_since: cursor },
+							manifest,
+						);
+						assert.equal(afterRetry.data.length, 0);
 						if (databaseUrl) {
 							await postgresQuery(
 								"DELETE FROM record_changes WHERE stream = $1 AND record_key = 'a'",
@@ -328,20 +370,30 @@ for (const backend of ["sqlite", "postgres"] as const) {
 					},
 				);
 				await t.test(
-					"observed residual: beginning after anchor pruning expires although current append_only record survives",
+					"beginning after anchor pruning enumerates current append_only state without a duplicate version",
 					async () => {
-						assert.equal((await read("events")).data.required, "value");
-						await assert.rejects(
-							queryRecords(
-								target,
-								"events",
-								grant,
-								{ changes_since: "beginning" },
-								manifest,
-							),
-							{
-								code: "cursor_expired",
-							},
+						const before = await databaseState();
+						const beginning = await queryRecords(
+							target,
+							"events",
+							grant,
+							{ changes_since: "beginning" },
+							manifest,
+						);
+						assert.deepEqual(beginning.data.map((record) => record.id).sort(), [
+							"a",
+							"array",
+						]);
+						assert.equal(
+							beginning.data.find((record) => record.id === "a")?.data
+								?.required,
+							"value",
+						);
+						assert.ok(beginning.next_changes_since);
+						assert.deepEqual(
+							await databaseState(),
+							before,
+							"bootstrap is read-only",
 						);
 					},
 				);
@@ -564,45 +616,637 @@ for (const backend of ["sqlite", "postgres"] as const) {
 					},
 				);
 				await t.test(
+					"sparse resolved-client response preserves cached fields outside its projection",
+					async () => {
+						const stored = {
+							id: "cache",
+							nested: { keep: true },
+							optional: "keep",
+							required: "Ada",
+						};
+						await write({ data: stored, key: "cache", stream: "state" });
+						const clientGrant = {
+							streams: [
+								{
+									fields: ["id", "required", "optional", "nested", "array"],
+									instance_ids: [target.connectorInstanceId],
+									name: "state",
+									resources: ["cache"],
+								},
+							],
+						};
+						const requested = ["optional", "array"];
+						const output = await executeRecordsList(
+							{
+								actor: {
+									kind: "client",
+									subject_id: "owner",
+									client_id: "client",
+									grant_id: "grant",
+								},
+								rawQueryFields: requested.join(","),
+								requestParams: { fields: requested },
+								streamName: "state",
+							},
+							{
+								decorateRecord: (record) => record,
+								experimentalRecordUpdatesEnabled: () => true,
+								getGrant: () => clientGrant,
+								getManifest: () => manifest,
+								getSourceDescriptor: () => ({
+									id: connectorId,
+									kind: "connector",
+								}),
+								queryRecords: async (stream, _grant, params) => {
+									const result = await queryRecords(
+										target,
+										stream,
+										clientGrant,
+										params,
+										manifest,
+									);
+									return {
+										...result,
+										data: result.data.map((record) => ({ ...record })),
+									};
+								},
+								validateRequestFields: () => {},
+							},
+						);
+						assert.deepEqual(
+							output.result.data[0]?.data,
+							{ id: "cache", optional: "keep", required: "Ada" },
+							"required fields survive the final operation projection",
+						);
+						const cache: Record<string, unknown> = {
+							...stored,
+							array: ["stale"],
+						};
+						const returned = output.result.data[0]?.data as Record<
+							string,
+							unknown
+						>;
+						for (const field of ["id", "required", ...requested]) {
+							if (Object.hasOwn(returned, field))
+								cache[field] = returned[field];
+							else delete cache[field];
+						}
+						assert.deepEqual(
+							cache,
+							stored,
+							"an absent requested field disappears; unrequested nested value survives",
+						);
+						const full = await queryRecords(
+							target,
+							"state",
+							clientGrant,
+							{},
+							manifest,
+						);
+						assert.deepEqual(
+							full.data[0]?.data,
+							stored,
+							"sparse response does not delete stored values",
+						);
+					},
+				);
+				await t.test(
+					"sparse client changes_since eligibility uses the full frozen grant projection",
+					async () => {
+						const data = {
+							id: "eligibility",
+							optional: "before",
+							required: "stable",
+						};
+						await write({ data, key: "eligibility", stream: "state" });
+						const clientGrant = {
+							streams: [
+								{
+									fields: ["id", "required", "optional"],
+									instance_ids: [target.connectorInstanceId],
+									name: "state",
+									resources: ["eligibility"],
+								},
+							],
+						};
+						const fields = ["id", "required"];
+						const beginning = await queryRecords(
+							target,
+							"state",
+							clientGrant,
+							{ changes_since: "beginning", fields },
+							manifest,
+						);
+						assert.ok(beginning.next_changes_since);
+						assert.deepEqual(beginning.data[0]?.data, {
+							id: "eligibility",
+							required: "stable",
+						});
+						await write({
+							...instruction({ optional: "after" }),
+							key: "eligibility",
+						});
+						const delta = await queryRecords(
+							target,
+							"state",
+							clientGrant,
+							{ changes_since: beginning.next_changes_since, fields },
+							manifest,
+						);
+						assert.equal(
+							delta.data.length,
+							1,
+							"unrequested granted-field change still qualifies for sync",
+						);
+						assert.deepEqual(
+							delta.data[0]?.data,
+							beginning.data[0]?.data,
+							"response is sparse even when eligibility uses more fields",
+						);
+					},
+				);
+				await t.test(
+					"bootstrap pages preserve authorized h1 state after writes and history pruning",
+					async () => {
+						for (const id of ["a", "b", "c", "deleted", "hidden", "old"]) {
+							await write({
+								data: {
+									created_at:
+										id === "old"
+											? "2026-09-01T00:00:00Z"
+											: "2026-10-01T00:00:00Z",
+									id,
+									required: "at-h1",
+								},
+								key: id,
+								stream: "bootstrap",
+							});
+						}
+						await write({ key: "deleted", op: "delete", stream: "bootstrap" });
+						const scope = {
+							streams: [
+								{
+									fields: ["id", "required", "optional"],
+									instance_ids: [target.connectorInstanceId],
+									name: "bootstrap",
+									resources: ["a", "b", "c", "deleted", "old"],
+									time_constraint: {
+										field: "created_at",
+										since: "2026-10-01T00:00:00Z",
+									},
+								},
+							],
+						};
+						const prune = async () => {
+							if (databaseUrl)
+								await postgresQuery(
+									"DELETE FROM record_changes WHERE stream = 'bootstrap'",
+								);
+							else
+								getDb()
+									.prepare(
+										"DELETE FROM record_changes WHERE stream = 'bootstrap'",
+									)
+									.run();
+						};
+						await prune();
+						const before = await databaseState();
+						let page = await queryRecords(
+							target,
+							"bootstrap",
+							scope,
+							{ changes_since: "beginning", limit: 1, order: "asc" },
+							manifest,
+						);
+						assert.equal(page.has_more, true);
+						assert.ok(page.next_cursor);
+						assert.equal(
+							page.next_changes_since,
+							undefined,
+							"sync token is terminal-only",
+						);
+						assert.deepEqual(
+							await databaseState(),
+							before,
+							"capturing h1 is read-only",
+						);
+						const firstCursor = page.next_cursor;
+						await assert.rejects(
+							queryRecords(
+								target,
+								"bootstrap",
+								scope,
+								{ cursor: firstCursor, fields: ["id"], limit: 1, order: "asc" },
+								manifest,
+							),
+							{ code: "invalid_cursor" },
+						);
+						await write({
+							data: {
+								created_at: "2026-10-01T00:00:00Z",
+								id: "b",
+								required: "after-h1",
+							},
+							key: "b",
+							stream: "bootstrap",
+						});
+						await write({ key: "c", op: "delete", stream: "bootstrap" });
+						await write({
+							data: {
+								created_at: "2026-10-01T00:00:00Z",
+								id: "later",
+								required: "after-h1",
+							},
+							key: "later",
+							stream: "bootstrap",
+						});
+						await prune();
+						const collected = [...page.data];
+						while (page.has_more) {
+							assert.ok(page.next_cursor);
+							page = await queryRecords(
+								target,
+								"bootstrap",
+								scope,
+								{ cursor: page.next_cursor, limit: 1, order: "asc" },
+								manifest,
+							);
+							collected.push(...page.data);
+							if (page.has_more)
+								assert.equal(page.next_changes_since, undefined);
+						}
+						assert.deepEqual(
+							collected.map((record) => record.id),
+							["a", "b"],
+						);
+						assert.deepEqual(
+							collected.map((record) => record.data),
+							["a", "b"].map((id) => ({ id, required: "at-h1" })),
+						);
+						assert.ok(page.next_changes_since);
+						await write({
+							data: {
+								created_at: "2026-10-01T00:00:00Z",
+								id: "b",
+								required: "one",
+							},
+							key: "b",
+							stream: "bootstrap",
+						});
+						await write({
+							data: {
+								created_at: "2026-10-01T00:00:00Z",
+								id: "b",
+								required: "two",
+							},
+							key: "b",
+							stream: "bootstrap",
+						});
+						if (databaseUrl)
+							await postgresQuery(
+								"DELETE FROM record_changes WHERE stream = 'bootstrap' AND version < (SELECT MAX(version) FROM record_changes WHERE stream = 'bootstrap')",
+							);
+						else
+							getDb()
+								.prepare(
+									"DELETE FROM record_changes WHERE stream = 'bootstrap' AND version < (SELECT MAX(version) FROM record_changes WHERE stream = 'bootstrap')",
+								)
+								.run();
+						await assert.rejects(
+							queryRecords(
+								target,
+								"bootstrap",
+								scope,
+								{ changes_since: page.next_changes_since, order: "asc" },
+								manifest,
+							),
+							{ code: "cursor_expired" },
+						);
+						const restarted = await queryRecords(
+							target,
+							"bootstrap",
+							scope,
+							{ changes_since: "beginning", order: "asc" },
+							manifest,
+						);
+						assert.deepEqual(restarted.data.map((record) => record.id).sort(), [
+							"a",
+							"b",
+						]);
+					},
+				);
+				await t.test(
+					"post-pruning bootstrap suppresses ungranted changes and retains later deletion baselines",
+					async () => {
+						const record = {
+							data: { id: "a", optional: "before", required: "stable" },
+							key: "a",
+							stream: "bootstrap-followup",
+						};
+						await write(record);
+						if (databaseUrl)
+							await postgresQuery(
+								"DELETE FROM record_changes WHERE stream = 'bootstrap-followup'",
+							);
+						else
+							getDb()
+								.prepare(
+									"DELETE FROM record_changes WHERE stream = 'bootstrap-followup'",
+								)
+								.run();
+						const clientGrant = {
+							streams: [
+								{
+									fields: ["id", "required"],
+									instance_ids: [target.connectorInstanceId],
+									name: "bootstrap-followup",
+								},
+							],
+						};
+						const beginning = await queryRecords(
+							target,
+							"bootstrap-followup",
+							clientGrant,
+							{ changes_since: "beginning" },
+							manifest,
+						);
+						assert.ok(beginning.next_changes_since);
+						await write(
+							instruction({ optional: "after" }, [], "bootstrap-followup"),
+						);
+						const unchanged = await queryRecords(
+							target,
+							"bootstrap-followup",
+							clientGrant,
+							{ changes_since: beginning.next_changes_since },
+							manifest,
+						);
+						assert.deepEqual(
+							unchanged.data,
+							[],
+							"ungranted changes must not qualify for incremental sync",
+						);
+						assert.ok(unchanged.next_changes_since);
+						await write({
+							key: "a",
+							op: "delete",
+							stream: "bootstrap-followup",
+						});
+						const deletion = await queryRecords(
+							target,
+							"bootstrap-followup",
+							clientGrant,
+							{ changes_since: unchanged.next_changes_since },
+							manifest,
+						);
+						assert.equal(
+							deletion.data.length,
+							1,
+							"rolling h0 baseline must retain the prior authorized record",
+						);
+						assert.equal(deletion.data[0]?.deleted, true);
+					},
+				);
+				await t.test(
+					"retained sync pages order records and tombstones by canonical key and bind direction",
+					async () => {
+						const stream = "bootstrap-order";
+						for (const id of ["z", "a", "m"])
+							await write({
+								stream,
+								key: id,
+								data: { id, required: "before" },
+							});
+						const orderGrant = {
+							streams: [
+								{
+									name: stream,
+									fields: ["id", "required"],
+									instance_ids: [target.connectorInstanceId],
+								},
+							],
+						};
+						const first = await queryRecords(
+							target,
+							stream,
+							orderGrant,
+							{ changes_since: "beginning", limit: 1, order: "asc" },
+							manifest,
+						);
+						assert.ok(first.next_cursor);
+						const ids = first.data.map((record) => record.id);
+						let page = first;
+						while (page.next_cursor) {
+							page = await queryRecords(
+								target,
+								stream,
+								orderGrant,
+								{ cursor: page.next_cursor, limit: 1, order: "asc" },
+								manifest,
+							);
+							ids.push(...page.data.map((record) => record.id));
+						}
+						assert.deepEqual(
+							ids,
+							["a", "m", "z"],
+							"bootstrap order must not reveal write order",
+						);
+						assert.ok(page.next_changes_since);
+						await assert.rejects(
+							queryRecords(
+								target,
+								stream,
+								orderGrant,
+								{ cursor: first.next_cursor, limit: 1, order: "desc" },
+								manifest,
+							),
+							{ code: "invalid_cursor" },
+						);
+						const descending = await queryRecords(
+							target,
+							stream,
+							orderGrant,
+							{ changes_since: "beginning", order: "desc" },
+							manifest,
+						);
+						assert.deepEqual(
+							descending.data.map((record) => record.id),
+							["z", "m", "a"],
+						);
+						await write({
+							stream,
+							key: "z",
+							data: { id: "z", required: "after" },
+						});
+						await write({ stream, key: "a", op: "delete" });
+						const changes = await queryRecords(
+							target,
+							stream,
+							orderGrant,
+							{ changes_since: page.next_changes_since, order: "asc" },
+							manifest,
+						);
+						assert.deepEqual(
+							changes.data.map((record) => [
+								record.id,
+								record.deleted === true,
+							]),
+							[
+								["a", true],
+								["z", false],
+							],
+							"tombstones and snapshots share canonical key order",
+						);
+					},
+				);
+				await t.test(
+					"client list preserves tombstone envelopes with full and sparse responses",
+					async () => {
+						await write({
+							data: { id: "tombstone", required: "before" },
+							key: "tombstone",
+							stream: "state",
+						});
+						const clientGrant = {
+							streams: [
+								{
+									fields: ["id", "required"],
+									instance_ids: [target.connectorInstanceId],
+									name: "state",
+									resources: ["tombstone"],
+								},
+							],
+						};
+						const beginning = await queryRecords(
+							target,
+							"state",
+							clientGrant,
+							{ changes_since: "beginning" },
+							manifest,
+						);
+						assert.ok(beginning.next_changes_since);
+						await write({ key: "tombstone", op: "delete", stream: "state" });
+						for (const fields of [undefined, ["id"]]) {
+							const params = {
+								changes_since: beginning.next_changes_since,
+								...(fields ? { fields } : {}),
+							};
+							const output = await executeRecordsList(
+								{
+									actor: {
+										kind: "client",
+										subject_id: "owner",
+										client_id: "client",
+										grant_id: "grant",
+									},
+									requestParams: params,
+									streamName: "state",
+								},
+								{
+									decorateRecord: (record) => record,
+									experimentalRecordUpdatesEnabled: () => true,
+									getGrant: () => clientGrant,
+									getManifest: () => manifest,
+									getSourceDescriptor: () => ({
+										id: connectorId,
+										kind: "connector",
+									}),
+									queryRecords: async (stream, _grant, request) => {
+										const result = await queryRecords(
+											target,
+											stream,
+											clientGrant,
+											request,
+											manifest,
+										);
+										return {
+											...result,
+											data: result.data.map((record) => ({ ...record })),
+										};
+									},
+									validateRequestFields: () => {},
+								},
+							);
+							assert.equal(output.result.data.length, 1);
+							assert.equal(output.result.data[0]?.deleted, true);
+							assert.equal(output.result.data[0]?.object, "record");
+							assert.equal(output.result.data[0]?.stream, "state");
+							assert.equal(output.result.data[0]?.id, "tombstone");
+							assert.equal(output.result.data[0]?.data, undefined);
+						}
+					},
+				);
+				await t.test(
 					"snapshot replacement and complete version history",
 					async () => {
-						const clientCopyBefore = { ...(await read("state")).data };
-						assert.equal(Object.hasOwn(clientCopyBefore, "optional"), true);
-						await write({
-							...snapshot("state"),
-							data: { id: "a", required: "replacement" },
-						});
-						assert.deepEqual(
-							(await read("state")).data,
-							{ id: "a", required: "replacement" },
-							"snapshots replace omitted values",
-						);
-						const replacementCopy = { ...(await read("state")).data };
-						assert.equal(
-							Object.hasOwn(replacementCopy, "optional"),
-							false,
-							"a client replacing its copy within the same projection removes absent values",
-						);
-						const history = databaseUrl
-							? (
-									await postgresQuery(
-										"SELECT record_json FROM record_changes WHERE stream = 'state' AND NOT deleted",
-									)
-								).rows
-							: getDb()
-									.prepare(
-										"SELECT record_json FROM record_changes WHERE stream = 'state' AND NOT deleted",
-									)
-									.all();
-						for (const row of history as Array<{ record_json: unknown }>) {
-							const data =
-								typeof row.record_json === "string"
-									? JSON.parse(row.record_json)
-									: row.record_json;
-							assert.equal(Object.hasOwn(data, "type"), false);
-							assert.equal(typeof data.required, "string");
-							assert.equal(data.id, "a");
+						const initial = {
+							array: [1, 2],
+							id: "history",
+							nested: { one: 1 },
+							optional: "present",
+							required: "initial",
+						};
+						const nullable = { ...initial, optional: null };
+						const removed = {
+							array: [1, 2],
+							id: "history",
+							nested: { one: 1 },
+							required: "initial",
+						};
+						const replacement = { id: "history", required: "replacement" };
+						const writes = [
+							{ data: initial, key: "history", stream: "state" },
+							{ ...instruction({ optional: null }), key: "history" },
+							{ ...instruction({}, ["optional"]), key: "history" },
+							{ data: replacement, key: "history", stream: "state" },
+						];
+						const expected: Array<{ data: unknown; version: number }> = [];
+						for (const [index, record] of writes.entries()) {
+							const outcome = await write(record);
+							assert.equal(outcome.changed, true);
+							assert.equal(typeof outcome.version, "number");
+							expected.push({
+								data: [initial, nullable, removed, replacement][index],
+								version: outcome.version as number,
+							});
 						}
+						const historySql =
+							"SELECT record_json, version FROM record_changes WHERE stream = 'state' AND record_key = 'history' AND NOT deleted ORDER BY version";
+						const history = databaseUrl
+							? (await postgresQuery(historySql)).rows
+							: getDb().prepare(historySql).all();
+						assertCompleteHistory(history as HistoryRow[], expected);
+						assert.throws(
+							() => assertCompleteHistory([], expected),
+							"the oracle must reject deleted history",
+						);
+						assert.throws(
+							() =>
+								assertCompleteHistory(
+									(history as HistoryRow[]).slice(1),
+									expected,
+								),
+							"the oracle must reject a missing partial snapshot",
+						);
+						assert.throws(
+							() =>
+								assertCompleteHistory(
+									[...(history as HistoryRow[])].reverse(),
+									expected,
+								),
+							"the oracle must reject reordered versions",
+						);
+						assert.throws(
+							() =>
+								assertCompleteHistory(
+									(history as HistoryRow[]).map((row) => ({
+										...row,
+										record_json: replacement,
+									})),
+									expected,
+								),
+							"the oracle must reject loss of unnamed historical values",
+						);
 					},
 				);
 				await t.test(
@@ -900,4 +1544,164 @@ test("experimental SQLite JSON equality ignores nested member order", async () =
 		closeDb();
 		delete process.env.PDPP_EXPERIMENTAL_RECORD_UPDATES;
 	}
+});
+
+test("flag-off SQLite retries do not parse current snapshots for disabled duplicate handling", async (t) => {
+	setup();
+	delete process.env.PDPP_EXPERIMENTAL_RECORD_UPDATES;
+	try {
+		const data = { id: "a", required: "unique-disabled-parse-probe" };
+		const record = { data, key: "a", stream: "events" };
+		await ingestRecord(target, record, { deferIndexes: true });
+		const storedJson = getDb()
+			.prepare("SELECT record_json FROM records WHERE stream = 'events'")
+			.get()?.record_json;
+		let calls = 0;
+		const parse = JSON.parse;
+		t.mock.method(
+			JSON,
+			"parse",
+			(value: string, reviver?: Parameters<typeof JSON.parse>[1]) => {
+				if (value === storedJson) calls += 1;
+				return parse(value, reviver);
+			},
+		);
+		assert.equal(
+			(await ingestRecord(target, record, { deferIndexes: true })).changed,
+			false,
+		);
+		assert.equal(
+			calls,
+			0,
+			"flag-off duplicate handling must retain the legacy string comparison",
+		);
+	} finally {
+		t.mock.restoreAll();
+		closeDb();
+		delete process.env.PDPP_EXPERIMENTAL_RECORD_UPDATES;
+	}
+});
+
+test("retained bootstrap state binds tokens and pages to context and storage lifecycle", (t) => {
+	bumpStorageGeneration();
+	const token = Buffer.from(JSON.stringify({ v: 2 })).toString("base64url");
+	const records = ["a", "b"].map((id) => ({
+		record: { id, data: { id } },
+		eligibility: { id },
+	}));
+	const result = startBootstrapPage({
+		context: "authorized",
+		records,
+		changesCursor: token,
+		limit: 1,
+	});
+	assert.equal(result.has_more, true);
+	assert.equal(result.next_changes_since, undefined);
+	assert.ok(result.next_cursor);
+	const cursor = JSON.parse(
+		Buffer.from(result.next_cursor, "base64url").toString(),
+	);
+	assert.throws(() => continueBootstrapPage(cursor, "different-grant", 1), {
+		code: "invalid_cursor",
+	});
+	const terminal = continueBootstrapPage<{ id: string; data: { id: string } }>(
+		cursor,
+		"authorized",
+		1,
+	);
+	assert.deepEqual(terminal.data, [{ id: "b", data: { id: "b" } }]);
+	assert.ok(terminal.next_changes_since);
+	const terminalToken = terminal.next_changes_since;
+	assert.deepEqual(
+		retainedBootstrapRecordIds(terminal.next_changes_since, "authorized"),
+		["a", "b"],
+	);
+	const forged = JSON.parse(
+		Buffer.from(terminal.next_changes_since, "base64url").toString(),
+	);
+	forged.v = 3;
+	assert.throws(
+		() =>
+			retainedBootstrapRecordIds(
+				Buffer.from(JSON.stringify(forged)).toString("base64url"),
+				"authorized",
+			),
+		{ code: "invalid_cursor" },
+	);
+	assert.throws(
+		() => retainedBootstrapRecordIds(terminalToken, "different-grant"),
+		{ code: "invalid_cursor" },
+	);
+	const originalNow = Date.now();
+	t.mock.method(Date, "now", () => originalNow + 5 * 60 * 1000 + 1);
+	assert.throws(() => retainedBootstrapRecordIds(terminalToken, "authorized"), {
+		code: "cursor_expired",
+	});
+	t.mock.restoreAll();
+	const restarted = startBootstrapPage({
+		context: "authorized",
+		records,
+		changesCursor: token,
+		limit: 10,
+	});
+	assert.ok(restarted.next_changes_since);
+	const restartedToken = restarted.next_changes_since;
+	bumpStorageGeneration();
+	assert.throws(
+		() => retainedBootstrapRecordIds(restartedToken, "authorized"),
+		{ code: "cursor_expired" },
+	);
+});
+
+test("retained bootstrap capacity rejects complete captures and counts terminal baselines", () => {
+	bumpStorageGeneration();
+	const changesCursor = Buffer.from(JSON.stringify({ v: 1 })).toString(
+		"base64url",
+	);
+	const capture = (
+		records: Array<{
+			record: { id: string; value?: string };
+			eligibility: unknown;
+		}>,
+	) =>
+		startBootstrapPage({
+			context: "capacity",
+			records,
+			changesCursor,
+			limit: 100,
+		});
+	assert.throws(
+		() =>
+			capture(
+				Array.from({ length: BOOTSTRAP_MAX_RECORDS + 1 }, (_, i) => ({
+					record: { id: String(i) },
+					eligibility: { id: String(i) },
+				})),
+			),
+		{ code: "bootstrap_capacity_exceeded" },
+	);
+	assert.throws(
+		() =>
+			capture([
+				{
+					record: { id: "large", value: "x".repeat(33 * 1024 * 1024) },
+					eligibility: { id: "large" },
+				},
+			]),
+		{ code: "bootstrap_capacity_exceeded" },
+	);
+	let last: ReturnType<typeof capture> | undefined;
+	for (let i = 0; i < 32; i++)
+		last = capture([
+			{ record: { id: "retained" }, eligibility: { id: "retained" } },
+		]);
+	assert.ok(last?.next_changes_since);
+	assert.throws(() => capture([]), { code: "bootstrap_capacity_exceeded" });
+	assert.deepEqual(
+		retainedBootstrapRecordIds(last.next_changes_since, "capacity"),
+		["retained"],
+	);
+	bumpStorageGeneration();
+	assert.deepEqual(capture([]).data, []);
+	bumpStorageGeneration();
 });

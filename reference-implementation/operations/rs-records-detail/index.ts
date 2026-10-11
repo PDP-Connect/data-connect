@@ -36,7 +36,11 @@
  *   - response writing.
  */
 
-import { normalizeProjectionFields, projectRecordEnvelope } from "../read-projection.ts";
+import {
+  normalizeProjectionFields,
+  projectRecordEnvelope,
+  resolveResponseProjectionFields,
+} from "../read-projection.ts";
 
 export interface RecordDetailSourceDescriptor {
   id: string;
@@ -55,7 +59,7 @@ export type RecordDetailActor =
 
 export interface RecordDetailManifestStream {
   name: string;
-  schema?: { properties?: Record<string, unknown> };
+  schema?: { properties?: Record<string, unknown>; required?: string[] };
   [extra: string]: unknown;
 }
 
@@ -94,6 +98,8 @@ export interface RecordDetailDependencies {
    * carry blob refs).
    */
   decorateRecord: (record: Record<string, unknown>) => Record<string, unknown>;
+  /** Host-controlled prototype capability; omitted hosts retain legacy projection. */
+  experimentalRecordUpdatesEnabled?: () => boolean;
   /**
    * Resolved grant the host derived for this request. Owner actors get an
    * owner read-grant; client actors get the token's grant.
@@ -214,7 +220,15 @@ export async function executeRecordDetail(
 
   const record = projectRecordEnvelope(
     dependencies.decorateRecord(rawRecord),
-    normalizeProjectionFields(expandOptions.fields)
+    dependencies.experimentalRecordUpdatesEnabled?.()
+      ? resolveResponseProjectionFields(
+          expandOptions.fields,
+          manifestStream?.schema?.required ?? [],
+          input.actor.kind === "client"
+            ? (grant.streams.find((stream) => stream.name === input.streamName)?.fields ?? null)
+            : null
+        )
+      : normalizeProjectionFields(expandOptions.fields)
   );
 
   return {
