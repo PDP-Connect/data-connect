@@ -92,6 +92,8 @@ export interface AgentConnectAttemptStore {
   ) => Promise<
     | { outcome: "missing" }
     | { outcome: "pending"; interval: number }
+    /** Lifecycle history is unavailable or has pending actions; the attempt is kept. */
+    | { outcome: "temporary" }
     | { outcome: "failed"; status: "denied" | "expired" }
     | { outcome: "approved"; body: Record<string, unknown>; replay: boolean }
   >;
@@ -284,17 +286,26 @@ export function createAgentConnectAttemptStore(): AgentConnectAttemptStore {
     }
     return body;
   };
-  const tokenIsActive = async (
+  /** "unavailable": lifecycle authority cannot decide now, so nothing may be deleted. */
+  const tokenState = async (
     tokenId: string | undefined,
     grant?: Record<string, unknown> | null
-  ): Promise<boolean> => {
+  ): Promise<"active" | "inactive" | "unavailable"> => {
     if (!tokenId) {
-      return false;
+      return "inactive";
     }
     const rt = getHeldDataRuntime();
     if (rt) {
-      if (!(await introspect(tokenId)).active) {
-        return false;
+      if (rt.authority.lost) {
+        return "unavailable";
+      }
+      const active = (await introspect(tokenId)).active;
+      // Introspection refreshes the journal and can discover a loss on this check.
+      if (rt.authority.lost) {
+        return "unavailable";
+      }
+      if (!active) {
+        return "inactive";
       }
       // A live package token cannot make its cached ended-child grant positive.
       if (
@@ -304,10 +315,10 @@ export function createAgentConnectAttemptStore(): AgentConnectAttemptStore {
           return typeof grantId === "string" && rt.authority.hasEnded(grantId);
         })
       ) {
-        return false;
+        return "inactive";
       }
       if (rt.authority.lost) {
-        return false;
+        return "unavailable";
       }
     }
     if (isPostgresStorageBackend()) {
@@ -321,13 +332,13 @@ export function createAgentConnectAttemptStore(): AgentConnectAttemptStore {
          ) AS ok`,
         [tokenId, new Date().toISOString()]
       );
-      return Boolean(result.rows[0]?.ok);
+      return result.rows[0]?.ok ? "active" : "inactive";
     }
     const row = getOne<{ ok: number }>(referenceQueries.authAgentConnectAttemptsTokenActive, [
       tokenId,
       new Date().toISOString(),
     ]);
-    return Boolean(row?.ok);
+    return row?.ok ? "active" : "inactive";
   };
   const revokeTokenIfNoLiveSibling = async (
     tokenId: string | undefined,
@@ -476,7 +487,7 @@ export function createAgentConnectAttemptStore(): AgentConnectAttemptStore {
       return attempt;
     }
     const grant = grantFromRecoveredConsent(recovered);
-    if (!(grant && (await tokenIsActive(recovered.token_id, grant)))) {
+    if (!(grant && (await tokenState(recovered.token_id, grant)) === "active")) {
       return attempt;
     }
     await markAttemptApproved(attempt.requestUri, recovered.token_id, grant, recovered.grant_id ?? null);
@@ -844,7 +855,11 @@ export function createAgentConnectAttemptStore(): AgentConnectAttemptStore {
         getHeldDataRuntime() && attempt.responseJson
           ? objectFromStoredJson(parseStoredResponse(attempt.responseJson).body.grant)
           : attempt.grant;
-      if (!(await tokenIsActive(attempt.token, deliveredGrant))) {
+      const state = await tokenState(attempt.token, deliveredGrant);
+      if (state === "unavailable") {
+        return { outcome: "temporary" };
+      }
+      if (state === "inactive") {
         await this.delete(attempt.id);
         return { outcome: "missing" };
       }
@@ -1106,6 +1121,10 @@ export function mountAsAgentConnectToken(app: AppLike, ctx: MountAsAgentConnectT
           interval: result.interval,
           status: "pending",
         });
+      }
+      if (result.outcome === "temporary") {
+        res.setHeader("Retry-After", "60");
+        return ctx.pdppError(res, 503, "temporarily_unavailable", "Grant lifecycle history is being recovered");
       }
       if (result.outcome === "failed") {
         const error = buildAgentConnectError(result.status);

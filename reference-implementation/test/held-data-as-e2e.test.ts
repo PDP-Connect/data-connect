@@ -1477,6 +1477,68 @@ describe("held-data lifecycle over HTTP", () => {
     );
   });
 
+  for (const replay of [false, true]) {
+    const delivery = replay ? "replay" : "first delivery";
+    it(`second-B repair: agent-connect ${delivery} keeps a live grant's attempt during history recovery`, async () => {
+      const opts = heldDataOpts();
+      await withServer(
+        false,
+        async (h) => {
+          const clientId = await registerPublicClient(h);
+          const unrelated = await authCodeGrant(h, clientId);
+          const g = await authCodeGrant(h, clientId);
+          const grant = (await introspect(g.accessToken)).grant;
+          const id = `att_${randomBytes(8).toString("hex")}`;
+          const pollingCode = "recovery-polling-proof";
+          getDb()
+            .prepare(`INSERT INTO agent_connect_attempts(
+            id, request_uri, client_id, polling_code_hash, status, approval_url, token_url,
+            interval_seconds, created_at, expires_at_ms, completed_at, grant_id, grant_json, token
+          ) VALUES(?, ?, ?, ?, 'approved', ?, ?, 2, ?, ?, ?, ?, ?, ?)`)
+            .run(
+              id,
+              `urn:test:${id}`,
+              clientId,
+              createHash("sha256").update(pollingCode).digest("base64url"),
+              `${h.asUrl}/consent`,
+              `${h.asUrl}/agent-connect/token`,
+              new Date().toISOString(),
+              Date.now() + DAY,
+              new Date().toISOString(),
+              g.grantId,
+              JSON.stringify(grant),
+              g.accessToken
+            );
+          const store = createAgentConnectAttemptStore();
+          if (replay) {
+            assert.equal((await store.redeem(id, pollingCode)).outcome, "approved");
+          }
+          const restore = loseHistory(join(opts.experimentalHeldDataLifecycle.journalDir, "authority.journal"), "suffix");
+          const pending = await revoke(h, h.ownerToken, unrelated.grantId, { pdpp_disposition: "keep" });
+          assert.equal(pending.status, 200, JSON.stringify(pending.body));
+          assert.equal((await store.redeem(id, pollingCode)).outcome, "temporary", "lost history");
+          const polled = await fetch(`${h.asUrl}/agent-connect/${id}/token`, json({ polling_code: pollingCode }));
+          assert.equal(polled.status, 503, await polled.text());
+          assert.equal(polled.headers.get("retry-after"), "60");
+          restore();
+          assert.equal(
+            (await store.redeem(id, pollingCode)).outcome,
+            "temporary",
+            "restored history with another grant's pending action"
+          );
+          getHeldDataRuntime()!.authority.reestablishHistory();
+          const delivered = await store.redeem(id, pollingCode);
+          assert.equal(delivered.outcome, "approved", JSON.stringify(delivered));
+          if (delivered.outcome === "approved") {
+            assert.equal(delivered.body.access_token, g.accessToken);
+            assert.equal(delivered.replay, replay);
+          }
+        },
+        opts
+      );
+    });
+  }
+
   it("lane B: a shared package credential stays active for its live sibling; fan-out excludes the restored ended child", async () => {
     await withServer(
       false,
