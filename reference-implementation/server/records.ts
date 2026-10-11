@@ -6,6 +6,7 @@ import { parseCoverageDiagnosticsStateSnapshot } from "./polyfill-connectors-run
  * PDPP Resource Server — record storage and grant-enforced query
  */
 import { getDb } from "./db.ts";
+import { applyPartialInstruction, enforceAppendOnlyDuplicate, equalJsonValues, experimentalRecordUpdatesEnabled, isPartialInstruction, recordUpdateError, validateExperimentalSnapshot, type ExperimentalStream } from "./experimental-record-updates.ts";
 import { assertGrantedManifestReadAuthority, assertManifestReadAuthority } from "./manifest-read-authority.ts";
 import type { ComputedLexicalFields } from "./search.ts";
 import type { ComputedSemanticEntries } from "./search-semantic.ts";
@@ -174,6 +175,9 @@ type RecordStorageTarget =
   | undefined;
 type RecordData = Record<string, unknown>;
 interface RecordEnvelope {
+  type?: unknown;
+  set?: unknown;
+  remove?: unknown;
   data?: unknown;
   emitted_at?: string | null | undefined;
   key: unknown;
@@ -854,6 +858,9 @@ export class RecordIndexAdmissionError extends Error {
  * by construction, not a correctness bug.
  */
 const PERMANENT_INGEST_FAILURE_CODES: ReadonlySet<string> = new Set([
+  "append_only_record_conflict",
+  "invalid_record_schema",
+  "invalid_partial_update",
   "connector_instance_not_found",
   "connector_instance_not_writable",
   "invalid_record_identity",
@@ -2016,19 +2023,29 @@ function ingestRecordWithinCoordinator(
 }
 
 function toPostgresRecordInput(record: RecordEnvelope): {
+  type?: unknown;
+  set?: unknown;
+  remove?: unknown;
   data?: RecordData;
   emitted_at?: string;
   key: unknown;
   op?: "delete" | "upsert";
   stream: string;
 } {
+  if (isPartialInstruction(record) && (record.data !== undefined || record.op !== undefined)) {
+    throw recordUpdateError("invalid_partial_update", "Instruction must not contain snapshot data or an op");
+  }
   if (record.data !== undefined && record.data !== null && !isRecordData(record.data)) {
+    if (experimentalRecordUpdatesEnabled()) throw recordUpdateError("invalid_record_schema", "RECORD data must be an object");
     throw new TypeError("Postgres record data must be an object when present");
   }
   if (record.emitted_at !== undefined && record.emitted_at !== null && typeof record.emitted_at !== "string") {
     throw new TypeError("Postgres record emitted_at must be a string when present");
   }
   return {
+    ...(record.type !== undefined ? { type: record.type } : {}),
+    ...(record.set !== undefined ? { set: record.set } : {}),
+    ...(record.remove !== undefined ? { remove: record.remove } : {}),
     key: record.key,
     stream: record.stream,
     ...(isRecordData(record.data) ? { data: record.data } : {}),
@@ -2278,9 +2295,15 @@ async function ingestSqliteRecord(
 ): Promise<RecordIngestOutcome> {
   const connectorId = connectorIdForStorageTarget(storageTarget);
   const connectorInstanceId = resolveStorageConnectorInstanceId(storageTarget, connectorId);
-  const { stream, key, data, emitted_at, op = "upsert" } = record;
+  const { stream, key, emitted_at, op = "upsert" } = record;
+  let data = record.data;
   const recordKey = encodeKey(key);
-  const recordJson = data ? JSON.stringify(data) : null;
+  let recordJson = data ? JSON.stringify(data) : null;
+  const experimentalStream = experimentalRecordUpdatesEnabled() || isPartialInstruction(record)
+    ? getExperimentalManifestStream(connectorId, stream) : null;
+  if (experimentalRecordUpdatesEnabled() && op !== "delete" && !isPartialInstruction(record)) {
+    validateExperimentalSnapshot(experimentalStream, key, data);
+  }
 
   // Validate record identity against the manifest-declared primary_key. The
   // record `key` is the ordered tuple of primary-key field values; each
@@ -2303,7 +2326,7 @@ async function ingestSqliteRecord(
   // Only meaningful for upserts (a delete keeps the row's existing
   // semantic_time); computed unconditionally for a simpler, branch-free bind
   // below — the delete path does not write it.
-  const semanticTime =
+  let semanticTime =
     op === "delete" ? SEMANTIC_TIME_UNKNOWN : computeIngestSemanticTime(connectorId, stream, data, attemptStreamFacts);
   const changeHistoryLimit = getChangeHistoryLimit();
 
@@ -2325,6 +2348,15 @@ async function ingestSqliteRecord(
       stream,
       recordKey,
     ]);
+
+    if (isPartialInstruction(record)) {
+      data = applyPartialInstruction(record, experimentalStream, current && !current.deleted && current.record_json ? JSON.parse(current.record_json) : null);
+      recordJson = JSON.stringify(data);
+      semanticTime = computeIngestSemanticTime(connectorId, stream, data, attemptStreamFacts);
+    }
+    if (op !== "delete" && current && !current.deleted && enforceAppendOnlyDuplicate(experimentalStream, current.record_json ? JSON.parse(current.record_json) : null, data)) {
+      return finishDurableOutcome({ kind: "noop" });
+    }
 
     if (op === "delete" && (!current || current.deleted)) {
       return finishDurableOutcome({ kind: "noop" });
@@ -2349,7 +2381,9 @@ async function ingestSqliteRecord(
     // write). The downstream changed-write delta math is already correct
     // for an unchanged payload at a new version: the record-count and
     // current-bytes deltas are zero, and only one history row is appended.
-    const wouldBeUnchangedUpsert = op !== "delete" && current && !current.deleted && current.record_json === recordJson;
+    const wouldBeUnchangedUpsert = op !== "delete" && current && !current.deleted && (experimentalRecordUpdatesEnabled()
+      ? equalJsonValues(current.record_json ? JSON.parse(current.record_json) : null, data)
+      : current.record_json === recordJson);
     // Anchor present → genuine no-op. Anchor missing → fall through to
     // the changed-write path below to re-anchor the current row.
     if (wouldBeUnchangedUpsert) {
@@ -2786,6 +2820,18 @@ async function maintainRecordIndexesWithinPermit(
 ): Promise<void> {
   const connectorId = connectorIdForStorageTarget(storageTarget);
   const connectorInstanceId = resolveStorageConnectorInstanceId(storageTarget, connectorId);
+  if (isPartialInstruction(record)) {
+    const recordKey = encodeKey(record.key);
+    const current = isPostgresStorageBackend()
+      ? (await postgresQuery<{ record_json: RecordData; version: number; deleted: boolean }>(
+          "SELECT record_json, version, deleted FROM records WHERE connector_instance_id = $1 AND stream = $2 AND record_key = $3",
+          [connectorInstanceId, record.stream, recordKey]
+        )).rows[0]
+      : getOne<CurrentRecordRow>(referenceQueries.recordsIngestGetCurrentRecordState, [connectorInstanceId, record.stream, recordKey]);
+    if (!current || current.deleted || Number(current.version) !== expectedVersion) return;
+    const data = typeof current.record_json === "string" ? JSON.parse(current.record_json) : current.record_json;
+    record = { stream: record.stream, key: record.key, data, op: "upsert" };
+  }
   const { stream, key, data, op = "upsert" } = record;
   const recordKey = encodeKey(key);
   const attemptFacts = options.attemptContext?.streams?.[stream] ?? null;
@@ -8821,6 +8867,13 @@ export async function backfillSqliteRecordSemanticTimesForManifest(
     });
   });
   return { streams: streamOutcomes, updated };
+}
+
+function getExperimentalManifestStream(connectorId: string, streamName: string): ExperimentalStream | null {
+  const row = getOne<ConnectorManifestRow>(referenceQueries.authConnectorsGetManifestById, [connectorId]);
+  if (!row?.manifest) return null;
+  const manifest = JSON.parse(row.manifest) as { streams?: Array<ExperimentalStream & { name?: string }> };
+  return manifest.streams?.find(candidate => candidate.name === streamName) ?? null;
 }
 
 // Returns the manifest-declared primary_key field names for a stream, or null

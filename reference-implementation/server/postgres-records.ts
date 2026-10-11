@@ -12,6 +12,7 @@
  */
 
 import { createHash } from "node:crypto";
+import { applyPartialInstruction, enforceAppendOnlyDuplicate, experimentalRecordUpdatesEnabled, isPartialInstruction, validateExperimentalSnapshot } from "./experimental-record-updates.ts";
 import {
   buildLimitClampedWarning,
   clampRecordsPageLimit,
@@ -91,6 +92,7 @@ async function postgresQuery(
 }
 
 interface ManifestStream {
+  semantics?: string;
   consent_time_field?: string;
   cursor_field?: string;
   name?: string;
@@ -248,6 +250,9 @@ interface PgQueryError extends Error {
 }
 
 interface IngestRecord {
+  type?: unknown;
+  set?: unknown;
+  remove?: unknown;
   data?: JsonObject;
   emitted_at?: string;
   key: unknown;
@@ -1899,9 +1904,10 @@ export async function postgresIngestRecord(
 ): Promise<IngestOutcome> {
   const connectorId = resolveStorageConnectorId(storageTarget);
   const connectorInstanceId = resolveStorageConnectorInstanceId(storageTarget, connectorId ?? "");
-  const { stream, key, data, emitted_at: emittedAt, op = "upsert" } = record;
+  const { stream, key, emitted_at: emittedAt, op = "upsert" } = record;
+  let data = record.data;
   const recordKey = encodeKey(key);
-  const recordJson = data ? JSON.stringify(data) : null;
+  let recordJson = data ? JSON.stringify(data) : null;
 
   // Validate record identity against the manifest-declared primary_key (covers
   // non-`id` and compound keys), via the same shared guard the SQLite store
@@ -1914,6 +1920,11 @@ export async function postgresIngestRecord(
     attemptStreamFacts ? manifestStreamFromFacts(attemptStreamFacts) : null
   );
   assertRecordIdentity(normalizePrimaryKey(identityManifestStream?.primary_key), key, data ?? null);
+  const experimentalStream = experimentalRecordUpdatesEnabled() || isPartialInstruction(record)
+    ? await getCachedPostgresManifestStream(resolvedConnectorId, stream) : null;
+  if (experimentalRecordUpdatesEnabled() && op !== "delete" && !isPartialInstruction(record)) {
+    validateExperimentalSnapshot(experimentalStream, key, data);
+  }
 
   const effectiveEmittedAt = emittedAt || nowIso();
   const changeHistoryLimit = getChangeHistoryLimit();
@@ -1923,11 +1934,11 @@ export async function postgresIngestRecord(
       ? manifestStreamFromFacts(attemptStreamFacts)
       : await getCachedPostgresManifestStream(resolvedConnectorId, stream);
   }
-  const storedCursorValue = op === "delete" ? null : cursorValue(data ?? null, manifestStream);
-  const storedPrimaryKeyText = op === "delete" ? recordKey : primaryKeyText(data ?? null, recordKey, manifestStream);
+  let storedCursorValue = op === "delete" ? null : cursorValue(data ?? null, manifestStream);
+  let storedPrimaryKeyText = op === "delete" ? recordKey : primaryKeyText(data ?? null, recordKey, manifestStream);
   // SEMANTIC time for the Explore merged-timeline sort (upserts only; a delete
   // keeps the row's existing semantic_time). Falls back to emitted_at.
-  const storedSemanticTime = op === "delete" ? null : semanticTimeValue(data ?? null, manifestStream);
+  let storedSemanticTime = op === "delete" ? null : semanticTimeValue(data ?? null, manifestStream);
 
   const outcome = await withPostgresTransaction<DurableIngestOutcome>(
     async (client) => {
@@ -1966,6 +1977,21 @@ export async function postgresIngestRecord(
         [connectorInstanceId, stream, recordKey, recordJson]
       );
       const current = currentResult.rows[0] || null;
+
+      if (isPartialInstruction(record)) {
+        data = applyPartialInstruction(record, experimentalStream, current && !current.deleted ? current.record_json : null);
+        recordJson = JSON.stringify(data);
+        storedCursorValue = cursorValue(data, manifestStream);
+        storedPrimaryKeyText = primaryKeyText(data, recordKey, manifestStream);
+        storedSemanticTime = semanticTimeValue(data, manifestStream);
+        if (current) {
+          const equality = await client.query("SELECT $1::jsonb = $2::jsonb AS equal", [JSON.stringify(current.record_json), recordJson]);
+          current.is_identical = equality.rows[0]?.equal;
+        }
+      }
+      if (op !== "delete" && current && !current.deleted && enforceAppendOnlyDuplicate(experimentalStream, current.record_json, data)) {
+        return finishDurableOutcome({ kind: "noop" });
+      }
 
       if (op === "delete" && (!current || current.deleted)) {
         return finishDurableOutcome({ kind: "noop" });
