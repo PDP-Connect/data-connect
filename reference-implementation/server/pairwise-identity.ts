@@ -250,19 +250,18 @@ export async function buildPairwiseOwnerBindings(subjectId: string): Promise<Pai
       const sourceIds = new Set(
         [row.connector_id, manifest?.source_declaration?.source?.id].filter((id): id is string => Boolean(id))
       );
-      return await Promise.all(
-        [...sourceIds].map(async (sourceId) => ({
-          instance_id: await getPairwiseHandle({
-            clientId: OWNER_PAIRWISE_CLIENT_ID,
-            internalId: row.connector_instance_id,
-            kind: "instance",
-            sourceId,
-            subjectId,
-          }),
-          rs_instance: row.connector_instance_id,
-          source_id: sourceId,
-        }))
-      );
+      const instanceId = await getPairwiseHandle({
+        clientId: OWNER_PAIRWISE_CLIENT_ID,
+        internalId: row.connector_instance_id,
+        kind: "instance",
+        sourceId: manifest?.source_declaration?.source?.id ?? row.connector_id,
+        subjectId,
+      });
+      return [...sourceIds].map((sourceId) => ({
+        instance_id: instanceId,
+        rs_instance: row.connector_instance_id,
+        source_id: sourceId,
+      }));
     })
   );
   return nestedBindings.flat();

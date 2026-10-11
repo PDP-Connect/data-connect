@@ -1990,6 +1990,24 @@ async function decoratePairwiseReadRecord(
   if (decorated.expanded && typeof decorated.expanded === "object") {
     const expanded = decorated.expanded as Record<string, unknown>;
     for (const [relation, children] of Object.entries(decorated.expanded)) {
+      if (
+        children &&
+        typeof children === "object" &&
+        "object" in children &&
+        children.object === "list" &&
+        "data" in children &&
+        Array.isArray(children.data)
+      ) {
+        expanded[relation] = {
+          ...children,
+          data: await Promise.all(
+            children.data.map((child: unknown) =>
+              decoratePairwiseReadRecord(ctx, tokenInfo, child, [binding], source, manifest)
+            )
+          ),
+        };
+        continue;
+      }
       expanded[relation] = Array.isArray(children)
         ? await Promise.all(
             children.map((child) => decoratePairwiseReadRecord(ctx, tokenInfo, child, [binding], source, manifest))
