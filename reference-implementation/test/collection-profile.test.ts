@@ -1111,6 +1111,7 @@ test("DETAIL_GAP rejects embedded launch and later interaction credentials witho
     },
     { kind: "credentials", name: "later embedded short credentials", secret: "p7ss!3", status: "success" },
     { kind: "otp", name: "later embedded OTP", secret: "493827", status: "success" },
+    { kind: "otp", name: "later numeric OTP", numeric: true, secret: "493827", status: "success" },
   ] as const;
   try {
     for (const fixture of fixtures) {
@@ -1125,12 +1126,15 @@ test("DETAIL_GAP rejects embedded launch and later interaction credentials witho
 import { createInterface } from 'node:readline';
 const rl = createInterface({ input: process.stdin, terminal: false });
 const kind = ${JSON.stringify(fixture.kind)};
+const numeric = ${JSON.stringify("numeric" in fixture)};
 const emit = (message) => process.stdout.write(JSON.stringify(message) + '\\n');
 function finish(value) {
   emit({
     type: 'DETAIL_GAP', stream: 'items', reference_only: true, status: 'pending',
     record_key: 'synthetic-item', reason: 'temporary_unavailable', retryable: true,
-    detail_locator: { kind: 'item', cursor: 'prefix-' + value + '-suffix' },
+    detail_locator: numeric
+      ? { kind: 'item', attempt_code: Number(value) }
+      : { kind: 'item', cursor: 'prefix-' + value + '-suffix' },
   });
   process.stdout.write(JSON.stringify({ type: 'DONE', status: 'succeeded', records_emitted: 0 }) + '\\n',
     () => process.exit(0));
@@ -1212,6 +1216,102 @@ rl.on('line', (line) => {
           if (fixture.kind) {
             assert.ok(timeline.data?.some((entry) => entry.event_type === "run.interaction_completed"));
           }
+        } finally {
+          if (previousTraceDir === undefined) {
+            delete process.env.PDPP_TRACE_DIR;
+          } else {
+            process.env.PDPP_TRACE_DIR = previousTraceDir;
+          }
+          rmSync(tmpDir, { force: true, recursive: true });
+        }
+      });
+    }
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test("malformed DETAIL_GAP JSONL omits credentials from traces and returned diagnostics", async (t) => {
+  const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+  const { asPort, rsPort } = server;
+  const { ownerToken, connectorId } = await setupConnector(server, asPort);
+  const secret = "p4ss!2";
+  try {
+    for (const terminated of [false, true]) {
+      // biome-ignore lint/performance/noAwaitInLoops: each run owns its trace directory and environment.
+      await t.test(terminated ? "malformed newline-terminated line" : "truncated final line", async () => {
+        const tmpDir = mkdtempSync(join(tmpdir(), "cp-gap-malformed-"));
+        const connectorPath = join(tmpDir, "connector.mjs");
+        const traceDir = join(tmpDir, "trace");
+        writeFileSync(
+          connectorPath,
+          `
+import { createInterface } from 'node:readline';
+const rl = createInterface({ input: process.stdin, terminal: false });
+rl.on('line', (line) => {
+  if (JSON.parse(line).type !== 'START') return;
+  const malformed = JSON.stringify({
+    type: 'DETAIL_GAP',
+    detail_locator: { kind: 'item', cursor: 'prefix-' + process.env.SYNTHETIC_TRACE_SECRET + '-suffix' },
+  }).slice(0, -2);
+  process.stdout.write(malformed + ${JSON.stringify(terminated ? "\n" : "")}, () => process.exit(0));
+  rl.close();
+});
+`
+        );
+        const previousTraceDir = process.env.PDPP_TRACE_DIR;
+        process.env.PDPP_TRACE_DIR = traceDir;
+        const progress: unknown[] = [];
+        let gapWrites = 0;
+        try {
+          let rejection: RuntimeRunConnectorError | undefined;
+          await assert.rejects(
+            runTestConnector({
+              connectorId,
+              connectorPath,
+              detailGapStore: {
+                listPendingGaps: async () => [],
+                upsertPendingGap: async () => {
+                  gapWrites += 1;
+                  return null;
+                },
+              },
+              manifest: MINIMAL_MANIFEST,
+              onProgress: (event) => {
+                progress.push(event);
+              },
+              ownerToken,
+              persistState: false,
+              rsUrl: `http://localhost:${rsPort}`,
+              staticSecretEnv: { SYNTHETIC_TRACE_SECRET: secret },
+            }),
+            (error) => {
+              rejection = asRuntimeError(error);
+              return true;
+            }
+          );
+          assert.ok(rejection);
+          // biome-ignore lint/performance/useTopLevelRegex: assert the malformed protocol diagnostic.
+          assert.match(rejection.message, /Connector emitted invalid JSONL/);
+          assert.ok(rejection.message.includes('"parse_error":true'), "retain safe parse-error metadata");
+          const diagnostics = JSON.stringify([rejection.message, rejection.stack, rejection, progress]);
+          assert.equal(diagnostics.includes(secret), false, "returned diagnostics must omit payload values");
+          const trace = readdirSync(traceDir)
+            .map((name) => readFileSync(join(traceDir, name), "utf8"))
+            .join("\n");
+          assert.equal(trace.includes(secret), false, "malformed JSONL must never fall back to raw tracing");
+          assert.ok(trace.includes('"parse_error":true'), "retain a safe trace marker");
+          const malformedLineLength =
+            JSON.stringify({
+              detail_locator: { cursor: `prefix-${secret}-suffix`, kind: "item" },
+              type: "DETAIL_GAP",
+            }).length - 2;
+          assert.ok(trace.includes(`"line_length":${malformedLineLength}`), "retain the input length");
+          assert.equal(gapWrites, 0, "malformed locators never reach persistence");
+          const { body: timeline } = await fetchJson<TimelineBody>(
+            `http://localhost:${asPort}/_ref/runs/${encodeURIComponent(requireRunId(rejection))}/timeline`
+          );
+          assert.equal(JSON.stringify(timeline).includes(secret), false, "timeline must omit payload values");
         } finally {
           if (previousTraceDir === undefined) {
             delete process.env.PDPP_TRACE_DIR;

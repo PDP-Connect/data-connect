@@ -1828,8 +1828,8 @@ function containsRuntimeSecret(locator: unknown, knownSecrets: readonly string[]
   while (values.length) {
     const value = values.pop();
     if (
-      typeof value === "string" &&
-      knownSecrets.some((secret) => secret.length > 0 && value.includes(secret))
+      (typeof value === "string" || (typeof value === "number" && Number.isFinite(value))) &&
+      knownSecrets.some((secret) => secret.length > 0 && String(value).includes(secret))
     ) {
       return true;
     }
@@ -1840,6 +1840,10 @@ function containsRuntimeSecret(locator: unknown, knownSecrets: readonly string[]
     }
   }
   return false;
+}
+
+function malformedJsonlDiagnostic(line: string): string {
+  return JSON.stringify({ line_length: line.length, parse_error: true, type: "__PARSE_ERROR__" });
 }
 
 function validateRedeferredDetailGapLease(
@@ -3215,7 +3219,8 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
     try {
       message = JSON.parse(line) as ConnectorMessage | null;
     } catch {
-      // Preserve malformed JSON for protocol diagnostics.
+      // Malformed payloads and parser exception excerpts can contain secrets.
+      traceLine = malformedJsonlDiagnostic(line);
     }
     if (message?.type === "DETAIL_GAP") {
       try {
@@ -6215,24 +6220,18 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
         }
         msgQueue.push(msg);
         processNext().catch(reject);
-      } catch (caught) {
-        const err = caught as RuntimeRunError;
+      } catch {
+        const diagnostic = malformedJsonlDiagnostic(line);
         if (
           failPendingInteraction(
-            new Error(`Connector emitted invalid JSONL while waiting for INTERACTION_RESPONSE: ${err.message}`)
+            new Error(`Connector emitted invalid JSONL while waiting for INTERACTION_RESPONSE: ${diagnostic}`)
           )
         ) {
           return;
         }
-        // Context for debugging: include byte length and a preview of the
-        // offending line in the error message.
-        const preview =
-          line.length > 400
-            ? `${line.slice(0, 200)} … [truncated ${line.length - 400} chars] … ${line.slice(-200)}`
-            : line;
-        const enriched = `${err.message} (line_length=${line.length} preview=${JSON.stringify(preview).slice(0, 600)})`;
+        // Preserve only safe metadata, never the raw line or parser's payload preview.
         msgQueue.push({
-          error: enriched,
+          error: diagnostic,
           type: "__PARSE_ERROR__",
         });
         processNext().catch(reject);
