@@ -235,4 +235,17 @@ describe("client record clocks in the durable checkpoint", () => {
     assert.equal(c.acquire("g"), true, "Core permits reading again after the disposal");
     assert.equal(c.deleteBy("g"), T0 + 2 * DAY, "but the ceiling still counts from the first acquisition");
   });
+  it("disposing one source's expired record does not delete another source's live record with the same id", () => {
+    let t = T0;
+    const policy = { retentionCeilingMs: ceiling };
+    const app = new ToyApp();
+    const c = new HeldDataClient({ initialize: true, now: () => t, status: unavailable, store: app, policy });
+    app.attach(c);
+    app.sync("g", [{ id: "r", stream: "s", sourceId: "A", version: "v", text: "alpha" }]);
+    t += 5 * DAY;
+    app.sync("g", [{ id: "r", stream: "s", sourceId: "B", version: "v", text: "bravo" }]);
+    t += 5 * DAY;
+    void c.canUse("g");
+    assert.deepEqual(app.records.get("g")?.map((r) => r.sourceId), ["B"], "B's own ceiling is day 15");
+  });
 });

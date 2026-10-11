@@ -214,7 +214,9 @@ export class ToyApp implements HeldStore {
 
   disposeRecords(grantId: string, records: readonly HeldRecordRef[]): void {
     const current = this.records.get(grantId) ?? [];
+    // Full record identity: one source's expiry must not remove another source's live record.
     const keep = current.filter((r) => !records.some((expired) =>
+      expired.sourceId === r.sourceId && expired.instanceId === r.instanceId &&
       expired.id === r.id && expired.stream === r.stream && expired.version === r.version
     ));
     if (keep.length) {
