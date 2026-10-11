@@ -80,6 +80,20 @@ test("placement refuses BLOB and OBSERVATION with a typed reason before spawn", 
   }
 });
 
+test("malformed protocol capabilities refuse with a typed reason before spawn", async () => {
+  for (const capabilities of [null, "BLOB", [""], [0], ["STREAM_EVIDENCE", null]]) {
+    // Serialized artifacts arrive without TypeScript's manifest guarantees.
+    const declaration = JSON.parse(JSON.stringify({ ...manifest, protocol_capabilities: capabilities }));
+    // biome-ignore lint/performance/noAwaitInLoops: the runtime store uses one process-global database.
+    await withConnector(async (run, marker) => {
+      await assert.rejects(run(declaration), {
+        code: "runtime_capability_undeclared",
+      });
+      assert.equal(existsSync(marker), false);
+    });
+  }
+});
+
 test("placement refuses unsupported required binding features before spawn", async () => {
   await withConnector(async (run, marker) => {
     await assert.rejects(
