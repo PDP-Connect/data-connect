@@ -10874,10 +10874,12 @@ function buildConsentPackageGrant(
   memberRows: readonly GrantPackageMemberRow[]
 ): Record<string, unknown> {
   return {
-    child_grants: memberRows.map((row) => ({
-      grant_id: row.grant_id,
-      source: parsePackageJson(row.source_json),
-    })),
+    child_grants: memberRows
+      .filter((row) => !heldDataEndedOrLost(row.grant_id))
+      .map((row) => ({
+        grant_id: row.grant_id,
+        source: parsePackageJson(row.source_json),
+      })),
     grant_id: packageId,
     package: true,
     package_id: packageId,

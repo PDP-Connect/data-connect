@@ -22,7 +22,13 @@ import { httpStatusTransport } from "../lib/held-data/http-transport.ts";
 import { makeDpopProof, thumbprint } from "../lib/training-lease/dpop.ts";
 import { generateEd25519KeyPair } from "../lib/training-lease/jws.ts";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
-import { createConsentExchangeCode, getGrantPackageAccess, introspect, issueToken } from "../server/auth.ts";
+import {
+  approveGrant,
+  createConsentExchangeCode,
+  getGrantPackageAccess,
+  introspect,
+  issueToken,
+} from "../server/auth.ts";
 import { getDb } from "../server/db.ts";
 import { getHeldDataRuntime } from "../server/held-data/runtime.ts";
 import { createAgentConnectAttemptStore } from "../server/routes/as-agent-connect.ts";
@@ -1044,14 +1050,25 @@ describe("held-data lifecycle over HTTP", () => {
     );
   });
 
-  for (const replay of [false, true]) {
-    it(`lane B: agent-connect ${replay ? "replay" : "first delivery"} refuses a restored ended grant`, async () => {
+  for (const [replay, mixed] of [
+    [false, false],
+    [true, false],
+    [false, true],
+    [true, true],
+  ]) {
+    const delivery = replay ? "replay" : "first delivery";
+    const target = mixed ? "package child" : "grant";
+    it(`lane B: agent-connect ${delivery} refuses a restored ended ${target}`, async () => {
       await withServer(
         false,
         async (h) => {
           const clientId = await registerPublicClient(h);
-          const g = await authCodeGrant(h, clientId);
-          const grant = (await introspect(g.accessToken)).grant;
+          const p = mixed ? await devicePackage(h, clientId) : null;
+          const g = p ? { grantId: p.packageId, accessToken: p.packageToken } : await authCodeGrant(h, clientId);
+          const grant = p
+            ? { package_id: p.packageId, child_grants: p.children.map((grant_id) => ({ grant_id })) }
+            : (await introspect(g.accessToken)).grant;
+          const ended = p?.children[0] ?? g.grantId;
           const id = `att_${randomBytes(8).toString("hex")}`;
           const pollingCode = "test-polling-proof";
           getDb()
@@ -1074,16 +1091,25 @@ describe("held-data lifecycle over HTTP", () => {
               g.accessToken
             );
           const store = createAgentConnectAttemptStore();
-          if (replay) assert.equal((await store.redeem(id, pollingCode)).outcome, "approved");
+          if (replay) {
+            assert.equal((await store.redeem(id, pollingCode)).outcome, "approved");
+            if (p) {
+              // The cached response still lists both children; check it, not the updated grant snapshot.
+              getDb().prepare("UPDATE agent_connect_attempts SET grant_json = ? WHERE id = ?").run(
+                JSON.stringify({ package_id: p.packageId, child_grants: [{ grant_id: p.children[1] }] }),
+                id
+              );
+            }
+          }
           assert.equal(
             (
-              await revoke(h, h.ownerToken, g.grantId, {
+              await revoke(h, h.ownerToken, ended, {
                 pdpp_disposition: "delete",
               })
             ).status,
             200
           );
-          restoreGrantRows(g.grantId);
+          restoreGrantRows(ended);
           assert.equal((await store.redeem(id, pollingCode)).outcome, "missing", "agent-connect returned restored token");
         },
         heldDataOpts()
@@ -1162,6 +1188,42 @@ describe("held-data lifecycle over HTTP", () => {
     );
   });
 
+  for (const path of ["consent_exchange", "approval_retry"]) {
+    it(`lane B: mixed-package ${path} never returns the restored erased child`, async () => {
+      await withServer(
+        false,
+        async (h) => {
+          const clientId = await registerPublicClient(h);
+          const p = await devicePackage(h, clientId);
+          const proof = "mixed-package-proof";
+          const code = await createConsentExchangeCode({
+            grantId: p.packageId,
+            token: p.packageToken,
+            grant: { package_id: p.packageId },
+            recoveryProof: proof,
+          });
+          const ended = p.children[0] as string;
+          assert.equal((await revoke(h, h.ownerToken, ended, { pdpp_disposition: "delete" })).status, 200);
+          restoreGrantRows(ended);
+          let grant: Record<string, unknown>;
+          if (path === "consent_exchange") {
+            const response = await fetchJson(`${h.asUrl}/consent/exchange`, json({ code, proof }));
+            assert.equal(response.status, 200, JSON.stringify(response.body));
+            grant = response.body.grant as Record<string, unknown>;
+          } else {
+            grant = (await approveGrant(p.deviceCode, "owner_local")).grant;
+          }
+          assert.deepEqual(
+            (grant.child_grants as { grant_id: string }[]).map((child) => child.grant_id),
+            p.children.filter((id) => id !== ended),
+            `${path} returned an erased child with the live sibling`
+          );
+        },
+        heldDataOpts()
+      );
+    });
+  }
+
   it("lane B: a restored single-grant authorization code is refused before consumption", async () => {
     await withServer(
       false,
@@ -1205,6 +1267,27 @@ describe("held-data lifecycle over HTTP", () => {
       restoreGrantRows(g.grantId);
       assert.equal(typeof (await issueToken(g.grantId, "owner_local", clientId, null)), "string");
       assert.equal((await fetchJson(`${h.asUrl}/consent/exchange`, json({ code }))).status, 200);
+    });
+  });
+
+  it("lane B: flag off preserves mixed-package child summaries on consent delivery and approval retry", async () => {
+    await withServer(false, async (h) => {
+      const clientId = await registerPublicClient(h);
+      const p = await devicePackage(h, clientId);
+      const code = await createConsentExchangeCode({
+        grantId: p.packageId,
+        token: p.packageToken,
+        grant: { package_id: p.packageId },
+      });
+      const ended = p.children[0] as string;
+      assert.equal((await revoke(h, h.ownerToken, ended)).status, 200);
+      restoreGrantRows(ended);
+      const response = await fetchJson(`${h.asUrl}/consent/exchange`, json({ code }));
+      assert.equal(response.status, 200);
+      const retried = await approveGrant(p.deviceCode, "owner_local");
+      for (const grant of [response.body.grant as Record<string, unknown>, retried.grant]) {
+        assert.deepEqual((grant.child_grants as { grant_id: string }[]).map((child) => child.grant_id), p.children);
+      }
     });
   });
 
