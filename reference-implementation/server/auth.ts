@@ -95,7 +95,8 @@ import {
   getTrainingLeaseRuntime,
   ProcessingPermissionsError,
 } from "./training-lease/runtime.ts";
-import { getHeldDataRuntime } from "./held-data/runtime.ts";
+import { getHeldDataRuntime, type HeldDataRuntime } from "./held-data/runtime.ts";
+import { checkDpopProof, DPOP_MAX_AGE_S } from "../lib/training-lease/dpop.ts";
 import type { Disposition, EndingPath, GrantRegistration } from "../lib/held-data/authority.ts";
 import {
   buildDomainControlTrustSignal,
@@ -12220,6 +12221,141 @@ async function revokeGrantStorage(grantId: string): Promise<void> {
   exec(referenceQueries.authOauthRefreshTokensRevokeByGrant, [nowIso(), grantId]);
 }
 
+// Proof replay state belongs to this runtime, never a previous test/server instance.
+const revocationProofs = new WeakMap<HeldDataRuntime, Map<string, number>>();
+
+/** RFC 7009; Core's grant-ending policy is experimental and flag-gated. */
+export async function revokeOAuthToken(input: {
+  token: string;
+  clientId: string;
+  confidential: boolean;
+  lifecycle?: HeldDataEnding;
+  dpopProof?: string;
+  revocationUrl?: string;
+}): Promise<void> {
+  const { token, clientId, confidential } = input;
+  const hash = hashOAuthRefreshToken(token);
+  const refresh = isPostgresStorageBackend()
+    ? await pgOne<RefreshTokenRow>("SELECT * FROM oauth_refresh_tokens WHERE refresh_token_hash = $1", [hash])
+    : getOne<RefreshTokenRow>(referenceQueries.authOauthRefreshTokensGetByToken, [hash]);
+  const access = refresh ? null : await getTokenStore().getIntrospection(token);
+  if (!refresh && !access) {
+    return; // Invalid/unknown tokens have the same empty 200 as valid ones.
+  }
+  if ((refresh ?? access)?.client_id !== clientId) {
+    throw bindingError("invalid_grant", "Token was not issued to this client");
+  }
+  if (access && access.token_kind !== "client" && access.token_kind !== "mcp_package") {
+    throw bindingError("unsupported_token_type", "Only client access and refresh tokens can be revoked");
+  }
+  const packageId = refresh?.package_id ?? access?.package_id;
+  const grantId = refresh?.grant_id ?? access?.grant_id;
+  const members = isNonEmptyString(packageId) ? await getGrantPackageStore().listAllMembers(packageId) : [];
+  const grantIds = isNonEmptyString(grantId) ? [grantId] : members.map((m) => m.grant_id).filter(isNonEmptyString);
+  const rt = getHeldDataRuntime();
+  if (rt) {
+    await prepareHeldDataStatusToken(token);
+    // Snapshot authentication BEFORE revoking anything. A shared current
+    // package credential authorizes the disposition for earlier-ended children.
+    let dpopJkt: string | null = null;
+    if (input.dpopProof && input.revocationUrl) {
+      const proof = checkDpopProof({
+        proof: input.dpopProof,
+        method: "POST",
+        url: input.revocationUrl,
+        nowS: Math.floor(rt.now() / 1000),
+        ...(access ? { accessToken: token } : {}),
+      });
+      if (proof.ok) {
+        const seen = revocationProofs.get(rt) ?? new Map<string, number>();
+        revocationProofs.set(rt, seen);
+        for (const [key, expiry] of seen) {
+          if (expiry <= rt.now()) seen.delete(key);
+        }
+        const key = `${proof.jkt} ${proof.jti}`;
+        if (!seen.has(key)) {
+          seen.set(key, (proof.iat + DPOP_MAX_AGE_S + 1) * 1000);
+          dpopJkt = proof.jkt;
+        }
+      }
+    }
+    const principal = confidential ? null : rt.authority.authenticateRead({ token, dpopJkt });
+    const pending = refresh ? rt.authority.pendingRevocation(refresh.family_id) : null;
+    const current =
+      confidential ||
+      Boolean(
+        principal?.clientId === clientId &&
+          !(refresh && rt.authority.refreshFamilyRevoked(refresh.family_id)) &&
+          (pending || grantIds.some((id) => !rt.authority.hasEnded(id))) &&
+          (await Promise.all(grantIds.map((id) => heldDataWriteClient(token, id)))).some((id) => id === clientId)
+      );
+    if (refresh && current && input.lifecycle?.disposition && !pending) {
+      rt.authority.recordPendingRevocation(refresh.family_id, input.lifecycle.disposition, input.lifecycle.reportedAt);
+    }
+    // Resume only the exact previously authenticated operation, even if the
+    // caller changes parameters or loses current credentials after a 503.
+    const accepted = refresh ? rt.authority.pendingRevocation(refresh.family_id) : null;
+    const lifecycle: HeldDataEnding = accepted
+      ? { path: "client_revocation", ...accepted }
+      : current && input.lifecycle
+        ? input.lifecycle
+        : { path: "client_revocation" };
+    const outcomes: { grant_id: string; state: "recorded" | "pending" }[] = [];
+    for (const id of grantIds) {
+      if (!refresh) {
+        // Coverage is family membership, not whether a family is still live:
+        // refresh replay destroys tokens without ending the grant (Core P8).
+        const covered = isPostgresStorageBackend()
+          ? await pgOne(
+              "SELECT 1 FROM oauth_refresh_tokens WHERE grant_id = $1 OR package_id IN (SELECT package_id FROM grant_package_members WHERE grant_id = $1) LIMIT 1",
+              [id]
+            )
+          : getOne(referenceQueries.authOauthRefreshTokensCoversGrant, [id, id]);
+        if (covered) {
+          continue;
+        }
+      }
+      try {
+        await revokeGrant(id, { lifecycle });
+        outcomes.push({ grant_id: id, state: "recorded" });
+      } catch {
+        outcomes.push({ grant_id: id, state: "pending" });
+      }
+    }
+    if (outcomes.some((outcome) => outcome.state === "pending")) {
+      // Leave the shared credential available for retry. Never acknowledge a
+      // partly recorded disconnect as complete (Core P1a, RFC 7009 §2.2.1).
+      const error = bindingError("temporarily_unavailable", "Grant ending is not fully recorded");
+      error.result = outcomes;
+      throw error;
+    }
+  }
+  if (refresh) {
+    // Persist credential revocation before mutating the restorable token store.
+    // Partial child failures above leave the current family available for retry.
+    rt?.authority.revokeRefreshFamily(refresh.family_id);
+    const revokedAt = nowIso();
+    if (isPostgresStorageBackend()) {
+      // Same lock as refresh rotation: no active successor survives revocation.
+      await withPostgresTransaction(async (client) => {
+        await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [refresh.family_id]);
+        await client.query(
+          "UPDATE oauth_refresh_tokens SET status = 'revoked', revoked_at = $1 WHERE family_id = $2 AND status <> 'revoked'",
+          [revokedAt, refresh.family_id]
+        );
+        await client.query("UPDATE tokens SET revoked = TRUE WHERE refresh_family_id = $1", [refresh.family_id]);
+      });
+    } else {
+      writeTransaction(() => {
+        exec(referenceQueries.authOauthRefreshTokensRevokeFamily, [revokedAt, refresh.family_id]);
+        exec(referenceQueries.authTokensRevokeByRefreshFamily, [refresh.family_id]);
+      });
+    }
+  } else {
+    await getTokenStore().revokeByTokenId(token, clientId);
+  }
+}
+
 async function emitGrantRevoked(
   row: GrantRevocationRow,
   parsedGrant: DbRow,
@@ -12536,16 +12672,18 @@ export async function heldDataWriteClient(token: string, grantId: string): Promi
   const refresh = isPostgresStorageBackend()
     ? await pgOne<{
         client_id: string;
+        family_id: string;
         grant_id: string | null;
         package_id: string | null;
         status: string;
         expires_at: string | null;
       }>(
-        "SELECT client_id, grant_id, package_id, status, expires_at FROM oauth_refresh_tokens WHERE refresh_token_hash = $1",
+        "SELECT client_id, family_id, grant_id, package_id, status, expires_at FROM oauth_refresh_tokens WHERE refresh_token_hash = $1",
         [hash]
       )
     : getOne<{
         client_id: string;
+        family_id: string;
         grant_id: string | null;
         package_id: string | null;
         status: string;
@@ -12555,6 +12693,7 @@ export async function heldDataWriteClient(token: string, grantId: string): Promi
   // journal has not ended (a restored main database can resurrect the row).
   if (
     refresh?.status !== "active" ||
+    rt.authority.refreshFamilyRevoked(refresh.family_id) ||
     (refresh.expires_at && Date.parse(refresh.expires_at) <= Date.now()) ||
     heldDataEndedOrLost(refresh.grant_id)
   ) {

@@ -100,6 +100,16 @@ type Entry =
       at: number;
     }
   | {
+      t: "hd_revoke_pending";
+      id: string;
+      grant_id: "";
+      family_id: string;
+      disposition: Disposition;
+      reported_at?: number;
+      at: number;
+    }
+  | { t: "hd_family_revoke"; id: string; grant_id: ""; family_id: string; at: number }
+  | {
       t: "hd_cred_disable";
       id: string;
       grant_id: string;
@@ -266,6 +276,8 @@ export class HeldDataAuthority {
   readonly #ops = new Map<string, { grantId: string; index: number }>();
   /** Digests disabled for lifecycle compromise, whether or not registered. */
   readonly #disabled = new Map<string, string>();
+  readonly #revokedFamilies = new Set<string>();
+  readonly #pendingRevocations = new Map<string, Extract<Entry, { t: "hd_revoke_pending" }>>();
   #corrupt = false;
   #position = 0;
   #epoch: string | null = null;
@@ -404,6 +416,48 @@ export class HeldDataAuthority {
       reason,
       at: this.#o.now(),
     });
+  }
+
+  /** Persist the authenticated disposition before applying package children. */
+  recordPendingRevocation(familyId: string, disposition: Disposition, reportedAt?: number): void {
+    this.#requireWritable();
+    this.#refresh();
+    if (!this.#pendingRevocations.has(familyId)) {
+      this.#append({
+        t: "hd_revoke_pending",
+        id: randomUUID(),
+        grant_id: "",
+        family_id: familyId,
+        disposition,
+        ...(reportedAt === undefined ? {} : { reported_at: reportedAt }),
+        at: this.#o.now(),
+      });
+    }
+  }
+
+  pendingRevocation(familyId: string): { disposition: Disposition; reportedAt?: number } | null {
+    this.#refresh();
+    const pending = this.#revokedFamilies.has(familyId) ? null : this.#pendingRevocations.get(familyId);
+    return pending
+      ? {
+          disposition: pending.disposition,
+          ...(pending.reported_at === undefined ? {} : { reportedAt: pending.reported_at }),
+        }
+      : null;
+  }
+
+  /** Refresh-family revocation is separate from the grants it covers (Core P1a/P5). */
+  revokeRefreshFamily(familyId: string): void {
+    this.#requireWritable();
+    this.#refresh();
+    if (!this.#revokedFamilies.has(familyId)) {
+      this.#append({ t: "hd_family_revoke", id: randomUUID(), grant_id: "", family_id: familyId, at: this.#o.now() });
+    }
+  }
+
+  refreshFamilyRevoked(familyId: string): boolean {
+    this.#refresh();
+    return this.#revokedFamilies.has(familyId);
   }
 
   /**
@@ -1104,6 +1158,12 @@ export class HeldDataAuthority {
         this.#creds.set(e.digest, c);
         return;
       }
+      case "hd_revoke_pending":
+        if (!this.#pendingRevocations.has(e.family_id)) this.#pendingRevocations.set(e.family_id, e);
+        return;
+      case "hd_family_revoke":
+        this.#revokedFamilies.add(e.family_id);
+        return;
       case "hd_cred_disable": {
         if (!this.#disabled.has(e.digest)) {
           this.#disabled.set(e.digest, e.reason);

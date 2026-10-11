@@ -46,6 +46,7 @@ export interface AsAuthorizationServerMetadataBuilderInput {
   readonly deviceAuthorizationProfilesSupported: readonly Record<string, unknown>[];
   readonly grantTypesSupported: readonly string[];
   readonly introspectionEndpoint: string;
+  readonly revocationEndpoint: string;
   readonly issuer: string;
   readonly preRegisteredPublicClients: readonly AsAuthorizationServerPublicClient[];
   readonly processingLeaseEndpoint?: string;
@@ -115,6 +116,7 @@ export function executeAsAuthorizationServerMetadata(
     ],
     grantTypesSupported: ["urn:ietf:params:oauth:grant-type:device_code", "authorization_code", "refresh_token"],
     introspectionEndpoint: `${issuer}/introspect`,
+    revocationEndpoint: `${issuer}/oauth/revoke`,
     issuer,
     preRegisteredPublicClients,
     ...processingLease,

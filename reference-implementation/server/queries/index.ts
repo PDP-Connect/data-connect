@@ -203,6 +203,7 @@ export interface ReferenceQueryRegistry extends Readonly<Record<string, Register
   readonly authOauthClientsListByIssuerSubject: SmallEnumerationQuery;
   readonly authOauthClientsUpsert: MutationQuery;
   // Auth — oauth_refresh_tokens (hosted MCP durable OAuth sessions)
+  readonly authOauthRefreshTokensCoversGrant: ReadOneQuery;
   readonly authOauthRefreshTokensGetByToken: ReadOneQuery;
   readonly authOauthRefreshTokensInsert: MutationQuery;
   readonly authOauthRefreshTokensRevokeByGrant: MutationQuery;

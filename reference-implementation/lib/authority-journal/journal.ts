@@ -45,7 +45,9 @@ export interface JournalEntryBase {
  * credential disables. Acknowledging one requires advancing the
  * loss-detection evidence first.
  */
-const TERMINAL_TYPES: ReadonlySet<string> = new Set(["tombstone", "hd_end", "erase", "hd_keep", "hd_cred_disable", "hd_pending_inbox"]);
+const TERMINAL_TYPES: ReadonlySet<string> = new Set([
+  "tombstone", "hd_end", "erase", "hd_keep", "hd_cred_disable", "hd_pending_inbox", "hd_family_revoke", "hd_revoke_pending",
+]);
 
 /**
  * Loss-detection evidence, kept outside the journal's failure domain (the

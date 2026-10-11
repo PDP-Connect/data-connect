@@ -150,6 +150,7 @@ import {
   resolveOAuthClient,
   retireFormerPreRegisteredClientsAtStartup,
   revokeGrant,
+  revokeOAuthToken,
   revokeGrantPackage,
   revokeOwnerClientTokenByPublicId,
   seedPreRegisteredClients,
@@ -165,6 +166,7 @@ import {
   trainingLeaseOptionsFromEnv,
 } from "./training-lease/runtime.ts";
 import {
+  acceptHeldDataClientAssertion,
   createHeldDataRuntime,
   getHeldDataRuntime,
   type HeldDataRuntimeOptions,
@@ -387,6 +389,7 @@ import { mountAsDcr } from "./routes/as-dcr.ts";
 import { mountAsDeviceUi } from "./routes/as-device-ui.ts";
 import { buildApplyGrantRevokeSideEffects, mountAsGrantRevoke } from "./routes/as-grant-revoke.ts";
 import { mountAsDeviceAuthorization, mountAsIntrospect, mountAsToken } from "./routes/as-oauth.ts";
+import { mountAsTokenRevoke } from "./routes/as-token-revoke.ts";
 import { mountAsPar } from "./routes/as-par.ts";
 import { mountAsPolyfillConnectorDetail, mountAsPolyfillConnectorRegister } from "./routes/as-polyfill-connectors.ts";
 import { mountClientMetadata } from "./routes/client-metadata.ts";
@@ -5605,6 +5608,47 @@ export function buildAsApp(opts: ServerOpts = {}) {
     setReferenceTraceId,
   };
   mountAsToken(app, asTokenContext as unknown as Parameters<typeof mountAsToken>[1]);
+  mountAsTokenRevoke(app as unknown as Parameters<typeof mountAsTokenRevoke>[0], {
+    authenticateClient: async (req, body) => {
+      const baseUrl = asTokenContext.resolveBaseUrl(req);
+      const endpoint = asTokenContext.resolveTokenEndpoint(req).replace(/\/token$/, "/revoke");
+      const runtime = getHeldDataRuntime();
+      const lifecycleAssertion = runtime && body.pdpp_disposition !== undefined && body.client_assertion !== undefined;
+      const clientId = await asTokenContext.authenticateOAuthTokenClient({
+        baseUrl,
+        clientId: body.client_id,
+        clientAssertion: body.client_assertion,
+        clientAssertionType: body.client_assertion_type,
+        tokenEndpoint: lifecycleAssertion
+          ? asTokenContext.resolveTokenEndpoint(req).replace(/\/oauth\/token$/, "")
+          : endpoint,
+      });
+      const client = clientId
+        ? await resolveOAuthClient(clientId, {
+            baseUrl,
+            ...(opts.cimdFetchDependencies ? { cimdFetchDependencies: opts.cimdFetchDependencies } : {}),
+          })
+        : null;
+      if (!client || !clientId) {
+        throw new Error("Client authentication failed");
+      }
+      if (lifecycleAssertion) {
+        const claims = JSON.parse(
+          Buffer.from(String(body.client_assertion).split(".")[1] ?? "", "base64url").toString("utf8")
+        ) as Record<string, unknown>;
+        if (!acceptHeldDataClientAssertion(runtime, clientId, claims)) {
+          throw new Error("Current client assertion required");
+        }
+      }
+      return {
+        clientId,
+        confidential: client.token_endpoint_auth_method === "private_key_jwt",
+      };
+    },
+    revokeToken: revokeOAuthToken,
+    revocationUrl: (req) => asTokenContext.resolveTokenEndpoint(req).replace(/\/token$/, "/revoke"),
+    lifecycleNow: () => getHeldDataRuntime()?.now() ?? null,
+  });
 
   // GET /device, POST /device/approve, POST /device/deny extracted to
   // `server/routes/as-device-ui.ts` per OpenSpec change
@@ -7298,7 +7342,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
     writeClient: heldDataWriteClient,
     // The metadata `issuer` is resolved the same way (root-and-discovery.ts).
     issuer: (req: unknown) =>
-      resolvePublicUrl(req as Parameters<typeof resolvePublicUrl>[0], explicitAsBaseUrl).replace(/\/+$/, ""),
+      asTokenContext.resolveTokenEndpoint(req).replace(/\/oauth\/token$/, ""),
     resolveBaseUrl: (req: unknown) =>
       resolvePublicUrl(req as Parameters<typeof resolvePublicUrl>[0], explicitAsBaseUrl),
     runtime: getHeldDataRuntime,
