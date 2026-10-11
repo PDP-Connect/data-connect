@@ -72,6 +72,7 @@ import {
   validateDoneRecordsEmitted,
   validateDoneStatus,
 } from "./done-validators.ts";
+import { diagnoseObservationFailure } from "./failure-diagnosis.ts";
 import type { IngestResult as StrictIngestResult } from "./ingest-failure.ts";
 import { readIngestResponse as strictReadIngestResponse } from "./ingest-failure.ts";
 import {
@@ -88,6 +89,7 @@ import {
   nextIngestRetryDelayMs,
   parseIngestRetryAfterMs,
 } from "./ingest-retry.ts";
+import { createObservationRunRecord, OBSERVATION_LIMITS } from "./observation.ts";
 import { isClosedPipeWriteError } from "./pipe-errors.ts";
 import {
   validateProgressAttachmentHydrationFailureOutcome,
@@ -232,6 +234,7 @@ interface RuntimeRunError extends Error {
  * reads to decide the owner-facing recovery action.
  */
 interface ConnectorDoneError {
+  basis?: string[];
   code?: string;
   message?: string;
   recovery_hint?: string | { action: string; retryable?: boolean } | null;
@@ -3113,7 +3116,8 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
   });
 
   // Debug trace: if PDPP_TRACE_DIR is set, record every line received from the
-  // connector before parsing. On a crash, the file is inspectable with jq/less
+  // connector before parsing, except OBSERVATION, which is retained only after
+  // validation in the run record. On a crash, the file is inspectable with jq/less
   // and shows exactly what the connector emitted. See
   // openspec/changes/add-polyfill-connector-system/design-notes/debugging-leverage-open-question.md
   const _traceAppendFile = openRuntimeTraceFile(process.env.PDPP_TRACE_DIR, connectorId, runId);
@@ -3403,6 +3407,8 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
   let pendingInteraction: ConnectorMessage | null = null;
   let terminalEventRecorded = false;
   let doneMessage: DoneMessageState | null = null;
+  const observationRecord = createObservationRunRecord(manifest);
+  const observationLineBytes = new WeakMap<ConnectorMessage, number>();
   // Cancellation intent for this run. Owner cancellation records
   // `run.cancel_requested` and terminals as `run.cancelled`; scheduler timeout
   // records `run.failed` with `run_timed_out`. `ownerCancelForced` flips to true
@@ -3766,6 +3772,17 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
     stdinClosedAtPhase?: string | null;
     violation?: unknown;
   } = {}): Record<string, unknown> {
+    const runRecord = {
+      ...observationRecord.snapshot(),
+      done: doneMessage
+        ? {
+            error: doneMessage.error ? { basis: doneMessage.error.basis ?? [] } : null,
+            status: doneMessage.status,
+          }
+        : null,
+      process_exit: { code: exitCode },
+    };
+    const hasObservationRecord = observationRecord.declared || runRecord.facts.length > 0;
     const stateStreamsStaged = countStagedStateStreams();
     const stateStreamsCommitted = committedStateStreams.size;
     const terminalKnownGaps = buildKnownGapsForTerminal(reason, connectorError);
@@ -3799,6 +3816,12 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       recoveryOnly: startRecoveryOnly,
     } as unknown as Parameters<typeof buildRecoveryGapClosureFacts>[0]);
     return {
+      ...(hasObservationRecord
+        ? {
+            run_record: runRecord,
+            ...(finalStatus === "failed" ? { failure_diagnosis: diagnoseObservationFailure(runRecord) } : {}),
+          }
+        : {}),
       buffered_records_dropped: countBufferedRecords(),
       checkpoint_commit_status: checkpointCommitStatus(),
       checkpoint_mode: "checkpointed_streaming",
@@ -5198,7 +5221,11 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
         throw invalidDoneStatus;
       }
       const doneStatus = msg.status as DoneMessageState["status"];
-      const normalizedDoneError = validateDoneError(doneStatus, msg.error as Parameters<typeof validateDoneError>[1]);
+      const normalizedDoneError = validateDoneError(
+        doneStatus,
+        msg.error as Parameters<typeof validateDoneError>[1],
+        observationRecord
+      );
       if (normalizedDoneError instanceof Error) {
         throw normalizedDoneError;
       }
@@ -6022,7 +6049,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       onProgress(msg);
     }
 
-    const protocolHandlers: Record<string, (msg: ConnectorMessage) => Promise<void>> = {
+    const protocolHandlers: Record<string, (msg: ConnectorMessage) => Promise<void> | void> = {
       ASSISTANCE: handleAssistanceMessage,
       ASSISTANCE_STATUS: handleAssistanceStatusMessage,
       DETAIL_COVERAGE: handleDetailCoverageMessage,
@@ -6032,6 +6059,9 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       DETAIL_GAPS_PAGE_REQUEST: handleDetailGapsPageRequest,
       DONE: handleDoneMessage,
       INTERACTION: handleInteractionMessage,
+      OBSERVATION: (msg) => {
+        observationRecord.accept(msg, observationLineBytes.get(msg) ?? Buffer.byteLength(JSON.stringify(msg)));
+      },
       PROGRESS: handleProgressMessage,
       RECORD: handleRecordMessage,
       SKIP_RESULT: handleSkipResultMessage,
@@ -6059,12 +6089,27 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
     }
 
     rl.on("line", (line) => {
-      writeTrace(line);
       if (!line.trim()) {
+        writeTrace(line);
         return;
       }
+      let parsedLine = false;
       try {
-        const msg = JSON.parse(line);
+        let msg = JSON.parse(line);
+        parsedLine = true;
+        // OBSERVATION is untrusted typed evidence. Never persist a raw line
+        // before validation: discarded attrs may contain provider text/secrets.
+        if (msg?.type === "OBSERVATION") {
+          const lineBytes = Buffer.byteLength(line);
+          // Queue only a marker for oversized observations; the handler needs
+          // the byte count, not their unbounded connector-supplied contents.
+          if (lineBytes > OBSERVATION_LIMITS.maxLineBytes) {
+            msg = { type: "OBSERVATION" };
+          }
+          observationLineBytes.set(msg, lineBytes);
+        } else {
+          writeTrace(line);
+        }
         if (resolvePendingOtpInteraction(msg)) {
           // The matching resolution releases the protocol gate immediately.
           // DONE can arrive on the next line before the async interaction
@@ -6077,6 +6122,9 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
         msgQueue.push(msg);
         processNext().catch(reject);
       } catch (caught) {
+        if (!parsedLine) {
+          writeTrace(line);
+        }
         const err = caught as RuntimeRunError;
         if (
           failPendingInteraction(
