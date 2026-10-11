@@ -119,6 +119,7 @@ import {
   ensureHeldDataGrant,
   prepareHeldDataDecommission,
   heldDataWriteClient,
+  heldDataResponseReleaseCheck,
   prepareHeldDataStatusToken,
   readGrantForProcessing,
   createCimdDocument,
@@ -4992,6 +4993,21 @@ export function buildAsApp(opts: ServerOpts = {}) {
   const app = createApp({
     ...(opts.logger === null ? {} : { logger: opts.logger }),
   });
+  app.use(((_req: ReqLike, res: ResLike, next: () => void) => {
+    const send = res.json.bind(res);
+    res.json = (payload: unknown) => {
+      if (!getHeldDataRuntime()) return send(payload);
+      void heldDataResponseReleaseCheck(payload).then((release) => {
+        release();
+        send(payload);
+      }).catch(() => {
+        res.status(400);
+        send({ error: "invalid_grant", error_description: "Authority changed before token release" });
+      });
+      return res;
+    };
+    next();
+  }) as unknown as Parameters<typeof app.use>[0]);
   const reachabilityContract = opts.reachabilityContract ?? parseReachabilityContract();
   const hosted = opts.ownerExposurePosture?.hosted ?? reachabilityContractIsHosted(reachabilityContract);
   app.use(((req: ReqLike, res: ResLike, next: () => void) => {

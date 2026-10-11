@@ -7575,7 +7575,14 @@ export async function getPendingConsent(
  * Called by the current consent surface after user approval.
  * This is grant issuance, not owner authentication.
  */
-export async function approveGrant(
+export async function approveGrant(...args: Parameters<typeof approveGrantUnchecked>): ReturnType<typeof approveGrantUnchecked> {
+  const response = await approveGrantUnchecked(...args);
+  const release = await heldDataResponseReleaseCheck(response);
+  release();
+  return response;
+}
+
+async function approveGrantUnchecked(
   deviceCode: string,
   _legacySubjectId = "owner_local",
   opts: {
@@ -7946,7 +7953,10 @@ export async function exchangeGrantScopedDeviceCode({
   }
 
   await requireApprovedGrantScopedDeviceCode(row, deviceCode);
-  return buildGrantScopedDeviceTokenPayload(row, clientId);
+  const payload = await buildGrantScopedDeviceTokenPayload(row, clientId);
+  const release = await heldDataResponseReleaseCheck(payload);
+  release();
+  return payload;
 }
 
 function isUsableAuthorizationCodePkceChallenge(challenge: unknown, method: unknown): boolean {
@@ -8640,6 +8650,8 @@ async function issuePackageToken(
     trace_id: meta.traceContext?.trace_id || undefined,
   });
 
+  const release = await heldDataTokenReleaseCheck(tokenId);
+  release();
   return tokenId;
 }
 
@@ -8979,7 +8991,14 @@ async function persistChildGrantForPackage({
  * @param {string} [args.subjectId]
  * @param {object} [args.opts]
  */
-export async function createHostedMcpGrantPackage({
+export async function createHostedMcpGrantPackage(...args: Parameters<typeof createHostedMcpGrantPackageUnchecked>): ReturnType<typeof createHostedMcpGrantPackageUnchecked> {
+  const response = await createHostedMcpGrantPackageUnchecked(...args);
+  const release = await heldDataResponseReleaseCheck(response);
+  release();
+  return response;
+}
+
+async function createHostedMcpGrantPackageUnchecked({
   clientId,
   authorizationDetails,
   storageBindings = [],
@@ -9218,7 +9237,7 @@ export async function getGrantPackageAccess(packageId: unknown): Promise<Record<
   });
 
   return {
-    members: activeMembers,
+    members: activeMembers.filter((member) => !heldDataEndedOrLost(member.grant_id)),
     package: grantPackage,
   };
 }
@@ -10246,6 +10265,46 @@ async function requireOAuthAuthorizationCodeTokenInfo(
   return tokenInfo as TokenIntrospectionResult & { subject_id: string };
 }
 
+/** Resolve restorable bindings before returning a synchronous, journal-backed release check. */
+export async function heldDataTokenReleaseCheck(
+  token: unknown,
+  assessedGrantIds: readonly string[] = []
+): Promise<() => void> {
+  const rt = getHeldDataRuntime();
+  if (!rt || !isNonEmptyString(token)) return () => {};
+  const row = await getTokenStore().getIntrospection(token);
+  if (row?.token_kind === "owner") return () => {};
+  const members = row?.package_id ? await getGrantPackageStore().listAllMembers(row.package_id) : [];
+  const covered = isNonEmptyString(row?.grant_id) ? [row.grant_id] : members.map((m) => m.grant_id);
+  return () => {
+    const blocked = !row || row.revoked || covered.length === 0 ||
+      rt.authority.accessCredentialRevoked(token) ||
+      (row.refresh_family_id && rt.authority.refreshFamilyRevoked(row.refresh_family_id)) ||
+      covered.every((id) => heldDataEndedOrLost(id)) ||
+      assessedGrantIds.some((id) => heldDataEndedOrLost(id)) || rt.authority.lost;
+    if (blocked) throw bindingError("invalid_grant", "Authority changed before token release");
+  };
+}
+
+/** Every token in an AS response and every returned grant assessment share the release fence. */
+export async function heldDataResponseReleaseCheck(payload: unknown): Promise<() => void> {
+  if (!getHeldDataRuntime()) return () => {};
+  const tokens = new Set<string>();
+  const assessed = new Set<string>();
+  const visit = (value: unknown): void => {
+    if (Array.isArray(value)) { value.forEach(visit); return; }
+    if (!isRecord(value)) return;
+    for (const [key, child] of Object.entries(value)) {
+      if ((key === "access_token" || key === "token") && isNonEmptyString(child)) tokens.add(child);
+      if (key === "grant_id" && isNonEmptyString(child)) assessed.add(child);
+      if (typeof child === "object" && child !== null) visit(child);
+    }
+  };
+  visit(payload);
+  const checks = await Promise.all([...tokens].map((token) => heldDataTokenReleaseCheck(token, [...assessed])));
+  return () => { for (const check of checks) check(); };
+}
+
 export async function exchangeOAuthAuthorizationCode({
   code,
   clientId,
@@ -10308,6 +10367,8 @@ export async function exchangeOAuthAuthorizationCode({
     response.access_token_expires_at = new Date(tokenInfo.exp * 1000).toISOString();
   }
 
+  const release = await heldDataResponseReleaseCheck(response);
+  release();
   return response;
 }
 
@@ -10878,13 +10939,16 @@ export async function exchangeOAuthRefreshToken({
     throw buildOAuthRefreshTokenError("invalid_grant", "Refresh token is invalid");
   }
 
-  return {
+  const response = {
     access_token: outcome.accessToken,
     access_token_expires_at: outcome.accessTokenExpiresAt,
     refresh_token: successorToken,
     token_type: "Bearer",
     ...(outcome.row.package_id ? { grant_package_id: outcome.row.package_id } : { grant_id: outcome.row.grant_id }),
   };
+  const release = await heldDataResponseReleaseCheck(response);
+  release();
+  return response;
 }
 
 const CONSENT_EXCHANGE_CODE_TTL_MS = 5 * 60 * 1000;
@@ -11178,6 +11242,10 @@ export async function consumeConsentExchangeCode(
           };
         }
       );
+  if (result.ok) {
+    const release = await heldDataResponseReleaseCheck(result);
+    release();
+  }
   return result;
 }
 
@@ -11852,7 +11920,14 @@ function insertSqliteGrantTokenInCurrentTransaction({
   return { grantRow, persistedGrant, tokenId };
 }
 
-export async function issueToken(
+export async function issueToken(...args: Parameters<typeof issueTokenUnchecked>): ReturnType<typeof issueTokenUnchecked> {
+  const token = await issueTokenUnchecked(...args);
+  const release = await heldDataTokenReleaseCheck(token);
+  release();
+  return token;
+}
+
+async function issueTokenUnchecked(
   grantId: string,
   subjectId: string,
   clientId: string,
@@ -12101,7 +12176,7 @@ export async function introspect(token: unknown): Promise<TokenIntrospectionResu
     };
   }
 
-  if (getHeldDataRuntime()?.authority.isDisabled(token) || getHeldDataRuntime()?.authority.accessCredentialRevoked(token)) {
+  if (getHeldDataRuntime()?.authority.accessCredentialRevoked(token)) {
     return { active: false, inactive_reason: "token_revoked", ...getInactiveTokenBinding(row) };
   }
 
@@ -12165,11 +12240,18 @@ export async function introspect(token: unknown): Promise<TokenIntrospectionResu
   }
 
   if (row.token_kind === "mcp_package") {
-    return enrichPackageTokenIntrospection(row, result);
+    const enriched = enrichPackageTokenIntrospection(row, result);
+    const release = await heldDataTokenReleaseCheck(token);
+    try { release(); } catch { return { active: false, ...getInactiveTokenBinding(row) }; }
+    return enriched;
   }
 
   if (row.token_kind === "client") {
-    return enrichClientTokenIntrospection(row, result);
+    const enriched = enrichClientTokenIntrospection(row, result);
+    if (!enriched.active) return enriched;
+    const release = await heldDataTokenReleaseCheck(token);
+    try { release(); } catch { return { active: false, ...getInactiveTokenBinding(row) }; }
+    return enriched;
   }
 
   return result;
@@ -12748,7 +12830,7 @@ export async function endHeldDataForGrant(grantId: string, ending: HeldDataEndin
  */
 export async function heldDataWriteClient(token: string, grantId: string): Promise<string | null> {
   const rt = getHeldDataRuntime();
-  if (!(rt && token)) {
+  if (!(rt && token) || rt.authority.isDisabled(token)) {
     return null;
   }
   const recovered = rt.authority.statusCredentialClient(token, grantId);
@@ -12756,12 +12838,16 @@ export async function heldDataWriteClient(token: string, grantId: string): Promi
     return recovered;
   }
   const info = await introspect(token);
+  if (rt.authority.isDisabled(token)) return null;
   if (info.active === true && info.pdpp_token_kind === "client" && info.grant_id === grantId && info.client_id) {
     return info.client_id;
   }
   const packageId = (info as { grant_package_id?: unknown }).grant_package_id;
   if (info.active === true && info.pdpp_token_kind === "mcp_package" && isNonEmptyString(packageId) && info.client_id) {
     const members = await getGrantPackageStore().listAllMembers(packageId);
+    const release = await heldDataTokenReleaseCheck(token);
+    try { release(); } catch { return null; }
+    if (rt.authority.isDisabled(token)) return null;
     return members.some((m) => m.grant_id === grantId) ? info.client_id : null;
   }
   const hash = hashOAuthRefreshToken(token);
@@ -12788,6 +12874,7 @@ export async function heldDataWriteClient(token: string, grantId: string): Promi
   // Current means: the family's active member, unexpired, and for a grant the
   // journal has not ended (a restored main database can resurrect the row).
   if (
+    rt.authority.isDisabled(token) ||
     refresh?.status !== "active" ||
     rt.authority.refreshFamilyRevoked(refresh.family_id) ||
     (refresh.expires_at && Date.parse(refresh.expires_at) <= Date.now()) ||
@@ -12800,6 +12887,7 @@ export async function heldDataWriteClient(token: string, grantId: string): Promi
   }
   if (refresh.package_id) {
     const members = await getGrantPackageStore().listAllMembers(refresh.package_id);
+    if (rt.authority.isDisabled(token) || rt.authority.lost || rt.authority.refreshFamilyRevoked(refresh.family_id) || heldDataPackageMembersBlocked(members)) return null;
     return members.some((m) => m.grant_id === grantId) ? refresh.client_id : null;
   }
   return null;

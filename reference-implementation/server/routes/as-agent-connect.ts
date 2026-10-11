@@ -23,7 +23,7 @@
 
 import { createHash, timingSafeEqual } from "node:crypto";
 import { exec, getMany, getOne, referenceQueries } from "../../lib/db.ts";
-import { introspect, parsePendingConsentRequestUri } from "../auth.ts";
+import { heldDataResponseReleaseCheck, introspect, parsePendingConsentRequestUri } from "../auth.ts";
 import { normalizeAbsentOnlyExpiry } from "../core-source-authorization.ts";
 import { applyCredentialResponseNoStoreHeaders } from "../credential-response-cache.ts";
 import { getHeldDataRuntime } from "../held-data/runtime.ts";
@@ -706,7 +706,7 @@ export function createAgentConnectAttemptStore(): AgentConnectAttemptStore {
     }
   };
 
-  return {
+  const store: AgentConnectAttemptStore = {
     async complete(requestUri, outcome): Promise<void> {
       if (!requestUri) {
         return;
@@ -911,6 +911,18 @@ export function createAgentConnectAttemptStore(): AgentConnectAttemptStore {
       return { outcome: "missing" };
     },
   };
+  const redeem = store.redeem.bind(store);
+  store.redeem = async (...args) => {
+    const result = await redeem(...args);
+    if (result.outcome === "approved") {
+      const release = await heldDataResponseReleaseCheck(result.body);
+      try { release(); } catch {
+        return { outcome: getHeldDataRuntime()?.authority.lost ? "temporary" : "missing" };
+      }
+    }
+    return result;
+  };
+  return store;
 }
 
 // ─── Shared helpers ───────────────────────────────────────────────────────────

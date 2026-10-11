@@ -36,6 +36,10 @@ import {
   createConsentExchangeCode,
   getGrantPackageAccess,
   introspect,
+  exchangeOAuthAuthorizationCode,
+  exchangeOAuthRefreshToken,
+  consumeConsentExchangeCode,
+  heldDataTokenReleaseCheck,
   revokeGrant,
   issueToken,
 } from "../server/auth.ts";
@@ -832,6 +836,10 @@ describe("held-data lifecycle over HTTP", () => {
         const g = await ordinaryGrant(h);
         assert.equal((await status(h, g.token, g.grantId)).status, 200);
         getHeldDataRuntime()?.authority.disableCredential(g.token);
+        assert.equal((await introspect(g.token)).active, true, "lifecycle disablement changes no read authority");
+        assert.equal(await rsRead(h, g.token), 200);
+        const release = await heldDataTokenReleaseCheck(g.token);
+        release();
         assert.equal((await status(h, g.token, g.grantId)).status, 401);
         const code = await owner(h, `/v1/owner/grants/${g.grantId}/lifecycle/recovery-code`, "POST");
         const rec = await fetchJson<{ status_credential: string }>(
@@ -2948,6 +2956,42 @@ describe("lane F: P6 advance election over HTTP", () => {
   });
 });
 
+it('code exchange rechecks history after its asynchronous token assessment',async()=>{
+ const opts=heldDataOpts();
+ await withServer(false,async(h)=>{
+  const clientId=await registerPublicClient(h);
+  const g=await authCodeGrant(h,clientId);
+  await status(h,g.accessToken,g.grantId);
+  getDb().prepare("UPDATE oauth_authorization_codes SET status = 'issued', consumed_at = NULL WHERE code = ?").run(g.code);
+  getDb().prepare("UPDATE tokens SET refresh_family_id = NULL WHERE token_id = ?").run(g.accessToken);
+  const authority=getHeldDataRuntime()!.authority;
+  const original=authority.hasEnded.bind(authority);
+  let acknowledged=false;
+  authority.hasEnded=(id)=>{
+   const ended=original(id);
+   if(id===g.grantId){
+    authority.hasEnded=original;
+    queueMicrotask(()=>{
+     loseHistory(join(opts.experimentalHeldDataLifecycle.journalDir,'authority.journal'),'suffix');
+     acknowledged=authority.end({grantId:g.grantId,path:'owner_withdrawal',disposition:'delete'}).pending===true;
+    });
+   }
+   return ended;
+  };
+  let returned=false;
+  try {
+   const response=await exchangeOAuthAuthorizationCode({clientId,code:g.code,codeVerifier:g.verifier,redirectUri:REDIRECT});
+   returned=Boolean(response.access_token);
+   console.log('pending_acknowledged_before_response='+acknowledged+' authority_lost='+authority.lost+' access_token_returned='+returned+' refresh_token_returned='+Boolean(response.refresh_token));
+  } catch (error) {
+   assert.equal((error as { code?: string }).code, 'invalid_grant');
+   console.log('rejected=invalid_grant');
+  }
+  assert.equal(acknowledged, true);
+  assert.equal(returned,false);
+ },opts);
+});
+
 it('owner keep after security revocation is applied on replay',async()=>{
  const opts=heldDataOpts();
  await withServer(false,async(h)=>{
@@ -2972,7 +3016,7 @@ it('owner keep after security revocation is applied on replay',async()=>{
  },opts);
 });
 
-it('restored revoked access token authenticates new erasure',async()=>{
+it('restored revoked access token cannot authenticate new erasure',async()=>{
  await withServer(false,async h=>{
   const clientId=await registerPublicClient(h);
   const g=await authCodeGrant(h,clientId);
@@ -2987,4 +3031,59 @@ it('restored revoked access token authenticates new erasure',async()=>{
   assert.equal(write.body.grants[0]?.error,'current_authentication_required');
   assert.equal((await status(h, g.accessToken, g.grantId)).body.grants[0]?.held_data, 'permitted');
  },heldDataOpts());
+});
+
+for (const path of ['device_code', 'refresh_token', 'consent_exchange', 'approval_retry', 'issue_token', 'introspection'] as const) {
+  it(`A2 release fence: ${path} refuses an ending acknowledged during assessment`, async () => {
+    const opts = heldDataOpts();
+    await withServer(false, async h => {
+      const clientId = await registerPublicClient(h);
+      const device = path === 'device_code' ? await devicePackage(h, clientId) : null;
+      const g = device ? null : await authCodeGrant(h, clientId);
+      const grantId = device?.children[0] ?? g?.grantId;
+      const token = device?.packageToken ?? g?.accessToken;
+      assert.ok(grantId && token);
+      await status(h, token, grantId);
+      const code = path === 'consent_exchange' ? await createConsentExchangeCode({
+        grantId, token, grant: (await introspect(token)).grant as Record<string, unknown>
+      }) : null;
+      const authority = getHeldDataRuntime()!.authority;
+      const hasEnded = authority.hasEnded.bind(authority);
+      let acknowledged = false;
+      authority.hasEnded = id => {
+        const ended = hasEnded(id);
+        if (id === grantId) {
+          authority.hasEnded = hasEnded;
+          queueMicrotask(() => {
+            loseHistory(join(opts.experimentalHeldDataLifecycle.journalDir, 'authority.journal'), 'suffix');
+            acknowledged = authority.end({ grantId, path: 'owner_withdrawal', disposition: 'delete' }).pending === true;
+          });
+        }
+        return ended;
+      };
+      if (path === 'introspection') {
+        assert.equal((await introspect(token)).active, false);
+      } else {
+        await assert.rejects(async () => {
+          if (path === 'device_code') return exchangeGrantScopedDeviceCode({ clientId, deviceCode: device!.deviceCode });
+          if (path === 'refresh_token') return exchangeOAuthRefreshToken({ clientId, refreshToken: g!.refreshToken });
+          if (path === 'consent_exchange') return consumeConsentExchangeCode(code);
+          if (path === 'issue_token') return issueToken(grantId, 'owner_local', clientId, null);
+          const row = getDb().prepare('SELECT device_code FROM pending_consents WHERE token_id = ?').get(token) as { device_code: string };
+          return approveGrant(row.device_code, 'owner_local');
+        }, { code: path === 'device_code' ? 'expired_token' : path === 'approval_retry' ? 'not_found' : 'invalid_grant' });
+      }
+      assert.equal(acknowledged, true, 'the pending ending was acknowledged before release');
+      console.log(`A2 ${path}: pending_acknowledged=true token_returned=false`);
+    }, opts);
+  });
+}
+
+it('A2 release fence: a resolved release check sees a later journaled access revocation', async () => {
+  await withServer(false, async h => {
+    const g = await ordinaryGrant(h);
+    const release = await heldDataTokenReleaseCheck(g.token);
+    getHeldDataRuntime()!.authority.revokeAccessCredential(g.token);
+    assert.throws(release, { code: 'invalid_grant' });
+  }, heldDataOpts());
 });
