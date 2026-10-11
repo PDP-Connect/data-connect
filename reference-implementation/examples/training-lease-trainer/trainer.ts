@@ -42,7 +42,7 @@ export interface ToyTrainerOptions {
   batchSize: number;
   mixedOwnerPolicy: MixedOwnerPolicy;
   advance: (ms: number) => void;
-  /** Real time, used only to label completed steps for the test oracle. */
+  /** Real time, used only to label completed steps and aborts for the test oracle. */
   trueNow: () => number;
 }
 
@@ -159,12 +159,26 @@ export class ToyTrainer {
           type: "step_aborted",
           grant_ids: grantIds,
           reason: "deadline_reached_in_flight",
+          at_true_ms: this.#o.trueNow(),
         });
         // The partial update is never applied: the step aborts, it is not
         // completed-then-discarded.
         return { kind: "aborted", grantIds };
       }
       this.#o.advance(slice);
+      const overrun = owners.filter(
+        (l) => (this.#guardFor(l)?.remainingMs() ?? 0) <= 0,
+      );
+      if (overrun.length > 0) {
+        const grantIds = overrun.map((l) => l.grantId);
+        this.#o.recorder.record({
+          type: "step_aborted",
+          grant_ids: grantIds,
+          reason: "deadline_overrun",
+          at_true_ms: this.#o.trueNow(),
+        });
+        return { kind: "aborted", grantIds };
+      }
       const ex = batch[i % batch.length];
       delta += (ex?.value ?? 0) / this.#o.microSteps;
     }

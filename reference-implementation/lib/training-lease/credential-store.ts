@@ -49,6 +49,13 @@ CREATE TABLE IF NOT EXISTS lease_credential_secret (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   secret TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS lease_credential_requests (
+  cred_hash TEXT NOT NULL,
+  proof_jti TEXT NOT NULL,
+  PRIMARY KEY (cred_hash, proof_jti)
+);
+INSERT OR IGNORE INTO lease_credential_requests(cred_hash, proof_jti)
+  SELECT cred_hash, first_proof_jti FROM lease_credentials WHERE first_proof_jti IS NOT NULL;
 `;
 
 export type RenewOutcome =
@@ -178,7 +185,6 @@ export class LeaseCredentialStore {
               chain_id: string;
               generation: number;
               successor_hash: string | null;
-              first_proof_jti: string | null;
             }
           | undefined;
         if (!row) {
@@ -215,10 +221,21 @@ export class LeaseCredentialStore {
               "UPDATE lease_credentials SET successor_hash = ?, first_used_at_ms = COALESCE(first_used_at_ms, ?), first_proof_jti = ? WHERE cred_hash = ?",
             )
             .run(hash(successor), now, input.proofJti, h);
+          this.#db
+            .prepare(
+              "INSERT INTO lease_credential_requests(cred_hash, proof_jti) VALUES (?, ?)",
+            )
+            .run(h, input.proofJti);
           out = { ok: true, successor, ...base, repeat: false };
           return;
         }
-        if (row.first_proof_jti === input.proofJti) {
+        if (
+          this.#db
+            .prepare(
+              "SELECT 1 FROM lease_credential_requests WHERE cred_hash = ? AND proof_jti = ?",
+            )
+            .get(h, input.proofJti)
+        ) {
           out = { ok: true, successor, ...base, repeat: true };
           return;
         }
@@ -229,6 +246,11 @@ export class LeaseCredentialStore {
           .get(row.successor_hash) as { first_used_at_ms: number | null };
         if (succ.first_used_at_ms === null) {
           // Lost response or a concurrent renewal: the same successor again.
+          this.#db
+            .prepare(
+              "INSERT INTO lease_credential_requests(cred_hash, proof_jti) VALUES (?, ?)",
+            )
+            .run(h, input.proofJti);
           out = { ok: true, successor, ...base, repeat: true };
           return;
         }

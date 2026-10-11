@@ -164,7 +164,12 @@ export type JobRecordEvent =
       deadline_trusted_ms: number | null;
     }
   | { type: "drained"; grant_id: string; examples_dropped: number }
-  | { type: "step_aborted"; grant_ids: string[]; reason: string }
+  | {
+      type: "step_aborted";
+      grant_ids: string[];
+      reason: string;
+      at_true_ms: number;
+    }
   | { type: "job_paused"; grant_id: string; reason: string }
   | { type: "revalidation_required"; grant_id: string; reason: string }
   | { type: "authority_ended"; grant_id: string; reason: string };
@@ -406,12 +411,8 @@ export class GrantAuthorityGuard {
    * during system suspend, so a monotonic-only deadline would be extended by
    * the suspend duration.
    */
-  #detectStall(): boolean {
+  #detectStall(t: TrustedTimeReading): boolean {
     if (!this.#lastAnchor) {
-      return false;
-    }
-    const t = this.#clock.trustedTime();
-    if (!t) {
       return false;
     }
     const monoElapsed = this.#clock.monotonicMs() - this.#lastAnchor.mono;
@@ -434,10 +435,23 @@ export class GrantAuthorityGuard {
 
   /** Remaining authority in ms (monotonic). Negative or null means none. */
   remainingMs(): number | null {
+    const trusted = this.#clock.trustedTime();
+    const rejection = this.#checkTrustedTime(trusted);
+    if (rejection || !trusted) {
+      if (!this.#needsRevalidation) {
+        this.#recorder.record({
+          type: "revalidation_required",
+          grant_id: this.lineage.grantId,
+          reason: rejection ?? "no_trusted_time",
+        });
+      }
+      this.#needsRevalidation = true;
+      return null;
+    }
     if (this.#ended || this.#deadlineMono === null || this.#needsRevalidation) {
       return null;
     }
-    if (this.#detectStall()) {
+    if (this.#detectStall(trusted)) {
       return null;
     }
     return this.#deadlineMono - this.#clock.monotonicMs();

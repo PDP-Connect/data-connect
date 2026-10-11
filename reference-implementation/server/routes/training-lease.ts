@@ -176,7 +176,7 @@ export function mountTrainingLease(
     const baseUrl = ctx.resolveBaseUrl(req).replace(/\/+$/, "");
     const endpoint = `${baseUrl}/oauth/processing-lease`;
     const grantId = str(body.grant_id);
-    const rateKey = str(body.client_id) ?? req.ip ?? "anonymous";
+    const rateKey = req.ip ?? "anonymous";
     if (!limiter.allow(rateKey, rt.rateLimitPerMinute, rt.now())) {
       return res.status(429).json({ error: "slow_down" });
     }
@@ -228,6 +228,8 @@ export function mountTrainingLease(
       if (!renewed.ok || renewed.grantId !== grantId) {
         return res.status(400).json(NO_LEASE);
       }
+      // A retry keeps its successor, but re-issues the lease under a fresh
+      // authority check rather than replaying an earlier lease.
       const out = await issueIfLive(rt, grantId, renewed.clientId);
       if (!out) {
         return res.status(400).json(NO_LEASE);

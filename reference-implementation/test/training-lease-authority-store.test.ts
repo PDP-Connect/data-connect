@@ -13,16 +13,19 @@
  * PROTOTYPE: experimental AI Training Profile work, off by default.
  */
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import {
+  appendFileSync,
   copyFileSync,
   existsSync,
   mkdtempSync,
   renameSync,
   rmSync,
 } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { after, describe, it } from "node:test";
+import { after, describe, it, mock } from "node:test";
 import { Worker } from "node:worker_threads";
 import Database from "./helpers/sqlite-driver.ts";
 import {
@@ -183,6 +186,78 @@ describe("L1/L2 lease shape", () => {
 });
 
 describe("L3 stop time", () => {
+  it("a torn tail cannot swallow another node's committed tombstone", () => {
+    const paths = tempPaths();
+    const clock = { now: T0 };
+    const nodeA = openNode(paths, clock);
+    seed(nodeA);
+    const nodeB = openNode(paths, clock, { nodeId: "node-b" });
+    try {
+      appendFileSync(paths.journalPath, '{"t":"issue","id":"torn');
+      assert.equal(nodeA.status("grt_1").state, "active");
+      assert.equal(
+        nodeB.withdraw({ grantId: "grt_1", reason: "training_withdrawn" })
+          .state,
+        "withdrawn",
+      );
+      assert.deepEqual(
+        nodeA.issueLease({ grantId: "grt_1", clientId: "client_1" }),
+        { ok: false, reason: "withdrawn" },
+      );
+      assert.equal(nodeA.status("grt_1").state, "withdrawn");
+    } finally {
+      nodeA.close();
+      nodeB.close();
+    }
+  });
+
+  it("short journal reads preserve entries and the issue post-append check", () => {
+    const paths = tempPaths();
+    const store = openNode(paths, { now: T0 });
+    const originalRead = fs.readSync;
+    const read = mock.method(
+      fs,
+      "readSync",
+      (
+        fd: number,
+        buffer: Buffer,
+        offset: number,
+        length: number,
+        position: number,
+      ) => originalRead(fd, buffer, offset, Math.min(length, 13), position),
+    );
+    syncBuiltinESMExports();
+    try {
+      seed(store);
+      const issued = store.issueLease({
+        grantId: "grt_1",
+        clientId: "client_1",
+      });
+      assert.ok(
+        issued.ok,
+        "the post-append check must find the complete issue entry",
+      );
+      assert.equal(
+        store.withdraw({ grantId: "grt_1", reason: "training_withdrawn" })
+          .state,
+        "withdrawn",
+      );
+      assert.equal(store.status("grt_1").state, "withdrawn");
+      assert.deepEqual(
+        store.issueLease({ grantId: "grt_1", clientId: "client_1" }),
+        { ok: false, reason: "withdrawn" },
+      );
+      assert.ok(
+        read.mock.callCount() > 3,
+        "the reader must loop over short reads",
+      );
+    } finally {
+      read.mock.restore();
+      syncBuiltinESMExports();
+      store.close();
+    }
+  });
+
   it("T is the stored maximum exp of leases actually issued", () => {
     const clock = { now: T0 };
     const store = openNode(tempPaths(), clock);
@@ -256,6 +331,7 @@ describe("L3 conformance: issuance racing withdrawal (concurrent connections)", 
       const main = openNode(paths, clock, { nodeId: "withdrawer" });
       seed(main);
       const counter = new Int32Array(new SharedArrayBuffer(4));
+      let finished = 0;
       const workers = [0, 1, 2].map(
         (i) =>
           new Promise<{
@@ -279,13 +355,21 @@ describe("L3 conformance: issuance racing withdrawal (concurrent connections)", 
                 },
               },
             );
-            w.once("message", resolve);
-            w.once("error", reject);
+            w.once("message", (m) => {
+              finished += 1;
+              resolve(m);
+            });
+            w.once("error", (e) => {
+              finished += 1;
+              reject(e);
+            });
           }),
       );
       // Start barrier: withdraw only once the issuers are mid-stream.
       const target = 20 + round * 40;
-      while (Atomics.load(counter, 0) < target) {
+      // Also release if every issuer has already stopped, so an early
+      // refusal fails the assertions below instead of hanging the test.
+      while (Atomics.load(counter, 0) < target && finished < 3) {
         await new Promise((r) => setImmediate(r));
       }
       const withdrawal = main.withdraw({
@@ -300,11 +384,13 @@ describe("L3 conformance: issuance racing withdrawal (concurrent connections)", 
         all.length > 0,
         "the race should let some leases through before the withdrawal",
       );
+      // Each issuer stops on the withdrawal, or earlier on "unavailable" when
+      // it cannot get the store's write lock within the busy timeout under
+      // this contention (fail closed; SQLite's lock is not fair).
       for (const r of results) {
-        assert.equal(
-          r.refusal,
-          "withdrawn",
-          "every issuer stopped because of the withdrawal",
+        assert.ok(
+          r.refusal === "withdrawn" || r.refusal === "unavailable",
+          `unexpected refusal ${r.refusal}`,
         );
       }
       const maxExpMs = Math.max(...all.map((l) => l.exp * 1000));

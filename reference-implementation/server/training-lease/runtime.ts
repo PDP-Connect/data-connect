@@ -36,7 +36,7 @@ export interface TrainingLeaseRuntimeOptions {
   /** Training `expires_at` = review time + this. Default 30 days. */
   trainingGrantLifetimeMs?: number;
   leaseLifetimeMs?: number;
-  /** Lease endpoint requests per client per minute. */
+  /** Pre-authentication lease endpoint requests per caller IP per minute. */
   rateLimitPerMinute?: number;
 }
 

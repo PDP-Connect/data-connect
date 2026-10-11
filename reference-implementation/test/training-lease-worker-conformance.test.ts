@@ -252,6 +252,36 @@ describe("L7 conformance: expiry during a step", () => {
     assertNoStepPastExpiry(slow.completed, new Map([["g1", expMs]]));
     assert.equal(slow.weight, 0, "an aborted step applies no update");
     assert.equal(s.recorder.ofType("step_aborted").length, 1);
+    assert.ok(
+      (s.recorder.ofType("step_aborted")[0]?.at_true_ms ?? Infinity) <= expMs,
+      "the abort itself must happen by the real lease expiry",
+    );
+  });
+
+  it("aborts without an update when the final slice overruns the deadline", () => {
+    const s = setup({ grants: ["g1"], stepMs: 10 * MIN, drainMs: 12 * MIN });
+    s.guard("g1").accept(lease(s.key, { grant_id: "g1" }, T0), s.jwks);
+    s.trainer.enqueue(examples("g1", 4));
+    s.clock.advance(49 * MIN);
+    let slices = 0;
+    const slow = new ToyTrainer({
+      guards: s.guards,
+      recorder: s.recorder,
+      stepMs: 10 * MIN,
+      microSteps: 10,
+      batchSize: 4,
+      mixedOwnerPolicy: "drop",
+      advance: (ms) => s.clock.advance(++slices === 10 ? 3 * ms : ms),
+      trueNow: () => s.clock.trueMs,
+    });
+    slow.queue.push(...s.trainer.queue);
+    assert.equal(slow.step().kind, "aborted");
+    assert.equal(slices, 10);
+    assert.equal(slow.weight, 0);
+    assert.equal(slow.completed.length, 0);
+    const abort = s.recorder.ofType("step_aborted")[0];
+    assert.equal(abort?.reason, "deadline_overrun");
+    assert.equal(abort?.at_true_ms, T0 + 61 * MIN);
   });
 });
 
@@ -290,16 +320,26 @@ describe("L7 conformance: resume after expiry", () => {
     });
   });
 
-  it("documents the limit: with no trusted time after an unsignalled suspend, the monotonic deadline is extended", () => {
+  it("fails closed with no trusted time after an unsignalled suspend", () => {
     const s = setup({ grants: ["g1"], stepMs: MIN, drainMs: 2 * MIN });
     const tok = lease(s.key, { grant_id: "g1" }, s.clock.trueMs);
     const expMs = Math.floor((s.clock.trueMs + 60 * MIN) / 1000) * 1000;
     s.guard("g1").accept(tok, s.jwks);
     s.clock.suspend(90 * MIN);
     s.clock.trustedAvailable = false;
-    // The guard cannot see the suspend; it still admits, past real expiry.
-    assert.equal(s.guard("g1").canAdmit().ok, true);
+    assert.equal(s.guard("g1").canAdmit().ok, false);
+    assert.equal(s.guard("g1").canStartStep(MIN), false);
     assert.ok(s.clock.trueMs > expMs);
+  });
+
+  it("fails closed when uncertainty grows after a suspend", () => {
+    const s = setup({ grants: ["g1"], stepMs: MIN, drainMs: 2 * MIN });
+    s.guard("g1").accept(lease(s.key, { grant_id: "g1" }, T0), s.jwks);
+    s.clock.advance(55 * MIN);
+    s.clock.suspend(10 * MIN);
+    s.clock.uncertaintyMs = 10 * MIN;
+    assert.equal(s.guard("g1").canAdmit().ok, false);
+    assert.equal(s.guard("g1").canStartStep(MIN), false);
   });
 
   it("a restored checkpoint carries no authority", () => {
@@ -355,25 +395,21 @@ describe("L7 conformance: clock rollback", () => {
     });
   });
 
-  it("documents the limit: a smaller rollback across a restart is not caught when the high-water mark is only refreshed on accept", () => {
+  it("detects a smaller rollback across a restart using the high-water mark refreshed on checks", () => {
     const s = setup({ grants: ["g1"], stepMs: MIN, drainMs: 2 * MIN });
     const tok = lease(s.key, { grant_id: "g1" }, s.clock.trueMs);
     s.guard("g1").accept(tok, s.jwks);
     s.clock.advance(65 * MIN); // lease is now expired in real time
+    assert.equal(s.guard("g1").canAdmit().ok, false);
     const cp = s.guard("g1").checkpoint();
     s.clock.restartProcess();
     s.clock.trustedOffsetMs = -30 * MIN;
     const fresh = new GrantAuthorityGuard(lineage("g1"), s.clock, s.recorder);
     fresh.restoreCheckpoint(cp);
-    // The high-water mark is from before expiry (T0), so a 30-minute rollback
-    // after a 65-minute run still reads as "later than T0". The persisted mark
-    // must be refreshed as time passes, not only at accept().
-    const v = fresh.accept(tok, s.jwks);
-    assert.equal(
-      v.ok,
-      true,
-      "LIMIT: high-water updated only on accept; a rollback smaller than the time since last accept is not caught",
-    );
+    assert.deepEqual(fresh.accept(tok, s.jwks), {
+      ok: false,
+      reason: "clock_rollback",
+    });
   });
 
   it("fails closed when trusted-time uncertainty exceeds the margin", () => {

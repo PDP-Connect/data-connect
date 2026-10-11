@@ -214,9 +214,20 @@ class JournalIndex {
         return;
       }
       const buf = Buffer.alloc(size - this.#offset);
-      readSync(fd, buf, 0, buf.length, this.#offset);
-      this.#offset = size;
-      const text = this.#remainder + buf.toString("utf8");
+      let bytesRead = 0;
+      while (bytesRead < buf.length) {
+        const n = readSync(
+          fd,
+          buf,
+          bytesRead,
+          buf.length - bytesRead,
+          this.#offset + bytesRead,
+        );
+        if (n === 0) break;
+        bytesRead += n;
+      }
+      this.#offset += bytesRead;
+      const text = this.#remainder + buf.toString("utf8", 0, bytesRead);
       const lines = text.split("\n");
       this.#remainder = lines.pop() ?? "";
       for (const line of lines) {
@@ -227,6 +238,9 @@ class JournalIndex {
         try {
           e = JSON.parse(line) as JournalEntry;
         } catch {
+          // Only appendJournal writes here: malformed JSON is a torn record
+          // never acknowledged before fsync returned. Its successor's leading
+          // newline isolates it, so ignoring it cannot discard a committed entry.
           continue;
         }
         this.#apply(e);
@@ -265,7 +279,10 @@ class JournalIndex {
 function appendJournal(path: string, entry: JournalEntry): void {
   const fd = openSync(path, "a");
   try {
-    writeSync(fd, `${JSON.stringify(entry)}\n`);
+    const record = `\n${JSON.stringify(entry)}\n`;
+    if (writeSync(fd, record) !== Buffer.byteLength(record)) {
+      throw new Error("short authority journal write");
+    }
     fsyncSync(fd);
   } finally {
     closeSync(fd);

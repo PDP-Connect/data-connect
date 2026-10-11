@@ -13,6 +13,9 @@
  */
 
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it } from "node:test";
 import { AI_TRAINING_PERMISSION } from "../lib/training-lease/constants.ts";
 import {
@@ -60,6 +63,38 @@ describe("flag off: the Core gate and unchanged behavior", () => {
 });
 
 describe("flag on: issuance gate and consent binding", () => {
+  it("rotating body client_id does not reset the caller's rate-limit window", async () => {
+    const storeDir = mkdtempSync(join(tmpdir(), "pdpp-lease-rate-limit-"));
+    try {
+      await withServer(
+        true,
+        async (h) => {
+          const statuses: number[] = [];
+          for (let i = 0; i < 3; i += 1) {
+            const out = await fetchJson(
+              `${h.asUrl}/oauth/processing-lease`,
+              json({
+                grant_id: "unknown",
+                client_id: `caller-controlled-${i}`,
+              }),
+            );
+            statuses.push(out.status);
+          }
+          assert.deepEqual(statuses, [400, 400, 429]);
+        },
+        {
+          experimentalAiTrainingLeases: {
+            storeDir,
+            now: () => Date.UTC(2026, 9, 8, 12),
+            rateLimitPerMinute: 2,
+          },
+        },
+      );
+    } finally {
+      rmSync(storeDir, { recursive: true, force: true });
+    }
+  });
+
   it("advertises the permission, the lease endpoint and the JWKS", async () => {
     await withServer(true, async (h) => {
       const meta = await fetchJson<Record<string, unknown>>(
@@ -331,6 +366,40 @@ describe("flag on: leases, endings and the owner's stop time", () => {
 });
 
 describe("flag on: L5 public-client credential chain", () => {
+  it("a retry of the second accepted proof after successor use keeps the chain active", async () => {
+    await withServer(true, async (h) => {
+      const g = await issueTrainingGrant(h);
+      const c = new PublicLeaseClient(h, g.grant.grant_id);
+      assert.equal((await c.bootstrap(g.token)).status, 200);
+      const predecessor = c.credential as string;
+      const a = await c.renew({ adopt: false, credential: predecessor });
+      const proofB = c.proof();
+      const b = await c.renew({ credential: predecessor, proof: proofB });
+      assert.equal(a.status, 200);
+      assert.equal(b.status, 200);
+      assert.equal(a.body.lease_credential, b.body.lease_credential);
+      assert.equal((await c.renew()).status, 200, "use the successor");
+      const repeatedB = await c.renew({
+        adopt: false,
+        credential: predecessor,
+        proof: proofB,
+      });
+      assert.equal(repeatedB.status, 200);
+      assert.equal(repeatedB.body.lease_credential, b.body.lease_credential);
+      const status = await fetchJson<{
+        credential_chains: Array<{ status: string }>;
+      }>(`${h.asUrl}/v1/owner/grants/${g.grant.grant_id}/training`, {
+        headers: { Authorization: `Bearer ${h.ownerToken}` },
+      });
+      assert.equal(status.body.credential_chains[0]?.status, "active");
+      assert.equal(
+        (await c.renew()).status,
+        200,
+        "the legitimate next renewal succeeds",
+      );
+    });
+  });
+
   it("lost response: a retry with the same DPoP proof gets the same successor", async () => {
     await withServer(true, async (h) => {
       const g = await issueTrainingGrant(h);
