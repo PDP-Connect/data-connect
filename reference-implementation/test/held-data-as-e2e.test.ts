@@ -19,6 +19,7 @@ import { describe, it } from "node:test";
 import { ToyApp } from "../examples/held-data-toy-app/app.ts";
 import { HeldDataAuthority } from "../lib/held-data/authority.ts";
 import { HeldDataClient } from "../lib/held-data/client.ts";
+import { MemoryClientCheckpointStorage } from "../lib/held-data/checkpoint.ts";
 import { httpReportTransport, httpStatusTransport } from "../lib/held-data/http-transport.ts";
 import { makeDpopProof, thumbprint } from "../lib/training-lease/dpop.ts";
 import { generateEd25519KeyPair } from "../lib/training-lease/jws.ts";
@@ -1226,6 +1227,60 @@ async function revokeToken(h: Harness, params: Record<string, string>) {
     body: body ? (JSON.parse(body) as { error?: string }) : null,
   };
 }
+
+describe("held-data lane integration over HTTP", () => {
+  it("history loss fences revocation and a restarted client until owner erasure is replayed", async () => {
+    const clock = { now: Date.now() };
+    const opts = heldDataOpts(clock);
+    await withServer(false, async (h) => {
+      const clientId = await registerPublicClient(h);
+      const g = await authCodeGrant(h, clientId);
+      const app = new ToyApp();
+      const storage = new MemoryClientCheckpointStorage();
+      const statusTransport = httpStatusTransport({ asBaseUrl: h.asUrl, credentialFor: () => g.refreshToken });
+      const clientOpts = {
+        now: () => clock.now, store: app, storage, status: statusTransport,
+        policy: { disposeAt: "deadline" as const },
+      };
+      let client = new HeldDataClient({ ...clientOpts, initialize: true });
+      app.attach(client);
+      app.sync(g.grantId, [{ id: "a1", stream: "top_artists", text: "radiohead" }]);
+      await client.reconcile();
+      assert.equal(client.canUse(g.grantId).ok, true);
+      const journalPath = join(opts.experimentalHeldDataLifecycle.journalDir, "authority.journal");
+      const restore = loseHistory(journalPath, "suffix");
+      const damaged = readFileSync(journalPath, "utf8");
+      const revocation = { client_id: clientId, token: g.refreshToken, pdpp_disposition: "delete" };
+      assert.equal((await revokeToken(h, revocation)).status, 503);
+      assert.equal(readFileSync(journalPath, "utf8"), damaged, "revocation cannot append to lost history");
+      const pending = await revoke(h, h.ownerToken, g.grantId, { pdpp_disposition: "delete" });
+      assert.equal(pending.status, 200);
+      clock.now += 7 * DAY;
+      await client.reconcile();
+      assert.deepEqual(client.canUse(g.grantId), { ok: false, reason: "stale" });
+      client = new HeldDataClient(clientOpts);
+      app.attach(client);
+      assert.equal(client.canUse(g.grantId).ok, false);
+      await client.reconcile();
+      assert.equal(client.canUse(g.grantId).ok, false);
+      restore();
+      assert.equal((await revokeToken(h, revocation)).status, 503, "restoration alone does not release pending actions");
+      getHeldDataRuntime()!.authority.reestablishHistory();
+      assert.equal((await revokeToken(h, revocation)).status, 200);
+      await client.reconcile();
+      assert.deepEqual(client.canUse(g.grantId), { ok: false, reason: "erased" });
+      const deadline = client.deleteBy(g.grantId);
+      assert.equal(deadline, clock.now + 30 * DAY);
+      assert.equal((await revokeToken(h, revocation)).status, 200);
+      await client.reconcile();
+      assert.equal(client.deleteBy(g.grantId), deadline);
+      clock.now = deadline!;
+      await client.tick();
+      assert.equal(app.holds(g.grantId).records, 0);
+      assert.equal(await rsRead(h, g.accessToken), 403);
+    }, opts);
+  });
+});
 
 describe("RFC 7009 held-data revocation", () => {
   it("RFC 7009 metadata advertises revocation_endpoint with the flag on and off", async () => {

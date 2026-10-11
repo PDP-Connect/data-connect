@@ -914,6 +914,10 @@ export class HeldDataAuthority {
    * evidence to fit an older backup. Authority remains fenced until replay ends.
    */
   reestablishHistory(): void {
+    this.#ordered(() => this.#reestablishHistory());
+  }
+
+  #reestablishHistory(): void {
     if (this.#o.primaryHead || this.#pending?.lost) throw new AuthorityUnavailableError("pending history unavailable");
     this.#replaying = true;
     this.#lostHistory = true;
