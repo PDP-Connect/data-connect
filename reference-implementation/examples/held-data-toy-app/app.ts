@@ -251,22 +251,33 @@ export class ToySubprocessor implements Downstream {
   readonly held = new Map<string, number>();
   readonly #read: () => number;
   #highWaterMs = Number.NEGATIVE_INFINITY;
+  #clockUncertain = false;
 
   constructor(now: () => number) {
     this.#read = now;
   }
 
-  /** High-water mark, as in the main client: a clock moved back never revives use or delays disposal. */
+  /**
+   * A clock that moved back or gave a non-finite reading cannot show that a deadline is still ahead.
+   * Core: treat disposal as due. The state is sticky, as in the main client: the copy is disposed
+   * and nothing new is kept.
+   */
   #now(): number {
     const raw = this.#read();
-    if (Number.isFinite(raw)) {
-      this.#highWaterMs = Math.max(this.#highWaterMs, raw);
+    if (!Number.isFinite(raw) || raw < this.#highWaterMs) {
+      this.#clockUncertain = true;
+      this.held.clear();
+    } else {
+      this.#highWaterMs = raw;
     }
     return this.#highWaterMs;
   }
 
   receive(grantId: string, count: number): void {
-    this.held.set(grantId, count);
+    this.#now();
+    if (!this.#clockUncertain) {
+      this.held.set(grantId, count);
+    }
   }
 
   relay(n: DownstreamNotice): void {
@@ -303,6 +314,9 @@ export class ToySubprocessor implements Downstream {
   canUse(grantId: string): boolean {
     const n = this.latest(grantId);
     const now = this.#now();
+    if (this.#clockUncertain) {
+      return false;
+    }
     const { erased, deleteBy } = this.terminal(grantId);
     // The gate enforces every relayed deadline itself; it does not rely on a later tick.
     return this.held.has(grantId) && !erased && (deleteBy === null || now < deleteBy) && n?.useUntil != null && now < n.useUntil;
@@ -310,6 +324,7 @@ export class ToySubprocessor implements Downstream {
 
   /** Dispose of everything whose relayed deadline has passed. */
   tick(): void {
+    this.#now();
     for (const grantId of [...this.held.keys()]) {
       const { deleteBy } = this.terminal(grantId);
       if (deleteBy !== null && this.#now() >= deleteBy) {

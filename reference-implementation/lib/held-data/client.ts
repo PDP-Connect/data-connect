@@ -486,6 +486,10 @@ export class HeldDataClient {
       this.#disposeDue(written);
       return { ok: false, reason: this.#grants.get(grantId)?.deletedAt != null ? "deleted" : "stale" };
     }
+    // The same sample can detect a suspend: the copy may have missed a status attempt or an erasure.
+    if (g.needsReconcile) {
+      return { ok: false, reason: "reconcile_required" };
+    }
     return { ok: true, until };
   }
 

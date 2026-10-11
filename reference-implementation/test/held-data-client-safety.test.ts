@@ -510,7 +510,65 @@ describe("client safety (RT6, RT10 and persisted state)", () => {
     t = T0 + DAY;
     assert.equal(other.canUse("h"), false, "a raw clock moved back to day 1 does not revive use");
     other.tick();
-    assert.equal(other.held.has("h"), true, "a rollback does not dispose anything by itself");
+    assert.equal(other.held.has("h"), false, "a rollback means no deadline can be shown to remain ahead: disposal is due");
+  });
+
+  it("toy subprocessor: a clock moved back fails closed; it does not clamp and carry on", () => {
+    let t = T0;
+    const sub = new ToySubprocessor(() => t);
+    sub.receive("g", 1);
+    sub.relay({ grantId: "g", issuedAt: T0, useUntil: T0 + 7 * DAY, deleteAllBy: T0 + 2 * DAY, erasures: [] });
+    t = T0 + DAY;
+    assert.equal(sub.canUse("g"), true);
+    t = T0;
+    assert.equal(sub.canUse("g"), false, "the rollback is detected");
+    t = T0 + DAY;
+    assert.equal(sub.canUse("g"), false, "one real day later the reading equals the old high-water mark, yet use stays refused");
+    assert.equal(sub.held.has("g"), false, "the held copy is disposed");
+    sub.receive("g", 1);
+    assert.equal(sub.held.has("g"), false, "nothing new is kept while the clock is untrusted");
+  });
+
+  it("toy subprocessor: a non-finite clock reading refuses use and disposes", () => {
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY]) {
+      let t = bad;
+      const sub = new ToySubprocessor(() => t);
+      sub.receive("g", 1);
+      sub.relay({ grantId: "g", issuedAt: T0, useUntil: T0 + 7 * DAY, deleteAllBy: T0 + 2 * DAY, erasures: [] });
+      assert.equal(sub.canUse("g"), false, `initial ${bad} reading`);
+      sub.tick();
+      assert.equal(sub.held.has("g"), false);
+      t = T0;
+      assert.equal(sub.canUse("g"), false, "a later finite reading does not restore trust");
+    }
+  });
+
+  it("a suspend detected by the final clock sample after the last write refuses use until reconciliation", async () => {
+    let wall = T0;
+    let mono = 0;
+    const storage = new MemoryClientCheckpointStorage();
+    const write = storage.write.bind(storage);
+    let suspendOnWrite = 0;
+    storage.write = (cp) => {
+      wall += suspendOnWrite;
+      write(cp);
+    };
+    const app = new ToyApp();
+    const c = new HeldDataClient({
+      initialize: true, now: () => wall, monotonicMs: () => mono, status: positive(() => wall), storage, store: app,
+    });
+    app.attach(c);
+    app.sync("g", record);
+    await c.reconcile();
+    assert.equal(c.canUse("g").ok, true);
+    // Wall time jumps a day during the writes; monotonic time does not move. Only the last sample sees it.
+    suspendOnWrite = DAY;
+    const decision = c.canUse("g");
+    assert.equal(decision.ok, false, "use after a detected suspend needs reconciliation first");
+    assert.deepEqual(decision, { ok: false, reason: "reconcile_required" });
+    suspendOnWrite = 0;
+    await c.reconcile();
+    assert.equal(c.canUse("g").ok, true, "reconciliation restores use");
   });
 
   it("a durable write that crosses the pause deadline does not license use", async () => {
