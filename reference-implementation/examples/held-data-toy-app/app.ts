@@ -155,10 +155,20 @@ export class ToyApp implements HeldStore {
 export class ToySubprocessor implements Downstream {
   readonly notices: DownstreamNotice[] = [];
   readonly held = new Map<string, number>();
-  readonly #now: () => number;
+  readonly #read: () => number;
+  #highWaterMs = Number.NEGATIVE_INFINITY;
 
   constructor(now: () => number) {
-    this.#now = now;
+    this.#read = now;
+  }
+
+  /** High-water mark, as in the main client: a clock moved back never revives use or delays disposal. */
+  #now(): number {
+    const raw = this.#read();
+    if (Number.isFinite(raw)) {
+      this.#highWaterMs = Math.max(this.#highWaterMs, raw);
+    }
+    return this.#highWaterMs;
   }
 
   receive(grantId: string, count: number): void {
@@ -198,9 +208,10 @@ export class ToySubprocessor implements Downstream {
 
   canUse(grantId: string): boolean {
     const n = this.latest(grantId);
-    return (
-      this.held.has(grantId) && !this.terminal(grantId).erased && n?.useUntil != null && this.#now() < n.useUntil
-    );
+    const now = this.#now();
+    const { erased, deleteBy } = this.terminal(grantId);
+    // The gate enforces every relayed deadline itself; it does not rely on a later tick.
+    return this.held.has(grantId) && !erased && (deleteBy === null || now < deleteBy) && n?.useUntil != null && now < n.useUntil;
   }
 
   /** Dispose of everything whose relayed deadline has passed. */

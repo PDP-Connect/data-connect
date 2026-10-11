@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it } from "node:test";
-import { ToyApp } from "../examples/held-data-toy-app/app.ts";
+import { ToyApp, ToySubprocessor } from "../examples/held-data-toy-app/app.ts";
 import { FileClientCheckpointStorage, MemoryClientCheckpointStorage } from "../lib/held-data/checkpoint.ts";
 import type { StatusTransport } from "../lib/held-data/client.ts";
 import { HeldDataClient } from "../lib/held-data/client.ts";
@@ -482,5 +482,34 @@ describe("client safety (RT6, RT10 and persisted state)", () => {
     assert.equal(c.canUse("g").ok, true);
     wall += 2 * DAY;
     assert.equal(c.canUse("g").ok, false, "wall time includes suspension even if monotonic time omits it");
+  });
+
+  it("toy subprocessor: the use gate enforces a relayed deleteAllBy itself, without a tick", () => {
+    let t = T0;
+    const sub = new ToySubprocessor(() => t);
+    sub.receive("g", 1);
+    sub.relay({ grantId: "g", issuedAt: T0, useUntil: T0 + 7 * DAY, deleteAllBy: T0 + 2 * DAY, erasures: [] });
+    t = T0 + 2 * DAY;
+    assert.equal(sub.canUse("g"), false, "use ends at deleteAllBy without a separate tick");
+    const erased = new ToySubprocessor(() => t);
+    erased.receive("e", 1);
+    erased.relay({
+      grantId: "e", issuedAt: T0, useUntil: T0 + 7 * DAY, deleteAllBy: null,
+      erasures: [{ operationId: "op", scope: { streams: "all" }, deleteBy: T0 + DAY }],
+    });
+    assert.equal(erased.canUse("e"), false, "an erasure also closes use");
+  });
+
+  it("toy subprocessor: a clock moved back never revives use", () => {
+    let t = T0;
+    const other = new ToySubprocessor(() => t);
+    other.receive("h", 1);
+    other.relay({ grantId: "h", issuedAt: T0, useUntil: T0 + 7 * DAY, deleteAllBy: null, erasures: [] });
+    t = T0 + 8 * DAY;
+    assert.equal(other.canUse("h"), false);
+    t = T0 + DAY;
+    assert.equal(other.canUse("h"), false, "a raw clock moved back to day 1 does not revive use");
+    other.tick();
+    assert.equal(other.held.has("h"), true, "a rollback does not dispose anything by itself");
   });
 });
