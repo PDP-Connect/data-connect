@@ -323,6 +323,12 @@ describe("L3 conformance: issuance racing withdrawal (concurrent connections)", 
           `issuer stopped without a fail-closed refusal: ${r.refusal}`,
         );
       }
+      // A lock refusal is fail-closed, but if every issuer stopped that way
+      // the withdrawal never raced issuance and the round proves nothing.
+      assert.ok(
+        results.some((r) => r.refusal === "withdrawn"),
+        "at least one issuer must stop because of the withdrawal",
+      );
       const maxExpMs = Math.max(...all.map((l) => l.exp * 1000));
       assert.ok(
         maxExpMs <= withdrawal.stopsByMs,
