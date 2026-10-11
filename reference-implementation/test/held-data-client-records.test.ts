@@ -21,9 +21,20 @@ class Store implements HeldStore {
   readonly held = new Set<string>();
   readonly disposedRecords: string[] = [];
   grantIds() { return this.held; }
+  recordRefs(): HeldRecordRef[] { return []; }
   dispose(grantId: string) { this.held.delete(grantId); }
   disposeRecords(_grantId: string, records: readonly HeldRecordRef[]) {
     this.disposedRecords.push(...records.map((r) => `${r.id}@${r.version ?? ""}`));
+  }
+}
+
+/** A store that can dispose records but cannot list what it holds, so a restored copy cannot be swept. */
+class BareStore implements HeldStore {
+  readonly rows = new Set<string>();
+  grantIds() { return this.rows.size ? ["g"] : []; }
+  dispose() { this.rows.clear(); }
+  disposeRecords(_grantId: string, records: readonly HeldRecordRef[]) {
+    for (const r of records) this.rows.delete(r.id);
   }
 }
 
@@ -163,5 +174,65 @@ describe("client record clocks in the durable checkpoint", () => {
     assert.ok(!kept || (by !== null && by <= T0 + ceiling), `reacquired copy must stay past its original ceiling; deleteBy=${by === null ? by : (by - T0) / DAY}d`);
     void c.canUse("g");
     assert.equal(store.held.has("g"), false, "the reacquired legacy copy is disposed at once");
+  });
+  it("a store that cannot list its records cannot take per-record retention", () => {
+    const c = new HeldDataClient({
+      now: () => T0, status: unavailable, store: new BareStore(), initialize: true, policy: { retentionCeilingMs: ceiling },
+    });
+    assert.throws(() => c.acquireRecords("g", [{ id: "a", stream: "s" }]), /recordRefs/);
+  });
+
+  it("a restored record that the store cannot list is not left usable: the whole grant is disposed", async () => {
+    let t = T0;
+    const storage = new MemoryClientCheckpointStorage();
+    const policy = { retentionCeilingMs: ceiling };
+    const app = new ToyApp();
+    const c1 = new HeldDataClient({ initialize: true, now: () => t, status: permitted(() => t), storage, store: app, policy });
+    app.attach(c1);
+    app.sync("g", [{ id: "a", stream: "s", text: "alpha" }]);
+    t += 5 * DAY;
+    app.sync("g", [{ id: "b", stream: "s", text: "bravo" }]);
+    t += 5 * DAY;
+    void c1.canUse("g");
+    // The older data backup carries a again, in a store without recordRefs.
+    const bare = new BareStore();
+    bare.rows.add("a");
+    bare.rows.add("b");
+    t += DAY;
+    const c2 = new HeldDataClient({ now: () => t, status: permitted(() => t), storage, store: bare, policy });
+    await c2.reconcile();
+    assert.equal(c2.canUse("g").ok, false);
+    assert.equal(bare.rows.has("a"), false, "the expired record must not stay held");
+  });
+
+  it("reacquiring a legacy copy after a long-stop disposal does not restart the retention ceiling", () => {
+    let t = T0;
+    const store = new Store();
+    const c = new HeldDataClient({
+      now: () => t, status: unavailable, store, initialize: true, policy: { retentionCeilingMs: 2 * DAY, longStopMs: DAY },
+    });
+    assert.equal(c.acquire("g"), true);
+    store.held.add("g");
+    t += DAY;
+    void c.canUse("g");
+    assert.equal(c.grantState("g")?.deleteReason, "long_stop");
+
+    t = T0 + 3 * DAY;
+    assert.equal(c.acquire("g"), false, "the original copy's ceiling (day 2) has passed");
+    assert.ok((c.deleteBy("g") ?? 0) <= T0 + 2 * DAY || c.grantState("g")?.deletedAt != null);
+  });
+
+  it("a legacy copy reread after a long-stop but before the ceiling keeps the original ceiling", () => {
+    let t = T0;
+    const store = new Store();
+    const c = new HeldDataClient({
+      now: () => t, status: unavailable, store, initialize: true, policy: { retentionCeilingMs: 2 * DAY, longStopMs: DAY },
+    });
+    c.acquire("g");
+    t += DAY;
+    void c.canUse("g");
+    t = T0 + DAY + 12 * 60 * 60 * 1000;
+    assert.equal(c.acquire("g"), true, "Core permits reading again after the disposal");
+    assert.equal(c.deleteBy("g"), T0 + 2 * DAY, "but the ceiling still counts from the first acquisition");
   });
 });

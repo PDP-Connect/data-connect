@@ -97,7 +97,10 @@ interface HeldRecord {
 export interface HeldStore {
   /** Inventory includes derivatives: lost lifecycle state makes all these copies due. */
   grantIds(): Iterable<string>;
-  /** Complete inventory for migrating a legacy acquisition to per-record clocks. */
+  /**
+   * Complete inventory of the grant's held records. Required for per-record retention: it migrates
+   * a legacy acquisition and finds records that a restored data backup brings back.
+   */
   recordRefs?(grantId: string): Iterable<HeldRecordRef>;
   /** Remove the covered records and every derivative built from them. */
   dispose(grantId: string, scope: ErasureScope): void;
@@ -302,9 +305,10 @@ export class HeldDataClient {
    */
   acquire(grantId: string, o: { processingPermission?: boolean } = {}): boolean {
     const prior = this.#grants.get(grantId);
-    // A legacy copy has no record identities, so reacquiring it after its ceiling cannot be told
-    // from a new copy. The ceiling stays with the original acquisition.
-    const ceilingClock = prior?.deletedAt != null && prior.deleteReason === "retention_ceiling" ? prior.legacyAcquiredAt : null;
+    // A legacy copy has no record identities, so reacquiring it after any disposal cannot be told
+    // from the old copy. Core counts the ceiling from first acquisition and never restarts it, so
+    // it stays with the original acquisition. (A read after a long-stop disposal is still allowed.)
+    const ceilingClock = prior?.deletedAt != null ? prior.legacyAcquiredAt : null;
     if (!this.#register(grantId, o)) return false;
     const g = this.#grants.get(grantId);
     if (!g) return false;
@@ -363,6 +367,10 @@ export class HeldDataClient {
   acquireRecords<T extends HeldRecordRef>(grantId: string, records: readonly T[]): T[] {
     if (this.policy.retentionCeilingMs !== null && !this.#store.disposeRecords) {
       throw new Error("per-record retention requires a store with disposeRecords");
+    }
+    if (this.policy.retentionCeilingMs !== null && !this.#store.recordRefs) {
+      // Without an inventory a restored, expired record cannot be found, so it would stay usable.
+      throw new Error("per-record retention requires a store with recordRefs");
     }
     const priorGrant = this.#grants.get(grantId);
     if (priorGrant && [...priorGrant.erasures.values()].some((e) => e.scope.streams === "all")) {
@@ -799,9 +807,13 @@ export class HeldDataClient {
       }
       // Per-record ceilings never use the grant's first acquisition: a later record keeps its own clock.
       const by = grantDeadlines.length ? Math.min(...grantDeadlines) : null;
-      if (g.pendingDeletionReason !== null || (by !== null && now >= by)) {
-        g.pendingDeletionReason ??=
-          g.legacyAcquiredAt !== null && this.policy.retentionCeilingMs !== null && now >= g.legacyAcquiredAt + this.policy.retentionCeilingMs
+      // Per-record clocks need an inventory to sweep restored copies. If the store cannot give one,
+      // the deadlines cannot be shown to remain in the future (Core): the whole grant is due.
+      const inventoryUnavailable = g.recordsTracked && this.policy.retentionCeilingMs !== null && !this.#store.recordRefs;
+      if (g.pendingDeletionReason !== null || inventoryUnavailable || (by !== null && now >= by)) {
+        g.pendingDeletionReason ??= inventoryUnavailable
+          ? "retention_ceiling"
+          : g.legacyAcquiredAt !== null && this.policy.retentionCeilingMs !== null && now >= g.legacyAcquiredAt + this.policy.retentionCeilingMs
             ? "retention_ceiling"
             : "long_stop";
         if (!this.#persist()) {

@@ -57,7 +57,7 @@ test('a mixed acquisition survives restart without abandoning its old retention 
   assert.equal(resumed.deleteBy('g'), T0 + 3 * DAY);
 });
 
-test('a store without complete record inventory keeps the original whole-copy bound across restart', async () => {
+test('a store without record inventory refuses per-record retention and keeps the whole-copy bound across restart', async () => {
   let now = T0;
   const app = new ToyApp();
   const storage = new MemoryClientCheckpointStorage();
@@ -73,8 +73,7 @@ test('a store without complete record inventory keeps the original whole-copy bo
   first.acquire('g');
   app.sync('g', [{ id: 'old', stream: 'messages', text: 'oldword' }]);
   now += DAY;
-  app.attach(first);
-  app.sync('g', [{ id: 'new', stream: 'messages', text: 'newword' }]);
+  assert.throws(() => first.acquireRecords('g', [{ id: 'new', stream: 'messages' }]), /recordRefs/);
   const resumed = make();
   assert.equal(resumed.deleteBy('g'), T0 + 2 * DAY);
   now += DAY;
