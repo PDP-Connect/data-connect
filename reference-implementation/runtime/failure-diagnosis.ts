@@ -19,7 +19,15 @@ function supportedCategory(fact: ConnectorRunRecordFact, record: ObservationRunR
     return null;
   }
   if (fact.fact === "provider_message") {
-    if (fact.attrs.rule && !descriptors?.rules?.some((rule) => rule.id === fact.attrs.rule && rule.kind === "auth")) {
+    if (
+      fact.attrs.rule &&
+      !descriptors?.rules?.some(
+        (rule) =>
+          rule.id === fact.attrs.rule &&
+          rule.kind === "auth" &&
+          (rule.step === undefined || rule.step === fact.step)
+      )
+    ) {
       return null;
     }
     return fact.attrs.kind === "auth_failure" ? "auth_rejected" : null;

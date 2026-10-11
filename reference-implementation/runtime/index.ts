@@ -6121,27 +6121,22 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
         }
         msgQueue.push(msg);
         processNext().catch(reject);
-      } catch (caught) {
+      } catch {
+        // Neither parser exceptions nor unparsed stdout are safe to retain:
+        // both may quote credentials or discarded OBSERVATION attributes.
+        const parseError = `${parsedLine ? "invalid_message" : "invalid_json"} (line_bytes=${Buffer.byteLength(line)})`;
         if (!parsedLine) {
-          writeTrace(line);
+          writeTrace(JSON.stringify({ error: parseError, type: "__PARSE_ERROR__" }));
         }
-        const err = caught as RuntimeRunError;
         if (
           failPendingInteraction(
-            new Error(`Connector emitted invalid JSONL while waiting for INTERACTION_RESPONSE: ${err.message}`)
+            new Error(`Connector emitted invalid JSONL while waiting for INTERACTION_RESPONSE: ${parseError}`)
           )
         ) {
           return;
         }
-        // Context for debugging: include byte length and a preview of the
-        // offending line in the error message.
-        const preview =
-          line.length > 400
-            ? `${line.slice(0, 200)} … [truncated ${line.length - 400} chars] … ${line.slice(-200)}`
-            : line;
-        const enriched = `${err.message} (line_length=${line.length} preview=${JSON.stringify(preview).slice(0, 600)})`;
         msgQueue.push({
-          error: enriched,
+          error: parseError,
           type: "__PARSE_ERROR__",
         });
         processNext().catch(reject);
@@ -6266,7 +6261,13 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       return null;
     }
 
-    async function handleDoneClose(code: number | null): Promise<boolean> {
+    async function handleDoneClose(
+      closeEvent: Extract<ConnectorChildTerminalEvent, { kind: "close" }>
+    ): Promise<boolean> {
+      // Only the buffered child close event authorizes DONE finalization.
+      // Its code is settled even when DONE arrived much earlier; reading
+      // proc.exitCode while handling DONE would race the child's exit.
+      const { code } = closeEvent;
       const done = doneMessage;
       if (!done) {
         return false;
@@ -6385,6 +6386,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
         actor_type: "runtime",
         data: buildRunTerminalData({
           connectorError: done.error,
+          exitCode: code,
           reason: terminalEventReason,
           recordsEmitted: done.records_emitted,
         }),
@@ -6709,7 +6711,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
           } else if (ownerCancelRequested) {
             await handleOwnerCancellationClose(code);
           } else if (doneMessage) {
-            if (await handleDoneClose(code)) {
+            if (await handleDoneClose(terminalEvent)) {
               return;
             }
           } else {
