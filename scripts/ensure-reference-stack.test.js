@@ -149,7 +149,7 @@ function tauriHookFixture() {
   }
   for (const path of [
     "reference-implementation/vendor/pdpp-polyfill-connectors-0.0.1.tgz",
-    "reference-implementation/vendor/pdpp-reference-contract-0.1.0.tgz",
+    "reference-implementation/vendor/pdpp-reference-contract-0.1.0-proto.1.tgz",
   ]) {
     writeFileSync(join(root, path), "fixture tarball")
   }

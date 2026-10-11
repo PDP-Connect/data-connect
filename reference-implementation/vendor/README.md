@@ -1,3 +1,21 @@
+## Prototype contract fork (2026-10-10)
+
+The active dependency is `pdpp-reference-contract-0.1.0-proto.1.tgz`, compiled from
+`PDP-Connect/pdpp` commit `3b05c1b1e4db56c9cb2820e5bae570d6d3a73024` on
+`proto/reference-contract`. This prototype supports drafts #387–#393 and #398;
+it is not a finalized Core release. The historical `0.1.0` archive remains for provenance.
+
+Repack procedure: run `npm pack --json --workspaces=false` in the source package,
+extract into a disk-backed scratch directory, compile `src/` with TypeScript
+(`noEmit:false`, `outDir:dist`, `rootDir:src`, `declaration:true`,
+`rewriteRelativeImportExtensions:true`), using the source package's pinned build
+dependencies. Set the extracted package version to `0.1.0-proto.1` and each export
+plus `main` and `types` to its compiled `dist/` target. Run `npm pack` again.
+The source files remain in the archive. Record SHA-256 in `SHA256SUMS`, update
+the RI dependency and workspace lock, and update both filename references in
+`scripts/ensure-reference-stack.js`. npm 12 returns pack JSON keyed by package name;
+older npm versions return an array.
+
 # Vendored cross-repo dependency tarballs (transitional)
 
 ## `@pdpp/reference-contract` — pinned tarball, not a registry release (Move B decision Q2, interim)
@@ -15,8 +33,8 @@ recorded below.
 `0d3deca19186a2185a6a15ab76c71352d10e627e` (`main`, 2026-09-02). SHA-256 is recorded in
 `SHA256SUMS` in this directory.
 
-`reference-implementation/package.json` depends on it via
-`"file:./vendor/pdpp-reference-contract-0.1.0.tgz"`.
+The historical dependency was `"file:./vendor/pdpp-reference-contract-0.1.0.tgz"`.
+The active prototype dependency is recorded above.
 
 **Update (2026-09-02, data-connect seam-fix): compiled JS, not raw `.ts`, is now
 vendored.** The package ships raw TypeScript source with no build step in `pdpp` itself

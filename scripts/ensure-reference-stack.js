@@ -40,7 +40,7 @@ const LOCAL_PACKAGES = [
 ]
 const RI_PACKAGE_FILES = [
   "reference-implementation/vendor/pdpp-polyfill-connectors-0.0.1.tgz",
-  "reference-implementation/vendor/pdpp-reference-contract-0.1.0.tgz",
+  "reference-implementation/vendor/pdpp-reference-contract-0.1.0-proto.1.tgz",
 ]
 
 function fail(message) {
@@ -373,7 +373,7 @@ function createStagedPackageJson(projectRoot, stageRoot) {
   dependencies["@pdpp/polyfill-connectors"] =
     "file:reference-implementation/vendor/pdpp-polyfill-connectors-0.0.1.tgz"
   dependencies["@pdpp/reference-contract"] =
-    "file:reference-implementation/vendor/pdpp-reference-contract-0.1.0.tgz"
+    "file:reference-implementation/vendor/pdpp-reference-contract-0.1.0-proto.1.tgz"
   for (const [packageName] of LOCAL_PACKAGES) {
     dependencies[packageName] = localPackageSpecifier(packageName)
   }

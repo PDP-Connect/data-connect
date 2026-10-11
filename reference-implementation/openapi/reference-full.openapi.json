@@ -2149,6 +2149,14 @@
                           },
                           "type": "object"
                         },
+                        "processing_permissions": {
+                          "items": {
+                            "format": "uri",
+                            "type": "string"
+                          },
+                          "type": "array",
+                          "uniqueItems": true
+                        },
                         "purpose_code": {
                           "format": "uri",
                           "minLength": 1,
@@ -2219,13 +2227,26 @@
                             ],
                             "properties": {
                               "fields": {
-                                "items": {
-                                  "minLength": 1,
-                                  "type": "string"
-                                },
-                                "minItems": 1,
-                                "type": "array",
-                                "uniqueItems": true
+                                "oneOf": [
+                                  {
+                                    "const": [
+                                      "*"
+                                    ],
+                                    "type": "array"
+                                  },
+                                  {
+                                    "items": {
+                                      "minLength": 1,
+                                      "type": "string",
+                                      "not": {
+                                        "const": "*"
+                                      }
+                                    },
+                                    "minItems": 1,
+                                    "type": "array",
+                                    "uniqueItems": true
+                                  }
+                                ]
                               },
                               "instance_ids": {
                                 "items": {
@@ -2239,6 +2260,71 @@
                               "name": {
                                 "minLength": 1,
                                 "type": "string"
+                              },
+                              "minimum": {
+                                "additionalProperties": false,
+                                "minProperties": 1,
+                                "properties": {
+                                  "fields": {
+                                    "items": {
+                                      "minLength": 1,
+                                      "type": "string",
+                                      "not": {
+                                        "const": "*"
+                                      }
+                                    },
+                                    "minItems": 1,
+                                    "type": "array",
+                                    "uniqueItems": true
+                                  },
+                                  "time_range": {
+                                    "additionalProperties": false,
+                                    "anyOf": [
+                                      {
+                                        "required": [
+                                          "since"
+                                        ]
+                                      },
+                                      {
+                                        "required": [
+                                          "until"
+                                        ]
+                                      }
+                                    ],
+                                    "properties": {
+                                      "since": {
+                                        "oneOf": [
+                                          {
+                                            "format": "date",
+                                            "type": "string"
+                                          },
+                                          {
+                                            "format": "date-time",
+                                            "type": "string"
+                                          }
+                                        ]
+                                      },
+                                      "until": {
+                                        "oneOf": [
+                                          {
+                                            "format": "date",
+                                            "type": "string"
+                                          },
+                                          {
+                                            "format": "date-time",
+                                            "type": "string"
+                                          }
+                                        ]
+                                      }
+                                    },
+                                    "type": "object",
+                                    "required": [
+                                      "since",
+                                      "until"
+                                    ]
+                                  }
+                                },
+                                "type": "object"
                               },
                               "necessity": {
                                 "enum": [
@@ -2272,12 +2358,28 @@
                                 ],
                                 "properties": {
                                   "since": {
-                                    "format": "date-time",
-                                    "type": "string"
+                                    "oneOf": [
+                                      {
+                                        "format": "date",
+                                        "type": "string"
+                                      },
+                                      {
+                                        "format": "date-time",
+                                        "type": "string"
+                                      }
+                                    ]
                                   },
                                   "until": {
-                                    "format": "date-time",
-                                    "type": "string"
+                                    "oneOf": [
+                                      {
+                                        "format": "date",
+                                        "type": "string"
+                                      },
+                                      {
+                                        "format": "date-time",
+                                        "type": "string"
+                                      }
+                                    ]
                                   }
                                 },
                                 "type": "object"
@@ -2480,6 +2582,62 @@
                               ],
                               "type": "object"
                             },
+                            "declaration_display": {
+                              "items": {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "language": {
+                                    "pattern": "^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*$",
+                                    "type": "string"
+                                  },
+                                  "path": {
+                                    "minLength": 1,
+                                    "pattern": "^/",
+                                    "type": "string"
+                                  },
+                                  "text": {
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "path",
+                                  "text"
+                                ],
+                                "type": "object"
+                              },
+                              "type": "array"
+                            },
+                            "grantors": {
+                              "items": {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "capacity": {
+                                    "format": "uri",
+                                    "type": "string"
+                                  },
+                                  "id": {
+                                    "minLength": 1,
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "id",
+                                  "capacity"
+                                ],
+                                "type": "object"
+                              },
+                              "minItems": 1,
+                              "type": "array",
+                              "uniqueItems": true
+                            },
+                            "processing_permissions": {
+                              "items": {
+                                "format": "uri",
+                                "type": "string"
+                              },
+                              "type": "array",
+                              "uniqueItems": true
+                            },
                             "client_claims": {
                               "oneOf": [
                                 {
@@ -2573,18 +2731,79 @@
                                         ]
                                       }
                                     ],
+                                    "allOf": [
+                                      {
+                                        "if": {
+                                          "properties": {
+                                            "type": {
+                                              "const": "date"
+                                            }
+                                          },
+                                          "required": [
+                                            "type"
+                                          ]
+                                        },
+                                        "then": {
+                                          "properties": {
+                                            "since": {
+                                              "format": "date",
+                                              "type": "string"
+                                            },
+                                            "until": {
+                                              "format": "date",
+                                              "type": "string"
+                                            }
+                                          }
+                                        },
+                                        "else": {
+                                          "properties": {
+                                            "since": {
+                                              "format": "date-time",
+                                              "type": "string"
+                                            },
+                                            "until": {
+                                              "format": "date-time",
+                                              "type": "string"
+                                            }
+                                          }
+                                        }
+                                      }
+                                    ],
                                     "properties": {
                                       "field": {
                                         "minLength": 1,
                                         "type": "string"
                                       },
                                       "since": {
-                                        "format": "date-time",
+                                        "oneOf": [
+                                          {
+                                            "format": "date",
+                                            "type": "string"
+                                          },
+                                          {
+                                            "format": "date-time",
+                                            "type": "string"
+                                          }
+                                        ]
+                                      },
+                                      "type": {
+                                        "enum": [
+                                          "date",
+                                          "date-time"
+                                        ],
                                         "type": "string"
                                       },
                                       "until": {
-                                        "format": "date-time",
-                                        "type": "string"
+                                        "oneOf": [
+                                          {
+                                            "format": "date",
+                                            "type": "string"
+                                          },
+                                          {
+                                            "format": "date-time",
+                                            "type": "string"
+                                          }
+                                        ]
                                       }
                                     },
                                     "required": [
@@ -2935,6 +3154,62 @@
                               ],
                               "type": "object"
                             },
+                            "declaration_display": {
+                              "items": {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "language": {
+                                    "pattern": "^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*$",
+                                    "type": "string"
+                                  },
+                                  "path": {
+                                    "minLength": 1,
+                                    "pattern": "^/",
+                                    "type": "string"
+                                  },
+                                  "text": {
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "path",
+                                  "text"
+                                ],
+                                "type": "object"
+                              },
+                              "type": "array"
+                            },
+                            "grantors": {
+                              "items": {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "capacity": {
+                                    "format": "uri",
+                                    "type": "string"
+                                  },
+                                  "id": {
+                                    "minLength": 1,
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "id",
+                                  "capacity"
+                                ],
+                                "type": "object"
+                              },
+                              "minItems": 1,
+                              "type": "array",
+                              "uniqueItems": true
+                            },
+                            "processing_permissions": {
+                              "items": {
+                                "format": "uri",
+                                "type": "string"
+                              },
+                              "type": "array",
+                              "uniqueItems": true
+                            },
                             "expires_at": {
                               "type": [
                                 "string",
@@ -3019,6 +3294,62 @@
                                       }
                                     ]
                                   },
+                                  "declaration_display": {
+                                    "items": {
+                                      "additionalProperties": false,
+                                      "properties": {
+                                        "language": {
+                                          "pattern": "^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*$",
+                                          "type": "string"
+                                        },
+                                        "path": {
+                                          "minLength": 1,
+                                          "pattern": "^/",
+                                          "type": "string"
+                                        },
+                                        "text": {
+                                          "type": "string"
+                                        }
+                                      },
+                                      "required": [
+                                        "path",
+                                        "text"
+                                      ],
+                                      "type": "object"
+                                    },
+                                    "type": "array"
+                                  },
+                                  "grantors": {
+                                    "items": {
+                                      "additionalProperties": false,
+                                      "properties": {
+                                        "capacity": {
+                                          "format": "uri",
+                                          "type": "string"
+                                        },
+                                        "id": {
+                                          "minLength": 1,
+                                          "type": "string"
+                                        }
+                                      },
+                                      "required": [
+                                        "id",
+                                        "capacity"
+                                      ],
+                                      "type": "object"
+                                    },
+                                    "minItems": 1,
+                                    "type": "array",
+                                    "uniqueItems": true
+                                  },
+                                  "processing_permissions": {
+                                    "items": {
+                                      "format": "uri",
+                                      "type": "string"
+                                    },
+                                    "type": "array",
+                                    "uniqueItems": true
+                                  },
                                   "index": {
                                     "minimum": 0,
                                     "type": "integer"
@@ -3085,18 +3416,79 @@
                                               ]
                                             }
                                           ],
+                                          "allOf": [
+                                            {
+                                              "if": {
+                                                "properties": {
+                                                  "type": {
+                                                    "const": "date"
+                                                  }
+                                                },
+                                                "required": [
+                                                  "type"
+                                                ]
+                                              },
+                                              "then": {
+                                                "properties": {
+                                                  "since": {
+                                                    "format": "date",
+                                                    "type": "string"
+                                                  },
+                                                  "until": {
+                                                    "format": "date",
+                                                    "type": "string"
+                                                  }
+                                                }
+                                              },
+                                              "else": {
+                                                "properties": {
+                                                  "since": {
+                                                    "format": "date-time",
+                                                    "type": "string"
+                                                  },
+                                                  "until": {
+                                                    "format": "date-time",
+                                                    "type": "string"
+                                                  }
+                                                }
+                                              }
+                                            }
+                                          ],
                                           "properties": {
                                             "field": {
                                               "minLength": 1,
                                               "type": "string"
                                             },
                                             "since": {
-                                              "format": "date-time",
+                                              "oneOf": [
+                                                {
+                                                  "format": "date",
+                                                  "type": "string"
+                                                },
+                                                {
+                                                  "format": "date-time",
+                                                  "type": "string"
+                                                }
+                                              ]
+                                            },
+                                            "type": {
+                                              "enum": [
+                                                "date",
+                                                "date-time"
+                                              ],
                                               "type": "string"
                                             },
                                             "until": {
-                                              "format": "date-time",
-                                              "type": "string"
+                                              "oneOf": [
+                                                {
+                                                  "format": "date",
+                                                  "type": "string"
+                                                },
+                                                {
+                                                  "format": "date-time",
+                                                  "type": "string"
+                                                }
+                                              ]
                                             }
                                           },
                                           "required": [
@@ -3896,6 +4288,37 @@
                               "format": "date-time",
                               "type": "string"
                             },
+                            "extensions": {
+                              "additionalProperties": true,
+                              "propertyNames": {
+                                "format": "uri",
+                                "type": "string"
+                              },
+                              "type": "object"
+                            },
+                            "grantors": {
+                              "items": {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "capacity": {
+                                    "format": "uri",
+                                    "type": "string"
+                                  },
+                                  "id": {
+                                    "minLength": 1,
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "id",
+                                  "capacity"
+                                ],
+                                "type": "object"
+                              },
+                              "minItems": 1,
+                              "type": "array",
+                              "uniqueItems": true
+                            },
                             "grant_id": {
                               "minLength": 1,
                               "type": "string"
@@ -3903,6 +4326,14 @@
                             "issued_at": {
                               "format": "date-time",
                               "type": "string"
+                            },
+                            "processing_permissions": {
+                              "items": {
+                                "format": "uri",
+                                "type": "string"
+                              },
+                              "type": "array",
+                              "uniqueItems": true
                             },
                             "purpose_code": {
                               "format": "uri",
@@ -4025,18 +4456,79 @@
                                         ]
                                       }
                                     ],
+                                    "allOf": [
+                                      {
+                                        "if": {
+                                          "properties": {
+                                            "type": {
+                                              "const": "date"
+                                            }
+                                          },
+                                          "required": [
+                                            "type"
+                                          ]
+                                        },
+                                        "then": {
+                                          "properties": {
+                                            "since": {
+                                              "format": "date",
+                                              "type": "string"
+                                            },
+                                            "until": {
+                                              "format": "date",
+                                              "type": "string"
+                                            }
+                                          }
+                                        },
+                                        "else": {
+                                          "properties": {
+                                            "since": {
+                                              "format": "date-time",
+                                              "type": "string"
+                                            },
+                                            "until": {
+                                              "format": "date-time",
+                                              "type": "string"
+                                            }
+                                          }
+                                        }
+                                      }
+                                    ],
                                     "properties": {
                                       "field": {
                                         "minLength": 1,
                                         "type": "string"
                                       },
                                       "since": {
-                                        "format": "date-time",
+                                        "oneOf": [
+                                          {
+                                            "format": "date",
+                                            "type": "string"
+                                          },
+                                          {
+                                            "format": "date-time",
+                                            "type": "string"
+                                          }
+                                        ]
+                                      },
+                                      "type": {
+                                        "enum": [
+                                          "date",
+                                          "date-time"
+                                        ],
                                         "type": "string"
                                       },
                                       "until": {
-                                        "format": "date-time",
-                                        "type": "string"
+                                        "oneOf": [
+                                          {
+                                            "format": "date",
+                                            "type": "string"
+                                          },
+                                          {
+                                            "format": "date-time",
+                                            "type": "string"
+                                          }
+                                        ]
                                       }
                                     },
                                     "required": [
@@ -4677,6 +5169,37 @@
                           "format": "date-time",
                           "type": "string"
                         },
+                        "extensions": {
+                          "additionalProperties": true,
+                          "propertyNames": {
+                            "format": "uri",
+                            "type": "string"
+                          },
+                          "type": "object"
+                        },
+                        "grantors": {
+                          "items": {
+                            "additionalProperties": false,
+                            "properties": {
+                              "capacity": {
+                                "format": "uri",
+                                "type": "string"
+                              },
+                              "id": {
+                                "minLength": 1,
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "id",
+                              "capacity"
+                            ],
+                            "type": "object"
+                          },
+                          "minItems": 1,
+                          "type": "array",
+                          "uniqueItems": true
+                        },
                         "grant_id": {
                           "minLength": 1,
                           "type": "string"
@@ -4684,6 +5207,14 @@
                         "issued_at": {
                           "format": "date-time",
                           "type": "string"
+                        },
+                        "processing_permissions": {
+                          "items": {
+                            "format": "uri",
+                            "type": "string"
+                          },
+                          "type": "array",
+                          "uniqueItems": true
                         },
                         "purpose_code": {
                           "format": "uri",
@@ -4806,18 +5337,79 @@
                                     ]
                                   }
                                 ],
+                                "allOf": [
+                                  {
+                                    "if": {
+                                      "properties": {
+                                        "type": {
+                                          "const": "date"
+                                        }
+                                      },
+                                      "required": [
+                                        "type"
+                                      ]
+                                    },
+                                    "then": {
+                                      "properties": {
+                                        "since": {
+                                          "format": "date",
+                                          "type": "string"
+                                        },
+                                        "until": {
+                                          "format": "date",
+                                          "type": "string"
+                                        }
+                                      }
+                                    },
+                                    "else": {
+                                      "properties": {
+                                        "since": {
+                                          "format": "date-time",
+                                          "type": "string"
+                                        },
+                                        "until": {
+                                          "format": "date-time",
+                                          "type": "string"
+                                        }
+                                      }
+                                    }
+                                  }
+                                ],
                                 "properties": {
                                   "field": {
                                     "minLength": 1,
                                     "type": "string"
                                   },
                                   "since": {
-                                    "format": "date-time",
+                                    "oneOf": [
+                                      {
+                                        "format": "date",
+                                        "type": "string"
+                                      },
+                                      {
+                                        "format": "date-time",
+                                        "type": "string"
+                                      }
+                                    ]
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "date",
+                                      "date-time"
+                                    ],
                                     "type": "string"
                                   },
                                   "until": {
-                                    "format": "date-time",
-                                    "type": "string"
+                                    "oneOf": [
+                                      {
+                                        "format": "date",
+                                        "type": "string"
+                                      },
+                                      {
+                                        "format": "date-time",
+                                        "type": "string"
+                                      }
+                                    ]
                                   }
                                 },
                                 "required": [
@@ -5296,13 +5888,602 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "oneOf": [
+                  "anyOf": [
                     {
                       "additionalProperties": false,
                       "properties": {
                         "access_token": {
                           "minLength": 1,
                           "type": "string"
+                        },
+                        "authorization_details": {
+                          "items": {
+                            "oneOf": [
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "grant": {
+                                    "additionalProperties": false,
+                                    "properties": {
+                                      "access_mode": {
+                                        "enum": [
+                                          "single_use",
+                                          "continuous"
+                                        ],
+                                        "type": "string"
+                                      },
+                                      "client": {
+                                        "additionalProperties": false,
+                                        "properties": {
+                                          "client_display": {
+                                            "additionalProperties": false,
+                                            "properties": {
+                                              "logo_uri": {
+                                                "format": "uri",
+                                                "type": "string"
+                                              },
+                                              "name": {
+                                                "minLength": 1,
+                                                "type": "string"
+                                              },
+                                              "policy_uri": {
+                                                "format": "uri",
+                                                "type": "string"
+                                              },
+                                              "tos_uri": {
+                                                "format": "uri",
+                                                "type": "string"
+                                              },
+                                              "uri": {
+                                                "format": "uri",
+                                                "type": "string"
+                                              }
+                                            },
+                                            "type": "object"
+                                          },
+                                          "client_id": {
+                                            "minLength": 1,
+                                            "type": "string"
+                                          }
+                                        },
+                                        "required": [
+                                          "client_id"
+                                        ],
+                                        "type": "object"
+                                      },
+                                      "expires_at": {
+                                        "format": "date-time",
+                                        "type": "string"
+                                      },
+                                      "extensions": {
+                                        "additionalProperties": true,
+                                        "propertyNames": {
+                                          "format": "uri",
+                                          "type": "string"
+                                        },
+                                        "type": "object"
+                                      },
+                                      "grantors": {
+                                        "items": {
+                                          "additionalProperties": false,
+                                          "properties": {
+                                            "capacity": {
+                                              "format": "uri",
+                                              "type": "string"
+                                            },
+                                            "id": {
+                                              "minLength": 1,
+                                              "type": "string"
+                                            }
+                                          },
+                                          "required": [
+                                            "id",
+                                            "capacity"
+                                          ],
+                                          "type": "object"
+                                        },
+                                        "minItems": 1,
+                                        "type": "array",
+                                        "uniqueItems": true
+                                      },
+                                      "grant_id": {
+                                        "minLength": 1,
+                                        "type": "string"
+                                      },
+                                      "issued_at": {
+                                        "format": "date-time",
+                                        "type": "string"
+                                      },
+                                      "processing_permissions": {
+                                        "items": {
+                                          "format": "uri",
+                                          "type": "string"
+                                        },
+                                        "type": "array",
+                                        "uniqueItems": true
+                                      },
+                                      "purpose_code": {
+                                        "format": "uri",
+                                        "minLength": 1,
+                                        "type": "string"
+                                      },
+                                      "purpose_description": {
+                                        "minLength": 1,
+                                        "type": "string"
+                                      },
+                                      "retention": {
+                                        "additionalProperties": false,
+                                        "properties": {
+                                          "max_duration": {
+                                            "minLength": 1,
+                                            "type": "string"
+                                          },
+                                          "on_expiry": {
+                                            "enum": [
+                                              "delete",
+                                              "anonymize"
+                                            ],
+                                            "type": "string"
+                                          }
+                                        },
+                                        "required": [
+                                          "max_duration",
+                                          "on_expiry"
+                                        ],
+                                        "type": "object"
+                                      },
+                                      "selection_preset": {
+                                        "minLength": 1,
+                                        "type": "string"
+                                      },
+                                      "source": {
+                                        "additionalProperties": false,
+                                        "properties": {
+                                          "id": {
+                                            "format": "uri",
+                                            "minLength": 1,
+                                            "type": "string"
+                                          },
+                                          "kind": {
+                                            "enum": [
+                                              "connector",
+                                              "provider_native"
+                                            ],
+                                            "type": "string"
+                                          }
+                                        },
+                                        "required": [
+                                          "kind",
+                                          "id"
+                                        ],
+                                        "type": "object"
+                                      },
+                                      "source_declaration": {
+                                        "additionalProperties": false,
+                                        "properties": {
+                                          "version": {
+                                            "minLength": 1,
+                                            "type": "string"
+                                          }
+                                        },
+                                        "required": [
+                                          "version"
+                                        ],
+                                        "type": "object"
+                                      },
+                                      "streams": {
+                                        "items": {
+                                          "additionalProperties": false,
+                                          "properties": {
+                                            "fields": {
+                                              "items": {
+                                                "minLength": 1,
+                                                "type": "string"
+                                              },
+                                              "minItems": 1,
+                                              "type": "array",
+                                              "uniqueItems": true
+                                            },
+                                            "instance_ids": {
+                                              "items": {
+                                                "minLength": 1,
+                                                "type": "string"
+                                              },
+                                              "minItems": 1,
+                                              "type": "array",
+                                              "uniqueItems": true
+                                            },
+                                            "name": {
+                                              "minLength": 1,
+                                              "not": {
+                                                "const": "*"
+                                              },
+                                              "type": "string"
+                                            },
+                                            "resources": {
+                                              "items": {
+                                                "minLength": 1,
+                                                "type": "string"
+                                              },
+                                              "minItems": 1,
+                                              "type": "array",
+                                              "uniqueItems": true
+                                            },
+                                            "time_constraint": {
+                                              "additionalProperties": false,
+                                              "anyOf": [
+                                                {
+                                                  "required": [
+                                                    "since"
+                                                  ]
+                                                },
+                                                {
+                                                  "required": [
+                                                    "until"
+                                                  ]
+                                                }
+                                              ],
+                                              "allOf": [
+                                                {
+                                                  "if": {
+                                                    "properties": {
+                                                      "type": {
+                                                        "const": "date"
+                                                      }
+                                                    },
+                                                    "required": [
+                                                      "type"
+                                                    ]
+                                                  },
+                                                  "then": {
+                                                    "properties": {
+                                                      "since": {
+                                                        "format": "date",
+                                                        "type": "string"
+                                                      },
+                                                      "until": {
+                                                        "format": "date",
+                                                        "type": "string"
+                                                      }
+                                                    }
+                                                  },
+                                                  "else": {
+                                                    "properties": {
+                                                      "since": {
+                                                        "format": "date-time",
+                                                        "type": "string"
+                                                      },
+                                                      "until": {
+                                                        "format": "date-time",
+                                                        "type": "string"
+                                                      }
+                                                    }
+                                                  }
+                                                }
+                                              ],
+                                              "properties": {
+                                                "field": {
+                                                  "minLength": 1,
+                                                  "type": "string"
+                                                },
+                                                "since": {
+                                                  "oneOf": [
+                                                    {
+                                                      "format": "date",
+                                                      "type": "string"
+                                                    },
+                                                    {
+                                                      "format": "date-time",
+                                                      "type": "string"
+                                                    }
+                                                  ]
+                                                },
+                                                "type": {
+                                                  "enum": [
+                                                    "date",
+                                                    "date-time"
+                                                  ],
+                                                  "type": "string"
+                                                },
+                                                "until": {
+                                                  "oneOf": [
+                                                    {
+                                                      "format": "date",
+                                                      "type": "string"
+                                                    },
+                                                    {
+                                                      "format": "date-time",
+                                                      "type": "string"
+                                                    }
+                                                  ]
+                                                }
+                                              },
+                                              "required": [
+                                                "field"
+                                              ],
+                                              "type": "object"
+                                            }
+                                          },
+                                          "required": [
+                                            "name",
+                                            "instance_ids",
+                                            "fields"
+                                          ],
+                                          "type": "object"
+                                        },
+                                        "minItems": 1,
+                                        "type": "array",
+                                        "uniqueItems": true
+                                      },
+                                      "subject": {
+                                        "additionalProperties": false,
+                                        "properties": {
+                                          "id": {
+                                            "minLength": 1,
+                                            "type": "string"
+                                          }
+                                        },
+                                        "required": [
+                                          "id"
+                                        ],
+                                        "type": "object"
+                                      },
+                                      "version": {
+                                        "const": "0.1.0",
+                                        "type": "string"
+                                      }
+                                    },
+                                    "required": [
+                                      "version",
+                                      "grant_id",
+                                      "issued_at",
+                                      "subject",
+                                      "client",
+                                      "source",
+                                      "source_declaration",
+                                      "purpose_code",
+                                      "access_mode",
+                                      "streams"
+                                    ],
+                                    "type": "object"
+                                  },
+                                  "type": {
+                                    "const": "https://pdpp.dev/data-access"
+                                  }
+                                },
+                                "required": [
+                                  "type",
+                                  "grant"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "access_mode": {
+                                    "enum": [
+                                      "single_use",
+                                      "continuous"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "purpose_code": {
+                                    "format": "uri",
+                                    "minLength": 1,
+                                    "type": "string"
+                                  },
+                                  "purpose_description": {
+                                    "minLength": 1,
+                                    "type": "string"
+                                  },
+                                  "retention": {
+                                    "additionalProperties": false,
+                                    "properties": {
+                                      "max_duration": {
+                                        "minLength": 1,
+                                        "type": "string"
+                                      },
+                                      "on_expiry": {
+                                        "enum": [
+                                          "delete",
+                                          "anonymize"
+                                        ],
+                                        "type": "string"
+                                      }
+                                    },
+                                    "required": [
+                                      "max_duration",
+                                      "on_expiry"
+                                    ],
+                                    "type": "object"
+                                  },
+                                  "selection_preset": {
+                                    "minLength": 1,
+                                    "type": "string"
+                                  },
+                                  "source": {
+                                    "additionalProperties": false,
+                                    "properties": {
+                                      "id": {
+                                        "format": "uri",
+                                        "minLength": 1,
+                                        "type": "string"
+                                      },
+                                      "kind": {
+                                        "enum": [
+                                          "connector",
+                                          "provider_native"
+                                        ],
+                                        "type": "string"
+                                      }
+                                    },
+                                    "required": [
+                                      "kind",
+                                      "id"
+                                    ],
+                                    "type": "object"
+                                  },
+                                  "streams": {
+                                    "items": {
+                                      "additionalProperties": false,
+                                      "properties": {
+                                        "fields": {
+                                          "items": {
+                                            "minLength": 1,
+                                            "type": "string"
+                                          },
+                                          "minItems": 1,
+                                          "type": "array",
+                                          "uniqueItems": true
+                                        },
+                                        "instance_ids": {
+                                          "items": {
+                                            "minLength": 1,
+                                            "type": "string"
+                                          },
+                                          "minItems": 1,
+                                          "type": "array",
+                                          "uniqueItems": true
+                                        },
+                                        "name": {
+                                          "minLength": 1,
+                                          "not": {
+                                            "const": "*"
+                                          },
+                                          "type": "string"
+                                        },
+                                        "resources": {
+                                          "items": {
+                                            "minLength": 1,
+                                            "type": "string"
+                                          },
+                                          "minItems": 1,
+                                          "type": "array",
+                                          "uniqueItems": true
+                                        },
+                                        "time_constraint": {
+                                          "additionalProperties": false,
+                                          "anyOf": [
+                                            {
+                                              "required": [
+                                                "since"
+                                              ]
+                                            },
+                                            {
+                                              "required": [
+                                                "until"
+                                              ]
+                                            }
+                                          ],
+                                          "allOf": [
+                                            {
+                                              "if": {
+                                                "properties": {
+                                                  "type": {
+                                                    "const": "date"
+                                                  }
+                                                },
+                                                "required": [
+                                                  "type"
+                                                ]
+                                              },
+                                              "then": {
+                                                "properties": {
+                                                  "since": {
+                                                    "format": "date",
+                                                    "type": "string"
+                                                  },
+                                                  "until": {
+                                                    "format": "date",
+                                                    "type": "string"
+                                                  }
+                                                }
+                                              },
+                                              "else": {
+                                                "properties": {
+                                                  "since": {
+                                                    "format": "date-time",
+                                                    "type": "string"
+                                                  },
+                                                  "until": {
+                                                    "format": "date-time",
+                                                    "type": "string"
+                                                  }
+                                                }
+                                              }
+                                            }
+                                          ],
+                                          "properties": {
+                                            "field": {
+                                              "minLength": 1,
+                                              "type": "string"
+                                            },
+                                            "since": {
+                                              "oneOf": [
+                                                {
+                                                  "format": "date",
+                                                  "type": "string"
+                                                },
+                                                {
+                                                  "format": "date-time",
+                                                  "type": "string"
+                                                }
+                                              ]
+                                            },
+                                            "type": {
+                                              "enum": [
+                                                "date",
+                                                "date-time"
+                                              ],
+                                              "type": "string"
+                                            },
+                                            "until": {
+                                              "oneOf": [
+                                                {
+                                                  "format": "date",
+                                                  "type": "string"
+                                                },
+                                                {
+                                                  "format": "date-time",
+                                                  "type": "string"
+                                                }
+                                              ]
+                                            }
+                                          },
+                                          "required": [
+                                            "field"
+                                          ],
+                                          "type": "object"
+                                        }
+                                      },
+                                      "required": [
+                                        "name",
+                                        "instance_ids",
+                                        "fields"
+                                      ],
+                                      "type": "object"
+                                    },
+                                    "minItems": 1,
+                                    "type": "array",
+                                    "uniqueItems": true
+                                  },
+                                  "type": {
+                                    "const": "https://pdpp.dev/data-access"
+                                  }
+                                },
+                                "required": [
+                                  "type",
+                                  "access_mode",
+                                  "purpose_code",
+                                  "source",
+                                  "streams"
+                                ],
+                                "type": "object"
+                              }
+                            ]
+                          },
+                          "minItems": 1,
+                          "type": "array"
                         },
                         "expires_in": {
                           "minimum": 0,
@@ -5326,6 +6507,595 @@
                           "minLength": 1,
                           "type": "string"
                         },
+                        "authorization_details": {
+                          "items": {
+                            "oneOf": [
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "grant": {
+                                    "additionalProperties": false,
+                                    "properties": {
+                                      "access_mode": {
+                                        "enum": [
+                                          "single_use",
+                                          "continuous"
+                                        ],
+                                        "type": "string"
+                                      },
+                                      "client": {
+                                        "additionalProperties": false,
+                                        "properties": {
+                                          "client_display": {
+                                            "additionalProperties": false,
+                                            "properties": {
+                                              "logo_uri": {
+                                                "format": "uri",
+                                                "type": "string"
+                                              },
+                                              "name": {
+                                                "minLength": 1,
+                                                "type": "string"
+                                              },
+                                              "policy_uri": {
+                                                "format": "uri",
+                                                "type": "string"
+                                              },
+                                              "tos_uri": {
+                                                "format": "uri",
+                                                "type": "string"
+                                              },
+                                              "uri": {
+                                                "format": "uri",
+                                                "type": "string"
+                                              }
+                                            },
+                                            "type": "object"
+                                          },
+                                          "client_id": {
+                                            "minLength": 1,
+                                            "type": "string"
+                                          }
+                                        },
+                                        "required": [
+                                          "client_id"
+                                        ],
+                                        "type": "object"
+                                      },
+                                      "expires_at": {
+                                        "format": "date-time",
+                                        "type": "string"
+                                      },
+                                      "extensions": {
+                                        "additionalProperties": true,
+                                        "propertyNames": {
+                                          "format": "uri",
+                                          "type": "string"
+                                        },
+                                        "type": "object"
+                                      },
+                                      "grantors": {
+                                        "items": {
+                                          "additionalProperties": false,
+                                          "properties": {
+                                            "capacity": {
+                                              "format": "uri",
+                                              "type": "string"
+                                            },
+                                            "id": {
+                                              "minLength": 1,
+                                              "type": "string"
+                                            }
+                                          },
+                                          "required": [
+                                            "id",
+                                            "capacity"
+                                          ],
+                                          "type": "object"
+                                        },
+                                        "minItems": 1,
+                                        "type": "array",
+                                        "uniqueItems": true
+                                      },
+                                      "grant_id": {
+                                        "minLength": 1,
+                                        "type": "string"
+                                      },
+                                      "issued_at": {
+                                        "format": "date-time",
+                                        "type": "string"
+                                      },
+                                      "processing_permissions": {
+                                        "items": {
+                                          "format": "uri",
+                                          "type": "string"
+                                        },
+                                        "type": "array",
+                                        "uniqueItems": true
+                                      },
+                                      "purpose_code": {
+                                        "format": "uri",
+                                        "minLength": 1,
+                                        "type": "string"
+                                      },
+                                      "purpose_description": {
+                                        "minLength": 1,
+                                        "type": "string"
+                                      },
+                                      "retention": {
+                                        "additionalProperties": false,
+                                        "properties": {
+                                          "max_duration": {
+                                            "minLength": 1,
+                                            "type": "string"
+                                          },
+                                          "on_expiry": {
+                                            "enum": [
+                                              "delete",
+                                              "anonymize"
+                                            ],
+                                            "type": "string"
+                                          }
+                                        },
+                                        "required": [
+                                          "max_duration",
+                                          "on_expiry"
+                                        ],
+                                        "type": "object"
+                                      },
+                                      "selection_preset": {
+                                        "minLength": 1,
+                                        "type": "string"
+                                      },
+                                      "source": {
+                                        "additionalProperties": false,
+                                        "properties": {
+                                          "id": {
+                                            "format": "uri",
+                                            "minLength": 1,
+                                            "type": "string"
+                                          },
+                                          "kind": {
+                                            "enum": [
+                                              "connector",
+                                              "provider_native"
+                                            ],
+                                            "type": "string"
+                                          }
+                                        },
+                                        "required": [
+                                          "kind",
+                                          "id"
+                                        ],
+                                        "type": "object"
+                                      },
+                                      "source_declaration": {
+                                        "additionalProperties": false,
+                                        "properties": {
+                                          "version": {
+                                            "minLength": 1,
+                                            "type": "string"
+                                          }
+                                        },
+                                        "required": [
+                                          "version"
+                                        ],
+                                        "type": "object"
+                                      },
+                                      "streams": {
+                                        "items": {
+                                          "additionalProperties": false,
+                                          "properties": {
+                                            "fields": {
+                                              "items": {
+                                                "minLength": 1,
+                                                "type": "string"
+                                              },
+                                              "minItems": 1,
+                                              "type": "array",
+                                              "uniqueItems": true
+                                            },
+                                            "instance_ids": {
+                                              "items": {
+                                                "minLength": 1,
+                                                "type": "string"
+                                              },
+                                              "minItems": 1,
+                                              "type": "array",
+                                              "uniqueItems": true
+                                            },
+                                            "name": {
+                                              "minLength": 1,
+                                              "not": {
+                                                "const": "*"
+                                              },
+                                              "type": "string"
+                                            },
+                                            "resources": {
+                                              "items": {
+                                                "minLength": 1,
+                                                "type": "string"
+                                              },
+                                              "minItems": 1,
+                                              "type": "array",
+                                              "uniqueItems": true
+                                            },
+                                            "time_constraint": {
+                                              "additionalProperties": false,
+                                              "anyOf": [
+                                                {
+                                                  "required": [
+                                                    "since"
+                                                  ]
+                                                },
+                                                {
+                                                  "required": [
+                                                    "until"
+                                                  ]
+                                                }
+                                              ],
+                                              "allOf": [
+                                                {
+                                                  "if": {
+                                                    "properties": {
+                                                      "type": {
+                                                        "const": "date"
+                                                      }
+                                                    },
+                                                    "required": [
+                                                      "type"
+                                                    ]
+                                                  },
+                                                  "then": {
+                                                    "properties": {
+                                                      "since": {
+                                                        "format": "date",
+                                                        "type": "string"
+                                                      },
+                                                      "until": {
+                                                        "format": "date",
+                                                        "type": "string"
+                                                      }
+                                                    }
+                                                  },
+                                                  "else": {
+                                                    "properties": {
+                                                      "since": {
+                                                        "format": "date-time",
+                                                        "type": "string"
+                                                      },
+                                                      "until": {
+                                                        "format": "date-time",
+                                                        "type": "string"
+                                                      }
+                                                    }
+                                                  }
+                                                }
+                                              ],
+                                              "properties": {
+                                                "field": {
+                                                  "minLength": 1,
+                                                  "type": "string"
+                                                },
+                                                "since": {
+                                                  "oneOf": [
+                                                    {
+                                                      "format": "date",
+                                                      "type": "string"
+                                                    },
+                                                    {
+                                                      "format": "date-time",
+                                                      "type": "string"
+                                                    }
+                                                  ]
+                                                },
+                                                "type": {
+                                                  "enum": [
+                                                    "date",
+                                                    "date-time"
+                                                  ],
+                                                  "type": "string"
+                                                },
+                                                "until": {
+                                                  "oneOf": [
+                                                    {
+                                                      "format": "date",
+                                                      "type": "string"
+                                                    },
+                                                    {
+                                                      "format": "date-time",
+                                                      "type": "string"
+                                                    }
+                                                  ]
+                                                }
+                                              },
+                                              "required": [
+                                                "field"
+                                              ],
+                                              "type": "object"
+                                            }
+                                          },
+                                          "required": [
+                                            "name",
+                                            "instance_ids",
+                                            "fields"
+                                          ],
+                                          "type": "object"
+                                        },
+                                        "minItems": 1,
+                                        "type": "array",
+                                        "uniqueItems": true
+                                      },
+                                      "subject": {
+                                        "additionalProperties": false,
+                                        "properties": {
+                                          "id": {
+                                            "minLength": 1,
+                                            "type": "string"
+                                          }
+                                        },
+                                        "required": [
+                                          "id"
+                                        ],
+                                        "type": "object"
+                                      },
+                                      "version": {
+                                        "const": "0.1.0",
+                                        "type": "string"
+                                      }
+                                    },
+                                    "required": [
+                                      "version",
+                                      "grant_id",
+                                      "issued_at",
+                                      "subject",
+                                      "client",
+                                      "source",
+                                      "source_declaration",
+                                      "purpose_code",
+                                      "access_mode",
+                                      "streams"
+                                    ],
+                                    "type": "object"
+                                  },
+                                  "type": {
+                                    "const": "https://pdpp.dev/data-access"
+                                  }
+                                },
+                                "required": [
+                                  "type",
+                                  "grant"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "access_mode": {
+                                    "enum": [
+                                      "single_use",
+                                      "continuous"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "purpose_code": {
+                                    "format": "uri",
+                                    "minLength": 1,
+                                    "type": "string"
+                                  },
+                                  "purpose_description": {
+                                    "minLength": 1,
+                                    "type": "string"
+                                  },
+                                  "retention": {
+                                    "additionalProperties": false,
+                                    "properties": {
+                                      "max_duration": {
+                                        "minLength": 1,
+                                        "type": "string"
+                                      },
+                                      "on_expiry": {
+                                        "enum": [
+                                          "delete",
+                                          "anonymize"
+                                        ],
+                                        "type": "string"
+                                      }
+                                    },
+                                    "required": [
+                                      "max_duration",
+                                      "on_expiry"
+                                    ],
+                                    "type": "object"
+                                  },
+                                  "selection_preset": {
+                                    "minLength": 1,
+                                    "type": "string"
+                                  },
+                                  "source": {
+                                    "additionalProperties": false,
+                                    "properties": {
+                                      "id": {
+                                        "format": "uri",
+                                        "minLength": 1,
+                                        "type": "string"
+                                      },
+                                      "kind": {
+                                        "enum": [
+                                          "connector",
+                                          "provider_native"
+                                        ],
+                                        "type": "string"
+                                      }
+                                    },
+                                    "required": [
+                                      "kind",
+                                      "id"
+                                    ],
+                                    "type": "object"
+                                  },
+                                  "streams": {
+                                    "items": {
+                                      "additionalProperties": false,
+                                      "properties": {
+                                        "fields": {
+                                          "items": {
+                                            "minLength": 1,
+                                            "type": "string"
+                                          },
+                                          "minItems": 1,
+                                          "type": "array",
+                                          "uniqueItems": true
+                                        },
+                                        "instance_ids": {
+                                          "items": {
+                                            "minLength": 1,
+                                            "type": "string"
+                                          },
+                                          "minItems": 1,
+                                          "type": "array",
+                                          "uniqueItems": true
+                                        },
+                                        "name": {
+                                          "minLength": 1,
+                                          "not": {
+                                            "const": "*"
+                                          },
+                                          "type": "string"
+                                        },
+                                        "resources": {
+                                          "items": {
+                                            "minLength": 1,
+                                            "type": "string"
+                                          },
+                                          "minItems": 1,
+                                          "type": "array",
+                                          "uniqueItems": true
+                                        },
+                                        "time_constraint": {
+                                          "additionalProperties": false,
+                                          "anyOf": [
+                                            {
+                                              "required": [
+                                                "since"
+                                              ]
+                                            },
+                                            {
+                                              "required": [
+                                                "until"
+                                              ]
+                                            }
+                                          ],
+                                          "allOf": [
+                                            {
+                                              "if": {
+                                                "properties": {
+                                                  "type": {
+                                                    "const": "date"
+                                                  }
+                                                },
+                                                "required": [
+                                                  "type"
+                                                ]
+                                              },
+                                              "then": {
+                                                "properties": {
+                                                  "since": {
+                                                    "format": "date",
+                                                    "type": "string"
+                                                  },
+                                                  "until": {
+                                                    "format": "date",
+                                                    "type": "string"
+                                                  }
+                                                }
+                                              },
+                                              "else": {
+                                                "properties": {
+                                                  "since": {
+                                                    "format": "date-time",
+                                                    "type": "string"
+                                                  },
+                                                  "until": {
+                                                    "format": "date-time",
+                                                    "type": "string"
+                                                  }
+                                                }
+                                              }
+                                            }
+                                          ],
+                                          "properties": {
+                                            "field": {
+                                              "minLength": 1,
+                                              "type": "string"
+                                            },
+                                            "since": {
+                                              "oneOf": [
+                                                {
+                                                  "format": "date",
+                                                  "type": "string"
+                                                },
+                                                {
+                                                  "format": "date-time",
+                                                  "type": "string"
+                                                }
+                                              ]
+                                            },
+                                            "type": {
+                                              "enum": [
+                                                "date",
+                                                "date-time"
+                                              ],
+                                              "type": "string"
+                                            },
+                                            "until": {
+                                              "oneOf": [
+                                                {
+                                                  "format": "date",
+                                                  "type": "string"
+                                                },
+                                                {
+                                                  "format": "date-time",
+                                                  "type": "string"
+                                                }
+                                              ]
+                                            }
+                                          },
+                                          "required": [
+                                            "field"
+                                          ],
+                                          "type": "object"
+                                        }
+                                      },
+                                      "required": [
+                                        "name",
+                                        "instance_ids",
+                                        "fields"
+                                      ],
+                                      "type": "object"
+                                    },
+                                    "minItems": 1,
+                                    "type": "array",
+                                    "uniqueItems": true
+                                  },
+                                  "type": {
+                                    "const": "https://pdpp.dev/data-access"
+                                  }
+                                },
+                                "required": [
+                                  "type",
+                                  "access_mode",
+                                  "purpose_code",
+                                  "source",
+                                  "streams"
+                                ],
+                                "type": "object"
+                              }
+                            ]
+                          },
+                          "minItems": 1,
+                          "type": "array"
+                        },
                         "grant_id": {
                           "minLength": 1,
                           "type": "string"
@@ -5342,6 +7112,621 @@
                         "access_token",
                         "token_type",
                         "grant_id"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "access_token": {
+                          "minLength": 1,
+                          "type": "string"
+                        },
+                        "authorization_details": {
+                          "items": {
+                            "oneOf": [
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "grant": {
+                                    "additionalProperties": false,
+                                    "properties": {
+                                      "access_mode": {
+                                        "enum": [
+                                          "single_use",
+                                          "continuous"
+                                        ],
+                                        "type": "string"
+                                      },
+                                      "client": {
+                                        "additionalProperties": false,
+                                        "properties": {
+                                          "client_display": {
+                                            "additionalProperties": false,
+                                            "properties": {
+                                              "logo_uri": {
+                                                "format": "uri",
+                                                "type": "string"
+                                              },
+                                              "name": {
+                                                "minLength": 1,
+                                                "type": "string"
+                                              },
+                                              "policy_uri": {
+                                                "format": "uri",
+                                                "type": "string"
+                                              },
+                                              "tos_uri": {
+                                                "format": "uri",
+                                                "type": "string"
+                                              },
+                                              "uri": {
+                                                "format": "uri",
+                                                "type": "string"
+                                              }
+                                            },
+                                            "type": "object"
+                                          },
+                                          "client_id": {
+                                            "minLength": 1,
+                                            "type": "string"
+                                          }
+                                        },
+                                        "required": [
+                                          "client_id"
+                                        ],
+                                        "type": "object"
+                                      },
+                                      "expires_at": {
+                                        "format": "date-time",
+                                        "type": "string"
+                                      },
+                                      "extensions": {
+                                        "additionalProperties": true,
+                                        "propertyNames": {
+                                          "format": "uri",
+                                          "type": "string"
+                                        },
+                                        "type": "object"
+                                      },
+                                      "grantors": {
+                                        "items": {
+                                          "additionalProperties": false,
+                                          "properties": {
+                                            "capacity": {
+                                              "format": "uri",
+                                              "type": "string"
+                                            },
+                                            "id": {
+                                              "minLength": 1,
+                                              "type": "string"
+                                            }
+                                          },
+                                          "required": [
+                                            "id",
+                                            "capacity"
+                                          ],
+                                          "type": "object"
+                                        },
+                                        "minItems": 1,
+                                        "type": "array",
+                                        "uniqueItems": true
+                                      },
+                                      "grant_id": {
+                                        "minLength": 1,
+                                        "type": "string"
+                                      },
+                                      "issued_at": {
+                                        "format": "date-time",
+                                        "type": "string"
+                                      },
+                                      "processing_permissions": {
+                                        "items": {
+                                          "format": "uri",
+                                          "type": "string"
+                                        },
+                                        "type": "array",
+                                        "uniqueItems": true
+                                      },
+                                      "purpose_code": {
+                                        "format": "uri",
+                                        "minLength": 1,
+                                        "type": "string"
+                                      },
+                                      "purpose_description": {
+                                        "minLength": 1,
+                                        "type": "string"
+                                      },
+                                      "retention": {
+                                        "additionalProperties": false,
+                                        "properties": {
+                                          "max_duration": {
+                                            "minLength": 1,
+                                            "type": "string"
+                                          },
+                                          "on_expiry": {
+                                            "enum": [
+                                              "delete",
+                                              "anonymize"
+                                            ],
+                                            "type": "string"
+                                          }
+                                        },
+                                        "required": [
+                                          "max_duration",
+                                          "on_expiry"
+                                        ],
+                                        "type": "object"
+                                      },
+                                      "selection_preset": {
+                                        "minLength": 1,
+                                        "type": "string"
+                                      },
+                                      "source": {
+                                        "additionalProperties": false,
+                                        "properties": {
+                                          "id": {
+                                            "format": "uri",
+                                            "minLength": 1,
+                                            "type": "string"
+                                          },
+                                          "kind": {
+                                            "enum": [
+                                              "connector",
+                                              "provider_native"
+                                            ],
+                                            "type": "string"
+                                          }
+                                        },
+                                        "required": [
+                                          "kind",
+                                          "id"
+                                        ],
+                                        "type": "object"
+                                      },
+                                      "source_declaration": {
+                                        "additionalProperties": false,
+                                        "properties": {
+                                          "version": {
+                                            "minLength": 1,
+                                            "type": "string"
+                                          }
+                                        },
+                                        "required": [
+                                          "version"
+                                        ],
+                                        "type": "object"
+                                      },
+                                      "streams": {
+                                        "items": {
+                                          "additionalProperties": false,
+                                          "properties": {
+                                            "fields": {
+                                              "items": {
+                                                "minLength": 1,
+                                                "type": "string"
+                                              },
+                                              "minItems": 1,
+                                              "type": "array",
+                                              "uniqueItems": true
+                                            },
+                                            "instance_ids": {
+                                              "items": {
+                                                "minLength": 1,
+                                                "type": "string"
+                                              },
+                                              "minItems": 1,
+                                              "type": "array",
+                                              "uniqueItems": true
+                                            },
+                                            "name": {
+                                              "minLength": 1,
+                                              "not": {
+                                                "const": "*"
+                                              },
+                                              "type": "string"
+                                            },
+                                            "resources": {
+                                              "items": {
+                                                "minLength": 1,
+                                                "type": "string"
+                                              },
+                                              "minItems": 1,
+                                              "type": "array",
+                                              "uniqueItems": true
+                                            },
+                                            "time_constraint": {
+                                              "additionalProperties": false,
+                                              "anyOf": [
+                                                {
+                                                  "required": [
+                                                    "since"
+                                                  ]
+                                                },
+                                                {
+                                                  "required": [
+                                                    "until"
+                                                  ]
+                                                }
+                                              ],
+                                              "allOf": [
+                                                {
+                                                  "if": {
+                                                    "properties": {
+                                                      "type": {
+                                                        "const": "date"
+                                                      }
+                                                    },
+                                                    "required": [
+                                                      "type"
+                                                    ]
+                                                  },
+                                                  "then": {
+                                                    "properties": {
+                                                      "since": {
+                                                        "format": "date",
+                                                        "type": "string"
+                                                      },
+                                                      "until": {
+                                                        "format": "date",
+                                                        "type": "string"
+                                                      }
+                                                    }
+                                                  },
+                                                  "else": {
+                                                    "properties": {
+                                                      "since": {
+                                                        "format": "date-time",
+                                                        "type": "string"
+                                                      },
+                                                      "until": {
+                                                        "format": "date-time",
+                                                        "type": "string"
+                                                      }
+                                                    }
+                                                  }
+                                                }
+                                              ],
+                                              "properties": {
+                                                "field": {
+                                                  "minLength": 1,
+                                                  "type": "string"
+                                                },
+                                                "since": {
+                                                  "oneOf": [
+                                                    {
+                                                      "format": "date",
+                                                      "type": "string"
+                                                    },
+                                                    {
+                                                      "format": "date-time",
+                                                      "type": "string"
+                                                    }
+                                                  ]
+                                                },
+                                                "type": {
+                                                  "enum": [
+                                                    "date",
+                                                    "date-time"
+                                                  ],
+                                                  "type": "string"
+                                                },
+                                                "until": {
+                                                  "oneOf": [
+                                                    {
+                                                      "format": "date",
+                                                      "type": "string"
+                                                    },
+                                                    {
+                                                      "format": "date-time",
+                                                      "type": "string"
+                                                    }
+                                                  ]
+                                                }
+                                              },
+                                              "required": [
+                                                "field"
+                                              ],
+                                              "type": "object"
+                                            }
+                                          },
+                                          "required": [
+                                            "name",
+                                            "instance_ids",
+                                            "fields"
+                                          ],
+                                          "type": "object"
+                                        },
+                                        "minItems": 1,
+                                        "type": "array",
+                                        "uniqueItems": true
+                                      },
+                                      "subject": {
+                                        "additionalProperties": false,
+                                        "properties": {
+                                          "id": {
+                                            "minLength": 1,
+                                            "type": "string"
+                                          }
+                                        },
+                                        "required": [
+                                          "id"
+                                        ],
+                                        "type": "object"
+                                      },
+                                      "version": {
+                                        "const": "0.1.0",
+                                        "type": "string"
+                                      }
+                                    },
+                                    "required": [
+                                      "version",
+                                      "grant_id",
+                                      "issued_at",
+                                      "subject",
+                                      "client",
+                                      "source",
+                                      "source_declaration",
+                                      "purpose_code",
+                                      "access_mode",
+                                      "streams"
+                                    ],
+                                    "type": "object"
+                                  },
+                                  "type": {
+                                    "const": "https://pdpp.dev/data-access"
+                                  }
+                                },
+                                "required": [
+                                  "type",
+                                  "grant"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "access_mode": {
+                                    "enum": [
+                                      "single_use",
+                                      "continuous"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "purpose_code": {
+                                    "format": "uri",
+                                    "minLength": 1,
+                                    "type": "string"
+                                  },
+                                  "purpose_description": {
+                                    "minLength": 1,
+                                    "type": "string"
+                                  },
+                                  "retention": {
+                                    "additionalProperties": false,
+                                    "properties": {
+                                      "max_duration": {
+                                        "minLength": 1,
+                                        "type": "string"
+                                      },
+                                      "on_expiry": {
+                                        "enum": [
+                                          "delete",
+                                          "anonymize"
+                                        ],
+                                        "type": "string"
+                                      }
+                                    },
+                                    "required": [
+                                      "max_duration",
+                                      "on_expiry"
+                                    ],
+                                    "type": "object"
+                                  },
+                                  "selection_preset": {
+                                    "minLength": 1,
+                                    "type": "string"
+                                  },
+                                  "source": {
+                                    "additionalProperties": false,
+                                    "properties": {
+                                      "id": {
+                                        "format": "uri",
+                                        "minLength": 1,
+                                        "type": "string"
+                                      },
+                                      "kind": {
+                                        "enum": [
+                                          "connector",
+                                          "provider_native"
+                                        ],
+                                        "type": "string"
+                                      }
+                                    },
+                                    "required": [
+                                      "kind",
+                                      "id"
+                                    ],
+                                    "type": "object"
+                                  },
+                                  "streams": {
+                                    "items": {
+                                      "additionalProperties": false,
+                                      "properties": {
+                                        "fields": {
+                                          "items": {
+                                            "minLength": 1,
+                                            "type": "string"
+                                          },
+                                          "minItems": 1,
+                                          "type": "array",
+                                          "uniqueItems": true
+                                        },
+                                        "instance_ids": {
+                                          "items": {
+                                            "minLength": 1,
+                                            "type": "string"
+                                          },
+                                          "minItems": 1,
+                                          "type": "array",
+                                          "uniqueItems": true
+                                        },
+                                        "name": {
+                                          "minLength": 1,
+                                          "not": {
+                                            "const": "*"
+                                          },
+                                          "type": "string"
+                                        },
+                                        "resources": {
+                                          "items": {
+                                            "minLength": 1,
+                                            "type": "string"
+                                          },
+                                          "minItems": 1,
+                                          "type": "array",
+                                          "uniqueItems": true
+                                        },
+                                        "time_constraint": {
+                                          "additionalProperties": false,
+                                          "anyOf": [
+                                            {
+                                              "required": [
+                                                "since"
+                                              ]
+                                            },
+                                            {
+                                              "required": [
+                                                "until"
+                                              ]
+                                            }
+                                          ],
+                                          "allOf": [
+                                            {
+                                              "if": {
+                                                "properties": {
+                                                  "type": {
+                                                    "const": "date"
+                                                  }
+                                                },
+                                                "required": [
+                                                  "type"
+                                                ]
+                                              },
+                                              "then": {
+                                                "properties": {
+                                                  "since": {
+                                                    "format": "date",
+                                                    "type": "string"
+                                                  },
+                                                  "until": {
+                                                    "format": "date",
+                                                    "type": "string"
+                                                  }
+                                                }
+                                              },
+                                              "else": {
+                                                "properties": {
+                                                  "since": {
+                                                    "format": "date-time",
+                                                    "type": "string"
+                                                  },
+                                                  "until": {
+                                                    "format": "date-time",
+                                                    "type": "string"
+                                                  }
+                                                }
+                                              }
+                                            }
+                                          ],
+                                          "properties": {
+                                            "field": {
+                                              "minLength": 1,
+                                              "type": "string"
+                                            },
+                                            "since": {
+                                              "oneOf": [
+                                                {
+                                                  "format": "date",
+                                                  "type": "string"
+                                                },
+                                                {
+                                                  "format": "date-time",
+                                                  "type": "string"
+                                                }
+                                              ]
+                                            },
+                                            "type": {
+                                              "enum": [
+                                                "date",
+                                                "date-time"
+                                              ],
+                                              "type": "string"
+                                            },
+                                            "until": {
+                                              "oneOf": [
+                                                {
+                                                  "format": "date",
+                                                  "type": "string"
+                                                },
+                                                {
+                                                  "format": "date-time",
+                                                  "type": "string"
+                                                }
+                                              ]
+                                            }
+                                          },
+                                          "required": [
+                                            "field"
+                                          ],
+                                          "type": "object"
+                                        }
+                                      },
+                                      "required": [
+                                        "name",
+                                        "instance_ids",
+                                        "fields"
+                                      ],
+                                      "type": "object"
+                                    },
+                                    "minItems": 1,
+                                    "type": "array",
+                                    "uniqueItems": true
+                                  },
+                                  "type": {
+                                    "const": "https://pdpp.dev/data-access"
+                                  }
+                                },
+                                "required": [
+                                  "type",
+                                  "access_mode",
+                                  "purpose_code",
+                                  "source",
+                                  "streams"
+                                ],
+                                "type": "object"
+                              }
+                            ]
+                          },
+                          "minItems": 1,
+                          "type": "array"
+                        },
+                        "expires_in": {
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "refresh_token": {
+                          "minLength": 1,
+                          "type": "string"
+                        },
+                        "token_type": {
+                          "const": "Bearer"
+                        }
+                      },
+                      "required": [
+                        "access_token",
+                        "token_type",
+                        "authorization_details"
                       ],
                       "type": "object"
                     }
@@ -5582,6 +7967,37 @@
                           "format": "date-time",
                           "type": "string"
                         },
+                        "extensions": {
+                          "additionalProperties": true,
+                          "propertyNames": {
+                            "format": "uri",
+                            "type": "string"
+                          },
+                          "type": "object"
+                        },
+                        "grantors": {
+                          "items": {
+                            "additionalProperties": false,
+                            "properties": {
+                              "capacity": {
+                                "format": "uri",
+                                "type": "string"
+                              },
+                              "id": {
+                                "minLength": 1,
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "id",
+                              "capacity"
+                            ],
+                            "type": "object"
+                          },
+                          "minItems": 1,
+                          "type": "array",
+                          "uniqueItems": true
+                        },
                         "grant_id": {
                           "minLength": 1,
                           "type": "string"
@@ -5589,6 +8005,14 @@
                         "issued_at": {
                           "format": "date-time",
                           "type": "string"
+                        },
+                        "processing_permissions": {
+                          "items": {
+                            "format": "uri",
+                            "type": "string"
+                          },
+                          "type": "array",
+                          "uniqueItems": true
                         },
                         "purpose_code": {
                           "format": "uri",
@@ -5711,18 +8135,79 @@
                                     ]
                                   }
                                 ],
+                                "allOf": [
+                                  {
+                                    "if": {
+                                      "properties": {
+                                        "type": {
+                                          "const": "date"
+                                        }
+                                      },
+                                      "required": [
+                                        "type"
+                                      ]
+                                    },
+                                    "then": {
+                                      "properties": {
+                                        "since": {
+                                          "format": "date",
+                                          "type": "string"
+                                        },
+                                        "until": {
+                                          "format": "date",
+                                          "type": "string"
+                                        }
+                                      }
+                                    },
+                                    "else": {
+                                      "properties": {
+                                        "since": {
+                                          "format": "date-time",
+                                          "type": "string"
+                                        },
+                                        "until": {
+                                          "format": "date-time",
+                                          "type": "string"
+                                        }
+                                      }
+                                    }
+                                  }
+                                ],
                                 "properties": {
                                   "field": {
                                     "minLength": 1,
                                     "type": "string"
                                   },
                                   "since": {
-                                    "format": "date-time",
+                                    "oneOf": [
+                                      {
+                                        "format": "date",
+                                        "type": "string"
+                                      },
+                                      {
+                                        "format": "date-time",
+                                        "type": "string"
+                                      }
+                                    ]
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "date",
+                                      "date-time"
+                                    ],
                                     "type": "string"
                                   },
                                   "until": {
-                                    "format": "date-time",
-                                    "type": "string"
+                                    "oneOf": [
+                                      {
+                                        "format": "date",
+                                        "type": "string"
+                                      },
+                                      {
+                                        "format": "date-time",
+                                        "type": "string"
+                                      }
+                                    ]
                                   }
                                 },
                                 "required": [
@@ -5781,6 +8266,36 @@
                     "inactive_reason": {
                       "minLength": 1,
                       "type": "string"
+                    },
+                    "pdpp_instance_bindings": {
+                      "items": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "instance_id": {
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          "rs_instance": {
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          "source_id": {
+                            "format": "uri",
+                            "type": "string"
+                          },
+                          "stream": {
+                            "minLength": 1,
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "source_id",
+                          "instance_id",
+                          "rs_instance"
+                        ],
+                        "type": "object"
+                      },
+                      "type": "array"
                     },
                     "pdpp_token_kind": {
                       "description": "Core defines \"owner\" and \"client\". Deployments MAY introduce additional token kinds in companion profiles (the reference emits \"mcp_package\"). A resource server that receives a pdpp_token_kind value it does not recognize MUST treat the token as unauthorized for all operations defined in Core.",
@@ -6135,7 +8650,31 @@
         "summary": "Revoke a grant and all tokens minted from it.",
         "tags": [
           "grants"
-        ]
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "pdpp_disposition": {
+                    "enum": [
+                      "keep",
+                      "delete"
+                    ],
+                    "type": "string"
+                  },
+                  "reported_at": {
+                    "format": "date-time",
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        }
       }
     },
     "/v1/connectors": {
@@ -6176,31 +8715,67 @@
                                   "type": "object"
                                 },
                                 "freshness": {
-                                  "$id": "pdpp/common/Freshness",
-                                  "additionalProperties": false,
-                                  "properties": {
-                                    "captured_at": {
-                                      "format": "date-time",
-                                      "type": "string"
-                                    },
-                                    "last_attempted_at": {
-                                      "format": "date-time",
-                                      "type": "string"
-                                    },
-                                    "status": {
-                                      "$id": "pdpp/common/FreshnessStatus",
-                                      "enum": [
-                                        "current",
-                                        "stale",
-                                        "unknown"
+                                  "oneOf": [
+                                    {
+                                      "$id": "pdpp/common/Freshness",
+                                      "additionalProperties": false,
+                                      "properties": {
+                                        "captured_at": {
+                                          "format": "date-time",
+                                          "type": "string"
+                                        },
+                                        "last_attempted_at": {
+                                          "format": "date-time",
+                                          "type": "string"
+                                        },
+                                        "status": {
+                                          "$id": "pdpp/common/FreshnessStatus",
+                                          "enum": [
+                                            "current",
+                                            "stale",
+                                            "unknown"
+                                          ],
+                                          "type": "string"
+                                        }
+                                      },
+                                      "required": [
+                                        "status"
                                       ],
-                                      "type": "string"
+                                      "type": "object"
+                                    },
+                                    {
+                                      "$id": "pdpp/common/InstanceFreshnessArray",
+                                      "items": {
+                                        "additionalProperties": false,
+                                        "properties": {
+                                          "instance_id": {
+                                            "minLength": 1,
+                                            "type": "string"
+                                          },
+                                          "last_failure_at": {
+                                            "format": "date-time",
+                                            "type": [
+                                              "string",
+                                              "null"
+                                            ]
+                                          },
+                                          "last_success_at": {
+                                            "format": "date-time",
+                                            "type": [
+                                              "string",
+                                              "null"
+                                            ]
+                                          }
+                                        },
+                                        "required": [
+                                          "instance_id",
+                                          "last_success_at"
+                                        ],
+                                        "type": "object"
+                                      },
+                                      "type": "array"
                                     }
-                                  },
-                                  "required": [
-                                    "status"
-                                  ],
-                                  "type": "object"
+                                  ]
                                 },
                                 "last_updated": {
                                   "type": [
@@ -7036,31 +9611,67 @@
                                   "type": "object"
                                 },
                                 "freshness": {
-                                  "$id": "pdpp/common/Freshness",
-                                  "additionalProperties": false,
-                                  "properties": {
-                                    "captured_at": {
-                                      "format": "date-time",
-                                      "type": "string"
-                                    },
-                                    "last_attempted_at": {
-                                      "format": "date-time",
-                                      "type": "string"
-                                    },
-                                    "status": {
-                                      "$id": "pdpp/common/FreshnessStatus",
-                                      "enum": [
-                                        "current",
-                                        "stale",
-                                        "unknown"
+                                  "oneOf": [
+                                    {
+                                      "$id": "pdpp/common/Freshness",
+                                      "additionalProperties": false,
+                                      "properties": {
+                                        "captured_at": {
+                                          "format": "date-time",
+                                          "type": "string"
+                                        },
+                                        "last_attempted_at": {
+                                          "format": "date-time",
+                                          "type": "string"
+                                        },
+                                        "status": {
+                                          "$id": "pdpp/common/FreshnessStatus",
+                                          "enum": [
+                                            "current",
+                                            "stale",
+                                            "unknown"
+                                          ],
+                                          "type": "string"
+                                        }
+                                      },
+                                      "required": [
+                                        "status"
                                       ],
-                                      "type": "string"
+                                      "type": "object"
+                                    },
+                                    {
+                                      "$id": "pdpp/common/InstanceFreshnessArray",
+                                      "items": {
+                                        "additionalProperties": false,
+                                        "properties": {
+                                          "instance_id": {
+                                            "minLength": 1,
+                                            "type": "string"
+                                          },
+                                          "last_failure_at": {
+                                            "format": "date-time",
+                                            "type": [
+                                              "string",
+                                              "null"
+                                            ]
+                                          },
+                                          "last_success_at": {
+                                            "format": "date-time",
+                                            "type": [
+                                              "string",
+                                              "null"
+                                            ]
+                                          }
+                                        },
+                                        "required": [
+                                          "instance_id",
+                                          "last_success_at"
+                                        ],
+                                        "type": "object"
+                                      },
+                                      "type": "array"
                                     }
-                                  },
-                                  "required": [
-                                    "status"
-                                  ],
-                                  "type": "object"
+                                  ]
                                 },
                                 "granted_connections": {
                                   "description": "Connections the caller's grant authorizes for this stream under the addressed connector. Clients MAY pass any `connection_id` here on a subsequent read to scope without trial-and-error. Omitted for provider-native sources where connection identity does not apply.",
@@ -7637,31 +10248,67 @@
                             "type": "string"
                           },
                           "freshness": {
-                            "$id": "pdpp/common/Freshness",
-                            "additionalProperties": false,
-                            "properties": {
-                              "captured_at": {
-                                "format": "date-time",
-                                "type": "string"
-                              },
-                              "last_attempted_at": {
-                                "format": "date-time",
-                                "type": "string"
-                              },
-                              "status": {
-                                "$id": "pdpp/common/FreshnessStatus",
-                                "enum": [
-                                  "current",
-                                  "stale",
-                                  "unknown"
+                            "oneOf": [
+                              {
+                                "$id": "pdpp/common/Freshness",
+                                "additionalProperties": false,
+                                "properties": {
+                                  "captured_at": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "last_attempted_at": {
+                                    "format": "date-time",
+                                    "type": "string"
+                                  },
+                                  "status": {
+                                    "$id": "pdpp/common/FreshnessStatus",
+                                    "enum": [
+                                      "current",
+                                      "stale",
+                                      "unknown"
+                                    ],
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "status"
                                 ],
-                                "type": "string"
+                                "type": "object"
+                              },
+                              {
+                                "$id": "pdpp/common/InstanceFreshnessArray",
+                                "items": {
+                                  "additionalProperties": false,
+                                  "properties": {
+                                    "instance_id": {
+                                      "minLength": 1,
+                                      "type": "string"
+                                    },
+                                    "last_failure_at": {
+                                      "format": "date-time",
+                                      "type": [
+                                        "string",
+                                        "null"
+                                      ]
+                                    },
+                                    "last_success_at": {
+                                      "format": "date-time",
+                                      "type": [
+                                        "string",
+                                        "null"
+                                      ]
+                                    }
+                                  },
+                                  "required": [
+                                    "instance_id",
+                                    "last_success_at"
+                                  ],
+                                  "type": "object"
+                                },
+                                "type": "array"
                               }
-                            },
-                            "required": [
-                              "status"
-                            ],
-                            "type": "object"
+                            ]
                           },
                           "last_updated": {
                             "type": [
@@ -8452,31 +11099,67 @@
                       "type": "object"
                     },
                     "freshness": {
-                      "$id": "pdpp/common/Freshness",
-                      "additionalProperties": false,
-                      "properties": {
-                        "captured_at": {
-                          "format": "date-time",
-                          "type": "string"
-                        },
-                        "last_attempted_at": {
-                          "format": "date-time",
-                          "type": "string"
-                        },
-                        "status": {
-                          "$id": "pdpp/common/FreshnessStatus",
-                          "enum": [
-                            "current",
-                            "stale",
-                            "unknown"
+                      "oneOf": [
+                        {
+                          "$id": "pdpp/common/Freshness",
+                          "additionalProperties": false,
+                          "properties": {
+                            "captured_at": {
+                              "format": "date-time",
+                              "type": "string"
+                            },
+                            "last_attempted_at": {
+                              "format": "date-time",
+                              "type": "string"
+                            },
+                            "status": {
+                              "$id": "pdpp/common/FreshnessStatus",
+                              "enum": [
+                                "current",
+                                "stale",
+                                "unknown"
+                              ],
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "status"
                           ],
-                          "type": "string"
+                          "type": "object"
+                        },
+                        {
+                          "$id": "pdpp/common/InstanceFreshnessArray",
+                          "items": {
+                            "additionalProperties": false,
+                            "properties": {
+                              "instance_id": {
+                                "minLength": 1,
+                                "type": "string"
+                              },
+                              "last_failure_at": {
+                                "format": "date-time",
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
+                              },
+                              "last_success_at": {
+                                "format": "date-time",
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
+                              }
+                            },
+                            "required": [
+                              "instance_id",
+                              "last_success_at"
+                            ],
+                            "type": "object"
+                          },
+                          "type": "array"
                         }
-                      },
-                      "required": [
-                        "status"
-                      ],
-                      "type": "object"
+                      ]
                     },
                     "granted_connections": {
                       "description": "Connections the caller's grant authorizes for this stream under the addressed connector. Clients MAY pass any `connection_id` here on a subsequent read to scope without trial-and-error. Omitted for provider-native sources where connection identity does not apply.",
@@ -9150,6 +11833,10 @@
                           "id": {
                             "type": "string"
                           },
+                          "instance_id": {
+                            "minLength": 1,
+                            "type": "string"
+                          },
                           "object": {
                             "const": "record"
                           },
@@ -9180,31 +11867,67 @@
                       "const": "list"
                     },
                     "freshness": {
-                      "$id": "pdpp/common/Freshness",
-                      "additionalProperties": false,
-                      "properties": {
-                        "captured_at": {
-                          "format": "date-time",
-                          "type": "string"
-                        },
-                        "last_attempted_at": {
-                          "format": "date-time",
-                          "type": "string"
-                        },
-                        "status": {
-                          "$id": "pdpp/common/FreshnessStatus",
-                          "enum": [
-                            "current",
-                            "stale",
-                            "unknown"
+                      "oneOf": [
+                        {
+                          "$id": "pdpp/common/Freshness",
+                          "additionalProperties": false,
+                          "properties": {
+                            "captured_at": {
+                              "format": "date-time",
+                              "type": "string"
+                            },
+                            "last_attempted_at": {
+                              "format": "date-time",
+                              "type": "string"
+                            },
+                            "status": {
+                              "$id": "pdpp/common/FreshnessStatus",
+                              "enum": [
+                                "current",
+                                "stale",
+                                "unknown"
+                              ],
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "status"
                           ],
-                          "type": "string"
+                          "type": "object"
+                        },
+                        {
+                          "$id": "pdpp/common/InstanceFreshnessArray",
+                          "items": {
+                            "additionalProperties": false,
+                            "properties": {
+                              "instance_id": {
+                                "minLength": 1,
+                                "type": "string"
+                              },
+                              "last_failure_at": {
+                                "format": "date-time",
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
+                              },
+                              "last_success_at": {
+                                "format": "date-time",
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
+                              }
+                            },
+                            "required": [
+                              "instance_id",
+                              "last_success_at"
+                            ],
+                            "type": "object"
+                          },
+                          "type": "array"
                         }
-                      },
-                      "required": [
-                        "status"
-                      ],
-                      "type": "object"
+                      ]
                     },
                     "meta": {
                       "$id": "pdpp/canonical/Meta",
@@ -10508,6 +13231,10 @@
                     "id": {
                       "type": "string"
                     },
+                    "instance_id": {
+                      "minLength": 1,
+                      "type": "string"
+                    },
                     "object": {
                       "const": "record"
                     },
@@ -11149,6 +13876,10 @@
                           "object": {
                             "const": "search_result"
                           },
+                          "instance_id": {
+                            "minLength": 1,
+                            "type": "string"
+                          },
                           "record_key": {
                             "minLength": 1,
                             "type": "string"
@@ -11730,6 +14461,10 @@
                           "object": {
                             "const": "search_result"
                           },
+                          "instance_id": {
+                            "minLength": 1,
+                            "type": "string"
+                          },
                           "record_key": {
                             "minLength": 1,
                             "type": "string"
@@ -12308,6 +15043,10 @@
                           },
                           "object": {
                             "const": "search_result"
+                          },
+                          "instance_id": {
+                            "minLength": 1,
+                            "type": "string"
                           },
                           "record_key": {
                             "minLength": 1,
@@ -13927,6 +16666,10 @@
                             "type": "string"
                           },
                           "id": {
+                            "type": "string"
+                          },
+                          "instance_id": {
+                            "minLength": 1,
                             "type": "string"
                           },
                           "matched_field": {
@@ -47542,6 +50285,10 @@
                           "emitted_at": {
                             "type": "string"
                           },
+                          "instance_id": {
+                            "minLength": 1,
+                            "type": "string"
+                          },
                           "object": {
                             "const": "timeline_record"
                           },
@@ -47603,6 +50350,10 @@
                             ]
                           },
                           "emitted_at": {
+                            "type": "string"
+                          },
+                          "instance_id": {
+                            "minLength": 1,
                             "type": "string"
                           },
                           "object": {

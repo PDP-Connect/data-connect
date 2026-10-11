@@ -299,6 +299,12 @@ Revoke a grant and all tokens minted from it.
 
 - `grantId` - string
 
+### Request body
+
+`application/json`
+- `pdpp_disposition` - enum `keep | delete`
+- `reported_at` - string · format: date-time
+
 ### Responses
 
 - `200` - JSON body
