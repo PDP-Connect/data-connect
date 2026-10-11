@@ -32,16 +32,27 @@ export class ToyApp implements HeldStore {
     this.#client = client;
   }
 
+  grantIds(): Iterable<string> {
+    const ids = new Set([...this.records.keys(), ...this.summaries.keys()]);
+    for (const entries of this.index.values()) {
+      for (const key of entries) ids.add(key.slice(0, key.lastIndexOf(":")));
+    }
+    return ids;
+  }
+
   /** Store records from a read. Rereads replace the copy; they never move lifecycle clocks. */
   sync(grantId: string, records: ToyRecord[]): void {
     if (this.#client && !this.#client.acquire(grantId)) {
       // A late delivery under an erased grant is dropped, not stored.
       return;
     }
-    const prior = this.records.get(grantId) ?? [];
+    const erased = this.#client?.erasedStreams(grantId) ?? new Set<string>();
+    const prior = (this.records.get(grantId) ?? []).filter((r) => !erased.has(r.stream));
     const merged = new Map(prior.map((r) => [r.id, r]));
     for (const r of records) {
-      merged.set(r.id, r);
+      if (!erased.has(r.stream)) {
+        merged.set(r.id, r);
+      }
     }
     this.records.set(grantId, [...merged.values()]);
     this.reindex(grantId);
