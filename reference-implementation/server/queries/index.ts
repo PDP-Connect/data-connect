@@ -187,6 +187,7 @@ export interface ReferenceQueryRegistry extends Readonly<Record<string, Register
   readonly authGrantsGetForRevocation: ReadOneQuery;
   // Auth — grants
   readonly authGrantsInsert: MutationQuery;
+  readonly authGrantsListAllIdsByClientId: SmallEnumerationQuery;
   readonly authGrantsListActiveIdsByClientId: SmallEnumerationQuery;
   readonly authGrantsMarkConsumed: MutationQuery;
   readonly authGrantsMarkRevoked: MutationQuery;
@@ -838,6 +839,7 @@ export function loadReferenceQueries(queryDir = QUERIES_DIR): ReferenceQueryRegi
     "authGrantsGetForRevocation",
     "authGrantsMarkRevoked",
     "authGrantsListActiveIdsByClientId",
+    "authGrantsListAllIdsByClientId",
     // Auth — tokens
     "authTokensInsertClient",
     "authTokensInsertRefreshClient",

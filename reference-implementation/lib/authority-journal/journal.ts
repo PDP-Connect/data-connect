@@ -43,7 +43,7 @@ export interface JournalEntryBase {
  * credential disables. Acknowledging one requires advancing the
  * loss-detection evidence first.
  */
-const TERMINAL_TYPES: ReadonlySet<string> = new Set(["tombstone", "hd_end", "erase", "hd_keep", "hd_cred_disable"]);
+const TERMINAL_TYPES: ReadonlySet<string> = new Set(["tombstone", "hd_end", "erase", "hd_keep", "hd_cred_disable", "hd_pending_inbox"]);
 
 /**
  * Loss-detection evidence, kept outside the journal's failure domain (the
@@ -57,6 +57,16 @@ export interface LossEvidence {
 }
 
 const evidencePaths = new Map<string, string>();
+const issuanceFences = new Map<string, () => boolean>();
+
+/** Shared with the lease store: restored history alone does not discharge D4 pending actions. */
+export function registerIssuanceFence(journalPath: string, ready: () => boolean): void {
+  issuanceFences.set(journalPath, ready);
+}
+
+export function journalAllowsIssuance(journalPath: string): boolean {
+  return journalCoversEvidence(journalPath) && (issuanceFences.get(journalPath)?.() ?? true);
+}
 
 /** Bind a journal to its evidence file. Appends of terminal events then advance it. */
 export function registerLossEvidence(journalPath: string, evidencePath: string): void {

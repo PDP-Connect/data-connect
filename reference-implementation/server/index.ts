@@ -9457,7 +9457,46 @@ export async function startServer(opts: ServerOpts = {}) {
   // biome-ignore lint/style/useDestructuring: Explicit property or positional access documents this compatibility boundary.
   const bindHost = reachabilityContract.bindHost;
 
-  const asServer = await asApp.listen(requestedAsPort, bindHost);
+  // PROTOTYPE, off by default: install the held-data lifecycle runtime. It
+  // appends to the lease journal when the lease prototype runs too (B3).
+  // Install the fence before listen so restart cannot expose answers before replay.
+  const heldDataOptions =
+    opts.experimentalHeldDataLifecycle === undefined
+      ? heldDataOptionsFromEnv(process.env)
+      : opts.experimentalHeldDataLifecycle;
+  let heldDataRuntime: ReturnType<typeof createHeldDataRuntime> | null = null;
+  if (heldDataOptions) {
+    // Only the lease path is needed here; its issuer resolves after listen.
+    const leaseOptions =
+      opts.experimentalAiTrainingLeases === undefined
+        ? trainingLeaseOptionsFromEnv(process.env, configuredAsIssuer ?? "")
+        : opts.experimentalAiTrainingLeases;
+    const leaseJournal = leaseOptions
+      ? path.join(leaseOptions.journalDir ?? leaseOptions.storeDir, "training-authority.journal")
+      : null;
+    const journalPath =
+      heldDataOptions.journalPath ??
+      leaseJournal ??
+      (heldDataOptions.journalDir ? path.join(heldDataOptions.journalDir, "authority.journal") : null);
+    if (!journalPath) {
+      throw new Error("experimentalHeldDataLifecycle needs journalPath or journalDir");
+    }
+    heldDataRuntime = createHeldDataRuntime({ markerDir: runtimeDataDir, ...heldDataOptions, journalPath });
+    installHeldDataRuntime(heldDataRuntime);
+  }
+  const closeHeldDataRuntime = () => {
+    if (!heldDataRuntime) return;
+    if (getHeldDataRuntime() === heldDataRuntime) installHeldDataRuntime(null);
+    heldDataRuntime.close();
+  };
+  let asServer: Awaited<ReturnType<typeof asApp.listen>>;
+  try {
+    asServer = await asApp.listen(requestedAsPort, bindHost);
+  } catch (error) {
+    closeHeldDataRuntime();
+    throw error;
+  }
+  asServer.once("close", closeHeldDataRuntime);
   if (typeof (asApp as unknown as Record<string, unknown>).__pdppStreamingUpgradeHandler === "function") {
     asServer.on("upgrade", (req, socket, head) => {
       const handled = (
@@ -9880,30 +9919,6 @@ export async function startServer(opts: ServerOpts = {}) {
         installTrainingLeaseRuntime(null);
       }
       trainingLeaseRuntime.close();
-    });
-  }
-  // PROTOTYPE, off by default: install the held-data lifecycle runtime. It
-  // appends to the lease journal when the lease prototype runs too (B3).
-  const heldDataOptions =
-    opts.experimentalHeldDataLifecycle === undefined
-      ? heldDataOptionsFromEnv(process.env)
-      : opts.experimentalHeldDataLifecycle;
-  if (heldDataOptions) {
-    const leaseJournal = getTrainingLeaseRuntime()?.journalPath;
-    const journalPath =
-      heldDataOptions.journalPath ??
-      leaseJournal ??
-      (heldDataOptions.journalDir ? path.join(heldDataOptions.journalDir, "authority.journal") : null);
-    if (!journalPath) {
-      throw new Error("experimentalHeldDataLifecycle needs journalPath or journalDir");
-    }
-    const heldDataRuntime = createHeldDataRuntime({ ...heldDataOptions, journalPath });
-    installHeldDataRuntime(heldDataRuntime);
-    asServer.once("close", () => {
-      if (getHeldDataRuntime() === heldDataRuntime) {
-        installHeldDataRuntime(null);
-      }
-      heldDataRuntime.close();
     });
   }
   rsServer.once("close", () => {

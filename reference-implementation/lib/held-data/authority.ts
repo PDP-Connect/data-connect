@@ -17,15 +17,28 @@
  * PROTOTYPE: experimental held-data lifecycle work, off by default.
  */
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import {
   appendJournalEntry,
   JournalReader,
   journalCoversEvidence,
   readLossEvidence,
   registerLossEvidence,
+  registerIssuanceFence,
   writeLossEvidence,
 } from "../authority-journal/journal.ts";
+
+import { PendingActions, type PendingAction } from "./pending-actions.ts";
+
+export interface GrantRegistration {
+  grantId: string;
+  clientId: string;
+  subjectId: string;
+  confidential: boolean;
+  trainingOnly?: boolean;
+  streams: string[];
+  expiresAtMs: number | null;
+}
 
 export type Disposition = "keep" | "delete";
 
@@ -61,6 +74,8 @@ export type ErasureScope = { streams: "all" } | { streams: string[] };
 export type CredentialKind = "access" | "refresh" | "status" | "recovery";
 
 type Entry =
+  | { t: "hd_pending_inbox"; id: string; grant_id: ""; inbox_epoch: string; at: number }
+  | { t: "tombstone"; id: string; grant_id: string; reason: string; at: number }
   | { t: "hd_epoch"; id: string; grant_id: ""; at: number }
   | {
       t: "hd_grant";
@@ -83,7 +98,14 @@ type Entry =
       jkt: string | null;
       at: number;
     }
-  | { t: "hd_cred_disable"; id: string; grant_id: string; digest: string; reason: string; at: number }
+  | {
+      t: "hd_cred_disable";
+      id: string;
+      grant_id: string;
+      digest: string;
+      reason: string;
+      at: number;
+    }
   | {
       t: "hd_end";
       id: string;
@@ -93,9 +115,22 @@ type Entry =
       owner_notice_required: boolean;
       at: number;
     }
-  | { t: "erase"; id: string; grant_id: string; scope: ErasureScope; origin: string; at: number }
+  | {
+      t: "erase";
+      id: string;
+      grant_id: string;
+      scope: ErasureScope;
+      origin: string;
+      at: number;
+    }
   | { t: "hd_keep"; id: string; grant_id: string; at: number }
-  | { t: "hd_delivered" | "hd_receipt"; id: string; grant_id: string; op: string; at: number }
+  | {
+      t: "hd_delivered" | "hd_receipt";
+      id: string;
+      grant_id: string;
+      op: string;
+      at: number;
+    }
   | {
       t: "hd_complete";
       id: string;
@@ -117,7 +152,11 @@ interface ErasureFacts {
   seq: number;
   deliveredAt: number | null;
   receiptAt: number | null;
-  completion: { at: number; outcome: "deleted" | "exception"; detail: string | null } | null;
+  completion: {
+    at: number;
+    outcome: "deleted" | "exception";
+    detail: string | null;
+  } | null;
   /**
    * `retained` reports (deletion complete except legally retained data), in
    * order. A later report with different terms corrects an earlier one
@@ -153,7 +192,11 @@ export interface StatusAnswer {
     disposition: Disposition | null;
     owner_notice_required: boolean;
   } | null;
-  erasures: { operation_id: string; scope: ErasureScope; accepted_at: number }[];
+  erasures: {
+    operation_id: string;
+    scope: ErasureScope;
+    accepted_at: number;
+  }[];
   /**
    * `permitted`: ordinary use may continue for data no listed erasure covers.
    * `stopped`: an erasure covers the whole copy. `custody_only`: a
@@ -200,15 +243,23 @@ export interface HeldDataAuthorityOptions {
    * the authority fails closed (K4) instead of starting a new history.
    */
   epochMarkerPath?: string;
+  /** Pending inbox outside the journal failure/restore domain. */
+  pendingPath?: string;
+  /** Loss witness outside the pending inbox failure/restore domain. */
+  pendingEvidencePath?: string;
 }
 
 export function credentialDigest(token: string): string {
   return createHash("sha256").update(token).digest("base64url");
 }
 
+/** D4 pending actions live in a separate durable inbox until the operator replays them. */
 export class HeldDataAuthority {
   readonly #o: HeldDataAuthorityOptions;
-  readonly #reader: JournalReader<Entry>;
+  #reader: JournalReader<Entry>;
+  readonly #pending: PendingActions | null;
+  #replaying = false;
+  readonly #entryIds = new Set<string>();
   readonly #grants = new Map<string, GrantFacts>();
   readonly #creds = new Map<string, CredentialFacts>();
   readonly #ops = new Map<string, { grantId: string; index: number }>();
@@ -217,8 +268,10 @@ export class HeldDataAuthority {
   #corrupt = false;
   #position = 0;
   #epoch: string | null = null;
+  #pendingEpoch: string | null = null;
+  #pendingHistoryLost = false;
   /** Set when the epoch marker names a history this journal does not hold. */
-  readonly #lostHistory: boolean;
+  #lostHistory: boolean;
 
   /**
    * The authority cannot establish its terminal-event history: the journal
@@ -226,11 +279,18 @@ export class HeldDataAuthority {
    * Every answer and write then fails closed.
    */
   get lost(): boolean {
-    return this.#lostHistory || this.#corrupt || (!this.#o.primaryHead && !journalCoversEvidence(this.#o.journalPath));
+    if (this.#lostHistory || this.#corrupt || (!this.#o.primaryHead && !journalCoversEvidence(this.#o.journalPath))) {
+      return true;
+    }
+    if (this.#pendingHistoryLost || this.#pending?.lost) return true;
+    return !this.#replaying && (this.#pending?.pending().length ?? 0) > 0;
   }
 
   private constructor(o: HeldDataAuthorityOptions) {
     this.#o = o;
+    if (o.pendingPath === o.journalPath || (o.pendingEvidencePath && o.pendingEvidencePath === o.pendingPath)) {
+      throw new Error("pending actions and loss evidence require separate storage paths");
+    }
     this.#reader = new JournalReader<Entry>(o.journalPath);
     this.#refresh();
     const evidence = o.epochMarkerPath ? readLossEvidence(o.epochMarkerPath) : null;
@@ -242,6 +302,18 @@ export class HeldDataAuthority {
     this.#lostHistory =
       evidence !== null &&
       (evidence.epoch !== this.#epoch || !existsSync(o.journalPath) || statSync(o.journalPath).size < evidence.bytes);
+    const existingPending = !!(
+      (o.pendingPath && existsSync(o.pendingPath)) ||
+      (o.pendingEvidencePath && existsSync(o.pendingEvidencePath))
+    );
+    this.#pending = o.pendingPath && o.pendingEvidencePath
+      ? new PendingActions(o.pendingPath, o.pendingEvidencePath, !this.#lostHistory && !this.#corrupt && !this.#pendingEpoch)
+      : null;
+    // A surviving inbox is also evidence of an earlier authority generation.
+    // Never adopt it as fresh after losing the journal and its terminal witness.
+    this.#pendingHistoryLost =
+      (existingPending && this.#pendingEpoch === null && !this.#lostHistory) ||
+      (this.#pendingEpoch !== null && this.#pendingEpoch !== this.#pending?.epoch);
     if (!(this.lost || this.#epoch || o.primaryHead)) {
       const id = `hdepoch_${randomUUID()}`;
       this.#append({ t: "hd_epoch", id, grant_id: "", at: o.now() });
@@ -249,6 +321,12 @@ export class HeldDataAuthority {
     if (!this.lost && o.epochMarkerPath && this.#epoch && !o.primaryHead && evidence?.epoch !== this.#epoch) {
       writeLossEvidence(o.epochMarkerPath, { epoch: this.#epoch, bytes: statSync(o.journalPath).size });
     }
+    if (!this.lost && this.#pending && !this.#pendingEpoch && !o.primaryHead) {
+      const inboxEpoch = this.#pending.epoch;
+      if (!inboxEpoch) throw new AuthorityUnavailableError("pending inbox cannot be initialized");
+      this.#append({ t: "hd_pending_inbox", id: randomUUID(), grant_id: "", inbox_epoch: inboxEpoch, at: o.now() });
+    }
+    if (!o.primaryHead) registerIssuanceFence(o.journalPath, () => !this.lost && !this.#replaying);
   }
 
   static open(o: HeldDataAuthorityOptions): HeldDataAuthority {
@@ -262,15 +340,7 @@ export class HeldDataAuthority {
 
   // ─── Writes ────────────────────────────────────────────────────────────────
 
-  registerGrant(g: {
-    grantId: string;
-    clientId: string;
-    subjectId: string;
-    confidential: boolean;
-    trainingOnly?: boolean;
-    streams: string[];
-    expiresAtMs: number | null;
-  }): void {
+  registerGrant(g: GrantRegistration): void {
     this.#requireWritable();
     this.#refresh();
     if (this.#grants.has(g.grantId)) {
@@ -385,8 +455,14 @@ export class HeldDataAuthority {
     grantId: string;
     path: EndingPath;
     disposition?: Disposition | null;
-  }): { endedAt: number; erasure: { operationId: string; acceptedAt: number } | null } {
-    this.#requireWritable();
+    /** Main-database identity when the lost journal cannot supply it. */
+    grant?: GrantRegistration;
+  }): {
+    endedAt: number;
+    erasure: { operationId: string; acceptedAt: number } | null;
+    pending?: boolean;
+    actionId?: string;
+  } {
     const disposition = input.disposition ?? null;
     if (OWNER_PATHS.has(input.path) && disposition === null) {
       throw new DispositionError(`a ${input.path} needs a keep or delete disposition`);
@@ -395,6 +471,16 @@ export class HeldDataAuthority {
       throw new DispositionError("a security revocation records no disposition; the owner chooses later");
     }
     this.#refresh();
+    if (this.lost) {
+      const action = this.#queue(input.grantId, "end", input.path, disposition, input.grant);
+      return {
+        endedAt: action.acceptedAt,
+        erasure: action.erasureId ? { operationId: action.erasureId, acceptedAt: action.acceptedAt } : null,
+        pending: true,
+        actionId: action.id,
+      };
+    }
+    this.#requireWritable();
     const facts = this.#grants.get(input.grantId);
     if (!facts) {
       throw new Error(`unknown grant ${input.grantId}`);
@@ -478,6 +564,10 @@ export class HeldDataAuthority {
 
   /** Owner disposition after a path that recorded none (security revocation), or a later erase. */
   elect(input: { grantId: string; disposition: Disposition }): { operationId: string; acceptedAt: number } | null {
+    if (this.lost) {
+      const a = this.#queue(input.grantId, "elect", "owner_withdrawal", input.disposition);
+      return a.erasureId ? { operationId: a.erasureId, acceptedAt: a.acceptedAt } : null;
+    }
     if (input.disposition === "keep") {
       this.#requireWritable();
       this.#refresh();
@@ -659,8 +749,13 @@ export class HeldDataAuthority {
    * client's receipt is recorded; until then the owner sees acceptance and
    * delivery only.
    */
-  ownerView(grantId: string, deletionPeriodMs: number): {
-    grant_state: StatusAnswer["grant_state"];
+  ownerView(
+    grantId: string,
+    deletionPeriodMs: number,
+  ): {
+    grant_state: StatusAnswer["grant_state"] | "unavailable";
+    history_available: boolean;
+    pending_actions: PendingAction[];
     ending: StatusAnswer["ending"];
     erasures: {
       operation_id: string;
@@ -674,13 +769,26 @@ export class HeldDataAuthority {
     }[];
   } | null {
     this.#refresh();
-    const facts = this.#grants.get(grantId);
+    const pending = this.#pendingHistoryLost || this.#pending?.lost ? [] : this.pendingActions(grantId);
+    const staged = pending[0]?.grant;
+    const facts =
+      this.#grants.get(grantId) ??
+      (staged
+        ? {
+            grant: this.#grantEntry(staged),
+            end: null,
+            keptAt: null,
+            erasures: [],
+          }
+        : null);
     if (!facts) {
       return null;
     }
     const a = this.#answer(facts, this.#o.now());
     return {
-      grant_state: a.grant_state,
+      grant_state: this.lost ? "unavailable" : a.grant_state,
+      history_available: !this.lost,
+      pending_actions: pending,
       ending: a.ending,
       erasures: facts.erasures.map((e) => ({
         operation_id: e.entry.id,
@@ -703,7 +811,8 @@ export class HeldDataAuthority {
 
   isKnown(grantId: string): boolean {
     this.#refresh();
-    return this.#grants.has(grantId);
+    if (this.#grants.has(grantId)) return true;
+    return !this.#pending?.lost && Boolean(this.#pending?.pending().some((a) => a.grant.grantId === grantId));
   }
 
   /**
@@ -724,6 +833,149 @@ export class HeldDataAuthority {
   grantClient(grantId: string): string | null {
     this.#refresh();
     return this.#grants.get(grantId)?.grant.client_id ?? null;
+  }
+
+  /**
+   * Operator path: restore the complete journal covered by the existing
+   * evidence, then call this method (or reopen and call it). Never reset the
+   * evidence to fit an older backup. Authority remains fenced until replay ends.
+   */
+  reestablishHistory(): void {
+    if (this.#o.primaryHead || this.#pending?.lost) throw new AuthorityUnavailableError("pending history unavailable");
+    this.#replaying = true;
+    this.#lostHistory = true;
+    try {
+      this.#reader = new JournalReader<Entry>(this.#o.journalPath);
+      this.#grants.clear();
+      this.#creds.clear();
+      this.#ops.clear();
+      this.#disabled.clear();
+      this.#entryIds.clear();
+      this.#position = 0;
+      this.#epoch = null;
+      this.#pendingEpoch = null;
+      this.#corrupt = false;
+      this.#refresh();
+      const evidence = this.#o.epochMarkerPath ? readLossEvidence(this.#o.epochMarkerPath) : null;
+      if (
+        this.#corrupt ||
+        readFileSync(this.#o.journalPath).at(-1) !== 10 ||
+        !evidence ||
+        evidence.epoch !== this.#epoch ||
+        !journalCoversEvidence(this.#o.journalPath)
+      ) {
+        throw new AuthorityUnavailableError("restore the complete history covered by its evidence first");
+      }
+      if (this.#pending && this.#pendingEpoch !== this.#pending.epoch) {
+        throw new AuthorityUnavailableError("restore the pending inbox matching the history's generation");
+      }
+      this.#pendingHistoryLost = false;
+      for (const action of this.#pending?.pending() ?? []) {
+        const grantId = action.grant.grantId;
+        if (!this.#grants.has(grantId)) this.#append(this.#grantEntry(action.grant));
+        if (action.kind === "end" && !this.#grants.get(grantId)?.end) {
+          this.#append({
+            t: "hd_end",
+            id: `${action.id}_end`,
+            grant_id: grantId,
+            path: action.path,
+            disposition: action.disposition,
+            owner_notice_required: action.path === "security_revocation",
+            at: action.acceptedAt,
+          });
+        }
+        if (
+          action.disposition === "delete" &&
+          !this.#grants.get(grantId)?.erasures.some((e) => e.entry.scope.streams === "all")
+        ) {
+          if (!action.erasureId) throw new AuthorityUnavailableError("pending deletion has no instruction id");
+          this.#append({
+            t: "erase",
+            id: action.erasureId,
+            grant_id: grantId,
+            scope: { streams: "all" },
+            origin: action.path,
+            at: action.acceptedAt,
+          });
+        } else if (action.kind === "elect" && action.disposition === "keep") {
+          this.#append({
+            t: "hd_keep",
+            id: `${action.id}_keep`,
+            grant_id: grantId,
+            at: action.acceptedAt,
+          });
+        }
+        if (action.kind === "end" && !this.#entryIds.has(`${action.id}_processing`)) {
+          this.#append({
+            t: "tombstone",
+            id: `${action.id}_processing`,
+            grant_id: grantId,
+            reason: "grant_revoked",
+            at: action.acceptedAt,
+          });
+        }
+        // A crash before this durable marker replays the same entry IDs.
+        this.#pending?.applied(action);
+      }
+      this.#lostHistory = false;
+    } finally {
+      this.#replaying = false;
+    }
+  }
+
+  pendingActions(grantId?: string): PendingAction[] {
+    if (this.#pendingHistoryLost || this.#pending?.lost) throw new AuthorityUnavailableError("pending history unavailable");
+    const actions = this.lost ? this.#pending?.accepted() : this.#pending?.pending();
+    return (actions ?? []).filter((a) => grantId === undefined || a.grant.grantId === grantId);
+  }
+
+  #grantEntry(g: GrantRegistration): GrantEntry {
+    return {
+      t: "hd_grant",
+      id: randomUUID(),
+      grant_id: g.grantId,
+      client_id: g.clientId,
+      subject_id: g.subjectId,
+      confidential: g.confidential,
+      training_only: g.trainingOnly ?? false,
+      streams: [...g.streams],
+      expires_at: g.expiresAtMs,
+      at: this.#o.now(),
+    };
+  }
+
+  #queue(
+    grantId: string,
+    kind: PendingAction["kind"],
+    path: EndingPath,
+    disposition: Disposition | null,
+    supplied?: GrantRegistration,
+  ): PendingAction {
+    if (!this.#pending || this.#pendingHistoryLost || this.#pending.lost || this.#o.primaryHead)
+      throw new AuthorityUnavailableError("an independent pending inbox is required");
+    const g = this.#grants.get(grantId)?.grant;
+    const grant =
+      supplied ??
+      this.#pending.pending().find((a) => a.grant.grantId === grantId)?.grant ??
+      (g
+        ? {
+            grantId,
+            clientId: g.client_id,
+            subjectId: g.subject_id,
+            confidential: g.confidential,
+            trainingOnly: g.training_only,
+            streams: g.streams,
+            expiresAtMs: g.expires_at,
+          }
+        : null);
+    if (!grant || grant.grantId !== grantId) throw new Error(`unknown grant ${grantId}`);
+    return this.#pending.accept({
+      grant,
+      kind,
+      path,
+      disposition,
+      acceptedAt: this.#o.now(),
+    });
   }
 
   // ─── Internals ─────────────────────────────────────────────────────────────
@@ -803,7 +1055,12 @@ export class HeldDataAuthority {
 
   #apply(e: Entry, seq: number): void {
     this.#position = seq;
+    if (this.#entryIds.has(e.id)) return;
+    this.#entryIds.add(e.id);
     switch (e.t) {
+      case "hd_pending_inbox":
+        this.#pendingEpoch ??= e.inbox_epoch;
+        return;
       case "hd_epoch":
         this.#epoch ??= e.id;
         return;

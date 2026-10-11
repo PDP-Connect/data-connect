@@ -138,7 +138,8 @@ export interface GrantPackageRevokeResult {
   readonly package_id: string;
   readonly revoked_at: string | null;
   readonly revoked_child_grants: readonly string[];
-  readonly status: "revoked" | "partial_failure";
+  readonly status: "revoked" | "partial_failure" | "pending";
+  readonly lifecycle?: unknown;
 }
 
 export interface MountRefGrantsContext {
@@ -396,12 +397,13 @@ export function mountRefGrantPackagesRevoke(app: AppLike, ctx: MountRefGrantsCon
           revoked_child_count: result.revoked_child_grants.length,
           revoked_child_grants: result.revoked_child_grants,
           status: result.status,
+          ...(result.lifecycle ? { lifecycle: result.lifecycle } : {}),
         };
         if (result.status === "partial_failure") {
           res.status(500).json(body);
           return;
         }
-        res.json(body);
+        res.status(result.status === "pending" ? 202 : 200).json(body);
       } catch (err) {
         ctx.handleError(res, err);
       }

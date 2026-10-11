@@ -12,7 +12,7 @@
  */
 import assert from "node:assert/strict";
 import { createHash, generateKeyPairSync, type KeyObject, randomBytes, sign } from "node:crypto";
-import { appendFileSync, mkdtempSync } from "node:fs";
+import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -21,8 +21,11 @@ import { HeldDataClient } from "../lib/held-data/client.ts";
 import { httpStatusTransport } from "../lib/held-data/http-transport.ts";
 import { makeDpopProof, thumbprint } from "../lib/training-lease/dpop.ts";
 import { generateEd25519KeyPair } from "../lib/training-lease/jws.ts";
+import { endHeldDataForGrant, exchangeGrantScopedDeviceCode, issueToken } from "../server/auth.ts";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { getDb } from "../server/db.ts";
+import { buildLogger } from "../server/transport.ts";
+import { getTrainingLeaseRuntime } from "../server/training-lease/runtime.ts";
 import { getHeldDataRuntime } from "../server/held-data/runtime.ts";
 import { parseHostedMcpSelection } from "../server/hosted-mcp-selection.ts";
 import {
@@ -158,6 +161,8 @@ async function authCodeGrant(
   );
   assert.equal(token.status, 200, JSON.stringify(token.body));
   return {
+    code,
+    verifier,
     accessToken: token.body.access_token,
     grantId: token.body.grant_id,
     refreshToken: token.body.refresh_token,
@@ -320,7 +325,185 @@ function clientAuth(
   };
 }
 
+function loseHistory(journalPath: string, loss: "wiped" | "suffix") {
+  const rt = getHeldDataRuntime()!;
+  rt.authority.registerGrant({ grantId: "loss-witness", clientId: "witness", subjectId: "owner_local", confidential: false, streams: [], expiresAtMs: null });
+  const prefix = readFileSync(journalPath, "utf8");
+  rt.authority.end({ grantId: "loss-witness", path: "owner_withdrawal", disposition: "keep" });
+  const full = readFileSync(journalPath, "utf8");
+  if (loss === "wiped") rmSync(journalPath);
+  else writeFileSync(journalPath, prefix);
+  assert.equal(rt.authority.lost, true);
+  return () => writeFileSync(journalPath, full);
+}
+
 describe("held-data lifecycle over HTTP", () => {
+  it("D4: authority fence is installed before the AS listener is published", async () => {
+    let readyWhenBound = false;
+    const logger = buildLogger({ quiet: true });
+    logger.info = ((...args: unknown[]) => {
+      if (args[1] === "authorization server listening") readyWhenBound = getHeldDataRuntime() !== null;
+    }) as typeof logger.info;
+    await withServer(false, async () => {
+      assert.equal(readyWhenBound, true);
+    }, { ...heldDataOpts(), logger });
+  });
+
+  for (const loss of ["wiped", "suffix"] as const) {
+    for (const disposition of ["delete", "keep"] as const) {
+      it(`D4: ${loss} history accepts owner ${disposition}; restores before lifecycle, introspection and refresh`, async () => {
+        const opts = heldDataOpts();
+        await withServer(false, async (h) => {
+          const clientId = await registerPublicClient(h);
+          const g = await authCodeGrant(h, clientId);
+          assert.equal((await status(h, g.accessToken, g.grantId)).status, 200);
+          const journal = join(opts.experimentalHeldDataLifecycle.journalDir, "authority.journal");
+          const restore = loseHistory(journal, loss);
+          const first = await revoke(h, h.ownerToken, g.grantId, { pdpp_disposition: disposition });
+          assert.equal(first.status, 200, JSON.stringify(first.body));
+          assert.equal((first.body as { lifecycle: { status: string } }).lifecycle.status, "pending");
+          const retry = await revoke(h, h.ownerToken, g.grantId, { pdpp_disposition: disposition });
+          assert.equal(retry.status, 200, JSON.stringify(retry.body));
+          const record = await owner(h, `/v1/owner/grants/${g.grantId}/lifecycle`);
+          assert.equal(record.status, 200);
+          assert.equal((record.body.pending_actions as unknown[]).length, 1);
+          assert.equal(record.body.history_available, false);
+          assert.match(String(record.body.owner_message), /no reads, tokens, processing authority, or positive assessments/);
+          assert.equal((await status(h, g.accessToken, g.grantId)).status, 503);
+          restore();
+          // Restore the read database too: no authority path may bypass pending replay.
+          getDb().prepare("UPDATE grants SET status = 'active' WHERE grant_id = ?").run(g.grantId);
+          getDb().prepare("UPDATE tokens SET revoked = 0 WHERE grant_id = ?").run(g.grantId);
+          getDb().prepare("UPDATE oauth_refresh_tokens SET status = 'active', revoked_at = NULL WHERE grant_id = ?").run(g.grantId);
+          assert.equal((await status(h, g.accessToken, g.grantId)).status, 503);
+          assert.equal(await rsRead(h, g.accessToken), 403);
+          const refresh = () => fetchJson(`${h.asUrl}/oauth/token`, form({ client_id: clientId, grant_type: "refresh_token", refresh_token: g.refreshToken }));
+          assert.equal((await refresh()).status, 400);
+          getDb().prepare("UPDATE oauth_authorization_codes SET status = 'issued', consumed_at = NULL WHERE code = ?").run(g.code);
+          const redeliver = () => fetchJson(`${h.asUrl}/oauth/token`, form({ client_id: clientId, grant_type: "authorization_code", code: g.code, code_verifier: g.verifier, redirect_uri: REDIRECT }));
+          assert.equal((await redeliver()).status, 400);
+          const device = getDb().prepare("SELECT device_code FROM pending_consents WHERE grant_id = ?").get(g.grantId) as { device_code: string };
+          assert.ok(device.device_code);
+          await assert.rejects(() => exchangeGrantScopedDeviceCode({ clientId, deviceCode: device.device_code }));
+          await assert.rejects(() => issueToken(g.grantId, "owner_local", clientId, null));
+          getHeldDataRuntime()!.authority.reestablishHistory();
+          const result = await status(h, g.accessToken, g.grantId);
+          assert.equal(result.status, 200, JSON.stringify(result.body));
+          assert.equal(result.body.grants[0]?.read_state, "revoked");
+          assert.equal(result.body.grants[0]?.held_data, disposition === "delete" ? "erase" : "permitted");
+          assert.equal(await rsRead(h, g.accessToken), 403);
+          assert.equal((await refresh()).status, 400);
+          assert.equal((await redeliver()).status, 400);
+          await assert.rejects(() => exchangeGrantScopedDeviceCode({ clientId, deviceCode: device.device_code }));
+          await assert.rejects(() => issueToken(g.grantId, "owner_local", clientId, null));
+        }, opts);
+      });
+    }
+    it(`D4: ${loss} history accepts package delete for active and previously kept children`, async () => {
+      const opts = heldDataOpts();
+      await withServer(false, async (h) => {
+        const github = await registerSecondConnector(h);
+        const clientId = await registerPublicClient(h);
+        const pkg = await packageFlow(h, clientId, [h.connectorId, github]);
+        await revoke(h, h.ownerToken, pkg.children[0]!, { pdpp_disposition: "keep" });
+        const restore = loseHistory(join(opts.experimentalHeldDataLifecycle.journalDir, "authority.journal"), loss);
+        const result = await fetchJson<{ status: string; lifecycle: { grants: { status: string }[] } }>(`${h.asUrl}/_ref/grant-packages/${pkg.packageId}/revoke`, json({ pdpp_disposition: "delete" }));
+        assert.equal(result.status, 202, JSON.stringify(result.body));
+        assert.equal(result.body.status, "pending");
+        assert.equal(result.body.lifecycle.grants.length, 2);
+        assert.ok(result.body.lifecycle.grants.every((g) => g.status === "pending"));
+        for (const grantId of pkg.children) {
+          const v = await owner(h, `/v1/owner/grants/${grantId}/lifecycle`);
+          assert.equal((v.body.pending_actions as unknown[]).length, 1);
+        }
+        restore();
+        getHeldDataRuntime()!.authority.reestablishHistory();
+        for (const grantId of pkg.children) {
+          assert.equal((await status(h, pkg.packageToken, grantId)).body.grants[0]?.held_data, "erase");
+        }
+      }, opts);
+    });
+  }
+
+  it("D4: whole-client delete while wiped includes an earlier ended grant absent from the lost history", async () => {
+    const opts = heldDataOpts();
+    await withServer(false, async (h) => {
+      const clientId = await registerPublicClient(h);
+      const old = await authCodeGrant(h, clientId);
+      const live = await authCodeGrant(h, clientId);
+      await revoke(h, h.ownerToken, old.grantId, { pdpp_disposition: "keep" });
+      getDb().prepare("UPDATE oauth_clients SET metadata_json = json_set(metadata_json, '$.issuer_subject_id', 'owner_local') WHERE client_id = ?").run(clientId);
+      const restore = loseHistory(join(opts.experimentalHeldDataLifecycle.journalDir, "authority.journal"), "wiped");
+      const result = await fetchJson<{ lifecycle: { status: string; grants: unknown[] } }>(`${h.asUrl}/oauth/register/${encodeURIComponent(clientId)}?pdpp_disposition=delete`, { method: "DELETE" });
+      assert.equal(result.status, 202, JSON.stringify(result.body));
+      assert.equal(result.body.lifecycle.status, "pending");
+      assert.equal(result.body.lifecycle.grants.length, 2);
+      restore();
+      getHeldDataRuntime()!.authority.reestablishHistory();
+      for (const g of [old, live]) {
+        assert.equal((await status(h, g.accessToken, g.grantId)).body.grants[0]?.held_data, "erase");
+      }
+    }, opts);
+  });
+
+  it("D4: history loss during async grant lookup still records the owner action", async () => {
+    const opts = heldDataOpts();
+    await withServer(false, async (h) => {
+      const g = await ordinaryGrant(h);
+      const rt = getHeldDataRuntime()!;
+      assert.equal(rt.authority.isKnown(g.grantId), false);
+      const journal = join(opts.experimentalHeldDataLifecycle.journalDir, "authority.journal");
+      rt.authority.registerGrant({ grantId: "lookup-witness", clientId: "witness", subjectId: "owner_local", confidential: false, streams: [], expiresAtMs: null });
+      const prefix = readFileSync(journal, "utf8");
+      rt.authority.end({ grantId: "lookup-witness", path: "owner_withdrawal", disposition: "keep" });
+      const full = readFileSync(journal, "utf8");
+      const accepting = endHeldDataForGrant(g.grantId, { path: "owner_withdrawal", disposition: "delete" });
+      queueMicrotask(() => writeFileSync(journal, prefix));
+      await assert.doesNotReject(accepting);
+      assert.equal(rt.authority.pendingActions(g.grantId).length, 1);
+      writeFileSync(journal, full);
+      rt.authority.reestablishHistory();
+      assert.equal(rt.authority.ownerView(g.grantId, DAY)?.erasures.length, 1);
+      assert.equal(await rsRead(h, g.token), 403);
+    }, opts);
+  });
+
+  it("D4: pending training revocation does not append to lost history and replays processing withdrawal", async () => {
+    await withServer(true, async (h) => {
+      const g = await issueTrainingGrant(h);
+      await status(h, g.token, g.grant.grant_id);
+      const training = getTrainingLeaseRuntime()!;
+      const restore = loseHistory(training.journalPath, "suffix");
+      const damaged = readFileSync(training.journalPath, "utf8");
+      const result = await revoke(h, h.ownerToken, g.grant.grant_id, { pdpp_disposition: "keep" });
+      assert.equal(result.status, 200, JSON.stringify(result.body));
+      assert.equal(readFileSync(training.journalPath, "utf8"), damaged, "all terminal effects wait for verified recovery");
+      restore();
+      getHeldDataRuntime()!.authority.reestablishHistory();
+      assert.equal(training.store.status(g.grant.grant_id).state, "withdrawn");
+      assert.equal(training.store.issueLease({ grantId: g.grant.grant_id, clientId: "concert_recommendation_app" }).ok, false);
+    }, heldDataOpts());
+  });
+
+  it("D4: narrowing and later owner erasure are accepted while history is lost", async () => {
+    const opts = heldDataOpts();
+    await withServer(false, async (h) => {
+      const narrow = await ordinaryGrant(h);
+      const erase = await ordinaryGrant(h);
+      await status(h, narrow.token, narrow.grantId);
+      await status(h, erase.token, erase.grantId);
+      const restore = loseHistory(join(opts.experimentalHeldDataLifecycle.journalDir, "authority.journal"), "suffix");
+      const result = await revoke(h, h.ownerToken, narrow.grantId, { pdpp_ending: "narrowing", pdpp_disposition: "delete" });
+      assert.equal(result.status, 200, JSON.stringify(result.body));
+      assert.equal((result.body as { lifecycle: { status: string } }).lifecycle.status, "pending");
+      const erased = await owner(h, `/v1/owner/grants/${erase.grantId}/lifecycle/erase`, "POST");
+      assert.equal(erased.status, 202, JSON.stringify(erased.body));
+      restore();
+      getHeldDataRuntime()!.authority.reestablishHistory();
+      for (const g of [narrow, erase]) assert.equal((await status(h, g.token, g.grantId)).body.grants[0]?.held_data, "erase");
+    }, opts);
+  });
+
   it("flag off: no lifecycle endpoint, and owner revocation without a disposition works as before", async () => {
     await withServer(false, async (h) => {
       const g = await ordinaryGrant(h);

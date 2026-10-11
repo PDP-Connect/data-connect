@@ -402,6 +402,10 @@ export function mountHeldData(app: AppLike, ctx: MountHeldDataContext): void {
     return {
       grant_id: grantId,
       grant_state: v.grant_state,
+      history_available: v.history_available,
+      durability: "Prototype records use fsynced files. Disk-loss survival requires separately provisioned storage for the authority history, pending inbox and loss witnesses; default directories can share a disk.",
+      pending_actions: v.pending_actions.map((a) => ({ action_id: a.id, kind: a.kind, path: a.path, disposition: a.disposition, accepted_at: iso(a.acceptedAt), status: "pending" })),
+      ...(v.history_available ? {} : { owner_message: `Action recorded and pending. These grants permit no reads, tokens, processing authority, or positive assessments until history is re-established. Clients pause use after the pause threshold (${rt.pauseThresholdMs} ms since their last positive assessment)${rt.longStopMs === null ? ". No long-stop is configured." : ` and delete their copies after the long-stop (${rt.longStopMs} ms since their last positive assessment).`}` }),
       ending: v.ending ? { ...v.ending, ended_at: iso(v.ending.ended_at) } : null,
       erasures: v.erasures.map((e) => ({
         operation_id: e.operation_id,
@@ -449,6 +453,10 @@ export function mountHeldData(app: AppLike, ctx: MountHeldDataContext): void {
     const grantId = req.params.grantId as string;
     if (!(await ctx.ensureGrant(grantId))) {
       return res.status(404).json({ error: "not_found" });
+    }
+    if (rt.authority.lost) {
+      await ctx.revokeGrant(grantId, { lifecycle: { path: "owner_withdrawal", disposition: "delete" } });
+      return res.status(202).json(ownerRecord(rt, grantId));
     }
     // An instruction that takes effect while the grant is active also revokes it (Core: Erasure).
     const [answer] = rt.authority.status(

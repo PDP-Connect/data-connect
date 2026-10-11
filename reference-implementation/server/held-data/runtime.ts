@@ -16,7 +16,8 @@
  *
  * PROTOTYPE: not for merge until the Core held-data text is final.
  */
-import { join } from "node:path";
+import { mkdirSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { HeldDataAuthority } from "../../lib/held-data/authority.ts";
 
 export interface HeldDataRuntimeOptions {
@@ -26,6 +27,10 @@ export interface HeldDataRuntimeOptions {
   journalPath?: string;
   /** Restorable directory for the epoch marker (normally the main data directory). */
   markerDir?: string;
+  /** Inbox outside the journal failure/restore domain; defaults to a sibling of the journal directory. */
+  pendingActionDir?: string;
+  /** Witness outside the inbox failure domain. Co-location detects file loss, not disk loss. */
+  pendingEvidenceDir?: string;
   now?: () => number;
   /** Shown to the owner once receipt is confirmed. Default 30 days. */
   deletionPeriodMs?: number;
@@ -58,9 +63,19 @@ export function installHeldDataRuntime(runtime: HeldDataRuntime | null): void {
 
 export function createHeldDataRuntime(opts: HeldDataRuntimeOptions & { journalPath: string }): HeldDataRuntime {
   const now = opts.now ?? Date.now;
+  const pendingDir = opts.pendingActionDir ?? `${dirname(opts.journalPath)}-pending`;
+  const pendingEvidenceDir = opts.pendingEvidenceDir ?? opts.markerDir;
+  mkdirSync(pendingDir, { recursive: true });
+  if (pendingEvidenceDir) mkdirSync(pendingEvidenceDir, { recursive: true });
   const authority = HeldDataAuthority.open({
     journalPath: opts.journalPath,
     now,
+    ...(pendingEvidenceDir
+      ? {
+          pendingPath: join(pendingDir, "held-data-pending-actions"),
+          pendingEvidencePath: join(pendingEvidenceDir, "held-data-pending-evidence"),
+        }
+      : {}),
     ...(opts.markerDir ? { epochMarkerPath: join(opts.markerDir, "held-data-authority-epoch") } : {}),
   });
   return {
@@ -87,6 +102,8 @@ export function heldDataOptionsFromEnv(env: NodeJS.ProcessEnv): HeldDataRuntimeO
   }
   return {
     journalDir,
+    ...(env.PDPP_HELD_DATA_PENDING_DIR ? { pendingActionDir: env.PDPP_HELD_DATA_PENDING_DIR } : {}),
+    ...(env.PDPP_HELD_DATA_PENDING_EVIDENCE_DIR ? { pendingEvidenceDir: env.PDPP_HELD_DATA_PENDING_EVIDENCE_DIR } : {}),
     ...(env.PDPP_HELD_DATA_MARKER_DIR ? { markerDir: env.PDPP_HELD_DATA_MARKER_DIR } : {}),
   };
 }
