@@ -333,7 +333,17 @@ export class HeldDataClient {
       this.#disposeDue();
       return false;
     }
-    return this.#persist();
+    // The write takes time: the copy may be kept only if no deadline is due on the sample after it.
+    const written = this.#commit();
+    if (written === null) {
+      return false;
+    }
+    const due = this.deleteBy(grantId);
+    if (due !== null && written >= due) {
+      this.#disposeDue(written);
+      return false;
+    }
+    return true;
   }
 
   /** Create or revive the grant entry in memory; the caller persists. */
@@ -463,7 +473,27 @@ export class HeldDataClient {
         ...(r.ref.version === undefined ? {} : { version: r.ref.version }),
       }, firstAcquiredAt: r.firstAcquiredAt });
     }
-    return this.#persist() ? eligible.map((r) => r.ref) : [];
+    // The write takes time: a record is kept only if its ceiling is still ahead on the sample after
+    // it. Disposing what the write crossed takes another write, so decide again until none is due.
+    let live = eligible;
+    for (;;) {
+      const written = this.#commit();
+      if (written === null) {
+        return [];
+      }
+      const due = this.deleteBy(grantId);
+      if (due === null || written < due) {
+        return live.map((r) => r.ref);
+      }
+      this.#disposeDue(written);
+      const after = this.#grants.get(grantId);
+      live = after && after.deletedAt === null ? live.filter((r) => after.records.has(r.key)) : [];
+      // A deadline that disposal did not clear cannot be shown ahead: keep nothing.
+      const still = this.deleteBy(grantId);
+      if (live.length === 0 || (still !== null && still <= written)) {
+        return [];
+      }
+    }
   }
 
   /** The gate the app checks before every use. */

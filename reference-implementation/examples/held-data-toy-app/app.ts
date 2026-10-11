@@ -83,10 +83,9 @@ export class ToyApp implements HeldStore {
     if (job.state !== "running") {
       return null;
     }
+    // The search gates after its work, so use that crossed the bound is cancelled (Core C2).
     const result = this.search(job.grantId, job.word);
-    // The work takes time. Check the gate again after it, before reporting complete use or
-    // returning the result: use that crossed the bound is cancelled (Core C2).
-    if (result === null || !this.#client?.canUse(job.grantId).ok) {
+    if (result === null) {
       this.#cancel(job);
       return null;
     }
@@ -178,16 +177,28 @@ export class ToyApp implements HeldStore {
 
   /** An ordinary use: search. Returns null when the gate refuses. */
   search(grantId: string, word: string): string[] | null {
-    if (!this.#client?.canUse(grantId).ok) {
+    return this.#licensed(grantId, (client) => {
+      const erased = client.erasedStreams(grantId);
+      const recs = this.records.get(grantId) ?? [];
+      const hits = [...(this.index.get(word.toLowerCase()) ?? [])].filter((k) => k.startsWith(`${grantId}:`));
+      return hits.filter((k) => {
+        const r = recs.find((x) => `${grantId}:${x.id}` === k);
+        return r !== undefined && !erased.has(r.stream);
+      });
+    });
+  }
+
+  /**
+   * Use of a grant's data, gated before and after the work. Work takes time: a result that crossed
+   * a bound while it ran is not returned (Core C2), so no caller sees a late hit.
+   */
+  #licensed<T>(grantId: string, work: (client: HeldDataClient) => T): T | null {
+    const client = this.#client;
+    if (!client?.canUse(grantId).ok) {
       return null;
     }
-    const erased = this.#client.erasedStreams(grantId);
-    const recs = this.records.get(grantId) ?? [];
-    const hits = [...(this.index.get(word.toLowerCase()) ?? [])].filter((k) => k.startsWith(`${grantId}:`));
-    return hits.filter((k) => {
-      const r = recs.find((x) => `${grantId}:${x.id}` === k);
-      return r !== undefined && !erased.has(r.stream);
-    });
+    const result = work(client);
+    return client.canUse(grantId).ok ? result : null;
   }
 
   dispose(grantId: string, scope: ErasureScope): void {
