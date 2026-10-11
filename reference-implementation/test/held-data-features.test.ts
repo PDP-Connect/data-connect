@@ -150,6 +150,21 @@ describe("lane F: per-record retention ceilings", () => {
     assert.equal(s.app.holds("g3").records, 0);
   });
 
+  it("deletes expired word-index keys while preserving words still held by another grant", async () => {
+    const s = setup();
+    s.app.sync("g", [{ id: "old", stream: "messages", text: "expiredword shared" }]);
+    s.at(T0 + DAY);
+    s.app.sync("g2", [{ id: "new", stream: "messages", text: "liveword shared" }]);
+    s.at(T0 + 2 * DAY);
+    await s.client.tick();
+    assert.equal(s.app.index.has("expiredword"), false);
+    assert.deepEqual([...(s.app.index.get("shared") ?? [])], ["g2:new"]);
+    assert.equal(s.app.index.has("liveword"), true);
+    s.at(T0 + 3 * DAY);
+    await s.client.tick();
+    assert.equal(s.app.index.size, 0);
+  });
+
   it("a later identifiable version gets its own receipt clock, while ambiguous versions use the earliest acquisition", async () => {
     const s = setup();
     s.app.sync("g", [{ id: "r", stream: "messages", text: "v1", version: "v1" }]);

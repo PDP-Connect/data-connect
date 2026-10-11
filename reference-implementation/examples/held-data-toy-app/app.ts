@@ -53,11 +53,14 @@ export class ToyApp implements HeldStore {
 
   /** A transform. Rebuilds derivatives; lifecycle clocks are not touched. */
   reindex(grantId: string): void {
-    for (const ids of this.index.values()) {
+    for (const [word, ids] of this.index) {
       for (const id of [...ids]) {
         if (id.startsWith(`${grantId}:`)) {
           ids.delete(id);
         }
+      }
+      if (ids.size === 0) {
+        this.index.delete(word);
       }
     }
     for (const r of this.records.get(grantId) ?? []) {
