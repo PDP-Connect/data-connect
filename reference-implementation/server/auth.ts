@@ -11859,7 +11859,9 @@ export async function issueToken(
   expiresAt: string | null,
   meta: { traceContext?: TraceContext | null; source?: string } = {}
 ): Promise<string> {
-  if (heldDataEndedOrLost(grantId)) throw bindingError("grant_revoked", "Grant ended or authority history is unavailable");
+  if (heldDataEndedOrLost(grantId)) {
+    throw bindingError(getHeldDataRuntime()?.authority.lost ? "invalid_grant" : "grant_revoked", "Grant ended or authority history is unavailable");
+  }
   if (isPostgresStorageBackend()) {
     const { tokenId, grantRow, persistedGrant } = await withPostgresTransaction((client) =>
       insertPostgresGrantToken(client, { clientId, expiresAt, grantId, subjectId })

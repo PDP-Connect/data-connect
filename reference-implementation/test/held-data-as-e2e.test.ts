@@ -1211,8 +1211,8 @@ describe("held-data lifecycle over HTTP", () => {
         assert.ok(rt);
         truncateSync(join(opts.experimentalHeldDataLifecycle.journalDir, "authority.journal"), 0);
         assert.equal(rt.authority.lost, true);
-        await assert.rejects(issueToken(untracked.grantId, "owner_local", clientId, null), { code: "grant_revoked" });
-        await assert.rejects(issueToken(g.grantId, "owner_local", clientId, null), { code: "grant_revoked" });
+        await assert.rejects(issueToken(untracked.grantId, "owner_local", clientId, null), { code: "invalid_grant" });
+        await assert.rejects(issueToken(g.grantId, "owner_local", clientId, null), { code: "invalid_grant" });
         assert.equal((await introspect(p.packageToken)).active, false);
         assert.equal((await fetchJson(`${h.asUrl}/consent/exchange`, json({ code }))).status, 404);
         assert.equal(
