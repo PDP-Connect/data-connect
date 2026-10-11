@@ -105,7 +105,9 @@ describe("held-data timing traces (converge-r1-astra §3)", () => {
     });
   }
 
-  it("AS clock 3 d ahead: with the AS assessment time as freshness origin, use outlasts the threshold by the skew; the request-send origin does not", async () => {
+  // NON-CONFORMING COMPARISON: the assessed_at origin is not a valid policy. This test only measures
+  // how far it overshoots the threshold; it does not endorse that behaviour.
+  it("NON-CONFORMING comparison mode: AS clock 3 d ahead, the assessed_at origin outlasts the threshold by the skew; the conforming request_sent origin does not", async () => {
     const results: Record<string, number> = {};
     for (const origin of ["assessed_at", "request_sent"] as const) {
       const sim = new Sim({ asSkewMs: 3 * DAY, policy: { pauseThresholdMs: 48 * HOUR, freshnessOrigin: origin } });

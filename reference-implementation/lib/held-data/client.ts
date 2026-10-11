@@ -40,6 +40,10 @@ export interface LifecyclePolicy {
    * Freshness origin of a positive answer. `request_sent` uses the earlier of
    * the AS assessment time and the local send time, so an AS clock that runs
    * ahead cannot extend use. `assessed_at` is integration-v2 read literally.
+   *
+   * NON-CONFORMING COMPARISON MODE: `assessed_at` lets an AS clock that runs ahead extend use
+   * and the long-stop by the skew, which Core's no-extension rule forbids. It exists only so a
+   * test can measure that difference. Never use it outside a comparison experiment.
    */
   freshnessOrigin: "request_sent" | "assessed_at";
   /** When the app disposes of data under an instruction: at once, or at the latest permitted time. */
