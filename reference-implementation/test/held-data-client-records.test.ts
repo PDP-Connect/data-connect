@@ -3,11 +3,19 @@
 
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { ToyApp } from "../examples/held-data-toy-app/app.ts";
 import { MemoryClientCheckpointStorage } from "../lib/held-data/checkpoint.ts";
 import { HeldDataClient, type HeldRecordRef, type HeldStore, type StatusTransport } from "../lib/held-data/client.ts";
 import { DAY, T0 } from "./helpers/held-data-sim.ts";
 
 const unavailable: StatusTransport = async () => ({ ok: false, reason: "unreachable" });
+const permitted = (now: () => number): StatusTransport => async (ids) => ({
+  ok: true,
+  results: ids.map((grant_id) => ({
+    as_position: 1, assessed_at: now(), ending: null, erasures: [], expires_at: null, grant_id,
+    grant_state: "active" as const, ordinary_use: "permitted" as const,
+  })),
+});
 
 class Store implements HeldStore {
   readonly held = new Set<string>();
@@ -102,5 +110,34 @@ describe("client record clocks in the durable checkpoint", () => {
     assert.deepEqual(lost.acquireRecords("g", [{ id: "r", stream: "s" }]), []);
     assert.equal(lost.canUse("g").ok, false);
     assert.equal(store.held.size, 0);
+  });
+
+  it("a record disposed at its ceiling and restored from an older data backup is swept again before use", async () => {
+    let t = T0;
+    const storage = new MemoryClientCheckpointStorage();
+    const policy = { retentionCeilingMs: ceiling };
+    const app = new ToyApp();
+    const c1 = new HeldDataClient({ initialize: true, now: () => t, status: permitted(() => t), storage, store: app, policy });
+    app.attach(c1);
+    app.sync("g", [{ id: "a", stream: "s", text: "alpha" }]);
+    t += 5 * DAY;
+    app.sync("g", [{ id: "b", stream: "s", text: "bravo" }]);
+    const backup = structuredClone(app.records.get("g") ?? []);
+    assert.equal(backup.length, 2);
+    t += 5 * DAY;
+    void c1.canUse("g");
+    assert.deepEqual(app.records.get("g")?.map((r) => r.id), ["b"], "a is disposed at day 10");
+
+    // The data backup is older than the checkpoint: it carries a again. The checkpoint stays current.
+    const restored = new ToyApp();
+    restored.records.set("g", structuredClone(backup));
+    restored.reindex("g");
+    t += DAY;
+    const c2 = new HeldDataClient({ now: () => t, status: permitted(() => t), storage, store: restored, policy });
+    restored.attach(c2);
+    await c2.reconcile();
+    assert.deepEqual(restored.search("g", "alpha"), [], "a is past its ceiling and must not be searchable");
+    assert.deepEqual(restored.records.get("g")?.map((r) => r.id), ["b"]);
+    assert.deepEqual(restored.search("g", "bravo"), ["g:b"]);
   });
 });

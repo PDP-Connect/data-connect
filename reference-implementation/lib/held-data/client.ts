@@ -792,6 +792,24 @@ export class HeldDataClient {
       if (g.deletedAt === null && g.recordsTracked && this.policy.retentionCeilingMs !== null) {
         const retentionCeilingMs = this.policy.retentionCeilingMs;
         const due = [...g.records].filter(([, r]) => now >= r.firstAcquiredAt + retentionCeilingMs);
+        // A data backup restored after a disposal brings back records the grant no longer tracks.
+        // Acquisition history outlives the grant entry: sweep any inventory it shows past its ceiling.
+        const known = new Set(due.map(([key]) => key));
+        for (const ref of this.#store.recordRefs?.(g.grantId) ?? []) {
+          const identity = JSON.stringify([ref.sourceId ?? null, ref.instanceId ?? null, ref.stream, ref.id]);
+          const key = JSON.stringify([identity, ref.version ?? null]);
+          const versions = this.#acquisitions.get(identity);
+          if (!versions || g.records.has(key) || known.has(key)) {
+            continue;
+          }
+          const first = ref.version === undefined
+            ? Math.min(...versions.values())
+            : Math.min(versions.get(ref.version) ?? Number.POSITIVE_INFINITY, versions.get(undefined) ?? Number.POSITIVE_INFINITY);
+          if (now >= first + retentionCeilingMs) {
+            known.add(key);
+            due.push([key, { ref, firstAcquiredAt: first }]);
+          }
+        }
         if (due.length > 0) {
           if (!this.#store.disposeRecords) {
             throw new Error("per-record retention requires a store with disposeRecords");
