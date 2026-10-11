@@ -194,4 +194,41 @@ describe("held-data timing traces (converge-r1-astra §3)", () => {
       });
     }
   }
+
+  describe("C2: queued and in-flight work observed through the toy-app adapter", () => {
+    it("AS unreachable after the erasure: a job started before s + threshold cannot complete use after it, and queued work is not dispatched", async () => {
+      const sim = await started({ policy: { pauseThresholdMs: 48 * HOUR } });
+      const s = sim.t;
+      sim.outages = [[s + 1, s + 30 * DAY]];
+      sim.t = s + HOUR;
+      sim.as.requestErasure({ grantId: "g1", origin: "owner_withdrawal" });
+      const inFlight = sim.app.enqueue("g1", "hello");
+      const queued = sim.app.enqueue("g1", "hello");
+      sim.t = s + 48 * HOUR - MIN;
+      assert.equal(sim.app.start(inFlight), true, "before the bound the job starts");
+      sim.t = s + 48 * HOUR + MIN;
+      assert.equal(sim.app.finish(inFlight), null, "the in-flight job is refused when it tries to complete");
+      assert.equal(sim.app.start(queued), false, "queued work is not dispatched after the bound");
+      const late = sim.app.observations.filter((o) => o.kind === "complete" && o.at >= s + 48 * HOUR);
+      assert.deepEqual(late, [], "no use completes at or after s + the pause threshold");
+      assert.ok(sim.app.observations.some((o) => o.kind === "cancel" && o.grantId === "g1"));
+    });
+
+    it("receipt before the bound: work stops at once on receipt, on the declared clock, and nothing completes after it", async () => {
+      const sim = await started({ policy: { pauseThresholdMs: 48 * HOUR } });
+      const inFlight = sim.app.enqueue("g1", "hello");
+      assert.equal(sim.app.start(inFlight), true);
+      const queued = sim.app.enqueue("g1", "hello");
+      sim.t += MIN;
+      const w = sim.as.requestErasure({ grantId: "g1", origin: "owner_withdrawal" }).acceptedAt;
+      await sim.runUntil(w + 2 * DAY);
+      const q = sim.client.grantState("g1")?.erasures.values().next().value?.receivedAt;
+      assert.ok(q !== undefined && q <= w + 48 * HOUR, "receipt within the stop-use bound");
+      const cancels = sim.app.observations.filter((o) => o.kind === "cancel").map((o) => o.at);
+      assert.deepEqual(cancels, [q, q], "in-flight and queued work were cancelled at the instant of receipt");
+      assert.equal(sim.app.finish(inFlight), null);
+      assert.equal(sim.app.start(queued), false);
+      assert.deepEqual(sim.app.observations.filter((o) => o.kind === "complete"), []);
+    });
+  });
 });

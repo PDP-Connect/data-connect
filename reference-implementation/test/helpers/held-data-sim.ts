@@ -52,7 +52,7 @@ export class Sim {
   readonly journalPath: string;
   readonly epochPath: string;
   readonly as: HeldDataAuthority;
-  readonly app = new ToyApp();
+  readonly app = new ToyApp(() => this.t);
   readonly sub: ToySubprocessor;
   readonly client: HeldDataClient;
   readonly tokens = new Map<string, string>();

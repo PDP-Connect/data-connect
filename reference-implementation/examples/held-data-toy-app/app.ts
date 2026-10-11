@@ -20,6 +20,20 @@ export interface ToyRecord extends HeldRecordRef {
   text: string;
 }
 
+/** One unit of use of a grant's data: queued, running (in flight), then done or cancelled. */
+export interface ToyJob {
+  readonly grantId: string;
+  readonly word: string;
+  state: "queued" | "running" | "done" | "cancelled";
+}
+
+/** Adapter observation on the declared test clock (Core C2). */
+export interface ToyJobObservation {
+  kind: "queued" | "start" | "cancel" | "complete";
+  grantId: string;
+  at: number;
+}
+
 export class ToyApp implements HeldStore {
   readonly records = new Map<string, ToyRecord[]>();
   /** Derivative: word -> record ids. */
@@ -28,10 +42,64 @@ export class ToyApp implements HeldStore {
   readonly summaries = new Map<string, string>();
   /** Derivative over several grants: the record keys of every input grant, rebuilt whenever one changes. */
   readonly digests = new Map<string, { grants: string[]; entries: string[] }>();
+  /** Receipt, cancellation and completion of queued and in-flight work. */
+  readonly observations: ToyJobObservation[] = [];
+  readonly #jobs: ToyJob[] = [];
+  readonly #clock: () => number;
   #client: HeldDataClient | null = null;
+
+  constructor(clock: () => number = () => 0) {
+    this.#clock = clock;
+  }
 
   attach(client: HeldDataClient): void {
     this.#client = client;
+  }
+
+  /** Queue work. Queuing is not use; the gate applies when it starts and when it completes. */
+  enqueue(grantId: string, word: string): ToyJob {
+    const job: ToyJob = { grantId, word, state: "queued" };
+    this.#jobs.push(job);
+    this.#observe("queued", grantId);
+    return job;
+  }
+
+  /** Dispatch a queued job. The gate is checked at dispatch. */
+  start(job: ToyJob): boolean {
+    if (job.state !== "queued") {
+      return false;
+    }
+    if (!this.#client?.canUse(job.grantId).ok) {
+      this.#cancel(job);
+      return false;
+    }
+    job.state = "running";
+    this.#observe("start", job.grantId);
+    return true;
+  }
+
+  /** Finish in-flight work. Completing is use: the gate is checked again, so old eligibility never carries over. */
+  finish(job: ToyJob): string[] | null {
+    if (job.state !== "running") {
+      return null;
+    }
+    const result = this.search(job.grantId, job.word);
+    if (result === null) {
+      this.#cancel(job);
+      return null;
+    }
+    job.state = "done";
+    this.#observe("complete", job.grantId);
+    return result;
+  }
+
+  #cancel(job: ToyJob): void {
+    job.state = "cancelled";
+    this.#observe("cancel", job.grantId);
+  }
+
+  #observe(kind: ToyJobObservation["kind"], grantId: string): void {
+    this.observations.push({ kind, grantId, at: this.#clock() });
   }
 
   grantIds(): Iterable<string> {
@@ -121,6 +189,14 @@ export class ToyApp implements HeldStore {
   }
 
   dispose(grantId: string, scope: ErasureScope): void {
+    if (scope.streams === "all") {
+      // Disposal stops work that has not completed.
+      for (const job of this.#jobs) {
+        if (job.grantId === grantId && (job.state === "queued" || job.state === "running")) {
+          this.#cancel(job);
+        }
+      }
+    }
     const recs = this.records.get(grantId) ?? [];
     const keep = scope.streams === "all" ? [] : recs.filter((r) => !(scope.streams as string[]).includes(r.stream));
     if (keep.length === 0) {
