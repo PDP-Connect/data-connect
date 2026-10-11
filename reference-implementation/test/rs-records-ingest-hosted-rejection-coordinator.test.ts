@@ -12,6 +12,7 @@ import { closeDb, getDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
 import { closePostgresStorage, postgresQuery } from "../server/postgres-storage.ts";
 import { mountRefRunCancel, type RunCancelResult } from "../server/routes/run-cancel.ts";
+import { runControlAuditStub } from "./helpers/run-control-audit-stub.ts";
 
 const TEST_DCR_INITIAL_ACCESS_TOKEN = "pdpp-reference-test-initial-access-token";
 const POSTGRES_URL = process.env.PDPP_TEST_POSTGRES_URL;
@@ -675,6 +676,7 @@ async function cancelRunThroughRouteHarness(args: {
     },
   };
   mountRefRunCancel(app, {
+    ...runControlAuditStub(),
     controller: {
       cancelRun: async (runId: string): Promise<RunCancelResult> => {
         await terminalizeRun({ backend: args.backend, connectorInstanceId: args.connectorInstanceId, runId });

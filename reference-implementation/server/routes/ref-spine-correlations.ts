@@ -89,17 +89,19 @@ function parseListFilters(
   };
 }
 
-function mountKind(
-  app: AppLike,
-  ctx: MountRefSpineCorrelationsContext,
-  path: string,
+// The list handler for one correlation kind, without its auth guard. The
+// cookie `/_ref/runs` route and the owner-bearer `/v1/owner/runs` route
+// (`owner-runs.ts`) mount the same handler, so filters, pagination, and
+// redaction are identical.
+export function buildSpineCorrelationListHandler(
+  ctx: Pick<MountRefSpineCorrelationsContext, "canonicalConnectorKey" | "handleError" | "listSpineCorrelations">,
   kind: RefSpineCorrelationKind
-): void {
+): RouteHandler {
   const deps = {
     listSpineCorrelations: (k: RefSpineCorrelationKind, filters: RefSpineCorrelationFilters) =>
       ctx.listSpineCorrelations(k, filters),
   };
-  app.get(path, ctx.requireOwnerSession, async (req: RouteRequest, res: RouteResponse) => {
+  return async (req: RouteRequest, res: RouteResponse) => {
     try {
       const envelope = await executeRefSpineCorrelationsList(
         { filters: parseListFilters(req.query, ctx.canonicalConnectorKey), kind },
@@ -109,7 +111,16 @@ function mountKind(
     } catch (err) {
       ctx.handleError(res, err);
     }
-  });
+  };
+}
+
+function mountKind(
+  app: AppLike,
+  ctx: MountRefSpineCorrelationsContext,
+  path: string,
+  kind: RefSpineCorrelationKind
+): void {
+  app.get(path, ctx.requireOwnerSession, buildSpineCorrelationListHandler(ctx, kind));
 }
 
 // Spine correlation list routes delegate envelope assembly to the canonical
