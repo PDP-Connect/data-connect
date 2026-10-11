@@ -157,7 +157,19 @@ interface HeldGrant {
   pendingDeletionReason: string | null;
   recordsTracked: boolean;
   legacyAcquiredAt: number | null;
+  /**
+   * Earliest first-acquisition time of a legacy copy whose records can no longer be listed (it was
+   * disposed, or the store showed nothing). Records delivered later cannot be told from it, so each
+   * counts from this time and never from its own delivery (Core: never restarts that clock).
+   */
+  legacyFloorAt: number | null;
   records: Map<string, HeldRecord>;
+}
+
+/** The earliest of the known times, or null if none is known. */
+function earliest(...times: (number | null | undefined)[]): number | null {
+  const known = times.filter((x): x is number => x !== null && x !== undefined);
+  return known.length ? Math.min(...known) : null;
 }
 
 const time = z.number().finite();
@@ -193,6 +205,7 @@ const checkpointSchema = z.object({
     readState: z.enum(["active", "window_closed", "expired", "ended"]).optional(),
     recordsTracked: z.boolean().optional(),
     legacyAcquiredAt: time.nullable().optional(),
+    legacyFloorAt: time.nullable().optional(),
     records: z.array(z.tuple([z.string(), z.object({ ref: refSchema, firstAcquiredAt: time })])).optional(),
     erasures: z.array(z.tuple([z.string(), z.object({
       scope: z.object({ streams: z.union([z.literal("all"), z.array(z.string())]) }),
@@ -283,6 +296,8 @@ export class HeldDataClient {
             readState: g.readState ?? "active",
             recordsTracked: g.recordsTracked ?? false,
             legacyAcquiredAt: g.legacyAcquiredAt === undefined ? (g.recordsTracked ? null : g.firstAcquiredAt) : g.legacyAcquiredAt,
+            // Older checkpoints: a disposed legacy copy keeps its clock as the floor.
+            legacyFloorAt: g.legacyFloorAt ?? (g.deletedAt !== null && g.legacyAcquiredAt != null ? g.legacyAcquiredAt : null),
             records: new Map(g.records ?? []),
             erasures: new Map(g.erasures),
             needsReconcile: true,
@@ -353,6 +368,7 @@ export class HeldDataClient {
         pendingDeletionReason: null,
         recordsTracked: false,
         legacyAcquiredAt: null,
+        legacyFloorAt: prior ? earliest(prior.legacyFloorAt, prior.legacyAcquiredAt) : null,
         records: new Map(),
       });
       this.#tokenOrigins.delete(grantId);
@@ -385,7 +401,9 @@ export class HeldDataClient {
     // Migrate the complete old inventory before accepting a new delivery. Without an
     // inventory, the original whole-copy deadline remains the conservative bound.
     if (priorGrant?.legacyAcquiredAt !== null && priorGrant?.legacyAcquiredAt !== undefined && this.#store.recordRefs) {
+      let listed = 0;
       for (const ref of this.#store.recordRefs(grantId)) {
+        listed += 1;
         const identity = JSON.stringify([ref.sourceId ?? null, ref.instanceId ?? null, ref.stream, ref.id]);
         const versions = this.#acquisitions.get(identity) ?? new Map<string | undefined, number>();
         const known = ref.version === undefined
@@ -401,16 +419,22 @@ export class HeldDataClient {
           ...(ref.version === undefined ? {} : { version: ref.version }),
         }, firstAcquiredAt });
       }
+      if (listed === 0) {
+        // Nothing to migrate: the legacy copy was disposed or lost, so its clock cannot be dropped.
+        // Whatever is delivered next may be that data again.
+        priorGrant.legacyFloorAt = earliest(priorGrant.legacyFloorAt, priorGrant.legacyAcquiredAt);
+      }
       priorGrant.recordsTracked = true;
       priorGrant.legacyAcquiredAt = null;
     }
+    const legacyFloor = priorGrant?.legacyFloorAt ?? Number.POSITIVE_INFINITY;
     const eligible: { ref: T; key: string; firstAcquiredAt: number }[] = [];
     for (const ref of records) {
       const identity = JSON.stringify([ref.sourceId ?? null, ref.instanceId ?? null, ref.stream, ref.id]);
       const versions = this.#acquisitions.get(identity) ?? new Map<string | undefined, number>();
       const prior = ref.version === undefined
-        ? Math.min(now, ...versions.values())
-        : Math.min(now, versions.get(ref.version) ?? now, versions.get(undefined) ?? now);
+        ? Math.min(now, legacyFloor, ...versions.values())
+        : Math.min(now, legacyFloor, versions.get(ref.version) ?? now, versions.get(undefined) ?? now);
       versions.set(ref.version, prior);
       this.#acquisitions.set(identity, versions);
       if (this.policy.retentionCeilingMs !== null && now >= prior + this.policy.retentionCeilingMs) {
@@ -829,6 +853,7 @@ export class HeldDataClient {
         g.deleteReason = g.pendingDeletionReason;
         g.pendingDeletionReason = null;
         g.records.clear();
+        g.legacyFloorAt = earliest(g.legacyFloorAt, g.legacyAcquiredAt);
         this.#persist();
         this.#log(g.grantId, "disposed", g.deleteReason);
       }
