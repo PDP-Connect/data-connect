@@ -61,7 +61,8 @@ it("D4 recovery and a concurrent erasure retry converge to one instruction", asy
   const [recoverer, retry] = workers;
   const [recoveryMessage, retryMessage] = messages;
   assert.ok(recoverer && retry && recoveryMessage && retryMessage);
-  await Promise.all(messages.map((next) => next()));
+  const ready = await Promise.all(messages.map((next) => next()));
+  assert.deepEqual(ready.map((message) => message.type), ["ready", "ready"]);
   recoverer.postMessage("run");
   assert.equal((await recoveryMessage()).type, "checkpoint");
   retry.postMessage("run");

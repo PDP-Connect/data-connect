@@ -14,6 +14,7 @@ const { opts, gate, recovering } = workerData;
 const barrier = new Int32Array(gate);
 let armed = false;
 let notified = false;
+let running = false;
 const readFile = fs.readFileSync;
 fs.readFileSync = ((...args: Parameters<typeof readFile>) => {
   const result = readFile(...args);
@@ -31,7 +32,7 @@ fs.mkdirSync = ((...args: Parameters<typeof mkdir>) => {
     return mkdir(...args);
   } catch (error) {
     if (
-      !notified &&
+      running && !notified &&
       String(args[0]) === `${opts.journalPath}.lock` &&
       (error as NodeJS.ErrnoException).code === "EEXIST"
     ) {
@@ -45,6 +46,7 @@ syncBuiltinESMExports();
 const authority = HeldDataAuthority.open({ ...opts, now: () => 1000 });
 port.postMessage({ type: "ready" });
 port.on("message", () => {
+  running = true;
   armed = true;
   if (recovering) {
     authority.reestablishHistory();
