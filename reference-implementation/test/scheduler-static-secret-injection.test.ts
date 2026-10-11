@@ -58,7 +58,7 @@ import {
 import { runConnector } from "../runtime/index.ts";
 import { createScheduler } from "../runtime/scheduler.ts";
 import type { RunRecord } from "../runtime/scheduler-domain-types.ts";
-import { closeDb, getDb } from "../server/db.ts";
+import { closeDb, getDb, initDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
 
@@ -879,6 +879,7 @@ test("startServer controller and scheduler-manager pass operator policy into spa
 
 test("manual run forwards bounded trigger and automation metadata to connector children", async () => {
   const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-run-metadata-"));
+  initDb(join(tmpDir, "authority.sqlite"));
   const { connectorPath, snapshotPath } = writeEnvSnapshotConnector(tmpDir, "manual-run", [
     "PDPP_RUN_AUTOMATION_MODE",
     "PDPP_RUN_TRIGGER_KIND",
@@ -957,6 +958,7 @@ test("manual run forwards bounded trigger and automation metadata to connector c
 
 test("connector stderr progress and retained diagnostics redact secret and proxy needles", async () => {
   const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-stderr-redaction-"));
+  initDb(join(tmpDir, "authority.sqlite"));
   const secretNeedle = "secret=shortNeedle";
   const proxyNeedle = "http://operator:proxy-password@proxy.example";
   const usefulContext = "useful context survives";
@@ -1080,6 +1082,7 @@ test("connector stderr progress and retained diagnostics redact secret and proxy
 
 test("connector children receive run-scoped capabilities without unrelated parent secrets", async () => {
   const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-run-env-isolation-"));
+  initDb(join(tmpDir, "authority.sqlite"));
   const connectionSecretName = "PDPP_TEST_CONNECTION_SCOPED_SECRET";
   const operatorSecretName = "PDPP_TEST_UNRELATED_OPERATOR_SECRET";
   const ownerPasswordName = "PDPP_OWNER_PASSWORD";

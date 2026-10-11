@@ -72,6 +72,7 @@ import {
   validateDoneRecordsEmitted,
   validateDoneStatus,
 } from "./done-validators.ts";
+import { buildEffectiveAuthorityRecord } from "./effective-authority.ts";
 import type { IngestResult as StrictIngestResult } from "./ingest-failure.ts";
 import { readIngestResponse as strictReadIngestResponse } from "./ingest-failure.ts";
 import {
@@ -2790,7 +2791,39 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
   // Check binding requirements
   const requiredBindings = manifest.runtime_requirements?.bindings || {};
   const availableBindings = buildAvailableBindings(onInteraction);
-
+  // Compute a collision-resistant run id before any child can execute.
+  const spawnRunId = opts.runId || `run_${randomUUID()}`;
+  // A child can egress from top-level code before START. Persist authority
+  // before spawn, and fail closed if its durable write fails.
+  const authorityTrace =
+    opts.traceContext || createTraceContext(opts.scenarioId ? { scenarioId: opts.scenarioId } : {});
+  const effectiveAuthority = buildEffectiveAuthorityRecord({
+    connectorId,
+    connectorInstanceId: resolvedConnectorInstanceId,
+    effectiveBindings: availableBindings,
+    ownerSubjectId: admittedConnection.ownerSubjectId,
+    requestedBindings: requiredBindings,
+    runId: spawnRunId,
+  });
+  const authorityEvent = await emitSpineEvent({
+    actor_id: connectorId,
+    actor_type: "runtime",
+    data: {
+      ...buildRunConnectionIdentity(resolvedConnectorInstanceId),
+      effective_authority: effectiveAuthority,
+      source: buildRunSourceDescriptor(connectorId, requestedRunSource),
+    },
+    event_type: "run.effective_authority",
+    object_id: spawnRunId,
+    object_type: "run",
+    run_id: spawnRunId,
+    scenario_id: authorityTrace.scenario_id,
+    subject_id: admittedConnection.ownerSubjectId,
+    trace_id: authorityTrace.trace_id,
+  });
+  if (!authorityEvent) {
+    throw new Error("Runtime cannot persist effective authority before spawn");
+  }
   validateRequiredRuntimeBindings(requiredBindings, availableBindings);
 
   const explicitlyRequestedStreams = requestedRuntimeStreams(providedScope);
@@ -2839,15 +2872,6 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
   const streamEvidenceRunRegistryStore: StreamEvidenceRunRegistryStore = resolveStreamEvidenceRunRegistryStore(
     opts.streamEvidenceRunRegistryStore
   );
-
-  // Compute runId before spawn so it can be threaded into the child env
-  // alongside the streaming registration token. The traceContext is
-  // computed below alongside the rest of the run-scoped state.
-  // A cryptographically strong UUID keeps the fallback globally
-  // collision-resistant: run_id is the sole uniqueness key for the durable
-  // STREAM_EVIDENCE claim registry, and a millisecond-granularity fallback
-  // can collide across unrelated concurrent runs.
-  const spawnRunId = opts.runId || `run_${randomUUID()}`;
 
   const launchConfig = buildConnectorLaunchConfig({
     automationMode,
@@ -3048,7 +3072,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
   // `scenarioId` is spread in only when present: under
   // `exactOptionalPropertyTypes` an explicit `undefined` is not the same as an
   // omitted optional property, and `createTraceContext` defaults on absence.
-  const traceContext = opts.traceContext || createTraceContext(opts.scenarioId ? { scenarioId: opts.scenarioId } : {});
+  const traceContext = authorityTrace;
   const runId = spawnRunId;
   const runSource = buildRunSourceDescriptor(connectorId, requestedRunSource);
   const runConnectionIdentity = buildRunConnectionIdentity(normalizedConnectorInstanceId);

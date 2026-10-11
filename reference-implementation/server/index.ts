@@ -522,6 +522,7 @@ import { mountRsHostedMcp } from "./routes/rs-hosted-mcp.ts";
 import { mountRsBlobsUpload, mountRsEventSubscriptions, mountRsMutation } from "./routes/rs-mutation.ts";
 import { mountRsBlobRead, mountRsReadQueries } from "./routes/rs-read.ts";
 import { mountRefRunCancel } from "./routes/run-cancel.ts";
+import { mountOwnerRunEffectiveAuthority, mountRefRunEffectiveAuthority } from "./routes/run-effective-authority.ts";
 import { mountRefDevPlaygroundSession, mountRefRunInteraction } from "./routes/run-interaction.ts";
 import { mountRefSourceWebhooks } from "./routes/source-webhooks.ts";
 import {
@@ -531,6 +532,7 @@ import {
   mountRefWebPushListSubscriptions,
   mountRefWebPushTest,
 } from "./routes/web-push.ts";
+import { readRunEffectiveAuthority } from "./run-effective-authority-read-model.ts";
 import {
   computeLexicalIndexState,
   getLexicalIndexBackfillProgress,
@@ -5882,6 +5884,13 @@ export function buildAsApp(opts: ServerOpts = {}) {
     requireOwnerSession: ownerAuth.requireOwnerSession,
   } as unknown as Parameters<typeof mountRefRunStatus>[1]);
 
+  mountRefRunEffectiveAuthority(app, {
+    handleError,
+    pdppError,
+    readRunEffectiveAuthority,
+    requireOwnerSession: ownerAuth.requireOwnerSession,
+  } as unknown as Parameters<typeof mountRefRunEffectiveAuthority>[1]);
+
   // Run-interaction streaming companion (reference-only). The store and
   // companion factory live in this AS app so the mint route, the SSE viewer
   // channel, and the input dispatch share state without a separate process.
@@ -7820,6 +7829,14 @@ function buildRsApp(opts: ServerOpts = {}) {
   // Registered immediately after mountRsReadQueries, before mountRsBlobRead,
   // to preserve the original route registration order.
   mountRsBlobsUpload(app, rsMutationContext as unknown as Parameters<typeof mountRsBlobsUpload>[1]);
+
+  mountOwnerRunEffectiveAuthority(app, {
+    handleError,
+    pdppError,
+    readRunEffectiveAuthority,
+    requireOwner,
+    requireToken,
+  } as unknown as Parameters<typeof mountOwnerRunEffectiveAuthority>[1]);
 
   // GET /v1/owner/connections is the bearer-authed owner-agent control-surface
   // listing of configured connection instances. It is the `/v1/owner/*` sibling

@@ -7,11 +7,17 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { TestContext } from "node:test";
-import { test } from "node:test";
+import { after, before, test } from "node:test";
 import type { RuntimeRunConnectorResult } from "../runtime/index.ts";
 import { createJsonlLineDispatcher, runConnector } from "../runtime/index.ts";
 import { isClosedPipeWriteError } from "../runtime/pipe-errors.ts";
 import { type DeriveTerminalReasonInput, deriveTerminalReason } from "../runtime/terminal-reason.ts";
+import { closeDb, initDb } from "../server/db.ts";
+import { makeTemporaryDbPath } from "./helpers/temp-dir.ts";
+
+// Placement requires a durable authority record before these spawn fixtures run.
+before(() => initDb(makeTemporaryDbPath("pipe-authority-")));
+after(() => closeDb());
 
 /**
  * `deriveTerminalReason`'s `doneMessage` type only declares the `status`

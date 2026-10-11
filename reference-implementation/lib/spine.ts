@@ -20,6 +20,7 @@ import {
 } from "./db.ts";
 import {
   postgresEmitSpineEvent,
+  postgresGetRunEffectiveAuthorityEvent,
   postgresGetRunStartedEvent,
   postgresGetRunTerminalEvent,
   postgresListRunSummariesByConnectorIds,
@@ -901,6 +902,17 @@ export async function getRunStartedEvent(runId: string): Promise<RunLifecycleEve
   const row = isPostgresStorageBackend()
     ? ((await postgresGetRunStartedEvent(runId)) as RunLifecycleEventRow | null | undefined)
     : getOne<RunLifecycleEventRow>(referenceQueries.spineGetRunStartedEvent, [runId]);
+  return summarizeRunLifecycleRow(row);
+}
+
+// Durable authority read, bounded on both storage backends.
+export async function getRunEffectiveAuthorityEvent(runId: string): Promise<RunLifecycleEventSummary | null> {
+  if (!runId) {
+    return null;
+  }
+  const row = isPostgresStorageBackend()
+    ? ((await postgresGetRunEffectiveAuthorityEvent(runId)) as RunLifecycleEventRow | null | undefined)
+    : getOne<RunLifecycleEventRow>(referenceQueries.spineGetRunEffectiveAuthorityEvent, [runId]);
   return summarizeRunLifecycleRow(row);
 }
 
