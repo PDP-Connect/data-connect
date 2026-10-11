@@ -1079,7 +1079,7 @@ export class HeldDataAuthority {
             origin: action.path,
             at: action.acceptedAt,
           });
-        } else if (action.kind === "elect" && action.disposition === "keep") {
+        } else if (action.disposition === "keep" && facts?.keptAt === null && facts.erasures.length === 0) {
           this.#append({
             t: "hd_keep",
             id: `${action.id}_keep`,

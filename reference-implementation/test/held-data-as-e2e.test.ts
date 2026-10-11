@@ -36,6 +36,7 @@ import {
   createConsentExchangeCode,
   getGrantPackageAccess,
   introspect,
+  revokeGrant,
   issueToken,
 } from "../server/auth.ts";
 import { getDb } from "../server/db.ts";
@@ -2944,3 +2945,28 @@ describe("lane F: P6 advance election over HTTP", () => {
     }, heldDataOpts(clock));
   });
 });
+
+it('owner keep after security revocation is applied on replay',async()=>{
+ const opts=heldDataOpts();
+ await withServer(false,async(h)=>{
+  const g=await ordinaryGrant(h);
+  await status(h,g.token,g.grantId);
+  await revokeGrant(g.grantId);
+  const restore=loseHistory(join(opts.experimentalHeldDataLifecycle.journalDir,'authority.journal'),'suffix');
+  const response=await revoke(h,h.ownerToken,g.grantId,{pdpp_disposition:'keep'});
+  assert.equal(response.status, 200);
+  assert.equal((response.body.lifecycle as { status: string }).status, 'pending');
+  console.log('owner_keep_http=200 lifecycle_status=pending');
+  restore();
+  const authority=getHeldDataRuntime()!.authority;
+  authority.reestablishHistory();
+  const view=authority.ownerView(g.grantId,DAY)!;
+  const entries=readFileSync(join(opts.experimentalHeldDataLifecycle.journalDir,'authority.journal'),'utf8').trim().split('\n').map(s=>JSON.parse(s));
+  const keeps=entries.filter(e=>e.t==='hd_keep'&&e.grant_id===g.grantId).length;
+  console.log('after_replay_pending='+view.pending_actions.length+' disposition='+view.ending?.disposition+' owner_notice_required='+view.ending?.owner_notice_required+' recorded_keep_entries='+keeps);
+  assert.equal(view.pending_actions.length, 0);
+  assert.equal(keeps, 1);
+  assert.equal(view.ending?.owner_notice_required,false);
+ },opts);
+});
+
