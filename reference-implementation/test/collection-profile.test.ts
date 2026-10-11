@@ -1097,6 +1097,136 @@ test("portable detail gaps validate manifest parents and keep retryable out of r
   }
 });
 
+test("DETAIL_GAP rejects embedded launch and later interaction credentials without tracing them", async (t) => {
+  const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+  const { asPort, rsPort } = server;
+  const { ownerToken, connectorId } = await setupConnector(server, asPort);
+  const fixtures = [
+    { kind: null, name: "embedded short launch credential", secret: "p4ss!2", status: "success" },
+    {
+      kind: "credentials",
+      name: "later credentials with implicit success",
+      secret: "synthetic-interaction-secret",
+      status: undefined,
+    },
+    { kind: "credentials", name: "later embedded short credentials", secret: "p7ss!3", status: "success" },
+    { kind: "otp", name: "later embedded OTP", secret: "493827", status: "success" },
+  ] as const;
+  try {
+    for (const fixture of fixtures) {
+      // biome-ignore lint/performance/noAwaitInLoops: each run owns its credential and trace directory.
+      await t.test(fixture.name, async () => {
+        const tmpDir = mkdtempSync(join(tmpdir(), "cp-gap-secret-"));
+        const connectorPath = join(tmpDir, "connector.mjs");
+        const traceDir = join(tmpDir, "trace");
+        writeFileSync(
+          connectorPath,
+          `
+import { createInterface } from 'node:readline';
+const rl = createInterface({ input: process.stdin, terminal: false });
+const kind = ${JSON.stringify(fixture.kind)};
+const emit = (message) => process.stdout.write(JSON.stringify(message) + '\\n');
+function finish(value) {
+  emit({
+    type: 'DETAIL_GAP', stream: 'items', reference_only: true, status: 'pending',
+    record_key: 'synthetic-item', reason: 'temporary_unavailable', retryable: true,
+    detail_locator: { kind: 'item', cursor: 'prefix-' + value + '-suffix' },
+  });
+  process.stdout.write(JSON.stringify({ type: 'DONE', status: 'succeeded', records_emitted: 0 }) + '\\n',
+    () => process.exit(0));
+  rl.close();
+}
+rl.on('line', (line) => {
+  const message = JSON.parse(line);
+  if (message.type === 'START') {
+    if (kind) {
+      emit({
+        type: 'INTERACTION', request_id: 'synthetic-credential-request', kind, stream: 'items',
+        message: 'Provide the synthetic test value',
+        schema: { type: 'object', properties: { value: { type: 'string', format: 'password' } } },
+      });
+    } else {
+      finish(process.env.SYNTHETIC_TRACE_SECRET);
+    }
+  } else if (message.type === 'INTERACTION_RESPONSE') {
+    finish(message.data.value);
+  }
+});
+`
+        );
+        const previousTraceDir = process.env.PDPP_TRACE_DIR;
+        process.env.PDPP_TRACE_DIR = traceDir;
+        let interactions = 0;
+        let gapWrites = 0;
+        try {
+          let rejection: RuntimeRunConnectorError | undefined;
+          await assert.rejects(
+            runTestConnector({
+              connectorId,
+              connectorPath,
+              detailGapStore: {
+                listPendingGaps: async () => [],
+                upsertPendingGap: async () => {
+                  gapWrites += 1;
+                  return null;
+                },
+              },
+              manifest: MINIMAL_MANIFEST,
+              onInteraction: async (interaction) => {
+                interactions += 1;
+                return {
+                  data: { empty: "", value: fixture.secret },
+                  request_id: interaction.request_id,
+                  status: fixture.status,
+                  type: "INTERACTION_RESPONSE",
+                };
+              },
+              onProgress: () => {
+                /* Never log the synthetic response or rejected locator. */
+              },
+              ownerToken,
+              persistState: false,
+              rsUrl: `http://localhost:${rsPort}`,
+              staticSecretEnv: fixture.kind ? null : { SYNTHETIC_TRACE_SECRET: fixture.secret },
+            }),
+            (error) => {
+              rejection = asRuntimeError(error);
+              return true;
+            }
+          );
+          assert.equal(interactions, fixture.kind ? 1 : 0);
+          const trace = readdirSync(traceDir)
+            .map((name) => readFileSync(join(traceDir, name), "utf8"))
+            .join("\n");
+          assert.ok(trace.includes("DETAIL_GAP"), "retain the rejected message type for diagnostics");
+          assert.equal(trace.includes(fixture.secret), false, "debug tracing must omit the response value");
+          assert.ok(trace.includes('"detail_locator":"[REDACTED]"'));
+          assert.ok(rejection);
+          // biome-ignore lint/performance/useTopLevelRegex: local assertion names the credential guard.
+          assert.match(rejection.message, /contains a runtime-known secret/);
+          assert.equal(gapWrites, 0, "reject credential-bearing locators before persistence");
+          const { body: timeline } = await fetchJson<TimelineBody>(
+            `http://localhost:${asPort}/_ref/runs/${encodeURIComponent(requireRunId(rejection))}/timeline`
+          );
+          assert.equal(JSON.stringify(timeline).includes(fixture.secret), false, "timeline must omit response values");
+          if (fixture.kind) {
+            assert.ok(timeline.data?.some((entry) => entry.event_type === "run.interaction_completed"));
+          }
+        } finally {
+          if (previousTraceDir === undefined) {
+            delete process.env.PDPP_TRACE_DIR;
+          } else {
+            process.env.PDPP_TRACE_DIR = previousTraceDir;
+          }
+          rmSync(tmpDir, { force: true, recursive: true });
+        }
+      });
+    }
+  } finally {
+    await closeServer(server);
+  }
+});
+
 test("Collection Profile conformance", async (t) => {
   t.after(async () => {
     await Promise.allSettled([...trackedTestServers].map((server) => closeServer(server)));

@@ -1829,7 +1829,7 @@ function containsRuntimeSecret(locator: unknown, knownSecrets: readonly string[]
     const value = values.pop();
     if (
       typeof value === "string" &&
-      knownSecrets.some((secret) => value === secret || (secret.length >= 8 && value.includes(secret)))
+      knownSecrets.some((secret) => secret.length > 0 && value.includes(secret))
     ) {
       return true;
     }
@@ -2955,6 +2955,8 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
     staticSecretLaunchEnv,
     streamingRegistrationEnv,
   } = launchConfig;
+  // Run-local registry shared by locator validation and trace redaction. Successful
+  // credential interactions extend it before their values reach the connector.
   const runKnownSecrets = [...Object.values(staticSecretLaunchEnv), ownerToken, streamingRegistrationToken].filter(
     (value): value is string => typeof value === "string" && value.length > 0
   );
@@ -5972,6 +5974,15 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       pendingInteraction = null;
       if (msg.kind === "otp") {
         completedOtpInteractionRequestIds.add(interactionRequestId);
+      }
+      if (responseStatus === "success" && (msg.kind === "credentials" || msg.kind === "otp")) {
+        // Keep answers only in this run's in-memory guard. Register before stdin
+        // write: the connector can immediately echo a value into a DETAIL_GAP.
+        for (const value of Object.values(response.data ?? {})) {
+          if (typeof value === "string" && value.length > 0 && !runKnownSecrets.includes(value)) {
+            runKnownSecrets.push(value);
+          }
+        }
       }
       if (!writeChildStdin(`${JSON.stringify({ ...response, status: responseStatus })}\n`, "interaction_response")) {
         onProgress({ phase: "interaction_response", reason: childStdinClosedReason, type: "connector_stdin_closed" });
