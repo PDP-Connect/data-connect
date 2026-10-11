@@ -422,25 +422,102 @@ async function assertEachChildServesEveryTool(fault?: Fault) {
 					`${child}/${name} path`,
 				);
 			}
-			if (name === "query_records") {
-				assert.equal(
-					result.body.result.structuredContent.data.data[0].text,
-					`text from ${child}`,
-				);
-			}
-			if (name === "aggregate") {
-				const expectedValue = child === "a" ? 11 : 22;
-				assert.equal(
-					result.body.result.structuredContent.data.value,
-					expectedValue,
-				);
-				assert.ok(
-					result.body.result.content[0].text.includes(
-						`count(notes) = ${expectedValue}`,
-					),
-				);
-			}
+			assertChildSpecificResult(child, name, result.body.result);
 		}
+	}
+}
+
+// Exact child identity in every tool's formatted result, so a formatter that
+// returns another child's payload after a correct read still fails.
+function assertChildSpecificResult(
+	child: string,
+	name: string,
+	result: {
+		content: { text: string }[];
+		structuredContent: Record<string, any>;
+	},
+) {
+	const label = `${child}/${name}`;
+	const structured = result.structuredContent;
+	const recordId = `conn_${child}/notes:${child}`;
+	assert.ok(
+		result.content[1]?.text.startsWith(`Selected grant_id: grt_${child}.`),
+		`${label} selected grant stamp`,
+	);
+	switch (name) {
+		case "schema":
+			// The fixture serves its generic record envelope for /v1/schema.
+			assert.equal(structured.data.data[0].id, child, `${label} payload id`);
+			assert.equal(
+				structured.data.data[0].text,
+				`text from ${child}`,
+				`${label} payload text`,
+			);
+			break;
+		case "query_records":
+			assert.equal(
+				structured.data.data[0].text,
+				`text from ${child}`,
+				`${label} payload text`,
+			);
+			break;
+		case "aggregate": {
+			const expectedValue = child === "a" ? 11 : 22;
+			assert.equal(structured.data.value, expectedValue, `${label} value`);
+			assert.ok(
+				result.content[0]?.text.includes(`count(notes) = ${expectedValue}`),
+				`${label} text`,
+			);
+			break;
+		}
+		case "search":
+			assert.equal(structured.results.length, 1, `${label} hit count`);
+			assert.equal(structured.results[0].id, recordId, `${label} hit id`);
+			assert.equal(
+				structured.results[0].connection_id,
+				`conn_${child}`,
+				`${label} hit connection`,
+			);
+			assert.ok(
+				result.content[0]?.text.includes(`first_fetch_id=${recordId}`),
+				`${label} first_fetch_id`,
+			);
+			break;
+		case "fetch":
+			assert.equal(structured.id, recordId, `${label} record id`);
+			assert.ok(
+				structured.url.endsWith(`/notes/records/${child}?connection_id=conn_${child}`),
+				`${label} record url`,
+			);
+			assert.deepEqual(
+				JSON.parse(structured.text).data.map((row: { id: string }) => row.id),
+				[child],
+				`${label} record body`,
+			);
+			assert.ok(
+				structured.text.includes(`text from ${child}`),
+				`${label} record text`,
+			);
+			break;
+		case "read_record_field":
+			assert.deepEqual(
+				structured.record,
+				{
+					connection_id: `conn_${child}`,
+					id: recordId,
+					record_id: child,
+					stream: "notes",
+				},
+				`${label} record identity`,
+			);
+			assert.equal(structured.field.path, "text", `${label} field path`);
+			assert.ok(
+				result.content[0]?.text.startsWith(`record=${recordId} field=text `),
+				`${label} text header`,
+			);
+			break;
+		default:
+			assert.fail(`unhandled tool ${name}`);
 	}
 }
 
@@ -467,7 +544,11 @@ async function assertOffsetReplay(fault?: Fault) {
 			.map((m) => ({ args: JSON.parse(m?.[2] ?? "{}"), kind: m?.[1] }));
 	const middle = await call({ offset_chars: 16 });
 	const middleWindow = middle.body.result.structuredContent.window;
-	assert.equal(middleWindow.start_chars, 16);
+	assert.equal(
+		middleWindow.start_chars,
+		16,
+		"middle window starts at requested offset",
+	);
 	const [previous, next] = [
 		descriptorsOf(middle.body.result.content[0].text).find(
 			(d) => d.kind === "previous",
@@ -493,11 +574,18 @@ test("field-window continuations replay at the requested offsets and reach both 
 	assertOffsetReplay());
 
 test("the stronger checks fail for an adapter that always uses the first child", async () => {
-	await assert.rejects(assertEachChildServesEveryTool("always-first-child"));
+	// Pin the assertion that kills the mutant, not any earlier failure.
+	await assert.rejects(assertEachChildServesEveryTool("always-first-child"), {
+		code: "ERR_ASSERTION",
+		message: /^b\/schema bearer/,
+	});
 });
 
 test("the stronger checks fail for an adapter that ignores the requested offset", async () => {
-	await assert.rejects(assertOffsetReplay("drop-offset"));
+	await assert.rejects(assertOffsetReplay("drop-offset"), {
+		code: "ERR_ASSERTION",
+		message: /^middle window starts at requested offset/,
+	});
 });
 
 async function packageInstructions() {
