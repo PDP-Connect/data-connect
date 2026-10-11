@@ -47,6 +47,39 @@ export interface HeldDataRuntime {
 }
 
 let current: HeldDataRuntime | null = null;
+const clientAssertions = new WeakMap<HeldDataRuntime, Map<string, number>>();
+
+/** Consume a verified assertion once across the lifecycle and revocation endpoints. */
+export function acceptHeldDataClientAssertion(
+  runtime: HeldDataRuntime,
+  clientId: string,
+  claims: Record<string, unknown>
+): boolean {
+  const { jti, exp } = claims;
+  const now = runtime.now();
+  if (
+    typeof jti !== "string" ||
+    jti.length === 0 ||
+    typeof exp !== "number" ||
+    !Number.isFinite(exp) ||
+    exp * 1000 <= now
+  ) {
+    return false;
+  }
+  const seen = clientAssertions.get(runtime) ?? new Map<string, number>();
+  clientAssertions.set(runtime, seen);
+  for (const [key, until] of seen) {
+    if (until <= now) {
+      seen.delete(key);
+    }
+  }
+  const key = JSON.stringify([clientId, jti]);
+  if (seen.has(key)) {
+    return false;
+  }
+  seen.set(key, exp * 1000);
+  return true;
+}
 
 export function getHeldDataRuntime(): HeldDataRuntime | null {
   return current;

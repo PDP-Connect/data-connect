@@ -166,6 +166,7 @@ import {
   trainingLeaseOptionsFromEnv,
 } from "./training-lease/runtime.ts";
 import {
+  acceptHeldDataClientAssertion,
   createHeldDataRuntime,
   getHeldDataRuntime,
   type HeldDataRuntimeOptions,
@@ -5611,12 +5612,16 @@ export function buildAsApp(opts: ServerOpts = {}) {
     authenticateClient: async (req, body) => {
       const baseUrl = asTokenContext.resolveBaseUrl(req);
       const endpoint = asTokenContext.resolveTokenEndpoint(req).replace(/\/token$/, "/revoke");
+      const runtime = getHeldDataRuntime();
+      const lifecycleAssertion = runtime && body.pdpp_disposition !== undefined && body.client_assertion !== undefined;
       const clientId = await asTokenContext.authenticateOAuthTokenClient({
         baseUrl,
         clientId: body.client_id,
         clientAssertion: body.client_assertion,
         clientAssertionType: body.client_assertion_type,
-        tokenEndpoint: endpoint,
+        tokenEndpoint: lifecycleAssertion
+          ? asTokenContext.resolveTokenEndpoint(req).replace(/\/oauth\/token$/, "")
+          : endpoint,
       });
       const client = clientId
         ? await resolveOAuthClient(clientId, {
@@ -5626,6 +5631,14 @@ export function buildAsApp(opts: ServerOpts = {}) {
         : null;
       if (!client || !clientId) {
         throw new Error("Client authentication failed");
+      }
+      if (lifecycleAssertion) {
+        const claims = JSON.parse(
+          Buffer.from(String(body.client_assertion).split(".")[1] ?? "", "base64url").toString("utf8")
+        ) as Record<string, unknown>;
+        if (!acceptHeldDataClientAssertion(runtime, clientId, claims)) {
+          throw new Error("Current client assertion required");
+        }
       }
       return {
         clientId,
@@ -7329,7 +7342,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
     writeClient: heldDataWriteClient,
     // The metadata `issuer` is resolved the same way (root-and-discovery.ts).
     issuer: (req: unknown) =>
-      resolvePublicUrl(req as Parameters<typeof resolvePublicUrl>[0], explicitAsBaseUrl).replace(/\/+$/, ""),
+      asTokenContext.resolveTokenEndpoint(req).replace(/\/oauth\/token$/, ""),
     resolveBaseUrl: (req: unknown) =>
       resolvePublicUrl(req as Parameters<typeof resolvePublicUrl>[0], explicitAsBaseUrl),
     runtime: getHeldDataRuntime,

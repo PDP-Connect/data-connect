@@ -1358,7 +1358,7 @@ describe("RFC 7009 held-data revocation", () => {
           assert.equal(
             (
               await revokeToken(h, {
-                ...clientAuth(c, `${h.asUrl}/oauth/revoke`),
+                ...clientAuth(c, h.asUrl),
                 token: g.refreshToken,
                 pdpp_disposition: disposition,
               })
@@ -1663,4 +1663,92 @@ describe("RFC 7009 owner-package restore", () => {
       heldDataOpts()
     );
   });
+});
+
+describe("RFC 7009 Core assertion authentication", () => {
+  for (const scenario of [
+    "issuer audience",
+    "advertised issuer",
+    "non-empty jti",
+    "shared replay",
+    "flag off",
+  ] as const) {
+    it(`RFC 7009 Core assertion ${scenario}`, async () => {
+      const c = cimdClient();
+      const cimdFetchDependencies = {
+        dnsLookupImpl: async () => [{ address: "93.184.216.34", family: 4 }],
+        fetchImpl: async (input: unknown) =>
+          new Response(JSON.stringify(String(input) === c.jwksUri ? c.jwks : c.doc), {
+            headers: { "Content-Type": "application/json" },
+            status: 200,
+          }),
+        isGlobalUnicastAddressImpl: () => true,
+      };
+      await withServer(
+        false,
+        async (h) => {
+          const g = await authCodeGrant(h, c.clientId, {
+            redirect: c.doc.redirect_uris[0] as string,
+            tokenAuth: (aud) =>
+              clientAuth(c, scenario === "advertised issuer" ? "https://token-auth.example/oauth/token" : aud),
+          });
+          const params = { token: g.refreshToken, pdpp_disposition: "delete" };
+          if (scenario === "flag off") {
+            const assertion = clientAuth(c, `${h.asUrl}/oauth/revoke`, { jti: null });
+            assert.equal((await revokeToken(h, { ...assertion, ...params })).status, 200);
+            assert.equal((await revokeToken(h, { ...assertion, ...params })).status, 200);
+            assert.equal(
+              getDb().prepare("SELECT status FROM grants WHERE grant_id = ?").get(g.grantId)?.status,
+              "active"
+            );
+            return;
+          }
+          if (scenario === "issuer audience" || scenario === "advertised issuer") {
+            const jti = randomBytes(8).toString("hex");
+            assert.equal(
+              (await revokeToken(h, { ...clientAuth(c, `${h.asUrl}/oauth/revoke`, { jti }), ...params })).status,
+              401
+            );
+            const metadata = await fetchJson<{ issuer: string }>(`${h.asUrl}/.well-known/oauth-authorization-server`);
+            assert.equal(
+              (await revokeToken(h, { ...clientAuth(c, metadata.body.issuer, { jti }), ...params })).status,
+              200
+            );
+            assert.equal(getHeldDataRuntime()?.authority.ownerView(g.grantId, 30 * DAY)?.erasures.length, 1);
+            assert.equal((await lifecycle(h, { ...clientAuth(c, metadata.body.issuer), grant_id: g.grantId })).status, 200);
+          } else if (scenario === "non-empty jti") {
+            for (const jti of [null, ""] as const) {
+              assert.equal((await revokeToken(h, { ...clientAuth(c, h.asUrl, { jti }), ...params })).status, 401);
+            }
+            assert.equal((await revokeToken(h, { ...clientAuth(c, h.asUrl), ...params })).status, 200);
+          } else {
+            const used = clientAuth(c, h.asUrl);
+            assert.equal((await lifecycle(h, { ...used, grant_id: g.grantId })).status, 200);
+            assert.equal(
+              (await revokeToken(h, { ...used, ...params })).status,
+              401,
+              "lifecycle assertion cannot be replayed at revocation"
+            );
+            const fresh = clientAuth(c, h.asUrl);
+            assert.equal((await revokeToken(h, { ...fresh, ...params })).status, 200);
+            assert.equal(
+              (await revokeToken(h, { ...fresh, ...params })).status,
+              401,
+              "revocation assertion is accepted once"
+            );
+            assert.equal(
+              (await lifecycle(h, { ...fresh, grant_id: g.grantId })).status,
+              401,
+              "revocation assertion cannot be replayed at lifecycle"
+            );
+          }
+        },
+        {
+          ...(scenario === "flag off" ? {} : heldDataOpts()),
+          cimdFetchDependencies,
+          ...(scenario === "advertised issuer" ? { asIssuer: "https://token-auth.example" } : {}),
+        } as never
+      );
+    });
+  }
 });

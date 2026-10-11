@@ -31,7 +31,7 @@
 import type { StatusResult } from "../../lib/held-data/authority.ts";
 import { AuthorityUnavailableError } from "../../lib/held-data/authority.ts";
 import { checkDpopProof, DPOP_MAX_AGE_S } from "../../lib/training-lease/dpop.ts";
-import type { HeldDataRuntime } from "../held-data/runtime.ts";
+import { acceptHeldDataClientAssertion, type HeldDataRuntime } from "../held-data/runtime.ts";
 
 interface RouteRequest {
   readonly body?: Record<string, unknown> | null;
@@ -156,7 +156,6 @@ export function mountHeldData(app: AppLike, ctx: MountHeldDataContext): void {
 
   // Replay caches (Core: Assertions and proofs). Keys live until the
   // assertion or proof could no longer be accepted anyway.
-  const seenAssertions = new Map<string, number>();
   const seenProofs = new Map<string, number>();
   function firstUse(cache: Map<string, number>, key: string, untilMs: number, nowMs: number): boolean {
     for (const [k, until] of cache) {
@@ -209,7 +208,7 @@ export function mountHeldData(app: AppLike, ctx: MountHeldDataContext): void {
     if (!clientId) {
       return null;
     }
-    return firstUse(seenAssertions, `${clientId} ${claims.jti}`, claims.exp * 1000, rt.now()) ? clientId : null;
+    return acceptHeldDataClientAssertion(rt, clientId, claims) ? clientId : null;
   }
 
   /**
