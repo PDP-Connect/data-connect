@@ -2883,6 +2883,10 @@ describe("lane F: P9 decommission", () => {
       });
       assert.equal(complete.status, 200, JSON.stringify(complete.body));
       assert.equal(complete.body.decommissioned, true);
+      for (const g of [live, consumed, ended]) {
+        const record = await owner(h, `/v1/owner/grants/${g.grantId}/lifecycle`);
+        assert.equal(record.status, 200, `owner record of ${g.grantId} after retirement: ${JSON.stringify(record.body)}`);
+      }
       const rt = getHeldDataRuntime();
       assert.ok(rt);
       assert.equal(rt.authority.decommissioned, true);
@@ -3124,5 +3128,23 @@ it('A2 response fence does not defer a token-free lifecycle assessment past a qu
     assert.equal(response.status, 200);
     assert.equal(acknowledged, true);
     assert.equal(serializedAfterEnding, false, 'an answer computed synchronously must be sent before a later queued ending');
+  }, heldDataOpts());
+});
+
+
+it('G1 restored package access token stays inactive after an acknowledged family revocation', async () => {
+  await withServer(false, async h => {
+    const clientId = await registerPublicClient(h);
+    const pkg = await packageFlow(h, clientId, [h.connectorId, await registerSecondConnector(h)]);
+    assert.equal((await revokeToken(h, { client_id: clientId, token: pkg.refreshToken })).status, 200);
+    const familyId = getDb().prepare('SELECT family_id FROM oauth_refresh_tokens WHERE package_id = ?').get(pkg.packageId)!.family_id as string;
+    assert.equal(getHeldDataRuntime()!.authority.refreshFamilyRevoked(familyId), true);
+    getDb().prepare("UPDATE oauth_refresh_tokens SET status = 'active', revoked_at = NULL WHERE package_id = ?").run(pkg.packageId);
+    getDb().prepare('UPDATE tokens SET revoked = 0 WHERE token_id = ?').run(pkg.packageToken);
+    getDb().prepare("UPDATE grant_packages SET status = 'active', revoked_at = NULL WHERE package_id = ?").run(pkg.packageId);
+    for (const id of pkg.children) restoreGrantRows(id);
+    assert.equal((await introspect(pkg.packageToken)).active, false, 'a restored token of a revoked family must not introspect active');
+    const write = await lifecycle(h, { token: pkg.packageToken, grant_id: pkg.children[0]!, pdpp_disposition: 'delete' });
+    assert.equal(write.body.grants[0]?.error, 'current_authentication_required');
   }, heldDataOpts());
 });
