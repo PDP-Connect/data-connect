@@ -3087,3 +3087,42 @@ it('A2 release fence: a resolved release check sees a later journaled access rev
     assert.throws(release, { code: 'invalid_grant' });
   }, heldDataOpts());
 });
+
+
+it('A2 response fence does not defer a token-free lifecycle assessment past a queued ending', async () => {
+  await withServer(false, async h => {
+    const g = await ordinaryGrant(h);
+    await status(h, g.token, g.grantId);
+    const authority = getHeldDataRuntime()!.authority;
+    const original = authority.status.bind(authority);
+    let acknowledged = false;
+    let serializedAfterEnding: boolean | null = null;
+    authority.status = (...args) => {
+      const results = original(...args);
+      authority.status = original;
+      queueMicrotask(() => {
+        authority.end({ grantId: g.grantId, path: 'owner_withdrawal', disposition: 'delete' });
+        acknowledged = true;
+      });
+      return new Proxy(results, {
+        get(target, property, receiver) {
+          if (property !== 'map') return Reflect.get(target, property, receiver);
+          return (callback: (r: (typeof results)[number]) => Record<string, unknown>) => {
+            const wire = target.map(callback);
+            for (const answer of wire) {
+              Object.defineProperty(answer, 'toJSON', { value: () => {
+                serializedAfterEnding = authority.hasEnded(g.grantId);
+                return answer;
+              } });
+            }
+            return wire;
+          };
+        }
+      });
+    };
+    const response = await status(h, g.token, g.grantId);
+    assert.equal(response.status, 200);
+    assert.equal(acknowledged, true);
+    assert.equal(serializedAfterEnding, false, 'an answer computed synchronously must be sent before a later queued ending');
+  }, heldDataOpts());
+});

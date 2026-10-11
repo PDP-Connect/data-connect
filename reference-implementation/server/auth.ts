@@ -10286,8 +10286,8 @@ export async function heldDataTokenReleaseCheck(
   };
 }
 
-/** Every token in an AS response and every returned grant assessment share the release fence. */
-export async function heldDataResponseReleaseCheck(payload: unknown): Promise<() => void> {
+/** Resolve token bindings for the final check; token-free responses stay synchronous. */
+export function heldDataResponseReleaseCheck(payload: unknown): (() => void) | Promise<() => void> {
   if (!getHeldDataRuntime()) return () => {};
   const tokens = new Set<string>();
   const assessed = new Set<string>();
@@ -10301,8 +10301,9 @@ export async function heldDataResponseReleaseCheck(payload: unknown): Promise<()
     }
   };
   visit(payload);
-  const checks = await Promise.all([...tokens].map((token) => heldDataTokenReleaseCheck(token, [...assessed])));
-  return () => { for (const check of checks) check(); };
+  if (tokens.size === 0) return () => {};
+  return Promise.all([...tokens].map((token) => heldDataTokenReleaseCheck(token, [...assessed])))
+    .then((checks) => () => { for (const check of checks) check(); });
 }
 
 export async function exchangeOAuthAuthorizationCode({

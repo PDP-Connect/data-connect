@@ -4997,7 +4997,12 @@ export function buildAsApp(opts: ServerOpts = {}) {
     const send = res.json.bind(res);
     res.json = (payload: unknown) => {
       if (!getHeldDataRuntime()) return send(payload);
-      void heldDataResponseReleaseCheck(payload).then((release) => {
+      const check = heldDataResponseReleaseCheck(payload);
+      if (typeof check === "function") {
+        check();
+        return send(payload);
+      }
+      void check.then((release) => {
         release();
         send(payload);
       }).catch(() => {
