@@ -40,6 +40,10 @@ export class ToyApp implements HeldStore {
     return ids;
   }
 
+  recordRefs(grantId: string): Iterable<HeldRecordRef> {
+    return this.records.get(grantId) ?? [];
+  }
+
   /** Store records from a read. Rereads replace the copy; they never move lifecycle clocks. */
   sync(grantId: string, records: ToyRecord[]): void {
     if (this.#client) {

@@ -93,6 +93,8 @@ interface HeldRecord {
 export interface HeldStore {
   /** Inventory includes derivatives: lost lifecycle state makes all these copies due. */
   grantIds(): Iterable<string>;
+  /** Complete inventory for migrating a legacy acquisition to per-record clocks. */
+  recordRefs?(grantId: string): Iterable<HeldRecordRef>;
   /** Remove the covered records and every derivative built from them. */
   dispose(grantId: string, scope: ErasureScope): void;
   /** Remove these versions and delete or regenerate every derivative that used them. */
@@ -147,6 +149,7 @@ interface HeldGrant {
   needsReconcile: boolean;
   pendingDeletionReason: string | null;
   recordsTracked: boolean;
+  legacyAcquiredAt: number | null;
   records: Map<string, HeldRecord>;
 }
 
@@ -182,6 +185,7 @@ const checkpointSchema = z.object({
     // grant-level ceiling (never later than the record clocks) applies.
     readState: z.enum(["active", "window_closed", "expired", "ended"]).optional(),
     recordsTracked: z.boolean().optional(),
+    legacyAcquiredAt: time.nullable().optional(),
     records: z.array(z.tuple([z.string(), z.object({ ref: refSchema, firstAcquiredAt: time })])).optional(),
     erasures: z.array(z.tuple([z.string(), z.object({
       scope: z.object({ streams: z.union([z.literal("all"), z.array(z.string())]) }),
@@ -271,6 +275,7 @@ export class HeldDataClient {
             ...g,
             readState: g.readState ?? "active",
             recordsTracked: g.recordsTracked ?? false,
+            legacyAcquiredAt: g.legacyAcquiredAt === undefined ? (g.recordsTracked ? null : g.firstAcquiredAt) : g.legacyAcquiredAt,
             records: new Map(g.records ?? []),
             erasures: new Map(g.erasures),
             needsReconcile: true,
@@ -292,7 +297,11 @@ export class HeldDataClient {
    * is not an assessment, so this never makes data usable.
    */
   acquire(grantId: string, o: { processingPermission?: boolean } = {}): boolean {
-    return this.#register(grantId, o) && this.#persist();
+    if (!this.#register(grantId, o)) return false;
+    const g = this.#grants.get(grantId);
+    if (!g) return false;
+    g.legacyAcquiredAt = Math.min(g.legacyAcquiredAt ?? Number.POSITIVE_INFINITY, g.firstAcquiredAt);
+    return this.#persist();
   }
 
   /** Create or revive the grant entry in memory; the caller persists. */
@@ -326,6 +335,7 @@ export class HeldDataClient {
         needsReconcile: false,
         pendingDeletionReason: null,
         recordsTracked: false,
+        legacyAcquiredAt: null,
         records: new Map(),
       });
       this.#tokenOrigins.delete(grantId);
@@ -350,6 +360,20 @@ export class HeldDataClient {
       // Clocks cannot be recorded durably or trusted: nothing is kept.
       this.#disposeDue();
       return [];
+    }
+    // Migrate the complete old inventory before accepting a new delivery. Without an
+    // inventory, the original whole-copy deadline remains the conservative bound.
+    if (priorGrant?.legacyAcquiredAt !== null && priorGrant?.legacyAcquiredAt !== undefined && this.#store.recordRefs) {
+      for (const ref of this.#store.recordRefs(grantId)) {
+        const identity = JSON.stringify([ref.sourceId ?? null, ref.instanceId ?? null, ref.stream, ref.id]);
+        const versions = this.#acquisitions.get(identity) ?? new Map<string | undefined, number>();
+        const firstAcquiredAt = Math.min(priorGrant.legacyAcquiredAt, versions.get(ref.version) ?? Number.POSITIVE_INFINITY);
+        versions.set(ref.version, firstAcquiredAt);
+        this.#acquisitions.set(identity, versions);
+        priorGrant.records.set(JSON.stringify([identity, ref.version ?? null]), { ref, firstAcquiredAt });
+      }
+      priorGrant.recordsTracked = true;
+      priorGrant.legacyAcquiredAt = null;
     }
     const eligible: { ref: T; key: string; firstAcquiredAt: number }[] = [];
     for (const ref of records) {
@@ -443,6 +467,7 @@ export class HeldDataClient {
     }
     const candidates: number[] = [];
     if (this.policy.retentionCeilingMs !== null) {
+      if (g.legacyAcquiredAt !== null) candidates.push(g.legacyAcquiredAt + this.policy.retentionCeilingMs);
       if (g.recordsTracked) {
         for (const r of g.records.values()) {
           candidates.push(r.firstAcquiredAt + this.policy.retentionCeilingMs);
@@ -734,14 +759,14 @@ export class HeldDataClient {
       if (this.policy.longStopMs !== null) {
         grantDeadlines.push((g.freshnessOrigin ?? g.firstAcquiredAt) + this.policy.longStopMs);
       }
-      if (!g.recordsTracked && this.policy.retentionCeilingMs !== null) {
-        grantDeadlines.push(g.firstAcquiredAt + this.policy.retentionCeilingMs);
+      if (g.legacyAcquiredAt !== null && this.policy.retentionCeilingMs !== null) {
+        grantDeadlines.push(g.legacyAcquiredAt + this.policy.retentionCeilingMs);
       }
       // Per-record ceilings never use the grant's first acquisition: a later record keeps its own clock.
       const by = grantDeadlines.length ? Math.min(...grantDeadlines) : null;
       if (g.pendingDeletionReason !== null || (by !== null && now >= by)) {
         g.pendingDeletionReason ??=
-          !g.recordsTracked && this.policy.retentionCeilingMs !== null && now >= g.firstAcquiredAt + this.policy.retentionCeilingMs
+          g.legacyAcquiredAt !== null && this.policy.retentionCeilingMs !== null && now >= g.legacyAcquiredAt + this.policy.retentionCeilingMs
             ? "retention_ceiling"
             : "long_stop";
         if (!this.#persist()) {
@@ -773,7 +798,7 @@ export class HeldDataClient {
             g.records.delete(key);
           }
           this.#log(g.grantId, "disposed", "retention_ceiling");
-          if (g.records.size === 0) {
+          if (g.records.size === 0 && g.legacyAcquiredAt === null) {
             g.deletedAt = now;
             g.deleteReason = "retention_ceiling";
           }
