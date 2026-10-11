@@ -460,7 +460,21 @@ export class HeldDataClient {
     if (this.#highWaterMs >= until) {
       return { ok: false, reason: "stale" };
     }
-    return this.#persist() ? { ok: true, until } : { ok: false, reason: "state_unavailable" };
+    if (!this.#persist()) {
+      return { ok: false, reason: "state_unavailable" };
+    }
+    // Durable writes take time. Sample once more, with no I/O after it, so a write that
+    // crossed a deadline cannot license use past it.
+    const written = this.#now();
+    if (this.#clockUncertain) {
+      return { ok: false, reason: "state_unavailable" };
+    }
+    const due = this.deleteBy(grantId);
+    if (written >= until || (due !== null && written >= due)) {
+      this.#disposeDue(written);
+      return { ok: false, reason: this.#grants.get(grantId)?.deletedAt != null ? "deleted" : "stale" };
+    }
+    return { ok: true, until };
   }
 
   /** Streams of a grant that a partial erasure has removed (narrowing). */

@@ -512,4 +512,47 @@ describe("client safety (RT6, RT10 and persisted state)", () => {
     other.tick();
     assert.equal(other.held.has("h"), true, "a rollback does not dispose anything by itself");
   });
+
+  it("a durable write that crosses the pause deadline does not license use", async () => {
+    let t = T0;
+    const storage = new MemoryClientCheckpointStorage();
+    const write = storage.write.bind(storage);
+    let writeCostMs = 0;
+    storage.write = (cp) => {
+      t += writeCostMs;
+      write(cp);
+    };
+    const app = new ToyApp();
+    const c = new HeldDataClient({ initialize: true, now: () => t, status: positive(() => t), storage, store: app });
+    app.attach(c);
+    app.sync("g", record);
+    await c.reconcile();
+    t = T0 + 7 * DAY - 1;
+    writeCostMs = 2;
+    assert.equal(c.canUse("g").ok, false, "the write took the clock past origin + pause threshold");
+    assert.equal(app.search("g", "hello"), null);
+  });
+
+  it("a durable write that crosses a retention ceiling does not leave the record usable", async () => {
+    let t = T0;
+    const storage = new MemoryClientCheckpointStorage();
+    const write = storage.write.bind(storage);
+    let writeCostMs = 0;
+    storage.write = (cp) => {
+      t += writeCostMs;
+      write(cp);
+    };
+    const app = new ToyApp();
+    const policy = { retentionCeilingMs: 10 * DAY, pauseThresholdMs: 30 * DAY, longStopMs: null };
+    const c = new HeldDataClient({ initialize: true, now: () => t, status: positive(() => t), storage, store: app, policy });
+    app.attach(c);
+    app.sync("g", record);
+    await c.reconcile();
+    t = T0 + 10 * DAY - 1;
+    writeCostMs = 2;
+    assert.equal(c.canUse("g").ok, false, "the write took the clock past the ceiling");
+    writeCostMs = 0;
+    assert.equal(app.search("g", "hello"), null);
+    assert.equal(app.holds("g").records, 0, "the record is disposed, not merely refused");
+  });
 });
