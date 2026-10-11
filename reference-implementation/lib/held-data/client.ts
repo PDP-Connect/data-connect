@@ -284,6 +284,9 @@ export class HeldDataClient {
   /** The gate the app checks before every use. */
   canUse(grantId: string): UseDecision {
     this.#disposeDue();
+    // Disposal can take time. Sample again, complete any newly due disposal,
+    // then evaluate every guard without another clock read after those guards.
+    this.#disposeDue(this.#now());
     this.#persist();
     if (this.#stateUnavailable || this.#clockUncertain) {
       return { ok: false, reason: "state_unavailable" };
@@ -305,7 +308,7 @@ export class HeldDataClient {
       return { ok: false, reason: "no_assessment" };
     }
     const until = g.freshnessOrigin + this.policy.pauseThresholdMs;
-    if (this.#now() >= until) {
+    if (this.#highWaterMs >= until) {
       return { ok: false, reason: "stale" };
     }
     return this.#persist() ? { ok: true, until } : { ok: false, reason: "state_unavailable" };
@@ -568,8 +571,7 @@ export class HeldDataClient {
     }
   }
 
-  #disposeDue(): void {
-    const now = this.#now();
+  #disposeDue(now = this.#now()): void {
     if (this.#stateUnavailable || this.#clockUncertain) {
       // Unknown deadlines are due under Core. No new acquisition can reset them.
       this.#persist();

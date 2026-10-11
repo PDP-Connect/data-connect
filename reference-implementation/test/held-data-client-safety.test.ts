@@ -64,6 +64,43 @@ describe("client safety (RT6, RT10 and persisted state)", () => {
     assert.ok(client.deleteBy("g") === null || client.deleteBy("g") === deadline);
   });
 
+  it("rollback observed on the final use-gate time read cannot license one last use", async () => {
+    let armed = false;
+    let reads = 0;
+    const now = () => {
+      if (armed) {
+        reads += 1;
+      }
+      return armed && reads >= 2 ? T0 - 10 * DAY : T0;
+    };
+    const app = new ToyApp();
+    const c = new HeldDataClient({ now, status: positive(() => T0), store: app });
+    app.attach(c);
+    app.sync("g", record);
+    await c.reconcile();
+    armed = true;
+    assert.equal(c.canUse("g").ok, false, "rollback detected inside the gate must invalidate its decision");
+    assert.equal(app.holds("g").records, 0);
+  });
+
+  it("suspension observed on the final use-gate time read requires reconciliation", async () => {
+    let armed = false;
+    let reads = 0;
+    const now = () => {
+      if (armed) {
+        reads += 1;
+      }
+      return armed && reads >= 2 ? T0 + 2 * DAY : T0;
+    };
+    const app = new ToyApp();
+    const c = new HeldDataClient({ monotonicMs: () => 0, now, status: positive(() => T0), store: app });
+    app.attach(c);
+    app.sync("g", record);
+    await c.reconcile();
+    armed = true;
+    assert.equal(c.canUse("g").ok, false, "suspension detected inside the gate must invalidate its decision");
+  });
+
   it("checkpoint persists first receipt, deadlines, positions and assessment before restart", async () => {
     let t = T0;
     const storage = new MemoryClientCheckpointStorage();
