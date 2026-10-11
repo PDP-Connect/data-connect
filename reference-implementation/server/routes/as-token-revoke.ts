@@ -72,7 +72,7 @@ function revocationError(err: unknown, res: Response): unknown {
 export interface TokenRevocationContext {
   authenticateClient: (
     req: Request,
-    body: Record<string, unknown>,
+    body: Record<string, unknown>
   ) => Promise<{ clientId: string; confidential: boolean }>;
   lifecycleNow: () => number | null;
   revocationUrl: (req: Request) => string;
@@ -88,7 +88,7 @@ export interface TokenRevocationContext {
 
 export function mountAsTokenRevoke(
   app: { post: (path: string, ...handlers: RouteArg<Handler>[]) => unknown },
-  ctx: TokenRevocationContext,
+  ctx: TokenRevocationContext
 ): void {
   const handler: Handler = async (req, res) => {
     res.setHeader("Cache-Control", "no-store");
