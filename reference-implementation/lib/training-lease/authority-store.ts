@@ -176,6 +176,14 @@ interface ErasureEntry {
   at: number;
 }
 
+interface AdvanceErasureEntry {
+  t: "hd_advance";
+  id: string;
+  grant_id: string;
+  at: number;
+  effective_at: number | null;
+}
+
 /**
  * Per-grant index over the shared authority journal. Each node keeps one and
  * reads only the bytes appended since its last read. Entry types this store
@@ -183,10 +191,10 @@ interface ErasureEntry {
  * which bound lease issuance for the acquisition copies they cover (B3).
  */
 class JournalIndex {
-  readonly #reader: JournalReader<JournalEntry | ErasureEntry>;
+  readonly #reader: JournalReader<JournalEntry | ErasureEntry | AdvanceErasureEntry>;
   readonly grants = new Map<string, GrantFacts>();
   /** First erasure of each grant's copy, by journal sequence. */
-  readonly erasures = new Map<string, { seq: number; at: number }>();
+  readonly erasures = new Map<string, { seq: number; at: number; scheduled: boolean }>();
   /** B3: latest `exp` of a returnable lease naming each acquisition grant, before its erasure. */
   readonly acquisitionMaxExp = new Map<string, number>();
   /** Sequence numbers, only for entries this node is waiting on (see watch). */
@@ -220,13 +228,15 @@ class JournalIndex {
     this.#reader.refresh((e, seq) => this.#apply(e, seq));
   }
 
-  #apply(e: JournalEntry | ErasureEntry, seq: number): void {
+  #apply(e: JournalEntry | ErasureEntry | AdvanceErasureEntry, seq: number): void {
     if (this.#watched.has(e.id)) {
       this.#watched.set(e.id, seq);
     }
-    if (e.t === "erase") {
-      if (!this.erasures.has(e.grant_id)) {
-        this.erasures.set(e.grant_id, { at: e.at, seq });
+    if (e.t === "erase" || e.t === "hd_advance") {
+      const at = e.t === "erase" ? e.at : e.effective_at;
+      const prior = this.erasures.get(e.grant_id);
+      if (at !== null && (!prior || at < prior.at || (e.t === "erase" && prior.scheduled))) {
+        this.erasures.set(e.grant_id, { at: Math.min(at, prior?.at ?? at), seq, scheduled: e.t === "hd_advance" });
       }
       return;
     }
@@ -244,7 +254,8 @@ class JournalIndex {
         // A lease naming an acquisition grant that is already erased is never
         // returned (post-append check), so it does not move that grant's T.
         for (const a of e.acq ?? []) {
-          if (!this.erasures.has(a)) {
+          const erasure = this.erasures.get(a);
+          if (!erasure || (erasure.scheduled && e.exp_ms <= erasure.at)) {
             this.acquisitionMaxExp.set(a, Math.max(this.acquisitionMaxExp.get(a) ?? 0, e.exp_ms));
           }
         }
@@ -464,18 +475,28 @@ export class TrainingAuthorityStore {
             failure = "unavailable";
             return;
           }
+          const eligible = (requestedAcq ?? [input.grantId]).filter((a) => {
+            const erasure = this.#journal.erasures.get(a);
+            return !erasure || (erasure.scheduled && now < erasure.at);
+          });
+          if (eligible.length === 0) {
+            failure = "acquisition_erased";
+            return;
+          }
+          const effectiveAt = Math.min(...eligible.map((a) => this.#journal.erasures.get(a)?.at ?? Number.POSITIVE_INFINITY));
           const iatS = Math.floor(now / 1000);
           const expS = Math.floor(
             Math.min(
               iatS * 1000 + this.#o.leaseLifetimeMs,
               row.training_expires_at_ms,
+              effectiveAt,
             ) / 1000,
           );
           if (expS <= iatS) {
             failure = "expired";
             return;
           }
-          const acq = requestedAcq?.filter((a) => !this.#journal.erasures.has(a));
+          const acq = requestedAcq ? eligible : undefined;
           if (requestedAcq && acq?.length === 0) {
             failure = "acquisition_erased";
             return;
@@ -546,7 +567,13 @@ export class TrainingAuthorityStore {
     }
     // B3: an erasure ordered before this entry ends issuance for that copy.
     // The lease is not returned; the caller may ask again for the rest.
-    if (c.acq?.some((a) => (this.#journal.erasures.get(a)?.seq ?? Number.POSITIVE_INFINITY) < mine)) {
+    if ((c.acq ?? [input.grantId]).some((a) => {
+      const erasure = this.#journal.erasures.get(a);
+      return erasure && (
+        (erasure.scheduled && c.expS * 1000 > erasure.at) ||
+        (erasure.seq < mine && (!erasure.scheduled || erasure.at <= now))
+      );
+    })) {
       return { ok: false, reason: "acquisition_erased" };
     }
     const claims: LeaseClaimsOut = {

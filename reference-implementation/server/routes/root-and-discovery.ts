@@ -129,6 +129,7 @@ export interface MountAsAuthorizationServerMetadataContext {
   resolvePreRegisteredPublicClients: () => unknown[];
   /** Experimental AI-training prototype: empty unless the runtime is installed. */
   resolveProcessingPermissionsSupported?: () => readonly string[];
+  resolveHeldDataLifecycleEnabled?: () => boolean;
   resolvePublicUrl: (req: unknown, explicit: unknown) => string;
   trustedMetadataHosts: unknown;
 }
@@ -148,6 +149,7 @@ export function mountAsAuthorizationServerMetadata(app: AppLike, ctx: MountAsAut
     res.json(
       executeAsAuthorizationServerMetadata(
         {
+          ...(ctx.resolveHeldDataLifecycleEnabled ? { heldDataLifecycleEnabled: ctx.resolveHeldDataLifecycleEnabled() } : {}),
           cimdEnabled: ctx.cimdEnabled === true,
           dynamicClientRegistrationEnabled: ctx.dynamicClientRegistrationEnabled,
           issuer,

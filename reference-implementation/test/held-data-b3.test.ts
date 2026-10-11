@@ -128,3 +128,67 @@ describe("B3: acquisition erasure ends lease issuance for that copy", () => {
     });
   });
 });
+
+
+describe("lane F: advance elections bound processing authority", () => {
+  it("caps new leases at the acquisition election's future effective time and refuses at expiry", () => {
+    const s = setup();
+    s.held.registerGrant({ grantId: "short", clientId: "app", subjectId: "owner", confidential: false,
+      streams: ["messages"], expiresAtMs: s.now() + 15 * MIN });
+    const election = s.held.electAdvance("short");
+    const issued = s.leases.issueLease({ grantId: "G2", clientId: "app", acquisitionGrantIds: ["short"] });
+    assert.equal(issued.ok, true);
+    assert.ok(issued.ok && issued.claims.exp * 1000 === s.now() + 15 * MIN);
+    s.advance(15 * MIN);
+    assert.deepEqual(s.leases.issueLease({ grantId: "G2", clientId: "app", acquisitionGrantIds: ["short"] }),
+      { ok: false, reason: "acquisition_erased" });
+    assert.equal(s.held.electAdvance("short").operationId, election.operationId);
+  });
+
+  it("an advance instruction on the lease's own copy also constrains an implicit acquisition", () => {
+    const s = setup();
+    s.held.electAdvance("G2");
+    assert.equal(s.leases.issueLease({ grantId: "G2", clientId: "app" }).ok, true);
+    s.held.requestErasure({ grantId: "G2", origin: "owner_election" });
+    const denied = s.leases.issueLease({ grantId: "G2", clientId: "app" });
+    assert.equal(denied.ok, false);
+    assert.ok(!denied.ok && denied.reason === "acquisition_erased");
+  });
+});
+
+
+describe("lane F: Core finding about already-issued authority", () => {
+  it("FINDING: a new advance election cannot shorten an offline lease issued before the election", () => {
+    const s = setup();
+    s.held.registerGrant({ grantId: "short", clientId: "app", subjectId: "owner", confidential: false,
+      streams: ["messages"], expiresAtMs: s.now() + 15 * MIN });
+    const prior = s.leases.issueLease({ grantId: "G2", clientId: "app", acquisitionGrantIds: ["short"] });
+    assert.ok(prior.ok);
+    s.held.electAdvance("short");
+    assert.ok(prior.claims.exp * 1000 > s.now() + 15 * MIN);
+    const next = s.leases.issueLease({ grantId: "G2", clientId: "app", acquisitionGrantIds: ["short"] });
+    assert.ok(next.ok);
+    assert.equal(next.claims.exp * 1000, s.now() + 15 * MIN);
+  });
+});
+
+
+describe("lane F: advance election races lease issuance", () => {
+  it("does not return a lease crossing a future effective time learned in the post-append check", () => {
+    let s: ReturnType<typeof setup>;
+    let elected = false;
+    s = setup({ afterIssue: () => {
+      if (!elected) {
+        elected = true;
+        s.held.electAdvance("short");
+      }
+    } });
+    s.held.registerGrant({ grantId: "short", clientId: "app", subjectId: "owner", confidential: false,
+      streams: ["messages"], expiresAtMs: s.now() + 15 * MIN });
+    const racing = s.leases.issueLease({ grantId: "G2", clientId: "app", acquisitionGrantIds: ["short"] });
+    assert.equal(racing.ok, false);
+    const retry = s.leases.issueLease({ grantId: "G2", clientId: "app", acquisitionGrantIds: ["short"] });
+    assert.ok(retry.ok);
+    assert.equal(retry.claims.exp * 1000, s.now() + 15 * MIN);
+  });
+});

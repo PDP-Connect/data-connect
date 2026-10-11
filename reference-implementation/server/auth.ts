@@ -12501,6 +12501,46 @@ interface HeldDataGrantRow extends DbRow {
   grant_json: string | null;
 }
 
+/** Recover the first single-use token's fixed read-window end, not a later token's expiry. */
+async function recordHeldDataReadWindow(grantId: string): Promise<void> {
+  const rt = getHeldDataRuntime();
+  if (!rt) {
+    return;
+  }
+  const sql = `SELECT t.expires_at FROM tokens t JOIN grants g ON g.grant_id = t.grant_id
+    WHERE t.grant_id = $1 AND t.token_kind = 'client' AND g.access_mode = 'single_use'
+    ORDER BY t.created_at ASC LIMIT 1`;
+  const row = isPostgresStorageBackend()
+    ? await pgOne<{ expires_at: string | null }>(sql, [grantId])
+    : getDb().prepare(sql.replace("$1", "?")).get(grantId) as { expires_at: string | null } | undefined;
+  if (row?.expires_at && !rt.authority.lost && !rt.authority.decommissioned) {
+    rt.authority.recordReadWindow(grantId, Date.parse(row.expires_at));
+  }
+}
+
+/** Include active, consumed, expired and revoked grants, plus journal-only custody records. */
+export async function prepareHeldDataDecommission(): Promise<{ grant_id: string; grant: Record<string, unknown> | null }[]> {
+  const rt = getHeldDataRuntime();
+  if (!rt) {
+    return [];
+  }
+  const rows = isPostgresStorageBackend()
+    ? (await postgresQuery<{ grant_id: string; grant_json: string | null }>("SELECT grant_id, grant_json::text AS grant_json FROM grants", [])).rows
+    : getDb().prepare("SELECT grant_id, grant_json FROM grants").all() as { grant_id: string; grant_json: string | null }[];
+  for (const row of rows) {
+    await ensureHeldDataGrant(row.grant_id);
+  }
+  const terms = new Map<string, Record<string, unknown> | null>();
+  for (const row of rows) {
+    try {
+      terms.set(row.grant_id, row.grant_json ? JSON.parse(row.grant_json) as Record<string, unknown> : null);
+    } catch {
+      terms.set(row.grant_id, null);
+    }
+  }
+  return rt.authority.allGrantIds().map((grant_id) => ({ grant_id, grant: terms.get(grant_id) ?? null }));
+}
+
 /** Read identity for a pending owner action without trusting it as lifecycle authority. */
 async function readHeldDataGrant(grantId: string): Promise<{ grant: GrantRegistration; revoked: boolean } | null> {
   const rt = getHeldDataRuntime();
@@ -12542,13 +12582,17 @@ async function readHeldDataGrant(grantId: string): Promise<{ grant: GrantRegistr
 export async function ensureHeldDataGrant(grantId: string): Promise<boolean> {
   const rt = getHeldDataRuntime();
   if (!rt) return false;
-  if (rt.authority.isKnown(grantId)) return true;
+  if (rt.authority.isKnown(grantId)) {
+    await recordHeldDataReadWindow(grantId);
+    return true;
+  }
   const row = await readHeldDataGrant(grantId);
   if (!row) return false;
   // Owner views and actions may inspect main-database identity while history
   // is unavailable. It never becomes authority until recovery applies an action.
   if (rt.authority.lost) return true;
   rt.authority.registerGrant(row.grant);
+  await recordHeldDataReadWindow(grantId);
   if (row.revoked) {
     // Ended before the journal saw it; the main database holds no ending time.
     rt.authority.markEndedBeforeTracking(grantId, rt.now());

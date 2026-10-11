@@ -69,11 +69,12 @@ export interface MountHeldDataContext {
   }) => Promise<string | null>;
   /** Register a grant from the main database if the journal has not seen it (lazy registration). */
   ensureGrant: (grantId: string) => Promise<boolean>;
+  prepareDecommission: () => Promise<{ grant_id: string; grant: Record<string, unknown> | null }[]>;
   introspect: (token: string) => Promise<IntrospectInfo>;
   /** Revoke a grant through the RI's revocation funnel, with how it is ending. */
   revokeGrant: (
     grantId: string,
-    context: { lifecycle: { path: "owner_withdrawal" | "client_revocation"; disposition: "delete" } }
+    context: { lifecycle: { path: "owner_withdrawal" | "client_revocation" | "decommission"; disposition: "keep" | "delete" } }
   ) => Promise<unknown>;
   /** The AS issuer identifier: the required `aud` of a client assertion. */
   issuer: (req: unknown) => string;
@@ -107,7 +108,7 @@ export function statusWire(r: StatusResult, stopUseBoundMs: number): Record<stri
   if ("error" in r) {
     return r;
   }
-  let readState = "active";
+  let readState = r.grant_state === "window_closed" ? "window_closed" : "active";
   let endedAt: number | null = null;
   if (r.ending) {
     readState = "revoked";
@@ -117,6 +118,7 @@ export function statusWire(r: StatusResult, stopUseBoundMs: number): Record<stri
     endedAt = r.expires_at;
   }
   const erase = r.erasures.find((e) => e.scope.streams === "all");
+  const effectiveAt = erase?.effective_at ?? erase?.accepted_at;
   return {
     grant_id: r.grant_id,
     assessed_at: iso(r.assessed_at),
@@ -128,8 +130,8 @@ export function statusWire(r: StatusResult, stopUseBoundMs: number): Record<stri
           erasure: {
             instruction_id: erase.operation_id,
             accepted_at: iso(erase.accepted_at),
-            effective_at: iso(erase.accepted_at),
-            stop_use_by: iso(erase.accepted_at + stopUseBoundMs),
+            effective_at: iso(effectiveAt),
+            stop_use_by: iso((effectiveAt ?? erase.accepted_at) + stopUseBoundMs),
           },
         }
       : {}),
@@ -410,23 +412,77 @@ export function mountHeldData(app: AppLike, ctx: MountHeldDataContext): void {
         operation_id: e.operation_id,
         scope: e.scope,
         accepted_at: iso(e.accepted_at),
+        effective_at: iso(e.effective_at),
         delivered_at: iso(e.delivered_at),
         receipt_at: iso(e.receipt_at),
         delete_by: iso(e.delete_by),
         // B1: the only bound that holds without delivery.
-        use_stops_by: iso(e.accepted_at + rt.pauseThresholdMs),
+        use_stops_by: e.effective_at === null ? null : iso(e.effective_at + rt.pauseThresholdMs),
         // Bounds that hold without receipt (Core: AS records and owner statements).
-        deleted_by_without_receipt: rt.longStopMs === null ? null : iso(e.accepted_at + rt.longStopMs),
+        deleted_by_without_receipt: rt.longStopMs === null || e.effective_at === null ? null : iso(e.effective_at + rt.longStopMs),
         retained: e.retained.map((r) => ({
           reported_at: iso(r.reportedAt),
           received_at: iso(r.receivedAt),
           detail: r.detail,
         })),
         completion: e.completion ? { ...e.completion, at: iso(e.completion.at) } : null,
-        owner_message: ownerMessage(e, rt.pauseThresholdMs, rt.longStopMs),
+        owner_message: ownerMessage(e, rt.pauseThresholdMs, rt.longStopMs, rt.now()),
       })),
     };
   }
+
+  app.get("/v1/owner/lifecycle/decommission", async (req, res) => {
+    const rt = ctx.runtime();
+    if (!rt) {
+      return res.status(404).json({ error: "not_found" });
+    }
+    if (!(await requireOwner(req, res))) {
+      return;
+    }
+    const snapshots = await ctx.prepareDecommission();
+    const offer = rt.authority.offerDecommission();
+    return res.status(200).json({
+      offer_id: offer.id,
+      grants: offer.grants.map((grant_id) => ({
+        grant_id, choices: ["keep", "delete"], lifecycle: ownerRecord(rt, grant_id),
+        grant: snapshots.find((g) => g.grant_id === grant_id)?.grant ?? null,
+      })),
+      pause_threshold_ms: rt.pauseThresholdMs,
+      long_stop_ms: rt.longStopMs,
+      owner_message: `Once this AS stops answering, conforming clients pause use ${rt.pauseThresholdMs / 86400000} days after their last positive assessment and ${rt.longStopMs === null ? "have no Core long-stop deletion date" : `delete copies ${rt.longStopMs / 86400000} days after that assessment`}. Erasure exclusions and legal retention apply.`,
+    });
+  });
+
+  app.post("/v1/owner/lifecycle/decommission", async (req, res) => {
+    const rt = ctx.runtime();
+    if (!rt) {
+      return res.status(404).json({ error: "not_found" });
+    }
+    if (!(await requireOwner(req, res))) {
+      return;
+    }
+    const grantIds = (await ctx.prepareDecommission()).map((g) => g.grant_id);
+    const offerId = str(req.body?.offer_id);
+    const dispositions = req.body?.dispositions;
+    if (!offerId || !rt.authority.decommissionOfferMatches(offerId, grantIds)) {
+      return res.status(400).json({ error: "invalid_request", message: "review the complete decommission offer first" });
+    }
+    if (!dispositions || typeof dispositions !== "object" || Array.isArray(dispositions)) {
+      return res.status(400).json({ error: "disposition_required" });
+    }
+    const choices = dispositions as Record<string, unknown>;
+    if (Object.keys(choices).length !== grantIds.length || grantIds.some((id) => choices[id] !== "keep" && choices[id] !== "delete")) {
+      return res.status(400).json({ error: "disposition_required" });
+    }
+    for (const grantId of grantIds) {
+      const disposition = choices[grantId] as "keep" | "delete";
+      await ctx.revokeGrant(grantId, { lifecycle: { path: "decommission", disposition } });
+      rt.authority.end({ grantId, path: "decommission", disposition });
+      rt.authority.elect({ grantId, disposition });
+    }
+    rt.authority.completeDecommission(offerId);
+    return res.status(200).json({ decommissioned: true });
+  });
 
   app.get("/v1/owner/grants/:grantId/lifecycle", async (req, res) => {
     const rt = ctx.runtime();
@@ -439,6 +495,22 @@ export function mountHeldData(app: AppLike, ctx: MountHeldDataContext): void {
     await ctx.ensureGrant(req.params.grantId as string);
     const record = ownerRecord(rt, req.params.grantId as string);
     return record ? res.status(200).json(record) : res.status(404).json({ error: "not_found" });
+  });
+
+  app.post("/v1/owner/grants/:grantId/lifecycle/elect-delete", async (req, res) => {
+    const rt = ctx.runtime();
+    if (!rt) {
+      return res.status(404).json({ error: "not_found" });
+    }
+    if (!(await requireOwner(req, res))) {
+      return;
+    }
+    const grantId = req.params.grantId as string;
+    if (!(await ctx.ensureGrant(grantId))) {
+      return res.status(404).json({ error: "not_found" });
+    }
+    rt.authority.electAdvance(grantId);
+    return res.status(200).json(ownerRecord(rt, grantId));
   });
 
   app.post("/v1/owner/grants/:grantId/lifecycle/erase", async (req, res) => {
@@ -462,7 +534,7 @@ export function mountHeldData(app: AppLike, ctx: MountHeldDataContext): void {
       { clientId: rt.authority.grantClient(grantId) ?? "", grantIds: new Set([grantId]), clientAuthenticated: false },
       [grantId]
     );
-    if (answer && !("error" in answer) && answer.grant_state === "active") {
+    if (answer && !("error" in answer) && (answer.grant_state === "active" || answer.grant_state === "window_closed")) {
       await ctx.revokeGrant(grantId, { lifecycle: { path: "owner_withdrawal", disposition: "delete" } });
     } else {
       rt.authority.elect({ grantId, disposition: "delete" });
@@ -491,6 +563,7 @@ export function mountHeldData(app: AppLike, ctx: MountHeldDataContext): void {
 function ownerMessage(
   e: {
     accepted_at: number;
+    effective_at: number | null;
     delivered_at: number | null;
     receipt_at: number | null;
     delete_by: number | null;
@@ -499,7 +572,11 @@ function ownerMessage(
   },
   pauseThresholdMs: number,
   longStopMs: number | null,
+  now: number,
 ): string {
+  if (e.effective_at === null || e.effective_at > now) {
+    return "Advance deletion election recorded. It takes effect when the grant ends; acceptance does not end access or use. The pause and long-stop bounds run from that ending, not from this election.";
+  }
   if (e.completion) {
     return "The app reported that it deleted this data.";
   }
@@ -514,6 +591,6 @@ function ownerMessage(
   const longStop =
     longStopMs === null
       ? "Without receipt, PDPP sets no deletion date."
-      : `Without receipt, apps that follow PDPP delete it by ${at(e.accepted_at + longStopMs)}.`;
-  return `Deletion request recorded, ${stage}. Apps that follow PDPP stop using this data by ${at(e.accepted_at + pauseThresholdMs)} in every case. ${longStop}`;
+      : `Without receipt, apps that follow PDPP delete it by ${at(e.effective_at + longStopMs)}.`;
+  return `Deletion request recorded, ${stage}. Apps that follow PDPP stop using this data by ${at(e.effective_at + pauseThresholdMs)} in every case. ${longStop}`;
 }

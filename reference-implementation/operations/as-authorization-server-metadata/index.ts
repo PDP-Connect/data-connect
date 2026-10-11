@@ -27,6 +27,8 @@ export interface AsAuthorizationServerMetadataInput {
   readonly preRegisteredPublicClients?: readonly AsAuthorizationServerPublicClient[];
   /** Experimental AI-training prototype. Absent or empty: nothing is advertised. */
   readonly processingPermissionsSupported?: readonly string[];
+  /** Experimental held-data lifecycle; omitted unless enabled. */
+  readonly heldDataLifecycleEnabled?: boolean;
 }
 
 export interface AsAuthorizationServerPublicClient {
@@ -45,6 +47,7 @@ export interface AsAuthorizationServerMetadataBuilderInput {
   readonly deviceAuthorizationEndpoint: string;
   readonly deviceAuthorizationProfilesSupported: readonly Record<string, unknown>[];
   readonly grantTypesSupported: readonly string[];
+  readonly grantLifecycleEndpoint?: string;
   readonly introspectionEndpoint: string;
   readonly revocationEndpoint: string;
   readonly issuer: string;
@@ -92,6 +95,7 @@ export function executeAsAuthorizationServerMetadata(
     ? [...registrationModesBase, "client_id_metadata_document"]
     : registrationModesBase;
   return deps.buildAuthorizationServerMetadata({
+    ...(input.heldDataLifecycleEnabled ? { grantLifecycleEndpoint: `${issuer}/oauth/grant-lifecycle` } : {}),
     agentConnectEndpoint: `${issuer}/agent-connect`,
     authorizationDetailsTypesSupported: ["https://pdpp.dev/data-access"],
     authorizationEndpoint: `${issuer}/oauth/authorize`,
