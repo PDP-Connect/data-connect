@@ -16,7 +16,9 @@
  *
  * PROTOTYPE: experimental held-data lifecycle work, off by default.
  */
+import { z } from "zod";
 import type { ErasureScope, StatusResult } from "./authority.ts";
+import { type ClientCheckpointStorage, MemoryClientCheckpointStorage } from "./checkpoint.ts";
 
 export const HOUR_MS = 60 * 60 * 1000;
 export const DAY_MS = 24 * HOUR_MS;
@@ -75,6 +77,8 @@ export type ReportTransport = (r: {
 
 /** Where the app keeps the copy and its derivatives. */
 export interface HeldStore {
+  /** Inventory includes derivatives: lost lifecycle state makes all these copies due. */
+  grantIds(): Iterable<string>;
   /** Remove the covered records and every derivative built from them. */
   dispose(grantId: string, scope: ErasureScope): void;
 }
@@ -99,7 +103,7 @@ export type UseDecision =
   | { ok: true; until: number }
   | {
       ok: false;
-      reason: "deleted" | "erased" | "no_assessment" | "stale" | "reconcile_required" | "custody_only";
+      reason: "deleted" | "erased" | "no_assessment" | "stale" | "reconcile_required" | "custody_only" | "state_unavailable";
     };
 
 interface HeldErasure {
@@ -109,6 +113,7 @@ interface HeldErasure {
   disposedAt: number | null;
   receiptReported: boolean;
   completionReported: boolean;
+  disposalPending: boolean;
 }
 
 interface HeldGrant {
@@ -123,7 +128,33 @@ interface HeldGrant {
   deletedAt: number | null;
   deleteReason: string | null;
   needsReconcile: boolean;
+  pendingDeletionReason: string | null;
 }
+
+const time = z.number().finite();
+const interval = time.nonnegative();
+const policySchema = z.object({
+  cadenceMs: interval, retryMs: interval, pauseThresholdMs: interval, deletionPeriodMs: interval,
+  longStopMs: interval.nullable(), retentionCeilingMs: interval.nullable(),
+  freshnessOrigin: z.enum(["request_sent", "assessed_at"]), disposeAt: z.enum(["promptly", "deadline"]),
+});
+const checkpointSchema = z.object({
+  version: z.literal(1), revision: z.number().int().nonnegative(), policy: policySchema,
+  highWaterMs: time, clockUncertain: z.boolean(), nextAttemptAt: time.nullable(),
+  tokenOrigins: z.array(z.tuple([z.string(), z.object({ origin: time, processingPermission: z.boolean() })])),
+  tokenRequests: z.array(z.tuple([z.string(), time])),
+  grants: z.array(z.object({
+    grantId: z.string(), firstAcquiredAt: time, freshnessOrigin: time.nullable(), custodyOnly: z.boolean(),
+    processingPermission: z.boolean(), lastPosition: z.number().int().nonnegative(),
+    deletedAt: time.nullable(), deleteReason: z.string().nullable(), needsReconcile: z.boolean(),
+    pendingDeletionReason: z.string().nullable(),
+    erasures: z.array(z.tuple([z.string(), z.object({
+      scope: z.object({ streams: z.union([z.literal("all"), z.array(z.string())]) }),
+      receivedAt: time, deleteBy: time, disposedAt: time.nullable(), receiptReported: z.boolean(),
+      completionReported: z.boolean(), disposalPending: z.boolean(),
+    })])),
+  })),
+});
 
 export interface LifecycleEvent {
   at: number;
@@ -141,10 +172,19 @@ export class HeldDataClient {
   readonly #downstream: Downstream[];
   readonly #grants = new Map<string, HeldGrant>();
   readonly #batch: boolean;
+  readonly #storage: ClientCheckpointStorage;
+  readonly #tokenOrigins = new Map<string, { origin: number; processingPermission: boolean }>();
+  readonly #tokenRequests = new Map<string, number>();
+  #revision = 0;
+  #highWaterMs: number;
+  #clockUncertain = false;
+  #stateUnavailable = false;
+  #timeAnchor: { wall: number; mono: number } | null = null;
   #nextAttemptAt: number | null = null;
   readonly events: LifecycleEvent[] = [];
 
   constructor(o: {
+    /** Caller supplies conservative epoch time; wall time alone is not a trusted time service. */
     now: () => number;
     status: StatusTransport;
     report?: ReportTransport;
@@ -153,14 +193,50 @@ export class HeldDataClient {
     policy?: Partial<LifecyclePolicy>;
     /** Confidential clients may ask about several grants in one call. */
     batch?: boolean;
+    storage?: ClientCheckpointStorage;
+    /** Explicitly initialize a pristine store; never use this when restoring held data. */
+    initialize?: boolean;
+    /** Like the lease guard: optionally detect wall/elapsed disagreement and suspension. */
+    monotonicMs?: () => number;
   }) {
     this.policy = { ...DEFAULT_POLICY, ...o.policy };
-    this.#now = o.now;
+    this.#highWaterMs = o.now();
+    this.#now = () => this.#readTime(o.now(), o.monotonicMs?.());
     this.#status = o.status;
     this.#report = o.report ?? null;
     this.#store = o.store;
     this.#downstream = o.downstream ?? [];
     this.#batch = o.batch ?? false;
+    this.#storage = o.storage ?? new MemoryClientCheckpointStorage();
+    try {
+      const raw = this.#storage.read();
+      if (raw === null) {
+        if ((o.initialize ?? o.storage === undefined) && [...o.store.grantIds()].length === 0) {
+          this.#persist();
+        } else {
+          this.#stateUnavailable = true;
+        }
+      } else {
+        const cp = checkpointSchema.parse(JSON.parse(raw));
+        this.policy = cp.policy;
+        this.#revision = cp.revision;
+        this.#highWaterMs = cp.highWaterMs;
+        this.#clockUncertain = cp.clockUncertain;
+        this.#nextAttemptAt = cp.nextAttemptAt;
+        for (const [id, origin] of cp.tokenOrigins) {
+          this.#tokenOrigins.set(id, origin);
+        }
+        for (const [id, sentAt] of cp.tokenRequests) {
+          this.#tokenRequests.set(id, sentAt);
+        }
+        for (const g of cp.grants) {
+          this.#grants.set(g.grantId, { ...g, erasures: new Map(g.erasures), needsReconcile: true });
+        }
+      }
+    } catch {
+      this.#stateUnavailable = true;
+    }
+    this.#now();
   }
 
   /**
@@ -170,6 +246,10 @@ export class HeldDataClient {
    */
   acquire(grantId: string, o: { processingPermission?: boolean } = {}): boolean {
     const now = this.#now();
+    if (this.#stateUnavailable || this.#clockUncertain) {
+      this.#disposeDue();
+      return false;
+    }
     const prior = this.#grants.get(grantId);
     // Erasure is terminal: a late delivery under an erased grant is not an
     // acquisition. The caller must not keep it.
@@ -183,24 +263,34 @@ export class HeldDataClient {
       this.#grants.set(grantId, {
         grantId,
         firstAcquiredAt: now,
-        freshnessOrigin: null,
+        freshnessOrigin: this.#tokenOrigins.get(grantId)?.origin ?? null,
         custodyOnly: false,
-        processingPermission: o.processingPermission ?? false,
+        processingPermission: (o.processingPermission ?? false) || (this.#tokenOrigins.get(grantId)?.processingPermission ?? false),
         lastPosition: prior?.lastPosition ?? 0,
         erasures: prior?.erasures ?? new Map(),
         deletedAt: null,
         deleteReason: null,
         needsReconcile: false,
+        pendingDeletionReason: null,
       });
+      this.#tokenOrigins.delete(grantId);
       this.#log(grantId, "acquire");
       // The first check is due 24 h after first acquisition.
       this.#nextAttemptAt = Math.min(this.#nextAttemptAt ?? Number.POSITIVE_INFINITY, now + this.policy.cadenceMs);
     }
-    return true;
+    return this.#persist();
   }
 
   /** The gate the app checks before every use. */
   canUse(grantId: string): UseDecision {
+    this.#disposeDue();
+    // Disposal can take time. Sample again, complete any newly due disposal,
+    // then evaluate every guard without another clock read after those guards.
+    this.#disposeDue(this.#now());
+    this.#persist();
+    if (this.#stateUnavailable || this.#clockUncertain) {
+      return { ok: false, reason: "state_unavailable" };
+    }
     const g = this.#grants.get(grantId);
     if (!g || g.deletedAt !== null) {
       return { ok: false, reason: "deleted" };
@@ -218,10 +308,10 @@ export class HeldDataClient {
       return { ok: false, reason: "no_assessment" };
     }
     const until = g.freshnessOrigin + this.policy.pauseThresholdMs;
-    if (this.#now() >= until) {
+    if (this.#highWaterMs >= until) {
       return { ok: false, reason: "stale" };
     }
-    return { ok: true, until };
+    return this.#persist() ? { ok: true, until } : { ok: false, reason: "state_unavailable" };
   }
 
   /** Streams of a grant that a partial erasure has removed (narrowing). */
@@ -259,7 +349,58 @@ export class HeldDataClient {
   }
 
   grantState(grantId: string): Readonly<HeldGrant> | undefined {
-    return this.#grants.get(grantId);
+    return structuredClone(this.#grants.get(grantId));
+  }
+
+  /** Write ahead before token I/O. Reusing a request id preserves its original send time. */
+  beginTokenRequest(requestId: string): number | null {
+    const now = this.#now();
+    if (this.#stateUnavailable || this.#clockUncertain) {
+      return null;
+    }
+    const origin = this.#tokenRequests.get(requestId) ?? now;
+    this.#tokenRequests.set(requestId, origin);
+    return this.#persist() ? origin : null;
+  }
+
+  /** Authenticated token authorization result only; recovery tokens are not assessments. */
+  onTokenResponse(o: {
+    grantIds: readonly string[];
+    /** Prefer a durable request id; explicit send time is for callers persisting their own requests. */
+    requestId?: string;
+    sentAt?: number;
+    processingPermissionGrantIds?: readonly string[];
+    lifecycleRecovery?: boolean;
+  }): void {
+    this.#disposeDue();
+    if (o.lifecycleRecovery || this.#stateUnavailable || this.#clockUncertain) {
+      return;
+    }
+    const sentAt = o.requestId === undefined ? o.sentAt : this.#tokenRequests.get(o.requestId);
+    if (sentAt === undefined || !Number.isFinite(sentAt) || sentAt > this.#now()) {
+      throw new Error("invalid token assessment origin");
+    }
+    for (const id of o.grantIds) {
+      const g = this.#grants.get(id);
+      if (g && [...g.erasures.values()].some((e) => e.scope.streams === "all")) {
+        continue;
+      }
+      if (g && g.deletedAt === null) {
+        g.processingPermission ||= o.processingPermissionGrantIds?.includes(id) ?? false;
+        g.freshnessOrigin = Math.max(g.freshnessOrigin ?? -Infinity, sentAt);
+        g.needsReconcile = false;
+      } else {
+        const prior = this.#tokenOrigins.get(id);
+        this.#tokenOrigins.set(id, {
+          origin: Math.max(prior?.origin ?? -Infinity, sentAt),
+          processingPermission: (o.processingPermissionGrantIds?.includes(id) ?? false) || (prior?.processingPermission ?? false),
+        });
+      }
+      this.#log(id, "positive", String(sentAt));
+    }
+    if (this.#persist()) {
+      this.#relayAll();
+    }
   }
 
   /** Run due work: overdue disposal first, then a status attempt if one is due. */
@@ -269,6 +410,7 @@ export class HeldDataClient {
     if (this.#nextAttemptAt !== null && now >= this.#nextAttemptAt) {
       await this.reconcile();
     }
+    this.#persist();
   }
 
   /** A read failed with the grant shown inactive: check status before further use. */
@@ -277,6 +419,7 @@ export class HeldDataClient {
     if (g) {
       g.needsReconcile = true;
     }
+    this.#persist();
     await this.reconcile();
   }
 
@@ -285,6 +428,7 @@ export class HeldDataClient {
     for (const g of this.#grants.values()) {
       g.needsReconcile = true;
     }
+    this.#persist();
     this.#disposeDue();
     await this.reconcile();
   }
@@ -303,10 +447,14 @@ export class HeldDataClient {
   async reconcile(): Promise<void> {
     // Overdue disposal comes before any new assessment, on every entry path.
     this.#disposeDue();
+    if (this.#stateUnavailable || this.#clockUncertain) {
+      return;
+    }
     const held = [...this.#grants.values()].filter((g) => g.deletedAt === null).map((g) => g.grantId);
     const sentAt = this.#now();
     if (held.length === 0) {
       this.#nextAttemptAt = null;
+      this.#persist();
       return;
     }
     let failed = false;
@@ -318,6 +466,12 @@ export class HeldDataClient {
         r = await this.#status(ids);
       } catch (err) {
         r = { ok: false, reason: err instanceof Error ? err.message : "unreachable" };
+      }
+      // A deadline may have passed while the response was in flight. Dispose
+      // against the old assessment before the new one can move the long-stop.
+      this.#disposeDue();
+      if (this.#stateUnavailable || this.#clockUncertain) {
+        return;
       }
       if (!r.ok) {
         failed = true;
@@ -339,6 +493,9 @@ export class HeldDataClient {
           continue;
         }
         this.#apply(only, sentAt);
+        if (!this.#persist()) {
+          return;
+        }
       }
     }
     // The attempt was made; the threshold rule now governs use.
@@ -350,6 +507,9 @@ export class HeldDataClient {
     }
     // The interval runs between attempt starts, so a slow answer does not stretch it.
     this.#nextAttemptAt = sentAt + (failed ? Math.max(this.policy.retryMs, retryAfterMs) : this.policy.cadenceMs);
+    if (!this.#persist()) {
+      return;
+    }
     this.#disposeDue();
     this.#relayAll();
   }
@@ -403,27 +563,51 @@ export class HeldDataClient {
       disposedAt: null,
       receiptReported: false,
       completionReported: false,
+      disposalPending: false,
     });
     this.#log(grantId, "erasure_received", operationId);
-    void this.#reportOp(grantId, operationId, "receipt");
+    if (this.#persist()) {
+      void this.#reportOp(grantId, operationId, "receipt");
+    }
   }
 
-  #disposeDue(): void {
-    const now = this.#now();
+  #disposeDue(now = this.#now()): void {
+    if (this.#stateUnavailable || this.#clockUncertain) {
+      // Unknown deadlines are due under Core. No new acquisition can reset them.
+      this.#persist();
+      this.#disposeInventory();
+      return;
+    }
     for (const g of this.#grants.values()) {
       if (g.deletedAt !== null) {
+        // A restored data backup must replay deletion state before any use.
+        this.#store.dispose(g.grantId, { streams: "all" });
         continue;
       }
       for (const [opId, e] of g.erasures) {
-        const due = this.policy.disposeAt === "promptly" || now >= e.deleteBy;
+        if (e.disposedAt !== null) {
+          // The library also models partial scopes: replay them against restored
+          // data even though the original disposal is already recorded complete.
+          this.#store.dispose(g.grantId, e.scope);
+          continue;
+        }
+        const due = e.disposalPending || this.policy.disposeAt === "promptly" || now >= e.deleteBy;
         if (e.disposedAt === null && due) {
+          e.disposalPending = true;
+          if (!this.#persist()) {
+            this.#store.dispose(g.grantId, e.scope);
+            return;
+          }
           this.#store.dispose(g.grantId, e.scope);
           e.disposedAt = now;
+          e.disposalPending = false;
           this.#log(g.grantId, "disposed", opId);
-          void this.#reportOp(g.grantId, opId, "completion");
           if (e.scope.streams === "all") {
             g.deletedAt = now;
             g.deleteReason = "erasure";
+          }
+          if (this.#persist()) {
+            void this.#reportOp(g.grantId, opId, "completion");
           }
         }
       }
@@ -431,13 +615,20 @@ export class HeldDataClient {
         continue;
       }
       const by = this.deleteBy(g.grantId);
-      if (by !== null && now >= by) {
-        this.#store.dispose(g.grantId, { streams: "all" });
-        g.deletedAt = now;
-        g.deleteReason =
+      if (g.pendingDeletionReason !== null || (by !== null && now >= by)) {
+        g.pendingDeletionReason ??=
           this.policy.retentionCeilingMs !== null && now >= g.firstAcquiredAt + this.policy.retentionCeilingMs
             ? "retention_ceiling"
             : "long_stop";
+        if (!this.#persist()) {
+          this.#store.dispose(g.grantId, { streams: "all" });
+          return;
+        }
+        this.#store.dispose(g.grantId, { streams: "all" });
+        g.deletedAt = now;
+        g.deleteReason = g.pendingDeletionReason;
+        g.pendingDeletionReason = null;
+        this.#persist();
         this.#log(g.grantId, "disposed", g.deleteReason);
       }
     }
@@ -445,7 +636,7 @@ export class HeldDataClient {
 
   async #reportOp(grantId: string, operationId: string, kind: "receipt" | "completion"): Promise<void> {
     const e = this.#grants.get(grantId)?.erasures.get(operationId);
-    if (!(this.#report && e) || operationId.startsWith("local_")) {
+    if (!(this.#report && e) || operationId.startsWith("local_") || !this.#persist()) {
       return;
     }
     try {
@@ -461,12 +652,16 @@ export class HeldDataClient {
       } else if (ok) {
         e.completionReported = true;
       }
+      this.#persist();
     } catch {
       // Retried on the next reconcile is not built; the AS then shows the operation as delivered but unconfirmed.
     }
   }
 
   #relayAll(): void {
+    if (!this.#persist()) {
+      return;
+    }
     for (const g of this.#grants.values()) {
       const decision = this.canUse(g.grantId);
       const notice: DownstreamNotice = {
@@ -477,12 +672,83 @@ export class HeldDataClient {
         deleteAllBy: this.deleteBy(g.grantId),
       };
       for (const d of this.#downstream) {
-        d.relay(notice);
+        // A preceding callback or the issuedAt reading can expose a clock
+        // discontinuity. Recheck immediately before licensing downstream use.
+        const current = this.canUse(g.grantId);
+        notice.useUntil = current.ok ? current.until : null;
+        if (this.#clockUncertain) {
+          notice.deleteAllBy = this.#highWaterMs;
+        }
+        if (this.#persist()) {
+          d.relay(notice);
+        }
       }
     }
   }
 
   #log(grantId: string, kind: LifecycleEvent["kind"], detail?: string): void {
     this.events.push({ at: this.#now(), grantId, kind, ...(detail === undefined ? {} : { detail }) });
+  }
+
+  #readTime(wall: number, mono?: number): number {
+    if (!Number.isFinite(wall) || wall < this.#highWaterMs) {
+      this.#clockUncertain = true;
+    }
+    if (mono !== undefined && this.#timeAnchor) {
+      const elapsed = mono - this.#timeAnchor.mono;
+      if (!Number.isFinite(elapsed) || elapsed < 0) {
+        this.#clockUncertain = true;
+      }
+      // Both clocks are injected, as in the lease guard. Wall time covers suspend;
+      // monotonic progress prevents a slow wall clock extending elapsed limits.
+      this.#highWaterMs = Math.max(this.#highWaterMs, this.#timeAnchor.wall + Math.max(0, elapsed));
+      if (wall - this.#timeAnchor.wall - elapsed > 1000) {
+        for (const g of this.#grants.values()) {
+          g.needsReconcile = true;
+        }
+      }
+    }
+    if (Number.isFinite(wall)) {
+      this.#highWaterMs = Math.max(this.#highWaterMs, wall);
+    }
+    if (mono !== undefined) {
+      this.#timeAnchor = { wall: this.#highWaterMs, mono };
+    }
+    return this.#highWaterMs;
+  }
+
+  #persist(): boolean {
+    if (this.#stateUnavailable) {
+      return false;
+    }
+    try {
+      this.#storage.write(JSON.stringify({
+        version: 1, revision: ++this.#revision, policy: this.policy,
+        highWaterMs: this.#highWaterMs, clockUncertain: this.#clockUncertain, nextAttemptAt: this.#nextAttemptAt,
+        tokenOrigins: [...this.#tokenOrigins],
+        tokenRequests: [...this.#tokenRequests],
+        grants: [...this.#grants.values()].map((g) => ({ ...g, erasures: [...g.erasures] })),
+      }));
+      return true;
+    } catch {
+      this.#stateUnavailable = true;
+      this.#disposeInventory();
+      return false;
+    }
+  }
+
+  #disposeInventory(): void {
+    const errors: unknown[] = [];
+    for (const id of new Set([...this.#store.grantIds(), ...this.#grants.keys()])) {
+      try {
+        this.#store.dispose(id, { streams: "all" });
+      } catch (error) {
+        // One unavailable holder must not prevent disposal of the other copies.
+        errors.push(error);
+      }
+    }
+    if (errors.length > 0) {
+      throw new AggregateError(errors, "client could not complete fail-closed disposal");
+    }
   }
 }

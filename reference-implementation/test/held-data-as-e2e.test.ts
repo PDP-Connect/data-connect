@@ -18,7 +18,7 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 import { ToyApp } from "../examples/held-data-toy-app/app.ts";
 import { HeldDataClient } from "../lib/held-data/client.ts";
-import { httpStatusTransport } from "../lib/held-data/http-transport.ts";
+import { httpReportTransport, httpStatusTransport } from "../lib/held-data/http-transport.ts";
 import { makeDpopProof, thumbprint } from "../lib/training-lease/dpop.ts";
 import { generateEd25519KeyPair } from "../lib/training-lease/jws.ts";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
@@ -683,6 +683,47 @@ describe("held-data lifecycle over HTTP", () => {
       },
       heldDataOpts()
     );
+  });
+
+  it("reported_at skew: a client ten days ahead retries once with AS-mapped event time over HTTP", async () => {
+    const clock = { now: Date.now() };
+    await withServer(false, async (h) => {
+      const clientId = await registerPublicClient(h);
+      const g = await authCodeGrant(h, clientId);
+      await owner(h, `/v1/owner/grants/${g.grantId}/lifecycle/erase`, "POST");
+      const code = await owner(h, `/v1/owner/grants/${g.grantId}/lifecycle/recovery-code`, "POST");
+      const recovered = await fetchJson<{ status_credential: string }>(
+        `${h.asUrl}/oauth/grant-lifecycle/recover`,
+        json({ grant_id: g.grantId, recovery_code: code.body.recovery_code })
+      );
+      const q = await status(h, recovered.body.status_credential, g.grantId);
+      const instruction = (q.body.grants[0]?.erasure as { instruction_id: string }).instruction_id;
+      const receiptAt = clock.now + 10 * DAY;
+      let reportAttempts = 0;
+      const statuses: number[] = [];
+      const transport = httpReportTransport({
+        asBaseUrl: h.asUrl,
+        currentTokenFor: () => recovered.body.status_credential,
+        now: () => receiptAt,
+        fetchImpl: async (url, init) => {
+          const response = await fetch(url, init);
+          if (new URLSearchParams(String(init?.body)).has("report")) {
+            reportAttempts += 1;
+            statuses.push(response.status);
+          }
+          return response;
+        },
+      });
+      assert.equal(await transport({ grantId: g.grantId, operationId: instruction, kind: "receipt", reportedAt: receiptAt }), true);
+      assert.equal(reportAttempts, 2);
+      assert.deepEqual(statuses, [400, 200]);
+      const ownerRecord = await owner(h, `/v1/owner/grants/${g.grantId}/lifecycle`);
+      const erasure = (ownerRecord.body.erasures as Record<string, unknown>[])[0];
+      assert.equal(Date.parse(String(erasure?.receipt_at)), clock.now);
+      assert.equal(Date.parse(String(erasure?.delete_by)), clock.now + 30 * DAY);
+      assert.equal(await transport({ grantId: g.grantId, operationId: instruction, kind: "completion", reportedAt: receiptAt }), true);
+      assert.equal(reportAttempts, 3, "a learned conservative mapping avoids another rejected report");
+    }, heldDataOpts(clock));
   });
 
   it("Core wire: pdpp_disposition=delete from a client with current authentication records the instruction and ends the grant", async () => {

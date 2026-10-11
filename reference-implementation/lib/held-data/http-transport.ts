@@ -122,23 +122,47 @@ export function httpReportTransport(o: {
   /** Current authentication for a write: an active access token, the current refresh token, or null. */
   currentTokenFor: (grantId: string) => string | null;
   fetchImpl?: typeof fetch;
+  now?: () => number;
 }): ReportTransport {
   const f = o.fetchImpl ?? fetch;
+  const now = o.now ?? Date.now;
+  const offsets = new Map<string, number>();
   return async (r) => {
     const token = o.currentTokenFor(r.grantId);
     if (!token) {
       return false;
     }
-    const resp = await f(
+    const eventTime = r.reportedAt ?? now();
+    const send = (reportedAt: number) => f(
       `${o.asBaseUrl}/oauth/grant-lifecycle`,
       formBody({
         grant_id: r.grantId,
         token,
         report: r.kind === "receipt" ? "received" : "completed",
         instruction_id: r.operationId,
-        reported_at: new Date(r.reportedAt ?? Date.now()).toISOString(),
+        reported_at: new Date(reportedAt).toISOString(),
       })
     );
+    let resp = await send(eventTime + (offsets.get(r.grantId) ?? 0));
+    if (resp.status === 400) {
+      const error = (await resp.json()) as { error?: string };
+      if (error.error !== "invalid_request") return false;
+      // Obtain an authenticated AS assessment, not an HTTP Date or arrival time.
+      const query = await f(`${o.asBaseUrl}/oauth/grant-lifecycle`, formBody({ grant_id: r.grantId, token }));
+      if (!query.ok) return false;
+      const atReceipt = now();
+      const body = (await query.json()) as { grants?: Record<string, unknown>[] };
+      const answers = body.grants?.filter((g) => g.grant_id === r.grantId);
+      const answer = answers?.length === 1 ? answers[0] : undefined;
+      const assessedAt = ms(answer?.assessed_at);
+      const erasure = answer?.erasure as { instruction_id?: string } | undefined;
+      if (!Number.isFinite(assessedAt) || erasure?.instruction_id !== r.operationId || eventTime <= assessedAt) return false;
+      // Subtract all local elapsed time through query delivery. The client's
+      // original receipt stays intact; mapping may only make the report earlier.
+      const offset = Math.min(offsets.get(r.grantId) ?? 0, assessedAt - atReceipt, 0);
+      offsets.set(r.grantId, offset);
+      resp = await send(Math.min(eventTime + offset, assessedAt));
+    }
     if (!resp.ok) {
       return false;
     }
