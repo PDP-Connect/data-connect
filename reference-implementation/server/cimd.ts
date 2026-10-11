@@ -607,6 +607,11 @@ export function invalidateCimdCache(clientId: string): void {
   cimdCache.delete(clientId);
 }
 
+/** The last validated document for a client_id, expired or not. Never fetches. */
+export function cachedCimdDocument(clientId: string): CimdDocument | null {
+  return cimdCache.get(clientId)?.doc ?? null;
+}
+
 /**
  * Build a synthetic "registered client" shape from a CIMD doc.
  * This mirrors the shape returned by getRegisteredClient() in auth.js.

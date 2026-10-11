@@ -23,7 +23,13 @@ import { MemoryClientCheckpointStorage } from "../lib/held-data/checkpoint.ts";
 import { httpReportTransport, httpStatusTransport } from "../lib/held-data/http-transport.ts";
 import { makeDpopProof, thumbprint } from "../lib/training-lease/dpop.ts";
 import { generateEd25519KeyPair } from "../lib/training-lease/jws.ts";
-import { endHeldDataForGrant, ensureHeldDataGrant, exchangeGrantScopedDeviceCode } from "../server/auth.ts";
+import {
+  endHeldDataForGrant,
+  ensureHeldDataGrant,
+  exchangeGrantScopedDeviceCode,
+  revokeCimdClientAccessForSecurityMetadataChange,
+} from "../server/auth.ts";
+import { invalidateCimdCache } from "../server/cimd.ts";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
 import {
   approveGrant,
@@ -1375,6 +1381,99 @@ describe("held-data lifecycle over HTTP", () => {
         assert.equal(q.body.grants[0]?.held_data, "permitted");
       },
       { ...heldDataOpts(), cimdFetchDependencies } as never
+    );
+  });
+
+  /** CIMD fixture whose metadata host can be made unreachable mid-test. */
+  function unreachableCimd(confidential: boolean) {
+    const c = cimdClient();
+    const doc = confidential ? c.doc : { ...c.doc, token_endpoint_auth_method: "none" };
+    const host = { reachable: true };
+    const cimdFetchDependencies = {
+      dnsLookupImpl: async () => [{ address: "93.184.216.34", family: 4 }],
+      fetchImpl: async (input: unknown) => {
+        if (!host.reachable) throw new Error("metadata host unreachable");
+        return new Response(JSON.stringify(String(input) === c.jwksUri ? c.jwks : doc), {
+          headers: { "Content-Type": "application/json" },
+          status: 200,
+        });
+      },
+      isGlobalUnicastAddressImpl: () => true,
+    };
+    const grant = (h: Harness) =>
+      authCodeGrant(h, c.clientId, {
+        redirect: doc.redirect_uris[0] as string,
+        ...(confidential ? { tokenAuth: (aud: string) => clientAuth(c, aud) } : {}),
+      });
+    return { c, host, cimdFetchDependencies, grant };
+  }
+
+  for (const confidential of [true, false]) {
+    const kind = confidential ? "confidential" : "public";
+    it(`second-B repair: an owner ending of a tracked ${kind} CIMD grant needs no metadata fetch`, async () => {
+      const f = unreachableCimd(confidential);
+      await withServer(
+        false,
+        async (h) => {
+          const g = await f.grant(h);
+          const rt = getHeldDataRuntime()!;
+          assert.equal(await ensureHeldDataGrant(g.grantId), true);
+          assert.equal(rt.authority.isKnown(g.grantId), true);
+          f.host.reachable = false;
+          invalidateCimdCache(f.c.clientId);
+          const ended = await revoke(h, h.ownerToken, g.grantId, { pdpp_disposition: "keep" });
+          assert.equal(ended.status, 200, JSON.stringify(ended.body));
+          assert.equal(rt.authority.hasEnded(g.grantId), true, "journal did not record the ending");
+          assert.equal((await introspect(g.accessToken)).active, false);
+        },
+        { ...heldDataOpts(), cimdFetchDependencies: f.cimdFetchDependencies } as never
+      );
+    });
+
+    it(`second-B repair: a security metadata change ends every tracked ${kind} CIMD grant without a fetch`, async () => {
+      const f = unreachableCimd(confidential);
+      await withServer(
+        false,
+        async (h) => {
+          const first = await f.grant(h);
+          const second = await f.grant(h);
+          const rt = getHeldDataRuntime()!;
+          f.host.reachable = false;
+          // The cascade runs after the cache entry is deleted.
+          invalidateCimdCache(f.c.clientId);
+          await revokeCimdClientAccessForSecurityMetadataChange({ clientId: f.c.clientId });
+          for (const g of [first, second]) {
+            assert.equal(rt.authority.hasEnded(g.grantId), true, `${g.grantId} was not ended`);
+            assert.equal((await introspect(g.accessToken)).active, false);
+          }
+        },
+        { ...heldDataOpts(), cimdFetchDependencies: f.cimdFetchDependencies } as never
+      );
+    });
+  }
+
+  it("second-B repair: an owner action during history loss classifies an unresolvable CIMD client as confidential", async () => {
+    const opts = heldDataOpts();
+    const f = unreachableCimd(true);
+    await withServer(
+      false,
+      async (h) => {
+        const g = await f.grant(h);
+        const rt = getHeldDataRuntime()!;
+        const restore = loseHistory(join(opts.experimentalHeldDataLifecycle.journalDir, "authority.journal"), "wiped");
+        assert.equal(rt.authority.isKnown(g.grantId), false, "wiped history still knows the grant");
+        f.host.reachable = false;
+        invalidateCimdCache(f.c.clientId);
+        const ended = await revoke(h, h.ownerToken, g.grantId, { pdpp_disposition: "keep" });
+        assert.equal(ended.status, 200, JSON.stringify(ended.body));
+        const [action] = rt.authority.pendingActions(g.grantId);
+        assert.equal(action?.grant.confidential, true, "a confidential client was staged as public");
+        restore();
+        rt.authority.reestablishHistory();
+        assert.equal(rt.authority.hasEnded(g.grantId), true);
+        assert.equal((await introspect(g.accessToken)).active, false);
+      },
+      { ...opts, cimdFetchDependencies: f.cimdFetchDependencies } as never
     );
   });
 

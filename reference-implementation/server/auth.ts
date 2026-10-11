@@ -12543,8 +12543,31 @@ export async function prepareHeldDataDecommission(): Promise<{ grant_id: string;
   return rt.authority.allGrantIds().map((grant_id) => ({ grant_id, grant: terms.get(grant_id) ?? null }));
 }
 
+/** First registration: classify the client from its live registration (a CIMD client may be fetched). */
+async function liveHeldDataConfidential(clientId: string): Promise<boolean> {
+  const client = await resolveOAuthClient(clientId);
+  return client !== null && client.token_endpoint_auth_method !== "none";
+}
+
+/**
+ * Endings never fetch: a local registration or the last validated CIMD
+ * document classifies the client. A CIMD client without either counts as
+ * confidential, so missing metadata never lets a token alone read its lifecycle.
+ */
+async function localHeldDataConfidential(clientId: string): Promise<boolean> {
+  const registered = await getRegisteredClient(clientId);
+  if (registered) return registered.token_endpoint_auth_method !== "none";
+  const { buildCimdRegisteredClient, cachedCimdDocument, isCimdClientId } = await import("./cimd.ts");
+  if (!isCimdClientId(clientId)) return false;
+  const doc = cachedCimdDocument(clientId);
+  return doc === null || buildCimdRegisteredClient(clientId, doc).token_endpoint_auth_method !== "none";
+}
+
 /** Read identity for a pending owner action without trusting it as lifecycle authority. */
-async function readHeldDataGrant(grantId: string): Promise<{ grant: GrantRegistration; revoked: boolean } | null> {
+async function readHeldDataGrant(
+  grantId: string,
+  classify: (clientId: string) => Promise<boolean>
+): Promise<{ grant: GrantRegistration; revoked: boolean } | null> {
   const rt = getHeldDataRuntime();
   if (!rt) return null;
   const row = isPostgresStorageBackend()
@@ -12568,12 +12591,12 @@ async function readHeldDataGrant(grantId: string): Promise<{ grant: GrantRegistr
   // A training detail is training-only: keeping it never permits ordinary use (A1 F4).
   const trainingState = rt.authority.lost ? undefined : getTrainingLeaseRuntime()?.store.status(grantId).state;
   trainingOnly ||= trainingState !== undefined && trainingState !== "unknown";
-  const client = await resolveOAuthClient(row.client_id);
+  const confidential = await classify(row.client_id);
   return { grant: {
     grantId,
     clientId: row.client_id,
     subjectId: row.subject_id,
-    confidential: client !== null && client.token_endpoint_auth_method !== "none",
+    confidential,
     trainingOnly,
     streams,
     expiresAtMs: row.expires_at ? Date.parse(row.expires_at) : null,
@@ -12588,7 +12611,8 @@ export async function ensureHeldDataGrant(grantId: string): Promise<boolean> {
     await recordHeldDataReadWindow(grantId);
     return true;
   }
-  const row = await readHeldDataGrant(grantId);
+  // A lost history registers nothing, so it needs no live classification.
+  const row = await readHeldDataGrant(grantId, rt.authority.lost ? localHeldDataConfidential : liveHeldDataConfidential);
   if (!row) return false;
   // Owner views and actions may inspect main-database identity while history
   // is unavailable. It never becomes authority until recovery applies an action.
@@ -12688,7 +12712,7 @@ export async function endHeldDataForGrant(grantId: string, ending: HeldDataEndin
   requireHeldDataDisposition(ending);
   // Read the surviving identity before the synchronous intake section. A
   // loss or recovery during this await must not drop or mis-bind the action.
-  const staged = await readHeldDataGrant(grantId);
+  const staged = await readHeldDataGrant(grantId, localHeldDataConfidential);
   if (!staged && !rt.authority.isKnown(grantId)) return;
   if (!rt.authority.lost && staged && !rt.authority.isKnown(grantId)) {
     rt.authority.registerGrant(staged.grant);
