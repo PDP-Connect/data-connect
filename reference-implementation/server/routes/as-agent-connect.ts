@@ -23,9 +23,10 @@
 
 import { createHash, timingSafeEqual } from "node:crypto";
 import { exec, getMany, getOne, referenceQueries } from "../../lib/db.ts";
-import { parsePendingConsentRequestUri } from "../auth.ts";
+import { introspect, parsePendingConsentRequestUri } from "../auth.ts";
 import { normalizeAbsentOnlyExpiry } from "../core-source-authorization.ts";
 import { applyCredentialResponseNoStoreHeaders } from "../credential-response-cache.ts";
+import { getHeldDataRuntime } from "../held-data/runtime.ts";
 import { isPostgresStorageBackend, postgresQuery, withPostgresTransaction } from "../postgres-storage.ts";
 import type { PdppErrorFn, RouteArg } from "./_route-contract.ts";
 
@@ -285,6 +286,9 @@ export function createAgentConnectAttemptStore(): AgentConnectAttemptStore {
   };
   const tokenIsActive = async (tokenId: string | undefined): Promise<boolean> => {
     if (!tokenId) {
+      return false;
+    }
+    if (getHeldDataRuntime() && !(await introspect(tokenId)).active) {
       return false;
     }
     if (isPostgresStorageBackend()) {

@@ -8589,6 +8589,9 @@ async function issuePackageToken(
   expiresAt: string | null = null,
   meta: { traceContext?: TraceContext | null; source?: string } = {}
 ): Promise<string> {
+  if (await heldDataPackageBlocked(packageId)) {
+    throw buildOAuthAuthorizationCodeError("invalid_grant", "Grant package ended or authority history is unavailable");
+  }
   const packageRow = await getGrantPackageStore().getPackageById(packageId);
   const grantPackage = normalizePackageRow(packageRow);
   if (
@@ -10883,6 +10886,8 @@ function buildConsentPackageGrant(
 
 function consentExchangeTokenIsActive(row: ConsentExchangeRow): boolean {
   return (
+    !getHeldDataRuntime()?.authority.lost &&
+    !heldDataEndedOrLost(row.grant_id) &&
     !row.token_revoked &&
     (!row.token_expires_at || new Date(row.token_expires_at).getTime() > Date.now()) &&
     Boolean(row.grant_id) !== Boolean(row.package_id)
@@ -11009,6 +11014,9 @@ async function loadPostgresConsentExchangeGrant(
     ORDER BY gm.added_at, gm.grant_id`,
     [row.package_id]
   );
+  if (heldDataPackageMembersBlocked(members.rows)) {
+    return { ok: false, reason: "revoked" };
+  }
   if (!row.package_id) {
     return { ok: false, reason: "unknown" };
   }
@@ -11130,6 +11138,9 @@ export async function consumeConsentExchangeCode(
               return { ok: false as const, reason: "revoked" };
             }
             const members = sqliteGrantPackageStore.listAllMembers(row.package_id) as readonly GrantPackageMemberRow[];
+            if (heldDataPackageMembersBlocked(members)) {
+              return { ok: false as const, reason: "revoked" };
+            }
             packageId = row.package_id;
             grant = buildConsentPackageGrant(packageId, members);
           }
@@ -11714,6 +11725,9 @@ async function insertPostgresGrantToken(
     subjectId,
   }: { clientId: string; expiresAt: string | null; grantId: string; subjectId: string }
 ): Promise<{ grantRow: GrantIssuanceRow; persistedGrant: DbRow; tokenId: string }> {
+  if (heldDataEndedOrLost(grantId)) {
+    throw bindingError("grant_revoked", "Grant ended or authority history is unavailable");
+  }
   const result = await client.query<GrantIssuanceRow>(
     `SELECT grant_id AS persisted_grant_id, subject_id AS grant_subject_id,
             client_id AS grant_client_id, access_mode AS grant_access_mode,
@@ -11779,6 +11793,9 @@ function insertSqliteGrantTokenInCurrentTransaction({
   grantId: string;
   subjectId: string;
 }): { grantRow: GrantIssuanceRow; persistedGrant: DbRow; tokenId: string } {
+  if (heldDataEndedOrLost(grantId)) {
+    throw bindingError("grant_revoked", "Grant ended or authority history is unavailable");
+  }
   const grantRow = getOne<GrantIssuanceRow>(referenceQueries.authGrantsGetForIssuance, [grantId]);
   if (!grantRow) {
     const err: AuthError = new Error(`Unknown grant: ${grantId}`);
@@ -12089,7 +12106,10 @@ export async function introspect(token: unknown): Promise<TokenIntrospectionResu
     };
   }
 
-  if (row.token_kind === "mcp_package" && row.package_status !== "active") {
+  if (
+    row.token_kind === "mcp_package" &&
+    (row.package_status !== "active" || await heldDataPackageBlocked(row.package_id))
+  ) {
     return {
       active: false,
       client_id: row.client_id,
@@ -12350,12 +12370,12 @@ export async function ensureHeldDataGrant(grantId: string): Promise<boolean> {
   // A training detail is training-only: keeping it never permits ordinary use (A1 F4).
   const trainingState = getTrainingLeaseRuntime()?.store.status(grantId).state;
   trainingOnly ||= trainingState !== undefined && trainingState !== "unknown";
-  const client = await getRegisteredClient(row.client_id);
+  const client = await resolveOAuthClient(row.client_id);
   rt.authority.registerGrant({
     grantId,
     clientId: row.client_id,
     subjectId: row.subject_id,
-    confidential: client?.token_endpoint_auth_method === "private_key_jwt",
+    confidential: client !== null && client.token_endpoint_auth_method !== "none",
     trainingOnly,
     streams,
     expiresAtMs: row.expires_at ? Date.parse(row.expires_at) : null,
@@ -12551,10 +12571,29 @@ async function heldDataRefreshBlocked(refreshTokenHash: string): Promise<boolean
       );
   if (isNonEmptyString(row?.package_id)) {
     // A package token covers each child; refuse it only once every child has ended.
-    const members = await getGrantPackageStore().listAllMembers(row.package_id);
-    return members.length > 0 && members.every((m) => heldDataEndedOrLost(m.grant_id));
+    return heldDataPackageBlocked(row.package_id);
   }
   return heldDataEndedOrLost(row?.grant_id);
+}
+
+/** A shared package credential stays usable for its live children only. */
+function heldDataPackageMembersBlocked(members: readonly { grant_id: string }[]): boolean {
+  const rt = getHeldDataRuntime();
+  if (!rt) {
+    return false;
+  }
+  return rt.authority.lost || members.length === 0 || members.every((m) => heldDataEndedOrLost(m.grant_id));
+}
+
+async function heldDataPackageBlocked(packageId: unknown): Promise<boolean> {
+  const rt = getHeldDataRuntime();
+  if (!rt) {
+    return false;
+  }
+  if (rt.authority.lost || !isNonEmptyString(packageId)) {
+    return true;
+  }
+  return heldDataPackageMembersBlocked(await getGrantPackageStore().listAllMembers(packageId));
 }
 
 /** Read guard: the journal records an ending (a restored main database cannot reopen reads). */
@@ -12563,5 +12602,7 @@ function heldDataEndedOrLost(grantId: unknown): boolean {
   if (!(rt && isNonEmptyString(grantId))) {
     return false;
   }
-  return rt.authority.lost || rt.authority.hasEnded(grantId);
+  const ended = rt.authority.hasEnded(grantId);
+  // hasEnded refreshes the journal and can discover corruption on this check.
+  return rt.authority.lost || ended;
 }
