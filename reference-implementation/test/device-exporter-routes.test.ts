@@ -830,13 +830,16 @@ test("batch attempt deadline cannot block acceptance once derived indexing is de
   // durable batch into a 503 — it durably writes and accepts immediately,
   // and the slow embed lands afterward on the deferred lane.
   const previousDeadline = process.env.PDPP_INGEST_BATCH_ATTEMPT_DEADLINE_MS;
-  process.env.PDPP_INGEST_BATCH_ATTEMPT_DEADLINE_MS = "10";
+  process.env.PDPP_INGEST_BATCH_ATTEMPT_DEADLINE_MS = "1000";
+  const releaseEmbedding = deferred();
+  let embeddingCompleted = false;
   const backend = {
     available: () => true,
     dimensions: () => 3,
     distanceMetric: () => "cosine",
     embedDocument: async () => {
-      await new Promise((resolve) => setTimeout(resolve, 30));
+      await releaseEmbedding.promise;
+      embeddingCompleted = true;
       return new Float32Array([0.1, 0.2, 0.3]);
     },
     embedQuery: async () => new Float32Array([0.1, 0.2, 0.3]),
@@ -850,47 +853,65 @@ test("batch attempt deadline cannot block acceptance once derived indexing is de
       const batch = makeBatch(device, "batch-attempt-deadline", "deadline");
       firstRecord(batch).data.content = "deadline payload";
       batch.body_hash = bodyHash(batch.records);
-      const first = await postJson(
+      const firstRequest = postJson(
         `${asUrl}/_ref/device-exporters/${encodeURIComponent(device.device_id)}/ingest-batches`,
         batch,
         authHeaders(device.device_token)
       );
-      assert.equal(first.status, 201, JSON.stringify(first.body));
-      assert.deepEqual(
-        getDb()
-          .prepare("SELECT status, durable_prefix_count FROM device_ingest_batch_outcomes WHERE batch_id = ?")
-          .get(batch.batch_id),
-        { durable_prefix_count: 1, status: "accepted" }
-      );
-      assert.equal(
-        selectRow<{ count: number }>(
-          "SELECT COUNT(*) AS count FROM record_changes WHERE connector_instance_id = ?",
-          device.connector_instance_id
-        ).count,
-        1
-      );
+      let watchdog: ReturnType<typeof setTimeout> | undefined;
+      try {
+        // Keep embedding blocked until acceptance; the watchdog detects an
+        // inline indexing await without racing the durable-write phase.
+        const first = await Promise.race([
+          firstRequest,
+          new Promise<never>((_, reject) => {
+            watchdog = setTimeout(() => reject(new Error("acceptance awaited blocked embedding")), 5000);
+          }),
+        ]);
+        assert.equal(embeddingCompleted, false, "acceptance must precede embedding completion");
+        assert.equal(first.status, 201, JSON.stringify(first.body));
+        assert.deepEqual(
+          getDb()
+            .prepare("SELECT status, durable_prefix_count FROM device_ingest_batch_outcomes WHERE batch_id = ?")
+            .get(batch.batch_id),
+          { durable_prefix_count: 1, status: "accepted" }
+        );
+        assert.equal(
+          selectRow<{ count: number }>(
+            "SELECT COUNT(*) AS count FROM record_changes WHERE connector_instance_id = ?",
+            device.connector_instance_id
+          ).count,
+          1
+        );
 
-      await drainConnectorInstanceIndexWorkForTests();
-      const retry = await postJson(
-        `${asUrl}/_ref/device-exporters/${encodeURIComponent(device.device_id)}/ingest-batches`,
-        batch,
-        authHeaders(device.device_token)
-      );
-      assert.equal(retry.status, 201, JSON.stringify(retry.body));
-      assert.deepEqual(
-        getDb()
-          .prepare("SELECT status, durable_prefix_count FROM device_ingest_batch_outcomes WHERE batch_id = ?")
-          .get(batch.batch_id),
-        { durable_prefix_count: 1, status: "accepted" }
-      );
-      assert.equal(
-        selectRow<{ count: number }>(
-          "SELECT COUNT(*) AS count FROM record_changes WHERE connector_instance_id = ?",
-          device.connector_instance_id
-        ).count,
-        1,
-        "accepted replay does not allocate a second version"
-      );
+        releaseEmbedding.resolve();
+        await drainConnectorInstanceIndexWorkForTests();
+        assert.equal(embeddingCompleted, true, "deferred indexing completes after acceptance");
+        const retry = await postJson(
+          `${asUrl}/_ref/device-exporters/${encodeURIComponent(device.device_id)}/ingest-batches`,
+          batch,
+          authHeaders(device.device_token)
+        );
+        assert.equal(retry.status, 201, JSON.stringify(retry.body));
+        assert.deepEqual(
+          getDb()
+            .prepare("SELECT status, durable_prefix_count FROM device_ingest_batch_outcomes WHERE batch_id = ?")
+            .get(batch.batch_id),
+          { durable_prefix_count: 1, status: "accepted" }
+        );
+        assert.equal(
+          selectRow<{ count: number }>(
+            "SELECT COUNT(*) AS count FROM record_changes WHERE connector_instance_id = ?",
+            device.connector_instance_id
+          ).count,
+          1,
+          "accepted replay does not allocate a second version"
+        );
+      } finally {
+        clearTimeout(watchdog);
+        releaseEmbedding.resolve();
+        await Promise.allSettled([firstRequest]);
+      }
     });
   } finally {
     if (previousDeadline === undefined) {
