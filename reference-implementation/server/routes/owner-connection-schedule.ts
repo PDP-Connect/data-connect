@@ -514,6 +514,14 @@ export function buildConnectionScheduleUpsertHandler(
       const result = await ctx.upsertSchedule(namespace.connectorId, req.body || {}, {
         connectorInstanceId: namespace.connectorInstanceId,
       });
+      // Build the wire response before publishing a successful terminal audit.
+      // A missing or unusable result must only take the failed-audit path.
+      const response = result.policy_warning
+        ? {
+            ...(result.schedule as Record<string, unknown>),
+            policy_warning: result.policy_warning,
+          }
+        : result.schedule;
       await ctx.onScheduleMutation?.();
       ctx.invalidateConnectorSummariesCache?.();
       await ctx.markConnectorSummaryEvidenceDirty?.({
@@ -530,14 +538,7 @@ export function buildConnectionScheduleUpsertHandler(
         outcome: "succeeded",
         selector: binding.selector,
       });
-      res.json(
-        result.policy_warning
-          ? {
-              ...(result.schedule as Record<string, unknown>),
-              policy_warning: result.policy_warning,
-            }
-          : result.schedule
-      );
+      res.json(response);
     } catch (error) {
       await emitScheduleAudit(ctx, req, res, {
         actor,

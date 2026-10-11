@@ -6543,12 +6543,18 @@ export function buildAsApp(opts: ServerOpts = {}) {
         connectorInstanceId,
         options as Parameters<ReturnType<typeof createRequestConnectorInstanceStore>["updateStatus"]>[1]
       ),
-    upsertSchedule: (connectorId: string, input: unknown, options: unknown) =>
-      controller?.upsertSchedule(
+    upsertSchedule: (connectorId: string, input: unknown, options: unknown) => {
+      if (!controller) {
+        throw Object.assign(new Error("Schedule controller is unavailable"), {
+          code: "runtime_unavailable",
+        });
+      }
+      return controller.upsertSchedule(
         connectorId,
         input as Parameters<NonNullable<typeof controller>["upsertSchedule"]>[1],
         options as Parameters<NonNullable<typeof controller>["upsertSchedule"]>[2]
-      ),
+      );
+    },
   };
 
   mountRefConnectorsList(app, refConnectorsContext as unknown as Parameters<typeof mountRefConnectorsList>[1]);
@@ -7938,12 +7944,18 @@ function buildRsApp(opts: ServerOpts = {}) {
     resolveOwnerConnectorNamespace,
     resolveRegisteredConnectorManifest,
     setReferenceTraceId,
-    upsertSchedule: (connectorId: string, input: unknown, options: unknown) =>
-      opts.controller?.upsertSchedule(
+    upsertSchedule: (connectorId: string, input: unknown, options: unknown) => {
+      if (!opts.controller) {
+        throw Object.assign(new Error("Schedule controller is unavailable"), {
+          code: "runtime_unavailable",
+        });
+      }
+      return opts.controller.upsertSchedule(
         connectorId,
         input as Parameters<NonNullable<typeof opts.controller>["upsertSchedule"]>[1],
         options as Parameters<NonNullable<typeof opts.controller>["upsertSchedule"]>[2]
-      ),
+      );
+    },
   } as unknown as Parameters<typeof mountOwnerConnectionScheduleUpsert>[1]);
 
   // The owner's read/write surface for a local connection's declared collection

@@ -27,9 +27,14 @@ import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 
 import { listSpineEventsPage } from "../lib/spine.ts";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
-import { startServer } from "../server/index.ts";
+import { buildAsApp, startServer } from "../server/index.ts";
+import {
+  buildConnectionScheduleUpsertHandler,
+  type ConnectionScheduleUpsertContext,
+} from "../server/routes/owner-connection-schedule.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
 import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
+import { TEST_INTROSPECTION_SERVER_OPTS } from "./helpers/introspection-test-credentials.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REFERENCE_IMPL_DIR = join(__dirname, "..");
@@ -554,6 +559,106 @@ test("parity: schedule PUT returns identical validation and resolution errors an
     }
     assert.equal((await cookie("GET", COOKIE_CONNECTION)).body.schedule, null);
   });
+});
+
+test("controller-less schedule PUT emits exactly one failed audit and leaves storage untouched", async () => {
+  await withSurfaces(async ({ cookie }) => {
+    let mutations = 0;
+    const app = buildAsApp({
+      controller: null,
+      onScheduleMutation: () => {
+        mutations += 1;
+      },
+      ownerAuthPassword: "",
+      ...TEST_INTROSPECTION_SERVER_OPTS,
+    });
+    const server = (await app.listen(0, "127.0.0.1")) as Awaited<ReturnType<typeof app.listen>> & CloseableServer;
+    try {
+      const port = (server.address() as import("node:net").AddressInfo).port;
+      const result = await fetchJson(`http://127.0.0.1:${port}/_ref/connections/${COOKIE_CONNECTION}/schedule`, {
+        body: JSON.stringify({ enabled: false, interval_seconds: 3600 }),
+        headers: { "Content-Type": "application/json" },
+        method: "PUT",
+      });
+      assert.ok(result.status >= 500, "an unavailable runtime returns a server error");
+      const traceId = result.headers.get("PDPP-Reference-Trace-Id");
+      assert.ok(traceId);
+      const events = (listSpineEventsPage("trace", traceId, { limit: 20 }).events as unknown as AuditEvent[]).filter(
+        (event) => event.event_type === "owner_agent.connection.schedule"
+      );
+      assert.equal(events.length, 1, "one terminal schedule audit is emitted for the request");
+      assert.equal(events.filter((event) => event.data.outcome === "succeeded").length, 0);
+      assert.equal(events[0]?.status, "failed");
+      assert.equal(events[0]?.data.outcome, "failed");
+      assert.equal(events[0]?.data.operation, "upsert_schedule");
+      assert.equal(errorBody(result).code, "runtime_unavailable");
+      assert.equal((events[0]?.data.error as Record<string, unknown>).code, "runtime_unavailable");
+      assert.equal(mutations, 0, "no scheduler refresh runs without a committed schedule");
+      assert.equal((await cookie("GET", COOKIE_CONNECTION)).body.schedule, null);
+    } finally {
+      server.closeAllConnections();
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+});
+
+test("schedule PUT builds the response before emitting a success audit", async () => {
+  const responseError = new Error("schedule response projection failed");
+  const events: Record<string, unknown>[] = [];
+  const errors: unknown[] = [];
+  const responses: unknown[] = [];
+  const ctx: ConnectionScheduleUpsertContext = {
+    canonicalConnectorKey,
+    createTraceContext: () => ({
+      request_id: "req_schedule_response",
+      scenario_id: "scenario_schedule_response",
+      trace_id: "trace_schedule_response",
+    }),
+    emitSpineEvent: async (event) => {
+      events.push(event);
+    },
+    ensureRequestId: () => "req_schedule_response",
+    handleError: (_res, error) => {
+      errors.push(error);
+    },
+    pdppError: () => assert.fail("the handler should use handleError"),
+    resolveOwnerConnectorNamespace: async () => ({
+      connectorId: "spotify",
+      connectorInstanceId: COOKIE_CONNECTION,
+    }),
+    resolveRegisteredConnectorManifest: async () => ({}),
+    setReferenceTraceId: () => undefined,
+    upsertSchedule: async () => ({
+      get policy_warning() {
+        throw responseError;
+      },
+      schedule: { interval_seconds: 3600 },
+    }),
+  };
+  const handler = buildConnectionScheduleUpsertHandler(ctx, {
+    ownerSubjectId: () => OWNER_SUBJECT_ID,
+    param: "connectionId",
+    selector: "connection_id",
+    surface: "owner_session",
+  });
+  const res: Parameters<typeof handler>[1] = {
+    end: () => undefined,
+    getHeader: () => undefined,
+    json: (body) => responses.push(body),
+    setHeader: () => undefined,
+    status: () => res,
+  };
+  await handler(
+    { body: { interval_seconds: 3600 }, params: { connectionId: COOKIE_CONNECTION }, query: {} },
+    res
+  );
+  const scheduleEvents = events.filter((event) => event.event_type === "owner_agent.connection.schedule");
+  assert.equal(scheduleEvents.length, 1, "response construction failure emits only one terminal audit");
+  assert.equal(scheduleEvents.filter((event) => event.status === "succeeded").length, 0);
+  assert.equal(scheduleEvents[0]?.status, "failed");
+  assert.equal((scheduleEvents[0]?.data as Record<string, unknown>).outcome, "failed");
+  assert.deepEqual(errors, [responseError]);
+  assert.deepEqual(responses, []);
 });
 
 test("detail and schedule PUT reject client tokens with 403 and leave the schedule untouched", async () => {
