@@ -367,7 +367,10 @@ export class HeldDataClient {
       for (const ref of this.#store.recordRefs(grantId)) {
         const identity = JSON.stringify([ref.sourceId ?? null, ref.instanceId ?? null, ref.stream, ref.id]);
         const versions = this.#acquisitions.get(identity) ?? new Map<string | undefined, number>();
-        const firstAcquiredAt = Math.min(priorGrant.legacyAcquiredAt, versions.get(ref.version) ?? Number.POSITIVE_INFINITY);
+        const known = ref.version === undefined
+          ? Math.min(...versions.values())
+          : Math.min(versions.get(ref.version) ?? Number.POSITIVE_INFINITY, versions.get(undefined) ?? Number.POSITIVE_INFINITY);
+        const firstAcquiredAt = Math.min(priorGrant.legacyAcquiredAt, known);
         versions.set(ref.version, firstAcquiredAt);
         this.#acquisitions.set(identity, versions);
         priorGrant.records.set(JSON.stringify([identity, ref.version ?? null]), { ref, firstAcquiredAt });

@@ -82,3 +82,23 @@ test('a store without complete record inventory keeps the original whole-copy bo
   assert.deepEqual(app.holds('g'), { records: 0, indexEntries: 0, summary: false });
   assert.equal(resumed.grantState('g')?.deleteReason, 'retention_ceiling');
 });
+
+test('legacy inventory migration keeps an earlier ambiguous-version record clock', async () => {
+  let now = T0;
+  const app = new ToyApp();
+  const client = new HeldDataClient({ now: () => now, store: app,
+    status: async () => ({ ok: false, reason: 'offline' }),
+    policy: { retentionCeilingMs: 2 * DAY, longStopMs: null } });
+  client.acquireRecords('first', [{ id: 'r', stream: 'messages' }]);
+  app.sync('first', [{ id: 'r', stream: 'messages', text: 'oldword' }]);
+  now += DAY;
+  client.acquire('legacy');
+  app.sync('legacy', [{ id: 'r', stream: 'messages', version: 'v2', text: 'oldword' }]);
+  app.attach(client);
+  app.sync('legacy', [{ id: 'new', stream: 'messages', text: 'newword' }]);
+  assert.equal(client.deleteBy('legacy'), T0 + 2 * DAY);
+  now += DAY;
+  await client.tick();
+  assert.deepEqual(app.records.get('legacy')?.map(r => r.id), ['new']);
+  assert.equal(app.index.has('oldword'), false);
+});
