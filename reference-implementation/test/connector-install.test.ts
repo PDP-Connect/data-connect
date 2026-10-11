@@ -30,6 +30,10 @@ import {
   reconcileConnectorUninstalls,
   resolveActiveConnectorPath,
 } from "../server/connector-install/index.ts";
+import {
+  createFileLocalConnectorSourceStore,
+  inspectActiveLocalConnectorSource,
+} from "../server/connector-install/local-source.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
 import { createSqliteSchedulerStore } from "../server/stores/scheduler-store.ts";
@@ -123,6 +127,116 @@ function writeFixture(root: string): void {
   writeFileSync(join(root, "dist", "collection-profile.mjs"), "export {};\n");
   writeFileSync(join(root, "provenance.json"), "{}\n");
 }
+
+function writeLocalBindingFixture(root: string, bindings: unknown): void {
+  writeFixture(root);
+  writeFileSync(
+    join(root, "profile", "collection-profile.json"),
+    JSON.stringify({
+      connector_id: "https://example.com/connectors/local-bindings",
+      connector_key: "local-bindings",
+      version: "1.0.0",
+      streams: [{ name: "records" }],
+      runtime_requirements: { bindings },
+    })
+  );
+}
+
+test("local sources add and inspect named bindings by their supported kinds", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pdpp-local-named-bindings-"));
+  try {
+    const root = join(dataDir, "source");
+    const bindings = {
+      site: { kind: "browser", required: true, interface: "browser@1" },
+      files: { kind: "filesystem", required: false },
+      api: { kind: "network", required: false },
+    };
+    writeLocalBindingFixture(root, bindings);
+    const store = createFileLocalConnectorSourceStore(dataDir);
+    const record = await store.add(root);
+    assert.deepEqual(record.manifest.runtime_requirements, { bindings });
+    await store.select(record.connectorKey, record.sourceId);
+    const inspection = await inspectActiveLocalConnectorSource(store, record.connectorId);
+    assert.equal(inspection.status, "active");
+    if (inspection.status !== "active") assert.fail("named bindings must remain runnable");
+    assert.equal(inspection.path, join(root, "dist", "collection-profile.mjs"));
+    assert.deepEqual(inspection.record.manifest.runtime_requirements, { bindings });
+  } finally {
+    rmSync(dataDir, { force: true, recursive: true });
+  }
+});
+
+test("local sources reload and inspect a shorthand-to-named browser binding migration", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pdpp-local-binding-reload-"));
+  try {
+    const root = join(dataDir, "source");
+    writeLocalBindingFixture(root, { browser: { required: true } });
+    const store = createFileLocalConnectorSourceStore(dataDir);
+    const original = await store.add(root);
+    await store.select(original.connectorKey, original.sourceId);
+    const bindings = { site: { kind: "browser", required: true } };
+    writeLocalBindingFixture(root, bindings);
+    const reloaded = await store.reload(original.sourceId);
+    assert.equal(reloaded.sourceId, original.sourceId);
+    assert.equal(reloaded.selected, true);
+    assert.notEqual(reloaded.manifestSha256, original.manifestSha256);
+    assert.deepEqual(reloaded.manifest.runtime_requirements, { bindings });
+    const inspection = await inspectActiveLocalConnectorSource(store, original.connectorId);
+    assert.equal(inspection.status, "active");
+    if (inspection.status !== "active") assert.fail("reloaded named binding must remain runnable");
+    assert.deepEqual(inspection.record.manifest.runtime_requirements, { bindings });
+  } finally {
+    rmSync(dataDir, { force: true, recursive: true });
+  }
+});
+
+test("local sources apply shared validation to malformed binding declarations", async (t) => {
+  const cases = [
+    { name: "named instance without kind", bindings: { site: { required: true } } },
+    { name: "non-string kind", bindings: { site: { kind: 42, required: true } } },
+    { name: "non-boolean required", bindings: { site: { kind: "browser", required: "yes" } } },
+    { name: "missing required", bindings: { browser: {} } },
+    { name: "mismatched interface", bindings: { browser: { required: true, interface: "network@1" } } },
+    { name: "invalid feature", bindings: { browser: { required: true, features: ["not_a_feature"] } } },
+    { name: "non-canonical host", bindings: { browser: { required: true, constraints: { navigate: ["Example.com"] } } } },
+    { name: "reserved instance", bindings: { interactive: { kind: "browser", required: false } } },
+  ];
+  for (const { name, bindings } of cases) {
+    await t.test(name, async () => {
+      const dataDir = mkdtempSync(join(tmpdir(), "pdpp-local-invalid-bindings-"));
+      try {
+        const root = join(dataDir, "source");
+        writeLocalBindingFixture(root, { browser: { required: true } });
+        const store = createFileLocalConnectorSourceStore(dataDir);
+        const original = await store.add(root);
+        writeLocalBindingFixture(root, bindings);
+        await assert.rejects(store.add(root), /runtime_requirements\.bindings/);
+        await assert.rejects(store.reload(original.sourceId), /runtime_requirements\.bindings/);
+        assert.deepEqual(await store.list(), [original]);
+      } finally {
+        rmSync(dataDir, { force: true, recursive: true });
+      }
+    });
+  }
+});
+
+test("local sources still reject optional unsupported kinds in named and shorthand forms", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pdpp-local-unsupported-bindings-"));
+  try {
+    const root = join(dataDir, "source");
+    const store = createFileLocalConnectorSourceStore(dataDir);
+    for (const bindings of [
+      { session: { kind: "desktop_session", required: false } },
+      { desktop_session: { required: false } },
+    ]) {
+      writeLocalBindingFixture(root, bindings);
+      await assert.rejects(store.add(root), /unsupported runtime binding/);
+      assert.deepEqual(await store.list(), []);
+    }
+  } finally {
+    rmSync(dataDir, { force: true, recursive: true });
+  }
+});
 
 test("installs into an immutable digest root and resolves the active verified entrypoint", async () => {
   const dataDir = mkdtempSync(join(tmpdir(), "pdpp-connector-install-"));
