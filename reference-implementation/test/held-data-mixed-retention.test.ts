@@ -102,3 +102,23 @@ test('legacy inventory migration keeps an earlier ambiguous-version record clock
   assert.deepEqual(app.records.get('legacy')?.map(r => r.id), ['new']);
   assert.equal(app.index.has('oldword'), false);
 });
+
+for (const opaque of [false, true]) {
+  test(`legacy migration checkpoints references only: ${opaque ? 'non-JSON body' : 'record text'}`, () => {
+    let now = T0;
+    const app = new ToyApp();
+    const storage = new MemoryClientCheckpointStorage();
+    const client = new HeldDataClient({ now: () => now, store: app, storage, initialize: true,
+      status: async () => ({ ok: false, reason: 'offline' }),
+      policy: { retentionCeilingMs: 2 * DAY, longStopMs: null } });
+    client.acquire('g');
+    const old = { id: 'old', stream: 'messages', text: 'body-must-stay-in-the-store', ...(opaque ? { opaque: 1n } : {}) };
+    app.sync('g', [old]);
+    app.attach(client);
+    now += DAY;
+    app.sync('g', [{ id: 'new', stream: 'messages', text: 'newbody' }]);
+    assert.equal(app.holds('g').records, 2, 'body fields must not make checkpoint persistence fail');
+    assert.equal(storage.read()?.includes(old.text), false, 'the checkpoint must contain only record references');
+    assert.equal(client.deleteBy('g'), T0 + 2 * DAY);
+  });
+}

@@ -373,7 +373,12 @@ export class HeldDataClient {
         const firstAcquiredAt = Math.min(priorGrant.legacyAcquiredAt, known);
         versions.set(ref.version, firstAcquiredAt);
         this.#acquisitions.set(identity, versions);
-        priorGrant.records.set(JSON.stringify([identity, ref.version ?? null]), { ref, firstAcquiredAt });
+        priorGrant.records.set(JSON.stringify([identity, ref.version ?? null]), { ref: {
+          id: ref.id, stream: ref.stream,
+          ...(ref.sourceId === undefined ? {} : { sourceId: ref.sourceId }),
+          ...(ref.instanceId === undefined ? {} : { instanceId: ref.instanceId }),
+          ...(ref.version === undefined ? {} : { version: ref.version }),
+        }, firstAcquiredAt });
       }
       priorGrant.recordsTracked = true;
       priorGrant.legacyAcquiredAt = null;
