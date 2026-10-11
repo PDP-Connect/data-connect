@@ -13,7 +13,7 @@
 
 import { createHash } from "node:crypto";
 import { applyPartialInstruction, enforceAppendOnlyDuplicate, experimentalRecordUpdatesEnabled, isPartialInstruction, validateExperimentalSnapshot } from "./experimental-record-updates.ts";
-import { BOOTSTRAP_MAX_RECORDS, continueBootstrapPage, retainedBootstrapRecordIds, startBootstrapPage } from "./experimental-record-bootstrap.ts";
+import { BOOTSTRAP_MAX_RECORDS, bootstrapScope, continueBootstrapPage, currentDeletionEpoch, noteRecordDeletion, retainedBootstrapRecordIds, startBootstrapPage } from "./experimental-record-bootstrap.ts";
 import {
   buildLimitClampedWarning,
   clampRecordsPageLimit,
@@ -1743,6 +1743,7 @@ async function writePostgresIngestMutation({
 }): Promise<number> {
   let nextRecordJsonBytes = 0;
   if (op === "delete") {
+    noteRecordDeletion(connectorInstanceId, stream, recordKey);
     await client.query(
       `UPDATE records
        SET connector_id = $6, deleted = TRUE, deleted_at = $4, emitted_at = $4, version = $5
@@ -2447,6 +2448,7 @@ export async function postgresQueryRecords(
     const response = isBootstrapPage && bootstrapCursor
       ? continueBootstrapPage<ResponseRecord>(bootstrapCursor, context, limit)
       : await withPostgresReadOnlyTransaction(async (client) => {
+          const deletionEpoch = currentDeletionEpoch();
           const sinceCursor = retainedCursor?.bootstrap_baseline !== undefined ? String(requestParams.changes_since) : undefined;
           const previousIds = sinceCursor ? retainedBootstrapRecordIds(sinceCursor, context) : [];
           const horizon = await client.query("SELECT max_version FROM version_counter WHERE connector_instance_id = $1 AND stream = $2", [connectorInstanceId, stream]);
@@ -2467,7 +2469,7 @@ export async function postgresQueryRecords(
           const removed = previousIds.length ? await client.query("SELECT record_key, emitted_at, deleted_at FROM records WHERE connector_instance_id = $1 AND stream = $2 AND record_key = ANY($3::text[])", [connectorInstanceId, stream, previousIds]) : { rows: [] };
           const eligibilityFields = effective.eligibilityFields !== undefined ? effective.eligibilityFields : fields;
           return startBootstrapPage({
-            context, records: rows.rows.map((row) => ({ record: responseRecord({ row, stream, fields, identity }), eligibility: projectFields(row.record_json, eligibilityFields ?? null) })), limit, order: orderDirection,
+            context, scope: bootstrapScope(connectorInstanceId, stream), deletionEpoch, records: rows.rows.map((row) => ({ record: responseRecord({ row, stream, fields, identity }), eligibility: projectFields(row.record_json, eligibilityFields ?? null) })), limit, order: orderDirection,
             changesCursor: encodeCursor({ v: maxVersion }),
             removedRecords: removed.rows.map((row) => deletedResponseRecord({ row, stream, identity })),
             ...(sinceCursor ? { sinceCursor } : {}),

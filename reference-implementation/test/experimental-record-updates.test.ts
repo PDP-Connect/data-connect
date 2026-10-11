@@ -854,6 +854,15 @@ for (const backend of ["sqlite", "postgres"] as const) {
 						await write({
 							data: {
 								created_at: "2026-10-01T00:00:00Z",
+								id: "c",
+								required: "reinserted-after-h1",
+							},
+							key: "c",
+							stream: "bootstrap",
+						});
+						await write({
+							data: {
+								created_at: "2026-10-01T00:00:00Z",
 								id: "later",
 								required: "after-h1",
 							},
@@ -878,6 +887,7 @@ for (const backend of ["sqlite", "postgres"] as const) {
 						assert.deepEqual(
 							collected.map((record) => record.id),
 							["a", "b"],
+							"c was deleted and reinserted after h1, so the h1 snapshot of c must not be served",
 						);
 						assert.deepEqual(
 							collected.map((record) => record.data),
@@ -932,7 +942,14 @@ for (const backend of ["sqlite", "postgres"] as const) {
 						assert.deepEqual(restarted.data.map((record) => record.id).sort(), [
 							"a",
 							"b",
+							"c",
 						]);
+						assert.equal(
+							restarted.data.find((record) => record.id === "c")?.data
+								?.required,
+							"reinserted-after-h1",
+							"a fresh beginning session serves the reinserted payload",
+						);
 					},
 				);
 				await t.test(
@@ -1210,6 +1227,18 @@ for (const backend of ["sqlite", "postgres"] as const) {
 								version: outcome.version as number,
 							});
 						}
+						const current = await getRecord(
+							target,
+							"state",
+							"history",
+							grant,
+							manifest,
+						);
+						assert.deepEqual(
+							current.data,
+							replacement,
+							"RECORD replacement removes omitted fields from current storage",
+						);
 						const historySql =
 							"SELECT record_json, version FROM record_changes WHERE stream = 'state' AND record_key = 'history' AND NOT deleted ORDER BY version";
 						const history = databaseUrl
@@ -1591,6 +1620,8 @@ test("retained bootstrap state binds tokens and pages to context and storage lif
 	}));
 	const result = startBootstrapPage({
 		context: "authorized",
+		deletionEpoch: 0,
+		scope: "test",
 		records,
 		changesCursor: token,
 		limit: 1,
@@ -1640,6 +1671,8 @@ test("retained bootstrap state binds tokens and pages to context and storage lif
 	t.mock.restoreAll();
 	const restarted = startBootstrapPage({
 		context: "authorized",
+		deletionEpoch: 0,
+		scope: "test",
 		records,
 		changesCursor: token,
 		limit: 10,
@@ -1666,6 +1699,8 @@ test("retained bootstrap capacity rejects complete captures and counts terminal 
 	) =>
 		startBootstrapPage({
 			context: "capacity",
+			deletionEpoch: 0,
+			scope: "test",
 			records,
 			changesCursor,
 			limit: 100,

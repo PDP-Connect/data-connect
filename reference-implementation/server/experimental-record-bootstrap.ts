@@ -1,7 +1,10 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 import { randomUUID } from "node:crypto";
-import { equalJsonValues } from "./experimental-record-updates.ts";
+import {
+	equalJsonValues,
+	experimentalRecordUpdatesEnabled,
+} from "./experimental-record-updates.ts";
 import { currentStorageGeneration } from "./storage-generation.ts";
 
 // Prototype only: retain serialized authorized snapshots, independent of history
@@ -16,6 +19,8 @@ interface Session {
 	context: string;
 	expiresAt: number;
 	generation: number;
+	deletionEpoch: number;
+	scope: string;
 	records: string[];
 	baseline: Map<string, string>;
 }
@@ -38,6 +43,69 @@ interface BootstrapCursor {
 }
 const sessions = new Map<string, Session>();
 
+// A retained page serves the record as captured at h1, so any deletion after h1
+// must suppress it, even if the key is later reinserted with a new payload.
+// The current row cannot tell: reinsertion clears deleted and deleted_at, and
+// record_changes may be pruned. This process-local ledger mirrors the
+// process-local sessions it protects. An entry matters only to sessions
+// captured before it. Those expire within SESSION_TTL_MS, so older entries are
+// dropped.
+const LEDGER_RETENTION_MS = 2 * SESSION_TTL_MS;
+let deletionEpoch = 0;
+const deletions = new Map<
+	string,
+	{ at: number; epoch: number; generation: number }
+>();
+
+function deletionKey(scope: string, id: string): string {
+	return JSON.stringify([scope, id]);
+}
+
+export function bootstrapScope(
+	connectorInstanceId: string,
+	stream: string,
+): string {
+	return JSON.stringify([connectorInstanceId, stream]);
+}
+
+/** Record a deletion. Call from every path that marks a record deleted. */
+export function noteRecordDeletion(
+	connectorInstanceId: string,
+	stream: string,
+	recordKey: string,
+): void {
+	if (!experimentalRecordUpdatesEnabled()) return;
+	const now = Date.now();
+	for (const [key, entry] of deletions) {
+		if (entry.at > now - LEDGER_RETENTION_MS) break;
+		deletions.delete(key);
+	}
+	const key = deletionKey(
+		bootstrapScope(connectorInstanceId, stream),
+		recordKey,
+	);
+	deletions.delete(key); // re-insert so the map stays ordered by time
+	deletions.set(key, {
+		at: now,
+		epoch: ++deletionEpoch,
+		generation: currentStorageGeneration(),
+	});
+}
+
+/** Read before the snapshot query, so deletions that race the capture suppress. */
+export function currentDeletionEpoch(): number {
+	return deletionEpoch;
+}
+
+function deletedAfterCapture(session: Session, id: string): boolean {
+	const entry = deletions.get(deletionKey(session.scope, id));
+	return (
+		entry !== undefined &&
+		entry.generation === session.generation &&
+		entry.epoch > session.deletionEpoch
+	);
+}
+
 function bootstrapError(
 	code: string,
 	message: string,
@@ -56,7 +124,7 @@ function pruneSessions(): void {
 	}
 }
 
-function page<T>(
+function page<T extends { id: string }>(
 	id: string,
 	session: Session,
 	offset: number,
@@ -68,7 +136,11 @@ function page<T>(
 		object: "list",
 		data: session.records
 			.slice(offset, end)
-			.map((record) => JSON.parse(record) as T),
+			.map((record) => JSON.parse(record) as T & { deleted?: unknown })
+			.filter(
+				(record) =>
+					record.deleted === true || !deletedAfterCapture(session, record.id),
+			),
 		has_more: hasMore,
 		...(hasMore
 			? {
@@ -129,8 +201,12 @@ export function startBootstrapPage<T extends { id: string }>({
 	sinceCursor,
 	removedRecords = [],
 	order = "ASC",
+	scope,
+	deletionEpoch: capturedDeletionEpoch,
 }: {
 	context: string;
+	scope: string;
+	deletionEpoch: number;
 	records: Iterable<BootstrapSnapshot<T>>;
 	changesCursor: string;
 	limit: number;
@@ -202,6 +278,8 @@ export function startBootstrapPage<T extends { id: string }>({
 		baseline,
 		expiresAt: Date.now() + SESSION_TTL_MS,
 		generation: currentStorageGeneration(),
+		deletionEpoch: capturedDeletionEpoch,
+		scope,
 	};
 	const retainedBytes = [...sessions.values()].reduce(
 		(total, existing) => total + existing.bytes,
@@ -217,7 +295,7 @@ export function startBootstrapPage<T extends { id: string }>({
 	return page<T>(id, session, 0, limit);
 }
 
-export function continueBootstrapPage<T>(
+export function continueBootstrapPage<T extends { id: string }>(
 	cursor: BootstrapCursor,
 	context: string,
 	limit: number,

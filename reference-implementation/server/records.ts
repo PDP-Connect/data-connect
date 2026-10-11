@@ -7,7 +7,7 @@ import { parseCoverageDiagnosticsStateSnapshot } from "./polyfill-connectors-run
  */
 import { getDb } from "./db.ts";
 import { applyPartialInstruction, enforceAppendOnlyDuplicate, equalJsonValues, experimentalRecordUpdatesEnabled, isPartialInstruction, recordUpdateError, validateExperimentalSnapshot, type ExperimentalStream } from "./experimental-record-updates.ts";
-import { continueBootstrapPage, retainedBootstrapRecordIds, startBootstrapPage, type BootstrapSnapshot } from "./experimental-record-bootstrap.ts";
+import { bootstrapScope, continueBootstrapPage, currentDeletionEpoch, noteRecordDeletion, retainedBootstrapRecordIds, startBootstrapPage, type BootstrapSnapshot } from "./experimental-record-bootstrap.ts";
 import { assertGrantedManifestReadAuthority, assertManifestReadAuthority } from "./manifest-read-authority.ts";
 import type { ComputedLexicalFields } from "./search.ts";
 import type { ComputedSemanticEntries } from "./search-semantic.ts";
@@ -1353,6 +1353,7 @@ function writeRecordChange({
   stream: string;
 }): void {
   if (op === "delete") {
+    noteRecordDeletion(connectorInstanceId, stream, recordKey);
     exec(referenceQueries.recordsIngestMarkRecordDeleted, [
       effectiveEmittedAt,
       nextVersion,
@@ -5612,6 +5613,7 @@ export async function queryRecords(
     const response: ListResponse = paginationCursor?.bootstrap_session !== undefined
       ? continueBootstrapPage<ResponseRecord>(paginationCursor, context, ctx.limit)
       : writeTransaction(() => {
+          const deletionEpoch = currentDeletionEpoch();
           const sinceCursor = retainedCursor?.bootstrap_baseline !== undefined ? String(requestParams.changes_since) : undefined;
           const previousIds = sinceCursor ? retainedBootstrapRecordIds(sinceCursor, context) : [];
           const horizon = getOne<VersionCounterRow>(referenceQueries.recordsIngestGetVersionCounter, [ctx.connectorInstanceId, stream])?.max_version ?? 0;
@@ -5644,7 +5646,7 @@ export async function queryRecords(
               yield record;
             }
           }
-          return startBootstrapPage({ context, records: visibleRecords(), changesCursor: encodeChangesSinceCursor(horizon), limit: ctx.limit, order: ctx.order, removedRecords: removedRecords(), ...(sinceCursor ? { sinceCursor } : {}) });
+          return startBootstrapPage({ context, scope: bootstrapScope(ctx.connectorInstanceId, stream), deletionEpoch, records: visibleRecords(), changesCursor: encodeChangesSinceCursor(horizon), limit: ctx.limit, order: ctx.order, removedRecords: removedRecords(), ...(sinceCursor ? { sinceCursor } : {}) });
         });
     if (paginationCursor?.bootstrap_session !== undefined) {
       response.data = response.data.filter((record) => {
@@ -6523,6 +6525,7 @@ async function deleteRecordWithinCoordinator(storageTarget: RecordStorageTarget,
 
     maybeDeleteFault("after-version-allocation", { connectorId, connectorInstanceId, nextVersion, recordId, stream });
 
+    noteRecordDeletion(connectorInstanceId, stream, recordId);
     exec(referenceQueries.recordsIngestMarkRecordDeleted, [now, nextVersion, connectorInstanceId, stream, recordId]);
 
     maybeDeleteFault("after-records-mutation", { connectorId, connectorInstanceId, nextVersion, recordId, stream });
