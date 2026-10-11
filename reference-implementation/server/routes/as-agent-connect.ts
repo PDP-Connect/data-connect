@@ -23,9 +23,10 @@
 
 import { createHash, timingSafeEqual } from "node:crypto";
 import { exec, getMany, getOne, referenceQueries } from "../../lib/db.ts";
-import { parsePendingConsentRequestUri } from "../auth.ts";
+import { introspect, parsePendingConsentRequestUri } from "../auth.ts";
 import { normalizeAbsentOnlyExpiry } from "../core-source-authorization.ts";
 import { applyCredentialResponseNoStoreHeaders } from "../credential-response-cache.ts";
+import { getHeldDataRuntime } from "../held-data/runtime.ts";
 import { isPostgresStorageBackend, postgresQuery, withPostgresTransaction } from "../postgres-storage.ts";
 import type { PdppErrorFn, RouteArg } from "./_route-contract.ts";
 
@@ -283,9 +284,31 @@ export function createAgentConnectAttemptStore(): AgentConnectAttemptStore {
     }
     return body;
   };
-  const tokenIsActive = async (tokenId: string | undefined): Promise<boolean> => {
+  const tokenIsActive = async (
+    tokenId: string | undefined,
+    grant?: Record<string, unknown> | null
+  ): Promise<boolean> => {
     if (!tokenId) {
       return false;
+    }
+    const rt = getHeldDataRuntime();
+    if (rt) {
+      if (!(await introspect(tokenId)).active) {
+        return false;
+      }
+      // A live package token cannot make its cached ended-child grant positive.
+      if (
+        Array.isArray(grant?.child_grants) &&
+        grant.child_grants.some((child) => {
+          const grantId = objectFromStoredJson(child)?.grant_id;
+          return typeof grantId === "string" && rt.authority.hasEnded(grantId);
+        })
+      ) {
+        return false;
+      }
+      if (rt.authority.lost) {
+        return false;
+      }
     }
     if (isPostgresStorageBackend()) {
       const result = await postgresQuery<{ ok: boolean }>(
@@ -453,7 +476,7 @@ export function createAgentConnectAttemptStore(): AgentConnectAttemptStore {
       return attempt;
     }
     const grant = grantFromRecoveredConsent(recovered);
-    if (!(grant && (await tokenIsActive(recovered.token_id)))) {
+    if (!(grant && (await tokenIsActive(recovered.token_id, grant)))) {
       return attempt;
     }
     await markAttemptApproved(attempt.requestUri, recovered.token_id, grant, recovered.grant_id ?? null);
@@ -817,7 +840,11 @@ export function createAgentConnectAttemptStore(): AgentConnectAttemptStore {
         await this.delete(attempt.id);
         return { outcome: "failed", status: attempt.status };
       }
-      if (!(await tokenIsActive(attempt.token))) {
+      const deliveredGrant =
+        getHeldDataRuntime() && attempt.responseJson
+          ? objectFromStoredJson(parseStoredResponse(attempt.responseJson).body.grant)
+          : attempt.grant;
+      if (!(await tokenIsActive(attempt.token, deliveredGrant))) {
         await this.delete(attempt.id);
         return { outcome: "missing" };
       }

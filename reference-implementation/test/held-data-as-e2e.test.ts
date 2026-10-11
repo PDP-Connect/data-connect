@@ -12,7 +12,7 @@
  */
 import assert from "node:assert/strict";
 import { createHash, generateKeyPairSync, type KeyObject, randomBytes, sign } from "node:crypto";
-import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, readFileSync, rmSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -23,12 +23,20 @@ import { MemoryClientCheckpointStorage } from "../lib/held-data/checkpoint.ts";
 import { httpReportTransport, httpStatusTransport } from "../lib/held-data/http-transport.ts";
 import { makeDpopProof, thumbprint } from "../lib/training-lease/dpop.ts";
 import { generateEd25519KeyPair } from "../lib/training-lease/jws.ts";
-import { endHeldDataForGrant, ensureHeldDataGrant, exchangeGrantScopedDeviceCode, issueToken } from "../server/auth.ts";
+import { endHeldDataForGrant, ensureHeldDataGrant, exchangeGrantScopedDeviceCode } from "../server/auth.ts";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
+import {
+  approveGrant,
+  createConsentExchangeCode,
+  getGrantPackageAccess,
+  introspect,
+  issueToken,
+} from "../server/auth.ts";
 import { getDb } from "../server/db.ts";
 import { buildLogger } from "../server/transport.ts";
 import { getTrainingLeaseRuntime } from "../server/training-lease/runtime.ts";
 import { getHeldDataRuntime } from "../server/held-data/runtime.ts";
+import { createAgentConnectAttemptStore } from "../server/routes/as-agent-connect.ts";
 import { parseHostedMcpSelection } from "../server/hosted-mcp-selection.ts";
 import {
   computeHostedMcpDecisionDigest,
@@ -235,6 +243,8 @@ async function packageFlow(h: Harness, clientId: string, connectorIds: string[])
   );
   assert.equal(detail.status, 200, JSON.stringify(detail.body));
   return {
+    code,
+    verifier,
     packageId: token.body.grant_package_id,
     packageToken: token.body.access_token,
     refreshToken: token.body.refresh_token,
@@ -253,6 +263,42 @@ async function registerSecondConnector(h: Harness): Promise<string> {
   return manifest.connector_id;
 }
 
+async function devicePackage(h: Harness, clientId: string) {
+  const second = await registerSecondConnector(h);
+  const started = await fetchJson<{
+    device_code: string;
+    verification_uri_complete: string;
+  }>(
+    `${h.asUrl}/oauth/device_authorization`,
+    form({
+      client_id: clientId,
+      resource: `${h.rsUrl}/mcp`,
+      authorization_details: JSON.stringify([ordinaryDetail(h.connectorId, { access_mode: "continuous" })]),
+    })
+  );
+  assert.equal(started.status, 200, JSON.stringify(started.body));
+  const requestUri = new URL(started.body.verification_uri_complete).searchParams.get("request_uri");
+  const review = await fetchJson<{ approval_review_revision: string }>(
+    `${h.asUrl}/consent/review`,
+    json({ request_uri: requestUri, subject_id: "owner_local" })
+  );
+  assert.equal(review.status, 200, JSON.stringify(review.body));
+  const approval = await fetchJson(
+    `${h.asUrl}/consent/approve`,
+    json({
+      request_uri: requestUri,
+      approval_review_revision: review.body.approval_review_revision,
+    })
+  );
+  assert.equal(approval.status, 200, JSON.stringify(approval.body));
+  const p = await packageFlow(h, clientId, [h.connectorId, second]);
+  // Restore an approved device row with the binding written by a package approval.
+  getDb()
+    .prepare("UPDATE pending_consents SET grant_id = ?, token_id = ? WHERE device_code = ?")
+    .run(p.packageId, p.packageToken, started.body.device_code);
+  return { ...p, deviceCode: started.body.device_code };
+}
+
 /** The grant lifecycle operation, in the Core draft's form encoding. */
 async function lifecycle(h: Harness, params: Record<string, string>) {
   return fetchJson<{ grants: Record<string, unknown>[]; error?: string }>(
@@ -267,6 +313,25 @@ async function status(h: Harness, token: string, grantId: string) {
 
 async function revoke(h: Harness, bearer: string, grantId: string, body: Record<string, unknown> = {}) {
   return fetchJson(`${h.asUrl}/grants/${grantId}/revoke`, json(body, { Authorization: `Bearer ${bearer}` }));
+}
+
+/** Restore the pre-ending main-store rows; leave the independent journal intact. */
+function restoreGrantRows(grantId: string) {
+  getDb().prepare("UPDATE grants SET status = 'active', consumed = 0 WHERE grant_id = ?").run(grantId);
+  getDb().prepare("UPDATE tokens SET revoked = 0 WHERE grant_id = ?").run(grantId);
+  getDb()
+    .prepare("UPDATE oauth_refresh_tokens SET status = 'active', revoked_at = NULL WHERE grant_id = ?")
+    .run(grantId);
+  getDb()
+    .prepare("UPDATE grant_package_members SET status = 'active', revoked_at = NULL WHERE grant_id = ?")
+    .run(grantId);
+}
+
+function restoreAuthorizationCode(code: string, token: string) {
+  getDb()
+    .prepare("UPDATE oauth_authorization_codes SET status = 'issued', consumed_at = NULL WHERE code = ?")
+    .run(code);
+  getDb().prepare("UPDATE tokens SET refresh_family_id = NULL, expires_at = NULL WHERE token_id = ?").run(token);
 }
 
 async function rsRead(h: Harness, token: string) {
@@ -966,6 +1031,481 @@ describe("held-data lifecycle over HTTP", () => {
       },
       heldDataOpts()
     );
+  });
+
+  for (const disposition of ["keep", "delete"]) {
+    it(`lane B: minting for a restored grant ended with ${disposition} fails before inserting a token`, async () => {
+      await withServer(
+        false,
+        async (h) => {
+          const clientId = await registerPublicClient(h);
+          const g = await authCodeGrant(h, clientId);
+          assert.equal(
+            (
+              await revoke(h, h.ownerToken, g.grantId, {
+                pdpp_disposition: disposition,
+              })
+            ).status,
+            200
+          );
+          restoreGrantRows(g.grantId);
+          const before = getDb().prepare("SELECT count(*) AS n FROM tokens").get() as { n: number };
+          await assert.rejects(issueToken(g.grantId, "owner_local", clientId, null), { code: "grant_revoked" });
+          assert.deepEqual(getDb().prepare("SELECT count(*) AS n FROM tokens").get(), before);
+        },
+        heldDataOpts()
+      );
+    });
+
+    it(`lane B: consent exchange replay cannot redeliver a restored grant ended with ${disposition}`, async () => {
+      await withServer(
+        false,
+        async (h) => {
+          const clientId = await registerPublicClient(h);
+          const g = await authCodeGrant(h, clientId);
+          const info = await introspect(g.accessToken);
+          const proof = "client-held-recovery-proof";
+          const code = await createConsentExchangeCode({
+            grantId: g.grantId,
+            token: g.accessToken,
+            grant: info.grant as Record<string, unknown>,
+            recoveryProof: proof,
+          });
+          assert.equal((await fetchJson(`${h.asUrl}/consent/exchange`, json({ code, proof }))).status, 200);
+          assert.equal(
+            (
+              await revoke(h, h.ownerToken, g.grantId, {
+                pdpp_disposition: disposition,
+              })
+            ).status,
+            200
+          );
+          restoreGrantRows(g.grantId);
+          const replay = await fetchJson(`${h.asUrl}/consent/exchange`, json({ code, proof }));
+          assert.equal(replay.status, 404, `restored consent exchange returned ${replay.status}`);
+          assert.equal(replay.body.token, undefined);
+        },
+        heldDataOpts()
+      );
+    });
+  }
+
+  for (const path of ["authorization_code", "device_code", "refresh_token", "introspection", "consent_exchange"]) {
+    it(`lane B: ${path} refuses a package whose restored children all ended in the journal`, async () => {
+      await withServer(
+        false,
+        async (h) => {
+          const clientId = await registerPublicClient(h);
+          const p =
+            path === "device_code" ? await devicePackage(h, clientId) : await packageFlow(h, clientId, [h.connectorId]);
+          const proof = "package-recovery-proof";
+          const exchangeCode = await createConsentExchangeCode({
+            grantId: p.packageId,
+            token: p.packageToken,
+            grant: {
+              package_id: p.packageId,
+              child_grants: p.children.map((grant_id) => ({ grant_id })),
+            },
+            recoveryProof: proof,
+          });
+          const poll = () =>
+            fetchJson(
+              `${h.asUrl}/oauth/token`,
+              form({
+                client_id: clientId,
+                device_code: "deviceCode" in p && typeof p.deviceCode === "string" ? p.deviceCode : "",
+                grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+              })
+            );
+          if (path === "device_code") {
+            const first = await poll();
+            assert.equal(first.status, 200, JSON.stringify(first.body));
+          }
+          for (const grantId of p.children) {
+            assert.equal(
+              (
+                await revoke(h, h.ownerToken, grantId, {
+                  pdpp_disposition: "delete",
+                })
+              ).status,
+              200
+            );
+            restoreGrantRows(grantId);
+          }
+          // Also restore family state: revoking a child may revoke a package refresh family.
+          getDb()
+            .prepare("UPDATE oauth_refresh_tokens SET status = 'active', revoked_at = NULL WHERE package_id = ?")
+            .run(p.packageId);
+          if (path === "introspection") {
+            assert.equal(
+              (await introspect(p.packageToken)).active,
+              false,
+              "restored package introspection returned active"
+            );
+          } else {
+            if (path === "authorization_code") restoreAuthorizationCode(p.code, p.packageToken);
+            const r =
+              path === "device_code"
+                ? await poll()
+                : path === "consent_exchange"
+                  ? await fetchJson(`${h.asUrl}/consent/exchange`, json({ code: exchangeCode, proof }))
+                  : await fetchJson(
+                      `${h.asUrl}/oauth/token`,
+                      form(
+                        path === "authorization_code"
+                          ? {
+                              client_id: clientId,
+                              code: p.code,
+                              code_verifier: p.verifier,
+                              grant_type: path,
+                              redirect_uri: REDIRECT,
+                            }
+                          : {
+                              client_id: clientId,
+                              grant_type: path,
+                              refresh_token: p.refreshToken,
+                            }
+                      )
+                    );
+            assert.equal(
+              r.status,
+              path === "consent_exchange" ? 404 : 400,
+              `${path} returned ${r.status} for journal-ended package`
+            );
+            assert.equal(r.body.access_token, undefined);
+            assert.equal(r.body.refresh_token, undefined);
+          }
+          const access = await getGrantPackageAccess(p.packageId);
+          assert.deepEqual(access?.members, [], "direct fan-out must hide restored ended grants");
+        },
+        heldDataOpts()
+      );
+    });
+  }
+
+  it("lane B: lost history blocks fresh issuance, package introspection and all token redelivery", async () => {
+    const opts = heldDataOpts();
+    await withServer(
+      false,
+      async (h) => {
+        const clientId = await registerPublicClient(h);
+        const g = await authCodeGrant(h, clientId);
+        const untracked = await authCodeGrant(h, clientId);
+        const p = await packageFlow(h, clientId, [h.connectorId]);
+        const code = await createConsentExchangeCode({
+          grantId: g.grantId,
+          token: g.accessToken,
+          grant: (await introspect(g.accessToken)).grant as Record<string, unknown>,
+        });
+        // Acknowledged endings advance independent evidence; truncate the history only.
+        assert.equal(
+          (
+            await revoke(h, h.ownerToken, g.grantId, {
+              pdpp_disposition: "keep",
+            })
+          ).status,
+          200
+        );
+        restoreGrantRows(g.grantId);
+        const rt = getHeldDataRuntime();
+        assert.ok(rt);
+        truncateSync(join(opts.experimentalHeldDataLifecycle.journalDir, "authority.journal"), 0);
+        assert.equal(rt.authority.lost, true);
+        await assert.rejects(issueToken(untracked.grantId, "owner_local", clientId, null), { code: "grant_revoked" });
+        await assert.rejects(issueToken(g.grantId, "owner_local", clientId, null), { code: "grant_revoked" });
+        assert.equal((await introspect(p.packageToken)).active, false);
+        assert.equal((await fetchJson(`${h.asUrl}/consent/exchange`, json({ code }))).status, 404);
+        assert.equal(
+          (
+            await fetchJson(
+              `${h.asUrl}/oauth/token`,
+              form({
+                client_id: clientId,
+                grant_type: "refresh_token",
+                refresh_token: p.refreshToken,
+              })
+            )
+          ).status,
+          400
+        );
+        assert.deepEqual((await getGrantPackageAccess(p.packageId))?.members, []);
+      },
+      opts
+    );
+  });
+
+  it("lane B: CIMD confidential tokens alone cannot query; client authentication can", async () => {
+    const c = cimdClient();
+    const cimdFetchDependencies = {
+      dnsLookupImpl: async () => [{ address: "93.184.216.34", family: 4 }],
+      fetchImpl: async (input: unknown) =>
+        new Response(JSON.stringify(String(input) === c.jwksUri ? c.jwks : c.doc), {
+          headers: { "Content-Type": "application/json" },
+          status: 200,
+        }),
+      isGlobalUnicastAddressImpl: () => true,
+    };
+    await withServer(
+      false,
+      async (h) => {
+        const g = await authCodeGrant(h, c.clientId, {
+          redirect: c.doc.redirect_uris[0] as string,
+          tokenAuth: (aud) => clientAuth(c, aud),
+        });
+        const tokenOnly = await status(h, g.accessToken, g.grantId);
+        assert.equal(tokenOnly.status, 200);
+        assert.equal(tokenOnly.body.grants[0]?.error, "invalid_grant", "CIMD token alone returned a lifecycle answer");
+        assert.equal(tokenOnly.body.grants[0]?.held_data, undefined);
+        const authenticated = await lifecycle(h, {
+          grant_id: g.grantId,
+          ...clientAuth(c, h.asUrl),
+        });
+        assert.equal(authenticated.status, 200);
+        assert.equal(authenticated.body.grants[0]?.held_data, "permitted");
+      },
+      { ...heldDataOpts(), cimdFetchDependencies } as never
+    );
+  });
+
+  for (const [replay, mixed] of [
+    [false, false],
+    [true, false],
+    [false, true],
+    [true, true],
+  ]) {
+    const delivery = replay ? "replay" : "first delivery";
+    const target = mixed ? "package child" : "grant";
+    it(`lane B: agent-connect ${delivery} refuses a restored ended ${target}`, async () => {
+      await withServer(
+        false,
+        async (h) => {
+          const clientId = await registerPublicClient(h);
+          const p = mixed ? await devicePackage(h, clientId) : null;
+          const g = p ? { grantId: p.packageId, accessToken: p.packageToken } : await authCodeGrant(h, clientId);
+          const grant = p
+            ? { package_id: p.packageId, child_grants: p.children.map((grant_id) => ({ grant_id })) }
+            : (await introspect(g.accessToken)).grant;
+          const ended = p?.children[0] ?? g.grantId;
+          const id = `att_${randomBytes(8).toString("hex")}`;
+          const pollingCode = "test-polling-proof";
+          getDb()
+            .prepare(`INSERT INTO agent_connect_attempts(
+            id, request_uri, client_id, polling_code_hash, status, approval_url, token_url,
+            interval_seconds, created_at, expires_at_ms, completed_at, grant_id, grant_json, token
+          ) VALUES(?, ?, ?, ?, 'approved', ?, ?, 2, ?, ?, ?, ?, ?, ?)`)
+            .run(
+              id,
+              `urn:test:${id}`,
+              clientId,
+              createHash("sha256").update(pollingCode).digest("base64url"),
+              `${h.asUrl}/consent`,
+              `${h.asUrl}/agent-connect/token`,
+              new Date().toISOString(),
+              Date.now() + DAY,
+              new Date().toISOString(),
+              g.grantId,
+              JSON.stringify(grant),
+              g.accessToken
+            );
+          const store = createAgentConnectAttemptStore();
+          if (replay) {
+            assert.equal((await store.redeem(id, pollingCode)).outcome, "approved");
+            if (p) {
+              // The cached response still lists both children; check it, not the updated grant snapshot.
+              getDb().prepare("UPDATE agent_connect_attempts SET grant_json = ? WHERE id = ?").run(
+                JSON.stringify({ package_id: p.packageId, child_grants: [{ grant_id: p.children[1] }] }),
+                id
+              );
+            }
+          }
+          assert.equal(
+            (
+              await revoke(h, h.ownerToken, ended, {
+                pdpp_disposition: "delete",
+              })
+            ).status,
+            200
+          );
+          restoreGrantRows(ended);
+          assert.equal((await store.redeem(id, pollingCode)).outcome, "missing", "agent-connect returned restored token");
+        },
+        heldDataOpts()
+      );
+    });
+  }
+
+  it("lane B: the first introspection after journal corruption fails closed", async () => {
+    const opts = heldDataOpts();
+    await withServer(
+      false,
+      async (h) => {
+        const g = await ordinaryGrant(h, { access_mode: "continuous" });
+        assert.equal((await status(h, g.token, g.grantId)).status, 200);
+        appendFileSync(
+          join(opts.experimentalHeldDataLifecycle.journalDir, "authority.journal"),
+          "unreadable terminal event\n"
+        );
+        assert.equal((await introspect(g.token)).active, false, "first check after corrupt history returned active");
+        assert.equal(await rsRead(h, g.token), 403);
+      },
+      opts
+    );
+  });
+
+  it("lane B: CIMD public tokens still query without client authentication", async () => {
+    const c = cimdClient();
+    const doc = { ...c.doc, token_endpoint_auth_method: "none" };
+    const cimdFetchDependencies = {
+      dnsLookupImpl: async () => [{ address: "93.184.216.34", family: 4 }],
+      fetchImpl: async () =>
+        new Response(JSON.stringify(doc), {
+          headers: { "Content-Type": "application/json" },
+          status: 200,
+        }),
+      isGlobalUnicastAddressImpl: () => true,
+    };
+    await withServer(
+      false,
+      async (h) => {
+        const g = await authCodeGrant(h, c.clientId, {
+          redirect: doc.redirect_uris[0] as string,
+        });
+        const q = await status(h, g.accessToken, g.grantId);
+        assert.equal(q.status, 200);
+        assert.equal(q.body.grants[0]?.held_data, "permitted");
+      },
+      { ...heldDataOpts(), cimdFetchDependencies } as never
+    );
+  });
+
+  it("lane B: a shared package credential stays active for its live sibling; fan-out excludes the restored ended child", async () => {
+    await withServer(
+      false,
+      async (h) => {
+        const clientId = await registerPublicClient(h);
+        const second = await registerSecondConnector(h);
+        const p = await packageFlow(h, clientId, [h.connectorId, second]);
+        const ended = p.children[0] as string;
+        assert.equal((await revoke(h, h.ownerToken, ended, { pdpp_disposition: "delete" })).status, 200);
+        restoreGrantRows(ended);
+        assert.equal((await introspect(p.packageToken)).active, true);
+        const access = await getGrantPackageAccess(p.packageId);
+        const members = access?.members as { grant_id: string }[];
+        assert.deepEqual(
+          members.map((m) => m.grant_id),
+          p.children.filter((id) => id !== ended)
+        );
+        const refreshed = await fetchJson(
+          `${h.asUrl}/oauth/token`,
+          form({ client_id: clientId, grant_type: "refresh_token", refresh_token: p.refreshToken })
+        );
+        assert.equal(refreshed.status, 200, JSON.stringify(refreshed.body));
+      },
+      heldDataOpts()
+    );
+  });
+
+  for (const path of ["consent_exchange", "approval_retry"]) {
+    it(`lane B: mixed-package ${path} never returns the restored erased child`, async () => {
+      await withServer(
+        false,
+        async (h) => {
+          const clientId = await registerPublicClient(h);
+          const p = await devicePackage(h, clientId);
+          const proof = "mixed-package-proof";
+          const code = await createConsentExchangeCode({
+            grantId: p.packageId,
+            token: p.packageToken,
+            grant: { package_id: p.packageId },
+            recoveryProof: proof,
+          });
+          const ended = p.children[0] as string;
+          assert.equal((await revoke(h, h.ownerToken, ended, { pdpp_disposition: "delete" })).status, 200);
+          restoreGrantRows(ended);
+          let grant: Record<string, unknown>;
+          if (path === "consent_exchange") {
+            const response = await fetchJson(`${h.asUrl}/consent/exchange`, json({ code, proof }));
+            assert.equal(response.status, 200, JSON.stringify(response.body));
+            grant = response.body.grant as Record<string, unknown>;
+          } else {
+            grant = (await approveGrant(p.deviceCode, "owner_local")).grant;
+          }
+          assert.deepEqual(
+            (grant.child_grants as { grant_id: string }[]).map((child) => child.grant_id),
+            p.children.filter((id) => id !== ended),
+            `${path} returned an erased child with the live sibling`
+          );
+        },
+        heldDataOpts()
+      );
+    });
+  }
+
+  it("lane B: a restored single-grant authorization code is refused before consumption", async () => {
+    await withServer(
+      false,
+      async (h) => {
+        const clientId = await registerPublicClient(h);
+        const g = await authCodeGrant(h, clientId);
+        assert.equal((await revoke(h, h.ownerToken, g.grantId, { pdpp_disposition: "keep" })).status, 200);
+        restoreGrantRows(g.grantId);
+        restoreAuthorizationCode(g.code, g.accessToken);
+        const r = await fetchJson(
+          `${h.asUrl}/oauth/token`,
+          form({
+            client_id: clientId,
+            code: g.code,
+            code_verifier: g.verifier,
+            grant_type: "authorization_code",
+            redirect_uri: REDIRECT,
+          })
+        );
+        assert.equal(r.status, 400);
+        assert.equal(
+          (
+            getDb().prepare("SELECT status FROM oauth_authorization_codes WHERE code = ?").get(g.code) as {
+              status: string;
+            }
+          ).status,
+          "issued"
+        );
+      },
+      heldDataOpts()
+    );
+  });
+
+  it("lane B: flag off preserves direct minting and consent-code delivery from restored database rows", async () => {
+    await withServer(false, async (h) => {
+      const clientId = await registerPublicClient(h);
+      const g = await authCodeGrant(h, clientId);
+      const grant = (await introspect(g.accessToken)).grant as Record<string, unknown>;
+      const code = await createConsentExchangeCode({ grantId: g.grantId, token: g.accessToken, grant });
+      assert.equal((await revoke(h, h.ownerToken, g.grantId)).status, 200);
+      restoreGrantRows(g.grantId);
+      assert.equal(typeof (await issueToken(g.grantId, "owner_local", clientId, null)), "string");
+      assert.equal((await fetchJson(`${h.asUrl}/consent/exchange`, json({ code }))).status, 200);
+    });
+  });
+
+  it("lane B: flag off preserves mixed-package child summaries on consent delivery and approval retry", async () => {
+    await withServer(false, async (h) => {
+      const clientId = await registerPublicClient(h);
+      const p = await devicePackage(h, clientId);
+      const code = await createConsentExchangeCode({
+        grantId: p.packageId,
+        token: p.packageToken,
+        grant: { package_id: p.packageId },
+      });
+      const ended = p.children[0] as string;
+      assert.equal((await revoke(h, h.ownerToken, ended)).status, 200);
+      restoreGrantRows(ended);
+      const response = await fetchJson(`${h.asUrl}/consent/exchange`, json({ code }));
+      assert.equal(response.status, 200);
+      const retried = await approveGrant(p.deviceCode, "owner_local");
+      for (const grant of [response.body.grant as Record<string, unknown>, retried.grant]) {
+        assert.deepEqual((grant.child_grants as { grant_id: string }[]).map((child) => child.grant_id), p.children);
+      }
+    });
   });
 
   it("review fix: a public client's current refresh token authenticates pdpp_disposition=delete; an expired one and one for a journal-ended grant do not", async () => {
