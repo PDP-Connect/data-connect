@@ -279,6 +279,20 @@ export interface MountAsAuthorizeContext {
   /** Resolved native manifest for this server instance, or null. */
   nativeManifest: unknown;
   /**
+   * Experimental held-data lifecycle recovery: when the authorization details
+   * carry a `https://pdpp.dev/grant-lifecycle` element, parks the request for
+   * owner review. Absent, or null for an ordinary request, the flow is unchanged.
+   */
+  startLifecycleRecovery?: (input: {
+    details: readonly unknown[];
+    clientId: string;
+    redirectUri: string;
+    state: string | null;
+    codeChallenge: string;
+    ownerSubjectId: string;
+    baseUrl: string;
+  }) => Promise<{ ok: true; location: string } | { ok: false; status: number; error: string; message: string } | null>;
+  /**
    * Writes an OAuth error envelope and returns. `extras` is merged into the
    * top-level envelope so a resolvable client/scope condition (e.g. a stream
    * with no eligible connector instance) can name the affected stream(s) in
@@ -1540,6 +1554,26 @@ export function mountAsAuthorize(app: AppLike, ctx: MountAsAuthorizeContext): vo
       requireRegisteredRedirectUri(client, redirectUri);
 
       const authorizationDetails = parseAuthorizeAuthorizationDetails(req.query);
+      const recovery =
+        authorizationDetails && ctx.startLifecycleRecovery
+          ? await ctx.startLifecycleRecovery({
+              baseUrl: ctx.resolvePublicUrl(
+                req,
+                ctx.asPublicUrl || (ctx.ignoreAmbientPublicUrls ? null : (process.env.AS_PUBLIC_URL ?? null))
+              ),
+              clientId,
+              codeChallenge,
+              details: authorizationDetails,
+              ownerSubjectId: ownerSubjectIdFromRequest(req),
+              redirectUri,
+              state,
+            })
+          : null;
+      if (recovery) {
+        return recovery.ok
+          ? res.redirect(302, recovery.location)
+          : ctx.oauthError(res, recovery.status, recovery.error, recovery.message);
+      }
       const rawConnectorId =
         // biome-ignore lint/suspicious/noUnnecessaryConditions: TypeScript boundary permits nullish input; this guard preserves runtime behavior.
         typeof req.query?.connector_id === "string" && req.query.connector_id.trim()

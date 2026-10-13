@@ -17,7 +17,8 @@
  * PROTOTYPE: experimental held-data lifecycle work, off by default.
  */
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, openSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import {
   appendJournalEntry,
   JournalReader,
@@ -39,7 +40,17 @@ export interface GrantRegistration {
   trainingOnly?: boolean;
   streams: string[];
   expiresAtMs: number | null;
+  /** The grant's `retention.max_duration` (`PnD`), for the owner statement about the retention ceiling. */
+  retentionMaxDuration?: string | null;
+  /** When the AS issued the grant. Lets an invalidation on restore reach a grant the restored history never saw. */
+  issuedAtMs?: number | null;
 }
+
+/** The end of a legal retention obligation, in the form the client gave (Core: Grant lifecycle operation). */
+export type RetainedUntil =
+  | { form: "date-time"; at: number }
+  | { form: "event"; text: string }
+  | { form: "unknown" };
 
 export type Disposition = "keep" | "delete";
 
@@ -72,7 +83,12 @@ const OWNER_PATHS: ReadonlySet<EndingPath> = new Set([
 /** Streams an erasure covers. `"all"` is the whole copy acquired under the grant. */
 export type ErasureScope = { streams: "all" } | { streams: string[] };
 
-export type CredentialKind = "access" | "refresh" | "status" | "recovery";
+/**
+ * `recovery` is the lifecycle-only access token that lifecycle recovery issues
+ * (Core: Lifecycle recovery). It authenticates the grant lifecycle operation
+ * and nothing else.
+ */
+export type CredentialKind = "access" | "refresh" | "recovery";
 
 type Entry =
   | { t: "hd_pending_inbox"; id: string; grant_id: ""; inbox_epoch: string; at: number }
@@ -88,6 +104,8 @@ type Entry =
       training_only: boolean;
       streams: string[];
       expires_at: number | null;
+      retention_max_duration?: string | null;
+      issued_at?: number | null;
       at: number;
     }
   | {
@@ -97,6 +115,10 @@ type Entry =
       digest: string;
       kind: CredentialKind;
       jkt: string | null;
+      /** Lifecycle-write expiry of a recovery token; queries ignore it. */
+      expires_at?: number | null;
+      /** The recovery approval a recovery token was issued under (one token per approval). */
+      approval_id?: string;
       at: number;
     }
   | {
@@ -147,9 +169,29 @@ type Entry =
       op: string;
       outcome: "deleted" | "exception";
       detail: string | null;
+      /** A `retained` report's structured terms. */
+      retained?: { until: RetainedUntil; basis: string | null; scope: string | null };
       at: number;
       /** AS time the report arrived (`at` is the client-reported time). */
       received_at?: number;
+    }
+  /**
+   * Restore procedure marker (Core: Lifecycle durability, mechanism
+   * "invalidation on restore"): every grant the history held or issued before
+   * `at` is not current until re-established.
+   */
+  | { t: "hd_invalidate"; id: string; grant_id: ""; reason: string; at: number }
+  | { t: "hd_reestablish"; id: string; grant_id: string; at: number }
+  /** Retained consent evidence for an approved lifecycle recovery. */
+  | {
+      t: "hd_recovery_approval";
+      id: string;
+      grant_id: "";
+      client_id: string;
+      subject_id: string;
+      grant_ids: string[];
+      shown: { grant_id: string; source: string | null; purpose: string | null; issued_at: string | null }[];
+      at: number;
     };
 
 type GrantEntry = Extract<Entry, { t: "hd_grant" }>;
@@ -171,7 +213,14 @@ interface ErasureFacts {
    * order. A later report with different terms corrects an earlier one
    * without overwriting it. None of them is completion.
    */
-  retained: { reportedAt: number; receivedAt: number; detail: string | null }[];
+  retained: {
+    reportedAt: number;
+    receivedAt: number;
+    detail: string | null;
+    until: RetainedUntil | null;
+    basis: string | null;
+    scope: string | null;
+  }[];
 }
 
 interface GrantFacts {
@@ -181,6 +230,9 @@ interface GrantFacts {
   /** The owner chose keep after an ending that recorded no disposition. */
   keptAt: number | null;
   erasures: ErasureFacts[];
+  /** Journal position of the registration, and of the latest re-establishment after a restore. */
+  regSeq: number;
+  reestablishSeq: number;
 }
 
 interface CredentialFacts {
@@ -189,6 +241,7 @@ interface CredentialFacts {
   kind: CredentialKind;
   jkt: string | null;
   disabled: string | null;
+  expiresAt: number | null;
 }
 
 /** The answer for one grant, before mapping to the Core wire (server/routes/held-data.ts). */
@@ -234,6 +287,28 @@ export class AuthorityUnavailableError extends Error {
   readonly code = "temporarily_unavailable";
 }
 
+/**
+ * How the AS keeps its terminal-event history safe across restore and
+ * failover (Core: Lifecycle durability). The AS chooses and declares one.
+ *
+ * - `outside_witness`: loss-detection evidence kept outside the journal's
+ *   failure domain. A journal shorter than the evidence, or of another epoch,
+ *   is lost history and fails closed.
+ * - `invalidate_on_restore`: one store, no outside witness. The operator
+ *   restores it only through `HeldDataAuthority.restoreFromSnapshot`, which
+ *   marks every grant not current until `reestablishGrants` recovers its facts.
+ */
+export type RestoreMechanism = "outside_witness" | "invalidate_on_restore";
+
+export interface DurabilityDeclaration {
+  mechanism: RestoreMechanism;
+  survives: string[];
+  does_not_survive: string[];
+  undetected: string[];
+  /** The text shown to the owner. */
+  statement: string;
+}
+
 export interface HeldDataAuthorityOptions {
   journalPath: string;
   now: () => number;
@@ -273,6 +348,10 @@ export class HeldDataAuthority {
   readonly #disabled = new Map<string, string>();
   readonly #revokedAccess = new Set<string>();
   readonly #revokedFamilies = new Set<string>();
+  readonly #recoveryApprovals = new Map<string, Extract<Entry, { t: "hd_recovery_approval" }>>();
+  readonly #recoveryIssued = new Set<string>();
+  /** Restore-procedure markers (mechanism "invalidation on restore"), in journal order. */
+  readonly #invalidations: { seq: number; at: number }[] = [];
   readonly #pendingRevocations = new Map<string, Extract<Entry, { t: "hd_revoke_pending" }>>();
   #corrupt = false;
   #position = 0;
@@ -337,7 +416,11 @@ export class HeldDataAuthority {
       if (!inboxEpoch) throw new AuthorityUnavailableError("pending inbox cannot be initialized");
       this.#append({ t: "hd_pending_inbox", id: randomUUID(), grant_id: "", inbox_epoch: inboxEpoch, at: o.now() });
     }
-    if (!o.primaryHead) registerIssuanceFence(o.journalPath, () => !this.lost && !this.#replaying);
+    // Processing authority (training leases) is issued only from history that is current:
+    // while a restore marker covers any grant the whole fence stays shut (fail closed).
+    if (!o.primaryHead) {
+      registerIssuanceFence(o.journalPath, () => !this.lost && !this.#replaying && this.invalidatedGrantIds().length === 0);
+    }
   }
 
   static open(o: HeldDataAuthorityOptions): HeldDataAuthority {
@@ -418,6 +501,8 @@ export class HeldDataAuthority {
       training_only: g.trainingOnly ?? false,
       streams: [...g.streams],
       expires_at: g.expiresAtMs,
+      retention_max_duration: g.retentionMaxDuration ?? null,
+      issued_at: g.issuedAtMs ?? null,
       at: this.#o.now(),
     });
   }
@@ -437,7 +522,14 @@ export class HeldDataAuthority {
   }
 
   /** Record a digest of a token issued for one or more grants (K3: digests, not tokens). */
-  recordCredential(c: { token: string; grantIds: readonly string[]; kind: CredentialKind; jkt?: string | null }): void {
+  recordCredential(c: {
+    token: string;
+    grantIds: readonly string[];
+    kind: CredentialKind;
+    jkt?: string | null;
+    expiresAtMs?: number | null;
+    approvalId?: string;
+  }): void {
     this.#requireWritable();
     const digest = credentialDigest(c.token);
     for (const grantId of c.grantIds) {
@@ -448,6 +540,8 @@ export class HeldDataAuthority {
         digest,
         kind: c.kind,
         jkt: c.jkt ?? null,
+        ...(c.expiresAtMs === undefined ? {} : { expires_at: c.expiresAtMs }),
+        ...(c.approvalId === undefined ? {} : { approval_id: c.approvalId }),
         at: this.#o.now(),
       });
     }
@@ -532,50 +626,54 @@ export class HeldDataAuthority {
   }
 
   /**
-   * Replace lifecycle authentication after a compromise (K3), with no new
-   * data grant and no read access. Proof is one of: possession of a DPoP key
-   * that a credential of the grant was bound to; confidential client
-   * authentication; or a one-time recovery code the owner handed to the
-   * client. Returns a status-only credential, which the RS never accepts, or
-   * null when no proof holds.
+   * Record the owner's approval of a lifecycle recovery as retained consent
+   * evidence (Core: Lifecycle recovery): the client, the owner, the exact
+   * grant identifier set, and what the owner was shown for each grant.
+   * Returns the approval identifier a token issuance then names.
    */
-  replaceStatusCredential(input: {
-    grantId: string;
-    jkt?: string | null;
-    clientId?: string | null;
-    recoveryCode?: string | null;
-  }): string | null {
+  recordRecoveryApproval(input: {
+    clientId: string;
+    subjectId: string;
+    grantIds: readonly string[];
+    shown: { grant_id: string; source: string | null; purpose: string | null; issued_at: string | null }[];
+  }): string {
     this.#requireWritable();
     this.#refresh();
-    const facts = this.#grants.get(input.grantId);
-    if (!facts) {
-      return null;
-    }
-    const creds = [...this.#creds.values()].filter((c) => c.grantIds.has(input.grantId));
-    let jkt: string | null = null;
-    if (input.jkt && creds.some((c) => c.jkt === input.jkt && c.kind !== "recovery")) {
-      jkt = input.jkt;
-    } else if (input.clientId && facts.grant.confidential && input.clientId === facts.grant.client_id) {
-      jkt = null;
-    } else if (input.recoveryCode) {
-      const rc = this.#creds.get(credentialDigest(input.recoveryCode));
-      if (rc?.kind !== "recovery" || rc.disabled || !rc.grantIds.has(input.grantId)) {
-        return null;
+    for (const id of input.grantIds) {
+      const g = this.#grants.get(id)?.grant;
+      if (!g || g.client_id !== input.clientId || g.subject_id !== input.subjectId) {
+        throw new Error("a recovery covers only grants issued to the client for the owner");
       }
-      this.disableCredential(input.recoveryCode, "recovery_code_used");
-    } else {
-      return null;
     }
-    const token = `hdsc_${randomUUID()}${randomUUID()}`.replaceAll("-", "");
-    this.recordCredential({ token, grantIds: [input.grantId], kind: "status", jkt });
-    return token;
+    const id = `hdrec_${randomUUID()}`;
+    this.#append({
+      t: "hd_recovery_approval",
+      id,
+      grant_id: "",
+      client_id: input.clientId,
+      subject_id: input.subjectId,
+      grant_ids: [...input.grantIds],
+      shown: input.shown,
+      at: this.#o.now(),
+    });
+    return id;
   }
 
-  /** Owner action: a one-time code the owner gives the client to recover lifecycle authentication. */
-  ownerRecoveryCode(grantId: string): string {
-    const code = `hdrc_${randomUUID()}`.replaceAll("-", "");
-    this.recordCredential({ token: code, grantIds: [grantId], kind: "recovery" });
-    return code;
+  /**
+   * Issue the lifecycle-only access token of an approved recovery, once. It
+   * covers exactly the approved grants, carries no read or processing
+   * authority, and has no refresh token.
+   */
+  issueRecoveryToken(approvalId: string, expiresAtMs: number | null): { token: string; grantIds: string[] } {
+    this.#requireWritable();
+    this.#refresh();
+    const approval = this.#recoveryApprovals.get(approvalId);
+    if (!approval || this.#recoveryIssued.has(approvalId)) {
+      throw new Error("recovery approval is unknown or already used");
+    }
+    const token = `hdrt_${randomUUID()}${randomUUID()}`.replaceAll("-", "");
+    this.recordCredential({ token, grantIds: approval.grant_ids, kind: "recovery", expiresAtMs, approvalId });
+    return { token, grantIds: [...approval.grant_ids] };
   }
 
   /**
@@ -768,6 +866,8 @@ export class HeldDataAuthority {
     /** Legacy form of `retained`: `completion` with outcome `exception`. */
     outcome?: "deleted" | "exception";
     detail?: string;
+    /** The terms of a `retained` report (Core: `retained_until`, `retention_basis`, `retention_scope`). */
+    retained?: { until: RetainedUntil; basis?: string | null; scope?: string | null };
     /** Client-reported time of the event (Core `reported_at`). Default: now. */
     reportedAt?: number;
   }): boolean {
@@ -798,8 +898,18 @@ export class HeldDataAuthority {
     const retained = input.kind === "retained" || input.outcome === "exception";
     const detail = input.detail ?? null;
     if (retained) {
-      // Each retained report with new terms is kept; an identical repeat changes nothing.
-      if (e.retained.at(-1)?.detail !== detail) {
+      const terms = input.retained
+        ? { until: input.retained.until, basis: input.retained.basis ?? null, scope: input.retained.scope ?? null }
+        : undefined;
+      // Each retained report with new terms is kept as a correction that does
+      // not overwrite the earlier one; an identical repeat changes nothing.
+      const last = e.retained.at(-1);
+      const same =
+        last !== undefined &&
+        last.detail === detail &&
+        JSON.stringify([last.until, last.basis, last.scope]) ===
+          JSON.stringify([terms?.until ?? null, terms?.basis ?? null, terms?.scope ?? null]);
+      if (!same) {
         this.#append({
           t: "hd_complete",
           id: randomUUID(),
@@ -807,6 +917,7 @@ export class HeldDataAuthority {
           op: input.operationId,
           outcome: "exception",
           detail,
+          ...(terms ? { retained: terms } : {}),
           at: input.reportedAt ?? this.#o.now(),
           received_at: this.#o.now(),
         });
@@ -859,7 +970,7 @@ export class HeldDataAuthority {
       return { clientId: input.clientId, grantIds, clientAuthenticated: true };
     }
     const cred = this.#creds.get(credentialDigest(input.token));
-    if (!cred || cred.disabled || cred.kind === "recovery") {
+    if (!cred || cred.disabled) {
       return null;
     }
     if (cred.jkt && cred.jkt !== input.dpopJkt) {
@@ -906,14 +1017,18 @@ export class HeldDataAuthority {
         out.push({ grant_id: grantId, error: "invalid_grant" });
         continue;
       }
-      const answer = this.#answer(facts, now);
+      // A view that cannot be shown current may return an instruction only
+      // when it was durably effective: a stale advance election is never
+      // promoted to an effective instruction by the passing of time.
+      const stale = !current || this.invalidated(grantId);
+      const answer = this.#answer(facts, now, stale);
       // K4: a positive answer must be ordered against every acknowledged
       // terminal event. A replica that cannot show it is current may still
       // serve a negative answer, which is terminal and cannot go stale.
-      // Custody-only is a positive assessment too (it refreshes the long-stop),
-      // so only an erasure answer may come from a view that cannot be shown current.
-      if (answer.ordinary_use !== "stopped" && !current) {
-        throw new AuthorityUnavailableError("replica cannot confirm it is current");
+      // Custody-only is a positive assessment too, so only an erasure answer
+      // may come from a view that cannot be shown current.
+      if (answer.ordinary_use !== "stopped" && stale) {
+        throw new AuthorityUnavailableError("history cannot be shown current for this grant");
       }
       out.push(answer);
     }
@@ -938,6 +1053,9 @@ export class HeldDataAuthority {
   ): {
     grant_state: StatusAnswer["grant_state"] | "unavailable";
     history_available: boolean;
+    /** `restored_not_current`: a restore marker covers the grant until its facts are re-established. */
+    history_state: "current" | "unavailable" | "restored_not_current";
+    retention_max_duration: string | null;
     pending_actions: PendingAction[];
     ending: StatusAnswer["ending"];
     erasures: {
@@ -964,6 +1082,8 @@ export class HeldDataAuthority {
             end: null,
             keptAt: null,
             erasures: [],
+            regSeq: 0,
+            reestablishSeq: 0,
           }
         : null);
     if (!facts) {
@@ -973,6 +1093,8 @@ export class HeldDataAuthority {
     return {
       grant_state: this.lost ? "unavailable" : a.grant_state,
       history_available: !this.lost,
+      history_state: this.lost ? "unavailable" : this.invalidated(grantId) ? "restored_not_current" : "current",
+      retention_max_duration: facts.grant.retention_max_duration ?? null,
       pending_actions: pending,
       ending: a.ending,
       erasures: facts.erasures.map((e) => ({
@@ -1002,13 +1124,21 @@ export class HeldDataAuthority {
   }
 
   /**
-   * A recovered lifecycle credential is current authentication for writes
-   * (Core: "an unexpired lifecycle recovery token"). Returns its client.
+   * A lifecycle recovery token is current authentication for writes while it
+   * is unexpired and not disabled (Core: Lifecycle recovery). Returns its client.
    */
-  statusCredentialClient(token: string, grantId: string): string | null {
+  recoveryCredentialClient(token: string, grantId: string): string | null {
     this.#refresh();
     const c = this.#creds.get(credentialDigest(token));
-    return c && c.kind === "status" && !c.disabled && c.grantIds.has(grantId) ? c.clientId : null;
+    if (!c || c.kind !== "recovery" || c.disabled || !c.grantIds.has(grantId)) return null;
+    if (c.expiresAt !== null && this.#o.now() >= c.expiresAt) return null;
+    return c.clientId;
+  }
+
+  /** The owner subject a grant was issued for, or null. */
+  grantSubject(grantId: string): string | null {
+    this.#refresh();
+    return this.#grants.get(grantId)?.grant.subject_id ?? null;
   }
 
   grantsOfClient(clientId: string): string[] {
@@ -1041,6 +1171,7 @@ export class HeldDataAuthority {
       this.#ops.clear();
       this.#disabled.clear();
       this.#revokedAccess.clear();
+      this.#invalidations.length = 0;
       this.#entryIds.clear();
       this.#position = 0;
       this.#epoch = null;
@@ -1123,6 +1254,146 @@ export class HeldDataAuthority {
     }
   }
 
+  // ─── Restore mechanism (Core: Lifecycle durability) ────────────────────────
+
+  get mechanism(): RestoreMechanism {
+    return this.#o.epochMarkerPath ? "outside_witness" : "invalidate_on_restore";
+  }
+
+  /**
+   * Operator restore procedure of the `invalidate_on_restore` mechanism: put a
+   * snapshot in place as the journal and, in the same atomic replace, append a
+   * marker that makes every grant not current. A restore through any other
+   * path leaves no marker and is not detected. Stop every writer first.
+   */
+  static restoreFromSnapshot(o: { journalPath: string; snapshotPath: string; now: () => number; reason?: string }): void {
+    const bytes = readFileSync(o.snapshotPath);
+    const end = bytes.lastIndexOf(10);
+    const kept = end === -1 ? Buffer.alloc(0) : bytes.subarray(0, end + 1);
+    const marker: Entry = { t: "hd_invalidate", id: randomUUID(), grant_id: "", reason: o.reason ?? "restore", at: o.now() };
+    const tmp = `${o.journalPath}.restore`;
+    writeFileSync(tmp, Buffer.concat([kept, Buffer.from(`${JSON.stringify(marker)}\n`)]));
+    const fd = openSync(tmp, "r");
+    try {
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    renameSync(tmp, o.journalPath);
+    const dfd = openSync(dirname(o.journalPath), "r");
+    try {
+      fsyncSync(dfd);
+    } finally {
+      closeSync(dfd);
+    }
+  }
+
+  /**
+   * True while a restore marker covers the grant and its facts are not yet
+   * re-established. A grant registered after the marker is covered only when
+   * it was issued before the restore (or its issue time is unknown).
+   */
+  invalidated(grantId: string): boolean {
+    this.#refresh();
+    const f = this.#grants.get(grantId);
+    if (!f) return false;
+    return this.#invalidations.some(
+      (inv) =>
+        inv.seq > f.reestablishSeq &&
+        (f.regSeq < inv.seq || f.grant.issued_at == null || f.grant.issued_at < inv.at),
+    );
+  }
+
+  invalidatedGrantIds(): string[] {
+    return this.allGrantIds().filter((id) => this.invalidated(id));
+  }
+
+  /** A lifecycle write is not authenticated from history that is not current. */
+  requireCurrent(grantId: string): void {
+    if (this.invalidated(grantId)) {
+      throw new AuthorityUnavailableError("history for this grant was restored and is not re-established");
+    }
+  }
+
+  /**
+   * Make grants current again after a restore, from facts recovered outside
+   * the restored history (the owner's re-confirmation, the main database, a
+   * client's report). Each recovered ending or erasure is recorded first.
+   */
+  reestablishGrants(
+    facts: { grantId: string; ended?: { path: EndingPath; disposition: Disposition | null }; erase?: boolean }[],
+  ): void {
+    this.#ordered(() => {
+      this.#requireWritable();
+      for (const f of facts) {
+        if (!this.#grants.has(f.grantId)) throw new Error(`unknown grant ${f.grantId}`);
+        if (f.ended && !this.hasEnded(f.grantId)) this.end({ grantId: f.grantId, ...f.ended });
+        if (f.erase) this.requestErasure({ grantId: f.grantId, origin: "reestablished" });
+        this.#append({ t: "hd_reestablish", id: randomUUID(), grant_id: f.grantId, at: this.#o.now() });
+      }
+    });
+  }
+
+  /**
+   * What this AS survives, what it does not, and the rollbacks it cannot
+   * detect, in words the owner can read. The AS claims no more than it keeps.
+   */
+  durability(): DurabilityDeclaration {
+    const sameDevice = (() => {
+      try {
+        return this.#o.epochMarkerPath
+          ? statSync(dirname(this.#o.journalPath)).dev === statSync(dirname(this.#o.epochMarkerPath)).dev
+          : true;
+      } catch {
+        return true;
+      }
+    })();
+    const common = ["a crash or restart of the AS: each terminal event is written to disk before it is acknowledged"];
+    const decl: Omit<DurabilityDeclaration, "statement"> =
+      this.mechanism === "outside_witness"
+        ? {
+            mechanism: "outside_witness",
+            survives: [
+              ...common,
+              "restore or loss of the main database: the history is a separate store",
+              "restore of the history to an older copy, or its loss, while the loss-detection evidence survives: the AS detects the shortfall and refuses positive answers and tokens",
+            ],
+            does_not_survive: [
+              sameDevice
+                ? "loss of the disk that holds both the history and its loss-detection evidence: they share one device here"
+                : "loss of both the history and its loss-detection evidence",
+              "loss of the host",
+            ],
+            undetected: [
+              "a rollback that restores the history and its evidence together, such as a revert of a virtual-machine snapshot or a whole-disk restore",
+              "a copy of the history placed outside the AS that never passes the evidence check",
+            ],
+          }
+        : {
+            mechanism: "invalidate_on_restore",
+            survives: [
+              ...common,
+              "restore or loss of the main database: the history is a separate store",
+              "restore of a snapshot through the declared restore procedure: every grant is then not current, and gets no positive answer, token, or write until its facts are re-established",
+            ],
+            does_not_survive: [
+              "loss of the disk that holds the history: this AS keeps its history in a single store on a single disk and does not claim the record survives that loss",
+              "loss of the host",
+            ],
+            undetected: [
+              "any rollback or replacement of the history outside the declared restore procedure, such as a revert of a virtual-machine snapshot, a file copy of an older history, or a lost store recreated empty",
+            ],
+          };
+    const statement = [
+      `Restore mechanism: ${decl.mechanism === "outside_witness" ? "loss-detection evidence kept outside the history" : "invalidation on restore (one store, no outside witness)"}.`,
+      `Survives: ${decl.survives.join("; ")}.`,
+      `Does not survive: ${decl.does_not_survive.join("; ")}.`,
+      `Not detected: ${decl.undetected.join("; ")}.`,
+      "A rollback this AS does not detect, such as a revert of a virtual-machine snapshot, can revive revoked grants and lose recorded deletions.",
+    ].join(" ");
+    return { ...decl, statement };
+  }
+
   pendingActions(grantId?: string): PendingAction[] {
     if (this.#pendingHistoryLost || this.#pending?.lost) throw new AuthorityUnavailableError("pending history unavailable");
     const actions = this.lost ? this.#pending?.accepted() : this.#pending?.pending();
@@ -1140,6 +1411,8 @@ export class HeldDataAuthority {
       training_only: g.trainingOnly ?? false,
       streams: [...g.streams],
       expires_at: g.expiresAtMs,
+      retention_max_duration: g.retentionMaxDuration ?? null,
+      issued_at: g.issuedAtMs ?? null,
       at: this.#o.now(),
     };
   }
@@ -1166,6 +1439,8 @@ export class HeldDataAuthority {
             trainingOnly: g.training_only,
             streams: g.streams,
             expiresAtMs: g.expires_at,
+            retentionMaxDuration: g.retention_max_duration ?? null,
+            issuedAtMs: g.issued_at ?? null,
           }
         : null);
     if (!grant || grant.grantId !== grantId) throw new Error(`unknown grant ${grantId}`);
@@ -1180,9 +1455,10 @@ export class HeldDataAuthority {
 
   // ─── Internals ─────────────────────────────────────────────────────────────
 
-  #answer(facts: GrantFacts, now: number): StatusAnswer {
+  #answer(facts: GrantFacts, now: number, stale = false): StatusAnswer {
     const g = facts.grant;
     const effective = facts.erasures.filter((e) => {
+      if (stale && e.entry.t !== "erase") return false;
       const at = this.#effectiveAt(facts, e);
       return at !== null && at <= now;
     });
@@ -1306,9 +1582,28 @@ export class HeldDataAuthority {
       case "hd_decommission":
         this.#decommissioned = true;
         return;
+      case "hd_recovery_approval":
+        this.#recoveryApprovals.set(e.id, e);
+        return;
+      case "hd_invalidate":
+        this.#invalidations.push({ seq, at: e.at });
+        return;
+      case "hd_reestablish": {
+        const g = this.#grants.get(e.grant_id);
+        if (g) g.reestablishSeq = Math.max(g.reestablishSeq, seq);
+        return;
+      }
       case "hd_grant":
         if (!this.#grants.has(e.grant_id)) {
-          this.#grants.set(e.grant_id, { grant: e, readWindowEnd: null, end: null, keptAt: null, erasures: [] });
+          this.#grants.set(e.grant_id, {
+            grant: e,
+            readWindowEnd: null,
+            end: null,
+            keptAt: null,
+            erasures: [],
+            regSeq: seq,
+            reestablishSeq: 0,
+          });
         }
         return;
       case "hd_window": {
@@ -1319,6 +1614,7 @@ export class HeldDataAuthority {
         return;
       }
       case "hd_cred": {
+        if (e.approval_id) this.#recoveryIssued.add(e.approval_id);
         const g = this.#grants.get(e.grant_id);
         if (!g) {
           return;
@@ -1329,6 +1625,7 @@ export class HeldDataAuthority {
           kind: e.kind,
           jkt: e.jkt,
           disabled: this.#disabled.get(e.digest) ?? null,
+          expiresAt: e.expires_at ?? null,
         };
         c.grantIds.add(e.grant_id);
         this.#creds.set(e.digest, c);
@@ -1395,7 +1692,14 @@ export class HeldDataAuthority {
         }
         if (e.t === "hd_complete") {
           if (e.outcome === "exception") {
-            f.retained.push({ reportedAt: e.at, receivedAt: e.received_at ?? e.at, detail: e.detail });
+            f.retained.push({
+              reportedAt: e.at,
+              receivedAt: e.received_at ?? e.at,
+              detail: e.detail,
+              until: e.retained?.until ?? null,
+              basis: e.retained?.basis ?? null,
+              scope: e.retained?.scope ?? null,
+            });
           } else {
             f.completion ??= { at: e.at, outcome: e.outcome, detail: e.detail };
           }

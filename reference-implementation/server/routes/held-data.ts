@@ -7,10 +7,10 @@
  * routes. Every handler answers 404 while no runtime is installed.
  *
  *   POST /oauth/grant-lifecycle            queries and writes (Core)
- *   POST /oauth/grant-lifecycle/recover    replace lifecycle authentication
  *   GET  /v1/owner/grants/:grantId/lifecycle             owner record
  *   POST /v1/owner/grants/:grantId/lifecycle/erase       later erase / election
- *   POST /v1/owner/grants/:grantId/lifecycle/recovery-code
+ *   GET  /v1/owner/lifecycle-recovery/:requestId         review a recovery request
+ *   POST /v1/owner/lifecycle-recovery/:requestId/approve | deny
  *
  * Queries: the form parameter `token` (or an `Authorization` header) with any
  * access or refresh token the AS issued for the grant, active or not (the AS
@@ -18,20 +18,30 @@
  * `client_assertion` for a confidential client, which may then batch.
  * Writes (`report`, `pdpp_disposition=delete`) need current authentication:
  * an active access or package token covering the grant, the current
- * unexpired refresh token, a recovered lifecycle credential (Core's recovery
- * token), or a client assertion.
+ * unexpired refresh token, an unexpired lifecycle recovery token, or a client
+ * assertion. Lifecycle recovery is the `authorization_details` flow of
+ * `https://pdpp.dev/grant-lifecycle`; see server/held-data/recovery.ts. Its
+ * owner review is JSON here: Core defines no UI locator for owner controls.
+ * Answers carry `as_position`, a prototype addition (the journal position
+ * the answer is ordered after).
  *
- * Recovery differs from Core: the owner hands the client a one-time code
- * instead of approving a `grant-lifecycle` authorization request. Answers
- * carry `as_position`, a prototype addition (the journal position the answer
- * is ordered after).
- *
- * PROTOTYPE: not for merge until the Core held-data text is final.
+ * PROTOTYPE: experimental, tracks the Core held-data text at `ready/v010-held-data`.
  */
 import type { StatusResult } from "../../lib/held-data/authority.ts";
 import { AuthorityUnavailableError } from "../../lib/held-data/authority.ts";
 import { checkDpopProof, DPOP_MAX_AGE_S } from "../../lib/training-lease/dpop.ts";
 import { acceptHeldDataClientAssertion, type HeldDataRuntime } from "../held-data/runtime.ts";
+import {
+  decommissionStatement,
+  erasureStatements,
+  PENDING_HISTORY_STATEMENT,
+  RESTORED_STATEMENT,
+  stageLine,
+  stagesOf,
+  formatRetainedUntil,
+} from "../held-data/owner-statements.ts";
+import { parseRetainedUntil, parseRfc3339 } from "../held-data/wire.ts";
+import { reviewRecovery, decideRecovery } from "../held-data/recovery.ts";
 
 interface RouteRequest {
   readonly body?: Record<string, unknown> | null;
@@ -100,8 +110,9 @@ function iso(ms: number | null | undefined): string | null {
 }
 
 /**
- * Wire form of one result, in the Core draft's members (`rev/held-data`
- * 699e8b71bd, Grant lifecycle operation). `as_position` is a prototype
+ * Wire form of one result, in the Core text's members (Grant lifecycle
+ * operation). `stop_use_by` is the effective time plus the stop-use bound.
+ * `as_position` is a prototype
  * addition: the journal position the answer is ordered after.
  */
 export function statusWire(r: StatusResult, stopUseBoundMs: number): Record<string, unknown> {
@@ -255,7 +266,9 @@ export function mountHeldData(app: AppLike, ctx: MountHeldDataContext): void {
     const disposition = body.pdpp_disposition === undefined ? null : body.pdpp_disposition;
     const isWrite = report !== null || disposition !== null;
     const reportKinds = ["received", "completed", "retained"];
-    const reportedAt = typeof body.reported_at === "string" ? Date.parse(body.reported_at) : Number.NaN;
+    const reportedAt = parseRfc3339(body.reported_at) ?? Number.NaN;
+    const retainedUntil = report === "retained" ? parseRetainedUntil(body.retained_until) : null;
+    const optionalText = (v: unknown) => v === undefined || (typeof v === "string" && v.length > 0);
     const invalid =
       grantIds.length === 0 ||
       (report !== null && disposition !== null) ||
@@ -267,10 +280,12 @@ export function mountHeldData(app: AppLike, ctx: MountHeldDataContext): void {
       (disposition !== null &&
         body.reported_at !== undefined &&
         (!Number.isFinite(reportedAt) || reportedAt > rt.now())) ||
+      // retained_until is one of three forms; a date-time may not precede reported_at.
       (report === "retained" &&
-        (!str(body.retained_until) ||
-          !Number.isFinite(Date.parse(String(body.retained_until))) ||
-          Date.parse(String(body.retained_until)) < reportedAt));
+        (retainedUntil === null ||
+          (retainedUntil.form === "date-time" && retainedUntil.at < reportedAt) ||
+          !optionalText(body.retention_basis) ||
+          !optionalText(body.retention_scope)));
     if (invalid) {
       return res.status(400).json({ error: "invalid_request" });
     }
@@ -302,6 +317,8 @@ export function mountHeldData(app: AppLike, ctx: MountHeldDataContext): void {
       if (!visible || "error" in visible) {
         return res.status(200).json({ grants: [{ grant_id: grantId, error: "invalid_grant" }] });
       }
+      // History that is not current authenticates no write (Core: Lifecycle durability).
+      rt.authority.requireCurrent(grantId);
       // Writes need current client authentication; an old token never authenticates one.
       const writer =
         (clientId && rt.authority.grantClient(grantId) === clientId ? clientId : null) ??
@@ -315,9 +332,13 @@ export function mountHeldData(app: AppLike, ctx: MountHeldDataContext): void {
           grantId,
           operationId: str(body.instruction_id) as string,
           kind: report === "received" ? "receipt" : report === "retained" ? "retained" : "completion",
-          ...(report === "retained"
+          ...(report === "retained" && retainedUntil
             ? {
-                detail: `retained_until=${String(body.retained_until)}${typeof body.retention_basis === "string" ? `; basis=${body.retention_basis}` : ""}`,
+                retained: {
+                  until: retainedUntil,
+                  basis: typeof body.retention_basis === "string" ? body.retention_basis : null,
+                  scope: typeof body.retention_scope === "string" ? body.retention_scope : null,
+                },
               }
             : {}),
           reportedAt,
@@ -352,33 +373,6 @@ export function mountHeldData(app: AppLike, ctx: MountHeldDataContext): void {
     }
   });
 
-  app.post("/oauth/grant-lifecycle/recover", async (req, res) => {
-    const rt = ctx.runtime();
-    if (!rt) {
-      return res.status(404).json({ error: "not_found" });
-    }
-    res.setHeader("Cache-Control", "no-store");
-    const body = req.body ?? {};
-    const path = "/oauth/grant-lifecycle/recover";
-    const grantId = str(body.grant_id);
-    if (!grantId) {
-      return res.status(400).json({ error: "invalid_request" });
-    }
-    const credential = rt.authority.replaceStatusCredential({
-      grantId,
-      jkt: dpopJkt(req, rt, endpoint(req, path).url, null),
-      clientId: await clientFromAssertion(req, path),
-      recoveryCode: str(body.recovery_code),
-    });
-    if (!credential) {
-      return res.status(400).json({ error: "invalid_grant" });
-    }
-    return res.status(200).json({
-      status_credential: credential,
-      token_type: "pdpp_lifecycle_status",
-    });
-  });
-
   async function requireOwner(req: RouteRequest, res: RouteResponse): Promise<boolean> {
     const auth = header(req, "authorization");
     if (auth?.startsWith("Bearer ")) {
@@ -400,35 +394,85 @@ export function mountHeldData(app: AppLike, ctx: MountHeldDataContext): void {
     if (!v) {
       return null;
     }
+    const durability = rt.authority.durability();
+    const unavailable = v.history_state === "unavailable";
     return {
       grant_id: grantId,
       grant_state: v.grant_state,
       history_available: v.history_available,
-      durability: "Prototype records use fsynced files. Disk-loss survival requires separately provisioned storage for the authority history, pending inbox and loss witnesses; default directories can share a disk.",
+      history_state: v.history_state,
+      durability: durability.statement,
+      durability_detail: {
+        mechanism: durability.mechanism,
+        survives: durability.survives,
+        does_not_survive: durability.does_not_survive,
+        undetected: durability.undetected,
+      },
       pending_actions: v.pending_actions.map((a) => ({ action_id: a.id, kind: a.kind, path: a.path, disposition: a.disposition, accepted_at: iso(a.acceptedAt), status: "pending" })),
-      ...(v.history_available ? {} : { owner_message: `Action recorded and pending. These grants permit no reads, tokens, processing authority, or positive assessments until history is re-established. Clients pause use after the pause threshold (${rt.pauseThresholdMs} ms since their last positive assessment)${rt.longStopMs === null ? ". No long-stop is configured." : ` and delete their copies after the long-stop (${rt.longStopMs} ms since their last positive assessment).`}` }),
+      ...(unavailable ? { owner_message: PENDING_HISTORY_STATEMENT } : {}),
+      ...(v.history_state === "restored_not_current" ? { owner_message: RESTORED_STATEMENT } : {}),
       ending: v.ending ? { ...v.ending, ended_at: iso(v.ending.ended_at) } : null,
-      erasures: v.erasures.map((e) => ({
-        operation_id: e.operation_id,
-        scope: e.scope,
-        accepted_at: iso(e.accepted_at),
-        effective_at: iso(e.effective_at),
-        delivered_at: iso(e.delivered_at),
-        receipt_at: iso(e.receipt_at),
-        delete_by: iso(e.delete_by),
-        // B1: the only bound that holds without delivery.
-        use_stops_by: e.effective_at === null ? null : iso(e.effective_at + rt.pauseThresholdMs),
-        // Bounds that hold without receipt (Core: AS records and owner statements).
-        deleted_by_without_receipt: rt.longStopMs === null || e.effective_at === null ? null : iso(e.effective_at + rt.longStopMs),
-        retained: e.retained.map((r) => ({
-          reported_at: iso(r.reportedAt),
-          received_at: iso(r.receivedAt),
-          detail: r.detail,
-        })),
-        completion: e.completion ? { ...e.completion, at: iso(e.completion.at) } : null,
-        owner_message: ownerMessage(e, rt.pauseThresholdMs, rt.longStopMs, rt.now()),
-      })),
+      erasures: v.erasures.map((e) => {
+        const facts = {
+          accepted_at: e.accepted_at,
+          effective_at: e.effective_at,
+          delivered_at: e.delivered_at,
+          receipt_at: e.receipt_at,
+          completion: e.completion,
+          retained: e.retained,
+        };
+        const statements = erasureStatements({
+          effectiveAt: e.effective_at,
+          stopUseBoundMs: rt.stopUseBoundMs,
+          deletionPeriodMs: rt.deletionPeriodMs,
+          retentionMaxDuration: v.retention_max_duration,
+        });
+        const pendingAdvance = e.effective_at === null || e.effective_at > rt.now();
+        return {
+          operation_id: e.operation_id,
+          scope: e.scope,
+          accepted_at: iso(e.accepted_at),
+          effective_at: iso(e.effective_at),
+          delivered_at: iso(e.delivered_at),
+          receipt_at: iso(e.receipt_at),
+          // Shown only from a reported receipt (Core: AS records and owner statements).
+          delete_by: iso(e.delete_by),
+          stop_use_by: e.effective_at === null ? null : iso(e.effective_at + rt.stopUseBoundMs),
+          stages: stagesOf(facts),
+          statements,
+          // Each retained report is kept, in order; a later one corrects an earlier one.
+          retained: e.retained.map((r) => ({
+            reported_at: iso(r.reportedAt),
+            received_at: iso(r.receivedAt),
+            retained_until: r.until,
+            retained_until_display: formatRetainedUntil(r.until),
+            retention_basis: r.basis,
+            retention_scope: r.scope,
+            detail: r.detail,
+          })),
+          completion: e.completion ? { ...e.completion, at: iso(e.completion.at) } : null,
+          owner_message: pendingAdvance
+            ? "Advance deletion election recorded. It takes effect when the grant ends; acceptance does not end access or use. The stop-use period runs from that ending, not from this election."
+            : `${stageLine(facts, e.delete_by)} ${statements.join(" ")}`,
+        };
+      }),
     };
+  }
+
+  /** Where one grant's disposition stands: offered, recorded, sent, or receipt reported. */
+  function dispositionStage(rt: HeldDataRuntime, grantId: string): "offered" | "recorded" | "sent" | "receipt reported" {
+    const v = rt.authority.ownerView(grantId, rt.deletionPeriodMs);
+    const e = v?.erasures.find((x) => x.scope.streams === "all");
+    if (e) {
+      return e.receipt_at !== null ? "receipt reported" : e.delivered_at !== null ? "sent" : "recorded";
+    }
+    return v?.ending?.disposition ? "recorded" : "offered";
+  }
+
+  /** A delete the AS holds that no app has received yet: it cannot be delivered once the AS stops answering. */
+  function undeliveredDelete(rt: HeldDataRuntime, grantId: string): boolean {
+    const e = rt.authority.ownerView(grantId, rt.deletionPeriodMs)?.erasures.find((x) => x.scope.streams === "all");
+    return e !== undefined && e.delivered_at === null && e.receipt_at === null;
   }
 
   app.get("/v1/owner/lifecycle/decommission", async (req, res) => {
@@ -445,11 +489,15 @@ export function mountHeldData(app: AppLike, ctx: MountHeldDataContext): void {
       offer_id: offer.id,
       grants: offer.grants.map((grant_id) => ({
         grant_id, choices: ["keep", "delete"], lifecycle: ownerRecord(rt, grant_id),
+        stage: dispositionStage(rt, grant_id),
+        delete_warning:
+          "A delete chosen now reaches the app only when it next gets an answer from this server. Once this server stops answering, an app that has not received it cannot learn of it.",
+        ...(undeliveredDelete(rt, grant_id)
+          ? { warning: "This delete has not been received by the app. Once this server stops answering, the app cannot learn of it." }
+          : {}),
         grant: snapshots.find((g) => g.grant_id === grant_id)?.grant ?? null,
       })),
-      pause_threshold_ms: rt.pauseThresholdMs,
-      long_stop_ms: rt.longStopMs,
-      owner_message: `Once this AS stops answering, conforming clients pause use ${rt.pauseThresholdMs / 86400000} days after their last positive assessment and ${rt.longStopMs === null ? "have no Core long-stop deletion date" : `delete copies ${rt.longStopMs / 86400000} days after that assessment`}. Erasure exclusions and legal retention apply.`,
+      owner_message: decommissionStatement(),
     });
   });
 
@@ -481,7 +529,17 @@ export function mountHeldData(app: AppLike, ctx: MountHeldDataContext): void {
       rt.authority.elect({ grantId, disposition });
     }
     rt.authority.completeDecommission(offerId);
-    return res.status(200).json({ decommissioned: true });
+    return res.status(200).json({
+      decommissioned: true,
+      grants: grantIds.map((grant_id) => ({
+        grant_id,
+        disposition: choices[grant_id],
+        stage: dispositionStage(rt, grant_id),
+        ...(undeliveredDelete(rt, grant_id)
+          ? { warning: "This delete has not been received by the app, and it cannot be delivered now that this server has stopped answering." }
+          : {}),
+      })),
+    });
   });
 
   app.get("/v1/owner/grants/:grantId/lifecycle", async (req, res) => {
@@ -530,11 +588,18 @@ export function mountHeldData(app: AppLike, ctx: MountHeldDataContext): void {
       return res.status(202).json(ownerRecord(rt, grantId));
     }
     // An instruction that takes effect while the grant is active also revokes it (Core: Erasure).
-    const [answer] = rt.authority.status(
-      { clientId: rt.authority.grantClient(grantId) ?? "", grantIds: new Set([grantId]), clientAuthenticated: false },
-      [grantId]
-    );
-    if (answer && !("error" in answer) && (answer.grant_state === "active" || answer.grant_state === "window_closed")) {
+    // History that is not current for the grant gives no answer, but the owner's request is still
+    // accepted: ending the grant with `delete` records the instruction and is safe whatever the state.
+    let answer: ReturnType<typeof rt.authority.status>[number] | undefined;
+    try {
+      [answer] = rt.authority.status(
+        { clientId: rt.authority.grantClient(grantId) ?? "", grantIds: new Set([grantId]), clientAuthenticated: false },
+        [grantId]
+      );
+    } catch (err) {
+      if (!(err instanceof AuthorityUnavailableError)) throw err;
+    }
+    if (!answer || (!("error" in answer) && (answer.grant_state === "active" || answer.grant_state === "window_closed"))) {
       await ctx.revokeGrant(grantId, { lifecycle: { path: "owner_withdrawal", disposition: "delete" } });
     } else {
       rt.authority.elect({ grantId, disposition: "delete" });
@@ -542,7 +607,9 @@ export function mountHeldData(app: AppLike, ctx: MountHeldDataContext): void {
     return res.status(200).json(ownerRecord(rt, grantId));
   });
 
-  app.post("/v1/owner/grants/:grantId/lifecycle/recovery-code", async (req, res) => {
+  // Lifecycle recovery (Core): the owner reviews and decides a recovery request that
+  // /oauth/authorize parked (server/held-data/recovery.ts).
+  app.get("/v1/owner/lifecycle-recovery/:requestId", async (req, res) => {
     const rt = ctx.runtime();
     if (!rt) {
       return res.status(404).json({ error: "not_found" });
@@ -550,47 +617,31 @@ export function mountHeldData(app: AppLike, ctx: MountHeldDataContext): void {
     if (!(await requireOwner(req, res))) {
       return;
     }
-    const grantId = req.params.grantId as string;
-    if (!(await ctx.ensureGrant(grantId))) {
-      return res.status(404).json({ error: "not_found" });
-    }
-    res.setHeader("Cache-Control", "no-store");
-    return res.status(200).json({ recovery_code: rt.authority.ownerRecoveryCode(grantId) });
+    const review = reviewRecovery(rt, req.params.requestId as string);
+    return review ? res.status(200).json(review) : res.status(404).json({ error: "not_found" });
   });
+
+  for (const decision of ["approve", "deny"] as const) {
+    app.post(`/v1/owner/lifecycle-recovery/:requestId/${decision}`, async (req, res) => {
+      const rt = ctx.runtime();
+      if (!rt) {
+        return res.status(404).json({ error: "not_found" });
+      }
+      if (!(await requireOwner(req, res))) {
+        return;
+      }
+      res.setHeader("Cache-Control", "no-store");
+      try {
+        const result = decideRecovery(rt, req.params.requestId as string, decision);
+        return result ? res.status(200).json(result) : res.status(404).json({ error: "not_found" });
+      } catch (err) {
+        if (err instanceof AuthorityUnavailableError) {
+          res.setHeader("Retry-After", "60");
+          return res.status(503).json({ error: "temporarily_unavailable" });
+        }
+        throw err;
+      }
+    });
+  }
 }
 
-/** K4 wording: "recorded", and only the bounds that hold. */
-function ownerMessage(
-  e: {
-    accepted_at: number;
-    effective_at: number | null;
-    delivered_at: number | null;
-    receipt_at: number | null;
-    delete_by: number | null;
-    completion: { outcome: string } | null;
-    retained: unknown[];
-  },
-  pauseThresholdMs: number,
-  longStopMs: number | null,
-  now: number,
-): string {
-  if (e.effective_at === null || e.effective_at > now) {
-    return "Advance deletion election recorded. It takes effect when the grant ends; acceptance does not end access or use. The pause and long-stop bounds run from that ending, not from this election.";
-  }
-  if (e.completion) {
-    return "The app reported that it deleted this data.";
-  }
-  if (e.retained.length > 0) {
-    return "The app reported that it deleted this data except data the law requires it to keep. That data is not reported as deleted.";
-  }
-  const at = (ms: number) => new Date(ms).toISOString();
-  if (e.receipt_at !== null && e.delete_by !== null) {
-    return `Deletion request recorded and receipt reported by the app. Apps that follow PDPP stop using this data within 48 hours if they can reach this server and delete it by ${at(e.delete_by)}.`;
-  }
-  const stage = e.delivered_at === null ? "not yet sent to the app" : "sent to the app; receipt not reported";
-  const longStop =
-    longStopMs === null
-      ? "Without receipt, PDPP sets no deletion date."
-      : `Without receipt, apps that follow PDPP delete it by ${at(e.effective_at + longStopMs)}.`;
-  return `Deletion request recorded, ${stage}. Apps that follow PDPP stop using this data by ${at(e.effective_at + pauseThresholdMs)} in every case. ${longStop}`;
-}

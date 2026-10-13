@@ -117,6 +117,7 @@ import {
   authenticateOAuthTokenClient,
   endProcessingAuthorityForGrant,
   ensureHeldDataGrant,
+  describeHeldDataGrant,
   prepareHeldDataDecommission,
   heldDataWriteClient,
   heldDataResponseReleaseCheck,
@@ -176,6 +177,7 @@ import {
   installHeldDataRuntime,
 } from "./held-data/runtime.ts";
 import { mountHeldData } from "./routes/held-data.ts";
+import { startLifecycleRecovery } from "./held-data/recovery.ts";
 import { autoEnrollEligibleSchedules } from "./auto-enroll-eligible-schedules.ts";
 import type { CimdFetchDependencies } from "./cimd.ts";
 import { acquireDefaultDeliveryWorker, getDefaultDeliveryWorker } from "./client-event-delivery-worker.ts";
@@ -5511,6 +5513,20 @@ export function buildAsApp(opts: ServerOpts = {}) {
         }
       : {}),
     resolvePublicUrl: resolvePublicUrl as unknown as Parameters<typeof mountAsAuthorize>[1]["resolvePublicUrl"],
+    // PROTOTYPE, off by default: lifecycle recovery requests (held-data). Null while no runtime is installed.
+    startLifecycleRecovery: async (input) => {
+      const rt = getHeldDataRuntime();
+      if (!rt) return null;
+      const started = await startLifecycleRecovery(
+        rt,
+        { ensureGrant: ensureHeldDataGrant, describeGrant: describeHeldDataGrant },
+        input
+      );
+      if (!started) return null;
+      return started.ok
+        ? { ok: true, location: `${input.baseUrl.replace(/\/+$/, "")}${started.reviewPath}` }
+        : started;
+    },
     selectionParsers: {
       parseHostedMcpSelections: parseHostedMcpSelections as unknown as Parameters<
         typeof mountAsAuthorize

@@ -18,7 +18,8 @@
  */
 import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { HeldDataAuthority } from "../../lib/held-data/authority.ts";
+import { HeldDataAuthority, type RestoreMechanism } from "../../lib/held-data/authority.ts";
+import { RecoveryRequests } from "./recovery.ts";
 
 export interface HeldDataRuntimeOptions {
   /** Directory of the authority journal. MUST be outside every backup-restore path. */
@@ -31,21 +32,28 @@ export interface HeldDataRuntimeOptions {
   pendingActionDir?: string;
   /** Witness outside the inbox failure domain. Co-location detects file loss, not disk loss. */
   pendingEvidenceDir?: string;
+  /**
+   * The restore mechanism this deployment declares (Core: Lifecycle durability).
+   * `outside_witness` (default): loss-detection evidence and a pending inbox outside the history.
+   * `invalidate_on_restore`: one store and no outside witness. Restore it only through
+   * `HeldDataAuthority.restoreFromSnapshot`; any other rollback goes undetected, and the owner
+   * statement says so.
+   */
+  restoreMechanism?: RestoreMechanism;
   now?: () => number;
   /** Shown to the owner once receipt is confirmed. Default 30 days. */
   deletionPeriodMs?: number;
-  /** OD-4, the delivery-independent stop-use bound shown to the owner. Default 7 days. */
-  pauseThresholdMs?: number;
-  /** OD-5, the long-stop shown to the owner as a bound without receipt. Default 90 days; null: off. */
-  longStopMs?: number | null;
+  /** Expiry of a lifecycle recovery token for lifecycle writes. Default 24 hours. */
+  recoveryTokenTtlMs?: number;
 }
 
 export interface HeldDataRuntime {
   readonly authority: HeldDataAuthority;
   readonly now: () => number;
   readonly deletionPeriodMs: number;
-  readonly pauseThresholdMs: number;
-  readonly longStopMs: number | null;
+  readonly recoveryTokenTtlMs: number;
+  /** Pending lifecycle recovery requests and codes (server/held-data/recovery.ts). */
+  readonly recovery: RecoveryRequests;
   /** Core stop-use bound (48 h): `stop_use_by` = effective time + this. */
   readonly stopUseBoundMs: number;
   close(): void;
@@ -96,9 +104,11 @@ export function installHeldDataRuntime(runtime: HeldDataRuntime | null): void {
 
 export function createHeldDataRuntime(opts: HeldDataRuntimeOptions & { journalPath: string }): HeldDataRuntime {
   const now = opts.now ?? Date.now;
+  const witnessed = opts.restoreMechanism !== "invalidate_on_restore";
+  const markerDir = witnessed ? opts.markerDir : undefined;
   const pendingDir = opts.pendingActionDir ?? `${dirname(opts.journalPath)}-pending`;
-  const pendingEvidenceDir = opts.pendingEvidenceDir ?? opts.markerDir;
-  mkdirSync(pendingDir, { recursive: true });
+  const pendingEvidenceDir = witnessed ? (opts.pendingEvidenceDir ?? markerDir) : undefined;
+  if (pendingEvidenceDir) mkdirSync(pendingDir, { recursive: true });
   if (pendingEvidenceDir) mkdirSync(pendingEvidenceDir, { recursive: true });
   const authority = HeldDataAuthority.open({
     journalPath: opts.journalPath,
@@ -109,15 +119,15 @@ export function createHeldDataRuntime(opts: HeldDataRuntimeOptions & { journalPa
           pendingEvidencePath: join(pendingEvidenceDir, "held-data-pending-evidence"),
         }
       : {}),
-    ...(opts.markerDir ? { epochMarkerPath: join(opts.markerDir, "held-data-authority-epoch") } : {}),
+    ...(markerDir ? { epochMarkerPath: join(markerDir, "held-data-authority-epoch") } : {}),
   });
   return {
     authority,
     now,
     deletionPeriodMs: opts.deletionPeriodMs ?? 30 * 24 * 60 * 60 * 1000,
-    pauseThresholdMs: opts.pauseThresholdMs ?? 7 * 24 * 60 * 60 * 1000,
+    recoveryTokenTtlMs: opts.recoveryTokenTtlMs ?? 24 * 60 * 60 * 1000,
+    recovery: new RecoveryRequests(),
     stopUseBoundMs: 48 * 60 * 60 * 1000,
-    longStopMs: opts.longStopMs === undefined ? 90 * 24 * 60 * 60 * 1000 : opts.longStopMs,
     close() {
       // The authority holds no open handles.
     },
@@ -138,5 +148,8 @@ export function heldDataOptionsFromEnv(env: NodeJS.ProcessEnv): HeldDataRuntimeO
     ...(env.PDPP_HELD_DATA_PENDING_DIR ? { pendingActionDir: env.PDPP_HELD_DATA_PENDING_DIR } : {}),
     ...(env.PDPP_HELD_DATA_PENDING_EVIDENCE_DIR ? { pendingEvidenceDir: env.PDPP_HELD_DATA_PENDING_EVIDENCE_DIR } : {}),
     ...(env.PDPP_HELD_DATA_MARKER_DIR ? { markerDir: env.PDPP_HELD_DATA_MARKER_DIR } : {}),
+    ...(env.PDPP_HELD_DATA_RESTORE_MECHANISM === "invalidate_on_restore"
+      ? { restoreMechanism: "invalidate_on_restore" as const }
+      : {}),
   };
 }

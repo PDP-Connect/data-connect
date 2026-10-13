@@ -96,6 +96,8 @@ import {
   ProcessingPermissionsError,
 } from "./training-lease/runtime.ts";
 import { getHeldDataRuntime, type HeldDataRuntime } from "./held-data/runtime.ts";
+import { redeemRecoveryCode } from "./held-data/recovery.ts";
+import { requireDayDuration } from "./held-data/wire.ts";
 import { checkDpopProof, DPOP_MAX_AGE_S } from "../lib/training-lease/dpop.ts";
 import type { Disposition, EndingPath, GrantRegistration } from "../lib/held-data/authority.ts";
 import {
@@ -1839,6 +1841,9 @@ async function normalizeAuthorizationDetail(
     }));
   }
   const detail = requireAuthorizationDetailInput(detailInput, index);
+  // Experimental held-data prototype: Core fixes `retention.max_duration` to `PnD`.
+  // With the flag off the contract schema still takes any non-empty string.
+  if (getHeldDataRuntime()) requireDayDuration(detail.retention);
   const { sourceBinding, storageBinding } = await resolveAuthorizationDetailBindings(detail, index, opts);
 
   return {
@@ -10272,6 +10277,12 @@ export async function heldDataTokenReleaseCheck(
 ): Promise<() => void> {
   const rt = getHeldDataRuntime();
   if (!rt || !isNonEmptyString(token)) return () => {};
+  // A lifecycle recovery token is no access token: it has no token row and covers no read.
+  if (rt.authority.credentialKind(token) === "recovery") {
+    return () => {
+      if (rt.authority.lost || rt.authority.isDisabled(token)) throw bindingError("invalid_grant", "Authority changed before token release");
+    };
+  }
   const row = await getTokenStore().getIntrospection(token);
   if (row?.token_kind === "owner") return () => {};
   const members = row?.package_id ? await getGrantPackageStore().listAllMembers(row.package_id) : [];
@@ -10324,6 +10335,11 @@ export async function exchangeOAuthAuthorizationCode({
   cimdFetchDependencies?: CimdFetchDependencies;
 }): Promise<Record<string, unknown>> {
   if (getHeldDataRuntime()?.authority.lost) throw bindingError("invalid_grant", "authority history unavailable or actions pending");
+  // Experimental held-data prototype: a lifecycle recovery code issues a lifecycle-only token.
+  const heldData = getHeldDataRuntime();
+  const recovered = heldData ? redeemRecoveryCode(heldData, { clientId, code, codeVerifier, redirectUri }) : null;
+  if (recovered === "invalid_grant") throw buildOAuthAuthorizationCodeError("invalid_grant", "Invalid authorization code");
+  if (recovered) return { ...recovered };
   const normalized = requireOAuthAuthorizationCodeExchangeInput({ clientId, code, codeVerifier, redirectUri });
   const oauthCodeStore = getOAuthCodeStore();
   const row = requireRedeemableOAuthAuthorizationCode(
@@ -12669,10 +12685,20 @@ async function readHeldDataGrant(
   }
   let streams: string[] = [];
   let trainingOnly = false;
+  let retentionMaxDuration: string | null = null;
+  let issuedAtMs: number | null = null;
   try {
-    const grant = JSON.parse(row.grant_json ?? "{}") as { streams?: { name?: unknown }[]; processing_permissions?: unknown };
+    const grant = JSON.parse(row.grant_json ?? "{}") as {
+      streams?: { name?: unknown }[];
+      processing_permissions?: unknown;
+      retention?: { max_duration?: unknown };
+      issued_at?: unknown;
+    };
     streams = (grant.streams ?? []).map((s) => s.name).filter((n): n is string => typeof n === "string");
     trainingOnly = Array.isArray(grant.processing_permissions) && grant.processing_permissions.length > 0;
+    retentionMaxDuration = typeof grant.retention?.max_duration === "string" ? grant.retention.max_duration : null;
+    const issued = typeof grant.issued_at === "string" ? Date.parse(grant.issued_at) : Number.NaN;
+    issuedAtMs = Number.isFinite(issued) ? issued : null;
   } catch {
     // An unparseable grant still gets a lifecycle record, with no streams.
   }
@@ -12688,7 +12714,30 @@ async function readHeldDataGrant(
     trainingOnly,
     streams,
     expiresAtMs: row.expires_at ? Date.parse(row.expires_at) : null,
+    retentionMaxDuration,
+    issuedAtMs,
   }, revoked: row.status === "revoked" };
+}
+
+/** What the owner is shown for a grant before approving its lifecycle recovery: source, purpose, issue date. */
+export async function describeHeldDataGrant(
+  grantId: string
+): Promise<{ source: string | null; purpose: string | null; issued_at: string | null }> {
+  const row = isPostgresStorageBackend()
+    ? await pgOne<{ grant_json: string | null }>("SELECT grant_json::text AS grant_json FROM grants WHERE grant_id = $1", [grantId])
+    : getOne<HeldDataGrantRow>(referenceQueries.authGrantsGetForRevocation, [grantId]);
+  let grant: { source?: { id?: unknown }; purpose_code?: unknown; purpose_description?: unknown; issued_at?: unknown } = {};
+  try {
+    grant = JSON.parse(row?.grant_json ?? "{}");
+  } catch {
+    // An unparseable grant still gets a review row, with nothing to show.
+  }
+  const text = (v: unknown) => (typeof v === "string" ? v : null);
+  return {
+    source: text(grant.source?.id),
+    purpose: text(grant.purpose_description) ?? text(grant.purpose_code),
+    issued_at: text(grant.issued_at),
+  };
 }
 
 /** Register a grant in the lifecycle journal from the main database. False if the grant is unknown. */
@@ -12834,7 +12883,7 @@ export async function heldDataWriteClient(token: string, grantId: string): Promi
   if (!(rt && token) || rt.authority.isDisabled(token)) {
     return null;
   }
-  const recovered = rt.authority.statusCredentialClient(token, grantId);
+  const recovered = rt.authority.recoveryCredentialClient(token, grantId);
   if (recovered) {
     return recovered;
   }
@@ -12947,5 +12996,6 @@ function heldDataEndedOrLost(grantId: unknown): boolean {
   }
   const ended = rt.authority.hasEnded(grantId);
   // hasEnded refreshes the journal and can discover corruption on this check.
-  return rt.authority.lost || ended;
+  // A grant a restore left not current issues nothing until it is re-established.
+  return rt.authority.lost || ended || rt.authority.invalidated(grantId);
 }

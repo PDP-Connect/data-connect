@@ -97,7 +97,9 @@ export function executeAsAuthorizationServerMetadata(
   return deps.buildAuthorizationServerMetadata({
     ...(input.heldDataLifecycleEnabled ? { grantLifecycleEndpoint: `${issuer}/oauth/grant-lifecycle` } : {}),
     agentConnectEndpoint: `${issuer}/agent-connect`,
-    authorizationDetailsTypesSupported: ["https://pdpp.dev/data-access"],
+    authorizationDetailsTypesSupported: input.heldDataLifecycleEnabled
+      ? ["https://pdpp.dev/data-access", "https://pdpp.dev/grant-lifecycle"]
+      : ["https://pdpp.dev/data-access"],
     authorizationEndpoint: `${issuer}/oauth/authorize`,
     cimdEnabled,
     codeChallengeMethodsSupported: ["S256"],
