@@ -6,6 +6,8 @@ import { parseCoverageDiagnosticsStateSnapshot } from "./polyfill-connectors-run
  * PDPP Resource Server — record storage and grant-enforced query
  */
 import { getDb } from "./db.ts";
+import { applyPartialInstruction, enforceAppendOnlyDuplicate, equalJsonValues, experimentalRecordUpdatesEnabled, isPartialInstruction, recordUpdateError, validateExperimentalSnapshot, type ExperimentalStream } from "./experimental-record-updates.ts";
+import { bootstrapScope, continueBootstrapPage, currentDeletionEpoch, noteRecordDeletion, retainedBootstrapRecordIds, startBootstrapPage, type BootstrapSnapshot } from "./experimental-record-bootstrap.ts";
 import { assertGrantedManifestReadAuthority, assertManifestReadAuthority } from "./manifest-read-authority.ts";
 import type { ComputedLexicalFields } from "./search.ts";
 import type { ComputedSemanticEntries } from "./search-semantic.ts";
@@ -174,6 +176,9 @@ type RecordStorageTarget =
   | undefined;
 type RecordData = Record<string, unknown>;
 interface RecordEnvelope {
+  type?: unknown;
+  set?: unknown;
+  remove?: unknown;
   data?: unknown;
   emitted_at?: string | null | undefined;
   key: unknown;
@@ -300,6 +305,7 @@ interface StreamGrant {
   time_constraint?: TimeConstraint | null;
 }
 interface EffectiveReadScope {
+  eligibilityFields?: string[] | null;
   fields: string[] | null;
   resources: string[] | null;
   timeConstraint: TimeConstraint | null;
@@ -629,6 +635,9 @@ interface LogicalPosition {
 }
 type PageOrder = "ASC" | "DESC";
 interface PaginationCursor {
+  kind?: unknown;
+  bootstrap_session?: unknown;
+  bootstrap_offset?: unknown;
   after_version?: number;
   cursor_value?: unknown;
   order?: unknown;
@@ -646,8 +655,9 @@ function buildEffectiveReadScope(
   requestParams: Parameters<typeof buildEffectiveFilter>[1],
   requiredFields: string[] = []
 ): EffectiveReadScope {
-  const effective = buildEffectiveFilter(streamGrant, requestParams, requiredFields);
+  const effective = buildEffectiveFilter(streamGrant, requestParams, requiredFields, experimentalRecordUpdatesEnabled());
   return {
+    ...(effective.eligibilityFields !== undefined ? { eligibilityFields: effective.eligibilityFields } : {}),
     fields: Array.isArray(effective.fields)
       ? effective.fields.filter((field): field is string => typeof field === "string")
       : null,
@@ -854,6 +864,9 @@ export class RecordIndexAdmissionError extends Error {
  * by construction, not a correctness bug.
  */
 const PERMANENT_INGEST_FAILURE_CODES: ReadonlySet<string> = new Set([
+  "append_only_record_conflict",
+  "invalid_record_schema",
+  "invalid_partial_update",
   "connector_instance_not_found",
   "connector_instance_not_writable",
   "invalid_record_identity",
@@ -1340,6 +1353,7 @@ function writeRecordChange({
   stream: string;
 }): void {
   if (op === "delete") {
+    noteRecordDeletion(connectorInstanceId, stream, recordKey);
     exec(referenceQueries.recordsIngestMarkRecordDeleted, [
       effectiveEmittedAt,
       nextVersion,
@@ -2016,19 +2030,29 @@ function ingestRecordWithinCoordinator(
 }
 
 function toPostgresRecordInput(record: RecordEnvelope): {
+  type?: unknown;
+  set?: unknown;
+  remove?: unknown;
   data?: RecordData;
   emitted_at?: string;
   key: unknown;
   op?: "delete" | "upsert";
   stream: string;
 } {
+  if (isPartialInstruction(record) && (record.data !== undefined || record.op !== undefined)) {
+    throw recordUpdateError("invalid_partial_update", "Instruction must not contain snapshot data or an op");
+  }
   if (record.data !== undefined && record.data !== null && !isRecordData(record.data)) {
+    if (experimentalRecordUpdatesEnabled()) throw recordUpdateError("invalid_record_schema", "RECORD data must be an object");
     throw new TypeError("Postgres record data must be an object when present");
   }
   if (record.emitted_at !== undefined && record.emitted_at !== null && typeof record.emitted_at !== "string") {
     throw new TypeError("Postgres record emitted_at must be a string when present");
   }
   return {
+    ...(record.type !== undefined ? { type: record.type } : {}),
+    ...(record.set !== undefined ? { set: record.set } : {}),
+    ...(record.remove !== undefined ? { remove: record.remove } : {}),
     key: record.key,
     stream: record.stream,
     ...(isRecordData(record.data) ? { data: record.data } : {}),
@@ -2278,9 +2302,15 @@ async function ingestSqliteRecord(
 ): Promise<RecordIngestOutcome> {
   const connectorId = connectorIdForStorageTarget(storageTarget);
   const connectorInstanceId = resolveStorageConnectorInstanceId(storageTarget, connectorId);
-  const { stream, key, data, emitted_at, op = "upsert" } = record;
+  const { stream, key, emitted_at, op = "upsert" } = record;
+  let data = record.data;
   const recordKey = encodeKey(key);
-  const recordJson = data ? JSON.stringify(data) : null;
+  let recordJson = data ? JSON.stringify(data) : null;
+  const experimentalStream = experimentalRecordUpdatesEnabled() || isPartialInstruction(record)
+    ? getExperimentalManifestStream(connectorId, stream) : null;
+  if (experimentalRecordUpdatesEnabled() && op !== "delete" && !isPartialInstruction(record)) {
+    validateExperimentalSnapshot(experimentalStream, key, data);
+  }
 
   // Validate record identity against the manifest-declared primary_key. The
   // record `key` is the ordered tuple of primary-key field values; each
@@ -2303,7 +2333,7 @@ async function ingestSqliteRecord(
   // Only meaningful for upserts (a delete keeps the row's existing
   // semantic_time); computed unconditionally for a simpler, branch-free bind
   // below — the delete path does not write it.
-  const semanticTime =
+  let semanticTime =
     op === "delete" ? SEMANTIC_TIME_UNKNOWN : computeIngestSemanticTime(connectorId, stream, data, attemptStreamFacts);
   const changeHistoryLimit = getChangeHistoryLimit();
 
@@ -2325,6 +2355,15 @@ async function ingestSqliteRecord(
       stream,
       recordKey,
     ]);
+
+    if (isPartialInstruction(record)) {
+      data = applyPartialInstruction(record, experimentalStream, current && !current.deleted && current.record_json ? JSON.parse(current.record_json) : null);
+      recordJson = JSON.stringify(data);
+      semanticTime = computeIngestSemanticTime(connectorId, stream, data, attemptStreamFacts);
+    }
+    if (experimentalRecordUpdatesEnabled() && op !== "delete" && current && !current.deleted && enforceAppendOnlyDuplicate(experimentalStream, current.record_json ? JSON.parse(current.record_json) : null, data)) {
+      return finishDurableOutcome({ kind: "noop" });
+    }
 
     if (op === "delete" && (!current || current.deleted)) {
       return finishDurableOutcome({ kind: "noop" });
@@ -2349,7 +2388,9 @@ async function ingestSqliteRecord(
     // write). The downstream changed-write delta math is already correct
     // for an unchanged payload at a new version: the record-count and
     // current-bytes deltas are zero, and only one history row is appended.
-    const wouldBeUnchangedUpsert = op !== "delete" && current && !current.deleted && current.record_json === recordJson;
+    const wouldBeUnchangedUpsert = op !== "delete" && current && !current.deleted && (experimentalRecordUpdatesEnabled()
+      ? equalJsonValues(current.record_json ? JSON.parse(current.record_json) : null, data)
+      : current.record_json === recordJson);
     // Anchor present → genuine no-op. Anchor missing → fall through to
     // the changed-write path below to re-anchor the current row.
     if (wouldBeUnchangedUpsert) {
@@ -2786,6 +2827,18 @@ async function maintainRecordIndexesWithinPermit(
 ): Promise<void> {
   const connectorId = connectorIdForStorageTarget(storageTarget);
   const connectorInstanceId = resolveStorageConnectorInstanceId(storageTarget, connectorId);
+  if (isPartialInstruction(record)) {
+    const recordKey = encodeKey(record.key);
+    const current = isPostgresStorageBackend()
+      ? (await postgresQuery<{ record_json: RecordData; version: number; deleted: boolean }>(
+          "SELECT record_json, version, deleted FROM records WHERE connector_instance_id = $1 AND stream = $2 AND record_key = $3",
+          [connectorInstanceId, record.stream, recordKey]
+        )).rows[0]
+      : getOne<CurrentRecordRow>(referenceQueries.recordsIngestGetCurrentRecordState, [connectorInstanceId, record.stream, recordKey]);
+    if (!current || current.deleted || Number(current.version) !== expectedVersion) return;
+    const data = typeof current.record_json === "string" ? JSON.parse(current.record_json) : current.record_json;
+    record = { stream: record.stream, key: record.key, data, op: "upsert" };
+  }
   const { stream, key, data, op = "upsert" } = record;
   const recordKey = encodeKey(key);
   const attemptFacts = options.attemptContext?.streams?.[stream] ?? null;
@@ -3463,9 +3516,10 @@ function validateWindowKind(value: unknown): void {
   }
 }
 
-function rejectListOnlyParamsForChangesFeed(requestParams: RequestParams): void {
+function rejectListOnlyParamsForChangesFeed(requestParams: RequestParams, allowOrder = false): void {
   const unsupported: string[] = [];
   for (const key of ["sort", "count", "order", "window"]) {
+    if (key === "order" && allowOrder) continue;
     if (!isNullish(requestParams[key]) && requestParams[key] !== "") {
       unsupported.push(key);
     }
@@ -5230,16 +5284,17 @@ function resolveChangeGroupRecord(
     return null;
   }
 
+  const eligibilityFields = effective.eligibilityFields !== undefined ? effective.eligibilityFields : effective.fields;
   const previousProjection =
-    previousVisible && previous?.data ? projectFields(previous.data, effective.fields ?? undefined) : null;
-  const currentProjection = projectFields(current.data, effective.fields ?? undefined);
+    previousVisible && previous?.data ? projectFields(previous.data, eligibilityFields ?? undefined) : null;
+  const currentProjection = projectFields(current.data, eligibilityFields ?? undefined);
 
   if (previousProjection && JSON.stringify(previousProjection) === JSON.stringify(currentProjection)) {
     return null;
   }
 
   const changeRecord: ResponseRecord = {
-    data: currentProjection,
+    data: projectFields(current.data, effective.fields ?? undefined),
     emitted_at: current.emitted_at,
     id: group.record_key,
     object: "record",
@@ -5453,7 +5508,10 @@ function validateQueryCursors(
     throw codedError("Malformed cursor", "invalid_cursor");
   }
   if (changesSince !== null || paginationCursor?.session === "changes") {
-    rejectListOnlyParamsForChangesFeed(requestParams);
+    const retainedCursor = experimentalRecordUpdatesEnabled() && typeof requestParams.changes_since === "string"
+      ? decodeCursor(requestParams.changes_since) : null;
+    const allowOrder = experimentalRecordUpdatesEnabled() && (requestParams.changes_since === "beginning" || paginationCursor?.bootstrap_session !== undefined || retainedCursor?.bootstrap_baseline !== undefined);
+    rejectListOnlyParamsForChangesFeed(requestParams, allowOrder);
   }
   if ((changesSince !== null || paginationCursor?.session === "changes") && expansions.length) {
     throw invalidQueryError("expand is not supported with changes_since", "invalid_expand");
@@ -5547,6 +5605,59 @@ export async function queryRecords(
 
   const ctx = await validateQueryRecordsRequest(storageTarget, stream, grant, requestParams, manifest);
   const { changesSince, paginationCursor } = ctx;
+  const retainedCursor = experimentalRecordUpdatesEnabled() && typeof requestParams.changes_since === "string"
+    ? decodeCursor(requestParams.changes_since) : null;
+
+  if (experimentalRecordUpdatesEnabled() && (requestParams.changes_since === "beginning" || paginationCursor?.bootstrap_session !== undefined || retainedCursor?.bootstrap_baseline !== undefined)) {
+    const context = JSON.stringify(["sqlite", ctx.connectorInstanceId, stream, grant, ctx.effective, ctx.compiledFilters, manifest, ctx.order]);
+    const response: ListResponse = paginationCursor?.bootstrap_session !== undefined
+      ? continueBootstrapPage<ResponseRecord>(paginationCursor, context, ctx.limit)
+      : writeTransaction(() => {
+          const deletionEpoch = currentDeletionEpoch();
+          const sinceCursor = retainedCursor?.bootstrap_baseline !== undefined ? String(requestParams.changes_since) : undefined;
+          const previousIds = sinceCursor ? retainedBootstrapRecordIds(sinceCursor, context) : [];
+          const horizon = getOne<VersionCounterRow>(referenceQueries.recordsIngestGetVersionCounter, [ctx.connectorInstanceId, stream])?.max_version ?? 0;
+          if (sinceCursor && changesSince) {
+            validateChangesSinceVersions(changesSince, null, ctx.connectorInstanceId, stream);
+            const min = getOne<MinVersionRow>(referenceQueries.recordsSnapshotsGetMinRecordChangeVersion, [ctx.connectorInstanceId, stream])?.min_version ?? null;
+            if (min === null && changesSince.version < horizon) throw codedError("changes_since history has been pruned; full re-sync required", "cursor_expired");
+          }
+          function* visibleRecords(): Generator<BootstrapSnapshot<ResponseRecord>> {
+            // REVIEWED-DYNAMIC: fixed instance/stream read; streamed into a bounded
+            // experimental snapshot so later pages need no retained history.
+            for (const row of iterateDynamicSqlAcknowledged<{ record_key: string; record_json: string; emitted_at: string }>(
+              "SELECT record_key, record_json, emitted_at FROM records WHERE connector_instance_id = ? AND stream = ? AND deleted = 0 ORDER BY version, record_key",
+              [ctx.connectorInstanceId, stream]
+            )) {
+              const data = parseStoredRecordData(row.record_json);
+              if ((ctx.effective.resources && !ctx.effective.resources.includes(row.record_key)) || !passesTimeConstraint(data, ctx.effective.timeConstraint) || !passesRequestFilters(data, ctx.compiledFilters)) continue;
+              const record: ResponseRecord = { object: "record", id: row.record_key, stream, emitted_at: row.emitted_at, data: projectFields(data, ctx.effective.fields ?? undefined) };
+              decorateRecordWithConnectionIdentity(record, ctx.recordIdentity);
+              const eligibilityFields = ctx.effective.eligibilityFields !== undefined ? ctx.effective.eligibilityFields : ctx.effective.fields;
+              yield { record, eligibility: projectFields(data, eligibilityFields ?? undefined) };
+            }
+          }
+          function* removedRecords(): Generator<ResponseRecord> {
+            for (const key of previousIds) {
+              const row = getDb().prepare("SELECT emitted_at, deleted_at FROM records WHERE connector_instance_id = ? AND stream = ? AND record_key = ?").get<{ emitted_at: string; deleted_at: string | null }>(ctx.connectorInstanceId, stream, key);
+              if (!row) continue;
+              const record: ResponseRecord = { object: "record", id: key, stream, deleted: true, emitted_at: row.emitted_at, deleted_at: row.deleted_at ?? row.emitted_at };
+              decorateRecordWithConnectionIdentity(record, ctx.recordIdentity);
+              yield record;
+            }
+          }
+          return startBootstrapPage({ context, scope: bootstrapScope(ctx.connectorInstanceId, stream), deletionEpoch, records: visibleRecords(), changesCursor: encodeChangesSinceCursor(horizon), limit: ctx.limit, order: ctx.order, removedRecords: removedRecords(), ...(sinceCursor ? { sinceCursor } : {}) });
+        });
+    if (paginationCursor?.bootstrap_session !== undefined) {
+      response.data = response.data.filter((record) => {
+        if (record.deleted === true) return true;
+        const current = getDb().prepare("SELECT deleted FROM records WHERE connector_instance_id = ? AND stream = ? AND record_key = ?").get<{ deleted: boolean | number }>(ctx.connectorInstanceId, stream, record.id);
+        return !!current && !current.deleted;
+      });
+    }
+    attachRequestWarningsToResponse(response, ctx.requestWarnings);
+    return response;
+  }
 
   if (changesSince !== null || paginationCursor?.session === "changes") {
     return queryRecordsChangesSince({
@@ -6414,6 +6525,7 @@ async function deleteRecordWithinCoordinator(storageTarget: RecordStorageTarget,
 
     maybeDeleteFault("after-version-allocation", { connectorId, connectorInstanceId, nextVersion, recordId, stream });
 
+    noteRecordDeletion(connectorInstanceId, stream, recordId);
     exec(referenceQueries.recordsIngestMarkRecordDeleted, [now, nextVersion, connectorInstanceId, stream, recordId]);
 
     maybeDeleteFault("after-records-mutation", { connectorId, connectorInstanceId, nextVersion, recordId, stream });
@@ -8821,6 +8933,13 @@ export async function backfillSqliteRecordSemanticTimesForManifest(
     });
   });
   return { streams: streamOutcomes, updated };
+}
+
+function getExperimentalManifestStream(connectorId: string, streamName: string): ExperimentalStream | null {
+  const row = getOne<ConnectorManifestRow>(referenceQueries.authConnectorsGetManifestById, [connectorId]);
+  if (!row?.manifest) return null;
+  const manifest = JSON.parse(row.manifest) as { streams?: Array<ExperimentalStream & { name?: string }> };
+  return manifest.streams?.find(candidate => candidate.name === streamName) ?? null;
 }
 
 // Returns the manifest-declared primary_key field names for a stream, or null

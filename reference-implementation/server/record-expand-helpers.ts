@@ -33,6 +33,7 @@ interface EffectiveFilterGrant {
   time_constraint?: TimeConstraint | null;
 }
 export interface EffectiveFilter {
+  eligibilityFields?: string[] | null;
   fields: string[] | null;
   resources: string[] | null;
   timeConstraint: TimeConstraint | null;
@@ -189,15 +190,21 @@ export function assertNonEmptyJsonField(field: unknown, label: string): asserts 
 export function buildEffectiveFilter(
   streamGrant: EffectiveFilterGrant,
   requestParams: RequestParams,
-  requiredFields: string[] = []
+  requiredFields: string[] = [],
+  experimentalRecordUpdates = false
 ): EffectiveFilter {
   const timeConstraint = requireTimeConstraint(streamGrant.time_constraint);
-  const effective = {
+  const effective: EffectiveFilter = {
     fields: streamGrant.fields || null,
     resources: streamGrant.resources || null,
     timeConstraint,
     timeConstraintField: timeConstraint ? timeConstraint.field : null,
   };
+  const isClientGrant = Object.hasOwn(streamGrant, "instance_ids");
+  if (experimentalRecordUpdates && isClientGrant) {
+    // Sync eligibility uses the frozen grant, independently of sparse responses.
+    effective.eligibilityFields = streamGrant.fields || null;
+  }
 
   if (requestParams.fields && effective.fields !== null) {
     effective.fields = requestParams.fields.filter((f) => effective.fields?.includes(f) === true);
@@ -210,7 +217,12 @@ export function buildEffectiveFilter(
     // authorization time. A later manifest declaration must not widen that
     // grant by adding newly-required fields. Owner grants omit instance_ids
     // and retain the current-manifest behavior used by self-reads.
-    const manifestRequiredFields = Object.hasOwn(streamGrant, "instance_ids") ? [] : requiredFields;
+    let manifestRequiredFields = requiredFields;
+    if (isClientGrant) {
+      manifestRequiredFields = experimentalRecordUpdates
+        ? requiredFields.filter((field) => !streamGrant.fields || streamGrant.fields.includes(field))
+        : [];
+    }
     effective.fields = [...new Set([...manifestRequiredFields, ...effective.fields])];
   }
 

@@ -77,6 +77,7 @@ import {
   type StreamsListDependencies,
   type StreamsListInput,
 } from "../../operations/rs-streams-list/index.ts";
+import { experimentalRecordUpdatesEnabled } from "../experimental-record-updates.ts";
 import { rejectUnsupportedClientQuery } from "../record-filters.ts";
 import type { MiddlewareHandler, RouteArg } from "./_route-contract.ts";
 
@@ -1777,6 +1778,7 @@ function buildRecordsListDeps(
   const { manifest, storageBinding, sourceDescriptor } = refs;
   return {
     decorateRecord: (record: unknown) => ctx.decorateRecordBlobRefs(record),
+    experimentalRecordUpdatesEnabled,
     getGrant: () => tokenInfo.grant || { streams: [] },
     getManifest: () => manifest,
     getSourceDescriptor: () => sourceDescriptor,
@@ -1970,6 +1972,7 @@ export function mountRsRecordDetail(app: AppLike, ctx: MountRsReadContext): void
 
         const dependencies = {
           decorateRecord: (record: unknown) => ctx.decorateRecordBlobRefs(record),
+          experimentalRecordUpdatesEnabled,
           getGrant: () => tokenInfo.grant || { streams: [] },
           getManifest: () => manifest,
           getRecord: async (

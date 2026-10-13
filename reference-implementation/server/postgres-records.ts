@@ -12,6 +12,8 @@
  */
 
 import { createHash } from "node:crypto";
+import { applyPartialInstruction, enforceAppendOnlyDuplicate, experimentalRecordUpdatesEnabled, isPartialInstruction, validateExperimentalSnapshot } from "./experimental-record-updates.ts";
+import { BOOTSTRAP_MAX_RECORDS, bootstrapScope, continueBootstrapPage, currentDeletionEpoch, noteRecordDeletion, retainedBootstrapRecordIds, startBootstrapPage } from "./experimental-record-bootstrap.ts";
 import {
   buildLimitClampedWarning,
   clampRecordsPageLimit,
@@ -31,6 +33,7 @@ import {
   isPostgresStorageBackend,
   postgresQuery as rawPostgresQuery,
   withPostgresTransaction,
+  withPostgresReadOnlyTransaction,
 } from "./postgres-storage.ts";
 import {
   assertExpansionInstanceAuthorized,
@@ -91,6 +94,7 @@ async function postgresQuery(
 }
 
 interface ManifestStream {
+  semantics?: string;
   consent_time_field?: string;
   cursor_field?: string;
   name?: string;
@@ -181,6 +185,7 @@ interface PgRow {
 }
 
 interface EffectiveFilter {
+  eligibilityFields?: string[] | null;
   fields?: string[] | null;
   resources?: string[] | null;
   timeConstraint?: { field: string; since?: string; until?: string } | null;
@@ -219,6 +224,7 @@ interface QueryRequestParams extends Record<string, unknown> {
 type ExpansionEntry = ReturnType<typeof normalizeExpandRequest>[number];
 
 interface ResponseRecord extends JsonObject {
+  id: string;
   expanded?: JsonObject;
   // Logical byte length of this record's current `record_json`
   // (octet_length(record_json)). Only populated on the single-record-detail
@@ -248,6 +254,9 @@ interface PgQueryError extends Error {
 }
 
 interface IngestRecord {
+  type?: unknown;
+  set?: unknown;
+  remove?: unknown;
   data?: JsonObject;
   emitted_at?: string;
   key: unknown;
@@ -381,9 +390,10 @@ function validateWindowKind(value: unknown): void {
   }
 }
 
-function rejectListOnlyParamsForChangesFeed(requestParams: QueryRequestParams): void {
+function rejectListOnlyParamsForChangesFeed(requestParams: QueryRequestParams, allowOrder = false): void {
   const unsupported: string[] = [];
   for (const key of ["sort", "count", "order", "window"]) {
+    if (key === "order" && allowOrder) continue;
     if (requestParams[key] !== null && requestParams[key] !== undefined && requestParams[key] !== "") {
       unsupported.push(key);
     }
@@ -590,7 +600,9 @@ function fieldsFor(
     // resolution. Filtering and record identity are computed separately, so
     // current manifest requirements cannot add response fields. Owner grants
     // omit `instance_ids` and retain the current-manifest projection.
-    const projectionRequiredFields = Object.hasOwn(streamGrant, "instance_ids") ? [] : requiredFields;
+    const projectionRequiredFields = Object.hasOwn(streamGrant, "instance_ids")
+      ? (experimentalRecordUpdatesEnabled() ? requiredFields.filter((field) => !streamGrant.fields || streamGrant.fields.includes(field)) : [])
+      : requiredFields;
     for (const required of projectionRequiredFields) {
       if (!seen.has(required)) {
         effective.push(required);
@@ -1387,7 +1399,8 @@ function resolvePostgresExpansionFields(
   const childEffective = buildEffectiveFilter(
     expansion.childGrant,
     {},
-    childRequiredFields
+    childRequiredFields,
+    experimentalRecordUpdatesEnabled()
   ) as unknown as EffectiveFilter;
   return {
     childEffective,
@@ -1730,6 +1743,7 @@ async function writePostgresIngestMutation({
 }): Promise<number> {
   let nextRecordJsonBytes = 0;
   if (op === "delete") {
+    noteRecordDeletion(connectorInstanceId, stream, recordKey);
     await client.query(
       `UPDATE records
        SET connector_id = $6, deleted = TRUE, deleted_at = $4, emitted_at = $4, version = $5
@@ -1899,9 +1913,10 @@ export async function postgresIngestRecord(
 ): Promise<IngestOutcome> {
   const connectorId = resolveStorageConnectorId(storageTarget);
   const connectorInstanceId = resolveStorageConnectorInstanceId(storageTarget, connectorId ?? "");
-  const { stream, key, data, emitted_at: emittedAt, op = "upsert" } = record;
+  const { stream, key, emitted_at: emittedAt, op = "upsert" } = record;
+  let data = record.data;
   const recordKey = encodeKey(key);
-  const recordJson = data ? JSON.stringify(data) : null;
+  let recordJson = data ? JSON.stringify(data) : null;
 
   // Validate record identity against the manifest-declared primary_key (covers
   // non-`id` and compound keys), via the same shared guard the SQLite store
@@ -1914,6 +1929,11 @@ export async function postgresIngestRecord(
     attemptStreamFacts ? manifestStreamFromFacts(attemptStreamFacts) : null
   );
   assertRecordIdentity(normalizePrimaryKey(identityManifestStream?.primary_key), key, data ?? null);
+  const experimentalStream = experimentalRecordUpdatesEnabled() || isPartialInstruction(record)
+    ? await getCachedPostgresManifestStream(resolvedConnectorId, stream) : null;
+  if (experimentalRecordUpdatesEnabled() && op !== "delete" && !isPartialInstruction(record)) {
+    validateExperimentalSnapshot(experimentalStream, key, data);
+  }
 
   const effectiveEmittedAt = emittedAt || nowIso();
   const changeHistoryLimit = getChangeHistoryLimit();
@@ -1923,11 +1943,11 @@ export async function postgresIngestRecord(
       ? manifestStreamFromFacts(attemptStreamFacts)
       : await getCachedPostgresManifestStream(resolvedConnectorId, stream);
   }
-  const storedCursorValue = op === "delete" ? null : cursorValue(data ?? null, manifestStream);
-  const storedPrimaryKeyText = op === "delete" ? recordKey : primaryKeyText(data ?? null, recordKey, manifestStream);
+  let storedCursorValue = op === "delete" ? null : cursorValue(data ?? null, manifestStream);
+  let storedPrimaryKeyText = op === "delete" ? recordKey : primaryKeyText(data ?? null, recordKey, manifestStream);
   // SEMANTIC time for the Explore merged-timeline sort (upserts only; a delete
   // keeps the row's existing semantic_time). Falls back to emitted_at.
-  const storedSemanticTime = op === "delete" ? null : semanticTimeValue(data ?? null, manifestStream);
+  let storedSemanticTime = op === "delete" ? null : semanticTimeValue(data ?? null, manifestStream);
 
   const outcome = await withPostgresTransaction<DurableIngestOutcome>(
     async (client) => {
@@ -1966,6 +1986,21 @@ export async function postgresIngestRecord(
         [connectorInstanceId, stream, recordKey, recordJson]
       );
       const current = currentResult.rows[0] || null;
+
+      if (isPartialInstruction(record)) {
+        data = applyPartialInstruction(record, experimentalStream, current && !current.deleted ? current.record_json : null);
+        recordJson = JSON.stringify(data);
+        storedCursorValue = cursorValue(data, manifestStream);
+        storedPrimaryKeyText = primaryKeyText(data, recordKey, manifestStream);
+        storedSemanticTime = semanticTimeValue(data, manifestStream);
+        if (current) {
+          const equality = await client.query("SELECT $1::jsonb = $2::jsonb AS equal", [JSON.stringify(current.record_json), recordJson]);
+          current.is_identical = equality.rows[0]?.equal;
+        }
+      }
+      if (op !== "delete" && current && !current.deleted && enforceAppendOnlyDuplicate(experimentalStream, current.record_json, data)) {
+        return finishDurableOutcome({ kind: "noop" });
+      }
 
       if (op === "delete" && (!current || current.deleted)) {
         return finishDurableOutcome({ kind: "noop" });
@@ -2125,7 +2160,7 @@ async function visiblePostgresChange({
   if (!(current && currentVisible && passesRequestFilters(current.data, compiledFilters))) {
     return null;
   }
-  const fields = effective.fields ?? null;
+  const fields = (effective.eligibilityFields !== undefined ? effective.eligibilityFields : effective.fields) ?? null;
   const previousProjection = previous && previousVisible ? projectFields(previous.data, fields) : null;
   const currentProjection = projectFields(current.data, fields);
   if (previousProjection && JSON.stringify(previousProjection) === JSON.stringify(currentProjection)) {
@@ -2134,7 +2169,7 @@ async function visiblePostgresChange({
   return responseRecord({
     fields: null,
     identity,
-    row: { ...row, record_json: currentProjection },
+    row: { ...row, record_json: projectFields(current.data, effective.fields ?? null) },
     stream,
   });
 }
@@ -2359,7 +2394,8 @@ export async function postgresQueryRecords(
   const effective = buildEffectiveFilter(
     streamGrant,
     {},
-    requiredFieldsFor(manifestStream)
+    requiredFieldsFor(manifestStream),
+    experimentalRecordUpdatesEnabled()
   ) as unknown as EffectiveFilter;
   effective.fields = fields;
   const compiledFilters = compileRequestFilters(requestParams.filter, streamGrant, manifestStream ?? {});
@@ -2392,7 +2428,10 @@ export async function postgresQueryRecords(
   enforceConnectionNarrowing(requestParams, connectorInstanceId);
   const identity = await resolveRecordIdentityForBinding(connectorInstanceId, connectorId);
 
-  rejectExpandWithChangesSince(requestParams);
+  const bootstrapCursor = experimentalRecordUpdatesEnabled() && requestParams.cursor ? decodeCursor(requestParams.cursor) : null;
+  const retainedCursor = experimentalRecordUpdatesEnabled() && typeof requestParams.changes_since === "string" ? decodeCursor(requestParams.changes_since) : null;
+  const isBootstrapPage = experimentalRecordUpdatesEnabled() && bootstrapCursor?.bootstrap_session !== undefined;
+  rejectExpandWithChangesSince(isBootstrapPage ? { ...requestParams, changes_since: "beginning" } : requestParams);
   // Resolve and validate expansions up front so misuse rejects before any
   // SQL runs. SQLite path does the same in records.ts#normalizeExpandRequest.
   const expansions = normalizeExpandRequest(
@@ -2402,6 +2441,49 @@ export async function postgresQueryRecords(
     manifestStream as unknown as Parameters<typeof normalizeExpandRequest>[3],
     order === "asc" ? "ASC" : "DESC"
   );
+
+  if (experimentalRecordUpdatesEnabled() && (requestParams.changes_since === "beginning" || isBootstrapPage || retainedCursor?.bootstrap_baseline !== undefined)) {
+    rejectListOnlyParamsForChangesFeed(requestParams, true);
+    const context = JSON.stringify(["postgres", connectorInstanceId, stream, grant, effective, compiledFilters, manifest, orderDirection]);
+    const response = isBootstrapPage && bootstrapCursor
+      ? continueBootstrapPage<ResponseRecord>(bootstrapCursor, context, limit)
+      : await withPostgresReadOnlyTransaction(async (client) => {
+          const deletionEpoch = currentDeletionEpoch();
+          const sinceCursor = retainedCursor?.bootstrap_baseline !== undefined ? String(requestParams.changes_since) : undefined;
+          const previousIds = sinceCursor ? retainedBootstrapRecordIds(sinceCursor, context) : [];
+          const horizon = await client.query("SELECT max_version FROM version_counter WHERE connector_instance_id = $1 AND stream = $2", [connectorInstanceId, stream]);
+          const maxVersion = Number(horizon.rows[0]?.max_version ?? 0);
+          if (sinceCursor) {
+            const sinceVersion = retainedCursor?.v;
+            const minResult = await client.query("SELECT MIN(version)::bigint AS min_version FROM record_changes WHERE connector_instance_id = $1 AND stream = $2", [connectorInstanceId, stream]);
+            const minVersion = minResult.rows[0]?.min_version == null ? null : Number(minResult.rows[0].min_version);
+            if (typeof sinceVersion !== "number" || !Number.isInteger(sinceVersion)) throw Object.assign(new Error("Malformed changes_since cursor"), { code: "invalid_cursor" });
+            if ((minVersion !== null && sinceVersion < minVersion - 1) || (minVersion === null && sinceVersion < maxVersion)) throw Object.assign(new Error("changes_since history has been pruned; full re-sync required"), { code: "cursor_expired" });
+          }
+          const params: unknown[] = [connectorInstanceId, stream];
+          const whereParts = ["connector_instance_id = $1", "stream = $2", "deleted = FALSE"];
+          appendGrantVisibilityClauses(whereParts, params, effective);
+          const where = `WHERE ${whereParts.join(" AND ")}${buildFilterClause(compiledFilters, requestParams.filter, params)}`;
+          params.push(BOOTSTRAP_MAX_RECORDS + 1);
+          const rows = await client.query(`SELECT record_key, record_json, emitted_at FROM records ${where} ORDER BY version, record_key LIMIT $${params.length}`, params);
+          const removed = previousIds.length ? await client.query("SELECT record_key, emitted_at, deleted_at FROM records WHERE connector_instance_id = $1 AND stream = $2 AND record_key = ANY($3::text[])", [connectorInstanceId, stream, previousIds]) : { rows: [] };
+          const eligibilityFields = effective.eligibilityFields !== undefined ? effective.eligibilityFields : fields;
+          return startBootstrapPage({
+            context, scope: bootstrapScope(connectorInstanceId, stream), deletionEpoch, records: rows.rows.map((row) => ({ record: responseRecord({ row, stream, fields, identity }), eligibility: projectFields(row.record_json, eligibilityFields ?? null) })), limit, order: orderDirection,
+            changesCursor: encodeCursor({ v: maxVersion }),
+            removedRecords: removed.rows.map((row) => deletedResponseRecord({ row, stream, identity })),
+            ...(sinceCursor ? { sinceCursor } : {}),
+          });
+        });
+    if (isBootstrapPage) {
+      const ids = response.data.filter((record) => record.deleted !== true).map((record) => record.id);
+      const current = ids.length ? await postgresQuery("SELECT record_key, deleted FROM records WHERE connector_instance_id = $1 AND stream = $2 AND record_key = ANY($3::text[])", [connectorInstanceId, stream, ids]) : { rows: [] };
+      const liveIds = new Set(current.rows.filter((row) => !row.deleted).map((row) => row.record_key));
+      response.data = response.data.filter((record) => record.deleted === true || liveIds.has(record.id));
+    }
+    attachRequestWarningsToResponse(response, requestWarnings);
+    return response;
+  }
 
   if (requestParams.changes_since !== null && requestParams.changes_since !== undefined) {
     return queryPostgresChangesSince({
@@ -2646,7 +2728,8 @@ export async function postgresGetRecord(
   const effective = buildEffectiveFilter(
     streamGrant,
     {},
-    requiredFieldsFor(manifestStream)
+    requiredFieldsFor(manifestStream),
+    experimentalRecordUpdatesEnabled()
   ) as unknown as EffectiveFilter;
   effective.fields = fields;
   const { warnings: requestWarnings } = resolveRequestConnectionId(requestParams);
@@ -2814,7 +2897,8 @@ export async function postgresGetRecordFieldWindow(
   const effective = buildEffectiveFilter(
     streamGrant,
     {},
-    requiredFieldsFor(manifestStream)
+    requiredFieldsFor(manifestStream),
+    experimentalRecordUpdatesEnabled()
   ) as unknown as EffectiveFilter;
 
   assertFieldVisibleToGrant(fieldPath, effective.fields);
