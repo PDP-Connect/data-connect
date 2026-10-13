@@ -14,7 +14,7 @@ test('switching from acquire to acquireRecords preserves the old records retenti
   const app = new ToyApp();
   const client = new HeldDataClient({ now: () => now, store: app,
     status: async () => ({ok: false, reason: 'offline'}),
-    policy: {retentionCeilingMs: 2 * DAY, longStopMs: null} });
+    policy: {retentionCeilingMs: 2 * DAY } });
   // Existing integration stores a legacy delivery after acquire succeeds.
   assert.equal(client.acquire('g'), true);
   app.sync('g', [{id: 'old', stream: 'messages', text: 'oldword'}]);
@@ -40,7 +40,7 @@ test('a mixed acquisition survives restart without abandoning its old retention 
   const app = new ToyApp();
   const make = (initialize = false) => new HeldDataClient({ now: () => now, storage, initialize, store: app,
     status: async () => ({ ok: false, reason: 'offline' }),
-    policy: { retentionCeilingMs: 2 * DAY, longStopMs: null } });
+    policy: { retentionCeilingMs: 2 * DAY } });
   const first = make(true);
   assert.equal(first.acquire('g'), true);
   app.sync('g', [{ id: 'old', stream: 'messages', text: 'oldword' }]);
@@ -68,7 +68,7 @@ test('a store without record inventory refuses per-record retention and keeps th
   };
   const make = (initialize = false) => new HeldDataClient({ now: () => now, storage, initialize, store,
     status: async () => ({ ok: false, reason: 'offline' }),
-    policy: { retentionCeilingMs: 2 * DAY, longStopMs: null } });
+    policy: { retentionCeilingMs: 2 * DAY } });
   const first = make(true);
   first.acquire('g');
   app.sync('g', [{ id: 'old', stream: 'messages', text: 'oldword' }]);
@@ -87,7 +87,7 @@ test('legacy inventory migration keeps an earlier ambiguous-version record clock
   const app = new ToyApp();
   const client = new HeldDataClient({ now: () => now, store: app,
     status: async () => ({ ok: false, reason: 'offline' }),
-    policy: { retentionCeilingMs: 2 * DAY, longStopMs: null } });
+    policy: { retentionCeilingMs: 2 * DAY } });
   client.acquireRecords('first', [{ id: 'r', stream: 'messages' }]);
   app.sync('first', [{ id: 'r', stream: 'messages', text: 'oldword' }]);
   now += DAY;
@@ -109,7 +109,7 @@ for (const opaque of [false, true]) {
     const storage = new MemoryClientCheckpointStorage();
     const client = new HeldDataClient({ now: () => now, store: app, storage, initialize: true,
       status: async () => ({ ok: false, reason: 'offline' }),
-      policy: { retentionCeilingMs: 2 * DAY, longStopMs: null } });
+      policy: { retentionCeilingMs: 2 * DAY } });
     client.acquire('g');
     const old = { id: 'old', stream: 'messages', text: 'body-must-stay-in-the-store', ...(opaque ? { opaque: 1n } : {}) };
     app.sync('g', [old]);

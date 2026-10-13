@@ -278,13 +278,13 @@ describe("client: positive assessment, cadence and triggers (K3)", () => {
   });
 
   it("after a suspend, overdue disposal runs before anything else, then reconciliation gates use", async () => {
-    const sim = new Sim({ policy: { longStopMs: 90 * DAY } });
+    const sim = new Sim({ policy: { retentionCeilingMs: 90 * DAY } });
     sim.sync();
     await sim.client.reconcile();
     sim.t += 100 * DAY; // suspended: no ticks
     sim.outages = [[sim.t, sim.t + DAY]];
     await sim.client.onResume();
-    assert.equal(sim.client.grantState("g1")?.deleteReason, "long_stop");
+    assert.equal(sim.client.grantState("g1")?.deleteReason, "retention_ceiling");
     assert.deepEqual(sim.app.holds("g1"), { records: 0, indexEntries: 0, summary: false });
 
     const sim2 = new Sim();
@@ -296,7 +296,7 @@ describe("client: positive assessment, cadence and triggers (K3)", () => {
     assert.equal(sim2.client.canUse("g1").ok, false, "an erasure issued during the suspend is learned before any use");
   });
 
-  it("an older answer (lower AS position) is ignored: it never moves the freshness origin", async () => {
+  it("an older answer (lower AS position) is ignored: it never moves the positive-assessment record", async () => {
     const sim = new Sim();
     sim.sync();
     const principal = sim.as.authenticateRead({ token: sim.tokens.get("g1") ?? "" });
@@ -305,13 +305,13 @@ describe("client: positive assessment, cadence and triggers (K3)", () => {
     sim.t += 2 * HOUR;
     sim.addGrant("other"); // moves the journal position
     await sim.client.reconcile();
-    const origin = sim.client.grantState("g1")?.freshnessOrigin;
+    const origin = sim.client.grantState("g1")?.positiveAt;
     assert.equal(origin, sim.t);
     // The older answer is replayed later (a cache or a stale path).
     sim.answerFrom = { ...sim.as, authenticateRead: () => principal, status: () => older } as unknown as HeldDataAuthority;
     sim.t += HOUR;
     await sim.client.reconcile();
-    assert.equal(sim.client.grantState("g1")?.freshnessOrigin, origin, "origin unchanged");
+    assert.equal(sim.client.grantState("g1")?.positiveAt, origin, "origin unchanged");
     assert.ok(sim.client.events.some((e) => e.kind === "ignored_stale_answer"));
   });
 
@@ -374,35 +374,33 @@ describe("restore safety (K4)", () => {
     assert.equal(answer(ask(r, "t", ["g"])).ordinary_use, "stopped");
   });
 
-  it("single-disk loss: with the epoch marker restored from backup, the authority fails closed; the client pauses at the threshold and the long-stop disposes", async () => {
-    for (const longStopMs of [90 * DAY, null]) {
-      const sim = new Sim({ policy: { pauseThresholdMs: 7 * DAY, longStopMs } });
-      sim.sync();
-      await sim.client.reconcile();
-      const s = sim.t;
-      sim.t += HOUR;
-      // The disk dies: the journal is gone. The epoch marker comes back with the backup.
-      rmSync(sim.journalPath);
-      const reopened = HeldDataAuthority.open({ journalPath: sim.journalPath, now: () => sim.t, epochMarkerPath: sim.epochPath });
-      assert.equal(reopened.lost, true);
-      assert.throws(() => reopened.authenticateRead({ token: sim.tokens.get("g1") ?? "" }), AuthorityUnavailableError);
-      assert.throws(
-        () => reopened.status({ clientId: "app", grantIds: new Set(["g1"]), clientAuthenticated: false }, ["g1"]),
-        AuthorityUnavailableError
-      );
-      assert.throws(() => reopened.registerGrant({ grantId: "x", clientId: "app", subjectId: "o", confidential: false, streams: [], expiresAtMs: null }), AuthorityUnavailableError);
-      sim.answerFrom = reopened;
-      const { lastUsable } = await sim.runUntil(s + 10 * DAY);
-      const gone = await sim.runUntilGone(s + 200 * DAY, 6 * HOUR);
-      console.log(
-        `[held-data-lifecycle] disk loss, long-stop ${longStopMs === null ? "off" : "90 d"}: usable until s+${(((lastUsable ?? s) - s) / HOUR).toFixed(2)} h; copy ${gone === null ? "kept (paused) to 200 d" : `gone at s+${((gone - s) / DAY).toFixed(2)} d`}`
-      );
-      assert.ok(lastUsable !== null && lastUsable <= s + 7 * DAY);
-      assert.equal(gone === null, longStopMs === null);
-    }
+  it("single-disk loss: with the epoch marker restored from backup, the authority fails closed; the silent AS starts no deadline for the client", async () => {
+    const sim = new Sim();
+    sim.sync();
+    await sim.client.reconcile();
+    const s = sim.t;
+    sim.t += HOUR;
+    // The disk dies: the journal is gone. The epoch marker comes back with the backup.
+    rmSync(sim.journalPath);
+    const reopened = HeldDataAuthority.open({ journalPath: sim.journalPath, now: () => sim.t, epochMarkerPath: sim.epochPath });
+    assert.equal(reopened.lost, true);
+    assert.throws(() => reopened.authenticateRead({ token: sim.tokens.get("g1") ?? "" }), AuthorityUnavailableError);
+    assert.throws(
+      () => reopened.status({ clientId: "app", grantIds: new Set(["g1"]), clientAuthenticated: false }, ["g1"]),
+      AuthorityUnavailableError
+    );
+    assert.throws(() => reopened.registerGrant({ grantId: "x", clientId: "app", subjectId: "o", confidential: false, streams: [], expiresAtMs: null }), AuthorityUnavailableError);
+    sim.answerFrom = reopened;
+    const calls = sim.statusCalls;
+    const { lastUsable } = await sim.runUntil(s + 200 * DAY, HOUR);
+    // Core: AS silence starts no deadline. The client keeps the copy and may use it as the grant permits,
+    // and it keeps trying at least hourly.
+    assert.equal(lastUsable, s + 200 * DAY, "use continues for the whole outage");
+    assert.deepEqual(sim.app.holds("g1"), { records: 2, indexEntries: 4, summary: true });
+    assert.ok(sim.statusCalls - calls >= 200 * 24 - 24, "attempts continue about hourly while no attempt succeeds");
   });
 
-  it("single-disk loss with no marker restored: a fresh history; every old grant is unknown, so clients get invalid_grant and pause", () => {
+  it("single-disk loss with no marker restored: a fresh history; every old grant is unknown, so clients get invalid_grant", () => {
     const now = T0;
     const { as, journalPath, dir } = authority(() => now);
     reg(as, "g");
@@ -461,7 +459,7 @@ describe("review fixes", () => {
     assert.equal(answer(ask(as, "ts", ["s"])).ending?.owner_notice_required, false);
   });
 
-  it("a custody-only (training) grant with daily positive answers is not deleted at the long-stop, and is never usable", async () => {
+  it("a custody-only (training) grant with daily positive answers is kept and is never usable", async () => {
     const sim = new Sim({ grants: [] });
     sim.addGrant("tr", false, { trainingOnly: true });
     sim.app.sync("tr", [{ id: "x", stream: "messages", text: "kept" }]);
@@ -478,22 +476,6 @@ describe("review fixes", () => {
     const start = sim.t;
     await sim.client.reconcile();
     assert.equal(sim.client.nextAttemptAt, start + DAY);
-  });
-
-  it("reading again after a long-stop deletion is a new acquisition that is tracked again", async () => {
-    const sim = new Sim({ policy: { longStopMs: 90 * DAY } });
-    sim.sync();
-    await sim.client.reconcile();
-    sim.t += 100 * DAY;
-    sim.outages = [[sim.t, sim.t + HOUR]];
-    await sim.client.onResume();
-    assert.equal(sim.client.grantState("g1")?.deleteReason, "long_stop");
-    sim.t += 2 * HOUR;
-    sim.sync();
-    assert.equal(sim.client.grantState("g1")?.deletedAt, null);
-    assert.equal(sim.client.grantState("g1")?.firstAcquiredAt, sim.t);
-    await sim.client.reconcile();
-    assert.equal(sim.client.canUse("g1").ok, true);
   });
 });
 
@@ -514,8 +496,8 @@ describe("journeys (converge-r1-astra §4, design-astra §7)", () => {
     assert.ok(view?.erasures[0]?.receipt_at, "the expired public client could report receipt only because the sim treats its write as current");
   });
 
-  it("a revoked-with-keep copy stays usable with fresh status for as long as daily checks succeed", async () => {
-    const sim = new Sim({ policy: { pauseThresholdMs: 48 * HOUR } });
+  it("a revoked-with-keep copy stays usable for as long as the grant's surviving-use terms permit", async () => {
+    const sim = new Sim();
     sim.sync();
     await sim.client.reconcile();
     sim.as.end({ grantId: "g1", path: "owner_withdrawal", disposition: "keep" });
@@ -545,11 +527,11 @@ describe("journeys (converge-r1-astra §4, design-astra §7)", () => {
   });
 
   it("a subprocessor receives the original absolute deadlines and gets no fresh period", async () => {
-    const sim = new Sim({ policy: { disposeAt: "deadline", pauseThresholdMs: 48 * HOUR } });
+    const sim = new Sim({ policy: { disposeAt: "deadline" } });
     sim.sync();
     await sim.client.reconcile();
-    const useUntil0 = sim.sub.latest("g1")?.useUntil;
-    assert.equal(useUntil0, T0 + 48 * HOUR, "pause relayed as an absolute time");
+    assert.equal(sim.sub.latest("g1")?.usable, true);
+    assert.equal(sim.sub.latest("g1")?.useUntil, null, "no deadline is known, so none is relayed");
     sim.t += 3 * HOUR;
     sim.as.requestErasure({ grantId: "g1", origin: "owner_withdrawal" });
     await sim.client.reconcile();

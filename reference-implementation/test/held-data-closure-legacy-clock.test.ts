@@ -29,9 +29,9 @@ class ListedStore implements HeldStore {
 }
 
 const r: HeldRecordRef = { id: "r", stream: "s" };
-const policy = { retentionCeilingMs: 2 * DAY, longStopMs: DAY };
+const policy = { retentionCeilingMs: 2 * DAY };
 
-function longStopDisposedLegacy(t: { v: number }, storage?: MemoryClientCheckpointStorage) {
+function ceilingDisposedLegacy(t: { v: number }, storage?: MemoryClientCheckpointStorage) {
   const store = new ListedStore();
   const make = (initialize: boolean) => new HeldDataClient({
     now: () => t.v, status: unavailable, store, policy, initialize, ...(storage ? { storage } : {}),
@@ -39,50 +39,38 @@ function longStopDisposedLegacy(t: { v: number }, storage?: MemoryClientCheckpoi
   const c = make(true);
   assert.equal(c.acquire("g"), true);
   store.rows.push(r);
-  t.v = T0 + DAY;
+  t.v = T0 + 2 * DAY;
   void c.canUse("g");
-  assert.equal(c.grantState("g")?.deleteReason, "long_stop");
+  assert.equal(c.grantState("g")?.deleteReason, "retention_ceiling");
   assert.equal(store.rows.length, 0);
   return { c, store, make };
 }
 
 describe("legacy clock survives migration after disposal", () => {
-  it("a record re-delivered after the legacy copy's long-stop disposal and past its ceiling is not kept", () => {
+  it("a record re-delivered after the legacy copy's ceiling disposal is not kept", () => {
     const t = { v: T0 };
-    const { c, store } = longStopDisposedLegacy(t);
+    const { c, store } = ceilingDisposedLegacy(t);
     t.v = T0 + 3 * DAY;
     const kept = c.acquireRecords("g", [r]);
     store.rows.push(...kept);
-    assert.deepEqual(kept, [], "the copy was first acquired on day 0; its ceiling (day 2) has passed");
+    assert.deepEqual(kept, [], "the copy was first acquired on day 0; its ceiling (day 2) has passed and the clock outlives the disposal");
     assert.equal(store.rows.length, 0);
   });
 
   it("the same, after a restart restores the checkpoint", () => {
     const t = { v: T0 };
     const storage = new MemoryClientCheckpointStorage();
-    const { make } = longStopDisposedLegacy(t, storage);
+    const { make } = ceilingDisposedLegacy(t, storage);
     t.v = T0 + 3 * DAY;
     const restarted = make(false);
     assert.deepEqual(restarted.acquireRecords("g", [r]), []);
-  });
-
-  it("a record re-delivered between the long-stop and the ceiling keeps the original ceiling", () => {
-    const t = { v: T0 };
-    const { c } = longStopDisposedLegacy(t);
-    t.v = T0 + DAY + 12 * HOUR;
-    assert.equal(c.acquire("g"), true, "Core permits reading again after the disposal");
-    t.v += HOUR;
-    assert.equal(c.acquireRecords("g", [r]).length, 1);
-    const [rec] = c.grantState("g")?.records.values() ?? [];
-    assert.equal(rec?.firstAcquiredAt, T0, "the record counts from the first acquisition, not the reread");
-    assert.ok((c.deleteBy("g") ?? Number.POSITIVE_INFINITY) <= T0 + 2 * DAY);
   });
 
   it("a legacy copy that the store no longer lists (empty inventory) does not get a fresh clock", () => {
     const t = { v: T0 };
     const store = new ListedStore();
     const c = new HeldDataClient({
-      now: () => t.v, status: unavailable, store, initialize: true, policy: { retentionCeilingMs: 2 * DAY, longStopMs: null },
+      now: () => t.v, status: unavailable, store, initialize: true, policy: { retentionCeilingMs: 2 * DAY },
     });
     assert.equal(c.acquire("g"), true);
     t.v = T0 + DAY + 12 * HOUR;

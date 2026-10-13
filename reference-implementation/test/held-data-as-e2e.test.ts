@@ -2103,12 +2103,13 @@ describe("held-data lane integration over HTTP", () => {
       assert.equal(pending.status, 200);
       clock.now += 7 * DAY;
       await client.reconcile();
-      assert.deepEqual(client.canUse(g.grantId), { ok: false, reason: "stale" });
+      assert.deepEqual(client.canUse(g.grantId), { ok: true, until: null }, "AS silence starts no deadline");
+      clock.now += 2 * 60 * 60 * 1000; // powered off past the retry interval of the failed attempt
       client = new HeldDataClient(clientOpts);
       app.attach(client);
-      assert.equal(client.canUse(g.grantId).ok, false);
+      assert.equal(client.canUse(g.grantId).ok, false, "an attempt fell due while the client was off: it must start first");
       await client.reconcile();
-      assert.equal(client.canUse(g.grantId).ok, false);
+      assert.equal(client.canUse(g.grantId).ok, true, "a failed attempt does not stop use the grant permits");
       restore();
       assert.equal((await revokeToken(h, revocation)).status, 503, "restoration alone does not release pending actions");
       getHeldDataRuntime()!.authority.reestablishHistory();
@@ -2966,7 +2967,7 @@ describe("lane F: single-use read window", () => {
       await client.reconcile();
       assert.equal(client.grantState(g.grantId)?.readState, "window_closed");
       assert.equal(client.canUse(g.grantId).ok, true);
-      assert.equal(client.deleteBy(g.grantId), clock.now + 90 * DAY);
+      assert.equal(client.deleteBy(g.grantId), null, "no long-stop: surviving use has no deletion deadline without a retention limit");
       clock.now = expiry;
       assert.equal((await status(h, g.token, g.grantId)).body.grants[0]!.read_state, "expired");
       assert.equal((await owner(h, `/v1/owner/grants/${g.grantId}/lifecycle/erase`, "POST")).status, 200);
@@ -2981,7 +2982,7 @@ describe("lane F: single-use read window", () => {
 
 
 describe("lane F: P9 decommission", () => {
-  it("offers all grants, requires dispositions, persists retirement, and the client pauses then deletes", async () => {
+  it("offers all grants, requires dispositions, persists retirement, and the client keeps the data while the AS is gone", async () => {
     const clock = { now: Date.now() };
     await withServer(false, async (h) => {
       const live = await ordinaryGrant(h, { access_mode: "continuous" });
@@ -3029,15 +3030,16 @@ describe("lane F: P9 decommission", () => {
       const reopened = HeldDataAuthority.open({ journalPath: rt.authority.journalPath, now: () => clock.now });
       assert.equal(reopened.decommissioned, true);
       assert.equal((await status(h, live.token, live.grantId)).status, 503);
+      // Once the AS stops answering for good, the client keeps the data and may use it as the grant
+      // permits (here: no retention limit), however long the silence lasts.
       clock.now = origin + 7 * DAY;
       await client.tick();
-      assert.equal(client.canUse(live.grantId).ok, false);
+      assert.equal(client.canUse(live.grantId).ok, true);
       assert.equal(app.holds(live.grantId).records, 1);
       clock.now = origin + 90 * DAY;
       await client.tick();
-      assert.equal(app.holds(live.grantId).records, 0);
-      assert.equal(app.holds(live.grantId).summary, false);
-      assert.equal(app.holds(live.grantId).indexEntries, 0);
+      assert.equal(client.canUse(live.grantId).ok, true);
+      assert.equal(app.holds(live.grantId).records, 1);
     }, heldDataOpts(clock));
   });
 
