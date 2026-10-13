@@ -36,6 +36,7 @@ import { closeDb, initDb } from "../server/db.ts";
 import { OWNER_AUTH_DEFAULT_SUBJECT_ID } from "../server/owner-auth.ts";
 import {
   aggregateRecordsAcrossBindings as aggregateRecordsAcrossBindingsUntyped,
+  deleteRecord,
   getRecordAcrossBindings,
   ingestRecord,
   listStreamsAcrossBindings as listStreamsAcrossBindingsUntyped,
@@ -54,7 +55,12 @@ interface RecordListWarning {
 interface RecordListResponse {
   data: Record<string, unknown>[];
   has_more: boolean;
-  meta?: { count?: unknown; warnings?: RecordListWarning[]; window?: unknown; [key: string]: unknown };
+  meta?: {
+    count?: unknown;
+    warnings?: RecordListWarning[];
+    window?: unknown;
+    [key: string]: unknown;
+  };
   next_changes_since?: string;
   next_cursor?: string | null;
   object: string;
@@ -136,7 +142,10 @@ interface AggregateResponseBase {
   granularity: string | null;
   group_by: string | null;
   group_by_time: string | null;
-  meta?: { warnings?: Array<{ code: string; [key: string]: unknown }>; [key: string]: unknown };
+  meta?: {
+    warnings?: Array<{ code: string; [key: string]: unknown }>;
+    [key: string]: unknown;
+  };
   metric: string;
   object: string;
   stream: string;
@@ -218,6 +227,243 @@ const STREAM = "messages";
 const INSTANCE_A = "cin_fanin_account_a";
 const INSTANCE_B = "cin_fanin_account_b";
 const INSTANCE_C = "cin_fanin_account_c";
+
+test("pairwise prototype globally pages two instances without collapsing cursors", async () => {
+  process.env.PDPP_EXPERIMENTAL_PAIRWISE_INSTANCE_IDENTITY = "1";
+  try {
+    await withDualConnectionDb(async () => {
+      const bindings = [
+        {
+          connectorId: CONNECTOR_ID,
+          connectorInstanceId: INSTANCE_A,
+          instanceId: "inst_z",
+        },
+        {
+          connectorId: CONNECTOR_ID,
+          connectorInstanceId: INSTANCE_B,
+          instanceId: "inst_a",
+        },
+      ];
+      const seen: string[] = [];
+      let cursor: string | null | undefined;
+      do {
+        const page = await queryRecordsAcrossBindings(
+          bindings,
+          STREAM,
+          grant,
+          { order: "asc", limit: "1", ...(cursor ? { cursor } : {}) },
+          baseManifest
+        );
+        assert.equal(page.data.length, 1);
+        seen.push(String(page.data[0]?.id));
+        cursor = page.next_cursor;
+        assert.equal(page.has_more, Boolean(cursor));
+      } while (cursor);
+      assert.deepEqual(seen, ["rec-a-1", "shared-id", "rec-b-1", "shared-id"]);
+      await assert.rejects(
+        queryRecordsAcrossBindings(bindings, STREAM, grant, { limit: "1", cursor: "unknown" }, baseManifest),
+        (error: unknown) => hasCode(error) && error.code === "invalid_cursor"
+      );
+    });
+  } finally {
+    delete process.env.PDPP_EXPERIMENTAL_PAIRWISE_INSTANCE_IDENTITY;
+  }
+});
+
+test("pairwise prototype detail requires an instance even when the key exists once", async () => {
+  process.env.PDPP_EXPERIMENTAL_PAIRWISE_INSTANCE_IDENTITY = "1";
+  try {
+    await withDualConnectionDb(async () => {
+      await assert.rejects(
+        getRecordAcrossBindings(
+          [
+            { connectorId: CONNECTOR_ID, connectorInstanceId: INSTANCE_A },
+            { connectorId: CONNECTOR_ID, connectorInstanceId: INSTANCE_B },
+          ],
+          STREAM,
+          "rec-a-1",
+          grant,
+          baseManifest
+        ),
+        (error: unknown) => hasCode(error) && error.code === "invalid_request"
+      );
+    });
+  } finally {
+    delete process.env.PDPP_EXPERIMENTAL_PAIRWISE_INSTANCE_IDENTITY;
+  }
+});
+
+test("pairwise descending sort keeps missing values last and honors narrower requested fields", async () => {
+  process.env.PDPP_EXPERIMENTAL_PAIRWISE_INSTANCE_IDENTITY = "1";
+  try {
+    await withDualConnectionDb(async () => {
+      const manifest = {
+        ...baseManifest,
+        streams: baseManifest.streams.map((stream) => ({
+          ...stream,
+          cursor_field: "rank",
+          schema: {
+            ...stream.schema,
+            properties: {
+              ...stream.schema.properties,
+              rank: { type: "integer" },
+            },
+          },
+        })),
+      };
+      await registerConnector(manifest);
+      for (const [instance, key, rank] of [
+        [INSTANCE_A, "rec-a-1", 1],
+        [INSTANCE_B, "rec-b-1", 2],
+      ] as const) {
+        const record = recordPayload(key, "ranked", "2026-05-18T12:00:00.000Z");
+        await ingestRecord(target(instance), {
+          ...record,
+          data: { ...record.data, rank },
+        });
+      }
+      const bindings = [
+        {
+          connectorId: CONNECTOR_ID,
+          connectorInstanceId: INSTANCE_A,
+          instanceId: "inst_z",
+        },
+        {
+          connectorId: CONNECTOR_ID,
+          connectorInstanceId: INSTANCE_B,
+          instanceId: "inst_a",
+        },
+      ];
+      const page = await queryRecordsAcrossBindings(
+        bindings,
+        STREAM,
+        grant,
+        { order: "desc", fields: ["id"], limit: "10" },
+        manifest
+      );
+      assert.deepEqual(
+        page.data.map((record) => record.id),
+        ["rec-b-1", "rec-a-1", "shared-id", "shared-id"]
+      );
+      for (const record of page.data) assert.deepEqual(Object.keys(record.data as object), ["id"]);
+    });
+  } finally {
+    delete process.env.PDPP_EXPERIMENTAL_PAIRWISE_INSTANCE_IDENTITY;
+  }
+});
+
+test("pairwise changes pages preserve duplicate keys and order tombstones by instance and key", async () => {
+  process.env.PDPP_EXPERIMENTAL_PAIRWISE_INSTANCE_IDENTITY = "1";
+  try {
+    await withDualConnectionDb(async () => {
+      const bindings = [
+        {
+          connectorId: CONNECTOR_ID,
+          connectorInstanceId: INSTANCE_A,
+          instanceId: "inst_z",
+        },
+        {
+          connectorId: CONNECTOR_ID,
+          connectorInstanceId: INSTANCE_B,
+          instanceId: "inst_a",
+        },
+      ];
+      const seen: string[] = [];
+      let cursor: string | null | undefined;
+      let checkpoint: string | null | undefined;
+      do {
+        const result = await queryRecordsAcrossBindings(
+          bindings,
+          STREAM,
+          grant,
+          {
+            order: "asc",
+            changes_since: "beginning",
+            ...(cursor ? { cursor } : {}),
+            limit: "1",
+          },
+          baseManifest
+        );
+        seen.push(`${result.data[0]?.instance_id}:${result.data[0]?.id}`);
+        cursor = result.next_cursor;
+        checkpoint = result.next_changes_since;
+      } while (cursor);
+      assert.deepEqual(seen, ["inst_a:rec-b-1", "inst_a:shared-id", "inst_z:rec-a-1", "inst_z:shared-id"]);
+      assert.ok(checkpoint);
+      await deleteRecord(target(INSTANCE_A), STREAM, "shared-id");
+      await ingestRecord(target(INSTANCE_B), recordPayload("shared-id", "updated B", "2026-05-18T12:03:00.000Z"));
+      const changes = await queryRecordsAcrossBindings(
+        bindings,
+        STREAM,
+        grant,
+        { order: "asc", changes_since: checkpoint, limit: "10" },
+        baseManifest
+      );
+      assert.deepEqual(
+        changes.data.map((record) => [record.instance_id, record.id, Boolean(record.deleted)]),
+        [
+          ["inst_a", "shared-id", false],
+          ["inst_z", "shared-id", true],
+        ]
+      );
+    });
+  } finally {
+    delete process.env.PDPP_EXPERIMENTAL_PAIRWISE_INSTANCE_IDENTITY;
+  }
+});
+
+test("pairwise changes exhaust more than one storage page in a single instance", async () => {
+  process.env.PDPP_EXPERIMENTAL_PAIRWISE_INSTANCE_IDENTITY = "1";
+  try {
+    await withSingleConnectionDb(async () => {
+      for (let index = 0; index < 1001; index += 1)
+        await ingestRecord(
+          target(INSTANCE_A),
+          recordPayload(`bulk-${String(index).padStart(4, "0")}`, "bulk", "2026-05-18T12:00:00.000Z"),
+          { deferIndexes: true }
+        );
+      const bindings = [
+        {
+          connectorId: CONNECTOR_ID,
+          connectorInstanceId: INSTANCE_A,
+          instanceId: "inst_a",
+        },
+      ];
+      let cursor: string | null | undefined;
+      let count = 0;
+      let checkpoint: string | null | undefined;
+      do {
+        const page = await queryRecordsAcrossBindings(
+          bindings,
+          STREAM,
+          grant,
+          {
+            order: "asc",
+            changes_since: "beginning",
+            limit: "1000",
+            ...(cursor ? { cursor } : {}),
+          },
+          baseManifest
+        );
+        count += page.data.length;
+        cursor = page.next_cursor;
+        checkpoint = page.next_changes_since;
+      } while (cursor);
+      assert.equal(count, 1003);
+      assert.ok(checkpoint);
+      const noChanges = await queryRecordsAcrossBindings(
+        bindings,
+        STREAM,
+        grant,
+        { order: "asc", changes_since: checkpoint },
+        baseManifest
+      );
+      assert.deepEqual(noChanges.data, []);
+    });
+  } finally {
+    delete process.env.PDPP_EXPERIMENTAL_PAIRWISE_INSTANCE_IDENTITY;
+  }
+});
 
 const baseManifest = {
   capabilities: { human_interaction: [] },

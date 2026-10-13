@@ -71,7 +71,7 @@
     "@pdpp/connector-protocol": "*",
     "@pdpp/display": "*",
     "@pdpp/mcp-server": "*",
-    "@pdpp/reference-contract": "file:./vendor/pdpp-reference-contract-0.1.0.tgz",
+    "@pdpp/reference-contract": "file:./vendor/pdpp-reference-contract-0.1.0-proto.1.tgz",
     "@streamparser/json": "^0.0.25",
     "@types/pg": "8.23.1",
     "ajv": "^8.20.0",

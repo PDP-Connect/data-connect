@@ -33,11 +33,6 @@ import {
 import { postgresEmitSpineEventInTransaction } from "../lib/postgres-spine.ts";
 import { createTraceContext, emitSpineEvent as emitRawSpineEvent, type SpineEventInput } from "../lib/spine.ts";
 import type { CimdFetchDependencies, CimdTransportFailureEvent } from "./cimd.ts";
-import {
-  OAUTH_JWT_BEARER_CLIENT_ASSERTION_TYPE,
-  clientAssertionIssuer,
-  verifyPrivateKeyJwtClientAssertion,
-} from "./oauth-client-auth.ts";
 import { listActiveBindingsForGrant, projectBindingForWire } from "./connection-identity.ts";
 import { canonicalConnectorKey, canonicalConnectorKeyFromManifest, legacyLocalAliasMap } from "./connector-key.ts";
 import {
@@ -51,16 +46,18 @@ import {
   coreSchemaRequiredFields,
   createRetainedCoreConsentSnapshot,
   materializeCoreResolvedGrant,
+  parseCoreResolvedGrant,
   readRetainedCoreConsentSnapshot,
   resolveCoreEligibleInstanceIds,
   validateCoreSelectionRequest,
 } from "./core-source-authorization.ts";
 import { getDb, runWithSqliteBusyRetry } from "./db.ts";
+import { deriveGrantLifecycle, derivePackageLifecycle, type PackageMemberLifecycleInput } from "./grant-lifecycle.ts";
 import {
-  derivePackageLifecycle,
-  deriveGrantLifecycle,
-  type PackageMemberLifecycleInput,
-} from "./grant-lifecycle.ts";
+  clientAssertionIssuer,
+  OAUTH_JWT_BEARER_CLIENT_ASSERTION_TYPE,
+  verifyPrivateKeyJwtClientAssertion,
+} from "./oauth-client-auth.ts";
 import {
   base64UrlSha256,
   generateOAuthRefreshToken,
@@ -69,13 +66,20 @@ import {
   PKCE_CODE_VERIFIER_RE,
   SUPPORTED_AUTHORIZATION_CODE_CHALLENGE_METHODS,
 } from "./oauth-substrate/primitives.ts";
+import {
+  buildPairwiseInstanceBindings,
+  buildPairwiseOwnerBindings,
+  getPairwiseHandle,
+  pairwiseInstanceIdentityEnabled,
+  projectPairwiseGrant,
+  resolvePairwiseInstanceHandle,
+} from "./pairwise-identity.ts";
+import {
+  invalidatePairwiseQuerySessionsPostgres,
+  invalidatePairwiseQuerySessionsSqlite,
+} from "./pairwise-query-sessions.ts";
 import { isPostgresStorageBackend, postgresQuery, withPostgresTransaction } from "./postgres-storage.ts";
 import { REUSED_OWNER_BEARER_CLIENT_IDS } from "./reference-local-defaults.ts";
-import {
-  lockOwnerPasswordVerifierRevision,
-  ownerPasswordVerifierRevision,
-} from "./stores/owner-password-verifier-store.ts";
-import { type RetiredClientCleanup, retireFormerPreRegisteredClients } from "./stores/owner-session-store.ts";
 import { buildGrantedAuthorizationDetail } from "./source-approved-authorization.ts";
 import { snapshotSourceDeclaration } from "./source-declaration.ts";
 import { snapshotContentAddressedSourceDeclarationFromLegacyConnectorManifest } from "./source-declaration-legacy-collection.ts";
@@ -90,6 +94,11 @@ import {
   makeDefaultAccountConnectorInstanceId,
   resolveOwnerConnectorInstanceNamespace,
 } from "./stores/connector-instance-store.ts";
+import {
+  lockOwnerPasswordVerifierRevision,
+  ownerPasswordVerifierRevision,
+} from "./stores/owner-password-verifier-store.ts";
+import { type RetiredClientCleanup, retireFormerPreRegisteredClients } from "./stores/owner-session-store.ts";
 import {
   buildDomainControlTrustSignal,
   parseTrustSignal,
@@ -2515,7 +2524,48 @@ async function resolveSnapshotStreamsForApproval(
   return projectResolvedGrantStreams(eligibleStreams);
 }
 
-function resolvePendingRequestForApproval(
+async function resolveClientRequestInstanceHandles(
+  streams: StreamSelection[],
+  request: Partial<PendingRequest>,
+  subjectId: string
+): Promise<StreamSelection[]> {
+  if (!pairwiseInstanceIdentityEnabled()) {
+    return streams;
+  }
+  const { sourceBinding } = requireStructuredPendingRequestBindings(request);
+  const clientId = request.client?.client_id;
+  if (!isNonEmptyString(clientId)) {
+    throw bindingError("invalid_request", "Request client identity is missing");
+  }
+  return await Promise.all(
+    streams.map(async (stream) => ({
+      ...stream,
+      ...(stream.instance_ids
+        ? {
+            instance_ids: await Promise.all(
+              stream.instance_ids.map(async (handle) => {
+                const internalId = await resolvePairwiseInstanceHandle({
+                  clientId,
+                  handle,
+                  sourceId: sourceBinding.id,
+                  subjectId,
+                });
+                if (!internalId) {
+                  throw bindingError(
+                    "invalid_request",
+                    "Requested instance handle is unknown for this client and source"
+                  );
+                }
+                return internalId;
+              })
+            ),
+          }
+        : {}),
+    }))
+  );
+}
+
+async function resolvePendingRequestForApproval(
   request: Partial<PendingRequest>,
   sourceBinding: SourceBinding,
   storageBinding: StorageBinding,
@@ -2523,7 +2573,7 @@ function resolvePendingRequestForApproval(
 ): Promise<ResolvedGrantStream[]> {
   const snapshot = readRetainedSourceDeclarationSnapshot(request);
   return resolveSnapshotStreamsForApproval(
-    cloneJson(snapshot.resolved_streams),
+    await resolveClientRequestInstanceHandles(cloneJson(snapshot.resolved_streams), request, subjectId),
     sourceBinding,
     storageBinding,
     subjectId,
@@ -2858,7 +2908,9 @@ const postgresOwnerDeviceAuthStore: OwnerDeviceAuthStore = {
               [input.authorizationFence.sessionIdHash, input.subjectId, Math.floor(Date.now() / 1000)]
             )
           ).rows[0];
-          if (!session) throw buildOwnerDeviceApprovalSessionConflictError();
+          if (!session) {
+            throw buildOwnerDeviceApprovalSessionConflictError();
+          }
         } else if (!hasRevisionFence) {
           throw buildOwnerDeviceApprovalSessionConflictError();
         }
@@ -3071,7 +3123,9 @@ const sqliteOwnerDeviceAuthStore: OwnerDeviceAuthStore = {
               input.subjectId,
               Math.floor(Date.now() / 1000)
             );
-          if (!session) throw buildOwnerDeviceApprovalSessionConflictError();
+          if (!session) {
+            throw buildOwnerDeviceApprovalSessionConflictError();
+          }
         } else if (!hasRevisionFence) {
           throw buildOwnerDeviceApprovalSessionConflictError();
         }
@@ -3679,17 +3733,23 @@ function normalizeApprovalReviewClientClaims(raw: unknown): { commitments: strin
   return commitments.length > 0 ? { commitments } : null;
 }
 
-function buildApprovalReviewArtifact(input: {
+async function buildApprovalReviewArtifact(input: {
   aiTrainingConsented: boolean | null;
   client: unknown;
   expiresAt: string | null;
   request: PendingRequest;
   resolvedStreams: ResolvedGrantStream[] | StreamSelection[];
   subjectId: string;
-}): { artifactJson: string; digest: string; revision: string } {
+}): Promise<{ artifactJson: string; digest: string; revision: string }> {
   const { request } = input;
   const snapshot = readRetainedSourceDeclarationSnapshot(request);
   const { selection } = request;
+  const identity = await projectReviewIdentity(
+    input.subjectId,
+    input.client,
+    requireStructuredPendingRequestBindings(request).sourceBinding.id,
+    input.resolvedStreams
+  );
   const artifact = {
     access_mode: selection.access_mode,
     ai_training_consented: input.aiTrainingConsented,
@@ -3698,12 +3758,12 @@ function buildApprovalReviewArtifact(input: {
     expires_at: input.expiresAt,
     purpose_code: selection.purpose_code,
     purpose_description: selection.purpose_description ?? null,
-    resolved_streams: input.resolvedStreams,
+    resolved_streams: identity.streams,
     retention: selection.retention ?? null,
     selection_preset: selection.selection_preset ?? null,
     source: describeSourceBinding(request.source_binding),
     source_declaration: buildApprovalReviewSourceDeclaration(snapshot),
-    subject: { id: input.subjectId },
+    subject: { id: identity.subjectId },
     version: "reference.approval-review.v1",
   };
   const artifactJson = canonicalApprovalReviewJson(artifact);
@@ -3723,7 +3783,28 @@ function buildApprovalReviewSourceDeclaration(snapshot: SourceDeclarationSnapsho
   };
 }
 
-function buildBatchApprovalReviewArtifact(input: {
+async function projectReviewIdentity(
+  subjectId: string,
+  client: unknown,
+  sourceId: string,
+  streams: ResolvedGrantStream[] | StreamSelection[]
+) {
+  if (!pairwiseInstanceIdentityEnabled()) {
+    return { streams, subjectId };
+  }
+  if (!(isRecord(client) && isNonEmptyString(client.client_id))) {
+    throw bindingError("invalid_request", "Review client identity is missing");
+  }
+  const projected = await projectPairwiseGrant({
+    client: { client_id: client.client_id },
+    source: { id: sourceId },
+    streams,
+    subject: { id: subjectId },
+  });
+  return { streams: projected.streams, subjectId: projected.subject.id };
+}
+
+async function buildBatchApprovalReviewArtifact(input: {
   approvedIndexes: number[];
   client: unknown;
   entries: {
@@ -3735,8 +3816,9 @@ function buildBatchApprovalReviewArtifact(input: {
   parentPackageId: string | null;
   sourceNarrowing: Record<string, unknown>;
   subjectId: string;
-}): { artifactJson: string; digest: string; revision: string } {
+}): Promise<{ artifactJson: string; digest: string; revision: string }> {
   const [firstEntry] = input.entries;
+  const identity = await projectReviewIdentity(input.subjectId, input.client, "", []);
   const artifact = {
     access_mode: firstEntry ? firstEntry.request.selection.access_mode : null,
     approved_source_indexes: input.approvedIndexes,
@@ -3744,22 +3826,30 @@ function buildBatchApprovalReviewArtifact(input: {
     expires_at: input.expiresAt,
     parent_package_id: input.parentPackageId,
     source_narrowing: input.sourceNarrowing,
-    sources: input.entries.map(({ index, request, resolvedStreams }) => {
-      const snapshot = readRetainedSourceDeclarationSnapshot(request);
-      return {
-        access_mode: request.selection.access_mode,
-        client_claims: normalizeApprovalReviewClientClaims(request.selection.client_claims),
-        index,
-        purpose_code: request.selection.purpose_code,
-        purpose_description: request.selection.purpose_description ?? null,
-        resolved_streams: resolvedStreams,
-        retention: request.selection.retention ?? null,
-        selection_preset: request.selection.selection_preset ?? null,
-        source: describeSourceBinding(request.source_binding),
-        source_declaration: buildApprovalReviewSourceDeclaration(snapshot),
-      };
-    }),
-    subject: { id: input.subjectId },
+    sources: await Promise.all(
+      input.entries.map(async ({ index, request, resolvedStreams }) => {
+        const snapshot = readRetainedSourceDeclarationSnapshot(request);
+        const sourceIdentity = await projectReviewIdentity(
+          input.subjectId,
+          input.client,
+          requireStructuredPendingRequestBindings(request).sourceBinding.id,
+          resolvedStreams
+        );
+        return {
+          access_mode: request.selection.access_mode,
+          client_claims: normalizeApprovalReviewClientClaims(request.selection.client_claims),
+          index,
+          purpose_code: request.selection.purpose_code,
+          purpose_description: request.selection.purpose_description ?? null,
+          resolved_streams: sourceIdentity.streams,
+          retention: request.selection.retention ?? null,
+          selection_preset: request.selection.selection_preset ?? null,
+          source: describeSourceBinding(request.source_binding),
+          source_declaration: buildApprovalReviewSourceDeclaration(snapshot),
+        };
+      })
+    ),
+    subject: { id: identity.subjectId },
     version: "reference.batch-approval-review.v1",
   };
   const artifactJson = canonicalApprovalReviewJson(artifact);
@@ -3772,16 +3862,24 @@ async function persistApprovalReviewArtifact(input: {
   artifactJson: string;
   digest: string;
   revision: string;
+  subjectId: string;
 }): Promise<void> {
   if (isPostgresStorageBackend()) {
     const result = await postgresQuery(
       `UPDATE pending_consents
           SET approval_review_revision = $2,
               approval_review_digest = $3,
-              approval_review_json = $4::jsonb
+              approval_review_json = $4::jsonb,
+              subject_id = COALESCE($5, subject_id)
         WHERE device_code = $1
           AND status = 'pending'`,
-      [input.deviceCode, input.revision, input.digest, input.artifactJson]
+      [
+        input.deviceCode,
+        input.revision,
+        input.digest,
+        input.artifactJson,
+        pairwiseInstanceIdentityEnabled() ? input.subjectId : null,
+      ]
     );
     if (result.rowCount !== 1) {
       const err: AuthError = new Error("Pending consent approval conflict");
@@ -3794,10 +3892,17 @@ async function persistApprovalReviewArtifact(input: {
     `UPDATE pending_consents
         SET approval_review_revision = ?,
             approval_review_digest = ?,
-            approval_review_json = ?
+            approval_review_json = ?,
+            subject_id = COALESCE(?, subject_id)
       WHERE device_code = ?
         AND status = 'pending'`,
-    [input.revision, input.digest, input.artifactJson, input.deviceCode]
+    [
+      input.revision,
+      input.digest,
+      input.artifactJson,
+      pairwiseInstanceIdentityEnabled() ? input.subjectId : null,
+      input.deviceCode,
+    ]
   );
   if (result.changes !== 1) {
     const err: AuthError = new Error("Pending consent approval conflict");
@@ -3806,15 +3911,15 @@ async function persistApprovalReviewArtifact(input: {
   }
 }
 
-function requireMatchingApprovalReview(
+async function requireMatchingApprovalReview(
   row: PendingConsentRow,
   revision: unknown
-): {
+): Promise<{
   aiTrainingConsented: boolean | null;
   expiresAt: string | null;
   resolvedStreams: ResolvedGrantStream[];
   subjectId: string;
-} {
+}> {
   if (!isNonEmptyString(revision)) {
     throw bindingError("invalid_request", "approval_review_revision is required");
   }
@@ -3828,11 +3933,44 @@ function requireMatchingApprovalReview(
   if (!(isRecord(parsed.subject) && isNonEmptyString(parsed.subject.id))) {
     throw bindingError("invalid_request", "Pending consent review subject is malformed; review the request again");
   }
+  let subjectId = parsed.subject.id;
+  let resolvedStreams = parsed.resolved_streams as ResolvedGrantStream[];
+  if (pairwiseInstanceIdentityEnabled()) {
+    if (!(isNonEmptyString(row.subject_id) && isRecord(parsed.client) && isNonEmptyString(parsed.client.client_id))) {
+      throw bindingError("invalid_request", "Pairwise review identity is unavailable; review again");
+    }
+    subjectId = row.subject_id;
+    const scope = { clientId: parsed.client.client_id, subjectId };
+    const expected = await getPairwiseHandle({ ...scope, internalId: subjectId, kind: "subject" });
+    if (expected !== parsed.subject.id) {
+      throw bindingError("invalid_request", "Pairwise review subject is inconsistent");
+    }
+    if (Array.isArray(resolvedStreams)) {
+      if (!(isRecord(parsed.source) && isNonEmptyString(parsed.source.id))) {
+        throw bindingError("invalid_request", "Pairwise review source is missing");
+      }
+      const sourceId = parsed.source.id;
+      resolvedStreams = await Promise.all(
+        resolvedStreams.map(async (stream) => ({
+          ...stream,
+          instance_ids: await Promise.all(
+            (stream.instance_ids ?? []).map(async (handle) => {
+              const internalId = await resolvePairwiseInstanceHandle({ ...scope, handle, sourceId });
+              if (!internalId) {
+                throw bindingError("invalid_request", "Pairwise review instance is unavailable; review again");
+              }
+              return internalId;
+            })
+          ),
+        }))
+      );
+    }
+  }
   return {
     aiTrainingConsented: typeof parsed.ai_training_consented === "boolean" ? parsed.ai_training_consented : null,
     expiresAt: typeof parsed.expires_at === "string" ? parsed.expires_at : null,
-    resolvedStreams: parsed.resolved_streams as ResolvedGrantStream[],
-    subjectId: parsed.subject.id,
+    resolvedStreams,
+    subjectId,
   };
 }
 
@@ -6175,7 +6313,7 @@ function buildBatchConsentCards(request: StagedBatchRequest): Record<string, unk
       client_claims: entry.selection?.client_claims ?? null,
       index,
       manifestStreamNames: Array.isArray(snapshot.declaration.streams)
-        ? snapshot.declaration.streams.map((stream) => stream.name).filter((name) => typeof name === "string")
+        ? (snapshot.declaration.streams ?? []).map((stream) => stream.name).filter((name) => typeof name === "string")
         : null,
       purpose_code: entry.selection?.purpose_code || null,
       resolvedStreams,
@@ -6515,7 +6653,11 @@ async function getPendingConsentBatch(
       const batchState = await buildReviewedBatchApprovalState(request, row, opts.subjectId, {
         ...opts,
       });
-      await persistApprovalReviewArtifact({ deviceCode: row.device_code, ...batchState.review });
+      await persistApprovalReviewArtifact({
+        deviceCode: row.device_code,
+        subjectId: opts.subjectId,
+        ...batchState.review,
+      });
       const persisted = await readValidatedPersistedApprovalReview(row.device_code);
       review = persisted.artifact;
       reviewArtifact = persisted.artifactJson;
@@ -6742,7 +6884,7 @@ async function approveStagedGrantBatch(
 ): Promise<{ grant: DbRow; package: boolean; package_id: string; token: string }> {
   const traceContext = requirePersistedPendingTraceContext(pending);
   request.trace_context = traceContext;
-  const reviewed = requireMatchingApprovalReview(pending as PendingConsentRow, opts.approval_review_revision);
+  const reviewed = await requireMatchingApprovalReview(pending as PendingConsentRow, opts.approval_review_revision);
   const { subjectId } = reviewed;
   const persistedOptions = persistedBatchReviewOptions(pending as PendingConsentRow);
   // The re-resolution inside the batch state needs the issuer origin: a CIMD
@@ -6810,7 +6952,12 @@ async function buildReviewedBatchApprovalState(
       const { sourceBinding, storageBinding } = requireStructuredPendingRequestBindings(slice);
       entry.source_binding = describeSourceBinding(sourceBinding);
       entry.storage_binding = normalizeStorageBinding(storageBinding);
-      const baselineStreams = resolvePendingRequestAgainstSnapshot(slice);
+      // biome-ignore lint/performance/noAwaitInLoops: Resolve each retained source before applying its ordered approval narrowing.
+      const baselineStreams = await resolveClientRequestInstanceHandles(
+        resolvePendingRequestAgainstSnapshot(slice),
+        slice,
+        subjectId
+      );
       const retainedDeclaration = readRetainedSourceDeclarationSnapshot(slice).declaration;
       // Apply owner per-source narrowing against the staged resolved baseline.
       // narrowResolvedSelectionForSource proves the result is a subset/tightening
@@ -6861,7 +7008,7 @@ async function buildReviewedBatchApprovalState(
     firstResolvedEntry.entry.selection.access_mode === "single_use"
       ? (opts.reviewExpiresAt ?? new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString())
       : null;
-  const review = buildBatchApprovalReviewArtifact({
+  const review = await buildBatchApprovalReviewArtifact({
     approvedIndexes,
     client: request.client,
     entries: resolvedEntries.map((entry) => ({
@@ -7376,7 +7523,9 @@ async function resolveSingleConsentReviewStreams(
   storageBinding: StorageBinding,
   opts: PendingConsentDisplayOptions
 ): Promise<ResolvedGrantStream[] | StreamSelection[]> {
-  const baselineStreams = resolvePendingRequestAgainstSnapshot(request);
+  const baselineStreams = opts.subjectId
+    ? await resolveClientRequestInstanceHandles(resolvePendingRequestAgainstSnapshot(request), request, opts.subjectId)
+    : resolvePendingRequestAgainstSnapshot(request);
   const sourceNarrowing = opts.sourceNarrowing && typeof opts.sourceNarrowing === "object" ? opts.sourceNarrowing : {};
   requireNumericObjectKeys(sourceNarrowing, "source_narrowing");
   requireApprovedSourceNarrowings(sourceNarrowing, [0]);
@@ -7436,12 +7585,12 @@ export async function getPendingConsent(
     const snapshot = readRetainedSourceDeclarationSnapshot(request);
     resolvedStreams = await resolveSingleConsentReviewStreams(request, sourceBinding, storageBinding, opts);
     manifestStreamNames = Array.isArray(snapshot.declaration.streams)
-      ? snapshot.declaration.streams.map((stream) => stream.name).filter((name) => typeof name === "string")
+      ? (snapshot.declaration.streams ?? []).map((stream) => stream.name).filter((name) => typeof name === "string")
       : null;
     if (opts.finalizeReview && opts.subjectId) {
       const aiTrainingConsented = coerceAiTrainingConsent(opts.ai_training_consented);
       requireReviewedAiTrainingConsent(request.selection, aiTrainingConsented);
-      const artifact = buildApprovalReviewArtifact({
+      const artifact = await buildApprovalReviewArtifact({
         aiTrainingConsented,
         client: request.client,
         expiresAt:
@@ -7452,7 +7601,7 @@ export async function getPendingConsent(
         resolvedStreams: resolvedStreams ?? [],
         subjectId: opts.subjectId,
       });
-      await persistApprovalReviewArtifact({ deviceCode, ...artifact });
+      await persistApprovalReviewArtifact({ deviceCode, subjectId: opts.subjectId, ...artifact });
       const persisted = await readValidatedPersistedApprovalReview(deviceCode);
       review = persisted.artifact;
       row.approval_review_digest = persisted.digest;
@@ -7537,7 +7686,7 @@ export async function approveGrant(
     return approveStagedGrantBatch(deviceCode, pending, request, opts);
   }
   requireStructuredPendingRequestShape(request);
-  const reviewed = requireMatchingApprovalReview(pending, opts.approval_review_revision);
+  const reviewed = await requireMatchingApprovalReview(pending, opts.approval_review_revision);
   const { aiTrainingConsented, subjectId } = reviewed;
   const traceContext = requirePersistedPendingTraceContext(pending);
   request.trace_context = traceContext;
@@ -7573,7 +7722,7 @@ export async function approveGrant(
   const { expiresAt } = reviewed;
 
   const persistedStorageBinding = normalizeStorageBinding(storageBinding);
-  const approvalArtifact = buildApprovalReviewArtifact({
+  const approvalArtifact = await buildApprovalReviewArtifact({
     aiTrainingConsented,
     client: request.client,
     expiresAt,
@@ -7645,12 +7794,6 @@ export async function approveGrant(
     }),
     reviewedRevision: approvalArtifact.revision,
     subjectId,
-    // The signal from the resolution that immediately precedes issuance, which is
-    // the one the AS actually relied on to issue this grant. `requirePendingRequest
-    // ClientRegistration` re-resolved the identity a moment ago, so its lookup time
-    // is the truthful one; the PAR-time signal describes a reliance that only got
-    // the request as far as a reviewable consent.
-    trustSignal: registeredClient.trust_signal ?? null,
     tokenIssuedEvent: (tokenId) =>
       buildTokenIssuedEventInput({
         clientId: registeredClient.client_id,
@@ -7661,9 +7804,15 @@ export async function approveGrant(
         traceContext,
       }),
     traceContext,
+    // The signal from the resolution that immediately precedes issuance, which is
+    // the one the AS actually relied on to issue this grant. `requirePendingRequest
+    // ClientRegistration` re-resolved the identity a moment ago, so its lookup time
+    // is the truthful one; the PAR-time signal describes a reliance that only got
+    // the request as far as a reviewable consent.
+    trustSignal: registeredClient.trust_signal ?? null,
   });
 
-  return { grant, token };
+  return { grant: await projectPairwiseGrant(grant), token };
 }
 
 async function resumeApprovedGrant(
@@ -7718,7 +7867,11 @@ async function resumeApprovedGrant(
   if (!isRecord(grant) || grant.grant_id !== pending.grant_id) {
     throw bindingError("grant_invalid", "Approved consent grant is malformed");
   }
-  return { grant, token: pending.token_id };
+  const projected = await projectPairwiseGrant(parseCoreResolvedGrant(grant));
+  return {
+    grant: { ...projected, streams: projected.streams.map((stream) => ({ ...stream })) },
+    token: pending.token_id,
+  };
 }
 
 function buildGrantScopedDeviceExchangeError(code: string, message: string, row: DbRow | null = null): AuthError {
@@ -10146,7 +10299,9 @@ export async function exchangeOAuthAuthorizationCode({
 
   const tokenInfo = await requireOAuthAuthorizationCodeTokenInfo(row, normalized.clientId);
   if (row.grant_id) {
-    response.authorization_details = [buildGrantedAuthorizationDetail(tokenInfo.grant)];
+    response.authorization_details = pairwiseInstanceIdentityEnabled()
+      ? [{ grant: tokenInfo.pairwise_grant, type: "https://pdpp.dev/data-access" }]
+      : [buildGrantedAuthorizationDetail(tokenInfo.grant)];
   }
   const refresh =
     clientSupportsOAuthRefreshToken(registeredClient) && (await authorizationCodeBindingSupportsRefresh(row, tokenInfo))
@@ -11021,6 +11176,9 @@ export async function consumeConsentExchangeCode(
           };
         }
       );
+  if (result.ok && "grantId" in result && pairwiseInstanceIdentityEnabled()) {
+    return { ...result, grant: { ...(await projectPairwiseGrant(parseCoreResolvedGrant(result.grant))) } };
+  }
   return result;
 }
 
@@ -11989,13 +12147,41 @@ export async function introspect(token: unknown): Promise<TokenIntrospectionResu
   if (row.token_kind === "owner" && row.client_id) {
     result.client_id = row.client_id;
   }
+  if (row.token_kind === "owner" && pairwiseInstanceIdentityEnabled()) {
+    result.pdpp_instance_bindings = await buildPairwiseOwnerBindings(row.subject_id);
+  }
 
   if (row.token_kind === "mcp_package") {
     return enrichPackageTokenIntrospection(row, result);
   }
 
   if (row.token_kind === "client") {
-    return enrichClientTokenIntrospection(row, result);
+    const enriched = enrichClientTokenIntrospection(row, result);
+    if (enriched.active && pairwiseInstanceIdentityEnabled()) {
+      const grant = parseCoreResolvedGrant(enriched.grant);
+      enriched.pairwise_grant = await projectPairwiseGrant(grant);
+      enriched.pdpp_instance_bindings = await buildPairwiseInstanceBindings(grant);
+      // Declaration facts are frozen at review. They do not grant fields or records.
+      const pending = isPostgresStorageBackend()
+        ? await pgOne<{ params_json: string }>(
+            "SELECT params_json::text AS params_json FROM pending_consents WHERE grant_id = $1 AND status = 'approved' LIMIT 1",
+            [grant.grant_id]
+          )
+        : getDb()
+            .prepare("SELECT params_json FROM pending_consents WHERE grant_id = ? AND status = 'approved' LIMIT 1")
+            .get<{ params_json: string }>(grant.grant_id);
+      if (pending?.params_json) {
+        const request: unknown = JSON.parse(pending.params_json);
+        if (isRecord(request) && !isStagedBatchRequest(request)) {
+          requireStructuredPendingRequestShape(request);
+          const snapshot = readRetainedSourceDeclarationSnapshot(request);
+          enriched.pairwise_source_primary_keys = Object.fromEntries(
+            (snapshot.declaration.streams ?? []).map((stream) => [stream.name, stream.primary_key])
+          );
+        }
+      }
+    }
+    return enriched;
   }
 
   return result;
@@ -12059,17 +12245,23 @@ async function requireRevocablePersistedGrant(
 
 async function revokeGrantStorage(grantId: string): Promise<void> {
   if (isPostgresStorageBackend()) {
-    await pgExec("UPDATE grants SET status = 'revoked' WHERE grant_id = $1", [grantId]);
-    await pgExec("UPDATE tokens SET revoked = TRUE WHERE grant_id = $1", [grantId]);
-    await pgExec(
-      "UPDATE oauth_refresh_tokens SET status = 'revoked', revoked_at = $1 WHERE grant_id = $2 AND status = 'active'",
-      [nowIso(), grantId]
-    );
+    await withPostgresTransaction(async (client) => {
+      await invalidatePairwiseQuerySessionsPostgres({ grantId }, client);
+      await client.query("UPDATE grants SET status = 'revoked' WHERE grant_id = $1", [grantId]);
+      await client.query("UPDATE tokens SET revoked = TRUE WHERE grant_id = $1", [grantId]);
+      await client.query(
+        "UPDATE oauth_refresh_tokens SET status = 'revoked', revoked_at = $1 WHERE grant_id = $2 AND status = 'active'",
+        [nowIso(), grantId]
+      );
+    });
     return;
   }
-  exec(referenceQueries.authGrantsMarkRevoked, [grantId]);
-  exec(referenceQueries.authTokensRevokeByGrant, [grantId]);
-  exec(referenceQueries.authOauthRefreshTokensRevokeByGrant, [nowIso(), grantId]);
+  writeTransaction(() => {
+    invalidatePairwiseQuerySessionsSqlite({ grantId });
+    exec(referenceQueries.authGrantsMarkRevoked, [grantId]);
+    exec(referenceQueries.authTokensRevokeByGrant, [grantId]);
+    exec(referenceQueries.authOauthRefreshTokensRevokeByGrant, [nowIso(), grantId]);
+  });
 }
 
 async function emitGrantRevoked(

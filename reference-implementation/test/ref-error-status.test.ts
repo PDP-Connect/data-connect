@@ -18,6 +18,11 @@ function statusFor(code: string): number {
   return status;
 }
 
+test("pairwise snapshot capacity returns a retryable HTTP service error", () => {
+  assert.equal(statusFor("query_capacity_exceeded"), 503);
+  assert.equal(typeFor(statusFor("query_capacity_exceeded")), "api_error");
+});
+
 test("typeFor maps each known HTTP status to its canonical error type", () => {
   assert.equal(typeFor(400), "invalid_request_error");
   assert.equal(typeFor(401), "authentication_error");

@@ -327,6 +327,13 @@ export function resolveCoreSelection(
     }
     const fields = resolveFields(request, stream);
     const instanceIds = request.instance_ids ?? [];
+    if (
+      process.env.PDPP_EXPERIMENTAL_PAIRWISE_INSTANCE_IDENTITY === "1" &&
+      request.resources !== undefined &&
+      instanceIds.length > 1
+    ) {
+      fail(`Stream '${stream.name}' resources must cover exactly one instance`);
+    }
     if (instanceIds.some((id) => !isNonEmptyString(id)) || new Set(instanceIds).size !== instanceIds.length) {
       fail(`Stream '${stream.name}' instance_ids must be unique opaque handles`);
     }

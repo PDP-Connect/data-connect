@@ -215,6 +215,14 @@ const SANCTIONED_GENERIC_DATA_READ_CALL_SITES: ReadonlySet<string> = new Set([
   'reference-implementation/scripts/quality-ratchet/measure-mass.ts::readPinnedBiomeVersion::readFile(packageJsonPath, "utf8")',
   'reference-implementation/scripts/quality-ratchet/mass-delta-report.ts::baselineMass::readFile(BASELINE_PATH, "utf8")',
   'reference-implementation/scripts/quality-ratchet/check-mass-ratchet.ts::readJsonFile::readFile(filePath, "utf8")',
+  // repack-reference-contract.mjs verifies source package/compiler manifests
+  // from the signed, pinned checkout and the package archive it just unpacked.
+  // These paths are toolchain/package metadata, not runtime connector policy.
+  'reference-implementation/scripts/repack-reference-contract.mjs::readJson::readFileSync(path, "utf8")',
+  // Its SHA256SUMS read compares the independently rebuilt package archive
+  // with the repository's active vendored-artifact digest; it does not
+  // select or configure runtime behavior.
+  'reference-implementation/scripts/repack-reference-contract.mjs::<module>::readFileSync( join(RI_ROOT, "vendor/SHA256SUMS"), "utf8", )',
   // reference-revision.ts reads the repo's own package.json for its version string.
   'reference-implementation/server/reference-revision.ts::readPackageVersion::readFileSync(PACKAGE_JSON_PATH, "utf8")',
   // createFileConnectorInstallStore() reads the operator-managed

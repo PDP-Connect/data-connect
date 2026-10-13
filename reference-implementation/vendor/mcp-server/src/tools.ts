@@ -92,11 +92,11 @@ interface ResourceTemplateDefinition {
 // biome-ignore lint/style/useConsistentTypeDefinitions: see comment above.
 type RecordRef = {
   connectionId: string | null;
+  instanceId?: string;
   recordId: string;
   stream: string;
 };
 type FieldWindowRef = RecordRef & {
-  connectionId: string;
   field_path: string;
   cursor?: string;
   offset_chars?: number;
@@ -119,6 +119,7 @@ interface MatchWindow {
 
 interface SearchResult {
   connection_id?: string;
+  instance_id?: string;
   connector_key?: string;
   display_name?: string;
   evidence_excerpts?: JsonObject[];
@@ -192,6 +193,7 @@ const SUPPORTED_QUERY_KEYS = new Set([
   // or rewrites a connection_id. See:
   //   openspec/changes/expose-connection-identity-on-public-read
   "connection_id",
+  "instance_id",
 ]);
 
 // Mirror of the REST aggregate query-param vocabulary
@@ -378,6 +380,15 @@ class ConflictingConnectionIdError extends Error {
   }
 }
 
+class ConflictingInstanceIdError extends Error {
+  readonly code = "conflicting_instance_id";
+
+  constructor(message: string) {
+    super(message);
+    this.name = "ConflictingInstanceIdError";
+  }
+}
+
 class InvalidReadRecordFieldSelectorError extends Error {
   code: string;
 
@@ -499,6 +510,14 @@ const ConnectionIdInputShape = {
   connection_id: z.string().min(1).describe(CONNECTION_ID_DESCRIPTION).optional(),
 };
 
+const InstanceIdInputShape = {
+  instance_id: z
+    .string()
+    .min(1)
+    .optional()
+    .describe("Opaque instance handle returned by the resource server; use without connection_id."),
+};
+
 // Canonical envelope summary referenced from tool descriptions. Kept terse to
 // stay within MCP token-budget norms; the authoritative schema vocabulary
 // lives at `GET /v1/schema` and in the OpenAPI artifacts published by the
@@ -552,7 +571,8 @@ const READ_RECORD_FIELD_OUTPUT_SCHEMA_SHAPE = {
   record: z
     .object({
       id: z.string(),
-      connection_id: z.string().nullable(),
+      connection_id: z.string().nullable().optional(),
+      instance_id: z.string().optional(),
       stream: z.string(),
       record_id: z.string(),
     })
@@ -725,6 +745,7 @@ export function buildTools({ rs, providerUrl }: { rs: RsClient; providerUrl: str
           expand_limit: z.record(z.string(), z.number().int().positive()).optional().describe(EXPAND_LIMIT_DESCRIPTION),
           changes_since: z.string().optional().describe(CHANGES_SINCE_DESCRIPTION),
           ...ConnectionIdInputShape,
+          ...InstanceIdInputShape,
         })
         .strict(),
       outputSchema: z.object(READ_OUTPUT_SCHEMA_SHAPE),
@@ -832,6 +853,7 @@ export function buildTools({ rs, providerUrl }: { rs: RsClient; providerUrl: str
           mode: z.enum(["lexical", "semantic", "hybrid"]).optional(),
           filter: TypedFilterInput.optional().describe(FILTER_DESCRIPTION),
           ...ConnectionIdInputShape,
+          ...InstanceIdInputShape,
         })
         .strict(),
       outputSchema: z.object(SEARCH_OUTPUT_SCHEMA_SHAPE),
@@ -844,6 +866,7 @@ export function buildTools({ rs, providerUrl }: { rs: RsClient; providerUrl: str
             limit: args.limit as number | undefined,
             cursor: args.cursor as string | undefined,
             connection_id: args.connection_id as string | undefined,
+            instance_id: args.instance_id as string | undefined,
           },
           args.filter as FilterInput | undefined
         );
@@ -858,7 +881,7 @@ export function buildTools({ rs, providerUrl }: { rs: RsClient; providerUrl: str
       name: "fetch",
       title: "Fetch PDPP search result",
       description:
-        "Fetch a single OpenAI-compatible document by a result id from `search`. Id formats: self-contained `connection_id/stream:record_id` (pass it unchanged — no other argument is needed) or legacy `stream:record_id` plus an optional `connection_id` argument. Both resolve to `GET /v1/streams/{stream}/records/{record_id}`. Returns document fields only (`id`, `title`, `text`, `url`, `metadata`); use `query_records` for canonical PDPP record envelopes. Use `fields` to project the source record before rendering document text/metadata; if the projection excludes every text-like field (`text`, `content`, `body`, `summary`), `text` contains compact JSON for the projected record rather than the full document body. Operational source handles (`id`, stream, `connection_id`, `connector_key`) remain available in `metadata`. On `ambiguous_connection` (409), pick a `connection_id` from `available_connections` in the error and retry. Read-only.",
+        "Fetch a single OpenAI-compatible document by a result id from `search`. Id formats: self-contained `connection_id/stream:record_id` (pass it unchanged — no other argument is needed) or legacy `stream:record_id` plus an optional `connection_id` argument. Instance-scoped hits use opaque `pdpp://record/...` ids; pass them unchanged. All forms resolve to `GET /v1/streams/{stream}/records/{record_id}`. Returns document fields only (`id`, `title`, `text`, `url`, `metadata`); use `query_records` for canonical PDPP record envelopes. Use `fields` to project the source record before rendering document text/metadata; if the projection excludes every text-like field (`text`, `content`, `body`, `summary`), `text` contains compact JSON for the projected record rather than the full document body. Operational source handles (`id`, stream, `instance_id`, `connection_id`, `connector_key`) remain available in `metadata`. On `ambiguous_connection` (409), pick a `connection_id` from `available_connections` in the error and retry. Read-only.",
       annotations: READ_ONLY_ANNOTATIONS,
       inputSchema: z
         .object({
@@ -870,6 +893,7 @@ export function buildTools({ rs, providerUrl }: { rs: RsClient; providerUrl: str
           expand_limit: z.record(z.string(), z.number().int().positive()).optional().describe(EXPAND_LIMIT_DESCRIPTION),
           fields: z.array(z.string()).optional().describe(FIELDS_DESCRIPTION),
           ...ConnectionIdInputShape,
+          ...InstanceIdInputShape,
         })
         .strict(),
       outputSchema: z.object(FETCH_OUTPUT_SCHEMA_SHAPE),
@@ -878,6 +902,14 @@ export function buildTools({ rs, providerUrl }: { rs: RsClient; providerUrl: str
         const ref = parseRecordResultId(requestedId);
         if (ref.connectionId && typeof args.connection_id === "string" && args.connection_id !== ref.connectionId) {
           throw new ConflictingConnectionIdError(ref.connectionId, args.connection_id);
+        }
+        if (ref.instanceId && args.instance_id !== undefined && args.instance_id !== ref.instanceId) {
+          throw new ConflictingInstanceIdError(
+            "The id and instance_id argument name different instances; pass the opaque id alone.",
+          );
+        }
+        if ((ref.instanceId || args.instance_id) && (ref.connectionId || args.connection_id)) {
+          throw new ConflictingInstanceIdError("Use an instance handle without a connection_id selector.");
         }
         const expand = Array.isArray(args.expand) ? (args.expand as string[]) : undefined;
         if (expand && expand.length > 0) {
@@ -892,6 +924,9 @@ export function buildTools({ rs, providerUrl }: { rs: RsClient; providerUrl: str
         // multi-source grant resolves without a second model-carried handle.
         if (ref.connectionId && query.connection_id === undefined) {
           query.connection_id = ref.connectionId;
+        }
+        if (ref.instanceId && query.instance_id === undefined) {
+          query.instance_id = ref.instanceId;
         }
         const response = await rs.getJson(
           `/v1/streams/${encodeURIComponent(ref.stream)}/records/${encodeURIComponent(ref.recordId)}`,
@@ -913,6 +948,7 @@ export function buildTools({ rs, providerUrl }: { rs: RsClient; providerUrl: str
             .optional()
             .describe("ID: `connection_id/stream:record_id`, `stream:record_id`, or `pdpp://record/...` URI."),
           connection_id: z.string().min(1).optional(),
+          ...InstanceIdInputShape,
           stream: z.string().min(1).optional(),
           record_id: z.string().min(1).optional(),
           field_path: z.string().min(1),
@@ -928,13 +964,14 @@ export function buildTools({ rs, providerUrl }: { rs: RsClient; providerUrl: str
       handler: async (args: JsonObject) => {
         const ref = resolveReadRecordFieldRef(args);
         const fieldPath = requireSafeName(args.field_path, "field_path");
-        const query = readRecordFieldQuery(args, ref.connectionId, fieldPath);
+        const query = readRecordFieldQuery(args, ref, fieldPath);
         const response = await rs.getJson(
           `/v1/streams/${encodeURIComponent(ref.stream)}/records/${encodeURIComponent(ref.recordId)}/field-window`,
           { query }
         );
         return toReadRecordFieldToolResult(response, providerUrl, {
           connectionId: ref.connectionId,
+          instanceId: ref.instanceId,
           stream: ref.stream,
           recordId: ref.recordId,
           fieldPath,
@@ -956,15 +993,13 @@ function searchPathForMode(mode: unknown): string {
   return "/v1/search";
 }
 
-interface ReadRecordFieldRef {
-  connectionId: string;
-  recordId: string;
-  stream: string;
-}
-
-function resolveReadRecordFieldRef(args: JsonObject): ReadRecordFieldRef {
+function resolveReadRecordFieldRef(args: JsonObject): RecordRef {
   const hasId = typeof args.id === "string" && args.id.length > 0;
-  const hasExplicit = args.connection_id !== undefined || args.stream !== undefined || args.record_id !== undefined;
+  const hasExplicit =
+    args.instance_id !== undefined ||
+    args.connection_id !== undefined ||
+    args.stream !== undefined ||
+    args.record_id !== undefined;
   if (hasId && hasExplicit) {
     throw new InvalidReadRecordFieldSelectorError(
       "`id` is exclusive with explicit `connection_id`, `stream`, and `record_id`; pass one record identity form"
@@ -972,26 +1007,30 @@ function resolveReadRecordFieldRef(args: JsonObject): ReadRecordFieldRef {
   }
   if (hasId) {
     const ref = parseRecordResultId(args.id as string);
-    if (!ref.connectionId) {
+    if (!(ref.connectionId || ref.instanceId)) {
       throw new InvalidReadRecordFieldSelectorError(
         "`id` for read_record_field must include connection_id (`connection_id/stream:record_id`) or use explicit connection_id + stream + record_id"
       );
     }
-    return { connectionId: ref.connectionId, stream: ref.stream, recordId: ref.recordId };
+    return ref;
   }
-  if (!(args.connection_id && args.stream && args.record_id)) {
+  if (args.instance_id && args.connection_id) {
+    throw new InvalidReadRecordFieldSelectorError("Use an instance handle without a connection_id selector.");
+  }
+  if (!((args.connection_id || args.instance_id) && args.stream && args.record_id)) {
     throw new InvalidReadRecordFieldSelectorError(
       "read_record_field requires either `id` + `field_path` or `connection_id` + `stream` + `record_id` + `field_path`"
     );
   }
   return {
-    connectionId: requireSafeName(args.connection_id, "connection_id"),
+    connectionId: args.instance_id ? null : requireSafeName(args.connection_id, "connection_id"),
+    ...(args.instance_id ? { instanceId: requireSafeName(args.instance_id, "instance_id") } : {}),
     stream: requireSafeName(args.stream, "stream"),
     recordId: requireSafeName(args.record_id, "record_id"),
   };
 }
 
-function readRecordFieldQuery(args: JsonObject, connectionId: string, fieldPath: string): QueryParams {
+function readRecordFieldQuery(args: JsonObject, ref: RecordRef, fieldPath: string): QueryParams {
   if (args.cursor !== undefined && args.offset_chars !== undefined) {
     throw new InvalidReadRecordFieldSelectorError("`cursor` is exclusive with `offset_chars`");
   }
@@ -1002,7 +1041,7 @@ function readRecordFieldQuery(args: JsonObject, connectionId: string, fieldPath:
     throw new InvalidReadRecordFieldSelectorError("`before_chars` and `after_chars` require `q`");
   }
   const query: QueryParams = {
-    connection_id: connectionId,
+    ...(ref.instanceId ? { instance_id: ref.instanceId } : { connection_id: ref.connectionId }),
     field: fieldPath,
   };
   if (args.cursor !== undefined) {
@@ -1067,6 +1106,9 @@ function buildRecordResourceTemplate({
       if (ref.connectionId) {
         query.connection_id = ref.connectionId;
       }
+      if (ref.instanceId) {
+        query.instance_id = ref.instanceId;
+      }
       const response = await rs.getJson(
         `/v1/streams/${encodeURIComponent(ref.stream)}/records/${encodeURIComponent(ref.recordId)}`,
         { query }
@@ -1102,7 +1144,7 @@ function buildRecordFieldResourceTemplate({
     mimeType: "text/plain",
     read: async (uri, variables) => {
       const ref = resolveFieldWindowResourceRef(uri, variables);
-      const query = readRecordFieldQuery(ref, ref.connectionId, ref.field_path);
+      const query = readRecordFieldQuery(ref, ref, ref.field_path);
       const response = await rs.getJson(
         `/v1/streams/${encodeURIComponent(ref.stream)}/records/${encodeURIComponent(ref.recordId)}/field-window`,
         { query }
@@ -1112,6 +1154,7 @@ function buildRecordFieldResourceTemplate({
       }
       const result = toReadRecordFieldToolResult(response, providerUrl, {
         connectionId: ref.connectionId,
+        instanceId: ref.instanceId,
         stream: ref.stream,
         recordId: ref.recordId,
         fieldPath: ref.field_path,
@@ -1186,24 +1229,17 @@ function resourceErrorContents(uri: string, response: RsResponse, providerUrl: s
 
 function resolveRecordResourceRef(uri: string, variables: Record<string, string | string[]>): RecordRef {
   const handle = resolveResourceHandle(uri, variables, "record");
-  let payload: ResourceHandlePayload;
-  try {
-    payload = decodeResourceHandle(handle, "record");
-  } catch {
-    const ref = parseRecordResultId(decodeURIComponent(handle));
-    return { connectionId: ref.connectionId, stream: ref.stream, recordId: ref.recordId };
-  }
-  return {
-    connectionId: requireSafeName(payload.connection_id, "connection_id"),
-    stream: requireSafeName(payload.stream, "stream"),
-    recordId: requireSafeName(payload.record_id, "record_id"),
-  };
+  return parseRecordResultId(`pdpp://record/${handle}`);
 }
 
 function resolveFieldWindowResourceRef(uri: string, variables: Record<string, string | string[]>): FieldWindowRef {
   const payload = decodeResourceHandle(resolveResourceHandle(uri, variables, "field-window"), "field-window");
+  if (payload.instance_id !== undefined && payload.connection_id !== undefined) {
+    throw new InvalidReadRecordFieldSelectorError("Use an instance handle without a connection_id selector.");
+  }
   const ref: FieldWindowRef = {
-    connectionId: requireSafeName(payload.connection_id, "connection_id"),
+    connectionId: payload.instance_id !== undefined ? null : requireSafeName(payload.connection_id, "connection_id"),
+    ...(payload.instance_id !== undefined ? { instanceId: requireSafeName(payload.instance_id, "instance_id") } : {}),
     stream: requireSafeName(payload.stream, "stream"),
     recordId: requireSafeName(payload.record_id, "record_id"),
     field_path: requireSafeName(payload.field_path, "field_path"),
@@ -1719,6 +1755,7 @@ function toSearchToolResult(
 
 interface ReadRecordFieldIdentity {
   connectionId: string | null;
+  instanceId?: string | undefined;
   fieldPath: string;
   recordId: string;
   stream: string;
@@ -1789,11 +1826,17 @@ function toReadRecordFieldToolResult(
   const rawWindow = objectValue(body.window) || {};
   const stream = firstString(body.stream, identity.stream);
   const recordId = firstString(body.record_id, identity.recordId);
+  const instanceId = firstString(identity.instanceId, body.instance_id);
   const connectionId =
     firstString(body.connection_id, body.connector_instance_id, identity.connectionId ?? undefined) || null;
   const record = {
-    id: connectionId ? `${connectionId}/${stream}:${recordId}` : `${stream}:${recordId}`,
-    connection_id: connectionId,
+    id: selfContainedRecordId({
+      connectionId: instanceId ? null : connectionId,
+      ...(instanceId ? { instanceId } : {}),
+      stream: stream ?? identity.stream,
+      recordId: recordId ?? identity.recordId,
+    }),
+    ...(instanceId ? { instance_id: instanceId } : { connection_id: connectionId }),
     stream,
     record_id: recordId,
   };
@@ -2057,14 +2100,49 @@ function buildFetchContentLadder(recordBody: Json, document: FetchedDocument): J
 }
 
 function buildRecordContentLadder(record: Json, fallback: JsonObject = {}): RecordLadder | null {
+  const recordObject = objectValue(record);
+  const instanceId = firstString(recordObject?.instance_id, fallback.instanceId);
+  const opaqueId = firstString(fallback.id, recordObject?.id);
+  const ref = instanceId && opaqueId ? parseRecordResultIdOrNull(opaqueId) : null;
   const ladder = callBuildSharedRecordContentLadder(record, {
-    fallback,
+    fallback: instanceId
+      ? {
+          ...fallback,
+          stream: firstString(fallback.stream, ref?.stream, recordObject?.stream),
+          recordId: firstString(fallback.recordId, ref?.recordId, recordObject?.record_id, recordObject?.id),
+        }
+      : fallback,
     encodeResourceUri,
     fieldLimit: CONTENT_LADDER_FIELD_LIMIT,
     binaryLimit: CONTENT_LADDER_BINARY_FIELD_LIMIT,
     windowLimitChars: CONTENT_LADDER_WINDOW_LIMIT_CHARS,
   });
-  return hideModelVisibleResourceUris(ladder);
+  if (!ladder || !instanceId) {
+    return hideModelVisibleResourceUris(ladder);
+  }
+  const id = selfContainedRecordId({
+    connectionId: null,
+    instanceId,
+    stream: String(ladder.stream),
+    recordId: String(ladder.record_id),
+  });
+  const scopedFields = (fields: Json): Json =>
+    Array.isArray(fields)
+      ? fields.map((field) => {
+          const entry = objectValue(field) || {};
+          const read = objectValue(entry.read);
+          return read ? { ...entry, read: { ...read, args: { ...objectValue(read.args), id } } } : entry;
+        })
+      : fields;
+  const scopedLadder = { ...ladder };
+  delete scopedLadder.connection_id;
+  return hideModelVisibleResourceUris({
+    ...scopedLadder,
+    id,
+    instance_id: instanceId,
+    field_windows: scopedFields(ladder.field_windows as Json),
+    ...(ladder.json_fields ? { json_fields: scopedFields(ladder.json_fields as Json) } : {}),
+  });
 }
 
 function toFetchToolResult(response: RsResponse, providerUrl: string, requestedId: string): McpToolResult {
@@ -2943,16 +3021,24 @@ function normalizeSearchResults(body: Json, options: NormalizeSearchResultsOptio
     const recordUriRef = recordUriRefForHit(hit);
     const stream = firstString(streamForHit(hit), recordUriRef?.stream);
     const recordKey = firstString(recordKeyForHit(hit), recordUriRef?.recordId);
-    const connectionId = firstString(
-      hitObject?.connection_id,
-      hitObject?.connector_instance_id,
-      source.connection_id,
-      recordUriRef?.connectionId
-    );
+    const instanceId = firstString(hitObject?.instance_id, source.instance_id, recordUriRef?.instanceId);
+    const connectionId = instanceId
+      ? undefined
+      : firstString(
+          hitObject?.connection_id,
+          hitObject?.connector_instance_id,
+          source.connection_id,
+          recordUriRef?.connectionId
+        );
     // The id is the single opaque handle a model carries into `fetch`; encode
     // the hit's connection so multi-source grants resolve without a second
     // model-carried `connection_id` field.
-    const id = selfContainedResultId(resultIdForHit(hit, index, { stream, recordKey }), connectionId);
+    const baseId = resultIdForHit(hit, index, { stream, recordKey });
+    const baseRef = parseRecordResultIdOrNull(baseId);
+    const id =
+      instanceId && baseRef
+        ? selfContainedRecordId({ ...baseRef, connectionId: null, instanceId })
+        : selfContainedResultId(baseId, connectionId);
     const displayName = firstString(hitObject?.display_name, source.display_name);
     const connectorKey = firstString(
       hitObject?.connector_key,
@@ -2973,6 +3059,9 @@ function normalizeSearchResults(body: Json, options: NormalizeSearchResultsOptio
     }
     if (recordKey) {
       normalized.record_key = recordKey;
+    }
+    if (instanceId) {
+      normalized.instance_id = instanceId;
     }
     if (connectionId) {
       normalized.connection_id = connectionId;
@@ -3220,6 +3309,13 @@ function recordUriRefForHit(hit: Json): RecordRef | null {
 }
 
 function selfContainedRecordId(ref: RecordRef): string {
+  if (ref.instanceId) {
+    return encodeResourceUri("record", {
+      instance_id: ref.instanceId,
+      stream: ref.stream,
+      record_id: ref.recordId,
+    });
+  }
   return ref.connectionId ? `${ref.connectionId}/${ref.stream}:${ref.recordId}` : `${ref.stream}:${ref.recordId}`;
 }
 
@@ -3272,6 +3368,17 @@ function parseRecordResultId(id: string): RecordRef {
     // URIs that embed the self-contained grammar directly.
     try {
       const payload = decodeResourceHandle(handle, "record");
+      if (payload.instance_id !== undefined) {
+        if (payload.connection_id !== undefined) {
+          throw new ConflictingInstanceIdError("A record handle must not contain both instance_id and connection_id.");
+        }
+        return {
+          connectionId: null,
+          instanceId: requireSafeName(payload.instance_id, "instance_id"),
+          stream: requireSafeName(payload.stream, "stream"),
+          recordId: requireSafeName(payload.record_id, "record_id"),
+        };
+      }
       return {
         connectionId: requireSafeName(payload.connection_id, "connection_id"),
         stream: requireSafeName(payload.stream, "stream"),
@@ -3542,6 +3649,10 @@ function urlForRecord(record: Json, fallbackId: string, providerUrl: string | un
     if (recordRef) {
       const base = providerUrl.replace(TRAILING_SLASH_PATTERN, "");
       const recordUrl = `${base}/v1/streams/${encodeURIComponent(recordRef.stream)}/records/${encodeURIComponent(recordRef.recordId)}`;
+      const instanceId = firstString(recordRef.instanceId, recordObject?.instance_id);
+      if (instanceId) {
+        return `${recordUrl}?instance_id=${encodeURIComponent(instanceId)}`;
+      }
       return recordRef.connectionId
         ? `${recordUrl}?connection_id=${encodeURIComponent(recordRef.connectionId)}`
         : recordUrl;
@@ -3655,6 +3766,7 @@ const FETCH_METADATA_RECORD_KEYS = new Set([
   "stream_name",
   "streamName",
   "connection_id",
+  "instance_id",
   "connector_key",
   "connector_id",
   "display_name",

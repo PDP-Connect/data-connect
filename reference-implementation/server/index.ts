@@ -11,6 +11,8 @@ import { createHash, randomBytes } from "node:crypto";
 import { existsSync, readFileSync, renameSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { pairwiseInstanceIdentityEnabled } from "./pairwise-identity.ts";
+import { sweepPairwiseQuerySessions } from "./pairwise-query-sessions.ts";
 import { isMainModule } from "../scripts/is-main-module.js";
 // biome-ignore lint/correctness/noUnresolvedImports: Biome cannot resolve this installed package export; Node and TypeScript resolve it.
 import type { BrowserSurfaceAllocator, BrowserSurfaceLeaseManager } from "@opendatalabs/remote-surface/leases";
@@ -1404,6 +1406,9 @@ function pdppError(
   extras: Record<string, unknown> | null = null
 ) {
   const typedRes = res as ResLike;
+  if (status === 503 && code === "query_capacity_exceeded") {
+    typedRes.setHeader("Retry-After", "60");
+  }
   const body: { error: PdppErrorBody } = {
     error: { code, message, type: typeFor(status) },
   };
@@ -2076,6 +2081,14 @@ async function requireTokenWithIntrospection(
   }
   const token = auth.slice(7);
   const info = await introspectToken(token);
+  if (
+    pairwiseInstanceIdentityEnabled() &&
+    info.active &&
+    info.pdpp_token_kind === "client" &&
+    (req.query?.connection_id !== undefined || req.query?.connector_instance_id !== undefined)
+  ) {
+    return pdppError(res, 400, "invalid_request", "Use instance_id to select a source instance");
+  }
   if (info.active && info.pdpp_token_kind === "client" && req.params?.stream) {
     const requestedConnection = resolveRequestConnectionId(req.query ?? {}).connectionId;
     try {
@@ -4115,16 +4128,19 @@ function mergeStreamSummary(
 }
 
 async function listSubjectVisibleStreamSummaries({
+  source,
   storageBinding,
   manifest,
   grant,
   ownerSubjectId,
+  tokenInfo,
 }: {
   source: { kind?: string; id?: string } | null | undefined;
   storageBinding: StorageBinding;
   manifest: Record<string, unknown>;
   grant: Record<string, unknown> | null;
   ownerSubjectId: string | null;
+  tokenInfo?: TokenInfo | null;
 }): Promise<Record<string, unknown>[]> {
   const manifestStreams = Array.isArray(manifest.streams) ? (manifest.streams as Record<string, unknown>[]) : [];
   const effectiveGrant = grant ?? {
@@ -4158,6 +4174,16 @@ async function listSubjectVisibleStreamSummaries({
           connectorId: string;
           connectorInstanceId: string;
         }>;
+        if (pairwiseInstanceIdentityEnabled() && tokenInfo?.pdpp_token_kind === "owner") {
+          const covered = authenticatedDiscoveryBindings(tokenInfo);
+          bindings = bindings.filter((binding) =>
+            covered.some(
+              (entry) =>
+                (entry.source_id === source?.id || entry.source_id === storageBinding.connector_id) &&
+                entry.rs_instance === binding.connectorInstanceId
+            )
+          );
+        }
       } catch (error) {
         if (error instanceof Error && (error as Error & { code?: string }).code === "connection_not_found") {
           return;
@@ -4190,12 +4216,14 @@ async function buildConnectorSchemaItem({
   manifest,
   grant = null as Record<string, unknown> | null,
   ownerSubjectId = null as string | null,
+  tokenInfo = null as TokenInfo | null,
 }: {
   source: { kind?: string; id?: string } | null | undefined;
   storageBinding: StorageBinding;
   manifest: Record<string, unknown>;
   grant?: Record<string, unknown> | null;
   ownerSubjectId?: string | null;
+  tokenInfo?: TokenInfo | null;
 }) {
   const connectorId = (storageBinding.connector_id as string | null | undefined) ?? null;
   const rawStreamSummaries = await listSubjectVisibleStreamSummaries({
@@ -4204,6 +4232,7 @@ async function buildConnectorSchemaItem({
     ownerSubjectId,
     source,
     storageBinding,
+    tokenInfo,
   });
   const streamSummaries = rawStreamSummaries as Record<string, unknown>[];
   const summaryByName = new Map(streamSummaries.map((summary) => [summary.name as string, summary]));
@@ -4273,12 +4302,14 @@ async function buildConnectorDiscoveryItem({
   manifest,
   grant = null as Record<string, unknown> | null,
   ownerSubjectId = null as string | null,
+  tokenInfo = null as TokenInfo | null,
 }: {
   source: { kind?: string; id?: string } | null | undefined;
   storageBinding: StorageBinding;
   manifest: Record<string, unknown>;
   grant?: Record<string, unknown> | null;
   ownerSubjectId?: string | null;
+  tokenInfo?: TokenInfo | null;
 }) {
   const connectorId = (storageBinding.connector_id as string | null | undefined) ?? null;
   const rawSummaries = await listSubjectVisibleStreamSummaries({
@@ -4287,6 +4318,7 @@ async function buildConnectorDiscoveryItem({
     ownerSubjectId,
     source,
     storageBinding,
+    tokenInfo,
   });
   const streamSummaries = rawSummaries as Record<string, unknown>[];
   const summaryByName = new Map(streamSummaries.map((summary) => [summary.name as string, summary]));
@@ -4524,6 +4556,104 @@ function buildNextLink(
   return finalQuery ? `${path}?${finalQuery}` : path;
 }
 
+function authenticatedDiscoveryBindings(tokenInfo: TokenInfo | null | undefined) {
+  const bindings = tokenInfo?.pdpp_instance_bindings;
+  return (Array.isArray(bindings) ? bindings : []).filter(
+    (entry): entry is { source_id: string; rs_instance: string; instance_id: string; stream?: string } =>
+      Boolean(
+        entry &&
+          typeof entry === "object" &&
+          typeof entry.source_id === "string" &&
+          typeof entry.rs_instance === "string" &&
+          typeof entry.instance_id === "string"
+      )
+  );
+}
+
+function projectDiscoveryInstanceSelectors(
+  entry: Record<string, unknown>,
+  covered: ReturnType<typeof authenticatedDiscoveryBindings>,
+  owner: boolean
+): Record<string, unknown> | null {
+  const next = { ...entry };
+  const internalId = entry.connector_instance_id ?? entry.connection_id;
+  if (internalId !== undefined) {
+    const binding = covered.find((candidate) => candidate.rs_instance === internalId);
+    if (!binding) {
+      if (owner) {
+        return null;
+      }
+      throw Object.assign(new Error("Discovery instance is outside authenticated bindings"), { code: "grant_invalid" });
+    }
+    next.instance_id = binding.instance_id;
+    Reflect.deleteProperty(next, "display_name");
+  }
+  for (const key of [
+    "connection_id",
+    "connector_instance_id",
+    "granted_connections",
+    "available_connections",
+    "requested_connection_id",
+  ]) {
+    delete next[key];
+  }
+  if (Array.isArray(entry.instance_ids)) {
+    next.instance_ids = entry.instance_ids.flatMap((id) => {
+      const binding = covered.find((candidate) => candidate.rs_instance === id || candidate.instance_id === id);
+      if (binding) {
+        return [binding.instance_id];
+      }
+      if (owner) {
+        return [];
+      }
+      throw Object.assign(new Error("Discovery instance is outside authenticated bindings"), { code: "grant_invalid" });
+    });
+  }
+  return next;
+}
+
+// Only discovery containers are traversed: schema properties and record data are
+// application fields, even when their names resemble a legacy instance selector.
+function projectPairwiseDiscovery(payload: Record<string, unknown>, req: ReqLike) {
+  const { tokenInfo } = req;
+  const owner = tokenInfo?.pdpp_token_kind === "owner";
+  const bindings = authenticatedDiscoveryBindings(tokenInfo);
+  const grant = tokenInfo?.grant as { source?: { id?: string } } | undefined;
+  const initialSource = owner ? req.query?.connector_id : grant?.source?.id;
+  function project(value: unknown, inheritedSource: unknown): unknown {
+    if (Array.isArray(value)) {
+      return value.map((item) => project(item, inheritedSource)).filter((item) => item !== null);
+    }
+    if (!value || typeof value !== "object") {
+      return value;
+    }
+    const entry = value as Record<string, unknown>;
+    const source = entry.source as { id?: string } | undefined;
+    const sourceId = (owner ? entry.connector_id : undefined) ?? source?.id ?? inheritedSource;
+    const covered = bindings.filter(
+      (binding) =>
+        binding.source_id === sourceId &&
+        (owner || !binding.stream || typeof entry.name !== "string" || binding.stream === entry.name)
+    );
+    if (owner && entry.object === "connector" && covered.length === 0) {
+      return null;
+    }
+    const next = projectDiscoveryInstanceSelectors(entry, covered, owner);
+    if (!next) {
+      return null;
+    }
+    for (const key of ["data", "streams", "connectors", "sources"]) {
+      if (key in entry) {
+        next[key] = project(entry[key], sourceId);
+      }
+    }
+    return next;
+  }
+  return project(payload, initialSource) as Record<string, unknown>;
+}
+
+const PAIRWISE_DISCOVERY_PATH = /^\/v1\/(connectors|schema|streams(?:\/[^/]+)?)\/?$/;
+
 /**
  * Project a public-read operation envelope onto the canonical contract:
  * `{ object, data, has_more?, links: { self, next }, meta: { count, warnings } }`.
@@ -4574,6 +4704,10 @@ function finalizeCanonicalEnvelope(
     meta.warnings = [];
   }
   next.meta = meta;
+  const requestPath = req?.path ?? req?.url?.split("?")[0];
+  if (pairwiseInstanceIdentityEnabled() && req && requestPath && PAIRWISE_DISCOVERY_PATH.test(requestPath)) {
+    return projectPairwiseDiscovery(next, req);
+  }
   return next;
 }
 
@@ -4760,6 +4894,7 @@ async function getVisibleStreamFreshness({
     ownerSubjectId: ownerSubjectIdForBindings(tokenInfo),
     source,
     storageBinding,
+    tokenInfo: tokenInfo ?? null,
   });
   const summary = summaries.find((entry) => entry.name === stream);
   return buildConnectorAwareFreshness(freshnessEvidence, (summary?.last_updated as string | null | undefined) || null);
@@ -8660,6 +8795,11 @@ export async function startServer(opts: ServerOpts = {}) {
     log: (msg: string) => logger.info(msg),
   });
   const uninstallRecoveryStore = createConnectorInstallStore();
+  try {
+    await sweepPairwiseQuerySessions();
+  } catch (err) {
+    logger.warn({ err: err instanceof Error ? err.message : String(err) }, "pairwise query startup reclamation failed");
+  }
   const uninstallDataDir = connectorLifecycleDataDir();
   await reconcileConnectorUninstalls(uninstallDataDir, uninstallRecoveryStore, removeConnectorActivation);
   const configuredOwnerPassword =
@@ -9155,7 +9295,14 @@ export async function startServer(opts: ServerOpts = {}) {
         "connector-maintenance sweep tick failed"
       );
     },
-    sweep: () => connectorMaintenanceSweep.run(),
+    sweep: async () => {
+      try {
+        await sweepPairwiseQuerySessions();
+      } catch (err) {
+        logger.warn({ err: err instanceof Error ? err.message : String(err) }, "pairwise query reclamation failed");
+      }
+      await connectorMaintenanceSweep.run();
+    },
   });
   function stopConnectorMaintenanceSweep() {
     connectorMaintenanceSweepTimer.stop();

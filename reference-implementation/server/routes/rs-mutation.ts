@@ -85,8 +85,10 @@ import {
   RecordsIngestSystemicFailureError,
   type RejectionReceipt,
 } from "../../operations/rs-records-ingest/index.ts";
+import { listActiveBindingsForGrant } from "../connection-identity.ts";
 import { canonicalConnectorKey } from "../connector-key.ts";
 import { HOSTED_INGEST_MAX_LINE_BYTES } from "../hosted-ingest-limits.ts";
+import { pairwiseInstanceIdentityEnabled } from "../pairwise-identity.ts";
 import type { MiddlewareHandler, PdppErrorFn, RouteArg } from "./_route-contract.ts";
 
 // Express-shaped surface, structurally typed to avoid pulling in the
@@ -1030,6 +1032,43 @@ export function mountRsRecordsDeleteStream(app: AppLike, ctx: MountRsMutationCon
 // Single-delete semantics live in the canonical `rs.records.delete` operation
 // (operations/rs-records-delete). The host adapter owns auth, mutation-context
 // wiring, trace id setup, instrumentation dispatch, and response writing.
+async function resolveOwnerDeleteInstance(
+  ctx: MountRsMutationContext,
+  req: RouteRequest,
+  connectorId: string
+): Promise<string> {
+  const selector = req.query.instance_id;
+  if (selector !== undefined && (typeof selector !== "string" || !selector)) {
+    throw Object.assign(new Error("instance_id must be a non-empty string"), { code: "invalid_request" });
+  }
+  const subjectId = ctx.getOwnerTokenSubjectId?.(req) ?? req.tokenInfo?.subject_id;
+  const localBindings = await listActiveBindingsForGrant({ connectorId, ownerSubjectId: subjectId });
+  const supplied = Array.isArray(req.tokenInfo?.pdpp_instance_bindings) ? req.tokenInfo.pdpp_instance_bindings : [];
+  const bindings = supplied.filter(
+    (entry): entry is { source_id: string; instance_id: string; rs_instance: string } =>
+      entry !== null &&
+      typeof entry === "object" &&
+      "source_id" in entry &&
+      entry.source_id === connectorId &&
+      "instance_id" in entry &&
+      typeof entry.instance_id === "string" &&
+      "rs_instance" in entry &&
+      typeof entry.rs_instance === "string" &&
+      localBindings.some((binding) => binding.connectorInstanceId === entry.rs_instance)
+  );
+  const handles = [...new Map(bindings.map((binding) => [binding.instance_id, binding])).values()];
+  if (handles.length > 1 && !selector) {
+    throw Object.assign(new Error("instance_id is required for a multi-instance query context"), {
+      code: "invalid_request",
+    });
+  }
+  const selected = selector ? handles.find((binding) => binding.instance_id === selector) : handles[0];
+  if (!selected) {
+    throw Object.assign(new Error("Instance not found"), { code: "not_found" });
+  }
+  return selected.rs_instance;
+}
+
 export function mountRsRecordsDelete(app: AppLike, ctx: MountRsMutationContext): void {
   app.delete(
     "/v1/streams/:stream/records/:id",
@@ -1037,7 +1076,7 @@ export function mountRsRecordsDelete(app: AppLike, ctx: MountRsMutationContext):
     ctx.requireOwner,
     async (req: RouteRequest, res: RouteResponse) => {
       const connectorId = canonicalizeConnectorId(ctx.resolveSingleConnectorIdQueryValue(req.query.connector_id));
-      const connectorInstanceId = ctx.resolveSingleConnectorIdQueryValue(req.query.connector_instance_id);
+      let connectorInstanceId = ctx.resolveSingleConnectorIdQueryValue(req.query.connector_instance_id);
       // biome-ignore lint/suspicious/noUnnecessaryConditions: TypeScript boundary permits nullish input; this guard preserves runtime behavior.
       const requestedRecordId = decodeURIComponent(req.params.id ?? "");
       const mutationContext = ctx.buildMutationContext(req, res, {
@@ -1049,6 +1088,10 @@ export function mountRsRecordsDelete(app: AppLike, ctx: MountRsMutationContext):
         streamId: req.params.stream ?? null,
       });
       try {
+        if (pairwiseInstanceIdentityEnabled() && connectorId) {
+          connectorInstanceId = await resolveOwnerDeleteInstance(ctx, req, connectorId);
+          mutationContext.connectorInstanceId = connectorInstanceId;
+        }
         let storageNamespace: ConnectorNamespaceLike | null = null;
         const dependencies: RecordsDeleteDependencies = {
           deleteRecord: async (cid: string, streamName: string, recordId: string) => {
