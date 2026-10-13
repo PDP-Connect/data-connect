@@ -306,14 +306,8 @@ test("T2c: scheduled managed connector retries runtime-retryable terminal known 
   }
 });
 
-test("T2d: a definitive session_required failure is NOT retried even with maxRetries>0 (no three-attempt burst)", async () => {
-  // Regression for the live steady-state burst: a scheduled ChatGPT run that
-  // fails with session_required must stop after ONE attempt. The gap here is
-  // deliberately shaped so the GENERIC retry classifier would retry it — it
-  // carries no `retryable: false` marker and no non-retryable failure/terminal
-  // reason — so the ONLY thing preventing a burst is the owner-auth-repair gate
-  // added to routeScheduledManagedRun. Removing that gate makes this fail with
-  // controllerCalls.length === 3.
+test("T2d: a runtime interaction cancellation is not retried even with maxRetries>0", async () => {
+  // The runtime cancelled an interaction; connector wording and hints are unnecessary.
   const tmpDir = mkdtempSync(join(tmpdir(), "sched-managed-authburst-"));
   try {
     const connectorPath = writeDummyConnector(tmpDir);
@@ -322,10 +316,9 @@ test("T2d: a definitive session_required failure is NOT retried even with maxRet
     const completedRuns: RunRecord[] = [];
     const controllerCalls: number[] = [];
     const sessionGap = {
-      kind: "run_failed",
-      // session_required message → managedRunRequiresOwnerAuthRepair === true.
+      kind: "interaction_required",
       message: "chatgpt_preprogress_failure: session_required: ChatGPT session is not active.",
-      reason: "connector_reported_failed",
+      reason: "interaction_cancelled",
       severity: "actionable",
       stream: null,
       // No recovery_hint.retryable marker → the generic classifier does NOT see
@@ -369,7 +362,7 @@ test("T2d: a definitive session_required failure is NOT retried even with maxRet
       scheduler.stop();
 
       const authAttempts = controllerCalls.length;
-      assert.equal(authAttempts, 1, "definitive session_required must not retry within a tick (no burst)");
+      assert.equal(authAttempts, 1, "runtime interaction cancellation must not retry within a tick");
       const [authRecord] = completedRuns;
       assert.ok(authRecord, "a completed run record was captured");
       assert.equal(authRecord.status, "failed");
@@ -1045,78 +1038,91 @@ test("T7: a managed run that DISPATCHES but FAILS records a failed RunRecord (no
   }
 });
 
-test("T7b: auth-required managed scheduled failure marks needs-human and suppresses the next tick", async () => {
-  const tmpDir = mkdtempSync(join(tmpdir(), "sched-managed-"));
-  try {
-    const connectorPath = writeDummyConnector(tmpDir);
-    const connectorInstanceId = "cin_chatgpt_personal";
-    const needsHuman = new Set();
-    const completedRuns: RunRecord[] = [];
-    const controllerCalls: number[] = [];
-    const authGap = {
-      kind: "run_failed",
-      message:
-        "chatgpt_preprogress_failure: refresh_credentials: chatgpt_session_failed: chatgpt_session_required: ChatGPT session is not active.",
-      reason: "connector_reported_failed",
-      recovery_hint: { action: "refresh_credentials", retryable: false },
-      severity: "actionable",
-      stream: null,
-    };
-
-    const scheduler = createScheduler({
-      connectors: [
-        {
-          connectorId: "chatgpt",
-          connectorInstanceId,
-          connectorPath,
-          intervalMs: 25,
-          manifest: BACKGROUND_SAFE_MANIFEST,
-          maxRetries: 0,
-          ownerSubjectId: "owner-managed",
-          ownerToken: "owner-token",
-        },
-      ],
-      isNeedsHuman: (_connectorId, instanceId) => needsHuman.has(instanceId),
-      markNeedsHuman: (_connectorId, instanceId) => needsHuman.add(instanceId),
-      onInteraction: async () => ({ accepted: true, status: "cancelled" }),
-      onRunComplete: (record) => completedRuns.push(record),
-      rsUrl: "http://localhost.invalid",
-      runManagedConnectorViaController: () => {
-        controllerCalls.push(Date.now());
-        return {
-          connector_error: { message: String(authGap.message), retryable: false },
-          known_gaps: [authGap],
-          run_id: "run-auth-required-001",
-          status: "failed",
-          trace_id: "trace-auth-required",
-        };
-      },
-    });
-
+test("T7b: only a runtime interaction outcome marks needs-human and suppresses the next tick", async () => {
+  for (const runtimeOutcome of [false, true]) {
+    const tmpDir = mkdtempSync(join(tmpdir(), "sched-managed-"));
     try {
-      scheduler.start();
-      await waitFor(() => completedRuns.length >= 2, 5000);
-      scheduler.stop();
+      const connectorPath = writeDummyConnector(tmpDir);
+      const connectorInstanceId = "cin_chatgpt_personal";
+      const needsHuman = new Set();
+      const completedRuns: RunRecord[] = [];
+      const controllerCalls: number[] = [];
+      const authGap = {
+        kind: runtimeOutcome ? "interaction_required" : "run_failed",
+        message:
+          "chatgpt_preprogress_failure: refresh_credentials: chatgpt_session_failed: chatgpt_session_required: ChatGPT session is not active.",
+        reason: runtimeOutcome ? "interaction_timeout" : "connector_reported_failed",
+        recovery_hint: { action: "refresh_credentials", retryable: false },
+        severity: "actionable",
+        stream: null,
+      };
 
-      assert.equal(controllerCalls.length, 1, "auth-required failure should prevent a second managed dispatch");
-      const [firstRun, secondRun] = completedRuns;
-      assert.ok(firstRun, "the first completed run record was captured");
-      assert.ok(secondRun, "the second completed run record was captured");
-      assert.equal(firstRun.status, "failed");
-      assert.deepEqual(firstRun.knownGaps, [authGap], "terminal auth gap should be preserved");
-      assert.equal(needsHuman.has(connectorInstanceId), true, "existing needs-human gate should be marked");
-      assert.equal(secondRun.status, "skipped");
-      assert.match(secondRun.error || "", NEEDS_HUMAN_ATTENTION);
-      // Same-connection repair (4.8): the failure, the needs-human gate, and the
-      // suppressed follow-up tick all key on the SAME connector_instance_id — no
-      // duplicate connection is created to carry the repair.
-      const instanceIds = new Set(completedRuns.map((r) => r.connectorInstanceId || r.connectorId));
-      assert.deepEqual([...instanceIds], [connectorInstanceId], "repair stays on the same connection id");
+      const scheduler = createScheduler({
+        connectors: [
+          {
+            connectorId: "chatgpt",
+            connectorInstanceId,
+            connectorPath,
+            intervalMs: 25,
+            manifest: BACKGROUND_SAFE_MANIFEST,
+            maxRetries: 0,
+            ownerSubjectId: "owner-managed",
+            ownerToken: "owner-token",
+          },
+        ],
+        isNeedsHuman: (_connectorId, instanceId) => needsHuman.has(instanceId),
+        markNeedsHuman: (_connectorId, instanceId) => needsHuman.add(instanceId),
+        onInteraction: async () => ({ accepted: true, status: "cancelled" }),
+        onRunComplete: (record) => completedRuns.push(record),
+        rsUrl: "http://localhost.invalid",
+        runManagedConnectorViaController: () => {
+          controllerCalls.push(Date.now());
+          return {
+            connector_error: { message: String(authGap.message), retryable: false },
+            known_gaps: [authGap],
+            run_id: "run-auth-required-001",
+            status: "failed",
+            trace_id: "trace-auth-required",
+          };
+        },
+      });
+
+      try {
+        scheduler.start();
+        // biome-ignore lint/performance/noAwaitInLoops: Cases share the scheduler store and must finish sequentially.
+        await waitFor(() => completedRuns.length >= 2, 5000);
+        scheduler.stop();
+
+        assert.equal(
+          controllerCalls.length >= 2,
+          !runtimeOutcome,
+          "only a runtime outcome should prevent another dispatch"
+        );
+        const [firstRun, secondRun] = completedRuns;
+        assert.ok(firstRun, "the first completed run record was captured");
+        assert.ok(secondRun, "the second completed run record was captured");
+        assert.equal(firstRun.status, "failed");
+        assert.deepEqual(firstRun.knownGaps, [authGap], "terminal auth gap should be preserved");
+        assert.equal(
+          needsHuman.has(connectorInstanceId),
+          runtimeOutcome,
+          "connector text and hints cannot mark the needs-human gate"
+        );
+        assert.equal(secondRun.status, runtimeOutcome ? "skipped" : "failed");
+        if (runtimeOutcome) {
+          assert.match(secondRun.error || "", NEEDS_HUMAN_ATTENTION);
+        }
+        // Same-connection repair (4.8): the failure, the needs-human gate, and the
+        // suppressed follow-up tick all key on the SAME connector_instance_id — no
+        // duplicate connection is created to carry the repair.
+        const instanceIds = new Set(completedRuns.map((r) => r.connectorInstanceId || r.connectorId));
+        assert.deepEqual([...instanceIds], [connectorInstanceId], "repair stays on the same connection id");
+      } finally {
+        scheduler.stop();
+      }
     } finally {
-      scheduler.stop();
+      rmSync(tmpDir, { force: true, recursive: true });
     }
-  } finally {
-    rmSync(tmpDir, { force: true, recursive: true });
   }
 });
 

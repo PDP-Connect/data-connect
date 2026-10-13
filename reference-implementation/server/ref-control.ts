@@ -138,7 +138,6 @@ import {
   filterRunCoverageEvidence,
   firstDegradingKnownGapReason,
   firstPendingDetailGapReason,
-  hasCompetingOwnerInteractionGap,
   hasDegradingKnownGap,
   hasTerminalKnownGap,
   isRetryableKnownGap,
@@ -2840,161 +2839,12 @@ function classifiedRunForOwnerState(
   };
 }
 
-// Generic terminal reasons that carry NO specific cause — a connector that
-// flattens any terminal failure into one of these hides the real signal. When
-// the run reason is one of these, a credential-bearing known-gap should win
-// (§10-C); a SPECIFIC failure_reason is left untouched.
+// Generic terminal reasons do not identify the cause of a failure.
 const GENERIC_TERMINAL_FAILURE_REASONS: ReadonlySet<string> = new Set([
   "connector_reported_failed",
   "connector_exited",
   "unknown",
 ]);
-
-/**
- * §10-C: recover a credential-specific reason from a run whose top-level
- * `failure_reason` is a GENERIC placeholder (e.g. `connector_reported_failed`)
- * but whose degrading known-gaps signal an auth failure (a 401/403 message or a
- * `refresh_credentials` recovery hint). Returns the most specific auth reason
- * the gap proves so the downstream `isCredentialReason` gate can preserve the
- * repair surface (browser session vs stored credential) instead of collapsing a
- * session repair into a credential update.
- * Returns `null` when the failure_reason is already specific (left untouched),
- * a competing owner-interaction gap in the SAME known_gaps array already
- * classifies this failure more specifically (manual_action/interaction, not a
- * proven credential rejection — evidence-specific: this does NOT suppress a
- * genuine `authentication_error`/401/403/credential-rejected signal, only
- * defers to an explicit sibling gap that is itself present this run), or no
- * known-gap signals credentials.
- */
-function credentialReasonFromGenericFailure(run: ConnectorRunSummary | null): string | null {
-  if (!run) {
-    return null;
-  }
-  const failureReason = run.failure_reason;
-  // A specific failure_reason is authoritative — do not override it.
-  if (
-    typeof failureReason === "string" &&
-    failureReason.length > 0 &&
-    !GENERIC_TERMINAL_FAILURE_REASONS.has(failureReason)
-  ) {
-    return null;
-  }
-  const competingOwnerInteraction = hasCompetingOwnerInteractionGap(run.known_gaps);
-  for (const gap of run.known_gaps) {
-    const reason = credentialReasonFromGenericGap(gap, competingOwnerInteraction);
-    if (reason) {
-      return reason;
-    }
-  }
-  return null;
-}
-
-function credentialReasonFromGenericGap(gap: unknown, competingOwnerInteraction: boolean): string | null {
-  if (!gap || typeof gap !== "object" || Array.isArray(gap)) {
-    return null;
-  }
-  // biome-ignore lint/style/useDestructuring: Explicit property or positional access documents this compatibility boundary.
-  const severity = (gap as { severity?: unknown }).severity;
-  if (severity === "informational" || severity === "recoverable") {
-    return null;
-  }
-  // biome-ignore lint/style/useDestructuring: Explicit property or positional access documents this compatibility boundary.
-  const message = (gap as { message?: unknown }).message;
-  if (isSourceUnavailableMessage(message)) {
-    return null;
-  }
-  // A genuine, definitive credential signal (401/403/explicit
-  // credential-rejected/invalid-token language) always wins, even alongside
-  // a competing manual_action gap — a real rejected credential is never
-  // suppressed. Only the WEAKER signals (a bare `refresh_credentials`
-  // recovery_hint with no definitive auth-failure message, or a
-  // `session_failed`-shaped message with no definitive marker) defer to a
-  // more specific sibling gap when one exists.
-  if (isDefinitiveAuthFailureMessage(message)) {
-    return browserSessionReasonFromAuthMessage(message) ?? "credential_rejected";
-  }
-  if (competingOwnerInteraction) {
-    return null;
-  }
-  const recoveryAction = (gap as { recovery_hint?: { action?: unknown } }).recovery_hint?.action;
-  if (recoveryAction === "refresh_credentials" || isAuthFailureMessage(message)) {
-    return browserSessionReasonFromAuthMessage(message) ?? "credentials_required";
-  }
-  return null;
-}
-
-/**
- * True only for an UNAMBIGUOUS, provably-dead-credential signal: an explicit
- * HTTP 401/403 status or an explicit credential-rejected marker in the
- * message text. Distinct from the broader `isAuthFailureMessage` (which also
- * matches softer, ambiguous markers like "session_failed" that a login-flow
- * stall can trigger just as easily as a genuinely dead session) — this
- * stricter check is what a competing manual_action gap is allowed to defer
- * to without risking suppression of a real credential rejection.
- */
-function isDefinitiveAuthFailureMessage(message: unknown): boolean {
-  if (typeof message !== "string" || message.length === 0) {
-    return false;
-  }
-  const text = message.toLowerCase();
-  return (
-    text.includes("401") ||
-    text.includes("403") ||
-    text.includes("authentication_error") ||
-    text.includes("credential_rejected") ||
-    text.includes("invalid_token") ||
-    text.includes("unauthorized") ||
-    text.includes("forbidden")
-  );
-}
-
-/**
- * True when a known-gap message indicates an authentication/credential failure
- * (a 401/403, expired token, dead session). Mirrors the `isCredentialReason`
- * vocabulary so an auth failure buried in a connector's message is recognised
- * even when the top-level run reason is generic (§10-C).
- */
-function isAuthFailureMessage(message: unknown): boolean {
-  if (typeof message !== "string" || message.length === 0) {
-    return false;
-  }
-  const text = message.toLowerCase();
-  return (
-    text.includes("401") ||
-    text.includes("403") ||
-    text.includes("auth_missing") ||
-    text.includes("authentication_error") ||
-    text.includes("credential") ||
-    text.includes("session_expired") ||
-    text.includes("session_required") ||
-    text.includes("reauth") ||
-    text.includes("unauthorized") ||
-    text.includes("forbidden") ||
-    text.includes("invalid_token")
-  );
-}
-
-function browserSessionReasonFromAuthMessage(message: unknown): string | null {
-  if (typeof message !== "string" || message.length === 0) {
-    return null;
-  }
-  const text = message.toLowerCase();
-  if (text.includes("session_required")) {
-    return "session_required";
-  }
-  if (text.includes("session_expired")) {
-    return "session_expired";
-  }
-  return null;
-}
-
-function isSourceUnavailableMessage(message: unknown): boolean {
-  if (typeof message !== "string" || message.length === 0) {
-    return false;
-  }
-  const text = message.toLowerCase();
-  return text.includes("source_unavailable");
-}
 
 /**
  * Roll per-stream evidence into the connection-scoped coverage axis.
@@ -6067,13 +5917,7 @@ export function projectConnectorSummaryConnectionHealth(input: {
         : scheduleEvidence.lastSuccessfulAt,
       latestStatus: mapRunStatus(latestRunForHealth?.status) ?? scheduleEvidence.backoffEvidence.schedulerFailureStatus,
       reasonCode:
-        // §10-C: a credential/auth signal buried in a known-gap takes priority
-        // over a GENERIC top-level `failure_reason` (e.g. ChatGPT's terminal 401
-        // surfaces as `connector_reported_failed`, which hides the auth cause and
-        // produces a silent failure with no reconnect prompt). A SPECIFIC
-        // failure_reason still wins — this only fires when the run reason is the
-        // generic `connector_reported_failed` placeholder.
-        credentialReasonFromGenericFailure(latestRunForHealth) ??
+        // Connector messages and hints do not prove sign-in rejection (Collection Profile 0.2.0, §5.11).
         latestRunForHealth?.failure_reason ??
         firstDegradingKnownGapReason(latestRunForHealth) ??
         firstPendingDetailGapReason(pendingDetailGaps) ??

@@ -27,13 +27,14 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { RECOVERY_ACTIONS } from "../runtime/connector-gap-bounding.ts";
+import { boundConnectorErrorMessage, boundGapString, RECOVERY_ACTIONS } from "../runtime/connector-gap-bounding.ts";
 import {
   loadSyncState,
   type RuntimeRunConnectorOptions,
   type RuntimeRunConnectorResult,
   runConnector,
 } from "../runtime/index.ts";
+import { runRequiresOwnerAuthRepair } from "../runtime/scheduler-retry-classifier.ts";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { startServer } from "../server/index.ts";
 import { buildStoredCollectionScope, COLLECTION_SCOPE_STATE_KEY } from "../server/local-collection-scope.ts";
@@ -754,6 +755,60 @@ function buildCoEmittedStreamManifest(connectorId = "test-co-emitted-stream") {
     ],
   };
 }
+
+test("run.failed known-gap messages use the same secret redaction as connector errors", async () => {
+  const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+  const { asPort, rsPort } = server;
+  const { ownerToken, connectorId } = await setupConnector(server, asPort);
+  const machineSecret = ["sk", "live", "51HxYzAbCdEfGhIjKlMnOp"].join("_");
+  const message = `request failed: ${machineSecret}; password=hunter2; code 482913`;
+  const { connectorPath, cleanup } = createTestConnector([
+    {
+      kind: "interaction_required",
+      known_gaps: [{ kind: "interaction_required", reason: "interaction_timeout" }],
+      message,
+      reason: "interaction_timeout",
+      recovery_hint: "refresh_credentials",
+      stream: "items",
+      type: "SKIP_RESULT",
+    },
+    { error: { message, retryable: false }, records_emitted: 0, status: "failed", type: "DONE" },
+  ]);
+  try {
+    const result = await runTestConnector({
+      collectionMode: "full_refresh",
+      connectorId,
+      connectorPath,
+      manifest: MINIMAL_MANIFEST,
+      onInteraction: async () => ({}),
+      ownerToken,
+      persistState: true,
+      rsUrl: `http://localhost:${rsPort}`,
+      state: null,
+    });
+    assert.equal(result.status, "failed");
+    const { body: timeline } = await fetchJson<TimelineBody>(
+      `http://localhost:${asPort}/_ref/runs/${encodeURIComponent(requireRunId(result))}/timeline`
+    );
+    const failure = (timeline.data || []).find((event) => event.event_type === "run.failed");
+    assert.ok(failure);
+    // Connector-supplied gap kinds/outcomes cannot become runtime interaction evidence.
+    assert.equal(
+      knownGapsOf(failure).some((gap) => gap.kind === "interaction_required"),
+      false
+    );
+    assert.equal(runRequiresOwnerAuthRepair({ known_gaps: knownGapsOf(failure).map((gap) => ({ ...gap })) }), false);
+    for (const kind of ["skip_result", "run_failed"]) {
+      const gap: KnownGap | undefined = knownGapsOf(failure).find((entry) => entry.kind === kind);
+      assert.ok(gap);
+      assert.equal(gap.message, failure.data.connector_error_message);
+      assert.equal(gap.message, "request failed: [REDACTED]; password=[REDACTED] code [REDACTED_OTP]");
+    }
+  } finally {
+    cleanup();
+    await closeServer(server);
+  }
+});
 
 test("Collection Profile conformance", async (t) => {
   t.after(async () => {
@@ -1814,12 +1869,13 @@ test("Collection Profile conformance", async (t) => {
       connector_id: "chatgpt",
     });
 
+    const message =
+      "chatgpt_preprogress_failure: refresh_credentials: chatgpt_session_failed: apiFetch got 401 on GET /conversation/abc (auth - not retryable)";
     const { connectorPath, cleanup } = createTestConnector([
       {
         error: {
           code: "credential_rejected",
-          message:
-            "chatgpt_preprogress_failure: refresh_credentials: chatgpt_session_failed: apiFetch got 401 on GET /conversation/abc (auth - not retryable)",
+          message,
           recovery_hint: "refresh_credentials",
           retryable: false,
         },
@@ -1850,8 +1906,7 @@ test("Collection Profile conformance", async (t) => {
       assert.ok(runFailedGap, `expected run_failed known gap, got ${JSON.stringify(result.known_gaps)}`);
       assert.equal(runFailedGap.reason, "connector_reported_failed");
       assert.equal(runFailedGap.recovery_hint?.action, "refresh_credentials");
-      // biome-ignore lint/performance/useTopLevelRegex: localized test assertion preserves its explicit contract.
-      assert.match(runFailedGap.message ?? "", /chatgpt_preprogress_failure: refresh_credentials:/);
+      assert.equal(runFailedGap.message, boundGapString(boundConnectorErrorMessage(message)));
 
       const asUrl = `http://localhost:${asPort}`;
       const { body: runTimeline } = await fetchJson<TimelineBody>(
