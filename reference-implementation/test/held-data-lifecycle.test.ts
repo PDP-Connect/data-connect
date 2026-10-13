@@ -523,25 +523,34 @@ describe("journeys (converge-r1-astra §4, design-astra §7)", () => {
     assert.equal(lastUsable, T0 + 30 * DAY);
   });
 
-  it("a compromised status credential is replaced without restoring read access", () => {
-    const { as } = authority(() => T0);
+  it("a compromised credential is replaced by a lifecycle recovery token for exactly the approved grants (Core: Lifecycle recovery)", () => {
+    // Replaces the prototype's key / owner-code replacement: Core's recovery is an owner-approved
+    // authorization, and a confidential client recovers by client authentication alone.
+    let now = T0;
+    const { as } = authority(() => now);
     reg(as, "g");
-    as.recordCredential({ token: "bound", grantIds: ["g"], kind: "access", jkt: "K" });
-    as.recordCredential({ token: "bearer", grantIds: ["g"], kind: "access" });
+    reg(as, "other");
+    as.recordCredential({ token: "bound", grantIds: ["g", "other"], kind: "access", jkt: "K" });
     as.disableCredential("bound");
-    as.disableCredential("bearer");
-    assert.equal(as.replaceStatusCredential({ grantId: "g" }), null, "no proof, no replacement");
-    assert.equal(as.replaceStatusCredential({ grantId: "g", jkt: "WRONG" }), null);
-    const viaKey = as.replaceStatusCredential({ grantId: "g", jkt: "K" });
-    assert.ok(viaKey);
-    assert.equal(ask(as, viaKey, ["g"]), null, "the replacement is still bound to the key");
-    assert.ok(ask(as, viaKey, ["g"], { dpopJkt: "K" }));
-    const code = as.ownerRecoveryCode("g");
-    assert.equal(ask(as, code, ["g"]), null, "a recovery code is not a status reader");
-    const viaOwner = as.replaceStatusCredential({ grantId: "g", recoveryCode: code });
-    assert.ok(viaOwner && ask(as, viaOwner, ["g"]));
-    assert.equal(as.replaceStatusCredential({ grantId: "g", recoveryCode: code }), null, "one use");
-    // Read access: the status credential is not an access token; the RS check is in held-data-as-e2e.
+    assert.equal(ask(as, "bound", ["g"], { dpopJkt: "K" }), null, "a disabled token is refused");
+    const shown = [{ grant_id: "g", source: "s", purpose: "p", issued_at: null }];
+    assert.throws(
+      () => as.recordRecoveryApproval({ clientId: "someone-else", subjectId: "owner", grantIds: ["g"], shown }),
+      /issued to the client/,
+    );
+    const approval = as.recordRecoveryApproval({ clientId: "app", subjectId: "owner", grantIds: ["g"], shown });
+    const issued = as.issueRecoveryToken(approval, T0 + HOUR);
+    assert.deepEqual(issued.grantIds, ["g"]);
+    assert.throws(() => as.issueRecoveryToken(approval, null), /already used/, "one token per approval");
+    assert.ok(ask(as, issued.token, ["g"]), "the token authenticates queries");
+    assert.deepEqual(ask(as, issued.token, ["other"]), [{ grant_id: "other", error: "invalid_grant" }], "an unapproved grant is not covered");
+    assert.equal(as.recoveryCredentialClient(issued.token, "g"), "app", "unexpired: authenticates a write");
+    assert.equal(as.recoveryCredentialClient(issued.token, "other"), null);
+    now = T0 + HOUR;
+    assert.equal(as.recoveryCredentialClient(issued.token, "g"), null, "expired: authenticates no write");
+    assert.ok(ask(as, issued.token, ["g"]), "an expired token still authenticates a query");
+    as.disableCredential(issued.token);
+    assert.equal(ask(as, issued.token, ["g"]), null, "a disabled token is refused");
   });
 
   it("a subprocessor receives the original absolute deadlines and gets no fresh period", async () => {

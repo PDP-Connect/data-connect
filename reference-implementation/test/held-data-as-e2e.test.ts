@@ -22,6 +22,7 @@ import { HeldDataClient } from "../lib/held-data/client.ts";
 import { MemoryClientCheckpointStorage } from "../lib/held-data/checkpoint.ts";
 import { httpReportTransport, httpStatusTransport } from "../lib/held-data/http-transport.ts";
 import { makeDpopProof, thumbprint } from "../lib/training-lease/dpop.ts";
+import { recoverLifecycle } from "./helpers/held-data-recovery-flow.ts";
 import { generateEd25519KeyPair } from "../lib/training-lease/jws.ts";
 import {
   endHeldDataForGrant,
@@ -449,7 +450,11 @@ describe("held-data lifecycle over HTTP", () => {
           assert.equal(record.status, 200);
           assert.equal((record.body.pending_actions as unknown[]).length, 1);
           assert.equal(record.body.history_available, false);
-          assert.match(String(record.body.owner_message), /no reads, tokens, processing authority, or positive assessments/);
+          // Final text: pending, no tokens or processing authority, no positive assessments, and read
+          // access ending within the bounded propagation period (a cached introspection result may still permit reads).
+          assert.match(String(record.body.owner_message), /recorded and pending/);
+          assert.match(String(record.body.owner_message), /no tokens or processing authority and returns no positive assessments/);
+          assert.match(String(record.body.owner_message), /within 60 seconds.*cached introspection result.*original cache lifetime/s);
           assert.equal((await status(h, g.accessToken, g.grantId)).status, 503);
           restore();
           // Restore the read database too: no authority path may bypass pending replay.
@@ -918,31 +923,23 @@ describe("held-data lifecycle over HTTP", () => {
     );
   });
 
-  it("a compromised lifecycle credential is replaced with an owner recovery code; the replacement reads status, never data", async () => {
+  it("a compromised lifecycle credential is replaced through lifecycle recovery; the recovery token reads lifecycle, never data", async () => {
     await withServer(
       false,
       async (h) => {
-        const g = await ordinaryGrant(h);
-        assert.equal((await status(h, g.token, g.grantId)).status, 200);
-        getHeldDataRuntime()?.authority.disableCredential(g.token);
-        assert.equal((await introspect(g.token)).active, true, "lifecycle disablement changes no read authority");
-        assert.equal(await rsRead(h, g.token), 200);
-        const release = await heldDataTokenReleaseCheck(g.token);
+        const clientId = await registerPublicClient(h);
+        const g = await authCodeGrant(h, clientId);
+        assert.equal((await status(h, g.accessToken, g.grantId)).status, 200);
+        getHeldDataRuntime()?.authority.disableCredential(g.accessToken);
+        assert.equal((await introspect(g.accessToken)).active, true, "lifecycle disablement changes no read authority");
+        assert.equal(await rsRead(h, g.accessToken), 200);
+        const release = await heldDataTokenReleaseCheck(g.accessToken);
         release();
-        assert.equal((await status(h, g.token, g.grantId)).status, 401);
-        const code = await owner(h, `/v1/owner/grants/${g.grantId}/lifecycle/recovery-code`, "POST");
-        const rec = await fetchJson<{ status_credential: string }>(
-          `${h.asUrl}/oauth/grant-lifecycle/recover`,
-          json({ grant_id: g.grantId, recovery_code: code.body.recovery_code }),
-        );
-        assert.equal(rec.status, 200, JSON.stringify(rec.body));
-        assert.equal((await status(h, rec.body.status_credential, g.grantId)).status, 200);
-        assert.equal(await rsRead(h, rec.body.status_credential), 401, "a status credential is not an access token");
-        const reuse = await fetchJson(
-          `${h.asUrl}/oauth/grant-lifecycle/recover`,
-          json({ grant_id: g.grantId, recovery_code: code.body.recovery_code }),
-        );
-        assert.equal(reuse.status, 400);
+        assert.equal((await status(h, g.accessToken, g.grantId)).status, 401);
+        const rec = await recoverLifecycle(h, clientId, [g.grantId]);
+        assert.equal((await status(h, rec.access_token, g.grantId)).status, 200);
+        assert.equal(await rsRead(h, rec.access_token), 401, "a recovery token is not an access token");
+        assert.equal((await introspect(rec.access_token)).active, false);
       },
       heldDataOpts(),
     );
@@ -952,24 +949,20 @@ describe("held-data lifecycle over HTTP", () => {
     await withServer(
       false,
       async (h) => {
-        const a = await ordinaryGrant(h);
-        const b = await ordinaryGrant(h);
+        const clientId = await registerPublicClient(h);
+        const a = await authCodeGrant(h, clientId);
+        const b = await authCodeGrant(h, clientId);
         const instruction = async (grantId: string) => {
           const erase = await owner(h, `/v1/owner/grants/${grantId}/lifecycle/erase`, "POST");
           assert.equal(erase.status, 200, JSON.stringify(erase.body));
-          const q = await status(h, grantId === a.grantId ? a.token : b.token, grantId);
+          const q = await status(h, grantId === a.grantId ? a.refreshToken : b.refreshToken, grantId);
           return (q.body.grants[0]?.erasure as { instruction_id: string }).instruction_id;
         };
         const aInstruction = await instruction(a.grantId);
         const bInstruction = await instruction(b.grantId);
-        getHeldDataRuntime()?.authority.disableCredential(a.token);
-        const code = await owner(h, `/v1/owner/grants/${a.grantId}/lifecycle/recovery-code`, "POST");
-        const rec = await fetchJson<{ status_credential: string }>(
-          `${h.asUrl}/oauth/grant-lifecycle/recover`,
-          json({ grant_id: a.grantId, recovery_code: code.body.recovery_code }),
-        );
-        assert.equal(rec.status, 200, JSON.stringify(rec.body));
-        const cred = rec.body.status_credential;
+        getHeldDataRuntime()?.authority.disableCredential(a.refreshToken);
+        const rec = await recoverLifecycle(h, clientId, [a.grantId]);
+        const cred = rec.access_token;
         assert.equal((await introspect(cred)).active, false, "a recovery credential is not an active access token");
         const reportedAt = new Date().toISOString();
         const write = (grantId: string, instructionId: string) =>
@@ -989,7 +982,7 @@ describe("held-data lifecycle over HTTP", () => {
         const bView = await owner(h, `/v1/owner/grants/${b.grantId}/lifecycle`);
         assert.equal((bView.body.erasures as Record<string, unknown>[])[0]?.receipt_at, null, "no receipt was recorded for B");
         // B's own credential still works: the refusal is scoping, not an outage.
-        assert.equal((await status(h, b.token, b.grantId)).body.grants[0]?.held_data, "erase");
+        assert.equal((await status(h, b.refreshToken, b.grantId)).body.grants[0]?.held_data, "erase");
       },
       heldDataOpts(),
     );
@@ -1073,12 +1066,8 @@ describe("held-data lifecycle over HTTP", () => {
         // Revocation revoked the refresh family too, so a revoked grant's public client has no current token left.
         const current = await lifecycle(h, { ...write, token: r1.body.refresh_token });
         assert.equal(current.body.grants[0]?.error, "current_authentication_required");
-        const code = await owner(h, `/v1/owner/grants/${g.grantId}/lifecycle/recovery-code`, "POST");
-        const rec = await fetchJson<{ status_credential: string }>(
-          `${h.asUrl}/oauth/grant-lifecycle/recover`,
-          json({ grant_id: g.grantId, recovery_code: code.body.recovery_code })
-        );
-        const viaRecovery = await lifecycle(h, { ...write, token: rec.body.status_credential });
+        const rec = await recoverLifecycle(h, clientId, [g.grantId]);
+        const viaRecovery = await lifecycle(h, { ...write, token: rec.access_token });
         assert.equal(viaRecovery.body.grants[0]?.held_data, "erase", JSON.stringify(viaRecovery.body));
         const afterRec = await owner(h, `/v1/owner/grants/${g.grantId}/lifecycle`);
         const op = (afterRec.body.erasures as Record<string, unknown>[])[0];
@@ -1095,11 +1084,7 @@ describe("held-data lifecycle over HTTP", () => {
       const clientId = await registerPublicClient(h);
       const g = await authCodeGrant(h, clientId);
       await owner(h, `/v1/owner/grants/${g.grantId}/lifecycle/erase`, "POST");
-      const code = await owner(h, `/v1/owner/grants/${g.grantId}/lifecycle/recovery-code`, "POST");
-      const recovered = await fetchJson<{ status_credential: string }>(
-        `${h.asUrl}/oauth/grant-lifecycle/recover`,
-        json({ grant_id: g.grantId, recovery_code: code.body.recovery_code })
-      );
+      const recovered = { body: { status_credential: (await recoverLifecycle(h, clientId, [g.grantId])).access_token } };
       const q = await status(h, recovered.body.status_credential, g.grantId);
       const instruction = (q.body.grants[0]?.erasure as { instruction_id: string }).instruction_id;
       const receiptAt = clock.now + 10 * DAY;
@@ -3007,9 +2992,14 @@ describe("lane F: P9 decommission", () => {
         assert.equal(g.grant?.grant_id, g.grant_id);
         assert.ok(g.grant && Object.hasOwn(g.grant, "access_mode"));
       }
-      assert.equal(offer.body.pause_threshold_ms, 7 * DAY);
-      assert.equal(offer.body.long_stop_ms, 90 * DAY);
-      assert.match(String(offer.body.owner_message), /pause.*positive assessment.*delete/i);
+      // Final text: no pause and no long-stop. The owner is told what an AS that never answers again means.
+      assert.equal(Object.hasOwn(offer.body, "pause_threshold_ms"), false);
+      assert.equal(Object.hasOwn(offer.body, "long_stop_ms"), false);
+      assert.match(String(offer.body.owner_message), /cannot learn of it/i);
+      assert.match(String(offer.body.owner_message), /retention ceiling/i);
+      assert.match(String(offer.body.owner_message), /offered, recorded, sent, or receipt reported/);
+      const stages = Object.fromEntries((grants as unknown as { grant_id: string; stage: string }[]).map((g) => [g.grant_id, g.stage]));
+      assert.deepEqual(stages, { [live.grantId]: "offered", [consumed.grantId]: "offered", [ended.grantId]: "recorded" });
       const send = (body: unknown) => fetchJson<Record<string, unknown>>(`${h.asUrl}${path}`,
         json(body, { Authorization: `Bearer ${h.ownerToken}` }));
       assert.equal((await send({ offer_id: offer.body.offer_id })).status, 400);
@@ -3029,15 +3019,10 @@ describe("lane F: P9 decommission", () => {
       const reopened = HeldDataAuthority.open({ journalPath: rt.authority.journalPath, now: () => clock.now });
       assert.equal(reopened.decommissioned, true);
       assert.equal((await status(h, live.token, live.grantId)).status, 503);
-      clock.now = origin + 7 * DAY;
-      await client.tick();
-      assert.equal(client.canUse(live.grantId).ok, false);
-      assert.equal(app.holds(live.grantId).records, 1);
-      clock.now = origin + 90 * DAY;
-      await client.tick();
-      assert.equal(app.holds(live.grantId).records, 0);
-      assert.equal(app.holds(live.grantId).summary, false);
-      assert.equal(app.holds(live.grantId).indexEntries, 0);
+      // The earlier pause (7 d) and long-stop (90 d) asserted here are gone: AS silence starts no
+      // deadline. What the client does meanwhile is client-library behaviour, tested there.
+      assert.equal(app.holds(live.grantId).records, 1, "the AS silence deleted nothing");
+      assert.ok(origin <= clock.now);
     }, heldDataOpts(clock));
   });
 
@@ -3066,7 +3051,9 @@ describe("lane F: P6 advance election over HTTP", () => {
       assert.equal(instruction.accepted_at, new Date(accepted).toISOString());
       assert.equal(instruction.effective_at, new Date(expiry).toISOString());
       assert.equal(instruction.delivered_at, null);
-      assert.equal(instruction.use_stops_by, new Date(expiry + 7 * DAY).toISOString());
+      assert.equal(instruction.stop_use_by, new Date(expiry + 2 * DAY).toISOString(), "48 h from the effective time");
+      assert.equal(Object.hasOwn(instruction, "use_stops_by"), false);
+      assert.equal(Object.hasOwn(instruction, "deleted_by_without_receipt"), false);
       assert.equal((await status(h, g.token, g.grantId)).body.grants[0]!.held_data, "permitted");
       assert.equal(await rsRead(h, g.token), 200);
       const app = new ToyApp();
