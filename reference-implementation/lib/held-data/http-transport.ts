@@ -6,12 +6,14 @@
  * in the Core draft's wire form (`rev/held-data` 699e8b71bd): a form-encoded
  * POST to `/oauth/grant-lifecycle` with `grant_id` and `token`, answered with
  * `{ grants: [{ grant_id, assessed_at, read_state, held_data, erasure? }] }`.
- * Writes (`report=received|completed`) go to the same endpoint.
+ * Writes (`report=received|completed|retained`) go to the same endpoint. A `retained` report carries
+ * `retained_until` in one of its three forms (RFC 3339 date-time, `event:<text>`, `unknown`) and,
+ * unless law prohibits them, `retention_basis` and `retention_scope`.
  *
  * PROTOTYPE: experimental held-data lifecycle work, off by default.
  */
 import type { StatusResult } from "./authority.ts";
-import type { ReportTransport, StatusTransport } from "./client.ts";
+import { formatRetentionEnd, type ReportTransport, type StatusTransport } from "./client.ts";
 
 function ms(v: unknown): number {
   return typeof v === "string" ? Date.parse(v) : Number.NaN;
@@ -140,9 +142,12 @@ export function httpReportTransport(o: {
       formBody({
         grant_id: r.grantId,
         token,
-        report: r.kind === "receipt" ? "received" : "completed",
+        report: r.kind === "receipt" ? "received" : r.kind === "retained" ? "retained" : "completed",
         instruction_id: r.operationId,
         reported_at: new Date(reportedAt).toISOString(),
+        ...(r.kind === "retained" && r.retainedUntil ? { retained_until: formatRetentionEnd(r.retainedUntil) } : {}),
+        ...(r.kind === "retained" && r.retentionBasis !== undefined ? { retention_basis: r.retentionBasis } : {}),
+        ...(r.kind === "retained" && r.retentionScope !== undefined ? { retention_scope: r.retentionScope } : {}),
       })
     );
     let resp = await send(eventTime + (offsets.get(r.grantId) ?? 0));

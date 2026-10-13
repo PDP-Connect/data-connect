@@ -156,7 +156,7 @@ describe("client record clocks in the durable checkpoint", () => {
     let t = T0;
     const store = new Store();
     const c = new HeldDataClient({
-      now: () => t, status: unavailable, store, initialize: true, policy: { retentionCeilingMs: ceiling, longStopMs: null },
+      now: () => t, status: unavailable, store, initialize: true, policy: { retentionCeilingMs: ceiling },
     });
     assert.equal(c.acquire("g"), true);
     store.held.add("g");
@@ -205,36 +205,23 @@ describe("client record clocks in the durable checkpoint", () => {
     assert.equal(bare.rows.has("a"), false, "the expired record must not stay held");
   });
 
-  it("reacquiring a legacy copy after a long-stop disposal does not restart the retention ceiling", () => {
+  it("reacquiring a legacy copy after its ceiling disposal does not restart the retention ceiling", () => {
     let t = T0;
     const store = new Store();
     const c = new HeldDataClient({
-      now: () => t, status: unavailable, store, initialize: true, policy: { retentionCeilingMs: 2 * DAY, longStopMs: DAY },
+      now: () => t, status: unavailable, store, initialize: true, policy: { retentionCeilingMs: 2 * DAY },
     });
     assert.equal(c.acquire("g"), true);
     store.held.add("g");
-    t += DAY;
+    t = T0 + 2 * DAY;
     void c.canUse("g");
-    assert.equal(c.grantState("g")?.deleteReason, "long_stop");
+    assert.equal(c.grantState("g")?.deleteReason, "retention_ceiling");
 
     t = T0 + 3 * DAY;
     assert.equal(c.acquire("g"), false, "the original copy's ceiling (day 2) has passed");
     assert.ok((c.deleteBy("g") ?? 0) <= T0 + 2 * DAY || c.grantState("g")?.deletedAt != null);
   });
 
-  it("a legacy copy reread after a long-stop but before the ceiling keeps the original ceiling", () => {
-    let t = T0;
-    const store = new Store();
-    const c = new HeldDataClient({
-      now: () => t, status: unavailable, store, initialize: true, policy: { retentionCeilingMs: 2 * DAY, longStopMs: DAY },
-    });
-    c.acquire("g");
-    t += DAY;
-    void c.canUse("g");
-    t = T0 + DAY + 12 * 60 * 60 * 1000;
-    assert.equal(c.acquire("g"), true, "Core permits reading again after the disposal");
-    assert.equal(c.deleteBy("g"), T0 + 2 * DAY, "but the ceiling still counts from the first acquisition");
-  });
   it("disposing one source's expired record does not delete another source's live record with the same id", () => {
     let t = T0;
     const policy = { retentionCeilingMs: ceiling };

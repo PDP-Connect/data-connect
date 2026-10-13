@@ -81,9 +81,9 @@ describe("red-team findings (redteam-sol.md)", () => {
     assert.ok((client.grantState("g")?.erasures.size ?? 0) > 0, "the erasure facts survive");
   });
 
-  it("RT15 (finding 3): overdue long-stop disposal runs before a new assessment on every entry path (onReadFailure, reconcile)", async () => {
+  it("RT15 (finding 3): overdue retention disposal runs before a new assessment on every entry path (onReadFailure, reconcile)", async () => {
     for (const entry of ["onReadFailure", "reconcile"] as const) {
-      const sim = new Sim({ policy: { longStopMs: 90 * DAY } });
+      const sim = new Sim({ policy: { retentionCeilingMs: 90 * DAY } });
       sim.sync();
       await sim.client.reconcile();
       sim.t = T0 + 100 * DAY;
@@ -92,7 +92,7 @@ describe("red-team findings (redteam-sol.md)", () => {
       } else {
         await sim.client.reconcile();
       }
-      assert.equal(sim.client.grantState("g1")?.deleteReason, "long_stop", entry);
+      assert.equal(sim.client.grantState("g1")?.deleteReason, "retention_ceiling", entry);
       assert.deepEqual(sim.app.holds("g1"), { records: 0, indexEntries: 0, summary: false }, entry);
     }
   });
@@ -186,51 +186,48 @@ describe("red-team findings (redteam-sol.md)", () => {
     }
   });
 
-  it("C1a (finding 9): HTTP 429 with Retry-After is a failed attempt, retried after the server-directed wait; a late answer pauses then resumes use", async () => {
+  it("C1a (finding 9): HTTP 429 with Retry-After is a failed attempt; Retry-After MAY replace the retry interval but the 24 h reconciliation attempt still binds; use never stops", async () => {
     let t = T0;
     const app = new ToyApp();
     let mode: "ok" | "429" = "ok";
+    let retryAfterMs = 2 * HOUR;
     const as = authority(() => t).as;
     reg(as, "g");
     as.recordCredential({ token: "tok", grantIds: ["g"], kind: "access" });
-    let delayMs = 0;
-    let pausedDuringDelivery: boolean | null = null;
     const client: HeldDataClient = new HeldDataClient({
       now: () => t,
       store: app,
-      policy: { pauseThresholdMs: 48 * HOUR, retryMs: HOUR },
+      policy: { retryMs: HOUR },
       status: async () => {
         if (mode === "429") {
-          return { ok: false, reason: "http_429", retryAfterMs: 2 * HOUR };
+          return { ok: false, reason: "http_429", retryAfterMs };
         }
         const p = as.authenticateRead({ token: "tok" });
-        const results = p ? as.status(p, ["g"]) : [];
-        t += delayMs;
-        if (delayMs > 0) {
-          pausedDuringDelivery = !client.canUse("g").ok;
-        }
-        return { ok: true, results };
+        return { ok: true, results: p ? as.status(p, ["g"]) : [] };
       },
     });
     app.attach(client);
     app.sync("g", [{ id: "r", stream: "messages", text: "x" }]);
     await client.reconcile();
-    const s = t;
     mode = "429";
     t += MIN;
+    const first = t;
     await client.reconcile();
-    assert.equal(client.nextAttemptAt, t + 2 * HOUR);
-    // RT14 trace: retry at s+47h59m, answer delivered two minutes later.
+    assert.equal(client.nextAttemptAt, first + 2 * HOUR, "the server-directed wait replaces the retry interval");
+    assert.equal(client.canUse("g").ok, true, "a failed attempt does not stop permitted use");
+    // A Retry-After longer than the reconciliation interval cannot postpone the 24 h attempt.
+    retryAfterMs = 48 * HOUR;
+    t = first + 2 * HOUR;
+    const second = t;
+    await client.reconcile();
+    assert.equal(client.nextAttemptAt, second + DAY, "the reconciliation interval takes precedence over Retry-After");
+    // The attempt due at second + 24 h answers: use goes on and the schedule returns to the daily cadence.
     mode = "ok";
-    t = s + 47 * HOUR + 59 * MIN;
-    delayMs = 2 * MIN;
-    const req = client.reconcile();
-    await req;
-    assert.equal(t, s + 48 * HOUR + MIN);
-    assert.equal(pausedDuringDelivery, true, "use pauses at the deadline while the answer is in flight");
-    assert.equal(client.canUse("g").ok, true, "use resumes once the positive answer arrives");
-    // Between the deadline and delivery the gate was closed: the freshness origin is the send time.
-    assert.equal(client.grantState("g")?.freshnessOrigin, s + 47 * HOUR + 59 * MIN);
+    t = second + DAY;
+    await client.tick();
+    assert.equal(client.canUse("g").ok, true);
+    assert.equal(client.nextAttemptAt, t + DAY);
+    assert.equal(client.grantState("g")?.positiveAt, second + DAY);
   });
 
   it("RT9 (finding 11): retained, a corrected retained, then completed are all kept; the owner sees completion", () => {
@@ -256,10 +253,11 @@ describe("red-team findings (redteam-sol.md)", () => {
     let t = T0;
     const sub = new ToySubprocessor(() => t);
     sub.receive("g", 3);
-    const positive = { grantId: "g", issuedAt: T0, useUntil: T0 + 7 * DAY, erasures: [], deleteAllBy: null };
+    const positive = { grantId: "g", issuedAt: T0, usable: true, useUntil: T0 + 7 * DAY, erasures: [], deleteAllBy: null };
     const erase = {
       grantId: "g",
       issuedAt: T0 + HOUR,
+      usable: false,
       useUntil: null,
       erasures: [{ operationId: "op", scope: { streams: "all" as const }, deleteBy: T0 + 30 * DAY }],
       deleteAllBy: T0 + 30 * DAY,

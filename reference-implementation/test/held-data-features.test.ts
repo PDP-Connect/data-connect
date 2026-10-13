@@ -102,7 +102,7 @@ describe("lane F: per-record retention ceilings", () => {
       now: () => t,
       store: app,
       status: async () => ({ ok: false, reason: "offline" }),
-      policy: { retentionCeilingMs: 2 * DAY, longStopMs: null },
+      policy: { retentionCeilingMs: 2 * DAY },
     });
     app.attach(client);
     return {

@@ -56,9 +56,9 @@ describe("client safety (RT6, RT10 and persisted state)", () => {
     await client.reconcile();
     const deadline = client.deleteBy("g");
     t += 8 * DAY;
-    assert.equal(client.canUse("g").ok, false);
+    assert.equal(client.canUse("g").ok, true, "silence from the AS starts no deadline");
     t -= 10 * DAY;
-    assert.equal(client.canUse("g").ok, false, "rollback must not revive the old assessment");
+    assert.equal(client.canUse("g").ok, false, "rollback must not license use");
     await client.tick();
     assert.equal(app.holds("g").records, 0, "uncertain disposal deadline is treated as due");
     assert.ok(client.deleteBy("g") === null || client.deleteBy("g") === deadline);
@@ -125,7 +125,7 @@ describe("client safety (RT6, RT10 and persisted state)", () => {
     app.attach(restarted);
     assert.deepEqual(restarted.grantState("g")?.erasures, before?.erasures);
     assert.equal(restarted.grantState("g")?.firstAcquiredAt, T0);
-    assert.equal(restarted.grantState("g")?.freshnessOrigin, T0);
+    assert.equal(restarted.grantState("g")?.positiveAt, T0);
     assert.equal(restarted.grantState("g")?.lastPosition, 7);
     assert.equal(restarted.nextAttemptAt, nextAttempt);
     assert.equal(restarted.deleteBy("g"), c.deleteBy("g"));
@@ -201,11 +201,11 @@ describe("client safety (RT6, RT10 and persisted state)", () => {
     app.attach(restarted);
     app.sync("g", record);
     await restarted.reconcile();
-    assert.equal(restarted.grantState("g")?.freshnessOrigin, sentAt);
-    assert.equal(restarted.deleteBy("g"), sentAt + 90 * DAY, "acquisition + long-stop is too late");
+    assert.equal(restarted.grantState("g")?.positiveAt, sentAt);
+    assert.equal(restarted.deleteBy("g"), null, "a missing answer starts no deletion deadline");
     assert.equal(restarted.canUse("g").ok, true);
-    t = sentAt + 7 * DAY;
-    assert.equal(restarted.canUse("g").ok, false);
+    t = sentAt + 30 * DAY;
+    assert.equal(restarted.canUse("g").ok, true, "and no pause: a failed attempt does not stop permitted use");
     c.onTokenResponse({ grantIds: ["recovery"], lifecycleRecovery: true, sentAt: t });
     assert.equal(c.grantState("recovery"), undefined);
   });
@@ -252,11 +252,13 @@ describe("client safety (RT6, RT10 and persisted state)", () => {
     assert.equal(relays, 0);
   });
 
-  it("toy app restart preserves paused use and disposes overdue restored data before an answer", async () => {
+  it("toy app restart: use waits for an attempt after a resume, and overdue retention disposal runs before any answer", async () => {
     let t = T0;
     const storage = new MemoryClientCheckpointStorage();
     const app = new ToyApp();
-    const c = new HeldDataClient({ initialize: true, now: () => t, status: positive(() => t), storage, store: app });
+    const c = new HeldDataClient({
+      initialize: true, now: () => t, status: positive(() => t), storage, store: app, policy: { retentionCeilingMs: 90 * DAY },
+    });
     app.attach(c);
     app.sync("g", record);
     await c.reconcile();
@@ -287,7 +289,7 @@ describe("client safety (RT6, RT10 and persisted state)", () => {
     restoredApp.attach(afterPowerOff);
     await afterPowerOff.onResume();
     assert.equal(observed, false, "disposed copies need no query");
-    assert.equal(afterPowerOff.grantState("g")?.deleteReason, "long_stop");
+    assert.equal(afterPowerOff.grantState("g")?.deleteReason, "retention_ceiling");
     assert.equal(restoredApp.search("g", "hello"), null);
   });
 
@@ -381,7 +383,7 @@ describe("client safety (RT6, RT10 and persisted state)", () => {
 
   it("a clock rollback in one downstream callback cannot relay positive use to the next", async () => {
     let t = T0;
-    let secondUntil: number | null | undefined;
+    let secondUsable: boolean | undefined;
     const app = new ToyApp();
     const c = new HeldDataClient({
       downstream: [
@@ -392,7 +394,7 @@ describe("client safety (RT6, RT10 and persisted state)", () => {
         },
         {
           relay: (notice) => {
-            secondUntil = notice.useUntil;
+            secondUsable = notice.usable;
           },
         },
       ],
@@ -403,10 +405,10 @@ describe("client safety (RT6, RT10 and persisted state)", () => {
     app.attach(c);
     app.sync("g", record);
     await c.reconcile();
-    assert.equal(secondUntil, null, "relay must check authority after a reentrant clock discontinuity");
+    assert.equal(secondUsable, false, "relay must check authority after a reentrant clock discontinuity");
   });
 
-  it("a positive status answer delayed across the old long-stop cannot cancel overdue disposal", async () => {
+  it("a positive status answer delayed across a retention ceiling cannot cancel overdue disposal", async () => {
     let t = T0;
     let delayed = false;
     const app = new ToyApp();
@@ -417,7 +419,7 @@ describe("client safety (RT6, RT10 and persisted state)", () => {
       }
       return answer;
     };
-    const c = new HeldDataClient({ now: () => t, status, store: app });
+    const c = new HeldDataClient({ now: () => t, status, store: app, policy: { retentionCeilingMs: 90 * DAY } });
     app.attach(c);
     app.sync("g", record);
     await c.reconcile();
@@ -425,7 +427,7 @@ describe("client safety (RT6, RT10 and persisted state)", () => {
     delayed = true;
     await c.reconcile();
     assert.equal(app.holds("g").records, 0, "new assessment must not cancel a disposal deadline passed in flight");
-    assert.equal(c.grantState("g")?.deleteReason, "long_stop");
+    assert.equal(c.grantState("g")?.deleteReason, "retention_ceiling");
   });
 
   it("completed partial erasure is replayed against restored data without changing receipt or completion", async () => {
@@ -488,13 +490,13 @@ describe("client safety (RT6, RT10 and persisted state)", () => {
     let t = T0;
     const sub = new ToySubprocessor(() => t);
     sub.receive("g", 1);
-    sub.relay({ grantId: "g", issuedAt: T0, useUntil: T0 + 7 * DAY, deleteAllBy: T0 + 2 * DAY, erasures: [] });
+    sub.relay({ grantId: "g", issuedAt: T0, usable: true, useUntil: T0 + 7 * DAY, deleteAllBy: T0 + 2 * DAY, erasures: [] });
     t = T0 + 2 * DAY;
     assert.equal(sub.canUse("g"), false, "use ends at deleteAllBy without a separate tick");
     const erased = new ToySubprocessor(() => t);
     erased.receive("e", 1);
     erased.relay({
-      grantId: "e", issuedAt: T0, useUntil: T0 + 7 * DAY, deleteAllBy: null,
+      grantId: "e", issuedAt: T0, usable: true, useUntil: T0 + 7 * DAY, deleteAllBy: null,
       erasures: [{ operationId: "op", scope: { streams: "all" }, deleteBy: T0 + DAY }],
     });
     assert.equal(erased.canUse("e"), false, "an erasure also closes use");
@@ -504,7 +506,7 @@ describe("client safety (RT6, RT10 and persisted state)", () => {
     let t = T0;
     const other = new ToySubprocessor(() => t);
     other.receive("h", 1);
-    other.relay({ grantId: "h", issuedAt: T0, useUntil: T0 + 7 * DAY, deleteAllBy: null, erasures: [] });
+    other.relay({ grantId: "h", issuedAt: T0, usable: true, useUntil: T0 + 7 * DAY, deleteAllBy: null, erasures: [] });
     t = T0 + 8 * DAY;
     assert.equal(other.canUse("h"), false);
     t = T0 + DAY;
@@ -517,7 +519,7 @@ describe("client safety (RT6, RT10 and persisted state)", () => {
     let t = T0;
     const sub = new ToySubprocessor(() => t);
     sub.receive("g", 1);
-    sub.relay({ grantId: "g", issuedAt: T0, useUntil: T0 + 7 * DAY, deleteAllBy: T0 + 2 * DAY, erasures: [] });
+    sub.relay({ grantId: "g", issuedAt: T0, usable: true, useUntil: T0 + 7 * DAY, deleteAllBy: T0 + 2 * DAY, erasures: [] });
     t = T0 + DAY;
     assert.equal(sub.canUse("g"), true);
     t = T0;
@@ -534,7 +536,7 @@ describe("client safety (RT6, RT10 and persisted state)", () => {
       let t = bad;
       const sub = new ToySubprocessor(() => t);
       sub.receive("g", 1);
-      sub.relay({ grantId: "g", issuedAt: T0, useUntil: T0 + 7 * DAY, deleteAllBy: T0 + 2 * DAY, erasures: [] });
+      sub.relay({ grantId: "g", issuedAt: T0, usable: true, useUntil: T0 + 7 * DAY, deleteAllBy: T0 + 2 * DAY, erasures: [] });
       assert.equal(sub.canUse("g"), false, `initial ${bad} reading`);
       sub.tick();
       assert.equal(sub.held.has("g"), false);
@@ -571,26 +573,6 @@ describe("client safety (RT6, RT10 and persisted state)", () => {
     assert.equal(c.canUse("g").ok, true, "reconciliation restores use");
   });
 
-  it("a durable write that crosses the pause deadline does not license use", async () => {
-    let t = T0;
-    const storage = new MemoryClientCheckpointStorage();
-    const write = storage.write.bind(storage);
-    let writeCostMs = 0;
-    storage.write = (cp) => {
-      t += writeCostMs;
-      write(cp);
-    };
-    const app = new ToyApp();
-    const c = new HeldDataClient({ initialize: true, now: () => t, status: positive(() => t), storage, store: app });
-    app.attach(c);
-    app.sync("g", record);
-    await c.reconcile();
-    t = T0 + 7 * DAY - 1;
-    writeCostMs = 2;
-    assert.equal(c.canUse("g").ok, false, "the write took the clock past origin + pause threshold");
-    assert.equal(app.search("g", "hello"), null);
-  });
-
   it("a durable write that crosses a retention ceiling does not leave the record usable", async () => {
     let t = T0;
     const storage = new MemoryClientCheckpointStorage();
@@ -601,7 +583,7 @@ describe("client safety (RT6, RT10 and persisted state)", () => {
       write(cp);
     };
     const app = new ToyApp();
-    const policy = { retentionCeilingMs: 10 * DAY, pauseThresholdMs: 30 * DAY, longStopMs: null };
+    const policy = { retentionCeilingMs: 10 * DAY };
     const c = new HeldDataClient({ initialize: true, now: () => t, status: positive(() => t), storage, store: app, policy });
     app.attach(c);
     app.sync("g", record);
@@ -693,7 +675,7 @@ describe("client safety (RT6, RT10 and persisted state)", () => {
         let licensedAt: number | null = null;
         const c = new HeldDataClient({
           downstream: [{ relay: (n) => {
-            if (n.useUntil !== null) licensedAt = h.ctl.writes;
+            if (n.usable) licensedAt = h.ctl.writes;
           } }],
           initialize: true, now: () => T0, status: unavailable, storage: h.storage, store: app,
         });
@@ -725,7 +707,8 @@ describe("client safety (RT6, RT10 and persisted state)", () => {
           h.start(failAt);
           await c.reconcile();
           return { licensedAt };
-        }, kind === "receipt" ? 2 : 7);
+          // One more write than before: an attempt's start is durable before its request leaves.
+        }, kind === "receipt" ? 3 : 8);
       });
     }
   });

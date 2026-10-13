@@ -334,7 +334,10 @@ export class ToySubprocessor implements Downstream {
     }
     const { erased, deleteBy } = this.terminal(grantId);
     // The gate enforces every relayed deadline itself; it does not rely on a later tick.
-    return this.held.has(grantId) && !erased && (deleteBy === null || now < deleteBy) && n?.useUntil != null && now < n.useUntil;
+    return (
+      this.held.has(grantId) && !erased && (deleteBy === null || now < deleteBy) &&
+      n?.usable === true && (n.useUntil === null || now < n.useUntil)
+    );
   }
 
   /** Dispose of everything whose relayed deadline has passed. */

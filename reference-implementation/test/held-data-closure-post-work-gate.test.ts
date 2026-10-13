@@ -3,8 +3,8 @@
 
 /**
  * Class: an entry point that licenses use or storage must decide after its work and its durable
- * write, on a fresh clock sample, not only before. Core: no use after a stop-use or pause bound,
- * including in-flight work; a retention ceiling is not extended by a slow write.
+ * write, on a fresh clock sample, not only before. Core: no use after a stop-use bound or a retention
+ * ceiling, including in-flight work; a retention ceiling is not extended by a slow write.
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
@@ -24,20 +24,20 @@ const positive = (now: () => number): StatusTransport => async (ids) => ({
 const record = [{ id: "r", stream: "messages", text: "hello world" }];
 
 describe("licensing entry points re-gate after their work", () => {
-  it("app.search: a slow index lookup that crosses the pause bound returns no hits", async () => {
+  it("app.search: a slow index lookup that crosses the retention ceiling returns no hits", async () => {
     let t = T0;
     const app = new ToyApp(() => t);
-    const c = new HeldDataClient({ now: () => t, status: positive(() => t), store: app });
+    const c = new HeldDataClient({ now: () => t, status: positive(() => t), store: app, policy: { retentionCeilingMs: 7 * DAY } });
     app.attach(c);
     app.sync("g", [{ id: "r", stream: "messages", text: "hello world" }]);
     await c.reconcile();
-    assert.deepEqual(app.search("g", "hello"), ["g:r"], "control: allowed before the bound");
+    assert.deepEqual(app.search("g", "hello"), ["g:r"], "control: allowed before the ceiling");
     const get = app.index.get.bind(app.index);
     app.index.get = (word: string) => {
-      t += 8 * DAY; // the lookup is slow: it crosses the 7-day pause threshold
+      t += 8 * DAY; // the lookup is slow: it crosses the 7-day ceiling
       return get(word);
     };
-    assert.equal(app.search("g", "hello"), null, "use that crossed the bound must not return hits");
+    assert.equal(app.search("g", "hello"), null, "use that crossed the ceiling must not return hits");
   });
 
   it("acquireRecords: a reread 1 ms before its ceiling, plus a 2 ms write, is not kept", () => {
@@ -87,7 +87,7 @@ describe("licensing entry points re-gate after their work", () => {
     const app = new ToyApp();
     const c = new HeldDataClient({
       now: () => t, status: positive(() => t), store: app, storage, initialize: true,
-      policy: { retentionCeilingMs: ceiling, longStopMs: null },
+      policy: { retentionCeilingMs: ceiling },
     });
     assert.equal(c.acquire("g"), true);
     app.records.set("g", [{ id: "r", stream: "messages", text: "x" }]);
