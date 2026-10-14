@@ -35,7 +35,8 @@ tokens, server logs) goes to `.state/` (git-ignored) or `$VACUNA_STATE_DIR`.
 node seed.ts                       # ~20 min; see "Seeding" below
 node loadgen.ts --label my-run     # ramp 4..128 concurrency, 30 s stages
 ./run-matrix.sh                    # the five configurations in RESULTS.md
-./db.sh down                       # remove the container
+./db.sh stop                       # keep the seeded data; ./db.sh start reuses it
+./db.sh down                       # remove the container and its data
 ```
 
 `start-server.sh` sets `PDPP_STORAGE_BACKEND=postgres`,
