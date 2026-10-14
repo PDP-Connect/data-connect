@@ -89,18 +89,18 @@ const TOP_LEVEL_REGEX_57 = /Request ID: (req_[A-Za-z0-9]+)/;
 const TOP_LEVEL_REGEX_58 = /Reference trace ID: (trc_[A-Za-z0-9]+)/;
 const TOP_LEVEL_REGEX_59 = /view and fields are mutually exclusive/;
 const TOP_LEVEL_REGEX_60 = /view and fields are mutually exclusive/;
-const TOP_LEVEL_REGEX_61 = /Grant is malformed or no longer valid/;
+const TOP_LEVEL_REGEX_61 = /Invalid or expired token/;
 const TOP_LEVEL_REGEX_62 = /Request ID: (req_[A-Za-z0-9_]+)/;
 const TOP_LEVEL_REGEX_63 = /Reference trace ID: (trc_[A-Za-z0-9_]+)/;
-const TOP_LEVEL_REGEX_64 = /Grant is malformed or no longer valid/;
-const TOP_LEVEL_REGEX_65 = /Grant is malformed or no longer valid/;
+const TOP_LEVEL_REGEX_64 = /Invalid or expired token/;
+const TOP_LEVEL_REGEX_65 = /Invalid or expired token/;
 const TOP_LEVEL_REGEX_66 = /Request ID: (req_[A-Za-z0-9_]+)/;
 const TOP_LEVEL_REGEX_67 = /Reference trace ID: (trc_[A-Za-z0-9_]+)/;
-const TOP_LEVEL_REGEX_68 = /Grant is malformed or no longer valid/;
+const TOP_LEVEL_REGEX_68 = /Invalid or expired token/;
 const TOP_LEVEL_REGEX_69 = /Request ID: (req_[A-Za-z0-9_]+)/;
 const TOP_LEVEL_REGEX_70 = /Reference trace ID: (trc_[A-Za-z0-9_]+)/;
-const TOP_LEVEL_REGEX_71 = /Grant is malformed or no longer valid/;
-const TOP_LEVEL_REGEX_72 = /Grant is malformed or no longer valid/;
+const TOP_LEVEL_REGEX_71 = /Invalid or expired token/;
+const TOP_LEVEL_REGEX_72 = /Invalid or expired token/;
 const TOP_LEVEL_REGEX_73 = /Request ID: (req_[A-Za-z0-9_]+)/;
 const TOP_LEVEL_REGEX_74 = /Reference trace ID: (trc_[A-Za-z0-9_]+)/;
 const TOP_LEVEL_REGEX_CLIENT_FILTER_UNSUPPORTED =
@@ -123,7 +123,7 @@ const TOP_LEVEL_REGEX_92 = /Unknown connector: missing_spotify_connector/;
 const TOP_LEVEL_REGEX_93 = /view and fields are mutually exclusive/;
 const TOP_LEVEL_REGEX_94 = /Request ID: req_/;
 const TOP_LEVEL_REGEX_95 = /Reference trace ID: trc_/;
-const TOP_LEVEL_REGEX_96 = /Grant is malformed or no longer valid/;
+const TOP_LEVEL_REGEX_96 = /Invalid or expired token/;
 const TOP_LEVEL_REGEX_97 = /Request ID: req_/;
 const TOP_LEVEL_REGEX_98 = /Reference trace ID: trc_/;
 const TOP_LEVEL_REGEX_99 = /Grant has been revoked/;
@@ -132,15 +132,15 @@ const TOP_LEVEL_REGEX_101 = /Reference trace ID: trc_/;
 const TOP_LEVEL_REGEX_102 = /Grant has expired/;
 const TOP_LEVEL_REGEX_103 = /Request ID: req_/;
 const TOP_LEVEL_REGEX_104 = /Reference trace ID: trc_/;
-const TOP_LEVEL_REGEX_105 = /Grant is malformed or no longer valid/;
+const TOP_LEVEL_REGEX_105 = /Invalid or expired token/;
 const TOP_LEVEL_REGEX_106 = /Grant has been revoked/;
 const TOP_LEVEL_REGEX_107 = /Grant has expired/;
-const TOP_LEVEL_REGEX_108 = /Grant is malformed or no longer valid/;
+const TOP_LEVEL_REGEX_108 = /Invalid or expired token/;
 const TOP_LEVEL_REGEX_109 = /Grant has been revoked/;
 const TOP_LEVEL_REGEX_110 = /Grant has expired/;
 const TOP_LEVEL_REGEX_111 = /Request ID: (req_[A-Za-z0-9_]+)/;
 const TOP_LEVEL_REGEX_112 = /Reference trace ID: (trc_[A-Za-z0-9_]+)/;
-const TOP_LEVEL_REGEX_113 = /Grant is malformed or no longer valid/;
+const TOP_LEVEL_REGEX_113 = /Invalid or expired token/;
 const TOP_LEVEL_REGEX_114 = /Request ID: (req_[A-Za-z0-9_]+)/;
 const TOP_LEVEL_REGEX_115 = /Reference trace ID: (trc_[A-Za-z0-9_]+)/;
 const TOP_LEVEL_REGEX_116 = /view and fields are mutually exclusive/;
@@ -4208,7 +4208,7 @@ test("PDPP CLI smoke", async (t) => {
       const rejectedResp = await fetch(`${rsUrl}/v1/streams/top_artists`, {
         headers: { Authorization: `Bearer ${approved.token}` },
       });
-      assert.equal(rejectedResp.status, 403);
+      assert.equal(rejectedResp.status, 401);
       const requestId = rejectedResp.headers.get("Request-Id");
       const traceId = rejectedResp.headers.get("PDPP-Reference-Trace-Id");
       assert.ok(requestId, "malformed polyfill client stream-metadata read should surface a request id");
@@ -4216,7 +4216,7 @@ test("PDPP CLI smoke", async (t) => {
       assert.ok(requestId.startsWith("req_"));
       assert.ok(traceId.startsWith("trc_"));
       const rejectedBody = asRecord(await rejectedResp.json());
-      assert.equal(asRecord(rejectedBody.error).code, "grant_invalid");
+      assert.equal(asRecord(rejectedBody.error).code, "authentication_error");
       assert.match(String(asRecord(rejectedBody.error).message ?? ""), TOP_LEVEL_REGEX_64);
 
       const timeline = await runCli([
@@ -4349,10 +4349,10 @@ test("PDPP CLI smoke", async (t) => {
           const rejectedResp = await fetch(`${rsUrl}/v1/streams/top_artists`, {
             headers: { Authorization: `Bearer ${approved.token}` },
           });
-          assert.equal(rejectedResp.status, 403);
+          assert.equal(rejectedResp.status, 401);
           const rejectedBody = asRecord(await rejectedResp.json());
           const rejectedError = asRecord(rejectedBody.error);
-          assert.equal(rejectedError.code, "grant_invalid");
+          assert.equal(rejectedError.code, "authentication_error");
           assert.match(String(rejectedError.message ?? ""), TOP_LEVEL_REGEX_71);
           return {
             requestId: rejectedResp.headers.get("Request-Id"),
@@ -4385,7 +4385,7 @@ test("PDPP CLI smoke", async (t) => {
     for await (const scenario of scenarios) {
       await withMalformedPolyfillClientGrant(async ({ asUrl, rsUrl, approved, visibleRecord, missingConnectorId }) => {
         const failure = await scenario.trigger({ approved, rsUrl, visibleRecord });
-        assert.match(failure.stderr || "Grant is malformed or no longer valid", TOP_LEVEL_REGEX_72);
+        assert.match(failure.stderr || "Invalid or expired token", TOP_LEVEL_REGEX_72);
         const requestId = failure.requestId || failure.stderr?.match(TOP_LEVEL_REGEX_73)?.[1];
         const traceId = failure.traceId || failure.stderr?.match(TOP_LEVEL_REGEX_74)?.[1];
         assert.ok(requestId, `malformed polyfill client ${scenario.label} should surface a request id`);
@@ -7987,7 +7987,7 @@ rl.on('line', (line) => {
           PDPP_CLIENT_TOKEN: approved.token,
         });
 
-        assert.equal(result.code, 4);
+        assert.equal(result.code, 3);
         assert.match(result.stderr, TOP_LEVEL_REGEX_96);
         assert.match(result.stderr, TOP_LEVEL_REGEX_97);
         assert.match(result.stderr, TOP_LEVEL_REGEX_98);
@@ -8025,7 +8025,7 @@ rl.on('line', (line) => {
           PDPP_CLIENT_TOKEN: approved.token,
         });
 
-        assert.equal(result.code, 4);
+        assert.equal(result.code, 3);
         assert.match(result.stderr, TOP_LEVEL_REGEX_99);
         assert.match(result.stderr, TOP_LEVEL_REGEX_100);
         assert.match(result.stderr, TOP_LEVEL_REGEX_101);
@@ -8060,7 +8060,7 @@ rl.on('line', (line) => {
           PDPP_CLIENT_TOKEN: approved.token,
         });
 
-        assert.equal(result.code, 4);
+        assert.equal(result.code, 3);
         assert.match(result.stderr, TOP_LEVEL_REGEX_102);
         assert.match(result.stderr, TOP_LEVEL_REGEX_103);
         assert.match(result.stderr, TOP_LEVEL_REGEX_104);
@@ -8151,7 +8151,7 @@ rl.on('line', (line) => {
           PDPP_CLIENT_TOKEN: approved.token,
         });
 
-        assert.equal(queryFailure.code, 4);
+        assert.equal(queryFailure.code, 3);
         assert.match(queryFailure.stderr, scenario.expectedMessage);
 
         const timeline = await runCli([
@@ -8281,7 +8281,7 @@ rl.on('line', (line) => {
             { PDPP_CLIENT_TOKEN: approved.token }
           );
 
-          assert.equal(queryFailure.code, 4);
+          assert.equal(queryFailure.code, 3);
           assert.match(queryFailure.stderr, scenario.expectedMessage);
           const requestId = queryFailure.stderr.match(TOP_LEVEL_REGEX_111)?.[1];
           const traceId = queryFailure.stderr.match(TOP_LEVEL_REGEX_112)?.[1];
@@ -8406,7 +8406,7 @@ rl.on('line', (line) => {
           { PDPP_CLIENT_TOKEN: approved.token }
         );
 
-        assert.equal(queryFailure.code, 4);
+        assert.equal(queryFailure.code, 3);
         assert.match(queryFailure.stderr, TOP_LEVEL_REGEX_113);
         const requestId = queryFailure.stderr.match(TOP_LEVEL_REGEX_114)?.[1];
         const traceId = queryFailure.stderr.match(TOP_LEVEL_REGEX_115)?.[1];

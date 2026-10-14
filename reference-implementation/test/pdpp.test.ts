@@ -135,10 +135,6 @@ const REGEXP_80 = /Unsupported pending stream selection fields on 'top_artists':
 const REGEXP_86 = /Access Denied/;
 const REGEXP_87 = /source\/id must match format "uri"/;
 const REGEXP_89 = /Grant is malformed or no longer valid/;
-const REGEXP_91 = /Grant is malformed or no longer valid/;
-const REGEXP_92 = /Grant is malformed or no longer valid/;
-const REGEXP_93 = /Grant is malformed or no longer valid/;
-const REGEXP_94 = /Grant is malformed or no longer valid/;
 const REGEXP_95 = /Token introspection failed closed/;
 const REGEXP_96 = /Grant is malformed or no longer valid/;
 const REGEXP_97 = /Grant is malformed or no longer valid/;
@@ -406,6 +402,7 @@ interface SourceDescriptor {
 
 interface TraceEventError {
   code: string | null | undefined;
+  http_status: number | undefined;
   message: string | null | undefined;
 }
 
@@ -810,6 +807,7 @@ function parseTraceEventError(value: unknown, description: string): TraceEventEr
   const error = requireJsonRecord(value, description);
   return {
     code: optionalString(error.code, `${description}.code`),
+    http_status: typeof error.http_status === "number" ? error.http_status : undefined,
     message: optionalString(error.message, `${description}.message`),
   };
 }
@@ -4887,8 +4885,8 @@ test("PDPP reference implementation integration", async (t) => {
       assert.equal(streamsResp.status, 401);
       assert.ok(streamsResp.headers["request-id"]?.startsWith("req_"));
       assert.ok(streamsResp.headers["pdpp-reference-trace-id"]?.startsWith("trc_"));
-      assert.equal(streamsResp.body.error.code, "grant_invalid");
-      assert.match(streamsResp.body.error.message, REGEXP_91);
+      assert.equal(streamsResp.body.error.code, "authentication_error");
+      assert.match(streamsResp.body.error.message, /Invalid or expired token/);
 
       const metadataResp = await fetchJson(`${rsUrl}/v1/streams/pay_statements`, {
         headers: { Authorization: `Bearer ${approved.token}` },
@@ -4896,8 +4894,8 @@ test("PDPP reference implementation integration", async (t) => {
       assert.equal(metadataResp.status, 401);
       assert.ok(metadataResp.headers["request-id"]?.startsWith("req_"));
       assert.ok(metadataResp.headers["pdpp-reference-trace-id"]?.startsWith("trc_"));
-      assert.equal(metadataResp.body.error.code, "grant_invalid");
-      assert.match(metadataResp.body.error.message, REGEXP_92);
+      assert.equal(metadataResp.body.error.code, "authentication_error");
+      assert.match(metadataResp.body.error.message, /Invalid or expired token/);
 
       const recordResp = await fetchJson(`${rsUrl}/v1/streams/pay_statements/records/ps_2026_04_15`, {
         headers: { Authorization: `Bearer ${approved.token}` },
@@ -4905,8 +4903,8 @@ test("PDPP reference implementation integration", async (t) => {
       assert.equal(recordResp.status, 401);
       assert.ok(recordResp.headers["request-id"]?.startsWith("req_"));
       assert.ok(recordResp.headers["pdpp-reference-trace-id"]?.startsWith("trc_"));
-      assert.equal(recordResp.body.error.code, "grant_invalid");
-      assert.match(recordResp.body.error.message, REGEXP_93);
+      assert.equal(recordResp.body.error.code, "authentication_error");
+      assert.match(recordResp.body.error.message, /Invalid or expired token/);
     } finally {
       await closeServer(server);
       cleanup();
@@ -5009,8 +5007,8 @@ test("PDPP reference implementation integration", async (t) => {
           assert.ok(rejectedRequestId?.startsWith("req_"));
           assert.ok(rejectedTraceId?.startsWith("trc_"));
           const rejectedBody = parseErrorResponse(await rejectedResp.json());
-          assert.equal(rejectedBody.error.code, "grant_invalid");
-          assert.match(rejectedBody.error.message, REGEXP_94);
+          assert.equal(rejectedBody.error.code, "authentication_error");
+          assert.match(rejectedBody.error.message, /Invalid or expired token/);
 
           const { body: timeline } = await fetchGrantTimeline(asUrl, approved.grant.grant_id);
           const queryReceivedEvent = timeline.data.find(
@@ -5430,8 +5428,8 @@ test("PDPP reference implementation integration", async (t) => {
           headers: { Authorization: `Bearer ${approved.token}` },
         });
         assert.equal(metadataResp.status, 401);
-        assert.equal(metadataResp.body.error.code, "grant_invalid");
-        assert.match(metadataResp.body.error.message, REGEXP_101);
+        assert.equal(metadataResp.body.error.code, "authentication_error");
+        assert.match(metadataResp.body.error.message, /Invalid or expired token/);
 
         const revokeResp = await fetchJson(`${asUrl}/grants/${approved.grant.grant_id}/revoke`, {
           headers: {
@@ -5565,8 +5563,8 @@ test("PDPP reference implementation integration", async (t) => {
           headers: { Authorization: `Bearer ${approved.token}` },
         });
         assert.equal(metadataResp.status, 401);
-        assert.equal(metadataResp.body.error.code, "grant_invalid");
-        assert.match(metadataResp.body.error.message, REGEXP_105);
+        assert.equal(metadataResp.body.error.code, "authentication_error");
+        assert.match(metadataResp.body.error.message, /Invalid or expired token/);
 
         const revokeResp = await fetchJson(`${asUrl}/grants/${approved.grant.grant_id}/revoke`, {
           headers: {
@@ -9196,6 +9194,60 @@ test("PDPP reference implementation integration", async (t) => {
   });
 
   await t.test(
+    "inactive malformed grants return authentication_error and record the actual auth-gate status",
+    async () => {
+      await withNativeHarness(async ({ asUrl, rsUrl, nativeManifest }) => {
+        await seedNorthstar(nativeManifest);
+        const approved = await approveGrant(asUrl, "employee_1", {
+          access_mode: "continuous",
+          client_id: "longview",
+          purpose_code: "https://pdpp.dev/purpose/financial_planning",
+          purpose_description: "Malformed grant auth-gate status test",
+          source: { id: nativeManifest.provider_id, kind: "provider_native" },
+          streams: [{ name: "pay_statements" }],
+        });
+
+        getDb()
+          .prepare(`
+          UPDATE grants
+          SET storage_binding_json = NULL
+          WHERE grant_id = ?
+        `)
+          .run(approved.grant.grant_id);
+
+        const rejected = await fetchJson(`${rsUrl}/v1/streams`, {
+          headers: { Authorization: `Bearer ${approved.token}` },
+        });
+        const { body: timeline } = await fetchGrantTimeline(asUrl, approved.grant.grant_id);
+        const rejectedEvent = (timeline.data || []).find(
+          (event) =>
+            event.event_type === "query.rejected" &&
+            event.object_id === rejected.headers["request-id"] &&
+            event.data?.auth_gate === true
+        );
+
+        assert.ok(rejectedEvent, "grant timeline should include the auth-gate rejection");
+        assert.deepEqual(
+          {
+            bodyCode: rejected.body.error.code,
+            bodyMessage: rejected.body.error.message,
+            eventCode: rejectedEvent.data?.error?.code,
+            eventStatus: requireJsonRecord(rejectedEvent.data?.error, "rejected event error").http_status,
+            status: rejected.status,
+          },
+          {
+            bodyCode: "authentication_error",
+            bodyMessage: "Invalid or expired token",
+            eventCode: "grant_invalid",
+            eventStatus: 401,
+            status: 401,
+          }
+        );
+      });
+    }
+  );
+
+  await t.test(
     "auth-gate client read failures emit correlated query.rejected artifacts on the grant timeline",
     async () => {
       await withNativeHarness(async ({ asUrl, rsUrl, nativeManifest }) => {
@@ -9258,7 +9310,10 @@ test("PDPP reference implementation integration", async (t) => {
           });
 
           assert.equal(rejected.status, 401);
-          assert.equal(rejected.body.error.code, scenario.inactiveReason);
+          assert.equal(
+            rejected.body.error.code,
+            scenario.inactiveReason === "grant_invalid" ? "authentication_error" : scenario.inactiveReason
+          );
           assert.equal(
             rejected.headers["www-authenticate"],
             `Bearer error="invalid_token", resource_metadata="${rsUrl}/.well-known/oauth-protected-resource"`
@@ -9282,6 +9337,7 @@ test("PDPP reference implementation integration", async (t) => {
           );
           assert.equal(rejectedEvent.trace_id, rejected.headers["pdpp-reference-trace-id"]);
           assert.equal(rejectedEvent.data?.error?.code, scenario.inactiveReason);
+          assert.equal(requireJsonRecord(rejectedEvent.data?.error, "rejected event error").http_status, 401);
         }
       });
     }
@@ -9347,7 +9403,7 @@ test("PDPP reference implementation integration", async (t) => {
           });
 
           assert.equal(rejected.status, 401);
-          assert.equal(rejected.body.error.code, "grant_invalid");
+          assert.equal(rejected.body.error.code, "authentication_error");
           assert.ok(rejected.headers["request-id"]?.startsWith("req_"));
           assert.ok(rejected.headers["pdpp-reference-trace-id"]?.startsWith("trc_"));
           observed.push({
@@ -9393,6 +9449,7 @@ test("PDPP reference implementation integration", async (t) => {
           assert.equal(rejectedEvent.data?.limit ?? null, route.limit ?? null);
           assert.equal(rejectedEvent.data?.requested_record_id ?? null, route.requestedRecordId ?? null);
           assert.equal(rejectedEvent.data?.error?.code, "grant_invalid");
+          assert.equal(requireJsonRecord(rejectedEvent.data?.error, "rejected event error").http_status, 401);
         }
       });
     }

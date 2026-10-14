@@ -190,7 +190,8 @@ async function emitInactiveTokenQuery(req: RequestLike, res: ResponseLike, info:
     Object.assign(new Error("Token rejected at auth gate"), {
       code: info.inactive_reason || "authentication_error",
       message: inactiveTokenMessage(info.inactive_reason),
-    })
+    }),
+    401
   );
 }
 
@@ -207,7 +208,7 @@ async function respondToInactiveToken(req: RequestLike, res: ResponseLike, info:
     return pdppError(res, 401, "grant_expired", "Grant has expired");
   }
   if (info.inactive_reason === "grant_invalid") {
-    return pdppError(res, 401, "grant_invalid", "Grant is malformed or no longer valid");
+    return pdppError(res, 401, "authentication_error", "Invalid or expired token");
   }
   if (info.inactive_reason === "authorization_state.unsupported_legacy_shape") {
     return pdppError(res, 401, info.inactive_reason, "Fresh consent is required");

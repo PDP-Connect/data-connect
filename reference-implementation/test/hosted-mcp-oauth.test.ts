@@ -1994,7 +1994,7 @@ test("/mcp rejects missing and owner bearers", async () => {
   }
 });
 
-test("/mcp challenges revoked and expired grants as invalid tokens", async () => {
+test("/mcp challenges revoked grants as invalid tokens", async () => {
   const server = await startOpenTestServer();
   const asUrl = `http://localhost:${server.asPort}`;
   const rsUrl = `http://localhost:${server.rsPort}`;
@@ -2021,6 +2021,20 @@ test("/mcp challenges revoked and expired grants as invalid tokens", async () =>
     assert.equal(errorOf(revokedResponse).code, "grant_revoked");
     assert.equal(errorOf(revokedResponse).resource_metadata, metadataUrl);
 
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test("/mcp challenges expired grants as invalid tokens", async () => {
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+  const rsUrl = `http://localhost:${server.rsPort}`;
+  const metadataUrl = `${rsUrl}/.well-known/oauth-protected-resource/mcp`;
+
+  try {
+    const manifest = await registerAuthorizedSpotify(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
     const expired = await completeOauthCodeFlow({ asUrl, client, manifest });
     const expiredGrantId = mustExist(expired.grantId, "authorization code flow must issue a grant id");
     const expiredAt = new Date(Date.now() - 60_000).toISOString();
@@ -2028,12 +2042,14 @@ test("/mcp challenges revoked and expired grants as invalid tokens", async () =>
       .prepare("UPDATE grants SET expires_at = ?, grant_json = json_set(grant_json, '$.expires_at', ?) WHERE grant_id = ?")
       .run(expiredAt, expiredAt, expiredGrantId);
     getDb().prepare("UPDATE tokens SET expires_at = ? WHERE grant_id = ?").run(expiredAt, expiredGrantId);
+
     const expiredResponse = await postMcpJson(rsUrl, expired.accessToken, {
       id: 2,
       jsonrpc: "2.0",
       method: "tools/list",
       params: {},
     });
+
     assert.equal(expiredResponse.status, 401);
     assert.equal(
       expiredResponse.resp.headers.get("www-authenticate"),
