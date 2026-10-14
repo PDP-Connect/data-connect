@@ -1489,12 +1489,15 @@ function getProtectedResourceMetadataUrl(res: ResLike) {
   return typeof metadataUrl === "string" && metadataUrl ? metadataUrl : null;
 }
 
-function setProtectedResourceMetadataChallenge(res: ResLike) {
+function setProtectedResourceMetadataChallenge(res: ResLike, invalidToken = false) {
   const metadataUrl = getProtectedResourceMetadataUrl(res);
   if (!metadataUrl) {
     return;
   }
-  res.setHeader("WWW-Authenticate", `Bearer resource_metadata="${httpQuotedString(metadataUrl)}"`);
+  res.setHeader(
+    "WWW-Authenticate",
+    `Bearer ${invalidToken ? 'error="invalid_token", ' : ""}resource_metadata="${httpQuotedString(metadataUrl)}"`
+  );
 }
 
 function sha256Hex(value: string) {
@@ -2093,6 +2096,7 @@ async function requireTokenWithIntrospection(
     }
   }
   if (!info.active) {
+    setProtectedResourceMetadataChallenge(res, true);
     if (info.trace_id) {
       setReferenceTraceId(res, info.trace_id);
     }
@@ -2136,23 +2140,20 @@ async function requireTokenWithIntrospection(
       await emitQueryRejected(authGateContext, req, gateErr);
     }
     if (info.inactive_reason === "grant_revoked") {
-      return pdppError(res, 403, "grant_revoked", "Grant has been revoked");
+      return pdppError(res, 401, "grant_revoked", "Grant has been revoked");
     }
     if (info.inactive_reason === "grant_expired") {
-      return pdppError(res, 403, "grant_expired", "Grant has expired");
+      return pdppError(res, 401, "grant_expired", "Grant has expired");
     }
     if (info.inactive_reason === "grant_invalid") {
-      return pdppError(res, 403, "grant_invalid", "Grant is malformed or no longer valid");
+      return pdppError(res, 401, "grant_invalid", "Grant is malformed or no longer valid");
     }
     if (info.inactive_reason?.startsWith("context.")) {
-      setProtectedResourceMetadataChallenge(res);
       return pdppError(res, 401, info.inactive_reason, "Token introspection failed closed");
     }
     if (info.inactive_reason === "authorization_state.unsupported_legacy_shape") {
-      setProtectedResourceMetadataChallenge(res);
       return pdppError(res, 401, info.inactive_reason, "Fresh consent is required");
     }
-    setProtectedResourceMetadataChallenge(res);
     return pdppError(res, 401, "authentication_error", "Invalid or expired token");
   }
   req.tokenInfo = info;

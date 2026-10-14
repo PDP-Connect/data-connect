@@ -45,15 +45,11 @@ test("codeToStatus pins the acceptance-target typed-error envelope codes", () =>
   assert.equal(codeToStatus.connector_invalid, 400);
 });
 
-test("codeToStatus pins grant/auth and connector-instance code statuses", () => {
-  for (const code of [
-    "grant_expired",
-    "grant_revoked",
-    "grant_consumed",
-    "grant_invalid",
-    "field_not_granted",
-    "connector_instance_owner_mismatch",
-  ]) {
+test("codeToStatus pins inactive grant and permission error statuses", () => {
+  for (const code of ["grant_expired", "grant_revoked"]) {
+    assert.equal(codeToStatus[code], 401, `${code} must be 401`);
+  }
+  for (const code of ["grant_consumed", "grant_invalid", "field_not_granted", "connector_instance_owner_mismatch"]) {
     assert.equal(codeToStatus[code], 403, `${code} must be 403`);
   }
   assert.equal(codeToStatus.connector_instance_busy, 503);

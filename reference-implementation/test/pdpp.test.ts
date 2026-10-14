@@ -4884,7 +4884,7 @@ test("PDPP reference implementation integration", async (t) => {
       const streamsResp = await fetchJson(`${rsUrl}/v1/streams`, {
         headers: { Authorization: `Bearer ${approved.token}` },
       });
-      assert.equal(streamsResp.status, 403);
+      assert.equal(streamsResp.status, 401);
       assert.ok(streamsResp.headers["request-id"]?.startsWith("req_"));
       assert.ok(streamsResp.headers["pdpp-reference-trace-id"]?.startsWith("trc_"));
       assert.equal(streamsResp.body.error.code, "grant_invalid");
@@ -4893,7 +4893,7 @@ test("PDPP reference implementation integration", async (t) => {
       const metadataResp = await fetchJson(`${rsUrl}/v1/streams/pay_statements`, {
         headers: { Authorization: `Bearer ${approved.token}` },
       });
-      assert.equal(metadataResp.status, 403);
+      assert.equal(metadataResp.status, 401);
       assert.ok(metadataResp.headers["request-id"]?.startsWith("req_"));
       assert.ok(metadataResp.headers["pdpp-reference-trace-id"]?.startsWith("trc_"));
       assert.equal(metadataResp.body.error.code, "grant_invalid");
@@ -4902,7 +4902,7 @@ test("PDPP reference implementation integration", async (t) => {
       const recordResp = await fetchJson(`${rsUrl}/v1/streams/pay_statements/records/ps_2026_04_15`, {
         headers: { Authorization: `Bearer ${approved.token}` },
       });
-      assert.equal(recordResp.status, 403);
+      assert.equal(recordResp.status, 401);
       assert.ok(recordResp.headers["request-id"]?.startsWith("req_"));
       assert.ok(recordResp.headers["pdpp-reference-trace-id"]?.startsWith("trc_"));
       assert.equal(recordResp.body.error.code, "grant_invalid");
@@ -5003,7 +5003,7 @@ test("PDPP reference implementation integration", async (t) => {
           const rejectedResp = await fetch(`${rsUrl}${path}`, {
             headers: { Authorization: `Bearer ${approved.token}` },
           });
-          assert.equal(rejectedResp.status, 403);
+          assert.equal(rejectedResp.status, 401);
           const rejectedRequestId = rejectedResp.headers.get("Request-Id");
           const rejectedTraceId = rejectedResp.headers.get("PDPP-Reference-Trace-Id");
           assert.ok(rejectedRequestId?.startsWith("req_"));
@@ -5429,7 +5429,7 @@ test("PDPP reference implementation integration", async (t) => {
         const metadataResp = await fetchJson(`${rsUrl}/v1/streams/top_artists`, {
           headers: { Authorization: `Bearer ${approved.token}` },
         });
-        assert.equal(metadataResp.status, 403);
+        assert.equal(metadataResp.status, 401);
         assert.equal(metadataResp.body.error.code, "grant_invalid");
         assert.match(metadataResp.body.error.message, REGEXP_101);
 
@@ -5564,7 +5564,7 @@ test("PDPP reference implementation integration", async (t) => {
         const metadataResp = await fetchJson(`${rsUrl}/v1/streams/pay_statements`, {
           headers: { Authorization: `Bearer ${approved.token}` },
         });
-        assert.equal(metadataResp.status, 403);
+        assert.equal(metadataResp.status, 401);
         assert.equal(metadataResp.body.error.code, "grant_invalid");
         assert.match(metadataResp.body.error.message, REGEXP_105);
 
@@ -9154,7 +9154,7 @@ test("PDPP reference implementation integration", async (t) => {
         headers: { Authorization: `Bearer ${approved.token}` },
       });
 
-      assert.equal(revoked.status, 403);
+      assert.equal(revoked.status, 401);
       assert.equal(revoked.body.error.code, "grant_revoked");
       assert.ok(revoked.headers["request-id"]?.startsWith("req_"));
       assert.equal(revoked.headers["pdpp-reference-trace-id"], timeline.trace_id);
@@ -9188,7 +9188,7 @@ test("PDPP reference implementation integration", async (t) => {
         headers: { Authorization: `Bearer ${approved.token}` },
       });
 
-      assert.equal(expired.status, 403);
+      assert.equal(expired.status, 401);
       assert.equal(expired.body.error.code, "grant_expired");
       assert.ok(expired.headers["request-id"]?.startsWith("req_"));
       assert.equal(expired.headers["pdpp-reference-trace-id"], timeline.trace_id);
@@ -9257,8 +9257,12 @@ test("PDPP reference implementation integration", async (t) => {
             headers: { Authorization: `Bearer ${approved.token}` },
           });
 
-          assert.equal(rejected.status, 403);
+          assert.equal(rejected.status, 401);
           assert.equal(rejected.body.error.code, scenario.inactiveReason);
+          assert.equal(
+            rejected.headers["www-authenticate"],
+            `Bearer error="invalid_token", resource_metadata="${rsUrl}/.well-known/oauth-protected-resource"`
+          );
           assert.ok(rejected.headers["request-id"]?.startsWith("req_"));
           assert.ok(rejected.headers["pdpp-reference-trace-id"]?.startsWith("trc_"));
 
@@ -9342,7 +9346,7 @@ test("PDPP reference implementation integration", async (t) => {
             headers: { Authorization: `Bearer ${approved.token}` },
           });
 
-          assert.equal(rejected.status, 403);
+          assert.equal(rejected.status, 401);
           assert.equal(rejected.body.error.code, "grant_invalid");
           assert.ok(rejected.headers["request-id"]?.startsWith("req_"));
           assert.ok(rejected.headers["pdpp-reference-trace-id"]?.startsWith("trc_"));
