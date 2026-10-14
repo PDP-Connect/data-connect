@@ -63,12 +63,15 @@ const UPGRADE_FIXTURES = join(HERE, "..", "fixtures", "legacy-upgrade");
 /** Pinned compiled bundles: sha256 of the decompressed `dist/collection-profile.mjs`. */
 export const SLACK_BUNDLES = {
 	legacy: {
-		// data-connectors 97536ad49: its slack manifest is byte-identical to fixtures/legacy-upgrade/slack.json
-		// (0.6.0), so this is the emitter that matches the legacy registration. The O image (c82718d4) vendors
-		// data-connectors 21e0386d instead; the only slack difference is a 5-line observeProgress() change in runSlackdump.
-		file: "slack-0.6.0-97536ad49.collection-profile.mjs.gz",
+		// data-connectors 21e0386d7be16fbaae6e3a4de03d9db84860729f, the revision of the c82718d4 image's vendored
+		// tarball. The live image's shipped compiled connectors/slack/index.js (and the rest of connectors/slack/* and
+		// manifests/slack.json) equal that tarball's (image sha256:11b82170559cd6f04ff4e32ba073a146121909f75c2c7e15a0993344ce8ebe1f),
+		// and this bundle is built from that same source revision with its own npm ci. Its slack manifest is
+		// byte-identical to fixtures/legacy-upgrade/slack.json (0.6.0). 97536ad49 differs only by a 5-line
+		// observeProgress() call in runSlackdump.
+		file: "slack-0.6.0-21e0386d7b.collection-profile.mjs.gz",
 		manifest: "slack.json",
-		sha256: "75022d8fd3b0ace2ef4bb7a4698bfbc876d17b5328ed713916f64ed5cabe34c2",
+		sha256: "77f51a36da77e96b92b6d6ebd97b0c166ac00349c2c0509952436676eda08655",
 	},
 	v071: {
 		// data-connectors 861be44d48 (origin/main at build time, descends from 2afb7109), manifest 0.7.1.

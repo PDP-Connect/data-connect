@@ -6,13 +6,13 @@
 	"version": "0.6.0",
 	"source": {
 		"repository": "https://github.com/PDP-Connect/data-connectors",
-		"revision": "97536ad49467fba512ad300e0051df04215181bd",
+		"revision": "21e0386d7be16fbaae6e3a4de03d9db84860729f",
 		"connector_path": "packages/polyfill-connectors/connectors/slack"
 	},
-	"build_command": "node build-local-source.mjs --dcs <checkout> --connector slack --connector-dir <checkout>/packages/polyfill-connectors/connectors/slack --manifest <checkout>/packages/polyfill-connectors/manifests/slack.json --contract <work>/dcs/scripts/connector-host-runtime-contract.mjs --expect-revision 97536ad49467fba512ad300e0051df04215181bd --out <work>/tmp/prov/slack-97536/slack",
-	"dependency_install": "node_modules is a symlink to another checkout's install; the third-party versions below are what was bundled",
+	"build_command": "node build-local-source.mjs --dcs <checkout> --connector slack --connector-dir <checkout>/packages/polyfill-connectors/connectors/slack --manifest <checkout>/packages/polyfill-connectors/manifests/slack.json --contract <work>/dcs/scripts/connector-host-runtime-contract.mjs --parity-note This is the emitter the live c82718d4 image ships: the image's @pdpp/polyfill-connectors connectors/slack/* (including the compiled index.js) and manifests/slack.json are byte-identical to the c82718d4 vendored tarball (image sha256:11b82170559cd6f04ff4e32ba073a146121909f75c2c7e15a0993344ce8ebe1f), which corresponds to data-connectors 21e0386d7be16fbaae6e3a4de03d9db84860729f; this bundle is built from that same source revision with that revision's own npm ci (index.ts blob 7747ca30). Manifest is byte-identical to fixtures/legacy-upgrade/slack.json. --expect-revision 21e0386d7be16fbaae6e3a4de03d9db84860729f --out <work>/tmp/p21/slack",
+	"dependency_install": "node_modules installed in the checkout",
 	"manifest_sha256": "sha256:88c7d5d1f3b28a786f73e2b9af80fe57e694e4cc8c0f88de2b3287f28c50ba95",
-	"bundle_sha256": "sha256:75022d8fd3b0ace2ef4bb7a4698bfbc876d17b5328ed713916f64ed5cabe34c2",
+	"bundle_sha256": "sha256:77f51a36da77e96b92b6d6ebd97b0c166ac00349c2c0509952436676eda08655",
 	"esbuild_version": "0.28.2",
 	"externals_left": [
 		"dynamic-import:patchright",
@@ -29,7 +29,7 @@
 	"source_inventory": [
 		{
 			"path": "packages/polyfill-connectors/connectors/slack/index.ts",
-			"sha256": "sha256:dbcb190cbc688039a2a23dfa30be5ed991a57940e66634fab07a47bd48d5af51"
+			"sha256": "sha256:4aa59bf1f6ef170c481bb5315319635a97ec7562d6648b39dd69fb33a67b8f54"
 		},
 		{
 			"path": "packages/polyfill-connectors/connectors/slack/parsers.ts",
@@ -123,16 +123,17 @@
 	"third_party_packages": [
 		{
 			"name": "@pdpp/connector-protocol",
-			"version": "2.4.0",
+			"version": "0.0.1",
 			"license": "Apache-2.0",
 			"bundled_inputs": 9
 		},
 		{
 			"name": "zod",
-			"version": "4.6.5",
+			"version": "4.5.4",
 			"license": "MIT",
-			"bundled_inputs": 95
+			"bundled_inputs": 94
 		}
 	],
+	"parity_note": "This is the emitter the live c82718d4 image ships: the image's @pdpp/polyfill-connectors connectors/slack/* (including the compiled index.js) and manifests/slack.json are byte-identical to the c82718d4 vendored tarball (image sha256:11b82170559cd6f04ff4e32ba073a146121909f75c2c7e15a0993344ce8ebe1f), which corresponds to data-connectors 21e0386d7be16fbaae6e3a4de03d9db84860729f; this bundle is built from that same source revision with that revision's own npm ci (index.ts blob 7747ca30). Manifest is byte-identical to fixtures/legacy-upgrade/slack.json.",
 	"signed": false
 }

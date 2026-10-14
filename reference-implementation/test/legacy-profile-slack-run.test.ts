@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * The compiled Slack profiles (data-connectors 97536ad49 = 0.6.0, 861be44d48 = 0.7.1) run through
+ * The compiled Slack profiles (data-connectors 21e0386d = 0.6.0 as shipped in the c82718d4 image, 861be44d48 = 0.7.1) run through
  * the real controller as the developer-local source `slack`, offline, against a legacy-upgraded
  * registration. See helpers/legacy-profile-slack.ts for what is real and what is replaced.
  */

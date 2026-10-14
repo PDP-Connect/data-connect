@@ -5,12 +5,12 @@ This bundle also contains third-party packages, found in the esbuild metafile of
 Each package's own license and notice files follow.
 
 ==============================================================================
-@pdpp/connector-protocol@2.4.0 (Apache-2.0)
+@pdpp/connector-protocol@0.0.1 (Apache-2.0)
 ==============================================================================
 (no license file shipped in the package; license field above is from its package.json)
 
 ==============================================================================
-zod@4.6.5 (MIT)
+zod@4.5.4 (MIT)
 ==============================================================================
 --- LICENSE ---
 MIT License

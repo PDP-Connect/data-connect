@@ -10,19 +10,23 @@
 //
 // Reproduces the checked-in *.collection-profile.mjs.gz bundles (gzip -9 -n of dist/collection-profile.mjs).
 // Every command below also needs --expect-revision <full sha of that checkout>; the build refuses otherwise.
-// The 0.6.0 emitter is built from 97536ad49, while c82718d4 vendors 21e0386d; the only slack difference
-// is a 5-line observeProgress() change in runSlackdump.
 // Needs a data-connectors checkout at the pinned revision with `npm ci --ignore-scripts` done (esbuild 0.28.2).
 //   0.7.1  (data-connectors 861be44d48, origin/main, descends from 2afb7109):
 //     node build-local-source.mjs --dcs <checkout@861be44d48> --connector slack --out <out>/slack
 //     -> bundle sha256 d1be528ba5a175e1a0cfb9b4d9afe9b89e18fa891364536ef5e1698edc86a968
-//   0.6.0  (data-connectors 97536ad49; older layout, so the connector dir, manifest and contract are explicit):
-//     node build-local-source.mjs --dcs <checkout@97536ad49> --connector slack \
+//   0.6.0  (data-connectors 21e0386d7be16fbaae6e3a4de03d9db84860729f, with its own `npm ci` in the checkout root and
+//          in packages/polyfill-connectors; older layout, so the connector dir, manifest and contract are explicit):
+//     node build-local-source.mjs --dcs <checkout@21e0386d> --connector slack \
 //       --connector-dir <checkout>/packages/polyfill-connectors/connectors/slack \
 //       --manifest <checkout>/packages/polyfill-connectors/manifests/slack.json \
-//       --contract <checkout@861be44d48>/scripts/connector-host-runtime-contract.mjs --out <out>/slack
-//     -> bundle sha256 75022d8fd3b0ace2ef4bb7a4698bfbc876d17b5328ed713916f64ed5cabe34c2
-//   apple_contacts, spotify, github (data-connectors 97536ad49, same flags as the 0.6.0 slack build, with
+//       --contract <checkout@861be44d48>/scripts/connector-host-runtime-contract.mjs \
+//       --parity-note "<see the checked-in provenance.json>" --expect-revision 21e0386d... --out <out>/slack
+//     -> bundle sha256 77f51a36da77e96b92b6d6ebd97b0c166ac00349c2c0509952436676eda08655
+//     21e0386d is the revision of the c82718d4 image's vendored tarball: that image's slack connectors/*, compiled
+//     index.js and manifests/slack.json are byte-identical to the tarball's (image sha256:11b82170559c...e1f), and the
+//     manifest is byte-identical to fixtures/legacy-upgrade/slack.json. 97536ad49 differs only by a 5-line
+//     observeProgress() call in runSlackdump.
+//   apple_contacts, spotify, github (data-connectors 97536ad49, node_modules symlinked to the 861be44d48 install; same flags as the slack build, with
 //   --connector <name>, --connector-dir <checkout>/packages/polyfill-connectors/connectors/<name> and
 //   --manifest <checkout>/packages/polyfill-connectors/manifests/<name>.json):
 //     apple_contacts -> bundle sha256 11777c08835a12e0ad04f62645c7315aae6918399964421a2072b8358ad009f7
@@ -32,6 +36,7 @@
 // usage: node build-local-source.mjs --dcs <checkout> --connector <dir name> --out <dir>
 //          [--manifest <path>] [--esbuild <path to esbuild main.js>] [--external a,b]
 //          [--connector-dir <dir>] [--contract <host-runtime-contract.mjs>]
+//          [--parity-note <text recorded in provenance.json>]
 //          --expect-revision <40-hex sha>   (required: the build refuses unless the checkout's HEAD is this
 //                                            commit and its tracked tree is clean)
 import { execFileSync } from "node:child_process";
@@ -63,6 +68,7 @@ const connectorDir = arg("--connector-dir", join(dcs, "connectors", name));
 const manifestPath = arg("--manifest", join(connectorDir, "manifest.json"));
 const entry = join(connectorDir, "index.ts");
 const expectRevision = arg("--expect-revision");
+const parityNote = arg("--parity-note", "");
 const headRevision = execFileSync("git", ["rev-parse", "HEAD"], {
 	cwd: dcs,
 	encoding: "utf8",
@@ -219,6 +225,7 @@ const provenance = {
 			bundled_inputs: inputs,
 		}),
 	),
+	...(parityNote ? { parity_note: parityNote } : {}),
 	signed: false,
 };
 writeFileSync(

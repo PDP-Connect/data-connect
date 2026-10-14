@@ -257,7 +257,7 @@ export async function assertCompiledSlackUpgrade(
 					grants.push({ spec, token: minted.token });
 				}
 
-				// ---- legacy phase: the 0.6.0 emitter (data-connectors 97536ad49) ----
+				// ---- legacy phase: the 0.6.0 emitter (data-connectors 21e0386d, as shipped in the c82718d4 image) ----
 				await addAndSelectSlackSource(
 					urls,
 					materializeSlackSource(join(dir, "legacy-src"), "legacy"),
