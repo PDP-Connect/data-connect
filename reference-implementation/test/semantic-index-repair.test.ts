@@ -13,7 +13,10 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import test from "node:test";
+import { runRestore } from "../scripts/repair/gmail-delta-blanked-envelope-restore.ts";
+import { runRepair } from "../scripts/repair/record-current-projection-repair.ts";
 import { registerConnector } from "../server/auth.ts";
+import { lockConnectorManifestPublication } from "../server/connector-manifest-write-fence.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
 import {
   closePostgresStorage,
@@ -24,9 +27,7 @@ import {
   withPostgresTransaction,
 } from "../server/postgres-storage.ts";
 import { deleteAllRecordsForConnector, ingestRecord, maintainRecordIndexes } from "../server/records.ts";
-import { lockConnectorManifestPublication } from "../server/connector-manifest-write-fence.ts";
-import { runRestore } from "../scripts/repair/gmail-delta-blanked-envelope-restore.ts";
-import { runRepair } from "../scripts/repair/record-current-projection-repair.ts";
+import { __setLexicalBackfillPhaseHookForTest } from "../server/search.ts";
 import { reconcileSearchIndexDirtyScope } from "../server/search-index-reconcile.ts";
 import {
   computeIndexState,
@@ -59,7 +60,7 @@ function manifest(fields: SemanticFields = ["subject"], version = "1.0.0") {
       {
         name: STREAM,
         primary_key: ["id"],
-        query: { search: { semantic_fields: [...fields] } },
+        query: { search: { lexical_fields: ["subject"], semantic_fields: [...fields] } },
         schema: {
           properties: { body: { type: "string" }, id: { type: "string" }, subject: { type: "string" } },
           required: ["id"],
@@ -535,7 +536,7 @@ scenario(
     embedder.failWith = null;
     assert.deepEqual(await statuses(), ["complete"]);
     assert.deepEqual(await keys(), ["k2", "k3"]);
-    assert.equal((await dirtyRow())?.dirty, 0);
+    assert.equal((await dirtyRow())?.dirty, 1, "a standalone semantic pass cannot clear lexical work");
   }
 );
 
@@ -566,7 +567,7 @@ scenario("two overlapping passes on one scope: one is busy and the dirty mark su
     (await first).scopes.map((scope) => scope.status),
     ["complete"]
   );
-  assert.equal((await dirtyRow())?.dirty, 0);
+  assert.equal((await dirtyRow())?.dirty, 1, "only the reconciler owns the shared dirty clear");
 });
 
 scenario("an ingest version update racing a repair page: the newer version wins and nothing older lands", async () => {
@@ -627,7 +628,7 @@ scenario("the budget stops mid-stream and the next call resumes from the persist
     "no page was embedded twice"
   );
   assert.equal(await progressRow(), null);
-  assert.equal((await dirtyRow())?.dirty, 0);
+  assert.equal((await dirtyRow())?.dirty, 1);
   assert.equal(await computeIndexState(), "built");
 });
 
@@ -728,7 +729,7 @@ scenario(
     assert.equal(restarted?.passRevision, bumped.revision, "with a fresh pass_dirty_revision");
     assert.deepEqual(await statuses({ pageSize: 2 }), ["complete"]);
     assert.equal((await rowFor("k1"))?.version, k1Version, "the new pass repaired the key");
-    assert.equal((await dirtyRow())?.dirty, 0);
+    assert.equal((await dirtyRow())?.dirty, 1);
   }
 );
 
@@ -814,7 +815,7 @@ scenario("GATE 3: a new orphan behind the orphan cursor is removed by the next p
   assert.deepEqual(await keys(), ["k1", "k2", "k3"], "the orphan sits behind this pass's cursor");
   assert.deepEqual(await statuses({ pageSize: 2 }), ["complete"]);
   assert.deepEqual(await keys(), ["k2", "k3"]);
-  assert.equal((await dirtyRow())?.dirty, 0);
+  assert.equal((await dirtyRow())?.dirty, 1);
 });
 
 scenario(
@@ -929,6 +930,91 @@ scenario(
   }
 );
 
+scenario("a write after lexical proof cannot be cleared by semantic acquisition, including a standalone semantic job", async () => {
+  await setup();
+  await ingest("k1", "before");
+  assert.deepEqual(await statuses(), ["complete"]);
+  assert.equal((await dirtyRow())?.dirty, 1, "a standalone semantic job retains shared lexical work");
+
+  const before = await dirtyRow();
+  assert.ok(before);
+  const lexicalDone = deferred();
+  const resume = deferred();
+  __setLexicalBackfillPhaseHookForTest(async (point) => {
+    if (point === "after-instance-backfill") {
+      lexicalDone.release();
+      await resume.promise;
+    }
+  });
+  try {
+    const round = reconcileSearchIndexDirtyScope({
+      connectorId: CONNECTOR_ID,
+      connectorInstanceId: INSTANCE_ID,
+      markedAt: new Date().toISOString(),
+      revision: before.revision,
+      stream: STREAM,
+    });
+    await lexicalDone.promise;
+    await ingest("k1", "after lexical proof");
+    const revised = await dirtyRow();
+    assert.ok(revised && revised.revision > before.revision);
+    resume.release();
+    assert.equal((await round).outcome, "recontended");
+    assert.deepEqual(await dirtyRow(), revised, "the semantic completion did not clear work lexical never proved");
+    const converged = await reconcileSearchIndexDirtyScope({
+      connectorId: CONNECTOR_ID,
+      connectorInstanceId: INSTANCE_ID,
+      markedAt: new Date().toISOString(),
+      revision: revised.revision,
+      stream: STREAM,
+    });
+    assert.equal(converged.outcome, "converged");
+    assert.equal((await dirtyRow())?.dirty, 0);
+  } finally {
+    __setLexicalBackfillPhaseHookForTest(null);
+    resume.release();
+  }
+});
+
+test("SQLite: records repair page uses the scoped keyset index on a skewed fixture", () => {
+  initDb(":memory:");
+  try {
+    const db = getDb();
+    const insert = db.prepare(
+      `INSERT INTO records(connector_id, connector_instance_id, stream, record_key, record_json, emitted_at, version, deleted)
+       VALUES (?, ?, ?, ?, ?, ?, 1, 0)`
+    );
+    db.transaction(() => {
+      for (let index = 0; index < 4_000; index += 1) {
+        insert.run("other", "cin_large", "items", `large-${index}`, '{"id":"large"}', "2026-10-14T00:00:00.000Z");
+      }
+      for (let index = 0; index < 8; index += 1) {
+        insert.run(CONNECTOR_ID, INSTANCE_ID, STREAM, `target-${index}`, '{"id":"target"}', "2026-10-14T00:00:00.000Z");
+      }
+    })();
+    const sql = `SELECT id, record_key, version, semantic_generation FROM records
+      WHERE connector_instance_id = ? AND stream = ? AND deleted = 0 AND id > ? ORDER BY id ASC LIMIT ?`;
+    assert.ok(
+      db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_records_semantic_repair_page'").get(),
+      "boot migration creates the records repair keyset index"
+    );
+    db.exec("DROP INDEX idx_records_semantic_repair_page");
+    const before = db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(INSTANCE_ID, STREAM, 0, 4) as Array<{ detail: string }>;
+    const beforePlan = before.map((row) => row.detail).join(" | ");
+    assert.match(beforePlan, /idx_records_canonical_count/);
+    assert.match(beforePlan, /USE TEMP B-TREE FOR ORDER BY/);
+    db.exec(
+      "CREATE INDEX idx_records_semantic_repair_page ON records(connector_instance_id, stream, deleted, id)"
+    );
+    const after = db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(INSTANCE_ID, STREAM, 0, 4) as Array<{ detail: string }>;
+    const afterPlan = after.map((row) => row.detail).join(" | ");
+    assert.match(afterPlan, /idx_records_semantic_repair_page/);
+    assert.doesNotMatch(afterPlan, /USE TEMP B-TREE FOR ORDER BY/);
+  } finally {
+    closeDb();
+  }
+});
+
 // ─── Adversarial provenance, publication, and completion proofs ────────────
 
 scenario("operator repairs enqueue durable work and the next pass converges on the repaired provenance", async () => {
@@ -1028,7 +1114,7 @@ scenario("operator repairs enqueue durable work and the next pass converges on t
   const semantic = await rowFor("projection");
   assert.equal(semantic?.version, await recordVersion("projection"));
   assert.equal(semantic?.generation, await recordSemanticGeneration("projection"));
-  assert.equal((await dirtyRow())?.dirty, 0);
+  assert.equal((await dirtyRow())?.dirty, 1, "the scheduler must retain the shared lexical/semantic proof obligation");
 });
 
 scenario("same-version projection restore and tombstone advance only semantic provenance and dirty revision", async () => {
@@ -1320,4 +1406,85 @@ scenario("stale completion cannot publish metadata or clear dirty work after pub
   );
   assert.deepEqual(await semanticMeta(), winnerMeta, "the expired owner could not overwrite owner B metadata");
   assert.equal((await dirtyRow())?.dirty, 0, "owner B's completion state survived owner A's stale completion");
+});
+
+scenario("ordinary semantic completion retains dirty work when an additive manifest publishes before acquire or completion", async () => {
+  await setup();
+  await ingest("k1", "text");
+  await backfill();
+  const inner = createSemanticRepairStore();
+  const acquireEntered = deferred();
+  const releaseAcquire = deferred();
+  const pauseAcquire: RepairStore = {
+    ...inner,
+    acquire: async (...args) => {
+      acquireEntered.release();
+      await releaseAcquire.promise;
+      return await inner.acquire(...args);
+    },
+  };
+  const beforeAcquire = semanticIndexBackfillForManifest({ manifest: pinned() as never, repair: { store: pauseAcquire } });
+  await acquireEntered.promise;
+  await registerConnector(manifest(["subject", "body"], "additive-before-acquire"), { backfillRetrievalIndexes: false });
+  releaseAcquire.release();
+  await assert.rejects(beforeAcquire, /manifest revision changed/);
+  assert.equal((await dirtyRow())?.dirty, 1, "the additive publication stays queued");
+
+  await registerConnector(manifest(), { backfillRetrievalIndexes: false });
+  const completionEntered = deferred();
+  const releaseCompletion = deferred();
+  const pauseCompletion: RepairStore = {
+    ...inner,
+    complete: async (...args) => {
+      completionEntered.release();
+      await releaseCompletion.promise;
+      return await inner.complete(...args);
+    },
+  };
+  const beforeCompletion = semanticIndexBackfillForManifest({
+    manifest: pinned() as never,
+    repair: { store: pauseCompletion },
+  });
+  await completionEntered.promise;
+  await registerConnector(manifest(["subject", "body"], "additive-before-completion"), {
+    backfillRetrievalIndexes: false,
+  });
+  releaseCompletion.release();
+  await assert.rejects(beforeCompletion, /manifest revision changed/);
+  assert.equal((await dirtyRow())?.dirty, 1, "an ordinary completion cannot clear manifest B work");
+});
+
+scenario("an expired completion loses without publishing metadata or clearing dirty work", async () => {
+  await setup();
+  await ingest("k1", "text");
+  await backfill();
+  const beforeMeta = await semanticMeta();
+  const beforeDirty = await dirtyRow();
+  const store = createSemanticRepairStore({ leaseTtlMs: 60_000 });
+  const scope = { connectorId: CONNECTOR_ID, connectorInstanceId: INSTANCE_ID, stream: STREAM };
+  const acquired = await store.acquire({
+    identity: { dimensions: 8, distanceMetric: "cosine", fieldsFingerprint: "expired", modelId: "expired" },
+    owner: "expired-owner",
+    scope,
+  });
+  assert.equal(acquired.busy, false);
+  if (acquired.busy) {
+    throw new Error("unreachable");
+  }
+  await forceLeaseExpired();
+  assert.equal(
+    await store.complete(scope, acquired.fence, {
+      connectorId: CONNECTOR_ID,
+      connectorInstanceId: INSTANCE_ID,
+      dimensions: 8,
+      distanceMetric: "cosine",
+      fieldsFingerprint: "expired",
+      manifest: manifest() as never,
+      modelId: "expired",
+      stream: STREAM,
+    }),
+    "lost"
+  );
+  assert.deepEqual(await semanticMeta(), beforeMeta);
+  assert.deepEqual(await dirtyRow(), beforeDirty);
 });

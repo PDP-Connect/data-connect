@@ -1492,6 +1492,10 @@ export async function lexicalIndexBackfillForManifest({
         log,
         signal
       );
+      await maybeLexicalBackfillPhaseForTest("after-instance-backfill", {
+        connectorId,
+        connectorInstanceId,
+      });
     });
     return progressJob;
   } finally {

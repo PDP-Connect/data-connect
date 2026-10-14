@@ -227,6 +227,8 @@ interface SemanticBackfillOptions {
   manifest?: SemanticBackfillManifest;
   /** Budget and test seams for the bounded repair (defaults: 100 pages, 10 s). */
   repair?: {
+    /** Reconcile's shared lexical+semantic dirty revision; standalone semantic runs retain that shared flag. */
+    clearDirtyRevision?: number | null | undefined;
     /** Absolute epoch-ms deadline from the caller (the reconcile round's remaining time). */
     deadlineAt?: number | null | undefined;
     leaseTtlMs?: number | undefined;
@@ -2722,6 +2724,7 @@ async function assertSemanticBackfillManifestCurrent(
 
 interface SemanticBackfillContext {
   budget: RepairBudget;
+  clearDirtyRevision: number | null;
   connectorId: string;
   currentIdentity: SemanticBackfillIdentity;
   currentMetric: SemanticDistanceMetric;
@@ -2887,18 +2890,23 @@ async function repairSemanticScope({
     const completion = await store.complete(
       scope,
       fence,
-      identityChanged
-        ? {
-            connectorId,
-            connectorInstanceId,
-            dimensions: currentIdentity.dimensions,
-            distanceMetric: currentMetric,
-            fieldsFingerprint: newFingerprint,
-            manifest: context.manifest as Record<string, unknown>,
-            modelId: currentModel,
-            stream,
-          }
-        : undefined
+      {
+        clearDirtyRevision: context.clearDirtyRevision,
+        manifest: context.manifest as Record<string, unknown>,
+        ...(identityChanged
+          ? {
+              metadata: {
+                connectorId,
+                connectorInstanceId,
+                dimensions: currentIdentity.dimensions,
+                distanceMetric: currentMetric,
+                fieldsFingerprint: newFingerprint,
+                modelId: currentModel,
+                stream,
+              },
+            }
+          : {}),
+      }
     );
     released = true;
     if (completion === "lost") {
@@ -3066,6 +3074,7 @@ export async function semanticIndexBackfillForManifest({
     // calls (embedDocumentWithAdmission has its OWN admission pool).
     await backfillSemanticIndexForConnectorInstance({
       budget,
+      clearDirtyRevision: repair.clearDirtyRevision ?? null,
       fencedConnectorInstanceId: connectorInstanceId,
       log,
       manifest,
@@ -3097,6 +3106,7 @@ export function createSemanticRepairStore(options: { leaseTtlMs?: number | undef
 // that fence; all current/removed/orphan stream effects below run within it.
 async function backfillSemanticIndexForConnectorInstance({
   budget,
+  clearDirtyRevision,
   manifest,
   log,
   pageSize,
@@ -3106,6 +3116,7 @@ async function backfillSemanticIndexForConnectorInstance({
   fencedConnectorInstanceId,
 }: {
   budget: RepairBudget;
+  clearDirtyRevision: number | null;
   manifest: SemanticBackfillManifest;
   log: (message: string) => void;
   pageSize: number | undefined;
@@ -3162,6 +3173,7 @@ async function backfillSemanticIndexForConnectorInstance({
       progressJob = await backfillSemanticManifestStream({
         context: {
           budget,
+          clearDirtyRevision,
           connectorId,
           currentIdentity: {
             dimensions: currentDims,

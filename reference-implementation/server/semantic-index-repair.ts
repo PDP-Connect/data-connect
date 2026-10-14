@@ -132,7 +132,7 @@ type Awaitable<T> = T | Promise<T>;
 
 export interface RepairStore {
   acquire: (args: { identity: RepairIdentity; owner: string; scope: RepairScope }) => Awaitable<RepairAcquireResult>;
-  complete: (scope: RepairScope, fence: RepairFence, meta?: RepairMeta) => Awaitable<RepairCompletion>;
+  complete: (scope: RepairScope, fence: RepairFence, completion?: RepairCompletionArgument) => Awaitable<RepairCompletion>;
   deleteEmptied: (scope: RepairScope, fence: RepairFence, items: readonly RepairEmptied[]) => Awaitable<boolean>;
   deleteOrphans: (
     scope: RepairScope,
@@ -183,6 +183,50 @@ export interface RepairMeta {
   modelId: string;
   manifest: Record<string, unknown>;
   stream: string;
+}
+
+/** Semantic completion carries a manifest proof; metadata publication is optional. */
+export interface RepairCompletionInput {
+  /** Shared lexical+semantic revision to clear; null means semantic-only work must retain the shared flag. */
+  clearDirtyRevision?: number | null;
+  manifest: Record<string, unknown>;
+  metadata?: Omit<RepairMeta, "manifest">;
+}
+
+type RepairCompletionArgument = RepairCompletionInput | RepairMeta;
+
+function completionManifest(completion: RepairCompletionArgument | undefined): Record<string, unknown> | undefined {
+  return completion?.manifest;
+}
+
+function completionMetadata(completion: RepairCompletionArgument | undefined): Omit<RepairMeta, "manifest"> | undefined {
+  if (!completion) {
+    return undefined;
+  }
+  return "connectorId" in completion ? completion : completion.metadata;
+}
+
+type CompletionDirtyPolicy =
+  | { kind: "legacy"; revision: number | null }
+  | { kind: "reconcile" }
+  | { kind: "standalone"; passRevision: number | null };
+
+/**
+ * Legacy callers own the dirty clear inside the repair store. New semantic
+ * callers do not: a standalone semantic pass retains the shared lexical /
+ * semantic mark, while reconciliation clears its pre-lexical revision only
+ * after both families have completed.
+ */
+function completionDirtyPolicy(
+  completion: RepairCompletionArgument | undefined,
+  passRevision: number | null
+): CompletionDirtyPolicy {
+  if (!completion || "connectorId" in completion) {
+    return { kind: "legacy", revision: passRevision };
+  }
+  return completion.clearDirtyRevision === null
+    ? { kind: "standalone", passRevision }
+    : { kind: "reconcile" };
 }
 
 export const REPAIR_PAGE_SIZE = 500;
@@ -502,13 +546,33 @@ function semanticScopeLikePattern(stream: string): string {
 
 async function pgFenceHeld(client: PgClient, scope: RepairScope, fence: RepairFence, mode: "SHARE" | "UPDATE") {
   const result = await client.query(
-    `SELECT pass_dirty_revision FROM semantic_search_backfill_progress
+    `SELECT pass_dirty_revision, lease_expires_at, ${PG_NOW} AS now_ms FROM semantic_search_backfill_progress
       WHERE connector_instance_id = $1 AND stream = $2
-        AND lease_owner = $3 AND lease_generation = $4 AND lease_expires_at > ${PG_NOW}
+        AND lease_owner = $3 AND lease_generation = $4
       FOR ${mode}`,
     [scope.connectorInstanceId, scope.stream, fence.owner, fence.generation]
   );
-  return result.rows[0] as { pass_dirty_revision: string | number | null } | undefined;
+  const row = result.rows[0] as { lease_expires_at: string | number; now_ms: string | number; pass_dirty_revision: string | number | null } | undefined;
+  return row && Number(row.lease_expires_at) > Number(row.now_ms) ? row : undefined;
+}
+
+class LeaseExpiredDuringWrite extends Error {}
+
+async function pgBooleanOnLeaseLoss(work: () => Promise<boolean>): Promise<boolean> {
+  try {
+    return await work();
+  } catch (error) {
+    if (error instanceof LeaseExpiredDuringWrite) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+async function pgRequireFence(client: PgClient, scope: RepairScope, fence: RepairFence, mode: "SHARE" | "UPDATE") {
+  if (!(await pgFenceHeld(client, scope, fence, mode))) {
+    throw new LeaseExpiredDuringWrite();
+  }
 }
 
 /** Ensure the dirty row (no revision change), then read the revision. Same transaction as the caller's pass write. */
@@ -604,16 +668,19 @@ export function createPostgresRepairStore(options: { leaseTtlMs?: number | undef
       });
     },
 
-    async complete(scope, fence, meta) {
-      return await withPostgresTransaction(async (client): Promise<RepairCompletion> => {
-        if (meta) {
-          await assertConnectorManifestStreamSubsetWithClient(client, scope.connectorId, meta.manifest);
+    async complete(scope, fence, completion) {
+      try {
+        return await withPostgresTransaction(async (client): Promise<RepairCompletion> => {
+        const manifest = completionManifest(completion);
+        const metadata = completionMetadata(completion);
+        if (manifest) {
+          await assertConnectorManifestStreamSubsetWithClient(client, scope.connectorId, manifest);
         }
         const held = await pgFenceHeld(client, scope, fence, "UPDATE");
         if (!held) {
           return "lost";
         }
-        if (meta) {
+        if (metadata) {
           await client.query(
             `INSERT INTO semantic_search_meta(connector_instance_id, connector_id, stream, fields_fingerprint, model_id, dimensions, distance_metric, updated_at)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -621,22 +688,59 @@ export function createPostgresRepairStore(options: { leaseTtlMs?: number | undef
                connector_id = EXCLUDED.connector_id, fields_fingerprint = EXCLUDED.fields_fingerprint,
                model_id = EXCLUDED.model_id, dimensions = EXCLUDED.dimensions,
                distance_metric = EXCLUDED.distance_metric, updated_at = EXCLUDED.updated_at`,
-            [meta.connectorInstanceId, meta.connectorId, meta.stream, meta.fieldsFingerprint, meta.modelId, meta.dimensions, meta.distanceMetric, new Date().toISOString()]
+            [metadata.connectorInstanceId, metadata.connectorId, metadata.stream, metadata.fieldsFingerprint, metadata.modelId, metadata.dimensions, metadata.distanceMetric, new Date().toISOString()]
           );
         }
+        if (!(await pgFenceHeld(client, scope, fence, "UPDATE"))) {
+          throw new LeaseExpiredDuringWrite();
+        }
         const passRevision = held.pass_dirty_revision === null ? null : Number(held.pass_dirty_revision);
+        const policy = completionDirtyPolicy(completion, passRevision);
+        if (policy.kind === "reconcile") {
+          await client.query(
+            `DELETE FROM semantic_search_backfill_progress
+              WHERE connector_instance_id = $1 AND stream = $2 AND lease_owner = $3 AND lease_generation = $4`,
+            [scope.connectorInstanceId, scope.stream, fence.owner, fence.generation]
+          );
+          return "complete";
+        }
+        if (policy.kind === "standalone") {
+          const revision = await pgEnsureDirtyAndRevision(client, scope);
+          if (!(await pgFenceHeld(client, scope, fence, "UPDATE"))) {
+            throw new LeaseExpiredDuringWrite();
+          }
+          if (revision === policy.passRevision) {
+            await client.query(
+              `DELETE FROM semantic_search_backfill_progress
+                WHERE connector_instance_id = $1 AND stream = $2 AND lease_owner = $3 AND lease_generation = $4`,
+              [scope.connectorInstanceId, scope.stream, fence.owner, fence.generation]
+            );
+            return "complete";
+          }
+          await client.query(
+            `UPDATE semantic_search_backfill_progress
+                SET cursor_key = NULL, pass_dirty_revision = $5, pass_kind = 'repair',
+                    lease_owner = NULL, lease_expires_at = NULL, updated_at = $6
+              WHERE connector_instance_id = $1 AND stream = $2 AND lease_owner = $3 AND lease_generation = $4`,
+            [scope.connectorInstanceId, scope.stream, fence.owner, fence.generation, revision, new Date().toISOString()]
+          );
+          return "reset";
+        }
         const cleared =
-          passRevision === null
+          policy.revision === null
             ? 0
             : (
                 await client.query(
                   `UPDATE search_index_dirty
                       SET dirty = 0, reconciled_at = $3, last_error = NULL, attempts = 0, next_attempt_at = NULL
                     WHERE connector_instance_id = $1 AND stream = $2 AND revision = $4`,
-                  [scope.connectorInstanceId, scope.stream, new Date().toISOString(), passRevision]
+                  [scope.connectorInstanceId, scope.stream, new Date().toISOString(), policy.revision]
                 )
               ).rowCount;
-        if (cleared) {
+        if (!(await pgFenceHeld(client, scope, fence, "UPDATE"))) {
+          throw new LeaseExpiredDuringWrite();
+        }
+        if (cleared || policy.revision === null) {
           await client.query(
             `DELETE FROM semantic_search_backfill_progress
               WHERE connector_instance_id = $1 AND stream = $2 AND lease_owner = $3 AND lease_generation = $4`,
@@ -654,14 +758,20 @@ export function createPostgresRepairStore(options: { leaseTtlMs?: number | undef
           [scope.connectorInstanceId, scope.stream, fence.owner, fence.generation, revision, new Date().toISOString()]
         );
         return "reset";
-      });
+        });
+      } catch (error) {
+        if (error instanceof LeaseExpiredDuringWrite) {
+          return "lost";
+        }
+        throw error;
+      }
     },
 
     async deleteEmptied(scope, fence, items) {
       if (items.length === 0) {
         return true;
       }
-      return await withPostgresBulkTransaction(async (client) => {
+      return await pgBooleanOnLeaseLoss(() => withPostgresBulkTransaction(async (client) => {
         if (!(await pgFenceHeld(client, scope, fence, "SHARE"))) {
           return false;
         }
@@ -685,15 +795,16 @@ export function createPostgresRepairStore(options: { leaseTtlMs?: number | undef
             items.map((item) => item.generation),
           ]
         );
+        await pgRequireFence(client, scope, fence, "SHARE");
         return true;
-      });
+      }));
     },
 
     async deleteOrphans(scope, fence, scopeKey, recordKeys) {
       if (recordKeys.length === 0) {
         return true;
       }
-      return await withPostgresBulkTransaction(async (client) => {
+      return await pgBooleanOnLeaseLoss(() => withPostgresBulkTransaction(async (client) => {
         if (!(await pgFenceHeld(client, scope, fence, "SHARE"))) {
           return false;
         }
@@ -714,12 +825,13 @@ export function createPostgresRepairStore(options: { leaseTtlMs?: number | undef
             [scope.connectorInstanceId, scopeKey, doomed]
           );
         }
+        await pgRequireFence(client, scope, fence, "SHARE");
         return true;
-      });
+      }));
     },
 
     async deleteStreamRows(scope, fence) {
-      return await withPostgresTransaction(async (client) => {
+      return await pgBooleanOnLeaseLoss(() => withPostgresTransaction(async (client) => {
         if (!(await pgFenceHeld(client, scope, fence, "SHARE"))) {
           return false;
         }
@@ -727,8 +839,9 @@ export function createPostgresRepairStore(options: { leaseTtlMs?: number | undef
           "DELETE FROM semantic_search_blob WHERE connector_instance_id = $1 AND scope_key LIKE $2 ESCAPE '\\'",
           [scope.connectorInstanceId, semanticScopeLikePattern(scope.stream)]
         );
+        await pgRequireFence(client, scope, fence, "SHARE");
         return true;
-      });
+      }));
     },
 
     async fetchRecords(scope, recordKeys) {
@@ -788,7 +901,7 @@ export function createPostgresRepairStore(options: { leaseTtlMs?: number | undef
     },
 
     async resetPass(scope, fence, { identity, kind }) {
-      return await withPostgresTransaction(async (client) => {
+      return await pgBooleanOnLeaseLoss(() => withPostgresTransaction(async (client) => {
         if (!(await pgFenceHeld(client, scope, fence, "UPDATE"))) {
           return false;
         }
@@ -812,12 +925,13 @@ export function createPostgresRepairStore(options: { leaseTtlMs?: number | undef
             new Date().toISOString(),
           ]
         );
+        await pgRequireFence(client, scope, fence, "UPDATE");
         return true;
-      });
+      }));
     },
 
     async resetIdentityPass(scope, fence, { identity, manifest }) {
-      return await withPostgresTransaction(async (client) => {
+      return await pgBooleanOnLeaseLoss(() => withPostgresTransaction(async (client) => {
         await assertConnectorManifestStreamSubsetWithClient(client, scope.connectorId, manifest);
         if (!(await pgFenceHeld(client, scope, fence, "UPDATE"))) {
           return false;
@@ -834,8 +948,9 @@ export function createPostgresRepairStore(options: { leaseTtlMs?: number | undef
             WHERE connector_instance_id = $1 AND stream = $2 AND lease_owner = $3 AND lease_generation = $4`,
           [scope.connectorInstanceId, scope.stream, fence.owner, fence.generation, identity.fieldsFingerprint, identity.modelId, identity.dimensions, identity.distanceMetric, revision, new Date().toISOString()]
         );
+        await pgRequireFence(client, scope, fence, "UPDATE");
         return true;
-      });
+      }));
     },
 
     async saveCursor(scope, fence, cursor) {
@@ -895,7 +1010,7 @@ export function createPostgresRepairStore(options: { leaseTtlMs?: number | undef
       if (rows.length === 0) {
         return true;
       }
-      return await withPostgresBulkTransaction(async (client) => {
+      return await pgBooleanOnLeaseLoss(() => withPostgresBulkTransaction(async (client) => {
         if (!(await pgFenceHeld(client, scope, fence, "SHARE"))) {
           return false;
         }
@@ -935,8 +1050,9 @@ export function createPostgresRepairStore(options: { leaseTtlMs?: number | undef
             scope.stream,
           ]
         );
+        await pgRequireFence(client, scope, fence, "SHARE");
         return true;
-      });
+      }));
     },
   };
 }
@@ -1086,36 +1202,66 @@ export function createSqliteRepairStore(
       });
     },
 
-    complete(scope, fence, meta) {
+    complete(scope, fence, completion) {
       return writeTransaction((): RepairCompletion => {
-        if (meta) {
-          assertConnectorManifestStreamSubsetSync(scope.connectorId, meta.manifest);
+        const manifest = completionManifest(completion);
+        const metadata = completionMetadata(completion);
+        if (manifest) {
+          assertConnectorManifestStreamSubsetSync(scope.connectorId, manifest);
         }
         const held = sqliteFenceHeld(scope, fence);
         if (!held) {
           return "lost";
         }
-        if (meta) {
+        if (metadata) {
           sqliteRun(
             `INSERT INTO semantic_search_meta(connector_instance_id, connector_id, stream, fields_fingerprint, model_id, dimensions, distance_metric, updated_at)
              VALUES(?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(connector_instance_id, stream) DO UPDATE SET connector_id=excluded.connector_id,
              fields_fingerprint=excluded.fields_fingerprint, model_id=excluded.model_id,
              dimensions=excluded.dimensions, distance_metric=excluded.distance_metric, updated_at=excluded.updated_at`,
-            [meta.connectorInstanceId, meta.connectorId, meta.stream, meta.fieldsFingerprint, meta.modelId, meta.dimensions, meta.distanceMetric, new Date().toISOString()]
+            [metadata.connectorInstanceId, metadata.connectorId, metadata.stream, metadata.fieldsFingerprint, metadata.modelId, metadata.dimensions, metadata.distanceMetric, new Date().toISOString()]
           );
         }
         const passRevision = held.pass_dirty_revision === null ? null : Number(held.pass_dirty_revision);
+        const policy = completionDirtyPolicy(completion, passRevision);
+        if (policy.kind === "reconcile") {
+          sqliteRun(
+            `DELETE FROM semantic_search_backfill_progress
+              WHERE connector_instance_id = ? AND stream = ? AND lease_owner = ? AND lease_generation = ?`,
+            [scope.connectorInstanceId, scope.stream, fence.owner, fence.generation]
+          );
+          return "complete";
+        }
+        if (policy.kind === "standalone") {
+          const revision = sqliteEnsureDirtyAndRevision(scope);
+          if (revision === policy.passRevision) {
+            sqliteRun(
+              `DELETE FROM semantic_search_backfill_progress
+                WHERE connector_instance_id = ? AND stream = ? AND lease_owner = ? AND lease_generation = ?`,
+              [scope.connectorInstanceId, scope.stream, fence.owner, fence.generation]
+            );
+            return "complete";
+          }
+          sqliteRun(
+            `UPDATE semantic_search_backfill_progress
+                SET cursor_key = NULL, pass_dirty_revision = ?, pass_kind = 'repair',
+                    lease_owner = NULL, lease_expires_at = NULL, updated_at = ?
+              WHERE connector_instance_id = ? AND stream = ? AND lease_owner = ? AND lease_generation = ?`,
+            [revision, new Date().toISOString(), scope.connectorInstanceId, scope.stream, fence.owner, fence.generation]
+          );
+          return "reset";
+        }
         const cleared =
-          passRevision === null
+          policy.revision === null
             ? 0
             : sqliteRun(
                 `UPDATE search_index_dirty
                     SET dirty = 0, reconciled_at = ?, last_error = NULL, attempts = 0, next_attempt_at = NULL
                   WHERE connector_instance_id = ? AND stream = ? AND revision = ?`,
-                [new Date().toISOString(), scope.connectorInstanceId, scope.stream, passRevision]
+                [new Date().toISOString(), scope.connectorInstanceId, scope.stream, policy.revision]
               );
-        if (cleared > 0) {
+        if (cleared > 0 || policy.revision === null) {
           sqliteRun(
             `DELETE FROM semantic_search_backfill_progress
               WHERE connector_instance_id = ? AND stream = ? AND lease_owner = ? AND lease_generation = ?`,

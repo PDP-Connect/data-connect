@@ -90,8 +90,8 @@ async function storedVersions(): Promise<Map<string, number | null>> {
   );
 }
 
-function withPostgres(name: string, run: () => Promise<void>) {
-  test(`PostgreSQL: ${name}`, { skip: !POSTGRES_URL }, async () => {
+function withPostgres(name: string, run: () => Promise<void>, options: { skip?: boolean } = {}) {
+  test(`PostgreSQL: ${name}`, { skip: !POSTGRES_URL || options.skip }, async () => {
     assert.ok(POSTGRES_URL);
     await withTemporaryPostgresDatabase(
       {
@@ -141,6 +141,82 @@ async function openFence() {
   }
   return { fence: acquired.fence, store };
 }
+
+function deferred() {
+  let release: () => void = () => undefined;
+  const promise = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return { promise, release };
+}
+
+withPostgres("an expired completion rolls back metadata and dirty writes after a metadata lock wait", async () => {
+  await ingestRecord(TARGET, envelope("k1", "text"), { deferIndexes: true });
+  await semanticIndexBackfillForManifest({
+    manifest: { ...manifest, storage_binding: { connector_instance_id: INSTANCE_ID } } as never,
+  });
+  const beforeMeta = (
+    await postgresQuery(
+      "SELECT fields_fingerprint, model_id FROM semantic_search_meta WHERE connector_instance_id = $1 AND stream = $2",
+      [INSTANCE_ID, STREAM]
+    )
+  ).rows[0];
+  const beforeDirty = (
+    await postgresQuery("SELECT dirty, revision FROM search_index_dirty WHERE connector_instance_id = $1 AND stream = $2", [
+      INSTANCE_ID,
+      STREAM,
+    ])
+  ).rows[0];
+  const store = createSemanticRepairStore({ leaseTtlMs: 25 });
+  const acquired = await store.acquire({
+    identity: { dimensions: 8, distanceMetric: "cosine", fieldsFingerprint: "expired", modelId: "expired" },
+    owner: "ttl-waiter",
+    scope: SCOPE,
+  });
+  assert.equal(acquired.busy, false);
+  if (acquired.busy) {
+    throw new Error("unreachable");
+  }
+  const locked = deferred();
+  const unlock = deferred();
+  const holder = withPostgresTransaction(async (client) => {
+    await client.query(
+      "SELECT 1 FROM semantic_search_meta WHERE connector_instance_id = $1 AND stream = $2 FOR UPDATE",
+      [INSTANCE_ID, STREAM]
+    );
+    locked.release();
+    await unlock.promise;
+  });
+  await locked.promise;
+  const completing = store.complete(SCOPE, acquired.fence, {
+    connectorId: CONNECTOR_ID,
+    connectorInstanceId: INSTANCE_ID,
+    dimensions: 8,
+    distanceMetric: "cosine",
+    fieldsFingerprint: "expired",
+    manifest: manifest as never,
+    modelId: "expired",
+    stream: STREAM,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  unlock.release();
+  await holder;
+  assert.equal(await completing, "lost");
+  const afterMeta = (
+    await postgresQuery(
+      "SELECT fields_fingerprint, model_id FROM semantic_search_meta WHERE connector_instance_id = $1 AND stream = $2",
+      [INSTANCE_ID, STREAM]
+    )
+  ).rows[0];
+  const afterDirty = (
+    await postgresQuery("SELECT dirty, revision FROM search_index_dirty WHERE connector_instance_id = $1 AND stream = $2", [
+      INSTANCE_ID,
+      STREAM,
+    ])
+  ).rows[0];
+  assert.deepEqual(afterMeta, beforeMeta, "the blocked metadata write rolled back");
+  assert.deepEqual(afterDirty, beforeDirty, "the dirty clear rolled back with metadata");
+});
 
 withPostgres(
   "the write guard is the AUTHORITATIVE record version: a version committed during the lock wait wins",
@@ -381,4 +457,4 @@ withPostgres("EXPLAIN (plan only): every repair read is index-backed", async () 
     "SELECT model_id, dimensions, distance_metric FROM semantic_search_meta",
     []
   );
-});
+}, { skip: process.env.PDPP_SEMANTIC_REPAIR_STRESS !== "1" });

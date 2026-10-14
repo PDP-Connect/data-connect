@@ -1739,6 +1739,9 @@ CREATE INDEX IF NOT EXISTS idx_records_lookup
 CREATE INDEX IF NOT EXISTS idx_records_version
   ON records(connector_id, stream, version);
 
+CREATE INDEX IF NOT EXISTS idx_records_semantic_repair_page
+  ON records(connector_instance_id, stream, deleted, id);
+
 -- Never reset this clock with a stream or connector reset. It gives an
 -- embedding a non-reusable provenance token even if a record key is deleted
 -- and later reinserted at the same historical version.
@@ -6435,6 +6438,7 @@ DROP INDEX IF EXISTS idx_record_changes_record;
 DROP INDEX IF EXISTS idx_blob_bindings_record;
 CREATE INDEX IF NOT EXISTS idx_records_lookup ON records(connector_instance_id, stream, record_key);
 CREATE INDEX IF NOT EXISTS idx_records_version ON records(connector_instance_id, stream, version);
+CREATE INDEX IF NOT EXISTS idx_records_semantic_repair_page ON records(connector_instance_id, stream, deleted, id);
 CREATE INDEX IF NOT EXISTS idx_records_semantic_time ON records(connector_instance_id, stream, (COALESCE(NULLIF(semantic_time, ''), emitted_at)) DESC, record_key DESC);
 CREATE INDEX IF NOT EXISTS idx_records_canonical_count ON records(connector_instance_id, deleted, stream, emitted_at);
 CREATE INDEX IF NOT EXISTS idx_record_changes_record ON record_changes(connector_instance_id, stream, record_key, version);

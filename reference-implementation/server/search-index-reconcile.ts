@@ -12,9 +12,10 @@
  * semantic-index-repair.ts), both scoped to that one connector instance via
  * `storage_binding.connector_instance_id`. The semantic pass is leased
  * (single flight per physical scope), paged with a persisted cursor, and
- * budgeted; it clears the dirty flag itself, with a CAS against the revision
- * captured at the START of the whole keyset pass. `busy` and `partial` results
- * leave the flag and its revision untouched.
+ * budgeted. Reconciliation clears the shared dirty flag only after both
+ * families finish, with a CAS against the revision captured before lexical
+ * begins. `busy` and `partial` results leave the flag and its revision
+ * untouched.
  *
  * A scope's dirty flag is cleared ONLY after both backfills complete
  * without throwing for that scope -- clearing does not mean "we found and
@@ -175,7 +176,7 @@ async function runScopeBackfills(
   if (semanticBackend) {
     const semantic = await semanticIndexBackfillForManifest({
       manifest: pinnedManifest,
-      repair: { deadlineAt },
+      repair: { clearDirtyRevision: scope.revision, deadlineAt },
     } as unknown as SemanticBackfillOptions);
     assertStorageGenerationCurrent(generation);
     const mine = semantic.scopes.find(
@@ -188,12 +189,9 @@ async function runScopeBackfills(
       await rotateSearchIndexDirtyOrder({ connectorInstanceId, stream }, new Date().toISOString());
       return { connectorId, connectorInstanceId, outcome: "partial", stream };
     }
-    if (mine?.status === "complete") {
-      // The pass's own completion CAS (revision = the revision captured at the
-      // START of the whole keyset pass) already cleared the dirty flag. The
-      // round's later revision is deliberately NOT used here.
-      return { connectorId, connectorInstanceId, outcome: "converged", stream };
-    }
+    // Completion only releases the semantic lease. The shared dirty flag is
+    // cleared below with the revision captured before lexical began, proving
+    // one boundary for both index families.
   }
 
   // CAS on scope.revision (captured when this round listed the scope,
