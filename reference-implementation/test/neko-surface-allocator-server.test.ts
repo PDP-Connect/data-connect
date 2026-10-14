@@ -2,7 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
+import { pathToFileURL } from "node:url";
 
 // biome-ignore lint/correctness/noUnresolvedImports: Biome resolver lacks this runtime-supported dependency export shape.
 import type { BrowserSurface } from "@opendatalabs/remote-surface/leases";
@@ -12,6 +17,7 @@ import {
   type DockerEngineTransport,
   NekoSurfaceAllocatorService,
   NekoSurfaceAllocatorServiceError,
+  type ProfileDirectoryStat,
   type ProfileFilesystem,
   readNekoSurfaceAllocatorOptionsFromEnv,
   startNekoSurfaceAllocatorServer,
@@ -189,7 +195,10 @@ test("creates and starts an owned n.eko container with sanitized profile storage
   assert.ok(profilePath, "create call must label the profile path");
   assert.match(profilePath, REGEXP_11);
   assert.deepEqual(profileFilesystem.calls, [
-    { method: "mkdir", options: { mode: 0o700, recursive: true }, path: profilePath },
+    { follow: true, method: "stat", path: BASE_OPTIONS.profileRoot },
+    { method: "access", path: BASE_OPTIONS.profileRoot },
+    { method: "mkdir", options: { mode: 0o700 }, path: profilePath },
+    { follow: false, method: "stat", path: profilePath },
     { gid: 1000, method: "chown", path: profilePath, uid: 1000 },
     { method: "chmod", mode: 0o700, path: profilePath },
   ]);
@@ -873,15 +882,10 @@ test("does not create a Docker container when profile directory preparation fail
     docker,
     fetchImpl: readyFetch(),
     profileFilesystem: {
-      async chmod() {
-        /* intentionally empty */
-      },
+      ...noopProfileFilesystem(),
       // biome-ignore lint/suspicious/useAwait: Async callback preserves the dependency contract and rejection timing.
       async chown() {
         throw new Error("chown failed");
-      },
-      async mkdir() {
-        /* intentionally empty */
       },
     },
   });
@@ -1745,8 +1749,13 @@ function selectiveFetch(predicate: (url: URL) => boolean): FetchLike {
   };
 }
 
+const HEALTHY_DIRECTORY: ProfileDirectoryStat = { isDirectory: true, isSymbolicLink: false, nlink: 2 };
+
 function noopProfileFilesystem(): ProfileFilesystem {
   return {
+    async access() {
+      /* intentionally empty */
+    },
     async chmod() {
       /* intentionally empty */
     },
@@ -1756,14 +1765,19 @@ function noopProfileFilesystem(): ProfileFilesystem {
     async mkdir() {
       /* intentionally empty */
     },
+    // biome-ignore lint/suspicious/useAwait: Async callback preserves the dependency contract and rejection timing.
+    async stat() {
+      return HEALTHY_DIRECTORY;
+    },
   };
 }
 
 interface ProfileFilesystemCall {
+  readonly follow?: boolean;
   readonly gid?: number;
-  readonly method: "chmod" | "chown" | "mkdir";
+  readonly method: "access" | "chmod" | "chown" | "mkdir" | "stat";
   readonly mode?: number;
-  readonly options?: { mode: number; recursive: true };
+  readonly options?: { mode: number };
   readonly path: string;
   readonly uid?: number;
 }
@@ -1772,6 +1786,10 @@ function recordingProfileFilesystem(): ProfileFilesystem & { calls: ProfileFiles
   const calls: ProfileFilesystemCall[] = [];
   return {
     calls,
+    // biome-ignore lint/suspicious/useAwait: Async callback preserves the dependency contract and rejection timing.
+    async access(path) {
+      calls.push({ method: "access", path });
+    },
     // biome-ignore lint/suspicious/useAwait: Async callback preserves the dependency contract and rejection timing.
     async chmod(path, mode) {
       calls.push({ method: "chmod", mode, path });
@@ -1784,5 +1802,243 @@ function recordingProfileFilesystem(): ProfileFilesystem & { calls: ProfileFiles
     async mkdir(path, options) {
       calls.push({ method: "mkdir", options, path });
     },
+    // biome-ignore lint/suspicious/useAwait: Async callback preserves the dependency contract and rejection timing.
+    async stat(path, options) {
+      calls.push({ follow: options.follow, method: "stat", path });
+      return HEALTHY_DIRECTORY;
+    },
   };
 }
+
+// --- Profile storage: real filesystem, no mkdir -p -------------------------
+
+const CHILD_WATCHDOG_MS = 5000;
+const REQUEST = { connectorId: "chatgpt", profileKey: "profile_1", surfaceId: "surface_1" } as const;
+
+function realFsOptions(profileRoot: string) {
+  const { profileFilesystem: _noop, ...rest } = BASE_OPTIONS;
+  return {
+    ...rest,
+    docker: new FakeDocker(),
+    fetchImpl: readyFetch(),
+    profileOwnerGid: process.getgid?.() ?? 0,
+    profileOwnerUid: process.getuid?.() ?? 0,
+    profileRoot,
+  };
+}
+
+function scratchRoot(): { cleanup: () => void; root: string } {
+  const base = mkdtempSync(join(tmpdir(), "neko-profile-root-"));
+  return {
+    cleanup: () => rmSync(base, { force: true, recursive: true }),
+    root: base,
+  };
+}
+
+function storageCode(error: unknown): string | undefined {
+  return error instanceof NekoSurfaceAllocatorServiceError ? error.code : undefined;
+}
+
+// Child with a strict watchdog: the pre-fix recursive mkdir never returns.
+function runChild(script: string): Promise<{ killed: boolean; stderr: string; stdout: string }> {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, ["--input-type=module", "-e", script], { stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    let killed = false;
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString();
+    });
+    const watchdog = setTimeout(() => {
+      killed = true;
+      child.kill("SIGKILL");
+    }, CHILD_WATCHDOG_MS);
+    child.once("close", () => {
+      clearTimeout(watchdog);
+      resolve({ killed, stderr, stdout });
+    });
+  });
+}
+
+test("a deleted-but-open profile root fails fast with a typed error instead of spinning in mkdir", async () => {
+  const serverUrl = pathToFileURL(new URL("../server/neko-surface-allocator-server.ts", import.meta.url).pathname).href;
+  const script = `
+    import { closeSync, mkdtempSync, openSync, rmdirSync } from "node:fs";
+    import { tmpdir } from "node:os";
+    import { join } from "node:path";
+    const { NekoSurfaceAllocatorService } = await import(${JSON.stringify(serverUrl)});
+    const dir = mkdtempSync(join(tmpdir(), "neko-unlinked-root-"));
+    const fd = openSync(dir, "r");
+    rmdirSync(dir);
+    const service = new NekoSurfaceAllocatorService({
+      cdpBaseUrlTemplate: "http://127.0.0.1:{host_port}/cdp/",
+      deploymentId: "unlinked-root-test",
+      docker: { requestJson: async (path) => { if (path === "/containers/json") return []; throw new Error("unexpected docker call " + path); } },
+      image: "neko:test",
+      network: "unlinked-root-test",
+      profileRoot: "/proc/self/fd/" + fd,
+      streamBaseUrlTemplate: "http://127.0.0.1:{host_port}/neko",
+      webrtcHostPortEnd: 59002,
+      webrtcHostPortStart: 59000,
+    });
+    try {
+      await service.ensureSurface(${JSON.stringify(REQUEST)});
+      console.log(JSON.stringify({ outcome: "resolved" }));
+    } catch (error) {
+      console.log(JSON.stringify({ code: error.code, message: error.message, outcome: "rejected" }));
+    }
+    closeSync(fd);
+  `;
+  const result = await runChild(script);
+  assert.equal(result.killed, false, `child hung until the ${String(CHILD_WATCHDOG_MS)}ms watchdog`);
+  const outcome = JSON.parse(result.stdout.trim()) as { code: string; message: string; outcome: string };
+  assert.equal(outcome.outcome, "rejected");
+  assert.equal(outcome.code, "profile_storage_unavailable");
+  assert.match(outcome.message, /unlinked/);
+});
+
+test("creates a missing profile directory with mode 0700 under a valid root", async () => {
+  const { cleanup, root } = scratchRoot();
+  try {
+    const service = new NekoSurfaceAllocatorService(realFsOptions(root));
+    const surface = await service.ensureSurface(REQUEST);
+    const profilePath = allocatorMetadata(surface).profile_path as string;
+    assert.ok(profilePath.startsWith(`${root}/`));
+    assert.equal(statSync(profilePath).mode & 0o777, 0o700);
+  } finally {
+    cleanup();
+  }
+});
+
+test("an existing profile keeps its data and gets its mode restored", async () => {
+  const { cleanup, root } = scratchRoot();
+  try {
+    const first = await new NekoSurfaceAllocatorService(realFsOptions(root)).ensureSurface(REQUEST);
+    const profilePath = allocatorMetadata(first).profile_path as string;
+    writeFileSync(join(profilePath, "Cookies"), "keep-me");
+    chmodSync(profilePath, 0o755);
+    await new NekoSurfaceAllocatorService(realFsOptions(root)).ensureSurface(REQUEST);
+    assert.equal(readFileSync(join(profilePath, "Cookies"), "utf8"), "keep-me");
+    assert.equal(statSync(profilePath).mode & 0o777, 0o700);
+  } finally {
+    cleanup();
+  }
+});
+
+test("concurrent allocations of one profile all succeed against a real filesystem", async () => {
+  const { cleanup, root } = scratchRoot();
+  try {
+    const services = Array.from({ length: 8 }, () => new NekoSurfaceAllocatorService(realFsOptions(root)));
+    const surfaces = await Promise.all(services.map((service) => service.ensureSurface(REQUEST)));
+    const paths = new Set(surfaces.map((surface) => allocatorMetadata(surface).profile_path));
+    assert.equal(paths.size, 1);
+  } finally {
+    cleanup();
+  }
+});
+
+test("a missing profile root is a typed error and is not created implicitly", async () => {
+  const { cleanup, root } = scratchRoot();
+  try {
+    const missing = join(root, "not-provisioned");
+    await assert.rejects(
+      () => new NekoSurfaceAllocatorService(realFsOptions(missing)).ensureSurface(REQUEST),
+      (error) => storageCode(error) === "profile_storage_unavailable"
+    );
+    assert.throws(() => statSync(missing), { code: "ENOENT" });
+  } finally {
+    cleanup();
+  }
+});
+
+test("a profile root that is a file is rejected", async () => {
+  const { cleanup, root } = scratchRoot();
+  try {
+    const file = join(root, "file");
+    writeFileSync(file, "");
+    await assert.rejects(
+      () => new NekoSurfaceAllocatorService(realFsOptions(file)).assertProfileStorageReady(),
+      (error) =>
+        storageCode(error) === "profile_storage_unavailable" && /not a directory/.test((error as Error).message)
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test("a read-only profile root is rejected before any container is created", {
+  skip: process.getuid?.() === 0,
+}, async () => {
+  const { cleanup, root } = scratchRoot();
+  try {
+    chmodSync(root, 0o500);
+    const options = realFsOptions(root);
+    await assert.rejects(
+      () => new NekoSurfaceAllocatorService(options).ensureSurface(REQUEST),
+      (error) => storageCode(error) === "profile_storage_unavailable"
+    );
+    assert.equal(
+      options.docker.calls.some((call) => call.path === "/containers/create"),
+      false
+    );
+  } finally {
+    chmodSync(root, 0o700);
+    cleanup();
+  }
+});
+
+test("a symlink at the profile path is never adopted or modified", async () => {
+  const { cleanup, root } = scratchRoot();
+  try {
+    const probe = await new NekoSurfaceAllocatorService(realFsOptions(root)).ensureSurface(REQUEST);
+    const profilePath = allocatorMetadata(probe).profile_path as string;
+    rmSync(profilePath, { recursive: true });
+    const elsewhere = join(root, "elsewhere");
+    mkdirSync(elsewhere);
+    symlinkSync(elsewhere, profilePath);
+    const modeBefore = statSync(elsewhere).mode;
+    const options = realFsOptions(root);
+    await assert.rejects(
+      () => new NekoSurfaceAllocatorService(options).ensureSurface(REQUEST),
+      (error) => storageCode(error) === "profile_path_invalid"
+    );
+    assert.equal(statSync(elsewhere).mode, modeBefore);
+    assert.equal(
+      options.docker.calls.some((call) => call.path === "/containers/create"),
+      false
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test("readiness endpoint and startup both report an unusable profile root", async () => {
+  const { cleanup, root } = scratchRoot();
+  try {
+    const missing = join(root, "gone");
+    await assert.rejects(
+      () =>
+        startNekoSurfaceAllocatorServer({ ...realFsOptions(missing), listenHost: "127.0.0.1" }),
+      (error) => storageCode(error) === "profile_storage_unavailable"
+    );
+
+    const docker = realFsOptions(root).docker;
+    docker.networks.add("pdpp-neko");
+    const server = await startNekoSurfaceAllocatorServer({ ...realFsOptions(root), docker, listenHost: "127.0.0.1" });
+    try {
+      const ready = await fetch(new URL("readyz", server.url));
+      assert.equal(ready.status, 200);
+      rmSync(root, { force: true, recursive: true });
+      const notReady = await fetch(new URL("readyz", server.url));
+      assert.equal(notReady.status, 503);
+      assert.equal(((await notReady.json()) as { code: string }).code, "profile_storage_unavailable");
+    } finally {
+      await server.close();
+    }
+  } finally {
+    cleanup();
+  }
+});

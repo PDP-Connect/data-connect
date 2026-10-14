@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { createHash } from "node:crypto";
-import { chmod, chown, mkdir } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import { access, chmod, lchown, lstat, mkdir, stat } from "node:fs/promises";
 import { createServer, request as httpRequest, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { isAbsolute } from "node:path";
@@ -90,10 +91,24 @@ export interface DockerEngineRequestInit {
   readonly query?: Readonly<Record<string, string>>;
 }
 
+export interface ProfileDirectoryStat {
+  readonly isDirectory: boolean;
+  readonly isSymbolicLink: boolean;
+  readonly nlink: number;
+}
+
+// `mkdir` is deliberately non-recursive. Node 24.19's recursive mkdir loops
+// forever (millions of mkdir/statx syscalls, one pinned CPU) when an ancestor
+// is a directory that was unlinked while still open — the state of a
+// bind-mounted profile root whose host directory was deleted. A non-recursive
+// mkdir fails with ENOENT immediately in that state.
 export interface ProfileFilesystem {
+  /** Rejects unless the caller may create entries in `path` (W_OK | X_OK). */
+  access: (path: string) => Promise<void>;
   chmod: (path: string, mode: number) => Promise<void>;
   chown: (path: string, uid: number, gid: number) => Promise<void>;
-  mkdir: (path: string, options: { mode: number; recursive: true }) => Promise<void>;
+  mkdir: (path: string, options: { mode: number }) => Promise<void>;
+  stat: (path: string, options: { follow: boolean }) => Promise<ProfileDirectoryStat>;
 }
 
 export interface NekoSurfaceAllocatorServerOptions {
@@ -251,6 +266,8 @@ export class NekoSurfaceAllocatorServiceError extends Error {
     | "foreign_resource"
     | "not_found"
     | "port_capacity_exhausted"
+    | "profile_path_invalid"
+    | "profile_storage_unavailable"
     | "readiness_failed";
 
   constructor(code: NekoSurfaceAllocatorServiceError["code"], message: string, options: { cause?: unknown } = {}) {
@@ -840,17 +857,69 @@ export class NekoSurfaceAllocatorService {
     return inspect.State?.Running !== true && inspect.State?.Status !== "running";
   }
 
+  /**
+   * Fails unless the profile root is a live, writable directory. Also the
+   * allocator's readiness check, so a root that goes bad after startup is
+   * reported instead of discovered mid-allocation.
+   *
+   * `nlink === 0` means the directory was unlinked while still open (the
+   * bind-mounted root's host directory was deleted or its cleanup-managed
+   * parent was swept). Every path below it then fails or loops until the
+   * mount is recreated, so name that state explicitly.
+   */
+  async assertProfileStorageReady(): Promise<void> {
+    const root = this.#options.profileRoot;
+    const fs = this.#options.profileFilesystem;
+    let rootStat: ProfileDirectoryStat;
+    try {
+      rootStat = await fs.stat(root, { follow: true });
+    } catch (cause) {
+      throw profileStorageError(`profile root ${root} is not usable (${errnoCode(cause)})`, cause);
+    }
+    if (!rootStat.isDirectory) {
+      throw profileStorageError(`profile root ${root} is not a directory`);
+    }
+    if (rootStat.nlink === 0) {
+      throw profileStorageError(
+        `profile root ${root} has been unlinked (deleted while still mounted); recreate the host directory, then restart the allocator and any browser container that mounts it`
+      );
+    }
+    try {
+      await fs.access(root);
+    } catch (cause) {
+      throw profileStorageError(`profile root ${root} is not writable (${errnoCode(cause)})`, cause);
+    }
+  }
+
   async #prepareProfileDirectory(profilePath: string): Promise<void> {
-    await this.#options.profileFilesystem.mkdir(profilePath, {
-      mode: PROFILE_DIRECTORY_MODE,
-      recursive: true,
-    });
-    await this.#options.profileFilesystem.chown(
-      profilePath,
-      this.#options.profileOwnerUid,
-      this.#options.profileOwnerGid
-    );
-    await this.#options.profileFilesystem.chmod(profilePath, PROFILE_DIRECTORY_MODE);
+    await this.assertProfileStorageReady();
+    const fs = this.#options.profileFilesystem;
+    // Non-recursive: the root was just validated, so only the final component
+    // can be missing. EEXIST is the normal path for an existing profile and
+    // for a concurrent request that created it first.
+    try {
+      await fs.mkdir(profilePath, { mode: PROFILE_DIRECTORY_MODE });
+    } catch (cause) {
+      if (errnoCode(cause) !== "EEXIST") {
+        throw profileStorageError(`cannot create profile directory ${profilePath} (${errnoCode(cause)})`, cause);
+      }
+    }
+    // lstat, not stat: a symlink (or file) at the profile path must never be
+    // adopted, chowned, or bind-mounted into a browser container.
+    let profileStat: ProfileDirectoryStat;
+    try {
+      profileStat = await fs.stat(profilePath, { follow: false });
+    } catch (cause) {
+      throw profileStorageError(`cannot inspect profile directory ${profilePath} (${errnoCode(cause)})`, cause);
+    }
+    if (!profileStat.isDirectory || profileStat.isSymbolicLink) {
+      throw new NekoSurfaceAllocatorServiceError(
+        "profile_path_invalid",
+        `profile path ${profilePath} exists but is not a plain directory`
+      );
+    }
+    await fs.chown(profilePath, this.#options.profileOwnerUid, this.#options.profileOwnerGid);
+    await fs.chmod(profilePath, PROFILE_DIRECTORY_MODE);
   }
 
   async #allocateHostPort(skippedPorts: ReadonlySet<number> = new Set()): Promise<number> {
@@ -999,7 +1068,10 @@ export function createNekoSurfaceAllocatorHttpHandler(service: NekoSurfaceAlloca
       await routeAllocatorRequest(service, req, res);
     } catch (cause) {
       const error = cause instanceof Error ? cause : new Error(String(cause));
-      sendJson(res, statusForError(error), { error: error.message });
+      sendJson(res, statusForError(error), {
+        error: error.message,
+        ...(error instanceof NekoSurfaceAllocatorServiceError ? { code: error.code } : {}),
+      });
     }
   };
 }
@@ -1011,6 +1083,11 @@ async function routeAllocatorRequest(
 ): Promise<void> {
   const url = new URL(req.url ?? "/", "http://allocator.local");
   const parts = url.pathname.split("/").filter(Boolean);
+  if (parts.length === 1 && parts[0] === "readyz" && req.method === "GET") {
+    await service.assertProfileStorageReady();
+    sendJson(res, 200, { ready: true });
+    return;
+  }
   if (parts.length === 1 && parts[0] === "surfaces") {
     await routeSurfaceCollection(service, req, res);
     return;
@@ -1069,6 +1146,10 @@ export async function startNekoSurfaceAllocatorServer(
   options: NekoSurfaceAllocatorServerOptions
 ): Promise<{ close: () => Promise<void>; url: string }> {
   const service = new NekoSurfaceAllocatorService(options);
+  // Fail before listening: an allocator that cannot write profiles must exit
+  // (visible to the container restart policy) instead of accepting requests
+  // it can only fail.
+  await service.assertProfileStorageReady();
   await service.ensureNetworkExists();
   const server = createServer(createNekoSurfaceAllocatorHttpHandler(service));
   const listenHost = options.listenHost ?? "127.0.0.1";
@@ -1214,10 +1295,10 @@ function statusForError(error: Error): number {
   if (error.code === "not_found") {
     return 404;
   }
-  if (error.code === "foreign_resource") {
+  if (error.code === "foreign_resource" || error.code === "profile_path_invalid") {
     return 409;
   }
-  if (error.code === "port_capacity_exhausted") {
+  if (error.code === "port_capacity_exhausted" || error.code === "profile_storage_unavailable") {
     return 503;
   }
   return 502;
@@ -1456,12 +1537,33 @@ export function readNekoSurfaceAllocatorOptionsFromEnv(
 }
 
 const nodeProfileFilesystem: ProfileFilesystem = {
+  async access(path) {
+    await access(path, fsConstants.W_OK | fsConstants.X_OK);
+  },
   chmod,
-  chown,
+  // lchown: never follow a symlink swapped in between the lstat and the chown.
+  chown: lchown,
   async mkdir(path, options) {
-    await mkdir(path, options);
+    await mkdir(path, { mode: options.mode, recursive: false });
+  },
+  async stat(path, options) {
+    const stats = await (options.follow ? stat(path) : lstat(path));
+    return { isDirectory: stats.isDirectory(), isSymbolicLink: stats.isSymbolicLink(), nlink: stats.nlink };
   },
 };
+
+function errnoCode(cause: unknown): string {
+  const code = (cause as NodeJS.ErrnoException | null)?.code;
+  return typeof code === "string" ? code : "unknown";
+}
+
+function profileStorageError(message: string, cause?: unknown): NekoSurfaceAllocatorServiceError {
+  return new NekoSurfaceAllocatorServiceError(
+    "profile_storage_unavailable",
+    message,
+    cause === undefined ? {} : { cause }
+  );
+}
 
 function compactEnv(values: Readonly<Record<string, string | undefined>>): Record<string, string> {
   return Object.fromEntries(
