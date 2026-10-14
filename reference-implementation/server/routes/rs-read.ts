@@ -361,6 +361,7 @@ export interface MountRsReadContext {
     err: unknown,
     param?: string | null
   ) => Promise<unknown>;
+  readonly requireCoreEndpointToken: MiddlewareHandler;
   readonly requireToken: MiddlewareHandler;
   resolveGrantManifest: (tokenInfo: TokenInfo, opts: unknown) => Promise<ResolvedManifest>;
 
@@ -660,6 +661,7 @@ export function mountRsConnectors(app: AppLike, ctx: MountRsReadContext): void {
     "/v1/connectors",
     { contract: "listConnectors" },
     ctx.requireToken,
+    ctx.requireCoreEndpointToken,
     async (req: RouteRequest, res: RouteResponse) => {
       let queryContext: QueryContext | null = null;
       try {
@@ -1040,7 +1042,7 @@ function buildSchemaQueryData(selectors: SchemaRequestSelectors): Record<string,
 
 // GET /v1/schema — one-shot capability/schema discovery for the bearer
 export function mountRsSchema(app: AppLike, ctx: MountRsReadContext): void {
-  app.get("/v1/schema", { contract: "getSchema" }, ctx.requireToken, async (req: RouteRequest, res: RouteResponse) => {
+  app.get("/v1/schema", { contract: "getSchema" }, ctx.requireToken, ctx.requireCoreEndpointToken, async (req: RouteRequest, res: RouteResponse) => {
     let queryContext: QueryContext | null = null;
     try {
       const { tokenInfo } = req;
@@ -1405,6 +1407,7 @@ export function mountRsStreamsList(app: AppLike, ctx: MountRsReadContext): void 
     "/v1/streams",
     { contract: "listStreams" },
     ctx.requireToken,
+    ctx.requireCoreEndpointToken,
     async (req: RouteRequest, res: RouteResponse) => {
       let queryContext: QueryContext | null = null;
       try {
@@ -1485,6 +1488,7 @@ export function mountRsStreamDetail(app: AppLike, ctx: MountRsReadContext): void
     "/v1/streams/:stream",
     { contract: "getStreamMetadata" },
     ctx.requireToken,
+    ctx.requireCoreEndpointToken,
     async (req: RouteRequest, res: RouteResponse) => {
       let queryContext: QueryContext | null = null;
       try {
@@ -1655,6 +1659,7 @@ export function mountRsStreamAggregate(app: AppLike, ctx: MountRsReadContext): v
     "/v1/streams/:stream/aggregate",
     { contract: "aggregateStream" },
     ctx.requireToken,
+    ctx.requireCoreEndpointToken,
     async (req: RouteRequest, res: RouteResponse) => {
       let queryContext: QueryContext | null = null;
       try {
@@ -1803,6 +1808,7 @@ export function mountRsRecordsList(app: AppLike, ctx: MountRsReadContext): void 
     "/v1/streams/:stream/records",
     { contract: "listRecords" },
     ctx.requireToken,
+    ctx.requireCoreEndpointToken,
     async (req: RouteRequest, res: RouteResponse) => {
       let queryContext: QueryContext | null = null;
       try {
@@ -1921,6 +1927,7 @@ export function mountRsRecordDetail(app: AppLike, ctx: MountRsReadContext): void
     "/v1/streams/:stream/records/:id",
     { contract: "getRecord" },
     ctx.requireToken,
+    ctx.requireCoreEndpointToken,
     async (req: RouteRequest, res: RouteResponse) => {
       let queryContext: QueryContext | null = null;
       try {
@@ -2081,6 +2088,7 @@ export function mountRsRecordFieldWindow(app: AppLike, ctx: MountRsReadContext):
     // content-ladder change; this route does its own selector validation and
     // returns through the shared canonical envelope until then.
     ctx.requireToken,
+    ctx.requireCoreEndpointToken,
     async (req: RouteRequest, res: RouteResponse) => {
       let queryContext: QueryContext | null = null;
       try {
@@ -2357,6 +2365,7 @@ export function mountRsSearchLexical(app: AppLike, ctx: MountRsReadContext): voi
     "/v1/search",
     { contract: "searchRecordsLexical" },
     ctx.requireToken,
+    ctx.requireCoreEndpointToken,
     (req: RouteRequest, res: RouteResponse) =>
       runSearchRouteHandler(ctx, req, res, {
         queryShape: "search",
@@ -2382,6 +2391,7 @@ export function mountRsSearchSemantic(app: AppLike, ctx: MountRsReadContext): vo
     "/v1/search/semantic",
     { contract: "searchRecordsSemantic" },
     ctx.requireToken,
+    ctx.requireCoreEndpointToken,
     (req: RouteRequest, res: RouteResponse) =>
       runSearchRouteHandler(ctx, req, res, {
         queryShape: "search_semantic",
@@ -2409,6 +2419,7 @@ export function mountRsSearchHybrid(app: AppLike, ctx: MountRsReadContext): void
     "/v1/search/hybrid",
     { contract: "searchRecordsHybrid" },
     ctx.requireToken,
+    ctx.requireCoreEndpointToken,
     (req: RouteRequest, res: RouteResponse) =>
       runSearchRouteHandler(ctx, req, res, {
         queryShape: "search_hybrid",
@@ -2682,6 +2693,7 @@ export function mountRsBlobRead(app: AppLike, ctx: MountRsReadContext): void {
     "/v1/blobs/:blob_id",
     { contract: "getBlob" },
     ctx.requireToken,
+    ctx.requireCoreEndpointToken,
     async (req: RouteRequest, res: RouteResponse) => {
       try {
         const blobId = decodeURIComponent(req.params.blob_id as string);
