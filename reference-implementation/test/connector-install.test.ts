@@ -30,6 +30,10 @@ import {
   reconcileConnectorUninstalls,
   resolveActiveConnectorPath,
 } from "../server/connector-install/index.ts";
+import {
+  createFileLocalConnectorSourceStore,
+  inspectActiveLocalConnectorSource,
+} from "../server/connector-install/local-source.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
 import { createSqliteSchedulerStore } from "../server/stores/scheduler-store.ts";
@@ -110,6 +114,55 @@ test("PDPP_CONNECTOR_PRELOAD_DIR selects the file-backed install store", () => {
       process.env.PDPP_CONNECTOR_PRELOAD_DIR = previous;
     }
     rmSync(dataDir, { force: true, recursive: true });
+  }
+});
+
+test("owner local-source state lives in PDPP_DATA_DIR even when PDPP_CONNECTOR_PRELOAD_DIR is set", async () => {
+  const preloadDir = mkdtempSync(join(tmpdir(), "pdpp-local-source-preload-"));
+  const ownerDataDir = mkdtempSync(join(tmpdir(), "pdpp-local-source-data-"));
+  const sourceRoot = mkdtempSync(join(tmpdir(), "pdpp-local-source-profile-"));
+  const previousPreload = process.env.PDPP_CONNECTOR_PRELOAD_DIR;
+  const previousData = process.env.PDPP_DATA_DIR;
+  process.env.PDPP_CONNECTOR_PRELOAD_DIR = preloadDir;
+  process.env.PDPP_DATA_DIR = ownerDataDir;
+  try {
+    mkdirSync(join(sourceRoot, "profile"));
+    mkdirSync(join(sourceRoot, "dist"));
+    writeFileSync(
+      join(sourceRoot, "profile", "collection-profile.json"),
+      JSON.stringify({
+        connector_id: "https://registry.pdpp.dev/connectors/preload-split-fixture",
+        connector_key: "preload-split-fixture",
+        display_name: "Preload split fixture",
+        runtime_requirements: { bindings: { network: { required: true } } },
+        streams: [{ name: "items" }],
+        version: "0.1.0",
+      })
+    );
+    writeFileSync(join(sourceRoot, "dist", "collection-profile.mjs"), "export default {};\n");
+
+    // Production call sites pass neither dataDir nor localSourceStore.
+    const service = createConnectorInstallService({ registerManifest: () => Promise.resolve() });
+    const added = await service.addLocalSource?.(sourceRoot);
+    assert.ok(added);
+    await service.selectLocalSource?.(added.connectorKey, added.sourceId);
+
+    // The run path (runtime/controller.ts, server/index.ts) builds its store with
+    // no argument, which resolves to PDPP_DATA_DIR.
+    const runSideStore = createFileLocalConnectorSourceStore();
+    assert.deepEqual(
+      (await runSideStore.list()).map((source) => source.sourceId),
+      [added.sourceId]
+    );
+    const active = await inspectActiveLocalConnectorSource(runSideStore, added.connectorId);
+    assert.equal(active.status, "active");
+    assert.equal(existsSync(join(preloadDir, "connector-local-sources.json")), false);
+  } finally {
+    if (previousPreload === undefined) delete process.env.PDPP_CONNECTOR_PRELOAD_DIR;
+    else process.env.PDPP_CONNECTOR_PRELOAD_DIR = previousPreload;
+    if (previousData === undefined) delete process.env.PDPP_DATA_DIR;
+    else process.env.PDPP_DATA_DIR = previousData;
+    for (const dir of [preloadDir, ownerDataDir, sourceRoot]) rmSync(dir, { force: true, recursive: true });
   }
 });
 
