@@ -1,0 +1,538 @@
+{
+  "deny_ratio": 0.09257544899092761,
+  "grants": 980200,
+  "label": "pool8-sync-on-b",
+  "stage_seconds": 30,
+  "stages": [
+    {
+      "concurrency": 4,
+      "counts": {
+        "cross": 380,
+        "ok": 7738,
+        "revoked": 418
+      },
+      "cpu_pg_container_pct": 76.7,
+      "cpu_server_pct": 48.8,
+      "error_example": null,
+      "error_rate": 0,
+      "errors": 0,
+      "latency_ms_all": {
+        "p50": 11.2,
+        "p95": 32,
+        "p99": 63.6
+      },
+      "latency_ms_ok": {
+        "p50": 11.4,
+        "p95": 32.7,
+        "p99": 65
+      },
+      "measured_seconds": 30,
+      "pg_activity_avg": {
+        "active:cpu": 0.5,
+        "idle:Client/ClientRead": 2.38,
+        "idle:cpu": 0.25,
+        "active:IO/DataFileRead": 0.13,
+        "active:IO/WALSync": 0.75,
+        "active:LWLock/WALWrite": 0.94,
+        "active:Client/ClientRead": 0.06
+      },
+      "requests": 8536,
+      "requests_sent_incl_warmup": {
+        "cross": 479,
+        "ok": 9511,
+        "revoked": 493
+      },
+      "rps_timeline": [
+        451,
+        377,
+        421,
+        275,
+        319,
+        341,
+        432,
+        393,
+        413,
+        454,
+        426,
+        81,
+        92,
+        114,
+        135,
+        167,
+        187,
+        239,
+        287,
+        284,
+        316,
+        279,
+        236,
+        227,
+        245,
+        250,
+        223,
+        284,
+        296,
+        289
+      ],
+      "rps": 284.5,
+      "rps_ok": 257.9,
+      "audit": {
+        "coverage": 1,
+        "disclosure_served": 9511,
+        "query_received": 10483,
+        "query_rejected": 972,
+        "requests_answered": 10483,
+        "spine_rows_per_request": 2,
+        "spine_rows_total": 20966
+      },
+      "pass": true,
+      "wal": {
+        "bytes_per_request": 15044,
+        "checkpoints": 0,
+        "mb_total": 150.4
+      }
+    },
+    {
+      "concurrency": 8,
+      "counts": {
+        "cross": 579,
+        "ok": 11634,
+        "revoked": 591
+      },
+      "cpu_pg_container_pct": 80.8,
+      "cpu_server_pct": 49.3,
+      "error_example": null,
+      "error_rate": 0,
+      "errors": 0,
+      "latency_ms_all": {
+        "p50": 15.2,
+        "p95": 26.9,
+        "p99": 78.3
+      },
+      "latency_ms_ok": {
+        "p50": 15.4,
+        "p95": 27.1,
+        "p99": 79.3
+      },
+      "measured_seconds": 30,
+      "pg_activity_avg": {
+        "active:cpu": 0.44,
+        "active:IO/WALSync": 0.81,
+        "active:LWLock/WALWrite": 4.06,
+        "idle:cpu": 0.38,
+        "idle:Client/ClientRead": 2.19,
+        "active:Client/ClientRead": 0.06,
+        "active:IO/DataFileRead": 0.06
+      },
+      "requests": 12804,
+      "requests_sent_incl_warmup": {
+        "cross": 675,
+        "ok": 13770,
+        "revoked": 719
+      },
+      "rps_timeline": [
+        475,
+        444,
+        464,
+        445,
+        511,
+        467,
+        525,
+        524,
+        503,
+        472,
+        110,
+        419,
+        537,
+        530,
+        491,
+        518,
+        390,
+        468,
+        344,
+        31,
+        125,
+        14,
+        497,
+        498,
+        476,
+        488,
+        521,
+        514,
+        537,
+        466
+      ],
+      "rps": 426.8,
+      "rps_ok": 387.8,
+      "audit": {
+        "coverage": 1,
+        "disclosure_served": 13770,
+        "query_received": 15164,
+        "query_rejected": 1394,
+        "requests_answered": 15164,
+        "spine_rows_per_request": 2,
+        "spine_rows_total": 30328
+      },
+      "pass": true,
+      "wal": {
+        "bytes_per_request": 5830,
+        "checkpoints": 0,
+        "mb_total": 84.3
+      }
+    },
+    {
+      "concurrency": 16,
+      "counts": {
+        "cross": 617,
+        "ok": 11718,
+        "revoked": 620
+      },
+      "cpu_pg_container_pct": 96.3,
+      "cpu_server_pct": 47.9,
+      "error_example": null,
+      "error_rate": 0,
+      "errors": 0,
+      "latency_ms_all": {
+        "p50": 31.1,
+        "p95": 73,
+        "p99": 145.7
+      },
+      "latency_ms_ok": {
+        "p50": 31.6,
+        "p95": 74,
+        "p99": 143.8
+      },
+      "measured_seconds": 30.05,
+      "pg_activity_avg": {
+        "active:Client/ClientRead": 0.19,
+        "active:IO/DataFileRead": 0.19,
+        "active:IO/WALSync": 0.94,
+        "active:LWLock/WALWrite": 5.19,
+        "idle:Client/ClientRead": 0.56,
+        "active:cpu": 0.56,
+        "idle:cpu": 0.38
+      },
+      "requests": 12955,
+      "requests_sent_incl_warmup": {
+        "cross": 740,
+        "ok": 14075,
+        "revoked": 733
+      },
+      "rps_timeline": [
+        396,
+        522,
+        540,
+        278,
+        208,
+        326,
+        544,
+        497,
+        511,
+        545,
+        524,
+        498,
+        534,
+        479,
+        329,
+        199,
+        303,
+        467,
+        462,
+        427,
+        537,
+        237,
+        295,
+        440,
+        428,
+        462,
+        508,
+        471,
+        475,
+        501
+      ],
+      "rps": 431.1,
+      "rps_ok": 389.9,
+      "audit": {
+        "coverage": 1,
+        "disclosure_served": 14075,
+        "query_received": 15548,
+        "query_rejected": 1473,
+        "requests_answered": 15548,
+        "spine_rows_per_request": 2,
+        "spine_rows_total": 31096
+      },
+      "pass": true,
+      "wal": {
+        "bytes_per_request": 4386,
+        "checkpoints": 0,
+        "mb_total": 65
+      }
+    },
+    {
+      "concurrency": 32,
+      "counts": {
+        "cross": 622,
+        "ok": 12253,
+        "revoked": 644
+      },
+      "cpu_pg_container_pct": 96.2,
+      "cpu_server_pct": 53.6,
+      "error_example": null,
+      "error_rate": 0,
+      "errors": 0,
+      "latency_ms_all": {
+        "p50": 63.6,
+        "p95": 124.3,
+        "p99": 195.2
+      },
+      "latency_ms_ok": {
+        "p50": 64.5,
+        "p95": 126.7,
+        "p99": 198.5
+      },
+      "measured_seconds": 30,
+      "pg_activity_avg": {
+        "active:cpu": 0.31,
+        "active:IO/WALSync": 0.94,
+        "active:LWLock/WALWrite": 5.06,
+        "active:Client/ClientRead": 0.25,
+        "idle:Client/ClientRead": 1.13,
+        "active:IO/DataFileRead": 0.06,
+        "active:LWLock/ProcArray": 0.06,
+        "idle:cpu": 0.19
+      },
+      "requests": 13519,
+      "requests_sent_incl_warmup": {
+        "cross": 723,
+        "ok": 14067,
+        "revoked": 736
+      },
+      "rps_timeline": [
+        520,
+        483,
+        497,
+        416,
+        480,
+        447,
+        421,
+        445,
+        481,
+        569,
+        507,
+        477,
+        212,
+        386,
+        530,
+        493,
+        487,
+        484,
+        465,
+        591,
+        565,
+        511,
+        462,
+        374,
+        531,
+        512,
+        407,
+        233,
+        187,
+        344
+      ],
+      "rps": 450.6,
+      "rps_ok": 408.4,
+      "audit": {
+        "coverage": 1,
+        "disclosure_served": 14067,
+        "query_received": 15526,
+        "query_rejected": 1459,
+        "requests_answered": 15526,
+        "spine_rows_per_request": 2,
+        "spine_rows_total": 31052
+      },
+      "pass": true,
+      "wal": {
+        "bytes_per_request": 4304,
+        "checkpoints": 0,
+        "mb_total": 63.7
+      }
+    },
+    {
+      "concurrency": 64,
+      "counts": {
+        "cross": 628,
+        "ok": 12012,
+        "revoked": 592
+      },
+      "cpu_pg_container_pct": 95.3,
+      "cpu_server_pct": 49.5,
+      "error_example": null,
+      "error_rate": 0,
+      "errors": 0,
+      "latency_ms_all": {
+        "p50": 128.6,
+        "p95": 201.6,
+        "p99": 409.3
+      },
+      "latency_ms_ok": {
+        "p50": 130.1,
+        "p95": 208,
+        "p99": 445.3
+      },
+      "measured_seconds": 30,
+      "pg_activity_avg": {
+        "active:IO/WALSync": 0.94,
+        "active:LWLock/WALWrite": 5.06,
+        "idle:Client/ClientRead": 0.88,
+        "idle:cpu": 0.19,
+        "active:cpu": 0.56,
+        "idle:LWLock/WALWrite": 0.06,
+        "active:IO/DataFileRead": 0.31
+      },
+      "requests": 13232,
+      "requests_sent_incl_warmup": {
+        "cross": 737,
+        "ok": 14193,
+        "revoked": 695
+      },
+      "rps_timeline": [
+        442,
+        484,
+        491,
+        546,
+        554,
+        297,
+        21,
+        142,
+        402,
+        464,
+        503,
+        472,
+        480,
+        514,
+        229,
+        429,
+        532,
+        503,
+        476,
+        514,
+        432,
+        490,
+        480,
+        497,
+        503,
+        473,
+        513,
+        533,
+        420,
+        396
+      ],
+      "rps": 441,
+      "rps_ok": 400.4,
+      "audit": {
+        "coverage": 1,
+        "disclosure_served": 14193,
+        "query_received": 15625,
+        "query_rejected": 1432,
+        "requests_answered": 15625,
+        "spine_rows_per_request": 2,
+        "spine_rows_total": 31250
+      },
+      "pass": true,
+      "wal": {
+        "bytes_per_request": 4259,
+        "checkpoints": 0,
+        "mb_total": 63.5
+      }
+    },
+    {
+      "concurrency": 128,
+      "counts": {
+        "cross": 569,
+        "ok": 10991,
+        "revoked": 607
+      },
+      "cpu_pg_container_pct": 94.6,
+      "cpu_server_pct": 51.5,
+      "error_example": null,
+      "error_rate": 0,
+      "errors": 0,
+      "latency_ms_all": {
+        "p50": 263.7,
+        "p95": 605.2,
+        "p99": 1347.8
+      },
+      "latency_ms_ok": {
+        "p50": 268.7,
+        "p95": 608.9,
+        "p99": 1389.1
+      },
+      "measured_seconds": 30.01,
+      "pg_activity_avg": {
+        "active:IO/WALSync": 0.94,
+        "active:LWLock/WALWrite": 6.31,
+        "active:IO/DataFileRead": 0.06,
+        "idle:Client/ClientRead": 0.25,
+        "active:cpu": 0.25,
+        "idle:cpu": 0.13,
+        "active:IO/WALWrite": 0.06
+      },
+      "requests": 12167,
+      "requests_sent_incl_warmup": {
+        "cross": 693,
+        "ok": 13403,
+        "revoked": 734
+      },
+      "rps_timeline": [
+        93,
+        79,
+        187,
+        126,
+        463,
+        462,
+        548,
+        533,
+        523,
+        440,
+        465,
+        155,
+        540,
+        462,
+        305,
+        232,
+        346,
+        455,
+        475,
+        531,
+        488,
+        465,
+        466,
+        452,
+        449,
+        465,
+        507,
+        511,
+        494,
+        450
+      ],
+      "rps": 405.5,
+      "rps_ok": 366.3,
+      "audit": {
+        "coverage": 1,
+        "disclosure_served": 13403,
+        "query_received": 14830,
+        "query_rejected": 1427,
+        "requests_answered": 14830,
+        "spine_rows_per_request": 2,
+        "spine_rows_total": 29660
+      },
+      "pass": false,
+      "wal": {
+        "bytes_per_request": 4285,
+        "checkpoints": 0,
+        "mb_total": 60.6
+      }
+    }
+  ],
+  "warmup_seconds": 5
+}

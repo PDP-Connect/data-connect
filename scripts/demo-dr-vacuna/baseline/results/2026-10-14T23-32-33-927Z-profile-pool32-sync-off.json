@@ -1,0 +1,95 @@
+{
+  "deny_ratio": 0.09257544899092761,
+  "grants": 980200,
+  "label": "profile-pool32-sync-off",
+  "stage_seconds": 30,
+  "stages": [
+    {
+      "concurrency": 8,
+      "counts": {
+        "cross": 1048,
+        "ok": 21301,
+        "revoked": 1122
+      },
+      "cpu_pg_container_pct": 214.4,
+      "cpu_server_pct": 89.4,
+      "error_example": null,
+      "error_rate": 0,
+      "errors": 0,
+      "latency_ms_all": {
+        "p50": 9.1,
+        "p95": 18.1,
+        "p99": 26.1
+      },
+      "latency_ms_ok": {
+        "p50": 9.3,
+        "p95": 18.3,
+        "p99": 26.2
+      },
+      "measured_seconds": 30,
+      "pg_activity_avg": {
+        "idle:Client/ClientRead": 6.75,
+        "active:cpu": 0.69,
+        "active:Client/ClientRead": 0.38,
+        "active:IO/DataFileRead": 0.44,
+        "idle:cpu": 0.56
+      },
+      "requests": 23471,
+      "requests_sent_incl_warmup": {
+        "cross": 1151,
+        "ok": 23231,
+        "revoked": 1211
+      },
+      "rps_timeline": [
+        770,
+        840,
+        813,
+        591,
+        778,
+        1035,
+        878,
+        787,
+        757,
+        997,
+        678,
+        871,
+        613,
+        777,
+        667,
+        621,
+        787,
+        619,
+        794,
+        859,
+        852,
+        945,
+        708,
+        726,
+        688,
+        980,
+        863,
+        730,
+        787,
+        656
+      ],
+      "rps": 782.3,
+      "rps_ok": 709.9,
+      "audit": {
+        "coverage": 1,
+        "disclosure_served": 23231,
+        "query_received": 25593,
+        "query_rejected": 2362,
+        "requests_answered": 25593,
+        "spine_rows_per_request": 2,
+        "spine_rows_total": 51186
+      },
+      "pass": true,
+      "wal": {
+        "bytes_per_request": 15703,
+        "checkpoints": 1,
+        "mb_total": 383.3
+      }
+    }
+  ],
+  "warmup_seconds": 3
+}
