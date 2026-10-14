@@ -4587,7 +4587,8 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
         actor_type: "runtime",
         data: {
           checkpoint_mode: "checkpointed_streaming",
-          cursor,
+          // Audit fact only; the commit of this cursor failed (#76).
+          ...cursorAuditFact(cursor),
           error_message: err instanceof Error ? err.message : String(err),
           grant_id: grantId,
           source: runSource,

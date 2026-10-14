@@ -10,6 +10,7 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { cursorAuditFact } from "../runtime/cursor-audit-fact.ts";
 import { runConnector } from "../runtime/index.ts";
 import { parsePendingConsentRequestUri, registerConnector } from "../server/auth.ts";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
@@ -7397,7 +7398,11 @@ rl.on('line', (line) => {
       );
       assert.ok(commitFailedEvent, "run timeline should include run.state_commit_failed");
       assert.equal(commitFailedEvent.stream_id, "other_items");
-      assert.deepEqual(commitFailedEvent.data?.cursor, { cursor: "other_items_cursor_partial_commit" });
+      assert.equal("cursor" in (commitFailedEvent.data ?? {}), false, "commit-failed event must not embed the full cursor");
+      assert.deepEqual(
+        { cursor_bytes: commitFailedEvent.data?.cursor_bytes, cursor_sha256: commitFailedEvent.data?.cursor_sha256 },
+        cursorAuditFact({ cursor: "other_items_cursor_partial_commit" })
+      );
       assert.equal(commitFailedEvent.data?.state_streams_staged, 2);
       assert.equal(commitFailedEvent.data?.state_streams_committed, 1);
       assert.match(String(commitFailedEvent.data?.error_message ?? ""), TOP_LEVEL_REGEX_90);

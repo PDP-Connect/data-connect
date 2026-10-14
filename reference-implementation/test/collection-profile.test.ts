@@ -3086,7 +3086,10 @@ rl.on('line', (line) => {
         const [firstCommitFailed] = commitFailedEvents;
         assert.ok(firstCommitFailed, "expected one commit-failed event");
         assert.equal(firstCommitFailed.stream_id, "other_items");
-        assert.deepEqual(firstCommitFailed.data.cursor, { cursor: "other_items_cursor_partial_commit" });
+        assert.equal(
+          eventCursorKey(firstCommitFailed),
+          cursorEventKey("other_items", "other_items_cursor_partial_commit")
+        );
         assert.equal(firstCommitFailed.data.state_streams_staged, 2);
         assert.equal(firstCommitFailed.data.state_streams_committed, 1);
         // biome-ignore lint/performance/useTopLevelRegex: localized test assertion preserves its explicit contract.
