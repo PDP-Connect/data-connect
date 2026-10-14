@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
+import { createServer } from "node:http";
 import { test } from "node:test";
 
 import { type QueryParams, RsClient } from "../src/rs-client.ts";
@@ -50,6 +51,32 @@ test("attaches bearer token and forwards query params", async () => {
   assert.equal(url.searchParams.get("filter"), "amount>100");
   const headers = call.init?.headers as Record<string, string> | undefined;
   assert.equal(headers?.Authorization, "Bearer scoped-abc");
+});
+
+test("requires a bearer before a custom network fetch can be used", async () => {
+  let echoRequests = 0;
+  const echoServer = createServer((request, response) => {
+    echoRequests += 1;
+    response.setHeader("content-type", "application/json");
+    response.end(JSON.stringify({ authorization: request.headers.authorization ?? null }));
+  });
+  await new Promise<void>((resolve) => echoServer.listen(0, "127.0.0.1", resolve));
+  const address = echoServer.address();
+  assert.ok(address && typeof address === "object");
+  const fetch = (input: string | URL | Request, init?: RequestInit) => globalThis.fetch(input, init);
+
+  try {
+    assert.throws(
+      () => new RsClient({
+        fetch,
+        providerUrl: `http://127.0.0.1:${address.port}`,
+      } as ConstructorParameters<typeof RsClient>[0]),
+      /RsClient requires accessToken/,
+    );
+    assert.equal(echoRequests, 0, "a tokenless RsClient cannot make an echo request");
+  } finally {
+    await new Promise<void>((resolve, reject) => echoServer.close((error) => (error ? reject(error) : resolve())));
+  }
 });
 
 test("rejects object-valued query params instead of JSON-stringifying them", async () => {

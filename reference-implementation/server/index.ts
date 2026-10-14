@@ -9,6 +9,7 @@
  */
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync, readFileSync, renameSync } from "node:fs";
+import { Socket } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { isMainModule } from "../scripts/is-main-module.js";
@@ -227,6 +228,12 @@ import {
   createRemoteIntrospector,
   type IntrospectionCallerCredentials,
 } from "./introspection-http.ts";
+import {
+  getDispatchEntry,
+  getEventTokenId,
+  getRequestAbortSignal,
+  markDispatchedTokenInfo,
+} from "./internal-dispatch.ts";
 import {
   buildAuthorizationServerMetadata,
   buildClientEventSubscriptionsCapability,
@@ -1801,8 +1808,7 @@ async function emitQueryRejected(context: QueryContext, req: ReqLike, err: ApiEr
   if (Object.hasOwn(context, "sourceDescriptor")) {
     data.source = context.sourceDescriptor ?? null;
   }
-  const authHeader = req.headers?.authorization;
-  const tokenId = typeof authHeader === "string" ? authHeader.slice(7) : null;
+  const tokenId = getEventTokenId(req.headers?.authorization, context.tokenInfo);
   await emitSpineEvent({
     actor_id: context.actorId ?? null,
     actor_type: context.actorType ?? null,
@@ -1836,8 +1842,7 @@ async function emitQueryReceived(context: QueryContext, req: ReqLike) {
   if (Object.hasOwn(context, "sourceDescriptor")) {
     data.source = context.sourceDescriptor ?? null;
   }
-  const authHeader = req.headers?.authorization;
-  const tokenId = typeof authHeader === "string" ? authHeader.slice(7) : null;
+  const tokenId = getEventTokenId(req.headers?.authorization, context.tokenInfo);
   await emitSpineEvent({
     actor_id: context.actorId ?? null,
     actor_type: context.actorType ?? null,
@@ -1916,8 +1921,7 @@ async function emitStateEvent(
   status: string,
   data: Record<string, unknown> = {}
 ) {
-  const authHeader = req.headers?.authorization;
-  const tokenId = typeof authHeader === "string" ? authHeader.slice(7) : null;
+  const tokenId = getEventTokenId(req.headers?.authorization, req.tokenInfo);
   await emitSpineEvent({
     actor_id: context.actorId ?? null,
     actor_type: context.actorType ?? null,
@@ -2007,8 +2011,7 @@ async function emitMutationEvent(
   status: string,
   data: Record<string, unknown> = {}
 ) {
-  const authHeader = req.headers?.authorization;
-  const tokenId = typeof authHeader === "string" ? authHeader.slice(7) : null;
+  const tokenId = getEventTokenId(req.headers?.authorization, req.tokenInfo);
   await emitSpineEvent({
     actor_id: context.actorId ?? null,
     actor_type: context.actorType ?? null,
@@ -2072,13 +2075,31 @@ async function requireTokenWithIntrospection(
   next: () => void,
   introspectToken: (token: string) => Promise<TokenInfo>
 ) {
+  const requestSignal = getRequestAbortSignal(req.raw);
+  if (requestSignal?.aborted) {
+    return;
+  }
   const auth = req.headers?.authorization;
-  if (!auth || typeof auth !== "string" || !auth.startsWith("Bearer ")) {
+  const isInjectRequest = !(req.raw?.socket instanceof Socket);
+  const bearer = typeof auth === "string" && auth.startsWith("Bearer ") ? auth.slice(7) : undefined;
+  const dispatchEntry = isInjectRequest && bearer ? getDispatchEntry(bearer) : undefined;
+  if (!dispatchEntry && (!auth || typeof auth !== "string" || !auth.startsWith("Bearer "))) {
     setProtectedResourceMetadataChallenge(res);
     return pdppError(res, 401, "authentication_error", "Missing Bearer token");
   }
-  const token = auth.slice(7);
-  const info = await introspectToken(token);
+  const info: TokenInfo = dispatchEntry
+    ? structuredClone(dispatchEntry.info as TokenInfo)
+    : await introspectToken((auth as string).slice(7));
+  if (dispatchEntry) {
+    markDispatchedTokenInfo(info);
+  }
+  if (requestSignal?.aborted) {
+    return;
+  }
+  if (dispatchEntry && typeof info.exp === "number" && info.exp <= Math.floor(Date.now() / 1000)) {
+    info.active = false;
+    info.inactive_reason ??= "grant_expired";
+  }
   if (info.active && info.pdpp_token_kind === "client" && req.params?.stream) {
     const requestedConnection = resolveRequestConnectionId(req.query ?? {}).connectionId;
     try {
@@ -7474,6 +7495,7 @@ function buildRsApp(opts: ServerOpts = {}) {
   mountRsHostedMcp(app, {
     createPackageProfile,
     createRsClient,
+    dispatchApp: app,
     explicitResource,
     getGrantPackageAccess,
     handleStreamableHttpRequest,
