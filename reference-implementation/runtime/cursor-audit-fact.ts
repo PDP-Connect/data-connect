@@ -4,14 +4,18 @@
 /**
  * Compact, bounded audit fact for a connector cursor.
  *
- * `run.state_staged` and `run.state_advanced` spine events used to embed the
- * full connector cursor (`data.cursor`) at every checkpoint. Cursors can reach
+ * `run.state_staged`, `run.state_advanced` and `run.state_commit_failed` spine
+ * events used to embed the full connector cursor (`data.cursor`). Cursors can reach
  * megabytes, so the append-only spine grew without bound (issue #76). The
  * spine is an audit record, not the state store: the authoritative cursor is
  * persisted through `PUT /v1/state/<connector>` and read back from there, never
  * from spine events. These events therefore record only a digest and a size,
  * which still lets an auditor tell "same cursor" from "different cursor" and
  * see its magnitude.
+ *
+ * An absent cursor and a `null` cursor produce the same fact; the event does
+ * not distinguish them. Input is parsed JSON, so boxed primitives and other
+ * non-JSON values are not expected.
  *
  * Old events (full `cursor`) remain in storage. Readers must tolerate both
  * shapes: `cursor` present (legacy) or `cursor_sha256` + `cursor_bytes`.
