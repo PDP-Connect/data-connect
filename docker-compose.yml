@@ -1,3 +1,12 @@
+# Bounded container logs. Docker's default json-file driver never rotates, so a
+# chatty service can fill the host disk. Override with PDPP_LOG_MAX_SIZE and
+# PDPP_LOG_MAX_FILE.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: ${PDPP_LOG_MAX_SIZE:-10m}
+    max-file: "${PDPP_LOG_MAX_FILE:-5}"
+
 services:
   reference:
     # The default GHCR image (and the `reference` build target below) is this
@@ -6,6 +15,7 @@ services:
     # official stack under deploy/docker; this development/reference service
     # keeps browser-backed collection on the workspace collector instead.
     image: ${PDPP_REFERENCE_IMAGE:-ghcr.io/pdp-connect/data-connect/reference:main}
+    logging: *default-logging
     build:
       context: .
       dockerfile: deploy/docker/Dockerfile
@@ -223,6 +233,7 @@ services:
   # PDPP_STORAGE_BACKEND=postgres and PDPP_DATABASE_URL paired.
   postgres:
     image: ${PDPP_POSTGRES_IMAGE:-pgvector/pgvector:pg16}
+    logging: *default-logging
     environment:
       POSTGRES_USER: ${PDPP_POSTGRES_USER:-pdpp}
       POSTGRES_PASSWORD: ${PDPP_POSTGRES_PASSWORD:-pdpp}
@@ -280,6 +291,7 @@ services:
   # path-layout differences this compose reconciles).
   web:
     image: ${PDPP_WEB_IMAGE:-ghcr.io/pdp-connect/data-connect/console:main}
+    logging: *default-logging
     build:
       context: ./apps/console
       dockerfile: Dockerfile
