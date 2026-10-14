@@ -206,7 +206,7 @@ function legacyRecordData(key: string, stream: string, instanceId: string): Row 
 
 /**
  * Writes the legacy registration, instances, per-instance state (over the
- * owner state API), records (over the owner ingest API) and a grant.
+ * owner state API), records (over the owner ingest API) and a grant row (inserted directly; no client-token read goes through it).
  * Paused instances are paused only after their data exists, because writes
  * need an active instance.
  */
@@ -358,6 +358,15 @@ async function storedManifest(backend: LegacyBackend, key: string): Promise<Row>
   return (typeof row.manifest === "string" ? JSON.parse(row.manifest) : row.manifest) as Row;
 }
 
+async function assertPausedReadRefused(urls: LegacyUrls): Promise<void> {
+  const read = await fetchJson(
+    `${urls.rsUrl}/v1/streams/repositories/records?connector_id=github&connector_instance_id=cin_github_paused`,
+    { headers: { Authorization: `Bearer ${urls.ownerToken}` } }
+  );
+  assert.equal(read.status, 400, JSON.stringify(read.body));
+  assert.equal(read.body.error.code, "connector_instance_inactive");
+}
+
 /** `/update` over HTTP on legacy github with an active and a paused instance. */
 export async function assertUpdatePreservesOwnerRows(backend: LegacyBackend, dataDir: string, databaseUrl?: string) {
   const catalog = fakeCatalogFor(catalogGithubProfile());
@@ -374,6 +383,7 @@ export async function assertUpdatePreservesOwnerRows(backend: LegacyBackend, dat
       "repositories"
     );
     const before = await snapshotOwnerRows(backend);
+    await assertPausedReadRefused(urls);
     const manifestBefore = await storedManifest(backend, "github");
     assert.equal(manifestBefore.version, "0.5.0");
     assert.equal((manifestBefore.streams as unknown[]).length, 7);
@@ -418,8 +428,9 @@ export async function assertUpdatePreservesOwnerRows(backend: LegacyBackend, dat
     assert.equal((await storedManifest(backend, "github")).version, "0.5.1");
 
     // The active instance's records stay readable over HTTP. The paused instance's rows
-    // are covered by the storage snapshot above; owner reads of a paused instance are
-    // refused with connector_instance_inactive, before and after.
+    // are covered by the storage snapshot above; its owner reads are refused the same way
+    // as before the update (stores/connector-instance-store.ts, same at c82718d4).
+    await assertPausedReadRefused(urls);
     const read = await fetchJson(
       `${urls.rsUrl}/v1/streams/repositories/records?connector_id=github&connector_instance_id=cin_github_active`,
       { headers: { Authorization: `Bearer ${urls.ownerToken}` } }
@@ -458,7 +469,11 @@ export async function assertUpdateWithoutCatalogEntryCreatesNothing(
       headers: { Authorization: `Bearer ${urls.ownerToken}`, "Content-Type": "application/json" },
       method: "POST",
     });
-    assert.ok(updated.status >= 400, `expected a failure, got ${updated.status}`);
+    // Pinned as observed: the service throws a plain Error, which handleError maps to 500 api_error.
+    // A 4xx would be the better contract; this pin makes a change in either direction visible.
+    assert.equal(updated.status, 500, JSON.stringify(updated.body));
+    assert.equal(updated.body.error.code, "api_error");
+    assert.equal(updated.body.error.message, "Connector has no verified update target.");
     assert.equal(registrations, 0, "a failed update must not register a manifest");
     assert.deepEqual(await snapshotOwnerRows(backend), before);
     assert.deepEqual(await service.status(), [], "nothing was installed");

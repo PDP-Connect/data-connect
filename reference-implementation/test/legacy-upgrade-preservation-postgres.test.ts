@@ -24,6 +24,7 @@ import {
   assertUpdateWithoutCatalogEntryCreatesNothing,
   postgresBackend,
 } from "./helpers/legacy-upgrade.ts";
+import { assertSlackPathPreservesOwnerData } from "./helpers/legacy-upgrade-slack.ts";
 
 const DATABASE_URL = dedicatedPostgresTestUrl(process.env.PDPP_TEST_POSTGRES_URL);
 const OWNER_TABLES = "TRUNCATE connectors, connector_instances, grants, records, connector_state CASCADE";
@@ -59,5 +60,13 @@ test("Postgres: /update with a key that has no catalog entry fails and creates n
 }, async () => {
   await withFreshPostgres("update-missing", (dataDir, databaseUrl) =>
     assertUpdateWithoutCatalogEntryCreatesNothing(postgresBackend, dataDir, databaseUrl)
+  );
+});
+
+test("Postgres: registering slack 0.7.1 over a c82718d4 slack 0.6.0 registration keeps ids, streams, state, old records and grant rows", {
+  skip: SKIP,
+}, async () => {
+  await withFreshPostgres("slack", (_dataDir, databaseUrl) =>
+    assertSlackPathPreservesOwnerData(postgresBackend, databaseUrl)
   );
 });

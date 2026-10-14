@@ -6,11 +6,12 @@
  *
  * c82718d4 registered `signal` from its bundled manifest. Signal has no
  * local-collector Collection Profile at the target, so no profile pin exists
- * for it. An already-enrolled local-device source with an active connector
- * instance must still authorize pushes and ingest records against the
- * DB-registered manifest (ref-device-exporters.ts: enrollment falls back to
- * the registered manifest; compileDeviceAttemptContext reads
- * ctx.getConnectorManifest, not a profile).
+ * for it. This test registers the O-era stored manifest, enrolls a device at
+ * the target for that connector (the enroll route falls back to the
+ * registered manifest), and shows pushes are authorized and ingested against
+ * the DB-registered manifest (compileDeviceAttemptContext reads
+ * ctx.getConnectorManifest, not a profile). It does NOT seed an O-era device
+ * row or token: a device enrolled at c82718d4 is not reproduced byte for byte.
  */
 
 import assert from "node:assert/strict";
@@ -25,24 +26,18 @@ import { COLLECTOR_PROTOCOL_VERSION } from "../server/collector-protocol.ts";
 import { getDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
 import { readLocalCollectorProfile } from "../server/local-collector-profiles.ts";
+import { closeServer, fetchJson, type TestServer } from "./helpers/legacy-upgrade.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const NOW = "2026-05-18T12:00:00.000Z";
 const PROTOCOL_HEADERS = { "X-PDPP-Collector-Protocol": COLLECTOR_PROTOCOL_VERSION };
 
-type TestServer = Awaited<ReturnType<typeof startServer>> & {
-  asServer: { close: (cb: (err?: Error) => void) => void; closeAllConnections: () => void };
-  rsServer: { close: (cb: (err?: Error) => void) => void; closeAllConnections: () => void };
-};
-
-async function postJson(url: string, body: unknown, headers: Record<string, string> = {}) {
-  const response = await fetch(url, {
+function postJson(url: string, body: unknown, headers: Record<string, string> = {}) {
+  return fetchJson(url, {
     body: JSON.stringify(body),
     headers: { Accept: "application/json", "Content-Type": "application/json", ...headers },
     method: "POST",
   });
-  const text = await response.text();
-  return { body: text ? JSON.parse(text) : null, status: response.status };
 }
 
 function canonicalValue(value: unknown): unknown {
@@ -67,7 +62,7 @@ function bodyHash(records: unknown): string {
     .digest("hex");
 }
 
-test("an enrolled device pushes a signal-style connector with no profile pin against the registered manifest", async () => {
+test("a device enrolled at the target pushes a signal-style connector with no profile pin against the registered manifest", async () => {
   assert.equal(readLocalCollectorProfile("signal"), null, "signal must have no Collection Profile pin for this test");
   const server = (await startServer({
     asPort: 0,
@@ -144,18 +139,14 @@ test("an enrolled device pushes a signal-style connector with no profile pin aga
       { ...batch, batch_id: "legacy-signal-2", batch_seq: 2, body_hash: bodyHash(bad), records: bad },
       { Authorization: `Bearer ${device.device_token}`, ...PROTOCOL_HEADERS }
     );
-    assert.ok(rejected.status >= 400, `expected rejection, got ${rejected.status}: ${JSON.stringify(rejected.body)}`);
+    assert.equal(rejected.status, 400, JSON.stringify(rejected.body));
+    assert.equal(rejected.body.error.code, "invalid_request");
+    assert.equal(rejected.body.error.message, "records[0].stream is not declared by the connector manifest");
     assert.equal(
       getDb().prepare("SELECT COUNT(*) AS n FROM records WHERE record_key = 'msg-2'").get()?.n,
       0
     );
   } finally {
-    server.schedulerManager?.stop?.();
-    server.asServer.closeAllConnections();
-    server.rsServer.closeAllConnections();
-    await Promise.allSettled([
-      new Promise<void>((resolve) => server.asServer.close(() => resolve())),
-      new Promise<void>((resolve) => server.rsServer.close(() => resolve())),
-    ]);
+    await closeServer(server);
   }
 });

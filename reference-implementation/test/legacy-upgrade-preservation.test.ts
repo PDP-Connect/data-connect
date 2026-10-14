@@ -7,14 +7,14 @@
  * An instance upgraded from RI commit c82718d4 holds connectors registered
  * from the old bundled package (`connectors.connector_id` is the manifest's
  * `connector_key`, e.g. `apple_contacts` with an underscore), plus connector
- * instances (some paused), per-instance state, grants and records. At the
+ * instances (some paused), per-instance state, grant rows and records. At the
  * target, catalog connectors run only from verified OCI installs or
  * developer-local sources. These tests prove the upgrade paths keep that
  * owner data in place:
  *
  *   1. A developer-local source preserves an underscore legacy id: select is
  *      accepted, the run-path resolver finds the source under the stored id,
- *      no hyphen registration appears, and instance/state/grant/record rows
+ *      no hyphen registration appears, and instance/state/grant-row/record rows
  *      do not change.
  *   2. `POST /v1/owner/connector-install/update` over HTTP on a
  *      legacy-registered connector changes only the manifest and
@@ -131,6 +131,7 @@ test("a developer-local source preserves the underscore legacy id apple_contacts
       );
 
       // Add and select neither re-register, hit the catalog, nor touch owner rows.
+      // The two counter checks are regression guards: they hold by construction today.
       assert.equal(registrations, 0, "local-source add/select must not register a manifest");
       assert.equal(catalogLoads, 0, "local-source add/select must not read the catalog");
       const after = await snapshotOwnerRows(sqliteBackend);
