@@ -23,11 +23,11 @@ export function formatRetainedUntil(until: RetainedUntil | null): string {
   return "end unknown";
 }
 
-/** The grant's retention ceiling as the owner reads it. */
+/** How long the app may keep using the data, as the owner reads it. */
 export function retentionCeilingText(maxDuration: string | null): string {
   return maxDuration
-    ? `each record's retention ceiling (the app's first acquisition of the record plus ${maxDuration})`
-    : "no time limit, because the grant states no retention limit";
+    ? `until each record's retention ceiling (the app's first acquisition of the record plus ${maxDuration})`
+    : "with no time limit, because the grant states no retention limit";
 }
 
 export interface ErasureFacts {
@@ -80,7 +80,7 @@ export function erasureStatements(input: {
     `The app must stop using covered data as soon as practicable after it receives this request: by ${stopUse} if it receives it by then, and at once if it receives it later. It must delete covered data within ${days} days of receiving the request.`,
     "The app learns of this request only when it gets an answer from your server. While the app runs, it tries daily to check with your server, but a try is not a received request. An app that is not running does not check, and learns of this request only when it next runs and checks.",
     "If your server is offline, the app cannot learn of the request until your server answers, and there is no maximum delay.",
-    `If your server never answers again before the app receives the request, the app may keep using the data for the approved purpose until ${retentionCeilingText(input.retentionMaxDuration)}.`,
+    `If your server never answers again before the app receives the request, the app may keep using the data for the approved purpose ${retentionCeilingText(input.retentionMaxDuration)}.`,
     "If the app offers deletion, deleting inside it binds the app at once. That is an instruction, not instant physical deletion. These are duties of conforming apps, not proof of remote deletion. Legally required copies and the stated exclusions may remain.",
   ];
 }

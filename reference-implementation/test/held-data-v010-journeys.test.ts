@@ -248,11 +248,9 @@ describe("J1: AS offline while the app runs", () => {
  *     the app exists when the grant states no retention (400 days walked). Who is surprised: the
  *     patient and the clinician. The patient pressed delete and was warned; the clinician's app
  *     holds a refused-read grant and keeps serving the data, lawfully.
- *   - Two wording defects in the AS's statements (prototype, not Core): with no retention limit the
- *     sentence reads "...for the approved purpose until no time limit, because the grant states no
- *     retention limit" (Core's example: "or with no time limit if it stated none"); and every
- *     statement says the app "tries daily", though after one failed attempt the text makes it try
- *     hourly (1306), which is 24 times as many requests as the owner is told.
+ *   - Every statement says the app "tries daily", as Core's own example does (1350), though after one
+ *     failed attempt the text makes it try hourly (1306), which is 24 times as many requests as the
+ *     owner is told. (A second wording defect, "until no time limit", is fixed in the prototype.)
  * ---------------------------------------------------------------------------------------------- */
 describe("J2: the owner deletes, then the AS dies for good", () => {
   const required = [
@@ -336,10 +334,8 @@ describe("J2: the owner deletes, then the AS dies for good", () => {
       assert.equal(erased.erasures[0].stages.latest, "requested");
       const text = (erased.erasures[0].statements as string[]).join("\n");
       for (const r of required) assert.match(text, r);
-      assert.match(text, /no time limit, because the grant states no retention limit/);
-      // Prototype wording defect: the sentence reads "...for the approved purpose until no time limit, because...".
-      // Core's example says "or with no time limit if it stated none".
-      assert.match(text, /until no time limit/, "UNVERIFIED-BY-DESIGN: records the garbled wording as it is");
+      assert.match(text, /for the approved purpose with no time limit, because the grant states no retention limit/);
+      assert.doesNotMatch(text, /until no time limit/, "the garbled wording is fixed");
       w.outages.push([w.clock.now, Infinity]);
       await w.advance(t0 + 400 * DAY);
       assert.equal(w.useLog.every((u) => u.ok), true, "400 days of use, none refused");
