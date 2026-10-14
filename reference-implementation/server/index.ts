@@ -579,6 +579,7 @@ import { registerStreamingRoutes } from "./streaming/routes.ts";
 import { createRunTargetRegistry } from "./streaming/run-target-registry.ts";
 import { createStreamingSessionStore } from "./streaming/sessions.ts";
 import { buildLogger, createApp } from "./transport.ts";
+import { createReadReceiptHookFromEnv } from "./read-receipts.ts";
 import {
   buildClientAuthMiddleware,
   confidentialClientAuthEnabled,
@@ -7142,6 +7143,8 @@ function buildRsApp(opts: ServerOpts = {}) {
   // blob-read route (`GET /v1/blobs/:blob_id`) mounts after `POST /v1/blobs`
   // below, preserving the original registration order.
   const rsReadContext = {
+    // Signed read receipts on single-record reads; null unless PDPP_READ_RECEIPTS=1.
+    readReceipts: createReadReceiptHookFromEnv(),
     AmbiguousConnectionError,
     aggregateRecordsAcrossBindings,
     buildClientSourceDescriptor,

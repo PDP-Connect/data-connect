@@ -79,6 +79,7 @@ import {
 } from "../../operations/rs-streams-list/index.ts";
 import { rejectUnsupportedClientQuery } from "../record-filters.ts";
 import type { MiddlewareHandler, RouteArg } from "./_route-contract.ts";
+import type { ReadReceiptHook } from "../read-receipts.ts";
 
 // Express-shaped surface, structurally typed to avoid pulling in the
 // transport's `.js` ambient types. Matches the pattern established in
@@ -233,6 +234,8 @@ type QueryContext = Record<string, unknown> & {
 // internal shape while still type-checking the wiring.
 export interface MountRsReadContext {
   AmbiguousConnectionError: AmbiguousConnectionErrorCtor;
+  /** Optional signed read receipts (server/read-receipts.ts, PDPP_READ_RECEIPTS). */
+  readReceipts?: ReadReceiptHook | null;
   aggregateRecordsAcrossBindings: (
     bindings: ReadRequestBinding[],
     stream: string,
@@ -2031,16 +2034,21 @@ export function mountRsRecordDetail(app: AppLike, ctx: MountRsReadContext): void
           tokenInfo,
           traceId,
         });
-        return res.json(
-          ctx.finalizeCanonicalEnvelope(
-            withRecordSourceIdentity(result.record, {
-              requestConnectionId: resolveRequestConnectionId(req.query),
-              sourceDescriptor,
-              storageBinding,
-            }),
-            req
-          )
+        const recordBody = ctx.finalizeCanonicalEnvelope(
+          withRecordSourceIdentity(result.record, {
+            requestConnectionId: resolveRequestConnectionId(req.query),
+            sourceDescriptor,
+            storageBinding,
+          }),
+          req
         );
+        // Read-receipt hook: signs over the exact serialized body it returns.
+        if (ctx.readReceipts && tokenInfo.pdpp_token_kind !== "owner") {
+          return res.json(
+            ctx.readReceipts.sign(res, { body: recordBody, grantId: tokenInfo.grant_id, requestId: queryId })
+          );
+        }
+        return res.json(recordBody);
       } catch (err) {
         if (queryContext) {
           await ctx.emitQueryReceived(queryContext, req);
