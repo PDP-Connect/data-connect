@@ -267,15 +267,15 @@ function buildRouteSchema(manifest: RouteManifest): Record<string, JsonValue> | 
 
 /**
  * Successful `/introspect` calls (one per authenticated RS request) and any
- * `GET`/`DELETE /mcp` (stream-listen and session probes the stateless hosted MCP
- * endpoint answers with 405, whatever the status) are housekeeping that a few
- * agent sessions can generate many times a second. Every other failure keeps
- * info-level detail.
+ * `GET`/`DELETE /mcp` answered 405 (stream-listen and session probes the stateless
+ * hosted MCP endpoint refuses) are housekeeping that a few
+ * agent sessions can generate many times a second. Auth failures (401, 403) and
+ * server errors on the same routes keep info-level detail.
  */
 function isHighFrequencyHousekeeping(method: string, url: string, statusCode: number): boolean {
   const path = url.split("?", 1)[0];
   if (path === "/mcp" && (method === "GET" || method === "DELETE")) {
-    return true;
+    return statusCode === 405;
   }
   return path === "/introspect" && statusCode < 400;
 }

@@ -54,6 +54,7 @@ async function sendWebResponse(
 
 test("SDK client does not reconnect-storm GET against the stateless endpoint", async () => {
 	const counts: Record<string, number> = {};
+	const getStatuses: number[] = [];
 	const server = createServer((req, res) => {
 		const { port } = server.address() as AddressInfo;
 		counts[req.method ?? "?"] = (counts[req.method ?? "?"] ?? 0) + 1;
@@ -64,7 +65,10 @@ test("SDK client does not reconnect-storm GET against the stateless endpoint", a
 					providerUrl: `http://127.0.0.1:${port}`,
 				}),
 			)
-			.then((response) => sendWebResponse(res, response))
+			.then((response) => {
+				if (req.method === "GET") getStatuses.push(response.status);
+				return sendWebResponse(res, response);
+			})
 			.catch(() => {
 				res.statusCode = 500;
 				res.end();
@@ -83,8 +87,8 @@ test("SDK client does not reconnect-storm GET against the stateless endpoint", a
 		await new Promise((resolve) => setTimeout(resolve, OBSERVE_MS));
 		assert.ok(tools.length > 0, "listTools returned tools");
 		assert.ok(
-			(counts.GET ?? 0) <= 1,
-			`GET count ${counts.GET ?? 0} over ${OBSERVE_MS}ms (all: ${JSON.stringify(counts)})`,
+			getStatuses.length === 1 && getStatuses[0] === 405,
+			`expected one GET answered 405, got ${JSON.stringify(getStatuses)} over ${OBSERVE_MS}ms (all: ${JSON.stringify(counts)})`,
 		);
 		assert.ok(
 			(counts.POST ?? 0) <= 6,

@@ -12,13 +12,21 @@ import { createApp } from "../server/transport.ts";
 // Their per-request completion record must not flood the info-level log, while
 // failures and ordinary traffic keep info-level detail.
 
+interface Req {
+	headers: Record<string, string | undefined>;
+}
+
 interface Res {
 	json: (body: unknown) => unknown;
 	status: (code: number) => Res;
 }
 
 async function completionLevels(
-	requests: { method: "GET" | "POST" | "DELETE"; url: string }[],
+	requests: {
+		method: "GET" | "POST" | "DELETE";
+		url: string;
+		headers?: Record<string, string>;
+	}[],
 ) {
 	const lines: { level: number; url?: string; statusCode?: number }[] = [];
 	const sink = new Writable({
@@ -28,8 +36,9 @@ async function completionLevels(
 		},
 	});
 	const app = createApp({ logger: pino({ level: "debug" }, sink) });
-	const reply = (status: number) => (_req: unknown, res: Res) =>
-		res.status(status).json({});
+	// `x-test-status` lets one request force a failure status on the same route.
+	const reply = (status: number) => (req: Req, res: Res) =>
+		res.status(Number(req.headers["x-test-status"] ?? status)).json({});
 	app.post("/introspect", reply(200));
 	app.get("/mcp", reply(405));
 	app.delete("/mcp", reply(405));
@@ -46,7 +55,7 @@ async function completionLevels(
 		.map((l) => ({ debug: l.level === DEBUG, url: l.url }));
 }
 
-test("successful /introspect and any GET/DELETE /mcp complete at debug; other requests stay at info", async () => {
+test("successful /introspect and 405 GET/DELETE /mcp complete at debug; other requests stay at info", async () => {
 	const out = await completionLevels([
 		{ method: "POST", url: "/introspect" },
 		{ method: "GET", url: "/mcp" },
@@ -62,5 +71,18 @@ test("successful /introspect and any GET/DELETE /mcp complete at debug; other re
 		{ debug: false, url: "/mcp" },
 		{ debug: false, url: "/v1/other" },
 		{ debug: false, url: "/v1/broken" },
+	]);
+});
+
+test("auth failures and server errors stay at info on the housekeeping routes", async () => {
+	const out = await completionLevels([
+		{ method: "GET", url: "/mcp", headers: { "x-test-status": "401" } },
+		{ method: "DELETE", url: "/mcp", headers: { "x-test-status": "500" } },
+		{ method: "POST", url: "/introspect", headers: { "x-test-status": "401" } },
+	]);
+	assert.deepEqual(out, [
+		{ debug: false, url: "/mcp" },
+		{ debug: false, url: "/mcp" },
+		{ debug: false, url: "/introspect" },
 	]);
 });
