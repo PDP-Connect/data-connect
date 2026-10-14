@@ -1,0 +1,116 @@
+{
+	"generated_file_notice": "Local-source layout build (scratch builder). Not signed. Rebuild with build-local-source.mjs.",
+	"builder": "build-local-source.mjs (esbuild settings copied from scripts/build-connector-oci-artifact.mjs)",
+	"connector_key": "spotify",
+	"connector_directory": "spotify",
+	"version": "0.1.0",
+	"source": {
+		"repository": "https://github.com/PDP-Connect/data-connectors",
+		"revision": "97536ad49467fba512ad300e0051df04215181bd",
+		"connector_path": "packages/polyfill-connectors/connectors/spotify"
+	},
+	"build_command": "node build-local-source.mjs --dcs <checkout> --connector spotify --connector-dir <checkout>/packages/polyfill-connectors/connectors/spotify --manifest <checkout>/packages/polyfill-connectors/manifests/spotify.json --contract <work>/dcs/scripts/connector-host-runtime-contract.mjs --expect-revision 97536ad49467fba512ad300e0051df04215181bd --out <work>/tmp/prov/spotify-97536/spotify",
+	"dependency_install": "node_modules is a symlink to another checkout's install; the third-party versions below are what was bundled",
+	"manifest_sha256": "sha256:84e19b1b3bd28c1be42d13128ab1e196073a893ed6342830fc3636d051ba1194",
+	"bundle_sha256": "sha256:7df5838bda8dcd69ddb48a90177c814dd538b29c0b73f95aef80ba42952e7ef1",
+	"esbuild_version": "0.28.2",
+	"externals_left": [
+		"dynamic-import:patchright",
+		"import-statement:node:crypto",
+		"import-statement:node:fs",
+		"import-statement:node:fs/promises",
+		"import-statement:node:os",
+		"import-statement:node:path",
+		"import-statement:node:readline",
+		"import-statement:node:url"
+	],
+	"source_inventory": [
+		{
+			"path": "packages/polyfill-connectors/connectors/spotify/index.ts",
+			"sha256": "sha256:e65aa68836b166dc0ed553f1e133d431c38f2fee7921c1fc9a598c96fd1136c7"
+		},
+		{
+			"path": "packages/polyfill-connectors/connectors/spotify/schemas.ts",
+			"sha256": "sha256:ed88683f679eb965212d8c74d5d3eeb49c5ea4b0fcc8dce8a5a846afad5a946e"
+		},
+		{
+			"path": "packages/polyfill-connectors/src/browser-handoff.ts",
+			"sha256": "sha256:ee209176da45a8828272964a9e39f454a69debc490c9d3716713ec1e63c5a38c"
+		},
+		{
+			"path": "packages/polyfill-connectors/src/browser-launch.ts",
+			"sha256": "sha256:96c467da65638eb632b557c0f81e060a4077ecd2cf67965e3ecf47a051cba415"
+		},
+		{
+			"path": "packages/polyfill-connectors/src/capture-redaction.ts",
+			"sha256": "sha256:ea99cac014760a92e978bb931bc3c2425571f881925f5a6754e65528a2a26b28"
+		},
+		{
+			"path": "packages/polyfill-connectors/src/connector-exit.ts",
+			"sha256": "sha256:395555db65b8760bd5f7812fe81c7b5922d84a25bfc8a1e82a925c9bd2ed0b56"
+		},
+		{
+			"path": "packages/polyfill-connectors/src/connector-http-governor.ts",
+			"sha256": "sha256:5637d37c5e8c7f819370ce4891d8d4cf6ed057c970bc157b3b964262689ec417"
+		},
+		{
+			"path": "packages/polyfill-connectors/src/connector-runtime.ts",
+			"sha256": "sha256:29336e4e02c8543f716d5d776d6681562e77f4673af4565d735a5711093ec06e"
+		},
+		{
+			"path": "packages/polyfill-connectors/src/fixture-capture.ts",
+			"sha256": "sha256:29b8863a659f25c7946640c358bca543f33f4d942d8fd042b28884f4e5d1d653"
+		},
+		{
+			"path": "packages/polyfill-connectors/src/profile-lock.ts",
+			"sha256": "sha256:e4398bd9a175edcc62cfed0df33bd5c2cd570450f846e5e9e73a8b99e523ad36"
+		},
+		{
+			"path": "packages/polyfill-connectors/src/provider-pacing.ts",
+			"sha256": "sha256:6a79661d584efb5198e8c2dd9c5545806238e2ae62f6fac2b0be7fe7ea422e8a"
+		},
+		{
+			"path": "packages/polyfill-connectors/src/provider-profile.ts",
+			"sha256": "sha256:99429d63ed08bb1efbcff2b006cd35ca5c4d81e2ea5286374e915eb33d942cdf"
+		},
+		{
+			"path": "packages/polyfill-connectors/src/runtime-environment.ts",
+			"sha256": "sha256:93ad3686202601fe638f97d5278c80b521092b31d849d53d77fe93fb3154d57d"
+		},
+		{
+			"path": "packages/polyfill-connectors/src/schema-registry.ts",
+			"sha256": "sha256:0babcc2e73431002b31e58bfd8754b85d10294cfa51058d4471db7f95a164b73"
+		},
+		{
+			"path": "packages/polyfill-connectors/src/session-establish.ts",
+			"sha256": "sha256:c204b0f5106def83cc517f0ddce3c1ac4910c49ecdd048542cc130dcbe046d2a"
+		},
+		{
+			"path": "packages/polyfill-connectors/src/shutdown-hook.ts",
+			"sha256": "sha256:20f2918a9c85e645776f3a5c2e46b9ec930d429e50443436978a5cccdabc604f"
+		},
+		{
+			"path": "packages/polyfill-connectors/src/streaming-target-registration.ts",
+			"sha256": "sha256:12eaeeecd9fcbff8b2cd0846721163917df2f6f9e0692050fb581269ef6a76ca"
+		},
+		{
+			"path": "packages/polyfill-connectors/src/terminal-error.ts",
+			"sha256": "sha256:4bc3efc944ca22615905239ee7f875cfc27aabd8ca5dafe28ee5cc8e6d8c426a"
+		}
+	],
+	"third_party_packages": [
+		{
+			"name": "@pdpp/connector-protocol",
+			"version": "2.4.0",
+			"license": "Apache-2.0",
+			"bundled_inputs": 9
+		},
+		{
+			"name": "zod",
+			"version": "4.6.5",
+			"license": "MIT",
+			"bundled_inputs": 95
+		}
+	],
+	"signed": false
+}

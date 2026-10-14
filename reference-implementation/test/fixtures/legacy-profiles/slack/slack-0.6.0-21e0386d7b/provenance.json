@@ -1,0 +1,139 @@
+{
+	"generated_file_notice": "Local-source layout build (scratch builder). Not signed. Rebuild with build-local-source.mjs.",
+	"builder": "build-local-source.mjs (esbuild settings copied from scripts/build-connector-oci-artifact.mjs)",
+	"connector_key": "slack",
+	"connector_directory": "slack",
+	"version": "0.6.0",
+	"source": {
+		"repository": "https://github.com/PDP-Connect/data-connectors",
+		"revision": "21e0386d7be16fbaae6e3a4de03d9db84860729f",
+		"connector_path": "packages/polyfill-connectors/connectors/slack"
+	},
+	"build_command": "node build-local-source.mjs --dcs <checkout> --connector slack --connector-dir <checkout>/packages/polyfill-connectors/connectors/slack --manifest <checkout>/packages/polyfill-connectors/manifests/slack.json --contract <work>/dcs/scripts/connector-host-runtime-contract.mjs --parity-note This is the emitter the live c82718d4 image ships: the image's @pdpp/polyfill-connectors connectors/slack/* (including the compiled index.js) and manifests/slack.json are byte-identical to the c82718d4 vendored tarball (image sha256:11b82170559cd6f04ff4e32ba073a146121909f75c2c7e15a0993344ce8ebe1f), which corresponds to data-connectors 21e0386d7be16fbaae6e3a4de03d9db84860729f; this bundle is built from that same source revision with that revision's own npm ci (index.ts blob 7747ca30). Manifest is byte-identical to fixtures/legacy-upgrade/slack.json. --expect-revision 21e0386d7be16fbaae6e3a4de03d9db84860729f --out <work>/tmp/p21/slack",
+	"dependency_install": "node_modules installed in the checkout",
+	"manifest_sha256": "sha256:88c7d5d1f3b28a786f73e2b9af80fe57e694e4cc8c0f88de2b3287f28c50ba95",
+	"bundle_sha256": "sha256:77f51a36da77e96b92b6d6ebd97b0c166ac00349c2c0509952436676eda08655",
+	"esbuild_version": "0.28.2",
+	"externals_left": [
+		"dynamic-import:patchright",
+		"import-statement:node:child_process",
+		"import-statement:node:crypto",
+		"import-statement:node:fs",
+		"import-statement:node:fs/promises",
+		"import-statement:node:os",
+		"import-statement:node:path",
+		"import-statement:node:readline",
+		"import-statement:node:sqlite",
+		"import-statement:node:url"
+	],
+	"source_inventory": [
+		{
+			"path": "packages/polyfill-connectors/connectors/slack/index.ts",
+			"sha256": "sha256:4aa59bf1f6ef170c481bb5315319635a97ec7562d6648b39dd69fb33a67b8f54"
+		},
+		{
+			"path": "packages/polyfill-connectors/connectors/slack/parsers.ts",
+			"sha256": "sha256:36eaeb8f9d1646ad9f6a0b4e466df1bcb3f1a77b3bebb95f9a66c3945e819d6b"
+		},
+		{
+			"path": "packages/polyfill-connectors/connectors/slack/schemas.ts",
+			"sha256": "sha256:3d9d64369dd1269fc3546890d9234e229090faaee168b2b90465f85008f51e60"
+		},
+		{
+			"path": "packages/polyfill-connectors/connectors/slack/slack-api.ts",
+			"sha256": "sha256:440f009e32cdd3fd07096cd73ff270fb31f9fb47fefc84f2be345012eeb4f669"
+		},
+		{
+			"path": "packages/polyfill-connectors/src/browser-handoff.ts",
+			"sha256": "sha256:ee209176da45a8828272964a9e39f454a69debc490c9d3716713ec1e63c5a38c"
+		},
+		{
+			"path": "packages/polyfill-connectors/src/browser-launch.ts",
+			"sha256": "sha256:96c467da65638eb632b557c0f81e060a4077ecd2cf67965e3ecf47a051cba415"
+		},
+		{
+			"path": "packages/polyfill-connectors/src/capture-redaction.ts",
+			"sha256": "sha256:ea99cac014760a92e978bb931bc3c2425571f881925f5a6754e65528a2a26b28"
+		},
+		{
+			"path": "packages/polyfill-connectors/src/connector-artifact-root.ts",
+			"sha256": "sha256:6f37ea7c7a03efe47380849f41384e1add6df82c3d34e498c0e001c7b1878a9e"
+		},
+		{
+			"path": "packages/polyfill-connectors/src/connector-exit.ts",
+			"sha256": "sha256:395555db65b8760bd5f7812fe81c7b5922d84a25bfc8a1e82a925c9bd2ed0b56"
+		},
+		{
+			"path": "packages/polyfill-connectors/src/connector-http-governor.ts",
+			"sha256": "sha256:5637d37c5e8c7f819370ce4891d8d4cf6ed057c970bc157b3b964262689ec417"
+		},
+		{
+			"path": "packages/polyfill-connectors/src/connector-options.ts",
+			"sha256": "sha256:2bc9f77dc2d1f1379af5bee6675b6c7e2545218094651e8b8ff0f674968d52ae"
+		},
+		{
+			"path": "packages/polyfill-connectors/src/connector-runtime.ts",
+			"sha256": "sha256:29336e4e02c8543f716d5d776d6681562e77f4673af4565d735a5711093ec06e"
+		},
+		{
+			"path": "packages/polyfill-connectors/src/fingerprint-cursor.ts",
+			"sha256": "sha256:9e06e7d7796f99b352d85a3b5f30505e3393d555e82829fb331882fc4e695b9a"
+		},
+		{
+			"path": "packages/polyfill-connectors/src/fixture-capture.ts",
+			"sha256": "sha256:29b8863a659f25c7946640c358bca543f33f4d942d8fd042b28884f4e5d1d653"
+		},
+		{
+			"path": "packages/polyfill-connectors/src/profile-lock.ts",
+			"sha256": "sha256:e4398bd9a175edcc62cfed0df33bd5c2cd570450f846e5e9e73a8b99e523ad36"
+		},
+		{
+			"path": "packages/polyfill-connectors/src/provider-pacing.ts",
+			"sha256": "sha256:6a79661d584efb5198e8c2dd9c5545806238e2ae62f6fac2b0be7fe7ea422e8a"
+		},
+		{
+			"path": "packages/polyfill-connectors/src/provider-profile.ts",
+			"sha256": "sha256:99429d63ed08bb1efbcff2b006cd35ca5c4d81e2ea5286374e915eb33d942cdf"
+		},
+		{
+			"path": "packages/polyfill-connectors/src/runtime-environment.ts",
+			"sha256": "sha256:93ad3686202601fe638f97d5278c80b521092b31d849d53d77fe93fb3154d57d"
+		},
+		{
+			"path": "packages/polyfill-connectors/src/schema-registry.ts",
+			"sha256": "sha256:0babcc2e73431002b31e58bfd8754b85d10294cfa51058d4471db7f95a164b73"
+		},
+		{
+			"path": "packages/polyfill-connectors/src/session-establish.ts",
+			"sha256": "sha256:c204b0f5106def83cc517f0ddce3c1ac4910c49ecdd048542cc130dcbe046d2a"
+		},
+		{
+			"path": "packages/polyfill-connectors/src/shutdown-hook.ts",
+			"sha256": "sha256:20f2918a9c85e645776f3a5c2e46b9ec930d429e50443436978a5cccdabc604f"
+		},
+		{
+			"path": "packages/polyfill-connectors/src/streaming-target-registration.ts",
+			"sha256": "sha256:12eaeeecd9fcbff8b2cd0846721163917df2f6f9e0692050fb581269ef6a76ca"
+		},
+		{
+			"path": "packages/polyfill-connectors/src/terminal-error.ts",
+			"sha256": "sha256:4bc3efc944ca22615905239ee7f875cfc27aabd8ca5dafe28ee5cc8e6d8c426a"
+		}
+	],
+	"third_party_packages": [
+		{
+			"name": "@pdpp/connector-protocol",
+			"version": "0.0.1",
+			"license": "Apache-2.0",
+			"bundled_inputs": 9
+		},
+		{
+			"name": "zod",
+			"version": "4.5.4",
+			"license": "MIT",
+			"bundled_inputs": 94
+		}
+	],
+	"parity_note": "This is the emitter the live c82718d4 image ships: the image's @pdpp/polyfill-connectors connectors/slack/* (including the compiled index.js) and manifests/slack.json are byte-identical to the c82718d4 vendored tarball (image sha256:11b82170559cd6f04ff4e32ba073a146121909f75c2c7e15a0993344ce8ebe1f), which corresponds to data-connectors 21e0386d7be16fbaae6e3a4de03d9db84860729f; this bundle is built from that same source revision with that revision's own npm ci (index.ts blob 7747ca30). Manifest is byte-identical to fixtures/legacy-upgrade/slack.json.",
+	"signed": false
+}

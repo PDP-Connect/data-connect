@@ -47,6 +47,7 @@ export type TestServer = Awaited<ReturnType<typeof startServer>> & {
 export type InstallService = ReturnType<typeof createConnectorInstallService>;
 
 export function legacyManifest(key: string): Record<string, unknown> {
+  // spotify's O-era manifest comes from data-connectors 97536ad49; the others are the c82718d4 bundle copies.
   return JSON.parse(readFileSync(join(HERE, "..", "fixtures", "legacy-upgrade", `${key}.json`), "utf8"));
 }
 
@@ -166,12 +167,19 @@ export interface LegacyUrls {
 }
 
 export async function withLegacyServer(
-  options: { backend: LegacyBackend; databaseUrl?: string | undefined; service?: InstallService | undefined },
+  options: {
+    backend: LegacyBackend;
+    databaseUrl?: string | undefined;
+    /** Extra startServer options, for tests that run a connector (connectorPathResolver, run env). */
+    serverOptions?: Record<string, unknown> | undefined;
+    service?: InstallService | undefined;
+  },
   body: (urls: LegacyUrls) => Promise<void>
 ): Promise<void> {
   const server = (await startServer({
     asPort: 0,
     ...(options.service ? { connectorInstallService: options.service } : {}),
+    ...(options.serverOptions ?? {}),
     dbPath: ":memory:",
     quiet: true,
     reconcilePolyfillManifests: false,
