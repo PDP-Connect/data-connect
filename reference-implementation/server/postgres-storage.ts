@@ -2957,6 +2957,7 @@ async function bootstrapPostgresSchemaOnce({
         -- See docs/research/explore-semantic-time-sort-design-2026-06-20.md.
         semantic_time TEXT NOT NULL DEFAULT '',
         version BIGINT NOT NULL DEFAULT 1,
+        semantic_generation BIGINT NOT NULL DEFAULT 1,
         deleted BOOLEAN NOT NULL DEFAULT FALSE,
         deleted_at TEXT,
         cursor_value TEXT,
@@ -3112,6 +3113,8 @@ async function bootstrapPostgresSchemaOnce({
         scope_key TEXT NOT NULL,
         record_key TEXT NOT NULL,
         embedding JSONB NOT NULL,
+        source_version BIGINT,
+        source_generation BIGINT,
         PRIMARY KEY(connector_instance_id, scope_key, record_key)
       );
       CREATE TABLE IF NOT EXISTS semantic_search_snapshots (
@@ -5344,6 +5347,23 @@ async function migratePostgresRecordsBlobSearchInstanceColumns(client: PoolClien
   // with no table rewrite. Legacy semantic rows keep source_version NULL
   // ("unknown"); nothing stamps them current. cursor_key already exists.
   await client.query("ALTER TABLE semantic_search_blob ADD COLUMN IF NOT EXISTS source_version BIGINT");
+  await client.query("ALTER TABLE semantic_search_blob ADD COLUMN IF NOT EXISTS source_generation BIGINT");
+  await client.query("ALTER TABLE records ADD COLUMN IF NOT EXISTS semantic_generation BIGINT NOT NULL DEFAULT 1");
+  await client.query("CREATE SEQUENCE IF NOT EXISTS records_semantic_generation_seq");
+  // Constant DEFAULT 1 is metadata-only on supported PostgreSQL versions.
+  // Preserve the sequence's existing high-water mark so an ABA token cannot
+  // be reused after a record deletion/reinsertion.
+  await client.query(
+    `SELECT setval(
+       'records_semantic_generation_seq',
+       GREATEST(
+         1,
+         (SELECT last_value FROM records_semantic_generation_seq),
+         COALESCE((SELECT MAX(semantic_generation) FROM records), 1)
+       ),
+       TRUE
+     )`
+  );
   await client.query(
     "ALTER TABLE semantic_search_backfill_progress ADD COLUMN IF NOT EXISTS pass_kind TEXT NOT NULL DEFAULT 'rebuild'"
   );

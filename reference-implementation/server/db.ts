@@ -1727,6 +1727,7 @@ CREATE TABLE IF NOT EXISTS records (
   -- monotonic id. Never null.
   semantic_time TEXT NOT NULL DEFAULT '',
   version       INTEGER NOT NULL DEFAULT 1,
+  semantic_generation INTEGER NOT NULL DEFAULT 1,
   deleted       INTEGER NOT NULL DEFAULT 0,
   deleted_at    TEXT,
   UNIQUE(connector_instance_id, stream, record_key)
@@ -1737,6 +1738,13 @@ CREATE INDEX IF NOT EXISTS idx_records_lookup
 
 CREATE INDEX IF NOT EXISTS idx_records_version
   ON records(connector_id, stream, version);
+
+-- Never reset this clock with a stream or connector reset. It gives an
+-- embedding a non-reusable provenance token even if a record key is deleted
+-- and later reinserted at the same historical version.
+CREATE TABLE IF NOT EXISTS semantic_generation_clock (
+  generation INTEGER PRIMARY KEY AUTOINCREMENT
+);
 
 -- NOTE: the keyset index for the Explore merged-timeline
 -- (idx_records_semantic_time, an EXPRESSION index on
@@ -2158,6 +2166,8 @@ CREATE TABLE IF NOT EXISTS semantic_search_rowid (
   scope_key     TEXT NOT NULL,
   record_key    TEXT NOT NULL,
   rowid         INTEGER NOT NULL,
+  source_version INTEGER,
+  source_generation INTEGER,
   PRIMARY KEY(connector_instance_id, scope_key, record_key)
 );
 
@@ -2173,6 +2183,8 @@ CREATE TABLE IF NOT EXISTS semantic_search_blob (
   scope_key     TEXT NOT NULL,
   record_key    TEXT NOT NULL,
   embedding     BLOB NOT NULL,
+  source_version INTEGER,
+  source_generation INTEGER,
   PRIMARY KEY(connector_instance_id, scope_key, record_key)
 );
 CREATE INDEX IF NOT EXISTS idx_semantic_search_blob_plan
@@ -5941,7 +5953,10 @@ function migrateBlobBindingsJsonPath(raw: SqliteDatabase, opts: MigrationOptions
 function migrateSemanticSearchRepairColumns(raw: SqliteDatabase): void {
   const additions: ReadonlyArray<readonly [string, string, string]> = [
     ["semantic_search_rowid", "source_version", "INTEGER"],
+    ["semantic_search_rowid", "source_generation", "INTEGER"],
     ["semantic_search_blob", "source_version", "INTEGER"],
+    ["semantic_search_blob", "source_generation", "INTEGER"],
+    ["records", "semantic_generation", "INTEGER NOT NULL DEFAULT 1"],
     ["semantic_search_backfill_progress", "pass_kind", "TEXT NOT NULL DEFAULT 'rebuild'"],
     ["semantic_search_backfill_progress", "cursor_key", "TEXT"],
     ["semantic_search_backfill_progress", "pass_dirty_revision", "INTEGER"],
@@ -5954,6 +5969,9 @@ function migrateSemanticSearchRepairColumns(raw: SqliteDatabase): void {
       raw.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
     }
   }
+  // Reserve generation 1 for pre-generation rows. AUTOINCREMENT then issues
+  // 2 or higher, and it never reuses a value after records are deleted.
+  raw.prepare("INSERT INTO semantic_generation_clock(generation) VALUES(1) ON CONFLICT(generation) DO NOTHING").run();
 }
 
 function migrateSemanticSearchInstanceColumns(raw: SqliteDatabase, opts: MigrationOptions = {}) {

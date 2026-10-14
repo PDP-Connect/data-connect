@@ -244,6 +244,7 @@ if (POSTGRES_URL) {
         record_json JSONB NOT NULL,
         emitted_at TEXT NOT NULL,
         version BIGINT NOT NULL DEFAULT 1,
+        semantic_generation BIGINT NOT NULL DEFAULT 0,
         deleted BOOLEAN NOT NULL DEFAULT FALSE,
         deleted_at TEXT,
         cursor_value TEXT,
@@ -267,6 +268,16 @@ if (POSTGRES_URL) {
         connector_instance_id TEXT NOT NULL,
         stream TEXT NOT NULL,
         max_version BIGINT NOT NULL DEFAULT 0,
+        PRIMARY KEY(connector_instance_id, stream)
+      );
+      CREATE SEQUENCE IF NOT EXISTS records_semantic_generation_seq;
+      CREATE TABLE IF NOT EXISTS search_index_dirty (
+        connector_instance_id TEXT NOT NULL,
+        connector_id TEXT NOT NULL,
+        stream TEXT NOT NULL,
+        dirty BOOLEAN NOT NULL DEFAULT TRUE,
+        marked_at TEXT NOT NULL,
+        revision BIGINT NOT NULL DEFAULT 1,
         PRIMARY KEY(connector_instance_id, stream)
       );
     `);
@@ -501,12 +512,18 @@ if (POSTGRES_URL) {
       assert.equal(applied.affected.updated, 1);
 
       const row = await pool.query(
-        `SELECT version, record_json FROM records
+        `SELECT version, semantic_generation, record_json FROM records
           WHERE connector_instance_id = $1 AND stream = $2 AND record_key = 'txn-2'`,
         [connectorInstanceId, stream]
       );
       assert.equal(Number(row.rows[0].version), 2);
+      assert.ok(Number(row.rows[0].semantic_generation) > 0, "same-version projection gets a fresh semantic generation");
       assert.equal(row.rows[0].record_json.amount, 20);
+      const dirty = await pool.query(
+        "SELECT dirty FROM search_index_dirty WHERE connector_instance_id = $1 AND stream = $2",
+        [connectorInstanceId, stream]
+      );
+      assert.equal(dirty.rows[0].dirty, true, "projection repair atomically leaves semantic convergence queued");
 
       // The backup captured the stale pre-image (existed_before=true, v1).
       const backup = await pool.query(`SELECT existed_before, version FROM "${applied.backupTable}"`);
@@ -580,13 +597,19 @@ if (POSTGRES_URL) {
       assert.equal(applied.affected.deleted, 1);
 
       const row = await pool.query(
-        `SELECT deleted, version, deleted_at FROM records
+        `SELECT deleted, version, semantic_generation, deleted_at FROM records
           WHERE connector_instance_id = $1 AND stream = $2 AND record_key = 'txn-4'`,
         [connectorInstanceId, stream]
       );
       assert.equal(row.rows[0].deleted, true);
       assert.equal(Number(row.rows[0].version), 2);
+      assert.ok(Number(row.rows[0].semantic_generation) > 0, "tombstone gets a fresh semantic generation");
       assert.ok(row.rows[0].deleted_at, "deleted_at is set from the authoritative delete row");
+      const dirty = await pool.query(
+        "SELECT dirty FROM search_index_dirty WHERE connector_instance_id = $1 AND stream = $2",
+        [connectorInstanceId, stream]
+      );
+      assert.equal(dirty.rows[0].dirty, true, "tombstone repair atomically leaves semantic convergence queued");
     });
   });
 

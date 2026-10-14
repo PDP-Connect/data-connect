@@ -362,6 +362,8 @@ interface SemanticIndexEntry {
    * as NULL, i.e. unknown, never current.
    */
   version?: number;
+  /** Non-reusable semantic provenance token for the current record incarnation. */
+  generation?: number;
 }
 
 interface SemanticIndex {
@@ -395,12 +397,12 @@ interface SemanticIndex {
     connectorInstanceId?: string | null;
     stream: string;
   }) => Promise<Set<string>> | Set<string>;
-  /** Stored `source_version` per `versionKey(scopeKey, recordKey)`; NULL = legacy-unknown, absent = no row. */
+  /** Stored source provenance per `versionKey(scopeKey, recordKey)`; NULL = legacy-unknown, absent = no row. */
   listVersions: (args: {
     connectorInstanceId: string;
     recordKeys: string[];
     scopeKeys: string[];
-  }) => Map<string, number | null>;
+  }) => Map<string, { generation: number | null; version: number | null }>;
   /** One keyset page of indexed record keys for an exact scope, ordered by record_key. */
   pageKeys: (args: {
     afterRecordKey: string | null;
@@ -1365,18 +1367,21 @@ function sqliteListVersions(
     scopeKeys,
     recordKeys,
   }: { connectorInstanceId: string; recordKeys: string[]; scopeKeys: string[] }
-): Map<string, number | null> {
-  const out = new Map<string, number | null>();
+): Map<string, { generation: number | null; version: number | null }> {
+  const out = new Map<string, { generation: number | null; version: number | null }>();
   if (scopeKeys.length === 0 || recordKeys.length === 0) {
     return out;
   }
   const rows = iterateDynamicSqlAcknowledged(
-    `SELECT scope_key, record_key, source_version FROM ${table}
+    `SELECT scope_key, record_key, source_version, source_generation FROM ${table}
      WHERE connector_instance_id = ? AND scope_key IN (${sqlPlaceholders(scopeKeys)}) AND record_key IN (${sqlPlaceholders(recordKeys)})`,
     [connectorInstanceId, ...scopeKeys, ...recordKeys]
   );
   for (const row of rows) {
-    out.set(versionKey(row.scope_key, row.record_key), row.source_version === null ? null : Number(row.source_version));
+    out.set(versionKey(row.scope_key, row.record_key), {
+      generation: row.source_generation === null ? null : Number(row.source_generation),
+      version: row.source_version === null ? null : Number(row.source_version),
+    });
   }
   return out;
 }
@@ -1763,6 +1768,7 @@ function makeSqliteVecIndex({
     recordKey,
     vector,
     version,
+    generation,
   }: SemanticIndexEntry): void {
     const buf = Buffer.from(vector.buffer, vector.byteOffset, vector.byteLength);
     const existing = getOne(referenceQueries.searchSemanticRowidGetRowidByIdentity, [
@@ -1777,8 +1783,9 @@ function makeSqliteVecIndex({
       // ensureTable() runs.
       execDynamicSqlAcknowledged("UPDATE semantic_search_vec SET embedding = ? WHERE rowid = ?", [buf, existing.rowid]);
       // REVIEWED-DYNAMIC: version column added by migrateSemanticSearchRepairColumns.
-      execDynamicSqlAcknowledged("UPDATE semantic_search_rowid SET source_version = ? WHERE rowid = ?", [
+      execDynamicSqlAcknowledged("UPDATE semantic_search_rowid SET source_version = ?, source_generation = ? WHERE rowid = ?", [
         version ?? null,
+        generation ?? null,
         existing.rowid,
       ]);
       return;
@@ -1796,6 +1803,7 @@ function makeSqliteVecIndex({
       recordKey,
       Number(info.lastInsertRowid),
       version ?? null,
+      generation ?? null,
     ]);
   }
 
@@ -2310,6 +2318,7 @@ export async function computeSemanticEntries({
   data,
   declaredFields,
   version,
+  generation,
 }: {
   connectorId: string;
   connectorInstanceId: string;
@@ -2319,6 +2328,7 @@ export async function computeSemanticEntries({
   declaredFields?: string[];
   /** The `records.version` `data` was committed at; stored as the rows' `source_version`. */
   version?: number;
+  generation?: number;
 }): Promise<ComputedSemanticEntries | null> {
   if (!backend) {
     return null;
@@ -2341,6 +2351,7 @@ export async function computeSemanticEntries({
           scopeKey: encodeScopeKey(stream, field),
           vector: await embedDocumentWithAdmission(text),
           ...(version === undefined ? {} : { version }),
+          ...(generation === undefined ? {} : { generation }),
         } satisfies SemanticIndexEntry;
       })
     )
@@ -2771,11 +2782,11 @@ async function prepareSemanticPass({
         `dims=${displaySemanticMetaValue(metaRow?.dimensions)}→${currentIdentity.dimensions}, ` +
         `metric=${displaySemanticMetaValue(metaRow?.distance_metric)}→${currentMetric}) — rebuilding`
     );
-    // The ONLY whole-stream delete. It runs before the row is flipped to
-    // `rebuild`, so a crash in between re-runs the delete rather than resuming
-    // a rebuild whose rows were never cleared.
-    const deleted = await store.deleteStreamRows(scope, fence);
-    return deleted && (await store.resetPass(scope, fence, { identity, kind: "rebuild" })) ? { cursor: null } : "busy";
+    // The manifest proof, publication lock, lease fence, destructive delete,
+    // and rebuild cursor reset are one store transition.
+    return (await store.resetIdentityPass(scope, fence, { identity, manifest: context.manifest as Record<string, unknown> }))
+      ? { cursor: null }
+      : "busy";
   }
   if (!(identityChanged || created) && prior?.kind === "rebuild") {
     // A leftover `rebuild` row whose identity already matches meta: new repair pass.
@@ -2873,31 +2884,22 @@ async function repairSemanticScope({
     if (outcome === "partial") {
       return { job, status: "partial" };
     }
-    if (identityChanged) {
-      if (usePostgres) {
-        await postgresUpsertSemanticMeta({
-          connectorId,
-          connectorInstanceId,
-          dimensions: currentIdentity.dimensions,
-          distanceMetric: currentMetric,
-          fieldsFingerprint: newFingerprint,
-          modelId: currentModel,
-          stream,
-        });
-      } else {
-        exec(referenceQueries.searchSemanticMetaUpsert, [
-          connectorInstanceId,
-          connectorId,
-          stream,
-          newFingerprint,
-          currentModel,
-          currentIdentity.dimensions,
-          currentMetric,
-          new Date().toISOString(),
-        ]);
-      }
-    }
-    const completion = await store.complete(scope, fence);
+    const completion = await store.complete(
+      scope,
+      fence,
+      identityChanged
+        ? {
+            connectorId,
+            connectorInstanceId,
+            dimensions: currentIdentity.dimensions,
+            distanceMetric: currentMetric,
+            fieldsFingerprint: newFingerprint,
+            manifest: context.manifest as Record<string, unknown>,
+            modelId: currentModel,
+            stream,
+          }
+        : undefined
+    );
     released = true;
     if (completion === "lost") {
       return { job, status: "busy" };

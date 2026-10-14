@@ -227,6 +227,7 @@ interface CurrentRecordRow {
   deleted: boolean | number;
   emitted_at: string | null;
   record_json: string | null;
+  semantic_generation: number;
   version: number;
 }
 interface VersionAllocationRow {
@@ -234,7 +235,7 @@ interface VersionAllocationRow {
 }
 type DurableIngestOutcome =
   | { kind: "noop" }
-  | { kind: "changed"; op: "delete" | "upsert"; selfHeal: boolean; version: number };
+  | { kind: "changed"; op: "delete" | "upsert"; selfHeal: boolean; semanticGeneration: number; version: number };
 interface RecordIngestOutcome {
   accepted: boolean;
   changed: boolean;
@@ -248,6 +249,7 @@ interface RecordIngestOutcome {
     stream: string;
   };
   self_healed?: boolean;
+  semanticGeneration?: number;
   version?: number;
 }
 type DeviceRecordPlanEntry = { inputIndex: number; record: RecordEnvelope } & Record<string, unknown>;
@@ -265,6 +267,7 @@ type RecordIngestAfterRecord = (record: RecordEnvelope, outcome: RecordIngestBat
 interface DeferredRecordIndex {
   index: number;
   record: RecordEnvelope;
+  semanticGeneration: number;
   version: number;
 }
 interface IngestRecordsWithinCoordinatorResult {
@@ -1326,6 +1329,7 @@ function writeRecordChange({
   recordJson,
   recordKey,
   semanticTime,
+  semanticGeneration,
   stream,
 }: {
   connectorId: string;
@@ -1337,12 +1341,14 @@ function writeRecordChange({
   recordJson: string | null;
   recordKey: string;
   semanticTime: string;
+  semanticGeneration: number;
   stream: string;
 }): void {
   if (op === "delete") {
     exec(referenceQueries.recordsIngestMarkRecordDeleted, [
       effectiveEmittedAt,
       nextVersion,
+      semanticGeneration,
       connectorInstanceId,
       stream,
       recordKey,
@@ -1367,6 +1373,7 @@ function writeRecordChange({
     recordJson,
     effectiveEmittedAt,
     nextVersion,
+    semanticGeneration,
     semanticTime,
   ]);
   exec(referenceQueries.recordsIngestInsertRecordChangeUpsert, [
@@ -1797,7 +1804,7 @@ async function runDeferredRecordIndexes(
 ): Promise<void> {
   const connectorId = connectorIdForStorageTarget(storageTarget);
   const connectorInstanceId = resolveStorageConnectorInstanceId(storageTarget, connectorId);
-  for (const { record, version } of batch.changedRecords) {
+  for (const { record, semanticGeneration, version } of batch.changedRecords) {
     const { stream } = record;
     // Storage-lifecycle fence (server/storage-generation.ts), re-checked per
     // record: if storage closed/reinitialized partway through this batch's
@@ -1815,7 +1822,7 @@ async function runDeferredRecordIndexes(
     try {
       // biome-ignore lint/performance/noAwaitInLoops: One connector instance's derived index repairs are intentionally ordered.
       await withIndexWork(
-        () => maintainRecordIndexesWithinPermit(storageTarget, record, version, {}),
+        () => maintainRecordIndexesWithinPermit(storageTarget, record, version, {}, semanticGeneration),
         scheduledGeneration
       );
     } catch (err) {
@@ -1923,8 +1930,13 @@ async function ingestRecordsWithinCoordinator(
       // harden-connector-instance-write-fence-transaction-native.
       // biome-ignore lint/performance/noAwaitInLoops: Durable version allocation and same-instance state transitions are intentionally ordered.
       outcome = await ingestRecord(storageTarget, record, perRecordOptions);
-      if (outcome.accepted && outcome.changed && typeof outcome.version === "number") {
-        changedRecords.push({ index, record, version: outcome.version });
+      if (
+        outcome.accepted &&
+        outcome.changed &&
+        typeof outcome.version === "number" &&
+        typeof outcome.semanticGeneration === "number"
+      ) {
+        changedRecords.push({ index, record, semanticGeneration: outcome.semanticGeneration, version: outcome.version });
       }
     } catch (err) {
       const classified = classifyIngestFailure(err);
@@ -2085,6 +2097,7 @@ function toRecordIngestOutcome(outcome: {
   changed: boolean;
   retainedSizeDelta?: RecordData;
   self_healed?: boolean;
+  semanticGeneration?: number;
   version?: number;
 }): RecordIngestOutcome {
   return {
@@ -2092,6 +2105,7 @@ function toRecordIngestOutcome(outcome: {
     changed: outcome.changed,
     ...(isRetainedSizeDelta(outcome.retainedSizeDelta) ? { retainedSizeDelta: outcome.retainedSizeDelta } : {}),
     ...(typeof outcome.self_healed === "boolean" ? { self_healed: outcome.self_healed } : {}),
+    ...(typeof outcome.semanticGeneration === "number" ? { semanticGeneration: outcome.semanticGeneration } : {}),
     ...(typeof outcome.version === "number" ? { version: outcome.version } : {}),
   };
 }
@@ -2125,8 +2139,20 @@ async function ingestPostgresRecord(
     // Fire-and-forget, same reasoning as ingestSqliteRecord: this scope's
     // dirty flag (written inside postgresIngestRecord's own transaction) is
     // what makes it safe not to await this before returning the ack.
-    if (!options.deferIndexes && typeof outcome.version === "number") {
-      scheduleRecordIndexMaintenance(connectorInstanceId, stream, storageTarget, record, outcome.version, options);
+    if (
+      !options.deferIndexes &&
+      typeof outcome.version === "number" &&
+      typeof outcome.semanticGeneration === "number"
+    ) {
+      scheduleRecordIndexMaintenance(
+        connectorInstanceId,
+        stream,
+        storageTarget,
+        record,
+        outcome.version,
+        outcome.semanticGeneration,
+        options
+      );
     }
     __invokeClientEventEnqueueHook({
       connectionId: connectorInstanceId,
@@ -2373,6 +2399,10 @@ async function ingestSqliteRecord(
       stream,
     ]);
     const nextVersion = allocated.max_version;
+    const semanticGeneration = execReturningOne<{ generation: number }>(
+      referenceQueries.recordsIngestAllocateSemanticGeneration,
+      []
+    ).generation;
 
     maybeFault("after-version-allocation", { connectorId, connectorInstanceId, nextVersion, recordKey, stream });
 
@@ -2386,6 +2416,7 @@ async function ingestSqliteRecord(
       recordJson,
       recordKey,
       semanticTime,
+      semanticGeneration,
       stream,
     });
     maybeFault("after-records-mutation", { connectorId, connectorInstanceId, nextVersion, op, recordKey, stream });
@@ -2423,7 +2454,7 @@ async function ingestSqliteRecord(
       stream,
     });
 
-    return finishDurableOutcome({ kind: "changed", op, selfHeal, version: nextVersion });
+    return finishDurableOutcome({ kind: "changed", op, selfHeal, semanticGeneration, version: nextVersion });
   });
 
   if (outcome.kind === "noop") {
@@ -2438,7 +2469,15 @@ async function ingestSqliteRecord(
   // and read-time self-heal both check it. See scheduleRecordIndexMaintenance
   // and server/stores/search-index-dirty-store.ts.
   if (!options.deferIndexes) {
-    scheduleRecordIndexMaintenance(connectorInstanceId, stream, storageTarget, record, outcome.version, options);
+    scheduleRecordIndexMaintenance(
+      connectorInstanceId,
+      stream,
+      storageTarget,
+      record,
+      outcome.version,
+      outcome.semanticGeneration,
+      options
+    );
   }
 
   // Colocated with the retained-size delta applied in the committed
@@ -2471,6 +2510,7 @@ async function ingestSqliteRecord(
   const result: RecordIngestOutcome = {
     accepted: true,
     changed: true,
+    semanticGeneration: outcome.semanticGeneration,
     version: outcome.version,
   };
   if (outcome.selfHeal) {
@@ -2494,10 +2534,11 @@ export async function maintainRecordIndexes(
   record: RecordEnvelope,
   expectedVersion: number,
   options: RecordIngestOptions = {},
-  generation: number = currentStorageGeneration()
+  generation: number = currentStorageGeneration(),
+  expectedSemanticGeneration?: number
 ): Promise<void> {
   return await withIndexWork(
-    () => maintainRecordIndexesWithinPermit(storageTarget, record, expectedVersion, options),
+    () => maintainRecordIndexesWithinPermit(storageTarget, record, expectedVersion, options, expectedSemanticGeneration),
     generation
   );
 }
@@ -2521,6 +2562,7 @@ function scheduleRecordIndexMaintenance(
   storageTarget: RecordStorageTarget,
   record: RecordEnvelope,
   version: number,
+  semanticGeneration: number,
   options: RecordIngestOptions,
   startAfter?: Promise<void>
 ): Promise<void> {
@@ -2550,7 +2592,8 @@ function scheduleRecordIndexMaintenance(
           record,
           version,
           options.attemptContext ? { attemptContext: options.attemptContext } : {},
-          scheduledGeneration
+          scheduledGeneration,
+          semanticGeneration
         );
       } catch (err) {
         // Deliberately swallowed here: this call is fire-and-forget from the
@@ -2732,14 +2775,16 @@ async function prepareDeviceFinalRecordsWithinCoordinator(
  * harden-connector-instance-write-fence-transaction-native.
  */
 function isRecordStillCurrent(
-  current: { version: number | string; deleted: boolean | number } | null | undefined,
+  current: { version: number | string; deleted: boolean | number; semantic_generation?: number | string } | null | undefined,
   expectedVersion: number,
-  op: "upsert" | "delete"
+  op: "upsert" | "delete",
+  expectedSemanticGeneration?: number
 ): boolean {
   return (
     current !== null &&
     current !== undefined &&
     Number(current.version) === expectedVersion &&
+    (expectedSemanticGeneration === undefined || Number(current.semantic_generation) === expectedSemanticGeneration) &&
     Boolean(current.deleted) === (op === "delete")
   );
 }
@@ -2782,7 +2827,8 @@ async function maintainRecordIndexesWithinPermit(
   storageTarget: RecordStorageTarget,
   record: RecordEnvelope,
   expectedVersion: number,
-  options: RecordIngestOptions
+  options: RecordIngestOptions,
+  expectedSemanticGeneration?: number
 ): Promise<void> {
   const connectorId = connectorIdForStorageTarget(storageTarget);
   const connectorInstanceId = resolveStorageConnectorInstanceId(storageTarget, connectorId);
@@ -2836,6 +2882,7 @@ async function maintainRecordIndexesWithinPermit(
       declaredFields: options.attemptContext ? (attemptFacts?.semanticFields ?? []) : undefined,
       recordKey,
       stream,
+      generation: expectedSemanticGeneration,
       version: expectedVersion,
     });
     maybeRecordIndexFault("after-semantic-index", {
@@ -2857,13 +2904,13 @@ async function maintainRecordIndexesWithinPermit(
 
   if (isPostgresStorageBackend()) {
     return withPostgresTransaction(async (client) => {
-      const current = await client.query<{ version: string | number; deleted: boolean }>(
-        `SELECT version, deleted FROM records
+      const current = await client.query<{ version: string | number; deleted: boolean; semantic_generation: string | number }>(
+        `SELECT version, deleted, semantic_generation FROM records
           WHERE connector_instance_id = $1 AND stream = $2 AND record_key = $3
           FOR UPDATE`,
         [connectorInstanceId, stream, recordKey]
       );
-      if (!isRecordStillCurrent(current.rows[0], expectedVersion, op)) {
+      if (!isRecordStillCurrent(current.rows[0], expectedVersion, op, expectedSemanticGeneration)) {
         return;
       }
       if (op === "delete") {
@@ -2898,7 +2945,7 @@ async function maintainRecordIndexesWithinPermit(
       stream,
       recordKey,
     ]);
-    if (!isRecordStillCurrent(current, expectedVersion, op)) {
+    if (!isRecordStillCurrent(current, expectedVersion, op, expectedSemanticGeneration)) {
       return;
     }
     if (op === "delete") {
@@ -6385,7 +6432,14 @@ async function deleteRecordWithinCoordinator(storageTarget: RecordStorageTarget,
         reason: "record delete changed connection count/stream evidence",
       });
       if (typeof outcome.version === "number") {
-        await maintainRecordIndexes(storageTarget, { key: decodeKey(recordId), op: "delete", stream }, outcome.version);
+        await maintainRecordIndexes(
+          storageTarget,
+          { key: decodeKey(recordId), op: "delete", stream },
+          outcome.version,
+          {},
+          currentStorageGeneration(),
+          outcome.semanticGeneration
+        );
       }
     }
     return outcome;
@@ -6396,7 +6450,7 @@ async function deleteRecordWithinCoordinator(storageTarget: RecordStorageTarget,
   const now = nowIso();
   const changeHistoryLimit = getChangeHistoryLimit();
 
-  const outcome = writeTransaction<{ kind: "changed"; version: number } | { kind: "noop" }>(() => {
+  const outcome = writeTransaction<{ kind: "changed"; semanticGeneration: number; version: number } | { kind: "noop" }>(() => {
     const current = getOne<CurrentRecordRow>(referenceQueries.recordsIngestGetCurrentRecordState, [
       connectorInstanceId,
       stream,
@@ -6412,10 +6466,21 @@ async function deleteRecordWithinCoordinator(storageTarget: RecordStorageTarget,
       stream,
     ]);
     const nextVersion = allocated.max_version;
+    const semanticGeneration = execReturningOne<{ generation: number }>(
+      referenceQueries.recordsIngestAllocateSemanticGeneration,
+      []
+    ).generation;
 
     maybeDeleteFault("after-version-allocation", { connectorId, connectorInstanceId, nextVersion, recordId, stream });
 
-    exec(referenceQueries.recordsIngestMarkRecordDeleted, [now, nextVersion, connectorInstanceId, stream, recordId]);
+    exec(referenceQueries.recordsIngestMarkRecordDeleted, [
+      now,
+      nextVersion,
+      semanticGeneration,
+      connectorInstanceId,
+      stream,
+      recordId,
+    ]);
 
     maybeDeleteFault("after-records-mutation", { connectorId, connectorInstanceId, nextVersion, recordId, stream });
 
@@ -6464,7 +6529,7 @@ async function deleteRecordWithinCoordinator(storageTarget: RecordStorageTarget,
       stream,
     });
 
-    return { kind: "changed", version: nextVersion };
+    return { kind: "changed", semanticGeneration, version: nextVersion };
   });
 
   if (outcome.kind === "noop") {
@@ -6487,7 +6552,14 @@ async function deleteRecordWithinCoordinator(storageTarget: RecordStorageTarget,
   // writer that races and lands a newer version for this key first is never
   // clobbered by this delete's publish landing late — see
   // `maintainRecordIndexesWithinPermit`'s header.
-  await maintainRecordIndexes(storageTarget, { key: decodeKey(recordId), op: "delete", stream }, outcome.version);
+  await maintainRecordIndexes(
+    storageTarget,
+    { key: decodeKey(recordId), op: "delete", stream },
+    outcome.version,
+    {},
+    currentStorageGeneration(),
+    outcome.semanticGeneration
+  );
 
   return 1;
 }

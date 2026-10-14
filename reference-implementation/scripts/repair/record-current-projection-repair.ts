@@ -642,6 +642,15 @@ export async function runRepair({
       }
     }
 
+    await client.query(
+      `INSERT INTO search_index_dirty(connector_instance_id, connector_id, stream, dirty, marked_at, revision)
+       SELECT $1, connector_id, $2, 1, $3, 1 FROM records
+        WHERE connector_instance_id = $1 AND stream = $2 LIMIT 1
+       ON CONFLICT(connector_instance_id, stream) DO UPDATE SET connector_id = excluded.connector_id,
+         dirty = 1, marked_at = excluded.marked_at, revision = search_index_dirty.revision + 1`,
+      [connectorInstanceId, stream, new Date().toISOString()]
+    );
+
     await client.query("COMMIT");
   } catch (err) {
     try {
@@ -752,15 +761,16 @@ export async function applyProjectionRepair({
           )
      )
      INSERT INTO records
-       (connector_id, connector_instance_id, stream, record_key, record_json, emitted_at, version, deleted, deleted_at, cursor_value, primary_key_text)
+       (connector_id, connector_instance_id, stream, record_key, record_json, emitted_at, version, semantic_generation, deleted, deleted_at, cursor_value, primary_key_text)
      SELECT latest.connector_id, latest.connector_instance_id, latest.stream, latest.record_key,
-            latest.record_json, latest.emitted_at, latest.version, FALSE, NULL, $4, $4
+            latest.record_json, latest.emitted_at, latest.version, nextval('records_semantic_generation_seq'), FALSE, NULL, $4, $4
        FROM latest
      ON CONFLICT (connector_instance_id, stream, record_key) DO UPDATE
        SET connector_id = EXCLUDED.connector_id,
            record_json = EXCLUDED.record_json,
            emitted_at = EXCLUDED.emitted_at,
            version = EXCLUDED.version,
+           semantic_generation = nextval('records_semantic_generation_seq'),
            deleted = FALSE,
            deleted_at = NULL,
            cursor_value = EXCLUDED.cursor_value,
@@ -807,6 +817,7 @@ export async function applyDeleteRepair({
             deleted_at = COALESCE(c.deleted_at, c.emitted_at),
             emitted_at = c.emitted_at,
             version = c.version,
+            semantic_generation = nextval('records_semantic_generation_seq'),
             connector_id = c.connector_id
        FROM record_changes c
       WHERE r.connector_instance_id = $1

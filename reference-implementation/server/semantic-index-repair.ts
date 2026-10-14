@@ -53,6 +53,10 @@ import {
   withPostgresBulkTransaction,
   withPostgresTransaction,
 } from "./postgres-storage.ts";
+import {
+  assertConnectorManifestStreamSubsetSync,
+  assertConnectorManifestStreamSubsetWithClient,
+} from "./connector-manifest-write-fence.ts";
 
 // ─── Public types ───────────────────────────────────────────────────────────
 
@@ -90,6 +94,7 @@ export type RepairAcquireResult =
 export type RepairCursor = { id: number; p: "records" } | { k: string | null; p: "orphans"; s: number };
 
 export interface RepairRecordRef {
+  generation: number;
   id: number;
   recordKey: string;
   version: number;
@@ -97,6 +102,7 @@ export interface RepairRecordRef {
 
 export interface RepairRecordBody {
   data: unknown;
+  generation: number;
   recordKey: string;
   version: number;
 }
@@ -107,10 +113,12 @@ export interface RepairEntry {
   recordKey: string;
   scopeKey: string;
   vector: Float32Array;
+  generation?: number;
   version: number;
 }
 
 export interface RepairEmptied {
+  generation?: number;
   recordKey: string;
   scopeKey: string;
   version: number;
@@ -124,7 +132,7 @@ type Awaitable<T> = T | Promise<T>;
 
 export interface RepairStore {
   acquire: (args: { identity: RepairIdentity; owner: string; scope: RepairScope }) => Awaitable<RepairAcquireResult>;
-  complete: (scope: RepairScope, fence: RepairFence) => Awaitable<RepairCompletion>;
+  complete: (scope: RepairScope, fence: RepairFence, meta?: RepairMeta) => Awaitable<RepairCompletion>;
   deleteEmptied: (scope: RepairScope, fence: RepairFence, items: readonly RepairEmptied[]) => Awaitable<boolean>;
   deleteOrphans: (
     scope: RepairScope,
@@ -150,14 +158,31 @@ export interface RepairStore {
     fence: RepairFence,
     args: { identity: RepairIdentity; kind: RepairPassKind }
   ) => Awaitable<boolean>;
+  /** The destructive profile reset: manifest proof, lease fence, delete and pass reset are one transition. */
+  resetIdentityPass: (
+    scope: RepairScope,
+    fence: RepairFence,
+    args: { identity: RepairIdentity; manifest: Record<string, unknown> }
+  ) => Awaitable<boolean>;
   /** Cursor save + lease renewal in one fenced statement. */
   saveCursor: (scope: RepairScope, fence: RepairFence, cursor: RepairCursor) => Awaitable<boolean>;
   versions: (
     scope: RepairScope,
     scopeKeys: readonly string[],
     recordKeys: readonly string[]
-  ) => Awaitable<Map<string, number | null>>;
+  ) => Awaitable<Map<string, { generation: number | null; version: number | null }>>;
   writeEntries: (scope: RepairScope, fence: RepairFence, entries: readonly RepairEntry[]) => Awaitable<boolean>;
+}
+
+export interface RepairMeta {
+  connectorId: string;
+  connectorInstanceId: string;
+  dimensions: number;
+  distanceMetric: string;
+  fieldsFingerprint: string;
+  modelId: string;
+  manifest: Record<string, unknown>;
+  stream: string;
 }
 
 export const REPAIR_PAGE_SIZE = 500;
@@ -299,7 +324,7 @@ interface EmbeddedBodies {
 async function embedRepairBodies(
   input: RepairPassInput,
   bodies: readonly RepairRecordBody[],
-  versions: ReadonlyMap<string, number | null>
+  versions: ReadonlyMap<string, { generation: number | null; version: number | null }>
 ): Promise<EmbeddedBodies> {
   const { scope, budget, declaredFields } = input;
   const result: EmbeddedBodies = { deadlineHit: false, emptied: [], entries: [] };
@@ -314,11 +339,11 @@ async function embedRepairBodies(
       const text = input.textFor(data, field);
       if (!text) {
         if (stored !== undefined) {
-          result.emptied.push({ recordKey: body.recordKey, scopeKey, version: body.version });
+          result.emptied.push({ generation: body.generation, recordKey: body.recordKey, scopeKey, version: body.version });
         }
         continue;
       }
-      if (stored === body.version) {
+      if (stored?.version === body.version && stored.generation === body.generation) {
         continue;
       }
       if (budget.embedsStarted > 0 && budget.now() >= budget.deadlineAt) {
@@ -334,6 +359,7 @@ async function embedRepairBodies(
         recordKey: body.recordKey,
         scopeKey,
         vector,
+        generation: body.generation,
         version: body.version,
       });
     }
@@ -349,10 +375,13 @@ async function repairRecordsPage(input: RepairPassInput, page: readonly RepairRe
     scopeKeys,
     page.map((ref) => ref.recordKey)
   );
-  // A row is current ONLY when source_version === records.version. Missing,
+  // A row is current ONLY when source_version and source_generation match. Missing,
   // NULL, lower and higher all need validation against the current text.
   const candidates = page.filter((ref) =>
-    scopeKeys.some((scopeKey) => versions.get(versionKey(scopeKey, ref.recordKey)) !== ref.version)
+    scopeKeys.some((scopeKey) => {
+      const stored = versions.get(versionKey(scopeKey, ref.recordKey));
+      return stored?.version !== ref.version || stored.generation !== ref.generation;
+    })
   );
   if (candidates.length === 0) {
     return "ok";
@@ -575,11 +604,25 @@ export function createPostgresRepairStore(options: { leaseTtlMs?: number | undef
       });
     },
 
-    async complete(scope, fence) {
+    async complete(scope, fence, meta) {
       return await withPostgresTransaction(async (client): Promise<RepairCompletion> => {
+        if (meta) {
+          await assertConnectorManifestStreamSubsetWithClient(client, scope.connectorId, meta.manifest);
+        }
         const held = await pgFenceHeld(client, scope, fence, "UPDATE");
         if (!held) {
           return "lost";
+        }
+        if (meta) {
+          await client.query(
+            `INSERT INTO semantic_search_meta(connector_instance_id, connector_id, stream, fields_fingerprint, model_id, dimensions, distance_metric, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+             ON CONFLICT (connector_instance_id, stream) DO UPDATE SET
+               connector_id = EXCLUDED.connector_id, fields_fingerprint = EXCLUDED.fields_fingerprint,
+               model_id = EXCLUDED.model_id, dimensions = EXCLUDED.dimensions,
+               distance_metric = EXCLUDED.distance_metric, updated_at = EXCLUDED.updated_at`,
+            [meta.connectorInstanceId, meta.connectorId, meta.stream, meta.fieldsFingerprint, meta.modelId, meta.dimensions, meta.distanceMetric, new Date().toISOString()]
+          );
         }
         const passRevision = held.pass_dirty_revision === null ? null : Number(held.pass_dirty_revision);
         const cleared =
@@ -624,13 +667,14 @@ export function createPostgresRepairStore(options: { leaseTtlMs?: number | undef
         }
         await client.query(
           `WITH locked AS MATERIALIZED (
-             SELECT r.record_key, r.version FROM records r
+             SELECT r.record_key, r.version, r.semantic_generation FROM records r
               WHERE r.connector_instance_id = $1 AND r.stream = $2 AND r.record_key = ANY($3::text[]) AND NOT r.deleted
               ORDER BY r.record_key FOR SHARE)
            DELETE FROM semantic_search_blob b
-            USING unnest($4::text[], $5::text[], $6::bigint[]) AS d(scope_key, record_key, version), locked l
+           USING unnest($4::text[], $5::text[], $6::bigint[], $7::bigint[]) AS d(scope_key, record_key, version, generation), locked l
             WHERE b.connector_instance_id = $1 AND b.scope_key = d.scope_key AND b.record_key = d.record_key
-              AND l.record_key = d.record_key AND l.version = d.version`,
+              AND l.record_key = d.record_key AND l.version = d.version
+              AND (d.generation IS NULL OR l.semantic_generation = d.generation)`,
           [
             scope.connectorInstanceId,
             scope.stream,
@@ -638,6 +682,7 @@ export function createPostgresRepairStore(options: { leaseTtlMs?: number | undef
             items.map((item) => item.scopeKey),
             items.map((item) => item.recordKey),
             items.map((item) => item.version),
+            items.map((item) => item.generation),
           ]
         );
         return true;
@@ -688,12 +733,13 @@ export function createPostgresRepairStore(options: { leaseTtlMs?: number | undef
 
     async fetchRecords(scope, recordKeys) {
       const result = await postgresBulkQuery(
-        `SELECT record_key, version, record_json FROM records
+        `SELECT record_key, version, semantic_generation, record_json FROM records
           WHERE connector_instance_id = $1 AND stream = $2 AND record_key = ANY($3::text[]) AND deleted = FALSE`,
         [scope.connectorInstanceId, scope.stream, [...recordKeys]]
       );
       return result.rows.map((row) => ({
         data: row.record_json,
+        generation: Number(row.semantic_generation),
         recordKey: row.record_key as string,
         version: Number(row.version),
       }));
@@ -720,12 +766,13 @@ export function createPostgresRepairStore(options: { leaseTtlMs?: number | undef
 
     async recordsPage(scope, afterId, limit) {
       const result = await postgresBulkQuery(
-        `SELECT id, record_key, version FROM records
+        `SELECT id, record_key, version, semantic_generation FROM records
           WHERE connector_instance_id = $1 AND stream = $2 AND deleted = FALSE AND id > $3
           ORDER BY id ASC LIMIT $4`,
         [scope.connectorInstanceId, scope.stream, afterId, limit]
       );
       return result.rows.map((row) => ({
+        generation: Number(row.semantic_generation),
         id: Number(row.id),
         recordKey: row.record_key as string,
         version: Number(row.version),
@@ -769,6 +816,28 @@ export function createPostgresRepairStore(options: { leaseTtlMs?: number | undef
       });
     },
 
+    async resetIdentityPass(scope, fence, { identity, manifest }) {
+      return await withPostgresTransaction(async (client) => {
+        await assertConnectorManifestStreamSubsetWithClient(client, scope.connectorId, manifest);
+        if (!(await pgFenceHeld(client, scope, fence, "UPDATE"))) {
+          return false;
+        }
+        await client.query(
+          "DELETE FROM semantic_search_blob WHERE connector_instance_id = $1 AND scope_key LIKE $2 ESCAPE '\\'",
+          [scope.connectorInstanceId, semanticScopeLikePattern(scope.stream)]
+        );
+        const revision = await pgEnsureDirtyAndRevision(client, scope);
+        await client.query(
+          `UPDATE semantic_search_backfill_progress
+              SET pass_kind = 'rebuild', fields_fingerprint = $5, model_id = $6, dimensions = $7, distance_metric = $8,
+                  cursor_key = NULL, pass_dirty_revision = $9, updated_at = $10
+            WHERE connector_instance_id = $1 AND stream = $2 AND lease_owner = $3 AND lease_generation = $4`,
+          [scope.connectorInstanceId, scope.stream, fence.owner, fence.generation, identity.fieldsFingerprint, identity.modelId, identity.dimensions, identity.distanceMetric, revision, new Date().toISOString()]
+        );
+        return true;
+      });
+    },
+
     async saveCursor(scope, fence, cursor) {
       const result = await postgresQuery(
         `UPDATE semantic_search_backfill_progress
@@ -789,20 +858,23 @@ export function createPostgresRepairStore(options: { leaseTtlMs?: number | undef
     },
 
     async versions(scope, scopeKeys, recordKeys) {
-      const out = new Map<string, number | null>();
+      const out = new Map<string, { generation: number | null; version: number | null }>();
       if (scopeKeys.length === 0 || recordKeys.length === 0) {
         return out;
       }
       // EXACT scope keys, never a LIKE on the middle PK column.
       const result = await postgresBulkQuery(
-        `SELECT scope_key, record_key, source_version FROM semantic_search_blob
+        `SELECT scope_key, record_key, source_version, source_generation FROM semantic_search_blob
           WHERE connector_instance_id = $1 AND scope_key = ANY($2::text[]) AND record_key = ANY($3::text[])`,
         [scope.connectorInstanceId, [...scopeKeys], [...recordKeys]]
       );
       for (const row of result.rows) {
         out.set(
           versionKey(row.scope_key as string, row.record_key as string),
-          row.source_version === null ? null : Number(row.source_version)
+          {
+            generation: row.source_generation === null ? null : Number(row.source_generation),
+            version: row.source_version === null ? null : Number(row.source_version),
+          }
         );
       }
       return out;
@@ -836,19 +908,21 @@ export function createPostgresRepairStore(options: { leaseTtlMs?: number | undef
         // the record's must stay repairable.
         await client.query(
           `WITH locked AS MATERIALIZED (
-             SELECT r.record_key, r.version FROM records r
-              WHERE r.connector_instance_id = $7 AND r.stream = $8 AND r.record_key = ANY($4::text[]) AND NOT r.deleted
+             SELECT r.record_key, r.version, r.semantic_generation FROM records r
+              WHERE r.connector_instance_id = $8 AND r.stream = $9 AND r.record_key = ANY($4::text[]) AND NOT r.deleted
               ORDER BY r.record_key FOR SHARE)
-           INSERT INTO semantic_search_blob (connector_id, connector_instance_id, scope_key, record_key, embedding, source_version)
+           INSERT INTO semantic_search_blob (connector_id, connector_instance_id, scope_key, record_key, embedding, source_version, source_generation)
            SELECT rows.connector_id, rows.connector_instance_id, rows.scope_key, rows.record_key,
-                  rows.embedding::${vectorMode()}, rows.version
-             FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::bigint[])
-               AS rows(connector_id, connector_instance_id, scope_key, record_key, embedding, version)
+                  rows.embedding::${vectorMode()}, rows.version, rows.generation
+             FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::bigint[], $7::bigint[])
+               AS rows(connector_id, connector_instance_id, scope_key, record_key, embedding, version, generation)
              JOIN locked l ON l.record_key = rows.record_key AND l.version = rows.version
+                AND (rows.generation IS NULL OR l.semantic_generation = rows.generation)
            ON CONFLICT (connector_instance_id, scope_key, record_key) DO UPDATE
-             SET embedding = EXCLUDED.embedding, source_version = EXCLUDED.source_version
+             SET embedding = EXCLUDED.embedding, source_version = EXCLUDED.source_version, source_generation = EXCLUDED.source_generation
              WHERE semantic_search_blob.embedding IS DISTINCT FROM EXCLUDED.embedding
-                OR semantic_search_blob.source_version IS DISTINCT FROM EXCLUDED.source_version`,
+                OR semantic_search_blob.source_version IS DISTINCT FROM EXCLUDED.source_version
+                OR semantic_search_blob.source_generation IS DISTINCT FROM EXCLUDED.source_generation`,
           [
             rows.map((entry) => entry.connectorId),
             rows.map((entry) => entry.connectorInstanceId),
@@ -856,6 +930,7 @@ export function createPostgresRepairStore(options: { leaseTtlMs?: number | undef
             rows.map((entry) => entry.recordKey),
             rows.map((entry) => JSON.stringify(Array.from(entry.vector))),
             rows.map((entry) => entry.version),
+            rows.map((entry) => entry.generation),
             scope.connectorInstanceId,
             scope.stream,
           ]
@@ -876,7 +951,7 @@ export interface RepairVectorIndex {
     connectorInstanceId: string;
     recordKeys: string[];
     scopeKeys: string[];
-  }) => Map<string, number | null>;
+  }) => Map<string, { generation: number | null; version: number | null }>;
   pageKeys: (args: {
     afterRecordKey: string | null;
     connectorInstanceId: string;
@@ -925,12 +1000,12 @@ function sqliteEnsureDirtyAndRevision(scope: RepairScope): number {
   return Number(row?.revision ?? 0);
 }
 
-function sqliteRecordState(scope: RepairScope, recordKey: string): { deleted: boolean; version: number } | null {
+function sqliteRecordState(scope: RepairScope, recordKey: string): { deleted: boolean; generation: number; version: number } | null {
   const [row] = sqliteRows(
-    "SELECT version, deleted FROM records WHERE connector_instance_id = ? AND stream = ? AND record_key = ?",
+    "SELECT version, semantic_generation, deleted FROM records WHERE connector_instance_id = ? AND stream = ? AND record_key = ?",
     [scope.connectorInstanceId, scope.stream, recordKey]
   );
-  return row ? { deleted: Boolean(row.deleted), version: Number(row.version) } : null;
+  return row ? { deleted: Boolean(row.deleted), generation: Number(row.semantic_generation), version: Number(row.version) } : null;
 }
 
 export function createSqliteRepairStore(
@@ -1011,11 +1086,24 @@ export function createSqliteRepairStore(
       });
     },
 
-    complete(scope, fence) {
+    complete(scope, fence, meta) {
       return writeTransaction((): RepairCompletion => {
+        if (meta) {
+          assertConnectorManifestStreamSubsetSync(scope.connectorId, meta.manifest);
+        }
         const held = sqliteFenceHeld(scope, fence);
         if (!held) {
           return "lost";
+        }
+        if (meta) {
+          sqliteRun(
+            `INSERT INTO semantic_search_meta(connector_instance_id, connector_id, stream, fields_fingerprint, model_id, dimensions, distance_metric, updated_at)
+             VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(connector_instance_id, stream) DO UPDATE SET connector_id=excluded.connector_id,
+             fields_fingerprint=excluded.fields_fingerprint, model_id=excluded.model_id,
+             dimensions=excluded.dimensions, distance_metric=excluded.distance_metric, updated_at=excluded.updated_at`,
+            [meta.connectorInstanceId, meta.connectorId, meta.stream, meta.fieldsFingerprint, meta.modelId, meta.dimensions, meta.distanceMetric, new Date().toISOString()]
+          );
         }
         const passRevision = held.pass_dirty_revision === null ? null : Number(held.pass_dirty_revision);
         const cleared =
@@ -1055,7 +1143,12 @@ export function createSqliteRepairStore(
         const byScope = new Map<string, string[]>();
         for (const item of items) {
           const state = sqliteRecordState(scope, item.recordKey);
-          if (state && !state.deleted && state.version === item.version) {
+          if (
+            state &&
+            !state.deleted &&
+            state.version === item.version &&
+            (item.generation === undefined || state.generation === item.generation)
+          ) {
             byScope.set(item.scopeKey, [...(byScope.get(item.scopeKey) ?? []), item.recordKey]);
           }
         }
@@ -1099,11 +1192,12 @@ export function createSqliteRepairStore(
         return [];
       }
       return sqliteRows(
-        `SELECT record_key, version, record_json FROM records
+        `SELECT record_key, version, semantic_generation, record_json FROM records
           WHERE connector_instance_id = ? AND stream = ? AND deleted = 0 AND record_key IN (${placeholders(recordKeys)})`,
         [scope.connectorInstanceId, scope.stream, ...recordKeys]
       ).map((row) => ({
         data: row.record_json,
+        generation: Number(row.semantic_generation),
         recordKey: row.record_key as string,
         version: Number(row.version),
       }));
@@ -1119,11 +1213,11 @@ export function createSqliteRepairStore(
 
     recordsPage(scope, afterId, limit) {
       return sqliteRows(
-        `SELECT id, record_key, version FROM records
+        `SELECT id, record_key, version, semantic_generation FROM records
           WHERE connector_instance_id = ? AND stream = ? AND deleted = 0 AND id > ?
           ORDER BY id ASC LIMIT ?`,
         [scope.connectorInstanceId, scope.stream, afterId, limit]
-      ).map((row) => ({ id: Number(row.id), recordKey: row.record_key as string, version: Number(row.version) }));
+      ).map((row) => ({ generation: Number(row.semantic_generation), id: Number(row.id), recordKey: row.record_key as string, version: Number(row.version) }));
     },
 
     release(scope, fence) {
@@ -1158,6 +1252,29 @@ export function createSqliteRepairStore(
             fence.owner,
             fence.generation,
           ]
+        );
+        return true;
+      });
+    },
+
+    resetIdentityPass(scope, fence, { identity, manifest }) {
+      return writeTransaction(() => {
+        assertConnectorManifestStreamSubsetSync(scope.connectorId, manifest);
+        if (!sqliteFenceHeld(scope, fence)) {
+          return false;
+        }
+        getIndex().deleteByConnectorStream({
+          connectorId: scope.connectorId,
+          connectorInstanceId: scope.connectorInstanceId,
+          stream: scope.stream,
+        });
+        const revision = sqliteEnsureDirtyAndRevision(scope);
+        sqliteRun(
+          `UPDATE semantic_search_backfill_progress
+              SET pass_kind = 'rebuild', fields_fingerprint = ?, model_id = ?, dimensions = ?, distance_metric = ?,
+                  cursor_key = NULL, pass_dirty_revision = ?, updated_at = ?
+            WHERE connector_instance_id = ? AND stream = ? AND lease_owner = ? AND lease_generation = ?`,
+          [identity.fieldsFingerprint, identity.modelId, identity.dimensions, identity.distanceMetric, revision, new Date().toISOString(), scope.connectorInstanceId, scope.stream, fence.owner, fence.generation]
         );
         return true;
       });
@@ -1201,7 +1318,7 @@ export function createSqliteRepairStore(
         // one synchronous transaction, so nothing can interleave between them.
         const current = entries.filter((entry) => {
           const state = sqliteRecordState(scope, entry.recordKey);
-          return state !== null && !state.deleted && state.version === entry.version;
+          return state !== null && !state.deleted && state.version === entry.version && state.generation === entry.generation;
         });
         if (current.length > 0) {
           getIndex().upsertMany(current);

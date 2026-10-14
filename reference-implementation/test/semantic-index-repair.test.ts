@@ -168,6 +168,15 @@ async function recordVersion(recordKey: string): Promise<number> {
   return Number(rows[0]?.version);
 }
 
+async function recordSemanticGeneration(recordKey: string): Promise<number> {
+  const rows = await rowsOf(
+    "SELECT semantic_generation FROM records WHERE connector_instance_id = ? AND stream = ? AND record_key = ?",
+    "SELECT semantic_generation FROM records WHERE connector_instance_id = $1 AND stream = $2 AND record_key = $3",
+    [INSTANCE_ID, STREAM, recordKey]
+  );
+  return Number(rows[0]?.semantic_generation);
+}
+
 async function setStoredVersion(recordKey: string, version: number | null): Promise<void> {
   if (isPostgresStorageBackend()) {
     await exec(
@@ -234,7 +243,14 @@ async function ingest(key: string, text: string): Promise<number> {
 
 /** Live publish of the record's CURRENT version, exactly like the post-ack lane. */
 async function publish(key: string, text: string): Promise<void> {
-  await maintainRecordIndexes(TARGET, subject(key, text), await recordVersion(key), {});
+  await maintainRecordIndexes(
+    TARGET,
+    subject(key, text),
+    await recordVersion(key),
+    {},
+    undefined,
+    await recordSemanticGeneration(key)
+  );
 }
 
 async function remove(key: string): Promise<void> {
@@ -266,6 +282,10 @@ function spyStore(options: { leaseTtlMs?: number; noRelease?: boolean } = {}): S
     deleteStreamRows: (scope, fence) => {
       calls.push("deleteStreamRows");
       return inner.deleteStreamRows(scope, fence);
+    },
+    resetIdentityPass: (scope, fence, args) => {
+      calls.push("resetIdentityPass");
+      return inner.resetIdentityPass(scope, fence, args);
     },
     fences,
     release: (scope, fence) => (options.noRelease ? Promise.resolve() : inner.release(scope, fence)),
@@ -716,7 +736,7 @@ scenario(
     const store = spyStore();
     assert.deepEqual(await statuses({ maxPages: 1, pageSize: 1, store }, ["subject", "body"]), ["partial"]);
     assert.equal(
-      store.calls.filter((call) => call === "deleteStreamRows").length,
+      store.calls.filter((call) => call === "resetIdentityPass").length,
       1,
       "identity change is the only whole-stream delete"
     );
@@ -728,7 +748,7 @@ scenario(
     assert.equal(await computeIndexState(), "stale");
     assert.deepEqual(await statuses({ pageSize: 1, store }, ["subject", "body"]), ["complete"]);
     assert.equal(
-      store.calls.filter((call) => call === "deleteStreamRows").length,
+      store.calls.filter((call) => call === "resetIdentityPass").length,
       1,
       "the resumed rebuild does not delete again"
     );

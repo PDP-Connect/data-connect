@@ -167,6 +167,7 @@ interface PgRow {
   record_json: unknown;
   record_json_bytes?: number | string;
   record_key: string;
+  semantic_generation?: number | string;
   semantic_time?: string | null;
   sha256?: string;
   size_bytes?: number | string;
@@ -269,6 +270,7 @@ interface IngestOutcome {
   changed: boolean;
   retainedSizeDelta?: JsonObject;
   self_healed?: boolean;
+  semanticGeneration?: number;
   version?: number;
 }
 
@@ -276,6 +278,7 @@ interface DurableIngestOutcome {
   kind: "noop" | "changed";
   op?: "upsert" | "delete";
   retainedSizeDelta?: JsonObject;
+  semanticGeneration?: number;
   selfHeal?: boolean;
   version?: number;
 }
@@ -1727,15 +1730,19 @@ async function writePostgresIngestMutation({
   storedPrimaryKeyText: string;
   storedSemanticTime: string | null;
   current: PgRow | null;
-}): Promise<number> {
+}): Promise<{ recordJsonBytes: number; semanticGeneration: number }> {
   let nextRecordJsonBytes = 0;
+  let semanticGeneration = 0;
   if (op === "delete") {
-    await client.query(
+    const deleted = await client.query(
       `UPDATE records
-       SET connector_id = $6, deleted = TRUE, deleted_at = $4, emitted_at = $4, version = $5
-       WHERE connector_instance_id = $1 AND stream = $2 AND record_key = $3`,
+       SET connector_id = $6, deleted = TRUE, deleted_at = $4, emitted_at = $4, version = $5,
+           semantic_generation = nextval('records_semantic_generation_seq')
+       WHERE connector_instance_id = $1 AND stream = $2 AND record_key = $3
+       RETURNING semantic_generation`,
       [connectorInstanceId, stream, recordKey, effectiveEmittedAt, nextVersion, connectorId]
     );
+    semanticGeneration = Number(deleted.rows[0]?.semantic_generation);
     await client.query(
       `INSERT INTO record_changes
          (connector_id, connector_instance_id, stream, record_key, version, record_json, emitted_at, deleted, deleted_at)
@@ -1753,19 +1760,20 @@ async function writePostgresIngestMutation({
   } else {
     const stored = await client.query(
       `INSERT INTO records
-         (connector_id, connector_instance_id, stream, record_key, record_json, emitted_at, version, deleted, deleted_at, cursor_value, primary_key_text, semantic_time)
-       VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, FALSE, NULL, $8, $9, $10)
+         (connector_id, connector_instance_id, stream, record_key, record_json, emitted_at, version, semantic_generation, deleted, deleted_at, cursor_value, primary_key_text, semantic_time)
+       VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, nextval('records_semantic_generation_seq'), FALSE, NULL, $8, $9, $10)
        ON CONFLICT (connector_instance_id, stream, record_key) DO UPDATE
          SET connector_id = EXCLUDED.connector_id,
              record_json = EXCLUDED.record_json,
              emitted_at = EXCLUDED.emitted_at,
              version = EXCLUDED.version,
+             semantic_generation = nextval('records_semantic_generation_seq'),
              deleted = FALSE,
              deleted_at = NULL,
              cursor_value = EXCLUDED.cursor_value,
              primary_key_text = EXCLUDED.primary_key_text,
              semantic_time = EXCLUDED.semantic_time
-       RETURNING COALESCE(octet_length(record_json::text), 0)::bigint AS record_json_bytes`,
+       RETURNING COALESCE(octet_length(record_json::text), 0)::bigint AS record_json_bytes, semantic_generation`,
       [
         connectorId,
         connectorInstanceId,
@@ -1780,6 +1788,7 @@ async function writePostgresIngestMutation({
       ]
     );
     nextRecordJsonBytes = Number(stored.rows[0]?.record_json_bytes || 0);
+    semanticGeneration = Number(stored.rows[0]?.semantic_generation);
     await client.query(
       `INSERT INTO record_changes
          (connector_id, connector_instance_id, stream, record_key, version, record_json, emitted_at, deleted, deleted_at)
@@ -1788,7 +1797,7 @@ async function writePostgresIngestMutation({
     );
   }
 
-  return nextRecordJsonBytes;
+  return { recordJsonBytes: nextRecordJsonBytes, semanticGeneration };
 }
 
 type PostgresTransactionClient = Parameters<Parameters<typeof withPostgresTransaction>[0]>[0];
@@ -1992,7 +2001,7 @@ export async function postgresIngestRecord(
 
       const nextVersion = await allocateNextVersion(client, resolvedConnectorId, connectorInstanceId, stream);
       const currentRecordJsonBytes = current && !current.deleted ? Number(current.record_json_bytes || 0) : 0;
-      const nextRecordJsonBytes = await writePostgresIngestMutation({
+      const { recordJsonBytes: nextRecordJsonBytes, semanticGeneration } = await writePostgresIngestMutation({
         client,
         connectorId,
         connectorInstanceId,
@@ -2048,6 +2057,7 @@ export async function postgresIngestRecord(
           stream,
         },
         selfHeal,
+        semanticGeneration,
         version: nextVersion,
       });
     },
@@ -2066,6 +2076,7 @@ export async function postgresIngestRecord(
     accepted: true,
     changed: true,
     ...(outcome.retainedSizeDelta ? { retainedSizeDelta: outcome.retainedSizeDelta } : {}),
+    ...(outcome.semanticGeneration === undefined ? {} : { semanticGeneration: outcome.semanticGeneration }),
     ...(outcome.version === undefined ? {} : { version: outcome.version }),
   };
   if (outcome.selfHeal) {

@@ -318,7 +318,8 @@ export async function runRestore(args: {
                     FROM jsonb_each(hist.record_json) AS h(key, value)
                    WHERE h.key = ANY($5::text[])
                 ),
-                version = cur.version + 1
+                version = cur.version + 1,
+                semantic_generation = nextval('records_semantic_generation_seq')
            FROM record_changes hist
           WHERE cur.connector_instance_id = $1
             AND cur.stream = $2
@@ -343,6 +344,16 @@ export async function runRestore(args: {
       } else {
         skippedConcurrent += 1;
       }
+    }
+    if (restoredCount > 0) {
+      await client.query(
+        `INSERT INTO search_index_dirty(connector_instance_id, connector_id, stream, dirty, marked_at, revision)
+         SELECT $1, connector_id, $2, 1, $3, 1 FROM records
+          WHERE connector_instance_id = $1 AND stream = $2 LIMIT 1
+         ON CONFLICT(connector_instance_id, stream) DO UPDATE SET connector_id = excluded.connector_id,
+           dirty = 1, marked_at = excluded.marked_at, revision = search_index_dirty.revision + 1`,
+        [args.connectorInstanceId, MESSAGES_STREAM, new Date().toISOString()]
+      );
     }
     await client.query("COMMIT");
     return { ...base, backupTable: table, blankedCount, restorableCount, restoredCount, skippedConcurrent };

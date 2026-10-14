@@ -54,6 +54,7 @@ interface SemanticIndexEntry {
   vector?: Iterable<number>;
   /** See search-semantic.ts's `SemanticIndexEntry.version` header — backfill-only. */
   version?: number;
+  generation?: number;
 }
 
 interface NormalizedSemanticIndexEntry {
@@ -63,6 +64,7 @@ interface NormalizedSemanticIndexEntry {
   scopeKey: string;
   values: number[];
   version?: number;
+  generation?: number;
 }
 
 interface SemanticHit {
@@ -665,6 +667,9 @@ function normalizedSemanticRow(
   if (typeof entry.version === "number") {
     row.version = entry.version;
   }
+  if (typeof entry.generation === "number") {
+    row.generation = entry.generation;
+  }
   return row;
 }
 
@@ -715,15 +720,16 @@ async function insertSemanticRows(
     // (NULL when the caller does not know it: unknown, never current). The
     // live publisher runs under the records FOR UPDATE version check, so it is
     // authoritative and needs no stored-version guard. An unchanged
-    // (embedding, source_version) pair writes nothing.
-    `INSERT INTO semantic_search_blob (connector_id, connector_instance_id, scope_key, record_key, embedding, source_version)
-     SELECT rows.connector_id, rows.connector_instance_id, rows.scope_key, rows.record_key, rows.embedding::${vectorMode ? "vector" : "jsonb"}, rows.version
-     FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::bigint[])
-       AS rows(connector_id, connector_instance_id, scope_key, record_key, embedding, version)
+    // (embedding, source_version, source_generation) triple writes nothing.
+    `INSERT INTO semantic_search_blob (connector_id, connector_instance_id, scope_key, record_key, embedding, source_version, source_generation)
+     SELECT rows.connector_id, rows.connector_instance_id, rows.scope_key, rows.record_key, rows.embedding::${vectorMode ? "vector" : "jsonb"}, rows.version, rows.generation
+     FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::bigint[], $7::bigint[])
+       AS rows(connector_id, connector_instance_id, scope_key, record_key, embedding, version, generation)
      ON CONFLICT (connector_instance_id, scope_key, record_key) DO UPDATE
-       SET embedding = EXCLUDED.embedding, source_version = EXCLUDED.source_version
+       SET embedding = EXCLUDED.embedding, source_version = EXCLUDED.source_version, source_generation = EXCLUDED.source_generation
        WHERE semantic_search_blob.embedding IS DISTINCT FROM EXCLUDED.embedding
-          OR semantic_search_blob.source_version IS DISTINCT FROM EXCLUDED.source_version`,
+          OR semantic_search_blob.source_version IS DISTINCT FROM EXCLUDED.source_version
+          OR semantic_search_blob.source_generation IS DISTINCT FROM EXCLUDED.source_generation`,
     [
       rows.map((entry) => entry.connectorId),
       rows.map((entry) => entry.connectorInstanceId),
@@ -731,6 +737,7 @@ async function insertSemanticRows(
       rows.map((entry) => entry.recordKey),
       rows.map((entry) => JSON.stringify(entry.values)),
       rows.map((entry) => entry.version ?? null),
+      rows.map((entry) => entry.generation ?? null),
     ]
   );
   return rows.length;
