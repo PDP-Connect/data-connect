@@ -84,32 +84,56 @@ export class World {
     return w;
   }
 
-  /** Wraps fetch: cuts the network during outages, logs each lifecycle call. */
+  /**
+   * Delay, in ms of real time, before a lifecycle call's response is handed back to the client.
+   * Lets a test make an earlier request finish after a later one, as a real network can.
+   */
+  responseDelayMs: (call: { kind: Call["kind"]; report?: string }) => number = () => 0;
+
+  /**
+   * Wraps fetch: cuts the network during outages, logs each lifecycle call. The log is in the order
+   * the client sent the calls, not the order the responses came back: concurrent requests finish in
+   * any order, and the order a test can rely on is the one the client chose.
+   */
   readonly fetchImpl: typeof fetch = async (input, init) => {
     const body = typeof init?.body === "string" ? new URLSearchParams(init.body) : new URLSearchParams();
     const kind: Call["kind"] = body.has("report") || body.has("pdpp_disposition") ? "write" : "query";
     const report = body.get("report") ?? undefined;
     const at = this.clock.now;
+    const call: Call = { at, kind, status: 0, ...(report ? { report } : {}) };
+    this.calls.push(call);
     if (this.down(at)) {
-      this.calls.push({ at, kind, status: 0, ...(report ? { report } : {}) });
       throw new TypeError("fetch failed");
     }
     this.inflight += 1;
     try {
       const resp = await fetch(input, init);
-      const call: Call = { at, kind, status: resp.status, ...(report ? { report } : {}) };
+      call.status = resp.status;
       if (resp.status === 200) {
         const j = (await resp.clone().json()) as { grants?: { held_data?: string; error?: string }[] };
         const e = j.grants?.[0];
         if (e?.held_data) call.held = e.held_data;
         if (e?.error) call.error = e.error;
       }
-      this.calls.push(call);
+      const delay = this.responseDelayMs({ kind, ...(report ? { report } : {}) });
+      if (delay > 0) await new Promise((r) => setTimeout(r, delay));
       return resp;
     } finally {
       this.inflight -= 1;
     }
   };
+
+  /** Counts a transport call as in flight from the moment the client makes it until it returns. */
+  #tracked<A extends unknown[], R>(f: (...a: A) => Promise<R>): (...a: A) => Promise<R> {
+    return async (...a) => {
+      this.inflight += 1;
+      try {
+        return await f(...a);
+      } finally {
+        this.inflight -= 1;
+      }
+    };
+  }
 
   down(at = this.clock.now): boolean {
     return this.outages.some(([a, b]) => at >= a && at < b);
@@ -118,19 +142,19 @@ export class World {
   #build(initialize: boolean): HeldDataClient {
     const client = new HeldDataClient({
       now: () => this.clock.now,
-      status: httpStatusTransport({
+      status: this.#tracked(httpStatusTransport({
         asBaseUrl: this.h.asUrl,
         // Any token the AS issued for the grant works for a query; a recovery token too.
         credentialFor: () => this.recoveryToken ?? this.refreshToken,
         fetchImpl: this.fetchImpl,
-      }),
-      report: httpReportTransport({
+      })),
+      report: this.#tracked(httpReportTransport({
         asBaseUrl: this.h.asUrl,
         // A public client's grant tokens stop authenticating writes when the grant ends; only recovery does.
         currentTokenFor: () => this.recoveryToken,
         fetchImpl: this.fetchImpl,
         now: () => this.clock.now,
-      }),
+      })),
       store: this.app,
       storage: this.storage,
       ...(initialize ? { initialize: true } : {}),
@@ -170,13 +194,15 @@ export class World {
     return ok;
   }
 
+  /**
+   * Wait until no lifecycle call is in flight and the client has run what each answer set off. The
+   * client continues in microtasks after a transport returns, and a macrotask turn cannot start before
+   * they drain, so one turn with nothing in flight means nothing is left. No timer length is involved.
+   */
   async settle(): Promise<void> {
-    for (let i = 0; i < 3; i += 1) {
-      await new Promise((r) => setTimeout(r, 4));
-      while (this.inflight > 0) {
-        await new Promise((r) => setTimeout(r, 4));
-      }
-    }
+    do {
+      await new Promise((r) => setImmediate(r));
+    } while (this.inflight > 0);
   }
 
   /** Advance true time to `until`, ticking the client and trying to use the data at each step. */

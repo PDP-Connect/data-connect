@@ -958,3 +958,47 @@ describe("J6b: the same hold when the client deletes at its deadline", () => {
     );
   });
 });
+
+/* ------------------------------------------------------------------------------------------------
+ * J6c: the write log under reordered responses (regression for a flake in J6 and J5).
+ *
+ * The client sends `received` and `retained` (or `completed`) back to back; nothing makes the AS answer
+ * them in that order. The journey log used to record each call when its response came back, so under
+ * load a later report could be logged first and an exact-order assertion failed about 1 run in 20.
+ * No `completed` was ever sent while the hold was open (Core 1415): the log now records the order the
+ * client sent, and this case forces the reordering that load only produced by chance.
+ * ---------------------------------------------------------------------------------------------- */
+describe("J6c: write log order when the receipt response is slow", () => {
+  it("logs the order the client sent, and sends no completion while the hold is open", async () => {
+    const invoice = { id: "inv1", stream: "invoices" };
+    await journey(
+      {
+        policy: { disposeAt: "promptly" },
+        legalRetention: () => ({
+          scope: "invoices for 2026",
+          basis: "tax record-keeping law",
+          end: { kind: "event", text: "close of the 2026 tax audit" },
+          records: [invoice],
+        }),
+      },
+      async (w) => {
+        w.responseDelayMs = (c) => (c.report === "received" ? 60 : 0);
+        const t0 = w.clock.now;
+        w.firstSync([{ ...invoice, text: "invoice for 2026" }]);
+        await w.advance(t0 + HOUR);
+        await w.ownerErase();
+        await w.recover();
+        await w.advance(t0 + 25 * HOUR);
+        await w.settle();
+        assert.deepEqual(
+          w.writes().map((x) => `${x.report}:${x.status}`),
+          ["received:200", "retained:200"],
+          "send order, although the retained response came back first",
+        );
+        await w.advance(t0 + 60 * DAY);
+        await w.settle();
+        assert.equal(w.writes().filter((x) => x.report === "completed").length, 0, "no completion while the hold is open");
+      },
+    );
+  });
+});
