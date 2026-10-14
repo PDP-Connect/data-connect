@@ -28,6 +28,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { RECOVERY_ACTIONS } from "../runtime/connector-gap-bounding.ts";
+import { cursorAuditFact } from "../runtime/cursor-audit-fact.ts";
 import {
   loadSyncState,
   type RuntimeRunConnectorOptions,
@@ -239,6 +240,17 @@ interface JsonRecord {
 function asRecord(value: unknown): JsonRecord {
   assert.ok(value && typeof value === "object" && !Array.isArray(value), "expected an object payload");
   return value as JsonRecord;
+}
+
+/** Expected `stream:digest` key for a staged/advanced event carrying `{ cursor }`. */
+function cursorEventKey(stream: string, cursor: string): string {
+  return `${stream}:${cursorAuditFact({ cursor }).cursor_sha256}`;
+}
+
+/** Actual `stream:digest` key; also proves the full cursor is no longer embedded. */
+function eventCursorKey(event: { stream_id?: string | null; data: Record<string, unknown> }): string {
+  assert.equal("cursor" in event.data, false, "checkpoint event must not embed the full cursor");
+  return `${event.stream_id}:${event.data.cursor_sha256}`;
 }
 
 function asArray(value: unknown): readonly JsonValue[] {
@@ -2610,12 +2622,12 @@ test("Collection Profile conformance", async (t) => {
       assert.equal(stagedEvents.length, 2);
       const [firstStaged, secondStaged] = stagedEvents;
       assert.ok(firstStaged && secondStaged, "expected two staged events");
-      assert.deepEqual(firstStaged.data.cursor, { cursor: "cursor_1" });
-      assert.deepEqual(secondStaged.data.cursor, { cursor: "cursor_2" });
+      assert.equal(eventCursorKey(firstStaged), cursorEventKey(String(firstStaged.stream_id), "cursor_1"));
+      assert.equal(eventCursorKey(secondStaged), cursorEventKey(String(secondStaged.stream_id), "cursor_2"));
 
       const advancedEvent = (runTimeline.data || []).find((event) => event.event_type === "run.state_advanced");
       assert.ok(advancedEvent);
-      assert.deepEqual(advancedEvent.data.cursor, { cursor: "cursor_2" });
+      assert.equal(eventCursorKey(advancedEvent), cursorEventKey(String(advancedEvent.stream_id), "cursor_2"));
     } finally {
       cleanup();
       await closeServer(server);
@@ -2711,7 +2723,7 @@ rl.on('line', (line) => {
         const [firstStaged] = stagedEvents;
         assert.ok(firstStaged, "expected one staged event");
         assert.equal(firstStaged.stream_id, "items");
-        assert.deepEqual(firstStaged.data.cursor, { cursor: "cursor_items_1" });
+        assert.equal(eventCursorKey(firstStaged), cursorEventKey("items", "cursor_items_1"));
 
         const failedEvent = (runTimeline.data || []).find((event) => event.event_type === "run.failed");
         assert.ok(failedEvent);
@@ -2790,12 +2802,12 @@ rl.on('line', (line) => {
         assert.equal(stagedEvents.length, 2);
         assert.equal(advancedEvents.length, 2);
         assert.deepEqual(
-          new Set(stagedEvents.map((event) => `${event.stream_id}:${asRecord(event.data.cursor).cursor}`)),
-          new Set(["items:cursor_items_success", "other_items:cursor_other_success"])
+          new Set(stagedEvents.map((event) => eventCursorKey(event))),
+          new Set([cursorEventKey("items", "cursor_items_success"), cursorEventKey("other_items", "cursor_other_success")])
         );
         assert.deepEqual(
-          new Set(advancedEvents.map((event) => `${event.stream_id}:${asRecord(event.data.cursor).cursor}`)),
-          new Set(["items:cursor_items_success", "other_items:cursor_other_success"])
+          new Set(advancedEvents.map((event) => eventCursorKey(event))),
+          new Set([cursorEventKey("items", "cursor_items_success"), cursorEventKey("other_items", "cursor_other_success")])
         );
         assert.deepEqual(
           advancedEvents.map((event) => event.data.state_streams_committed as number).sort((a, b) => a - b),
@@ -2893,8 +2905,8 @@ rl.on('line', (line) => {
       assert.equal(stagedEvents.length, 2);
       assert.equal(advancedEvents.length, 0);
       assert.deepEqual(
-        new Set(stagedEvents.map((event) => `${event.stream_id}:${asRecord(event.data.cursor).cursor}`)),
-        new Set(["items:cursor_items_failed", "other_items:cursor_other_failed"])
+        new Set(stagedEvents.map((event) => eventCursorKey(event))),
+        new Set([cursorEventKey("items", "cursor_items_failed"), cursorEventKey("other_items", "cursor_other_failed")])
       );
 
       const failedEvent = (runTimeline.data || []).find((event) => event.event_type === "run.failed");
@@ -3074,7 +3086,10 @@ rl.on('line', (line) => {
         const [firstCommitFailed] = commitFailedEvents;
         assert.ok(firstCommitFailed, "expected one commit-failed event");
         assert.equal(firstCommitFailed.stream_id, "other_items");
-        assert.deepEqual(firstCommitFailed.data.cursor, { cursor: "other_items_cursor_partial_commit" });
+        assert.equal(
+          eventCursorKey(firstCommitFailed),
+          cursorEventKey("other_items", "other_items_cursor_partial_commit")
+        );
         assert.equal(firstCommitFailed.data.state_streams_staged, 2);
         assert.equal(firstCommitFailed.data.state_streams_committed, 1);
         // biome-ignore lint/performance/useTopLevelRegex: localized test assertion preserves its explicit contract.
@@ -8895,8 +8910,8 @@ rl.on('line', (line) => {
       assert.equal(stagedEvents.length, 2);
       assert.equal(advancedEvents.length, 0);
       assert.deepEqual(
-        new Set(stagedEvents.map((event) => `${event.stream_id}:${asRecord(event.data.cursor).cursor}`)),
-        new Set(["items:cursor_items_done_failed", "other_items:cursor_other_done_failed"])
+        new Set(stagedEvents.map((event) => eventCursorKey(event))),
+        new Set([cursorEventKey("items", "cursor_items_done_failed"), cursorEventKey("other_items", "cursor_other_done_failed")])
       );
 
       const failedEvent = (runTimeline.data || []).find((event) => event.event_type === "run.failed");

@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
 import Database from "./helpers/sqlite-driver.ts";
 import { emitSpineEvent, type SpineEventRecord } from "../lib/spine.ts";
+import { cursorAuditFact } from "../runtime/cursor-audit-fact.ts";
 import { runConnector } from "../runtime/index.ts";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { closeDb as closeDbUntyped, getDb as getDbUntyped, initDb as initDbUntyped } from "../server/db.ts";
@@ -2362,7 +2363,11 @@ rl.on('line', (line) => {
       const commitFailedEvent = commitFailedEvents[0];
       assert.ok(commitFailedEvent, "expected a run.state_commit_failed event");
       assert.equal(commitFailedEvent.stream_id, "other_items");
-      assert.deepEqual(commitFailedEvent.data.cursor, { cursor: "other_items_cursor_partial_commit" });
+      assert.equal("cursor" in commitFailedEvent.data, false, "commit-failed event must not embed the full cursor");
+      assert.deepEqual(
+        { cursor_bytes: commitFailedEvent.data.cursor_bytes, cursor_sha256: commitFailedEvent.data.cursor_sha256 },
+        cursorAuditFact({ cursor: "other_items_cursor_partial_commit" })
+      );
       assert.equal(commitFailedEvent.data.state_streams_staged, 2);
       assert.equal(commitFailedEvent.data.state_streams_committed, 1);
       assert.match(commitFailedEvent.data.error_message as string, REGEXP_7);

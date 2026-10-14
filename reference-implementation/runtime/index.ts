@@ -63,6 +63,7 @@ import {
   normalizeGapScope,
   VIOLATION_LIST_MAX,
 } from "./connector-gap-bounding.ts";
+import { cursorAuditFact } from "./cursor-audit-fact.ts";
 import { describeCursorBandViolation, evaluateCursorBand } from "./cursor-band-contiguity.ts";
 import { declaredReasonTokensFor } from "./declared-reason-tokens.ts";
 import { createDetailGapPageReader, validateDetailGapsPageRequest } from "./detail-gap-paging.ts";
@@ -4565,7 +4566,8 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
         actor_type: "runtime",
         data: {
           checkpoint_mode: "checkpointed_streaming",
-          cursor,
+          // Audit fact only; the authoritative cursor is the PUT above (#76).
+          ...cursorAuditFact(cursor),
           grant_id: grantId,
           source: runSource,
           state_streams_committed: committedStateStreams.size,
@@ -4585,7 +4587,8 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
         actor_type: "runtime",
         data: {
           checkpoint_mode: "checkpointed_streaming",
-          cursor,
+          // Audit fact only; the commit of this cursor failed (#76).
+          ...cursorAuditFact(cursor),
           error_message: err instanceof Error ? err.message : String(err),
           grant_id: grantId,
           source: runSource,
@@ -5175,7 +5178,8 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
         actor_type: "runtime",
         data: {
           checkpoint_mode: "checkpointed_streaming",
-          cursor: msg.cursor,
+          // Audit fact only; the staged cursor lives in `newState` (#76).
+          ...cursorAuditFact(msg.cursor),
           grant_id: grantId,
           source: runSource,
           state_commit_intent: persistState ? "commit_on_success" : "do_not_persist",
