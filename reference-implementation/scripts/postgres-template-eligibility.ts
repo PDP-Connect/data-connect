@@ -89,6 +89,7 @@ export const POSTGRES_TEMPLATE_ELIGIBLE_FILES: readonly string[] = [
   "test/grant-scoped-state-postgres-routing.test.ts",
   "test/ingest-dirty-terminal-postgres-parity.test.ts",
   "test/introspection-manifest-fail-closed.test.ts",
+  "test/legacy-upgrade-preservation-postgres.test.ts",
   "test/lexical-index-skip-unchanged-postgres.test.ts",
   "test/live-shadow-comparison.test.ts",
   "test/local-coverage-state-parser-postgres.test.ts",
