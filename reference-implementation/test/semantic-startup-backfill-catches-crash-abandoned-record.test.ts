@@ -4,12 +4,8 @@
 // Discriminating regression test: startup semantic backfill must detect and
 // repair a record that was durably written but never got its index
 // maintenance run (simulating a crash between commit and background index
-// completion). Originally written as a failing probe against
-// semanticBackfillIndexIsInSync's upper-bound-only comparison
-// (indexCount <= maxIndexRows), which could report "in sync" even while a
-// specific record's row was missing as long as the total count didn't
-// exceed the ceiling. Fixed by comparing indexCount to the EXACT expected
-// row count instead. This file now proves the fix, not the gap.
+// completion). The semantic pass finds it as a MISSING row (no row for the
+// record key), not through a count comparison.
 import assert from "node:assert/strict";
 import test from "node:test";
 import { registerConnector } from "../server/auth.ts";

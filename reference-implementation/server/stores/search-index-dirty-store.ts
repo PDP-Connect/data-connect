@@ -16,8 +16,8 @@
  *
  * A dirty=1 row is a HINT to re-check, not proof of drift: the existing
  * exact-comparison drift-checks (search.ts's backfillLexicalStream,
- * search-semantic.ts's semanticBackfillIndexIsInSync, both already
- * idempotent no-ops when actually in sync) remain the source of truth.
+ * the semantic pass in semantic-index-repair.ts, which compares per-row
+ * source_version rather than counts; both idempotent) remain the source of truth.
  * `clearSearchIndexDirty` is called only after both checks report in-sync
  * for that scope.
  */
@@ -57,6 +57,38 @@ export function markSearchIndexDirtySqlite(
   nowIso: string
 ): void {
   exec(referenceQueries.searchIndexDirtyMarkDirty, [key.connectorInstanceId, key.connectorId, key.stream, nowIso]);
+}
+
+/**
+ * Guarantee a dirty row (dirty = 1) for a scope without touching `revision`.
+ * A scope holding unfinished semantic repair work must always be listed by
+ * the sweep; revision is the in-flight pass's CAS token and must not move.
+ */
+export async function ensureSearchIndexScopeDirty(
+  key: SearchIndexScopeKey & { readonly connectorId: string },
+  nowIso: string
+): Promise<void> {
+  if (isPostgresStorageBackend()) {
+    await postgresQuery(ENSURE_DIRTY_POSTGRES_SQL, [key.connectorInstanceId, key.connectorId, key.stream, nowIso]);
+    return;
+  }
+  exec(referenceQueries.searchIndexDirtyEnsureDirty, [key.connectorInstanceId, key.connectorId, key.stream, nowIso]);
+}
+
+export const ENSURE_DIRTY_POSTGRES_SQL = `INSERT INTO search_index_dirty(connector_instance_id, connector_id, stream, dirty, marked_at, revision)
+     VALUES ($1, $2, $3, 1, $4, 1)
+     ON CONFLICT(connector_instance_id, stream) DO UPDATE SET dirty = 1`;
+
+/** Move a `partial` scope behind its peers in list order. Never touches `revision` or `dirty`. */
+export async function rotateSearchIndexDirtyOrder(key: SearchIndexScopeKey, nowIso: string): Promise<void> {
+  if (isPostgresStorageBackend()) {
+    await postgresQuery(
+      "UPDATE search_index_dirty SET marked_at = $3 WHERE connector_instance_id = $1 AND stream = $2 AND dirty <> 0",
+      [key.connectorInstanceId, key.stream, nowIso]
+    );
+    return;
+  }
+  exec(referenceQueries.searchIndexDirtyRotateOrder, [nowIso, key.connectorInstanceId, key.stream]);
 }
 
 /** Call from inside the SAME `withPostgresTransaction` client as the record mutation. */

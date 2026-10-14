@@ -1317,7 +1317,7 @@ async function runPhaseFaultMatrix(driver: Driver): Promise<void> {
       const reconcile = await runSearchIndexDirtyReconcileRound({ maxDurationMs: 5000, pageSize: 100 });
       assert.deepEqual(
         reconcile,
-        { attempted: 1, failed: 0, incomplete: false, recontended: 0, succeeded: 1 },
+        { attempted: 1, busy: 0, failed: 0, incomplete: false, partial: 0, recontended: 0, succeeded: 1 },
         "the retained scope must converge through a successful reconcile, not a hidden failure"
       );
       assert.equal(

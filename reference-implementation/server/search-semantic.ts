@@ -27,12 +27,11 @@
  *       specs/reference-implementation-architecture/spec.md
  */
 
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { setImmediate as yieldImmediate } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import type { BindValue, Page } from "../lib/db.ts";
+import type { Page } from "../lib/db.ts";
 import {
   allowUnboundedReadAcknowledged,
   getMany as dbGetMany,
@@ -77,36 +76,44 @@ import { assertGrantedManifestReadAuthority, assertOwnerSearchFilterAuthority } 
 import { OWNER_AUTH_DEFAULT_SUBJECT_ID } from "./owner-auth.ts";
 import {
   postgresAnySemanticProgressRow,
-  postgresCountIndexableSemanticValues,
-  postgresCountSemanticIndexByScope,
-  postgresCountSemanticRecords,
   postgresDeleteSemanticMeta,
   postgresDeleteSemanticProgress,
   postgresGetSemanticMeta,
-  postgresGetSemanticProgress,
   postgresGetSemanticRecord,
   postgresListAllSemanticMetaIdentities,
-  postgresListExistingSemanticKeysForRecords,
   postgresListSemanticConnectorInstanceIds,
   postgresListSemanticStreamsForConnector,
   postgresSemanticIndexDelete,
   postgresSemanticIndexDeleteByConnectorStream,
   postgresSemanticIndexDeleteWithClient,
-  postgresSemanticIndexInsertManyGuarded,
   postgresSemanticIndexPublishWithClient,
   postgresSemanticIndexUpsertMany,
-  postgresSemanticRecordsPage,
   postgresSemanticSearch,
   postgresUpsertSemanticMeta,
   postgresUpsertSemanticMetaWithClient,
-  postgresUpsertSemanticProgress,
 } from "./postgres-search.ts";
 import type { PostgresTransactionClient } from "./postgres-storage.ts";
 import { isPostgresStorageBackend, postgresQuery, withPostgresTransaction } from "./postgres-storage.ts";
 import type { CompiledFilter } from "./record-filters.ts";
 import { compileRequestFilters, passesGrantRecordConstraints, passesRequestFilters } from "./record-filters.ts";
 import { mapSearchFanout } from "./search-fanout.ts";
-import { sqliteCountIndexableTextValues } from "./search-index-counts.ts";
+import {
+  createPostgresRepairStore,
+  createSqliteRepairStore,
+  newRepairBudget,
+  type RepairBudget,
+  type RepairCursor,
+  type RepairFence,
+  type RepairIdentity,
+  type RepairPriorRow,
+  type RepairScope,
+  type RepairStore,
+  type RepairVectorIndex,
+  repairBudgetExhausted,
+  runRepairPass,
+  versionKey,
+} from "./semantic-index-repair.ts";
+import { ensureSearchIndexScopeDirty } from "./stores/search-index-dirty-store.ts";
 
 type SemanticManifestStream = SearchSemanticManifestStream & {
   query?: { search?: { semantic_fields?: string[] } };
@@ -114,8 +121,28 @@ type SemanticManifestStream = SearchSemanticManifestStream & {
 
 type SemanticBackfillManifest = SearchSemanticManifest & {
   connector_id: string;
+  connector_instance_id?: string;
+  storage_binding?: { connector_id?: string; connector_instance_id?: string };
   streams: SemanticManifestStream[];
 };
+
+export type SemanticBackfillScopeStatus = "busy" | "complete" | "partial";
+
+export interface SemanticBackfillScopeResult {
+  connectorInstanceId: string;
+  status: SemanticBackfillScopeStatus;
+  stream: string;
+}
+
+/**
+ * Per-scope outcome of one backfill call. `complete`: the pass finished and
+ * its own dirty-revision CAS cleared the scope. `partial`: budget spent, a
+ * deferred scope, or a newer dirty revision survived (a new pass started);
+ * the scope stays dirty. `busy`: another holder owns the lease; no work done.
+ */
+export interface SemanticBackfillResult {
+  scopes: SemanticBackfillScopeResult[];
+}
 type SemanticSearchManifest = SearchSemanticManifest & {
   connector_id?: string;
   storage_binding?: { connector_id?: string; connector_instance_id?: string };
@@ -198,6 +225,16 @@ interface SemanticRunOptions {
 interface SemanticBackfillOptions {
   log?: (message: string) => void;
   manifest?: SemanticBackfillManifest;
+  /** Budget and test seams for the bounded repair (defaults: 100 pages, 10 s). */
+  repair?: {
+    /** Absolute epoch-ms deadline from the caller (the reconcile round's remaining time). */
+    deadlineAt?: number | null | undefined;
+    leaseTtlMs?: number | undefined;
+    maxDurationMs?: number | undefined;
+    maxPages?: number | undefined;
+    pageSize?: number | undefined;
+    store?: RepairStore | undefined;
+  };
   signal?: AbortSignal | null;
 }
 
@@ -317,14 +354,12 @@ interface SemanticIndexEntry {
   scopeKey: string;
   vector: SemanticVector;
   /**
-   * The `records.version` this entry's source text was read at — set only
-   * by the backfill path (`rebuildSemanticIndexForStream`), which re-checks
-   * it immediately before writing so a row a concurrent delete/newer-write
-   * has since superseded is skipped rather than resurrected/overwritten.
-   * Unset (undefined) for the live per-record ingest CAS path, which is
-   * already atomically gated elsewhere (records.ts's
-   * maintainRecordIndexesWithinPermit) and does not need this check
-   * repeated here. See harden-connector-instance-write-fence-transaction-native.
+   * The `records.version` this entry's source text was read at; persisted as
+   * the row's `source_version`. A row is current only when it equals the live
+   * record's version. Both writers know it: the live publisher (under the
+   * records FOR UPDATE version check) and the bounded repair (under a
+   * records FOR SHARE lock, see semantic-index-repair.ts). Unset => stored
+   * as NULL, i.e. unknown, never current.
    */
   version?: number;
 }
@@ -343,6 +378,11 @@ interface SemanticIndex {
     connectorInstanceId?: string | null;
     stream: string;
   }) => Promise<void> | void;
+  /**
+   * Exact-key removal used by the orphan phase of the bounded repair. The
+   * caller has already proven these record keys have no live record.
+   */
+  deleteExactKeys: (args: { connectorInstanceId: string; recordKeys: string[]; scopeKey: string }) => void;
   deleteRecord: (args: {
     connectorId: string;
     connectorInstanceId?: string | null;
@@ -355,6 +395,19 @@ interface SemanticIndex {
     connectorInstanceId?: string | null;
     stream: string;
   }) => Promise<Set<string>> | Set<string>;
+  /** Stored `source_version` per `versionKey(scopeKey, recordKey)`; NULL = legacy-unknown, absent = no row. */
+  listVersions: (args: {
+    connectorInstanceId: string;
+    recordKeys: string[];
+    scopeKeys: string[];
+  }) => Map<string, number | null>;
+  /** One keyset page of indexed record keys for an exact scope, ordered by record_key. */
+  pageKeys: (args: {
+    afterRecordKey: string | null;
+    connectorInstanceId: string;
+    limit: number;
+    scopeKey: string;
+  }) => string[];
   queryPerConnector: (args: {
     connectorId: string;
     connectorInstanceId?: string | null;
@@ -1295,6 +1348,57 @@ export function getSemanticIndexBackfillProgress() {
 
 // ─── Vector index interface + backends ─────────────────────────────────────
 
+function sqlPlaceholders(values: readonly unknown[]): string {
+  return values.map(() => "?").join(",");
+}
+
+/**
+ * Shared by both SQLite stores: the logical-identity table differs
+ * (`semantic_search_blob` itself, or the vec0 sidecar `semantic_search_rowid`)
+ * but both carry (connector_instance_id, scope_key, record_key, source_version).
+ * REVIEWED-DYNAMIC: IN-lists are page-sized (<= the 500-record repair page).
+ */
+function sqliteListVersions(
+  table: "semantic_search_blob" | "semantic_search_rowid",
+  {
+    connectorInstanceId,
+    scopeKeys,
+    recordKeys,
+  }: { connectorInstanceId: string; recordKeys: string[]; scopeKeys: string[] }
+): Map<string, number | null> {
+  const out = new Map<string, number | null>();
+  if (scopeKeys.length === 0 || recordKeys.length === 0) {
+    return out;
+  }
+  const rows = iterateDynamicSqlAcknowledged(
+    `SELECT scope_key, record_key, source_version FROM ${table}
+     WHERE connector_instance_id = ? AND scope_key IN (${sqlPlaceholders(scopeKeys)}) AND record_key IN (${sqlPlaceholders(recordKeys)})`,
+    [connectorInstanceId, ...scopeKeys, ...recordKeys]
+  );
+  for (const row of rows) {
+    out.set(versionKey(row.scope_key, row.record_key), row.source_version === null ? null : Number(row.source_version));
+  }
+  return out;
+}
+
+function sqlitePageKeys(
+  table: "semantic_search_blob" | "semantic_search_rowid",
+  {
+    afterRecordKey,
+    connectorInstanceId,
+    limit,
+    scopeKey,
+  }: { afterRecordKey: string | null; connectorInstanceId: string; limit: number; scopeKey: string }
+): string[] {
+  const rows = iterateDynamicSqlAcknowledged(
+    `SELECT record_key FROM ${table}
+     WHERE connector_instance_id = ? AND scope_key = ? AND (? IS NULL OR record_key > ?)
+     ORDER BY record_key ASC LIMIT ?`,
+    [connectorInstanceId, scopeKey, afterRecordKey, afterRecordKey, limit]
+  );
+  return Array.from(rows, (row) => row.record_key as string);
+}
+
 /**
  * Persistent SQLite-backed flat vector store for environments where
  * sqlite-vec cannot be loaded. Stores embeddings as BLOBs in a regular
@@ -1423,6 +1527,16 @@ function makeBlobFlatIndex({
       }
       exec(referenceQueries.searchSemanticBlobDeleteByStreamPrefix, [connectorId, `${streamPrefix}%`]);
     },
+    deleteExactKeys({ connectorInstanceId, scopeKey, recordKeys }) {
+      if (recordKeys.length === 0) {
+        return;
+      }
+      execDynamicSqlAcknowledged(
+        `DELETE FROM semantic_search_blob
+         WHERE connector_instance_id = ? AND scope_key = ? AND record_key IN (${sqlPlaceholders(recordKeys)})`,
+        [connectorInstanceId, scopeKey, ...recordKeys]
+      );
+    },
     deleteRecord({
       connectorId,
       connectorInstanceId,
@@ -1497,6 +1611,8 @@ function makeBlobFlatIndex({
       }
       return result;
     },
+    listVersions: (args) => sqliteListVersions("semantic_search_blob", args),
+    pageKeys: (args) => sqlitePageKeys("semantic_search_blob", args),
     queryPerConnector({
       connectorId,
       connectorInstanceId = null,
@@ -1547,9 +1663,16 @@ function makeBlobFlatIndex({
         limit
       );
     },
-    upsert({ connectorId, connectorInstanceId, scopeKey, recordKey, vector }: SemanticIndexEntry): void {
+    upsert({ connectorId, connectorInstanceId, scopeKey, recordKey, vector, version }: SemanticIndexEntry): void {
       const buf = Buffer.from(vector.buffer, vector.byteOffset, vector.byteLength);
-      exec(referenceQueries.searchSemanticBlobUpsert, [connectorInstanceId, connectorId, scopeKey, recordKey, buf]);
+      exec(referenceQueries.searchSemanticBlobUpsert, [
+        connectorInstanceId,
+        connectorId,
+        scopeKey,
+        recordKey,
+        buf,
+        version ?? null,
+      ]);
     },
     upsertMany(entries: SemanticIndexEntry[]): void {
       if (entries.length === 0) {
@@ -1564,6 +1687,7 @@ function makeBlobFlatIndex({
             entry.scopeKey,
             entry.recordKey,
             buf,
+            entry.version ?? null,
           ]);
         }
       });
@@ -1632,7 +1756,14 @@ function makeSqliteVecIndex({
   }
   ensureTable();
 
-  function upsertOne({ connectorId, connectorInstanceId, scopeKey, recordKey, vector }: SemanticIndexEntry): void {
+  function upsertOne({
+    connectorId,
+    connectorInstanceId,
+    scopeKey,
+    recordKey,
+    vector,
+    version,
+  }: SemanticIndexEntry): void {
     const buf = Buffer.from(vector.buffer, vector.byteOffset, vector.byteLength);
     const existing = getOne(referenceQueries.searchSemanticRowidGetRowidByIdentity, [
       connectorInstanceId,
@@ -1645,6 +1776,11 @@ function makeSqliteVecIndex({
       // created lazily; static prepare validation would fail before
       // ensureTable() runs.
       execDynamicSqlAcknowledged("UPDATE semantic_search_vec SET embedding = ? WHERE rowid = ?", [buf, existing.rowid]);
+      // REVIEWED-DYNAMIC: version column added by migrateSemanticSearchRepairColumns.
+      execDynamicSqlAcknowledged("UPDATE semantic_search_rowid SET source_version = ? WHERE rowid = ?", [
+        version ?? null,
+        existing.rowid,
+      ]);
       return;
     }
     // REVIEWED-DYNAMIC: INSERT into semantic_search_vec is a runtime
@@ -1659,6 +1795,7 @@ function makeSqliteVecIndex({
       scopeKey,
       recordKey,
       Number(info.lastInsertRowid),
+      version ?? null,
     ]);
   }
 
@@ -1825,6 +1962,26 @@ function makeSqliteVecIndex({
       }
       exec(referenceQueries.searchSemanticRowidDeleteByStreamPrefix, [connectorId, `${streamPrefix}%`]);
     },
+    deleteExactKeys({ connectorInstanceId, scopeKey, recordKeys }) {
+      if (recordKeys.length === 0) {
+        return;
+      }
+      const rows = Array.from(
+        iterateDynamicSqlAcknowledged(
+          `SELECT rowid FROM semantic_search_rowid
+           WHERE connector_instance_id = ? AND scope_key = ? AND record_key IN (${sqlPlaceholders(recordKeys)})`,
+          [connectorInstanceId, scopeKey, ...recordKeys]
+        )
+      );
+      for (const row of rows) {
+        deleteVecByRowid(row.rowid);
+      }
+      execDynamicSqlAcknowledged(
+        `DELETE FROM semantic_search_rowid
+         WHERE connector_instance_id = ? AND scope_key = ? AND record_key IN (${sqlPlaceholders(recordKeys)})`,
+        [connectorInstanceId, scopeKey, ...recordKeys]
+      );
+    },
     deleteRecord({ connectorId, connectorInstanceId, stream, recordKey }) {
       const streamPrefix = scopeKeyPrefixForStream(stream);
       if (!connectorInstanceId) {
@@ -1869,6 +2026,8 @@ function makeSqliteVecIndex({
       }
       return result;
     },
+    listVersions: (args) => sqliteListVersions("semantic_search_rowid", args),
+    pageKeys: (args) => sqlitePageKeys("semantic_search_rowid", args),
     queryPerConnector({ connectorId, connectorInstanceId = null, scopeKeys, queryVector, limit, recordKeys = null }) {
       if (!Array.isArray(scopeKeys) || scopeKeys.length === 0) {
         return [];
@@ -1943,8 +2102,15 @@ function makeSqliteVecIndex({
       hits.sort(compareHits);
       return hits;
     },
-    upsert({ connectorId, connectorInstanceId, scopeKey, recordKey, vector }) {
-      upsertOne({ connectorId, connectorInstanceId, recordKey, scopeKey, vector });
+    upsert({ connectorId, connectorInstanceId, scopeKey, recordKey, vector, version }) {
+      upsertOne({
+        connectorId,
+        connectorInstanceId,
+        recordKey,
+        scopeKey,
+        vector,
+        ...(version === undefined ? {} : { version }),
+      });
     },
     upsertMany(entries) {
       if (entries.length === 0) {
@@ -2143,6 +2309,7 @@ export async function computeSemanticEntries({
   recordKey,
   data,
   declaredFields,
+  version,
 }: {
   connectorId: string;
   connectorInstanceId: string;
@@ -2150,6 +2317,8 @@ export async function computeSemanticEntries({
   recordKey: string;
   data?: SemanticRecordData | null;
   declaredFields?: string[];
+  /** The `records.version` `data` was committed at; stored as the rows' `source_version`. */
+  version?: number;
 }): Promise<ComputedSemanticEntries | null> {
   if (!backend) {
     return null;
@@ -2171,6 +2340,7 @@ export async function computeSemanticEntries({
           recordKey,
           scopeKey: encodeScopeKey(stream, field),
           vector: await embedDocumentWithAdmission(text),
+          ...(version === undefined ? {} : { version }),
         } satisfies SemanticIndexEntry;
       })
     )
@@ -2333,6 +2503,47 @@ export async function semanticIndexDelete({
   await index.deleteRecord({ connectorId, connectorInstanceId, recordKey, stream });
 }
 
+function deleteSqliteSemanticStreamRowsWithoutBackend({
+  connectorId,
+  connectorInstanceId,
+  stream,
+}: {
+  connectorId: string;
+  connectorInstanceId: string;
+  stream: string;
+}): void {
+  const like = `${scopeKeyPrefixForStream(stream)}%`;
+  transaction(() => {
+    // REVIEWED-DYNAMIC: vec0 table exists only when sqlite-vec created it; row
+    // removal by rowid needs no dimension knowledge.
+    if (getOne(referenceQueries.searchSemanticVecGetTableSql, [])) {
+      const rowids = Array.from(
+        iterateDynamicSqlAcknowledged(
+          "SELECT rowid FROM semantic_search_rowid WHERE connector_instance_id = ? AND scope_key LIKE ?",
+          [connectorInstanceId, like]
+        ),
+        (row) => row.rowid
+      );
+      for (const rowid of rowids) {
+        execDynamicSqlAcknowledged("DELETE FROM semantic_search_vec WHERE rowid = ?", [rowid]);
+      }
+    }
+    execDynamicSqlAcknowledged(
+      "DELETE FROM semantic_search_rowid WHERE connector_instance_id = ? AND scope_key LIKE ?",
+      [connectorInstanceId, like]
+    );
+    execDynamicSqlAcknowledged(
+      "DELETE FROM semantic_search_blob WHERE connector_instance_id = ? AND scope_key LIKE ?",
+      [connectorInstanceId, like]
+    );
+    execDynamicSqlAcknowledged("DELETE FROM semantic_search_meta WHERE connector_instance_id = ? AND stream = ?", [
+      connectorInstanceId,
+      stream,
+    ]);
+    deleteBackfillProgress({ connectorId, connectorInstanceId, stream });
+  });
+}
+
 export async function semanticIndexDeleteByConnectorStream({
   connectorId,
   connectorInstanceId,
@@ -2343,6 +2554,14 @@ export async function semanticIndexDeleteByConnectorStream({
   stream: string;
 }): Promise<void> {
   if (!backend) {
+    // A stream reset restarts record versions from 1, so rows that survive it
+    // could carry a source_version equal to a NEW record's version while holding
+    // the OLD text's vector. Reset therefore removes the derived rows even with
+    // no embedding backend (Postgres already does this atomically in
+    // postgresDeleteAllRecords). SQLite needs no backend to delete rows.
+    if (!isPostgresStorageBackend()) {
+      deleteSqliteSemanticStreamRowsWithoutBackend({ connectorId, connectorInstanceId, stream });
+    }
     return;
   }
   if (isPostgresStorageBackend()) {
@@ -2367,46 +2586,6 @@ function fingerprintSemanticFields(declaredFields: readonly string[]): string {
   const unique = Array.from(new Set(declaredFields));
   unique.sort();
   return JSON.stringify(unique);
-}
-
-function semanticIdentityMatches(
-  row: SemanticDbRow | null,
-  {
-    fieldsFingerprint,
-    modelId,
-    dimensions,
-    distanceMetric,
-  }: { fieldsFingerprint: string; modelId: string; dimensions: number; distanceMetric: SemanticDistanceMetric }
-): boolean {
-  return (
-    !!row &&
-    row.fields_fingerprint === fieldsFingerprint &&
-    row.model_id === modelId &&
-    Number(row.dimensions) === dimensions &&
-    row.distance_metric === distanceMetric
-  );
-}
-
-function jsonPathForTopLevelField(field: string): string {
-  return `$."${String(field).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
-}
-
-function countIndexableSemanticValues({
-  connectorInstanceId,
-  stream,
-  declaredFields,
-}: {
-  connectorInstanceId: string;
-  stream: string;
-  declaredFields: readonly string[];
-}): number {
-  return sqliteCountIndexableTextValues({
-    connectorInstanceId,
-    declaredFields,
-    iterateDynamicSql: (sql, params) => iterateDynamicSqlAcknowledged(sql, params as readonly BindValue[]),
-    jsonPathForField: jsonPathForTopLevelField,
-    stream,
-  });
 }
 
 function listSemanticConnectorInstanceIds({ connectorId, stream }: { connectorId: string; stream: string }): string[] {
@@ -2441,250 +2620,6 @@ function backendStorageIdentity(b: SemanticEmbeddingBackend): string {
   return parts.join(";");
 }
 
-/**
- * "Resume, and resolve already-indexed keys one page at a time."
- *
- * A distinct object identity rather than `null`, which already means "the index
- * is empty, skip nothing" on the fresh-rebuild path.
- */
-const RESUME_KEYS_PER_PAGE: Set<string> = new Set<string>();
-
-async function buildSemanticIndexEntries(
-  rows: readonly SemanticDbRow[],
-  declaredFields: readonly string[],
-  connectorId: string,
-  connectorInstanceId: string,
-  stream: string,
-  existingKeys: Set<string> | null
-): Promise<SemanticIndexEntry[]> {
-  const entries: SemanticIndexEntry[] = [];
-  let embeddingChain = Promise.resolve();
-  for (const row of rows) {
-    let data: SemanticRecordData | null;
-    try {
-      data = typeof row.record_json === "string" ? JSON.parse(row.record_json) : row.record_json;
-    } catch {
-      continue;
-    }
-    const version = Number(row.version);
-    for (const field of declaredFields) {
-      const text = normalizeSemanticEmbeddingInput(data?.[field]);
-      if (!text) {
-        continue;
-      }
-      const scopeKey = encodeScopeKey(stream, field);
-      if (existingKeys?.has(encodeVectorPairKey(scopeKey, `${connectorInstanceId}\u0000${row.record_key}`))) {
-        continue;
-      }
-      embeddingChain = embeddingChain.then(async () => {
-        entries.push({
-          connectorId,
-          connectorInstanceId,
-          recordKey: row.record_key,
-          scopeKey,
-          vector: await embedDocumentWithAdmission(text),
-          version,
-        });
-      });
-    }
-  }
-  await embeddingChain;
-  return entries;
-}
-
-/**
- * SQLite backfill guard: re-checks each entry's captured `version` against
- * the CURRENT `records` row, immediately before the upsert call, and drops
- * any entry a concurrent delete/newer-write has since superseded. Mirrors
- * `postgresSemanticIndexInsertManyGuarded`'s JOIN check — SQLite has no
- * single-statement equivalent (no cross-table JOIN inside an INSERT INTO a
- * vec0 virtual table), so the check runs as an explicit read immediately
- * before the write instead, both inside the same synchronous call stack
- * (single-writer SQLite has no concurrent-transaction window here).
- */
-function liveEntriesOnly(
-  entries: readonly SemanticIndexEntry[],
-  connectorInstanceId: string,
-  stream: string
-): SemanticIndexEntry[] {
-  return entries.filter((entry) => {
-    if (typeof entry.version !== "number") {
-      return true;
-    }
-    const current = dbGetOne<{ deleted: boolean | number; version: number }>(
-      referenceQueries.recordsIngestGetCurrentRecordState,
-      [connectorInstanceId, stream, entry.recordKey]
-    );
-    return current !== null && !current.deleted && current.version === entry.version;
-  });
-}
-
-async function upsertLiveSqliteEntries(
-  vectorIndex: SemanticIndex,
-  entries: readonly SemanticIndexEntry[],
-  connectorInstanceId: string,
-  stream: string
-): Promise<void> {
-  if (entries.length === 0) {
-    return;
-  }
-  const current = liveEntriesOnly(entries, connectorInstanceId, stream);
-  if (current.length > 0) {
-    await vectorIndex.upsertMany(current);
-  }
-}
-
-async function rebuildSemanticIndexForStream({
-  connectorId,
-  connectorInstanceId,
-  stream,
-  declaredFields,
-  recordsToScan = null,
-  progressJob = null,
-  existingKeys = null,
-  signal = null,
-  manifest,
-}: {
-  connectorId: string;
-  connectorInstanceId: string;
-  stream: string;
-  declaredFields: readonly string[];
-  recordsToScan?: number | null;
-  progressJob?: SemanticBackfillJob | null;
-  existingKeys?: Set<string> | null;
-  signal?: AbortSignal | null;
-  manifest: SemanticBackfillManifest;
-}): Promise<number> {
-  const usePostgres = isPostgresStorageBackend();
-  const index = usePostgres ? null : ensureVectorIndex();
-  if (!((usePostgres || index) && backend)) {
-    return 0;
-  }
-  const vectorIndex = index as SemanticIndex;
-
-  const PAGE = 500;
-  async function rebuildPage(lastId: number, indexed: number, scanned: number): Promise<number> {
-    let currentProgressJob = progressJob;
-    // Cancellation hook (see lexical counterpart in search.js): the CLI
-    // shutdown handler aborts the signal before closing the DB so the
-    // embed/upsert loop releases the WAL writer cleanly.
-    if (signal?.aborted) {
-      throw signal.reason instanceof Error ? signal.reason : new Error("semantic backfill aborted");
-    }
-    // UNFENCED scan + embed: no connector-instance writer-admission slot
-    // held across the page read or buildSemanticIndexEntries' embedding
-    // calls (embedDocumentWithAdmission, gated by their OWN separate
-    // activeSemanticWork pool). This is the unbounded-duration part of a
-    // rebuild; holding the shared ingest admission slot across it is what
-    // starved unrelated live ingest in the UAT startup-backfill incident.
-    const rows: readonly SemanticDbRow[] = usePostgres
-      ? ((await postgresSemanticRecordsPage({
-          connectorInstanceId,
-          lastId,
-          limit: PAGE,
-          stream,
-        })) as unknown as readonly SemanticDbRow[])
-      : getMany(referenceQueries.searchSemanticRecordsPageNonDeleted, [connectorInstanceId, stream, lastId], {
-          limit: PAGE,
-        }).rows;
-    if (rows.length === 0) {
-      return indexed;
-    }
-    const lastRow = rows.at(-1);
-    const nextLastId = lastRow ? Number(lastRow.id) : lastId;
-    const nextScanned = scanned + rows.length;
-    // Resolve already-indexed keys for THIS PAGE only when resuming on
-    // Postgres. buildSemanticIndexEntries can only ever test keys belonging to
-    // rows in the page it was handed, so a page-scoped answer is identical to
-    // the whole-stream one — at O(500) retained instead of O(stream size).
-    const pageExistingKeys =
-      existingKeys === RESUME_KEYS_PER_PAGE
-        ? await postgresListExistingSemanticKeysForRecords({
-            connectorId,
-            connectorInstanceId,
-            recordKeys: rows.map((row) => String(row.record_key)),
-            // EXACT scope keys, never a prefix. The primary key is
-            // (connector_instance_id, scope_key, record_key); a LIKE on the
-            // MIDDLE column cannot be an index condition, so Postgres falls
-            // back to scanning every row for the instance. Measured on the
-            // live 1.82M-row table: prefix LIKE 5924ms, exact keys 0.069ms.
-            scopeKeys: declaredFields.map((field) => encodeScopeKey(stream, field)),
-          })
-        : existingKeys;
-    const entries = await buildSemanticIndexEntries(
-      rows,
-      declaredFields,
-      connectorId,
-      connectorInstanceId,
-      stream,
-      pageExistingKeys
-    );
-    const nextIndexed = indexed + entries.length;
-    // Fenced ONLY for this page's bounded, already version-CAS'd write
-    // (postgresSemanticIndexInsertManyGuarded / upsertLiveSqliteEntries's
-    // liveEntriesOnly both re-check records.version immediately before
-    // writing — a row a concurrent delete/newer-write has since superseded
-    // is skipped, not resurrected). Held for O(one page's write), never
-    // O(the whole rebuild).
-    if (usePostgres) {
-      await withPostgresTransaction((client) =>
-        assertConnectorManifestStreamSubsetWithClient(client, connectorId, manifest)
-      );
-    } else {
-      assertConnectorManifestStreamSubsetSync(connectorId, manifest);
-    }
-    await withConnectorInstanceWrite(connectorInstanceId, async () => {
-      if (usePostgres) {
-        await postgresSemanticIndexInsertManyGuarded({ connectorId, connectorInstanceId, entries, stream });
-      } else {
-        await upsertLiveSqliteEntries(vectorIndex, entries, connectorInstanceId, stream);
-      }
-    });
-    if (currentProgressJob) {
-      currentProgressJob = updateBackfillJob(currentProgressJob, {
-        indexedVectors: nextIndexed,
-        recordsScanned: nextScanned,
-        recordsTotal: recordsToScan,
-      });
-    }
-    await yieldImmediate();
-    if (rows.length < PAGE) {
-      return nextIndexed;
-    }
-    return rebuildPage(nextLastId, nextIndexed, nextScanned);
-  }
-  return await rebuildPage(0, 0, 0);
-}
-
-function upsertBackfillProgress({
-  connectorId,
-  connectorInstanceId,
-  stream,
-  fieldsFingerprint,
-  modelId,
-  dimensions,
-  distanceMetric,
-}: {
-  connectorId: string;
-  connectorInstanceId: string;
-  stream: string;
-  fieldsFingerprint: string;
-  modelId: string;
-  dimensions: number;
-  distanceMetric: SemanticDistanceMetric;
-}): void {
-  exec(referenceQueries.searchSemanticProgressUpsert, [
-    connectorInstanceId,
-    connectorId,
-    stream,
-    fieldsFingerprint,
-    modelId,
-    dimensions,
-    distanceMetric,
-    new Date().toISOString(),
-  ]);
-}
-
 function deleteBackfillProgress({
   connectorId,
   connectorInstanceId = null,
@@ -2715,6 +2650,12 @@ async function resolveSemanticBackfillConnectorInstanceIds({
   connectorId: string;
   manifest: SemanticBackfillManifest;
 }): Promise<string[]> {
+  // Same pin as lexical (search.ts resolveLexicalBackfillConnectorInstanceIds):
+  // a pinned manifest is scoped to exactly that physical instance.
+  const pinned = manifest.storage_binding?.connector_instance_id || manifest.connector_instance_id;
+  if (typeof pinned === "string" && pinned.trim()) {
+    return [pinned.trim()];
+  }
   const usePostgres = isPostgresStorageBackend();
   const streams = new Set(
     manifest.streams.map((stream) => stream?.name).filter((stream) => typeof stream === "string" && stream.length > 0)
@@ -2769,6 +2710,7 @@ async function assertSemanticBackfillManifestCurrent(
 }
 
 interface SemanticBackfillContext {
+  budget: RepairBudget;
   connectorId: string;
   currentIdentity: SemanticBackfillIdentity;
   currentMetric: SemanticDistanceMetric;
@@ -2776,211 +2718,85 @@ interface SemanticBackfillContext {
   index: SemanticIndex | null;
   log: (message: string) => void;
   manifest: SemanticBackfillManifest;
+  pageSize: number | undefined;
+  results: SemanticBackfillScopeResult[];
   signal: AbortSignal | null;
+  store: RepairStore;
   usePostgres: boolean;
   vectorIndex: SemanticIndex;
-}
-
-async function semanticBackfillIndexIsInSync({
-  connectorId,
-  connectorInstanceId,
-  declaredFields,
-  stream,
-  usePostgres,
-  vectorIndex,
-}: {
-  connectorId: string;
-  connectorInstanceId: string;
-  declaredFields: readonly string[];
-  stream: string;
-  usePostgres: boolean;
-  vectorIndex: SemanticIndex;
-}): Promise<boolean> {
-  const indexCounts = await Promise.all(
-    declaredFields.map((field) =>
-      usePostgres
-        ? postgresCountSemanticIndexByScope({
-            connectorId,
-            connectorInstanceId,
-            scopeKey: encodeScopeKey(stream, field),
-          })
-        : vectorIndex.countByConnectorScope(connectorId, encodeScopeKey(stream, field), connectorInstanceId)
-    )
-  );
-  const indexCount = indexCounts.reduce((total, count) => total + count, 0);
-  // Exact comparison, not the prior upper-bound-only `indexCount <=
-  // maxIndexRows`: that check could never detect a record whose index rows
-  // were never written (a crash between durable commit and background index
-  // maintenance) because a short-but-nonzero indexCount still satisfies
-  // `<= maxIndexRows`. expectedIndexRows (the actual number of indexable
-  // text values in the CURRENT record set) is now always computed and
-  // compared exactly, so any per-record shortfall is caught. See
-  // semantic-startup-backfill-catches-crash-abandoned-record.test.ts.
-  const expectedIndexRows = usePostgres
-    ? await postgresCountIndexableSemanticValues({ connectorInstanceId, declaredFields, stream })
-    : countIndexableSemanticValues({ connectorInstanceId, declaredFields, stream });
-  return indexCount === expectedIndexRows;
-}
-
-function logSemanticBackfillDecision({
-  backendChanged,
-  canResume,
-  connectorId,
-  currentIdentity,
-  currentMetric,
-  currentModel,
-  fingerprintChanged,
-  log,
-  metaRow,
-  newFingerprint,
-  stream,
-}: {
-  backendChanged: boolean;
-  canResume: boolean;
-  connectorId: string;
-  currentIdentity: SemanticBackfillIdentity;
-  currentMetric: SemanticDistanceMetric;
-  currentModel: string;
-  fingerprintChanged: boolean;
-  log: (message: string) => void;
-  metaRow: SemanticDbRow | null;
-  newFingerprint: string;
-  stream: string;
-}): void {
-  if (canResume) {
-    log(
-      `[PDPP] Semantic index resume for ${connectorId} stream='${stream}' ` +
-        `(fields=${newFingerprint}, model=${currentModel}, dims=${currentIdentity.dimensions}, metric=${currentMetric})`
-    );
-  } else if (fingerprintChanged) {
-    log(
-      `[PDPP] Semantic index field-set change for ${connectorId} stream='${stream}' ` +
-        `(was=${displaySemanticMetaValue(metaRow?.fields_fingerprint)}, now=${newFingerprint}) — rebuilding`
-    );
-  } else if (backendChanged) {
-    log(
-      `[PDPP] Semantic index backend identity changed for ${connectorId} stream='${stream}' ` +
-        `(model=${displaySemanticMetaValue(metaRow?.model_id)}→${currentModel}, ` +
-        `dims=${displaySemanticMetaValue(metaRow?.dimensions)}→${currentIdentity.dimensions}, ` +
-        `metric=${displaySemanticMetaValue(metaRow?.distance_metric)}→${currentMetric}) — rebuilding`
-    );
-  }
 }
 
 function displaySemanticMetaValue(value: unknown): string {
   return value === null || value === undefined ? "null" : String(value);
 }
 
-async function inspectSemanticBackfillInstance({
+/**
+ * Decide, under the lease, whether this call resumes the open pass or starts a
+ * new one. The whole-stream delete happens ONLY on an identity change that is
+ * not already being resumed. Returns the cursor to continue from, or "busy" if
+ * the lease was lost while preparing.
+ */
+async function prepareSemanticPass({
   context,
-  connectorInstanceId,
-  declaredFields,
-  newFingerprint,
-  stream,
+  created,
+  fence,
+  identity,
+  identityChanged,
+  metaRow,
+  prior,
+  scope,
 }: {
   context: SemanticBackfillContext;
-  connectorInstanceId: string;
-  declaredFields: readonly string[];
-  newFingerprint: string;
-  stream: string;
-}): Promise<{ canResume: boolean; needsRebuild: boolean }> {
-  const { connectorId, currentIdentity, currentMetric, currentModel, log, usePostgres, vectorIndex } = context;
-  const metaRow = usePostgres
-    ? await postgresGetSemanticMeta({ connectorInstanceId, stream })
-    : getOne(referenceQueries.searchSemanticMetaGetByStream, [connectorInstanceId, stream]);
-  const progressRow = usePostgres
-    ? await postgresGetSemanticProgress({ connectorInstanceId, stream })
-    : getOne(referenceQueries.searchSemanticProgressGetByStream, [connectorInstanceId, stream]);
-  const progressMatches = semanticIdentityMatches(progressRow as SemanticDbRow | null, currentIdentity);
-  const fingerprintChanged = !metaRow || metaRow.fields_fingerprint !== newFingerprint;
-  const backendChanged =
-    !metaRow ||
-    metaRow.model_id !== currentModel ||
-    Number(metaRow.dimensions) !== currentIdentity.dimensions ||
-    metaRow.distance_metric !== currentMetric;
-  let needsRebuild = fingerprintChanged || backendChanged || progressMatches;
-  let canResume = progressMatches;
-
-  if (needsRebuild) {
-    logSemanticBackfillDecision({
-      backendChanged,
-      canResume,
-      connectorId,
-      currentIdentity,
-      currentMetric,
-      currentModel,
-      fingerprintChanged,
-      log,
-      metaRow: metaRow as SemanticDbRow | null,
-      newFingerprint,
-      stream,
-    });
-  } else {
-    const inSync = await semanticBackfillIndexIsInSync({
-      connectorId,
-      connectorInstanceId,
-      declaredFields,
-      stream,
-      usePostgres,
-      vectorIndex,
-    });
-    needsRebuild = !inSync;
-    if (needsRebuild) {
-      canResume = false;
-      log(`[PDPP] Semantic index drift for ${connectorId} stream='${stream}' — rebuilding`);
-    } else if (progressRow) {
-      if (usePostgres) {
-        await postgresDeleteSemanticProgress({ connectorInstanceId, stream });
-      } else {
-        deleteBackfillProgress({ connectorId, connectorInstanceId, stream });
-      }
-    }
+  created: boolean;
+  fence: RepairFence;
+  identity: RepairIdentity;
+  identityChanged: boolean;
+  metaRow: SemanticDbRow | null;
+  prior: RepairPriorRow | null;
+  scope: RepairScope;
+}): Promise<"busy" | { cursor: RepairCursor | null }> {
+  const { currentIdentity, currentMetric, currentModel, log, store } = context;
+  const resumingRebuild =
+    !created &&
+    prior?.kind === "rebuild" &&
+    prior.identity.fieldsFingerprint === identity.fieldsFingerprint &&
+    prior.identity.modelId === currentModel &&
+    prior.identity.dimensions === currentIdentity.dimensions &&
+    prior.identity.distanceMetric === currentMetric;
+  if (identityChanged && !resumingRebuild) {
+    log(
+      `[PDPP] Semantic index identity change for ${scope.connectorId} stream='${scope.stream}' ` +
+        `(fields=${displaySemanticMetaValue(metaRow?.fields_fingerprint)}→${identity.fieldsFingerprint}, ` +
+        `model=${displaySemanticMetaValue(metaRow?.model_id)}→${currentModel}, ` +
+        `dims=${displaySemanticMetaValue(metaRow?.dimensions)}→${currentIdentity.dimensions}, ` +
+        `metric=${displaySemanticMetaValue(metaRow?.distance_metric)}→${currentMetric}) — rebuilding`
+    );
+    // The ONLY whole-stream delete. It runs before the row is flipped to
+    // `rebuild`, so a crash in between re-runs the delete rather than resuming
+    // a rebuild whose rows were never cleared.
+    const deleted = await store.deleteStreamRows(scope, fence);
+    return deleted && (await store.resetPass(scope, fence, { identity, kind: "rebuild" })) ? { cursor: null } : "busy";
   }
-  return { canResume, needsRebuild };
+  if (!(identityChanged || created) && prior?.kind === "rebuild") {
+    // A leftover `rebuild` row whose identity already matches meta: new repair pass.
+    return (await store.resetPass(scope, fence, { identity, kind: "repair" })) ? { cursor: null } : "busy";
+  }
+  return { cursor: created ? null : (prior?.cursor ?? null) };
 }
 
-async function prepareSemanticBackfillKeys({
-  context,
-  canResume,
-  connectorInstanceId,
-  stream,
-}: {
-  context: SemanticBackfillContext;
-  canResume: boolean;
-  connectorInstanceId: string;
-  stream: string;
-}): Promise<Set<string> | null> {
-  const { connectorId, index, usePostgres, vectorIndex } = context;
-  if (usePostgres && canResume) {
-    // NOT postgresListExistingSemanticKeys: that reads every key the stream has
-    // ever indexed into one Set — O(stream size), held live. On 2026-08-27 that
-    // was 1,515,064 keys (~200 MB) for one claude-code stream and it took
-    // production down: heap ceiling reached ~20 min after every boot, forever.
-    //
-    // The sentinel says "resume, but resolve per page". `null` cannot carry
-    // that meaning: the fresh-index branch below DELETES the index and returns
-    // null to mean "nothing exists, skip nothing". Reusing null here would make
-    // a resume re-embed every row it was supposed to skip.
-    return RESUME_KEYS_PER_PAGE;
-  }
-  if (canResume && index && typeof index.listExistingKeys === "function") {
-    return index.listExistingKeys({ connectorId, connectorInstanceId, stream });
-  }
-  if (usePostgres) {
-    await postgresSemanticIndexDeleteByConnectorStream({ connectorId, connectorInstanceId, stream });
-  } else {
-    await vectorIndex.deleteByConnectorStream({ connectorId, connectorInstanceId, stream });
-  }
-  return null;
-}
-
-async function rebuildSemanticBackfillInstance({
+/**
+ * Bounded, version-aware repair of ONE physical scope (connector_instance_id,
+ * stream). Count drift is not an input. The whole-stream delete runs only when
+ * the stored identity (fields fingerprint, model, dimensions, metric) differs
+ * from the live backend; everything else (missing, stale, legacy-NULL, orphan
+ * rows) is repaired in place by `runRepairPass`. See semantic-index-repair.ts.
+ */
+async function repairSemanticScope({
   context,
   connectorInstanceId,
   declaredFields,
   newFingerprint,
   progressJob,
-  canResume,
   stream,
 }: {
   context: SemanticBackfillContext;
@@ -2988,70 +2804,114 @@ async function rebuildSemanticBackfillInstance({
   declaredFields: readonly string[];
   newFingerprint: string;
   progressJob: SemanticBackfillJob;
-  canResume: boolean;
   stream: string;
-}): Promise<SemanticBackfillJob> {
-  const { connectorId, currentIdentity, currentMetric, currentModel, log, signal, usePostgres } = context;
-  if (usePostgres) {
-    await postgresUpsertSemanticProgress({ connectorId, connectorInstanceId, ...currentIdentity, stream });
-  } else {
-    upsertBackfillProgress({ connectorId, connectorInstanceId, stream, ...currentIdentity });
+}): Promise<{ job: SemanticBackfillJob; status: SemanticBackfillScopeStatus }> {
+  const { budget, connectorId, currentIdentity, currentMetric, currentModel, signal, store, usePostgres } = context;
+  const scope = { connectorId, connectorInstanceId, stream };
+  let job = progressJob;
+  if (repairBudgetExhausted(budget)) {
+    // Deferred before acquisition: no progress row exists, so enqueue the scope
+    // explicitly. ensure-dirty never changes `revision`.
+    await ensureSearchIndexScopeDirty(scope, new Date().toISOString());
+    return { job, status: "partial" };
   }
-  const existingKeys = await prepareSemanticBackfillKeys({ canResume, connectorInstanceId, context, stream });
-  const recordsToScan = usePostgres
-    ? await postgresCountSemanticRecords({ connectorInstanceId, stream })
-    : Number(getOne(referenceQueries.searchSemanticRecordsCountNonDeleted, [connectorInstanceId, stream])?.n || 0);
-  const rebuildingJob = updateBackfillJob(progressJob, {
-    indexedVectors: 0,
-    phase: "rebuilding",
-    recordsScanned: 0,
-    recordsTotal: recordsToScan,
-    stream,
-  });
-  log(
-    `[PDPP] Semantic index rebuild starting for ${connectorId} stream='${stream}' ` +
-      `(records=${recordsToScan}, fields=${declaredFields.length}, mode=${canResume ? "resume" : "fresh"})`
-  );
-  const indexed = await rebuildSemanticIndexForStream({
-    connectorId,
-    connectorInstanceId,
-    declaredFields,
-    existingKeys,
-    progressJob: rebuildingJob,
-    recordsToScan,
-    signal,
-    stream,
-    manifest: context.manifest,
-  });
-  log(
-    `[PDPP] Semantic index rebuild completed for ${connectorId} stream='${stream}' ` +
-      `(records=${recordsToScan}, indexed=${indexed})`
-  );
-  if (usePostgres) {
-    await postgresUpsertSemanticMeta({
-      connectorId,
-      connectorInstanceId,
-      dimensions: currentIdentity.dimensions,
-      distanceMetric: currentMetric,
-      fieldsFingerprint: newFingerprint,
-      modelId: currentModel,
-      stream,
+  const metaRow = usePostgres
+    ? await postgresGetSemanticMeta({ connectorInstanceId, stream })
+    : getOne(referenceQueries.searchSemanticMetaGetByStream, [connectorInstanceId, stream]);
+  const identityChanged =
+    !metaRow ||
+    metaRow.fields_fingerprint !== newFingerprint ||
+    metaRow.model_id !== currentModel ||
+    Number(metaRow.dimensions) !== currentIdentity.dimensions ||
+    metaRow.distance_metric !== currentMetric;
+  const identity = { ...currentIdentity, fieldsFingerprint: newFingerprint };
+  const acquired = await store.acquire({ identity, owner: randomUUID(), scope });
+  if (acquired.busy) {
+    return { job, status: "busy" };
+  }
+  const { created, fence, prior } = acquired;
+  let released = false;
+  try {
+    const prepared = await prepareSemanticPass({
+      context,
+      created,
+      fence,
+      identity,
+      identityChanged,
+      metaRow: metaRow as SemanticDbRow | null,
+      prior,
+      scope,
     });
-    await postgresDeleteSemanticProgress({ connectorInstanceId, stream });
-  } else {
-    exec(referenceQueries.searchSemanticMetaUpsert, [
-      connectorInstanceId,
-      connectorId,
-      stream,
-      newFingerprint,
-      currentModel,
-      currentIdentity.dimensions,
-      currentMetric,
-      new Date().toISOString(),
-    ]);
-    deleteBackfillProgress({ connectorId, connectorInstanceId, stream });
+    if (prepared === "busy") {
+      return { job, status: "busy" };
+    }
+    const { cursor } = prepared;
+    job = updateBackfillJob(job, { phase: "rebuilding", recordsScanned: 0, recordsTotal: null, stream });
+    let scanned = 0;
+    const outcome = await runRepairPass({
+      assertManifestCurrent: () => assertSemanticBackfillManifestCurrent(connectorId, context.manifest),
+      budget,
+      cursor,
+      declaredFields,
+      embed: embedDocumentWithAdmission,
+      fence,
+      onProgress: ({ scanned: pageRows }) => {
+        scanned += pageRows;
+        job = updateBackfillJob(job, { recordsScanned: scanned });
+      },
+      pageSize: context.pageSize,
+      scope,
+      scopeKeyFor: (field) => encodeScopeKey(stream, field),
+      signal,
+      store,
+      textFor: (data, field) => normalizeSemanticEmbeddingInput((data as SemanticRecordData | null)?.[field]),
+      writeFence: (fn) => withConnectorInstanceWrite(connectorInstanceId, fn),
+    });
+    if (outcome === "lost") {
+      return { job, status: "busy" };
+    }
+    if (outcome === "partial") {
+      return { job, status: "partial" };
+    }
+    if (identityChanged) {
+      if (usePostgres) {
+        await postgresUpsertSemanticMeta({
+          connectorId,
+          connectorInstanceId,
+          dimensions: currentIdentity.dimensions,
+          distanceMetric: currentMetric,
+          fieldsFingerprint: newFingerprint,
+          modelId: currentModel,
+          stream,
+        });
+      } else {
+        exec(referenceQueries.searchSemanticMetaUpsert, [
+          connectorInstanceId,
+          connectorId,
+          stream,
+          newFingerprint,
+          currentModel,
+          currentIdentity.dimensions,
+          currentMetric,
+          new Date().toISOString(),
+        ]);
+      }
+    }
+    const completion = await store.complete(scope, fence);
+    released = true;
+    if (completion === "lost") {
+      return { job, status: "busy" };
+    }
+    // "reset": a newer dirty revision survived the completion CAS. The progress
+    // row restarted a fresh pass and the scope stays dirty (guaranteed resumer).
+    return { job, status: completion === "complete" ? "complete" : "partial" };
+  } finally {
+    if (!released) {
+      await Promise.resolve(store.release(scope, fence)).catch(() => {
+        // The lease expires on its own; never mask the original outcome.
+      });
+    }
   }
-  return rebuildingJob;
 }
 
 async function deleteSemanticNonParticipatingStream({
@@ -3130,50 +2990,48 @@ async function backfillSemanticManifestStream({
   await runSequential(
     connectorInstanceIds.filter((id) => id === fencedConnectorInstanceId),
     async (connectorInstanceId) => {
-      const { canResume, needsRebuild } = await inspectSemanticBackfillInstance({
+      const { job, status } = await repairSemanticScope({
         connectorInstanceId,
         context,
         declaredFields,
         newFingerprint,
+        progressJob: currentProgressJob,
         stream,
       });
-      if (needsRebuild) {
-        currentProgressJob = await rebuildSemanticBackfillInstance({
-          canResume,
-          connectorInstanceId,
-          context,
-          declaredFields,
-          newFingerprint,
-          progressJob: currentProgressJob,
-          stream,
-        });
-      }
+      currentProgressJob = job;
+      context.results.push({ connectorInstanceId, status, stream });
     }
   );
   return currentProgressJob;
 }
 
 /**
- * Drift-detect + rebuild the semantic index for every participating stream
- * of a manifest. Parallel to lexicalIndexBackfillForManifest.
+ * Verify and repair the semantic index for every participating stream of a
+ * manifest, within a bounded budget. Parallel to lexicalIndexBackfillForManifest.
  *
- * Drift signals:
- *   1. fields_fingerprint mismatch (authoritative). Catches same-cardinality
- *      swaps like ['title'] → ['selftext'].
- *   2. model_id / dimensions / distance_metric mismatch (backend identity).
- *      Any change invalidates every row — the stored vectors were produced
- *      by a different model.
- *   3. Row-count guard for streams whose fingerprint already matches.
- *      A zero index is rebuilt only when records actually contain non-empty
- *      declared text; non-zero in-band counts are left alone to avoid
- *      destructive full-stream rebuilds from benign count skew.
+ * Whole-stream deletion is reserved for an IDENTITY change:
+ *   - fields_fingerprint mismatch (catches same-cardinality swaps such as
+ *     ['title'] → ['selftext']);
+ *   - model_id / dimensions / distance_metric mismatch (the stored vectors
+ *     were produced by a different model).
+ * Count drift is NOT an input and never deletes anything. Missing, stale
+ * (`source_version` NULL, lower or higher than the record's version) and
+ * orphan rows are repaired in place by a paged, leased, resumable pass; see
+ * semantic-index-repair.ts. Each call spends at most one budget (pages and
+ * wall clock) across all scopes and returns a per-scope status; scopes that
+ * did not finish stay dirty so the sweep resumes them.
  *
  * Streams that previously participated but no longer declare semantic_fields
  * have their stale index rows + meta dropped. Same pattern as lexical.
  *
+ * Instances: a manifest pinned with `storage_binding.connector_instance_id`
+ * (or `connector_instance_id`) processes only that instance, exactly like
+ * lexicalIndexBackfillForManifest. Unpinned manifests process every instance.
+ *
  * Called from:
  *   - startServer (native mode)
  *   - registerConnector (polyfill mode)
+ *   - the dirty-scope reconcile (pinned to one instance)
  */
 export async function semanticIndexBackfillForManifest({
   manifest,
@@ -3181,45 +3039,77 @@ export async function semanticIndexBackfillForManifest({
     // Deliberately silent when no backfill logger is supplied.
   },
   signal = null,
-}: SemanticBackfillOptions = {}): Promise<void> {
+  repair = {},
+}: SemanticBackfillOptions = {}): Promise<SemanticBackfillResult> {
+  const results: SemanticBackfillScopeResult[] = [];
   if (!(manifest?.connector_id && Array.isArray(manifest?.streams))) {
-    return;
+    return { scopes: results };
   }
   if (!backend) {
-    return;
+    return { scopes: results };
   }
   const connectorId = manifest.connector_id;
   await assertSemanticBackfillManifestCurrent(connectorId, manifest);
   const connectorInstanceIds = await resolveSemanticBackfillConnectorInstanceIds({ connectorId, manifest });
+  const budget = newRepairBudget({
+    callerDeadlineAt: repair.deadlineAt ?? null,
+    maxDurationMs: repair.maxDurationMs,
+    maxPages: repair.maxPages,
+  });
+  const store = repair.store ?? createSemanticRepairStore({ leaseTtlMs: repair.leaseTtlMs });
   await runSequential(connectorInstanceIds, async (connectorInstanceId) => {
     // No connector-instance writer-admission fence around the whole
-    // per-instance backfill: see rebuildSemanticIndexForStream below for
-    // where the fence now lives (one bounded page write at a time, never
-    // O(the whole rebuild's scan+embed duration)). Embedding calls
-    // (embedDocumentWithAdmission) are already bounded by their OWN
-    // separate admission pool (activeSemanticWork), independent of the
-    // ingest writer-admission gate this used to also hold hostage.
+    // per-instance backfill: the fence is held for one bounded page write at a
+    // time (see repairSemanticScope), never for the scan or the embedding
+    // calls (embedDocumentWithAdmission has its OWN admission pool).
     await backfillSemanticIndexForConnectorInstance({
+      budget,
       fencedConnectorInstanceId: connectorInstanceId,
       log,
       manifest,
+      pageSize: repair.pageSize,
+      results,
       signal,
+      store,
     });
   });
+  return { scopes: results };
+}
+
+/** Backend-appropriate repair store. Exported so tests can wrap it to interleave a racing writer. */
+export function createSemanticRepairStore(options: { leaseTtlMs?: number | undefined } = {}): RepairStore {
+  if (isPostgresStorageBackend()) {
+    return createPostgresRepairStore(options);
+  }
+  return createSqliteRepairStore(() => {
+    const index = ensureVectorIndex();
+    if (!index) {
+      throw new Error("semantic vector index is unavailable");
+    }
+    return index as unknown as RepairVectorIndex;
+  }, options);
 }
 
 // The public entry point obtains one coordinator scope per id. This helper is
 // deliberately private so no external caller can select an instance and skip
 // that fence; all current/removed/orphan stream effects below run within it.
 async function backfillSemanticIndexForConnectorInstance({
+  budget,
   manifest,
   log,
+  pageSize,
+  results,
   signal,
+  store,
   fencedConnectorInstanceId,
 }: {
+  budget: RepairBudget;
   manifest: SemanticBackfillManifest;
   log: (message: string) => void;
+  pageSize: number | undefined;
+  results: SemanticBackfillScopeResult[];
   signal: AbortSignal | null;
+  store: RepairStore;
   fencedConnectorInstanceId: string;
 }): Promise<void> {
   const connectorId = manifest.connector_id;
@@ -3269,6 +3159,7 @@ async function backfillSemanticIndexForConnectorInstance({
       visitedStreams.add(stream);
       progressJob = await backfillSemanticManifestStream({
         context: {
+          budget,
           connectorId,
           currentIdentity: {
             dimensions: currentDims,
@@ -3281,7 +3172,10 @@ async function backfillSemanticIndexForConnectorInstance({
           index,
           log,
           manifest,
+          pageSize,
+          results,
           signal,
+          store,
           usePostgres,
           vectorIndex,
         },

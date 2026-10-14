@@ -5339,6 +5339,21 @@ async function migratePostgresRecordsBlobSearchInstanceColumns(client: PoolClien
     }
   );
   await client.query("ALTER TABLE semantic_search_backfill_progress ADD COLUMN IF NOT EXISTS fields_fingerprint TEXT");
+  // Bounded semantic repair (semantic-index-repair.ts). All additions are
+  // nullable or constant-default, so PG16 applies them as catalog-only changes
+  // with no table rewrite. Legacy semantic rows keep source_version NULL
+  // ("unknown"); nothing stamps them current. cursor_key already exists.
+  await client.query("ALTER TABLE semantic_search_blob ADD COLUMN IF NOT EXISTS source_version BIGINT");
+  await client.query(
+    "ALTER TABLE semantic_search_backfill_progress ADD COLUMN IF NOT EXISTS pass_kind TEXT NOT NULL DEFAULT 'rebuild'"
+  );
+  await client.query("ALTER TABLE semantic_search_backfill_progress ADD COLUMN IF NOT EXISTS cursor_key TEXT");
+  await client.query("ALTER TABLE semantic_search_backfill_progress ADD COLUMN IF NOT EXISTS pass_dirty_revision BIGINT");
+  await client.query("ALTER TABLE semantic_search_backfill_progress ADD COLUMN IF NOT EXISTS lease_owner TEXT");
+  await client.query("ALTER TABLE semantic_search_backfill_progress ADD COLUMN IF NOT EXISTS lease_expires_at BIGINT");
+  await client.query(
+    "ALTER TABLE semantic_search_backfill_progress ADD COLUMN IF NOT EXISTS lease_generation BIGINT NOT NULL DEFAULT 0"
+  );
   if (checks.every(Boolean)) {
     await ensurePostgresRecordsBlobSearchInstanceIndexes(client);
     return;

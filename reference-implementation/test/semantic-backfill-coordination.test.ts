@@ -51,7 +51,7 @@ type SemanticIndexBackfillForManifestFn = (
   args: SemanticBackfillOptions & {
     manifest: NonNullable<SemanticBackfillOptions["manifest"]>;
   }
-) => Promise<void>;
+) => Promise<unknown>;
 const semanticIndexBackfillForManifest: SemanticIndexBackfillForManifestFn = (args) =>
   semanticIndexBackfillForManifestUntyped(args);
 

@@ -197,6 +197,8 @@ export const POSTGRES_TEMPLATE_COLD_REQUIRED_FILES: readonly string[] = [
   "test/run-history-duplicate-run-id-identity.test.ts",
   "test/run-history-interrupted-migration-reconciliation.test.ts",
   "test/run-history-writer-authority.test.ts",
+  "test/semantic-index-repair-postgres.test.ts",
+  "test/semantic-index-repair.test.ts",
   "test/semantic-index-skip-unchanged-postgres.test.ts",
   "test/spine-events-connector-instance-id-backfill.test.ts",
   "test/spine-source-boot-backfill.test.ts",
