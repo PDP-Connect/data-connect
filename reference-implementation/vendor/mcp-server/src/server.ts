@@ -4,6 +4,12 @@
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
+import {
+  buildPackageProfileTools,
+  isPackageDataTool,
+  type PackageProfile,
+  resolvePackageChild,
+} from "./package-profile.ts";
 import { RsClient } from "./rs-client.ts";
 import { buildResourceTemplates, buildTools } from "./tools.ts";
 
@@ -15,8 +21,8 @@ export const DEFAULT_SERVER_VERSION = "0.0.0";
 // Cross-tool details that would otherwise repeat across tool descriptions live
 // here; tool descriptions stay concise and routing-specific.
 export const PDPP_MCP_INSTRUCTIONS =
-  "PDPP tools are grant-scoped. Start with `schema`, then call `schema(stream)` after choosing a stream; add `connection_id` when a stream name appears under multiple sources or before full schema. Use `connection_id` from schema results or `available_connections` errors to disambiguate sources. Filters must be typed objects, not bracket strings. Page and narrow with `limit`, `cursor`, and `fields`; prefer `aggregate` or lexical `search` for exact terms. " +
-  "The configured bearer limits every result; do not use owner or control-plane tokens for normal MCP access. Schema advertises valid fields, filter operators, expand relations, sort/count support, connection identities, and connector keys. Persist `connection_id`, not `grant_id`, across reconnects. Search result ids are self-contained handles; pass them to `fetch` for projected records or to `read_record_field` for bounded field windows. " +
+  "PDPP tools are grant-scoped. Start with `schema`, then call `schema(stream)` after choosing a stream; on client tokens, add `connection_id` when a stream name appears under multiple sources or before full schema. Use `connection_id` from schema results or `available_connections` errors to disambiguate sources. Filters must be typed objects, not bracket strings. Page and narrow with `limit`, `cursor`, and `fields`; prefer `aggregate` or lexical `search` for exact terms. " +
+  "The configured bearer limits every result; do not use owner or control-plane tokens for normal MCP access. Schema advertises valid fields, filter operators, expand relations, sort/count support, connection identities, and connector keys. Persist `connection_id` for client-token reconnects. Package tokens require one `grant_id` on every data tool; choose the child with `grant_id` and keep it on follow-up calls. Search result ids are self-contained handles; pass them to `fetch` for projected records or to `read_record_field` for bounded field windows. " +
   "When a preview is not enough, follow `structuredContent.content_ladder`: call `read_record_field` with the supplied arguments. Resource-aware hosts may also read hidden/returned resource URIs, but generic resource reads are not required for ordinary text evidence. " +
   "`content[]` is the reliable model-visible guide and includes next cursors/bookmarks when present; `structuredContent` is a host-dependent machine envelope, not the only place to find next-step handles.";
 
@@ -27,9 +33,10 @@ interface ServerIcon {
 }
 
 interface CreatePdppMcpServerOptions {
-  accessToken: string;
+  accessToken?: string;
   fetch?: typeof fetch;
   providerUrl: string;
+  packageProfile?: PackageProfile;
   rsClient?: RsClient;
   serverIcons?: ServerIcon[];
   serverName?: string;
@@ -47,16 +54,25 @@ interface CreatePdppMcpServerOptions {
 export function createPdppMcpServer({
   providerUrl,
   accessToken,
+  packageProfile,
   rsClient,
   fetch: fetchImpl = globalThis.fetch,
   serverName = DEFAULT_SERVER_NAME,
   serverVersion = DEFAULT_SERVER_VERSION,
   serverIcons,
 }: CreatePdppMcpServerOptions): { server: McpServer; rs: RsClient } {
-  // Callers may inject a custom RsClient-compatible adapter (e.g. the hosted
-  // adapter's PackageRsClient fan-out). Otherwise we build a single-bearer
-  // RsClient from the supplied accessToken.
-  const rs = rsClient ?? new RsClient({ providerUrl, accessToken, fetch: fetchImpl });
+  // Package calls receive a profile whose children each own one scoped client.
+  const rs =
+    rsClient ??
+    packageProfile?.children[0]?.rs ??
+    (accessToken
+      ? new RsClient({ providerUrl, accessToken, fetch: fetchImpl })
+      : undefined);
+  if (!rs) {
+    throw new TypeError(
+      "CreatePdppMcpServer requires an accessToken, rsClient, or packageProfile",
+    );
+  }
   const serverInfo: { name: string; version: string; icons?: ServerIcon[] } = {
     name: serverName,
     version: serverVersion,
@@ -68,7 +84,9 @@ export function createPdppMcpServer({
     instructions: PDPP_MCP_INSTRUCTIONS,
   });
 
-  const tools = buildTools({ rs, providerUrl });
+  const tools = packageProfile
+    ? buildPackageProfileTools(packageProfile, providerUrl)
+    : buildTools({ rs, providerUrl });
   for (const tool of tools) {
     const config: {
       title: string;
@@ -94,7 +112,9 @@ export function createPdppMcpServer({
     });
   }
 
-  for (const template of buildResourceTemplates({ rs, providerUrl })) {
+  for (const template of packageProfile
+    ? []
+    : buildResourceTemplates({ rs, providerUrl })) {
     server.registerResource(
       template.name,
       new ResourceTemplate(template.uriTemplate, { list: undefined }),
@@ -144,6 +164,36 @@ export async function handleStreamableHttpRequest(
   request: Request,
   options: CreatePdppMcpServerOptions
 ): Promise<Response> {
+  if (options.packageProfile) {
+    const rpc = await request
+      .clone()
+      .json()
+      .catch(() => null);
+    if (
+      rpc &&
+      typeof rpc === "object" &&
+      (rpc as Record<string, unknown>).method === "tools/call"
+    ) {
+      const params = (
+        rpc as {
+          params?: { name?: unknown; arguments?: Record<string, unknown> };
+        }
+      ).params;
+      if (isPackageDataTool(params?.name)) {
+        const selection = resolvePackageChild(
+          options.packageProfile,
+          params?.arguments?.grant_id,
+        );
+        if ("error" in selection) {
+          return Response.json({
+            jsonrpc: "2.0",
+            id: (rpc as { id?: unknown }).id ?? null,
+            result: selection.error,
+          });
+        }
+      }
+    }
+  }
   const { server } = createPdppMcpServer(options);
   // Explicitly omitting `sessionIdGenerator` (rather than setting it to
   // `undefined`) selects the SDK's stateless mode identically —

@@ -212,7 +212,7 @@ const SUPPORTED_AGGREGATE_QUERY_KEYS = new Set([
 ]);
 
 const CONNECTION_ID_DESCRIPTION =
-  "Optional connection scope. Omit to fan in across granted connections. Get it from `schema` or typed 409 `available_connections` entries with `connector_key` and `connection_id`; persist `connection_id`, not `grant_id`, across reconnects.";
+  "Client tokens may scope with a `connection_id` from `schema` or `available_connections`; candidates include `connector_key` and `connection_id`. Package tokens select one child with `grant_id`.";
 
 const LIMIT_DESCRIPTION =
   "Records per page. Omit for the default page of 25; the maximum is 100 (the spec-core §8 contract). Values above 100 are rejected here rather than silently clamped, so the page size you request is always the page size you get. Page forward with the returned `cursor` instead of asking for a larger page.";
@@ -690,7 +690,7 @@ export function buildTools({ rs, providerUrl }: { rs: RsClient; providerUrl: str
       name: "schema",
       title: "Get PDPP schema",
       description:
-        'Return the grant-scoped PDPP schema document from `GET /v1/schema`. This is the canonical capability source: streams, canonical connector-type metadata (`connector_key`), per-field filter operators (`field_capabilities`), expandable relations (`expand_capabilities`), projection support, search modes, pagination support, count support, and granted connection identities (`connection_id`, `display_name`). Defaults to a compact, token-efficient projection (`detail: "compact"`) so the `schema -> schema(stream) -> schema(stream, connection_id) -> query_records` discovery path stays cheap. Stream names are not globally unique; add `connection_id` to narrow a shared stream to one configured source. `detail: "full"` is allowed only with `stream` and returns deduped exhaustive schema for matching stream rows, preserving raw per-field JSON Schema without duplicate stream arrays. Call this before issuing other tools to discover valid filter, sort, expand, fields, count, aggregate, stream, and connection-disambiguation arguments. Read-only.',
+        'Return the grant-scoped schema from `GET /v1/schema`: streams, canonical `connector_key` metadata, field filter/sort/count operators, expansions, aggregates, projections, search, pagination, and `connection_id` identities. Defaults to a compact token-efficient projection (`detail: "compact"`) so `schema -> schema(stream) -> schema(stream, connection_id) -> query_records` stays cheap for client tokens. Stream names may repeat; package tokens select one child with `grant_id`. `detail: "full"` is allowed only with `stream` and preserves raw per-field JSON Schema. Read this first to find valid arguments. Read-only.',
       annotations: READ_ONLY_ANNOTATIONS,
       inputSchema: z
         .object({
@@ -821,7 +821,7 @@ export function buildTools({ rs, providerUrl }: { rs: RsClient; providerUrl: str
       name: "search",
       title: "Search PDPP records",
       description:
-        "Search records via `GET /v1/search` (lexical), `/v1/search/semantic`, or `/v1/search/hybrid` per `mode`. Use lexical for exact known terms; semantic is approximate retrieval for conceptual matches. `structuredContent.results` carries the flattened page; `structuredContent.data` carries compact envelope metadata, not a duplicate hit array. Hit ids are self-contained `fetch` handles (the connection is encoded in the id); hits also carry `connection_id` and `connector_key`. Pass `connection_id` to scope, omit to fan in. Page default is 25 hits; `limit` is capped at 100 (enforced at input, and fan-in packages apply it globally). Page forward with `cursor` (lexical/semantic; hybrid does not page). Per-mode capability support is advertised by `GET /v1/schema`. Read-only.",
+        "Search lexical `/v1/search`, semantic, or hybrid records. Use lexical for exact terms and semantic for conceptual matches. Results contain self-contained `fetch` ids, `connection_id`, and `connector_key`; `structuredContent.data` holds compact metadata. Modes and query capabilities are in `GET /v1/schema`. Client tokens may scope by `connection_id`; package tokens must select one child with `grant_id`. Pages default to 25; `limit` is capped at 100. Page with the returned `cursor` (lexical/semantic; hybrid does not page). Read-only.",
       annotations: READ_ONLY_ANNOTATIONS,
       inputSchema: z
         .object({
@@ -2795,7 +2795,6 @@ function summarizeSearch(body: Json, results: SearchResult[]): string {
   const nextCursor = envelopeStringField(body, "next_cursor");
   const cursorText = nextCursor ? ` next_cursor=${formatScalar(nextCursor)}.` : "";
   const firstFetchText = results[0]?.id ? ` first_fetch_id=${formatInlineValue(results[0].id)}` : "";
-  const sourceMixText = formatSearchSourceMix(body);
   const recallText = formatSearchRecallWarning(body);
   const previews = results.slice(0, SEARCH_TEXT_PREVIEW_LIMIT).map(formatSearchPreviewLine);
   const matchPreviews = results
@@ -2807,7 +2806,7 @@ function summarizeSearch(body: Json, results: SearchResult[]): string {
     previews.length > 0
       ? "\nFetch a hit with `fetch` using the shown id as-is; ids are self-contained. Pass connection_id only when shown separately."
       : "";
-  return `search: ${results.length} hit(s).${hasMore}${cursorText}${firstFetchText}${sourceMixText}${recallText}${matchPreviewText}${previewText}${fetchHint} Search envelope metadata: structuredContent.data; flattened results: structuredContent.results.`;
+  return `search: ${results.length} hit(s).${hasMore}${cursorText}${firstFetchText}${recallText}${matchPreviewText}${previewText}${fetchHint} Search envelope metadata: structuredContent.data; flattened results: structuredContent.results.`;
 }
 
 function formatSearchMatchWindowLines(result: SearchResult, index: number): string[] {
@@ -2863,32 +2862,6 @@ function formatSearchRecallWarning(body: Json): string {
     return ` Recall: results were ranked over a bounded candidate window, not all matches — more matches may exist${factsText}; do not treat this page as exhaustive.`;
   }
   return "";
-}
-
-function formatSearchSourceMix(body: Json): string {
-  const bodyObject = objectValue(body);
-  const meta = objectValue(bodyObject?.meta);
-  const pkg = objectValue(meta?.package);
-  const sourceMix = pkg?.source_mix;
-  if (!Array.isArray(sourceMix) || sourceMix.length === 0) {
-    return "";
-  }
-  const rendered = sourceMix.slice(0, 8).map((entry: Json) => {
-    const entryObject = objectValue(entry);
-    const parts = [
-      `connection_id:${formatInlineValue(entryObject?.connection_id)}`,
-      `connector_key:${formatInlineValue(entryObject?.connector_key)}`,
-      `count:${formatInlineValue(entryObject?.count)}`,
-    ];
-    if (entryObject?.display_name) {
-      parts.push(`display_name:${formatInlineValue(entryObject.display_name)}`);
-    }
-    return `{${parts.join(",")}}`;
-  });
-  if (sourceMix.length > 8) {
-    rendered.push(`more:${sourceMix.length - 8}`);
-  }
-  return ` source_mix=${rendered.join("|")}.`;
 }
 
 function formatSearchPreviewLine(result: SearchResult, index: number): string {
