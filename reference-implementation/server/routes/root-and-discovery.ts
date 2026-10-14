@@ -128,6 +128,8 @@ export interface MountAsAuthorizationServerMetadataContext {
   resolveExplicitIssuer: () => string | null;
   resolvePreRegisteredPublicClients: () => unknown[];
   resolvePublicUrl: (req: unknown, explicit: unknown) => string;
+  /** Optional; omitted means ["none"] (public clients only). */
+  tokenEndpointAuthMethodsSupported?: () => readonly string[];
   trustedMetadataHosts: unknown;
 }
 
@@ -152,6 +154,9 @@ export function mountAsAuthorizationServerMetadata(app: AppLike, ctx: MountAsAut
           preRegisteredPublicClients: ctx.publicClientMetadataForAuthorizationServer(
             ctx.resolvePreRegisteredPublicClients()
           ),
+          ...(ctx.tokenEndpointAuthMethodsSupported
+            ? { tokenEndpointAuthMethodsSupported: ctx.tokenEndpointAuthMethodsSupported() }
+            : {}),
         },
         { buildAuthorizationServerMetadata: ctx.buildAuthorizationServerMetadata }
       )

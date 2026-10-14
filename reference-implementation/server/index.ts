@@ -101,6 +101,7 @@ import {
   getConfiguredNativeManifest,
   getConnectorManifest,
   getCumulativeClientAccessForPackage,
+  getRegisteredClient,
   getGrantPackageAccess,
   getGrantPackageForOwner,
   getManifestForStorageBinding,
@@ -578,6 +579,11 @@ import { registerStreamingRoutes } from "./streaming/routes.ts";
 import { createRunTargetRegistry } from "./streaming/run-target-registry.ts";
 import { createStreamingSessionStore } from "./streaming/sessions.ts";
 import { buildLogger, createApp } from "./transport.ts";
+import {
+  buildClientAuthMiddleware,
+  confidentialClientAuthEnabled,
+  supportedTokenEndpointAuthMethods,
+} from "./client-authentication.ts";
 import {
   createWebPushSubscriptionStore,
   fanoutEscalationWebPush,
@@ -4846,6 +4852,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
     resolvePublicUrl: resolvePublicUrl as unknown as Parameters<
       typeof mountAsAuthorizationServerMetadata
     >[1]["resolvePublicUrl"],
+    tokenEndpointAuthMethodsSupported: () => supportedTokenEndpointAuthMethods(),
     trustedMetadataHosts: opts.trustedMetadataHosts,
   });
 
@@ -5051,7 +5058,25 @@ export function buildAsApp(opts: ServerOpts = {}) {
   };
   mountAsDeviceAuthorization(app, asDeviceAuthContext as unknown as Parameters<typeof mountAsDeviceAuthorization>[1]);
 
+  // Confidential-client authentication at /oauth/token and /oauth/par,
+  // behind PDPP_CONFIDENTIAL_CLIENTS (server/client-authentication.ts).
+  // Off: no middleware is mounted and public-client behaviour is unchanged.
+  const clientAuthMiddleware = confidentialClientAuthEnabled()
+    ? buildClientAuthMiddleware({
+        lookupClient: (clientId) => getRegisteredClient(clientId),
+        resolveIssuer: (req) =>
+          resolvePublicUrl(
+            req as unknown as Parameters<typeof resolvePublicUrl>[0],
+            opts.asIssuer ||
+              opts.asPublicUrl ||
+              (opts.ignoreAmbientPublicUrls ? null : process.env.AS_ISSUER || process.env.AS_PUBLIC_URL) ||
+              null
+          ),
+      })
+    : null;
+
   const asTokenContext = {
+    clientAuthMiddleware,
     exchangeDeviceCode: (args: { clientId: string; deviceCode: string }) =>
       typeof args.deviceCode === "string" && args.deviceCode.startsWith("dc_owner_")
         ? ownerDeviceAuthStore.exchangeDeviceCode(args)
@@ -6570,6 +6595,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
   // same contract metadata, same auth posture (none — public endpoint),
   // same base-URL resolution, same response envelope, same status codes.
   mountAsPar(app, {
+    clientAuthMiddleware,
     handleError,
     initiateGrant: (body: unknown, opts2: unknown) =>
       // biome-ignore lint/suspicious/noUnnecessaryConditions: TypeScript boundary permits nullish input; this guard preserves runtime behavior.

@@ -50,6 +50,11 @@ export interface MountAsParContext {
     body: Record<string, unknown> | null | undefined,
     opts: { baseUrl: string; nativeManifest: unknown }
   ) => Promise<AsParCreateStoreResult> | AsParCreateStoreResult;
+  /**
+   * Optional confidential-client authentication (server/client-authentication.ts),
+   * mounted only when PDPP_CONFIDENTIAL_CLIENTS is on. Absent: public clients only.
+   */
+  clientAuthMiddleware?: RouteHandler | null;
   /** The native manifest for this server instance, or null if not set. */
   nativeManifest: unknown;
   /** Resolves the full base URL for the running AS given the inbound request. */
@@ -89,7 +94,13 @@ export function mountAsPar(app: AppLike, ctx: MountAsParContext): void {
     }
   };
 
-  app.post("/oauth/par", { contract: "createPushedAuthorizationRequest" } as RouteArg<RouteHandler>, handler);
+  const clientAuth = ctx.clientAuthMiddleware ? [ctx.clientAuthMiddleware as RouteArg<RouteHandler>] : [];
+  app.post(
+    "/oauth/par",
+    { contract: "createPushedAuthorizationRequest" } as RouteArg<RouteHandler>,
+    ...clientAuth,
+    handler
+  );
 }
 
 export function mapParProtocolError(err: unknown): unknown {

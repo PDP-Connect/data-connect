@@ -56,6 +56,13 @@ import {
   type PackageMemberLifecycleInput,
 } from "./grant-lifecycle.ts";
 import {
+  type ClientJwks,
+  confidentialClientAuthEnabled,
+  generateClientSecret,
+  isConfidentialClientAuthMethod,
+  normalizeClientJwks,
+} from "./client-authentication.ts";
+import {
   base64UrlSha256,
   generateOAuthRefreshToken,
   generateToken,
@@ -210,6 +217,7 @@ interface ClientMetadata {
   client_uri?: string | null | undefined;
   grant_types?: string[] | undefined;
   issuer_subject_id?: string;
+  jwks?: ClientJwks | undefined;
   logo_uri?: string | null | undefined;
   policy_uri?: string | null | undefined;
   redirect_uris?: string[] | undefined;
@@ -1421,7 +1429,8 @@ function validateAuthorizationCodeRedirectUris(redirectUris: string[] = [], appl
 function requireSupportedClientRegistrationMetadata(input: Record<string, unknown>): string {
   const rawTokenEndpointAuthMethod = input.token_endpoint_auth_method || "none";
   const tokenEndpointAuthMethod = typeof rawTokenEndpointAuthMethod === "string" ? rawTokenEndpointAuthMethod : "";
-  if (!SUPPORTED_CLIENT_AUTH_METHODS.has(tokenEndpointAuthMethod)) {
+  const confidentialAllowed = confidentialClientAuthEnabled() && isConfidentialClientAuthMethod(tokenEndpointAuthMethod);
+  if (!(SUPPORTED_CLIENT_AUTH_METHODS.has(tokenEndpointAuthMethod) || confidentialAllowed)) {
     const err: AuthError = new Error(`Unsupported token_endpoint_auth_method: ${tokenEndpointAuthMethod}`);
     err.code = "invalid_client_metadata";
     throw err;
@@ -1435,7 +1444,15 @@ function requireSupportedClientRegistrationMetadata(input: Record<string, unknow
     throw err;
   }
 
-  const unsupportedFields = Object.keys(input).filter((field) => !SUPPORTED_DYNAMIC_CLIENT_METADATA_FIELDS.has(field));
+  // `jwks` is accepted only for private_key_jwt clients, behind
+  // PDPP_CONFIDENTIAL_CLIENTS (server/client-authentication.ts).
+  const unsupportedFields = Object.keys(input).filter(
+    (field) =>
+      !(
+        SUPPORTED_DYNAMIC_CLIENT_METADATA_FIELDS.has(field) ||
+        (field === "jwks" && confidentialAllowed && tokenEndpointAuthMethod === "private_key_jwt")
+      )
+  );
   if (unsupportedFields.length) {
     const err: AuthError = new Error(`Unsupported client metadata fields: ${unsupportedFields.join(", ")}`);
     err.code = "invalid_client_metadata";
@@ -1505,6 +1522,7 @@ function normalizeClientRegistrationMetadata(input: Record<string, unknown> = {}
     token_endpoint_auth_method: tokenEndpointAuthMethod,
     tos_uri: normalizeUri(input.tos_uri, "tos_uri"),
   };
+  const jwks = tokenEndpointAuthMethod === "private_key_jwt" ? normalizeClientJwks(input.jwks) : undefined;
 
   validateClientRegistrationCapabilities(metadata);
   if (!metadata.application_type && metadata.redirect_uris?.length) {
@@ -1523,6 +1541,7 @@ function normalizeClientRegistrationMetadata(input: Record<string, unknown> = {}
     response_types: metadata.response_types,
     token_endpoint_auth_method: metadata.token_endpoint_auth_method,
     tos_uri: metadata.tos_uri,
+    ...(jwks ? { jwks } : {}),
   };
 }
 
@@ -5100,9 +5119,12 @@ export async function registerDynamicClient(
   }
 
   const clientId = generateId("cli");
+  // client_secret_basic (PDPP_CONFIDENTIAL_CLIENTS): the AS generates the
+  // secret, stores only its digest, and returns the secret once below.
+  const generatedSecret = metadata.token_endpoint_auth_method === "client_secret_basic" ? generateClientSecret() : null;
   await upsertRegisteredClient({
     clientId,
-    clientSecret: null,
+    clientSecret: generatedSecret ? generatedSecret.storedDigest : null,
     metadata,
     registrationMode: "dynamic",
   });
@@ -5130,6 +5152,8 @@ export async function registerDynamicClient(
     response_types: registered.metadata.response_types || undefined,
     token_endpoint_auth_method: registered.token_endpoint_auth_method,
     tos_uri: registered.metadata.tos_uri || (asBase ? asBase : undefined),
+    ...(registered.metadata.jwks ? { jwks: registered.metadata.jwks } : {}),
+    ...(generatedSecret ? { client_secret: generatedSecret.secret, client_secret_expires_at: 0 } : {}),
   };
 }
 

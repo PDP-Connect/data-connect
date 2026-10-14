@@ -25,6 +25,8 @@ export interface AsAuthorizationServerMetadataInput {
   readonly dynamicClientRegistrationEnabled: boolean;
   readonly issuer: string;
   readonly preRegisteredPublicClients?: readonly AsAuthorizationServerPublicClient[];
+  /** Defaults to ["none"]; the host adds confidential methods when enabled. */
+  readonly tokenEndpointAuthMethodsSupported?: readonly string[];
 }
 
 export interface AsAuthorizationServerPublicClient {
@@ -103,6 +105,6 @@ export function executeAsAuthorizationServerMetadata(
     registrationModesSupported,
     responseTypesSupported: ["code"],
     tokenEndpoint: `${issuer}/oauth/token`,
-    tokenEndpointAuthMethodsSupported: ["none"],
+    tokenEndpointAuthMethodsSupported: input.tokenEndpointAuthMethodsSupported ?? ["none"],
   });
 }

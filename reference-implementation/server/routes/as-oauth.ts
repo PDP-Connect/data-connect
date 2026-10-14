@@ -268,6 +268,11 @@ export interface MountAsTokenContext {
     grant_package_id?: string | null;
   }>;
   oauthError: PdppErrorFn;
+  /**
+   * Optional confidential-client authentication (server/client-authentication.ts),
+   * mounted only when PDPP_CONFIDENTIAL_CLIENTS is on. Absent: public clients only.
+   */
+  clientAuthMiddleware?: RouteHandler | null;
   /** Resolves the full base URL for the running AS given the inbound request. */
   resolveBaseUrl: (req: RouteRequest) => string;
   setReferenceTraceId: (res: unknown, traceId: string) => void;
@@ -400,7 +405,8 @@ export function mountAsToken(app: AppLike, ctx: MountAsTokenContext): void {
       outcome.errorMessage as string | undefined
     );
   };
-  app.post("/oauth/token", { contract: "exchangeOwnerDeviceToken" } as RouteArg<RouteHandler>, handler);
+  const clientAuth = ctx.clientAuthMiddleware ? [ctx.clientAuthMiddleware as RouteArg<RouteHandler>] : [];
+  app.post("/oauth/token", { contract: "exchangeOwnerDeviceToken" } as RouteArg<RouteHandler>, ...clientAuth, handler);
 }
 
 // POST /introspect
