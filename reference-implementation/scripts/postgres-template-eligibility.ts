@@ -143,6 +143,7 @@ export const POSTGRES_TEMPLATE_ELIGIBLE_FILES: readonly string[] = [
   "test/rs-ingest-systemic-failure-contract.test.ts",
   "test/run-connection-identity-postgres.test.ts",
   "test/runtime-cancel-ingest-commit-boundary-probe.test.ts",
+  "test/runtime-cursor-audit-fact.test.ts",
   "test/runtime-record-rejection-system-journey.test.ts",
   "test/scheduler-dispatch-wedge-health-reason.test.ts",
   "test/scheduler-owner-isolation.test.ts",
