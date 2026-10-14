@@ -1709,6 +1709,7 @@ test("RS 401 responses advertise protected-resource metadata in header and body"
   const rsUrl = `http://localhost:${server.rsPort}`;
   const metadataUrl = `${rsUrl}/.well-known/oauth-protected-resource`;
   const expectedChallenge = `Bearer resource_metadata="${metadataUrl}"`;
+  const invalidTokenChallenge = `Bearer error="invalid_token", resource_metadata="${metadataUrl}"`;
 
   try {
     const missingResp = await fetch(`${rsUrl}/v1/schema`);
@@ -1727,7 +1728,7 @@ test("RS 401 responses advertise protected-resource metadata in header and body"
     });
     const invalidBody = (await invalidResp.json()) as JsonObject;
     assert.equal(invalidResp.status, 401);
-    assert.equal(invalidResp.headers.get("www-authenticate"), expectedChallenge);
+    assert.equal(invalidResp.headers.get("www-authenticate"), invalidTokenChallenge);
     assert.equal(invalidBody.error.resource_metadata, metadataUrl);
     // biome-ignore lint/performance/useTopLevelRegex: localized test assertion preserves its explicit contract.
     assert.match(invalidBody.error.next_step, /pdpp_agent_discovery\.cli/);
