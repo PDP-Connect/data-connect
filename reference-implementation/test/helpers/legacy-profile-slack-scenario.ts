@@ -92,7 +92,7 @@ function runFacts(timeline: Row) {
 		failure_message: data.failure_message,
 		records_accepted: data.records_accepted,
 		skipped: events
-			.filter((event) => String(event.event_type).includes("skip"))
+			.filter((event) => event.event_type === "run.stream_skipped")
 			.map((event) => ({
 				event_type: event.event_type,
 				stream: event.stream_id,
@@ -169,6 +169,24 @@ function writeEvidence(report: Record<string, unknown>) {
 	}
 }
 
+/** The base-archive resume fact the run committed; the connector writes it just after the run is terminal. */
+async function waitForResumeFact(
+	urls: LegacyUrls,
+): Promise<{ archive: string; at: string }> {
+	for (let attempt = 0; attempt < 50; attempt += 1) {
+		const messages = ((await readState(urls)).state as Record<string, Row>)
+			.messages as Row;
+		const [entry] = Object.entries(
+			(messages.base_archive_resumed_at as Row | undefined) ?? {},
+		);
+		if (entry) {
+			return { archive: entry[0], at: String(entry[1]) };
+		}
+		await new Promise((resolve) => setTimeout(resolve, 100));
+	}
+	throw new Error("no base_archive_resumed_at fact appeared after the run");
+}
+
 /** State as an instance last synced 8 days ago would have it: slackdump is due again. */
 async function ageLastResume(urls: LegacyUrls): Promise<void> {
 	const messages = ((await readState(urls)).state as Record<string, Row>)
@@ -193,6 +211,12 @@ async function ageLastResume(urls: LegacyUrls): Promise<void> {
 	);
 	assert.equal(put.status, 200, JSON.stringify(put.body));
 }
+
+/** A stream's state without its run clock, so values from different runs compare. */
+const withoutClock = (state: Row | undefined) => {
+	const { synced_at: _syncedAt, ...rest } = state ?? {};
+	return rest;
+};
 
 const sorted = (values: Iterable<string>) => [...values].sort();
 
@@ -306,13 +330,29 @@ export async function assertCompiledSlackUpgrade(
 				);
 				const grantsRegistered = await readGrants(urls, grants);
 
-				// ---- step 2: first run with the compiled 0.7.1 emitter. The connector's migration shim seeds its
-				// resume throttle from state, so slackdump is NOT called; the run re-reads the existing archive. ----
+				// ---- step 2: first run with the compiled 0.7.1 emitter. State proves a completed run (archive_dir,
+				// last_ts) but holds no base_archive_resumed_at fact, so the connector's migration shim
+				// (deriveMigratedBaseArchiveResumedAt, which the 0.6.0 bundle contains too) seeds the resume throttle from
+				// this run and slackdump is not called. A throttle hit on an existing fact would leave the state
+				// precondition false and the fact older than this run, so both are pinned. ----
+				const messagesBefore = stateBefore.messages as Row;
+				assert.ok(
+					messagesBefore.archive_dir && messagesBefore.last_ts,
+					"state proves a completed prior run",
+				);
+				assert.deepEqual(
+					Object.keys(
+						(messagesBefore.base_archive_resumed_at as Row | undefined) ?? {},
+					),
+					[],
+					"the 0.6.0 run left no base_archive_resumed_at fact",
+				);
 				await addAndSelectSlackSource(
 					urls,
 					materializeSlackSource(join(dir, "v071-src"), "v071"),
 				);
 				const stubMark1 = harness.stubLog().length;
+				const run1Started = Date.now();
 				const run1 = await runSlackSync(urls);
 				assert.equal(
 					run1.timeline.terminal_status,
@@ -322,7 +362,22 @@ export async function assertCompiledSlackUpgrade(
 				assert.deepEqual(
 					harness.stubLog().slice(stubMark1),
 					[],
-					"first post-upgrade run is throttled: slackdump not called",
+					"first post-upgrade run: slackdump not called",
+				);
+				assert.ok(
+					(run1.timeline.data as Row[]).some(
+						(event) =>
+							event.event_type === "run.progress_reported" &&
+							(event.data as Row).message ===
+								"Using the saved copy; Slack was checked recently",
+					),
+					"the run reports the throttle decision",
+				);
+				const seeded = await waitForResumeFact(urls);
+				assert.equal(seeded.archive, messagesBefore.archive_dir);
+				assert.ok(
+					Date.parse(seeded.at) >= run1Started - 1000,
+					`the resume fact was seeded by this run, not carried over: ${seeded.at}`,
 				);
 				const afterRun1 = await storedRecords(backend);
 				const written1 = [...afterRun1].filter(
@@ -340,9 +395,12 @@ export async function assertCompiledSlackUpgrade(
 						`${key} written by 0.7.1 has no fetched_at`,
 					);
 				}
-				// CONTRACT CHANGE: rows the emitter did not rewrite keep their legacy data.fetched_at. The 0.7.1 manifest still
-				// lists fetched_at in compaction_fingerprint.exclude_keys, so an unchanged row's fingerprint matches and the
-				// connector suppresses it; the stored version is never replaced.
+				// CONTRACT CHANGE: rows the emitter did not rewrite keep their legacy data.fetched_at. The reason is the
+				// connector's in-code FINGERPRINT_EXCLUDE (connectors/slack/index.ts at 861be44d48: workspace and
+				// channel_memberships exclude "fetched_at"), not the manifest's compaction_fingerprint.exclude_keys: an
+				// unchanged row's fingerprint still matches the stored one, so the connector suppresses it and the stored
+				// version is never replaced. dm_read_states is rewritten because it is not in FINGERPRINTED_STREAMS, so
+				// it is emitted on every run.
 				assert.deepEqual(
 					sorted(
 						[...afterRun1]
@@ -371,6 +429,15 @@ export async function assertCompiledSlackUpgrade(
 						false,
 						`${stream} has no state entry of its own, before or after`,
 					);
+				}
+				for (const stream of Object.keys(stateBefore)) {
+					if (stream !== "messages") {
+						assert.deepEqual(
+							withoutClock(stateRun1[stream]),
+							withoutClock(stateBefore[stream]),
+							`${stream}: state values unchanged by the first 0.7.1 run`,
+						);
+					}
 				}
 				assert.deepEqual(
 					(stateRun1.messages as Row).channel_last_ts,
@@ -460,7 +527,18 @@ export async function assertCompiledSlackUpgrade(
 					sorted(Object.keys(stateRun2)),
 					sorted(Object.keys(stateBefore)),
 				);
-				const messagesBefore = stateBefore.messages as Row;
+				for (const stream of Object.keys(stateBefore)) {
+					// workspace, channel_memberships and messages legitimately change in the resume run.
+					if (
+						!["workspace", "channel_memberships", "messages"].includes(stream)
+					) {
+						assert.deepEqual(
+							withoutClock(stateRun2[stream]),
+							withoutClock(stateBefore[stream]),
+							`${stream}: state values carried through the resume run`,
+						);
+					}
+				}
 				const messagesAfter = stateRun2.messages as Row;
 				assert.ok(
 					Number(messagesAfter.last_ts) > Number(messagesBefore.last_ts),

@@ -41,6 +41,25 @@ const EXPECTED_STATE: Record<ApiProfileKey, Record<string, true>> = {
 	spotify: { playlists: true, recently_played: true, saved_tracks: true },
 };
 
+const EXPECTED_PATHS = {
+	github: [
+		"/user",
+		"/user/repos",
+		"/user/starred",
+		"/issues",
+		"/search/issues",
+		"/repos/octotester/widgets/pulls/7",
+		"/gists",
+	],
+	spotify: [
+		"/v1/me/playlists",
+		"/v1/me/tracks",
+		"/v1/me/top/artists",
+		"/v1/me/player/recently-played",
+	],
+	apple_contacts: [],
+} as const;
+
 // Records the run added per manifest stream. The first stream also holds the one legacy record seeded before the run.
 const EXPECTED_NEW_RECORDS: Record<ApiProfileKey, Record<string, number>> = {
 	apple_contacts: { address_books: 1, contact_groups: 1, contacts: 2 },
@@ -95,6 +114,37 @@ for (const key of Object.keys(API_PROFILES) as ApiProfileKey[]) {
 			Object.keys(EXPECTED_STATE[key]).sort(),
 			"state written per stream",
 		);
+		// The shim must have loaded and served: an empty log would mean the child could have reached the provider.
+		assert.ok(
+			run.shimLog.length > 0,
+			"the network shim loaded and logged requests",
+		);
+		const served = run.shimLog.map((entry) => new URL(String(entry.url)));
+		if (key === "apple_contacts") {
+			assert.ok(
+				run.shimLog.every((entry) => entry.loopback === true),
+				"only loopback fetches",
+			);
+			assert.equal(
+				run.shimLog.length,
+				run.carddavRequests.length,
+				"every fetch reached the loopback mock",
+			);
+		} else {
+			assert.ok(
+				run.shimLog.every((entry) => entry.status === 200),
+				"every fetch was answered by a fixture",
+			);
+			assert.deepEqual(
+				[...new Set(served.map((url) => url.host))],
+				[key === "github" ? "api.github.com" : "api.spotify.com"],
+			);
+			assert.deepEqual(
+				[...new Set(served.map((url) => url.pathname))].sort(),
+				[...EXPECTED_PATHS[key]].sort(),
+				"the fixture paths the connector asked for",
+			);
+		}
 		assert.deepEqual(
 			run.shimLog.filter((entry) => entry.blocked),
 			[],

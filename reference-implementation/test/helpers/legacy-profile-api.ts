@@ -29,7 +29,12 @@ import {
 import { createFileLocalConnectorSourceStore } from "../../server/connector-install/local-source.ts";
 import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "../fixtures/demo-clients.ts";
 import { startCardDavMock } from "../fixtures/legacy-profiles/apple_contacts/carddav-mock.mjs";
-import { SLACK_PROFILE_FIXTURES, scratchDir } from "./legacy-profile-slack.ts";
+import {
+	AMBIENT_CHILD_ENV,
+	assertBundleProvenance,
+	SLACK_PROFILE_FIXTURES,
+	scratchDir,
+} from "./legacy-profile-slack.ts";
 import {
 	fetchJson,
 	type LegacyBackend,
@@ -111,6 +116,11 @@ export async function runApiProfile(
 		profile.sha256,
 		`${profile.bundle} matches its pinned hash`,
 	);
+	assertBundleProvenance(
+		join(PROFILES, key),
+		profile.bundle.split("/")[1] as string,
+		profile.sha256,
+	);
 	const root = join(dir, "source");
 	mkdirSync(join(root, "profile"), { recursive: true });
 	mkdirSync(join(root, "dist"), { recursive: true });
@@ -130,6 +140,10 @@ export async function runApiProfile(
 	const dataDir = join(dir, "data");
 	setEnv("PDPP_DATA_DIR", dataDir);
 	setEnv("PDPP_CONNECTOR_ARTIFACT_ROOT", join(dir, "artifacts"));
+	for (const name of AMBIENT_CHILD_ENV) {
+		setEnv(name, "");
+		delete process.env[name];
+	}
 	setEnv("TMPDIR", dir);
 	const mock = key === "apple_contacts" ? await startCardDavMock() : null;
 	const credentials: Record<string, string> = {
@@ -278,7 +292,7 @@ export async function runApiProfile(
 						reason: terminal.reason,
 						records_accepted: terminal.records_accepted,
 						skipped: events
-							.filter((event) => String(event.event_type).includes("skip"))
+							.filter((event) => event.event_type === "run.stream_skipped")
 							.map((event) => event.stream_id),
 						terminal_status: timeline.terminal_status,
 					},

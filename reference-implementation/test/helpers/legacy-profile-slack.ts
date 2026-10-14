@@ -64,7 +64,8 @@ const UPGRADE_FIXTURES = join(HERE, "..", "fixtures", "legacy-upgrade");
 export const SLACK_BUNDLES = {
 	legacy: {
 		// data-connectors 97536ad49: its slack manifest is byte-identical to fixtures/legacy-upgrade/slack.json
-		// (0.6.0), so this is the emitter that matches the legacy registration.
+		// (0.6.0), so this is the emitter that matches the legacy registration. The O image (c82718d4) vendors
+		// data-connectors 21e0386d instead; the only slack difference is a 5-line observeProgress() change in runSlackdump.
 		file: "slack-0.6.0-97536ad49.collection-profile.mjs.gz",
 		manifest: "slack.json",
 		sha256: "75022d8fd3b0ace2ef4bb7a4698bfbc876d17b5328ed713916f64ed5cabe34c2",
@@ -84,6 +85,16 @@ export const FAKE_CREDENTIALS = {
 	SLACK_WORKSPACE: "acme",
 } as const;
 
+/** Ambient variables the child environment policy would pass through (reserved platform keys); tests start without them. */
+export const AMBIENT_CHILD_ENV = [
+	"PDPP_CAPTURE_FIXTURES",
+	"PDPP_CAPTURE_ON_FAILURE",
+	"PDPP_CAPTURE_ROOT_DIR",
+	"PDPP_CAPTURE_ARIA_DEPTH",
+	"PDPP_DB_PATH",
+	"PDPP_TRACE",
+] as const;
+
 export type SourceKind = keyof typeof SLACK_BUNDLES;
 
 /**
@@ -91,6 +102,43 @@ export type SourceKind = keyof typeof SLACK_BUNDLES;
  * The bundle resolves `new URL("../../config/slackdump-api-config.toml", import.meta.url)` to
  * the latter, i.e. a `config` directory beside the source root.
  */
+/**
+ * Each bundle ships its provenance (source repo, revision, build command, source inventory, third-party
+ * packages) and the licence texts of what it bundles, as in the ical artifact precedent. Checks they match the bundle.
+ */
+export function assertBundleProvenance(
+	profilesDir: string,
+	bundleFile: string,
+	sha256: string,
+): void {
+	const dir = join(
+		profilesDir,
+		bundleFile.replace(/\.collection-profile\.mjs\.gz$/, ""),
+	);
+	const provenance = JSON.parse(
+		readFileSync(join(dir, "provenance.json"), "utf8"),
+	);
+	assert.equal(
+		provenance.bundle_sha256,
+		`sha256:${sha256}`,
+		`${bundleFile}: provenance matches the bundle`,
+	);
+	assert.match(provenance.source.revision, /^[0-9a-f]{40}$/);
+	assert.ok(provenance.source_inventory.length > 0 && provenance.build_command);
+	const notice = readFileSync(join(dir, "licenses", "NOTICE"), "utf8");
+	for (const pkg of provenance.third_party_packages) {
+		assert.ok(
+			notice.includes(`${pkg.name}@${pkg.version}`),
+			`NOTICE covers ${pkg.name}`,
+		);
+	}
+	assert.ok(
+		readFileSync(join(dir, "licenses", "LICENSE"), "utf8").includes(
+			"Apache License",
+		),
+	);
+}
+
 export function materializeSlackSource(
 	parent: string,
 	kind: SourceKind,
@@ -104,6 +152,7 @@ export function materializeSlackSource(
 		bundle.sha256,
 		`${bundle.file} matches its pinned hash`,
 	);
+	assertBundleProvenance(SLACK_PROFILE_FIXTURES, bundle.file, bundle.sha256);
 	const root = join(parent, "slack");
 	mkdirSync(join(root, "profile"), { recursive: true });
 	mkdirSync(join(root, "dist"), { recursive: true });
@@ -160,6 +209,10 @@ export function createSlackRunHarness(
 	setEnv("PDPP_DATA_DIR", dataDir);
 	setEnv("PDPP_CONNECTOR_ARTIFACT_ROOT", artifactRoot);
 	setEnv("SLACKDUMP_BIN", join(SLACK_PROFILE_FIXTURES, "slackdump-stub.mjs"));
+	for (const name of AMBIENT_CHILD_ENV) {
+		setEnv(name, "");
+		delete process.env[name];
+	}
 	setEnv("TMPDIR", dir);
 	rmSync(join(dir, "slackdump-stub.jsonl"), { force: true });
 	rmSync(join(dir, "slack-net-shim.jsonl"), { force: true });
