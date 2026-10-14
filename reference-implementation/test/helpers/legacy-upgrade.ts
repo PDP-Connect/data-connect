@@ -15,7 +15,7 @@
 
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -47,7 +47,10 @@ export type TestServer = Awaited<ReturnType<typeof startServer>> & {
 export type InstallService = ReturnType<typeof createConnectorInstallService>;
 
 export function legacyManifest(key: string): Record<string, unknown> {
-  return JSON.parse(readFileSync(join(HERE, "..", "fixtures", "legacy-upgrade", `${key}.json`), "utf8"));
+  const bundled = join(HERE, "..", "fixtures", "legacy-upgrade", `${key}.json`);
+  // spotify is not in the c82718d4 bundle copies above; its O-era manifest comes from data-connectors 97536ad49.
+  const path = existsSync(bundled) ? bundled : join(HERE, "..", "fixtures", "legacy-profiles", key, "manifest.json");
+  return JSON.parse(readFileSync(path, "utf8"));
 }
 
 /** The manifest JSON c82718d4 left in `connectors.manifest`. */

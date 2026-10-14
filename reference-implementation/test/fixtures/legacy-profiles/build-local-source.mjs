@@ -19,6 +19,12 @@
 //       --manifest <checkout>/packages/polyfill-connectors/manifests/slack.json \
 //       --contract <checkout@861be44d48>/scripts/connector-host-runtime-contract.mjs --out <out>/slack
 //     -> bundle sha256 75022d8fd3b0ace2ef4bb7a4698bfbc876d17b5328ed713916f64ed5cabe34c2
+//   apple_contacts, spotify, github (data-connectors 97536ad49, same flags as the 0.6.0 slack build, with
+//   --connector <name>, --connector-dir <checkout>/packages/polyfill-connectors/connectors/<name> and
+//   --manifest <checkout>/packages/polyfill-connectors/manifests/<name>.json):
+//     apple_contacts -> bundle sha256 11777c08835a12e0ad04f62645c7315aae6918399964421a2072b8358ad009f7
+//     github         -> bundle sha256 b33a2dcaecfe91e4b23f051800fe4814fed96f5b308e430bafec205e2139d9c7
+//     spotify        -> bundle sha256 7df5838bda8dcd69ddb48a90177c814dd538b29c0b73f95aef80ba42952e7ef1
 //
 // usage: node build-local-source.mjs --dcs <checkout> --connector <dir name> --out <dir>
 //          [--manifest <path>] [--esbuild <path to esbuild main.js>] [--external a,b]
