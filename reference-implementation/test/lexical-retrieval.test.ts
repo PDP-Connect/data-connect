@@ -264,7 +264,7 @@ const REDDITISH_MANIFEST_A = withCoreSourceDeclaration({
         required: ["id"],
         type: "object",
       },
-      selection: { fields: true, resources: false },
+      selection: { fields: true, resources: true },
       semantics: "append_only",
     },
     {
@@ -375,7 +375,12 @@ interface ApproveClientGrantParams {
   purpose_code: string;
   purpose_description: string;
   source_id: string;
-  streams: Array<{ fields?: string[]; name: string }>;
+  streams: Array<{
+    fields?: string[];
+    name: string;
+    resources?: string[];
+    time_range?: { since?: string; until?: string };
+  }>;
   subject_id?: string;
 }
 
@@ -1200,6 +1205,56 @@ test("client grant authorizing only one of two declared lexical_fields restricts
       undefined,
       "p_self must not appear because its match was in ungranted selftext"
     );
+  });
+});
+
+test("client lexical search applies the grant time_range and resources before returning hits", async () => {
+  await withHarness({}, async ({ asUrl, rsUrl }) => {
+    const ownerToken = await issueOwnerToken(asUrl);
+    const connectorId = REDDITISH_MANIFEST_A.connector_id;
+    await ingest(rsUrl, ownerToken, connectorId, "posts", [
+      {
+        id: "scoped_old",
+        selftext: "Beta source before time range",
+        source_created_at: "2026-01-01T00:00:00Z",
+        title: "Beta",
+      },
+      {
+        id: "scoped_hit",
+        selftext: "Beta source in scope",
+        source_created_at: "2026-02-01T00:00:00Z",
+        title: "Beta",
+      },
+      {
+        id: "scoped_resource_hidden",
+        selftext: "Beta source outside resources",
+        source_created_at: "2026-03-01T00:00:00Z",
+        title: "Beta",
+      },
+    ]);
+    const approved = await approveClientGrant(asUrl, {
+      access_mode: "continuous",
+      client_id: "longview",
+      purpose_code: "https://pdpp.dev/purpose/analytics",
+      purpose_description: "lexical search resource and time range safety test",
+      source_id: REDDITISH_MANIFEST_A.source_declaration.source.id,
+      streams: [
+        {
+          fields: ["id", "title", "source_created_at"],
+          name: "posts",
+          resources: ["scoped_old", "scoped_hit"],
+          time_range: { since: "2026-01-15T00:00:00Z" },
+        },
+      ],
+    });
+
+    const { status, body } = await fetchJson<SearchListResponse>(`${rsUrl}/v1/search?q=Beta&streams=posts`, {
+      headers: { Authorization: `Bearer ${approved.token}` },
+    });
+
+    assert.equal(status, 200);
+    assert.ok(body, "search response body");
+    assert.deepEqual(body.data.map((hit) => hit.record_key), ["scoped_hit"]);
   });
 });
 
