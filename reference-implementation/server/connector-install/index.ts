@@ -817,7 +817,9 @@ export function createConnectorInstallService(options: {
   const store =
     options.store ||
     (process.env.PDPP_CONNECTOR_PRELOAD_DIR ? createFileConnectorInstallStore(dataDir) : createConnectorInstallStore());
-  const localSourceStore = options.localSourceStore || createFileLocalConnectorSourceStore(dataDir);
+  // Local sources are owner state, read by the run path from PDPP_DATA_DIR, not
+  // preloaded install state: do not follow PDPP_CONNECTOR_PRELOAD_DIR here.
+  const localSourceStore = options.localSourceStore || createFileLocalConnectorSourceStore(options.dataDir);
   let catalogRefresh: Promise<readonly ConnectorCatalogEntry[]> | undefined;
   const loadCatalog = async (): Promise<readonly ConnectorCatalogEntry[]> => {
     const release = acquireCatalogStateLock(dataDir);
