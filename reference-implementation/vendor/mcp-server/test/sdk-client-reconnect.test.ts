@@ -17,8 +17,10 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { handleStreamableHttpRequest } from "../src/server.ts";
 
 // End-to-end check with the official SDK client. A stateless JSON endpoint has no
-// server-to-client stream; the client must stop asking for one after a 405 on GET
-// instead of reconnecting in a loop.
+// server-to-client stream; the SDK client probes GET once after `initialized` and
+// must stop on the 405 instead of reconnecting in a loop. Before the 405 fix the
+// same client sent one GET per second for as long as it stayed connected (a 200
+// stream that closes counts as a successful connect, so the backoff never grows).
 
 const OBSERVE_MS = 3000;
 
@@ -81,7 +83,7 @@ test("SDK client does not reconnect-storm GET against the stateless endpoint", a
 		await new Promise((resolve) => setTimeout(resolve, OBSERVE_MS));
 		assert.ok(tools.length > 0, "listTools returned tools");
 		assert.ok(
-			(counts.GET ?? 0) <= 2,
+			(counts.GET ?? 0) <= 1,
 			`GET count ${counts.GET ?? 0} over ${OBSERVE_MS}ms (all: ${JSON.stringify(counts)})`,
 		);
 		assert.ok(

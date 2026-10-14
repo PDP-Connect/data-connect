@@ -266,10 +266,11 @@ function buildRouteSchema(manifest: RouteManifest): Record<string, JsonValue> | 
 }
 
 /**
- * Successful `/introspect` calls (one per authenticated RS request, cached or
- * not) and any `GET`/`DELETE /mcp` (stream-listen and session probes the
- * stateless hosted MCP endpoint answers with 405) are housekeeping that a few
- * agent sessions can generate many times a second. Errors keep info-level detail.
+ * Successful `/introspect` calls (one per authenticated RS request) and any
+ * `GET`/`DELETE /mcp` (stream-listen and session probes the stateless hosted MCP
+ * endpoint answers with 405, whatever the status) are housekeeping that a few
+ * agent sessions can generate many times a second. Every other failure keeps
+ * info-level detail.
  */
 function isHighFrequencyHousekeeping(method: string, url: string, statusCode: number): boolean {
   const path = url.split("?", 1)[0];
@@ -370,7 +371,7 @@ function buildFastify({ loggerInstance }: { loggerInstance: FastifyBaseLogger })
   // setReferenceTraceId() — trace_id. Kept at `info`; this is the baseline
   // record the spec promises, not a per-status-code shape. Exception: routes
   // that clients hit at high frequency for housekeeping (see
-  // `isHighFrequencyHousekeeping`) log at `debug` unless they failed.
+  // `isHighFrequencyHousekeeping`) log at `debug`.
   // biome-ignore lint/suspicious/useAwait: The async signature is part of this caller-facing contract.
   fastify.addHook("onResponse", async (request, reply) => {
     const traceId = reply.getHeader?.(PDPP_TRACE_ID_HEADER) || request.__pdppTraceId;
