@@ -17,11 +17,16 @@ import { registerConnector } from "../server/auth.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
 import {
   closePostgresStorage,
+  getPostgresPool,
   initPostgresStorage,
   isPostgresStorageBackend,
   postgresQuery,
+  withPostgresTransaction,
 } from "../server/postgres-storage.ts";
 import { deleteAllRecordsForConnector, ingestRecord, maintainRecordIndexes } from "../server/records.ts";
+import { lockConnectorManifestPublication } from "../server/connector-manifest-write-fence.ts";
+import { runRestore } from "../scripts/repair/gmail-delta-blanked-envelope-restore.ts";
+import { runRepair } from "../scripts/repair/record-current-projection-repair.ts";
 import { reconcileSearchIndexDirtyScope } from "../server/search-index-reconcile.ts";
 import {
   computeIndexState,
@@ -127,6 +132,7 @@ async function exec(sqliteSql: string, pgSql: string, params: unknown[]): Promis
 }
 
 interface SemanticRow {
+  generation: number | null;
   loc: string;
   recordKey: string;
   scopeKey: string;
@@ -135,14 +141,15 @@ interface SemanticRow {
 
 async function semanticRows(): Promise<SemanticRow[]> {
   const rows = await rowsOf(
-    `SELECT scope_key, record_key, source_version, CAST(rowid AS TEXT) AS loc FROM semantic_search_rowid WHERE connector_instance_id = ?
+    `SELECT scope_key, record_key, source_version, source_generation, CAST(rowid AS TEXT) AS loc FROM semantic_search_rowid WHERE connector_instance_id = ?
      UNION ALL
-     SELECT scope_key, record_key, source_version, CAST(rowid AS TEXT) AS loc FROM semantic_search_blob WHERE connector_instance_id = ?`,
-    "SELECT scope_key, record_key, source_version, ctid::text AS loc FROM semantic_search_blob WHERE connector_instance_id = $1",
+     SELECT scope_key, record_key, source_version, source_generation, CAST(rowid AS TEXT) AS loc FROM semantic_search_blob WHERE connector_instance_id = ?`,
+    "SELECT scope_key, record_key, source_version, source_generation, ctid::text AS loc FROM semantic_search_blob WHERE connector_instance_id = $1",
     isPostgresStorageBackend() ? [INSTANCE_ID] : [INSTANCE_ID, INSTANCE_ID]
   );
   return rows
     .map((row) => ({
+      generation: row.source_generation === null ? null : Number(row.source_generation),
       loc: String(row.loc),
       recordKey: row.record_key as string,
       scopeKey: row.scope_key as string,
@@ -177,6 +184,33 @@ async function recordSemanticGeneration(recordKey: string): Promise<number> {
   return Number(rows[0]?.semantic_generation);
 }
 
+async function recordProjection(recordKey: string): Promise<{ cursor: string | null; deleted: boolean; generation: number; version: number }> {
+  const rows = await rowsOf(
+    "SELECT NULL AS cursor_value, deleted, semantic_generation, version FROM records WHERE connector_instance_id = ? AND stream = ? AND record_key = ?",
+    "SELECT cursor_value, deleted, semantic_generation, version FROM records WHERE connector_instance_id = $1 AND stream = $2 AND record_key = $3",
+    [INSTANCE_ID, STREAM, recordKey]
+  );
+  const row = rows[0];
+  if (!row) {
+    throw new Error(`missing fixture record ${recordKey}`);
+  }
+  return {
+    cursor: row.cursor_value === null ? null : String(row.cursor_value),
+    deleted: Boolean(row.deleted),
+    generation: Number(row.semantic_generation),
+    version: Number(row.version),
+  };
+}
+
+async function streamVersionCounter(): Promise<number> {
+  const rows = await rowsOf(
+    "SELECT max_version FROM version_counter WHERE connector_instance_id = ? AND stream = ?",
+    "SELECT max_version FROM version_counter WHERE connector_instance_id = $1 AND stream = $2",
+    [INSTANCE_ID, STREAM]
+  );
+  return Number(rows[0]?.max_version);
+}
+
 async function setStoredVersion(recordKey: string, version: number | null): Promise<void> {
   if (isPostgresStorageBackend()) {
     await exec(
@@ -200,6 +234,76 @@ async function dirtyRow(): Promise<{ dirty: number; revision: number } | null> {
     [INSTANCE_ID, STREAM]
   );
   return rows[0] ? { dirty: Number(rows[0].dirty), revision: Number(rows[0].revision) } : null;
+}
+
+async function semanticMeta(): Promise<{ fieldsFingerprint: string; modelId: string } | null> {
+  const rows = await rowsOf(
+    "SELECT fields_fingerprint, model_id FROM semantic_search_meta WHERE connector_instance_id = ? AND stream = ?",
+    "SELECT fields_fingerprint, model_id FROM semantic_search_meta WHERE connector_instance_id = $1 AND stream = $2",
+    [INSTANCE_ID, STREAM]
+  );
+  return rows[0]
+    ? { fieldsFingerprint: String(rows[0].fields_fingerprint), modelId: String(rows[0].model_id) }
+    : null;
+}
+
+async function markDirty(): Promise<void> {
+  await exec(
+    `INSERT INTO search_index_dirty(connector_instance_id, connector_id, stream, dirty, marked_at, revision)
+     VALUES (?, ?, ?, 1, ?, 1)
+     ON CONFLICT(connector_instance_id, stream) DO UPDATE SET dirty = 1, marked_at = excluded.marked_at,
+       revision = search_index_dirty.revision + 1`,
+    `INSERT INTO search_index_dirty(connector_instance_id, connector_id, stream, dirty, marked_at, revision)
+     VALUES ($1, $2, $3, 1, $4, 1)
+     ON CONFLICT(connector_instance_id, stream) DO UPDATE SET dirty = 1, marked_at = excluded.marked_at,
+       revision = search_index_dirty.revision + 1`,
+    [INSTANCE_ID, CONNECTOR_ID, STREAM, new Date().toISOString()]
+  );
+}
+
+/** Test fixture equivalent of an operator repair: same historical version, new provenance generation. */
+async function replaceCurrentAtSameVersion(recordKey: string, text: string): Promise<void> {
+  const recordJson = JSON.stringify({ id: recordKey, subject: text });
+  if (isPostgresStorageBackend()) {
+    await postgresQuery(
+      `UPDATE records SET record_json = $4::jsonb, semantic_generation = nextval('records_semantic_generation_seq')
+        WHERE connector_instance_id = $1 AND stream = $2 AND record_key = $3`,
+      [INSTANCE_ID, STREAM, recordKey, recordJson]
+    );
+  } else {
+    const db = getDb();
+    db.transaction(() => {
+      const allocated = db.prepare("INSERT INTO semantic_generation_clock DEFAULT VALUES").run().lastInsertRowid;
+      db.prepare(
+        "UPDATE records SET record_json = ?, semantic_generation = ? WHERE connector_instance_id = ? AND stream = ? AND record_key = ?"
+      ).run(recordJson, Number(allocated), INSTANCE_ID, STREAM, recordKey);
+    })();
+  }
+  await markDirty();
+}
+
+async function forceLeaseExpired(): Promise<void> {
+  await exec(
+    "UPDATE semantic_search_backfill_progress SET lease_expires_at = ? WHERE connector_instance_id = ? AND stream = ?",
+    "UPDATE semantic_search_backfill_progress SET lease_expires_at = (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::bigint - 1 WHERE connector_instance_id = $1 AND stream = $2",
+    isPostgresStorageBackend() ? [INSTANCE_ID, STREAM] : [Date.now() - 1, INSTANCE_ID, STREAM]
+  );
+}
+
+async function settlesWithin<T>(work: Promise<T>, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<T>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} timed out`)), 2_000);
+      }),
+    ]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
 }
 
 interface ProgressRow {
@@ -824,3 +928,396 @@ scenario(
     assert.equal((await dirtyRow())?.dirty, 0);
   }
 );
+
+// ─── Adversarial provenance, publication, and completion proofs ────────────
+
+scenario("operator repairs enqueue durable work and the next pass converges on the repaired provenance", async () => {
+  await setup();
+  await ingest("projection", "authoritative subject");
+  await publish("projection", "authoritative subject");
+  const beforeProjection = await dirtyRow();
+
+  if (isPostgresStorageBackend()) {
+    // This is the real projection-repair utility, not a copied SQL fragment.
+    await postgresQuery(
+      "UPDATE records SET record_json = $4::jsonb WHERE connector_instance_id = $1 AND stream = $2 AND record_key = $3",
+      [INSTANCE_ID, STREAM, "projection", JSON.stringify({ id: "projection", subject: "corrupt current projection" })]
+    );
+    const repaired = await runRepair({
+      apply: true,
+      applyDeletes: false,
+      connectorInstanceId: INSTANCE_ID,
+      limit: null,
+      pool: getPostgresPool(),
+      recordKey: "projection",
+      stamp: "semantic_adversarial_projection",
+      stream: STREAM,
+    });
+    assert.equal(repaired.failed, false);
+    assert.equal(repaired.affected.updated, 1);
+
+    // Gmail's tool is intentionally Postgres-only. Exercise its exported
+    // implementation against its real `messages` scope and assert its durable
+    // enqueue before switching back to the semantic fixture stream.
+    const gmailStream = "messages";
+    const gmailManifest = {
+      ...manifest(["subject"], "gmail"),
+      streams: [{ ...manifest(["subject"], "gmail").streams[0], name: gmailStream }],
+    };
+    await registerConnector(gmailManifest, { backfillRetrievalIndexes: false });
+    await ingestRecord(
+      TARGET,
+      {
+        data: { from_email: "sender@example.test", id: "gmail", subject: "mail subject" },
+        emitted_at: "2026-10-14T00:00:00.000Z",
+        key: "gmail",
+        stream: gmailStream,
+      },
+      { deferIndexes: true }
+    );
+    await postgresQuery(
+      "UPDATE records SET record_json = jsonb_build_object('id', $3) WHERE connector_instance_id = $1 AND stream = $2 AND record_key = $3",
+      [INSTANCE_ID, gmailStream, "gmail"]
+    );
+    const gmailBefore = await rowsOf(
+      "",
+      "SELECT revision FROM search_index_dirty WHERE connector_instance_id = $1 AND stream = $2",
+      [INSTANCE_ID, gmailStream]
+    );
+    const restored = await runRestore({
+      apply: true,
+      connectorInstanceId: INSTANCE_ID,
+      pool: getPostgresPool(),
+      stamp: "semantic_adversarial_gmail",
+    });
+    assert.equal(restored.failed, false);
+    assert.equal(restored.restoredCount, 1);
+    const gmailAfter = await rowsOf(
+      "",
+      "SELECT dirty, revision FROM search_index_dirty WHERE connector_instance_id = $1 AND stream = $2",
+      [INSTANCE_ID, gmailStream]
+    );
+    assert.equal(Number(gmailAfter[0]?.dirty), 1);
+    assert.ok(Number(gmailAfter[0]?.revision) > Number(gmailBefore[0]?.revision));
+    await semanticIndexBackfillForManifest({
+      manifest: { ...gmailManifest, storage_binding: { connector_instance_id: INSTANCE_ID } } as never,
+    });
+    const gmailRows = await rowsOf(
+      "",
+      "SELECT b.source_version, b.source_generation, r.version, r.semantic_generation FROM semantic_search_blob b JOIN records r ON r.connector_instance_id = b.connector_instance_id AND r.record_key = b.record_key WHERE b.connector_instance_id = $1 AND b.scope_key = $2 AND b.record_key = $3",
+      [INSTANCE_ID, encodeScopeKey(gmailStream, "subject"), "gmail"]
+    );
+    assert.deepEqual(gmailRows[0], {
+      semantic_generation: gmailRows[0]?.source_generation,
+      source_generation: gmailRows[0]?.source_generation,
+      source_version: gmailRows[0]?.version,
+      version: gmailRows[0]?.version,
+    });
+    await registerConnector(manifest(), { backfillRetrievalIndexes: false });
+  } else {
+    // The utilities are Postgres-only. The SQLite half proves the same durable
+    // current-row provenance contract through the backend's transaction path.
+    await replaceCurrentAtSameVersion("projection", "authoritative subject");
+  }
+
+  const afterProjection = await dirtyRow();
+  assert.ok(afterProjection && beforeProjection && afterProjection.revision > beforeProjection.revision);
+  const calls = installBackend();
+  await backfill();
+  assert.deepEqual(calls.calls, ["authoritative subject"]);
+  const semantic = await rowFor("projection");
+  assert.equal(semantic?.version, await recordVersion("projection"));
+  assert.equal(semantic?.generation, await recordSemanticGeneration("projection"));
+  assert.equal((await dirtyRow())?.dirty, 0);
+});
+
+scenario("same-version projection restore and tombstone advance only semantic provenance and dirty revision", async () => {
+  await setup();
+  await ingest("k1", "authoritative");
+  await publish("k1", "authoritative");
+  const original = await recordProjection("k1");
+  const counter = await streamVersionCounter();
+  const dirtyBefore = (await dirtyRow())?.revision as number;
+
+  if (isPostgresStorageBackend()) {
+    await postgresQuery(
+      "UPDATE records SET record_json = $4::jsonb WHERE connector_instance_id = $1 AND stream = $2 AND record_key = $3",
+      [INSTANCE_ID, STREAM, "k1", JSON.stringify({ id: "k1", subject: "wrong" })]
+    );
+    const repaired = await runRepair({
+      apply: true,
+      applyDeletes: false,
+      connectorInstanceId: INSTANCE_ID,
+      limit: null,
+      pool: getPostgresPool(),
+      recordKey: "k1",
+      stamp: "semantic_same_version_restore",
+      stream: STREAM,
+    });
+    assert.equal(repaired.failed, false);
+  } else {
+    await replaceCurrentAtSameVersion("k1", "authoritative");
+  }
+  const restored = await recordProjection("k1");
+  assert.deepEqual(
+    { cursor: restored.cursor, version: restored.version },
+    { cursor: original.cursor, version: original.version }
+  );
+  assert.equal(await streamVersionCounter(), counter);
+  assert.ok(restored.generation > original.generation);
+  assert.ok(((await dirtyRow())?.revision as number) > dirtyBefore);
+
+  const dirtyAfterRestore = (await dirtyRow())?.revision as number;
+  if (isPostgresStorageBackend()) {
+    await postgresQuery(
+      "UPDATE record_changes SET deleted = TRUE, deleted_at = emitted_at WHERE connector_instance_id = $1 AND stream = $2 AND record_key = $3",
+      [INSTANCE_ID, STREAM, "k1"]
+    );
+    const tombstoned = await runRepair({
+      apply: true,
+      applyDeletes: true,
+      connectorInstanceId: INSTANCE_ID,
+      limit: null,
+      pool: getPostgresPool(),
+      recordKey: "k1",
+      stamp: "semantic_same_version_tombstone",
+      stream: STREAM,
+    });
+    assert.equal(tombstoned.failed, false);
+    assert.equal(tombstoned.affected.deleted, 1);
+  } else {
+    const db = getDb();
+    db.transaction(() => {
+      const generation = Number(db.prepare("INSERT INTO semantic_generation_clock DEFAULT VALUES").run().lastInsertRowid);
+      db.prepare("UPDATE records SET deleted = 1, semantic_generation = ? WHERE connector_instance_id = ? AND stream = ? AND record_key = ?").run(
+        generation,
+        INSTANCE_ID,
+        STREAM,
+        "k1"
+      );
+    })();
+    await markDirty();
+  }
+  const tombstone = await recordProjection("k1");
+  assert.equal(tombstone.deleted, true);
+  assert.deepEqual(
+    { cursor: tombstone.cursor, version: tombstone.version },
+    { cursor: original.cursor, version: original.version }
+  );
+  assert.equal(await streamVersionCounter(), counter);
+  assert.ok(tombstone.generation > restored.generation);
+  assert.ok(((await dirtyRow())?.revision as number) > dirtyAfterRestore);
+});
+
+scenario("an old publisher computed before a same-version repair cannot overwrite the repaired generation", async () => {
+  const embedder = await setup();
+  await ingest("k1", "old text");
+  await publish("k1", "old text");
+  const oldGeneration = await recordSemanticGeneration("k1");
+  const entered = deferred();
+  const release = deferred();
+  embedder.hook = async (text) => {
+    if (text === "old text") {
+      entered.release();
+      await release.promise;
+    }
+  };
+  const oldPublisher = publish("k1", "old text");
+  await entered.promise;
+  await replaceCurrentAtSameVersion("k1", "new text");
+  const newGeneration = await recordSemanticGeneration("k1");
+  assert.ok(newGeneration > oldGeneration);
+  embedder.hook = null;
+  await backfill();
+  assert.equal((await rowFor("k1"))?.generation, newGeneration);
+  release.release();
+  await oldPublisher;
+  assert.equal((await rowFor("k1"))?.generation, newGeneration);
+  assert.equal((await rowFor("k1"))?.version, await recordVersion("k1"));
+});
+
+scenario("a delete then projection reinsert at the same version cannot ABA-match an old computation", async () => {
+  const embedder = await setup();
+  await ingest("k1", "old text");
+  await publish("k1", "old text");
+  const old = await recordProjection("k1");
+  const entered = deferred();
+  const release = deferred();
+  embedder.hook = async (text) => {
+    if (text === "old text") {
+      entered.release();
+      await release.promise;
+    }
+  };
+  const stalePublisher = publish("k1", "old text");
+  await entered.promise;
+
+  if (isPostgresStorageBackend()) {
+    await postgresQuery("DELETE FROM records WHERE connector_instance_id = $1 AND stream = $2 AND record_key = $3", [INSTANCE_ID, STREAM, "k1"]);
+    const reinserted = await runRepair({
+      apply: true,
+      applyDeletes: false,
+      connectorInstanceId: INSTANCE_ID,
+      limit: null,
+      pool: getPostgresPool(),
+      recordKey: "k1",
+      stamp: "semantic_aba_projection_insert",
+      stream: STREAM,
+    });
+    assert.equal(reinserted.failed, false);
+    assert.equal(reinserted.affected.inserted, 1);
+  } else {
+    const db = getDb();
+    const row = db
+      .prepare("SELECT connector_id, record_json, emitted_at, version FROM records WHERE connector_instance_id = ? AND stream = ? AND record_key = ?")
+      .get(INSTANCE_ID, STREAM, "k1") as Record<string, unknown>;
+    db.transaction(() => {
+      db.prepare("DELETE FROM records WHERE connector_instance_id = ? AND stream = ? AND record_key = ?").run(INSTANCE_ID, STREAM, "k1");
+      const generation = Number(db.prepare("INSERT INTO semantic_generation_clock DEFAULT VALUES").run().lastInsertRowid);
+      db.prepare(
+        "INSERT INTO records(connector_id, connector_instance_id, stream, record_key, record_json, emitted_at, version, semantic_generation, deleted) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)"
+      ).run(row.connector_id, INSTANCE_ID, STREAM, "k1", row.record_json, row.emitted_at, row.version, generation);
+    })();
+    await markDirty();
+  }
+  const reinserted = await recordProjection("k1");
+  assert.equal(reinserted.version, old.version);
+  assert.ok(reinserted.generation > old.generation);
+  embedder.hook = null;
+  await backfill();
+  release.release();
+  await stalePublisher;
+  assert.equal((await rowFor("k1"))?.generation, reinserted.generation);
+});
+
+scenario("an old identity reset cannot delete a newly published profile, and publication lock users settle", async () => {
+  await setup();
+  await ingest("k1", "stable");
+  await publish("k1", "stable");
+  await backfill();
+  const preserved = await semanticRows();
+  await registerConnector(manifest(["subject", "body"], "two"), { backfillRetrievalIndexes: false });
+
+  const inner = createSemanticRepairStore();
+  const resetEntered = deferred();
+  const releaseReset = deferred();
+  const pausingStore: RepairStore = {
+    ...inner,
+    resetIdentityPass: async (...args) => {
+      resetEntered.release();
+      await releaseReset.promise;
+      return await inner.resetIdentityPass(...args);
+    },
+  };
+  const oldReset = semanticIndexBackfillForManifest({
+    manifest: pinned(["subject", "body"], "two") as never,
+    repair: { store: pausingStore },
+  });
+  await resetEntered.promise;
+
+  // The profile publication completes before the old caller crosses the
+  // destructive transition. Its expected stream subset is now obsolete.
+  await registerConnector(manifest(["subject", "body", "id"], "three"), { backfillRetrievalIndexes: false });
+  releaseReset.release();
+  await assert.rejects(oldReset, /manifest revision changed/);
+  assert.deepEqual(await semanticRows(), preserved, "the stale reset did not delete the current derived stream");
+
+  if (isPostgresStorageBackend()) {
+    // Hold the shared publication serialization key, then start a publisher
+    // and a lease claimant. Releasing it lets both settle under a bounded wait:
+    // there is no lock cycle between profile publication, lease, and publisher.
+    const locked = deferred();
+    const unlock = deferred();
+    const holder = withPostgresTransaction(async (client) => {
+      await lockConnectorManifestPublication(client, CONNECTOR_ID);
+      locked.release();
+      await unlock.promise;
+    });
+    await locked.promise;
+    const publisher = publish("k1", "stable");
+    const claimant = inner.acquire({
+      identity: { dimensions: 8, distanceMetric: "cosine", fieldsFingerprint: "lock", modelId: "lock" },
+      owner: "publication-lock-claimant",
+      scope: { connectorId: CONNECTOR_ID, connectorInstanceId: INSTANCE_ID, stream: STREAM },
+    });
+    unlock.release();
+    await settlesWithin(Promise.all([holder, publisher, claimant]), "publication lock ordering");
+  }
+});
+
+scenario("stale completion cannot publish metadata or clear dirty work after publication or lease takeover", async () => {
+  await setup();
+  await ingest("k1", "text");
+  await backfill();
+  const baselineMeta = await semanticMeta();
+  assert.ok(baselineMeta);
+  await registerConnector(manifest(["subject", "body"], "two"), { backfillRetrievalIndexes: false });
+
+  const inner = createSemanticRepairStore({ leaseTtlMs: 60_000 });
+  const completionEntered = deferred();
+  const releaseCompletion = deferred();
+  const pausingStore: RepairStore = {
+    ...inner,
+    complete: async (...args) => {
+      completionEntered.release();
+      await releaseCompletion.promise;
+      return await inner.complete(...args);
+    },
+  };
+  const oldCompletion = semanticIndexBackfillForManifest({
+    manifest: pinned(["subject", "body"], "two") as never,
+    repair: { store: pausingStore },
+  });
+  await completionEntered.promise;
+  await registerConnector(manifest(["subject", "body", "id"], "three"), { backfillRetrievalIndexes: false });
+  releaseCompletion.release();
+  await assert.rejects(oldCompletion, /manifest revision changed/);
+  assert.deepEqual(await semanticMeta(), baselineMeta, "the old completion did not publish its obsolete identity");
+  assert.equal((await dirtyRow())?.dirty, 1, "the stale completion did not clear the newer publication's dirty mark");
+
+  const scope = { connectorId: CONNECTOR_ID, connectorInstanceId: INSTANCE_ID, stream: STREAM };
+  const identityA = { dimensions: 8, distanceMetric: "cosine", fieldsFingerprint: "owner-a", modelId: "owner-a" };
+  const identityB = { dimensions: 8, distanceMetric: "cosine", fieldsFingerprint: "owner-b", modelId: "owner-b" };
+  const acquiredA = await inner.acquire({ identity: identityA, owner: "owner-a", scope });
+  assert.equal(acquiredA.busy, false);
+  if (acquiredA.busy) {
+    throw new Error("unreachable");
+  }
+  await forceLeaseExpired();
+  const acquiredB = await inner.acquire({ identity: identityB, owner: "owner-b", scope });
+  assert.equal(acquiredB.busy, false);
+  if (acquiredB.busy) {
+    throw new Error("unreachable");
+  }
+  assert.ok(acquiredB.fence.generation > acquiredA.fence.generation);
+  assert.equal(
+    await inner.complete(scope, acquiredB.fence, {
+      connectorId: CONNECTOR_ID,
+      connectorInstanceId: INSTANCE_ID,
+      dimensions: identityB.dimensions,
+      distanceMetric: identityB.distanceMetric,
+      fieldsFingerprint: identityB.fieldsFingerprint,
+      manifest: manifest(["subject", "body", "id"], "three") as never,
+      modelId: identityB.modelId,
+      stream: STREAM,
+    }),
+    "complete"
+  );
+  const winnerMeta = await semanticMeta();
+  assert.equal(winnerMeta?.fieldsFingerprint, identityB.fieldsFingerprint);
+  assert.equal(
+    await inner.complete(scope, acquiredA.fence, {
+      connectorId: CONNECTOR_ID,
+      connectorInstanceId: INSTANCE_ID,
+      dimensions: identityA.dimensions,
+      distanceMetric: identityA.distanceMetric,
+      fieldsFingerprint: identityA.fieldsFingerprint,
+      manifest: manifest(["subject", "body", "id"], "three") as never,
+      modelId: identityA.modelId,
+      stream: STREAM,
+    }),
+    "lost"
+  );
+  assert.deepEqual(await semanticMeta(), winnerMeta, "the expired owner could not overwrite owner B metadata");
+  assert.equal((await dirtyRow())?.dirty, 0, "owner B's completion state survived owner A's stale completion");
+});

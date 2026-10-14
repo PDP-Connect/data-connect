@@ -772,9 +772,7 @@ export async function applyProjectionRepair({
            version = EXCLUDED.version,
            semantic_generation = nextval('records_semantic_generation_seq'),
            deleted = FALSE,
-           deleted_at = NULL,
-           cursor_value = EXCLUDED.cursor_value,
-           primary_key_text = EXCLUDED.primary_key_text
+           deleted_at = NULL
        WHERE records.version <= EXCLUDED.version
      RETURNING (xmax = 0) AS inserted`,
     [connectorInstanceId, stream, recordKey, recordKey, latestHistoryVersion]
