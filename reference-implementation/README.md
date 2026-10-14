@@ -118,14 +118,7 @@ operator bootstrap), `dataconnect-console` (the console's owner bearer) and
 console and the connector runtime hold one owner bearer per subject: an owner
 device approval for either client returns the live bearer that client already
 has while it has at least half its lifetime left, and the runtime keeps that
-bearer in memory between runs. Startup retires the clients earlier versions
-pre-registered and no longer do (`RETIRED_PRE_REGISTERED_CLIENT_IDS`) unless
-`preRegisteredPublicClients` lists them: it revokes their owner bearers and
-expires their pending owner device requests. If an active grant names the
-client, that is all: the grant's tokens, its refresh tokens and the client row
-stay. Otherwise startup also revokes the client's other tokens and refresh
-tokens, deletes its `oauth_clients` row, disables its event subscriptions and
-writes `client.deleted`. The pre-registered set
+bearer in memory between runs. The pre-registered set
 is reference-local convenience; production deployments should supply their
 own `preRegisteredPublicClients` option.
 

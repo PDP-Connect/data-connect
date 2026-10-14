@@ -32,7 +32,6 @@ import {
   initiateOwnerDeviceAuthorization,
   introspect,
   issueOwnerToken,
-  retireFormerPreRegisteredClientsAtStartup,
   seedPreRegisteredClients,
 } from "../server/auth.ts";
 import { closeDb, getDb } from "../server/db.ts";
@@ -812,180 +811,22 @@ test(
 const POSTGRES_URL = dedicatedPostgresTestUrl(process.env.PDPP_TEST_POSTGRES_URL);
 
 if (POSTGRES_URL) {
-  test("Postgres: approvals reuse the live product bearer and startup retires the old client ids once", async () => {
+  test("Postgres: approvals reuse the live product bearer", async () => {
     await initPostgresStorage({
       backend: "postgres",
       databaseUrl: POSTGRES_URL,
     });
     try {
-      await seedPreRegisteredClients([
-        ...DEFAULT_PRE_REGISTERED_PUBLIC_CLIENTS.map((client) => ({
+      await seedPreRegisteredClients(
+        DEFAULT_PRE_REGISTERED_PUBLIC_CLIENTS.map((client) => ({
           ...client,
           metadata: { ...client.metadata },
-        })),
-        {
-          client_id: OLD_CONSOLE_CLIENT,
-          metadata: {
-            client_name: "PDPP Polyfill Owner Bootstrap",
-            token_endpoint_auth_method: "none",
-          },
-        },
-        ...DEMO_PRE_REGISTERED_PUBLIC_CLIENTS.map((client) => ({
-          ...client,
-          metadata: { ...client.metadata },
-        })),
-      ]);
+        }))
+      );
       const approveOwnerDevice = async (clientId: string) => {
         const device = await initiateOwnerDeviceAuthorization(clientId);
         return (await approveOwnerDeviceAuthorization(device.user_code, SUBJECT)).access_token as string;
       };
-      const oldBearers: string[] = [];
-      for (const clientId of OLD_CLIENT_IDS) oldBearers.push(await issueOwnerToken(SUBJECT, { clientId }));
-      oldBearers.push(await approveOwnerDevice("cli_longview"));
-      const pending = await initiateOwnerDeviceAuthorization("longview");
-      const keptBearer = await issueOwnerToken(SUBJECT, {
-        clientId: "pdpp_cli",
-      });
-      await postgresQuery(
-        `INSERT INTO oauth_refresh_tokens(refresh_token_hash, family_id, generation, client_id, subject_id, status, created_at)
-         VALUES ('rth_pg_old', 'fam_pg_old', 1, 'longview', $1, 'active', $2)`,
-        [SUBJECT, new Date().toISOString()]
-      );
-      await postgresQuery(
-        `INSERT INTO grants(grant_id, subject_id, client_id, grant_json, access_mode, status, issued_at)
-         VALUES ('grt_pg_concert', $1, 'concert_recommendation_app', '{}', 'continuous', 'active', $2)`,
-        [SUBJECT, new Date().toISOString()]
-      );
-      // The concert app's grant-bound access token and refresh token.
-      await postgresQuery(
-        `INSERT INTO tokens(token_id, grant_id, subject_id, client_id, token_kind, refresh_family_id, expires_at)
-         VALUES ('tok_pg_concert', 'grt_pg_concert', $1, 'concert_recommendation_app', 'client', 'fam_pg_concert', $2)`,
-        [SUBJECT, new Date(Date.now() + 3_600_000).toISOString()]
-      );
-      await postgresQuery(
-        `INSERT INTO oauth_refresh_tokens(refresh_token_hash, family_id, generation, client_id, subject_id, grant_id, status, created_at)
-         VALUES ('rth_pg_concert', 'fam_pg_concert', 1, 'concert_recommendation_app', $1, 'grt_pg_concert', 'active', $2)`,
-        [SUBJECT, new Date().toISOString()]
-      );
-      await postgresQuery(
-        `INSERT INTO client_event_subscriptions(subscription_id, grant_id, client_id, subject_id, callback_url,
-           secret_hash, secret_text, scope_json, status, created_at, updated_at)
-         VALUES ('sub_pg_longview', 'grt_pg_longview_revoked', 'longview', $1, 'https://example.test/hook',
-           'hash', 'secret', '{}'::jsonb, 'active', $2, $2)`,
-        [SUBJECT, new Date().toISOString()]
-      );
-      const now = nowSeconds();
-      const session = (id: string, createdAt: number, label: string, userAgent: string | null) =>
-        postgresQuery(
-          `INSERT INTO owner_sessions(id_hash, session_id, subject_id, device_key, label, user_agent, ip_address, created_at, expires_at, last_seen_at, revoked_at)
-           VALUES ($1, $1, $2, NULL, $3, $4, NULL, $5, $6, $5, NULL)`,
-          [id, SUBJECT, label, userAgent, createdAt, createdAt + 7 * 24 * 60 * 60]
-        );
-      await session("desktop_old_0001", now - 300, "Unknown browser", null);
-      await session("desktop_old_0002", now - 200, "Unknown browser", null);
-      await session("desktop_new_0003", now - 100, "Unknown browser", null);
-      await session("firefox_0000_004", now - 400, "Firefox", "Firefox/140.0");
-
-      const productIds = DEFAULT_PRE_REGISTERED_PUBLIC_CLIENTS.map((client) => client.client_id);
-      assert.deepEqual(await retireFormerPreRegisteredClientsAtStartup(now, productIds), {
-        clients: {
-          cli_longview: {
-            bearers: 2,
-            deregistered: true,
-            deviceRequests: 0,
-            keptForActiveGrant: false,
-            refreshTokens: 0,
-          },
-          concert_recommendation_app: {
-            bearers: 1,
-            deregistered: false,
-            deviceRequests: 0,
-            keptForActiveGrant: true,
-            refreshTokens: 0,
-          },
-          longview: {
-            bearers: 1,
-            deregistered: true,
-            deviceRequests: 1,
-            keptForActiveGrant: false,
-            refreshTokens: 1,
-          },
-          longview_planning_v1: {
-            bearers: 1,
-            deregistered: true,
-            deviceRequests: 0,
-            keptForActiveGrant: false,
-            refreshTokens: 0,
-          },
-          "pdpp-polyfill-owner-bootstrap": {
-            bearers: 1,
-            deregistered: true,
-            deviceRequests: 0,
-            keptForActiveGrant: false,
-            refreshTokens: 0,
-          },
-        },
-        sessions: 2,
-      });
-      assert.deepEqual(
-        await retireFormerPreRegisteredClientsAtStartup(now, productIds),
-        { clients: {}, sessions: 0 },
-        "a second run changes nothing"
-      );
-      for (const token of oldBearers) assert.equal(await isActive(token), false, "an old-id bearer is revoked");
-      assert.equal(await isActive(keptBearer), true, "the pdpp_cli bearer still works");
-      assert.deepEqual(
-        {
-          refresh: (
-            await postgresQuery<{ status: string }>(
-              "SELECT status FROM oauth_refresh_tokens WHERE refresh_token_hash = 'rth_pg_concert'"
-            )
-          ).rows[0]?.status,
-          token: (await postgresQuery<{ revoked: boolean }>("SELECT revoked FROM tokens WHERE token_id = 'tok_pg_concert'"))
-            .rows[0]?.revoked,
-        },
-        { refresh: "active", token: false },
-        "the active grant's tokens stay live"
-      );
-      assert.deepEqual(
-        (
-          await postgresQuery(
-            "SELECT status, disabled_reason FROM client_event_subscriptions WHERE subscription_id = 'sub_pg_longview'"
-          )
-        ).rows,
-        [{ disabled_reason: "client_deleted", status: "disabled_revoked" }]
-      );
-      assert.deepEqual(
-        (
-          await postgresQuery<{ client_id: string }>(
-            "SELECT client_id FROM spine_events WHERE event_type = 'client.deleted' ORDER BY client_id"
-          )
-        ).rows.map((row) => row.client_id),
-        ["cli_longview", "longview", "longview_planning_v1", "pdpp-polyfill-owner-bootstrap"],
-        "each deleted client has one client.deleted event"
-      );
-      assert.equal(
-        (
-          await postgresQuery<{ status: string }>("SELECT status FROM owner_device_auth WHERE device_code = $1", [
-            pending.device_code,
-          ])
-        ).rows[0]?.status,
-        "expired"
-      );
-      assert.deepEqual(
-        (
-          await postgresQuery<{ id_hash: string }>(
-            "SELECT id_hash FROM owner_sessions WHERE revoked_at IS NULL ORDER BY id_hash"
-          )
-        ).rows.map((row) => row.id_hash),
-        ["desktop_new_0003", "firefox_0000_004"]
-      );
-      assert.deepEqual(
-        (await postgresQuery<{ client_id: string }>("SELECT client_id FROM oauth_clients")).rows
-          .map((row) => row.client_id)
-          .sort(),
-        ["concert_recommendation_app", ...PRODUCT_CLIENT_IDS].sort()
-      );
 
       const othersBearer = await issueOwnerToken("owner_other", { clientId: CONSOLE_CLIENT });
       const consoleBearer = await approveOwnerDevice(CONSOLE_CLIENT);
