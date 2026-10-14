@@ -17,7 +17,6 @@ import {
   isPostgresSemanticGlobalHnswUsable,
   isPostgresSemanticIterativeScanSupported,
   isPostgresSemanticVectorEmbedding,
-  postgresBulkQuery,
   postgresQuery,
   withPostgresTransaction,
 } from "./postgres-storage.ts";
@@ -537,10 +536,10 @@ export async function postgresSemanticIndexDeleteByConnectorStream({
   connectorInstanceId = defaultConnectorInstanceId(connectorId),
   stream,
 }: ConnectorStreamScope) {
-  await postgresQuery("DELETE FROM semantic_search_blob WHERE connector_instance_id = $1 AND scope_key LIKE $2 ESCAPE '\\'", [
-    connectorInstanceId,
-    semanticScopeLikePattern(stream),
-  ]);
+  await postgresQuery(
+    "DELETE FROM semantic_search_blob WHERE connector_instance_id = $1 AND scope_key LIKE $2 ESCAPE '\\'",
+    [connectorInstanceId, semanticScopeLikePattern(stream)]
+  );
   await postgresQuery("DELETE FROM semantic_search_meta WHERE connector_instance_id = $1 AND stream = $2", [
     connectorInstanceId,
     stream,
@@ -577,17 +576,6 @@ export async function postgresListSemanticConnectorInstanceIds({
   return result.rows.map((row) => row.connector_instance_id).filter(Boolean);
 }
 
-export async function postgresCountSemanticRecords({
-  connectorInstanceId,
-  stream,
-}: Required<Pick<ConnectorStreamScope, "connectorInstanceId" | "stream">>) {
-  const result = await postgresQuery(
-    "SELECT COUNT(*) AS n FROM records WHERE connector_instance_id = $1 AND stream = $2 AND deleted = FALSE",
-    [connectorInstanceId, stream]
-  );
-  return Number(result.rows[0]?.n || 0);
-}
-
 export async function postgresCountIndexableSemanticValues({
   connectorInstanceId,
   stream,
@@ -609,20 +597,6 @@ export async function postgresCountIndexableSemanticValues({
     [connectorInstanceId, stream, fields]
   );
   return sumCountRows(result.rows);
-}
-
-export async function postgresCountSemanticIndexByScope({
-  connectorId,
-  connectorInstanceId,
-  scopeKey,
-}: Required<Pick<ConnectorStreamScope, "connectorId" | "connectorInstanceId">> & { scopeKey: string }) {
-  const result = await postgresQuery(
-    `SELECT COUNT(*) AS n
-     FROM semantic_search_blob
-     WHERE connector_id = $1 AND connector_instance_id = $2 AND scope_key = $3`,
-    [connectorId, connectorInstanceId, scopeKey]
-  );
-  return Number(result.rows[0]?.n || 0);
 }
 
 /**
@@ -736,19 +710,27 @@ async function insertSemanticRows(
     // The embedding parameter is text: pg accepts a JSON array literal as both
     // valid JSON and valid pgvector input, but the target type differs between
     // the two storage modes.
-    `INSERT INTO semantic_search_blob (connector_id, connector_instance_id, scope_key, record_key, embedding)
-     SELECT rows.connector_id, rows.connector_instance_id, rows.scope_key, rows.record_key, rows.embedding::${vectorMode ? "vector" : "jsonb"}
-     FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[])
-       AS rows(connector_id, connector_instance_id, scope_key, record_key, embedding)
+    //
+    // source_version is the records.version the embedding was computed from
+    // (NULL when the caller does not know it: unknown, never current). The
+    // live publisher runs under the records FOR UPDATE version check, so it is
+    // authoritative and needs no stored-version guard. An unchanged
+    // (embedding, source_version) pair writes nothing.
+    `INSERT INTO semantic_search_blob (connector_id, connector_instance_id, scope_key, record_key, embedding, source_version)
+     SELECT rows.connector_id, rows.connector_instance_id, rows.scope_key, rows.record_key, rows.embedding::${vectorMode ? "vector" : "jsonb"}, rows.version
+     FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::bigint[])
+       AS rows(connector_id, connector_instance_id, scope_key, record_key, embedding, version)
      ON CONFLICT (connector_instance_id, scope_key, record_key) DO UPDATE
-       SET embedding = EXCLUDED.embedding
-       WHERE semantic_search_blob.embedding IS DISTINCT FROM EXCLUDED.embedding`,
+       SET embedding = EXCLUDED.embedding, source_version = EXCLUDED.source_version
+       WHERE semantic_search_blob.embedding IS DISTINCT FROM EXCLUDED.embedding
+          OR semantic_search_blob.source_version IS DISTINCT FROM EXCLUDED.source_version`,
     [
       rows.map((entry) => entry.connectorId),
       rows.map((entry) => entry.connectorInstanceId),
       rows.map((entry) => entry.scopeKey),
       rows.map((entry) => entry.recordKey),
       rows.map((entry) => JSON.stringify(entry.values)),
+      rows.map((entry) => entry.version ?? null),
     ]
   );
   return rows.length;
@@ -758,10 +740,9 @@ async function insertSemanticRows(
  * Bulk semantic insert for the LIVE per-record ingest CAS path only
  * (`applySemanticEntriesWithClient`/`applySemanticEntriesSync` in
  * search-semantic.ts) — that caller already owns a version-gated
- * transaction around this call, so no per-row check happens here. Backfill
- * (`rebuildSemanticIndexForStream`) MUST use `postgresSemanticIndexInsertManyGuarded`
- * instead, since it has no such enclosing transaction of its own and reads
- * each row on its own schedule, well before this insert runs.
+ * transaction around this call, so no per-row check happens here. The bounded
+ * repair (semantic-index-repair.ts) has no such transaction and writes through
+ * its own lease-fenced, record-locked statement instead.
  */
 export function postgresSemanticIndexInsertMany({
   connectorId,
@@ -773,67 +754,6 @@ export function postgresSemanticIndexInsertMany({
 }) {
   const rows = semanticInsertManyRows(connectorId, connectorInstanceId, entries);
   return insertSemanticRows(rows, (sql, params) => postgresQuery(sql, params as unknown[]));
-}
-
-/**
- * Version-guarded semantic insert for the BACKFILL path
- * (`rebuildSemanticIndexForStream`). Every `entries[]` row MUST carry the
- * `records.version` its source text was read at (a backfill page read,
- * taken well before this insert runs, with embedding computed in between —
- * unlocked). Re-checks that version is STILL current and the row still
- * live, atomically within this one INSERT statement's own snapshot,
- * immediately before writing — a row a concurrent delete/newer-write has
- * since superseded is silently skipped, never resurrected/overwritten.
- * See harden-connector-instance-write-fence-transaction-native.
- *
- * Runs on the BULK lane (`postgresBulkQuery`): this is background backfill
- * work, so it must neither consume a connection the owner's page loads need
- * nor run unbounded once Postgres has admitted it. The single-statement
- * version-CAS above is unchanged — `postgresBulkQuery` wraps exactly this
- * one statement in its own short BEGIN/COMMIT, so the statement's snapshot
- * semantics, and therefore the CAS, are identical.
- */
-export async function postgresSemanticIndexInsertManyGuarded({
-  connectorId,
-  connectorInstanceId = defaultConnectorInstanceId(connectorId),
-  stream,
-  entries,
-}: Required<Pick<ConnectorStreamScope, "connectorId" | "stream">> & {
-  connectorInstanceId?: string;
-  entries: readonly SemanticIndexEntry[];
-}): Promise<number> {
-  const rows = semanticInsertManyRows(connectorId, connectorInstanceId, entries).filter(
-    (row): row is NormalizedSemanticIndexEntry & { version: number } => typeof row.version === "number"
-  );
-  if (rows.length === 0) {
-    return 0;
-  }
-  const vectorMode = isPostgresSemanticVectorEmbedding();
-  await postgresBulkQuery(
-    `INSERT INTO semantic_search_blob (connector_id, connector_instance_id, scope_key, record_key, embedding)
-     SELECT rows.connector_id, rows.connector_instance_id, rows.scope_key, rows.record_key, rows.embedding::${vectorMode ? "vector" : "jsonb"}
-     FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::bigint[])
-       AS rows(connector_id, connector_instance_id, scope_key, record_key, embedding, version)
-     JOIN records r
-       ON r.connector_instance_id = $7
-      AND r.stream = $8
-      AND r.record_key = rows.record_key
-      AND r.version = rows.version
-      AND r.deleted = FALSE
-     ON CONFLICT (connector_instance_id, scope_key, record_key) DO UPDATE
-       SET embedding = EXCLUDED.embedding`,
-    [
-      rows.map((entry) => entry.connectorId),
-      rows.map((entry) => entry.connectorInstanceId),
-      rows.map((entry) => entry.scopeKey),
-      rows.map((entry) => entry.recordKey),
-      rows.map((entry) => JSON.stringify(entry.values)),
-      rows.map((entry) => entry.version),
-      connectorInstanceId,
-      stream,
-    ]
-  );
-  return rows.length;
 }
 
 export async function postgresSemanticIndexUpsertMany({
@@ -885,43 +805,6 @@ export async function postgresSemanticIndexDeleteWithClient(
     "DELETE FROM semantic_search_blob WHERE connector_instance_id = $1 AND scope_key LIKE $2 ESCAPE '\\' AND record_key = $3",
     [connectorInstanceId, semanticScopeLikePattern(stream), recordKey]
   );
-}
-
-/**
- * The semantic backfill's coverage scan: one keyset page of `records`.
- *
- * Runs on the BULK lane. This statement is the one live `pg_stat_activity`
- * sampling caught at 27.4s during the 2026-08-21 incident — it is background
- * work, and it was competing for the same connections as the owner's page
- * loads while doing it. Its COST is addressed by
- * `idx_pg_records_instance_stream_id` (this exact keyset shape); the bulk
- * lane and bounded statement here are the backstop, so a page that goes
- * pathological anyway is cancelled by Postgres instead of holding a
- * connection open indefinitely.
- *
- * Already chunked by construction: the caller (`rebuildSemanticIndexForStream`)
- * pages 500 rows at a time and each page is its own statement, so no
- * transaction spans pages and the keyset cursor only advances past a page
- * that committed.
- */
-export async function postgresSemanticRecordsPage({
-  connectorInstanceId,
-  stream,
-  lastId,
-  limit,
-}: Required<Pick<ConnectorStreamScope, "connectorInstanceId" | "stream">> & { lastId: number; limit: number }) {
-  const result = await postgresBulkQuery(
-    `SELECT id, record_key, record_json, version
-     FROM records
-     WHERE connector_instance_id = $1
-       AND stream = $2
-       AND deleted = FALSE
-       AND id > $3
-     ORDER BY id ASC
-     LIMIT $4`,
-    [connectorInstanceId, stream, lastId, limit]
-  );
-  return result.rows;
 }
 
 export async function postgresGetSemanticMeta({
@@ -1013,56 +896,6 @@ export async function postgresDeleteSemanticMeta({
     connectorInstanceId,
     stream,
   ]);
-}
-
-export async function postgresGetSemanticProgress({
-  connectorInstanceId,
-  stream,
-}: Required<Pick<ConnectorStreamScope, "connectorInstanceId" | "stream">>) {
-  const result = await postgresQuery(
-    `SELECT fields_fingerprint, model_id, dimensions, distance_metric
-     FROM semantic_search_backfill_progress
-     WHERE connector_instance_id = $1 AND stream = $2`,
-    [connectorInstanceId, stream]
-  );
-  return result.rows[0] || null;
-}
-
-export async function postgresUpsertSemanticProgress({
-  connectorId,
-  connectorInstanceId,
-  stream,
-  fieldsFingerprint,
-  modelId,
-  dimensions,
-  distanceMetric,
-}: Required<ConnectorStreamScope> & {
-  dimensions: number;
-  distanceMetric: string;
-  fieldsFingerprint: string;
-  modelId: string;
-}) {
-  await postgresQuery(
-    `INSERT INTO semantic_search_backfill_progress(connector_instance_id, connector_id, stream, fields_fingerprint, model_id, dimensions, distance_metric, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-     ON CONFLICT (connector_instance_id, stream) DO UPDATE
-       SET connector_id = EXCLUDED.connector_id,
-           fields_fingerprint = EXCLUDED.fields_fingerprint,
-           model_id = EXCLUDED.model_id,
-           dimensions = EXCLUDED.dimensions,
-           distance_metric = EXCLUDED.distance_metric,
-           updated_at = EXCLUDED.updated_at`,
-    [
-      connectorInstanceId,
-      connectorId,
-      stream,
-      fieldsFingerprint,
-      modelId,
-      dimensions,
-      distanceMetric,
-      new Date().toISOString(),
-    ]
-  );
 }
 
 export async function postgresDeleteSemanticProgress({

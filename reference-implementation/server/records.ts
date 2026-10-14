@@ -2836,6 +2836,7 @@ async function maintainRecordIndexesWithinPermit(
       declaredFields: options.attemptContext ? (attemptFacts?.semanticFields ?? []) : undefined,
       recordKey,
       stream,
+      version: expectedVersion,
     });
     maybeRecordIndexFault("after-semantic-index", {
       connectorId,

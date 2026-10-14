@@ -235,6 +235,13 @@ Operators can switch profiles without changing the public API:
 Changing the profile/model/dtype/dimensions/metric invalidates existing
 semantic vectors. The reference reports `index_state: "stale"` or `"building"`
 and rebuilds from stored records; it does not require connector re-ingest.
+Only such an identity change deletes a stream's index. Drift inside an
+unchanged profile (a missing, stale or orphaned row) is repaired in place by a
+bounded, resumable pass: a semantic row is current only when its
+`source_version` equals the live record's `version`, rows written before that
+column existed (NULL) are re-validated and re-embedded gradually, and
+`index_state` stays `"stale"` while any pass is unfinished. Existing vectors keep
+serving search during that time.
 Use `/deployment` or `GET /_ref/deployment` to inspect backend
 availability, cache state, active language bias, participating semantic fields,
 and warnings such as zero participation or a rebuilding index.

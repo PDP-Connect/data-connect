@@ -210,10 +210,19 @@ async function assertStaleSemanticPageRejected(): Promise<void> {
     const stale = semanticIndexBackfillForManifest({ manifest: semanticManifest("subject") });
     await entered.promise;
     await registerConnector(semanticManifest("title"), { backfillRetrievalIndexes: false });
-    await semanticIndexBackfillForManifest({ manifest: semanticManifest("title") });
+    // The stale call still holds the scope's single-flight lease while its
+    // embed is blocked, so this concurrent call reports `busy` and does no work.
+    const concurrent = await semanticIndexBackfillForManifest({ manifest: semanticManifest("title") });
+    assert.deepEqual(
+      concurrent.scopes.map((scope) => scope.status),
+      ["busy"],
+      "a second backfill on a leased scope must not run concurrently"
+    );
     const staleRejected = assert.rejects(stale, MANIFEST_REVISION_CHANGED);
     resume.release();
     await staleRejected;
+    // The lease is released when the stale call fails; the next call converges.
+    await semanticIndexBackfillForManifest({ manifest: semanticManifest("title") });
     const scopeKeys = isPostgresStorageBackend()
       ? (
           await postgresQuery<{ scope_key: string }>(
@@ -412,7 +421,9 @@ test("PostgreSQL: a stale derived write cannot commit after manifest B publishes
 async function assertRefreshPolicyOnlyUpdateKeepsStreamRevision(): Promise<void> {
   const a = manifest("subject");
   await registerConnector(a, { backfillRetrievalIndexes: false });
-  const expectedRevision = storedConnectorManifestStreamRevision(normalizeConnectorManifestForStorage(a).storedManifest);
+  const expectedRevision = storedConnectorManifestStreamRevision(
+    normalizeConnectorManifestForStorage(a).storedManifest
+  );
   await registerConnector(
     {
       ...a,

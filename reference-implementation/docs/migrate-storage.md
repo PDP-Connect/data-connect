@@ -449,10 +449,10 @@ These are reconstructed by the PDPP runtime on first boot after migration:
 - `lexical_search_index` — full-text inverted index (FTS)
 - `lexical_search_snapshots` — FTS snapshot metadata
 - `lexical_search_meta` — lexical search runtime state
-- `semantic_search_blob` — vector embeddings for similarity search (pgvector)
+- `semantic_search_blob` — vector embeddings for similarity search (pgvector). `source_version` records the `records.version` each embedding was computed from; NULL means unknown (legacy) and is never treated as current
 - `semantic_search_snapshots` — semantic snapshot metadata
 - `semantic_search_meta` — semantic search runtime state
-- `semantic_search_backfill_progress` — resumable backfill tracker
+- `semantic_search_backfill_progress` — resumable, leased repair/rebuild tracker (keyset cursor, the dirty revision captured at pass start, and the single-flight lease with its fencing generation)
 
 **Why?** These tables are derived from `blobs` and `records`. Their schema and generation logic differ between SQLite (sqlite-vec virtual tables) and Postgres (pgvector columns). The runtime is the source of truth for rebuilding them correctly; migrating them would risk stale or corrupt indexes. Always let the runtime rebuild.
 

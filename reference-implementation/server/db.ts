@@ -2470,8 +2470,10 @@ CREATE TABLE IF NOT EXISTS manifest_write_violations (
 -- pass proves the lexical+semantic drift-checks for this scope both report
 -- in-sync. A present dirty=1 row is a hint to re-check, not proof of actual
 -- drift -- the existing exact-comparison drift-checks (search.ts
--- backfillLexicalStream, search-semantic.ts semanticBackfillIndexIsInSync)
--- remain the source of truth for whether a rebuild is actually needed.
+-- backfillLexicalStream; the semantic pass in semantic-index-repair.ts, which
+-- compares per-row source_version, not counts) remain the source of truth.
+-- The semantic pass clears the flag itself with a revision CAS against the
+-- revision captured at the START of its whole keyset pass.
 -- attempts/next_attempt_at implement backoff-based starvation avoidance: a
 -- scope that fails reconcile repeatedly must not occupy the front of the
 -- oldest-first queue forever (its marked_at never changes on failure,
@@ -5933,6 +5935,27 @@ function migrateBlobBindingsJsonPath(raw: SqliteDatabase, opts: MigrationOptions
   return result;
 }
 
+// Bounded semantic repair columns (server/semantic-index-repair.ts). Forward-only
+// and idempotent. `source_version` is NULL for every pre-existing row: NULL means
+// "indexed source version unknown" and is never treated as current.
+function migrateSemanticSearchRepairColumns(raw: SqliteDatabase): void {
+  const additions: ReadonlyArray<readonly [string, string, string]> = [
+    ["semantic_search_rowid", "source_version", "INTEGER"],
+    ["semantic_search_blob", "source_version", "INTEGER"],
+    ["semantic_search_backfill_progress", "pass_kind", "TEXT NOT NULL DEFAULT 'rebuild'"],
+    ["semantic_search_backfill_progress", "cursor_key", "TEXT"],
+    ["semantic_search_backfill_progress", "pass_dirty_revision", "INTEGER"],
+    ["semantic_search_backfill_progress", "lease_owner", "TEXT"],
+    ["semantic_search_backfill_progress", "lease_expires_at", "INTEGER"],
+    ["semantic_search_backfill_progress", "lease_generation", "INTEGER NOT NULL DEFAULT 0"],
+  ];
+  for (const [table, column, definition] of additions) {
+    if (!hasTableColumn(raw, table, column)) {
+      raw.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+    }
+  }
+}
+
 function migrateSemanticSearchInstanceColumns(raw: SqliteDatabase, opts: MigrationOptions = {}) {
   const rowidHasInstance = hasTableColumn(raw, "semantic_search_rowid", "connector_instance_id");
   const blobHasInstance = hasTableColumn(raw, "semantic_search_blob", "connector_instance_id");
@@ -6383,6 +6406,7 @@ export function initDb(path = ":memory:", opts: InitDbOptions = {}): DatabaseHan
   runWithSqliteBusyRetrySync(() => migrateRecordStorageInstanceColumns(raw, opts));
   runWithSqliteBusyRetrySync(() => migrateBlobOriginInstanceColumn(raw, opts));
   runWithSqliteBusyRetrySync(() => migrateSemanticSearchInstanceColumns(raw, opts));
+  runWithSqliteBusyRetrySync(() => migrateSemanticSearchRepairColumns(raw));
   runWithSqliteBusyRetrySync(() => migrateLexicalSearchInstanceColumns(raw, opts));
   runWithSqliteBusyRetrySync(() => migrateLocalDeviceConnectorInstances(raw, opts));
   runWithSqliteBusyRetrySync(() => migrateRecordSemanticTimeColumn(raw));

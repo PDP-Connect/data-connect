@@ -6,16 +6,15 @@
  * (search_index_dirty, see stores/search-index-dirty-store.ts).
  *
  * For each dirty (connector_instance_id, stream) scope, this re-runs the
- * EXISTING exact-comparison drift-check + idempotent rebuild-if-needed for
- * both index kinds (search.ts's lexicalIndexBackfillForManifest,
- * search-semantic.ts's semanticIndexBackfillForManifest), scoped to that one
- * connector instance via `storage_binding.connector_instance_id` -- the same
- * mechanism production owner-bound manifests already use to pin backfill
- * scope. Both backfills are already correctness-proven no-ops when the
- * scope is actually in sync (I2's fix makes the semantic comparison exact;
- * the lexical comparison was already exact), so calling them unconditionally
- * for a dirty scope is cheap in the common case and a real (bounded, per-
- * connector) rebuild only when something is actually missing.
+ * lexical drift-check + idempotent rebuild-if-needed (search.ts's
+ * lexicalIndexBackfillForManifest) and the BOUNDED, version-aware semantic
+ * repair (search-semantic.ts's semanticIndexBackfillForManifest ->
+ * semantic-index-repair.ts), both scoped to that one connector instance via
+ * `storage_binding.connector_instance_id`. The semantic pass is leased
+ * (single flight per physical scope), paged with a persisted cursor, and
+ * budgeted; it clears the dirty flag itself, with a CAS against the revision
+ * captured at the START of the whole keyset pass. `busy` and `partial` results
+ * leave the flag and its revision untouched.
  *
  * A scope's dirty flag is cleared ONLY after both backfills complete
  * without throwing for that scope -- clearing does not mean "we found and
@@ -36,6 +35,7 @@ import {
   type DirtySearchIndexScope,
   listDirtySearchIndexScopes,
   recordSearchIndexDirtyFailure,
+  rotateSearchIndexDirtyOrder,
 } from "./stores/search-index-dirty-store.ts";
 
 interface ConnectorManifestRow {
@@ -88,11 +88,17 @@ function declaresSemanticFields(manifestStream: Record<string, unknown>): boolea
  * wrong, the scope just needs another round to check the newer state. It
  * must not be counted or evidenced the same as `failed`, which reflects the
  * backfills/storage-fence themselves throwing.
+ * `busy`: another worker holds the semantic lease for this scope. No work was
+ * done and nothing is cleared, recorded or backed off; the dirty mark stays.
+ * `partial`: the semantic pass spent its budget (or a newer dirty revision
+ * survived the pass's own completion CAS and a new pass started). The scope
+ * stays dirty, keeps its revision, and is rotated behind its peers so one long
+ * scope cannot starve the rest. Neither outcome is a failure.
  * `failed`: a backfill or the storage-generation fence threw; structured
  * failure evidence was recorded (or dropped as a lifecycle race) and the
  * scope's dirty flag is left untouched.
  */
-export type ReconcileScopeOutcome = "converged" | "failed" | "recontended";
+export type ReconcileScopeOutcome = "busy" | "converged" | "failed" | "partial" | "recontended";
 
 export interface ReconcileScopeResult {
   readonly connectorId: string;
@@ -122,7 +128,8 @@ async function runScopeBackfills(
   scope: DirtySearchIndexScope,
   manifest: Record<string, unknown>,
   targetStream: Record<string, unknown>,
-  generation: number
+  generation: number,
+  deadlineAt: number | null
 ): Promise<ReconcileScopeResult> {
   const { connectorId, connectorInstanceId, stream } = scope;
   // Narrowed to the ONE dirty stream, not the whole manifest: the
@@ -166,8 +173,27 @@ async function runScopeBackfills(
     return { connectorId, connectorInstanceId, outcome: "failed", stream };
   }
   if (semanticBackend) {
-    await semanticIndexBackfillForManifest({ manifest: pinnedManifest } as unknown as SemanticBackfillOptions);
+    const semantic = await semanticIndexBackfillForManifest({
+      manifest: pinnedManifest,
+      repair: { deadlineAt },
+    } as unknown as SemanticBackfillOptions);
     assertStorageGenerationCurrent(generation);
+    const mine = semantic.scopes.find(
+      (candidate) => candidate.connectorInstanceId === connectorInstanceId && candidate.stream === stream
+    );
+    if (mine?.status === "busy") {
+      return { connectorId, connectorInstanceId, outcome: "busy", stream };
+    }
+    if (mine?.status === "partial") {
+      await rotateSearchIndexDirtyOrder({ connectorInstanceId, stream }, new Date().toISOString());
+      return { connectorId, connectorInstanceId, outcome: "partial", stream };
+    }
+    if (mine?.status === "complete") {
+      // The pass's own completion CAS (revision = the revision captured at the
+      // START of the whole keyset pass) already cleared the dirty flag. The
+      // round's later revision is deliberately NOT used here.
+      return { connectorId, connectorInstanceId, outcome: "converged", stream };
+    }
   }
 
   // CAS on scope.revision (captured when this round listed the scope,
@@ -213,7 +239,8 @@ async function runScopeBackfills(
  */
 export async function reconcileSearchIndexDirtyScope(
   scope: DirtySearchIndexScope,
-  generation: number = currentStorageGeneration()
+  generation: number = currentStorageGeneration(),
+  deadlineAt: number | null = null
 ): Promise<ReconcileScopeResult> {
   const { connectorId, connectorInstanceId, stream } = scope;
   try {
@@ -243,7 +270,7 @@ export async function reconcileSearchIndexDirtyScope(
       );
       return { connectorId, connectorInstanceId, outcome: cleared ? "converged" : "recontended", stream };
     }
-    return await runScopeBackfills(scope, manifest, targetStream, generation);
+    return await runScopeBackfills(scope, manifest, targetStream, generation, deadlineAt);
   } catch (err) {
     if (err instanceof ScopeStorageGenerationStaleError || !isCurrentStorageGeneration(generation)) {
       // The failure itself may BE storage having closed mid-flight; writing
@@ -262,8 +289,12 @@ export async function reconcileSearchIndexDirtyScope(
 
 export interface SearchIndexDirtyReconcileRoundResult {
   readonly attempted: number;
+  /** Scopes skipped because another worker holds their semantic lease. */
+  readonly busy: number;
   readonly failed: number;
   readonly incomplete: boolean;
+  /** Scopes whose semantic pass spent its budget; still dirty, resumed next round. */
+  readonly partial: number;
   /**
    * A scope whose clear CAS was a no-op because a concurrent write
    * re-dirtied it between this round's listing and its clear (see
@@ -304,8 +335,10 @@ export async function runSearchIndexDirtyReconcileRound(options?: {
   const scopes = await listDirtySearchIndexScopes(pageSize);
 
   const outcomeCounts: Record<ReconcileScopeOutcome, number> = {
+    busy: 0,
     converged: 0,
     failed: 0,
+    partial: 0,
     recontended: 0,
   };
   let incomplete = false;
@@ -318,14 +351,16 @@ export async function runSearchIndexDirtyReconcileRound(options?: {
     }
     attempted += 1;
     // biome-ignore lint/performance/noAwaitInLoops: Bounded round; each scope's reconcile is independent but sequential to keep this sweep's DB load predictable.
-    const result = await reconcileSearchIndexDirtyScope(scope, generation);
+    const result = await reconcileSearchIndexDirtyScope(scope, generation, deadline);
     outcomeCounts[result.outcome] += 1;
   }
 
   return {
     attempted,
+    busy: outcomeCounts.busy,
     failed: outcomeCounts.failed,
     incomplete: incomplete || scopes.length >= pageSize,
+    partial: outcomeCounts.partial,
     recontended: outcomeCounts.recontended,
     succeeded: outcomeCounts.converged,
   };
