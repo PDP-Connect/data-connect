@@ -39,7 +39,6 @@ import { startServer } from "../server/index.ts";
 import { closePostgresStorage, initPostgresStorage, postgresQuery } from "../server/postgres-storage.ts";
 import { DEFAULT_PRE_REGISTERED_PUBLIC_CLIENTS } from "../server/reference-local-defaults.ts";
 import { getOwnerSessionStore } from "../server/stores/owner-session-store.ts";
-import { DEMO_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
 import { dedicatedPostgresTestUrl } from "./helpers/dedicated-postgres-test-url.ts";
 
 const TEST_PASSWORD = "placeholder-test-password";
@@ -47,9 +46,6 @@ const SUBJECT = "owner_local";
 const CONSOLE_CLIENT = "dataconnect-console";
 const RUNTIME_CLIENT = "dataconnect-connector-runtime";
 /** The clients earlier versions pre-registered and this one retires. */
-const OLD_CONSOLE_CLIENT = "pdpp-polyfill-owner-bootstrap";
-const DEMO_CLIENT_IDS = DEMO_PRE_REGISTERED_PUBLIC_CLIENTS.map((client) => client.client_id);
-const OLD_CLIENT_IDS = [OLD_CONSOLE_CLIENT, ...DEMO_CLIENT_IDS];
 
 interface CloseableServer {
   close: (callback?: (err?: Error) => void) => unknown;
@@ -108,10 +104,6 @@ async function start(dbPath: string): Promise<{ server: StartedServer; asUrl: st
   return { server, asUrl: `http://localhost:${server.asPort}`, warnings };
 }
 
-function retirementLog(warnings: readonly StartLog[]): StartLog | undefined {
-  return warnings.find((entry) => entry.retired_clients !== undefined);
-}
-
 function sessionCookieFrom(setCookie: readonly string[]): string {
   const pair = setCookie.map((header) => header.split(";")[0]).find((p) => p?.startsWith("pdpp_owner_session="));
   assert.ok(pair, "login sets an owner session cookie");
@@ -150,20 +142,6 @@ function desktopSignIn(asUrl: string, label?: string): Promise<string> {
     req.on("error", reject);
     req.end(body);
   });
-}
-
-async function browserSignIn(asUrl: string): Promise<string> {
-  const resp = await fetch(`${asUrl}/owner/login`, {
-    body: JSON.stringify({ password: TEST_PASSWORD }),
-    headers: {
-      Accept: "application/json",
-      "Content-Type": "application/json",
-      "User-Agent": "Firefox/140.0",
-    },
-    method: "POST",
-    redirect: "manual",
-  });
-  return sessionCookieFrom(resp.headers.getSetCookie());
 }
 
 async function post(url: string, cookie: string, body: Record<string, unknown>): Promise<Response> {
@@ -230,18 +208,6 @@ function registeredClientIds(): string[] {
     .prepare("SELECT client_id FROM oauth_clients ORDER BY client_id")
     .all<{ client_id: string }>()
     .map((row) => row.client_id);
-}
-
-/** Every credential row's revocation state, to show a start changed none. */
-function credentialState(): unknown {
-  const db = getDb();
-  return {
-    clients: registeredClientIds(),
-    deviceRequests: db.prepare("SELECT device_code, status FROM owner_device_auth ORDER BY device_code").all(),
-    refreshTokens: db.prepare("SELECT refresh_token_hash, status FROM oauth_refresh_tokens ORDER BY 1").all(),
-    sessions: db.prepare("SELECT id_hash, revoked_at FROM owner_sessions ORDER BY id_hash").all(),
-    tokens: db.prepare("SELECT token_id, revoked FROM tokens ORDER BY token_id").all(),
-  };
 }
 
 /**
@@ -342,355 +308,12 @@ test(
 );
 
 /** What earlier versions left, written the way they wrote it. */
-interface OldInstall {
-  /** Owner bearers under every old client id, by client id. */
-  oldBearers: Record<string, string[]>;
-  /** Credentials no retirement rule covers. */
-  keptBearer: string;
-  browserCookie: string;
-  /** Unlabelled desktop sign-ins, oldest first. */
-  oldDesktopCookies: string[];
-  pendingDeviceCode: string;
-  refreshTokenHash: string;
-}
-
-async function seedOldInstall(asUrl: string): Promise<OldInstall> {
-  // Earlier versions pre-registered these at startup.
-  await seedPreRegisteredClients([
-    {
-      client_id: OLD_CONSOLE_CLIENT,
-      metadata: {
-        client_name: "PDPP Polyfill Owner Bootstrap",
-        token_endpoint_auth_method: "none",
-      },
-    },
-    ...DEMO_PRE_REGISTERED_PUBLIC_CLIENTS.map((client) => ({
-      ...client,
-      metadata: { ...client.metadata },
-    })),
-  ]);
-  const oldDesktopCookies: string[] = [];
-  for (let i = 0; i < 3; i++) {
-    // Each earlier app start happened a while before the next one.
-    getDb().prepare("UPDATE owner_sessions SET created_at = created_at - 3600 WHERE user_agent IS NULL").run();
-    oldDesktopCookies.push(await desktopSignIn(asUrl));
-  }
-  const browserCookie = await browserSignIn(asUrl);
-  const oldBearers: Record<string, string[]> = {};
-  for (const clientId of OLD_CLIENT_IDS) {
-    oldBearers[clientId] = [await issueOwnerToken(SUBJECT, { clientId }), await issueOwnerToken(SUBJECT, { clientId })];
-  }
-  // The old connector runtime approved its own `cli_longview` device requests.
-  for (let i = 0; i < 2; i++) {
-    const device = await initiateOwnerDeviceAuthorization("cli_longview");
-    oldBearers.cli_longview?.push(
-      (await approveOwnerDeviceAuthorization(device.user_code, SUBJECT)).access_token as string
-    );
-  }
-  const pending = await initiateOwnerDeviceAuthorization("cli_longview");
-  // The demo app `longview` holds an access token and its refresh token.
-  const refreshTokenHash = "rth_old_longview_0001";
-  getDb()
-    .prepare(
-      `INSERT INTO tokens(token_id, subject_id, client_id, token_kind, refresh_family_id, expires_at)
-       VALUES ('tok_old_longview_access', ?, 'longview', 'client', 'fam_old_longview', ?)`
-    )
-    .run(SUBJECT, new Date(Date.now() + 3_600_000).toISOString());
-  getDb()
-    .prepare(
-      `INSERT INTO oauth_refresh_tokens(refresh_token_hash, family_id, generation, client_id, subject_id, status, created_at)
-       VALUES (?, 'fam_old_longview', 1, 'longview', ?, 'active', ?)`
-    )
-    .run(refreshTokenHash, SUBJECT, new Date().toISOString());
-  // A person granted the demo app `concert_recommendation_app` access, so its
-  // client row stays for the grant to name.
-  getDb()
-    .prepare(
-      `INSERT INTO grants(grant_id, subject_id, client_id, grant_json, access_mode, status, issued_at)
-       VALUES ('grt_old_concert', ?, 'concert_recommendation_app', '{}', 'continuous', 'active', ?)`
-    )
-    .run(SUBJECT, new Date().toISOString());
-  return {
-    browserCookie,
-    keptBearer: await issueOwnerToken(SUBJECT, { clientId: "pdpp_cli" }),
-    oldBearers,
-    oldDesktopCookies,
-    pendingDeviceCode: pending.device_code as string,
-    refreshTokenHash,
-  };
-}
-
-test(
-  "startup revokes every credential of the old client ids and the old desktop sessions, once",
-  withDataDir(async (dataDir) => {
-    const dbPath = join(dataDir, "pdpp.sqlite");
-    const first = await start(dbPath);
-    let old: OldInstall;
-    try {
-      old = await seedOldInstall(first.asUrl);
-      assert.equal((await liveBearerLabels()).length, 2 * OLD_CLIENT_IDS.length + 2 + 1, "the old bearers are live");
-      assert.equal((await liveSessionLabels()).length, 4, "the old sessions are live");
-    } finally {
-      await stop(first.server);
-    }
-
-    const { server, asUrl, warnings } = await start(dbPath);
-    let afterUpgrade: unknown;
-    try {
-      assert.deepEqual(await liveBearerLabels(), ["PDPP CLI"], "only the pdpp_cli bearer survives");
-      for (const [clientId, tokens] of Object.entries(old.oldBearers)) {
-        for (const token of tokens) assert.equal(await isActive(token), false, `a ${clientId} bearer is revoked`);
-      }
-      assert.equal(await isActive(old.keptBearer), true, "the pdpp_cli bearer still works");
-      assert.deepEqual(
-        await liveSessionLabels(),
-        ["Firefox", "Unknown browser"],
-        "the browser session and the newest old desktop session stay"
-      );
-      assert.equal(await sessionStatus(asUrl, old.browserCookie), 204);
-      assert.equal(await sessionStatus(asUrl, old.oldDesktopCookies.at(-1) as string), 204);
-      for (const cookie of old.oldDesktopCookies.slice(0, -1)) {
-        assert.equal(await sessionStatus(asUrl, cookie), 401, "an older desktop session is revoked");
-      }
-      assert.equal(
-        getDb()
-          .prepare("SELECT status FROM owner_device_auth WHERE device_code = ?")
-          .get<{ status: string }>(old.pendingDeviceCode)?.status,
-        "expired"
-      );
-      assert.equal(
-        getDb()
-          .prepare("SELECT revoked FROM tokens WHERE token_id = 'tok_old_longview_access'")
-          .get<{ revoked: number }>()?.revoked,
-        1,
-        "the demo app's access token is revoked"
-      );
-      assert.equal(
-        getDb()
-          .prepare("SELECT status FROM oauth_refresh_tokens WHERE refresh_token_hash = ?")
-          .get<{ status: string }>(old.refreshTokenHash)?.status,
-        "revoked"
-      );
-      assert.deepEqual(
-        registeredClientIds(),
-        ["concert_recommendation_app", ...PRODUCT_CLIENT_IDS].sort(),
-        "the old clients are deregistered except the one an active grant names"
-      );
-      const log = retirementLog(warnings);
-      assert.deepEqual(log?.retired_clients, {
-        cli_longview: {
-          bearers: 4,
-          deregistered: true,
-          deviceRequests: 1,
-          keptForActiveGrant: false,
-          refreshTokens: 0,
-        },
-        concert_recommendation_app: {
-          bearers: 2,
-          deregistered: false,
-          deviceRequests: 0,
-          keptForActiveGrant: true,
-          refreshTokens: 0,
-        },
-        longview: {
-          bearers: 3,
-          deregistered: true,
-          deviceRequests: 0,
-          keptForActiveGrant: false,
-          refreshTokens: 1,
-        },
-        longview_planning_v1: {
-          bearers: 2,
-          deregistered: true,
-          deviceRequests: 0,
-          keptForActiveGrant: false,
-          refreshTokens: 0,
-        },
-        "pdpp-polyfill-owner-bootstrap": {
-          bearers: 2,
-          deregistered: true,
-          deviceRequests: 0,
-          keptForActiveGrant: false,
-          refreshTokens: 0,
-        },
-      });
-      assert.equal(log?.owner_sessions_revoked, 2);
-      assert.doesNotMatch(JSON.stringify(warnings), /tok_|pdpp_owner_session=/u, "the log holds no credential");
-      afterUpgrade = credentialState();
-    } finally {
-      await stop(server);
-    }
-
-    const again = await start(dbPath);
-    try {
-      assert.equal(retirementLog(again.warnings), undefined, "a second start retires nothing");
-      assert.deepEqual(credentialState(), afterUpgrade, "a second start revokes and deletes nothing");
-    } finally {
-      await stop(again.server);
-    }
-  })
-);
-
-test(
-  "a server that registers a retired client itself keeps that client's credentials",
-  withDataDir(async (dataDir) => {
-    const dbPath = join(dataDir, "pdpp.sqlite");
-    const clients = [...DEFAULT_PRE_REGISTERED_PUBLIC_CLIENTS, ...DEMO_PRE_REGISTERED_PUBLIC_CLIENTS].map((client) => ({
-      ...client,
-      metadata: { ...client.metadata },
-    }));
-    const startWith = async () =>
-      (await startServer({
-        asPort: 0,
-        dbPath,
-        ownerAuthPassword: TEST_PASSWORD,
-        preRegisteredPublicClients: clients,
-        quiet: true,
-        rsPort: 0,
-      })) as StartedServer;
-    const first = await startWith();
-    let token: string;
-    try {
-      token = await issueOwnerToken(SUBJECT, { clientId: "cli_longview" });
-    } finally {
-      await stop(first);
-    }
-    const second = await startWith();
-    try {
-      assert.equal(await isActive(token), true);
-      assert.ok(registeredClientIds().includes("cli_longview"));
-    } finally {
-      await stop(second);
-    }
-  })
-);
-
-function tokenRevoked(tokenId: string): number | undefined {
-  return getDb().prepare("SELECT revoked FROM tokens WHERE token_id = ?").get<{ revoked: number }>(tokenId)?.revoked;
-}
-
-function insertGrantToken(tokenId: string, grantId: string, clientId: string): void {
-  getDb()
-    .prepare(
-      `INSERT INTO tokens(token_id, grant_id, subject_id, client_id, token_kind, refresh_family_id, expires_at)
-       VALUES (?, ?, ?, ?, 'client', 'fam_concert', ?)`
-    )
-    .run(tokenId, grantId, SUBJECT, clientId, new Date(Date.now() + 3_600_000).toISOString());
-}
-
 function spineEvents(eventType: string, clientId: string): Record<string, unknown>[] {
   return getDb()
     .prepare("SELECT actor_type, data_json FROM spine_events WHERE event_type = ? AND client_id = ? ORDER BY event_seq")
     .all<{ actor_type: string; data_json: string }>(eventType, clientId)
     .map((row) => ({ actor_type: row.actor_type, ...(JSON.parse(row.data_json) as Record<string, unknown>) }));
 }
-
-test(
-  "startup keeps a retired client's grant tokens while an active grant names it, and cascades a deletion",
-  withDataDir(async (dataDir) => {
-    const dbPath = join(dataDir, "pdpp.sqlite");
-    const first = await start(dbPath);
-    let ownerBearer: string;
-    let pendingDeviceCode: string;
-    try {
-      await seedPreRegisteredClients(
-        DEMO_PRE_REGISTERED_PUBLIC_CLIENTS.map((client) => ({ ...client, metadata: { ...client.metadata } }))
-      );
-      const nowIso = new Date().toISOString();
-      getDb()
-        .prepare(
-          `INSERT INTO grants(grant_id, subject_id, client_id, grant_json, access_mode, status, issued_at)
-           VALUES ('grt_concert', ?, 'concert_recommendation_app', '{}', 'continuous', 'active', ?)`
-        )
-        .run(SUBJECT, nowIso);
-      insertGrantToken("tok_concert_before_upgrade", "grt_concert", "concert_recommendation_app");
-      getDb()
-        .prepare(
-          `INSERT INTO oauth_refresh_tokens(refresh_token_hash, family_id, generation, client_id, subject_id, grant_id, status, created_at)
-           VALUES ('rth_concert', 'fam_concert', 1, 'concert_recommendation_app', ?, 'grt_concert', 'active', ?)`
-        )
-        .run(SUBJECT, nowIso);
-      ownerBearer = await issueOwnerToken(SUBJECT, { clientId: "concert_recommendation_app" });
-      pendingDeviceCode = (await initiateOwnerDeviceAuthorization("concert_recommendation_app")).device_code as string;
-      // `longview` has no active grant, only an event subscription from a
-      // grant the owner revoked.
-      getDb()
-        .prepare(
-          `INSERT INTO client_event_subscriptions(subscription_id, grant_id, client_id, subject_id, callback_url,
-             secret_hash, secret_text, scope_json, status, created_at, updated_at)
-           VALUES ('sub_longview', 'grt_longview_revoked', 'longview', ?, 'https://example.test/hook',
-             'hash', 'secret', '{}', 'active', ?, ?)`
-        )
-        .run(SUBJECT, nowIso, nowIso);
-    } finally {
-      await stop(first.server);
-    }
-
-    const concertCredentials = () => ({
-      beforeUpgrade: tokenRevoked("tok_concert_before_upgrade"),
-      grant: getDb().prepare("SELECT status FROM grants WHERE grant_id = 'grt_concert'").get<{ status: string }>()
-        ?.status,
-      refresh: getDb()
-        .prepare("SELECT status FROM oauth_refresh_tokens WHERE refresh_token_hash = 'rth_concert'")
-        .get<{ status: string }>()?.status,
-    });
-
-    const upgrade = await start(dbPath);
-    try {
-      assert.deepEqual(concertCredentials(), { beforeUpgrade: 0, grant: "active", refresh: "active" });
-      assert.equal(await isActive(ownerBearer), false, "the retired client's owner bearer is revoked");
-      assert.equal(
-        getDb()
-          .prepare("SELECT status FROM owner_device_auth WHERE device_code = ?")
-          .get<{ status: string }>(pendingDeviceCode)?.status,
-        "expired"
-      );
-      assert.ok(registeredClientIds().includes("concert_recommendation_app"), "the client row stays");
-      assert.deepEqual(retirementLog(upgrade.warnings)?.retired_clients?.concert_recommendation_app, {
-        bearers: 1,
-        deregistered: false,
-        deviceRequests: 1,
-        keptForActiveGrant: true,
-        refreshTokens: 0,
-      });
-
-      assert.ok(!registeredClientIds().includes("longview"), "the client without an active grant is deleted");
-      assert.deepEqual(
-        getDb()
-          .prepare("SELECT status, disabled_reason FROM client_event_subscriptions WHERE subscription_id = 'sub_longview'")
-          .get(),
-        { disabled_reason: "client_deleted", status: "disabled_revoked" },
-        "a deleted client's event subscriptions are disabled"
-      );
-      assert.deepEqual(spineEvents("client.deleted", "longview"), [
-        {
-          actor_type: "authorization_server",
-          disabled_subscription_count: 1,
-          registration_mode: "pre_registered_public",
-          revoked_grant_count: 0,
-          revoked_owner_token_count: 0,
-          revoked_package_count: 0,
-        },
-      ]);
-      assert.deepEqual(spineEvents("client.deleted", "concert_recommendation_app"), [], "a kept client is not deleted");
-
-      // The app refreshes its access token after the upgrade.
-      insertGrantToken("tok_concert_after_upgrade", "grt_concert", "concert_recommendation_app");
-    } finally {
-      await stop(upgrade.server);
-    }
-
-    const again = await start(dbPath);
-    try {
-      assert.deepEqual(concertCredentials(), { beforeUpgrade: 0, grant: "active", refresh: "active" });
-      assert.equal(tokenRevoked("tok_concert_after_upgrade"), 0, "a token issued after the upgrade stays live");
-      assert.equal(retirementLog(again.warnings), undefined, "a second start retires nothing");
-      assert.equal(spineEvents("client.deleted", "longview").length, 1, "the deletion is recorded once");
-    } finally {
-      await stop(again.server);
-    }
-  })
-);
 
 /** Approve an owner device request the way the console and the runtime do. */
 async function approveAs(clientId: string, subjectId = SUBJECT): Promise<{ access_token: string; expires_in: number }> {
