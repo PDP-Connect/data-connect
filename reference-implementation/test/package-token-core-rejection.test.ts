@@ -207,7 +207,7 @@ async function packageToken(): Promise<{
 
 const coreProbes: Array<{
 	name: string;
-	method: "GET" | "POST";
+	method: "DELETE" | "GET" | "PATCH" | "POST";
 	path: string;
 	body?: unknown;
 	ownerOnly?: boolean;
@@ -222,7 +222,7 @@ const coreProbes: Array<{
 	{
 		name: "records list",
 		method: "GET",
-		path: "/v1/streams/spotify.playlists/records",
+		path: "/v1/streams/spotify.playlists/records?changes_since=beginning",
 	},
 	{
 		name: "record by id",
@@ -263,6 +263,17 @@ const coreProbes: Array<{
 	{
 		name: "event subscription by id",
 		method: "GET",
+		path: "/v1/event-subscriptions/sub-test",
+	},
+	{
+		name: "event subscription update",
+		method: "PATCH",
+		path: "/v1/event-subscriptions/sub-test",
+		body: { enabled: false },
+	},
+	{
+		name: "event subscription delete",
+		method: "DELETE",
 		path: "/v1/event-subscriptions/sub-test",
 	},
 	{
