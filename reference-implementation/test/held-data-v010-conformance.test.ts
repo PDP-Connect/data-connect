@@ -19,7 +19,7 @@
  * Failure domains exercised: the authority journal file, the epoch marker file, the
  * main (restorable) database, and the toy app's in-memory stores.
  *
- * `it.skip('... UNVERIFIED - reason')` marks an outcome the prototype cannot run.
+ * `it(title, { skip: 'UNVERIFIED: reason' })` marks an outcome the prototype cannot run; the runner requires the reason.
  * `it.todo` marks a SPEC FINDING kept asserting the text.
  *
  * Not covered here (not in this file's brief): C1, C3 (unused), C6, C7 (not applicable until a processing
@@ -200,7 +200,7 @@ describe("P1. Owner withdrawal at the AS", () => {
     return { clientId, active, single };
   }
 
-  it.skip("P1: lists both grants and presents keep and delete with neither preselected [AO] - UNVERIFIED: the RI has no interactive owner surface; the only listing is the decommission offer (P9) and the statements exist only after a choice", () => {});
+  it("P1: lists both grants and presents keep and delete with neither preselected [AO]", { skip: "UNVERIFIED: the RI has no interactive owner surface; the only listing is the decommission offer (P9) and the statements exist only after a choice" }, () => {});
 
   it("P1: rejects a programmatic request that lacks a disposition, for a grant and for the whole client, and ends nothing [PV]", async () => {
     await withServer(
@@ -466,7 +466,7 @@ describe("P3. Narrowing", () => {
     return { clientId, g, g2 };
   }
 
-  it.skip("P3: before the final step the AS states the effect of each disposition [AO] - UNVERIFIED: the RI has no narrowing surface; Core's Grant narrowing statement (keep and delete effects) is not produced anywhere, and the prototype has no UI to observe", () => {});
+  it("P3: before the final step the AS states the effect of each disposition [AO]", { skip: "UNVERIFIED: the RI has no narrowing surface; Core's Grant narrowing statement (keep and delete effects) is not produced anywhere, and the prototype has no UI to observe" }, () => {});
 
   it("P3: G answers erase and the client deletes its G copy [PV+AO]", async () => {
     const clock = { now: Date.now() };
@@ -534,7 +534,7 @@ describe("P3. Narrowing", () => {
     );
   });
 
-  it.skip("P3: relabeling an old G acquisition as G2's never evades G's instruction [AO] - UNVERIFIED: the toy app has no relabel operation and the client library cannot observe one; only the late-delivery case above is exercised", () => {});
+  it("P3: relabeling an old G acquisition as G2's never evades G's instruction [AO]", { skip: "UNVERIFIED: the toy app has no relabel operation and the client library cannot observe one; only the late-delivery case above is exercised" }, () => {});
 
   it("P3 (note): choosing not to reacquire does not fail the case [PV]", async () => {
     await withServer(
@@ -1414,9 +1414,9 @@ describe("D1a. Restore across issuance paths", () => {
     );
   });
 
-  it.skip("D1a (variant): the RS retains a positive introspection result computed before revocation; a read MAY succeed only within the result's original cache lifetime and applicable read deadline, and the restore does not restart either limit [PV] - UNVERIFIED: the RI's resource server keeps no introspection result cache, so the exception cannot be exercised", () => {});
+  it("D1a (variant): the RS retains a positive introspection result computed before revocation; a read MAY succeed only within the result's original cache lifetime and applicable read deadline, and the restore does not restart either limit [PV]", { skip: "UNVERIFIED: the RI's resource server keeps no introspection result cache, so the exception cannot be exercised" }, () => {});
 
-  it.skip("D1a (variant): a positive introspection response computed before revocation reaches the RS more than 60 seconds after the RS sent the request and authorizes neither a read nor a signed blob URL [PV] - UNVERIFIED: no RS introspection cache, no delayed-response handling and no signed blob URLs exist in the prototype", () => {});
+  it("D1a (variant): a positive introspection response computed before revocation reaches the RS more than 60 seconds after the RS sent the request and authorizes neither a read nor a signed blob URL [PV]", { skip: "UNVERIFIED: no RS introspection cache, no delayed-response handling and no signed blob URLs exist in the prototype" }, () => {});
 });
 
 // ---------------------------------------------------------------------------
