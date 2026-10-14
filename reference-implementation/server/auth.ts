@@ -12592,6 +12592,8 @@ export async function readGrantForProcessing(
 export interface HeldDataEnding {
   path: EndingPath;
   disposition?: Disposition | null;
+  /** Why the AS ended the grant (security revocation); shown to the owner. */
+  reason?: string;
   /**
    * With a client-conveyed `delete`: the owner's choice time in the client,
    * which is the first receipt. Absent, no receipt is recorded.
@@ -12859,6 +12861,7 @@ export async function endHeldDataForGrant(grantId: string, ending: HeldDataEndin
     grantId,
     path: ending?.path ?? "security_revocation",
     disposition: ending?.disposition ?? null,
+    ...(ending?.reason ? { reason: ending.reason } : {}),
     ...(staged ? { grant: staged.grant } : {}),
   });
   const clientId = rt.authority.grantClient(grantId);

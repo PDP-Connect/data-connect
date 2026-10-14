@@ -146,6 +146,8 @@ type Entry =
       path: EndingPath;
       disposition: Disposition | null;
       owner_notice_required: boolean;
+      /** Why the AS ended the grant (security revocation), shown to the owner. */
+      reason?: string;
       at: number;
     }
   | { t: "erase"; id: string; grant_id: string; scope: ErasureScope; origin: string; at: number; accepted_at?: number }
@@ -254,6 +256,7 @@ export interface StatusAnswer {
     ended_at: number;
     disposition: Disposition | null;
     owner_notice_required: boolean;
+    reason?: string;
   } | null;
   erasures: { operation_id: string; scope: ErasureScope; accepted_at: number; effective_at?: number }[];
   /**
@@ -686,6 +689,8 @@ export class HeldDataAuthority {
     grantId: string;
     path: EndingPath;
     disposition?: Disposition | null;
+    /** Why the AS ended the grant, for a security revocation. */
+    reason?: string;
     /** Main-database identity when the lost journal cannot supply it. */
     grant?: GrantRegistration;
   }): {
@@ -728,6 +733,7 @@ export class HeldDataAuthority {
         path: input.path,
         disposition,
         owner_notice_required: input.path === "security_revocation",
+        ...(input.reason ? { reason: input.reason } : {}),
         at: this.#o.now(),
       });
     }
@@ -1486,6 +1492,7 @@ export class HeldDataAuthority {
             ended_at: facts.end.at,
             disposition: facts.end.disposition,
             owner_notice_required: facts.end.owner_notice_required && facts.keptAt === null && facts.erasures.length === 0,
+            ...(facts.end.reason ? { reason: facts.end.reason } : {}),
           }
         : null,
       erasures: effective.map((e) => ({
