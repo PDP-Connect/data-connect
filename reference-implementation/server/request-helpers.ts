@@ -120,13 +120,18 @@ export function pdppError(
 
 // ─── Query spine emission ────────────────────────────────────────────────────
 
-export async function emitQueryRejected(context: QueryContext, req: RequestLike, err: ErrorWithCode): Promise<void> {
+export async function emitQueryRejected(
+  context: QueryContext,
+  req: RequestLike,
+  err: ErrorWithCode,
+  statusOverride?: number
+): Promise<void> {
   // biome-ignore lint/suspicious/noUnnecessaryConditions: TypeScript boundary permits nullish input; this guard preserves runtime behavior.
   if (!context?.queryId) {
     return;
   }
   const code = err.code || "api_error";
-  const status = codeToStatus[code] || 500;
+  const status = statusOverride ?? codeToStatus[code] ?? 500;
   const data: Record<string, unknown> = {
     ...(context.queryData || {}),
     error: {

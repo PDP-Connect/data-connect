@@ -1783,13 +1783,13 @@ function inferAuthGateQueryContext(req: ReqLike, _tokenInfo: TokenInfo = {}) {
   return null;
 }
 
-async function emitQueryRejected(context: QueryContext, req: ReqLike, err: ApiError) {
+async function emitQueryRejected(context: QueryContext, req: ReqLike, err: ApiError, statusOverride?: number) {
   // biome-ignore lint/suspicious/noUnnecessaryConditions: TypeScript boundary permits nullish input; this guard preserves runtime behavior.
   if (!context?.queryId) {
     return;
   }
   const code = err.code || "api_error";
-  const status = codeToStatus[code] || 500;
+  const status = statusOverride ?? codeToStatus[code] ?? 500;
   const data: Record<string, unknown> = {
     ...(context.queryData || {}),
     error: {
@@ -2134,10 +2134,9 @@ async function requireTokenWithIntrospection(
               info.inactive_reason === "grant_invalid"
               ? "Grant is malformed or no longer valid"
               : "Invalid or expired token";
-      const gateErr = Object.assign(new Error(gateErrMsg), {
-        code: info.inactive_reason || "authentication_error",
-      }) as ApiError;
-      await emitQueryRejected(authGateContext, req, gateErr);
+      const inactiveReason = info.inactive_reason || "authentication_error";
+      const gateErr = Object.assign(new Error(gateErrMsg), { code: inactiveReason }) as ApiError;
+      await emitQueryRejected(authGateContext, req, gateErr, 401);
     }
     if (info.inactive_reason === "grant_revoked") {
       return pdppError(res, 401, "grant_revoked", "Grant has been revoked");
@@ -2146,7 +2145,7 @@ async function requireTokenWithIntrospection(
       return pdppError(res, 401, "grant_expired", "Grant has expired");
     }
     if (info.inactive_reason === "grant_invalid") {
-      return pdppError(res, 401, "grant_invalid", "Grant is malformed or no longer valid");
+      return pdppError(res, 401, "authentication_error", "Invalid or expired token");
     }
     if (info.inactive_reason?.startsWith("context.")) {
       return pdppError(res, 401, info.inactive_reason, "Token introspection failed closed");
