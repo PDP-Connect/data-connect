@@ -1017,7 +1017,7 @@ test("mutation control: a durable DETAIL_GAP alongside a STREAM_EVIDENCE shortfa
   process.stdout.write(JSON.stringify({ type: 'RECORD', stream: 'messages', key: 'm-1', data: { id: 'm-1' }, emitted_at: new Date().toISOString() }) + '\\n');
   process.stdout.write(JSON.stringify({ type: 'RECORD', stream: 'message_bodies', key: 'm-1', data: { id: 'm-1' }, emitted_at: new Date().toISOString() }) + '\\n');
   process.stdout.write(JSON.stringify({ type: 'STATE', stream: 'messages', cursor: { cursor: 'messages-1' } }) + '\\n');
-  process.stdout.write(JSON.stringify({ type: 'DETAIL_GAP', stream: 'message_bodies', parent_stream: 'messages', record_key: 'm-2', reason: 'temporary_unavailable', retryable: true }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'DETAIL_GAP', reference_only: true, status: 'pending', detail_locator: { kind: 'test.detail' }, stream: 'message_bodies', parent_stream: 'messages', record_key: 'm-2', reason: 'temporary_unavailable', retryable: true }) + '\\n');
   process.stdout.write(JSON.stringify({ type: 'STREAM_EVIDENCE', reference_only: true, stream: 'message_bodies', considered: 2, outcomes: { emitted: 1, unchanged: 0, gapped: 1, unaccounted: 0 } }) + '\\n');
   process.stdout.write(JSON.stringify({ type: 'DONE', status: 'succeeded', records_emitted: 2 }) + '\\n');
   rl.close();

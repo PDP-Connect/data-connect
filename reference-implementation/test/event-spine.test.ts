@@ -2986,10 +2986,10 @@ rl.on('line', (line) => {
     });
   });
 
-  await t.test("captures connector-declared terminal error details on cancelled runs", async () => {
+  await t.test("captures connector-declared terminal error details when verification is declined", async () => {
     await withHarness(async ({ asUrl, rsUrl, spotifyManifest }) => {
       const ownerToken = await issueOwnerToken(asUrl, "u1");
-      const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-event-spine-terminal-cancelled-"));
+      const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-event-spine-verification-declined-"));
       const connectorPath = join(tmpDir, "connector.mjs");
       writeFileSync(
         connectorPath,
@@ -3002,13 +3002,13 @@ rl.on('line', (line) => {
   process.stdout.write(JSON.stringify({
     type: 'RECORD',
     stream: 'top_artists',
-    key: 'terminal_cancelled_event',
-    data: { id: 'terminal_cancelled_event', value: 'before terminal cancellation' },
+    key: 'verification_declined_event',
+    data: { id: 'verification_declined_event', value: 'before verification declined' },
     emitted_at: new Date().toISOString(),
   }) + '\\n');
   process.stdout.write(JSON.stringify({
     type: 'DONE',
-    status: 'cancelled',
+    status: 'failed',
     records_emitted: 1,
     error: { message: 'User denied follow-up verification', retryable: false },
   }) + '\\n');
@@ -3032,8 +3032,8 @@ rl.on('line', (line) => {
           state: null,
         });
 
-        assert.equal(result.status, "cancelled");
-        assert.equal(result.terminal_reason, "connector_reported_cancelled");
+        assert.equal(result.status, "failed");
+        assert.equal(result.terminal_reason, "connector_reported_failed");
         assert.deepEqual(result.connector_error, {
           message: "User denied follow-up verification",
           retryable: false,
@@ -3048,10 +3048,10 @@ rl.on('line', (line) => {
 
         const failedEvent = (runTimeline.data || []).find((event) => event.event_type === "run.failed");
         assert.ok(failedEvent, "expected run.failed event");
-        assert.equal(failedEvent.status, "cancelled");
+        assert.equal(failedEvent.status, "failed");
         assert.equal(failedEvent.data.source?.kind, "connector");
         assert.equal(failedEvent.data.source?.id, SPOTIFY_CONNECTOR_KEY);
-        assert.equal(failedEvent.data.reason, "connector_reported_cancelled");
+        assert.equal(failedEvent.data.reason, "connector_reported_failed");
         assert.equal(failedEvent.data.connector_error_message, "User denied follow-up verification");
         assert.equal(failedEvent.data.connector_error_retryable, false);
         assert.equal(failedEvent.data.buffered_records_dropped, 1);

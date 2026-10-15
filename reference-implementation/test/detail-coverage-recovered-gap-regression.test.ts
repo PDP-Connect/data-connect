@@ -338,6 +338,8 @@ test("a recovered detail gap re-deferred with the same identity must not fail th
       record_key: "X",
       retryable: true,
       stream: "messages",
+      reference_only: true,
+      status: "pending",
       type: "DETAIL_GAP",
     },
     {
@@ -434,6 +436,8 @@ test("run.detail_gap_recorded fires once at first sighting, NOT on a prior-run r
       record_key: "OLD",
       retryable: true,
       stream: "messages",
+      reference_only: true,
+      status: "pending",
       type: "DETAIL_GAP",
     },
     {
@@ -442,6 +446,8 @@ test("run.detail_gap_recorded fires once at first sighting, NOT on a prior-run r
       record_key: "NEW",
       retryable: true,
       stream: "messages",
+      reference_only: true,
+      status: "pending",
       type: "DETAIL_GAP",
     },
     {
@@ -576,6 +582,8 @@ test("a recovered gap re-deferred by a LATER run reopens to pending and surfaces
       record_key: "LATER_X",
       retryable: true,
       stream: "messages",
+      reference_only: true,
+      status: "pending",
       type: "DETAIL_GAP",
     },
     {
@@ -699,6 +707,8 @@ test("a recovered gap re-deferred by the SAME run that recovered it stays recove
       record_key: "SAME_X",
       retryable: true,
       stream: "messages",
+      reference_only: true,
+      status: "pending",
       type: "DETAIL_GAP",
     },
     {
@@ -754,7 +764,7 @@ test("a recovered gap re-deferred by the SAME run that recovered it stays recove
   assert.equal(detailGapKnownGaps.length, 0, "a same-run recover-then-redefer must not surface a phantom known_gap");
 });
 
-test("a truly pending gap still surfaces as a retryable known_gap", async (t) => {
+test("a truly pending gap surfaces without an inferred retry action", async (t) => {
   const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
   t.after(() => closeServer(server));
   const { asPort, rsPort } = server;
@@ -775,6 +785,8 @@ test("a truly pending gap still surfaces as a retryable known_gap", async (t) =>
       record_key: "NEW",
       retryable: true,
       stream: "messages",
+      reference_only: true,
+      status: "pending",
       type: "DETAIL_GAP",
     },
     {
@@ -824,5 +836,5 @@ test("a truly pending gap still surfaces as a retryable known_gap", async (t) =>
   assert.equal(detailGapKnownGaps.length, 1, "a genuinely pending gap must still surface as a known_gap");
   const [detailGapKnownGap] = detailGapKnownGaps;
   assert.ok(detailGapKnownGap, "one detail_gap known_gap was found");
-  assert.equal(detailGapKnownGap.recovery_hint?.action, "retry_by_runtime");
+  assert.equal(detailGapKnownGap.recovery_hint?.action, "unknown");
 });

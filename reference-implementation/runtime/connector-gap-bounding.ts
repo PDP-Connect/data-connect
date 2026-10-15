@@ -137,21 +137,20 @@ export const RECOVERY_ACTIONS = new Set([
  * its `code` or free-form `message` text.
  */
 export function isValidRecoveryHintShape(value: unknown): boolean {
-  if (isNullish(value)) {
+  if (value === undefined) {
     return true;
   }
   if (typeof value === "string") {
     return RECOVERY_ACTIONS.has(value);
   }
-  if (typeof value !== "object" || Array.isArray(value)) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
     return false;
   }
   const hint = value as { action?: unknown; retryable?: unknown };
   return (
-    Object.keys(value).every((key) => key === "action" || key === "retryable") &&
     typeof hint.action === "string" &&
     RECOVERY_ACTIONS.has(hint.action) &&
-    (isNullish(hint.retryable) || typeof hint.retryable === "boolean")
+    (hint.retryable === undefined || typeof hint.retryable === "boolean")
   );
 }
 
@@ -223,18 +222,15 @@ export function boundConnectorErrorMessage(value: unknown, declaredReasonTokens?
   return `${text.slice(0, CONNECTOR_ERROR_MESSAGE_MAX - 1)}…`;
 }
 
-// Mirrors packages/polyfill-connectors/src/connector-runtime.ts's
-// CONNECTOR_ERROR_CODE_RE — the two run in different processes (connector
-// child vs. RS-side runtime) so cannot literally share a module, but the
-// contract MUST match: short, lowercase, snake_case only.
-const CONNECTOR_ERROR_CODE_RE = /^[a-z][a-z0-9_]{1,63}$/;
+// Collection Profile §5.8 requires lowercase snake_case, with no length limit.
+export const CONNECTOR_ERROR_CODE_RE = /^[a-z][a-z0-9_]*$/;
 
 /**
  * Validate a connector-declared `error.code` before it is copied verbatim
  * onto `connector_error_code` (see `buildTerminalConnectorFields` below).
  * Unlike `boundConnectorErrorMessage`, this does NOT redact/truncate —
  * `code` is a typed, non-secret channel by contract, so anything that
- * doesn't already match the strict charset/length is untrustworthy and
+ * doesn't already match the strict charset is untrustworthy and
  * dropped (fails closed to `null`) rather than passed through in any form.
  * A dropped code still leaves the (redacted) `message` field for the owner
  * to read — this only withholds the free-form value from the unredacted

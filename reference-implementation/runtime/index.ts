@@ -1725,10 +1725,15 @@ function validateSkipTimeRange(value: unknown): void {
 }
 
 function validateSkipResultMessage(msg: ConnectorMessage, scopeByStream: ScopeByStream): void {
-  requireOptionalNonEmptyString(msg.stream, "SKIP_RESULT.stream");
+  if (typeof msg.stream !== "string" || !msg.stream.trim()) {
+    throw new Error("Connector emitted invalid SKIP_RESULT.stream: expected non-empty string");
+  }
   validateOptionalScopedStream(msg.stream, "SKIP_RESULT", scopeByStream);
-  requireOptionalNonEmptyString(msg.reason, "SKIP_RESULT.reason");
-  requireOptionalNonEmptyString(msg.message, "SKIP_RESULT.message");
+  for (const field of ["reason", "message"]) {
+    if (typeof msg[field] !== "string") {
+      throw new Error(`Connector emitted invalid SKIP_RESULT.${field}: expected string`);
+    }
+  }
   validateSkipRecoveryHint(msg.recovery_hint);
   if (!isNullish(msg.continuation)) {
     validateRuntimeContinuationFact(msg.continuation);
@@ -1738,14 +1743,22 @@ function validateSkipResultMessage(msg: ConnectorMessage, scopeByStream: ScopeBy
   validateSkipTimeRange(msg.time_range);
 }
 
-function validateDetailGapMessage(msg: ConnectorMessage, scopeByStream: ScopeByStream): void {
+function validateDetailGapMessage(
+  msg: ConnectorMessage,
+  scopeByStream: ScopeByStream,
+  parentsByStream: Map<string, Set<string>>,
+  stateStreamByStream: Map<string, string>
+): { parentStream: string | null; soleParent: boolean } {
+  if (msg.reference_only !== true || msg.status !== "pending") {
+    throw new Error('Connector emitted invalid DETAIL_GAP.markers: expected true/"pending"');
+  }
   requireOptionalNonEmptyString(msg.stream, "DETAIL_GAP.stream");
   if (!msg.stream) {
     throw new Error("Connector emitted invalid DETAIL_GAP.stream: expected non-empty string");
   }
   validateOptionalScopedStream(msg.stream, "DETAIL_GAP", scopeByStream);
   requireOptionalNonEmptyString(msg.parent_stream, "DETAIL_GAP.parent_stream");
-  if (!isNullish(msg.record_key) && typeof msg.record_key !== "string" && typeof msg.record_key !== "number") {
+  if (typeof msg.record_key !== "string" && typeof msg.record_key !== "number") {
     throw new Error("Connector emitted invalid DETAIL_GAP.record_key: expected string or number");
   }
   for (const fieldName of ["detail_locator", "list_cursor", "last_error"]) {
@@ -1753,15 +1766,46 @@ function validateDetailGapMessage(msg: ConnectorMessage, scopeByStream: ScopeByS
       throw new Error(`Connector emitted invalid DETAIL_GAP.${fieldName}: expected object`);
     }
   }
-  requireOptionalNonEmptyString(msg.reason, "DETAIL_GAP.reason");
-  if (!isNullish(msg.retryable) && typeof msg.retryable !== "boolean") {
-    throw new Error("Connector emitted invalid DETAIL_GAP.retryable: expected boolean");
+  if (!msg.detail_locator || typeof (msg.detail_locator as Record<string, unknown>).kind !== "string") {
+    throw new Error("Connector emitted invalid DETAIL_GAP.detail_locator.kind: expected string");
+  }
+  if (
+    !["rate_limited", "retry_exhausted", "temporary_unavailable", "upstream_pressure"].includes(msg.reason as string)
+  ) {
+    throw new Error("Connector emitted invalid DETAIL_GAP.reason: expected portable reason");
+  }
+  if (msg.retryable !== true) {
+    throw new Error("Connector emitted invalid DETAIL_GAP.retryable: expected true");
   }
   requireOptionalNonEmptyString(msg.gap_id, "DETAIL_GAP.gap_id");
   requireOptionalNonEmptyString(msg.lease_id, "DETAIL_GAP.lease_id");
+  return resolveDetailGapParent(msg, parentsByStream, stateStreamByStream);
 }
 
-function findServedDetailGapLease(leases: Map<string, ServedGapLease>, msg: ConnectorMessage): ServedGapLease | null {
+function resolveDetailGapParent(
+  msg: ConnectorMessage,
+  parentsByStream: Map<string, Set<string>>,
+  stateStreamByStream: Map<string, string>
+): { parentStream: string | null; soleParent: boolean } {
+  const stateParent = stateStreamByStream.get(msg.stream as string);
+  const parents = parentsByStream.get(msg.stream as string) ?? new Set(stateParent ? [stateParent] : []);
+  if (msg.parent_stream !== undefined && (typeof msg.parent_stream !== "string" || !parents.has(msg.parent_stream))) {
+    throw new Error("Connector emitted invalid DETAIL_GAP.parent_stream: expected declared parent");
+  }
+  if (parents.size > 1 && msg.parent_stream === undefined) {
+    throw new Error("Connector emitted invalid DETAIL_GAP.parent_stream: required for multiple parents");
+  }
+  return {
+    parentStream: (msg.parent_stream as string | undefined) ?? (parents.size === 1 ? ([...parents][0] ?? null) : null),
+    soleParent: parents.size === 1,
+  };
+}
+
+function findServedDetailGapLease(
+  leases: Map<string, ServedGapLease>,
+  msg: ConnectorMessage,
+  allowLegacyParent = false
+): ServedGapLease | null {
   if (msg.gap_id) {
     return leases.get(msg.gap_id as string) || null;
   }
@@ -1770,10 +1814,54 @@ function findServedDetailGapLease(leases: Map<string, ServedGapLease>, msg: Conn
   }
   const recordKey = String(msg.record_key);
   const parentStream = typeof msg.parent_stream === "string" ? msg.parent_stream : null;
-  const matches = [...leases.values()].filter(
-    (lease) => lease.stream === msg.stream && lease.recordKey === recordKey && lease.parentStream === parentStream
+  const candidates = [...leases.values()].filter(
+    (lease) => lease.stream === msg.stream && lease.recordKey === recordKey
   );
+  const exactMatches = candidates.filter((lease) => lease.parentStream === parentStream);
+  const matches = exactMatches.length
+    ? exactMatches
+    : candidates.filter((lease) => allowLegacyParent && lease.parentStream === null);
   return matches.length === 1 ? (matches[0] ?? null) : null;
+}
+
+function containsRuntimeSecret(locator: unknown, knownSecrets: readonly string[]): boolean {
+  const values: unknown[] = [locator];
+  while (values.length) {
+    const value = values.pop();
+    if (
+      (typeof value === "string" || (typeof value === "number" && Number.isFinite(value))) &&
+      knownSecrets.some((secret) => secret.length > 0 && String(value).includes(secret))
+    ) {
+      return true;
+    }
+    if (value && typeof value === "object") {
+      for (const [key, entry] of Object.entries(value)) {
+        values.push(key, entry);
+      }
+    }
+  }
+  return false;
+}
+
+function malformedJsonlDiagnostic(line: string): string {
+  return JSON.stringify({ line_length: line.length, parse_error: true, type: "__PARSE_ERROR__" });
+}
+
+function validateRedeferredDetailGapLease(
+  leases: Map<string, ServedGapLease>,
+  msg: ConnectorMessage,
+  parentStream: string | null,
+  allowLegacyParent: boolean
+): ServedGapLease | null {
+  // A legacy parentless lease is unambiguous only under a sole manifest parent.
+  const lease = findServedDetailGapLease(leases, msg, allowLegacyParent);
+  if (msg.lease_id && (!lease || lease.leaseId !== msg.lease_id)) {
+    throw new Error("Connector re-deferred a detail gap without the current run-owned lease");
+  }
+  if (lease && lease.parentStream !== parentStream && !(allowLegacyParent && lease.parentStream === null)) {
+    throw new Error("Connector re-deferred a detail gap under a different parent stream");
+  }
+  return lease;
 }
 
 function validateDetailGapAttemptedMessage(msg: ConnectorMessage, scopeByStream: ScopeByStream): void {
@@ -2872,6 +2960,11 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
     staticSecretLaunchEnv,
     streamingRegistrationEnv,
   } = launchConfig;
+  // Run-local registry shared by locator validation and trace redaction. Successful
+  // credential interactions extend it before their values reach the connector.
+  const runKnownSecrets = [...Object.values(staticSecretLaunchEnv), ownerToken, streamingRegistrationToken].filter(
+    (value): value is string => typeof value === "string" && value.length > 0
+  );
 
   // `detached: true` puts the connector child into its OWN process group
   // (POSIX setsid), with the child's PID as the group leader. This is the
@@ -3114,16 +3207,34 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
   });
 
   // Debug trace: if PDPP_TRACE_DIR is set, record every line received from the
-  // connector before parsing. On a crash, the file is inspectable with jq/less
-  // and shows exactly what the connector emitted. See
+  // connector before protocol handling. Locators containing a runtime-known
+  // secret are redacted even when the message will be rejected. See
   // openspec/changes/add-polyfill-connector-system/design-notes/debugging-leverage-open-question.md
   const _traceAppendFile = openRuntimeTraceFile(process.env.PDPP_TRACE_DIR, connectorId, runId);
   const writeTrace = (line: string) => {
     if (!_traceAppendFile) {
       return;
     }
+    let traceLine = line;
+    let message: ConnectorMessage | null = null;
     try {
-      appendFileSync(_traceAppendFile, `${line}\n`);
+      message = JSON.parse(line) as ConnectorMessage | null;
+    } catch {
+      // Malformed payloads and parser exception excerpts can contain secrets.
+      traceLine = malformedJsonlDiagnostic(line);
+    }
+    if (message?.type === "DETAIL_GAP") {
+      try {
+        if (containsRuntimeSecret(message.detail_locator, runKnownSecrets)) {
+          traceLine = JSON.stringify({ ...message, detail_locator: "[REDACTED]" });
+        }
+      } catch {
+        // A failed sanitizer must never fall back to the raw locator.
+        traceLine = '{"type":"DETAIL_GAP","detail_locator":"[REDACTED]","trace_redaction_failed":true}';
+      }
+    }
+    try {
+      appendFileSync(_traceAppendFile, `${traceLine}\n`);
     } catch {
       // Tracing is best-effort and must never affect runtime protocol handling.
     }
@@ -5202,9 +5313,22 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
         throw invalidDoneStatus;
       }
       const doneStatus = msg.status as DoneMessageState["status"];
-      const normalizedDoneError = validateDoneError(doneStatus, msg.error as Parameters<typeof validateDoneError>[1]);
+      const normalizedDoneError = validateDoneError(doneStatus, msg.error as Parameters<typeof validateDoneError>[1], {
+        declared:
+          Array.isArray(manifest.protocol_capabilities) && manifest.protocol_capabilities.includes("OBSERVATION"),
+        // OBSERVATION transport/store support is a separate conformance change.
+        ids: new Set<string>(),
+      });
       if (normalizedDoneError instanceof Error) {
         throw normalizedDoneError;
+      }
+      if (
+        streamCollectionFailedStreams.size > 0 &&
+        (doneStatus !== "failed" || normalizedDoneError?.code !== "stream_collection_failed")
+      ) {
+        throw new Error(
+          "Connector emitted invalid DONE.error.code: SKIP_RESULT stream_collection_failed requires failed DONE with the same code"
+        );
       }
       finalStatus = doneStatus;
       doneMessage = {
@@ -5330,15 +5454,10 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       gapStream: string,
       gapReason: string | null,
       gapParentStream: string | null,
-      gapLastError: { class?: string; http_status?: number } | null
+      gapLastError: { class?: string; http_status?: number } | null,
+      allowLegacyParent: boolean
     ): Promise<DurableDetailGap> {
-      const leasedGap = findServedDetailGapLease(allServedGapLeases, msg);
-      if (msg.lease_id && (!leasedGap || leasedGap.leaseId !== msg.lease_id)) {
-        throw new Error("Connector re-deferred a detail gap without the current run-owned lease");
-      }
-      if (leasedGap && leasedGap.parentStream !== gapParentStream) {
-        throw new Error("Connector re-deferred a detail gap under a different parent stream");
-      }
+      const leasedGap = validateRedeferredDetailGapLease(allServedGapLeases, msg, gapParentStream, allowLegacyParent);
       const gapInput = {
         connectorId,
         connectorInstanceId: normalizedConnectorInstanceId,
@@ -5372,17 +5491,16 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       msg: ConnectorMessage,
       storedGap: DurableDetailGap,
       gapStream: string,
-      gapReason: string | null,
-      gapParentStream: string | null
+      gapReason: string | null
     ): Promise<void> {
       durableDetailGaps.push(storedGap);
       const gap = buildKnownGap({
         kind: "detail_gap",
         message: "Required detail is recorded as a pending reference-only recovery gap.",
         reason: gapReason,
-        recoveryHint: msg.retryable === false ? "not_retriable" : "retry_by_runtime",
+        recoveryHint: "unknown",
         scope: {
-          parent_stream: gapParentStream,
+          parent_stream: storedGap.parent_stream,
           record_key: isNullish(msg.record_key) ? null : String(msg.record_key),
         },
         stream: gapStream,
@@ -5486,9 +5604,16 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
     }
 
     async function handleDetailGapMessage(msg: ConnectorMessage): Promise<void> {
-      validateDetailGapMessage(msg, scopeByStream);
-      // Proven by the validator: non-empty in-scope `stream`; the
-      // remaining fields are optional and pass through as-is.
+      const { parentStream: gapParentStream, soleParent: allowLegacyParent } = validateDetailGapMessage(
+        msg,
+        scopeByStream,
+        manifestDetailParentStreamsByStream,
+        manifestStateStreamByStream
+      );
+      if (containsRuntimeSecret(msg.detail_locator, runKnownSecrets)) {
+        throw new Error("Connector emitted invalid DETAIL_GAP.detail_locator: contains a runtime-known secret");
+      }
+      // The portable envelope and manifest parent boundary are validated before persistence.
       const gapStream = msg.stream as string;
       // Same terminal-fact rule as handleRecordMessage: a DETAIL_GAP for a
       // stream this run already reported STREAM_EVIDENCE for would silently
@@ -5501,9 +5626,16 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
         );
       }
       const gapReason = (msg.reason as string | undefined) || null;
-      const gapParentStream = (msg.parent_stream as string | undefined) || null;
+      const normalizedMsg = { ...msg, ...(gapParentStream ? { parent_stream: gapParentStream } : {}) };
       const gapLastError = (msg.last_error as { class?: string; http_status?: number } | null) ?? null;
-      const storedGap = await settleDetailGapMessage(msg, gapStream, gapReason, gapParentStream, gapLastError);
+      const storedGap = await settleDetailGapMessage(
+        normalizedMsg,
+        gapStream,
+        gapReason,
+        gapParentStream,
+        gapLastError,
+        allowLegacyParent
+      );
 
       // §10-A: a gap that re-defers with a NON-TRANSIENT error (404/410/
       // permanent-403/401) and has exhausted its recovery budget transitions
@@ -5518,15 +5650,19 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       // TERMINALIZATION must be too. This is the seam that makes "a connector
       // emits a 404/410/permanent gap that can never go terminal" impossible
       // by construction (spec §10-A option (b) — GAP 1 + GAP 2).
-      if (await maybeTerminalizeDetailGap(msg, storedGap, gapStream, gapReason, gapParentStream, gapLastError)) {
+      if (
+        await maybeTerminalizeDetailGap(normalizedMsg, storedGap, gapStream, gapReason, gapParentStream, gapLastError)
+      ) {
         return;
       }
 
-      if (await maybeQuarantineDetailGap(msg, storedGap, gapStream, gapReason, gapLastError, gapParentStream)) {
+      if (
+        await maybeQuarantineDetailGap(normalizedMsg, storedGap, gapStream, gapReason, gapLastError, gapParentStream)
+      ) {
         return;
       }
 
-      await recordPendingDetailGap(msg, storedGap, gapStream, gapReason, gapParentStream);
+      await recordPendingDetailGap(normalizedMsg, storedGap, gapStream, gapReason);
     }
 
     async function handleDetailGapRecovered(msg: ConnectorMessage): Promise<void> {
@@ -5656,8 +5792,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
 
     async function handleSkipResultMessage(msg: ConnectorMessage): Promise<void> {
       validateSkipResultMessage(msg, scopeByStream);
-      // `stream` is optional on SKIP_RESULT; when present the validator
-      // proved it is a non-empty, in-scope stream name.
+      // The validator proved stream is a required, non-empty, in-scope name.
       const skipStream = (msg.stream as string | undefined) || null;
       const skippedManifestStream = skipStream ? manifestByStream.get(skipStream) : null;
       if (skipStream && msg.reason === "stream_collection_failed") {
@@ -5848,6 +5983,15 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       pendingInteraction = null;
       if (msg.kind === "otp") {
         completedOtpInteractionRequestIds.add(interactionRequestId);
+      }
+      if (responseStatus === "success" && (msg.kind === "credentials" || msg.kind === "otp")) {
+        // Keep answers only in this run's in-memory guard. Register before stdin
+        // write: the connector can immediately echo a value into a DETAIL_GAP.
+        for (const value of Object.values(response.data ?? {})) {
+          if (typeof value === "string" && value.length > 0 && !runKnownSecrets.includes(value)) {
+            runKnownSecrets.push(value);
+          }
+        }
       }
       if (!writeChildStdin(`${JSON.stringify({ ...response, status: responseStatus })}\n`, "interaction_response")) {
         onProgress({ phase: "interaction_response", reason: childStdinClosedReason, type: "connector_stdin_closed" });
@@ -6080,24 +6224,18 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
         }
         msgQueue.push(msg);
         processNext().catch(reject);
-      } catch (caught) {
-        const err = caught as RuntimeRunError;
+      } catch {
+        const diagnostic = malformedJsonlDiagnostic(line);
         if (
           failPendingInteraction(
-            new Error(`Connector emitted invalid JSONL while waiting for INTERACTION_RESPONSE: ${err.message}`)
+            new Error(`Connector emitted invalid JSONL while waiting for INTERACTION_RESPONSE: ${diagnostic}`)
           )
         ) {
           return;
         }
-        // Context for debugging: include byte length and a preview of the
-        // offending line in the error message.
-        const preview =
-          line.length > 400
-            ? `${line.slice(0, 200)} … [truncated ${line.length - 400} chars] … ${line.slice(-200)}`
-            : line;
-        const enriched = `${err.message} (line_length=${line.length} preview=${JSON.stringify(preview).slice(0, 600)})`;
+        // Preserve only safe metadata, never the raw line or parser's payload preview.
         msgQueue.push({
-          error: enriched,
+          error: diagnostic,
           type: "__PARSE_ERROR__",
         });
         processNext().catch(reject);
@@ -6627,9 +6765,6 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       // a child that echoes one into stderr leaks it the same way. Scoping to
       // what was actually injected keeps this a fact about the run rather than
       // a guess about the connector.
-      const runKnownSecrets = [...Object.values(staticSecretLaunchEnv), ownerToken, streamingRegistrationToken].filter(
-        (value): value is string => typeof value === "string" && value.length > 0
-      );
       if (stderrTailRaw.text) {
         onProgress({
           text: redactStderrTail(stderrTailRaw.text, { knownSecrets: runKnownSecrets }).text,

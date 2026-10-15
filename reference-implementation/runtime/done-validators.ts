@@ -14,9 +14,9 @@
 // Extracted from runtime/index.js: pure shape/consistency checks with no
 // runtime state, secret handling, or grant/scope enforcement.
 
-import { isValidRecoveryHintShape } from "./connector-gap-bounding.ts";
+import { CONNECTOR_ERROR_CODE_RE, isValidRecoveryHintShape } from "./connector-gap-bounding.ts";
 
-type DoneStatus = "succeeded" | "failed" | "cancelled";
+type DoneStatus = "succeeded" | "failed";
 
 interface DoneErrorInput {
   code?: string | null;
@@ -27,10 +27,11 @@ interface DoneErrorInput {
 }
 
 interface DoneError {
+  basis?: string[];
   code?: string;
   message: string;
   recovery_hint?: string | { action: string; retryable?: boolean };
-  retryable: boolean | null;
+  retryable: boolean;
 }
 
 interface DoneMessage {
@@ -47,7 +48,7 @@ export function validateDoneExitCode(doneMessage: DoneMessage | null | undefined
   if (doneMessage.status === "succeeded" && exitCode !== 0) {
     return new Error(`Connector exit code ${exitCode} does not match DONE status: succeeded`);
   }
-  if ((doneMessage.status === "failed" || doneMessage.status === "cancelled") && exitCode === 0) {
+  if (doneMessage.status === "failed" && exitCode === 0) {
     return new Error(`Connector exit code ${exitCode} does not match DONE status: ${doneMessage.status}`);
   }
   return null;
@@ -72,21 +73,38 @@ export function validateDoneRecordsEmitted(
 }
 
 export function validateDoneStatus(status: unknown): Error | null {
-  if (status === "succeeded" || status === "failed" || status === "cancelled") {
+  if (status === "succeeded" || status === "failed") {
     return null;
   }
   return new Error(`Connector emitted invalid DONE status: ${status}`);
 }
 
-const DONE_ERROR_CODE_RE = /^[a-z][a-z0-9_]{0,63}$/;
+function validateDoneBasis(
+  basis: unknown,
+  observations: { declared: boolean; ids: ReadonlySet<string> }
+): Error | null {
+  if (basis === undefined) {
+    return null;
+  }
+  if (!observations.declared) {
+    return new Error("Connector emitted invalid DONE.error.basis: OBSERVATION capability is not declared");
+  }
+  if (!Array.isArray(basis) || basis.some((id) => typeof id !== "string" || !observations.ids.has(id))) {
+    return new Error("Connector emitted invalid DONE.error.basis: expected OBSERVATION ids emitted in this run");
+  }
+  return null;
+}
 
 export function validateDoneError(
   status: DoneStatus | unknown,
-  error: DoneErrorInput | null | undefined
+  error: DoneErrorInput | null | undefined,
+  observations: { declared: boolean; ids: ReadonlySet<string> } = { declared: false, ids: new Set() }
 ): DoneError | Error | null {
   // biome-ignore lint/suspicious/noEqualsToNull: check for both null and undefined
   if (error == null) {
-    return null;
+    return status === "failed"
+      ? new Error("Connector emitted invalid DONE.error: failed runs require error details")
+      : null;
   }
   if (status === "succeeded") {
     return new Error("Connector emitted invalid DONE.error: succeeded runs must not include terminal error details");
@@ -94,33 +112,32 @@ export function validateDoneError(
   if (typeof error !== "object" || Array.isArray(error)) {
     return new Error("Connector emitted invalid DONE.error: expected object");
   }
-  const unsupportedFields = Object.keys(error).filter(
-    (field) => field !== "message" && field !== "retryable" && field !== "code" && field !== "recovery_hint"
-  );
-  if (unsupportedFields.length) {
-    return new Error(`Connector emitted invalid DONE.error: unsupported fields ${unsupportedFields.join(", ")}`);
-  }
-  // biome-ignore lint/suspicious/noEqualsToNull: check for both null and undefined
-  if (error.code != null && (typeof error.code !== "string" || !DONE_ERROR_CODE_RE.test(error.code))) {
-    return new Error("Connector emitted invalid DONE.error.code: expected bounded snake_case code");
+  if (error.code !== undefined && (typeof error.code !== "string" || !CONNECTOR_ERROR_CODE_RE.test(error.code))) {
+    return new Error("Connector emitted invalid DONE.error.code: expected snake_case code");
   }
   if (typeof error.message !== "string" || !error.message.trim()) {
     return new Error("Connector emitted invalid DONE.error.message: expected non-empty string");
   }
-  // biome-ignore lint/suspicious/noEqualsToNull: check for both null and undefined
-  if (error.retryable != null && typeof error.retryable !== "boolean") {
+  if (typeof error.retryable !== "boolean") {
     return new Error("Connector emitted invalid DONE.error.retryable: expected boolean");
   }
   if (!isValidRecoveryHintShape(error.recovery_hint)) {
     return new Error("Connector emitted invalid DONE.error.recovery_hint");
   }
+  const invalidBasis = validateDoneBasis(error.basis, observations);
+  if (invalidBasis) {
+    return invalidBasis;
+  }
+  const hint = error.recovery_hint as DoneError["recovery_hint"];
+  const recoveryHint =
+    typeof hint === "object"
+      ? { action: hint.action, ...(hint.retryable === undefined ? {} : { retryable: hint.retryable }) }
+      : hint;
   return {
     ...(error.code ? { code: error.code } : {}),
     message: error.message.trim(),
-    // biome-ignore lint/suspicious/noEqualsToNull: check for both null and undefined
-    ...(error.recovery_hint == null
-      ? {}
-      : { recovery_hint: error.recovery_hint as NonNullable<DoneError["recovery_hint"]> }),
-    retryable: error.retryable ?? null,
+    ...(recoveryHint === undefined ? {} : { recovery_hint: recoveryHint }),
+    retryable: error.retryable,
+    ...(error.basis === undefined ? {} : { basis: error.basis as string[] }),
   };
 }
