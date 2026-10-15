@@ -24,6 +24,7 @@
  * What the operation owns:
  *   - `not_found` error mapping when the record does not exist;
  *   - grant stream visibility for client actors (`grant_stream_not_allowed`);
+ *   - requested fields outside a client grant (`field_not_granted`);
  *   - field projection validation against the manifest stream;
  *   - owner read-grant construction for the actor's stream;
  *   - output shape (decorated record + instrumentation data blocks).
@@ -172,9 +173,9 @@ export interface RecordDetailOutput {
  * route-compatible response without translation.
  */
 export class RecordDetailVisibilityError extends Error {
-  readonly code: "not_found" | "grant_stream_not_allowed";
+  readonly code: "not_found" | "grant_stream_not_allowed" | "field_not_granted";
 
-  constructor(message: string, code: "not_found" | "grant_stream_not_allowed" = "not_found") {
+  constructor(message: string, code: "not_found" | "grant_stream_not_allowed" | "field_not_granted" = "not_found") {
     super(message);
     this.name = "RecordDetailVisibilityError";
     this.code = code;
@@ -205,6 +206,17 @@ export async function executeRecordDetail(
   const expandOptions: RecordDetailExpandOptions = input.expandOptions ?? {};
   const manifestStream = manifest.streams.find((s) => s.name === input.streamName) ?? null;
   dependencies.validateRequestFields(expandOptions as Record<string, unknown>, manifestStream);
+  if (input.actor.kind !== "owner") {
+    // Same rule as rs.records.list: a client may not ask for a declared field
+    // its grant does not cover (otherwise the read is served with that field
+    // silently dropped).
+    const grantedFields = grant.streams.find((stream) => stream.name === input.streamName)?.fields;
+    const requested = normalizeProjectionFields(expandOptions.fields);
+    const outside = requested && grantedFields ? requested.filter((field) => !grantedFields.includes(field)) : [];
+    if (outside.length) {
+      throw new RecordDetailVisibilityError(`Fields not in grant: ${outside.join(", ")}`, "field_not_granted");
+    }
+  }
 
   const rawRecord = await dependencies.getRecord(input.streamName, input.recordId, grant, manifest, expandOptions);
 
