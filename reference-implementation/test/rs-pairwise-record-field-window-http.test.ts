@@ -113,18 +113,56 @@ test("owner field-window omission requires one effective instance", async (t) =>
 	assert.equal(single.body.instance_id, OWNER_A);
 });
 
-test("foreign and raw stored instance handles never resolve or appear in field-window responses", async (t) => {
+test("detail and field-window reject mapped raw selectors with 400 and foreign public handles with 404", async (t) => {
 	const fx = await makeFixture(t);
-	for (const [token, path] of [
-		["client", clientWindow("inst_foreign")],
-		["client", clientWindow(INTERNAL_A)],
-		["owner", ownerWindow("inst_foreign")],
-		["owner", ownerWindow(INTERNAL_A)],
-	] as const) {
-		const reply = token === "client" ? await fx.client(path) : await fx.owner(path);
-		assert.ok(reply.status === 400 || reply.status === 404, reply.text);
-		assert.ok(!reply.text.includes(INTERNAL_A));
-		assert.ok(!reply.text.includes(INTERNAL_B));
+	for (const route of ["", "/field-window"]) {
+		for (const [token, foreignHandle] of [["client", OWNER_A], ["owner", CLIENT_A]] as const) {
+			for (const selector of ["instance_id", "connection_id"]) {
+				for (const [handle, status, errorCode] of [
+					[INTERNAL_A, 400, "invalid_request"],
+					[foreignHandle, 404, "not_found"],
+					["inst_foreign", 404, "not_found"],
+				] as const) {
+					const query = `${token === "owner" ? `connector_id=${CONNECTOR_ID}&` : ""}${route ? "field=name&" : ""}${selector}=${handle}`;
+					const path = `/v1/streams/top_artists/records/shared${route}?${query}`;
+					const reply = token === "client" ? await fx.client(path) : await fx.owner(path);
+					assert.equal(reply.status, status, `${token} ${path}: ${reply.text}`);
+					assert.equal(code(reply), errorCode);
+					for (const privateValue of [
+						INTERNAL_A, INTERNAL_B, INTERNAL_FOREIGN, INTERNAL_INACTIVE,
+						"application A", "application B", "unique application A",
+					]) {
+						assert.ok(!reply.text.includes(privateValue), reply.text);
+					}
+				}
+			}
+		}
+	}
+});
+
+test("owner detail and field-window accept equal public aliases and reject conflicting aliases", async (t) => {
+	const fx = await makeFixture(t);
+	for (const route of ["", "/field-window"]) {
+		const path = `/v1/streams/top_artists/records/shared${route}?connector_id=${CONNECTOR_ID}&${route ? "field=name&" : ""}`;
+		for (const selector of [
+			`instance_id=${OWNER_A}`,
+			`connection_id=${OWNER_A}`,
+			`instance_id=${OWNER_A}&connection_id=${OWNER_A}`,
+		]) {
+			const reply = await fx.owner(path + selector);
+			assert.equal(reply.status, 200, reply.text);
+			assert.equal(reply.body.instance_id, OWNER_A);
+			assert.ok(reply.text.includes("application A"), reply.text);
+			assert.ok(!reply.text.includes("application B"), reply.text);
+			assert.ok(!reply.text.includes(INTERNAL_A), reply.text);
+			assert.ok(!reply.text.includes(INTERNAL_B), reply.text);
+		}
+		const conflict = await fx.owner(path + `instance_id=${OWNER_A}&connection_id=${OWNER_B}`);
+		assert.equal(conflict.status, 400, conflict.text);
+		assert.equal(code(conflict), "invalid_request");
+		for (const privateValue of [INTERNAL_A, INTERNAL_B, "application A", "application B"]) {
+			assert.ok(!conflict.text.includes(privateValue), conflict.text);
+		}
 	}
 });
 

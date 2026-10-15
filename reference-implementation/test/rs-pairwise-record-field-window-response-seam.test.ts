@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { mountRsRecordFieldWindow } from "../server/routes/rs-read.ts";
+import { mountRsRecordDetail, mountRsRecordFieldWindow } from "../server/routes/rs-read.ts";
 
 const SOURCE_ID = "https://sources.example/field-window-seam";
 const INTERNAL_ID = "cin_field_window_private";
@@ -313,3 +313,49 @@ test("field-window rejects an internal alias without rewriting the request query
 	assert.ok(!rejection?.message.includes(INTERNAL_ID));
 	assert.equal(nextCalls, 0);
 });
+
+for (const [routeName, mountRoute, routePath] of [
+	["detail", mountRsRecordDetail, "/v1/streams/:stream/records/:id"],
+	["field-window", mountRsRecordFieldWindow, "/v1/streams/:stream/records/:id/field-window"],
+] as const) {
+	test(`${routeName} prelude normalizes a frozen public connection_id without mutating the input or URL`, async () => {
+		let guard: ((...args: unknown[]) => unknown) | undefined;
+		let rejection: unknown;
+		let nextCalls = 0;
+		let downstreamQuery: Readonly<Record<string, unknown>> | undefined;
+		const otherQuery = routeName === "field-window" ? { field: "body" } : {};
+		const originalQuery = Object.freeze({ ...otherQuery, connection_id: HANDLE });
+		const originalUrl = `/v1/streams/stream/records/record${routeName === "field-window" ? "/field-window?field=body&" : "?"}connection_id=${HANDLE}`;
+		const request = {
+			query: originalQuery as Readonly<Record<string, unknown>>,
+			url: originalUrl,
+			originalUrl,
+		};
+		const app = {
+			get: (path: string, ...args: unknown[]) => {
+				assert.equal(path, routePath);
+				// Detail registration includes contract metadata before its middleware.
+				guard = args.find((arg) => typeof arg === "function") as typeof guard;
+				return app;
+			},
+		};
+		mountRoute(app as never, {
+			handleError: (_response: unknown, error: unknown) => { rejection = error; },
+		} as never);
+		assert.ok(guard);
+		await guard(request, {}, () => {
+			nextCalls++;
+			downstreamQuery = request.query;
+		});
+		assert.equal(rejection, undefined);
+		assert.equal(nextCalls, 1);
+		assert.equal(downstreamQuery, request.query);
+		assert.notEqual(downstreamQuery, originalQuery);
+		assert.deepEqual(downstreamQuery, { ...otherQuery, instance_id: HANDLE });
+		assert.equal(Object.hasOwn(request.query, "connection_id"), false);
+		assert.ok(Object.isFrozen(originalQuery));
+		assert.deepEqual(originalQuery, { ...otherQuery, connection_id: HANDLE });
+		assert.equal(request.url, originalUrl);
+		assert.equal(request.originalUrl, originalUrl);
+	});
+}
