@@ -154,6 +154,14 @@ export function buildLocalDeviceIngestBatchRequest(
   };
 }
 
+/** Order strings by UTF-16 code unit, the order a bare sort() uses. */
+function compareCodeUnits(a: string, b: string): number {
+  if (a < b) {
+    return -1;
+  }
+  return a > b ? 1 : 0;
+}
+
 function toCanonicalValue(value: unknown): unknown {
   if (value === null || typeof value !== "object") {
     return value;
@@ -164,7 +172,8 @@ function toCanonicalValue(value: unknown): unknown {
   }
 
   const out: Record<string, unknown> = {};
-  for (const key of Object.keys(value).sort()) {
+  // Canonical JSON hashes depend on this key order; do not use localeCompare.
+  for (const key of Object.keys(value).sort(compareCodeUnits)) {
     const item = (value as Record<string, unknown>)[key];
     if (item !== undefined) {
       out[key] = toCanonicalValue(item);
