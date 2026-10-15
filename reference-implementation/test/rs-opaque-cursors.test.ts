@@ -27,12 +27,14 @@ import { withTemporaryPostgresDatabase } from "./helpers/postgres-temp-database.
 const { Pool } = pg;
 const TEST_POSTGRES_URL = process.env.PDPP_TEST_POSTGRES_URL;
 const TIMEOUT_ORACLE_CHILD = process.env.RS_CURSOR_TIMEOUT_ORACLE_CHILD === "1";
-const TIMEOUT_ORACLE_DEADLINE_MS = 250;
+const CURSOR_FAULT_ORACLE = process.env.RS_CURSOR_FAULT_ORACLE;
+const CURSOR_ISSUER_APP_NAME = "rs_opaque_cursor_test_issuer";
 const SCOPE = { subject: "cursor-store-test" };
 const CONTEXT = { connector: "mail", fields: ["id", "updated_at"] };
 const NOW = 2_000_000_000_000;
 const PUBLIC_TOKEN_PATTERN = /^pdc_[A-Za-z0-9_-]{32}$/;
-const TIMEOUT_DB_DROPPED_PATTERN = /timeout_subprocess_owned_database_dropped/;
+const BARRIER_ISSUER_REJECTION = /injected barrier issuer rejection/;
+const BATCH_OBSERVER_REJECTION = /injected batch observer rejection/;
 type SqliteDatabaseForTest = ReturnType<typeof getDb>;
 
 function digest(value: string): string {
@@ -61,11 +63,26 @@ async function activeCursorIssuePids(pool: InstanceType<typeof Pool>, blockerPid
       WHERE datname = current_database()
         AND pid <> pg_backend_pid()
         AND state = 'active'
-        AND query LIKE 'SELECT pg_advisory_xact_lock%'
+        AND application_name = $2
         AND ($1::integer IS NULL OR $1 = ANY(pg_blocking_pids(pid)))`,
-    [blockerPid ?? null]
+    [blockerPid ?? null, CURSOR_ISSUER_APP_NAME]
   );
   return result.rows.map((row) => Number(row.pid));
+}
+
+async function setCursorIssuerDefaults(databaseUrl: string, databaseName: string): Promise<void> {
+  const adminUrl = new URL(databaseUrl);
+  adminUrl.pathname = "/postgres";
+  const admin = new Pool({ connectionString: adminUrl.toString(), max: 1, statement_timeout: 3000 });
+  try {
+    await admin.query(`ALTER DATABASE "${databaseName}" SET application_name = '${CURSOR_ISSUER_APP_NAME}'`);
+    if (!CURSOR_FAULT_ORACLE) {
+      await admin.query(`ALTER DATABASE "${databaseName}" SET statement_timeout = '8000ms'`);
+      await admin.query(`ALTER DATABASE "${databaseName}" SET lock_timeout = '5000ms'`);
+    }
+  } finally {
+    await admin.end();
+  }
 }
 
 async function cancelCursorIssues(pool: InstanceType<typeof Pool>, blockerPid?: number): Promise<void> {
@@ -79,8 +96,8 @@ async function terminateCursorIssues(pool: InstanceType<typeof Pool>): Promise<v
 }
 
 function postgresTestSkipReason(): string | false {
-  if (TIMEOUT_ORACLE_CHILD) {
-    return "timeout subprocess only";
+  if (TIMEOUT_ORACLE_CHILD && !TEST_POSTGRES_URL) {
+    return "PDPP_TEST_POSTGRES_URL is not configured";
   }
   if (!TEST_POSTGRES_URL) {
     return "PDPP_TEST_POSTGRES_URL is not configured";
@@ -90,42 +107,76 @@ function postgresTestSkipReason(): string | false {
 
 async function assertTimeoutOracleSubprocessCompletes(): Promise<void> {
   assert.ok(TEST_POSTGRES_URL, "Postgres URL is required for the subprocess oracle");
-  const childEnvironment: NodeJS.ProcessEnv = { ...process.env, RS_CURSOR_TIMEOUT_ORACLE_CHILD: "1" };
-  childEnvironment.NODE_TEST_CONTEXT = undefined;
-  const child = spawn(process.execPath, ["--import", "tsx", "--test", fileURLToPath(import.meta.url)], {
-    env: childEnvironment,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  let output = "";
-  let timedOut = false;
-  let forceKill: ReturnType<typeof setTimeout> | undefined;
-  child.stdout.setEncoding("utf8").on("data", (chunk: string) => {
-    output += chunk;
-  });
-  child.stderr.setEncoding("utf8").on("data", (chunk: string) => {
-    output += chunk;
-  });
-  const forceDeadline = setTimeout(() => {
-    timedOut = true;
-    child.kill("SIGTERM");
-    forceKill = setTimeout(() => child.kill("SIGKILL"), 1000);
-  }, 15_000);
-  try {
-    const [code, signal] = await new Promise<[number | null, NodeJS.Signals | null]>((resolve, reject) => {
-      child.once("error", reject);
-      child.once("close", (exitCode, exitSignal) => resolve([exitCode, exitSignal]));
+  for (const fault of ["batch-observer", "barrier-issuer"]) {
+    const databaseName = `ri_cursor_fault_${fault.replaceAll("-", "_")}_${process.pid}_${Date.now()}`;
+    const childEnvironment: NodeJS.ProcessEnv = {
+      ...process.env,
+      RS_CURSOR_FAULT_DB_NAME: databaseName,
+      RS_CURSOR_FAULT_ORACLE: fault,
+      RS_CURSOR_TIMEOUT_ORACLE_CHILD: "1",
+    };
+    childEnvironment.NODE_TEST_CONTEXT = undefined;
+    const child = spawn(
+      process.execPath,
+      ["--unhandled-rejections=strict", "--import", "tsx", "--test", fileURLToPath(import.meta.url)],
+      {
+        env: childEnvironment,
+        stdio: ["ignore", "pipe", "pipe"],
+      }
+    );
+    let output = "";
+    let timedOut = false;
+    let forceKill: ReturnType<typeof setTimeout> | undefined;
+    child.stdout.setEncoding("utf8").on("data", (chunk: string) => {
+      output += chunk;
     });
-    assert.equal(timedOut, false, "timeout oracle child must exit within 15 seconds");
-    assert.equal(signal, null, `timeout oracle child was signalled: ${output.slice(-1000)}`);
-    assert.equal(code, 0, `timeout oracle child failed: ${output.slice(-1000)}`);
-    assert.match(output, TIMEOUT_DB_DROPPED_PATTERN);
-  } finally {
-    clearTimeout(forceDeadline);
-    if (forceKill) {
-      clearTimeout(forceKill);
+    child.stderr.setEncoding("utf8").on("data", (chunk: string) => {
+      output += chunk;
+    });
+    const forceDeadline = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGTERM");
+      forceKill = setTimeout(() => child.kill("SIGKILL"), 1000);
+    }, 15_000);
+    let childError: unknown;
+    try {
+      // biome-ignore lint/performance/noAwaitInLoops: wait for each child before checking its independent database cleanup.
+      const [code, signal] = await new Promise<[number | null, NodeJS.Signals | null]>((resolve, reject) => {
+        child.once("error", reject);
+        child.once("close", (exitCode, exitSignal) => resolve([exitCode, exitSignal]));
+      });
+      assert.equal(timedOut, false, `${fault} cleanup child must exit within 15 seconds`);
+      assert.equal(signal, null, `${fault} cleanup child was signalled: ${output.slice(-1200)}`);
+      assert.equal(code, 0, `${fault} cleanup child failed: ${output.slice(-1200)}`);
+      assert.match(output, new RegExp(`cursor_fault_oracle_${fault}_database_dropped`));
+    } catch (error) {
+      childError = error;
+    } finally {
+      clearTimeout(forceDeadline);
+      if (forceKill) {
+        clearTimeout(forceKill);
+      }
+      if (child.exitCode === null && child.signalCode === null) {
+        child.kill("SIGKILL");
+      }
     }
-    if (child.exitCode === null && child.signalCode === null) {
-      child.kill("SIGKILL");
+    const adminUrl = new URL(TEST_POSTGRES_URL);
+    adminUrl.pathname = "/postgres";
+    const admin = new Pool({ connectionString: adminUrl.toString(), max: 1, statement_timeout: 3000 });
+    try {
+      const dropped = await admin.query<{ dropped: boolean }>(
+        "SELECT NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1) AS dropped",
+        [databaseName]
+      );
+      if (!dropped.rows[0]?.dropped) {
+        await admin.query(`DROP DATABASE IF EXISTS "${databaseName}" WITH (FORCE)`);
+      }
+      assert.equal(dropped.rows[0]?.dropped, true, `${fault} owned database must be dropped`);
+    } finally {
+      await admin.end();
+    }
+    if (childError) {
+      throw childError;
     }
   }
 }
@@ -180,8 +231,10 @@ async function verifyBehaviorAndSqliteAtomicity(observerDb: SqliteDatabaseForTes
     .all<{ name: string }>()
     .map((row) => row.name);
   assert.deepEqual(
-    tableAndIndexes.sort(),
-    ["rs_opaque_cursors", "idx_rs_opaque_cursors_expiry", "idx_rs_opaque_cursors_scope"].sort()
+    tableAndIndexes.toSorted((left, right) => left.localeCompare(right)),
+    ["rs_opaque_cursors", "idx_rs_opaque_cursors_expiry", "idx_rs_opaque_cursors_scope"].toSorted((left, right) =>
+      left.localeCompare(right)
+    )
   );
 
   const token = await issueRsCursor({
@@ -422,116 +475,8 @@ async function verifyBehaviorAndSqliteAtomicity(observerDb: SqliteDatabaseForTes
   assert.equal(recreated, 0);
 }
 
-if (TIMEOUT_ORACLE_CHILD) {
-  test("Postgres cursor lock timeout cancels and tears down owned resources", async () => {
-    assert.ok(TEST_POSTGRES_URL, "Postgres URL is required for the timeout child");
-    const databaseName = `ri_cursor_timeout_child_${process.pid}_${Date.now()}`;
-    let pool: InstanceType<typeof Pool> | null = null;
-    await withTemporaryPostgresDatabase(
-      {
-        closeConnections: async () => {
-          if (pool) {
-            await cancelCursorIssues(pool);
-          }
-          await closePostgresStorage();
-          if (pool) {
-            await pool.end();
-          }
-        },
-        connectionString: TEST_POSTGRES_URL,
-        databaseName,
-        templateName: null,
-      },
-      async (databaseUrl) => {
-        await initPostgresStorage({ backend: "postgres", databaseUrl });
-        pool = new Pool({
-          connectionString: databaseUrl,
-          max: 3,
-          options: "-c statement_timeout=5000 -c lock_timeout=4000",
-        });
-        const external = pool;
-        const blocker = await external.connect();
-        let blockerPid: number | undefined;
-        let issueSettled = false;
-        let issueOutcome: Promise<{ error?: { code?: string }; token?: string }> | null = null;
-        try {
-          await blocker.query("BEGIN");
-          await blocker.query("SELECT pg_advisory_xact_lock(hashtext('pdpp'), hashtext('rs_opaque_cursors.issue'))");
-          blockerPid = Number((await blocker.query("SELECT pg_backend_pid() AS pid")).rows[0]?.pid);
-          issueOutcome = issueRsCursor({
-            context: { test: "timeout-cleanup" },
-            internalCursor: "timeout-cleanup-position",
-            kind: "changes_since",
-            now: NOW,
-            scope: { test: "timeout-cleanup" },
-          })
-            .then(
-              (token) => ({ token }),
-              (error: { code?: string }) => ({ error })
-            )
-            .finally(() => {
-              issueSettled = true;
-            });
-          const lockWaitDeadline = Date.now() + 3000;
-          let blocked = false;
-          while (!blocked && Date.now() < lockWaitDeadline) {
-            // biome-ignore lint/performance/noAwaitInLoops: poll the independent backend until a bounded lock-wait deadline.
-            const pids = await activeCursorIssuePids(external, blockerPid);
-            blocked = pids.length > 0;
-            if (!blocked) {
-              await new Promise((resolve) => setTimeout(resolve, 10));
-            }
-          }
-          assert.equal(blocked, true, "issuer must reach the held registry lock");
-          await new Promise((resolve) => setTimeout(resolve, TIMEOUT_ORACLE_DEADLINE_MS + 50));
-          assert.equal(issueSettled, false, "issuer must remain blocked past the oracle deadline");
-          const blockedPids = await activeCursorIssuePids(external, blockerPid);
-          assert.ok(blockedPids.length > 0);
-          await cancelCursorIssues(external, blockerPid);
-          const outcome = await Promise.race([
-            issueOutcome,
-            new Promise<null>((resolve) => setTimeout(() => resolve(null), 2000)),
-          ]);
-          assert.ok(outcome, "cancelled issuer must settle before teardown");
-          assert.equal(outcome.token, undefined);
-          assert.equal(outcome.error?.code, "57014");
-        } finally {
-          if (blockerPid !== undefined && !issueSettled) {
-            await cancelCursorIssues(external, blockerPid);
-          }
-          await blocker.query("ROLLBACK").catch(() => undefined);
-          blocker.release();
-          if (issueOutcome && !issueSettled) {
-            await cancelCursorIssues(external);
-            const outcome = await Promise.race([
-              issueOutcome,
-              new Promise<null>((resolve) => setTimeout(() => resolve(null), 2000)),
-            ]);
-            assert.ok(outcome, "all issuer work must settle before pool teardown");
-          }
-        }
-      }
-    );
-    const admin = new Pool({
-      connectionString: TEST_POSTGRES_URL,
-      max: 1,
-      options: "-c statement_timeout=5000",
-    });
-    try {
-      const dropped = await admin.query<{ dropped: boolean }>(
-        "SELECT NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1) AS dropped",
-        [databaseName]
-      );
-      assert.equal(dropped.rows[0]?.dropped, true, "temporary database must be removed after child teardown");
-    } finally {
-      await admin.end();
-    }
-    process.stdout.write("timeout_subprocess_owned_database_dropped\n");
-  });
-}
-
 test("SQLite opaque cursors preserve utility semantics and issue atomically", {
-  skip: TIMEOUT_ORACLE_CHILD ? "timeout subprocess only" : false,
+  skip: TIMEOUT_ORACLE_CHILD ? "Postgres cleanup subprocess only" : false,
 }, async () => {
   const directory = mkdtempSync(join(tmpdir(), "rs-opaque-cursors-"));
   const databasePath = join(directory, "cursors.sqlite");
@@ -556,12 +501,18 @@ test("SQLite opaque cursors preserve utility semantics and issue atomically", {
 });
 
 test("Postgres opaque cursors bootstrap cold and issue atomically", { skip: postgresTestSkipReason() }, async () => {
-  const dbName = `ri_cursor_${process.pid}_${Date.now()}`;
+  const dbName = process.env.RS_CURSOR_FAULT_DB_NAME ?? `ri_cursor_${process.pid}_${Date.now()}`;
   let pool: InstanceType<typeof Pool> | null = null;
+  let batchBarrier: pg.PoolClient | null = null;
   await withTemporaryPostgresDatabase(
     {
       closeConnections: async () => {
         await closePostgresStorage();
+        if (batchBarrier) {
+          await batchBarrier.query("ROLLBACK").catch(() => undefined);
+          batchBarrier.release();
+          batchBarrier = null;
+        }
         if (pool) {
           await pool.end();
         }
@@ -571,11 +522,12 @@ test("Postgres opaque cursors bootstrap cold and issue atomically", { skip: post
       templateName: null,
     },
     async (databaseUrl) => {
+      await setCursorIssuerDefaults(databaseUrl, dbName);
       await initPostgresStorage({ backend: "postgres", databaseUrl });
       pool = new Pool({
         connectionString: databaseUrl,
         max: 8,
-        options: "-c statement_timeout=5000 -c lock_timeout=4000",
+        options: "-c application_name=rs_opaque_cursor_test_external -c statement_timeout=5000 -c lock_timeout=4000",
       });
       const external = pool;
       const catalog = await external.query<{ name: string }>(
@@ -851,6 +803,7 @@ test("Postgres opaque cursors bootstrap cold and issue atomically", { skip: post
       let issueSettled = false;
       let blockerPid: number | undefined;
       let barrierError: unknown;
+      let issueOutcome: Promise<{ error?: unknown; value?: string }> | null = null;
       try {
         await blocker.query("BEGIN");
         blockerPid = Number((await blocker.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")).rows[0]?.pid);
@@ -859,25 +812,43 @@ test("Postgres opaque cursors bootstrap cold and issue atomically", { skip: post
           [rsCursorDigest(SCOPE)]
         );
         let settled = false;
-        issuing = issueRsCursor({
-          context: CONTEXT,
-          internalCursor: "visibility-probe",
-          kind: "changes_since",
-          now: NOW,
-          scope: SCOPE,
-        }).finally(() => {
-          settled = true;
-          issueSettled = true;
-        });
+        issuing =
+          CURSOR_FAULT_ORACLE === "barrier-issuer"
+            ? Promise.reject(new Error("injected barrier issuer rejection"))
+            : issueRsCursor({
+                context: CONTEXT,
+                internalCursor: "visibility-probe",
+                kind: "changes_since",
+                now: NOW,
+                scope: SCOPE,
+              });
+        issueOutcome = issuing
+          .then(
+            (value) => ({ value }),
+            (error: unknown) => ({ error })
+          )
+          .then((outcome) => {
+            settled = true;
+            issueSettled = true;
+            return outcome;
+          });
         let blocked = false;
         const deadline = Date.now() + 10_000;
         while (Date.now() < deadline && !blocked) {
-          // biome-ignore lint/performance/noAwaitInLoops: each query polls a real lock wait until its bounded deadline.
-          const state = await external.query<{ blocked: boolean }>(
-            "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)) AND pid <> $1 AND wait_event_type = 'Lock') AS blocked",
-            [blockerPid]
-          );
-          blocked = Boolean(state.rows[0]?.blocked);
+          // biome-ignore lint/performance/noAwaitInLoops: poll the independent lock state until issuance blocks or its deadline expires.
+          const state = await Promise.race([
+            external
+              .query<{ blocked: boolean }>(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)) AND pid <> $1 AND wait_event_type = 'Lock') AS blocked",
+                [blockerPid]
+              )
+              .then((result) => ({ blocked: Boolean(result.rows[0]?.blocked) })),
+            issueOutcome.then((outcome) => ({ issue: outcome })),
+          ]);
+          if ("issue" in state) {
+            throw state.issue.error ?? new Error("visibility issuer completed before row-lock barrier");
+          }
+          ({ blocked } = state);
           if (!blocked) {
             await new Promise((resolve) => setTimeout(resolve, 10));
           }
@@ -895,7 +866,7 @@ test("Postgres opaque cursors bootstrap cold and issue atomically", { skip: post
       } finally {
         if (!issueSettled && blockerPid !== undefined) {
           try {
-            await cancelCursorIssues(external, blockerPid);
+            await cancelCursorIssues(external);
           } catch (error) {
             barrierError ??= error;
           }
@@ -907,17 +878,13 @@ test("Postgres opaque cursors bootstrap cold and issue atomically", { skip: post
         }
         if (issuing) {
           const settledBeforeDeadline = await Promise.race([
-            issuing.then(
-              () => true,
-              () => true
-            ),
+            issueOutcome?.then(() => true) ?? Promise.resolve(false),
             new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 3000)),
           ]);
           if (settledBeforeDeadline) {
-            try {
-              await issuing;
-            } catch (error) {
-              barrierError ??= error;
+            const outcome = await issueOutcome;
+            if (outcome?.error) {
+              barrierError ??= outcome.error;
             }
           } else {
             try {
@@ -927,17 +894,13 @@ test("Postgres opaque cursors bootstrap cold and issue atomically", { skip: post
               barrierError ??= error;
             }
             const settledAfterCancellation = await Promise.race([
-              issuing.then(
-                () => true,
-                () => true
-              ),
+              issueOutcome?.then(() => true) ?? Promise.resolve(false),
               new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 2000)),
             ]);
             if (settledAfterCancellation) {
-              try {
-                await issuing;
-              } catch (error) {
-                barrierError ??= error;
+              const outcome = await issueOutcome;
+              if (outcome?.error) {
+                barrierError ??= outcome.error;
               }
             } else {
               barrierError ??= new Error("visibility issuer did not settle before bounded cleanup deadline");
@@ -947,26 +910,62 @@ test("Postgres opaque cursors bootstrap cold and issue atomically", { skip: post
         blocker.release();
       }
       if (barrierError) {
-        throw barrierError;
+        if (CURSOR_FAULT_ORACLE === "barrier-issuer") {
+          assert.match(String(barrierError), BARRIER_ISSUER_REJECTION);
+        } else {
+          throw barrierError;
+        }
       }
       assert.equal(await count(), RS_CURSOR_QUOTA.changes_since);
 
       await external.query("DELETE FROM rs_opaque_cursors");
       await seed({ count: RS_CURSOR_QUOTA.changes_since });
+      batchBarrier = CURSOR_FAULT_ORACLE === "batch-observer" ? await external.connect() : null;
+      let batchBlockerPid: number | undefined;
+      if (batchBarrier) {
+        await batchBarrier.query("BEGIN");
+        await batchBarrier.query(
+          "SELECT token_digest FROM rs_opaque_cursors WHERE scope_digest = $1 AND kind = 'changes_since' ORDER BY created_at, token_digest LIMIT 1 FOR UPDATE",
+          [rsCursorDigest(SCOPE)]
+        );
+        batchBlockerPid = Number(
+          (await batchBarrier.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")).rows[0]?.pid
+        );
+      }
       let maxObserved = 0;
       let observing = true;
-      let observerError: unknown;
       const observer = (async () => {
         const deadline = Date.now() + 20_000;
         while (observing && Date.now() < deadline) {
-          // biome-ignore lint/performance/noAwaitInLoops: serial samples observe independent committed database states.
+          // biome-ignore lint/performance/noAwaitInLoops: sample committed count serially to capture every intermediate state.
           maxObserved = Math.max(maxObserved, await count());
+          if (CURSOR_FAULT_ORACLE === "batch-observer") {
+            let oldestRowBlocked = false;
+            const blockDeadline = Date.now() + 4000;
+            while (!oldestRowBlocked && Date.now() < blockDeadline) {
+              // biome-ignore lint/performance/noAwaitInLoops: poll until the first issuer is blocked in quota pruning.
+              const result = await external.query<{ blocked: boolean }>(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE application_name = $1 AND state = 'active' AND $2 = ANY(pg_blocking_pids(pid))) AS blocked",
+                [CURSOR_ISSUER_APP_NAME, batchBlockerPid]
+              );
+              oldestRowBlocked = Boolean(result.rows[0]?.blocked);
+              if (!oldestRowBlocked) {
+                await new Promise((resolve) => setTimeout(resolve, 10));
+              }
+            }
+            assert.equal(oldestRowBlocked, true, "batch issuer must block while pruning the locked oldest row");
+            throw new Error("injected batch observer rejection");
+          }
           await new Promise((resolve) => setTimeout(resolve, 5));
         }
         if (observing) {
           throw new Error("cursor concurrency observer exceeded its deadline");
         }
       })();
+      const observerOutcome = observer.then(
+        () => ({ ok: true as const }),
+        (error: unknown) => ({ error })
+      );
       let settledIssues = 0;
       const issuePromises = Array.from({ length: 300 }, (_, index) =>
         issueRsCursor({
@@ -980,16 +979,30 @@ test("Postgres opaque cursors bootstrap cold and issue atomically", { skip: post
         })
       );
       const batch = Promise.all(issuePromises);
+      const batchOutcome = batch.then(
+        (value) => ({ value }),
+        (error: unknown) => ({ error })
+      );
       let issued: string[] | undefined;
       let batchError: unknown;
+      let observerError: unknown;
+      let drainError: unknown;
+      let issuerCleanupError: unknown;
       let timeout: ReturnType<typeof setTimeout> | undefined;
       try {
-        issued = await Promise.race([
-          batch,
+        const outcome = await Promise.race([
+          batchOutcome,
+          observerOutcome,
           new Promise<never>((_, reject) => {
             timeout = setTimeout(() => reject(new Error("cursor concurrency oracle timed out")), 12_000);
           }),
         ]);
+        if ("error" in outcome) {
+          throw outcome.error;
+        }
+        if ("value" in outcome) {
+          issued = outcome.value;
+        }
       } catch (error) {
         batchError = error;
       } finally {
@@ -1000,53 +1013,93 @@ test("Postgres opaque cursors bootstrap cold and issue atomically", { skip: post
         if (batchError) {
           const cleanupDeadline = Date.now() + 6000;
           while (settledIssues < issuePromises.length && Date.now() < cleanupDeadline) {
-            // biome-ignore lint/performance/noAwaitInLoops: repeatedly cancel queued lock waiters until bounded drain completes.
-            await cancelCursorIssues(external);
+            try {
+              // biome-ignore lint/performance/noAwaitInLoops: cancel issuers until all issue promises settle or bounded cleanup expires.
+              await cancelCursorIssues(external);
+            } catch (error) {
+              issuerCleanupError ??= error;
+            }
             if (Date.now() + 2500 >= cleanupDeadline) {
-              await terminateCursorIssues(external);
+              try {
+                await terminateCursorIssues(external);
+              } catch (error) {
+                issuerCleanupError ??= error;
+              }
             }
             await new Promise((resolve) => setTimeout(resolve, 20));
           }
         }
         if (settledIssues !== issuePromises.length) {
           batchError ??= new Error("cursor issuance promises did not drain before bounded cleanup deadline");
-          await cancelCursorIssues(external);
-          await terminateCursorIssues(external);
+          try {
+            await cancelCursorIssues(external);
+          } catch (error) {
+            issuerCleanupError ??= error;
+          }
+          try {
+            await terminateCursorIssues(external);
+          } catch (error) {
+            issuerCleanupError ??= error;
+          }
         }
         const fullyDrained = await Promise.race([
           Promise.allSettled(issuePromises).then(() => true),
           new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 2000)),
         ]);
         if (!fullyDrained) {
-          batchError ??= new Error("cursor issuance batch remained pending after cancellation and termination");
+          drainError = new Error("cursor issuance batch remained pending after cancellation and termination");
         }
-        try {
-          await observer;
-        } catch (error) {
-          observerError = error;
+        const observerResult = await observerOutcome;
+        if ("error" in observerResult) {
+          observerError = observerResult.error;
         }
       }
-      if (batchError) {
-        throw batchError;
+      if (batchError && CURSOR_FAULT_ORACLE === "batch-observer") {
+        assert.match(String(observerError), BATCH_OBSERVER_REJECTION);
+        assert.equal(settledIssues, issuePromises.length, "fault cleanup must settle every started issue");
+        if (drainError) {
+          throw drainError;
+        }
+        if (issuerCleanupError) {
+          throw issuerCleanupError;
+        }
+        if (batchError !== observerError && (batchError as { code?: unknown } | null)?.code !== "57014") {
+          throw batchError;
+        }
+      } else {
+        const failures = [batchError, observerError, drainError, issuerCleanupError].filter(
+          (error) => error !== undefined
+        );
+        if (failures.length === 1) {
+          throw failures[0];
+        }
+        if (failures.length > 1) {
+          throw new AggregateError(failures, "cursor issue batch and cleanup failed");
+        }
       }
-      if (observerError) {
-        throw observerError;
+      if (!CURSOR_FAULT_ORACLE) {
+        assert.equal(issued?.length, 300);
+        assert.ok(maxObserved <= RS_CURSOR_QUOTA.changes_since);
+        assert.ok((await count()) <= RS_CURSOR_QUOTA.changes_since);
+        assert.equal(await count(), RS_CURSOR_QUOTA.changes_since);
       }
-      assert.equal(issued?.length, 300);
-      assert.ok(maxObserved <= RS_CURSOR_QUOTA.changes_since);
-      assert.ok((await count()) <= RS_CURSOR_QUOTA.changes_since);
-      assert.equal(await count(), RS_CURSOR_QUOTA.changes_since);
 
-      await external.query("DROP TABLE rs_opaque_cursors");
-      await assert.rejects(
-        issueRsCursor({ context: CONTEXT, internalCursor: "no-ddl", kind: "page", now: NOW, scope: SCOPE })
-      );
-      await assert.rejects(resolveRsCursor({ accept: ["page"], context: CONTEXT, now: NOW, param: "cursor", token }));
-      const recreated = await external.query<{ exists: boolean }>(
-        "SELECT to_regclass('rs_opaque_cursors') IS NOT NULL AS exists"
-      );
-      assert.equal(recreated.rows[0]?.exists, false);
+      if (!CURSOR_FAULT_ORACLE) {
+        await external.query("DROP TABLE rs_opaque_cursors");
+        await assert.rejects(
+          issueRsCursor({ context: CONTEXT, internalCursor: "no-ddl", kind: "page", now: NOW, scope: SCOPE })
+        );
+        await assert.rejects(resolveRsCursor({ accept: ["page"], context: CONTEXT, now: NOW, param: "cursor", token }));
+        const recreated = await external.query<{ exists: boolean }>(
+          "SELECT to_regclass('rs_opaque_cursors') IS NOT NULL AS exists"
+        );
+        assert.equal(recreated.rows[0]?.exists, false);
+      }
     }
   );
-  await assertTimeoutOracleSubprocessCompletes();
+  if (TIMEOUT_ORACLE_CHILD) {
+    process.stdout.write(`cursor_fault_oracle_${CURSOR_FAULT_ORACLE}_database_dropped\n`);
+  } else {
+    await assertTimeoutOracleSubprocessCompletes();
+  }
 });
