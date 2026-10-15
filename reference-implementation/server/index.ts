@@ -200,6 +200,7 @@ import {
 import { registerInboxRoutes } from "./inbox.ts";
 import {
   authenticateIntrospectionCaller,
+  createInProcessIntrospector,
   createRemoteIntrospector,
   type IntrospectionCallerCredentials,
 } from "./introspection-http.ts";
@@ -835,6 +836,18 @@ interface ServerOpts {
   rsInternalUrl?: string | null;
   rsIntrospectionCredentials?: IntrospectionCallerCredentials;
   rsIntrospectionEndpoint?: string | null;
+  /**
+   * Same-process AS lookup handed to the RS by startServer when in-process
+   * introspection is on. Internal wiring, not a caller option.
+   */
+  rsInProcessIntrospect?: ((token: string) => Promise<Record<string, unknown>>) | null;
+  /**
+   * When the AS and RS run in this process, let the RS call the AS
+   * introspection directly instead of over loopback HTTP. Defaults to
+   * `PDPP_RS_INPROCESS_INTROSPECTION=1`. Ignored when an explicit
+   * `rsIntrospectionEndpoint` or `introspectionFetch` is supplied.
+   */
+  rsInProcessIntrospection?: boolean;
   rsPort?: number;
   rsPublicUrl?: string | null;
   rsUrl?: string | null;
@@ -6877,13 +6890,17 @@ function buildRsApp(opts: ServerOpts = {}) {
   if (!rsIntrospectionCredentials) {
     throw new Error("RS introspection credentials must be configured");
   }
-  const introspectToken = createRemoteIntrospector({
-    ...rsIntrospectionCredentials,
-    endpoint: opts.rsIntrospectionEndpoint ?? `http://127.0.0.1:${opts.asPort ?? AS_PORT}/introspect`,
-    expectedAudience: opts.resolveIntrospectionAudience ?? (() => explicitResource ?? null),
-    expectedIssuer: opts.resolveIntrospectionIssuer ?? (() => opts.asIssuer ?? opts.asPublicUrl ?? null),
-    ...(opts.introspectionFetch ? { fetchImpl: opts.introspectionFetch } : {}),
-  });
+  const expectedAudience = opts.resolveIntrospectionAudience ?? (() => explicitResource ?? null);
+  const expectedIssuer = opts.resolveIntrospectionIssuer ?? (() => opts.asIssuer ?? opts.asPublicUrl ?? null);
+  const introspectToken = opts.rsInProcessIntrospect
+    ? createInProcessIntrospector({ expectedAudience, expectedIssuer, introspect: opts.rsInProcessIntrospect })
+    : createRemoteIntrospector({
+        ...rsIntrospectionCredentials,
+        endpoint: opts.rsIntrospectionEndpoint ?? `http://127.0.0.1:${opts.asPort ?? AS_PORT}/introspect`,
+        expectedAudience,
+        expectedIssuer,
+        ...(opts.introspectionFetch ? { fetchImpl: opts.introspectionFetch } : {}),
+      });
   const requireToken = (req: ReqLike, res: ResLike, next: () => void) =>
     requireTokenWithIntrospection(req, res, next, introspectToken);
 
@@ -7895,6 +7912,29 @@ function buildRsApp(opts: ServerOpts = {}) {
 // ─── Main ────────────────────────────────────────────────────────────────────
 
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: This protocol transition owns ordered state invariants that must remain local.
+/**
+ * In-process RS introspection (see `createInProcessIntrospector`). Returns the
+ * same object the AS `/introspect` route answers with: the source wire
+ * projection plus `aud` / `iss` from the AS's own resolvers. Null keeps the
+ * loopback HTTP path, which stays the default and is always used when a test
+ * or deployment points the RS at an explicit endpoint or fetch.
+ */
+function resolveRsInProcessIntrospect(
+  opts: ServerOpts,
+  resolvers: { audience: () => string | null; issuer: () => string | null }
+): ((token: string) => Promise<Record<string, unknown>>) | null {
+  const enabled = opts.rsInProcessIntrospection ?? process.env.PDPP_RS_INPROCESS_INTROSPECTION === "1";
+  if (!enabled || opts.rsIntrospectionEndpoint || opts.introspectionFetch) {
+    return null;
+  }
+  return async (token: string) => {
+    const info = projectSourceIntrospectionWireContext(await introspect(token)) as Record<string, unknown>;
+    const audience = resolvers.audience();
+    const issuer = resolvers.issuer();
+    return { ...info, ...(audience ? { aud: audience } : {}), ...(issuer ? { iss: issuer } : {}) };
+  };
+}
+
 export async function startServer(opts: ServerOpts = {}) {
   const introspectionCredentials = resolveIntrospectionCredentials(opts);
   const logger = opts.logger ?? buildLogger({ quiet: !!opts.quiet });
@@ -8654,6 +8694,10 @@ export async function startServer(opts: ServerOpts = {}) {
     // the adapter falls back to the public resource). See explicitRsInternalUrl.
     // Spec: openspec/changes/route-hosted-mcp-adapter-self-calls-internally/
     rsInternalUrl: explicitRsInternalUrl,
+    rsInProcessIntrospect: resolveRsInProcessIntrospect(opts, {
+      audience: () => configuredRsPublicUrl || runtimeContext.rsUrl,
+      issuer: () => configuredAsIssuer || runtimeContext.referenceBaseUrl,
+    }),
     rsIntrospectionCredentials: introspectionCredentials,
     rsIntrospectionEndpoint: opts.rsIntrospectionEndpoint ?? `http://127.0.0.1:${asPort}/introspect`,
     rsPublicUrl: configuredRsPublicUrl,
