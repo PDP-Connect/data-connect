@@ -16,10 +16,12 @@ import {
 	completePairwiseIdentityLegacyBackfill,
 	getPairwiseHandle,
 	initializePairwiseIdentityRootKey,
+	lookupPairwiseInstanceMapping,
 	migratePairwiseIdentityIssuer,
 	type PairwiseHandleInput,
-	projectPairwiseGrant,
+	PairwiseIdentityContextError,
 	PairwiseIdentityDeploymentError,
+	projectPairwiseGrant,
 	recordTrustedClientSectorMembership,
 	resolveInternalInstanceId,
 	validatePairwiseInstanceBindings,
@@ -822,9 +824,51 @@ test("stream translations reject a different stream and malformed runtime stream
 	);
 });
 
+test("client-visible translator types null bindings as grant_invalid", () => {
+	assert.throws(
+		() =>
+			clientVisibleInstanceId("rs-17", null as never, "source-a", "profile"),
+		(error: unknown) => {
+			assert.equal(error instanceof PairwiseIdentityContextError, true);
+			assert.equal(
+				(error as PairwiseIdentityContextError).code,
+				"grant_invalid",
+			);
+			return true;
+		},
+	);
+});
+
+test("internal translator types undefined bindings as grant_invalid", () => {
+	assert.throws(
+		() =>
+			resolveInternalInstanceId(
+				"inst-17",
+				undefined as never,
+				"source-a",
+				"profile",
+			),
+		(error: unknown) => {
+			assert.equal(error instanceof PairwiseIdentityContextError, true);
+			assert.equal(
+				(error as PairwiseIdentityContextError).code,
+				"grant_invalid",
+			);
+			return true;
+		},
+	);
+});
+
 test("pairwise identity and binding boundaries reject malformed runtime values", async () => {
 	initDb(":memory:");
 	try {
+		await initializePairwiseIdentityRootKey(ISSUER);
+		await recordTrustedClientSectorMembership({
+			clientId: baseInput.clientId,
+			clientSector: SECTOR,
+			issuer: ISSUER,
+		});
+		await completePairwiseIdentityLegacyBackfill(ISSUER);
 		for (const value of ["", 17, null]) {
 			await assert.rejects(
 				initializePairwiseIdentityRootKey(value as unknown as string),
@@ -1242,6 +1286,10 @@ test("first v1 issuance requires complete legacy membership backfill", async () 
 			issuer: ISSUER,
 		});
 		await assert.rejects(getPairwiseHandle(baseInput), /backfill|membership/i);
+		await assert.rejects(
+			completePairwiseIdentityLegacyBackfill(ISSUER),
+			(error: unknown) => error instanceof PairwiseIdentityDeploymentError,
+		);
 		await recordTrustedClientSectorMembership({
 			clientId: "legacy-unregistered",
 			clientSector: SECTOR,
@@ -2073,6 +2121,24 @@ if (POSTGRES_URL) {
 					clientSector: SECTOR,
 					issuer: ISSUER,
 				});
+				assert.equal(
+					await lookupPairwiseInstanceMapping({
+						clientId: "client-a",
+						clientSector: SECTOR,
+						instanceHandle: "inst_missing_lookup",
+						issuer: ISSUER,
+						subjectId: baseInput.subjectId,
+					}),
+					null,
+				);
+				assert.equal(
+					(
+						await postgresQuery(
+							"SELECT count(*)::int AS count FROM pairwise_identity_legacy_backfills",
+						)
+					).rows[0]?.count,
+					0,
+				);
 				await assert.rejects(
 					getPairwiseHandle({ ...baseInput, clientId: "missing-client" }),
 				);
@@ -2127,6 +2193,19 @@ if (POSTGRES_URL) {
 					issuer: ISSUER,
 				});
 				await completePairwiseIdentityLegacyBackfill(ISSUER);
+				const issuedHandle = await getPairwiseHandle(baseInput);
+				assert.equal(
+					(
+						await lookupPairwiseInstanceMapping({
+							clientId: baseInput.clientId,
+							clientSector: SECTOR,
+							instanceHandle: issuedHandle,
+							issuer: ISSUER,
+							subjectId: baseInput.subjectId,
+						})
+					)?.internalId,
+					baseInput.internalId,
+				);
 				await postgresQuery(
 					"INSERT INTO pairwise_identity_handles (issuer,subject_id,client_id,kind,source_id,internal_id,handle) VALUES ($1,'person-4','late-client','instance','source','cin-late','inst_late')",
 					[ISSUER],
@@ -2137,6 +2216,22 @@ if (POSTGRES_URL) {
 						clientSector: SECTOR,
 						issuer: ISSUER,
 					}),
+				);
+				await postgresQuery(
+					`INSERT INTO pairwise_identity_handles (issuer,subject_id,client_id,kind,source_id,internal_id,handle)
+					 VALUES ('https://foreign-as.example','person-foreign','foreign-client','instance','source','cin-foreign','inst_foreign')`,
+				);
+				await assert.rejects(
+					getPairwiseHandle(baseInput),
+					(error: unknown) => error instanceof PairwiseIdentityDeploymentError,
+				);
+				await assert.rejects(
+					recordTrustedClientSectorMembership({
+						clientId: "another-late-client",
+						clientSector: SECTOR,
+						issuer: ISSUER,
+					}),
+					(error: unknown) => error instanceof PairwiseIdentityDeploymentError,
 				);
 			},
 		);
