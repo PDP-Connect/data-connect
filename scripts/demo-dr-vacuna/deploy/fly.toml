@@ -1,0 +1,85 @@
+# fly.toml — "Vacuna al día" walkthrough (PDPP pilot + reminder web app).
+#
+#   internet ─HTTPS─▶ :8080 server.ts ─┬─ /recordatorio/*  reminder web app
+#                                      ├─ /pilot/*, /oauth/authorize, GET /consent ─▶ AS 127.0.0.1:7662
+#                                      └─ everything else 404 (AS/RS stay on loopback)
+#                     volume vacuna_state → /data  (reminder SQLite, client key, read-receipt key)
+#                     DATABASE_URL → Postgres app (fly.db.toml) over the private network
+#
+# Deploy from the repo root (build context = cwd; `dockerfile` and
+# `ignorefile` resolve relative to this file):
+#   fly deploy --config scripts/demo-dr-vacuna/deploy/fly.toml --ha=false
+#
+# Secrets (not in this file): DATABASE_URL, PDPP_AUDIT_TOKEN_HMAC_KEY,
+# VACUNA_BUILDER_PRIVATE_KEY, VACUNA_REGISTER_SERVER_PRIVATE_KEY. See DEPLOY.md.
+# Rename `app` and PUBLIC_ORIGIN together if the name is taken.
+
+app = "vacuna-al-dia-demo"
+primary_region = "mia"
+
+[build]
+  dockerfile = "Dockerfile"
+  ignorefile = "Dockerfile.dockerignore"
+
+[env]
+  NODE_ENV = "production"
+  PORT = "8080"
+  PUBLIC_ORIGIN = "https://vacuna-al-dia-demo.fly.dev"
+  VACUNA_STATE_DIR = "/data"
+  # Paid reads on Moksha through the existing Vana data gateway. Each served
+  # read is paid once (EIP-712 GenericPayment + RecordDataAccess). Secrets:
+  # VACUNA_BUILDER_PRIVATE_KEY, VACUNA_REGISTER_SERVER_PRIVATE_KEY (DEPLOY.md).
+  # Local runs and tests keep the mock payer (no money moves).
+  VACUNA_PAYER = "http"
+  VACUNA_GATEWAY_URL = "https://dp-rpc.moksha.vana.org"
+  VACUNA_CHAIN_ID = "14800"
+  VACUNA_ALLOW_REMOTE_GATEWAY = "1"
+  VACUNA_EXPLORER_TX_URL = "https://moksha.vanascan.io/tx/"
+  # Contract addresses, data owner and data point scope come from the Moksha
+  # registration (scripts/demo-dr-vacuna/moksha/): either set them here /
+  # as env, or upload its KEY=VALUE output to this file on the volume.
+  VACUNA_PAYER_ENV_FILE = "/data/moksha.env"
+  # VACUNA_ESCROW_CONTRACT = "0x…"
+  # VACUNA_DATA_REGISTRY_CONTRACT = "0x…"
+  # VACUNA_DATA_OWNER_ADDRESS = "0x…"
+  # VACUNA_DATA_POINT_SCOPE = "dr.vacuna.child_immunizations"
+  # Pilot flags (server.ts sets the same defaults; listed here so the
+  # deployment documents itself).
+  PDPP_PILOT_DR_VACUNA = "1"
+  PDPP_CONFIDENTIAL_CLIENTS = "1"
+  PDPP_READ_RECEIPTS = "1"
+  PDPP_RS_INPROCESS_INTROSPECTION = "1"
+  PDPP_HTTP_KEEP_ALIVE = "1"
+  PDPP_PILOT_DR_VACUNA_START_URL = "/recordatorio"
+  # No owner password: the owner surface is only on loopback (see server.ts).
+  PDPP_ALLOW_UNAUTHENTICATED_OWNER = "1"
+
+[mounts]
+  source = "vacuna_state"
+  destination = "/data"
+  initial_size = "1gb"
+
+# One always-on machine: Cuenta Única sessions and OAuth state are in memory.
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [http_service.concurrency]
+    type = "connections"
+    hard_limit = 100
+    soft_limit = 80
+
+  [[http_service.checks]]
+    method = "GET"
+    path = "/healthz"
+    grace_period = "60s"
+    interval = "30s"
+    timeout = "5s"
+
+[[vm]]
+  memory = "1gb"
+  cpu_kind = "shared"
+  cpus = 1

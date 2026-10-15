@@ -1,0 +1,29 @@
+# fly.db.toml — Postgres for the "Vacuna al día" walkthrough: a second Fly
+# app running the same pgvector image as docker-compose.yml, on a volume,
+# reachable only on the organization's private network
+# (vacuna-al-dia-db.internal:5432). No public services.
+#
+#   fly deploy --config scripts/demo-dr-vacuna/deploy/fly.db.toml --ha=false
+#
+# Secret (not in this file): POSTGRES_PASSWORD. See DEPLOY.md.
+
+app = "vacuna-al-dia-db"
+primary_region = "mia"
+
+[build]
+  image = "pgvector/pgvector:pg16"
+
+[env]
+  POSTGRES_USER = "pdpp"
+  POSTGRES_DB = "pdpp"
+  PGDATA = "/var/lib/postgresql/data/pgdata"
+
+[mounts]
+  source = "pg_data"
+  destination = "/var/lib/postgresql/data"
+  initial_size = "1gb"
+
+[[vm]]
+  memory = "512mb"
+  cpu_kind = "shared"
+  cpus = 1
