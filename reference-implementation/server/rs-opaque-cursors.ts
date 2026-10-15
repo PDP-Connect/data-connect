@@ -112,10 +112,10 @@ async function insertRow(row: {
         `DELETE FROM rs_opaque_cursors
         WHERE token_digest IN (
           SELECT token_digest FROM rs_opaque_cursors
-           WHERE scope_digest = $1 AND kind = $2
+           WHERE scope_digest = $1 AND kind = $2 AND token_digest <> $3
            ORDER BY created_at DESC, token_digest DESC
-           OFFSET $3)`,
-        [row.scopeDigest, row.kind, quota]
+           OFFSET $4)`,
+        [row.scopeDigest, row.kind, row.tokenDigest, quota - 1]
       );
     });
     return;
@@ -140,10 +140,10 @@ async function insertRow(row: {
       `DELETE FROM rs_opaque_cursors
       WHERE token_digest IN (
         SELECT token_digest FROM rs_opaque_cursors
-         WHERE scope_digest = ? AND kind = ?
+         WHERE scope_digest = ? AND kind = ? AND token_digest <> ?
          ORDER BY created_at DESC, token_digest DESC
          LIMIT -1 OFFSET ?)`
-    ).run(row.scopeDigest, row.kind, quota);
+    ).run(row.scopeDigest, row.kind, row.tokenDigest, quota - 1);
   }).immediate();
 }
 
