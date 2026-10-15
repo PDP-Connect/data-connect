@@ -269,7 +269,7 @@ import {
   selfCallUrlHostForBindHost,
   validateReachabilityContract,
 } from "./reachability-contract.ts";
-import { createPackageRsClient, createRsClient } from "./package-rs-client.ts";
+import { createPackageProfile, createRsClient } from "./package-rs-client.ts";
 import { reconcilePolyfillManifests } from "./polyfill-manifest-reconcile.ts";
 import { postgresPersistContentAddressedBlob } from "./postgres-records.ts";
 import {
@@ -7476,10 +7476,10 @@ function buildRsApp(opts: ServerOpts = {}) {
   // extraction: same `requireTrustedHostedMcpResource` host guard, same
   // `setHostedMcpProtectedResourceMetadata` middleware, same
   // `requireToken` + `requireClientOrMcpPackage` auth posture, same
-  // package-token → PackageRsClient fan-out, same single-bearer path,
+  // package-token → grant_id-selected child, same single-bearer client path,
   // same response envelope and headers.
   mountRsHostedMcp(app, {
-    createPackageRsClient,
+    createPackageProfile,
     createRsClient,
     explicitResource,
     getGrantPackageAccess,

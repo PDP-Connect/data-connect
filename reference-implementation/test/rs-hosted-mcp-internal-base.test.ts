@@ -14,14 +14,14 @@
 // The fix passes the EXPLICITLY-configured internal base (`opts.rsInternalUrl`
 // or the operator's `PDPP_RS_URL`, plumbed by `startServer` — NOT the bare
 // `referenceTopology` default `http://localhost:7663`, which is intentionally
-// skipped) to `createPackageRsClient` as the child fetch base, falling back to
+// skipped) to `createPackageProfile` as the child fetch base, falling back to
 // the public resource when no internal base is configured. Advertised identity
 // stays public. (`INTERNAL_BASE` below is an explicitly-configured value, as a
 // real deployment's `PDPP_RS_URL` would be.)
 //
 // This test drives `handleHostedMcp` through `mountRsHostedMcp` against a
 // hand-built fake app + context. It captures the `providerUrl` that reaches
-// `createPackageRsClient` and the `providerUrl` advertised on
+// `createPackageProfile` and the `providerUrl` advertised on
 // `mcpServerOptions`. PRE-fix both equal the public resource (this test fails
 // on `assertEqual(internal)`); POST-fix the child base is the internal base
 // and the advertised value remains public.
@@ -137,7 +137,7 @@ interface Seen {
   singleGrantProviderUrl: string | null;
 }
 
-// Build a context whose `createPackageRsClient` records the providerUrl it
+// Build a context whose `createPackageProfile` records the providerUrl it
 // receives, and whose `handleStreamableHttpRequest` records the providerUrl it
 // is advertised. `internalResource` is the fix's injected internal base.
 function makeContext({ internalResource }: { internalResource: string | null | undefined }): {
@@ -147,9 +147,9 @@ function makeContext({ internalResource }: { internalResource: string | null | u
   const seen: Seen = { advertisedProviderUrl: null, childProviderUrl: null, singleGrantProviderUrl: null };
   return {
     ctx: {
-      createPackageRsClient({ providerUrl }) {
+      createPackageProfile({ providerUrl }) {
         seen.childProviderUrl = providerUrl;
-        return { __fakePackageRsClient: true };
+        return { __fakePackageProfile: true };
       },
       createRsClient({ providerUrl }) {
         seen.singleGrantProviderUrl = providerUrl;
@@ -252,7 +252,7 @@ test("F1 wiring (single-grant): client-token self-calls use the internal base; a
     "advertised providerUrl must remain the public origin (single-grant)"
   );
   // The package-only recorder was not touched on the client path.
-  assert.equal(seen.childProviderUrl, null, "package createPackageRsClient must not be invoked for a client token");
+  assert.equal(seen.childProviderUrl, null, "package createPackageProfile must not be invoked for a client token");
 });
 
 test("F1 wiring (single-grant) fallback: no internal base → client self-calls use the public resource", async () => {

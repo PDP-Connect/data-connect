@@ -184,22 +184,6 @@ function schemaStreamRows(schemaBody: Record<string, unknown>): SchemaStreamRow[
   });
 }
 
-interface SchemaPackageSource extends Record<string, unknown> {
-  connector_id: string;
-  grant_id: string;
-}
-
-interface SchemaPackageMetadata extends Record<string, unknown> {
-  grant_package: unknown;
-  member_count: number;
-  sources: SchemaPackageSource[];
-}
-
-function schemaPackageMetadata(schemaBody: Record<string, unknown>): SchemaPackageMetadata | null {
-  const data = (schemaBody.data ?? schemaBody) as Record<string, unknown>;
-  return (data.package as SchemaPackageMetadata | undefined) ?? null;
-}
-
 function structuredContentData(result: Record<string, unknown>): Record<string, unknown> {
   const structuredContent = result.structuredContent as Record<string, unknown>;
   return structuredContent.data as Record<string, unknown>;
@@ -2415,7 +2399,7 @@ test("CIMD native loopback redirect matching ignores only runtime port", async (
 // revocation. The unit suite in `package-rs-client.test.js` covers the
 // adapter routing in isolation; this suite proves the live wiring.
 
-test("multi-source hosted MCP picker issues a package token usable at /mcp with source-tagged reads", async () => {
+test("multi-source hosted MCP picker requires explicit grant_id selection for package reads", async () => {
   const server = await startOpenTestServer();
   const asUrl = `http://localhost:${server.asPort}`;
   const rsUrl = `http://localhost:${server.rsPort}`;
@@ -2425,13 +2409,31 @@ test("multi-source hosted MCP picker issues a package token usable at /mcp with 
     const github = await registerAuthorizedGithub(asUrl);
     const client = await registerAuthCodeClient(asUrl);
 
-    const { accessToken, refreshToken, packageId } = await completeMultiSourcePackageFlow({
-      asUrl,
-      client,
-      connectorIds: [spotify.connector_id, github.connector_id],
-    });
+    const { accessToken, refreshToken, packageId } =
+      await completeMultiSourcePackageFlow({
+        asUrl,
+        client,
+        connectorIds: [spotify.connector_id, github.connector_id],
+      });
     assert.ok(refreshToken, "multi-source package issues a refresh token");
     assert.equal(refreshToken.startsWith("rt_"), true);
+
+    const missingGrantId = await postMcpJson(rsUrl, accessToken, {
+      id: 2,
+      jsonrpc: "2.0",
+      method: "tools/call",
+      params: { arguments: {}, name: "schema" },
+    });
+    assert.equal(missingGrantId.status, 200);
+    assert.equal(
+      resultOf(missingGrantId).isError,
+      true,
+      "package reads require explicit grant_id selection",
+    );
+    assert.match(
+      JSON.stringify(resultOf(missingGrantId)),
+      /list_package_children/,
+    );
 
     const initialize = await postMcpJson(rsUrl, accessToken, {
       id: 1,
@@ -2444,44 +2446,64 @@ test("multi-source hosted MCP picker issues a package token usable at /mcp with 
       },
     });
     assert.equal(initialize.status, 200);
-    assert.equal((resultOf(initialize).serverInfo as Record<string, unknown>).name, "pdpp-reference-mcp");
+    assert.equal(
+      (resultOf(initialize).serverInfo as Record<string, unknown>).name,
+      "pdpp-reference-mcp",
+    );
 
-    // schema fan-out: streams from both children should appear, each
-    // tagged with the source's connector_id and grant_id.
-    const schemaCall = await postMcpJson(rsUrl, accessToken, {
+    const packageAccess = mustExist(
+      await getGrantPackageAccess(packageId),
+      "package access is available",
+    ) as { members: GrantPackageMember[] };
+    assert.equal(packageAccess.members.length, 2);
+    const childGrantIds = packageAccess.members.map(
+      (member) => member.grant_id,
+    );
+
+    const missingSelector = await postMcpJson(rsUrl, accessToken, {
       id: 2,
       jsonrpc: "2.0",
       method: "tools/call",
       params: { arguments: {}, name: "schema" },
     });
-    assert.equal(schemaCall.status, 200);
-    assert.equal(resultOf(schemaCall).isError, undefined);
-    const schemaData = structuredContentData(resultOf(schemaCall));
-    const schemaPackage = mustExist(schemaPackageMetadata(schemaData), "schema response carries package metadata");
-    assert.ok(schemaPackage.grant_package, "schema response carries package metadata");
-    assert.equal(schemaPackage.member_count, 2);
-    const schemaConnectors = (schemaData.connectors as Record<string, unknown>[] | undefined) || [];
-    const schemaStreams = schemaConnectors.flatMap((connector) =>
-      ((connector.streams as Record<string, unknown>[] | undefined) || []).map((stream) => ({
-        ...stream,
-        source: stream.source || connector.source,
-      }))
+    assert.equal(missingSelector.status, 200);
+    assert.equal(resultOf(missingSelector).isError, true);
+    assert.match(
+      JSON.stringify(resultOf(missingSelector).content),
+      /list_package_children/,
     );
-    const schemaConnectorIds = new Set(
-      schemaStreams
-        .map((s) => {
-          const source = s.source as Record<string, unknown> | undefined;
-          const connectorId = source?.connector_id || source?.connector_key;
-          return typeof connectorId === "string" ? (canonicalConnectorKey(connectorId) ?? connectorId) : connectorId;
-        })
-        .filter(Boolean)
-    );
-    assert.ok(schemaConnectorIds.has(spotify.connector_id), "schema fanout includes spotify streams");
-    assert.ok(schemaConnectorIds.has(github.connector_id), "schema fanout includes github streams");
-    const schemaGrantIds = new Set(
-      schemaStreams.map((s) => (s.source as Record<string, unknown> | undefined)?.grant_id).filter(Boolean)
-    );
-    assert.equal(schemaGrantIds.size, 2, "each stream is tagged with its child grant_id");
+    for (const grant_id of childGrantIds) {
+      // biome-ignore lint/performance/noAwaitInLoops: Each child needs an isolated live schema control.
+      const selectedSchema = await postMcpJson(rsUrl, accessToken, {
+        id: 3,
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: { arguments: { grant_id }, name: "schema" },
+      });
+      assert.equal(selectedSchema.status, 200);
+      assert.equal(resultOf(selectedSchema).isError, undefined);
+      const schemaData = structuredContentData(resultOf(selectedSchema));
+      assert.equal(
+        schemaData.package,
+        undefined,
+        "schema contains only the selected child, with no merged package summary",
+      );
+    }
+    const packageTools = await postMcpJson(rsUrl, accessToken, {
+      id: 4,
+      jsonrpc: "2.0",
+      method: "tools/list",
+      params: {},
+    });
+    for (const tool of resultOf(packageTools).tools as Array<{
+      inputSchema: { properties: Record<string, unknown>; required: string[] };
+    }>) {
+      assert.equal(
+        (tool.inputSchema.properties.grant_id as { type?: string }).type,
+        "string",
+      );
+      assert.ok(tool.inputSchema.required.includes("grant_id"));
+    }
 
     // The package token MUST NOT reach a non-/mcp REST surface. The
     // canonical REST surfaces are gated by `requireClient` (returns 403
@@ -2492,10 +2514,14 @@ test("multi-source hosted MCP picker issues a package token usable at /mcp with 
     const restProbe = await fetchJson(`${rsUrl}/v1/schema`, {
       headers: { Authorization: `Bearer ${accessToken}` },
     });
-    assert.notEqual(restProbe.status, 200, "package tokens MUST NOT serve REST /v1/schema");
+    assert.notEqual(
+      restProbe.status,
+      200,
+      "package tokens MUST NOT serve REST /v1/schema",
+    );
     assert.ok(
       restProbe.status === 403 || restProbe.status === 404,
-      `expected REST surface to reject package token, got ${restProbe.status}`
+      `expected REST surface to reject package token, got ${restProbe.status}`,
     );
 
     // Refresh-token exchange must succeed and return a fresh package token.
@@ -2517,19 +2543,26 @@ test("multi-source hosted MCP picker issues a package token usable at /mcp with 
     assert.notEqual(refreshed.body.access_token, accessToken);
     const refreshedAccessToken = stringField(refreshed.body, "access_token");
 
-    // The refreshed package token still reaches /mcp with both children.
-    const refreshedSchema = await postMcpJson(rsUrl, refreshedAccessToken, {
-      id: 4,
-      jsonrpc: "2.0",
-      method: "tools/call",
-      params: { arguments: {}, name: "schema" },
-    });
-    assert.equal(refreshedSchema.status, 200);
-    const refreshedSchemaData = structuredContentData(resultOf(refreshedSchema));
-    assert.equal(
-      mustExist(schemaPackageMetadata(refreshedSchemaData), "schema response carries package metadata").member_count,
-      2
-    );
+    // Refresh retains both child identities; each read still names one child.
+    for (const member of packageAccess.members) {
+      // biome-ignore lint/performance/noAwaitInLoops: Each refreshed child needs an isolated live schema control.
+      const refreshedSchema = await postMcpJson(rsUrl, refreshedAccessToken, {
+        id: 4,
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: { arguments: { grant_id: member.grant_id }, name: "schema" },
+      });
+      assert.equal(refreshedSchema.status, 200);
+      assert.equal(resultOf(refreshedSchema).isError, undefined);
+      const connectorId = member.grant_storage_binding?.connector_id;
+      assert.ok(connectorId, "refreshed child has its own connector identity");
+      assert.ok(
+        schemaStreamRows(structuredContentData(resultOf(refreshedSchema))).some(
+          (stream) => stream.source.connector_id === connectorId,
+        ),
+        `refreshed grant ${member.grant_id} still reads ${connectorId}`,
+      );
+    }
   } finally {
     await closeServer(server);
   }
@@ -2699,7 +2732,7 @@ test("package refresh replay deactivates every family-linked package bearer", as
   }
 });
 
-test("revoking one child grant silently removes that source from the package /mcp fanout", async () => {
+test("revoked package child selectors fail while an explicitly selected sibling remains usable", async () => {
   const server = await startOpenTestServer();
   const asUrl = `http://localhost:${server.asPort}`;
   const rsUrl = `http://localhost:${server.rsPort}`;
@@ -2726,61 +2759,59 @@ test("revoking one child grant silently removes that source from the package /mc
       },
     });
 
-    // Baseline: both sources present.
-    const before = await postMcpJson(rsUrl, accessToken, {
-      id: 1,
-      jsonrpc: "2.0",
-      method: "tools/call",
-      params: { arguments: {}, name: "schema" },
-    });
-    assert.equal(before.status, 200);
-    const beforeData = structuredContentData(resultOf(before));
-    const beforePackage = mustExist(schemaPackageMetadata(beforeData), "schema response carries package metadata");
-    assert.equal(beforePackage.member_count, 2);
-    const childGrants = beforePackage.sources.map((s) => ({
-      connector_id: canonicalConnectorKey(s.connector_id) ?? s.connector_id,
-      grant_id: s.grant_id,
-    }));
+    const packageAccess = mustExist(
+      await getGrantPackageAccess(packageId),
+      "package access is available",
+    ) as { members: GrantPackageMember[] };
     const spotifyChild = mustExist(
-      childGrants.find((c) => c.connector_id === spotify.connector_id),
-      "spotify child must exist"
+      packageAccess.members.find(
+        (member) =>
+          canonicalConnectorKey(member.grant.source.id) ===
+          spotify.connector_id,
+      ),
+      "spotify child must exist",
     );
-    const githubChild = childGrants.find((c) => c.connector_id === github.connector_id);
-    assert.ok(spotifyChild && githubChild, "package exposes one child grant per source");
+    const githubChild = mustExist(
+      packageAccess.members.find(
+        (member) =>
+          canonicalConnectorKey(member.grant.source.id) === github.connector_id,
+      ),
+      "github child must exist",
+    );
+    const selectSchema = (grant_id: string, id: number) =>
+      postMcpJson(rsUrl, accessToken, {
+        id,
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: { arguments: { grant_id }, name: "schema" },
+      });
+    const ownControl = await selectSchema(spotifyChild.grant_id, 1);
+    assert.equal(resultOf(ownControl).isError, undefined);
 
     // Revoke just the spotify child grant. The package and the github child
     // stay active.
-    await revokeGrant(spotifyChild.grant_id, { request_id: "multi-source-child-revoke-test" });
-
-    const after = await postMcpJson(rsUrl, accessToken, {
-      id: 2,
-      jsonrpc: "2.0",
-      method: "tools/call",
-      params: { arguments: {}, name: "schema" },
+    await revokeGrant(spotifyChild.grant_id, {
+      request_id: "multi-source-child-revoke-test",
     });
-    assert.equal(after.status, 200);
-    const afterData = structuredContentData(resultOf(after));
-    const afterPackage = mustExist(schemaPackageMetadata(afterData), "schema response carries package metadata");
-    assert.equal(afterPackage.member_count, 1, "revoked child is no longer counted in the package fanout");
-    const afterConnectorIds = new Set(
-      schemaStreamRows(afterData).map((stream) => {
-        const connectorId = stream.source?.connector_id;
-        return canonicalConnectorKey(connectorId) ?? connectorId;
-      })
-    );
-    assert.ok(
-      !afterConnectorIds.has(spotify.connector_id),
-      "spotify streams are absent after its child grant is revoked"
-    );
-    assert.ok(afterConnectorIds.has(github.connector_id), "github streams still present");
-    const afterSourceConnectorIds = afterPackage.sources.map(
-      (source) => canonicalConnectorKey(source.connector_id) ?? source.connector_id
-    );
-    assert.deepEqual(afterSourceConnectorIds, [github.connector_id]);
 
-    // The package token itself stays valid because the package is still
-    // active and has one active member.
-    assert.equal(resultOf(after).isError, undefined);
+    const revokedSelection = await selectSchema(spotifyChild.grant_id, 2);
+    assert.equal(revokedSelection.status, 200);
+    assert.equal(resultOf(revokedSelection).isError, true);
+    assert.equal(
+      (
+        (
+          resultOf(revokedSelection).structuredContent as Record<
+            string,
+            unknown
+          >
+        ).error as Record<string, unknown>
+      ).code,
+      "unknown_grant_selector",
+      "the later inactive-child result is not implemented in this change",
+    );
+    const siblingSelection = await selectSchema(githubChild.grant_id, 3);
+    assert.equal(siblingSelection.status, 200);
+    assert.equal(resultOf(siblingSelection).isError, undefined);
 
     // Sanity: the package is still active, only the child is revoked.
     assert.ok(packageId);
@@ -2911,185 +2942,199 @@ test("revoking the package invalidates /mcp access and the refresh-token exchang
 // The unit suite in package-rs-client.test.js stubs fetch; this test
 // exercises the full stack from MCP tool call → PackageRsClient → live RI RS.
 
-test("query_records with connection_id routes to one source only (G1 source-targeted routing)", async () => {
+// G1 live authorization check: selecting one package child cannot read a sibling's record.
+
+const PACKAGE_SHARED_KEYS = ["profile-shared-1"];
+
+function packageChildManifest(connectorId: string): ConnectorManifest {
+  const manifest = structuredClone(
+    pinConnectorManifest(),
+  ) as ConnectorManifest & {
+    source_declaration: {
+      source: { id: string };
+      streams: Record<string, unknown>[];
+    };
+  };
+  manifest.connector_id = connectorId;
+  manifest.display_name = `Package child ${connectorId}`;
+  manifest.source_declaration.source.id = `https://registry.pdpp.dev/connectors/${connectorId}`;
+  for (const stream of manifest.source_declaration.streams) {
+    stream.query = { search: { lexical_fields: ["subject"] } };
+  }
+  for (const stream of manifest.streams) {
+    stream.query = { search: { lexical_fields: ["subject"] } };
+  }
+  return manifest;
+}
+
+function packageChildSentinel(connectionId: string): string {
+  return `sentinel-${connectionId}`;
+}
+
+async function registerPackageChild(
+  asUrl: string,
+  connectorId: string,
+): Promise<string> {
+  const manifest = packageChildManifest(connectorId);
+  const registration = await fetchJson(`${asUrl}/connectors`, {
+    body: JSON.stringify(manifest),
+    headers: { "Content-Type": "application/json" },
+    method: "POST",
+  });
+  assert.equal(registration.status, 201);
+  const connectionId = await seedDefaultHostedInstance(manifest);
+  for (const [index, key] of PACKAGE_SHARED_KEYS.entries()) {
+    const receivedAt = `2026-05-18T12:0${index}:00.000Z`;
+    // biome-ignore lint/performance/noAwaitInLoops: Seed each child's record before the package is issued.
+    await ingestRecord(
+      { connector_id: connectorId, connector_instance_id: connectionId },
+      {
+        data: {
+          id: key,
+          received_at: receivedAt,
+          subject: `${packageChildSentinel(connectionId)} ${key}`,
+        },
+        emitted_at: receivedAt,
+        key,
+        stream: PIN_STREAM,
+      },
+    );
+  }
+  return connectionId;
+}
+
+test("package grant_id selection isolates a real sibling record", async () => {
   const server = await startOpenTestServer();
   const asUrl = `http://localhost:${server.asPort}`;
   const rsUrl = `http://localhost:${server.rsPort}`;
 
   try {
-    const spotify = await registerSpotify(asUrl);
-    const github = await registerGithub(asUrl);
-
-    // Seed one named connection per connector so the picker renders
-    // per-connection rows and the resulting members carry connection_id.
-    const store = createSqliteConnectorInstanceStore();
-    const now = new Date().toISOString();
-    const spotifyConnId = "cin_g1_spotify";
-    const githubConnId = "cin_g1_github";
-    await store.upsert({
-      connectorId: spotify.connector_id,
-      connectorInstanceId: spotifyConnId,
-      createdAt: now,
-      displayName: "My Spotify",
-      ownerSubjectId: "owner_local",
-      sourceBinding: { account: "spotify@example.com" },
-      sourceBindingKey: "spotify@example.com",
-      sourceKind: "account",
-      status: "active",
-      updatedAt: now,
-    });
-    await store.upsert({
-      connectorId: github.connector_id,
-      connectorInstanceId: githubConnId,
-      createdAt: now,
-      displayName: "My GitHub",
-      ownerSubjectId: "owner_local",
-      sourceBinding: { account: "github@example.com" },
-      sourceBindingKey: "github@example.com",
-      sourceKind: "account",
-      status: "active",
-      updatedAt: now,
-    });
-
+    const connectionA = await registerPackageChild(asUrl, "profile-child-a");
+    const connectionB = await registerPackageChild(asUrl, "profile-child-b");
     const client = await registerAuthCodeClient(asUrl);
-    const verifier = randomBytes(32).toString("base64url");
-    const codeChallenge = pkceChallenge(verifier);
-    const state = "g1-routing-test";
-
-    // The picker branch parks the request under a consent challenge; the
-    // console's render model publishes one row per named connection. Approving
-    // every stream of both rows is the same connection-scoped whole-source
-    // approval the picker form used to submit — the routing contract under test
-    // depends on the resulting members carrying a connection_id, which is what
-    // the per-connection rows produce.
-    const challenge = await startPickerConsentChallenge({
+    const { accessToken, packageId } = await completeMultiSourcePackageFlow({
       asUrl,
-      clientId: client.client_id,
-      codeChallenge,
-      state,
+      client,
+      connectorIds: ["profile-child-a", "profile-child-b"],
     });
-    const model = await fetchPickerConsentModel(asUrl, challenge);
-    const bySelection = new Map(model.sources.map((source) => [source.selectionValue, source]));
-    const spotifySourceRow = mustExist(
-      bySelection.get(encodeHostedMcpSelection({ connectionId: spotifyConnId, connectorId: spotify.connector_id })),
-      "the model must publish a row for the named spotify connection"
-    );
-    const githubSourceRow = mustExist(
-      bySelection.get(encodeHostedMcpSelection({ connectionId: githubConnId, connectorId: github.connector_id })),
-      "the model must publish a row for the named github connection"
-    );
-    const chosen = [
-      { source: spotifySourceRow, streams: spotifySourceRow.streams },
-      { source: githubSourceRow, streams: githubSourceRow.streams },
-    ];
+    const access = mustExist(
+      await getGrantPackageAccess(packageId),
+      "package access exists",
+    ) as { members: GrantPackageMember[] };
+    const memberFor = (connectionId: string) =>
+      mustExist(
+        access.members.find((member) => member.connection_id === connectionId),
+        `package contains ${connectionId}`,
+      );
+    const childA = memberFor(connectionA);
+    const childB = memberFor(connectionB);
+    const call = (grant_id: string, id: string, requestId: number) =>
+      postMcpJson(rsUrl, accessToken, {
+        id: requestId,
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: { arguments: { grant_id, id }, name: "fetch" },
+      });
 
-    const approve = await postPickerConsentChallenge(
+    const ownA = await call(
+      childA.grant_id,
+      `${connectionA}/${PIN_STREAM}:${PACKAGE_SHARED_KEYS[0]}`,
+      1,
+    );
+    assert.equal(
+      resultOf(ownA).isError,
+      undefined,
+      "child A can read its own real record",
+    );
+    assert.ok(
+      JSON.stringify(resultOf(ownA)).includes(
+        packageChildSentinel(connectionA),
+      ),
+    );
+    const ownB = await call(
+      childB.grant_id,
+      `${connectionB}/${PIN_STREAM}:${PACKAGE_SHARED_KEYS[0]}`,
+      2,
+    );
+    assert.equal(
+      resultOf(ownB).isError,
+      undefined,
+      "child B can read its own real record",
+    );
+    assert.ok(
+      JSON.stringify(resultOf(ownB)).includes(
+        packageChildSentinel(connectionB),
+      ),
+    );
+
+    const crossChild = await call(
+      childA.grant_id,
+      `${connectionB}/${PIN_STREAM}:${PACKAGE_SHARED_KEYS[0]}`,
+      3,
+    );
+    assert.equal(crossChild.status, 200);
+    assert.equal(
+      resultOf(crossChild).isError,
+      true,
+      "child A cannot read child B's record",
+    );
+    assert.ok(
+      !JSON.stringify(resultOf(crossChild)).includes(
+        packageChildSentinel(connectionB),
+      ),
+    );
+
+    const replacement = await completeMultiSourcePackageFlow({
       asUrl,
-      challenge,
-      "accept",
-      pickerConsentAcceptBody({ chosen, clientId: client.client_id, model })
+      client,
+      connectorIds: ["profile-child-a", "profile-child-b"],
+    });
+    const replacementAccess = mustExist(
+      await getGrantPackageAccess(replacement.packageId),
+      "replacement package access exists",
+    ) as { members: GrantPackageMember[] };
+    assert.deepEqual(
+      replacementAccess.members.map((member) => member.connection_id).sort(),
+      access.members.map((member) => member.connection_id).sort(),
+      "re-consent preserves the approved instance handles",
     );
-    assert.equal(approve.status, 200, JSON.stringify(approve.body));
-    const callback = new URL(stringField(approve.body, "redirect_url"));
-    const code = mustExist(callback.searchParams.get("code"), "redirect must carry an authorization code");
-    assert.ok(code);
-
-    const { body: tokenBody } = await fetchJson(`${asUrl}/oauth/token`, {
-      body: new URLSearchParams({
-        client_id: client.client_id,
-        code,
-        code_verifier: verifier,
-        grant_type: "authorization_code",
-        redirect_uri: "https://client.example/callback",
-      }).toString(),
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      method: "POST",
-    });
-    assert.ok(tokenBody.grant_package_id, "connection-scoped multi-source package issued");
-    const accessToken = stringField(tokenBody, "access_token");
-
-    await postMcpJson(rsUrl, accessToken, {
-      id: 0,
-      jsonrpc: "2.0",
-      method: "initialize",
-      params: {
-        capabilities: {},
-        clientInfo: { name: "g1-routing-test", version: "0.0.0" },
-        protocolVersion: "2025-06-18",
-      },
-    });
-
-    // Step 1: fan-out schema to confirm both connection_id values are present.
-    const schemaCall = await postMcpJson(rsUrl, accessToken, {
-      id: 1,
-      jsonrpc: "2.0",
-      method: "tools/call",
-      params: { arguments: {}, name: "schema" },
-    });
-    assert.equal(schemaCall.status, 200);
-    assert.equal(resultOf(schemaCall).isError, undefined);
-    const schemaData = structuredContentData(resultOf(schemaCall));
-    // biome-ignore lint/suspicious/noUnnecessaryConditions: the helper intentionally returns null for absent package metadata.
-    const sources = schemaPackageMetadata(schemaData)?.sources ?? [];
-    assert.equal(sources.length, 2, "package exposes two sources");
-
-    const spotifySource = sources.find((s) => s.connection_id === spotifyConnId);
-    const githubSource = sources.find((s) => s.connection_id === githubConnId);
-    assert.ok(spotifySource, "spotify connection is present in package sources");
-    assert.ok(githubSource, "github connection is present in package sources");
-
-    // Step 2: schema fan-out exposes stream names and source tags for both
-    // children. Pick one stream per source for targeted read calls.
-    const allRows = schemaStreamRows(schemaData);
-    assert.ok(allRows.length > 0, "schema returns streams from package sources");
-    const allConnectorIds = new Set(allRows.map((r) => r.source?.connector_id).filter(Boolean));
-    assert.ok(allConnectorIds.has(spotify.connector_id), "schema fan-out includes spotify streams");
-    assert.ok(allConnectorIds.has(github.connector_id), "schema fan-out includes github streams");
-    const spotifyRow = allRows.find((r) => r.source?.connection_id === spotifyConnId);
-    const githubRow = allRows.find((r) => r.source?.connection_id === githubConnId);
-    assert.ok(spotifyRow?.name, "spotify connection has a stream to query");
-    assert.ok(githubRow?.name, "github connection has a stream to query");
-
-    // Step 3: query_records scoped to spotify's connection_id routes to that child.
-    const spotifyQuery = await postMcpJson(rsUrl, accessToken, {
-      id: 3,
-      jsonrpc: "2.0",
-      method: "tools/call",
-      params: {
-        arguments: { connection_id: spotifyConnId, limit: 1, stream: spotifyRow.name },
-        name: "query_records",
-      },
-    });
-    assert.equal(spotifyQuery.status, 200);
-    assert.equal(resultOf(spotifyQuery).isError, undefined, "spotify-scoped query_records must not be an error");
-
-    // Step 4: query_records scoped to github's connection_id routes to that child.
-    const githubQuery = await postMcpJson(rsUrl, accessToken, {
+    assert.ok(
+      access.members.every(
+        (member) =>
+          !replacementAccess.members.some(
+            (next) => next.grant_id === member.grant_id,
+          ),
+      ),
+      "re-consent creates new child grant identities",
+    );
+    const staleSelector = await postMcpJson(rsUrl, replacement.accessToken, {
       id: 4,
       jsonrpc: "2.0",
       method: "tools/call",
-      params: {
-        arguments: { connection_id: githubConnId, limit: 1, stream: githubRow.name },
-        name: "query_records",
-      },
+      params: { arguments: { grant_id: childA.grant_id }, name: "schema" },
     });
-    assert.equal(githubQuery.status, 200);
-    assert.equal(resultOf(githubQuery).isError, undefined, "github-scoped query_records must not be an error");
-
-    // Step 5: unknown connection_id must return a structured MCP error
-    // (isError: true), not a server crash — proves the PackageRsClient
-    // not_found error path is wired through the full live stack.
-    const unknownQuery = await postMcpJson(rsUrl, accessToken, {
-      id: 5,
-      jsonrpc: "2.0",
-      method: "tools/call",
-      params: {
-        arguments: { connection_id: "cin_does_not_exist", limit: 1, stream: spotifyRow.name },
-        name: "query_records",
+    assert.equal(resultOf(staleSelector).isError, true);
+    assert.equal(
+      (
+        (resultOf(staleSelector).structuredContent as Record<string, unknown>)
+          .error as Record<string, unknown>
+      ).code,
+      "unknown_grant_selector",
+    );
+    const replacementSelector = await postMcpJson(
+      rsUrl,
+      replacement.accessToken,
+      {
+        id: 5,
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          arguments: { grant_id: replacementAccess.members[0]!.grant_id },
+          name: "schema",
+        },
       },
-    });
-    assert.equal(unknownQuery.status, 200, "unknown connection_id returns HTTP 200 (MCP error envelope)");
-    assert.equal(resultOf(unknownQuery).isError, true, "unknown connection_id returns isError: true");
+    );
+    assert.equal(resultOf(replacementSelector).isError, undefined);
   } finally {
     await closeServer(server);
   }

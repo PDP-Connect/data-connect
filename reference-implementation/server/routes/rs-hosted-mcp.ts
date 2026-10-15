@@ -7,15 +7,15 @@
 // Behaviour-preserving extraction from `server/index.js` per the OpenSpec
 // change `split-reference-server-by-route-family` (§5.4). These three routes
 // proxy inbound MCP requests through `@pdpp/mcp-server` using either a
-// single-bearer `RsClient` (standard client token) or a fan-out
-// `PackageRsClient` (mcp_package token). Auth posture:
+// single-bearer `RsClient` (standard client token) or a selected-child
+// `PackageProfile` (mcp_package token). Auth posture:
 //   - `requireToken` — rejects unauthenticated and owner-token requests
 //   - `requireClientOrMcpPackage` — only `client` or `mcp_package` token kinds
 //     may reach the MCP surface; owner tokens are always rejected.
 //   - `requireTrustedHostedMcpResource` — host-based guard identical to the
 //     one that guards the canonical provider protected-resource metadata.
 //
-// `handleStreamableHttpRequest` and `createPackageRsClient` are injected via
+// `handleStreamableHttpRequest` and `createPackageProfile` are injected via
 // context because `@pdpp/mcp-server` ships as a JS-only workspace package
 // without `.d.ts` declarations, so they cannot be imported directly from a
 // strict-mode `.ts` file.
@@ -82,6 +82,7 @@ interface McpServerOptions {
   readonly accessToken?: string;
   readonly fetch: typeof globalThis.fetch;
   readonly providerUrl: string;
+  readonly packageProfile?: unknown;
   readonly rsClient?: unknown;
   readonly serverIcons?: readonly McpServerIcon[];
   readonly serverName: string;
@@ -90,10 +91,10 @@ interface McpServerOptions {
 
 export interface MountRsHostedMcpContext {
   /**
-   * `createPackageRsClient` from `./package-rs-client.js`.
+   * `createPackageProfile` from `./package-rs-client.js`.
    * Injected for the same reason — called with a JS-only signature.
    */
-  createPackageRsClient: (options: {
+  createPackageProfile: (options: {
     providerUrl: string;
     members: readonly GrantPackageMember[];
     fetch: typeof globalThis.fetch;
@@ -297,7 +298,7 @@ export function mountRsHostedMcp(app: AppLike, ctx: MountRsHostedMcpContext): vo
       ctx.pdppError(res, 401, "authentication_error", "Grant package is revoked or has no active members");
       return null;
     }
-    const rsClient = ctx.createPackageRsClient({
+    const packageProfile = ctx.createPackageProfile({
       fetch: globalThis.fetch,
       members: access.members,
       // Child self-calls use the internal base, not the public edge.
@@ -306,7 +307,7 @@ export function mountRsHostedMcp(app: AppLike, ctx: MountRsHostedMcpContext): vo
     const mcpServerOptions = {
       fetch: globalThis.fetch,
       providerUrl: resource,
-      rsClient,
+      packageProfile,
       serverIcons: hostedMcpIcons(resource),
       serverName: "pdpp-reference-mcp",
       serverVersion: referenceRevision,
