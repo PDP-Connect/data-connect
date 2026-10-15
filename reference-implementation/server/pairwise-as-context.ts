@@ -338,6 +338,16 @@ export async function recordPairwiseAsInstanceAuthority(input: {
 			"Retained instance source authority conflicts with accepted declaration",
 		);
 	}
+	if (
+		retainedAfterInsert.declarationVersion === input.declarationVersion &&
+		JSON.stringify(
+			[...retainedAfterInsert.acceptedLegacySourceAliases].sort(),
+		) !== aliasesJson
+	) {
+		throw new PairwiseIdentityContextError(
+			"Retained instance source authority conflicts with accepted declaration",
+		);
+	}
 	if (isPostgresStorageBackend()) {
 		await postgresQuery(
 			`INSERT INTO pairwise_as_instance_authority_versions(
