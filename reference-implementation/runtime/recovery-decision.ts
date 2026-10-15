@@ -250,7 +250,9 @@ export function classifyRecoveryGap(row: RecoveryGapRow): RecoveryGapClassificat
   const reasonClass = classifyRecoveryReason(row?.reason);
   // The explicit discriminator wins over class/cap/pressure hints. A bare
   // `not_retriable` diagnostic hint is NOT a guard; only the durable boolean is.
-  const recoveryClass = isRecoverableDetailGapRow(row) ? connectorRecoveryClass(connectorClass, reasonClass) : "permanent_loss";
+  const recoveryClass = isRecoverableDetailGapRow(row)
+    ? connectorRecoveryClass(connectorClass, reasonClass)
+    : "permanent_loss";
 
   const isSourcePressure = recoveryClass === "provider_pressure";
   return {

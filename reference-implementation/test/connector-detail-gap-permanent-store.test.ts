@@ -254,7 +254,11 @@ for (const backend of BACKENDS) {
         stream: "messages",
       });
       assert.ok(permanent && cooling);
-      assert.deepEqual(await recoverableSelection(ctx).then(ids), [], "cooling transient work stays gated; permanent never selected");
+      assert.deepEqual(
+        await recoverableSelection(ctx).then(ids),
+        [],
+        "cooling transient work stays gated; permanent never selected"
+      );
       assert.deepEqual(
         await recoverableSelection(ctx, { includeNonRetryable: true }).then(ids),
         [permanent.gap_id],
@@ -533,7 +537,12 @@ for (const backend of BACKENDS) {
       assert.ok(gap);
       const terminal = await ctx.store.markGapStatus(gap.gap_id, "terminal", { now: NOW });
       assert.equal(terminal?.status, "terminal");
-      const reUpserted = await seed(ctx, { now: LATER, reason: "source_unrepresentable", recordKey: "k", retryable: false });
+      const reUpserted = await seed(ctx, {
+        now: LATER,
+        reason: "source_unrepresentable",
+        recordKey: "k",
+        retryable: false,
+      });
       assert.equal(reUpserted?.status, "terminal", "terminal stays sticky on re-upsert");
       assert.equal(reUpserted?.retryable, false, "the discriminator survives the terminal transition");
       assert.deepEqual(await recoverableSelection(ctx), []);

@@ -382,7 +382,11 @@ test(
     }
     const permanentAfter = await store.getGapById(seeded.permanent.gap_id);
     assert.equal(permanentAfter?.status, "pending", "the permanent gap was never leased");
-    assert.equal(permanentAfter?.attempt_count, 0, "serving the transient gap consumed no attempt of the permanent one");
+    assert.equal(
+      permanentAfter?.attempt_count,
+      0,
+      "serving the transient gap consumed no attempt of the permanent one"
+    );
   })
 );
 

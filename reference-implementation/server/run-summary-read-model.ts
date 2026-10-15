@@ -131,7 +131,9 @@ function readRuntimeCollectionFact(raw: unknown): RuntimeCollectionFact | null {
     considered: readSafeNonNegativeInteger(entry.considered),
     covered: readSafeNonNegativeInteger(entry.covered),
     pending_detail_gaps: readFiniteNumber(entry.pending_detail_gaps, 0),
-    ...(readSafeNonNegativeInteger(entry.permanent_detail_gaps) ? { permanent_detail_gaps: readSafeNonNegativeInteger(entry.permanent_detail_gaps) as number } : {}),
+    ...(readSafeNonNegativeInteger(entry.permanent_detail_gaps)
+      ? { permanent_detail_gaps: readSafeNonNegativeInteger(entry.permanent_detail_gaps) as number }
+      : {}),
     // Whether the declared boundary was enforceable on this stream. `false`
     // marks a stream collected WHOLE under a bounded run, so its coverage must
     // not read as proving the declared region.

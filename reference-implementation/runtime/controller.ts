@@ -3549,10 +3549,7 @@ export function createController(opts: ControllerOptions = {}): Controller {
   // request or offer a refetch of such a gap: refuse, rather than silently run an
   // ordinary collection labelled as gap recovery. No pending-gap evidence at all
   // keeps the existing behavior.
-  async function assertRecoveryOnlyHasRecoverableWork(
-    connectorId: string,
-    connectorInstanceId: string
-  ): Promise<void> {
+  async function assertRecoveryOnlyHasRecoverableWork(connectorId: string, connectorInstanceId: string): Promise<void> {
     const rows = await listPendingGapsForContinuation(connectorId, connectorInstanceId);
     if (rows.length > 0 && rows.every((row) => !isRecoverableDetailGapRow(row))) {
       throw new ControllerError(

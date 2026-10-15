@@ -282,13 +282,7 @@ function recordKeys(stream: string): string[] {
 
 test("required [a,b], RECORD a, permanent gap b, hydrated [a], gap_keys [b]: accounted, not hydrated, not complete-by-proof", async (t) => {
   const { ownerToken, server } = await start(t);
-  const { result, runId, thrown } = await run(server, ownerToken, [
-    RECORD_A,
-    permanentGap(),
-    coverage(),
-    STATE,
-    DONE,
-  ]);
+  const { result, runId, thrown } = await run(server, ownerToken, [RECORD_A, permanentGap(), coverage(), STATE, DONE]);
 
   assert.equal(thrown, null);
   assert.ok(result && runId);
@@ -333,7 +327,13 @@ const UNACCOUNTED_CASES: ReadonlyArray<{ label: string; messages: Record<string,
   },
   {
     label: "the observed gap is for a different key",
-    messages: [RECORD_A, permanentGap({ detail_locator: { kind: "test.valuation", valuation_id: "c" }, record_key: "c" }), coverage(), STATE, DONE],
+    messages: [
+      RECORD_A,
+      permanentGap({ detail_locator: { kind: "test.valuation", valuation_id: "c" }, record_key: "c" }),
+      coverage(),
+      STATE,
+      DONE,
+    ],
   },
   {
     label: "the observed gap is for a different stream",
@@ -353,7 +353,10 @@ for (const unaccounted of UNACCOUNTED_CASES) {
     if (thrown !== null) {
       // A stricter parent/stream check may reject the run outright; either way
       // the key must not have been credited and nothing hydrated for b.
-      assert.deepEqual(recordKeys("valuations").filter((key) => key === "b"), []);
+      assert.deepEqual(
+        recordKeys("valuations").filter((key) => key === "b"),
+        []
+      );
       return;
     }
     assert.ok(result);
@@ -364,7 +367,11 @@ for (const unaccounted of UNACCOUNTED_CASES) {
       gaps.some((gap) => gap.reason === "detail_coverage_incomplete"),
       "the unaccounted key is reported as a coverage shortfall"
     );
-    assert.deepEqual(recordKeys("valuations").filter((key) => key === "b"), [], "b is never hydrated");
+    assert.deepEqual(
+      recordKeys("valuations").filter((key) => key === "b"),
+      [],
+      "b is never hydrated"
+    );
   });
 }
 

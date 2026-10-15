@@ -188,7 +188,11 @@ function lastPressureAt(row: GapRow): string | null {
   return null;
 }
 
-export function mapPressureGaps(rows: readonly GapRow[], instanceKey: string, defaultInstanceId: string): PressureGap[] {
+export function mapPressureGaps(
+  rows: readonly GapRow[],
+  instanceKey: string,
+  defaultInstanceId: string
+): PressureGap[] {
   const gaps: PressureGap[] = [];
   for (const row of rows) {
     if (!isRecoverableDetailGapRow(row)) {

@@ -3440,7 +3440,11 @@ test("local-collector-gaps route preserves an explicit retryable boolean into th
         gapId
       );
     assert.equal(stored(retryableGapId).retryable, 1);
-    assert.equal(stored(permanentGapId).retryable, 0, "an explicit false is never converted to recoverable legacy NULL");
+    assert.equal(
+      stored(permanentGapId).retryable,
+      0,
+      "an explicit false is never converted to recoverable legacy NULL"
+    );
     assert.equal(stored(permanentGapId).reason, "policy_budget", "the collector protocol's own reason is kept as-is");
 
     // Replay with no usable boolean cannot happen on this route (it is required);

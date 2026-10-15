@@ -2570,7 +2570,12 @@ test(
     await seedInstances({ sourceKind: "manual" });
     const store = getTestDetailGapStore() as unknown as PermanentSeedStore;
     const future = new Date(Date.now() + 60 * 60 * 1000).toISOString();
-    const base = { connectorId: CONNECTOR_ID, connectorInstanceId: WORK_INSTANCE_ID, grantId: "grant_1", stream: "files" };
+    const base = {
+      connectorId: CONNECTOR_ID,
+      connectorInstanceId: WORK_INSTANCE_ID,
+      grantId: "grant_1",
+      stream: "files",
+    };
     await store.upsertPendingGap({
       ...base,
       nextAttemptAfter: future,
@@ -2621,7 +2626,12 @@ test(
     seedConnector();
     await seedInstances({ sourceKind: "manual" });
     const store = getTestDetailGapStore() as unknown as PermanentSeedStore;
-    const base = { connectorId: CONNECTOR_ID, connectorInstanceId: WORK_INSTANCE_ID, grantId: "grant_1", stream: "files" };
+    const base = {
+      connectorId: CONNECTOR_ID,
+      connectorInstanceId: WORK_INSTANCE_ID,
+      grantId: "grant_1",
+      stream: "files",
+    };
     await store.upsertPendingGap({ ...base, reason: "source_unrepresentable", recordKey: "lost", retryable: false });
     await store.upsertPendingGap({ ...base, reason: "upstream_pressure", recordKey: "later", retryable: true });
 

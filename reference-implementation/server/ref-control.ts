@@ -4113,7 +4113,10 @@ function deriveCollectionReportEntryCoverage(input: {
     skipped: null,
     stream: input.stream,
   };
-  const permanentGaps = Math.max(baseFact.permanent_detail_gaps ?? 0, input.permanentGapCountByStream.get(input.stream) ?? 0);
+  const permanentGaps = Math.max(
+    baseFact.permanent_detail_gaps ?? 0,
+    input.permanentGapCountByStream.get(input.stream) ?? 0
+  );
   const fact: RuntimeCollectionFact = {
     ...baseFact,
     pending_detail_gaps: Math.max(baseFact.pending_detail_gaps, input.pendingGapCountByStream.get(input.stream) ?? 0),

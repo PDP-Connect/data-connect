@@ -69,9 +69,12 @@ test("admission denies permanent loss with its own reason, not cooldown, budget 
   const admission = resolveRecoveryAdmission(PERMANENT, { nowMs: NOW_MS });
   assert.deepEqual(admission, { ok: false, reason: "permanent_loss" });
   // No timing floor can make it admissible, and an expired floor changes nothing.
-  const pastFloor = resolveRecoveryAdmission(row({ next_attempt_after: "2020-01-01T00:00:00.000Z", retryable: false }), {
-    nowMs: NOW_MS,
-  });
+  const pastFloor = resolveRecoveryAdmission(
+    row({ next_attempt_after: "2020-01-01T00:00:00.000Z", retryable: false }),
+    {
+      nowMs: NOW_MS,
+    }
+  );
   assert.deepEqual(pastFloor, { ok: false, reason: "permanent_loss" });
 });
 
@@ -112,7 +115,11 @@ test("permanent loss cannot make a domain look like it has eligible recovery wor
   const onlyPermanent = [...partitionRecoveryBacklog([PERMANENT]).values()][0];
   assert.equal(hasEligibleNonPressureRecovery(onlyPermanent, NOW_MS), false);
   const mixed = [...partitionRecoveryBacklog([PERMANENT, TRANSIENT]).values()][0];
-  assert.equal(hasEligibleNonPressureRecovery(mixed, NOW_MS), true, "transient work is not starved by the permanent row");
+  assert.equal(
+    hasEligibleNonPressureRecovery(mixed, NOW_MS),
+    true,
+    "transient work is not starved by the permanent row"
+  );
 });
 
 test("admission diagnostics report permanent loss distinctly and do not explain it as system_issue", () => {

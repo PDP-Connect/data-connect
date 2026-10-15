@@ -341,7 +341,13 @@ test("a permanent-only backlog shape offers no recoverable work and no recovery 
   const permanentOnly = backlog({ max_attempt_count: 0, next_attempt_at: null, pending: 0, pending_other: 0 });
   assert.equal(hasRecoverableWork(permanentOnly), false);
   assert.equal(
-    deriveRecoveryStep(null, health({ axes: { attention: "none", coverage: "terminal_gap", freshness: "fresh", outbox: "idle" }, state: "degraded" })),
+    deriveRecoveryStep(
+      null,
+      health({
+        axes: { attention: "none", coverage: "terminal_gap", freshness: "fresh", outbox: "idle" },
+        state: "degraded",
+      })
+    ),
     "none"
   );
 });

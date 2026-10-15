@@ -134,7 +134,12 @@ test("live gap reads: a permanent pending gap reads terminal_gap, is not resumab
 test("live gap reads: recoverable and legacy NULL gaps still read retryable_gap / resumable", () => {
   for (const retryable of [true, null, undefined]) {
     const [entry] = report([
-      { reason: "temporary_unavailable", status: "pending", stream: "other_items", ...(retryable === undefined ? {} : { retryable }) },
+      {
+        reason: "temporary_unavailable",
+        status: "pending",
+        stream: "other_items",
+        ...(retryable === undefined ? {} : { retryable }),
+      },
     ]);
     assert.ok(entry);
     assert.equal(entry.coverage_condition, "retryable_gap", String(retryable));
@@ -157,7 +162,13 @@ test("source-pressure backlog rollup excludes permanent gaps from pending and pe
   const backlog = deriveSourcePressureBacklog({
     pendingGaps: [
       { attemptCount: 0, lastPressureAt: null, nextAttemptAfter: null, reason: "rate_limited", retryable: false },
-      { attemptCount: 0, lastPressureAt: null, nextAttemptAfter: null, reason: "source_unrepresentable", retryable: false },
+      {
+        attemptCount: 0,
+        lastPressureAt: null,
+        nextAttemptAfter: null,
+        reason: "source_unrepresentable",
+        retryable: false,
+      },
       { attemptCount: 0, lastPressureAt: null, nextAttemptAfter: null, reason: "rate_limited", retryable: true },
       { attemptCount: 0, lastPressureAt: null, nextAttemptAfter: null, reason: "retry_exhausted" },
     ] as never,
