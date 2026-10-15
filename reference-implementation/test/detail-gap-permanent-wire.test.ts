@@ -466,3 +466,35 @@ test(
     assert.equal(after?.recovered_run_id, null);
   })
 );
+
+test(
+  "an unleased DETAIL_GAP_RECOVERED fails closed when the store lacks the atomic connector recovery operation",
+  withTempDb(async () => {
+    const calls: string[] = [];
+    // A store exposing only the generic status write: it must NOT be used for a connector claim.
+    const store = {
+      // biome-ignore lint/suspicious/useAwait: async test double keeps the Promise-returning dependency contract.
+      async getGapById() {
+        return { gap_id: "gap_x", retryable: null, status: "pending" };
+      },
+      // biome-ignore lint/suspicious/useAwait: async test double keeps the Promise-returning dependency contract.
+      async listPendingGaps() {
+        return [];
+      },
+      // biome-ignore lint/suspicious/useAwait: async test double keeps the Promise-returning dependency contract.
+      async markGapStatus(gapId: string) {
+        calls.push(gapId);
+        return { gap_id: gapId, status: "recovered" };
+      },
+    };
+    await assert.rejects(
+      () =>
+        runMessages("perm_wire_fail_closed", store, [
+          { gap_id: "gap_x", record_key: "k1", reference_only: true, stream: "messages", type: "DETAIL_GAP_RECOVERED" },
+          DONE,
+        ]),
+      /connector gap recovery/
+    );
+    assert.deepEqual(calls, [], "the generic write was never used as a fallback");
+  })
+);

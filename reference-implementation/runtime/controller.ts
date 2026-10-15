@@ -1465,7 +1465,10 @@ interface PendingDetailGapRow {
   readonly attempt_count?: number | null;
   readonly connector_id?: string | null;
   readonly connector_instance_id?: string | null;
+  /** Keyset cursor parts (`created_at`, `gap_id`) when the store returns them. */
+  readonly created_at?: string | null;
   readonly detail_class?: string | null;
+  readonly gap_id?: string | null;
   readonly last_attempt_at?: string | null;
   readonly last_error?: { readonly class?: unknown } | null;
   readonly next_attempt_after?: string | null;
@@ -1481,6 +1484,8 @@ interface PendingDetailGapRow {
  * cooldown projection. Kept to one method so a test fake is trivial.
  */
 interface ConnectorDetailGapReadOptions {
+  /** Keyset cursor: only rows strictly after (`created_at`, `gap_id`). */
+  readonly after?: { readonly createdAt: string; readonly gapId: string };
   /** Connector-wide reads only: scope to one connection in SQL, before the LIMIT. */
   readonly connectorInstanceId?: string;
   /** Applied in SQL before the LIMIT: keep only reasons NOT in this list. */
@@ -3554,9 +3559,15 @@ export function createController(opts: ControllerOptions = {}): Controller {
   async function listPendingGapsForContinuation(
     connectorId: string,
     connectorInstanceId: string,
-    readOptions: { readonly limit?: number; readonly recoverableOnly?: boolean } = {}
+    readOptions: {
+      readonly after?: { readonly createdAt: string; readonly gapId: string };
+      readonly limit?: number;
+      readonly recoverableOnly?: boolean;
+    } = {}
   ): Promise<readonly PendingDetailGapRow[]> {
-    const options = { limit: RECOVERY_CONTINUATION_PENDING_READ_LIMIT, ...readOptions };
+    // `connectorInstanceId` is passed to BOTH reads so the connector-wide fallback also
+    // scopes to this connection in SQL, before the LIMIT.
+    const options = { connectorInstanceId, limit: RECOVERY_CONTINUATION_PENDING_READ_LIMIT, ...readOptions };
     if (detailGapStore.listPendingGapsForConnectorInstance) {
       return await Promise.resolve(
         detailGapStore.listPendingGapsForConnectorInstance(connectorId, connectorInstanceId, options)
@@ -3597,13 +3608,42 @@ export function createController(opts: ControllerOptions = {}): Controller {
     connectorId: string,
     connectorInstanceId: string
   ): Promise<boolean> {
-    // Permanent rows are dropped in SQL before the LIMIT so they cannot fill the page.
-    const rows = await listPendingGapsForContinuation(connectorId, connectorInstanceId, { recoverableOnly: true });
+    // Eligibility is `resolveRecoveryAdmission` over a row, which depends on the row's
+    // recovery class, its own retry floor and its work domain, so no fixed-size page of
+    // the OLDEST recoverable rows can decide it: they may all be retryable pressure,
+    // still inside their floor, or owner-required / connector-defect. Walk the
+    // connection's recoverable pending gaps in stable keyset pages until an admissible
+    // non-pressure row is found or the pending set is proven exhausted (a short page).
     const nowMs = Date.now();
-    return rows.some((row) => {
-      const classification = classifyRecoveryGap(row);
-      return classification.isNonPressureRecovery && resolveRecoveryAdmission(row, { nowMs }).ok;
-    });
+    let after: { createdAt: string; gapId: string } | undefined;
+    for (;;) {
+      // biome-ignore lint/performance/noAwaitInLoops: each page depends on the previous cursor.
+      const page = await listPendingGapsForContinuation(connectorId, connectorInstanceId, {
+        recoverableOnly: true,
+        ...(after ? { after } : {}),
+      });
+      if (
+        page.some((row) => {
+          const classification = classifyRecoveryGap(row);
+          return classification.isNonPressureRecovery && resolveRecoveryAdmission(row, { nowMs }).ok;
+        })
+      ) {
+        return true;
+      }
+      if (page.length < RECOVERY_CONTINUATION_PENDING_READ_LIMIT) {
+        return false;
+      }
+      const last = page[page.length - 1];
+      // A store that returns a full page it cannot continue from (no cursor fields, or a
+      // cursor that did not advance) cannot prove more rows exist, so stop here.
+      if (!(last?.created_at && last.gap_id)) {
+        return false;
+      }
+      if (after && after.createdAt === last.created_at && after.gapId === last.gap_id) {
+        return false;
+      }
+      after = { createdAt: last.created_at, gapId: last.gap_id };
+    }
   }
 
   // Forward-evidence-debt probe for `resolveEffectiveRecoveryOnly` (mirrors

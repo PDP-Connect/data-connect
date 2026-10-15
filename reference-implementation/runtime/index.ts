@@ -340,6 +340,7 @@ interface RuntimeDetailGapStoreCapabilities {
     limit: number;
     streams?: string[] | null;
   }) => Promise<DurableDetailGap[] | null>;
+  markConnectorGapRecovered?: (gapId: string, options: { runId: string }) => Promise<DurableDetailGap | null>;
   markGapStatus?: (gapId: string, status: string, options: { runId: string }) => Promise<DurableDetailGap | null>;
   markLeasedGapAttempt?: (lease: ServedGapLease) => Promise<DurableDetailGap | null>;
   reclaimStrandedInProgressGaps?: (options: {
@@ -355,6 +356,7 @@ interface RuntimeDetailGapStoreCapabilities {
 }
 
 interface RuntimeDetailGapStore extends RuntimeDetailGapStoreCapabilities {
+  markConnectorGapRecovered: NonNullable<RuntimeDetailGapStoreCapabilities["markConnectorGapRecovered"]>;
   markGapStatus: NonNullable<RuntimeDetailGapStoreCapabilities["markGapStatus"]>;
   markLeasedGapAttempt: NonNullable<RuntimeDetailGapStoreCapabilities["markLeasedGapAttempt"]>;
   settleLeasedGapPending: NonNullable<RuntimeDetailGapStoreCapabilities["settleLeasedGapPending"]>;
@@ -2869,6 +2871,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
   // module boundary (that store has not been migrated yet), so the runtime
   // states the surface it actually drives here.
   const detailGapStore: RuntimeDetailGapStore = {
+    markConnectorGapRecovered: unsupportedDetailGapStoreCapability("connector gap recovery"),
     markGapStatus: unsupportedDetailGapStoreCapability("gap status transitions"),
     markLeasedGapAttempt: unsupportedDetailGapStoreCapability("leased gap attempts"),
     settleLeasedGapPending: unsupportedDetailGapStoreCapability("pending lease settlement"),
@@ -5602,11 +5605,30 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
         }
       }
       await flushAll();
-      const recoveredGap = lease
-        ? await detailGapStore.settleLeasedGapRecovered(lease)
-        : await detailGapStore.markGapStatus(recoveredGapId, "recovered", { runId });
-      if (!recoveredGap || (lease && recoveredGap.lease_id === lease.leaseId)) {
-        throw new Error("Detail-gap recovery lease was lost before durable accounting");
+      // A run that was cancelled or timed out while its flush was in flight (the
+      // controller watchdog aborts the run and may admit the next run on the same
+      // connection without waiting for this handler) must not record a recovery:
+      // `flushBatch` also drops buffered records once stopped, so the claim would be
+      // unbacked. Accepted RECORD accounting keeps its own rules.
+      if (terminalStopRequested()) {
+        return;
+      }
+      let recoveredGap: DurableDetailGap | null;
+      if (lease) {
+        recoveredGap = await detailGapStore.settleLeasedGapRecovered(lease);
+        if (!recoveredGap || recoveredGap.lease_id === lease.leaseId) {
+          throw new Error("Detail-gap recovery lease was lost before durable accounting");
+        }
+      } else {
+        // The permanent-loss predicate is evaluated by the store in the same statement
+        // as the write, so the early read above cannot be stale by the time we write.
+        // A null result is a refusal, not a recovery: no event, no credit.
+        recoveredGap = await detailGapStore.markConnectorGapRecovered(recoveredGapId, { runId });
+        if (!recoveredGap) {
+          throw new Error(
+            `Connector emitted DETAIL_GAP_RECOVERED for gap '${recoveredGapId}' that is permanent (non-retryable, ${PERMANENT_DETAIL_GAP_REASON}) or no longer exists: a recovery claim cannot hydrate it`
+          );
+        }
       }
       if (lease) {
         allServedGapLeases.delete(recoveredGapId);

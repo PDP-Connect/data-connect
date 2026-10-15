@@ -4357,18 +4357,16 @@ test(
         async listPendingGaps(): Promise<MockGap[]> {
           return [];
         },
+        // An unleased connector recovery claim goes through the atomic connector-origin
+        // operation; the generic `markGapStatus` is reserved for trusted internal callers.
         // biome-ignore lint/suspicious/useAwait: async test doubles retain the Promise-returning dependency contract and its microtask timing.
-        async markGapStatus(
-          gapId: string,
-          status: string,
-          options: MockMarkGapStatusCall["options"]
-        ): Promise<MockGap> {
-          statusCalls.push({ gapId, options, status });
+        async markConnectorGapRecovered(gapId: string, options: MockMarkGapStatusCall["options"]): Promise<MockGap> {
+          statusCalls.push({ gapId, options, status: "recovered" });
           return {
             gap_id: gapId,
             reason: "rate_limited",
             record_key: "conv_1",
-            status,
+            status: "recovered",
             stream: "messages",
           };
         },

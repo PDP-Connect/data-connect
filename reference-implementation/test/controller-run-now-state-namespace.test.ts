@@ -1049,3 +1049,153 @@ test("explicit recoveryOnly:true over >100 permanent rows and NO recoverable row
   );
   assert.equal(calls.length, 0);
 });
+
+// ─── recovery eligibility needs the real admission predicate, not a page of rows ──
+//
+// `hasEligibleNonPressureRecoveryWork` classifies rows with `classifyRecoveryGap`
+// and `resolveRecoveryAdmission` in JS. A bounded page of the OLDEST recoverable
+// rows can be entirely inadmissible (retryable pressure rows, rows still inside
+// their own retry floor, owner-required or connector-defect rows), so a later,
+// immediately eligible row was never seen: an implicit run picked forward
+// collection and the post-progress continuation stopped while recovery existed.
+// Eligibility must be established by paging until an admissible row is found or
+// the pending set is proven exhausted, with `resolveRecoveryAdmission` staying the
+// single source of truth. These tests drive the real controller and the real store.
+
+interface GapGroup {
+  readonly count: number;
+  readonly lastErrorClass?: string;
+  readonly nextAttemptAfter?: string;
+  readonly offsetSeconds: number;
+  readonly prefix: string;
+  readonly reason: string;
+}
+
+async function seedGapGroups(groups: readonly GapGroup[]) {
+  const store = createSqliteConnectorDetailGapStore();
+  const base = Date.parse("2026-01-01T00:00:00.000Z");
+  for (const group of groups) {
+    for (let index = 0; index < group.count; index += 1) {
+      // biome-ignore lint/performance/noAwaitInLoops: ordered setup keeps created_at ordering deterministic.
+      await store.upsertPendingGap({
+        connectorId: AMAZON,
+        connectorInstanceId: "cin_recovery",
+        detailLocator: { kind: "test.item", item: `${group.prefix}${index}` },
+        grantId: "grant_1",
+        ...(group.lastErrorClass ? { lastError: { class: group.lastErrorClass } } : {}),
+        ...(group.nextAttemptAfter ? { nextAttemptAfter: group.nextAttemptAfter } : {}),
+        now: new Date(base + (group.offsetSeconds + index) * 1000).toISOString(),
+        reason: group.reason,
+        recordKey: `${group.prefix}${index}`,
+        retryable: true,
+        stream: "order_items",
+      });
+    }
+  }
+  return store as unknown as DetailGapReadStoreFixture;
+}
+
+const FUTURE_FLOOR = new Date(Date.now() + 6 * 60 * 60 * 1000).toISOString();
+const ELIGIBLE_LATER: GapGroup = { count: 1, offsetSeconds: 10_000, prefix: "ok", reason: "retry_exhausted" };
+
+async function implicitRunMode(
+  groups: readonly GapGroup[],
+  runId: string,
+  force = false
+): Promise<boolean | undefined> {
+  const store = await seedGapGroups(groups);
+  const calls: RuntimeRunConnectorOptions[] = [];
+  const controller = makeController(calls, { detailGapStore: store });
+  await controller.runNow(AMAZON, {
+    connectorInstanceId: "cin_recovery",
+    ...(force ? { force: true } : {}),
+    manifest: AMAZON_MANIFEST,
+    ownerToken: "owner-token",
+    runId,
+  });
+  await drainUntilIdle(controller);
+  assert.equal(calls.length, 1);
+  return at(calls, 0).recoveryOnly;
+}
+
+test("implicit run finds eligible work behind 120 older retryable PRESSURE rows", async (t) => {
+  freshDb(t);
+  await seedCurrentRecoveryConnection();
+  // `force` only bypasses the provider-pressure cooldown gate; it does not pick the mode.
+  const mode = await implicitRunMode(
+    [{ count: 120, offsetSeconds: 0, prefix: "pr", reason: "rate_limited" }, ELIGIBLE_LATER],
+    "run_behind_pressure",
+    true
+  );
+  assert.equal(mode, true, "pressure rows are not non-pressure recovery; the later eligible row must still be found");
+});
+
+test("implicit run finds immediately eligible work behind 120 older rows still inside their retry floor", async (t) => {
+  freshDb(t);
+  await seedCurrentRecoveryConnection();
+  const mode = await implicitRunMode(
+    [
+      { count: 120, nextAttemptAfter: FUTURE_FLOOR, offsetSeconds: 0, prefix: "fl", reason: "temporary_unavailable" },
+      { count: 1, offsetSeconds: 10_000, prefix: "now", reason: "temporary_unavailable" },
+    ],
+    "run_behind_floors"
+  );
+  assert.equal(mode, true, "no pressure gate is involved: the older rows are simply not admissible yet");
+});
+
+test("implicit run finds eligible work behind older owner-required and connector-defect rows", async (t) => {
+  freshDb(t);
+  await seedCurrentRecoveryConnection();
+  const mode = await implicitRunMode(
+    [
+      { count: 60, offsetSeconds: 0, prefix: "own", reason: "auth_failure" },
+      { count: 60, offsetSeconds: 100, prefix: "def", reason: "quarantined" },
+      ELIGIBLE_LATER,
+    ],
+    "run_behind_inadmissible_classes"
+  );
+  assert.equal(mode, true, "owner_required and connector_defect rows are denied by admission, not eligible work");
+});
+
+test("control: 120 rows that are ALL inadmissible and nothing eligible still run forward collection", async (t) => {
+  freshDb(t);
+  await seedCurrentRecoveryConnection();
+  const mode = await implicitRunMode(
+    [{ count: 120, nextAttemptAfter: FUTURE_FLOOR, offsetSeconds: 0, prefix: "fl", reason: "temporary_unavailable" }],
+    "run_all_inadmissible"
+  );
+  assert.equal(mode, false, "exhausting the pending set without an admissible row means no recovery-first");
+});
+
+test("post-progress continuation starts another recovery run when eligible work sits behind 120 inadmissible rows", async (t) => {
+  freshDb(t);
+  await seedCurrentRecoveryConnection();
+  const store = await seedGapGroups([
+    { count: 120, nextAttemptAfter: FUTURE_FLOOR, offsetSeconds: 0, prefix: "fl", reason: "temporary_unavailable" },
+    { count: 1, offsetSeconds: 10_000, prefix: "now", reason: "temporary_unavailable" },
+  ]);
+  const calls: RuntimeRunConnectorOptions[] = [];
+  const controller = makeController(calls, {
+    detailGapStore: store,
+    runConnectorImpl: (opts) => {
+      calls.push(opts);
+      // The first run reports durable recovery progress; the store still holds the eligible row.
+      return Promise.resolve({
+        detail_gaps: calls.length === 1 ? [{ gap_id: "gap_done", status: "recovered", stream: "order_items" }] : [],
+        records_emitted: 1,
+        status: "succeeded",
+      });
+    },
+  });
+  await controller.runNow(AMAZON, {
+    connectorInstanceId: "cin_recovery",
+    manifest: AMAZON_MANIFEST,
+    ownerToken: "owner-token",
+    recoveryOnly: true,
+    runId: "run_continuation_behind_floors",
+  });
+  await drainUntilIdle(controller);
+  assert.equal(calls.length, 2, "the continuation must see the eligible row behind the inadmissible page");
+  assert.equal(at(calls, 1).recoveryOnly, true);
+  assert.equal(at(calls, 1).triggerKind, "manual");
+});

@@ -264,4 +264,45 @@ for (const backend of BACKENDS) {
       );
     });
   });
+  test(`[${backend.name}] keyset pages visit every pending gap of one connection exactly once, in a stable order`, async () => {
+    await backend.run(async (ctx) => {
+      // Identical created_at on purpose: the cursor must tie-break on gap_id.
+      for (let index = 0; index < 5; index += 1) {
+        // biome-ignore lint/performance/noAwaitInLoops: ordered setup keeps the fixture deterministic.
+        await ctx.store.upsertPendingGap({
+          connectorId: ctx.connectorId,
+          connectorInstanceId: "cin_a",
+          detailLocator: { item: `s${index}`, kind: "test.item" },
+          grantId: "grant_1",
+          now: OLD,
+          reason: "retry_exhausted",
+          recordKey: `s${index}`,
+          retryable: true,
+          stream: "messages",
+        });
+      }
+      const seen: string[] = [];
+      let after: { createdAt: string; gapId: string } | undefined;
+      for (let page = 0; page < 10; page += 1) {
+        // biome-ignore lint/performance/noAwaitInLoops: each page depends on the previous cursor.
+        const rows = await ctx.store.listPendingGapsForConnectorInstance(ctx.connectorId, "cin_a", {
+          limit: 2,
+          recoverableOnly: true,
+          ...(after ? { after } : {}),
+        } as Parameters<Store["listPendingGapsForConnectorInstance"]>[2]);
+        if (rows.length === 0) {
+          break;
+        }
+        seen.push(...rows.map((row) => row.record_key as string));
+        const last = rows[rows.length - 1];
+        assert.ok(last);
+        after = { createdAt: last.created_at, gapId: last.gap_id };
+        if (rows.length < 2) {
+          break;
+        }
+      }
+      assert.deepEqual([...seen].sort(), ["s0", "s1", "s2", "s3", "s4"], "every gap exactly once");
+      assert.equal(new Set(seen).size, 5, "no duplicates across pages");
+    });
+  });
 }

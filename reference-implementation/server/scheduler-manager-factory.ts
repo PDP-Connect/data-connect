@@ -106,6 +106,7 @@ type ConnectorInstanceStore = Parameters<typeof admitOwnerRunConnection>[0]["con
 type ConnectorInstanceCredentialStore = StaticSecretCredentialStore;
 
 interface PendingGapReadOptions {
+  readonly connectorInstanceId?: string;
   readonly excludeReasons?: readonly string[];
   readonly limit: number;
   readonly reasons?: readonly string[];
@@ -137,7 +138,12 @@ function readProbeGaps(
   instanceKey: string,
   reasonScope: { readonly excludeReasons?: readonly string[]; readonly reasons?: readonly string[] }
 ): Promise<readonly GapRow[]> {
-  const options: PendingGapReadOptions = { ...reasonScope, limit: RECOVERY_PROBE_READ_LIMIT, recoverableOnly: true };
+  const options: PendingGapReadOptions = {
+    ...reasonScope,
+    connectorInstanceId: instanceKey,
+    limit: RECOVERY_PROBE_READ_LIMIT,
+    recoverableOnly: true,
+  };
   return typeof store.listPendingGapsForConnectorInstance === "function"
     ? store.listPendingGapsForConnectorInstance(connectorId, instanceKey, options)
     : store.listPendingGapsForConnector(connectorId, options);

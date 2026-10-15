@@ -517,6 +517,36 @@ for (const backend of BACKENDS) {
     });
   });
 
+  test(`[${backend.name}] connector-origin recovery is refused atomically for a permanent gap and succeeds otherwise`, async () => {
+    await backend.run(async (ctx) => {
+      const permanent = await seed(ctx, { reason: "source_unrepresentable", recordKey: "p", retryable: false });
+      const transient = await seed(ctx, { reason: "temporary_unavailable", recordKey: "t", retryable: true });
+      const legacy = await seed(ctx, { reason: "retry_exhausted", recordKey: "l" });
+      assert.ok(permanent && transient && legacy);
+
+      assert.equal(
+        await ctx.store.markConnectorGapRecovered(permanent.gap_id, { runId: "run_c" }),
+        null,
+        "no update is distinguishable from a recovery"
+      );
+      const unchanged = await ctx.store.getGapById(permanent.gap_id);
+      assert.equal(unchanged?.status, "pending");
+      assert.equal(unchanged?.retryable, false);
+      assert.equal(unchanged?.recovered_run_id, null);
+
+      const recovered = await ctx.store.markConnectorGapRecovered(transient.gap_id, { runId: "run_c" });
+      assert.equal(recovered?.status, "recovered");
+      assert.equal(recovered?.recovered_run_id, "run_c");
+      const recoveredLegacy = await ctx.store.markConnectorGapRecovered(legacy.gap_id, { runId: "run_c" });
+      assert.equal(recoveredLegacy?.status, "recovered", "legacy NULL rows keep their old eligibility");
+      assert.equal(await ctx.store.markConnectorGapRecovered("gap_missing", { runId: "run_c" }), null);
+
+      // The generic trusted path is unchanged (local-collector settlement).
+      const generic = await ctx.store.markGapStatus(permanent.gap_id, "recovered", { runId: "run_g" });
+      assert.equal(generic?.status, "recovered");
+    });
+  });
+
   test(`[${backend.name}] claimPendingGaps has no opt-in that can claim a permanent gap`, async () => {
     await backend.run(async (ctx) => {
       const permanent = await seed(ctx, { reason: "source_unrepresentable", recordKey: "p", retryable: false });

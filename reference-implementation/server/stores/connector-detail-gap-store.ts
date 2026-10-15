@@ -1162,6 +1162,12 @@ async function requeuePostgresQuarantinedRows(
  * recoverable work that decision is about.
  */
 export interface PendingGapReadOptions {
+  /**
+   * Keyset cursor: only rows strictly after (`created_at`, `gap_id`) in the read's stable
+   * order. Lets a caller walk a connection's pending gaps in pages until it finds what it
+   * needs or proves exhaustion, instead of deciding from one bounded page.
+   */
+  after?: { createdAt: string; gapId: string } | null;
   /** ForConnector reads only: scope to one connection in SQL, before the LIMIT. */
   connectorInstanceId?: string | null;
   /** Keep only reasons NOT in this list (a NULL reason is kept). */
@@ -1181,6 +1187,10 @@ function nonEmptyReasonList(values: readonly string[] | null | undefined): strin
 function sqlitePendingReadFilter(options: PendingGapReadOptions): { params: string[]; sql: string } {
   const parts: string[] = [];
   const params: string[] = [];
+  if (options.after?.createdAt && options.after.gapId) {
+    parts.push("AND (created_at > ? OR (created_at = ? AND gap_id > ?))");
+    params.push(options.after.createdAt, options.after.createdAt, options.after.gapId);
+  }
   if (options.recoverableOnly === true) {
     parts.push("AND (retryable IS NULL OR retryable <> 0)");
   }
@@ -1203,6 +1213,12 @@ function postgresPendingReadFilter(
 ): { params: unknown[]; sql: string } {
   const parts: string[] = [];
   const params: unknown[] = [];
+  if (options.after?.createdAt && options.after.gapId) {
+    params.push(options.after.createdAt, options.after.gapId);
+    const createdAtParam = `$${firstParamIndex + params.length - 2}`;
+    const gapIdParam = `$${firstParamIndex + params.length - 1}`;
+    parts.push(`AND (created_at > ${createdAtParam} OR (created_at = ${createdAtParam} AND gap_id > ${gapIdParam}))`);
+  }
   if (options.recoverableOnly === true) {
     parts.push("AND (retryable IS NULL OR retryable <> 0)");
   }
@@ -1476,7 +1492,7 @@ export function createSqliteConnectorDetailGapStore() {
           AND status = 'pending'
           AND (? IS NULL OR connector_instance_id = ?)
           ${filter.sql}
-        ORDER BY created_at
+        ORDER BY created_at, gap_id
         LIMIT ?
       `,
           [connectorId, scopedInstance, scopedInstance, ...filter.params, Math.max(1, Math.min(limit, 500))]
@@ -1502,7 +1518,7 @@ export function createSqliteConnectorDetailGapStore() {
           AND connector_instance_id = ?
           AND status = 'pending'
           ${filter.sql}
-        ORDER BY created_at
+        ORDER BY created_at, gap_id
         LIMIT ?
       `,
           [connectorId, connectorInstanceId, ...filter.params, Math.max(1, Math.min(limit, 500))]
@@ -1603,6 +1619,44 @@ export function createSqliteConnectorDetailGapStore() {
         ]
       );
       // REVIEWED-DYNAMIC: single-row lookup for the store-owned detail-gap table.
+      return rowToGap(firstSqliteRow("SELECT * FROM connector_detail_gaps WHERE gap_id = ? LIMIT 1", [gapId]));
+    },
+
+    // Connector-origin recovery of a gap that is NOT leased to the run. Same write as
+    // `markGapStatus(id, "recovered", { runId })`, with the permanent-loss predicate in
+    // the SAME statement so no earlier read can be stale: a gap whose CURRENT row is
+    // `retryable = 0` is never marked recovered by a connector claim. Returns null when
+    // no row was updated (permanent, or no such gap), which callers must treat as a
+    // refusal rather than a recovery. The generic `markGapStatus` is unchanged and
+    // stays the trusted path for the local collector's own `policy_budget` settlement.
+    // biome-ignore lint/suspicious/useAwait: The async signature is part of this caller-facing contract.
+    async markConnectorGapRecovered(gapId: string, options: MarkGapStatusOptions = {}): Promise<DetailGap | null> {
+      const mutation = normalizeGapStatusMutation(gapId, "recovered", options);
+      // REVIEWED-DYNAMIC: conditional status mutation for the store-owned detail-gap table.
+      const result = execDynamicSqlAcknowledged(
+        `
+        UPDATE connector_detail_gaps
+        SET status = 'recovered',
+            next_attempt_after = ?,
+            last_error_json = ?,
+            last_run_id = COALESCE(?, last_run_id),
+            recovered_run_id = COALESCE(?, recovered_run_id),
+            updated_at = ?
+        WHERE gap_id = ?
+          AND (retryable IS NULL OR retryable <> 0)
+      `,
+        [
+          mutation.nextAttemptAfter,
+          mutation.lastErrorJson,
+          mutation.runId,
+          mutation.recoveredRunId,
+          mutation.now,
+          mutation.gapId,
+        ]
+      );
+      if (Number(result.changes || 0) !== 1) {
+        return null;
+      }
       return rowToGap(firstSqliteRow("SELECT * FROM connector_detail_gaps WHERE gap_id = ? LIMIT 1", [gapId]));
     },
 
@@ -2182,7 +2236,7 @@ export function createPostgresConnectorDetailGapStore() {
           AND status = 'pending'
           AND ($3::text IS NULL OR connector_instance_id = $3)
           ${filter.sql}
-        ORDER BY created_at
+        ORDER BY created_at, gap_id
         LIMIT $2
       `,
         [connectorId, Math.max(1, Math.min(limit, 500)), nonEmptyString(options.connectorInstanceId), ...filter.params]
@@ -2204,7 +2258,7 @@ export function createPostgresConnectorDetailGapStore() {
           AND connector_instance_id = $2
           AND status = 'pending'
           ${filter.sql}
-        ORDER BY created_at
+        ORDER BY created_at, gap_id
         LIMIT $3
       `,
         [connectorId, connectorInstanceId, Math.max(1, Math.min(limit, 500)), ...filter.params]
@@ -2306,6 +2360,35 @@ export function createPostgresConnectorDetailGapStore() {
         return rowToGap(unchanged.rows[0] ?? null);
       }
       return rowToGap(result.rows[0]);
+    },
+
+    // Connector-origin recovery of a gap that is NOT leased to the run; see the SQLite
+    // store. The permanent-loss predicate is in the same statement as the write.
+    async markConnectorGapRecovered(gapId: string, options: MarkGapStatusOptions = {}): Promise<DetailGap | null> {
+      const mutation = normalizeGapStatusMutation(gapId, "recovered", options);
+      const result = await postgresQuery<DetailGapRow>(
+        `
+        UPDATE connector_detail_gaps
+        SET status = 'recovered',
+            next_attempt_after = $1,
+            last_error_json = $2::jsonb,
+            last_run_id = COALESCE($3, last_run_id),
+            recovered_run_id = COALESCE($4, recovered_run_id),
+            updated_at = $5
+        WHERE gap_id = $6
+          AND (retryable IS NULL OR retryable <> 0)
+        RETURNING *
+      `,
+        [
+          mutation.nextAttemptAfter,
+          mutation.lastErrorJson,
+          mutation.runId,
+          mutation.recoveredRunId,
+          mutation.now,
+          mutation.gapId,
+        ]
+      );
+      return result.rows[0] ? rowToGap(result.rows[0]) : null;
     },
 
     async markLeasedGapAttempt(lease: {
