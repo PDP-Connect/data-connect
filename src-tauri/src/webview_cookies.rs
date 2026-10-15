@@ -4,6 +4,9 @@
 use std::future::Future;
 use tauri::{webview::Cookie, Url, Webview};
 
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
+const COOKIE_COMPLETION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 pub(crate) async fn set_cookies_then_navigate(
     webview: &Webview,
     cookies: Vec<Cookie<'static>>,
@@ -33,6 +36,17 @@ async fn navigate_after_cookie_completion(
     navigate()
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
+async fn wait_for_cookie_completion(
+    receive: tokio::sync::oneshot::Receiver<Result<(), String>>,
+    timeout: std::time::Duration,
+) -> Result<(), String> {
+    tokio::time::timeout(timeout, receive)
+        .await
+        .map_err(|_| "Timed out waiting for authentication cookie completion".to_string())?
+        .map_err(|_| "Authentication cookie completion was dropped".to_string())?
+}
+
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 async fn set_cookie(webview: &Webview, cookie: Cookie<'static>, url: &Url) -> Result<(), String> {
     let (send, receive) = tokio::sync::oneshot::channel();
@@ -42,9 +56,7 @@ async fn set_cookie(webview: &Webview, cookie: Cookie<'static>, url: &Url) -> Re
     webview
         .with_webview(move |platform| install_cookie(platform, cookie, url, send))
         .map_err(|_| "Failed to dispatch authentication cookie installation".to_string())?;
-    receive
-        .await
-        .map_err(|_| "Authentication cookie completion was dropped".to_string())?
+    wait_for_cookie_completion(receive, COOKIE_COMPLETION_TIMEOUT).await
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -143,8 +155,8 @@ mod tests {
         let task = tokio::spawn(async move {
             navigate_after_cookie_completion(
                 async {
-                    receive.await.unwrap()?;
-                    receive_second.await.unwrap()
+                    wait_for_cookie_completion(receive, COOKIE_COMPLETION_TIMEOUT).await?;
+                    wait_for_cookie_completion(receive_second, COOKIE_COMPLETION_TIMEOUT).await
                 },
                 || {
                     observed.store(true, Ordering::SeqCst);
@@ -172,6 +184,60 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error, "cookie failed");
+    }
+
+    #[tokio::test]
+    async fn cookie_completion_timeout_prevents_navigation() {
+        let (_send, receive) = tokio::sync::oneshot::channel();
+        let navigated = Arc::new(AtomicBool::new(false));
+        let observed = navigated.clone();
+
+        let error = navigate_after_cookie_completion(
+            wait_for_cookie_completion(receive, std::time::Duration::from_millis(10)),
+            || {
+                observed.store(true, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            "Timed out waiting for authentication cookie completion"
+        );
+        assert!(!navigated.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn late_cookie_completion_after_timeout_is_ignored() {
+        let (send, receive) = tokio::sync::oneshot::channel();
+        let navigated = Arc::new(AtomicBool::new(false));
+        let observed = navigated.clone();
+        let task = tokio::spawn(async move {
+            navigate_after_cookie_completion(
+                wait_for_cookie_completion(receive, std::time::Duration::from_millis(10)),
+                || {
+                    observed.store(true, Ordering::SeqCst);
+                    Ok(())
+                },
+            )
+            .await
+        });
+
+        let error = task.await.unwrap().unwrap_err();
+        assert_eq!(
+            error,
+            "Timed out waiting for authentication cookie completion"
+        );
+
+        // Match the native callbacks: a late send error is intentionally ignored.
+        tokio::spawn(async move {
+            let _ = send.send(Ok(()));
+        })
+        .await
+        .unwrap();
+        assert!(!navigated.load(Ordering::SeqCst));
     }
 
     #[tokio::test]
