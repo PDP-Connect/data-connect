@@ -1199,3 +1199,137 @@ test("post-progress continuation starts another recovery run when eligible work 
   assert.equal(at(calls, 1).recoveryOnly, true);
   assert.equal(at(calls, 1).triggerKind, "manual");
 });
+
+// ─── a store that cannot be paged must fail closed, never read as "no eligible work" ──
+//
+// `ControllerOptions.detailGapStore` is a supported override: it only has to provide
+// `listPendingGapsForConnector`. Eligibility is established by walking the pending gaps
+// in keyset pages. A full page of inadmissible rows from an adapter that gives no
+// cursor, ignores `after`, or answers with a backwards cursor cannot prove that no
+// eligible row exists beyond it. That is scan UNCERTAINTY: it must be reported and must
+// not choose forward collection (absence) or stop the continuation as if drained.
+
+type PagedGapRow = PendingDetailGapRowFixture & { created_at?: string; gap_id?: string };
+
+function inadmissiblePage(startIndex: number, withCursor: boolean): PagedGapRow[] {
+  return Array.from({ length: 100 }, (_, offset) => {
+    const index = startIndex + offset;
+    return {
+      attempt_count: 0,
+      connector_id: AMAZON,
+      connector_instance_id: "cin_recovery",
+      ...(withCursor
+        ? {
+            created_at: new Date(Date.parse("2026-01-01T00:00:00.000Z") + index * 1000).toISOString(),
+            gap_id: `gap_${String(index).padStart(5, "0")}`,
+          }
+        : {}),
+      last_error: null,
+      next_attempt_after: FUTURE_FLOOR,
+      reason: "temporary_unavailable",
+      retryable: true,
+      status: "pending",
+      stream: "order_items",
+      updated_at: "2026-01-01T00:00:00.000Z",
+    };
+  });
+}
+
+type PageStrategy = (callIndex: number, options: { after?: { createdAt: string; gapId: string } }) => PagedGapRow[];
+
+const UNPAGEABLE_STORES: ReadonlyArray<readonly [string, PageStrategy]> = [
+  ["rows carry no cursor metadata", () => inadmissiblePage(0, false)],
+  ["the store ignores `after` and repeats the page", () => inadmissiblePage(0, true)],
+  [
+    "the cursor moves backwards",
+    (callIndex) => (callIndex === 0 ? inadmissiblePage(500, true) : inadmissiblePage(0, true)),
+  ],
+];
+
+function pagedOverrideStore(strategy: PageStrategy): DetailGapReadStoreFixture {
+  let calls = 0;
+  return {
+    listPendingGapsForConnector: () => [],
+    listPendingGapsForConnectorInstance: (_connector: string, _instance: string, options?: unknown) => {
+      const page = strategy(calls, (options ?? {}) as { after?: { createdAt: string; gapId: string } });
+      calls += 1;
+      return page;
+    },
+  } as unknown as DetailGapReadStoreFixture;
+}
+
+for (const [label, strategy] of UNPAGEABLE_STORES) {
+  test(`implicit run reports recovery-scan uncertainty and launches nothing when ${label}`, async (t) => {
+    freshDb(t);
+    await seedCurrentRecoveryConnection();
+    const calls: RuntimeRunConnectorOptions[] = [];
+    const controller = makeController(calls, { detailGapStore: pagedOverrideStore(strategy) });
+    await assert.rejects(
+      () =>
+        controller.runNow(AMAZON, {
+          connectorInstanceId: "cin_recovery",
+          manifest: AMAZON_MANIFEST,
+          ownerToken: "owner-token",
+          runId: "run_unpageable_implicit",
+        }),
+      (err: unknown) => (err as { code?: string }).code === "recovery_scan_unsupported"
+    );
+    await drainUntilIdle(controller);
+    assert.equal(calls.length, 0, "uncertainty must not be read as absence and fall through to forward collection");
+  });
+
+  test(`post-progress continuation does not stop silently or start forward when ${label}`, async (t) => {
+    freshDb(t);
+    await seedCurrentRecoveryConnection();
+    const calls: RuntimeRunConnectorOptions[] = [];
+    const warnings: string[] = [];
+    const errors: string[] = [];
+    const controller = createController({
+      admitRunConnection: ({ connectorId, connectorInstanceId, ownerSubjectId }) =>
+        Promise.resolve({
+          connectorId,
+          connectorInstanceId: connectorInstanceId ?? "cin_recovery",
+          ownerSubjectId: ownerSubjectId ?? "owner_1",
+        }),
+      connectorPathResolver: () => "/tmp/connector.ts",
+      detailGapStore: pagedOverrideStore(strategy),
+      logger: {
+        error: (message: string) => {
+          errors.push(message);
+        },
+        warn: (message: string) => {
+          warnings.push(message);
+        },
+      },
+      ownerSubjectId: "owner_1",
+      runConnectorImpl: (opts) => {
+        calls.push(opts);
+        return Promise.resolve({
+          detail_gaps: [{ gap_id: "gap_done", status: "recovered", stream: "order_items" }],
+          records_emitted: 1,
+          status: "succeeded",
+        });
+      },
+    });
+    await controller.runNow(AMAZON, {
+      connectorInstanceId: "cin_recovery",
+      manifest: AMAZON_MANIFEST,
+      ownerToken: "owner-token",
+      recoveryOnly: true,
+      runId: "run_unpageable_continuation",
+    });
+    await drainUntilIdle(controller);
+    assert.equal(calls.length, 1, "the continuation neither starts a run nor falls back to forward collection");
+    const reported = [...warnings, ...errors].filter((message) => message.includes("recovery_scan_unsupported"));
+    assert.equal(
+      reported.length,
+      1,
+      "the uncertainty is reported once with its distinct code, not as a generic run failure"
+    );
+    assert.equal(
+      errors.some((message) => message.includes("run failed")),
+      false,
+      "and is not mislabelled as the run having failed"
+    );
+  });
+}

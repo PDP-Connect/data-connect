@@ -26,7 +26,12 @@ import { join } from "node:path";
 import test from "node:test";
 import { runConnector } from "../runtime/index.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
-import { closePostgresStorage, initPostgresStorage, postgresQuery } from "../server/postgres-storage.ts";
+import {
+  closePostgresStorage,
+  initPostgresStorage,
+  isPostgresStorageBackend,
+  postgresQuery,
+} from "../server/postgres-storage.ts";
 import { makeDefaultAccountConnectorInstanceId } from "../server/stores/connector-instance-store.ts";
 import {
   createPostgresConnectorDetailGapStore,
@@ -252,18 +257,31 @@ function runRecoveringConnector(
   );
 }
 
-function runEventTypes(runId: string | null | undefined): string[] {
-  if (!runId) {
-    return [];
-  }
-  return getDb()
-    .prepare("SELECT event_type FROM spine_events WHERE run_id = ?")
-    .all<{ event_type: string }>(runId)
-    .map((row) => row.event_type);
+/**
+ * Event types recorded for a run id the TEST chose (passed as `runId` to the run), so the
+ * query cannot silently use a null id taken from a failed run's error. Asserts the id is
+ * real by requiring that the run recorded at least one event; an absent
+ * `run.detail_gap_recovered` is then a meaningful negative, not an empty result.
+ */
+async function runEventTypes(runId: string): Promise<string[]> {
+  assert.ok(runId, "the run id is known before the run starts");
+  // The spine lives in the active storage backend: Postgres when it is enabled, else SQLite.
+  const types = isPostgresStorageBackend()
+    ? (
+        await postgresQuery<{ event_type: string }>("SELECT event_type FROM spine_events WHERE run_id = $1", [runId])
+      ).rows.map((row) => row.event_type)
+    : getDb()
+        .prepare("SELECT event_type FROM spine_events WHERE run_id = ?")
+        .all<{ event_type: string }>(runId)
+        .map((row) => row.event_type);
+  assert.ok(types.length > 0, `the run ${runId} recorded events, so the absence check below is not vacuous`);
+  return types;
 }
 
-function runIdOf(outcome: unknown): string | null {
-  return (outcome as { run_id?: string | null } | null)?.run_id ?? null;
+let runSequence = 0;
+function nextRunId(): string {
+  runSequence += 1;
+  return `run_recovered_race_${Date.now()}_${runSequence}`;
 }
 
 for (const backend of BACKENDS) {
@@ -273,8 +291,9 @@ for (const backend of BACKENDS) {
       const held = await startHeldRecordStore();
       const connector = recoveringConnector(gapId);
       const observed = observeGapReads(store, gapId);
+      const runId = nextRunId();
       try {
-        const outcomePromise = runRecoveringConnector(observed.store, connector.connectorPath, held.rsUrl);
+        const outcomePromise = runRecoveringConnector(observed.store, connector.connectorPath, held.rsUrl, { runId });
         // Latches, not sleeps: the old handler has READ the transient gap and is parked in its flush.
         await observed.preReadDone;
         await held.ingestHeld;
@@ -287,14 +306,14 @@ for (const backend of BACKENDS) {
           retryable: false,
         });
         held.releaseIngest();
-        const outcome = await outcomePromise;
+        await outcomePromise;
 
         const after = await store.getGapById(gapId);
         assert.equal(after?.retryable, false, "the permanent classification survives the late write");
         assert.equal(after?.status, "pending", "no recovery is recorded over a permanent loss");
         assert.equal(after?.recovered_run_id, null);
         assert.equal(
-          runEventTypes(runIdOf(outcome)).includes("run.detail_gap_recovered"),
+          (await runEventTypes(runId)).includes("run.detail_gap_recovered"),
           false,
           "no recovery event or accounting credit for the refused claim"
         );
@@ -311,22 +330,24 @@ for (const backend of BACKENDS) {
       const held = await startHeldRecordStore();
       const connector = recoveringConnector(gapId);
       const abort = new AbortController();
+      const runId = nextRunId();
       try {
         const outcomePromise = runRecoveringConnector(store, connector.connectorPath, held.rsUrl, {
           cancelSignal: abort.signal,
+          runId,
         });
         await held.ingestHeld;
         // Stand-in for the controller watchdog: abort first, then the flush returns.
         abort.abort();
         held.releaseIngest();
-        const outcome = await outcomePromise;
+        await outcomePromise;
         // The cancelled run can settle before its parked handler does; yield until it has.
         await drainEventLoop();
 
         const after = await store.getGapById(gapId);
         assert.notEqual(after?.status, "recovered", "a stopped run must not write a recovery after its flush");
         assert.equal(
-          runEventTypes(runIdOf(outcome)).includes("run.detail_gap_recovered"),
+          (await runEventTypes(runId)).includes("run.detail_gap_recovered"),
           false,
           "and must not emit a recovery event"
         );

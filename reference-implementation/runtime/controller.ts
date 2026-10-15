@@ -1509,6 +1509,29 @@ interface ConnectorDetailGapReadStore {
   ) => Promise<readonly PendingDetailGapRow[]> | readonly PendingDetailGapRow[];
 }
 
+/** `next` is strictly after `previous` in the stable (`created_at`, `gap_id`) read order. */
+function gapCursorAdvances(
+  previous: { readonly createdAt: string; readonly gapId: string },
+  next: { readonly createdAt: string; readonly gapId: string }
+): boolean {
+  if (next.createdAt !== previous.createdAt) {
+    return next.createdAt > previous.createdAt;
+  }
+  return next.gapId > previous.gapId;
+}
+
+/**
+ * The detail-gap store override could not be scanned to exhaustion, so whether an
+ * eligible recovery row exists is unknown. Distinct from "none exists".
+ */
+function recoveryScanUnsupported(connectorId: string, connectorInstanceId: string, detail: string): ControllerError {
+  return new ControllerError(
+    `Recovery eligibility could not be established for ${connectorId} (connection ${connectorInstanceId}): ${detail}. ` +
+      "A detail-gap store must return stable keyset pages ordered by (created_at, gap_id) and honor `after`.",
+    "recovery_scan_unsupported"
+  );
+}
+
 function isConnectorDetailGapReadStore(value: unknown): value is ConnectorDetailGapReadStore {
   return (
     value !== null &&
@@ -3633,14 +3656,26 @@ export function createController(opts: ControllerOptions = {}): Controller {
       if (page.length < RECOVERY_CONTINUATION_PENDING_READ_LIMIT) {
         return false;
       }
+      // A FULL page of inadmissible rows only proves "no eligible row yet". The next
+      // cursor must come from the store and must strictly advance; an adapter that gives
+      // no cursor, ignores `after`, or answers with a backwards / repeating cursor leaves
+      // rows beyond this page unexamined. That is scan uncertainty, not absence: it must
+      // never be read as "no eligible work" (which would pick forward collection or stop
+      // a continuation), so it is reported as its own error.
       const last = page[page.length - 1];
-      // A store that returns a full page it cannot continue from (no cursor fields, or a
-      // cursor that did not advance) cannot prove more rows exist, so stop here.
       if (!(last?.created_at && last.gap_id)) {
-        return false;
+        throw recoveryScanUnsupported(
+          connectorId,
+          connectorInstanceId,
+          "a full page carried no created_at/gap_id cursor"
+        );
       }
-      if (after && after.createdAt === last.created_at && after.gapId === last.gap_id) {
-        return false;
+      if (after && !gapCursorAdvances(after, { createdAt: last.created_at, gapId: last.gap_id })) {
+        throw recoveryScanUnsupported(
+          connectorId,
+          connectorInstanceId,
+          "the page cursor did not strictly advance (the store ignored `after`, repeated or went backwards)"
+        );
       }
       after = { createdAt: last.created_at, gapId: last.gap_id };
     }
@@ -3753,8 +3788,19 @@ export function createController(opts: ControllerOptions = {}): Controller {
       );
       return;
     }
-    if (!(await hasEligibleNonPressureRecoveryWork(input.connectorId, input.connectorInstanceId))) {
-      return;
+    try {
+      if (!(await hasEligibleNonPressureRecoveryWork(input.connectorId, input.connectorInstanceId))) {
+        return;
+      }
+    } catch (err) {
+      // Scan uncertainty is not "drained": report it by its own code and start nothing
+      // (no continuation, and never forward collection). Any other failure keeps its
+      // existing path.
+      if (err instanceof ControllerError && err.code === "recovery_scan_unsupported") {
+        log.warn?.(`[controller] recovery continuation not started (${err.code}): ${err.message}`);
+        return;
+      }
+      throw err;
     }
     // Manifest automation policy gate. A recovery continuation is started BY
     // THE CONTROLLER, not by an owner gesture: it is an unattended automatic
