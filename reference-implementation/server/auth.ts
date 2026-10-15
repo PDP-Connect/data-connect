@@ -75,7 +75,6 @@ import {
   lockOwnerPasswordVerifierRevision,
   ownerPasswordVerifierRevision,
 } from "./stores/owner-password-verifier-store.ts";
-import { type RetiredClientCleanup, retireFormerPreRegisteredClients } from "./stores/owner-session-store.ts";
 import { buildGrantedAuthorizationDetail } from "./source-approved-authorization.ts";
 import { snapshotSourceDeclaration } from "./source-declaration.ts";
 import { snapshotContentAddressedSourceDeclarationFromLegacyConnectorManifest } from "./source-declaration-legacy-collection.ts";
@@ -5209,37 +5208,6 @@ async function emitClientDeletedEvent({
     subject_type: actorId ? "subject" : undefined,
     trace_id: traceId,
   });
-}
-
-/**
- * Retire the pre-registered clients earlier versions left
- * (`retireFormerPreRegisteredClients`), then finish each deletion it made the
- * way `deleteRegisteredClient` does: disable the client's event subscriptions
- * and write `client.deleted`.
- */
-export async function retireFormerPreRegisteredClientsAtStartup(
-  nowSeconds: number,
-  registeredClientIds: readonly string[]
-): Promise<RetiredClientCleanup> {
-  const cleanup = await retireFormerPreRegisteredClients(nowSeconds, registeredClientIds);
-  await forEachSequential(
-    Object.entries(cleanup.clients).filter(([, counts]) => counts.deregistered),
-    async ([clientId, counts]) => {
-      const disabledSubscriptionCount = await disableClientEventSubscriptionsForDeletedClient(clientId);
-      await emitClientDeletedEvent({
-        actorId: null,
-        clientId,
-        counts: {
-          disabledSubscriptionCount,
-          revokedGrantIds: [],
-          revokedOwnerTokenCount: counts.bearers,
-          revokedPackageIds: [],
-        },
-        registrationMode: "pre_registered_public",
-      });
-    }
-  );
-  return cleanup;
 }
 
 async function disableClientEventSubscriptionsForDeletedClient(
