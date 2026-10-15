@@ -403,7 +403,8 @@ export function computeSourcePressureCooldown(
       : Number.POSITIVE_INFINITY;
 
   const pressureGaps = (pendingGaps ?? []).filter(
-    (gap) => gap && typeof gap.reason === "string" && SOURCE_PRESSURE_GAP_REASONS.has(gap.reason)
+    (gap) =>
+      gap && typeof gap.reason === "string" && SOURCE_PRESSURE_GAP_REASONS.has(gap.reason) && gap.retryable !== false
   );
 
   // Force override or no pressure → no cooldown. A recovered run (pending

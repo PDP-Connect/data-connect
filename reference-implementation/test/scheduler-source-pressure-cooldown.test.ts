@@ -173,6 +173,56 @@ test("mixed gaps count only the pressure-reason subset", () => {
 
 // ─── next_attempt_after floor ─────────────────────────────────────────────
 
+test("an explicit retryable:false pressure-reason gap is permanent loss, not pressure", () => {
+  const decision = computeSourcePressureCooldown(
+    [{ attemptCount: 9, lastPressureAt: 0, nextAttemptAfter: null, reason: "rate_limited", retryable: false }],
+    1_000,
+    0
+  );
+  assert.equal(decision.pendingPressureGapCount, 0);
+  assert.equal(decision.cooldownApplied, false);
+  assert.equal(decision.identity, null);
+  assert.equal(decision.maxAttemptCount, 0);
+});
+
+test("mixed retryable true and false gaps count and anchor only the true gap", () => {
+  const retryable = {
+    attemptCount: 2,
+    lastPressureAt: 500,
+    nextAttemptAfter: null,
+    reason: "upstream_pressure",
+    retryable: true,
+  };
+  const permanent = {
+    attemptCount: 9,
+    lastPressureAt: 0,
+    nextAttemptAfter: null,
+    reason: "rate_limited",
+    retryable: false,
+  };
+  const mixed = computeSourcePressureCooldown([retryable, permanent], 1_000, 0);
+  const onlyRetryable = computeSourcePressureCooldown([retryable], 1_000, 0);
+  assert.equal(mixed.pendingPressureGapCount, 1);
+  assert.equal(mixed.maxAttemptCount, 2);
+  assert.deepEqual(mixed, onlyRetryable);
+});
+
+test("null and absent retryable keep the legacy pressure behaviour", () => {
+  const absent = computeSourcePressureCooldown(
+    [{ attemptCount: 0, lastPressureAt: null, nextAttemptAfter: null, reason: "rate_limited" }],
+    1_000,
+    0
+  );
+  const explicitNull = computeSourcePressureCooldown(
+    [{ attemptCount: 0, lastPressureAt: null, nextAttemptAfter: null, reason: "rate_limited", retryable: null }],
+    1_000,
+    0
+  );
+  assert.equal(absent.pendingPressureGapCount, 1);
+  assert.equal(absent.cooldownApplied, true);
+  assert.deepEqual(explicitNull, absent);
+});
+
 test("an explicit next_attempt_after later than the computed cooldown is honoured as the floor", () => {
   const farFuture = new Date(T0 + BASE_INTERVAL_MS * 100).toISOString();
   const decision = computeSourcePressureCooldown(
