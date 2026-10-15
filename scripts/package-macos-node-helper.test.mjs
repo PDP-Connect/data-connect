@@ -11,9 +11,8 @@ import {
   writeFileSync,
 } from "node:fs"
 import { execFileSync } from "node:child_process"
-import { fileURLToPath } from "node:url"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { join, resolve } from "node:path"
 import { describe, expect, it } from "vitest"
 import {
   MACOS_NODE_HELPER,
@@ -36,9 +35,7 @@ describe("macOS Node helper packaging", () => {
         chmodSync(original, 0o755)
         if (entryPoint === "cli") {
           execFileSync(process.execPath, [
-            fileURLToPath(
-              new URL("./package-macos-node-helper.mjs", import.meta.url)
-            ),
+            resolve("scripts/package-macos-node-helper.mjs"),
             root,
           ])
         } else {
