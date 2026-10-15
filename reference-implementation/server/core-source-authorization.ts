@@ -11,6 +11,7 @@ import {
   validateResolvedGrantSemantics,
   validateSelectionRequestSemantics,
 } from "@pdpp/reference-contract/public/source";
+import { splitGrantors } from "./pilot-dr-vacuna/grantors.ts";
 import { passesGrantRecordConstraints } from "./record-filters.ts";
 import { requireSourceDeclaration, snapshotSourceDeclaration } from "./source-declaration.ts";
 
@@ -628,7 +629,18 @@ export function normalizeAbsentOnlyExpiry(candidate: unknown): unknown {
  * does not silently become permanent protocol acceptance.
  */
 export function parseCoreResolvedGrant(value: unknown): ResolvedGrant {
-  const candidate = normalizeAbsentOnlyExpiry(cloneJson(value));
+  // DR pilot (PDPP_PILOT_DR_VACUNA=1): #378 `grantors` is validated apart from
+  // the vendored schema, which predates it. No-op when the flag is off.
+  let split: ReturnType<typeof splitGrantors>;
+  try {
+    split = splitGrantors(normalizeAbsentOnlyExpiry(cloneJson(value)));
+  } catch (err: unknown) {
+    fail(`Resolved grant is invalid: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  if (split.grantors) {
+    return { ...parseCoreResolvedGrant(split.grant), grantors: split.grantors } as ResolvedGrant;
+  }
+  const candidate = split.grant;
   if (!validateResolvedGrantSchema(candidate)) {
     const details = (validateResolvedGrantSchema.errors ?? [])
       .map((error) => `${error.instancePath || "/"} ${error.message || "is invalid"}`)
