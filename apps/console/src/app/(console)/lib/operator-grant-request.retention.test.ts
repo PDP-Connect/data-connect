@@ -15,6 +15,9 @@ let parBody: Record<string, unknown> | null = null;
 function loadProducer(): Promise<typeof import("./operator-grant-request.ts")> {
 	loaded ??= (async () => {
 		mock.module("server-only", { namedExports: {} });
+		mock.module("./verify-session.ts", {
+			namedExports: { verifyDashboardSession: async () => undefined },
+		});
 		mock.module("./owner-token.ts", {
 			namedExports: {
 				getAsInternalUrl: () => "http://127.0.0.1:1",
@@ -130,4 +133,58 @@ test("invalid nonempty expiry action is rejected before HTTP", async (t) => {
 		/on-expiry action/,
 	);
 	assert.equal(fetchMock.mock.callCount(), 0);
+});
+
+test("connection picker retains accounts when the public source differs from the storage connector key", async (t) => {
+	const producer = await loadProducer();
+	const sourceId = "https://sources.example.test/fixture";
+	const connections = [
+		{
+			connector_id: "fixture",
+			connector_instance_id: "cin_a",
+			status: "active",
+		},
+		{
+			connector_id: "fixture",
+			connector_instance_id: "cin_b",
+			status: "active",
+		},
+	];
+	const fetchMock = t.mock.method(
+		globalThis,
+		"fetch",
+		async (input: string | URL | Request) => {
+			const url = new URL(String(input));
+			if (url.pathname === "/_ref/connections") {
+				assert.equal(url.searchParams.get("connector_id"), sourceId);
+				return Response.json({ data: connections, object: "list" });
+			}
+			assert.equal(url.pathname, "/_ref/connectors");
+			const connectionId = url.searchParams.get("connection");
+			assert.ok(connectionId === "cin_a" || connectionId === "cin_b");
+			return Response.json({
+				data: [
+					{
+						connection_id: connectionId,
+						connector_id: "fixture",
+						display_name: connectionId === "cin_a" ? "Account A" : "Account B",
+						streams: ["transactions"],
+					},
+				],
+				object: "list",
+			});
+		},
+	);
+	const workspace = producer.updateGrantRequestWorkspaceDraft(undefined, {
+		sourceId,
+		streamName: "transactions",
+	});
+	assert.deepEqual(
+		(await producer.loadConnectionPinOptions(workspace.draft)).options,
+		[
+			{ label: "Account A", value: "cin_a" },
+			{ label: "Account B", value: "cin_b" },
+		],
+	);
+	assert.equal(fetchMock.mock.callCount(), 3);
 });

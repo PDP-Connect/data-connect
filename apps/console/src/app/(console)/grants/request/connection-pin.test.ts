@@ -7,9 +7,8 @@
  * Closes the open product item in
  *   openspec/changes/expose-connection-identity-on-public-read (Section 4)
  * — the operator grant-request flow can now pin a staged grant to one
- * connection of a multi-connection connector, or fan in across all the grant
- * authorizes. The selected connection is sent in `streams[].instance_ids`,
- * which the authorization server validates against the approving owner.
+ * connection of a multi-connection connector. The pin rides on
+ * `streams[].instance_ids`, an existing grant field the read path enforces.
  *
  * Two layers:
  *  1. Behavioral — executes the pure projection + stream-selection helpers in
@@ -19,9 +18,9 @@
  *     string match. This mirrors `consent-connection-label.test.js`.
  *  2. Structural — the page/lib/actions are server components with no JSX
  *     render harness in this app, so we assert the wiring the brief requires:
- *     the staged PAR threads the selection, the select offers an explicit
- *     fan-in default (never a silent pin or silent fan-in), and the form posts
- *     the field through the action.
+ *     the staged PAR threads the selection, the select requires a choice when
+ *     multiple connections are listed, and the form posts the field through
+ *     the action.
  */
 
 import assert from "node:assert/strict";
@@ -46,12 +45,11 @@ const LIB_PAR_STREAM_RE = /streams: \[streamSelectionFromDraft\(workspace\.draft
 const LIB_EXAMPLE_STREAM_RE =
   /streamSelectionFromDraft\(workspace\.draft, workspace\.draft\.streamName \|\| "<stream>"\)/;
 const ACTION_READS_FIELD_RE = /connectionId: asString\(formData\.get\("connection_id"\)\)/;
-const PAGE_FAN_IN_LABEL_RE = /All connections \(fan-in\)/;
-const PAGE_FAN_IN_VALUE_RE = /const FAN_IN_OPTION_VALUE = "";/;
+const PAGE_CHOOSE_CONNECTION_RE = /Choose a connection/;
 const PAGE_DEFAULT_OPTION_RE =
-  /options=\{\[\{ label: FAN_IN_OPTION_LABEL, value: FAN_IN_OPTION_VALUE \}, \.\.\.connectionOptions\]\}/;
+  /options=\{\[\{ label: NO_CONNECTION_OPTION_LABEL, value: NO_CONNECTION_OPTION_VALUE \}, \.\.\.connectionOptions\]\}/;
 const PAGE_COLLAPSE_GUARD_RE = /if \(connectionOptions\.length <= 1\)/;
-const PAGE_FAN_IN_TESTID_RE = /data-testid="connection-pin-fan-in-only"/;
+const PAGE_SERVER_RESOLUTION_TESTID_RE = /data-testid="connection-pin-server-resolution-only"/;
 const PAGE_LOADS_OPTIONS_RE = /const connectionPinOptions = await loadConnectionPinOptions\(draft\)/;
 const LOAD_OPTIONS_USES_SEAM_RE =
   /async function loadConnectionPinOptions\(draft: GrantRequestDraft\)[\s\S]*listConnectionsByConnector\(draft\.sourceId\)/;
@@ -128,25 +126,25 @@ test("buildConnectionPinOptions returns [] for provider-native and empty sources
   assert.deepEqual(buildConnectionPinOptions({ id: "", kind: "connector" }, summaries), []);
 });
 
-// ── Behavioral: the selected connection lands in the staged stream ──────────
+// ── Behavioral: the selected instance_id lands in the staged stream ─────────
 
-test("streamSelectionFromDraft omits an instance constraint when no connection is selected", () => {
+test("streamSelectionFromDraft omits instance_ids when no connection is selected", () => {
   const selection = streamSelectionFromDraft(draft(), "messages");
   assert.equal(selection.name, "messages");
-  assert.equal("connection_id" in selection, false);
   assert.equal("instance_ids" in selection, false);
+  assert.equal("connection_id" in selection, false);
 });
 
-test("streamSelectionFromDraft pins instance_ids when the owner selected one", () => {
+test("streamSelectionFromDraft pins the selected connection as instance_ids", () => {
   const selection = streamSelectionFromDraft(draft({ connectionId: "cin_a", fields: "id, subject" }), "messages");
   assert.deepEqual(selection.instance_ids, ["cin_a"]);
   assert.equal("connection_id" in selection, false);
   assert.deepEqual(selection.fields, ["id", "subject"]);
 });
 
-test("streamSelectionFromDraft does not regress single-connection / unpinned streams", () => {
-  // The pre-existing shape (name + optional fields/view, no connection_id) is
-  // preserved byte-for-byte when no pin is chosen.
+test("streamSelectionFromDraft leaves unselected streams for server resolution", () => {
+  // The unpinned shape omits instance_ids so the server applies its
+  // single-instance or configured-default resolution rules.
   const selection = streamSelectionFromDraft(draft({ view: "summary" }), "messages");
   assert.deepEqual(selection, { name: "messages", view: "summary" });
 });
@@ -166,19 +164,17 @@ test("the grant-request action reads the connection_id field", async () => {
   assert.match(src, ACTION_READS_FIELD_RE);
 });
 
-test("the page offers an explicit fan-in default — never a silent pin or silent fan-in", async () => {
+test("the page requires an explicit choice when multiple connections are listed", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
-  assert.match(src, PAGE_FAN_IN_LABEL_RE);
-  // The default option's value is the empty (fan-in) sentinel.
-  assert.match(src, PAGE_FAN_IN_VALUE_RE);
+  assert.match(src, PAGE_CHOOSE_CONNECTION_RE);
   assert.match(src, PAGE_DEFAULT_OPTION_RE);
 });
 
-test("the page hides the pin control when there is nothing to disambiguate", async () => {
+test("the page leaves zero or one eligible connection to server resolution", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
-  // <= 1 connection: collapse to a static fan-in note and post the empty value.
+  // <= 1 connection: show the server-resolution note instead of a selector.
   assert.match(src, PAGE_COLLAPSE_GUARD_RE);
-  assert.match(src, PAGE_FAN_IN_TESTID_RE);
+  assert.match(src, PAGE_SERVER_RESOLUTION_TESTID_RE);
 });
 
 test("the page loads the pin options from the live connector listing", async () => {

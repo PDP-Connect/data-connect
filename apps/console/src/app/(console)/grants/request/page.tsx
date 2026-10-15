@@ -143,38 +143,36 @@ function DraftFormFields({ connectionOptions, draft }: { connectionOptions: Conn
   );
 }
 
-const FAN_IN_OPTION_VALUE = "";
-const FAN_IN_OPTION_LABEL = "All connections (fan-in)";
+const NO_CONNECTION_OPTION_VALUE = "";
+const NO_CONNECTION_OPTION_LABEL = "Choose a connection";
 
 /**
- * Per-connection pin for the addressed stream. The default option is an
- * explicit "All connections (fan-in)" — never a silent fan-in and never a
- * silent pin. When the source is a connector with more than one active
- * connection, the owner may pin one; the chosen `connection_id` rides on
- * `streams[].instance_ids`, which the authorization server validates against
- * the approving owner before issuing the grant.
+ * Per-connection pin for the addressed stream. For multiple active connector
+ * connections the owner must choose one; the authorization server rejects an
+ * ambiguous omission. The selected `connection_id` is serialized as
+ * `streams[].instance_ids` and resolved to owner-owned instances.
  *
  * `connectionOptions` is now built from `loadConnectionPinOptions`'s EXACT
  * per-connector seam lookup (`ref-client.ts`'s `listConnectionsByConnector`
  * composed with scoped `listConnectorSummaries` calls) — there is no
  * incompleteness signal to render here anymore.
  *
- * For a single-connection or provider-native source there is nothing to
- * disambiguate, so the control collapses to a static "fan-in" note and posts
- * the empty (fan-in) value — preserving the prior single-connection shape.
+ * For a single connection or a provider-native source there is no connection
+ * choice, so the control collapses to a static note and posts the empty value
+ * for the AS's unambiguous default resolution.
  */
 function ConnectionPinField({ connectionOptions, draft }: { connectionOptions: ConnectionPinOption[]; draft: Draft }) {
   if (connectionOptions.length <= 1) {
     return (
       <label className="flex min-w-0 flex-col gap-1" htmlFor="grant-request-connection_id">
         <span className="pdpp-caption font-medium text-muted-foreground">Connection</span>
-        <input name="connection_id" type="hidden" value={FAN_IN_OPTION_VALUE} />
+        <input name="connection_id" type="hidden" value={NO_CONNECTION_OPTION_VALUE} />
         <span
           className="pdpp-caption rounded-md border border-border/80 border-dashed bg-muted/20 px-3 py-2 text-muted-foreground"
-          data-testid="connection-pin-fan-in-only"
+          data-testid="connection-pin-server-resolution-only"
           id="grant-request-connection_id"
         >
-          {connectionOptions.length === 1 ? "One connection — reads cover it (fan-in)." : "All connections (fan-in)."}
+          {connectionOptions.length === 1 ? "One eligible connection — the server resolves it." : "No listed connection — the server must have an explicit configured default."}
         </span>
       </label>
     );
@@ -186,10 +184,10 @@ function ConnectionPinField({ connectionOptions, draft }: { connectionOptions: C
         defaultValue={draft.connectionId}
         id="grant-request-connection_id"
         name="connection_id"
-        options={[{ label: FAN_IN_OPTION_LABEL, value: FAN_IN_OPTION_VALUE }, ...connectionOptions]}
+        options={[{ label: NO_CONNECTION_OPTION_LABEL, value: NO_CONNECTION_OPTION_VALUE }, ...connectionOptions]}
       />
       <span className="pdpp-caption text-muted-foreground">
-        Pin to one connection, or fan in across all the grant authorizes.
+        Choose one connection so the consent request identifies the exact account.
       </span>
     </label>
   );

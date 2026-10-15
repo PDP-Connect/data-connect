@@ -135,8 +135,9 @@ export async function loadConnectionPinOptions(draft: GrantRequestDraft): Promis
     live.map((connection) => listConnectorSummaries({ connectionRouteId: connection.connector_instance_id }))
   );
   const scopedSummaries = summaries.flatMap((response) => response.data);
+  const connectorId = connections[0]?.connector_id ?? draft.sourceId;
   const options = buildConnectionPinOptions(
-    { id: draft.sourceId, kind: draft.sourceKind, streamName: draft.streamName },
+    { id: connectorId, kind: draft.sourceKind, streamName: draft.streamName },
     scopedSummaries
   );
   return { options };
