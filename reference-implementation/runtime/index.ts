@@ -14,7 +14,11 @@ import { isIP } from "node:net";
 import { tmpdir } from "node:os";
 import { join as joinPath } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { validateRuntimeContinuationFact } from "@pdpp/connector-protocol/connector-runtime-protocol";
+import {
+  PERMANENT_DETAIL_GAP_REASON,
+  RETRYABLE_DETAIL_GAP_REASONS,
+  validateRuntimeContinuationFact,
+} from "@pdpp/connector-protocol/connector-runtime-protocol";
 import { connectorChildArgs } from "../connector-dependency-loader.mjs";
 import { emitControllerBootedAndStashEpoch } from "../lib/controller-boot.ts";
 import type { SpineEventInput, SpineEventRecord } from "../lib/spine.ts";
@@ -274,6 +278,8 @@ interface DurableDetailGap {
   parent_stream?: string | null;
   reason?: string | null;
   record_key?: string | number | null;
+  /** `false` = permanent source loss (never recovered by a connector claim); `null`/absent = legacy. */
+  retryable?: boolean | null;
   status?: string;
   stream?: string;
 }
@@ -293,6 +299,7 @@ interface RuntimeDetailGapInput {
   parentStream?: string | null;
   reason?: string | null;
   recordKey?: unknown;
+  retryable?: boolean | null;
   scope?: unknown;
   source?: unknown;
   stream?: string | null;
@@ -1738,6 +1745,41 @@ function validateSkipResultMessage(msg: ConnectorMessage, scopeByStream: ScopeBy
   validateSkipTimeRange(msg.time_range);
 }
 
+const RETRYABLE_DETAIL_GAP_REASON_SET: ReadonlySet<string> = new Set(RETRYABLE_DETAIL_GAP_REASONS);
+
+/**
+ * collection-profile §5.6: `status: "pending"` and a boolean `retryable` are
+ * REQUIRED on both gap forms, and `source_unrepresentable` <=> `retryable: false`.
+ * A mismatched pair is rejected here, before any store or coverage effect.
+ */
+function validateDetailGapClassification(msg: ConnectorMessage): void {
+  if (msg.status !== "pending") {
+    throw new Error('Connector emitted invalid DETAIL_GAP.status: expected "pending"');
+  }
+  if (typeof msg.retryable !== "boolean") {
+    throw new Error("Connector emitted invalid DETAIL_GAP.retryable: expected boolean");
+  }
+  if (typeof msg.reason !== "string" || !msg.reason) {
+    throw new Error("Connector emitted invalid DETAIL_GAP.reason: expected non-empty string");
+  }
+  if (msg.retryable === false) {
+    if (msg.reason !== PERMANENT_DETAIL_GAP_REASON) {
+      throw new Error(
+        `Connector emitted invalid DETAIL_GAP: retryable:false requires reason "${PERMANENT_DETAIL_GAP_REASON}", got "${msg.reason}"`
+      );
+    }
+    return;
+  }
+  if (msg.reason === PERMANENT_DETAIL_GAP_REASON) {
+    throw new Error(
+      `Connector emitted invalid DETAIL_GAP: reason "${PERMANENT_DETAIL_GAP_REASON}" requires retryable:false`
+    );
+  }
+  if (!RETRYABLE_DETAIL_GAP_REASON_SET.has(msg.reason)) {
+    throw new Error(`Connector emitted invalid DETAIL_GAP.reason: unknown reason "${msg.reason}"`);
+  }
+}
+
 function validateDetailGapMessage(msg: ConnectorMessage, scopeByStream: ScopeByStream): void {
   requireOptionalNonEmptyString(msg.stream, "DETAIL_GAP.stream");
   if (!msg.stream) {
@@ -1753,10 +1795,7 @@ function validateDetailGapMessage(msg: ConnectorMessage, scopeByStream: ScopeByS
       throw new Error(`Connector emitted invalid DETAIL_GAP.${fieldName}: expected object`);
     }
   }
-  requireOptionalNonEmptyString(msg.reason, "DETAIL_GAP.reason");
-  if (!isNullish(msg.retryable) && typeof msg.retryable !== "boolean") {
-    throw new Error("Connector emitted invalid DETAIL_GAP.retryable: expected boolean");
-  }
+  validateDetailGapClassification(msg);
   requireOptionalNonEmptyString(msg.gap_id, "DETAIL_GAP.gap_id");
   requireOptionalNonEmptyString(msg.lease_id, "DETAIL_GAP.lease_id");
 }
@@ -5351,7 +5390,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
         parentStream: gapParentStream,
         reason: gapReason,
         recordKey: msg.record_key ?? null,
-        retryable: msg.retryable ?? null,
+        retryable: msg.retryable === true || msg.retryable === false ? msg.retryable : null,
         scope: startScope,
         source: runSource,
         stream: gapStream,
@@ -5546,11 +5585,23 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
           `Connector emitted DETAIL_GAP_RECOVERED for stream '${recoveredStream}' after already reporting STREAM_EVIDENCE for it this run`
         );
       }
-      await flushAll();
       const lease = allServedGapLeases.get(recoveredGapId);
       if (msg.lease_id && (!lease || lease.leaseId !== msg.lease_id)) {
         throw new Error("Connector recovered a detail gap without the current run-owned lease");
       }
+      // §5.6: a permanent (retryable:false) gap is never served, so a recovery
+      // claim naming one is not a settlement of served work. A DETAIL_GAP_RECOVERED
+      // message is a claim, never a substitute for an accepted RECORD: refuse it
+      // rather than manufacture recovery/hydration of a source_unrepresentable gap.
+      if (!lease && typeof detailGapStore.getGapById === "function") {
+        const named = await detailGapStore.getGapById(recoveredGapId);
+        if (named?.retryable === false) {
+          throw new Error(
+            `Connector emitted DETAIL_GAP_RECOVERED for permanent (non-retryable, ${PERMANENT_DETAIL_GAP_REASON}) gap '${recoveredGapId}': a recovery claim cannot hydrate a permanently unrepresentable record`
+          );
+        }
+      }
+      await flushAll();
       const recoveredGap = lease
         ? await detailGapStore.settleLeasedGapRecovered(lease)
         : await detailGapStore.markGapStatus(recoveredGapId, "recovered", { runId });

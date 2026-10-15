@@ -24,6 +24,7 @@ import {
 } from "../server/records.ts";
 import { __setDeviceIngestStoreFaultHookForTest } from "../server/routes/ref-device-exporters.ts";
 import { runSearchIndexDirtyReconcileRound } from "../server/search-index-reconcile.ts";
+import { createSqliteConnectorDetailGapStore } from "../server/stores/connector-detail-gap-store.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
 import { isSearchIndexScopeDirty } from "../server/stores/search-index-dirty-store.ts";
 
@@ -3403,5 +3404,169 @@ test("connect: local profile permissions and redaction are unaffected by the sco
     // never be echoed back in the enroll response itself; it lives only in
     // connector_state, read back through the dedicated scope route/CLI.
     assert.equal(JSON.stringify(body).includes("secret-project-name"), false);
+  });
+});
+
+// The local-collector gap API is a SEPARATE protocol from connector-wire
+// DETAIL_GAP (its own reasons, runner conditions in synthetic
+// `local-collector/...` streams), but it writes the SAME recovery store. Its
+// required `retryable` boolean was discarded at storage, so an explicit false
+// became indistinguishable from a recoverable legacy row. Storage must keep the
+// explicit boolean for every supported producer; §5.6's connector-wire reason
+// rules are NOT imposed here.
+test("local-collector-gaps route preserves an explicit retryable boolean into the shared store", async () => {
+  await withServer(async ({ asUrl }) => {
+    const device = await enrollDevice(asUrl, "laptop-gap-retryable-bool");
+
+    const retryableAck = await postLocalCollectorGap(
+      asUrl,
+      device,
+      localCollectorGapBody(device, { retryable: true, stream: "kept" })
+    );
+    assert.equal(retryableAck.status, 201, JSON.stringify(retryableAck.body));
+    const permanentAck = await postLocalCollectorGap(
+      asUrl,
+      device,
+      localCollectorGapBody(device, { retryable: false, stream: "lost" })
+    );
+    assert.equal(permanentAck.status, 201, JSON.stringify(permanentAck.body));
+    assert.equal(bodyOf(permanentAck).retryable, false);
+
+    const retryableGapId = stringField(bodyOf(retryableAck), "gap_id");
+    const permanentGapId = stringField(bodyOf(permanentAck), "gap_id");
+    const stored = (gapId: string) =>
+      selectRow<{ retryable: number | null; reason: string }>(
+        "SELECT retryable, reason FROM connector_detail_gaps WHERE gap_id = ?",
+        gapId
+      );
+    assert.equal(stored(retryableGapId).retryable, 1);
+    assert.equal(stored(permanentGapId).retryable, 0, "an explicit false is never converted to recoverable legacy NULL");
+    assert.equal(stored(permanentGapId).reason, "policy_budget", "the collector protocol's own reason is kept as-is");
+
+    // Replay with no usable boolean cannot happen on this route (it is required);
+    // an identical false replay keeps false.
+    const replay = await postLocalCollectorGap(
+      asUrl,
+      device,
+      localCollectorGapBody(device, { last_run_id: "run-2", retryable: false, stream: "lost" })
+    );
+    assert.equal(replay.status, 201);
+    assert.equal(stored(permanentGapId).retryable, 0);
+
+    // route -> store -> eligibility: the false row is not a recovery candidate.
+    const store = createSqliteConnectorDetailGapStore();
+    const candidates = await store.listPendingGaps({
+      connectorId: device.connector_id,
+      connectorInstanceId: device.connector_instance_id,
+      grantId: null,
+    });
+    const candidateIds = candidates.map((gap) => gap.gap_id);
+    assert.ok(candidateIds.includes(retryableGapId), "the retryable collector gap stays a candidate");
+    assert.equal(candidateIds.includes(permanentGapId), false, "the explicit-false collector gap is excluded");
+
+    // The collector's own authenticated /recovered route keeps its existing
+    // contract: completing the collector's own work is not a refetch request, so
+    // it can still resolve its own explicit-false gap.
+    const recovered = await postLocalCollectorGapRecovered(asUrl, device, {
+      connector_id: device.connector_id,
+      reason: "policy_budget",
+      recovered_run_id: "run-3",
+      source_instance_id: device.source_instance_id,
+      stream: "lost",
+    });
+    assert.equal(recovered.status, 200, JSON.stringify(recovered.body));
+    assert.equal(bodyOf(recovered).status, "recovered");
+  });
+});
+
+// recoverDrainedPolicyBudgetGaps may read explicit-false rows ONLY for its
+// narrowly scoped completed-collector/policy-budget settlement. It must never
+// become a way to clear an unrelated connector gap, and generic recovery
+// selection must not gain those rows.
+test("drained-heartbeat settlement clears an explicit-false policy-budget gap but never an unrelated permanent source gap", async () => {
+  await withServer(async ({ asUrl }) => {
+    const device = await enrollDevice(asUrl, "laptop-gap-drain-false");
+
+    const policyBudgetFalse = await postLocalCollectorGap(
+      asUrl,
+      device,
+      localCollectorGapBody(device, { retryable: false, stream: "messages" })
+    );
+    assert.equal(policyBudgetFalse.status, 201, JSON.stringify(policyBudgetFalse.body));
+    const childFailureFalse = await postLocalCollectorGap(
+      asUrl,
+      device,
+      localCollectorGapBody(device, { reason: "connector_child_failure", retryable: false, stream: "messages" })
+    );
+    assert.equal(childFailureFalse.status, 201, JSON.stringify(childFailureFalse.body));
+
+    // An unrelated permanent connector-wire loss on the SAME connector instance.
+    const store = createSqliteConnectorDetailGapStore();
+    const unrelated = await store.upsertPendingGap({
+      connectorId: device.connector_id,
+      connectorInstanceId: device.connector_instance_id,
+      detailLocator: { kind: "test.item", item_id: "x" },
+      reason: "source_unrepresentable",
+      recordKey: "x",
+      retryable: false,
+      stream: "messages",
+    });
+    assert.ok(unrelated);
+
+    const heartbeat = await postJson(
+      `${asUrl}/_ref/device-exporters/${encodeURIComponent(device.device_id)}/heartbeat`,
+      {
+        source_instances: [
+          {
+            outbox: {
+              backlog_open: 0,
+              dead_letter: 0,
+              leased: 0,
+              pending: 0,
+              retrying: 0,
+              stale_leases: 0,
+              succeeded: 10,
+              total: 10,
+            },
+            records_pending: 0,
+            source_instance_id: device.source_instance_id,
+            status: "healthy",
+          },
+        ],
+      },
+      authHeaders(device.device_token)
+    );
+    assert.equal(heartbeat.status, 200, JSON.stringify(heartbeat.body));
+
+    const statusOf = (gapId: string) =>
+      selectRow<{ retryable: number | null; status: string }>(
+        "SELECT status, retryable FROM connector_detail_gaps WHERE gap_id = ?",
+        gapId
+      );
+    assert.equal(
+      statusOf(stringField(bodyOf(policyBudgetFalse), "gap_id")).status,
+      "recovered",
+      "the collector's own explicit-false policy_budget gap is settled when drained"
+    );
+    assert.equal(
+      statusOf(stringField(bodyOf(childFailureFalse), "gap_id")).status,
+      "pending",
+      "connector_child_failure is not part of the policy-budget settlement"
+    );
+    const unrelatedAfter = statusOf(unrelated.gap_id);
+    assert.equal(unrelatedAfter.status, "pending", "an unrelated source_unrepresentable gap is never cleared here");
+    assert.equal(unrelatedAfter.retryable, 0);
+
+    // Generic recovery selection did not gain the explicit-false rows.
+    const candidates = await store.listPendingGaps({
+      connectorId: device.connector_id,
+      connectorInstanceId: device.connector_instance_id,
+      grantId: null,
+    });
+    assert.deepEqual(
+      candidates.map((gap) => gap.gap_id),
+      [],
+      "explicit-false rows stay out of the default recovery selection"
+    );
   });
 });

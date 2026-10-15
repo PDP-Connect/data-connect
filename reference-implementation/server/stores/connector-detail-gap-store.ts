@@ -29,6 +29,13 @@ interface DetailGap {
   reason: string | null;
   record_key: string | null;
   recovered_run_id: string | null;
+  /**
+   * `connector_detail_gaps.retryable`: `false` = permanent source loss (never
+   * scheduled, requested or offered as a refetch), `true` = retryable, `null` =
+   * legacy / unknown (a pre-field row, or a writer that carries no classification);
+   * a `null` row keeps its old-contract recovery eligibility.
+   */
+  retryable: boolean | null;
   scope: unknown;
   source: unknown;
   status: string;
@@ -62,6 +69,7 @@ interface DetailGapRow {
   reason: string | null;
   record_key: string | null;
   recovered_run_id: string | null;
+  retryable?: number | boolean | null;
   scope_json: string | null;
   source_json: string;
   status: string;
@@ -88,6 +96,8 @@ interface UpsertGapInput {
   parentStream?: string | null;
   reason?: string | null;
   recordKey?: unknown;
+  /** Explicit classification; absent / null is NOT a fresh classification (see upsert). */
+  retryable?: boolean | null;
   scope?: unknown;
   source?: unknown;
   stream?: string | null;
@@ -110,6 +120,8 @@ interface NormalizedGapInput {
   parentStream: string | null;
   reason: string | null;
   recordKey: string | null;
+  /** 1 = retryable, 0 = permanent, null = no classification supplied. */
+  retryable: number | null;
   scope: unknown;
   source: unknown;
   stream: string;
@@ -144,6 +156,7 @@ interface PendingGapScope {
   connectorInstanceId: string;
   eligibleAt: string;
   grantId: string | null;
+  includeNonRetryable: boolean;
   limit: number;
   streamList: string[] | null;
 }
@@ -436,6 +449,7 @@ function normalizeGapInput(input: UpsertGapInput): NormalizedGapInput {
     parentStream,
     reason,
     recordKey,
+    retryable: typeof input.retryable === "boolean" ? (input.retryable ? 1 : 0) : null,
     scope: metadata.scope,
     source: metadata.source,
     stream,
@@ -472,6 +486,7 @@ function rowToGap(row: DetailGapRow | null): DetailGap | null {
     reason: nullableGapRowValue(row.reason),
     record_key: nullableGapRowValue(row.record_key),
     recovered_run_id: nullableGapRowValue(row.recovered_run_id),
+    retryable: row.retryable === null || row.retryable === undefined ? null : Number(row.retryable) !== 0,
     scope: parseJson(row.scope_json),
     source: parseJson(row.source_json),
     status: row.status,
@@ -653,7 +668,7 @@ function mergeSqlitePendingGapsByConnectorInstanceId(
        FROM connector_detail_gaps
        WHERE connector_instance_id IN (${placeholders})
          AND status = 'pending'
-         AND (next_attempt_after IS NULL OR next_attempt_after <= ?)
+         AND (next_attempt_after IS NULL OR next_attempt_after <= ? OR retryable = 0)
      ) SELECT * FROM ranked WHERE row_number <= ? ORDER BY connector_instance_id, row_number`,
       [eligibleAt, ...connectorInstanceIdChunk, eligibleAt, bounded]
     ),
@@ -810,7 +825,7 @@ function pendingGapOrderBySql(isPostgres: boolean): string {
 }
 
 function normalizePendingGapScope(
-  rawInput: { connectorInstanceId?: string | null } | undefined,
+  rawInput: { connectorInstanceId?: string | null; includeNonRetryable?: boolean } | undefined,
   connectorId: string,
   grantId: string | null,
   streams: unknown,
@@ -827,6 +842,7 @@ function normalizePendingGapScope(
     connectorInstanceId,
     eligibleAt,
     grantId,
+    includeNonRetryable: rawInput?.includeNonRetryable === true,
     limit: Math.max(1, Math.min(limit, 500)),
     streamList,
   };
@@ -1030,6 +1046,7 @@ function sqliteQuarantinedRequeueRows(scope: QuarantinedRequeueScope): DetailGap
       AND connector_instance_id = ?
       AND status = 'terminal'
       AND reason = ?
+      AND (retryable IS NULL OR retryable <> 0)
       ${streamPlaceholders ? `AND stream IN (${streamPlaceholders})` : ""}
     ORDER BY updated_at, created_at
     LIMIT ?
@@ -1062,6 +1079,7 @@ function requeueSqliteQuarantinedRows(rows: DetailGap[], scope: QuarantinedReque
         AND connector_instance_id = ?
         AND status = 'terminal'
         AND reason = ?
+        AND (retryable IS NULL OR retryable <> 0)
     `,
       [
         requeueReasonForGap(gap, scope.reason),
@@ -1086,6 +1104,7 @@ async function postgresQuarantinedRequeueRows(scope: QuarantinedRequeueScope): P
       AND connector_instance_id = $2
       AND status = 'terminal'
       AND reason = $3
+      AND (retryable IS NULL OR retryable <> 0)
       AND ($4::text[] IS NULL OR stream = ANY($4::text[]))
     ORDER BY updated_at, created_at
     LIMIT $5
@@ -1117,6 +1136,7 @@ async function requeuePostgresQuarantinedRows(
         AND connector_instance_id = $6
         AND status = 'terminal'
         AND reason = $7
+        AND (retryable IS NULL OR retryable <> 0)
     `,
       [
         requeueReasonForGap(gap, scope.reason),
@@ -1168,6 +1188,7 @@ export function createSqliteConnectorDetailGapStore() {
           SET status = 'in_progress', lease_run_id = ?, lease_id = ?, lease_attempted = 0,
               lease_expires_at = ?, updated_at = ?
           WHERE gap_id = ? AND status = 'pending'
+            AND (retryable IS NULL OR retryable <> 0)
         `,
           [owner.runId, owner.leaseId, expiresAt, nowIso(), id]
         );
@@ -1309,6 +1330,8 @@ export function createSqliteConnectorDetailGapStore() {
         limit?: number;
         now?: string;
         connectorInstanceId?: string | null;
+        /** Read-only inspection: also list explicit-false (permanent) rows. Never feeds a claim. */
+        includeNonRetryable?: boolean;
       } = { connectorId: "" }
     ): Promise<DetailGap[]> {
       const { connectorId, grantId = null, streams = null, limit = 100, now = nowIso() } = options;
@@ -1328,7 +1351,8 @@ export function createSqliteConnectorDetailGapStore() {
           AND connector_id = ?
           AND (? IS NULL OR grant_id = ?)
           AND status = 'pending'
-          AND (next_attempt_after IS NULL OR next_attempt_after <= ?)
+          AND (? = 1 OR retryable IS NULL OR retryable <> 0)
+          AND (next_attempt_after IS NULL OR next_attempt_after <= ? OR retryable = 0)
           ${streamPlaceholders ? `AND stream IN (${streamPlaceholders})` : ""}
         ORDER BY ${pendingGapOrderBySql(false)}
         LIMIT ?
@@ -1338,6 +1362,7 @@ export function createSqliteConnectorDetailGapStore() {
             scope.connectorId,
             scope.grantId,
             scope.grantId,
+            scope.includeNonRetryable ? 1 : 0,
             scope.eligibleAt,
             ...(scope.streamList ?? []),
             scope.eligibleAt,
@@ -1489,6 +1514,7 @@ export function createSqliteConnectorDetailGapStore() {
             recovered_run_id = COALESCE(?, recovered_run_id),
             updated_at = ?
         WHERE gap_id = ?
+          AND NOT (? = 'in_progress' AND COALESCE(retryable, 1) = 0)
       `,
         [
           mutation.status,
@@ -1502,6 +1528,7 @@ export function createSqliteConnectorDetailGapStore() {
           mutation.recoveredRunId,
           mutation.now,
           mutation.gapId,
+          mutation.status,
         ]
       );
       // REVIEWED-DYNAMIC: single-row lookup for the store-owned detail-gap table.
@@ -1626,7 +1653,9 @@ export function createSqliteConnectorDetailGapStore() {
       const result = execDynamicSqlAcknowledged(
         `
         UPDATE connector_detail_gaps
-        SET source_json = ?, detail_locator_json = ?, list_cursor_json = ?, scope_json = ?, reason = ?,
+        SET source_json = ?, detail_locator_json = ?, list_cursor_json = ?, scope_json = ?,
+            reason = CASE WHEN ? IS NULL AND retryable IS NOT NULL THEN reason ELSE ? END,
+            retryable = COALESCE(?, retryable),
             status = 'pending', next_attempt_after = ?, last_error_json = ?, last_run_id = ?,
             attempt_count = attempt_count + CASE WHEN lease_attempted = 0 THEN 1 ELSE 0 END,
             last_attempt_at = CASE WHEN lease_attempted = 0 THEN ? ELSE last_attempt_at END,
@@ -1640,7 +1669,9 @@ export function createSqliteConnectorDetailGapStore() {
           detailLocatorJson,
           encodeJson(gap.listCursor),
           encodeJson(gap.scope),
+          gap.retryable,
           gap.reason,
+          gap.retryable,
           gap.nextAttemptAfter,
           encodeJson(gap.lastError),
           gap.lastRunId,
@@ -1694,14 +1725,20 @@ export function createSqliteConnectorDetailGapStore() {
         INSERT INTO connector_detail_gaps(
           gap_id, connector_id, connector_instance_id, grant_id, source_json, stream, parent_stream, record_key,
           detail_locator_json, list_cursor_json, scope_json, reason, status, attempt_count,
-          next_attempt_after, last_error_json, discovered_run_id, last_run_id, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?, ?, ?, ?)
+          next_attempt_after, last_error_json, discovered_run_id, last_run_id, created_at, updated_at, retryable
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(gap_id) DO UPDATE SET
           source_json = excluded.source_json,
           detail_locator_json = excluded.detail_locator_json,
           list_cursor_json = excluded.list_cursor_json,
           scope_json = excluded.scope_json,
-          reason = excluded.reason,
+          -- retryable: a NULL (absent) observation is NOT a fresh classification.
+          -- On a row that already carries a known value it preserves BOTH the stored
+          -- boolean and its paired reason; a fresh explicit boolean replaces the
+          -- pair atomically (latest valid observation wins, like every other column).
+          reason = CASE WHEN excluded.retryable IS NULL AND connector_detail_gaps.retryable IS NOT NULL
+                        THEN connector_detail_gaps.reason ELSE excluded.reason END,
+          retryable = COALESCE(excluded.retryable, connector_detail_gaps.retryable),
           -- §10-A: 'terminal' is always sticky — a terminalized gap must not be
           -- silently resurrected into the fillable-pending set by a re-upsert.
           -- 'recovered' is sticky ONLY against a re-upsert from the SAME run
@@ -1738,7 +1775,10 @@ export function createSqliteConnectorDetailGapStore() {
             ELSE 'pending'
           END,
           next_attempt_after = excluded.next_attempt_after,
-          last_error_json = excluded.last_error_json,
+          -- Explanatory metadata is never written over a stored permanent
+          -- classification by an unclassified observation.
+          last_error_json = CASE WHEN excluded.retryable IS NULL AND connector_detail_gaps.retryable = 0
+                                 THEN connector_detail_gaps.last_error_json ELSE excluded.last_error_json END,
           last_run_id = excluded.last_run_id,
           updated_at = excluded.updated_at
         -- Identity conflict target = the natural key, with the volatile locator
@@ -1750,7 +1790,13 @@ export function createSqliteConnectorDetailGapStore() {
           detail_locator_json = excluded.detail_locator_json,
           list_cursor_json = excluded.list_cursor_json,
           scope_json = excluded.scope_json,
-          reason = excluded.reason,
+          -- retryable: a NULL (absent) observation is NOT a fresh classification.
+          -- On a row that already carries a known value it preserves BOTH the stored
+          -- boolean and its paired reason; a fresh explicit boolean replaces the
+          -- pair atomically (latest valid observation wins, like every other column).
+          reason = CASE WHEN excluded.retryable IS NULL AND connector_detail_gaps.retryable IS NOT NULL
+                        THEN connector_detail_gaps.reason ELSE excluded.reason END,
+          retryable = COALESCE(excluded.retryable, connector_detail_gaps.retryable),
           -- §10-A: see the mirrored ON CONFLICT(gap_id) branch above for the
           -- reopen-on-later-run rationale and the NULL-recovered_run_id
           -- non-wildcard rule (a run-id-less recovery is never same-attempt).
@@ -1762,7 +1808,10 @@ export function createSqliteConnectorDetailGapStore() {
             ELSE 'pending'
           END,
           next_attempt_after = excluded.next_attempt_after,
-          last_error_json = excluded.last_error_json,
+          -- Explanatory metadata is never written over a stored permanent
+          -- classification by an unclassified observation.
+          last_error_json = CASE WHEN excluded.retryable IS NULL AND connector_detail_gaps.retryable = 0
+                                 THEN connector_detail_gaps.last_error_json ELSE excluded.last_error_json END,
           last_run_id = excluded.last_run_id,
           updated_at = excluded.updated_at
       `,
@@ -1785,6 +1834,7 @@ export function createSqliteConnectorDetailGapStore() {
           gap.lastRunId,
           gap.now,
           gap.now,
+          gap.retryable,
         ]
       );
       // REVIEWED-DYNAMIC: single-row lookup for the store-owned detail-gap table.
@@ -1850,6 +1900,7 @@ export function createPostgresConnectorDetailGapStore() {
           SET status = 'in_progress', lease_run_id = $1, lease_id = $2, lease_attempted = 0,
               lease_expires_at = $3, updated_at = $4
           WHERE gap_id = $5 AND status = 'pending'
+            AND (retryable IS NULL OR retryable <> 0)
           RETURNING gap_id
         `,
           [owner.runId, owner.leaseId, expiresAt, nowIso(), id]
@@ -1989,6 +2040,8 @@ export function createPostgresConnectorDetailGapStore() {
         limit?: number;
         now?: string;
         connectorInstanceId?: string | null;
+        /** Read-only inspection: also list explicit-false (permanent) rows. Never feeds a claim. */
+        includeNonRetryable?: boolean;
       } = { connectorId: "" }
     ): Promise<DetailGap[]> {
       const { connectorId, grantId = null, streams = null, limit = 100, now = nowIso() } = options;
@@ -2003,7 +2056,8 @@ export function createPostgresConnectorDetailGapStore() {
           AND connector_id = $2
           AND ($3::text IS NULL OR grant_id = $3)
           AND status = 'pending'
-          AND (next_attempt_after IS NULL OR next_attempt_after <= $4)
+          AND ($7::boolean OR retryable IS NULL OR retryable <> 0)
+          AND (next_attempt_after IS NULL OR next_attempt_after <= $4 OR retryable = 0)
           AND ($5::text[] IS NULL OR stream = ANY($5::text[]))
         ORDER BY ${pendingGapOrderBySql(true)}
         LIMIT $6
@@ -2015,6 +2069,7 @@ export function createPostgresConnectorDetailGapStore() {
           eligibleAt,
           Array.isArray(streams) && streams.length ? streams : null,
           Math.max(1, Math.min(limit, 500)),
+          options.includeNonRetryable === true,
         ]
       );
       return (result.rows as DetailGapRow[]).map((row) => rowToGap(row) as DetailGap);
@@ -2039,7 +2094,7 @@ export function createPostgresConnectorDetailGapStore() {
            FROM connector_detail_gaps
            WHERE connector_instance_id = ANY($1::text[])
              AND status = 'pending'
-             AND (next_attempt_after IS NULL OR next_attempt_after <= $2)
+             AND (next_attempt_after IS NULL OR next_attempt_after <= $2 OR retryable = 0)
          ) SELECT * FROM ranked WHERE row_number <= $3 ORDER BY connector_instance_id, row_number`,
         [ids, eligibleAt, bounded, eligibleAt]
       );
@@ -2152,6 +2207,7 @@ export function createPostgresConnectorDetailGapStore() {
             recovered_run_id = COALESCE($7, recovered_run_id),
             updated_at = $3
         WHERE gap_id = $8
+          AND NOT ($1 = 'in_progress' AND COALESCE(retryable, 1) = 0)
         RETURNING *
       `,
         [
@@ -2166,7 +2222,15 @@ export function createPostgresConnectorDetailGapStore() {
           mutation.reason,
         ]
       );
-      return rowToGap(result.rows[0] ?? null);
+      if (!result.rows[0]) {
+        // The guarded UPDATE matched nothing (a permanent gap refused `in_progress`):
+        // report the unchanged row, as the SQLite path does.
+        const unchanged = await postgresQuery<DetailGapRow>("SELECT * FROM connector_detail_gaps WHERE gap_id = $1", [
+          mutation.gapId,
+        ]);
+        return rowToGap(unchanged.rows[0] ?? null);
+      }
+      return rowToGap(result.rows[0]);
     },
 
     async markLeasedGapAttempt(lease: {
@@ -2277,7 +2341,10 @@ export function createPostgresConnectorDetailGapStore() {
         `
         UPDATE connector_detail_gaps
         SET source_json = $1::jsonb, detail_locator_json = $2::jsonb, list_cursor_json = $3::jsonb,
-            scope_json = $4::jsonb, reason = $5, status = 'pending', next_attempt_after = $6,
+            scope_json = $4::jsonb,
+            reason = CASE WHEN $13::integer IS NULL AND retryable IS NOT NULL THEN reason ELSE $5 END,
+            retryable = COALESCE($13::integer, retryable),
+            status = 'pending', next_attempt_after = $6,
             last_error_json = $7::jsonb, last_run_id = $8,
             attempt_count = attempt_count + CASE WHEN lease_attempted = 0 THEN 1 ELSE 0 END,
             last_attempt_at = CASE WHEN lease_attempted = 0 THEN $9 ELSE last_attempt_at END,
@@ -2299,6 +2366,7 @@ export function createPostgresConnectorDetailGapStore() {
           owner.gapId,
           owner.runId,
           owner.leaseId,
+          gap.retryable,
         ]
       );
       return result.rows[0] ? rowToGap(result.rows[0]) : null;
@@ -2333,8 +2401,8 @@ export function createPostgresConnectorDetailGapStore() {
         INSERT INTO connector_detail_gaps(
           gap_id, connector_id, connector_instance_id, grant_id, source_json, stream, parent_stream, record_key,
           detail_locator_json, list_cursor_json, scope_json, reason, status, attempt_count,
-          next_attempt_after, last_error_json, discovered_run_id, last_run_id, created_at, updated_at
-        ) VALUES($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9::jsonb, $10::jsonb, $11::jsonb, $12, 'pending', 0, $13, $14::jsonb, $15, $16, $17, $17)
+          next_attempt_after, last_error_json, discovered_run_id, last_run_id, created_at, updated_at, retryable
+        ) VALUES($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9::jsonb, $10::jsonb, $11::jsonb, $12, 'pending', 0, $13, $14::jsonb, $15, $16, $17, $17, $18::integer)
         -- Identity conflict target = the natural key, with the volatile locator
         -- dropped when a record_key exists (see detailGapIdentityKey). Closes the
         -- locator-drift orphan class: a re-discovery under a new locator shape
@@ -2344,7 +2412,11 @@ export function createPostgresConnectorDetailGapStore() {
           detail_locator_json = EXCLUDED.detail_locator_json,
           list_cursor_json = EXCLUDED.list_cursor_json,
           scope_json = EXCLUDED.scope_json,
-          reason = EXCLUDED.reason,
+          -- retryable: see the SQLite upsert. A NULL observation preserves BOTH the stored
+          -- boolean and its paired reason; a fresh explicit boolean replaces the pair.
+          reason = CASE WHEN EXCLUDED.retryable IS NULL AND connector_detail_gaps.retryable IS NOT NULL
+                        THEN connector_detail_gaps.reason ELSE EXCLUDED.reason END,
+          retryable = COALESCE(EXCLUDED.retryable, connector_detail_gaps.retryable),
           -- §10-A: 'terminal' is always sticky — a terminalized gap must not be
           -- silently resurrected into the fillable-pending set by a re-upsert.
           -- 'recovered' is sticky ONLY against a re-upsert from the SAME run
@@ -2379,7 +2451,8 @@ export function createPostgresConnectorDetailGapStore() {
             ELSE 'pending'
           END,
           next_attempt_after = EXCLUDED.next_attempt_after,
-          last_error_json = EXCLUDED.last_error_json,
+          last_error_json = CASE WHEN EXCLUDED.retryable IS NULL AND connector_detail_gaps.retryable = 0
+                                 THEN connector_detail_gaps.last_error_json ELSE EXCLUDED.last_error_json END,
           last_run_id = EXCLUDED.last_run_id,
           updated_at = EXCLUDED.updated_at
         RETURNING *
@@ -2402,6 +2475,7 @@ export function createPostgresConnectorDetailGapStore() {
           gap.discoveredRunId,
           gap.lastRunId,
           gap.now,
+          gap.retryable,
         ]
       );
       return rowToGap(result.rows[0] ?? null);

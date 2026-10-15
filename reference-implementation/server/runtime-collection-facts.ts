@@ -50,12 +50,19 @@ export function readRuntimeCollectionFact(raw: unknown): RuntimeCollectionFact |
     considered: readSafeNonNegativeInteger(entry.considered),
     covered: readSafeNonNegativeInteger(entry.covered),
     pending_detail_gaps: readFiniteNumber(entry.pending_detail_gaps, 0),
+    ...permanentDetailGapsField(entry.permanent_detail_gaps),
     ...(coverageStatuses ? { coverage_statuses: coverageStatuses } : {}),
     skipped: readRuntimeSkipFact(entry.skipped),
     stream: entry.stream,
   };
   Object.assign(fact, optionalRuntimeScopeFields(entry));
   return fact;
+}
+
+/** Omitted unless a positive safe integer: absence reads as no permanent loss, never a fabricated count. */
+function permanentDetailGapsField(value: unknown): { permanent_detail_gaps: number } | Record<string, never> {
+  const count = readSafeNonNegativeInteger(value);
+  return count !== null && count > 0 ? { permanent_detail_gaps: count } : {};
 }
 
 function readCoverageStatuses(value: unknown): readonly string[] | undefined {

@@ -16,7 +16,7 @@ import { getRunTerminalEvent } from "../lib/spine.ts";
 import { isHealthRelevant as isAttentionHealthRelevant } from "../runtime/attention.ts";
 import type { ConnectorEnvironmentPolicy } from "../runtime/connector-child-environment.ts";
 import { getScheduleIneligibilityReason, resolveDefaultConnectorPath } from "../runtime/controller.ts";
-import { hasForwardEvidenceDebt } from "../runtime/recovery-decision.ts";
+import { hasForwardEvidenceDebt, isRecoverableDetailGapRow } from "../runtime/recovery-decision.ts";
 import { matchesRecoveryInstance } from "../runtime/scheduler/recovery-instance-scope.ts";
 import type {
   ConnectorError,
@@ -115,6 +115,7 @@ interface GapRow {
   readonly last_attempt_at?: unknown;
   readonly next_attempt_after?: unknown;
   readonly reason?: unknown;
+  readonly retryable?: boolean | null;
   readonly updated_at?: unknown;
 }
 
@@ -187,9 +188,12 @@ function lastPressureAt(row: GapRow): string | null {
   return null;
 }
 
-function mapPressureGaps(rows: readonly GapRow[], instanceKey: string, defaultInstanceId: string): PressureGap[] {
+export function mapPressureGaps(rows: readonly GapRow[], instanceKey: string, defaultInstanceId: string): PressureGap[] {
   const gaps: PressureGap[] = [];
   for (const row of rows) {
+    if (!isRecoverableDetailGapRow(row)) {
+      continue;
+    }
     if (typeof row.reason !== "string" || !SOURCE_PRESSURE_GAP_REASONS.has(row.reason)) {
       continue;
     }
@@ -206,9 +210,12 @@ function mapPressureGaps(rows: readonly GapRow[], instanceKey: string, defaultIn
   return gaps;
 }
 
-function countNonPressureGaps(rows: readonly GapRow[], instanceKey: string, defaultInstanceId: string): number {
+export function countNonPressureGaps(rows: readonly GapRow[], instanceKey: string, defaultInstanceId: string): number {
   let count = 0;
   for (const row of rows) {
+    if (!isRecoverableDetailGapRow(row)) {
+      continue;
+    }
     if (typeof row.reason === "string" && SOURCE_PRESSURE_GAP_REASONS.has(row.reason)) {
       continue;
     }

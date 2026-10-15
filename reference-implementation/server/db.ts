@@ -1919,6 +1919,8 @@ CREATE TABLE IF NOT EXISTS connector_detail_gaps (
   lease_id            TEXT,
   lease_attempted     INTEGER NOT NULL DEFAULT 0,
   lease_expires_at    TEXT,
+  -- 1 = retryable, 0 = permanent source loss, NULL = legacy / unclassified.
+  retryable           INTEGER,
   created_at          TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at          TEXT NOT NULL DEFAULT (datetime('now')),
   CHECK (status IN ('pending', 'in_progress', 'recovered', 'terminal'))
@@ -4422,6 +4424,8 @@ function migrateConnectorDetailGapInstanceColumns(raw: SqliteDatabase, opts: Mig
   addColumnIfMissing(raw, "connector_detail_gaps", "lease_id", "TEXT");
   addColumnIfMissing(raw, "connector_detail_gaps", "lease_attempted", "INTEGER NOT NULL DEFAULT 0");
   addColumnIfMissing(raw, "connector_detail_gaps", "lease_expires_at", "TEXT");
+  // Additive, nullable, never backfilled: NULL = legacy / unclassified keeps its old eligibility.
+  addColumnIfMissing(raw, "connector_detail_gaps", "retryable", "INTEGER");
   const legacyLeaseLess = raw
     .prepare(`
     UPDATE connector_detail_gaps

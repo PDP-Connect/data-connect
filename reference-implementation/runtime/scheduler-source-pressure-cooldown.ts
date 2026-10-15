@@ -280,6 +280,11 @@ export interface PendingPressureGap {
   readonly nextAttemptAfter?: string | null;
   /** Source-pressure reason. Only `SOURCE_PRESSURE_GAP_REASONS` count. */
   readonly reason: string | null;
+  /**
+   * Durable `retryable`. `false` = permanent source loss: never source pressure,
+   * whatever its reason, and excluded from every cooldown/backlog figure.
+   */
+  readonly retryable?: boolean | null;
 }
 
 export interface ComputeCooldownOptions {

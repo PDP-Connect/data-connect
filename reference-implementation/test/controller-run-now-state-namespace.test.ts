@@ -101,6 +101,7 @@ interface PendingDetailGapRowFixture {
   readonly last_error?: { readonly class?: unknown } | null;
   readonly next_attempt_after?: string | null;
   readonly reason?: string | null;
+  readonly retryable?: boolean | null;
   readonly status?: string | null;
   readonly stream?: string | null;
   readonly updated_at?: string | null;
@@ -853,4 +854,98 @@ test("explicit resources/scoped streams combined with recoveryOnly:true still ho
     true,
     "an explicit recoveryOnly choice takes precedence over scoping, per the documented precedence order"
   );
+});
+
+// ─── permanent source loss (`retryable: false`) at the manual run boundary ────
+//
+// collection-profile §5.6: a runtime MUST NOT schedule, request, or offer a
+// refetch of a `retryable: false` gap. An owner-triggered run is the manual
+// request boundary: the recovery-first default must not treat permanent loss as
+// eligible recovery work, and an explicit recovery-only request over nothing but
+// permanent loss must be refused instead of launching a doomed recovery run.
+
+function permanentLossGap(overrides: Partial<PendingDetailGapRowFixture> = {}): PendingDetailGapRowFixture {
+  return pendingRecoveryGap({ last_error: null, reason: "source_unrepresentable", retryable: false, ...overrides });
+}
+
+test("manual runNow with only permanent-loss gaps runs forward collection, not recoveryOnly", async (t) => {
+  freshDb(t);
+  await seedCurrentRecoveryConnection();
+
+  const calls: RuntimeRunConnectorOptions[] = [];
+  const controller = makeController(calls, {
+    detailGapStore: detailGapStoreForContinuation([[permanentLossGap()]]),
+  });
+
+  await controller.runNow(AMAZON, {
+    connectorInstanceId: "cin_recovery",
+    manifest: AMAZON_MANIFEST,
+    ownerToken: "owner-token",
+    runId: "run_manual_permanent_only",
+  });
+  await drainUntilIdle(controller);
+
+  assert.equal(calls.length, 1);
+  assert.equal(at(calls, 0).recoveryOnly, false, "permanent loss is not eligible recovery work");
+});
+
+test("manual runNow with permanent-loss AND transient gaps still prefers recoveryOnly for the transient work", async (t) => {
+  freshDb(t);
+  await seedCurrentRecoveryConnection();
+
+  const calls: RuntimeRunConnectorOptions[] = [];
+  const controller = makeController(calls, {
+    detailGapStore: detailGapStoreForContinuation([[permanentLossGap(), pendingRecoveryGap({ retryable: true })]]),
+  });
+
+  await controller.runNow(AMAZON, {
+    connectorInstanceId: "cin_recovery",
+    manifest: AMAZON_MANIFEST,
+    ownerToken: "owner-token",
+    runId: "run_manual_permanent_and_transient",
+  });
+  await drainUntilIdle(controller);
+
+  assert.equal(calls.length, 1);
+  assert.equal(at(calls, 0).recoveryOnly, true, "a permanent row neither blocks nor starves transient recovery");
+});
+
+test("explicit recoveryOnly:true over nothing but permanent-loss gaps is refused with permanent_loss", async (t) => {
+  freshDb(t);
+  await seedCurrentRecoveryConnection();
+
+  const calls: RuntimeRunConnectorOptions[] = [];
+  const controller = makeController(calls, {
+    detailGapStore: detailGapStoreForContinuation([[permanentLossGap(), permanentLossGap({ stream: "orders" })]]),
+  });
+
+  await assert.rejects(
+    () =>
+      controller.runNow(AMAZON, {
+        connectorInstanceId: "cin_recovery",
+        manifest: AMAZON_MANIFEST,
+        ownerToken: "owner-token",
+        recoveryOnly: true,
+        runId: "run_manual_recovery_only_permanent",
+      }),
+    (err: unknown) => (err as { recoveryAdmissionReason?: string }).recoveryAdmissionReason === "permanent_loss"
+  );
+  assert.equal(calls.length, 0, "no recovery run is launched for permanent loss");
+});
+
+test("explicit recoveryOnly:true with no pending gap evidence at all is unchanged (not refused)", async (t) => {
+  freshDb(t);
+
+  const calls: RuntimeRunConnectorOptions[] = [];
+  const controller = makeController(calls, { detailGapStore: detailGapStoreForContinuation([[]]) });
+  await controller.runNow(AMAZON, {
+    connectorInstanceId: "cin_recovery",
+    manifest: AMAZON_MANIFEST,
+    ownerToken: "owner-token",
+    recoveryOnly: true,
+    runId: "run_manual_recovery_only_empty",
+  });
+  await drainUntilIdle(controller);
+  assert.equal(calls.length, 1);
+  assert.equal(at(calls, 0).recoveryOnly, true);
 });

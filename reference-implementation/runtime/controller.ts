@@ -101,6 +101,7 @@ import {
   classifyRecoveryGap,
   filterFreshPressureRows,
   hasForwardEvidenceDebt,
+  isRecoverableDetailGapRow,
   type RecoveryAdmissionDenialReason,
   resolveRecoveryAdmission,
   resolveRecoveryFirstMode,
@@ -1469,6 +1470,7 @@ interface PendingDetailGapRow {
   readonly last_error?: { readonly class?: unknown } | null;
   readonly next_attempt_after?: string | null;
   readonly reason?: string | null;
+  readonly retryable?: boolean | null;
   readonly status?: string | null;
   readonly stream?: string | null;
   readonly updated_at?: string | null;
@@ -1621,6 +1623,9 @@ function bucketPressureGapsByInstance(
   ensure: EnsureScheduleFacts
 ): void {
   for (const gap of gaps) {
+    if (!isRecoverableDetailGapRow(gap)) {
+      continue;
+    }
     if (typeof gap.reason !== "string" || !SOURCE_PRESSURE_GAP_REASONS.has(gap.reason)) {
       continue;
     }
@@ -3472,6 +3477,7 @@ export function createController(opts: ControllerOptions = {}): Controller {
     );
     const pendingPressureRows = pendingGapRows
       .filter((row) => (row.connector_instance_id || connectorId) === connectorInstanceId)
+      .filter(isRecoverableDetailGapRow)
       .filter((row) => typeof row.reason === "string" && SOURCE_PRESSURE_GAP_REASONS.has(row.reason));
     return filterFreshPressureRows(pendingPressureRows, Date.now()).map((row) =>
       projectPendingPressureGap(row, row.reason as string)
@@ -3535,6 +3541,26 @@ export function createController(opts: ControllerOptions = {}): Controller {
       detailGapStore.listPendingGapsForConnector(connectorId, { limit: RECOVERY_CONTINUATION_PENDING_READ_LIMIT })
     );
     return rows.filter((row) => (row.connector_instance_id || connectorId) === connectorInstanceId);
+  }
+
+  // An explicit recovery-only request is a request to refetch pending detail
+  // gaps. When the connection's ONLY pending gaps are permanent source loss
+  // (`retryable: false`) there is nothing to refetch, and a runtime must not
+  // request or offer a refetch of such a gap: refuse, rather than silently run an
+  // ordinary collection labelled as gap recovery. No pending-gap evidence at all
+  // keeps the existing behavior.
+  async function assertRecoveryOnlyHasRecoverableWork(
+    connectorId: string,
+    connectorInstanceId: string
+  ): Promise<void> {
+    const rows = await listPendingGapsForContinuation(connectorId, connectorInstanceId);
+    if (rows.length > 0 && rows.every((row) => !isRecoverableDetailGapRow(row))) {
+      throw new ControllerError(
+        "Recovery-only run refused: every pending detail gap is permanent source loss (non-retryable) and cannot be refetched.",
+        "invalid_request",
+        { recoveryAdmissionReason: "permanent_loss" }
+      );
+    }
   }
 
   async function hasEligibleNonPressureRecoveryWork(
@@ -3605,6 +3631,9 @@ export function createController(opts: ControllerOptions = {}): Controller {
     options: RunNowOptions,
     scopedToResources: boolean
   ): Promise<boolean> {
+    if (options.recoveryOnly === true) {
+      await assertRecoveryOnlyHasRecoverableWork(connectorId, connectorInstanceId);
+    }
     const nonPressureRecoveryEligible =
       options.recoveryOnly === undefined && !scopedToResources
         ? await hasEligibleNonPressureRecoveryWork(connectorId, connectorInstanceId)

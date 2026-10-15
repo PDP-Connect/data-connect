@@ -103,7 +103,7 @@ import { createRecoveryKeyStore } from "./recovery-key-store.ts";
 import { getOwnerSessionStore } from "./stores/owner-session-store.ts";
 import { NekoSurfaceAllocatorClient } from "../runtime/neko-surface-allocator.ts";
 import { isClosedPipeWriteError } from "../runtime/pipe-errors.ts";
-import { hasForwardEvidenceDebt } from "../runtime/recovery-decision.ts";
+import { hasForwardEvidenceDebt, isRecoverableDetailGapRow } from "../runtime/recovery-decision.ts";
 import { projectRunAutomationPolicy } from "../runtime/run-automation-policy.ts";
 import { matchesRecoveryInstance } from "../runtime/scheduler/recovery-instance-scope.ts";
 import { createScheduler } from "../runtime/scheduler.ts";
@@ -10520,6 +10520,10 @@ function createReferenceSchedulerManager({
           const instanceKey = connectorInstanceId || connectorId;
           let count = 0;
           for (const row of rows ?? []) {
+            // Permanent source loss (retryable:false) is never recoverable work.
+            if (!isRecoverableDetailGapRow(row as { retryable?: boolean | null })) {
+              continue;
+            }
             // Exclude source-pressure reasons — they belong to Governor A (cooldown),
             // not to the recovery lane.
             if (typeof row?.reason === "string" && SOURCE_PRESSURE_GAP_REASONS.has(row.reason)) {
@@ -10564,6 +10568,9 @@ function createReferenceSchedulerManager({
         // biome-ignore lint/suspicious/noEvolvingTypes: This runtime-untyped boundary requires staged type narrowing.
         const gaps = [];
         for (const row of rows ?? []) {
+          if (!isRecoverableDetailGapRow(row as { retryable?: boolean | null })) {
+            continue;
+          }
           if (typeof row?.reason !== "string" || !SOURCE_PRESSURE_GAP_REASONS.has(row.reason)) {
             continue;
           }

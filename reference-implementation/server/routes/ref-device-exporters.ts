@@ -471,6 +471,7 @@ interface ConnectorDetailGapStore {
     connectorId: string;
     connectorInstanceId: string;
     grantId?: string | null;
+    includeNonRetryable?: boolean;
     limit?: number;
     streams?: readonly string[] | null;
   }) => Promise<GapRow[]>;
@@ -486,6 +487,7 @@ interface ConnectorDetailGapStore {
     lastError: unknown;
     discoveredRunId?: string;
     lastRunId?: string;
+    retryable?: boolean;
   }) => Promise<GapRow>;
 }
 
@@ -1159,10 +1161,14 @@ async function recoverDrainedPolicyBudgetGaps(
   if (typeof detailGapStore.listPendingGaps !== "function") {
     return;
   }
+  // `includeNonRetryable` is read-only inspection and is used ONLY for this narrowly
+  // scoped completed-collector settlement: the loop below still clears nothing but
+  // the collector's own `policy_budget` local-collector gaps.
   const gaps = await detailGapStore.listPendingGaps({
     connectorId,
     connectorInstanceId,
     grantId: null,
+    includeNonRetryable: true,
     limit: 500,
   });
   for (const gap of gaps) {
@@ -3198,6 +3204,9 @@ async function reportLocalCollectorGap(
     detailLocator,
     lastError,
     reason,
+    // The route requires a boolean (validateGapReportFields); an explicit false is
+    // kept in storage, never converted to a recoverable legacy NULL.
+    ...(typeof body.retryable === "boolean" ? { retryable: body.retryable } : {}),
     source,
     stream: syntheticStream,
     ...(firstSeenRunId ? { discoveredRunId: firstSeenRunId } : {}),

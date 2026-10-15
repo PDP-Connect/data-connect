@@ -659,12 +659,16 @@ export function deriveSourcePressureBacklog(
   if (!evidence || evidence.unreadable) {
     return null;
   }
-  const pressureGaps = (evidence.pendingGaps ?? []).filter(
+  // Permanent source loss (`retryable: false`) is accounted by the coverage axis
+  // (`terminal_gap`); it is neither pressure nor other recoverable work, so it
+  // never feeds a recovery-derived figure (pending, pending_other, retry floor).
+  const recoverableGaps = (evidence.pendingGaps ?? []).filter((gap) => gap?.retryable !== false);
+  const pressureGaps = recoverableGaps.filter(
     (gap) => gap && typeof gap.reason === "string" && SOURCE_PRESSURE_GAP_REASONS.has(gap.reason)
   );
   const pending = pressureGaps.length;
   const totalReturned = (evidence.pendingGaps ?? []).length;
-  const pendingOther = Math.max(0, totalReturned - pending);
+  const pendingOther = Math.max(0, recoverableGaps.length - pending);
   const maxAttemptCount = pressureGaps.reduce((max, gap) => {
     const attempt = gap.attemptCount;
     if (typeof attempt !== "number" || !Number.isFinite(attempt) || attempt < 0) {
