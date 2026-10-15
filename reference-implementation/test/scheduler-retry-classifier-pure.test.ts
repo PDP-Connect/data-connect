@@ -90,11 +90,12 @@ test("shouldRetryRunFailure: a non-retryable terminal_reason blocks retry", () =
   assert.equal(shouldRetryRunFailure({ terminal_reason: "grant_expired" }), false);
 });
 
-test("shouldRetryRunFailure: connector_error.retryable === false blocks retry", () => {
+test("shouldRetryRunFailure: a connector-reported failure is not retried, whatever its retryable claim", () => {
+  // Collection Profile 0.2.0, Section 5.11: `DONE.error.retryable` is a
+  // connector claim and never starts an automatic retry.
   assert.equal(shouldRetryRunFailure({ connector_error: { retryable: false } }), false);
-  // retryable true or absent does not block on its own.
-  assert.equal(shouldRetryRunFailure({ connector_error: { retryable: true } }), true);
-  assert.equal(shouldRetryRunFailure({ connector_error: {} }), true, "absent retryable flag is not a block");
+  assert.equal(shouldRetryRunFailure({ connector_error: { retryable: true } }), false);
+  assert.equal(shouldRetryRunFailure({ connector_error: {} }), false);
 });
 
 // ---------------------------------------------------------------------------

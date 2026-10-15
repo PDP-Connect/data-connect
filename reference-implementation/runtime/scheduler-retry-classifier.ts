@@ -36,28 +36,6 @@ function isRetryableHttpStatus(status: unknown): boolean {
   return true;
 }
 
-function hasRetryableRunFailureKnownGap(gaps: readonly Record<string, unknown>[] | null | undefined): boolean {
-  for (const gap of gaps ?? []) {
-    if (!gap || typeof gap !== "object" || Array.isArray(gap)) {
-      continue;
-    }
-    if (gap.kind !== "run_failed") {
-      continue;
-    }
-    const recoveryHint = gap.recovery_hint;
-    if (!recoveryHint || typeof recoveryHint !== "object" || Array.isArray(recoveryHint)) {
-      continue;
-    }
-    if (
-      (recoveryHint as { action?: unknown }).action === "retry_by_runtime" &&
-      (recoveryHint as { retryable?: unknown }).retryable === true
-    ) {
-      return true;
-    }
-  }
-  return false;
-}
-
 const NON_RETRYABLE_FAILURE_REASONS: ReadonlySet<string> = new Set([
   "authentication_error",
   "connector_protocol_violation",
@@ -161,28 +139,27 @@ function shouldRetryRunFailure(err: RunConnectorError | null | undefined): boole
   if (err.terminal_reason && NON_RETRYABLE_TERMINAL_REASONS.has(err.terminal_reason)) {
     return false;
   }
-  // A connector-declared non-retryable error remains authoritative even if a
-  // future adapter accidentally also supplies a runtime transport hint.
-  if (err.connector_error?.retryable === false) {
+  // A failure the connector reported in DONE is retried only on runtime
+  // evidence. `DONE.error.retryable` and a recovery hint are connector claims,
+  // and a runtime MUST NOT start an automatic retry because of either
+  // (Collection Profile 0.2.0, Section 5.11). The runtime records no evidence
+  // that makes a connector-reported failure retryable, so it waits for the
+  // next scheduled run. This stops repeated sign-ins against a provider that
+  // rejected the first one.
+  if (err.connector_error) {
     return false;
   }
   if (!hasRetryableRunFailureContext(err)) {
     return false;
   }
-  // A connector's affirmative verdict is only safe after the owner-auth gate
-  // above: a manual-action gap must never restart the same doomed run.
-  if (err.connector_error?.retryable === true) {
-    return true;
-  }
   // This is a runtime-derived verdict from a safe, structured Node/undici
-  // cause code. It is more precise than the message/gap heuristics below and
-  // is set only when a connector DID NOT report its own terminal error.
+  // cause code. It is set only when a connector DID NOT report its own
+  // terminal error.
   if (typeof err.runtime_retryable === "boolean") {
     return err.runtime_retryable;
   }
-  if (hasRetryableRunFailureKnownGap(err.known_gaps)) {
-    return true;
-  }
+  // A crash, an exit without DONE, or a runtime-side failure: the runtime
+  // observed the failure itself, so it retries within the attempt budget.
   return true;
 }
 
@@ -199,7 +176,6 @@ function isTerminalGrantFailure(reason: string | null | undefined): reason is Te
 
 export type { RunConnectorError };
 export {
-  hasRetryableRunFailureKnownGap,
   isRetryableHttpStatus,
   isTerminalGrantFailure,
   NON_RETRYABLE_FAILURE_REASONS,

@@ -233,7 +233,11 @@ test("T1+T2: scheduled managed-connector run calls runManagedConnectorViaControl
   }
 });
 
-test("T2c: scheduled managed connector retries runtime-retryable terminal known gaps before recording failure", async () => {
+// Collection Profile 0.2.0, Section 5.11: a connector's failure report, its
+// `retryable` claim, and its recovery hint never start an automatic retry. The
+// browser-profile attach text below is connector text, not runtime evidence,
+// so the scheduler records the failure and the next scheduled run collects.
+test("T2c: a scheduled managed run that the connector reports as failed is not retried in the same tick", async () => {
   const tmpDir = mkdtempSync(join(tmpdir(), "sched-managed-retry-"));
   try {
     const connectorPath = writeDummyConnector(tmpDir);
@@ -270,9 +274,9 @@ test("T2c: scheduled managed connector retries runtime-retryable terminal known 
         controllerCalls.push(Date.now());
         if (controllerCalls.length === 1) {
           return {
-            // Runtime evidence, not a connector verdict: no connector_error.retryable
-            // marker, so the structured retry_by_runtime known_gap below decides.
-            connector_error: { message: String(runtimeGap.message) },
+            // The connector reported this failure; the retry_by_runtime hint
+            // on the gap is its suggestion, not runtime evidence.
+            connector_error: { message: String(runtimeGap.message), retryable: true },
             known_gaps: [runtimeGap],
             run_id: "run-runtime-race-001",
             status: "failed",
@@ -292,12 +296,11 @@ test("T2c: scheduled managed connector retries runtime-retryable terminal known 
       await waitFor(() => completedRuns.length >= 1, 5000);
       scheduler.stop();
 
-      assert.equal(controllerCalls.length, 2, "runtime-retryable managed failure should be retried by scheduler");
       const [record] = completedRuns;
       assert.ok(record, "a completed run record was captured");
-      assert.equal(record.status, "succeeded");
-      assert.equal(record.runId, "run-runtime-race-002");
-      assert.equal(record.attempt, 2);
+      assert.equal(record.status, "failed");
+      assert.equal(record.runId, "run-runtime-race-001");
+      assert.equal(record.attempt, 1, "a connector-reported failure must not start a retry");
     } finally {
       scheduler.stop();
     }
