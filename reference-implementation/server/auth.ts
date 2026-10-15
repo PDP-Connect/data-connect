@@ -3366,12 +3366,60 @@ function serializePendingConsentParams(params: PendingRequest | StagedBatchReque
   return JSON.stringify(cloneJson(params));
 }
 
+export function generatePendingConsentUserCode(): string {
+  return randomBytes(3).toString("hex").toUpperCase();
+}
+
+const PENDING_CONSENT_USER_CODE_ATTEMPTS = 8;
+
+/**
+ * `pending_consents.user_code` is UNIQUE across every row ever written and the
+ * code is only 6 hex digits, so collisions become routine at volume (~1% of
+ * inserts once ~130k rows exist). True only for a unique violation on that
+ * column (Postgres `pending_consents_user_code_key`, SQLite
+ * `pending_consents.user_code`); any other conflict is a real error.
+ */
+export function isPendingConsentUserCodeConflict(err: unknown): boolean {
+  const e = err as { code?: unknown; constraint?: unknown; message?: unknown } | null;
+  if (!e) {
+    return false;
+  }
+  const message = typeof e.message === "string" ? e.message : "";
+  if (e.code === "23505") {
+    return e.constraint === "pending_consents_user_code_key" || message.includes("pending_consents_user_code_key");
+  }
+  return (
+    (e.code === "SQLITE_CONSTRAINT_UNIQUE" || message.includes("UNIQUE constraint failed")) &&
+    message.includes("pending_consents.user_code")
+  );
+}
+
+/** Runs `insert` with a fresh user code, drawing another on a user_code collision. Returns the stored code. */
+export async function insertWithFreshPendingConsentUserCode(
+  insert: (userCode: string) => Promise<unknown>,
+  nextUserCode: () => string = generatePendingConsentUserCode,
+  attempts = PENDING_CONSENT_USER_CODE_ATTEMPTS
+): Promise<string> {
+  for (let attempt = 1; ; attempt++) {
+    const userCode = nextUserCode();
+    try {
+      // biome-ignore lint/performance/noAwaitInLoops: each retry depends on the previous insert failing.
+      await insert(userCode);
+      return userCode;
+    } catch (err) {
+      if (attempt >= attempts || !isPendingConsentUserCodeConflict(err)) {
+        throw err;
+      }
+    }
+  }
+}
+
+/** Inserts the pending consent and returns the user code it was stored with. */
 async function createPendingConsent(
   deviceCode: string,
-  userCode: string,
   params: PendingRequest | StagedBatchRequest,
   expiresAt: string
-): Promise<void> {
+): Promise<string> {
   const createdAt = nowIso();
   const traceContext = getRequestTraceContext(params);
   // approval_id is the non-redeemable opaque public id for `_ref/approvals`
@@ -3379,15 +3427,17 @@ async function createPendingConsent(
   // has a stable id without exposing the live device_code.
   const approvalId = generateId("appr");
   const paramsJson = serializePendingConsentParams(params);
-  await getPendingConsentStore().insert({
-    approvalId,
-    createdAt,
-    deviceCode,
-    expiresAt,
-    paramsJson,
-    traceContext,
-    userCode,
-  });
+  return await insertWithFreshPendingConsentUserCode((userCode) =>
+    getPendingConsentStore().insert({
+      approvalId,
+      createdAt,
+      deviceCode,
+      expiresAt,
+      paramsJson,
+      traceContext,
+      userCode,
+    })
+  );
 }
 
 export async function getPendingConsentRowByApprovalId(approvalId: unknown): Promise<PendingConsentRow | null> {
@@ -5648,12 +5698,11 @@ export async function initiateGrant(
     resolvePendingRequestAgainstSnapshot(normalized);
 
     const deviceCode = generateId("dc");
-    const userCode = randomBytes(3).toString("hex").toUpperCase();
     const verificationBaseUrl =
       opts.baseUrl || process.env.AS_PUBLIC_URL || `http://localhost:${process.env.AS_PORT || "7662"}`;
     const expiresAt = expiresInIso(300);
 
-    await createPendingConsent(deviceCode, userCode, normalized, expiresAt);
+    const userCode = await createPendingConsent(deviceCode, normalized, expiresAt);
     const requestEventData = {
       access_mode: normalized.selection.access_mode || null,
       purpose_code: normalized.selection.purpose_code || null,
@@ -5781,12 +5830,11 @@ async function initiateStagedGrantBatch(
     });
 
     const deviceCode = generateId("dc");
-    const userCode = randomBytes(3).toString("hex").toUpperCase();
     const verificationBaseUrl =
       opts.baseUrl || process.env.AS_PUBLIC_URL || `http://localhost:${process.env.AS_PORT || "7662"}`;
     const expiresAt = expiresInIso(300);
 
-    await createPendingConsent(deviceCode, userCode, batch, expiresAt);
+    const userCode = await createPendingConsent(deviceCode, batch, expiresAt);
     await emitSpineEvent({
       actor_id: batch.client.client_id,
       actor_type: "client",
