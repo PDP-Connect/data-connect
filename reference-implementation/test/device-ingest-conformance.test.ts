@@ -1551,10 +1551,10 @@ async function runDuplicateAndNewerWriterOracle(driver: Driver): Promise<void> {
     try {
       accepted = await driver.ingest(device, request);
       assert.equal(accepted.status, 201, "an already-durable batch accepts despite a derived-index fault");
+      await within(waitForDeferredIndexWorkToDrain(), "deferred device index work to finish");
     } finally {
       __setRecordIndexFaultHookForTest(null);
     }
-    await within(waitForDeferredIndexWorkToDrain(), "deferred device index work to finish");
     const stored = mustExist(await driver.outcome(device, request.batch_id), "an accepted outcome must exist");
     assert.equal(stored.status, "accepted");
     assert.equal(stored.durable_prefix_count, 2);
