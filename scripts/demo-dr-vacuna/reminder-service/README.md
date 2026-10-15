@@ -70,6 +70,9 @@ Connection: `VACUNA_AS_URL`, `VACUNA_RS_URL`, `VACUNA_AS_ISSUER` (assertion
   `VACUNA_GATEWAY_ALLOWLIST` (comma-separated, e.g.
   `https://dp-rpc.moksha.vana.org`). Use throwaway keys only. Format details
   in `lib/payer.ts`.
+- `--payer moksha`: the same endpoint per child on Vana Moksha, with each
+  child's server, data point and grant registered on the gateway before its
+  first paid read. Config, keys and caps: `../moksha/LIVE-RUNBOOK.md`.
 
 ## Refresh rotation
 

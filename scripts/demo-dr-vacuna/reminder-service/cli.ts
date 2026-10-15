@@ -27,6 +27,7 @@ import {
   NATIVE_ASSET,
   ONE_HUNDREDTH_VANA_WEI,
 } from "./lib/payer.ts";
+import { buildContext as buildMokshaContext } from "../moksha/lib/context.ts";
 import { DEFAULT_CONFIG, ReminderService } from "./lib/service.ts";
 import {
   dispositionStubFromFile,
@@ -78,6 +79,10 @@ function buildPayer(store: ReminderStore): GatewayPayer {
   const kind = argValue("payer", "mock");
   if (kind === "mock") {
     return new MockPayer();
+  }
+  if (kind === "moksha") {
+    // Registers each child on the gateway before its first paid read; see ../moksha/LIVE-RUNBOOK.md.
+    return buildMokshaContext({}).payer;
   }
   if (kind !== "http") {
     throw new Error(`unknown --payer ${kind}`);
