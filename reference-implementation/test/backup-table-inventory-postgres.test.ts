@@ -13,7 +13,7 @@
 
 import { strict as assert } from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -25,15 +25,20 @@ import {
   POSTGRES_SQLITE_ONLY_STORAGE_TABLES,
   POSTGRES_STORAGE_TABLES,
 } from "../server/backup-table-policy.ts";
+import { ISSUANCE_CUTOVER_VERSION, migratePostgresIssuanceCutover } from "../server/issuance-cutover.ts";
+import { initializePairwiseGrantAdoption } from "../server/pairwise-grant-adoption.ts";
 import {
   closePostgresStorage,
+  getPostgresPool,
   initPostgresStorage,
+  postgresQuery,
   withPostgresReadOnlyTransaction,
 } from "../server/postgres-storage.ts";
 import { provisionTestDatabase, TEST_DATABASE_SENTINEL_SCHEMA } from "../server/postgres-test-database-guard.ts";
 import { withTemporaryPostgresDatabase } from "./helpers/postgres-temp-database.ts";
 
 const POSTGRES_VERSION_RE = /PostgreSQL\)\s+(\d+)\./;
+const POSTGRES_IMMUTABLE_TRIGGER_ERROR = /immutable/;
 
 function sorted(values: Iterable<string>): string[] {
   return [...values].sort((a, b) => a.localeCompare(b));
@@ -151,6 +156,80 @@ test("Postgres dump/restore preserves every required durable table when configur
       "DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;",
     ]);
     await initPostgresStorage({ backend: "postgres", databaseUrl: sourceUrl });
+    const cutoverClient = await getPostgresPool().connect();
+    try {
+      await migratePostgresIssuanceCutover(cutoverClient);
+    } finally {
+      cutoverClient.release();
+    }
+    await initializePairwiseGrantAdoption("https://backup-inventory.invalid");
+    const tupleSha256 = createHash("sha256").update("backup-inventory-fixture-tuple").digest("hex");
+    // These direct sentinels exercise durable backup bytes; they are not authenticated grants or authorization proof.
+    await postgresQuery(
+      `INSERT INTO as_issuance_cohort(kind, row_id, version, original_expires_at, enrollment)
+       VALUES ($1, $2, $3, $4, $5)`,
+      ["grant", "backup_inventory_cutover_grant", ISSUANCE_CUTOVER_VERSION, "2031-01-02T03:04:05.000Z", "cutover"]
+    );
+    await postgresQuery(
+      `INSERT INTO pairwise_as_grant_adoption_receipts(
+        issuer, grant_id, client_id, subject_id, tuple_count, tuple_sha256, completed_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [
+        "https://backup-inventory.invalid",
+        "backup_inventory_adoption_grant",
+        "backup_inventory_client",
+        "backup_inventory_subject",
+        1,
+        tupleSha256,
+        "2031-01-02T03:04:05.000Z",
+      ]
+    );
+    await postgresQuery(
+      `INSERT INTO pairwise_as_grant_instance_adoptions(
+        issuer, grant_id, client_id, subject_id, source_id, stream,
+        instance_id, rs_instance, declaration_version
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      [
+        "https://backup-inventory.invalid",
+        "backup_inventory_adoption_grant",
+        "backup_inventory_client",
+        "backup_inventory_subject",
+        "https://source.backup-inventory.invalid/",
+        "messages",
+        "backup_inventory_instance",
+        "backup_inventory_rs_instance",
+        "backup_inventory_declaration_v1",
+      ]
+    );
+    const sourceRows = await withPostgresReadOnlyTransaction(async (client) => {
+      const [cutover, cohort, receipt, adoption] = await Promise.all([
+        client.query("SELECT version, completed_at FROM as_issuance_cutover WHERE version = $1", [
+          ISSUANCE_CUTOVER_VERSION,
+        ]),
+        client.query(
+          "SELECT kind, row_id, version, original_expires_at, enrollment FROM as_issuance_cohort WHERE row_id = $1",
+          ["backup_inventory_cutover_grant"]
+        ),
+        client.query(
+          "SELECT issuer, grant_id, client_id, subject_id, tuple_count, tuple_sha256, completed_at FROM pairwise_as_grant_adoption_receipts WHERE grant_id = $1",
+          ["backup_inventory_adoption_grant"]
+        ),
+        client.query(
+          "SELECT issuer, grant_id, client_id, subject_id, source_id, stream, instance_id, rs_instance, declaration_version FROM pairwise_as_grant_instance_adoptions WHERE grant_id = $1",
+          ["backup_inventory_adoption_grant"]
+        ),
+      ]);
+      return {
+        adoption: adoption.rows,
+        cohort: cohort.rows,
+        cutover: cutover.rows,
+        receipt: receipt.rows,
+      };
+    });
+    assert.equal(sourceRows.cutover.length, 1, "cutover marker fixture must be initialized");
+    assert.equal(sourceRows.cohort.length, 1, "cohort fixture must be initialized");
+    assert.equal(sourceRows.receipt.length, 1, "receipt fixture must be initialized");
+    assert.equal(sourceRows.adoption.length, 1, "adoption tuple fixture must be initialized");
     await closePostgresStorage();
 
     // Exclude the test-guard schema from the dump: pg_dump with no --schema
@@ -198,6 +277,71 @@ test("Postgres dump/restore preserves every required durable table when configur
       );
 
       assert.deepEqual(sorted(missingTables), [], "Postgres dump/restore must contain every non-lazy required table");
+      const restoredRows = await withPostgresReadOnlyTransaction(async (client) => {
+        const [cutover, cohort, receipt, adoption, triggers] = await Promise.all([
+          client.query("SELECT version, completed_at FROM as_issuance_cutover WHERE version = $1", [
+            ISSUANCE_CUTOVER_VERSION,
+          ]),
+          client.query(
+            "SELECT kind, row_id, version, original_expires_at, enrollment FROM as_issuance_cohort WHERE row_id = $1",
+            ["backup_inventory_cutover_grant"]
+          ),
+          client.query(
+            "SELECT issuer, grant_id, client_id, subject_id, tuple_count, tuple_sha256, completed_at FROM pairwise_as_grant_adoption_receipts WHERE grant_id = $1",
+            ["backup_inventory_adoption_grant"]
+          ),
+          client.query(
+            "SELECT issuer, grant_id, client_id, subject_id, source_id, stream, instance_id, rs_instance, declaration_version FROM pairwise_as_grant_instance_adoptions WHERE grant_id = $1",
+            ["backup_inventory_adoption_grant"]
+          ),
+          client.query(
+            `SELECT t.tgname
+               FROM pg_trigger t
+               JOIN pg_class c ON c.oid = t.tgrelid
+              WHERE c.relname IN ('pairwise_as_grant_adoption_receipts', 'pairwise_as_grant_instance_adoptions')
+                AND NOT t.tgisinternal
+              ORDER BY t.tgname`
+          ),
+        ]);
+        return {
+          adoption: adoption.rows,
+          cohort: cohort.rows,
+          cutover: cutover.rows,
+          receipt: receipt.rows,
+          triggers: triggers.rows.map((row) => row.tgname),
+        };
+      });
+      assert.deepEqual(restoredRows.cutover, sourceRows.cutover);
+      assert.deepEqual(restoredRows.cohort, sourceRows.cohort);
+      assert.deepEqual(restoredRows.receipt, sourceRows.receipt);
+      assert.deepEqual(restoredRows.adoption, sourceRows.adoption);
+      assert.equal(restoredRows.receipt[0]?.tuple_sha256, tupleSha256, "the exact receipt digest must survive restore");
+      assert.deepEqual(restoredRows.triggers, [
+        "pairwise_as_grant_adoptions_immutable",
+        "pairwise_as_grant_receipts_immutable",
+      ]);
+      await assert.rejects(
+        () =>
+          postgresQuery("UPDATE pairwise_as_grant_adoption_receipts SET tuple_sha256 = 'changed' WHERE grant_id = $1", [
+            "backup_inventory_adoption_grant",
+          ]),
+        POSTGRES_IMMUTABLE_TRIGGER_ERROR
+      );
+      await assert.rejects(
+        () =>
+          postgresQuery("DELETE FROM pairwise_as_grant_adoption_receipts WHERE grant_id = $1", [
+            "backup_inventory_adoption_grant",
+          ]),
+        POSTGRES_IMMUTABLE_TRIGGER_ERROR
+      );
+      const unchangedDigest = await postgresQuery<{ tuple_sha256: string }>(
+        "SELECT tuple_sha256 FROM pairwise_as_grant_adoption_receipts WHERE grant_id = $1",
+        ["backup_inventory_adoption_grant"]
+      );
+      assert.deepEqual(
+        unchangedDigest.rows.map((row) => row.tuple_sha256),
+        [tupleSha256]
+      );
     } finally {
       await closePostgresStorage();
     }

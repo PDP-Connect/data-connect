@@ -11,6 +11,7 @@
 
 import { strict as assert } from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -24,6 +25,10 @@ import {
   SQLITE_POSTGRES_ONLY_STORAGE_TABLES,
 } from "../server/backup-table-policy.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
+import { ISSUANCE_CUTOVER_VERSION, migrateSqliteIssuanceCutover } from "../server/issuance-cutover.ts";
+import { initializePairwiseGrantAdoption } from "../server/pairwise-grant-adoption.ts";
+
+const SQLITE_IMMUTABLE_TRIGGER_ERROR = /immutable/;
 
 function sorted(values: Iterable<string>): string[] {
   return [...values].sort((a, b) => a.localeCompare(b));
@@ -101,13 +106,78 @@ test("backup inventory has deterministic SQLite/Postgres table parity", () => {
   );
 });
 
-test("SQLite stopped backup preserves every required durable table", () => {
+test("SQLite stopped backup preserves every required durable table", async () => {
   const dir = mkdtempSync(join(tmpdir(), "pdpp-sqlite-backup-oracle-"));
   const sourcePath = join(dir, "source.sqlite");
   const backupPath = join(dir, "backup.sqlite");
   try {
     initDb(sourcePath);
     const source = getDb();
+    migrateSqliteIssuanceCutover(source);
+    await initializePairwiseGrantAdoption("https://backup-inventory.invalid");
+    const tupleSha256 = createHash("sha256").update("backup-inventory-fixture-tuple").digest("hex");
+    // These direct sentinels exercise durable backup bytes; they are not authenticated grants or authorization proof.
+    source
+      .prepare(
+        `INSERT INTO as_issuance_cohort(kind, row_id, version, original_expires_at, enrollment)
+         VALUES (?, ?, ?, ?, ?)`
+      )
+      .run("grant", "backup_inventory_cutover_grant", ISSUANCE_CUTOVER_VERSION, "2031-01-02T03:04:05.000Z", "cutover");
+    source
+      .prepare(
+        `INSERT INTO pairwise_as_grant_adoption_receipts(
+          issuer, grant_id, client_id, subject_id, tuple_count, tuple_sha256, completed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        "https://backup-inventory.invalid",
+        "backup_inventory_adoption_grant",
+        "backup_inventory_client",
+        "backup_inventory_subject",
+        1,
+        tupleSha256,
+        "2031-01-02T03:04:05.000Z"
+      );
+    source
+      .prepare(
+        `INSERT INTO pairwise_as_grant_instance_adoptions(
+          issuer, grant_id, client_id, subject_id, source_id, stream,
+          instance_id, rs_instance, declaration_version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        "https://backup-inventory.invalid",
+        "backup_inventory_adoption_grant",
+        "backup_inventory_client",
+        "backup_inventory_subject",
+        "https://source.backup-inventory.invalid/",
+        "messages",
+        "backup_inventory_instance",
+        "backup_inventory_rs_instance",
+        "backup_inventory_declaration_v1"
+      );
+    const sourceRows = {
+      adoption: sqliteQueryRows(
+        sourcePath,
+        "SELECT issuer || '|' || grant_id || '|' || client_id || '|' || subject_id || '|' || source_id || '|' || stream || '|' || instance_id || '|' || rs_instance || '|' || declaration_version FROM pairwise_as_grant_instance_adoptions WHERE grant_id = 'backup_inventory_adoption_grant'"
+      ),
+      cohort: sqliteQueryRows(
+        sourcePath,
+        "SELECT kind || '|' || row_id || '|' || version || '|' || original_expires_at || '|' || enrollment FROM as_issuance_cohort WHERE row_id = 'backup_inventory_cutover_grant'"
+      ),
+      cutover: sqliteQueryRows(
+        sourcePath,
+        `SELECT version || '|' || completed_at FROM as_issuance_cutover WHERE version = '${ISSUANCE_CUTOVER_VERSION}'`
+      ),
+      receipt: sqliteQueryRows(
+        sourcePath,
+        "SELECT issuer || '|' || grant_id || '|' || client_id || '|' || subject_id || '|' || tuple_count || '|' || tuple_sha256 || '|' || completed_at FROM pairwise_as_grant_adoption_receipts WHERE grant_id = 'backup_inventory_adoption_grant'"
+      ),
+    };
+    assert.equal(sourceRows.cutover.length, 1, "cutover marker fixture must be initialized");
+    assert.equal(sourceRows.cohort.length, 1, "cohort fixture must be initialized");
+    assert.equal(sourceRows.receipt.length, 1, "receipt fixture must be initialized");
+    assert.equal(sourceRows.adoption.length, 1, "adoption tuple fixture must be initialized");
     source.prepare("INSERT INTO connectors(connector_id, manifest) VALUES (?, ?)").run("connector_backup", "{}");
     source
       .prepare(
@@ -191,6 +261,83 @@ test("SQLite stopped backup preserves every required durable table", () => {
     assert.equal(sqliteQueryRows(backupPath, "SELECT COUNT(*) FROM source_webhook_run_receipts")[0], "1");
     assert.equal(sqliteQueryRows(backupPath, "SELECT COUNT(*) FROM record_rejections")[0], "1");
     assert.equal(sqliteQueryRows(backupPath, "SELECT pending_payload_bytes FROM record_rejection_quota")[0], "7");
+    assert.deepEqual(
+      sqliteQueryRows(
+        backupPath,
+        `SELECT version || '|' || completed_at FROM as_issuance_cutover WHERE version = '${ISSUANCE_CUTOVER_VERSION}'`
+      ),
+      sourceRows.cutover
+    );
+    assert.deepEqual(
+      sqliteQueryRows(
+        backupPath,
+        "SELECT kind || '|' || row_id || '|' || version || '|' || original_expires_at || '|' || enrollment FROM as_issuance_cohort WHERE row_id = 'backup_inventory_cutover_grant'"
+      ),
+      sourceRows.cohort
+    );
+    assert.deepEqual(
+      sqliteQueryRows(
+        backupPath,
+        "SELECT issuer || '|' || grant_id || '|' || client_id || '|' || subject_id || '|' || tuple_count || '|' || tuple_sha256 || '|' || completed_at FROM pairwise_as_grant_adoption_receipts WHERE grant_id = 'backup_inventory_adoption_grant'"
+      ),
+      sourceRows.receipt
+    );
+    assert.deepEqual(
+      sqliteQueryRows(
+        backupPath,
+        "SELECT issuer || '|' || grant_id || '|' || client_id || '|' || subject_id || '|' || source_id || '|' || stream || '|' || instance_id || '|' || rs_instance || '|' || declaration_version FROM pairwise_as_grant_instance_adoptions WHERE grant_id = 'backup_inventory_adoption_grant'"
+      ),
+      sourceRows.adoption
+    );
+    assert.equal(sourceRows.receipt[0]?.includes(tupleSha256), true, "the exact receipt digest must survive backup");
+    assert.deepEqual(
+      sorted(
+        sqliteQueryRows(
+          backupPath,
+          `SELECT name FROM sqlite_schema WHERE type = 'trigger' AND name LIKE 'pairwise_as_grant_%' ORDER BY name`
+        )
+      ),
+      [
+        "pairwise_as_grant_adoptions_no_delete",
+        "pairwise_as_grant_adoptions_no_update",
+        "pairwise_as_grant_receipts_no_delete",
+        "pairwise_as_grant_receipts_no_update",
+      ]
+    );
+    assert.throws(
+      () =>
+        execFileSync(
+          "sqlite3",
+          [
+            "-batch",
+            backupPath,
+            "UPDATE pairwise_as_grant_adoption_receipts SET tuple_sha256 = 'changed' WHERE grant_id = 'backup_inventory_adoption_grant'",
+          ],
+          { stdio: ["ignore", "pipe", "pipe"] }
+        ),
+      SQLITE_IMMUTABLE_TRIGGER_ERROR
+    );
+    assert.throws(
+      () =>
+        execFileSync(
+          "sqlite3",
+          [
+            "-batch",
+            backupPath,
+            "DELETE FROM pairwise_as_grant_adoption_receipts WHERE grant_id = 'backup_inventory_adoption_grant'",
+          ],
+          { stdio: ["ignore", "pipe", "pipe"] }
+        ),
+      SQLITE_IMMUTABLE_TRIGGER_ERROR
+    );
+    assert.deepEqual(
+      sqliteQueryRows(
+        backupPath,
+        "SELECT tuple_sha256 FROM pairwise_as_grant_adoption_receipts WHERE grant_id = 'backup_inventory_adoption_grant'"
+      ),
+      [tupleSha256],
+      "restored immutable receipt bytes must remain unchanged"
+    );
   } finally {
     closeDb();
     rmSync(dir, { force: true, recursive: true });

@@ -17,6 +17,14 @@ export const BACKUP_TABLE_INVENTORY: Record<string, BackupTableInventoryEntry> =
     classification: "backup_required",
     reason: "Agent-connect handoff attempts and recovery bindings are durable authorization delivery state.",
   },
+  as_issuance_cohort: {
+    classification: "backup_required",
+    reason: "Original issuance expiry provenance and cutover enrollment must survive restore unchanged.",
+  },
+  as_issuance_cutover: {
+    classification: "backup_required",
+    reason: "The completed issuance cutover marker prevents a restore from repeating or skipping enrollment.",
+  },
   blob_bindings: {
     classification: "backup_required",
     reason: "Binds durable blob bytes to records and JSON paths.",
@@ -428,11 +436,21 @@ export const BACKUP_TABLE_INVENTORY: Record<string, BackupTableInventoryEntry> =
 };
 
 const SQLITE_INTERNAL_TABLES = new Set(["sqlite_sequence", "sqlite_stat1", "sqlite_stat4"]);
-const SQLITE_LAZY_APPLICATION_TABLES = ["explore_cursor_store"] as const;
+const SQLITE_LAZY_APPLICATION_TABLES = [
+  "as_issuance_cohort",
+  "as_issuance_cutover",
+  "explore_cursor_store",
+  "pairwise_as_grant_adoption_receipts",
+  "pairwise_as_grant_instance_adoptions",
+] as const;
 const POSTGRES_LAZY_APPLICATION_TABLES = [
+  "as_issuance_cohort",
+  "as_issuance_cutover",
   "dataset_summary_projection",
   "dataset_summary_stream_projection",
   "explore_cursor_store",
+  "pairwise_as_grant_adoption_receipts",
+  "pairwise_as_grant_instance_adoptions",
 ] as const;
 const POSTGRES_SQLITE_ONLY_TABLES = ["semantic_search_rowid"] as const;
 // pgvector/HNSW has no SQLite counterpart; the build-progress row only ever exists
