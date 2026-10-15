@@ -138,7 +138,7 @@ import {
 } from "./stores/connector-instance-store.ts";
 import { getDefaultConnectorStateStore } from "./stores/connector-state-store.ts";
 import { advanceSqliteDeviceIngestPrefix } from "./stores/device-exporter-store.ts";
-import { markSearchIndexDirtySqlite, recordSearchIndexDirtyFailure } from "./stores/search-index-dirty-store.ts";
+import { markSearchIndexDirtySqlite, recordSearchIndexDirtyEvidence } from "./stores/search-index-dirty-store.ts";
 
 export { resolveRecordIdentityForBinding } from "./connection-identity.ts";
 
@@ -1821,7 +1821,7 @@ async function runDeferredRecordIndexes(
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (isCurrentStorageGeneration(scheduledGeneration)) {
-        await recordSearchIndexDirtyFailure({ connectorInstanceId, stream }, message).catch(() => {
+        await recordSearchIndexDirtyEvidence({ connectorInstanceId, stream }, message).catch(() => {
           // Evidence write is itself best-effort; never mask the original failure.
         });
       }
@@ -2565,7 +2565,7 @@ function scheduleRecordIndexMaintenance(
         // closed mid-flight, in which case writing failure evidence would
         // touch a different generation's table under the same scope key.
         if (isCurrentStorageGeneration(scheduledGeneration)) {
-          await recordSearchIndexDirtyFailure({ connectorInstanceId, stream }, message).catch(() => {
+          await recordSearchIndexDirtyEvidence({ connectorInstanceId, stream }, message).catch(() => {
             // Evidence write is itself best-effort; never let it mask the
             // original failure or throw out of a fire-and-forget lane.
           });

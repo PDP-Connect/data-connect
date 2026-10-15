@@ -17,6 +17,7 @@ import { __setRecordIndexFaultHookForTest, ingestRecord, ingestRecords } from ".
 import { __setLexicalBackfillPhaseHookForTest } from "../server/search.ts";
 import { runSearchIndexDirtyReconcileRound } from "../server/search-index-reconcile.ts";
 import { countDirtySearchIndexScopes, isSearchIndexScopeDirty } from "../server/stores/search-index-dirty-store.ts";
+import { parkSearchIndexDirtyScope } from "../server/stores/search-index-dirty-store.ts";
 
 function target(connectorId: string, connectorInstanceId: string) {
   return { connector_id: connectorId, connector_instance_id: connectorInstanceId };
@@ -150,6 +151,66 @@ test("invariant (1): a single record's accepted outcome is never retroactively r
 
     __setRecordIndexFaultHookForTest(null);
     await new Promise((resolve) => setImmediate(resolve));
+  } finally {
+    __setRecordIndexFaultHookForTest(null);
+    closeDb();
+  }
+});
+
+test("changed ingest resets only automatic retry state; noop and explicit park retain their control state", async () => {
+  initDb(":memory:");
+  try {
+    const connectorId = "inv-retry-control-real-ingest";
+    const connectorInstanceId = "cin_retry_control_real_ingest";
+    await registerConnector(manifestFor(connectorId));
+    __setRecordIndexFaultHookForTest((point: string) => {
+      if (point === "after-lexical-index") {
+        throw new Error("keep derived work dirty");
+      }
+    });
+
+    await ingestRecord(target(connectorId, connectorInstanceId), record("items", "k1", "one"));
+    const read = () =>
+      getDb()
+        .prepare(
+          "SELECT attempts, next_attempt_at, operator_parked, revision FROM search_index_dirty WHERE connector_instance_id = ? AND stream = ?"
+        )
+        .get(connectorInstanceId, "items") as {
+        attempts: number;
+        next_attempt_at: string | null;
+        operator_parked: number | null;
+        revision: number;
+      };
+
+    getDb()
+      .prepare(
+        "UPDATE search_index_dirty SET attempts = 12, next_attempt_at = ? WHERE connector_instance_id = ? AND stream = ?"
+      )
+      .run("2099-01-01T00:00:00.000Z", connectorInstanceId, "items");
+    const delayed = read();
+
+    await ingestRecord(target(connectorId, connectorInstanceId), record("items", "k1", "two"));
+    const changed = read();
+    assert.equal(changed.revision, delayed.revision + 1, "a real canonical change advances the work/control epoch");
+    assert.deepEqual(
+      {
+        attempts: changed.attempts,
+        next_attempt_at: changed.next_attempt_at,
+        operator_parked: changed.operator_parked,
+      },
+      { attempts: 0, next_attempt_at: null, operator_parked: 0 },
+      "changed ingest makes known automatic work eligible immediately"
+    );
+
+    await ingestRecord(target(connectorId, connectorInstanceId), record("items", "k1", "two"));
+    assert.deepEqual(read(), changed, "same-record ingest is a true noop and does not alter retry state or revision");
+
+    assert.equal(await parkSearchIndexDirtyScope({ connectorInstanceId, stream: "items" }), true);
+    const parked = read();
+    await ingestRecord(target(connectorId, connectorInstanceId), record("items", "k1", "three"));
+    const changedWhileParked = read();
+    assert.equal(changedWhileParked.revision, parked.revision + 1);
+    assert.equal(changedWhileParked.operator_parked, 1, "a real ingest must not silently defeat an intentional park");
   } finally {
     __setRecordIndexFaultHookForTest(null);
     closeDb();

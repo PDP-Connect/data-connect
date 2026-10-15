@@ -153,6 +153,9 @@ export const POSTGRES_TEMPLATE_ELIGIBLE_FILES: readonly string[] = [
   "test/scheduler-dispatch-wedge-health-reason.test.ts",
   "test/scheduler-owner-isolation.test.ts",
   "test/scheduler-store-semantic-surface.test.ts",
+  "test/search-index-lexical-resume.postgres.test.ts",
+  "test/search-index-reconcile-scope-isolation.postgres.test.ts",
+  "test/search-index-repair-correctness.postgres.test.ts",
   "test/setup-binding-promotion.test.ts",
   "test/source-declaration-trust.test.ts",
   "test/source-field-name-records-parity.test.ts",
@@ -206,6 +209,8 @@ export const POSTGRES_TEMPLATE_COLD_REQUIRED_FILES: readonly string[] = [
   "test/run-history-interrupted-migration-reconciliation.test.ts",
   "test/run-history-writer-authority.test.ts",
   "test/semantic-index-skip-unchanged-postgres.test.ts",
+  // Exercises additive semantic input-identity migration and real publication.
+  "test/semantic-startup-backfill-catches-crash-abandoned-record.test.ts",
   "test/spine-events-connector-instance-id-backfill.test.ts",
   "test/spine-source-boot-backfill.test.ts",
 ];

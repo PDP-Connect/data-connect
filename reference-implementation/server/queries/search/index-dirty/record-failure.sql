@@ -16,11 +16,15 @@
 -- Postgres's identical schedule in the store's Postgres branch). SQLite's
 -- relative date modifiers only support whole-second granularity, which is
 -- why BACKOFF_SCHEDULE_MS's values are all exact multiples of 1000ms.
+-- next_attempt_at never moves backward (MAX with the stored value): an
+-- in-flight failure landing after an operator parked this scope must not
+-- override the park. The tail climbs past 600s to 24h; see
+-- search-index-dirty-store.ts BACKOFF_SCHEDULE_SECONDS.
 UPDATE search_index_dirty
 SET
   last_error = ?,
   attempts = attempts + 1,
-  next_attempt_at = strftime('%Y-%m-%dT%H:%M:%fZ', ?, '+' || (CASE
+  next_attempt_at = MAX(COALESCE(next_attempt_at, ''), strftime('%Y-%m-%dT%H:%M:%fZ', ?, '+' || (CASE
     WHEN attempts + 1 <= 0 THEN 0
     WHEN attempts + 1 = 1 THEN 5
     WHEN attempts + 1 = 2 THEN 15
@@ -28,6 +32,11 @@ SET
     WHEN attempts + 1 = 4 THEN 60
     WHEN attempts + 1 = 5 THEN 120
     WHEN attempts + 1 = 6 THEN 300
-    ELSE 600
-  END) || ' seconds')
-WHERE connector_instance_id = ? AND stream = ?
+    WHEN attempts + 1 = 7 THEN 600
+    WHEN attempts + 1 = 8 THEN 1800
+    WHEN attempts + 1 = 9 THEN 3600
+    WHEN attempts + 1 = 10 THEN 21600
+    ELSE 86400
+  END) || ' seconds'))
+WHERE connector_instance_id = ? AND stream = ? AND revision = ?
+  AND dirty <> 0 AND operator_parked = 0

@@ -104,6 +104,19 @@ function assertCurrentManifestStreamSubset(
   }
 }
 
+function assertCurrentManifestStreamAbsent(connectorId: string, stream: string, storedManifest: unknown): void {
+  if (!storedManifest) {
+    throw new Error(`Connector ${connectorId} manifest is unavailable during derived repair`);
+  }
+  const manifest = typeof storedManifest === "string" ? JSON.parse(storedManifest) : storedManifest;
+  if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) {
+    throw new Error(`Connector ${connectorId} manifest revision changed during derived repair`);
+  }
+  if (connectorManifestStreamNames(manifest as Record<string, unknown>).includes(stream)) {
+    throw new Error(`Connector ${connectorId} stream ${stream} was reintroduced during derived repair`);
+  }
+}
+
 /**
  * Confirm only the declared streams being repaired still match storage.
  * Reconciliation passes intentionally narrow a manifest to one dirty stream,
@@ -141,6 +154,31 @@ export function assertConnectorManifestStreamSubsetSync(
     ? null
     : getDb().prepare("SELECT 1 FROM connector_activations WHERE connector_id=?").get(connectorId);
   assertCurrentManifestStreamSubset(connectorId, expectedManifest, row?.manifest, Boolean(activation));
+}
+
+/**
+ * Under the manifest publication fence, prove a stream scheduled for removal
+ * is still absent. A subset check cannot make that claim: its expected
+ * manifest deliberately omits the stream.
+ */
+export async function assertConnectorManifestStreamAbsentWithClient(
+  client: PostgresTransactionClient,
+  connectorId: string,
+  stream: string
+): Promise<void> {
+  await lockConnectorManifestPublication(client, connectorId);
+  const row = await client.query<{ manifest: unknown }>(
+    "SELECT manifest FROM connectors WHERE connector_id=$1 FOR SHARE",
+    [connectorId]
+  );
+  assertCurrentManifestStreamAbsent(connectorId, stream, row.rows[0]?.manifest);
+}
+
+export function assertConnectorManifestStreamAbsentSync(connectorId: string, stream: string): void {
+  const row = getDb()
+    .prepare("SELECT manifest FROM connectors WHERE connector_id=?")
+    .get<{ manifest: string }>(connectorId);
+  assertCurrentManifestStreamAbsent(connectorId, stream, row?.manifest);
 }
 
 export function assertCurrentManifestRevision(

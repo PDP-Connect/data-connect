@@ -427,6 +427,7 @@ import {
   mountRefConnectionSchedulePause,
   mountRefConnectionScheduleResume,
   mountRefConnectionScheduleUpsert,
+  mountRefConnectionSearchIndexControl,
   mountRefConnectionSetDisplayName,
   mountRefConnectionsList,
   mountRefConnectorDetail,
@@ -627,7 +628,11 @@ import {
   runStartupRunHistoryBackfillToCompletion,
 } from "./stores/run-history-backfill-stage.ts";
 import { getDefaultSchedulerStore, type SchedulerStore } from "./stores/scheduler-store.ts";
-import { countDirtySearchIndexScopes } from "./stores/search-index-dirty-store.ts";
+import {
+  countDirtySearchIndexScopes,
+  parkSearchIndexDirtyScope,
+  rearmSearchIndexDirtyScope,
+} from "./stores/search-index-dirty-store.ts";
 import { getDefaultSourceWebhookEventStore } from "./stores/source-webhook-event-store.ts";
 import {
   isStaticSecretProfileManifest,
@@ -6483,7 +6488,9 @@ export function buildAsApp(opts: ServerOpts = {}) {
     listSchedules: async () => (controller ? await controller.listSchedules() : []),
     markConnectorSummaryEvidenceDirty,
     onScheduleMutation: opts.onScheduleMutation,
+    parkSearchIndexDirtyScope,
     pdppError,
+    rearmSearchIndexDirtyScope,
     reconcileDirtyConnectorSummaryEvidence,
     requireOwnerSession: ownerAuth.requireOwnerSession,
     resolveOwnerConnectorNamespace,
@@ -7126,6 +7133,10 @@ export function buildAsApp(opts: ServerOpts = {}) {
   );
   mountRefConnectionDelete(app, refConnectorsContext as unknown as Parameters<typeof mountRefConnectionDelete>[1]);
   mountRefConnectionResetState(app, refConnectorsContext as unknown as Parameters<typeof mountRefConnectionResetState>[1]);
+  mountRefConnectionSearchIndexControl(
+    app,
+    refConnectorsContext as unknown as Parameters<typeof mountRefConnectionSearchIndexControl>[1]
+  );
   mountRefConnectionBrowserProfilePurge(
     app,
     refConnectorsContext as unknown as Parameters<typeof mountRefConnectionBrowserProfilePurge>[1]

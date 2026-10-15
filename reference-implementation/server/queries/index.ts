@@ -466,6 +466,7 @@ export interface ReferenceQueryRegistry extends Readonly<Record<string, Register
   readonly searchIndexCountByStream: ReadOneQuery;
   // Lexical retrieval — FTS5 index maintenance.
   readonly searchIndexDeleteByRecordKey: MutationQuery;
+  readonly searchIndexDeleteByRowid: MutationQuery;
   readonly searchIndexDeleteByStream: MutationQuery;
   // Search — scope-keyed (connector_instance_id, stream) dirty flag for
   // deferred lexical+semantic index maintenance.
@@ -474,8 +475,15 @@ export interface ReferenceQueryRegistry extends Readonly<Record<string, Register
   readonly searchIndexDirtyGetByScope: ReadOneQuery;
   readonly searchIndexDirtyListDirty: IterateQuery;
   readonly searchIndexDirtyMarkDirty: MutationQuery;
+  readonly searchIndexDirtyPark: MutationQuery;
+  readonly searchIndexDirtyRearm: MutationQuery;
+  readonly searchIndexDirtyRecordEvidence: MutationQuery;
   readonly searchIndexDirtyRecordFailure: MutationQuery;
   readonly searchIndexInsertRow: MutationQuery;
+  readonly searchIndexPageAfterRowid: ReadManyQuery;
+  readonly searchIndexPageByRecordKeysAfterRowid: ReadManyQuery;
+  readonly searchIndexRowByIdentity: ReadOneQuery;
+  readonly searchIndexRowsByRecordKeys: ReadManyQuery;
   readonly searchMetaDeleteByStream: MutationQuery;
   // Lexical retrieval — backfill drift detection metadata.
   readonly searchMetaExistsByStream: ReadOneQuery;
@@ -485,6 +493,7 @@ export interface ReferenceQueryRegistry extends Readonly<Record<string, Register
   readonly searchRecordsCountIndexableTextValues: ReadOneQuery;
   readonly searchRecordsCountNonDeleted: ReadOneQuery;
   // Lexical retrieval — record paging for backfill scans + counts.
+  readonly searchRecordsLiveKeysByRecordKeys: ReadManyQuery;
   readonly searchRecordsPageNonDeleted: ReadManyQuery;
   readonly searchSemanticBlobCountAll: ReadOneQuery;
   readonly searchSemanticBlobCountByScope: ReadOneQuery;
@@ -987,7 +996,12 @@ export function loadReferenceQueries(queryDir = QUERIES_DIR): ReferenceQueryRegi
     "spineSearchListRunSummariesByLike",
     // Lexical retrieval — FTS5 index maintenance.
     "searchIndexDeleteByRecordKey",
+    "searchIndexDeleteByRowid",
     "searchIndexInsertRow",
+    "searchIndexPageAfterRowid",
+    "searchIndexPageByRecordKeysAfterRowid",
+    "searchIndexRowsByRecordKeys",
+    "searchIndexRowByIdentity",
     "searchIndexDeleteByStream",
     "searchIndexCountByStream",
     // Lexical retrieval — backfill drift detection metadata.
@@ -997,6 +1011,7 @@ export function loadReferenceQueries(queryDir = QUERIES_DIR): ReferenceQueryRegi
     "searchMetaUpsertFingerprint",
     "searchMetaListStreamsForConnector",
     // Lexical retrieval — record paging for backfill scans + counts.
+    "searchRecordsLiveKeysByRecordKeys",
     "searchRecordsPageNonDeleted",
     "searchRecordsCountNonDeleted",
     "searchRecordsCountIndexableTextValues",

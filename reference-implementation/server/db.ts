@@ -231,6 +231,7 @@ interface LastRunRow extends ConnectorScopedRow {
 }
 
 interface SemanticIndexRow extends ConnectorScopedRow {
+  input_identity?: string | null;
   embedding?: Uint8Array;
   record_key: string;
   rowid?: number;
@@ -2199,6 +2200,7 @@ CREATE TABLE IF NOT EXISTS semantic_search_rowid (
   scope_key     TEXT NOT NULL,
   record_key    TEXT NOT NULL,
   rowid         INTEGER NOT NULL,
+  input_identity TEXT,
   PRIMARY KEY(connector_instance_id, scope_key, record_key)
 );
 
@@ -2214,6 +2216,7 @@ CREATE TABLE IF NOT EXISTS semantic_search_blob (
   scope_key     TEXT NOT NULL,
   record_key    TEXT NOT NULL,
   embedding     BLOB NOT NULL,
+  input_identity TEXT,
   PRIMARY KEY(connector_instance_id, scope_key, record_key)
 );
 CREATE INDEX IF NOT EXISTS idx_semantic_search_blob_plan
@@ -2522,15 +2525,16 @@ CREATE TABLE IF NOT EXISTS manifest_write_violations (
 -- scope rotates out of contention and a later healthy scope can take its
 -- page slot, while the failing scope still gets retried periodically.
 -- revision is a monotonic per-scope generation counter, atomically
--- incremented by every mark-dirty write (revision = revision + 1 in the
--- SAME statement, same idiom as connector_instances.manifest_generation).
+-- incremented by every changed mark and explicit park/rearm (revision =
+-- revision + 1 in the SAME statement, same idiom as
+-- connector_instances.manifest_generation).
 -- A reconcile's clear is CAS'd on the revision value it read when it
 -- listed the scope, NOT on marked_at: two durable marks issued within
 -- the same millisecond receive the identical ISO marked_at string (no
 -- guaranteed sub-millisecond monotonicity), so a marked_at-only CAS can
 -- silently pass even though a concurrent write re-dirtied the scope after
--- the reconcile's read -- revision cannot collide, because it only ever
--- increases by exactly 1 per mark and the clear demands an exact match.
+-- the reconcile's read -- revision cannot collide, because every ingest or
+-- operator control advances it and the clear demands an exact match.
 -- marked_at is kept for queue ordering (oldest-first) and operator-facing
 -- diagnostics ONLY; it is no longer part of any correctness-bearing check.
 CREATE TABLE IF NOT EXISTS search_index_dirty (
@@ -2544,6 +2548,9 @@ CREATE TABLE IF NOT EXISTS search_index_dirty (
   last_error            TEXT,
   attempts              INTEGER NOT NULL DEFAULT 0,
   next_attempt_at       TEXT,
+  -- 0 automatic retry state; 1 explicit operator park; NULL legacy delay
+  -- whose provenance cannot be inferred safely.
+  operator_parked       INTEGER DEFAULT 0,
   PRIMARY KEY(connector_instance_id, stream)
 );
 CREATE INDEX IF NOT EXISTS idx_search_index_dirty_pending
@@ -2613,12 +2620,13 @@ function withCachedPrepare(raw: SqliteDatabase): DatabaseHandle {
  *       ("The reference's default semantic index SHALL persist across
  *        process restarts")
  */
-function addColumnIfMissing(raw: SqliteDatabase, table: string, column: string, type: string): void {
+function addColumnIfMissing(raw: SqliteDatabase, table: string, column: string, type: string): boolean {
   const cols = raw.prepare(`PRAGMA table_info(${table})`).all();
   if (cols.some((c) => c.name === column)) {
-    return;
+    return false;
   }
   raw.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+  return true;
 }
 
 function rekeyRecordRejectionReplayKeys(raw: SqliteDatabase): void {
@@ -5988,13 +5996,13 @@ function migrateSemanticSearchInstanceColumns(raw: SqliteDatabase, opts: Migrati
   const migration = raw.transaction(() => {
     const rowids = raw
       .prepare(
-        `SELECT ${rowidHasInstance ? "connector_instance_id," : ""} connector_id, scope_key, record_key, rowid
+        `SELECT ${rowidHasInstance ? "connector_instance_id," : ""} connector_id, scope_key, record_key, rowid, ${hasTableColumn(raw, "semantic_search_rowid", "input_identity") ? "input_identity" : "NULL AS input_identity"}
         FROM semantic_search_rowid`
       )
       .all<SemanticIndexRow>();
     const blobs = raw
       .prepare(
-        `SELECT ${blobHasInstance ? "connector_instance_id," : ""} connector_id, scope_key, record_key, embedding
+        `SELECT ${blobHasInstance ? "connector_instance_id," : ""} connector_id, scope_key, record_key, embedding, ${hasTableColumn(raw, "semantic_search_blob", "input_identity") ? "input_identity" : "NULL AS input_identity"}
         FROM semantic_search_blob`
       )
       .all<SemanticIndexRow>();
@@ -6058,6 +6066,7 @@ function migrateSemanticSearchInstanceColumns(raw: SqliteDatabase, opts: Migrati
         scope_key     TEXT NOT NULL,
         record_key    TEXT NOT NULL,
         rowid         INTEGER NOT NULL,
+        input_identity TEXT,
         PRIMARY KEY(connector_instance_id, scope_key, record_key)
       );
 
@@ -6067,6 +6076,7 @@ function migrateSemanticSearchInstanceColumns(raw: SqliteDatabase, opts: Migrati
         scope_key     TEXT NOT NULL,
         record_key    TEXT NOT NULL,
         embedding     BLOB NOT NULL,
+        input_identity TEXT,
         PRIMARY KEY(connector_instance_id, scope_key, record_key)
       );
       CREATE INDEX IF NOT EXISTS idx_semantic_search_blob_plan
@@ -6074,19 +6084,33 @@ function migrateSemanticSearchInstanceColumns(raw: SqliteDatabase, opts: Migrati
     `);
 
     const insertRowid = raw.prepare(
-      `INSERT INTO semantic_search_rowid(connector_instance_id, connector_id, scope_key, record_key, rowid)
-        VALUES(?, ?, ?, ?, ?)`
+      `INSERT INTO semantic_search_rowid(connector_instance_id, connector_id, scope_key, record_key, rowid, input_identity)
+        VALUES(?, ?, ?, ?, ?, ?)`
     );
     for (const row of rowids) {
-      insertRowid.run(resolveInstanceId(row), row.connector_id, row.scope_key, row.record_key, row.rowid);
+      insertRowid.run(
+        resolveInstanceId(row),
+        row.connector_id,
+        row.scope_key,
+        row.record_key,
+        row.rowid,
+        row.input_identity ?? null
+      );
     }
 
     const insertBlob = raw.prepare(
-      `INSERT INTO semantic_search_blob(connector_instance_id, connector_id, scope_key, record_key, embedding)
-        VALUES(?, ?, ?, ?, ?)`
+      `INSERT INTO semantic_search_blob(connector_instance_id, connector_id, scope_key, record_key, embedding, input_identity)
+        VALUES(?, ?, ?, ?, ?, ?)`
     );
     for (const row of blobs) {
-      insertBlob.run(resolveInstanceId(row), row.connector_id, row.scope_key, row.record_key, row.embedding);
+      insertBlob.run(
+        resolveInstanceId(row),
+        row.connector_id,
+        row.scope_key,
+        row.record_key,
+        row.embedding,
+        row.input_identity ?? null
+      );
     }
 
     const insertMeta = raw.prepare(
@@ -6376,6 +6400,23 @@ export function initDb(path = ":memory:", opts: InitDbOptions = {}): DatabaseHan
     addColumnIfMissing(raw, "search_index_dirty", "attempts", "INTEGER NOT NULL DEFAULT 0")
   );
   runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "search_index_dirty", "next_attempt_at", "TEXT"));
+  // Existing delayed rows have no provenance: do not guess whether an old
+  // deadline was automatic or an intentional operator park. New rows use the
+  // fresh-table default (0); legacy delayed rows remain NULL until an
+  // automatic failure or explicit control action classifies them.
+  runWithSqliteBusyRetrySync(() => {
+    raw.exec("BEGIN IMMEDIATE");
+    try {
+      if (addColumnIfMissing(raw, "search_index_dirty", "operator_parked", "INTEGER")) {
+        raw.exec(`UPDATE search_index_dirty
+                  SET operator_parked = CASE WHEN next_attempt_at IS NULL THEN 0 ELSE NULL END`);
+      }
+      raw.exec("COMMIT");
+    } catch (error) {
+      raw.exec("ROLLBACK");
+      throw error;
+    }
+  });
   // Monotonic per-scope CAS generation (see the CREATE TABLE comment above):
   // a pre-existing reference DB created the table before this column
   // existed. Pre-existing rows seed with 0; any subsequent mark-dirty write
@@ -6439,6 +6480,12 @@ export function initDb(path = ":memory:", opts: InitDbOptions = {}): DatabaseHan
   runWithSqliteBusyRetrySync(() => migrateRecordStorageInstanceColumns(raw, opts));
   runWithSqliteBusyRetrySync(() => migrateBlobOriginInstanceColumn(raw, opts));
   runWithSqliteBusyRetrySync(() => migrateSemanticSearchInstanceColumns(raw, opts));
+  // A legacy vector has no evidence that it was produced from the current
+  // normalized input. NULL deliberately forces one guarded refresh.
+  runWithSqliteBusyRetrySync(() => {
+    addColumnIfMissing(raw, "semantic_search_blob", "input_identity", "TEXT");
+    addColumnIfMissing(raw, "semantic_search_rowid", "input_identity", "TEXT");
+  });
   runWithSqliteBusyRetrySync(() => migrateLexicalSearchInstanceColumns(raw, opts));
   runWithSqliteBusyRetrySync(() => migrateLocalDeviceConnectorInstances(raw, opts));
   runWithSqliteBusyRetrySync(() => migrateRecordSemanticTimeColumn(raw));

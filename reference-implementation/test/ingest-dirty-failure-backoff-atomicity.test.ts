@@ -22,25 +22,31 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
+import Database from "better-sqlite3";
 import { closeDb, getDb, initDb } from "../server/db.ts";
 import {
   clearSearchIndexDirty,
+  listDirtySearchIndexScopes,
   markSearchIndexDirtySqlite,
+  parkSearchIndexDirtyScope,
+  rearmSearchIndexDirtyScope,
   recordSearchIndexDirtyFailure,
 } from "../server/stores/search-index-dirty-store.ts";
 
-const BACKOFF_SCHEDULE_SECONDS = [0, 5, 15, 30, 60, 120, 300, 600];
+const BACKOFF_SCHEDULE_SECONDS = [0, 5, 15, 30, 60, 120, 300, 600, 1800, 3600, 21_600, 86_400];
 
 function rawRow(connectorInstanceId: string, stream: string) {
   return getDb()
     .prepare(
-      "SELECT attempts, dirty, last_error, next_attempt_at, revision FROM search_index_dirty WHERE connector_instance_id = ? AND stream = ?"
+      "SELECT attempts, dirty, last_error, marked_at, next_attempt_at, operator_parked, revision FROM search_index_dirty WHERE connector_instance_id = ? AND stream = ?"
     )
     .get(connectorInstanceId, stream) as {
     attempts: number;
     dirty: number;
     last_error: string | null;
+    marked_at: string;
     next_attempt_at: string | null;
+    operator_parked: number | null;
     revision: number;
   };
 }
@@ -56,7 +62,7 @@ test("recordSearchIndexDirtyFailure: attempts and next_attempt_at are always joi
     for (let expectedAttempts = 1; expectedAttempts <= BACKOFF_SCHEDULE_SECONDS.length + 1; expectedAttempts += 1) {
       const before = Date.now();
       // biome-ignore lint/performance/noAwaitInLoops: Each failure must observe the previous failure's persisted attempts count before the next is asserted.
-      await recordSearchIndexDirtyFailure({ connectorInstanceId, stream }, `failure #${expectedAttempts}`);
+      await recordSearchIndexDirtyFailure({ connectorInstanceId, stream }, 1, `failure #${expectedAttempts}`);
       const after = Date.now();
 
       const row = rawRow(connectorInstanceId, stream);
@@ -108,13 +114,167 @@ test("recordSearchIndexDirtyFailure: attempts and next_attempt_at are always joi
   }
 });
 
+test("changed marks reset automatic backoff but preserve an explicit park or an unclassified legacy delay", async () => {
+  initDb(":memory:");
+  try {
+    const automatic = {
+      connectorId: "retry-control",
+      connectorInstanceId: "cin_retry_auto",
+      stream: "items",
+    };
+    markSearchIndexDirtySqlite(automatic, "2026-10-15T00:00:00.000Z");
+    await recordSearchIndexDirtyFailure(automatic, 1, "automatic failure");
+    const delayed = rawRow(automatic.connectorInstanceId, automatic.stream);
+    assert.ok(delayed.next_attempt_at);
+    markSearchIndexDirtySqlite(automatic, "2026-10-15T00:01:00.000Z");
+    const changed = rawRow(automatic.connectorInstanceId, automatic.stream);
+    assert.equal(changed.revision, delayed.revision + 1);
+    assert.equal(changed.attempts, 0);
+    assert.equal(changed.next_attempt_at, null);
+    assert.equal(changed.operator_parked, 0);
+    assert.equal(await recordSearchIndexDirtyFailure(automatic, delayed.revision, "stale failure"), false);
+
+    const parked = {
+      connectorId: "retry-control",
+      connectorInstanceId: "cin_retry_park",
+      stream: "items",
+    };
+    markSearchIndexDirtySqlite(parked, "2026-10-15T00:00:00.000Z");
+    const parkRevision = rawRow(parked.connectorInstanceId, parked.stream).revision;
+    assert.equal(await parkSearchIndexDirtyScope(parked), true);
+    markSearchIndexDirtySqlite(parked, "2026-10-15T00:01:00.000Z");
+    const stillParked = rawRow(parked.connectorInstanceId, parked.stream);
+    assert.equal(stillParked.operator_parked, 1);
+    assert.equal(await recordSearchIndexDirtyFailure(parked, parkRevision, "pre-park failure"), false);
+    assert.ok(
+      (await listDirtySearchIndexScopes(10)).some(
+        (scope) => scope.connectorInstanceId === automatic.connectorInstanceId
+      ),
+      "the changed automatic generation is immediately eligible"
+    );
+    assert.ok(
+      !(await listDirtySearchIndexScopes(10)).some((scope) => scope.connectorInstanceId === parked.connectorInstanceId),
+      "an explicit park is excluded from automatic reconciliation"
+    );
+    await rearmSearchIndexDirtyScope(parked);
+    const rearmed = rawRow(parked.connectorInstanceId, parked.stream);
+    assert.equal(rearmed.operator_parked, 0);
+    assert.equal(rearmed.attempts, 0);
+    assert.equal(rearmed.next_attempt_at, null);
+    assert.equal(rearmed.revision, stillParked.revision + 1);
+
+    getDb()
+      .prepare(
+        "INSERT INTO search_index_dirty(connector_instance_id, connector_id, stream, dirty, marked_at, attempts, next_attempt_at, operator_parked, revision) VALUES (?, ?, ?, 1, ?, 10, ?, NULL, 9)"
+      )
+      .run("cin_retry_legacy", "retry-control", "items", "2026-10-15T00:00:00.000Z", "2099-01-01T00:00:00.000Z");
+    markSearchIndexDirtySqlite(
+      {
+        connectorId: "retry-control",
+        connectorInstanceId: "cin_retry_legacy",
+        stream: "items",
+      },
+      "2026-10-15T00:01:00.000Z"
+    );
+    const legacy = rawRow("cin_retry_legacy", "items");
+    assert.equal(legacy.operator_parked, null);
+    assert.equal(legacy.attempts, 10);
+    assert.equal(legacy.next_attempt_at, "2099-01-01T00:00:00.000Z");
+
+    getDb()
+      .prepare(
+        "INSERT INTO search_index_dirty(connector_instance_id, connector_id, stream, dirty, marked_at, attempts, next_attempt_at, operator_parked, revision) VALUES (?, ?, ?, 1, ?, 10, NULL, NULL, 10)"
+      )
+      .run("cin_retry_unknown", "retry-control", "items", "2026-10-15T00:00:00.000Z");
+    assert.ok(
+      !(await listDirtySearchIndexScopes(100)).some((scope) => scope.connectorInstanceId === "cin_retry_unknown"),
+      "unknown legacy intent stays ineligible even when its deadline is NULL"
+    );
+  } finally {
+    closeDb();
+  }
+});
+
+test("SQLite startup classifies legacy rows only when operator_parked is first added", async () => {
+  const { mkdtempSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "pdpp-search-dirty-migration-"));
+  const dbPath = join(dir, "state.sqlite");
+  try {
+    initDb(dbPath);
+    getDb()
+      .prepare(
+        "INSERT INTO search_index_dirty(connector_instance_id, connector_id, stream, dirty, marked_at, attempts, next_attempt_at, operator_parked, revision) VALUES (?, ?, ?, 1, ?, 10, NULL, NULL, 10)"
+      )
+      .run("cin_retry_legacy_auto", "retry-control", "items", "2026-10-15T00:00:00.000Z");
+    getDb()
+      .prepare(
+        "INSERT INTO search_index_dirty(connector_instance_id, connector_id, stream, dirty, marked_at, attempts, next_attempt_at, operator_parked, revision) VALUES (?, ?, ?, 1, ?, 10, ?, NULL, 10)"
+      )
+      .run(
+        "cin_retry_legacy_ambiguous",
+        "retry-control",
+        "items",
+        "2026-10-15T00:00:00.000Z",
+        "2099-01-01T00:00:00.000Z"
+      );
+    getDb().exec(`
+      CREATE TRIGGER reject_operator_parked_migration
+      BEFORE UPDATE ON search_index_dirty
+      BEGIN
+        SELECT RAISE(ABORT, 'forced operator classification migration failure');
+      END
+    `);
+    getDb().exec("ALTER TABLE search_index_dirty DROP COLUMN operator_parked");
+    closeDb();
+
+    assert.throws(() => initDb(dbPath), /forced operator classification migration failure/);
+    const inspect = new Database(dbPath);
+    try {
+      const columns = inspect.prepare("PRAGMA table_info(search_index_dirty)").all() as Array<{ name: string }>;
+      assert.ok(
+        !columns.some((column) => column.name === "operator_parked"),
+        "a failed column add and classification roll back together"
+      );
+      inspect.exec("DROP TRIGGER reject_operator_parked_migration");
+    } finally {
+      inspect.close();
+    }
+
+    initDb(dbPath);
+    assert.equal(rawRow("cin_retry_legacy_auto", "items").operator_parked, 0);
+    assert.equal(rawRow("cin_retry_legacy_ambiguous", "items").operator_parked, null);
+    getDb()
+      .prepare(
+        "INSERT INTO search_index_dirty(connector_instance_id, connector_id, stream, dirty, marked_at, attempts, next_attempt_at, operator_parked, revision) VALUES (?, ?, ?, 1, ?, 10, NULL, NULL, 11)"
+      )
+      .run("cin_retry_unknown", "retry-control", "items", "2026-10-15T00:00:00.000Z");
+    closeDb();
+
+    initDb(dbPath);
+    assert.equal(rawRow("cin_retry_unknown", "items").operator_parked, null);
+    assert.ok(
+      !(await listDirtySearchIndexScopes(100)).some((scope) => scope.connectorInstanceId === "cin_retry_unknown"),
+      "a later bootstrap does not reinterpret unknown NULL state as automatic"
+    );
+  } finally {
+    closeDb();
+    rmSync(dir, { force: true, recursive: true });
+  }
+});
+
 test("clearSearchIndexDirty preserves a second mark even when both marks have the same timestamp", async () => {
   initDb(":memory:");
   try {
     const connectorInstanceId = "cin_same_millisecond";
     const stream = "items";
     const sameMarkedAt = "2026-08-12T00:00:00.000Z";
-    const key = { connectorId: "same-millisecond", connectorInstanceId, stream };
+    const key = {
+      connectorId: "same-millisecond",
+      connectorInstanceId,
+      stream,
+    };
 
     markSearchIndexDirtySqlite(key, sameMarkedAt);
     const listedRevision = rawRow(connectorInstanceId, stream).revision;

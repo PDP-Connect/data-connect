@@ -24,14 +24,19 @@
  * structured evidence (I6) instead of only a console.warn line.
  */
 
-import { getOne } from "../lib/db.ts";
-import { isPostgresStorageBackend, postgresQuery } from "./postgres-storage.ts";
+import { getOne, transaction } from "../lib/db.ts";
+import {
+  assertConnectorManifestStreamSubsetSync,
+  assertConnectorManifestStreamSubsetWithClient,
+} from "./connector-manifest-write-fence.ts";
+import { isPostgresStorageBackend, postgresQuery, withPostgresBulkTransaction } from "./postgres-storage.ts";
 import { referenceQueries } from "./queries/index.ts";
 import { lexicalIndexBackfillForManifest } from "./search.ts";
-import { getSemanticBackend, semanticIndexBackfillForManifest } from "./search-semantic.ts";
+import { backendStorageIdentity, getSemanticBackend, semanticIndexBackfillForManifest } from "./search-semantic.ts";
 import { currentStorageGeneration, isCurrentStorageGeneration } from "./storage-generation.ts";
 import {
   clearSearchIndexDirty,
+  clearSearchIndexDirtySync,
   countDirtySearchIndexScopes,
   type DirtySearchIndexScope,
   listDirtySearchIndexScopes,
@@ -138,7 +143,13 @@ async function runScopeBackfills(
     streams: [targetStream],
   };
 
-  await lexicalIndexBackfillForManifest({ manifest: pinnedManifest } as unknown as LexicalBackfillOptions);
+  // orphanStreamCleanup:false -- the manifest is pinned to ONE stream, so
+  // "every stored stream the manifest does not name" is every healthy sibling.
+  await lexicalIndexBackfillForManifest({
+    manifest: pinnedManifest,
+    orphanStreamCleanup: false,
+    verifyContent: true,
+  } as unknown as LexicalBackfillOptions);
   assertStorageGenerationCurrent(generation);
 
   // Distinguish "this stream does not declare semantic_fields" (semantic
@@ -158,15 +169,20 @@ async function runScopeBackfills(
   // chance to actually check it.
   const semanticFieldsDeclared = declaresSemanticFields(targetStream);
   const semanticBackend = getSemanticBackend();
+  const semanticIdentity = semanticBackend ? backendStorageIdentity(semanticBackend) : null;
   if (semanticFieldsDeclared && !semanticBackend) {
     await recordSearchIndexDirtyFailure(
       { connectorInstanceId, stream },
+      scope.revision,
       "semantic_fields is declared for this stream but no semantic backend is currently configured; semantic sync is unproven, dirty flag retained"
     );
     return { connectorId, connectorInstanceId, outcome: "failed", stream };
   }
   if (semanticBackend) {
-    await semanticIndexBackfillForManifest({ manifest: pinnedManifest } as unknown as SemanticBackfillOptions);
+    await semanticIndexBackfillForManifest({
+      manifest: pinnedManifest,
+      orphanStreamCleanup: false,
+    } as unknown as SemanticBackfillOptions);
     assertStorageGenerationCurrent(generation);
   }
 
@@ -181,11 +197,33 @@ async function runScopeBackfills(
   // above may well have converged everything they saw, just not the write
   // that raced past them, so no failure evidence is recorded and the
   // scope's existing backoff state is left untouched.
-  const cleared = await clearSearchIndexDirty(
-    { connectorInstanceId, stream },
-    scope.revision,
-    new Date().toISOString()
-  );
+  const assertCompletionCurrent = () => {
+    assertStorageGenerationCurrent(generation);
+    const currentBackend = getSemanticBackend();
+    if (
+      semanticBackend !== currentBackend ||
+      (currentBackend && backendStorageIdentity(currentBackend) !== semanticIdentity)
+    ) {
+      throw new Error("semantic backend changed before dirty completion");
+    }
+  };
+  const key = { connectorInstanceId, stream };
+  const cleared = isPostgresStorageBackend()
+    ? await withPostgresBulkTransaction(
+        async (client) => {
+          await assertConnectorManifestStreamSubsetWithClient(client, connectorId, pinnedManifest);
+          assertCompletionCurrent();
+          const applied = await clearSearchIndexDirty(key, scope.revision, new Date().toISOString(), client);
+          assertCompletionCurrent();
+          return applied;
+        },
+        { lockConnectorInstanceId: connectorInstanceId }
+      )
+    : transaction(() => {
+        assertConnectorManifestStreamSubsetSync(connectorId, pinnedManifest);
+        assertCompletionCurrent();
+        return clearSearchIndexDirtySync(key, scope.revision, new Date().toISOString());
+      });
   return { connectorId, connectorInstanceId, outcome: cleared ? "converged" : "recontended", stream };
 }
 
@@ -222,7 +260,12 @@ export async function reconcileSearchIndexDirtyScope(
     assertStorageGenerationCurrent(generation);
     const manifestStreams = Array.isArray(manifest?.streams) ? (manifest.streams as Record<string, unknown>[]) : null;
     const targetStream = manifestStreams?.find((candidate) => candidate?.name === stream) ?? null;
-    if (!(manifest && targetStream)) {
+    if (!manifest) {
+      // A missing persisted manifest cannot prove that this dirty scope is
+      // obsolete. Leave it dirty for a later trusted manifest publication.
+      return { connectorId, connectorInstanceId, outcome: "failed", stream };
+    }
+    if (!targetStream) {
       // Connector no longer registered, or this stream is no longer
       // declared in its manifest: nothing to reconcile against. Clear the
       // flag -- there is no drift-check that can ever run for a stream that
@@ -253,7 +296,7 @@ export async function reconcileSearchIndexDirtyScope(
       return { connectorId, connectorInstanceId, outcome: "failed", stream };
     }
     const message = err instanceof Error ? err.message : String(err);
-    await recordSearchIndexDirtyFailure({ connectorInstanceId, stream }, message).catch(() => {
+    await recordSearchIndexDirtyFailure({ connectorInstanceId, stream }, scope.revision, message).catch(() => {
       // Evidence write is itself best-effort; never mask the original failure.
     });
     return { connectorId, connectorInstanceId, outcome: "failed", stream };

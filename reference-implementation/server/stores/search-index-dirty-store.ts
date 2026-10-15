@@ -23,6 +23,7 @@
  */
 
 import { exec, getOne, iterate, referenceQueries } from "../../lib/db.ts";
+import type { PostgresTransactionClient } from "../postgres-storage.ts";
 import { isPostgresStorageBackend, postgresQuery } from "../postgres-storage.ts";
 
 interface SqlClient {
@@ -70,12 +71,14 @@ export async function markSearchIndexDirtyPostgres(
   // shape and this file's DirtySearchIndexScope doc comment for why this,
   // not marked_at, is the reconcile clear's CAS token.
   await client.query(
-    `INSERT INTO search_index_dirty(connector_instance_id, connector_id, stream, dirty, marked_at, revision)
-     VALUES ($1, $2, $3, 1, $4, 1)
+    `INSERT INTO search_index_dirty(connector_instance_id, connector_id, stream, dirty, marked_at, revision, operator_parked)
+     VALUES ($1, $2, $3, 1, $4, 1, 0)
      ON CONFLICT(connector_instance_id, stream) DO UPDATE SET
        connector_id = excluded.connector_id,
        dirty = 1,
        marked_at = excluded.marked_at,
+       attempts = CASE WHEN search_index_dirty.operator_parked = 0 THEN 0 ELSE search_index_dirty.attempts END,
+       next_attempt_at = CASE WHEN search_index_dirty.operator_parked = 0 THEN NULL ELSE search_index_dirty.next_attempt_at END,
        revision = search_index_dirty.revision + 1`,
     [key.connectorInstanceId, key.connectorId, key.stream, nowIso]
   );
@@ -96,17 +99,25 @@ export async function markSearchIndexDirtyPostgres(
 export async function clearSearchIndexDirty(
   key: SearchIndexScopeKey,
   expectedRevision: number,
-  nowIso: string
+  nowIso: string,
+  client?: PostgresTransactionClient
 ): Promise<boolean> {
   if (isPostgresStorageBackend()) {
-    const result = await postgresQuery(
+    const query = client ? client.query.bind(client) : postgresQuery;
+    const result = await query(
       `UPDATE search_index_dirty
        SET dirty = 0, reconciled_at = $4, last_error = NULL, attempts = 0, next_attempt_at = NULL
-       WHERE connector_instance_id = $1 AND stream = $2 AND revision = $3`,
+       WHERE connector_instance_id = $1 AND stream = $2 AND revision = $3
+         AND dirty <> 0 AND operator_parked = 0`,
       [key.connectorInstanceId, key.stream, expectedRevision, nowIso]
     );
     return (result.rowCount ?? 0) > 0;
   }
+  return clearSearchIndexDirtySync(key, expectedRevision, nowIso);
+}
+
+/** SQLite completion gate can share its caller's manifest publication transaction. */
+export function clearSearchIndexDirtySync(key: SearchIndexScopeKey, expectedRevision: number, nowIso: string): boolean {
   const result = exec(referenceQueries.searchIndexDirtyClear, [
     nowIso,
     key.connectorInstanceId,
@@ -117,12 +128,9 @@ export async function clearSearchIndexDirty(
 }
 
 // Starvation-avoidance backoff schedule (I5/review): each successive
-// failure pushes next_attempt_at further out, capped so a scope is never
-// starved for longer than ~10 minutes between retries. Deliberately small
-// multipliers (not a full exponential-to-hours curve) because this backlog
-// is expected to be tiny in steady state (a crash/restart edge case, not
-// routine traffic) -- the goal is "a permanently-broken scope stops eating
-// every page's front slot," not "minimize retry cost of a large backlog."
+// failure pushes next_attempt_at further out, reaching a 24-hour bound for
+// persistent failures. New changed automatic input resets this state; explicit
+// parks and unclassified legacy delays survive changed ingest.
 // Values are whole seconds (never sub-second) because SQLite's relative
 // date modifiers ('+N seconds') only support whole-second granularity --
 // the SAME schedule is baked into both queries/search/index-dirty/
@@ -132,7 +140,13 @@ export async function clearSearchIndexDirty(
 // review finding #1 requires the whole increment+backoff computation to
 // happen in ONE atomic statement per backend, which rules out computing
 // the delay in JS and passing it as a parameter).
-const BACKOFF_SCHEDULE_SECONDS = [0, 5, 15, 30, 60, 120, 300, 600];
+//
+// The short head (<=10 min) keeps a transient blip cheap. A scope that keeps
+// failing past it is NOT transient (prod: 64k attempts at a 600s cap kept
+// rewriting the lexical index forever), so the tail climbs to 30m, 1h, 6h and
+// finally 24h; `rearmSearchIndexDirtyScope` is the explicit recovery lever and a
+// success (`clearSearchIndexDirty`) resets the streak.
+const BACKOFF_SCHEDULE_SECONDS = [0, 5, 15, 30, 60, 120, 300, 600, 1800, 3600, 21_600, 86_400];
 
 // Postgres CASE expression mirroring record-failure.sql's SQLite ladder
 // exactly, keyed on the POST-increment attempts value. to_char(...) forces
@@ -162,23 +176,84 @@ const POSTGRES_BACKOFF_CASE = (() => {
  * permanently occupying the oldest-first queue's front slot (see
  * listDirtySearchIndexScopes).
  */
-export async function recordSearchIndexDirtyFailure(key: SearchIndexScopeKey, error: string): Promise<void> {
+export async function recordSearchIndexDirtyFailure(
+  key: SearchIndexScopeKey,
+  expectedRevision: number,
+  error: string
+): Promise<boolean> {
   const nowIso = new Date().toISOString();
   if (isPostgresStorageBackend()) {
-    await postgresQuery(
+    const result = await postgresQuery(
       `UPDATE search_index_dirty
        SET last_error = $3,
            attempts = attempts + 1,
-           next_attempt_at = to_char(
+           next_attempt_at = GREATEST(next_attempt_at, to_char(
              ($4::timestamptz + ${POSTGRES_BACKOFF_CASE} * interval '1 second') AT TIME ZONE 'UTC',
              'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'
-           )
-       WHERE connector_instance_id = $1 AND stream = $2`,
-      [key.connectorInstanceId, key.stream, error, nowIso]
+           ))
+       WHERE connector_instance_id = $1 AND stream = $2 AND revision = $5
+         AND dirty <> 0 AND operator_parked = 0`,
+      [key.connectorInstanceId, key.stream, error, nowIso, expectedRevision]
+    );
+    return (result.rowCount ?? 0) > 0;
+  }
+  const result = exec(referenceQueries.searchIndexDirtyRecordFailure, [
+    error,
+    nowIso,
+    key.connectorInstanceId,
+    key.stream,
+    expectedRevision,
+  ]);
+  return result.changes > 0;
+}
+
+/**
+ * Diagnostic-only failure message for write-path (non-reconcile) index
+ * maintenance failures. Touches `last_error` only: attempts/backoff belong to
+ * reconcile attempts, which are fenced on the dirty `revision`. The write path
+ * has no revision for its mark, so it must not advance retry state.
+ */
+export async function recordSearchIndexDirtyEvidence(key: SearchIndexScopeKey, error: string): Promise<void> {
+  if (isPostgresStorageBackend()) {
+    await postgresQuery(
+      "UPDATE search_index_dirty SET last_error = $3 WHERE connector_instance_id = $1 AND stream = $2",
+      [key.connectorInstanceId, key.stream, error]
     );
     return;
   }
-  exec(referenceQueries.searchIndexDirtyRecordFailure, [error, nowIso, key.connectorInstanceId, key.stream]);
+  exec(referenceQueries.searchIndexDirtyRecordEvidence, [error, key.connectorInstanceId, key.stream]);
+}
+
+/**
+ * Explicit recovery lever for a scope sitting in long backoff or an operator
+ * park: makes it eligible on the next round and resets the failure streak.
+ * Preserves `dirty` and advances `revision`, fencing old in-flight results
+ * that would otherwise be able to reinstate the pre-rearm failure delay.
+ *
+ * The internal owner-session action is mounted at
+ * `/_ref/connections/:id/search-index/:stream/{park,rearm}`; its route validates
+ * ownership and the connector's declared stream first.
+ */
+export async function rearmSearchIndexDirtyScope(key: SearchIndexScopeKey): Promise<boolean> {
+  if (isPostgresStorageBackend()) {
+    const result = await postgresQuery(
+      "UPDATE search_index_dirty SET attempts = 0, next_attempt_at = NULL, operator_parked = 0, revision = revision + 1 WHERE connector_instance_id = $1 AND stream = $2 AND dirty <> 0",
+      [key.connectorInstanceId, key.stream]
+    );
+    return (result.rowCount ?? 0) > 0;
+  }
+  return exec(referenceQueries.searchIndexDirtyRearm, [key.connectorInstanceId, key.stream]).changes > 0;
+}
+
+export async function parkSearchIndexDirtyScope(key: SearchIndexScopeKey): Promise<boolean> {
+  if (isPostgresStorageBackend()) {
+    const result = await postgresQuery(
+      "UPDATE search_index_dirty SET operator_parked = 1, revision = revision + 1 WHERE connector_instance_id = $1 AND stream = $2 AND dirty <> 0",
+      [key.connectorInstanceId, key.stream]
+    );
+    return (result.rowCount ?? 0) > 0;
+  }
+  return exec(referenceQueries.searchIndexDirtyPark, [key.connectorInstanceId, key.stream]).changes > 0;
 }
 
 export async function isSearchIndexScopeDirty(key: SearchIndexScopeKey): Promise<boolean> {
@@ -217,6 +292,7 @@ export async function listDirtySearchIndexScopes(limit: number): Promise<DirtySe
       `SELECT connector_instance_id, connector_id, stream, marked_at, revision
        FROM search_index_dirty
        WHERE dirty <> 0
+         AND operator_parked = 0
          AND (next_attempt_at IS NULL OR next_attempt_at <= $2)
        ORDER BY marked_at ASC, connector_instance_id ASC, stream ASC
        LIMIT $1`,
