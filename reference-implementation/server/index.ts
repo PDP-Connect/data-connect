@@ -100,14 +100,13 @@ import { autostartStatePath, createAutostartStore } from "./autostart-store.ts";
 import { type BrowserProfilePurger, createBrowserProfilePurger } from "./browser-profile-purge.ts";
 import { createLiveRevisions, type LiveRevisions, registerDefaultLiveTopics } from "./live-revisions.ts";
 import { createRecoveryKeyStore } from "./recovery-key-store.ts";
+import { probeNonPressureRecoverableCount, probeSourcePressureGaps } from "./scheduler-manager-factory.ts";
 import { getOwnerSessionStore } from "./stores/owner-session-store.ts";
 import { NekoSurfaceAllocatorClient } from "../runtime/neko-surface-allocator.ts";
 import { isClosedPipeWriteError } from "../runtime/pipe-errors.ts";
-import { hasForwardEvidenceDebt, isRecoverableDetailGapRow } from "../runtime/recovery-decision.ts";
+import { hasForwardEvidenceDebt } from "../runtime/recovery-decision.ts";
 import { projectRunAutomationPolicy } from "../runtime/run-automation-policy.ts";
-import { matchesRecoveryInstance } from "../runtime/scheduler/recovery-instance-scope.ts";
 import { createScheduler } from "../runtime/scheduler.ts";
-import { SOURCE_PRESSURE_GAP_REASONS } from "../runtime/scheduler-source-pressure-cooldown.ts";
 import { isVendoredUndiciParserAssertion } from "../runtime/undici-parser-errors.ts";
 import {
   buildPendingConsentRequestUri,
@@ -10508,34 +10507,11 @@ function createReferenceSchedulerManager({
         // whether recovery work exists, do not bypass the cooldown — the next clean
         // tick recovers it.
         try {
-          const store = getDefaultConnectorDetailGapStore() as {
-            listPendingGapsForConnector: (
-              id: string,
-              opts: { limit: number }
-            ) => Promise<Record<string, unknown>[] | null | undefined>;
-          };
-          const rows = await store.listPendingGapsForConnector(connectorId, {
-            limit: 200,
-          });
-          const instanceKey = connectorInstanceId || connectorId;
-          let count = 0;
-          for (const row of rows ?? []) {
-            // Permanent source loss (retryable:false) is never recoverable work.
-            if (!isRecoverableDetailGapRow(row as { retryable?: boolean | null })) {
-              continue;
-            }
-            // Exclude source-pressure reasons — they belong to Governor A (cooldown),
-            // not to the recovery lane.
-            if (typeof row?.reason === "string" && SOURCE_PRESSURE_GAP_REASONS.has(row.reason)) {
-              continue;
-            }
-            // Scope to this connection's instance (same guard as the pressure probe).
-            if (!matchesRecoveryInstance(row.connector_instance_id, instanceKey, connectorId)) {
-              continue;
-            }
-            count += 1;
-          }
-          return count;
+          return await probeNonPressureRecoverableCount(
+            getDefaultConnectorDetailGapStore() as Parameters<typeof probeNonPressureRecoverableCount>[0],
+            connectorId,
+            connectorInstanceId
+          );
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
           logger.error({ err: message }, `[scheduler] non-pressure recovery probe failed for ${connectorId}`);
@@ -10555,44 +10531,11 @@ function createReferenceSchedulerManager({
         // A probe failure is surfaced as "no pressure" (empty list) so an
         // unreadable gap store cannot silently pause a schedule — same
         // fail-open stance as the attention probe above.
-        const store = getDefaultConnectorDetailGapStore() as {
-          listPendingGapsForConnector: (
-            id: string,
-            opts: { limit: number }
-          ) => Promise<Record<string, unknown>[] | null | undefined>;
-        };
-        const rows = await store.listPendingGapsForConnector(connectorId, {
-          limit: 200,
-        });
-        const instanceKey = connectorInstanceId || connectorId;
-        // biome-ignore lint/suspicious/noEvolvingTypes: This runtime-untyped boundary requires staged type narrowing.
-        const gaps = [];
-        for (const row of rows ?? []) {
-          if (!isRecoverableDetailGapRow(row as { retryable?: boolean | null })) {
-            continue;
-          }
-          if (typeof row?.reason !== "string" || !SOURCE_PRESSURE_GAP_REASONS.has(row.reason)) {
-            continue;
-          }
-          // `listPendingGapsForConnector` spans every instance of the connector
-          // type; keep only this connection's gaps so cooldown stays per-source.
-          if (!matchesRecoveryInstance(row.connector_instance_id, instanceKey, connectorId)) {
-            continue;
-          }
-          gaps.push({
-            attemptCount: typeof row.attempt_count === "number" ? row.attempt_count : null,
-            lastPressureAt:
-              typeof row.last_attempt_at === "string"
-                ? row.last_attempt_at
-                : // biome-ignore lint/style/noNestedTernary: The existing expression mirrors the protocol’s compact value selection contract.
-                  typeof row.updated_at === "string"
-                  ? row.updated_at
-                  : null,
-            nextAttemptAfter: typeof row.next_attempt_after === "string" ? row.next_attempt_after : null,
-            reason: row.reason,
-          });
-        }
-        return gaps;
+        return await probeSourcePressureGaps(
+          getDefaultConnectorDetailGapStore() as Parameters<typeof probeSourcePressureGaps>[0],
+          connectorId,
+          connectorInstanceId
+        );
       },
       getState: async (connectorId, connectorInstanceId) => {
         // Read scheduler state from the connection-instance namespace by

@@ -13,6 +13,7 @@ import { reconcileDirtyConnectorSummaryEvidence } from "../server/connector-summ
 import { closeDb, getDb, initDb } from "../server/db.ts";
 import { OWNER_AUTH_DEFAULT_SUBJECT_ID } from "../server/owner-auth.ts";
 import { getSyncState, putSyncState } from "../server/records.ts";
+import { createSqliteConnectorDetailGapStore } from "../server/stores/connector-detail-gap-store.ts";
 import { makeDefaultAccountConnectorInstanceId } from "../server/stores/connector-instance-store.ts";
 import { withConnectorLifecycleLock } from "../server/connector-lifecycle-lock.ts";
 
@@ -948,4 +949,103 @@ test("explicit recoveryOnly:true with no pending gap evidence at all is unchange
   await drainUntilIdle(controller);
   assert.equal(calls.length, 1);
   assert.equal(at(calls, 0).recoveryOnly, true);
+});
+
+// ─── bounded diagnostic reads must not gate recovery (real store) ─────────────
+//
+// The controller's recovery-first and explicit-recovery-only decisions read one
+// connection's pending gaps. Older permanent loss must not fill that bounded read
+// and hide later recoverable work (nor, in the refusal check, make a connection
+// that DOES have recoverable work look like it has none).
+
+async function seedRealRecoveryGaps(permanentCount: number, transientCount: number) {
+  const store = createSqliteConnectorDetailGapStore();
+  const base = Date.parse("2026-01-01T00:00:00.000Z");
+  const common = {
+    connectorId: AMAZON,
+    connectorInstanceId: "cin_recovery",
+    grantId: "grant_1",
+    stream: "order_items",
+  };
+  for (let index = 0; index < permanentCount; index += 1) {
+    // biome-ignore lint/performance/noAwaitInLoops: ordered setup keeps created_at ordering deterministic.
+    await store.upsertPendingGap({
+      ...common,
+      detailLocator: { kind: "test.item", item: `p${index}` },
+      now: new Date(base + index * 1000).toISOString(),
+      reason: "source_unrepresentable",
+      recordKey: `p${index}`,
+      retryable: false,
+    });
+  }
+  for (let index = 0; index < transientCount; index += 1) {
+    // biome-ignore lint/performance/noAwaitInLoops: ordered setup keeps created_at ordering deterministic.
+    await store.upsertPendingGap({
+      ...common,
+      detailLocator: { kind: "test.item", item: `t${index}` },
+      now: new Date(base + (permanentCount + 1000 + index) * 1000).toISOString(),
+      reason: "retry_exhausted",
+      recordKey: `t${index}`,
+      retryable: true,
+    });
+  }
+  return store;
+}
+
+test("explicit recoveryOnly:true is NOT refused when recoverable work sits behind >100 older permanent rows", async (t) => {
+  freshDb(t);
+  await seedCurrentRecoveryConnection();
+  const store = await seedRealRecoveryGaps(120, 1);
+
+  const calls: RuntimeRunConnectorOptions[] = [];
+  const controller = makeController(calls, { detailGapStore: store as unknown as DetailGapReadStoreFixture });
+  await controller.runNow(AMAZON, {
+    connectorInstanceId: "cin_recovery",
+    manifest: AMAZON_MANIFEST,
+    ownerToken: "owner-token",
+    recoveryOnly: true,
+    runId: "run_recovery_only_behind_permanent",
+  });
+  await drainUntilIdle(controller);
+  assert.equal(calls.length, 1, "the recovery run launches");
+  assert.equal(at(calls, 0).recoveryOnly, true);
+});
+
+test("implicit manual run prefers recovery when recoverable work sits behind >100 older permanent rows", async (t) => {
+  freshDb(t);
+  await seedCurrentRecoveryConnection();
+  const store = await seedRealRecoveryGaps(120, 1);
+
+  const calls: RuntimeRunConnectorOptions[] = [];
+  const controller = makeController(calls, { detailGapStore: store as unknown as DetailGapReadStoreFixture });
+  await controller.runNow(AMAZON, {
+    connectorInstanceId: "cin_recovery",
+    manifest: AMAZON_MANIFEST,
+    ownerToken: "owner-token",
+    runId: "run_implicit_behind_permanent",
+  });
+  await drainUntilIdle(controller);
+  assert.equal(calls.length, 1);
+  assert.equal(at(calls, 0).recoveryOnly, true, "the later recoverable gap makes recovery-first eligible");
+});
+
+test("explicit recoveryOnly:true over >100 permanent rows and NO recoverable row is still refused", async (t) => {
+  freshDb(t);
+  await seedCurrentRecoveryConnection();
+  const store = await seedRealRecoveryGaps(120, 0);
+
+  const calls: RuntimeRunConnectorOptions[] = [];
+  const controller = makeController(calls, { detailGapStore: store as unknown as DetailGapReadStoreFixture });
+  await assert.rejects(
+    () =>
+      controller.runNow(AMAZON, {
+        connectorInstanceId: "cin_recovery",
+        manifest: AMAZON_MANIFEST,
+        ownerToken: "owner-token",
+        recoveryOnly: true,
+        runId: "run_recovery_only_all_permanent_real",
+      }),
+    (err: unknown) => (err as { recoveryAdmissionReason?: string }).recoveryAdmissionReason === "permanent_loss"
+  );
+  assert.equal(calls.length, 0);
 });

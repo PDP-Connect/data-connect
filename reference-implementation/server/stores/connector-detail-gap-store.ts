@@ -1153,6 +1153,72 @@ async function requeuePostgresQuarantinedRows(
   return { matched: rows.length, requeued };
 }
 
+/**
+ * Options for the bounded per-connector / per-connection pending-gap reads.
+ * Without them the read is a complete-visibility diagnostic. The recovery
+ * decisions (recovery-first, scheduler probes, manual-request denial) pass them so
+ * eligibility is applied in SQL BEFORE the LIMIT: older permanent loss, other
+ * connections' rows or non-matching reasons cannot fill the page and hide the
+ * recoverable work that decision is about.
+ */
+export interface PendingGapReadOptions {
+  /** ForConnector reads only: scope to one connection in SQL, before the LIMIT. */
+  connectorInstanceId?: string | null;
+  /** Keep only reasons NOT in this list (a NULL reason is kept). */
+  excludeReasons?: readonly string[] | null;
+  limit?: number;
+  /** Keep only reasons in this list. */
+  reasons?: readonly string[] | null;
+  /** Drop explicit-false (`retryable = 0`) rows; legacy NULL rows are kept. */
+  recoverableOnly?: boolean;
+}
+
+function nonEmptyReasonList(values: readonly string[] | null | undefined): string[] | null {
+  const list = (values ?? []).filter((value) => typeof value === "string" && value.length > 0);
+  return list.length ? list : null;
+}
+
+function sqlitePendingReadFilter(options: PendingGapReadOptions): { params: string[]; sql: string } {
+  const parts: string[] = [];
+  const params: string[] = [];
+  if (options.recoverableOnly === true) {
+    parts.push("AND (retryable IS NULL OR retryable <> 0)");
+  }
+  const reasons = nonEmptyReasonList(options.reasons);
+  if (reasons) {
+    parts.push(`AND reason IN (${reasons.map(() => "?").join(", ")})`);
+    params.push(...reasons);
+  }
+  const excluded = nonEmptyReasonList(options.excludeReasons);
+  if (excluded) {
+    parts.push(`AND (reason IS NULL OR reason NOT IN (${excluded.map(() => "?").join(", ")}))`);
+    params.push(...excluded);
+  }
+  return { params, sql: parts.join("\n          ") };
+}
+
+function postgresPendingReadFilter(
+  options: PendingGapReadOptions,
+  firstParamIndex: number
+): { params: unknown[]; sql: string } {
+  const parts: string[] = [];
+  const params: unknown[] = [];
+  if (options.recoverableOnly === true) {
+    parts.push("AND (retryable IS NULL OR retryable <> 0)");
+  }
+  const reasons = nonEmptyReasonList(options.reasons);
+  if (reasons) {
+    params.push(reasons);
+    parts.push(`AND reason = ANY($${firstParamIndex + params.length - 1}::text[])`);
+  }
+  const excluded = nonEmptyReasonList(options.excludeReasons);
+  if (excluded) {
+    params.push(excluded);
+    parts.push(`AND (reason IS NULL OR reason <> ALL($${firstParamIndex + params.length - 1}::text[]))`);
+  }
+  return { params, sql: parts.join("\n          ") };
+}
+
 export function createSqliteConnectorDetailGapStore() {
   return {
     // Leasing is not an attempt. Every claimed gap moves pending → in_progress
@@ -1397,10 +1463,10 @@ export function createSqliteConnectorDetailGapStore() {
     // (e.g. one device per local Codex install) are not silently dropped
     // when the projection has no single instance to filter by.
     // biome-ignore lint/suspicious/useAwait: The async signature is part of this caller-facing contract.
-    async listPendingGapsForConnector(
-      connectorId: string,
-      { limit = 100 }: { limit?: number } = {}
-    ): Promise<DetailGap[]> {
+    async listPendingGapsForConnector(connectorId: string, options: PendingGapReadOptions = {}): Promise<DetailGap[]> {
+      const { limit = 100 } = options;
+      const filter = sqlitePendingReadFilter(options);
+      const scopedInstance = nonEmptyString(options.connectorInstanceId);
       // REVIEWED-DYNAMIC: bounded diagnostics scan of pending gaps for one connector type.
       const rows = [
         ...iterateDynamicSqlAcknowledged<DetailGapRow>(
@@ -1408,10 +1474,12 @@ export function createSqliteConnectorDetailGapStore() {
         SELECT * FROM connector_detail_gaps
         WHERE connector_id = ?
           AND status = 'pending'
+          AND (? IS NULL OR connector_instance_id = ?)
+          ${filter.sql}
         ORDER BY created_at
         LIMIT ?
       `,
-          [connectorId, Math.max(1, Math.min(limit, 500))]
+          [connectorId, scopedInstance, scopedInstance, ...filter.params, Math.max(1, Math.min(limit, 500))]
         ),
       ];
       return rows.map((row) => rowToGap(row) as DetailGap);
@@ -1421,8 +1489,10 @@ export function createSqliteConnectorDetailGapStore() {
     async listPendingGapsForConnectorInstance(
       connectorId: string,
       connectorInstanceId: string,
-      { limit = 100 }: { limit?: number } = {}
+      options: PendingGapReadOptions = {}
     ): Promise<DetailGap[]> {
+      const { limit = 100 } = options;
+      const filter = sqlitePendingReadFilter(options);
       // REVIEWED-DYNAMIC: bounded diagnostics scan of pending gaps for one connection.
       const rows = [
         ...iterateDynamicSqlAcknowledged<DetailGapRow>(
@@ -1431,10 +1501,11 @@ export function createSqliteConnectorDetailGapStore() {
         WHERE connector_id = ?
           AND connector_instance_id = ?
           AND status = 'pending'
+          ${filter.sql}
         ORDER BY created_at
         LIMIT ?
       `,
-          [connectorId, connectorInstanceId, Math.max(1, Math.min(limit, 500))]
+          [connectorId, connectorInstanceId, ...filter.params, Math.max(1, Math.min(limit, 500))]
         ),
       ];
       return rows.map((row) => rowToGap(row) as DetailGap);
@@ -2101,19 +2172,20 @@ export function createPostgresConnectorDetailGapStore() {
       return groupGapRowsByConnectorInstanceId(query.rows as DetailGapRow[]);
     },
 
-    async listPendingGapsForConnector(
-      connectorId: string,
-      { limit = 100 }: { limit?: number } = {}
-    ): Promise<DetailGap[]> {
+    async listPendingGapsForConnector(connectorId: string, options: PendingGapReadOptions = {}): Promise<DetailGap[]> {
+      const { limit = 100 } = options;
+      const filter = postgresPendingReadFilter(options, 4);
       const result = await postgresQuery<DetailGapRow>(
         `
         SELECT * FROM connector_detail_gaps
         WHERE connector_id = $1
           AND status = 'pending'
+          AND ($3::text IS NULL OR connector_instance_id = $3)
+          ${filter.sql}
         ORDER BY created_at
         LIMIT $2
       `,
-        [connectorId, Math.max(1, Math.min(limit, 500))]
+        [connectorId, Math.max(1, Math.min(limit, 500)), nonEmptyString(options.connectorInstanceId), ...filter.params]
       );
       return (result.rows as DetailGapRow[]).map((row) => rowToGap(row) as DetailGap);
     },
@@ -2121,18 +2193,21 @@ export function createPostgresConnectorDetailGapStore() {
     async listPendingGapsForConnectorInstance(
       connectorId: string,
       connectorInstanceId: string,
-      { limit = 100 }: { limit?: number } = {}
+      options: PendingGapReadOptions = {}
     ): Promise<DetailGap[]> {
+      const { limit = 100 } = options;
+      const filter = postgresPendingReadFilter(options, 4);
       const result = await postgresQuery<DetailGapRow>(
         `
         SELECT * FROM connector_detail_gaps
         WHERE connector_id = $1
           AND connector_instance_id = $2
           AND status = 'pending'
+          ${filter.sql}
         ORDER BY created_at
         LIMIT $3
       `,
-        [connectorId, connectorInstanceId, Math.max(1, Math.min(limit, 500))]
+        [connectorId, connectorInstanceId, Math.max(1, Math.min(limit, 500)), ...filter.params]
       );
       return (result.rows as DetailGapRow[]).map((row) => rowToGap(row) as DetailGap);
     },

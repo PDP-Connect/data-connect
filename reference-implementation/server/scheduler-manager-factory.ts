@@ -105,8 +105,42 @@ type ConnectorInstanceStore = Parameters<typeof admitOwnerRunConnection>[0]["con
 
 type ConnectorInstanceCredentialStore = StaticSecretCredentialStore;
 
+interface PendingGapReadOptions {
+  readonly excludeReasons?: readonly string[];
+  readonly limit: number;
+  readonly reasons?: readonly string[];
+  readonly recoverableOnly?: boolean;
+}
+
 interface GapStore {
-  listPendingGapsForConnector: (connectorId: string, options: { limit: number }) => Promise<readonly GapRow[]>;
+  listPendingGapsForConnector: (connectorId: string, options: PendingGapReadOptions) => Promise<readonly GapRow[]>;
+  listPendingGapsForConnectorInstance?: (
+    connectorId: string,
+    connectorInstanceId: string,
+    options: PendingGapReadOptions
+  ) => Promise<readonly GapRow[]>;
+}
+
+const RECOVERY_PROBE_READ_LIMIT = 200;
+
+/**
+ * One connection's pending gaps for a recovery probe. Eligibility (recoverable,
+ * and the pressure / non-pressure reason split) is applied in SQL before the
+ * LIMIT, scoped to this connection, so older permanent loss, other connections'
+ * rows or the other reason class cannot fill the page and hide the work the probe
+ * is about. A store without the per-connection read falls back to the
+ * connector-wide read (the callers still filter by instance and reason).
+ */
+function readProbeGaps(
+  store: GapStore,
+  connectorId: string,
+  instanceKey: string,
+  reasonScope: { readonly excludeReasons?: readonly string[]; readonly reasons?: readonly string[] }
+): Promise<readonly GapRow[]> {
+  const options: PendingGapReadOptions = { ...reasonScope, limit: RECOVERY_PROBE_READ_LIMIT, recoverableOnly: true };
+  return typeof store.listPendingGapsForConnectorInstance === "function"
+    ? store.listPendingGapsForConnectorInstance(connectorId, instanceKey, options)
+    : store.listPendingGapsForConnector(connectorId, options);
 }
 
 interface GapRow {
@@ -229,6 +263,34 @@ export function countNonPressureGaps(rows: readonly GapRow[], instanceKey: strin
     count += 1;
   }
   return count;
+}
+
+/**
+ * Durable non-pressure recovery probe for one connection: how many pending gaps
+ * are drainable recovery work. Shared by both scheduler wirings so the bounded
+ * read and its predicates have exactly one definition.
+ */
+export async function probeNonPressureRecoverableCount(
+  store: GapStore,
+  connectorId: string,
+  connectorInstanceId: string | undefined
+): Promise<number> {
+  const instanceKey = connectorInstanceId || connectorId;
+  const rows = await readProbeGaps(store, connectorId, instanceKey, {
+    excludeReasons: [...SOURCE_PRESSURE_GAP_REASONS],
+  });
+  return countNonPressureGaps(rows ?? [], instanceKey, connectorId);
+}
+
+/** Durable source-pressure projection for one connection's cross-run cooldown. */
+export async function probeSourcePressureGaps(
+  store: GapStore,
+  connectorId: string,
+  connectorInstanceId: string | undefined
+): Promise<PressureGap[]> {
+  const instanceKey = connectorInstanceId || connectorId;
+  const rows = await readProbeGaps(store, connectorId, instanceKey, { reasons: [...SOURCE_PRESSURE_GAP_REASONS] });
+  return mapPressureGaps(rows ?? [], instanceKey, connectorId);
 }
 
 function relevantAttentionRecord(records: readonly Parameters<typeof isAttentionHealthRelevant>[0][], nowIso: string) {
@@ -653,9 +715,7 @@ export function createReferenceSchedulerManager({
         // tick recovers it.
         try {
           const store = getDefaultConnectorDetailGapStore() as unknown as GapStore;
-          const rows = await store.listPendingGapsForConnector(connectorId, { limit: 200 });
-          const instanceKey = connectorInstanceId ?? connectorId;
-          return countNonPressureGaps(rows, instanceKey, connectorId);
+          return await probeNonPressureRecoverableCount(store, connectorId, connectorInstanceId);
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
           logger.error({ err: message }, `[scheduler] non-pressure recovery probe failed for ${connectorId}`);
@@ -675,9 +735,7 @@ export function createReferenceSchedulerManager({
         // unreadable gap store cannot silently pause a schedule — same
         // fail-open stance as the attention probe above.
         const store = getDefaultConnectorDetailGapStore() as unknown as GapStore;
-        const rows = await store.listPendingGapsForConnector(connectorId, { limit: 200 });
-        const instanceKey = connectorInstanceId ?? connectorId;
-        return mapPressureGaps(rows, instanceKey, connectorId);
+        return await probeSourcePressureGaps(store, connectorId, connectorInstanceId);
       },
       getState: async (connectorId, connectorInstanceId) => {
         // Read scheduler state from the connection-instance namespace by

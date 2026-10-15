@@ -1480,15 +1480,27 @@ interface PendingDetailGapRow {
  * The read surface of the detail-gap store the controller depends on for the
  * cooldown projection. Kept to one method so a test fake is trivial.
  */
+interface ConnectorDetailGapReadOptions {
+  /** Connector-wide reads only: scope to one connection in SQL, before the LIMIT. */
+  readonly connectorInstanceId?: string;
+  /** Applied in SQL before the LIMIT: keep only reasons NOT in this list. */
+  readonly excludeReasons?: readonly string[];
+  readonly limit?: number;
+  /** Applied in SQL before the LIMIT: keep only these reasons. */
+  readonly reasons?: readonly string[];
+  /** Applied in SQL before the LIMIT: drop explicit-false (permanent) rows. */
+  readonly recoverableOnly?: boolean;
+}
+
 interface ConnectorDetailGapReadStore {
   listPendingGapsForConnector: (
     connectorId: string,
-    options?: { limit?: number }
+    options?: ConnectorDetailGapReadOptions
   ) => Promise<readonly PendingDetailGapRow[]> | readonly PendingDetailGapRow[];
   listPendingGapsForConnectorInstance?: (
     connectorId: string,
     connectorInstanceId: string,
-    options?: { limit?: number }
+    options?: ConnectorDetailGapReadOptions
   ) => Promise<readonly PendingDetailGapRow[]> | readonly PendingDetailGapRow[];
 }
 
@@ -2911,7 +2923,12 @@ export function createController(opts: ControllerOptions = {}): Controller {
     await Promise.all(
       [...connectorIds].map(async (connectorId) => {
         try {
-          const gaps = (await detailGapStore.listPendingGapsForConnector(connectorId, { limit: 200 })) ?? [];
+          const gaps =
+            (await detailGapStore.listPendingGapsForConnector(connectorId, {
+              limit: 200,
+              reasons: [...SOURCE_PRESSURE_GAP_REASONS],
+              recoverableOnly: true,
+            })) ?? [];
           bucketPressureGapsByInstance(gaps, connectorId, ensure);
         } catch (err) {
           console.error(
@@ -3472,8 +3489,16 @@ export function createController(opts: ControllerOptions = {}): Controller {
     connectorId: string,
     connectorInstanceId: string
   ): Promise<PendingPressureGap[]> {
+    // Eligibility (this connection, pressure reasons, recoverable) is applied in the
+    // store before the 200-row LIMIT, so older permanent or non-pressure rows, or
+    // another connection's rows, cannot hide this connection's pressure gaps.
     const pendingGapRows = await Promise.resolve(
-      detailGapStore.listPendingGapsForConnector(connectorId, { limit: 200 })
+      detailGapStore.listPendingGapsForConnector(connectorId, {
+        connectorInstanceId,
+        limit: 200,
+        reasons: [...SOURCE_PRESSURE_GAP_REASONS],
+        recoverableOnly: true,
+      })
     );
     const pendingPressureRows = pendingGapRows
       .filter((row) => (row.connector_instance_id || connectorId) === connectorInstanceId)
@@ -3528,18 +3553,16 @@ export function createController(opts: ControllerOptions = {}): Controller {
 
   async function listPendingGapsForContinuation(
     connectorId: string,
-    connectorInstanceId: string
+    connectorInstanceId: string,
+    readOptions: { readonly limit?: number; readonly recoverableOnly?: boolean } = {}
   ): Promise<readonly PendingDetailGapRow[]> {
+    const options = { limit: RECOVERY_CONTINUATION_PENDING_READ_LIMIT, ...readOptions };
     if (detailGapStore.listPendingGapsForConnectorInstance) {
       return await Promise.resolve(
-        detailGapStore.listPendingGapsForConnectorInstance(connectorId, connectorInstanceId, {
-          limit: RECOVERY_CONTINUATION_PENDING_READ_LIMIT,
-        })
+        detailGapStore.listPendingGapsForConnectorInstance(connectorId, connectorInstanceId, options)
       );
     }
-    const rows = await Promise.resolve(
-      detailGapStore.listPendingGapsForConnector(connectorId, { limit: RECOVERY_CONTINUATION_PENDING_READ_LIMIT })
-    );
+    const rows = await Promise.resolve(detailGapStore.listPendingGapsForConnector(connectorId, options));
     return rows.filter((row) => (row.connector_instance_id || connectorId) === connectorInstanceId);
   }
 
@@ -3550,8 +3573,18 @@ export function createController(opts: ControllerOptions = {}): Controller {
   // ordinary collection labelled as gap recovery. No pending-gap evidence at all
   // keeps the existing behavior.
   async function assertRecoveryOnlyHasRecoverableWork(connectorId: string, connectorInstanceId: string): Promise<void> {
-    const rows = await listPendingGapsForContinuation(connectorId, connectorInstanceId);
-    if (rows.length > 0 && rows.every((row) => !isRecoverableDetailGapRow(row))) {
+    // Evidence of "pending exists AND recoverable is absent", not an every() over a
+    // truncated diagnostic page: the recoverable read applies eligibility in SQL
+    // before its LIMIT, and only an empty result makes the second, any-pending read.
+    const recoverable = await listPendingGapsForContinuation(connectorId, connectorInstanceId, {
+      limit: 1,
+      recoverableOnly: true,
+    });
+    if (recoverable.some(isRecoverableDetailGapRow)) {
+      return;
+    }
+    const anyPending = await listPendingGapsForContinuation(connectorId, connectorInstanceId, { limit: 1 });
+    if (anyPending.length > 0) {
       throw new ControllerError(
         "Recovery-only run refused: every pending detail gap is permanent source loss (non-retryable) and cannot be refetched.",
         "invalid_request",
@@ -3564,7 +3597,8 @@ export function createController(opts: ControllerOptions = {}): Controller {
     connectorId: string,
     connectorInstanceId: string
   ): Promise<boolean> {
-    const rows = await listPendingGapsForContinuation(connectorId, connectorInstanceId);
+    // Permanent rows are dropped in SQL before the LIMIT so they cannot fill the page.
+    const rows = await listPendingGapsForContinuation(connectorId, connectorInstanceId, { recoverableOnly: true });
     const nowMs = Date.now();
     return rows.some((row) => {
       const classification = classifyRecoveryGap(row);
