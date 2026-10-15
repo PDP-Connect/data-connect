@@ -247,6 +247,7 @@ export interface ReferenceQueryRegistry extends Readonly<Record<string, Register
   // Blobs — content-addressed blob persistence + binding maintenance.
   readonly blobsInsertBlob: MutationQuery;
   readonly blobsListBindingsById: ReadManyQuery;
+  readonly blobsListBindingsByInstancePage: ReadManyQuery;
   readonly clientEventSubscriptionsClaimDueQueue: SmallEnumerationQuery;
   readonly clientEventSubscriptionsDeleteSubscription: MutationQuery;
   readonly clientEventSubscriptionsDropQueuedForSubscription: MutationQuery;
@@ -864,6 +865,7 @@ export function loadReferenceQueries(queryDir = QUERIES_DIR): ReferenceQueryRegi
     "blobsGetRowById",
     "blobsGetSizeById",
     "blobsListBindingsById",
+    "blobsListBindingsByInstancePage",
     // Approvals — `/_ref/approvals` projection.
     "approvalsListPendingConsents",
     "approvalsListPendingOwnerDevices",

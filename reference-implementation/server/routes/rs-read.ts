@@ -79,12 +79,14 @@ import {
 } from "../../operations/rs-streams-list/index.ts";
 import {
   clientGrantForPairwiseDetail,
+  pairwiseClientReadContext,
   pairwiseClientReadMap,
   pairwiseOwnerReadMap,
   pairwiseOwnerReadMapForSource,
   parsePairwiseReadSelector,
   parsePairwiseReadSelectorSyntax,
   projectPairwiseDetailRecord,
+  safePairwiseBlobError,
   safePairwiseDetailError,
   safePairwiseFieldWindowError,
   safePairwiseFieldWindowWarnings,
@@ -98,6 +100,7 @@ import type { MiddlewareHandler, RouteArg } from "./_route-contract.ts";
 // `server/routes/ref-dataset.ts` / `ref-connectors.ts`.
 
 interface RouteRequest {
+  _pdpp_deprecated_instance_alias?: boolean;
   _pdpp_resolver_warnings?: ResolverWarning[] | undefined;
   readonly headers: Readonly<Record<string, unknown>>;
   readonly params: Readonly<Record<string, string>>;
@@ -222,12 +225,16 @@ interface BlobRow {
 }
 
 interface BlobStoreLike {
-  listBlobBindings: (blobId: string) => Promise<BlobBindingRow[]>;
+  listBlobBindingsPage: (args: {
+    blobId: string;
+    connectorId: string;
+    connectorInstanceId: string;
+    cursor?: { record_key: string; stream: string } | null;
+  }) => Promise<{
+    nextCursor: { record_key: string; stream: string } | null;
+    rows: readonly BlobBindingRow[];
+  }>;
   loadContentAddressedBlob: (blobId: string) => Promise<BlobRow | null>;
-}
-
-interface AmbiguousConnectionErrorCtor {
-  new (message: string, candidates: unknown[]): Error;
 }
 
 // The query-context object threaded through `emitQueryReceived` / `rejectQuery`.
@@ -245,7 +252,6 @@ type QueryContext = Record<string, unknown> & {
 // permissive `unknown` returns keep the adapter from re-stating each helper's
 // internal shape while still type-checking the wiring.
 export interface MountRsReadContext {
-  AmbiguousConnectionError: AmbiguousConnectionErrorCtor;
   aggregateRecordsAcrossBindings: (
     bindings: ReadRequestBinding[],
     stream: string,
@@ -462,6 +468,7 @@ function canonicalDetailUrl(req: RouteRequest, publicHandle: string): string {
 function pairwiseSelectorPrelude(
   ctx: MountRsReadContext,
   projectError: (error: unknown) => Error & { code: string; param?: string },
+  markDeprecatedAlias = false,
 ): MiddlewareHandler {
   return (...args: unknown[]) => {
     const req = args[0] as RouteRequest;
@@ -470,6 +477,7 @@ function pairwiseSelectorPrelude(
     try {
       const handle = parsePairwiseReadSelectorSyntax(req.query ?? {});
       if (Object.hasOwn(req.query ?? {}, "connection_id")) {
+        if (markDeprecatedAlias) req._pdpp_deprecated_instance_alias = true;
         const query = { ...req.query };
         delete query.connection_id;
         if (!Object.hasOwn(query, "instance_id")) query.instance_id = handle;
@@ -2810,193 +2818,6 @@ export function mountRsSearchHybrid(app: AppLike, ctx: MountRsReadContext): void
   );
 }
 
-interface BlobActorScope {
-  manifest: ManifestLike;
-  storageBinding: StorageBindingLike;
-}
-
-// Owner/client scope resolution for the blob route. Unlike `resolveReadScope`,
-// the blob route does not thread `queryContext` because it has no
-// `query.received` instrumentation.
-async function resolveBlobActorScope(
-  ctx: MountRsReadContext,
-  req: RouteRequest,
-  tokenInfo: TokenInfo
-): Promise<BlobActorScope> {
-  if (tokenInfo.pdpp_token_kind === "owner") {
-    const ownerScope = await ctx.resolveOwnerReadScope(req, ctx.opts);
-    const ownerResolved = await ctx.resolveOwnerManifestFromScope(ownerScope, ctx.opts);
-    return {
-      manifest: ownerResolved.manifest,
-      storageBinding: ownerResolved.storageBinding,
-    };
-  }
-  const grantResolved = await ctx.resolveGrantManifest(tokenInfo, ctx.opts);
-  return {
-    manifest: grantResolved.manifest,
-    storageBinding: grantResolved.storageBinding,
-  };
-}
-
-// Walk every blob binding and collect the unique connector instances that
-// expose a visible record referencing this blob. Owns the per-stream
-// addressable-id resolution (with its closed grant `instance_ids` check and
-// connection_not_found / invalid_argument tolerance) and the visibility scan.
-// Behaviour-identical to the previous inline loop + `resolveAddressableForStream`
-// closure.
-async function scanBlobBindingMatches(
-  ctx: MountRsReadContext,
-  args: {
-    req: RouteRequest;
-    tokenInfo: TokenInfo;
-    blobId: string;
-    blobBindings: BlobBindingRow[];
-    storageBinding: StorageBindingLike;
-    manifest: ManifestLike;
-    actorConnectorId: string | null;
-    defaultAddressableInstanceIds: Set<string>;
-  }
-): Promise<Map<string, { binding: BlobBindingRow; record: unknown }>> {
-  const {
-    req,
-    tokenInfo,
-    blobId,
-    blobBindings,
-    storageBinding,
-    manifest,
-    actorConnectorId,
-    defaultAddressableInstanceIds,
-  } = args;
-  const grantStreams = Array.isArray(tokenInfo.grant?.streams) ? tokenInfo.grant.streams : [];
-  const ownerMode = tokenInfo.pdpp_token_kind === "owner";
-  const requestParams = (req.query as Record<string, unknown>) || {};
-
-  // Owner-mode addressable cache: owner can read any active connection and
-  // there is no grant-scoped instance constraint. Client mode resolves
-  // `(stream → bindings)` lazily from per-stream `grant.streams[].instance_ids`.
-  const streamBindingCache = new Map<string, Set<string>>();
-  async function resolveAddressableForStream(streamName: string): Promise<Set<string>> {
-    if (ownerMode) {
-      // Owner mode: no grant scoping; the default fan-in set already captures
-      // every active connection under the actor's connector, narrowed only by
-      // request-time `connection_id` (or alias).
-      return defaultAddressableInstanceIds;
-    }
-    if (streamBindingCache.has(streamName)) {
-      return streamBindingCache.get(streamName) as Set<string>;
-    }
-    try {
-      const { bindings: streamBindings } = await ctx.resolveReadRequestBindings({
-        grant: tokenInfo.grant || { streams: [] },
-        ownerRead: ownerMode,
-        ownerSubjectId: ctx.ownerSubjectIdForBindings(tokenInfo),
-        requestParams,
-        storageBinding,
-        streamName,
-      });
-      const ids = new Set(streamBindings.map((b) => b.connectorInstanceId).filter(Boolean) as string[]);
-      streamBindingCache.set(streamName, ids);
-      return ids;
-    } catch (err) {
-      // biome-ignore lint/suspicious/noUnnecessaryConditions: TypeScript boundary permits nullish input; this guard preserves runtime behavior.
-      const code = (err as { code?: string })?.code;
-      if (code === "connection_not_found" || code === "invalid_argument") {
-        // The request supplied an addressable id outside the grant for this
-        // stream, or the stored grant is malformed.
-        // Treat the stream as inaccessible for the blob-visibility check.
-        const empty = new Set<string>();
-        streamBindingCache.set(streamName, empty);
-        return empty;
-      }
-      throw err;
-    }
-  }
-
-  // Is this binding addressable by the caller for its stream? Owner mode and
-  // the owner fan-in case use the default set; grant-scoped clients
-  // resolve per-stream.
-  async function bindingIsAddressable(binding: BlobBindingRow): Promise<boolean> {
-    const addressable =
-      grantStreams.length || ownerMode
-        ? await resolveAddressableForStream(binding.stream)
-        : defaultAddressableInstanceIds;
-    return Boolean(binding.connector_instance_id && addressable.has(binding.connector_instance_id));
-  }
-
-  // Load the record this binding points at (under the binding's own connection
-  // when set), returning it only if it actually references the blob. `null`
-  // means "not a match" (missing record, grant-filtered, or different blob).
-  async function loadMatchingRecord(
-    binding: BlobBindingRow
-  ): Promise<{ data?: { blob_ref?: { blob_id?: string } } } | null> {
-    const grant = ownerMode ? ctx.buildOwnerReadGrant(binding.stream) : tokenInfo.grant;
-    const bindingStorageTarget = binding.connector_instance_id
-      ? { connector_id: binding.connector_id, connector_instance_id: binding.connector_instance_id }
-      : storageBinding;
-    let record: { data?: { blob_ref?: { blob_id?: string } } } | null;
-    try {
-      record = await ctx.getRecord(bindingStorageTarget, binding.stream, binding.record_key, grant ?? null, manifest);
-    } catch (err) {
-      // biome-ignore lint/suspicious/noUnnecessaryConditions: TypeScript boundary permits nullish input; this guard preserves runtime behavior.
-      if ((err as { code?: string })?.code === "not_found") {
-        return null;
-      }
-      throw err;
-    }
-    return record?.data?.blob_ref?.blob_id === blobId ? record : null;
-  }
-
-  const matchedByInstance = new Map<string, { binding: BlobBindingRow; record: unknown }>();
-  for (const binding of blobBindings) {
-    if (!actorConnectorId || binding.connector_id !== actorConnectorId) {
-      continue;
-    }
-    // biome-ignore lint/performance/noAwaitInLoops: Work is intentionally sequential to preserve ordering and state transitions.
-    if (!(await bindingIsAddressable(binding))) {
-      continue;
-    }
-    const record = await loadMatchingRecord(binding);
-    if (!record) {
-      continue;
-    }
-    // Dedup by connection: the first visible record per instance wins, and
-    // bindings without an instance id are not addressable connections.
-    const instanceId = binding.connector_instance_id || null;
-    if (!instanceId || matchedByInstance.has(instanceId)) {
-      continue;
-    }
-    matchedByInstance.set(instanceId, { binding, record });
-  }
-  return matchedByInstance;
-}
-
-// Build the `ambiguous_connection` error carrying every connection that exposed
-// the blob, so the caller can retry with `connection_id`. Behaviour-identical
-// to the previous inline candidate assembly.
-function buildAmbiguousConnectionError(
-  ctx: MountRsReadContext,
-  blobId: string,
-  matchedByInstance: Map<string, { binding: BlobBindingRow; record: unknown }>,
-  defaultBindings: ReadRequestBinding[]
-): Error {
-  const candidates: unknown[] = [];
-  for (const [instanceId, m] of matchedByInstance) {
-    const found = defaultBindings.find((b) => b.connectorInstanceId === instanceId);
-    const wire = ctx.projectBindingForWire({
-      connectorId: m.binding.connector_id,
-      connectorInstanceId: instanceId,
-      displayName: found?.displayName ?? null,
-    });
-    if (wire) {
-      candidates.push(wire);
-    }
-  }
-  return new ctx.AmbiguousConnectionError(
-    `Blob '${blobId}' is exposed by records under more than one connection. Retry with \`connection_id\`.`,
-    candidates
-  );
-}
-
 // Pipe the resolved (single) binding through the canonical `executeBlobsRead`
 // operation and write the response: content headers, the deprecated-alias
 // warning header (P3 — the raw-bytes response has no JSON envelope to carry
@@ -3058,7 +2879,7 @@ async function serveResolvedBlob(
   // P3: when the resolver observed deprecated alias use, surface it as a
   // structured response header so callers see migration signal.
   if (Array.isArray(resolverWarnings) && resolverWarnings.some((w) => w?.code === "deprecated_alias_used")) {
-    res.setHeader("PDPP-Warning", "deprecated_alias_used: connector_instance_id");
+    res.setHeader("PDPP-Warning", "deprecated_alias_used: connection_id");
   }
   res.send(Buffer.isBuffer(blob.data) ? blob.data : Buffer.from(blob.data || ""));
 }
@@ -3074,109 +2895,218 @@ export function mountRsBlobRead(app: AppLike, ctx: MountRsReadContext): void {
   app.get(
     "/v1/blobs/:blob_id",
     { contract: "getBlob" },
+    pairwiseSelectorPrelude(ctx, safePairwiseBlobError, true),
     ctx.requireToken,
     ctx.requireCoreEndpointToken,
     async (req: RouteRequest, res: RouteResponse) => {
       try {
         const blobId = decodeURIComponent(req.params.blob_id as string);
         const { tokenInfo } = req;
-        const { storageBinding, manifest } = await resolveBlobActorScope(ctx, req, tokenInfo);
+        const ownerRead = tokenInfo.pdpp_token_kind === "owner";
+        const ownerSubjectId = ctx.ownerSubjectIdForBindings(tokenInfo);
+        if (!ownerSubjectId) {
+          throw Object.assign(
+            new Error("Authenticated instance subject is unavailable"),
+            {
+              code: "grant_invalid",
+            },
+          );
+        }
 
-        // Resolve the default set of bindings this caller can address. When
-        // the request supplies `connection_id` (or the deprecated alias) the
-        // resolver narrows; otherwise the resolver fans in. The blob route
-        // does not know the stream yet — that comes from per-binding records
-        // — so we resolve without a stream constraint here and re-check the
-        // per-stream closed `instance_ids` constraint per binding below.
-        const {
-          bindings: defaultBindings,
-          requestConnectionId,
-          warnings: resolverWarnings,
-        } = await ctx.resolveReadRequestBindings({
-          grant: tokenInfo.grant || { streams: [] },
-          ownerRead: tokenInfo.pdpp_token_kind === "owner",
-          ownerSubjectId: ctx.ownerSubjectIdForBindings(tokenInfo),
-          requestParams: (req.query as Record<string, unknown>) || {},
-          storageBinding,
-          streamName: null,
-        });
-        const defaultAddressableInstanceIds = new Set(
-          defaultBindings.map((b) => b.connectorInstanceId).filter(Boolean) as string[]
-        );
+        let identityMap: PairwiseReadMap;
+        let clientContext: ReturnType<typeof pairwiseClientReadContext> | null =
+          null;
+        let selection: ReturnType<typeof parsePairwiseReadSelector>;
+        let storageBinding: StorageBindingLike;
+        let manifest: ManifestLike;
+        if (ownerRead) {
+          const ownerMap = pairwiseOwnerReadMap(tokenInfo);
+          await ctx.validatePairwiseReadBindingOwnership({
+            ownerSubjectId,
+            bindings: ownerMap.bindings,
+          });
+          identityMap = { ...ownerMap, stream: "*" };
+          selection = parsePairwiseReadSelector(req.query, identityMap, {
+            requireSelector: true,
+          });
+          const selectedBinding = ownerMap.bindings.find(
+            (binding) => binding.instance_id === selection.handle,
+          );
+          if (!selectedBinding) {
+            throw Object.assign(
+              new Error("Instance is not available under this authorization"),
+              {
+                code: "not_found",
+              },
+            );
+          }
+          const requestedSourceId = await ownerDetailSourceId(ctx, req);
+          if (
+            requestedSourceId &&
+            requestedSourceId !== selectedBinding.source_id
+          ) {
+            throw Object.assign(
+              new Error("Instance is not available under this authorization"),
+              {
+                code: "not_found",
+              },
+            );
+          }
+          const ownerScopeQuery = { ...(req.query as Record<string, unknown>) };
+          delete ownerScopeQuery.instance_id;
+          delete ownerScopeQuery.connection_id;
+          delete ownerScopeQuery.connector_instance_id;
+          ownerScopeQuery.connection_id = selection.internalId;
+          const scopeReq = { ...req, query: ownerScopeQuery };
+          const ownerScope = await ctx.resolveOwnerReadScope(
+            scopeReq,
+            ctx.opts,
+          );
+          const ownerResolved = await ctx.resolveOwnerManifestFromScope(
+            ownerScope,
+            ctx.opts,
+          );
+          storageBinding = ownerResolved.storageBinding;
+          manifest = ownerResolved.manifest;
+        } else {
+          const sourceId = (
+            tokenInfo.grant as unknown as { source?: { id?: unknown } } | null
+          )?.source?.id;
+          clientContext = pairwiseClientReadContext(
+            tokenInfo as Parameters<typeof pairwiseClientReadContext>[0],
+            typeof sourceId === "string" ? sourceId : "",
+          );
+          await ctx.validatePairwiseReadBindingOwnership({
+            ownerSubjectId,
+            bindings: clientContext.bindings,
+          });
+          identityMap = { ...clientContext, stream: "*" };
+          selection = parsePairwiseReadSelector(req.query, identityMap, {
+            requireSelector: true,
+          });
+          const grantResolved = await ctx.resolveGrantManifest(
+            tokenInfo,
+            ctx.opts,
+          );
+          storageBinding = grantResolved.storageBinding;
+          manifest = grantResolved.manifest;
+        }
 
-        // Pre-load the blob and its bindings ourselves so we can perform a
-        // route-level scan for ambiguity (P1 fix: the canonical operation
-        // short-circuits on the first visible match and cannot observe
-        // multiplicity) and so we can apply the per-stream grant-scope
-        // `connection_id` constraint per blob binding (P2 fix: blobs cannot
-        // borrow the connector-wide addressable set when the grant pins a
-        // specific connection on the binding's stream).
+        // Selector resolution and complete private-binding validation precede
+        // content and binding lookup. Blob visibility remains record based.
         const blobRow = await blobStore.loadContentAddressedBlob(blobId);
         if (!blobRow) {
-          const notFound = new Error("Blob not found") as Error & { code?: string };
-          notFound.code = "blob_not_found";
-          throw notFound;
+          throw Object.assign(new Error("Blob not found"), {
+            code: "blob_not_found",
+          });
         }
-        const blobBindings = await blobStore.listBlobBindings(blobId);
-        // Blob bindings are stored under the canonical connector key at ingest.
-        // The grant/owner storage binding may still carry a legacy URL-shaped
-        // connector id, so canonicalize before matching binding.connector_id or
-        // the visibility scan never matches and the read fails blob_not_found.
-        // See canonicalize-connector-keys Decision 1.
-        // biome-ignore lint/suspicious/noUnnecessaryConditions: TypeScript boundary permits nullish input; this guard preserves runtime behavior.
-        const rawActorConnectorId = storageBinding?.connector_id ?? null;
+        const rawActorConnectorId = storageBinding.connector_id ?? null;
         const actorConnectorId = rawActorConnectorId
-          ? (ctx.canonicalConnectorKey(rawActorConnectorId) ?? rawActorConnectorId)
+          ? (ctx.canonicalConnectorKey(rawActorConnectorId) ??
+            rawActorConnectorId)
           : null;
+        const requestParams = { ...(req.query as Record<string, unknown>) };
+        delete requestParams.instance_id;
+        delete requestParams.connection_id;
+        delete requestParams.connector_instance_id;
+        requestParams.connection_id = selection.internalId;
+        let resolverWarnings: ResolverWarning[] | undefined =
+          req._pdpp_deprecated_instance_alias
+            ? [{ code: "deprecated_alias_used" }]
+            : undefined;
+        let resolvedMatch: { binding: BlobBindingRow; record: unknown } | null =
+          null;
+        let cursor: { record_key: string; stream: string } | null = null;
 
-        // Iterate every blob binding and collect the unique connector instances
-        // that expose a visible record referencing this blob.
-        const matchedByInstance = await scanBlobBindingMatches(ctx, {
-          actorConnectorId,
-          blobBindings,
-          blobId,
-          defaultAddressableInstanceIds,
-          manifest,
-          req,
-          storageBinding,
-          tokenInfo,
-        });
+        while (actorConnectorId && !resolvedMatch) {
+          const page = await blobStore.listBlobBindingsPage({
+            blobId,
+            connectorId: actorConnectorId,
+            connectorInstanceId: selection.internalId,
+            cursor,
+          });
+          for (const binding of page.rows) {
+            if (
+              clientContext &&
+              !clientContext.handlesByStream
+                .get(binding.stream)
+                ?.has(selection.handle)
+            ) {
+              continue;
+            }
 
-        if (matchedByInstance.size === 0) {
-          const notFound = new Error("Blob not found") as Error & { code?: string };
-          notFound.code = "blob_not_found";
-          throw notFound;
+            const grant = ownerRead
+              ? ctx.buildOwnerReadGrant(binding.stream)
+              : (clientGrantForPairwiseDetail(
+                  (tokenInfo.grant ?? { streams: [] }) as unknown as Record<
+                    string,
+                    unknown
+                  >,
+                  binding.stream,
+                  selection.internalId,
+                ) as GrantLike);
+            const requestBindings = await ctx.resolveReadRequestBindings({
+              grant,
+              ownerRead,
+              ownerSubjectId,
+              requestParams,
+              storageBinding,
+              streamName: binding.stream,
+            });
+            const bindingIsAddressable = requestBindings.bindings.some(
+              (candidate) =>
+                candidate.connectorInstanceId === selection.internalId &&
+                (ctx.canonicalConnectorKey(candidate.connectorId) ??
+                  candidate.connectorId) === binding.connector_id,
+            );
+            if (!bindingIsAddressable) continue;
+            resolverWarnings = [
+              ...(resolverWarnings ?? []),
+              ...(requestBindings.warnings ?? []),
+            ];
+
+            let record: Awaited<ReturnType<typeof ctx.getRecord>>;
+            try {
+              record = await ctx.getRecord(
+                {
+                  connector_id: binding.connector_id,
+                  connector_instance_id: selection.internalId,
+                },
+                binding.stream,
+                binding.record_key,
+                grant,
+                manifest,
+              );
+            } catch (error) {
+              if ((error as { code?: unknown })?.code === "not_found") continue;
+              throw error;
+            }
+            if (record?.data?.blob_ref?.blob_id === blobId) {
+              resolvedMatch = { binding, record };
+              break;
+            }
+          }
+          if (resolvedMatch || !page.nextCursor) break;
+          cursor = page.nextCursor;
         }
-
-        // Ambiguity: more than one connection exposed the blob and the caller
-        // did not narrow with `connection_id`. Emit the typed
-        // `ambiguous_connection` envelope with `available_connections` so the
-        // caller can recover.
-        if (matchedByInstance.size > 1 && !requestConnectionId) {
-          throw buildAmbiguousConnectionError(ctx, blobId, matchedByInstance, defaultBindings);
+        if (!resolvedMatch) {
+          throw Object.assign(new Error("Blob not found"), {
+            code: "blob_not_found",
+          });
         }
-
-        // Single visible binding: serve the blob bytes. The selected match is
-        // piped through the canonical `executeBlobsRead` operation and written
-        // out by `serveResolvedBlob` (headers, deprecated-alias warning header,
-        // and the raw bytes). `matchedByInstance.size === 0` was handled above,
-        // so the iterator yields at least one entry here.
-        const [selectedMatch] = matchedByInstance.values() as IterableIterator<{
-          binding: BlobBindingRow;
-          record: unknown;
-        }>;
-        const resolvedMatch = selectedMatch as { binding: BlobBindingRow; record: unknown };
         await serveResolvedBlob(res, {
           actorConnectorId,
           blobId,
           blobRow,
           resolvedMatch,
-          resolverWarnings,
+          resolverWarnings: resolverWarnings?.length
+            ? resolverWarnings
+            : undefined,
         });
       } catch (err) {
-        ctx.handleError(res, err);
+        ctx.handleError(res, safePairwiseBlobError(err));
       }
-    }
+    },
   );
 }
 

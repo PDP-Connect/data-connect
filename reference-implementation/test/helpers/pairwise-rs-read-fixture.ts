@@ -24,21 +24,29 @@ const { basicIntrospectionAuthorization } = await import(
 );
 const { startServer } = await import("../../server/index.ts");
 const { ingestRecord } = await import("../../server/records.ts");
+const { deleteRecord } = await import("../../server/records.ts");
 const { createRequestConnectorInstanceStore } = await import(
 	"../../server/request-store-factories.ts"
 );
-const { closePostgresStorage } = await import("../../server/postgres-storage.ts");
+const { closePostgresStorage } = await import(
+	"../../server/postgres-storage.ts"
+);
 
 export const INTERNAL_A = "cin_pairwise_detail_a";
 export const INTERNAL_B = "cin_pairwise_detail_b";
+export const INTERNAL_SECOND_SOURCE = "cin_pairwise_detail_second_source";
 export const INTERNAL_FOREIGN = "cin_pairwise_detail_foreign_owner";
 export const INTERNAL_INACTIVE = "cin_pairwise_detail_inactive";
 export const CLIENT_A = "inst_v1_pairwise_client_a";
 export const CLIENT_B = "inst_v1_pairwise_client_b";
 export const OWNER_A = "inst_v1_pairwise_owner_a";
 export const OWNER_B = "inst_v1_pairwise_owner_b";
+export const OWNER_SECOND_SOURCE = "inst_v1_pairwise_owner_second_source";
 export const CONNECTOR_ID = "pairwise-detail-fixture";
-export const SOURCE_ID = "https://sources.example/records/pairwise-detail-fixture";
+export const SOURCE_ID =
+	"https://sources.example/records/pairwise-detail-fixture";
+export const SECOND_CONNECTOR_ID = "pairwise-detail-fixture-second";
+export const SECOND_SOURCE_ID = `${SOURCE_ID}/second`;
 export const ISSUER = "https://as.pairwise-detail.example";
 export const CLIENT_ID = "pairwise_detail_client";
 export const CLIENT_TOKEN = "pairwise-detail-client-token";
@@ -51,17 +59,56 @@ test.after(async () => {
 	if (process.env.CORE1_DETAIL_PG === "1") await closePostgresStorage();
 });
 
-export type Reply = { status: number; text: string; body: Record<string, unknown> };
+export type Reply = {
+	status: number;
+	text: string;
+	body: Record<string, unknown>;
+};
 export type Fixture = {
 	client: (path: string) => Promise<Reply>;
 	owner: (path: string) => Promise<Reply>;
 	request: (path: string, authorization?: string) => Promise<Reply>;
+	requestRaw: (
+		path: string,
+		authorization?: string,
+		init?: RequestInit,
+	) => Promise<{
+		body: Uint8Array;
+		headers: Headers;
+		status: number;
+	}>;
+	uploadBlob: (args: {
+		bytes: Uint8Array;
+		connectorId?: string;
+		connectorInstanceId: string;
+		recordKey: string;
+		stream: string;
+	}) => Promise<{
+		blob_id: string;
+		mime_type: string;
+		sha256: string;
+		size_bytes: number;
+	}>;
+	seedRecord: (args: {
+		connectorId?: string;
+		connectorInstanceId: string;
+		data: Record<string, unknown>;
+		emittedAt?: string;
+		key: string;
+		stream: string;
+	}) => Promise<void>;
+	deleteRecord: (args: {
+		connectorId?: string;
+		connectorInstanceId: string;
+		key: string;
+		stream: string;
+	}) => Promise<void>;
 	introspection: Map<string, Record<string, unknown>>;
 };
 
 export async function makeFixture(
 	t: TestContext,
-	options: { connectorKey?: string } = {},
+	options: { connectorKey?: string; withSecondSource?: boolean } = {},
 ): Promise<Fixture> {
 	const connectorId = options.connectorKey ?? CONNECTOR_ID;
 	const declaration = JSON.parse(
@@ -78,6 +125,16 @@ export async function makeFixture(
 	];
 	declaration.streams[0].query = { aggregations: { count: true } };
 	declaration.streams[0].schema.properties.rank = { type: "integer" };
+	declaration.streams[0].schema.properties.blob_ref = {
+		properties: {
+			blob_id: { type: "string" },
+			mime_type: { type: "string" },
+			sha256: { type: "string" },
+			size_bytes: { type: "integer" },
+		},
+		required: ["blob_id"],
+		type: "object",
+	};
 	declaration.streams.push(
 		{
 			name: "parents",
@@ -94,7 +151,20 @@ export async function makeFixture(
 				},
 			],
 			schema: {
-				properties: { id: { type: "string" }, name: { type: "string" } },
+				properties: {
+					id: { type: "string" },
+					name: { type: "string" },
+					blob_ref: {
+						properties: {
+							blob_id: { type: "string" },
+							mime_type: { type: "string" },
+							sha256: { type: "string" },
+							size_bytes: { type: "integer" },
+						},
+						required: ["blob_id"],
+						type: "object",
+					},
+				},
 				required: ["id"],
 				type: "object",
 			},
@@ -108,6 +178,16 @@ export async function makeFixture(
 				properties: {
 					id: { type: "string" },
 					name: { type: "string" },
+					blob_ref: {
+						properties: {
+							blob_id: { type: "string" },
+							mime_type: { type: "string" },
+							sha256: { type: "string" },
+							size_bytes: { type: "integer" },
+						},
+						required: ["blob_id"],
+						type: "object",
+					},
 					parent_id: { type: "string" },
 				},
 				required: ["id", "parent_id"],
@@ -216,6 +296,32 @@ export async function makeFixture(
 		},
 	);
 	assert.equal(registration.status, 201, await registration.text());
+	if (options.withSecondSource) {
+		const secondDeclaration = structuredClone(declaration);
+		secondDeclaration.source.id = SECOND_SOURCE_ID;
+		const secondManifest = {
+			...secondDeclaration,
+			connector_id: SECOND_CONNECTOR_ID,
+			connector_key: SECOND_CONNECTOR_ID,
+			display_name: "Pairwise detail second source fixture",
+			manifest_uri: `https://implementations.example/connectors/${SECOND_CONNECTOR_ID}`,
+			source_declaration: secondDeclaration,
+			version: "1.0.0",
+		};
+		const secondRegistration = await fetch(
+			`http://localhost:${startedServer.asPort}/connectors`,
+			{
+				body: JSON.stringify(secondManifest),
+				headers: { "Content-Type": "application/json" },
+				method: "POST",
+			},
+		);
+		assert.equal(
+			secondRegistration.status,
+			201,
+			await secondRegistration.text(),
+		);
+	}
 
 	const store = createRequestConnectorInstanceStore();
 	for (const id of [INTERNAL_A, INTERNAL_B]) {
@@ -228,6 +334,21 @@ export async function makeFixture(
 			ownerSubjectId: OWNER_SUBJECT,
 			sourceBinding: { fixture: id },
 			sourceBindingKey: id,
+			sourceKind: "account",
+			status: "active",
+			updatedAt: now,
+		});
+	}
+	if (options.withSecondSource) {
+		const now = new Date().toISOString();
+		await store.upsert({
+			connectorId: SECOND_CONNECTOR_ID,
+			connectorInstanceId: INTERNAL_SECOND_SOURCE,
+			createdAt: now,
+			displayName: INTERNAL_SECOND_SOURCE,
+			ownerSubjectId: OWNER_SUBJECT,
+			sourceBinding: { fixture: INTERNAL_SECOND_SOURCE },
+			sourceBindingKey: INTERNAL_SECOND_SOURCE,
 			sourceKind: "account",
 			status: "active",
 			updatedAt: now,
@@ -259,7 +380,7 @@ export async function makeFixture(
 		await ingestRecord(
 			{ connector_id: connectorId, connector_instance_id: instance },
 			{
-			data: { id: key, name, observed_at: "2026-03-01T00:00:00Z", rank: 7 },
+				data: { id: key, name, observed_at: "2026-03-01T00:00:00Z", rank: 7 },
 				emitted_at: "2026-03-01T00:00:00Z",
 				key,
 				stream: "top_artists",
@@ -275,6 +396,25 @@ export async function makeFixture(
 			stream: "parents",
 		},
 	);
+	if (options.withSecondSource) {
+		await ingestRecord(
+			{
+				connector_id: SECOND_CONNECTOR_ID,
+				connector_instance_id: INTERNAL_SECOND_SOURCE,
+			},
+			{
+				data: {
+					id: "second-source-record",
+					name: "second source application data",
+					rank: 8,
+					observed_at: "2026-03-03T00:00:00Z",
+				},
+				emitted_at: "2026-03-03T00:00:00Z",
+				key: "second-source-record",
+				stream: "top_artists",
+			},
+		);
+	}
 	await ingestRecord(
 		{ connector_id: connectorId, connector_instance_id: INTERNAL_A },
 		{
@@ -299,17 +439,17 @@ export async function makeFixture(
 		source_declaration: { version: "1.0.0" },
 		streams: [
 			{
-				fields: ["id", "name", "rank"],
+				fields: ["id", "name", "rank", "blob_ref"],
 				instance_ids: [CLIENT_A, CLIENT_B],
 				name: "top_artists",
 			},
 			{
-				fields: ["id", "name"],
+				fields: ["id", "name", "blob_ref"],
 				instance_ids: [CLIENT_A, CLIENT_B],
 				name: "parents",
 			},
 			{
-				fields: ["id", "name", "parent_id"],
+				fields: ["id", "name", "parent_id", "blob_ref"],
 				instance_ids: [CLIENT_A, CLIENT_B],
 				name: "children",
 			},
@@ -358,7 +498,13 @@ export async function makeFixture(
 		iss: ISSUER,
 		pdpp_instance_bindings: [
 			{ instance_id: OWNER_A, rs_instance: INTERNAL_A, source_id: SOURCE_ID },
-			{ instance_id: OWNER_B, rs_instance: INTERNAL_B, source_id: SOURCE_ID },
+			{
+				instance_id: options.withSecondSource ? OWNER_SECOND_SOURCE : OWNER_B,
+				rs_instance: options.withSecondSource
+					? INTERNAL_SECOND_SOURCE
+					: INTERNAL_B,
+				source_id: options.withSecondSource ? SECOND_SOURCE_ID : SOURCE_ID,
+			},
 		],
 		pdpp_token_kind: "owner",
 		subject_id: OWNER_SUBJECT,
@@ -378,10 +524,95 @@ export async function makeFixture(
 			}
 			return { body, status: response.status, text };
 		};
+	const requestRaw = async (
+		path: string,
+		authorization?: string,
+		init: RequestInit = {},
+	) => {
+		const response = await fetch(`${rsUrl}${path}`, {
+			...init,
+			headers: {
+				...(authorization ? { Authorization: authorization } : {}),
+				...init.headers,
+			},
+		});
+		return {
+			body: new Uint8Array(await response.arrayBuffer()),
+			headers: response.headers,
+			status: response.status,
+		};
+	};
 	return {
 		client: read(`Bearer ${CLIENT_TOKEN}`),
 		owner: read(`Bearer ${OWNER_TOKEN}`),
 		request: (path, authorization) => read(authorization)(path),
+		requestRaw,
+		uploadBlob: async ({
+			bytes,
+			connectorId: targetConnectorId = connectorId,
+			connectorInstanceId,
+			recordKey,
+			stream,
+		}) => {
+			const query = new URLSearchParams({
+				connector_id: targetConnectorId,
+				connector_instance_id: connectorInstanceId,
+				record_key: recordKey,
+				stream,
+			});
+			const response = await fetch(`${rsUrl}/v1/blobs?${query}`, {
+				body: Buffer.from(bytes),
+				headers: {
+					Authorization: `Bearer ${OWNER_TOKEN}`,
+					"Content-Type": "application/octet-stream",
+				},
+				method: "POST",
+			});
+			const text = await response.text();
+			assert.equal(response.status, 200, text);
+			return JSON.parse(text) as {
+				blob_id: string;
+				mime_type: string;
+				sha256: string;
+				size_bytes: number;
+			};
+		},
+		seedRecord: async ({
+			connectorId: targetConnectorId = connectorId,
+			connectorInstanceId,
+			data,
+			emittedAt,
+			key,
+			stream,
+		}) => {
+			await ingestRecord(
+				{
+					connector_id: targetConnectorId,
+					connector_instance_id: connectorInstanceId,
+				},
+				{
+					data,
+					emitted_at: emittedAt ?? "2026-03-03T00:00:00Z",
+					key,
+					stream,
+				},
+			);
+		},
+		deleteRecord: async ({
+			connectorId: targetConnectorId = connectorId,
+			connectorInstanceId,
+			key,
+			stream,
+		}) => {
+			await deleteRecord(
+				{
+					connector_id: targetConnectorId,
+					connector_instance_id: connectorInstanceId,
+				},
+				stream,
+				key,
+			);
+		},
 		introspection,
 	};
 }

@@ -48,12 +48,19 @@ export interface PairwiseReadMap {
 	readonly stream: string;
 }
 
-/** Validate the complete authenticated client context before resolving a request selector. */
-export function pairwiseClientReadMap(
+export interface PairwiseClientReadContext {
+	readonly bindings: readonly PairwiseInstanceBinding[];
+	readonly byHandle: ReadonlyMap<string, string>;
+	readonly byInternalId: ReadonlyMap<string, string>;
+	readonly handlesByStream: ReadonlyMap<string, ReadonlySet<string>>;
+	readonly sourceId: string;
+}
+
+/** Validate every authenticated client stream before selecting a request instance. */
+export function pairwiseClientReadContext(
 	token: PairwiseReadToken,
 	sourceId: string,
-	streamName: string,
-): PairwiseReadMap {
+): PairwiseClientReadContext {
 	const grant = token?.grant;
 	if (
 		!nonEmpty(token?.client_id) ||
@@ -97,14 +104,6 @@ export function pairwiseClientReadMap(
 			expected.add(JSON.stringify([sourceId, stream.name, handle]));
 		}
 	}
-	const target = grant.streams.find((stream) => stream.name === streamName);
-	if (!target || !Array.isArray(target.instance_ids)) {
-		throw identityError(
-			"grant_invalid",
-			"Requested stream is outside the authenticated grant",
-		);
-	}
-
 	let bindings: ValidatedPairwiseInstanceBindings;
 	try {
 		if (!Array.isArray(token.pdpp_instance_bindings))
@@ -139,19 +138,57 @@ export function pairwiseClientReadMap(
 		);
 	}
 
+	const handlesByStream = new Map<string, ReadonlySet<string>>();
 	const byHandle = new Map<string, string>();
 	const byInternalId = new Map<string, string>();
-	for (const handle of target.instance_ids) {
-		const internalId = resolveInternalInstanceId(
-			handle as string,
-			bindings,
-			sourceId,
-			streamName,
-		);
-		byHandle.set(handle as string, internalId);
-		byInternalId.set(internalId, handle as string);
+	for (const stream of grant.streams) {
+		const handles = new Set<string>();
+		for (const handle of stream.instance_ids as readonly string[]) {
+			const internalId = resolveInternalInstanceId(
+				handle,
+				bindings,
+				sourceId,
+				stream.name,
+			);
+			handles.add(handle);
+			byHandle.set(handle, internalId);
+			byInternalId.set(internalId, handle);
+		}
+		handlesByStream.set(stream.name as string, handles);
 	}
-	return { bindings, byHandle, byInternalId, sourceId, stream: streamName };
+	return { bindings, byHandle, byInternalId, handlesByStream, sourceId };
+}
+
+/** Keep the detail/window view scoped to its existing target stream. */
+export function pairwiseClientReadMap(
+	token: PairwiseReadToken,
+	sourceId: string,
+	streamName: string,
+): PairwiseReadMap {
+	const context = pairwiseClientReadContext(token, sourceId);
+	const handles = context.handlesByStream.get(streamName);
+	if (!handles) {
+		throw identityError(
+			"grant_invalid",
+			"Requested stream is outside the authenticated grant",
+		);
+	}
+	const byHandle = new Map(
+		[...handles].map((handle) => [
+			handle,
+			context.byHandle.get(handle) as string,
+		]),
+	);
+	const byInternalId = new Map(
+		[...byHandle].map(([handle, internalId]) => [internalId, handle]),
+	);
+	return {
+		bindings: context.bindings,
+		byHandle,
+		byInternalId,
+		sourceId,
+		stream: streamName,
+	};
 }
 
 const OWNER_KEYS = "instance_id,rs_instance,source_id";
@@ -251,9 +288,17 @@ export function parsePairwiseReadSelectorSyntax(
 export function parsePairwiseReadSelector(
 	query: Readonly<Record<string, unknown>>,
 	readMap: PairwiseReadMap,
+	options: { readonly requireSelector?: boolean } = {},
 ): { readonly handle: string; readonly internalId: string } {
 	const handle = parsePairwiseReadSelectorSyntax(query);
 	if (handle === null) {
+		if (options.requireSelector) {
+			throw identityError(
+				"invalid_request",
+				"instance_id is required for blob reads",
+				"instance_id",
+			);
+		}
 		if (readMap.byHandle.size === 1) {
 			const [handle, internalId] = readMap.byHandle.entries().next().value as [
 				string,
@@ -344,6 +389,49 @@ export function safePairwiseDetailError(value: unknown): Error & {
 	return Object.assign(new Error("Record detail request failed"), {
 		code: "api_error",
 	});
+}
+
+/** Keep blob selector and visibility codes while dropping private backend details. */
+export function safePairwiseBlobError(value: unknown): Error & {
+	code: string;
+	param?: string;
+} {
+	const source = value as { code?: unknown; param?: unknown } | null;
+	const code = typeof source?.code === "string" ? source.code : "";
+	if (code === "invalid_request") {
+		const param =
+			typeof source?.param === "string" &&
+			["instance_id", "connection_id", "connector_id"].includes(source.param)
+				? source.param
+				: undefined;
+		return Object.assign(new Error("The blob request is invalid"), {
+			code,
+			...(param ? { param } : {}),
+		});
+	}
+	if (code === "grant_invalid") {
+		return Object.assign(
+			new Error("Authenticated instance bindings are invalid"),
+			{
+				code,
+			},
+		);
+	}
+	if (code === "not_found") {
+		return Object.assign(
+			new Error("Instance is not available under this authorization"),
+			{ code },
+		);
+	}
+	if (code === "blob_not_found") {
+		return Object.assign(
+			new Error("Blob is not available under this authorization"),
+			{
+				code,
+			},
+		);
+	}
+	return Object.assign(new Error("Blob request failed"), { code: "api_error" });
 }
 
 /** Keep field-window status codes while replacing backend text with fixed copy. */
@@ -464,6 +552,30 @@ export function projectPairwiseDetailRecord(
 			"Stored record is outside the authenticated instance set",
 		);
 	const projected: Record<string, unknown> = { ...record, instance_id: handle };
+	if (
+		record.data &&
+		typeof record.data === "object" &&
+		!Array.isArray(record.data)
+	) {
+		const data = record.data as Record<string, unknown>;
+		const blobRef = data.blob_ref;
+		if (
+			blobRef &&
+			typeof blobRef === "object" &&
+			!Array.isArray(blobRef) &&
+			typeof (blobRef as Record<string, unknown>).blob_id === "string"
+		) {
+			projected.data = {
+				...data,
+				blob_ref: {
+					...(blobRef as Record<string, unknown>),
+					fetch_url: `/v1/blobs/${encodeURIComponent(
+						(blobRef as Record<string, unknown>).blob_id as string,
+					)}?instance_id=${encodeURIComponent(handle)}`,
+				},
+			};
+		}
+	}
 	for (const key of INTERNAL_SELECTOR_KEYS) delete projected[key];
 	if (
 		record.expanded &&

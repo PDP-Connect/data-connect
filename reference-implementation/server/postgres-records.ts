@@ -3225,6 +3225,62 @@ export async function postgresListBlobBindings(
   return result.rows;
 }
 
+export const BLOB_BINDING_PAGE_SIZE = 256;
+
+export async function postgresListBlobBindingsPage({
+  blobId,
+  connectorId,
+  connectorInstanceId,
+  cursor,
+}: {
+  blobId: string;
+  connectorId: string;
+  connectorInstanceId: string;
+  cursor?: { record_key: string; stream: string } | null;
+}): Promise<{
+  nextCursor: { record_key: string; stream: string } | null;
+  rows: PgRow[];
+}> {
+  const result = await postgresQuery(
+    `SELECT connector_id, connector_instance_id, stream, record_key
+     FROM (
+       SELECT connector_id, connector_instance_id, stream, record_key FROM blobs WHERE blob_id = $1
+       UNION
+       SELECT connector_id, connector_instance_id, stream, record_key FROM blob_bindings WHERE blob_id = $1
+     ) bindings
+     WHERE connector_id = $2
+       AND connector_instance_id = $3
+       AND (
+         $4 = FALSE
+         OR stream COLLATE "C" > $5
+         OR (stream COLLATE "C" = $5 AND record_key COLLATE "C" > $6)
+       )
+     ORDER BY stream COLLATE "C", record_key COLLATE "C"
+     LIMIT $7`,
+    [
+      blobId,
+      connectorId,
+      connectorInstanceId,
+      Boolean(cursor),
+      cursor?.stream ?? "",
+      cursor?.record_key ?? "",
+      BLOB_BINDING_PAGE_SIZE + 1,
+    ],
+  );
+  const truncated = result.rows.length > BLOB_BINDING_PAGE_SIZE;
+  const rows = truncated
+    ? result.rows.slice(0, BLOB_BINDING_PAGE_SIZE)
+    : result.rows;
+  const last = rows.at(-1);
+  return {
+    nextCursor:
+      truncated && last
+        ? { record_key: String(last.record_key), stream: String(last.stream) }
+        : null,
+    rows,
+  };
+}
+
 export async function postgresGetDatasetRecordsAggregate() {
   const result = await postgresQuery(`
     SELECT
