@@ -30,9 +30,14 @@
 // accessor == payerAddress. Here recordId is the register's read id (the
 // 32-byte `read_id` in its read receipt), so one payment maps to one served
 // read. Amounts are decimal wei strings; 0.01 VANA = 10^16.
+//
+// `signGatewayPayment` also signs the grant form (opType "grant", opId =
+// grantId): the same accessRecord plus the grant's one-time registration
+// fee. The gateway flips a grant to paid only through that form, and a
+// data_access payment needs a paid grant (api/v1/escrow/pay.ts).
 
 import { encodeAbiParameters, getAddress, type Hex, keccak256 } from "viem";
-import { privateKeyToAccount } from "viem/accounts";
+import { type LocalAccount, privateKeyToAccount } from "viem/accounts";
 import type { FetchLike } from "./oauth.ts";
 
 export const ONE_HUNDREDTH_VANA_WEI = "10000000000000000";
@@ -175,77 +180,129 @@ export class HttpGatewayPayer implements GatewayPayer {
     }
     const c = this.config;
     const recordId = read.readId.toLowerCase() as Hex;
-    const accessor = this.builder.address;
-    const accessSignature = await this.server.signTypedData({
-      domain: vanaDomain(c.chainId, c.dataRegistryContract),
-      message: {
-        accessor,
-        ownerAddress: getAddress(c.dataOwnerAddress),
-        recordId,
-        scope: c.dataPointScope,
-        version: c.dataPointVersion,
-      },
-      primaryType: "RecordDataAccess",
-      types: RECORD_DATA_ACCESS_TYPES,
-    });
-    const paymentNonce = this.nextNonce();
-    const asset = getAddress(c.asset);
-    const signature = await this.builder.signTypedData({
-      domain: vanaDomain(c.chainId, c.escrowContract),
-      message: {
-        amount: BigInt(c.amountWei),
-        asset,
-        opId: recordId,
-        opType: "data_access",
-        payerAddress: accessor,
-        paymentNonce,
-      },
-      primaryType: "GenericPayment",
-      types: GENERIC_PAYMENT_TYPES,
-    });
-    const body = {
-      accessRecord: {
-        accessor,
-        dataPointId: computeDataPointId(c.dataOwnerAddress, c.dataPointScope),
-        recordId,
-        signature: accessSignature,
-        version: c.dataPointVersion.toString(),
-      },
-      amount: c.amountWei,
-      asset,
+    const signed = await signGatewayPayment({
+      amountWei: c.amountWei,
+      asset: c.asset,
+      builder: this.builder,
+      chainId: c.chainId,
+      dataOwnerAddress: c.dataOwnerAddress,
+      dataPointScope: c.dataPointScope,
+      dataPointVersion: c.dataPointVersion,
+      dataRegistryContract: c.dataRegistryContract,
+      escrowContract: c.escrowContract,
       opId: recordId,
       opType: "data_access",
-      payerAddress: accessor,
-      paymentNonce: paymentNonce.toString(),
-    };
-    return { amount: c.amountWei, bodyJson: JSON.stringify({ authorization: `Web3Signed ${signature}`, body }) };
+      paymentNonce: this.nextNonce(),
+      recordId,
+      server: this.server,
+    });
+    return { amount: c.amountWei, bodyJson: JSON.stringify(signed) };
   }
 
   async send(bodyJson: string): Promise<SendResult> {
     this.sendCalls += 1;
     const { authorization, body } = JSON.parse(bodyJson) as { authorization: string; body: unknown };
-    let resp: Response;
-    try {
-      resp = await this.fetchImpl(`${this.config.gatewayUrl.replace(/\/+$/, "")}/v1/escrow/pay`, {
-        body: JSON.stringify(body),
-        headers: { Authorization: authorization, "Content-Type": "application/json" },
-        method: "POST",
-        signal: AbortSignal.timeout(30_000),
-      });
-    } catch (err) {
-      return { accepted: false, response: { error: String((err as Error).message ?? err) }, retryable: true };
-    }
-    const text = await resp.text();
-    let parsed: unknown = text;
-    try {
-      parsed = JSON.parse(text);
-    } catch {
-      // keep raw text
-    }
-    if (resp.status === 200 && (parsed as { success?: boolean }).success === true) {
-      return { accepted: true, response: parsed, retryable: false };
-    }
-    // 5xx / 502 (fee or chain lookup) are transient; 4xx are final for this body.
-    return { accepted: false, response: { body: parsed, status: resp.status }, retryable: resp.status >= 500 };
+    return postEscrowPay({ authorization, body, fetchImpl: this.fetchImpl, gatewayUrl: this.config.gatewayUrl });
   }
+}
+
+export interface SignGatewayPaymentInput {
+  amountWei: string;
+  asset: string;
+  /** Payer and accessor. */
+  builder: LocalAccount;
+  chainId: bigint;
+  dataOwnerAddress: string;
+  dataPointScope: string;
+  dataPointVersion: bigint;
+  dataRegistryContract: string;
+  escrowContract: string;
+  /** The recordId for data_access; the grantId for a grant payment that bundles this read. */
+  opId: Hex;
+  opType: "data_access" | "grant";
+  paymentNonce: bigint;
+  recordId: Hex;
+  /** Trusted server of dataOwnerAddress; signs RecordDataAccess. */
+  server: LocalAccount;
+}
+
+/** Signs one `/v1/escrow/pay` request (GenericPayment + bundled RecordDataAccess). */
+export async function signGatewayPayment(p: SignGatewayPaymentInput): Promise<{ authorization: string; body: Record<string, unknown> }> {
+  const accessor = p.builder.address;
+  const recordId = p.recordId.toLowerCase() as Hex;
+  const opId = p.opId.toLowerCase() as Hex;
+  const accessSignature = await p.server.signTypedData({
+    domain: vanaDomain(p.chainId, p.dataRegistryContract),
+    message: {
+      accessor,
+      ownerAddress: getAddress(p.dataOwnerAddress),
+      recordId,
+      scope: p.dataPointScope,
+      version: p.dataPointVersion,
+    },
+    primaryType: "RecordDataAccess",
+    types: RECORD_DATA_ACCESS_TYPES,
+  });
+  const asset = getAddress(p.asset);
+  const signature = await p.builder.signTypedData({
+    domain: vanaDomain(p.chainId, p.escrowContract),
+    message: {
+      amount: BigInt(p.amountWei),
+      asset,
+      opId,
+      opType: p.opType,
+      payerAddress: accessor,
+      paymentNonce: p.paymentNonce,
+    },
+    primaryType: "GenericPayment",
+    types: GENERIC_PAYMENT_TYPES,
+  });
+  const body = {
+    accessRecord: {
+      accessor,
+      dataPointId: computeDataPointId(p.dataOwnerAddress, p.dataPointScope),
+      recordId,
+      signature: accessSignature,
+      version: p.dataPointVersion.toString(),
+    },
+    amount: p.amountWei,
+    asset,
+    opId,
+    opType: p.opType,
+    payerAddress: accessor,
+    paymentNonce: p.paymentNonce.toString(),
+  };
+  return { authorization: `Web3Signed ${signature}`, body };
+}
+
+/** POSTs a signed body to `/v1/escrow/pay` and classifies the answer. */
+export async function postEscrowPay(opts: {
+  authorization: string;
+  body: unknown;
+  fetchImpl: FetchLike;
+  gatewayUrl: string;
+}): Promise<SendResult> {
+  let resp: Response;
+  try {
+    resp = await opts.fetchImpl(`${opts.gatewayUrl.replace(/\/+$/, "")}/v1/escrow/pay`, {
+      body: JSON.stringify(opts.body),
+      headers: { Authorization: opts.authorization, "Content-Type": "application/json" },
+      method: "POST",
+      signal: AbortSignal.timeout(30_000),
+    });
+  } catch (err) {
+    return { accepted: false, response: { error: String((err as Error).message ?? err) }, retryable: true };
+  }
+  const text = await resp.text();
+  let parsed: unknown = text;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    // keep raw text
+  }
+  if (resp.status === 200 && (parsed as { success?: boolean }).success === true) {
+    return { accepted: true, response: parsed, retryable: false };
+  }
+  // 5xx / 502 (fee or chain lookup) are transient; 4xx are final for this body.
+  return { accepted: false, response: { body: parsed, status: resp.status }, retryable: resp.status >= 500 };
 }
