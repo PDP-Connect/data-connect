@@ -379,6 +379,13 @@ export interface MountRsReadContext {
     streamName: string | null;
     ownerRead?: boolean;
   }) => Promise<ReadRequestBindingsResult>;
+  validatePairwiseReadBindingOwnership: (args: {
+    ownerSubjectId: string;
+    bindings: readonly {
+      readonly source_id: string;
+      readonly rs_instance: string;
+    }[];
+  }) => Promise<void>;
   resolveRegisteredConnectorManifest: (connectorId: string) => Promise<ManifestLike>;
   runHybridSearch: (args: Record<string, unknown>) => Promise<{ envelope: unknown; disclosureData: unknown }>;
   // search surfaces
