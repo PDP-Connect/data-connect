@@ -30,8 +30,7 @@ const SUPERVISOR_CONTRACT_PATTERN = /PDPP_LOCAL_TRANSFORMER_SUPERVISOR_RESTART_C
 
 class FakeChild extends EventEmitter {
   readonly stdout = new PassThrough();
-  // biome-ignore lint/style/noIncrementDecrement: localized test assertion preserves its explicit contract.
-  readonly pid = nextPid++;
+  readonly pid: number;
   readonly signals: NodeJS.Signals[] = [];
   readonly writes: string[] = [];
   readonly stdin = new EventEmitter() as EventEmitter & {
@@ -44,8 +43,10 @@ class FakeChild extends EventEmitter {
   onKill: ((signal: NodeJS.Signals) => void) | null = null;
   onWrite: ((value: string) => void) | null = null;
 
-  constructor() {
+  constructor(pid?: number) {
     super();
+    // biome-ignore lint/style/noIncrementDecrement: localized test assertion preserves its explicit contract.
+    this.pid = pid ?? nextPid++;
     this.stdin.end = () => this.onEnd?.();
     this.stdin.write = (value) => {
       this.writes.push(value);
@@ -96,16 +97,18 @@ async function afterIo() {
 function executorFor(
   children: FakeChild[],
   options: Omit<LocalTransformerExecutorOptions, "spawnChild"> = {},
-  onSpawnEnv?: (env: NodeJS.ProcessEnv) => void
+  onSpawnEnv?: (env: NodeJS.ProcessEnv) => void,
+  fakePid?: number
 ) {
   return new LocalTransformerExecutor({
     deadlineMs: 100,
     killGraceMs: 10,
     termGraceMs: 10,
     ...options,
+    readChildRssBytes: options.readChildRssBytes ?? (() => null),
     spawnChild: (_command, _args, spawnOptions) => {
       onSpawnEnv?.(spawnOptions.env);
-      const child = new FakeChild();
+      const child = new FakeChild(fakePid);
       children.push(child);
       return child as unknown as TransformerChild;
     },
@@ -227,10 +230,24 @@ test("PDPP_LOCAL_TRANSFORMER_WORK_LIMIT=2 forwards that value to the child env (
 
 test("unexpected child exit fences and rejects the generation after confirmed exit", async () => {
   const children: FakeChild[] = [];
-  const executor = executorFor(children);
+  const sampledPids: number[] = [];
+  const executor = executorFor(
+    children,
+    {
+      readChildRssBytes: (pid) => {
+        if (pid !== undefined) {
+          sampledPids.push(pid);
+        }
+        return null;
+      },
+    },
+    undefined,
+    process.pid
+  );
   const work = executor.embed("input", "backend-a", {});
   children[0]?.exit();
   await assert.rejects(work, assertCode("transformer_child_exited"));
+  assert.ok(sampledPids.includes(process.pid), "the fake PID collision must reach the injected reader");
   assert.deepEqual(executor.telemetry(), {
     childHighWater: 0,
     childPid: null,
@@ -323,6 +340,7 @@ test("local backend keeps semantic preflight available across a confirmed deadli
       executorOptions: {
         deadlineMs: 5,
         killGraceMs: 20,
+        readChildRssBytes: () => null,
         spawnChild: () => {
           const child = new FakeChild();
           children.push(child);
@@ -401,6 +419,7 @@ test("local backend coalesces concurrent warmers into one provider job", async (
     },
     {
       executorOptions: {
+        readChildRssBytes: () => null,
         spawnChild: () => {
           const child = new FakeChild();
           children.push(child);
@@ -447,6 +466,7 @@ test("download-disabled local mode is ready lexical-only and does not spawn a wa
     },
     {
       executorOptions: {
+        readChildRssBytes: () => null,
         spawnChild: () => {
           const child = new FakeChild();
           children.push(child);
@@ -485,6 +505,7 @@ test("warmup failure is recorded without turning preparation into a boot rejecti
     },
     {
       executorOptions: {
+        readChildRssBytes: () => null,
         spawnChild: () => {
           const child = new FakeChild();
           children.push(child);
@@ -531,6 +552,7 @@ test("a restart with a complete cache reports ready and reuses it without spawni
     },
     {
       executorOptions: {
+        readChildRssBytes: () => null,
         spawnChild: () => {
           const child = new FakeChild();
           children.push(child);
@@ -579,6 +601,7 @@ test("spawn and stdin failure fence safely without exposing source input", async
   const writingExecutor = new LocalTransformerExecutor({
     deadlineMs: 100,
     killGraceMs: 10,
+    readChildRssBytes: () => null,
     spawnChild: () => {
       children.push(child);
       return child as unknown as TransformerChild;
