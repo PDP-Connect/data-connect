@@ -203,6 +203,7 @@ export const POSTGRES_TEMPLATE_COLD_REQUIRED_FILES: readonly string[] = [
   "test/postgres-semantic-pgvector.test.ts",
   "test/postgres-template-eligibility-migration-mutation-control.test.ts",
   "test/records-instance-stream-id-keyset-index.test.ts",
+  "test/rs-opaque-cursors.test.ts",
   "test/run-history-completed-at-fleet-migration.test.ts",
   "test/run-history-duplicate-run-id-identity.test.ts",
   "test/run-history-interrupted-migration-reconciliation.test.ts",
