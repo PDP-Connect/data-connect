@@ -6,6 +6,7 @@ import { test } from "node:test";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
 
 import { createPdppMcpServer, handleStreamableHttpRequest } from "../src/server.ts";
 import { __internal } from "../src/tools.ts";
@@ -270,6 +271,9 @@ function makeFakeRs() {
     }
     if (url.pathname === "/v1/streams/orders") {
       return jsonResponse(STREAM_META);
+    }
+    if (url.pathname === "/v1/streams/orders/aggregate") {
+      return jsonResponse({ filtered_record_count: 2, metric: "count", object: "aggregation", value: 2 });
     }
     if (url.pathname === "/v1/streams/orders/records") {
       const limit = url.searchParams.get("limit");
@@ -1538,6 +1542,96 @@ test("tool output never contains the bearer token", async () => {
     const serialized = JSON.stringify(result);
     assert.ok(!serialized.includes("scoped-token"), `${name} result must not echo bearer token`);
   }
+
+  await client.close();
+  await server.close();
+});
+
+test("MCP schemas, results, and errors never disclose subject_id or rs_instance", async () => {
+  const { fetch: rsFetch } = makeFakeRs();
+  const errorRoutes = new Map([
+    ["/v1/schema", { code: "schema_forbidden", message: "schema access denied", status: 403 }],
+    ["/v1/streams/orders/records", { code: "records_forbidden", message: "record access denied", status: 403 }],
+    ["/v1/streams/orders/aggregate", { code: "aggregate_missing", message: "aggregate not found", status: 404 }],
+    ["/v1/search", { code: "search_limited", message: "search rate limited", status: 429 }],
+    ["/v1/streams/orders/records/o2", { code: "record_missing", message: "record not found", status: 404 }],
+    [
+      "/v1/streams/orders/records/o2/field-window",
+      { code: "field_forbidden", message: "field access denied", status: 403 },
+    ],
+  ]);
+  let returnErrorFixtures = false;
+  const fetch: typeof globalThis.fetch = async (input, init) => {
+    const url = new URL(input.toString());
+    const fixture = errorRoutes.get(url.pathname);
+    if (!returnErrorFixtures || !fixture) {
+      return rsFetch(input, init);
+    }
+    return new Response(
+      JSON.stringify({ error: { code: fixture.code, message: fixture.message, type: "fixture_error" } }),
+      { status: fixture.status, headers: { "content-type": "application/json" } }
+    );
+  };
+  const { client, server } = await connectClient(fetch);
+  const forbiddenIdentifier = /\b(?:subject_id|rs_instance)\b/;
+
+  assert.doesNotMatch(client.getInstructions() ?? "", forbiddenIdentifier, "initialize instructions");
+  const tools = await client.listTools();
+  assert.doesNotMatch(JSON.stringify(tools), forbiddenIdentifier);
+
+  const successCalls: ReadonlyArray<{ args: Record<string, unknown>; name: string }> = [
+    { args: {}, name: "schema" },
+    { args: { stream: "orders" }, name: "query_records" },
+    { args: { metric: "count", stream: "orders" }, name: "aggregate" },
+    { args: { q: "pasta" }, name: "search" },
+    { args: { id: "orders:o2" }, name: "fetch" },
+    { args: { field_path: "text", id: "conn_orders/orders:o2" }, name: "read_record_field" },
+  ];
+
+  for (const { args, name } of successCalls) {
+    // biome-ignore lint/performance/noAwaitInLoops: Calls share one fake RS and must be checked in order.
+    const result = await client.callTool({ name, arguments: args });
+    assert.notEqual(result.isError, true, `${name} success fixture must return a successful result`);
+    assert.ok(result.content.length > 0, `${name} success fixture must return content`);
+    assert.ok(
+      result.content.some((part) => part.type === "text" && part.text.trim().length > 0),
+      `${name} success fixture must return populated text content`
+    );
+    assert.doesNotMatch(JSON.stringify(result), forbiddenIdentifier, `${name} result/error`);
+  }
+
+  returnErrorFixtures = true;
+  const errorCalls: ReadonlyArray<{ args: Record<string, unknown>; name: string }> = [
+    { args: {}, name: "schema" },
+    { args: { stream: "orders" }, name: "query_records" },
+    { args: { metric: "count", stream: "orders" }, name: "aggregate" },
+    { args: { q: "pasta" }, name: "search" },
+    { args: { id: "orders:o2" }, name: "fetch" },
+    { args: { field_path: "text", id: "conn_orders/orders:o2" }, name: "read_record_field" },
+  ];
+
+  for (const { args, name } of errorCalls) {
+    // biome-ignore lint/performance/noAwaitInLoops: Calls share the same RS fixture and check one error per tool in order.
+    const result = await client.request(
+      { method: "tools/call", params: { arguments: args, name } },
+      CallToolResultSchema
+    );
+    assert.equal(result.isError, true, `${name} error fixture must return an error result`);
+    assert.ok(result.content.length > 0, `${name} error fixture must return content`);
+    assert.ok(
+      result.content.some((part) => part.type === "text" && part.text.trim().length > 0),
+      `${name} error fixture must return populated text content`
+    );
+    assert.doesNotMatch(JSON.stringify(result), forbiddenIdentifier, `${name} error`);
+  }
+
+  const validationError = await client.request(
+    { method: "tools/call", params: { arguments: { limit: -1, stream: "orders" }, name: "query_records" } },
+    CallToolResultSchema
+  );
+  assert.equal(validationError.isError, true);
+  assert.ok(validationError.content.length > 0, "validation error must include content");
+  assert.doesNotMatch(JSON.stringify(validationError), forbiddenIdentifier, "validation error result");
 
   await client.close();
   await server.close();

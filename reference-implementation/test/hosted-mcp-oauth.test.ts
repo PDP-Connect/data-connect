@@ -2450,6 +2450,107 @@ test("multi-source hosted MCP picker issues a package token usable at /mcp with 
   }
 });
 
+test("package member with a tampered client binding is excluded from hosted MCP access", async () => {
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+  const rsUrl = `http://localhost:${server.rsPort}`;
+
+  try {
+    const spotify = await registerAuthorizedSpotify(asUrl);
+    const github = await registerAuthorizedGithub(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+    const issued = await completeMultiSourcePackageFlow({
+      asUrl,
+      client,
+      connectorIds: [spotify.connector_id, github.connector_id],
+    });
+    const before = await getGrantPackageAccess(issued.packageId);
+    assert.equal((before?.members as unknown[] | undefined)?.length, 2, "both package members start bound");
+    const member = getDb()
+      .prepare("SELECT token_id FROM grant_package_members WHERE package_id = ? ORDER BY grant_id LIMIT 1")
+      .get(issued.packageId) as { token_id: string } | undefined;
+    assert.ok(member, "package has a child member token");
+    getDb().prepare("UPDATE tokens SET client_id = ? WHERE token_id = ?").run("tampered-client", member.token_id);
+    const tamperedToken = getDb()
+      .prepare("SELECT client_id FROM tokens WHERE token_id = ?")
+      .get(member.token_id) as { client_id: string } | undefined;
+    assert.equal(tamperedToken?.client_id, "tampered-client");
+
+    const access = await getGrantPackageAccess(issued.packageId);
+
+    assert.ok(access, "the package remains active");
+    assert.equal((access.members as unknown[]).length, 1, "the mismatched child binding is dropped");
+
+    const schema = await postMcpJson(rsUrl, issued.accessToken, {
+      id: 1,
+      jsonrpc: "2.0",
+      method: "tools/call",
+      params: { arguments: {}, name: "schema" },
+    });
+    assert.equal(schema.status, 200);
+    const packageInfo = schemaPackageMetadata(structuredContentData(resultOf(schema)));
+    assert.equal(packageInfo?.member_count, 1, "hosted MCP output contains only the bound child");
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test("mcp_package bearer is rejected by an owner route", async () => {
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+
+  try {
+    const spotify = await registerAuthorizedSpotify(asUrl);
+    const github = await registerAuthorizedGithub(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+    const issued = await completeMultiSourcePackageFlow({
+      asUrl,
+      client,
+      connectorIds: [spotify.connector_id, github.connector_id],
+    });
+
+    const response = await fetchJson(`http://localhost:${server.rsPort}/v1/owner/control`, {
+      headers: { Authorization: `Bearer ${issued.accessToken}` },
+    });
+
+    assert.equal(response.status, 403);
+    assert.equal((response.body.error as Record<string, unknown>).code, "permission_error");
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test("expired package bearer is rejected at /mcp", async () => {
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+  const rsUrl = `http://localhost:${server.rsPort}`;
+
+  try {
+    const spotify = await registerAuthorizedSpotify(asUrl);
+    const github = await registerAuthorizedGithub(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+    const issued = await completeMultiSourcePackageFlow({
+      asUrl,
+      client,
+      connectorIds: [spotify.connector_id, github.connector_id],
+    });
+    getDb()
+      .prepare("UPDATE tokens SET expires_at = ? WHERE token_id = ?")
+      .run(new Date(Date.now() - 60_000).toISOString(), issued.accessToken);
+
+    const expired = await postMcpJson(rsUrl, issued.accessToken, {
+      id: 1,
+      jsonrpc: "2.0",
+      method: "tools/list",
+      params: {},
+    });
+
+    assert.equal(expired.status, 401);
+  } finally {
+    await closeServer(server);
+  }
+});
+
 test("package refresh replay deactivates every family-linked package bearer", async () => {
   const server = await startOpenTestServer();
   const asUrl = `http://localhost:${server.asPort}`;
