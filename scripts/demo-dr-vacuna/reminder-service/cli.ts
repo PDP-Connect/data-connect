@@ -19,7 +19,15 @@ import { childId, generateChild } from "../baseline/lib/dataset.ts";
 import { CONNECTOR_ID, SOURCE_ID, STREAM, VACUNA_MANIFEST } from "../baseline/lib/manifest.ts";
 import { type Clock, createClock, DAY_MS, ManualClock, WEEK_MS } from "./lib/clock.ts";
 import { type ClientCredentials, loadOrCreateClientKey, privateKeyJwtClient, publicClient } from "./lib/oauth.ts";
-import { type GatewayPayer, HttpGatewayPayer, MockPayer, NATIVE_ASSET, ONE_HUNDREDTH_VANA_WEI } from "./lib/payer.ts";
+import {
+  assertAllowedRemote,
+  type GatewayPayer,
+  HttpGatewayPayer,
+  MockPayer,
+  NATIVE_ASSET,
+  ONE_HUNDREDTH_VANA_WEI,
+} from "./lib/payer.ts";
+import { buildContext as buildMokshaContext } from "../moksha/lib/context.ts";
 import { DEFAULT_CONFIG, ReminderService } from "./lib/service.ts";
 import {
   dispositionStubFromFile,
@@ -67,16 +75,15 @@ function buildClock(): Clock {
   return createClock({ fixedNow: now || null, offsetMs: argInt("clock-offset-days", 0) * DAY_MS });
 }
 
-function isLoopback(url: string): boolean {
-  const host = new URL(url).hostname;
-  return host === "127.0.0.1" || host === "localhost" || host === "::1";
-}
-
 function buildPayer(store: ReminderStore): GatewayPayer {
   const kind = argValue("payer", "mock");
   if (kind === "mock") {
     const ledgerPath = argValue("payer-ledger", "");
     return new MockPayer(ledgerPath ? { ledgerPath } : {});
+  }
+  if (kind === "moksha") {
+    // Registers each child on the gateway before its first paid read; see ../moksha/LIVE-RUNBOOK.md.
+    return buildMokshaContext({}).payer;
   }
   if (kind !== "http") {
     throw new Error(`unknown --payer ${kind}`);
@@ -89,10 +96,7 @@ function buildPayer(store: ReminderStore): GatewayPayer {
     }
     return v;
   };
-  const gatewayUrl = required("VACUNA_GATEWAY_URL");
-  if (!(isLoopback(gatewayUrl) || process.argv.includes("--allow-remote-gateway"))) {
-    throw new Error("refusing a non-loopback gateway without --allow-remote-gateway");
-  }
+  const gatewayUrl = assertAllowedRemote(required("VACUNA_GATEWAY_URL"), env.VACUNA_GATEWAY_ALLOWLIST, "VACUNA_GATEWAY_ALLOWLIST");
   return new HttpGatewayPayer({
     config: {
       amountWei: env.VACUNA_PAYMENT_AMOUNT_WEI || ONE_HUNDREDTH_VANA_WEI,

@@ -68,9 +68,14 @@ Connection: `VACUNA_AS_URL`, `VACUNA_RS_URL`, `VACUNA_AS_ISSUER` (assertion
   `VACUNA_CHAIN_ID`, `VACUNA_ESCROW_CONTRACT`, `VACUNA_DATA_REGISTRY_CONTRACT`,
   `VACUNA_DATA_OWNER_ADDRESS`; optional `VACUNA_DATA_POINT_SCOPE`,
   `VACUNA_DATA_POINT_VERSION`, `VACUNA_PAYMENT_AMOUNT_WEI` (default 0.01 VANA),
-  `VACUNA_PAYMENT_ASSET` (default native). Refuses a non-loopback gateway
-  unless `--allow-remote-gateway`. Use throwaway keys only. Format details in
-  `lib/payer.ts`.
+  `VACUNA_PAYMENT_ASSET` (default native). Loopback only by default: a
+  non-loopback gateway must be https and its origin listed in
+  `VACUNA_GATEWAY_ALLOWLIST` (comma-separated, e.g.
+  `https://dp-rpc.moksha.vana.org`). Use throwaway keys only. Format details
+  in `lib/payer.ts`.
+- `--payer moksha`: the same endpoint per child on Vana Moksha, with each
+  child's server, data point and grant registered on the gateway before its
+  first paid read. Config, keys and caps: `../moksha/LIVE-RUNBOOK.md`.
 
 ## Refresh rotation
 

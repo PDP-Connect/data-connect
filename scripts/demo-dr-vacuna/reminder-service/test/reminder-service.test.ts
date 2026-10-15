@@ -11,7 +11,14 @@ import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { childId, generateChild } from "../../baseline/lib/dataset.ts";
 import { DAY_MS, HOUR_MS, ManualClock, WEEK_MS } from "../lib/clock.ts";
 import { privateKeyJwtClient } from "../lib/oauth.ts";
-import { type GatewayConfig, HttpGatewayPayer, MockPayer, NATIVE_ASSET, ONE_HUNDREDTH_VANA_WEI } from "../lib/payer.ts";
+import {
+  assertAllowedRemote,
+  type GatewayConfig,
+  HttpGatewayPayer,
+  MockPayer,
+  NATIVE_ASSET,
+  ONE_HUNDREDTH_VANA_WEI,
+} from "../lib/payer.ts";
 import { evaluateDueDose } from "../lib/schedule.ts";
 import { DEFAULT_CONFIG, ReminderService } from "../lib/service.ts";
 import { LifecycleEndpointStatusSource } from "../lib/status.ts";
@@ -291,4 +298,19 @@ test("HTTP gateway payer: EIP-712 signed escrow/pay accepted by a verifying fake
   const refused = await (payer as HttpGatewayPayer).send(JSON.stringify(rogueBody));
   assert.equal(refused.accepted, false);
   assert.equal((refused.response as { status: number }).status, 401);
+});
+
+test("gateway allowlist: loopback by default, a remote origin only over https when listed", () => {
+  const env = "VACUNA_GATEWAY_ALLOWLIST";
+  for (const url of ["http://127.0.0.1:8787", "http://localhost:3000/", "http://[::1]:9/"]) {
+    assert.equal(assertAllowedRemote(url, undefined, env), url);
+  }
+  const moksha = "https://dp-rpc.moksha.vana.org";
+  assert.throws(() => assertAllowedRemote(moksha, undefined, env), /not listed in VACUNA_GATEWAY_ALLOWLIST/);
+  assert.throws(() => assertAllowedRemote(moksha, "", env), /not listed/);
+  assert.equal(assertAllowedRemote(moksha, ` ${moksha}/ ,https://other.example`, env), moksha);
+  assert.equal(assertAllowedRemote(`${moksha}/`, moksha, env), `${moksha}/`);
+  assert.throws(() => assertAllowedRemote("http://dp-rpc.moksha.vana.org", moksha, env), /only https/);
+  assert.throws(() => assertAllowedRemote("https://dp-rpc.vana.org", moksha, env), /not listed/);
+  assert.throws(() => assertAllowedRemote("https://dp-rpc.moksha.vana.org.evil.example", moksha, env), /not listed/);
 });
