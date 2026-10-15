@@ -8,3 +8,4 @@ src-tauri/target
 **/dist-ssr
 scripts/demo-dr-vacuna/portal/screenshots
 scripts/demo-dr-vacuna/*/results
+**/.state-*
