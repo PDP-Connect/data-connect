@@ -74,3 +74,31 @@ test("records: Sofía's next dose is days away, Ana is overdue, deterministic", 
     assert.ok(record.doses.every((d) => d.date <= REFERENCE_DATE && d.date >= child.birth_date), child.child_id);
   }
 });
+
+test("dashboard links a settled payment to the explorer by its transaction hash", async () => {
+  const { explorerTxBase, txHashOf } = await import("./reminder-web.ts");
+  const hash = `0x${"ab".repeat(32)}`;
+  assert.equal(txHashOf(JSON.stringify({ success: true, txHash: hash })), hash);
+  assert.equal(txHashOf(JSON.stringify({ result: { transaction_hash: hash } })), hash);
+  assert.equal(txHashOf(JSON.stringify({ success: true })), null);
+  assert.equal(txHashOf("not json"), null);
+  assert.match(explorerTxBase(), /^https:\/\/.+\/tx\/$/);
+});
+
+test("payer env file: fills unset settings, never holds private keys", async () => {
+  const { mkdtempSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { loadPayerEnvFile } = await import("./reminder-web.ts");
+  const dir = mkdtempSync(join(tmpdir(), "vacuna-env-"));
+  const file = join(dir, "moksha.env");
+  writeFileSync(file, "# from the Moksha registration\nVACUNA_TEST_ESCROW=0xabc\nVACUNA_TEST_KEEP=from-file\n");
+  process.env.VACUNA_TEST_KEEP = "from-env";
+  loadPayerEnvFile(file);
+  assert.equal(process.env.VACUNA_TEST_ESCROW, "0xabc");
+  assert.equal(process.env.VACUNA_TEST_KEEP, "from-env");
+  writeFileSync(file, "VACUNA_BUILDER_PRIVATE_KEY=0x1\n");
+  assert.throws(() => loadPayerEnvFile(file), /secret/);
+  delete process.env.VACUNA_TEST_ESCROW;
+  delete process.env.VACUNA_TEST_KEEP;
+});

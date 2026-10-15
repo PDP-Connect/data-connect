@@ -241,6 +241,51 @@ ${dose}
   )}</p></div>`;
 }
 
+/** Block explorer transaction URL prefix (Moksha testnet by default). */
+export function explorerTxBase(): string {
+  return process.env.VACUNA_EXPLORER_TX_URL || "https://moksha.vanascan.io/tx/";
+}
+
+/** A settlement transaction hash in a gateway response, if it carries one. */
+export function txHashOf(responseJson: string | null): string | null {
+  if (!responseJson) {
+    return null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(responseJson);
+  } catch {
+    return null;
+  }
+  const seen: unknown[] = [parsed];
+  while (seen.length) {
+    const node = seen.shift();
+    if (!node || typeof node !== "object") {
+      continue;
+    }
+    for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
+      if (/^(tx_?hash|transaction_?hash|transactionHash|txHash|hash)$/i.test(key) && typeof value === "string" && /^0x[0-9a-fA-F]{64}$/.test(value)) {
+        return value;
+      }
+      if (value && typeof value === "object") {
+        seen.push(value);
+      }
+    }
+  }
+  return null;
+}
+
+function formatVana(wei: string): string {
+  try {
+    const n = BigInt(wei);
+    const whole = n / 10n ** 18n;
+    const frac = (n % 10n ** 18n).toString().padStart(18, "0").replace(/0+$/, "");
+    return `${whole}${frac ? `.${frac}` : ""} VANA`;
+  } catch {
+    return wei;
+  }
+}
+
 const STATUS_LABEL: Record<string, readonly [string, string]> = {
   active: ["Activa", "Active"],
   deleted: ["Retirada · datos borrados", "Withdrawn · data deleted"],
@@ -560,6 +605,36 @@ ${stat(totals.payments_accepted ?? 0, t(`pagos por lectura aceptados (${payer.na
           })
           .join("")
       : `<tr><td colspan="4">${t("Todavía no hay niños conectados. Empiece desde Inicio.", "No children connected yet. Start from Home.")}</td></tr>`;
+    const payments = store.db
+      .prepare(
+        `SELECT p.read_id, p.amount, p.status, p.response_json, p.created_at, c.child_id
+           FROM payments p LEFT JOIN children c ON c.child_index = p.child_index
+          ORDER BY p.created_at DESC LIMIT 12`
+      )
+      .all() as Array<{ amount: string; child_id: string | null; created_at: number; read_id: string; response_json: string | null; status: string }>;
+    const paymentRows = payments
+      .map((p) => {
+        const hash = txHashOf(p.response_json);
+        const settled = hash
+          ? `<a href="${esc(`${explorerTxBase()}${hash}`)}" target="_blank" rel="noopener" data-tx>${esc(`${hash.slice(0, 10)}…`)}</a>`
+          : payer.name === "mock"
+            ? t("simulado (sin transacción)", "simulated (no transaction)")
+            : p.status === "accepted"
+            ? t("aceptado, sin transacción todavía", "accepted, no transaction yet")
+            : p.status === "pending"
+              ? t("pendiente", "pending")
+              : t("rechazado", "rejected");
+        return `<tr data-payment="${esc(p.read_id)}" data-status="${esc(p.status)}">
+<td data-label="${t("Lectura", "Read")}">${esc(`${p.read_id.slice(0, 10)}…`)}<small>${esc(p.child_id ?? "")}</small></td>
+<td data-label="${t("Monto", "Amount")}">${esc(formatVana(p.amount))}</td>
+<td data-label="${t("Cuándo", "When")}">${esc(formatMoment(p.created_at, lang))}</td>
+<td data-label="${t("Liquidación", "Settlement")}">${settled}</td></tr>`;
+      })
+      .join("");
+    const paymentsTable = payments.length
+      ? `<h2 style="font-size:18px;margin:28px 0 10px">${t("Pagos por lectura", "Per-read payments")}</h2>
+<table class="vd-table"><thead><tr><th>${t("Lectura", "Read")}</th><th>${t("Monto", "Amount")}</th><th>${t("Cuándo", "When")}</th><th>${t("Liquidación", "Settlement")}</th></tr></thead><tbody>${paymentRows}</tbody></table>`
+      : "";
     const ranRead = url.searchParams.get("leido") === "1";
     const body = `<div class="vd-toolbar"><h1>${t("Panel del servicio", "Service dashboard")}</h1>
 <form method="POST" action="${BASE}/panel/leer"><button type="submit" class="vd-btn vd-secondary" data-read-now>${t("Leer ahora todos los registros activos", "Read all active records now")}</button></form></div>
@@ -571,9 +646,10 @@ ${ranRead ? `<div class="vd-alert vd-ok" role="status">${t("Lectura completada."
 ${stats}
 <table class="vd-table"><thead><tr><th>${t("Registro", "Record")}</th><th>${t("Autorización", "Authorization")}</th><th>${t("Última lectura", "Last read")}</th><th>${t("Próxima dosis", "Next dose")}</th></tr></thead>
 <tbody>${rowsHtml}</tbody></table>
+${paymentsTable}
 <p class="vd-note">${t(
-      `Pagos: ${payer.name === "mock" ? "simulados (no se mueve dinero)" : "pasarela de datos"} · recibos de lectura verificados: ${c.receiptsVerified ?? 0} · lecturas intentadas: ${c.readsAttempted ?? 0}`,
-      `Payments: ${payer.name === "mock" ? "simulated (no money moves)" : "data gateway"} · read receipts verified: ${c.receiptsVerified ?? 0} · reads attempted: ${c.readsAttempted ?? 0}`
+      `Pagos: ${payer.name === "mock" ? "simulados (no se mueve dinero)" : "pasarela de datos de Vana (Moksha)"} · recibos de lectura verificados: ${c.receiptsVerified ?? 0} · lecturas intentadas: ${c.readsAttempted ?? 0}`,
+      `Payments: ${payer.name === "mock" ? "simulated (no money moves)" : "Vana data gateway (Moksha)"} · read receipts verified: ${c.receiptsVerified ?? 0} · reads attempted: ${c.readsAttempted ?? 0}`
     )}</p>`;
     return shell({ body, currentUrl: currentUrl(url), lang, page: "panel", title: `${CLIENT_NAME} · ${t("Panel", "Dashboard")}` });
   }
@@ -646,8 +722,32 @@ function isLoopback(url: string): boolean {
   return host === "127.0.0.1" || host === "localhost" || host === "::1";
 }
 
+/**
+ * Hook for the Moksha registration (scripts/demo-dr-vacuna/moksha/): a
+ * KEY=VALUE file with the non-secret on-chain settings it produced (contract
+ * addresses, data owner, data point scope). Values already in the
+ * environment win; private keys belong in secrets, not in this file.
+ */
+export function loadPayerEnvFile(path: string | undefined): void {
+  if (!(path && existsSync(path))) {
+    return;
+  }
+  for (const line of readFileSync(path, "utf8").split("\n")) {
+    const match = /^\s*([A-Z0-9_]+)\s*=\s*(.*?)\s*$/.exec(line);
+    if (!match || line.trim().startsWith("#")) {
+      continue;
+    }
+    const [, key, value] = match as unknown as [string, string, string];
+    if (/PRIVATE_KEY/.test(key)) {
+      throw new Error(`${path} must not hold ${key}; set it as a secret`);
+    }
+    process.env[key] ??= value.replace(/^["']|["']$/g, "");
+  }
+}
+
 /** VACUNA_PAYER=mock (default) records payments locally; =http pays through the data gateway (see DEPLOY.md). */
 function buildPayer(store: ReminderStore): GatewayPayer {
+  loadPayerEnvFile(process.env.VACUNA_PAYER_ENV_FILE);
   const env = process.env;
   const kind = env.VACUNA_PAYER || "mock";
   if (kind === "mock") {

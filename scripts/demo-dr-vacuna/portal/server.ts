@@ -47,6 +47,11 @@ mkdirSync(STATE_DIR, { recursive: true });
 // before the server module loads; explicit env wins.
 const defaults: Record<string, string> = {
   AS_PUBLIC_URL: PUBLIC_ORIGIN,
+  // The owner surface has no password: the parent flow runs through the
+  // pilot's Cuenta Única stub, and /oauth/authorize must not demand an owner
+  // session. That surface is unreachable from outside: the AS listens on
+  // loopback and the public listener forwards only isPublicAsPath() paths.
+  PDPP_ALLOW_UNAUTHENTICATED_OWNER: "1",
   PDPP_CONFIDENTIAL_CLIENTS: "1",
   PDPP_DATABASE_URL: DATABASE_URL,
   PDPP_DB_PATH: join(STATE_DIR, "pdpp-scratch.sqlite"),
@@ -86,8 +91,11 @@ if (existsSync(join(STATE_DIR, RESET_MARKER))) {
   } finally {
     await pool.end();
   }
+  // Keep operator-provided *.env files (e.g. the Moksha settings, VACUNA_PAYER_ENV_FILE).
   for (const name of readdirSync(STATE_DIR)) {
-    rmSync(join(STATE_DIR, name), { force: true, recursive: true });
+    if (!name.endsWith(".env")) {
+      rmSync(join(STATE_DIR, name), { force: true, recursive: true });
+    }
   }
 }
 
