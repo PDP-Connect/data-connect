@@ -511,17 +511,14 @@ function withRecordSourceIdentity(
   refs: {
     sourceDescriptor: SourceDescriptorLike | null;
     storageBinding: StorageBindingLike | null;
-    requestConnectionId: string | null;
   }
 ): unknown {
   if (!record || typeof record !== "object" || Array.isArray(record)) {
     return record;
   }
   const connectorKey = sourceIdentityValue(refs.sourceDescriptor?.id, refs.storageBinding?.connector_id);
-  const connectionId = sourceIdentityValue(refs.requestConnectionId, refs.storageBinding?.connector_instance_id);
   return {
     ...(connectorKey ? { connector_key: connectorKey } : {}),
-    ...(connectionId ? { connection_id: connectionId } : {}),
     ...(record as Record<string, unknown>),
   };
 }
@@ -2197,6 +2194,34 @@ export function mountRsRecordDetail(
           throw err;
         }
 
+        const projectedRecord = projectPairwiseDetailRecord(
+          result.record,
+          readMap,
+        );
+        if (
+          !projectedRecord ||
+          typeof projectedRecord !== "object" ||
+          (projectedRecord as Record<string, unknown>).instance_id !==
+            selection.handle
+        ) {
+          throw Object.assign(
+            new Error("Stored record is outside its selected instance"),
+            { code: "grant_invalid" },
+          );
+        }
+
+        const response = ctx.finalizeCanonicalEnvelope(
+          withRecordSourceIdentity(projectedRecord, {
+            sourceDescriptor,
+            storageBinding,
+          }),
+          {
+            ...req,
+            query: { ...req.query, instance_id: selection.handle },
+            url: canonicalDetailUrl(req, selection.handle),
+          },
+        );
+
         await emitDisclosureServed(ctx, {
           actorId,
           actorType,
@@ -2209,23 +2234,7 @@ export function mountRsRecordDetail(
           tokenInfo,
           traceId,
         });
-        return res.json(
-          ctx.finalizeCanonicalEnvelope(
-            projectPairwiseDetailRecord(
-              withRecordSourceIdentity(result.record, {
-                requestConnectionId: selection.internalId,
-                sourceDescriptor,
-                storageBinding,
-              }),
-              readMap,
-            ),
-            {
-              ...req,
-              query: { ...req.query, instance_id: selection.handle },
-              url: canonicalDetailUrl(req, selection.handle),
-            },
-          ),
-        );
+        return res.json(response);
       } catch (err) {
         if (queryContext) {
           await ctx.emitQueryReceived(queryContext, req);

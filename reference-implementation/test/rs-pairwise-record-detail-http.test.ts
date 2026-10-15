@@ -518,6 +518,23 @@ test("record detail projects the pairwise handle to expanded child envelopes", a
 	assertNoInternalIds(reply.text);
 });
 
+test("client detail keeps the current expansion restriction", async (t) => {
+	const fx = await makeFixture(t);
+	const reply = await fx.client(
+		`/v1/streams/parents/records/parent-a?instance_id=${CLIENT_A}&expand=children`,
+	);
+	assert.equal(reply.status, 400, reply.text);
+	assert.equal(
+		(reply.body.error as Record<string, unknown>)?.code,
+		"invalid_request",
+	);
+	assert.equal(
+		(reply.body.error as Record<string, unknown>)?.param,
+		"expand",
+	);
+	assertNoInternalIds(reply.text);
+});
+
 test("owner detail requires a selector before looking up a uniquely present record", async (t) => {
 	const fx = await makeFixture(t);
 	const reply = await fx.owner(
