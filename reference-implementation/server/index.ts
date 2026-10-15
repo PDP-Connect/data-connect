@@ -124,6 +124,7 @@ import {
   stageOAuthAuthorizationCodeRequest,
   updateRegisteredClientName,
 } from "./auth.ts";
+import { auditTokenRefFromAuthorization } from "./audit-token-ref.ts";
 import { autoEnrollEligibleSchedules } from "./auto-enroll-eligible-schedules.ts";
 import type { CimdFetchDependencies } from "./cimd.ts";
 import { acquireDefaultDeliveryWorker, getDefaultDeliveryWorker } from "./client-event-delivery-worker.ts";
@@ -1775,7 +1776,7 @@ async function emitStateEvent(
   data: Record<string, unknown> = {}
 ) {
   const authHeader = req.headers?.authorization;
-  const tokenId = typeof authHeader === "string" ? authHeader.slice(7) : null;
+  const tokenId = auditTokenRefFromAuthorization(authHeader);
   await emitSpineEvent({
     actor_id: context.actorId ?? null,
     actor_type: context.actorType ?? null,
@@ -1866,7 +1867,7 @@ async function emitMutationEvent(
   data: Record<string, unknown> = {}
 ) {
   const authHeader = req.headers?.authorization;
-  const tokenId = typeof authHeader === "string" ? authHeader.slice(7) : null;
+  const tokenId = auditTokenRefFromAuthorization(authHeader);
   await emitSpineEvent({
     actor_id: context.actorId ?? null,
     actor_type: context.actorType ?? null,

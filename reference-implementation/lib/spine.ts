@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { randomBytes } from "node:crypto";
+import { auditTokenRef } from "../server/audit-token-ref.ts";
 import { getDb } from "../server/db.ts";
 import { isPostgresStorageBackend } from "../server/postgres-storage.ts";
 import {
@@ -398,6 +399,10 @@ function serializeSpineEventData(inputData: unknown, source: SourceObject | null
   return JSON.stringify(data);
 }
 
+function tokenObjectId(objectType: string, objectId: string): string {
+  return objectType === "token" ? (auditTokenRef(objectId) ?? objectId) : objectId;
+}
+
 function normalizeSpineEventInput(input: SpineEventInput): NormalizedSpineEvent {
   const occurredAt = asString(input.occurred_at, nowIso());
   const actorType = asString(input.actor_type, "system");
@@ -413,7 +418,8 @@ function normalizeSpineEventInput(input: SpineEventInput): NormalizedSpineEvent 
     event_type: asOptionalString(input.event_type),
     grant_id: asOptionalString(input.grant_id),
     interaction_id: asOptionalString(input.interaction_id),
-    object_id: asString(input.object_id, generateSpineId("obj")),
+    // `token` objects are identified by the bearer itself; keep it out of the log.
+    object_id: tokenObjectId(asString(input.object_type, "event"), asString(input.object_id, generateSpineId("obj"))),
     object_type: asString(input.object_type, "event"),
     occurred_at: occurredAt,
     recorded_at: nowIso(),
@@ -428,7 +434,7 @@ function normalizeSpineEventInput(input: SpineEventInput): NormalizedSpineEvent 
     stream_id: asOptionalString(input.stream_id),
     subject_id: asOptionalString(input.subject_id),
     subject_type: asOptionalString(input.subject_type),
-    token_id: asOptionalString(input.token_id),
+    token_id: auditTokenRef(asOptionalString(input.token_id)),
     trace_id: asString(input.trace_id, generateSpineId("trc")),
     version: asString(input.version, SPINE_VERSION),
   };

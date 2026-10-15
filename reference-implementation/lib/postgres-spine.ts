@@ -10,6 +10,7 @@
 import { randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
 
+import { auditTokenRef } from "../server/audit-token-ref.ts";
 import { postgresQuery, withPostgresTransaction } from "../server/postgres-storage.ts";
 import {
   isRunHistoryRelevantEventType,
@@ -378,6 +379,10 @@ function sourceColumns(source: SourceObject | null): Pick<NormalizedSpineEvent, 
   return source ? { source_id: source.id, source_kind: source.kind } : { source_id: null, source_kind: null };
 }
 
+function tokenObjectId(objectType: string, objectId: string): string {
+  return objectType === "token" ? (auditTokenRef(objectId) ?? objectId) : objectId;
+}
+
 function normalize(input: PostgresSpineEventInput = {}): NormalizedSpineEvent {
   const at = defaultString(input.occurred_at, nowIso);
   const actorType = defaultString(input.actor_type, "system");
@@ -393,7 +398,11 @@ function normalize(input: PostgresSpineEventInput = {}): NormalizedSpineEvent {
     event_type: defaultString(input.event_type, "event"),
     grant_id: optionalString(input.grant_id),
     interaction_id: optionalString(input.interaction_id),
-    object_id: defaultString(input.object_id, () => eventId("obj")),
+    // `token` objects are identified by the bearer itself; keep it out of the log.
+    object_id: tokenObjectId(
+      defaultString(input.object_type, "object"),
+      defaultString(input.object_id, () => eventId("obj"))
+    ),
     object_type: defaultString(input.object_type, "object"),
     occurred_at: at,
     recorded_at: nowIso(),
@@ -405,7 +414,7 @@ function normalize(input: PostgresSpineEventInput = {}): NormalizedSpineEvent {
     stream_id: optionalString(input.stream_id),
     subject_id: optionalString(input.subject_id),
     subject_type: optionalString(input.subject_type),
-    token_id: optionalString(input.token_id),
+    token_id: auditTokenRef(optionalString(input.token_id)),
     trace_id: defaultString(input.trace_id, () => eventId("trace")),
     version: defaultString(input.version, "1"),
   };

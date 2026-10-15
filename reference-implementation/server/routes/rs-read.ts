@@ -77,6 +77,7 @@ import {
   type StreamsListDependencies,
   type StreamsListInput,
 } from "../../operations/rs-streams-list/index.ts";
+import { auditTokenRefFromAuthorization } from "../audit-token-ref.ts";
 import { rejectUnsupportedClientQuery } from "../record-filters.ts";
 import type { MiddlewareHandler, RouteArg } from "./_route-contract.ts";
 
@@ -401,8 +402,7 @@ export interface MountRsReadContext {
 }
 
 function authorizationTokenId(req: RouteRequest): string | null {
-  const auth = req.headers.authorization;
-  return typeof auth === "string" ? auth.slice(7) : null;
+  return auditTokenRefFromAuthorization(req.headers.authorization);
 }
 
 // Resolve the request-time `connection_id`, honoring the deprecated
