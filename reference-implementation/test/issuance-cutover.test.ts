@@ -2,11 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { Pool } from "pg";
+import { Pool, type PoolClient } from "pg";
 import type { getDb } from "../server/db.ts";
 import {
 	migratePostgresIssuanceCutover,
@@ -15,6 +16,7 @@ import {
 	sqliteIssuanceProtection,
 } from "../server/issuance-cutover.ts";
 import { SqliteDriver } from "../server/sqlite-driver.ts";
+import { withTemporaryPostgresDatabase } from "./helpers/postgres-temp-database.ts";
 
 const SCHEMA = `CREATE TABLE tokens(token_id TEXT PRIMARY KEY, expires_at TEXT);
  CREATE TABLE oauth_refresh_tokens(refresh_token_hash TEXT PRIMARY KEY, family_id TEXT, expires_at TEXT);
@@ -309,3 +311,312 @@ test("PostgreSQL cutover: exact provenance, rollback, partial state, concurrent 
 		await pool.end();
 	}
 });
+
+test("PostgreSQL cutover fences source writers and snapshots one issuance cohort", {
+	skip: process.env.PDPP_TEST_POSTGRES_URL
+		? false
+		: "PDPP_TEST_POSTGRES_URL unset",
+}, async () => {
+	const connectionString = process.env.PDPP_TEST_POSTGRES_URL;
+	assert.ok(connectionString);
+	const databaseName = `ri394_${randomBytes(8).toString("hex")}`;
+	let pool: Pool | undefined;
+	await withTemporaryPostgresDatabase(
+		{
+			connectionString,
+			databaseName,
+			templateName: null,
+			closeConnections: async () => pool?.end(),
+		},
+		async (databaseUrl) => {
+			pool = new Pool({
+				connectionString: databaseUrl,
+				connectionTimeoutMillis: 5_000,
+				statement_timeout: 15_000,
+			});
+			const setup = await pool.connect();
+			try {
+				await setup.query(`CREATE TABLE tokens(token_id TEXT PRIMARY KEY, expires_at TEXT);
+          CREATE TABLE oauth_refresh_tokens(refresh_token_hash TEXT PRIMARY KEY, family_id TEXT, expires_at TEXT);
+          CREATE TABLE grants(grant_id TEXT PRIMARY KEY, expires_at TEXT);
+          CREATE TABLE grant_packages(package_id TEXT PRIMARY KEY);
+          CREATE FUNCTION public.ri394_pause_cutover() RETURNS event_trigger LANGUAGE plpgsql AS $$
+          BEGIN
+            PERFORM pg_advisory_xact_lock(current_setting('ri394.pause_key')::bigint);
+          END;
+          $$;
+          CREATE EVENT TRIGGER ri394_pause_cutover ON ddl_command_end
+          WHEN TAG IN ('CREATE TABLE') EXECUTE FUNCTION public.ri394_pause_cutover();`);
+				await setup.query(`BEGIN;
+          INSERT INTO tokens VALUES ('before-token', NULL);
+          INSERT INTO oauth_refresh_tokens VALUES ('before-refresh', 'before-family', NULL);
+          INSERT INTO grants VALUES ('before-grant', NULL);
+          INSERT INTO grant_packages VALUES ('before-package');
+          COMMIT;`);
+			} finally {
+				setup.release();
+			}
+
+			const barrierKey = BigInt(
+				`0x${randomBytes(7).toString("hex")}`,
+			).toString();
+			const probeWrites = [
+				"INSERT INTO tokens VALUES ('probe-token', NULL)",
+				"INSERT INTO oauth_refresh_tokens VALUES ('probe-refresh', 'probe-family', NULL)",
+				"INSERT INTO grants VALUES ('probe-grant', NULL)",
+				"INSERT INTO grant_packages VALUES ('probe-package')",
+			];
+			const probeIds = [
+				["token", "probe-token"],
+				["refresh", "probe-refresh"],
+				["family", "probe-family"],
+				["grant", "probe-grant"],
+				["package", "probe-package"],
+			] as const;
+			const afterIds = [
+				["token", "after-token"],
+				["refresh", "after-refresh"],
+				["family", "after-family"],
+				["grant", "after-grant"],
+				["package", "after-package"],
+			] as const;
+			let barrierHeld = false;
+			let migrationPromise: Promise<void> | undefined;
+			let linkedWriterForCleanup: PoolClient | undefined;
+			const clients: PoolClient[] = [];
+			const pendingWrites: Promise<unknown>[] = [];
+			try {
+				const barrier = await pool.connect();
+				clients.push(barrier);
+				const migration = await pool.connect();
+				clients.push(migration);
+				const observer = await pool.connect();
+				clients.push(observer);
+				const probes: PoolClient[] = [];
+				for (let index = 0; index < 4; index += 1) {
+					const probe = await pool.connect();
+					probes.push(probe);
+					clients.push(probe);
+				}
+				const linkedWriter = await pool.connect();
+				clients.push(linkedWriter);
+				linkedWriterForCleanup = linkedWriter;
+
+				await barrier.query("SELECT pg_advisory_lock($1::bigint)", [
+					barrierKey,
+				]);
+				barrierHeld = true;
+				const migrationPid = Number(
+					(await migration.query("SELECT pg_backend_pid() AS pid")).rows[0].pid,
+				);
+				await migration.query(
+					"SELECT set_config('ri394.pause_key', $1, false)",
+					[barrierKey],
+				);
+				migrationPromise = migratePostgresIssuanceCutover(migration);
+				let migrationError: unknown;
+				void migrationPromise.catch((error) => {
+					migrationError = error;
+				});
+
+				await waitForPostgresState(
+					"cutover to reach the test barrier before snapshot statements",
+					async () => {
+						if (migrationError) throw migrationError;
+						const state = await observer.query(
+							`SELECT a.wait_event_type,
+                    EXISTS (SELECT 1 FROM pg_locks l WHERE l.pid = a.pid AND l.locktype = 'advisory' AND NOT l.granted) AS waiting_on_barrier
+                   FROM pg_stat_activity a WHERE a.pid = $1`,
+							[migrationPid],
+						);
+						return (
+							state.rows[0]?.waiting_on_barrier === true &&
+							state.rows[0]?.wait_event_type === "Lock"
+						);
+					},
+				);
+
+				const writeStates = probes.map((client, index) => {
+					assert.ok(client);
+					const write = probeWrites[index];
+					assert.ok(write);
+					let settled = false;
+					let writeError: unknown;
+					const pidPromise = client.query("SELECT pg_backend_pid() AS pid");
+					const queryPromise = pidPromise.then(async ({ rows }) => {
+						const pid = Number(rows[0].pid);
+						try {
+							const result = await client.query(write);
+							settled = true;
+							return { pid, result };
+						} catch (error) {
+							settled = true;
+							writeError = error;
+							throw error;
+						}
+					});
+					void queryPromise.catch(() => undefined);
+					pendingWrites.push(queryPromise);
+					return {
+						pidPromise,
+						get settled() {
+							return settled;
+						},
+						get writeError() {
+							return writeError;
+						},
+					};
+				});
+
+				await waitForPostgresState(
+					"each source-table writer to block on the cutover backend",
+					async () => {
+						const results = await Promise.all(
+							writeStates.map(async (state) => {
+								if (state.settled) {
+									if (state.writeError) throw state.writeError;
+									throw new Error(
+										"a source writer completed before cutover released its lock",
+									);
+								}
+								const { rows } = await state.pidPromise.then(
+									({ rows: pidRows }) =>
+										observer.query(
+											`SELECT wait_event_type, pg_blocking_pids(pid) AS blockers
+                       FROM pg_stat_activity WHERE pid = $1`,
+											[pidRows[0].pid],
+										),
+									() => ({ rows: [] }),
+								);
+								return (
+									rows[0]?.wait_event_type === "Lock" &&
+									rows[0]?.blockers.includes(migrationPid)
+								);
+							}),
+						);
+						return results.every(Boolean);
+					},
+				);
+
+				await linkedWriter.query("BEGIN");
+				const linkedPid = Number(
+					(await linkedWriter.query("SELECT pg_backend_pid() AS pid")).rows[0]
+						.pid,
+				);
+				const linkedWrite = linkedWriter
+					.query(`INSERT INTO tokens VALUES ('after-token', NULL);
+              INSERT INTO oauth_refresh_tokens VALUES ('after-refresh', 'after-family', NULL);
+              INSERT INTO grants VALUES ('after-grant', NULL);
+              INSERT INTO grant_packages VALUES ('after-package');
+              COMMIT`)
+					.catch(async (error: unknown) => {
+						await linkedWriter.query("ROLLBACK").catch(() => undefined);
+						throw error;
+					});
+				void linkedWrite.catch(() => undefined);
+				pendingWrites.push(linkedWrite);
+				await waitForPostgresState(
+					"the linked issuance writer to block on the cutover backend",
+					async () => {
+						const { rows } = await observer.query(
+							`SELECT wait_event_type, pg_blocking_pids(pid) AS blockers
+                   FROM pg_stat_activity WHERE pid = $1`,
+							[linkedPid],
+						);
+						return (
+							rows[0]?.wait_event_type === "Lock" &&
+							rows[0]?.blockers.includes(migrationPid)
+						);
+					},
+				);
+
+				assert.equal(
+					(
+						await barrier.query(
+							"SELECT pg_advisory_unlock($1::bigint) AS unlocked",
+							[barrierKey],
+						)
+					).rows[0].unlocked,
+					true,
+				);
+				barrierHeld = false;
+				await migrationPromise;
+				await Promise.all(pendingWrites);
+
+				const cohort = (await observer.query(READ)).rows.map((row) => [
+					row.kind,
+					row.row_id,
+				]);
+				assert.deepEqual(cohort, [
+					["family", "before-family"],
+					["grant", "before-grant"],
+					["package", "before-package"],
+					["refresh", "before-refresh"],
+					["token", "before-token"],
+				]);
+				for (const [kind, id] of [...probeIds, ...afterIds]) {
+					assert.equal(
+						cohort.some(
+							([cohortKind, cohortId]) =>
+								cohortKind === kind && cohortId === id,
+						),
+						false,
+						`${kind} ${id} was issued after cutover began and must stay outside its cohort`,
+					);
+				}
+				assert.deepEqual(
+					(await observer.query(SOURCE_ROWS)).rows.map((row) => [
+						row.kind,
+						row.row_id,
+					]),
+					[
+						["grant", "after-grant"],
+						["grant", "before-grant"],
+						["grant", "probe-grant"],
+						["package", "after-package"],
+						["package", "before-package"],
+						["package", "probe-package"],
+						["refresh", "after-refresh"],
+						["refresh", "before-refresh"],
+						["refresh", "probe-refresh"],
+						["token", "after-token"],
+						["token", "before-token"],
+						["token", "probe-token"],
+					],
+				);
+				assert.deepEqual(
+					(
+						await observer.query(
+							"SELECT family_id FROM oauth_refresh_tokens WHERE family_id IS NOT NULL ORDER BY family_id",
+						)
+					).rows.map((row) => row.family_id),
+					["after-family", "before-family", "probe-family"],
+				);
+			} finally {
+				if (barrierHeld) {
+					await clients[0]
+						?.query("SELECT pg_advisory_unlock($1::bigint)", [barrierKey])
+						.catch(() => undefined);
+				}
+				if (migrationPromise) await migrationPromise.catch(() => undefined);
+				await Promise.all(
+					pendingWrites.map((write) => write.catch(() => undefined)),
+				);
+				await linkedWriterForCleanup?.query("ROLLBACK").catch(() => undefined);
+				for (const client of clients) client.release();
+			}
+		},
+	);
+});
+
+async function waitForPostgresState(
+	description: string,
+	probe: () => Promise<boolean>,
+): Promise<void> {
+	const deadline = Date.now() + 8_000;
+	while (Date.now() < deadline) {
+		if (await probe()) return;
+		await new Promise((resolve) => setTimeout(resolve, 10));
+	}
+	throw new Error(`timed out waiting for PostgreSQL state: ${description}`);
+}
