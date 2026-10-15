@@ -108,7 +108,7 @@ export const ADULTS: readonly WalkthroughAdult[] = [
   },
   {
     cedula: "00100000100",
-    demonstrates: ["Madre con dos hijos pequeños", "Mother with two young children"],
+    demonstrates: ["Madre de tres niños pequeños, uno con una vacuna atrasada", "Mother of three young children, one with an overdue vaccine"],
     family_name: "Santos",
     given_name: "Elena",
   },
