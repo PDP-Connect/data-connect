@@ -338,6 +338,7 @@ export interface ReferenceQueryRegistry extends Readonly<Record<string, Register
   readonly controllerMergeRunHistoryBatchFacts: MutationQuery;
   readonly controllerListSchedules: SmallEnumerationQuery;
   readonly controllerMergeRunHistoryCollectionRate: MutationQuery;
+  readonly controllerResetConnectorStateByInstance: MutationQuery;
   readonly controllerStartRunHistory: MutationQuery;
   readonly controllerUpdateSchedule: MutationQuery;
   readonly controllerUpdateScheduleEnabled: MutationQuery;
