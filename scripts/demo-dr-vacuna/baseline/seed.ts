@@ -13,9 +13,11 @@
 //   bulk-grants  clone the first real grant in SQL for the remaining children
 //   revoke       revoke every 100th grant through POST /grants/:id/revoke
 //   prepare      VACUUM ANALYZE + CHECKPOINT so the load test starts settled
+//   registry     (DR pilot, not in "all") civil-registry stub: ~650k parents,
+//                guardianships, refusal set; ../consent/seed-registry.ts
 //
 // Usage:
-//   node seed.ts [--phase all|bootstrap|records|bulk-records|real-grants|bulk-grants|revoke|prepare]
+//   node seed.ts [--phase all|bootstrap|records|bulk-records|real-grants|bulk-grants|revoke|prepare|registry]
 //                [--records 1000000] [--api-records 20000] [--grants 980200] [--real-grants 2000]
 //                [--from N] [--concurrency 4] [--batch 1000]
 
@@ -452,6 +454,11 @@ async function prepare(): Promise<void> {
   recordTiming("prepare", 1, startedAt);
 }
 
+/** DR pilot civil-registry stub: parents, guardianships, refusal set (see ../consent/README.md). */
+async function registry(): Promise<void> {
+  await import("../consent/seed-registry.ts");
+}
+
 const phases: Record<string, () => Promise<void>> = {
   bootstrap,
   "bulk-grants": bulkGrants,
@@ -459,6 +466,7 @@ const phases: Record<string, () => Promise<void>> = {
   prepare,
   records: ingestRecords,
   "real-grants": realGrants,
+  registry,
   revoke: revokeGrants,
 };
 
