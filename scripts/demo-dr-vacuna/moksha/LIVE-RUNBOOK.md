@@ -3,7 +3,14 @@
 For a human operator. Two children, at most 10 paid reads, a 1 VANA escrow
 deposit, through the live gateway `https://dp-rpc.moksha.vana.org` (chain
 14800). The endpoints, signers, fees and gas behind each step are in
-`SEQUENCE.md`. None of these commands has been run against Moksha yet.
+`SEQUENCE.md`.
+
+First live run (2026-10-15, builder `0x14095d8079DA8D62f989052d12615041424057cD`):
+registration all 201; deposit `0xc596009f02973c670de0a1ddcfe4a4c427c8a8f7dbc9196a2a82154897da296b`;
+8 of 8 payments accepted and settled by the gateway relayer `0x80534af0…a0`
+(`recordAccessAndSettle`, about 171k gas at 0.1 gwei, 0.000017 VANA each),
+e.g. [`0x9d05ea45…`](https://moksha.vanascan.io/tx/0x9d05ea45a87eb6c7432b2ec40d725a90ad16bce2bd428778fa30e50a0407e7ca).
+The deposit stays `submitted` until `POST /v1/escrow/balance/sync`, which `balance` now calls.
 
 Spend: one deposit of 1 VANA plus its gas. Out of the deposit, 2 × 0.011
 (first read per child, which also pays the grant fee) + 6 × 0.01 = 0.082
