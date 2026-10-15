@@ -1048,6 +1048,18 @@ export function buildResourceTemplates({
   ];
 }
 
+export function resourceUriIdentity(
+  uri: string,
+  kind: "record" | "field-window",
+): { connectionId: string | null; stream: string } {
+  if (kind === "record") {
+    const ref = parseRecordResultId(uri);
+    return { connectionId: ref.connectionId, stream: ref.stream };
+  }
+  const ref = resolveFieldWindowResourceRef(uri, {});
+  return { connectionId: ref.connectionId, stream: ref.stream };
+}
+
 function buildRecordResourceTemplate({
   rs,
   providerUrl,

@@ -17,6 +17,7 @@ const TOOL_NAMES = [
 	"read_record_field",
 ];
 const PACKAGE_TOOL_NAMES = ["list_package_children", ...TOOL_NAMES];
+const PRIVATE_IDS_PATTERN = /subject_private|rs_instance_private|cin_internal_1/;
 const VALID_ARGS: Record<string, Record<string, unknown>> = {
 	schema: {},
 	query_records: { stream: "notes" },
@@ -80,6 +81,16 @@ function fixture(options: { inactiveGrantId?: string; invalidGrantId?: string } 
 						},
 					});
 				}
+				if (
+					url.includes("/v1/streams/") && url.includes("/records/") &&
+					new URL(url).searchParams.get("connection_id")?.startsWith("pairwise-") &&
+					new URL(url).searchParams.get("connection_id") !== `pairwise-${grant_id}`
+				) {
+					return Response.json(
+						{ error: { code: "record_not_found", message: "The selected child cannot read this record." } },
+						{ status: 404 },
+					);
+				}
 				if (url.includes("/v1/search")) {
 					return Response.json({
 						hits: [
@@ -108,6 +119,10 @@ function fixture(options: { inactiveGrantId?: string; invalidGrantId?: string } 
 	return { reads, profile: { children } satisfies PackageProfile };
 }
 
+function assertReadFromChild(reads: string[], grantId: string) {
+	assert.ok(reads.at(0)?.startsWith(`${grantId}:`));
+}
+
 async function request(
 	profile: PackageProfile | undefined,
 	method: string,
@@ -133,6 +148,10 @@ async function request(
 		...(JSON.parse(await response.text()) as { result: Record<string, unknown> }),
 		httpStatus: response.status,
 	};
+}
+
+async function readResource(profile: PackageProfile, uri: string) {
+	return request(profile, "resources/read", { uri });
 }
 
 async function call(
@@ -365,7 +384,7 @@ test("selected downstream 403 package inactivity codes map to package_child_inac
 	}
 });
 
-test("package tools/list requires grant_id and hides resource templates; client surface stays unchanged", async () => {
+test("package tools/list requires grant_id and resource templates advertise explicit child URIs", async () => {
 	const { profile } = fixture();
 	const packageList = await request(profile, "tools/list", {});
 	assert.deepEqual(
@@ -402,12 +421,16 @@ test("package tools/list requires grant_id and hides resource templates; client 
 		"unknown_grant_selector",
 	);
 	const templates = await request(profile, "resources/templates/list", {});
-	assert.equal(
-		templates.error !== undefined ||
-			templates.result.resourceTemplates === undefined,
-		true,
+	assert.deepEqual(
+		(templates.result.resourceTemplates as Array<{ uriTemplate: string }>).map(
+			(entry) => entry.uriTemplate,
+		),
+		["pdpp://record/{grant_id}/{handle}", "pdpp://field-window/{grant_id}/{handle}"],
 	);
+	const resources = await request(profile, "resources/list", {});
+	assert.deepEqual(resources.result.resources, []);
 	const packageToolListBytes = Buffer.byteLength(JSON.stringify(packageList.result.tools));
+	assert.equal(packageToolListBytes, 23_712, "package tools/list must keep its measured B2 size");
 	assert.ok(packageToolListBytes <= 24_576, `package tools/list: ${packageToolListBytes} bytes`);
 
 	const clientList = await request(undefined, "tools/list", {});
@@ -422,6 +445,108 @@ test("package tools/list requires grant_id and hides resource templates; client 
 	}>) {
 		assert.equal("grant_id" in tool.inputSchema.properties, false);
 	}
+});
+
+test("package resources resolve old URIs by one active child and new URIs by explicit grant_id", async () => {
+	const { profile, reads } = fixture();
+	const [firstChild] = profile.children;
+	assert.ok(firstChild?.source && firstChild.streams[0]);
+	firstChild.source.connection_id = "conn_orders";
+	firstChild.streams[0].name = "orders";
+	firstChild.streams[0].instance_ids = ["conn_orders"];
+	const oldUri = "pdpp://record/conn_orders%2Forders%3Ao2";
+	const legacyCanonicalHandle = Buffer.from(
+		JSON.stringify({ connection_id: "conn_orders", kind: "record", record_id: "o2", stream: "orders", v: 1 }),
+	).toString("base64url");
+	const newHandle = Buffer.from(
+		JSON.stringify({ connection_id: "pairwise-a.child~_1-", kind: "record", record_id: "a", stream: "orders", v: 1 }),
+	).toString("base64url");
+	const newUri = `pdpp://record/a.child~_1-/${newHandle}`;
+
+	const old = await readResource(profile, oldUri);
+	assert.equal(old.httpStatus, 200);
+	assert.equal(reads.length, 1);
+	assertReadFromChild(reads, "a.child~_1-");
+	assert.doesNotMatch(newUri, PRIVATE_IDS_PATTERN);
+
+	reads.length = 0;
+	const fieldHandle = Buffer.from(
+		JSON.stringify({
+			connection_id: "pairwise-a.child~_1-",
+			field_path: "text",
+			kind: "field-window",
+			record_id: "a",
+			stream: "orders",
+			v: 1,
+		}),
+	).toString("base64url");
+	const fieldResult = await readResource(
+		profile,
+		`pdpp://field-window/a.child~_1-/${fieldHandle}`,
+	);
+	assert.equal(fieldResult.result.isError, undefined);
+	assert.equal(reads.length, 1);
+	assertReadFromChild(reads, "a.child~_1-");
+	assert.ok(reads.at(0)?.includes("field-window"));
+
+	reads.length = 0;
+	const canonicalOld = await readResource(profile, `pdpp://record/${legacyCanonicalHandle}`);
+	assert.equal(canonicalOld.httpStatus, 200);
+	assert.equal(reads.length, 1);
+	assertReadFromChild(reads, "a.child~_1-");
+	assert.ok(reads.at(0)?.includes("connection_id=conn_orders"));
+
+	reads.length = 0;
+	const selected = await readResource(profile, newUri);
+	assert.equal(selected.httpStatus, 200);
+	assert.equal(reads.length, 1);
+	assertReadFromChild(reads, "a.child~_1-");
+
+	reads.length = 0;
+	const siblingRecord = await readResource(
+		profile,
+		`pdpp://record/b.child/${newHandle}`,
+	);
+	assert.equal(siblingRecord.result.isError, undefined);
+	assert.ok(JSON.stringify(siblingRecord.result).includes("record_not_found"));
+	assert.equal(reads.length, 1);
+	assertReadFromChild(reads, "b.child");
+});
+
+test("legacy package resource URI refuses ambiguous child mapping without RS calls", async () => {
+	const { profile, reads } = fixture();
+	const [firstChild, secondChild] = profile.children;
+	assert.ok(firstChild?.source && firstChild.streams[0] && secondChild?.source && secondChild.streams[0]);
+	secondChild.source.connection_id = firstChild.source.connection_id;
+	secondChild.streams[0].instance_ids = [...firstChild.streams[0].instance_ids];
+	const result = await readResource(profile, "pdpp://record/pairwise-a.child~_1-%2Fnotes%3Aa");
+	assert.equal(result.result.isError, true);
+	const serializedResult = JSON.stringify(result.result);
+	assert.ok(serializedResult.includes("list_package_children"));
+	assert.ok(serializedResult.includes("grant_id"));
+	assert.deepEqual(reads, []);
+});
+
+test("package resource selectors reject malformed, unknown, and inactive children before RS calls", async () => {
+	const { profile, reads } = fixture({ inactiveGrantId: "a.child~_1-" });
+	const handle = Buffer.from(
+		JSON.stringify({ v: 1, kind: "record", connection_id: "pairwise-a.child~_1-", stream: "notes", record_id: "a" }),
+	).toString("base64url");
+	for (const [grantId, expected] of [
+		["bad/id", "invalid_grant_selector"],
+		["unknown", "unknown_grant_selector"],
+		["a.child~_1-", "package_child_inactive"],
+	] as const) {
+		const encodedGrantId = encodeURIComponent(grantId);
+		const result = await readResource(profile, `pdpp://record/${encodedGrantId}/${handle}`);
+		assert.equal(result.result.isError, true);
+		assert.ok(JSON.stringify(result.result).includes(expected));
+		assert.doesNotMatch(JSON.stringify(result.result), PRIVATE_IDS_PATTERN);
+		if (expected === "package_child_inactive") {
+			assert.ok(JSON.stringify(result.result).includes("Access to grant a.child~_1- has ended"));
+		}
+	}
+	assert.deepEqual(reads, []);
 });
 
 test("package follow-up descriptors keep their selected grant_id", async () => {
