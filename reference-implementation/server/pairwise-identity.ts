@@ -140,8 +140,7 @@ export async function initializePairwiseIdentityRootKey(
 			const existing = await client.query<{ issuer: string }>(
 				`SELECT issuer FROM pairwise_identity_root_keys
            UNION SELECT issuer FROM pairwise_identity_handles
-           UNION SELECT issuer FROM pairwise_trusted_client_sectors
-           UNION SELECT issuer FROM pairwise_identity_legacy_backfills`,
+           UNION SELECT issuer FROM pairwise_trusted_client_sectors`,
 			);
 			if (existing.rows.some((row) => row.issuer !== issuer)) {
 				throw new PairwiseIdentityDeploymentError(
@@ -194,8 +193,7 @@ export async function initializePairwiseIdentityRootKey(
 			.prepare(
 				`SELECT issuer FROM pairwise_identity_root_keys
          UNION SELECT issuer FROM pairwise_identity_handles
-         UNION SELECT issuer FROM pairwise_trusted_client_sectors
-         UNION SELECT issuer FROM pairwise_identity_legacy_backfills`,
+         UNION SELECT issuer FROM pairwise_trusted_client_sectors`,
 			)
 			.all<{ issuer: string }>();
 		if (existing.some((row) => row.issuer !== issuer)) {
@@ -233,7 +231,7 @@ export async function initializePairwiseIdentityRootKey(
 	}).immediate();
 }
 
-/** Completes the required legacy-client sector backfill before v1 issuance. */
+/** Records completion of the optional legacy-client sector backfill. */
 export async function completePairwiseIdentityLegacyBackfill(
 	issuer: string,
 ): Promise<void> {
@@ -254,8 +252,7 @@ export async function completePairwiseIdentityLegacyBackfill(
 			const foreign = await client.query(
 				`SELECT 1 FROM pairwise_identity_root_keys WHERE issuer<>$1
 				 UNION ALL SELECT 1 FROM pairwise_identity_handles WHERE issuer<>$1
-				 UNION ALL SELECT 1 FROM pairwise_trusted_client_sectors WHERE issuer<>$1
-				 UNION ALL SELECT 1 FROM pairwise_identity_legacy_backfills WHERE issuer<>$1 LIMIT 1`,
+				 UNION ALL SELECT 1 FROM pairwise_trusted_client_sectors WHERE issuer<>$1 LIMIT 1`,
 				[issuer],
 			);
 			if (foreign.rowCount)
@@ -510,7 +507,7 @@ export async function recordTrustedClientSectorMembership(input: {
 	clientSector: string;
 	issuer: string;
 }): Promise<void> {
-	return persistTrustedClientSectorMembership(input, false);
+	return persistTrustedClientSectorMembership(input);
 }
 
 /**
@@ -522,12 +519,11 @@ export async function backfillTrustedClientSectorMembership(input: {
 	clientSector: string;
 	issuer: string;
 }): Promise<void> {
-	return persistTrustedClientSectorMembership(input, true);
+	return persistTrustedClientSectorMembership(input);
 }
 
 async function persistTrustedClientSectorMembership(
 	input: { clientId: string; clientSector: string; issuer: string },
-	allowExistingAliasConflict: boolean,
 ): Promise<void> {
 	validateMembershipInput(input);
 	if (isPostgresStorageBackend()) {
@@ -545,8 +541,7 @@ async function persistTrustedClientSectorMembership(
 			const foreign = await client.query(
 				`SELECT 1 FROM pairwise_identity_root_keys WHERE issuer<>$1
 				 UNION ALL SELECT 1 FROM pairwise_identity_handles WHERE issuer<>$1
-				 UNION ALL SELECT 1 FROM pairwise_trusted_client_sectors WHERE issuer<>$1
-				 UNION ALL SELECT 1 FROM pairwise_identity_legacy_backfills WHERE issuer<>$1 LIMIT 1`,
+				 UNION ALL SELECT 1 FROM pairwise_trusted_client_sectors WHERE issuer<>$1 LIMIT 1`,
 				[input.issuer],
 			);
 			if (foreign.rowCount)
@@ -567,39 +562,6 @@ async function persistTrustedClientSectorMembership(
 					);
 				}
 				return;
-			}
-			const backfill = await client.query(
-				"SELECT 1 FROM pairwise_identity_legacy_backfills WHERE issuer=$1",
-				[input.issuer],
-			);
-			const legacy = await client.query<{
-				kind: string;
-				subject_id: string;
-				internal_id: string;
-				handle: string;
-			}>(
-				"SELECT kind,subject_id,internal_id,handle FROM pairwise_identity_handles WHERE issuer=$1 AND client_id=$2 AND scheme='legacy'",
-				[input.issuer, input.clientId],
-			);
-			if (backfill.rowCount && legacy.rowCount) {
-				throw new PairwiseIdentityDeploymentError(
-					"Legacy membership cannot be assigned after backfill completion",
-				);
-			}
-			const peers = await client.query<{
-				client_id: string;
-				kind: string;
-				subject_id: string;
-				internal_id: string;
-				handle: string;
-			}>(
-				`SELECT h.client_id,h.kind,h.subject_id,h.internal_id,h.handle FROM pairwise_identity_handles h
-          JOIN pairwise_trusted_client_sectors m ON m.issuer=h.issuer AND m.client_id=h.client_id
-         WHERE h.issuer=$1 AND m.client_sector=$2 AND h.scheme='legacy'`,
-				[input.issuer, input.clientSector],
-			);
-			if (!allowExistingAliasConflict) {
-				assertNoLegacyConflict(legacy.rows, peers.rows);
 			}
 			await client.query(
 				`INSERT INTO pairwise_trusted_client_sectors (issuer,client_id,client_sector) VALUES ($1,$2,$3)`,
@@ -622,41 +584,6 @@ async function persistTrustedClientSectorMembership(
 					"Trusted client sector assignment is immutable",
 				);
 			return;
-		}
-		const backfill = db
-			.prepare(
-				"SELECT 1 FROM pairwise_identity_legacy_backfills WHERE issuer=?",
-			)
-			.get(input.issuer);
-		const legacy = db
-			.prepare(
-				"SELECT kind,subject_id,internal_id,handle FROM pairwise_identity_handles WHERE issuer=? AND client_id=? AND scheme='legacy'",
-			)
-			.all<{
-				kind: string;
-				subject_id: string;
-				internal_id: string;
-				handle: string;
-			}>(input.issuer, input.clientId);
-		if (backfill && legacy.length)
-			throw new PairwiseIdentityDeploymentError(
-				"Legacy membership cannot be assigned after backfill completion",
-			);
-		const peers = db
-			.prepare(
-				`SELECT h.client_id,h.kind,h.subject_id,h.internal_id,h.handle FROM pairwise_identity_handles h
-        JOIN pairwise_trusted_client_sectors m ON m.issuer=h.issuer AND m.client_id=h.client_id
-       WHERE h.issuer=? AND m.client_sector=? AND h.scheme='legacy'`,
-			)
-			.all<{
-				client_id: string;
-				kind: string;
-				subject_id: string;
-				internal_id: string;
-				handle: string;
-			}>(input.issuer, input.clientSector);
-		if (!allowExistingAliasConflict) {
-			assertNoLegacyConflict(legacy, peers);
 		}
 		db.prepare(
 			"INSERT INTO pairwise_trusted_client_sectors (issuer,client_id,client_sector) VALUES (?,?,?)",
@@ -682,61 +609,13 @@ function assertConfiguredIssuerSqlite(
 		.prepare(
 			`SELECT 1 FROM pairwise_identity_root_keys WHERE issuer<>?
 			 UNION ALL SELECT 1 FROM pairwise_identity_handles WHERE issuer<>?
-			 UNION ALL SELECT 1 FROM pairwise_trusted_client_sectors WHERE issuer<>?
-			 UNION ALL SELECT 1 FROM pairwise_identity_legacy_backfills WHERE issuer<>? LIMIT 1`,
+			 UNION ALL SELECT 1 FROM pairwise_trusted_client_sectors WHERE issuer<>? LIMIT 1`,
 		)
-		.get(issuer, issuer, issuer, issuer);
+		.get(issuer, issuer, issuer);
 	if (foreign)
 		throw new PairwiseIdentityDeploymentError(
 			"Identity state exists outside the configured issuer",
 		);
-}
-
-function legacyIdentities(
-	rows: readonly {
-		kind: string;
-		subject_id: string;
-		internal_id: string;
-		handle: string;
-	}[],
-): Map<string, Set<string>> {
-	const identities = new Map<string, Set<string>>();
-	for (const row of rows) {
-		const key =
-			row.kind === "instance"
-				? JSON.stringify(["instance", row.subject_id, row.internal_id])
-				: JSON.stringify(["person", row.internal_id]);
-		const handles = identities.get(key) ?? new Set<string>();
-		handles.add(row.handle);
-		identities.set(key, handles);
-	}
-	return identities;
-}
-
-function assertNoLegacyConflict(
-	candidateRows: readonly {
-		kind: string;
-		subject_id: string;
-		internal_id: string;
-		handle: string;
-	}[],
-	peerRows: readonly {
-		kind: string;
-		subject_id: string;
-		internal_id: string;
-		handle: string;
-	}[],
-): void {
-	const candidate = legacyIdentities(candidateRows);
-	const peers = legacyIdentities(peerRows);
-	for (const [identity, handles] of candidate) {
-		const peerHandles = peers.get(identity) ?? new Set<string>();
-		if (handles.size > 1 || new Set([...handles, ...peerHandles]).size > 1) {
-			throw new PairwiseIdentityDeploymentError(
-				"Ambiguous legacy pairwise identity mapping",
-			);
-		}
-	}
 }
 
 function semanticIdentity(input: PairwiseHandleInput): {
@@ -791,22 +670,28 @@ function rootKeyForIssuerSync(issuer: string): Buffer {
 	return validRootKey(row.root_key_hex);
 }
 
-/**
- * Legacy ambiguity checks precede canonical v1 and legacy lookup. New mappings
- * use issuer, trusted sector, and semantic identity; aliases and streams are omitted.
- */
+/** Issues or returns only an issuer-, sector-, and identity-scoped HMAC v1 handle. */
 export async function getPairwiseHandle(
+	input: PairwiseHandleInput,
+): Promise<string> {
+	return await resolvePairwiseHandle(input);
+}
+
+/**
+ * Retained as a forwarding alias for callers that used the explicit v1 API.
+ */
+export async function getPairwiseV1Handle(
+	input: PairwiseHandleInput,
+): Promise<string> {
+	return await getPairwiseHandle(input);
+}
+
+async function resolvePairwiseHandle(
 	input: PairwiseHandleInput,
 ): Promise<string> {
 	validateHandleInput(input);
 	const identity = semanticIdentity(input);
-	const legacySubject =
-		input.kind === "instance" ? input.subjectId : input.internalId;
 	const legacyKind = input.kind === "instance" ? "instance" : "subject";
-	const legacyFilter =
-		input.kind === "instance"
-			? "h.kind='instance' AND h.subject_id=$3 AND h.internal_id=$4"
-			: "((h.kind='subject' AND h.subject_id=$3 AND h.internal_id=$4) OR (h.kind='grantor' AND h.internal_id=$4))";
 
 	if (isPostgresStorageBackend()) {
 		return withPostgresTransaction(async (client) => {
@@ -824,8 +709,7 @@ export async function getPairwiseHandle(
 			const foreign = await client.query(
 				`SELECT 1 FROM pairwise_identity_root_keys WHERE issuer<>$1
 				 UNION ALL SELECT 1 FROM pairwise_identity_handles WHERE issuer<>$1
-				 UNION ALL SELECT 1 FROM pairwise_trusted_client_sectors WHERE issuer<>$1
-				 UNION ALL SELECT 1 FROM pairwise_identity_legacy_backfills WHERE issuer<>$1 LIMIT 1`,
+				 UNION ALL SELECT 1 FROM pairwise_trusted_client_sectors WHERE issuer<>$1 LIMIT 1`,
 				[input.issuer],
 			);
 			if (foreign.rowCount)
@@ -844,37 +728,6 @@ export async function getPairwiseHandle(
 					"Trusted client sector membership is missing or mismatched",
 				);
 			}
-			const backfill = await client.query(
-				"SELECT 1 FROM pairwise_identity_legacy_backfills WHERE issuer=$1",
-				[input.issuer],
-			);
-			if (!backfill.rowCount) {
-				const missing = await client.query(
-					`SELECT 1 FROM pairwise_identity_handles h LEFT JOIN pairwise_trusted_client_sectors m
-             ON m.issuer=h.issuer AND m.client_id=h.client_id
-           WHERE h.issuer=$1 AND h.scheme='legacy' AND m.client_id IS NULL LIMIT 1`,
-					[input.issuer],
-				);
-				if (missing.rowCount)
-					throw new PairwiseIdentityDeploymentError(
-						"Legacy client-sector backfill is incomplete",
-					);
-				await client.query(
-					"INSERT INTO pairwise_identity_legacy_backfills (issuer,completed_at) VALUES ($1,$2)",
-					[input.issuer, new Date().toISOString()],
-				);
-			}
-			const legacy = await client.query<{ handle: string }>(
-				`SELECT DISTINCT h.handle FROM pairwise_identity_handles h
-          JOIN pairwise_trusted_client_sectors m ON m.issuer=h.issuer AND m.client_id=h.client_id
-         WHERE h.issuer=$1 AND m.client_sector=$2 AND ${legacyFilter} AND h.scheme='legacy'`,
-				[input.issuer, input.clientSector, legacySubject, input.internalId],
-			);
-			const legacyHandles = [...new Set(legacy.rows.map((row) => row.handle))];
-			if (legacyHandles.length > 1)
-				throw new PairwiseIdentityContextError(
-					"Ambiguous legacy pairwise identity mapping",
-				);
 			const canonical = await client.query<{ handle: string }>(
 				`SELECT handle FROM pairwise_identity_handles
           WHERE issuer=$1 AND client_sector=$2 AND kind=$3 AND subject_id=$4 AND internal_id=$5 AND scheme='v1'`,
@@ -901,7 +754,6 @@ export async function getPairwiseHandle(
 				validRootKey(key.rows[0]?.root_key_hex);
 				return canonical.rows[0].handle;
 			}
-			if (legacyHandles.length) return legacyHandles[0] as string;
 			const keyRow = await client.query<{
 				key_version: number;
 				root_key_hex: string;
@@ -960,45 +812,6 @@ export async function getPairwiseHandle(
 					"Trusted client sector membership is missing or mismatched",
 				);
 			}
-			const backfill = db
-				.prepare(
-					"SELECT 1 FROM pairwise_identity_legacy_backfills WHERE issuer=?",
-				)
-				.get(input.issuer);
-			if (!backfill) {
-				const missing = db
-					.prepare(
-						`SELECT 1 FROM pairwise_identity_handles h LEFT JOIN pairwise_trusted_client_sectors m
-           ON m.issuer=h.issuer AND m.client_id=h.client_id
-         WHERE h.issuer=? AND h.scheme='legacy' AND m.client_id IS NULL LIMIT 1`,
-					)
-					.get(input.issuer);
-				if (missing)
-					throw new PairwiseIdentityDeploymentError(
-						"Legacy client-sector backfill is incomplete",
-					);
-				db.prepare(
-					"INSERT INTO pairwise_identity_legacy_backfills (issuer,completed_at) VALUES (?,?)",
-				).run(input.issuer, new Date().toISOString());
-			}
-			const legacyRows = db
-				.prepare(
-					`SELECT DISTINCT h.handle FROM pairwise_identity_handles h
-        JOIN pairwise_trusted_client_sectors m ON m.issuer=h.issuer AND m.client_id=h.client_id
-					WHERE h.issuer=? AND m.client_sector=? AND ${input.kind === "instance" ? "h.kind='instance' AND h.subject_id=? AND h.internal_id=?" : "((h.kind='subject' AND h.subject_id=? AND h.internal_id=?) OR (h.kind='grantor' AND h.internal_id=?))"} AND h.scheme='legacy'`,
-				)
-				.all<{ handle: string }>(
-					input.issuer,
-					input.clientSector,
-					legacySubject,
-					input.internalId,
-					...(input.kind === "instance" ? [] : [input.internalId]),
-				);
-			const legacyHandles = [...new Set(legacyRows.map((row) => row.handle))];
-			if (legacyHandles.length > 1)
-				throw new PairwiseIdentityContextError(
-					"Ambiguous legacy pairwise identity mapping",
-				);
 			const canonical = db
 				.prepare(
 					`SELECT handle FROM pairwise_identity_handles
@@ -1015,7 +828,6 @@ export async function getPairwiseHandle(
 				rootKeyForIssuerSync(input.issuer);
 				return canonical.handle;
 			}
-			if (legacyHandles.length) return legacyHandles[0] as string;
 			const rootKey = rootKeyForIssuerSync(input.issuer);
 			const handle = deterministicHandle(input, rootKey);
 			db.prepare(
@@ -1090,8 +902,7 @@ export async function lookupPairwiseInstanceMapping(
 			const foreign = await client.query(
 				`SELECT 1 FROM pairwise_identity_root_keys WHERE issuer<>$1
 				 UNION ALL SELECT 1 FROM pairwise_identity_handles WHERE issuer<>$1
-				 UNION ALL SELECT 1 FROM pairwise_trusted_client_sectors WHERE issuer<>$1
-				 UNION ALL SELECT 1 FROM pairwise_identity_legacy_backfills WHERE issuer<>$1 LIMIT 1`,
+				 UNION ALL SELECT 1 FROM pairwise_trusted_client_sectors WHERE issuer<>$1 LIMIT 1`,
 				[input.issuer],
 			);
 			if (foreign.rowCount) {
@@ -1103,16 +914,10 @@ export async function lookupPairwiseInstanceMapping(
 			const match = await client.query<{
 				internal_id: string;
 				source_id: string;
-				scheme: string;
 			}>(
-				`SELECT h.internal_id,h.source_id,h.scheme FROM pairwise_identity_handles h
-				 LEFT JOIN pairwise_trusted_client_sectors m
-				   ON m.issuer=h.issuer AND m.client_id=h.client_id
-				WHERE h.issuer=$1 AND h.kind='instance' AND h.subject_id=$2
-				  AND h.handle=$3 AND (
-				    (h.scheme='v1' AND h.client_sector=$4) OR
-				    (h.scheme='legacy' AND m.client_sector=$4)
-				  )`,
+				`SELECT internal_id,source_id FROM pairwise_identity_handles
+				 WHERE issuer=$1 AND kind='instance' AND subject_id=$2
+				   AND handle=$3 AND client_sector=$4 AND scheme='v1'`,
 				[
 					input.issuer,
 					input.subjectId,
@@ -1122,22 +927,19 @@ export async function lookupPairwiseInstanceMapping(
 			);
 			const row = match.rows[0];
 			if (!row) return null;
-			if (row.scheme === "v1") {
-				const key = await client.query<{
-					key_version: number;
-					root_key_hex: string;
-				}>(
-					"SELECT key_version,root_key_hex FROM pairwise_identity_root_keys WHERE issuer=$1",
-					[input.issuer],
+			const key = await client.query<{
+				key_version: number;
+				root_key_hex: string;
+			}>(
+				"SELECT key_version,root_key_hex FROM pairwise_identity_root_keys WHERE issuer=$1",
+				[input.issuer],
+			);
+			if (key.rows[0]?.key_version !== ROOT_KEY_VERSION) {
+				throw new Error(
+					"Pairwise identity root key is missing or unavailable",
 				);
-				if (key.rows[0]?.key_version !== ROOT_KEY_VERSION) {
-					throw new Error(
-						"Pairwise identity root key is missing or unavailable",
-					);
-				}
-				validRootKey(key.rows[0].root_key_hex);
 			}
-			await assertUnambiguousLegacyLookup(client, input, row);
+			validRootKey(key.rows[0].root_key_hex);
 			return {
 				internalId: row.internal_id,
 				retainedSourceId: row.source_id,
@@ -1159,28 +961,20 @@ export async function lookupPairwiseInstanceMapping(
 					"Trusted client sector membership is missing or mismatched",
 				);
 			}
-			assertCompletePairwiseLookupBackfillSqlite(db, input.issuer);
 			const row = db
 				.prepare(
-					`SELECT h.internal_id,h.source_id,h.scheme FROM pairwise_identity_handles h
-				 LEFT JOIN pairwise_trusted_client_sectors m
-				   ON m.issuer=h.issuer AND m.client_id=h.client_id
-				WHERE h.issuer=? AND h.kind='instance' AND h.subject_id=?
-				  AND h.handle=? AND (
-				    (h.scheme='v1' AND h.client_sector=?) OR
-				    (h.scheme='legacy' AND m.client_sector=?)
-				  )`,
+					`SELECT internal_id,source_id FROM pairwise_identity_handles
+				 WHERE issuer=? AND kind='instance' AND subject_id=?
+				   AND handle=? AND client_sector=? AND scheme='v1'`,
 				)
-				.get<{ internal_id: string; source_id: string; scheme: string }>(
+				.get<{ internal_id: string; source_id: string }>(
 					input.issuer,
 					input.subjectId,
 					input.instanceHandle,
 					input.clientSector,
-					input.clientSector,
 				);
 			if (!row) return null;
-			if (row.scheme === "v1") rootKeyForIssuerSync(input.issuer);
-			assertUnambiguousLegacyLookupSqlite(db, input, row);
+			rootKeyForIssuerSync(input.issuer);
 			return {
 				internalId: row.internal_id,
 				retainedSourceId: row.source_id,
@@ -1202,85 +996,6 @@ async function assertPairwiseLookupMembership(
 			"Trusted client sector membership is missing or mismatched",
 		);
 	}
-	const marker = await client.query(
-		"SELECT 1 FROM pairwise_identity_legacy_backfills WHERE issuer=$1",
-		[input.issuer],
-	);
-	if (marker.rowCount) return;
-	const missing = await client.query(
-		`SELECT 1 FROM pairwise_identity_handles h LEFT JOIN pairwise_trusted_client_sectors m
-		   ON m.issuer=h.issuer AND m.client_id=h.client_id
-		 WHERE h.issuer=$1 AND h.scheme='legacy' AND m.client_id IS NULL LIMIT 1`,
-		[input.issuer],
-	);
-	if (missing.rowCount) {
-		throw new PairwiseIdentityDeploymentError(
-			"Legacy client-sector backfill is incomplete",
-		);
-	}
-}
-
-async function assertUnambiguousLegacyLookup(
-	client: PostgresTransactionClient,
-	input: PairwiseInstanceHandleLookupInput,
-	row: { internal_id: string; scheme: string },
-): Promise<void> {
-	const aliases = await client.query(
-		`SELECT 1 FROM pairwise_identity_handles h
-		 JOIN pairwise_trusted_client_sectors m ON m.issuer=h.issuer AND m.client_id=h.client_id
-		 WHERE h.issuer=$1 AND m.client_sector=$2 AND h.kind='instance'
-		   AND h.subject_id=$3 AND h.internal_id=$4 AND h.scheme='legacy'
-		 GROUP BY h.internal_id HAVING count(DISTINCT h.handle)>1 LIMIT 1`,
-		[input.issuer, input.clientSector, input.subjectId, row.internal_id],
-	);
-	if (aliases.rowCount) {
-		throw new PairwiseIdentityContextError(
-			"Ambiguous legacy pairwise identity mapping",
-		);
-	}
-}
-
-function assertCompletePairwiseLookupBackfillSqlite(
-	db: ReturnType<typeof getDb>,
-	issuer: string,
-): void {
-	const marker = db
-		.prepare("SELECT 1 FROM pairwise_identity_legacy_backfills WHERE issuer=?")
-		.get(issuer);
-	if (marker) return;
-	const missing = db
-		.prepare(
-			`SELECT 1 FROM pairwise_identity_handles h LEFT JOIN pairwise_trusted_client_sectors m
-			   ON m.issuer=h.issuer AND m.client_id=h.client_id
-			 WHERE h.issuer=? AND h.scheme='legacy' AND m.client_id IS NULL LIMIT 1`,
-		)
-		.get(issuer);
-	if (missing) {
-		throw new PairwiseIdentityDeploymentError(
-			"Legacy client-sector backfill is incomplete",
-		);
-	}
-}
-
-function assertUnambiguousLegacyLookupSqlite(
-	db: ReturnType<typeof getDb>,
-	input: PairwiseInstanceHandleLookupInput,
-	row: { internal_id: string; scheme: string },
-): void {
-	const aliases = db
-		.prepare(
-			`SELECT 1 FROM pairwise_identity_handles h
-			 JOIN pairwise_trusted_client_sectors m ON m.issuer=h.issuer AND m.client_id=h.client_id
-			 WHERE h.issuer=? AND m.client_sector=? AND h.kind='instance'
-			   AND h.subject_id=? AND h.internal_id=? AND h.scheme='legacy'
-			 GROUP BY h.internal_id HAVING count(DISTINCT h.handle)>1 LIMIT 1`,
-		)
-		.get(input.issuer, input.clientSector, input.subjectId, row.internal_id);
-	if (aliases) {
-		throw new PairwiseIdentityContextError(
-			"Ambiguous legacy pairwise identity mapping",
-		);
-	}
 }
 
 export interface PairwiseGrant {
@@ -1296,7 +1011,10 @@ export interface PairwiseGrantIdentityContext {
 	resolveClientSector(clientId: string): string;
 }
 
-/** MCP contract: grant + internal subject ID + trusted AS issuer/sector resolver. */
+/**
+ * MCP contract: grant + internal subject ID + trusted AS issuer/sector resolver.
+ * Newly projected grant identifiers use pairwise HMAC v1 handles.
+ */
 export async function projectPairwiseGrant<T extends PairwiseGrant>(
 	grant: T,
 	internalSubjectId: string,
@@ -1309,7 +1027,7 @@ export async function projectPairwiseGrant<T extends PairwiseGrant>(
 		issuer: context.issuer,
 		subjectId: internalSubjectId,
 	};
-	projected.subject.id = await getPairwiseHandle({
+	projected.subject.id = await getPairwiseV1Handle({
 		...scope,
 		internalId: internalSubjectId,
 		kind: "subject",
@@ -1317,7 +1035,7 @@ export async function projectPairwiseGrant<T extends PairwiseGrant>(
 	if (projected.grantors) {
 		await Promise.all(
 			projected.grantors.map(async (grantor) => {
-				grantor.id = await getPairwiseHandle({
+				grantor.id = await getPairwiseV1Handle({
 					...scope,
 					internalId: grantor.id,
 					kind: "grantor",
@@ -1332,7 +1050,7 @@ export async function projectPairwiseGrant<T extends PairwiseGrant>(
 			}
 			stream.instance_ids = await Promise.all(
 				stream.instance_ids.map((internalId) =>
-					getPairwiseHandle({
+					getPairwiseV1Handle({
 						...scope,
 						internalId,
 						kind: "instance",

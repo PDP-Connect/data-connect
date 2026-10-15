@@ -1,6 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 mod commands;
+mod webview_cookies;
 #[cfg(desktop)]
 mod atomic_write;
 #[cfg(desktop)]
@@ -163,7 +164,7 @@ pub fn run() {
     #[cfg(target_os = "linux")]
     let builder = builder.plugin(wayland_titlebar::init());
 
-    #[cfg(debug_assertions)]
+    #[cfg(all(debug_assertions, not(windows)))]
     let builder = builder.plugin(tauri_plugin_mcp_bridge::init());
 
     builder

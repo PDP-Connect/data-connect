@@ -49,12 +49,7 @@ pub async fn open_reference_server_view(
         .build();
 
     if let Some(existing) = app.get_webview(REF_SERVER_VIEW_LABEL) {
-        existing
-            .set_cookie(cookie)
-            .map_err(|e| format!("Failed to set owner session cookie: {}", e))?;
-        existing
-            .navigate(url)
-            .map_err(|e| format!("Failed to navigate reference server view: {}", e))?;
+        crate::webview_cookies::set_cookies_then_navigate(&existing, vec![cookie], url).await?;
         existing
             .set_position(LogicalPosition::new(bounds.x, bounds.y))
             .map_err(|e| e.to_string())?;
@@ -69,8 +64,10 @@ pub async fn open_reference_server_view(
         return Err("Main window not found".to_string());
     };
 
-    let webview_builder =
-        WebviewBuilder::new(REF_SERVER_VIEW_LABEL, WebviewUrl::External(url.clone()));
+    let webview_builder = WebviewBuilder::new(
+        REF_SERVER_VIEW_LABEL,
+        WebviewUrl::External("about:blank".parse().expect("valid blank URL")),
+    );
 
     let webview = main_window
         .add_child(
@@ -80,15 +77,7 @@ pub async fn open_reference_server_view(
         )
         .map_err(|e| format!("Failed to create reference server webview: {}", e))?;
 
-    webview
-        .set_cookie(cookie)
-        .map_err(|e| format!("Failed to set owner session cookie: {}", e))?;
-
-    // Cookie must be present before the initial navigation for the first
-    // request to be authenticated, so navigate only after set_cookie above.
-    webview
-        .navigate(url)
-        .map_err(|e| format!("Failed to navigate reference server view: {}", e))?;
+    crate::webview_cookies::set_cookies_then_navigate(&webview, vec![cookie], url).await?;
 
     Ok(())
 }

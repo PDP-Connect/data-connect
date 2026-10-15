@@ -87,7 +87,6 @@ fs2 = "0.4"
 rusqlite = { version = "0.37", features = ["bundled"] }
 tar = "0.4"
 tempfile = "3"
-tauri-plugin-mcp-bridge = "0.13.0"
 tauri-plugin-clipboard-manager = "2.3.2"
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 tauri-plugin-autostart = "2"
@@ -98,6 +97,14 @@ uuid = { version = "1.22", features = ["v4"] }
 aes-gcm = "0.11.1"
 scrypt = { version = "0.12.0", default-features = false, features = ["kdf"] }
 
+# `tauri-plugin-mcp-bridge` 0.13.0 pins `webview2-com` 0.38 and `windows` 0.61, while
+# `wry` 0.57 (Tauri 2.12) uses `webview2-com` 0.39 and `windows` 0.62. The bridge's
+# Windows screenshot code then fails to compile against wry's WebView2 types. The
+# bridge is a debug-only developer tool, so build it everywhere except Windows
+# until an upstream release moves to `webview2-com` 0.39.
+[target.'cfg(not(windows))'.dependencies]
+tauri-plugin-mcp-bridge = "0.13.0"
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 signal-hook = "0.4.4"
@@ -106,6 +113,8 @@ signal-hook = "0.4.4"
 # wayland_titlebar module can call GtkWindowExt on the window tauri returns.
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18"
+webkit2gtk = { version = "=2.0.2", features = ["v2_38"] }
+soup3 = "0.5"
 
 # The WebKitGTK cookie test in unified.rs builds a real webview with the wry
 # that tauri already uses, with the same features.
@@ -125,6 +134,10 @@ wry = { version = "0.55", default-features = false, features = ["protocol", "os-
 # matching this crate's MSRV -- verified against crates.io's published
 # rust_version per release, not assumed.
 sysinfo = { version = "0.38", default-features = false, features = ["system"] }
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSHTTPCookie", "NSDictionary", "NSString", "NSURL"] }
+objc2-web-kit = { version = "0.3", default-features = false, features = ["std", "block2", "WKWebView", "WKWebViewConfiguration", "WKWebsiteDataStore", "WKHTTPCookieStore"] }
+block2 = "0.6"
 
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 robius-authentication = "0.3.1"

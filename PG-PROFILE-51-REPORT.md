@@ -167,8 +167,8 @@ tail:
 ## Scope counts and comparison baseline
 
 `scripts/run-tests.ts` discovers 1,034 profile files. The template equivalence
-registry is a different measure: 140 eligible plus 34 cold-required files,
-for **174** total. These registry counts include the search-index repair tests.
+registry is a different measure: 140 eligible plus 35 cold-required files,
+for **175** total. These registry counts include the search-index repair tests.
 
 The sibling report supplies only a memory-default cap-2 baseline (10,252
 assertions, 9,690 passed, 209 failed, 353 skipped; about 10 minutes). It is not
