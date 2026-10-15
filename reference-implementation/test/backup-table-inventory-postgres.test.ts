@@ -25,9 +25,12 @@ import {
   POSTGRES_SQLITE_ONLY_STORAGE_TABLES,
   POSTGRES_STORAGE_TABLES,
 } from "../server/backup-table-policy.ts";
+import { ISSUANCE_CUTOVER_VERSION, migratePostgresIssuanceCutover } from "../server/issuance-cutover.ts";
 import {
   closePostgresStorage,
+  getPostgresPool,
   initPostgresStorage,
+  postgresQuery,
   withPostgresReadOnlyTransaction,
 } from "../server/postgres-storage.ts";
 import { provisionTestDatabase, TEST_DATABASE_SENTINEL_SCHEMA } from "../server/postgres-test-database-guard.ts";
@@ -159,6 +162,31 @@ test("Postgres dump/restore preserves every required durable table when configur
       "DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;",
     ]);
     await initPostgresStorage({ backend: "postgres", databaseUrl: sourceUrl });
+    const cutoverClient = await getPostgresPool().connect();
+    try {
+      await migratePostgresIssuanceCutover(cutoverClient);
+    } finally {
+      cutoverClient.release();
+    }
+    await postgresQuery(
+      `INSERT INTO as_issuance_cohort(kind, row_id, version, original_expires_at, enrollment)
+       VALUES ($1, $2, $3, $4, $5)`,
+      ["grant", "backup_inventory_cutover_grant", ISSUANCE_CUTOVER_VERSION, "2031-01-02T03:04:05.000Z", "cutover"]
+    );
+    const sourceCutoverRows = await withPostgresReadOnlyTransaction(async (client) => {
+      const [marker, cohort] = await Promise.all([
+        client.query("SELECT version, completed_at FROM as_issuance_cutover WHERE version = $1", [
+          ISSUANCE_CUTOVER_VERSION,
+        ]),
+        client.query(
+          "SELECT kind, row_id, version, original_expires_at, enrollment FROM as_issuance_cohort WHERE row_id = $1",
+          ["backup_inventory_cutover_grant"]
+        ),
+      ]);
+      return { marker: marker.rows, cohort: cohort.rows };
+    });
+    assert.equal(sourceCutoverRows.marker.length, 1, "cutover marker fixture must be initialized");
+    assert.equal(sourceCutoverRows.cohort.length, 1, "cohort fixture must be initialized");
     await closePostgresStorage();
 
     // Exclude the test-guard schema from the dump: pg_dump with no --schema
@@ -206,6 +234,19 @@ test("Postgres dump/restore preserves every required durable table when configur
       );
 
       assert.deepEqual(sorted(missingTables), [], "Postgres dump/restore must contain every non-lazy required table");
+      const restoredCutoverRows = await withPostgresReadOnlyTransaction(async (client) => {
+        const [marker, cohort] = await Promise.all([
+          client.query("SELECT version, completed_at FROM as_issuance_cutover WHERE version = $1", [
+            ISSUANCE_CUTOVER_VERSION,
+          ]),
+          client.query(
+            "SELECT kind, row_id, version, original_expires_at, enrollment FROM as_issuance_cohort WHERE row_id = $1",
+            ["backup_inventory_cutover_grant"]
+          ),
+        ]);
+        return { marker: marker.rows, cohort: cohort.rows };
+      });
+      assert.deepEqual(restoredCutoverRows, sourceCutoverRows);
     } finally {
       await closePostgresStorage();
     }
