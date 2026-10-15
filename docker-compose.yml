@@ -1,21 +1,20 @@
-# Bounded container logs. Docker's default json-file driver never rotates, so a
-# chatty service can fill the host disk. Override with PDPP_LOG_MAX_SIZE and
-# PDPP_LOG_MAX_FILE.
-x-logging: &default-logging
+# Docker keeps every container's stdout/stderr in an unrotated file by default.
+# Rotate at 10 MiB x 5 files (50 MiB per container). Values are strings.
+x-bounded-logging: &bounded-logging
   driver: json-file
   options:
-    max-size: ${PDPP_LOG_MAX_SIZE:-10m}
-    max-file: "${PDPP_LOG_MAX_FILE:-5}"
+    max-size: "10m"
+    max-file: "5"
 
 services:
   reference:
+    logging: *bounded-logging
     # The default GHCR image (and the `reference` build target below) is this
     # split-service's deliberately browser-free AS/RS runtime. The normal
     # browser-capable self-host path is the published Core image and the
     # official stack under deploy/docker; this development/reference service
     # keeps browser-backed collection on the workspace collector instead.
     image: ${PDPP_REFERENCE_IMAGE:-ghcr.io/pdp-connect/data-connect/reference:main}
-    logging: *default-logging
     build:
       context: .
       dockerfile: deploy/docker/Dockerfile
@@ -232,8 +231,8 @@ services:
   # service can depend on it. A custom env file must keep
   # PDPP_STORAGE_BACKEND=postgres and PDPP_DATABASE_URL paired.
   postgres:
+    logging: *bounded-logging
     image: ${PDPP_POSTGRES_IMAGE:-pgvector/pgvector:pg16}
-    logging: *default-logging
     environment:
       POSTGRES_USER: ${PDPP_POSTGRES_USER:-pdpp}
       POSTGRES_PASSWORD: ${PDPP_POSTGRES_PASSWORD:-pdpp}
@@ -290,8 +289,8 @@ services:
   # root Dockerfile — see deploy/docker/Dockerfile's header comment for the
   # path-layout differences this compose reconciles).
   web:
+    logging: *bounded-logging
     image: ${PDPP_WEB_IMAGE:-ghcr.io/pdp-connect/data-connect/console:main}
-    logging: *default-logging
     build:
       context: ./apps/console
       dockerfile: Dockerfile

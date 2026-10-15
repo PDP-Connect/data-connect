@@ -435,7 +435,7 @@ jobs:
             exit 1
           fi
           skopeo() {
-            docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
+            docker run --rm --log-driver none --user "$(id -u):$(id -g)" -e HOME=/tmp \
               -v "$HOME/.docker/config.json:/auth.json:ro" -v "$RUNNER_TEMP:/work" \
               "$SKOPEO_IMAGE" "$@" --authfile /auth.json
           }
@@ -456,7 +456,7 @@ jobs:
           SKOPEO_IMAGE: quay.io/skopeo/stable:v1.22.3-immutable@sha256:c0ee1f4edca5c01cb8d5611124f92f3cc47196ecab68aee5d0f90834e00574d5
         run: |
           set -euo pipefail
-          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
+          docker run --rm --log-driver none --user "$(id -u):$(id -g)" -e HOME=/tmp \
             -v "$HOME/.docker/config.json:/auth.json:ro" -v "$RUNNER_TEMP:/work" \
             "$SKOPEO_IMAGE" copy --all --authfile /auth.json \
             "docker://$PDPP_IMAGE@$PUSHED_DIGEST" oci-archive:/work/image-pushed.oci.tar

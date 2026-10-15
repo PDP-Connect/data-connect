@@ -35,6 +35,23 @@
 /** Strips docker's leading `/` from a container Name (e.g. `/pdpp-core` -> `pdpp-core`). */
 const LEADING_SLASH_PATTERN = /^\//u;
 
+/**
+ * Docker log bound applied to every replacement container: json-file rotated
+ * at 10 MiB x 5 files (50 MiB per container). It is set explicitly instead of
+ * copied from the old container, so recreating a container that was running
+ * with Docker's unbounded default fixes it rather than carrying it forward.
+ * Values are strings because Docker's `--log-opt` and `LogConfig.Config` take
+ * strings only.
+ */
+export const BOUNDED_LOG_RUN_ARGS: readonly string[] = [
+  "--log-driver",
+  "json-file",
+  "--log-opt",
+  "max-size=10m",
+  "--log-opt",
+  "max-file=5",
+];
+
 export interface PortBinding {
   readonly hostIp?: string;
   readonly hostPort: string;
@@ -153,7 +170,7 @@ export function parseInspect(raw: unknown): InspectedContainer {
  * entrypoint in the new image is not pinned to the old one.
  */
 export function buildRunArgs(spec: InspectedContainer, newImage: string, envArgs: readonly string[]): string[] {
-  const args: string[] = ["run", "-d", "--name", spec.name];
+  const args: string[] = ["run", "-d", "--name", spec.name, ...BOUNDED_LOG_RUN_ARGS];
 
   if (spec.restartPolicyName) {
     const policy =

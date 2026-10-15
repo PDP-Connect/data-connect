@@ -13,12 +13,13 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 
+import { greppedCountInImage } from "../scripts/canary/collectors.ts";
 import { buildRunArgs, parseInspect, rollbackContainerName } from "../scripts/canary/container-spec.ts";
 import { redact, renderRunArgs } from "../scripts/canary/deploy-canary.ts";
 import { deriveEnv, parseEnvEntries, toDockerEnvArgs } from "../scripts/canary/env-derivation.ts";
@@ -588,6 +589,41 @@ test("buildRunArgs puts the new image before the command, and keeps the command"
   assert.ok(imageIndex > 0, "image must appear in argv");
   assert.deepEqual(args.slice(imageIndex + 1), ["node", "--import", "tsx", "/app/deploy/railway/core-supervisor.ts"]);
   assert.equal(args[args.indexOf("--entrypoint") + 1], "docker-entrypoint.sh");
+});
+
+test("buildRunArgs bounds Docker logs before the image, even when the old container was unbounded", () => {
+  const spec = parseInspect(LIVE_INSPECT);
+  const args = buildRunArgs(spec, "pdpp-core:new", []);
+  const imageIndex = args.indexOf("pdpp-core:new");
+  const flags = args.slice(0, imageIndex);
+  const at = flags.indexOf("--log-driver");
+  assert.deepEqual(flags.slice(at, at + 6), [
+    "--log-driver",
+    "json-file",
+    "--log-opt",
+    "max-size=10m",
+    "--log-opt",
+    "max-file=5",
+  ]);
+});
+
+test("greppedCountInImage runs its throwaway container with --log-driver none, before the image", () => {
+  const dir = mkdtempSync(join(tmpdir(), "fake-docker-"));
+  const argvFile = join(dir, "argv.txt");
+  writeFileSync(join(dir, "docker"), `#!/bin/sh\nprintf '%s\\n' "$@" > "${argvFile}"\necho 3\n`);
+  chmodSync(join(dir, "docker"), 0o755);
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${dir}:${previousPath}`;
+  try {
+    assert.equal(greppedCountInImage("img:tag", "/app/x.js", "needle"), 3);
+  } finally {
+    process.env.PATH = previousPath;
+  }
+  const argv = readFileSync(argvFile, "utf8").trimEnd().split("\n");
+  rmSync(dir, { force: true, recursive: true });
+  const at = argv.indexOf("--log-driver");
+  assert.ok(at > 0 && at < argv.indexOf("img:tag"), "log flags must precede the image");
+  assert.equal(argv[at + 1], "none");
 });
 
 test("buildRunArgs never carries the OLD image tag", () => {

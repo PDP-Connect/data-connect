@@ -42,6 +42,7 @@ interface DockerCreateContainerBody {
     readonly Retries: number;
   };
   readonly HostConfig: {
+    readonly LogConfig: { readonly Config: Record<string, string>; readonly Type: string };
     readonly NetworkMode: string;
     readonly PortBindings: Record<string, { readonly HostPort: string }[]>;
   };
@@ -171,6 +172,11 @@ test("creates and starts an owned n.eko container with sanitized profile storage
   assert.equal(create.init.body.Image, BASE_OPTIONS.image);
   assert.equal(create.init.body.HostConfig.NetworkMode, BASE_OPTIONS.network);
   assert.deepEqual(create.init.body.HostConfig.PortBindings["59000/tcp"], [{ HostPort: "59000" }]);
+  // Bounded Docker logs, as the exact JSON the Engine API receives: option values must be strings.
+  assert.deepEqual(JSON.parse(JSON.stringify(create.init.body)).HostConfig.LogConfig, {
+    Config: { "max-file": "5", "max-size": "10m" },
+    Type: "json-file",
+  });
   assert.deepEqual(create.init.body.HostConfig.PortBindings["59000/udp"], [{ HostPort: "59000" }]);
   assert.equal(create.init.body.Labels[`${LABEL}.owner`], "pdpp-reference");
   assert.equal(create.init.body.Labels[`${LABEL}.surface_id`], "surface:https://chatgpt.example/profile 1");

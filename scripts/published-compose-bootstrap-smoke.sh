@@ -37,7 +37,7 @@ cleanup() {
   # Delete them from inside a container, which owns the same uid, then sweep
   # whatever is left. Only this run's temporary host directory is touched --
   # never a Docker volume.
-  docker run --rm \
+  docker run --rm --log-driver none \
     --volume "$SMOKE_ROOT:/smoke-root" \
     "${PDPP_POSTGRES_IMAGE:-pgvector/pgvector:pg16}" \
     sh -c 'rm -rf /smoke-root/..?* /smoke-root/.[!.]* /smoke-root/*' >/dev/null 2>&1 || true

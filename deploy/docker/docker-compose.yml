@@ -15,22 +15,21 @@
 # This file is intentionally small. The repository-root docker-compose.yml is
 # the development/owner stack (connector credentials, fixture mounts, browser
 # services) — do not start here if you only want to run a node.
-# Bounded container logs. Docker's default json-file driver never rotates, so a
-# chatty service can fill the host disk. Override with PDPP_LOG_MAX_SIZE and
-# PDPP_LOG_MAX_FILE.
-x-logging: &default-logging
+# Docker keeps every container's stdout/stderr in an unrotated file by default.
+# Rotate at 10 MiB x 5 files (50 MiB per container). Values are strings.
+x-bounded-logging: &bounded-logging
   driver: json-file
   options:
-    max-size: ${PDPP_LOG_MAX_SIZE:-10m}
-    max-file: "${PDPP_LOG_MAX_FILE:-5}"
+    max-size: "10m"
+    max-file: "5"
 
 services:
   core:
+    logging: *bounded-logging
     # The released channel: moves only on a successful release, and always
     # resolves to the same image as that release's version tag. Override with
     # PDPP_CORE_IMAGE to pin an immutable release tag (for example core:1.5.1).
     image: ${PDPP_CORE_IMAGE:-ghcr.io/pdp-connect/data-connect/core:latest}
-    logging: *default-logging
     restart: unless-stopped
     environment:
       # The single public origin this node advertises. Override this when
@@ -101,8 +100,8 @@ services:
       start_period: 30s
 
   postgres:
+    logging: *bounded-logging
     image: ${PDPP_POSTGRES_IMAGE:-pgvector/pgvector:pg16}
-    logging: *default-logging
     restart: unless-stopped
     environment:
       POSTGRES_USER: pdpp

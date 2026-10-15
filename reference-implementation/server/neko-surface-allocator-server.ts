@@ -375,6 +375,8 @@ export class NekoSurfaceAllocatorService {
           Healthcheck: this.#containerHealthcheck(),
           HostConfig: {
             Binds: [`${names.profilePath}:/home/user/.config/chromium`],
+            // Docker takes these option values as strings only.
+            LogConfig: { Config: { "max-file": "5", "max-size": "10m" }, Type: "json-file" },
             NetworkMode: this.#options.network,
             PortBindings: {
               [`${String(port)}/tcp`]: [{ HostPort: String(port) }],

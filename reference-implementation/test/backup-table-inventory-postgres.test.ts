@@ -49,7 +49,9 @@ function missingRequiredTables(restoredTables: Set<string>, lazyTables: Readonly
 function postgresTool(tool: "pg_dump" | "psql", args: string[]): void {
   const image = process.env.PDPP_TEST_POSTGRES_CLIENT_IMAGE;
   if (image) {
-    execFileSync("docker", ["run", "--rm", "--network", "host", image, tool, ...args], { stdio: "inherit" });
+    execFileSync("docker", ["run", "--rm", "--log-driver", "none", "--network", "host", image, tool, ...args], {
+      stdio: "inherit",
+    });
     return;
   }
   execFileSync(tool, args, { stdio: "inherit" });
@@ -58,7 +60,9 @@ function postgresTool(tool: "pg_dump" | "psql", args: string[]): void {
 function postgresToolOutput(tool: "pg_dump" | "psql", args: string[]): string {
   const image = process.env.PDPP_TEST_POSTGRES_CLIENT_IMAGE;
   if (image) {
-    return execFileSync("docker", ["run", "--rm", "--network", "host", image, tool, ...args], { encoding: "utf8" });
+    return execFileSync("docker", ["run", "--rm", "--log-driver", "none", "--network", "host", image, tool, ...args], {
+      encoding: "utf8",
+    });
   }
   return execFileSync(tool, args, { encoding: "utf8" });
 }
@@ -66,10 +70,14 @@ function postgresToolOutput(tool: "pg_dump" | "psql", args: string[]): string {
 function postgresToolWithInput(tool: "psql", args: string[], input: string): void {
   const image = process.env.PDPP_TEST_POSTGRES_CLIENT_IMAGE;
   if (image) {
-    execFileSync("docker", ["run", "--rm", "--interactive", "--network", "host", image, tool, ...args], {
-      input,
-      stdio: ["pipe", "inherit", "inherit"],
-    });
+    execFileSync(
+      "docker",
+      ["run", "--rm", "--log-driver", "none", "--interactive", "--network", "host", image, tool, ...args],
+      {
+        input,
+        stdio: ["pipe", "inherit", "inherit"],
+      }
+    );
     return;
   }
   execFileSync(tool, args, { input, stdio: ["pipe", "inherit", "inherit"] });
