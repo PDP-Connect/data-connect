@@ -12,7 +12,8 @@ shift; [ $# -gt 0 ] && shift; [ $# -gt 0 ] && shift
 STATE_DIR=${VACUNA_STATE_DIR:-"$HERE/.state"}
 export VACUNA_STATE_DIR="$STATE_DIR"
 
-pkill -f "demo-dr-vacuna/baseline/serve.ts" 2>/dev/null || true
+# Only this checkout's server: sibling worktrees may run their own copy.
+pkill -f "$HERE/serve.ts" 2>/dev/null || true
 while lsof -nP -iTCP:7663 -sTCP:LISTEN >/dev/null 2>&1; do sleep 1; done
 
 "$HERE/db.sh" psql -q -c "ALTER SYSTEM SET synchronous_commit = '$SYNC'" -c "SELECT pg_reload_conf()" >/dev/null

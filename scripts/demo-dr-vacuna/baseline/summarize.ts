@@ -20,7 +20,7 @@ interface Stage {
   error_rate: number;
   latency_ms_all: { p50: number; p95: number; p99: number };
   pass: boolean;
-  requests_sent_incl_warmup: { cross: number; ok: number; revoked: number };
+  requests_sent_incl_warmup: { cross: number; ok: number; revoked: number; unknown?: number };
   rps: number;
   rps_ok: number;
   wal: { bytes_per_request: number | null };
@@ -44,7 +44,8 @@ for (const file of process.argv.slice(2)) {
   detail.push("| conc | req/s | ok/s | p50 | p95 | p99 | err | server CPU | PG CPU | audited / answered | rejected / denied | WAL B/req |");
   detail.push("|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|");
   for (const s of run.stages) {
-    const denied = s.requests_sent_incl_warmup.revoked + s.requests_sent_incl_warmup.cross;
+    const denied =
+      s.requests_sent_incl_warmup.revoked + s.requests_sent_incl_warmup.cross + (s.requests_sent_incl_warmup.unknown ?? 0);
     detail.push(
       `| ${s.concurrency} | ${s.rps} | ${s.rps_ok} | ${s.latency_ms_all.p50} | ${s.latency_ms_all.p95} | ${s.latency_ms_all.p99} | ${(s.error_rate * 100).toFixed(3)}% | ${s.cpu_server_pct}% | ${s.cpu_pg_container_pct}% | ${s.audit.query_received} / ${s.audit.requests_answered} | ${s.audit.query_rejected} / ${denied} | ${s.wal.bytes_per_request} |`
     );

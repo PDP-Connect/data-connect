@@ -12,6 +12,7 @@
  */
 
 import { emitSpineEvent, generateSpineId, type SpineEventInput } from "../lib/spine.ts";
+import { auditTokenRefFromAuthorization } from "./audit-token-ref.ts";
 import { codeToStatus, typeFor } from "./routes/ref-error-status.ts";
 
 // ─── Structural request/response shapes ──────────────────────────────────────
@@ -153,7 +154,7 @@ export async function emitQueryRejected(context: QueryContext, req: RequestLike,
     stream_id: context.streamId || null,
     subject_id: context.tokenInfo?.subject_id || null,
     subject_type: "subject",
-    token_id: req.headers.authorization?.slice(7) || null,
+    token_id: auditTokenRefFromAuthorization(req.headers.authorization),
     trace_id: context.traceId,
     // Cast bridges `exactOptionalPropertyTypes`: several context fields are
     // `string | null | undefined` at runtime (e.g. `scenarioId` from
@@ -194,7 +195,7 @@ export async function emitQueryReceived(context: QueryContext, req: RequestLike)
     stream_id: context.streamId || null,
     subject_id: context.tokenInfo?.subject_id || null,
     subject_type: "subject",
-    token_id: req.headers.authorization?.slice(7) || null,
+    token_id: auditTokenRefFromAuthorization(req.headers.authorization),
     trace_id: context.traceId,
     // See the cast note in `emitQueryRejected` above — same runtime-vs-
     // exactOptional bridge; no value coercion.

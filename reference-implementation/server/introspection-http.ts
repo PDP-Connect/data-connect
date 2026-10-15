@@ -11,12 +11,25 @@ export interface IntrospectionCallerCredentials {
   readonly clientSecret: string;
 }
 
-export interface RemoteIntrospectionConfig extends IntrospectionCallerCredentials {
-  readonly endpoint: string;
+/** What the RS checks on every introspection answer, however it was obtained. */
+export interface IntrospectionValidationConfig {
   readonly expectedAudience: () => string | null;
   readonly expectedIssuer: () => string | null;
-  readonly fetchImpl?: typeof fetch;
   readonly now?: () => number;
+}
+
+export interface RemoteIntrospectionConfig extends IntrospectionCallerCredentials, IntrospectionValidationConfig {
+  readonly endpoint: string;
+  readonly fetchImpl?: typeof fetch;
+}
+
+export interface InProcessIntrospectionConfig extends IntrospectionValidationConfig {
+  /**
+   * Produces exactly the JSON object the AS `/introspect` route would answer
+   * with (wire projection plus `aud` / `iss`), by calling the AS in the same
+   * process instead of over loopback HTTP.
+   */
+  readonly introspect: (token: string) => Promise<unknown>;
 }
 
 export type RemoteIntrospectionInfo = Record<string, unknown> & {
@@ -157,7 +170,7 @@ function validateResponseLifetime(info: Record<string, unknown>, nowSeconds: num
 
 function validateIssuer(
   info: Record<string, unknown>,
-  config: RemoteIntrospectionConfig
+  config: IntrospectionValidationConfig
 ): RemoteIntrospectionInfo | null {
   const expectedIssuer = config.expectedIssuer();
   return inactiveWhen(Boolean(expectedIssuer && info.iss === expectedIssuer), "context.issuer_mismatch");
@@ -165,7 +178,7 @@ function validateIssuer(
 
 function validateAudience(
   info: Record<string, unknown>,
-  config: RemoteIntrospectionConfig
+  config: IntrospectionValidationConfig
 ): RemoteIntrospectionInfo | null {
   const expectedAudience = config.expectedAudience();
   return inactiveWhen(
@@ -198,7 +211,7 @@ function inactiveResponse(info: Record<string, unknown>): RemoteIntrospectionInf
 
 function validateActiveResponse(
   info: Record<string, unknown>,
-  config: RemoteIntrospectionConfig
+  config: IntrospectionValidationConfig
 ): RemoteIntrospectionInfo {
   if (info.active !== true) {
     return inactiveResponse(info);
@@ -264,5 +277,28 @@ export function createRemoteIntrospector(
   return async (token: string) => {
     const payload = await requestIntrospectionPayload({ authorization, endpoint: config.endpoint, fetchImpl, token });
     return payload ? validateActiveResponse(payload, config) : inactive("context.authentication_failed");
+  };
+}
+
+/**
+ * RS-side introspector for a server where the AS and RS share one process.
+ * It skips only the loopback HTTP hop (and its per-request TCP connection);
+ * the AS still runs its full token/grant/revocation lookup on every call (no
+ * caching, so a revocation is effective on the next request), and the answer
+ * goes through the same issuer / audience / lifetime / authorization-context
+ * validation as the remote path. A thrown lookup fails closed exactly like a
+ * failed HTTP call: `context.authentication_failed`.
+ */
+export function createInProcessIntrospector(
+  config: InProcessIntrospectionConfig
+): (token: string) => Promise<RemoteIntrospectionInfo> {
+  return async (token: string) => {
+    let payload: Record<string, unknown>;
+    try {
+      payload = requireIntrospectionPayload(await config.introspect(token));
+    } catch {
+      return inactive("context.authentication_failed");
+    }
+    return validateActiveResponse(payload, config);
   };
 }
