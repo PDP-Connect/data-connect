@@ -76,7 +76,7 @@ async function setCursorIssuerDefaults(databaseUrl: string, databaseName: string
   const admin = new Pool({ connectionString: adminUrl.toString(), max: 1, statement_timeout: 3000 });
   try {
     await admin.query(`ALTER DATABASE "${databaseName}" SET application_name = '${CURSOR_ISSUER_APP_NAME}'`);
-    if (!CURSOR_FAULT_ORACLE) {
+    if (!CURSOR_FAULT_ORACLE || CURSOR_FAULT_ORACLE === "barrier-release-delay") {
       await admin.query(`ALTER DATABASE "${databaseName}" SET statement_timeout = '8000ms'`);
       await admin.query(`ALTER DATABASE "${databaseName}" SET lock_timeout = '5000ms'`);
     }
@@ -107,7 +107,7 @@ function postgresTestSkipReason(): string | false {
 
 async function assertTimeoutOracleSubprocessCompletes(): Promise<void> {
   assert.ok(TEST_POSTGRES_URL, "Postgres URL is required for the subprocess oracle");
-  for (const fault of ["batch-observer", "barrier-issuer"]) {
+  for (const fault of ["batch-observer", "barrier-issuer", "barrier-release-delay"]) {
     const databaseName = `ri_cursor_fault_${fault.replaceAll("-", "_")}_${process.pid}_${Date.now()}`;
     const childEnvironment: NodeJS.ProcessEnv = {
       ...process.env,
@@ -195,6 +195,7 @@ function sqliteDigests(db: SqliteDatabaseForTest = getDb()): string[] {
 function seedSqliteRows(args: {
   count: number;
   createdAt?: number;
+  createdAts?: readonly number[];
   expiresAt?: number;
   kind?: string;
   scopeDigest?: string;
@@ -214,7 +215,7 @@ function seedSqliteRows(args: {
         args.scopeDigest ?? rsCursorDigest(SCOPE),
         rsCursorDigest(CONTEXT),
         `internal-${index}`,
-        args.createdAt ?? NOW - 1000,
+        args.createdAts?.[index] ?? args.createdAt ?? NOW - 1000,
         args.expiresAt ?? NOW + RS_CURSOR_TTL_MS.changes_since
       );
     }
@@ -381,6 +382,51 @@ async function verifyBehaviorAndSqliteAtomicity(observerDb: SqliteDatabaseForTes
       token: olderIssuedToken,
     }),
     { internalCursor: "older-issued-position", kind: "changes_since" }
+  );
+
+  getDb().prepare("DELETE FROM rs_opaque_cursors").run();
+  const priorTokens = Array.from(
+    { length: RS_CURSOR_QUOTA.changes_since },
+    (_, index) => `pdc_${Buffer.alloc(24, index + 1).toString("base64url")}`
+  );
+  seedSqliteRows({
+    count: priorTokens.length,
+    createdAts: priorTokens.map((_, index) => NOW - priorTokens.length + index),
+    tokenDigests: priorTokens.map(digest),
+  });
+  const quotaIssuedToken = await issueRsCursor({
+    context: CONTEXT,
+    internalCursor: "quota-issued-position",
+    kind: "changes_since",
+    now: NOW,
+    scope: SCOPE,
+  });
+  assert.equal(sqliteCount(), RS_CURSOR_QUOTA.changes_since);
+  await assert.rejects(
+    resolveRsCursor({
+      accept: ["changes_since"],
+      context: CONTEXT,
+      now: NOW,
+      param: "changes_since",
+      token: priorTokens[0],
+    }),
+    (error: { code?: string }) => error.code === "cursor_expired"
+  );
+  for (const [index, token] of priorTokens.slice(1).entries()) {
+    assert.deepEqual(
+      await resolveRsCursor({ accept: ["changes_since"], context: CONTEXT, now: NOW, param: "changes_since", token }),
+      { internalCursor: `internal-${index + 1}`, kind: "changes_since" }
+    );
+  }
+  assert.deepEqual(
+    await resolveRsCursor({
+      accept: ["changes_since"],
+      context: CONTEXT,
+      now: NOW,
+      param: "changes_since",
+      token: quotaIssuedToken,
+    }),
+    { internalCursor: "quota-issued-position", kind: "changes_since" }
   );
 
   getDb().prepare("DELETE FROM rs_opaque_cursors").run();
@@ -798,6 +844,21 @@ test("Postgres opaque cursors bootstrap cold and issue atomically", { skip: post
 
       await external.query("DELETE FROM rs_opaque_cursors");
       await seed({ count: RS_CURSOR_QUOTA.changes_since });
+      if (CURSOR_FAULT_ORACLE === "barrier-release-delay") {
+        await external.query(`
+          CREATE FUNCTION rs_cursor_test_slow_prune() RETURNS trigger LANGUAGE plpgsql AS $$
+          BEGIN
+            PERFORM pg_sleep(0.75);
+            RETURN OLD;
+          END;
+          $$
+        `);
+        await external.query(`
+          CREATE TRIGGER rs_cursor_test_slow_prune
+          BEFORE DELETE ON rs_opaque_cursors
+          FOR EACH ROW EXECUTE FUNCTION rs_cursor_test_slow_prune()
+        `);
+      }
       const blocker = await external.connect();
       let issuing: Promise<string> | null = null;
       let issueSettled = false;
@@ -864,19 +925,19 @@ test("Postgres opaque cursors bootstrap cold and issue atomically", { skip: post
       } catch (error) {
         barrierError = error;
       } finally {
-        if (!issueSettled && blockerPid !== undefined) {
-          try {
-            await cancelCursorIssues(external);
-          } catch (error) {
-            barrierError ??= error;
-          }
-        }
         try {
           await blocker.query("ROLLBACK");
         } catch {
           /* already released */
         }
         if (issuing) {
+          if (barrierError && !issueSettled && blockerPid !== undefined) {
+            try {
+              await cancelCursorIssues(external);
+            } catch (error) {
+              barrierError ??= error;
+            }
+          }
           const settledBeforeDeadline = await Promise.race([
             issueOutcome?.then(() => true) ?? Promise.resolve(false),
             new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 3000)),
@@ -887,6 +948,7 @@ test("Postgres opaque cursors bootstrap cold and issue atomically", { skip: post
               barrierError ??= outcome.error;
             }
           } else {
+            barrierError ??= new Error("visibility issuer did not settle before bounded cleanup deadline");
             try {
               await cancelCursorIssues(external);
               await terminateCursorIssues(external);
@@ -903,7 +965,7 @@ test("Postgres opaque cursors bootstrap cold and issue atomically", { skip: post
                 barrierError ??= outcome.error;
               }
             } else {
-              barrierError ??= new Error("visibility issuer did not settle before bounded cleanup deadline");
+              barrierError ??= new Error("visibility issuer did not settle after cancellation cleanup deadline");
             }
           }
         }
@@ -917,6 +979,22 @@ test("Postgres opaque cursors bootstrap cold and issue atomically", { skip: post
         }
       }
       assert.equal(await count(), RS_CURSOR_QUOTA.changes_since);
+      if (CURSOR_FAULT_ORACLE === "barrier-release-delay") {
+        const delayedIssue = await issueOutcome;
+        assert.ok(delayedIssue?.value);
+        assert.deepEqual(
+          await resolveRsCursor({
+            accept: ["changes_since"],
+            context: CONTEXT,
+            now: NOW,
+            param: "changes_since",
+            token: delayedIssue?.value,
+          }),
+          { internalCursor: "visibility-probe", kind: "changes_since" }
+        );
+        await external.query("DROP TRIGGER rs_cursor_test_slow_prune ON rs_opaque_cursors");
+        await external.query("DROP FUNCTION rs_cursor_test_slow_prune()");
+      }
 
       await external.query("DELETE FROM rs_opaque_cursors");
       await seed({ count: RS_CURSOR_QUOTA.changes_since });
