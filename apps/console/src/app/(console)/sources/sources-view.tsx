@@ -1066,6 +1066,7 @@ function StreamManifestRow({
         {collection && collection.pendingDetailGaps > 0 ? (
           <span className="rr-s-stream-subfact is-warning">{collection.pendingDetailGapsLabel ?? "pending gaps"}</span>
         ) : null}
+        {stream.gapStatement ? <span className="rr-s-stream-subfact">{stream.gapStatement}</span> : null}
         {collection?.skipLabel ? <span className="rr-s-stream-subfact">{collection.skipLabel}</span> : null}
       </TableCell>
       <TableCell>

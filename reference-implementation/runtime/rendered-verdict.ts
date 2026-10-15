@@ -384,6 +384,19 @@ export interface RenderedVerdict {
  * plus the durable retryability/attention signals the disposition oracle needs. This is
  * a synthesizer INPUT; the wire-forwarding of these rows from ref-control is Dispatch C.
  */
+/** Private synthesizer input derived from pending gap rows; never serialized. */
+export interface StreamGapFailureEvidence {
+  readonly affected_streams: readonly string[];
+  readonly consecutive_same_error_count: number;
+  readonly error_class: string | null;
+  readonly key_count: number;
+  readonly key_count_is_floor: boolean;
+  readonly latest_at: string | null;
+  readonly latest_run_id: string | null;
+  readonly message: string | null;
+  readonly reason: string;
+}
+
 export interface StreamRollup {
   /** Whether structured owner attention is open for this stream's gap. */
   readonly attention_open: boolean;
@@ -404,6 +417,8 @@ export interface StreamRollup {
    * `retry_by_runtime`.
    */
   readonly recovery_action?: string | null;
+  /** Owner-safe explanation derived from persisted pending gaps; input only. */
+  readonly gap_failure?: StreamGapFailureEvidence | null;
   readonly stream_id: string;
   /**
    * Whether this stream's ENTIRE terminal shortfall carries durable per-item
@@ -2628,7 +2643,12 @@ function buildStreamRows(
       considered: stream.considered,
       coverage: stream.coverage,
       disposition,
-      statement: streamStatement(disposition, snapshot.badges.syncing, freshnessNotApplicable(snapshot)),
+      statement: streamStatement(
+        disposition,
+        snapshot.badges.syncing,
+        freshnessNotApplicable(snapshot),
+        stream.gap_failure
+      ),
       stream_id: stream.stream_id,
     };
   });
@@ -2657,7 +2677,8 @@ function actionRefFor(
 function streamStatement(
   disposition: ForwardDisposition,
   activeRunSyncing = false,
-  oneTimeImportFinished = false
+  oneTimeImportFinished = false,
+  gapFailure: StreamGapFailureEvidence | null | undefined = null
 ): string {
   switch (disposition) {
     case "complete":
@@ -2670,7 +2691,7 @@ function streamStatement(
         ? "Can't be measured — this one-time import ended before a full pass finished."
         : "Coverage has not been measured yet.";
     case "resumable":
-      return "The next run is expected to fill the rest.";
+      return gapFailure ? gapFailureStatement(gapFailure) : "The next run is expected to fill the rest.";
     case "owner_refresh_due":
       // An advancing run already answers the same nudge this stream would
       // otherwise ask the owner to trigger (mirrors labelForPill's amber
@@ -2687,6 +2708,24 @@ function streamStatement(
       return _never;
     }
   }
+}
+
+const GAP_FAILURE_ACTIONS: ReadonlyMap<string, string> = new Map([
+  ["download_button_click_failed", "start the activity file download"],
+  ["qfx_download_failed", "download the activity file"],
+  ["qfx_parse_failed", "read the activity file"],
+]);
+
+const GAP_FAILURE_REASONS: ReadonlyMap<string, string> = new Map([
+  ["rate_limited", "rate limited"],
+  ["temporary_unavailable", "temporarily unavailable"],
+]);
+
+function gapFailureStatement(gap: StreamGapFailureEvidence): string {
+  const action = GAP_FAILURE_ACTIONS.get(gap.error_class?.toLowerCase() ?? "") ?? "retrieve the missing data";
+  const reason = GAP_FAILURE_REASONS.get(gap.reason) ?? "a problem occurred";
+  const details = [reason, gap.message].filter((detail): detail is string => detail !== null);
+  return `The connector could not ${action} (${details.join("; ")}); the next run will retry.`;
 }
 
 // ─── Detail + suppressed routing ────────────────────────────────────────────

@@ -94,6 +94,8 @@ export interface SourceStreamManifestRow {
   displayLabel: string;
   /** Deep-link into Explore for this connection + stream. */
   exploreHref: string;
+  /** Informative server verdict copy for a retryable stream gap, when present. */
+  gapStatement: string | null;
   name: string;
   /** Server-retained record count for the stream, or null when unknown. */
   recordCount: number | null;
@@ -611,6 +613,7 @@ export function toSourceInstanceView(
       formatStreamCollectionFacts(entry),
     ])
   );
+  const verdictStreamsByName = new Map((summary.rendered_verdict?.streams ?? []).map((stream) => [stream.stream_id, stream]));
   const streamRecordsByStream = new Map((summary.stream_records ?? []).map((entry) => [entry.stream, entry]));
   const sourceStreamNames = streamNamesForSource(summary, collectionFactsByStream, streamRecordsByStream);
 
@@ -665,6 +668,7 @@ export function toSourceInstanceView(
     const facts = collectionFactsByStream.get(name) ?? null;
     const retained = streamRecordsByStream.get(name) ?? null;
     const streamDecl = streamsByName.get(name);
+    const verdictStream = verdictStreamsByName.get(name);
     return {
       collection: facts
         ? {
@@ -684,6 +688,11 @@ export function toSourceInstanceView(
       cursor: null,
       displayLabel: streamDisplayLabel(name, streamDecl),
       exploreHref: exploreHrefFor(routeId, name),
+      gapStatement:
+        verdictStream?.disposition === "resumable" &&
+        verdictStream.statement !== "The next run is expected to fill the rest."
+          ? verdictStream.statement
+          : null,
       name,
       recordCount: retained ? retained.record_count : null,
       searchable: null,
