@@ -38,8 +38,8 @@ const OTHER_SECTOR = "https://other.example/sector.json";
 const SCHEME_KEY = ["issuer", "subject_id", "client_id", "kind", "source_id", "internal_id", "scheme"];
 const PRECHANGE_KEY = SCHEME_KEY.slice(0, 6);
 const READ_STATEMENT = /^\s*(SELECT|PRAGMA|WITH)\b/i;
-const AMBIGUOUS = /ambiguous/i;
 const ROOT_KEY_FAILURE = /root key/i;
+const SUBJECT_HANDLE = /^sub_v1_[A-Za-z0-9_-]{43}$/;
 
 // Frozen pre-change shapes. Real old databases carry these tables; the
 // current bootstrap must upgrade them in place without changing any handle.
@@ -500,13 +500,13 @@ async function lookups(): Promise<Record<string, unknown>> {
 
 const EXPECTED_LOOKUPS = {
   crossSector: null,
-  legacyA: { internalId: "cin-17", retainedSourceId: "source-primary" },
+  legacyA: null,
   v1A: { internalId: "cin-17", retainedSourceId: "" },
   v1B: { internalId: "cin-17", retainedSourceId: "" },
   v1C: { internalId: "cin-17", retainedSourceId: "" },
 };
 
-backendTest("new grant projection always selects v1 beside an adopted legacy grant", async (h) => {
+backendTest("new grant projection selects HMAC v1 beside stored legacy rows", async (h) => {
   await h.init();
   await provisionKey(h);
   await insertLegacyRows((sql, params) => h.query(sql, params), CLIENT_A_LEGACY);
@@ -564,8 +564,59 @@ backendTest("new grant projection always selects v1 beside an adopted legacy gra
   );
 });
 
+backendTest("fresh projections reject raw IDs across authenticated client sectors", async (h) => {
+  await h.init();
+  await provisionKey(h);
+  await insertLegacyRows((sql, params) => h.query(sql, params), [
+    ["person-4", "client-a", "subject", "", "person-4", "person-4"],
+    ["person-4", "client-a", "instance", "source-primary", "cin-17", "cin-17"],
+  ]);
+  await seedMixedClients();
+
+  const project = (clientId: string, sector: string) =>
+    projectPairwiseGrant(
+      {
+        client: { client_id: clientId },
+        source: { id: "source-primary" },
+        streams: [{ instance_ids: ["cin-17"], name: "orders" }],
+        subject: { id: "person-4" },
+      },
+      "person-4",
+      { issuer: ISSUER, resolveClientSector: () => sector }
+    );
+  const projectedA = await project("client-a", SECTOR);
+  const projectedC = await project("client-c", OTHER_SECTOR);
+  const lookup = (clientId: string, sector: string, instanceHandle: string) =>
+    lookupPairwiseInstanceMapping({
+      clientId,
+      clientSector: sector,
+      instanceHandle,
+      issuer: ISSUER,
+      subjectId: "person-4",
+    });
+  const handleA = projectedA.streams[0]?.instance_ids?.[0] as string;
+  const handleC = projectedC.streams[0]?.instance_ids?.[0] as string;
+
+  assert.match(projectedA.subject.id, SUBJECT_HANDLE);
+  assert.match(projectedC.subject.id, SUBJECT_HANDLE);
+  assert.notEqual(projectedA.subject.id, "person-4");
+  assert.notEqual(projectedC.subject.id, "person-4");
+  assert.notEqual(projectedA.subject.id, projectedC.subject.id);
+  assert.equal(await lookup("client-a", SECTOR, "cin-17"), null);
+  assert.equal(await lookup("client-c", OTHER_SECTOR, "cin-17"), null);
+  assert.equal(await lookup("client-c", OTHER_SECTOR, handleA), null);
+  assert.deepEqual(await lookup("client-a", SECTOR, handleA), {
+    internalId: "cin-17",
+    retainedSourceId: "",
+  });
+  assert.deepEqual(await lookup("client-c", OTHER_SECTOR, handleC), {
+    internalId: "cin-17",
+    retainedSourceId: "",
+  });
+});
+
 backendTest(
-  "explicit v1 issuance coexists with unchanged legacy mappings across interleaved lookups and restart",
+  "default issuance is HMAC-only beside unchanged legacy mappings across restart",
   async (h) => {
     await h.init();
     await provisionKey(h);
@@ -574,22 +625,21 @@ backendTest(
     const legacyBefore = await allRows(h, "legacy");
     const schemaBefore = await schemaState(h);
 
-    // Default API, before any v1 mapping exists: old grants keep the raw value.
-    assert.equal(await getPairwiseHandle(subjectInput("client-a")), "sub_disclosed_legacy");
+    assert.equal(await getPairwiseHandle(subjectInput("client-a")), EXPECTED_V1.subjectA);
     assert.equal(
       await getPairwiseHandle(instanceInput("client-a", "cin-17", "source-primary")),
-      "inst_disclosed_legacy"
+      EXPECTED_V1.instanceA
     );
-    assert.deepEqual(await allRows(h, "v1"), []);
+    assert.deepEqual(
+      (await allRows(h, "v1")).map((row) => row.handle),
+      [EXPECTED_V1.instanceA, EXPECTED_V1.subjectA].sort()
+    );
 
     assert.deepEqual(await issueV1(), EXPECTED_V1);
     assert.notEqual(EXPECTED_V1.subjectA, EXPECTED_V1.subjectC);
     assert.deepEqual(await lookups(), EXPECTED_LOOKUPS);
     assert.deepEqual(await allRows(h, "v1"), expectedV1Rows());
     assert.deepEqual(await allRows(h, "legacy"), legacyBefore);
-    // Existing default precedence: a canonical v1 mapping wins once present.
-    // Pre-cutover grants must therefore keep their persisted public values;
-    // re-projecting them through getPairwiseHandle is not legacy-safe.
     assert.equal(await getPairwiseHandle(subjectInput("client-a")), EXPECTED_V1.subjectA);
     assert.deepEqual(await schemaState(h), schemaBefore);
 
@@ -603,7 +653,7 @@ backendTest(
   }
 );
 
-backendTest("ambiguous legacy aliases block the default API but not explicit v1 issuance", async (h) => {
+backendTest("ambiguous legacy aliases do not affect default HMAC issuance or lookup", async (h) => {
   await h.init();
   await provisionKey(h);
   const write = (sql: string, params: unknown[]) => h.query(sql, params);
@@ -623,7 +673,10 @@ backendTest("ambiguous legacy aliases block the default API but not explicit v1 
   const legacyBefore = await allRows(h, "legacy");
   const input = instanceInput("old-a", "cin-amb", "source-a");
 
-  await assert.rejects(getPairwiseHandle(input), AMBIGUOUS);
+  assert.equal(
+    await getPairwiseHandle(input),
+    expectedInstanceHandle(SECTOR, "person-4", "cin-amb")
+  );
   const issued = await getPairwiseV1Handle(input);
   assert.equal(issued, expectedInstanceHandle(SECTOR, "person-4", "cin-amb"));
   assert.equal(await getPairwiseV1Handle(instanceInput("old-b", "cin-amb", "source-b")), issued);
@@ -632,8 +685,8 @@ backendTest("ambiguous legacy aliases block the default API but not explicit v1 
   const expected = { internalId: "cin-amb", retainedSourceId: "" };
   assert.deepEqual(await reverse("old-a", SECTOR, issued), expected);
   assert.deepEqual(await reverse("old-b", SECTOR, issued), expected);
-  await assert.rejects(reverse("old-a", SECTOR, "inst_amb_a"), AMBIGUOUS);
-  await assert.rejects(reverse("old-b", SECTOR, "inst_amb_b"), AMBIGUOUS);
+  assert.equal(await reverse("old-a", SECTOR, "inst_amb_a"), null);
+  assert.equal(await reverse("old-b", SECTOR, "inst_amb_b"), null);
   await recordTrustedClientSectorMembership({ clientId: "other-sector", clientSector: OTHER_SECTOR, issuer: ISSUER });
   assert.equal(await reverse("other-sector", OTHER_SECTOR, issued), null);
   assert.deepEqual(await allRows(h, "legacy"), legacyBefore);

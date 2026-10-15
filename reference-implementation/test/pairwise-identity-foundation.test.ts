@@ -35,7 +35,7 @@ import {
 import { withTemporaryPostgresDatabase } from "./helpers/postgres-temp-database.ts";
 
 const HMAC_INSTANCE_HANDLE = /^inst_v1_[A-Za-z0-9_-]{43}$/;
-const AMBIGUOUS_IDENTITY = /ambiguous|conflict/i;
+const HMAC_SUBJECT_HANDLE = /^sub_v1_[A-Za-z0-9_-]{43}$/;
 const VERSIONED_INSTANCE_HANDLE = /^inst_v1_/;
 const IMMUTABLE_SECTOR = /immutable/i;
 const UNAVAILABLE_KEY = /key|unavailable/i;
@@ -116,6 +116,66 @@ test("new instance handles use deterministic versioned HMAC-SHA256", async () =>
 		const handle = await getPairwiseHandle(baseInput);
 		assert.equal(handle, expectedHandle(baseInput));
 		assert.match(handle, HMAC_INSTANCE_HANDLE);
+	} finally {
+		closeDb();
+	}
+});
+
+test("default handles and reverse lookup never adopt legacy mappings", async () => {
+	await seedSqliteFixture();
+	try {
+		const insert = getDb().prepare(
+			`INSERT INTO pairwise_identity_handles
+			 (issuer,subject_id,client_id,kind,source_id,internal_id,handle)
+			 VALUES (?,?,?,?,?,?,?)`,
+		);
+		insert.run(
+			ISSUER,
+			"person-4",
+			"client-a",
+			"subject",
+			"",
+			"person-4",
+			"sub_raw-person",
+		);
+		insert.run(
+			ISSUER,
+			"person-4",
+			"client-a",
+			"instance",
+			"source-primary",
+			"cin_stable-17",
+			"inst_raw-instance",
+		);
+
+		const subjectInput = {
+			...baseInput,
+			internalId: "person-4",
+			kind: "subject" as const,
+		};
+		const sameClientLookup = await lookupPairwiseInstanceMapping({
+			...baseInput,
+			instanceHandle: "inst_raw-instance",
+		});
+		const otherClientLookup = await lookupPairwiseInstanceMapping({
+			...baseInput,
+			clientId: "client-b",
+			instanceHandle: "inst_raw-instance",
+		});
+		assert.deepEqual(
+			{
+				instanceHandle: await getPairwiseHandle(baseInput),
+				otherClientLookup,
+				personHandle: await getPairwiseHandle(subjectInput),
+				sameClientLookup,
+			},
+			{
+				instanceHandle: expectedHandle(baseInput),
+				otherClientLookup: null,
+				personHandle: expectedHandle(subjectInput, "person"),
+				sameClientLookup: null,
+			},
+		);
 	} finally {
 		closeDb();
 	}
@@ -296,7 +356,7 @@ test("subject and grantor entries for one person share an identifier across repr
 	}
 });
 
-test("legacy grantor-kind rows participate in person lookup instead of being replaced", async () => {
+test("legacy grantor-kind rows do not affect new person handles", async () => {
 	await seedSqliteFixture();
 	try {
 		getDb()
@@ -312,20 +372,18 @@ test("legacy grantor-kind rows participate in person lookup instead of being rep
 				"grantor-9",
 				"sub_proto_grantor",
 			);
-		assert.equal(
-			await getPairwiseHandle({
-				...baseInput,
-				kind: "grantor",
-				internalId: "grantor-9",
-			}),
-			"sub_proto_grantor",
-		);
+		const input = {
+			...baseInput,
+			internalId: "grantor-9",
+			kind: "grantor" as const,
+		};
+		assert.equal(await getPairwiseHandle(input), expectedHandle(input, "person"));
 	} finally {
 		closeDb();
 	}
 });
 
-test("an existing random mapping wins before new-key derivation", async () => {
+test("an existing random mapping does not replace its HMAC v1 handle", async () => {
 	await seedSqliteFixture();
 	try {
 		const legacyHandle = "inst_existing-random-mapping";
@@ -344,13 +402,14 @@ test("an existing random mapping wins before new-key derivation", async () => {
 				baseInput.internalId,
 				legacyHandle,
 			);
-		assert.equal(await getPairwiseHandle(baseInput), legacyHandle);
+		assert.match(await getPairwiseHandle(baseInput), HMAC_INSTANCE_HANDLE);
+		assert.notEqual(await getPairwiseHandle(baseInput), legacyHandle);
 	} finally {
 		closeDb();
 	}
 });
 
-test("one unambiguous legacy alias preserves its issued handle", async () => {
+test("one legacy source alias does not change the issued HMAC handle", async () => {
 	await seedSqliteFixture();
 	try {
 		getDb()
@@ -368,13 +427,13 @@ test("one unambiguous legacy alias preserves its issued handle", async () => {
 				baseInput.internalId,
 				"inst_old-once",
 			);
-		assert.equal(await getPairwiseHandle(baseInput), "inst_old-once");
+		assert.match(await getPairwiseHandle(baseInput), HMAC_INSTANCE_HANDLE);
 	} finally {
 		closeDb();
 	}
 });
 
-test("conflicting legacy handles within trusted sector membership fail closed", async () => {
+test("conflicting legacy handles do not block HMAC issuance in a trusted sector", async () => {
 	await seedSqliteFixture();
 	try {
 		await recordTrustedClientSectorMembership({
@@ -415,9 +474,9 @@ test("conflicting legacy handles within trusted sector membership fail closed", 
 			baseInput.internalId,
 			"inst_legacy-b",
 		);
-		await assert.rejects(
-			getPairwiseHandle({ ...baseInput, clientId: "new-client" }),
-			AMBIGUOUS_IDENTITY,
+		assert.equal(
+			await getPairwiseHandle({ ...baseInput, clientId: "new-client" }),
+			expectedHandle(baseInput),
 		);
 	} finally {
 		closeDb();
@@ -625,7 +684,7 @@ test("persisted handles remain stable after reopening SQLite", async () => {
 	}
 });
 
-test("SQLite upgrades the random red-stage ledger in place and keeps its handles", async () => {
+test("SQLite upgrades the random red-stage ledger in place and ignores its handles", async () => {
 	const directory = mkdtempSync(
 		join(tmpdir(), "pdpp-pairwise-legacy-upgrade-"),
 	);
@@ -658,7 +717,13 @@ test("SQLite upgrades the random red-stage ledger in place and keeps its handles
 			clientSector: SECTOR,
 			issuer: ISSUER,
 		});
-		assert.equal(await getPairwiseHandle(baseInput), "inst_red_random");
+		assert.match(await getPairwiseHandle(baseInput), HMAC_INSTANCE_HANDLE);
+		assert.equal(
+			getDb()
+				.prepare("SELECT handle FROM pairwise_identity_handles WHERE scheme='legacy'")
+				.get<{ handle: string }>()?.handle,
+			"inst_red_random",
+		);
 		const columns = getDb()
 			.prepare("PRAGMA table_info(pairwise_identity_handles)")
 			.all<{ name: string }>();
@@ -1040,18 +1105,18 @@ test("prototype local-issuer rows migrate explicitly without changing disclosed 
 			issuer: ISSUER,
 		});
 		await completePairwiseIdentityLegacyBackfill(ISSUER);
-		assert.equal(
+		assert.match(
 			await getPairwiseHandle({ ...baseInput, clientId: "prototype-client" }),
-			"inst_proto_random",
+			HMAC_INSTANCE_HANDLE,
 		);
-		assert.equal(
+		assert.match(
 			await getPairwiseHandle({
 				...baseInput,
 				clientId: "prototype-client",
 				kind: "subject",
 				internalId: "person-4",
 			}),
-			"sub_proto_random",
+			HMAC_SUBJECT_HANDLE,
 		);
 		await assert.rejects(
 			migratePairwiseIdentityIssuer({
@@ -1264,7 +1329,7 @@ test("issuer migration rolls back every namespace change after a mid-transaction
 	}
 });
 
-test("first v1 issuance requires complete legacy membership backfill", async () => {
+test("HMAC issuance does not require legacy membership backfill", async () => {
 	initDb(":memory:");
 	try {
 		await initializePairwiseIdentityRootKey(ISSUER);
@@ -1285,7 +1350,7 @@ test("first v1 issuance requires complete legacy membership backfill", async () 
 			clientSector: SECTOR,
 			issuer: ISSUER,
 		});
-		await assert.rejects(getPairwiseHandle(baseInput), /backfill|membership/i);
+		assert.match(await getPairwiseHandle(baseInput), HMAC_INSTANCE_HANDLE);
 		await assert.rejects(
 			completePairwiseIdentityLegacyBackfill(ISSUER),
 			(error: unknown) => error instanceof PairwiseIdentityDeploymentError,
@@ -1310,20 +1375,21 @@ test("first v1 issuance requires complete legacy membership backfill", async () 
 				"late-id",
 				"inst_late_legacy",
 			);
-		await assert.rejects(
-			recordTrustedClientSectorMembership({
-				clientId: "late-legacy",
-				clientSector: SECTOR,
-				issuer: ISSUER,
-			}),
-			/backfill|legacy|immutable/i,
+		await recordTrustedClientSectorMembership({
+			clientId: "late-legacy",
+			clientSector: SECTOR,
+			issuer: ISSUER,
+		});
+		assert.match(
+			await getPairwiseHandle({ ...baseInput, clientId: "late-legacy" }),
+			HMAC_INSTANCE_HANDLE,
 		);
 	} finally {
 		closeDb();
 	}
 });
 
-test("a conflicting legacy sector merge is rejected atomically while another sector remains usable", async () => {
+test("a conflicting legacy sector merge does not affect HMAC identity", async () => {
 	initDb(":memory:");
 	try {
 		await initializePairwiseIdentityRootKey(ISSUER);
@@ -1353,34 +1419,21 @@ test("a conflicting legacy sector merge is rejected atomically while another sec
 			"cin-conflict",
 			"inst_legacy_b",
 		);
-		await assert.rejects(
-			recordTrustedClientSectorMembership({
-				clientId: "legacy-b",
-				clientSector: SECTOR,
-				issuer: ISSUER,
-			}),
-			(error: unknown) => {
-				assert.equal(error instanceof PairwiseIdentityDeploymentError, true);
-				assert.equal("code" in (error as object), false);
-				return true;
-			},
-		);
-		assert.equal(
+		await recordTrustedClientSectorMembership({
+			clientId: "legacy-b",
+			clientSector: SECTOR,
+			issuer: ISSUER,
+		});
+		assert.ok(
 			getDb()
 				.prepare(
 					"SELECT 1 AS present FROM pairwise_trusted_client_sectors WHERE issuer=? AND client_id=?",
 				)
 				.get(ISSUER, "legacy-b"),
-			undefined,
 		);
 		await recordTrustedClientSectorMembership({
 			clientId: "unrelated-same-sector",
 			clientSector: SECTOR,
-			issuer: ISSUER,
-		});
-		await recordTrustedClientSectorMembership({
-			clientId: "legacy-b",
-			clientSector: OTHER_SECTOR,
 			issuer: ISSUER,
 		});
 		await recordTrustedClientSectorMembership({
@@ -1400,7 +1453,7 @@ test("a conflicting legacy sector merge is rejected atomically while another sec
 	}
 });
 
-test("backfill imports existing conflicting member facts and keeps that identity blocked", async () => {
+test("backfilled conflicting legacy facts do not block HMAC issuance", async () => {
 	initDb(":memory:");
 	try {
 		await initializePairwiseIdentityRootKey(ISSUER);
@@ -1433,13 +1486,13 @@ test("backfill imports existing conflicting member facts and keeps that identity
 			});
 		}
 		await completePairwiseIdentityLegacyBackfill(ISSUER);
-		await assert.rejects(
-			getPairwiseHandle({
+		assert.match(
+			await getPairwiseHandle({
 				...baseInput,
 				clientId: "old-a",
 				internalId: "cin-existing-conflict",
 			}),
-			AMBIGUOUS_IDENTITY,
+			HMAC_INSTANCE_HANDLE,
 		);
 		await recordTrustedClientSectorMembership({
 			clientId: "other-sector-client",
@@ -1460,7 +1513,7 @@ test("backfill imports existing conflicting member facts and keeps that identity
 	}
 });
 
-test("legacy source aliases with different handles block all affected lookups and issuance", async () => {
+test("legacy source aliases do not affect HMAC issuance", async () => {
 	initDb(":memory:");
 	try {
 		await initializePairwiseIdentityRootKey(ISSUER);
@@ -1496,17 +1549,21 @@ test("legacy source aliases with different handles block all affected lookups an
 			issuer: ISSUER,
 		});
 		await completePairwiseIdentityLegacyBackfill(ISSUER);
+		let issued: string | undefined;
 		for (const clientId of ["alias-client", "alias-sibling"]) {
 			for (const sourceId of ["source-x", "source-y", "source-z"]) {
-				await assert.rejects(
-					getPairwiseHandle({
-						...baseInput,
-						clientId,
-						internalId: "cin-alias",
-						sourceId,
-					}),
-					AMBIGUOUS_IDENTITY,
-				);
+				const input = {
+					...baseInput,
+					clientId,
+					internalId: "cin-alias",
+					sourceId,
+				};
+				const handle = await getPairwiseHandle(input);
+				assert.match(handle, HMAC_INSTANCE_HANDLE);
+				if (issued) {
+					assert.equal(handle, issued);
+				}
+				issued = handle;
 			}
 		}
 		await recordTrustedClientSectorMembership({
@@ -1724,7 +1781,7 @@ if (POSTGRES_URL) {
 						...baseInput,
 						internalId: "cin-red-upgrade",
 					}),
-					"inst_pg_red_random",
+					expectedHandle({ ...baseInput, internalId: "cin-red-upgrade" }),
 				);
 				const provisionedBefore = await postgresQuery<{ root_key_hex: string }>(
 					"SELECT root_key_hex FROM pairwise_identity_root_keys WHERE issuer=$1",
@@ -1781,7 +1838,7 @@ if (POSTGRES_URL) {
 						internalId: legacyId,
 						sourceId: "new-source-alias",
 					}),
-					"inst_pg_legacy",
+					expectedHandle({ ...baseInput, internalId: legacyId }),
 				);
 				await recordTrustedClientSectorMembership({
 					clientId: "old-client-pg-a",
@@ -1804,13 +1861,13 @@ if (POSTGRES_URL) {
                   ($1,$2,'old-client-pg-b','instance','old-source',$3,'inst_pg_ambiguous_b')`,
 					[ISSUER, baseInput.subjectId, "cin-ambiguous-pg"],
 				);
-				await assert.rejects(
-					getPairwiseHandle({
+				assert.equal(
+					await getPairwiseHandle({
 						...baseInput,
 						clientId: "new-client-pg",
 						internalId: "cin-ambiguous-pg",
 					}),
-					AMBIGUOUS_IDENTITY,
+					expectedHandle({ ...baseInput, internalId: "cin-ambiguous-pg" }),
 				);
 				await initPostgresStorage({ backend: "postgres", databaseUrl });
 				assert.equal(
@@ -1854,7 +1911,7 @@ if (POSTGRES_URL) {
 		);
 	});
 
-	test("PostgreSQL migrates prototype local-issuer rows before published-issuer issuance", async () => {
+test("PostgreSQL default issuance ignores prototype legacy mappings", async () => {
 		await withTemporaryPostgresDatabase(
 			{
 				closeConnections: closePostgresStorage,
@@ -1919,13 +1976,13 @@ if (POSTGRES_URL) {
 					issuer: ISSUER,
 				});
 				await completePairwiseIdentityLegacyBackfill(ISSUER);
-				assert.equal(
+				assert.match(
 					await getPairwiseHandle({
 						...baseInput,
 						clientId: "prototype-client",
 						internalId: "cin-proto",
 					}),
-					"inst_proto_random",
+					HMAC_INSTANCE_HANDLE,
 				);
 			},
 		);
@@ -2105,7 +2162,7 @@ if (POSTGRES_URL) {
 		);
 	});
 
-	test("PostgreSQL enforces membership, backfill, and conflicting-registration guards", async () => {
+	test("PostgreSQL HMAC issuance ignores legacy registration conflicts", async () => {
 		await withTemporaryPostgresDatabase(
 			{
 				closeConnections: closePostgresStorage,
@@ -2145,6 +2202,7 @@ if (POSTGRES_URL) {
 				await assert.rejects(
 					getPairwiseHandle({ ...baseInput, clientSector: OTHER_SECTOR }),
 				);
+				assert.match(await getPairwiseHandle(baseInput), HMAC_INSTANCE_HANDLE);
 				await postgresQuery(
 					`INSERT INTO pairwise_identity_handles (issuer,subject_id,client_id,kind,source_id,internal_id,handle)
 					 VALUES ($1,'person-4','legacy-a','instance','source','cin-conflict','inst_conflict_a'),
@@ -2157,31 +2215,21 @@ if (POSTGRES_URL) {
 					clientSector: SECTOR,
 					issuer: ISSUER,
 				});
-				await assert.rejects(
-					recordTrustedClientSectorMembership({
-						clientId: "legacy-b",
-						clientSector: SECTOR,
-						issuer: ISSUER,
-					}),
-					(error: unknown) => {
-						assert.equal(
-							error instanceof PairwiseIdentityDeploymentError,
-							true,
-						);
-						assert.equal("code" in (error as object), false);
-						return true;
-					},
-				);
+				await recordTrustedClientSectorMembership({
+					clientId: "legacy-b",
+					clientSector: SECTOR,
+					issuer: ISSUER,
+				});
 				assert.equal(
 					(
 						await postgresQuery(
 							"SELECT count(*)::int AS count FROM pairwise_trusted_client_sectors WHERE client_id='legacy-b'",
 						)
 					).rows[0]?.count,
-					0,
+					1,
 				);
 				await assert.rejects(completePairwiseIdentityLegacyBackfill(ISSUER));
-				await assert.rejects(getPairwiseHandle(baseInput));
+				assert.match(await getPairwiseHandle(baseInput), HMAC_INSTANCE_HANDLE);
 				await backfillTrustedClientSectorMembership({
 					clientId: "legacy-b",
 					clientSector: SECTOR,
@@ -2210,12 +2258,14 @@ if (POSTGRES_URL) {
 					"INSERT INTO pairwise_identity_handles (issuer,subject_id,client_id,kind,source_id,internal_id,handle) VALUES ($1,'person-4','late-client','instance','source','cin-late','inst_late')",
 					[ISSUER],
 				);
-				await assert.rejects(
-					recordTrustedClientSectorMembership({
-						clientId: "late-client",
-						clientSector: SECTOR,
-						issuer: ISSUER,
-					}),
+				await recordTrustedClientSectorMembership({
+					clientId: "late-client",
+					clientSector: SECTOR,
+					issuer: ISSUER,
+				});
+				assert.match(
+					await getPairwiseHandle({ ...baseInput, clientId: "late-client" }),
+					HMAC_INSTANCE_HANDLE,
 				);
 				await postgresQuery(
 					`INSERT INTO pairwise_identity_handles (issuer,subject_id,client_id,kind,source_id,internal_id,handle)
