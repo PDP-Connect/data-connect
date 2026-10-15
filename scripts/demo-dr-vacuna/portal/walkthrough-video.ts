@@ -16,7 +16,7 @@
 // settlement scene.
 
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { type Browser, type BrowserContext, chromium, type Page } from "playwright";
@@ -28,6 +28,7 @@ const OUT = resolve(process.env.OUT || `walkthrough-${LANG}.mp4`);
 const PASSWORD = process.env.DEMO_PASSWORD || WALKTHROUGH_PASSWORD;
 const SETTLE_WAIT_S = Number(process.env.SETTLE_WAIT_S ?? 420);
 const SIZE = { height: 800, width: 1280 };
+const SEGMENT_LEAD_IN_S = 1.6;
 const t = (es: string, en: string) => (LANG === "es" ? es : en);
 const pause = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -447,13 +448,28 @@ try {
   await browser.close();
 }
 
-// Join the segments into one H.264 MP4.
+// Join the segments into one H.264 MP4. Each segment opens on a blank page
+// for about a second before the first load, so each input is seeked past it
+// (an input -ss decodes and drops frames; the concat demuxer's inpoint snaps
+// to the WebM keyframe at 0). A silent audio track is added because players
+// that stream through HLS (Slack) declare an audio codec and stall without one.
 mkdirSync(join(OUT, ".."), { recursive: true });
-const list = join(workDir, "segments.txt");
-writeFileSync(list, segments.map((p) => `file '${p}'`).join("\n"));
+const inputs = segments.flatMap((p) => ["-ss", String(SEGMENT_LEAD_IN_S), "-i", p]);
+const filter =
+  segments.map((_, i) => `[${i}:v]fps=30,format=yuv420p,setsar=1[v${i}];`).join("") +
+  `${segments.map((_, i) => `[v${i}]`).join("")}concat=n=${segments.length}:v=1:a=0[v]`;
 execFileSync(
   "ffmpeg",
-  ["-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", list, "-vf", "fps=30,format=yuv420p", "-c:v", "libx264", "-crf", "20", "-preset", "medium", "-movflags", "+faststart", OUT],
+  [
+    "-y", "-loglevel", "error",
+    ...inputs,
+    "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo",
+    "-filter_complex", filter,
+    "-map", "[v]", "-map", `${segments.length}:a`, "-shortest",
+    "-c:v", "libx264", "-crf", "20", "-preset", "medium",
+    "-c:a", "aac", "-b:a", "64k",
+    "-movflags", "+faststart", OUT,
+  ],
   { stdio: "inherit" }
 );
 console.log(`video: ${OUT}`);
