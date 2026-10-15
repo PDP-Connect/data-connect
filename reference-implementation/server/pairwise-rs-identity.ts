@@ -213,11 +213,10 @@ export function pairwiseOwnerReadMapForSource(
 	};
 }
 
-/** Parse the public selector pair. Equal aliases are accepted; duplicate or malformed values fail closed. */
-export function parsePairwiseReadSelector(
+/** Validate selector syntax without using authenticated identity state. */
+export function parsePairwiseReadSelectorSyntax(
 	query: Readonly<Record<string, unknown>>,
-	readMap: PairwiseReadMap,
-): { readonly handle: string; readonly internalId: string } {
+): string | null {
 	const values: string[] = [];
 	for (const key of ["instance_id", "connection_id"]) {
 		if (!Object.hasOwn(query, key)) continue;
@@ -238,7 +237,23 @@ export function parsePairwiseReadSelector(
 			"instance_id",
 		);
 	}
-	if (values.length === 0) {
+	if (values.length > 1 && values.some((value) => value !== values[0])) {
+		throw identityError(
+			"invalid_request",
+			"Instance selectors must use the same public handle",
+			"instance_id",
+		);
+	}
+	return values[0] ?? null;
+}
+
+/** Parse the public selector pair. Equal aliases are accepted; duplicate or malformed values fail closed. */
+export function parsePairwiseReadSelector(
+	query: Readonly<Record<string, unknown>>,
+	readMap: PairwiseReadMap,
+): { readonly handle: string; readonly internalId: string } {
+	const handle = parsePairwiseReadSelectorSyntax(query);
+	if (handle === null) {
 		if (readMap.byHandle.size === 1) {
 			const [handle, internalId] = readMap.byHandle.entries().next().value as [
 				string,
@@ -259,15 +274,7 @@ export function parsePairwiseReadSelector(
 			"instance_id",
 		);
 	}
-	const [handle] = values;
-	if (values.some((value) => value !== handle)) {
-		throw identityError(
-			"invalid_request",
-			"Instance selectors must use the same public handle",
-			"instance_id",
-		);
-	}
-	const internalId = readMap.byHandle.get(handle as string);
+	const internalId = readMap.byHandle.get(handle);
 	if (!internalId) {
 		if (readMap.bindings.some((binding) => binding.rs_instance === handle)) {
 			throw identityError(
@@ -282,7 +289,7 @@ export function parsePairwiseReadSelector(
 			"instance_id",
 		);
 	}
-	return { handle: handle as string, internalId };
+	return { handle, internalId };
 }
 
 /** Keep translated storage identifiers and backend messages out of HTTP errors. */

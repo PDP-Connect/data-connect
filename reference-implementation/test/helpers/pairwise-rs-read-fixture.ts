@@ -55,10 +55,15 @@ export type Reply = { status: number; text: string; body: Record<string, unknown
 export type Fixture = {
 	client: (path: string) => Promise<Reply>;
 	owner: (path: string) => Promise<Reply>;
+	request: (path: string, authorization?: string) => Promise<Reply>;
 	introspection: Map<string, Record<string, unknown>>;
 };
 
-export async function makeFixture(t: TestContext): Promise<Fixture> {
+export async function makeFixture(
+	t: TestContext,
+	options: { connectorKey?: string } = {},
+): Promise<Fixture> {
+	const connectorId = options.connectorKey ?? CONNECTOR_ID;
 	const declaration = JSON.parse(
 		readFileSync(
 			join(import.meta.dirname, "../seam-spike/fixtures/pr89/source.json"),
@@ -114,10 +119,10 @@ export async function makeFixture(t: TestContext): Promise<Fixture> {
 	);
 	const manifest = {
 		...declaration,
-		connector_id: CONNECTOR_ID,
-		connector_key: CONNECTOR_ID,
+		connector_id: connectorId,
+		connector_key: connectorId,
 		display_name: "Pairwise detail fixture",
-		manifest_uri: `https://implementations.example/connectors/${CONNECTOR_ID}`,
+		manifest_uri: `https://implementations.example/connectors/${connectorId}`,
 		source_declaration: declaration,
 		version: "1.0.0",
 	};
@@ -216,7 +221,7 @@ export async function makeFixture(t: TestContext): Promise<Fixture> {
 	for (const id of [INTERNAL_A, INTERNAL_B]) {
 		const now = new Date().toISOString();
 		await store.upsert({
-			connectorId: CONNECTOR_ID,
+			connectorId,
 			connectorInstanceId: id,
 			createdAt: now,
 			displayName: id,
@@ -234,7 +239,7 @@ export async function makeFixture(t: TestContext): Promise<Fixture> {
 	] as const) {
 		const now = new Date().toISOString();
 		await store.upsert({
-			connectorId: CONNECTOR_ID,
+			connectorId,
 			connectorInstanceId: id,
 			createdAt: now,
 			displayName: id,
@@ -252,7 +257,7 @@ export async function makeFixture(t: TestContext): Promise<Fixture> {
 		[INTERNAL_A, "unique-a", "unique application A"],
 	] as const) {
 		await ingestRecord(
-			{ connector_id: CONNECTOR_ID, connector_instance_id: instance },
+			{ connector_id: connectorId, connector_instance_id: instance },
 			{
 			data: { id: key, name, observed_at: "2026-03-01T00:00:00Z", rank: 7 },
 				emitted_at: "2026-03-01T00:00:00Z",
@@ -262,7 +267,7 @@ export async function makeFixture(t: TestContext): Promise<Fixture> {
 		);
 	}
 	await ingestRecord(
-		{ connector_id: CONNECTOR_ID, connector_instance_id: INTERNAL_A },
+		{ connector_id: connectorId, connector_instance_id: INTERNAL_A },
 		{
 			data: { id: "parent-a", name: "parent application data" },
 			emitted_at: "2026-03-02T00:00:00Z",
@@ -271,7 +276,7 @@ export async function makeFixture(t: TestContext): Promise<Fixture> {
 		},
 	);
 	await ingestRecord(
-		{ connector_id: CONNECTOR_ID, connector_instance_id: INTERNAL_A },
+		{ connector_id: connectorId, connector_instance_id: INTERNAL_A },
 		{
 			data: {
 				id: "child-a",
@@ -325,7 +330,7 @@ export async function makeFixture(t: TestContext): Promise<Fixture> {
 		],
 		client_id: CLIENT_ID,
 		grant_id: GRANT_ID,
-		grant_storage_binding: { connector_id: CONNECTOR_ID },
+		grant_storage_binding: { connector_id: connectorId },
 		iss: ISSUER,
 		pdpp: {
 			client_id: CLIENT_ID,
@@ -359,10 +364,10 @@ export async function makeFixture(t: TestContext): Promise<Fixture> {
 		subject_id: OWNER_SUBJECT,
 	});
 	const read =
-		(token: string) =>
+		(authorization: string | undefined) =>
 		async (path: string): Promise<Reply> => {
 			const response = await fetch(`${rsUrl}${path}`, {
-				headers: { Authorization: `Bearer ${token}` },
+				headers: authorization ? { Authorization: authorization } : {},
 			});
 			const text = await response.text();
 			let body: Record<string, unknown> = {};
@@ -374,8 +379,9 @@ export async function makeFixture(t: TestContext): Promise<Fixture> {
 			return { body, status: response.status, text };
 		};
 	return {
-		client: read(CLIENT_TOKEN),
-		owner: read(OWNER_TOKEN),
+		client: read(`Bearer ${CLIENT_TOKEN}`),
+		owner: read(`Bearer ${OWNER_TOKEN}`),
+		request: (path, authorization) => read(authorization)(path),
 		introspection,
 	};
 }

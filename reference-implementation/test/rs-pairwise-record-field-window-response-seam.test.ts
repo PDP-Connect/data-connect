@@ -29,6 +29,7 @@ async function invokeWindow(options: SeamOptions = {}) {
 		},
 	};
 	const ctx = {
+		canonicalConnectorKey: (value: string) => value,
 		buildClientSourceDescriptor: () => ({ id: SOURCE_ID, kind: "connector" }),
 		buildQueryActorContext: () => ({ actorId: "subject", actorType: "client", scenarioId: null, traceId: null }),
 		ensureRequestId: () => "request-seam",
@@ -127,12 +128,20 @@ async function invokeWindow(options: SeamOptions = {}) {
 }
 
 test("field-window response rejects a storage binding that differs from the selected handle", async () => {
-	const result = await invokeWindow({
-		bindings: [{ connectorId: "connector", connectorInstanceId: "cin_other_private" }],
-	});
-	assert.equal(result.rejected[0]?.code, "grant_invalid");
-	assert.equal(result.events.includes("disclosure.served"), false);
-	assert.equal(result.events.includes("storage"), false);
+	for (const bindings of [
+		[],
+		[
+			{ connectorId: "connector", connectorInstanceId: INTERNAL_ID },
+			{ connectorId: "connector", connectorInstanceId: "cin_other_private" },
+		],
+		[{ connectorId: "other-connector", connectorInstanceId: INTERNAL_ID }],
+		[{ connectorId: "connector", connectorInstanceId: "cin_other_private" }],
+	]) {
+		const result = await invokeWindow({ bindings });
+		assert.equal(result.rejected[0]?.code, "grant_invalid");
+		assert.equal(result.events.includes("disclosure.served"), false);
+		assert.equal(result.events.includes("storage"), false);
+	}
 });
 
 test("field-window response rejects malformed or identity-bearing window metadata", async () => {

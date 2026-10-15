@@ -7,6 +7,7 @@ import test from "node:test";
 import {
 	CLIENT_A,
 	CLIENT_B,
+	CLIENT_TOKEN,
 	CONNECTOR_ID,
 	INTERNAL_A,
 	INTERNAL_B,
@@ -15,6 +16,7 @@ import {
 	makeFixture,
 	OWNER_A,
 	OWNER_B,
+	OWNER_TOKEN,
 	type Reply,
 } from "./helpers/pairwise-rs-read-fixture.ts";
 
@@ -91,6 +93,24 @@ test("single authorized instance permits an omitted selector before record looku
 	const missing = await fx.client("/v1/streams/top_artists/records/does-not-exist/field-window?field=name");
 	assert.equal(missing.status, 404, missing.text);
 	assert.equal(code(missing), "not_found");
+});
+
+test("owner field-window omission requires one effective instance", async (t) => {
+	const fx = await makeFixture(t);
+	const ambiguous = await fx.owner(
+		`/v1/streams/top_artists/records/shared/field-window?connector_id=${CONNECTOR_ID}&field=name`,
+	);
+	assert.equal(ambiguous.status, 400, ambiguous.text);
+	assert.equal(code(ambiguous), "invalid_request");
+	fx.introspection.get(OWNER_TOKEN)!.pdpp_instance_bindings =
+		(fx.introspection.get(OWNER_TOKEN)!.pdpp_instance_bindings as Array<Record<string, unknown>>).filter(
+			(binding) => binding.instance_id === OWNER_A,
+		);
+	const single = await fx.owner(
+		`/v1/streams/top_artists/records/shared/field-window?connector_id=${CONNECTOR_ID}&field=name`,
+	);
+	assert.equal(single.status, 200, single.text);
+	assert.equal(single.body.instance_id, OWNER_A);
 });
 
 test("foreign and raw stored instance handles never resolve or appear in field-window responses", async (t) => {
@@ -210,4 +230,78 @@ test("field-window typed errors and operational output do not disclose stored se
 	assert.ok(!response.text.includes(INTERNAL_A));
 	assert.ok(!response.text.includes(INTERNAL_B));
 	assert.equal(response.body.url, `/v1/streams/top_artists/records/shared/field-window?field=name&instance_id=${CLIENT_A}`);
+});
+
+test("field-window accepts a canonicalized URL-shaped storage alias", async (t) => {
+	const fx = await makeFixture(t, { connectorKey: "spotify" });
+	const info = fx.introspection.get(CLIENT_TOKEN)!;
+	(info.grant_storage_binding as Record<string, unknown>).connector_id =
+		"https://registry.pdpp.dev/connectors/spotify";
+	const reply = await fx.client(clientWindow(CLIENT_A));
+	assert.equal(reply.status, 200, reply.text);
+	assert.equal(reply.body.instance_id, CLIENT_A);
+	assert.equal((reply.body.window as Record<string, unknown>).text, "application A");
+});
+
+test("field-window deprecated public alias keeps route-level selector errors", async (t) => {
+	const fx = await makeFixture(t);
+	const cases = [
+		[`connection_id=${INTERNAL_A}`, 400, "invalid_request"],
+		["connection_id=inst_foreign", 404, "not_found"],
+		[`instance_id=${CLIENT_A}&connection_id=inst_foreign`, 400, "invalid_request"],
+	] as const;
+	const actual = [];
+	for (const [query] of cases) {
+		const reply = await fx.client(`/v1/streams/top_artists/records/shared/field-window?field=name&${query}`);
+		actual.push([reply.status, code(reply)]);
+		assert.ok(!reply.text.includes(INTERNAL_A));
+	}
+	assert.deepEqual(actual, cases.map(([, status, errorCode]) => [status, errorCode]));
+});
+
+test("detail and field-window public aliases retain selector semantics before scope resolution", async (t) => {
+	const fx = await makeFixture(t);
+	for (const path of [
+		`/v1/streams/top_artists/records/shared?instance_id=${CLIENT_A}`,
+		`/v1/streams/top_artists/records/shared?connection_id=${CLIENT_A}`,
+		`/v1/streams/top_artists/records/shared?instance_id=${CLIENT_A}&connection_id=${CLIENT_A}`,
+		`/v1/streams/top_artists/records/shared/field-window?field=name&instance_id=${CLIENT_A}`,
+		`/v1/streams/top_artists/records/shared/field-window?field=name&connection_id=${CLIENT_A}`,
+		`/v1/streams/top_artists/records/shared/field-window?field=name&instance_id=${CLIENT_A}&connection_id=${CLIENT_A}`,
+	] as const) {
+		const reply = await fx.client(path);
+		assert.equal(reply.status, 200, reply.text);
+		assert.equal(reply.body.instance_id, CLIENT_A);
+	}
+	for (const [route, suffix, status, errorCode] of [
+		["detail", `connection_id=${INTERNAL_A}`, 400, "invalid_request"],
+		["detail", "connection_id=inst_foreign", 404, "not_found"],
+		["detail", `instance_id=${CLIENT_A}&connection_id=inst_foreign`, 400, "invalid_request"],
+		["window", `connection_id=${INTERNAL_A}`, 400, "invalid_request"],
+		["window", "connection_id=inst_foreign", 404, "not_found"],
+		["window", `instance_id=${CLIENT_A}&connection_id=inst_foreign`, 400, "invalid_request"],
+	] as const) {
+		const routePath = route === "detail"
+			? `/v1/streams/top_artists/records/shared?${suffix}`
+			: `/v1/streams/top_artists/records/shared/field-window?field=name&${suffix}`;
+		const reply = await fx.client(routePath);
+		assert.equal(reply.status, status, reply.text);
+		assert.equal(code(reply), errorCode);
+		assert.ok(!reply.text.includes(INTERNAL_A));
+	}
+});
+
+test("pairwise selector prelude leaves authentication failures intact", async (t) => {
+	const fx = await makeFixture(t);
+	for (const path of [
+		`/v1/streams/top_artists/records/shared?instance_id=${CLIENT_A}`,
+		`/v1/streams/top_artists/records/shared?connection_id=${CLIENT_A}`,
+		`/v1/streams/top_artists/records/shared/field-window?field=name&instance_id=${CLIENT_A}`,
+		`/v1/streams/top_artists/records/shared/field-window?field=name&connection_id=${CLIENT_A}`,
+	] as const) {
+		for (const authorization of [undefined, "Bearer wrong-token"] as const) {
+			const reply = await fx.request(path, authorization);
+			assert.equal(reply.status, 401, reply.text);
+		}
+	}
 });

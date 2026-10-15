@@ -83,6 +83,7 @@ import {
   pairwiseOwnerReadMap,
   pairwiseOwnerReadMapForSource,
   parsePairwiseReadSelector,
+  parsePairwiseReadSelectorSyntax,
   projectPairwiseDetailRecord,
   safePairwiseDetailError,
   safePairwiseFieldWindowError,
@@ -456,6 +457,29 @@ function canonicalDetailUrl(req: RouteRequest, publicHandle: string): string {
   query.set("instance_id", publicHandle);
   const search = query.toString();
   return search ? `${pathname}?${search}` : pathname;
+}
+
+function pairwiseSelectorPrelude(
+  ctx: MountRsReadContext,
+  projectError: (error: unknown) => Error & { code: string; param?: string },
+): MiddlewareHandler {
+  return (...args: unknown[]) => {
+    const req = args[0] as RouteRequest;
+    const res = args[1] as RouteResponse;
+    const next = args[2];
+    try {
+      const handle = parsePairwiseReadSelectorSyntax(req.query ?? {});
+      if (Object.hasOwn(req.query ?? {}, "connection_id")) {
+        const query = { ...req.query };
+        delete query.connection_id;
+        if (!Object.hasOwn(query, "instance_id")) query.instance_id = handle;
+        (req as RouteRequest & { query: Readonly<Record<string, unknown>> }).query = query;
+      }
+    } catch (error) {
+      return ctx.handleError(res, projectError(error));
+    }
+    return typeof next === "function" ? next() : undefined;
+  };
 }
 
 async function ownerDetailSourceId(
@@ -2183,6 +2207,7 @@ export function mountRsRecordDetail(
   app.get(
     "/v1/streams/:stream/records/:id",
     { contract: "getRecord" },
+    pairwiseSelectorPrelude(ctx, safePairwiseDetailError),
     ctx.requireToken,
     ctx.requireCoreEndpointToken,
     async (req: RouteRequest, res: RouteResponse) => {
@@ -2407,21 +2432,7 @@ export function mountRsRecordFieldWindow(app: AppLike, ctx: MountRsReadContext):
     // its request/response JSON Schema is a follow-up tracked in the MCP
     // content-ladder change; this route does its own selector validation and
     // returns through the shared canonical envelope until then.
-    (...args: unknown[]) => {
-      const req = args[0] as RouteRequest;
-      const res = args[1] as RouteResponse;
-      const next = args[2];
-      if (Object.hasOwn(req.query ?? {}, "connector_instance_id")) {
-        return ctx.handleError(
-          res,
-          Object.assign(
-            new Error("Use instance_id to select a source instance"),
-            { code: "invalid_request", param: "instance_id" },
-          ),
-        );
-      }
-      return typeof next === "function" ? next() : undefined;
-    },
+    pairwiseSelectorPrelude(ctx, safePairwiseFieldWindowError),
     ctx.requireToken,
     ctx.requireCoreEndpointToken,
     async (req: RouteRequest, res: RouteResponse) => {
@@ -2514,11 +2525,15 @@ export function mountRsRecordFieldWindow(app: AppLike, ctx: MountRsReadContext):
             storageBinding,
             streamName,
           });
+        const expectedConnectorId = storageBinding.connector_id
+          ? ctx.canonicalConnectorKey(storageBinding.connector_id) ??
+            storageBinding.connector_id
+          : null;
         if (
           bindings.length !== 1 ||
           bindings[0]?.connectorInstanceId !== selection.internalId ||
-          (storageBinding.connector_id &&
-            bindings[0]?.connectorId !== storageBinding.connector_id)
+          (expectedConnectorId &&
+            bindings[0]?.connectorId !== expectedConnectorId)
         ) {
           throw Object.assign(
             new Error(
