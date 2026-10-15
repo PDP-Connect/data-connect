@@ -798,7 +798,7 @@ function rootKeyForIssuerSync(issuer: string): Buffer {
 export async function getPairwiseHandle(
 	input: PairwiseHandleInput,
 ): Promise<string> {
-	return resolvePairwiseHandle(input, "legacy-compatible");
+	return await resolvePairwiseHandle(input, "legacy-compatible");
 }
 
 /**
@@ -809,7 +809,7 @@ export async function getPairwiseHandle(
 export async function getPairwiseV1Handle(
 	input: PairwiseHandleInput,
 ): Promise<string> {
-	return resolvePairwiseHandle(input, "v1");
+	return await resolvePairwiseHandle(input, "v1");
 }
 
 async function resolvePairwiseHandle(
@@ -1168,7 +1168,9 @@ export async function lookupPairwiseInstanceMapping(
 				}
 				validRootKey(key.rows[0].root_key_hex);
 			}
-			await assertUnambiguousLegacyLookup(client, input, row);
+			if (row.scheme === "legacy") {
+				await assertUnambiguousLegacyLookup(client, input, row);
+			}
 			return {
 				internalId: row.internal_id,
 				retainedSourceId: row.source_id,
@@ -1211,7 +1213,9 @@ export async function lookupPairwiseInstanceMapping(
 				);
 			if (!row) return null;
 			if (row.scheme === "v1") rootKeyForIssuerSync(input.issuer);
-			assertUnambiguousLegacyLookupSqlite(db, input, row);
+			if (row.scheme === "legacy") {
+				assertUnambiguousLegacyLookupSqlite(db, input, row);
+			}
 			return {
 				internalId: row.internal_id,
 				retainedSourceId: row.source_id,

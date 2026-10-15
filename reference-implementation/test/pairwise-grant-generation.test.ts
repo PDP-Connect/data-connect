@@ -568,6 +568,15 @@ backendTest("ambiguous legacy aliases block the default API but not explicit v1 
   const issued = await getPairwiseV1Handle(input);
   assert.equal(issued, expectedInstanceHandle(SECTOR, "person-4", "cin-amb"));
   assert.equal(await getPairwiseV1Handle(instanceInput("old-b", "cin-amb", "source-b")), issued);
+  const reverse = (clientId: string, clientSector: string, instanceHandle: string) =>
+    lookupPairwiseInstanceMapping({ clientId, clientSector, instanceHandle, issuer: ISSUER, subjectId: "person-4" });
+  const expected = { internalId: "cin-amb", retainedSourceId: "" };
+  assert.deepEqual(await reverse("old-a", SECTOR, issued), expected);
+  assert.deepEqual(await reverse("old-b", SECTOR, issued), expected);
+  await assert.rejects(reverse("old-a", SECTOR, "inst_amb_a"), AMBIGUOUS);
+  await assert.rejects(reverse("old-b", SECTOR, "inst_amb_b"), AMBIGUOUS);
+  await recordTrustedClientSectorMembership({ clientId: "other-sector", clientSector: OTHER_SECTOR, issuer: ISSUER });
+  assert.equal(await reverse("other-sector", OTHER_SECTOR, issued), null);
   assert.deepEqual(await allRows(h, "legacy"), legacyBefore);
   assert.deepEqual(
     (await allRows(h, "v1")).map((row) => row.handle),
