@@ -21,6 +21,7 @@ import {
   type PairwiseHandleInput,
   PairwiseIdentityContextError,
   PairwiseIdentityDeploymentError,
+  projectPairwiseGrant,
   recordTrustedClientSectorMembership,
 } from "../server/pairwise-identity.ts";
 import { closePostgresStorage, initPostgresStorage, postgresQuery } from "../server/postgres-storage.ts";
@@ -504,6 +505,64 @@ const EXPECTED_LOOKUPS = {
   v1B: { internalId: "cin-17", retainedSourceId: "" },
   v1C: { internalId: "cin-17", retainedSourceId: "" },
 };
+
+backendTest("new grant projection always selects v1 beside an adopted legacy grant", async (h) => {
+  await h.init();
+  await provisionKey(h);
+  await insertLegacyRows((sql, params) => h.query(sql, params), CLIENT_A_LEGACY);
+  await seedMixedClients();
+  const legacyBefore = await allRows(h, "legacy");
+  const approvedOldGrant = {
+    client: { client_id: "client-a" },
+    grant_id: "old-approved-grant",
+    grantors: [{ capacity: "https://example.test/capacity/legal-representative", id: "sub_disclosed_grantor" }],
+    source: { id: "source-primary" },
+    streams: [{ instance_ids: ["inst_disclosed_legacy", "inst_disclosed_sourceless"], name: "orders" }],
+    subject: { id: "sub_disclosed_legacy" },
+  };
+  const oldBytes = JSON.stringify(approvedOldGrant);
+  const input = {
+    ...approvedOldGrant,
+    grant_id: "new-approved-grant",
+    grantors: [{ capacity: "https://example.test/capacity/legal-representative", id: "person-9" }],
+    streams: [{ instance_ids: ["cin-17", "cin-18"], name: "orders" }],
+    subject: { id: "person-4" },
+  };
+  const inputBytes = JSON.stringify(input);
+  const expected = {
+    ...input,
+    grantors: [
+      { capacity: "https://example.test/capacity/legal-representative", id: personHandle(SECTOR, "person-9") },
+    ],
+    streams: [
+      {
+        instance_ids: [
+          expectedInstanceHandle(SECTOR, "person-4", "cin-17"),
+          expectedInstanceHandle(SECTOR, "person-4", "cin-18"),
+        ],
+        name: "orders",
+      },
+    ],
+    subject: { id: personHandle(SECTOR, "person-4") },
+  };
+  const context = { issuer: ISSUER, resolveClientSector: () => SECTOR };
+  assert.deepEqual(await projectPairwiseGrant(input, "person-4", context), expected);
+  assert.equal(JSON.stringify(input), inputBytes, "new input is not mutated");
+  assert.equal(JSON.stringify(approvedOldGrant), oldBytes, "previously approved values are retained");
+  assert.deepEqual(await allRows(h, "legacy"), legacyBefore);
+  await h.close();
+  await h.init();
+  assert.deepEqual(await projectPairwiseGrant(input, "person-4", context), expected);
+  assert.equal(JSON.stringify(approvedOldGrant), oldBytes);
+  assert.deepEqual(await allRows(h, "legacy"), legacyBefore);
+  assert.deepEqual(
+    await lookupPairwiseInstanceMapping({
+      ...instanceInput("client-a", "cin-17", "source-primary"),
+      instanceHandle: expectedInstanceHandle(SECTOR, "person-4", "cin-17"),
+    }),
+    { internalId: "cin-17", retainedSourceId: "" }
+  );
+});
 
 backendTest(
   "explicit v1 issuance coexists with unchanged legacy mappings across interleaved lookups and restart",
