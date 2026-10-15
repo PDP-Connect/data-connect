@@ -41,7 +41,7 @@ yet.
 |---|---|---|
 | Fly organization | — | `--org <org>` on `fly apps create` |
 | App names | `vacuna-al-dia-demo`, `vacuna-al-dia-db` | Change `app` in both toml files, `PUBLIC_ORIGIN` in fly.toml, and the host in `DATABASE_URL` |
-| Region | `mia` (closest to Santo Domingo) | `primary_region` in both files |
+| Region | `iad` (closest to Santo Domingo) | `primary_region` in both files |
 | `POSTGRES_PASSWORD` (db app secret) | — | Random, e.g. `openssl rand -hex 24` |
 | `DATABASE_URL` (app secret) | — | `postgres://pdpp:<POSTGRES_PASSWORD>@vacuna-al-dia-db.internal:5432/pdpp` |
 | `PDPP_AUDIT_TOKEN_HMAC_KEY` (app secret) | — | At least 32 characters, e.g. `openssl rand -hex 32` |
@@ -114,8 +114,8 @@ upload.
 ORG=<org>
 fly apps create vacuna-al-dia-db --org "$ORG"
 fly apps create vacuna-al-dia-demo --org "$ORG"
-fly volumes create pg_data --app vacuna-al-dia-db --region mia --size 1 --yes
-fly volumes create vacuna_state --app vacuna-al-dia-demo --region mia --size 1 --yes
+fly volumes create pg_data --app vacuna-al-dia-db --region iad --size 1 --yes
+fly volumes create vacuna_state --app vacuna-al-dia-demo --region iad --size 1 --yes
 
 PG_PASSWORD=$(openssl rand -hex 24)
 fly secrets set --app vacuna-al-dia-db POSTGRES_PASSWORD="$PG_PASSWORD" --stage

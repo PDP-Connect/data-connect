@@ -15,7 +15,7 @@
 # Rename `app` and PUBLIC_ORIGIN together if the name is taken.
 
 app = "vacuna-al-dia-demo"
-primary_region = "mia"
+primary_region = "iad"
 
 [build]
   dockerfile = "Dockerfile"
