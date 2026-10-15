@@ -23,7 +23,9 @@ import { loadConfig, type MokshaConfig } from "../lib/config.ts";
 import { buildContext } from "../lib/context.ts";
 import { depositNative, readBalance } from "../lib/deposit.ts";
 import { initKeyFiles, keysFromSecrets, loadKeys } from "../lib/keys.ts";
+import { JsonRpc } from "../lib/rpc.ts";
 import { pollSettlements } from "../lib/settlement.ts";
+import { SettlementWatcher } from "../lib/settlement-watch.ts";
 import { MokshaState } from "../lib/state.ts";
 import { FakeMoksha } from "./fake-moksha.ts";
 
@@ -312,6 +314,90 @@ test("settlement poller maps each paid read to its recordAccessAndSettle tx and 
   const again = await pollSettlements(pollDeps);
   assert.deepEqual(again.totals, { settled: 3 });
   assert.equal(ctx.state.data.poll.unmatchedSettlements.length, 1);
+});
+
+test("settlement watcher: bounded scan from a recorded start block, accepted -> settled, no overlapping polls", async (t) => {
+  const { ctx, fake } = await setup(t);
+  fake.fund(ctx.keys.builder.address, parseEther("2"));
+  const deps = { config: ctx.config, gateway: ctx.gateway, keys: ctx.keys, log: () => {}, rpc: ctx.rpc, sleep: async () => {}, state: ctx.state };
+  await depositNative(deps, { amountWei: parseEther("1") });
+  const ranges: bigint[] = [];
+  const call = ctx.rpc.call.bind(ctx.rpc);
+  ctx.rpc.call = (async (method: string, params: unknown[] = []) => {
+    if (method === "eth_getLogs") {
+      ranges.push(BigInt((params[0] as { fromBlock: string }).fromBlock));
+    }
+    return call(method, params);
+  }) as typeof ctx.rpc.call;
+  const lines: Record<string, unknown>[] = [];
+  const watcher = new SettlementWatcher({ deps: { ...deps, log: (l) => lines.push(l), registrar: ctx.registrar }, env: {}, intervalMs: 0 });
+
+  // First run on a fresh state: start a small margin below the latest block, and persist it.
+  const latest = fake.blockNumber;
+  await watcher.poll();
+  assert.equal(watcher.lastError, null);
+  assert.equal(ctx.state.data.poll.startBlock, (latest - 100n).toString());
+  assert.equal(JSON.parse(readFileSync(ctx.state.path, "utf8")).poll.startBlock, (latest - 100n).toString(), "saved in the state dir");
+
+  for (const n of [31, 32]) {
+    const p = await ctx.payer.prepare(read("DR-0000001", n));
+    assert.equal((await ctx.payer.send(p.bodyJson)).accepted, true);
+  }
+  await watcher.poll();
+  assert.equal(ctx.state.data.payments[readId(31)]?.status, "accepted");
+
+  const hashes = fake.settle();
+  // Three callers at once share one poll.
+  const before = watcher.runs;
+  await Promise.all([watcher.poll(), watcher.poll(), watcher.refreshIfStale()]);
+  assert.equal(watcher.runs, before + 1, "one poll for overlapping callers");
+  for (const n of [31, 32]) {
+    const p = ctx.state.data.payments[readId(n)];
+    assert.equal(p?.status, "settled");
+    assert.ok(hashes.includes(p?.settleTxHash as Hex));
+  }
+  assert.equal(ctx.state.data.children["DR-0000001"]?.grantChain?.status, "confirmed");
+  assert.ok(ranges.length > 0 && ranges.every((b) => b >= latest - 100n), `scan stays above the start block: ${ranges}`);
+  const cursor = BigInt(ctx.state.data.poll.fromBlock as string);
+  assert.equal(cursor, fake.blockNumber + 1n, "cursor past the last scanned block");
+
+  // Fresh within staleMs: a dashboard view does not poll again.
+  await watcher.refreshIfStale();
+  assert.equal(watcher.runs, before + 1);
+});
+
+test("settlement watcher: unsettled reads before the first run widen the start; RPC errors are logged, never thrown", async (t) => {
+  const { ctx, fake } = await setup(t);
+  fake.fund(ctx.keys.builder.address, parseEther("2"));
+  const deps = { config: ctx.config, gateway: ctx.gateway, keys: ctx.keys, log: () => {}, rpc: ctx.rpc, sleep: async () => {}, state: ctx.state };
+  await depositNative(deps, { amountWei: parseEther("1") });
+  const p = await ctx.payer.prepare(read("DR-0000001", 41));
+  assert.equal((await ctx.payer.send(p.bodyJson)).accepted, true);
+  fake.settle();
+
+  const lines: Record<string, unknown>[] = [];
+  const dead = new SettlementWatcher({
+    deps: { ...deps, log: (l) => lines.push(l), registrar: ctx.registrar, rpc: new JsonRpc("http://127.0.0.1:1") },
+    env: {},
+    intervalMs: 0,
+  });
+  await dead.poll();
+  assert.ok(dead.lastError, "error kept");
+  assert.ok(lines.some((l) => l.event === "settlement_poll_failed"));
+  assert.equal(ctx.state.data.poll.fromBlock, null, "no start block recorded without the chain");
+  // A failed attempt counts for staleMs: a page view right after it does not retry.
+  await dead.refreshIfStale();
+  assert.equal(dead.runs, 1);
+
+  const watcher = new SettlementWatcher({ deps: { ...deps, registrar: ctx.registrar }, env: {}, intervalMs: 0, lookback: 3n });
+  await watcher.poll();
+  assert.equal(watcher.lastError, null);
+  assert.equal(ctx.state.data.poll.startBlock, (fake.blockNumber - 3n).toString(), "lookback, not the boot margin");
+  assert.equal(ctx.state.data.payments[readId(41)]?.status, "settled", "a read settled before the first run is found");
+  const fromEnv = new SettlementWatcher({ deps: { ...deps, registrar: ctx.registrar }, env: { VACUNA_MOKSHA_FROM_BLOCK: "7" }, intervalMs: 0 });
+  ctx.state.data.poll.fromBlock = null;
+  await fromEnv.poll();
+  assert.equal(ctx.state.data.poll.startBlock, "7");
 });
 
 test("keys come from 0600 files named by env; nothing else is accepted and nothing is echoed", async () => {

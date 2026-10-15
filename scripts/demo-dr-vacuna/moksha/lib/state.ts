@@ -65,6 +65,8 @@ export interface MokshaStateData {
     balance: unknown;
     fromBlock: string | null;
     lastPolledAt: string | null;
+    /** First block the in-server watcher scanned (settlement-watch.ts). */
+    startBlock?: string | null;
     unmatchedSettlements: { opKind: number; ref: string; txHash: string }[];
   };
   version: 1;
