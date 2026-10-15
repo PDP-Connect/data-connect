@@ -22,7 +22,7 @@ export const DEFAULT_SERVER_VERSION = "0.0.0";
 // here; tool descriptions stay concise and routing-specific.
 export const PDPP_MCP_INSTRUCTIONS =
   "PDPP tools are grant-scoped. Start with `schema`, then call `schema(stream)` after choosing a stream; on client tokens, add `connection_id` when a stream name appears under multiple sources or before full schema. Use `connection_id` from schema results or `available_connections` errors to disambiguate sources. Filters must be typed objects, not bracket strings. Page and narrow with `limit`, `cursor`, and `fields`; prefer `aggregate` or lexical `search` for exact terms. " +
-  "The configured bearer limits every result; do not use owner or control-plane tokens for normal MCP access. Schema advertises valid fields, filter operators, expand relations, sort/count support, connection identities, and connector keys. Persist `connection_id` for client-token reconnects. Package tokens require one `grant_id` on every data tool; choose the child with `grant_id` and keep it on follow-up calls. Search result ids are self-contained handles; pass them to `fetch` for projected records or to `read_record_field` for bounded field windows. " +
+  "The configured bearer limits every result; do not use owner or control-plane tokens for normal MCP access. Schema advertises valid fields, filter operators, expand relations, sort/count support, connection identities, and connector keys. Persist `connection_id` for client-token reconnects. Search result ids are self-contained handles; pass them to `fetch` for projected records or to `read_record_field` for bounded field windows. " +
   "When a preview is not enough, follow `structuredContent.content_ladder`: call `read_record_field` with the supplied arguments. Resource-aware hosts may also read hidden/returned resource URIs, but generic resource reads are not required for ordinary text evidence. " +
   "`content[]` is the reliable model-visible guide and includes next cursors/bookmarks when present; `structuredContent` is a host-dependent machine envelope, not the only place to find next-step handles.";
 
@@ -81,7 +81,9 @@ export function createPdppMcpServer({
     serverInfo.icons = serverIcons;
   }
   const server = new McpServer(serverInfo, {
-    instructions: PDPP_MCP_INSTRUCTIONS,
+    instructions: packageProfile
+      ? `${PDPP_MCP_INSTRUCTIONS} Call list_package_children to see package children and their statuses, then pass one grant_id on each data tool.`
+      : PDPP_MCP_INSTRUCTIONS,
   });
 
   const tools = packageProfile

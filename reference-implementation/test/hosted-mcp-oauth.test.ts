@@ -3081,8 +3081,14 @@ test("multi-source hosted MCP picker requires explicit grant_id selection for pa
       params: {},
     });
     for (const tool of resultOf(packageTools).tools as Array<{
+      name: string;
       inputSchema: { properties: Record<string, unknown>; required: string[] };
     }>) {
+      if (tool.name === "list_package_children") {
+        assert.deepEqual(tool.inputSchema.required ?? [], []);
+        assert.deepEqual(tool.inputSchema.properties ?? {}, {});
+        continue;
+      }
       assert.equal(
         (tool.inputSchema.properties.grant_id as { type?: string }).type,
         "string",
@@ -3216,7 +3222,7 @@ test("package refresh replay deactivates every family-linked package bearer", as
   }
 });
 
-test("revoked package child selectors fail while an explicitly selected sibling remains usable", async () => {
+test("revoked legacy package children stay isolated while siblings remain usable", async () => {
   const server = await startOpenTestServer();
   const asUrl = `http://localhost:${server.asPort}`;
   const rsUrl = `http://localhost:${server.rsPort}`;
@@ -3278,22 +3284,31 @@ test("revoked package child selectors fail while an explicitly selected sibling 
       request_id: "multi-source-child-revoke-test",
     });
 
-    const revokedSelection = await selectSchema(spotifyChild.grant_id, 2);
+    const discovery = await postMcpJson(rsUrl, accessToken, {
+      id: 2,
+      jsonrpc: "2.0",
+      method: "tools/call",
+      params: { arguments: {}, name: "list_package_children" },
+    });
+    assert.equal(discovery.status, 200);
+    assert.equal(resultOf(discovery).isError, undefined);
+    const children = (resultOf(discovery).structuredContent as { children: Array<Record<string, unknown>> }).children;
+    // The current producer omits revoked children from its legacy member
+    // shape, so discovery cannot list them and B1's selector error applies.
+    assert.equal(children.some((child) => child.grant_id === spotifyChild.grant_id), false);
+    const discoveredGithub = mustExist(
+      children.find((child) => child.grant_id === githubChild.grant_id),
+      "active github child remains discoverable",
+    );
+    assert.equal(discoveredGithub.active, true);
+
+    const revokedSelection = await selectSchema(spotifyChild.grant_id, 3);
     assert.equal(revokedSelection.status, 200);
     assert.equal(resultOf(revokedSelection).isError, true);
-    assert.equal(
-      (
-        (
-          resultOf(revokedSelection).structuredContent as Record<
-            string,
-            unknown
-          >
-        ).error as Record<string, unknown>
-      ).code,
-      "unknown_grant_selector",
-      "the later inactive-child result is not implemented in this change",
-    );
-    const siblingSelection = await selectSchema(githubChild.grant_id, 3);
+    const revokedError = (resultOf(revokedSelection).structuredContent as { error: Record<string, unknown> }).error;
+    assert.equal(revokedError.code, "unknown_grant_selector");
+    assert.match(String(revokedError.message), /Unknown grant_id.*list_package_children/);
+    const siblingSelection = await selectSchema(githubChild.grant_id, 4);
     assert.equal(siblingSelection.status, 200);
     assert.equal(resultOf(siblingSelection).isError, undefined);
 
@@ -3304,7 +3319,7 @@ test("revoked package child selectors fail while an explicitly selected sibling 
   }
 });
 
-test("revoking a package's last child challenges its token as invalid", async () => {
+test("revoking the last package child makes its token invalid", async () => {
   const server = await startOpenTestServer();
   const asUrl = `http://localhost:${server.asPort}`;
   const rsUrl = `http://localhost:${server.rsPort}`;
@@ -3323,12 +3338,21 @@ test("revoking a package's last child challenges its token as invalid", async ()
     const packageMember = packageMembers?.members?.[0];
     assert.ok(packageMember?.grant_id);
     assert.equal(packageMembers?.members?.length, 1);
+
+    const before = await postMcpJson(rsUrl, accessToken, {
+      id: 1,
+      jsonrpc: "2.0",
+      method: "tools/list",
+      params: {},
+    });
+    assert.equal(before.status, 200, "the package token serves MCP before its last child is revoked");
+
     await revokeGrant(packageMember.grant_id, {
       request_id: "mcp-package-last-child-revoked-test",
     });
     assert.equal((await introspectAccessToken(asUrl, accessToken)).active, true);
     const emptyPackageAccess = await getGrantPackageAccess(packageId);
-    assert.equal((emptyPackageAccess?.members as unknown[] | undefined)?.length, 0);
+    assert.equal((emptyPackageAccess?.members as Array<{ active?: boolean }> | undefined)?.length, 0);
 
     const after = await postMcpJson(rsUrl, accessToken, {
       id: 1,
@@ -3486,6 +3510,67 @@ async function registerPackageChild(
   }
   return connectionId;
 }
+
+test("current package sessions replay discovery and every read tool", async () => {
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+  const rsUrl = `http://localhost:${server.rsPort}`;
+
+  try {
+    const connectionId = await registerPackageChild(asUrl, "profile-replay-child");
+    const client = await registerAuthCodeClient(asUrl);
+    const { accessToken } = await completeMultiSourcePackageFlow({
+      asUrl,
+      client,
+      connectorIds: ["profile-replay-child"],
+    });
+    let requestId = 1;
+    const call = async (name: string, args: Record<string, unknown> = {}) => {
+      const response = await postMcpJson(rsUrl, accessToken, {
+        id: requestId++,
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: { arguments: args, name },
+      });
+      assert.equal(response.status, 200, `${name} stays on the MCP tool surface`);
+      assert.equal(resultOf(response).isError, undefined, `${name} succeeds`);
+      return resultOf(response);
+    };
+
+    const listed = await postMcpJson(rsUrl, accessToken, {
+      id: requestId++,
+      jsonrpc: "2.0",
+      method: "tools/list",
+      params: {},
+    });
+    assert.equal(listed.status, 200);
+    const tools = resultOf(listed).tools as Array<{ name: string }>;
+    assert.ok(tools.some((tool) => tool.name === "list_package_children"));
+
+    const discovered = await call("list_package_children");
+    const children = (discovered.structuredContent as { children: Array<Record<string, unknown>> }).children;
+    const child = mustExist(
+      children.find((candidate) => {
+        const source = candidate.source as Record<string, unknown>;
+        return source.connection_id === connectionId;
+      }),
+      "current producer child is discoverable by its pairwise handle",
+    );
+    const grantId = stringField(child, "grant_id");
+    await call("schema", { grant_id: grantId });
+    const searched = await call("search", {
+      grant_id: grantId,
+      q: packageChildSentinel(connectionId),
+      streams: [PIN_STREAM],
+    });
+    const searchData = searched.structuredContent as { results: Array<{ id: string }> };
+    const hit = mustExist(searchData.results[0], "search returns the seeded package child record");
+    await call("fetch", { grant_id: grantId, id: hit.id });
+    await call("query_records", { grant_id: grantId, stream: PIN_STREAM });
+  } finally {
+    await closeServer(server);
+  }
+});
 
 test("package grant_id selection isolates a real sibling record", async () => {
   const server = await startOpenTestServer();

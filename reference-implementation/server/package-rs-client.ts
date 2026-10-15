@@ -5,7 +5,22 @@ import type { PackageProfile } from "../vendor/mcp-server/src/package-profile.ts
 import { RsClient } from "../vendor/mcp-server/src/rs-client.ts";
 
 interface PackageMember {
+	access_mode: string;
+	active: boolean;
+	connection_id: string | null;
+	grant: {
+		purpose: string;
+		streams: readonly { readonly instance_ids: readonly string[]; readonly name: string }[];
+	};
 	grant_id: string;
+	package_id: string;
+	source: {
+		connection_id?: string;
+		connector_display_name?: string;
+		display_name?: string;
+		id: string;
+		kind: "connector" | "provider_native";
+	} | null;
 	token: string;
 }
 
@@ -61,8 +76,16 @@ export function createPackageProfile({
 		);
 	}
 	return {
-		children: members.map(({ grant_id, token }) => ({
+		children: members.map(({ access_mode, active, grant, grant_id, source, token }) => ({
+			access_mode,
+			active,
 			grant_id,
+			purpose: grant.purpose,
+			source: source ? { ...source } : null,
+			streams: grant.streams.map(({ name, instance_ids }) => ({
+				name,
+				instance_ids: [...instance_ids],
+			})),
 			rs: new RsClient({
 				accessToken: token,
 				fetch,
