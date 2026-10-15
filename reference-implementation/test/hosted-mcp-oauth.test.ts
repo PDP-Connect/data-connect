@@ -1050,6 +1050,26 @@ test("OAuth token lifetime and refresh eligibility follow the persisted grant co
   }
 });
 
+test("an expired refresh-issued access token reads as token_expired while its grant is active", async () => {
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+  try {
+    const manifest = await registerAuthorizedSpotify(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+    const issued = await completeOauthCodeFlow({ asUrl, client, manifest });
+    assert.equal(typeof issued.refreshToken, "string");
+    // The 10-minute access token lapses; the grant and its refresh family do not.
+    getDb()
+      .prepare("UPDATE tokens SET expires_at = ? WHERE token_id = ?")
+      .run(new Date(Date.now() - 1000).toISOString(), issued.accessToken);
+    const info = await introspectAccessToken(asUrl, issued.accessToken);
+    assert.equal(info.active, false);
+    assert.equal(info.inactive_reason, "token_expired");
+  } finally {
+    await closeServer(server);
+  }
+});
+
 test("SQLite authorization-code failure rolls back consumption with initial refresh issuance", async () => {
   const server = await startOpenTestServer();
   const asUrl = `http://localhost:${server.asPort}`;

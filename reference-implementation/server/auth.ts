@@ -11676,11 +11676,15 @@ export async function introspect(token: unknown): Promise<TokenIntrospectionResu
     };
   }
 
-  // Check expiry
+  // Check expiry. A refresh-issued access token lives 10 minutes inside a
+  // longer grant: its lapse is the token's, not the grant's, unless the grant
+  // itself has expired.
   if (row.expires_at && new Date(row.expires_at) < new Date()) {
+    const grantEnded =
+      !row.refresh_family_id || (row.grant_expires_at ? new Date(String(row.grant_expires_at)) <= new Date() : false);
     return {
       active: false,
-      inactive_reason: row.token_kind === "client" ? "grant_expired" : "token_expired",
+      inactive_reason: row.token_kind === "client" && grantEnded ? "grant_expired" : "token_expired",
       ...getInactiveTokenBinding(row),
     };
   }
