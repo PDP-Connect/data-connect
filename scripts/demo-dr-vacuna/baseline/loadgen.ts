@@ -22,9 +22,15 @@
 //                   [--grants 980200] [--deny-ratio 0.0926] [--unknown-ratio 0]
 //                   [--label baseline]
 //                   [--no-stop]
+//                   [--tokens-file tokens.json] [--results-dir dir]
+//
+// --tokens-file replaces the baseline's derived tokens with real ones:
+// { "active": [[childIndex, token], ...], "revoked": [[childIndex, token], ...] }.
+// Revoked tokens may have expired by then, so a revoked read then expects
+// 403 or 401.
 
 import { execFile, execFileSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -63,6 +69,12 @@ type Kind = "ok" | "revoked" | "cross" | "unknown";
 const EXPECTED: Record<Kind, number> = { cross: 404, ok: 200, revoked: 403, unknown: 401 };
 
 const realTokens = readRealTokens();
+const tokensFile = argValue("tokens-file", "");
+const supplied = tokensFile
+  ? (JSON.parse(readFileSync(tokensFile, "utf8")) as { active: [number, string][]; revoked: [number, string][] })
+  : null;
+const suppliedToken = new Map<number, string>([...(supplied?.active ?? []), ...(supplied?.revoked ?? [])]);
+const tokenOf = (i: number) => suppliedToken.get(i) ?? tokenFor(i, realTokens);
 let rngState = 0x5eed_1234;
 function rand(): number {
   // xorshift32; deterministic request sequence per run.
@@ -75,6 +87,9 @@ function randomChild(): number {
   return 1 + Math.floor(rand() * grantTotal);
 }
 function randomActiveChild(): number {
+  if (supplied) {
+    return (supplied.active[Math.floor(rand() * supplied.active.length)] as [number, string])[0];
+  }
   let i = randomChild();
   while (isRevokedIndex(i)) {
     i = randomChild();
@@ -82,6 +97,9 @@ function randomActiveChild(): number {
   return i;
 }
 function randomRevokedChild(): number {
+  if (supplied) {
+    return (supplied.revoked[Math.floor(rand() * supplied.revoked.length)] as [number, string])[0];
+  }
   const slots = Math.floor((grantTotal - REVOKE_REMAINDER) / REVOKE_MODULUS) + 1;
   return Math.floor(rand() * slots) * REVOKE_MODULUS + REVOKE_REMAINDER;
 }
@@ -106,7 +124,7 @@ function nextRequest(): { kind: Kind; record: number; token: string } {
   const shifted = roll - unknownRatio;
   if (shifted < known / 2) {
     const i = randomRevokedChild();
-    return { kind: "revoked", record: i, token: tokenFor(i, realTokens) };
+    return { kind: "revoked", record: i, token: tokenOf(i) };
   }
   if (shifted < known) {
     const i = randomActiveChild();
@@ -114,10 +132,10 @@ function nextRequest(): { kind: Kind; record: number; token: string } {
     while (j === i) {
       j = randomChild();
     }
-    return { kind: "cross", record: j, token: tokenFor(i, realTokens) };
+    return { kind: "cross", record: j, token: tokenOf(i) };
   }
   const i = randomActiveChild();
-  return { kind: "ok", record: i, token: tokenFor(i, realTokens) };
+  return { kind: "ok", record: i, token: tokenOf(i) };
 }
 
 function percentile(sorted: number[], p: number): number {
@@ -146,7 +164,8 @@ const serverPid = (() => {
     return explicit;
   }
   try {
-    return execFileSync("lsof", ["-t", "-nP", "-iTCP:7663", "-sTCP:LISTEN"], { encoding: "utf8" }).trim().split("\n")[0];
+    const port = new URL(RS_URL).port || "80";
+    return execFileSync("lsof", ["-t", "-nP", `-iTCP:${port}`, "-sTCP:LISTEN"], { encoding: "utf8" }).trim().split("\n")[0];
   } catch {
     return "";
   }
@@ -252,7 +271,7 @@ async function runStage(concurrency: number) {
         sent[req.kind] += 1;
       }
       if (measuring) {
-        const ok = status === EXPECTED[req.kind];
+        const ok = status === EXPECTED[req.kind] || (supplied !== null && req.kind === "revoked" && status === 401);
         if (!(ok || errorExample)) {
           errorExample = `${req.kind} -> HTTP ${status}`;
         }
@@ -388,7 +407,7 @@ async function main() {
       break;
     }
   }
-  const outDir = join(HERE, "results");
+  const outDir = argValue("results-dir", join(HERE, "results"));
   mkdirSync(outDir, { recursive: true });
   const file = join(outDir, `${new Date().toISOString().replace(/[:.]/g, "-")}-${label}.json`);
   writeFileSync(
