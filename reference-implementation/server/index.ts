@@ -585,6 +585,8 @@ import {
   confidentialClientAuthEnabled,
   supportedTokenEndpointAuthMethods,
 } from "./client-authentication.ts";
+import { isDrVacunaPilotEnabled } from "./pilot-dr-vacuna/config.ts";
+import { mountDrVacunaPilot } from "./pilot-dr-vacuna/routes.ts";
 import {
   createWebPushSubscriptionStore,
   fanoutEscalationWebPush,
@@ -4526,6 +4528,12 @@ export async function evaluateOwnerStreamCoverageAuthority({
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: This protocol transition owns ordered state invariants that must remain local.
 export function buildAsApp(opts: ServerOpts = {}) {
   const app = createApp({ ...(opts.logger === null ? {} : { logger: opts.logger }) });
+  // DR "Vacuna al día" pilot: parent (representative) approval. Inert unless
+  // PDPP_PILOT_DR_VACUNA=1. Mounted first so its GET /consent redirect for
+  // pilot-source requests runs before the reference consent route.
+  if (isDrVacunaPilotEnabled()) {
+    mountDrVacunaPilot(app as unknown as Parameters<typeof mountDrVacunaPilot>[0]);
+  }
   const nativeMode = !!resolveNativeManifest(opts);
   const providerName = resolveProviderName(opts);
   const referenceRevision = resolveReferenceRevision({

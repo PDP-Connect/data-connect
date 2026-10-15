@@ -70,6 +70,7 @@ import {
   PKCE_CODE_VERIFIER_RE,
   SUPPORTED_AUTHORIZATION_CODE_CHALLENGE_METHODS,
 } from "./oauth-substrate/primitives.ts";
+import { type Grantor, splitGrantors } from "./pilot-dr-vacuna/grantors.ts";
 import { isPostgresStorageBackend, postgresQuery, withPostgresTransaction } from "./postgres-storage.ts";
 import { buildGrantedAuthorizationDetail } from "./source-approved-authorization.ts";
 import { snapshotSourceDeclaration } from "./source-declaration.ts";
@@ -2386,11 +2387,19 @@ function isUnsupportedLegacyGrantShape(grant: DbRow): boolean {
 }
 
 function requireClosedResolvedGrant(grant: unknown, code: "grant_invalid" | "invalid_request"): DbRow {
-  const candidate = cloneJson(grant);
+  // DR pilot (PDPP_PILOT_DR_VACUNA=1): validate #378 `grantors` separately,
+  // because the vendored contract schema predates it. No-op when the flag is off.
+  let split: ReturnType<typeof splitGrantors>;
+  try {
+    split = splitGrantors(cloneJson(grant));
+  } catch (err: unknown) {
+    throw bindingError(code, `Resolved grant is invalid: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  const candidate = split.grant;
   if (!validateResolvedGrantContract(candidate)) {
     throw bindingError(code, `Resolved grant is invalid: ${contractValidationMessage(validateResolvedGrantContract)}`);
   }
-  const resolved = candidate as DbRow;
+  const resolved = (split.grantors ? { ...(candidate as DbRow), grantors: split.grantors } : candidate) as DbRow;
   if (resolved.version !== "0.1.0") {
     throw bindingError(code, "Resolved grant version is unsupported; fresh consent is required");
   }
@@ -4068,6 +4077,7 @@ async function persistApprovedSingleGrantAtomically({
   traceContext,
   reviewedRevision,
   reviewedInstanceChecks,
+  recordInTransaction,
 }: {
   accessMode: string;
   aiTrainingConsented: boolean | null | undefined;
@@ -4085,6 +4095,7 @@ async function persistApprovedSingleGrantAtomically({
   traceContext: TraceContext;
   reviewedRevision: string;
   reviewedInstanceChecks: ReviewedInstanceCheck[];
+  recordInTransaction?: RepresentativeApprovalBinding["recordInTransaction"];
 }): Promise<string> {
   const storageBindingJson = serializeStorageBinding(persistedStorageBinding);
 
@@ -4125,6 +4136,7 @@ async function persistApprovedSingleGrantAtomically({
         ]
       );
       const { tokenId } = await insertPostgresGrantToken(client, { clientId, expiresAt, grantId, subjectId });
+      await recordInTransaction?.(client, { grantId, tokenId });
       await postgresEmitSpineEventInTransaction(client, consentApprovedEvent as SpineEventInput);
       await postgresEmitSpineEventInTransaction(client, grantIssuedEvent as SpineEventInput);
       await postgresEmitSpineEventInTransaction(client, tokenIssuedEvent(tokenId) as SpineEventInput);
@@ -6170,6 +6182,53 @@ interface PendingConsentDisplayOptions extends Record<string, unknown> {
   nativeManifest?: DbRow | null;
   sourceNarrowing?: Record<string, unknown>;
   subjectId?: string | null;
+  representative?: RepresentativeReviewBinding;
+}
+
+/**
+ * DR pilot only (server/pilot-dr-vacuna/). Review a single-source request
+ * on behalf of `dataSubjectId` (the child): connector instances are resolved
+ * for `instanceOwnerSubjectId` (the register that holds the records), every
+ * resolved stream is narrowed to the one record `resourceId` (requested
+ * resources are upper limits), the artifact's `subject` is the child, and
+ * `expires_at` is capped at `expiresAtCap`. Grantors are bound by the pilot
+ * layer to the resulting review revision (the vendored review schema is closed).
+ */
+export interface RepresentativeReviewBinding {
+  dataSubjectId: string;
+  expiresAtCap: string;
+  instanceOwnerSubjectId: string;
+  resourceId: string;
+}
+
+/** DR pilot only: the approval-time half of RepresentativeReviewBinding. */
+export interface RepresentativeApprovalBinding {
+  actorId: string;
+  dataSubjectId: string;
+  grantors: Grantor[];
+  instanceOwnerSubjectId: string;
+  /** Runs inside the issuing Postgres transaction after the grant row exists. */
+  recordInTransaction?: (
+    client: { query: (sql: string, params?: unknown[]) => Promise<unknown> },
+    issued: { grantId: string; tokenId: string }
+  ) => Promise<void>;
+}
+
+function narrowStreamsToRepresentedResource(
+  streams: ResolvedGrantStream[] | StreamSelection[],
+  resourceId: string
+): ResolvedGrantStream[] | StreamSelection[] {
+  return (streams as Array<Record<string, unknown>>).map((stream) => {
+    const requested = Array.isArray(stream.resources) ? (stream.resources as unknown[]) : null;
+    if (requested && !requested.includes(resourceId)) {
+      throw bindingError("access_denied", "Requested resources do not include the represented record");
+    }
+    return { ...stream, resources: [resourceId] };
+  }) as ResolvedGrantStream[] | StreamSelection[];
+}
+
+function earliestIso(a: string | null, b: string): string {
+  return a && Date.parse(a) < Date.parse(b) ? a : b;
 }
 
 async function getPendingConsentBatch(
@@ -7086,8 +7145,12 @@ export async function getPendingConsent(
     return getReviewedPendingConsentProjection(deviceCode, row, request, opts);
   }
   if (isStagedBatchRequest(request)) {
+    if (opts.representative) {
+      throw bindingError("invalid_request", "Representative approval supports single-source requests only");
+    }
     return getPendingConsentBatch(request, row, opts);
   }
+  const { representative } = opts;
   let resolvedStreams: StreamSelection[] | null = null;
   let manifestStreamNames: string[] | null = null;
   let review: (Record<string, unknown> & { subject?: { id?: unknown } }) | null = null;
@@ -7098,23 +7161,35 @@ export async function getPendingConsent(
     request.source_binding = describeSourceBinding(sourceBinding);
     request.storage_binding = normalizeStorageBinding(storageBinding);
     const snapshot = readRetainedSourceDeclarationSnapshot(request);
-    resolvedStreams = await resolveSingleConsentReviewStreams(request, sourceBinding, storageBinding, opts);
+    resolvedStreams = await resolveSingleConsentReviewStreams(
+      request,
+      sourceBinding,
+      storageBinding,
+      representative ? { ...opts, subjectId: representative.instanceOwnerSubjectId } : opts
+    );
+    if (representative && resolvedStreams) {
+      resolvedStreams = narrowStreamsToRepresentedResource(
+        resolvedStreams,
+        representative.resourceId
+      ) as StreamSelection[];
+    }
     manifestStreamNames = Array.isArray(snapshot.declaration.streams)
       ? snapshot.declaration.streams.map((stream) => stream.name).filter((name) => typeof name === "string")
       : null;
     if (opts.finalizeReview && opts.subjectId) {
       const aiTrainingConsented = coerceAiTrainingConsent(opts.ai_training_consented);
       requireReviewedAiTrainingConsent(request.selection, aiTrainingConsented);
+      const defaultExpiresAt =
+        request.selection.access_mode === "single_use"
+          ? new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
+          : null;
       const artifact = buildApprovalReviewArtifact({
         aiTrainingConsented,
         client: request.client,
-        expiresAt:
-          request.selection.access_mode === "single_use"
-            ? new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
-            : null,
+        expiresAt: representative ? earliestIso(defaultExpiresAt, representative.expiresAtCap) : defaultExpiresAt,
         request,
         resolvedStreams: resolvedStreams ?? [],
-        subjectId: opts.subjectId,
+        subjectId: representative ? representative.dataSubjectId : opts.subjectId,
       });
       await persistApprovalReviewArtifact({ deviceCode, ...artifact });
       const persisted = await readValidatedPersistedApprovalReview(deviceCode);
@@ -7160,8 +7235,12 @@ export async function approveGrant(
     baseUrl?: string;
     confirmedApproveAll?: boolean;
     sourceNarrowing?: Record<string, unknown>;
+    representative?: RepresentativeApprovalBinding;
   } = {}
 ): Promise<{ grant: DbRow; package?: boolean; package_id?: string; token: string }> {
+  if (opts.representative && !isPostgresStorageBackend()) {
+    throw bindingError("invalid_request", "Representative approval requires the Postgres storage backend");
+  }
   if (opts.ai_training_consented !== undefined) {
     const err = bindingError("invalid_request", "ai_training_consented is only accepted during consent review");
     err.param = "ai_training_consented";
@@ -7198,11 +7277,20 @@ export async function approveGrant(
   }
   const request: unknown = JSON.parse(pending.params_json);
   if (isStagedBatchRequest(request)) {
+    if (opts.representative) {
+      throw bindingError("invalid_request", "Representative approval supports single-source requests only");
+    }
     return approveStagedGrantBatch(deviceCode, pending, request, opts);
   }
   requireStructuredPendingRequestShape(request);
   const reviewed = requireMatchingApprovalReview(pending, opts.approval_review_revision);
   const { aiTrainingConsented, subjectId } = reviewed;
+  const { representative } = opts;
+  if (representative && representative.dataSubjectId !== subjectId) {
+    throw bindingError("invalid_request", "Pending consent review subject does not match the represented subject");
+  }
+  // Connector instances are owned by the data holder; the grant subject is the child.
+  const instanceOwnerSubjectId = representative ? representative.instanceOwnerSubjectId : subjectId;
   const traceContext = requirePersistedPendingTraceContext(pending);
   request.trace_context = traceContext;
   let registeredClient: RegisteredClient;
@@ -7268,22 +7356,35 @@ export async function approveGrant(
     ) as unknown as import("./core-source-authorization.ts").RetainedCoreConsentSnapshot,
     subjectId,
   }) as GrantEnvelope;
+  if (representative) {
+    // #378: record who approved on the subject's behalf; the subject stays the child.
+    grant.grantors = representative.grantors;
+    requireClosedResolvedGrant(grant, "invalid_request");
+  }
+  const consentApprovedEvent = buildConsentApprovedEventInput({
+    deviceCode,
+    grantId,
+    pending,
+    registeredClient,
+    request,
+    resolvedStreams,
+    sourceBinding,
+    subjectId,
+    traceContext,
+  });
 
   const token = await persistApprovedSingleGrantAtomically({
     accessMode: selection.access_mode,
     aiTrainingConsented,
     clientId: registeredClient.client_id,
-    consentApprovedEvent: buildConsentApprovedEventInput({
-      deviceCode,
-      grantId,
-      pending,
-      registeredClient,
-      request,
-      resolvedStreams,
-      sourceBinding,
-      subjectId,
-      traceContext,
-    }),
+    consentApprovedEvent: representative
+      ? {
+          ...consentApprovedEvent,
+          actor_id: representative.actorId,
+          actor_type: "representative",
+          data: { ...(consentApprovedEvent.data as Record<string, unknown>), grantors: representative.grantors },
+        }
+      : consentApprovedEvent,
     deviceCode,
     expiresAt,
     grantId,
@@ -7305,8 +7406,9 @@ export async function approveGrant(
       resolvedStreams,
       sourceBinding,
       storageBinding,
-      subjectId,
+      subjectId: instanceOwnerSubjectId,
     }),
+    ...(representative?.recordInTransaction ? { recordInTransaction: representative.recordInTransaction } : {}),
     reviewedRevision: approvalArtifact.revision,
     subjectId,
     tokenIssuedEvent: (tokenId) =>
@@ -9484,6 +9586,21 @@ export async function stageOAuthAuthorizationCodeRequest({
   });
 
   return { ...row, status: "pending" };
+}
+
+/**
+ * DR pilot only: the redirect target staged by GET /oauth/authorize for a
+ * pending consent, so a refused representative approval can return an OAuth
+ * `error=access_denied` to the client (RFC 6749 4.1.2.1).
+ */
+export async function getStagedOAuthAuthorizationRedirect(
+  deviceCode: string
+): Promise<{ redirectUri: string; state: string | null } | null> {
+  const row = await getOAuthCodeStore().getByDeviceCode(deviceCode);
+  if (row?.status !== "pending" || !isNonEmptyString(row.redirect_uri)) {
+    return null;
+  }
+  return { redirectUri: row.redirect_uri, state: isNonEmptyString(row.state) ? row.state : null };
 }
 
 export async function issueOAuthAuthorizationCodeForDeviceCode(
