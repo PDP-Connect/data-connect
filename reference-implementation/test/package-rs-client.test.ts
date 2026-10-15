@@ -7,6 +7,26 @@ import { createPackageProfile } from "../server/package-rs-client.ts";
 
 const PROVIDER = "https://rs.test";
 
+function member(grant_id: string, token: string) {
+	return {
+		access_mode: "continuous",
+		active: true,
+		connection_id: `pairwise-${grant_id}`,
+		grant: {
+			purpose: "personal records",
+			streams: [{ name: "notes", instance_ids: [`pairwise-${grant_id}`] }],
+		},
+		grant_id,
+		package_id: "package-test",
+		source: {
+			connection_id: `pairwise-${grant_id}`,
+			id: `source-${grant_id}`,
+			kind: "connector" as const,
+		},
+		token,
+	};
+}
+
 test("package profile keeps each child bound to its own RS bearer", async () => {
 	const calls: Array<{ authorization: string | null; url: string }> = [];
 	const profile = createPackageProfile({
@@ -18,8 +38,8 @@ test("package profile keeps each child bound to its own RS bearer", async () => 
 			return Response.json({ object: "schema", streams: [] });
 		},
 		members: [
-			{ grant_id: "child-A", token: "token-A" },
-			{ grant_id: "child.B", token: "token-B" },
+			member("child-A", "token-A"),
+			member("child.B", "token-B"),
 		],
 		providerUrl: PROVIDER,
 	});

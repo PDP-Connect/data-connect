@@ -77,12 +77,47 @@ interface AppLike {
 }
 
 export interface GrantPackageMember {
-  readonly accessToken: string;
-  readonly grantId: string;
+  readonly access_mode: string;
+  readonly active: boolean;
+  readonly connection_id: string | null;
+  readonly grant: {
+    readonly purpose: string;
+    readonly streams: readonly {
+      readonly instance_ids: readonly string[];
+      readonly name: string;
+    }[];
+  };
+  readonly grant_id: string;
+  readonly package_id: string;
+  readonly source: {
+    readonly connection_id?: string;
+    readonly connector_display_name?: string;
+    readonly display_name?: string;
+    readonly id: string;
+    readonly kind: "connector" | "provider_native";
+  } | null;
+  readonly token: string;
+}
+
+interface GrantPackageMemberInput extends Omit<GrantPackageMember, "access_mode" | "active" | "grant"> {
+  readonly access_mode?: string;
+  readonly active?: boolean;
+  readonly grant: Omit<GrantPackageMember["grant"], "purpose"> & {
+    readonly access_mode?: string;
+    readonly purpose?: string | { readonly code?: string; readonly description?: string };
+    readonly purpose_code?: string;
+    readonly purpose_description?: string;
+  };
+}
+
+interface GrantPackageAccessInput {
+  readonly members: readonly GrantPackageMemberInput[];
+  readonly package: Readonly<Record<string, unknown>>;
 }
 
 export interface GrantPackageAccess {
   readonly members: readonly GrantPackageMember[];
+  readonly package: Readonly<Record<string, unknown>>;
 }
 
 interface McpServerIcon {
@@ -125,8 +160,8 @@ export interface MountRsHostedMcpContext {
   /** Resolved RS public URL (or null; adapter derives it per-request). */
   readonly explicitResource: string | null | undefined;
   readonly dispatchApp: DispatchApp;
-  /** From auth.js: resolve active grant-package members for a package token. */
-  getGrantPackageAccess: (packageId: string) => Promise<GrantPackageAccess | null>;
+  /** Resolve every grant-package member, including inactive public members. */
+  getGrantPackageAccess: (packageId: string) => Promise<GrantPackageAccessInput | null>;
   /**
    * `handleStreamableHttpRequest` from `@pdpp/mcp-server/server`.
    * Injected because the package is JS-only without type declarations.
@@ -251,6 +286,70 @@ function hostedMcpIconLink(resource: string): string {
   return `<${hostedMcpIconUrl(resource)}>; rel="icon"; type="image/svg+xml"`;
 }
 
+function normalizeGrantPackageAccess(access: GrantPackageAccessInput): GrantPackageAccess {
+  const members = access.members;
+  if (!Array.isArray(members)) {
+    throw new TypeError("Malformed grant package access");
+  }
+  const hasActiveKey = (member: GrantPackageMemberInput) =>
+    Object.hasOwn(member, "active");
+  const legacyShape = members.every((member) => !hasActiveKey(member));
+  const frozenShape = members.every(
+    (member) => hasActiveKey(member) && typeof member.active === "boolean"
+  );
+  if (!legacyShape && !frozenShape) {
+    throw new TypeError("Malformed grant package access");
+  }
+
+  const grantIds = new Set<string>();
+  for (const member of members) {
+    if (!member || typeof member !== "object" || typeof member.grant_id !== "string" || !member.grant_id) {
+      throw new TypeError("Malformed grant package access");
+    }
+    if (grantIds.has(member.grant_id)) {
+      throw new TypeError("Malformed grant package access");
+    }
+    grantIds.add(member.grant_id);
+    const memberMode = member.access_mode;
+    const grantMode = member.grant?.access_mode;
+    if (
+      (memberMode !== undefined && typeof memberMode !== "string") ||
+      (grantMode !== undefined && typeof grantMode !== "string") ||
+      (memberMode !== undefined && grantMode !== undefined && memberMode !== grantMode)
+    ) {
+      throw new TypeError("Malformed grant package access");
+    }
+  }
+
+  return {
+    ...access,
+    members: members.map((member) => {
+      const accessMode = member.access_mode ?? member.grant.access_mode;
+      if (typeof accessMode !== "string") {
+        throw new TypeError("Malformed grant package access");
+      }
+      const purpose = typeof member.grant.purpose === "string"
+        ? member.grant.purpose
+        : member.grant.purpose?.description ?? member.grant.purpose?.code ??
+          member.grant.purpose_description ?? member.grant.purpose_code;
+      if (typeof purpose !== "string") {
+        throw new TypeError("Malformed grant package access");
+      }
+      // The current producer returns only active legacy members. Revoked
+      // children are absent and keep B1's unknown-selector behavior.
+      return {
+        ...member,
+        access_mode: accessMode,
+        active: legacyShape ? true : member.active as boolean,
+        grant: { ...member.grant, purpose },
+        source: member.source && member.connection_id
+          ? { ...member.source, connection_id: member.connection_id }
+          : member.source,
+      };
+    }),
+  };
+}
+
 export function mountRsHostedMcp(app: AppLike, ctx: MountRsHostedMcpContext): void {
   const {
     explicitResource,
@@ -297,8 +396,16 @@ export function mountRsHostedMcp(app: AppLike, ctx: MountRsHostedMcpContext): vo
     resource: string,
     internalBase: string
   ): Promise<McpServerOptions | null> {
-    const access = await ctx.getGrantPackageAccess(req.tokenInfo?.grant_package_id as string);
-    if (!access || access.members.length === 0) {
+    const resolvedAccess = await ctx.getGrantPackageAccess(req.tokenInfo?.grant_package_id as string);
+    let access: GrantPackageAccess | null;
+    try {
+      access = resolvedAccess ? normalizeGrantPackageAccess(resolvedAccess) : null;
+    } catch {
+      // Malformed member lists fail closed without logging or returning member data.
+      ctx.pdppError(res, 500, "api_error", "Unable to resolve package access");
+      return null;
+    }
+    if (!access?.members.some((member) => member.active)) {
       const metadataUrl = res.locals[PROTECTED_RESOURCE_METADATA_URL_LOCAL];
       if (typeof metadataUrl === "string" && metadataUrl) {
         res.setHeader(
