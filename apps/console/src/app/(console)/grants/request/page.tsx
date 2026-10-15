@@ -116,6 +116,15 @@ function DraftFormFields({ connectionOptions, draft }: { connectionOptions: Conn
         options={ACCESS_MODE_OPTIONS}
       />
       <FormField defaultValue={draft.retention} label="Retention" name="retention" />
+      <FormSelect
+        defaultValue={draft.retentionOnExpiry}
+        label="On expiry"
+        name="retention_on_expiry"
+        options={[
+          { label: "delete", value: "delete" },
+          { label: "anonymize", value: "anonymize" },
+        ]}
+      />
       <FormField defaultValue={draft.streamName} label="Stream name" name="stream_name" />
       <ConnectionPinField connectionOptions={connectionOptions} draft={draft} />
       <FormField defaultValue={draft.fields} label="Fields (comma-separated)" name="fields" placeholder="id, name" />
@@ -142,7 +151,8 @@ const FAN_IN_OPTION_LABEL = "All connections (fan-in)";
  * explicit "All connections (fan-in)" — never a silent fan-in and never a
  * silent pin. When the source is a connector with more than one active
  * connection, the owner may pin one; the chosen `connection_id` rides on
- * `streams[].connection_id` (an existing grant field the read path enforces).
+ * `streams[].instance_ids`, which the authorization server validates against
+ * the approving owner before issuing the grant.
  *
  * `connectionOptions` is now built from `loadConnectionPinOptions`'s EXACT
  * per-connector seam lookup (`ref-client.ts`'s `listConnectionsByConnector`

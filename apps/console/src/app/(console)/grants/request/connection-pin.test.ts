@@ -8,8 +8,8 @@
  *   openspec/changes/expose-connection-identity-on-public-read (Section 4)
  * — the operator grant-request flow can now pin a staged grant to one
  * connection of a multi-connection connector, or fan in across all the grant
- * authorizes. The pin rides on `streams[].connection_id`, an existing grant
- * field the read path already enforces (no new storage shape).
+ * authorizes. The selected connection is sent in `streams[].instance_ids`,
+ * which the authorization server validates against the approving owner.
  *
  * Two layers:
  *  1. Behavioral — executes the pure projection + stream-selection helpers in
@@ -128,17 +128,19 @@ test("buildConnectionPinOptions returns [] for provider-native and empty sources
   assert.deepEqual(buildConnectionPinOptions({ id: "", kind: "connector" }, summaries), []);
 });
 
-// ── Behavioral: the selected connection_id lands in the staged stream ────────
+// ── Behavioral: the selected connection lands in the staged stream ──────────
 
-test("streamSelectionFromDraft omits connection_id by default (fan-in)", () => {
+test("streamSelectionFromDraft omits an instance constraint when no connection is selected", () => {
   const selection = streamSelectionFromDraft(draft(), "messages");
   assert.equal(selection.name, "messages");
   assert.equal("connection_id" in selection, false);
+  assert.equal("instance_ids" in selection, false);
 });
 
-test("streamSelectionFromDraft pins connection_id when the owner selected one", () => {
+test("streamSelectionFromDraft pins instance_ids when the owner selected one", () => {
   const selection = streamSelectionFromDraft(draft({ connectionId: "cin_a", fields: "id, subject" }), "messages");
-  assert.equal(selection.connection_id, "cin_a");
+  assert.deepEqual(selection.instance_ids, ["cin_a"]);
+  assert.equal("connection_id" in selection, false);
   assert.deepEqual(selection.fields, ["id", "subject"]);
 });
 
