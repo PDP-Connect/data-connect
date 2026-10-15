@@ -32,6 +32,7 @@ import { platform, arch } from "os"
 import { stageConsoleStack } from "./ensure-console-stack.js"
 import { stageReferenceStack } from "./ensure-reference-stack.js"
 import { nativeTauriTarget, stagePdppNode } from "./stage-pdpp-node.mjs"
+import { packageMacosNodeHelper } from "./package-macos-node-helper.mjs"
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const ROOT = join(__dirname, "..")
@@ -220,6 +221,7 @@ async function build() {
   if (PLAT === "darwin") {
     log(`Restoring reference-stack resources into ${appPath}...`)
     copyReferenceStacksIntoApp(appPath)
+    packageMacosNodeHelper(appPath)
   }
 
   // 9. Create DMG from the complete .app.

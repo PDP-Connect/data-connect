@@ -69,6 +69,7 @@ export default defineConfig(({ mode }) => ({
       "scripts/release-atomicity.test.ts",
       "scripts/railway-mcp-query-smoke.test.ts",
       "scripts/stage-pdpp-node.test.mjs",
+      "scripts/package-macos-node-helper.test.mjs",
       "scripts/ensure-reference-stack.test.js",
       "scripts/ensure-console-stack.test.js",
       "scripts/stage-generations.test.js",

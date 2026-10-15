@@ -259,6 +259,8 @@ jobs:
               rm -rf "$browsers_destination"
               cp -R playwright-runner/dist/browsers "$browsers_destination"
 
+              node scripts/package-macos-node-helper.mjs "$app"
+
               version=$(node -p "require('./src-tauri/tauri.conf.json').version")
               arch=$(echo "${{ matrix.target }}" | cut -d- -f1)
               dmg_path="$bundle_root/dmg/DataConnect_${version}_${arch}.dmg"
