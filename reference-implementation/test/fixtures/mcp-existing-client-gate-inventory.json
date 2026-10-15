@@ -1,0 +1,22 @@
+{
+  "active": [
+    "hosted /mcp preserves the existing client-token contract",
+    "hosted /mcp package tokens remain implicit or offer child discovery",
+    "hosted package resource URIs preserve stored handles and advertise selected forms"
+  ],
+  "pending": [
+    {
+      "name": "TODO [P2→P3→P7 audience migration] permanent client token survives the audience boundary",
+      "dependency": "identity-lane P2 worktree"
+    },
+    {
+      "name": "TODO [P2→P3→P7 audience migration] permanent package token survives the audience boundary",
+      "dependency": "identity-lane P2 worktree"
+    },
+    {
+      "name": "TODO [P4 stored-ID resolution] grandfathered ChatGPT handles resolve after identity cutover",
+      "dependency": "identity-lane P4 worktree"
+    }
+  ],
+  "documentedTodo": []
+}
