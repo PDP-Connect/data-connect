@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
-import { homedir } from "node:os";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import pg from "pg";
@@ -1405,7 +1405,7 @@ for (const kind of ["blob-flat", "sqlite-vec", "postgres"] as const) {
         "SQLite additive and instance-table recreation migrations preserve proven identities; old NULL vectors refresh once",
         async () =>
           fixture(async (f) => {
-            const dir = mkdtempSync(path.join(homedir(), ".tmp", "index391-semantic-migration-"));
+            const dir = mkdtempSync(path.join(tmpdir(), "index391-semantic-migration-"));
             const dbPath = path.join(dir, "fixture.sqlite");
             try {
               closeDb();

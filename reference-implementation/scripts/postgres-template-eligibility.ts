@@ -202,6 +202,8 @@ export const POSTGRES_TEMPLATE_COLD_REQUIRED_FILES: readonly string[] = [
   "test/postgres-record-index-idempotency-oracle.test.ts",
   "test/postgres-record-index-repair-oracle.test.ts",
   "test/postgres-semantic-pgvector.test.ts",
+  // Verifies scope-index bootstrap identity and replacement of a bad definition.
+  "test/postgres-semantic-scope-index-idempotence.test.ts",
   "test/postgres-template-eligibility-migration-mutation-control.test.ts",
   "test/records-instance-stream-id-keyset-index.test.ts",
   "test/run-history-completed-at-fleet-migration.test.ts",

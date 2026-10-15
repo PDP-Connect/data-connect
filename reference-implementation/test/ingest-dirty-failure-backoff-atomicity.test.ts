@@ -22,7 +22,6 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import Database from "better-sqlite3";
 import { closeDb, getDb, initDb } from "../server/db.ts";
 import {
   clearSearchIndexDirty,
@@ -32,6 +31,7 @@ import {
   rearmSearchIndexDirtyScope,
   recordSearchIndexDirtyFailure,
 } from "../server/stores/search-index-dirty-store.ts";
+import Database from "./helpers/sqlite-driver.ts";
 
 const BACKOFF_SCHEDULE_SECONDS = [0, 5, 15, 30, 60, 120, 300, 600, 1800, 3600, 21_600, 86_400];
 
