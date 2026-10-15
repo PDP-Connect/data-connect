@@ -406,6 +406,7 @@ async function withLexicalBackfillWrite(
           } else {
             await assertConnectorManifestStreamSubsetWithClient(client, connectorId, manifest);
           }
+          await maybeLexicalBackfillPhaseForTest("before-derived-dml", { connectorId, connectorInstanceId });
           await postgresWrite(client);
         },
         { lockConnectorInstanceId: connectorInstanceId }
@@ -664,34 +665,12 @@ function getSearchIndexStore(): LexicalSearchStore {
   return isPostgresStorageBackend() ? postgresSearchIndexStore : sqliteSearchIndexStore;
 }
 
-// ─── Stream-level declaration lookup ───────────────────────────────────────
-
-/**
- * Look up the declared lexical_fields for (connector_id, stream) by reading
- * the connector manifest. Returns an array of top-level scalar string field
- * names, or null if the stream does not participate in lexical retrieval.
- *
- * Manifest validator (auth.ts) already enforces v1 shape constraints, so we
- * trust the declaration here.
- */
-async function getStreamLexicalFields(connectorId: string, stream: string): Promise<string[] | null> {
-  const manifest = await getConnectorManifest(connectorId);
-  if (!manifest) {
-    return null;
-  }
-  const mStream = (manifest.streams || []).find((s: LexicalManifestStream) => s.name === stream);
-  const declared = mStream?.query?.search?.lexical_fields;
-  if (!Array.isArray(declared) || declared.length === 0) {
-    return null;
-  }
-  return declared;
-}
-
 // ─── Index maintenance (called from records.js) ────────────────────────────
 
 export interface ComputedLexicalFields {
   declared: string[];
   fields: Record<string, string>;
+  publicationManifest: { connector_id: string; streams: LexicalManifestStream[] };
 }
 
 /**
@@ -719,16 +698,33 @@ export async function computeLexicalFields({
   data?: JsonObject | null;
   declaredFields?: string[];
 }): Promise<ComputedLexicalFields | null> {
-  const declared = declaredFields === undefined ? await getStreamLexicalFields(connectorId, stream) : declaredFields;
+  const manifest = await getConnectorManifest(connectorId);
+  const manifestStream = manifest?.streams.find((candidate) => candidate.name === stream) as
+    | LexicalManifestStream
+    | undefined;
+  const storedFields = manifestStream?.query?.search?.lexical_fields;
+  const declared = declaredFields ?? (Array.isArray(storedFields) && storedFields.length > 0 ? storedFields : null);
   if (!declared) {
     return null;
   }
+  if (
+    declaredFields !== undefined &&
+    manifest &&
+    fingerprintLexicalFields(declared) !== fingerprintLexicalFields(storedFields ?? [])
+  ) {
+    throw new Error("lexical manifest changed before input computation");
+  }
+  // Freeze the full stream that supplied the fields, independently of semantic participation.
+  const publicationManifest = {
+    connector_id: connectorId,
+    streams: [structuredClone(manifestStream ?? { name: stream, query: { search: { lexical_fields: declared } } })],
+  };
   const fields = Object.fromEntries(
     declared
       .map((field): [string, unknown] => [field, data?.[field]])
       .filter(([, value]) => typeof value === "string" && value.length > 0)
   ) as Record<string, string>;
-  return { declared, fields };
+  return { declared, fields, publicationManifest };
 }
 
 /**
@@ -754,6 +750,7 @@ export async function applyLexicalFieldsWithClient(
     computed: ComputedLexicalFields;
   }
 ): Promise<void> {
+  await assertConnectorManifestStreamSubsetWithClient(client, connectorId, computed.publicationManifest);
   await postgresLexicalIndexPublishWithClient(client, {
     connectorId,
     connectorInstanceId,
@@ -797,6 +794,7 @@ export function applyLexicalFieldsSync({
   recordKey: string;
   computed: ComputedLexicalFields;
 }): void {
+  assertConnectorManifestStreamSubsetSync(connectorId, computed.publicationManifest);
   exec(referenceQueries.searchIndexDeleteByRecordKey, [connectorInstanceId, stream, recordKey]);
   for (const field of computed.declared) {
     const value = computed.fields[field];

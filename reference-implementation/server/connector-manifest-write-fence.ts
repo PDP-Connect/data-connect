@@ -334,7 +334,14 @@ export function assertConnectorManifestStreamRevisionOrAbsentSync(
   assertCurrentManifestStreamRevision(connectorId, expectedRevision, row?.manifest, Boolean(activation));
 }
 
-/** Use the same advisory key as OCI activation publication. */
+/**
+ * Use the same advisory key as OCI activation publication.
+ * Derived search writers acquire locks in this order: connector-instance
+ * advisory lock -> manifest publication lock -> record/derived tuples (DML).
+ * Live maintenance and repair must take both advisory locks before any tuple
+ * lock, including deletes; acquiring publication after lexical DML deadlocks
+ * with repair. Compute and embedding stay outside the transaction.
+ */
 export async function lockConnectorManifestPublication(
   client: PostgresTransactionClient,
   connectorId: string

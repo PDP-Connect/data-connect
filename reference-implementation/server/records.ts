@@ -66,7 +66,10 @@ import {
   withConnectorInstanceWrite,
 } from "./connector-instance-write-coordinator.ts";
 import { canonicalConnectorKey } from "./connector-key.ts";
-import { assertConnectorManifestStreamSubsetSync } from "./connector-manifest-write-fence.ts";
+import {
+  assertConnectorManifestStreamSubsetSync,
+  lockConnectorManifestPublication,
+} from "./connector-manifest-write-fence.ts";
 import { markConnectorSummaryEvidenceDirty } from "./connector-summary-read-model.ts";
 import { applyDatasetSummaryRecordDelta, markDatasetSummaryProjectionStale } from "./dataset-summary-read-model.ts";
 import { COLLECTION_SCOPE_STATE_KEY, readStoredCollectionScope } from "./local-collection-scope.ts";
@@ -2855,40 +2858,45 @@ async function maintainRecordIndexesWithinPermit(
   });
 
   if (isPostgresStorageBackend()) {
-    return withPostgresTransaction(async (client) => {
-      const current = await client.query<{ version: string | number; deleted: boolean }>(
-        `SELECT version, deleted FROM records
+    return withPostgresTransaction(
+      async (client) => {
+        // Match repair's instance -> publication -> derived DML order, including deletes.
+        await lockConnectorManifestPublication(client, connectorId);
+        const current = await client.query<{ version: string | number; deleted: boolean }>(
+          `SELECT version, deleted FROM records
           WHERE connector_instance_id = $1 AND stream = $2 AND record_key = $3
           FOR UPDATE`,
-        [connectorInstanceId, stream, recordKey]
-      );
-      if (!isRecordStillCurrent(current.rows[0], expectedVersion, op)) {
-        return;
-      }
-      if (op === "delete") {
-        await lexicalModule.applyLexicalDeleteWithClient(client, { connectorInstanceId, recordKey, stream });
-        await semanticModule.applySemanticDeleteWithClient(client, { connectorInstanceId, recordKey, stream });
-        return;
-      }
-      if (computedLexical) {
-        await lexicalModule.applyLexicalFieldsWithClient(client, {
-          computed: computedLexical,
-          connectorId,
-          connectorInstanceId,
-          recordKey,
-          stream,
-        });
-      }
-      if (computedSemantic) {
-        await semanticModule.applySemanticEntriesWithClient(client, {
-          computed: computedSemantic,
-          connectorId,
-          connectorInstanceId,
-          recordKey,
-          stream,
-        });
-      }
-    });
+          [connectorInstanceId, stream, recordKey]
+        );
+        if (!isRecordStillCurrent(current.rows[0], expectedVersion, op)) {
+          return;
+        }
+        if (op === "delete") {
+          await lexicalModule.applyLexicalDeleteWithClient(client, { connectorInstanceId, recordKey, stream });
+          await semanticModule.applySemanticDeleteWithClient(client, { connectorInstanceId, recordKey, stream });
+          return;
+        }
+        if (computedLexical) {
+          await lexicalModule.applyLexicalFieldsWithClient(client, {
+            computed: computedLexical,
+            connectorId,
+            connectorInstanceId,
+            recordKey,
+            stream,
+          });
+        }
+        if (computedSemantic) {
+          await semanticModule.applySemanticEntriesWithClient(client, {
+            computed: computedSemantic,
+            connectorId,
+            connectorInstanceId,
+            recordKey,
+            stream,
+          });
+        }
+      },
+      { lockConnectorInstanceId: connectorInstanceId }
+    );
   }
 
   return writeTransaction(() => {

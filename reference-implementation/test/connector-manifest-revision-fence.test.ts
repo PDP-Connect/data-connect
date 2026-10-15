@@ -3,6 +3,7 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
 import { normalizeConnectorManifestForStorage, registerConnector } from "../server/auth.ts";
 import {
   assertConnectorManifestStreamRevisionSync,
@@ -26,17 +27,20 @@ import {
   maintainRecordIndexes,
 } from "../server/records.ts";
 import { __setLexicalBackfillPhaseHookForTest, lexicalIndexBackfillForManifest } from "../server/search.ts";
+import { reconcileSearchIndexDirtyScope } from "../server/search-index-reconcile.ts";
 import {
   configureSemanticBackend,
   encodeScopeKey,
   makeStubBackend,
   semanticIndexBackfillForManifest,
 } from "../server/search-semantic.ts";
+import { countDirtySearchIndexScopes, listDirtySearchIndexScopes } from "../server/stores/search-index-dirty-store.ts";
 import { withTemporaryPostgresDatabase } from "./helpers/postgres-temp-database.ts";
 
 const connectorId = "manifest-revision-fence";
 const connectorInstanceId = "cin_manifest_revision_fence";
 const stream = "items";
+const INSTANCE_ADVISORY_LOCK_QUERY = /pg_advisory_xact_lock\(\$1::bigint\)/;
 const MANIFEST_REVISION_CHANGED = /manifest revision changed/i;
 const MANIFEST_CLEANUP_CHANGED = /revision changed|reintroduced/;
 const ACTIVE_ACTIVATION_STREAM_SHAPE = /stream shape while its installed activation is active/i;
@@ -913,3 +917,184 @@ for (const removed of [false, true]) {
     );
   });
 }
+
+async function assertLexicalOnlyLivePublicationFenced(): Promise<void> {
+  const entered = deferred();
+  const resume = deferred();
+  const target = { connector_id: connectorId, connector_instance_id: connectorInstanceId };
+  const record = { data: { id: "one", subject: "old subject", title: "new title" }, key: "one", stream };
+  let stale: Promise<void> | undefined;
+  let paused = false;
+  configureSemanticBackend(null);
+  try {
+    await registerConnector(manifest("subject"), { backfillRetrievalIndexes: false });
+    const ingest = await ingestRecord(target, record, { deferIndexes: true });
+    __setIndexPublishPhaseHookForTest(async (point: string) => {
+      if (point === "before-publish-transaction" && !paused) {
+        paused = true;
+        entered.release();
+        await resume.promise;
+      }
+    });
+    stale = maintainRecordIndexes(target, record, ingest.version ?? 1);
+    // Attach immediately so a failing transaction cannot become an unhandled rejection.
+    const outcome = stale.then(
+      () => null,
+      (error: unknown) => error
+    );
+    await entered.promise;
+    await registerConnector(manifest("title"), { backfillRetrievalIndexes: false });
+    const scope = (await listDirtySearchIndexScopes(25)).find(
+      (entry) => entry.connectorInstanceId === connectorInstanceId
+    );
+    assert.ok(scope);
+    assert.equal((await reconcileSearchIndexDirtyScope(scope)).outcome, "converged");
+    assert.equal(await countDirtySearchIndexScopes(), 0, "B has reconciled and cleared its dirty revision");
+    resume.release();
+    const publicationError = await outcome;
+    const rows = isPostgresStorageBackend()
+      ? (
+          await postgresQuery("SELECT field, value AS text FROM lexical_search_index WHERE connector_instance_id=$1", [
+            connectorInstanceId,
+          ])
+        ).rows
+      : getDb()
+          .prepare("SELECT field, text FROM lexical_search_index WHERE connector_instance_id=?")
+          .all(connectorInstanceId);
+    assert.deepEqual(rows, [{ field: "title", text: "new title" }], "delayed A must preserve B's clean lexical rows");
+    const meta = isPostgresStorageBackend()
+      ? (
+          await postgresQuery("SELECT fields_fingerprint FROM lexical_search_meta WHERE connector_instance_id=$1", [
+            connectorInstanceId,
+          ])
+        ).rows[0]
+      : getDb()
+          .prepare("SELECT fields_fingerprint FROM lexical_search_meta WHERE connector_instance_id=?")
+          .get<{ fields_fingerprint: string }>(connectorInstanceId);
+    assert.equal(meta?.fields_fingerprint, '["title"]');
+    assert.match(String(publicationError), MANIFEST_REVISION_CHANGED);
+    assert.equal(await countDirtySearchIndexScopes(), 0);
+  } finally {
+    resume.release();
+    await Promise.allSettled([stale]);
+    __setIndexPublishPhaseHookForTest(null);
+    configureSemanticBackend(null);
+  }
+}
+
+test("SQLite: lexical-only delayed live A cannot overwrite reconciled clean manifest B", async () => {
+  initDb(":memory:");
+  try {
+    await assertLexicalOnlyLivePublicationFenced();
+  } finally {
+    closeDb();
+  }
+});
+
+test("PostgreSQL: lexical-only delayed live A cannot overwrite reconciled clean manifest B", {
+  skip: !process.env.PDPP_TEST_POSTGRES_URL,
+}, async () => {
+  await withFencePostgres(assertLexicalOnlyLivePublicationFenced);
+});
+
+async function withFencePostgres(run: () => Promise<void>): Promise<void> {
+  const url = process.env.PDPP_TEST_POSTGRES_URL;
+  assert.ok(url);
+  await withTemporaryPostgresDatabase(
+    {
+      closeConnections: closePostgresStorage,
+      connectionString: url,
+      databaseName: `pdpp_test_live_fence_${Date.now().toString(36)}_${Math.random().toString(16).slice(2, 10)}_1`,
+      templateName: null,
+    },
+    async (databaseUrl) => {
+      initDb(":memory:");
+      try {
+        await initPostgresStorage({ backend: "postgres", databaseUrl });
+        await run();
+      } finally {
+        await closePostgresStorage();
+        closeDb();
+      }
+    }
+  );
+}
+
+test("PostgreSQL: live publication overlaps lexical repair without a tuple/publication deadlock", {
+  skip: !process.env.PDPP_TEST_POSTGRES_URL,
+  timeout: 30_000,
+}, async () => {
+  await withFencePostgres(async () => {
+    const entered = deferred();
+    const resume = deferred();
+    const target = { connector_id: connectorId, connector_instance_id: connectorInstanceId };
+    const record = { data: { id: "one", subject: "current subject", title: "new title" }, key: "one", stream };
+    let repair: Promise<unknown> | undefined;
+    let live: Promise<unknown> | undefined;
+    let paused = false;
+    configureSemanticBackend(makeStubBackend({ dimensions: 8 }));
+    try {
+      await registerConnector(retrievalManifest("subject"), { backfillRetrievalIndexes: false });
+      const ingest = await ingestRecord(target, record, { deferIndexes: true });
+      await maintainRecordIndexes(target, record, ingest.version ?? 1);
+      // Force exact-content repair to write the tuple the live writer will also replace.
+      await postgresQuery("UPDATE lexical_search_index SET value='corrupt' WHERE connector_instance_id=$1", [
+        connectorInstanceId,
+      ]);
+      __setLexicalBackfillPhaseHookForTest(async (point) => {
+        if (point === "before-derived-dml" && !paused) {
+          paused = true;
+          entered.release();
+          await resume.promise;
+        }
+      });
+      repair = lexicalIndexBackfillForManifest({
+        manifest: { ...retrievalManifest("subject"), storage_binding: { connector_instance_id: connectorInstanceId } },
+        verifyContent: true,
+      });
+      const repairOutcome = repair.then(
+        () => null,
+        (error: unknown) => error
+      );
+      await entered.promise;
+      live = maintainRecordIndexes(target, record, ingest.version ?? 1);
+      const liveOutcome = live.then(
+        () => null,
+        (error: unknown) => error
+      );
+      // Wait for a real database lock wait, not a timing guess. Repair owns both
+      // advisory locks. Old live code holds a lexical tuple while waiting on
+      // publication; fixed live code waits on instance before touching tuples.
+      let waitingQuery: string | undefined;
+      const deadline = Date.now() + 5000;
+      while (!waitingQuery && Date.now() < deadline) {
+        // biome-ignore lint/performance/noAwaitInLoops: observe the ordered lock handoff before releasing repair.
+        const waiting = await postgresQuery<{ query: string }>(`SELECT query FROM pg_stat_activity
+          WHERE datname=current_database() AND pid<>pg_backend_pid()
+            AND wait_event_type='Lock' AND query LIKE '%pg_advisory_xact_lock%'`);
+        waitingQuery = waiting.rows[0]?.query;
+        if (!waitingQuery) {
+          await delay(10);
+        }
+      }
+      assert.ok(waitingQuery, "live publication must overlap repair at an advisory lock");
+      resume.release();
+      const outcomes = await Promise.all([repairOutcome, liveOutcome]);
+      assert.deepEqual(outcomes, [null, null], "neither repair nor live publication may deadlock/abort");
+      assert.match(
+        waitingQuery,
+        INSTANCE_ADVISORY_LOCK_QUERY,
+        "live must acquire instance before publication and derived DML"
+      );
+      const rows = await postgresQuery("SELECT field, value FROM lexical_search_index WHERE connector_instance_id=$1", [
+        connectorInstanceId,
+      ]);
+      assert.deepEqual(rows.rows, [{ field: "subject", value: "current subject" }]);
+    } finally {
+      resume.release();
+      await Promise.allSettled([repair, live]);
+      __setLexicalBackfillPhaseHookForTest(null);
+      configureSemanticBackend(null);
+    }
+  });
+});
