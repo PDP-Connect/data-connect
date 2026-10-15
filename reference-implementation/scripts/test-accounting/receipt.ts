@@ -121,6 +121,8 @@ export const POSTGRES_UNNAMED_SKIP_TEST_NAME_ROWS: readonly string[] = [
   "PostgreSQL: a stale lexical pass cannot republish metadata after manifest B",
   "PostgreSQL: lexical-only delayed live A cannot overwrite reconciled clean manifest B",
   "PostgreSQL: live publication overlaps lexical repair without a tuple/publication deadlock",
+  "PostgreSQL: stale nonparticipating lexical cleanup preserves a reintroduced stream",
+  "PostgreSQL: stale removed lexical cleanup preserves a reintroduced stream",
   "PostgreSQL: a stale semantic page cannot overwrite the index after manifest B publishes",
   "PostgreSQL: stale record-column repair cannot overwrite manifest B",
   "PostgreSQL: a stale derived write cannot commit after manifest B publishes",
