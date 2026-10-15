@@ -120,6 +120,25 @@ const POSTGRES_INTERACTIVE_POOL_MAX = 8;
 const POSTGRES_BULK_POOL_MAX = 3;
 
 /**
+ * Interactive-lane size: `PDPP_PG_INTERACTIVE_POOL_MAX` (positive integer, at
+ * most 1000) or the default above. Read per pool creation so tests and
+ * restarts see the current value. A larger pool mostly buys Postgres group
+ * commit for the per-read audit inserts; keep `max_connections` headroom for
+ * the bulk (3) and lock (1) lanes and every other process.
+ */
+export function resolvePostgresInteractivePoolMax(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.PDPP_PG_INTERACTIVE_POOL_MAX?.trim();
+  if (!raw) {
+    return POSTGRES_INTERACTIVE_POOL_MAX;
+  }
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 1 || value > 1000) {
+    throw new Error(`PDPP_PG_INTERACTIVE_POOL_MAX must be an integer from 1 to 1000, got "${raw}"`);
+  }
+  return value;
+}
+
+/**
  * Hard per-statement ceiling for the bulk lane. Postgres cannot preempt a
  * transaction once admitted (see the PostgreSQL wiki's own "Priorities"
  * page: there are no facilities to limit or prioritize resources per
@@ -1415,7 +1434,7 @@ export async function initExistingPostgresRepairStorage(
   if (pool) {
     await closePostgresStorage();
   }
-  pool = new Pool({ connectionString: config.databaseUrl, max: POSTGRES_INTERACTIVE_POOL_MAX });
+  pool = new Pool({ connectionString: config.databaseUrl, max: resolvePostgresInteractivePoolMax() });
   bulkPool = new Pool({ connectionString: config.databaseUrl, max: POSTGRES_BULK_POOL_MAX });
   lockPoolCapacity = 1;
   lockPool = new Pool({ connectionString: config.databaseUrl, max: lockPoolCapacity });
@@ -1474,7 +1493,7 @@ export async function initPostgresStorage(
   }
 
   // Two lanes, not one shared pool: see POSTGRES_INTERACTIVE_POOL_MAX.
-  pool = new Pool({ connectionString: config.databaseUrl, max: POSTGRES_INTERACTIVE_POOL_MAX });
+  pool = new Pool({ connectionString: config.databaseUrl, max: resolvePostgresInteractivePoolMax() });
   bulkPool = new Pool({ connectionString: config.databaseUrl, max: POSTGRES_BULK_POOL_MAX });
   lockPoolCapacity = 1;
   lockPool = new Pool({ connectionString: config.databaseUrl, max: lockPoolCapacity });
