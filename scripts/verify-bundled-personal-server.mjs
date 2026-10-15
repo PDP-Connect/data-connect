@@ -19,6 +19,7 @@ import {
 import { createInterface } from "node:readline"
 import { assertStagedConsoleConnectors } from "./check-staged-console-connectors.mjs"
 import { isMainModule } from "./is-main-module.js"
+import { MACOS_NODE_HELPER } from "./package-macos-node-helper.mjs"
 
 const REQUIRED_PATH_FRAGMENTS = [
   "connectors/lock.json",
@@ -153,7 +154,7 @@ function packagedEntryPath(entry, platform) {
 export function assertPackagedNode(entries, artifactName, platform) {
   const expectedPath = {
     linux: "usr/bin/pdpp-node",
-    macos: "contents/macos/pdpp-node",
+    macos: MACOS_NODE_HELPER.toLowerCase(),
     windows: "pdpp-node.exe",
   }[platform]
   if (!expectedPath) fail(`Unsupported Node sidecar platform: ${platform}`)
@@ -555,9 +556,9 @@ export function selectMacAppExecutables(
     )
   }
 
-  const nodeMatches = executableNames.filter(name => name === "pdpp-node")
+  const nodeMatches = executableNames.filter(name => name === MACOS_NODE_HELPER)
   if (nodeMatches.length !== 1) {
-    fail(`${artifactName} must contain exactly one pdpp-node sidecar`)
+    fail(`${artifactName} must contain exactly one background Node helper`)
   }
   if (declaredExecutable === "pdpp-node") {
     fail(`${artifactName} app executable must be distinct from pdpp-node`)
@@ -566,6 +567,21 @@ export function selectMacAppExecutables(
   return {
     appExecutable: declaredExecutable,
     nodeSidecar: nodeMatches[0],
+  }
+}
+
+export function assertMacNodeHelperInfo(info, artifactName) {
+  const expected = {
+    CFBundleExecutable: "DataConnect",
+    CFBundleIdentifier: "dev.dataconnect.node",
+    CFBundleName: "DataConnect",
+    CFBundleDisplayName: "DataConnect",
+    CFBundlePackageType: "APPL",
+    LSBackgroundOnly: true,
+  }
+  for (const [key, value] of Object.entries(expected)) {
+    if (info[key] !== value)
+      fail(`${artifactName} Node helper has invalid ${key}`)
   }
 }
 
@@ -639,6 +655,28 @@ function verifyMacApp(
   const declaredExecutable = readMacBundleExecutable(
     join(app, "Contents", "Info.plist")
   )
+  if (existsSync(join(executableDirectory, "pdpp-node"))) {
+    fail(`${artifactName} still carries a foreground Node sidecar`)
+  }
+  const helperStat = lstatSync(join(app, MACOS_NODE_HELPER))
+  if (!helperStat.isFile() || !(helperStat.mode & 0o111)) {
+    fail(
+      `${artifactName} Node helper must be a regular executable with execute permission`
+    )
+  }
+  assertMacNodeHelperInfo(
+    JSON.parse(
+      run("plutil", [
+        "-convert",
+        "json",
+        "-o",
+        "-",
+        join(app, dirname(MACOS_NODE_HELPER), "../Info.plist"),
+      ])
+    ),
+    artifactName
+  )
+  executableNames.push(MACOS_NODE_HELPER)
   const { appExecutable, nodeSidecar } = selectMacAppExecutables(
     executableNames,
     declaredExecutable,
@@ -647,7 +685,7 @@ function verifyMacApp(
 
   const binaries = [
     join(executableDirectory, appExecutable),
-    join(executableDirectory, nodeSidecar),
+    join(app, nodeSidecar),
     join(
       app,
       "Contents",
