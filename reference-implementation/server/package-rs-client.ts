@@ -76,9 +76,10 @@ export function createPackageProfile({
 		);
 	}
 	return {
-		children: members.map(({ access_mode, active, grant, grant_id, source, token }) => ({
+		children: members.map(({ access_mode, active, connection_id, grant, grant_id, source, token }) => ({
 			access_mode,
 			active,
+			connection_id: connection_id ?? source?.connection_id ?? null,
 			grant_id,
 			purpose: grant.purpose,
 			source: source ? { ...source } : null,

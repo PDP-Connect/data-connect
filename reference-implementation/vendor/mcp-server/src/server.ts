@@ -169,7 +169,8 @@ function readPackageResource(
     const matches = profile.children.filter(
       (candidate) =>
         candidate.active &&
-        candidate.source?.connection_id === identity.connectionId &&
+        (candidate.connection_id ?? candidate.source?.connection_id) ===
+          identity.connectionId &&
         candidate.streams.some(
           (stream) =>
             stream.name === identity.stream &&

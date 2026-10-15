@@ -8,6 +8,7 @@ import { buildTools } from "./tools.ts";
 export interface PackageProfileChild {
 	access_mode: string;
 	active: boolean;
+	connection_id?: string | null;
 	grant_id: string;
 	purpose: string;
 	rs: RsClient;
@@ -119,6 +120,7 @@ function selectedChildError(result: ToolResult, grantId: string): ToolResult {
 function discoveryChild(child: PackageProfileChild) {
 	return {
 		grant_id: child.grant_id,
+		connection_id: child.connection_id ?? child.source?.connection_id ?? null,
 		source: child.source
 			? {
 					id: child.source.id,
@@ -236,7 +238,7 @@ export function buildPackageProfileTools(
 		name: "list_package_children",
 		title: "List package children",
 		description:
-			"List this package token's covered grants, source metadata, streams, access modes, and active status. Read-only.",
+			"List this package token's covered grants, source metadata, streams, access modes, and active status. The deprecated compatibility alias `connection_id` maps legacy stored IDs and URIs to a child; use `grant_id` for package tool and resource calls. Read-only.",
 		annotations: {
 			destructiveHint: false,
 			idempotentHint: true,
@@ -248,6 +250,9 @@ export function buildPackageProfileTools(
 			children: z.array(
 				z.object({
 					grant_id: z.string(),
+					connection_id: z.string().nullable().describe(
+						"Deprecated public compatibility alias for legacy stored IDs and URIs. Use grant_id for package tool and resource calls.",
+					),
 					source: z
 						.union([
 							z.object({

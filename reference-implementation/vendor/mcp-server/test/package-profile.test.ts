@@ -237,6 +237,10 @@ test("selected child grant_invalid is returned without calling a sibling", async
 
 test("package discovery lists covered children, including inactive, with only declared public fields", async () => {
 	const { profile, reads } = fixture({ inactiveGrantId: "b.child" });
+	const secondChild = profile.children[1];
+	assert.ok(secondChild?.source);
+	secondChild.connection_id = null;
+	secondChild.source.connection_id = undefined;
 	const { result } = await call(profile, "list_package_children", {});
 	assert.equal(result.isError, undefined);
 	assert.deepEqual(reads, []);
@@ -244,6 +248,7 @@ test("package discovery lists covered children, including inactive, with only de
 		children: [
 			{
 				grant_id: "a.child~_1-",
+				connection_id: "pairwise-a.child~_1-",
 				purpose: "personal records",
 				streams: [{ name: "notes", instance_ids: ["pairwise-a.child~_1-"] }],
 				source: {
@@ -257,13 +262,13 @@ test("package discovery lists covered children, including inactive, with only de
 			},
 			{
 				grant_id: "b.child",
+				connection_id: null,
 				purpose: "personal records",
 				streams: [{ name: "notes", instance_ids: ["pairwise-b.child"] }],
 				source: {
 					id: "source-b.child",
 					kind: "connector",
 					display_name: "Source b.child",
-					connection_id: "pairwise-b.child",
 				},
 				access_mode: "continuous",
 				active: false,
@@ -283,6 +288,11 @@ test("package discovery lists covered children, including inactive, with only de
 	assert.doesNotMatch(exposed, /subject_id|rs_instance|cin_/);
 	assert.equal(exposed.includes("child-bearer-secret"), false);
 	assert.match(String(initialized.result.instructions), /list_package_children.*statuses.*grant_id/);
+	const tools = await request(profile, "tools/list", {});
+	const discoveryTool = (tools.result.tools as Array<{ description: string; name: string }>).find(
+		(tool) => tool.name === "list_package_children",
+	);
+	assert.match(String(discoveryTool?.description), /deprecated compatibility alias.*connection_id/i);
 });
 
 test("frozen package members map to child metadata without exposing per-child tokens", async () => {
@@ -306,7 +316,7 @@ test("frozen package members map to child metadata without exposing per-child to
 			{
 				access_mode: "single_use",
 				active: false,
-				connection_id: "pairwise-b",
+				connection_id: null,
 				grant: {
 					purpose: "personal records",
 					streams: [{ name: "notes", instance_ids: ["pairwise-b"] }],
@@ -319,15 +329,21 @@ test("frozen package members map to child metadata without exposing per-child to
 		],
 	});
 	assert.deepEqual(
-		profile.children.map(({ grant_id, active, streams }) => ({ grant_id, active, streams })),
+		profile.children.map(({ grant_id, active, connection_id, streams }) => ({ grant_id, active, connection_id, streams })),
 		[
-			{ grant_id: "grant-a", active: true, streams: [{ name: "notes", instance_ids: ["pairwise-a"] }] },
-			{ grant_id: "grant-b", active: false, streams: [{ name: "notes", instance_ids: ["pairwise-b"] }] },
+			{ grant_id: "grant-a", active: true, connection_id: "pairwise-a", streams: [{ name: "notes", instance_ids: ["pairwise-a"] }] },
+			{ grant_id: "grant-b", active: false, connection_id: "pairwise-b", streams: [{ name: "notes", instance_ids: ["pairwise-b"] }] },
 		],
 	);
 	assert.equal("token" in profile.children[0]!, false);
 	const { result } = await call(profile, "list_package_children", {});
 	assert.equal(JSON.stringify(result).includes("bearer-secret"), false);
+	assert.deepEqual(
+		(result.structuredContent as { children: Array<{ connection_id: string | null }> }).children.map(
+			(child) => child.connection_id,
+		),
+		["pairwise-a", "pairwise-b"],
+	);
 });
 
 test("inactive selected child returns terminal package_child_inactive while its sibling stays readable", async () => {
@@ -430,7 +446,7 @@ test("package tools/list requires grant_id and resource templates advertise expl
 	const resources = await request(profile, "resources/list", {});
 	assert.deepEqual(resources.result.resources, []);
 	const packageToolListBytes = Buffer.byteLength(JSON.stringify(packageList.result.tools));
-	assert.equal(packageToolListBytes, 23_712, "package tools/list must keep its measured B2 size");
+	assert.equal(packageToolListBytes, 24_054, "package tools/list size must match the measured B3 schema");
 	assert.ok(packageToolListBytes <= 24_576, `package tools/list: ${packageToolListBytes} bytes`);
 
 	const clientList = await request(undefined, "tools/list", {});
@@ -451,7 +467,8 @@ test("package resources resolve old URIs by one active child and new URIs by exp
 	const { profile, reads } = fixture();
 	const [firstChild] = profile.children;
 	assert.ok(firstChild?.source && firstChild.streams[0]);
-	firstChild.source.connection_id = "conn_orders";
+	firstChild.connection_id = "conn_orders";
+	firstChild.source.connection_id = undefined;
 	firstChild.streams[0].name = "orders";
 	firstChild.streams[0].instance_ids = ["conn_orders"];
 	const oldUri = "pdpp://record/conn_orders%2Forders%3Ao2";
