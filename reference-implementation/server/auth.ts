@@ -3427,8 +3427,8 @@ async function createPendingConsent(
   // has a stable id without exposing the live device_code.
   const approvalId = generateId("appr");
   const paramsJson = serializePendingConsentParams(params);
-  return await insertWithFreshPendingConsentUserCode((userCode) =>
-    getPendingConsentStore().insert({
+  return await insertWithFreshPendingConsentUserCode(async (userCode) =>
+    await getPendingConsentStore().insert({
       approvalId,
       createdAt,
       deviceCode,
