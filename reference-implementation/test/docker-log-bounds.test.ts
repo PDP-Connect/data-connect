@@ -1,3 +1,6 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 /**
  * Every shipped Compose launch must resolve to bounded Docker logs. This
  * checks the EFFECTIVE configuration (`docker compose config`, which needs the
