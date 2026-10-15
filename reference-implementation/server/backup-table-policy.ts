@@ -213,6 +213,30 @@ export const BACKUP_TABLE_INVENTORY: Record<string, BackupTableInventoryEntry> =
     classification: "backup_required",
     reason: "OAuth grants are core authorization state.",
   },
+  pairwise_identity_handles: {
+    classification: "backup_required",
+    reason: "Pairwise identifiers must remain stable across restarts and recovery.",
+  },
+  pairwise_identity_root_keys: {
+    classification: "backup_required",
+    reason: "Pairwise identifiers cannot be re-derived after loss of the issuer identity root key.",
+  },
+  pairwise_trusted_client_sectors: {
+    classification: "backup_required",
+    reason: "Trusted client sector assignments must remain immutable after identifiers are disclosed.",
+  },
+  pairwise_identity_legacy_backfills: {
+    classification: "backup_required",
+    reason: "Legacy identity backfill completion gates the first versioned issuance.",
+  },
+  pairwise_identity_issuer_migrations: {
+    classification: "backup_required",
+    reason: "Issuer migrations record one-time identity namespace changes.",
+  },
+  pairwise_identity_deployment: {
+    classification: "backup_required",
+    reason: "The exact configured issuer pins this database to one deployment identity namespace.",
+  },
   lexical_search_index: {
     classification: "backup_required",
     reason: "Lexical index rows are rebuilt from records.",
