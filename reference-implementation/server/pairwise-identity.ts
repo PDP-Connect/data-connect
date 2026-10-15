@@ -798,6 +798,24 @@ function rootKeyForIssuerSync(issuer: string): Buffer {
 export async function getPairwiseHandle(
 	input: PairwiseHandleInput,
 ): Promise<string> {
+	return resolvePairwiseHandle(input, "legacy-compatible");
+}
+
+/**
+ * HMAC-only lookup or issuance for grants created under the v1 generation.
+ * Legacy rows are never read, returned, or checked for ambiguity, so an old
+ * raw value for the same client and identity cannot leak into a new grant.
+ */
+export async function getPairwiseV1Handle(
+	input: PairwiseHandleInput,
+): Promise<string> {
+	return resolvePairwiseHandle(input, "v1");
+}
+
+async function resolvePairwiseHandle(
+	input: PairwiseHandleInput,
+	generation: "legacy-compatible" | "v1",
+): Promise<string> {
 	validateHandleInput(input);
 	const identity = semanticIdentity(input);
 	const legacySubject =
@@ -864,13 +882,23 @@ export async function getPairwiseHandle(
 					[input.issuer, new Date().toISOString()],
 				);
 			}
-			const legacy = await client.query<{ handle: string }>(
-				`SELECT DISTINCT h.handle FROM pairwise_identity_handles h
+			const legacyRows =
+				generation === "v1"
+					? []
+					: (
+							await client.query<{ handle: string }>(
+								`SELECT DISTINCT h.handle FROM pairwise_identity_handles h
           JOIN pairwise_trusted_client_sectors m ON m.issuer=h.issuer AND m.client_id=h.client_id
          WHERE h.issuer=$1 AND m.client_sector=$2 AND ${legacyFilter} AND h.scheme='legacy'`,
-				[input.issuer, input.clientSector, legacySubject, input.internalId],
-			);
-			const legacyHandles = [...new Set(legacy.rows.map((row) => row.handle))];
+								[
+									input.issuer,
+									input.clientSector,
+									legacySubject,
+									input.internalId,
+								],
+							)
+						).rows;
+			const legacyHandles = [...new Set(legacyRows.map((row) => row.handle))];
 			if (legacyHandles.length > 1)
 				throw new PairwiseIdentityContextError(
 					"Ambiguous legacy pairwise identity mapping",
@@ -981,19 +1009,22 @@ export async function getPairwiseHandle(
 					"INSERT INTO pairwise_identity_legacy_backfills (issuer,completed_at) VALUES (?,?)",
 				).run(input.issuer, new Date().toISOString());
 			}
-			const legacyRows = db
-				.prepare(
-					`SELECT DISTINCT h.handle FROM pairwise_identity_handles h
+			const legacyRows =
+				generation === "v1"
+					? []
+					: db
+							.prepare(
+								`SELECT DISTINCT h.handle FROM pairwise_identity_handles h
         JOIN pairwise_trusted_client_sectors m ON m.issuer=h.issuer AND m.client_id=h.client_id
 					WHERE h.issuer=? AND m.client_sector=? AND ${input.kind === "instance" ? "h.kind='instance' AND h.subject_id=? AND h.internal_id=?" : "((h.kind='subject' AND h.subject_id=? AND h.internal_id=?) OR (h.kind='grantor' AND h.internal_id=?))"} AND h.scheme='legacy'`,
-				)
-				.all<{ handle: string }>(
-					input.issuer,
-					input.clientSector,
-					legacySubject,
-					input.internalId,
-					...(input.kind === "instance" ? [] : [input.internalId]),
-				);
+							)
+							.all<{ handle: string }>(
+								input.issuer,
+								input.clientSector,
+								legacySubject,
+								input.internalId,
+								...(input.kind === "instance" ? [] : [input.internalId]),
+							);
 			const legacyHandles = [...new Set(legacyRows.map((row) => row.handle))];
 			if (legacyHandles.length > 1)
 				throw new PairwiseIdentityContextError(

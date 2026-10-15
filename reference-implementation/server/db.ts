@@ -922,7 +922,7 @@ CREATE TABLE IF NOT EXISTS pairwise_identity_handles (
   client_sector TEXT,
   scheme TEXT NOT NULL DEFAULT 'legacy' CHECK (scheme IN ('legacy','v1')),
   handle TEXT NOT NULL UNIQUE,
-  PRIMARY KEY (issuer,subject_id,client_id,kind,source_id,internal_id)
+  PRIMARY KEY (issuer,subject_id,client_id,kind,source_id,internal_id,scheme)
 );
 CREATE TABLE IF NOT EXISTS pairwise_trusted_client_sectors (
   issuer TEXT NOT NULL,
@@ -6188,6 +6188,48 @@ export function initDb(path = ":memory:", opts: InitDbOptions = {}): DatabaseHan
   runWithSqliteBusyRetrySync(() =>
     addColumnIfMissing(raw, "pairwise_identity_handles", "scheme", "TEXT NOT NULL DEFAULT 'legacy' CHECK (scheme IN ('legacy','v1'))")
   );
+  // A legacy row and its v1 successor share the original six-column tuple, so
+  // the key must include scheme. SQLite cannot change a primary key in place:
+  // rebuild once, atomically, copying every disclosed handle unchanged. The
+  // shape is re-read inside the write lock so a concurrent starter skips it.
+  runWithSqliteBusyRetrySync(() => {
+    raw
+      .transaction(() => {
+        const key = raw
+          .prepare("SELECT name FROM pragma_table_info('pairwise_identity_handles') WHERE pk > 0 ORDER BY pk")
+          .all<{ name: string }>()
+          .map((column) => column.name)
+          .join(",");
+        if (key === "issuer,subject_id,client_id,kind,source_id,internal_id,scheme") return;
+        if (key !== "issuer,subject_id,client_id,kind,source_id,internal_id") {
+          throw new Error("Unsupported pairwise_identity_handles primary key; refusing an unsafe migration.");
+        }
+        raw.exec(`
+          CREATE TABLE pairwise_identity_handles_new (
+            issuer TEXT NOT NULL,
+            subject_id TEXT NOT NULL,
+            client_id TEXT NOT NULL,
+            kind TEXT NOT NULL CHECK (kind IN ('subject','grantor','instance')),
+            source_id TEXT NOT NULL,
+            internal_id TEXT NOT NULL,
+            client_sector TEXT,
+            scheme TEXT NOT NULL DEFAULT 'legacy' CHECK (scheme IN ('legacy','v1')),
+            handle TEXT NOT NULL UNIQUE,
+            PRIMARY KEY (issuer,subject_id,client_id,kind,source_id,internal_id,scheme)
+          );
+          INSERT INTO pairwise_identity_handles_new
+            (issuer,subject_id,client_id,kind,source_id,internal_id,client_sector,scheme,handle)
+          SELECT issuer,subject_id,client_id,kind,source_id,internal_id,client_sector,scheme,handle
+            FROM pairwise_identity_handles;
+          DROP TABLE pairwise_identity_handles;
+          ALTER TABLE pairwise_identity_handles_new RENAME TO pairwise_identity_handles;
+          CREATE UNIQUE INDEX idx_pairwise_identity_handles_v1_scope
+            ON pairwise_identity_handles(issuer, client_sector, kind, subject_id, internal_id)
+            WHERE scheme = 'v1';
+        `);
+      })
+      .immediate();
+  });
   runWithSqliteBusyRetrySync(() => {
     raw.exec(
       `CREATE UNIQUE INDEX IF NOT EXISTS idx_pairwise_identity_handles_v1_scope
