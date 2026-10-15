@@ -105,7 +105,9 @@ async function main(): Promise<void> {
           child: family.children[0]?.child_id as string,
         });
       }
-      if (family.index % crossStride === 0 && crossCandidates.length < crossTarget + 1) {
+      // Sample up to refusalTotal + 1 so cross-family attempts can make up for
+      // suspensions a tiny registry cannot produce (no two-parent family).
+      if (family.index % crossStride === 0 && crossCandidates.length < refusalTotal + 1) {
         crossCandidates.push({
           cedula: family.parents[0]?.cedula as string,
           child: family.children[0]?.child_id as string,
