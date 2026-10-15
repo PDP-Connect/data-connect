@@ -50,7 +50,9 @@ interface PendingDetailGapRow {
 
 interface DetailGapStoreCall {
   readonly connectorId: string;
-  readonly options: { limit?: number } | undefined;
+  readonly options:
+    | { connectorInstanceId?: string; limit?: number; reasons?: readonly string[]; recoverableOnly?: boolean }
+    | undefined;
 }
 
 type ControllerThrownError = Error & {
@@ -61,7 +63,10 @@ type ControllerThrownError = Error & {
 };
 
 interface DetailGapReadStore {
-  listPendingGapsForConnector: (connectorId: string, options?: { limit?: number }) => readonly PendingDetailGapRow[];
+  listPendingGapsForConnector: (
+    connectorId: string,
+    options?: { connectorInstanceId?: string; limit?: number; reasons?: readonly string[]; recoverableOnly?: boolean }
+  ) => readonly PendingDetailGapRow[];
 }
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
@@ -370,8 +375,17 @@ test("manual cooldown gate reads connector type and filters to the requested con
       // biome-ignore lint/style/useDestructuring: Indexed access expresses the protocol field position under test.
       const firstCall = calls[0];
       assert.ok(firstCall, "expected a detail-gap store call to have been recorded");
-      assert.equal(firstCall.connectorId, TEST_CONNECTOR_ID, "store read is connector-type scoped, not cin-scoped");
-      assert.deepEqual(firstCall.options, { limit: 200 });
+      assert.equal(firstCall.connectorId, TEST_CONNECTOR_ID, "store read is made per connector type");
+      assert.deepEqual(
+        firstCall.options,
+        {
+          connectorInstanceId: "cin_target",
+          limit: 200,
+          reasons: ["rate_limited", "upstream_pressure"],
+          recoverableOnly: true,
+        },
+        "the connection, the pressure reasons and recoverability are applied in the store before the 200-row LIMIT"
+      );
     }
   );
 });

@@ -650,8 +650,8 @@ test("STREAM_EVIDENCE: a claimed gapped:1 with TWO real distinct durable DETAIL_
       `
   process.stdout.write(JSON.stringify({ type: 'RECORD', stream: 'messages', key: 'm-1', data: { id: 'm-1' }, emitted_at: new Date().toISOString() }) + '\\n');
   process.stdout.write(JSON.stringify({ type: 'STATE', stream: 'messages', cursor: { cursor: 'messages-1' } }) + '\\n');
-  process.stdout.write(JSON.stringify({ type: 'DETAIL_GAP', stream: 'message_bodies', parent_stream: 'messages', record_key: 'm-a', reason: 'temporary_unavailable', retryable: true }) + '\\n');
-  process.stdout.write(JSON.stringify({ type: 'DETAIL_GAP', stream: 'message_bodies', parent_stream: 'messages', record_key: 'm-b', reason: 'temporary_unavailable', retryable: true }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'DETAIL_GAP', status: "pending", stream: 'message_bodies', parent_stream: 'messages', record_key: 'm-a', reason: 'temporary_unavailable', retryable: true }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'DETAIL_GAP', status: "pending", stream: 'message_bodies', parent_stream: 'messages', record_key: 'm-b', reason: 'temporary_unavailable', retryable: true }) + '\\n');
   // Two REAL, distinct durable gaps exist for message_bodies, but the
   // connector under-claims gapped:1 instead of the honest gapped:2.
   process.stdout.write(JSON.stringify({ type: 'STREAM_EVIDENCE', reference_only: true, stream: 'message_bodies', considered: 2, outcomes: { emitted: 0, unchanged: 0, gapped: 1, unaccounted: 1 } }) + '\\n');
@@ -703,8 +703,8 @@ test("mutation control: an honest gapped:2 matching two real distinct durable DE
       `
   process.stdout.write(JSON.stringify({ type: 'RECORD', stream: 'messages', key: 'm-1', data: { id: 'm-1' }, emitted_at: new Date().toISOString() }) + '\\n');
   process.stdout.write(JSON.stringify({ type: 'STATE', stream: 'messages', cursor: { cursor: 'messages-1' } }) + '\\n');
-  process.stdout.write(JSON.stringify({ type: 'DETAIL_GAP', stream: 'message_bodies', parent_stream: 'messages', record_key: 'm-a', reason: 'temporary_unavailable', retryable: true }) + '\\n');
-  process.stdout.write(JSON.stringify({ type: 'DETAIL_GAP', stream: 'message_bodies', parent_stream: 'messages', record_key: 'm-b', reason: 'temporary_unavailable', retryable: true }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'DETAIL_GAP', status: "pending", stream: 'message_bodies', parent_stream: 'messages', record_key: 'm-a', reason: 'temporary_unavailable', retryable: true }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'DETAIL_GAP', status: "pending", stream: 'message_bodies', parent_stream: 'messages', record_key: 'm-b', reason: 'temporary_unavailable', retryable: true }) + '\\n');
   process.stdout.write(JSON.stringify({ type: 'STREAM_EVIDENCE', reference_only: true, stream: 'message_bodies', considered: 2, outcomes: { emitted: 0, unchanged: 0, gapped: 2, unaccounted: 0 } }) + '\\n');
   process.stdout.write(JSON.stringify({ type: 'DONE', status: 'succeeded', records_emitted: 1 }) + '\\n');
   rl.close();
@@ -1424,7 +1424,7 @@ test("STREAM_EVIDENCE: a DETAIL_GAP for the same stream after its accepted STREA
   process.stdout.write(JSON.stringify({ type: 'STATE', stream: 'messages', cursor: { cursor: 'messages-1' } }) + '\\n');
   process.stdout.write(JSON.stringify({ type: 'RECORD', stream: 'message_bodies', key: 'm-a', data: { id: 'm-a' }, emitted_at: new Date().toISOString() }) + '\\n');
   process.stdout.write(JSON.stringify({ type: 'STREAM_EVIDENCE', reference_only: true, stream: 'message_bodies', considered: 1, outcomes: { emitted: 1, unchanged: 0, gapped: 0, unaccounted: 0 } }) + '\\n');
-  process.stdout.write(JSON.stringify({ type: 'DETAIL_GAP', stream: 'message_bodies', parent_stream: 'messages', record_key: 'm-b', reason: 'temporary_unavailable', retryable: true }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'DETAIL_GAP', status: "pending", stream: 'message_bodies', parent_stream: 'messages', record_key: 'm-b', reason: 'temporary_unavailable', retryable: true }) + '\\n');
   process.stdout.write(JSON.stringify({ type: 'DONE', status: 'succeeded', records_emitted: 2 }) + '\\n');
   rl.close();
   process.exit(0);
@@ -2057,7 +2057,7 @@ test("STREAM_EVIDENCE: a gap recovered by an EARLIER run then re-deferred THIS r
       `
   process.stdout.write(JSON.stringify({ type: 'RECORD', stream: 'messages', key: 'm-1', data: { id: 'm-1' }, emitted_at: new Date().toISOString() }) + '\\n');
   process.stdout.write(JSON.stringify({ type: 'STATE', stream: 'messages', cursor: { cursor: 'messages-1' } }) + '\\n');
-  process.stdout.write(JSON.stringify({ type: 'DETAIL_GAP', stream: 'message_bodies', parent_stream: 'messages', record_key: 'm-a', reason: 'temporary_unavailable', retryable: true }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'DETAIL_GAP', status: "pending", stream: 'message_bodies', parent_stream: 'messages', record_key: 'm-a', reason: 'temporary_unavailable', retryable: true }) + '\\n');
   process.stdout.write(JSON.stringify({ type: 'STREAM_EVIDENCE', reference_only: true, stream: 'message_bodies', considered: 1, outcomes: { emitted: 0, unchanged: 0, gapped: 1, unaccounted: 0 } }) + '\\n');
   process.stdout.write(JSON.stringify({ type: 'DONE', status: 'succeeded', records_emitted: 1 }) + '\\n');
   rl.close();
@@ -2101,7 +2101,7 @@ test("STREAM_EVIDENCE: a new gap discovered and recovered within the SAME run (n
       `
   process.stdout.write(JSON.stringify({ type: 'RECORD', stream: 'messages', key: 'm-1', data: { id: 'm-1' }, emitted_at: new Date().toISOString() }) + '\\n');
   process.stdout.write(JSON.stringify({ type: 'STATE', stream: 'messages', cursor: { cursor: 'messages-1' } }) + '\\n');
-  process.stdout.write(JSON.stringify({ type: 'DETAIL_GAP', stream: 'message_bodies', parent_stream: 'messages', record_key: 'm-a', reason: 'temporary_unavailable', retryable: true }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'DETAIL_GAP', status: "pending", stream: 'message_bodies', parent_stream: 'messages', record_key: 'm-a', reason: 'temporary_unavailable', retryable: true }) + '\\n');
   process.stdout.write(JSON.stringify({ type: 'DONE', status: 'succeeded', records_emitted: 1 }) + '\\n');
   rl.close();
   process.exit(0);
@@ -2190,8 +2190,8 @@ test("STREAM_EVIDENCE: mixed recovered/pending/terminal durable gaps reconcile e
   process.stdout.write(JSON.stringify({ type: 'STATE', stream: 'messages', cursor: { cursor: 'messages-1' } }) + '\\n');
   process.stdout.write(JSON.stringify({ type: 'DETAIL_GAP_RECOVERED', stream: 'message_bodies', record_key: 'm-recovered', reference_only: true, gap_id: '${recoveredSeed.gap_id}' }) + '\\n');
   process.stdout.write(JSON.stringify({ type: 'RECORD', stream: 'message_bodies', key: 'm-recovered', data: { id: 'm-recovered' }, emitted_at: new Date().toISOString() }) + '\\n');
-  process.stdout.write(JSON.stringify({ type: 'DETAIL_GAP', stream: 'message_bodies', parent_stream: 'messages', record_key: 'm-pending', reason: 'temporary_unavailable', retryable: true }) + '\\n');
-  process.stdout.write(JSON.stringify({ type: 'DETAIL_GAP', stream: 'message_bodies', parent_stream: 'messages', record_key: 'm-terminal', reason: 'permanent_unavailable', retryable: false }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'DETAIL_GAP', status: "pending", stream: 'message_bodies', parent_stream: 'messages', record_key: 'm-pending', reason: 'temporary_unavailable', retryable: true }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'DETAIL_GAP', status: "pending", stream: 'message_bodies', parent_stream: 'messages', record_key: 'm-terminal', reason: 'source_unrepresentable', retryable: false }) + '\\n');
   process.stdout.write(JSON.stringify({ type: 'STREAM_EVIDENCE', reference_only: true, stream: 'message_bodies', considered: 3, outcomes: { emitted: 1, unchanged: 0, gapped: 2, unaccounted: 0 } }) + '\\n');
   process.stdout.write(JSON.stringify({ type: 'DONE', status: 'succeeded', records_emitted: 2 }) + '\\n');
   rl.close();
@@ -2243,8 +2243,8 @@ test("mutation control: mixed recovered/pending/terminal gaps reject a gapped co
   process.stdout.write(JSON.stringify({ type: 'STATE', stream: 'messages', cursor: { cursor: 'messages-1' } }) + '\\n');
   process.stdout.write(JSON.stringify({ type: 'DETAIL_GAP_RECOVERED', stream: 'message_bodies', record_key: 'm-recovered', reference_only: true, gap_id: '${recoveredSeed.gap_id}' }) + '\\n');
   process.stdout.write(JSON.stringify({ type: 'RECORD', stream: 'message_bodies', key: 'm-recovered', data: { id: 'm-recovered' }, emitted_at: new Date().toISOString() }) + '\\n');
-  process.stdout.write(JSON.stringify({ type: 'DETAIL_GAP', stream: 'message_bodies', parent_stream: 'messages', record_key: 'm-pending', reason: 'temporary_unavailable', retryable: true }) + '\\n');
-  process.stdout.write(JSON.stringify({ type: 'DETAIL_GAP', stream: 'message_bodies', parent_stream: 'messages', record_key: 'm-terminal', reason: 'permanent_unavailable', retryable: false }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'DETAIL_GAP', status: "pending", stream: 'message_bodies', parent_stream: 'messages', record_key: 'm-pending', reason: 'temporary_unavailable', retryable: true }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'DETAIL_GAP', status: "pending", stream: 'message_bodies', parent_stream: 'messages', record_key: 'm-terminal', reason: 'source_unrepresentable', retryable: false }) + '\\n');
   process.stdout.write(JSON.stringify({ type: 'STREAM_EVIDENCE', reference_only: true, stream: 'message_bodies', considered: 4, outcomes: { emitted: 1, unchanged: 0, gapped: 3, unaccounted: 0 } }) + '\\n');
   process.stdout.write(JSON.stringify({ type: 'DONE', status: 'succeeded', records_emitted: 2 }) + '\\n');
   rl.close();
@@ -2304,7 +2304,7 @@ test("STREAM_EVIDENCE: a DETAIL_GAP_RECOVERED for the same stream after its acce
       `
   process.stdout.write(JSON.stringify({ type: 'RECORD', stream: 'messages', key: 'm-1', data: { id: 'm-1' }, emitted_at: new Date().toISOString() }) + '\\n');
   process.stdout.write(JSON.stringify({ type: 'STATE', stream: 'messages', cursor: { cursor: 'messages-1' } }) + '\\n');
-  process.stdout.write(JSON.stringify({ type: 'DETAIL_GAP', stream: 'message_bodies', parent_stream: 'messages', record_key: 'm-a', reason: 'temporary_unavailable', retryable: true }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'DETAIL_GAP', status: "pending", stream: 'message_bodies', parent_stream: 'messages', record_key: 'm-a', reason: 'temporary_unavailable', retryable: true }) + '\\n');
   process.stdout.write(JSON.stringify({ type: 'STREAM_EVIDENCE', reference_only: true, stream: 'message_bodies', considered: 1, outcomes: { emitted: 0, unchanged: 0, gapped: 1, unaccounted: 0 } }) + '\\n');
   process.stdout.write(JSON.stringify({ type: 'DETAIL_GAP_RECOVERED', stream: 'message_bodies', record_key: 'm-a', reference_only: true, gap_id: '${seeded.gap_id}' }) + '\\n');
   process.stdout.write(JSON.stringify({ type: 'DONE', status: 'succeeded', records_emitted: 1 }) + '\\n');

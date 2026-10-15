@@ -80,6 +80,7 @@ const RUNTIME_GENERIC_DISPLAY_MESSAGES: Record<string, string> = {
   retry_exhausted: "We used up this run's retries here, so we'll pick the rest up on the next run",
   run_cap_deferred:
     "We collected a batch within this run's budget and saved it; the rest will be collected on the next run",
+  source_unrepresentable: "This item is in a form we can't copy in full, so it was recorded as not collected",
   temporary_unavailable: "We couldn't finish this item yet, so we'll try it again on the next run",
   upstream_pressure: "The service is busy right now — we'll back off and try later",
   user_disabled: "This was turned off in your collection settings",

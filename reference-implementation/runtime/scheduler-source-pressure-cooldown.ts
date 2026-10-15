@@ -280,6 +280,11 @@ export interface PendingPressureGap {
   readonly nextAttemptAfter?: string | null;
   /** Source-pressure reason. Only `SOURCE_PRESSURE_GAP_REASONS` count. */
   readonly reason: string | null;
+  /**
+   * Durable `retryable`. `false` = permanent source loss: never source pressure,
+   * whatever its reason, and excluded from every cooldown/backlog figure.
+   */
+  readonly retryable?: boolean | null;
 }
 
 export interface ComputeCooldownOptions {
@@ -398,7 +403,8 @@ export function computeSourcePressureCooldown(
       : Number.POSITIVE_INFINITY;
 
   const pressureGaps = (pendingGaps ?? []).filter(
-    (gap) => gap && typeof gap.reason === "string" && SOURCE_PRESSURE_GAP_REASONS.has(gap.reason)
+    (gap) =>
+      gap && typeof gap.reason === "string" && SOURCE_PRESSURE_GAP_REASONS.has(gap.reason) && gap.retryable !== false
   );
 
   // Force override or no pressure → no cooldown. A recovered run (pending

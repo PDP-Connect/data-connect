@@ -101,6 +101,7 @@ import {
   classifyRecoveryGap,
   filterFreshPressureRows,
   hasForwardEvidenceDebt,
+  isRecoverableDetailGapRow,
   type RecoveryAdmissionDenialReason,
   resolveRecoveryAdmission,
   resolveRecoveryFirstMode,
@@ -1464,11 +1465,15 @@ interface PendingDetailGapRow {
   readonly attempt_count?: number | null;
   readonly connector_id?: string | null;
   readonly connector_instance_id?: string | null;
+  /** Keyset cursor parts (`created_at`, `gap_id`) when the store returns them. */
+  readonly created_at?: string | null;
   readonly detail_class?: string | null;
+  readonly gap_id?: string | null;
   readonly last_attempt_at?: string | null;
   readonly last_error?: { readonly class?: unknown } | null;
   readonly next_attempt_after?: string | null;
   readonly reason?: string | null;
+  readonly retryable?: boolean | null;
   readonly status?: string | null;
   readonly stream?: string | null;
   readonly updated_at?: string | null;
@@ -1478,16 +1483,53 @@ interface PendingDetailGapRow {
  * The read surface of the detail-gap store the controller depends on for the
  * cooldown projection. Kept to one method so a test fake is trivial.
  */
+interface ConnectorDetailGapReadOptions {
+  /** Keyset cursor: only rows strictly after (`created_at`, `gap_id`). */
+  readonly after?: { readonly createdAt: string; readonly gapId: string };
+  /** Connector-wide reads only: scope to one connection in SQL, before the LIMIT. */
+  readonly connectorInstanceId?: string;
+  /** Applied in SQL before the LIMIT: keep only reasons NOT in this list. */
+  readonly excludeReasons?: readonly string[];
+  readonly limit?: number;
+  /** Applied in SQL before the LIMIT: keep only these reasons. */
+  readonly reasons?: readonly string[];
+  /** Applied in SQL before the LIMIT: drop explicit-false (permanent) rows. */
+  readonly recoverableOnly?: boolean;
+}
+
 interface ConnectorDetailGapReadStore {
   listPendingGapsForConnector: (
     connectorId: string,
-    options?: { limit?: number }
+    options?: ConnectorDetailGapReadOptions
   ) => Promise<readonly PendingDetailGapRow[]> | readonly PendingDetailGapRow[];
   listPendingGapsForConnectorInstance?: (
     connectorId: string,
     connectorInstanceId: string,
-    options?: { limit?: number }
+    options?: ConnectorDetailGapReadOptions
   ) => Promise<readonly PendingDetailGapRow[]> | readonly PendingDetailGapRow[];
+}
+
+/** `next` is strictly after `previous` in the stable (`created_at`, `gap_id`) read order. */
+function gapCursorAdvances(
+  previous: { readonly createdAt: string; readonly gapId: string },
+  next: { readonly createdAt: string; readonly gapId: string }
+): boolean {
+  if (next.createdAt !== previous.createdAt) {
+    return next.createdAt > previous.createdAt;
+  }
+  return next.gapId > previous.gapId;
+}
+
+/**
+ * The detail-gap store override could not be scanned to exhaustion, so whether an
+ * eligible recovery row exists is unknown. Distinct from "none exists".
+ */
+function recoveryScanUnsupported(connectorId: string, connectorInstanceId: string, detail: string): ControllerError {
+  return new ControllerError(
+    `Recovery eligibility could not be established for ${connectorId} (connection ${connectorInstanceId}): ${detail}. ` +
+      "A detail-gap store must return stable keyset pages ordered by (created_at, gap_id) and honor `after`.",
+    "recovery_scan_unsupported"
+  );
 }
 
 function isConnectorDetailGapReadStore(value: unknown): value is ConnectorDetailGapReadStore {
@@ -1621,6 +1663,9 @@ function bucketPressureGapsByInstance(
   ensure: EnsureScheduleFacts
 ): void {
   for (const gap of gaps) {
+    if (!isRecoverableDetailGapRow(gap)) {
+      continue;
+    }
     if (typeof gap.reason !== "string" || !SOURCE_PRESSURE_GAP_REASONS.has(gap.reason)) {
       continue;
     }
@@ -2906,7 +2951,12 @@ export function createController(opts: ControllerOptions = {}): Controller {
     await Promise.all(
       [...connectorIds].map(async (connectorId) => {
         try {
-          const gaps = (await detailGapStore.listPendingGapsForConnector(connectorId, { limit: 200 })) ?? [];
+          const gaps =
+            (await detailGapStore.listPendingGapsForConnector(connectorId, {
+              limit: 200,
+              reasons: [...SOURCE_PRESSURE_GAP_REASONS],
+              recoverableOnly: true,
+            })) ?? [];
           bucketPressureGapsByInstance(gaps, connectorId, ensure);
         } catch (err) {
           console.error(
@@ -3467,11 +3517,20 @@ export function createController(opts: ControllerOptions = {}): Controller {
     connectorId: string,
     connectorInstanceId: string
   ): Promise<PendingPressureGap[]> {
+    // Eligibility (this connection, pressure reasons, recoverable) is applied in the
+    // store before the 200-row LIMIT, so older permanent or non-pressure rows, or
+    // another connection's rows, cannot hide this connection's pressure gaps.
     const pendingGapRows = await Promise.resolve(
-      detailGapStore.listPendingGapsForConnector(connectorId, { limit: 200 })
+      detailGapStore.listPendingGapsForConnector(connectorId, {
+        connectorInstanceId,
+        limit: 200,
+        reasons: [...SOURCE_PRESSURE_GAP_REASONS],
+        recoverableOnly: true,
+      })
     );
     const pendingPressureRows = pendingGapRows
       .filter((row) => (row.connector_instance_id || connectorId) === connectorInstanceId)
+      .filter(isRecoverableDetailGapRow)
       .filter((row) => typeof row.reason === "string" && SOURCE_PRESSURE_GAP_REASONS.has(row.reason));
     return filterFreshPressureRows(pendingPressureRows, Date.now()).map((row) =>
       projectPendingPressureGap(row, row.reason as string)
@@ -3522,31 +3581,104 @@ export function createController(opts: ControllerOptions = {}): Controller {
 
   async function listPendingGapsForContinuation(
     connectorId: string,
-    connectorInstanceId: string
+    connectorInstanceId: string,
+    readOptions: {
+      readonly after?: { readonly createdAt: string; readonly gapId: string };
+      readonly limit?: number;
+      readonly recoverableOnly?: boolean;
+    } = {}
   ): Promise<readonly PendingDetailGapRow[]> {
+    // `connectorInstanceId` is passed to BOTH reads so the connector-wide fallback also
+    // scopes to this connection in SQL, before the LIMIT.
+    const options = { connectorInstanceId, limit: RECOVERY_CONTINUATION_PENDING_READ_LIMIT, ...readOptions };
     if (detailGapStore.listPendingGapsForConnectorInstance) {
       return await Promise.resolve(
-        detailGapStore.listPendingGapsForConnectorInstance(connectorId, connectorInstanceId, {
-          limit: RECOVERY_CONTINUATION_PENDING_READ_LIMIT,
-        })
+        detailGapStore.listPendingGapsForConnectorInstance(connectorId, connectorInstanceId, options)
       );
     }
-    const rows = await Promise.resolve(
-      detailGapStore.listPendingGapsForConnector(connectorId, { limit: RECOVERY_CONTINUATION_PENDING_READ_LIMIT })
-    );
+    const rows = await Promise.resolve(detailGapStore.listPendingGapsForConnector(connectorId, options));
     return rows.filter((row) => (row.connector_instance_id || connectorId) === connectorInstanceId);
+  }
+
+  // An explicit recovery-only request is a request to refetch pending detail
+  // gaps. When the connection's ONLY pending gaps are permanent source loss
+  // (`retryable: false`) there is nothing to refetch, and a runtime must not
+  // request or offer a refetch of such a gap: refuse, rather than silently run an
+  // ordinary collection labelled as gap recovery. No pending-gap evidence at all
+  // keeps the existing behavior.
+  async function assertRecoveryOnlyHasRecoverableWork(connectorId: string, connectorInstanceId: string): Promise<void> {
+    // Evidence of "pending exists AND recoverable is absent", not an every() over a
+    // truncated diagnostic page: the recoverable read applies eligibility in SQL
+    // before its LIMIT, and only an empty result makes the second, any-pending read.
+    const recoverable = await listPendingGapsForContinuation(connectorId, connectorInstanceId, {
+      limit: 1,
+      recoverableOnly: true,
+    });
+    if (recoverable.some(isRecoverableDetailGapRow)) {
+      return;
+    }
+    const anyPending = await listPendingGapsForContinuation(connectorId, connectorInstanceId, { limit: 1 });
+    if (anyPending.length > 0) {
+      throw new ControllerError(
+        "Recovery-only run refused: every pending detail gap is permanent source loss (non-retryable) and cannot be refetched.",
+        "invalid_request",
+        { recoveryAdmissionReason: "permanent_loss" }
+      );
+    }
   }
 
   async function hasEligibleNonPressureRecoveryWork(
     connectorId: string,
     connectorInstanceId: string
   ): Promise<boolean> {
-    const rows = await listPendingGapsForContinuation(connectorId, connectorInstanceId);
+    // Eligibility is `resolveRecoveryAdmission` over a row, which depends on the row's
+    // recovery class, its own retry floor and its work domain, so no fixed-size page of
+    // the OLDEST recoverable rows can decide it: they may all be retryable pressure,
+    // still inside their floor, or owner-required / connector-defect. Walk the
+    // connection's recoverable pending gaps in stable keyset pages until an admissible
+    // non-pressure row is found or the pending set is proven exhausted (a short page).
     const nowMs = Date.now();
-    return rows.some((row) => {
-      const classification = classifyRecoveryGap(row);
-      return classification.isNonPressureRecovery && resolveRecoveryAdmission(row, { nowMs }).ok;
-    });
+    let after: { createdAt: string; gapId: string } | undefined;
+    for (;;) {
+      // biome-ignore lint/performance/noAwaitInLoops: each page depends on the previous cursor.
+      const page = await listPendingGapsForContinuation(connectorId, connectorInstanceId, {
+        recoverableOnly: true,
+        ...(after ? { after } : {}),
+      });
+      if (
+        page.some((row) => {
+          const classification = classifyRecoveryGap(row);
+          return classification.isNonPressureRecovery && resolveRecoveryAdmission(row, { nowMs }).ok;
+        })
+      ) {
+        return true;
+      }
+      if (page.length < RECOVERY_CONTINUATION_PENDING_READ_LIMIT) {
+        return false;
+      }
+      // A FULL page of inadmissible rows only proves "no eligible row yet". The next
+      // cursor must come from the store and must strictly advance; an adapter that gives
+      // no cursor, ignores `after`, or answers with a backwards / repeating cursor leaves
+      // rows beyond this page unexamined. That is scan uncertainty, not absence: it must
+      // never be read as "no eligible work" (which would pick forward collection or stop
+      // a continuation), so it is reported as its own error.
+      const last = page[page.length - 1];
+      if (!(last?.created_at && last.gap_id)) {
+        throw recoveryScanUnsupported(
+          connectorId,
+          connectorInstanceId,
+          "a full page carried no created_at/gap_id cursor"
+        );
+      }
+      if (after && !gapCursorAdvances(after, { createdAt: last.created_at, gapId: last.gap_id })) {
+        throw recoveryScanUnsupported(
+          connectorId,
+          connectorInstanceId,
+          "the page cursor did not strictly advance (the store ignored `after`, repeated or went backwards)"
+        );
+      }
+      after = { createdAt: last.created_at, gapId: last.gap_id };
+    }
   }
 
   // Forward-evidence-debt probe for `resolveEffectiveRecoveryOnly` (mirrors
@@ -3605,6 +3737,9 @@ export function createController(opts: ControllerOptions = {}): Controller {
     options: RunNowOptions,
     scopedToResources: boolean
   ): Promise<boolean> {
+    if (options.recoveryOnly === true) {
+      await assertRecoveryOnlyHasRecoverableWork(connectorId, connectorInstanceId);
+    }
     const nonPressureRecoveryEligible =
       options.recoveryOnly === undefined && !scopedToResources
         ? await hasEligibleNonPressureRecoveryWork(connectorId, connectorInstanceId)
@@ -3653,8 +3788,19 @@ export function createController(opts: ControllerOptions = {}): Controller {
       );
       return;
     }
-    if (!(await hasEligibleNonPressureRecoveryWork(input.connectorId, input.connectorInstanceId))) {
-      return;
+    try {
+      if (!(await hasEligibleNonPressureRecoveryWork(input.connectorId, input.connectorInstanceId))) {
+        return;
+      }
+    } catch (err) {
+      // Scan uncertainty is not "drained": report it by its own code and start nothing
+      // (no continuation, and never forward collection). Any other failure keeps its
+      // existing path.
+      if (err instanceof ControllerError && err.code === "recovery_scan_unsupported") {
+        log.warn?.(`[controller] recovery continuation not started (${err.code}): ${err.message}`);
+        return;
+      }
+      throw err;
     }
     // Manifest automation policy gate. A recovery continuation is started BY
     // THE CONTROLLER, not by an owner gesture: it is an unattended automatic

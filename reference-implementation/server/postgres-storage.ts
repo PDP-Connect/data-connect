@@ -2614,6 +2614,7 @@ async function bootstrapPostgresSchemaOnce({
         lease_id TEXT,
         lease_attempted INTEGER NOT NULL DEFAULT 0,
         lease_expires_at TEXT,
+        retryable INTEGER,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -4846,6 +4847,10 @@ async function migratePostgresConnectorDetailGapInstanceColumns(client: PoolClie
   }
   if (!(await hasPostgresColumn(client, "connector_detail_gaps", "lease_expires_at"))) {
     await client.query("ALTER TABLE connector_detail_gaps ADD COLUMN lease_expires_at TEXT");
+  }
+  // Additive, nullable, never backfilled: NULL = legacy / unclassified keeps its old eligibility.
+  if (!(await hasPostgresColumn(client, "connector_detail_gaps", "retryable"))) {
+    await client.query("ALTER TABLE connector_detail_gaps ADD COLUMN retryable INTEGER");
   }
   await client.query(`
     UPDATE connector_detail_gaps
