@@ -2,7 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
+import { copyFile, mkdtemp, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { promisify } from "node:util";
 import test from "node:test";
 import { setImmediate as yieldImmediate } from "node:timers/promises";
 
@@ -35,9 +40,20 @@ import { configureSemanticBackend } from "../server/search-semantic.ts";
 import { isSearchIndexScopeDirty } from "../server/stores/search-index-dirty-store.ts";
 import { dedicatedPostgresTestUrl } from "./helpers/dedicated-postgres-test-url.ts";
 import { withTemporaryPostgresDatabase } from "./helpers/postgres-temp-database.ts";
+import { createPostgresSchedulerStore } from "../server/stores/scheduler-store.ts";
+import {
+  DEFAULT_COLLECTOR_OUTBOX_POLICY,
+  drainCollectorOutbox,
+  runCollectorConnector,
+  transformRecordsToCollectorEnvelopes,
+} from "../../packages/collector-runtime/src/collector-runner.ts";
+import { LocalDeviceClient } from "../../packages/collector-runtime/src/local-device-client.ts";
+import { buildLocalDeviceOutboxId, LocalDeviceOutbox } from "../../packages/collector-runtime/src/local-device-outbox.ts";
 
 const DEDICATED_POSTGRES_URL = dedicatedPostgresTestUrl(process.env.PDPP_TEST_POSTGRES_URL);
+const RUN_CHECKPOINT_RESTORE_DRILL = process.env.PDPP_RUN_CHECKPOINT_RESTORE_DRILL === "1";
 const PROTOCOL_HEADERS = { "X-PDPP-Collector-Protocol": COLLECTOR_PROTOCOL_VERSION };
+const execFileAsync = promisify(execFile);
 let unique = 0;
 
 function startServer(
@@ -391,6 +407,423 @@ async function withTemporaryPostgres(fn: (url: string) => Promise<void>): Promis
     fn
   );
 }
+
+test(
+  "Postgres restore to S followed by a pending local checkpoint must not skip the accepted record lost by restore",
+  {
+    skip: !RUN_CHECKPOINT_RESTORE_DRILL
+      ? "set PDPP_RUN_CHECKPOINT_RESTORE_DRILL=1 to run the Docker-backed PostgreSQL dump/restore drill"
+      : DEDICATED_POSTGRES_URL ? false : "PDPP_TEST_POSTGRES_URL unset or non-dedicated",
+  },
+  async (t) => {
+    const workDir = await mkdtemp(join(tmpdir(), "pdpp-checkpoint-restore-"));
+    const dumpPath = join(workDir, "server-state.dump");
+    await withTemporaryPostgres(async (databaseUrl) => {
+      const parsedUrl = new URL(databaseUrl);
+      const databaseName = decodeURIComponent(parsedUrl.pathname.slice(1));
+      const postgresContainer = process.env.PDPP_TEST_POSTGRES_RESTORE_CONTAINER;
+      assert.ok(postgresContainer, "PDPP_TEST_POSTGRES_RESTORE_CONTAINER must name the disposable test container");
+      const containerDumpPath = `/tmp/pdpp-checkpoint-restore-${process.pid}-${unique}.dump`;
+      let server: CloseableTestServer | null = null;
+      let outbox: LocalDeviceOutbox | null = null;
+      try {
+        const startPostgresServer = async () => {
+          initDb(":memory:");
+          return startServer({
+            asPort: 0,
+            databaseUrl,
+            dbPath: ":memory:",
+            quiet: true,
+            rsPort: 0,
+            storageBackend: "postgres",
+          });
+        };
+        server = await startPostgresServer();
+        const asUrl = `http://localhost:${server.asPort}`;
+        const device = await enrollDevice(asUrl, `checkpoint-restore-${process.pid}-${Date.now()}`);
+        const client = new LocalDeviceClient({
+          baseUrl: asUrl,
+          deviceId: device.device_id,
+          deviceToken: device.device_token,
+        });
+        const queuePath = join(workDir, "local-outbox.sqlite");
+        outbox = new LocalDeviceOutbox({ path: queuePath });
+
+        const enqueueRecords = (batchId: string, batchSeq: number, recordIds: readonly string[]) => {
+          const records = transformRecordsToCollectorEnvelopes({
+            batchId,
+            batchSeq,
+            connectorId: device.connector_id,
+            deviceId: device.device_id,
+            messages: recordIds.map((recordId) => ({
+                data: { id: recordId },
+                emitted_at: "2026-10-15T12:00:00.000Z",
+                key: recordId,
+                stream: "messages",
+                type: "RECORD",
+              })),
+            sourceInstanceId: device.source_instance_id,
+          });
+          outbox?.enqueue({
+            id: buildLocalDeviceOutboxId({ kind: "record_batch", parts: [batchId], sourceInstanceId: device.source_instance_id }),
+            kind: "record_batch",
+            payload: {
+              batchId,
+              batchSeq,
+              connectorId: device.connector_id,
+              deviceId: device.device_id,
+              records,
+              sourceInstanceId: device.source_instance_id,
+            },
+            sourceInstanceId: device.source_instance_id,
+          });
+        };
+        const drainOne = () =>
+          drainCollectorOutbox({
+            client,
+            connectorId: device.connector_id,
+            holderId: "restore-checkpoint-drill",
+            outbox: mustExist(outbox, "local SQLite outbox is open"),
+            policy: { ...DEFAULT_COLLECTOR_OUTBOX_POLICY, maxDrainIterations: 1 },
+            sourceInstanceId: device.source_instance_id,
+          });
+
+        await client.putSourceInstanceState({
+          sourceInstanceId: device.source_instance_id,
+          state: { messages: { cursor: "cursor-S" } },
+        });
+        assert.equal((await postgresQuery("SELECT count(*)::integer AS count FROM records")).rows[0]?.count, 0);
+
+        // A custom-format dump captures restore point S with collectors stopped. The test
+        // restores this database after it accepts the later batch at T.
+        await execFileAsync("docker", [
+          "exec",
+          "--user",
+          "postgres",
+          postgresContainer,
+          "pg_dump",
+          "--format=custom",
+          `--file=${containerDumpPath}`,
+          `--dbname=${databaseName}`,
+        ]);
+        await execFileAsync("docker", ["cp", `${postgresContainer}:${containerDumpPath}`, dumpPath]);
+        const recoveredRecordIds = ["record-after-S-1", "record-after-S-2"];
+        enqueueRecords("batch-after-S", 2, recoveredRecordIds);
+        assert.equal((await drainOne()).sentByKind.record_batch, 1, "later batch is durably accepted before restore");
+        assert.equal(
+          (await postgresQuery(
+            "SELECT status FROM device_ingest_batch_outcomes WHERE device_id = $1 AND batch_id = $2",
+            [device.device_id, "batch-after-S"]
+          )).rows[0]?.status,
+          "accepted",
+          "later batch has a durable accepted receipt before the restore"
+        );
+        assert.deepEqual((await postgresQuery(
+          "SELECT record_key FROM records WHERE connector_instance_id = $1 ORDER BY record_key",
+          [device.connector_instance_id]
+        )).rows.map((row) => String(row.record_key)), recoveredRecordIds, "both records exist before restore");
+        const stateBeforeRestore = await client.getSourceInstanceState({ sourceInstanceId: device.source_instance_id });
+        assert.equal((stateBeforeRestore.state.messages as { cursor?: string }).cursor, "cursor-S");
+        assert.ok(stateBeforeRestore.state.$collection_scope, "collection boundary remains present at restore point S");
+        outbox.enqueue({
+          id: buildLocalDeviceOutboxId({
+            kind: "checkpoint",
+            parts: [device.connector_id, { messages: { cursor: "cursor-T" } }],
+            sourceInstanceId: device.source_instance_id,
+          }),
+          kind: "checkpoint",
+          payload: {
+            connectorId: device.connector_id,
+            sourceInstanceId: device.source_instance_id,
+            state: { messages: { cursor: "cursor-T" } },
+          },
+          sourceInstanceId: device.source_instance_id,
+        });
+
+        outbox.close();
+        outbox = null;
+        const quarantinePath = join(workDir, "quarantined-pending-outbox.sqlite");
+        await rename(queuePath, quarantinePath);
+        assert.equal(await stat(queuePath).then(() => true, () => false), false, "old outbox was moved aside");
+        assert.ok((await stat(quarantinePath)).size > 0, "pending checkpoint outbox is preserved in quarantine");
+
+        await closeServer(server);
+        server = null;
+        await closePostgresStorage();
+        closeDb();
+        await execFileAsync("docker", ["cp", dumpPath, `${postgresContainer}:${containerDumpPath}`]);
+        await execFileAsync("docker", [
+          "exec",
+          "--user",
+          "postgres",
+          postgresContainer,
+          "pg_restore",
+          "--clean",
+          "--if-exists",
+          "--no-owner",
+          "--no-privileges",
+          "--exit-on-error",
+          `--dbname=${databaseName}`,
+          containerDumpPath,
+        ]);
+
+        server = await startPostgresServer();
+        const restoredClient = new LocalDeviceClient({
+          baseUrl: `http://localhost:${server.asPort}`,
+          deviceId: device.device_id,
+          deviceToken: device.device_token,
+        });
+        const lostRecordRows = await postgresQuery(
+          "SELECT record_key FROM records WHERE connector_instance_id = $1 AND record_key = ANY($2)",
+          [device.connector_instance_id, recoveredRecordIds]
+        );
+        const lostReceiptRows = await postgresQuery(
+          "SELECT status FROM device_ingest_batch_outcomes WHERE device_id = $1 AND batch_id = $2",
+          [device.device_id, "batch-after-S"]
+        );
+        assert.equal(lostRecordRows.rowCount, 0, "restore to S removes the later accepted record");
+        assert.equal(lostReceiptRows.rowCount, 0, "restore to S removes the later accepted receipt");
+
+        const resetStore = createPostgresSchedulerStore();
+        const resetRun = (runId: string) => resetStore.resetStateAndUpsertActiveRun?.({
+          connector_id: device.connector_id,
+          connector_instance_id: device.connector_instance_id,
+          run_generation: unique++,
+          run_id: runId,
+          scenario_id: "restore-checkpoint-drill",
+          started_at: new Date().toISOString(),
+          trace_id: runId,
+        });
+        const unsafeOutboxPath = join(workDir, "unsafe-replay-outbox.sqlite");
+        await copyFile(quarantinePath, unsafeOutboxPath);
+        const unsafeOutbox = new LocalDeviceOutbox({ path: unsafeOutboxPath });
+        assert.equal(await resetRun("restore-reset-pending-checkpoint"), true);
+        const resetBeforePendingDrain = await restoredClient.getSourceInstanceState({ sourceInstanceId: device.source_instance_id });
+        assert.deepEqual(resetBeforePendingDrain.state, { $collection_scope: stateBeforeRestore.state.$collection_scope });
+        const drain = await drainCollectorOutbox({
+          client: restoredClient,
+          connectorId: device.connector_id,
+          holderId: "restore-checkpoint-drain",
+          outbox: unsafeOutbox,
+          policy: DEFAULT_COLLECTOR_OUTBOX_POLICY,
+          sourceInstanceId: device.source_instance_id,
+        });
+        assert.equal(drain.sentByKind.checkpoint, 1);
+        unsafeOutbox.close();
+        const restoredState = await restoredClient.getSourceInstanceState({ sourceInstanceId: device.source_instance_id });
+        const recordRows = await postgresQuery(
+          `SELECT record_key FROM records
+            WHERE connector_instance_id = $1 AND stream = 'messages'
+            ORDER BY record_key`,
+          [device.connector_instance_id]
+        );
+        const observed = {
+          cursor: (restoredState.state.messages as { cursor?: string } | undefined)?.cursor,
+          recordKeys: recordRows.rows.map((row) => String(row.record_key)),
+        };
+
+        assert.equal(observed.cursor, "cursor-T", "pending checkpoint advances the restored cursor to T");
+        assert.deepEqual(observed.recordKeys, [], "no lost record was replayed by draining the checkpoint");
+        console.log("unsafe-reset-with-pending-checkpoint", JSON.stringify({
+          cursor: observed.cursor,
+          lostRecordRows: lostRecordRows.rowCount,
+          lostReceiptRows: lostReceiptRows.rowCount,
+          recordKeys: observed.recordKeys,
+        }));
+
+        const unsafeFixturePath = join(workDir, "unsafe-resume-fixture.mjs");
+        await writeFile(unsafeFixturePath, `
+          let input = "";
+          await new Promise((resolve) => process.stdin.on("data", (chunk) => {
+            input += chunk;
+            if (input.includes("\\n")) resolve();
+          }));
+          const start = JSON.parse(input.split("\\n")[0]);
+          const ids = start.state?.messages?.cursor === "cursor-T" ? [] : ["record-after-S-1", "record-after-S-2"];
+          for (const id of ids) process.stdout.write(JSON.stringify({
+            type: "RECORD", stream: "messages", key: id, data: { id }, emitted_at: "2026-10-15T12:00:00.000Z",
+          }) + "\\n");
+          process.stdout.write(JSON.stringify({ type: "DONE", status: "succeeded", records_emitted: ids.length }) + "\\n");
+        `);
+        const unsafeResume = await runCollectorConnector({
+          baseUrl: `http://localhost:${server.asPort}`,
+          connector: {
+            args: [unsafeFixturePath], command: "node", connector_id: device.connector_id,
+            protocol_capabilities: [], runtime_requirements: { bindings: {} }, streams: ["messages"],
+          },
+          deviceId: device.device_id, deviceToken: device.device_token,
+          executionRoot: await realpath(workDir), queuePath: unsafeOutboxPath,
+          sourceInstanceId: device.source_instance_id,
+        });
+        assert.equal((unsafeResume.priorState?.messages as { cursor?: string })?.cursor, "cursor-T");
+        assert.equal(unsafeResume.done?.status, "succeeded");
+        assert.equal(unsafeResume.recordsQueued, 0, "resuming at T skips the two available source records");
+        assert.equal((await postgresQuery(
+          "SELECT count(*)::integer AS count FROM records WHERE connector_instance_id = $1",
+          [device.connector_instance_id]
+        )).rows[0]?.count, 0, "the unsafe collector run leaves both restored-away records missing");
+
+        await t.test("quarantining the pending outbox and collecting from reset state restores the exact record set", async () => {
+          await closeServer(server!);
+          server = null;
+          await closePostgresStorage();
+          closeDb();
+          await execFileAsync("docker", ["cp", dumpPath, `${postgresContainer}:${containerDumpPath}`]);
+          await execFileAsync("docker", [
+            "exec", "--user", "postgres", postgresContainer, "pg_restore", "--clean", "--if-exists",
+            "--no-owner", "--no-privileges", "--exit-on-error", `--dbname=${databaseName}`, containerDumpPath,
+          ]);
+          server = await startPostgresServer();
+          const mitigationClient = new LocalDeviceClient({
+            baseUrl: `http://localhost:${server.asPort}`,
+            deviceId: device.device_id,
+            deviceToken: device.device_token,
+          });
+          assert.equal(await resetRun("restore-reset-quarantined-outbox"), true);
+          assert.deepEqual(
+            (await mitigationClient.getSourceInstanceState({ sourceInstanceId: device.source_instance_id })).state,
+            { $collection_scope: stateBeforeRestore.state.$collection_scope },
+            "reset clears stream cursors and preserves the collection boundary before recollection"
+          );
+
+          const fixturePath = join(workDir, "restore-recollect-fixture.mjs");
+          await writeFile(fixturePath, `
+            let input = "";
+            await new Promise((resolve) => process.stdin.on("data", (chunk) => {
+              input += chunk;
+              if (input.includes("\\n")) resolve();
+            }));
+            const start = JSON.parse(input.split("\\n")[0]);
+            const mode = process.argv[2];
+            const cursor = start.state?.messages?.cursor;
+            const stateMatchesMode = mode === "expect-reset" ? cursor === undefined : cursor === "cursor-T";
+            if (stateMatchesMode) {
+              for (const id of ["record-after-S-1", "record-after-S-2"]) {
+                process.stdout.write(JSON.stringify({
+                  type: "RECORD", stream: "messages", key: id, data: { id }, emitted_at: "2026-10-15T12:00:00.000Z",
+                }) + "\\n");
+              }
+              process.stdout.write(JSON.stringify({ type: "STATE", stream: "messages", cursor: { cursor: "cursor-T" } }) + "\\n");
+              process.stdout.write(JSON.stringify({ type: "DONE", status: "succeeded", records_emitted: 2 }) + "\\n");
+            } else {
+              process.stdout.write(JSON.stringify({ type: "DONE", status: "failed", records_emitted: 0 }) + "\\n");
+            }
+          `);
+          const recollect = await runCollectorConnector({
+            baseUrl: `http://localhost:${server!.asPort}`,
+            connector: {
+              args: [fixturePath, "expect-reset"],
+              command: "node",
+              connector_id: device.connector_id,
+              protocol_capabilities: [],
+              runtime_requirements: { bindings: {} },
+              streams: ["messages"],
+            },
+            deviceId: device.device_id,
+            deviceToken: device.device_token,
+            executionRoot: await realpath(workDir),
+            queuePath: join(workDir, "fresh-outbox-first.sqlite"),
+            sourceInstanceId: device.source_instance_id,
+          });
+          assert.deepEqual(recollect.priorState, { $collection_scope: stateBeforeRestore.state.$collection_scope });
+          assert.equal(recollect.recordsQueued, 2, "fixture recollects both lost records from reset START.state");
+          assert.equal(recollect.done?.status, "succeeded");
+          console.log("recollect-run-result", JSON.stringify({
+            flushedState: recollect.flushedState,
+            sentBatches: recollect.sentBatches,
+            statePutFailed: recollect.statePutFailed,
+          }));
+
+          const recoveredRows = await postgresQuery(
+            `SELECT record_key FROM records
+              WHERE connector_instance_id = $1 AND stream = 'messages'
+              ORDER BY record_key`,
+            [device.connector_instance_id]
+          );
+          const recoveredReceipt = await postgresQuery(
+            `SELECT status FROM device_ingest_batch_outcomes
+              WHERE device_id = $1 AND source_instance_id = $2 AND status = 'accepted'`,
+            [device.device_id, device.source_instance_id]
+          );
+          const recoveredState = await mitigationClient.getSourceInstanceState({ sourceInstanceId: device.source_instance_id });
+          const mitigationObserved = {
+            cursor: (recoveredState.state.messages as { cursor?: string } | undefined)?.cursor,
+            recordKeys: recoveredRows.rows.map((row) => String(row.record_key)),
+            receipt: recoveredReceipt.rows[0]?.status,
+          };
+          assert.deepEqual(mitigationObserved, {
+            cursor: "cursor-T",
+            recordKeys: recoveredRecordIds,
+            receipt: "accepted",
+          });
+          assert.equal(mitigationObserved.recordKeys.length - observed.recordKeys.length, 2, "recollection recovers both records absent after restore");
+          const replay = await runCollectorConnector({
+            baseUrl: `http://localhost:${server!.asPort}`,
+            connector: {
+              args: [fixturePath, "replay"],
+              command: "node",
+              connector_id: device.connector_id,
+              protocol_capabilities: [],
+              runtime_requirements: { bindings: {} },
+              streams: ["messages"],
+            },
+            deviceId: device.device_id,
+            deviceToken: device.device_token,
+            executionRoot: await realpath(workDir),
+            queuePath: join(workDir, "fresh-outbox-replay.sqlite"),
+            sourceInstanceId: device.source_instance_id,
+          });
+          assert.equal(replay.recordsQueued, 2);
+          assert.equal(replay.done?.status, "succeeded");
+          assert.equal(replay.sentBatches, 1, "replayed records are accepted by the real backend");
+          assert.equal(replay.statePutFailed, false);
+          assert.equal((await postgresQuery(
+            "SELECT count(*)::integer AS count FROM device_ingest_batch_outcomes WHERE device_id = $1 AND source_instance_id = $2 AND status = 'accepted'",
+            [device.device_id, device.source_instance_id]
+          )).rows[0]?.count, 1, "identical replay keeps the accepted deterministic batch receipt");
+          assert.deepEqual(
+            (await postgresQuery(
+              `SELECT record_key FROM records WHERE connector_instance_id = $1 AND stream = 'messages' ORDER BY record_key`,
+              [device.connector_instance_id]
+            )).rows.map((row) => String(row.record_key)),
+            recoveredRecordIds,
+            "replaying both canonical records leaves the exact two-record set"
+          );
+          console.log("quarantine-reset-recollect-pass", JSON.stringify({
+            cursor: mitigationObserved.cursor,
+            quarantinedOutboxPreserved: true,
+            recordKeys: mitigationObserved.recordKeys,
+            receipt: mitigationObserved.receipt,
+          }));
+        });
+
+        await t.test(
+          "a pending checkpoint after restore/reset does not skip the accepted record lost by restore",
+          {
+            todo: "known gap: restoring PostgreSQL to S removes the accepted records and receipt from S-to-T, but draining the still-pending SQLite checkpoint after reset advances the cursor to T and suppresses their recollection",
+          },
+          () => {
+            assert.deepEqual(observed.recordKeys, recoveredRecordIds);
+          }
+        );
+      } finally {
+        outbox?.close();
+        if (server) await closeServer(server);
+        await closePostgresStorage().catch(() => undefined);
+        closeDb();
+        await execFileAsync("docker", [
+          "exec",
+          "--user",
+          "postgres",
+          postgresContainer,
+          "rm",
+          "-f",
+          containerDumpPath,
+        ]).catch(() => undefined);
+      }
+    }).finally(() => rm(workDir, { force: true, recursive: true }));
+  }
+);
 
 type BackendKind = "sqlite" | "postgres";
 
