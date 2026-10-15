@@ -3088,6 +3088,18 @@ async function bootstrapPostgresSchemaOnce({
       CREATE UNIQUE INDEX IF NOT EXISTS uniq_blobs_sha256
         ON blobs(sha256);
 
+      CREATE TABLE IF NOT EXISTS rs_opaque_cursors (
+        token_digest TEXT PRIMARY KEY,
+        kind TEXT NOT NULL CHECK (kind IN ('page', 'changes_page', 'changes_since')),
+        scope_digest TEXT NOT NULL,
+        context_digest TEXT NOT NULL,
+        internal_cursor TEXT NOT NULL,
+        created_at BIGINT NOT NULL,
+        expires_at BIGINT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_rs_opaque_cursors_expiry ON rs_opaque_cursors(expires_at);
+      CREATE INDEX IF NOT EXISTS idx_rs_opaque_cursors_scope ON rs_opaque_cursors(scope_digest, kind, created_at);
+
       CREATE TABLE IF NOT EXISTS spine_events (
         event_id TEXT PRIMARY KEY,
         event_seq BIGSERIAL UNIQUE,

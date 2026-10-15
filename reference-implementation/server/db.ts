@@ -1894,6 +1894,19 @@ CREATE TABLE IF NOT EXISTS grant_connector_state (
   PRIMARY KEY(grant_id, connector_instance_id, stream)
 );
 
+-- Opaque public read cursors hold compact metadata, never record payloads.
+CREATE TABLE IF NOT EXISTS rs_opaque_cursors (
+  token_digest    TEXT PRIMARY KEY,
+  kind            TEXT NOT NULL CHECK (kind IN ('page', 'changes_page', 'changes_since')),
+  scope_digest    TEXT NOT NULL,
+  context_digest  TEXT NOT NULL,
+  internal_cursor TEXT NOT NULL,
+  created_at      INTEGER NOT NULL,
+  expires_at      INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_rs_opaque_cursors_expiry ON rs_opaque_cursors(expires_at);
+CREATE INDEX IF NOT EXISTS idx_rs_opaque_cursors_scope ON rs_opaque_cursors(scope_digest, kind, created_at);
+
 CREATE TABLE IF NOT EXISTS connector_detail_gaps (
   gap_id              TEXT PRIMARY KEY,
   connector_id        TEXT NOT NULL,

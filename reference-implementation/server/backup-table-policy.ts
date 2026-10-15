@@ -346,6 +346,11 @@ export const BACKUP_TABLE_INVENTORY: Record<string, BackupTableInventoryEntry> =
     classification: "backup_required",
     reason: "Retained-size rows are rebuildable projections.",
   },
+  rs_opaque_cursors: {
+    classification: "backup_required",
+    reason:
+      "Opaque read cursors and sync checkpoints held for clients. Loss forces a client to restart pagination or sync from beginning (invalid_cursor / cursor_expired); no rebuild oracle exists.",
+  },
   run_history: {
     classification: "backup_required",
     reason: "Terminal run history is durable operational evidence.",
