@@ -1,0 +1,28 @@
+{
+  "concurrency": 8,
+  "errors": 0,
+  "error_samples": [],
+  "grants": {
+    "count": 20000,
+    "mean_ms_per_step": {
+      "approve": 37.3,
+      "login_per_parent": 0.4,
+      "par": 9.8,
+      "select_incl_registry_check": 14.5
+    },
+    "per_second": 128.6,
+    "seconds": 155.5
+  },
+  "label": "c8-20k",
+  "par_user_code_collision_retries": 167,
+  "projection_hours_for_980200_grants": 2.12,
+  "refusals": {
+    "count": 12000,
+    "per_second": 287.4,
+    "reasons": {
+      "authority_suspended": 10000,
+      "no_relationship": 2000
+    },
+    "seconds": 41.7
+  }
+}
