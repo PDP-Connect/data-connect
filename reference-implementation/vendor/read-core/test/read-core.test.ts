@@ -74,14 +74,15 @@ test("buildRecordContentLadder creates stable field-window continuation descript
     },
   });
 
-  assert.equal(ladder.id, "cin_a/messages:m1");
-  assert.equal(ladder.connection_id, "cin_a");
+  assert.equal(ladder.id, "m1");
+  assert.equal(ladder.instance_id, "cin_a");
   assert.equal(ladder.stream, "messages");
-  assert.equal(ladder.record_id, "m1");
   assert.equal(ladder.field_windows.length, 2);
   assert.equal(ladder.field_windows[0].read.tool, "read_record_field");
   assert.deepEqual(ladder.field_windows[0].read.args, {
-    id: "cin_a/messages:m1",
+    id: "m1",
+    instance_id: "cin_a",
+    stream: "messages",
     field_path: "text",
     offset_chars: 0,
     limit_chars: 2048,
@@ -94,15 +95,18 @@ test("buildRecordContentLadder creates stable field-window continuation descript
 
 test("content ladder handles are state, not authorization-bearing provider paths", () => {
   const uri = defaultEncodeResourceUri("field-window", {
-    connection_id: "cin_a",
+    instance_id: "cin_a",
+    id: "m1",
     stream: "messages",
-    record_id: "m1",
     field_path: "text",
   });
 
   assert.match(uri, fieldWindowUriPattern);
   assert.doesNotMatch(uri, recordIdentityPattern);
   assert.doesNotMatch(uri, textSuffixPattern);
+  const payload = decodeContentHandle(uri.replace("pdpp://field-window/", ""), "field-window");
+  assert.equal(payload.instance_id, "cin_a");
+  assert.equal("connection_id" in payload, false);
 });
 
 test("binary fields are metadata-only when record carries server blob affordance", () => {
@@ -153,7 +157,9 @@ test("large text gets a bounded continuation while binary stays metadata-only", 
   assert.deepEqual(ladder.field_windows[0].read, {
     tool: "read_record_field",
     args: {
-      id: "cin_a/files:f2",
+      id: "f2",
+      instance_id: "cin_a",
+      stream: "files",
       field_path: "body",
       offset_chars: 0,
       limit_chars: 2048,
@@ -167,7 +173,9 @@ test("large text gets a bounded continuation while binary stays metadata-only", 
 test("JSON object fields get bounded previews and fetch projection continuation", () => {
   const ladder = buildRecordContentLadder(
     {
-      id: "cin_a/files:f3",
+      id: "f3",
+      instance_id: "cin_a",
+      stream: "files",
       data: {
         profile: { name: "Ada", tags: Array.from({ length: 80 }, (_, i) => `tag-${i}`) },
       },
@@ -184,10 +192,17 @@ test("JSON object fields get bounded previews and fetch projection continuation"
   assert.deepEqual(ladder.json_fields[0].read, {
     tool: "fetch",
     args: {
-      id: "cin_a/files:f3",
+      id: "f3",
+      instance_id: "cin_a",
+      stream: "files",
       fields: ["profile"],
     },
   });
+  const jsonHandle = ladder.json_fields[0].resource_uri.replace("pdpp://json-window/", "");
+  assert.deepEqual(
+    decodeContentHandle(jsonHandle, "json-window"),
+    { v: 1, kind: "json-window", id: "f3", instance_id: "cin_a", stream: "files", field_path: "profile" }
+  );
 });
 
 test("record set ladder is generic and does not infer connector semantics", () => {
@@ -204,6 +219,7 @@ test("record set ladder is generic and does not infer connector semantics", () =
     ladder.records.map((record) => record.stream),
     ["chatgpt.messages", "gmail.messages"]
   );
+  assert.deepEqual(ladder.records.map((record) => record.instance_id), ["cin_a", "cin_a"]);
   assert.ok(ladder.records.every((record) => !("title" in record)));
 });
 
