@@ -2173,11 +2173,18 @@ function requireClient(req: ReqLike, res: ResLike, next: () => void) {
   next();
 }
 
+function requireCoreEndpointToken(req: ReqLike, res: ResLike, next: () => void) {
+  if (req.tokenInfo?.pdpp_token_kind === "mcp_package") {
+    return pdppError(res, 403, "permission_error", "Grant package token cannot access a Core endpoint");
+  }
+  next();
+}
+
 // Accept either a per-grant client token (the normal RS token) or a
 // hosted-MCP grant-package token. The package token is only meaningful at
-// `/mcp`; every other resource-server route stays gated by `requireClient`
-// so package tokens cannot reach REST surfaces. Owner tokens are always
-// rejected — there is no owner-mode MCP.
+// `/mcp`; Core routes use `requireCoreEndpointToken` to reject it explicitly,
+// while owner routes retain their owner-specific authorization. Owner tokens
+// are always rejected — there is no owner-mode MCP.
 function requireClientOrMcpPackage(req: ReqLike, res: ResLike, next: () => void) {
   const kind = req.tokenInfo?.pdpp_token_kind;
   if (kind !== "client" && kind !== "mcp_package") {
@@ -7592,6 +7599,7 @@ function buildRsApp(opts: ServerOpts = {}) {
     rejectMutation,
     rejectState,
     requireClient,
+    requireCoreEndpointToken,
     requireOwner,
     requireToken,
     resolveGrantScopedStateGrant,
@@ -7783,6 +7791,7 @@ function buildRsApp(opts: ServerOpts = {}) {
     projectBindingForWire,
     queryRecordsAcrossBindings,
     rejectQuery,
+    requireCoreEndpointToken,
     requireToken,
     resolveGrantManifest: (tokenInfo: unknown, options: unknown) =>
       resolveGrantManifest(
