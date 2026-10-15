@@ -26,8 +26,10 @@ import { type Lang, langCookie, langHref, pick, requestedLang, resolveLang } fro
 import { SOURCE_ID, STREAM } from "../baseline/lib/manifest.ts";
 import { createClock } from "../reminder-service/lib/clock.ts";
 import { type ClientCredentials, loadOrCreateClientKey, privateKeyJwtClient } from "../reminder-service/lib/oauth.ts";
-import { buildContext as buildMokshaContext } from "../moksha/lib/context.ts";
+import { buildContext as buildMokshaContext, type MokshaContext } from "../moksha/lib/context.ts";
 import { keysFromSecrets } from "../moksha/lib/keys.ts";
+import { SettlementWatcher } from "../moksha/lib/settlement-watch.ts";
+import type { PaymentState } from "../moksha/lib/state.ts";
 import { type GatewayPayer, HttpGatewayPayer, MockPayer, NATIVE_ASSET, ONE_HUNDREDTH_VANA_WEI } from "../reminder-service/lib/payer.ts";
 import { evaluateDueDose, type ImmunizationRecord } from "../reminder-service/lib/schedule.ts";
 import { DEFAULT_CONFIG, ReminderService } from "../reminder-service/lib/service.ts";
@@ -45,6 +47,10 @@ export interface ReminderWebOptions {
   issuer: string;
   publicOrigin: string;
   rsInternal: string;
+  /** VACUNA_PAYER=moksha: settlement poll period (default 60 s; 0 = only on dashboard views). */
+  settlementPollMs?: number;
+  /** VACUNA_PAYER=moksha: a dashboard view polls when the last poll is this old (default 30 s). */
+  settlementStaleMs?: number;
   stateDir: string;
 }
 
@@ -288,6 +294,43 @@ function formatVana(wei: string): string {
   }
 }
 
+function txLink(hash: string, attr: string): string {
+  return `<a href="${esc(`${explorerTxBase()}${hash}`)}" target="_blank" rel="noopener" ${attr}>${esc(`${hash.slice(0, 10)}…`)}</a>`;
+}
+
+/**
+ * Settlement cell of one per-read payment. With the Moksha payer, `moksha`
+ * is that read's entry in the Moksha state (filled by the settlement poller)
+ * and `grantTxHash` the settle tx of the grant fee it carried, if any.
+ */
+export function settlementCell(input: {
+  grantTxHash?: string | null;
+  lang: Lang;
+  moksha?: Pick<PaymentState, "settleTxHash" | "status"> | null;
+  payerName: string;
+  responseJson: string | null;
+  status: string;
+}): string {
+  const t = (es: string, en: string) => pick(input.lang, es, en);
+  const settledHash = input.moksha?.status === "settled" ? input.moksha.settleTxHash : null;
+  const hash = settledHash ?? txHashOf(input.responseJson);
+  const main = settledHash
+    ? `<span data-settled>${t("liquidado", "settled")}</span> · ${txLink(settledHash, "data-tx")}`
+    : hash
+      ? txLink(hash, "data-tx")
+      : input.payerName === "mock"
+        ? t("simulado (sin transacción)", "simulated (no transaction)")
+        : input.status === "accepted"
+          ? t("aceptado, sin transacción todavía", "accepted, no transaction yet")
+          : input.status === "pending"
+            ? t("pendiente", "pending")
+            : t("rechazado", "rejected");
+  const grantFee = input.grantTxHash
+    ? `<small>${t("cuota de la autorización liquidada", "grant fee settled")}: ${txLink(input.grantTxHash, "data-grant-tx")}</small>`
+    : "";
+  return `${main}${grantFee}`;
+}
+
 const STATUS_LABEL: Record<string, readonly [string, string]> = {
   active: ["Activa", "Active"],
   deleted: ["Retirada · datos borrados", "Withdrawn · data deleted"],
@@ -339,7 +382,16 @@ export async function createReminderWeb(opts: ReminderWebOptions) {
   const clientState = await ensureClient();
   const { key, kid } = loadOrCreateClientKey(keyPath);
   const client: ClientCredentials = privateKeyJwtClient({ clientId: clientState.clientId, issuer: opts.issuer, key, kid });
-  const payer = buildPayer(store);
+  const { moksha, payer } = buildPayer(store);
+  // VACUNA_PAYER=moksha: learn each paid read's settle tx from the chain (../moksha/lib/settlement.ts).
+  const settlements = moksha
+    ? new SettlementWatcher({
+        deps: { config: moksha.config, gateway: moksha.gateway, keys: moksha.keys, log: moksha.log, registrar: moksha.registrar, rpc: moksha.rpc, state: moksha.state },
+        intervalMs: opts.settlementPollMs ?? 60_000,
+        staleMs: opts.settlementStaleMs ?? 30_000,
+      })
+    : null;
+  settlements?.start();
   const status = new LifecycleEndpointStatusSource({ client, endpoint: `${opts.asInternal}/pilot/vacuna/grant-lifecycle` });
   const receiptKeyFile = process.env.PDPP_READ_RECEIPTS_KEY_FILE ? `${process.env.PDPP_READ_RECEIPTS_KEY_FILE}.pub` : "";
   const receiptPublicKey =
@@ -574,6 +626,7 @@ ${connected ? childCard(connected, lang, now) : ""}
     // What the service knows now: lifecycle answers, then any deletion they require.
     await panelService.runStatusChecks().catch(() => undefined);
     await panelService.runDeletionSweep().catch(() => undefined);
+    await settlements?.refreshIfStale();
     const now = clock.now();
     const rows = store.db.prepare("SELECT * FROM children ORDER BY child_index").all() as ChildRow[];
     const totals = store.totals();
@@ -616,17 +669,10 @@ ${stat(totals.payments_accepted ?? 0, t(`pagos por lectura aceptados (${payer.na
       .all() as Array<{ amount: string; child_id: string | null; created_at: number; read_id: string; response_json: string | null; status: string }>;
     const paymentRows = payments
       .map((p) => {
-        const hash = txHashOf(p.response_json);
-        const settled = hash
-          ? `<a href="${esc(`${explorerTxBase()}${hash}`)}" target="_blank" rel="noopener" data-tx>${esc(`${hash.slice(0, 10)}…`)}</a>`
-          : payer.name === "mock"
-            ? t("simulado (sin transacción)", "simulated (no transaction)")
-            : p.status === "accepted"
-            ? t("aceptado, sin transacción todavía", "accepted, no transaction yet")
-            : p.status === "pending"
-              ? t("pendiente", "pending")
-              : t("rechazado", "rejected");
-        return `<tr data-payment="${esc(p.read_id)}" data-status="${esc(p.status)}">
+        const mp = moksha?.state.data.payments[p.read_id.toLowerCase()] ?? null;
+        const grantTxHash = mp?.opType === "grant" ? (moksha?.state.data.children[mp.childId]?.grantChain?.settleTxHash ?? null) : null;
+        const settled = settlementCell({ grantTxHash, lang, moksha: mp, payerName: payer.name, responseJson: p.response_json, status: p.status });
+        return `<tr data-payment="${esc(p.read_id)}" data-status="${esc(p.status)}"${mp?.status === "settled" ? ' data-settlement="settled"' : ""}>
 <td data-label="${t("Lectura", "Read")}">${esc(`${p.read_id.slice(0, 10)}…`)}<small>${esc(p.child_id ?? "")}</small></td>
 <td data-label="${t("Monto", "Amount")}">${esc(formatVana(p.amount))}</td>
 <td data-label="${t("Cuándo", "When")}">${esc(formatMoment(p.created_at, lang))}</td>
@@ -635,7 +681,11 @@ ${stat(totals.payments_accepted ?? 0, t(`pagos por lectura aceptados (${payer.na
       .join("");
     const paymentsTable = payments.length
       ? `<h2 style="font-size:18px;margin:28px 0 10px">${t("Pagos por lectura", "Per-read payments")}</h2>
-<table class="vd-table"><thead><tr><th>${t("Lectura", "Read")}</th><th>${t("Monto", "Amount")}</th><th>${t("Cuándo", "When")}</th><th>${t("Liquidación", "Settlement")}</th></tr></thead><tbody>${paymentRows}</tbody></table>`
+<table class="vd-table"><thead><tr><th>${t("Lectura", "Read")}</th><th>${t("Monto", "Amount")}</th><th>${t("Cuándo", "When")}</th><th>${t("Liquidación", "Settlement")}</th></tr></thead><tbody>${paymentRows}</tbody></table>${
+          settlements
+            ? `<p class="vd-note" data-settlement-checked>${t("Liquidaciones consultadas en la cadena", "Settlements last checked on chain")}: ${esc(formatMoment(settlements.lastSuccessAt, lang))}</p>`
+            : ""
+        }`
       : "";
     const ranRead = url.searchParams.get("leido") === "1";
     const body = `<div class="vd-toolbar"><h1>${t("Panel del servicio", "Service dashboard")}</h1>
@@ -713,8 +763,13 @@ ${paymentsTable}
 
   return {
     clientId: clientState.clientId,
-    close: () => store.close(),
+    close: () => {
+      settlements?.stop();
+      store.close();
+    },
     handle,
+    moksha,
+    settlements,
     store,
   };
 }
@@ -752,12 +807,12 @@ export function loadPayerEnvFile(path: string | undefined): void {
  * child on the gateway and pays per read (../moksha/LIVE-RUNBOOK.md); =http
  * pays through the data gateway with one fixed data point (see DEPLOY.md).
  */
-function buildPayer(store: ReminderStore): GatewayPayer {
+function buildPayer(store: ReminderStore): { moksha: MokshaContext | null; payer: GatewayPayer } {
   loadPayerEnvFile(process.env.VACUNA_PAYER_ENV_FILE);
   const env = process.env;
   const kind = env.VACUNA_PAYER || "mock";
   if (kind === "mock") {
-    return new MockPayer();
+    return { moksha: null, payer: new MockPayer() };
   }
   if (kind === "moksha") {
     // Keys arrive as secrets (Fly), not the 0600 files the moksha CLI reads.
@@ -773,7 +828,9 @@ function buildPayer(store: ReminderStore): GatewayPayer {
       childSeed: secret("VACUNA_CHILD_KEY_SEED"),
       register: secret("VACUNA_REGISTER_SERVER_PRIVATE_KEY"),
     });
-    return buildMokshaContext({ keys }).payer;
+    // One context: the payer and the settlement poller share one in-memory state file.
+    const moksha = buildMokshaContext({ keys });
+    return { moksha, payer: moksha.payer };
   }
   if (kind !== "http") {
     throw new Error(`unknown VACUNA_PAYER ${kind}`);
@@ -789,7 +846,7 @@ function buildPayer(store: ReminderStore): GatewayPayer {
   if (!(isLoopback(gatewayUrl) || env.VACUNA_ALLOW_REMOTE_GATEWAY === "1")) {
     throw new Error("refusing a non-loopback gateway without VACUNA_ALLOW_REMOTE_GATEWAY=1");
   }
-  return new HttpGatewayPayer({
+  const payer = new HttpGatewayPayer({
     config: {
       amountWei: env.VACUNA_PAYMENT_AMOUNT_WEI || ONE_HUNDREDTH_VANA_WEI,
       asset: env.VACUNA_PAYMENT_ASSET || NATIVE_ASSET,
@@ -805,4 +862,5 @@ function buildPayer(store: ReminderStore): GatewayPayer {
     },
     nextNonce: () => store.nextPaymentNonce(),
   });
+  return { moksha: null, payer };
 }

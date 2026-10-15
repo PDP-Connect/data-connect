@@ -76,13 +76,16 @@ test("records: Sofía's next dose is days away, Ana is overdue, deterministic", 
 });
 
 test("dashboard links a settled payment to the explorer by its transaction hash", async () => {
-  const { explorerTxBase, txHashOf } = await import("./reminder-web.ts");
+  const { explorerTxBase, settlementCell, txHashOf } = await import("./reminder-web.ts");
   const hash = `0x${"ab".repeat(32)}`;
   assert.equal(txHashOf(JSON.stringify({ success: true, txHash: hash })), hash);
   assert.equal(txHashOf(JSON.stringify({ result: { transaction_hash: hash } })), hash);
   assert.equal(txHashOf(JSON.stringify({ success: true })), null);
   assert.equal(txHashOf("not json"), null);
   assert.match(explorerTxBase(), /^https:\/\/.+\/tx\/$/);
+  // Mock payer: unchanged, no Moksha state.
+  const mock = settlementCell({ lang: "es", payerName: "mock", responseJson: JSON.stringify({ success: true }), status: "accepted" });
+  assert.equal(mock, "simulado (sin transacción)");
 });
 
 test("payer env file: fills unset settings, never holds private keys", async () => {
@@ -101,4 +104,106 @@ test("payer env file: fills unset settings, never holds private keys", async () 
   assert.throws(() => loadPayerEnvFile(file), /secret/);
   delete process.env.VACUNA_TEST_ESCROW;
   delete process.env.VACUNA_TEST_KEEP;
+});
+
+test("dashboard with the Moksha payer: payments move from accepted to settled; poll errors leave the page up", async (t) => {
+  const { mkdtempSync, writeFileSync } = await import("node:fs");
+  const { createServer } = await import("node:http");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { parseEther } = await import("viem");
+  const { generatePrivateKey } = await import("viem/accounts");
+  const { loadConfig } = await import("../moksha/lib/config.ts");
+  const { depositNative } = await import("../moksha/lib/deposit.ts");
+  const { FakeMoksha } = await import("../moksha/test/fake-moksha.ts");
+  const { BASE, createReminderWeb } = await import("./reminder-web.ts");
+
+  const stateDir = mkdtempSync(join(tmpdir(), "vacuna-portal-moksha-"));
+  const mokshaDir = join(stateDir, "moksha");
+  const fake = new FakeMoksha(loadConfig({}, { stateDir: mokshaDir }));
+  await fake.start();
+  t.after(() => fake.stop());
+  const env = {
+    VACUNA_BUILDER_PRIVATE_KEY: generatePrivateKey(),
+    VACUNA_CHILD_KEY_SEED: generatePrivateKey(),
+    VACUNA_EXPLORER_TX_URL: "https://explorer.test/tx/",
+    VACUNA_GATEWAY_URL: fake.gatewayUrl,
+    VACUNA_MOKSHA_STATE_DIR: mokshaDir,
+    VACUNA_PAYER: "moksha",
+    VACUNA_REGISTER_SERVER_PRIVATE_KEY: generatePrivateKey(),
+    VACUNA_RPC_URL: fake.rpcUrl,
+  };
+  const saved = Object.fromEntries(Object.keys(env).map((k) => [k, process.env[k]]));
+  Object.assign(process.env, env);
+  t.after(() => {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  });
+
+  // A registered client skips /oauth/register; the AS itself is unreachable (status checks fail quietly).
+  const publicOrigin = "http://portal.test";
+  writeFileSync(join(stateDir, "client.json"), JSON.stringify({ clientId: "cli_test", redirectUri: `${publicOrigin}${BASE}/callback` }));
+  const web = await createReminderWeb({
+    asInternal: "http://127.0.0.1:1",
+    issuer: publicOrigin,
+    publicOrigin,
+    rsInternal: "http://127.0.0.1:1",
+    settlementPollMs: 0,
+    settlementStaleMs: 0,
+    stateDir,
+  });
+  t.after(() => web.close());
+  const moksha = web.moksha;
+  assert.ok(moksha && web.settlements);
+  const server = createServer((req, res) => void web.handle(req, res));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => server.close());
+  const { port } = server.address() as { port: number };
+  const panel = async (lang: string) => {
+    const resp = await fetch(`http://127.0.0.1:${port}${BASE}/panel?lang=${lang}`);
+    return { html: await resp.text(), status: resp.status };
+  };
+
+  fake.fund(moksha.keys.builder.address, parseEther("2"));
+  await depositNative(
+    { config: moksha.config, gateway: moksha.gateway, keys: moksha.keys, log: () => {}, rpc: moksha.rpc, sleep: async () => {}, state: moksha.state },
+    { amountWei: parseEther("1") }
+  );
+  const readIds = [1, 2].map((n) => `0x${n.toString(16).padStart(64, "0")}`);
+  for (const [i, readId] of readIds.entries()) {
+    const p = await moksha.payer.prepare({ childId: "DR-9100001", childIndex: 9100001, grantId: "g", readId, recordSha256: "", servedAt: null });
+    const sent: { accepted: boolean; response: unknown } = await moksha.payer.send(p.bodyJson);
+    assert.equal(sent.accepted, true);
+    web.store.db
+      .prepare("INSERT INTO payments (read_id, child_index, amount, body_json, status, response_json, created_at) VALUES (?, ?, ?, ?, 'accepted', ?, ?)")
+      .run(readId, 9100001, p.amount, p.bodyJson, JSON.stringify(sent.response), Date.now() + i);
+  }
+
+  let page = await panel("es");
+  assert.equal(page.status, 200);
+  assert.equal((page.html.match(/aceptado, sin transacción todavía/g) ?? []).length, 2, "accepted before the relayer settles");
+  assert.doesNotMatch(page.html, /data-settled/);
+
+  fake.settle();
+  page = await panel("es");
+  for (const readId of readIds) {
+    const hash: string | null | undefined = moksha.state.data.payments[readId]?.settleTxHash;
+    assert.ok(hash, `settle tx for ${readId}`);
+    assert.ok(page.html.includes(`href="https://explorer.test/tx/${hash}"`), "links the explorer from VACUNA_EXPLORER_TX_URL");
+  }
+  assert.equal((page.html.match(/<span data-settled>liquidado<\/span>/g) ?? []).length, 2);
+  assert.equal((page.html.match(/data-settlement="settled"/g) ?? []).length, 2);
+  assert.match(page.html, /cuota de la autorización liquidada: <a href="https:\/\/explorer\.test\/tx\/0x[0-9a-f]{64}"/, "grant fee settle tx");
+  const en = await panel("en");
+  assert.equal((en.html.match(/<span data-settled>settled<\/span>/g) ?? []).length, 2);
+  assert.match(en.html, /grant fee settled: <a /);
+
+  // The chain goes away: the poll fails, the page still renders what is known.
+  await fake.stop();
+  page = await panel("es");
+  assert.equal(page.status, 200);
+  assert.ok(web.settlements?.lastError, "poll error recorded");
+  assert.equal((page.html.match(/<span data-settled>liquidado<\/span>/g) ?? []).length, 2);
 });
