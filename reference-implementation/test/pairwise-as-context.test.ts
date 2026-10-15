@@ -821,7 +821,7 @@ test("an accepted source alias on a v1 mapping resolves to its canonical source"
 		sourceAuthorities.set(internalId, {
 			acceptedLegacySourceAliases: ["source-local-alias"],
 			canonicalSourceId: SOURCE,
-			declarationVersion: "declaration-v7",
+			declarationVersion: "declaration-v1",
 		});
 		const before = sqliteIdentitySnapshot();
 		const bindings = await build(
@@ -840,7 +840,7 @@ test("an accepted source alias on a v1 mapping resolves to its canonical source"
 		sourceAuthorities.set(unknownInternalId, {
 			acceptedLegacySourceAliases: ["another-source-alias"],
 			canonicalSourceId: SOURCE,
-			declarationVersion: "declaration-v7",
+			declarationVersion: "declaration-v1",
 		});
 		const beforeUnknownAlias = sqliteIdentitySnapshot();
 		await assertGrantInvalid(
