@@ -748,6 +748,13 @@ fn resolve_node_binary_from(
 ) -> Option<PathBuf> {
     let mut binary_roots = Vec::with_capacity(5);
     if let Some(executable_dir) = executable_dir {
+        // Launch the actual helper path: an outer MacOS/pdpp-node symlink
+        // still inherits the foreground app's LaunchServices identity.
+        let helper =
+            executable_dir.join("../Helpers/DataConnect Helper.app/Contents/MacOS/DataConnect");
+        if helper.is_file() {
+            return Some(helper);
+        }
         // Tauri places externalBin beside the app executable (Contents/MacOS
         // on macOS), not in the resource directory.
         binary_roots.push(executable_dir.to_path_buf());
@@ -7636,6 +7643,23 @@ setInterval(() => {}, 1000);
         assert_eq!(
             resolve_node_binary_from(&resources, Some(&executable_dir)),
             Some(node_binary)
+        );
+    }
+
+    #[test]
+    fn node_sidecar_prefers_the_background_helper_bundle() {
+        let directory = tempdir().expect("app bundle temp directory");
+        let resources = directory.path().join("Contents/Resources");
+        let executable_dir = directory.path().join("Contents/MacOS");
+        let helper =
+            executable_dir.join("../Helpers/DataConnect Helper.app/Contents/MacOS/DataConnect");
+        fs::create_dir_all(helper.parent().unwrap()).unwrap();
+        fs::create_dir_all(&executable_dir).unwrap();
+        fs::write(&helper, "background node").unwrap();
+        fs::write(executable_dir.join("pdpp-node"), "foreground node").unwrap();
+        assert_eq!(
+            resolve_node_binary_from(&resources, Some(&executable_dir)),
+            Some(helper)
         );
     }
 

@@ -162,8 +162,29 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       # Bind the host profile root at the same absolute path so allocator
       # mkdir/chown/chmod calls affect the Docker bind source, not sidecar-only
-      # storage. Docker-created bind sources are root-owned and break Chromium.
-      - ${PDPP_NEKO_PROFILE_STORAGE_ROOT:-/var/lib/pdpp/neko-profiles}:${PDPP_NEKO_PROFILE_STORAGE_ROOT:-/var/lib/pdpp/neko-profiles}
+      # storage. The root must be a durable, operator-provisioned directory
+      # (not /tmp, ~/.tmp or any cleanup-managed path) owned by
+      # PDPP_NEKO_PROFILE_OWNER_UID:GID. create_host_path: false makes Compose
+      # fail instead of silently creating a root-owned directory (which breaks
+      # Chromium) when the host path is missing.
+      - type: bind
+        source: ${PDPP_NEKO_PROFILE_STORAGE_ROOT:-/var/lib/pdpp/neko-profiles}
+        target: ${PDPP_NEKO_PROFILE_STORAGE_ROOT:-/var/lib/pdpp/neko-profiles}
+        bind:
+          create_host_path: false
+    # /readyz fails when the profile root is missing, unlinked, or read-only.
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:' + (process.env.PDPP_NEKO_ALLOCATOR_PORT || 7331) + '/readyz').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
   coturn:
     logging: *bounded-logging
