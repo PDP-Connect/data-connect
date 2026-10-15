@@ -59,6 +59,7 @@ docker build --target core \
 
 ```sh
 docker run -d --name pdpp --restart unless-stopped \
+  --log-driver json-file --log-opt max-size=10m --log-opt max-file=5 \
   -p 127.0.0.1:7662:3000 \
   -e PDPP_BIND_HOST=127.0.0.1 \
   -e PDPP_REFERENCE_ORIGIN=http://localhost:7662 \
@@ -105,6 +106,7 @@ origin and allow it as a trusted host when you start Core:
 ```sh
 export TUNNEL_HOST=your-subdomain.example-tunnel.com
 docker run -d --name pdpp --restart unless-stopped \
+  --log-driver json-file --log-opt max-size=10m --log-opt max-file=5 \
   -p 127.0.0.1:7662:3000 \
   -e PDPP_BIND_HOST=0.0.0.0 \
   -e PDPP_REFERENCE_ORIGIN="https://${TUNNEL_HOST}" \
@@ -189,6 +191,29 @@ headed: when configured, the runtime attaches to its remote CDP browser.
 Serve a real domain through your HTTPS reverse proxy (Caddy, Traefik, nginx)
 pointed at the Core port, and set `PDPP_REFERENCE_ORIGIN` to that domain so
 owner-session cookies and OAuth metadata are correct.
+
+## Logs
+
+Docker keeps a container's output in a log file that is never rotated unless
+you ask for rotation. Every command and Compose file in this repository asks
+for it: the `json-file` driver, rotated at 10 MiB across 5 files (50 MiB per
+container). The Neko allocator applies the same limit to the browser
+containers it creates, and the canary deploy script applies it to the
+replacement container it starts.
+
+- Keep `--log-driver json-file --log-opt max-size=10m --log-opt max-file=5` on
+  any `docker run` you write yourself, or `logging:` on your own Compose
+  services. Use a different driver or larger limits only if you have chosen a
+  bound for them; leaving the options out means no limit.
+- The limit applies when a container is created. A container that already
+  exists keeps the logging it was created with, so an existing node keeps
+  growing its log until you recreate it. Recreating is an outage and
+  needs your approval; `docker compose up -d` does it for Compose services
+  whose configuration changed, and the upgrade command above does it for the
+  quickstart container. A Docker daemon default in `/etc/docker/daemon.json`
+  also covers only containers created after it takes effect.
+- Check a container with
+  `docker inspect --format '{{json .HostConfig.LogConfig}}' pdpp`.
 
 ## Verification
 

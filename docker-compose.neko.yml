@@ -1,3 +1,11 @@
+# Docker keeps every container's stdout/stderr in an unrotated file by default.
+# Rotate at 10 MiB x 5 files (50 MiB per container). Values are strings.
+x-bounded-logging: &bounded-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
 services:
   reference:
     depends_on:
@@ -42,6 +50,7 @@ services:
       NEKO_PASSWORD: ${NEKO_PASSWORD:-neko}
 
   neko:
+    logging: *bounded-logging
     image: ${NEKO_IMAGE:-pdpp-neko:local}
     build:
       context: .
@@ -85,6 +94,7 @@ services:
       start_period: 20s
 
   neko-allocator:
+    logging: *bounded-logging
     image: ${NEKO_ALLOCATOR_IMAGE:-pdpp-neko-allocator:local}
     build:
       context: .
@@ -156,6 +166,7 @@ services:
       - ${PDPP_NEKO_PROFILE_STORAGE_ROOT:-/var/lib/pdpp/neko-profiles}:${PDPP_NEKO_PROFILE_STORAGE_ROOT:-/var/lib/pdpp/neko-profiles}
 
   coturn:
+    logging: *bounded-logging
     image: ${TURN_IMAGE:-coturn/coturn:4.6.3-alpine}
     profiles: ["turn"]
     command:
@@ -178,6 +189,7 @@ services:
       - "${TURN_MIN_PORT:-49160}-${TURN_MAX_PORT:-49200}:${TURN_MIN_PORT:-49160}-${TURN_MAX_PORT:-49200}/udp"
 
   registry-mock:
+    logging: *bounded-logging
     image: nginx:1.27-alpine
     volumes:
       - ./packages/polyfill-connectors/manifests:/usr/share/nginx/html/connectors:ro

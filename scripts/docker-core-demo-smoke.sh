@@ -9,6 +9,8 @@ IMAGE_BUILD="${PDPP_CORE_SMOKE_SKIP_BUILD:-0}"
 RUN_ID="$(date +%s)-$$"
 NAME="pdpp-core-demo-${RUN_ID}"
 NETWORK="${NAME}-network"
+# Docker json-file log rotation (10 MiB x 5 files); this script reads container logs.
+LOG_BOUND=(--log-driver json-file --log-opt max-size=10m --log-opt max-file=5)
 VOLUME="${NAME}-data"
 TUNNEL_HOST="${PDPP_CORE_SMOKE_TUNNEL_HOST:-pdpp-demo-${RUN_ID}.test}"
 SMOKE_PORT="${PDPP_CORE_SMOKE_PORT:-7662}"
@@ -136,7 +138,7 @@ http {
 }
 NGINX
 
-docker run --detach --name "$CORE_CONTAINER" \
+docker run --detach --name "$CORE_CONTAINER" "${LOG_BOUND[@]}" \
   --network "$NETWORK" --network-alias core \
   --publish "127.0.0.1:${SMOKE_PORT}:3000" \
   --env PDPP_BIND_HOST=0.0.0.0 \
@@ -151,7 +153,7 @@ docker run --detach --name "$CORE_CONTAINER" \
 # The disposable TLS ingress stands in for the public Cloudflare tunnel. It
 # forwards to the Core container on the same private network; the Core run
 # command above keeps the documented tunnel origin and trusted-host settings.
-docker run --detach --name "$PROXY_CONTAINER" \
+docker run --detach --name "$PROXY_CONTAINER" --log-driver none \
   --network "$NETWORK" --network-alias "$TUNNEL_HOST" --network-alias "$CIMD_HOST" \
   --volume "$TEMP_ROOT/nginx.conf:/etc/nginx/nginx.conf:ro" \
   --volume "$TEMP_ROOT/tunnel.crt:/etc/nginx/tunnel.crt:ro" \
