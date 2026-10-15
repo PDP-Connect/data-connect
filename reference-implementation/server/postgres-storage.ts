@@ -2085,6 +2085,7 @@ async function bootstrapPostgresSchemaOnce({
       CREATE TABLE IF NOT EXISTS grants (
         grant_id TEXT PRIMARY KEY,
         subject_id TEXT NOT NULL,
+        public_subject_id TEXT,
         client_id TEXT NOT NULL,
         storage_binding_json JSONB,
         grant_json JSONB NOT NULL,
@@ -2183,6 +2184,7 @@ async function bootstrapPostgresSchemaOnce({
         issuer TEXT NOT NULL
       );
       ALTER TABLE grants ADD COLUMN IF NOT EXISTS trust_signal_json JSONB;
+      ALTER TABLE grants ADD COLUMN IF NOT EXISTS public_subject_id TEXT;
       CREATE INDEX IF NOT EXISTS idx_pg_grants_client_status
         ON grants(client_id, status, issued_at);
       -- Absent-only grant expiry: grants issued before that normalization
@@ -2227,6 +2229,7 @@ async function bootstrapPostgresSchemaOnce({
       CREATE TABLE IF NOT EXISTS grant_packages (
         package_id TEXT PRIMARY KEY,
         subject_id TEXT NOT NULL,
+        public_subject_id TEXT,
         client_id TEXT NOT NULL,
         status TEXT NOT NULL DEFAULT 'active',
         package_json JSONB NOT NULL,
@@ -2245,6 +2248,8 @@ async function bootstrapPostgresSchemaOnce({
       -- Postgres schemas aligned.
       ALTER TABLE grant_packages
         ADD COLUMN IF NOT EXISTS parent_package_id TEXT;
+      ALTER TABLE grant_packages
+        ADD COLUMN IF NOT EXISTS public_subject_id TEXT;
       UPDATE grant_packages child
          SET parent_package_id = NULL
        WHERE child.parent_package_id IS NOT NULL

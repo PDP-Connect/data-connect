@@ -221,6 +221,14 @@ export const BACKUP_TABLE_INVENTORY: Record<string, BackupTableInventoryEntry> =
     classification: "backup_required",
     reason: "Retained source declaration authority binds issued instance handles to owner-connected sources.",
   },
+  pairwise_as_grant_adoption_receipts: {
+    classification: "backup_required",
+    reason: "Completed grant-scoped identity adoption proves each preserved legacy grant has a complete immutable mapping.",
+  },
+  pairwise_as_grant_instance_adoptions: {
+    classification: "backup_required",
+    reason: "Grant-scoped identity mappings preserve legacy public instance identifiers without global handle collisions.",
+  },
   pairwise_as_instance_authority_versions: {
     classification: "backup_required",
     reason: "Versioned source authority lets existing grants retain their accepted declaration revision.",

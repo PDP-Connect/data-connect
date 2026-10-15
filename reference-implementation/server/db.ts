@@ -899,6 +899,7 @@ CREATE INDEX IF NOT EXISTS idx_record_acquisition_provenance_record
 CREATE TABLE IF NOT EXISTS grants (
   grant_id       TEXT PRIMARY KEY,
   subject_id     TEXT NOT NULL,
+  public_subject_id TEXT,
   client_id      TEXT NOT NULL,
   storage_binding_json TEXT,
   grant_json     TEXT NOT NULL,
@@ -1735,6 +1736,7 @@ CREATE INDEX IF NOT EXISTS idx_oauth_refresh_tokens_client_status
 CREATE TABLE IF NOT EXISTS grant_packages (
   package_id        TEXT PRIMARY KEY,
   subject_id        TEXT NOT NULL,
+  public_subject_id TEXT,
   client_id         TEXT NOT NULL,
   status            TEXT NOT NULL DEFAULT 'active',
   package_json      TEXT NOT NULL,
@@ -6451,6 +6453,7 @@ export function initDb(path = ":memory:", opts: InitDbOptions = {}): DatabaseHan
   // carries no source or stream authority — record access is still governed
   // solely by active child grants.
   runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "grant_packages", "parent_package_id", "TEXT"));
+  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "grant_packages", "public_subject_id", "TEXT"));
   runWithSqliteBusyRetrySync(() => {
     raw.exec(
       `CREATE INDEX IF NOT EXISTS idx_grant_packages_parent
@@ -6581,6 +6584,7 @@ CREATE INDEX IF NOT EXISTS idx_blob_bindings_record ON blob_bindings(connector_i
   // Spec: openspec/changes/reconcile-active-summary-evidence/specs/
   //       reference-connector-instances/spec.md
   runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "grants", "trust_signal_json", "TEXT"));
+  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "grants", "public_subject_id", "TEXT"));
   runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "spine_events", "connector_instance_id", "TEXT"));
   // Terminal provenance is source-bound, not projection-bound. This trigger
   // shares SQLite's single-writer ordering with registry mutation. It accepts
