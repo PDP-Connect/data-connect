@@ -184,7 +184,8 @@ export class FakeMoksha {
     const path = url.pathname;
     let body: Record<string, unknown> = {};
     if (req.method === "POST") {
-      body = JSON.parse(await readBody(req)) as Record<string, unknown>;
+      const raw = await readBody(req);
+      body = (raw ? JSON.parse(raw) : {}) as Record<string, unknown>;
     }
     const r = (status: number, out: unknown) => this.reply(res, req, body, status, out);
     const exactKeys = (required: string[], optional: string[] = []) => {
@@ -387,7 +388,12 @@ export class FakeMoksha {
       this.balances.set(lc(account), (this.balances.get(lc(account)) ?? 0n) + tx.value);
       return r(202, { account, status: "finalized", success: true, txHash });
     }
-    if (req.method === "GET" && path === "/v1/escrow/balance") {
+    // The real sync credits finalized deposits first; this fake credits them on
+    // submission, so sync answers like the GET.
+    if (
+      (req.method === "GET" && path === "/v1/escrow/balance") ||
+      (req.method === "POST" && path === "/v1/escrow/balance/sync")
+    ) {
       const account = getAddress(url.searchParams.get("account") ?? "");
       const balance = this.balances.get(lc(account)) ?? 0n;
       const authorized = this.authorized(account);

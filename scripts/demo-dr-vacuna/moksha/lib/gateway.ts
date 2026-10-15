@@ -175,6 +175,11 @@ export class GatewayClient {
     return this.request<GatewayBalance>("GET", `/v1/escrow/balance?account=${getAddress(account)}`);
   }
 
+  /** Same shape as getBalance, but first credits deposits that are final on chain (the GET never does). */
+  syncBalance(account: string) {
+    return this.request<GatewayBalance>("POST", `/v1/escrow/balance/sync?account=${getAddress(account)}`);
+  }
+
   submitDeposit(txHash: string) {
     return this.request<{ account?: string; error?: string; status?: string; success?: boolean; txHash?: string }>(
       "POST",

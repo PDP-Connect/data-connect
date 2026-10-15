@@ -123,8 +123,14 @@ export async function submitDeposit(deps: DepositDeps, record: DepositState, att
 /** Gateway escrow balance (finalized / pending / authorized) plus the builder's native gas balance. */
 export async function readBalance(deps: Pick<DepositDeps, "config" | "gateway" | "keys" | "rpc">) {
   const account = deps.keys.builder.address;
+  // The gateway credits a submitted deposit only on this sync; a plain GET
+  // leaves it pending forever. Fall back to the GET where sync is absent.
+  const syncOrGet = async () => {
+    const synced = await deps.gateway.syncBalance(account);
+    return synced.status === 404 || synced.status === 405 ? await deps.gateway.getBalance(account) : synced;
+  };
   const [escrow, nativeHex] = await Promise.all([
-    deps.gateway.getBalance(account),
+    syncOrGet(),
     deps.rpc.call<string>("eth_getBalance", [account, "latest"]).catch(() => null),
   ]);
   if (escrow.status !== 200) {
