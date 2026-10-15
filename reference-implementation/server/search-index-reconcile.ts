@@ -261,9 +261,10 @@ export async function reconcileSearchIndexDirtyScope(
     const manifestStreams = Array.isArray(manifest?.streams) ? (manifest.streams as Record<string, unknown>[]) : null;
     const targetStream = manifestStreams?.find((candidate) => candidate?.name === stream) ?? null;
     if (!manifest) {
-      // A missing persisted manifest cannot prove that this dirty scope is
-      // obsolete. Leave it dirty for a later trusted manifest publication.
-      return { connectorId, connectorInstanceId, outcome: "failed", stream };
+      // A missing/unparseable manifest cannot prove this scope is obsolete.
+      // Use the shared revision-fenced failure path: retain dirty and back off
+      // so unavailable manifests cannot monopolize the oldest-first page.
+      throw new Error("registered connector manifest is missing or unparseable; dirty flag retained");
     }
     if (!targetStream) {
       // Connector no longer registered, or this stream is no longer

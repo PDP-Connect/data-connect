@@ -247,6 +247,16 @@ test("SQLite startup classifies legacy rows only when operator_parked is first a
     assert.equal(rawRow("cin_retry_legacy_ambiguous", "items").operator_parked, null);
     getDb()
       .prepare(
+        "INSERT INTO search_index_dirty(connector_instance_id, connector_id, stream, dirty, marked_at) VALUES (?, ?, ?, 1, ?)"
+      )
+      .run("cin_retry_future", "retry-control", "items", "2026-10-15T00:00:00.000Z");
+    assert.equal(rawRow("cin_retry_future", "items").operator_parked, 0);
+    assert.ok(
+      (await listDirtySearchIndexScopes(100)).some((scope) => scope.connectorInstanceId === "cin_retry_future"),
+      "new scopes on an upgraded pre-column schema must remain eligible for automatic repair"
+    );
+    getDb()
+      .prepare(
         "INSERT INTO search_index_dirty(connector_instance_id, connector_id, stream, dirty, marked_at, attempts, next_attempt_at, operator_parked, revision) VALUES (?, ?, ?, 1, ?, 10, NULL, NULL, 11)"
       )
       .run("cin_retry_unknown", "retry-control", "items", "2026-10-15T00:00:00.000Z");

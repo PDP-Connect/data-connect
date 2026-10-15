@@ -38,6 +38,7 @@ const connectorId = "manifest-revision-fence";
 const connectorInstanceId = "cin_manifest_revision_fence";
 const stream = "items";
 const MANIFEST_REVISION_CHANGED = /manifest revision changed/i;
+const MANIFEST_CLEANUP_CHANGED = /revision changed|reintroduced/;
 const ACTIVE_ACTIVATION_STREAM_SHAPE = /stream shape while its installed activation is active/i;
 
 function manifest(field: "subject" | "title") {
@@ -91,7 +92,8 @@ function retrievalManifest(field: "subject" | "title") {
   };
 }
 
-async function assertStaleLexicalPageRejected(): Promise<void> {
+async function assertStaleLexicalPageRejected(pauseAt = "before-instance-fence"): Promise<void> {
+  const betweenPages = pauseAt === "between-pages";
   const entered = deferred();
   const resume = deferred();
   let held = false;
@@ -107,8 +109,28 @@ async function assertStaleLexicalPageRejected(): Promise<void> {
       },
       { deferIndexes: true }
     );
+    if (betweenPages) {
+      for (let i = 0; i < 500; i += 1) {
+        // biome-ignore lint/performance/noAwaitInLoops: construct a deterministic deferred-maintenance history.
+        await ingestRecord(
+          { connector_id: connectorId, connector_instance_id: connectorInstanceId },
+          {
+            data: { id: `extra-${i}`, subject: "old subject", title: "new title" },
+            emitted_at: "2026-07-16T00:00:00.000Z",
+            key: `extra-${i}`,
+            stream,
+          },
+          { deferIndexes: true }
+        );
+      }
+    }
+    let pages = 0;
     __setLexicalBackfillPhaseHookForTest(async (point) => {
-      if (point === "before-instance-fence" && !held) {
+      if (point === "after-page-fetch") {
+        pages += 1;
+      }
+      const pause = betweenPages ? point === "after-page-fetch" && pages === 2 : point === pauseAt;
+      if (pause && !held) {
         held = true;
         entered.release();
         await resume.promise;
@@ -133,7 +155,21 @@ async function assertStaleLexicalPageRejected(): Promise<void> {
             "SELECT field, text FROM lexical_search_index WHERE connector_instance_id=? AND stream=? ORDER BY field"
           )
           .all(connectorInstanceId, stream) as Array<{ field: string; text: string }>);
-    assert.deepEqual(rows, [{ field: "title", text: "new title" }]);
+    assert.deepEqual(
+      rows,
+      Array.from({ length: betweenPages ? 501 : 1 }, () => ({ field: "title", text: "new title" }))
+    );
+    const meta = isPostgresStorageBackend()
+      ? (
+          await postgresQuery<{ fields_fingerprint: string }>(
+            "SELECT fields_fingerprint FROM lexical_search_meta WHERE connector_instance_id=$1 AND stream=$2",
+            [connectorInstanceId, stream]
+          )
+        ).rows[0]
+      : getDb()
+          .prepare("SELECT fields_fingerprint FROM lexical_search_meta WHERE connector_instance_id=? AND stream=?")
+          .get(connectorInstanceId, stream);
+    assert.equal(meta?.fields_fingerprint, '["title"]');
   } finally {
     resume.release();
     __setLexicalBackfillPhaseHookForTest(null);
@@ -166,6 +202,74 @@ test("PostgreSQL: a stale lexical page cannot overwrite the index after manifest
       try {
         await initPostgresStorage({ backend: "postgres", databaseUrl });
         await assertStaleLexicalPageRejected();
+      } finally {
+        await closePostgresStorage();
+        closeDb();
+      }
+    }
+  );
+});
+
+test("SQLite: a stale lexical pass cannot overwrite manifest B published between pages", async () => {
+  initDb(":memory:");
+  try {
+    await assertStaleLexicalPageRejected("between-pages");
+  } finally {
+    closeDb();
+  }
+});
+
+test("PostgreSQL: a stale lexical pass cannot overwrite manifest B published between pages", {
+  skip: !process.env.PDPP_TEST_POSTGRES_URL,
+}, async () => {
+  const url = process.env.PDPP_TEST_POSTGRES_URL;
+  assert.ok(url);
+  await withTemporaryPostgresDatabase(
+    {
+      closeConnections: closePostgresStorage,
+      connectionString: url,
+      databaseName: `pdpp_test_between_pages_${Date.now().toString(36)}_${Math.random().toString(16).slice(2, 10)}_1`,
+      templateName: null,
+    },
+    async (databaseUrl) => {
+      initDb(":memory:");
+      try {
+        await initPostgresStorage({ backend: "postgres", databaseUrl });
+        await assertStaleLexicalPageRejected("between-pages");
+      } finally {
+        await closePostgresStorage();
+        closeDb();
+      }
+    }
+  );
+});
+
+test("SQLite: a stale lexical pass cannot republish metadata after manifest B", async () => {
+  initDb(":memory:");
+  try {
+    await assertStaleLexicalPageRejected("before-meta-publication");
+  } finally {
+    closeDb();
+  }
+});
+
+test("PostgreSQL: a stale lexical pass cannot republish metadata after manifest B", {
+  skip: !process.env.PDPP_TEST_POSTGRES_URL,
+}, async () => {
+  const url = process.env.PDPP_TEST_POSTGRES_URL;
+  assert.ok(url);
+  await withTemporaryPostgresDatabase(
+    {
+      closeConnections: closePostgresStorage,
+      connectionString: url,
+      databaseName: `pdpp_test_meta_publish_${Date.now().toString(36)}_${Math.random().toString(16).slice(2, 10)}_1`,
+      templateName: null,
+    },
+    async (databaseUrl) => {
+      initDb(":memory:");
+      try {
+        await initPostgresStorage({ backend: "postgres", databaseUrl });
+        await assertStaleLexicalPageRejected("before-meta-publication");
       } finally {
         await closePostgresStorage();
         closeDb();
@@ -705,3 +809,107 @@ test("PostgreSQL: active installed connectors allow refresh-policy updates but r
     }
   );
 });
+
+async function assertLexicalCleanupCannotRemoveReintroducedStream(removed: boolean): Promise<void> {
+  const entered = deferred();
+  const resume = deferred();
+  let held = false;
+  try {
+    await registerConnector(manifest("subject"), { backfillRetrievalIndexes: false });
+    await ingestRecord(
+      { connector_id: connectorId, connector_instance_id: connectorInstanceId },
+      {
+        data: { id: "one", subject: "old subject", title: "new title" },
+        emitted_at: "2026-07-16T00:00:00.000Z",
+        key: "one",
+        stream,
+      },
+      { deferIndexes: true }
+    );
+    await lexicalIndexBackfillForManifest({ manifest: pinnedManifest("subject") });
+    const inactive = {
+      ...manifest("subject"),
+      streams: removed
+        ? manifest("subject").streams.map((entry) => ({ ...entry, name: "other" }))
+        : manifest("subject").streams.map((entry) => ({ ...entry, query: {} })),
+    };
+    await registerConnector(inactive, { backfillRetrievalIndexes: false });
+    __setLexicalBackfillPhaseHookForTest(async (point) => {
+      if (point === "before-stream-cleanup" && !held) {
+        held = true;
+        entered.release();
+        await resume.promise;
+      }
+    });
+    const stale = lexicalIndexBackfillForManifest({
+      manifest: { ...inactive, storage_binding: { connector_instance_id: connectorInstanceId } },
+    });
+    await entered.promise;
+    await registerConnector(manifest("title"), { backfillRetrievalIndexes: false });
+    await lexicalIndexBackfillForManifest({ manifest: pinnedManifest("title") });
+    const rejected = assert.rejects(stale, MANIFEST_CLEANUP_CHANGED);
+    resume.release();
+    await rejected;
+    const rows = isPostgresStorageBackend()
+      ? (
+          await postgresQuery<{ field: string }>(
+            "SELECT field FROM lexical_search_index WHERE connector_instance_id=$1 AND stream=$2",
+            [connectorInstanceId, stream]
+          )
+        ).rows
+      : getDb()
+          .prepare("SELECT field FROM lexical_search_index WHERE connector_instance_id=? AND stream=?")
+          .all(connectorInstanceId, stream);
+    assert.deepEqual(rows, [{ field: "title" }]);
+    const meta = isPostgresStorageBackend()
+      ? (
+          await postgresQuery<{ fields_fingerprint: string }>(
+            "SELECT fields_fingerprint FROM lexical_search_meta WHERE connector_instance_id=$1 AND stream=$2",
+            [connectorInstanceId, stream]
+          )
+        ).rows[0]
+      : getDb()
+          .prepare("SELECT fields_fingerprint FROM lexical_search_meta WHERE connector_instance_id=? AND stream=?")
+          .get(connectorInstanceId, stream);
+    assert.equal(meta?.fields_fingerprint, '["title"]');
+  } finally {
+    resume.release();
+    __setLexicalBackfillPhaseHookForTest(null);
+  }
+}
+
+for (const removed of [false, true]) {
+  const kind = removed ? "removed" : "nonparticipating";
+  test(`SQLite: stale ${kind} lexical cleanup preserves a reintroduced stream`, async () => {
+    initDb(":memory:");
+    try {
+      await assertLexicalCleanupCannotRemoveReintroducedStream(removed);
+    } finally {
+      closeDb();
+    }
+  });
+  test(`PostgreSQL: stale ${kind} lexical cleanup preserves a reintroduced stream`, {
+    skip: !process.env.PDPP_TEST_POSTGRES_URL,
+  }, async () => {
+    const url = process.env.PDPP_TEST_POSTGRES_URL;
+    assert.ok(url);
+    await withTemporaryPostgresDatabase(
+      {
+        closeConnections: closePostgresStorage,
+        connectionString: url,
+        databaseName: `pdpp_test_cleanup_${Date.now().toString(36)}_${Math.random().toString(16).slice(2, 10)}_1`,
+        templateName: null,
+      },
+      async (databaseUrl) => {
+        initDb(":memory:");
+        try {
+          await initPostgresStorage({ backend: "postgres", databaseUrl });
+          await assertLexicalCleanupCannotRemoveReintroducedStream(removed);
+        } finally {
+          await closePostgresStorage();
+          closeDb();
+        }
+      }
+    );
+  });
+}

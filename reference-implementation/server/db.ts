@@ -6402,12 +6402,12 @@ export function initDb(path = ":memory:", opts: InitDbOptions = {}): DatabaseHan
   runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "search_index_dirty", "next_attempt_at", "TEXT"));
   // Existing delayed rows have no provenance: do not guess whether an old
   // deadline was automatic or an intentional operator park. New rows use the
-  // fresh-table default (0); legacy delayed rows remain NULL until an
-  // automatic failure or explicit control action classifies them.
+  // default (0) on both fresh and upgraded tables; legacy delayed rows remain
+  // NULL until an automatic failure or explicit control action classifies them.
   runWithSqliteBusyRetrySync(() => {
     raw.exec("BEGIN IMMEDIATE");
     try {
-      if (addColumnIfMissing(raw, "search_index_dirty", "operator_parked", "INTEGER")) {
+      if (addColumnIfMissing(raw, "search_index_dirty", "operator_parked", "INTEGER DEFAULT 0")) {
         raw.exec(`UPDATE search_index_dirty
                   SET operator_parked = CASE WHEN next_attempt_at IS NULL THEN 0 ELSE NULL END`);
       }

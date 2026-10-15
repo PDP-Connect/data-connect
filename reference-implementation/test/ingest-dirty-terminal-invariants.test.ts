@@ -15,9 +15,15 @@ import { registerConnector } from "../server/auth.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
 import { __setRecordIndexFaultHookForTest, ingestRecord, ingestRecords } from "../server/records.ts";
 import { __setLexicalBackfillPhaseHookForTest } from "../server/search.ts";
-import { runSearchIndexDirtyReconcileRound } from "../server/search-index-reconcile.ts";
-import { countDirtySearchIndexScopes, isSearchIndexScopeDirty } from "../server/stores/search-index-dirty-store.ts";
-import { parkSearchIndexDirtyScope } from "../server/stores/search-index-dirty-store.ts";
+import { reconcileSearchIndexDirtyScope, runSearchIndexDirtyReconcileRound } from "../server/search-index-reconcile.ts";
+import {
+  countDirtySearchIndexScopes,
+  isSearchIndexScopeDirty,
+  markSearchIndexDirtySqlite,
+  parkSearchIndexDirtyScope,
+} from "../server/stores/search-index-dirty-store.ts";
+
+const MANIFEST_UNAVAILABLE = /manifest.*missing or unparseable/;
 
 function target(connectorId: string, connectorInstanceId: string) {
   return { connector_id: connectorId, connector_instance_id: connectorInstanceId };
@@ -371,6 +377,118 @@ test("invariant (5): a permanently-failing dirty scope cannot starve a later hea
     closeDb();
   }
 });
+
+for (const manifestState of ["missing", "unparseable"] as const) {
+  test(`invariant (5): more than a page of ${manifestState} manifests cannot starve a later healthy scope`, async (t) => {
+    initDb(":memory:");
+    try {
+      const brokenConnectorId = `inv-manifest-starvation-${manifestState}`;
+      const healthyConnectorId = `inv-manifest-starvation-healthy-${manifestState}`;
+      const healthyInstanceId = `cin_manifest_starvation_healthy_${manifestState}`;
+      const brokenInstanceIds = Array.from(
+        { length: 26 },
+        (_, index) => `cin_manifest_starvation_${manifestState}_${String(index).padStart(2, "0")}`
+      );
+      const markedAt = "2026-08-09T00:00:00.000Z";
+      const now = new Date("2026-08-09T00:00:02.000Z");
+
+      if (manifestState === "unparseable") {
+        await registerConnector(manifestFor(brokenConnectorId));
+        getDb().prepare("UPDATE connectors SET manifest = ? WHERE connector_id = ?").run("{", brokenConnectorId);
+      }
+      // Missing manifests have no connector row; both cases retain their
+      // dirty scopes until a trusted manifest is available again.
+      for (const connectorInstanceId of brokenInstanceIds) {
+        markSearchIndexDirtySqlite({ connectorId: brokenConnectorId, connectorInstanceId, stream: "items" }, markedAt);
+      }
+
+      await registerConnector(manifestFor(healthyConnectorId));
+      await ingestRecord(target(healthyConnectorId, healthyInstanceId), record("items", "k1", "repair this record"));
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+      // Drain deferred ingest first, then create real lexical drift so only
+      // reconcile can repair it. Explicit timestamps fix the queue order.
+      getDb().prepare("DELETE FROM lexical_search_index WHERE connector_instance_id = ?").run(healthyInstanceId);
+      markSearchIndexDirtySqlite(
+        { connectorId: healthyConnectorId, connectorInstanceId: healthyInstanceId, stream: "items" },
+        "2026-08-09T00:00:01.000Z"
+      );
+      t.mock.timers.enable({ apis: ["Date"], now });
+      assert.equal(await countDirtySearchIndexScopes(), 27);
+
+      const first = await runSearchIndexDirtyReconcileRound();
+      assert.deepEqual(first, { attempted: 25, failed: 25, incomplete: true, recontended: 0, succeeded: 0 });
+      assert.equal(await isSearchIndexScopeDirty({ connectorInstanceId: healthyInstanceId, stream: "items" }), true);
+      const second = await runSearchIndexDirtyReconcileRound();
+      assert.deepEqual(
+        second,
+        { attempted: 2, failed: 1, incomplete: false, recontended: 0, succeeded: 1 },
+        "backoff must free the default page for the remaining broken scope and the later healthy scope"
+      );
+      assert.equal(await isSearchIndexScopeDirty({ connectorInstanceId: healthyInstanceId, stream: "items" }), false);
+      const rows = getDb()
+        .prepare("SELECT record_key, text FROM lexical_search_index WHERE connector_instance_id = ?")
+        .all(healthyInstanceId) as { record_key: string; text: string }[];
+      assert.deepEqual(
+        rows,
+        [{ record_key: "k1", text: "repair this record" }],
+        "the healthy index is actually repaired"
+      );
+
+      const failures = getDb()
+        .prepare(
+          "SELECT dirty, attempts, last_error, marked_at, next_attempt_at, revision FROM search_index_dirty WHERE connector_id = ?"
+        )
+        .all(brokenConnectorId) as {
+        dirty: number;
+        attempts: number;
+        last_error: string | null;
+        marked_at: string;
+        next_attempt_at: string | null;
+        revision: number;
+      }[];
+      assert.equal(failures.length, 26);
+      for (const failure of failures) {
+        assert.equal(failure.dirty, 1, "an unavailable manifest must never silently clear dirty work");
+        assert.equal(failure.attempts, 1, "each manifest failure records one retry attempt");
+        assert.match(failure.last_error ?? "", MANIFEST_UNAVAILABLE);
+        assert.equal(failure.marked_at, markedAt);
+        assert.equal(failure.revision, 1, "recording a failure does not advance the dirty revision");
+        assert.ok(Date.parse(failure.next_attempt_at ?? "") > now.getTime(), "every bad scope backs off");
+      }
+      assert.equal(await countDirtySearchIndexScopes(), 26, "all bad scopes remain dirty");
+      const third = await runSearchIndexDirtyReconcileRound();
+      assert.equal(third.attempted, 0, "backed-off failures are ineligible for the next round");
+
+      const [connectorInstanceId] = brokenInstanceIds;
+      assert.ok(connectorInstanceId);
+      markSearchIndexDirtySqlite(
+        { connectorId: brokenConnectorId, connectorInstanceId, stream: "items" },
+        now.toISOString()
+      );
+      await reconcileSearchIndexDirtyScope({
+        connectorId: brokenConnectorId,
+        connectorInstanceId,
+        markedAt,
+        revision: 1,
+        stream: "items",
+      });
+      const remarked = getDb()
+        .prepare(
+          "SELECT dirty, attempts, next_attempt_at, revision FROM search_index_dirty WHERE connector_instance_id = ?"
+        )
+        .get(connectorInstanceId);
+      assert.deepEqual(
+        remarked,
+        { attempts: 0, dirty: 1, next_attempt_at: null, revision: 2 },
+        "an old manifest failure must not reinstate backoff after a newer dirty mark"
+      );
+    } finally {
+      t.mock.timers.reset();
+      closeDb();
+    }
+  });
+}
 
 test("invariant (5): dirty work does not lie to search while pending -- no partial/uncommitted rows are ever visible", async () => {
   initDb(":memory:");

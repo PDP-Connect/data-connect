@@ -241,6 +241,12 @@ if (POSTGRES_URL) {
       storage_binding: { connector_instance_id: instance },
       streams: [streamDef("alpha", false)],
     };
+    // Cleanup is authorized by the published full manifest, not an omitted
+    // stream in a caller-supplied subset.
+    await registerConnector(
+      { ...manifestFor(connectorId, false), streams: manifest.streams },
+      { backfillRetrievalIndexes: false }
+    );
     await lexicalIndexBackfillForManifest({ manifest } as never);
     assert.equal((await lexicalRows(instance, "beta")).length, 0, "default (full-manifest) orphan cleanup unchanged");
     assert.ok((await lexicalRows(instance, "alpha")).length > 0);

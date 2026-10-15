@@ -191,6 +191,20 @@ test("SQLite: retry after a later-page failure preserves completed lexical rows"
       )
       .get(connectorInstanceId, "k0000", "subject") as { rowid: number };
 
+    // FTS5 can reuse rowids after deleting the entire index. Keep a higher
+    // rowid in another scope so destructive clearing cannot reinsert k0000
+    // at its original rowid and accidentally satisfy the preservation check.
+    const sentinelInstanceId = "cin_crash_gap_lex_resume_sibling";
+    getDb()
+      .prepare(
+        "INSERT INTO lexical_search_index(connector_id, connector_instance_id, stream, record_key, field, text) VALUES (?, ?, ?, ?, ?, ?)"
+      )
+      .run(baseManifest.connector_id, sentinelInstanceId, "items", "sentinel", "subject", "sibling sentinel");
+    const sentinelBefore = getDb()
+      .prepare("SELECT rowid FROM lexical_search_index WHERE connector_instance_id = ?")
+      .get(sentinelInstanceId) as { rowid: number };
+    assert.ok(sentinelBefore.rowid > rowidBefore.rowid);
+
     let fetchedPages = 0;
     __setLexicalBackfillPhaseHookForTest((point) => {
       if (point === "after-page-fetch") {
@@ -227,6 +241,11 @@ test("SQLite: retry after a later-page failure preserves completed lexical rows"
       )
       .get(connectorInstanceId, "k0000", "subject") as { rowid: number };
     assert.equal(rowidAfterRetry.rowid, rowidBefore.rowid, "retry must leave unchanged completed rows untouched");
+    assert.deepEqual(
+      getDb().prepare("SELECT rowid FROM lexical_search_index WHERE connector_instance_id = ?").get(sentinelInstanceId),
+      sentinelBefore,
+      "the sibling scope must survive both the failed pass and retry"
+    );
     assert.equal(
       getDb()
         .prepare("SELECT COUNT(*) AS n FROM lexical_search_index WHERE connector_instance_id = ?")

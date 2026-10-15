@@ -232,27 +232,43 @@ export async function postgresLexicalIndexDeleteWithClient(
   );
 }
 
-export async function postgresLexicalIndexDeleteByConnectorStream({
-  connectorId,
-  connectorInstanceId = defaultConnectorInstanceId(connectorId),
-  stream,
-}: ConnectorStreamScope) {
-  await postgresQuery("DELETE FROM lexical_search_index WHERE connector_instance_id = $1 AND stream = $2", [
+export async function postgresLexicalIndexDeleteByConnectorStream(scope: ConnectorStreamScope) {
+  await withPostgresTransaction((client) => postgresLexicalIndexDeleteByConnectorStreamWithClient(client, scope), {
+    lockConnectorInstanceId: scope.connectorInstanceId ?? defaultConnectorInstanceId(scope.connectorId),
+  });
+}
+
+export async function postgresLexicalIndexDeleteByConnectorStreamWithClient(
+  client: PostgresTransactionClient,
+  { connectorId, connectorInstanceId = defaultConnectorInstanceId(connectorId), stream }: ConnectorStreamScope
+): Promise<void> {
+  await client.query("DELETE FROM lexical_search_index WHERE connector_instance_id = $1 AND stream = $2", [
     connectorInstanceId,
     stream,
   ]);
-  await postgresQuery("DELETE FROM lexical_search_meta WHERE connector_instance_id = $1 AND stream = $2", [
+  await client.query("DELETE FROM lexical_search_meta WHERE connector_instance_id = $1 AND stream = $2", [
     connectorInstanceId,
     stream,
   ]);
 }
 
-export async function postgresLexicalIndexInsertMany({
-  connectorId,
-  connectorInstanceId = defaultConnectorInstanceId(connectorId),
-  stream,
-  entries,
-}: ConnectorStreamScope & { entries: readonly LexicalIndexEntry[] }) {
+export async function postgresLexicalIndexInsertMany(
+  scope: ConnectorStreamScope & { entries: readonly LexicalIndexEntry[] }
+) {
+  return await withPostgresTransaction((client) => postgresLexicalIndexInsertManyWithClient(client, scope), {
+    lockConnectorInstanceId: scope.connectorInstanceId ?? defaultConnectorInstanceId(scope.connectorId),
+  });
+}
+
+export async function postgresLexicalIndexInsertManyWithClient(
+  client: PostgresTransactionClient,
+  {
+    connectorId,
+    connectorInstanceId = defaultConnectorInstanceId(connectorId),
+    stream,
+    entries,
+  }: ConnectorStreamScope & { entries: readonly LexicalIndexEntry[] }
+) {
   if (!Array.isArray(entries) || entries.length === 0) {
     return 0;
   }
@@ -271,7 +287,7 @@ export async function postgresLexicalIndexInsertMany({
   // `insertSemanticRows` avoids. `rowCount` is not inspected by any caller
   // (the function reports `entries.length`), so eliding equal writes does not
   // change observable behavior.
-  await postgresQuery(
+  await client.query(
     `INSERT INTO lexical_search_index (connector_id, connector_instance_id, stream, record_key, field, value)
      SELECT $1, $2, $3, rows.record_key, rows.field, rows.value
      FROM unnest($4::text[], $5::text[], $6::text[], $7::bigint[]) AS rows(record_key, field, value, version)
@@ -309,19 +325,22 @@ export async function postgresLexicalIndexInsertMany({
  * produced for the page are never touched, so completed projection survives
  * a later failed batch with the same xmin.
  */
-export async function postgresLexicalIndexPrunePage({
-  connectorInstanceId,
-  stream,
-  pageRecords,
-  entries,
-}: Required<Pick<ConnectorStreamScope, "connectorInstanceId" | "stream">> & {
-  pageRecords: readonly { recordKey: string; version: number }[];
-  entries: readonly LexicalIndexEntry[];
-}) {
+export async function postgresLexicalIndexPrunePageWithClient(
+  client: PostgresTransactionClient,
+  {
+    connectorInstanceId,
+    stream,
+    pageRecords,
+    entries,
+  }: Required<Pick<ConnectorStreamScope, "connectorInstanceId" | "stream">> & {
+    pageRecords: readonly { recordKey: string; version: number }[];
+    entries: readonly LexicalIndexEntry[];
+  }
+) {
   if (pageRecords.length === 0) {
     return;
   }
-  await postgresQuery(
+  await client.query(
     `DELETE FROM lexical_search_index l
      USING unnest($3::text[], $4::bigint[]) AS p(record_key, version), records r
      WHERE l.connector_instance_id = $1
@@ -352,12 +371,15 @@ export async function postgresLexicalIndexPrunePage({
  * record is gone/deleted or whose field is no longer declared. Everything the
  * scan produced is kept untouched.
  */
-export async function postgresLexicalIndexPruneStale({
-  connectorInstanceId,
-  stream,
-  declaredFields,
-}: Required<Pick<ConnectorStreamScope, "connectorInstanceId" | "stream">> & { declaredFields: readonly string[] }) {
-  await postgresQuery(
+export async function postgresLexicalIndexPruneStaleWithClient(
+  client: PostgresTransactionClient,
+  {
+    connectorInstanceId,
+    stream,
+    declaredFields,
+  }: Required<Pick<ConnectorStreamScope, "connectorInstanceId" | "stream">> & { declaredFields: readonly string[] }
+) {
+  await client.query(
     `DELETE FROM lexical_search_index l
      WHERE l.connector_instance_id = $1
        AND l.stream = $2

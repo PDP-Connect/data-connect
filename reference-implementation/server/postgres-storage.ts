@@ -3438,6 +3438,7 @@ async function bootstrapPostgresSchemaOnce({
           SET operator_parked = CASE WHEN next_attempt_at IS NULL THEN 0 ELSE NULL END;
         END IF;
       END $$;
+      ALTER TABLE search_index_dirty ALTER COLUMN operator_parked SET DEFAULT 0;
 
       ALTER TABLE connector_summary_evidence
         ADD COLUMN IF NOT EXISTS last_record_updated_at TEXT;
@@ -6467,12 +6468,14 @@ async function enqueuePostgresLocalDeviceProjectionRepair(
     // equivalent, so a drift in either shows up as a test failure rather
     // than a silently un-reconciled scope.
     await client.query(
-      `INSERT INTO search_index_dirty(connector_instance_id, connector_id, stream, dirty, marked_at, revision)
-       VALUES ($1, $2, $3, 1, $4, 1)
+      `INSERT INTO search_index_dirty(connector_instance_id, connector_id, stream, dirty, marked_at, revision, operator_parked)
+       VALUES ($1, $2, $3, 1, $4, 1, 0)
        ON CONFLICT(connector_instance_id, stream) DO UPDATE SET
          connector_id = excluded.connector_id,
          dirty = 1,
          marked_at = excluded.marked_at,
+         attempts = CASE WHEN search_index_dirty.operator_parked = 0 THEN 0 ELSE search_index_dirty.attempts END,
+         next_attempt_at = CASE WHEN search_index_dirty.operator_parked = 0 THEN NULL ELSE search_index_dirty.next_attempt_at END,
          revision = search_index_dirty.revision + 1`,
       [repairConnectorInstanceId, newConnectorId, stream, nowIso]
     );
