@@ -14,8 +14,7 @@
  *
  * These tests start the server repeatedly on one data directory, sign in and
  * mint the way the desktop, the console and the runtime do, and count the
- * live owner sessions and bearers. They also seed what earlier versions left
- * and check that startup retires it.
+ * live owner sessions and bearers.
  */
 
 import assert from "node:assert/strict";
@@ -24,7 +23,6 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { request } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Writable } from "node:stream";
 import test from "node:test";
 import pino from "pino";
 import {
@@ -45,7 +43,6 @@ const TEST_PASSWORD = "placeholder-test-password";
 const SUBJECT = "owner_local";
 const CONSOLE_CLIENT = "dataconnect-console";
 const RUNTIME_CLIENT = "dataconnect-connector-runtime";
-/** The clients earlier versions pre-registered and this one retires. */
 
 interface CloseableServer {
   close: (callback?: (err?: Error) => void) => unknown;
@@ -70,38 +67,16 @@ async function stop(server: StartedServer): Promise<void> {
   closeDb();
 }
 
-interface StartLog {
-  msg: string;
-  owner_sessions_revoked?: number;
-  retired_clients?: Record<
-    string,
-    {
-      bearers: number;
-      deregistered: boolean;
-      deviceRequests: number;
-      keptForActiveGrant: boolean;
-      refreshTokens: number;
-    }
-  >;
-}
-
-/** Starts the server with its default clients and keeps its warnings. */
-async function start(dbPath: string): Promise<{ server: StartedServer; asUrl: string; warnings: StartLog[] }> {
-  const warnings: StartLog[] = [];
-  const sink = new Writable({
-    write(chunk, _encoding, done) {
-      for (const line of String(chunk).split("\n").filter(Boolean)) warnings.push(JSON.parse(line) as StartLog);
-      done();
-    },
-  });
+/** Starts the server with its default clients. */
+async function start(dbPath: string): Promise<{ server: StartedServer; asUrl: string }> {
   const server = (await startServer({
     asPort: 0,
     dbPath,
-    logger: pino({ level: "warn" }, sink),
+    logger: pino({ level: "silent" }),
     ownerAuthPassword: TEST_PASSWORD,
     rsPort: 0,
   })) as StartedServer;
-  return { server, asUrl: `http://localhost:${server.asPort}`, warnings };
+  return { server, asUrl: `http://localhost:${server.asPort}` };
 }
 
 function sessionCookieFrom(setCookie: readonly string[]): string {
@@ -307,7 +282,7 @@ test(
   )
 );
 
-/** What earlier versions left, written the way they wrote it. */
+/** The spine events of one type for one client, oldest first. */
 function spineEvents(eventType: string, clientId: string): Record<string, unknown>[] {
   return getDb()
     .prepare("SELECT actor_type, data_json FROM spine_events WHERE event_type = ? AND client_id = ? ORDER BY event_seq")
@@ -489,7 +464,7 @@ if (POSTGRES_URL) {
   });
 } else {
   test(
-    "Postgres: approvals reuse the live product bearer and startup retires the old client ids once (skipped: PDPP_TEST_POSTGRES_URL unset)",
+    "Postgres: approvals reuse the live product bearer (skipped: PDPP_TEST_POSTGRES_URL unset)",
     { skip: true },
     () => undefined
   );
