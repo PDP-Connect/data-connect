@@ -912,6 +912,45 @@ CREATE TABLE IF NOT EXISTS grants (
   scenario_id    TEXT
 );
 
+CREATE TABLE IF NOT EXISTS pairwise_identity_handles (
+  issuer TEXT NOT NULL,
+  subject_id TEXT NOT NULL,
+  client_id TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('subject','grantor','instance')),
+  source_id TEXT NOT NULL,
+  internal_id TEXT NOT NULL,
+  client_sector TEXT,
+  scheme TEXT NOT NULL DEFAULT 'legacy' CHECK (scheme IN ('legacy','v1')),
+  handle TEXT NOT NULL UNIQUE,
+  PRIMARY KEY (issuer,subject_id,client_id,kind,source_id,internal_id)
+);
+CREATE TABLE IF NOT EXISTS pairwise_trusted_client_sectors (
+  issuer TEXT NOT NULL,
+  client_id TEXT NOT NULL,
+  client_sector TEXT NOT NULL,
+  PRIMARY KEY (issuer, client_id)
+);
+CREATE TABLE IF NOT EXISTS pairwise_identity_root_keys (
+  issuer TEXT PRIMARY KEY,
+  key_version INTEGER NOT NULL CHECK (key_version = 1),
+  root_key_hex TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS pairwise_identity_legacy_backfills (
+  issuer TEXT PRIMARY KEY,
+  completed_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS pairwise_identity_issuer_migrations (
+  from_issuer TEXT NOT NULL,
+  to_issuer TEXT NOT NULL,
+  migrated_at TEXT NOT NULL,
+  PRIMARY KEY (from_issuer, to_issuer)
+);
+CREATE TABLE IF NOT EXISTS pairwise_identity_deployment (
+  singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+  issuer TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS tokens (
   token_id      TEXT PRIMARY KEY,
   grant_id      TEXT,
@@ -6138,6 +6177,19 @@ export function initDb(path = ":memory:", opts: InitDbOptions = {}): DatabaseHan
   // crash the new process. Sync because better-sqlite3 / initDb are sync.
   runWithSqliteBusyRetrySync(() => raw.exec(SCHEMA), {
     onRetry: opts.onSchemaRetry,
+  });
+  // The red-stage table may already contain random handles. Add metadata in
+  // place so those exact issued mappings remain readable as legacy rows.
+  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "pairwise_identity_handles", "client_sector", "TEXT"));
+  runWithSqliteBusyRetrySync(() =>
+    addColumnIfMissing(raw, "pairwise_identity_handles", "scheme", "TEXT NOT NULL DEFAULT 'legacy' CHECK (scheme IN ('legacy','v1'))")
+  );
+  runWithSqliteBusyRetrySync(() => {
+    raw.exec(
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_pairwise_identity_handles_v1_scope
+         ON pairwise_identity_handles(issuer, client_sector, kind, subject_id, internal_id)
+         WHERE scheme = 'v1'`
+    );
   });
   // Older registries contain only the uniqueness key. Keep those claims
   // spent, but leave them without a replay payload so the store fails closed

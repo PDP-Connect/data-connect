@@ -2097,6 +2097,50 @@ async function bootstrapPostgresSchemaOnce({
         trace_id TEXT,
         scenario_id TEXT
       );
+      CREATE TABLE IF NOT EXISTS pairwise_identity_handles (
+        issuer TEXT NOT NULL,
+        subject_id TEXT NOT NULL,
+        client_id TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('subject','grantor','instance')),
+        source_id TEXT NOT NULL,
+        internal_id TEXT NOT NULL,
+        client_sector TEXT,
+        scheme TEXT NOT NULL DEFAULT 'legacy' CHECK (scheme IN ('legacy','v1')),
+        handle TEXT NOT NULL UNIQUE,
+        PRIMARY KEY (issuer,subject_id,client_id,kind,source_id,internal_id)
+      );
+      ALTER TABLE pairwise_identity_handles ADD COLUMN IF NOT EXISTS client_sector TEXT;
+      ALTER TABLE pairwise_identity_handles
+        ADD COLUMN IF NOT EXISTS scheme TEXT NOT NULL DEFAULT 'legacy' CHECK (scheme IN ('legacy','v1'));
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_pg_pairwise_identity_handles_v1_scope
+        ON pairwise_identity_handles(issuer, client_sector, kind, subject_id, internal_id)
+        WHERE scheme = 'v1';
+      CREATE TABLE IF NOT EXISTS pairwise_trusted_client_sectors (
+        issuer TEXT NOT NULL,
+        client_id TEXT NOT NULL,
+        client_sector TEXT NOT NULL,
+        PRIMARY KEY (issuer, client_id)
+      );
+      CREATE TABLE IF NOT EXISTS pairwise_identity_root_keys (
+        issuer TEXT PRIMARY KEY,
+        key_version INTEGER NOT NULL CHECK (key_version = 1),
+        root_key_hex TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS pairwise_identity_legacy_backfills (
+        issuer TEXT PRIMARY KEY,
+        completed_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS pairwise_identity_issuer_migrations (
+        from_issuer TEXT NOT NULL,
+        to_issuer TEXT NOT NULL,
+        migrated_at TEXT NOT NULL,
+        PRIMARY KEY (from_issuer, to_issuer)
+      );
+      CREATE TABLE IF NOT EXISTS pairwise_identity_deployment (
+        singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+        issuer TEXT NOT NULL
+      );
       ALTER TABLE grants ADD COLUMN IF NOT EXISTS trust_signal_json JSONB;
       CREATE INDEX IF NOT EXISTS idx_pg_grants_client_status
         ON grants(client_id, status, issued_at);
