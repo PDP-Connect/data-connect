@@ -1331,7 +1331,10 @@ export interface PairwiseGrantIdentityContext {
 	resolveClientSector(clientId: string): string;
 }
 
-/** MCP contract: grant + internal subject ID + trusted AS issuer/sector resolver. */
+/**
+ * MCP contract: grant + internal subject ID + trusted AS issuer/sector resolver.
+ * New grants use v1 identifiers; old grants retain their persisted public values.
+ */
 export async function projectPairwiseGrant<T extends PairwiseGrant>(
 	grant: T,
 	internalSubjectId: string,
@@ -1344,7 +1347,7 @@ export async function projectPairwiseGrant<T extends PairwiseGrant>(
 		issuer: context.issuer,
 		subjectId: internalSubjectId,
 	};
-	projected.subject.id = await getPairwiseHandle({
+	projected.subject.id = await getPairwiseV1Handle({
 		...scope,
 		internalId: internalSubjectId,
 		kind: "subject",
@@ -1352,7 +1355,7 @@ export async function projectPairwiseGrant<T extends PairwiseGrant>(
 	if (projected.grantors) {
 		await Promise.all(
 			projected.grantors.map(async (grantor) => {
-				grantor.id = await getPairwiseHandle({
+				grantor.id = await getPairwiseV1Handle({
 					...scope,
 					internalId: grantor.id,
 					kind: "grantor",
@@ -1367,7 +1370,7 @@ export async function projectPairwiseGrant<T extends PairwiseGrant>(
 			}
 			stream.instance_ids = await Promise.all(
 				stream.instance_ids.map((internalId) =>
-					getPairwiseHandle({
+					getPairwiseV1Handle({
 						...scope,
 						internalId,
 						kind: "instance",
