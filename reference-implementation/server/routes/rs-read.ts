@@ -77,6 +77,7 @@ import {
   type StreamsListDependencies,
   type StreamsListInput,
 } from "../../operations/rs-streams-list/index.ts";
+import { auditTokenRefFromAuthorization } from "../audit-token-ref.ts";
 import { rejectUnsupportedClientQuery } from "../record-filters.ts";
 import type { MiddlewareHandler, RouteArg } from "./_route-contract.ts";
 import type { ReadReceiptHook } from "../read-receipts.ts";
@@ -288,6 +289,13 @@ export interface MountRsReadContext {
   decorateRecordBlobRefs: (record: unknown) => unknown;
   emitQueryReceived: (context: QueryContext, req: unknown) => Promise<void>;
   emitSpineEvent: (event: Record<string, unknown>) => Promise<unknown>;
+  /** Atomic multi-event spine write (one statement on Postgres). */
+  emitSpineEvents: (events: Record<string, unknown>[]) => Promise<unknown>;
+  /**
+   * PDPP_AUDIT_COALESCE_READ_EVENTS: on record-detail reads, hold
+   * `query.received` and write it in the same statement as the outcome event.
+   */
+  coalesceReadAuditEvents?: boolean;
 
   // request/response + instrumentation helpers
   ensureRequestId: (res: unknown) => string;
@@ -404,8 +412,7 @@ export interface MountRsReadContext {
 }
 
 function authorizationTokenId(req: RouteRequest): string | null {
-  const auth = req.headers.authorization;
-  return typeof auth === "string" ? auth.slice(7) : null;
+  return auditTokenRefFromAuthorization(req.headers.authorization);
 }
 
 // Resolve the request-time `connection_id`, honoring the deprecated
@@ -602,6 +609,8 @@ function emitDisclosureServed(
     queryId: string;
     streamId?: string | null;
     data: Record<string, unknown>;
+    /** Carries a deferred `query.received` to write alongside this event. */
+    queryContext?: QueryContext | null;
   }
 ): Promise<unknown> {
   const { tokenInfo } = args;
@@ -624,7 +633,22 @@ function emitDisclosureServed(
   if (args.streamId !== undefined) {
     event.stream_id = args.streamId;
   }
+  const pending = args.queryContext?.pendingReceived as Record<string, unknown> | null | undefined;
+  if (pending && args.queryContext) {
+    return emitPendingPair(ctx, args.queryContext, pending, event);
+  }
   return ctx.emitSpineEvent(event);
+}
+
+async function emitPendingPair(
+  ctx: MountRsReadContext,
+  queryContext: QueryContext,
+  pending: Record<string, unknown>,
+  event: Record<string, unknown>
+): Promise<unknown> {
+  const written = await ctx.emitSpineEvents([pending, event]);
+  queryContext.pendingReceived = null;
+  return written;
 }
 
 // Fold resolver-level warnings into a list body's `meta.warnings[]`, preserving
@@ -1953,6 +1977,7 @@ export function mountRsRecordDetail(app: AppLike, ctx: MountRsReadContext): void
           streamId: req.params.stream,
           tokenInfo,
           traceId,
+          ...(ctx.coalesceReadAuditEvents === true ? { deferReceived: true } : {}),
         };
 
         rejectUnsupportedClientQuery(tokenInfo.pdpp_token_kind, req.query);
@@ -2026,6 +2051,7 @@ export function mountRsRecordDetail(app: AppLike, ctx: MountRsReadContext): void
           actorId,
           actorType,
           data: { source: result.sourceDescriptor, ...result.disclosureData },
+          queryContext,
           queryId,
           req,
           scenarioId,

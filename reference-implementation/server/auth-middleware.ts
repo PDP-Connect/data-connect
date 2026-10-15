@@ -16,6 +16,7 @@
  * ./request-helpers.js — this module imports from there; it does not re-export them.
  */
 
+import { generateSpineId } from "../lib/spine.ts";
 import { introspect } from "./auth.ts";
 import {
   emitQueryReceived,
@@ -160,14 +161,18 @@ function inactiveTokenMessage(reason: string | undefined): string {
 
 async function emitInactiveTokenQuery(req: RequestLike, res: ResponseLike, info: InactiveTokenInfo): Promise<void> {
   const authGateQuery = inferAuthGateQueryContext(req);
-  if (!(authGateQuery && info.trace_id)) {
+  if (!authGateQuery) {
     return;
   }
+  // Unknown or malformed bearers carry no AS trace binding; audit them under a
+  // fresh trace id instead of dropping the rejection.
+  const traceId = info.trace_id || generateSpineId("trc_gate");
   const authGateContext = {
     actorId: info.client_id || null,
     actorType: "client",
     queryData: {
       auth_gate: true,
+      denial_reason: info.inactive_reason || "token_unknown",
       query_shape: authGateQuery.queryShape,
       ...(authGateQuery.queryShape === "record_list"
         ? { has_changes_since: authGateQuery.hasChangesSince ?? false, limit: authGateQuery.limit ?? null }
@@ -178,7 +183,7 @@ async function emitInactiveTokenQuery(req: RequestLike, res: ResponseLike, info:
     ...(info.scenario_id ? { scenarioId: info.scenario_id } : {}),
     streamId: authGateQuery.streamId,
     tokenInfo: info,
-    traceId: info.trace_id,
+    traceId,
   };
   await emitQueryReceived(authGateContext, req);
   await emitQueryRejected(

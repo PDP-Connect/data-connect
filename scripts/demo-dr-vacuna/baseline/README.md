@@ -85,6 +85,10 @@ per request, matching the pilot's 400,000 denied of 4,320,800:
 - 4.63% `revoked`: a revoked grant's token (expect 403)
 - 4.63% `cross`: child i's token reads child j's record (expect 404)
 
+`--unknown-ratio <r>` (default 0) carves never-issued bearers (expect 401)
+out of the denied share; the pilot's 40,000 expired/malformed tokens are
+0.0093.
+
 Anything else (wrong status, connection error, 10 s timeout) is an error.
 Each stage: 5 s warm-up, 30 s measured. The ramp stops at the first stage
 with error rate > 0.1% or p95 > 500 ms. Per stage it records throughput,
@@ -93,6 +97,12 @@ p50/p95/p99, server process CPU (`ps`), Postgres container CPU
 a per-second throughput timeline, and the audit check: spine rows written
 during the stage vs. requests answered (`query.received` must equal requests).
 Output: `results/<timestamp>-<label>.json`.
+
+The server's pilot flags (`PDPP_RS_INPROCESS_INTROSPECTION`,
+`PDPP_HTTP_KEEP_ALIVE`, `PDPP_AUDIT_COALESCE_READ_EVENTS`,
+`PDPP_PG_INTERACTIVE_POOL_MAX`, `PDPP_AUDIT_TOKEN_HMAC_KEY`) pass through
+`start-server.sh` / `experiment.sh` from the environment. Before/after
+numbers: [RESULTS-audit.md](./RESULTS-audit.md).
 
 ## Pool-size experiment
 

@@ -34,12 +34,14 @@ import { checkOrphanedRecordsAtBoot } from "../lib/orphaned-record-check.ts";
 import {
   createTraceContext,
   emitSpineEvent,
+  emitSpineEvents,
   generateSpineId,
   getRunStartedEvent,
   getRunTerminalEvent,
   getRunTerminalStatus,
   listSpineCorrelations,
   listSpineEventsPage,
+  type SpineEventInput,
   searchSpine,
 } from "../lib/spine.ts";
 import { buildEventPayload } from "../operations/as-client-event-subscriptions/index.ts";
@@ -125,6 +127,7 @@ import {
   stageOAuthAuthorizationCodeRequest,
   updateRegisteredClientName,
 } from "./auth.ts";
+import { auditTokenRefFromAuthorization } from "./audit-token-ref.ts";
 import { autoEnrollEligibleSchedules } from "./auto-enroll-eligible-schedules.ts";
 import type { CimdFetchDependencies } from "./cimd.ts";
 import { acquireDefaultDeliveryWorker, getDefaultDeliveryWorker } from "./client-event-delivery-worker.ts";
@@ -198,6 +201,7 @@ import {
 import { registerInboxRoutes } from "./inbox.ts";
 import {
   authenticateIntrospectionCaller,
+  createInProcessIntrospector,
   createRemoteIntrospector,
   type IntrospectionCallerCredentials,
 } from "./introspection-http.ts";
@@ -777,6 +781,11 @@ interface ServerOpts {
   hybridRetrievalCapability?: unknown;
   hybridRetrievalSupported?: boolean;
   ignoreAmbientPublicUrls?: boolean;
+  /**
+   * Record-detail reads write `query.received` in the same statement as their
+   * outcome event. Defaults to `PDPP_AUDIT_COALESCE_READ_EVENTS=1`.
+   */
+  coalesceReadAuditEvents?: boolean;
   introspectionCallerCredentials?: IntrospectionCallerCredentials;
   introspectionFetch?: typeof fetch;
   isNekoProxyTargetApproved?:
@@ -836,6 +845,18 @@ interface ServerOpts {
   rsInternalUrl?: string | null;
   rsIntrospectionCredentials?: IntrospectionCallerCredentials;
   rsIntrospectionEndpoint?: string | null;
+  /**
+   * Same-process AS lookup handed to the RS by startServer when in-process
+   * introspection is on. Internal wiring, not a caller option.
+   */
+  rsInProcessIntrospect?: ((token: string) => Promise<Record<string, unknown>>) | null;
+  /**
+   * When the AS and RS run in this process, let the RS call the AS
+   * introspection directly instead of over loopback HTTP. Defaults to
+   * `PDPP_RS_INPROCESS_INTROSPECTION=1`. Ignored when an explicit
+   * `rsIntrospectionEndpoint` or `introspectionFetch` is supplied.
+   */
+  rsInProcessIntrospection?: boolean;
   rsPort?: number;
   rsPublicUrl?: string | null;
   rsUrl?: string | null;
@@ -1650,11 +1671,7 @@ function inferAuthGateQueryContext(req: ReqLike, _tokenInfo: TokenInfo = {}) {
   return null;
 }
 
-async function emitQueryRejected(context: QueryContext, req: ReqLike, err: ApiError) {
-  // biome-ignore lint/suspicious/noUnnecessaryConditions: TypeScript boundary permits nullish input; this guard preserves runtime behavior.
-  if (!context?.queryId) {
-    return;
-  }
+function buildQueryRejectedEvent(context: QueryContext, req: ReqLike, err: ApiError): SpineEventInput {
   const code = err.code || "api_error";
   const status = codeToStatus[code] || 500;
   const data: Record<string, unknown> = {
@@ -1669,8 +1686,8 @@ async function emitQueryRejected(context: QueryContext, req: ReqLike, err: ApiEr
     data.source = context.sourceDescriptor ?? null;
   }
   const authHeader = req.headers?.authorization;
-  const tokenId = typeof authHeader === "string" ? authHeader.slice(7) : null;
-  await emitSpineEvent({
+  const tokenId = auditTokenRefFromAuthorization(authHeader);
+  return {
     actor_id: context.actorId ?? null,
     actor_type: context.actorType ?? null,
     client_id: context.tokenInfo?.client_id ?? null,
@@ -1686,26 +1703,17 @@ async function emitQueryRejected(context: QueryContext, req: ReqLike, err: ApiEr
     subject_type: "subject",
     token_id: tokenId,
     trace_id: context.traceId ?? null,
-  });
+  } as SpineEventInput;
 }
 
-async function emitQueryReceived(context: QueryContext, req: ReqLike) {
-  // biome-ignore lint/suspicious/noUnnecessaryConditions: TypeScript boundary permits nullish input; this guard preserves runtime behavior.
-  if (!context?.queryId) {
-    return;
-  }
-  if (context.receivedEmitted) {
-    return;
-  }
-  context.receivedEmitted = true;
-
+function buildQueryReceivedEvent(context: QueryContext, req: ReqLike): SpineEventInput {
   const data: Record<string, unknown> = { ...(context.queryData || {}) };
   if (Object.hasOwn(context, "sourceDescriptor")) {
     data.source = context.sourceDescriptor ?? null;
   }
   const authHeader = req.headers?.authorization;
-  const tokenId = typeof authHeader === "string" ? authHeader.slice(7) : null;
-  await emitSpineEvent({
+  const tokenId = auditTokenRefFromAuthorization(authHeader);
+  return {
     actor_id: context.actorId ?? null,
     actor_type: context.actorType ?? null,
     client_id: context.tokenInfo?.client_id ?? null,
@@ -1721,7 +1729,51 @@ async function emitQueryReceived(context: QueryContext, req: ReqLike) {
     subject_type: "subject",
     token_id: tokenId,
     trace_id: context.traceId ?? null,
-  });
+  } as SpineEventInput;
+}
+
+/**
+ * Write `event` together with a `query.received` that was deferred on this
+ * context (see `deferReceived`), as one atomic spine write. Without a pending
+ * receipt it is a plain single-event emit.
+ */
+async function emitWithPendingReceived(context: QueryContext, event: SpineEventInput): Promise<void> {
+  const pending = context.pendingReceived as SpineEventInput | null | undefined;
+  if (!pending) {
+    await emitSpineEvent(event);
+    return;
+  }
+  await emitSpineEvents([pending, event]);
+  context.pendingReceived = null;
+}
+
+async function emitQueryRejected(context: QueryContext, req: ReqLike, err: ApiError) {
+  // biome-ignore lint/suspicious/noUnnecessaryConditions: TypeScript boundary permits nullish input; this guard preserves runtime behavior.
+  if (!context?.queryId) {
+    return;
+  }
+  await emitWithPendingReceived(context, buildQueryRejectedEvent(context, req, err));
+}
+
+async function emitQueryReceived(context: QueryContext, req: ReqLike) {
+  // biome-ignore lint/suspicious/noUnnecessaryConditions: TypeScript boundary permits nullish input; this guard preserves runtime behavior.
+  if (!context?.queryId) {
+    return;
+  }
+  if (context.receivedEmitted) {
+    return;
+  }
+  context.receivedEmitted = true;
+  const event = buildQueryReceivedEvent(context, req);
+  if (context.deferReceived === true) {
+    // Coalesced audit (PDPP_AUDIT_COALESCE_READ_EVENTS): hold the receipt,
+    // stamped now, and write it in the same statement as the outcome event
+    // (`disclosure.served` or `query.rejected`), which is still written
+    // before the response is sent.
+    context.pendingReceived = { ...event, occurred_at: new Date().toISOString() };
+    return;
+  }
+  await emitSpineEvent(event);
 }
 
 async function rejectQuery(
@@ -1784,7 +1836,7 @@ async function emitStateEvent(
   data: Record<string, unknown> = {}
 ) {
   const authHeader = req.headers?.authorization;
-  const tokenId = typeof authHeader === "string" ? authHeader.slice(7) : null;
+  const tokenId = auditTokenRefFromAuthorization(authHeader);
   await emitSpineEvent({
     actor_id: context.actorId ?? null,
     actor_type: context.actorType ?? null,
@@ -1875,7 +1927,7 @@ async function emitMutationEvent(
   data: Record<string, unknown> = {}
 ) {
   const authHeader = req.headers?.authorization;
-  const tokenId = typeof authHeader === "string" ? authHeader.slice(7) : null;
+  const tokenId = auditTokenRefFromAuthorization(authHeader);
   await emitSpineEvent({
     actor_id: context.actorId ?? null,
     actor_type: context.actorType ?? null,
@@ -1932,6 +1984,62 @@ async function rejectMutation(res: ResLike, req: ReqLike, context: MutationConte
 
 // ─── Auth middleware ─────────────────────────────────────────────────────────
 
+// The AS answers `{ active: false }` with no reason for a bearer it never
+// issued (or one deleted since); the RS validator surfaces that as
+// `context.active_false`. Name it for the audit trail.
+function authGateDenialReason(inactiveReason: string | null | undefined): string {
+  if (!inactiveReason || inactiveReason === "context.active_false") {
+    return "token_unknown";
+  }
+  return inactiveReason;
+}
+
+// Audit one auth-gate rejection as `query.received` + `query.rejected`, written
+// in a single spine statement. `denial_reason` in the event data is the
+// machine-readable cause (`bearer_missing`, `bearer_malformed`,
+// `token_unknown`, `grant_revoked`, `grant_expired`, `context.*`, ...); the
+// error code mirrors what the client sees. Rejections the AS cannot bind to a
+// grant get a fresh trace id so the pair still correlates.
+async function auditAuthGateRejection(
+  req: ReqLike,
+  res: ResLike,
+  info: TokenInfo,
+  rejection: { code: string; denialReason: string; message: string }
+): Promise<void> {
+  const authGateQuery = inferAuthGateQueryContext(req, info);
+  const queryData: Record<string, unknown> = {
+    auth_gate: true,
+    denial_reason: rejection.denialReason,
+    query_shape: authGateQuery?.queryShape ?? "other",
+  };
+  if (authGateQuery) {
+    if (authGateQuery.queryShape === "record_list") {
+      // biome-ignore lint/suspicious/noUnnecessaryConditions: TypeScript boundary permits nullish input; this guard preserves runtime behavior.
+      queryData.has_changes_since = authGateQuery.hasChangesSince ?? false;
+      queryData.limit = authGateQuery.limit ?? null;
+    }
+    if (authGateQuery.requestedRecordId) {
+      queryData.requested_record_id = authGateQuery.requestedRecordId;
+    }
+  } else {
+    queryData.http_method = req.method ?? null;
+    queryData.route = req.path ?? null;
+  }
+  const context: QueryContext = {
+    actorId: info.client_id ?? null,
+    actorType: "client",
+    queryData,
+    queryId: ensureRequestId(res),
+    receivedEmitted: true,
+    scenarioId: info.scenario_id ?? null,
+    streamId: authGateQuery?.streamId ?? null,
+    tokenInfo: info,
+    traceId: info.trace_id ?? generateSpineId("trc_gate"),
+  };
+  const gateErr = Object.assign(new Error(rejection.message), { code: rejection.code }) as ApiError;
+  await emitSpineEvents([buildQueryReceivedEvent(context, req), buildQueryRejectedEvent(context, req, gateErr)]);
+}
+
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: This protocol transition owns ordered state invariants that must remain local.
 async function requireTokenWithIntrospection(
   req: ReqLike,
@@ -1941,6 +2049,11 @@ async function requireTokenWithIntrospection(
 ) {
   const auth = req.headers?.authorization;
   if (!auth || typeof auth !== "string" || !auth.startsWith("Bearer ")) {
+    await auditAuthGateRejection(req, res, {}, {
+      code: "authentication_error",
+      denialReason: auth ? "bearer_malformed" : "bearer_missing",
+      message: "Missing Bearer token",
+    });
     setProtectedResourceMetadataChallenge(res);
     return pdppError(res, 401, "authentication_error", "Missing Bearer token");
   }
@@ -1966,45 +2079,23 @@ async function requireTokenWithIntrospection(
     if (info.trace_id) {
       setReferenceTraceId(res, info.trace_id);
     }
-    const authGateQuery = inferAuthGateQueryContext(req, info);
-    if (authGateQuery && info.trace_id) {
-      const authGateContext: QueryContext = {
-        actorId: info.client_id ?? null,
-        actorType: "client",
-        queryData: {
-          auth_gate: true,
-          query_shape: authGateQuery.queryShape,
-          ...(authGateQuery.queryShape === "record_list"
-            ? {
-                // biome-ignore lint/suspicious/noUnnecessaryConditions: TypeScript boundary permits nullish input; this guard preserves runtime behavior.
-                has_changes_since: authGateQuery.hasChangesSince ?? false,
-                limit: authGateQuery.limit ?? null,
-              }
-            : {}),
-          ...(authGateQuery.requestedRecordId ? { requested_record_id: authGateQuery.requestedRecordId } : {}),
-        },
-        queryId: ensureRequestId(res),
-        scenarioId: info.scenario_id ?? null,
-        streamId: authGateQuery.streamId ?? null,
-        tokenInfo: info,
-        traceId: info.trace_id ?? null,
-      };
-      await emitQueryReceived(authGateContext, req);
-      const gateErrMsg =
-        info.inactive_reason === "grant_revoked"
-          ? "Grant has been revoked"
+    const gateErrMsg =
+      info.inactive_reason === "grant_revoked"
+        ? "Grant has been revoked"
+        : // biome-ignore lint/style/noNestedTernary: The existing expression mirrors the protocol’s compact value selection contract.
+          info.inactive_reason === "grant_expired"
+          ? "Grant has expired"
           : // biome-ignore lint/style/noNestedTernary: The existing expression mirrors the protocol’s compact value selection contract.
-            info.inactive_reason === "grant_expired"
-            ? "Grant has expired"
-            : // biome-ignore lint/style/noNestedTernary: The existing expression mirrors the protocol’s compact value selection contract.
-              info.inactive_reason === "grant_invalid"
-              ? "Grant is malformed or no longer valid"
-              : "Invalid or expired token";
-      const gateErr = Object.assign(new Error(gateErrMsg), {
-        code: info.inactive_reason || "authentication_error",
-      }) as ApiError;
-      await emitQueryRejected(authGateContext, req, gateErr);
-    }
+            info.inactive_reason === "grant_invalid"
+            ? "Grant is malformed or no longer valid"
+            : "Invalid or expired token";
+    // Every rejected bearer is audited, including ones the AS has never seen
+    // (no trace/grant binding) and failed introspection calls.
+    await auditAuthGateRejection(req, res, info, {
+      code: info.inactive_reason || "authentication_error",
+      denialReason: authGateDenialReason(info.inactive_reason),
+      message: gateErrMsg,
+    });
     if (info.inactive_reason === "grant_revoked") {
       return pdppError(res, 403, "grant_revoked", "Grant has been revoked");
     }
@@ -6834,13 +6925,17 @@ function buildRsApp(opts: ServerOpts = {}) {
   if (!rsIntrospectionCredentials) {
     throw new Error("RS introspection credentials must be configured");
   }
-  const introspectToken = createRemoteIntrospector({
-    ...rsIntrospectionCredentials,
-    endpoint: opts.rsIntrospectionEndpoint ?? `http://127.0.0.1:${opts.asPort ?? AS_PORT}/introspect`,
-    expectedAudience: opts.resolveIntrospectionAudience ?? (() => explicitResource ?? null),
-    expectedIssuer: opts.resolveIntrospectionIssuer ?? (() => opts.asIssuer ?? opts.asPublicUrl ?? null),
-    ...(opts.introspectionFetch ? { fetchImpl: opts.introspectionFetch } : {}),
-  });
+  const expectedAudience = opts.resolveIntrospectionAudience ?? (() => explicitResource ?? null);
+  const expectedIssuer = opts.resolveIntrospectionIssuer ?? (() => opts.asIssuer ?? opts.asPublicUrl ?? null);
+  const introspectToken = opts.rsInProcessIntrospect
+    ? createInProcessIntrospector({ expectedAudience, expectedIssuer, introspect: opts.rsInProcessIntrospect })
+    : createRemoteIntrospector({
+        ...rsIntrospectionCredentials,
+        endpoint: opts.rsIntrospectionEndpoint ?? `http://127.0.0.1:${opts.asPort ?? AS_PORT}/introspect`,
+        expectedAudience,
+        expectedIssuer,
+        ...(opts.introspectionFetch ? { fetchImpl: opts.introspectionFetch } : {}),
+      });
   const requireToken = (req: ReqLike, res: ResLike, next: () => void) =>
     requireTokenWithIntrospection(req, res, next, introspectToken);
 
@@ -7168,8 +7263,10 @@ function buildRsApp(opts: ServerOpts = {}) {
     countSearchIndexDirtyScopes: countDirtySearchIndexScopes,
     createBlobStore,
     decorateRecordBlobRefs,
+    coalesceReadAuditEvents: opts.coalesceReadAuditEvents ?? process.env.PDPP_AUDIT_COALESCE_READ_EVENTS === "1",
     emitQueryReceived,
     emitSpineEvent,
+    emitSpineEvents,
     ensureRequestId,
     finalizeCanonicalEnvelope,
     getConnectorFreshnessEvidence,
@@ -7852,6 +7949,29 @@ function buildRsApp(opts: ServerOpts = {}) {
 // ─── Main ────────────────────────────────────────────────────────────────────
 
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: This protocol transition owns ordered state invariants that must remain local.
+/**
+ * In-process RS introspection (see `createInProcessIntrospector`). Returns the
+ * same object the AS `/introspect` route answers with: the source wire
+ * projection plus `aud` / `iss` from the AS's own resolvers. Null keeps the
+ * loopback HTTP path, which stays the default and is always used when a test
+ * or deployment points the RS at an explicit endpoint or fetch.
+ */
+function resolveRsInProcessIntrospect(
+  opts: ServerOpts,
+  resolvers: { audience: () => string | null; issuer: () => string | null }
+): ((token: string) => Promise<Record<string, unknown>>) | null {
+  const enabled = opts.rsInProcessIntrospection ?? process.env.PDPP_RS_INPROCESS_INTROSPECTION === "1";
+  if (!enabled || opts.rsIntrospectionEndpoint || opts.introspectionFetch) {
+    return null;
+  }
+  return async (token: string) => {
+    const info = projectSourceIntrospectionWireContext(await introspect(token)) as Record<string, unknown>;
+    const audience = resolvers.audience();
+    const issuer = resolvers.issuer();
+    return { ...info, ...(audience ? { aud: audience } : {}), ...(issuer ? { iss: issuer } : {}) };
+  };
+}
+
 export async function startServer(opts: ServerOpts = {}) {
   const introspectionCredentials = resolveIntrospectionCredentials(opts);
   const logger = opts.logger ?? buildLogger({ quiet: !!opts.quiet });
@@ -8611,6 +8731,10 @@ export async function startServer(opts: ServerOpts = {}) {
     // the adapter falls back to the public resource). See explicitRsInternalUrl.
     // Spec: openspec/changes/route-hosted-mcp-adapter-self-calls-internally/
     rsInternalUrl: explicitRsInternalUrl,
+    rsInProcessIntrospect: resolveRsInProcessIntrospect(opts, {
+      audience: () => configuredRsPublicUrl || runtimeContext.rsUrl,
+      issuer: () => configuredAsIssuer || runtimeContext.referenceBaseUrl,
+    }),
     rsIntrospectionCredentials: introspectionCredentials,
     rsIntrospectionEndpoint: opts.rsIntrospectionEndpoint ?? `http://127.0.0.1:${asPort}/introspect`,
     rsPublicUrl: configuredRsPublicUrl,

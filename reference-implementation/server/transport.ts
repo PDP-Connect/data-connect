@@ -276,7 +276,24 @@ function buildRouteSchema(manifest: RouteManifest): Record<string, JsonValue> | 
  * request-completion log lines. We emit our own completion record in an
  * `onResponse` hook so it can carry PDPP's `trace_id` alongside `req_id`.
  */
+/**
+ * `PDPP_HTTP_KEEP_ALIVE=1` lets clients reuse connections (Node's default
+ * 5 s keep-alive) instead of the forced `Connection: close` below. The forced
+ * close exists for test harnesses that stop and restart a server on the same
+ * port: a pooled client socket from the previous server would otherwise be
+ * reused and fail. That concern does not apply to a long-running deployment,
+ * where forcing close costs a TCP (and, behind TLS, a handshake) per request
+ * and, at ~1,500 req/s on loopback, exhausted ephemeral ports in TIME_WAIT
+ * (scripts/demo-dr-vacuna/baseline/RESULTS.md).
+ */
+const HTTP_KEEP_ALIVE_TIMEOUT_MS = 5000;
+
+export function httpKeepAliveEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.PDPP_HTTP_KEEP_ALIVE === "1";
+}
+
 function buildFastify({ loggerInstance }: { loggerInstance: FastifyBaseLogger }): FastifyInstance {
+  const keepAlive = httpKeepAliveEnabled();
   const fastify = Fastify({
     bodyLimit: HOSTED_INGEST_MAX_REQUEST_BYTES, // match previous express.text() limit
     disableRequestLogging: true,
@@ -304,7 +321,7 @@ function buildFastify({ loggerInstance }: { loggerInstance: FastifyBaseLogger })
     // `startServer()` on the same port). We respond with `Connection: close`
     // on every reply below via an `onSend` hook so clients never pool our
     // sockets. The `keepAliveTimeout` is also set short as belt-and-braces.
-    keepAliveTimeout: 1,
+    keepAliveTimeout: keepAlive ? HTTP_KEEP_ALIVE_TIMEOUT_MS : 1,
     loggerInstance,
     // Router-level options moved out of the top-level constructor in Fastify 5
     // (the deprecated location warns FSTDEP022 and is removed in Fastify 6).
@@ -321,10 +338,12 @@ function buildFastify({ loggerInstance }: { loggerInstance: FastifyBaseLogger })
   // Force `Connection: close` on every response. See the note above the
   // Fastify config block. An `onRequest` hook sets it before handlers run so
   // there's no race with streaming replies.
-  fastify.addHook("onRequest", (_request, reply, done) => {
-    reply.header("connection", "close");
-    done();
-  });
+  if (!keepAlive) {
+    fastify.addHook("onRequest", (_request, reply, done) => {
+      reply.header("connection", "close");
+      done();
+    });
+  }
 
   // Fastify rejects a route body that exceeds its local bodyLimit before the
   // Express-shaped adapter runs. Keep this mapping narrowly scoped so the

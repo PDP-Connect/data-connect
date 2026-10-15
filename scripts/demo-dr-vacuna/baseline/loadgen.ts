@@ -7,7 +7,10 @@
 //   ok       token of child i, record of child i            -> expect 200
 //   revoked  token of a revoked grant, its own record        -> expect 403
 //   cross    token of child i, record of another child j     -> expect 404
+//   unknown  a bearer the AS never issued (--unknown-ratio)   -> expect 401
 // The denied share defaults to the pilot ratio 400,000 / 4,320,800.
+// --unknown-ratio (default 0) is carved out of that denied share; the pilot
+// has 40,000 expired or malformed tokens, i.e. 0.0093.
 //
 // Concurrency ramps through --stages; the run stops at the first stage where
 // unexpected responses exceed 0.1% or p95 exceeds 500 ms. Per stage it also
@@ -16,7 +19,8 @@
 //
 // Usage:
 //   node loadgen.ts [--stages 4,8,16,32,64,128] [--stage-seconds 30] [--warmup-seconds 5]
-//                   [--grants 980200] [--deny-ratio 0.0926] [--label baseline]
+//                   [--grants 980200] [--deny-ratio 0.0926] [--unknown-ratio 0]
+//                   [--label baseline]
 //                   [--no-stop]
 
 import { execFile, execFileSync } from "node:child_process";
@@ -48,14 +52,15 @@ const stageSeconds = argInt("stage-seconds", 30);
 const warmupSeconds = argInt("warmup-seconds", 5);
 const grantTotal = argInt("grants", 980_200);
 const denyRatio = Number(argValue("deny-ratio", String(400_000 / 4_320_800)));
+const unknownRatio = Number(argValue("unknown-ratio", "0"));
 const label = argValue("label", "baseline");
 const stopOnFail = !process.argv.includes("--no-stop");
 const MAX_ERROR_RATE = 0.001;
 const MAX_P95_MS = 500;
 const REQUEST_TIMEOUT_MS = 10_000;
 
-type Kind = "ok" | "revoked" | "cross";
-const EXPECTED: Record<Kind, number> = { cross: 404, ok: 200, revoked: 403 };
+type Kind = "ok" | "revoked" | "cross" | "unknown";
+const EXPECTED: Record<Kind, number> = { cross: 404, ok: 200, revoked: 403, unknown: 401 };
 
 const realTokens = readRealTokens();
 let rngState = 0x5eed_1234;
@@ -81,13 +86,29 @@ function randomRevokedChild(): number {
   return Math.floor(rand() * slots) * REVOKE_MODULUS + REVOKE_REMAINDER;
 }
 
+function unknownToken(): string {
+  // 64 hex chars, the shape the AS mints, but never issued.
+  let hex = "";
+  while (hex.length < 64) {
+    hex += Math.floor(rand() * 4_294_967_296)
+      .toString(16)
+      .padStart(8, "0");
+  }
+  return hex.slice(0, 64);
+}
+
 function nextRequest(): { kind: Kind; record: number; token: string } {
   const roll = rand();
-  if (roll < denyRatio / 2) {
+  if (roll < unknownRatio) {
+    return { kind: "unknown", record: randomChild(), token: unknownToken() };
+  }
+  const known = denyRatio - unknownRatio;
+  const shifted = roll - unknownRatio;
+  if (shifted < known / 2) {
     const i = randomRevokedChild();
     return { kind: "revoked", record: i, token: tokenFor(i, realTokens) };
   }
-  if (roll < denyRatio) {
+  if (shifted < known) {
     const i = randomActiveChild();
     let j = randomChild();
     while (j === i) {
@@ -202,10 +223,10 @@ async function spineCountsSince(seq: number): Promise<Record<string, number>> {
 async function runStage(concurrency: number) {
   const dispatcher = new Agent({ connections: concurrency, keepAliveTimeout: 30_000, pipelining: 1 });
   const samples: Sample[] = [];
-  const counts = { cross: 0, ok: 0, revoked: 0 };
+  const counts = { cross: 0, ok: 0, revoked: 0, unknown: 0 };
   // Every completed request of the stage, warm-up and drain included, for
   // the audit-coverage check.
-  const sent = { cross: 0, ok: 0, revoked: 0 };
+  const sent = { cross: 0, ok: 0, revoked: 0, unknown: 0 };
   let measuring = false;
   let stopping = false;
   let errorExample = "";
@@ -316,7 +337,7 @@ async function runStage(concurrency: number) {
 async function main() {
   const results = [];
   console.log(
-    `label=${label} grants=${grantTotal} deny_ratio=${round(denyRatio, 4)} stage=${stageSeconds}s warmup=${warmupSeconds}s server_pid=${serverPid || "?"}`
+    `label=${label} grants=${grantTotal} deny_ratio=${round(denyRatio, 4)} unknown_ratio=${round(unknownRatio, 4)} stage=${stageSeconds}s warmup=${warmupSeconds}s server_pid=${serverPid || "?"}`
   );
   console.log("conc  req/s  ok/s   p50   p95   p99  err%    srvCPU pgCPU  audit");
   for (const concurrency of stages) {
@@ -329,7 +350,7 @@ async function main() {
     const spine = await spineCountsSince(before);
     // Audit rows for the whole stage (warm-up included) against every
     // request that got an HTTP response in the stage.
-    const sentTotal = stage.requests_sent_incl_warmup.ok + stage.requests_sent_incl_warmup.revoked + stage.requests_sent_incl_warmup.cross;
+    const sentTotal = Object.values(stage.requests_sent_incl_warmup).reduce((a, b) => a + b, 0);
     const audit = {
       coverage: sentTotal ? round((spine["query.received"] ?? 0) / sentTotal, 4) : null,
       disclosure_served: spine["disclosure.served"] ?? 0,
@@ -372,7 +393,7 @@ async function main() {
   const file = join(outDir, `${new Date().toISOString().replace(/[:.]/g, "-")}-${label}.json`);
   writeFileSync(
     file,
-    `${JSON.stringify({ deny_ratio: denyRatio, grants: grantTotal, label, stage_seconds: stageSeconds, stages: results, warmup_seconds: warmupSeconds }, null, 2)}\n`
+    `${JSON.stringify({ deny_ratio: denyRatio, unknown_ratio: unknownRatio, grants: grantTotal, label, stage_seconds: stageSeconds, stages: results, warmup_seconds: warmupSeconds }, null, 2)}\n`
   );
   console.log(`wrote ${file}`);
   await monitorPool.end();
