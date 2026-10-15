@@ -123,9 +123,12 @@ export interface RepresentativeGrantRow {
   client_id: string;
   disposition: string | null;
   expires_at: string | null;
+  /** Fields the grant shares, from the resolved grant (display only). */
+  fields: string[];
   grant_id: string;
   grant_status: string;
   parent_ref: string;
+  purpose_description: string | null;
   revoked_at: string | null;
 }
 
@@ -139,9 +142,18 @@ function iso(value: unknown): string | null {
 const GRANT_LIST_SQL = `
   SELECT p.grant_id, p.child_id, p.client_id, p.parent_ref, p.capacity, p.approved_at, p.revoked_at,
          p.disposition, g.status AS grant_status, g.expires_at,
+         g.grant_json -> 'streams' AS streams_json, g.grant_json ->> 'purpose_description' AS purpose_description,
          COALESCE(p.client_name, g.grant_json -> 'client' -> 'client_display' ->> 'name') AS client_display_name
     FROM pilot_rep_grants p
     JOIN grants g ON g.grant_id = p.grant_id`;
+
+function grantFields(streams: unknown): string[] {
+  if (!Array.isArray(streams)) {
+    return [];
+  }
+  const fields = streams.flatMap((s) => (Array.isArray(s?.fields) ? (s.fields as unknown[]).map(String) : []));
+  return [...new Set(fields)];
+}
 
 function toGrantRow(row: Record<string, unknown>): RepresentativeGrantRow {
   return {
@@ -152,9 +164,11 @@ function toGrantRow(row: Record<string, unknown>): RepresentativeGrantRow {
     client_id: String(row.client_id),
     disposition: (row.disposition as string | null) ?? null,
     expires_at: iso(row.expires_at),
+    fields: grantFields(row.streams_json),
     grant_id: String(row.grant_id),
     grant_status: String(row.grant_status),
     parent_ref: String(row.parent_ref),
+    purpose_description: (row.purpose_description as string | null) ?? null,
     revoked_at: iso(row.revoked_at),
   };
 }

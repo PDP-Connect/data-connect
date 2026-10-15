@@ -61,6 +61,19 @@ export const PILOT_EVENTS = {
 export const PILOT_PATHS = {
   authorizations: "/pilot/vacuna/autorizaciones",
   consent: "/pilot/vacuna/consent",
+  consentReview: "/pilot/vacuna/consent/review",
+  grantLifecycle: "/pilot/vacuna/grant-lifecycle",
+  landing: "/pilot/vacuna",
   login: "/pilot/cuenta-unica/login",
   logout: "/pilot/cuenta-unica/logout",
+  result: "/pilot/vacuna/resultado",
 } as const;
+
+/**
+ * Where the signed-out landing page's "start" button goes: the client app
+ * that begins the walkthrough (the reminder service). Unset: no button.
+ */
+export function walkthroughStartUrl(env: NodeJS.ProcessEnv = process.env): string | null {
+  const raw = env.PDPP_PILOT_DR_VACUNA_START_URL?.trim();
+  return raw ? raw : null;
+}

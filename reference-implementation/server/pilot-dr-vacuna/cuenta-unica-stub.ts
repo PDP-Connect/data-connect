@@ -10,6 +10,7 @@
 
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { demoPassword } from "./config.ts";
+import type { ReviewView } from "./html.ts";
 import type { CivilRegistry } from "./registry-stub.ts";
 
 export const SESSION_COOKIE = "pilot_cu_session";
@@ -21,8 +22,12 @@ export interface ParentSession {
   csrfToken: string;
   displayName: string;
   expiresAt: number;
+  /** Outcome of the last consent step, for the post-redirect-get result page. */
+  lastResult?: { kind: "approved" | "declined" | "refused"; returnTo: string | null };
   /** Stable AS-internal identifier for the person (never the cédula). */
   parentRef: string;
+  /** The review this person was shown last (already authority-checked), for the GET review page. */
+  review?: ReviewView;
   sessionId: string;
 }
 

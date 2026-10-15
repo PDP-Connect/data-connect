@@ -1,0 +1,51 @@
+# Local run of the walkthrough image, the same shape as the Fly deployment:
+# one app container (AS/RS on loopback, reminder app, public port 8080) and
+# one Postgres. From the repo root:
+#
+#   docker compose -f scripts/demo-dr-vacuna/deploy/docker-compose.yml up --build -d
+#   open http://localhost:8080
+#
+# HOST_PORT changes the published port; PUBLIC_ORIGIN must then match it.
+name: vacuna-walkthrough
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: pdpp
+      POSTGRES_PASSWORD: pdpp
+      POSTGRES_DB: pdpp
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "pdpp"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  app:
+    build:
+      context: ../../..
+      dockerfile: scripts/demo-dr-vacuna/deploy/Dockerfile
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://pdpp:pdpp@db:5432/pdpp
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-http://localhost:8080}
+      # Local only. On Fly this is a secret (DEPLOY.md).
+      PDPP_AUDIT_TOKEN_HMAC_KEY: ${PDPP_AUDIT_TOKEN_HMAC_KEY:-local-compose-audit-key-change-me-0123456789}
+      VACUNA_PAYER: ${VACUNA_PAYER:-mock}
+    ports:
+      - "127.0.0.1:${HOST_PORT:-8080}:8080"
+    volumes:
+      - app_state:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 60
+
+volumes:
+  db_data:
+  app_state:
