@@ -306,3 +306,30 @@ export async function postEscrowPay(opts: {
   // 5xx / 502 (fee or chain lookup) are transient; 4xx are final for this body.
   return { accepted: false, response: { body: parsed, status: resp.status }, retryable: resp.status >= 500 };
 }
+
+function isLoopbackHost(hostname: string): boolean {
+  return hostname === "127.0.0.1" || hostname === "localhost" || hostname === "::1" || hostname === "[::1]";
+}
+
+/**
+ * Loopback is always allowed. Any other URL must be https and its origin must
+ * be listed in `allowlist` (comma-separated origins, e.g. the value of
+ * VACUNA_GATEWAY_ALLOWLIST="https://dp-rpc.moksha.vana.org"). Returns the URL.
+ */
+export function assertAllowedRemote(url: string, allowlist: string | undefined, envName: string): string {
+  const parsed = new URL(url);
+  if (isLoopbackHost(parsed.hostname)) {
+    return url;
+  }
+  const allowed = (allowlist ?? "")
+    .split(",")
+    .map((o) => o.trim().replace(/\/+$/, ""))
+    .filter(Boolean);
+  if (parsed.protocol !== "https:") {
+    throw new Error(`refusing non-loopback ${parsed.origin}: only https is allowed off loopback`);
+  }
+  if (!allowed.includes(parsed.origin)) {
+    throw new Error(`refusing non-loopback ${parsed.origin}: not listed in ${envName}`);
+  }
+  return url;
+}
