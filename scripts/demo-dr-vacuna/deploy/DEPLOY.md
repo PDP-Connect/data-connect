@@ -93,14 +93,16 @@ fly ssh sftp shell --app vacuna-al-dia-demo   # put moksha.env /data/moksha.env
 fly apps restart vacuna-al-dia-demo
 ```
 
-The current payer (`reminder-service/lib/payer.ts`) uses one data point scope
-for all reads. If the registration uses per-child data points, the payer needs
-to derive the scope per read; that change belongs with the Moksha work.
+The deploy uses `VACUNA_PAYER = "moksha"`: the Moksha payer
+(`../moksha/lib/payer.ts`) registers each child's server, data point and
+grant on the gateway before its first paid read, then pays 0.011 VANA for the
+first read (grant fee included) and 0.01 VANA after. It needs the three key
+secrets below and a funded escrow deposit for the builder
+(`node moksha/cli.ts deposit`, see `../moksha/LIVE-RUNBOOK.md`). Caps in
+`fly.toml`: 200 children, 5,000 paid reads.
 
-Until the Moksha settings and keys are in place, a `VACUNA_PAYER=http` boot
-fails with the missing variable's name. To bring the demo up first without
-payments, set `VACUNA_PAYER = "mock"` in `fly.toml`, deploy, and switch back
-to `"http"` once the Moksha values and keys are set.
+To bring the demo up without payments, set `VACUNA_PAYER = "mock"` in
+`fly.toml` and deploy.
 
 ## Create (once)
 
@@ -120,15 +122,13 @@ fly secrets set --app vacuna-al-dia-db POSTGRES_PASSWORD="$PG_PASSWORD" --stage
 fly secrets set --app vacuna-al-dia-demo --stage \
   DATABASE_URL="postgres://pdpp:$PG_PASSWORD@vacuna-al-dia-db.internal:5432/pdpp" \
   PDPP_AUDIT_TOKEN_HMAC_KEY="$(openssl rand -hex 32)" \
-  VACUNA_BUILDER_PRIVATE_KEY='<0x… builder key>' \
-  VACUNA_REGISTER_SERVER_PRIVATE_KEY='<0x… register server key>' \
-  VACUNA_ESCROW_CONTRACT='<0x…>' \
-  VACUNA_DATA_REGISTRY_CONTRACT='<0x…>' \
-  VACUNA_DATA_OWNER_ADDRESS='<0x…>'
+  VACUNA_BUILDER_PRIVATE_KEY="$(cat ~/.config/dr-vacuna/builder.key)" \
+  VACUNA_REGISTER_SERVER_PRIVATE_KEY="$(cat ~/.config/dr-vacuna/register.key)" \
+  VACUNA_CHILD_KEY_SEED="$(cat ~/.config/dr-vacuna/child-seed.key)"
 ```
 
-(The three contract/owner values are not secret; they may instead go in
-`fly.toml` or `/data/moksha.env`.)
+Contract addresses default to the live Moksha deployment
+(`../moksha/lib/config.ts`).
 
 Alternative to the db app: Fly Managed Postgres (`fly mpg create`), then set
 `DATABASE_URL` to its connection string. pgvector is optional for this demo.

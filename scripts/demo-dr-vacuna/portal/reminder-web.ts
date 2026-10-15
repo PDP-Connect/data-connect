@@ -26,6 +26,8 @@ import { type Lang, langCookie, langHref, pick, requestedLang, resolveLang } fro
 import { SOURCE_ID, STREAM } from "../baseline/lib/manifest.ts";
 import { createClock } from "../reminder-service/lib/clock.ts";
 import { type ClientCredentials, loadOrCreateClientKey, privateKeyJwtClient } from "../reminder-service/lib/oauth.ts";
+import { buildContext as buildMokshaContext } from "../moksha/lib/context.ts";
+import { keysFromSecrets } from "../moksha/lib/keys.ts";
 import { type GatewayPayer, HttpGatewayPayer, MockPayer, NATIVE_ASSET, ONE_HUNDREDTH_VANA_WEI } from "../reminder-service/lib/payer.ts";
 import { evaluateDueDose, type ImmunizationRecord } from "../reminder-service/lib/schedule.ts";
 import { DEFAULT_CONFIG, ReminderService } from "../reminder-service/lib/service.ts";
@@ -745,13 +747,33 @@ export function loadPayerEnvFile(path: string | undefined): void {
   }
 }
 
-/** VACUNA_PAYER=mock (default) records payments locally; =http pays through the data gateway (see DEPLOY.md). */
+/**
+ * VACUNA_PAYER=mock (default) records payments locally; =moksha registers each
+ * child on the gateway and pays per read (../moksha/LIVE-RUNBOOK.md); =http
+ * pays through the data gateway with one fixed data point (see DEPLOY.md).
+ */
 function buildPayer(store: ReminderStore): GatewayPayer {
   loadPayerEnvFile(process.env.VACUNA_PAYER_ENV_FILE);
   const env = process.env;
   const kind = env.VACUNA_PAYER || "mock";
   if (kind === "mock") {
     return new MockPayer();
+  }
+  if (kind === "moksha") {
+    // Keys arrive as secrets (Fly), not the 0600 files the moksha CLI reads.
+    const secret = (name: string): `0x${string}` => {
+      const v = env[name];
+      if (!(v && /^0x[0-9a-fA-F]{64}$/.test(v))) {
+        throw new Error(`VACUNA_PAYER=moksha needs ${name} (0x-prefixed 32-byte hex)`);
+      }
+      return v as `0x${string}`;
+    };
+    const keys = keysFromSecrets({
+      builder: secret("VACUNA_BUILDER_PRIVATE_KEY"),
+      childSeed: secret("VACUNA_CHILD_KEY_SEED"),
+      register: secret("VACUNA_REGISTER_SERVER_PRIVATE_KEY"),
+    });
+    return buildMokshaContext({ keys }).payer;
   }
   if (kind !== "http") {
     throw new Error(`unknown VACUNA_PAYER ${kind}`);

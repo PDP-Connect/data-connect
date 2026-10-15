@@ -30,8 +30,19 @@ primary_region = "mia"
   # read is paid once (EIP-712 GenericPayment + RecordDataAccess). Secrets:
   # VACUNA_BUILDER_PRIVATE_KEY, VACUNA_REGISTER_SERVER_PRIVATE_KEY (DEPLOY.md).
   # Local runs and tests keep the mock payer (no money moves).
-  VACUNA_PAYER = "http"
+  # VACUNA_PAYER = "moksha": registers each child (server, data point, grant)
+  # on the gateway before its first paid read (../moksha/SEQUENCE.md).
+  # Secrets: VACUNA_BUILDER_PRIVATE_KEY, VACUNA_REGISTER_SERVER_PRIVATE_KEY,
+  # VACUNA_CHILD_KEY_SEED.
+  VACUNA_PAYER = "moksha"
   VACUNA_GATEWAY_URL = "https://dp-rpc.moksha.vana.org"
+  VACUNA_GATEWAY_ALLOWLIST = "https://dp-rpc.moksha.vana.org"
+  VACUNA_RPC_URL = "https://rpc.moksha.vana.org"
+  VACUNA_RPC_ALLOWLIST = "https://rpc.moksha.vana.org"
+  VACUNA_MOKSHA_STATE_DIR = "/data/moksha"
+  # Spend caps for the shared demo (0.01 VANA per read).
+  VACUNA_MOKSHA_MAX_CHILDREN = "200"
+  VACUNA_MOKSHA_MAX_PAID_READS = "5000"
   VACUNA_CHAIN_ID = "14800"
   VACUNA_ALLOW_REMOTE_GATEWAY = "1"
   VACUNA_EXPLORER_TX_URL = "https://moksha.vanascan.io/tx/"
