@@ -1396,6 +1396,138 @@ if (POSTGRES_URL) {
 			},
 		);
 	});
+
+	test("concurrent writes preserve aliases for the same declaration version", async () => {
+		postgresCounter += 1;
+		await withTemporaryPostgresDatabase(
+			{
+				closeConnections: closePostgresStorage,
+				connectionString: POSTGRES_URL,
+				databaseName: `pdpp_pairwise_as_context_alias_race_${process.pid}_${postgresCounter}`,
+				templateName: null,
+			},
+			async (databaseUrl) => {
+				await initPostgresStorage({ backend: "postgres", databaseUrl });
+				await postgresQuery(`
+					CREATE FUNCTION block_alias_a() RETURNS trigger LANGUAGE plpgsql AS $$
+					BEGIN
+						IF NEW.accepted_legacy_source_aliases_json ? 'alias-a' THEN
+							PERFORM pg_advisory_xact_lock(874529);
+						END IF;
+						RETURN NEW;
+					END
+					$$
+				`);
+				await postgresQuery(`
+					CREATE TRIGGER block_alias_a
+					BEFORE INSERT ON pairwise_as_instance_authority_versions
+					FOR EACH ROW EXECUTE FUNCTION block_alias_a()
+				`);
+
+				const lock = await getPostgresPool().connect();
+				let first: Promise<PromiseSettledResult<void>[]> | undefined;
+				try {
+					await lock.query("SELECT pg_advisory_lock(874529)");
+					first = Promise.allSettled([
+						recordPairwiseAsInstanceAuthority({
+							canonicalSourceId: SOURCE,
+							declarationVersion: "v1",
+							internalInstanceId: "cin-alias-race",
+							subjectId: "person-alias-race",
+							acceptedLegacySourceAliases: ["alias-a"],
+						}),
+					]);
+					let blocked = 0;
+					for (let attempt = 0; attempt < 100; attempt += 1) {
+						const activity = await postgresQuery<{ count: number }>(
+							"SELECT count(*)::int AS count FROM pg_stat_activity WHERE datname=current_database() AND wait_event='advisory' AND query LIKE '%INSERT INTO pairwise_as_instance_authority_versions(%'",
+						);
+						blocked = activity.rows[0]?.count ?? 0;
+						if (blocked === 1) break;
+						await new Promise((resolve) => setTimeout(resolve, 20));
+					}
+					assert.equal(
+						blocked,
+						1,
+						"first alias version insert reaches the trigger barrier",
+					);
+					const second = await Promise.allSettled([
+						recordPairwiseAsInstanceAuthority({
+							canonicalSourceId: SOURCE,
+							declarationVersion: "v1",
+							internalInstanceId: "cin-alias-race",
+							subjectId: "person-alias-race",
+							acceptedLegacySourceAliases: ["alias-b"],
+						}),
+					]);
+					await lock.query("SELECT pg_advisory_unlock(874529)");
+					const firstResult = await first;
+					const baseAuthority = await readPairwiseAsInstanceAuthority(
+						"cin-alias-race",
+						"person-alias-race",
+					);
+					const versionAuthority = await readPairwiseAsInstanceAuthority(
+						"cin-alias-race",
+						"person-alias-race",
+						"v1",
+					);
+					assert.deepEqual(
+						versionAuthority?.acceptedLegacySourceAliases,
+						baseAuthority?.acceptedLegacySourceAliases,
+					);
+					assert.equal(firstResult[0]?.status, "fulfilled");
+					assert.equal(second[0]?.status, "rejected");
+					assert.deepEqual(baseAuthority?.acceptedLegacySourceAliases, [
+						"alias-a",
+					]);
+					assert.deepEqual(versionAuthority?.acceptedLegacySourceAliases, [
+						"alias-a",
+					]);
+
+					await recordPairwiseAsInstanceAuthority({
+						canonicalSourceId: SOURCE,
+						declarationVersion: "v1",
+						internalInstanceId: "cin-alias-versioned",
+						subjectId: "person-alias-versioned",
+						acceptedLegacySourceAliases: ["alias-v1"],
+					});
+					await recordPairwiseAsInstanceAuthority({
+						canonicalSourceId: SOURCE,
+						declarationVersion: "v2",
+						internalInstanceId: "cin-alias-versioned",
+						subjectId: "person-alias-versioned",
+						acceptedLegacySourceAliases: ["alias-v2"],
+					});
+					assert.deepEqual(
+						(
+							await readPairwiseAsInstanceAuthority(
+								"cin-alias-versioned",
+								"person-alias-versioned",
+								"v1",
+							)
+						)?.acceptedLegacySourceAliases,
+						["alias-v1"],
+					);
+					assert.deepEqual(
+						(
+							await readPairwiseAsInstanceAuthority(
+								"cin-alias-versioned",
+								"person-alias-versioned",
+								"v2",
+							)
+						)?.acceptedLegacySourceAliases,
+						["alias-v2"],
+					);
+				} finally {
+					await lock
+						.query("SELECT pg_advisory_unlock(874529)")
+						.catch(() => undefined);
+					lock.release();
+					await first;
+				}
+			},
+		);
+	});
 } else {
 	test("PostgreSQL AS context producer parity (skipped: PDPP_TEST_POSTGRES_URL unset)", {
 		skip: true,
