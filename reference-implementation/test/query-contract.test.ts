@@ -1450,6 +1450,35 @@ test("fields projection on a declared but ungranted field is rejected under a re
   });
 });
 
+test("single-record fields projection on a declared but ungranted field is rejected like the list", async () => {
+  await withHarness(async ({ asUrl, rsUrl, spotifyManifest }) => {
+    const connectorId = spotifyManifest.connector_id;
+    const ownerToken = await issueOwnerToken(asUrl, "ungranted_detail_fields_owner");
+    await seedSpotifyTopArtists(rsUrl, ownerToken, connectorId, [
+      { id: "a1", name: "A", popularity: 95, source_updated_at: "2026-01-01T00:00:00Z" },
+    ]);
+    const approved = await approveGrant(asUrl, "ungranted_detail_fields_owner", {
+      access_mode: "continuous",
+      client_id: "longview",
+      purpose_code: "https://pdpp.dev/purpose/analytics",
+      purpose_description: "single-record projection under a narrowed field grant",
+      source: { id: connectorId, kind: "connector" },
+      streams: [{ fields: ["id", "name", "source_updated_at"], name: "top_artists" }],
+    });
+    assert.ok(approved.token, `expected grant token, got ${JSON.stringify(approved)}`);
+    const headers = { Authorization: `Bearer ${approved.token}` };
+
+    const ungranted = await fetchJson(`${rsUrl}/v1/streams/top_artists/records/a1?fields=popularity`, { headers });
+    assert.equal(ungranted.status, 403, JSON.stringify(ungranted.body));
+    assert.equal(ungranted.body.error.code, "field_not_granted");
+
+    const granted = await fetchJson(`${rsUrl}/v1/streams/top_artists/records/a1?fields=name`, { headers });
+    assert.equal(granted.status, 200, JSON.stringify(granted.body));
+    assert.equal(granted.body.data.name, "A");
+    assert.equal(granted.body.data.popularity, undefined);
+  });
+});
+
 test("query-time view applies a real projection (not a silent no-op)", async () => {
   await withHarness(async ({ asUrl, rsUrl, spotifyManifest }) => {
     // top_artists declares view `basic` -> fields [id, name, genres]. Reading

@@ -58,6 +58,9 @@ Connection: `VACUNA_AS_URL`, `VACUNA_RS_URL`, `VACUNA_AS_ISSUER` (assertion
 ### Payer
 
 - `--payer mock` (default): records payments locally (settlement off).
+  `--payer-ledger <file.jsonl>` makes it keep its own books: one line per
+  accepted read id, deduplicated across restarts (the count job reads it as
+  the gateway's accepted count).
 - `--payer http`: data-gateway `POST /v1/escrow/pay`, `opType: data_access`,
   EIP-712 `GenericPayment` signed with `VACUNA_BUILDER_PRIVATE_KEY`, plus an
   `accessRecord` whose `RecordDataAccess` signature comes from

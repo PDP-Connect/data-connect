@@ -2,6 +2,7 @@
 # Copyright The PDP-Connect Contributors
 # SPDX-License-Identifier: Apache-2.0
 # Local Postgres for the load test: ./db.sh up | start | stop | down | psql [args]
+# VACUNA_PG_EXTRA_ARGS adds server settings at `up` (e.g. "-c max_wal_size=2GB").
 set -eu
 NAME=${VACUNA_PG_CONTAINER:-pdpp-vacuna-pg}
 PORT=${VACUNA_PG_PORT:-55432}
@@ -10,7 +11,7 @@ case "${1:-up}" in
     docker run -d --name "$NAME" -p "127.0.0.1:$PORT:5432" \
       -e POSTGRES_USER=pdpp -e POSTGRES_PASSWORD=pdpp -e POSTGRES_DB=pdpp \
       --shm-size=1g pgvector/pgvector:pg16 \
-      -c max_connections=200 -c shared_buffers=1GB -c track_io_timing=on
+      -c max_connections=200 -c shared_buffers=1GB -c track_io_timing=on ${VACUNA_PG_EXTRA_ARGS:-}
     until docker exec "$NAME" pg_isready -U pdpp -q; do sleep 1; done
     ;;
   start)  # reuse a stopped, already-seeded container

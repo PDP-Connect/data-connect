@@ -31,6 +31,7 @@
 // 32-byte `read_id` in its read receipt), so one payment maps to one served
 // read. Amounts are decimal wei strings; 0.01 VANA = 10^16.
 
+import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import { encodeAbiParameters, getAddress, type Hex, keccak256 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import type { FetchLike } from "./oauth.ts";
@@ -61,15 +62,30 @@ export interface GatewayPayer {
   send: (bodyJson: string) => Promise<SendResult>;
 }
 
-/** Records payments in memory (and the caller's store); used for tests and settlement-off runs. */
+/**
+ * Accepts every payment once per read id; used for tests and settlement-off
+ * runs. With `ledgerPath` it also stands in for the gateway's own books: each
+ * newly accepted payment is appended there as one JSON line (read ids already
+ * in the file are not appended again, also across restarts), so a count job
+ * can read the payer side independently of the reminder service's store.
+ */
 export class MockPayer implements GatewayPayer {
   readonly name = "mock";
   readonly ledger: { amount: string; grantId: string; readId: string }[] = [];
   sendCalls = 0;
   private readonly seen = new Set<string>();
   private readonly amount: string;
-  constructor(opts: { amountWei?: string } = {}) {
+  private readonly ledgerPath: string | null;
+  constructor(opts: { amountWei?: string; ledgerPath?: string | null } = {}) {
     this.amount = opts.amountWei ?? ONE_HUNDREDTH_VANA_WEI;
+    this.ledgerPath = opts.ledgerPath ?? null;
+    if (this.ledgerPath && existsSync(this.ledgerPath)) {
+      for (const line of readFileSync(this.ledgerPath, "utf8").split("\n")) {
+        if (line.trim()) {
+          this.seen.add((JSON.parse(line) as { readId: string }).readId);
+        }
+      }
+    }
   }
   prepare(read: PaidRead) {
     return Promise.resolve({
@@ -82,7 +98,11 @@ export class MockPayer implements GatewayPayer {
     const body = JSON.parse(bodyJson) as { amount: string; grantId: string; readId: string };
     if (!this.seen.has(body.readId)) {
       this.seen.add(body.readId);
-      this.ledger.push(body);
+      if (this.ledgerPath) {
+        appendFileSync(this.ledgerPath, `${JSON.stringify({ ...body, acceptedAt: new Date().toISOString() })}\n`);
+      } else {
+        this.ledger.push(body);
+      }
     }
     return Promise.resolve({ accepted: true, response: { success: true }, retryable: false });
   }
