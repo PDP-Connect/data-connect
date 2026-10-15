@@ -339,6 +339,78 @@ export function safePairwiseDetailError(value: unknown): Error & {
 	});
 }
 
+/** Keep field-window status codes while replacing backend text with fixed copy. */
+export function safePairwiseFieldWindowError(value: unknown): Error & {
+	code: string;
+	param?: string;
+} {
+	const source = value as { code?: unknown; param?: unknown } | null;
+	const code = typeof source?.code === "string" ? source.code : "";
+	const publicErrors: Record<string, { message: string; param?: boolean }> = {
+		field_not_found: { message: "The requested field is not available" },
+		field_not_granted: { message: "The requested field is not available" },
+		field_not_text: { message: "The requested field is not readable as text" },
+		grant_invalid: { message: "Authenticated instance bindings are invalid" },
+		grant_stream_not_allowed: { message: "The requested stream is not available" },
+		invalid_field_path: { message: "The field-window field path is invalid", param: true },
+		invalid_request: { message: "The field-window request is invalid", param: true },
+		invalid_stream: { message: "The requested stream is invalid" },
+		invalid_window: { message: "The field-window bounds are invalid", param: true },
+		not_found: { message: "The requested record or source is not available" },
+		query_not_found: { message: "No matching text was found in the field" },
+	};
+	const publicParams = new Set([
+		"after_chars",
+		"before_chars",
+		"connection_id",
+		"connector_id",
+		"connector_instance_id",
+		"field",
+		"instance_id",
+		"limit_chars",
+		"offset_chars",
+	]);
+	const safeError = Object.hasOwn(publicErrors, code) ? publicErrors[code] : undefined;
+	if (!safeError) {
+		return Object.assign(new Error("Field-window request failed"), {
+			code: "api_error",
+		});
+	}
+	const param =
+		safeError.param &&
+		typeof source?.param === "string" &&
+		publicParams.has(source.param)
+			? source.param
+			: undefined;
+	return Object.assign(new Error(safeError.message), {
+		code,
+		...(param ? { param } : {}),
+	});
+}
+
+/** Retain the field-window's public clamp warning and drop untrusted warning fields. */
+export function safePairwiseFieldWindowWarnings(value: unknown): Record<string, string>[] {
+	if (!Array.isArray(value)) return [];
+	const warnings: Record<string, string>[] = [];
+	for (const warning of value) {
+		if (!warning || typeof warning !== "object" || Array.isArray(warning)) continue;
+		const candidate = warning as Record<string, unknown>;
+		if (
+			candidate.code === "limit_clamped" &&
+			candidate.param === "limit_chars" &&
+			typeof candidate.message === "string" &&
+			/^limit_chars clamped to \d+$/.test(candidate.message)
+		) {
+			warnings.push({
+				code: "limit_clamped",
+				message: candidate.message,
+				param: "limit_chars",
+			});
+		}
+	}
+	return warnings;
+}
+
 const INTERNAL_SELECTOR_KEYS = [
 	"connection_id",
 	"connector_instance_id",

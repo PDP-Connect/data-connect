@@ -85,6 +85,9 @@ import {
   parsePairwiseReadSelector,
   projectPairwiseDetailRecord,
   safePairwiseDetailError,
+  safePairwiseFieldWindowError,
+  safePairwiseFieldWindowWarnings,
+  type PairwiseReadMap,
 } from "../pairwise-rs-identity.ts";
 import { rejectUnsupportedClientQuery } from "../record-filters.ts";
 import type { MiddlewareHandler, RouteArg } from "./_route-contract.ts";
@@ -497,6 +500,109 @@ async function ownerDetailSourceId(
   return source.id;
 }
 
+interface PairwiseSingleRecordContext {
+  manifest: ManifestLike;
+  ownerRead: boolean;
+  ownerSubjectId: string;
+  readMap: PairwiseReadMap;
+  requestParams: Record<string, unknown>;
+  selection: ReturnType<typeof parsePairwiseReadSelector>;
+  sourceDescriptor: SourceDescriptorLike | null;
+  storageBinding: StorageBindingLike;
+  grant: GrantLike;
+}
+
+/** Resolve one public record selector through the authenticated pairwise boundary. */
+async function preparePairwiseSingleRecordContext(
+  ctx: MountRsReadContext,
+  req: RouteRequest,
+  tokenInfo: TokenInfo,
+  queryContext: QueryContext,
+  streamName: string,
+): Promise<PairwiseSingleRecordContext> {
+  const ownerRead = tokenInfo.pdpp_token_kind === "owner";
+  const ownerSubjectId = ctx.ownerSubjectIdForBindings(tokenInfo);
+  if (!ownerSubjectId) {
+    throw Object.assign(new Error("Authenticated instance subject is unavailable"), {
+      code: "grant_invalid",
+    });
+  }
+  const ownerMap = ownerRead ? pairwiseOwnerReadMap(tokenInfo) : null;
+  let readMap = ownerMap;
+  let selection: ReturnType<typeof parsePairwiseReadSelector> | null = null;
+  let scopeReq = req;
+
+  if (ownerMap) {
+    await ctx.validatePairwiseReadBindingOwnership({
+      ownerSubjectId,
+      bindings: ownerMap.bindings,
+    });
+    const sourceId = await ownerDetailSourceId(ctx, req);
+    readMap = sourceId
+      ? pairwiseOwnerReadMapForSource(ownerMap, sourceId)
+      : ownerMap;
+    selection = parsePairwiseReadSelector(req.query, readMap);
+    const ownerScopeQuery = { ...(req.query as Record<string, unknown>) };
+    delete ownerScopeQuery.instance_id;
+    delete ownerScopeQuery.connection_id;
+    delete ownerScopeQuery.connector_instance_id;
+    ownerScopeQuery.connection_id = selection.internalId;
+    scopeReq = { ...req, query: ownerScopeQuery };
+  }
+
+  const { storageBinding, manifest, sourceDescriptor } = await resolveReadScope(
+    ctx,
+    scopeReq,
+    tokenInfo,
+    queryContext,
+  );
+
+  if (!ownerMap) {
+    readMap = pairwiseClientReadMap(
+      tokenInfo,
+      sourceDescriptor?.id ?? "",
+      streamName,
+    );
+    await ctx.validatePairwiseReadBindingOwnership({
+      ownerSubjectId,
+      bindings: readMap.bindings,
+    });
+    selection = parsePairwiseReadSelector(req.query, readMap);
+  }
+  if (!readMap || !selection) {
+    throw Object.assign(new Error("Record identity is unavailable"), {
+      code: "grant_invalid",
+    });
+  }
+
+  const requestParams = { ...(req.query as Record<string, unknown>) };
+  delete requestParams.instance_id;
+  delete requestParams.connection_id;
+  delete requestParams.connector_instance_id;
+  requestParams.connection_id = selection.internalId;
+  const grant = ownerRead
+    ? ctx.buildOwnerReadGrant(streamName)
+    : (clientGrantForPairwiseDetail(
+        (tokenInfo.grant ?? { streams: [] }) as unknown as Record<
+          string,
+          unknown
+        >,
+        streamName,
+        selection.internalId,
+      ) as GrantLike);
+  return {
+    grant,
+    manifest,
+    ownerRead,
+    ownerSubjectId,
+    readMap,
+    requestParams,
+    selection,
+    sourceDescriptor,
+    storageBinding,
+  };
+}
+
 function sourceIdentityValue(...values: unknown[]): string | null {
   for (const value of values) {
     if (typeof value === "string" && value.length > 0) {
@@ -613,14 +719,20 @@ async function rejectInvalidWindowParams(
   res: RouteResponse,
   req: RouteRequest,
   queryContext: QueryContext,
-  requestParams: Record<string, unknown>
+  requestParams: Record<string, unknown>,
+  errorProjector: (err: unknown) => unknown = (err) => err,
 ): Promise<boolean> {
   try {
     coerceWindowSelectorParams(requestParams);
     return false;
   } catch (err) {
     if (err instanceof InvalidWindowParamError) {
-      await ctx.rejectQuery(res, req, queryContext, err);
+      await ctx.rejectQuery(
+        res,
+        req,
+        queryContext,
+        errorProjector(err),
+      );
       return true;
     }
     throw err;
@@ -713,6 +825,76 @@ function mergeResolverWarningsIntoBody(body: Record<string, unknown>, resolverWa
     ...(existingMeta || {}),
     warnings: [...existingWarnings, ...resolverWarnings],
   };
+}
+
+const FIELD_WINDOW_KEYS = [
+  "complete",
+  "end_chars",
+  "has_more",
+  "limit_chars",
+  "match_end_chars",
+  "match_start_chars",
+  "next_offset_chars",
+  "previous_offset_chars",
+  "start_chars",
+  "text",
+  "total_chars",
+] as const;
+
+function projectPairwiseFieldWindowResult(
+  value: unknown,
+  requestedRecordId: string,
+  fieldPath: string,
+): { fieldType: string; window: Record<string, unknown>; warnings: unknown } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw Object.assign(new Error("Field-window result is invalid"), {
+      code: "grant_invalid",
+    });
+  }
+  const result = value as Record<string, unknown>;
+  const rawWindow = result.window;
+  if (
+    result.record_key !== requestedRecordId ||
+    result.field_path !== fieldPath ||
+    result.field_type !== "string" ||
+    !rawWindow ||
+    typeof rawWindow !== "object" ||
+    Array.isArray(rawWindow)
+  ) {
+    throw Object.assign(new Error("Field-window result does not match its request"), {
+      code: "grant_invalid",
+    });
+  }
+  const source = rawWindow as Record<string, unknown>;
+  const integer = (candidate: unknown, positive = false) =>
+    typeof candidate === "number" &&
+    Number.isInteger(candidate) &&
+    (positive ? candidate > 0 : candidate >= 0);
+  const nullableInteger = (candidate: unknown) =>
+    candidate === null || integer(candidate);
+  if (
+    Object.keys(source).some((key) => !FIELD_WINDOW_KEYS.includes(key as (typeof FIELD_WINDOW_KEYS)[number])) ||
+    FIELD_WINDOW_KEYS.some((key) => !Object.hasOwn(source, key)) ||
+    typeof source.complete !== "boolean" ||
+    !integer(source.end_chars) ||
+    typeof source.has_more !== "boolean" ||
+    !integer(source.limit_chars, true) ||
+    !nullableInteger(source.match_end_chars) ||
+    !nullableInteger(source.match_start_chars) ||
+    !nullableInteger(source.next_offset_chars) ||
+    !nullableInteger(source.previous_offset_chars) ||
+    !integer(source.start_chars) ||
+    typeof source.text !== "string" ||
+    !integer(source.total_chars)
+  ) {
+    throw Object.assign(new Error("Field-window result shape is invalid"), {
+      code: "grant_invalid",
+    });
+  }
+  const window = Object.fromEntries(
+    FIELD_WINDOW_KEYS.map((key) => [key, source[key]]),
+  );
+  return { fieldType: result.field_type, warnings: result.warnings, window };
 }
 
 // The owner/client actor block shared by the record-reading routes.
@@ -2011,12 +2193,10 @@ export function mountRsRecordDetail(
         const { actorType, actorId, traceId, scenarioId } =
           ctx.buildQueryActorContext(tokenInfo);
         ctx.setReferenceTraceId(res, traceId);
-        let storageBinding: StorageBindingLike | null = null;
-        let sourceDescriptor: SourceDescriptorLike | null =
+        const initialSourceDescriptor: SourceDescriptorLike | null =
           tokenInfo.pdpp_token_kind === "owner"
             ? ctx.buildOwnerQuerySourceDescriptor(req, ctx.opts)
             : ctx.buildClientSourceDescriptor(tokenInfo);
-        let manifest: ManifestLike;
         const streamName = req.params.stream as string;
         const requestedRecordId = decodeURIComponent(req.params.id as string);
         queryContext = {
@@ -2030,83 +2210,31 @@ export function mountRsRecordDetail(
           },
           queryId,
           scenarioId,
-          sourceDescriptor,
+          sourceDescriptor: initialSourceDescriptor,
           streamId: req.params.stream,
           tokenInfo,
           traceId,
         };
 
         rejectUnsupportedClientQuery(tokenInfo.pdpp_token_kind, req.query);
-
-        const ownerRead = tokenInfo.pdpp_token_kind === "owner";
-        const ownerSubjectId = ctx.ownerSubjectIdForBindings(tokenInfo);
-        if (!ownerSubjectId) {
-          throw Object.assign(
-            new Error("Authenticated instance subject is unavailable"),
-            { code: "grant_invalid" },
-          );
-        }
-        const ownerMap = ownerRead ? pairwiseOwnerReadMap(tokenInfo) : null;
-        let readMap = ownerMap;
-        let selection: ReturnType<typeof parsePairwiseReadSelector> | null =
-          null;
-        let scopeReq = req;
-
-        // Validate every authenticated mapping before deriving its effective source scope.
-        if (ownerMap) {
-          await ctx.validatePairwiseReadBindingOwnership({
-            ownerSubjectId,
-            bindings: ownerMap.bindings,
-          });
-          const sourceId = await ownerDetailSourceId(ctx, req);
-          readMap = sourceId
-            ? pairwiseOwnerReadMapForSource(ownerMap, sourceId)
-            : ownerMap;
-          selection = parsePairwiseReadSelector(req.query, readMap);
-          const ownerScopeQuery = { ...(req.query as Record<string, unknown>) };
-          delete ownerScopeQuery.instance_id;
-          delete ownerScopeQuery.connection_id;
-          delete ownerScopeQuery.connector_instance_id;
-          ownerScopeQuery.connection_id = selection.internalId;
-          scopeReq = { ...req, query: ownerScopeQuery };
-        }
-
-        ({ storageBinding, manifest, sourceDescriptor } =
-          await resolveReadScope(ctx, scopeReq, tokenInfo, queryContext));
-
-        if (!ownerMap) {
-          readMap = pairwiseClientReadMap(
-            tokenInfo,
-            sourceDescriptor?.id ?? "",
-            streamName,
-          );
-          await ctx.validatePairwiseReadBindingOwnership({
-            ownerSubjectId,
-            bindings: readMap.bindings,
-          });
-          selection = parsePairwiseReadSelector(req.query, readMap);
-        }
-        if (!readMap || !selection)
-          throw Object.assign(
-            new Error("Record detail identity is unavailable"),
-            { code: "grant_invalid" },
-          );
-
-        const requestParams = { ...(req.query as Record<string, unknown>) };
-        delete requestParams.instance_id;
-        delete requestParams.connection_id;
-        delete requestParams.connector_instance_id;
-        requestParams.connection_id = selection.internalId;
-        const detailGrant = ownerRead
-          ? ctx.buildOwnerReadGrant(streamName)
-          : clientGrantForPairwiseDetail(
-              (tokenInfo.grant ?? { streams: [] }) as unknown as Record<
-                string,
-                unknown
-              >,
-              streamName,
-              selection.internalId,
-            );
+        const pairwiseContext = await preparePairwiseSingleRecordContext(
+          ctx,
+          req,
+          tokenInfo,
+          queryContext,
+          streamName,
+        );
+        const {
+          grant: detailGrant,
+          manifest,
+          ownerRead,
+          ownerSubjectId,
+          readMap,
+          requestParams,
+          selection,
+          sourceDescriptor,
+          storageBinding,
+        } = pairwiseContext;
         await ctx.emitQueryReceived(queryContext, req);
 
         const operationInput = {
@@ -2279,6 +2407,21 @@ export function mountRsRecordFieldWindow(app: AppLike, ctx: MountRsReadContext):
     // its request/response JSON Schema is a follow-up tracked in the MCP
     // content-ladder change; this route does its own selector validation and
     // returns through the shared canonical envelope until then.
+    (...args: unknown[]) => {
+      const req = args[0] as RouteRequest;
+      const res = args[1] as RouteResponse;
+      const next = args[2];
+      if (Object.hasOwn(req.query ?? {}, "connector_instance_id")) {
+        return ctx.handleError(
+          res,
+          Object.assign(
+            new Error("Use instance_id to select a source instance"),
+            { code: "invalid_request", param: "instance_id" },
+          ),
+        );
+      }
+      return typeof next === "function" ? next() : undefined;
+    },
     ctx.requireToken,
     ctx.requireCoreEndpointToken,
     async (req: RouteRequest, res: RouteResponse) => {
@@ -2329,64 +2472,101 @@ export function mountRsRecordFieldWindow(app: AppLike, ctx: MountRsReadContext):
           return await ctx.rejectQuery(res, req, queryContext, err);
         }
 
-        const { storageBinding, manifest, sourceDescriptor } = await resolveReadScope(
+        const pairwiseContext = await preparePairwiseSingleRecordContext(
           ctx,
           req,
           tokenInfo,
-          queryContext
+          queryContext,
+          streamName,
         );
+        const {
+          grant,
+          manifest,
+          ownerRead,
+          ownerSubjectId,
+          requestParams,
+          selection,
+          sourceDescriptor,
+          storageBinding,
+        } = pairwiseContext;
 
         await ctx.emitQueryReceived(queryContext, req);
 
-        // Grant resolution mirrors the records-list / record-detail owner-vs-
-        // client split. An owner self-export carries no client grant in
-        // `tokenInfo.grant`; the route uses the permissive owner read grant
-        // (`buildOwnerReadGrant`) — a stream entry with no `fields` projection,
-        // so every field is visible to the owner. A client token's scoped grant
-        // (with its stream/field/resource/time projection) is the authority and
-        // is passed through unchanged; `getRecordFieldWindow` fails closed on
-        // any field outside it.
-        const grant =
-          tokenInfo.pdpp_token_kind === "owner"
-            ? ctx.buildOwnerReadGrant(streamName)
-            : tokenInfo.grant || { streams: [] };
-
-        const requestParams: Record<string, unknown> = { ...((req.query as Record<string, unknown>) || {}) };
-        if (await rejectInvalidWindowParams(ctx, res, req, queryContext, requestParams)) {
+        if (
+          await rejectInvalidWindowParams(
+            ctx,
+            res,
+            req,
+            queryContext,
+            requestParams,
+            safePairwiseFieldWindowError,
+          )
+        ) {
           return;
         }
 
-        const { bindings, warnings: resolverWarnings } = await ctx.resolveReadRequestBindings({
-          grant,
-          ownerRead: tokenInfo.pdpp_token_kind === "owner",
-          ownerSubjectId: ctx.ownerSubjectIdForBindings(tokenInfo),
-          requestParams,
-          storageBinding,
-          streamName,
-        });
+        const { bindings, warnings: resolverWarnings } =
+          await ctx.resolveReadRequestBindings({
+            grant,
+            ownerRead,
+            ownerSubjectId,
+            requestParams,
+            storageBinding,
+            streamName,
+          });
+        if (
+          bindings.length !== 1 ||
+          bindings[0]?.connectorInstanceId !== selection.internalId ||
+          (storageBinding.connector_id &&
+            bindings[0]?.connectorId !== storageBinding.connector_id)
+        ) {
+          throw Object.assign(
+            new Error(
+              "Resolved field-window binding differs from the selected instance",
+            ),
+            { code: "grant_invalid" },
+          );
+        }
 
-        const windowResult = (await ctx.getRecordFieldWindowAcrossBindings(
-          bindings,
-          streamName,
+        const windowResult = projectPairwiseFieldWindowResult(
+          await ctx.getRecordFieldWindowAcrossBindings(
+            bindings,
+            streamName,
+            requestedRecordId,
+            fieldPath,
+            grant,
+            manifest,
+            requestParams,
+            { extraWarnings: resolverWarnings || [] },
+          ),
           requestedRecordId,
           fieldPath,
-          grant,
-          manifest,
-          requestParams,
-          { extraWarnings: resolverWarnings || [] }
-        )) as {
-          record_key: string;
-          field_path: string;
-          field_type: string;
-          window: Record<string, unknown>;
-          warnings?: unknown[];
+        );
+
+        const responseBody: Record<string, unknown> = {
+          field: { path: fieldPath, type: windowResult.fieldType },
+          instance_id: selection.handle,
+          object: "field_window",
+          record_id: requestedRecordId,
+          stream: streamName,
+          url: canonicalDetailUrl(req, selection.handle),
+          window: windowResult.window,
         };
+        mergeResolverWarningsIntoBody(
+          responseBody,
+          safePairwiseFieldWindowWarnings(windowResult.warnings),
+        );
+        const response = ctx.finalizeCanonicalEnvelope(responseBody, {
+          ...req,
+          query: { ...req.query, instance_id: selection.handle },
+          url: canonicalDetailUrl(req, selection.handle),
+        });
 
         await emitDisclosureServed(ctx, {
           actorId,
           actorType,
           data: {
-            field_path: windowResult.field_path,
+            field_path: fieldPath,
             query_shape: "field_window",
             source: sourceDescriptor,
           },
@@ -2398,23 +2578,18 @@ export function mountRsRecordFieldWindow(app: AppLike, ctx: MountRsReadContext):
           traceId,
         });
 
-        const responseBody: Record<string, unknown> = {
-          field: { path: windowResult.field_path, type: windowResult.field_type },
-          object: "field_window",
-          record_id: requestedRecordId,
-          stream: streamName,
-          url: req.path,
-          window: windowResult.window,
-        };
-        mergeResolverWarningsIntoBody(responseBody, windowResult.warnings);
-
-        return res.json(ctx.finalizeCanonicalEnvelope(responseBody, req));
+        return res.json(response);
       } catch (err) {
         if (queryContext) {
           await ctx.emitQueryReceived(queryContext, req);
-          return await ctx.rejectQuery(res, req, queryContext, err);
+          return await ctx.rejectQuery(
+            res,
+            req,
+            queryContext,
+            safePairwiseFieldWindowError(err),
+          );
         }
-        return ctx.handleError(res, err);
+        return ctx.handleError(res, safePairwiseFieldWindowError(err));
       }
     }
   );
