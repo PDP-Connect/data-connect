@@ -191,7 +191,9 @@ test("SQLite cutover: exact provenance, rollback, partial state, concurrent star
 });
 
 test("PostgreSQL cutover: exact provenance, rollback, partial state, concurrent startup", {
-	skip: !process.env.PDPP_TEST_POSTGRES_URL,
+	skip: process.env.PDPP_TEST_POSTGRES_URL
+		? false
+		: "PDPP_TEST_POSTGRES_URL unset",
 }, async () => {
 	const pool = new Pool({
 		connectionString: process.env.PDPP_TEST_POSTGRES_URL,
