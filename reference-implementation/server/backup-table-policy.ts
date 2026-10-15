@@ -225,6 +225,14 @@ export const BACKUP_TABLE_INVENTORY: Record<string, BackupTableInventoryEntry> =
     classification: "backup_required",
     reason: "Pairwise identifiers must remain stable across restarts and recovery.",
   },
+  pairwise_as_instance_authority: {
+    classification: "backup_required",
+    reason: "Retained source declaration authority binds issued instance handles to owner-connected sources.",
+  },
+  pairwise_as_instance_authority_versions: {
+    classification: "backup_required",
+    reason: "Versioned source authority lets existing grants retain their accepted declaration revision.",
+  },
   pairwise_identity_root_keys: {
     classification: "backup_required",
     reason: "Pairwise identifiers cannot be re-derived after loss of the issuer identity root key.",
@@ -345,6 +353,11 @@ export const BACKUP_TABLE_INVENTORY: Record<string, BackupTableInventoryEntry> =
   retained_size_top_rows: {
     classification: "backup_required",
     reason: "Retained-size rows are rebuildable projections.",
+  },
+  rs_opaque_cursors: {
+    classification: "backup_required",
+    reason:
+      "Opaque read cursors and sync checkpoints held for clients. Loss forces a client to restart pagination or sync from beginning (invalid_cursor / cursor_expired); no rebuild oracle exists.",
   },
   run_history: {
     classification: "backup_required",
