@@ -44,7 +44,7 @@ export function packageMacosNodeHelper(appPath) {
   )
 }
 
-if (isMainModule(import.meta.url)) {
+if (isMainModule(import.meta.url, process.argv[1])) {
   if (process.argv.length !== 3)
     throw new Error("Usage: package-macos-node-helper.mjs <app>")
   packageMacosNodeHelper(resolve(process.argv[2]))
