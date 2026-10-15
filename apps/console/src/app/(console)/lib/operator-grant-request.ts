@@ -35,15 +35,10 @@ export interface GrantRequestDraft {
   clientId: string;
   clientName: string;
   clientUri: string;
-  /**
-   * Optional per-connection pin for the addressed stream. Empty string ⇒
-   * fan-in: the issued grant omits `streams[].connection_id` and reads union
-   * across every connection the grant authorizes for the stream. A non-empty
-   * value ⇒ the staged PAR pins `streams[0].connection_id` to exactly that
-   * connection (an existing supported grant field — no new storage shape).
-   * The form only ever offers a value the owner saw labelled, satisfying the
-   * "consent surface SHALL have shown the per-connection constraint" scenario.
-   */
+  /** Optional owner-selected connection. A missing value uses the AS default,
+   * which is valid only when it resolves unambiguously (for example, one
+   * eligible connection). Multiple eligible connector instances require an
+   * explicit selection. */
   connectionId: string;
   fields: string;
   initialAccessToken: string;
@@ -51,6 +46,7 @@ export interface GrantRequestDraft {
   purposeDescription: string;
   redirectUri: string;
   retention: string;
+  retentionOnExpiry: string;
   sourceId: string;
   sourceKind: "connector" | "provider_native";
   streamName: string;
@@ -92,6 +88,14 @@ function normalizeSourceKind(value: string | undefined): GrantRequestDraft["sour
   return trim(value) === "provider_native" ? "provider_native" : "connector";
 }
 
+function retentionForDraft(draft: GrantRequestDraft) {
+  const onExpiry = draft.retentionOnExpiry ?? "delete";
+  if (onExpiry !== "delete" && onExpiry !== "anonymize") {
+    throw new Error("Invalid retention on-expiry action");
+  }
+  return { max_duration: draft.retention, on_expiry: onExpiry };
+}
+
 function sourceFromDraft(draft: GrantRequestDraft) {
   return {
     id: draft.sourceId,
@@ -127,8 +131,9 @@ export async function loadConnectionPinOptions(draft: GrantRequestDraft): Promis
     live.map((connection) => listConnectorSummaries({ connectionRouteId: connection.connector_instance_id }))
   );
   const scopedSummaries = summaries.flatMap((response) => response.data);
+  const connectorId = connections[0]?.connector_id ?? draft.sourceId;
   const options = buildConnectionPinOptions(
-    { id: draft.sourceId, kind: draft.sourceKind, streamName: draft.streamName },
+    { id: connectorId, kind: draft.sourceKind, streamName: draft.streamName },
     scopedSummaries
   );
   return { options };
@@ -147,6 +152,7 @@ export function createDefaultGrantRequestDraft(): GrantRequestDraft {
     purposeDescription: "Compare personal data across providers.",
     redirectUri: "",
     retention: "P30D",
+    retentionOnExpiry: "delete",
     sourceId: "",
     sourceKind: "connector",
     streamName: "",
@@ -157,6 +163,10 @@ export function createDefaultGrantRequestDraft(): GrantRequestDraft {
 
 function sanitizeDraft(input: Partial<GrantRequestDraft> = {}): GrantRequestDraft {
   const base = createDefaultGrantRequestDraft();
+  const retentionOnExpiry = input.retentionOnExpiry || base.retentionOnExpiry;
+  if (retentionOnExpiry !== "delete" && retentionOnExpiry !== "anonymize") {
+    throw new Error("Invalid retention on-expiry action");
+  }
   return {
     accessMode: trim(input.accessMode) || base.accessMode,
     clientId: trim(input.clientId),
@@ -169,6 +179,7 @@ function sanitizeDraft(input: Partial<GrantRequestDraft> = {}): GrantRequestDraf
     purposeDescription: trim(input.purposeDescription) || base.purposeDescription,
     redirectUri: trim(input.redirectUri),
     retention: trim(input.retention) || base.retention,
+    retentionOnExpiry,
     sourceId: trim(input.sourceId),
     sourceKind: normalizeSourceKind(input.sourceKind),
     streamName: trim(input.streamName),
@@ -334,7 +345,7 @@ export async function stageGrantRequest(
         access_mode: workspace.draft.accessMode,
         purpose_code: workspace.draft.purposeCode,
         purpose_description: workspace.draft.purposeDescription,
-        retention: workspace.draft.retention,
+        retention: retentionForDraft(workspace.draft),
         source: sourceFromDraft(workspace.draft),
         streams: [streamSelectionFromDraft(workspace.draft, workspace.draft.streamName)],
         type: "https://pdpp.dev/data-access",
@@ -405,7 +416,7 @@ export async function buildGrantRequestExamples(workspace: GrantRequestWorkspace
         access_mode: workspace.draft.accessMode,
         purpose_code: workspace.draft.purposeCode,
         purpose_description: workspace.draft.purposeDescription,
-        retention: workspace.draft.retention,
+        retention: retentionForDraft(workspace.draft),
         source: sourceFromDraft(workspace.draft),
         streams: [streamSelection],
         type: "https://pdpp.dev/data-access",

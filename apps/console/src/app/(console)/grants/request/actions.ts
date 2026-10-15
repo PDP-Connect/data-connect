@@ -22,6 +22,12 @@ function asSourceKind(value: FormDataEntryValue | null): "connector" | "provider
   return asString(value) === "provider_native" ? "provider_native" : "connector";
 }
 
+function asRetentionOnExpiry(value: FormDataEntryValue | null): "delete" | "anonymize" | "" {
+  const action = asString(value);
+  if (action === "" || action === "delete" || action === "anonymize") return action;
+  throw new Error("Invalid retention on-expiry action");
+}
+
 function readDraft(formData: FormData) {
   return {
     accessMode: asString(formData.get("access_mode")),
@@ -35,6 +41,7 @@ function readDraft(formData: FormData) {
     purposeDescription: asString(formData.get("purpose_description")),
     redirectUri: asString(formData.get("redirect_uri")),
     retention: asString(formData.get("retention")),
+    retentionOnExpiry: asRetentionOnExpiry(formData.get("retention_on_expiry")),
     sourceId: asString(formData.get("source_id")),
     sourceKind: asSourceKind(formData.get("source_kind")),
     streamName: asString(formData.get("stream_name")),

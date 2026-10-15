@@ -59,11 +59,10 @@ function normalizeFields(value: string): string[] | undefined {
 }
 
 /**
- * The single stream selection the operator flow stages. When the owner pinned
- * a specific connection, `connection_id` lands on the stream entry — the
- * existing `StreamSelectionSchema.connection_id` grant field the read path
- * already enforces. When the pin is empty, the field is omitted so the grant
- * fans in across the connections it authorizes (the explicit default).
+ * The single stream selection the operator flow stages. The historical
+ * contract accepts the selected connection as `instance_ids`; the AS resolves
+ * that owner-scoped identifier before approval. When the pin is empty, the
+ * field is omitted so the grant uses the server's default resolution.
  */
 export function streamSelectionFromDraft(draft: ConnectionPinDraft, streamName: string) {
   const fields = normalizeFields(draft.fields);
@@ -73,7 +72,7 @@ export function streamSelectionFromDraft(draft: ConnectionPinDraft, streamName: 
     name: streamName,
     ...(fields ? { fields } : {}),
     ...(view ? { view } : {}),
-    ...(connectionId ? { connection_id: connectionId } : {}),
+    ...(connectionId ? { instance_ids: [connectionId] } : {}),
   };
 }
 
