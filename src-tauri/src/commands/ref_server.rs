@@ -611,7 +611,7 @@ pub fn cleanup_reference_server() {
 #[serde(rename_all = "camelCase")]
 pub struct ReferenceServerLoginResult {
     /// The `pdpp_owner_session` cookie value the caller can pass to
-    /// `Webview::set_cookie` for the embedded webview. Never logged.
+    /// the embedded webview cookie store. Never logged.
     pub session_cookie: String,
     pub origin: String,
 }

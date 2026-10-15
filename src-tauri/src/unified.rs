@@ -2952,7 +2952,7 @@ async fn finish_bootstrap(
         cookies.push(cookie);
     }
 
-    if let Err(error) = create_or_update_console_window(app, navigate_to, cookies, should_show) {
+    if let Err(error) = create_or_update_console_window(app, navigate_to, cookies, should_show).await {
         teardown_managed_on_error(app, managed, StopReason::BootstrapFailed);
         return Err(error);
     }
@@ -4200,18 +4200,6 @@ fn decide_console_navigation(url: &tauri::Url, console_origin: &tauri::Url) -> b
     false
 }
 
-fn set_cookies_then_navigate<SetCookies, Navigate>(
-    set_cookies: SetCookies,
-    navigate: Navigate,
-) -> Result<(), String>
-where
-    SetCookies: FnOnce() -> Result<(), String>,
-    Navigate: FnOnce() -> Result<(), String>,
-{
-    set_cookies()?;
-    navigate()
-}
-
 /// A path+query string safe to append to a FRESH console origin this
 /// process just built (never to a URL parsed from anywhere else). Rejects
 /// anything that is not exactly one leading `/` followed by no further `/`
@@ -4280,28 +4268,14 @@ fn console_url_preserving_path(
     url
 }
 
-fn create_or_update_console_window(
+async fn create_or_update_console_window(
     app: &AppHandle,
     url: tauri::Url,
     cookies: Vec<Cookie<'static>>,
     should_show: bool,
 ) -> Result<(), String> {
     if let Some(window) = app.get_webview_window(CONSOLE_WINDOW_LABEL) {
-        set_cookies_then_navigate(
-            || {
-                for cookie in &cookies {
-                    window
-                        .set_cookie(cookie.clone())
-                        .map_err(|error| format!("Failed to set console cookie: {error}"))?;
-                }
-                Ok(())
-            },
-            || {
-                window
-                    .navigate(url.clone())
-                    .map_err(|error| format!("Failed to navigate console: {error}"))
-            },
-        )?;
+        crate::webview_cookies::set_cookies_then_navigate(window.as_ref(), cookies, url).await?;
         if should_show {
             window
                 .show()
@@ -4339,21 +4313,7 @@ fn create_or_update_console_window(
             .build()
             .map_err(|error| format!("Failed to create console window: {error}"))?;
 
-    set_cookies_then_navigate(
-        || {
-            for cookie in cookies {
-                window
-                    .set_cookie(cookie)
-                    .map_err(|error| format!("Failed to set console cookie: {error}"))?;
-            }
-            Ok(())
-        },
-        || {
-            window
-                .navigate(url)
-                .map_err(|error| format!("Failed to navigate console: {error}"))
-        },
-    )?;
+    crate::webview_cookies::set_cookies_then_navigate(window.as_ref(), cookies, url).await?;
 
     let window_for_close = window.clone();
     window.on_window_event(move |event| {
@@ -8019,35 +7979,6 @@ setInterval(() => {}, 1000);
         );
     }
 
-    #[test]
-    fn console_cookie_is_set_before_navigation() {
-        let events = Arc::new(Mutex::new(Vec::new()));
-        let set_events = Arc::clone(&events);
-        let navigate_events = Arc::clone(&events);
-
-        set_cookies_then_navigate(
-            || {
-                set_events
-                    .lock()
-                    .expect("set events lock")
-                    .push("set_cookie");
-                Ok(())
-            },
-            || {
-                let mut events = navigate_events.lock().expect("navigate events lock");
-                assert_eq!(events.as_slice(), ["set_cookie"]);
-                events.push("navigate");
-                Ok(())
-            },
-        )
-        .expect("navigation ordering");
-
-        assert_eq!(
-            events.lock().expect("events lock").as_slice(),
-            ["set_cookie", "navigate"]
-        );
-    }
-
     /// Proves the actual mechanism the fix relies on: on a `current_thread`
     /// runtime (one worker thread, same shape of starvation risk the real
     /// watcher's task faces on a shared multi-threaded runtime), a blocking
@@ -8166,8 +8097,8 @@ setInterval(() => {}, 1000);
     /// wry turns a cookie with no domain into a WebKitGTK cookie with domain
     /// "", which WebKitGTK stores and never sends; the reveal cookie had no
     /// domain until this test was written. This builds a real WebKitGTK
-    /// webview, sets the two cookies through wry as `set_cookies_then_navigate`
-    /// does, and records the Cookie header at a local HTTP server.
+    /// webview, sets the two cookies through wry, and records the Cookie header
+    /// at a local HTTP server.
     ///
     /// It needs a display, so it is ignored by default. Run it on its own
     /// display and session bus, never the desktop's:
@@ -8289,7 +8220,7 @@ setInterval(() => {}, 1000);
     fn console_window_wires_on_navigation_unconditionally() {
         let source = include_str!("unified.rs");
         let start = source
-            .find("fn create_or_update_console_window(")
+            .find("async fn create_or_update_console_window(")
             .expect("create_or_update_console_window must exist");
         let body = &source[start..];
         assert!(

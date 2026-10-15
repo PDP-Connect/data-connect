@@ -106,6 +106,8 @@ signal-hook = "0.4.4"
 # wayland_titlebar module can call GtkWindowExt on the window tauri returns.
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18"
+webkit2gtk = { version = "=2.0.2", features = ["v2_38"] }
+soup3 = "0.5"
 
 # The WebKitGTK cookie test in unified.rs builds a real webview with the wry
 # that tauri already uses, with the same features.
@@ -125,6 +127,10 @@ wry = { version = "0.55", default-features = false, features = ["protocol", "os-
 # matching this crate's MSRV -- verified against crates.io's published
 # rust_version per release, not assumed.
 sysinfo = { version = "0.38", default-features = false, features = ["system"] }
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSHTTPCookie", "NSDictionary", "NSString", "NSURL"] }
+objc2-web-kit = { version = "0.3", default-features = false, features = ["std", "block2", "WKWebView", "WKWebViewConfiguration", "WKWebsiteDataStore", "WKHTTPCookieStore"] }
+block2 = "0.6"
 
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 robius-authentication = "0.3.1"

@@ -1,6 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 mod commands;
+mod webview_cookies;
 #[cfg(desktop)]
 mod atomic_write;
 #[cfg(desktop)]
