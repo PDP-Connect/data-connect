@@ -165,6 +165,12 @@ each child's grant status and grant tx. On a fresh state dir it scans the
 last 20,000 blocks; set `VACUNA_MOKSHA_FROM_BLOCK` to the deposit's block to
 scan less.
 
+The walkthrough server (`portal/server.ts`, `VACUNA_PAYER=moksha`) runs the
+same poll in process every 60 s, and on a dashboard view when the last poll
+is older than 30 s; its dashboard shows each settled read as "liquidado" /
+"settled" with its explorer link. Its first run records a start block in the
+state file (`poll.startBlock`), so it never scans from zero.
+
 Expect, once the relayer has drained (minutes; it runs every cron minute):
 
 - 8 rows `settled`, each `explorerUrl` a `recordAccessAndSettle` call on the

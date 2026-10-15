@@ -79,6 +79,7 @@ Set in `fly.toml` (`[env]`) unless marked secret.
 | `VACUNA_PAYMENT_AMOUNT_WEI`, `VACUNA_PAYMENT_ASSET` | `10000000000000000` (0.01 VANA), native | Per read |
 | `VACUNA_PAYER_ENV_FILE` | `/data/moksha.env` | Optional KEY=VALUE file with the non-secret Moksha settings; env wins; private keys are refused |
 | `VACUNA_EXPLORER_TX_URL` | `https://moksha.vanascan.io/tx/` | Dashboard links for settled payments |
+| `VACUNA_MOKSHA_FROM_BLOCK` | unset | `VACUNA_PAYER=moksha`: first block the server's settlement poll scans (once; the cursor is then kept in `VACUNA_MOKSHA_STATE_DIR`). Unset: 100 blocks below the latest on a fresh state, 20,000 if unsettled paid reads already exist |
 | `VACUNA_BUILDER_PRIVATE_KEY`, `VACUNA_REGISTER_SERVER_PRIVATE_KEY` | secrets | Payment and access-record signers |
 
 ### Moksha registration (hook, not done here)
