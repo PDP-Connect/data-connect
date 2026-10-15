@@ -17,10 +17,12 @@ import {
   iterateDynamicSqlAcknowledged,
   type Page,
   referenceQueries,
+  transaction as sqliteTransaction,
   decodeCursor as wrapperDecodeCursor,
 } from "./db.ts";
 import {
   postgresEmitSpineEvent,
+  postgresEmitSpineEvents,
   postgresGetRunStartedEvent,
   postgresGetRunTerminalEvent,
   postgresListRunSummariesByConnectorIds,
@@ -527,6 +529,36 @@ export function emitSpineEvent(
   }
 
   return Promise.resolve(insertSqliteSpineEvent(input, dbHandle));
+}
+
+/**
+ * Emit several spine events atomically, in order: all are written or none.
+ * Used where one request produces a fixed pair of audit facts (for example
+ * `query.received` + `query.rejected`), so the pair costs one commit.
+ */
+export function emitSpineEvents(inputs: readonly SpineEventInput[]): Promise<(SpineEventRecord | null)[]> {
+  try {
+    for (const input of inputs) {
+      assertRunEventHasConnectorInstanceId(input);
+      assertRunStartedIsStamped(input);
+    }
+  } catch (e) {
+    return Promise.reject(e);
+  }
+  if (isPostgresStorageBackend()) {
+    return postgresEmitSpineEvents(inputs) as Promise<(SpineEventRecord | null)[]>;
+  }
+  const db = getDb() as SpineDatabase | undefined;
+  if (!db) {
+    return Promise.resolve(inputs.map(() => null));
+  }
+  try {
+    return Promise.resolve(
+      sqliteTransaction(() => inputs.map((input) => appendSqliteSpineEventInTransaction(input, db)))
+    );
+  } catch (e) {
+    return Promise.reject(e);
+  }
 }
 
 function insertSqliteSpineEvent(input: SpineEventInput, dbHandle: SpineDatabase | null): SpineEventRecord | null {

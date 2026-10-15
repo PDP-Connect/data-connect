@@ -1104,18 +1104,34 @@ async function listRecentCorrelationAggregates(
     .sort(compareSummaryRows);
 }
 
-const SPINE_INSERT_EVENT_SQL = `INSERT INTO spine_events (
+const SPINE_INSERT_COLUMNS_SQL = `INSERT INTO spine_events (
        event_id, event_type, occurred_at, recorded_at, scenario_id, trace_id,
        actor_type, actor_id, subject_type, subject_id, object_type, object_id,
        status, request_id, grant_id, run_id, source_kind, source_id, client_id, stream_id,
        token_id, interaction_id, connector_instance_id, data_json, version
-     ) VALUES (
-       $1, $2, $3, $4, $5, $6,
-       $7, $8, $9, $10, $11, $12,
-       $13, $14, $15, $16, $17, $18, $19, $20,
-       $21, $22, $23, $24::jsonb, $25
-     )
-     RETURNING *`;
+     ) VALUES `;
+const SPINE_INSERT_PARAM_COUNT = 25;
+const SPINE_INSERT_JSONB_PARAM = 24;
+
+function spineInsertValuesTuple(rowIndex: number): string {
+  const base = rowIndex * SPINE_INSERT_PARAM_COUNT;
+  const params = Array.from({ length: SPINE_INSERT_PARAM_COUNT }, (_, i) =>
+    i + 1 === SPINE_INSERT_JSONB_PARAM ? `$${base + i + 1}::jsonb` : `$${base + i + 1}`
+  );
+  return `(${params.join(", ")})`;
+}
+
+// No `RETURNING *`: every caller-visible column is already known from the
+// normalized input (the only BEFORE INSERT trigger rewrites
+// connector_instance_id / manifest_generation on terminal run events, neither
+// of which the hydrated record exposes), so shipping the row back on every
+// audit insert is wasted work on the read hot path.
+const SPINE_INSERT_EVENT_SQL = `${SPINE_INSERT_COLUMNS_SQL}${spineInsertValuesTuple(0)}`;
+
+/** Multi-row variant: N events in one statement, so one commit. */
+function spineInsertEventsSql(count: number): string {
+  return `${SPINE_INSERT_COLUMNS_SQL}${Array.from({ length: count }, (_, i) => spineInsertValuesTuple(i)).join(", ")}`;
+}
 
 function spineInsertEventParams(event: NormalizedSpineEvent): unknown[] {
   return [
@@ -1161,12 +1177,41 @@ function toRunHistorySpineEvent(event: NormalizedSpineEvent, rawData: unknown): 
   };
 }
 
+function hydrateNormalized(event: NormalizedSpineEvent): SpineEventRecord {
+  return {
+    actor_id: event.actor_id,
+    actor_type: event.actor_type,
+    client_id: event.client_id,
+    data: JSON.parse(event.data_json),
+    event_id: event.event_id,
+    event_type: event.event_type,
+    grant_id: event.grant_id,
+    interaction_id: event.interaction_id,
+    object_id: event.object_id,
+    object_type: event.object_type,
+    occurred_at: event.occurred_at,
+    recorded_at: event.recorded_at,
+    request_id: event.request_id,
+    run_id: event.run_id,
+    scenario_id: event.scenario_id,
+    source_id: event.source_id,
+    source_kind: event.source_kind,
+    status: event.status,
+    stream_id: event.stream_id,
+    subject_id: event.subject_id,
+    subject_type: event.subject_type,
+    token_id: event.token_id,
+    trace_id: event.trace_id,
+    version: event.version,
+  };
+}
+
 export async function postgresEmitSpineEvent(input: PostgresSpineEventInput = {}): Promise<SpineEventRecord | null> {
   const event = normalize(input);
 
   if (!isRunHistoryRelevantEventType(event.event_type)) {
-    const result = await postgresQuery<SpineEventRow>(SPINE_INSERT_EVENT_SQL, spineInsertEventParams(event));
-    return hydrate(result.rows[0]);
+    await postgresQuery(SPINE_INSERT_EVENT_SQL, spineInsertEventParams(event));
+    return hydrateNormalized(event);
   }
 
   // Run/terminal events also write run_history (Authority Slice A): wrap
@@ -1175,6 +1220,34 @@ export async function postgresEmitSpineEvent(input: PostgresSpineEventInput = {}
   return withPostgresTransaction(async (client) =>
     appendNormalizedPostgresSpineEventInTransaction(client, event, input.data)
   );
+}
+
+/**
+ * Append several spine events atomically, in order. Events without a
+ * run-history projection (the request-path `query.*` / `disclosure.served`
+ * pairs) go in one multi-row INSERT: a single statement, a single commit and
+ * WAL flush, instead of one autocommit per event. Anything that also writes
+ * run_history falls back to one transaction.
+ */
+export async function postgresEmitSpineEvents(
+  inputs: readonly PostgresSpineEventInput[]
+): Promise<SpineEventRecord[]> {
+  const events = inputs.map((input) => normalize(input));
+  if (events.length === 0) {
+    return [];
+  }
+  if (events.some((event) => isRunHistoryRelevantEventType(event.event_type))) {
+    return withPostgresTransaction(async (client) => {
+      const out: SpineEventRecord[] = [];
+      for (const [i, event] of events.entries()) {
+        await appendNormalizedPostgresSpineEventInTransaction(client, event, inputs[i]?.data);
+        out.push(hydrateNormalized(event));
+      }
+      return out;
+    });
+  }
+  await postgresQuery(spineInsertEventsSql(events.length), events.flatMap(spineInsertEventParams));
+  return events.map(hydrateNormalized);
 }
 
 /**
@@ -1196,13 +1269,13 @@ async function appendNormalizedPostgresSpineEventInTransaction(
   rawData: unknown,
   hooks: PostgresSpineTransactionHooks = {}
 ): Promise<SpineEventRecord | null> {
-  const result = await client.query<SpineEventRow>(SPINE_INSERT_EVENT_SQL, spineInsertEventParams(event));
+  await client.query(SPINE_INSERT_EVENT_SQL, spineInsertEventParams(event));
   await hooks.afterEventInsert?.();
   if (isRunHistoryRelevantEventType(event.event_type)) {
     await writePostgresRunHistoryForSpineEvent(client, toRunHistorySpineEvent(event, rawData));
     await hooks.afterRunHistoryWrite?.();
   }
-  return hydrate(result.rows[0]);
+  return hydrateNormalized(event);
 }
 
 /**
@@ -1225,11 +1298,11 @@ export async function postgresEmitSpineEventInTransaction(
   input: PostgresSpineEventInput = {}
 ): Promise<SpineEventRecord | null> {
   const event = normalize(input);
-  const result = await client.query<SpineEventRow>(SPINE_INSERT_EVENT_SQL, spineInsertEventParams(event));
+  await client.query(SPINE_INSERT_EVENT_SQL, spineInsertEventParams(event));
   if (isRunHistoryRelevantEventType(event.event_type)) {
     await writePostgresRunHistoryForSpineEvent(client, toRunHistorySpineEvent(event, input.data));
   }
-  return hydrate(result.rows[0]);
+  return hydrateNormalized(event);
 }
 
 export async function postgresListSpineEventsPage(
