@@ -62,6 +62,7 @@ import {
   isResponseCanary,
 } from "./contract-validation.ts";
 import { HOSTED_INGEST_MAX_REQUEST_BYTES } from "./hosted-ingest-limits.ts";
+import { setRequestAbortSignal } from "./internal-dispatch.ts";
 
 // Header name the reference sets on responses to expose the protocol trace
 // ID (handler-set via setReferenceTraceId in server/index.js).
@@ -162,6 +163,7 @@ function loadQsParser(): QsParser {
 
 const localRequire = createRequire(import.meta.url);
 const qs = loadQsParser();
+const requestAbortCleanup = new WeakMap<FastifyRequest, () => void>();
 
 function canResolvePrettyTransport(): boolean {
   try {
@@ -314,7 +316,11 @@ function buildRouteSchema(manifest: RouteManifest): Record<string, JsonValue> | 
  * request-completion log lines. We emit our own completion record in an
  * `onResponse` hook so it can carry PDPP's `trace_id` alongside `req_id`.
  */
-function buildFastify({ loggerInstance }: { loggerInstance: FastifyBaseLogger }): FastifyInstance {
+function buildFastify({
+  loggerInstance,
+}: {
+  loggerInstance: FastifyBaseLogger;
+}): FastifyInstance {
   const fastify = Fastify({
     bodyLimit: HOSTED_INGEST_MAX_REQUEST_BYTES, // match previous express.text() limit
     disableRequestLogging: true,
@@ -359,7 +365,23 @@ function buildFastify({ loggerInstance }: { loggerInstance: FastifyBaseLogger })
   // Force `Connection: close` on every response. See the note above the
   // Fastify config block. An `onRequest` hook sets it before handlers run so
   // there's no race with streaming replies.
-  fastify.addHook("onRequest", (_request, reply, done) => {
+  fastify.addHook("onRequest", (request, reply, done) => {
+    const controller = new AbortController();
+    const abortOnRequest = () => controller.abort();
+    const abortOnResponseClose = () => {
+      if (!reply.raw.writableEnded) controller.abort();
+    };
+    if (request.raw.aborted || request.raw.socket.destroyed || reply.raw.destroyed) {
+      controller.abort();
+    } else {
+      request.raw.once("aborted", abortOnRequest);
+      reply.raw.once("close", abortOnResponseClose);
+    }
+    setRequestAbortSignal(request.raw, controller.signal);
+    requestAbortCleanup.set(request, () => {
+      request.raw.off("aborted", abortOnRequest);
+      reply.raw.off("close", abortOnResponseClose);
+    });
     reply.header("connection", "close");
     done();
   });
@@ -395,6 +417,8 @@ function buildFastify({ loggerInstance }: { loggerInstance: FastifyBaseLogger })
   // record the spec promises, not a per-status-code shape.
   // biome-ignore lint/suspicious/useAwait: The async signature is part of this caller-facing contract.
   fastify.addHook("onResponse", async (request, reply) => {
+    requestAbortCleanup.get(request)?.();
+    requestAbortCleanup.delete(request);
     const traceId = reply.getHeader?.(PDPP_TRACE_ID_HEADER) || request.__pdppTraceId;
     request.log.info(
       {
@@ -1215,6 +1239,7 @@ export function createApp({ logger, __requestValidationAllowlistForTest }: Creat
     // transport-coverage test can assert every contract manifest has its
     // binding declared at registration time.
     Object.assign(fastify.server, {
+      __pdppInject: app.inject,
       __pdppFastify: fastify,
       __pdppRegisteredRoutes: [...registeredRoutes],
     });
@@ -1225,6 +1250,17 @@ export function createApp({ logger, __requestValidationAllowlistForTest }: Creat
 
   const app = {
     delete: del,
+
+    inject: (options: {
+      headers: Record<string, string>;
+      method: "DELETE" | "GET" | "HEAD" | "OPTIONS" | "PATCH" | "POST" | "PUT";
+      payload?: Buffer;
+      url: string;
+    }) =>
+      fastify.inject({
+        ...options,
+        headers: options.headers,
+      }),
 
     // Escape hatch — tests and runtime adapters may need the raw Fastify
     // instance or its underlying http.Server.

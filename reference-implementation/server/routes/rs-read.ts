@@ -33,6 +33,7 @@ import {
   BlobsReadNotFoundError,
   executeBlobsRead,
 } from "../../operations/rs-blobs-read/index.ts";
+import { getEventTokenId } from "../internal-dispatch.ts";
 import {
   type ConnectorsListDependencies,
   type ConnectorsListInput,
@@ -400,9 +401,8 @@ export interface MountRsReadContext {
   ) => void;
 }
 
-function authorizationTokenId(req: RouteRequest): string | null {
-  const auth = req.headers.authorization;
-  return typeof auth === "string" ? auth.slice(7) : null;
+function authorizationTokenId(req: RouteRequest, tokenInfo: TokenInfo): string | null {
+  return getEventTokenId(req.headers.authorization, tokenInfo);
 }
 
 // Resolve the request-time `connection_id`, honoring the deprecated
@@ -615,7 +615,7 @@ function emitDisclosureServed(
     status: "succeeded",
     subject_id: tokenInfo.subject_id || null,
     subject_type: "subject",
-    token_id: authorizationTokenId(args.req),
+    token_id: authorizationTokenId(args.req, tokenInfo),
     trace_id: args.traceId,
   };
   if (args.streamId !== undefined) {

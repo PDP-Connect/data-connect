@@ -7,15 +7,17 @@ import assert from "node:assert/strict";
 import { createHash, generateKeyPairSync, randomBytes, sign } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import http from "node:http";
+import { Writable } from "node:stream";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import Database from "./helpers/sqlite-driver.ts";
+import pino from "pino";
 import {
   buildPendingConsentRequestUri,
   countGrantPackagesForOwner,
   getGrantPackageAccess,
+  introspect,
   revokeGrant,
   revokeGrantPackage,
 } from "../server/auth.ts";
@@ -23,16 +25,22 @@ import { canonicalConnectorKey, canonicalConnectorKeyFromManifest } from "../ser
 import { closeDb, getDb, initDb } from "../server/db.ts";
 import { encodeHostedMcpSelection, encodeHostedMcpStreamSelection, hostedMcpSourceKey } from "../server/hosted-mcp-selection.ts";
 import { scopeFieldsInputName, scopeSinceInputName, scopeUntilInputName } from "../server/hosted-mcp-stream-scope.ts";
-import { computeHostedMcpDecisionDigest } from "../server/routes/as-consent-ui-helpers.ts";
 import { startServer } from "../server/index.ts";
+import {
+  getDispatchRegistrySize,
+  type DispatchApp,
+  runWithDispatchScope,
+} from "../server/internal-dispatch.ts";
 import { basicIntrospectionAuthorization } from "../server/introspection-http.ts";
 import { ingestRecord, queryRecordsAcrossBindings, resolveReadRequestBindings } from "../server/records.ts";
+import { computeHostedMcpDecisionDigest } from "../server/routes/as-consent-ui-helpers.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
 import { bindHostedMcpConsentChallenge } from "./helpers/hosted-mcp-consent-challenge.ts";
 import {
   TEST_INTROSPECTION_SERVER_OPTS,
   TEST_RS_INTROSPECTION_CREDENTIALS,
 } from "./helpers/introspection-test-credentials.ts";
+import Database from "./helpers/sqlite-driver.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REFERENCE_IMPL_DIR = join(__dirname, "..");
@@ -1198,6 +1206,583 @@ test("hosted MCP OAuth code flow issues a scoped client token usable at /mcp", a
       { generation: 0, status: "revoked" },
       { generation: 1, status: "revoked" },
     ]);
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test("hosted MCP client schema call introspects its bearer once", async () => {
+  let introspectionCount = 0;
+  const innerNetworkCalls: string[] = [];
+  const logLines: string[] = [];
+  let nonceSocketProbe = false;
+  const logger = pino(
+    { level: "trace" },
+    new Writable({
+      write(chunk, _encoding, callback) {
+        logLines.push(String(chunk));
+        callback();
+      },
+    })
+  );
+  const originalFetch = globalThis.fetch;
+  const server = await startServer({
+    asPort: 0,
+    dbPath: ":memory:",
+    introspectionFetch: async (input, init) => {
+      introspectionCount += 1;
+      return fetch(input, init);
+    },
+    logger,
+    ownerAuthPassword: "",
+    quiet: true,
+    rsPort: 0,
+    ...TEST_INTROSPECTION_SERVER_OPTS,
+  });
+  const asUrl = `http://localhost:${server.asPort}`;
+  const rsUrl = `http://localhost:${server.rsPort}`;
+  type InjectOptions = { headers?: Record<string, string>; method: string; payload?: unknown; url: string };
+  const fastify = (
+    server.rsServer as unknown as { __pdppFastify: { inject: (options: InjectOptions) => Promise<unknown> } }
+  ).__pdppFastify;
+  const originalInject = fastify.inject.bind(fastify);
+  const dispatchNonces: string[] = [];
+  const innerAuthorizationHeaders: Array<string | undefined> = [];
+  let liveSocketNonceStatus: number | undefined;
+  fastify.inject = async (options) => {
+    if (options.url.startsWith("/v1/")) {
+      const authorization = options.headers?.authorization;
+      const nonce = authorization?.startsWith("Bearer ") ? authorization.slice(7) : "";
+      dispatchNonces.push(nonce);
+      innerAuthorizationHeaders.push(options.headers?.authorization);
+      if (nonce && liveSocketNonceStatus === undefined) {
+        nonceSocketProbe = true;
+        try {
+          liveSocketNonceStatus = (
+            await fetchJson(`${rsUrl}/v1/schema`, { headers: { Authorization: `Bearer ${nonce}` } })
+          ).status;
+        } finally {
+          nonceSocketProbe = false;
+        }
+      }
+    }
+    return originalInject(options);
+  };
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(input instanceof Request ? input.url : input.toString());
+    if (url.pathname.startsWith("/v1/") && !nonceSocketProbe) {
+      innerNetworkCalls.push(`${url.pathname}${url.search}`);
+    }
+    return originalFetch(input, init);
+  };
+
+  try {
+    const manifest = await registerAuthorizedSpotify(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+    const { accessToken } = await completeOauthCodeFlow({ asUrl, client, manifest });
+    introspectionCount = 0;
+
+    const schema = await postMcpJson(rsUrl, accessToken, {
+      id: 1,
+      jsonrpc: "2.0",
+      method: "tools/call",
+      params: { arguments: {}, name: "schema" },
+    });
+
+    assert.equal(schema.status, 200);
+    assert.equal(resultOf(schema).isError, undefined);
+    assert.equal(introspectionCount, 2, "the outer bearer and live-nonce socket probe each introspect once");
+    assert.equal(liveSocketNonceStatus, 401, "a real socket cannot use the live inject nonce as its bearer");
+    assert.deepEqual(innerNetworkCalls, [], "inner /v1 work must not open a loopback HTTP request");
+    assert.ok(dispatchNonces.length > 0, "the real /v1 route ran through Fastify inject");
+    assert.ok(dispatchNonces.every((nonce) => /^[0-9a-f]{32}$/.test(nonce)));
+    assert.ok(
+      innerAuthorizationHeaders.every((authorization) => authorization === `Bearer ${dispatchNonces[0]}`),
+      "the inner bearer is the live nonce, never the outer user's bearer",
+    );
+    assert.ok(dispatchNonces.every((nonce) => nonce !== accessToken));
+    const firstNonce = mustExist(dispatchNonces[0], "the dispatch nonce was captured");
+    for (const nonce of dispatchNonces) {
+      assert.ok(!JSON.stringify(schema.body).includes(nonce), "nonce is absent from response bodies");
+    }
+    const replayedNonce = await fetchJson(`${rsUrl}/v1/schema`, {
+      headers: { Authorization: `Bearer ${firstNonce}` },
+    });
+    assert.equal(replayedNonce.status, 401, "the nonce is rejected after the dispatch scope closes");
+    logger.flush?.();
+    assert.ok(logLines.every((line) => !dispatchNonces.some((nonce) => line.includes(nonce))));
+    const eventRows = getDb().prepare("SELECT token_id, data_json FROM spine_events").all();
+    assert.ok(eventRows.length > 0, "the hosted read emitted spine events");
+    const nonceEventRows = eventRows.filter((row) => JSON.stringify(row).includes(firstNonce));
+    assert.equal(
+      nonceEventRows.length,
+      0,
+      `nonce is absent from event data (fields: ${nonceEventRows.map((row) =>
+        `token_id=${row.token_id === firstNonce}, data_json=${String(row.data_json).includes(firstNonce)}`
+      ).join(", ")})`,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    fastify.inject = originalInject;
+    await closeServer(server);
+  }
+});
+
+test("dispatch identity never persists its nonce after abort, handler failure, or completion", async () => {
+  const logLines: string[] = [];
+  const logger = pino(
+    { level: "trace" },
+    new Writable({
+      write(chunk, _encoding, callback) {
+        logLines.push(String(chunk));
+        callback();
+      },
+    })
+  );
+  const server = await startServer({
+    asPort: 0,
+    dbPath: ":memory:",
+    logger,
+    ownerAuthPassword: "",
+    quiet: true,
+    rsPort: 0,
+    ...TEST_INTROSPECTION_SERVER_OPTS,
+  });
+  const asUrl = `http://localhost:${server.asPort}`;
+  const rsUrl = `http://localhost:${server.rsPort}`;
+  const fastify = (
+    server.rsServer as unknown as { __pdppFastify: { inject: (options: unknown) => Promise<unknown> } }
+  ).__pdppFastify;
+  const statementPrototype = Object.getPrototypeOf(getDb().prepare("SELECT 1")) as {
+    run: (...args: unknown[]) => unknown;
+  };
+  const originalRun = statementPrototype.run;
+
+  try {
+    const manifest = await registerAuthorizedSpotify(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+    const { accessToken } = await completeOauthCodeFlow({ asUrl, client, manifest });
+    const tokenInfo = await introspect(accessToken);
+    assert.equal(tokenInfo.active, true);
+
+    const runScenario = async (mode: "abort" | "throw" | "complete") => {
+      getDb().exec("DELETE FROM spine_events");
+      const controller = new AbortController();
+      let nonce = "";
+      let abortAtFirstEventInsert = mode !== "complete";
+      statementPrototype.run = function (...args: unknown[]) {
+        if (
+          abortAtFirstEventInsert &&
+          /INSERT\s+INTO\s+spine_events/i.test(String((this as { source?: unknown }).source))
+        ) {
+          abortAtFirstEventInsert = false;
+          controller.abort();
+        }
+        return originalRun.apply(this, args);
+      };
+
+      const dispatchApp: DispatchApp = {
+        inject: async (options) => {
+          nonce = mustExist(options.headers.authorization?.slice(7), "internal inject carries a nonce bearer");
+          return fastify.inject(options) as ReturnType<DispatchApp["inject"]>;
+        },
+      };
+      let result: { body: string; headers: Record<string, string>; status: number } | undefined;
+      let thrown: unknown;
+      try {
+        result = await runWithDispatchScope(
+          tokenInfo,
+          rsUrl,
+          dispatchApp,
+          async (inProcessFetch) => {
+            const response = await inProcessFetch(`${rsUrl}/v1/schema`);
+            const body = await response.text();
+            if (mode === "throw") {
+              throw new Error("simulated outer handler failure");
+            }
+            return { body, headers: Object.fromEntries(response.headers.entries()), status: response.status };
+          },
+          controller.signal,
+        );
+      } catch (error) {
+        thrown = error;
+      }
+
+      logger.flush?.();
+      const persistedEvents = getDb().prepare("SELECT * FROM spine_events").all();
+      const eventAndTraceData = JSON.stringify(persistedEvents);
+      assert.ok(nonce, "the internal inject call exposed a nonce to the test harness");
+      assert.ok(!eventAndTraceData.includes(nonce), `${mode}: persisted event and trace data excludes the nonce`);
+      assert.ok(!(JSON.stringify(result) ?? "").includes(nonce), `${mode}: response data excludes the nonce`);
+      assert.ok(logLines.every((line) => !line.includes(nonce)), `${mode}: logs exclude the nonce`);
+      assert.equal(getDispatchRegistrySize(), 0, `${mode}: dispatch scope is deleted`);
+      assert.ok(persistedEvents.some((event) => event.event_type === "disclosure.served"));
+      assert.ok(persistedEvents.every((event) => event.token_id === tokenInfo.grant_id));
+      if (mode === "throw") {
+        assert.match(String(thrown), /simulated outer handler failure/);
+      } else {
+        assert.equal(thrown, undefined);
+      }
+      if (mode === "abort") {
+        assert.equal(result?.status, 200, "the admitted route completes after scope cleanup");
+      } else if (mode === "complete") {
+        assert.equal(result?.status, 200);
+      }
+    };
+
+    await runScenario("throw");
+    await runScenario("abort");
+    await runScenario("complete");
+  } finally {
+    statementPrototype.run = originalRun;
+    logger.flush?.();
+    await closeServer(server);
+  }
+});
+
+test("disconnect during introspection opens no dispatch scope", async () => {
+  let introspectionCount = 0;
+  let blockIntrospection = false;
+  let markIntrospectionPaused: (() => void) | undefined;
+  let markIntrospectionFinished: (() => void) | undefined;
+  let releaseIntrospection: (() => void) | undefined;
+  const introspectionPaused = new Promise<void>((resolve) => {
+    markIntrospectionPaused = resolve;
+  });
+  const introspectionFinished = new Promise<void>((resolve) => {
+    markIntrospectionFinished = resolve;
+  });
+  const introspectionRelease = new Promise<void>((resolve) => {
+    releaseIntrospection = resolve;
+  });
+  const server = await startServer({
+    asPort: 0,
+    dbPath: ":memory:",
+    introspectionFetch: async (input, init) => {
+      introspectionCount += 1;
+      const response = await fetch(input, init);
+      if (blockIntrospection) {
+        markIntrospectionPaused?.();
+        await introspectionRelease;
+        markIntrospectionFinished?.();
+      }
+      return response;
+    },
+    ownerAuthPassword: "",
+    quiet: true,
+    rsPort: 0,
+    ...TEST_INTROSPECTION_SERVER_OPTS,
+  });
+  const asUrl = `http://localhost:${server.asPort}`;
+  const rsUrl = `http://localhost:${server.rsPort}`;
+  let markInnerStarted: (() => void) | undefined;
+  let releaseInner: (() => void) | undefined;
+  const innerStarted = new Promise<void>((resolve) => {
+    markInnerStarted = resolve;
+  });
+  const innerRelease = new Promise<void>((resolve) => {
+    releaseInner = resolve;
+  });
+  const fastify = (
+    server.rsServer as unknown as {
+      __pdppFastify: {
+        inject: (options: { method: string; url: string }) => Promise<unknown>;
+      };
+    }
+  ).__pdppFastify;
+  const originalInject = fastify.inject.bind(fastify);
+  let innerRouteCount = 0;
+  fastify.inject = async (options) => {
+    if (options.url.startsWith("/v1/")) {
+      innerRouteCount += 1;
+      markInnerStarted?.();
+      await innerRelease;
+    }
+    return originalInject(options);
+  };
+
+  try {
+    const manifest = await registerAuthorizedSpotify(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+    const { accessToken } = await completeOauthCodeFlow({ asUrl, client, manifest });
+    introspectionCount = 0;
+    blockIntrospection = true;
+
+    const payload = JSON.stringify({
+      id: 1,
+      jsonrpc: "2.0",
+      method: "tools/call",
+      params: { arguments: {}, name: "schema" },
+    });
+    const controller = new AbortController();
+    const request = fetch(`${rsUrl}/mcp`, {
+      body: payload,
+      headers: {
+        accept: "application/json, text/event-stream",
+        authorization: `Bearer ${accessToken}`,
+        "content-type": "application/json",
+      },
+      method: "POST",
+      signal: controller.signal,
+    }).catch(() => undefined);
+
+    await introspectionPaused;
+    controller.abort();
+    await request;
+    await new Promise((resolve) => setTimeout(resolve, 75));
+    releaseIntrospection?.();
+    await introspectionFinished;
+    await Promise.race([innerStarted, new Promise((resolve) => setTimeout(resolve, 100))]);
+
+    assert.equal(introspectionCount, 1);
+    assert.equal(getDispatchRegistrySize(), 0, "disconnect before auth completes must not open a context");
+    assert.equal(innerRouteCount, 0, "a disconnected request must not dispatch resource reads");
+  } finally {
+    releaseIntrospection?.();
+    releaseInner?.();
+    fastify.inject = originalInject;
+    await closeServer(server);
+  }
+});
+
+test("expanded hosted MCP query_records introspects its bearer once", async () => {
+  let introspectionCount = 0;
+  const server = await startServer({
+    asPort: 0,
+    dbPath: ":memory:",
+    introspectionFetch: async (input, init) => {
+      introspectionCount += 1;
+      return fetch(input, init);
+    },
+    ownerAuthPassword: "",
+    quiet: true,
+    rsPort: 0,
+    ...TEST_INTROSPECTION_SERVER_OPTS,
+  });
+  const asUrl = `http://localhost:${server.asPort}`;
+  const rsUrl = `http://localhost:${server.rsPort}`;
+  type FastifyInject = (options: { headers?: Record<string, string>; method: string; payload?: unknown; url: string }) => Promise<unknown>;
+  const fastify = (
+    server.rsServer as unknown as { __pdppFastify: { inject: FastifyInject } }
+  ).__pdppFastify;
+  const originalInject = fastify.inject.bind(fastify);
+  let innerRouteCount = 0;
+  const innerAuthorizationHeaders: Array<string | undefined> = [];
+  fastify.inject = async (options) => {
+    if (options.url.startsWith("/v1/")) {
+      innerRouteCount += 1;
+      innerAuthorizationHeaders.push(options.headers?.authorization);
+    }
+    return originalInject(options);
+  };
+
+  try {
+    const manifest = await registerAuthorizedSpotify(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+    const { accessToken } = await completeOauthCodeFlow({ asUrl, client, manifest });
+    introspectionCount = 0;
+
+    const expandedRead = await postMcpJson(rsUrl, accessToken, {
+      id: 1,
+      jsonrpc: "2.0",
+      method: "tools/call",
+      params: {
+        arguments: { expand: ["fixture_relation"], stream: manifest.streams[0]?.name },
+        name: "query_records",
+      },
+    });
+
+    assert.equal(expandedRead.status, 200);
+    assert.equal(resultOf(expandedRead).isError, true, "client-token expansions are rejected by the v0.1 query contract");
+    assert.equal(introspectionCount, 1, "schema preflight and record reads share the outer context");
+    assert.equal(innerRouteCount, 2, "the rejected expansion performs schema preflight and one record request");
+    const innerNonces = innerAuthorizationHeaders.map((authorization) => {
+      const header = mustExist(authorization, "an internal request must carry the live nonce bearer");
+      assert.ok(header.startsWith("Bearer "));
+      return header.slice(7);
+    });
+    assert.equal(new Set(innerNonces).size, 1, "all inner requests use this outer dispatch nonce");
+    const innerNonce = mustExist(innerNonces[0], "internal request nonce must exist");
+    assert.notEqual(innerNonce, accessToken, "the outer user bearer is not forwarded");
+    assert.ok(!JSON.stringify(expandedRead).includes(innerNonce));
+  } finally {
+    fastify.inject = originalInject;
+    await closeServer(server);
+  }
+});
+
+test("hosted MCP re-introspects after grant revocation between outer requests", async () => {
+  let introspectionCount = 0;
+  const server = await startServer({
+    asPort: 0,
+    dbPath: ":memory:",
+    introspectionFetch: async (input, init) => {
+      introspectionCount += 1;
+      return fetch(input, init);
+    },
+    ownerAuthPassword: "",
+    quiet: true,
+    rsPort: 0,
+    ...TEST_INTROSPECTION_SERVER_OPTS,
+  });
+  const asUrl = `http://localhost:${server.asPort}`;
+  const rsUrl = `http://localhost:${server.rsPort}`;
+
+  try {
+    const manifest = await registerAuthorizedSpotify(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+    const { accessToken, grantId } = await completeOauthCodeFlow({ asUrl, client, manifest });
+    introspectionCount = 0;
+
+    const first = await postMcpJson(rsUrl, accessToken, {
+      id: 1,
+      jsonrpc: "2.0",
+      method: "tools/call",
+      params: { arguments: {}, name: "schema" },
+    });
+    assert.equal(first.status, 200);
+    assert.equal(introspectionCount, 1);
+
+    await revokeGrant(mustExist(grantId, "authorization flow issues grant"), {
+      request_id: "mcp-inprocess-revocation-test",
+    });
+    const second = await postMcpJson(rsUrl, accessToken, {
+      id: 2,
+      jsonrpc: "2.0",
+      method: "tools/call",
+      params: { arguments: {}, name: "schema" },
+    });
+
+    assert.equal(second.status, 401);
+    assert.equal(introspectionCount, 2, "the next outer request must introspect again");
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test("external requests cannot forge inject authorization with nonce-shaped tokens or legacy headers", async () => {
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+  const rsUrl = `http://localhost:${server.rsPort}`;
+
+  try {
+    const spotify = await registerAuthorizedSpotify(asUrl);
+    const github = await registerAuthorizedGithub(asUrl);
+    const clientA = await registerAuthCodeClient(asUrl);
+    const clientB = await registerAuthCodeClient(asUrl);
+    const grantA = await completeOauthCodeFlow({ asUrl, client: clientA, manifest: spotify });
+    const grantB = await completeOauthCodeFlow({ asUrl, client: clientB, manifest: github });
+    const inProcessInject = (server.rsServer as unknown as { __pdppInject: DispatchApp["inject"] })
+      .__pdppInject;
+    assert.equal(
+      (await inProcessInject({ headers: { authorization: `Bearer ${grantA.accessToken}` }, method: "GET", url: "/v1/schema" }))
+        .statusCode,
+      200
+    );
+
+    const forgedInject = await inProcessInject({
+      headers: { authorization: `Bearer ${randomBytes(16).toString("hex")}` },
+      method: "GET",
+      url: "/v1/schema",
+    });
+    assert.equal(forgedInject.statusCode, 401, "an inject request cannot use a nonce outside a live scope");
+    const forgedSocket = await fetchJson(`${rsUrl}/v1/schema`, {
+      headers: { Authorization: `Bearer ${randomBytes(16).toString("hex")}` },
+    });
+    assert.equal(forgedSocket.status, 401, "a real socket always uses normal token introspection");
+
+    const legacyHeaders = await fetchJson(`${rsUrl}/v1/schema`, {
+      headers: {
+        "PdPp-InTeRnAl-DiSpAtCh": randomBytes(16).toString("hex"),
+        "X-PdPp-InTeRnAl-InJeCt": "01234567-89ab-cdef-0123-456789abcdef",
+      },
+    });
+    assert.equal(legacyHeaders.status, 401, "legacy headers cannot authorize a socket request");
+
+    const duplicateHeaders = await new Promise<number>((resolve, reject) => {
+      const request = http.request(
+        `${rsUrl}/v1/schema`,
+        {
+          headers: [
+            "Host",
+            new URL(rsUrl).host,
+            "authorization",
+            `Bearer ${randomBytes(16).toString("hex")}`,
+            "AUTHORIZATION",
+            `Bearer ${randomBytes(16).toString("hex")}`,
+            "x-pdpp-internal-inject",
+            "01234567-89ab-cdef-0123-456789abcdef",
+            "X-PDPP-INTERNAL-INJECT",
+            "01234567-89ab-cdef-0123-456789abcdef",
+          ],
+          method: "GET",
+        },
+        (response) => {
+          response.resume();
+          response.on("end", () => resolve(response.statusCode ?? 0));
+        }
+      );
+      request.on("error", reject);
+      request.end();
+    });
+    assert.equal(duplicateHeaders, 401, "duplicate mixed-case authorization headers fail closed");
+
+    const otherGrant = await fetchJson(`${rsUrl}/v1/schema`, {
+      headers: { Authorization: `Bearer ${grantB.accessToken}` },
+    });
+    assert.equal(otherGrant.status, 200);
+    const otherConnectorIds = new Set(
+      schemaStreamRows((otherGrant.body.data ?? otherGrant.body) as Record<string, unknown>)
+        .map((stream) => stream.source.connector_id)
+        .filter((connectorId): connectorId is string => typeof connectorId === "string")
+    );
+    assert.ok(otherConnectorIds.has(github.connector_id));
+    assert.ok(!otherConnectorIds.has(spotify.connector_id));
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test("concurrent hosted MCP requests keep each grant context isolated", async () => {
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+  const rsUrl = `http://localhost:${server.rsPort}`;
+
+  try {
+    const spotify = await registerAuthorizedSpotify(asUrl);
+    const github = await registerAuthorizedGithub(asUrl);
+    const [clientA, clientB] = await Promise.all([registerAuthCodeClient(asUrl), registerAuthCodeClient(asUrl)]);
+    const [grantA, grantB] = await Promise.all([
+      completeOauthCodeFlow({ asUrl, client: clientA, manifest: spotify }),
+      completeOauthCodeFlow({ asUrl, client: clientB, manifest: github }),
+    ]);
+    const [responseA, responseB] = await Promise.all([
+      postMcpJson(rsUrl, grantA.accessToken, {
+        id: 1,
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: { arguments: {}, name: "schema" },
+      }),
+      postMcpJson(rsUrl, grantB.accessToken, {
+        id: 2,
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: { arguments: {}, name: "schema" },
+      }),
+    ]);
+
+    assert.equal(responseA.status, 200);
+    assert.equal(responseB.status, 200);
+    const connectorsA = new Set(
+      schemaStreamRows(structuredContentData(resultOf(responseA))).map((stream) => stream.source.connector_id)
+    );
+    const connectorsB = new Set(
+      schemaStreamRows(structuredContentData(resultOf(responseB))).map((stream) => stream.source.connector_id)
+    );
+    assert.ok(connectorsA.has(spotify.connector_id));
+    assert.ok(!connectorsA.has(github.connector_id));
+    assert.ok(connectorsB.has(github.connector_id));
+    assert.ok(!connectorsB.has(spotify.connector_id));
   } finally {
     await closeServer(server);
   }

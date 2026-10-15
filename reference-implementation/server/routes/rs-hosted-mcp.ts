@@ -20,6 +20,7 @@
 // without `.d.ts` declarations, so they cannot be imported directly from a
 // strict-mode `.ts` file.
 
+import { getRequestAbortSignal, type DispatchApp, runWithDispatchScope } from "../internal-dispatch.ts";
 import {
   isTrustedMetadataRequestOrigin,
   protectedResourceMetadataUrlForResource,
@@ -38,7 +39,13 @@ interface RouteRequest extends ResolvePublicUrlRequest {
   readonly headers: Readonly<Record<string, string | string[] | undefined>>;
   readonly method: string;
   readonly path?: string;
-  readonly raw?: { readonly url?: string };
+  readonly raw?: {
+    readonly aborted?: boolean;
+    readonly socket?: { readonly destroyed?: boolean; readonly remoteAddress?: string };
+    readonly url?: string;
+    on?: (event: string, listener: () => void) => void;
+    off?: (event: string, listener: () => void) => void;
+  };
   readonly tokenInfo?: {
     readonly grant_package_id?: string;
     readonly pdpp_token_kind?: string;
@@ -49,6 +56,12 @@ interface RouteRequest extends ResolvePublicUrlRequest {
 interface RouteResponse {
   end: () => void;
   locals: Record<string, unknown>;
+  raw?: {
+    destroyed?: boolean;
+    off?: (event: string, listener: () => void) => void;
+    on?: (event: string, listener: () => void) => void;
+    writableEnded?: boolean;
+  };
   send: (body: unknown) => void;
   setHeader: (name: string, value: string) => void;
   status: (code: number) => RouteResponse;
@@ -100,14 +113,18 @@ export interface MountRsHostedMcpContext {
     fetch: typeof globalThis.fetch;
   }) => unknown;
   /**
-   * `createRsClient` from `./package-rs-client.js` — builds one single-bearer
-   * RsClient against a chosen fetch base. Injected for the same JS-only reason.
-   * Used for the standalone (`client`-token) path so its self-calls can use the
-   * internal RS base too (parity with the package path's child clients).
+   * `createRsClient` from `./package-rs-client.js` — builds one RsClient over
+   * the supplied fetch. The standalone path uses the outer bearer on the
+   * client; the in-process fetch replaces it with the live dispatch nonce.
    */
-  createRsClient: (options: { providerUrl: string; accessToken: string; fetch: typeof globalThis.fetch }) => unknown;
+  createRsClient: (options: {
+    providerUrl: string;
+    accessToken: string;
+    fetch: typeof globalThis.fetch;
+  }) => unknown;
   /** Resolved RS public URL (or null; adapter derives it per-request). */
   readonly explicitResource: string | null | undefined;
+  readonly dispatchApp: DispatchApp;
   /** From auth.js: resolve active grant-package members for a package token. */
   getGrantPackageAccess: (packageId: string) => Promise<GrantPackageAccess | null>;
   /**
@@ -195,12 +212,6 @@ function buildMcpWebRequest(req: RouteRequest, resource: string): Request {
   const headers = buildMcpWebRequestHeaders(req);
   const init = buildMcpWebRequestInit(req, headers);
   return new Request(url.toString(), init);
-}
-
-function extractInboundMcpToken(req: RouteRequest): string {
-  const authHeader = req.headers.authorization;
-  const authValue = Array.isArray(authHeader) ? (authHeader[0] ?? "") : (authHeader ?? "");
-  return authValue.slice(7);
 }
 
 interface SendWebResponseOptions {
@@ -318,20 +329,21 @@ export function mountRsHostedMcp(app: AppLike, ctx: MountRsHostedMcpContext): vo
   }
 
   function buildStandaloneMcpServerOptions(
+    req: RouteRequest,
     resource: string,
     internalBase: string,
-    accessToken: string
+    dispatchFetch: typeof globalThis.fetch
   ): McpServerOptions {
-    // Standalone (`client`-token) path: build the single-bearer RsClient
-    // against the internal base so its self-calls avoid the public-edge
-    // hairpin too — parity with the package path's child clients. The
-    // advertised `providerUrl`
-    // stays the public `resource` (display/provenance only; all fetches go
-    // through the injected rsClient). When no internal base is configured,
-    // internalBase === resource, so this is a no-op vs prior behavior.
+    // Standalone (`client`-token) path: dispatch through the real RS route
+    // chain in-process. The `providerUrl` stays public for display/provenance;
+    // all resource reads use the injected dispatch fetch.
+    const authorization = req.headers.authorization;
+    if (typeof authorization !== "string" || !authorization.startsWith("Bearer ")) {
+      throw new TypeError("standalone hosted MCP requires the outer bearer token");
+    }
     const rsClient = ctx.createRsClient({
-      accessToken,
-      fetch: globalThis.fetch,
+      accessToken: authorization.slice(7),
+      fetch: dispatchFetch,
       providerUrl: internalBase,
     });
     return {
@@ -350,15 +362,19 @@ export function mountRsHostedMcp(app: AppLike, ctx: MountRsHostedMcpContext): vo
     res: RouteResponse,
     resource: string,
     internalBase: string,
-    inboundToken: string
+    dispatchFetch: typeof globalThis.fetch
   ): Promise<McpServerOptions | null> {
     if (req.tokenInfo?.pdpp_token_kind === "mcp_package") {
       return buildPackageMcpServerOptions(req, res, resource, internalBase);
     }
-    return buildStandaloneMcpServerOptions(resource, internalBase, inboundToken);
+    return buildStandaloneMcpServerOptions(req, resource, internalBase, dispatchFetch);
   }
 
   async function handleHostedMcp(req: RouteRequest, res: RouteResponse): Promise<void> {
+    const requestSignal = getRequestAbortSignal(req.raw);
+    if (requestSignal?.aborted || req.raw?.aborted || req.raw?.socket?.destroyed || res.raw?.destroyed) {
+      return;
+    }
     // Advertised identity (what clients discover and call) — always public.
     const resource = resolvePublicUrl(req, explicitResource);
     // Server-internal fetch base for the adapter's own child-grant self-calls.
@@ -367,14 +383,36 @@ export function mountRsHostedMcp(app: AppLike, ctx: MountRsHostedMcpContext): vo
     // The internal base is fetch-only: it is never advertised, never written
     // into discovery metadata, and never carried in issued-token audiences.
     const internalBase = internalResource ?? resource;
-    const inboundToken = extractInboundMcpToken(req);
-
-    const mcpServerOptions = await buildHostedMcpServerOptions(req, res, resource, internalBase, inboundToken);
+    const webRequest = buildMcpWebRequest(req, resource);
+    if (req.tokenInfo?.pdpp_token_kind === "client") {
+      const response = await runWithDispatchScope(
+        req.tokenInfo,
+        `${resource}/mcp`,
+        ctx.dispatchApp,
+        async (dispatchFetch) => {
+          const mcpServerOptions = await buildHostedMcpServerOptions(
+            req,
+            res,
+            resource,
+            internalBase,
+            dispatchFetch
+          );
+          if (!mcpServerOptions) {
+            return null;
+          }
+          return ctx.handleStreamableHttpRequest(webRequest, mcpServerOptions);
+        },
+        requestSignal
+      );
+      if (response && !requestSignal?.aborted && !res.raw?.destroyed) {
+        await sendWebResponse(res, response, { iconLink: hostedMcpIconLink(resource) });
+      }
+      return;
+    }
+    const mcpServerOptions = await buildHostedMcpServerOptions(req, res, resource, internalBase, globalThis.fetch);
     if (!mcpServerOptions) {
       return;
     }
-
-    const webRequest = buildMcpWebRequest(req, resource);
     const response = await ctx.handleStreamableHttpRequest(webRequest, mcpServerOptions);
     await sendWebResponse(res, response, { iconLink: hostedMcpIconLink(resource) });
   }

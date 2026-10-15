@@ -155,6 +155,11 @@ function makeContext({ internalResource }: { internalResource: string | null | u
         seen.singleGrantProviderUrl = providerUrl;
         return { __fakeRsClient: true };
       },
+      dispatchApp: {
+        async inject() {
+          return { headers: {}, payload: "{}", statusCode: 200 };
+        },
+      },
       explicitResource: PUBLIC_RESOURCE,
       // biome-ignore lint/suspicious/useAwait: Async callback preserves the dependency contract and rejection timing.
       async getGrantPackageAccess() {
@@ -238,8 +243,7 @@ test("F1 wiring fallback: with no internal base configured, child self-calls fal
 
 test("F1 wiring (single-grant): client-token self-calls use the internal base; advertised stays public", async () => {
   const seen = await driveHandler({ internalResource: INTERNAL_BASE, makeRequest: makeClientRequest });
-  // The single-bearer RsClient's fetch base is the INTERNAL base (the
-  // single-grant extension — parity with the package path).
+  // The single-grant RsClient uses the INTERNAL base for its provider URL.
   assert.equal(
     seen.singleGrantProviderUrl,
     INTERNAL_BASE,
