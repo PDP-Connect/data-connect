@@ -10,6 +10,7 @@ import {
 	bootstrapPairwiseAsIdentityContext,
 	buildPairwiseInstanceBindings,
 	initializePairwiseAsContextAfterListen,
+	type PairwiseAsIdentityContext,
 	type PairwiseAsGrantProjection,
 	PairwiseAsIdentityContextSlot,
 	type PairwiseAsSourceAuthority,
@@ -198,6 +199,121 @@ async function build(
 		internalSubjectId: INTERNAL_SUBJECT,
 		target,
 	});
+}
+
+async function buildWithContext(
+	target:
+		| {
+				kind: "core";
+				grant: PairwiseAsGrantProjection["grant"];
+				resolvedInstances: PairwiseAsGrantProjection["resolvedInstances"];
+		  }
+		| {
+				kind: "package";
+				children: PairwiseAsGrantProjection[];
+		  },
+	identityContext: PairwiseAsIdentityContext,
+	internalSubjectId = INTERNAL_SUBJECT,
+): Promise<Awaited<ReturnType<typeof buildPairwiseInstanceBindings>>> {
+	return buildPairwiseInstanceBindings({
+		clientId: "client-a",
+		context: identityContext,
+		internalSubjectId,
+		target,
+	});
+}
+
+async function assertPersistedAuthorityBindings(
+	identityContext: PairwiseAsIdentityContext,
+	label: string,
+): Promise<void> {
+	const internalInstanceId = `cin-${label}-versioned-authority`;
+	const legacyV1 = `legacy-${label}-source-v1`;
+	const legacyV2 = `legacy-${label}-source-v2`;
+	const handleV1 = await issueHandle("client-a", internalInstanceId, legacyV1);
+	const handleV2 = await issueHandle("client-a", internalInstanceId, legacyV2);
+	await recordPairwiseAsInstanceAuthority({
+		acceptedLegacySourceAliases: [legacyV1],
+		canonicalSourceId: SOURCE,
+		declarationVersion: "declaration-v1",
+		internalInstanceId,
+		subjectId: INTERNAL_SUBJECT,
+	});
+	await recordPairwiseAsInstanceAuthority({
+		acceptedLegacySourceAliases: [legacyV2],
+		canonicalSourceId: SOURCE,
+		declarationVersion: "declaration-v2",
+		internalInstanceId,
+		subjectId: INTERNAL_SUBJECT,
+	});
+
+	for (const [version, handle, alias] of [
+		["declaration-v1", handleV1, legacyV1],
+		["declaration-v2", handleV2, legacyV2],
+	] as const) {
+		const grant = projection([handle], [tuple(internalInstanceId)], {
+			declarationVersion: version,
+		});
+		const bindings = await buildWithContext(coreTarget(grant), identityContext);
+		assert.equal(bindings[0]?.instance_id, handle);
+		assert.equal(bindings[0]?.source_id, SOURCE);
+		assert.equal(bindings[0]?.rs_instance, internalInstanceId);
+		assert.notEqual(alias, SOURCE);
+	}
+
+	const unknownVersion = projection([handleV2], [tuple(internalInstanceId)], {
+		declarationVersion: "declaration-v3",
+	});
+	await assertGrantInvalid(
+		buildWithContext(coreTarget(unknownVersion), identityContext),
+	);
+
+	const missingAuthorityId = `cin-${label}-missing-authority`;
+	const missingAuthorityHandle = await issueHandle(
+		"client-a",
+		missingAuthorityId,
+	);
+	await assertGrantInvalid(
+		buildWithContext(
+			coreTarget(
+				projection(
+					[missingAuthorityHandle],
+					[tuple(missingAuthorityId)],
+				),
+			),
+			identityContext,
+		),
+	);
+
+	const wrongOwnerId = `cin-${label}-wrong-owner`;
+	const wrongOwnerSubject = `${INTERNAL_SUBJECT}-other`;
+	const wrongOwnerHandle = await getPairwiseHandle({
+		clientId: "client-a",
+		clientSector: identityContext.resolveClientSector("client-a"),
+		internalId: wrongOwnerId,
+		issuer: ISSUER,
+		kind: "instance",
+		sourceId: SOURCE,
+		subjectId: wrongOwnerSubject,
+	});
+	await recordPairwiseAsInstanceAuthority({
+		canonicalSourceId: SOURCE,
+		declarationVersion: "declaration-v1",
+		internalInstanceId: wrongOwnerId,
+		subjectId: INTERNAL_SUBJECT,
+	});
+	await assertGrantInvalid(
+		buildWithContext(
+			coreTarget(
+				projection(
+					[wrongOwnerHandle],
+					[tuple(wrongOwnerId)],
+				),
+			),
+			identityContext,
+			wrongOwnerSubject,
+		),
+	);
 }
 
 function coreTarget(
@@ -576,6 +692,19 @@ test("accepted declaration revisions retain separate authority without changing 
 			).n,
 			2,
 		);
+	} finally {
+		closeDb();
+	}
+});
+
+test("persisted declaration authority selects the grant-pinned binding version", async () => {
+	await setup();
+	try {
+		const identityContext = await bootstrapPairwiseAsIdentityContext({
+			issuer: ISSUER,
+			clients: [{ clientId: "client-a", trustedExistingSector: SECTOR }],
+		});
+		await assertPersistedAuthorityBindings(identityContext, "sqlite");
 	} finally {
 		closeDb();
 	}
@@ -1153,6 +1282,11 @@ if (POSTGRES_URL) {
 					)?.declarationVersion,
 					"declaration-v2",
 				);
+				const identityContext = await bootstrapPairwiseAsIdentityContext({
+					issuer: ISSUER,
+					clients: [{ clientId: "client-a", trustedExistingSector: SECTOR }],
+				});
+				await assertPersistedAuthorityBindings(identityContext, "postgres");
 
 				const coreHandle = await issueHandle("client-a", "cin-pg-core");
 				const core = await build(
