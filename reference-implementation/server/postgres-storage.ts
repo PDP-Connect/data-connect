@@ -2107,11 +2107,36 @@ async function bootstrapPostgresSchemaOnce({
         client_sector TEXT,
         scheme TEXT NOT NULL DEFAULT 'legacy' CHECK (scheme IN ('legacy','v1')),
         handle TEXT NOT NULL UNIQUE,
-        PRIMARY KEY (issuer,subject_id,client_id,kind,source_id,internal_id)
+        PRIMARY KEY (issuer,subject_id,client_id,kind,source_id,internal_id,scheme)
       );
       ALTER TABLE pairwise_identity_handles ADD COLUMN IF NOT EXISTS client_sector TEXT;
       ALTER TABLE pairwise_identity_handles
         ADD COLUMN IF NOT EXISTS scheme TEXT NOT NULL DEFAULT 'legacy' CHECK (scheme IN ('legacy','v1'));
+      -- A legacy row and its v1 successor share the original six-column tuple,
+      -- so the key must include scheme. Rows and handles are untouched; this
+      -- batch's transaction and the bootstrap lock make the swap atomic.
+      DO $$
+      DECLARE
+        key_name TEXT;
+        key_columns TEXT;
+      BEGIN
+        SELECT c.conname, string_agg(a.attname, ',' ORDER BY k.position)
+          INTO key_name, key_columns
+          FROM pg_constraint c
+          CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS k(attnum, position)
+          JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum
+         WHERE c.conrelid = 'pairwise_identity_handles'::regclass AND c.contype = 'p'
+         GROUP BY c.conname;
+        IF key_columns = 'issuer,subject_id,client_id,kind,source_id,internal_id' THEN
+          EXECUTE format('ALTER TABLE pairwise_identity_handles DROP CONSTRAINT %I', key_name);
+          ALTER TABLE pairwise_identity_handles
+            ADD CONSTRAINT pairwise_identity_handles_pkey
+            PRIMARY KEY (issuer,subject_id,client_id,kind,source_id,internal_id,scheme);
+        ELSIF key_columns IS DISTINCT FROM 'issuer,subject_id,client_id,kind,source_id,internal_id,scheme' THEN
+          RAISE EXCEPTION 'Unsupported pairwise_identity_handles primary key; refusing an unsafe migration.';
+        END IF;
+      END
+      $$;
       CREATE UNIQUE INDEX IF NOT EXISTS idx_pg_pairwise_identity_handles_v1_scope
         ON pairwise_identity_handles(issuer, client_sector, kind, subject_id, internal_id)
         WHERE scheme = 'v1';

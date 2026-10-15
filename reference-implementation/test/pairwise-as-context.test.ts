@@ -452,7 +452,7 @@ test("mis-sourced v1 grant fails from retained authority without writes", async 
 	}
 });
 
-test("accepted legacy source alias resolves through declaration authority", async () => {
+test("legacy source aliases do not adopt a raw handle into a binding", async () => {
 	await setup();
 	try {
 		const handle = await issueLegacyHandle(
@@ -465,14 +465,60 @@ test("accepted legacy source alias resolves through declaration authority", asyn
 		const bindings = await build(
 			coreTarget(projection([handle], [tuple("cin-legacy-source")])),
 		);
-		assert.equal(bindings[0]?.source_id, SOURCE);
+		assert.deepEqual(bindings, []);
 		assert.deepEqual(sqliteIdentitySnapshot(), before);
 	} finally {
 		closeDb();
 	}
 });
 
-test("unknown legacy source alias fails closed without writes", async () => {
+test("an accepted source alias on a v1 mapping resolves to its canonical source", async () => {
+	await setup();
+	try {
+		const internalId = "cin-v1-source-alias";
+		const handle = await issueHandle("client-a", internalId);
+		getDb()
+			.prepare(
+				"UPDATE pairwise_identity_handles SET source_id=? WHERE issuer=? AND handle=? AND scheme='v1'",
+			)
+			.run("source-local-alias", ISSUER, handle);
+		sourceAuthorities.set(internalId, {
+			acceptedLegacySourceAliases: ["source-local-alias"],
+			canonicalSourceId: SOURCE,
+			declarationVersion: "declaration-v7",
+		});
+		const before = sqliteIdentitySnapshot();
+		const bindings = await build(
+			coreTarget(projection([handle], [tuple(internalId)])),
+		);
+		assert.equal(bindings[0]?.source_id, SOURCE);
+		assert.deepEqual(sqliteIdentitySnapshot(), before);
+
+		const unknownInternalId = "cin-v1-unknown-source-alias";
+		const unknownHandle = await issueHandle("client-a", unknownInternalId);
+		getDb()
+			.prepare(
+				"UPDATE pairwise_identity_handles SET source_id=? WHERE issuer=? AND handle=? AND scheme='v1'",
+			)
+			.run("unrecognized-source-alias", ISSUER, unknownHandle);
+		sourceAuthorities.set(unknownInternalId, {
+			acceptedLegacySourceAliases: ["another-source-alias"],
+			canonicalSourceId: SOURCE,
+			declarationVersion: "declaration-v7",
+		});
+		const beforeUnknownAlias = sqliteIdentitySnapshot();
+		await assertGrantInvalid(
+			build(
+				coreTarget(projection([unknownHandle], [tuple(unknownInternalId)])),
+			),
+		);
+		assert.deepEqual(sqliteIdentitySnapshot(), beforeUnknownAlias);
+	} finally {
+		closeDb();
+	}
+});
+
+test("an unknown legacy source alias also leaves a missing binding", async () => {
 	await setup();
 	try {
 		const handle = await issueLegacyHandle(
@@ -482,8 +528,11 @@ test("unknown legacy source alias fails closed without writes", async () => {
 			["source-local-alias"],
 		);
 		const before = sqliteIdentitySnapshot();
-		await assertGrantInvalid(
-			build(coreTarget(projection([handle], [tuple("cin-unknown-source")]))),
+		assert.deepEqual(
+			await build(
+				coreTarget(projection([handle], [tuple("cin-unknown-source")]))
+			),
+			[],
 		);
 		assert.deepEqual(sqliteIdentitySnapshot(), before);
 	} finally {
@@ -795,31 +844,39 @@ if (POSTGRES_URL) {
 				);
 				assert.deepEqual(await postgresIdentitySnapshot(), beforeMisSource);
 
-				const knownLegacyHandle = "inst_pg_legacy_source";
-				await insertPostgresLegacyHandle(
-					"cin-pg-legacy",
-					"legacy-pg-source-alias",
-					knownLegacyHandle,
+				const knownAliasInternalId = "cin-pg-v1-source-alias";
+				const knownAliasHandle = await issueHandle(
+					"client-a",
+					knownAliasInternalId,
 				);
-				sourceAuthorities.set("cin-pg-legacy", {
+				await postgresQuery(
+					"UPDATE pairwise_identity_handles SET source_id=$1 WHERE issuer=$2 AND handle=$3 AND scheme='v1'",
+					["legacy-pg-source-alias", ISSUER, knownAliasHandle],
+				);
+				sourceAuthorities.set(knownAliasInternalId, {
 					acceptedLegacySourceAliases: ["legacy-pg-source-alias"],
 					canonicalSourceId: SOURCE,
 					declarationVersion: "declaration-v8",
 				});
 				const beforeKnownAlias = await postgresIdentitySnapshot();
 				const knownAlias = await build(
-					coreTarget(projection([knownLegacyHandle], [tuple("cin-pg-legacy")])),
+					coreTarget(
+						projection([knownAliasHandle], [tuple(knownAliasInternalId)]),
+					),
 				);
 				assert.equal(knownAlias[0]?.source_id, SOURCE);
 				assert.deepEqual(await postgresIdentitySnapshot(), beforeKnownAlias);
 
-				const unknownLegacyHandle = "inst_pg_unknown_source";
-				await insertPostgresLegacyHandle(
-					"cin-pg-unknown-legacy",
-					"unknown-pg-source-alias",
-					unknownLegacyHandle,
+				const unknownAliasInternalId = "cin-pg-v1-unknown-source-alias";
+				const unknownAliasHandle = await issueHandle(
+					"client-a",
+					unknownAliasInternalId,
 				);
-				sourceAuthorities.set("cin-pg-unknown-legacy", {
+				await postgresQuery(
+					"UPDATE pairwise_identity_handles SET source_id=$1 WHERE issuer=$2 AND handle=$3 AND scheme='v1'",
+					["unknown-pg-source-alias", ISSUER, unknownAliasHandle],
+				);
+				sourceAuthorities.set(unknownAliasInternalId, {
 					acceptedLegacySourceAliases: ["another-pg-alias"],
 					canonicalSourceId: SOURCE,
 					declarationVersion: "declaration-v8",
@@ -829,8 +886,8 @@ if (POSTGRES_URL) {
 					build(
 						coreTarget(
 							projection(
-								[unknownLegacyHandle],
-								[tuple("cin-pg-unknown-legacy")],
+								[unknownAliasHandle],
+								[tuple(unknownAliasInternalId)],
 							),
 						),
 					),
@@ -853,24 +910,4 @@ async function postgresIdentitySnapshot() {
 		);
 	}
 	return digests;
-}
-
-async function insertPostgresLegacyHandle(
-	internalId: string,
-	retainedSourceAlias: string,
-	handle: string,
-): Promise<void> {
-	await postgresQuery(
-		`INSERT INTO pairwise_identity_handles
-		 (issuer,subject_id,client_id,kind,source_id,internal_id,handle)
-		 VALUES ($1,$2,$3,'instance',$4,$5,$6)`,
-		[
-			ISSUER,
-			INTERNAL_SUBJECT,
-			"client-a",
-			retainedSourceAlias,
-			internalId,
-			handle,
-		],
-	);
 }
