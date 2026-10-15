@@ -771,6 +771,11 @@ interface ServerOpts {
   hybridRetrievalCapability?: unknown;
   hybridRetrievalSupported?: boolean;
   ignoreAmbientPublicUrls?: boolean;
+  /**
+   * Record-detail reads write `query.received` in the same statement as their
+   * outcome event. Defaults to `PDPP_AUDIT_COALESCE_READ_EVENTS=1`.
+   */
+  coalesceReadAuditEvents?: boolean;
   introspectionCallerCredentials?: IntrospectionCallerCredentials;
   introspectionFetch?: typeof fetch;
   isNekoProxyTargetApproved?:
@@ -7204,8 +7209,10 @@ function buildRsApp(opts: ServerOpts = {}) {
     countSearchIndexDirtyScopes: countDirtySearchIndexScopes,
     createBlobStore,
     decorateRecordBlobRefs,
+    coalesceReadAuditEvents: opts.coalesceReadAuditEvents ?? process.env.PDPP_AUDIT_COALESCE_READ_EVENTS === "1",
     emitQueryReceived,
     emitSpineEvent,
+    emitSpineEvents,
     ensureRequestId,
     finalizeCanonicalEnvelope,
     getConnectorFreshnessEvidence,
