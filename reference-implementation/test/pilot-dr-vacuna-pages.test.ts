@@ -2,11 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // DR pilot pages and lifecycle answer, without a database:
-// language resolution (i18n.ts) and one language per rendered page (html.ts).
+// language resolution (i18n.ts), one language per rendered page (html.ts),
+// and the held-data answer for a grant row (grant-lifecycle.ts).
 
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { assessGrant } from "../server/pilot-dr-vacuna/grant-lifecycle.ts";
 import { ageLabel, authorizationsPage, reviewPage } from "../server/pilot-dr-vacuna/html.ts";
 import { langHref, resolveLang } from "../server/pilot-dr-vacuna/i18n.ts";
 import type { RepresentativeGrantRow } from "../server/pilot-dr-vacuna/store.ts";
@@ -103,4 +105,36 @@ test("ages read naturally", () => {
   assert.equal(ageLabel("2026-09-20", "es", now), "recién nacido/a");
   assert.equal(ageLabel("2026-02-10", "es", now), "8 meses");
   assert.equal(ageLabel("2022-11-02", "en", now), "3 years");
+});
+
+test("lifecycle answer: active, revoked keep, revoked delete, expired, other client", () => {
+  const now = Date.parse("2026-10-14T12:00:00Z");
+  assert.deepEqual(assessGrant("grt_1", row(), "cli_a", now), {
+    assessed_at: "2026-10-14T12:00:00.000Z",
+    grant_id: "grt_1",
+    held_data: "permitted",
+    read_state: "active",
+  });
+  const keep = assessGrant(
+    "grt_1",
+    row({ disposition: "keep", grant_status: "revoked", revoked_at: "2026-10-14T10:00:00.000Z" }),
+    "cli_a",
+    now
+  );
+  assert.ok("read_state" in keep);
+  assert.equal(keep.read_state, "revoked");
+  assert.equal(keep.held_data, "permitted");
+  const erase = assessGrant(
+    "grt_1",
+    row({ disposition: "delete", grant_status: "revoked", revoked_at: "2026-10-14T10:00:00.000Z" }),
+    "cli_a",
+    now
+  );
+  assert.ok("erasure" in erase && erase.erasure);
+  assert.equal(erase.held_data, "erase");
+  assert.equal(erase.erasure.stop_use_by, "2026-10-16T10:00:00.000Z");
+  const expired = assessGrant("grt_1", row({ expires_at: "2026-10-01T00:00:00.000Z" }), "cli_a", now);
+  assert.equal("read_state" in expired && expired.read_state, "expired");
+  assert.deepEqual(assessGrant("grt_1", row(), "cli_other", now), { error: "invalid_grant", grant_id: "grt_1" });
+  assert.deepEqual(assessGrant("grt_9", null, "cli_a", now), { error: "invalid_grant", grant_id: "grt_9" });
 });

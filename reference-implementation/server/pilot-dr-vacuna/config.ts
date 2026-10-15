@@ -62,6 +62,7 @@ export const PILOT_PATHS = {
   authorizations: "/pilot/vacuna/autorizaciones",
   consent: "/pilot/vacuna/consent",
   consentReview: "/pilot/vacuna/consent/review",
+  grantLifecycle: "/pilot/vacuna/grant-lifecycle",
   landing: "/pilot/vacuna",
   login: "/pilot/cuenta-unica/login",
   logout: "/pilot/cuenta-unica/logout",

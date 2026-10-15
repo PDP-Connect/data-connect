@@ -16,6 +16,7 @@
 //   GET  /pilot/vacuna/resultado              approved / declined / refused (browser)
 //   GET  /pilot/vacuna/autorizaciones         "Mis autorizaciones"
 //   POST /pilot/vacuna/autorizaciones/:grantId/revoke  keep-or-delete withdrawal
+//   POST /pilot/vacuna/grant-lifecycle        held-data answer for the client (grant-lifecycle.ts)
 //
 // Every route answers JSON when the request sends `Accept: application/json`
 // or a JSON body; that is the headless path the load harness uses. Browser
@@ -26,6 +27,9 @@
 // so a client that starts with PAR or /oauth/authorize lands on the parent
 // surface without knowing about it.
 
+import { getRegisteredClient } from "../auth.ts";
+import { authenticateClientRequest, createJtiReplayCache } from "../client-authentication.ts";
+import { resolvePublicUrl } from "../metadata.ts";
 import { isPostgresStorageBackend } from "../postgres-storage.ts";
 import { PILOT_PATHS, walkthroughStartUrl } from "./config.ts";
 import {
@@ -35,6 +39,7 @@ import {
   type ParentSession,
   sessionCookie,
 } from "./cuenta-unica-stub.ts";
+import { answerLifecycleQuery } from "./grant-lifecycle.ts";
 import {
   authorizationsPage,
   errorPage,
@@ -57,6 +62,7 @@ interface Req {
   originalUrl?: string;
   params?: Record<string, string>;
   path?: string;
+  protocol?: string;
   query: Record<string, unknown>;
   url?: string;
 }
@@ -108,10 +114,21 @@ function consentUrl(requestUri: string): string {
   return `${PILOT_PATHS.consent}?request_uri=${encodeURIComponent(requestUri)}`;
 }
 
+function headerGetter(req: Req): (name: string) => string | undefined {
+  return (name) => {
+    const value = req.headers[name.toLowerCase()];
+    if (Array.isArray(value)) {
+      return value.length ? String(value[0]) : undefined;
+    }
+    return value === undefined || value === null ? undefined : String(value);
+  };
+}
+
 export function mountDrVacunaPilot(app: AppLike, options: DrVacunaPilotOptions = {}) {
   const registry = options.registry ?? createPostgresCivilRegistry();
   const cuentaUnica: CuentaUnicaStub = createCuentaUnicaStub(registry);
   const consent = createRepresentativeConsent(registry);
+  const lifecycleJti = createJtiReplayCache();
   let readyPromise: Promise<void> | null = null;
 
   function ready(): Promise<void> {
@@ -544,6 +561,37 @@ export function mountDrVacunaPilot(app: AppLike, options: DrVacunaPilotOptions =
       res.redirect(SEE_OTHER, `${PILOT_PATHS.authorizations}?revoked=${encodeURIComponent(String(disposition))}`);
     } catch (err) {
       fail(req, res, err, session);
+    }
+  });
+
+  // Held-data lifecycle for the client holding the data (confidential clients only).
+  app.post(PILOT_PATHS.grantLifecycle, async (req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    try {
+      await ready();
+      const get = headerGetter(req);
+      const issuer = resolvePublicUrl(
+        { get, protocol: req.protocol ?? "http" },
+        process.env.AS_ISSUER || process.env.AS_PUBLIC_URL || null
+      );
+      const auth = await authenticateClientRequest({
+        authorizationHeader: get("authorization"),
+        body: req.body,
+        expectedAudiences: [issuer],
+        jtiCache: lifecycleJti,
+        lookupClient: (clientId) => getRegisteredClient(clientId),
+      });
+      if (auth.kind !== "confidential") {
+        res.status(401).json({
+          error: "invalid_client",
+          error_description: auth.kind === "failure" ? auth.description : "confidential client authentication required",
+        });
+        return;
+      }
+      const answer = await answerLifecycleQuery(auth.clientId, req.body ?? {});
+      res.status(answer.status).json(answer.body);
+    } catch (err) {
+      fail(req, res, err);
     }
   });
 
