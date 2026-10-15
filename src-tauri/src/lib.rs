@@ -163,7 +163,7 @@ pub fn run() {
     #[cfg(target_os = "linux")]
     let builder = builder.plugin(wayland_titlebar::init());
 
-    #[cfg(debug_assertions)]
+    #[cfg(all(debug_assertions, not(windows)))]
     let builder = builder.plugin(tauri_plugin_mcp_bridge::init());
 
     builder
