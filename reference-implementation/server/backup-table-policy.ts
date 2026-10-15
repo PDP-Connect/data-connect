@@ -217,6 +217,14 @@ export const BACKUP_TABLE_INVENTORY: Record<string, BackupTableInventoryEntry> =
     classification: "backup_required",
     reason: "Pairwise identifiers must remain stable across restarts and recovery.",
   },
+  pairwise_as_instance_authority: {
+    classification: "backup_required",
+    reason: "Retained source declaration authority binds issued instance handles to owner-connected sources.",
+  },
+  pairwise_as_instance_authority_versions: {
+    classification: "backup_required",
+    reason: "Versioned source authority lets existing grants retain their accepted declaration revision.",
+  },
   pairwise_identity_root_keys: {
     classification: "backup_required",
     reason: "Pairwise identifiers cannot be re-derived after loss of the issuer identity root key.",

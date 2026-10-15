@@ -930,6 +930,22 @@ CREATE TABLE IF NOT EXISTS pairwise_trusted_client_sectors (
   client_sector TEXT NOT NULL,
   PRIMARY KEY (issuer, client_id)
 );
+CREATE TABLE IF NOT EXISTS pairwise_as_instance_authority (
+  subject_id TEXT NOT NULL,
+  internal_instance_id TEXT NOT NULL,
+  canonical_source_id TEXT NOT NULL,
+  declaration_version TEXT NOT NULL,
+  accepted_legacy_source_aliases_json TEXT NOT NULL DEFAULT '[]',
+  PRIMARY KEY (subject_id, internal_instance_id)
+);
+CREATE TABLE IF NOT EXISTS pairwise_as_instance_authority_versions (
+  subject_id TEXT NOT NULL,
+  internal_instance_id TEXT NOT NULL,
+  canonical_source_id TEXT NOT NULL,
+  declaration_version TEXT NOT NULL,
+  accepted_legacy_source_aliases_json TEXT NOT NULL DEFAULT '[]',
+  PRIMARY KEY (subject_id, internal_instance_id, declaration_version)
+);
 CREATE TABLE IF NOT EXISTS pairwise_identity_root_keys (
   issuer TEXT PRIMARY KEY,
   key_version INTEGER NOT NULL CHECK (key_version = 1),

@@ -3,12 +3,19 @@
 
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { createServer } from "node:net";
 import test from "node:test";
 import { closeDb, getDb, initDb } from "../server/db.ts";
 import {
+	bootstrapPairwiseAsIdentityContext,
 	buildPairwiseInstanceBindings,
+	initializePairwiseAsContextAfterListen,
 	type PairwiseAsGrantProjection,
+	PairwiseAsIdentityContextSlot,
 	type PairwiseAsSourceAuthority,
+	readPairwiseAsInstanceAuthority,
+	recordPairwiseAsInstanceAuthority,
+	verifyOidcSectorIdentifier,
 } from "../server/pairwise-as-context.ts";
 import {
 	clientVisibleInstanceId,
@@ -17,11 +24,13 @@ import {
 	initializePairwiseIdentityRootKey,
 	lookupPairwiseInstanceMapping,
 	PairwiseIdentityContextError,
+	PairwiseIdentityDeploymentError,
 	recordTrustedClientSectorMembership,
 	validatePairwiseInstanceBindings,
 } from "../server/pairwise-identity.ts";
 import {
 	closePostgresStorage,
+	getPostgresPool,
 	initPostgresStorage,
 	postgresQuery,
 } from "../server/postgres-storage.ts";
@@ -134,6 +143,7 @@ function projection(
 	}[],
 	options: {
 		clientId?: string;
+		declarationVersion?: string;
 		grantId?: string;
 		sourceId?: string;
 		streams?: string[];
@@ -146,11 +156,16 @@ function projection(
 			grant_id: options.grantId ?? "grt_core",
 			client: { client_id: clientId },
 			source: { id: options.sourceId ?? SOURCE },
+			source_declaration: {
+				version: options.declarationVersion ?? "declaration-v1",
+			},
 			streams: streams.map((name) => ({
 				instance_ids: [...instanceIds],
 				name,
 			})),
 			subject: { id: "sub_pairwise-4" },
+		} as PairwiseAsGrantProjection["grant"] & {
+			source_declaration: { version: string };
 		},
 		resolvedInstances,
 	};
@@ -216,6 +231,7 @@ const IDENTITY_TABLES = [
 	"pairwise_identity_root_keys",
 	"pairwise_identity_deployment",
 	"pairwise_identity_issuer_migrations",
+	"pairwise_as_instance_authority",
 ] as const;
 
 function identityRowsDigest(rows: unknown[]): string {
@@ -229,6 +245,84 @@ function sqliteIdentitySnapshot() {
 		identityRowsDigest(getDb().prepare(`SELECT * FROM ${table}`).all()),
 	);
 }
+
+test("AS context slot rejects identity use before initialization and registers clients afterward", async () => {
+	initDb(":memory:");
+	try {
+		const slot = new PairwiseAsIdentityContextSlot();
+		assert.throws(() => slot.issuer, PairwiseIdentityContextError);
+		assert.throws(
+			() => slot.resolveClientSector("new-client"),
+			PairwiseIdentityContextError,
+		);
+		assert.throws(
+			() =>
+				slot.resolveCanonicalSourceForInstance("cin-slot", INTERNAL_SUBJECT),
+			PairwiseIdentityContextError,
+		);
+		await assert.rejects(
+			slot.registerOAuthClient("new-client"),
+			PairwiseIdentityContextError,
+		);
+		await slot.initializeFromStorage(ISSUER);
+		assert.equal(slot.issuer, ISSUER);
+		assert.equal(slot.resolveClientSector("@owner"), "owner-account:v1");
+		assert.throws(
+			() => slot.resolveClientSector("new-client"),
+			PairwiseIdentityContextError,
+		);
+		await slot.registerOAuthClient("new-client");
+		assert.equal(
+			slot.resolveClientSector("new-client"),
+			"oauth-client:new-client",
+		);
+		await recordPairwiseAsInstanceAuthority({
+			canonicalSourceId: SOURCE,
+			declarationVersion: "slot-v1",
+			internalInstanceId: "cin-slot",
+			subjectId: INTERNAL_SUBJECT,
+		});
+		assert.equal(
+			(
+				await slot.resolveCanonicalSourceForInstance(
+					"cin-slot",
+					INTERNAL_SUBJECT,
+					"slot-v1",
+				)
+			)?.canonicalSourceId,
+			SOURCE,
+		);
+	} finally {
+		closeDb();
+	}
+});
+
+test("AS listener closes when pairwise identity bootstrap fails after listen", async () => {
+	const server = createServer();
+	await new Promise<void>((resolve, reject) => {
+		server.once("error", reject);
+		server.listen(0, "127.0.0.1", resolve);
+	});
+	assert.equal(server.listening, true);
+	const bootstrapError = new Error("PairwiseIdentityDeploymentError fixture");
+	const context = {
+		initializeFromStorage: async () => {
+			throw bootstrapError;
+		},
+	} as unknown as Parameters<typeof initializePairwiseAsContextAfterListen>[0];
+	await assert.rejects(
+		initializePairwiseAsContextAfterListen(
+			context,
+			ISSUER,
+			() =>
+				new Promise<void>((resolve, reject) => {
+					server.close((error) => (error ? reject(error) : resolve()));
+				}),
+		),
+		(error) => error === bootstrapError,
+	);
+	assert.equal(server.listening, false);
+});
 
 test("bindings reuse a sector handle across clients and separate other sectors", async () => {
 	await setup();
@@ -244,6 +338,244 @@ test("bindings reuse a sector handle across clients and separate other sectors",
 		);
 		assert.equal(bindings[0]?.instance_id, clientAHandle);
 		assert.equal(bindings[0]?.rs_instance, "cin-17");
+	} finally {
+		closeDb();
+	}
+});
+
+test("OAuth clients with redirect URIs at the same host use separate tagged sectors", async () => {
+	initDb(":memory:");
+	try {
+		const identityContext = await bootstrapPairwiseAsIdentityContext({
+			issuer: ISSUER,
+			clients: [{ clientId: "oauth-a" }, { clientId: "oauth-b" }],
+		});
+		assert.notEqual(
+			identityContext.resolveClientSector("oauth-a"),
+			identityContext.resolveClientSector("oauth-b"),
+		);
+		assert.match(
+			identityContext.resolveClientSector("oauth-a"),
+			/^oauth-client:/,
+		);
+		await assert.rejects(
+			Promise.resolve().then(() =>
+				identityContext.resolveClientSector("unregistered"),
+			),
+			PairwiseIdentityContextError,
+		);
+	} finally {
+		closeDb();
+	}
+});
+
+test("verified OIDC sector documents share by host and list every registered redirect URI", async () => {
+	initDb(":memory:");
+	try {
+		const redirectUris = [
+			"https://client.example/callback/a",
+			"https://client.example/callback/b",
+		];
+		const host = await verifyOidcSectorIdentifier({
+			redirectUris,
+			sectorIdentifierUri: "https://SECTOR.example:443/one/applications.json",
+			fetchDocument: async () => redirectUris,
+		});
+		assert.equal(host, "sector.example");
+		const identityContext = await bootstrapPairwiseAsIdentityContext({
+			issuer: ISSUER,
+			clients: [
+				{ clientId: "oidc-a", verifiedOidcSectorHost: host },
+				{ clientId: "oidc-b", verifiedOidcSectorHost: host },
+			],
+		});
+		assert.equal(
+			identityContext.resolveClientSector("oidc-a"),
+			identityContext.resolveClientSector("oidc-b"),
+		);
+		const subjectA = await getPairwiseHandle({
+			clientId: "oidc-a",
+			clientSector: identityContext.resolveClientSector("oidc-a"),
+			internalId: INTERNAL_SUBJECT,
+			issuer: ISSUER,
+			kind: "subject",
+			subjectId: INTERNAL_SUBJECT,
+		});
+		const subjectB = await getPairwiseHandle({
+			clientId: "oidc-b",
+			clientSector: identityContext.resolveClientSector("oidc-b"),
+			internalId: INTERNAL_SUBJECT,
+			issuer: ISSUER,
+			kind: "subject",
+			subjectId: INTERNAL_SUBJECT,
+		});
+		assert.equal(subjectA, subjectB);
+	} finally {
+		closeDb();
+	}
+});
+
+test("HTTP or incomplete OIDC sector claims cannot cause clients to share", async () => {
+	const redirects = ["https://client.example/callback"];
+	await assert.rejects(
+		verifyOidcSectorIdentifier({
+			redirectUris: redirects,
+			sectorIdentifierUri: "http://sector.example/apps.json",
+			fetchDocument: async () => redirects,
+		}),
+		PairwiseIdentityContextError,
+	);
+	await assert.rejects(
+		verifyOidcSectorIdentifier({
+			redirectUris: redirects,
+			sectorIdentifierUri: "https://sector.example/apps.json",
+			fetchDocument: async () => ["https://other.example/callback"],
+		}),
+		PairwiseIdentityContextError,
+	);
+	initDb(":memory:");
+	try {
+		const identityContext = await bootstrapPairwiseAsIdentityContext({
+			issuer: ISSUER,
+			clients: [{ clientId: "oauth-a" }, { clientId: "oauth-b" }],
+		});
+		assert.notEqual(
+			identityContext.resolveClientSector("oauth-a"),
+			identityContext.resolveClientSector("oauth-b"),
+		);
+	} finally {
+		closeDb();
+	}
+});
+
+test("changed sector verification cannot regroup a client after identity issuance", async () => {
+	initDb(":memory:");
+	try {
+		const first = await bootstrapPairwiseAsIdentityContext({
+			issuer: ISSUER,
+			clients: [
+				{ clientId: "oidc-a", verifiedOidcSectorHost: "sector.example" },
+			],
+		});
+		const subjectBefore = await getPairwiseHandle({
+			clientId: "oidc-a",
+			clientSector: first.resolveClientSector("oidc-a"),
+			internalId: INTERNAL_SUBJECT,
+			issuer: ISSUER,
+			kind: "subject",
+			subjectId: INTERNAL_SUBJECT,
+		});
+		await assert.rejects(
+			bootstrapPairwiseAsIdentityContext({
+				issuer: ISSUER,
+				clients: [{ clientId: "oidc-a" }],
+			}),
+			PairwiseIdentityDeploymentError,
+		);
+		assert.equal(
+			await getPairwiseHandle({
+				clientId: "oidc-a",
+				clientSector: first.resolveClientSector("oidc-a"),
+				internalId: INTERNAL_SUBJECT,
+				issuer: ISSUER,
+				kind: "subject",
+				subjectId: INTERNAL_SUBJECT,
+			}),
+			subjectBefore,
+		);
+	} finally {
+		closeDb();
+	}
+});
+
+test("issued binding authority is retained and rejects a wrong declaration version", async () => {
+	await setup();
+	try {
+		const handle = await issueHandle("client-a", "cin-authority");
+		await recordPairwiseAsInstanceAuthority({
+			canonicalSourceId: SOURCE,
+			declarationVersion: "declaration-v1",
+			internalInstanceId: "cin-authority",
+			subjectId: INTERNAL_SUBJECT,
+		});
+		const target = coreTarget(projection([handle], [tuple("cin-authority")]));
+		const bindings = await build(target);
+		assert.equal(bindings[0]?.rs_instance, "cin-authority");
+		const wrongVersion = projection([handle], [tuple("cin-authority")]);
+		(
+			wrongVersion.grant as PairwiseAsGrantProjection["grant"] & {
+				source_declaration: { version: string };
+			}
+		).source_declaration = { version: "declaration-v2" };
+		await assertGrantInvalid(build(coreTarget(wrongVersion)));
+	} finally {
+		closeDb();
+	}
+});
+
+test("accepted declaration revisions retain separate authority without changing canonical source", async () => {
+	await setup();
+	try {
+		await recordPairwiseAsInstanceAuthority({
+			canonicalSourceId: SOURCE,
+			declarationVersion: "declaration-v1",
+			internalInstanceId: "cin-versioned-authority",
+			subjectId: INTERNAL_SUBJECT,
+		});
+		await recordPairwiseAsInstanceAuthority({
+			canonicalSourceId: SOURCE,
+			declarationVersion: "declaration-v2",
+			internalInstanceId: "cin-versioned-authority",
+			subjectId: INTERNAL_SUBJECT,
+		});
+
+		assert.equal(
+			(
+				await readPairwiseAsInstanceAuthority(
+					"cin-versioned-authority",
+					INTERNAL_SUBJECT,
+					"declaration-v1",
+				)
+			)?.declarationVersion,
+			"declaration-v1",
+		);
+		assert.equal(
+			(
+				await readPairwiseAsInstanceAuthority(
+					"cin-versioned-authority",
+					INTERNAL_SUBJECT,
+					"declaration-v2",
+				)
+			)?.declarationVersion,
+			"declaration-v2",
+		);
+		assert.equal(
+			await readPairwiseAsInstanceAuthority(
+				"cin-versioned-authority",
+				INTERNAL_SUBJECT,
+				"declaration-v3",
+			),
+			null,
+		);
+		await assert.rejects(
+			recordPairwiseAsInstanceAuthority({
+				canonicalSourceId: SOURCE_A,
+				declarationVersion: "declaration-v3",
+				internalInstanceId: "cin-versioned-authority",
+				subjectId: INTERNAL_SUBJECT,
+			}),
+			/Retained instance source authority conflicts/,
+		);
+		assert.equal(
+			(
+				getDb()
+					.prepare(
+						"SELECT count(*) AS n FROM pairwise_as_instance_authority_versions",
+					)
+					.get() as { n: number }
+			).n,
+			2,
+		);
 	} finally {
 		closeDb();
 	}
@@ -463,7 +795,11 @@ test("legacy source aliases do not adopt a raw handle into a binding", async () 
 		);
 		const before = sqliteIdentitySnapshot();
 		const bindings = await build(
-			coreTarget(projection([handle], [tuple("cin-legacy-source")])),
+			coreTarget(
+				projection([handle], [tuple("cin-legacy-source")], {
+					declarationVersion: "declaration-v7",
+				}),
+			),
 		);
 		assert.deepEqual(bindings, []);
 		assert.deepEqual(sqliteIdentitySnapshot(), before);
@@ -785,6 +1121,38 @@ if (POSTGRES_URL) {
 					issuer: ISSUER,
 				});
 				await completePairwiseIdentityLegacyBackfill(ISSUER);
+				await recordPairwiseAsInstanceAuthority({
+					canonicalSourceId: SOURCE,
+					declarationVersion: "declaration-v1",
+					internalInstanceId: "cin-pg-versioned-authority",
+					subjectId: INTERNAL_SUBJECT,
+				});
+				await recordPairwiseAsInstanceAuthority({
+					canonicalSourceId: SOURCE,
+					declarationVersion: "declaration-v2",
+					internalInstanceId: "cin-pg-versioned-authority",
+					subjectId: INTERNAL_SUBJECT,
+				});
+				assert.equal(
+					(
+						await readPairwiseAsInstanceAuthority(
+							"cin-pg-versioned-authority",
+							INTERNAL_SUBJECT,
+							"declaration-v1",
+						)
+					)?.declarationVersion,
+					"declaration-v1",
+				);
+				assert.equal(
+					(
+						await readPairwiseAsInstanceAuthority(
+							"cin-pg-versioned-authority",
+							INTERNAL_SUBJECT,
+							"declaration-v2",
+						)
+					)?.declarationVersion,
+					"declaration-v2",
+				);
 
 				const coreHandle = await issueHandle("client-a", "cin-pg-core");
 				const core = await build(
@@ -856,7 +1224,7 @@ if (POSTGRES_URL) {
 				sourceAuthorities.set(knownAliasInternalId, {
 					acceptedLegacySourceAliases: ["legacy-pg-source-alias"],
 					canonicalSourceId: SOURCE,
-					declarationVersion: "declaration-v8",
+					declarationVersion: "declaration-v1",
 				});
 				const beforeKnownAlias = await postgresIdentitySnapshot();
 				const knownAlias = await build(
@@ -879,7 +1247,7 @@ if (POSTGRES_URL) {
 				sourceAuthorities.set(unknownAliasInternalId, {
 					acceptedLegacySourceAliases: ["another-pg-alias"],
 					canonicalSourceId: SOURCE,
-					declarationVersion: "declaration-v8",
+					declarationVersion: "declaration-v1",
 				});
 				const beforeUnknownAlias = await postgresIdentitySnapshot();
 				await assertGrantInvalid(
@@ -893,6 +1261,138 @@ if (POSTGRES_URL) {
 					),
 				);
 				assert.deepEqual(await postgresIdentitySnapshot(), beforeUnknownAlias);
+			},
+		);
+	});
+
+	test("concurrent declaration writes preserve immutable canonical source authority", async () => {
+		postgresCounter += 1;
+		await withTemporaryPostgresDatabase(
+			{
+				closeConnections: closePostgresStorage,
+				connectionString: POSTGRES_URL,
+				databaseName: `pdpp_pairwise_as_context_race_${process.pid}_${postgresCounter}`,
+				templateName: null,
+			},
+			async (databaseUrl) => {
+				await initPostgresStorage({ backend: "postgres", databaseUrl });
+
+				const withHeldAuthorityInsert = async <T>(
+					run: () => Promise<T>,
+				): Promise<T> => {
+					const blocker = await getPostgresPool().connect();
+					let released = false;
+					let result: Promise<T> | undefined;
+					try {
+						await blocker.query("BEGIN");
+						await blocker.query(
+							"LOCK TABLE pairwise_as_instance_authority IN SHARE MODE",
+						);
+						result = run();
+						let blocked = 0;
+						for (let attempt = 0; attempt < 100; attempt += 1) {
+							const activity = await postgresQuery<{ count: number }>(
+								"SELECT count(*)::int AS count FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE '%INSERT INTO pairwise_as_instance_authority(%'",
+							);
+							blocked = activity.rows[0]?.count ?? 0;
+							if (blocked === 2) break;
+							await new Promise((resolve) => setTimeout(resolve, 20));
+						}
+						assert.equal(
+							blocked,
+							2,
+							"both base authority inserts reach the barrier",
+						);
+						await blocker.query("COMMIT");
+						released = true;
+						return await result;
+					} finally {
+						if (!released)
+							await blocker.query("ROLLBACK").catch(() => undefined);
+						blocker.release();
+						await result?.catch(() => undefined);
+					}
+				};
+
+				const conflicting = await withHeldAuthorityInsert(() =>
+					Promise.allSettled([
+						recordPairwiseAsInstanceAuthority({
+							canonicalSourceId: SOURCE_A,
+							declarationVersion: "declaration-race-a",
+							internalInstanceId: "cin-pg-authority-race-different",
+							subjectId: "person-authority-race-different",
+						}),
+						recordPairwiseAsInstanceAuthority({
+							canonicalSourceId: SOURCE_B,
+							declarationVersion: "declaration-race-b",
+							internalInstanceId: "cin-pg-authority-race-different",
+							subjectId: "person-authority-race-different",
+						}),
+					]),
+				);
+				assert.equal(
+					conflicting.filter((result) => result.status === "fulfilled").length,
+					1,
+				);
+				assert.equal(
+					conflicting.filter((result) => result.status === "rejected").length,
+					1,
+				);
+				const retained = await postgresQuery<{ canonical_source_id: string }>(
+					"SELECT canonical_source_id FROM pairwise_as_instance_authority WHERE subject_id=$1 AND internal_instance_id=$2",
+					[
+						"person-authority-race-different",
+						"cin-pg-authority-race-different",
+					],
+				);
+				const conflictingVersions = await postgresQuery<{
+					canonical_source_id: string;
+				}>(
+					"SELECT canonical_source_id FROM pairwise_as_instance_authority_versions WHERE subject_id=$1 AND internal_instance_id=$2",
+					[
+						"person-authority-race-different",
+						"cin-pg-authority-race-different",
+					],
+				);
+				assert.equal(retained.rows.length, 1);
+				assert.equal(conflictingVersions.rows.length, 1);
+				assert.equal(
+					conflictingVersions.rows[0]?.canonical_source_id,
+					retained.rows[0]?.canonical_source_id,
+				);
+
+				const sameSource = await withHeldAuthorityInsert(() =>
+					Promise.allSettled([
+						recordPairwiseAsInstanceAuthority({
+							canonicalSourceId: SOURCE,
+							declarationVersion: "declaration-same-v1",
+							internalInstanceId: "cin-pg-authority-race-same",
+							subjectId: "person-authority-race-same",
+						}),
+						recordPairwiseAsInstanceAuthority({
+							canonicalSourceId: SOURCE,
+							declarationVersion: "declaration-same-v2",
+							internalInstanceId: "cin-pg-authority-race-same",
+							subjectId: "person-authority-race-same",
+						}),
+					]),
+				);
+				assert.deepEqual(
+					sameSource.map((result) => result.status),
+					["fulfilled", "fulfilled"],
+				);
+				const sameSourceVersions = await postgresQuery<{
+					canonical_source_id: string;
+				}>(
+					"SELECT canonical_source_id FROM pairwise_as_instance_authority_versions WHERE subject_id=$1 AND internal_instance_id=$2",
+					["person-authority-race-same", "cin-pg-authority-race-same"],
+				);
+				assert.equal(sameSourceVersions.rows.length, 2);
+				assert.ok(
+					sameSourceVersions.rows.every(
+						(row) => row.canonical_source_id === SOURCE,
+					),
+				);
 			},
 		);
 	});
