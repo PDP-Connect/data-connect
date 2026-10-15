@@ -20,11 +20,12 @@
 // PDPP_DATABASE_URL, VACUNA_STATE_DIR (reminder SQLite + client key),
 // VACUNA_PAYER (mock|http). See ../deploy/DEPLOY.md.
 
-import { existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { createServer, type IncomingMessage, request, type ServerResponse } from "node:http";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
+import { wipeStateDir } from "./reset-state.ts";
 import { WALKTHROUGH_PASSWORD } from "./walkthrough-data.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -91,12 +92,7 @@ if (existsSync(join(STATE_DIR, RESET_MARKER))) {
   } finally {
     await pool.end();
   }
-  // Keep operator-provided *.env files (e.g. the Moksha settings, VACUNA_PAYER_ENV_FILE).
-  for (const name of readdirSync(STATE_DIR)) {
-    if (!name.endsWith(".env")) {
-      rmSync(join(STATE_DIR, name), { force: true, recursive: true });
-    }
-  }
+  wipeStateDir(STATE_DIR);
 }
 
 const { startServer } = await import("../../../reference-implementation/server/index.ts");

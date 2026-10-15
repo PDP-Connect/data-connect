@@ -173,7 +173,8 @@ scripts/demo-dr-vacuna/deploy/reset.sh fly        # APP=… to override the app 
 
 It writes `/data/reset-requested` and restarts the app; the next boot drops
 the database schema, clears `/data` (keeping `*.env` files such as
-`moksha.env`), re-seeds and re-registers the reminder client. Takes about a
+`moksha.env`, the Moksha chain state in `/data/moksha` and the volume's
+`lost+found`), re-seeds and re-registers the reminder client. Takes about a
 minute. Payments already settled on Moksha are not undone.
 
 ## Run locally (same image)

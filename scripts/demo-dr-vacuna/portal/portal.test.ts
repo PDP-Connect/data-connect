@@ -207,3 +207,21 @@ test("dashboard with the Moksha payer: payments move from accepted to settled; p
   assert.ok(web.settlements?.lastError, "poll error recorded");
   assert.equal((page.html.match(/<span data-settled>liquidado<\/span>/g) ?? []).length, 2);
 });
+
+test("reset wipes walkthrough state but keeps the volume's lost+found, Moksha state and *.env", async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync, readdirSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { wipeStateDir } = await import("./reset-state.ts");
+  const dir = mkdtempSync(join(tmpdir(), "vacuna-reset-"));
+  for (const d of ["lost+found", "moksha", "reminder"]) {
+    mkdirSync(join(dir, d));
+  }
+  writeFileSync(join(dir, "moksha", "state.json"), "{}");
+  writeFileSync(join(dir, "payer.env"), "X=1");
+  writeFileSync(join(dir, "reset-requested"), "");
+  writeFileSync(join(dir, "reminder.sqlite"), "");
+  wipeStateDir(dir);
+  assert.deepEqual(readdirSync(dir).sort(), ["lost+found", "moksha", "payer.env"]);
+  assert.deepEqual(readdirSync(join(dir, "moksha")), ["state.json"]);
+});
