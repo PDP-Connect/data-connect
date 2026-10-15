@@ -3,7 +3,7 @@
 
 import assert from "node:assert/strict";
 import { generateKeyPairSync } from "node:crypto";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -102,6 +102,23 @@ test("weekly reads: payer called exactly once per successful read, never for den
   assert.equal(service.counters.get("reads.denied.403_grant_revoked"), 1);
   assert.equal(mock.sendCalls - sendsBefore, 18, "no payment for the denied read");
   assert.equal(mock.ledger.length, service.counters.get("reads.succeeded"));
+});
+
+test("mock payer ledger: one line per read id, kept across restarts", async () => {
+  const path = join(mkdtempSync(join(tmpdir(), "vacuna-ledger-")), "ledger.jsonl");
+  const body = (readId: string) => JSON.stringify({ amount: "1", grantId: "grt_1", readId });
+  const first = new MockPayer({ ledgerPath: path });
+  assert.equal((await first.send(body("0x01"))).accepted, true);
+  await first.send(body("0x01"));
+  await first.send(body("0x02"));
+  const restarted = new MockPayer({ ledgerPath: path });
+  await restarted.send(body("0x02"));
+  await restarted.send(body("0x03"));
+  const ids = readFileSync(path, "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => (JSON.parse(line) as { readId: string }).readId);
+  assert.deepEqual(ids, ["0x01", "0x02", "0x03"]);
 });
 
 test("refresh rotation never replays: a lost refresh response is not retried, a crash mid-refresh is not retried", async (t) => {

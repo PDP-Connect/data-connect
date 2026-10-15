@@ -75,7 +75,8 @@ function isLoopback(url: string): boolean {
 function buildPayer(store: ReminderStore): GatewayPayer {
   const kind = argValue("payer", "mock");
   if (kind === "mock") {
-    return new MockPayer();
+    const ledgerPath = argValue("payer-ledger", "");
+    return new MockPayer(ledgerPath ? { ledgerPath } : {});
   }
   if (kind !== "http") {
     throw new Error(`unknown --payer ${kind}`);
