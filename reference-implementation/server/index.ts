@@ -5506,6 +5506,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
         },
         {
           baseUrl: opts2.baseUrl,
+          deviceAuthorization: true,
           ...(opts.cimdFetchDependencies ? { cimdFetchDependencies: opts.cimdFetchDependencies } : {}),
           nativeManifest: resolveNativeManifest(opts),
           onCimdTransportFailure,
