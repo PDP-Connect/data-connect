@@ -14,6 +14,7 @@ import { parseNekoBrowserSurfaceRuntimeConfig } from "../runtime/browser-surface
 import {
 	createHostBrowserSurfaceAllocator,
 	type HostBrowserSurfaceAllocator,
+	sanitizeHostLaunchReport,
 } from "../runtime/host-browser-surface-allocator.ts";
 import { createBrowserProfilePurger } from "../server/browser-profile-purge.ts";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
@@ -417,4 +418,136 @@ test("a URL-form connector id leases and purges the same host profile key", asyn
 	assert.equal(lease.connector_id, "github");
 	assert.deepEqual(result, { removed: 1, status: "purged", target: "host" });
 	assert.equal(hostProfiles.size, 0, "the leased profile is the one purged");
+});
+
+const PRIVATE_XVFB_POLICY = {
+	display_backend: "private-xvfb",
+	engine_mode: "headed",
+	fallback: "fail-closed",
+	interaction_presentation: "companion",
+	native_visibility: "isolated-display",
+	version: 1,
+} as const;
+
+const hostModeEnv = {
+	PDPP_BROWSER_SURFACE_HOST_ENDPOINT: "http://127.0.0.1:9916/agent",
+	PDPP_BROWSER_SURFACE_HOST_TOKEN: "shared-secret",
+	PDPP_BROWSER_SURFACE_MODE: "host",
+};
+
+test("host mode reads the presentation policy the desktop host advertises", () => {
+	const config = parseNekoBrowserSurfaceRuntimeConfig({
+		...hostModeEnv,
+		PDPP_BROWSER_PRESENTATION_POLICY: JSON.stringify(PRIVATE_XVFB_POLICY),
+	});
+	assert.deepEqual(config.host?.presentationPolicy, PRIVATE_XVFB_POLICY);
+	assert.equal(config.host?.headless, false);
+
+	const legacy = parseNekoBrowserSurfaceRuntimeConfig(hostModeEnv);
+	assert.equal(legacy.host?.presentationPolicy, undefined);
+	assert.equal(legacy.host?.headless, false);
+});
+
+test("host mode refuses an invalid policy or one that conflicts with PDPP_BROWSER_HEADLESS", () => {
+	assert.throws(
+		() =>
+			parseNekoBrowserSurfaceRuntimeConfig({
+				...hostModeEnv,
+				PDPP_BROWSER_PRESENTATION_POLICY: JSON.stringify({
+					...PRIVATE_XVFB_POLICY,
+					interaction_presentation: "native",
+				}),
+			}),
+		/interaction must use the companion/,
+	);
+	assert.throws(
+		() =>
+			parseNekoBrowserSurfaceRuntimeConfig({
+				...hostModeEnv,
+				PDPP_BROWSER_HEADLESS: "1",
+				PDPP_BROWSER_PRESENTATION_POLICY: JSON.stringify(PRIVATE_XVFB_POLICY),
+			}),
+		/conflicts with PDPP_BROWSER_PRESENTATION_POLICY/,
+	);
+});
+
+test("host lease POST carries the presentation policy and keeps only safe launch facts", async () => {
+	const mock = createMockHostEndpoint({
+		json: async () => ({
+			cdp_url: "http://127.0.0.1:9222",
+			launch: {
+				browser_version: "Chrome/141.0.7390.54",
+				display_backend: "private-xvfb",
+				engine_mode: "headed",
+				executable: "google-chrome",
+				milestones_ms: { cdp_ready: 812, display_ready: 35, spawned: 36 },
+				observed_visibility: "unknown",
+			},
+			surface_id: "host-surface-9",
+		}),
+		ok: true,
+		status: 200,
+	});
+	const allocator = createHostBrowserSurfaceAllocator({
+		endpoint: "http://127.0.0.1:9916/agent",
+		fetchImpl: mock.fetchImpl,
+		headless: false,
+		presentationPolicy: PRIVATE_XVFB_POLICY,
+		token: "shared-secret",
+	});
+	allocator.bindRunToSurface({ runId: "run-9", surfaceId: "surface_1" });
+	const surface = await allocator.ensureSurface({
+		connectorId: "chase",
+		profileKey: "chase:cin_chase",
+		surfaceId: "surface_1",
+		surfaceSubjectId: "cin_chase",
+	});
+
+	const body = JSON.parse(mock.calls[0]?.body ?? "{}");
+	assert.deepEqual(body.presentation_policy, PRIVATE_XVFB_POLICY);
+	assert.equal(body.headless, false);
+	assert.deepEqual(surface.allocator_metadata, {
+		host_launch_browser_version: "Chrome/141.0.7390.54",
+		host_launch_cdp_ready_ms: "812",
+		host_launch_display_backend: "private-xvfb",
+		host_launch_display_ready_ms: "35",
+		host_launch_engine_mode: "headed",
+		host_launch_executable: "google-chrome",
+		host_launch_observed_visibility: "unknown",
+		host_launch_spawned_ms: "36",
+		host_surface_id: "host-surface-9",
+	});
+});
+
+test("launch facts drop paths, URLs, tokens and unknown fields", () => {
+	const metadata = sanitizeHostLaunchReport({
+		browser_version: "Chrome/141 https://evil.test/?token=abc",
+		cdp_url: "ws://127.0.0.1:9222/devtools/page/SECRET",
+		display_backend: "/tmp/.X11-unix/X0",
+		engine_mode: "headed",
+		executable: "/home/owner/.cache/ms-playwright/chromium/chrome",
+		milestones_ms: {
+			cdp_ready: -1,
+			display_ready: 1.5,
+			spawned: "10",
+			token: 7,
+		},
+		observed_visibility: "visible",
+		token: "shared-secret",
+		xauthority: "/home/owner/.local/share/dataconnect/client.xauth",
+	});
+	assert.deepEqual(metadata, { host_launch_engine_mode: "headed" });
+	const serialized = JSON.stringify(metadata);
+	for (const secret of [
+		"SECRET",
+		"shared-secret",
+		"/home/owner",
+		"token=abc",
+		"xauth",
+	]) {
+		assert.equal(serialized.includes(secret), false, secret);
+	}
+	assert.deepEqual(sanitizeHostLaunchReport(undefined), {});
+	assert.deepEqual(sanitizeHostLaunchReport("Chrome/141"), {});
+	assert.deepEqual(sanitizeHostLaunchReport([1]), {});
 });

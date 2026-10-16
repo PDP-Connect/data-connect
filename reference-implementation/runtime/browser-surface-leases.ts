@@ -19,6 +19,11 @@ import { classifyConnectorIntentModality, type ConnectorManifestLike } from "../
 import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { BROWSER_BOUND_KEYS } from "../server/generated/connector-registry.generated.ts";
 import { connectorRetainsSurfaceProcess } from "./browser-surface/retained-surface-connectors.ts";
+import {
+  type BrowserPresentationPolicy,
+  parseBrowserPresentationPolicyEnv,
+  presentationPolicyHeadless,
+} from "./browser-presentation-policy.ts";
 
 export const DEFAULT_NEKO_READINESS_TIMEOUT_MS = 120_000;
 /**
@@ -42,6 +47,12 @@ export interface NekoDynamicBrowserSurfaceRuntimeConfig {
 export interface HostBrowserSurfaceRuntimeConfig {
   readonly endpoint: string;
   readonly headless: boolean;
+  /**
+   * The presentation policy the desktop host advertises in
+   * PDPP_BROWSER_PRESENTATION_POLICY. Absent means the legacy request, where
+   * `headless` alone decides the launch.
+   */
+  readonly presentationPolicy?: BrowserPresentationPolicy;
   readonly token: string;
 }
 
@@ -334,10 +345,18 @@ function parseHostBrowserSurfaceRuntimeConfig(env: NodeJS.ProcessEnv): NekoBrows
   if (!token) {
     throw new Error("PDPP_BROWSER_SURFACE_HOST_TOKEN is required when PDPP_BROWSER_SURFACE_MODE=host");
   }
+  const legacyHeadless = env.PDPP_BROWSER_HEADLESS?.trim() === "1";
+  const presentationPolicy = parseBrowserPresentationPolicyEnv(env.PDPP_BROWSER_PRESENTATION_POLICY);
+  if (presentationPolicy && legacyHeadless && !presentationPolicyHeadless(presentationPolicy)) {
+    throw new Error(
+      "PDPP_BROWSER_HEADLESS=1 conflicts with PDPP_BROWSER_PRESENTATION_POLICY, which selects a headed browser"
+    );
+  }
   return {
     host: {
       endpoint: parseHostEndpoint(env.PDPP_BROWSER_SURFACE_HOST_ENDPOINT),
-      headless: env.PDPP_BROWSER_HEADLESS?.trim() === "1",
+      headless: presentationPolicy ? presentationPolicyHeadless(presentationPolicy) : legacyHeadless,
+      ...(presentationPolicy ? { presentationPolicy } : {}),
       token,
     },
     leaseConfig,

@@ -3,6 +3,8 @@
 pub mod connector;
 pub mod connector_store;
 pub mod developer_connector_sources;
+pub(crate) mod browser_display;
+pub(crate) mod browser_presentation;
 pub mod browser_surface_host;
 #[cfg(desktop)]
 pub mod desktop_settings;

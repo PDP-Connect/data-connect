@@ -21,6 +21,11 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
 use uuid::Uuid;
 
+use super::browser_display::{BrowserDisplayLaunch, DisplayProviders, DisplaySession};
+use super::browser_presentation::{
+    deployment_policy, DisplayBackend, PresentationPolicy, BROWSER_DISPLAY_ENV,
+};
+
 const BROWSER_SURFACE_PATH: &str = "/browser-surface/leases";
 /// `DELETE /browser-surface/profiles/<connector_id>/<connection_id>` resets one
 /// connection's persistent profile after the owner deletes or revokes it.
@@ -41,6 +46,12 @@ const SURFACE_START_FAILED: &str = "surface_start_failed";
 const BROWSER_PROFILE_IN_USE: &str = "browser_profile_in_use";
 const BROWSER_PROFILE_IN_USE_MESSAGE: &str =
     "A DataConnect browser window for this account is still open. Close it and try again.";
+const INVALID_PRESENTATION_POLICY: &str = "invalid_presentation_policy";
+const BROWSER_PRESENTATION_UNSUPPORTED: &str = "browser_presentation_unsupported";
+const BROWSER_DISPLAY_UNAVAILABLE: &str = "browser_display_unavailable";
+/// The policy the host advertises to the RI, which sends it back with each
+/// acquire.
+pub(crate) const PRESENTATION_POLICY_ENV: &str = "PDPP_BROWSER_PRESENTATION_POLICY";
 
 #[derive(Debug, Deserialize)]
 struct AcquireRequest {
@@ -56,12 +67,42 @@ struct AcquireRequest {
     migrate_connector_profile: bool,
     #[serde(default)]
     headless: bool,
+    /// Presentation policy v1. Absent keeps the legacy launch, where
+    /// `headless` alone decides the engine mode on the inherited display.
+    #[serde(default)]
+    presentation_policy: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 struct AcquireResponse {
     surface_id: String,
     cdp_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    launch: Option<LaunchReport>,
+}
+
+/// Launch milestones for observability. Holds no path, URL, token or page
+/// content: the executable is reduced to its file name and the version is
+/// the browser's product string.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+struct LaunchReport {
+    executable: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    browser_version: Option<String>,
+    engine_mode: String,
+    display_backend: String,
+    /// No adapter observes native window state yet.
+    observed_visibility: String,
+    milestones_ms: LaunchMilestones,
+}
+
+/// Milliseconds from the start of the acquire.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+struct LaunchMilestones {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    display_ready: Option<u64>,
+    spawned: u64,
+    cdp_ready: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -100,6 +141,27 @@ impl BrowserLaunchError {
         }
     }
 
+    fn invalid_presentation(message: impl Into<String>) -> Self {
+        Self {
+            code: INVALID_PRESENTATION_POLICY,
+            message: message.into(),
+        }
+    }
+
+    fn presentation_unsupported(message: impl Into<String>) -> Self {
+        Self {
+            code: BROWSER_PRESENTATION_UNSUPPORTED,
+            message: message.into(),
+        }
+    }
+
+    fn display_unavailable(message: impl Into<String>) -> Self {
+        Self {
+            code: BROWSER_DISPLAY_UNAVAILABLE,
+            message: message.into(),
+        }
+    }
+
     pub(crate) fn is_sandbox_unavailable(&self) -> bool {
         self.code == BROWSER_SANDBOX_UNAVAILABLE
     }
@@ -130,8 +192,36 @@ struct BrowserSurfaceLease {
     connector_id: String,
     connection_id: String,
     headless: bool,
+    presentation: Option<PresentationPolicy>,
     response: AcquireResponse,
     browser_pid: u32,
+}
+
+/// A host-launched browser and the display it renders on. The display is
+/// stopped only after the browser, and the entry is forgotten only once both
+/// stops are confirmed, so an uncertain cleanup blocks reuse of the profile.
+struct TrackedBrowser {
+    child: Child,
+    browser_stopped: bool,
+    display: Option<Box<dyn DisplaySession>>,
+}
+
+impl TrackedBrowser {
+    fn terminate(&mut self) -> bool {
+        if !self.browser_stopped {
+            if !super::pdpp_browser::terminate_browser(&mut self.child) {
+                return false;
+            }
+            self.browser_stopped = true;
+        }
+        if let Some(display) = self.display.as_mut() {
+            if !display.terminate() {
+                return false;
+            }
+            self.display = None;
+        }
+        true
+    }
 }
 
 #[derive(Debug)]
@@ -145,10 +235,11 @@ struct HostState {
     profile_root: PathBuf,
     resource_dir: Option<PathBuf>,
     browser_path_override: Option<PathBuf>,
+    display_providers: DisplayProviders,
     leases: Mutex<HashMap<String, BrowserSurfaceLease>>,
     /// Keep process handles beyond a lease if termination fails, so a later
     /// acquire can safely retry cleanup for the exact profile and process.
-    browsers: Mutex<HashMap<u32, Child>>,
+    browsers: Mutex<HashMap<u32, TrackedBrowser>>,
     /// Prevent a late POST from recreating a lease after its run was released.
     cancelled_runs: Mutex<HashSet<String>>,
     closed: AtomicBool,
@@ -159,11 +250,13 @@ impl HostState {
         profile_root: PathBuf,
         resource_dir: Option<PathBuf>,
         browser_path_override: Option<PathBuf>,
+        display_providers: DisplayProviders,
     ) -> Self {
         Self {
             profile_root,
             resource_dir,
             browser_path_override,
+            display_providers,
             leases: Mutex::new(HashMap::new()),
             browsers: Mutex::new(HashMap::new()),
             cancelled_runs: Mutex::new(HashSet::new()),
@@ -175,6 +268,30 @@ impl HostState {
         validate_request_field("run_id", &request.run_id)?;
         validate_request_field("connector_id", &request.connector_id)?;
         validate_request_field("connection_id", &request.connection_id)?;
+        let presentation = request
+            .presentation_policy
+            .as_ref()
+            .map(PresentationPolicy::parse)
+            .transpose()
+            .map_err(|error| {
+                BrowserLaunchError::invalid_presentation(format!(
+                    "{}: {}",
+                    error.code, error.message
+                ))
+            })?;
+        if let Some(policy) = presentation {
+            if policy.headless() != request.headless {
+                return Err(BrowserLaunchError::invalid_presentation(
+                    "headless conflicts with the presentation policy engine_mode",
+                ));
+            }
+            if policy.display_backend == DisplayBackend::ExternallyOwned {
+                return Err(BrowserLaunchError::presentation_unsupported(
+                    "The desktop host owns its displays; externally-owned is for attached browsers",
+                ));
+            }
+        }
+        let started = Instant::now();
 
         // Admission and launch are serialized. A connection has exactly one
         // persistent profile, so a second launch must not race the first
@@ -198,6 +315,7 @@ impl HostState {
             if lease.connector_id != request.connector_id
                 || lease.connection_id != request.connection_id
                 || lease.headless != request.headless
+                || lease.presentation != presentation
             {
                 return Err("Run id is already bound to a different browser request".into());
             }
@@ -223,22 +341,97 @@ impl HostState {
                 "No system, downloaded, or bundled Chromium browser is available for host browser surfaces",
             )
         })?;
-        let (child, endpoint) = launch_browser(&browser, &profile_dir, request.headless)?;
+        // The display starts and passes its health check before the browser
+        // exists. A display failure ends the launch: the browser never falls
+        // back onto the owner's desktop.
+        let backend = presentation
+            .map(|policy| policy.display_backend)
+            .unwrap_or(DisplayBackend::InheritedHost);
+        let mut display = match backend {
+            DisplayBackend::InheritedHost => None,
+            backend => {
+                let provider = self.display_providers.get(backend).ok_or_else(|| {
+                    BrowserLaunchError::display_unavailable(format!(
+                        "No {} display backend is available on this computer",
+                        backend.as_str()
+                    ))
+                })?;
+                Some(
+                    provider
+                        .start()
+                        .map_err(BrowserLaunchError::display_unavailable)?,
+                )
+            }
+        };
+        let display_ready = display.as_ref().map(|_| elapsed_ms(started));
+        let launched = match launch_browser(
+            &browser,
+            &profile_dir,
+            request.headless,
+            display.as_ref().map(|display| display.browser_launch()),
+        ) {
+            Ok(launched) => launched,
+            Err(error) => {
+                if let Some(display) = display.as_mut() {
+                    if !display.terminate() {
+                        log::warn!("Private browser display did not stop after a failed launch");
+                    }
+                }
+                return Err(error);
+            }
+        };
+        let child = launched.child;
         let browser_pid = child.id();
         let surface_id = format!("host-surface-{}", Uuid::new_v4().as_simple());
+        let report = LaunchReport {
+            executable: executable_name(&browser),
+            browser_version: launched.browser_version,
+            engine_mode: if request.headless {
+                "headless"
+            } else {
+                "headed"
+            }
+            .into(),
+            display_backend: backend.as_str().into(),
+            observed_visibility: "unknown".into(),
+            milestones_ms: LaunchMilestones {
+                display_ready,
+                spawned: launched.spawned_at.duration_since(started).as_millis() as u64,
+                cdp_ready: elapsed_ms(started),
+            },
+        };
+        log::info!(
+            "Browser surface {surface_id} launched for run {}: executable={} version={} engine={} display={} display_ready_ms={} spawned_ms={} cdp_ready_ms={} pid={browser_pid}",
+            request.run_id,
+            report.executable,
+            report.browser_version.as_deref().unwrap_or("unknown"),
+            report.engine_mode,
+            report.display_backend,
+            report
+                .milestones_ms
+                .display_ready
+                .map_or_else(|| "-".to_string(), |ms| ms.to_string()),
+            report.milestones_ms.spawned,
+            report.milestones_ms.cdp_ready,
+        );
         let response = AcquireResponse {
             surface_id: surface_id.clone(),
-            cdp_url: endpoint,
+            cdp_url: launched.cdp_url,
+            launch: Some(report),
+        };
+        let mut tracked = TrackedBrowser {
+            child,
+            browser_stopped: false,
+            display,
         };
         let mut browsers = match self.browsers.lock() {
             Ok(browsers) => browsers,
             Err(_) => {
-                let mut child = child;
-                let _ = super::pdpp_browser::terminate_browser(&mut child);
+                let _ = tracked.terminate();
                 return Err("Browser process state is unavailable".into());
             }
         };
-        browsers.insert(browser_pid, child);
+        browsers.insert(browser_pid, tracked);
         drop(browsers);
         leases.insert(
             surface_id.clone(),
@@ -247,6 +440,7 @@ impl HostState {
                 connector_id: request.connector_id,
                 connection_id: request.connection_id,
                 headless: request.headless,
+                presentation,
                 response: response.clone(),
                 browser_pid,
             },
@@ -295,8 +489,8 @@ impl HostState {
         self.closed.store(true, Ordering::Release);
         self.release_all_leases();
         if let Ok(mut browsers) = self.browsers.lock() {
-            for (pid, child) in browsers.iter_mut() {
-                if !super::pdpp_browser::terminate_browser(child) {
+            for (pid, tracked) in browsers.iter_mut() {
+                if !tracked.terminate() {
                     log::warn!("Tracked browser {pid} did not terminate cleanly during shutdown");
                 }
             }
@@ -326,12 +520,17 @@ impl HostState {
             log::error!("Browser process state is poisoned during termination");
             return false;
         };
-        let Some(child) = browsers.get_mut(&pid) else {
+        let Some(tracked) = browsers.get_mut(&pid) else {
             log::error!("Browser process {pid} is missing from host state");
             return false;
         };
-        if super::pdpp_browser::terminate_browser(child) {
+        let started = Instant::now();
+        if tracked.terminate() {
             browsers.remove(&pid);
+            log::info!(
+                "Browser {pid} and its display stopped: cleanup_ms={}",
+                elapsed_ms(started)
+            );
             true
         } else {
             false
@@ -373,7 +572,7 @@ impl HostState {
                 .browsers
                 .lock()
                 .map_err(|_| BrowserLaunchError::profile_in_use())?;
-            let Some(child) = browsers.get_mut(&process_group) else {
+            let Some(tracked) = browsers.get_mut(&process_group) else {
                 return Err(BrowserLaunchError::profile_in_use());
             };
             if leases
@@ -382,7 +581,7 @@ impl HostState {
             {
                 return Err(BrowserLaunchError::profile_in_use());
             }
-            if !super::pdpp_browser::terminate_browser(child) {
+            if !tracked.terminate() {
                 return Err(BrowserLaunchError::profile_in_use());
             }
             browsers.remove(&process_group);
@@ -516,6 +715,7 @@ pub struct BrowserSurfaceHost {
     address: SocketAddr,
     endpoint: String,
     token: String,
+    presentation_policy: Option<PresentationPolicy>,
     stop: Arc<AtomicBool>,
     server_thread: Mutex<Option<JoinHandle<()>>>,
 }
@@ -523,13 +723,34 @@ pub struct BrowserSurfaceHost {
 impl BrowserSurfaceHost {
     /// Start a host endpoint on an OS-assigned loopback port.
     pub fn start(app_data_dir: PathBuf, resource_dir: Option<PathBuf>) -> Result<Self, String> {
-        Self::start_with_browser(app_data_dir, resource_dir, None)
+        let display_providers =
+            DisplayProviders::discover(&app_data_dir.join("browser-surface").join("displays"));
+        let presentation_policy = deployment_policy(
+            std::env::var(BROWSER_DISPLAY_ENV).ok().as_deref(),
+            std::env::var("PDPP_BROWSER_HEADLESS").is_ok_and(|value| value.trim() == "1"),
+            display_providers.get(DisplayBackend::PrivateXvfb).is_some(),
+        )?;
+        log::info!(
+            "Connector browsers use display {}",
+            presentation_policy.map_or("inherited-host (legacy)", |policy| policy
+                .display_backend
+                .as_str())
+        );
+        Self::start_with_browser(
+            app_data_dir,
+            resource_dir,
+            None,
+            display_providers,
+            presentation_policy,
+        )
     }
 
     fn start_with_browser(
         app_data_dir: PathBuf,
         resource_dir: Option<PathBuf>,
         browser_path_override: Option<PathBuf>,
+        display_providers: DisplayProviders,
+        presentation_policy: Option<PresentationPolicy>,
     ) -> Result<Self, String> {
         let listener = TcpListener::bind(("127.0.0.1", 0))
             .map_err(|error| format!("Failed to bind browser surface host: {error}"))?;
@@ -544,6 +765,7 @@ impl BrowserSurfaceHost {
             app_data_dir.join("browser-surface").join("profiles"),
             resource_dir,
             browser_path_override,
+            display_providers,
         ));
         let stop = Arc::new(AtomicBool::new(false));
         let server_state = Arc::clone(&state);
@@ -560,6 +782,7 @@ impl BrowserSurfaceHost {
             address,
             endpoint: format!("http://{address}"),
             token,
+            presentation_policy,
             stop,
             server_thread: Mutex::new(Some(server_thread)),
         })
@@ -567,11 +790,17 @@ impl BrowserSurfaceHost {
 
     /// Return the environment pairs the supervisor must pass to the RI.
     pub fn env_pairs(&self) -> Vec<(&'static str, String)> {
-        vec![
+        let mut pairs = vec![
             ("PDPP_BROWSER_SURFACE_MODE", "host".into()),
             ("PDPP_BROWSER_SURFACE_HOST_ENDPOINT", self.endpoint.clone()),
             ("PDPP_BROWSER_SURFACE_HOST_TOKEN", self.token.clone()),
-        ]
+        ];
+        if let Some(policy) = self.presentation_policy {
+            if let Ok(policy) = serde_json::to_string(&policy) {
+                pairs.push((PRESENTATION_POLICY_ENV, policy));
+            }
+        }
+        pairs
     }
 
     pub fn endpoint(&self) -> &str {
@@ -659,21 +888,40 @@ fn stable_segment(value: &str) -> String {
     hex::encode(Sha256::digest(value.as_bytes()))
 }
 
+#[derive(Debug)]
+pub(crate) struct LaunchedBrowser {
+    pub child: Child,
+    pub cdp_url: String,
+    pub spawned_at: Instant,
+    /// The `Browser` product string from `/json/version`, such as
+    /// `Chrome/141.0.7390.54`.
+    pub browser_version: Option<String>,
+}
+
 pub(crate) fn launch_browser(
     browser: &Path,
     profile_dir: &Path,
     headless: bool,
-) -> Result<(Child, String), BrowserLaunchError> {
-    let mut command = super::pdpp_browser::browser_command_with_args(
-        browser,
-        profile_dir,
-        headless,
-        &[
-            "--disable-background-timer-throttling",
-            "--disable-renderer-backgrounding",
-            "--disable-backgrounding-occluded-windows",
-        ],
-    );
+    display: Option<&BrowserDisplayLaunch>,
+) -> Result<LaunchedBrowser, BrowserLaunchError> {
+    let mut args = vec![
+        "--disable-background-timer-throttling",
+        "--disable-renderer-backgrounding",
+        "--disable-backgrounding-occluded-windows",
+    ];
+    if let Some(display) = display {
+        args.extend(display.args.iter().map(String::as_str));
+    }
+    let mut command =
+        super::pdpp_browser::browser_command_with_args(browser, profile_dir, headless, &args);
+    if let Some(display) = display {
+        // Only the browser's environment changes; the host and its other
+        // children keep the owner's display.
+        for name in &display.env_remove {
+            command.env_remove(name);
+        }
+        command.envs(display.env.iter().map(|(name, value)| (name, value)));
+    }
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -682,6 +930,7 @@ pub(crate) fn launch_browser(
     let mut child = command
         .spawn()
         .map_err(|error| format!("Failed to launch host browser: {error}"))?;
+    let spawned_at = Instant::now();
     let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
         let _ = super::pdpp_browser::terminate_browser(&mut child);
         return Err("Host browser output was not piped".to_string().into());
@@ -707,7 +956,27 @@ pub(crate) fn launch_browser(
         }
     });
 
-    wait_for_devtools_endpoint(profile_dir, child, receiver, &stderr_tail)
+    let (child, cdp_url, browser_version) =
+        wait_for_devtools_endpoint(profile_dir, child, receiver, &stderr_tail)?;
+    Ok(LaunchedBrowser {
+        child,
+        cdp_url,
+        spawned_at,
+        browser_version,
+    })
+}
+
+fn elapsed_ms(since: Instant) -> u64 {
+    since.elapsed().as_millis() as u64
+}
+
+/// The executable's file name only; its directory can name the owner.
+fn executable_name(browser: &Path) -> String {
+    browser
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "unknown".into())
 }
 
 /// The last `STDERR_TAIL_BYTES` of browser stderr, with URL query strings
@@ -754,7 +1023,7 @@ fn wait_for_devtools_endpoint(
     mut child: Child,
     receiver: mpsc::Receiver<String>,
     stderr_tail: &StderrTail,
-) -> Result<(Child, String), BrowserLaunchError> {
+) -> Result<(Child, String, Option<String>), BrowserLaunchError> {
     let deadline = Instant::now() + BROWSER_START_TIMEOUT;
     let active_port = profile_dir.join("DevToolsActivePort");
     let probe = reqwest::blocking::Client::builder()
@@ -773,12 +1042,12 @@ fn wait_for_devtools_endpoint(
         }
         for line in receiver.try_iter().take(1) {
             if let Some(url) = cdp_url_from_json(&line) {
-                if devtools_http_ready(&probe, &url, deadline) {
+                if let Some(ready) = devtools_http_ready(&probe, &url, deadline) {
                     if super::pdpp_browser::browser_child_exited(&mut child) {
                         let error = exited_before_ready(stderr_tail);
                         return Err(terminate_failed_launch(&mut child, error));
                     }
-                    return Ok((child, url));
+                    return Ok((child, url, ready.browser_version));
                 }
             }
         }
@@ -790,12 +1059,12 @@ fn wait_for_devtools_endpoint(
                 .filter(|port| *port != 0)
             {
                 let url = format!("http://127.0.0.1:{port}");
-                if devtools_http_ready(&probe, &url, deadline) {
+                if let Some(ready) = devtools_http_ready(&probe, &url, deadline) {
                     if super::pdpp_browser::browser_child_exited(&mut child) {
                         let error = exited_before_ready(stderr_tail);
                         return Err(terminate_failed_launch(&mut child, error));
                     }
-                    return Ok((child, url));
+                    return Ok((child, url, ready.browser_version));
                 }
             }
         }
@@ -841,60 +1110,67 @@ fn process_group_for_pid(pid: u32) -> Option<u32> {
     fields.split_whitespace().nth(2)?.parse().ok()
 }
 
+struct DevtoolsReady {
+    browser_version: Option<String>,
+}
+
 fn devtools_http_ready(
     client: &reqwest::blocking::Client,
     cdp_url: &str,
     deadline: Instant,
-) -> bool {
-    let Some(timeout) = devtools_probe_timeout(deadline) else {
-        return false;
-    };
+) -> Option<DevtoolsReady> {
+    let timeout = devtools_probe_timeout(deadline)?;
     let request = client
         .get(format!("{cdp_url}/json/version"))
         .timeout(timeout);
     if Instant::now() >= deadline {
-        return false;
+        return None;
     }
     let Ok(response) = request.send() else {
-        return false;
+        return None;
     };
     if !response.status().is_success() {
-        return false;
+        return None;
     }
     let Ok(version) = response.json::<serde_json::Value>() else {
-        return false;
+        return None;
     };
+    let browser_version = version
+        .get("Browser")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
     let has_browser_websocket = version
         .get("webSocketDebuggerUrl")
         .and_then(serde_json::Value::as_str)
         .is_some_and(is_websocket_url);
     if !has_browser_websocket {
-        return false;
+        return None;
     }
 
-    let Some(timeout) = devtools_probe_timeout(deadline) else {
-        return false;
-    };
+    let timeout = devtools_probe_timeout(deadline)?;
     let request = client.get(format!("{cdp_url}/json/list")).timeout(timeout);
     if Instant::now() >= deadline {
-        return false;
+        return None;
     }
     let Ok(response) = request.send() else {
-        return false;
+        return None;
     };
     if !response.status().is_success() {
-        return false;
+        return None;
     }
     let Ok(targets) = response.json::<Vec<serde_json::Value>>() else {
-        return false;
+        return None;
     };
-    targets.iter().any(|target| {
-        target.get("type").and_then(serde_json::Value::as_str) == Some("page")
-            && target
-                .get("webSocketDebuggerUrl")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(is_websocket_url)
-    })
+    targets
+        .iter()
+        .any(|target| {
+            target.get("type").and_then(serde_json::Value::as_str) == Some("page")
+                && target
+                    .get("webSocketDebuggerUrl")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(is_websocket_url)
+        })
+        .then_some(DevtoolsReady { browser_version })
 }
 
 fn devtools_probe_timeout(deadline: Instant) -> Option<Duration> {
@@ -1021,8 +1297,13 @@ fn dispatch_request(request: HttpRequest, state: Arc<HostState>) -> Vec<u8> {
                         error.message,
                         error.code
                     );
+                    let status = if error.code == INVALID_PRESENTATION_POLICY {
+                        "400 Bad Request"
+                    } else {
+                        "500 Internal Server Error"
+                    };
                     json_response(
-                        "500 Internal Server Error",
+                        status,
                         &ErrorResponse {
                             error: error.code,
                             message: Some(error.message),
@@ -1291,6 +1572,7 @@ for arg in "$@"; do
   esac
 done
 printf '%s\n' "$@" > "$profile/args.txt"
+printf 'DISPLAY=%s\nXAUTHORITY=%s\nHOME=%s\n' "${DISPLAY-unset}" "${XAUTHORITY-unset}" "${HOME-unset}" > "$profile/env.txt"
 python3 "$(dirname "$0")/fake-devtools.py" "$profile" &
 server_pid=$!
 trap 'kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true; exit 0' TERM INT
@@ -1308,6 +1590,8 @@ wait "$server_pid"
             temp.path().join("app-data"),
             None,
             Some(fake_browser(temp)),
+            DisplayProviders::default(),
+            None,
         )
         .expect("start test host")
     }
@@ -1540,7 +1824,7 @@ wait "$server_pid"
         fs::create_dir_all(&profile).expect("create profile");
 
         let started = Instant::now();
-        let result = launch_browser(&browser, &profile, true);
+        let result = launch_browser(&browser, &profile, true, None);
         let elapsed = started.elapsed();
         stop_server.store(true, Ordering::Release);
         let server_joined = server.join();
@@ -1620,12 +1904,12 @@ wait "$server_pid"
         fs::create_dir_all(&profile).expect("create profile");
 
         let started = Instant::now();
-        let launched = launch_browser(&browser, &profile, true);
+        let launched = launch_browser(&browser, &profile, true, None);
         let elapsed = started.elapsed();
         let launch_succeeded = match launched {
-            Ok((mut child, endpoint)) => {
-                let _ = super::super::pdpp_browser::terminate_browser(&mut child);
-                assert_eq!(endpoint, format!("http://{address}"));
+            Ok(mut launched) => {
+                let _ = super::super::pdpp_browser::terminate_browser(&mut launched.child);
+                assert_eq!(launched.cdp_url, format!("http://{address}"));
                 true
             }
             Err(_) => false,
@@ -1983,6 +2267,8 @@ exit 133
             temp.path().join("app-data"),
             None,
             Some(sandbox_blocked_browser(&temp)),
+            DisplayProviders::default(),
+            None,
         )
         .expect("start test host");
         let response = request(
@@ -2020,6 +2306,8 @@ exit 133
             temp.path().join("app-data"),
             None,
             Some(browser),
+            DisplayProviders::default(),
+            None,
         )
         .expect("start test host");
         let response = request(
@@ -2050,7 +2338,7 @@ exit 133
         fs::write(&path, "#!/bin/sh\necho 'some other failure' >&2\nexit 1\n")
             .expect("write crashing browser");
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod");
-        let error = launch_browser(&path, temp.path(), true).expect_err("launch must fail");
+        let error = launch_browser(&path, temp.path(), true, None).expect_err("launch must fail");
         assert_eq!(error.code, "surface_start_failed");
         assert!(error.message.contains("exited before becoming ready"));
     }
@@ -2146,11 +2434,14 @@ exit 133
             profile.join("SingletonLock"),
         )
         .expect("write fake Chromium lock");
-        host.state
-            .browsers
-            .lock()
-            .expect("browser state")
-            .insert(group_id, owner);
+        host.state.browsers.lock().expect("browser state").insert(
+            group_id,
+            TrackedBrowser {
+                child: owner,
+                browser_stopped: false,
+                display: None,
+            },
+        );
 
         let response = request(
             &host,
@@ -2187,13 +2478,150 @@ exit 133
         .expect("write fake handoff browser");
         fs::set_permissions(&browser, fs::Permissions::from_mode(0o755)).expect("chmod");
 
-        assert!(launch_browser(&browser, &profile, true).is_err());
+        assert!(launch_browser(&browser, &profile, true, None).is_err());
         let pid = fs::read_to_string(pid_file)
             .expect("handoff process pid")
             .trim()
             .parse::<u32>()
             .expect("valid pid");
         wait_for_process_exit(pid);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn process_group_members(group: u32) -> Vec<u32> {
+        fs::read_dir("/proc")
+            .expect("read /proc")
+            .flatten()
+            .filter_map(|entry| entry.file_name().to_str()?.parse::<u32>().ok())
+            .filter(|pid| process_group_for_pid(*pid) == Some(group))
+            .collect()
+    }
+
+    /// The X11 and Wayland server sockets that these processes are connected
+    /// to, from `ss -xpn`: a client socket's peer inode names the server's
+    /// listening path.
+    #[cfg(target_os = "linux")]
+    fn display_sockets_of(pids: &[u32]) -> Vec<String> {
+        let output = Command::new("ss").arg("-xpn").output().expect("run ss");
+        let text = String::from_utf8_lossy(&output.stdout);
+        let rows: Vec<Vec<&str>> = text
+            .lines()
+            .skip(1)
+            .map(|line| line.split_whitespace().collect())
+            .filter(|fields: &Vec<&str>| fields.len() >= 8)
+            .collect();
+        let paths: HashMap<&str, &str> = rows
+            .iter()
+            .filter(|fields| fields[4] != "*")
+            .map(|fields| (fields[5], fields[4]))
+            .collect();
+        rows.iter()
+            .filter(|fields| {
+                let process = fields[8..].join(" ");
+                pids.iter()
+                    .any(|pid| process.contains(&format!("pid={pid},")))
+            })
+            .filter_map(|fields| paths.get(fields[7]).map(|path| path.to_string()))
+            .filter(|path| path.contains("X11-unix") || path.contains("wayland"))
+            .collect()
+    }
+
+    /// The real Linux path: Xvfb, then Chromium on it. Every browser
+    /// process must point at the private display and none may see the
+    /// owner's Wayland or X display. With DATACONNECT_LIVE_CDP_CHECK naming
+    /// `scripts/verify-private-display-cdp.mjs`, it also proves screencast
+    /// frames and input over CDP, which is what the companion uses.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires real Chromium (DATACONNECT_REAL_BROWSER) and Xvfb"]
+    fn real_chrome_on_private_xvfb_stays_off_the_owner_display() {
+        let temp = tempfile::tempdir().expect("isolated tempdir");
+        let browser = PathBuf::from(
+            std::env::var("DATACONNECT_REAL_BROWSER").expect("DATACONNECT_REAL_BROWSER"),
+        );
+        let runtime = temp.path().join("displays");
+        let provider = super::super::browser_display::xvfb::XvfbProvider::new(
+            PathBuf::from("/usr/bin/Xvfb"),
+            runtime.clone(),
+        );
+        let host = BrowserSurfaceHost::start_with_browser(
+            temp.path().join("app-data"),
+            None,
+            Some(browser),
+            DisplayProviders::default().with(Arc::new(provider)),
+            Some(PresentationPolicy::PRIVATE_XVFB),
+        )
+        .expect("start host");
+        let owner_display = std::env::var("DISPLAY").ok();
+        let response =
+            acquire_with_policy(&host, "run-live", "chase", false, private_xvfb_policy());
+        assert_eq!(
+            response.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&response.body)
+        );
+        let acquired: AcquireResponse = serde_json::from_slice(&response.body).expect("body");
+        let pid = host.state.leases.lock().expect("leases")[&acquired.surface_id].browser_pid;
+        println!("launch report: {:?}", acquired.launch);
+
+        let members = process_group_members(pid);
+        assert!(!members.is_empty());
+        // Chromium rewrites its own environ (process titles), so prove the
+        // display by the sockets the browser processes are connected to.
+        let sockets = display_sockets_of(&members);
+        assert!(
+            !sockets.is_empty(),
+            "the browser is connected to no display"
+        );
+        let private_socket = sockets[0].clone();
+        assert!(
+            sockets.iter().all(|socket| socket == &private_socket),
+            "the browser reaches more than one display: {sockets:?}"
+        );
+        assert!(
+            private_socket.contains("/tmp/.X11-unix/X"),
+            "{private_socket}"
+        );
+        if let Some(owner) = owner_display
+            .as_deref()
+            .and_then(|value| value.strip_prefix(':'))
+        {
+            assert!(
+                !private_socket.ends_with(&format!("/tmp/.X11-unix/X{owner}")),
+                "the browser is on the owner's X display"
+            );
+        }
+        println!(
+            "{} browser processes; display connections: {} to {private_socket}, none to Wayland",
+            members.len(),
+            sockets.len()
+        );
+
+        if let Ok(script) = std::env::var("DATACONNECT_LIVE_CDP_CHECK") {
+            let output = Command::new("node")
+                .arg(&script)
+                .arg(&acquired.cdp_url)
+                .output()
+                .expect("run CDP check");
+            println!(
+                "CDP check: {}",
+                String::from_utf8_lossy(&output.stdout).trim()
+            );
+            assert!(
+                output.status.success(),
+                "CDP check failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        release_surface(&host, &acquired.surface_id);
+        assert!(
+            process_group_members(pid).is_empty(),
+            "browser processes remain"
+        );
+        assert_eq!(fs::read_dir(&runtime).expect("runtime dir").count(), 0);
+        println!("REAL PRIVATE XVFB BROWSER TEST RAN");
     }
 
     #[cfg(target_os = "linux")]
@@ -2208,6 +2636,8 @@ exit 133
             temp.path().join("app-data"),
             None,
             Some(browser.clone()),
+            DisplayProviders::default(),
+            None,
         )
         .expect("start isolated test host");
         let profile = host
@@ -2558,6 +2988,401 @@ exit 133
         assert_eq!(pairs[1].1, host.endpoint());
         assert_eq!(pairs[2].0, "PDPP_BROWSER_SURFACE_HOST_TOKEN");
         assert!(!pairs[2].1.is_empty());
+    }
+
+    #[test]
+    fn env_pairs_advertise_the_host_presentation_policy() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        assert!(!start_test_host(&temp)
+            .env_pairs()
+            .iter()
+            .any(|(name, _)| *name == PRESENTATION_POLICY_ENV));
+        let (host, _) = start_display_host(&temp, true);
+        let pairs = host.env_pairs();
+        let policy = &pairs
+            .iter()
+            .find(|(name, _)| *name == PRESENTATION_POLICY_ENV)
+            .expect("policy pair")
+            .1;
+        let policy: serde_json::Value = serde_json::from_str(policy).expect("policy JSON");
+        assert_eq!(
+            PresentationPolicy::parse(&policy),
+            Ok(PresentationPolicy::PRIVATE_XVFB)
+        );
+    }
+
+    /// Records display lifecycle events and, at stop, whether the browser
+    /// using the display had already exited.
+    #[derive(Clone, Default)]
+    struct DisplayLog {
+        events: Arc<Mutex<Vec<String>>>,
+        browser_pid: Arc<Mutex<Option<u32>>>,
+        fail_start: Arc<AtomicBool>,
+    }
+
+    impl DisplayLog {
+        fn events(&self) -> Vec<String> {
+            self.events.lock().expect("events").clone()
+        }
+    }
+
+    struct FakeDisplayProvider(DisplayLog);
+
+    impl super::super::browser_display::DisplayProvider for FakeDisplayProvider {
+        fn backend(&self) -> DisplayBackend {
+            DisplayBackend::PrivateXvfb
+        }
+
+        fn start(&self) -> Result<Box<dyn DisplaySession>, String> {
+            if self.0.fail_start.load(Ordering::Acquire) {
+                self.0
+                    .events
+                    .lock()
+                    .expect("events")
+                    .push("start-failed".into());
+                return Err("fake display did not start".into());
+            }
+            self.0.events.lock().expect("events").push("start".into());
+            Ok(Box::new(FakeDisplaySession {
+                log: self.0.clone(),
+                launch: BrowserDisplayLaunch {
+                    env: vec![
+                        ("DISPLAY".into(), ":4242".into()),
+                        ("XAUTHORITY".into(), "/fake/client.xauth".into()),
+                    ],
+                    // HOME is always set in the test process, so its absence
+                    // in the browser proves removal reaches the child only.
+                    env_remove: vec!["HOME"],
+                    args: vec!["--ozone-platform=x11".into()],
+                },
+                stopped: false,
+            }))
+        }
+    }
+
+    struct FakeDisplaySession {
+        log: DisplayLog,
+        launch: BrowserDisplayLaunch,
+        stopped: bool,
+    }
+
+    impl DisplaySession for FakeDisplaySession {
+        fn browser_launch(&self) -> &BrowserDisplayLaunch {
+            &self.launch
+        }
+
+        fn terminate(&mut self) -> bool {
+            if !self.stopped {
+                let browser_alive = self
+                    .log
+                    .browser_pid
+                    .lock()
+                    .expect("pid")
+                    .is_some_and(|pid| Path::new("/proc").join(pid.to_string()).exists());
+                self.log
+                    .events
+                    .lock()
+                    .expect("events")
+                    .push(if browser_alive {
+                        "stop-while-browser-alive".into()
+                    } else {
+                        "stop".into()
+                    });
+                self.stopped = true;
+            }
+            true
+        }
+    }
+
+    fn start_display_host(temp: &TempDir, with_provider: bool) -> (BrowserSurfaceHost, DisplayLog) {
+        let log = DisplayLog::default();
+        let providers = if with_provider {
+            DisplayProviders::default().with(Arc::new(FakeDisplayProvider(log.clone())))
+        } else {
+            DisplayProviders::default()
+        };
+        let host = BrowserSurfaceHost::start_with_browser(
+            temp.path().join("app-data"),
+            None,
+            Some(fake_browser(temp)),
+            providers,
+            Some(PresentationPolicy::PRIVATE_XVFB),
+        )
+        .expect("start display test host");
+        (host, log)
+    }
+
+    fn acquire_with_policy(
+        host: &BrowserSurfaceHost,
+        run_id: &str,
+        connector_id: &str,
+        headless: bool,
+        policy: serde_json::Value,
+    ) -> TestResponse {
+        request(
+            host,
+            "POST",
+            BROWSER_SURFACE_PATH,
+            Some(host_token(host)),
+            json!({
+                "run_id": run_id,
+                "connector_id": connector_id,
+                "connection_id": format!("cin-{connector_id}"),
+                "headless": headless,
+                "presentation_policy": policy,
+            }),
+        )
+    }
+
+    fn private_xvfb_policy() -> serde_json::Value {
+        serde_json::to_value(PresentationPolicy::PRIVATE_XVFB).expect("policy")
+    }
+
+    fn error_code(response: &TestResponse) -> String {
+        serde_json::from_slice::<serde_json::Value>(&response.body).expect("error body")["error"]
+            .as_str()
+            .expect("error code")
+            .to_string()
+    }
+
+    fn profile_was_launched(host: &BrowserSurfaceHost, connector_id: &str) -> bool {
+        host.state
+            .profile_dir(connector_id, &format!("cin-{connector_id}"), false)
+            .map(|dir| dir.join("args.txt").exists())
+            .unwrap_or(false)
+    }
+
+    #[test]
+    fn private_display_starts_first_reaches_only_the_browser_and_stops_last() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (host, log) = start_display_host(&temp, true);
+        let home_before = std::env::var_os("HOME");
+        let response =
+            acquire_with_policy(&host, "run-xvfb", "chase", false, private_xvfb_policy());
+        assert_eq!(response.status, 200);
+        let acquired: AcquireResponse = serde_json::from_slice(&response.body).expect("body");
+        assert_eq!(log.events(), vec!["start"]);
+
+        let profile_dir = host
+            .state
+            .profile_dir("chase", "cin-chase", false)
+            .expect("profile dir");
+        let env = fs::read_to_string(profile_dir.join("env.txt")).expect("fake env");
+        assert!(env.contains("DISPLAY=:4242\n"), "{env}");
+        assert!(env.contains("XAUTHORITY=/fake/client.xauth\n"), "{env}");
+        assert!(env.contains("HOME=unset\n"), "{env}");
+        assert_eq!(
+            std::env::var_os("HOME"),
+            home_before,
+            "the host env is unchanged"
+        );
+        let args = fs::read_to_string(profile_dir.join("args.txt")).expect("fake args");
+        assert!(args.contains("--ozone-platform=x11\n"));
+        assert!(!args.contains("--headless"));
+        assert!(
+            args.ends_with("about:blank\n"),
+            "start URL stays last: {args}"
+        );
+
+        // Phase 0 launch report: milestones in order, nothing sensitive.
+        let launch = acquired.launch.expect("launch report");
+        assert_eq!(launch.display_backend, "private-xvfb");
+        assert_eq!(launch.engine_mode, "headed");
+        assert_eq!(launch.observed_visibility, "unknown");
+        assert_eq!(launch.executable, "fake-browser.sh");
+        let display_ready = launch
+            .milestones_ms
+            .display_ready
+            .expect("display milestone");
+        assert!(display_ready <= launch.milestones_ms.spawned);
+        assert!(launch.milestones_ms.spawned <= launch.milestones_ms.cdp_ready);
+        let launch_json = serde_json::from_slice::<serde_json::Value>(&response.body)
+            .expect("body")["launch"]
+            .to_string();
+        assert!(
+            !launch_json.contains('/'),
+            "no path or URL in {launch_json}"
+        );
+        assert!(!launch_json.contains(host_token(&host)));
+
+        let pid = host
+            .state
+            .leases
+            .lock()
+            .expect("leases")
+            .get(&acquired.surface_id)
+            .expect("lease")
+            .browser_pid;
+        *log.browser_pid.lock().expect("pid") = Some(pid);
+        release_surface(&host, &acquired.surface_id);
+        assert_eq!(log.events(), vec!["start", "stop"]);
+        assert!(host.state.browsers.lock().expect("browsers").is_empty());
+    }
+
+    #[test]
+    fn display_failure_fails_the_launch_without_spawning_a_browser() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (host, log) = start_display_host(&temp, true);
+        log.fail_start.store(true, Ordering::Release);
+        let response =
+            acquire_with_policy(&host, "run-fail", "chase", false, private_xvfb_policy());
+        assert_eq!(response.status, 500);
+        assert_eq!(error_code(&response), BROWSER_DISPLAY_UNAVAILABLE);
+        assert!(
+            !profile_was_launched(&host, "chase"),
+            "no fallback onto the desktop"
+        );
+        assert!(host.state.leases.lock().expect("leases").is_empty());
+
+        // The host recovers once the display can start.
+        log.fail_start.store(false, Ordering::Release);
+        let response = acquire_with_policy(&host, "run-ok", "chase", false, private_xvfb_policy());
+        assert_eq!(response.status, 200);
+    }
+
+    #[test]
+    fn a_missing_display_backend_refuses_the_launch() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (host, _) = start_display_host(&temp, false);
+        let response =
+            acquire_with_policy(&host, "run-none", "chase", false, private_xvfb_policy());
+        assert_eq!(response.status, 500);
+        assert_eq!(error_code(&response), BROWSER_DISPLAY_UNAVAILABLE);
+        assert!(!profile_was_launched(&host, "chase"));
+    }
+
+    #[test]
+    fn a_browser_that_fails_after_its_display_started_stops_the_display() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let log = DisplayLog::default();
+        let host = BrowserSurfaceHost::start_with_browser(
+            temp.path().join("app-data"),
+            None,
+            Some(sandbox_blocked_browser(&temp)),
+            DisplayProviders::default().with(Arc::new(FakeDisplayProvider(log.clone()))),
+            Some(PresentationPolicy::PRIVATE_XVFB),
+        )
+        .expect("start test host");
+        let response =
+            acquire_with_policy(&host, "run-crash", "chase", false, private_xvfb_policy());
+        assert_eq!(response.status, 500);
+        assert_eq!(log.events(), vec!["start", "stop"]);
+        assert!(host.state.browsers.lock().expect("browsers").is_empty());
+    }
+
+    #[test]
+    fn invalid_or_unexecutable_policies_are_refused_before_spawn() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (host, log) = start_display_host(&temp, true);
+        let mut wrong_version = private_xvfb_policy();
+        wrong_version["version"] = json!(2);
+        let mut hidden_desktop = private_xvfb_policy();
+        hidden_desktop["display_backend"] = json!("inherited-host");
+        let mut external = private_xvfb_policy();
+        external["display_backend"] = json!("externally-owned");
+        let cases = [
+            (
+                "bad-version",
+                false,
+                wrong_version,
+                400,
+                INVALID_PRESENTATION_POLICY,
+            ),
+            (
+                "bad-combo",
+                false,
+                hidden_desktop,
+                400,
+                INVALID_PRESENTATION_POLICY,
+            ),
+            (
+                "bad-shape",
+                false,
+                json!("private-xvfb"),
+                400,
+                INVALID_PRESENTATION_POLICY,
+            ),
+            // The legacy flag must agree with the policy's engine mode.
+            (
+                "conflict",
+                true,
+                private_xvfb_policy(),
+                400,
+                INVALID_PRESENTATION_POLICY,
+            ),
+            (
+                "external",
+                false,
+                external,
+                500,
+                BROWSER_PRESENTATION_UNSUPPORTED,
+            ),
+        ];
+        for (connector, headless, policy, status, code) in cases {
+            let response = acquire_with_policy(&host, connector, connector, headless, policy);
+            assert_eq!(response.status, status, "{connector}");
+            assert_eq!(error_code(&response), code, "{connector}");
+            assert!(
+                !profile_was_launched(&host, connector),
+                "{connector} spawned"
+            );
+        }
+        assert!(
+            log.events().is_empty(),
+            "no display starts for a refused policy"
+        );
+    }
+
+    #[test]
+    fn a_retried_run_must_repeat_the_same_presentation_policy() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (host, log) = start_display_host(&temp, true);
+        let first = acquire_with_policy(&host, "run-same", "chase", false, private_xvfb_policy());
+        assert_eq!(first.status, 200);
+        let retry = acquire_with_policy(&host, "run-same", "chase", false, private_xvfb_policy());
+        assert_eq!(retry.status, 200);
+        assert_eq!(first.body, retry.body, "a retry returns the same surface");
+        let legacy =
+            acquire_connection_for_run(&host, "run-other", "github", "cin-github", true, false);
+        assert!(legacy.1.starts_with("http://127.0.0.1:"));
+        let mismatch = request(
+            &host,
+            "POST",
+            BROWSER_SURFACE_PATH,
+            Some(host_token(&host)),
+            json!({
+                "run_id": "run-same",
+                "connector_id": "chase",
+                "connection_id": "cin-chase",
+                "headless": false,
+            }),
+        );
+        assert_eq!(mismatch.status, 500);
+        assert_eq!(log.events(), vec!["start"], "only one display for one run");
+    }
+
+    #[test]
+    fn a_legacy_request_without_a_policy_keeps_the_inherited_display() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (host, log) = start_display_host(&temp, true);
+        let (surface_id, _, _) = acquire_with_headless(&host, "chase", false);
+        assert!(log.events().is_empty(), "no display for a legacy request");
+        let profile_dir = host
+            .state
+            .profile_dir("chase", "cin-chase", false)
+            .expect("profile dir");
+        let env = fs::read_to_string(profile_dir.join("env.txt")).expect("fake env");
+        assert!(!env.contains("DISPLAY=:4242"));
+        assert!(!env.contains("HOME=unset"));
+        let args = fs::read_to_string(profile_dir.join("args.txt")).expect("fake args");
+        assert!(!args.contains("--ozone-platform"));
+        let lease_launch = host.state.leases.lock().expect("leases")[&surface_id]
+            .response
+            .launch
+            .clone()
+            .expect("launch report");
+        assert_eq!(lease_launch.display_backend, "inherited-host");
+        assert_eq!(lease_launch.milestones_ms.display_ready, None);
     }
 
     #[cfg(unix)]

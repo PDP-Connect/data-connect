@@ -2554,9 +2554,9 @@ pub(crate) fn probe_browser_launch(
             return None;
         }
     };
-    match super::browser_surface_host::launch_browser(browser, profile.path(), true) {
-        Ok((mut child, _)) => {
-            let _ = super::pdpp_browser::terminate_browser(&mut child);
+    match super::browser_surface_host::launch_browser(browser, profile.path(), true, None) {
+        Ok(mut launched) => {
+            let _ = super::pdpp_browser::terminate_browser(&mut launched.child);
             None
         }
         Err(error) => {
