@@ -1,1 +1,1 @@
-Vendored from PDP-Connect/pdpp#412 at ddaf4cb083 (spec-client-range-filters.md, conformance/vectors/*). Do not edit; re-vendor when the spec moves.
+Vendored from PDP-Connect/pdpp#412 at 29396fe2ec (spec-client-range-filters.md, conformance/vectors/*). Do not edit; re-vendor when the spec moves.

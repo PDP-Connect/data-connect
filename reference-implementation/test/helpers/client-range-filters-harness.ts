@@ -134,6 +134,7 @@ export interface Expected {
 	query_exact?: JsonObject;
 	record_keys?: string[];
 	status?: number;
+	tombstone_forbidden_members?: string[];
 	tombstone_keys?: string[];
 }
 
@@ -662,16 +663,17 @@ export function assertExpected(
 				[...(expected.tombstone_keys ?? [])].sort(),
 				`${where}: tombstone keys`,
 			);
-			// A client tombstone for a range exit says nothing about when or why.
+			// Every tombstone lacks the members the vector forbids (a client
+			// tombstone says nothing about when or why a record left).
 			for (const tombstone of data.filter(
 				(record) => record.deleted === true,
 			)) {
 				assert.deepEqual(
 					Object.keys(tombstone).filter((key) =>
-						["data", "deleted_at", "emitted_at"].includes(key),
+						(expected.tombstone_forbidden_members ?? []).includes(key),
 					),
 					[],
-					`${where}: tombstone ${String(tombstone.id)} must not carry data, deleted_at or emitted_at`,
+					`${where}: tombstone ${String(tombstone.id)} carries a forbidden member`,
 				);
 			}
 		}

@@ -30,6 +30,11 @@ import {
 	type Vector,
 	type World,
 } from "./helpers/client-range-filters-harness.ts";
+import {
+	runRsVector,
+	startRsWorld,
+	stopRsWorld,
+} from "./helpers/client-range-filters-rs-runner.ts";
 import { introspectionHeaders } from "./helpers/introspection.ts";
 
 const { file } = loadVectors();
@@ -381,6 +386,7 @@ class AsRun {
 }
 
 test.before(async () => {
+	await startRsWorld();
 	world = await startWorld();
 	const registration = await fetchJson(`${world.asUrl}/oauth/register`, {
 		body: JSON.stringify({
@@ -402,6 +408,7 @@ test.before(async () => {
 });
 
 test.after(async () => {
+	await stopRsWorld();
 	await world.close();
 });
 
@@ -416,7 +423,17 @@ async function passControl(vector: Vector, ordinal: number): Promise<void> {
 	}
 	const control = vectorById.get(controlId);
 	assert.ok(control, `${vector.id}: control ${controlId} exists`);
-	await new AsRun(control, 1000 + ordinal).run();
+	if (isAsVector(control)) {
+		await new AsRun(control, 1000 + ordinal).run();
+	} else {
+		// An AS negative may name a resource-server positive as its control.
+		assert.equal(
+			control.expected?.status,
+			200,
+			`${controlId}: a control expects HTTP 200`,
+		);
+		await runRsVector(control, 1000 + ordinal);
+	}
 }
 
 for (const [ordinal, vector] of file.vectors.filter(isAsVector).entries()) {
@@ -565,10 +582,17 @@ test("a package read applies only the selected child's frozen set", async () => 
 		assert.ok(outcome.packageId, "a batch grant returns a package");
 		// The package credential itself never reads a Core endpoint; reads go
 		// through the adapter, one child bearer per call.
-		const direct = await fetchJson(`${world.rsUrl}/v1/streams/transactions/records`, {
-			headers: { Authorization: `Bearer ${outcome.accessToken}` },
-		});
-		assert.equal(direct.status, 403, "a package token is refused on a Core endpoint");
+		const direct = await fetchJson(
+			`${world.rsUrl}/v1/streams/transactions/records`,
+			{
+				headers: { Authorization: `Bearer ${outcome.accessToken}` },
+			},
+		);
+		assert.equal(
+			direct.status,
+			403,
+			"a package token is refused on a Core endpoint",
+		);
 		const access = await getGrantPackageAccess(outcome.packageId);
 		const members = (access?.members ?? []) as Parameters<
 			typeof createPackageRsClient
