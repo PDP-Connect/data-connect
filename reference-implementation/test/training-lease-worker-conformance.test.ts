@@ -342,6 +342,20 @@ describe("L7 conformance: resume after expiry", () => {
     assert.equal(s.guard("g1").canStartStep(MIN), false);
   });
 
+  it("a suspend shorter than the detection slack near expiry leaves no authority at exp", () => {
+    // The stall stays under suspendDetectionSlackMs plus uncertainty, so it
+    // is not detected; the monotonic deadline alone would still show time left.
+    const s = setup({ grants: ["g1"], stepMs: MIN, drainMs: 2 * MIN });
+    s.guard("g1").accept(lease(s.key, { grant_id: "g1" }, T0), s.jwks);
+    const expMs = T0 + 60 * MIN;
+    s.clock.advance(expMs - 2000 - s.clock.trueMs);
+    s.clock.suspend(2000);
+    assert.equal(s.clock.trueMs, expMs);
+    assert.equal(s.guard("g1").canStartStep(100), false);
+    const r = s.guard("g1").remainingMs();
+    assert.ok(r === null || r <= 0, `remaining ${r} ms at exp`);
+  });
+
   it("a restored checkpoint carries no authority", () => {
     const s = setup({ grants: ["g1"], stepMs: MIN, drainMs: 2 * MIN });
     const tok = lease(s.key, { grant_id: "g1" }, s.clock.trueMs);
@@ -476,6 +490,50 @@ describe("L7/L8 conformance: mixed-owner batch with one owner withdrawn", () => 
     assert.ok(g2After.length > 0, "g2 kept training after g1's lease ran out");
     assert.ok(g2After.every((st) => !st.grantIds.includes("g1")));
     assert.ok(s.recorder.ofType("drained").some((e) => e.grant_id === "g1"));
+  });
+
+  it("dropping an owner keeps another issuer's examples with the same grant_id", () => {
+    const s = setup({ grants: ["g1"], stepMs: 5 * MIN, drainMs: 6 * MIN });
+    const otherIss = "https://other-as.example";
+    const other: InputLineage = { iss: otherIss, clientId: CLIENT, grantId: "g1" };
+    const otherKey = generateEd25519KeyPair("k-other");
+    const otherGuard = new GrantAuthorityGuard(other, s.clock, s.recorder, {
+      drainMs: 6 * MIN,
+      safetyMarginMs: 1000,
+      maxClockUncertaintyMs: 5000,
+      suspendDetectionSlackMs: 2000,
+    });
+    // Insert the other issuer's guard first, so a bare grant_id lookup finds it.
+    const own = s.guard("g1");
+    s.guards.clear();
+    s.guards.set(lineageKey(other), otherGuard);
+    s.guards.set(lineageKey(lineage("g1")), own);
+    s.guard("g1").accept(lease(s.key, { grant_id: "g1" }, T0), s.jwks);
+    s.clock.advance(57 * MIN);
+    otherGuard.accept(
+      lease(otherKey, { grant_id: "g1", iss: otherIss }, s.clock.trueMs),
+      jwksOf(otherKey),
+    );
+    const otherExamples = Array.from({ length: 2 }, (_, i) => ({
+      id: `other-${i}`,
+      lineage: other,
+      value: 1,
+    }));
+    s.trainer.enqueue(otherExamples);
+    s.trainer.queue.unshift(...examples("g1", 2));
+    const out = s.trainer.step();
+    assert.equal(out.kind, "completed");
+    assert.deepEqual(
+      out.kind === "completed" && out.step.exampleIds,
+      ["other-0", "other-1"],
+    );
+    const stopped = s.recorder
+      .ofType("admission_stopped")
+      .find((e) => e.grant_id === "g1");
+    assert.equal(
+      stopped?.deadline_trusted_ms,
+      s.guard("g1").deadlineTrustedMs,
+    );
   });
 
   it("pauses the whole job when the policy says one owner's data cannot be removed", () => {

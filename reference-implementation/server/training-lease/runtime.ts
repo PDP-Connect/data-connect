@@ -7,7 +7,8 @@
  *
  * OFF BY DEFAULT. Enabled only by `ServerOpts.experimentalAiTrainingLeases`
  * or `PDPP_EXPERIMENTAL_AI_TRAINING_LEASES=1` plus
- * `PDPP_TRAINING_AUTHORITY_DIR`. While no runtime is installed, every AS path
+ * `PDPP_TRAINING_AUTHORITY_DIR` and `PDPP_TRAINING_AUTHORITY_JOURNAL_DIR`
+ * (outside the authority directory). While no runtime is installed, every AS path
  * behaves exactly as before: a detail carrying `processing_permissions` is
  * rejected with `invalid_authorization_details` (Core's reserved-identifier
  * gate) and nothing is advertised.
@@ -18,7 +19,7 @@
  * PROTOTYPE: not for merge until the AI Training Profile is agreed.
  */
 import { randomBytes } from "node:crypto";
-import { join } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { TrainingAuthorityStore } from "../../lib/training-lease/authority-store.ts";
 import { AI_TRAINING_PERMISSION } from "../../lib/training-lease/constants.ts";
 import { LeaseCredentialStore } from "../../lib/training-lease/credential-store.ts";
@@ -28,8 +29,11 @@ export { AI_TRAINING_PERMISSION };
 export interface TrainingLeaseRuntimeOptions {
   /** Directory for the authority store file. */
   storeDir: string;
-  /** Directory for the journal. MUST be outside every backup-restore path. */
-  journalDir?: string;
+  /**
+   * Directory for the journal. MUST be outside every backup-restore path, so
+   * it may not be the store directory or inside it.
+   */
+  journalDir: string;
   issuer: string;
   nodeId?: string;
   now?: () => number;
@@ -63,11 +67,29 @@ export function installTrainingLeaseRuntime(
   current = runtime;
 }
 
+/**
+ * A journal restored together with the store would restore the withdrawals it
+ * is meant to protect. Refuse the layouts where that is the default.
+ */
+function assertJournalOutsideStore(storeDir: string, journalDir: string): void {
+  const rel = relative(resolve(storeDir), resolve(journalDir));
+  const outside = rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel);
+  if (!outside) {
+    throw new Error(
+      "the training authority journal directory must be outside the authority store directory",
+    );
+  }
+}
+
 export function createTrainingLeaseRuntime(
   opts: TrainingLeaseRuntimeOptions,
 ): TrainingLeaseRuntime {
   const now = opts.now ?? Date.now;
-  const journalDir = opts.journalDir ?? opts.storeDir;
+  const journalDir = opts.journalDir;
+  if (!journalDir) {
+    throw new Error("the training authority store needs a journal directory");
+  }
+  assertJournalOutsideStore(opts.storeDir, journalDir);
   const storePath = join(opts.storeDir, "training-authority.sqlite");
   const store = TrainingAuthorityStore.open({
     storePath,
@@ -96,11 +118,15 @@ export function createTrainingLeaseRuntime(
   };
 }
 
-/** Env-driven enablement, mirroring the other `PDPP_*` toggles. Off unless both are set. */
+/**
+ * Env-driven enablement, mirroring the other `PDPP_*` toggles. Off unless the
+ * flag is set; then both directories are required. The issuer is resolved by
+ * the caller once the AS listens. Throws on an unsafe layout, so startup can
+ * fail before anything listens.
+ */
 export function trainingLeaseOptionsFromEnv(
   env: NodeJS.ProcessEnv,
-  issuer: string,
-): TrainingLeaseRuntimeOptions | null {
+): Omit<TrainingLeaseRuntimeOptions, "issuer"> | null {
   if (env.PDPP_EXPERIMENTAL_AI_TRAINING_LEASES !== "1") {
     return null;
   }
@@ -110,13 +136,14 @@ export function trainingLeaseOptionsFromEnv(
       "PDPP_EXPERIMENTAL_AI_TRAINING_LEASES=1 requires PDPP_TRAINING_AUTHORITY_DIR",
     );
   }
-  return {
-    issuer,
-    storeDir,
-    ...(env.PDPP_TRAINING_AUTHORITY_JOURNAL_DIR
-      ? { journalDir: env.PDPP_TRAINING_AUTHORITY_JOURNAL_DIR }
-      : {}),
-  };
+  const journalDir = env.PDPP_TRAINING_AUTHORITY_JOURNAL_DIR;
+  if (!journalDir) {
+    throw new Error(
+      "PDPP_EXPERIMENTAL_AI_TRAINING_LEASES=1 requires PDPP_TRAINING_AUTHORITY_JOURNAL_DIR, outside PDPP_TRAINING_AUTHORITY_DIR",
+    );
+  }
+  assertJournalOutsideStore(storeDir, journalDir);
+  return { storeDir, journalDir };
 }
 
 // ─── Core: closed issuance of processing_permissions ────────────────────────

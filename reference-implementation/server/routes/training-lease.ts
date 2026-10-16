@@ -256,6 +256,23 @@ export function mountTrainingLease(
       ) {
         return res.status(400).json(NO_LEASE);
       }
+      // Bearer bootstrap is for public clients only. Ask the token endpoint's
+      // own client authentication: a client registered for private_key_jwt
+      // fails without its assertion.
+      try {
+        const publicClient = await ctx.authenticateOAuthTokenClient({
+          baseUrl,
+          clientAssertion: undefined,
+          clientAssertionType: undefined,
+          clientId: info.client_id,
+          tokenEndpoint: endpoint,
+        });
+        if (publicClient !== info.client_id) {
+          return res.status(400).json(NO_LEASE);
+        }
+      } catch {
+        return res.status(400).json(NO_LEASE);
+      }
       const out = await issueIfLive(rt, grantId, info.client_id);
       if (!out) {
         return res.status(400).json(NO_LEASE);
@@ -264,7 +281,11 @@ export function mountTrainingLease(
         clientId: info.client_id,
         grantId,
         jkt: dpop.jkt,
+        proofJti: dpop.jti,
       });
+      if (!leaseCredential) {
+        return res.status(400).json(NO_LEASE);
+      }
       return res
         .status(200)
         .json({ ...leaseBody(out, rt), lease_credential: leaseCredential });
@@ -303,6 +324,20 @@ export function mountTrainingLease(
     return null;
   }
 
+  /** The owner token's subject must own the grant. Unknown and not-yours look the same. */
+  async function ownsGrant(
+    rt: TrainingLeaseRuntime,
+    grantId: string,
+    owner: IntrospectInfo,
+  ): Promise<boolean> {
+    if (!owner.subject_id) {
+      return false;
+    }
+    const grant = await ctx.readGrantForProcessing(grantId);
+    const subject = grant?.subject_id ?? rt.store.get(grantId)?.subject_id;
+    return subject === owner.subject_id;
+  }
+
   async function ownerStatus(rt: TrainingLeaseRuntime, grantId: string) {
     const grant = await ctx.readGrantForProcessing(grantId);
     let status = rt.store.status(grantId);
@@ -331,11 +366,15 @@ export function mountTrainingLease(
     if (!rt) {
       return res.status(404).json({ error: "not_found" });
     }
-    if (!(await requireOwner(req, res))) {
+    const owner = await requireOwner(req, res);
+    if (!owner) {
       return;
     }
     const grantId = req.params.grantId as string;
-    if (rt.store.status(grantId).state === "unknown") {
+    if (
+      rt.store.status(grantId).state === "unknown" ||
+      !(await ownsGrant(rt, grantId, owner))
+    ) {
       return res.status(404).json({ error: "not_found" });
     }
     return res.status(200).json(await ownerStatus(rt, grantId));
@@ -346,21 +385,25 @@ export function mountTrainingLease(
     if (!rt) {
       return res.status(404).json({ error: "not_found" });
     }
-    if (!(await requireOwner(req, res))) {
+    const owner = await requireOwner(req, res);
+    if (!owner) {
       return;
     }
     const grantId = req.params.grantId as string;
+    if (!(await ownsGrant(rt, grantId, owner))) {
+      return res.status(404).json({ error: "not_found" });
+    }
     try {
       const out = rt.store.withdraw({ grantId, reason: "training_withdrawn" });
       if (out.state === "unknown_grant") {
         return res.status(404).json({ error: "not_found" });
       }
     } catch {
-      return res.status(202).json({
-        grant_id: grantId,
-        owner_message: "Training withdrawal is pending.",
-        state: "pending",
-        training_stops_by: null,
+      // Nothing durable records this request, so it is not accepted. "pending"
+      // is only for a revoked grant, whose revocation is the durable intent.
+      return res.status(503).json({
+        error: "temporarily_unavailable",
+        error_description: "Training withdrawal was not recorded. Retry.",
       });
     }
     return res.status(200).json(await ownerStatus(rt, grantId));

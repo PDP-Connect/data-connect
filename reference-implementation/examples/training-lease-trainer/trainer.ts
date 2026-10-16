@@ -82,25 +82,26 @@ export class ToyTrainer {
     return { admitted, refused };
   }
 
-  #dropOwner(grantId: string, reason: string): void {
+  #dropOwner(lineage: InputLineage, reason: string): void {
+    // Match the same lineage the guard lookup uses: two issuers may share a grant_id.
+    const key = lineageKey(lineage);
     let dropped = 0;
     for (let i = this.queue.length - 1; i >= 0; i -= 1) {
-      if (this.queue[i]?.lineage.grantId === grantId) {
+      const ex = this.queue[i];
+      if (ex && lineageKey(ex.lineage) === key) {
         this.queue.splice(i, 1);
         dropped += 1;
       }
     }
     this.#o.recorder.record({
       type: "admission_stopped",
-      grant_id: grantId,
+      grant_id: lineage.grantId,
       reason,
-      deadline_trusted_ms:
-        [...this.#o.guards.values()].find((g) => g.grantId === grantId)
-          ?.deadlineTrustedMs ?? null,
+      deadline_trusted_ms: this.#guardFor(lineage)?.deadlineTrustedMs ?? null,
     });
     this.#o.recorder.record({
       type: "drained",
-      grant_id: grantId,
+      grant_id: lineage.grantId,
       examples_dropped: dropped,
     });
   }
@@ -133,10 +134,7 @@ export class ToyTrainer {
           });
           return { kind: "paused", grantId: blocked.grantId };
         }
-        this.#dropOwner(
-          blocked.grantId,
-          "owner_authority_insufficient_for_step",
-        );
+        this.#dropOwner(blocked, "owner_authority_insufficient_for_step");
         continue;
       }
       return this.#run(batch, [...owners.values()]);

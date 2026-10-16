@@ -23,8 +23,10 @@ import {
   validateLeaseStatic,
 } from "../lib/training-lease/worker.ts";
 import { getDb } from "../server/db.ts";
+import { getTrainingLeaseRuntime } from "../server/training-lease/runtime.ts";
 import {
   fetchJson,
+  issueOwnerToken,
   issueTrainingGrant,
   json,
   leaseExpMs,
@@ -65,6 +67,9 @@ describe("flag off: the Core gate and unchanged behavior", () => {
 describe("flag on: issuance gate and consent binding", () => {
   it("rotating body client_id does not reset the caller's rate-limit window", async () => {
     const storeDir = mkdtempSync(join(tmpdir(), "pdpp-lease-rate-limit-"));
+    const journalDir = mkdtempSync(
+      join(tmpdir(), "pdpp-lease-rate-limit-journal-"),
+    );
     try {
       await withServer(
         true,
@@ -84,6 +89,7 @@ describe("flag on: issuance gate and consent binding", () => {
         },
         {
           experimentalAiTrainingLeases: {
+            journalDir,
             storeDir,
             now: () => Date.UTC(2026, 9, 8, 12),
             rateLimitPerMinute: 2,
@@ -92,6 +98,7 @@ describe("flag on: issuance gate and consent binding", () => {
       );
     } finally {
       rmSync(storeDir, { recursive: true, force: true });
+      rmSync(journalDir, { recursive: true, force: true });
     }
   });
 
@@ -365,7 +372,115 @@ describe("flag on: leases, endings and the owner's stop time", () => {
   });
 });
 
+describe("flag on: owner routes are scoped to the grant's owner", () => {
+  it("another subject's owner token cannot read or withdraw training", async () => {
+    await withServer(true, async (h) => {
+      const g = await issueTrainingGrant(h);
+      const c = new PublicLeaseClient(h, g.grant.grant_id);
+      assert.equal((await c.bootstrap(g.token)).status, 200);
+      const otherOwner = await issueOwnerToken(h.asUrl, "owner_other");
+      const url = `${h.asUrl}/v1/owner/grants/${g.grant.grant_id}/training`;
+      const auth = { Authorization: `Bearer ${otherOwner}` };
+      const read = await fetchJson(url, { headers: auth });
+      assert.equal(read.status, 404, JSON.stringify(read.body));
+      const withdraw = await fetchJson(`${url}/withdraw`, {
+        headers: auth,
+        method: "POST",
+      });
+      assert.equal(withdraw.status, 404, JSON.stringify(withdraw.body));
+      const own = await fetchJson<{ state: string }>(url, {
+        headers: { Authorization: `Bearer ${h.ownerToken}` },
+      });
+      assert.equal(own.body.state, "active");
+      assert.equal((await c.renew()).status, 200);
+    });
+  });
+});
+
+describe("flag on: training withdrawal failure", () => {
+  it("a withdrawal that fails before the tombstone is a retriable error, not accepted", async () => {
+    await withServer(true, async (h) => {
+      const g = await issueTrainingGrant(h);
+      const rt = getTrainingLeaseRuntime();
+      assert.ok(rt);
+      const original = rt.store.withdraw.bind(rt.store);
+      rt.store.withdraw = () => {
+        throw new Error("journal unavailable");
+      };
+      const url = `${h.asUrl}/v1/owner/grants/${g.grant.grant_id}/training`;
+      const auth = { Authorization: `Bearer ${h.ownerToken}` };
+      let failed: { status: number; body: Record<string, unknown> };
+      try {
+        failed = await fetchJson(`${url}/withdraw`, {
+          headers: auth,
+          method: "POST",
+        });
+      } finally {
+        rt.store.withdraw = original;
+      }
+      assert.equal(failed.status, 503, JSON.stringify(failed.body));
+      assert.notEqual(failed.body.state, "pending");
+      const retry = await fetchJson<{ state: string }>(`${url}/withdraw`, {
+        headers: auth,
+        method: "POST",
+      });
+      assert.equal(retry.status, 200);
+      assert.equal(retry.body.state, "withdrawn");
+    });
+  });
+});
+
 describe("flag on: L5 public-client credential chain", () => {
+  it("a captured proof cannot be replayed with the successor credential", async () => {
+    await withServer(true, async (h) => {
+      const g = await issueTrainingGrant(h);
+      const c = new PublicLeaseClient(h, g.grant.grant_id);
+      assert.equal((await c.bootstrap(g.token)).status, 200);
+      const g0 = c.credential as string;
+      const captured = c.proof();
+      const first = await c.renew({ credential: g0, proof: captured });
+      assert.equal(first.status, 200);
+      const g1 = first.body.lease_credential as string;
+      // The intended idempotent retry: same proof, same credential.
+      const retry = await c.renew({
+        adopt: false,
+        credential: g0,
+        proof: captured,
+      });
+      assert.equal(retry.status, 200);
+      assert.equal(retry.body.lease_credential, g1);
+      // The same proof with the successor is not a retry.
+      const replay = await c.renew({
+        adopt: false,
+        credential: g1,
+        proof: captured,
+      });
+      assert.equal(replay.status, 400, JSON.stringify(replay.body));
+      assert.equal((await c.renew()).status, 200, "the holder continues");
+    });
+  });
+
+  it("a captured bootstrap proof cannot be replayed at renewal", async () => {
+    await withServer(true, async (h) => {
+      const g = await issueTrainingGrant(h);
+      const c = new PublicLeaseClient(h, g.grant.grant_id);
+      const bootProof = c.proof();
+      const boot = await fetchJson<{ lease_credential?: string }>(
+        `${h.asUrl}/oauth/processing-lease`,
+        json(
+          { grant_id: g.grant.grant_id },
+          { Authorization: `Bearer ${g.token}`, DPoP: bootProof },
+        ),
+      );
+      assert.equal(boot.status, 200);
+      c.credential = boot.body.lease_credential as string;
+      const replay = await c.renew({ adopt: false, proof: bootProof });
+      assert.equal(replay.status, 400, JSON.stringify(replay.body));
+      assert.equal((await c.renew()).status, 200, "the holder continues");
+    });
+  });
+
+
   it("a retry of the second accepted proof after successor use keeps the chain active", async () => {
     await withServer(true, async (h) => {
       const g = await issueTrainingGrant(h);

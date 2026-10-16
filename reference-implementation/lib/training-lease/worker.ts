@@ -454,7 +454,13 @@ export class GrantAuthorityGuard {
     if (this.#detectStall(trusted)) {
       return null;
     }
-    return this.#deadlineMono - this.#clock.monotonicMs();
+    // A stall below the detection slack still moves real time. Bound the
+    // monotonic answer by the latest time the trusted reading allows.
+    return Math.min(
+      this.#deadlineMono - this.#clock.monotonicMs(),
+      (this.#deadlineTrustedMs ?? Number.NEGATIVE_INFINITY) -
+        (trusted.nowMs + trusted.uncertaintyMs),
+    );
   }
 
   /** May new examples of this owner enter the queue? Closes `drainMs` early. */

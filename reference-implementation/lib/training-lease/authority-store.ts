@@ -10,9 +10,10 @@
  * Design (as built, after the first version failed its restore tests):
  *
  * - The authority is an append-only journal that MUST sit outside every
- *   restore path. Every authority creation, every issued lease (its `exp`),
- *   and every withdrawal (tombstone) is appended and fsynced before it takes
- *   effect. O_APPEND gives the entries one total order.
+ *   restore path. Every authority creation, every issued lease (its `exp`
+ *   and signing key), every withdrawal (tombstone) and every emergency key
+ *   revocation is appended and fsynced before it takes effect.
+ *   O_APPEND gives the entries one total order.
  * - The SQLite file is a projection of the journal, rebuilt by replay on
  *   every open. Restoring it from a backup loses nothing: the next open
  *   replays what the backup missed.
@@ -154,6 +155,12 @@ type JournalEntry =
       grant_id: string;
       reason: string;
       at: number;
+    }
+  | {
+      t: "key_revoked";
+      id: string;
+      kid: string;
+      at: number;
     };
 
 interface GrantFacts {
@@ -179,6 +186,10 @@ class JournalIndex {
   #seq = 0;
   #remainder = "";
   readonly grants = new Map<string, GrantFacts>();
+  /** L9 emergency revocations. A restored store must not re-activate these. */
+  readonly revokedKids = new Set<string>();
+  /** Latest `exp` signed by each key, so a restored store keeps retired keys published. */
+  readonly keyMaxExpMs = new Map<string, number>();
   /** Sequence numbers, only for entries this node is waiting on (see watch). */
   readonly #watched = new Map<string, number | null>();
 
@@ -255,10 +266,18 @@ class JournalIndex {
     if (this.#watched.has(e.id)) {
       this.#watched.set(e.id, this.#seq);
     }
+    if (e.t === "key_revoked") {
+      this.revokedKids.add(e.kid);
+      return;
+    }
     const f = this.facts(e.grant_id);
     if (e.t === "create") {
       f.create ??= e;
     } else if (e.t === "issue") {
+      this.keyMaxExpMs.set(
+        e.kid,
+        Math.max(this.keyMaxExpMs.get(e.kid) ?? 0, e.exp_ms),
+      );
       // An issue entry after the tombstone is never returned to a client, so
       // it does not move T.
       if (!f.tombstone) {
@@ -391,6 +410,18 @@ export class TrainingAuthorityStore {
           grantId,
         );
       }
+    }
+    const keyRaise = this.#store.prepare(
+      "UPDATE training_lease_signing_keys SET max_exp_ms = MAX(COALESCE(max_exp_ms, 0), ?) WHERE kid = ?",
+    );
+    for (const [kid, expMs] of this.#journal.keyMaxExpMs) {
+      keyRaise.run(expMs, kid);
+    }
+    const revoke = this.#store.prepare(
+      "UPDATE training_lease_signing_keys SET status = 'revoked' WHERE kid = ?",
+    );
+    for (const kid of this.#journal.revokedKids) {
+      revoke.run(kid);
     }
   }
 
@@ -732,26 +763,35 @@ export class TrainingAuthorityStore {
     return kid;
   }
 
-  /** Emergency revocation: the key leaves the JWKS at once. Workers that see this stop. */
+  /**
+   * Emergency revocation: the key leaves the JWKS at once. Workers that see
+   * this stop. Journaled first, so restoring the store cannot re-activate it.
+   */
   revokeSigningKey(kid: string): void {
-    this.#store
-      .prepare(
-        "UPDATE training_lease_signing_keys SET status = 'revoked' WHERE kid = ?",
-      )
-      .run(kid);
+    appendJournal(this.#o.journalPath, {
+      t: "key_revoked",
+      id: randomUUID(),
+      kid,
+      at: this.#o.now(),
+    });
+    this.sync();
     this.#ensureSigningKey();
   }
 
   jwks(): { keys: OkpPublicJwk[] } {
+    // The projection may predate a revocation another node journaled.
+    this.#journal.refresh();
     const rows = this.#store
       .prepare(
-        `SELECT public_jwk_json FROM training_lease_signing_keys
+        `SELECT kid, public_jwk_json FROM training_lease_signing_keys
           WHERE status = 'active' OR (status = 'retired' AND COALESCE(max_exp_ms, 0) > ?)
           ORDER BY created_at_ms DESC`,
       )
-      .all(this.#o.now()) as Array<{ public_jwk_json: string }>;
+      .all(this.#o.now()) as Array<{ kid: string; public_jwk_json: string }>;
     return {
-      keys: rows.map((r) => JSON.parse(r.public_jwk_json) as OkpPublicJwk),
+      keys: rows
+        .filter((r) => !this.#journal.revokedKids.has(r.kid))
+        .map((r) => JSON.parse(r.public_jwk_json) as OkpPublicJwk),
     };
   }
 }

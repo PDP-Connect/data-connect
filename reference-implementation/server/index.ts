@@ -833,7 +833,8 @@ interface ServerOpts {
   /**
    * PROTOTYPE, off by default: the AI-training processing permission and its
    * lease endpoint (draft AI Training Profile). Env equivalent:
-   * PDPP_EXPERIMENTAL_AI_TRAINING_LEASES=1 with PDPP_TRAINING_AUTHORITY_DIR.
+   * PDPP_EXPERIMENTAL_AI_TRAINING_LEASES=1 with PDPP_TRAINING_AUTHORITY_DIR
+   * and PDPP_TRAINING_AUTHORITY_JOURNAL_DIR (outside the authority directory).
    */
   experimentalAiTrainingLeases?: (Omit<TrainingLeaseRuntimeOptions, "issuer"> & { issuer?: string }) | null;
   clientLogoFetchDependencies?: import("./client-logo-cache.ts").FetchClientLogoOptions;
@@ -9418,6 +9419,13 @@ export async function startServer(opts: ServerOpts = {}) {
   // biome-ignore lint/style/useDestructuring: Explicit property or positional access documents this compatibility boundary.
   const bindHost = reachabilityContract.bindHost;
 
+  // PROTOTYPE, off by default: resolve the AI-training lease configuration
+  // before anything listens, so a bad environment fails startup cleanly.
+  const trainingLeaseOptions: ServerOpts["experimentalAiTrainingLeases"] =
+    opts.experimentalAiTrainingLeases === undefined
+      ? trainingLeaseOptionsFromEnv(process.env)
+      : opts.experimentalAiTrainingLeases;
+
   const asServer = await asApp.listen(requestedAsPort, bindHost);
   if (typeof (asApp as unknown as Record<string, unknown>).__pdppStreamingUpgradeHandler === "function") {
     asServer.on("upgrade", (req, socket, head) => {
@@ -9431,6 +9439,30 @@ export async function startServer(opts: ServerOpts = {}) {
     });
   }
   const asPort = (asServer.address() as import("net").AddressInfo).port;
+  // Install the training lease runtime once the AS issuer is known (ephemeral
+  // test ports resolve only after listen), before the RS listens and before
+  // any timer or worker starts. If the store cannot open, close the AS
+  // listener so the rejected startServer leaves nothing running.
+  if (trainingLeaseOptions) {
+    let trainingLeaseRuntime: ReturnType<typeof createTrainingLeaseRuntime>;
+    try {
+      trainingLeaseRuntime = createTrainingLeaseRuntime({
+        ...trainingLeaseOptions,
+        issuer: trainingLeaseOptions.issuer ?? configuredAsIssuer ?? `http://localhost:${asPort}`,
+      });
+    } catch (err) {
+      asServer.closeAllConnections?.();
+      await new Promise<void>((resolve) => asServer.close(() => resolve()));
+      throw err;
+    }
+    installTrainingLeaseRuntime(trainingLeaseRuntime);
+    asServer.once("close", () => {
+      if (getTrainingLeaseRuntime() === trainingLeaseRuntime) {
+        installTrainingLeaseRuntime(null);
+      }
+      trainingLeaseRuntime.close();
+    });
+  }
   const bindUrlHost = bindHost.includes(":") && !bindHost.startsWith("[") ? `[${bindHost}]` : bindHost;
   const selfCallUrlHost = selfCallUrlHostForBindHost(bindHost);
   const asPublicUrl = configuredAsPublicUrl || configuredAsIssuer || `http://localhost:${asPort}`;
@@ -9824,25 +9856,6 @@ export async function startServer(opts: ServerOpts = {}) {
   asServer.once("close", () => {
     releaseDeliveryWorkerLease(0);
   });
-  // PROTOTYPE, off by default: install the AI-training lease runtime once the
-  // AS issuer is known (ephemeral test ports resolve only after listen).
-  const trainingLeaseOptions =
-    opts.experimentalAiTrainingLeases === undefined
-      ? trainingLeaseOptionsFromEnv(process.env, configuredAsIssuer ?? `http://localhost:${asPort}`)
-      : opts.experimentalAiTrainingLeases;
-  if (trainingLeaseOptions) {
-    const trainingLeaseRuntime = createTrainingLeaseRuntime({
-      ...trainingLeaseOptions,
-      issuer: trainingLeaseOptions.issuer ?? configuredAsIssuer ?? `http://localhost:${asPort}`,
-    });
-    installTrainingLeaseRuntime(trainingLeaseRuntime);
-    asServer.once("close", () => {
-      if (getTrainingLeaseRuntime() === trainingLeaseRuntime) {
-        installTrainingLeaseRuntime(null);
-      }
-      trainingLeaseRuntime.close();
-    });
-  }
   rsServer.once("close", () => {
     releaseDeliveryWorkerLease(1);
   });

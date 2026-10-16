@@ -697,4 +697,44 @@ describe("L9 signing keys", () => {
     );
     store.close();
   });
+
+  it("a restore from a backup taken before an emergency revocation keeps the key revoked", () => {
+    const paths = tempPaths();
+    const clock = { now: T0 };
+    let store = openNode(paths, clock);
+    seed(store);
+    const lease = store.issueLease({ grantId: "grt_1", clientId: "client_1" });
+    assert.ok(lease.ok);
+    if (!lease.ok) return;
+    const bak = join(paths.dir, "backup.sqlite");
+    backup(paths.storePath, bak);
+    store.revokeSigningKey(lease.kid);
+    store.close();
+    restoreUnderRunningNodes(paths.storePath, bak);
+    store = openNode(paths, clock, { nodeId: "node-b" });
+    assert.ok(!store.jwks().keys.some((k) => k.kid === lease.kid));
+    const next = store.issueLease({ grantId: "grt_1", clientId: "client_1" });
+    assert.ok(next.ok);
+    assert.notEqual(next.ok && next.kid, lease.kid);
+    store.close();
+  });
+
+  it("a restored key watermark does not drop a retired key before its last lease expires", () => {
+    const paths = tempPaths();
+    const clock = { now: T0 };
+    let store = openNode(paths, clock);
+    seed(store);
+    const bak = join(paths.dir, "backup.sqlite");
+    backup(paths.storePath, bak);
+    const lease = store.issueLease({ grantId: "grt_1", clientId: "client_1" });
+    assert.ok(lease.ok);
+    if (!lease.ok) return;
+    store.close();
+    restoreUnderRunningNodes(paths.storePath, bak);
+    clock.now = T0 + 10 * MIN;
+    store = openNode(paths, clock, { nodeId: "node-b" });
+    store.rotateSigningKey();
+    assert.ok(store.jwks().keys.some((k) => k.kid === lease.kid));
+    store.close();
+  });
 });

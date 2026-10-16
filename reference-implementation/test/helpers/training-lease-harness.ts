@@ -82,7 +82,10 @@ export const json = (
   method: "POST",
 });
 
-export async function issueOwnerToken(asUrl: string): Promise<string> {
+export async function issueOwnerToken(
+  asUrl: string,
+  subjectId = "owner_local",
+): Promise<string> {
   const clientId = "cli_longview";
   const form = (o: Record<string, string>): RequestInit => ({
     body: new URLSearchParams(o).toString(),
@@ -95,7 +98,7 @@ export async function issueOwnerToken(asUrl: string): Promise<string> {
   }>(`${asUrl}/oauth/device_authorization`, form({ client_id: clientId }));
   await fetch(
     `${asUrl}/device/approve`,
-    form({ subject_id: "owner_local", user_code: device.user_code }),
+    form({ subject_id: subjectId, user_code: device.user_code }),
   );
   const { body: token } = await fetchJson<{ access_token: string }>(
     `${asUrl}/oauth/token`,

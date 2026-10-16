@@ -13,6 +13,9 @@
  *   after the successor was used (L5's idempotent retry).
  * - Any other use of a predecessor after its successor was used is treated
  *   as theft: the chain is revoked and the owner can see it.
+ * - A DPoP proof (`jkt`, `jti`) is bound to the one credential it was first
+ *   accepted with, or to the bootstrap. A captured proof cannot be replayed
+ *   with the successor it returned.
  *
  * PROTOTYPE: experimental AI Training Profile work, off by default.
  */
@@ -54,6 +57,12 @@ CREATE TABLE IF NOT EXISTS lease_credential_requests (
   proof_jti TEXT NOT NULL,
   PRIMARY KEY (cred_hash, proof_jti)
 );
+CREATE TABLE IF NOT EXISTS lease_credential_proofs (
+  jkt TEXT NOT NULL,
+  proof_jti TEXT NOT NULL,
+  cred_hash TEXT NOT NULL,
+  PRIMARY KEY (jkt, proof_jti)
+);
 INSERT OR IGNORE INTO lease_credential_requests(cred_hash, proof_jti)
   SELECT cred_hash, first_proof_jti FROM lease_credentials WHERE first_proof_jti IS NOT NULL;
 `;
@@ -73,6 +82,7 @@ export type RenewOutcome =
         | "unknown_credential"
         | "chain_revoked"
         | "key_mismatch"
+        | "proof_reused"
         | "theft_detected";
     };
 
@@ -88,6 +98,9 @@ export interface ChainView {
 function hash(value: string): string {
   return createHash("sha256").update(value).digest("base64url");
 }
+
+/** Proof binding for a bootstrap. Never equal to a credential hash. */
+const BOOTSTRAP_BINDING = "bootstrap";
 
 export class LeaseCredentialStore {
   readonly #db: SqliteDatabase;
@@ -140,12 +153,28 @@ export class LeaseCredentialStore {
   /**
    * Start a chain for a grant. The prototype bootstraps with the grant's
    * access token (see the route); a newer bootstrap supersedes older chains.
+   * Returns null when the DPoP proof was already used.
    */
-  bootstrap(input: { grantId: string; clientId: string; jkt: string }): string {
+  bootstrap(input: {
+    grantId: string;
+    clientId: string;
+    jkt: string;
+    proofJti: string;
+  }): string | null {
     const credential = `plc_${randomBytes(32).toString("base64url")}`;
     const now = this.#now();
+    let fresh = false;
     this.#db
       .transaction(() => {
+        fresh =
+          this.#db
+            .prepare(
+              "INSERT OR IGNORE INTO lease_credential_proofs(jkt, proof_jti, cred_hash) VALUES (?, ?, ?)",
+            )
+            .run(input.jkt, input.proofJti, BOOTSTRAP_BINDING).changes === 1;
+        if (!fresh) {
+          return;
+        }
         this.#db
           .prepare(
             `UPDATE lease_credential_chains SET status = 'revoked', revoked_reason = 'superseded', revoked_at_ms = ?
@@ -165,7 +194,7 @@ export class LeaseCredentialStore {
           .run(hash(credential), chainId, now);
       })
       .immediate();
-    return credential;
+    return fresh ? credential : null;
   }
 
   renew(input: {
@@ -207,6 +236,24 @@ export class LeaseCredentialStore {
           // treated as theft, because it proves nothing about the legitimate holder.
           out = { ok: false, reason: "key_mismatch" };
           return;
+        }
+        // Without this, a captured proof replayed with the successor it
+        // returned would advance the chain without the private key.
+        const bound = this.#db
+          .prepare(
+            "SELECT cred_hash FROM lease_credential_proofs WHERE jkt = ? AND proof_jti = ?",
+          )
+          .get(input.jkt, input.proofJti) as { cred_hash: string } | undefined;
+        if (bound && bound.cred_hash !== h) {
+          out = { ok: false, reason: "proof_reused" };
+          return;
+        }
+        if (!bound) {
+          this.#db
+            .prepare(
+              "INSERT INTO lease_credential_proofs(jkt, proof_jti, cred_hash) VALUES (?, ?, ?)",
+            )
+            .run(input.jkt, input.proofJti, h);
         }
         const successor = this.#derive(input.credential);
         const base = { grantId: chain.grant_id, clientId: chain.client_id };

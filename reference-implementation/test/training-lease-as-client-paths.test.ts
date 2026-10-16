@@ -328,4 +328,32 @@ describe("L5: confidential client authenticates as at the token endpoint", () =>
       { cimdFetchDependencies } as never,
     );
   });
+
+  it("refuses a bearer-only bootstrap for a private_key_jwt client", async () => {
+    await withServer(
+      true,
+      async (h) => {
+        const g = await authCodeTrainingGrant(h, {
+          clientId: c.clientId,
+          redirectUri: c.doc.redirect_uris[0] as string,
+          tokenAuth: (aud) => ({
+            client_assertion: assertion(c.clientId, aud, c.privateKey),
+            client_assertion_type:
+              "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+            client_id: c.clientId,
+          }),
+        });
+        const attacker = new PublicLeaseClient(h, g.grantId);
+        const boot = await attacker.bootstrap(g.accessToken);
+        assert.equal(boot.status, 400, JSON.stringify(boot.body));
+        assert.equal(boot.body.lease_credential, undefined);
+        const status = await fetchJson<{ credential_chains: unknown[] }>(
+          `${h.asUrl}/v1/owner/grants/${g.grantId}/training`,
+          { headers: { Authorization: `Bearer ${h.ownerToken}` } },
+        );
+        assert.deepEqual(status.body.credential_chains, []);
+      },
+      { cimdFetchDependencies } as never,
+    );
+  });
 });
