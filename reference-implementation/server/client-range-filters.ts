@@ -119,6 +119,29 @@ function dateSeconds(text: string): bigint | null {
 	return BigInt(date.getTime() / 1000);
 }
 
+// UTC days that ended with an inserted leap second (IERS bulletin C, 27 entries
+// through 2016-12-31). Core "Time constraint semantics" accepts :60 only on
+// these days. Extend when the IERS announces a new one.
+const LEAP_SECOND_DAYS = [
+	"1972-06-30", "1972-12-31", "1973-12-31", "1974-12-31", "1975-12-31", "1976-12-31",
+	"1977-12-31", "1978-12-31", "1979-12-31", "1981-06-30", "1982-06-30", "1983-06-30",
+	"1985-06-30", "1987-12-31", "1989-12-31", "1990-12-31", "1992-06-30", "1993-06-30",
+	"1994-06-30", "1995-12-31", "1997-06-30", "1998-12-31", "2005-12-31", "2008-12-31",
+	"2012-06-30", "2015-06-30", "2016-12-31",
+];
+// POSIX seconds of the midnight that follows each leap second, ascending.
+const LEAP_BOUNDARIES: bigint[] = LEAP_SECOND_DAYS.map((day) => dateSeconds(day)! + 86400n);
+
+// Position on a timeline that counts inserted leap seconds, so 23:59:60 orders
+// after :59 and before the next minute while equal instants stay equal.
+function leapCount(posixSeconds: bigint, inclusive: boolean): bigint {
+	let count = 0n;
+	for (const boundary of LEAP_BOUNDARIES) {
+		if (inclusive ? boundary <= posixSeconds : boundary < posixSeconds) count += 1n;
+	}
+	return count;
+}
+
 function parseValue(text: string, type: RangeType): ParsedValue | null {
 	if (type === "number" || type === "integer") {
 		const value = parseClientRangeDecimal(text);
@@ -133,14 +156,23 @@ function parseValue(text: string, type: RangeType): ParsedValue | null {
 	const [, day, hours, minutes, seconds, fraction = "", zone] = match;
 	const midnight = dateSeconds(day!);
 	const hour = Number(hours), minute = Number(minutes), second = Number(seconds);
-	if (midnight === null || hour > 23 || minute > 59 || second > 59) return null;
+	if (midnight === null || hour > 23 || minute > 59 || second > 60) return null;
 	let offset = 0;
 	if (zone!.toUpperCase() !== "Z") {
 		const offsetHour = Number(zone!.slice(1, 3)), offsetMinute = Number(zone!.slice(4, 6));
 		if (offsetHour > 23 || offsetMinute > 59) return null;
 		offset = (offsetHour * 60 + offsetMinute) * 60 * (zone![0] === "-" ? -1 : 1);
 	}
-	const whole = midnight + BigInt(hour * 3600 + minute * 60 + second - offset);
+	const posix = midnight + BigInt(hour * 3600 + minute * 60 + second - offset);
+	let whole: bigint;
+	if (second === 60) {
+		// Valid only as 23:59:60 UTC on an inserted-leap-second day: the posix
+		// value then equals the following midnight, a known boundary.
+		if (!LEAP_BOUNDARIES.includes(posix)) return null;
+		whole = posix + leapCount(posix, false);
+	} else {
+		whole = posix + leapCount(posix, true);
+	}
 	// Exact seconds with arbitrary decimal fraction; nanoseconds and finer are
 	// retained rather than truncated to Date's milliseconds.
 	const scale = 10n ** BigInt(fraction.length);

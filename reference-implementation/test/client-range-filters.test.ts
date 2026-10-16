@@ -87,7 +87,7 @@ test("exact decimals, invalid stored types, AND, and explicit lossless decimal a
 test("calendar dates, offsets, fractional instants and wrong temporal types", () => {
 	for (const value of ["2026-02-30", "2025-02-29", "2026-13-01", "2026-00-01", "2026-01-00", "2026-01-10T00:00:00Z", "2026-1-01"]) assert.equal(compile(value, "date").ok, false, value);
 	assert.equal(compile("2024-02-29", "date").ok, true);
-	for (const value of ["2026-01-10", "2026-02-30T00:00:00Z", "2026-01-10T00:00:00", "2026-01-10T24:00:00Z", "2026-01-10T00:60:00Z", "2026-01-10T00:00:00+24:00"]) assert.equal(compile(value, "date-time").ok, false, value);
+	for (const value of ["2026-01-10", "2026-02-30T00:00:00Z", "2026-01-10T00:00:00", "2026-01-10T24:00:00Z", "2026-01-10T00:60:00Z", "2026-01-10T00:00:00+24:00", "2026-01-10T23:59:60Z"]) assert.equal(compile(value, "date-time").ok, false, value);
 	const bound = filters("2026-01-10T00:00:00.000000001Z", "date-time");
 	assert.equal(matchesClientRangeFilters({ x: "2026-01-10T01:00:00+01:00" }, bound), false);
 	assert.equal(matchesClientRangeFilters({ x: "2026-01-10T00:00:00.000000001Z" }, bound), true);
@@ -181,4 +181,24 @@ test("all comparison operators, negative decimals and pre-epoch fractions", () =
 	assert.equal(matchesClientRangeFilters({ x: "1969-12-31T23:59:59.9Z" }, filters("1970-01-01T00:00:00Z", "date-time", "lt")), true);
 	const inherited = Object.create({ x: 1 });
 	assert.equal(matchesClientRangeFilters(inherited, filters("0")), false);
+});
+
+test("leap seconds: valid only on IERS days, ordered between :59 and the next minute (Core Time constraint semantics)", () => {
+	// 2016-12-31T23:59:60Z is a real leap second; 2017-01-01T00:00:00Z follows it.
+	assert.equal(compile("2016-12-31T23:59:60Z", "date-time").ok, true);
+	assert.equal(compile("2016-12-31T23:59:60.5Z", "date-time").ok, true);
+	// The same instant stated with an offset.
+	assert.equal(compile("2017-01-01T00:59:60+01:00", "date-time").ok, true);
+	// Not an inserted leap second.
+	for (const value of ["2016-12-30T23:59:60Z", "2017-06-30T23:59:60Z", "2016-12-31T22:59:60Z", "2016-12-31T23:58:60Z", "2016-12-31T23:59:61Z"]) assert.equal(compile(value, "date-time").ok, false, value);
+	const after59 = filters("2016-12-31T23:59:59.999999999Z", "date-time", "gt");
+	assert.equal(matchesClientRangeFilters({ x: "2016-12-31T23:59:60Z" }, after59), true);
+	const beforeNext = filters("2017-01-01T00:00:00Z", "date-time", "lt");
+	assert.equal(matchesClientRangeFilters({ x: "2016-12-31T23:59:60.999Z" }, beforeNext), true);
+	assert.equal(matchesClientRangeFilters({ x: "2017-01-01T00:00:00Z" }, beforeNext), false);
+	// An ordinary instant after the leap second still orders after earlier ones.
+	assert.equal(matchesClientRangeFilters({ x: "2017-01-01T00:00:00Z" }, filters("2016-12-31T23:59:60Z", "date-time", "gt")), true);
+	// Equal instants in different offsets stay equal.
+	assert.equal(matchesClientRangeFilters({ x: "2017-01-01T01:00:00+01:00" }, filters("2017-01-01T00:00:00Z", "date-time", "lte")), true);
+	assert.equal(matchesClientRangeFilters({ x: "2017-01-01T01:00:00+01:00" }, filters("2017-01-01T00:00:00Z", "date-time", "gte")), true);
 });
