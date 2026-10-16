@@ -77,7 +77,7 @@ test("shared fixtures cover every v1 enum combination exactly once", () => {
 						expected.add(
 							[display, engine, fallback, interaction, visibility].join("/"),
 						);
-	assert.equal(expected.size, 36);
+	assert.equal(expected.size, 64);
 	const seen = new Map<string, number>();
 	for (const fixture of fixtures.cases) {
 		const key = enumCombinationKey(fixture.policy);

@@ -27,13 +27,15 @@ pub(crate) enum EngineMode {
 pub(crate) enum DisplayBackend {
     InheritedHost,
     PrivateXvfb,
+    HiddenNative,
     ExternallyOwned,
 }
 
 impl DisplayBackend {
-    const ALL: [Self; 3] = [
+    const ALL: [Self; 4] = [
         Self::InheritedHost,
         Self::PrivateXvfb,
+        Self::HiddenNative,
         Self::ExternallyOwned,
     ];
 
@@ -47,6 +49,7 @@ impl DisplayBackend {
         match self {
             Self::InheritedHost => "inherited-host",
             Self::PrivateXvfb => "private-xvfb",
+            Self::HiddenNative => "hidden-native",
             Self::ExternallyOwned => "externally-owned",
         }
     }
@@ -57,6 +60,7 @@ impl DisplayBackend {
 pub(crate) enum NativeVisibility {
     Normal,
     IsolatedDisplay,
+    Concealed,
     NoWindow,
 }
 
@@ -111,6 +115,18 @@ impl PresentationPolicy {
         engine_mode: EngineMode::Headed,
         display_backend: DisplayBackend::PrivateXvfb,
         native_visibility: NativeVisibility::IsolatedDisplay,
+        interaction_presentation: InteractionPresentation::Companion,
+        fallback: Fallback::FailClosed,
+    };
+
+    /// Headed Chromium on the owner's desktop with its windows concealed
+    /// from launch. The owner reaches it through the companion; the host can
+    /// reveal it.
+    pub(crate) const HIDDEN_NATIVE: Self = Self {
+        version: PRESENTATION_POLICY_VERSION,
+        engine_mode: EngineMode::Headed,
+        display_backend: DisplayBackend::HiddenNative,
+        native_visibility: NativeVisibility::Concealed,
         interaction_presentation: InteractionPresentation::Companion,
         fallback: Fallback::FailClosed,
     };
@@ -176,7 +192,19 @@ impl PresentationPolicy {
         }
         if self.display_backend == DisplayBackend::InheritedHost {
             if self.native_visibility != NativeVisibility::Normal {
-                return Some("v1 has no adapter that hides a window on the owner's desktop".into());
+                return Some(
+                    "a window on the inherited display is shown normally; hiding it needs display_backend hidden-native"
+                        .into(),
+                );
+            }
+            return None;
+        }
+        if self.display_backend == DisplayBackend::HiddenNative {
+            if self.native_visibility != NativeVisibility::Concealed {
+                return Some(
+                    "display_backend hidden-native keeps the window on the owner's desktop concealed, so native_visibility must be concealed"
+                        .into(),
+                );
             }
             return None;
         }
@@ -204,6 +232,7 @@ impl PresentationPolicy {
     pub(crate) fn for_backend(backend: DisplayBackend) -> Option<Self> {
         match backend {
             DisplayBackend::PrivateXvfb => Some(Self::PRIVATE_XVFB),
+            DisplayBackend::HiddenNative => Some(Self::HIDDEN_NATIVE),
             DisplayBackend::InheritedHost | DisplayBackend::ExternallyOwned => None,
         }
     }
@@ -232,7 +261,9 @@ pub(crate) fn select_policy(
             let policy = DisplayBackend::from_name(name)
                 .and_then(PresentationPolicy::for_backend)
                 .ok_or_else(|| {
-                    format!("{BROWSER_DISPLAY_ENV} must be desktop or private-xvfb, not {name:?}")
+                    format!(
+                        "{BROWSER_DISPLAY_ENV} must be desktop, private-xvfb or hidden-native, not {name:?}"
+                    )
                 })?;
             if legacy_headless && !policy.headless() {
                 return Err(format!(
@@ -270,14 +301,19 @@ mod tests {
         const SPACES: [(&str, &[&str]); 5] = [
             (
                 "display_backend",
-                &["inherited-host", "private-xvfb", "externally-owned"],
+                &[
+                    "inherited-host",
+                    "private-xvfb",
+                    "hidden-native",
+                    "externally-owned",
+                ],
             ),
             ("engine_mode", &["headed", "headless"]),
             ("fallback", &["fail-closed"]),
             ("interaction_presentation", &["companion", "native"]),
             (
                 "native_visibility",
-                &["normal", "isolated-display", "no-window"],
+                &["normal", "isolated-display", "concealed", "no-window"],
             ),
         ];
         let object = policy.as_object()?;
@@ -298,9 +334,14 @@ mod tests {
     #[test]
     fn shared_fixtures_cover_every_v1_enum_combination_exactly_once() {
         let mut expected = std::collections::BTreeSet::new();
-        for display in ["inherited-host", "private-xvfb", "externally-owned"] {
+        for display in [
+            "inherited-host",
+            "private-xvfb",
+            "hidden-native",
+            "externally-owned",
+        ] {
             for engine in ["headed", "headless"] {
-                for visibility in ["normal", "isolated-display", "no-window"] {
+                for visibility in ["normal", "isolated-display", "concealed", "no-window"] {
                     for interaction in ["companion", "native"] {
                         expected.insert(format!(
                             "{display}/{engine}/fail-closed/{interaction}/{visibility}"
@@ -309,7 +350,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(expected.len(), 36);
+        assert_eq!(expected.len(), 64);
         let mut seen = std::collections::BTreeMap::<String, usize>::new();
         for case in fixture_cases() {
             if let Some(key) = enum_combination_key(&case["policy"]) {
