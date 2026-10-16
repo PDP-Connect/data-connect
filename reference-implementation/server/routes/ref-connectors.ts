@@ -222,11 +222,13 @@ export interface MountRefConnectorsContext {
   markConnectorSummaryEvidenceDirty?: (input: { connectorInstanceId: string; reason?: string }) => Promise<void> | void;
   now?: () => string;
   onScheduleMutation?: () => Promise<unknown> | unknown;
+  parkSearchIndexDirtyScope?: (key: { connectorInstanceId: string; stream: string }) => Promise<boolean>;
   pdppError: PdppErrorFn;
   // Post-commit browser-profile purge for delete and revoke
   // (server/browser-profile-purge.ts). Never throws; its result is reported in
   // the response and the audit event.
   purgeBrowserProfile?: BrowserProfilePurger;
+  rearmSearchIndexDirtyScope?: (key: { connectorInstanceId: string; stream: string }) => Promise<boolean>;
   requireOwnerSession: MiddlewareHandler;
   resolveOwnerConnectorNamespace: (
     req: unknown,
@@ -1581,6 +1583,55 @@ export function mountRefConnectionResetState(app: AppLike, ctx: MountRefConnecto
       }
     }
   );
+}
+
+/** Owner-session control of one existing dirty search-index scope. */
+export function mountRefConnectionSearchIndexControl(app: AppLike, ctx: MountRefConnectorsContext): void {
+  const register = (
+    action: "park" | "rearm",
+    mutate:
+      | MountRefConnectorsContext["parkSearchIndexDirtyScope"]
+      | MountRefConnectorsContext["rearmSearchIndexDirtyScope"]
+  ) => {
+    app.post(
+      `/_ref/connections/:connectorInstanceId/search-index/:stream/${action}`,
+      ctx.requireOwnerSession,
+      async (req: RouteRequest, res: RouteResponse) => {
+        try {
+          const connectorInstanceId = decodeURIComponent(req.params.connectorInstanceId as string);
+          const stream = decodeURIComponent(req.params.stream as string);
+          const namespace = await resolveRefConnectionNamespace(ctx, req, connectorInstanceId);
+          const changed = mutate
+            ? await mutate({
+                connectorInstanceId: namespace.connectorInstanceId,
+                stream,
+              })
+            : false;
+          if (!changed) {
+            ctx.pdppError(
+              res,
+              404,
+              "search_index_scope_not_found",
+              "No dirty search-index scope exists for this connection and stream."
+            );
+            return;
+          }
+          res.status(200).json({
+            action,
+            connector_instance_id: namespace.connectorInstanceId,
+            dirty: true,
+            object: "ref_search_index_scope_control",
+            stream,
+          });
+        } catch (err) {
+          ctx.handleError(res, err);
+        }
+      }
+    );
+  };
+
+  register("park", ctx.parkSearchIndexDirtyScope);
+  register("rearm", ctx.rearmSearchIndexDirtyScope);
 }
 
 // DELETE /_ref/connections/:connectorInstanceId — owner-session delete of one

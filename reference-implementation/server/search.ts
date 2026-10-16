@@ -56,6 +56,8 @@ import {
 } from "./connection-identity.ts";
 import { withConnectorInstanceWrite } from "./connector-instance-write-coordinator.ts";
 import {
+  assertConnectorManifestStreamAbsentSync,
+  assertConnectorManifestStreamAbsentWithClient,
   assertConnectorManifestStreamSubsetSync,
   assertConnectorManifestStreamSubsetWithClient,
 } from "./connector-manifest-write-fence.ts";
@@ -67,9 +69,15 @@ import {
   postgresLexicalIndexCountByStream,
   postgresLexicalIndexDelete,
   postgresLexicalIndexDeleteByConnectorStream,
+  postgresLexicalIndexDeleteByConnectorStreamWithClient,
   postgresLexicalIndexDeleteWithClient,
-  postgresLexicalIndexInsertMany,
+  postgresLexicalIndexInsertManyWithClient,
+  postgresLexicalIndexKeysPageAfter,
+  postgresLexicalIndexPrunePageWithClient,
+  postgresLexicalIndexPruneStaleWithClient,
   postgresLexicalIndexPublishWithClient,
+  postgresLexicalIndexRowsForKeys,
+  postgresLexicalLiveRecordKeys,
   postgresLexicalMetaGetFingerprint,
   postgresLexicalMetaListStreamsForConnector,
   postgresLexicalMetaUpsertFingerprint,
@@ -79,7 +87,12 @@ import {
   postgresLexicalSearch,
 } from "./postgres-search.ts";
 import type { PostgresTransactionClient } from "./postgres-storage.ts";
-import { isPostgresStorageBackend, postgresQuery, withPostgresTransaction } from "./postgres-storage.ts";
+import {
+  isPostgresStorageBackend,
+  postgresQuery,
+  withPostgresBulkTransaction,
+  withPostgresTransaction,
+} from "./postgres-storage.ts";
 import { compileRequestFilters, passesGrantRecordConstraints, passesRequestFilters } from "./record-filters.ts";
 import { mapSearchFanout } from "./search-fanout.ts";
 import { sqliteCountIndexableTextValues } from "./search-index-counts.ts";
@@ -338,7 +351,20 @@ type LexicalBackfillManifest = LexicalManifest & { connector_id: string; streams
 interface LexicalBackfillOptions {
   log?: (message?: unknown) => void;
   manifest?: LexicalBackfillManifest;
+  /**
+   * Drop stored streams the manifest does not name. Only correct when the
+   * manifest is the connector's FULL stream list; a scope-pinned manifest
+   * (search-index-reconcile) passes `false` or it deletes every healthy
+   * sibling stream. Default `true`.
+   */
+  orphanStreamCleanup?: boolean;
   signal?: AbortSignal | null;
+  /**
+   * Explicit repair mode (search-index reconcile only): compare exact canonical
+   * and indexed content on both backends instead of relying on row counts.
+   * Default false so startup/registration backfills keep the cheap count check.
+   */
+  verifyContent?: boolean;
 }
 
 /** Test-only phase seam for deterministic registration/backfill ordering. */
@@ -362,6 +388,42 @@ async function assertLexicalBackfillManifestCurrent(
   }
   assertConnectorManifestStreamSubsetSync(connectorId, manifest as unknown as Record<string, unknown>);
 }
+/** Each bounded repair mutation shares its instance lock and manifest publication fence. */
+async function withLexicalBackfillWrite(
+  connectorId: string,
+  connectorInstanceId: string,
+  expected: LexicalBackfillManifestStream | { absentStream: string },
+  sqliteWrite: () => void,
+  postgresWrite: (client: PostgresTransactionClient) => Promise<unknown>
+): Promise<void> {
+  const manifest = { connector_id: connectorId, streams: [expected] };
+  await withConnectorInstanceWrite(connectorInstanceId, async () => {
+    if (isPostgresStorageBackend()) {
+      await withPostgresBulkTransaction(
+        async (client) => {
+          if ("absentStream" in expected) {
+            await assertConnectorManifestStreamAbsentWithClient(client, connectorId, expected.absentStream);
+          } else {
+            await assertConnectorManifestStreamSubsetWithClient(client, connectorId, manifest);
+          }
+          await maybeLexicalBackfillPhaseForTest("before-derived-dml", { connectorId, connectorInstanceId });
+          await postgresWrite(client);
+        },
+        { lockConnectorInstanceId: connectorInstanceId }
+      );
+    } else {
+      transaction(() => {
+        if ("absentStream" in expected) {
+          assertConnectorManifestStreamAbsentSync(connectorId, expected.absentStream);
+        } else {
+          assertConnectorManifestStreamSubsetSync(connectorId, manifest);
+        }
+        sqliteWrite();
+      });
+    }
+  });
+}
+
 const lexicalBackfillJobs = new Map<string, LexicalBackfillJob>();
 
 function publicLexicalBackfillJob(job: LexicalBackfillJob) {
@@ -603,34 +665,12 @@ function getSearchIndexStore(): LexicalSearchStore {
   return isPostgresStorageBackend() ? postgresSearchIndexStore : sqliteSearchIndexStore;
 }
 
-// ─── Stream-level declaration lookup ───────────────────────────────────────
-
-/**
- * Look up the declared lexical_fields for (connector_id, stream) by reading
- * the connector manifest. Returns an array of top-level scalar string field
- * names, or null if the stream does not participate in lexical retrieval.
- *
- * Manifest validator (auth.ts) already enforces v1 shape constraints, so we
- * trust the declaration here.
- */
-async function getStreamLexicalFields(connectorId: string, stream: string): Promise<string[] | null> {
-  const manifest = await getConnectorManifest(connectorId);
-  if (!manifest) {
-    return null;
-  }
-  const mStream = (manifest.streams || []).find((s: LexicalManifestStream) => s.name === stream);
-  const declared = mStream?.query?.search?.lexical_fields;
-  if (!Array.isArray(declared) || declared.length === 0) {
-    return null;
-  }
-  return declared;
-}
-
 // ─── Index maintenance (called from records.js) ────────────────────────────
 
 export interface ComputedLexicalFields {
   declared: string[];
   fields: Record<string, string>;
+  publicationManifest: { connector_id: string; streams: LexicalManifestStream[] };
 }
 
 /**
@@ -658,16 +698,33 @@ export async function computeLexicalFields({
   data?: JsonObject | null;
   declaredFields?: string[];
 }): Promise<ComputedLexicalFields | null> {
-  const declared = declaredFields === undefined ? await getStreamLexicalFields(connectorId, stream) : declaredFields;
+  const manifest = await getConnectorManifest(connectorId);
+  const manifestStream = manifest?.streams.find((candidate) => candidate.name === stream) as
+    | LexicalManifestStream
+    | undefined;
+  const storedFields = manifestStream?.query?.search?.lexical_fields;
+  const declared = declaredFields ?? (Array.isArray(storedFields) && storedFields.length > 0 ? storedFields : null);
   if (!declared) {
     return null;
   }
+  if (
+    declaredFields !== undefined &&
+    manifest &&
+    fingerprintLexicalFields(declared) !== fingerprintLexicalFields(storedFields ?? [])
+  ) {
+    throw new Error("lexical manifest changed before input computation");
+  }
+  // Freeze the full stream that supplied the fields, independently of semantic participation.
+  const publicationManifest = {
+    connector_id: connectorId,
+    streams: [structuredClone(manifestStream ?? { name: stream, query: { search: { lexical_fields: declared } } })],
+  };
   const fields = Object.fromEntries(
     declared
       .map((field): [string, unknown] => [field, data?.[field]])
       .filter(([, value]) => typeof value === "string" && value.length > 0)
   ) as Record<string, string>;
-  return { declared, fields };
+  return { declared, fields, publicationManifest };
 }
 
 /**
@@ -693,6 +750,7 @@ export async function applyLexicalFieldsWithClient(
     computed: ComputedLexicalFields;
   }
 ): Promise<void> {
+  await assertConnectorManifestStreamSubsetWithClient(client, connectorId, computed.publicationManifest);
   await postgresLexicalIndexPublishWithClient(client, {
     connectorId,
     connectorInstanceId,
@@ -736,6 +794,7 @@ export function applyLexicalFieldsSync({
   recordKey: string;
   computed: ComputedLexicalFields;
 }): void {
+  assertConnectorManifestStreamSubsetSync(connectorId, computed.publicationManifest);
   exec(referenceQueries.searchIndexDeleteByRecordKey, [connectorInstanceId, stream, recordKey]);
   for (const field of computed.declared) {
     const value = computed.fields[field];
@@ -797,28 +856,6 @@ export async function lexicalIndexDeleteByConnectorStream({
  * which handles the per-stream loop, the manifest lookup of declared fields,
  * and the drift check that decides whether a rebuild is needed at all.
  */
-// Backend-dispatch wrappers for the three storage operations a lexical rebuild
-// performs, so `rebuildLexicalIndexForStream` can express the page loop without
-// interleaving `isPostgresStorageBackend()` branches. Pure I/O mechanics.
-async function rebuildLexicalDeleteStreamIndex(
-  usePostgres: boolean,
-  {
-    connectorId,
-    resolvedConnectorInstanceId,
-    stream,
-  }: { connectorId: string; resolvedConnectorInstanceId: string; stream: string }
-): Promise<void> {
-  if (usePostgres) {
-    await postgresLexicalIndexDeleteByConnectorStream({
-      connectorId,
-      connectorInstanceId: resolvedConnectorInstanceId,
-      stream,
-    });
-  } else {
-    exec(referenceQueries.searchIndexDeleteByStream, [resolvedConnectorInstanceId, stream]);
-  }
-}
-
 async function rebuildLexicalFetchRecordsPage(
   usePostgres: boolean,
   {
@@ -839,50 +876,115 @@ async function rebuildLexicalFetchRecordsPage(
         .rows as unknown as readonly LexicalRecordRow[]);
 }
 
-async function rebuildLexicalInsertEntries(
-  usePostgres: boolean,
-  {
-    connectorId,
-    resolvedConnectorInstanceId,
-    stream,
-    entries,
-  }: { connectorId: string; resolvedConnectorInstanceId: string; stream: string; entries: readonly LexicalIndexEntry[] }
-): Promise<void> {
-  if (usePostgres) {
-    await postgresLexicalIndexInsertMany({
-      connectorId,
-      connectorInstanceId: resolvedConnectorInstanceId,
-      entries,
-      stream,
-    });
-  } else {
-    // Version-guarded, matching the Postgres branch: each entry's `version`
-    // is the `records.version` its text was read at during the backfill
-    // page read. Re-checked against the CURRENT row, inside the SAME
-    // transaction as the insert, immediately before writing — a row a
-    // concurrent delete/newer-write has since superseded is skipped rather
-    // than resurrected/overwritten. See
-    // harden-connector-instance-write-fence-transaction-native.
-    transaction(() => {
-      for (const entry of entries) {
-        const current = getOne<CurrentLexicalBackfillRow>(referenceQueries.recordsIngestGetCurrentRecordState, [
-          resolvedConnectorInstanceId,
+function writeSqliteLexicalPage({
+  connectorId,
+  connectorInstanceId,
+  stream,
+  entries,
+  pageRows,
+}: {
+  connectorId: string;
+  connectorInstanceId: string;
+  stream: string;
+  entries: readonly LexicalIndexEntry[];
+  pageRows: readonly LexicalRecordRow[];
+}): void {
+  transaction(() => {
+    const keys = [...new Set(pageRows.map((row) => row.record_key))];
+    const expected = new Map(entries.map((entry) => [JSON.stringify([entry.recordKey, entry.field]), entry.text]));
+    const currentByKey = new Map(
+      pageRows.map((row) => [
+        row.record_key,
+        getOne<CurrentLexicalBackfillRow>(referenceQueries.recordsIngestGetCurrentRecordState, [
+          connectorInstanceId,
           stream,
-          entry.recordKey,
-        ]);
-        if (!current || current.deleted || current.version !== entry.version) {
-          continue;
-        }
-        exec(referenceQueries.searchIndexInsertRow, [
-          connectorId,
-          resolvedConnectorInstanceId,
-          stream,
-          entry.recordKey,
-          entry.field,
-          entry.text,
-        ]);
+          row.record_key,
+        ]),
+      ])
+    );
+    const pageRowsByKey = new Map(pageRows.map((row) => [row.record_key, row]));
+    const kept = new Set<string>();
+    let afterRowId = 0;
+    for (;;) {
+      const existing = getMany(
+        referenceQueries.searchIndexPageByRecordKeysAfterRowid,
+        [connectorInstanceId, stream, afterRowId, JSON.stringify(keys)],
+        { limit: CONTENT_CHECK_PAGE }
+      ).rows as { rowid: number; record_key: string; field: string; text: string }[];
+      if (existing.length === 0) {
+        break;
       }
-    });
+      preserveMatchingSqliteLexicalRows(existing, expected, pageRowsByKey, currentByKey, kept, {
+        connectorInstanceId,
+        stream,
+      });
+      afterRowId = existing.at(-1)?.rowid ?? afterRowId;
+    }
+    insertMissingSqliteLexicalRows({ connectorId, connectorInstanceId, currentByKey, entries, kept, stream });
+  });
+}
+
+function preserveMatchingSqliteLexicalRows(
+  existing: readonly { rowid: number; record_key: string; field: string; text: string }[],
+  expected: ReadonlyMap<string, string>,
+  pageRows: ReadonlyMap<string, LexicalRecordRow>,
+  currentByKey: ReadonlyMap<string, CurrentLexicalBackfillRow | null>,
+  kept: Set<string>,
+  scope: { connectorInstanceId: string; stream: string }
+): void {
+  for (const row of existing) {
+    const pair = JSON.stringify([row.record_key, row.field]);
+    const pageRow = pageRows.get(row.record_key);
+    const current = currentByKey.get(row.record_key);
+    if (!(pageRow && current) || current.deleted || current.version !== Number(pageRow.version)) {
+      continue;
+    }
+    if (expected.get(pair) === row.text && !kept.has(pair)) {
+      kept.add(pair);
+    } else {
+      exec(referenceQueries.searchIndexDeleteByRowid, [
+        row.rowid,
+        scope.connectorInstanceId,
+        scope.stream,
+        row.record_key,
+        row.field,
+        row.text,
+      ]);
+    }
+  }
+}
+
+function insertMissingSqliteLexicalRows({
+  connectorId,
+  connectorInstanceId,
+  stream,
+  entries,
+  currentByKey,
+  kept,
+}: {
+  connectorId: string;
+  connectorInstanceId: string;
+  stream: string;
+  entries: readonly LexicalIndexEntry[];
+  currentByKey: ReadonlyMap<string, CurrentLexicalBackfillRow | null>;
+  kept: ReadonlySet<string>;
+}): void {
+  for (const entry of entries) {
+    if (kept.has(JSON.stringify([entry.recordKey, entry.field]))) {
+      continue;
+    }
+    const current = currentByKey.get(entry.recordKey);
+    if (!current || current.deleted || current.version !== entry.version) {
+      continue;
+    }
+    exec(referenceQueries.searchIndexInsertRow, [
+      connectorId,
+      connectorInstanceId,
+      stream,
+      entry.recordKey,
+      entry.field,
+      entry.text,
+    ]);
   }
 }
 
@@ -930,8 +1032,121 @@ function parseLexicalIndexRecordsPage(
   return { entries, indexEntries: entries.length, lastId, scannedRecords };
 }
 
-async function rebuildLexicalIndexForStream({
+async function pruneStaleSqliteLexicalRows(
+  connectorId: string,
+  mStream: LexicalBackfillManifestStream,
+  connectorInstanceId: string,
+  stream: string,
+  declaredFields: readonly string[]
+): Promise<void> {
+  const declared = new Set(declaredFields);
+  let afterRowId = 0;
+  for (;;) {
+    const page = getMany(referenceQueries.searchIndexPageAfterRowid, [connectorInstanceId, stream, afterRowId], {
+      limit: CONTENT_CHECK_PAGE,
+    }).rows as { rowid: number; record_key: string; field: string }[];
+    if (page.length === 0) {
+      return;
+    }
+    const keys = [...new Set(page.map((row) => row.record_key))];
+    const liveRows = getMany(
+      referenceQueries.searchRecordsLiveKeysByRecordKeys,
+      [connectorInstanceId, stream, JSON.stringify(keys)],
+      {
+        limit: keys.length,
+      }
+    ).rows as { record_key: string }[];
+    const live = new Set(liveRows.map((row) => row.record_key));
+    const stale = page.filter((row) => !(live.has(row.record_key) && declared.has(row.field)));
+    if (stale.length > 0) {
+      // biome-ignore lint/performance/noAwaitInLoops: each bounded delete page releases the writer slot before the next read.
+      await pruneStaleSqliteLexicalPage({
+        connectorId,
+        connectorInstanceId,
+        declaredFields: declared,
+        mStream,
+        rows: stale,
+        stream,
+      });
+    }
+    afterRowId = page.at(-1)?.rowid ?? afterRowId;
+  }
+}
+
+async function pruneStaleSqliteLexicalPage({
   connectorId,
+  mStream,
+  connectorInstanceId,
+  stream,
+  declaredFields,
+  rows,
+}: {
+  connectorId: string;
+  mStream: LexicalBackfillManifestStream;
+  connectorInstanceId: string;
+  stream: string;
+  declaredFields: ReadonlySet<string>;
+  rows: readonly { rowid: number; record_key: string; field: string }[];
+}): Promise<void> {
+  await maybeLexicalBackfillPhaseForTest("after-stale-page-check", { connectorInstanceId, stream });
+  await withLexicalBackfillWrite(
+    connectorId,
+    connectorInstanceId,
+    mStream,
+    () => {
+      for (const candidate of rows) {
+        const currentIndexRow = getOne<{ rowid: number; record_key: string; field: string; text: string }>(
+          referenceQueries.searchIndexRowByIdentity,
+          [candidate.rowid, connectorInstanceId, stream, candidate.record_key, candidate.field]
+        );
+        if (
+          !currentIndexRow ||
+          isSqliteLexicalRowCanonical(currentIndexRow, declaredFields, stream, connectorInstanceId)
+        ) {
+          continue;
+        }
+        exec(referenceQueries.searchIndexDeleteByRowid, [
+          currentIndexRow.rowid,
+          connectorInstanceId,
+          stream,
+          currentIndexRow.record_key,
+          currentIndexRow.field,
+          currentIndexRow.text,
+        ]);
+      }
+    },
+    () => Promise.reject(new Error("SQLite stale prune requires SQLite"))
+  );
+}
+
+function isSqliteLexicalRowCanonical(
+  indexRow: { record_key: string; field: string; text: string },
+  declaredFields: ReadonlySet<string>,
+  stream: string,
+  connectorInstanceId: string
+): boolean {
+  if (!declaredFields.has(indexRow.field)) {
+    return false;
+  }
+  const currentRecord = getOne<CurrentLexicalBackfillRow>(referenceQueries.recordsIngestGetCurrentRecordState, [
+    connectorInstanceId,
+    stream,
+    indexRow.record_key,
+  ]);
+  if (!currentRecord || currentRecord.deleted || typeof currentRecord.record_json !== "string") {
+    return false;
+  }
+  try {
+    const data = JSON.parse(currentRecord.record_json) as JsonObject;
+    return data[indexRow.field] === indexRow.text;
+  } catch {
+    return false;
+  }
+}
+
+function rebuildLexicalIndexForStream({
+  connectorId,
+  mStream,
   connectorInstanceId,
   stream,
   declaredFields,
@@ -940,6 +1155,7 @@ async function rebuildLexicalIndexForStream({
   signal = null,
 }: {
   connectorId: string;
+  mStream: LexicalBackfillManifestStream;
   connectorInstanceId: string | null;
   stream: string;
   declaredFields: readonly string[];
@@ -949,17 +1165,41 @@ async function rebuildLexicalIndexForStream({
 }): Promise<number> {
   const resolvedConnectorInstanceId = resolveLexicalConnectorInstanceId(connectorId, connectorInstanceId);
   const usePostgres = isPostgresStorageBackend();
-  // Fenced ONLY for this one bounded, indexed DELETE — not for the scan
-  // that follows. See the per-page write below for why: a same-instance
-  // live write racing this delete is not lost, only deferred to the next
-  // reconcile sweep via search_index_dirty's atomic, write-transaction-scoped mark.
-  await withConnectorInstanceWrite(resolvedConnectorInstanceId, () =>
-    rebuildLexicalDeleteStreamIndex(usePostgres, { connectorId, resolvedConnectorInstanceId, stream })
-  );
+  // A duplicated declared field would emit two entries for one
+  // (record_key, field) and make the Postgres upsert fail ("cannot affect row
+  // a second time"); the table holds one row per (record, field). Only
+  // top-level string values are indexed -- array/object values contribute none.
+  const fields = Array.from(new Set(declaredFields));
+  // Do not clear the SQLite stream before scanning. Its page writer is
+  // write-elided for matching rows, so retries retain completed work.
+
+  // Remove stale entries only after every canonical page has been checked.
+  const pruneStaleRows = async (): Promise<void> => {
+    if (usePostgres) {
+      await withLexicalBackfillWrite(
+        connectorId,
+        resolvedConnectorInstanceId,
+        mStream,
+        () => {
+          throw new Error("PostgreSQL stale prune requires PostgreSQL");
+        },
+        (client) =>
+          postgresLexicalIndexPruneStaleWithClient(client, {
+            connectorInstanceId: resolvedConnectorInstanceId,
+            declaredFields: fields,
+            stream,
+          })
+      );
+    } else {
+      await pruneStaleSqliteLexicalRows(connectorId, mStream, resolvedConnectorInstanceId, stream, fields);
+    }
+  };
 
   // Stream the records page-by-page so we don't pull the whole table into
   // memory on big stores.
-  const PAGE = 500;
+  const PAGE = usePostgres
+    ? CONTENT_CHECK_PAGE
+    : Math.max(1, Math.min(CONTENT_CHECK_PAGE, Math.floor(800 / Math.max(fields.length, 1))));
   async function rebuildPage(lastId: number, scanned: number, indexed: number): Promise<number> {
     // Cancellation hook: signaled when the CLI is shutting down so the
     // backfill releases the WAL writer before `closeDb()` runs. Checked
@@ -984,35 +1224,51 @@ async function rebuildLexicalIndexForStream({
       stream,
     });
     if (rows.length === 0) {
+      await pruneStaleRows();
       return indexed;
     }
-    const {
-      entries,
-      indexEntries,
-      lastId: pageLastId,
-      scannedRecords,
-    } = parseLexicalIndexRecordsPage(rows, declaredFields);
+    await maybeLexicalBackfillPhaseForTest("after-page-fetch", {
+      connectorInstanceId: resolvedConnectorInstanceId,
+      stream,
+    });
+    const { entries, indexEntries, lastId: pageLastId, scannedRecords } = parseLexicalIndexRecordsPage(rows, fields);
     const nextLastId = pageLastId;
     const nextScanned = scanned + scannedRecords;
     let nextIndexed = indexed;
-    if (entries.length > 0) {
-      // Fenced ONLY for this page's bounded, already version-CAS'd write
-      // (rebuildLexicalInsertEntries re-reads records.version per entry
-      // immediately before writing, inside the same transaction — a row a
-      // concurrent delete/newer-write has since superseded is skipped, not
-      // resurrected). The fence here is a short in-process mutual-exclusion
-      // convenience, not a correctness requirement the write itself lacks;
-      // it is held for O(one page's write), never O(the whole rebuild).
-      await withConnectorInstanceWrite(resolvedConnectorInstanceId, () =>
-        rebuildLexicalInsertEntries(usePostgres, {
+    // Validate the declaration and current record versions in the same
+    // bounded transaction as this page's inserts and related pruning.
+    await withLexicalBackfillWrite(
+      connectorId,
+      resolvedConnectorInstanceId,
+      mStream,
+      () =>
+        writeSqliteLexicalPage({
           connectorId,
+          connectorInstanceId: resolvedConnectorInstanceId,
           entries,
-          resolvedConnectorInstanceId,
+          pageRows: rows,
           stream,
-        })
-      );
-      nextIndexed += indexEntries;
-    }
+        }),
+      async (client) => {
+        await postgresLexicalIndexInsertManyWithClient(client, {
+          connectorId,
+          connectorInstanceId: resolvedConnectorInstanceId,
+          entries,
+          stream,
+        });
+        await postgresLexicalIndexPrunePageWithClient(client, {
+          connectorInstanceId: resolvedConnectorInstanceId,
+          entries,
+          pageRecords: rows.map((row) => ({ recordKey: row.record_key, version: Number(row.version) })),
+          stream,
+        });
+      }
+    );
+    nextIndexed += indexEntries;
+    await maybeLexicalBackfillPhaseForTest("after-page-upsert", {
+      connectorInstanceId: resolvedConnectorInstanceId,
+      stream,
+    });
     if (progressJob) {
       progressJob = updateLexicalBackfillJob(progressJob, {
         indexedRows: nextIndexed,
@@ -1022,6 +1278,7 @@ async function rebuildLexicalIndexForStream({
     }
     await yieldImmediate();
     if (rows.length < PAGE) {
+      await pruneStaleRows();
       return nextIndexed;
     }
     return rebuildPage(nextLastId, nextScanned, nextIndexed);
@@ -1098,43 +1355,24 @@ async function lexicalMetaExists({
   return !!getOne(referenceQueries.searchMetaExistsByStream, [connectorInstanceId, stream]);
 }
 
-async function lexicalMetaUpsertFingerprint({
-  connectorId,
-  connectorInstanceId,
-  stream,
-  fieldsFingerprint,
-  updatedAt,
-}: {
-  connectorId: string;
-  connectorInstanceId: string;
-  stream: string;
-  fieldsFingerprint: string;
-  updatedAt: string;
-}): Promise<void> {
-  await getSearchIndexStore().metaUpsertFingerprint({
+async function deleteLexicalBackfillStream(
+  connectorId: string,
+  connectorInstanceId: string,
+  stream: string,
+  expected: LexicalBackfillManifestStream | { absentStream: string }
+): Promise<void> {
+  await maybeLexicalBackfillPhaseForTest("before-stream-cleanup", { connectorInstanceId, stream });
+  await withLexicalBackfillWrite(
     connectorId,
     connectorInstanceId,
-    fieldsFingerprint,
-    stream,
-    updatedAt,
-  });
-}
-
-async function lexicalIndexAndMetaDeleteByStream({
-  connectorId,
-  connectorInstanceId,
-  stream,
-}: {
-  connectorId: string;
-  connectorInstanceId: string;
-  stream: string;
-}): Promise<void> {
-  if (isPostgresStorageBackend()) {
-    await postgresLexicalIndexDeleteByConnectorStream({ connectorId, connectorInstanceId, stream });
-    return;
-  }
-  exec(referenceQueries.searchIndexDeleteByStream, [connectorInstanceId, stream]);
-  exec(referenceQueries.searchMetaDeleteByStream, [connectorInstanceId, stream]);
+    expected,
+    () => {
+      exec(referenceQueries.searchIndexDeleteByStream, [connectorInstanceId, stream]);
+      exec(referenceQueries.searchMetaDeleteByStream, [connectorInstanceId, stream]);
+    },
+    (client) =>
+      postgresLexicalIndexDeleteByConnectorStreamWithClient(client, { connectorId, connectorInstanceId, stream })
+  );
 }
 
 async function lexicalMetaListStreamsForConnector({
@@ -1187,6 +1425,185 @@ async function resolveLexicalBackfillConnectorInstanceIds({
   }
 
   return [resolveLexicalConnectorInstanceId(connectorId, null)];
+}
+
+const CONTENT_CHECK_PAGE = 500;
+
+/**
+ * Repair-mode "is the Postgres lexical index exactly what canonical records
+ * imply?" as two bounded keyset traversals (each DB statement touches at most
+ * CONTENT_CHECK_PAGE keys, indexed, no whole-stream join/hash/sort, no snapshot
+ * held between pages):
+ *   1. canonical -> index: every live record's expected (field, text) rows exist
+ *      with identical values and no extra rows exist for those keys;
+ *   2. index -> canonical: every index row belongs to a live record and a
+ *      declared field (catches orphan / trailing / deleted-record rows and an
+ *      empty canonical stream).
+ * Reads are not one snapshot: a concurrent write can yield a false "drift",
+ * which only triggers the idempotent rebuild; a false "in sync" is covered by
+ * that write's own dirty mark (the clear is revision-fenced).
+ */
+async function lexicalContentInSync(scope: {
+  connectorInstanceId: string;
+  declaredFields: readonly string[];
+  stream: string;
+}): Promise<boolean> {
+  if (isPostgresStorageBackend()) {
+    return (await canonicalRowsMatchIndex(scope)) && (await indexRowsAllCanonical(scope));
+  }
+  return (await sqliteCanonicalRowsMatchIndex(scope)) && (await sqliteIndexRowsAllCanonical(scope));
+}
+
+function sqliteCanonicalRowsMatchIndex({
+  connectorInstanceId,
+  declaredFields,
+  stream,
+}: {
+  connectorInstanceId: string;
+  declaredFields: readonly string[];
+  stream: string;
+}): boolean {
+  let afterId = 0;
+  for (;;) {
+    const pageLimit = Math.max(1, Math.min(CONTENT_CHECK_PAGE, Math.floor(800 / Math.max(declaredFields.length, 1))));
+    const rows = getMany(referenceQueries.searchRecordsPageNonDeleted, [connectorInstanceId, stream, afterId], {
+      limit: pageLimit,
+    }).rows as unknown as readonly LexicalRecordRow[];
+    if (rows.length === 0) {
+      return true;
+    }
+    const { entries, lastId } = parseLexicalIndexRecordsPage(rows, declaredFields);
+    const expected = new Map(entries.map((entry) => [JSON.stringify([entry.recordKey, entry.field]), entry.text]));
+    const keys = rows.map((row) => row.record_key);
+    const actual =
+      keys.length === 0
+        ? []
+        : (getMany(referenceQueries.searchIndexRowsByRecordKeys, [connectorInstanceId, stream, JSON.stringify(keys)], {
+            limit: Math.max(expected.size + 1, 1),
+          }).rows as { record_key: string; field: string; text: string }[]);
+    const actualPairs = new Set<string>();
+    for (const row of actual) {
+      const pair = JSON.stringify([row.record_key, row.field]);
+      if (actualPairs.has(pair) || expected.get(pair) !== row.text) {
+        return false;
+      }
+      actualPairs.add(pair);
+    }
+    if (actualPairs.size !== expected.size) {
+      return false;
+    }
+    afterId = lastId;
+  }
+}
+
+function sqliteIndexRowsAllCanonical({
+  connectorInstanceId,
+  declaredFields,
+  stream,
+}: {
+  connectorInstanceId: string;
+  declaredFields: readonly string[];
+  stream: string;
+}): boolean {
+  const declared = new Set(declaredFields);
+  let afterRowId = 0;
+  for (;;) {
+    const page = getMany(referenceQueries.searchIndexPageAfterRowid, [connectorInstanceId, stream, afterRowId], {
+      limit: CONTENT_CHECK_PAGE,
+    }).rows as { rowid: number; record_key: string; field: string }[];
+    if (page.length === 0) {
+      return true;
+    }
+    const keys = [...new Set(page.map((row) => row.record_key))];
+    const liveRows =
+      keys.length === 0
+        ? []
+        : (getMany(
+            referenceQueries.searchRecordsLiveKeysByRecordKeys,
+            [connectorInstanceId, stream, JSON.stringify(keys)],
+            {
+              limit: keys.length,
+            }
+          ).rows as { record_key: string }[]);
+    const live = new Set(liveRows.map((row) => row.record_key));
+    if (page.some((row) => !(live.has(row.record_key) && declared.has(row.field)))) {
+      return false;
+    }
+    afterRowId = page.at(-1)?.rowid ?? afterRowId;
+  }
+}
+
+async function canonicalRowsMatchIndex({
+  connectorInstanceId,
+  declaredFields,
+  stream,
+}: {
+  connectorInstanceId: string;
+  declaredFields: readonly string[];
+  stream: string;
+}): Promise<boolean> {
+  let afterId = 0;
+  for (;;) {
+    // biome-ignore lint/performance/noAwaitInLoops: keyset pages are sequential by construction.
+    const rows = (await postgresLexicalRecordsPageNonDeleted({
+      afterId,
+      connectorInstanceId,
+      limit: CONTENT_CHECK_PAGE,
+      stream,
+    })) as unknown as readonly LexicalRecordRow[];
+    if (rows.length === 0) {
+      return true;
+    }
+    const { entries, lastId } = parseLexicalIndexRecordsPage(rows, declaredFields);
+    const expected = new Map(entries.map((entry) => [JSON.stringify([entry.recordKey, entry.field]), entry.text]));
+    const actual = await postgresLexicalIndexRowsForKeys({
+      connectorInstanceId,
+      recordKeys: rows.map((row) => row.record_key),
+      stream,
+    });
+    if (actual.length !== expected.size) {
+      return false;
+    }
+    if (actual.some((row) => expected.get(JSON.stringify([row.record_key, row.field])) !== row.value)) {
+      return false;
+    }
+    afterId = lastId;
+  }
+}
+
+async function indexRowsAllCanonical({
+  connectorInstanceId,
+  declaredFields,
+  stream,
+}: {
+  connectorInstanceId: string;
+  declaredFields: readonly string[];
+  stream: string;
+}): Promise<boolean> {
+  const declared = new Set(declaredFields);
+  let after: { field: string; recordKey: string } | null = null;
+  for (;;) {
+    // biome-ignore lint/performance/noAwaitInLoops: keyset pages are sequential by construction.
+    const page: Array<{ field: string; record_key: string }> = await postgresLexicalIndexKeysPageAfter({
+      after,
+      connectorInstanceId,
+      limit: CONTENT_CHECK_PAGE,
+      stream,
+    });
+    if (page.length === 0) {
+      return true;
+    }
+    const live = await postgresLexicalLiveRecordKeys({
+      connectorInstanceId,
+      recordKeys: Array.from(new Set(page.map((row) => row.record_key))),
+      stream,
+    });
+    if (page.some((row) => !(live.has(row.record_key) && declared.has(row.field)))) {
+      return false;
+    }
+    const last = page.at(-1) as { field: string; record_key: string };
+    after = { field: last.field, recordKey: last.record_key };
+  }
 }
 
 /**
@@ -1242,7 +1659,9 @@ async function backfillLexicalStream({
   progressJob,
   log,
   signal,
+  verifyContent,
 }: {
+  verifyContent: boolean;
   connectorId: string;
   connectorInstanceId: string;
   mStream: LexicalBackfillManifestStream;
@@ -1265,9 +1684,7 @@ async function backfillLexicalStream({
         `[PDPP] Lexical index: stream='${stream}' connector='${connectorId}' ` +
           "no longer declares lexical_fields — dropping stale index + meta"
       );
-      await withConnectorInstanceWrite(connectorInstanceId, () =>
-        lexicalIndexAndMetaDeleteByStream({ connectorId, connectorInstanceId, stream })
-      );
+      await deleteLexicalBackfillStream(connectorId, connectorInstanceId, stream, mStream);
     }
     return progressJob;
   }
@@ -1291,14 +1708,27 @@ async function backfillLexicalStream({
   let indexCount = 0;
   let expectedIndexRows = 0;
 
-  if (!needsRebuild) {
+  if (!needsRebuild && verifyContent) {
+    // Repair mode: counts cannot see same-count wrong value/key drift. Compare
+    // canonical and index rows in bounded keyset pages (reads only); a clean
+    // stream writes nothing (the rebuild below never runs).
+    needsRebuild = !(await lexicalContentInSync({
+      connectorInstanceId,
+      declaredFields: Array.from(new Set(declaredFields)),
+      stream,
+    }));
+  } else if (!needsRebuild) {
     // Fingerprint matches — use exact non-empty text counts only to
     // distinguish a complete index from an unbuilt or partially-built one.
     // A loose non-zero heuristic lets historical records remain invisible
     // after a manifest/schema change or interrupted startup backfill.
     recordCount = await lexicalRecordsCountNonDeleted({ connectorInstanceId, stream });
     indexCount = await lexicalIndexCountByStream({ connectorInstanceId, stream });
-    expectedIndexRows = await countIndexableTextValues({ connectorInstanceId, declaredFields, stream });
+    expectedIndexRows = await countIndexableTextValues({
+      connectorInstanceId,
+      declaredFields: Array.from(new Set(declaredFields)),
+      stream,
+    });
 
     const maxIndexRows = recordCount * declaredFields.length;
     const inSync = indexCount === expectedIndexRows && indexCount <= maxIndexRows;
@@ -1335,6 +1765,7 @@ async function backfillLexicalStream({
     connectorId,
     connectorInstanceId,
     declaredFields,
+    mStream,
     progressJob,
     recordsToScan: recordCount,
     signal,
@@ -1345,15 +1776,30 @@ async function backfillLexicalStream({
       `(records=${recordCount}, indexed_rows=${indexedRows})`
   );
 
-  // Persist the new fingerprint so subsequent backfill calls can skip.
-  await withConnectorInstanceWrite(connectorInstanceId, () =>
-    lexicalMetaUpsertFingerprint({
-      connectorId,
-      connectorInstanceId,
-      fieldsFingerprint: newFingerprint,
-      stream,
-      updatedAt: new Date().toISOString(),
-    })
+  // Publication must validate the declaration again after the last page.
+  await maybeLexicalBackfillPhaseForTest("before-meta-publication", { connectorInstanceId, stream });
+  const updatedAt = new Date().toISOString();
+  await withLexicalBackfillWrite(
+    connectorId,
+    connectorInstanceId,
+    mStream,
+    () => {
+      exec(referenceQueries.searchMetaUpsertFingerprint, [
+        connectorId,
+        connectorInstanceId,
+        stream,
+        newFingerprint,
+        updatedAt,
+      ]);
+    },
+    (client) =>
+      postgresLexicalMetaUpsertFingerprintWithClient(client, {
+        connectorId,
+        connectorInstanceId,
+        fieldsFingerprint: newFingerprint,
+        stream,
+        updatedAt,
+      })
   );
   return progressJob;
 }
@@ -1367,7 +1813,9 @@ async function backfillLexicalConnectorInstance(
   manifestStreams: LexicalBackfillManifestStream[],
   progressJob: LexicalBackfillJob,
   log: (message?: unknown) => void,
-  signal: AbortSignal | null
+  signal: AbortSignal | null,
+  orphanStreamCleanup: boolean,
+  verifyContent: boolean
 ): Promise<LexicalBackfillJob> {
   // Track which streams we visited so we can detect "previously participated,
   // no longer participates" — those need their stale index rows and meta
@@ -1393,6 +1841,7 @@ async function backfillLexicalConnectorInstance(
       progressJob: currentProgressJob,
       signal,
       stream,
+      verifyContent,
     });
   });
   currentProgressJob = updateLexicalBackfillJob(currentProgressJob, {
@@ -1409,6 +1858,9 @@ async function backfillLexicalConnectorInstance(
   // REVIEWED-BOUNDED: lexical_search_meta is keyed by (connector_instance_id, stream)
   // and the stream count per connector is a small enumeration bounded by the
   // manifest, well below the @max_rows=1024 declared in the artifact.
+  if (!orphanStreamCleanup) {
+    return currentProgressJob;
+  }
   const orphanRows = await lexicalMetaListStreamsForConnector({ connectorInstanceId });
   await runSequential(orphanRows, async (row) => {
     if (visitedStreams.has(row.stream)) {
@@ -1418,9 +1870,7 @@ async function backfillLexicalConnectorInstance(
       `[PDPP] Lexical index: stream='${row.stream}' connector='${connectorId}' ` +
         "no longer in manifest — dropping stale index + meta"
     );
-    await withConnectorInstanceWrite(connectorInstanceId, () =>
-      lexicalIndexAndMetaDeleteByStream({ connectorId, connectorInstanceId, stream: row.stream })
-    );
+    await deleteLexicalBackfillStream(connectorId, connectorInstanceId, row.stream, { absentStream: row.stream });
   });
 
   return currentProgressJob;
@@ -1430,6 +1880,8 @@ export async function lexicalIndexBackfillForManifest({
   manifest,
   log = NOOP_LEXICAL_LOG,
   signal = null,
+  orphanStreamCleanup = true,
+  verifyContent = false,
 }: LexicalBackfillOptions = {}): Promise<LexicalBackfillJob | undefined> {
   if (!(manifest?.connector_id && Array.isArray(manifest?.streams))) {
     return;
@@ -1467,30 +1919,19 @@ export async function lexicalIndexBackfillForManifest({
         connectorInstanceId,
       });
       await assertLexicalBackfillManifestCurrent(connectorId, manifest);
-      // No connector-instance writer-admission fence here. The scan +
-      // per-page durable write below is the SAME shape records.ts's
-      // maintainRecordIndexesWithinPermit already uses for live-ingest
-      // derived-index maintenance: expensive/unlocked read work first, then
-      // a short version-CAS'd write (rebuildLexicalInsertEntries already
-      // re-checks records.version immediately before writing, skipping any
-      // row a concurrent write has since superseded). Holding
-      // withConnectorInstanceWrite across the WHOLE scan+write here — as
-      // this used to — meant one connector instance's rebuild occupied a
-      // GLOBAL admission slot for the full scan duration, starving
-      // unrelated live ingest for other instances until its own bounded
-      // wait elapsed (the UAT startup-backfill-vs-GroupMe-ingest incident).
-      // A concurrent same-instance write this scan misses is not lost: the
-      // write path's own atomic search_index_dirty mark re-flags the scope
-      // for the next reconcile sweep (search-index-reconcile.ts), which is
-      // itself CAS'd on marked_at so it can never clear a mark a concurrent
-      // write just set.
+      // Keep scans outside writer admission. Each bounded mutation below
+      // validates the manifest inside its instance-locked transaction. A
+      // concurrent ingest also advances the dirty revision, so this pass
+      // cannot acknowledge a newer generation it did not repair.
       progressJob = await backfillLexicalConnectorInstance(
         connectorId,
         connectorInstanceId,
         manifest.streams,
         progressJob,
         log,
-        signal
+        signal,
+        orphanStreamCleanup,
+        verifyContent
       );
     });
     return progressJob;

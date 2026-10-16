@@ -22,7 +22,10 @@ import {
   setClientEventEnqueueHook,
   teardownConnectionSearchProjection,
 } from "../server/records.ts";
-import { __setDeviceIngestStoreFaultHookForTest } from "../server/routes/ref-device-exporters.ts";
+import {
+  __setDeviceIngestPhaseFaultHookForTest,
+  __setDeviceIngestStoreFaultHookForTest,
+} from "../server/routes/ref-device-exporters.ts";
 import { runSearchIndexDirtyReconcileRound } from "../server/search-index-reconcile.ts";
 import { createSqliteConnectorDetailGapStore } from "../server/stores/connector-detail-gap-store.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
@@ -822,22 +825,42 @@ test("device ingest preserves op and rejects unsupported op or malformed data be
   });
 });
 
-test("batch attempt deadline cannot block acceptance once derived indexing is deferred", async () => {
-  // Derived index maintenance runs on the shared ordered lane after the
-  // route responds (see enqueueDeviceIndexMaintenance's fire-and-forget use
-  // in processDeviceIngestBatch): the batch-attempt deadline only bounds the
-  // durable-write phase, so a slow embedding call can no longer blow the
-  // deadline mid-response. A tiny deadline still can't turn an already-
-  // durable batch into a 503 — it durably writes and accepts immediately,
-  // and the slow embed lands afterward on the deferred lane.
+test("batch attempt deadline cannot block acceptance once derived indexing is deferred", async (t) => {
+  // Hold embedding across acceptance, then expire the attempt clock when
+  // derived work starts. The durable phase uses a controlled clock so this
+  // test does not require a CI worker to finish real storage work within 10 ms.
   const previousDeadline = process.env.PDPP_INGEST_BATCH_ATTEMPT_DEADLINE_MS;
   process.env.PDPP_INGEST_BATCH_ATTEMPT_DEADLINE_MS = "10";
+  let attemptTime = 0;
+  let expireDurableWrite = false;
+  t.mock.method(performance, "now", () => attemptTime);
+  __setDeviceIngestPhaseFaultHookForTest((point) => {
+    if (expireDurableWrite && point === "after-durable-record") {
+      attemptTime = 11;
+    }
+  });
+  // Expire the attempt clock after the durable prefix is written and before
+  // the batch is completed, so acceptance is proven to ignore an expired
+  // deadline once only derived work remains.
+  let expiredBeforeCompletion = false;
+  __setDeviceIngestStoreFaultHookForTest((point) => {
+    if (!expireDurableWrite && point === "before-complete-processing-batch") {
+      attemptTime = 11;
+      expiredBeforeCompletion = true;
+    }
+  });
+  const releaseEmbedding = deferred();
+  let embeddingWatchdogExpired = false;
+  let embeddingGuard: ReturnType<typeof setTimeout> | undefined;
+  let embeddedDocuments = 0;
   const backend = {
     available: () => true,
     dimensions: () => 3,
     distanceMetric: () => "cosine",
     embedDocument: async () => {
-      await new Promise((resolve) => setTimeout(resolve, 30));
+      attemptTime = 11;
+      await releaseEmbedding.promise;
+      embeddedDocuments += 1;
       return new Float32Array([0.1, 0.2, 0.3]);
     },
     embedQuery: async () => new Float32Array([0.1, 0.2, 0.3]),
@@ -851,11 +874,17 @@ test("batch attempt deadline cannot block acceptance once derived indexing is de
       const batch = makeBatch(device, "batch-attempt-deadline", "deadline");
       firstRecord(batch).data.content = "deadline payload";
       batch.body_hash = bodyHash(batch.records);
+      embeddingGuard = setTimeout(() => {
+        embeddingWatchdogExpired = true;
+        releaseEmbedding.resolve();
+      }, 15_000);
       const first = await postJson(
         `${asUrl}/_ref/device-exporters/${encodeURIComponent(device.device_id)}/ingest-batches`,
         batch,
         authHeaders(device.device_token)
       );
+      assert.equal(embeddingWatchdogExpired, false, "acceptance completes while embedding is held");
+      assert.equal(expiredBeforeCompletion, true, "the attempt clock expired before batch completion");
       assert.equal(first.status, 201, JSON.stringify(first.body));
       assert.deepEqual(
         getDb()
@@ -871,7 +900,10 @@ test("batch attempt deadline cannot block acceptance once derived indexing is de
         1
       );
 
+      assert.equal(embeddedDocuments, 0, "acceptance does not wait for embedding");
+      releaseEmbedding.resolve();
       await drainConnectorInstanceIndexWorkForTests();
+      assert.equal(embeddedDocuments, 1, "deferred embedding completes after acceptance");
       const retry = await postJson(
         `${asUrl}/_ref/device-exporters/${encodeURIComponent(device.device_id)}/ingest-batches`,
         batch,
@@ -892,8 +924,44 @@ test("batch attempt deadline cannot block acceptance once derived indexing is de
         1,
         "accepted replay does not allocate a second version"
       );
+
+      // The same expired clock must still stop a batch with durable work left.
+      attemptTime = 0;
+      expireDurableWrite = true;
+      const partial = makeBatch(device, "batch-partial-deadline", "partial");
+      partial.batch_seq = 2;
+      partial.records.push({
+        data: { id: "suffix-key", value: "suffix" },
+        emitted_at: "2026-04-30T12:00:01.000Z",
+        record_key: "suffix-key",
+        stream: "messages",
+      });
+      partial.body_hash = bodyHash(partial.records);
+      const interrupted = await postJson(
+        `${asUrl}/_ref/device-exporters/${encodeURIComponent(device.device_id)}/ingest-batches`,
+        partial,
+        authHeaders(device.device_token)
+      );
+      assert.equal(interrupted.status, 503);
+      assert.equal(errorCode(interrupted), "device_ingest_retryable");
+      assert.deepEqual(
+        getDb()
+          .prepare("SELECT status, durable_prefix_count FROM device_ingest_batch_outcomes WHERE batch_id = ?")
+          .get(partial.batch_id),
+        { durable_prefix_count: 1, status: "processing" }
+      );
+      const resumed = await postJson(
+        `${asUrl}/_ref/device-exporters/${encodeURIComponent(device.device_id)}/ingest-batches`,
+        partial,
+        authHeaders(device.device_token)
+      );
+      assert.equal(resumed.status, 201, JSON.stringify(resumed.body));
     });
   } finally {
+    clearTimeout(embeddingGuard);
+    releaseEmbedding.resolve();
+    __setDeviceIngestPhaseFaultHookForTest(null);
+    __setDeviceIngestStoreFaultHookForTest(null);
     if (previousDeadline === undefined) {
       delete process.env.PDPP_INGEST_BATCH_ATTEMPT_DEADLINE_MS;
     } else {

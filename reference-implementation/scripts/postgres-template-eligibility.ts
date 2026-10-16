@@ -154,6 +154,9 @@ export const POSTGRES_TEMPLATE_ELIGIBLE_FILES: readonly string[] = [
   "test/scheduler-owner-isolation.test.ts",
   "test/scheduler-store-reset-state-admission.test.ts",
   "test/scheduler-store-semantic-surface.test.ts",
+  "test/search-index-lexical-resume.postgres.test.ts",
+  "test/search-index-reconcile-scope-isolation.postgres.test.ts",
+  "test/search-index-repair-correctness.postgres.test.ts",
   "test/setup-binding-promotion.test.ts",
   "test/source-declaration-trust.test.ts",
   "test/source-field-name-records-parity.test.ts",
@@ -204,6 +207,8 @@ export const POSTGRES_TEMPLATE_COLD_REQUIRED_FILES: readonly string[] = [
   "test/postgres-record-index-idempotency-oracle.test.ts",
   "test/postgres-record-index-repair-oracle.test.ts",
   "test/postgres-semantic-pgvector.test.ts",
+  // Verifies scope-index bootstrap identity and replacement of a bad definition.
+  "test/postgres-semantic-scope-index-idempotence.test.ts",
   "test/postgres-template-eligibility-migration-mutation-control.test.ts",
   "test/records-instance-stream-id-keyset-index.test.ts",
   "test/rs-opaque-cursors.test.ts",
@@ -212,6 +217,8 @@ export const POSTGRES_TEMPLATE_COLD_REQUIRED_FILES: readonly string[] = [
   "test/run-history-interrupted-migration-reconciliation.test.ts",
   "test/run-history-writer-authority.test.ts",
   "test/semantic-index-skip-unchanged-postgres.test.ts",
+  // Exercises additive semantic input-identity migration and real publication.
+  "test/semantic-startup-backfill-catches-crash-abandoned-record.test.ts",
   "test/spine-events-connector-instance-id-backfill.test.ts",
   "test/spine-source-boot-backfill.test.ts",
 ];

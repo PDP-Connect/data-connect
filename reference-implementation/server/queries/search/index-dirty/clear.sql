@@ -19,3 +19,5 @@
 UPDATE search_index_dirty
 SET dirty = 0, reconciled_at = ?, last_error = NULL, attempts = 0, next_attempt_at = NULL
 WHERE connector_instance_id = ? AND stream = ? AND revision = ?
+  AND dirty <> 0
+  AND operator_parked = 0

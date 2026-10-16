@@ -13,10 +13,12 @@
 -- two durable marks within the same millisecond receive an identical ISO
 -- `marked_at` string, so only a value that strictly increases once per
 -- mark can prove "no mark landed after the reconcile's read."
-INSERT INTO search_index_dirty(connector_instance_id, connector_id, stream, dirty, marked_at, revision)
-VALUES(?, ?, ?, 1, ?, 1)
+INSERT INTO search_index_dirty(connector_instance_id, connector_id, stream, dirty, marked_at, revision, operator_parked)
+VALUES(?, ?, ?, 1, ?, 1, 0)
 ON CONFLICT(connector_instance_id, stream) DO UPDATE SET
   connector_id = excluded.connector_id,
   dirty = 1,
   marked_at = excluded.marked_at,
+  attempts = CASE WHEN search_index_dirty.operator_parked = 0 THEN 0 ELSE search_index_dirty.attempts END,
+  next_attempt_at = CASE WHEN search_index_dirty.operator_parked = 0 THEN NULL ELSE search_index_dirty.next_attempt_at END,
   revision = search_index_dirty.revision + 1

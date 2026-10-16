@@ -1371,12 +1371,18 @@ export async function withPostgresTransaction<T>(
 }
 
 /** Keep a bounded derived-index page on the bulk lane while it shares its manifest fence and write transaction. */
-export async function withPostgresBulkTransaction<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
+export async function withPostgresBulkTransaction<T>(
+  fn: (client: PoolClient) => Promise<T>,
+  options?: { lockConnectorInstanceId?: string }
+): Promise<T> {
   const client = await getPostgresBulkPool().connect();
   try {
     await client.query("BEGIN");
     await client.query(`SET LOCAL statement_timeout = ${POSTGRES_BULK_STATEMENT_TIMEOUT_MS}`);
     await client.query(`SET LOCAL lock_timeout = ${POSTGRES_BULK_LOCK_TIMEOUT_MS}`);
+    if (options?.lockConnectorInstanceId) {
+      await acquireConnectorInstanceXactLock(client, options.lockConnectorInstanceId);
+    }
     const value = await fn(client);
     await client.query("COMMIT");
     return value;
@@ -3210,8 +3216,10 @@ async function bootstrapPostgresSchemaOnce({
         scope_key TEXT NOT NULL,
         record_key TEXT NOT NULL,
         embedding JSONB NOT NULL,
+        input_identity TEXT,
         PRIMARY KEY(connector_instance_id, scope_key, record_key)
       );
+      ALTER TABLE semantic_search_blob ADD COLUMN IF NOT EXISTS input_identity TEXT;
       CREATE TABLE IF NOT EXISTS semantic_search_snapshots (
         snapshot_id TEXT PRIMARY KEY,
         query TEXT NOT NULL,
@@ -3462,6 +3470,7 @@ async function bootstrapPostgresSchemaOnce({
         last_error TEXT,
         attempts INTEGER NOT NULL DEFAULT 0,
         next_attempt_at TEXT,
+        operator_parked INTEGER DEFAULT 0,
         PRIMARY KEY(connector_instance_id, stream)
       );
       CREATE INDEX IF NOT EXISTS idx_pg_search_index_dirty_pending
@@ -3469,6 +3478,20 @@ async function bootstrapPostgresSchemaOnce({
       ALTER TABLE search_index_dirty ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 0;
       ALTER TABLE search_index_dirty ADD COLUMN IF NOT EXISTS next_attempt_at TEXT;
       ALTER TABLE search_index_dirty ADD COLUMN IF NOT EXISTS revision BIGINT NOT NULL DEFAULT 0;
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_schema = current_schema()
+            AND table_name = 'search_index_dirty'
+            AND column_name = 'operator_parked'
+        ) THEN
+          ALTER TABLE search_index_dirty ADD COLUMN operator_parked INTEGER;
+          UPDATE search_index_dirty
+          SET operator_parked = CASE WHEN next_attempt_at IS NULL THEN 0 ELSE NULL END;
+        END IF;
+      END $$;
+      ALTER TABLE search_index_dirty ALTER COLUMN operator_parked SET DEFAULT 0;
 
       ALTER TABLE connector_summary_evidence
         ADD COLUMN IF NOT EXISTS last_record_updated_at TEXT;
@@ -5656,6 +5679,14 @@ async function ensurePostgresRecordsBlobSearchInstanceIndexes(client: PoolClient
       expectedFragments: ["semantic_search_blob USING btree (connector_instance_id, scope_key)"],
       name: "idx_pg_semantic_search_scope",
     });
+    await ensurePostgresIndexDefinition(client, {
+      createSql:
+        'CREATE INDEX IF NOT EXISTS idx_pg_semantic_search_scope_c ON semantic_search_blob(connector_instance_id, (scope_key COLLATE "C"), (record_key COLLATE "C"))',
+      expectedFragments: [
+        'semantic_search_blob USING btree (connector_instance_id, scope_key COLLATE "C", record_key COLLATE "C")',
+      ],
+      name: "idx_pg_semantic_search_scope_c",
+    });
   });
 }
 
@@ -6490,12 +6521,14 @@ async function enqueuePostgresLocalDeviceProjectionRepair(
     // equivalent, so a drift in either shows up as a test failure rather
     // than a silently un-reconciled scope.
     await client.query(
-      `INSERT INTO search_index_dirty(connector_instance_id, connector_id, stream, dirty, marked_at, revision)
-       VALUES ($1, $2, $3, 1, $4, 1)
+      `INSERT INTO search_index_dirty(connector_instance_id, connector_id, stream, dirty, marked_at, revision, operator_parked)
+       VALUES ($1, $2, $3, 1, $4, 1, 0)
        ON CONFLICT(connector_instance_id, stream) DO UPDATE SET
          connector_id = excluded.connector_id,
          dirty = 1,
          marked_at = excluded.marked_at,
+         attempts = CASE WHEN search_index_dirty.operator_parked = 0 THEN 0 ELSE search_index_dirty.attempts END,
+         next_attempt_at = CASE WHEN search_index_dirty.operator_parked = 0 THEN NULL ELSE search_index_dirty.next_attempt_at END,
          revision = search_index_dirty.revision + 1`,
       [repairConnectorInstanceId, newConnectorId, stream, nowIso]
     );
