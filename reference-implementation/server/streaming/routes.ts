@@ -189,6 +189,8 @@ interface BrowserSurfaceLease {
 
 interface BrowserSurface {
   active_lease_id: string;
+  /** Allocator facts; the host allocator's are `host_launch_*`. */
+  allocator_metadata?: Readonly<Record<string, string>>;
   cdp_url?: string;
   connector_id: string;
   health: string;
@@ -260,6 +262,12 @@ interface RegisterStreamingRoutesOptions {
   emitTimelineEvent?: TimelineEmitter;
   /** Force-delete one exact connector-owned target at an interaction barrier. */
   forceUnregisterStreamingTarget?: ((runId: string, interactionId: string) => boolean | Promise<boolean>) | null;
+  /**
+   * Shows a host browser surface on the owner's desktop without taking focus.
+   * Called before a companion attaches to a surface whose launch report says
+   * it renders no frames while concealed (macOS hidden-native).
+   */
+  revealConcealedBrowserSurface?: ((surfaceId: string) => Promise<void>) | null;
   /**
    * Readiness-only hook for a non-n.eko target already registered by the
    * connector runtime. The route intentionally receives a boolean rather
@@ -846,6 +854,7 @@ export function registerStreamingRoutes({
   listRunEventsPage = null,
   browserSurfaceLeaseManager = null,
   forceUnregisterStreamingTarget = null,
+  revealConcealedBrowserSurface = null,
   nekoProxyPath = DEFAULT_NEKO_PROXY_PATH,
   nekoProxyAllowedHosts = [],
   isNekoProxyTargetApproved = null,
@@ -1160,6 +1169,22 @@ export function registerStreamingRoutes({
     return true;
   }
 
+  // A failed reveal is logged, not fatal: the owner can still reach the
+  // browser on the desktop, and refusing the stream would leave no way in.
+  async function revealIfConcealedWithoutFrames(target: BrowserSurfaceTarget | null): Promise<void> {
+    if (!(target?.backend === "cdp" && target.surface_id && revealConcealedBrowserSurface)) return;
+    const metadata = browserSurfaceLeaseManager?.getSurface(target.surface_id)?.allocator_metadata;
+    if (metadata?.host_launch_streams_while_concealed !== "false") return;
+    try {
+      await revealConcealedBrowserSurface(target.surface_id);
+    } catch (error) {
+      logger?.info(
+        { error: errorMessage(error, "reveal failed"), event: "browser_surface_reveal_failed", surface_id: target.surface_id },
+        "browser surface reveal before companion attach failed"
+      );
+    }
+  }
+
   async function mintStreamSession({
     body,
     companionFactory: factory,
@@ -1216,6 +1241,8 @@ export function registerStreamingRoutes({
         reason: "stream_session_superseded",
       });
     }
+
+    await revealIfConcealedWithoutFrames(mintScope.target);
 
     // A replay must reuse the companion bound to the original session.
     const effectiveBrowserSessionId = session.browser_session_id;

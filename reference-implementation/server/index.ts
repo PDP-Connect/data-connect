@@ -944,6 +944,11 @@ interface ServerOpts {
   staticSecretCredentialProber?: unknown;
   storageBackend?: "postgres" | "sqlite";
   streamingClearTimeout?: ((handle: unknown) => void) | null;
+  /**
+   * Shows a concealed host browser before a companion attaches. Defaults to
+   * the host allocator's `revealSurface`.
+   */
+  revealConcealedBrowserSurface?: ((surfaceId: string) => Promise<void>) | null;
   streamingCompanionFactory?: StreamingCompanionFactory | null;
   streamingLogger?: LoggerLike | null;
   streamingNow?: (() => number) | null;
@@ -5947,6 +5952,14 @@ export function buildAsApp(opts: ServerOpts = {}) {
       : {}),
     forceUnregisterStreamingTarget: (runId: string, interactionId: string) =>
       runTargetRegistry.forceUnregister({ interactionId, runId }),
+    revealConcealedBrowserSurface:
+      opts.revealConcealedBrowserSurface ??
+      (typeof (opts.browserSurfaceAllocator as { revealSurface?: unknown } | undefined)?.revealSurface === "function"
+        ? (surfaceId: string) =>
+            (opts.browserSurfaceAllocator as unknown as { revealSurface: (id: string) => Promise<void> }).revealSurface(
+              surfaceId
+            )
+        : null),
     isNekoProxyTargetApproved: (
       target: unknown,
       {
@@ -9360,6 +9373,9 @@ export async function startServer(opts: ServerOpts = {}) {
     resolveIntrospectionIssuer: () => configuredAsIssuer || runtimeContext.referenceBaseUrl,
     staticSecretCredentialProber,
     streamingClearTimeout: opts.streamingClearTimeout,
+    ...(opts.revealConcealedBrowserSurface === undefined
+      ? {}
+      : { revealConcealedBrowserSurface: opts.revealConcealedBrowserSurface }),
     streamingCompanionFactory: opts.streamingCompanionFactory,
     streamingLogger: opts.streamingLogger,
     streamingNow: opts.streamingNow,
