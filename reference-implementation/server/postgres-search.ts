@@ -40,6 +40,8 @@ interface LexicalIndexEntry {
   field: string;
   recordKey: string;
   text: string;
+  /** `records.version` the text was read at; the insert re-checks it is still current. */
+  version: number;
 }
 
 interface LexicalTextEntry {
@@ -271,6 +273,15 @@ export async function postgresLexicalIndexInsertManyWithClient(
 ) {
   if (!Array.isArray(entries) || entries.length === 0) {
     return 0;
+  }
+  // A missing version would bind NULL, match no record, and still be counted
+  // as written below, silently acknowledging a dropped batch.
+  for (const entry of entries) {
+    if (!Number.isSafeInteger(entry.version)) {
+      throw new TypeError(
+        `lexical index entry for ${stream}/${entry.recordKey}/${entry.field} has no valid records.version`
+      );
+    }
   }
   // Version-guarded: `entries[].version` is the `records.version` each
   // row's text was read at (a backfill page read, taken before this insert
