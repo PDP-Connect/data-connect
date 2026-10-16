@@ -3,7 +3,7 @@
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { createServer } from "node:http";
+import { createServer, Server } from "node:http";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 
@@ -28,9 +28,15 @@ const { deleteRecord } = await import("../../server/records.ts");
 const { createRequestConnectorInstanceStore } = await import(
 	"../../server/request-store-factories.ts"
 );
-const { closePostgresStorage } = await import(
-	"../../server/postgres-storage.ts"
-);
+const {
+	closePostgresStorage,
+	getPostgresPool,
+	isPostgresStorageBackend,
+	postgresQuery,
+	resolveStorageBackend,
+} = await import("../../server/postgres-storage.ts");
+const { getDb } = await import("../../server/db.ts");
+const { execDynamicSqlAcknowledged } = await import("../../lib/db.ts");
 
 export const INTERNAL_A = "cin_pairwise_detail_a";
 export const INTERNAL_B = "cin_pairwise_detail_b";
@@ -89,6 +95,12 @@ export type Fixture = {
 		sha256: string;
 		size_bytes: number;
 	}>;
+	removeOriginBlobBinding: (args: {
+		blobId: string;
+		connectorInstanceId: string;
+		recordKey: string;
+		stream: string;
+	}) => Promise<void>;
 	seedRecord: (args: {
 		connectorId?: string;
 		connectorInstanceId: string;
@@ -108,9 +120,23 @@ export type Fixture = {
 
 export async function makeFixture(
 	t: TestContext,
-	options: { connectorKey?: string; withSecondSource?: boolean } = {},
+	options: {
+		connectorKey?: string;
+		fixedResponseDate?: string;
+		withSecondSource?: boolean;
+	} = {},
 ): Promise<Fixture> {
 	const connectorId = options.connectorKey ?? CONNECTOR_ID;
+	const storageConfig = resolveStorageBackend();
+	// Capture admission before startServer invokes the parent database guard.
+	// Re-admitting after seeding would correctly reject the now nonempty DB.
+	const guardedPostgresFixture =
+		storageConfig.backend === "postgres" &&
+		process.env.CORE1_DETAIL_PG === "1" &&
+		process.env.PDPP_REQUIRE_TEST_DATABASE === "1" &&
+		Boolean(process.env.PDPP_TEST_POSTGRES_URL) &&
+		process.env.PDPP_DATABASE_URL === process.env.PDPP_TEST_POSTGRES_URL &&
+		storageConfig.databaseUrl === process.env.PDPP_TEST_POSTGRES_URL;
 	const declaration = JSON.parse(
 		readFileSync(
 			join(import.meta.dirname, "../seam-spike/fixtures/pr89/source.json"),
@@ -286,6 +312,25 @@ export async function makeFixture(
 		...TEST_INTROSPECTION_SERVER_OPTS,
 	} as Parameters<typeof startServer>[0])) as NonNullable<typeof server>;
 	server = startedServer;
+	const fixturePostgresPool = isPostgresStorageBackend()
+		? getPostgresPool()
+		: undefined;
+	const fixtureSqliteDb = fixturePostgresPool ? undefined : getDb();
+	if (options.fixedResponseDate !== undefined) {
+		const fixedResponseDate = options.fixedResponseDate;
+		assert.equal(
+			new Date(fixedResponseDate).toUTCString(),
+			fixedResponseDate,
+			"fixedResponseDate must be an RFC1123 HTTP date",
+		);
+		assert.ok(
+			startedServer.rsServer instanceof Server,
+			"fixedResponseDate requires the actual Node HTTP server",
+		);
+		startedServer.rsServer.prependListener("request", (_request, response) => {
+			response.setHeader("Date", fixedResponseDate);
+		});
+	}
 	rsUrl = `http://localhost:${startedServer.rsPort}`;
 	const registration = await fetch(
 		`http://localhost:${startedServer.asPort}/connectors`,
@@ -576,6 +621,42 @@ export async function makeFixture(
 				sha256: string;
 				size_bytes: number;
 			};
+		},
+		removeOriginBlobBinding: async ({
+			blobId,
+			connectorInstanceId,
+			recordKey,
+			stream,
+		}) => {
+			const params = [blobId, connectorId, connectorInstanceId, stream, recordKey];
+			const sql = `DELETE FROM blob_bindings
+				WHERE blob_id = ? AND connector_id = ? AND connector_instance_id = ?
+				  AND stream = ? AND record_key = ?`;
+			let changes: number | null;
+			if (isPostgresStorageBackend()) {
+				assert.ok(
+					guardedPostgresFixture,
+					"origin-only mutation requires the parent's admitted disposable PG fixture",
+				);
+				assert.ok(
+					getPostgresPool() === fixturePostgresPool,
+					"origin-only mutation must use the fixture's initialized pool",
+				);
+				let position = 0;
+				const result = await postgresQuery(
+					sql.replaceAll("?", () => `$${++position}`),
+					params,
+				);
+				changes = result.rowCount;
+			} else {
+				assert.equal(storageConfig.backend, "sqlite");
+				assert.ok(getDb() === fixtureSqliteDb);
+				assert.ok(fixtureSqliteDb && "name" in fixtureSqliteDb);
+				assert.equal(fixtureSqliteDb.name, ":memory:");
+				// REVIEWED-DYNAMIC: Test-only tuple removal must not enter the production query registry.
+				changes = execDynamicSqlAcknowledged(sql, params).changes;
+			}
+			assert.equal(changes, 1, "fixture setup: remove exactly one upload binding");
 		},
 		seedRecord: async ({
 			connectorId: targetConnectorId = connectorId,

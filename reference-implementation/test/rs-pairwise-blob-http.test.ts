@@ -3,6 +3,7 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
 
 import {
 	CLIENT_A,
@@ -17,6 +18,8 @@ import {
 	OWNER_TOKEN,
 	SECOND_CONNECTOR_ID,
 } from "./helpers/pairwise-rs-read-fixture.ts";
+
+const FIXED_RESPONSE_DATE = "Thu, 01 Jan 2026 00:00:00 GMT";
 
 async function seedBlob(
 	fx: Awaited<ReturnType<typeof makeFixture>>,
@@ -263,7 +266,7 @@ test("raw, malformed, conflicting, and unknown selectors fail with fixed public 
 });
 
 test("out-of-scope and nonexistent client selectors have identical error responses", async (t) => {
-	const fx = await makeFixture(t);
+	const fx = await makeFixture(t, { fixedResponseDate: FIXED_RESPONSE_DATE });
 	const { blob } = await seedBlob(fx, INTERNAL_A, "selector-equivalence");
 	const base = structuredClone(clientInfo(fx));
 	const makeContext = (handle: string, internalId: string) => {
@@ -291,10 +294,12 @@ test("out-of-scope and nonexistent client selectors have identical error respons
 			"Bearer blob-context-a-only",
 			{ headers: { "request-id": "req_blob_selector_equivalence" } },
 		);
-	const [outOfScope, nonexistent] = await Promise.all([
-		read(CLIENT_B),
-		read("inst_v1_blob_never_issued"),
-	]);
+	const outOfScope = await read(CLIENT_B);
+	await delay(1100);
+	const nonexistent = await read("inst_v1_blob_never_issued");
+	for (const reply of [outOfScope, nonexistent]) {
+		assert.equal(reply.headers.get("Date"), FIXED_RESPONSE_DATE);
+	}
 	assert.equal(outOfScope.status, 404);
 	assert.equal(nonexistent.status, 404);
 	assert.deepEqual(Buffer.from(outOfScope.body), Buffer.from(nonexistent.body));
@@ -556,7 +561,10 @@ test("field, resource, and time filters hide blob references without exposing by
 });
 
 test("valid blob URLs still require bearer authentication and owner source selection is private", async (t) => {
-	const fx = await makeFixture(t, { withSecondSource: true });
+	const fx = await makeFixture(t, {
+		fixedResponseDate: FIXED_RESPONSE_DATE,
+		withSecondSource: true,
+	});
 	const { blob, bytes } = await seedBlob(fx, INTERNAL_A, "auth-blob");
 	const validPath = `/v1/blobs/${blob.blob_id}?instance_id=${CLIENT_A}`;
 	const noBearer = await fx.requestRaw(validPath);
@@ -578,12 +586,17 @@ test("valid blob URLs still require bearer authentication and owner source selec
 		`Bearer ${OWNER_TOKEN}`,
 		{ headers: { "request-id": "req_owner_source_mismatch" } },
 	);
+	await delay(1100);
 	const nonexistent = await fx.requestRaw(
 		`/v1/blobs/${blob.blob_id}?instance_id=inst_v1_owner_never_issued`,
 		`Bearer ${OWNER_TOKEN}`,
 		{ headers: { "request-id": "req_owner_source_mismatch" } },
 	);
 	assert.equal(mismatch.status, 404);
+	assert.equal(nonexistent.status, 404);
+	for (const reply of [mismatch, nonexistent]) {
+		assert.equal(reply.headers.get("Date"), FIXED_RESPONSE_DATE);
+	}
 	assert.deepEqual(Buffer.from(mismatch.body), Buffer.from(nonexistent.body));
 	assert.deepEqual(
 		[...mismatch.headers.entries()],
