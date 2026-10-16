@@ -581,6 +581,136 @@ test("lists the expected tools and annotates read-only tools as read-only", asyn
   await server.close();
 });
 
+test("app-token tool guidance preserves input properties and required fields", async (t) => {
+  const { fetch } = makeFakeRs();
+  const { client, server } = await connectClient(fetch);
+  try {
+    const listed = await client.listTools();
+    const affectedNames = new Set(["aggregate", "fetch", "query_records", "search"]);
+    const affected = listed.tools.filter((tool) => affectedNames.has(tool.name));
+    assert.deepEqual(
+      Object.fromEntries(
+        affected.map((tool) => [
+          tool.name,
+          {
+            properties: Object.keys(tool.inputSchema.properties ?? {}).sort(),
+            required: [...(tool.inputSchema.required ?? [])].sort(),
+          },
+        ])
+      ),
+      {
+        aggregate: {
+          properties: [
+            "connection_id", "field", "filter", "granularity", "group_by",
+            "group_by_time", "limit", "metric", "stream", "time_zone",
+          ],
+          required: ["metric", "stream"],
+        },
+        fetch: {
+          properties: ["connection_id", "expand", "expand_limit", "fields", "id"],
+          required: ["id"],
+        },
+        query_records: {
+          properties: [
+            "changes_since", "connection_id", "count", "cursor", "expand", "expand_limit",
+            "fields", "filter", "limit", "order", "sort", "stream", "view",
+          ],
+          required: ["stream"],
+        },
+        search: {
+          properties: ["connection_id", "cursor", "filter", "limit", "mode", "q", "streams"],
+          required: ["q"],
+        },
+      }
+    );
+
+    const checked: string[] = [];
+    for (const tool of listed.tools) {
+      for (const name of ["filter", "expand", "expand_limit"]) {
+        const property = tool.inputSchema.properties?.[name] as { description?: string } | undefined;
+        if (!property) {
+          continue;
+        }
+        const description = property.description ?? "";
+        assert.match(description, /not supported/i, `${tool.name}.${name}`);
+        assert.match(description, /app|client/i, `${tool.name}.${name}`);
+        assert.match(description, /server returns 400/);
+        assert.match(description, /Owner-token reads only/);
+        assert.doesNotMatch(
+          description,
+          /Typed object filter|One-hop inline expansion|Typed per-relation cap|Pass an object|expand_capabilities|Fields and operators/i
+        );
+        checked.push(`${tool.name}.${name}`);
+      }
+    }
+    assert.deepEqual(checked.sort(), [
+      "aggregate.filter", "fetch.expand", "fetch.expand_limit",
+      "query_records.expand", "query_records.expand_limit", "query_records.filter", "search.filter",
+    ]);
+    for (const tool of listed.tools) {
+      assert.doesNotMatch(
+        tool.description ?? "",
+        /per-stream filter|valid filter|per-field filter operators|expandable relations|filter\/sort\/expand/i
+      );
+    }
+    const queryDescription = listed.tools.find((tool) => tool.name === "query_records")?.description ?? "";
+    for (const supported of ["cursor", "limit", "changes_since", "grant's time range", "search", "fields"]) {
+      assert.ok(queryDescription.includes(supported), `query_records must explain ${supported}`);
+    }
+    t.diagnostic(`tools/list bytes=${Buffer.byteLength(JSON.stringify(listed), "utf8")}`);
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+test("app-token filter rejection preserves the RS error and cursor paging remains available", async () => {
+  const { fetch: rsFetch, calls } = makeFakeRs();
+  const rejectedUrls: URL[] = [];
+  const error = {
+    type: "invalid_request",
+    code: "unsupported_query",
+    message: "filter[created_at][gte] is not supported for client-token reads in PDPP v0.1",
+  };
+  const fetch: typeof globalThis.fetch = async (input, init) => {
+    const url = new URL(input.toString());
+    const auth = (init?.headers as Record<string, string> | undefined)?.Authorization;
+    if (auth === "Bearer scoped-token" && [...url.searchParams.keys()].some((key) => key.startsWith("filter["))) {
+      rejectedUrls.push(url);
+      return jsonResponse({ error }, { status: 400 });
+    }
+    return rsFetch(input, init);
+  };
+  const { client, server } = await connectClient(fetch);
+  try {
+    const result = await client.callTool({
+      name: "query_records",
+      arguments: { stream: "orders", filter: { created_at: { gte: "2026-01-01T00:00:00Z" } } },
+    });
+    assert.equal(result.isError, true);
+    const structured = result.structuredContent as { error: unknown; http_status: number };
+    assert.equal(structured.http_status, 400);
+    assert.deepEqual(structured.error, error);
+    assert.equal(firstText(result), JSON.stringify(error, null, 2));
+    assert.equal(rejectedUrls.length, 1, "client rejection must not retry with broader credentials");
+    assert.equal(rejectedUrls[0]?.pathname, "/v1/streams/orders/records");
+    assert.equal(rejectedUrls[0]?.searchParams.get("filter[created_at][gte]"), "2026-01-01T00:00:00Z");
+
+    const page = await client.callTool({
+      name: "query_records",
+      arguments: { stream: "orders", cursor: "cursor_orders_page_2", limit: 25, fields: ["id"] },
+    });
+    assert.notEqual(page.isError, true);
+    const pageUrl = new URL(calls.at(-1)?.url ?? "");
+    assert.equal(pageUrl.searchParams.get("cursor"), "cursor_orders_page_2");
+    assert.equal(pageUrl.searchParams.get("limit"), "25");
+    assert.equal(rejectedUrls.length, 1);
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
 test("schema detail=full requires stream to avoid global schema blowups", async () => {
   const { fetch, calls } = makeFakeRs();
   const { client, server } = await connectClient(fetch);
