@@ -7,11 +7,15 @@
  * last_run_id stores a versioned JSON ledger of observed run identities.
  * Commits retain a tombstone so replaying an older outcome cannot reset or
  * recreate a newer streak. Legacy scalar run ids are upgraded on first write.
- * History is deliberately retained: pruning without a replay horizon would
- * make old runs count again. This is scheduling metadata, never data evidence.
+ * Replay fencing covers only the most recent CHECKPOINT_REPLAY_HORIZON distinct
+ * runs. Without a replay-stable run ordinal, an evicted run is indistinguishable
+ * from a new run: its replay can increment, reset, or restart a streak. This
+ * bounded best-effort history affects stall signals only, never cursors/data.
  */
 import { iterateDynamicSqlAcknowledged, writeTransaction } from "../../lib/db.ts";
 import { isPostgresStorageBackend, postgresQuery } from "../postgres-storage.ts";
+
+export const CHECKPOINT_REPLAY_HORIZON = 64;
 
 /** The scope a checkpoint commits under. Absent ids are stored as "". */
 export interface CheckpointScope {
@@ -55,9 +59,14 @@ function upsertOutcome(postgres: boolean): string {
   const wasCommitted = postgres
     ? `((${history})->>'committed')::boolean`
     : `json_extract(${history}, '$.committed') = 1`;
+  // Retain the newest N - 1 identities, then append this unseen run. Ordering
+  // is explicit on both backends; this also compacts oversized v1 histories.
+  const retainedRuns = postgres
+    ? `(SELECT COALESCE(jsonb_agg(value ORDER BY ord), '[]'::jsonb) FROM (SELECT value, ord FROM jsonb_array_elements((${history})->'runs') WITH ORDINALITY AS runs(value, ord) ORDER BY ord DESC LIMIT ${CHECKPOINT_REPLAY_HORIZON - 1}) recent)`
+    : `(SELECT json_group_array(value) FROM (SELECT value FROM (SELECT value, key FROM json_each(${history}, '$.runs') ORDER BY key DESC LIMIT ${CHECKPOINT_REPLAY_HORIZON - 1}) recent ORDER BY key))`;
   const nextLedger = postgres
-    ? `'v1:' || jsonb_build_object('runs', ((${history})->'runs') || jsonb_build_array(${p(6)}::text), 'committed', ${p(8)} = 1)::text`
-    : `'v1:' || json_object('runs', json(json_insert(json_extract(${history}, '$.runs'), '$[#]', ${p(6)})), 'committed', ${p(8)})`;
+    ? `'v1:' || jsonb_build_object('runs', ${retainedRuns} || jsonb_build_array(${p(6)}::text), 'committed', ${p(8)} = 1)::text`
+    : `'v1:' || json_object('runs', json(json_insert(${retainedRuns}, '$[#]', ${p(6)})), 'committed', ${p(8)})`;
   const committedResult = postgres
     ? "CASE WHEN substr(last_run_id, 1, 3) = 'v1:' THEN (substr(last_run_id, 4)::jsonb->>'committed')::boolean ELSE false END"
     : "CASE WHEN substr(last_run_id, 1, 3) = 'v1:' THEN json_extract(substr(last_run_id, 4), '$.committed') ELSE 0 END";

@@ -12,6 +12,7 @@ import test from "node:test";
 import { closeDb, getDb, initDb } from "../server/db.ts";
 import { closePostgresStorage, initPostgresStorage, postgresQuery } from "../server/postgres-storage.ts";
 import {
+  CHECKPOINT_REPLAY_HORIZON,
   type CheckpointScope,
   type CheckpointWithholdStore,
   getDefaultCheckpointWithholdStore,
@@ -122,5 +123,61 @@ test("SQLite upgrades legacy scalar run ids without recounting them", async () =
     assert.deepEqual(await withhold(store, "fresh", { orders: "a" }), { orders: 1 });
   } finally {
     closeDb();
+  }
+});
+
+async function assertBoundedReplayHistory(store: CheckpointWithholdStore, readLedger: () => Promise<string>): Promise<void> {
+  const horizon = CHECKPOINT_REPLAY_HORIZON;
+  for (let run = 0; run < horizon * 3; run += 1) {
+    // biome-ignore lint/performance/noAwaitInLoops: exercise sequential durable commits.
+    await withhold(store, `healthy-${run}`, {}, { committed: ["orders"] });
+    // biome-ignore lint/performance/noAwaitInLoops: verify every persisted ledger.
+    const ledger = JSON.parse((await readLedger()).slice(3)) as { runs: string[] };
+    assert.ok(ledger.runs.length <= horizon, "healthy commits retain bounded replay history");
+  }
+  assert.deepEqual(await withhold(store, "blocked-1", { orders: "a" }), { orders: 1 });
+  await withhold(store, `healthy-${horizon * 3 - 1}`, {}, { committed: ["orders"] });
+  assert.deepEqual(await withhold(store, "blocked-2", { orders: "a" }), { orders: 2 });
+  assert.deepEqual(await withhold(store, "blocked-1", { orders: "b" }), { orders: 2 });
+  for (let run = 0; run < horizon * 2; run += 1) {
+    // biome-ignore lint/performance/noAwaitInLoops: every run must observe its predecessor.
+    await withhold(store, `blocked-${run + 3}`, { orders: "a" });
+  }
+  const ledger = JSON.parse((await readLedger()).slice(3)) as { runs: string[] };
+  assert.equal(ledger.runs.length, horizon, "long streaks retain bounded replay history");
+  assert.equal(new Set(ledger.runs).size, horizon);
+  const beforeReplay = await readLedger();
+  assert.deepEqual(await withhold(store, ledger.runs[0]!, { orders: "b" }), { orders: horizon * 2 + 2 });
+  assert.equal(await readLedger(), beforeReplay, "oldest in-horizon replay leaves history unchanged");
+  assert.deepEqual(await withhold(store, `blocked-${horizon * 2 + 2}`, { orders: "b" }), { orders: horizon * 2 + 2 });
+}
+
+test("SQLite bounds healthy and withheld replay history", async () => {
+  initDb(":memory:");
+  try {
+    await assertBoundedReplayHistory(getDefaultCheckpointWithholdStore(), () => {
+      const row = getDb().prepare("SELECT last_run_id FROM connector_checkpoint_withholds WHERE state_stream = ?").get("orders") as { last_run_id: string };
+      return Promise.resolve(row.last_run_id);
+    });
+  } finally {
+    closeDb();
+  }
+});
+
+test("Postgres bounds healthy and withheld replay history", {
+  skip: POSTGRES_URL ? false : "PDPP_TEST_POSTGRES_URL unset",
+}, async () => {
+  await initPostgresStorage({ backend: "postgres", databaseUrl: POSTGRES_URL ?? "" });
+  try {
+    await postgresQuery("DELETE FROM connector_checkpoint_withholds WHERE connector_id = $1", [SCOPE.connectorId]);
+    await assertBoundedReplayHistory(getDefaultCheckpointWithholdStore(), async () => {
+      const { rows } = await postgresQuery<{ last_run_id: string }>(
+        "SELECT last_run_id FROM connector_checkpoint_withholds WHERE connector_id = $1 AND state_stream = $2",
+        [SCOPE.connectorId, "orders"]
+      );
+      return rows[0]!.last_run_id;
+    });
+  } finally {
+    await closePostgresStorage();
   }
 });
