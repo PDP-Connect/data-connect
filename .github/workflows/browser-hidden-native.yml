@@ -100,12 +100,14 @@ jobs:
           $observer.WaitForExit()
           Get-Content $observed
           if ($results | Where-Object { $_ -ne 0 }) { throw "live test failed: $results" }
-          # Hard requirements while concealed: the browser never holds the
-          # foreground, and no window is visible in steady state. Window
-          # creation (launch, a new page, a popup the page opens) can show a
-          # window for a sample before the hook hides it; those counts are
-          # reported, not failed.
-          $concealed = "^(launch|collect|collect-new-page|collect-popup|collect-closed|companion-concealed)$"
+          # Hard requirements while concealed: no foreground change from
+          # anything a connector does over DevTools, and no visible window
+          # in steady state. Window creation can show a window for a sample
+          # before the hook hides it. A popup that a page opens is created
+          # and activated by the browser itself, outside DevTools, and holds
+          # the foreground for a few samples before it is handed back. Those
+          # counts are reported, not failed.
+          $concealed = "^(launch|collect|collect-new-page|collect-closed|companion-concealed)$"
           $steady = "^(collect|collect-closed|companion-concealed)$"
           $lines = Get-Content $observed | Where-Object { $_ -match "^OBSERVE phase=" }
           $failures = @()
