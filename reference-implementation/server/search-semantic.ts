@@ -1450,15 +1450,13 @@ function makeBlobFlatIndex({
       stream: string;
       recordKey: string;
     }): void {
-      // scope_key contains stream as the first JSON array element. Use
-      // a LIKE match anchored on the opening characters of scope_key's
-      // JSON encoding to narrow before comparing the stream name exactly
-      // against the decoded scope_key.
+      // Binary ranges treat stream wildcard characters and case literally.
       const streamPrefix = scopeKeyPrefixForStream(stream); // e.g. '["posts",'
+      const streamUpper = `${streamPrefix.slice(0, -1)}-`;
       if (!connectorInstanceId) {
         execDynamicSqlAcknowledged(
-          "DELETE FROM semantic_search_blob WHERE connector_id = ? AND record_key = ? AND scope_key LIKE ?",
-          [connectorId, recordKey, `${streamPrefix}%`]
+          "DELETE FROM semantic_search_blob WHERE connector_id = ? AND record_key = ? AND scope_key COLLATE BINARY >= ? AND scope_key COLLATE BINARY < ?",
+          [connectorId, recordKey, streamPrefix, streamUpper]
         );
         return;
       }
@@ -1466,7 +1464,8 @@ function makeBlobFlatIndex({
         connectorId,
         connectorInstanceId,
         recordKey,
-        `${streamPrefix}%`,
+        streamPrefix,
+        streamUpper,
       ]);
     },
     kind: "blob-flat",
@@ -1707,10 +1706,10 @@ function makeSqliteVecIndex({
         iterateDynamicSqlAcknowledged(
           `SELECT rowid, connector_instance_id, scope_key
          FROM semantic_search_rowid
-         WHERE connector_id = ? AND record_key = ? AND scope_key LIKE ? AND rowid > ?
+         WHERE connector_id = ? AND record_key = ? AND scope_key COLLATE BINARY >= ? AND scope_key COLLATE BINARY < ? AND rowid > ?
          ORDER BY rowid ASC
          LIMIT ?`,
-          [connectorId, recordKey, `${streamPrefix}%`, cursorRowid, ROWID_PAGE]
+          [connectorId, recordKey, streamPrefix, `${streamPrefix.slice(0, -1)}-`, cursorRowid, ROWID_PAGE]
         )
       );
       for (const row of rows) {
@@ -1743,7 +1742,7 @@ function makeSqliteVecIndex({
     for (;;) {
       const page = getMany(
         referenceQueries.searchSemanticRowidPageByRecordAndStreamPrefix,
-        [connectorId, connectorInstanceId, recordKey, `${streamPrefix}%`, cursorRowid],
+        [connectorId, connectorInstanceId, recordKey, streamPrefix, `${streamPrefix.slice(0, -1)}-`, cursorRowid],
         { limit: ROWID_PAGE }
       );
       for (const row of page.rows) {

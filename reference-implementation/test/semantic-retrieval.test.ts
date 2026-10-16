@@ -1699,6 +1699,64 @@ test("semantic index metadata isolates instances and client search fans in acros
   });
 });
 
+for (const kind of ["sqlite-vec", "blob-flat"] as const) {
+  for (const instanceScoped of [true, false]) {
+    test(`semantic record delete isolates literal streams (${kind}, instance=${instanceScoped})`, async () => {
+      if (isPostgresStorageBackend()) return;
+      const streams = ["a_b", "axb", "a%b", "A_B"];
+      const manifest = structuredClone(MANIFEST_A);
+      const template = MANIFEST_A.streams[0];
+      assert.ok(template);
+      manifest.streams = streams.map((name) => ({ ...structuredClone(template), name }));
+      manifest.source_declaration.streams = manifest.streams;
+      try {
+        await withHarness({}, async ({ asUrl, rsUrl }) => {
+          if (kind === "sqlite-vec") assert.equal(getDb().vectorIndexKind, kind);
+          resetVectorIndexForTests(kind === "blob-flat" ? kind : undefined);
+          const ownerToken = await issueOwnerToken(asUrl);
+          const connectorId = manifest.connector_id;
+          const instances = ["cin_semantic_literal_one", "cin_semantic_literal_two"] as const;
+          for (const instance of instances) {
+            await materializeSemanticConnection(connectorId, instance);
+            for (const stream of streams) {
+              await ingest(rsUrl, ownerToken, connectorId, stream, [
+                { id: "K", title: "literal title", selftext: "literal body", source_created_at: "2026-04-01T00:00:00Z" },
+                { id: "keep", title: "survivor", selftext: "survivor body", source_created_at: "2026-04-01T00:00:00Z" },
+              ], instance);
+            }
+          }
+          const tables = kind === "sqlite-vec"
+            ? ["semantic_search_rowid", "semantic_search_vec"]
+            : ["semantic_search_blob"];
+          const rows = (table: string) => getDb().prepare(
+            `SELECT connector_instance_id, scope_key, record_key FROM ${table} WHERE connector_id = ?
+             ORDER BY connector_instance_id, scope_key, record_key`
+          ).all(connectorId) as Array<{ connector_instance_id: string; scope_key: string; record_key: string }>;
+          for (const table of tables) assert.equal(rows(table).length, 32);
+          for (const target of ["a_b", "a%b"]) {
+            const before = new Map(tables.map((table) => [table, rows(table)]));
+            await semanticIndexDelete({
+              connectorId,
+              connectorInstanceId: instanceScoped ? instances[0] : "",
+              recordKey: "K",
+              stream: target,
+            });
+            for (const table of tables) {
+              const expected = before.get(table)?.filter((row) =>
+                row.record_key !== "K" || JSON.parse(row.scope_key)[0] !== target ||
+                (instanceScoped && row.connector_instance_id !== instances[0])
+              );
+              assert.deepEqual(rows(table), expected, `${table}: literal deletion of ${target}`);
+            }
+          }
+        }, [manifest]);
+      } finally {
+        resetVectorIndexForTests();
+      }
+    });
+  }
+}
+
 test("interrupted semantic backfill with existing meta resumes instead of rebuilding from scratch", async () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pdpp-semantic-meta-resume-"));
   const dbPath = path.join(tmpDir, "pdpp.sqlite");
