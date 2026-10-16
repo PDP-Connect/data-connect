@@ -98,7 +98,7 @@ import { ownerPasswordManagedByDesktop, ownerPasswordOwnerSet } from "./owner-pa
 import { appConfigPath, createAppConfigStore } from "./app-config-store.ts";
 import { autostartStatePath, createAutostartStore } from "./autostart-store.ts";
 import { type BrowserProfilePurger, createBrowserProfilePurger } from "./browser-profile-purge.ts";
-import { clientRangeFiltersRsCapability } from "./client-range-filters.ts";
+import { CLIENT_RANGE_FILTERS_PROFILE_URI, clientRangeFiltersRsCapability } from "./client-range-filters.ts";
 import {
   type ClientRangeFiltersOption,
   clientFilterParameterOutsideList,
@@ -5004,7 +5004,9 @@ export function buildAsApp(opts: ServerOpts = {}) {
       ? Object.freeze([...opts.acceptedCollectorProtocolVersions])
       : SUPPORTED_COLLECTOR_PROTOCOL_VERSIONS;
   const controller = opts.controller || null;
-  const consentStore = createConsentStore();
+  const consentStore = createConsentStore({
+    clientRangeFilters: resolveClientRangeFiltersPolicy(opts).enabled(),
+  });
   const ownerDeviceAuthStore = createOwnerDeviceAuthStore() as unknown as OwnerDeviceAuthStore;
   const deviceExporterStore = opts.deviceExporterStore || createDeviceExporterStore();
   const webPushStore = opts.webPushSubscriptionStore || createWebPushSubscriptionStore();
@@ -5317,6 +5319,8 @@ export function buildAsApp(opts: ServerOpts = {}) {
       typeof mountAsAuthorizationServerMetadata
     >[1]["buildAuthorizationServerMetadata"],
     cimdEnabled: opts.cimdEnabled !== false,
+    clientRangeFiltersProfiles: () =>
+      resolveClientRangeFiltersPolicy(opts).enabled() ? [CLIENT_RANGE_FILTERS_PROFILE_URI] : [],
     dynamicClientRegistrationEnabled,
     publicClientMetadataForAuthorizationServer: publicClientMetadataForAuthorizationServer as unknown as Parameters<
       typeof mountAsAuthorizationServerMetadata
@@ -9377,6 +9381,7 @@ export async function startServer(opts: ServerOpts = {}) {
     asPublicUrl: configuredAsPublicUrl,
     clientLogoFetchDependencies: opts.clientLogoFetchDependencies,
     cimdFetchDependencies: opts.cimdFetchDependencies,
+    clientRangeFilters: opts.clientRangeFilters,
     connectorInstallService,
     controller,
     ownerLive: resolveOwnerLive(opts),

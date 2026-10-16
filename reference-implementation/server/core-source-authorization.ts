@@ -401,8 +401,41 @@ export function resolveCoreSelection(
   });
 }
 
-export function validateCoreSelectionRequest(value: unknown): SelectionRequest {
+/**
+ * Take the profile's `pdpp_range_filters` member off each stream request entry
+ * so the closed Core request schema validates the rest, and hand back the
+ * entries that asked for a frozen set. A present non-boolean value is rejected
+ * (spec-client-range-filters.md Section 3); `false` and absence mean no set.
+ */
+function takeRangeFilterRequests(candidate: unknown): Set<number> {
+  const requested = new Set<number>();
+  if (!(isObject(candidate) && Array.isArray(candidate.streams))) {
+    return requested;
+  }
+  for (const [index, stream] of candidate.streams.entries()) {
+    if (!(isObject(stream) && Object.hasOwn(stream, "pdpp_range_filters"))) {
+      continue;
+    }
+    const flag = stream.pdpp_range_filters;
+    if (flag !== undefined && typeof flag !== "boolean") {
+      fail(`Stream '${String(stream.name)}' pdpp_range_filters must be a boolean`);
+    }
+    Reflect.deleteProperty(stream, "pdpp_range_filters");
+    if (flag === true) {
+      requested.add(index);
+    }
+  }
+  return requested;
+}
+
+export function validateCoreSelectionRequest(
+  value: unknown,
+  options: { clientRangeFilters?: boolean } = {}
+): SelectionRequest {
   const candidate = cloneJson(value);
+  // Without the profile the member stays on the entry, and Core's closed
+  // schema rejects it as any other unknown member.
+  const rangeFilterRequests = options.clientRangeFilters ? takeRangeFilterRequests(candidate) : new Set<number>();
   if (!validateSelectionRequestSchema(candidate)) {
     const details = (validateSelectionRequestSchema.errors ?? [])
       .map((error) => `${error.instancePath || "/"} ${error.message || "is invalid"}`)
@@ -413,6 +446,14 @@ export function validateCoreSelectionRequest(value: unknown): SelectionRequest {
   const semantic = validateSelectionRequestSemantics(request);
   if (!semantic.ok) {
     fail(`Selection request semantics are invalid: ${semantic.failures.map((item) => item.code).join(", ")}`);
+  }
+  // Keep the intent on the validated entries; the freezing step reads it at
+  // approval, from the retained request, not from the wire again.
+  for (const index of rangeFilterRequests) {
+    const stream = request.streams?.[index];
+    if (stream) {
+      Object.assign(stream, { pdpp_range_filters: true });
+    }
   }
   return request;
 }

@@ -22,6 +22,7 @@ import { OWNER_AUTH_DEFAULT_SUBJECT_ID } from "../../server/owner-auth.ts";
 import { ingestRecord } from "../../server/records.ts";
 import { createSqliteConnectorInstanceStore } from "../../server/stores/connector-instance-store.ts";
 import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "../fixtures/demo-clients.ts";
+import { TEST_INTROSPECTION_SERVER_OPTS } from "./introspection-test-credentials.ts";
 
 // Vector content is data of unknown shape; the adapter narrows it where it reads.
 export type Json = any;
@@ -277,6 +278,19 @@ function declarationStreams(declaration: JsonObject): JsonObject[] {
 	);
 }
 
+// The fixture preset lists `fields: ["*"]`; the vendored declaration schema
+// takes concrete field names, and an omitted `fields` already means all of them.
+function presetsFor(presets: JsonObject[]): JsonObject[] {
+	return presets.map((preset) => ({
+		...preset,
+		streams: (preset.streams as JsonObject[]).map(({ fields, ...stream }) =>
+			Array.isArray(fields) && fields.length === 1 && fields[0] === "*"
+				? stream
+				: { ...stream, fields },
+		),
+	}));
+}
+
 export function manifestFor(
 	declaration: JsonObject,
 	version: string,
@@ -293,6 +307,9 @@ export function manifestFor(
 			protocol_version: "0.1.0",
 			publisher: { id: "https://pdpp.dev/reference-implementation/tests" },
 			source: { id: SOURCE_ID, kind: "connector" },
+			...(declaration.selection_presets
+				? { selection_presets: presetsFor(declaration.selection_presets) }
+				: {}),
 			streams,
 		},
 		streams,
@@ -318,6 +335,7 @@ export async function startWorld(
 	} = {},
 ): Promise<World> {
 	const server = await startServer({
+		...TEST_INTROSPECTION_SERVER_OPTS,
 		asPort: 0,
 		clientRangeFilters: options.evaluable
 			? { enabled: true, evaluable: options.evaluable }
