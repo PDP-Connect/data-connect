@@ -1029,3 +1029,49 @@ test("a checkpoint withheld for the same reason on consecutive runs is reported 
   assert.equal(gap?.reason, "checkpoint_withheld");
   assert.equal(gap?.severity, "transient");
 });
+
+test("changed-FK accepted retry cannot credit a rejected parent", async (t) => {
+  const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+  t.after(() => closeServer(server));
+  const ownerToken = await registerAndAuthorize(server);
+  const result = await runHoldings(server, ownerToken, [
+    activityRecord("T", { id: "wrong", holding_id: "A" }),
+    holdingsCoverage({ considered: 1, covered: 1, hydrated_keys: ["A"], required_keys: ["A"] }),
+    activityRecord("T", { id: "T", holding_id: "B" }),
+  ]);
+  assert.equal(result.checkpoint_summary?.state_streams_committed, 0);
+  assert.equal(terminalCoveredFor(result.run_id as string, "activity"), 0);
+});
+
+test("successful cursor resets its streak when the next cursor PUT fails", async (t) => {
+  const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+  t.after(() => closeServer(server));
+  const ownerToken = await registerAndAuthorize(server);
+  const unproven = [holdingsCoverage({ hydrated_keys: ["K"], required_keys: ["K"] })];
+  await runHoldings(server, ownerToken, unproven);
+  const originalFetch = globalThis.fetch;
+  const puts: string[] = [];
+  const mocked = t.mock.method(globalThis, "fetch", async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    if (init?.method === "PUT" && String(input).includes("/v1/state/")) {
+      const stream = Object.keys(JSON.parse(String(init.body)).state)[0] as string;
+      puts.push(stream);
+      if (stream === "activity") {
+        return new Response("injected second cursor failure", { status: 400 });
+      }
+    }
+    return originalFetch(input, init);
+  });
+  const attempt = await runShortfall(server, ownerToken, [
+    { data: { id: "H" }, emitted_at: RECORD_AT, key: "H", stream: "holdings", type: "RECORD" },
+    activityRecord("T", { id: "T" }),
+    holdingsCoverage({ empty_keys: ["K"], required_keys: ["K"] }),
+    { cursor: { page: "2" }, stream: "holdings", type: "STATE" },
+    { cursor: { page: "2" }, stream: "activity", type: "STATE" },
+    { records_emitted: 2, status: "succeeded", type: "DONE" },
+  ], undefined, ["holdings", "activity"]);
+  mocked.mock.restore();
+  assert.deepEqual(puts, ["holdings", "activity"]);
+  assert.ok(attempt.thrown || attempt.result?.status === "failed");
+  const again = await runHoldings(server, ownerToken, unproven);
+  assert.equal(withheldEvents(again.run_id as string)[0]?.consecutive_runs, 1);
+});

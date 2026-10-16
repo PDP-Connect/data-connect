@@ -989,7 +989,6 @@ function createAcceptedKeysStore(): AcceptedKeysStore {
   let dir: string | null = null;
   let insertStmt: ReturnType<InstanceType<typeof DatabaseSync>["prepare"]> | null = null;
   let countStmt: ReturnType<InstanceType<typeof DatabaseSync>["prepare"]> | null = null;
-  let insertRejectedStmt: ReturnType<InstanceType<typeof DatabaseSync>["prepare"]> | null = null;
   let insertRefStmt: ReturnType<InstanceType<typeof DatabaseSync>["prepare"]> | null = null;
   let evidencedStmt: ReturnType<InstanceType<typeof DatabaseSync>["prepare"]> | null = null;
   let rejectedStmt: ReturnType<InstanceType<typeof DatabaseSync>["prepare"]> | null = null;
@@ -1022,23 +1021,21 @@ function createAcceptedKeysStore(): AcceptedKeysStore {
     db.exec("PRAGMA journal_mode = WAL");
     db.exec("PRAGMA synchronous = NORMAL");
     db.exec("CREATE TABLE accepted_keys (stream TEXT NOT NULL, key TEXT NOT NULL, PRIMARY KEY (stream, key))");
-    db.exec("CREATE TABLE rejected_keys (stream TEXT NOT NULL, key TEXT NOT NULL, PRIMARY KEY (stream, key))");
     db.exec(
-      "CREATE TABLE record_refs (stream TEXT NOT NULL, ref TEXT NOT NULL, parent TEXT NOT NULL, key TEXT NOT NULL, " +
+      "CREATE TABLE record_refs (stream TEXT NOT NULL, ref TEXT NOT NULL, parent TEXT NOT NULL, key TEXT NOT NULL, accepted INTEGER NOT NULL, " +
         "PRIMARY KEY (stream, ref, parent, key))"
     );
     insertStmt = db.prepare("INSERT OR IGNORE INTO accepted_keys (stream, key) VALUES (?, ?)");
     countStmt = db.prepare("SELECT COUNT(*) AS c FROM accepted_keys WHERE stream = ?");
-    insertRejectedStmt = db.prepare("INSERT OR IGNORE INTO rejected_keys (stream, key) VALUES (?, ?)");
-    insertRefStmt = db.prepare("INSERT OR IGNORE INTO record_refs (stream, ref, parent, key) VALUES (?, ?, ?, ?)");
+    // Acceptance belongs to this exact (record, parent boundary, FK) reference.
+    // A retry for the same primary key but a different FK cannot credit the old FK.
+    insertRefStmt = db.prepare(
+      "INSERT INTO record_refs (stream, ref, parent, key, accepted) VALUES (?, ?, ?, ?, ?) " +
+        "ON CONFLICT (stream, ref, parent, key) DO UPDATE SET accepted = MAX(record_refs.accepted, excluded.accepted)"
+    );
     const refsFor = "FROM record_refs r WHERE r.stream = ? AND r.ref = ? AND r.parent IN (?, ?)";
-    evidencedStmt = db.prepare(
-      `SELECT 1 AS hit ${refsFor} AND EXISTS (SELECT 1 FROM accepted_keys a WHERE a.stream = r.stream AND a.key = r.key) LIMIT 1`
-    );
-    rejectedStmt = db.prepare(
-      `SELECT 1 AS hit ${refsFor} AND EXISTS (SELECT 1 FROM rejected_keys j WHERE j.stream = r.stream AND j.key = r.key) ` +
-        "AND NOT EXISTS (SELECT 1 FROM accepted_keys a WHERE a.stream = r.stream AND a.key = r.key) LIMIT 1"
-    );
+    evidencedStmt = db.prepare(`SELECT 1 AS hit ${refsFor} AND r.accepted = 1 LIMIT 1`);
+    rejectedStmt = db.prepare(`SELECT 1 AS hit ${refsFor} AND r.accepted = 0 LIMIT 1`);
   }
 
   return {
@@ -1067,7 +1064,6 @@ function createAcceptedKeysStore(): AcceptedKeysStore {
       db = null;
       insertStmt = null;
       countStmt = null;
-      insertRejectedStmt = null;
       insertRefStmt = null;
       evidencedStmt = null;
       rejectedStmt = null;
@@ -1107,11 +1103,13 @@ function createAcceptedKeysStore(): AcceptedKeysStore {
       try {
         for (const [index, record] of batch.entries()) {
           const key = encodeKey(record.key);
-          const statement = rejectedIndexes.has(index) ? insertRejectedStmt : insertStmt;
-          statement?.run(stream, key);
-          insertRefStmt?.run(stream, key, OWN_KEY_PARENT, key);
+          const accepted = rejectedIndexes.has(index) ? 0 : 1;
+          if (accepted) {
+            insertStmt?.run(stream, key);
+          }
+          insertRefStmt?.run(stream, key, OWN_KEY_PARENT, key, accepted);
           for (const ref of parentRefs(record)) {
-            insertRefStmt?.run(stream, ref.key, ref.parentStream, key);
+            insertRefStmt?.run(stream, ref.key, ref.parentStream, key, accepted);
           }
         }
         (db as InstanceType<typeof DatabaseSync>).exec("COMMIT");
@@ -4246,7 +4244,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
     let streaks = new Map<string, number>();
     try {
       streaks = await checkpointWithholdStore.recordCheckpointOutcomes({
-        committed: decision.commit,
+        committed: [],
         nowIso: new Date().toISOString(),
         runId,
         scope: {
@@ -4807,6 +4805,23 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       // already durable server-side at this point.
       await resp.text().catch(() => "");
       committedStateStreams.add(stream);
+      // Reset this cursor immediately: a later cursor PUT may fail.
+      // Scheduling metadata must never turn a durable commit into a failure.
+      try {
+        await checkpointWithholdStore.recordCheckpointOutcomes({
+          committed: [stream],
+          nowIso: new Date().toISOString(),
+          runId,
+          scope: {
+            connectorId,
+            connectorInstanceId: connectorInstanceEnv.PDPP_CONNECTOR_INSTANCE_ID || null,
+            grantId: grantId || null,
+          },
+          withheld: new Map(),
+        });
+      } catch (err) {
+        safeStderrWrite(`[runtime] checkpoint withhold streak not reset: ${(err as Error).message}\n`);
+      }
 
       // Cursor-band contiguity: the cursor that was just durably committed is
       // the exact artifact that decides what future runs will fetch, so this
