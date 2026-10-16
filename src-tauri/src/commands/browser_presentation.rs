@@ -264,10 +264,70 @@ mod tests {
             .clone()
     }
 
+    // A case that names one point of the version 1 enum space: an object with
+    // exactly the six v1 fields, each holding a known value.
+    fn enum_combination_key(policy: &serde_json::Value) -> Option<String> {
+        const SPACES: [(&str, &[&str]); 5] = [
+            (
+                "display_backend",
+                &["inherited-host", "private-xvfb", "externally-owned"],
+            ),
+            ("engine_mode", &["headed", "headless"]),
+            ("fallback", &["fail-closed"]),
+            ("interaction_presentation", &["companion", "native"]),
+            (
+                "native_visibility",
+                &["normal", "isolated-display", "no-window"],
+            ),
+        ];
+        let object = policy.as_object()?;
+        if object.get("version") != Some(&json!(1)) || object.len() != SPACES.len() + 1 {
+            return None;
+        }
+        let mut parts = Vec::new();
+        for (field, values) in SPACES {
+            let value = object.get(field)?.as_str()?;
+            if !values.contains(&value) {
+                return None;
+            }
+            parts.push(value);
+        }
+        Some(parts.join("/"))
+    }
+
+    #[test]
+    fn shared_fixtures_cover_every_v1_enum_combination_exactly_once() {
+        let mut expected = std::collections::BTreeSet::new();
+        for display in ["inherited-host", "private-xvfb", "externally-owned"] {
+            for engine in ["headed", "headless"] {
+                for visibility in ["normal", "isolated-display", "no-window"] {
+                    for interaction in ["companion", "native"] {
+                        expected.insert(format!(
+                            "{display}/{engine}/fail-closed/{interaction}/{visibility}"
+                        ));
+                    }
+                }
+            }
+        }
+        assert_eq!(expected.len(), 36);
+        let mut seen = std::collections::BTreeMap::<String, usize>::new();
+        for case in fixture_cases() {
+            if let Some(key) = enum_combination_key(&case["policy"]) {
+                *seen.entry(key).or_default() += 1;
+            }
+        }
+        assert_eq!(
+            seen.keys().cloned().collect::<Vec<_>>(),
+            expected.into_iter().collect::<Vec<_>>()
+        );
+        for (key, count) in seen {
+            assert_eq!(count, 1, "combination {key} appears {count} times");
+        }
+    }
+
     #[test]
     fn shared_fixtures_give_the_same_verdict_as_the_typescript_parser() {
         let cases = fixture_cases();
-        assert!(cases.len() >= 20, "fixture file lost its cases");
         for case in cases {
             let name = case["name"].as_str().expect("case name");
             let result = PresentationPolicy::parse(&case["policy"]);
