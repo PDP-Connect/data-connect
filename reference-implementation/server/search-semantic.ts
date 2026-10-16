@@ -1428,15 +1428,16 @@ function makeBlobFlatIndex({
       connectorInstanceId?: string | null;
       stream: string;
     }): void {
-      const streamPrefix = scopeKeyPrefixForStream(stream);
-      if (connectorInstanceId) {
-        execDynamicSqlAcknowledged(
-          "DELETE FROM semantic_search_blob WHERE connector_instance_id = ? AND connector_id = ? AND scope_key LIKE ?",
-          [connectorInstanceId, connectorId, `${streamPrefix}%`]
-        );
-        return;
-      }
-      exec(referenceQueries.searchSemanticBlobDeleteByStreamPrefix, [connectorId, `${streamPrefix}%`]);
+      const lower = scopeKeyPrefixForStream(stream);
+      const upper = `${lower.slice(0, -1)}-`;
+      // REVIEWED-DYNAMIC: exact binary JSON scope prefix; all values are bound.
+      const instanceClause = connectorInstanceId ? "AND connector_instance_id = ?" : "";
+      execDynamicSqlAcknowledged(
+        `DELETE FROM semantic_search_blob
+         WHERE connector_id = ? AND scope_key COLLATE BINARY >= ? AND scope_key COLLATE BINARY < ?
+           ${instanceClause}`,
+        [connectorId, lower, upper, ...(connectorInstanceId ? [connectorInstanceId] : [])]
+      );
     },
     deleteRecord({
       connectorId,
@@ -1449,15 +1450,13 @@ function makeBlobFlatIndex({
       stream: string;
       recordKey: string;
     }): void {
-      // scope_key contains stream as the first JSON array element. Use
-      // a LIKE match anchored on the opening characters of scope_key's
-      // JSON encoding to narrow before comparing the stream name exactly
-      // against the decoded scope_key.
+      // Binary ranges treat stream wildcard characters and case literally.
       const streamPrefix = scopeKeyPrefixForStream(stream); // e.g. '["posts",'
+      const streamUpper = `${streamPrefix.slice(0, -1)}-`;
       if (!connectorInstanceId) {
         execDynamicSqlAcknowledged(
-          "DELETE FROM semantic_search_blob WHERE connector_id = ? AND record_key = ? AND scope_key LIKE ?",
-          [connectorId, recordKey, `${streamPrefix}%`]
+          "DELETE FROM semantic_search_blob WHERE connector_id = ? AND record_key = ? AND scope_key COLLATE BINARY >= ? AND scope_key COLLATE BINARY < ?",
+          [connectorId, recordKey, streamPrefix, streamUpper]
         );
         return;
       }
@@ -1465,7 +1464,8 @@ function makeBlobFlatIndex({
         connectorId,
         connectorInstanceId,
         recordKey,
-        `${streamPrefix}%`,
+        streamPrefix,
+        streamUpper,
       ]);
     },
     kind: "blob-flat",
@@ -1706,10 +1706,10 @@ function makeSqliteVecIndex({
         iterateDynamicSqlAcknowledged(
           `SELECT rowid, connector_instance_id, scope_key
          FROM semantic_search_rowid
-         WHERE connector_id = ? AND record_key = ? AND scope_key LIKE ? AND rowid > ?
+         WHERE connector_id = ? AND record_key = ? AND scope_key COLLATE BINARY >= ? AND scope_key COLLATE BINARY < ? AND rowid > ?
          ORDER BY rowid ASC
          LIMIT ?`,
-          [connectorId, recordKey, `${streamPrefix}%`, cursorRowid, ROWID_PAGE]
+          [connectorId, recordKey, streamPrefix, `${streamPrefix.slice(0, -1)}-`, cursorRowid, ROWID_PAGE]
         )
       );
       for (const row of rows) {
@@ -1742,7 +1742,7 @@ function makeSqliteVecIndex({
     for (;;) {
       const page = getMany(
         referenceQueries.searchSemanticRowidPageByRecordAndStreamPrefix,
-        [connectorId, connectorInstanceId, recordKey, `${streamPrefix}%`, cursorRowid],
+        [connectorId, connectorInstanceId, recordKey, streamPrefix, `${streamPrefix.slice(0, -1)}-`, cursorRowid],
         { limit: ROWID_PAGE }
       );
       for (const row of page.rows) {
@@ -1807,41 +1807,36 @@ function makeSqliteVecIndex({
       exec(referenceQueries.searchSemanticRowidDeleteByScope, [connectorId, scopeKey]);
     },
     deleteByConnectorStream({ connectorId, connectorInstanceId = null, stream }) {
-      const streamPrefix = scopeKeyPrefixForStream(stream);
-      if (connectorInstanceId) {
+      const lower = scopeKeyPrefixForStream(stream);
+      const upper = `${lower.slice(0, -1)}-`;
+      const instanceClause = connectorInstanceId ? "AND connector_instance_id = ?" : "";
+      const params = [connectorId, lower, upper, ...(connectorInstanceId ? [connectorInstanceId] : [])];
+      let cursorRowid = 0;
+      for (;;) {
+        // REVIEWED-DYNAMIC: bound exact binary scope range and rowid page.
         const rows = Array.from(
           iterateDynamicSqlAcknowledged(
-            `SELECT rowid
-           FROM semantic_search_rowid
-           WHERE connector_instance_id = ? AND connector_id = ? AND scope_key LIKE ?`,
-            [connectorInstanceId, connectorId, `${streamPrefix}%`]
+            `SELECT rowid FROM semantic_search_rowid
+             WHERE connector_id = ? AND scope_key COLLATE BINARY >= ? AND scope_key COLLATE BINARY < ?
+               ${instanceClause} AND rowid > ?
+             ORDER BY rowid LIMIT ?`,
+            [...params, cursorRowid, ROWID_PAGE]
           )
         );
         for (const row of rows) {
           deleteVecByRowid(row.rowid);
-        }
-        execDynamicSqlAcknowledged(
-          "DELETE FROM semantic_search_rowid WHERE connector_instance_id = ? AND connector_id = ? AND scope_key LIKE ?",
-          [connectorInstanceId, connectorId, `${streamPrefix}%`]
-        );
-        return;
-      }
-      let cursorRowid = 0;
-      for (;;) {
-        const page = getMany(
-          referenceQueries.searchSemanticRowidPageByStreamPrefix,
-          [connectorId, `${streamPrefix}%`, cursorRowid],
-          { limit: ROWID_PAGE }
-        );
-        for (const row of page.rows) {
-          deleteVecByRowid(row.rowid);
           cursorRowid = Number(row.rowid);
         }
-        if (!page.truncated) {
+        if (rows.length < ROWID_PAGE) {
           break;
         }
       }
-      exec(referenceQueries.searchSemanticRowidDeleteByStreamPrefix, [connectorId, `${streamPrefix}%`]);
+      execDynamicSqlAcknowledged(
+        `DELETE FROM semantic_search_rowid
+         WHERE connector_id = ? AND scope_key COLLATE BINARY >= ? AND scope_key COLLATE BINARY < ?
+           ${instanceClause}`,
+        params
+      );
     },
     deleteRecord({ connectorId, connectorInstanceId, stream, recordKey }) {
       const streamPrefix = scopeKeyPrefixForStream(stream);
