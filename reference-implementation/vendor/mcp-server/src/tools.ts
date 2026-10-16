@@ -80,7 +80,10 @@ interface ResourceTemplateDefinition {
   description: string;
   mimeType: string;
   name: string;
-  read: (uri: string, variables: Record<string, string | string[]>) => Promise<ResourceReadResult>;
+  read: (uri: string, variables: Record<string, string | string[]>, context?: {
+    ref: RecordRef | FieldWindowRef;
+    onError: (response: RsResponse) => ResourceReadResult | undefined;
+  }) => Promise<ResourceReadResult>;
   title: string;
   uriTemplate: string;
 }
@@ -1048,16 +1051,40 @@ export function buildResourceTemplates({
   ];
 }
 
+export function packageResourceUriParts(uri: string): {
+  kind: "record" | "field-window"; grantId?: string; handle: string;
+} {
+  // Inspect the original path: URL normalization must never erase a selector.
+  const match = /^pdpp:\/\/(record|field-window)\/([^?#\\\\\s]+)$/.exec(uri);
+  if (!match?.[1] || !match[2]) {
+    throw new InvalidResourceUriError("The package resource URI is malformed.");
+  }
+  const segments = match[2].split("/");
+  if (segments.length > 2 || segments.some((segment) => {
+    let dots = segment;
+    while (/%25/i.test(dots)) dots = dots.replace(/%25/gi, "%");
+    dots = dots.replace(/%2e/gi, ".");
+    return !segment || dots === "." || dots === "..";
+  })) {
+    throw new InvalidResourceUriError("The package resource URI path is malformed.");
+  }
+  const handle = segments.at(-1)!;
+  // Validate escaping without consuming it; the identity reader decodes once.
+  decodeURIComponent(handle);
+  return {
+    kind: match[1] as "record" | "field-window",
+    handle,
+    ...(segments.length === 2 ? { grantId: decodeURIComponent(segments[0]!) } : {}),
+  };
+}
+
 export function resourceUriIdentity(
   uri: string,
   kind: "record" | "field-window",
-): { connectionId: string | null; stream: string } {
-  if (kind === "record") {
-    const ref = parseRecordResultId(uri);
-    return { connectionId: ref.connectionId, stream: ref.stream };
-  }
-  const ref = resolveFieldWindowResourceRef(uri, {});
-  return { connectionId: ref.connectionId, stream: ref.stream };
+): RecordRef | FieldWindowRef {
+  return kind === "record"
+    ? parseRecordResultId(uri)
+    : resolveFieldWindowResourceRef(uri, {});
 }
 
 function buildRecordResourceTemplate({
@@ -1073,8 +1100,8 @@ function buildRecordResourceTemplate({
     title: "PDPP record",
     description: "Returns one grant-scoped PDPP record through the resource server. Read-only.",
     mimeType: "application/json",
-    read: async (uri, variables) => {
-      const ref = resolveRecordResourceRef(uri, variables);
+    read: async (uri, variables, context) => {
+      const ref = context?.ref ?? resolveRecordResourceRef(uri, variables);
       const query: QueryParams = {};
       if (ref.connectionId) {
         query.connection_id = ref.connectionId;
@@ -1094,7 +1121,7 @@ function buildRecordResourceTemplate({
           ],
         };
       }
-      return resourceErrorContents(uri, response, providerUrl);
+      return context?.onError(response) ?? resourceErrorContents(uri, response, providerUrl);
     },
   };
 }
@@ -1112,15 +1139,17 @@ function buildRecordFieldResourceTemplate({
     title: "PDPP record field window",
     description: "Returns one bounded text window from an authorized PDPP record field. Read-only.",
     mimeType: "text/plain",
-    read: async (uri, variables) => {
-      const ref = resolveFieldWindowResourceRef(uri, variables);
+    read: async (uri, variables, context) => {
+      const ref = context?.ref && "field_path" in context.ref
+        ? context.ref
+        : resolveFieldWindowResourceRef(uri, variables);
       const query = readRecordFieldQuery(ref, ref.connectionId, ref.field_path);
       const response = await rs.getJson(
         `/v1/streams/${encodeURIComponent(ref.stream)}/records/${encodeURIComponent(ref.recordId)}/field-window`,
         { query }
       );
       if (!response.ok) {
-        return resourceErrorContents(uri, response, providerUrl);
+        return context?.onError(response) ?? resourceErrorContents(uri, response, providerUrl);
       }
       const result = toReadRecordFieldToolResult(response, providerUrl, {
         connectionId: ref.connectionId,

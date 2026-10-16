@@ -3,7 +3,7 @@
 
 import { z } from "zod";
 import type { RsClient } from "./rs-client.ts";
-import { buildTools } from "./tools.ts";
+import { buildTools, packageResourceUriParts } from "./tools.ts";
 
 export interface PackageProfileChild {
 	access_mode: string;
@@ -103,7 +103,7 @@ function inactiveChildError(grantId: string) {
 	};
 }
 
-function selectedChildError(result: ToolResult, grantId: string): ToolResult {
+export function selectedChildError(result: ToolResult, grantId: string): ToolResult {
 	const error = result.structuredContent?.error as { code?: unknown } | undefined;
 	if (
 		result.structuredContent?.http_status === 403 &&
@@ -309,6 +309,24 @@ export function buildPackageProfileTools(
 			const grantId = child.grant_id;
 			const readArgs = { ...args };
 			delete readArgs.grant_id;
+			if (
+				(tool.name === "fetch" || tool.name === "read_record_field") &&
+				typeof readArgs.id === "string" && readArgs.id.startsWith("pdpp://record/")
+			) {
+				try {
+					const parts = packageResourceUriParts(readArgs.id);
+					if (parts.grantId !== undefined) {
+						const uriSelection = resolvePackageChild(profile, parts.grantId);
+						if ("error" in uriSelection) return uriSelection.error;
+						if (parts.grantId !== grantId) {
+							return selectorError("invalid_grant_selector", "The resource URI grant_id must match the selected grant_id.");
+						}
+						readArgs.id = `pdpp://record/${parts.handle}`;
+					}
+				} catch {
+					return selectorError("invalid_resource_uri", "The package record URI is malformed.");
+				}
+			}
 			const childTool = buildTools({ rs: child.rs, providerUrl }).find(
 				(entry) => entry.name === tool.name,
 			);

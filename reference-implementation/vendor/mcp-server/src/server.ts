@@ -10,9 +10,10 @@ import {
   isPackageDataTool,
   type PackageProfile,
   resolvePackageChild,
+  selectedChildError,
 } from "./package-profile.ts";
 import { RsClient } from "./rs-client.ts";
-import { buildResourceTemplates, buildTools, resourceUriIdentity } from "./tools.ts";
+import { buildResourceTemplates, buildTools, packageResourceUriParts, resourceUriIdentity } from "./tools.ts";
 
 export const DEFAULT_SERVER_NAME = "pdpp-mcp-server";
 export const DEFAULT_SERVER_VERSION = "0.0.0";
@@ -47,8 +48,8 @@ interface CreatePdppMcpServerOptions {
 /**
  * Build an MCP server wired to a PDPP resource server through the supplied scoped token.
  *
- * The server registers the profile-free normal PDPP read surface plus one resource
- * template. It does not auto-connect to a transport — callers pass the transport
+ * The tool surface varies by profile, with two package or three client resource
+ * templates. It does not auto-connect to a transport — callers pass the transport
  * explicitly so tests can use the in-memory pair and CLI use can pass
  * StdioServerTransport.
  */
@@ -208,8 +209,21 @@ function readPackageResource(
       message: "This package resource URI is not supported.",
     });
   }
-  const baseUri = `pdpp://${kind}/${encodeURIComponent(handle)}`;
-  return template.read(baseUri, { handle }).then((result) => ({
+  const baseUri = `pdpp://${kind}/${handle}`;
+  return template.read(baseUri, {}, {
+    ref: identity,
+    onError: (response) => {
+      if (response.ok) return undefined;
+      const result = selectedChildError({
+        content: [],
+        structuredContent: { error: response.error, http_status: response.status },
+      }, child.grant_id);
+      const error = result.structuredContent?.error as Record<string, unknown> | undefined;
+      return error?.code === "package_child_inactive"
+        ? packageResourceError(uri, error, result.content[0]?.text)
+        : undefined;
+    },
+  }).then((result) => ({
     ...result,
     contents: result.contents.map((content) => ({ ...content, uri })),
   }));
@@ -218,74 +232,17 @@ function readPackageResource(
 function parsePackageResourceUri(
   uri: string,
 ):
-  | {
-      grantId?: string;
-      handle: string;
-      identity: { connectionId: string | null; stream: string };
-      kind: "record" | "field-window";
-    }
+  | (ReturnType<typeof packageResourceUriParts> & {
+      identity: ReturnType<typeof resourceUriIdentity>;
+    })
   | { error: Record<string, unknown> } {
-  let parsed: URL;
   try {
-    parsed = new URL(uri);
+    const parts = packageResourceUriParts(uri);
+    const identity = resourceUriIdentity(`pdpp://${parts.kind}/${parts.handle}`, parts.kind);
+    return { ...parts, identity };
   } catch {
     return { error: { code: "invalid_resource_uri", message: "The resource URI is malformed." } };
   }
-  const kind = parsed.hostname;
-  if (parsed.protocol !== "pdpp:" || !["record", "field-window"].includes(kind)) {
-    return { error: { code: "invalid_resource_uri", message: "This package resource URI is not supported." } };
-  }
-  const path = packageResourcePath(parsed.pathname, kind as "record" | "field-window");
-  if (!path) {
-    return { error: { code: "invalid_resource_uri", message: "The resource URI is malformed." } };
-  }
-
-  let decodedHandle: string;
-  let decodedGrantId: string | undefined;
-  try {
-    decodedHandle = decodeURIComponent(path.handle);
-    decodedGrantId =
-      path.grantId === undefined ? undefined : decodeURIComponent(path.grantId);
-  } catch {
-    return { error: { code: "invalid_resource_uri", message: "The resource URI is malformed." } };
-  }
-  const baseUri = `pdpp://${kind}/${encodeURIComponent(decodedHandle)}`;
-  let identity: { connectionId: string | null; stream: string };
-  try {
-    identity = resourceUriIdentity(baseUri, kind as "record" | "field-window");
-  } catch {
-    return { error: { code: "invalid_resource_uri", message: "The resource URI is malformed." } };
-  }
-  if (!identity.stream) {
-    return { error: { code: "invalid_resource_uri", message: "The resource URI is malformed." } };
-  }
-  return {
-    ...(decodedGrantId === undefined ? {} : { grantId: decodedGrantId }),
-    handle: decodedHandle,
-    identity,
-    kind: kind as "record" | "field-window",
-  };
-}
-
-function packageResourcePath(
-  pathname: string,
-  kind: "record" | "field-window",
-): { grantId?: string; handle: string } | null {
-  const segments = pathname.slice(1).split("/");
-  if (segments.length === 2) {
-    const [grantId, handle] = segments;
-    if (handle) {
-      return { grantId: grantId ?? "", handle };
-    }
-  }
-  if (segments.length === 1 && segments[0]) {
-    return { handle: segments[0] };
-  }
-  if (kind === "record" && segments.length === 3 && segments.every(Boolean)) {
-    const [connectionId, stream, recordId] = segments;
-    return { handle: `${connectionId}/${stream}:${recordId}` };
-  }
-  return null;
 }
 
 function packageResourceError(

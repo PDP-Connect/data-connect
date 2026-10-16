@@ -65,6 +65,16 @@ function fixture(options: { inactiveGrantId?: string; invalidGrantId?: string } 
 						{ status: 403 },
 					);
 				}
+				if (
+					url.includes("/v1/streams/") && url.includes("/records/") &&
+					new URL(url).searchParams.get("connection_id")?.startsWith("pairwise-") &&
+					new URL(url).searchParams.get("connection_id") !== `pairwise-${grant_id}`
+				) {
+					return Response.json(
+						{ error: { code: "record_not_found", message: "The selected child cannot read this record." } },
+						{ status: 404 },
+					);
+				}
 				if (url.includes("/field-window")) {
 					return Response.json({
 						field: { path: "text" },
@@ -80,16 +90,6 @@ function fixture(options: { inactiveGrantId?: string; invalidGrantId?: string } 
 							text: "hello",
 						},
 					});
-				}
-				if (
-					url.includes("/v1/streams/") && url.includes("/records/") &&
-					new URL(url).searchParams.get("connection_id")?.startsWith("pairwise-") &&
-					new URL(url).searchParams.get("connection_id") !== `pairwise-${grant_id}`
-				) {
-					return Response.json(
-						{ error: { code: "record_not_found", message: "The selected child cannot read this record." } },
-						{ status: 404 },
-					);
 				}
 				if (url.includes("/v1/search")) {
 					return Response.json({
@@ -593,4 +593,117 @@ test("package follow-up descriptors keep their selected grant_id", async () => {
 		structured.results[0]!.match_windows[0]!.read.args.grant_id,
 		grantId,
 	);
+});
+
+function resourceHandle(kind: "record" | "field-window", connection = "pairwise-a.child~_1-", recordId = "a") {
+	return Buffer.from(JSON.stringify({
+		v: 1, kind, connection_id: connection, stream: "notes", record_id: recordId,
+		...(kind === "field-window" ? { field_path: "text" } : {}),
+	})).toString("base64url");
+}
+
+test("package resource paths reject dot segments before selecting any client", async () => {
+	const { profile, reads } = fixture();
+	for (const kind of ["record", "field-window"] as const) {
+		const handle = resourceHandle(kind, "pairwise-b.child");
+		for (const dot of [".", "..", "%2e", "%2E%2e", "%252e", "%252e%252e"]) {
+			for (const path of [`${dot}/${handle}`, `unknown/${dot}/${handle}`, `a.child~_1-/${dot}/${handle}`]) {
+				const { result } = await readResource(profile, `pdpp://${kind}/${path}`);
+				assert.equal(result.isError, true, path);
+				assert.deepEqual(reads, [], path);
+			}
+		}
+		for (const path of [`unknown/${handle}`, `/${handle}`, `bad%2Fid/${handle}`, `unknown/notes/a`]) {
+			const { result } = await readResource(profile, `pdpp://${kind}/${path}`);
+			assert.equal(result.isError, true, path);
+			assert.deepEqual(reads, [], path);
+		}
+	}
+});
+
+test("package resource literal percent handles are decoded exactly once", async () => {
+	const { profile, reads } = fixture();
+	for (const recordId of ["r%20part", "r%2Fpart", "r%part"]) {
+		for (const handle of [encodeURIComponent(`pairwise-a.child~_1-/notes:${recordId}`), resourceHandle("record", "pairwise-a.child~_1-", recordId)]) {
+			reads.length = 0;
+			const { result } = await readResource(profile, `pdpp://record/a.child~_1-/${handle}`);
+			assert.ok(result);
+			assert.equal(reads.length, 1);
+			assert.ok(reads[0]!.includes(`/records/${encodeURIComponent(recordId)}`), reads[0]);
+		}
+	}
+});
+
+test("legacy package resources reject zero, inactive and stream-mismatched mappings", async () => {
+	for (const kind of ["record", "field-window"] as const) {
+		for (const mode of ["zero", "inactive", "stream", "instance"]) {
+			const { profile, reads } = fixture();
+			const child = profile.children[0]!;
+			if (mode === "inactive") child.active = false;
+			if (mode === "stream") child.streams[0]!.name = "other";
+			if (mode === "instance") child.streams[0]!.instance_ids = ["other"];
+			const handle = resourceHandle(kind, mode === "zero" ? "missing" : "pairwise-a.child~_1-");
+			const { result } = await readResource(profile, `pdpp://${kind}/${handle}`);
+			assert.equal(result.isError, true, mode);
+			assert.deepEqual(reads, []);
+		}
+	}
+});
+
+test("package resource downstream revocations are terminal for both resource kinds", async () => {
+	for (const kind of ["record", "field-window"] as const) {
+		for (const code of ["grant_revoked", "grant_expired", "package_child_inactive"]) {
+			const { profile, reads } = fixture();
+			const child = profile.children[0]!;
+			child.rs = new RsClient({
+				accessToken: "test-token", providerUrl: "https://rs.test",
+				fetch: async () => {
+					reads.push(child.grant_id);
+					return Response.json({ error: { code, message: "revoked" } }, { status: 403 });
+				},
+			});
+			const { result } = await readResource(profile, `pdpp://${kind}/${child.grant_id}/${resourceHandle(kind)}`);
+			assert.equal(result.isError, true);
+			assert.deepEqual(result.structuredContent, { error: { code: "package_child_inactive", grant_id: child.grant_id } });
+			assert.match(JSON.stringify(result.contents), /Do not retry/);
+			assert.deepEqual(reads, [child.grant_id]);
+		}
+	}
+});
+
+test("package fetch and field reads round trip selected record URIs", async () => {
+	const { profile, reads } = fixture();
+	const grantId = "a.child~_1-";
+	for (const name of ["fetch", "read_record_field"]) {
+		for (const handle of [resourceHandle("record"), encodeURIComponent("pairwise-a.child~_1-/notes:a")]) {
+			for (const prefix of ["", `${grantId}/`]) {
+				reads.length = 0;
+				const { result } = await call(profile, name, {
+					grant_id: grantId, id: `pdpp://record/${prefix}${handle}`,
+					...(name === "read_record_field" ? { field_path: "text" } : {}),
+				});
+				assert.notEqual(result.isError, true, JSON.stringify(result));
+				assert.equal(reads.length, 1);
+				assertReadFromChild(reads, grantId);
+			}
+			for (const selector of ["b.child", "unknown", "bad%2Fid", ".", "%252e"]) {
+				reads.length = 0;
+				const { result } = await call(profile, name, {
+					grant_id: grantId, id: `pdpp://record/${selector}/${handle}`,
+					...(name === "read_record_field" ? { field_path: "text" } : {}),
+				});
+				assert.equal(result.isError, true);
+				assert.deepEqual(reads, []);
+			}
+		}
+	}
+});
+
+test("field-window resources retain the selected client's cross-connection denial", async () => {
+	const { profile, reads } = fixture();
+	const { result } = await readResource(profile, `pdpp://field-window/b.child/${resourceHandle("field-window")}`);
+	assert.match(JSON.stringify(result), /record_not_found/);
+	assert.doesNotMatch(JSON.stringify(result), /hello/);
+	assert.equal(reads.length, 1);
+	assertReadFromChild(reads, "b.child");
 });
