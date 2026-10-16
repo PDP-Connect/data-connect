@@ -30,7 +30,7 @@ import {
   transaction,
   writeTransaction,
 } from "../lib/db.ts";
-import { postgresEmitSpineEventInTransaction } from "../lib/postgres-spine.ts";
+import { deriveTokenAuditId, postgresEmitSpineEventInTransaction } from "../lib/postgres-spine.ts";
 import { createTraceContext, emitSpineEvent as emitRawSpineEvent, type SpineEventInput } from "../lib/spine.ts";
 import type { CimdFetchDependencies, CimdTransportFailureEvent } from "./cimd.ts";
 import {
@@ -3643,14 +3643,14 @@ function buildTokenIssuedEventInput({
     },
     event_type: "token.issued",
     grant_id: grantId,
-    object_id: tokenId,
+    object_id: deriveTokenAuditId(tokenId),
     object_type: "token",
     request_id: traceContext.request_id,
     scenario_id: traceContext.scenario_id,
     status: "succeeded",
     subject_id: subjectId,
     subject_type: "subject",
-    token_id: tokenId,
+    token_id: deriveTokenAuditId(tokenId),
     trace_id: traceContext.trace_id,
   };
 }
@@ -4894,11 +4894,12 @@ export async function revokeOwnerClientTokenByPublicId(
         token_kind: match.token_kind,
       },
       event_type: "token.revoked",
-      object_id: "<redacted-token-id>",
+      object_id: deriveTokenAuditId(match.token_id),
       object_type: "token",
       status: "succeeded",
       subject_id: actingSubjectId,
       subject_type: "subject",
+      token_id: deriveTokenAuditId(match.token_id),
     });
   }
   return { revoked, token_id_public: tokenIdPublic };
@@ -6950,7 +6951,7 @@ async function persistApprovedBatchGrantAtomically({
     status: "succeeded",
     subject_id: subjectId,
     subject_type: "subject",
-    token_id: issuedPackageToken,
+    token_id: deriveTokenAuditId(issuedPackageToken),
     trace_id: traceContext.trace_id,
   });
 
@@ -8485,14 +8486,14 @@ async function issuePackageToken(
       token_kind: "mcp_package",
     },
     event_type: "token.issued",
-    object_id: tokenId,
+    object_id: deriveTokenAuditId(tokenId),
     object_type: "token",
     request_id: meta.traceContext?.request_id || undefined,
     scenario_id: meta.traceContext?.scenario_id || undefined,
     status: "succeeded",
     subject_id: subjectId,
     subject_type: "subject",
-    token_id: tokenId,
+    token_id: deriveTokenAuditId(tokenId),
     trace_id: meta.traceContext?.trace_id || undefined,
   });
 
@@ -8991,7 +8992,7 @@ export async function createHostedMcpGrantPackage({
     status: "succeeded",
     subject_id: subjectId,
     subject_type: "subject",
-    token_id: packageToken,
+    token_id: deriveTokenAuditId(packageToken),
     trace_id: traceContext.trace_id,
   });
 
@@ -10201,13 +10202,13 @@ function refreshTokenIssuedEvent({
     },
     event_type: "token.issued",
     ...(grantId ? { grant_id: grantId } : {}),
-    object_id: tokenId,
+    object_id: deriveTokenAuditId(tokenId),
     object_type: "token",
     ...(scenarioId ? { scenario_id: scenarioId } : {}),
     status: "succeeded",
     subject_id: row.subject_id,
     subject_type: "subject",
-    token_id: tokenId,
+    token_id: deriveTokenAuditId(tokenId),
     ...(traceId ? { trace_id: traceId } : {}),
   };
 }
@@ -11447,12 +11448,12 @@ function buildOwnerDeviceTokenIssuedEvent({
       user_code: pending.user_code,
     },
     event_type: "token.issued",
-    object_id: token,
+    object_id: deriveTokenAuditId(token),
     object_type: "token",
     status: "succeeded",
     subject_id: subjectId,
     subject_type: "subject",
-    token_id: token,
+    token_id: deriveTokenAuditId(token),
     ...ownerDeviceTraceEventFields(traceContext),
   };
 }
@@ -11680,14 +11681,14 @@ export async function issueToken(
       },
       event_type: "token.issued",
       grant_id: grantId,
-      object_id: tokenId,
+      object_id: deriveTokenAuditId(tokenId),
       object_type: "token",
       request_id: meta.traceContext?.request_id || undefined,
       scenario_id: meta.traceContext?.scenario_id || grantRow.scenario_id || undefined,
       status: "succeeded",
       subject_id: subjectId,
       subject_type: "subject",
-      token_id: tokenId,
+      token_id: deriveTokenAuditId(tokenId),
       trace_id: meta.traceContext?.trace_id || grantRow.trace_id || undefined,
     });
 
@@ -11718,14 +11719,14 @@ export async function issueToken(
       },
       event_type: "token.issued",
       grant_id: grantId,
-      object_id: tokenId,
+      object_id: deriveTokenAuditId(tokenId),
       object_type: "token",
       request_id: meta.traceContext?.request_id || undefined,
       scenario_id: meta.traceContext?.scenario_id || grantRow.scenario_id || undefined,
       status: "succeeded",
       subject_id: subjectId,
       subject_type: "subject",
-      token_id: tokenId,
+      token_id: deriveTokenAuditId(tokenId),
       trace_id: meta.traceContext?.trace_id || grantRow.trace_id || undefined,
     });
 
@@ -11752,14 +11753,14 @@ async function issueOwnerTokenRecord(
       ...(meta.userCode ? { user_code: meta.userCode } : {}),
     },
     event_type: "token.issued",
-    object_id: tokenId,
+    object_id: deriveTokenAuditId(tokenId),
     object_type: "token",
     request_id: meta.traceContext?.request_id || undefined,
     scenario_id: meta.traceContext?.scenario_id || undefined,
     status: "succeeded",
     subject_id: subjectId,
     subject_type: "subject",
-    token_id: tokenId,
+    token_id: deriveTokenAuditId(tokenId),
     trace_id: meta.traceContext?.trace_id || undefined,
   });
   return { expiresAt, tokenId };

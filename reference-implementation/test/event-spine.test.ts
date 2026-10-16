@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import { tmpdir } from "node:os";
@@ -13,6 +14,7 @@ import Database from "./helpers/sqlite-driver.ts";
 import { emitSpineEvent, type SpineEventRecord } from "../lib/spine.ts";
 import { cursorAuditFact } from "../runtime/cursor-audit-fact.ts";
 import { runConnector } from "../runtime/index.ts";
+import { listActiveTokensForOwnerClient, revokeOwnerClientTokenByPublicId } from "../server/auth.ts";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { closeDb as closeDbUntyped, getDb as getDbUntyped, initDb as initDbUntyped } from "../server/db.ts";
 import { startServer as startServerUntyped } from "../server/index.ts";
@@ -301,8 +303,11 @@ interface TokenBody {
   access_token: string;
 }
 
-async function issueOwnerToken(asUrl: string, subjectId = "owner_local"): Promise<string> {
-  const clientId = "cli_longview";
+async function issueOwnerToken(
+  asUrl: string,
+  subjectId = "owner_local",
+  clientId = "cli_longview"
+): Promise<string> {
   const { body: device } = await fetchJson<DeviceAuthorizationBody>(`${asUrl}/oauth/device_authorization`, {
     body: new URLSearchParams({ client_id: clientId }).toString(),
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -871,6 +876,40 @@ test("event spine", async (t) => {
     });
   });
 
+  await t.test("persists stable token audit fingerprints across public issuance and revocation", async () => {
+    await withHarness(async ({ asUrl }) => {
+      const registration = await registerDynamicClient(asUrl, {
+        client_name: "Token audit regression",
+        redirect_uris: ["https://audit.example/callback"],
+        token_endpoint_auth_method: "none",
+      });
+      assert.equal(registration.status, 201);
+      const clientId = requirePathSegment(registration.body.client_id, "client_id");
+      const bearer = await issueOwnerToken(asUrl, "u1", clientId);
+      assert.ok(bearer);
+      const fingerprint = `tokfp_${createHash("sha256").update(bearer).digest("base64url")}`;
+      const readRows = () => getDb().prepare("SELECT * FROM spine_events").all();
+      assert.equal(JSON.stringify(readRows()).includes(bearer), false, "persisted events must not contain the bearer");
+
+      const issued = readRows().find((row) => row.event_type === "token.issued" && row.client_id === clientId);
+      assert.ok(issued);
+      assert.equal(issued.object_id, fingerprint);
+      assert.equal(issued.token_id, fingerprint);
+
+      const tokens = await listActiveTokensForOwnerClient(clientId, "u1");
+      assert.equal(tokens.length, 1);
+      const revoked = await revokeOwnerClientTokenByPublicId(clientId, tokens[0]?.token_id_public, "u1");
+      assert.equal(revoked.revoked, true);
+
+      const rows = readRows();
+      assert.equal(JSON.stringify(rows).includes(bearer), false, "no persisted field may retain the bearer");
+      const revocation = rows.find((row) => row.event_type === "token.revoked" && row.client_id === clientId);
+      assert.ok(revocation);
+      assert.equal(revocation.object_id, issued.object_id, "the same bearer must have a stable audit id");
+      assert.equal(revocation.token_id, issued.token_id);
+    });
+  });
+
   await t.test("captures a grant trace through disclosure and revocation", async () => {
     await withHarness(async ({ asUrl, rsUrl, spotifyManifest }) => {
       const ownerToken = await issueOwnerToken(asUrl, "u1");
@@ -903,6 +942,25 @@ test("event spine", async (t) => {
       const approveResp = await approveReviewedConsent(asUrl, initiate.request_uri, "u1");
       assert.equal(approveResp.status, 200);
       const approval = (await approveResp.json()) as ConsentApprovalBody;
+      const persistedEvents = getDb().prepare("SELECT * FROM spine_events").all();
+      for (const bearer of [ownerToken, approval.token]) {
+        assert.ok(bearer);
+        const leakingFields = persistedEvents.flatMap((row) =>
+          Object.entries(row)
+            .filter(([, value]) => typeof value === "string" && value.includes(bearer))
+            .map(([field]) => `${String(row.event_type)}.${field}`)
+        );
+        assert.deepEqual(leakingFields, [], "persisted event fields containing a bearer");
+      }
+
+      const ownerFingerprint = `tokfp_${createHash("sha256").update(ownerToken).digest("base64url")}`;
+      for (const eventType of ["mutation.requested", "mutation.completed", "state.requested", "state.updated"]) {
+        const events = persistedEvents.filter((row) => row.event_type === eventType);
+        assert.ok(events.length > 0, `expected ${eventType} events from seed ingest`);
+        for (const event of events) {
+          assert.equal(event.token_id, ownerFingerprint, `${eventType} must use the same owner-token fingerprint`);
+        }
+      }
 
       const queryResp = await fetch(`${rsUrl}/v1/streams/top_artists/records?limit=3`, {
         headers: { Authorization: `Bearer ${approval.token}` },

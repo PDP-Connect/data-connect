@@ -40,6 +40,7 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { deriveTokenAuditId } from "../lib/postgres-spine.ts";
 import {
   type AuthorizationDecisionFaultHook,
   approveGrant,
@@ -296,7 +297,7 @@ if (POSTGRES_URL) {
        WHERE token_id = $1
          AND object_type = 'token'
          AND event_type = 'token.issued'`,
-      [recovered.access_token]
+      [deriveTokenAuditId(recovered.access_token as string)]
     );
     assert.equal(recoveredTokenEvents.rows[0]?.count, "1");
 
