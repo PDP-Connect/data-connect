@@ -3479,32 +3479,34 @@ const AUTOSTART_STATE_POLL_INTERVAL: Duration = Duration::from_secs(3);
 /// `tokio::task::spawn_blocking`, never inline on the watcher's async task.
 fn apply_pending_ngrok_authtoken(
     app: &AppHandle,
-    mut config: RemoteAccessConfig,
+    config: RemoteAccessConfig,
 ) -> Result<RemoteAccessConfig, String> {
-    let Some(sealed) = config.ngrok_authtoken_sealed.clone() else {
-        return Ok(config);
-    };
-    clear_pending_after_store(&mut config.ngrok_authtoken_sealed, || -> Result<(), String> {
-        let key_path = credential_encryption_key_path(app)?;
-        let database_path = app
-            .path()
-            .app_data_dir()
-            .map_err(|error| format!("Failed to resolve DataConnect app-data directory: {error}"))?
-            .join(UNIFIED_DB_DIRECTORY)
-            .join(UNIFIED_DB_FILE);
-        let credential_encryption_key =
-            load_or_create_credential_encryption_key(&key_path, &database_path)?;
-        let token = crate::sealed_credential::open_sealed_credential(
-            &sealed,
-            &credential_encryption_key,
-        )
-        .map_err(|error| format!("Failed to decrypt the pending ngrok authtoken: {error}"))?;
-        crate::owner_credential::store_provider_credential_reference(
-            crate::remote_access_ngrok::NGROK_PROVIDER_ID,
-            &token,
-        )
-    })?;
-    save_remote_access_config(app, config)
+    apply_pending_credential_handoff(
+        config,
+        |config| &mut config.ngrok_authtoken_sealed,
+        |sealed| {
+            let key_path = credential_encryption_key_path(app)?;
+            let database_path = app
+                .path()
+                .app_data_dir()
+                .map_err(|error| format!("Failed to resolve DataConnect app-data directory: {error}"))?
+                .join(UNIFIED_DB_DIRECTORY)
+                .join(UNIFIED_DB_FILE);
+            let credential_encryption_key =
+                load_or_create_credential_encryption_key(&key_path, &database_path)?;
+            let token = crate::sealed_credential::open_sealed_credential(
+                sealed,
+                &credential_encryption_key,
+            )
+            .map_err(|error| format!("Failed to decrypt the pending ngrok authtoken: {error}"))?;
+            crate::owner_credential::store_provider_credential_reference(
+                crate::remote_access_ngrok::NGROK_PROVIDER_ID,
+                &token,
+            )
+        },
+        || load_remote_access_config(app),
+        |config| save_remote_access_config(app, config),
+    )
 }
 
 /// Decrypt a pending `cloudflare_tunnel_token_sealed` into the OS keychain,
@@ -3514,64 +3516,209 @@ fn apply_pending_ngrok_authtoken(
 /// `restart_after_remote_access_config`.
 fn apply_pending_cloudflare_tunnel_token(
     app: &AppHandle,
-    mut config: RemoteAccessConfig,
+    config: RemoteAccessConfig,
 ) -> Result<RemoteAccessConfig, String> {
-    let Some(sealed) = config.cloudflare_tunnel_token_sealed.clone() else {
-        return Ok(config);
-    };
-    clear_pending_after_store(&mut config.cloudflare_tunnel_token_sealed, || -> Result<(), String> {
-        let key_path = credential_encryption_key_path(app)?;
-        let database_path = app
-            .path()
-            .app_data_dir()
-            .map_err(|error| format!("Failed to resolve DataConnect app-data directory: {error}"))?
-            .join(UNIFIED_DB_DIRECTORY)
-            .join(UNIFIED_DB_FILE);
-        let credential_encryption_key =
-            load_or_create_credential_encryption_key(&key_path, &database_path)?;
-        let token = crate::sealed_credential::open_sealed_credential(
-            &sealed,
-            &credential_encryption_key,
-        )
-        .map_err(|error| {
-            format!("Failed to decrypt the pending Cloudflare tunnel token: {error}")
-        })?;
-        crate::owner_credential::store_provider_credential_reference(
-            crate::remote_access_cloudflare::CLOUDFLARE_TUNNEL_PROVIDER_ID,
-            &token,
-        )
-    })?;
-    save_remote_access_config(app, config)
+    apply_pending_credential_handoff(
+        config,
+        |config| &mut config.cloudflare_tunnel_token_sealed,
+        |sealed| {
+            let key_path = credential_encryption_key_path(app)?;
+            let database_path = app
+                .path()
+                .app_data_dir()
+                .map_err(|error| format!("Failed to resolve DataConnect app-data directory: {error}"))?
+                .join(UNIFIED_DB_DIRECTORY)
+                .join(UNIFIED_DB_FILE);
+            let credential_encryption_key =
+                load_or_create_credential_encryption_key(&key_path, &database_path)?;
+            let token = crate::sealed_credential::open_sealed_credential(
+                sealed,
+                &credential_encryption_key,
+            )
+            .map_err(|error| {
+                format!("Failed to decrypt the pending Cloudflare tunnel token: {error}")
+            })?;
+            crate::owner_credential::store_provider_credential_reference(
+                crate::remote_access_cloudflare::CLOUDFLARE_TUNNEL_PROVIDER_ID,
+                &token,
+            )
+        },
+        || load_remote_access_config(app),
+        |config| save_remote_access_config(app, config),
+    )
 }
 
-/// The sealed handoff remains available until the injected durable store
-/// succeeds. Errors propagate to the watcher as an explicit retry state.
-fn clear_pending_after_store<T>(
-    pending: &mut Option<T>,
-    store: impl FnOnce() -> Result<(), String>,
-) -> Result<(), String> {
-    store()?;
-    *pending = None;
-    Ok(())
+/// Store before changing the persisted handoff; a failed store remains retryable.
+fn apply_pending_credential_handoff(
+    mut config: RemoteAccessConfig,
+    pending_field: fn(&mut RemoteAccessConfig) -> &mut Option<String>,
+    store: impl FnOnce(&str) -> Result<(), String>,
+    reload: impl FnOnce() -> Result<RemoteAccessConfig, String>,
+    save: impl FnOnce(RemoteAccessConfig) -> Result<RemoteAccessConfig, String>,
+) -> Result<RemoteAccessConfig, String> {
+    let Some(consumed) = pending_field(&mut config).clone() else {
+        return Ok(config);
+    };
+    store(&consumed)?;
+    // The keychain can block while the owner writes from another process.
+    // Reload only after it succeeds, and change only the handoff we consumed.
+    let mut current = reload()?;
+    let pending = pending_field(&mut current);
+    if pending.as_deref() == Some(consumed.as_str()) {
+        *pending = None;
+    }
+    // Two processes share this file without a file lock: an owner write in
+    // the remaining reload-to-atomic-rename window can still race. Do not put
+    // keychain work or any other blocking external call between reload/save.
+    save(current)
 }
 
 #[cfg(test)]
 mod pending_credential_handoff_tests {
     use super::*;
 
+    type PendingField = fn(&mut RemoteAccessConfig) -> &mut Option<String>;
+
+    fn pending_fields() -> [PendingField; 2] {
+        [
+            |config| &mut config.ngrok_authtoken_sealed,
+            |config| &mut config.cloudflare_tunnel_token_sealed,
+        ]
+    }
+
+    struct Fixture(PathBuf);
+
+    impl Fixture {
+        fn new(config: &RemoteAccessConfig) -> Self {
+            static NEXT: std::sync::atomic::AtomicUsize =
+                std::sync::atomic::AtomicUsize::new(0);
+            let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let root = std::env::temp_dir().join(format!(
+                "dataconnect-handoff-{}-{id}", std::process::id()
+            ));
+            fs::create_dir(&root).unwrap();
+            let fixture = Self(root);
+            fixture.save(config.clone()).unwrap();
+            fixture
+        }
+
+        fn path(&self) -> PathBuf {
+            self.0.join("remote-access.json")
+        }
+
+        fn load(&self) -> Result<RemoteAccessConfig, String> {
+            let content = fs::read_to_string(self.path()).map_err(|e| e.to_string())?;
+            let config = serde_json::from_str(&content).map_err(|e| e.to_string())?;
+            crate::remote_access::validate_remote_access_config(config)
+        }
+
+        fn save(&self, config: RemoteAccessConfig) -> Result<RemoteAccessConfig, String> {
+            let config = crate::remote_access::validate_remote_access_config(config)?;
+            crate::atomic_write::write_json_atomically(
+                &self.path(), &config, "handoff fixture write",
+            )?;
+            Ok(config)
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn initial_config() -> RemoteAccessConfig {
+        let mut config = off_remote_access_config();
+        config.posture = crate::remote_access::RemoteAccessPosture::PublicUrl;
+        config.provider = Some("user_supplied_origin".to_owned());
+        config.fields.reference_origin = Some("https://old.example.test".to_owned());
+        config.fields.trusted_hosts = "old.example.test".to_owned();
+        config.console_port = Some(4321);
+        // Synthetic ciphertext only; store is always injected, never real keychain.
+        config.ngrok_authtoken_sealed = Some("ngrok-sealed-fixture".to_owned());
+        config.cloudflare_tunnel_token_sealed = Some("cloudflare-sealed-fixture".to_owned());
+        config
+    }
+
+    #[test]
+    fn handoff_preserves_concurrent_remote_access_off() {
+        for field in pending_fields() {
+            let initial = initial_config();
+            let fixture = Fixture::new(&initial);
+            let expected = off_remote_access_config();
+            let result = apply_pending_credential_handoff(
+                initial, field,
+                |_| fixture.save(expected.clone()).map(|_| ()),
+                || fixture.load(), |config| fixture.save(config),
+            ).unwrap();
+            assert_eq!(fixture.load().unwrap(), expected);
+            assert_eq!(result, expected, "watcher must receive the current off config");
+        }
+    }
+
+    #[test]
+    fn handoff_preserves_concurrent_newer_token_and_origin() {
+        for field in pending_fields() {
+            let initial = initial_config();
+            let fixture = Fixture::new(&initial);
+            let mut expected = initial.clone();
+            *field(&mut expected) = Some("newer-sealed-fixture".to_owned());
+            expected.fields.reference_origin = Some("https://new.example.test".to_owned());
+            expected.fields.trusted_hosts = "new.example.test".to_owned();
+            expected.console_port = Some(5432);
+            let result = apply_pending_credential_handoff(
+                initial, field,
+                |_| fixture.save(expected.clone()).map(|_| ()),
+                || fixture.load(), |config| fixture.save(config),
+            ).unwrap();
+            assert_eq!(fixture.load().unwrap(), expected);
+            assert_eq!(result, expected, "watcher must receive the fresh config");
+        }
+    }
+
+    #[test]
+    fn handoff_clears_only_consumed_field_without_concurrent_change() {
+        for field in pending_fields() {
+            let initial = initial_config();
+            let fixture = Fixture::new(&initial);
+            let mut expected = initial.clone();
+            let consumed = field(&mut expected).take().unwrap();
+            let result = apply_pending_credential_handoff(
+                initial, field, |sealed| {
+                    assert_eq!(sealed, consumed);
+                    Ok(())
+                },
+                || fixture.load(), |config| fixture.save(config),
+            ).unwrap();
+            assert_eq!(fixture.load().unwrap(), expected);
+            assert_eq!(result, expected);
+        }
+    }
+
     #[test]
     fn failed_store_retains_each_handoff_until_successful_retry() {
-        for provider in ["ngrok", "cloudflare"] {
-            // Synthetic ciphertext only; never touches the real keychain.
-            let mut pending = Some(format!("{provider}-sealed-test-value"));
-            let original = pending.clone();
+        for field in pending_fields() {
+            let initial = initial_config();
+            let fixture = Fixture::new(&initial);
+            let original_bytes = fs::read(fixture.path()).unwrap();
             for failure in ["decryption unavailable", "keychain locked"] {
-                let result = clear_pending_after_store(&mut pending, || Err(failure.to_owned()));
+                let result = apply_pending_credential_handoff(
+                    initial.clone(), field, |_| Err(failure.to_owned()),
+                    || panic!("failed store must not reload"),
+                    |_| panic!("failed store must not save"),
+                );
                 assert_eq!(result, Err(failure.to_owned()));
-                assert_eq!(pending, original, "failed handoff must remain retryable");
+                assert_eq!(fs::read(fixture.path()).unwrap(), original_bytes);
+                assert_eq!(fixture.load().unwrap(), initial);
             }
-            assert_eq!(clear_pending_after_store(&mut pending, || Ok(())), Ok(()));
-            assert!(pending.is_none(), "clear only after durable storage succeeds");
+            let mut expected = initial.clone();
+            *field(&mut expected) = None;
+            let result = apply_pending_credential_handoff(
+                initial, field, |_| Ok(()),
+                || fixture.load(), |config| fixture.save(config),
+            ).unwrap();
+            assert_eq!(fixture.load().unwrap(), expected);
+            assert_eq!(result, expected);
         }
     }
 }
