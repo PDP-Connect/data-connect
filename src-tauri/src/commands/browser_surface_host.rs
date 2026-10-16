@@ -130,7 +130,8 @@ struct BrowserSurfaceLease {
     connector_id: String,
     connection_id: String,
     headless: bool,
-    response: AcquireResponse,
+    /// None means startup failed and process cleanup is still pending.
+    response: Option<AcquireResponse>,
     browser_pid: u32,
 }
 
@@ -198,6 +199,14 @@ impl HostState {
         {
             return Err("Run id has already been released".into());
         }
+        // Failed launches own the profile even though no surface was returned.
+        // Retry their cleanup before either idempotent reuse or a fresh launch.
+        leases.retain(|_, lease| {
+            lease.response.is_some()
+                || lease.connector_id != request.connector_id
+                || lease.connection_id != request.connection_id
+                || !self.terminate_tracked_browser(lease.browser_pid)
+        });
         if let Some(lease) = leases.values().find(|lease| lease.run_id == request.run_id) {
             if lease.connector_id != request.connector_id
                 || lease.connection_id != request.connection_id
@@ -205,7 +214,7 @@ impl HostState {
             {
                 return Err("Run id is already bound to a different browser request".into());
             }
-            return Ok(lease.response.clone());
+            return lease.response.clone().ok_or_else(BrowserLaunchError::profile_in_use);
         }
         if leases.values().any(|lease| {
             lease.connector_id == request.connector_id
@@ -227,20 +236,39 @@ impl HostState {
                 "No system, downloaded, or bundled Chromium browser is available for host browser surfaces",
             )
         })?;
-        let (child, endpoint) = launch_browser(&browser, &profile_dir, request.headless)?;
+        // Acquire the process lock before spawning: every live child must have
+        // an available owner, including when startup or cleanup fails.
+        let mut browsers = self.browsers.lock()
+            .map_err(|_| BrowserLaunchError::start_failed("Browser process state is unavailable"))?;
+        let (child, endpoint) = launch_browser_with_cleanup(
+            &browser,
+            &profile_dir,
+            request.headless,
+            |mut child, mut error| {
+                if !self.terminate_child(&mut child) {
+                    error.message.push_str("; termination failed");
+                    let browser_pid = child.id();
+                    browsers.insert(browser_pid, child);
+                    leases.insert(
+                        format!("host-pending-{}", Uuid::new_v4().as_simple()),
+                        BrowserSurfaceLease {
+                            run_id: request.run_id.clone(),
+                            connector_id: request.connector_id.clone(),
+                            connection_id: request.connection_id.clone(),
+                            headless: request.headless,
+                            response: None,
+                            browser_pid,
+                        },
+                    );
+                }
+                error
+            },
+        )?;
         let browser_pid = child.id();
         let surface_id = format!("host-surface-{}", Uuid::new_v4().as_simple());
         let response = AcquireResponse {
             surface_id: surface_id.clone(),
             cdp_url: endpoint,
-        };
-        let mut browsers = match self.browsers.lock() {
-            Ok(browsers) => browsers,
-            Err(_) => {
-                let mut child = child;
-                let _ = super::pdpp_browser::terminate_browser(&mut child);
-                return Err("Browser process state is unavailable".into());
-            }
         };
         browsers.insert(browser_pid, child);
         drop(browsers);
@@ -251,7 +279,7 @@ impl HostState {
                 connector_id: request.connector_id,
                 connection_id: request.connection_id,
                 headless: request.headless,
-                response: response.clone(),
+                response: Some(response.clone()),
                 browser_pid,
             },
         );
@@ -303,13 +331,21 @@ impl HostState {
     fn shutdown(&self) {
         self.closed.store(true, Ordering::Release);
         self.release_all_leases();
-        if let Ok(mut browsers) = self.browsers.lock() {
-            for (pid, child) in browsers.iter_mut() {
-                if !super::pdpp_browser::terminate_browser(child) {
-                    log::warn!("Tracked browser {pid} did not terminate cleanly during shutdown");
-                }
+        // Leased children that failed cleanup must retain both ownership
+        // records for another shutdown/release retry. Also clean up orphans.
+        if let Ok(leases) = self.leases.lock() {
+            if let Ok(mut browsers) = self.browsers.lock() {
+                browsers.retain(|pid, child| {
+                    if leases.values().any(|lease| lease.browser_pid == *pid) {
+                        return true;
+                    }
+                    let terminated = self.terminate_child(child);
+                    if !terminated {
+                        log::warn!("Tracked browser {pid} did not terminate cleanly during shutdown");
+                    }
+                    !terminated
+                });
             }
-            browsers.clear();
         }
     }
 
@@ -332,11 +368,15 @@ impl HostState {
         });
     }
 
-    fn terminate_tracked_browser(&self, pid: u32) -> bool {
+    fn terminate_child(&self, child: &mut Child) -> bool {
         #[cfg(test)]
         if self.fail_termination.load(Ordering::Acquire) {
             return false;
         }
+        super::pdpp_browser::terminate_browser(child)
+    }
+
+    fn terminate_tracked_browser(&self, pid: u32) -> bool {
         let Ok(mut browsers) = self.browsers.lock() else {
             log::error!("Browser process state is poisoned during termination");
             return false;
@@ -345,7 +385,7 @@ impl HostState {
             log::error!("Browser process {pid} is missing from host state");
             return false;
         };
-        if super::pdpp_browser::terminate_browser(child) {
+        if self.terminate_child(child) {
             browsers.remove(&pid);
             true
         } else {
@@ -679,6 +719,17 @@ pub(crate) fn launch_browser(
     profile_dir: &Path,
     headless: bool,
 ) -> Result<(Child, String), BrowserLaunchError> {
+    launch_browser_with_cleanup(browser, profile_dir, headless, |mut child, error| {
+        terminate_failed_launch(&mut child, error)
+    })
+}
+
+fn launch_browser_with_cleanup(
+    browser: &Path,
+    profile_dir: &Path,
+    headless: bool,
+    mut on_failure: impl FnMut(Child, BrowserLaunchError) -> BrowserLaunchError,
+) -> Result<(Child, String), BrowserLaunchError> {
     let mut command = super::pdpp_browser::browser_command_with_args(
         browser,
         profile_dir,
@@ -698,8 +749,7 @@ pub(crate) fn launch_browser(
         .spawn()
         .map_err(|error| format!("Failed to launch host browser: {error}"))?;
     let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
-        let _ = super::pdpp_browser::terminate_browser(&mut child);
-        return Err("Host browser output was not piped".to_string().into());
+        return Err(on_failure(child, "Host browser output was not piped".into()));
     };
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
@@ -722,7 +772,7 @@ pub(crate) fn launch_browser(
         }
     });
 
-    wait_for_devtools_endpoint(profile_dir, child, receiver, &stderr_tail)
+    wait_for_devtools_endpoint(profile_dir, child, receiver, &stderr_tail, on_failure)
 }
 
 /// The last `STDERR_TAIL_BYTES` of browser stderr, with URL query strings
@@ -769,29 +819,27 @@ fn wait_for_devtools_endpoint(
     mut child: Child,
     receiver: mpsc::Receiver<String>,
     stderr_tail: &StderrTail,
+    mut on_failure: impl FnMut(Child, BrowserLaunchError) -> BrowserLaunchError,
 ) -> Result<(Child, String), BrowserLaunchError> {
     let deadline = Instant::now() + BROWSER_START_TIMEOUT;
     let active_port = profile_dir.join("DevToolsActivePort");
-    let probe = reqwest::blocking::Client::builder()
-        .no_proxy()
-        .build()
-        .map_err(|error| {
-            terminate_failed_launch(
-                &mut child,
-                BrowserLaunchError::start_failed(error.to_string()),
-            )
-        })?;
+    let probe = match reqwest::blocking::Client::builder().no_proxy().build() {
+        Ok(probe) => probe,
+        Err(error) => {
+            return Err(on_failure(child, BrowserLaunchError::start_failed(error.to_string())));
+        }
+    };
     while Instant::now() < deadline {
         if super::pdpp_browser::browser_child_exited(&mut child) {
             let error = exited_before_ready(stderr_tail);
-            return Err(terminate_failed_launch(&mut child, error));
+            return Err(on_failure(child, error));
         }
         for line in receiver.try_iter().take(1) {
             if let Some(url) = cdp_url_from_json(&line) {
                 if devtools_http_ready(&probe, &url, deadline) {
                     if super::pdpp_browser::browser_child_exited(&mut child) {
                         let error = exited_before_ready(stderr_tail);
-                        return Err(terminate_failed_launch(&mut child, error));
+                        return Err(on_failure(child, error));
                     }
                     return Ok((child, url));
                 }
@@ -808,7 +856,7 @@ fn wait_for_devtools_endpoint(
                 if devtools_http_ready(&probe, &url, deadline) {
                     if super::pdpp_browser::browser_child_exited(&mut child) {
                         let error = exited_before_ready(stderr_tail);
-                        return Err(terminate_failed_launch(&mut child, error));
+                        return Err(on_failure(child, error));
                     }
                     return Ok((child, url));
                 }
@@ -816,7 +864,7 @@ fn wait_for_devtools_endpoint(
         }
         if super::pdpp_browser::browser_child_exited(&mut child) {
             let error = exited_before_ready(stderr_tail);
-            return Err(terminate_failed_launch(&mut child, error));
+            return Err(on_failure(child, error));
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
@@ -825,8 +873,8 @@ fn wait_for_devtools_endpoint(
         thread::sleep(Duration::from_millis(25).min(remaining));
     }
 
-    Err(terminate_failed_launch(
-        &mut child,
+    Err(on_failure(
+        child,
         BrowserLaunchError::start_failed("Timed out waiting for host browser CDP endpoint"),
     ))
 }
@@ -1653,6 +1701,82 @@ wait "$server_pid"
         );
         assert!(elapsed >= Duration::from_millis(200));
         assert!(launch_succeeded);
+    }
+
+    #[test]
+    fn failed_launch_retains_profile_until_release_all_retry() {
+        failed_launch_cleanup_retry("all");
+    }
+
+    #[test]
+    fn failed_launch_retains_profile_until_shutdown_retry() {
+        failed_launch_cleanup_retry("shutdown");
+    }
+
+    #[test]
+    fn failed_launch_retains_profile_until_acquire_retry() {
+        failed_launch_cleanup_retry("acquire");
+    }
+
+    fn failed_launch_cleanup_retry(retry: &str) {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let browser = temp.path().join("not-ready.sh");
+        fs::write(&browser, "#!/bin/sh\nfor arg in \"$@\"; do\ncase \"$arg\" in\n--user-data-dir=*) profile=\"${arg#*=}\" ;;\nesac\ndone\necho $$ > \"$profile/browser.pid\"\nexec sleep 60\n")
+            .expect("write browser without CDP");
+        fs::set_permissions(&browser, fs::Permissions::from_mode(0o755)).expect("chmod");
+        let state = HostState::new(temp.path().join("profiles"), None, Some(browser.clone()));
+        let profile = state.profile_dir("github", "cin-github", false).expect("profile");
+        fs::write(profile.join("Cookies"), "session").expect("seed cookie");
+        let acquire_request = || AcquireRequest {
+            run_id: "failed-launch".into(),
+            connector_id: "github".into(),
+            connection_id: "cin-github".into(),
+            migrate_connector_profile: false,
+            headless: true,
+        };
+        state.fail_termination.store(true, Ordering::Release);
+        let launch = state.acquire(acquire_request());
+        let pid: u32 = fs::read_to_string(profile.join("browser.pid"))
+            .expect("launched process pid").trim().parse().expect("pid");
+        let alive = unsafe { libc::kill(pid as libc::pid_t, 0) == 0 };
+        let reset = state.reset_profile("github", "cin-github", false);
+        let cookie = fs::read_to_string(profile.join("Cookies"));
+        // No second process may launch, even for the same idempotency key.
+        let refused = if matches!(reset, Err(ProfileResetError::InUse)) {
+            Some(state.acquire(acquire_request()))
+        } else {
+            None
+        };
+        state.fail_termination.store(false, Ordering::Release);
+        // A retry must clean up the old process before attempting a new launch.
+        fs::remove_file(&browser).expect("remove launch executable");
+        match retry {
+            "all" => state.release_all_leases(),
+            "shutdown" => state.shutdown(),
+            _ => { let _ = state.acquire(acquire_request()); }
+        }
+        let gone = unsafe { libc::kill(pid as libc::pid_t, 0) != 0 };
+        let reset_after = state.reset_profile("github", "cin-github", false);
+        // Clean up on the unfixed implementation before reporting failures.
+        if !gone {
+            unsafe {
+                libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+                libc::waitpid(pid as libc::pid_t, std::ptr::null_mut(), 0);
+            }
+        }
+        state.shutdown();
+        wait_for_process_exit(pid);
+
+        assert_eq!(launch.expect_err("CDP startup must fail").code, SURFACE_START_FAILED);
+        assert!(alive, "failed termination must leave a real process alive");
+        assert!(matches!(reset, Err(ProfileResetError::InUse)),
+            "{retry}: reset must refuse while failed launch owns the profile");
+        assert_eq!(cookie.expect("profile contents preserved"), "session");
+        assert_eq!(refused.expect("retry attempted").expect_err("profile in use").code,
+            BROWSER_PROFILE_IN_USE);
+        assert!(gone, "{retry}: cleanup retry must terminate and reap the process");
+        assert!(reset_after.expect("reset after verified termination"));
+        assert!(!profile.exists());
     }
 
     #[test]
