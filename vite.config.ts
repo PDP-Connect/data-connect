@@ -51,6 +51,7 @@ export default defineConfig(({ mode }) => ({
       "src/**/*.test.{ts,tsx}",
       "src-tauri/**/*.test.ts",
       "scripts/is-main-module.test.mjs",
+      "scripts/verify-private-display-cdp.test.mjs",
       "scripts/create-macos-dmg.test.mjs",
       "scripts/ensure-pdpp-runtime.test.mjs",
       "scripts/release-github.test.mjs",
