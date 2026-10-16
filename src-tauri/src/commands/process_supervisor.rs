@@ -1863,14 +1863,19 @@ fn signal_process_group_direct(pid: u32, signal: libc::c_int) {
 #[cfg(target_os = "linux")]
 fn process_group_has_other_members(process_group: u32) -> io::Result<bool> {
     for entry in std::fs::read_dir("/proc")? {
-        let entry = entry?;
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) if proc_stat_error_skips_entry(&error) => continue,
+            Err(error) => return Err(error),
+        };
         let Some(pid) = entry.file_name().to_str().and_then(|name| name.parse::<u32>().ok()) else {
             continue;
         };
         if pid == process_group { continue; }
         let stat = match std::fs::read(entry.path().join("stat")) {
+            Ok(stat) if stat.is_empty() => continue,
             Ok(stat) => stat,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) if proc_stat_error_skips_entry(&error) => continue,
             Err(error) => return Err(error),
         };
         // comm may contain spaces, parentheses, or non-UTF8 bytes.
@@ -1884,6 +1889,19 @@ fn process_group_has_other_members(process_group: u32) -> io::Result<bool> {
         if pgrp == process_group { return Ok(true); }
     }
     Ok(false)
+}
+
+// A vanished process is not a member. An entry we may not read (hidepid,
+// or a member that exec'd a setuid program) belongs to another user. Such
+// a member still occupies the PGID, so skipping it cannot let a later
+// signal reach a reused id; it only ends our wait for a process we could
+// not signal anyway.
+#[cfg(target_os = "linux")]
+fn proc_stat_error_skips_entry(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
+    ) || error.raw_os_error() == Some(libc::ESRCH)
 }
 
 #[cfg(target_os = "macos")]
@@ -3423,6 +3441,20 @@ setInterval(() => {{}}, 1000);
                 libc::WEXITED | libc::WNOHANG | libc::WNOWAIT) == 0
                 && info.si_pid() == pid
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unreadable_or_vanished_proc_entries_do_not_fail_group_cleanup() {
+        assert!(proc_stat_error_skips_entry(&io::Error::from(io::ErrorKind::NotFound)));
+        assert!(proc_stat_error_skips_entry(&io::Error::from(io::ErrorKind::PermissionDenied)));
+        assert!(proc_stat_error_skips_entry(&io::Error::from_raw_os_error(libc::ESRCH)));
+        assert!(proc_stat_error_skips_entry(&io::Error::from_raw_os_error(libc::EACCES)));
+        assert!(!proc_stat_error_skips_entry(&io::Error::from_raw_os_error(libc::EIO)));
+        assert!(!proc_stat_error_skips_entry(&io::Error::from_raw_os_error(libc::EMFILE)));
+        // No process can be in a group above pid_max; a full scan of this
+        // host's procfs, including entries of other users, must succeed.
+        assert!(!process_group_has_other_members(0x7fff_fff0).unwrap());
     }
 
     #[cfg(unix)]
