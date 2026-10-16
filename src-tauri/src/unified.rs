@@ -3461,10 +3461,9 @@ const AUTOSTART_STATE_POLL_INTERVAL: Duration = Duration::from_secs(3);
 /// Decrypt a pending `ngrok_authtoken_sealed` (written by `owner-remote-access.ts`'s
 /// POST handler, see `RemoteAccessConfig::ngrok_authtoken_sealed`'s doc comment
 /// in `remote_access.rs`) into the OS keychain, then blank the sealed field
-/// back to `None` on disk. Returns the config with the field cleared either
-/// way -- on decrypt failure the sealed token is dropped rather than retried
-/// forever, since a bad token needs the owner to resubmit it, not a poll loop
-/// hammering the same ciphertext every 3 seconds.
+/// back to `None` on disk only after durable storage succeeds. On failure,
+/// leave the sealed token on disk and return an error so the watcher retries
+/// on its next poll without advancing its baseline or restarting the stack.
 ///
 /// Must run BEFORE `restart_after_remote_access_config`: the restart's own
 /// `start_managed_stack` reads the ngrok authtoken back out of the keychain
@@ -3480,12 +3479,12 @@ const AUTOSTART_STATE_POLL_INTERVAL: Duration = Duration::from_secs(3);
 /// `tokio::task::spawn_blocking`, never inline on the watcher's async task.
 fn apply_pending_ngrok_authtoken(
     app: &AppHandle,
-    config: RemoteAccessConfig,
-) -> RemoteAccessConfig {
+    mut config: RemoteAccessConfig,
+) -> Result<RemoteAccessConfig, String> {
     let Some(sealed) = config.ngrok_authtoken_sealed.clone() else {
-        return config;
+        return Ok(config);
     };
-    let outcome = (|| -> Result<(), String> {
+    clear_pending_after_store(&mut config.ngrok_authtoken_sealed, || -> Result<(), String> {
         let key_path = credential_encryption_key_path(app)?;
         let database_path = app
             .path()
@@ -3504,21 +3503,8 @@ fn apply_pending_ngrok_authtoken(
             crate::remote_access_ngrok::NGROK_PROVIDER_ID,
             &token,
         )
-    })();
-    if let Err(error) = outcome {
-        log::error!("Could not apply the pending ngrok authtoken: {error}");
-    }
-    let cleared = RemoteAccessConfig {
-        ngrok_authtoken_sealed: None,
-        ..config
-    };
-    match save_remote_access_config(app, cleared.clone()) {
-        Ok(saved) => saved,
-        Err(error) => {
-            log::error!("Could not clear the pending ngrok authtoken from disk: {error}");
-            cleared
-        }
-    }
+    })?;
+    save_remote_access_config(app, config)
 }
 
 /// Decrypt a pending `cloudflare_tunnel_token_sealed` into the OS keychain,
@@ -3528,12 +3514,12 @@ fn apply_pending_ngrok_authtoken(
 /// `restart_after_remote_access_config`.
 fn apply_pending_cloudflare_tunnel_token(
     app: &AppHandle,
-    config: RemoteAccessConfig,
-) -> RemoteAccessConfig {
+    mut config: RemoteAccessConfig,
+) -> Result<RemoteAccessConfig, String> {
     let Some(sealed) = config.cloudflare_tunnel_token_sealed.clone() else {
-        return config;
+        return Ok(config);
     };
-    let outcome = (|| -> Result<(), String> {
+    clear_pending_after_store(&mut config.cloudflare_tunnel_token_sealed, || -> Result<(), String> {
         let key_path = credential_encryption_key_path(app)?;
         let database_path = app
             .path()
@@ -3554,19 +3540,38 @@ fn apply_pending_cloudflare_tunnel_token(
             crate::remote_access_cloudflare::CLOUDFLARE_TUNNEL_PROVIDER_ID,
             &token,
         )
-    })();
-    if let Err(error) = outcome {
-        log::error!("Could not apply the pending Cloudflare tunnel token: {error}");
-    }
-    let cleared = RemoteAccessConfig {
-        cloudflare_tunnel_token_sealed: None,
-        ..config
-    };
-    match save_remote_access_config(app, cleared.clone()) {
-        Ok(saved) => saved,
-        Err(error) => {
-            log::error!("Could not clear the pending Cloudflare tunnel token from disk: {error}");
-            cleared
+    })?;
+    save_remote_access_config(app, config)
+}
+
+/// The sealed handoff remains available until the injected durable store
+/// succeeds. Errors propagate to the watcher as an explicit retry state.
+fn clear_pending_after_store<T>(
+    pending: &mut Option<T>,
+    store: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    store()?;
+    *pending = None;
+    Ok(())
+}
+
+#[cfg(test)]
+mod pending_credential_handoff_tests {
+    use super::*;
+
+    #[test]
+    fn failed_store_retains_each_handoff_until_successful_retry() {
+        for provider in ["ngrok", "cloudflare"] {
+            // Synthetic ciphertext only; never touches the real keychain.
+            let mut pending = Some(format!("{provider}-sealed-test-value"));
+            let original = pending.clone();
+            for failure in ["decryption unavailable", "keychain locked"] {
+                let result = clear_pending_after_store(&mut pending, || Err(failure.to_owned()));
+                assert_eq!(result, Err(failure.to_owned()));
+                assert_eq!(pending, original, "failed handoff must remain retryable");
+            }
+            assert_eq!(clear_pending_after_store(&mut pending, || Ok(())), Ok(()));
+            assert!(pending.is_none(), "clear only after durable storage succeeds");
         }
     }
 }
@@ -3642,9 +3647,13 @@ pub(crate) fn spawn_remote_access_config_watcher(app: AppHandle) {
                 })
                 .await
                 {
-                    Ok(config) => config,
+                    Ok(Ok(config)) => config,
+                    Ok(Err(error)) => {
+                        log::error!("Pending ngrok authtoken handoff failed; retained for retry: {error}");
+                        continue;
+                    }
                     Err(error) => {
-                        log::error!("Pending ngrok authtoken task failed: {error}");
+                        log::error!("Pending ngrok authtoken task failed; retained for retry: {error}");
                         continue;
                     }
                 }
@@ -3658,9 +3667,13 @@ pub(crate) fn spawn_remote_access_config_watcher(app: AppHandle) {
                 })
                 .await
                 {
-                    Ok(config) => config,
+                    Ok(Ok(config)) => config,
+                    Ok(Err(error)) => {
+                        log::error!("Pending Cloudflare tunnel token handoff failed; retained for retry: {error}");
+                        continue;
+                    }
                     Err(error) => {
-                        log::error!("Pending Cloudflare tunnel token task failed: {error}");
+                        log::error!("Pending Cloudflare tunnel token task failed; retained for retry: {error}");
                         continue;
                     }
                 }
