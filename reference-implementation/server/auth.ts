@@ -116,6 +116,8 @@ interface TraceContext {
 }
 
 interface InitiateGrantOptions {
+  /** Server-only provenance; never copied from the request body. */
+  deviceAuthorization?: boolean;
   acceptedProviderNativeRevision?: AcceptedProviderNativeRevisionForConsent;
   /** Internal handle produced by provider-native onboarding. It is evidence, never a grant right. */
   acceptedRevisionReference?: string;
@@ -180,6 +182,7 @@ interface PendingRequestClient {
 }
 
 interface PendingRequest {
+  device_authorization?: "issued" | "consumed";
   client: PendingRequestClient;
   manifest_version?: string | undefined;
   request_kind: string;
@@ -200,6 +203,7 @@ interface BatchEntry {
 }
 
 interface StagedBatchRequest {
+  device_authorization?: "issued" | "consumed";
   client: PendingRequestClient;
   entries: BatchEntry[];
   entry_count: number;
@@ -945,6 +949,7 @@ const SUPPORTED_STREAM_SELECTION_FIELDS = new Set([
   "view",
 ]);
 const SUPPORTED_NORMALIZED_PENDING_REQUEST_FIELDS = new Set([
+  "device_authorization",
   "client",
   "manifest_version",
   "request_kind",
@@ -5931,6 +5936,9 @@ export async function initiateGrant(
     const verificationBaseUrl = opts.baseUrl || process.env.AS_PUBLIC_URL || defaultAsBaseUrl();
     const expiresAt = expiresInIso(300);
 
+    if (preparedOpts.deviceAuthorization === true) {
+      normalized.device_authorization = "issued";
+    }
     await createPendingConsent(deviceCode, userCode, normalized, expiresAt);
     const requestEventData = {
       access_mode: normalized.selection.access_mode || null,
@@ -6063,6 +6071,9 @@ async function initiateStagedGrantBatch(
     const verificationBaseUrl = opts.baseUrl || process.env.AS_PUBLIC_URL || defaultAsBaseUrl();
     const expiresAt = expiresInIso(300);
 
+    if (opts.deviceAuthorization === true) {
+      batch.device_authorization = "issued";
+    }
     await createPendingConsent(deviceCode, userCode, batch, expiresAt);
     await emitSpineEvent({
       actor_id: batch.client.client_id,
@@ -7799,13 +7810,36 @@ export async function exchangeGrantScopedDeviceCode({
   }
 
   const request = parsePendingConsentParams(row);
+  if (request.device_authorization !== "issued") {
+    throw buildGrantScopedDeviceExchangeError("invalid_grant", "Device code is not redeemable", row);
+  }
   const requestClientId = isRecord(request.client) ? request.client.client_id : null;
   if (requestClientId !== clientId) {
     throw buildGrantScopedDeviceExchangeError("invalid_client", "device_code is not bound to this client_id", row);
   }
 
   await requireApprovedGrantScopedDeviceCode(row, deviceCode);
-  return buildGrantScopedDeviceTokenPayload(row, clientId);
+  const payload = await buildGrantScopedDeviceTokenPayload(row, clientId);
+  const consumedParams = JSON.stringify({ ...request, device_authorization: "consumed" });
+  // Compare the exact persisted request and token binding. Concurrent exchanges
+  // can validate the same snapshot, but only one may return the bearer.
+  const consumed = isPostgresStorageBackend()
+    ? await pgExec(
+        `UPDATE pending_consents SET params_json = $1::jsonb
+         WHERE device_code = $2 AND status = 'approved'
+           AND params_json = $3::jsonb AND token_id = $4`,
+        [consumedParams, deviceCode, row.params_json, row.token_id]
+      )
+    : execDynamicSqlAcknowledged(
+        `UPDATE pending_consents SET params_json = ?
+         WHERE device_code = ? AND status = 'approved'
+           AND params_json = ? AND token_id = ?`,
+        [consumedParams, deviceCode, row.params_json, row.token_id]
+      );
+  if (consumed.changes !== 1) {
+    throw buildGrantScopedDeviceExchangeError("invalid_grant", "Device code is already used or invalid", row);
+  }
+  return payload;
 }
 
 function isUsableAuthorizationCodePkceChallenge(challenge: unknown, method: unknown): boolean {
