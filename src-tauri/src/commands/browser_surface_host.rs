@@ -146,9 +146,11 @@ struct HostState {
     resource_dir: Option<PathBuf>,
     browser_path_override: Option<PathBuf>,
     leases: Mutex<HashMap<String, BrowserSurfaceLease>>,
-    /// Keep process handles beyond a lease if termination fails, so a later
-    /// acquire can safely retry cleanup for the exact profile and process.
+    /// Keep process handles and leases until termination is verified, so
+    /// cleanup retries cannot expose a still-live profile to reset.
     browsers: Mutex<HashMap<u32, Child>>,
+    #[cfg(test)]
+    fail_termination: AtomicBool,
     /// Prevent a late POST from recreating a lease after its run was released.
     cancelled_runs: Mutex<HashSet<String>>,
     closed: AtomicBool,
@@ -166,6 +168,8 @@ impl HostState {
             browser_path_override,
             leases: Mutex::new(HashMap::new()),
             browsers: Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            fail_termination: AtomicBool::new(false),
             cancelled_runs: Mutex::new(HashSet::new()),
             closed: AtomicBool::new(false),
         }
@@ -260,11 +264,14 @@ impl HostState {
             log::error!("Browser surface lease state is poisoned during release");
             return;
         };
-        let Some(lease) = leases.remove(surface_id) else {
+        let Some(lease) = leases.get(surface_id) else {
             // DELETE is deliberately idempotent for RI cleanup retries.
             return;
         };
-        if !self.terminate_tracked_browser(lease.browser_pid) {
+        if self.terminate_tracked_browser(lease.browser_pid) {
+            leases.remove(surface_id);
+        } else {
+            // The retained lease is cleanup-pending and protects the profile.
             log::warn!("Browser surface {surface_id} did not terminate cleanly");
         }
     }
@@ -283,8 +290,10 @@ impl HostState {
             .iter()
             .find_map(|(surface_id, lease)| (lease.run_id == run_id).then(|| surface_id.clone()));
         if let Some(surface_id) = surface_id {
-            if let Some(lease) = leases.remove(&surface_id) {
-                if !self.terminate_tracked_browser(lease.browser_pid) {
+            if let Some(lease) = leases.get(&surface_id) {
+                if self.terminate_tracked_browser(lease.browser_pid) {
+                    leases.remove(&surface_id);
+                } else {
                     log::warn!("Browser surface {surface_id} did not terminate cleanly");
                 }
             }
@@ -309,19 +318,25 @@ impl HostState {
             log::error!("Browser surface lease state is poisoned during stack teardown");
             return;
         };
-        for (surface_id, lease) in leases.drain() {
+        leases.retain(|surface_id, lease| {
             if let Ok(mut cancelled_runs) = self.cancelled_runs.lock() {
-                cancelled_runs.insert(lease.run_id);
+                cancelled_runs.insert(lease.run_id.clone());
             }
-            if !self.terminate_tracked_browser(lease.browser_pid) {
+            let terminated = self.terminate_tracked_browser(lease.browser_pid);
+            if !terminated {
                 log::warn!(
                     "Browser surface {surface_id} did not terminate cleanly during stack teardown"
                 );
             }
-        }
+            !terminated
+        });
     }
 
     fn terminate_tracked_browser(&self, pid: u32) -> bool {
+        #[cfg(test)]
+        if self.fail_termination.load(Ordering::Acquire) {
+            return false;
+        }
         let Ok(mut browsers) = self.browsers.lock() else {
             log::error!("Browser process state is poisoned during termination");
             return false;
@@ -1638,6 +1653,56 @@ wait "$server_pid"
         );
         assert!(elapsed >= Duration::from_millis(200));
         assert!(launch_succeeded);
+    }
+
+    #[test]
+    fn failed_termination_keeps_profile_until_cleanup_retry_succeeds() {
+        for release_kind in ["surface", "run", "all"] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let host = start_test_host(&temp);
+            let (surface_id, _, pid) = acquire(&host, "github");
+            let run_id = host.state.leases.lock().expect("leases")
+                .get(&surface_id).expect("lease").run_id.clone();
+            let profile = host.state.profile_dir("github", "cin-github", false)
+                .expect("profile");
+            fs::write(profile.join("Cookies"), "session").expect("seed cookie");
+
+            host.state.fail_termination.store(true, Ordering::Release);
+            match release_kind {
+                "surface" => host.state.release(&surface_id),
+                "run" => host.state.release_run(&run_id),
+                _ => host.state.release_all_leases(),
+            }
+            let reset = host.state.reset_profile("github", "cin-github", false);
+            let cookie = fs::read_to_string(profile.join("Cookies"));
+            let retained = host.state.leases.lock().expect("leases")
+                .contains_key(&surface_id);
+            let alive = host.state.browsers.lock().expect("browsers")
+                .get_mut(&pid).expect("tracked browser")
+                .try_wait().expect("poll browser").is_none();
+
+            // Clean up before assertions, even against the old behavior.
+            host.state.fail_termination.store(false, Ordering::Release);
+            match release_kind {
+                "surface" => host.state.release(&surface_id),
+                "run" => host.state.release_run(&run_id),
+                _ => host.state.release_all_leases(),
+            }
+            let released = !host.state.leases.lock().expect("leases")
+                .contains_key(&surface_id);
+            host.shutdown();
+            wait_for_process_exit(pid);
+
+            assert!(alive, "{release_kind}: failed termination leaves browser alive");
+            assert!(matches!(reset, Err(ProfileResetError::InUse)),
+                "{release_kind}: reset must refuse pending cleanup");
+            assert_eq!(cookie.expect("profile cookie kept"), "session");
+            assert!(retained, "{release_kind}: cleanup ownership is retained");
+            assert!(released, "{release_kind}: successful retry releases ownership");
+            assert!(host.state.reset_profile("github", "cin-github", false)
+                .expect("reset after verified termination"));
+            assert!(!profile.exists());
+        }
     }
 
     #[test]
