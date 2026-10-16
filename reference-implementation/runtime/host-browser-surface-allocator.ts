@@ -11,6 +11,18 @@ import { canonicalConnectorKey } from "../server/connector-key.ts";
 import type { BrowserPresentationPolicy } from "./browser-presentation-policy.ts";
 
 const DEFAULT_HOST_REQUEST_TIMEOUT_MS = 5_000;
+/**
+ * The end-to-end budget the host gets for one acquire: waiting behind
+ * another launch, starting the display and the browser's readiness. The host
+ * enforces it across all three stages.
+ */
+export const DEFAULT_HOST_ACQUIRE_TIMEOUT_MS = 30_000;
+/**
+ * Extra time to wait for the host's answer after its budget. The host gives
+ * up at the budget and stops what it started, so waiting slightly longer
+ * means a late launch is always reported, never left without a lease holder.
+ */
+const HOST_ACQUIRE_RESPONSE_MARGIN_MS = 2_000;
 
 export interface HostBrowserSurfaceLeaseBinding {
 	/**
@@ -32,6 +44,9 @@ export interface HostBrowserSurfaceAllocatorOptions {
 	 * before spawning a browser if it cannot execute it.
 	 */
 	readonly presentationPolicy?: BrowserPresentationPolicy;
+	/** Budget sent with each acquire; see `DEFAULT_HOST_ACQUIRE_TIMEOUT_MS`. */
+	readonly acquireTimeoutMs?: number;
+	/** Timeout for release requests, which do no launch work. */
 	readonly requestTimeoutMs?: number;
 	readonly token: string;
 }
@@ -122,6 +137,7 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 	readonly #headless: boolean;
 	readonly #now: () => Date;
 	readonly #presentationPolicy: BrowserPresentationPolicy | undefined;
+	readonly #acquireTimeoutMs: number;
 	readonly #requestTimeoutMs: number;
 	readonly #token: string;
 	readonly #leasesBySurfaceId = new Map<string, HostLeaseRecord>();
@@ -139,6 +155,8 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 		this.#headless = options.headless;
 		this.#now = options.now ?? (() => new Date());
 		this.#presentationPolicy = options.presentationPolicy;
+		this.#acquireTimeoutMs =
+			options.acquireTimeoutMs ?? DEFAULT_HOST_ACQUIRE_TIMEOUT_MS;
 		this.#requestTimeoutMs =
 			options.requestTimeoutMs ?? DEFAULT_HOST_REQUEST_TIMEOUT_MS;
 		this.#token = options.token.trim();
@@ -189,6 +207,7 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 		let response: unknown;
 		try {
 			response = await this.#requestJson("POST", this.#leasesUrl(), {
+				acquire_timeout_ms: this.#acquireTimeoutMs,
 				run_id: runId,
 				// Canonical, so the host profile key matches the one the RI's
 				// post-delete purge sends (server/browser-profile-purge.ts).
@@ -300,7 +319,12 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 		url: string,
 		body: Record<string, unknown>,
 	): Promise<unknown> {
-		const response = await this.#request(method, url, JSON.stringify(body));
+		const response = await this.#request(
+			method,
+			url,
+			this.#acquireTimeoutMs + HOST_ACQUIRE_RESPONSE_MARGIN_MS,
+			JSON.stringify(body),
+		);
 		try {
 			return await response.json();
 		} catch (error) {
@@ -313,19 +337,17 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 	}
 
 	async #requestNoContent(method: "DELETE", url: string): Promise<void> {
-		await this.#request(method, url);
+		await this.#request(method, url, this.#requestTimeoutMs);
 	}
 
 	async #request(
 		method: "DELETE" | "POST",
 		url: string,
+		timeoutMs: number,
 		body?: string,
 	): Promise<FetchResponseLike> {
 		const controller = new AbortController();
-		const timeout = setTimeout(
-			() => controller.abort(),
-			this.#requestTimeoutMs,
-		);
+		const timeout = setTimeout(() => controller.abort(), timeoutMs);
 		try {
 			const response = await this.#fetch(url, {
 				headers: {
@@ -347,7 +369,7 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 			if (controller.signal.aborted) {
 				throw new HostBrowserSurfaceAllocatorError(
 					"host_browser_surface_timeout",
-					`host browser surface ${method} ${url} timed out after ${this.#requestTimeoutMs}ms`,
+					`host browser surface ${method} ${url} timed out after ${timeoutMs}ms`,
 					{ cause: error },
 				);
 			}
