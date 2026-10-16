@@ -58,9 +58,11 @@ import {
   type makeLocalTransformerBackend,
   makeStubBackend,
   parseSemanticSearchParams,
+  resetVectorIndexForTests,
   resolveSemanticBackendFromEnv,
   resolveSemanticPerConnectorLimit,
   semanticIndexDelete,
+  semanticIndexDeleteByConnectorStream,
 } from "../server/search-semantic.ts";
 import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
 
@@ -2454,6 +2456,60 @@ test("semantic backend env resolver refuses production local execution without t
     LOCAL_SUPERVISOR_CONTRACT_ERROR
   );
 });
+
+for (const indexKind of ["sqlite-vec", "blob-flat"] as const) {
+  test(`whole-stream semantic deletion treats underscore and percent literally (${indexKind})`, async (t) => {
+    if (isPostgresStorageBackend()) {
+      t.skip("SQLite backend regression");
+      return;
+    }
+    const streams = ["a_b", "axb", "a%b", "ab"];
+    const manifest = {
+      ...MANIFEST_A,
+      streams: streams.map((name) => ({ ...MANIFEST_A.streams[0], name })),
+    };
+    await withHarness({}, async ({ asUrl, rsUrl }) => {
+      const db = getDb();
+      if (indexKind === "sqlite-vec" && db.vectorIndexKind !== "sqlite-vec") {
+        t.skip("sqlite-vec extension unavailable");
+        return;
+      }
+      resetVectorIndexForTests(indexKind === "blob-flat" ? "blob-flat" : undefined);
+      try {
+        const ownerToken = await issueOwnerToken(asUrl);
+        await materializeSemanticConnection(MANIFEST_A.connector_id, SEMANTIC_A_TEST_INSTANCE_ID);
+        for (const stream of streams) {
+          await ingest(rsUrl, ownerToken, MANIFEST_A.connector_id, stream, [{
+            id: "shared-key",
+            title: `sentinel ${stream}`,
+            selftext: "",
+            source_created_at: "2026-04-01T00:00:00Z",
+          }], SEMANTIC_A_TEST_INSTANCE_ID);
+        }
+        const table = indexKind === "sqlite-vec" ? "semantic_search_rowid" : "semantic_search_blob";
+        const scopeKeys = (tableName: string) => db.prepare(
+          `SELECT scope_key FROM ${tableName} WHERE connector_instance_id = ? ORDER BY scope_key`
+        ).all<{ scope_key: string }>(SEMANTIC_A_TEST_INSTANCE_ID).map((row) => row.scope_key);
+        const expected = (names: string[]) => names.map((name) => JSON.stringify([name, "title"])).sort();
+        assert.deepEqual(scopeKeys(table), expected(streams), "all streams are indexed before deletion");
+        for (const stream of ["a_b", "a%b"]) {
+          await semanticIndexDeleteByConnectorStream({
+            connectorId: MANIFEST_A.connector_id,
+            connectorInstanceId: SEMANTIC_A_TEST_INSTANCE_ID,
+            stream,
+          });
+          streams.splice(streams.indexOf(stream), 1);
+          assert.deepEqual(scopeKeys(table), expected(streams), "only the literal stream sidecars are deleted");
+          if (indexKind === "sqlite-vec") {
+            assert.deepEqual(scopeKeys("semantic_search_vec"), expected(streams), "sibling physical vectors survive");
+          }
+        }
+      } finally {
+        resetVectorIndexForTests();
+      }
+    }, [manifest]);
+  });
+}
 
 test("semantic backend env resolver accepts production local execution once the supervisor restart contract is asserted", () => {
   const backend = resolveSemanticBackendFromEnv({
