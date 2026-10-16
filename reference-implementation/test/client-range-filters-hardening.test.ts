@@ -166,6 +166,13 @@ test("a physical deletion in a filtered sync session is a bare tombstone, like a
 			"transactions",
 			victim.id,
 		);
+		// A record outside the filter range never reached this client, so
+		// deleting it reports nothing.
+		await deleteRecord(
+			{ connector_id: "spotify", connector_instance_id: "inst_a" } as never,
+			"transactions",
+			"never",
+		);
 		const second = await fetchJson(
 			`${world.rsUrl}/v1/streams/transactions/records?changes_since=${first.body.next_changes_since}&${filter}`,
 			{ headers },
@@ -181,6 +188,11 @@ test("a physical deletion in a filtered sync session is a bare tombstone, like a
 				`tombstone must not carry ${member}`,
 			);
 		}
+		assert.deepEqual(
+			second.body.data.map((record: { id: string }) => record.id),
+			[victim.id],
+			"only the matching record's deletion is reported",
+		);
 	} finally {
 		await world.close();
 	}
