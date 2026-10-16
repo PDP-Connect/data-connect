@@ -1,17 +1,24 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 //
-// Display backends for host-owned connector browsers. A backend starts a
-// display before the browser, says how the browser must be launched to use
-// it, and stops it after the browser. The host selects a backend by the
-// presentation policy's `display_backend` and never names a concrete backend
-// at its call sites, so a backend can be replaced without touching them.
+// Display backends for host-owned connector browsers. A backend decides
+// where the browser's windows go: a display it starts before the browser, or
+// the owner's own desktop with the windows kept concealed. It says how the
+// browser must be launched, may start the browser process itself, and stops
+// after the browser. The host selects a backend by the presentation policy's
+// `display_backend` and never names a concrete backend at its call sites, so
+// platform launch details stay inside the backend.
 //
 // The Linux backend runs a private Xvfb server. It is reachable only through
 // an owner-only Xauthority cookie (never `-ac`) and does not listen on TCP.
 // Only the browser's environment receives DISPLAY and XAUTHORITY.
+//
+// The macOS and Windows backends (`hidden-native`) keep the browser on the
+// owner's desktop and conceal its windows from launch until the host
+// reveals them.
 
 use super::browser_presentation::DisplayBackend;
+use std::process::{Child, ChildStderr, ChildStdout, Command, Stdio};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -25,11 +32,202 @@ pub(crate) struct BrowserDisplayLaunch {
     pub env_remove: Vec<&'static str>,
     /// Extra browser switches, before the start URL.
     pub args: Vec<String>,
+    /// Open every page in the background, so the browser never activates
+    /// itself: start with no window, open the first page as a background
+    /// window over DevTools, and give clients a relay that opens their
+    /// pages in the background too (see `cdp_relay`).
+    pub pages_open_in_background: bool,
+}
+
+/// A running browser process tree. Tests substitute a fake so lifecycle
+/// order can be proven without real processes or `/proc`.
+pub(crate) trait BrowserProcess: Send {
+    fn id(&self) -> u32;
+    fn has_exited(&mut self) -> bool;
+    /// Stop the process and its descendants. False when the stop could not
+    /// be confirmed.
+    fn terminate(&mut self) -> bool;
+}
+
+/// A browser started by a display session. The pipes are absent when the
+/// operating system, not the host, started the process.
+pub(crate) struct SpawnedBrowser {
+    pub process: Box<dyn BrowserProcess>,
+    pub stdout: Option<ChildStdout>,
+    pub stderr: Option<ChildStderr>,
+}
+
+/// What the owner could see of the browser, as far as the backend observed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ObservedVisibility {
+    /// The backend cannot observe the owner's desktop.
+    Unknown,
+    /// The browser renders on a display the owner cannot see.
+    IsolatedDisplay,
+    /// No browser window was seen on the owner's desktop.
+    Concealed,
+    /// Windows appeared and were concealed; `shown` counts those seen
+    /// before concealment caught them.
+    ConcealedAfterShow { shown: u32 },
+    /// The host revealed the browser on purpose.
+    Revealed,
+    /// Concealment failed; the browser is visible on the owner's desktop.
+    Visible,
+}
+
+impl ObservedVisibility {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::IsolatedDisplay => "isolated-display",
+            Self::Concealed => "concealed",
+            Self::ConcealedAfterShow { .. } => "concealed-after-show",
+            Self::Revealed => "revealed",
+            Self::Visible => "visible",
+        }
+    }
+}
+
+/// The decisions of a backend that keeps browser windows on the owner's
+/// desktop concealed. Platform code feeds it what it observes; it answers
+/// whether to conceal and what to report. Pure, so every platform shares one
+/// tested policy.
+#[derive(Debug, Default)]
+pub(crate) struct ConcealmentTracker {
+    revealed: bool,
+    /// Windows seen on screen before concealment caught them.
+    shown: u32,
+    /// Consecutive observations in which concealment did not take effect.
+    unconcealed_streak: u32,
+    was_visible: bool,
+}
+
+/// After this many consecutive observations with a window still on screen,
+/// concealment is reported as failed. At the platform watchers' 5 ms period
+/// that is about a quarter of a second.
+const CONCEALMENT_FAILURE_STREAK: u32 = 50;
+
+impl ConcealmentTracker {
+    /// Record one observation of how many browser windows are on screen,
+    /// and return whether to conceal them now.
+    pub(crate) fn observe(&mut self, visible_windows: u32) -> bool {
+        if self.revealed {
+            return false;
+        }
+        let visible = visible_windows > 0;
+        if visible && !self.was_visible {
+            self.shown += visible_windows;
+        }
+        self.unconcealed_streak = if visible {
+            self.unconcealed_streak.saturating_add(1)
+        } else {
+            0
+        };
+        self.was_visible = visible;
+        visible
+    }
+
+    pub(crate) fn reveal(&mut self) {
+        self.revealed = true;
+    }
+
+    pub(crate) fn is_revealed(&self) -> bool {
+        self.revealed
+    }
+
+    pub(crate) fn visibility(&self) -> ObservedVisibility {
+        if self.revealed {
+            ObservedVisibility::Revealed
+        } else if self.unconcealed_streak >= CONCEALMENT_FAILURE_STREAK {
+            ObservedVisibility::Visible
+        } else if self.shown > 0 {
+            ObservedVisibility::ConcealedAfterShow { shown: self.shown }
+        } else {
+            ObservedVisibility::Concealed
+        }
+    }
+}
+
+/// A browser started as an ordinary child of the host. Its stop covers the
+/// whole process tree.
+pub(crate) struct ChildBrowser(pub(crate) Child);
+
+impl BrowserProcess for ChildBrowser {
+    fn id(&self) -> u32 {
+        self.0.id()
+    }
+
+    fn has_exited(&mut self) -> bool {
+        super::pdpp_browser::browser_child_exited(&mut self.0)
+    }
+
+    fn terminate(&mut self) -> bool {
+        super::pdpp_browser::terminate_browser(&mut self.0)
+    }
+}
+
+/// Start `command` as a child of the host with piped output.
+pub(crate) fn spawn_child(mut command: Command) -> std::io::Result<SpawnedBrowser> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = spawn_retrying_busy_executable(&mut command)?;
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    Ok(SpawnedBrowser {
+        process: Box::new(ChildBrowser(child)),
+        stdout,
+        stderr,
+    })
+}
+
+/// Spawn, retrying briefly when the executable is "busy". A process forked
+/// elsewhere in this app holds inherited descriptors until it execs, so a
+/// browser that was just downloaded (or a test's just-written script) can
+/// fail with ETXTBSY for a moment after its writer closed it.
+pub(crate) fn spawn_retrying_busy_executable(command: &mut Command) -> std::io::Result<Child> {
+    #[cfg(unix)]
+    let busy = Some(libc::ETXTBSY);
+    #[cfg(not(unix))]
+    let busy = None;
+    let mut attempts = 0;
+    loop {
+        match command.spawn() {
+            Err(error) if busy.is_some() && error.raw_os_error() == busy && attempts < 5 => {
+                attempts += 1;
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            result => return result,
+        }
+    }
 }
 
 /// A started display. It must outlive the browser that renders on it.
 pub(crate) trait DisplaySession: Send {
     fn browser_launch(&self) -> &BrowserDisplayLaunch;
+
+    /// Start the browser. Backends that must launch it through the
+    /// operating system, or watch its windows from the moment it exists,
+    /// override this.
+    fn spawn(&mut self, command: Command) -> std::io::Result<SpawnedBrowser> {
+        spawn_child(command)
+    }
+
+    fn observed_visibility(&self) -> ObservedVisibility;
+
+    /// Whether DevTools screencast frames keep flowing while the owner
+    /// cannot see the browser. When false, the companion needs `reveal`.
+    fn streams_while_concealed(&self) -> bool {
+        true
+    }
+
+    /// Show the browser on the owner's desktop without taking focus, and
+    /// stop concealing it for the rest of the session.
+    fn reveal(&mut self) -> Result<(), String> {
+        Err("This display cannot be shown on the owner's desktop".into())
+    }
+
     /// Stop the display and remove its files. Idempotent. Returns false when
     /// the stop could not be confirmed; the caller must then keep the session
     /// and retry later rather than forget it.
@@ -68,8 +266,9 @@ impl DisplayProviders {
         self.0.iter().map(|provider| provider.backend()).collect()
     }
 
-    /// The providers whose software is installed on this machine. On Linux
-    /// that is a private Xvfb when the `Xvfb` executable is found.
+    /// The providers whose software is installed on this machine: a private
+    /// Xvfb on Linux when the `Xvfb` executable is found, and concealed
+    /// windows on the owner's desktop on macOS and Windows.
     pub(crate) fn discover(runtime_dir: &std::path::Path) -> Self {
         #[cfg(target_os = "linux")]
         {
@@ -81,17 +280,32 @@ impl DisplayProviders {
             );
             Self::default()
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "macos")]
         {
             let _ = runtime_dir;
-            Self::default()
+            Self::default().with(Arc::new(macos::HiddenNativeProvider))
+        }
+        #[cfg(windows)]
+        {
+            let _ = runtime_dir;
+            Self::default().with(Arc::new(windows::HiddenNativeProvider))
         }
     }
 }
 
+#[cfg(target_os = "macos")]
+#[path = "browser_display_macos.rs"]
+mod macos;
+
+#[cfg(windows)]
+#[path = "browser_display_windows.rs"]
+mod windows;
+
 #[cfg(target_os = "linux")]
 pub(crate) mod xvfb {
-    use super::{BrowserDisplayLaunch, DisplayBackend, DisplayProvider, DisplaySession};
+    use super::{
+        BrowserDisplayLaunch, DisplayBackend, DisplayProvider, DisplaySession, ObservedVisibility,
+    };
     use std::fs::{self, File};
     use std::io::{Read, Write};
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -293,6 +507,7 @@ pub(crate) mod xvfb {
                         "--window-position=0,0".into(),
                         format!("--window-size={SCREEN_WIDTH},{SCREEN_HEIGHT}"),
                     ],
+                    pages_open_in_background: false,
                 },
                 dir,
                 stopped: false,
@@ -318,6 +533,10 @@ pub(crate) mod xvfb {
     impl DisplaySession for XvfbSession {
         fn browser_launch(&self) -> &BrowserDisplayLaunch {
             &self.launch
+        }
+
+        fn observed_visibility(&self) -> ObservedVisibility {
+            ObservedVisibility::IsolatedDisplay
         }
 
         fn terminate(&mut self) -> bool {
@@ -526,6 +745,55 @@ mod tests {
         fn start(&self, _deadline: Instant) -> Result<Box<dyn DisplaySession>, String> {
             Err("not startable".into())
         }
+    }
+
+    #[test]
+    fn concealment_reports_what_the_owner_could_have_seen() {
+        let mut tracker = ConcealmentTracker::default();
+        assert!(!tracker.observe(0));
+        assert_eq!(tracker.visibility(), ObservedVisibility::Concealed);
+
+        // A window appears, is concealed, and stays hidden: one flash.
+        assert!(tracker.observe(1));
+        assert!(!tracker.observe(0));
+        assert_eq!(
+            tracker.visibility(),
+            ObservedVisibility::ConcealedAfterShow { shown: 1 }
+        );
+        // One window seen over consecutive observations is still one flash.
+        assert!(tracker.observe(1));
+        assert!(tracker.observe(1));
+        assert!(!tracker.observe(0));
+        assert_eq!(
+            tracker.visibility(),
+            ObservedVisibility::ConcealedAfterShow { shown: 2 }
+        );
+    }
+
+    #[test]
+    fn concealment_that_does_not_take_effect_is_reported_as_visible() {
+        let mut tracker = ConcealmentTracker::default();
+        for _ in 0..CONCEALMENT_FAILURE_STREAK - 1 {
+            assert!(tracker.observe(1));
+        }
+        assert_ne!(tracker.visibility(), ObservedVisibility::Visible);
+        assert!(tracker.observe(1));
+        assert_eq!(tracker.visibility(), ObservedVisibility::Visible);
+        // Recovers once the window is concealed again.
+        assert!(!tracker.observe(0));
+        assert_eq!(
+            tracker.visibility(),
+            ObservedVisibility::ConcealedAfterShow { shown: 1 }
+        );
+    }
+
+    #[test]
+    fn a_revealed_browser_is_never_concealed_again() {
+        let mut tracker = ConcealmentTracker::default();
+        tracker.reveal();
+        assert!(tracker.is_revealed());
+        assert!(!tracker.observe(1), "a revealed window stays shown");
+        assert_eq!(tracker.visibility(), ObservedVisibility::Revealed);
     }
 
     #[test]

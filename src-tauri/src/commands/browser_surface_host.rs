@@ -30,6 +30,9 @@ use super::owned_browser::{
 };
 
 const BROWSER_SURFACE_PATH: &str = "/browser-surface/leases";
+/// `POST /browser-surface/leases/<surface_id>/reveal` shows a concealed
+/// browser on the owner's desktop without taking focus.
+const REVEAL_SUFFIX: &str = "/reveal";
 /// `DELETE /browser-surface/profiles/<connector_id>/<connection_id>` resets one
 /// connection's persistent profile after the owner deletes or revokes it.
 /// `?legacy=remove` also removes the pre-connection per-connector profile; the
@@ -96,8 +99,13 @@ struct LaunchReport {
     browser_version: Option<String>,
     engine_mode: String,
     display_backend: String,
-    /// No adapter observes native window state yet.
+    /// What the owner could see of the browser by the time it was ready, as
+    /// the display backend observed it: `unknown`, `isolated-display`,
+    /// `concealed`, `concealed-after-show` or `visible`.
     observed_visibility: String,
+    /// False when the companion receives no frames until the browser is
+    /// revealed (macOS `hidden-native`).
+    streams_while_concealed: bool,
     milestones_ms: LaunchMilestones,
 }
 
@@ -288,7 +296,8 @@ impl HostState {
             }
             .into(),
             display_backend: backend.as_str().into(),
-            observed_visibility: "unknown".into(),
+            observed_visibility: owned.observed_visibility().as_str().into(),
+            streams_while_concealed: owned.streams_while_concealed(),
             milestones_ms: LaunchMilestones {
                 display_ready: readiness.display_ready_at.map(|at| ms_between(started, at)),
                 spawned: ms_between(started, readiness.spawned_at),
@@ -296,12 +305,13 @@ impl HostState {
             },
         };
         log::info!(
-            "Browser surface {surface_id} launched for run {}: executable={} version={} engine={} display={} display_ready_ms={} spawned_ms={} cdp_ready_ms={} pid={browser_pid}",
+            "Browser surface {surface_id} launched for run {}: executable={} version={} engine={} display={} visibility={:?} display_ready_ms={} spawned_ms={} cdp_ready_ms={} pid={browser_pid}",
             request.run_id,
             report.executable,
             report.browser_version.as_deref().unwrap_or("unknown"),
             report.engine_mode,
             report.display_backend,
+            owned.observed_visibility(),
             report
                 .milestones_ms
                 .display_ready
@@ -355,6 +365,25 @@ impl HostState {
                 .is_some_and(|pid| leases.values().any(|lease| lease.browser_pid == pid));
             leased || !browser.terminate()
         });
+    }
+
+    /// Show a leased browser on the owner's desktop without taking focus.
+    /// Returns None when no such lease exists.
+    fn reveal(&self, surface_id: &str) -> Option<Result<(), String>> {
+        let leases = self.leases.lock().ok()?;
+        let pid = leases.get(surface_id)?.browser_pid;
+        let mut browsers = self.browsers.lock().ok()?;
+        let browser = browsers
+            .iter_mut()
+            .find(|browser| browser.pid() == Some(pid))?;
+        let result = browser.reveal();
+        log::info!(
+            "Browser surface {surface_id} reveal: {}",
+            result
+                .as_ref()
+                .map_or_else(|error| error.as_str(), |()| "shown")
+        );
+        Some(result)
     }
 
     fn release(&self, surface_id: &str) {
@@ -927,6 +956,24 @@ fn dispatch_request(request: HttpRequest, state: Arc<HostState>) -> Vec<u8> {
                 }
             }
         }
+        ("POST", path)
+            if path.starts_with("/browser-surface/leases/") && path.ends_with(REVEAL_SUFFIX) =>
+        {
+            let surface_id =
+                &path[BROWSER_SURFACE_PATH.len() + 1..path.len() - REVEAL_SUFFIX.len()];
+            match state.reveal(surface_id) {
+                Some(Ok(())) => empty_response("204 No Content"),
+                None => empty_response("404 Not Found"),
+                Some(Err(message)) => json_response(
+                    "409 Conflict",
+                    &ErrorResponse {
+                        error: "browser_reveal_failed",
+                        message: Some(message),
+                    },
+                    None,
+                ),
+            }
+        }
         ("DELETE", path) if path.starts_with("/browser-surface/leases/") => {
             let surface_id = &path[BROWSER_SURFACE_PATH.len() + 1..];
             if surface_id.is_empty() || surface_id.contains('/') {
@@ -1115,15 +1162,16 @@ fn empty_response(status: &str) -> Vec<u8> {
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::super::browser_display::{BrowserDisplayLaunch, DisplaySession};
-    use super::super::owned_browser::{
-        BROWSER_DISPLAY_UNAVAILABLE, NO_USABLE_SANDBOX_SIGNATURE, SURFACE_START_FAILED,
-    };
+    use super::super::browser_display::{BrowserDisplayLaunch, DisplaySession, ObservedVisibility};
+    use super::super::owned_browser::BROWSER_DISPLAY_UNAVAILABLE;
+    #[cfg(target_os = "linux")]
+    use super::super::owned_browser::{NO_USABLE_SANDBOX_SIGNATURE, SURFACE_START_FAILED};
     use super::*;
     use serde_json::json;
     use std::os::unix::fs::symlink;
     use std::os::unix::fs::PermissionsExt;
     use std::process::Command;
+    #[cfg(target_os = "linux")]
     use std::process::Stdio;
     use tempfile::TempDir;
 
@@ -1328,6 +1376,109 @@ wait "$server_pid"
             .expect("lease exists")
             .browser_pid;
         (value.surface_id, value.cdp_url, pid)
+    }
+
+    /// Runs `script <cdp_url>` with node and returns its last output line.
+    fn run_cdp_script(env: &str, cdp_url: &str) -> Option<(bool, String)> {
+        let script = std::env::var(env).ok()?;
+        let output = Command::new("node")
+            .arg(&script)
+            .arg(cdp_url)
+            .output()
+            .expect("run CDP script");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Some((
+            output.status.success(),
+            stdout.lines().last().unwrap_or_default().to_string(),
+        ))
+    }
+
+    /// The macOS `hidden-native` path with a real Chrome. Evidence of what
+    /// the owner saw comes from an independent observer
+    /// (DATACONNECT_OBSERVE_PHASE_FILE names the file this test writes its
+    /// phase to); the test itself proves collection while concealed, then
+    /// companion frames and input after reveal.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires a real Chrome (DATACONNECT_REAL_BROWSER) in a logged-in macOS session"]
+    fn real_chrome_hidden_native_stays_concealed() {
+        let phase = |name: &str| {
+            if let Ok(path) = std::env::var("DATACONNECT_OBSERVE_PHASE_FILE") {
+                fs::write(path, name).expect("write phase");
+            }
+        };
+        let temp = tempfile::tempdir().expect("isolated tempdir");
+        let browser = PathBuf::from(
+            std::env::var("DATACONNECT_REAL_BROWSER").expect("DATACONNECT_REAL_BROWSER"),
+        );
+        let providers = DisplayProviders::discover(temp.path());
+        assert_eq!(
+            providers.installed_backends(),
+            vec![DisplayBackend::HiddenNative]
+        );
+        let host = BrowserSurfaceHost::start_with_browser(
+            temp.path().join("app-data"),
+            None,
+            Some(browser),
+            providers,
+            Some(PresentationPolicy::HIDDEN_NATIVE),
+        )
+        .expect("start host");
+        phase("launch");
+        let response = acquire_with_policy(
+            &host,
+            "run-hidden",
+            "chase",
+            false,
+            serde_json::to_value(PresentationPolicy::HIDDEN_NATIVE).expect("policy"),
+        );
+        assert_eq!(
+            response.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&response.body)
+        );
+        let acquired: AcquireResponse = serde_json::from_slice(&response.body).expect("body");
+        let launch = acquired.launch.clone().expect("launch report");
+        println!("launch report: {launch:?}");
+        assert_eq!(launch.display_backend, "hidden-native");
+        assert!(!launch.streams_while_concealed);
+
+        phase("collect");
+        if let Some((ok, line)) =
+            run_cdp_script("DATACONNECT_LIVE_COLLECTION_CHECK", &acquired.cdp_url)
+        {
+            println!("collection while concealed: {line}");
+            assert!(ok, "collection failed while concealed: {line}");
+        }
+        // Lets an outside sampler measure the concealment watch's cost.
+        if let Ok(seconds) = std::env::var("DATACONNECT_LIVE_HOLD_SECS") {
+            println!("holding concealed: pid {}", std::process::id());
+            thread::sleep(Duration::from_secs(seconds.parse().expect("hold seconds")));
+        }
+        thread::sleep(Duration::from_millis(500));
+        phase("reveal");
+        let revealed = reveal(&host, &acquired.surface_id);
+        assert_eq!(
+            revealed.status,
+            204,
+            "{}",
+            String::from_utf8_lossy(&revealed.body)
+        );
+        thread::sleep(Duration::from_millis(500));
+        phase("companion");
+        if let Some((ok, line)) = run_cdp_script("DATACONNECT_LIVE_CDP_CHECK", &acquired.cdp_url) {
+            println!("companion after reveal: {line}");
+            assert!(ok, "companion check failed after reveal: {line}");
+        }
+        phase("release");
+        let pid = host.state.leases.lock().expect("leases")[&acquired.surface_id].browser_pid;
+        release_surface(&host, &acquired.surface_id);
+        assert!(host.state.browsers.lock().expect("browsers").is_empty());
+        // SAFETY: signal 0 only checks whether the group still exists.
+        let group_alive = unsafe { libc::kill(-(pid as libc::pid_t), 0) } == 0;
+        assert!(!group_alive, "the browser's process group is gone");
+        phase("done");
     }
 
     #[test]
@@ -1889,7 +2040,7 @@ exit 133
         command.arg(format!("--user-data-dir={}", profile.display()));
         use std::os::unix::process::CommandExt;
         command.process_group(0);
-        let owner = super::super::owned_browser::spawn_retrying_busy_executable(&mut command)
+        let owner = super::super::browser_display::spawn_retrying_busy_executable(&mut command)
             .expect("start tracked fake browser");
         let group_id = owner.id();
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -2487,6 +2638,7 @@ exit 133
                     // in the browser proves removal reaches the child only.
                     env_remove: vec!["HOME"],
                     args: vec!["--ozone-platform=x11".into()],
+                    pages_open_in_background: false,
                 },
                 stopped: false,
             }))
@@ -2502,6 +2654,10 @@ exit 133
     impl DisplaySession for FakeDisplaySession {
         fn browser_launch(&self) -> &BrowserDisplayLaunch {
             &self.launch
+        }
+
+        fn observed_visibility(&self) -> ObservedVisibility {
+            ObservedVisibility::IsolatedDisplay
         }
 
         fn terminate(&mut self) -> bool {
@@ -2616,7 +2772,8 @@ exit 133
         let launch = acquired.launch.expect("launch report");
         assert_eq!(launch.display_backend, "private-xvfb");
         assert_eq!(launch.engine_mode, "headed");
-        assert_eq!(launch.observed_visibility, "unknown");
+        assert_eq!(launch.observed_visibility, "isolated-display");
+        assert!(launch.streams_while_concealed);
         assert_eq!(launch.executable, "fake-browser.sh");
         let display_ready = launch
             .milestones_ms
@@ -2718,6 +2875,33 @@ while :; do sleep 1; done
         assert_eq!(error_code(&response), SURFACE_START_TIMEOUT);
         assert!(started.elapsed() < Duration::from_secs(2));
         assert!(!profile_was_launched(&host, "chase"));
+    }
+
+    fn reveal(host: &BrowserSurfaceHost, surface_id: &str) -> TestResponse {
+        request(
+            host,
+            "POST",
+            &format!("{BROWSER_SURFACE_PATH}/{surface_id}{REVEAL_SUFFIX}"),
+            Some(host_token(host)),
+            json!({}),
+        )
+    }
+
+    #[test]
+    fn reveal_reaches_the_leased_browser_and_reports_what_happened() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (host, _) = start_display_host(&temp, true);
+        let isolated =
+            acquire_with_policy(&host, "run-xvfb", "chase", false, private_xvfb_policy());
+        let isolated: AcquireResponse = serde_json::from_slice(&isolated.body).expect("body");
+        let refused = reveal(&host, &isolated.surface_id);
+        assert_eq!(refused.status, 409, "an isolated display cannot be shown");
+        assert_eq!(error_code(&refused), "browser_reveal_failed");
+
+        // A browser on the inherited display is already on the desktop.
+        let (legacy, _, _) = acquire_with_headless(&host, "github", false);
+        assert_eq!(reveal(&host, &legacy).status, 204);
+        assert_eq!(reveal(&host, "host-surface-unknown").status, 404);
     }
 
     #[test]
@@ -2910,6 +3094,7 @@ while :; do sleep 1; done
             .clone()
             .expect("launch report");
         assert_eq!(lease_launch.display_backend, "inherited-host");
+        assert_eq!(lease_launch.observed_visibility, "unknown");
         assert_eq!(lease_launch.milestones_ms.display_ready, None);
     }
 
