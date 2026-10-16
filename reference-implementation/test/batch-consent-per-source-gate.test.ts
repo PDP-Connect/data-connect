@@ -18,6 +18,7 @@ import { getDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
 import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
+import { deriveDeviceAuditId } from "../lib/postgres-spine.ts";
 
 const REGEXP_1 = /Confirm each source/;
 const REGEXP_2 = /Reference-experimental batch consent/;
@@ -73,7 +74,7 @@ function countConsentEvents(deviceCode: string, eventType: string): number {
       .prepare(
         "SELECT COUNT(*) AS count FROM spine_events WHERE object_id = ? AND object_type = 'pending_consent' AND event_type = ?"
       )
-      .get(deviceCode, eventType) as { count: number }
+      .get(deriveDeviceAuditId(deviceCode), eventType) as { count: number }
   ).count;
 }
 

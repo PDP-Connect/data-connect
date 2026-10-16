@@ -126,9 +126,9 @@ const KIND_TO_ID_KEY = {
 /**
  * Defense-in-depth redaction map. New access-token events store one-way
  * audit fingerprints, but historic rows may still contain literal bearers
- * in `token_id` or `object_id`. `pending_consent` and `owner_device_auth` events use
- * the live `device_code` as their `object_id` and `request.submitted`
- * carries `user_code` in `data`. All of these are bearer-equivalent
+ * in `token_id` or `object_id`. New `pending_consent` and `owner_device_auth`
+ * events store dcfp_ device fingerprints and omit data.user_code at ingress.
+ * Historical rows can still contain raw device/user codes. These are bearer-equivalent
  * and MUST be stripped before any operator-console read leaves the
  * reference. The schema-level fix is tracked in
  * `openspec/changes/harden-reference-auth-surfaces/design-notes/

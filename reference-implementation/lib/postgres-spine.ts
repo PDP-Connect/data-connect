@@ -27,6 +27,29 @@ export function deriveTokenAuditId(tokenId: string): string {
     : `tokfp_${createHash("sha256").update(tokenId).digest("base64url")}`;
 }
 
+/** One-way, stable correlation key for redeemable device polling credentials. */
+export function deriveDeviceAuditId(deviceCode: string): string {
+  return /^dcfp_[A-Za-z0-9_-]{43}$/.test(deviceCode)
+    ? deviceCode
+    : `dcfp_${createHash("sha256").update(deviceCode).digest("base64url")}`;
+}
+
+/** Shared ingress policy; clone data so callers retain their protocol response. */
+export function normalizeDeviceAuditFields(
+  objectType: string | null | undefined,
+  objectId: string,
+  data: unknown
+): { object_id: string; data: unknown } {
+  if (objectType !== "pending_consent" && objectType !== "owner_device_auth") {
+    return { data, object_id: objectId };
+  }
+  const safeData = data && typeof data === "object" && !Array.isArray(data)
+    ? { ...(data as Record<string, unknown>) }
+    : {};
+  delete safeData.user_code;
+  return { data: safeData, object_id: deriveDeviceAuditId(objectId) };
+}
+
 type SourceKind = "connector" | "provider_native";
 type JsonObject = Record<string, unknown>;
 type QueryParameter = string | number | string[] | null;
@@ -395,17 +418,18 @@ function normalize(input: PostgresSpineEventInput = {}): NormalizedSpineEvent {
   const source = deriveSource(input, actorType, actorId);
   const tokenId = optionalString(input.token_id);
   const objectId = defaultString(input.object_id, () => eventId("obj"));
+  const deviceAudit = normalizeDeviceAuditFields(input.object_type, objectId, input.data);
   return {
     actor_id: actorId,
     actor_type: actorType,
     client_id: optionalString(input.client_id),
     connector_instance_id: deriveConnectorInstanceId(input),
-    data_json: serializeData(input.data, source),
+    data_json: serializeData(deviceAudit.data, source),
     event_id: defaultString(input.event_id, () => eventId("evt")),
     event_type: defaultString(input.event_type, "event"),
     grant_id: optionalString(input.grant_id),
     interaction_id: optionalString(input.interaction_id),
-    object_id: input.object_type === "token" ? deriveTokenAuditId(objectId) : objectId,
+    object_id: input.object_type === "token" ? deriveTokenAuditId(objectId) : deviceAudit.object_id,
     object_type: defaultString(input.object_type, "object"),
     occurred_at: at,
     recorded_at: nowIso(),
