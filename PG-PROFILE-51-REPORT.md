@@ -168,7 +168,7 @@ tail:
 
 The completed profile receipt recorded 1,034 files; that historical receipt
 is unchanged. The template equivalence registry is a different measure:
-137 eligible plus 35 cold-required files, for **172** total. The
+138 eligible plus 35 cold-required files, for **173** total. The
 handle-generation, issuance-cutover and opaque-cursor cold-bootstrap tests
 remain registered. These counts are recomputed from the merged registry arrays.
 

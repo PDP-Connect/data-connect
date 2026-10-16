@@ -152,6 +152,7 @@ export const POSTGRES_TEMPLATE_ELIGIBLE_FILES: readonly string[] = [
   "test/runtime-record-rejection-system-journey.test.ts",
   "test/scheduler-dispatch-wedge-health-reason.test.ts",
   "test/scheduler-owner-isolation.test.ts",
+  "test/scheduler-store-reset-state-admission.test.ts",
   "test/scheduler-store-semantic-surface.test.ts",
   "test/setup-binding-promotion.test.ts",
   "test/source-declaration-trust.test.ts",
