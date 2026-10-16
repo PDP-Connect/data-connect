@@ -59,6 +59,8 @@ const HOLDINGS_STATE_STREAM_PATTERN = /state_stream=holdings/;
 const ACTIVITY_STATE_STREAM_PATTERN = /state_stream=activity/;
 const DUPLICATE_COVERAGE_PATTERN = /duplicate DETAIL_COVERAGE/;
 const OVERLAPPING_OUTCOME_PATTERN = /outcome key appears in multiple sets/;
+const STALL_MESSAGE_PATTERN =
+  /withheld for 3 consecutive runs, each time because activity left required keys uncredited/;
 
 interface ClosableServer {
   abortStartupBackfill: (reason: string) => void;
@@ -199,7 +201,12 @@ const MANIFEST = {
     {
       name: "activity",
       primary_key: ["id"],
-      schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+      relationships: [{ cardinality: "has_one", foreign_key: "holding_id", name: "holding", stream: "holdings" }],
+      schema: {
+        properties: { holding_id: { type: "string" }, id: { type: "string" } },
+        required: ["id"],
+        type: "object",
+      },
       selection: { fields: true, resources: true },
       semantics: "append_only",
     },
@@ -504,6 +511,7 @@ test("one detail stream can independently prove two parent checkpoints", async (
   const messages: Record<string, unknown>[] = [
     { data: { id: "H" }, emitted_at: "2026-04-18T00:00:00Z", key: "H", stream: "holdings", type: "RECORD" },
     { data: { id: "A" }, emitted_at: "2026-04-18T00:00:00Z", key: "A", stream: "activity", type: "RECORD" },
+    { data: { id: "A" }, emitted_at: "2026-04-18T00:00:00Z", key: "A", stream: "valuations", type: "RECORD" },
     {
       hydrated_keys: [],
       reference_only: true,
@@ -522,7 +530,7 @@ test("one detail stream can independently prove two parent checkpoints", async (
     },
     { cursor: { page: "holdings-1" }, stream: "holdings", type: "STATE" },
     { cursor: { page: "activity-1" }, stream: "activity", type: "STATE" },
-    { records_emitted: 2, status: "succeeded", type: "DONE" },
+    { records_emitted: 3, status: "succeeded", type: "DONE" },
   ];
 
   const { result, thrown } = await runShortfall(server, ownerToken, messages);
@@ -631,7 +639,8 @@ test("a staged parent without its required detail coverage report cannot commit"
   const ownerToken = await registerAndAuthorize(server);
   const messages: Record<string, unknown>[] = [
     {
-      hydrated_keys: ["H"],
+      empty_keys: ["H"],
+      hydrated_keys: [],
       reference_only: true,
       required_keys: ["H"],
       state_stream: "holdings",
@@ -716,6 +725,7 @@ test("an uncovered detail key leaves its parent retryable and a later complete p
 
   const complete = await runShortfall(server, ownerToken, [
     { data: { id: "K" }, emitted_at: "2026-04-18T00:00:00Z", key: "K", stream: "holdings", type: "RECORD" },
+    { data: { id: "K" }, emitted_at: "2026-04-18T00:00:00Z", key: "K", stream: "valuations", type: "RECORD" },
     {
       hydrated_keys: ["K"],
       reference_only: true,
@@ -725,7 +735,7 @@ test("an uncovered detail key leaves its parent retryable and a later complete p
       type: "DETAIL_COVERAGE",
     },
     { cursor: { page: "2" }, stream: "holdings", type: "STATE" },
-    { records_emitted: 1, status: "succeeded", type: "DONE" },
+    { records_emitted: 2, status: "succeeded", type: "DONE" },
   ]);
   assert.equal(complete.thrown, null);
   assert.equal(complete.result?.checkpoint_summary?.state_streams_committed, 1);
@@ -831,4 +841,191 @@ test("optional_skip_keys release the checkpoint but never inflate covered", asyn
   assert.equal(thrown, null);
   assert.equal(result?.checkpoint_summary?.state_streams_committed, 1);
   assert.equal(terminalCoveredFor(result?.run_id as string, "activity"), 1);
+});
+
+const RECORD_AT = "2026-04-18T00:00:00Z";
+
+function activityRecord(key: string, data: Record<string, unknown>): Record<string, unknown> {
+  return { data, emitted_at: RECORD_AT, key, stream: "activity", type: "RECORD" };
+}
+
+function holdingsCoverage(fields: Record<string, unknown>): Record<string, unknown> {
+  return {
+    hydrated_keys: [],
+    reference_only: true,
+    state_stream: "holdings",
+    stream: "activity",
+    type: "DETAIL_COVERAGE",
+    ...fields,
+  };
+}
+
+/** holdings record H, then `middle`, then the holdings STATE and a successful DONE. */
+function holdingsRun(middle: readonly Record<string, unknown>[]): Record<string, unknown>[] {
+  const records = middle.filter((message) => message.type === "RECORD").length + 1;
+  return [
+    { data: { id: "H" }, emitted_at: RECORD_AT, key: "H", stream: "holdings", type: "RECORD" },
+    ...middle,
+    { cursor: { page: "1" }, stream: "holdings", type: "STATE" },
+    { records_emitted: records, status: "succeeded", type: "DONE" },
+  ];
+}
+
+async function runHoldings(
+  server: ClosableServer,
+  ownerToken: string,
+  middle: readonly Record<string, unknown>[]
+): Promise<RuntimeRunConnectorResult> {
+  const { result, thrown } = await runShortfall(server, ownerToken, holdingsRun(middle), undefined, [
+    "holdings",
+    "activity",
+  ]);
+  assert.equal(thrown, null);
+  assert.ok(result);
+  assert.equal(result.status, "succeeded");
+  return result;
+}
+
+// Records may follow their DETAIL_COVERAGE and are flushed at DONE. Coverage
+// is reconciled against ingest evidence at DONE, so a rejection that arrives
+// after the report still counts against the key.
+test("a rejection that arrives after its DETAIL_COVERAGE still withholds the parent and uncovers the key", async (t) => {
+  const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+  t.after(() => closeServer(server));
+  const ownerToken = await registerAndAuthorize(server);
+
+  const result = await runHoldings(server, ownerToken, [
+    holdingsCoverage({ considered: 1, covered: 1, hydrated_keys: ["K"], required_keys: ["K"] }),
+    activityRecord("K", { id: "not-K" }),
+  ]);
+  assert.equal(result.checkpoint_summary?.state_streams_committed, 0);
+  assert.equal(terminalCoveredFor(result.run_id as string, "activity"), 0);
+});
+
+// The converse: a record rejected before the report and accepted on a retry
+// after it is hydrated.
+test("an accepted retry after DETAIL_COVERAGE credits a key whose first attempt was rejected", async (t) => {
+  const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+  t.after(() => closeServer(server));
+  const ownerToken = await registerAndAuthorize(server);
+
+  const result = await runHoldings(server, ownerToken, [
+    activityRecord("K", { id: "not-K" }),
+    holdingsCoverage({ considered: 1, covered: 1, hydrated_keys: ["K"], required_keys: ["K"] }),
+    activityRecord("K", { id: "K" }),
+  ]);
+  assert.equal(result.checkpoint_summary?.state_streams_committed, 1);
+  assert.equal(terminalCoveredFor(result.run_id as string, "activity"), 1);
+});
+
+// A hydrated listing is a claim, not evidence. With no accepted record for the
+// key the parent stays put; a key with no detail must say so in empty_keys.
+test("a hydrated key with no accepted record for it withholds the parent and does not count as covered", async (t) => {
+  const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+  t.after(() => closeServer(server));
+  const ownerToken = await registerAndAuthorize(server);
+
+  const result = await runHoldings(server, ownerToken, [
+    holdingsCoverage({ considered: 1, covered: 1, hydrated_keys: ["K"], required_keys: ["K"] }),
+  ]);
+  assert.equal(result.checkpoint_summary?.state_streams_committed, 0);
+  assert.equal(terminalCoveredFor(result.run_id as string, "activity"), 0);
+  const coverageGap = (result.known_gaps ?? []).find((gap) => gap.reason === "detail_coverage_incomplete");
+  assert.match(String(coverageGap?.message ?? ""), HOLDINGS_STATE_STREAM_PATTERN);
+});
+
+test("verified-empty and verified-unchanged keys release the parent and count as covered", async (t) => {
+  const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+  t.after(() => closeServer(server));
+  const ownerToken = await registerAndAuthorize(server);
+
+  const result = await runHoldings(server, ownerToken, [
+    holdingsCoverage({
+      considered: 2,
+      covered: 2,
+      empty_keys: ["E"],
+      required_keys: ["E", "U"],
+      unchanged_keys: ["U"],
+    }),
+  ]);
+  assert.equal(result.checkpoint_summary?.state_streams_committed, 1);
+  assert.equal(terminalCoveredFor(result.run_id as string, "activity"), 2);
+});
+
+// The USAA/Chase shape: required keys are parent (account) keys and detail
+// records carry them in a manifest-declared foreign key, not as their own key.
+test("a detail record's parent foreign key evidences the parent key; a rejected one withholds it", async (t) => {
+  const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+  t.after(() => closeServer(server));
+  const ownerToken = await registerAndAuthorize(server);
+  const coverage = holdingsCoverage({ considered: 1, covered: 1, hydrated_keys: ["K"], required_keys: ["K"] });
+
+  const accepted = await runHoldings(server, ownerToken, [
+    activityRecord("txn-1", { holding_id: "K", id: "txn-1" }),
+    coverage,
+  ]);
+  assert.equal(accepted.checkpoint_summary?.state_streams_committed, 1);
+  assert.equal(terminalCoveredFor(accepted.run_id as string, "activity"), 1);
+
+  const rejected = await runHoldings(server, ownerToken, [
+    activityRecord("txn-1", { holding_id: "K", id: "txn-1" }),
+    activityRecord("txn-2", { holding_id: "K", id: "not-txn-2" }),
+    coverage,
+  ]);
+  assert.equal(
+    rejected.checkpoint_summary?.state_streams_committed,
+    0,
+    "one rejected transaction of the account leaves the account incomplete"
+  );
+  assert.equal(terminalCoveredFor(rejected.run_id as string, "activity"), 0);
+});
+
+function withheldEvents(runId: string): { consecutive_runs: number | null; stalled: boolean; state_stream: string }[] {
+  return getDb()
+    .prepare(
+      "SELECT data_json FROM spine_events WHERE run_id = ? AND event_type = 'run.checkpoint_withheld' ORDER BY event_seq"
+    )
+    .all<{ data_json: string }>(runId)
+    .map((row) => JSON.parse(row.data_json));
+}
+
+// Withholding is safe against loss but not live: the same reason every run
+// means the cursor never moves. The owner is told once it persists.
+test("a checkpoint withheld for the same reason on consecutive runs is reported as stalled; a commit resets the count", async (t) => {
+  const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+  t.after(() => closeServer(server));
+  const ownerToken = await registerAndAuthorize(server);
+  const unproven = [holdingsCoverage({ hydrated_keys: ["K"], required_keys: ["K"] })];
+
+  const streaks: (number | null)[] = [];
+  let last: RuntimeRunConnectorResult | null = null;
+  for (let run = 0; run < 3; run += 1) {
+    // biome-ignore lint/performance/noAwaitInLoops: the streak is defined by run order.
+    last = await runHoldings(server, ownerToken, unproven);
+    const [event, ...rest] = withheldEvents(last.run_id as string);
+    assert.ok(event);
+    assert.equal(rest.length, 0);
+    assert.equal(event.state_stream, "holdings");
+    streaks.push(event.consecutive_runs);
+  }
+  assert.deepEqual(streaks, [1, 2, 3]);
+  const stall = (last?.known_gaps ?? []).find((gap) => gap.kind === "checkpoint_withheld");
+  assert.equal(stall?.reason, "checkpoint_stalled");
+  assert.equal(stall?.severity, "actionable");
+  assert.match(String(stall?.message), STALL_MESSAGE_PATTERN);
+
+  const committed = await runHoldings(server, ownerToken, [
+    holdingsCoverage({ empty_keys: ["K"], required_keys: ["K"] }),
+  ]);
+  assert.equal(committed.checkpoint_summary?.state_streams_committed, 1);
+  assert.deepEqual(withheldEvents(committed.run_id as string), []);
+
+  const again = await runHoldings(server, ownerToken, unproven);
+  const [event] = withheldEvents(again.run_id as string);
+  assert.ok(event);
+  assert.equal(event.consecutive_runs, 1, "a commit ends the streak");
+  assert.equal(event.stalled, false);
+  const gap = (again.known_gaps ?? []).find((entry) => entry.kind === "checkpoint_withheld");
+  assert.equal(gap?.reason, "checkpoint_withheld");
+  assert.equal(gap?.severity, "transient");
 });

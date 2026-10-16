@@ -175,7 +175,7 @@ export async function runMultiParentScenario<Store>({
   process.stdout.write(JSON.stringify({ type: 'RECORD', stream: 'holdings', key: 'H', data: { id: 'H' }, emitted_at: new Date().toISOString() }) + '\\n');
   process.stdout.write(JSON.stringify({ type: 'RECORD', stream: 'activity', key: 'A', data: { id: 'A' }, emitted_at: new Date().toISOString() }) + '\\n');
   process.stdout.write(JSON.stringify({ type: 'DETAIL_COVERAGE', reference_only: true, stream: 'valuations', state_stream: 'holdings', required_keys: ['H'], hydrated_keys: [] }) + '\\n');
-  process.stdout.write(JSON.stringify({ type: 'DETAIL_COVERAGE', reference_only: true, stream: 'valuations', state_stream: 'activity', required_keys: ['A'], hydrated_keys: ['A'] }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'DETAIL_COVERAGE', reference_only: true, stream: 'valuations', state_stream: 'activity', required_keys: ['A'], hydrated_keys: [], empty_keys: ['A'] }) + '\\n');
   process.stdout.write(JSON.stringify({ type: 'STATE', stream: 'holdings', cursor: { page: 'holdings-1' } }) + '\\n');
   process.stdout.write(JSON.stringify({ type: 'STATE', stream: 'activity', cursor: { page: 'activity-1' } }) + '\\n');
   process.stdout.write(JSON.stringify({ type: 'DONE', status: 'succeeded', records_emitted: 2 }) + '\\n');
@@ -543,7 +543,7 @@ export async function runSubsetParentCoverageScenario<Store>({
     `
   process.stdout.write(JSON.stringify({ type: 'RECORD', stream: 'a', key: 'a-1', data: { id: 'a-1' }, emitted_at: new Date().toISOString() }) + '\\n');
   process.stdout.write(JSON.stringify({ type: 'RECORD', stream: 'b', key: 'b-1', data: { id: 'b-1' }, emitted_at: new Date().toISOString() }) + '\\n');
-  process.stdout.write(JSON.stringify({ type: 'DETAIL_COVERAGE', reference_only: true, stream: 'detail', state_stream: 'a', required_keys: ['a-1'], hydrated_keys: ['a-1'] }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'DETAIL_COVERAGE', reference_only: true, stream: 'detail', state_stream: 'a', required_keys: ['a-1'], hydrated_keys: [], empty_keys: ['a-1'] }) + '\\n');
   process.stdout.write(JSON.stringify({ type: 'STATE', stream: 'a', cursor: { page: 'a-1' } }) + '\\n');
   process.stdout.write(JSON.stringify({ type: 'STATE', stream: 'b', cursor: { page: 'b-1' } }) + '\\n');
   process.stdout.write(JSON.stringify({ type: 'DONE', status: 'succeeded', records_emitted: 2 }) + '\\n');

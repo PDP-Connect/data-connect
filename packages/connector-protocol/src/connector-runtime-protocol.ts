@@ -415,7 +415,21 @@ export interface DetailCoverageMessage {
    * reads `partial`. NEVER inferred from the collected count.
    */
   covered?: number;
+  /**
+   * Required keys the connector verified have no detail at all this run (an
+   * account with no transactions, an order with no items). A key with no
+   * detail record belongs here, not in `hydrated_keys`.
+   */
+  empty_keys?: Array<string | number>;
   gap_keys?: Array<string | number>;
+  /**
+   * Required keys whose detail the run emitted. The runtime credits a hydrated
+   * key only when an accepted record of `stream` answers for it this run: a
+   * record whose primary key is the key, or whose foreign key in a manifest
+   * `relationships` entry to `state_stream` holds it. A hydrated key with no
+   * such record, or with a record the store rejected, withholds the
+   * `state_stream` checkpoint.
+   */
   hydrated_keys: Array<string | number>;
   /**
    * Required keys accepted by an explicit optional-detail policy. A provider
@@ -428,6 +442,11 @@ export interface DetailCoverageMessage {
   state_stream: string;
   stream: string;
   type: "DETAIL_COVERAGE";
+  /**
+   * Required keys whose detail the connector verified is unchanged since a
+   * prior run and so did not re-emit (a fingerprint or sync-token match).
+   */
+  unchanged_keys?: Array<string | number>;
 }
 
 export interface RuntimeContinuationFact {

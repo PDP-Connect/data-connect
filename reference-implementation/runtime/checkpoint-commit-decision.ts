@@ -17,17 +17,25 @@
  * 1. A manifest-declared detail stream of that parent sent no DETAIL_COVERAGE
  *    report for it (`coverage_report_missing`).
  * 2. A DETAIL_COVERAGE report leaves a required key uncredited
- *    (`coverage_shortfall`). A key is credited by:
- *    - a hydrated declaration the RS did not reject (a key the RS rejected this
- *      run and never accepted is not hydrated, whatever the connector says);
+ *    (`coverage_shortfall`). A key the RS rejected a record for this run (and
+ *    never accepted that record) is uncredited whatever the connector says,
+ *    unless a durable gap covers it. Otherwise a key is credited by:
+ *    - a hydrated declaration backed by an accepted record of the detail
+ *      stream for that key: its primary key, or the foreign key of a manifest
+ *      relationship to the parent. A bare hydrated listing proves nothing;
+ *    - an explicit `empty_keys` or `unchanged_keys` outcome: the connector
+ *      verified the key has no detail, or no changed detail, this run;
  *    - an optional-skip declaration (an accepted terminal absence); or
  *    - a pending or recovered durable DETAIL_GAP for the same stream, key and
  *      parent boundary. Declared `gap_keys` alone credit nothing.
+ *    Evidence is read once at DONE, after the final flush, so a record sent
+ *    after its DETAIL_COVERAGE still counts, for or against the key.
  * 3. A data stream that maps to it reported an omission with no durable work
  *    item (`reported_omission`): a `stream_collection_failed` SKIP_RESULT, a
  *    retryable SKIP_RESULT without a runtime continuation, or STREAM_EVIDENCE
  *    with `outcomes.unaccounted > 0`. Gapped evidence keys are durable
- *    DETAIL_GAPs and do not withhold.
+ *    DETAIL_GAPs and do not withhold. An omission that names no stream
+ *    withholds every staged cursor: nothing proves any cursor is clear of it.
  *
  * Every other staged STATE_STREAM commits.
  *
@@ -37,13 +45,35 @@
 
 /** One DETAIL_COVERAGE report for one (state_stream, detail stream) boundary. */
 export interface CoverageReport {
+  /** Keys the connector verified have no detail this run. */
+  emptyKeys: ReadonlySet<string>;
+  /** Keys with an accepted record of `stream` this run, by primary key or parent foreign key. */
+  evidencedKeys: ReadonlySet<string>;
   /** Hydrated keys as the connector declared them. */
   hydratedKeys: ReadonlySet<string>;
   optionalSkipKeys: ReadonlySet<string>;
-  /** Keys the RS rejected for `stream` this run and never accepted. */
+  /** Keys with a record of `stream` the RS rejected this run and never accepted. */
   rejectedKeys: ReadonlySet<string>;
   requiredKeys: readonly string[];
   stream: string;
+  /** Keys the connector verified have no changed detail this run. */
+  unchangedKeys: ReadonlySet<string>;
+}
+
+/**
+ * The required keys the run accounted for: hydrated with evidence, verified
+ * empty, or verified unchanged, and not contradicted by a rejection. Optional
+ * skips and gaps release a checkpoint but are not coverage, so a declared
+ * `covered` count never exceeds this.
+ */
+export function coveredRequiredKeys(report: CoverageReport): string[] {
+  return report.requiredKeys.filter(
+    (key) =>
+      !report.rejectedKeys.has(key) &&
+      ((report.hydratedKeys.has(key) && report.evidencedKeys.has(key)) ||
+        report.emptyKeys.has(key) ||
+        report.unchangedKeys.has(key))
+  );
 }
 
 /** The fields of a durable detail-gap row that can credit a required key. */
@@ -56,10 +86,14 @@ export interface DurableGapEvidence {
 
 export type OmissionSource = "retryable_skip" | "stream_collection_failed" | "unaccounted_evidence";
 
-/** A data stream that reported rows it did not collect. */
+/**
+ * A report of rows a run did not collect. `stream` is the data stream that
+ * omitted them, or null when the report named none: then no cursor is known
+ * to be clear of the omitted rows, so it withholds every staged cursor.
+ */
 export interface ReportedOmission {
   source: OmissionSource;
-  stream: string;
+  stream: string | null;
 }
 
 export interface CheckpointCommitInput {
@@ -84,7 +118,7 @@ export type WithholdReason =
       stateStream: string;
       stream: string;
     }
-  | { kind: "reported_omission"; source: OmissionSource; stateStream: string; stream: string };
+  | { kind: "reported_omission"; source: OmissionSource; stateStream: string; stream: string | null };
 
 export interface CheckpointCommitDecision {
   /** STATE_STREAM keys to commit, in staging order. */
@@ -148,13 +182,10 @@ function coverageShortfalls(input: CheckpointCommitInput, stateStream: string): 
   const reasons: WithholdReason[] = [];
   for (const report of input.coverageByStateStream.get(stateStream) || []) {
     const gapKeys = durableGapKeys(input, report.stream, stateStream);
+    const covered = new Set(coveredRequiredKeys(report));
     const missingKeyCount = report.requiredKeys.filter(
       (key) =>
-        !(
-          (report.hydratedKeys.has(key) && !report.rejectedKeys.has(key)) ||
-          report.optionalSkipKeys.has(key) ||
-          gapKeys.has(key)
-        )
+        !(gapKeys.has(key) || covered.has(key) || (report.optionalSkipKeys.has(key) && !report.rejectedKeys.has(key)))
     ).length;
     if (missingKeyCount) {
       reasons.push({
@@ -193,6 +224,30 @@ function durableGapKeys(input: CheckpointCommitInput, stream: string, stateStrea
 
 function omissionsOwnedBy(input: CheckpointCommitInput, stateStream: string): WithholdReason[] {
   return input.omissions
-    .filter((omission) => stateStreamsOwning(omission.stream, input).has(stateStream))
+    .filter((omission) => omission.stream === null || stateStreamsOwning(omission.stream, input).has(stateStream))
     .map((omission) => ({ kind: "reported_omission", source: omission.source, stateStream, stream: omission.stream }));
+}
+
+/**
+ * Consecutive runs a state stream's cursor may be withheld for the same reason
+ * before the runtime reports a stall to the owner rather than a transient gap.
+ */
+export const CHECKPOINT_STALL_RUNS = 3;
+
+/** One reason as a short, stable phrase; counts are left out so it is equal run to run. */
+export function describeWithholdReason(reason: WithholdReason): string {
+  const stream = reason.stream ?? "an unnamed stream";
+  switch (reason.kind) {
+    case "coverage_report_missing":
+      return `no DETAIL_COVERAGE report from ${stream}`;
+    case "coverage_shortfall":
+      return `${stream} left required keys uncredited`;
+    default:
+      return `${stream} reported an omission (${reason.source})`;
+  }
+}
+
+/** A stable identity for one state stream's set of reasons: same reasons, same key. */
+export function withholdReasonKey(reasons: readonly WithholdReason[]): string {
+  return [...new Set(reasons.map(describeWithholdReason))].sort().join("; ");
 }

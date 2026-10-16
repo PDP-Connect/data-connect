@@ -14,6 +14,7 @@ import test from "node:test";
 import {
   type CheckpointCommitInput,
   type CoverageReport,
+  coveredRequiredKeys,
   decideCheckpointCommits,
 } from "../runtime/checkpoint-commit-decision.ts";
 import { capCoveredCount } from "../runtime/connector-gap-bounding.ts";
@@ -33,10 +34,13 @@ function input(overrides: Partial<CheckpointCommitInput>): CheckpointCommitInput
 
 function report(overrides: Partial<CoverageReport> & { requiredKeys: string[] }): CoverageReport {
   return {
+    emptyKeys: new Set(),
+    evidencedKeys: new Set(),
     hydratedKeys: new Set(),
     optionalSkipKeys: new Set(),
     rejectedKeys: new Set(),
     stream: "details",
+    unchangedKeys: new Set(),
     ...overrides,
   };
 }
@@ -80,19 +84,65 @@ test("an out-of-scope detail stream needs no coverage report", () => {
   assert.deepEqual(decision.commit, ["orders"]);
 });
 
-test("a hydrated key credits its required key", () => {
-  const decision = decideCheckpointCommits(detailInput(report({ hydratedKeys: new Set(["k"]), requiredKeys: ["k"] })));
-  assert.deepEqual(decision.commit, ["orders"]);
-});
-
-test("a hydrated key the RS rejected does not credit its required key", () => {
-  const decision = decideCheckpointCommits(
-    detailInput(report({ hydratedKeys: new Set(["k"]), rejectedKeys: new Set(["k"]), requiredKeys: ["k"] }))
+test("a hydrated key credits its required key only with an accepted record for it", () => {
+  const evidenced = decideCheckpointCommits(
+    detailInput(report({ evidencedKeys: new Set(["k"]), hydratedKeys: new Set(["k"]), requiredKeys: ["k"] }))
   );
-  assert.deepEqual(decision.commit, []);
-  assert.deepEqual(decision.withheld, [
+  assert.deepEqual(evidenced.commit, ["orders"]);
+  const bare = decideCheckpointCommits(detailInput(report({ hydratedKeys: new Set(["k"]), requiredKeys: ["k"] })));
+  assert.deepEqual(bare.commit, []);
+  assert.deepEqual(bare.withheld, [
     { kind: "coverage_shortfall", missingKeyCount: 1, requiredKeyCount: 1, stateStream: "orders", stream: "details" },
   ]);
+});
+
+test("an accepted record without a hydrated declaration credits nothing", () => {
+  const decision = decideCheckpointCommits(detailInput(report({ evidencedKeys: new Set(["k"]), requiredKeys: ["k"] })));
+  assert.deepEqual(decision.commit, []);
+});
+
+test("verified-empty and verified-unchanged keys credit without a record", () => {
+  for (const field of ["emptyKeys", "unchangedKeys"] as const) {
+    const decision = decideCheckpointCommits(detailInput(report({ [field]: new Set(["k"]), requiredKeys: ["k"] })));
+    assert.deepEqual(decision.commit, ["orders"], field);
+  }
+});
+
+test("a rejected record uncredits every connector outcome for its key, but not a durable gap", () => {
+  for (const field of ["hydratedKeys", "emptyKeys", "unchangedKeys", "optionalSkipKeys"] as const) {
+    const decision = decideCheckpointCommits(
+      detailInput(
+        report({
+          [field]: new Set(["k"]),
+          evidencedKeys: new Set(["k"]),
+          rejectedKeys: new Set(["k"]),
+          requiredKeys: ["k"],
+        })
+      )
+    );
+    assert.deepEqual(decision.commit, [], field);
+  }
+  const gapped = decideCheckpointCommits(
+    detailInput(report({ rejectedKeys: new Set(["k"]), requiredKeys: ["k"] }), {
+      durableGaps: [{ parent_stream: "orders", record_key: "k", status: "pending", stream: "details" }],
+    })
+  );
+  assert.deepEqual(gapped.commit, ["orders"]);
+});
+
+test("coveredRequiredKeys counts evidenced, empty and unchanged keys, never skips, gaps or rejections", () => {
+  const covered = coveredRequiredKeys(
+    report({
+      emptyKeys: new Set(["e"]),
+      evidencedKeys: new Set(["h", "bare-evidence", "r"]),
+      hydratedKeys: new Set(["h", "unevidenced", "r"]),
+      optionalSkipKeys: new Set(["s"]),
+      rejectedKeys: new Set(["r"]),
+      requiredKeys: ["h", "unevidenced", "bare-evidence", "e", "u", "s", "r", "g"],
+      unchangedKeys: new Set(["u"]),
+    })
+  );
+  assert.deepEqual(covered, ["h", "e", "u"]);
 });
 
 test("an optional skip credits its required key", () => {
@@ -206,6 +256,17 @@ test("an omission on an unstaged stream withholds nothing", () => {
     input({ omissions: [{ source: "retryable_skip", stream: "unstaged" }], stagedStateStreams: ["a"] })
   );
   assert.deepEqual(decision, { commit: ["a"], withheld: [] });
+});
+
+test("an omission that names no stream withholds every staged state stream", () => {
+  const decision = decideCheckpointCommits(
+    input({ omissions: [{ source: "retryable_skip", stream: null }], stagedStateStreams: ["a", "b"] })
+  );
+  assert.deepEqual(decision.commit, []);
+  assert.deepEqual(decision.withheld, [
+    { kind: "reported_omission", source: "retryable_skip", stateStream: "a", stream: null },
+    { kind: "reported_omission", source: "retryable_skip", stateStream: "b", stream: null },
+  ]);
 });
 
 test("reasons are grouped by staged state stream: missing reports, then shortfalls, then omissions", () => {

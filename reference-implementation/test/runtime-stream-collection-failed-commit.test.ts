@@ -41,6 +41,7 @@ import { admitOwnerRunConnection } from "../server/stores/connector-instance-sto
 // the resolved result directly.
 
 const CHILD_B_STREAM_NAME_PATTERN = /child_b/;
+const STREAMLESS_OMISSION_PATTERN = /an unnamed stream reported an omission \(retryable_skip\)/;
 
 interface ClosableServer {
   asPort: number;
@@ -879,6 +880,55 @@ rl.on('line', (line) => {
       sibling_a: { cursor: "sibling_a_cursor" },
       sibling_b: { cursor: "replayed" },
     });
+  } finally {
+    rmSync(tmpDir, { force: true, recursive: true });
+    await closeServer(server);
+  }
+});
+
+// A retryable SKIP_RESULT that names no stream still omitted rows that some
+// staged cursor owns. Nothing proves which, so no staged cursor may move; the
+// run stays successful and says why each cursor was withheld.
+test("runConnector withholds every staged cursor after a retryable SKIP_RESULT that names no stream", async () => {
+  const server = await startServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+  const asUrl = `http://localhost:${server.asPort}`;
+  const rsUrl = `http://localhost:${server.rsPort}`;
+  const manifest = testManifest("runtime-streamless-retryable-skip-test");
+  const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-runtime-streamless-skip-"));
+  const connectorPath = writeConnectorStub(
+    tmpDir,
+    `
+  process.stdout.write(JSON.stringify({ type: 'STATE', stream: 'sibling_a', cursor: { cursor: 'sibling_a_cursor' } }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'STATE', stream: 'sibling_b', cursor: { cursor: 'beyond_withheld_rows' } }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'SKIP_RESULT', reason: 'upstream_pressure', message: 'withheld rows after 429', recovery_hint: 'retry_by_runtime' }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'DONE', status: 'succeeded', records_emitted: 0 }) + '\\n');
+  rl.close();
+  process.exit(0);
+`
+  );
+
+  try {
+    const registerResp = await fetch(`${asUrl}/connectors`, {
+      body: JSON.stringify(manifest),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    });
+    assert.equal(registerResp.status, 201);
+    const ownerToken = await issueOwnerToken(asUrl);
+
+    const result = await runStub({ asUrl, connectorPath, manifest, ownerToken, rsUrl });
+    assert.equal(result.status, "succeeded");
+    assert.equal(result.checkpoint_summary?.state_streams_staged, 2);
+    assert.equal(
+      result.checkpoint_summary?.state_streams_committed,
+      0,
+      "no staged cursor is proven clear of the omission"
+    );
+    const withheld = (result.known_gaps ?? []).filter((gap) => gap.kind === "checkpoint_withheld");
+    assert.deepEqual(withheld.map((gap) => gap.stream).sort(), ["sibling_a", "sibling_b"]);
+    for (const gap of withheld) {
+      assert.match(String(gap.message), STREAMLESS_OMISSION_PATTERN);
+    }
   } finally {
     rmSync(tmpDir, { force: true, recursive: true });
     await closeServer(server);

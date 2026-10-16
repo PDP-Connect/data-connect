@@ -453,9 +453,9 @@ export function boundConsideredCount(value: unknown): number | null {
 
 /**
  * Cap a connector-declared `covered` count at the denominator minus the items
- * the runtime knows were not covered (optional skips, rejected records): those
- * are neither emitted nor unchanged. The declared count may be lower; it is
- * never raised. null stays unknown.
+ * the runtime cannot show were covered (see `coveredRequiredKeys` in
+ * checkpoint-commit-decision.ts). The declared count may be lower; it is never
+ * raised. null stays unknown.
  */
 export function capCoveredCount(covered: number | null, denominator: number, knownUncovered: number): number | null {
   if (covered === null) {
