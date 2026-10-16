@@ -10,7 +10,10 @@ import {
 } from "../server/connector-instance-write-coordinator.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
 import { ingestRecord } from "../server/records.ts";
+import { runSearchIndexDirtyReconcileRound } from "../server/search-index-reconcile.ts";
 import {
+  __setSemanticRepairPhaseHookForTest,
+  __setSemanticVecInventoryFaultHookForTest,
   configureSemanticBackend,
   makeStubBackend,
   semanticIndexBackfillForManifest as semanticIndexBackfillForManifestUntyped,
@@ -405,4 +408,74 @@ test("REQUIRED DISCRIMINATOR: all configured admission slots held by long startu
       closeDb();
     }
   });
+});
+
+test("physical semantic verification yields between pages and shutdown abort retains dirty scope as incomplete", async () => {
+  initDb(":memory:");
+  configureSemanticBackend(makeStubBackend({ dimensions: 8 }));
+  const instanceId = "cin_semantic_verification_yield";
+  const manifest = {
+    ...semanticManifest,
+    storage_binding: { connector_instance_id: instanceId },
+    streams: [semanticManifest.streams[0]],
+  } as unknown as NonNullable<SemanticBackfillOptions["manifest"]>;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await registerConnector(baseManifest);
+    for (let i = 0; i < 1001; i += 1) {
+      // biome-ignore lint/performance/noAwaitInLoops: Seed three physical inventory pages before installing verification barriers.
+      await ingestRecord(target(instanceId), record("first", `yield-${i}`, `subject ${i}`));
+    }
+    await registerConnector(semanticManifest, { backfillRetrievalIndexes: false });
+    await semanticIndexBackfillForManifest({ manifest, orphanStreamCleanup: false });
+    assert.ok(
+      getDb().prepare("SELECT name FROM sqlite_master WHERE name = 'semantic_search_vec'").get(),
+      "this regression requires the physical sqlite-vec inventory path"
+    );
+
+    let physicalPages = 0;
+    const observedTimer = deferred<number>();
+    __setSemanticRepairPhaseHookForTest((phase) => {
+      if (phase === "after-physical-verification-page") physicalPages += 1;
+    });
+    __setSemanticVecInventoryFaultHookForTest((phase) => {
+      if (phase === "before-insert") {
+        // Scheduled before physical verification's first page, after the
+        // unrelated sidecar scan, so that scan's yields cannot pass this test.
+        timer = setTimeout(() => observedTimer.resolve(physicalPages), 0);
+      }
+    });
+    await semanticIndexBackfillForManifest({ manifest, orphanStreamCleanup: false });
+    const pagesWhenTimerFired = await observedTimer.promise;
+    assert.ok(
+      pagesWhenTimerFired > 0 && pagesWhenTimerFired < 3,
+      `timer must run before all three physical pages finish; observed ${pagesWhenTimerFired}`
+    );
+    assert.ok(physicalPages >= 6, "both complete physical proofs must still inspect every page");
+
+    const controller = new AbortController();
+    physicalPages = 0;
+    __setSemanticVecInventoryFaultHookForTest((phase) => {
+      if (phase === "before-insert") timer = setTimeout(() => controller.abort(), 0);
+    });
+    const result = await runSearchIndexDirtyReconcileRound({
+      maxDurationMs: 60_000,
+      pageSize: 25,
+      signal: controller.signal,
+    });
+    assert.ok(physicalPages > 0 && physicalPages < 3, "shutdown must interrupt the first physical proof");
+    assert.equal(result.incomplete, true);
+    assert.equal(result.succeeded, 0);
+    assert.equal(result.failed, 0, "shutdown interruption is not a corrupt-index failure");
+    const dirty = getDb()
+      .prepare("SELECT dirty FROM search_index_dirty WHERE connector_instance_id = ? AND stream = ?")
+      .get(instanceId, "first") as { dirty: number } | undefined;
+    assert.equal(dirty?.dirty, 1, "an interrupted proof must never clear the dirty scope");
+  } finally {
+    if (timer) clearTimeout(timer);
+    __setSemanticRepairPhaseHookForTest(null);
+    __setSemanticVecInventoryFaultHookForTest(null);
+    configureSemanticBackend(null);
+    closeDb();
+  }
 });
