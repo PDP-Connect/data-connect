@@ -419,7 +419,28 @@ fn terminate_unix_browser(
     if !wait_for_child_exit_without_reaping(child, BROWSER_STOP_WAIT) {
         return false;
     }
-    child.wait().is_ok()
+    if child.wait().is_err() {
+        return false;
+    }
+    // SIGKILL is delivered asynchronously, so descendants can outlive the
+    // leader briefly and still hold the profile. The kernel does not reuse a
+    // group id while any member is alive, so polling it after reaping the
+    // leader cannot mistake a new group for this one.
+    wait_for_process_group_exit(process_group, BROWSER_STOP_WAIT)
+}
+
+#[cfg(unix)]
+fn wait_for_process_group_exit(process_group: u32, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if !process_group_exists(process_group) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
 }
 
 pub(crate) fn browser_command(browser: &Path, profile_dir: &Path, headless: bool) -> Command {
