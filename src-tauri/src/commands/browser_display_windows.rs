@@ -116,9 +116,12 @@ impl DisplaySession for HiddenNativeSession {
     }
 
     fn reveal(&mut self) -> Result<(), String> {
-        if let Ok(mut tracker) = self.watch.tracker.lock() {
-            tracker.reveal();
-        }
+        let mut tracker = self
+            .watch
+            .tracker
+            .lock()
+            .map_err(|_| "The concealment state is unavailable")?;
+        tracker.reveal();
         let hidden = self
             .watch
             .hidden
@@ -308,7 +311,8 @@ fn conceal(context: &mut HookContext, windows: &[HWND]) {
         restore_foreground(context);
         return;
     }
-    drop(tracker);
+    // The tracker stays locked while hiding: `reveal` takes it too, so a
+    // reveal can never be undone by a hide decided just before it.
     let mut hidden = context.watch.hidden.lock().ok();
     for window in visible.iter().copied() {
         // SAFETY: hides another process's top-level window; it fails
@@ -321,6 +325,7 @@ fn conceal(context: &mut HookContext, windows: &[HWND]) {
         }
     }
     drop(hidden);
+    drop(tracker);
     restore_foreground(context);
 }
 

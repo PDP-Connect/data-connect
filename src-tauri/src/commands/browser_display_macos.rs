@@ -118,16 +118,21 @@ impl DisplaySession for HiddenNativeSession {
 
     fn reveal(&mut self) -> Result<(), String> {
         let pid = self.pid.ok_or("The browser has not started")?;
-        if let Ok(mut tracker) = self.watch.tracker.lock() {
+        {
+            let mut tracker = self
+                .watch
+                .tracker
+                .lock()
+                .map_err(|_| "The concealment state is unavailable")?;
             tracker.reveal();
+            // unhide shows the browser without activating it. It reports
+            // false even when it works, and a single NSRunningApplication's
+            // state goes stale off the main run loop, so success is
+            // confirmed on fresh lookups below.
+            running_application(pid)
+                .ok_or("The browser is no longer running")?
+                .unhide();
         }
-        // unhide shows the browser without activating it. It reports
-        // false even when it works, and a single NSRunningApplication's
-        // state goes stale off the main run loop, so success is confirmed
-        // on fresh lookups.
-        running_application(pid)
-            .ok_or("The browser is no longer running")?
-            .unhide();
         let deadline = Instant::now() + REVEAL_WAIT;
         while Instant::now() < deadline {
             if running_application(pid).is_some_and(|app| !app.isHidden()) {
@@ -241,15 +246,17 @@ fn watch_and_conceal(pid: libc::pid_t, watch: &Watch) {
             return;
         }
         let conceal = tracker.observe(on_screen_windows(pid));
-        drop(tracker);
         // A fresh lookup each time: one instance's state goes stale off the
         // main run loop.
         let Some(app) = running_application(pid) else {
             return;
         };
+        // Still holding the tracker: `reveal` takes it too, so a reveal can
+        // never be undone by a hide decided just before it.
         if conceal || !app.isHidden() {
             app.hide();
         }
+        drop(tracker);
         thread::sleep(WATCH_PERIOD);
     }
 }
