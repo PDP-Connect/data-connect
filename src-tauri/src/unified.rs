@@ -3336,7 +3336,8 @@ fn console_path_before_restart(app: &AppHandle) -> Option<String> {
             // propagate a shape `console_url_preserving_path` was not
             // proven safe for.
             log::warn!(
-                "console_path_before_restart: console URL path {path_and_query:?} failed validation, falling back to root"
+                "{}", console_restart_path_warning(&url, &path_and_query,
+                    "console_path_before_restart: console URL path failed validation")
             );
             None
         }
@@ -4235,6 +4236,70 @@ fn console_navigation_notice(url: &tauri::Url, decision: &str) -> String {
 }
 
 #[cfg(test)]
+mod restart_log_redaction_tests {
+    use super::*;
+
+    fn assert_warning_redacted(raw: &str) {
+        let url = tauri::Url::parse(
+            "https://USER_SENTINEL:PASSWORD_SENTINEL@example.test:8443//callback?code=SYNTHETIC_QUERY_SECRET#SYNTHETIC_FRAGMENT_SECRET"
+        ).unwrap();
+        for context in [
+            "console_path_before_restart: console URL path failed validation",
+            "console_url_preserving_path: rejected path for restart redirect",
+        ] {
+            let warning = console_restart_path_warning(&url, raw, context);
+            for secret in [
+                "SYNTHETIC_QUERY_SECRET",
+                "SYNTHETIC_FRAGMENT_SECRET",
+                "USER_SENTINEL",
+                "PASSWORD_SENTINEL",
+            ] {
+                assert!(!warning.contains(secret), "warning leaked {secret}");
+            }
+            assert_eq!(
+                warning,
+                format!("{context}: url=https://example.test//callback, falling back to root")
+            );
+        }
+    }
+
+    #[test]
+    fn restart_warnings_omit_query_secrets() {
+        assert_warning_redacted("//callback?code=SYNTHETIC_QUERY_SECRET#SYNTHETIC_FRAGMENT_SECRET");
+    }
+
+    #[test]
+    fn restart_warnings_omit_fragment_without_query() {
+        assert_warning_redacted("//callback#SYNTHETIC_FRAGMENT_SECRET");
+    }
+
+    #[test]
+    fn rejected_absolute_input_omits_userinfo() {
+        assert_warning_redacted("https://USER_SENTINEL:PASSWORD_SENTINEL@example.test//callback?code=SYNTHETIC_QUERY_SECRET#SYNTHETIC_FRAGMENT_SECRET");
+    }
+}
+
+/// Shared pure formatting boundary for restart validation warnings.
+fn console_restart_path_warning(
+    url: &tauri::Url,
+    raw: &str,
+    context: &str,
+) -> String {
+    // The rejected input need not be a valid path. Split both delimiters
+    // before rendering it; never resolve it against the console origin.
+    // log_url_origin shares navigation logging's userinfo-free policy.
+    // An invalid absolute-URL input must not expose its authority either.
+    let parsed = tauri::Url::parse(raw).ok();
+    let path = parsed.as_ref().map(|url| url.path()).unwrap_or_else(|| {
+        raw.split(['?', '#']).next().unwrap_or_default()
+    });
+    format!(
+        "{context}: url={}{path}, falling back to root",
+        log_url_origin(url)
+    )
+}
+
+#[cfg(test)]
 mod navigation_log_redaction_tests {
     use super::*;
 
@@ -4310,7 +4375,8 @@ fn console_url_preserving_path(
     };
     let Some(path_and_query) = ConsolePathAndQuery::parse(raw) else {
         log::warn!(
-            "console_url_preserving_path: rejected path {raw:?} for restart redirect, falling back to root"
+            "{}", console_restart_path_warning(console_origin, raw,
+                "console_url_preserving_path: rejected path for restart redirect")
         );
         return console_origin.clone();
     };
