@@ -332,6 +332,96 @@ test("out-of-scope and nonexistent client selectors have identical error respons
 	}
 });
 
+test("granted blob selectors with missing or dangling authenticated bindings fail closed", async (t) => {
+	const fx = await makeFixture(t);
+	const { blob, bytes } = await seedBlob(fx, INTERNAL_A, "granted-binding-proof");
+	const path = `/v1/blobs/${blob.blob_id}?instance_id=${CLIENT_A}`;
+	const info = clientInfo(fx);
+	const bindings = structuredClone(info.pdpp_instance_bindings) as Array<Record<string, unknown>>;
+	const grantBefore = structuredClone(info.authorization_details);
+	const selected = bindings.filter((binding) => binding.instance_id === CLIENT_A);
+	assert.ok(selected.length > 0, "fixture has authenticated mappings for the selected handle");
+	assert.ok(grantStreams(fx).some((stream) => stream.instance_ids?.includes(CLIENT_A)));
+	const dangling = "cin_pairwise_selected_does_not_exist";
+	const cases = [
+		{ name: "missing", bindings: bindings.filter((binding) => binding.instance_id !== CLIENT_A) },
+		{
+			name: "dangling",
+			bindings: bindings.map((binding) =>
+				binding.instance_id === CLIENT_A ? { ...binding, rs_instance: dangling } : binding),
+		},
+	];
+	for (const scenario of cases) {
+		const valid = await fx.requestRaw(path, `Bearer ${CLIENT_TOKEN}`);
+		assert.equal(valid.status, 200, `${scenario.name}: positive control`);
+		assert.deepEqual(Buffer.from(valid.body), bytes);
+		try {
+			info.pdpp_instance_bindings = scenario.bindings;
+			assert.deepEqual(info.authorization_details, grantBefore, "only the authenticated mapping changes");
+			const reply = await fx.requestRaw(path, `Bearer ${CLIENT_TOKEN}`);
+			assert.equal(reply.status, 403, scenario.name);
+			const text = Buffer.from(reply.body).toString("utf8");
+			const body = JSON.parse(text) as Record<string, unknown>;
+			assert.equal(errorCode({ body }), "grant_invalid", scenario.name);
+			assert.equal(Buffer.from(reply.body).includes(bytes), false, "no blob bytes in error");
+			const wire = text + JSON.stringify([...reply.headers.entries()]);
+			for (const hidden of [INTERNAL_A, INTERNAL_B, INTERNAL_SECOND_SOURCE, dangling, CLIENT_TOKEN]) {
+				assert.equal(wire.includes(hidden), false, `no private value: ${hidden}`);
+			}
+			assert.equal(wire.includes("cin_"), false, "no internal instance identifier");
+			assert.equal(wire.includes("rs_instance"), false, "no private mapping");
+			assert.equal(wire.includes("subject_id"), false, "no private subject field");
+		} finally {
+			info.pdpp_instance_bindings = structuredClone(bindings);
+		}
+		assert.deepEqual(info.authorization_details, grantBefore);
+		const restored = await fx.requestRaw(path, `Bearer ${CLIENT_TOKEN}`);
+		assert.equal(restored.status, 200, `${scenario.name}: fixture restored`);
+		assert.deepEqual(Buffer.from(restored.body), bytes);
+	}
+});
+
+test("owner blob selector with no binding matches an unknown selector without leaking bytes", async (t) => {
+	const fx = await makeFixture(t, { fixedResponseDate: FIXED_RESPONSE_DATE });
+	const { blob, bytes } = await seedBlob(fx, INTERNAL_A, "owner-binding-proof");
+	const path = `/v1/blobs/${blob.blob_id}?instance_id=${OWNER_A}`;
+	const info = ownerInfo(fx);
+	const bindings = structuredClone(info.pdpp_instance_bindings) as Array<Record<string, unknown>>;
+	assert.ok(bindings.some((binding) => binding.instance_id === OWNER_A));
+	const valid = await fx.requestRaw(path, `Bearer ${OWNER_TOKEN}`);
+	assert.equal(valid.status, 200);
+	assert.deepEqual(Buffer.from(valid.body), bytes);
+	try {
+		info.pdpp_instance_bindings = bindings.filter((binding) => binding.instance_id !== OWNER_A);
+		const init = { headers: { "request-id": "req_owner_missing_binding" } };
+		const missing = await fx.requestRaw(path, `Bearer ${OWNER_TOKEN}`, init);
+		await delay(1100);
+		const unknown = await fx.requestRaw(
+			`/v1/blobs/${blob.blob_id}?instance_id=inst_v1_never_bound`,
+			`Bearer ${OWNER_TOKEN}`,
+			init,
+		);
+		assert.equal(missing.status, 404);
+		assert.equal(unknown.status, 404);
+		const text = Buffer.from(missing.body).toString("utf8");
+		assert.equal(errorCode({ body: JSON.parse(text) }), "not_found");
+		assert.deepEqual(Buffer.from(missing.body), Buffer.from(unknown.body));
+		assert.equal(missing.headers.get("Date"), FIXED_RESPONSE_DATE);
+		assert.equal(unknown.headers.get("Date"), FIXED_RESPONSE_DATE);
+		assert.deepEqual([...missing.headers.entries()], [...unknown.headers.entries()]);
+		assert.equal(text.includes(bytes.toString("utf8")), false);
+		const wire = text + JSON.stringify([...missing.headers.entries()]);
+		for (const hidden of [INTERNAL_A, INTERNAL_B, OWNER_TOKEN, "rs_instance", "subject_id"]) {
+			assert.equal(wire.includes(hidden), false);
+		}
+	} finally {
+		info.pdpp_instance_bindings = bindings;
+	}
+	const restored = await fx.requestRaw(path, `Bearer ${OWNER_TOKEN}`);
+	assert.equal(restored.status, 200);
+	assert.deepEqual(Buffer.from(restored.body), bytes);
+});
+
 test("all client and owner bindings are checked before selected-instance lookup", async (t) => {
 	const fx = await makeFixture(t);
 	const clientToken = clientInfo(fx);
