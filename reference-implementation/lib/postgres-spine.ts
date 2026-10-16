@@ -7,7 +7,7 @@
  * Spec: openspec/changes/add-postgres-runtime-storage/
  */
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
 
 import { postgresQuery, withPostgresTransaction } from "../server/postgres-storage.ts";
@@ -16,6 +16,16 @@ import {
   type RunHistorySpineEvent,
   writePostgresRunHistoryForSpineEvent,
 } from "../server/stores/run-history-writer.ts";
+
+/**
+ * Shared by both spine append backends and auth event builders. Keep full
+ * SHA-256 entropy, and never hash an already-normalized audit id again.
+ */
+export function deriveTokenAuditId(tokenId: string): string {
+  return /^tokfp_[A-Za-z0-9_-]{43}$/.test(tokenId)
+    ? tokenId
+    : `tokfp_${createHash("sha256").update(tokenId).digest("base64url")}`;
+}
 
 type SourceKind = "connector" | "provider_native";
 type JsonObject = Record<string, unknown>;
@@ -383,6 +393,8 @@ function normalize(input: PostgresSpineEventInput = {}): NormalizedSpineEvent {
   const actorType = defaultString(input.actor_type, "system");
   const actorId = defaultString(input.actor_id, "system");
   const source = deriveSource(input, actorType, actorId);
+  const tokenId = optionalString(input.token_id);
+  const objectId = defaultString(input.object_id, () => eventId("obj"));
   return {
     actor_id: actorId,
     actor_type: actorType,
@@ -393,7 +405,7 @@ function normalize(input: PostgresSpineEventInput = {}): NormalizedSpineEvent {
     event_type: defaultString(input.event_type, "event"),
     grant_id: optionalString(input.grant_id),
     interaction_id: optionalString(input.interaction_id),
-    object_id: defaultString(input.object_id, () => eventId("obj")),
+    object_id: input.object_type === "token" ? deriveTokenAuditId(objectId) : objectId,
     object_type: defaultString(input.object_type, "object"),
     occurred_at: at,
     recorded_at: nowIso(),
@@ -405,7 +417,7 @@ function normalize(input: PostgresSpineEventInput = {}): NormalizedSpineEvent {
     stream_id: optionalString(input.stream_id),
     subject_id: optionalString(input.subject_id),
     subject_type: optionalString(input.subject_type),
-    token_id: optionalString(input.token_id),
+    token_id: tokenId === null ? null : deriveTokenAuditId(tokenId),
     trace_id: defaultString(input.trace_id, () => eventId("trace")),
     version: defaultString(input.version, "1"),
   };

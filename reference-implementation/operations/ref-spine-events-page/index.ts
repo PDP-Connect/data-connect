@@ -124,10 +124,9 @@ const KIND_TO_ID_KEY = {
 } as const;
 
 /**
- * Live-bearer redaction map. The reference's `spine_events.token_id`
- * column stores the literal opaque bearer (see `auth.js::issueToken`);
- * `token.issued` events also use the bearer string as their
- * `object_id`. `pending_consent` and `owner_device_auth` events use
+ * Defense-in-depth redaction map. New access-token events store one-way
+ * audit fingerprints, but historic rows may still contain literal bearers
+ * in `token_id` or `object_id`. `pending_consent` and `owner_device_auth` events use
  * the live `device_code` as their `object_id` and `request.submitted`
  * carries `user_code` in `data`. All of these are bearer-equivalent
  * and MUST be stripped before any operator-console read leaves the
