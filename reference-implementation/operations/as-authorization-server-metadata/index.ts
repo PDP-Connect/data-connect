@@ -25,6 +25,8 @@ export interface AsAuthorizationServerMetadataInput {
   readonly dynamicClientRegistrationEnabled: boolean;
   readonly issuer: string;
   readonly preRegisteredPublicClients?: readonly AsAuthorizationServerPublicClient[];
+  /** Experimental AI-training prototype. Absent or empty: nothing is advertised. */
+  readonly processingPermissionsSupported?: readonly string[];
 }
 
 export interface AsAuthorizationServerPublicClient {
@@ -46,6 +48,9 @@ export interface AsAuthorizationServerMetadataBuilderInput {
   readonly introspectionEndpoint: string;
   readonly issuer: string;
   readonly preRegisteredPublicClients: readonly AsAuthorizationServerPublicClient[];
+  readonly processingLeaseEndpoint?: string;
+  readonly processingLeaseJwksUri?: string;
+  readonly processingPermissionsSupported?: readonly string[];
   readonly providerConnectCapabilities: readonly string[];
   readonly pushedAuthorizationRequestEndpoint: string;
   readonly registrationEndpoint: string | null;
@@ -64,7 +69,21 @@ export function executeAsAuthorizationServerMetadata(
   input: AsAuthorizationServerMetadataInput,
   deps: AsAuthorizationServerMetadataDependencies
 ): unknown {
-  const { issuer, dynamicClientRegistrationEnabled, preRegisteredPublicClients = [], cimdEnabled = false } = input;
+  const {
+    issuer,
+    dynamicClientRegistrationEnabled,
+    preRegisteredPublicClients = [],
+    cimdEnabled = false,
+    processingPermissionsSupported = [],
+  } = input;
+  const processingLease =
+    processingPermissionsSupported.length > 0
+      ? {
+          processingLeaseEndpoint: `${issuer}/oauth/processing-lease`,
+          processingLeaseJwksUri: `${issuer}/oauth/processing-lease/jwks`,
+          processingPermissionsSupported,
+        }
+      : {};
   const registrationModesBase = dynamicClientRegistrationEnabled
     ? ["dynamic", "pre_registered_public"]
     : ["pre_registered_public"];
@@ -98,6 +117,7 @@ export function executeAsAuthorizationServerMetadata(
     introspectionEndpoint: `${issuer}/introspect`,
     issuer,
     preRegisteredPublicClients,
+    ...processingLease,
     providerConnectCapabilities: ["owner_self_export", "cli_device_connect", "third_party_client_connect"],
     pushedAuthorizationRequestEndpoint: `${issuer}/oauth/par`,
     registrationEndpoint: dynamicClientRegistrationEnabled ? `${issuer}/oauth/register` : null,

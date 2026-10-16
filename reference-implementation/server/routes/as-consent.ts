@@ -752,6 +752,10 @@ export function mountAsConsent(app: AppLike, ctx: MountAsConsentContext): void {
           ai_training_consented: req.body?.ai_training_consented,
           baseUrl: resolveBaseUrlForRequest(req),
           finalizeReview: true,
+          // Experimental AI-training prototype; ignored unless the runtime is installed.
+          ...(req.body?.processing_permissions_approved === undefined
+            ? {}
+            : { processing_permissions_approved: req.body.processing_permissions_approved }),
           subjectId,
           ...batchSelection,
         });
