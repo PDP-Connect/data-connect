@@ -858,8 +858,14 @@ export class TrainingAuthorityStore {
   }
 
   jwks(): { keys: OkpPublicJwk[] } {
-    // The projection may predate a revocation another node journaled.
-    this.#journal.refresh();
+    // The projection may predate keys, leases or revocations another node
+    // journaled. Replay first; if the store is busy, serve the projection
+    // and still drop every journaled revocation.
+    try {
+      this.sync();
+    } catch {
+      this.#journal.refresh();
+    }
     const rows = this.#store
       .prepare(
         `SELECT kid, public_jwk_json FROM training_lease_signing_keys

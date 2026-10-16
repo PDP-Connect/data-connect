@@ -847,6 +847,33 @@ describe("L9 signing keys", () => {
     nodeB.close();
   });
 
+  it("a node publishes a key another node created and signed with, without an explicit sync", () => {
+    const paths = tempPaths();
+    const clock = { now: T0 };
+    const nodeA = openNode(paths, clock, { nodeId: "node-a" });
+    seed(nodeA);
+    const first = nodeA.issueLease({ grantId: "grt_1", clientId: "client_1" });
+    assert.ok(first.ok);
+    if (!first.ok) return;
+    const copyPath = join(paths.dir, "copy.sqlite");
+    backup(paths.storePath, copyPath);
+    const nodeB = openNode(
+      { storePath: copyPath, journalPath: paths.journalPath },
+      clock,
+      { nodeId: "node-b" },
+    );
+    nodeB.revokeSigningKey(first.kid);
+    clock.now = T0 + MIN;
+    const fromB = nodeB.issueLease({ grantId: "grt_1", clientId: "client_1" });
+    assert.ok(fromB.ok);
+    if (!fromB.ok) return;
+    const kids = nodeA.jwks().keys.map((k) => k.kid);
+    assert.ok(kids.includes(fromB.kid), "node A's JWKS verifies node B's live lease");
+    assert.ok(!kids.includes(first.kid), "the revoked key stays out");
+    nodeA.close();
+    nodeB.close();
+  });
+
   it("a worker that saw the retired key leave the JWKS accepts the lease issued after a restore", () => {
     const paths = tempPaths();
     const sim = new SimClock(T0);
