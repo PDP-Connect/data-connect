@@ -589,8 +589,8 @@ const DISCOVERY_FIELD_SUMMARY_LIMIT = 16;
 const DISCOVERY_CONNECTION_SUMMARY_LIMIT = 8;
 const FIELD_CAPABILITY_FLAG_LEGEND = {
   t: "declared type",
-  eq: "exact filter supported",
-  r: "range filter operators",
+  eq: "exact filter supported (owner tokens only; app tokens get 400)",
+  r: "range filter operators (owner tokens only; app tokens get 400)",
   lex: "lexical search field",
   sem: "semantic search field",
   a: "aggregation capabilities",
@@ -2301,7 +2301,7 @@ function summarizeSchemaDiscovery(
 }
 
 function formatFieldCapabilityLegend(): string {
-  return "field_capability_legend t=declared_type eq=exact_filter r=range_filter_ops lex=lexical_search sem=semantic_search a=aggregation_caps g=false=not_granted";
+  return "field_capability_legend t=declared_type eq=exact_filter(owner_token_only) r=range_filter_ops(owner_token_only) lex=lexical_search sem=semantic_search a=aggregation_caps g=false=not_granted";
 }
 
 function formatSchemaStreamIndex(streamRefs: StreamRef[]): string[] {
