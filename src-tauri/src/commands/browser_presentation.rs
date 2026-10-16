@@ -11,9 +11,8 @@
 use serde::{Deserialize, Serialize};
 
 pub(crate) const PRESENTATION_POLICY_VERSION: u64 = 1;
-/// Overrides the presentation the desktop host selects for its browsers:
-/// `desktop` keeps the legacy visible window, `private-xvfb` requires the
-/// private display and fails launches when it is unavailable.
+/// Overrides the presentation the desktop host selects for its browsers;
+/// see `select_policy`.
 pub(crate) const BROWSER_DISPLAY_ENV: &str = "DATACONNECT_BROWSER_DISPLAY";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -32,6 +31,18 @@ pub(crate) enum DisplayBackend {
 }
 
 impl DisplayBackend {
+    const ALL: [Self; 3] = [
+        Self::InheritedHost,
+        Self::PrivateXvfb,
+        Self::ExternallyOwned,
+    ];
+
+    pub(crate) fn from_name(name: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|backend| backend.as_str() == name)
+    }
+
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::InheritedHost => "inherited-host",
@@ -187,38 +198,53 @@ impl PresentationPolicy {
     pub(crate) fn headless(&self) -> bool {
         self.engine_mode == EngineMode::Headless
     }
+
+    /// The policy the desktop host executes on `backend`, if it executes
+    /// one there at all.
+    pub(crate) fn for_backend(backend: DisplayBackend) -> Option<Self> {
+        match backend {
+            DisplayBackend::PrivateXvfb => Some(Self::PRIVATE_XVFB),
+            DisplayBackend::InheritedHost | DisplayBackend::ExternallyOwned => None,
+        }
+    }
 }
 
-/// What the desktop host asks of its own browsers when the owner has not
-/// overridden it. Only Linux has a private display backend in v1; it is
-/// selected when the backend reports it can start. Everywhere else, and when
-/// the legacy `PDPP_BROWSER_HEADLESS=1` is set, the host advertises no
-/// policy and launches exactly as before.
-pub(crate) fn deployment_policy(
+/// What the desktop host asks of its own browsers. `installed` lists the
+/// display backends whose software is present, most preferred first; the
+/// first one that the host can execute becomes the default. An owner
+/// override always wins: `desktop` keeps the legacy visible window, and a
+/// named backend is selected even when it is not installed, so its launches
+/// fail instead of showing a window. With no override, an absent backend
+/// leaves the legacy visible window, as does the legacy
+/// `PDPP_BROWSER_HEADLESS=1`. None means no policy is advertised and the
+/// host launches exactly as before.
+pub(crate) fn select_policy(
     display_override: Option<&str>,
     legacy_headless: bool,
-    private_xvfb_available: bool,
+    installed: &[DisplayBackend],
 ) -> Result<Option<PresentationPolicy>, String> {
     match display_override
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
         Some("desktop") => Ok(None),
-        Some("private-xvfb") => {
-            if legacy_headless {
+        Some(name) => {
+            let policy = DisplayBackend::from_name(name)
+                .and_then(PresentationPolicy::for_backend)
+                .ok_or_else(|| {
+                    format!("{BROWSER_DISPLAY_ENV} must be desktop or private-xvfb, not {name:?}")
+                })?;
+            if legacy_headless && !policy.headless() {
                 return Err(format!(
-                    "{BROWSER_DISPLAY_ENV}=private-xvfb conflicts with PDPP_BROWSER_HEADLESS=1"
+                    "{BROWSER_DISPLAY_ENV}={name} conflicts with PDPP_BROWSER_HEADLESS=1"
                 ));
             }
-            // Selected even when Xvfb is missing: the launch then fails with
-            // browser_display_unavailable instead of showing a window.
-            Ok(Some(PresentationPolicy::PRIVATE_XVFB))
+            Ok(Some(policy))
         }
-        Some(other) => Err(format!(
-            "{BROWSER_DISPLAY_ENV} must be desktop or private-xvfb, not {other:?}"
-        )),
-        None if legacy_headless || !private_xvfb_available => Ok(None),
-        None => Ok(Some(PresentationPolicy::PRIVATE_XVFB)),
+        None if legacy_headless => Ok(None),
+        None => Ok(installed
+            .iter()
+            .find_map(|backend| PresentationPolicy::for_backend(*backend))),
     }
 }
 
@@ -275,22 +301,38 @@ mod tests {
     }
 
     #[test]
-    fn the_desktop_policy_prefers_private_xvfb_on_linux_and_keeps_legacy_otherwise() {
+    fn selection_prefers_the_first_installed_backend_and_honors_the_override() {
+        let xvfb = [DisplayBackend::PrivateXvfb];
         assert_eq!(
-            deployment_policy(None, false, true),
+            select_policy(None, false, &xvfb),
             Ok(Some(PresentationPolicy::PRIVATE_XVFB))
         );
-        assert_eq!(deployment_policy(None, false, false), Ok(None));
-        assert_eq!(deployment_policy(None, true, true), Ok(None));
-        assert_eq!(deployment_policy(Some("desktop"), false, true), Ok(None));
-        assert_eq!(deployment_policy(Some(" "), false, false), Ok(None));
-        // An explicit request is honored even without Xvfb, so the launch
-        // fails visibly instead of falling back to the owner's desktop.
+        // Automatic selection without an installed backend keeps the legacy
+        // visible window; only an explicit request fails closed.
+        assert_eq!(select_policy(None, false, &[]), Ok(None));
+        assert_eq!(select_policy(None, true, &xvfb), Ok(None));
+        assert_eq!(select_policy(Some("desktop"), false, &xvfb), Ok(None));
+        assert_eq!(select_policy(Some(" "), false, &[]), Ok(None));
+        // A backend the host has no policy for is not a default.
         assert_eq!(
-            deployment_policy(Some("private-xvfb"), false, false),
+            select_policy(None, false, &[DisplayBackend::InheritedHost]),
+            Ok(None)
+        );
+        assert_eq!(
+            select_policy(
+                None,
+                false,
+                &[DisplayBackend::InheritedHost, DisplayBackend::PrivateXvfb]
+            ),
             Ok(Some(PresentationPolicy::PRIVATE_XVFB))
         );
-        assert!(deployment_policy(Some("private-xvfb"), true, true).is_err());
-        assert!(deployment_policy(Some("xvfb"), false, true).is_err());
+        assert_eq!(
+            select_policy(Some("private-xvfb"), false, &[]),
+            Ok(Some(PresentationPolicy::PRIVATE_XVFB))
+        );
+        assert!(select_policy(Some("private-xvfb"), true, &xvfb).is_err());
+        assert!(select_policy(Some("xvfb"), false, &xvfb).is_err());
+        assert!(select_policy(Some("inherited-host"), false, &xvfb).is_err());
+        assert!(select_policy(Some("externally-owned"), false, &xvfb).is_err());
     }
 }

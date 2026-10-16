@@ -13,6 +13,7 @@
 
 use super::browser_presentation::DisplayBackend;
 use std::sync::Arc;
+use std::time::Instant;
 
 /// How the browser must be launched to render on a display.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -39,8 +40,9 @@ pub(crate) trait DisplaySession: Send {
 pub(crate) trait DisplayProvider: Send + Sync {
     fn backend(&self) -> DisplayBackend;
     /// Start a display and prove it accepts an authenticated client before
-    /// returning. Never falls back to another display.
-    fn start(&self) -> Result<Box<dyn DisplaySession>, String>;
+    /// returning, giving up at `deadline`. Never falls back to another
+    /// display, and leaves nothing running when it fails.
+    fn start(&self, deadline: Instant) -> Result<Box<dyn DisplaySession>, String>;
 }
 
 /// The display providers the host can use, keyed by backend.
@@ -59,12 +61,19 @@ impl DisplayProviders {
         self.0.iter().find(|provider| provider.backend() == backend)
     }
 
-    /// The providers available on this machine. On Linux that is a private
-    /// Xvfb when the `Xvfb` executable is installed.
+    /// The backends whose software is installed, most preferred first.
+    /// Installed is not proven startable: a display can still fail to start,
+    /// and that launch then fails rather than falling back.
+    pub(crate) fn installed_backends(&self) -> Vec<DisplayBackend> {
+        self.0.iter().map(|provider| provider.backend()).collect()
+    }
+
+    /// The providers whose software is installed on this machine. On Linux
+    /// that is a private Xvfb when the `Xvfb` executable is found.
     pub(crate) fn discover(runtime_dir: &std::path::Path) -> Self {
         #[cfg(target_os = "linux")]
         {
-            if let Some(provider) = xvfb::XvfbProvider::discover(runtime_dir.to_path_buf()) {
+            if let Some(provider) = xvfb::XvfbProvider::find(runtime_dir.to_path_buf()) {
                 return Self::default().with(Arc::new(provider));
             }
             log::info!(
@@ -112,16 +121,17 @@ pub(crate) mod xvfb {
     }
 
     impl XvfbProvider {
-        /// Find `Xvfb` on PATH (or /usr/bin) and prepare the private runtime
-        /// directory. Session directories left by an earlier process are
-        /// removed: their displays exit on their own once their last client
-        /// is gone, because each one runs with `-terminate`.
-        pub(crate) fn discover(runtime_dir: PathBuf) -> Option<Self> {
+        /// Find `Xvfb` on PATH (or /usr/bin). See
+        /// `removing_stale_sessions` for the effect on `runtime_dir`.
+        pub(crate) fn find(runtime_dir: PathBuf) -> Option<Self> {
             let binary = find_executable("Xvfb")?;
-            Some(Self::new(binary, runtime_dir))
+            Some(Self::removing_stale_sessions(binary, runtime_dir))
         }
 
-        pub(crate) fn new(binary: PathBuf, runtime_dir: PathBuf) -> Self {
+        /// Session directories left in `runtime_dir` by an earlier process
+        /// are deleted. Their displays exit on their own once their last
+        /// client is gone, because each one runs with `-terminate`.
+        pub(crate) fn removing_stale_sessions(binary: PathBuf, runtime_dir: PathBuf) -> Self {
             if let Ok(entries) = fs::read_dir(&runtime_dir) {
                 for entry in entries.flatten() {
                     let _ = fs::remove_dir_all(entry.path());
@@ -139,8 +149,8 @@ pub(crate) mod xvfb {
             DisplayBackend::PrivateXvfb
         }
 
-        fn start(&self) -> Result<Box<dyn DisplaySession>, String> {
-            let session = XvfbSession::start(&self.binary, &self.runtime_dir)?;
+        fn start(&self, deadline: Instant) -> Result<Box<dyn DisplaySession>, String> {
+            let session = XvfbSession::start(&self.binary, &self.runtime_dir, deadline)?;
             Ok(Box::new(session))
         }
     }
@@ -148,7 +158,11 @@ pub(crate) mod xvfb {
     impl XvfbProvider {
         #[cfg(test)]
         pub(crate) fn start_session(&self) -> Result<XvfbSession, String> {
-            XvfbSession::start(&self.binary, &self.runtime_dir)
+            XvfbSession::start(
+                &self.binary,
+                &self.runtime_dir,
+                Instant::now() + DISPLAY_START_TIMEOUT,
+            )
         }
     }
 
@@ -167,7 +181,7 @@ pub(crate) mod xvfb {
     }
 
     impl XvfbSession {
-        fn start(binary: &Path, runtime_dir: &Path) -> Result<Self, String> {
+        fn start(binary: &Path, runtime_dir: &Path, deadline: Instant) -> Result<Self, String> {
             fs::DirBuilder::new()
                 .recursive(true)
                 .mode(0o700)
@@ -178,7 +192,10 @@ pub(crate) mod xvfb {
                 .mode(0o700)
                 .create(&dir)
                 .map_err(|error| format!("Failed to create the display directory: {error}"))?;
-            match Self::start_in(binary, dir.clone()) {
+            // An Xvfb that is slow to start is a fault, so the display gets
+            // its own bound even when the launch has time to spare.
+            let deadline = deadline.min(Instant::now() + DISPLAY_START_TIMEOUT);
+            match Self::start_in(binary, dir.clone(), deadline) {
                 Ok(session) => Ok(session),
                 Err(error) => {
                     let _ = fs::remove_dir_all(&dir);
@@ -187,7 +204,7 @@ pub(crate) mod xvfb {
             }
         }
 
-        fn start_in(binary: &Path, dir: PathBuf) -> Result<Self, String> {
+        fn start_in(binary: &Path, dir: PathBuf, deadline: Instant) -> Result<Self, String> {
             let mut cookie = [0_u8; 16];
             getrandom::fill(&mut cookie)
                 .map_err(|error| format!("Failed to generate the display cookie: {error}"))?;
@@ -228,7 +245,7 @@ pub(crate) mod xvfb {
                 .map_err(|error| format!("Failed to start Xvfb: {error}"))?;
             drop(write_end);
 
-            let display = match read_display_number(&read_end, &mut child) {
+            let display = match read_display_number(&read_end, &mut child, deadline) {
                 Ok(display) => display,
                 Err(error) => {
                     let _ = super::super::pdpp_browser::terminate_browser(&mut child);
@@ -364,8 +381,11 @@ pub(crate) mod xvfb {
 
     /// Wait for Xvfb to write its display number. It does so only once it
     /// accepts connections.
-    fn read_display_number(read_end: &OwnedFd, child: &mut Child) -> Result<u32, String> {
-        let deadline = Instant::now() + DISPLAY_START_TIMEOUT;
+    fn read_display_number(
+        read_end: &OwnedFd,
+        child: &mut Child,
+        deadline: Instant,
+    ) -> Result<u32, String> {
         let mut output = Vec::new();
         loop {
             if let Some(end) = output.iter().position(|byte| *byte == b'\n') {
@@ -503,7 +523,7 @@ mod tests {
             self.0
         }
 
-        fn start(&self) -> Result<Box<dyn DisplaySession>, String> {
+        fn start(&self, _deadline: Instant) -> Result<Box<dyn DisplaySession>, String> {
             Err("not startable".into())
         }
     }
@@ -557,8 +577,12 @@ mod tests {
         fn a_display_that_exits_before_reporting_fails_and_leaves_no_files() {
             let temp = tempfile::tempdir().expect("tempdir");
             let runtime = temp.path().join("displays");
-            let provider = XvfbProvider::new(fake_xvfb(&temp, "exit 1"), runtime.clone());
-            let error = provider.start().err().expect("start must fail");
+            let provider =
+                XvfbProvider::removing_stale_sessions(fake_xvfb(&temp, "exit 1"), runtime.clone());
+            let error = provider
+                .start(std::time::Instant::now() + std::time::Duration::from_secs(5))
+                .err()
+                .expect("start must fail");
             assert!(error.contains("exited before reporting"), "{error}");
             assert_eq!(std::fs::read_dir(&runtime).expect("runtime dir").count(), 0);
         }
@@ -568,7 +592,7 @@ mod tests {
             let temp = tempfile::tempdir().expect("tempdir");
             let runtime = temp.path().join("displays");
             let pid_file = temp.path().join("pid");
-            let provider = XvfbProvider::new(
+            let provider = XvfbProvider::removing_stale_sessions(
                 fake_xvfb(
                     &temp,
                     &format!("echo $$ > {}\nexec sleep 30", pid_file.display()),
@@ -576,7 +600,10 @@ mod tests {
                 runtime.clone(),
             );
             let started = std::time::Instant::now();
-            let error = provider.start().err().expect("start must fail");
+            let error = provider
+                .start(std::time::Instant::now() + std::time::Duration::from_secs(5))
+                .err()
+                .expect("start must fail");
             assert!(error.contains("Timed out"), "{error}");
             assert!(started.elapsed() < std::time::Duration::from_secs(9));
             let pid = std::fs::read_to_string(&pid_file)
@@ -596,11 +623,14 @@ mod tests {
             let runtime = temp.path().join("displays");
             // Reports a display number on the -displayfd descriptor ($2) but
             // never serves it.
-            let provider = XvfbProvider::new(
+            let provider = XvfbProvider::removing_stale_sessions(
                 fake_xvfb(&temp, "echo 65000 >&\"$2\"\nexec sleep 30"),
                 runtime.clone(),
             );
-            let error = provider.start().err().expect("start must fail");
+            let error = provider
+                .start(std::time::Instant::now() + std::time::Duration::from_secs(5))
+                .err()
+                .expect("start must fail");
             assert!(error.contains("private display"), "{error}");
             assert_eq!(std::fs::read_dir(&runtime).expect("runtime dir").count(), 0);
         }
@@ -610,7 +640,8 @@ mod tests {
             let temp = tempfile::tempdir().expect("tempdir");
             let runtime = temp.path().join("displays");
             std::fs::create_dir_all(runtime.join("stale")).expect("stale dir");
-            let _provider = XvfbProvider::new(temp.path().join("Xvfb"), runtime.clone());
+            let _provider =
+                XvfbProvider::removing_stale_sessions(temp.path().join("Xvfb"), runtime.clone());
             assert!(!runtime.join("stale").exists());
         }
 
@@ -623,7 +654,7 @@ mod tests {
                 .into_iter()
                 .map(std::path::PathBuf::from)
                 .find(|path| path.exists())
-                .map(|binary| XvfbProvider::new(binary, temp))
+                .map(|binary| XvfbProvider::removing_stale_sessions(binary, temp))
         }
 
         /// Runs only where Xvfb is installed (CI installs it for the WebKitGTK

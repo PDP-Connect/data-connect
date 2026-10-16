@@ -8,22 +8,25 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{Read, Write};
 #[cfg(test)]
 use std::net::SocketAddr;
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
 use uuid::Uuid;
 
-use super::browser_display::{BrowserDisplayLaunch, DisplayProviders, DisplaySession};
+use super::browser_display::DisplayProviders;
 use super::browser_presentation::{
-    deployment_policy, DisplayBackend, PresentationPolicy, BROWSER_DISPLAY_ENV,
+    select_policy, DisplayBackend, PresentationPolicy, BROWSER_DISPLAY_ENV,
+};
+use super::owned_browser::{
+    BrowserLaunchError, BrowserLauncher, LaunchFailure, LaunchSpec, OwnedBrowser,
+    SURFACE_START_TIMEOUT,
 };
 
 const BROWSER_SURFACE_PATH: &str = "/browser-surface/leases";
@@ -33,22 +36,19 @@ const BROWSER_SURFACE_PATH: &str = "/browser-surface/leases";
 /// RI sends it only when no other connection of the connector exists.
 const BROWSER_PROFILE_PATH: &str = "/browser-surface/profiles/";
 const MAX_HTTP_REQUEST_BYTES: usize = 64 * 1024;
-const BROWSER_START_TIMEOUT: Duration = Duration::from_secs(10);
-const DEVTOOLS_PROBE_TIMEOUT: Duration = Duration::from_millis(300);
 const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(5);
-/// Bytes of browser stderr kept for diagnosing a failed launch.
-const STDERR_TAIL_BYTES: usize = 8 * 1024;
-/// Chromium prints this when it cannot create its sandbox, for example when
-/// AppArmor restricts unprivileged user namespaces (Ubuntu 23.10+).
-const NO_USABLE_SANDBOX_SIGNATURE: &str = "No usable sandbox!";
-pub(crate) const BROWSER_SANDBOX_UNAVAILABLE: &str = "browser_sandbox_unavailable";
-const SURFACE_START_FAILED: &str = "surface_start_failed";
+/// The acquire budget when the RI names none. It covers waiting for an
+/// earlier launch, starting the display and the browser's readiness. A cold
+/// first browser start on macOS has been measured at 5.9 s.
+const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Cap on an RI-requested budget, so one request cannot hold the launch
+/// queue indefinitely.
+const MAX_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(120);
 const BROWSER_PROFILE_IN_USE: &str = "browser_profile_in_use";
 const BROWSER_PROFILE_IN_USE_MESSAGE: &str =
     "A DataConnect browser window for this account is still open. Close it and try again.";
 const INVALID_PRESENTATION_POLICY: &str = "invalid_presentation_policy";
 const BROWSER_PRESENTATION_UNSUPPORTED: &str = "browser_presentation_unsupported";
-const BROWSER_DISPLAY_UNAVAILABLE: &str = "browser_display_unavailable";
 /// The policy the host advertises to the RI, which sends it back with each
 /// acquire.
 pub(crate) const PRESENTATION_POLICY_ENV: &str = "PDPP_BROWSER_PRESENTATION_POLICY";
@@ -71,6 +71,11 @@ struct AcquireRequest {
     /// `headless` alone decides the engine mode on the inherited display.
     #[serde(default)]
     presentation_policy: Option<serde_json::Value>,
+    /// The RI's end-to-end budget for this acquire. The RI waits a little
+    /// longer than this for the response, so the host always answers first
+    /// and never leaves a launched browser that nobody will lease.
+    #[serde(default)]
+    acquire_timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -112,79 +117,12 @@ struct ErrorResponse<'a> {
     message: Option<String>,
 }
 
-/// A browser launch failure with a stable, machine-readable code.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct BrowserLaunchError {
-    pub code: &'static str,
-    pub message: String,
+fn profile_in_use() -> BrowserLaunchError {
+    BrowserLaunchError::new(BROWSER_PROFILE_IN_USE, BROWSER_PROFILE_IN_USE_MESSAGE)
 }
 
-impl BrowserLaunchError {
-    fn start_failed(message: impl Into<String>) -> Self {
-        Self {
-            code: SURFACE_START_FAILED,
-            message: message.into(),
-        }
-    }
-
-    fn sandbox_unavailable() -> Self {
-        Self {
-            code: BROWSER_SANDBOX_UNAVAILABLE,
-            message: sandbox_unavailable_message(),
-        }
-    }
-
-    fn profile_in_use() -> Self {
-        Self {
-            code: BROWSER_PROFILE_IN_USE,
-            message: BROWSER_PROFILE_IN_USE_MESSAGE.into(),
-        }
-    }
-
-    fn invalid_presentation(message: impl Into<String>) -> Self {
-        Self {
-            code: INVALID_PRESENTATION_POLICY,
-            message: message.into(),
-        }
-    }
-
-    fn presentation_unsupported(message: impl Into<String>) -> Self {
-        Self {
-            code: BROWSER_PRESENTATION_UNSUPPORTED,
-            message: message.into(),
-        }
-    }
-
-    fn display_unavailable(message: impl Into<String>) -> Self {
-        Self {
-            code: BROWSER_DISPLAY_UNAVAILABLE,
-            message: message.into(),
-        }
-    }
-
-    pub(crate) fn is_sandbox_unavailable(&self) -> bool {
-        self.code == BROWSER_SANDBOX_UNAVAILABLE
-    }
-}
-
-impl From<String> for BrowserLaunchError {
-    fn from(message: String) -> Self {
-        Self::start_failed(message)
-    }
-}
-
-impl From<&str> for BrowserLaunchError {
-    fn from(message: &str) -> Self {
-        Self::start_failed(message)
-    }
-}
-
-pub(crate) fn sandbox_unavailable_message() -> String {
-    "This Linux distribution blocks the sandbox of the browser that DataConnect \
-     bundles or downloads. Install Google Chrome or Chromium from a .deb package; \
-     DataConnect uses the first of /usr/bin/google-chrome, \
-     /usr/bin/google-chrome-stable, /usr/bin/chromium or /usr/bin/chromium-browser."
-        .into()
+fn invalid_presentation(message: impl Into<String>) -> BrowserLaunchError {
+    BrowserLaunchError::new(INVALID_PRESENTATION_POLICY, message)
 }
 
 struct BrowserSurfaceLease {
@@ -195,33 +133,6 @@ struct BrowserSurfaceLease {
     presentation: Option<PresentationPolicy>,
     response: AcquireResponse,
     browser_pid: u32,
-}
-
-/// A host-launched browser and the display it renders on. The display is
-/// stopped only after the browser, and the entry is forgotten only once both
-/// stops are confirmed, so an uncertain cleanup blocks reuse of the profile.
-struct TrackedBrowser {
-    child: Child,
-    browser_stopped: bool,
-    display: Option<Box<dyn DisplaySession>>,
-}
-
-impl TrackedBrowser {
-    fn terminate(&mut self) -> bool {
-        if !self.browser_stopped {
-            if !super::pdpp_browser::terminate_browser(&mut self.child) {
-                return false;
-            }
-            self.browser_stopped = true;
-        }
-        if let Some(display) = self.display.as_mut() {
-            if !display.terminate() {
-                return false;
-            }
-            self.display = None;
-        }
-        true
-    }
 }
 
 #[derive(Debug)]
@@ -235,11 +146,13 @@ struct HostState {
     profile_root: PathBuf,
     resource_dir: Option<PathBuf>,
     browser_path_override: Option<PathBuf>,
-    display_providers: DisplayProviders,
+    launcher: BrowserLauncher,
     leases: Mutex<HashMap<String, BrowserSurfaceLease>>,
-    /// Keep process handles beyond a lease if termination fails, so a later
-    /// acquire can safely retry cleanup for the exact profile and process.
-    browsers: Mutex<HashMap<u32, TrackedBrowser>>,
+    /// Every browser this host launched whose stop is not yet confirmed,
+    /// leased or not. A browser leaves this list only when its stop is
+    /// confirmed, so an uncertain cleanup blocks reuse of its profile and is
+    /// retried at the next acquire and at shutdown.
+    browsers: Mutex<Vec<OwnedBrowser>>,
     /// Prevent a late POST from recreating a lease after its run was released.
     cancelled_runs: Mutex<HashSet<String>>,
     closed: AtomicBool,
@@ -256,15 +169,22 @@ impl HostState {
             profile_root,
             resource_dir,
             browser_path_override,
-            display_providers,
+            launcher: BrowserLauncher::new(display_providers),
             leases: Mutex::new(HashMap::new()),
-            browsers: Mutex::new(HashMap::new()),
+            browsers: Mutex::new(Vec::new()),
             cancelled_runs: Mutex::new(HashSet::new()),
             closed: AtomicBool::new(false),
         }
     }
 
     fn acquire(&self, request: AcquireRequest) -> Result<AcquireResponse, BrowserLaunchError> {
+        let started = Instant::now();
+        let deadline = started
+            + request
+                .acquire_timeout_ms
+                .map(Duration::from_millis)
+                .unwrap_or(DEFAULT_ACQUIRE_TIMEOUT)
+                .min(MAX_ACQUIRE_TIMEOUT);
         validate_request_field("run_id", &request.run_id)?;
         validate_request_field("connector_id", &request.connector_id)?;
         validate_request_field("connection_id", &request.connection_id)?;
@@ -273,33 +193,26 @@ impl HostState {
             .as_ref()
             .map(PresentationPolicy::parse)
             .transpose()
-            .map_err(|error| {
-                BrowserLaunchError::invalid_presentation(format!(
-                    "{}: {}",
-                    error.code, error.message
-                ))
-            })?;
+            .map_err(|error| invalid_presentation(format!("{}: {}", error.code, error.message)))?;
         if let Some(policy) = presentation {
             if policy.headless() != request.headless {
-                return Err(BrowserLaunchError::invalid_presentation(
+                return Err(invalid_presentation(
                     "headless conflicts with the presentation policy engine_mode",
                 ));
             }
             if policy.display_backend == DisplayBackend::ExternallyOwned {
-                return Err(BrowserLaunchError::presentation_unsupported(
+                return Err(BrowserLaunchError::new(
+                    BROWSER_PRESENTATION_UNSUPPORTED,
                     "The desktop host owns its displays; externally-owned is for attached browsers",
                 ));
             }
         }
-        let started = Instant::now();
 
         // Admission and launch are serialized. A connection has exactly one
         // persistent profile, so a second launch must not race the first
         // launch or reuse its profile while the first browser is still alive.
-        let mut leases = self
-            .leases
-            .lock()
-            .map_err(|_| "Browser surface lease state is unavailable".to_string())?;
+        // Time spent waiting here counts against this acquire's deadline.
+        let mut leases = lock_before(&self.leases, deadline)?;
         if self.closed.load(Ordering::Acquire) {
             return Err("Browser surface host is shutting down".into());
         }
@@ -325,67 +238,49 @@ impl HostState {
             lease.connector_id == request.connector_id
                 && lease.connection_id == request.connection_id
         }) {
-            return Err(BrowserLaunchError::profile_in_use());
+            return Err(profile_in_use());
         }
 
+        self.retry_unconfirmed_stops(&leases);
         let profile_dir = self.profile_dir(
             &request.connector_id,
             &request.connection_id,
             request.migrate_connector_profile,
         )?;
-        self.recover_or_refuse_profile(&profile_dir, &leases)?;
-        let _ = fs::remove_file(profile_dir.join("DevToolsActivePort"));
+        refuse_profile_held_by_live_process(&profile_dir)?;
 
         let browser = self.browser_path().ok_or_else(|| {
             BrowserLaunchError::start_failed(
                 "No system, downloaded, or bundled Chromium browser is available for host browser surfaces",
             )
         })?;
-        // The display starts and passes its health check before the browser
-        // exists. A display failure ends the launch: the browser never falls
-        // back onto the owner's desktop.
         let backend = presentation
             .map(|policy| policy.display_backend)
             .unwrap_or(DisplayBackend::InheritedHost);
-        let mut display = match backend {
-            DisplayBackend::InheritedHost => None,
-            backend => {
-                let provider = self.display_providers.get(backend).ok_or_else(|| {
-                    BrowserLaunchError::display_unavailable(format!(
-                        "No {} display backend is available on this computer",
-                        backend.as_str()
-                    ))
-                })?;
-                Some(
-                    provider
-                        .start()
-                        .map_err(BrowserLaunchError::display_unavailable)?,
-                )
-            }
-        };
-        let display_ready = display.as_ref().map(|_| elapsed_ms(started));
-        let launched = match launch_browser(
-            &browser,
-            &profile_dir,
-            request.headless,
-            display.as_ref().map(|display| display.browser_launch()),
-        ) {
+        let launched = self.launcher.launch(&LaunchSpec {
+            executable: &browser,
+            profile_dir: &profile_dir,
+            headless: request.headless,
+            display_backend: backend,
+            deadline,
+        });
+        let (owned, readiness) = match launched {
             Ok(launched) => launched,
-            Err(error) => {
-                if let Some(display) = display.as_mut() {
-                    if !display.terminate() {
-                        log::warn!("Private browser display did not stop after a failed launch");
-                    }
+            Err(LaunchFailure { error, unstopped }) => {
+                if let Some(unstopped) = unstopped {
+                    self.keep_until_stopped(unstopped);
                 }
                 return Err(error);
             }
         };
-        let child = launched.child;
-        let browser_pid = child.id();
+        let Some(browser_pid) = owned.pid() else {
+            self.keep_until_stopped(owned);
+            return Err("Launched browser has no process id".into());
+        };
         let surface_id = format!("host-surface-{}", Uuid::new_v4().as_simple());
         let report = LaunchReport {
             executable: executable_name(&browser),
-            browser_version: launched.browser_version,
+            browser_version: readiness.browser_version,
             engine_mode: if request.headless {
                 "headless"
             } else {
@@ -395,9 +290,9 @@ impl HostState {
             display_backend: backend.as_str().into(),
             observed_visibility: "unknown".into(),
             milestones_ms: LaunchMilestones {
-                display_ready,
-                spawned: launched.spawned_at.duration_since(started).as_millis() as u64,
-                cdp_ready: elapsed_ms(started),
+                display_ready: readiness.display_ready_at.map(|at| ms_between(started, at)),
+                spawned: ms_between(started, readiness.spawned_at),
+                cdp_ready: ms_between(started, readiness.cdp_ready_at),
             },
         };
         log::info!(
@@ -416,23 +311,10 @@ impl HostState {
         );
         let response = AcquireResponse {
             surface_id: surface_id.clone(),
-            cdp_url: launched.cdp_url,
+            cdp_url: readiness.cdp_url,
             launch: Some(report),
         };
-        let mut tracked = TrackedBrowser {
-            child,
-            browser_stopped: false,
-            display,
-        };
-        let mut browsers = match self.browsers.lock() {
-            Ok(browsers) => browsers,
-            Err(_) => {
-                let _ = tracked.terminate();
-                return Err("Browser process state is unavailable".into());
-            }
-        };
-        browsers.insert(browser_pid, tracked);
-        drop(browsers);
+        self.keep_until_stopped(owned);
         leases.insert(
             surface_id.clone(),
             BrowserSurfaceLease {
@@ -447,6 +329,32 @@ impl HostState {
         );
 
         Ok(response)
+    }
+
+    fn keep_until_stopped(&self, mut browser: OwnedBrowser) {
+        match self.browsers.lock() {
+            Ok(mut browsers) => browsers.push(browser),
+            Err(_) => {
+                log::error!("Browser process state is poisoned; stopping the browser now");
+                if !browser.terminate() {
+                    log::warn!("A browser whose state could not be recorded did not stop");
+                }
+            }
+        }
+    }
+
+    /// Retry stopping browsers that no lease holds: those whose release or
+    /// failed launch could not confirm the stop.
+    fn retry_unconfirmed_stops(&self, leases: &HashMap<String, BrowserSurfaceLease>) {
+        let Ok(mut browsers) = self.browsers.lock() else {
+            return;
+        };
+        browsers.retain_mut(|browser| {
+            let leased = browser
+                .pid()
+                .is_some_and(|pid| leases.values().any(|lease| lease.browser_pid == pid));
+            leased || !browser.terminate()
+        });
     }
 
     fn release(&self, surface_id: &str) {
@@ -489,9 +397,12 @@ impl HostState {
         self.closed.store(true, Ordering::Release);
         self.release_all_leases();
         if let Ok(mut browsers) = self.browsers.lock() {
-            for (pid, tracked) in browsers.iter_mut() {
-                if !tracked.terminate() {
-                    log::warn!("Tracked browser {pid} did not terminate cleanly during shutdown");
+            for browser in browsers.iter_mut() {
+                if !browser.terminate() {
+                    log::warn!(
+                        "Browser {:?} did not terminate cleanly during shutdown",
+                        browser.pid()
+                    );
                 }
             }
             browsers.clear();
@@ -520,13 +431,16 @@ impl HostState {
             log::error!("Browser process state is poisoned during termination");
             return false;
         };
-        let Some(tracked) = browsers.get_mut(&pid) else {
+        let Some(index) = browsers
+            .iter()
+            .position(|browser| browser.pid() == Some(pid))
+        else {
             log::error!("Browser process {pid} is missing from host state");
             return false;
         };
         let started = Instant::now();
-        if tracked.terminate() {
-            browsers.remove(&pid);
+        if browsers[index].terminate() {
+            browsers.remove(index);
             log::info!(
                 "Browser {pid} and its display stopped: cleanup_ms={}",
                 elapsed_ms(started)
@@ -535,60 +449,6 @@ impl HostState {
         } else {
             false
         }
-    }
-
-    fn recover_or_refuse_profile(
-        &self,
-        profile_dir: &Path,
-        leases: &HashMap<String, BrowserSurfaceLease>,
-    ) -> Result<(), BrowserLaunchError> {
-        #[cfg(target_os = "linux")]
-        {
-            let lock = profile_dir.join("SingletonLock");
-            let target = match fs::read_link(&lock) {
-                Ok(target) => target,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-                Err(_) => return Err(BrowserLaunchError::profile_in_use()),
-            };
-            let hostname = fs::read_to_string("/proc/sys/kernel/hostname")
-                .map_err(|_| BrowserLaunchError::profile_in_use())?;
-            let Some(pid) = target
-                .to_string_lossy()
-                .strip_prefix(&format!("{}-", hostname.trim()))
-                .and_then(|pid| pid.parse::<u32>().ok())
-            else {
-                return Ok(());
-            };
-            if !Path::new("/proc").join(pid.to_string()).exists() {
-                return Ok(());
-            }
-            if !process_uses_profile(pid, profile_dir) {
-                return Err(BrowserLaunchError::profile_in_use());
-            }
-            let process_group =
-                process_group_for_pid(pid).ok_or_else(BrowserLaunchError::profile_in_use)?;
-
-            let mut browsers = self
-                .browsers
-                .lock()
-                .map_err(|_| BrowserLaunchError::profile_in_use())?;
-            let Some(tracked) = browsers.get_mut(&process_group) else {
-                return Err(BrowserLaunchError::profile_in_use());
-            };
-            if leases
-                .values()
-                .any(|lease| lease.browser_pid == process_group)
-            {
-                return Err(BrowserLaunchError::profile_in_use());
-            }
-            if !tracked.terminate() {
-                return Err(BrowserLaunchError::profile_in_use());
-            }
-            browsers.remove(&process_group);
-        }
-        #[cfg(not(target_os = "linux"))]
-        let _ = (profile_dir, leases);
-        Ok(())
     }
 
     /// Deletes one connection's persistent profile (its logged-in session),
@@ -725,10 +585,10 @@ impl BrowserSurfaceHost {
     pub fn start(app_data_dir: PathBuf, resource_dir: Option<PathBuf>) -> Result<Self, String> {
         let display_providers =
             DisplayProviders::discover(&app_data_dir.join("browser-surface").join("displays"));
-        let presentation_policy = deployment_policy(
+        let presentation_policy = select_policy(
             std::env::var(BROWSER_DISPLAY_ENV).ok().as_deref(),
             std::env::var("PDPP_BROWSER_HEADLESS").is_ok_and(|value| value.trim() == "1"),
-            display_providers.get(DisplayBackend::PrivateXvfb).is_some(),
+            &display_providers.installed_backends(),
         )?;
         log::info!(
             "Connector browsers use display {}",
@@ -888,86 +748,69 @@ fn stable_segment(value: &str) -> String {
     hex::encode(Sha256::digest(value.as_bytes()))
 }
 
-#[derive(Debug)]
-pub(crate) struct LaunchedBrowser {
-    pub child: Child,
-    pub cdp_url: String,
-    pub spawned_at: Instant,
-    /// The `Browser` product string from `/json/version`, such as
-    /// `Chrome/141.0.7390.54`.
-    pub browser_version: Option<String>,
+/// Lock `mutex`, waiting no later than `deadline`. A std mutex has no timed
+/// lock, so this polls; the wait is short and only behind another launch.
+fn lock_before<T>(
+    mutex: &Mutex<T>,
+    deadline: Instant,
+) -> Result<MutexGuard<'_, T>, BrowserLaunchError> {
+    loop {
+        match mutex.try_lock() {
+            Ok(guard) => return Ok(guard),
+            Err(TryLockError::Poisoned(_)) => {
+                return Err("Browser surface lease state is unavailable".into())
+            }
+            Err(TryLockError::WouldBlock) if Instant::now() >= deadline => {
+                return Err(BrowserLaunchError::new(
+                    SURFACE_START_TIMEOUT,
+                    "The browser launch deadline passed while waiting for another launch",
+                ))
+            }
+            Err(TryLockError::WouldBlock) => thread::sleep(Duration::from_millis(10)),
+        }
+    }
 }
 
-pub(crate) fn launch_browser(
-    browser: &Path,
-    profile_dir: &Path,
-    headless: bool,
-    display: Option<&BrowserDisplayLaunch>,
-) -> Result<LaunchedBrowser, BrowserLaunchError> {
-    let mut args = vec![
-        "--disable-background-timer-throttling",
-        "--disable-renderer-backgrounding",
-        "--disable-backgrounding-occluded-windows",
-    ];
-    if let Some(display) = display {
-        args.extend(display.args.iter().map(String::as_str));
+/// Refuse a profile whose Chromium singleton lock names a live process. By
+/// the time this runs, every browser this host launched and no longer
+/// leases has had its stop retried, so a live holder is either a browser
+/// that will not stop or a process the host does not own; neither may be
+/// shared.
+fn refuse_profile_held_by_live_process(profile_dir: &Path) -> Result<(), BrowserLaunchError> {
+    #[cfg(target_os = "linux")]
+    {
+        let lock = profile_dir.join("SingletonLock");
+        let target = match fs::read_link(&lock) {
+            Ok(target) => target,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(_) => return Err(profile_in_use()),
+        };
+        let hostname =
+            fs::read_to_string("/proc/sys/kernel/hostname").map_err(|_| profile_in_use())?;
+        let Some(pid) = target
+            .to_string_lossy()
+            .strip_prefix(&format!("{}-", hostname.trim()))
+            .and_then(|pid| pid.parse::<u32>().ok())
+        else {
+            return Ok(());
+        };
+        if Path::new("/proc").join(pid.to_string()).exists()
+            && process_uses_profile(pid, profile_dir)
+        {
+            return Err(profile_in_use());
+        }
     }
-    let mut command =
-        super::pdpp_browser::browser_command_with_args(browser, profile_dir, headless, &args);
-    if let Some(display) = display {
-        // Only the browser's environment changes; the host and its other
-        // children keep the owner's display.
-        for name in &display.env_remove {
-            command.env_remove(name);
-        }
-        command.envs(display.env.iter().map(|(name, value)| (name, value)));
-    }
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    let mut child = command
-        .spawn()
-        .map_err(|error| format!("Failed to launch host browser: {error}"))?;
-    let spawned_at = Instant::now();
-    let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
-        let _ = super::pdpp_browser::terminate_browser(&mut child);
-        return Err("Host browser output was not piped".to_string().into());
-    };
-    let (sender, receiver) = mpsc::channel();
-    thread::spawn(move || {
-        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            if sender.send(line).is_err() {
-                break;
-            }
-        }
-    });
-    let stderr_tail = StderrTail::default();
-    let stderr_reader = stderr_tail.clone();
-    // Keep draining after readiness so a chatty browser never blocks on a
-    // full pipe; only the bounded tail is retained.
-    thread::spawn(move || {
-        let mut reader = BufReader::new(stderr);
-        let mut line = Vec::new();
-        while matches!(reader.read_until(b'\n', &mut line), Ok(read) if read > 0) {
-            stderr_reader.push_line(&String::from_utf8_lossy(&line));
-            line.clear();
-        }
-    });
-
-    let (child, cdp_url, browser_version) =
-        wait_for_devtools_endpoint(profile_dir, child, receiver, &stderr_tail)?;
-    Ok(LaunchedBrowser {
-        child,
-        cdp_url,
-        spawned_at,
-        browser_version,
-    })
+    #[cfg(not(target_os = "linux"))]
+    let _ = profile_dir;
+    Ok(())
 }
 
 fn elapsed_ms(since: Instant) -> u64 {
     since.elapsed().as_millis() as u64
+}
+
+fn ms_between(start: Instant, end: Instant) -> u64 {
+    end.saturating_duration_since(start).as_millis() as u64
 }
 
 /// The executable's file name only; its directory can name the owner.
@@ -979,119 +822,6 @@ fn executable_name(browser: &Path) -> String {
         .unwrap_or_else(|| "unknown".into())
 }
 
-/// The last `STDERR_TAIL_BYTES` of browser stderr, with URL query strings
-/// removed. Chromium stderr can name the pages it loads.
-#[derive(Clone, Default)]
-struct StderrTail(Arc<Mutex<std::collections::VecDeque<String>>>);
-
-impl StderrTail {
-    fn push_line(&self, line: &str) {
-        let line = redact_query_strings(line.trim_end());
-        let Ok(mut lines) = self.0.lock() else {
-            return;
-        };
-        lines.push_back(line);
-        let mut total: usize = lines.iter().map(String::len).sum();
-        while total > STDERR_TAIL_BYTES {
-            match lines.pop_front() {
-                Some(dropped) => total -= dropped.len(),
-                None => break,
-            }
-        }
-    }
-
-    fn snapshot(&self) -> String {
-        self.0
-            .lock()
-            .map(|lines| lines.iter().cloned().collect::<Vec<_>>().join("\n"))
-            .unwrap_or_default()
-    }
-}
-
-fn redact_query_strings(line: &str) -> String {
-    line.split(' ')
-        .map(|word| match (word.contains("://"), word.find(['?', '#'])) {
-            (true, Some(index)) => format!("{}?<redacted>", &word[..index]),
-            _ => word.to_string(),
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn wait_for_devtools_endpoint(
-    profile_dir: &Path,
-    mut child: Child,
-    receiver: mpsc::Receiver<String>,
-    stderr_tail: &StderrTail,
-) -> Result<(Child, String, Option<String>), BrowserLaunchError> {
-    let deadline = Instant::now() + BROWSER_START_TIMEOUT;
-    let active_port = profile_dir.join("DevToolsActivePort");
-    let probe = reqwest::blocking::Client::builder()
-        .no_proxy()
-        .build()
-        .map_err(|error| {
-            terminate_failed_launch(
-                &mut child,
-                BrowserLaunchError::start_failed(error.to_string()),
-            )
-        })?;
-    while Instant::now() < deadline {
-        if super::pdpp_browser::browser_child_exited(&mut child) {
-            let error = exited_before_ready(stderr_tail);
-            return Err(terminate_failed_launch(&mut child, error));
-        }
-        for line in receiver.try_iter().take(1) {
-            if let Some(url) = cdp_url_from_json(&line) {
-                if let Some(ready) = devtools_http_ready(&probe, &url, deadline) {
-                    if super::pdpp_browser::browser_child_exited(&mut child) {
-                        let error = exited_before_ready(stderr_tail);
-                        return Err(terminate_failed_launch(&mut child, error));
-                    }
-                    return Ok((child, url, ready.browser_version));
-                }
-            }
-        }
-        if let Ok(contents) = fs::read_to_string(&active_port) {
-            if let Some(port) = contents
-                .lines()
-                .next()
-                .and_then(|port| port.trim().parse::<u16>().ok())
-                .filter(|port| *port != 0)
-            {
-                let url = format!("http://127.0.0.1:{port}");
-                if let Some(ready) = devtools_http_ready(&probe, &url, deadline) {
-                    if super::pdpp_browser::browser_child_exited(&mut child) {
-                        let error = exited_before_ready(stderr_tail);
-                        return Err(terminate_failed_launch(&mut child, error));
-                    }
-                    return Ok((child, url, ready.browser_version));
-                }
-            }
-        }
-        if super::pdpp_browser::browser_child_exited(&mut child) {
-            let error = exited_before_ready(stderr_tail);
-            return Err(terminate_failed_launch(&mut child, error));
-        }
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            break;
-        }
-        thread::sleep(Duration::from_millis(25).min(remaining));
-    }
-
-    Err(terminate_failed_launch(
-        &mut child,
-        BrowserLaunchError::start_failed("Timed out waiting for host browser CDP endpoint"),
-    ))
-}
-
-fn terminate_failed_launch(child: &mut Child, mut error: BrowserLaunchError) -> BrowserLaunchError {
-    if !super::pdpp_browser::terminate_browser(child) {
-        error.message.push_str("; termination failed");
-    }
-    error
-}
-
 #[cfg(target_os = "linux")]
 fn process_uses_profile(pid: u32, profile_dir: &Path) -> bool {
     let Ok(command_line) = fs::read(format!("/proc/{pid}/cmdline")) else {
@@ -1101,122 +831,6 @@ fn process_uses_profile(pid: u32, profile_dir: &Path) -> bool {
     command_line
         .split(|byte| *byte == 0)
         .any(|argument| argument == expected.as_bytes())
-}
-
-#[cfg(target_os = "linux")]
-fn process_group_for_pid(pid: u32) -> Option<u32> {
-    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let (_, fields) = stat.rsplit_once(") ")?;
-    fields.split_whitespace().nth(2)?.parse().ok()
-}
-
-struct DevtoolsReady {
-    browser_version: Option<String>,
-}
-
-fn devtools_http_ready(
-    client: &reqwest::blocking::Client,
-    cdp_url: &str,
-    deadline: Instant,
-) -> Option<DevtoolsReady> {
-    let timeout = devtools_probe_timeout(deadline)?;
-    let request = client
-        .get(format!("{cdp_url}/json/version"))
-        .timeout(timeout);
-    if Instant::now() >= deadline {
-        return None;
-    }
-    let Ok(response) = request.send() else {
-        return None;
-    };
-    if !response.status().is_success() {
-        return None;
-    }
-    let Ok(version) = response.json::<serde_json::Value>() else {
-        return None;
-    };
-    let browser_version = version
-        .get("Browser")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_string);
-    let has_browser_websocket = version
-        .get("webSocketDebuggerUrl")
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(is_websocket_url);
-    if !has_browser_websocket {
-        return None;
-    }
-
-    let timeout = devtools_probe_timeout(deadline)?;
-    let request = client.get(format!("{cdp_url}/json/list")).timeout(timeout);
-    if Instant::now() >= deadline {
-        return None;
-    }
-    let Ok(response) = request.send() else {
-        return None;
-    };
-    if !response.status().is_success() {
-        return None;
-    }
-    let Ok(targets) = response.json::<Vec<serde_json::Value>>() else {
-        return None;
-    };
-    targets
-        .iter()
-        .any(|target| {
-            target.get("type").and_then(serde_json::Value::as_str) == Some("page")
-                && target
-                    .get("webSocketDebuggerUrl")
-                    .and_then(serde_json::Value::as_str)
-                    .is_some_and(is_websocket_url)
-        })
-        .then_some(DevtoolsReady { browser_version })
-}
-
-fn devtools_probe_timeout(deadline: Instant) -> Option<Duration> {
-    let remaining = deadline.saturating_duration_since(Instant::now());
-    (!remaining.is_zero()).then_some(DEVTOOLS_PROBE_TIMEOUT.min(remaining))
-}
-
-fn is_websocket_url(url: &str) -> bool {
-    url.starts_with("ws://") || url.starts_with("wss://")
-}
-
-fn exited_before_ready(stderr_tail: &StderrTail) -> BrowserLaunchError {
-    // The stderr reader may still hold the last lines; give it a moment.
-    let deadline = Instant::now() + Duration::from_millis(500);
-    let mut tail = stderr_tail.snapshot();
-    while !tail.contains(NO_USABLE_SANDBOX_SIGNATURE) && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(25));
-        tail = stderr_tail.snapshot();
-    }
-    log::warn!("Host browser exited before becoming ready; stderr tail:\n{tail}");
-    if tail.contains(NO_USABLE_SANDBOX_SIGNATURE) {
-        BrowserLaunchError::sandbox_unavailable()
-    } else {
-        BrowserLaunchError::start_failed("Host browser exited before becoming ready")
-    }
-}
-
-fn cdp_url_from_json(line: &str) -> Option<String> {
-    let value = serde_json::from_str::<serde_json::Value>(line.trim()).ok()?;
-    let candidate = value
-        .as_str()
-        .or_else(|| value.get("cdp_url").and_then(serde_json::Value::as_str))
-        .or_else(|| value.get("cdpUrl").and_then(serde_json::Value::as_str))
-        .or_else(|| value.get("url").and_then(serde_json::Value::as_str))
-        .or_else(|| value.get("endpoint").and_then(serde_json::Value::as_str))?;
-    is_http_url(candidate).then(|| candidate.to_string())
-}
-
-fn is_http_url(value: &str) -> bool {
-    if value.chars().any(char::is_whitespace) {
-        return false;
-    }
-    let Ok(url) = reqwest::Url::parse(value) else {
-        return false;
-    };
-    matches!(url.scheme(), "http" | "https") && url.host_str().is_some()
 }
 
 fn run_server(listener: TcpListener, state: Arc<HostState>, token: String, stop: Arc<AtomicBool>) {
@@ -1501,12 +1115,24 @@ fn empty_response(status: &str) -> Vec<u8> {
 
 #[cfg(all(test, unix))]
 mod tests {
+    use super::super::browser_display::{BrowserDisplayLaunch, DisplaySession};
+    use super::super::owned_browser::{
+        BROWSER_DISPLAY_UNAVAILABLE, NO_USABLE_SANDBOX_SIGNATURE, SURFACE_START_FAILED,
+    };
     use super::*;
     use serde_json::json;
     use std::os::unix::fs::symlink;
     use std::os::unix::fs::PermissionsExt;
     use std::process::Command;
+    use std::process::Stdio;
     use tempfile::TempDir;
+
+    #[cfg(target_os = "linux")]
+    fn process_group_for_pid(pid: u32) -> Option<u32> {
+        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let (_, fields) = stat.rsplit_once(") ")?;
+        fields.split_whitespace().nth(2)?.parse().ok()
+    }
 
     #[cfg(target_os = "linux")]
     fn hostname() -> String {
@@ -1779,149 +1405,6 @@ wait "$server_pid"
             .expect("profile dir");
         let args = fs::read_to_string(profile_dir.join("args.txt")).expect("fake args");
         assert!(!args.contains("--headless=new"));
-    }
-
-    #[test]
-    fn slow_stdout_probes_do_not_extend_the_launch_deadline() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind slow DevTools server");
-        let address = listener.local_addr().expect("server address");
-        let stop_server = Arc::new(AtomicBool::new(false));
-        let server_stop = Arc::clone(&stop_server);
-        let server = thread::spawn(move || {
-            listener
-                .set_nonblocking(true)
-                .expect("make slow server nonblocking");
-            let deadline = Instant::now() + BROWSER_START_TIMEOUT + Duration::from_secs(1);
-            while Instant::now() < deadline && !server_stop.load(Ordering::Acquire) {
-                match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        let mut request = [0; 1024];
-                        let _ = stream.read(&mut request);
-                        thread::sleep(Duration::from_millis(250));
-                        let _ = stream.write_all(
-                            b"HTTP/1.1 503 Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                        );
-                    }
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(5));
-                    }
-                    Err(_) => return,
-                }
-            }
-        });
-        let browser = temp.path().join("fake-browser-slow.sh");
-        fs::write(
-            &browser,
-            format!(
-                "#!/bin/sh\nfor i in $(seq 1 100); do printf '{{\"cdp_url\":\"http://{address}\"}}\\n'; done\ntrap 'exit 0' TERM INT\nwhile :; do sleep 1; done\n"
-            ),
-        )
-        .expect("write slow fake browser");
-        fs::set_permissions(&browser, fs::Permissions::from_mode(0o755))
-            .expect("make slow fake browser executable");
-        let profile = temp.path().join("profile");
-        fs::create_dir_all(&profile).expect("create profile");
-
-        let started = Instant::now();
-        let result = launch_browser(&browser, &profile, true, None);
-        let elapsed = started.elapsed();
-        stop_server.store(true, Ordering::Release);
-        let server_joined = server.join();
-
-        assert!(result.is_err(), "unready endpoint must time out");
-        assert!(
-            elapsed <= BROWSER_START_TIMEOUT + Duration::from_millis(300),
-            "launch took {elapsed:?}, beyond the deadline and one short probe"
-        );
-        server_joined.expect("slow server thread");
-    }
-
-    #[test]
-    fn acquire_waits_until_the_devtools_http_endpoint_is_ready() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let reservation = TcpListener::bind("127.0.0.1:0").expect("reserve port");
-        let address = reservation.local_addr().expect("port address");
-        drop(reservation);
-
-        let ready_server = thread::spawn(move || {
-            thread::sleep(Duration::from_millis(200));
-            let listener = TcpListener::bind(address).expect("bind delayed DevTools endpoint");
-            listener
-                .set_nonblocking(true)
-                .expect("make DevTools endpoint nonblocking");
-            let deadline = Instant::now() + Duration::from_secs(2);
-            let mut requests = 0;
-            while Instant::now() < deadline {
-                match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        let mut request = [0; 1024];
-                        let _ = stream.read(&mut request);
-                        let body = if request.starts_with(b"GET /json/version ") {
-                            format!(
-                                r#"{{"webSocketDebuggerUrl":"ws://{}/devtools/browser/test"}}"#,
-                                address
-                            )
-                        } else {
-                            format!(
-                                r#"[{{"type":"page","webSocketDebuggerUrl":"ws://{}/devtools/page/test"}}]"#,
-                                address
-                            )
-                        };
-                        write!(
-                            stream,
-                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                            body.len(),
-                            body
-                        )
-                        .expect("write DevTools version response");
-                        requests += 1;
-                        if requests == 2 {
-                            return true;
-                        }
-                    }
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(10));
-                    }
-                    Err(_) => return false,
-                }
-            }
-            false
-        });
-
-        let browser = temp.path().join("fake-browser-delayed.sh");
-        fs::write(
-            &browser,
-            format!(
-                "#!/bin/sh\nprofile=\"\"\nfor arg in \"$@\"; do\n  case \"$arg\" in\n    --user-data-dir=*) profile=\"${{arg#*=}}\" ;;\n  esac\ndone\nprintf '%s\\n' {} > \"$profile/DevToolsActivePort\"\ntrap 'exit 0' TERM INT\nwhile :; do sleep 1; done\n",
-                address.port()
-            ),
-        )
-        .expect("write delayed fake browser");
-        fs::set_permissions(&browser, fs::Permissions::from_mode(0o755))
-            .expect("make delayed fake browser executable");
-        let profile = temp.path().join("profile");
-        fs::create_dir_all(&profile).expect("create profile");
-
-        let started = Instant::now();
-        let launched = launch_browser(&browser, &profile, true, None);
-        let elapsed = started.elapsed();
-        let launch_succeeded = match launched {
-            Ok(mut launched) => {
-                let _ = super::super::pdpp_browser::terminate_browser(&mut launched.child);
-                assert_eq!(launched.cdp_url, format!("http://{address}"));
-                true
-            }
-            Err(_) => false,
-        };
-        let server_ready = ready_server.join().expect("DevTools server thread");
-
-        assert!(
-            server_ready,
-            "host must wait for a live /json/version response"
-        );
-        assert!(elapsed >= Duration::from_millis(200));
-        assert!(launch_succeeded);
     }
 
     #[test]
@@ -2331,18 +1814,6 @@ exit 133
         );
     }
 
-    #[test]
-    fn early_exit_without_sandbox_signature_stays_surface_start_failed() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let path = temp.path().join("crashing-browser.sh");
-        fs::write(&path, "#!/bin/sh\necho 'some other failure' >&2\nexit 1\n")
-            .expect("write crashing browser");
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod");
-        let error = launch_browser(&path, temp.path(), true, None).expect_err("launch must fail");
-        assert_eq!(error.code, "surface_start_failed");
-        assert!(error.message.contains("exited before becoming ready"));
-    }
-
     #[cfg(target_os = "linux")]
     #[test]
     fn acquire_refuses_a_live_foreign_process_holding_the_profile() {
@@ -2418,7 +1889,8 @@ exit 133
         command.arg(format!("--user-data-dir={}", profile.display()));
         use std::os::unix::process::CommandExt;
         command.process_group(0);
-        let owner = command.spawn().expect("start tracked fake browser");
+        let owner = super::super::owned_browser::spawn_retrying_busy_executable(&mut command)
+            .expect("start tracked fake browser");
         let group_id = owner.id();
         let deadline = Instant::now() + Duration::from_secs(2);
         while !pid_file.exists() && Instant::now() < deadline {
@@ -2434,14 +1906,12 @@ exit 133
             profile.join("SingletonLock"),
         )
         .expect("write fake Chromium lock");
-        host.state.browsers.lock().expect("browser state").insert(
-            group_id,
-            TrackedBrowser {
-                child: owner,
-                browser_stopped: false,
-                display: None,
-            },
-        );
+        let _ = group_id;
+        host.state
+            .browsers
+            .lock()
+            .expect("browser state")
+            .push(OwnedBrowser::from_child(owner));
 
         let response = request(
             &host,
@@ -2456,34 +1926,12 @@ exit 133
             }),
         );
 
-        assert_eq!(response.status, 200);
-        wait_for_process_exit(pid);
-    }
-
-    #[test]
-    fn readiness_failure_terminates_descendant_browser_processes() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let profile = temp.path().join("profile");
-        fs::create_dir_all(&profile).expect("profile dir");
-        let pid_file = profile.join("orphan.pid");
-        let browser = temp.path().join("handoff-browser.sh");
-        fs::write(
-            &browser,
-            format!(
-                "#!/bin/sh\npython3 -c 'import time; time.sleep(30)' --user-data-dir={} &\necho $! > {}\nexit 1\n",
-                profile.display(),
-                pid_file.display()
-            ),
-        )
-        .expect("write fake handoff browser");
-        fs::set_permissions(&browser, fs::Permissions::from_mode(0o755)).expect("chmod");
-
-        assert!(launch_browser(&browser, &profile, true, None).is_err());
-        let pid = fs::read_to_string(pid_file)
-            .expect("handoff process pid")
-            .trim()
-            .parse::<u32>()
-            .expect("valid pid");
+        assert_eq!(
+            response.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&response.body)
+        );
         wait_for_process_exit(pid);
     }
 
@@ -2540,7 +1988,7 @@ exit 133
             std::env::var("DATACONNECT_REAL_BROWSER").expect("DATACONNECT_REAL_BROWSER"),
         );
         let runtime = temp.path().join("displays");
-        let provider = super::super::browser_display::xvfb::XvfbProvider::new(
+        let provider = super::super::browser_display::xvfb::XvfbProvider::removing_stale_sessions(
             PathBuf::from("/usr/bin/Xvfb"),
             runtime.clone(),
         );
@@ -2783,22 +2231,6 @@ exit 133
     }
 
     #[test]
-    fn stderr_tail_is_bounded_and_redacts_query_strings() {
-        let tail = StderrTail::default();
-        tail.push_line("loading https://bank.example/login?session=secret#frag done\n");
-        assert_eq!(
-            tail.snapshot(),
-            "loading https://bank.example/login?<redacted> done"
-        );
-        for _ in 0..2_000 {
-            tail.push_line("0123456789");
-        }
-        let snapshot = tail.snapshot();
-        assert!(snapshot.len() <= STDERR_TAIL_BYTES + 2_000);
-        assert!(!snapshot.contains("secret"));
-    }
-
-    #[test]
     fn retry_after_lost_response_reuses_surface_and_run_delete_releases_it() {
         let temp = tempfile::tempdir().expect("tempdir");
         let host = start_test_host(&temp);
@@ -3011,13 +2443,14 @@ exit 133
         );
     }
 
-    /// Records display lifecycle events and, at stop, whether the browser
-    /// using the display had already exited.
+    /// Records display lifecycle events. Stop order relative to the browser
+    /// is proven in `owned_browser`; these tests prove the host wiring.
     #[derive(Clone, Default)]
     struct DisplayLog {
         events: Arc<Mutex<Vec<String>>>,
-        browser_pid: Arc<Mutex<Option<u32>>>,
         fail_start: Arc<AtomicBool>,
+        /// Stops that fail before one succeeds, for each display started.
+        stop_failures: Arc<std::sync::atomic::AtomicUsize>,
     }
 
     impl DisplayLog {
@@ -3033,7 +2466,7 @@ exit 133
             DisplayBackend::PrivateXvfb
         }
 
-        fn start(&self) -> Result<Box<dyn DisplaySession>, String> {
+        fn start(&self, _deadline: Instant) -> Result<Box<dyn DisplaySession>, String> {
             if self.0.fail_start.load(Ordering::Acquire) {
                 self.0
                     .events
@@ -3072,22 +2505,17 @@ exit 133
         }
 
         fn terminate(&mut self) -> bool {
-            if !self.stopped {
-                let browser_alive = self
-                    .log
-                    .browser_pid
-                    .lock()
-                    .expect("pid")
-                    .is_some_and(|pid| Path::new("/proc").join(pid.to_string()).exists());
+            if self.log.stop_failures.load(Ordering::Acquire) > 0 {
+                self.log.stop_failures.fetch_sub(1, Ordering::AcqRel);
                 self.log
                     .events
                     .lock()
                     .expect("events")
-                    .push(if browser_alive {
-                        "stop-while-browser-alive".into()
-                    } else {
-                        "stop".into()
-                    });
+                    .push("stop-failed".into());
+                return false;
+            }
+            if !self.stopped {
+                self.log.events.lock().expect("events").push("stop".into());
                 self.stopped = true;
             }
             true
@@ -3213,10 +2641,110 @@ exit 133
             .get(&acquired.surface_id)
             .expect("lease")
             .browser_pid;
-        *log.browser_pid.lock().expect("pid") = Some(pid);
         release_surface(&host, &acquired.surface_id);
+        wait_for_process_exit(pid);
         assert_eq!(log.events(), vec!["start", "stop"]);
         assert!(host.state.browsers.lock().expect("browsers").is_empty());
+    }
+
+    fn acquire_with_budget(
+        host: &BrowserSurfaceHost,
+        run_id: &str,
+        budget_ms: u64,
+    ) -> TestResponse {
+        request(
+            host,
+            "POST",
+            BROWSER_SURFACE_PATH,
+            Some(host_token(host)),
+            json!({
+                "run_id": run_id,
+                "connector_id": "chase",
+                "connection_id": "cin-chase",
+                "headless": true,
+                "acquire_timeout_ms": budget_ms,
+            }),
+        )
+    }
+
+    #[test]
+    fn the_acquire_budget_bounds_browser_readiness() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let never_ready = temp.path().join("never-ready-browser.sh");
+        fs::write(
+            &never_ready,
+            "#!/bin/sh
+trap 'exit 0' TERM INT
+while :; do sleep 1; done
+",
+        )
+        .expect("write never-ready browser");
+        fs::set_permissions(&never_ready, fs::Permissions::from_mode(0o755)).expect("chmod");
+        let host = BrowserSurfaceHost::start_with_browser(
+            temp.path().join("app-data"),
+            None,
+            Some(never_ready),
+            DisplayProviders::default(),
+            None,
+        )
+        .expect("start test host");
+        let started = Instant::now();
+        let response = acquire_with_budget(&host, "run-slow", 600);
+        assert_eq!(response.status, 500);
+        assert_eq!(error_code(&response), SURFACE_START_TIMEOUT);
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "readiness used the request budget, not a fresh browser timeout: {:?}",
+            started.elapsed()
+        );
+        assert!(host.state.browsers.lock().expect("browsers").is_empty());
+    }
+
+    #[test]
+    fn waiting_behind_another_launch_counts_against_the_acquire_budget() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let host = start_test_host(&temp);
+        // Stands in for a launch in progress: admission holds this lock.
+        let in_progress = host.state.leases.lock().expect("leases");
+        let started = Instant::now();
+        let response = thread::scope(|scope| {
+            scope
+                .spawn(|| acquire_with_budget(&host, "run-queued", 300))
+                .join()
+                .expect("acquire thread")
+        });
+        drop(in_progress);
+        assert_eq!(response.status, 500);
+        assert_eq!(error_code(&response), SURFACE_START_TIMEOUT);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(!profile_was_launched(&host, "chase"));
+    }
+
+    #[test]
+    fn a_display_whose_stop_fails_is_kept_and_retried_by_the_next_acquire() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (host, log) = start_display_host(&temp, true);
+        let first = acquire_with_policy(&host, "run-first", "chase", false, private_xvfb_policy());
+        assert_eq!(first.status, 200);
+        let first: AcquireResponse = serde_json::from_slice(&first.body).expect("body");
+        log.stop_failures.store(1, Ordering::Release);
+        release_surface(&host, &first.surface_id);
+        assert_eq!(log.events(), vec!["start", "stop-failed"]);
+        assert_eq!(
+            host.state.browsers.lock().expect("browsers").len(),
+            1,
+            "an unconfirmed stop keeps the browser and its display"
+        );
+
+        let second =
+            acquire_with_policy(&host, "run-second", "chase", false, private_xvfb_policy());
+        assert_eq!(second.status, 200);
+        assert_eq!(
+            log.events(),
+            vec!["start", "stop-failed", "stop", "start"],
+            "the leftover display is stopped before the next launch"
+        );
+        assert_eq!(host.state.browsers.lock().expect("browsers").len(), 1);
     }
 
     #[test]
