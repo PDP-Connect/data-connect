@@ -1677,6 +1677,8 @@ fn retire_process_group(
             if let Some(Ok(registry)) = PROCESS_GROUP_REGISTRY.get() {
                 let mut registry = registry.lock().unwrap_or_else(|error| error.into_inner());
                 if exited && matches!(process_group_has_other_members(pgid as u32), Ok(false)) {
+                    // A member hidden from the procfs scan may still exist.
+                    signal_process_group_direct(pgid as u32, libc::SIGKILL);
                     registry.remove(&pgid);
                     group.take();
                     // WNOWAIT already observed exit; this cannot wait for a
@@ -1713,6 +1715,11 @@ fn stop_current_child_inner(
         let mut group = state.process_group_id.lock()
             .map_err(|_| io::Error::other("supervisor process-group state was poisoned"))?;
         if let Some(process_group) = *group {
+            // The scan cannot see a member hidden by hidepid or by a
+            // nondumpable process, yet we may still be able to signal it.
+            // The unreaped leader still reserves this PGID, so a final
+            // SIGKILL reaches only our own group.
+            signal_process_group_direct(process_group as u32, libc::SIGKILL);
             unregister_process_group(process_group);
             group.take();
             // stop_process_tree only observes exit on Unix group leaders.
@@ -1860,8 +1867,17 @@ fn signal_process_group_direct(pid: u32, signal: libc::c_int) {
 
 // Do not use kill(-pgid, 0) for cleanup: the zombie anchor itself exists.
 // Enumeration errors fail closed, retaining ownership and the anchor.
+// Test seam: process groups whose members the procfs scan must not see,
+// standing in for hidepid or nondumpable members.
+#[cfg(all(test, target_os = "linux"))]
+static SCAN_HIDDEN_GROUPS: Mutex<BTreeSet<u32>> = Mutex::new(BTreeSet::new());
+
 #[cfg(target_os = "linux")]
 fn process_group_has_other_members(process_group: u32) -> io::Result<bool> {
+    #[cfg(test)]
+    if SCAN_HIDDEN_GROUPS.lock().unwrap_or_else(|error| error.into_inner()).contains(&process_group) {
+        return Ok(false);
+    }
     for entry in std::fs::read_dir("/proc")? {
         let entry = match entry {
             Ok(entry) => entry,
@@ -1892,10 +1908,10 @@ fn process_group_has_other_members(process_group: u32) -> io::Result<bool> {
 }
 
 // A vanished process is not a member. An entry we may not read (hidepid,
-// or a member that exec'd a setuid program) belongs to another user. Such
-// a member still occupies the PGID, so skipping it cannot let a later
-// signal reach a reused id; it only ends our wait for a process we could
-// not signal anyway.
+// a nondumpable or setuid member) is skipped: while it lives it still
+// occupies the PGID, so skipping it cannot let a later signal reach a
+// reused id. Cleanup sends a final SIGKILL to the anchored group before
+// it unregisters, so a hidden member that we can signal is still killed.
 #[cfg(target_os = "linux")]
 fn proc_stat_error_skips_entry(error: &io::Error) -> bool {
     matches!(
@@ -3441,6 +3457,59 @@ setInterval(() => {{}}, 1000);
                 libc::WEXITED | libc::WNOHANG | libc::WNOWAIT) == 0
                 && info.si_pid() == pid
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn stop_kills_a_term_ignoring_member_hidden_from_the_group_scan() {
+        let leader_pid = NamedTempFile::new().unwrap();
+        let member_pid = NamedTempFile::new().unwrap();
+        let script = node_script(&format!(
+            r#"const fs = require('node:fs');
+const {{ spawn }} = require('node:child_process');
+const child = spawn(process.execPath, ['-e', "process.on('SIGTERM', () => {{}}); process.stdout.write('armed'); setInterval(() => {{}}, 1000);"], {{ stdio: ['ignore', 'pipe', 'ignore'] }});
+child.stdout.once('data', () => {{
+  fs.writeFileSync({:?}, String(child.pid));
+  fs.writeFileSync({:?}, String(process.pid));
+  console.log('GROUP-READY');
+}});
+setInterval(() => {{}}, 1000);
+"#,
+            member_pid.path().to_string_lossy(),
+            leader_pid.path().to_string_lossy()
+        ));
+        let spec = base_spec(
+            script.path(),
+            Readiness::StdoutMarker {
+                marker: "GROUP-READY".to_string(),
+                deadline: Duration::from_secs(15),
+            },
+        );
+        let handle = Supervisor::new(spec, ArcSink(Arc::new(RecordingSink::default())))
+            .start()
+            .unwrap();
+        let pgid = fs::read_to_string(leader_pid.path()).unwrap().parse::<u32>().unwrap();
+        let member = fs::read_to_string(member_pid.path()).unwrap().parse::<libc::pid_t>().unwrap();
+        SCAN_HIDDEN_GROUPS.lock().unwrap().insert(pgid);
+        let stopped = handle.stop();
+        SCAN_HIDDEN_GROUPS.lock().unwrap().remove(&pgid);
+        stopped.unwrap();
+        // The member ignores SIGTERM and the scan cannot see it, so only the
+        // final SIGKILL before unregistering can end it. It may linger as a
+        // zombie until its new parent reaps it, so poll.
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let mut errno = None;
+        while Instant::now() < deadline {
+            if unsafe { libc::kill(member, 0) } == -1 {
+                errno = io::Error::last_os_error().raw_os_error();
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        if errno.is_none() {
+            unsafe { libc::kill(member, libc::SIGKILL) };
+        }
+        assert_eq!(errno, Some(libc::ESRCH), "hidden SIGTERM-ignoring member survived stop");
     }
 
     #[cfg(target_os = "linux")]
