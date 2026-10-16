@@ -33,8 +33,11 @@ import {
   TrainingAuthorityStore,
 } from "../lib/training-lease/authority-store.ts";
 import { AI_TRAINING_PERMISSION } from "../lib/training-lease/constants.ts";
+import { SimClock } from "../lib/training-lease/sim-clock.ts";
 import {
+  GrantAuthorityGuard,
   type InputLineage,
+  JobRecorder,
   type Jwks,
   validateLeaseStatic,
 } from "../lib/training-lease/worker.ts";
@@ -772,6 +775,117 @@ describe("L9 signing keys", () => {
     );
     clock.now = lease.claims.exp * 1000;
     assert.ok(!store.jwks().keys.some((k) => k.kid === k2));
+    store.close();
+  });
+
+  it("a restore from a backup taken before a planned rotation does not resume signing with the retired key", () => {
+    const paths = tempPaths();
+    const clock = { now: T0 };
+    let store = openNode(paths, clock);
+    seed(store);
+    const first = store.issueLease({ grantId: "grt_1", clientId: "client_1" });
+    assert.ok(first.ok);
+    if (!first.ok) return;
+    const k1 = first.kid;
+    const bak = join(paths.dir, "backup.sqlite");
+    backup(paths.storePath, bak);
+    clock.now = T0 + 10 * MIN;
+    const k2 = store.rotateSigningKey();
+    const second = store.issueLease({ grantId: "grt_1", clientId: "client_1" });
+    assert.equal(second.ok && second.kid, k2);
+    store.close();
+    restoreUnderRunningNodes(paths.storePath, bak);
+    clock.now = T0 + 20 * MIN;
+    store = openNode(paths, clock, { nodeId: "node-b" });
+    const next = store.issueLease({ grantId: "grt_1", clientId: "client_1" });
+    assert.ok(next.ok);
+    assert.notEqual(next.ok && next.kid, k1, "k1 stays retired");
+    const kids = () => store.jwks().keys.map((k) => k.kid);
+    assert.ok(kids().includes(k1), "k1 published until its last exp");
+    assert.ok(kids().includes(k2));
+    clock.now = first.claims.exp * 1000;
+    assert.ok(!kids().includes(k1));
+    assert.ok(kids().includes(k2));
+    store.close();
+  });
+
+  it("a node whose only active key another node revoked issues with a fresh key", () => {
+    const paths = tempPaths();
+    const clock = { now: T0 };
+    const nodeA = openNode(paths, clock, { nodeId: "node-a" });
+    seed(nodeA);
+    const first = nodeA.issueLease({ grantId: "grt_1", clientId: "client_1" });
+    assert.ok(first.ok);
+    if (!first.ok) return;
+    // Node B runs on its own copy of the store and shares the journal.
+    const copyPath = join(paths.dir, "copy.sqlite");
+    backup(paths.storePath, copyPath);
+    const nodeB = openNode(
+      { storePath: copyPath, journalPath: paths.journalPath },
+      clock,
+      { nodeId: "node-b" },
+    );
+    nodeB.revokeSigningKey(first.kid);
+    const created = () =>
+      fs
+        .readFileSync(paths.journalPath, "utf8")
+        .split("\n")
+        .filter((l) => l.includes('"t":"key_created"')).length;
+    clock.now = T0 + MIN;
+    const next = nodeA.issueLease({ grantId: "grt_1", clientId: "client_1" });
+    assert.ok(next.ok, "no 'unavailable' after another node's revocation");
+    assert.notEqual(next.ok && next.kid, first.kid);
+    assert.ok(nodeA.jwks().keys.some((k) => next.ok && k.kid === next.kid));
+    // Steady state: replay does not keep minting keys.
+    const settled = created();
+    nodeA.sync();
+    nodeB.sync();
+    assert.ok(nodeA.issueLease({ grantId: "grt_1", clientId: "client_1" }).ok);
+    assert.ok(nodeB.issueLease({ grantId: "grt_1", clientId: "client_1" }).ok);
+    assert.equal(created(), settled);
+    nodeA.close();
+    nodeB.close();
+  });
+
+  it("a worker that saw the retired key leave the JWKS accepts the lease issued after a restore", () => {
+    const paths = tempPaths();
+    const sim = new SimClock(T0);
+    const clock = {
+      get now() {
+        return sim.trueMs;
+      },
+    };
+    let store = openNode(paths, clock);
+    seed(store);
+    const lineage: InputLineage = {
+      iss: "https://as.example",
+      clientId: "client_1",
+      grantId: "grt_1",
+    };
+    const guard = new GrantAuthorityGuard(lineage, sim, new JobRecorder(sim), {
+      drainMs: 1000,
+      safetyMarginMs: 1000,
+      maxClockUncertaintyMs: 5000,
+      suspendDetectionSlackMs: 2000,
+    });
+    const first = store.issueLease({ grantId: "grt_1", clientId: "client_1" });
+    assert.ok(first.ok);
+    if (!first.ok) return;
+    assert.ok(guard.accept(first.lease, store.jwks() as Jwks).ok);
+    const bak = join(paths.dir, "backup.sqlite");
+    backup(paths.storePath, bak);
+    sim.advance(10 * MIN);
+    store.rotateSigningKey();
+    sim.advance(first.claims.exp * 1000 - sim.trueMs);
+    guard.onJwksRefreshed(store.jwks() as Jwks);
+    store.close();
+    restoreUnderRunningNodes(paths.storePath, bak);
+    sim.advance(MIN);
+    store = openNode(paths, clock, { nodeId: "node-b" });
+    const next = store.issueLease({ grantId: "grt_1", clientId: "client_1" });
+    assert.ok(next.ok);
+    if (!next.ok) return;
+    assert.ok(guard.accept(next.lease, store.jwks() as Jwks).ok);
     store.close();
   });
 });

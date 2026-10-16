@@ -12,8 +12,8 @@
  * - The authority is an append-only journal that MUST sit outside every
  *   restore path. Every authority creation, every signing key's creation
  *   (its public JWK only), every issued lease (its `exp` and signing key),
- *   every withdrawal (tombstone) and every emergency key revocation is
- *   appended and fsynced before it takes effect.
+ *   every withdrawal (tombstone), every planned key retirement and every
+ *   emergency key revocation is appended and fsynced before it takes effect.
  *   O_APPEND gives the entries one total order.
  * - The SQLite file is a projection of the journal, rebuilt by replay on
  *   every open. Restoring it from a backup loses nothing: the next open
@@ -166,6 +166,12 @@ type JournalEntry =
       at: number;
     }
   | {
+      t: "key_retired";
+      id: string;
+      kid: string;
+      at: number;
+    }
+  | {
       t: "key_revoked";
       id: string;
       kid: string;
@@ -197,6 +203,8 @@ class JournalIndex {
   readonly grants = new Map<string, GrantFacts>();
   /** L9 emergency revocations. A restored store must not re-activate these. */
   readonly revokedKids = new Set<string>();
+  /** Planned retirements and when they took effect. A restored store must not re-activate these either. */
+  readonly retiredKids = new Map<string, number>();
   /** Public JWK of each journaled key, so a restore cannot lose a verification key. */
   readonly keys = new Map<string, { publicJwk: OkpPublicJwk; at: number }>();
   /** Latest `exp` signed by each key, so a restored store keeps retired keys published. */
@@ -279,6 +287,12 @@ class JournalIndex {
     }
     if (e.t === "key_revoked") {
       this.revokedKids.add(e.kid);
+      return;
+    }
+    if (e.t === "key_retired") {
+      if (!this.retiredKids.has(e.kid)) {
+        this.retiredKids.set(e.kid, e.at);
+      }
       return;
     }
     if (e.t === "key_created") {
@@ -385,7 +399,6 @@ export class TrainingAuthorityStore {
     db.exec(SCHEMA);
     const s = new TrainingAuthorityStore(db, opts);
     s.#store.transaction(() => s.#replay()).immediate();
-    s.#ensureSigningKey();
     return s;
   }
 
@@ -443,12 +456,26 @@ export class TrainingAuthorityStore {
     for (const [kid, expMs] of this.#journal.keyMaxExpMs) {
       keyRaise.run(expMs, kid);
     }
+    const retire = this.#store.prepare(
+      "UPDATE training_lease_signing_keys SET status = 'retired', retired_at_ms = ? WHERE kid = ? AND status = 'active'",
+    );
+    for (const [kid, at] of this.#journal.retiredKids) {
+      retire.run(at, kid);
+    }
+    // Revocation wins over retirement.
     const revoke = this.#store.prepare(
       "UPDATE training_lease_signing_keys SET status = 'revoked' WHERE kid = ?",
     );
     for (const kid of this.#journal.revokedKids) {
       revoke.run(kid);
     }
+    // A key without private material never signs.
+    this.#store
+      .prepare(
+        "UPDATE training_lease_signing_keys SET status = 'retired' WHERE status = 'active' AND private_pem = ''",
+      )
+      .run();
+    this.#ensureSigningKey();
   }
 
   close(): void {
@@ -521,7 +548,7 @@ export class TrainingAuthorityStore {
           }
           const key = this.#store
             .prepare(
-              "SELECT kid, private_pem FROM training_lease_signing_keys WHERE status = 'active' ORDER BY created_at_ms DESC LIMIT 1",
+              "SELECT kid, private_pem FROM training_lease_signing_keys WHERE status = 'active' AND private_pem != '' ORDER BY created_at_ms DESC LIMIT 1",
             )
             .get() as { kid: string; private_pem: string } | undefined;
           if (!key) {
@@ -736,20 +763,23 @@ export class TrainingAuthorityStore {
 
   // ----- L9 signing keys -----
 
+  /**
+   * Runs at the end of every replay, inside its transaction. A replay that
+   * retired or revoked this store's last signing key (a restore, or another
+   * node's journal entry) creates a fresh one, journaled like any other. A
+   * key is only ever deactivated by a journal entry naming it, so a key
+   * created here stays active on later replays: no key per replay.
+   */
   #ensureSigningKey(): void {
-    this.#store
-      .transaction(() => {
-        if (
-          !this.#store
-            .prepare(
-              "SELECT kid FROM training_lease_signing_keys WHERE status = 'active' LIMIT 1",
-            )
-            .get()
-        ) {
-          this.#insertKey();
-        }
-      })
-      .immediate();
+    if (
+      !this.#store
+        .prepare(
+          "SELECT kid FROM training_lease_signing_keys WHERE status = 'active' AND private_pem != '' LIMIT 1",
+        )
+        .get()
+    ) {
+      this.#insertKey();
+    }
   }
 
   #insertKey(): string {
@@ -787,11 +817,26 @@ export class TrainingAuthorityStore {
     let kid = "";
     this.#store
       .transaction(() => {
+        const now = this.#o.now();
+        const active = this.#store
+          .prepare(
+            "SELECT kid FROM training_lease_signing_keys WHERE status = 'active'",
+          )
+          .all() as Array<{ kid: string }>;
+        // Journaled first, so restoring the store cannot re-activate the key.
+        for (const k of active) {
+          appendJournal(this.#o.journalPath, {
+            t: "key_retired",
+            id: randomUUID(),
+            kid: k.kid,
+            at: now,
+          });
+        }
         this.#store
           .prepare(
             "UPDATE training_lease_signing_keys SET status = 'retired', retired_at_ms = ? WHERE status = 'active'",
           )
-          .run(this.#o.now());
+          .run(now);
         kid = this.#insertKey();
       })
       .immediate();
@@ -810,7 +855,6 @@ export class TrainingAuthorityStore {
       at: this.#o.now(),
     });
     this.sync();
-    this.#ensureSigningKey();
   }
 
   jwks(): { keys: OkpPublicJwk[] } {
