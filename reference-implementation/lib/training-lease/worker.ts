@@ -247,6 +247,8 @@ export class GrantAuthorityGuard {
   #lastAnchor: { mono: number; trusted: TrustedTimeReading } | null = null;
   #trustedHighWaterMs = Number.NEGATIVE_INFINITY;
   #reliedKid: string | null = null;
+  /** Kids seen leaving the JWKS. A stale JWKS cannot bring them back. */
+  readonly #withdrawnKids = new Set<string>();
   readonly #reliedJtis = new Set<string>();
 
   constructor(
@@ -309,6 +311,14 @@ export class GrantAuthorityGuard {
         reason: v.reason,
       });
       return v;
+    }
+    if (this.#withdrawnKids.has(v.kid)) {
+      this.#recorder.record({
+        type: "lease_rejected",
+        grant_id: this.lineage.grantId,
+        reason: "unknown_key",
+      });
+      return { ok: false, reason: "unknown_key" };
     }
     const trusted = this.#clock.trustedTime();
     const mono = this.#clock.monotonicMs();
@@ -385,10 +395,30 @@ export class GrantAuthorityGuard {
     });
   }
 
-  /** L9: a refreshed JWKS that no longer lists the relied-on key ends authority now. */
+  /**
+   * L9: a refreshed JWKS that no longer lists the relied-on key ends the
+   * current lease's authority now. It does not end the grant: a key also
+   * leaves the JWKS by planned retirement after its last exp, and a fresh
+   * lease under a still-trusted key must be accepted after that.
+   */
   onJwksRefreshed(jwks: Jwks): void {
-    if (this.#reliedKid && !jwks.keys.some((k) => k.kid === this.#reliedKid)) {
-      this.end("signing_key_withdrawn");
+    const kid = this.#reliedKid;
+    if (!kid || jwks.keys.some((k) => k.kid === kid)) {
+      return;
+    }
+    this.#withdrawnKids.add(kid);
+    this.#reliedKid = null;
+    const live =
+      this.#deadlineMono !== null &&
+      this.#deadlineMono > this.#clock.monotonicMs();
+    this.#deadlineMono = null;
+    this.#deadlineTrustedMs = null;
+    if (live) {
+      this.#recorder.record({
+        type: "authority_ended",
+        grant_id: this.lineage.grantId,
+        reason: "signing_key_withdrawn",
+      });
     }
   }
 

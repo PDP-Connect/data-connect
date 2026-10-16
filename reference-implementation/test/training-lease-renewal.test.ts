@@ -269,3 +269,73 @@ describe("L8 fail closed when the AS is unreachable", () => {
     }
   });
 });
+
+describe("L8 transport rejection", () => {
+  it("a rejected fetch is recorded as a non-terminal failure, backs off, and recovers", async () => {
+    const clock = new SimClock(T0);
+    const recorder = new JobRecorder(clock);
+    const key = generateEd25519KeyPair("k1");
+    let reject = true;
+    const renewer = new LeaseRenewer({
+      fetchLease: async (): Promise<LeaseFetchResult> => {
+        if (reject) {
+          throw new Error("ECONNRESET");
+        }
+        const iat = Math.floor(clock.trueMs / 1000);
+        return {
+          lease: signCompactJws(
+            { kid: key.kid, typ: LEASE_JWS_TYP },
+            {
+              aud: CLIENT,
+              exp: iat + 3600,
+              grant_id: "g1",
+              iat,
+              iss: ISS,
+              jti: "j1",
+              permission: AI_TRAINING_PERMISSION,
+            },
+            key.privateKey,
+          ),
+          ok: true,
+        };
+      },
+      grantId: "g1",
+      onLease: () => {},
+      random: () => 0.5,
+      recorder,
+    });
+    const first = await renewer.step(clock.trueMs);
+    assert.ok(first !== null);
+    assert.ok(first > clock.trueMs, "retry is scheduled in the future");
+    assert.ok(
+      first <= clock.trueMs + DEFAULT_RENEWAL_POLICY.backoffBaseMs,
+      "first retry bounded by the base backoff",
+    );
+    assert.deepEqual(
+      recorder.ofType("renewal").map((e) => e.ok),
+      [false],
+    );
+    assert.equal(renewer.terminal, null);
+    assert.equal(
+      await renewer.step(clock.trueMs),
+      first,
+      "not retried before the backoff elapses",
+    );
+    clock.advance(first - clock.trueMs);
+    const second = await renewer.step(clock.trueMs);
+    assert.ok(second !== null && second > clock.trueMs);
+    assert.ok(
+      second - clock.trueMs > first - T0,
+      "backoff grows after repeated rejection",
+    );
+    reject = false;
+    clock.advance(second - clock.trueMs);
+    await renewer.step(clock.trueMs);
+    assert.equal(renewer.held?.jti, "j1");
+    assert.ok(renewer.hasAuthority(clock.trueMs));
+    assert.deepEqual(
+      recorder.ofType("renewal").map((e) => e.ok),
+      [false, false, true],
+    );
+  });
+});

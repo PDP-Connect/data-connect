@@ -576,6 +576,42 @@ describe("L9 emergency key withdrawal", () => {
         .some((e) => e.reason === "signing_key_withdrawn"),
     );
   });
+
+  it("normal retirement of an expired lease's key does not block a later lease under the new key", () => {
+    const s = setup({ grants: ["g1"], stepMs: MIN, drainMs: 2 * MIN });
+    const k2 = generateEd25519KeyPair("k2");
+    s.guard("g1").accept(
+      lease(s.key, { grant_id: "g1" }, s.clock.trueMs),
+      s.jwks,
+    );
+    // Rotation to k2, then an outage that outlasts the k1 lease. Planned
+    // retirement removes k1 from the JWKS after its last exp.
+    s.clock.advance(90 * MIN);
+    s.guard("g1").onJwksRefreshed(jwksOf(k2));
+    const v = s.guard("g1").accept(
+      lease(k2, { grant_id: "g1" }, s.clock.trueMs),
+      jwksOf(k2),
+    );
+    assert.equal(v.ok, true);
+    assert.equal(s.guard("g1").canAdmit().ok, true);
+    s.trainer.enqueue(examples("g1", 4));
+    assert.equal(s.trainer.step().kind, "completed");
+  });
+
+  it("a lease under a withdrawn key is refused even with a stale JWKS", () => {
+    const s = setup({ grants: ["g1"], stepMs: MIN, drainMs: 2 * MIN });
+    s.guard("g1").accept(
+      lease(s.key, { grant_id: "g1" }, s.clock.trueMs),
+      s.jwks,
+    );
+    s.guard("g1").onJwksRefreshed({ keys: [] });
+    const v = s.guard("g1").accept(
+      lease(s.key, { grant_id: "g1" }, s.clock.trueMs),
+      s.jwks,
+    );
+    assert.equal(v.ok, false);
+    assert.equal(s.guard("g1").canAdmit().ok, false);
+  });
 });
 
 describe("L11 job records", () => {

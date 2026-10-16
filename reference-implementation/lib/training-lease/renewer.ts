@@ -127,7 +127,14 @@ export class LeaseRenewer {
       return this.#nextAttemptAtMs;
     }
     this.attempts.push(nowMs);
-    const result = await this.#fetch();
+    let result: LeaseFetchResult;
+    try {
+      result = await this.#fetch();
+    } catch {
+      // A rejected transport (DNS, reset, timeout) is an outage, not a
+      // refusal: keep the held lease and retry with backoff.
+      result = { error: "transport_error", ok: false, terminal: false };
+    }
     if (result.ok) {
       const decoded = decodeCompactJws(result.lease);
       const iat = decoded?.payload.iat;

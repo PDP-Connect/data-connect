@@ -737,4 +737,41 @@ describe("L9 signing keys", () => {
     assert.ok(store.jwks().keys.some((k) => k.kid === lease.kid));
     store.close();
   });
+
+  it("a key created after the backup stays published after a restore until its last lease expires", () => {
+    const paths = tempPaths();
+    const clock = { now: T0 };
+    let store = openNode(paths, clock);
+    seed(store);
+    const bak = join(paths.dir, "backup.sqlite");
+    backup(paths.storePath, bak);
+    clock.now = T0 + 10 * MIN;
+    const k2 = store.rotateSigningKey();
+    const lease = store.issueLease({ grantId: "grt_1", clientId: "client_1" });
+    assert.equal(lease.ok && lease.kid, k2);
+    if (!lease.ok) return;
+    store.close();
+    restoreUnderRunningNodes(paths.storePath, bak);
+    clock.now = T0 + 20 * MIN;
+    store = openNode(paths, clock, { nodeId: "node-b" });
+    const lineage: InputLineage = {
+      iss: "https://as.example",
+      clientId: "client_1",
+      grantId: "grt_1",
+    };
+    assert.ok(
+      validateLeaseStatic(lease.lease, store.jwks() as Jwks, lineage).ok,
+      "the restored JWKS still verifies the live k2 lease",
+    );
+    const next = store.issueLease({ grantId: "grt_1", clientId: "client_1" });
+    assert.ok(next.ok, "issuance still signs after the restore");
+    assert.notEqual(next.ok && next.kid, k2, "k2 is verify-only");
+    assert.ok(
+      next.ok &&
+        validateLeaseStatic(next.lease, store.jwks() as Jwks, lineage).ok,
+    );
+    clock.now = lease.claims.exp * 1000;
+    assert.ok(!store.jwks().keys.some((k) => k.kid === k2));
+    store.close();
+  });
 });

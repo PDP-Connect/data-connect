@@ -10,9 +10,10 @@
  * Design (as built, after the first version failed its restore tests):
  *
  * - The authority is an append-only journal that MUST sit outside every
- *   restore path. Every authority creation, every issued lease (its `exp`
- *   and signing key), every withdrawal (tombstone) and every emergency key
- *   revocation is appended and fsynced before it takes effect.
+ *   restore path. Every authority creation, every signing key's creation
+ *   (its public JWK only), every issued lease (its `exp` and signing key),
+ *   every withdrawal (tombstone) and every emergency key revocation is
+ *   appended and fsynced before it takes effect.
  *   O_APPEND gives the entries one total order.
  * - The SQLite file is a projection of the journal, rebuilt by replay on
  *   every open. Restoring it from a backup loses nothing: the next open
@@ -157,6 +158,14 @@ type JournalEntry =
       at: number;
     }
   | {
+      t: "key_created";
+      id: string;
+      kid: string;
+      /** Public only. Private material never enters the journal. */
+      public_jwk: OkpPublicJwk;
+      at: number;
+    }
+  | {
       t: "key_revoked";
       id: string;
       kid: string;
@@ -188,6 +197,8 @@ class JournalIndex {
   readonly grants = new Map<string, GrantFacts>();
   /** L9 emergency revocations. A restored store must not re-activate these. */
   readonly revokedKids = new Set<string>();
+  /** Public JWK of each journaled key, so a restore cannot lose a verification key. */
+  readonly keys = new Map<string, { publicJwk: OkpPublicJwk; at: number }>();
   /** Latest `exp` signed by each key, so a restored store keeps retired keys published. */
   readonly keyMaxExpMs = new Map<string, number>();
   /** Sequence numbers, only for entries this node is waiting on (see watch). */
@@ -268,6 +279,12 @@ class JournalIndex {
     }
     if (e.t === "key_revoked") {
       this.revokedKids.add(e.kid);
+      return;
+    }
+    if (e.t === "key_created") {
+      if (!this.keys.has(e.kid)) {
+        this.keys.set(e.kid, { publicJwk: e.public_jwk, at: e.at });
+      }
       return;
     }
     const f = this.facts(e.grant_id);
@@ -410,6 +427,15 @@ export class TrainingAuthorityStore {
           grantId,
         );
       }
+    }
+    // A key the restored store never saw comes back verify-only: no private
+    // material, never 'active', so it is published but never signs.
+    const keyRestore = this.#store.prepare(
+      `INSERT INTO training_lease_signing_keys(kid, private_pem, public_jwk_json, status, created_at_ms, retired_at_ms)
+       VALUES (?, '', ?, 'retired', ?, ?) ON CONFLICT(kid) DO NOTHING`,
+    );
+    for (const [kid, k] of this.#journal.keys) {
+      keyRestore.run(kid, JSON.stringify(k.publicJwk), k.at, k.at);
     }
     const keyRaise = this.#store.prepare(
       "UPDATE training_lease_signing_keys SET max_exp_ms = MAX(COALESCE(max_exp_ms, 0), ?) WHERE kid = ?",
@@ -734,6 +760,15 @@ export class TrainingAuthorityStore {
       use: "sig",
       alg: "EdDSA",
     };
+    const now = this.#o.now();
+    // Journaled before the key can sign, so a restore keeps it verifiable.
+    appendJournal(this.#o.journalPath, {
+      t: "key_created",
+      id: randomUUID(),
+      kid: kp.kid,
+      public_jwk: jwk,
+      at: now,
+    });
     this.#store
       .prepare(
         "INSERT INTO training_lease_signing_keys(kid, private_pem, public_jwk_json, status, created_at_ms) VALUES (?, ?, ?, 'active', ?)",
@@ -742,7 +777,7 @@ export class TrainingAuthorityStore {
         kp.kid,
         exportPrivateKeyPem(kp.privateKey),
         JSON.stringify(jwk),
-        this.#o.now(),
+        now,
       );
     return kp.kid;
   }
