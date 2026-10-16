@@ -317,7 +317,20 @@ fn spawn_and_wait(
         Some(display) => display.spawn(command),
         None => spawn_child(command),
     }
-    .map_err(|error| format!("Failed to launch host browser: {error}"))?;
+    .map_err(|error| {
+        if error.kind() == std::io::ErrorKind::Unsupported {
+            // The presentation cannot be executed for this browser; say so
+            // and how to get the visible browser instead.
+            BrowserLaunchError::new(
+                BROWSER_DISPLAY_UNAVAILABLE,
+                format!(
+                    "{error}. Set DATACONNECT_BROWSER_DISPLAY=desktop to use a visible browser window."
+                ),
+            )
+        } else {
+            BrowserLaunchError::start_failed(format!("Failed to launch host browser: {error}"))
+        }
+    })?;
     let spawned_at = Instant::now();
     owned.pid = Some(spawned.process.id());
     owned.process = Some(spawned.process);
@@ -869,6 +882,79 @@ pub(crate) mod tests {
             events.all(),
             ["display-start", "display-stop-failed", "display-stop"]
         );
+    }
+
+    /// A display that cannot launch this browser hidden.
+    struct UnsupportedDisplay(FakeDisplay);
+
+    impl DisplaySession for UnsupportedDisplay {
+        fn browser_launch(&self) -> &BrowserDisplayLaunch {
+            &self.0.launch
+        }
+
+        fn spawn(
+            &mut self,
+            _command: std::process::Command,
+        ) -> std::io::Result<crate::commands::browser_display::SpawnedBrowser> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "not inside an application bundle",
+            ))
+        }
+
+        fn observed_visibility(&self) -> ObservedVisibility {
+            ObservedVisibility::Concealed
+        }
+
+        fn terminate(&mut self) -> bool {
+            self.0.terminate()
+        }
+    }
+
+    struct UnsupportedProvider(Events);
+
+    impl DisplayProvider for UnsupportedProvider {
+        fn backend(&self) -> DisplayBackend {
+            DisplayBackend::HiddenNative
+        }
+
+        fn start(&self, _deadline: Instant) -> Result<Box<dyn DisplaySession>, String> {
+            Ok(Box::new(UnsupportedDisplay(FakeDisplay::new(
+                self.0.clone(),
+                0,
+            ))))
+        }
+    }
+
+    #[test]
+    fn a_browser_the_backend_cannot_present_fails_with_the_way_out() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let events = Events::default();
+        let launcher = BrowserLauncher::new(
+            DisplayProviders::default().with(Arc::new(UnsupportedProvider(events.clone()))),
+        );
+        let executable = temp.path().join("chromium");
+        let failure = launcher
+            .launch(&LaunchSpec {
+                executable: &executable,
+                profile_dir: temp.path(),
+                headless: false,
+                display_backend: DisplayBackend::HiddenNative,
+                deadline: Instant::now() + Duration::from_secs(5),
+            })
+            .err()
+            .expect("unsupported");
+        assert_eq!(failure.error.code, BROWSER_DISPLAY_UNAVAILABLE);
+        assert!(
+            failure
+                .error
+                .message
+                .contains("DATACONNECT_BROWSER_DISPLAY=desktop"),
+            "{}",
+            failure.error.message
+        );
+        assert!(failure.unstopped.is_none());
+        assert_eq!(events.all(), ["display-stop"]);
     }
 
     #[test]

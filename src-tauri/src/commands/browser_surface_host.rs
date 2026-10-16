@@ -468,10 +468,13 @@ impl HostState {
             return false;
         };
         let started = Instant::now();
+        // Includes what happened after launch, such as a popup that showed
+        // before it was concealed.
+        let visibility = browsers[index].observed_visibility();
         if browsers[index].terminate() {
             browsers.remove(index);
             log::info!(
-                "Browser {pid} and its display stopped: cleanup_ms={}",
+                "Browser {pid} and its display stopped: cleanup_ms={} observed_visibility={visibility:?}",
                 elapsed_ms(started)
             );
             true
