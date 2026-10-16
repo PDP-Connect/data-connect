@@ -27,6 +27,7 @@ import { createOwnerPasswordVerifierStore } from "../server/stores/owner-passwor
 import { getOwnerSessionStore } from "../server/stores/owner-session-store.ts";
 import { dedicatedPostgresTestUrl } from "./helpers/dedicated-postgres-test-url.ts";
 import { withTemporaryPostgresDatabase } from "./helpers/postgres-temp-database.ts";
+import { deriveDeviceAuditId } from "../lib/postgres-spine.ts";
 
 const CLIENT_ID = "owner_device_atomicity_client";
 const TEST_POSTGRES_URL = dedicatedPostgresTestUrl(process.env.PDPP_TEST_POSTGRES_URL);
@@ -85,7 +86,7 @@ function countOwnerTokensForClient(): number {
 function countOwnerDeviceEvents(deviceCode: string, eventType: string): number {
   return countRows(
     "spine_events",
-    `object_id = '${deviceCode}' AND object_type = 'owner_device_auth' AND event_type = '${eventType}'`
+    `object_id = '${deriveDeviceAuditId(deviceCode)}' AND object_type = 'owner_device_auth' AND event_type = '${eventType}'`
   );
 }
 

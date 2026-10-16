@@ -3182,8 +3182,8 @@ test("PDPP reference implementation integration", async (t) => {
         // literal. Spec: harden-reference-auth-surfaces §7.
         assert.equal(submittedEvent.object_id, "<redacted-device-code>");
         assert.equal(submittedEvent.data?.issuance_path, "owner_device_flow");
-        // user_code is part of the takeover chain; redacted on public reads.
-        assert.equal(submittedEvent.data?.user_code, "<redacted-bearer>");
+        // user_code is part of the takeover chain; it is dropped at event ingress.
+        assert.equal(submittedEvent.data?.user_code, undefined);
 
         const pendingResp = await fetch(`${asUrl}/oauth/token`, {
           body: new URLSearchParams({
@@ -3231,8 +3231,8 @@ test("PDPP reference implementation integration", async (t) => {
         assert.ok(ownerTokenEvent, "trace should include owner token issuance");
         assert.equal(ownerTokenEvent.request_id, requestId);
         assert.equal(ownerTokenEvent.client_id, "cli_longview");
-        // user_code redacted on public _ref read.
-        assert.equal(ownerTokenEvent.data?.user_code, "<redacted-bearer>");
+        // user_code is dropped at event ingress.
+        assert.equal(ownerTokenEvent.data?.user_code, undefined);
       });
     }
   );
@@ -3290,7 +3290,7 @@ test("PDPP reference implementation integration", async (t) => {
       // by request_id and client_id remains intact.
       assert.equal(rejectedEvent.object_id, "<redacted-device-code>");
       assert.equal(rejectedEvent.data?.issuance_path, "owner_device_flow");
-      assert.equal(rejectedEvent.data?.user_code, "<redacted-bearer>");
+      assert.equal(rejectedEvent.data?.user_code, undefined);
       assert.equal(rejectedEvent.data?.error?.code, "access_denied");
       assert.match(rejectedEvent.data?.error?.message || "", REGEXP_46);
     });

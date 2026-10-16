@@ -1566,10 +1566,10 @@ test("PDPP CLI smoke", async (t) => {
       assert.ok(requestSubmitted, "trace show should include owner-device request.submitted");
       assert.equal(requestSubmitted.request_id, requestId);
       assert.equal(requestSubmitted.client_id, "cli_longview");
-      // Public _ref redacts bearer-equivalent device_code / user_code on
-      // owner_device_auth (harden-reference-auth-surfaces §7).
+      // Public _ref redacts the device-code object id on owner_device_auth
+      // (harden-reference-auth-surfaces §7); user_code is dropped at ingress.
       assert.equal(requestSubmitted.object_id, "<redacted-device-code>");
-      assert.equal(requestSubmitted.data?.user_code, "<redacted-bearer>");
+      assert.equal(requestSubmitted.data?.user_code, undefined);
 
       const approved = (result.json.data || []).find(
         (event) => event.event_type === "consent.approved" && event.object_type === "owner_device_auth"
@@ -1578,7 +1578,7 @@ test("PDPP CLI smoke", async (t) => {
       assert.equal(approved.request_id, requestId);
       assert.equal(approved.client_id, "cli_longview");
       assert.equal(approved.object_id, "<redacted-device-code>");
-      assert.equal(approved.data?.user_code, "<redacted-bearer>");
+      assert.equal(approved.data?.user_code, undefined);
 
       const tokenIssued = (result.json.data || []).find(
         (event) => event.event_type === "token.issued" && event.data?.issuance_path === "owner_device_flow"
@@ -1586,7 +1586,7 @@ test("PDPP CLI smoke", async (t) => {
       assert.ok(tokenIssued, "trace show should include owner-device token.issued");
       assert.equal(tokenIssued.request_id, requestId);
       assert.equal(tokenIssued.client_id, "cli_longview");
-      assert.equal(tokenIssued.data?.user_code, "<redacted-bearer>");
+      assert.equal(tokenIssued.data?.user_code, undefined);
       assert.equal(result.stderr, "");
     });
   });
@@ -1643,7 +1643,7 @@ test("PDPP CLI smoke", async (t) => {
       assert.equal(rejected.client_id, "cli_longview");
       assert.equal(rejected.object_id, "<redacted-device-code>");
       assert.equal(rejected.data?.issuance_path, "owner_device_flow");
-      assert.equal(rejected.data?.user_code, "<redacted-bearer>");
+      assert.equal(rejected.data?.user_code, undefined);
       assert.equal(asRecord(rejected.data?.error).code, "access_denied");
       assert.match(String(asRecord(rejected.data?.error).message ?? ""), TOP_LEVEL_REGEX_14);
       assert.equal(result.stderr, "");
