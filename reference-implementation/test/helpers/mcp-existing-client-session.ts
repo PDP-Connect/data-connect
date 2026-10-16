@@ -921,10 +921,10 @@ export async function replay(
           instanceId
         if (typeof row.grant_id === "string" && connectionId) {
           byConnection.set(connectionId, row.grant_id)
-          byConnectionAll.set(connectionId, [
+          byConnectionAll.set(connectionId, [...new Set([
             ...(byConnectionAll.get(connectionId) ?? []),
             row.grant_id,
-          ])
+          ])])
         }
         Object.values(row).forEach(collect)
       }
@@ -1039,9 +1039,15 @@ export async function replay(
       )
     ).body
   )
+  const isAmbiguousLegacyRead = (read: JsonObject, uri: string): boolean => {
+    const connectionId = connectionIdForResourceUri(uri)
+    return tokenKind === "package" && read.isError === true &&
+      object(object(read.structuredContent).error).code === "ambiguous_legacy_resource_uri" &&
+      !!connectionId && (grantIdsByConnection.get(connectionId)?.length ?? 0) > 1
+  }
   const resourceContents = resourceRead.contents as JsonObject[]
   assert(
-    Array.isArray(resourceContents) &&
+    isAmbiguousLegacyRead(resourceRead, recordUri) || Array.isArray(resourceContents) &&
       resourceContents.some(
         part =>
           typeof part.text === "string" && String(part.text).includes(LONG_TEXT)
@@ -1084,7 +1090,7 @@ export async function replay(
       ).body
     )
     assert(
-      Array.isArray(replayed.contents) &&
+      isAmbiguousLegacyRead(replayed, uri) || Array.isArray(replayed.contents) &&
         (replayed.contents as JsonObject[]).some(
           part => typeof part.text === "string" && part.text.trim().length > 0
         ),
@@ -1527,10 +1533,8 @@ export async function replay(
         `package resource URI has no advertised template: ${oldUri}`
       )
       const templateUri = String(template.uriTemplate)
-      assert(
-        templateUri.includes("{grant_id}/"),
-        `package resource template '${String(template.name)}' does not advertise grant_id selection`
-      )
+      // Child discovery alone does not require a new resource URI form.
+      if (!templateUri.includes("{grant_id}")) continue
       const oldHandle = oldUri.slice(oldUri.indexOf("/", "pdpp://".length) + 1)
       for (const candidateGrantId of grantIds) {
         const uri = templateUri
@@ -1569,7 +1573,7 @@ export async function replay(
       assert(
         typeof errorCode === "string" &&
           errorCode === "ambiguous_legacy_resource_uri" &&
-          uri.startsWith("pdpp://record/") &&
+          resourceUris.includes(uri) &&
           matchingGrantIds.length > 1,
         `resources/read refused stored URI without genuine ambiguity; code=${String(errorCode)}, matchingChildren=${matchingGrantIds.length}: ${uri}`
       )
@@ -1837,10 +1841,10 @@ export async function capturePackageResourceSession(
           (typeof source.connection_id === "string" && source.connection_id) ||
           instanceId
         if (typeof row.grant_id === "string" && connectionId) {
-          grantsByConnection.set(connectionId, [
+          grantsByConnection.set(connectionId, [...new Set([
             ...(grantsByConnection.get(connectionId) ?? []),
             row.grant_id,
-          ])
+          ])])
         }
         Object.values(row).forEach(collect)
       }
@@ -1857,6 +1861,8 @@ export async function capturePackageResourceSession(
       "base package fixture has no stored resource URIs"
     )
     const urisToRead = new Set(oldUris)
+    const selectedResourceReads: JsonObject[] = []
+    const wrongChildUris = new Set<string>()
     const ambiguousLegacyUris: string[] = []
     if (grantsByConnection.size > 0) {
       for (const oldUri of oldUris) {
@@ -1874,20 +1880,29 @@ export async function capturePackageResourceSession(
           grants.length > 0,
           `package resource URI has no discovered child: ${oldUri}`
         )
-        if (grants.length > 1) ambiguousLegacyUris.push(oldUri)
         if (!template || typeof template.uriTemplate !== "string") continue
-        const handle = oldUri.slice(oldUri.lastIndexOf("/") + 1)
+        if (!template.uriTemplate.includes("{grant_id}")) continue
+        if (grants.length > 1) ambiguousLegacyUris.push(oldUri)
+        const handle = oldUri.slice(oldUri.indexOf("/", "pdpp://".length) + 1)
+        const expand = (grantId: string): string =>
+          String(template.uriTemplate)
+            .replace("{grant_id}", encodeURIComponent(grantId))
+            .replace("{handle}", handle)
         for (const grantId of grants) {
-          urisToRead.add(
-            String(template.uriTemplate)
-              .replace("{grant_id}", encodeURIComponent(grantId))
-              .replace("{handle}", handle)
-          )
+          const uri = expand(grantId)
+          urisToRead.add(uri)
+          selectedResourceReads.push({ uri, oldUri, grantId })
+        }
+        for (const grantId of new Set([...grantsByConnection.values()].flat())) {
+          if (!grants.includes(grantId)) wrongChildUris.add(expand(grantId))
         }
       }
     }
+    for (const resource of (resourceList.resources ?? []) as JsonObject[]) {
+      if (typeof resource.uri === "string") urisToRead.add(resource.uri)
+    }
     const resourceReads = await Promise.all(
-      [...urisToRead].map(async uri => {
+      [...new Set([...urisToRead, ...wrongChildUris])].map(async uri => {
         const response = (
           await rpc(
             rsUrl,
@@ -1936,6 +1951,8 @@ export async function capturePackageResourceSession(
           : {}),
       },
       resourceReads,
+      selectedResourceReads,
+      wrongChildUris: [...wrongChildUris],
       ambiguousLegacyUris,
       toolNames: tools.map(tool => tool.name),
     }
