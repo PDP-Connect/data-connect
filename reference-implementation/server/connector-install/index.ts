@@ -22,6 +22,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
+import { parseManifestJson } from "../../lib/collection-profile-bindings.ts";
 import { canonicalConnectorKey } from "../connector-key.ts";
 import {
   assertConnectorLifecycleAvailable,
@@ -629,7 +630,7 @@ function verifyStoredRecord(root: string, active: ConnectorInstallRecord, dataDi
   if (!manifestFile) {
     throw new Error("Active connector manifest path is invalid.");
   }
-  const manifest = JSON.parse(readFileSync(manifestFile, "utf8")) as Record<string, unknown>;
+  const manifest = parseManifestJson(readFileSync(manifestFile, "utf8")) as Record<string, unknown>;
   const manifestKey = canonicalManifestKey(manifest);
   if (manifestKey !== active.connectorId) {
     throw new Error("Active connector manifest identity does not match its record.");
@@ -671,7 +672,7 @@ function readVerifiedRecord(root: string, entry: ConnectorCatalogEntry): Connect
   if (lstatSync(manifestFile).size > MAX_CONFIG_BYTES) {
     throw new Error("Connector profile exceeds the 1 MiB RI limit.");
   }
-  const manifest: unknown = JSON.parse(readFileSync(manifestFile, "utf8"));
+  const manifest: unknown = parseManifestJson(readFileSync(manifestFile, "utf8"));
   if (!manifest || typeof manifest !== "object") {
     throw new Error("Connector profile is invalid.");
   }

@@ -1,0 +1,364 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/PDP-Connect/data-connectors/schemas/connector-manifest.schema.json",
+  "title": "Collection Profile manifest runtime requirements",
+  "description": "Machine-readable half of docs/spec/collection-profile.md Section 3.3: binding instances, kinds, interface versions, typed constraints, binding features, and filesystem inputs. Other manifest fields are outside this schema's scope. String patterns for constraint grammars (Section 3.3.4, 3.3.5) are a necessary but not sufficient structural check: they accept the canonical output of schemas/connector-binding-grammar.mjs, but full IDNA canonicalization, IPv4-looking-label rejection, and IPv6 normalization are that module's job, not this schema's. A string this schema accepts can still be non-canonical in a way only that module detects.",
+  "type": "object",
+  "properties": {
+    "runtime_requirements": {
+      "type": "object",
+      "properties": {
+        "bindings": { "$ref": "#/$defs/bindings" }
+      }
+    }
+  },
+  "$defs": {
+    "bindings": {
+      "type": "object",
+      "propertyNames": { "$ref": "#/$defs/bindingMapKey" },
+      "additionalProperties": false,
+      "patternProperties": {
+        "^browser$": { "$ref": "#/$defs/shorthandBrowserInstance" },
+        "^desktop_session$": { "$ref": "#/$defs/shorthandDesktopSessionInstance" },
+        "^filesystem$": { "$ref": "#/$defs/shorthandFilesystemInstance" },
+        "^network$": { "$ref": "#/$defs/shorthandNetworkInstance" },
+        "^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+/[a-z0-9]([a-z0-9._-]*[a-z0-9])?$": {
+          "$ref": "#/$defs/namespacedExtensionInstance"
+        },
+        "^(?!browser$|desktop_session$|filesystem$|network$)[a-z][a-z0-9_]*$": { "$ref": "#/$defs/namedInstance" }
+      }
+    },
+    "bindingMapKey": {
+      "type": "string",
+      "description": "A binding map key is either a registry or namespaced binding name used as shorthand for one instance of that kind, or a free-form author-local instance key that declares its kind explicitly (Section 3.3).",
+      "anyOf": [{ "$ref": "#/$defs/bindingName" }, { "$ref": "#/$defs/instanceKeyPattern" }]
+    },
+    "instanceKeyPattern": {
+      "type": "string",
+      "pattern": "^(?!browser$|desktop_session$|filesystem$|network$)[a-z][a-z0-9_]*$"
+    },
+    "bindingName": {
+      "type": "string",
+      "description": "A registry binding name, or an extension binding namespaced as <domain>/<name>. Unqualified names are reserved for the registry.",
+      "anyOf": [
+        { "$ref": "#/$defs/registryBinding" },
+        { "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+/[a-z0-9]([a-z0-9._-]*[a-z0-9])?$" }
+      ]
+    },
+    "registryBinding": {
+      "type": "string",
+      "description": "Binding registry:\n- browser: A runtime-managed browser surface.\n- desktop_session: The owner's active, logged-in desktop session and its operating-system facilities.\n- filesystem: Access to local files.\n- network: Outbound network access.",
+      "enum": ["browser", "desktop_session", "filesystem", "network"]
+    },
+
+    "instanceRequired": {
+      "type": "object",
+      "required": ["required"],
+      "properties": { "required": { "type": "boolean" } }
+    },
+    "noKind": { "not": { "type": "object", "required": ["kind"], "properties": { "kind": true } } },
+
+    "shorthandBrowserInstance": {
+      "allOf": [{ "$ref": "#/$defs/instanceRequired" }, { "$ref": "#/$defs/noKind" }, { "$ref": "#/$defs/browserExtra" }]
+    },
+    "shorthandNetworkInstance": {
+      "allOf": [{ "$ref": "#/$defs/instanceRequired" }, { "$ref": "#/$defs/noKind" }, { "$ref": "#/$defs/networkExtra" }]
+    },
+    "shorthandFilesystemInstance": {
+      "allOf": [{ "$ref": "#/$defs/instanceRequired" }, { "$ref": "#/$defs/noKind" }, { "$ref": "#/$defs/filesystemExtra" }]
+    },
+    "shorthandDesktopSessionInstance": {
+      "allOf": [
+        { "$ref": "#/$defs/instanceRequired" },
+        { "$ref": "#/$defs/noKind" },
+        { "$ref": "#/$defs/desktopSessionExtra" }
+      ]
+    },
+    "namespacedExtensionInstance": {
+      "allOf": [
+        { "$ref": "#/$defs/instanceRequired" },
+        { "$ref": "#/$defs/noKind" },
+        { "$ref": "#/$defs/genericExtensionExtra" }
+      ]
+    },
+    "namedInstance": {
+      "description": "A free-form author-local binding key. It MUST declare kind (Section 3.3), which selects the constraint and feature shape below by value, the same shape a shorthand key of that kind would use.",
+      "allOf": [
+        { "$ref": "#/$defs/instanceRequired" },
+        { "type": "object", "required": ["kind"], "properties": { "kind": true } },
+        { "type": "object", "properties": { "kind": { "$ref": "#/$defs/bindingName" } } },
+        {
+          "if": { "type": "object", "properties": { "kind": { "const": "browser" } } },
+          "then": { "$ref": "#/$defs/browserExtra" }
+        },
+        {
+          "if": { "type": "object", "properties": { "kind": { "const": "network" } } },
+          "then": { "$ref": "#/$defs/networkExtra" }
+        },
+        {
+          "if": { "type": "object", "properties": { "kind": { "const": "filesystem" } } },
+          "then": { "$ref": "#/$defs/filesystemExtra" }
+        },
+        {
+          "if": { "type": "object", "properties": { "kind": { "const": "desktop_session" } } },
+          "then": { "$ref": "#/$defs/desktopSessionExtra" }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "kind": { "type": "string", "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+/[a-z0-9]([a-z0-9._-]*[a-z0-9])?$" }
+            }
+          },
+          "then": { "$ref": "#/$defs/genericExtensionExtra" }
+        }
+      ]
+    },
+
+    "browserExtra": {
+      "type": "object",
+      "properties": {
+        "interface": { "type": "string", "pattern": "^browser@[1-9][0-9]*$" },
+        "features": {
+          "type": "array",
+          "items": { "anyOf": [{ "$ref": "#/$defs/browserFeature" }, { "$ref": "#/$defs/legacyBrowserFeature" }] },
+          "uniqueItems": true
+        },
+        "constraints": { "$ref": "#/$defs/browserConstraints" }
+      }
+    },
+    "networkExtra": {
+      "type": "object",
+      "properties": {
+        "interface": { "type": "string", "pattern": "^network@[1-9][0-9]*$" },
+        "features": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/networkFeature" },
+          "uniqueItems": true
+        },
+        "constraints": { "$ref": "#/$defs/networkConstraints" }
+      }
+    },
+    "filesystemExtra": {
+      "type": "object",
+      "not": { "type": "object", "required": ["features"], "properties": { "features": true } },
+      "properties": {
+        "interface": { "type": "string", "pattern": "^filesystem@[1-9][0-9]*$" },
+        "inputs": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/filesystemInput" }
+        },
+        "constraints": { "$ref": "#/$defs/filesystemConstraints" }
+      }
+    },
+    "desktopSessionExtra": {
+      "type": "object",
+      "not": { "type": "object", "required": ["features"], "properties": { "features": true } },
+      "properties": {
+        "interface": { "type": "string", "pattern": "^desktop_session@[1-9][0-9]*$" },
+        "constraints": { "$ref": "#/$defs/desktopSessionConstraints" }
+      }
+    },
+    "genericExtensionExtra": {
+      "description": "An extension kind defines its own feature and constraint vocabulary. This schema only checks that a declared feature, if any, is drawn from the shared feature enum, matching the leniency extension bindings already had before binding instances existed; constraints are an open object.",
+      "type": "object",
+      "properties": {
+        "interface": { "type": "string", "minLength": 1 },
+        "features": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/bindingFeature" },
+          "uniqueItems": true
+        },
+        "constraints": { "type": "object" }
+      }
+    },
+
+    "browserFeature": {
+      "type": "string",
+      "description": "Features the browser kind provides (Section 3.3.1):\n- page_navigation: Navigate the active page to a URL.\n- page_script_evaluation: Run script in the active page context.\n- page_content_read: Read rendered page content.\n- page_condition_wait: Wait until a condition in the active page becomes true.\n- host_download_capture: Capture content downloaded by the active page.\n- host_archive_extraction: Extract downloaded archive contents in the host runtime.\n- host_archive_entry_chunk_read: Read an extracted archive entry in chunks.\n- page_input: Interact with the active page: click and type.\n- cookie_read: Read the active page's cookie jar.\n- page_response_observation: Observe page network responses, including response body content.\n- host_cookie_jar_request: Make an HTTP request from the host runtime using the active page's cookie jar.",
+      "enum": [
+        "page_navigation",
+        "page_script_evaluation",
+        "page_content_read",
+        "page_condition_wait",
+        "host_download_capture",
+        "host_archive_extraction",
+        "host_archive_entry_chunk_read",
+        "page_input",
+        "cookie_read",
+        "page_response_observation",
+        "host_cookie_jar_request"
+      ]
+    },
+    "legacyBrowserFeature": {
+      "type": "string",
+      "description": "Section 3.3.8: host_http_request is also valid on browser as a named legacy dual placement, not the target shape. It is not added to browserFeature, so a validator can tell a legacy placement from the one-kind-per-feature rule new features follow. github_browser and strava_browser already declare it here, and scripts/pageshim/capabilities.mjs already supports it on both kinds. A future versioned alias, coordinated with the mobile host, is expected to resolve this; this schema does not perform that move.",
+      "enum": ["host_http_request"]
+    },
+    "networkFeature": {
+      "type": "string",
+      "description": "Features the network kind provides (Section 3.3.1):\n- same_origin_page_fetch: Fetch same-origin resources from the active page context.\n- host_http_request: Make an HTTP request from the host runtime outside the page context.",
+      "enum": ["same_origin_page_fetch", "host_http_request"]
+    },
+    "bindingFeature": {
+      "type": "string",
+      "description": "Host capability definitions (Section 3.3.8; each belongs to exactly one kind, see browserFeature and networkFeature):\n- page_navigation: Navigate the active page to a URL.\n- page_script_evaluation: Run script in the active page context.\n- page_content_read: Read rendered page content.\n- page_condition_wait: Wait until a condition in the active page becomes true.\n- same_origin_page_fetch: Fetch same-origin resources from the active page context.\n- host_http_request: Make an HTTP request from the host runtime outside the page context.\n- host_download_capture: Capture content downloaded by the active page.\n- host_archive_extraction: Extract downloaded archive contents in the host runtime.\n- host_archive_entry_chunk_read: Read an extracted archive entry in chunks.\n- page_input: Interact with the active page: click and type.\n- cookie_read: Read the active page's cookie jar.\n- page_response_observation: Observe page network responses, including response body content.\n- host_cookie_jar_request: Make an HTTP request from the host runtime using the active page's cookie jar.",
+      "enum": [
+        "page_navigation",
+        "page_script_evaluation",
+        "page_content_read",
+        "page_condition_wait",
+        "same_origin_page_fetch",
+        "host_http_request",
+        "host_download_capture",
+        "host_archive_extraction",
+        "host_archive_entry_chunk_read",
+        "page_input",
+        "cookie_read",
+        "page_response_observation",
+        "host_cookie_jar_request"
+      ]
+    },
+
+    "browserConstraints": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "navigate": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/webHostString" }
+        },
+        "connect": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/webConnectHostString" }
+        }
+      }
+    },
+    "networkConstraints": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "hosts": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "anyOf": [
+              { "$ref": "#/$defs/webHostString" },
+              { "$ref": "#/$defs/endpointString" },
+              { "$ref": "#/$defs/setupFieldHost" }
+            ]
+          }
+        }
+      }
+    },
+    "setupFieldHost": {
+      "type": "object",
+      "description": "A host or endpoint supplied through a manifest setup field rather than a literal (Section 3.3.4). This is a typed reference, not string interpolation: setup_field names the field, and the runtime resolves and freezes its value before the owner approves the grant.",
+      "additionalProperties": false,
+      "required": ["setup_field"],
+      "properties": {
+        "setup_field": { "type": "string", "minLength": 1 },
+        "allow_private": { "type": "boolean" }
+      }
+    },
+    "webHostString": {
+      "type": "string",
+      "description": "Canonical [scheme://]host[:port] for browser.navigate and an HTTP(S) network host (Section 3.3.3, 3.3.4): lowercase, IDNA ASCII, default http/https port dropped, normalized IPv6, no IPv4-looking non-canonical label, no trailing dot, exact host or one leading '*.' label, no path. This pattern is a structural approximation; schemas/connector-binding-grammar.mjs#canonicalizeWebHost is the reference implementation.",
+      "pattern": "^(https?://)?(\\*\\.([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?|(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])(\\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}|\\[[0-9a-f:]+\\]|([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)*[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)(:[1-9][0-9]{0,4})?$"
+    },
+    "webConnectHostString": {
+      "type": "string",
+      "description": "Canonical [scheme://]host[:port] for browser.connect (Section 3.3.3), which is scheme-aware: a page loaded over http(s) can open a ws/wss WebSocket (live capture evidence: wss://ws.chatgpt.com), so connect accepts http, https, ws, or wss where navigate accepts only http/https. Otherwise the same canonicalization as webHostString. schemas/connector-binding-grammar.mjs#canonicalizeConnectHost is the reference implementation.",
+      "pattern": "^((https?|wss?)://)?(\\*\\.([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?|(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])(\\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}|\\[[0-9a-f:]+\\]|([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)*[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)(:[1-9][0-9]{0,4})?$"
+    },
+    "endpointString": {
+      "type": "string",
+      "description": "Canonical scheme://host[:port] for a non-HTTP, non-WebSocket network endpoint, for example IMAP (Section 3.3.4): scheme required, no wildcard, otherwise the same host canonicalization as webHostString. ws/wss are reserved for browser.connect (Section 3.3.3) and are not valid here. schemas/connector-binding-grammar.mjs#canonicalizeEndpoint is the reference implementation.",
+      "pattern": "^(?!(https?|wss?)://)[a-z][a-z0-9+.-]*://((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])(\\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}|\\[[0-9a-f:]+\\]|([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)*[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)(:[1-9][0-9]{0,4})?$"
+    },
+
+    "filesystemConstraints": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "inputs": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/filesystemInput" }
+        },
+        "outputs": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/filesystemOutput" }
+        }
+      }
+    },
+    "filesystemInput": {
+      "type": "object",
+      "description": "A local path the connector reads. env_var values must be unique within inputs; JSON Schema cannot express that, so the profile states it and the schema test checks it for checked-in manifests.",
+      "additionalProperties": false,
+      "required": ["env_var", "kind", "access"],
+      "properties": {
+        "env_var": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$" },
+        "kind": { "type": "string", "enum": ["file", "dir"] },
+        "access": { "type": "string", "enum": ["read"] },
+        "accepted_extensions": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^\\.[a-z0-9]+(\\.[a-z0-9]+)*$" }
+        }
+      }
+    },
+    "filesystemOutput": {
+      "type": "object",
+      "description": "A declared output root the connector may write under (Section 3.3.3). The reserved slot \"scratch\" names the runtime's ephemeral per-run directory and MUST NOT be durable.",
+      "additionalProperties": false,
+      "required": ["slot", "access"],
+      "properties": {
+        "slot": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+        "access": { "type": "string", "enum": ["write"] },
+        "overwrite": { "type": "boolean" },
+        "delete": { "type": "boolean" },
+        "durable": { "type": "boolean" }
+      },
+      "if": { "type": "object", "properties": { "slot": { "const": "scratch" } } },
+      "then": { "type": "object", "properties": { "durable": { "const": false } } }
+    },
+
+    "desktopSessionConstraints": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["items"],
+      "properties": {
+        "items": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/desktopSessionItem" }
+        }
+      }
+    },
+    "desktopSessionItem": {
+      "type": "object",
+      "description": "One exact secret item and the operations brokered on it (Section 3.3.6). selector is an opaque, connector- and OS-specific identifier; the runtime broker resolves it, never the manifest.",
+      "additionalProperties": false,
+      "required": ["service", "selector", "operations"],
+      "properties": {
+        "service": { "type": "string", "minLength": 1 },
+        "selector": { "type": "string", "minLength": 1 },
+        "operations": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "enum": ["read", "unwrap"] }
+        }
+      }
+    }
+  }
+}

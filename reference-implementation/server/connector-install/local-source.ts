@@ -20,6 +20,11 @@ import {
   writeFileSync,
 } from "node:fs"
 import { isAbsolute, join, relative, resolve, sep } from "node:path"
+import {
+  bindingInstanceKind,
+  parseManifestJson,
+  validateBindingDeclarations,
+} from "../../lib/collection-profile-bindings.ts"
 import { canonicalConnectorKey } from "../connector-key.ts"
 
 const MANIFEST_PATH = "profile/collection-profile.json"
@@ -147,7 +152,7 @@ function readManifest(root: string): {
   }
   let parsed: unknown
   try {
-    parsed = JSON.parse(readFileSync(manifestPath, "utf8"))
+    parsed = parseManifestJson(readFileSync(manifestPath, "utf8"))
   } catch (error) {
     throw new Error(
       `Collection Profile manifest is invalid: ${error instanceof Error ? error.message : String(error)}`,
@@ -181,23 +186,11 @@ function readManifest(root: string): {
     assertRecord(requirements, "Collection Profile runtime_requirements")
     const bindings = requirements.bindings
     if (bindings !== undefined && bindings !== null) {
-      assertRecord(bindings, "Collection Profile runtime_requirements.bindings")
+      validateBindingDeclarations(bindings)
       for (const [binding, requirement] of Object.entries(bindings)) {
-        if (!LOCAL_BINDINGS.has(binding)) {
+        if (!LOCAL_BINDINGS.has(bindingInstanceKind(binding, requirement))) {
           throw new Error(
             `Collection Profile declares unsupported runtime binding: ${binding}`
-          )
-        }
-        assertRecord(
-          requirement,
-          `Collection Profile runtime binding ${binding}`
-        )
-        if (
-          requirement.required !== undefined &&
-          typeof requirement.required !== "boolean"
-        ) {
-          throw new Error(
-            `Collection Profile runtime binding ${binding}.required must be a boolean.`
           )
         }
       }

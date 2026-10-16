@@ -473,7 +473,7 @@ rl.on('line', (line) => {
   return { cleanup: () => rmSync(tmpDir, { force: true, recursive: true }), connectorPath };
 }
 
-function createStartCaptureConnector(capturePath: string) {
+function createStartCaptureConnector(capturePath: string, interactWhenAvailable = false) {
   const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-start-capture-"));
   const connectorPath = join(tmpDir, "connector.mjs");
 
@@ -483,13 +483,30 @@ import { writeFileSync } from 'node:fs';
 
 const rl = createInterface({ input: process.stdin, terminal: false });
 
+function finish() {
+  process.stdout.write(JSON.stringify({ type: 'DONE', status: 'succeeded', records_emitted: 0 }) + '\\n');
+  rl.close();
+  process.exit(0);
+}
+
 rl.on('line', (line) => {
   const msg = JSON.parse(line);
   if (msg.type === 'START') {
     writeFileSync(${JSON.stringify(capturePath)}, JSON.stringify(msg, null, 2));
-    process.stdout.write(JSON.stringify({ type: 'DONE', status: 'succeeded', records_emitted: 0 }) + '\\n');
-    rl.close();
-    process.exit(0);
+    if (${JSON.stringify(interactWhenAvailable)} && Object.hasOwn(msg.bindings || {}, 'interactive')) {
+      process.stdout.write(JSON.stringify({
+        type: 'INTERACTION',
+        request_id: 'binding-interaction',
+        kind: 'manual_action',
+        message: 'Complete the fixture action.',
+        timeout_seconds: 5,
+      }) + '\\n');
+      return;
+    }
+    finish();
+  } else if (msg.type === 'INTERACTION_RESPONSE') {
+    if (msg.request_id !== 'binding-interaction' || msg.status !== 'success') process.exit(1);
+    finish();
   }
 });
 `;
@@ -3549,7 +3566,7 @@ rl.on('line', (line) => {
       ...MINIMAL_MANIFEST,
       runtime_requirements: {
         bindings: {
-          browser_automation: { required: true },
+          keyring: { kind: "desktop_session", required: true },
         },
       },
     };
@@ -3575,7 +3592,7 @@ rl.on('line', (line) => {
             state: null,
           }),
         // biome-ignore lint/performance/useTopLevelRegex: localized test assertion preserves its explicit contract.
-        /binding/i,
+        /required binding: keyring \(desktop_session\)/i,
         "Should reject when required binding is not available"
       );
     } finally {
@@ -3583,53 +3600,105 @@ rl.on('line', (line) => {
     }
   });
 
-  await t.test("runtime satisfies required interactive bindings and advertises them in START", async () => {
-    const manifestWithInteractiveBinding = {
-      ...MINIMAL_MANIFEST,
-      runtime_requirements: {
-        bindings: {
-          interactive: { required: true },
-        },
-      },
-    };
+  await t.test("runtime rejects reserved interactive instance names before START", async () => {
+    for (const hasInteractionHandler of [false, true]) {
+      for (const declaration of [
+        { kind: "browser", required: true },
+        { kind: "desktop_session", required: false },
+      ]) {
+        const { connectorPath, cleanup } = createTestConnector([
+          { records_emitted: 0, status: "succeeded", type: "DONE" },
+        ]);
+        let started = false;
+        try {
+          await assert.rejects(
+            () =>
+              runTestConnector({
+                admitRunConnection: fakeEchoAdmitRunConnection(),
+                collectionMode: "full_refresh",
+                connectorId: "test",
+                connectorPath,
+                manifest: {
+                  ...MINIMAL_MANIFEST,
+                  runtime_requirements: { bindings: { interactive: declaration } },
+                },
+                onInteraction: hasInteractionHandler ? async () => ({}) : null,
+                onStarted: () => {
+                  started = true;
+                },
+                ownerToken: "test",
+                persistState: true,
+                rsUrl: "http://localhost:9999",
+                state: null,
+              }),
+            { message: "runtime_requirements.bindings.interactive is reserved for the host interaction capability" }
+          );
+          assert.equal(started, false);
+        } finally {
+          cleanup();
+        }
+      }
+    }
+  });
 
-    const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-interactive-binding-capture-"));
-    const capturePath = join(tmpDir, "start.json");
-    const { connectorPath, cleanup } = createStartCaptureConnector(capturePath);
+  await t.test("named bindings preserve the legacy interaction advertisement and exchange", async () => {
+    for (const hasInteractionHandler of [false, true]) {
+      const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+      const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-named-interaction-capture-"));
+      const capturePath = join(tmpDir, "start.json");
+      // The child requests interaction only when the legacy presence-based
+      // advertisement exists, and waits for the response before emitting DONE.
+      const { connectorPath, cleanup } = createStartCaptureConnector(capturePath, true);
+      let interactionCount = 0;
 
-    try {
-      const result = await runTestConnector({
-        // Bare runtime unit test: no server, no registered connector, an
-        // unreachable rsUrl. A pure-echo admission just needs to clear the
-        // gate so the START.bindings capture under test is reached.
-        admitRunConnection: fakeEchoAdmitRunConnection(),
-        collectionMode: "full_refresh",
-        connectorId: "test",
-        connectorPath,
-        manifest: manifestWithInteractiveBinding,
-        onInteraction: async () => ({
-          data: {},
-          request_id: "unused",
-          status: "success",
-          type: "INTERACTION_RESPONSE",
-        }),
-        ownerToken: "test",
-        persistState: true,
-        rsUrl: "http://localhost:9999",
-        state: null,
-      });
+      try {
+        const { ownerToken, connectorId } = await setupConnector(server, server.asPort);
+        const result = await runTestConnector({
+          collectionMode: "full_refresh",
+          connectorId,
+          connectorPath,
+          manifest: {
+            ...MINIMAL_MANIFEST,
+            runtime_requirements: {
+              bindings: {
+                site: { kind: "browser", required: true },
+                desktop: { kind: "desktop_session", required: false },
+              },
+            },
+          },
+          onInteraction: hasInteractionHandler
+            ? async (interaction) => {
+                interactionCount += 1;
+                assert.equal(interaction.request_id, "binding-interaction");
+                return {
+                  data: {},
+                  request_id: interaction.request_id,
+                  status: "success",
+                  type: "INTERACTION_RESPONSE",
+                };
+              }
+            : null,
+          ownerToken,
+          persistState: true,
+          rsUrl: `http://localhost:${server.rsPort}`,
+          state: null,
+        });
 
-      assert.equal(result.status, "succeeded");
-      const captured = JSON.parse(readFileSync(capturePath, "utf8"));
-      assert.deepEqual(captured.bindings, {
-        browser: {},
-        filesystem: {},
-        interactive: {},
-        network: {},
-      });
-    } finally {
-      cleanup();
-      rmSync(tmpDir, { force: true, recursive: true });
+        assert.equal(result.status, "succeeded");
+        assert.equal(interactionCount, hasInteractionHandler ? 1 : 0);
+        const captured = JSON.parse(readFileSync(capturePath, "utf8"));
+        assert.deepEqual(captured.bindings, {
+          browser: {},
+          filesystem: {},
+          network: {},
+          site: { kind: "browser" },
+          ...(hasInteractionHandler ? { interactive: {} } : {}),
+        });
+      } finally {
+        cleanup();
+        rmSync(tmpDir, { force: true, recursive: true });
+        await closeServer(server);
+      }
     }
   });
 
@@ -11275,3 +11344,79 @@ async function issueOwnerToken(asUrl: string, subjectId = "owner_local"): Promis
   assert.ok(tokenBody.access_token, "expected access_token from token exchange");
   return tokenBody.access_token;
 }
+
+test("START resolves multiple named instances by kind and omits unsupported optional extensions", async () => {
+  const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+  const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-named-bindings-"));
+  const capturePath = join(tmpDir, "start.json");
+  const { connectorPath, cleanup } = createStartCaptureConnector(capturePath);
+  const declaration = {
+    kind: "browser",
+    interface: "browser@1",
+    required: true,
+    features: ["page_navigation"],
+    constraints: { navigate: ["https://example.com"] }
+  };
+  try {
+    const result = await runTestConnector({
+      admitRunConnection: fakeEchoAdmitRunConnection(),
+      collectionMode: "full_refresh",
+      connectorId: "test",
+      connectorPath,
+      manifest: {
+        ...MINIMAL_MANIFEST,
+        runtime_requirements: {
+          bindings: {
+            first_site: declaration,
+            second_site: { ...declaration, constraints: { navigate: ["https://other.example.com"] } },
+            export_files: {
+              kind: "filesystem",
+              required: true,
+              inputs: [{ env_var: "EXPORT", kind: "dir", access: "read" }],
+              constraints: { outputs: [{ slot: "scratch", access: "write" }] }
+            },
+            api: {
+              kind: "network",
+              required: true,
+              constraints: { hosts: ["https://api.example.com", { setup_field: "base_url" }] }
+            },
+            "example.com/optional": { required: false },
+            desktop: { kind: "desktop_session", required: false }
+          }
+        }
+      },
+      onInteraction: async () => ({}),
+      ownerToken: "test",
+      persistState: true,
+      rsUrl: "http://localhost:9999",
+      state: null
+    });
+    assert.equal(result.status, "succeeded");
+    const captured = JSON.parse(readFileSync(capturePath, "utf8"));
+    assert.deepEqual(captured.bindings.first_site, {
+      kind: "browser",
+      interface: "browser@1",
+      features: ["page_navigation"],
+      constraints: declaration.constraints
+    });
+    assert.deepEqual(captured.bindings.second_site.constraints, { navigate: ["https://other.example.com"] });
+    assert.deepEqual(captured.bindings.export_files, {
+      kind: "filesystem",
+      constraints: {
+        inputs: [{ env_var: "EXPORT", kind: "dir", access: "read" }],
+        outputs: [{ slot: "scratch", access: "write" }]
+      }
+    });
+    assert.deepEqual(captured.bindings.api, {
+      kind: "network",
+      constraints: { hosts: ["https://api.example.com", { setup_field: "base_url" }] }
+    });
+    assert.equal(Object.hasOwn(captured.bindings, "example.com/optional"), false);
+    assert.equal(Object.hasOwn(captured.bindings, "desktop"), false);
+    assert.deepEqual(captured.bindings.interactive, {});
+  } finally {
+    cleanup();
+    rmSync(tmpDir, { force: true, recursive: true });
+    await closeServer(server);
+  }
+});
