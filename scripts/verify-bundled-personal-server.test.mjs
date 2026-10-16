@@ -17,8 +17,10 @@ import { tmpdir } from "node:os"
 import { dirname, join, relative } from "node:path"
 import { PassThrough } from "node:stream"
 import { describe, expect, it } from "vitest"
+import { MACOS_NODE_HELPER } from "./package-macos-node-helper.mjs"
 import {
   assertBinaryArchitecture,
+  assertMacNodeHelperInfo,
   assertMacFrameworkLayout,
   assertPackagedBrowser,
   assertPackagedNode,
@@ -335,11 +337,7 @@ describe("bundled personal-server verifier", () => {
       assertPackagedNode(["pdpp-node.exe"], "DataConnect.exe", "windows")
     ).not.toThrow()
     expect(() =>
-      assertPackagedNode(
-        ["Contents/MacOS/pdpp-node"],
-        "DataConnect.dmg",
-        "macos"
-      )
+      assertPackagedNode([MACOS_NODE_HELPER], "DataConnect.dmg", "macos")
     ).not.toThrow()
     expect(() =>
       assertPackagedNode(runtimeEntries, "DataConnect.exe", "windows")
@@ -437,13 +435,13 @@ describe("bundled personal-server verifier", () => {
     ).toThrow("empty CFBundleExecutable")
     expect(
       selectMacAppExecutables(
-        ["DataConnect", "pdpp-node"],
+        ["DataConnect", MACOS_NODE_HELPER],
         "DataConnect",
         "DataConnect.app"
       )
     ).toEqual({
       appExecutable: "DataConnect",
-      nodeSidecar: "pdpp-node",
+      nodeSidecar: MACOS_NODE_HELPER,
     })
   })
 
@@ -453,19 +451,23 @@ describe("bundled personal-server verifier", () => {
     ).toThrow("must identify exactly one app executable")
     expect(() =>
       selectMacAppExecutables(
-        ["DataConnect", "DataConnect", "pdpp-node"],
+        ["DataConnect", "DataConnect", MACOS_NODE_HELPER],
         "DataConnect",
         "DataConnect.app"
       )
     ).toThrow("must identify exactly one app executable")
   })
 
-  it("requires a distinct, exact Node sidecar beside the macOS app executable", () => {
+  it("requires a distinct Node helper inside its own macOS bundle", () => {
     expect(() =>
       selectMacAppExecutables(["DataConnect"], "DataConnect", "DataConnect.app")
-    ).toThrow("exactly one pdpp-node sidecar")
+    ).toThrow("exactly one background Node helper")
     expect(() =>
-      selectMacAppExecutables(["pdpp-node"], "pdpp-node", "DataConnect.app")
+      selectMacAppExecutables(
+        ["pdpp-node", MACOS_NODE_HELPER],
+        "pdpp-node",
+        "DataConnect.app"
+      )
     ).toThrow("must be distinct from pdpp-node")
     expect(() =>
       assertBinaryArchitecture(
@@ -474,6 +476,35 @@ describe("bundled personal-server verifier", () => {
         "pdpp-node"
       )
     ).not.toThrow()
+  })
+
+  it("rejects the old foreground Node path and invalid helper identities", () => {
+    expect(() =>
+      assertPackagedNode(
+        ["Contents/MacOS/pdpp-node"],
+        "DataConnect.dmg",
+        "macos"
+      )
+    ).toThrow("packaged Node.js sidecar")
+    const info = {
+      CFBundleExecutable: "DataConnect",
+      CFBundleIdentifier: "dev.dataconnect.node",
+      CFBundleName: "DataConnect",
+      CFBundleDisplayName: "DataConnect",
+      CFBundlePackageType: "APPL",
+      LSBackgroundOnly: true,
+    }
+    expect(() => assertMacNodeHelperInfo(info, "DataConnect.app")).not.toThrow()
+    for (const [key, value] of [
+      ["LSBackgroundOnly", false],
+      ["LSBackgroundOnly", "true"],
+      ["CFBundleIdentifier", "dev.dataconnect"],
+      ["CFBundleExecutable", "pdpp-node"],
+    ]) {
+      expect(() =>
+        assertMacNodeHelperInfo({ ...info, [key]: value }, "DataConnect.app")
+      ).toThrow(key)
+    }
   })
 
   it("enables strict signature checks only when explicitly requested", () => {

@@ -17,6 +17,14 @@ export const BACKUP_TABLE_INVENTORY: Record<string, BackupTableInventoryEntry> =
     classification: "backup_required",
     reason: "Agent-connect handoff attempts and recovery bindings are durable authorization delivery state.",
   },
+  as_issuance_cohort: {
+    classification: "backup_required",
+    reason: "Original issuance expiry provenance and cutover enrollment must survive restore unchanged.",
+  },
+  as_issuance_cutover: {
+    classification: "backup_required",
+    reason: "The completed issuance cutover marker prevents a restore from repeating or skipping enrollment.",
+  },
   blob_bindings: {
     classification: "backup_required",
     reason: "Binds durable blob bytes to records and JSON paths.",
@@ -217,6 +225,14 @@ export const BACKUP_TABLE_INVENTORY: Record<string, BackupTableInventoryEntry> =
     classification: "backup_required",
     reason: "Pairwise identifiers must remain stable across restarts and recovery.",
   },
+  pairwise_as_instance_authority: {
+    classification: "backup_required",
+    reason: "Retained source declaration authority binds issued instance handles to owner-connected sources.",
+  },
+  pairwise_as_instance_authority_versions: {
+    classification: "backup_required",
+    reason: "Versioned source authority lets existing grants retain their accepted declaration revision.",
+  },
   pairwise_identity_root_keys: {
     classification: "backup_required",
     reason: "Pairwise identifiers cannot be re-derived after loss of the issuer identity root key.",
@@ -338,6 +354,11 @@ export const BACKUP_TABLE_INVENTORY: Record<string, BackupTableInventoryEntry> =
     classification: "backup_required",
     reason: "Retained-size rows are rebuildable projections.",
   },
+  rs_opaque_cursors: {
+    classification: "backup_required",
+    reason:
+      "Opaque read cursors and sync checkpoints held for clients. Loss forces a client to restart pagination or sync from beginning (invalid_cursor / cursor_expired); no rebuild oracle exists.",
+  },
   run_history: {
     classification: "backup_required",
     reason: "Terminal run history is durable operational evidence.",
@@ -412,8 +433,10 @@ export const BACKUP_TABLE_INVENTORY: Record<string, BackupTableInventoryEntry> =
 };
 
 const SQLITE_INTERNAL_TABLES = new Set(["sqlite_sequence", "sqlite_stat1", "sqlite_stat4"]);
-const SQLITE_LAZY_APPLICATION_TABLES = ["explore_cursor_store"] as const;
+const SQLITE_LAZY_APPLICATION_TABLES = ["as_issuance_cohort", "as_issuance_cutover", "explore_cursor_store"] as const;
 const POSTGRES_LAZY_APPLICATION_TABLES = [
+  "as_issuance_cohort",
+  "as_issuance_cutover",
   "dataset_summary_projection",
   "dataset_summary_stream_projection",
   "explore_cursor_store",

@@ -931,6 +931,22 @@ CREATE TABLE IF NOT EXISTS pairwise_trusted_client_sectors (
   client_sector TEXT NOT NULL,
   PRIMARY KEY (issuer, client_id)
 );
+CREATE TABLE IF NOT EXISTS pairwise_as_instance_authority (
+  subject_id TEXT NOT NULL,
+  internal_instance_id TEXT NOT NULL,
+  canonical_source_id TEXT NOT NULL,
+  declaration_version TEXT NOT NULL,
+  accepted_legacy_source_aliases_json TEXT NOT NULL DEFAULT '[]',
+  PRIMARY KEY (subject_id, internal_instance_id)
+);
+CREATE TABLE IF NOT EXISTS pairwise_as_instance_authority_versions (
+  subject_id TEXT NOT NULL,
+  internal_instance_id TEXT NOT NULL,
+  canonical_source_id TEXT NOT NULL,
+  declaration_version TEXT NOT NULL,
+  accepted_legacy_source_aliases_json TEXT NOT NULL DEFAULT '[]',
+  PRIMARY KEY (subject_id, internal_instance_id, declaration_version)
+);
 CREATE TABLE IF NOT EXISTS pairwise_identity_root_keys (
   issuer TEXT PRIMARY KEY,
   key_version INTEGER NOT NULL CHECK (key_version = 1),
@@ -1894,6 +1910,19 @@ CREATE TABLE IF NOT EXISTS grant_connector_state (
   manifest_generation INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY(grant_id, connector_instance_id, stream)
 );
+
+-- Opaque public read cursors hold compact metadata, never record payloads.
+CREATE TABLE IF NOT EXISTS rs_opaque_cursors (
+  token_digest    TEXT PRIMARY KEY,
+  kind            TEXT NOT NULL CHECK (kind IN ('page', 'changes_page', 'changes_since')),
+  scope_digest    TEXT NOT NULL,
+  context_digest  TEXT NOT NULL,
+  internal_cursor TEXT NOT NULL,
+  created_at      INTEGER NOT NULL,
+  expires_at      INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_rs_opaque_cursors_expiry ON rs_opaque_cursors(expires_at);
+CREATE INDEX IF NOT EXISTS idx_rs_opaque_cursors_scope ON rs_opaque_cursors(scope_digest, kind, created_at);
 
 CREATE TABLE IF NOT EXISTS connector_detail_gaps (
   gap_id              TEXT PRIMARY KEY,

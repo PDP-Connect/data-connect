@@ -1,8 +1,9 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { createHash } from "node:crypto";
-import { chmod, chown, mkdir } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { type BigIntStats, constants as fsConstants } from "node:fs";
+import { lstat, mkdir, open, rmdir, stat, unlink } from "node:fs/promises";
 import { createServer, request as httpRequest, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { isAbsolute } from "node:path";
@@ -32,6 +33,8 @@ const DEFAULT_ALLOCATOR_PORT = 7331;
 const DEFAULT_NEKO_PROFILE_UID = 1000;
 const DEFAULT_NEKO_PROFILE_GID = 1000;
 const PROFILE_DIRECTORY_MODE = 0o700;
+const PERMISSION_BITS = 0o7777;
+const PROBE_PREFIX = ".pdpp-allocator-probe-";
 const LEADING_SLASH_RE = /^\//;
 const TRAILING_SLASHES_RE = /\/+$/;
 const DOCKER_HTTP_404_RE = /\bHTTP 404\b/;
@@ -90,10 +93,58 @@ export interface DockerEngineRequestInit {
   readonly query?: Readonly<Record<string, string>>;
 }
 
+// dev and ino are bigint: 64-bit inode numbers above 2^53 collapse to the same
+// JS number, which would make "is this the same directory" unsound.
+export interface ProfileDirectoryStat {
+  readonly dev: bigint;
+  readonly gid: number;
+  readonly ino: bigint;
+  readonly isDirectory: boolean;
+  readonly isSymbolicLink: boolean;
+  readonly mode: number;
+  readonly nlink: number;
+  readonly uid: number;
+}
+
+/** An open directory (O_DIRECTORY | O_NOFOLLOW); every call acts on that inode. */
+export interface ProfileDirectoryHandle {
+  chmod: (mode: number) => Promise<void>;
+  chown: (uid: number, gid: number) => Promise<void>;
+  close: () => Promise<void>;
+  stat: () => Promise<ProfileDirectoryStat>;
+}
+
+/**
+ * The allocator's only contact with profile storage.
+ *
+ * Trust contract: the profile root and every ancestor of it are written only
+ * by the operator and the allocator. The root path may traverse symlinks (it is
+ * operator configuration, resolved once per `stat`); entries below the root are
+ * never followed: `openDirectory` refuses a symlink in the last component. Docker
+ * resolves the bind-mount host path by name when the browser container is
+ * created, so the final identity check in `#prepareProfileDirectory` narrows,
+ * but cannot close, a swap by someone who can already write into the root.
+ *
+ * `mkdir` is deliberately non-recursive. Node 24.19's recursive mkdir loops
+ * forever (millions of mkdir/statx syscalls, one pinned CPU) when an ancestor
+ * is a directory that was unlinked while still open — the state of a
+ * bind-mounted profile root whose host directory was deleted. A non-recursive
+ * mkdir fails with ENOENT immediately in that state.
+ */
 export interface ProfileFilesystem {
-  chmod: (path: string, mode: number) => Promise<void>;
-  chown: (path: string, uid: number, gid: number) => Promise<void>;
-  mkdir: (path: string, options: { mode: number; recursive: true }) => Promise<void>;
+  mkdir: (path: string, options: { mode: number }) => Promise<void>;
+  openDirectory: (path: string) => Promise<ProfileDirectoryHandle>;
+  rmdir: (path: string) => Promise<void>;
+  /** `follow: true` resolves symlinks (profile root only); `false` is lstat. */
+  stat: (path: string, options: { follow: boolean }) => Promise<ProfileDirectoryStat>;
+  unlink: (path: string) => Promise<void>;
+  /** Exclusive create (fails on EEXIST), write, fsync, close. */
+  writeNewFile: (path: string, data: string) => Promise<void>;
+}
+
+interface ProfileRootIdentity {
+  readonly dev: bigint;
+  readonly ino: bigint;
 }
 
 export interface NekoSurfaceAllocatorServerOptions {
@@ -251,6 +302,8 @@ export class NekoSurfaceAllocatorServiceError extends Error {
     | "foreign_resource"
     | "not_found"
     | "port_capacity_exhausted"
+    | "profile_path_invalid"
+    | "profile_storage_unavailable"
     | "readiness_failed";
 
   constructor(code: NekoSurfaceAllocatorServiceError["code"], message: string, options: { cause?: unknown } = {}) {
@@ -290,6 +343,7 @@ export class NekoSurfaceAllocatorService {
       | "now"
     >;
   readonly #docker: DockerEngineTransport;
+  #storageCheck: Promise<ProfileRootIdentity> | null = null;
 
   constructor(options: NekoSurfaceAllocatorServerOptions) {
     assertAllocatorOptions(options);
@@ -315,6 +369,10 @@ export class NekoSurfaceAllocatorService {
 
   async ensureSurface(request: SurfaceRequest): Promise<BrowserSurface> {
     assertSurfaceRequest(request);
+    // Before ANY Docker mutation (remove, start, port reclaim, network
+    // migration, create): with unusable storage, replacing an existing
+    // surface would destroy a working container and then fail to rebuild it.
+    const rootIdentity = await this.assertProfileStorageReady();
     const existing = await this.#findOwnedContainer(request.surfaceId);
     if (existing !== null) {
       this.#assertContainerMatchesRequest(existing, request);
@@ -361,7 +419,7 @@ export class NekoSurfaceAllocatorService {
       // biome-ignore lint/performance/noAwaitInLoops: Work is intentionally sequential to preserve ordering and state transitions.
       const port = await this.#allocateHostPort(skippedPorts);
       const names = this.#resourceNames(request);
-      await this.#prepareProfileDirectory(names.profilePath);
+      await this.#prepareProfileDirectory(names.profilePath, rootIdentity);
       const labels = this.#labelsForRequest(request, names, port);
       const created = await this.#docker.requestJson("/containers/create", {
         body: {
@@ -434,7 +492,10 @@ export class NekoSurfaceAllocatorService {
     // lives on the host bind mount and survives. Other stop reasons (idle TTL,
     // capacity pressure, operator) leave the container in place so it can be
     // restarted cheaply.
-    if (request.reason === "surface_failed") {
+    // Stopping above is always allowed, even with broken storage: it only
+    // reduces active work. Removal is a destructive mutation and is skipped
+    // (the stopped container is reported as it is) while storage is unusable.
+    if (request.reason === "surface_failed" && (await this.#storageAllowsMutation())) {
       try {
         await this.#removeContainer(inspect.Id);
       } catch (cause) {
@@ -739,9 +800,27 @@ export class NekoSurfaceAllocatorService {
    * still count as migrated, since there is then no other path the normal
    * probes could be silently riding.
    */
+  // Guard for Docker mutations reached outside ensureSurface's early guard
+  // (network attach/detach from status/list, surface_failed removal). Unusable
+  // storage means "skip the mutation", never "throw": the read-only caller
+  // still gets an answer and nothing is changed.
+  async #storageAllowsMutation(): Promise<boolean> {
+    try {
+      await this.assertProfileStorageReady();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   async #migrateContainerNetworkIfNeeded(containerId: string): Promise<"migrated" | "pending"> {
     let inspect = await this.#inspectContainer(containerId);
     if (!hasNetwork(inspect, this.#options.network)) {
+      // Only an actual attach is a mutation; an already-migrated container is
+      // inspected without any filesystem work.
+      if (!(await this.#storageAllowsMutation())) {
+        return "pending";
+      }
       try {
         await this.#connectContainerToNetwork(this.#options.network, containerId);
       } catch {
@@ -779,6 +858,9 @@ export class NekoSurfaceAllocatorService {
     // could resolve via either network and would prove nothing
     // network-specific — before ever detaching the legacy network.
     if (!(await this.#isReachableOnExpectedNetwork(inspect))) {
+      return "pending";
+    }
+    if (!(await this.#storageAllowsMutation())) {
       return "pending";
     }
     try {
@@ -842,17 +924,216 @@ export class NekoSurfaceAllocatorService {
     return inspect.State?.Running !== true && inspect.State?.Status !== "running";
   }
 
-  async #prepareProfileDirectory(profilePath: string): Promise<void> {
-    await this.#options.profileFilesystem.mkdir(profilePath, {
-      mode: PROFILE_DIRECTORY_MODE,
-      recursive: true,
-    });
-    await this.#options.profileFilesystem.chown(
-      profilePath,
-      this.#options.profileOwnerUid,
-      this.#options.profileOwnerGid
-    );
-    await this.#options.profileFilesystem.chmod(profilePath, PROFILE_DIRECTORY_MODE);
+  /**
+   * Fails unless the profile root can actually host profiles: it is a live
+   * directory and a probe directory can be created in it, chowned to the
+   * browser uid:gid, written (fsync'd) and removed. `stat` and `access` alone
+   * cannot see ENOSPC, a read-only mount, or a filesystem that ignores
+   * ownership. Also the readiness check (startup and GET /readyz), run again
+   * at the top of every ensureSurface because startup readiness is not
+   * permanent.
+   *
+   * `nlink === 0` means the directory was unlinked while still open (the
+   * bind-mounted root's host directory was deleted or its cleanup-managed
+   * parent was swept). Every path below it then fails or loops until the
+   * mount is recreated, so name that state explicitly.
+   *
+   * Permissions: the root only has to be usable by the allocator process; the
+   * browser container mounts the profile leaf, not the root. A write by the
+   * allocator therefore proves nothing about the browser user, which is why
+   * the probe and each profile leaf are also verified to be owned by the
+   * configured uid:gid with mode 0700. A read-only Docker mount of the leaf
+   * cannot be detected from here.
+   *
+   * Returns the root's (dev, ino) so later steps can detect replacement.
+   */
+  assertProfileStorageReady(): Promise<ProfileRootIdentity> {
+    // One in-flight check shared by overlapping callers, so concurrent
+    // requests (or a stalled filesystem) cannot fan out into N probes. No
+    // cache: the entry is dropped the moment the check settles, success or
+    // failure, and leaf preparation re-checks the root identity itself.
+    if (this.#storageCheck !== null) {
+      return this.#storageCheck;
+    }
+    const check = this.#checkProfileStorage();
+    this.#storageCheck = check;
+    const release = (): void => {
+      if (this.#storageCheck === check) {
+        this.#storageCheck = null;
+      }
+    };
+    // Both handlers: the derived promise never rejects, so no unhandled
+    // rejection; callers still observe `check` itself.
+    check.then(release, release);
+    return check;
+  }
+
+  async #checkProfileStorage(): Promise<ProfileRootIdentity> {
+    const before = await this.#statProfileRoot();
+    await this.#probeProfileRoot();
+    const after = await this.#statProfileRoot();
+    if (after.dev !== before.dev || after.ino !== before.ino) {
+      throw profileStorageError(`profile root ${this.#options.profileRoot} was replaced while it was being checked`);
+    }
+    return { dev: after.dev, ino: after.ino };
+  }
+
+  async #statProfileRoot(): Promise<ProfileDirectoryStat> {
+    const root = this.#options.profileRoot;
+    let rootStat: ProfileDirectoryStat;
+    try {
+      rootStat = await this.#options.profileFilesystem.stat(root, { follow: true });
+    } catch (cause) {
+      throw profileStorageError(`profile root ${root} is not usable (${errnoCode(cause)})`, cause);
+    }
+    if (!rootStat.isDirectory) {
+      throw profileStorageError(`profile root ${root} is not a directory`);
+    }
+    if (rootStat.nlink === 0) {
+      throw profileStorageError(
+        `profile root ${root} has been unlinked (deleted while still mounted); recreate the host directory, then restart the allocator and any browser container that mounts it`
+      );
+    }
+    return rootStat;
+  }
+
+  async #probeProfileRoot(): Promise<void> {
+    const root = this.#options.profileRoot.replace(TRAILING_SLASHES_RE, "");
+    const fs = this.#options.profileFilesystem;
+    // Unique, nonrecursive, and only ever removed by this call: never touches
+    // an existing profile's contents.
+    const probeDir = `${root}/${PROBE_PREFIX}${String(process.pid)}-${randomUUID()}`;
+    const probeFile = `${probeDir}/probe`;
+    let stage = "create";
+    let dirCreated = false;
+    let fileMayExist = false;
+    let handle: ProfileDirectoryHandle | undefined;
+    let failure: unknown;
+    try {
+      await fs.mkdir(probeDir, { mode: PROFILE_DIRECTORY_MODE });
+      dirCreated = true;
+      stage = "open";
+      handle = await fs.openDirectory(probeDir);
+      stage = "chown";
+      await handle.chown(this.#options.profileOwnerUid, this.#options.profileOwnerGid);
+      await handle.chmod(PROFILE_DIRECTORY_MODE);
+      stage = "ownership";
+      this.#assertBrowserOwnedPrivateDirectory(await handle.stat(), probeDir);
+      stage = "write";
+      fileMayExist = true;
+      await fs.writeNewFile(probeFile, "pdpp-allocator-probe\n");
+    } catch (cause) {
+      failure = cause;
+    }
+    const cleanupFailures: string[] = [];
+    const attempt = async (what: string, action: () => Promise<void>, ignoreMissing: boolean): Promise<void> => {
+      try {
+        await action();
+      } catch (cause) {
+        if (!(ignoreMissing && errnoCode(cause) === "ENOENT")) {
+          cleanupFailures.push(`${what} (${errnoCode(cause)})`);
+        }
+      }
+    };
+    if (handle !== undefined) {
+      await attempt("close probe handle", () => handle.close(), false);
+    }
+    if (fileMayExist) {
+      await attempt("remove probe file", () => fs.unlink(probeFile), true);
+    }
+    if (dirCreated) {
+      await attempt("remove probe directory", () => fs.rmdir(probeDir), true);
+    }
+    const leftover =
+      cleanupFailures.length === 0 ? "" : `; cleanup failed: ${cleanupFailures.join(", ")} (${probeDir})`;
+    if (failure !== undefined) {
+      const detail = failure instanceof NekoSurfaceAllocatorServiceError ? failure.message : errnoCode(failure);
+      throw profileStorageError(
+        `profile root ${this.#options.profileRoot} failed its write probe at ${stage} (${detail})${leftover}`,
+        failure
+      );
+    }
+    if (cleanupFailures.length > 0) {
+      throw profileStorageError(`profile root ${this.#options.profileRoot} probe left residue${leftover}`);
+    }
+  }
+
+  #assertBrowserOwnedPrivateDirectory(directory: ProfileDirectoryStat, path: string): void {
+    const { profileOwnerGid: gid, profileOwnerUid: uid } = this.#options;
+    if (!directory.isDirectory || directory.isSymbolicLink || directory.nlink === 0) {
+      throw profileStorageError(`${path} is not a live directory`);
+    }
+    if (directory.uid !== uid || directory.gid !== gid) {
+      throw profileStorageError(
+        `${path} is owned by ${String(directory.uid)}:${String(directory.gid)}, expected ${String(uid)}:${String(gid)}`
+      );
+    }
+    // biome-ignore lint/suspicious/noBitwiseOperators: POSIX mode bits are masked with & to isolate the permission field from the file-type bits.
+    if ((directory.mode & PERMISSION_BITS) !== PROFILE_DIRECTORY_MODE) {
+      // biome-ignore lint/suspicious/noBitwiseOperators: same permission-bit mask as the check above, for the reported value.
+      throw profileStorageError(`${path} has mode ${(directory.mode & PERMISSION_BITS).toString(8)}, expected 700`);
+    }
+  }
+
+  async #assertProfileRootUnchanged(identity: ProfileRootIdentity): Promise<void> {
+    const current = await this.#statProfileRoot();
+    if (current.dev !== identity.dev || current.ino !== identity.ino) {
+      throw profileStorageError(`profile root ${this.#options.profileRoot} was replaced during allocation`);
+    }
+  }
+
+  async #prepareProfileDirectory(profilePath: string, rootIdentity: ProfileRootIdentity): Promise<void> {
+    const fs = this.#options.profileFilesystem;
+    await this.#assertProfileRootUnchanged(rootIdentity);
+    // Non-recursive: the root was just validated, so only the final component
+    // can be missing. EEXIST is the normal path for an existing profile and
+    // for a concurrent request that created it first.
+    try {
+      await fs.mkdir(profilePath, { mode: PROFILE_DIRECTORY_MODE });
+    } catch (cause) {
+      if (errnoCode(cause) !== "EEXIST") {
+        throw profileStorageError(`cannot create profile directory ${profilePath} (${errnoCode(cause)})`, cause);
+      }
+    }
+    // Open the leaf once (O_DIRECTORY | O_NOFOLLOW) and do every check and
+    // change through that handle, so a swap after the open cannot redirect
+    // chown/chmod to another inode. A symlink or file at the path never opens.
+    let handle: ProfileDirectoryHandle;
+    try {
+      handle = await fs.openDirectory(profilePath);
+    } catch (cause) {
+      const code = errnoCode(cause);
+      if (code === "ELOOP" || code === "ENOTDIR") {
+        // biome-ignore lint/style/useErrorCause: the cause is passed in the options argument, which the constructor forwards to Error as { cause }; the rule assumes Error's (message, options) order, which this class does not use because `code` comes first.
+        throw new NekoSurfaceAllocatorServiceError(
+          "profile_path_invalid",
+          `profile path ${profilePath} exists but is not a plain directory`,
+          { cause }
+        );
+      }
+      throw profileStorageError(`cannot open profile directory ${profilePath} (${code})`, cause);
+    }
+    try {
+      await handle.chown(this.#options.profileOwnerUid, this.#options.profileOwnerGid);
+      await handle.chmod(PROFILE_DIRECTORY_MODE);
+      const opened = await handle.stat();
+      this.#assertBrowserOwnedPrivateDirectory(opened, profilePath);
+      // Final identity recheck, immediately before the caller asks Docker to
+      // bind this path: the name must still refer to the inode we prepared and
+      // the root must still be the one we validated.
+      const named = await fs.stat(profilePath, { follow: false });
+      if (named.isSymbolicLink || named.dev !== opened.dev || named.ino !== opened.ino) {
+        throw new NekoSurfaceAllocatorServiceError(
+          "profile_path_invalid",
+          `profile path ${profilePath} was replaced while it was being prepared`
+        );
+      }
+      await this.#assertProfileRootUnchanged(rootIdentity);
+    } finally {
+      // A close failure on a read-only directory fd carries no information
+      // worth masking the real error for.
+      await handle.close().catch(() => undefined);
+    }
   }
 
   async #allocateHostPort(skippedPorts: ReadonlySet<number> = new Set()): Promise<number> {
@@ -1001,7 +1282,10 @@ export function createNekoSurfaceAllocatorHttpHandler(service: NekoSurfaceAlloca
       await routeAllocatorRequest(service, req, res);
     } catch (cause) {
       const error = cause instanceof Error ? cause : new Error(String(cause));
-      sendJson(res, statusForError(error), { error: error.message });
+      sendJson(res, statusForError(error), {
+        error: error.message,
+        ...(error instanceof NekoSurfaceAllocatorServiceError ? { code: error.code } : {}),
+      });
     }
   };
 }
@@ -1013,6 +1297,11 @@ async function routeAllocatorRequest(
 ): Promise<void> {
   const url = new URL(req.url ?? "/", "http://allocator.local");
   const parts = url.pathname.split("/").filter(Boolean);
+  if (parts.length === 1 && parts[0] === "readyz" && req.method === "GET") {
+    await service.assertProfileStorageReady();
+    sendJson(res, 200, { ready: true });
+    return;
+  }
   if (parts.length === 1 && parts[0] === "surfaces") {
     await routeSurfaceCollection(service, req, res);
     return;
@@ -1071,6 +1360,10 @@ export async function startNekoSurfaceAllocatorServer(
   options: NekoSurfaceAllocatorServerOptions
 ): Promise<{ close: () => Promise<void>; url: string }> {
   const service = new NekoSurfaceAllocatorService(options);
+  // Fail before listening: an allocator that cannot write profiles must exit
+  // (visible to the container restart policy) instead of accepting requests
+  // it can only fail.
+  await service.assertProfileStorageReady();
   await service.ensureNetworkExists();
   const server = createServer(createNekoSurfaceAllocatorHttpHandler(service));
   const listenHost = options.listenHost ?? "127.0.0.1";
@@ -1216,10 +1509,10 @@ function statusForError(error: Error): number {
   if (error.code === "not_found") {
     return 404;
   }
-  if (error.code === "foreign_resource") {
+  if (error.code === "foreign_resource" || error.code === "profile_path_invalid") {
     return 409;
   }
-  if (error.code === "port_capacity_exhausted") {
+  if (error.code === "port_capacity_exhausted" || error.code === "profile_storage_unavailable") {
     return 503;
   }
   return 502;
@@ -1457,13 +1750,63 @@ export function readNekoSurfaceAllocatorOptionsFromEnv(
   };
 }
 
+export function toProfileDirectoryStat(stats: BigIntStats): ProfileDirectoryStat {
+  return {
+    dev: stats.dev,
+    gid: Number(stats.gid),
+    ino: stats.ino,
+    isDirectory: stats.isDirectory(),
+    isSymbolicLink: stats.isSymbolicLink(),
+    mode: Number(stats.mode),
+    nlink: Number(stats.nlink),
+    uid: Number(stats.uid),
+  };
+}
+
 const nodeProfileFilesystem: ProfileFilesystem = {
-  chmod,
-  chown,
   async mkdir(path, options) {
-    await mkdir(path, options);
+    await mkdir(path, { mode: options.mode, recursive: false });
+  },
+  async openDirectory(path) {
+    // biome-ignore lint/suspicious/noBitwiseOperators: open(2) open flags are combined with bitwise OR; there is no other API for it.
+    const handle = await open(path, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW);
+    return {
+      chmod: (mode) => handle.chmod(mode),
+      chown: (uid, gid) => handle.chown(uid, gid),
+      close: () => handle.close(),
+      stat: async () => toProfileDirectoryStat(await handle.stat({ bigint: true })),
+    };
+  },
+  rmdir: (path) => rmdir(path),
+  async stat(path, options) {
+    return toProfileDirectoryStat(
+      await (options.follow ? stat(path, { bigint: true }) : lstat(path, { bigint: true }))
+    );
+  },
+  unlink: (path) => unlink(path),
+  async writeNewFile(path, data) {
+    const handle = await open(path, "wx", 0o600);
+    try {
+      await handle.writeFile(data);
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
   },
 };
+
+function errnoCode(cause: unknown): string {
+  const code = (cause as NodeJS.ErrnoException | null)?.code;
+  return typeof code === "string" ? code : "unknown";
+}
+
+function profileStorageError(message: string, cause?: unknown): NekoSurfaceAllocatorServiceError {
+  return new NekoSurfaceAllocatorServiceError(
+    "profile_storage_unavailable",
+    message,
+    cause === undefined ? {} : { cause }
+  );
+}
 
 function compactEnv(values: Readonly<Record<string, string | undefined>>): Record<string, string> {
   return Object.fromEntries(

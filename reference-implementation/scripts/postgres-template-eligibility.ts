@@ -152,6 +152,7 @@ export const POSTGRES_TEMPLATE_ELIGIBLE_FILES: readonly string[] = [
   "test/runtime-record-rejection-system-journey.test.ts",
   "test/scheduler-dispatch-wedge-health-reason.test.ts",
   "test/scheduler-owner-isolation.test.ts",
+  "test/scheduler-store-reset-state-admission.test.ts",
   "test/scheduler-store-semantic-surface.test.ts",
   "test/search-index-lexical-resume.postgres.test.ts",
   "test/search-index-reconcile-scope-isolation.postgres.test.ts",
@@ -189,6 +190,8 @@ export const POSTGRES_TEMPLATE_COLD_REQUIRED_FILES: readonly string[] = [
   "test/connector-summary-evidence-lifecycle-seq-index.test.ts",
   "test/connector-summary-source-revision.test.ts",
   "test/device-ingest-reservation-migration.test.ts",
+  // Fences issuance writers while the cutover migration snapshots source tables.
+  "test/issuance-cutover.test.ts",
   // Reopens old identity schemas and exercises migration rollback and recovery.
   "test/pairwise-grant-generation.test.ts",
   // Builds a prototype-shaped identity ledger before the real schema bootstrap.
@@ -208,6 +211,7 @@ export const POSTGRES_TEMPLATE_COLD_REQUIRED_FILES: readonly string[] = [
   "test/postgres-semantic-scope-index-idempotence.test.ts",
   "test/postgres-template-eligibility-migration-mutation-control.test.ts",
   "test/records-instance-stream-id-keyset-index.test.ts",
+  "test/rs-opaque-cursors.test.ts",
   "test/run-history-completed-at-fleet-migration.test.ts",
   "test/run-history-duplicate-run-id-identity.test.ts",
   "test/run-history-interrupted-migration-reconciliation.test.ts",

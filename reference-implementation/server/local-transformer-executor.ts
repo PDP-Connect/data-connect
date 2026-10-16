@@ -75,6 +75,7 @@ export interface LocalTransformerExecutorOptions {
   readonly failStop?: (reason: string) => void;
   readonly killGraceMs?: number;
   readonly queueLimit?: number;
+  readonly readChildRssBytes?: (pid: number | undefined) => number | null;
   readonly spawnChild?: (
     command: string,
     args: readonly string[],
@@ -192,6 +193,7 @@ export class LocalTransformerExecutor {
   readonly #failStop: (reason: string) => void;
   readonly #killGraceMs: number;
   readonly #queueLimit: number;
+  readonly #readChildRssBytes: (pid: number | undefined) => number | null;
   readonly #spawnChild: (
     command: string,
     args: readonly string[],
@@ -233,6 +235,7 @@ export class LocalTransformerExecutor {
       DEFAULT_QUEUE_LIMIT,
       MAX_QUEUE_LIMIT
     );
+    this.#readChildRssBytes = options.readChildRssBytes ?? safeChildRssBytes;
     this.#failStop = options.failStop ?? defaultFailStop;
     this.#spawnChild = options.spawnChild ?? defaultSpawnChild;
     this.#workerPath = options.workerPath ?? fileURLToPath(new URL("./local-transformer-child.ts", import.meta.url));
@@ -331,7 +334,7 @@ export class LocalTransformerExecutor {
       // biome-ignore lint/suspicious/noUnnecessaryConditions: TypeScript boundary permits nullish input; this guard preserves runtime behavior.
       childPid: session?.child.pid ?? null,
       childQueueDepth: this.#childQueueDepth,
-      childRssBytes: session ? safeChildRssBytes(session.child.pid) : null,
+      childRssBytes: session ? this.#readChildRssBytes(session.child.pid) : null,
       generation: this.#generation,
       peakChildRssBytes: this.#peakChildRssBytes,
       pendingJobs: this.#pending.size,
@@ -588,7 +591,7 @@ export class LocalTransformerExecutor {
   }
 
   #sampleChildRss(session: ChildSession) {
-    const rssBytes = safeChildRssBytes(session.child.pid);
+    const rssBytes = this.#readChildRssBytes(session.child.pid);
     if (rssBytes !== null) {
       this.#peakChildRssBytes = Math.max(this.#peakChildRssBytes, rssBytes);
     }
