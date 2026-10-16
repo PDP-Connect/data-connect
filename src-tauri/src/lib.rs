@@ -393,7 +393,7 @@ fn route_invoke<R: Runtime>(
 pub(crate) fn mock_app_with_data_dir(
     data_root: &std::path::Path,
 ) -> tauri::App<tauri::test::MockRuntime> {
-    let mut context: tauri::Context<tauri::test::MockRuntime> = tauri::generate_context!();
+    let mut context: tauri::Context<tauri::test::MockRuntime> = tauri::generate_context!(test = true);
     context.config_mut().identifier = data_root.join("app").to_string_lossy().into_owned();
     let app = tauri::test::mock_builder()
         .invoke_handler(route_invoke(runtime_generic_invoke_handler(), |_| false))
@@ -435,7 +435,7 @@ mod tests {
     #[test]
     fn startup_builds_no_window_before_composition_is_chosen() {
         let mut app = tauri::test::mock_builder()
-            .build(tauri::generate_context!())
+            .build(tauri::generate_context!(test = true))
             .expect("build the app from tauri.conf.json");
         // Tauri builds config windows when the event loop first runs, not
         // in `build`. One iteration runs that step.
@@ -506,7 +506,7 @@ mod tests {
     #[test]
     fn legacy_mode_still_builds_the_declared_main_window() {
         let app = tauri::test::mock_builder()
-            .build(tauri::generate_context!())
+            .build(tauri::generate_context!(test = true))
             .expect("build the app from tauri.conf.json");
         create_legacy_main_window(&app).expect("build the legacy window");
         assert!(app.get_webview_window(LEGACY_MAIN_WINDOW_LABEL).is_some());
