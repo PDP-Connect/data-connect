@@ -2997,7 +2997,7 @@ function assertSemanticBackfillNotAborted(scope: { signal?: AbortSignal | null }
 }
 
 function assertSemanticRepairBackend(
-  scope: Pick<SemanticRepairScope, "frozenBackend" | "frozenBackendIdentity" | "signal">
+  scope: Pick<SemanticRepairScope, "frozenBackend" | "frozenBackendIdentity"> & { signal?: AbortSignal | null }
 ): void {
   assertSemanticBackfillNotAborted(scope);
   if (backend !== scope.frozenBackend || backendStorageIdentity(scope.frozenBackend) !== scope.frozenBackendIdentity) {
