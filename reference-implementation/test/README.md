@@ -27,7 +27,10 @@ unchanged advertised resource contract is valid on any revision. When the
 candidate advertises grant-scoped templates, the gate expands those templates
 using its child discovery output, verifies matching-child reads, and rejects
 wrong-child reads. Only a reported `ambiguous_legacy_resource_uri` refusal backed
-by multiple discovered children for that connection is permitted. Removed
+by independently seeded membership and multiple discovered children, with
+`isError: true` and no contents, is permitted. This fixture seeds exactly one
+package child per connection, so candidate-discovered duplicate membership
+cannot justify ambiguity. Removed
 templates or resource read support (B1) and broken stored content remain failures.
 Client-token resource discovery must remain equal to base.
 
@@ -113,7 +116,10 @@ audience cannot be inferred. The test then restarts the database under the
 candidate code so its startup migration sees actual PRE-P2 token rows. Set
 `MCP_AUDIENCE_MIGRATION_STAGE` to `P2`, `P3`, or `P7` for the matching
 identity-lane checkout. The test checks the selected candidate path is the
-current test worktree. P7 retires the fixture's internal child token rows and
+current test worktree. The seeder HEAD is pinned to the full base SHA above,
+and its path and revision must differ from the candidate. Runtime files must
+be clean before seeding; only test overlays and package.json script changes
+are allowed. P7 retires the fixture's internal child token rows and
 replays the package tool session to prove package access remains independent of
 those bearers. This scenario does not use OAuth refresh: the census has no
 active refresh tokens. The base branch has no audience column or migration
@@ -161,3 +167,23 @@ Record fetch handles do not have an expiry field; they identify records and are
 resolved under the current bearer grant. The gate covers an unknown record id.
 The production census found non-expiring bearer tokens, so an expired-bearer
 scenario is outside this base contract until token expiry is introduced.
+
+## Hardening baseline requirement
+
+Full input schemas (including nested constraints and union branches) and HTTP
+auth observations must be recaptured on the pinned base before this hardened
+gate can pass. Missing baseline fields fail closed; candidate observations are
+never substituted for base evidence. Schema comparison is conservative: all
+validation-keyword changes fail, including some compatible widenings; descriptive
+schema text is ignored. The package grant_id transition remains explicit.
+
+The active captures probe missing, malformed and revoked bearers, record 401
+WWW-Authenticate and response bodies, and fetch MCP protected-resource metadata.
+Only local AS/RS origins are normalized. The comparison uses observed base
+challenges rather than requiring a future E4 challenge format.
+
+Saved fetch handles are checked against their own seeded identities; a separate
+fetch checks the fresh search hit. Page identities must be disjoint, field
+continuation offsets and text must advance, and the selected connection's count
+must be exactly two. Synthetic controls cover narrowing, replay misassociation,
+repeated pages, stalled windows, incorrect counts, and changed HTTP observations.

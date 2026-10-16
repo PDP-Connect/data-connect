@@ -7,7 +7,10 @@
         "contentTextMode": "non-empty-model-visible-text",
         "content": [
           {
-            "keys": ["text", "type"],
+            "keys": [
+              "text",
+              "type"
+            ],
             "types": {
               "type": "string",
               "text": "string"
@@ -124,7 +127,10 @@
         "contentTextMode": "non-empty-model-visible-text",
         "content": [
           {
-            "keys": ["text", "type"],
+            "keys": [
+              "text",
+              "type"
+            ],
             "types": {
               "type": "string",
               "text": "string"
@@ -158,7 +164,10 @@
         "contentTextMode": "non-empty-model-visible-text",
         "content": [
           {
-            "keys": ["text", "type"],
+            "keys": [
+              "text",
+              "type"
+            ],
             "types": {
               "type": "string",
               "text": "string"
@@ -285,7 +294,10 @@
         "contentTextMode": "json-equals-structuredContent-except-content_ladder",
         "content": [
           {
-            "keys": ["text", "type"],
+            "keys": [
+              "text",
+              "type"
+            ],
             "types": {
               "type": "string",
               "text": "string"
@@ -440,7 +452,10 @@
         "contentTextMode": "non-empty-model-visible-text",
         "content": [
           {
-            "keys": ["text", "type"],
+            "keys": [
+              "text",
+              "type"
+            ],
             "types": {
               "type": "string",
               "text": "string"
@@ -703,7 +718,10 @@
         "contentTextMode": "non-empty-model-visible-text",
         "content": [
           {
-            "keys": ["text", "type"],
+            "keys": [
+              "text",
+              "type"
+            ],
             "types": {
               "type": "string",
               "text": "string"
@@ -816,7 +834,10 @@
         "contentTextMode": "non-empty-model-visible-text",
         "content": [
           {
-            "keys": ["text", "type"],
+            "keys": [
+              "text",
+              "type"
+            ],
             "types": {
               "type": "string",
               "text": "string"
@@ -1057,7 +1078,10 @@
         "contentTextMode": "non-empty-model-visible-text",
         "content": [
           {
-            "keys": ["text", "type"],
+            "keys": [
+              "text",
+              "type"
+            ],
             "types": {
               "type": "string",
               "text": "string"
@@ -1594,7 +1618,10 @@
         "contentTextMode": "non-empty-model-visible-text",
         "content": [
           {
-            "keys": ["text", "type"],
+            "keys": [
+              "text",
+              "type"
+            ],
             "types": {
               "type": "string",
               "text": "string"
@@ -1707,7 +1734,10 @@
         "contentTextMode": "non-empty-model-visible-text",
         "content": [
           {
-            "keys": ["text", "type"],
+            "keys": [
+              "text",
+              "type"
+            ],
             "types": {
               "type": "string",
               "text": "string"
@@ -1771,7 +1801,10 @@
         "contentTextMode": "non-empty-model-visible-text",
         "content": [
           {
-            "keys": ["text", "type"],
+            "keys": [
+              "text",
+              "type"
+            ],
             "types": {
               "type": "string",
               "text": "string"
@@ -1994,7 +2027,11 @@
       "fetchId": "cin_mcp_contract_a/documents:record-1",
       "fetchMetadataConnectionId": "cin_mcp_contract_a",
       "queryRecordConnectionId": "cin_mcp_contract_a",
-      "schemaKeys": ["data", "provider_url", "request_id"],
+      "schemaKeys": [
+        "data",
+        "provider_url",
+        "request_id"
+      ],
       "searchResultKeys": [
         "connection_id",
         "connector_key",
@@ -2010,7 +2047,9 @@
       ],
       "searchedFetchId": "cin_mcp_contract_a/documents:record-1",
       "storedIds": {
-        "connectionIds": ["cin_mcp_contract_a"],
+        "connectionIds": [
+          "cin_mcp_contract_a"
+        ],
         "fetchId": "cin_mcp_contract_a/documents:record-1",
         "fetchIds": [
           "cin_mcp_contract_a/documents:record-1",
@@ -2058,7 +2097,9 @@
           "stream": "documents"
         }
       },
-      "observedConnectionIds": ["cin_mcp_contract_a"],
+      "observedConnectionIds": [
+        "cin_mcp_contract_a"
+      ],
       "observedRecordUris": [
         "pdpp://record/eyJjb25uZWN0aW9uX2lkIjoiY2luX21jcF9jb250cmFjdF9hIiwia2luZCI6InJlY29yZCIsInJlY29yZF9pZCI6InJlY29yZC0xIiwic3RyZWFtIjoiZG9jdW1lbnRzIiwidiI6MX0"
       ],
@@ -2073,6 +2114,31 @@
     },
     "toolSchemas": {
       "schema": {
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "type": "object",
+          "properties": {
+            "detail": {
+              "description": "Response detail grade for `structuredContent.data`. `compact` (default) returns a token-efficient projection: per-stream field names with capability flags, expandable relation names, connection identities, and connector metadata, with the heavy per-field JSON Schema blobs dropped. `full` returns deduped exhaustive schema for one source, preserving raw per-field JSON Schema while removing duplicate top-level stream arrays; it requires `stream`, and `connection_id` when that stream name is shared. The concise `content[]` text summary is identical for both grades.",
+              "type": "string",
+              "enum": [
+                "compact",
+                "full"
+              ]
+            },
+            "stream": {
+              "description": "Optional stream name from the compact `schema` stream list. Omit to describe every granted stream. Stream names are not globally unique; pair with `connection_id` when you need one configured source.",
+              "type": "string",
+              "minLength": 1
+            },
+            "connection_id": {
+              "description": "Optional. Scope schema detail to one configured connection when a stream name is shared by multiple connectors or connections. Obtain from schema results or typed ambiguity errors. This is source identity, not a profile selector.",
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "additionalProperties": false
+        },
         "properties": {
           "detail": "string",
           "stream": "string",
@@ -2081,6 +2147,139 @@
         "required": []
       },
       "query_records": {
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "type": "object",
+          "properties": {
+            "stream": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Stream name advertised by `schema`."
+            },
+            "limit": {
+              "description": "Records per page. Omit for the default page of 25; the maximum is 100 (the spec-core §8 contract). Values above 100 are rejected here rather than silently clamped, so the page size you request is always the page size you get. Page forward with the returned `cursor` instead of asking for a larger page.",
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 100
+            },
+            "cursor": {
+              "type": "string"
+            },
+            "order": {
+              "description": "Legacy page order for cursor-based pagination: `asc` or `desc`. Prefer canonical `sort` when `/v1/schema` advertises sortable fields; `order` remains accepted for clients that have not migrated.",
+              "type": "string"
+            },
+            "sort": {
+              "description": "Canonical sign-prefix sort spec advertised by `GET /v1/schema` (e.g. `sort=-emitted_at`). The reference runtime supports the advertised cursor field; unsupported fields, conflicting directions, or sort/order disagreement are rejected with typed errors rather than treated as no-ops.",
+              "type": "string"
+            },
+            "count": {
+              "description": "Canonical opt-in count grade (`none`, `estimated`, `exact`). Omit or use `none` for no count. `exact` returns `meta.count.kind=\"exact\"` when supported; `estimated` may be upgraded to an exact count. Counts are page-independent and may be more expensive than the page itself.",
+              "type": "string",
+              "enum": [
+                "none",
+                "estimated",
+                "exact"
+              ]
+            },
+            "filter": {
+              "description": "Not supported with app (client) tokens in PDPP v0.1: the server returns 400. Owner-token reads only.",
+              "type": "object",
+              "propertyNames": {
+                "type": "string",
+                "minLength": 1
+              },
+              "additionalProperties": {
+                "anyOf": [
+                  {
+                    "type": [
+                      "string",
+                      "number",
+                      "boolean"
+                    ]
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "gte": {
+                        "type": [
+                          "string",
+                          "number",
+                          "boolean"
+                        ]
+                      },
+                      "gt": {
+                        "type": [
+                          "string",
+                          "number",
+                          "boolean"
+                        ]
+                      },
+                      "lte": {
+                        "type": [
+                          "string",
+                          "number",
+                          "boolean"
+                        ]
+                      },
+                      "lt": {
+                        "type": [
+                          "string",
+                          "number",
+                          "boolean"
+                        ]
+                      }
+                    },
+                    "additionalProperties": false
+                  }
+                ]
+              }
+            },
+            "fields": {
+              "description": "Field allowlist for projection. Field paths must be declared by the stream; advertised by `GET /v1/schema` (`field_capabilities`). Unknown paths are rejected by the RS rather than silently widened.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "view": {
+              "description": "Named projection. A stream-declared view id (advertised by `GET /v1/schema` under each stream's `views`) that projects the returned records down to the view's field set. Mutually exclusive with `fields` (passing both is rejected by the RS); an unknown view id is rejected rather than silently ignored. Use `view` for a curated projection and `fields` for an ad-hoc one.",
+              "type": "string"
+            },
+            "expand": {
+              "description": "Not supported with app (client) tokens in PDPP v0.1: the server returns 400. Owner-token reads only.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "expand_limit": {
+              "description": "Not supported with app (client) tokens in PDPP v0.1: the server returns 400. Owner-token reads only.",
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "changes_since": {
+              "description": "Projection-safe incremental-sync bookmark. Use `beginning` for the initial changes feed, then pass the opaque `next_changes_since` value returned in the prior response. Do not pass an ISO timestamp; malformed bookmarks are rejected as `invalid_cursor`.",
+              "type": "string"
+            },
+            "connection_id": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Optional connection scope. Omit to fan in across granted connections. Get it from `schema` or typed 409 `available_connections` entries with `connector_key` and `connection_id`; persist `connection_id`, not `grant_id`, across reconnects."
+            }
+          },
+          "required": [
+            "stream"
+          ],
+          "additionalProperties": false
+        },
         "properties": {
           "stream": "string",
           "limit": "integer",
@@ -2096,9 +2295,135 @@
           "changes_since": "string",
           "connection_id": "string"
         },
-        "required": ["stream"]
+        "required": [
+          "stream"
+        ]
       },
       "aggregate": {
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "type": "object",
+          "properties": {
+            "stream": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Stream name advertised by `schema`."
+            },
+            "metric": {
+              "type": "string",
+              "enum": [
+                "count",
+                "sum",
+                "min",
+                "max",
+                "count_distinct"
+              ],
+              "description": "Aggregation metric. `field` is required for sum, min, max, and count_distinct."
+            },
+            "field": {
+              "description": "Target field for sum/min/max/count_distinct. Must be declared for the metric in `GET /v1/schema`.",
+              "type": "string",
+              "minLength": 1
+            },
+            "group_by": {
+              "description": "Scalar field to group counts by. Mutually exclusive with `group_by_time`.",
+              "type": "string",
+              "minLength": 1
+            },
+            "group_by_time": {
+              "description": "Declared date/date-time field to bucket counts by. Requires `granularity`. Mutually exclusive with `group_by`.",
+              "type": "string",
+              "minLength": 1
+            },
+            "granularity": {
+              "description": "Calendar bucket unit for `group_by_time`. Required with `group_by_time`, forbidden otherwise.",
+              "type": "string",
+              "enum": [
+                "minute",
+                "hour",
+                "day",
+                "week",
+                "month",
+                "quarter",
+                "year"
+              ]
+            },
+            "time_zone": {
+              "description": "IANA time zone for `group_by_time` bucket boundaries. Defaults to UTC; the response echoes the effective zone.",
+              "type": "string",
+              "minLength": 1
+            },
+            "limit": {
+              "description": "Maximum number of group buckets (1-100). Only valid with `group_by` or `group_by_time`.",
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 100
+            },
+            "filter": {
+              "description": "Not supported with app (client) tokens in PDPP v0.1: the server returns 400. Owner-token reads only.",
+              "type": "object",
+              "propertyNames": {
+                "type": "string",
+                "minLength": 1
+              },
+              "additionalProperties": {
+                "anyOf": [
+                  {
+                    "type": [
+                      "string",
+                      "number",
+                      "boolean"
+                    ]
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "gte": {
+                        "type": [
+                          "string",
+                          "number",
+                          "boolean"
+                        ]
+                      },
+                      "gt": {
+                        "type": [
+                          "string",
+                          "number",
+                          "boolean"
+                        ]
+                      },
+                      "lte": {
+                        "type": [
+                          "string",
+                          "number",
+                          "boolean"
+                        ]
+                      },
+                      "lt": {
+                        "type": [
+                          "string",
+                          "number",
+                          "boolean"
+                        ]
+                      }
+                    },
+                    "additionalProperties": false
+                  }
+                ]
+              }
+            },
+            "connection_id": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Optional connection scope. Omit to fan in across granted connections. Get it from `schema` or typed 409 `available_connections` entries with `connector_key` and `connection_id`; persist `connection_id`, not `grant_id`, across reconnects."
+            }
+          },
+          "required": [
+            "stream",
+            "metric"
+          ],
+          "additionalProperties": false
+        },
         "properties": {
           "stream": "string",
           "metric": "string",
@@ -2111,9 +2436,108 @@
           "filter": "object",
           "connection_id": "string"
         },
-        "required": ["metric", "stream"]
+        "required": [
+          "metric",
+          "stream"
+        ]
       },
       "search": {
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "type": "object",
+          "properties": {
+            "q": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Search query string."
+            },
+            "streams": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "limit": {
+              "description": "Hits per page. Omit for the default page of 25; the maximum is 100 — the bound the published `/v1/search`, `/v1/search/semantic`, and `/v1/search/hybrid` contract declares and every mode honors (mirrored as `capabilities.{lexical,semantic,hybrid}_retrieval.max_limit` in `/.well-known/oauth-protected-resource` and `GET /v1/schema`). Values above 100 are rejected here rather than forwarded to be silently clamped by the RS, so the page size you request is always the page size you get. Page forward with the returned `cursor` (lexical and semantic page; hybrid does not) instead of asking for a larger page.",
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 100
+            },
+            "cursor": {
+              "type": "string"
+            },
+            "mode": {
+              "type": "string",
+              "enum": [
+                "lexical",
+                "semantic",
+                "hybrid"
+              ]
+            },
+            "filter": {
+              "description": "Not supported with app (client) tokens in PDPP v0.1: the server returns 400. Owner-token reads only.",
+              "type": "object",
+              "propertyNames": {
+                "type": "string",
+                "minLength": 1
+              },
+              "additionalProperties": {
+                "anyOf": [
+                  {
+                    "type": [
+                      "string",
+                      "number",
+                      "boolean"
+                    ]
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "gte": {
+                        "type": [
+                          "string",
+                          "number",
+                          "boolean"
+                        ]
+                      },
+                      "gt": {
+                        "type": [
+                          "string",
+                          "number",
+                          "boolean"
+                        ]
+                      },
+                      "lte": {
+                        "type": [
+                          "string",
+                          "number",
+                          "boolean"
+                        ]
+                      },
+                      "lt": {
+                        "type": [
+                          "string",
+                          "number",
+                          "boolean"
+                        ]
+                      }
+                    },
+                    "additionalProperties": false
+                  }
+                ]
+              }
+            },
+            "connection_id": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Optional connection scope. Omit to fan in across granted connections. Get it from `schema` or typed 409 `available_connections` entries with `connector_key` and `connection_id`; persist `connection_id`, not `grant_id`, across reconnects."
+            }
+          },
+          "required": [
+            "q"
+          ],
+          "additionalProperties": false
+        },
         "properties": {
           "q": "string",
           "streams": "array",
@@ -2123,9 +2547,57 @@
           "filter": "object",
           "connection_id": "string"
         },
-        "required": ["q"]
+        "required": [
+          "q"
+        ]
       },
       "fetch": {
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "description": "ID: `connection_id/stream:record_id`, `stream:record_id`, or `pdpp://record/...` URI."
+            },
+            "expand": {
+              "description": "Not supported with app (client) tokens in PDPP v0.1: the server returns 400. Owner-token reads only.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "expand_limit": {
+              "description": "Not supported with app (client) tokens in PDPP v0.1: the server returns 400. Owner-token reads only.",
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "fields": {
+              "description": "Field allowlist for projection. Field paths must be declared by the stream; advertised by `GET /v1/schema` (`field_capabilities`). Unknown paths are rejected by the RS rather than silently widened.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "connection_id": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Optional connection scope. Omit to fan in across granted connections. Get it from `schema` or typed 409 `available_connections` entries with `connector_key` and `connection_id`; persist `connection_id`, not `grant_id`, across reconnects."
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "additionalProperties": false
+        },
         "properties": {
           "id": "string",
           "expand": "array",
@@ -2133,9 +2605,70 @@
           "fields": "array",
           "connection_id": "string"
         },
-        "required": ["id"]
+        "required": [
+          "id"
+        ]
       },
       "read_record_field": {
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "type": "object",
+          "properties": {
+            "id": {
+              "description": "ID: `connection_id/stream:record_id`, `stream:record_id`, or `pdpp://record/...` URI.",
+              "type": "string",
+              "minLength": 1
+            },
+            "connection_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "stream": {
+              "type": "string",
+              "minLength": 1
+            },
+            "record_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "field_path": {
+              "type": "string",
+              "minLength": 1
+            },
+            "cursor": {
+              "type": "string",
+              "minLength": 1
+            },
+            "offset_chars": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "limit_chars": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 16384
+            },
+            "q": {
+              "type": "string",
+              "minLength": 1
+            },
+            "before_chars": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 8192
+            },
+            "after_chars": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 8192
+            }
+          },
+          "required": [
+            "field_path"
+          ],
+          "additionalProperties": false
+        },
         "properties": {
           "id": "string",
           "connection_id": "string",
@@ -2149,7 +2682,9 @@
           "before_chars": "integer",
           "after_chars": "integer"
         },
-        "required": ["field_path"]
+        "required": [
+          "field_path"
+        ]
       }
     }
   },
@@ -2160,7 +2695,10 @@
         "contentTextMode": "non-empty-model-visible-text",
         "content": [
           {
-            "keys": ["text", "type"],
+            "keys": [
+              "text",
+              "type"
+            ],
             "types": {
               "type": "string",
               "text": "string"
@@ -2277,7 +2815,10 @@
         "contentTextMode": "non-empty-model-visible-text",
         "content": [
           {
-            "keys": ["text", "type"],
+            "keys": [
+              "text",
+              "type"
+            ],
             "types": {
               "type": "string",
               "text": "string"
@@ -2311,7 +2852,10 @@
         "contentTextMode": "non-empty-model-visible-text",
         "content": [
           {
-            "keys": ["text", "type"],
+            "keys": [
+              "text",
+              "type"
+            ],
             "types": {
               "type": "string",
               "text": "string"
@@ -2466,7 +3010,10 @@
         "contentTextMode": "json-equals-structuredContent-except-content_ladder",
         "content": [
           {
-            "keys": ["text", "type"],
+            "keys": [
+              "text",
+              "type"
+            ],
             "types": {
               "type": "string",
               "text": "string"
@@ -2621,7 +3168,10 @@
         "contentTextMode": "non-empty-model-visible-text",
         "content": [
           {
-            "keys": ["text", "type"],
+            "keys": [
+              "text",
+              "type"
+            ],
             "types": {
               "type": "string",
               "text": "string"
@@ -2884,7 +3434,10 @@
         "contentTextMode": "non-empty-model-visible-text",
         "content": [
           {
-            "keys": ["text", "type"],
+            "keys": [
+              "text",
+              "type"
+            ],
             "types": {
               "type": "string",
               "text": "string"
@@ -2997,7 +3550,10 @@
         "contentTextMode": "non-empty-model-visible-text",
         "content": [
           {
-            "keys": ["text", "type"],
+            "keys": [
+              "text",
+              "type"
+            ],
             "types": {
               "type": "string",
               "text": "string"
@@ -3238,7 +3794,10 @@
         "contentTextMode": "non-empty-model-visible-text",
         "content": [
           {
-            "keys": ["text", "type"],
+            "keys": [
+              "text",
+              "type"
+            ],
             "types": {
               "type": "string",
               "text": "string"
@@ -3823,7 +4382,10 @@
         "contentTextMode": "non-empty-model-visible-text",
         "content": [
           {
-            "keys": ["text", "type"],
+            "keys": [
+              "text",
+              "type"
+            ],
             "types": {
               "type": "string",
               "text": "string"
@@ -3936,7 +4498,10 @@
         "contentTextMode": "non-empty-model-visible-text",
         "content": [
           {
-            "keys": ["text", "type"],
+            "keys": [
+              "text",
+              "type"
+            ],
             "types": {
               "type": "string",
               "text": "string"
@@ -4000,7 +4565,10 @@
         "contentTextMode": "non-empty-model-visible-text",
         "content": [
           {
-            "keys": ["text", "type"],
+            "keys": [
+              "text",
+              "type"
+            ],
             "types": {
               "type": "string",
               "text": "string"
@@ -4249,7 +4817,11 @@
       "fetchId": "cin_mcp_contract_a/documents:record-1",
       "fetchMetadataConnectionId": "cin_mcp_contract_a",
       "queryRecordConnectionId": "cin_mcp_contract_a",
-      "schemaKeys": ["data", "provider_url", "request_id"],
+      "schemaKeys": [
+        "data",
+        "provider_url",
+        "request_id"
+      ],
       "searchResultKeys": [
         "connection_id",
         "connector_key",
@@ -4334,6 +4906,31 @@
     },
     "toolSchemas": {
       "schema": {
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "type": "object",
+          "properties": {
+            "detail": {
+              "description": "Response detail grade for `structuredContent.data`. `compact` (default) returns a token-efficient projection: per-stream field names with capability flags, expandable relation names, connection identities, and connector metadata, with the heavy per-field JSON Schema blobs dropped. `full` returns deduped exhaustive schema for one source, preserving raw per-field JSON Schema while removing duplicate top-level stream arrays; it requires `stream`, and `connection_id` when that stream name is shared. The concise `content[]` text summary is identical for both grades.",
+              "type": "string",
+              "enum": [
+                "compact",
+                "full"
+              ]
+            },
+            "stream": {
+              "description": "Optional stream name from the compact `schema` stream list. Omit to describe every granted stream. Stream names are not globally unique; pair with `connection_id` when you need one configured source.",
+              "type": "string",
+              "minLength": 1
+            },
+            "connection_id": {
+              "description": "Optional. Scope schema detail to one configured connection when a stream name is shared by multiple connectors or connections. Obtain from schema results or typed ambiguity errors. This is source identity, not a profile selector.",
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "additionalProperties": false
+        },
         "properties": {
           "detail": "string",
           "stream": "string",
@@ -4342,6 +4939,139 @@
         "required": []
       },
       "query_records": {
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "type": "object",
+          "properties": {
+            "stream": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Stream name advertised by `schema`."
+            },
+            "limit": {
+              "description": "Records per page. Omit for the default page of 25; the maximum is 100 (the spec-core §8 contract). Values above 100 are rejected here rather than silently clamped, so the page size you request is always the page size you get. Page forward with the returned `cursor` instead of asking for a larger page.",
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 100
+            },
+            "cursor": {
+              "type": "string"
+            },
+            "order": {
+              "description": "Legacy page order for cursor-based pagination: `asc` or `desc`. Prefer canonical `sort` when `/v1/schema` advertises sortable fields; `order` remains accepted for clients that have not migrated.",
+              "type": "string"
+            },
+            "sort": {
+              "description": "Canonical sign-prefix sort spec advertised by `GET /v1/schema` (e.g. `sort=-emitted_at`). The reference runtime supports the advertised cursor field; unsupported fields, conflicting directions, or sort/order disagreement are rejected with typed errors rather than treated as no-ops.",
+              "type": "string"
+            },
+            "count": {
+              "description": "Canonical opt-in count grade (`none`, `estimated`, `exact`). Omit or use `none` for no count. `exact` returns `meta.count.kind=\"exact\"` when supported; `estimated` may be upgraded to an exact count. Counts are page-independent and may be more expensive than the page itself.",
+              "type": "string",
+              "enum": [
+                "none",
+                "estimated",
+                "exact"
+              ]
+            },
+            "filter": {
+              "description": "Not supported with app (client) tokens in PDPP v0.1: the server returns 400. Owner-token reads only.",
+              "type": "object",
+              "propertyNames": {
+                "type": "string",
+                "minLength": 1
+              },
+              "additionalProperties": {
+                "anyOf": [
+                  {
+                    "type": [
+                      "string",
+                      "number",
+                      "boolean"
+                    ]
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "gte": {
+                        "type": [
+                          "string",
+                          "number",
+                          "boolean"
+                        ]
+                      },
+                      "gt": {
+                        "type": [
+                          "string",
+                          "number",
+                          "boolean"
+                        ]
+                      },
+                      "lte": {
+                        "type": [
+                          "string",
+                          "number",
+                          "boolean"
+                        ]
+                      },
+                      "lt": {
+                        "type": [
+                          "string",
+                          "number",
+                          "boolean"
+                        ]
+                      }
+                    },
+                    "additionalProperties": false
+                  }
+                ]
+              }
+            },
+            "fields": {
+              "description": "Field allowlist for projection. Field paths must be declared by the stream; advertised by `GET /v1/schema` (`field_capabilities`). Unknown paths are rejected by the RS rather than silently widened.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "view": {
+              "description": "Named projection. A stream-declared view id (advertised by `GET /v1/schema` under each stream's `views`) that projects the returned records down to the view's field set. Mutually exclusive with `fields` (passing both is rejected by the RS); an unknown view id is rejected rather than silently ignored. Use `view` for a curated projection and `fields` for an ad-hoc one.",
+              "type": "string"
+            },
+            "expand": {
+              "description": "Not supported with app (client) tokens in PDPP v0.1: the server returns 400. Owner-token reads only.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "expand_limit": {
+              "description": "Not supported with app (client) tokens in PDPP v0.1: the server returns 400. Owner-token reads only.",
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "changes_since": {
+              "description": "Projection-safe incremental-sync bookmark. Use `beginning` for the initial changes feed, then pass the opaque `next_changes_since` value returned in the prior response. Do not pass an ISO timestamp; malformed bookmarks are rejected as `invalid_cursor`.",
+              "type": "string"
+            },
+            "connection_id": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Optional connection scope. Omit to fan in across granted connections. Get it from `schema` or typed 409 `available_connections` entries with `connector_key` and `connection_id`; persist `connection_id`, not `grant_id`, across reconnects."
+            }
+          },
+          "required": [
+            "stream"
+          ],
+          "additionalProperties": false
+        },
         "properties": {
           "stream": "string",
           "limit": "integer",
@@ -4357,9 +5087,135 @@
           "changes_since": "string",
           "connection_id": "string"
         },
-        "required": ["stream"]
+        "required": [
+          "stream"
+        ]
       },
       "aggregate": {
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "type": "object",
+          "properties": {
+            "stream": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Stream name advertised by `schema`."
+            },
+            "metric": {
+              "type": "string",
+              "enum": [
+                "count",
+                "sum",
+                "min",
+                "max",
+                "count_distinct"
+              ],
+              "description": "Aggregation metric. `field` is required for sum, min, max, and count_distinct."
+            },
+            "field": {
+              "description": "Target field for sum/min/max/count_distinct. Must be declared for the metric in `GET /v1/schema`.",
+              "type": "string",
+              "minLength": 1
+            },
+            "group_by": {
+              "description": "Scalar field to group counts by. Mutually exclusive with `group_by_time`.",
+              "type": "string",
+              "minLength": 1
+            },
+            "group_by_time": {
+              "description": "Declared date/date-time field to bucket counts by. Requires `granularity`. Mutually exclusive with `group_by`.",
+              "type": "string",
+              "minLength": 1
+            },
+            "granularity": {
+              "description": "Calendar bucket unit for `group_by_time`. Required with `group_by_time`, forbidden otherwise.",
+              "type": "string",
+              "enum": [
+                "minute",
+                "hour",
+                "day",
+                "week",
+                "month",
+                "quarter",
+                "year"
+              ]
+            },
+            "time_zone": {
+              "description": "IANA time zone for `group_by_time` bucket boundaries. Defaults to UTC; the response echoes the effective zone.",
+              "type": "string",
+              "minLength": 1
+            },
+            "limit": {
+              "description": "Maximum number of group buckets (1-100). Only valid with `group_by` or `group_by_time`.",
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 100
+            },
+            "filter": {
+              "description": "Not supported with app (client) tokens in PDPP v0.1: the server returns 400. Owner-token reads only.",
+              "type": "object",
+              "propertyNames": {
+                "type": "string",
+                "minLength": 1
+              },
+              "additionalProperties": {
+                "anyOf": [
+                  {
+                    "type": [
+                      "string",
+                      "number",
+                      "boolean"
+                    ]
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "gte": {
+                        "type": [
+                          "string",
+                          "number",
+                          "boolean"
+                        ]
+                      },
+                      "gt": {
+                        "type": [
+                          "string",
+                          "number",
+                          "boolean"
+                        ]
+                      },
+                      "lte": {
+                        "type": [
+                          "string",
+                          "number",
+                          "boolean"
+                        ]
+                      },
+                      "lt": {
+                        "type": [
+                          "string",
+                          "number",
+                          "boolean"
+                        ]
+                      }
+                    },
+                    "additionalProperties": false
+                  }
+                ]
+              }
+            },
+            "connection_id": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Optional connection scope. Omit to fan in across granted connections. Get it from `schema` or typed 409 `available_connections` entries with `connector_key` and `connection_id`; persist `connection_id`, not `grant_id`, across reconnects."
+            }
+          },
+          "required": [
+            "stream",
+            "metric"
+          ],
+          "additionalProperties": false
+        },
         "properties": {
           "stream": "string",
           "metric": "string",
@@ -4372,9 +5228,108 @@
           "filter": "object",
           "connection_id": "string"
         },
-        "required": ["metric", "stream"]
+        "required": [
+          "metric",
+          "stream"
+        ]
       },
       "search": {
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "type": "object",
+          "properties": {
+            "q": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Search query string."
+            },
+            "streams": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "limit": {
+              "description": "Hits per page. Omit for the default page of 25; the maximum is 100 — the bound the published `/v1/search`, `/v1/search/semantic`, and `/v1/search/hybrid` contract declares and every mode honors (mirrored as `capabilities.{lexical,semantic,hybrid}_retrieval.max_limit` in `/.well-known/oauth-protected-resource` and `GET /v1/schema`). Values above 100 are rejected here rather than forwarded to be silently clamped by the RS, so the page size you request is always the page size you get. Page forward with the returned `cursor` (lexical and semantic page; hybrid does not) instead of asking for a larger page.",
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 100
+            },
+            "cursor": {
+              "type": "string"
+            },
+            "mode": {
+              "type": "string",
+              "enum": [
+                "lexical",
+                "semantic",
+                "hybrid"
+              ]
+            },
+            "filter": {
+              "description": "Not supported with app (client) tokens in PDPP v0.1: the server returns 400. Owner-token reads only.",
+              "type": "object",
+              "propertyNames": {
+                "type": "string",
+                "minLength": 1
+              },
+              "additionalProperties": {
+                "anyOf": [
+                  {
+                    "type": [
+                      "string",
+                      "number",
+                      "boolean"
+                    ]
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "gte": {
+                        "type": [
+                          "string",
+                          "number",
+                          "boolean"
+                        ]
+                      },
+                      "gt": {
+                        "type": [
+                          "string",
+                          "number",
+                          "boolean"
+                        ]
+                      },
+                      "lte": {
+                        "type": [
+                          "string",
+                          "number",
+                          "boolean"
+                        ]
+                      },
+                      "lt": {
+                        "type": [
+                          "string",
+                          "number",
+                          "boolean"
+                        ]
+                      }
+                    },
+                    "additionalProperties": false
+                  }
+                ]
+              }
+            },
+            "connection_id": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Optional connection scope. Omit to fan in across granted connections. Get it from `schema` or typed 409 `available_connections` entries with `connector_key` and `connection_id`; persist `connection_id`, not `grant_id`, across reconnects."
+            }
+          },
+          "required": [
+            "q"
+          ],
+          "additionalProperties": false
+        },
         "properties": {
           "q": "string",
           "streams": "array",
@@ -4384,9 +5339,57 @@
           "filter": "object",
           "connection_id": "string"
         },
-        "required": ["q"]
+        "required": [
+          "q"
+        ]
       },
       "fetch": {
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "description": "ID: `connection_id/stream:record_id`, `stream:record_id`, or `pdpp://record/...` URI."
+            },
+            "expand": {
+              "description": "Not supported with app (client) tokens in PDPP v0.1: the server returns 400. Owner-token reads only.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "expand_limit": {
+              "description": "Not supported with app (client) tokens in PDPP v0.1: the server returns 400. Owner-token reads only.",
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "fields": {
+              "description": "Field allowlist for projection. Field paths must be declared by the stream; advertised by `GET /v1/schema` (`field_capabilities`). Unknown paths are rejected by the RS rather than silently widened.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "connection_id": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Optional connection scope. Omit to fan in across granted connections. Get it from `schema` or typed 409 `available_connections` entries with `connector_key` and `connection_id`; persist `connection_id`, not `grant_id`, across reconnects."
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "additionalProperties": false
+        },
         "properties": {
           "id": "string",
           "expand": "array",
@@ -4394,9 +5397,70 @@
           "fields": "array",
           "connection_id": "string"
         },
-        "required": ["id"]
+        "required": [
+          "id"
+        ]
       },
       "read_record_field": {
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "type": "object",
+          "properties": {
+            "id": {
+              "description": "ID: `connection_id/stream:record_id`, `stream:record_id`, or `pdpp://record/...` URI.",
+              "type": "string",
+              "minLength": 1
+            },
+            "connection_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "stream": {
+              "type": "string",
+              "minLength": 1
+            },
+            "record_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "field_path": {
+              "type": "string",
+              "minLength": 1
+            },
+            "cursor": {
+              "type": "string",
+              "minLength": 1
+            },
+            "offset_chars": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "limit_chars": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 16384
+            },
+            "q": {
+              "type": "string",
+              "minLength": 1
+            },
+            "before_chars": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 8192
+            },
+            "after_chars": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 8192
+            }
+          },
+          "required": [
+            "field_path"
+          ],
+          "additionalProperties": false
+        },
         "properties": {
           "id": "string",
           "connection_id": "string",
@@ -4410,7 +5474,117 @@
           "before_chars": "integer",
           "after_chars": "integer"
         },
-        "required": ["field_path"]
+        "required": [
+          "field_path"
+        ]
+      }
+    }
+  },
+  "httpAuth": {
+    "missing": {
+      "status": 401,
+      "wwwAuthenticate": "Bearer resource_metadata=\"http://resource.example/.well-known/oauth-protected-resource/mcp\"",
+      "body": {
+        "error": {
+          "code": "authentication_error",
+          "message": "Missing Bearer token",
+          "type": "authentication_error",
+          "resource_metadata": "http://resource.example/.well-known/oauth-protected-resource/mcp",
+          "next_step": "Fetch error.resource_metadata, then follow pdpp_agent_discovery.cli when token completion is available; otherwise request a scoped client grant without using an owner bearer token.",
+          "request_id": "req_ID"
+        }
+      }
+    },
+    "malformed": {
+      "status": 401,
+      "wwwAuthenticate": "Bearer resource_metadata=\"http://resource.example/.well-known/oauth-protected-resource/mcp\"",
+      "body": {
+        "error": {
+          "code": "authentication_error",
+          "message": "Missing Bearer token",
+          "type": "authentication_error",
+          "resource_metadata": "http://resource.example/.well-known/oauth-protected-resource/mcp",
+          "next_step": "Fetch error.resource_metadata, then follow pdpp_agent_discovery.cli when token completion is available; otherwise request a scoped client grant without using an owner bearer token.",
+          "request_id": "req_ID"
+        }
+      }
+    },
+    "revoked": {
+      "status": "denied"
+    },
+    "metadata": {
+      "status": 200,
+      "wwwAuthenticate": null,
+      "body": {
+        "authorization_servers": [
+          "http://auth.example"
+        ],
+        "bearer_methods_supported": [
+          "header"
+        ],
+        "pdpp_core_query_base": "http://resource.example/v1",
+        "pdpp_provider_connect_version": "draft-2026-04-16",
+        "pdpp_self_export_supported": true,
+        "pdpp_token_kinds_supported": [
+          "client",
+          "mcp_package"
+        ],
+        "resource": "http://resource.example/mcp",
+        "resource_name": "DataConnect Hosted MCP Resource",
+        "pdpp_agent_discovery": {
+          "advisory": true,
+          "cli": {
+            "bin_name": "pdpp",
+            "connect_command": "npx -y @pdpp/cli connect <provider-url>",
+            "install_command": "npx -y @pdpp/cli --help",
+            "no_owner_token": true,
+            "no_owner_token_policy": "owner_browser_approval_required",
+            "package": "@pdpp/cli",
+            "package_specifier": "@pdpp/cli",
+            "run_command": "npx -y @pdpp/cli connect http://resource.example",
+            "version_policy": "latest"
+          },
+          "recommended_flow": "pdpp connect",
+          "skill_name": "pdpp-data-access",
+          "mcp": {
+            "endpoint": "http://resource.example/mcp",
+            "no_owner_token": true,
+            "setup_intent": "grant_scoped_read",
+            "tool_surface": "profile_free_normal_read",
+            "transport": "streamable_http",
+            "authorization": {
+              "authorization_code_pkce": {
+                "authorization_endpoint": "http://auth.example/oauth/authorize",
+                "flow": "authorization_code_pkce",
+                "pdpp_token_kind": "client",
+                "resource": "http://resource.example/mcp",
+                "resource_parameter": "required"
+              },
+              "device_code": {
+                "authorization_details_type": "https://pdpp.dev/data-access",
+                "device_authorization_endpoint": "http://auth.example/oauth/device_authorization",
+                "flow": "device_code",
+                "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+                "owner_bearer_accepted": false,
+                "pdpp_token_kind": "client",
+                "required_parameters": [
+                  "client_id",
+                  "resource",
+                  "authorization_details"
+                ],
+                "resource": "http://resource.example/mcp",
+                "token_endpoint": "http://auth.example/oauth/token"
+              },
+              "owner_agent_device_code": {
+                "advertised_in": "pdpp_owner_agent_onboarding",
+                "flow": "device_code",
+                "mcp_owner_bearer_rejected": true,
+                "normal_mcp_setup": false,
+                "pdpp_token_kind": "owner"
+              }
+            }
+          }
+        }
       }
     }
   },

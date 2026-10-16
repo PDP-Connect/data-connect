@@ -12,7 +12,7 @@ import { runSearchIndexDirtyReconcileRound } from "../../server/search-index-rec
 import { createSqliteConnectorInstanceStore } from "../../server/stores/connector-instance-store.ts"
 
 const CONNECTIONS = ["cin_mcp_contract_a", "cin_mcp_contract_b"]
-const LONG_TEXT = `Contract pasta order 1 and Contract pasta order 2. Café 🍝 data must survive hosted MCP fetch and bounded field reads. A hosted MCP connector must preserve the full record text across search, fetch, and bounded field reads. ${"Compatibility fixture. ".repeat(90)}`
+export const LONG_TEXT = `Contract pasta order 1 and Contract pasta order 2. Café 🍝 data must survive hosted MCP fetch and bounded field reads. A hosted MCP connector must preserve the full record text across search, fetch, and bounded field reads. ${"Compatibility fixture. ".repeat(90)}`
 
 type JsonObject = Record<string, unknown>
 type Tool = { name: string; inputSchema: JsonObject; annotations?: JsonObject }
@@ -689,6 +689,59 @@ function contentTextMode(result: JsonObject): string {
   return "non-empty-model-visible-text"
 }
 
+export function assertFetchedHandle(handle: string, data: JsonObject): void {
+  let connectionId = connectionIdForRecordHandle(handle)
+  let recordId = handle.split(":").at(-1)
+  if (handle.startsWith("pdpp://record/")) {
+    const encoded = decodeURIComponent(handle.slice("pdpp://record/".length))
+    try {
+      const payload = object(JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")))
+      connectionId = String(payload.connection_id)
+      recordId = String(payload.record_id)
+    } catch {
+      recordId = encoded.split(":").at(-1)
+    }
+  }
+  const metadata = object(data.metadata)
+  assert(metadata.id === recordId && metadata.connection_id === connectionId &&
+    data.id === (handle.startsWith("pdpp://record/") ? handle : `${connectionId}/documents:${recordId}`),
+    "saved handle resolved to a different record identity")
+  const match = recordId?.match(/^record-(\d+)(-page)?$/)
+  assert(match && connectionId === CONNECTIONS[Number(match[1]) - 1],
+    "saved handle does not identify a seeded record")
+  assert(data.title === `Contract pasta order ${match[1]}` &&
+    typeof data.text === "string" && data.text.includes(LONG_TEXT),
+    "saved handle returned different seeded content")
+}
+
+export function assertSeededCount(count: unknown): void {
+  assert(count === 2, "aggregate count must equal exactly two seeded records for the selected connection")
+}
+
+export function assertSeededPages(first: JsonObject[], next: JsonObject[]): void {
+  const identity = (row: JsonObject): string => {
+    const key = row.record_key ?? row.record_id ?? object(row.data).id ?? row.id
+    assert(typeof key === "string" && /^record-[12](-page)?$/.test(key),
+      "pagination must return seeded record identities")
+    return key
+  }
+  const left = first.map(identity)
+  const right = next.map(identity)
+  assert(left.length > 0 && right.length > 0 &&
+    new Set([...left, ...right]).size === left.length + right.length,
+    "pagination pages must contain disjoint seeded record identities")
+}
+
+export function assertWindowContinuation(first: JsonObject, next: JsonObject): void {
+  const start = (window: JsonObject): unknown => window.start_chars ?? window.start_char ?? window.start ?? window.offset ?? window.start_offset
+  const firstStart = start(first)
+  const nextStart = start(next)
+  assert(typeof firstStart === "number" && typeof nextStart === "number" && nextStart > firstStart,
+    "field continuation offset must advance")
+  assert(typeof first.text === "string" && typeof next.text === "string" && next.text.length > 0 && next.text !== first.text,
+    "field continuation must return different nonempty text")
+}
+
 function connectionIdForRecordHandle(handle: string): string | undefined {
   if (handle.startsWith("pdpp://record/")) {
     const value = decodeURIComponent(handle.slice("pdpp://record/".length))
@@ -705,6 +758,19 @@ function connectionIdForRecordHandle(handle: string): string | undefined {
   }
   const separator = handle.indexOf("/")
   return separator > 0 ? handle.slice(0, separator) : undefined
+}
+
+// seedFixture and the package consent select one child for each distinct connection.
+// Candidate discovery must never manufacture multi-child ambiguity for this seed.
+export function isEmptyAmbiguityRefusal(read: JsonObject): boolean {
+  return read.isError === true && !read.error &&
+    (read.errorCode ?? object(object(read.structuredContent).error).code) === "ambiguous_legacy_resource_uri" &&
+    (read.contents === undefined || Array.isArray(read.contents) && read.contents.length === 0)
+}
+
+export function seededMembershipCount(uri: string): number {
+  const connectionId = connectionIdForResourceUri(uri)
+  return connectionId && CONNECTIONS.includes(connectionId) ? 1 : 0
 }
 
 function connectionIdForResourceUri(uri: string): string | undefined {
@@ -1012,6 +1078,7 @@ export async function replay(
     Array.isArray(nextSearchResults) && nextSearchResults.length > 0,
     "search follow-up page must return results"
   )
+  assertSeededPages(hits, nextSearchResults as JsonObject[])
   const resultConnectionId =
     typeof hit.connection_id === "string" ? hit.connection_id : scopedConnection
   const recordUri = `pdpp://record/${Buffer.from(
@@ -1041,8 +1108,8 @@ export async function replay(
   )
   const isAmbiguousLegacyRead = (read: JsonObject, uri: string): boolean => {
     const connectionId = connectionIdForResourceUri(uri)
-    return tokenKind === "package" && read.isError === true &&
-      object(object(read.structuredContent).error).code === "ambiguous_legacy_resource_uri" &&
+    return tokenKind === "package" && isEmptyAmbiguityRefusal(read) &&
+      seededMembershipCount(uri) > 1 &&
       !!connectionId && (grantIdsByConnection.get(connectionId)?.length ?? 0) > 1
   }
   const resourceContents = resourceRead.contents as JsonObject[]
@@ -1124,8 +1191,12 @@ export async function replay(
       })
     )
   )
-  const fetched = fetchedResults[0]
-  assert(fetched, "fetch replay returned no results")
+  for (const [index, result] of fetchedResults.entries()) {
+    assertFetchedHandle(fetchIds[index]!, object(result.structuredContent))
+  }
+  // The fresh search hit can differ from the first saved handle when scores tie.
+  const fetched = await call("fetch", { ...packageArgs(resultConnectionId), id: hit.id })
+  assertFetchedHandle(String(hit.id), object(fetched.structuredContent))
   const fetchedData = object(fetched.structuredContent)
   assert(
     fetchedData.id === hit.id,
@@ -1200,6 +1271,7 @@ export async function replay(
     Array.isArray(records) && records.length > 0,
     `query_records returned no fixture records: ${JSON.stringify(queried)}`
   )
+  assertSeededPages(records, nextQueryRecords as JsonObject[])
   assert(
     contentTexts(queried).some(
       text => text.includes("documents") && text.includes("record-")
@@ -1249,7 +1321,7 @@ export async function replay(
   const cursorRead = await call("read_record_field", {
     ...packageArgs(),
     field_path: "text",
-    id: fetchId,
+    id: readIds[0],
     cursor: readCursor,
     limit_chars: 240,
   })
@@ -1260,6 +1332,7 @@ export async function replay(
         0,
     "bounded field continuation must resolve"
   )
+  assertWindowContinuation(object(readData.window), object(object(cursorRead.structuredContent).window))
   assert(
     String(readWindowText).includes("🍝"),
     "bounded Unicode field read must preserve the seeded character"
@@ -1323,6 +1396,10 @@ export async function replay(
     contentTexts(aggregate).some(text => /count/i.test(text)),
     "aggregate content text must expose the count metric"
   )
+  const aggregateData = object(aggregate.structuredContent)
+  const count = aggregateData.count ?? object(aggregateData.data).count ??
+    object(aggregateData.data).value ?? aggregateData.value
+  assertSeededCount(count)
   const currentWindowArgs: JsonObject[] = []
   const collectWindowArgs = (value: unknown): void => {
     if (Array.isArray(value)) {
@@ -1626,7 +1703,7 @@ export async function replay(
         resourceTemplates,
       },
       resourceReads,
-      fetchId,
+      fetchId: hit.id,
       fetchMetadataConnectionId: (
         ((fetched.structuredContent as JsonObject).metadata ?? {}) as JsonObject
       ).connection_id,
@@ -1648,9 +1725,9 @@ export async function replay(
         readIds: [...new Set([...readIds, ...recordUris])],
         recordUris: recordedUris,
         fieldWindowUris: [...fieldWindowUris].sort(),
-        searchResultIds,
+        searchResultIds: storedIds?.searchResultIds ?? searchResultIds,
         searchArgs: { q: "pasta" },
-        searchResultId: hit.id,
+        searchResultId: storedIds?.searchResultId ?? hit.id,
         queryArgs: { connection_id: resultConnectionId, limit: 10, stream },
       },
       observedConnectionIds: [...connectionIds].sort(),
@@ -1661,6 +1738,7 @@ export async function replay(
       tools.map(tool => [
         tool.name,
         {
+          inputSchema: tool.inputSchema,
           properties: Object.fromEntries(
             Object.entries(
               (tool.inputSchema.properties ?? {}) as JsonObject
@@ -1676,6 +1754,35 @@ export async function replay(
       ])
     ),
   }
+}
+
+async function captureHttpAuth(asUrl: string, rsUrl: string, token: string): Promise<JsonObject> {
+  const normalize = (value: unknown): unknown => JSON.parse(JSON.stringify(value)
+    .replaceAll(rsUrl, "http://resource.example").replaceAll(asUrl, "http://auth.example")
+    .replace(/req_[0-9a-f]+/g, "req_ID"))
+  const observe = async (url: string, authorization?: string): Promise<JsonObject> => {
+    const response = await fetch(url, { headers: authorization ? { Authorization: authorization } : {} })
+    const text = await response.text()
+    let body: unknown = text
+    try { body = JSON.parse(text) } catch { /* Preserve a non-JSON base response. */ }
+    return { status: response.status, wwwAuthenticate: normalize(response.headers.get("www-authenticate")),
+      body: normalize(body) }
+  }
+  const missing = await observe(`${rsUrl}/mcp`)
+  const malformed = await observe(`${rsUrl}/mcp`, "Bearer")
+  const changed = getDb().prepare("UPDATE tokens SET revoked = 1 WHERE token_id = ?").run(token)
+  assert(changed.changes === 1, "auth probe must revoke an issued fixture bearer")
+  const revoked = await observe(`${rsUrl}/mcp`, `Bearer ${token}`)
+  for (const [name, probe] of Object.entries({ missing, malformed }))
+    assert(probe.status === 401, `${name} bearer must return HTTP 401`)
+  // Revocation is recorded only as "denied": the E4 change moves it from 403 to 401
+  // on purpose, so the exact status and challenge are not part of the contract.
+  assert(revoked.status === 401 || revoked.status === 403, "revoked bearer must be denied with 401 or 403")
+  const metadata = await observe(`${rsUrl}/.well-known/oauth-protected-resource/mcp`)
+  assert(metadata.status === 200, "protected-resource metadata must be fetchable")
+  assert(object(metadata.body).resource === "http://resource.example/mcp",
+    "protected-resource metadata must identify the canonical MCP resource")
+  return { missing, malformed, revoked: { status: "denied" }, metadata }
 }
 
 export async function captureExistingClientContract(
@@ -1710,6 +1817,7 @@ export async function captureExistingClientContract(
             ),
           }
         : {}),
+      httpAuth: await captureHttpAuth(asUrl, rsUrl, tokenKind === "package" ? tokens.package : tokens.client),
       fixture: {
         longTextChars: LONG_TEXT.length,
         recordsPerChild: 2,
@@ -1882,7 +1990,10 @@ export async function capturePackageResourceSession(
         )
         if (!template || typeof template.uriTemplate !== "string") continue
         if (!template.uriTemplate.includes("{grant_id}")) continue
-        if (grants.length > 1) ambiguousLegacyUris.push(oldUri)
+        assert(grants.length === seededMembershipCount(oldUri),
+          "discovery membership differs from independently seeded membership")
+        if (grants.length > 1 && seededMembershipCount(oldUri) > 1)
+          ambiguousLegacyUris.push(oldUri)
         const handle = oldUri.slice(oldUri.indexOf("/", "pdpp://".length) + 1)
         const expand = (grantId: string): string =>
           String(template.uriTemplate)
@@ -1918,6 +2029,10 @@ export async function capturePackageResourceSession(
         ).body
         const result = response.result ? object(response.result) : {}
         const error = response.error
+        if (object(object(result.structuredContent).error).code === "ambiguous_legacy_resource_uri") {
+          assert(isEmptyAmbiguityRefusal(result) && !error,
+            "ambiguity refusal must have isError true and no contents")
+        }
         const contents = Array.isArray(result.contents)
           ? (result.contents as JsonObject[])
           : []
