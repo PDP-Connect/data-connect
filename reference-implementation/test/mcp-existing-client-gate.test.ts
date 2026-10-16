@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict"
-import { execFileSync } from "node:child_process"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import test from "node:test"
@@ -144,7 +143,7 @@ function stableJson(value: unknown): string {
   return JSON.stringify(value)
 }
 
-function compareClient(base: JsonObject, candidate: JsonObject): void {
+function compareClient(base: JsonObject, candidate: JsonObject, compareResources = true): void {
   const baseSession = object(base.session)
   const candidateSession = object(candidate.session)
   const baseTools = baseSession.toolNames as string[]
@@ -173,7 +172,7 @@ function compareClient(base: JsonObject, candidate: JsonObject): void {
   }
   compareDiscovery(baseSession, candidateSession, "client token")
   compareLegacyAliases(baseSession, candidateSession, "client token")
-  assert.equal(
+  if (compareResources) assert.equal(
     stableJson(candidateSession.resourceDiscovery),
     stableJson(baseSession.resourceDiscovery),
     "client token: resources/list and resources/templates/list changed from base"
@@ -237,12 +236,7 @@ function comparePackage(base: JsonObject, candidate: JsonObject): void {
   )
 
   if (!requiresGrantId) {
-    compareClient(base, candidate)
-    assert.equal(
-      stableJson(candidateSession.resourceDiscovery),
-      stableJson(baseSession.resourceDiscovery),
-      "package token: base resource discovery changed"
-    )
+    compareClient(base, candidate, false)
     return
   }
   if (!candidateNames.includes("list_package_children")) {
@@ -280,7 +274,7 @@ function comparePackage(base: JsonObject, candidate: JsonObject): void {
   }
   compareDiscovery(baseSession, candidateSession, "package token")
   compareLegacyAliases(baseSession, candidateSession, "package token")
-  comparePackageResources(baseSession, candidateSession, "package token")
+  // The dedicated resource session below checks old and selected URI forms.
 }
 
 function comparePackageResources(
@@ -289,88 +283,82 @@ function comparePackageResources(
   context: string
 ): void {
   const discovery = object(candidateSession.resourceDiscovery)
-  const templates = Array.isArray(discovery.resourceTemplates)
-    ? (discovery.resourceTemplates as JsonObject[])
-    : []
-  for (const name of ["pdpp-record", "pdpp-field-window"]) {
-    const template = templates.find(item => item.name === name)
-    assert(template, `${context}: resources/templates/list removed '${name}'`)
-    assert(
-      typeof template.uriTemplate === "string" &&
-        template.uriTemplate.includes("{grant_id}/{handle}"),
-      `${context}: '${name}' does not advertise the grant_id resource URI form`
-    )
+  const baseDiscovery = object(baseSession.resourceDiscovery)
+  const templates = (discovery.resourceTemplates ?? []) as JsonObject[]
+  const baseTemplates = (baseDiscovery.resourceTemplates ?? []) as JsonObject[]
+  assert(!Array.isArray(discovery.errors) || !discovery.errors.length,
+    `${context}: resource discovery is unavailable`)
+  assert(baseTemplates.length > 0, `${context}: base captured no resource templates`)
+  for (const baseTemplate of baseTemplates) {
+    const template = templates.find(item => item.name === baseTemplate.name)
+    assert(template, `${context}: resources/templates/list removed '${baseTemplate.name}'`)
+    assert(typeof template.uriTemplate === "string", `${context}: invalid resource template`)
+    assert(template.uriTemplate === baseTemplate.uriTemplate ||
+      (template.uriTemplate.includes("{grant_id}") && template.uriTemplate.includes("{handle}")),
+      `${context}: resource template neither preserves base nor advertises child selection`)
   }
-  assert(
-    templates.every(
-      template =>
-        typeof template.uriTemplate === "string" &&
-        template.uriTemplate.includes("{grant_id}/")
-    ),
-    `${context}: package resource discovery advertises a legacy or unscoped URI form`
-  )
-  const resources = Array.isArray(discovery.resources)
-    ? (discovery.resources as JsonObject[])
-    : []
-  const grantIds = Array.isArray(candidateSession.discoveryGrantIds)
-    ? (candidateSession.discoveryGrantIds as string[])
-    : []
-  assert(
-    resources.every(resource => {
-      const uri = resource.uri
-      return (
-        typeof uri === "string" &&
-        grantIds.some(id => uri.includes(`/${encodeURIComponent(id)}/`))
-      )
-    }),
-    `${context}: resources/list advertises a package URI without explicit child selection`
-  )
-
-  const storedIds = object(baseSession.storedIds)
-  const oldUris = [
-    ...new Set([
-      ...((storedIds.recordUris as string[] | undefined) ?? []),
-      ...((storedIds.fieldWindowUris as string[] | undefined) ?? []),
-    ]),
-  ]
-  assert(
-    oldUris.length > 0,
-    `${context}: base captured no stored resource URIs`
-  )
-  const reads = Array.isArray(candidateSession.resourceReads)
-    ? (candidateSession.resourceReads as JsonObject[])
-    : []
-  const readsByUri = new Map(reads.map(read => [String(read.uri), read]))
+  const selected = templates.some(item => String(item.uriTemplate).includes("{grant_id}"))
+  if (!selected) assert.deepEqual(discovery, baseDiscovery,
+    `${context}: unchanged resource forms must preserve base discovery`)
+  const ids = object(baseSession.storedIds)
+  const oldUris = [...new Set([
+    ...((ids.recordUris ?? []) as string[]),
+    ...((ids.fieldWindowUris ?? []) as string[]),
+  ])]
+  assert(oldUris.length > 0, `${context}: base captured no stored resource URIs`)
+  const reads = (candidateSession.resourceReads ?? []) as JsonObject[]
+  const byUri = new Map(reads.map(read => [String(read.uri), read]))
+  const baseReads = new Map(((baseSession.resourceReads ?? []) as JsonObject[])
+    .map(read => [String(read.uri), read]))
+  const ambiguous = new Set((candidateSession.ambiguousLegacyUris ?? []) as string[])
+  const contents = (read: JsonObject): JsonObject[] =>
+    ((read.contents ?? []) as JsonObject[]).map(part => ({ mimeType: part.mimeType, text: part.text }))
+  const successful = (read: JsonObject | undefined, uri: string): JsonObject => {
+    assert(read, `${context}: stored URI was not replayed: ${uri}`)
+    assert(!read.error && read.isError !== true && read.ambiguous !== true &&
+      contents(read).some(part => typeof part.text === "string" && part.text.trim()),
+      `${context}: resources/read failed or returned no content: ${uri}`)
+    return read
+  }
   for (const uri of oldUris) {
-    const read = readsByUri.get(uri)
-    assert(read, `${context}: old stored resource URI was not replayed: ${uri}`)
-    if (read.ambiguous === true) {
-      assert.equal(
-        read.errorCode,
-        "ambiguous_legacy_resource_uri",
-        `${context}: old URI refusal was not reported as genuine ambiguity`
-      )
+    const base = successful(baseReads.get(uri), uri)
+    const read = byUri.get(uri)
+    assert(read, `${context}: old stored URI was not replayed: ${uri}`)
+    if (selected && ambiguous.has(uri) && (read.isError === true || read.error || read.ambiguous)) {
+      assert.equal(read.errorCode, "ambiguous_legacy_resource_uri",
+        `${context}: old URI refusal must identify genuine multi-child ambiguity: ${uri}`)
       continue
     }
-    const contents = Array.isArray(read.contents)
-      ? (read.contents as JsonObject[])
-      : []
-    assert(
-      contents.some(
-        part => typeof part.text === "string" && part.text.trim().length > 0
-      ),
-      `${context}: old stored resource URI returned no content: ${uri}`
-    )
+    assert.deepEqual(contents(successful(read, uri)), contents(base),
+      `${context}: stored URI content changed: ${uri}`)
   }
-  const oldUriSet = new Set(oldUris)
-  const newReads = reads.filter(read => !oldUriSet.has(String(read.uri)))
-  assert(
-    newReads.some(read => String(read.uri).startsWith("pdpp://record/")) &&
-      newReads.some(read =>
-        String(read.uri).startsWith("pdpp://field-window/")
-      ),
-    `${context}: candidate templates did not produce working new record and field-window URIs`
-  )
+  if (!selected) return
+  const selectedReads = (candidateSession.selectedResourceReads ?? []) as JsonObject[]
+  const grantIds = (candidateSession.discoveryGrantIds ?? []) as string[]
+  assert(grantIds.length > 0, `${context}: selected forms need child discovery`)
+  for (const resource of (discovery.resources ?? []) as JsonObject[]) {
+    assert(typeof resource.uri === "string" &&
+      grantIds.some(id => String(resource.uri).includes(`/${encodeURIComponent(id)}/`)),
+      `${context}: advertised resource lacks discovered child selection`)
+    successful(byUri.get(String(resource.uri)), String(resource.uri))
+  }
+  for (const uri of oldUris) {
+    assert(selectedReads.some(read => read.oldUri === uri),
+      `${context}: advertised selected form was not exercised for ${uri}`)
+  }
+  for (const selection of selectedReads) {
+    assert(grantIds.includes(String(selection.grantId)), `${context}: undiscovered child`)
+    const read = successful(byUri.get(String(selection.uri)), String(selection.uri))
+    const base = successful(baseReads.get(String(selection.oldUri)), String(selection.oldUri))
+    assert.deepEqual(contents(read), contents(base), `${context}: selected child returned different content`)
+  }
+  const wrongChildUris = (candidateSession.wrongChildUris ?? []) as string[]
+  assert(wrongChildUris.length > 0, `${context}: wrong-child resource probes were not exercised`)
+  for (const uri of wrongChildUris) {
+    const read = byUri.get(uri)
+    assert(read && (read.error || read.isError === true) && !contents(read).length,
+      `${context}: resource resolved for the wrong child: ${uri}`)
+  }
 }
 
 function compareLegacyAliases(
@@ -530,94 +518,59 @@ test("hosted package resource URIs preserve stored handles and advertise selecte
   const resourceSession = await capturePackageResourceSession(
     object(baseSession.storedIds)
   )
-  const candidateSession = object(resourceSession)
-  const revision = execFileSync("git", ["rev-parse", "HEAD"], {
-    encoding: "utf8",
-  }).trim()
-  const discovery = object(candidateSession.resourceDiscovery)
-  const templates = Array.isArray(discovery.resourceTemplates)
-    ? (discovery.resourceTemplates as JsonObject[])
-    : []
-  const reads = Array.isArray(candidateSession.resourceReads)
-    ? (candidateSession.resourceReads as JsonObject[])
-    : []
-  const storedIds = object(baseSession.storedIds)
-  const oldUris = [
-    ...new Set([
-      ...((storedIds.recordUris as string[] | undefined) ?? []),
-      ...((storedIds.fieldWindowUris as string[] | undefined) ?? []),
-    ]),
+  comparePackageResources(baseSession, resourceSession, "package resources")
+})
+
+// Synthetic observations exercise the comparator independently of a live server.
+test("package resource gate rejects removed discovery, reads and changed stored content", () => {
+  const uri = "fixture://record/old-handle"
+  const base: JsonObject = {
+    storedIds: { recordUris: [uri] },
+    resourceDiscovery: { resources: [], resourceTemplates: [
+      { name: "record", uriTemplate: "fixture://record/{handle}" },
+    ] },
+    resourceReads: [{ uri, contents: [{ mimeType: "text/plain", text: "original" }] }],
+  }
+  comparePackageResources(base, structuredClone(base), "unchanged base")
+  const removedTemplates = structuredClone(base)
+  object(removedTemplates.resourceDiscovery).resourceTemplates = []
+  assert.throws(() => comparePackageResources(base, removedTemplates, "B1 templates"), /removed/)
+  const removedReads = structuredClone(base)
+  removedReads.resourceReads = [{ uri, error: { code: -32601 } }]
+  assert.throws(() => comparePackageResources(base, removedReads, "B1 reads"), /resources\/read failed/)
+  const brokenUri = structuredClone(base)
+  brokenUri.resourceReads = [{ uri, contents: [{ mimeType: "text/plain", text: "wrong record" }] }]
+  assert.throws(() => comparePackageResources(base, brokenUri, "broken URI"), /content changed/)
+
+  const selected = structuredClone(base)
+  object(selected.resourceDiscovery).resourceTemplates = [
+    { name: "record", uriTemplate: "fixture://record/{grant_id}/{handle}" },
   ]
-  assert(oldUris.length > 0, "base package session captured no resource URIs")
+  selected.discoveryGrantIds = ["child-a", "child-b"]
+  selected.selectedResourceReads = [{ uri: "fixture://record/child-a/old-handle", oldUri: uri, grantId: "child-a" }]
+  selected.wrongChildUris = ["fixture://record/child-b/old-handle"]
+  selected.resourceReads = [
+    ...(base.resourceReads as JsonObject[]),
+    { uri: "fixture://record/child-a/old-handle", contents: [{ mimeType: "text/plain", text: "original" }] },
+    { uri: "fixture://record/child-b/old-handle", isError: true, contents: [] },
+  ]
+  comparePackageResources(base, selected, "selected forms")
+  const brokenSelected = structuredClone(selected)
+  ;(brokenSelected.resourceReads as JsonObject[])[1].isError = true
+  assert.throws(() => comparePackageResources(base, brokenSelected, "broken selected read"), /resources\/read failed/)
+  const ambiguous = structuredClone(selected)
+  ambiguous.ambiguousLegacyUris = [uri]
+  ;(ambiguous.resourceReads as JsonObject[])[0] = {
+    uri, isError: true, errorCode: "ambiguous_legacy_resource_uri", contents: [],
+  }
+  comparePackageResources(base, ambiguous, "genuine ambiguity")
+  ambiguous.ambiguousLegacyUris = []
+  assert.throws(() => comparePackageResources(base, ambiguous, "false ambiguity"), /resources\/read failed/)
+})
 
-  if (revision === "3282ac2f5e4687419bf391c2294d2118dd63fd7c") {
-    assert.equal(
-      stableJson(discovery),
-      stableJson(baseSession.resourceDiscovery),
-      "base package resource discovery differs from its golden snapshot"
-    )
-  } else {
-    assert(
-      !Array.isArray(discovery.errors) || discovery.errors.length === 0,
-      `package resources: resources/list or resources/templates/list is unavailable: ${JSON.stringify(discovery.errors)}`
-    )
-    for (const name of ["pdpp-record", "pdpp-field-window"]) {
-      const template = templates.find(item => item.name === name)
-      assert(
-        template,
-        `package resources: resources/templates/list removed '${name}'`
-      )
-      assert(
-        typeof template.uriTemplate === "string" &&
-          template.uriTemplate.includes("{grant_id}/{handle}"),
-        `package resources: '${name}' does not advertise the grant_id URI form`
-      )
-    }
-    assert(
-      templates.every(
-        item =>
-          typeof item.uriTemplate === "string" &&
-          item.uriTemplate.includes("{grant_id}/")
-      ),
-      "package resources: resources/templates/list advertises a legacy or unscoped URI"
-    )
-  }
-
-  const readsByUri = new Map(reads.map(read => [String(read.uri), read]))
-  const ambiguous = new Set(
-    (candidateSession.ambiguousLegacyUris as string[] | undefined) ?? []
-  )
-  for (const uri of oldUris) {
-    const read = readsByUri.get(uri)
-    assert(read, `package resources: old stored URI was not replayed: ${uri}`)
-    if (ambiguous.has(uri)) {
-      assert.equal(
-        read.errorCode,
-        "ambiguous_legacy_resource_uri",
-        `package resources: refused old URI without genuine ambiguity: ${uri}`
-      )
-      continue
-    }
-    const content = Array.isArray(read.contents)
-      ? (read.contents as JsonObject[])
-      : []
-    assert(
-      !read.error &&
-        read.isError !== true &&
-        content.some(
-          part => typeof part.text === "string" && part.text.trim().length > 0
-        ),
-      `package resources: old stored URI failed with 401/404 or no content: ${uri}; ${JSON.stringify(read.error ?? read.errorCode)}`
-    )
-  }
-  if (revision !== "3282ac2f5e4687419bf391c2294d2118dd63fd7c") {
-    const newReads = reads.filter(read => !oldUris.includes(String(read.uri)))
-    assert(
-      newReads.some(read => String(read.uri).startsWith("pdpp://record/")) &&
-        newReads.some(read =>
-          String(read.uri).startsWith("pdpp://field-window/")
-        ),
-      "package resources: candidate-advertised record and field-window URIs did not resolve"
-    )
-  }
+test("local MCP resource selection requires the canonical advertised host", async () => {
+  const { selectResourceURL } = await import("@modelcontextprotocol/sdk/client/auth.js")
+  const metadata = { resource: "http://localhost:43210/mcp" }
+  assert.equal(selectResourceURL(new URL(metadata.resource), metadata).href, metadata.resource)
+  assert.throws(() => selectResourceURL(new URL("http://127.0.0.1:43210/mcp"), metadata))
 })

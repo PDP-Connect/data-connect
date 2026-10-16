@@ -21,16 +21,31 @@ discovers ids from that tool's result. The runner rejects every skipped or TODO
 scenario unless its title names the explicit P2 or P4 identity-lane dependency,
 and prints those pending scenarios.
 
-The package resource scenario stores the record and field-window URIs disclosed
-by the base package session. After the package identity change, the candidate
-must resolve those old URIs through an unambiguous child mapping and advertise
-new `grant_id` URI templates. It derives new URIs from the candidate's own
-templates and child discovery output, then reads them over the hosted session.
-Only a refusal with `ambiguous_legacy_resource_uri` is accepted when the stored
-URI maps to multiple children. The unchanged base is checked against its exact
-golden resource discovery; candidates that remove package templates, including
-B1, P1, and B2, fail the dedicated package-resource scenario. Client-token
-resource discovery must remain equal to base.
+The package resource scenario replays every record and field-window URI captured
+on the base and compares its text and MIME type with the captured content. An
+unchanged advertised resource contract is valid on any revision. When the
+candidate advertises grant-scoped templates, the gate expands those templates
+using its child discovery output, verifies matching-child reads, and rejects
+wrong-child reads. Only a reported `ambiguous_legacy_resource_uri` refusal backed
+by multiple discovered children for that connection is permitted. Removed
+templates or resource read support (B1) and broken stored content remain failures.
+Client-token resource discovery must remain equal to base.
+
+The comparator mutation scenario first accepts synthetic unchanged and selected
+observations, then removes templates, removes read support, changes old-URI
+content, breaks a selected read and falsely claims ambiguity. Each mutation must
+throw. These are comparator checks, not production-server mutation runs. Run
+them with the gate command above; full server mutations require the same fixture
+replayed against a deliberately changed candidate.
+
+## Canonical local MCP host
+
+The gate connects through the server's canonical advertised localhost URL.
+The explicit SDK resource-selection scenario accepts
+`http://localhost:PORT/mcp` and rejects a client configured at
+`http://127.0.0.1:PORT/mcp` when metadata advertises localhost. The two hosts are
+not OAuth resource aliases. Do not introduce Host-based resource aliases to
+make the latter pass; a future policy change must update this visible scenario.
 
 The committed golden contract was generated from
 `3282ac2f5e4687419bf391c2294d2118dd63fd7c`. Its generator refuses to run from
@@ -71,7 +86,10 @@ identity lane has a worktree to run it against. It models the production
 census: a non-expiring `mcp_package` token with no refresh family, its active
 package children, non-expiring per-child Core `client` tokens with
 `package_id = NULL`, and a non-expiring client token with no refresh family.
-The scenario checks that the package and MCP client audiences resolve to
+Audience semantics are checked through MCP replay and HTTP acceptance/refusal,
+not a persisted audience-column name. The seeder performs no audience-column
+write; it uses OAuth issuance. The scenario checks that package and MCP client
+audiences resolve to
 `/mcp`, child Core tokens resolve to the RS base audience and fail at `/mcp`,
 undecidable legacy rows are dual-accepted and counted, and package MCP calls
 continue after P7 retires the child tokens.

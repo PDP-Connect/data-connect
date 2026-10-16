@@ -36,13 +36,13 @@ function assertWorktreeIsCurrent(): void {
 
 function assertPermanentRows(
   tokenIds: string[],
-  expected: { kind: string; resource: string | null; packageId: string | null }
+  expected: { kind: string; packageId: string | null }
 ): void {
   const db = getDb();
   for (const tokenId of tokenIds) {
     const row = db
       .prepare(
-        `SELECT token_kind, package_id, refresh_family_id, expires_at, resource
+        `SELECT token_kind, package_id, refresh_family_id, expires_at
            FROM tokens WHERE token_id = ?`
       )
       .get(tokenId) as
@@ -50,7 +50,6 @@ function assertPermanentRows(
           expires_at: string | null;
           package_id: string | null;
           refresh_family_id: string | null;
-          resource: string | null;
           token_kind: string;
         }
       | undefined;
@@ -59,7 +58,6 @@ function assertPermanentRows(
     assert.equal(row.package_id, expected.packageId);
     assert.equal(row.expires_at, null, "census tokens do not expire");
     assert.equal(row.refresh_family_id, null, "census tokens have no refresh family");
-    assert.equal(row.resource, expected.resource);
   }
 }
 
@@ -129,32 +127,21 @@ async function runPermanentTokenScenario(tokenKind: "client" | "package") {
   const rsUrl = `http://localhost:${fixture.rsPort}`;
   try {
     const db = getDb();
-    const resourceColumn = db.prepare("PRAGMA table_info(tokens)").all() as Array<{ name: string }>;
-    assert(
-      resourceColumn.some((column) => column.name === "resource"),
-      "P2 migration must add tokens.resource"
-    );
-
-    const mcpAudience = `${rsUrl}/mcp`;
     assertPermanentRows([fixture.package], {
       kind: "mcp_package",
       packageId: fixture.packageId,
-      resource: mcpAudience,
     });
     assertPermanentRows([fixture.client], {
       kind: "client",
       packageId: null,
-      resource: mcpAudience,
     });
     assertPermanentRows(fixture.internalChildren, {
       kind: "client",
       packageId: null,
-      resource: rsUrl,
     });
     assertPermanentRows([fixture.undecidable], {
       kind: "client",
       packageId: null,
-      resource: null,
     });
     assertUndecidableRowsCounted();
 
@@ -170,9 +157,11 @@ async function runPermanentTokenScenario(tokenKind: "client" | "package") {
       "undecidable token remains dual-accepted at /v1"
     );
 
-    const [childToken] = fixture.internalChildren;
-    assert(childToken, "package fixture needs an internal child token");
-    await assertHttpStatus(`${rsUrl}/mcp`, childToken, 401, "internal child token at /mcp");
+    assert(fixture.internalChildren.length > 0, "package fixture needs internal child tokens");
+    for (const childToken of fixture.internalChildren) {
+      await assertHttpStatus(`${rsUrl}/mcp`, childToken, 401, "internal child token at /mcp");
+      await assertHttpStatus(`${rsUrl}/v1/schema`, childToken, 200, "internal child token at /v1");
+    }
 
     if (stage === "P7") {
       db.prepare(
