@@ -9,6 +9,7 @@ on:
       - "reference-implementation/vendor/**"
       - "reference-implementation/server/**"
       - "reference-implementation/test/fixtures/desktop-recovery-ri-driver.ts"
+      - "reference-implementation/runtime/browser-presentation-policy.fixtures.json"
       - "reference-implementation/package.json"
       - "packages/connector-protocol/**"
       - "packages/collector-runtime/**"
