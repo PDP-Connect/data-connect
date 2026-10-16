@@ -5285,10 +5285,15 @@ function resolveChangeGroupRecord(
     if (!previousInRange) {
       return null;
     }
-    return buildChangeTombstone(group, stream, recordIdentity, {
-      deletedAt: current.deleted_at,
-      emittedAt: current.emitted_at,
-    });
+    // Under client range filters a deletion is indistinguishable from a range
+    // exit (spec-client-range-filters.md Section 6.8): neither says when it
+    // happened or whether the record was deleted.
+    return buildChangeTombstone(
+      group,
+      stream,
+      recordIdentity,
+      filterAwareHistory ? undefined : { deletedAt: current.deleted_at, emittedAt: current.emitted_at }
+    );
   }
 
   if (!(currentVisible && current?.data && passesRequestFilters(current.data, compiledFilters))) {

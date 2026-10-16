@@ -11,6 +11,7 @@ import {
 import { parseTopLevelWithNumbers } from "../server/lossless-json.ts";
 import { passesRequestFilters } from "../server/record-filters.ts";
 import { rememberRecordSourceText } from "../server/record-source-text.ts";
+import { deleteRecord } from "../server/records.ts";
 import {
 	fetchJson,
 	issueClientGrant,
@@ -127,6 +128,59 @@ test("a requested field outside the grant and an invented one take the same path
 			real.body.error.message.replace("secret", "X"),
 			invented.body.error.message.replace("invented", "X"),
 		);
+	} finally {
+		await world.close();
+	}
+});
+
+test("a physical deletion in a filtered sync session is a bare tombstone, like a range exit", async () => {
+	const { file, exactRecords } = loadVectors();
+	const fixture = file.fixtures.sync;
+	assert.ok(fixture);
+	const world = await startWorld();
+	try {
+		await registerManifest(
+			world,
+			manifestFor(fixture.retained_declaration, "delete.v1"),
+		);
+		await materializeConnection("inst_a");
+		await seedRecords(
+			fixture.records,
+			exactRecords.get("sync#") as Map<string, string>,
+		);
+		const grant = await issueClientGrant(world, fixture.grant);
+		setGrantExtensions(
+			grant.grantId,
+			fixture.grant.extensions as Record<string, unknown>,
+		);
+		const headers = { Authorization: `Bearer ${grant.token}` };
+		const filter = "filter%5Bamount%5D%5Blte%5D=0.3";
+		const first = await fetchJson(
+			`${world.rsUrl}/v1/streams/transactions/records?changes_since=beginning&${filter}`,
+			{ headers },
+		);
+		assert.equal(first.status, 200);
+		const [victim] = first.body.data;
+		await deleteRecord(
+			{ connector_id: "spotify", connector_instance_id: "inst_a" } as never,
+			"transactions",
+			victim.id,
+		);
+		const second = await fetchJson(
+			`${world.rsUrl}/v1/streams/transactions/records?changes_since=${first.body.next_changes_since}&${filter}`,
+			{ headers },
+		);
+		const tombstone = second.body.data.find(
+			(record: { id: string }) => record.id === victim.id,
+		);
+		assert.equal(tombstone?.deleted, true);
+		for (const member of ["data", "deleted_at", "emitted_at"]) {
+			assert.equal(
+				Object.hasOwn(tombstone, member),
+				false,
+				`tombstone must not carry ${member}`,
+			);
+		}
 	} finally {
 		await world.close();
 	}
