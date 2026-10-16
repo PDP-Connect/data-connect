@@ -571,6 +571,6 @@ test("package resource gate rejects removed discovery, reads and changed stored 
 test("local MCP resource selection requires the canonical advertised host", async () => {
   const { selectResourceURL } = await import("@modelcontextprotocol/sdk/client/auth.js")
   const metadata = { resource: "http://localhost:43210/mcp" }
-  assert.equal(selectResourceURL(new URL(metadata.resource), metadata).href, metadata.resource)
-  assert.throws(() => selectResourceURL(new URL("http://127.0.0.1:43210/mcp"), metadata))
+  assert.equal((await selectResourceURL(new URL(metadata.resource), {}, metadata))?.href, metadata.resource)
+  await assert.rejects(async () => selectResourceURL(new URL("http://127.0.0.1:43210/mcp"), {}, metadata))
 })
