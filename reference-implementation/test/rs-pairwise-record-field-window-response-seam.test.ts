@@ -4,6 +4,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { codeToStatus } from "../server/routes/ref-error-status.ts";
 import { mountRsRecordFieldWindow } from "../server/routes/rs-read.ts";
 
 const SOURCE_ID = "https://sources.example/field-window-seam";
@@ -22,6 +23,7 @@ async function invokeWindow(options: SeamOptions = {}) {
 	const events: string[] = [];
 	const rejected: Array<{ code?: string; message?: string; param?: string }> = [];
 	let responseBody: unknown;
+	let responseStatus = 200;
 	const app = {
 		get: (_path: string, ...args: unknown[]) => {
 			handler = args.at(-1) as (req: unknown, res: unknown) => unknown;
@@ -72,6 +74,7 @@ async function invokeWindow(options: SeamOptions = {}) {
 		ownerSubjectIdForBindings: () => "owner",
 		rejectQuery: async (_res: unknown, _req: unknown, _context: unknown, error: Error & { code?: string; param?: string }) => {
 			rejected.push(error);
+			responseStatus = codeToStatus[error.code ?? "api_error"] || 500;
 			return response.json({ error: { code: error.code, message: error.message, param: error.param } });
 		},
 		resolveGrantManifest: async () => ({
@@ -124,7 +127,7 @@ async function invokeWindow(options: SeamOptions = {}) {
 		},
 		response,
 	);
-	return { events, rejected, responseBody };
+	return { events, rejected, responseBody, responseStatus };
 }
 
 test("field-window response rejects a storage binding that differs from the selected handle", async () => {
@@ -312,4 +315,20 @@ test("field-window rejects an internal alias without rewriting the request query
 	assert.equal(rejection?.code, "invalid_request");
 	assert.ok(!rejection?.message.includes(INTERNAL_ID));
 	assert.equal(nextCalls, 0);
+});
+
+test("field-window preserves safe stream_not_declared response and status", async () => {
+	const privateText = "cin_error_private subject_error_private backend-private";
+	const result = await invokeWindow({
+		windowError: Object.assign(new Error(privateText), {
+			code: "stream_not_declared", param: privateText, private_id: privateText,
+		}),
+	});
+	assert.ok(result.events.includes("storage"), "must reach the injected production read seam");
+	assert.equal(result.responseStatus, 404);
+	assert.deepEqual(result.responseBody, {
+		error: { code: "stream_not_declared", message: "The requested stream is not declared", param: undefined },
+	});
+	assert.equal(JSON.stringify(result.responseBody).includes(privateText), false);
+	assert.equal(result.events.includes("disclosure.served"), false);
 });

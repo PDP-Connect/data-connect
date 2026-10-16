@@ -4,8 +4,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { codeToStatus } from "../server/routes/ref-error-status.ts";
 import { mountRsRecordDetail } from "../server/routes/rs-read.ts";
-import { pairwiseClientReadMap } from "../server/pairwise-rs-identity.ts";
+import { pairwiseClientReadMap, pairwiseOwnerReadMap } from "../server/pairwise-rs-identity.ts";
 
 const SOURCE = "https://sources.example/projection-route";
 const INTERNAL_A = "cin_projection_a";
@@ -27,7 +28,7 @@ function bindings() {
 	);
 }
 
-async function invokeDetailRoute(storedRecord: Record<string, unknown>) {
+async function invokeDetailRoute(storedRecord: Record<string, unknown>, options: { owner?: boolean; storageError?: Error } = {}) {
 	const grant = {
 		source: { id: SOURCE },
 		streams: [
@@ -36,19 +37,26 @@ async function invokeDetailRoute(storedRecord: Record<string, unknown>) {
 		],
 	};
 	const tokenInfo = {
-		client_id: "projection-test-client",
+		client_id: options.owner ? "@owner" : "projection-test-client",
 		grant,
 		grant_id: "projection-test-grant",
-		pdpp_instance_bindings: bindings(),
-		pdpp_token_kind: "client",
+		pdpp_instance_bindings: options.owner
+			? [[PUBLIC_A, INTERNAL_A], [PUBLIC_B, INTERNAL_B]].map(([instance_id, rs_instance]) => ({
+				instance_id, rs_instance, source_id: SOURCE,
+			}))
+			: bindings(),
+		pdpp_token_kind: options.owner ? "owner" : "client",
 		subject_id: "projection-test-subject",
 	};
 	// This is the already-authenticated context that the HTTP suite supplies
 	// through remote introspection. Validate it before calling the mounted route.
-	pairwiseClientReadMap(tokenInfo, SOURCE, "parents");
+	if (options.owner) pairwiseOwnerReadMap(tokenInfo);
+	else pairwiseClientReadMap(tokenInfo, SOURCE, "parents");
 
 	const emitted: Record<string, unknown>[] = [];
 	let responseBody: unknown;
+	let responseStatus = 200;
+	let storageCalls = 0;
 	let handler: ((req: unknown, res: unknown) => unknown) | undefined;
 	const app = {
 		get: (_path: string, ...args: unknown[]) => {
@@ -62,9 +70,15 @@ async function invokeDetailRoute(storedRecord: Record<string, unknown>) {
 	};
 	const context = {
 		buildClientSourceDescriptor: () => sourceDescriptor,
+		buildOwnerQuerySourceDescriptor: () => sourceDescriptor,
+		buildSourceDescriptor: () => sourceDescriptor,
+		resolveNativeManifest: () => null,
+		resolveOwnerReadScope: async () => ({ source: sourceDescriptor }),
+		resolveOwnerManifestFromScope: async () => ({ manifest, storageBinding: { connector_id: "projection-connector" } }),
+		buildOwnerReadGrant: () => ({ streams: [{ name: "parents" }] }),
 		buildQueryActorContext: () => ({
 			actorId: "projection-test-subject",
-			actorType: "client",
+			actorType: options.owner ? "owner" : "client",
 			scenarioId: null,
 			traceId: null,
 		}),
@@ -75,7 +89,11 @@ async function invokeDetailRoute(storedRecord: Record<string, unknown>) {
 		},
 		ensureRequestId: () => "projection-query",
 		finalizeCanonicalEnvelope: (value: unknown) => value,
-		getRecordAcrossBindings: async () => storedRecord,
+		getRecordAcrossBindings: async () => {
+			storageCalls++;
+			if (options.storageError) throw options.storageError;
+			return storedRecord;
+		},
 		opts: {},
 		ownerSubjectIdForBindings: () => "projection-test-subject",
 		rejectQuery: async (
@@ -84,6 +102,7 @@ async function invokeDetailRoute(storedRecord: Record<string, unknown>) {
 			_context: unknown,
 			err: Error & { code?: string },
 		) => {
+			responseStatus = codeToStatus[err.code ?? "api_error"] || 500;
 			return res.json({
 				error: { code: err.code ?? "api_error", message: err.message },
 			});
@@ -125,7 +144,7 @@ async function invokeDetailRoute(storedRecord: Record<string, unknown>) {
 		setHeader: () => undefined,
 	};
 	await handler(req, res);
-	return { emitted, responseBody };
+	return { emitted, responseBody, responseStatus, storageCalls };
 }
 
 const malformedEnvelopes = [
@@ -181,5 +200,21 @@ for (const [name, storedRecord] of malformedEnvelopes) {
 		);
 		assert.ok(!JSON.stringify(outcome.responseBody).includes(INTERNAL_A));
 		assert.ok(!JSON.stringify(outcome.responseBody).includes(INTERNAL_B));
+	});
+}
+
+for (const [code, message, status, owner] of [
+	["stream_not_declared", "The requested stream is not declared", 404, false],
+	["invalid_expand", "The record expansion request is invalid", 400, true],
+] as const) {
+	test(`record detail preserves safe ${code} response and status`, async () => {
+		const privateText = "cin_error_private subject_error_private backend-private";
+		const error = Object.assign(new Error(privateText), { code, param: privateText, private_id: privateText });
+		const result = await invokeDetailRoute({}, { owner, storageError: error });
+		assert.equal(result.storageCalls, 1, "must reach the injected production read seam");
+		assert.equal(result.responseStatus, status);
+		assert.deepEqual(result.responseBody, { error: { code, message } });
+		assert.equal(JSON.stringify(result.responseBody).includes(privateText), false);
+		assert.equal(result.emitted.some((event) => event.event_type === "disclosure.served"), false);
 	});
 }

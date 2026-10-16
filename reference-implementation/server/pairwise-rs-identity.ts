@@ -356,6 +356,12 @@ export function safePairwiseDetailError(value: unknown): Error & {
 			...(param ? { param } : {}),
 		});
 	}
+	if (code === "stream_not_declared" || code === "invalid_expand") {
+		const message = code === "stream_not_declared"
+			? "The requested stream is not declared"
+			: "The record expansion request is invalid";
+		return Object.assign(new Error(message), { code });
+	}
 	if (code === "grant_invalid") {
 		return Object.assign(
 			new Error("Authenticated instance bindings are invalid"),
@@ -450,6 +456,7 @@ export function safePairwiseFieldWindowError(value: unknown): Error & {
 		invalid_field_path: { message: "The field-window field path is invalid", param: true },
 		invalid_request: { message: "The field-window request is invalid", param: true },
 		invalid_stream: { message: "The requested stream is invalid" },
+		stream_not_declared: { message: "The requested stream is not declared" },
 		invalid_window: { message: "The field-window bounds are invalid", param: true },
 		not_found: { message: "The requested record or source is not available" },
 		query_not_found: { message: "No matching text was found in the field" },
