@@ -106,8 +106,16 @@ export function regionColor(image, region = BLOCK_REGION) {
   return sum.map((total) => total / count);
 }
 
-export function colorNear(color, expected, tolerance = COLOR_TOLERANCE) {
-  return color.every((value, c) => Math.abs(value - expected[c]) <= tolerance);
+/**
+ * True when `color` is clearly the primary colour `expected` (red or blue):
+ * its channel is strong and the others are at most half of it. Exact values
+ * do not survive colour management: on macOS, captured frames are converted
+ * from the display's colour space, so pure red arrives as a different red.
+ */
+export function isPrimaryColor(color, expected) {
+  const channel = expected.indexOf(255);
+  const strong = color[channel];
+  return strong >= 150 && color.every((value, c) => c === channel || value <= strong / 2);
 }
 
 /**
@@ -174,7 +182,7 @@ async function main() {
       }
       return null;
     };
-    const before = await waitForFrame((frame) => colorNear(regionColor(frame), RED), 0);
+    const before = await waitForFrame((frame) => isPrimaryColor(regionColor(frame), RED), 0);
     const framesBeforeInput = frames.length;
     const box = await page.locator("#otp").boundingBox();
     await session.send("Input.dispatchMouseEvent", { type: "mousePressed", x: box.x + 5, y: box.y + 5, button: "left", clickCount: 1 });
@@ -186,7 +194,7 @@ async function main() {
     const button = await page.locator("#go").boundingBox();
     await session.send("Input.dispatchMouseEvent", { type: "mousePressed", x: button.x + 5, y: button.y + 5, button: "left", clickCount: 1 });
     await session.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: button.x + 5, y: button.y + 5, button: "left", clickCount: 1 });
-    const after = await waitForFrame((frame) => colorNear(regionColor(frame), BLUE), framesBeforeInput);
+    const after = await waitForFrame((frame) => isPrimaryColor(regionColor(frame), BLUE), framesBeforeInput);
     await session.send("Page.stopScreencast");
     const value = await page.locator("#otp").inputValue();
     const clicked = await page.evaluate(() => document.body.dataset.clicked === "1");
@@ -194,6 +202,8 @@ async function main() {
     const decodeErrors = frames.filter((frame) => frame.error).map((frame) => frame.error);
     const result = {
       beforeColor: before ? regionColor(before).map(Math.round) : null,
+      // Diagnostics when no frame matched: what the block looked like.
+      firstFrameColor: frames.find((frame) => frame.rgba) ? regionColor(frames.find((frame) => frame.rgba)).map(Math.round) : null,
       afterColor: after ? regionColor(after).map(Math.round) : null,
       // The changed-pixel comparison between the frame before and after input.
       blockChanged: before && after ? regionChanged(before, after) : false,
