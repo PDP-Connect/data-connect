@@ -67,7 +67,7 @@ function fakeEchoAdmitRunConnection(): (input: {
 
 const REGEXP_1 = /Access Denied/;
 const REGEXP_2 = /view and fields are mutually exclusive/;
-const REGEXP_3 = /Unknown field: not_a_real_field/;
+const REGEXP_3 = /Fields not in grant: not_a_real_field/;
 const REGEXP_4 = /Unknown connector: missing_spotify_connector/;
 const REGEXP_5 = /Unknown connector: missing_spotify_connector/;
 const REGEXP_6 = /is not scoped to stream recently_played/;
@@ -1312,7 +1312,7 @@ test("event spine", async (t) => {
       const rejectedResp = await fetch(`${rsUrl}/v1/streams/saved_tracks/records?fields=id,not_a_real_field`, {
         headers: { Authorization: `Bearer ${approval.token}` },
       });
-      assert.equal(rejectedResp.status, 400);
+      assert.equal(rejectedResp.status, 403);
       const requestId = rejectedResp.headers.get("Request-Id");
       const traceId = rejectedResp.headers.get("PDPP-Reference-Trace-Id");
       assert.ok(requestId?.startsWith("req_"));
@@ -1342,7 +1342,7 @@ test("event spine", async (t) => {
         assert.equal(rejected.data.query_shape, "record_list");
         assert.equal(rejected.data.source?.kind, "connector");
         assert.equal(rejected.data.source?.id, spotifyManifest.connector_id);
-        assert.equal(rejected.data.error?.code, "unknown_field");
+        assert.equal(rejected.data.error?.code, "field_not_granted");
         assert.match(rejected.data.error?.message || "", REGEXP_3);
         assert.ok(!("connector_id" in (rejected.data || {})));
       }
