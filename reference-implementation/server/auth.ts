@@ -8487,53 +8487,6 @@ function getTokenStore() {
   return isPostgresStorageBackend() ? postgresTokenStore : sqliteTokenStore;
 }
 
-async function issuePackageToken(
-  packageId: string,
-  subjectId: string,
-  clientId: string,
-  expiresAt: string | null = null,
-  meta: { traceContext?: TraceContext | null; source?: string } = {}
-): Promise<string> {
-  const packageRow = await getGrantPackageStore().getPackageById(packageId);
-  const grantPackage = normalizePackageRow(packageRow);
-  if (
-    !grantPackage ||
-    grantPackage.package_id !== packageId ||
-    grantPackage.subject_id !== subjectId ||
-    grantPackage.client_id !== clientId
-  ) {
-    throw buildOAuthAuthorizationCodeError(
-      "invalid_grant",
-      "Grant package binding is invalid; fresh consent is required"
-    );
-  }
-  const tokenId = generateToken();
-  await getGrantPackageStore().insertPackageToken({ clientId, expiresAt, packageId, subjectId, tokenId });
-
-  await emitSpineEvent({
-    actor_id: "pdpp_as",
-    actor_type: "authorization_server",
-    client_id: clientId,
-    data: {
-      grant_package_id: packageId,
-      issuance_path: meta.source || "hosted_mcp_package",
-      token_kind: "mcp_package",
-    },
-    event_type: "token.issued",
-    object_id: deriveTokenAuditId(tokenId),
-    object_type: "token",
-    request_id: meta.traceContext?.request_id || undefined,
-    scenario_id: meta.traceContext?.scenario_id || undefined,
-    status: "succeeded",
-    subject_id: subjectId,
-    subject_type: "subject",
-    token_id: deriveTokenAuditId(tokenId),
-    trace_id: meta.traceContext?.trace_id || undefined,
-  });
-
-  return tokenId;
-}
-
 function parsePackageJson(raw: unknown): Record<string, unknown> | null {
   if (typeof raw !== "string" || !raw.trim()) {
     return null;
@@ -8718,19 +8671,16 @@ async function normalizePersistedPackageMemberSource(
 }
 
 /**
- * Persist one source-bounded child grant + access token for a hosted MCP
- * grant package. Mirrors the durable steps in `approveGrant` for one
- * `authorization_details[]` entry, without the consent-row / pending-consent
- * coupling. Returns `{ grant, token, expiresAt }`.
+ * Prepare one source-bounded hosted MCP child grant and its issuance event.
+ * No authority is persisted until every child is prepared successfully.
  *
  * The package envelope is a transport convenience — it does NOT change the
  * Core invariant that each issued grant is source-bounded.
  */
-async function persistChildGrantForPackage({
+function prepareChildGrantForPackage({
   request,
   registeredClient,
   subjectId,
-  storageBinding,
   resolvedStreams,
   traceContext,
   reviewDigest = null,
@@ -8739,7 +8689,6 @@ async function persistChildGrantForPackage({
   request: PendingRequest;
   registeredClient: RegisteredClient;
   subjectId: string;
-  storageBinding: StorageBinding;
   resolvedStreams: ResolvedGrantStream[];
   traceContext: TraceContext;
   /**
@@ -8761,7 +8710,7 @@ async function persistChildGrantForPackage({
    * flow — see as-authorize.ts's `buildPackageAndRedirect`).
    */
   reviewDigest?: string | null;
-}): Promise<{ grant: GrantEnvelope; token: string; expiresAt: string | null }> {
+}): { grant: GrantEnvelope; expiresAt: string | null; grantIssuedEvent: AuthSpineEventInput } {
   const { selection } = request;
 
   // Hosted MCP packages never carry ai_training; reject if a client tries.
@@ -8784,7 +8733,6 @@ async function persistChildGrantForPackage({
       ? new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
       : grantExpiresAt;
 
-  const persistedStorageBinding = normalizeStorageBinding(storageBinding);
   const snapshot = readRetainedSourceDeclarationSnapshot(request);
 
   const grant = materializeCoreResolvedGrant({
@@ -8802,21 +8750,7 @@ async function persistChildGrantForPackage({
     subjectId,
   }) as GrantEnvelope;
 
-  await getGrantPackageStore().insertChildGrant({
-    accessMode: selection.access_mode,
-    clientId: registeredClient.client_id,
-    expiresAt,
-    grantId,
-    grantJson: JSON.stringify(grant),
-    issuedAt,
-    scenarioId: isNonEmptyString(traceContext.scenario_id) ? traceContext.scenario_id : null,
-    storageBindingJson: serializeStorageBinding(persistedStorageBinding),
-    subjectId,
-    traceId: traceContext.trace_id,
-    trustSignalJson: serializeTrustSignal(registeredClient.trust_signal),
-  });
-
-  await emitSpineEvent({
+  const grantIssuedEvent: AuthSpineEventInput = {
     actor_id: "pdpp_as",
     actor_type: "authorization_server",
     client_id: registeredClient.client_id,
@@ -8843,14 +8777,153 @@ async function persistChildGrantForPackage({
     subject_id: subjectId,
     subject_type: "subject",
     trace_id: traceContext.trace_id,
-  });
+  };
 
-  const token = await issueToken(grantId, subjectId, registeredClient.client_id, expiresAt, {
-    source: "hosted_mcp_package_child",
-    traceContext,
-  });
+  return { expiresAt, grant, grantIssuedEvent };
+}
 
-  return { expiresAt, grant, token };
+
+interface PreparedHostedPackageChild {
+  grant: GrantEnvelope;
+  grantIssuedEvent: AuthSpineEventInput;
+  storageBinding: StorageBinding;
+  trustSignal: TrustSignal | null;
+  source: Record<string, unknown> | null;
+  connection_id: string | null;
+  token: string;
+}
+
+async function persistHostedPackageAtomically(input: {
+  children: PreparedHostedPackageChild[];
+  clientId: string;
+  createdAt: string;
+  packageEnvelope: Record<string, unknown>;
+  packageId: string;
+  packageEvents: (token: string) => AuthSpineEventInput[];
+  subjectId: string;
+  traceContext: TraceContext;
+}): Promise<string> {
+  const packageParams = [
+    input.packageId,
+    input.subjectId,
+    input.clientId,
+    JSON.stringify(input.packageEnvelope),
+    null,
+    input.traceContext.trace_id,
+    input.traceContext.scenario_id ?? null,
+    input.createdAt,
+    input.createdAt,
+  ];
+  const childParams = (child: PreparedHostedPackageChild) => [
+    child.grant.grant_id,
+    input.subjectId,
+    input.clientId,
+    serializeStorageBinding(child.storageBinding),
+    JSON.stringify(child.grant),
+    serializeTrustSignal(child.trustSignal),
+    child.grant.access_mode,
+    child.grant.issued_at,
+    child.grant.expires_at ?? null,
+    input.traceContext.trace_id,
+    input.traceContext.scenario_id ?? null,
+  ];
+  const tokenInput = (child: PreparedHostedPackageChild) => ({
+    clientId: input.clientId,
+    expiresAt: child.grant.expires_at ?? null,
+    grantId: child.grant.grant_id,
+    subjectId: input.subjectId,
+  });
+  const memberParams = (child: PreparedHostedPackageChild) => [
+    input.packageId,
+    child.grant.grant_id,
+    child.token,
+    JSON.stringify(child.source),
+    input.createdAt,
+  ];
+  const childEvents = (child: PreparedHostedPackageChild): AuthSpineEventInput[] => {
+    const tokenEvent = buildTokenIssuedEventInput({
+      ...tokenInput(child),
+      grant: child.grant,
+      tokenId: child.token,
+      traceContext: input.traceContext,
+    });
+    return [
+      child.grantIssuedEvent,
+      {
+        ...tokenEvent,
+        data: {
+          issuance_path: "hosted_mcp_package_child",
+          source: describeGrantSource(child.grant),
+          token_kind: "client",
+        },
+      },
+    ];
+  };
+  if (isPostgresStorageBackend()) {
+    return withPostgresTransaction(async (client) => {
+      await client.query(
+        `INSERT INTO grant_packages(
+           package_id, subject_id, client_id, status, package_json,
+           parent_package_id, trace_id, scenario_id, created_at, approved_at, revoked_at
+         ) VALUES($1, $2, $3, 'active', $4::jsonb, $5, $6, $7, $8, $9, NULL)`,
+        packageParams
+      );
+      await forEachSequential(input.children, async (child) => {
+        await client.query(
+          `INSERT INTO grants(
+             grant_id, subject_id, client_id, storage_binding_json, grant_json,
+             trust_signal_json, access_mode, issued_at, expires_at, trace_id, scenario_id
+           ) VALUES($1, $2, $3, $4::jsonb, $5::jsonb, $6::jsonb, $7, $8, $9, $10, $11)`,
+          childParams(child)
+        );
+        child.token = (await insertPostgresGrantToken(client, tokenInput(child))).tokenId;
+        await client.query(
+          `INSERT INTO grant_package_members(
+             package_id, grant_id, token_id, source_json, status, added_at, revoked_at
+           ) VALUES($1, $2, $3, $4::jsonb, 'active', $5, NULL)`,
+          memberParams(child)
+        );
+        await forEachSequential(childEvents(child), async (event) => {
+          await postgresEmitSpineEventInTransaction(client, event as SpineEventInput);
+        });
+      });
+      const packageToken = generateToken();
+      await client.query(
+        `INSERT INTO tokens(token_id, grant_id, package_id, subject_id, client_id, token_kind, expires_at)
+         VALUES($1, NULL, $2, $3, $4, 'mcp_package', NULL)`,
+        [packageToken, input.packageId, input.subjectId, input.clientId]
+      );
+      await forEachSequential(input.packageEvents(packageToken), async (event) => {
+        await postgresEmitSpineEventInTransaction(client, event as SpineEventInput);
+      });
+      return packageToken;
+    });
+  }
+  // SQLite transactions must remain synchronous, including every spine insert.
+  return transaction(() => {
+    const db = getDb();
+    exec(referenceQueries.authGrantPackagesInsert, packageParams);
+    for (const child of input.children) {
+      exec(referenceQueries.authGrantsInsert, childParams(child));
+      child.token = insertSqliteGrantTokenInCurrentTransaction(tokenInput(child)).tokenId;
+      exec(referenceQueries.authGrantPackageMembersInsert, memberParams(child));
+      for (const event of childEvents(child)) {
+        emitRawSpineEvent(event as SpineEventInput, db);
+      }
+    }
+    const packageToken = generateToken();
+    exec(referenceQueries.authTokensInsertMcpPackage, [
+      packageToken,
+      input.packageId,
+      input.subjectId,
+      input.clientId,
+      null,
+    ]);
+    for (const event of input.packageEvents(packageToken)) {
+      emitRawSpineEvent(event as SpineEventInput, db);
+    }
+    return packageToken;
+  });
 }
 
 /**
@@ -8961,77 +9034,89 @@ export async function createHostedMcpGrantPackage({
     resolvedSources.push({ childRegisteredClient, request, resolvedStreams, storageBinding });
   });
 
-  await getGrantPackageStore().insertPackage({
-    approvedAt: createdAt,
-    clientId,
-    createdAt,
-    packageId,
-    packageJson: JSON.stringify(packageEnvelope),
-    parentPackageId: null,
-    scenarioId: traceContext.scenario_id,
-    subjectId,
-    traceId: traceContext.trace_id,
-  });
-
-  const childGrants: {
-    connection_id: string | null;
-    grant: GrantEnvelope;
-    source: Record<string, unknown> | null;
-    token: string;
-  }[] = [];
-  await forEachSequential(resolvedSources, async (resolved, index) => {
+  // Prepare all children without writes, then commit authority and events together.
+  const childGrants: PreparedHostedPackageChild[] = resolvedSources.map((resolved, index) => {
     const { childRegisteredClient, request, resolvedStreams, storageBinding } = resolved;
-    const { grant, token } = await persistChildGrantForPackage({
+    const { grant, grantIssuedEvent } = prepareChildGrantForPackage({
       grantExpiresAt: opts.grantExpiresAt ?? null,
       registeredClient: childRegisteredClient,
       request,
       resolvedStreams,
       reviewDigest: opts.reviewDigest ?? null,
-      storageBinding,
       subjectId,
       traceContext,
     });
     const grantedInstanceIds = Array.from(new Set(grant.streams.flatMap((stream) => stream.instance_ids ?? [])));
     const connectionId = grantedInstanceIds.length === 1 ? (grantedInstanceIds[0] ?? null) : null;
-    const source = describePackageMemberSource(grant, sourceMetadata[index]);
-    const addedAt = nowIso();
-    await getGrantPackageStore().insertPackageMember({
-      addedAt,
-      grantId: grant.grant_id,
-      packageId,
-      sourceJson: JSON.stringify(source),
-      tokenId: token,
-    });
-    childGrants.push({ connection_id: connectionId, grant, source, token });
+    return {
+      connection_id: connectionId,
+      grant,
+      grantIssuedEvent,
+      source: describePackageMemberSource(grant, sourceMetadata[index]),
+      storageBinding,
+      token: "",
+      trustSignal: childRegisteredClient.trust_signal ?? null,
+    };
   });
 
-  const packageToken = await issuePackageToken(packageId, subjectId, clientId, null, {
-    source: "hosted_mcp_package",
+  const packageToken = await persistHostedPackageAtomically({
+    children: childGrants,
+    clientId,
+    createdAt,
+    packageEnvelope,
+    packageId,
+    subjectId,
     traceContext,
-  });
-
-  await emitSpineEvent({
-    actor_id: "pdpp_as",
-    actor_type: "authorization_server",
-    client_id: clientId,
-    data: {
-      child_grant_ids: childGrants.map((entry) => entry.grant.grant_id),
-      sources: childGrants.map((entry) => entry.source),
-    },
-    event_type: "grant_package.issued",
-    object_id: packageId,
-    object_type: "grant_package",
-    request_id: traceContext.request_id,
-    scenario_id: traceContext.scenario_id,
-    status: "succeeded",
-    subject_id: subjectId,
-    subject_type: "subject",
-    token_id: deriveTokenAuditId(packageToken),
-    trace_id: traceContext.trace_id,
+    packageEvents: (token) => [
+      {
+        actor_id: "pdpp_as",
+        actor_type: "authorization_server",
+        client_id: clientId,
+        data: {
+          grant_package_id: packageId,
+          issuance_path: "hosted_mcp_package",
+          token_kind: "mcp_package",
+        },
+        event_type: "token.issued",
+        object_id: deriveTokenAuditId(token),
+        object_type: "token",
+        request_id: traceContext.request_id,
+        scenario_id: traceContext.scenario_id,
+        status: "succeeded",
+        subject_id: subjectId,
+        subject_type: "subject",
+        token_id: deriveTokenAuditId(token),
+        trace_id: traceContext.trace_id,
+      },
+      {
+        actor_id: "pdpp_as",
+        actor_type: "authorization_server",
+        client_id: clientId,
+        data: {
+          child_grant_ids: childGrants.map((entry) => entry.grant.grant_id),
+          sources: childGrants.map((entry) => entry.source),
+        },
+        event_type: "grant_package.issued",
+        object_id: packageId,
+        object_type: "grant_package",
+        request_id: traceContext.request_id,
+        scenario_id: traceContext.scenario_id,
+        status: "succeeded",
+        subject_id: subjectId,
+        subject_type: "subject",
+        token_id: deriveTokenAuditId(token),
+        trace_id: traceContext.trace_id,
+      },
+    ],
   });
 
   return {
-    child_grants: childGrants,
+    child_grants: childGrants.map(({ connection_id, grant, source, token }) => ({
+      connection_id,
+      grant,
+      source,
+      token,
+    })),
     package: {
       ...packageEnvelope,
       child_grants: childGrants.map((entry) => ({

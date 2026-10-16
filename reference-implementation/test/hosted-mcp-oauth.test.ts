@@ -7135,6 +7135,63 @@ test("a stream declared after review is not added to the issued grant", async ()
   }
 });
 
+
+test("hosted package member failure rolls back all authority and permits one retry", async () => {
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+  try {
+    await registerAuthorizedSpotify(asUrl);
+    await registerAuthorizedGithub(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+    const challenge = await startConsentChallenge(asUrl, client, "atomic-package-retry");
+    const model = await fetchConsentChallengeModel(asUrl, challenge);
+    const body = consentChallengeAcceptBody({
+      chosen: model.sources.map((source) => ({ source, streams: source.streams })),
+      client,
+      model,
+    });
+    const db = getDb();
+    const authorityCounts = () => ({
+      grants: db.prepare("SELECT count(*) AS n FROM grants WHERE client_id = ?").get(client.client_id),
+      packages: db.prepare("SELECT count(*) AS n FROM grant_packages WHERE client_id = ?").get(client.client_id),
+      tokens: db.prepare("SELECT count(*) AS n FROM tokens WHERE client_id = ?").get(client.client_id),
+      members: db.prepare("SELECT count(*) AS n FROM grant_package_members").get(),
+    });
+    const before = authorityCounts();
+    db.exec(`
+      CREATE TRIGGER fail_hosted_package_member
+      AFTER INSERT ON grant_package_members
+      BEGIN
+        SELECT RAISE(ABORT, 'injected hosted member failure');
+      END
+    `);
+    let failed: JsonResponse;
+    try {
+      failed = await postConsentChallenge(asUrl, challenge, "accept", body);
+    } finally {
+      db.exec("DROP TRIGGER fail_hosted_package_member");
+    }
+    assert.equal(failed.status, 400, JSON.stringify(failed.body));
+    assert.deepEqual(authorityCounts(), before, "failed issuance must leave no authority rows");
+    assert.deepEqual(
+      db.prepare("SELECT status, decision_digest FROM consent_challenges WHERE id = ?").get(challenge),
+      { decision_digest: null, status: "pending" }
+    );
+    const retried = await postConsentChallenge(asUrl, challenge, "accept", body);
+    assert.equal(retried.status, 200, JSON.stringify(retried.body));
+    assert.deepEqual(authorityCounts(), {
+      grants: { n: 2 },
+      packages: { n: 1 },
+      tokens: { n: 3 },
+      members: { n: 2 },
+    });
+    assert.equal((await postConsentChallenge(asUrl, challenge, "accept", body)).status, 404);
+    assert.equal(await countGrantPackagesForOwner(), 1);
+  } finally {
+    await closeServer(server);
+  }
+});
+
 test("a source revoked while minting leaves the consent challenge retryable", async () => {
   const server = await startOpenTestServer();
   const asUrl = `http://localhost:${server.asPort}`;
