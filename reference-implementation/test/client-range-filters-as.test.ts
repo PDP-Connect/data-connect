@@ -563,6 +563,12 @@ test("a package read applies only the selected child's frozen set", async () => 
 			})),
 		);
 		assert.ok(outcome.packageId, "a batch grant returns a package");
+		// The package credential itself never reads a Core endpoint; reads go
+		// through the adapter, one child bearer per call.
+		const direct = await fetchJson(`${world.rsUrl}/v1/streams/transactions/records`, {
+			headers: { Authorization: `Bearer ${outcome.accessToken}` },
+		});
+		assert.equal(direct.status, 403, "a package token is refused on a Core endpoint");
 		const access = await getGrantPackageAccess(outcome.packageId);
 		const members = (access?.members ?? []) as Parameters<
 			typeof createPackageRsClient
