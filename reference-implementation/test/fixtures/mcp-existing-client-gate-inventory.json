@@ -4,7 +4,8 @@
     "hosted /mcp package tokens remain implicit or offer child discovery",
     "hosted package resource URIs preserve stored handles and advertise selected forms",
     "package resource gate rejects removed discovery, reads and changed stored content",
-    "local MCP resource selection requires the canonical advertised host"
+    "local MCP resource selection requires the canonical advertised host",
+    "existing-client gate rejects schema narrowing and replay regressions"
   ],
   "pending": [
     {
