@@ -44,6 +44,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { type RuntimeRunConnectorResult, runConnector } from "../runtime/index.ts";
 
+import { getDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
 import { createRequestConnectorInstanceStore } from "../server/request-store-factories.ts";
 import { getDefaultConnectorDetailGapStore } from "../server/stores/connector-detail-gap-store.ts";
@@ -728,4 +729,106 @@ test("an uncovered detail key leaves its parent retryable and a later complete p
   ]);
   assert.equal(complete.thrown, null);
   assert.equal(complete.result?.checkpoint_summary?.state_streams_committed, 1);
+});
+
+function terminalCoveredFor(runId: string, stream: string): unknown {
+  const row = getDb()
+    .prepare(
+      `SELECT data_json FROM spine_events
+       WHERE run_id = ? AND event_type IN ('run.completed', 'run.failed', 'run.cancelled')
+       ORDER BY event_seq DESC LIMIT 1`
+    )
+    .get<{ data_json: string }>(runId);
+  assert.ok(row, `expected a terminal spine event for run ${runId}`);
+  const data = JSON.parse(row.data_json) as { collection_facts?: { streams?: Record<string, unknown>[] } };
+  const fact = data.collection_facts?.streams?.find((entry) => entry.stream === stream);
+  assert.ok(fact, `expected a collection fact for ${stream}`);
+  return fact.covered;
+}
+
+function hydratedKeyMessages(activityData: Record<string, unknown>): Record<string, unknown>[] {
+  return [
+    { data: { id: "H" }, emitted_at: "2026-04-18T00:00:00Z", key: "H", stream: "holdings", type: "RECORD" },
+    { data: activityData, emitted_at: "2026-04-18T00:00:00Z", key: "K", stream: "activity", type: "RECORD" },
+    {
+      considered: 1,
+      covered: 1,
+      hydrated_keys: ["K"],
+      reference_only: true,
+      required_keys: ["K"],
+      state_stream: "holdings",
+      stream: "activity",
+      type: "DETAIL_COVERAGE",
+    },
+    { cursor: { page: "1" }, stream: "holdings", type: "STATE" },
+    { records_emitted: 2, status: "succeeded", type: "DONE" },
+  ];
+}
+
+// The RS permanently rejects a record whose key disagrees with data.id. A
+// DETAIL_COVERAGE that still lists that key as hydrated claims coverage the
+// store never accepted: it must not pass the checkpoint gate or count as covered.
+test("a hydrated key the RS rejected neither passes the checkpoint gate nor counts as covered", async (t) => {
+  const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+  t.after(() => closeServer(server));
+  const ownerToken = await registerAndAuthorize(server);
+
+  const rejected = await runShortfall(server, ownerToken, hydratedKeyMessages({ id: "not-K" }), undefined, [
+    "holdings",
+    "activity",
+  ]);
+  assert.equal(rejected.thrown, null);
+  assert.equal(rejected.result?.status, "succeeded");
+  assert.equal(rejected.result?.checkpoint_summary?.state_streams_staged, 1);
+  assert.equal(
+    rejected.result?.checkpoint_summary?.state_streams_committed,
+    0,
+    "a rejected key is not hydrated, so the holdings cursor must not commit"
+  );
+  assert.equal(terminalCoveredFor(rejected.result?.run_id as string, "activity"), 0);
+
+  // Control: the same report over an accepted record commits and counts.
+  const accepted = await runShortfall(server, ownerToken, hydratedKeyMessages({ id: "K" }), undefined, [
+    "holdings",
+    "activity",
+  ]);
+  assert.equal(accepted.thrown, null);
+  assert.equal(accepted.result?.checkpoint_summary?.state_streams_committed, 1);
+  assert.equal(terminalCoveredFor(accepted.result?.run_id as string, "activity"), 1);
+});
+
+// An optional skip is an accepted terminal absence, so it may release the
+// checkpoint, but it is not coverage: `covered` counts emitted and unchanged
+// items only.
+test("optional_skip_keys release the checkpoint but never inflate covered", async (t) => {
+  const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+  t.after(() => closeServer(server));
+  const ownerToken = await registerAndAuthorize(server);
+
+  const { result, thrown } = await runShortfall(
+    server,
+    ownerToken,
+    [
+      { data: { id: "H" }, emitted_at: "2026-04-18T00:00:00Z", key: "H", stream: "holdings", type: "RECORD" },
+      { data: { id: "K1" }, emitted_at: "2026-04-18T00:00:00Z", key: "K1", stream: "activity", type: "RECORD" },
+      {
+        considered: 2,
+        covered: 2,
+        hydrated_keys: ["K1"],
+        optional_skip_keys: ["K2"],
+        reference_only: true,
+        required_keys: ["K1", "K2"],
+        state_stream: "holdings",
+        stream: "activity",
+        type: "DETAIL_COVERAGE",
+      },
+      { cursor: { page: "1" }, stream: "holdings", type: "STATE" },
+      { records_emitted: 2, status: "succeeded", type: "DONE" },
+    ],
+    undefined,
+    ["holdings", "activity"]
+  );
+  assert.equal(thrown, null);
+  assert.equal(result?.checkpoint_summary?.state_streams_committed, 1);
+  assert.equal(terminalCoveredFor(result?.run_id as string, "activity"), 1);
 });

@@ -452,6 +452,19 @@ export function boundConsideredCount(value: unknown): number | null {
 }
 
 /**
+ * Cap a connector-declared `covered` count at the denominator minus the items
+ * the runtime knows were not covered (optional skips, rejected records): those
+ * are neither emitted nor unchanged. The declared count may be lower; it is
+ * never raised. null stays unknown.
+ */
+export function capCoveredCount(covered: number | null, denominator: number, knownUncovered: number): number | null {
+  if (covered === null) {
+    return null;
+  }
+  return Math.min(covered, Math.max(denominator - knownUncovered, 0));
+}
+
+/**
  * Normalize a top-level `considered` key inside a bounded diagnostics object
  * (SKIP_RESULT.diagnostics). `boundGapDiagnostics` already preserved numbers as
  * raw leaves; this re-validates the one denominator key so an unsafe,
@@ -547,9 +560,9 @@ interface BuildCollectionFactsInput {
    * SAME unmodified `evaluateStreamCoherence` rule 2 that already gates every
    * other stream shape — no change to the shared contract was needed. Folded
    * into that stream's own considered/covered ONLY — never merged into
-   * detailCoverageByStateStream, so it can never reach
-   * missingDetailCoverageReports/recordDetailCoverageShortfalls or influence
-   * checkpoint commit eligibility. DETAIL_COVERAGE wins when both are present
+   * detailCoverageByStateStream, so it never reaches the coverage checks of
+   * decideCheckpointCommits (runtime/checkpoint-commit-decision.ts); only its
+   * unaccounted count withholds a checkpoint. DETAIL_COVERAGE wins when both are present
    * for the same stream (structurally impossible in a conformant run, since
    * STREAM_EVIDENCE is exclusive to state_stream-declared streams and
    * DETAIL_COVERAGE is rejected for them, but the precedence is made explicit

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -773,6 +773,149 @@ test("runConnector discards every staged checkpoint when the connector crashes w
     });
     const stateBody = (await stateResp.json()) as { state?: Record<string, unknown> };
     assert.deepEqual(stateBody.state ?? {}, {});
+  } finally {
+    rmSync(tmpDir, { force: true, recursive: true });
+    await closeServer(server);
+  }
+});
+
+// A retryable SKIP_RESULT is a reported omission. On a SUCCESSFUL DONE the
+// runtime previously recorded it only as a known gap and still committed the
+// stream's staged cursor, so the omitted rows sat behind a committed
+// checkpoint with no durable work item to replay them. The stream's cursor
+// must be withheld so the next run starts from the prior checkpoint.
+test("runConnector withholds a stream's cursor after a retryable SKIP_RESULT on a successful DONE, and the next run replays from the prior checkpoint", async () => {
+  const server = await startServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+  const asUrl = `http://localhost:${server.asPort}`;
+  const rsUrl = `http://localhost:${server.rsPort}`;
+  const manifest = testManifest("runtime-retryable-skip-withholds-cursor-test");
+  const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-runtime-retryable-skip-"));
+  const startStatePath = join(tmpDir, "start-state.json");
+  const firstRunPath = writeConnectorStub(
+    tmpDir,
+    `
+  process.stdout.write(JSON.stringify({ type: 'RECORD', stream: 'sibling_a', key: 'a-1', data: { id: 'a-1' }, emitted_at: new Date().toISOString() }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'STATE', stream: 'sibling_a', cursor: { cursor: 'sibling_a_cursor' } }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'RECORD', stream: 'sibling_b', key: 'b-1', data: { id: 'b-1' }, emitted_at: new Date().toISOString() }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'STATE', stream: 'sibling_b', cursor: { cursor: 'beyond_withheld_rows' } }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'SKIP_RESULT', stream: 'sibling_b', reason: 'upstream_pressure', message: 'withheld rows after 429', recovery_hint: 'retry_by_runtime' }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'DONE', status: 'succeeded', records_emitted: 2 }) + '\\n');
+  rl.close();
+  process.exit(0);
+`
+  );
+
+  try {
+    const registerResp = await fetch(`${asUrl}/connectors`, {
+      body: JSON.stringify(manifest),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    });
+    assert.equal(registerResp.status, 201);
+    const ownerToken = await issueOwnerToken(asUrl);
+
+    const result = await runStub({ asUrl, connectorPath: firstRunPath, manifest, ownerToken, rsUrl });
+    assert.equal(result.status, "succeeded");
+    assert.equal(result.checkpoint_summary?.state_streams_staged, 2);
+    assert.equal(
+      result.checkpoint_summary?.state_streams_committed,
+      1,
+      "the stream that reported a retryable omission must not commit its cursor"
+    );
+
+    const stateResp = await fetch(`${rsUrl}/v1/state/${encodeURIComponent(manifest.connector_id)}`, {
+      headers: { Authorization: `Bearer ${ownerToken}` },
+    });
+    const stateBody = (await stateResp.json()) as { state?: Record<string, unknown> };
+    assert.deepEqual(stateBody.state, { sibling_a: { cursor: "sibling_a_cursor" } });
+
+    // Next run: START carries the committed state. sibling_b has no
+    // checkpoint, so the connector re-collects the omitted rows.
+    const replayPath = join(tmpDir, "replay-connector.mjs");
+    writeFileSync(
+      replayPath,
+      `
+import { writeFileSync } from 'node:fs';
+import { createInterface } from 'node:readline';
+const rl = createInterface({ input: process.stdin, terminal: false });
+rl.on('line', (line) => {
+  const msg = JSON.parse(line);
+  if (msg.type !== 'START') return;
+  writeFileSync(${JSON.stringify(startStatePath)}, JSON.stringify(msg.state ?? null));
+  process.stdout.write(JSON.stringify({ type: 'RECORD', stream: 'sibling_b', key: 'b-2', data: { id: 'b-2' }, emitted_at: new Date().toISOString() }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'STATE', stream: 'sibling_b', cursor: { cursor: 'replayed' } }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'DONE', status: 'succeeded', records_emitted: 1 }) + '\\n');
+  rl.close();
+  process.exit(0);
+});
+`,
+      "utf8"
+    );
+    const replay = (await runConnector({
+      admitRunConnection: fakeAdmitRunConnection(),
+      collectionMode: "incremental",
+      connectorId: manifest.connector_id,
+      connectorPath: replayPath,
+      manifest,
+      onInteraction: async () => ({}),
+      ownerToken,
+      persistState: true,
+      rsUrl,
+      state: stateBody.state ?? null,
+    })) as RunResult;
+    assert.equal(replay.status, "succeeded");
+    const replayStartState = JSON.parse(readFileSync(startStatePath, "utf8")) as Record<string, unknown> | null;
+    assert.ok(
+      !("sibling_b" in (replayStartState ?? {})),
+      "the replay run must start sibling_b from its prior checkpoint"
+    );
+
+    const afterReplay = (await (
+      await fetch(`${rsUrl}/v1/state/${encodeURIComponent(manifest.connector_id)}`, {
+        headers: { Authorization: `Bearer ${ownerToken}` },
+      })
+    ).json()) as { state?: Record<string, unknown> };
+    assert.deepEqual(afterReplay.state, {
+      sibling_a: { cursor: "sibling_a_cursor" },
+      sibling_b: { cursor: "replayed" },
+    });
+  } finally {
+    rmSync(tmpDir, { force: true, recursive: true });
+    await closeServer(server);
+  }
+});
+
+test("runConnector still commits a stream whose SKIP_RESULT is not retryable (counterweight)", async () => {
+  const server = await startServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+  const asUrl = `http://localhost:${server.asPort}`;
+  const rsUrl = `http://localhost:${server.rsPort}`;
+  const manifest = testManifest("runtime-permanent-skip-commits-cursor-test");
+  const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-runtime-permanent-skip-"));
+  const connectorPath = writeConnectorStub(
+    tmpDir,
+    `
+  process.stdout.write(JSON.stringify({ type: 'STATE', stream: 'sibling_a', cursor: { cursor: 'sibling_a_cursor' } }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'STATE', stream: 'sibling_b', cursor: { cursor: 'sibling_b_cursor' } }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'SKIP_RESULT', stream: 'sibling_b', reason: 'not_available', message: 'provider never exposes this', recovery_hint: 'not_retriable' }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'DONE', status: 'succeeded', records_emitted: 0 }) + '\\n');
+  rl.close();
+  process.exit(0);
+`
+  );
+
+  try {
+    const registerResp = await fetch(`${asUrl}/connectors`, {
+      body: JSON.stringify(manifest),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    });
+    assert.equal(registerResp.status, 201);
+    const ownerToken = await issueOwnerToken(asUrl);
+
+    const result = await runStub({ asUrl, connectorPath, manifest, ownerToken, rsUrl });
+    assert.equal(result.status, "succeeded");
+    assert.equal(result.checkpoint_summary?.state_streams_staged, 2);
+    assert.equal(result.checkpoint_summary?.state_streams_committed, 2);
   } finally {
     rmSync(tmpDir, { force: true, recursive: true });
     await closeServer(server);

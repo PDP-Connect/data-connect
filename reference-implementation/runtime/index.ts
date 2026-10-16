@@ -46,6 +46,7 @@ import {
 } from "../server/stores/terminal-gap-classifier.ts";
 import type { AttentionWriterOptions } from "./attention-writer.ts";
 import { createAttentionWriter } from "./attention-writer.ts";
+import { decideCheckpointCommits, type ReportedOmission, type WithholdReason } from "./checkpoint-commit-decision.ts";
 import { classifyRuntimeFailure } from "./classify-runtime-failure.ts";
 import {
   type ConnectorConnectionEnvironment,
@@ -62,6 +63,7 @@ import {
   buildCollectionFacts,
   buildKnownGap,
   buildRecoveryGapClosureFacts,
+  capCoveredCount,
   GAP_STRING_MAX,
   isValidRecoveryHintShape,
   normalizeGapScope,
@@ -382,22 +384,14 @@ interface DetailCoverageEntry {
    * for the same stream, key, and parent boundary.
    */
   gapKeys: Set<string>;
+  /** Hydrated keys as the connector declared them. */
   hydratedKeys: Set<string>;
   /** Keys accepted by the connector's explicit optional-detail policy. */
   optionalSkipKeys: Set<string>;
+  /** Required or hydrated keys the RS rejected for `stream` this run and never accepted. */
+  rejectedKeys: Set<string>;
   requiredKeys: string[];
   stream: string;
-}
-
-function durableGapMatchesCoverageParent(
-  gapParentStream: string | null | undefined,
-  stateStream: string,
-  hasMultipleParents: boolean
-): boolean {
-  if (gapParentStream) {
-    return gapParentStream === stateStream;
-  }
-  return !hasMultipleParents;
 }
 
 /**
@@ -927,19 +921,25 @@ function readIngestResponse(resp: Response, stream: string, batchSize: number): 
 }
 
 /**
- * Lazily-created, disk-backed, per-run distinct-(stream,key) set of records
- * this run's own flush proved durably accepted. Never touches disk until
- * `record()` is first called with at least one survivor. `close()` is
- * idempotent and swallows its own errors — a failure to unlink a temp file
- * must never convert a succeeded run into a failed one.
+ * Lazily-created, disk-backed, per-run distinct-(stream,key) sets of records
+ * this run's own flush proved durably accepted, and of records the RS
+ * permanently rejected. Never touches disk until `record()` is first called
+ * with a non-empty batch. `close()` is idempotent and swallows its own errors —
+ * a failure to unlink a temp file must never convert a succeeded run into a
+ * failed one.
  */
 interface AcceptedKeysStore {
   /** Remove the temp directory, if one was ever created. Never throws. */
   close: () => void;
   /** Exact distinct accepted-key count for `stream`. 0 if the store was never created. */
   distinctCount: (stream: string) => number;
-  /** Record survivors (batch entries NOT in `rejectedIndexes`) as accepted for `stream`. */
+  /**
+   * Record survivors (batch entries NOT in `rejectedIndexes`) as accepted for
+   * `stream`, and the rejected entries as rejected.
+   */
   record: (stream: string, batch: readonly BufferedRecord[], rejectedIndexes: ReadonlySet<number>) => void;
+  /** The subset of `keys` the RS rejected for `stream` this run and never accepted. */
+  rejectedWithoutAcceptance: (stream: string, keys: Iterable<string>) => Set<string>;
 }
 
 function createAcceptedKeysStore(): AcceptedKeysStore {
@@ -947,6 +947,8 @@ function createAcceptedKeysStore(): AcceptedKeysStore {
   let dir: string | null = null;
   let insertStmt: ReturnType<InstanceType<typeof DatabaseSync>["prepare"]> | null = null;
   let countStmt: ReturnType<InstanceType<typeof DatabaseSync>["prepare"]> | null = null;
+  let insertRejectedStmt: ReturnType<InstanceType<typeof DatabaseSync>["prepare"]> | null = null;
+  let rejectedWithoutAcceptanceStmt: ReturnType<InstanceType<typeof DatabaseSync>["prepare"]> | null = null;
 
   function ensureOpen(): void {
     if (db) {
@@ -976,8 +978,14 @@ function createAcceptedKeysStore(): AcceptedKeysStore {
     db.exec("PRAGMA journal_mode = WAL");
     db.exec("PRAGMA synchronous = NORMAL");
     db.exec("CREATE TABLE accepted_keys (stream TEXT NOT NULL, key TEXT NOT NULL, PRIMARY KEY (stream, key))");
+    db.exec("CREATE TABLE rejected_keys (stream TEXT NOT NULL, key TEXT NOT NULL, PRIMARY KEY (stream, key))");
     insertStmt = db.prepare("INSERT OR IGNORE INTO accepted_keys (stream, key) VALUES (?, ?)");
     countStmt = db.prepare("SELECT COUNT(*) AS c FROM accepted_keys WHERE stream = ?");
+    insertRejectedStmt = db.prepare("INSERT OR IGNORE INTO rejected_keys (stream, key) VALUES (?, ?)");
+    rejectedWithoutAcceptanceStmt = db.prepare(
+      "SELECT 1 AS hit FROM rejected_keys r WHERE r.stream = ? AND r.key = ? " +
+        "AND NOT EXISTS (SELECT 1 FROM accepted_keys a WHERE a.stream = r.stream AND a.key = r.key)"
+    );
   }
 
   return {
@@ -990,6 +998,8 @@ function createAcceptedKeysStore(): AcceptedKeysStore {
       db = null;
       insertStmt = null;
       countStmt = null;
+      insertRejectedStmt = null;
+      rejectedWithoutAcceptanceStmt = null;
       if (dir) {
         try {
           rmSync(dir, { force: true, recursive: true });
@@ -1007,8 +1017,7 @@ function createAcceptedKeysStore(): AcceptedKeysStore {
       return row?.c ?? 0;
     },
     record(stream: string, batch: readonly BufferedRecord[], rejectedIndexes: ReadonlySet<number>): void {
-      const survivors = batch.filter((_, index) => !rejectedIndexes.has(index));
-      if (!survivors.length) {
+      if (!batch.length) {
         return;
       }
       ensureOpen();
@@ -1020,8 +1029,9 @@ function createAcceptedKeysStore(): AcceptedKeysStore {
       // above is the only path that can leave it null, and it always sets it.
       (db as InstanceType<typeof DatabaseSync>).exec("BEGIN IMMEDIATE");
       try {
-        for (const record of survivors) {
-          insertStmt?.run(stream, encodeKey(record.key));
+        for (const [index, record] of batch.entries()) {
+          const statement = rejectedIndexes.has(index) ? insertRejectedStmt : insertStmt;
+          statement?.run(stream, encodeKey(record.key));
         }
         (db as InstanceType<typeof DatabaseSync>).exec("COMMIT");
       } catch (err) {
@@ -1034,6 +1044,18 @@ function createAcceptedKeysStore(): AcceptedKeysStore {
         }
         throw err;
       }
+    },
+    rejectedWithoutAcceptance(stream: string, keys: Iterable<string>): Set<string> {
+      const rejected = new Set<string>();
+      if (!rejectedWithoutAcceptanceStmt) {
+        return rejected;
+      }
+      for (const key of keys) {
+        if (rejectedWithoutAcceptanceStmt.get(stream, key)) {
+          rejected.add(key);
+        }
+      }
+      return rejected;
     },
   };
 }
@@ -3511,8 +3533,12 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
   // — an untargeted SKIP_RESULT never certifies any specific stream as
   // failed. Read by handleDoneClose: a failed DONE is trusted as a
   // stream-scoped (rather than whole-run) failure only when this set is
-  // non-empty, and only the streams named here are excluded from commit.
+  // non-empty, and the streams named here are withheld from commit.
   const streamCollectionFailedStreams = new Set<string>();
+  // Streams that reported any other retryable SKIP_RESULT without a runtime
+  // continuation. The omitted rows have no durable work item of their own, so
+  // the stream's checkpoint must stay put for the next run to replay them.
+  const retryableSkippedStreams = new Set<string>();
   const durableDetailGaps: DurableDetailGap[] = [];
   // First-sighting idempotency for run.detail_gap_recorded: gap_ids already
   // emitted as `recorded` THIS run. Closes the resumed-run-stdout-replay edge
@@ -3531,8 +3557,8 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
   // durable `StreamEvidenceRunRegistryStore` (see its doc comment,
   // server/stores/stream-evidence-run-registry-store.ts), claimed
   // atomically in `trackStreamEvidence`. Kept fully separate from
-  // `detailCoverageByStateStream`: STREAM_EVIDENCE is never consulted by
-  // `missingDetailCoverageReports`/`recordDetailCoverageShortfalls`.
+  // `detailCoverageByStateStream`: STREAM_EVIDENCE never reaches the coverage
+  // checks of `decideCheckpointCommits`; only its unaccounted count does.
   const streamEvidenceByStream = new Map<string, StreamEvidenceOutcomes & { considered: number }>();
   // Latest `collection_rate` progress payload seen this run. Updated on each
   // rate-change PROGRESS event so the terminal event can carry the final
@@ -3939,7 +3965,8 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
     };
   }
 
-  function trackDetailCoverage(msg: ConnectorMessage): void {
+  // Must run after `flushAll()`: it reads this run's accepted and rejected keys.
+  function trackDetailCoverage(msg: ConnectorMessage): DetailCoverageEntry {
     // `validateDetailCoverageMessage` ran first: state_stream/stream are
     // non-empty strings and the three key arrays are string/number arrays.
     const stateStream = msg.state_stream as string;
@@ -3948,37 +3975,54 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
     if (entries.some((entry) => entry.stream === stream)) {
       throw new Error(`Connector emitted duplicate DETAIL_COVERAGE for state_stream=${stateStream} stream=${stream}`);
     }
-    entries.push({
-      // Optional connector-declared considered denominator (task 2.1). Retained
-      // here — normalized to a trusted safe non-negative integer or null — so
-      // the terminal collection-fact block can prefer it over the
-      // required_keys.length fallback. null stays `unknown`; never inferred.
-      considered: boundConsideredCount(msg.considered),
+    const requiredKeys = (msg.required_keys as (string | number)[]).map(normalizeCoverageKey);
+    const hydratedKeys = new Set((msg.hydrated_keys as (string | number)[]).map(normalizeCoverageKey));
+    const optionalSkipKeys = new Set(
+      ((msg.optional_skip_keys as (string | number)[] | null) || []).map(normalizeCoverageKey)
+    );
+    // Rejection is evidence against hydration (decideCheckpointCommits).
+    // Absence is not: a hydrated key need not be a record key of `stream` (an
+    // account whose transactions were fetched, or one with no activity).
+    const rejectedKeys = acceptedKeysDb.rejectedWithoutAcceptance(stream, new Set([...requiredKeys, ...hydratedKeys]));
+    // Optional connector-declared considered denominator (task 2.1). Retained
+    // here — normalized to a trusted safe non-negative integer or null — so
+    // the terminal collection-fact block can prefer it over the
+    // required_keys.length fallback. null stays `unknown`; never inferred.
+    const considered = boundConsideredCount(msg.considered);
+    const entry: DetailCoverageEntry = {
+      considered,
       // Optional connector-declared covered count (task 4.4): in-boundary items the
       // run accounted for (emitted + suppressed-unchanged). Same drop-don't-reject
       // normalization. null stays `unknown`; the projection compares `considered`
       // against `covered` when present so a steady-state full-sync run reads
-      // `complete`, never inferred from collected.
-      covered: boundConsideredCount(msg.covered),
+      // `complete`, never inferred from collected. Optional skips and rejected
+      // keys are neither emitted nor unchanged, so they cap the claim.
+      covered: capCoveredCount(
+        boundConsideredCount(msg.covered),
+        considered ?? requiredKeys.length,
+        requiredKeys.filter((key) => optionalSkipKeys.has(key) || rejectedKeys.has(key)).length
+      ),
       // Connector-declared unhydrated keys. Retained for collection facts and
       // diagnostics, but never authoritative by themselves: the checkpoint
       // gate credits a gap only when the same key has a durable DETAIL_GAP.
       gapKeys: new Set(((msg.gap_keys as (string | number)[] | null) || []).map(normalizeCoverageKey)),
-      hydratedKeys: new Set((msg.hydrated_keys as (string | number)[]).map(normalizeCoverageKey)),
-      optionalSkipKeys: new Set(
-        ((msg.optional_skip_keys as (string | number)[] | null) || []).map(normalizeCoverageKey)
-      ),
-      requiredKeys: (msg.required_keys as (string | number)[]).map(normalizeCoverageKey),
+      hydratedKeys,
+      optionalSkipKeys,
+      rejectedKeys,
+      requiredKeys,
       stream,
-    });
+    };
+    entries.push(entry);
     detailCoverageByStateStream.set(stateStream, entries);
+    return entry;
   }
 
   // Parallel to, but independent from, trackDetailCoverage: STREAM_EVIDENCE
   // is folded into RuntimeCollectionFact.considered/covered at terminal
   // collection-fact assembly (buildCollectionFacts) and never into
   // detailCoverageByStateStream, so it can never reach
-  // missingDetailCoverageReports/recordDetailCoverageShortfalls.
+  // the coverage checks of decideCheckpointCommits. Its `unaccounted` count
+  // reaches that decision separately, as a reported omission.
   //
   // This is the single acceptance point for the cross-invocation half of
   // rule 5 ("at most one accepted STREAM_EVIDENCE per stream per run_id"):
@@ -4037,22 +4081,18 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
     return claimResult.claim;
   }
 
-  // Resolve every STATE_STREAM checkpoint key owned by a data stream, for
-  // excluding a failed stream's checkpoint parent(s) from commit. Manifest
-  // declaration is authoritative and takes precedence: a `parent_streams`
-  // stream's every declared parent is a candidate to withhold, whether or
-  // not that parent got a live DETAIL_COVERAGE report this run (a failed
-  // stream's live evidence is inherently incomplete, so under-excluding by
-  // trusting only what happened to arrive live would be unsafe). The static
-  // `state_stream` mapping is the fallback for a stream with no
-  // `parent_streams` declaration, and the data stream's own name is the
-  // final fallback for a self-mapped stream.
-  function resolveStateStreamsForDataStream(dataStream: string): ReadonlySet<string> {
-    const declaredParents = manifestDetailParentStreamsByStream.get(dataStream);
-    if (declaredParents?.size) {
-      return declaredParents;
-    }
-    return new Set([manifestStateStreamByStream.get(dataStream) || dataStream]);
+  // Omissions this run reported without a durable work item, in the shape
+  // decideCheckpointCommits takes. Gapped STREAM_EVIDENCE keys are durable
+  // DETAIL_GAPs, which START serves independently of cursors, so only
+  // unaccounted keys count.
+  function collectReportedOmissions(): ReportedOmission[] {
+    return [
+      ...[...streamCollectionFailedStreams].map((stream) => ({ source: "stream_collection_failed" as const, stream })),
+      ...[...retryableSkippedStreams].map((stream) => ({ source: "retryable_skip" as const, stream })),
+      ...[...streamEvidenceByStream]
+        .filter(([, evidence]) => evidence.unaccounted > 0)
+        .map(([stream]) => ({ source: "unaccounted_evidence" as const, stream })),
+    ];
   }
 
   // A DETAIL_COVERAGE shortfall is a coverage GAP, not a protocol violation.
@@ -4060,67 +4100,8 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
   // could not hydrate this run; the honest response is to report the shortfall
   // and withhold the affected `state_stream`'s cursor so the next run
   // re-collects it — never to fail a run whose records are already ingested and
-  // durable. (A claim of completeness must carry proof, so an unproven key
-  // still blocks the cursor advance; incomplete coverage is reported, not
-  // fatal.) Mirrors the transient-manifest-drift posture in
+  // durable. Mirrors the transient-manifest-drift posture in
   // `recordManifestDriftStreamSkip`: per-stream gap + no cursor advance.
-  //
-  // Returns the `state_stream`s whose coverage is unproven; the caller skips
-  // exactly those commits and commits the rest.
-  function missingDetailCoverageReports(
-    stateStream: string,
-    coverageEntries: readonly DetailCoverageEntry[]
-  ): string[] {
-    const missing: string[] = [];
-    for (const [detailStream, parents] of manifestDetailParentStreamsByStream) {
-      if (
-        scopeByStream.has(detailStream) &&
-        parents.has(stateStream) &&
-        !coverageEntries.some((coverage) => coverage.stream === detailStream)
-      ) {
-        missing.push(detailStream);
-      }
-    }
-    return missing;
-  }
-
-  async function recordDetailCoverageShortfalls(): Promise<Set<string>> {
-    const shortfallStateStreams = new Set<string>();
-    for (const stateStream of Object.keys(newState)) {
-      const coverageEntries = detailCoverageByStateStream.get(stateStream) || [];
-      for (const detailStream of missingDetailCoverageReports(stateStream, coverageEntries)) {
-        shortfallStateStreams.add(stateStream);
-        // biome-ignore lint/performance/noAwaitInLoops: one bounded gap per missing parent report; sequential ordering keeps the timeline honest.
-        await recordMissingDetailCoverageReport(stateStream, detailStream);
-      }
-      for (const coverage of coverageEntries) {
-        const coverageParents = manifestDetailParentStreamsByStream.get(coverage.stream);
-        const hasMultipleParents = (coverageParents?.size || 0) > 1;
-        const accountedGapKeys = new Set(
-          durableDetailGaps
-            .filter(
-              (gap) =>
-                gap.stream === coverage.stream &&
-                (gap.status === "pending" || gap.status === "recovered") &&
-                durableGapMatchesCoverageParent(gap.parent_stream, stateStream, hasMultipleParents) &&
-                !isNullish(gap.record_key)
-            )
-            .map((gap) => normalizeCoverageKey(gap.record_key as string | number))
-        );
-        const missingKeys = coverage.requiredKeys.filter(
-          (key) => !(coverage.hydratedKeys.has(key) || coverage.optionalSkipKeys.has(key) || accountedGapKeys.has(key))
-        );
-        if (!missingKeys.length) {
-          continue;
-        }
-        shortfallStateStreams.add(stateStream);
-        // biome-ignore lint/performance/noAwaitInLoops: one bounded gap per shortfalling coverage entry; sequential ordering keeps the timeline honest.
-        await recordDetailCoverageShortfall(stateStream, coverage, missingKeys.length);
-      }
-    }
-    return shortfallStateStreams;
-  }
-
   async function recordMissingDetailCoverageReport(stateStream: string, stream: string): Promise<void> {
     const message = `Connector detail coverage incomplete: state_stream=${stateStream} stream=${stream} coverage_report=missing`;
     const gap = buildKnownGap({
@@ -4158,23 +4139,24 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
   // Per-shortfall known gap + timeline event. `detail_coverage_incomplete` is a
   // transient reason: the next run retries the same keys, so the owner sees a
   // reported gap with a real explanation rather than a bare failure.
-  async function recordDetailCoverageShortfall(
-    stateStream: string,
-    coverage: DetailCoverageEntry,
-    missingKeyCount: number
-  ): Promise<void> {
-    const message = detailCoverageShortfallMessage(stateStream, coverage.stream, missingKeyCount);
+  async function recordDetailCoverageShortfall({
+    missingKeyCount,
+    requiredKeyCount,
+    stateStream,
+    stream,
+  }: Extract<WithholdReason, { kind: "coverage_shortfall" }>): Promise<void> {
+    const message = detailCoverageShortfallMessage(stateStream, stream, missingKeyCount);
     const gap = buildKnownGap({
       diagnostics: {
         missing_required_keys: missingKeyCount,
-        required_keys: coverage.requiredKeys.length,
+        required_keys: requiredKeyCount,
         state_stream: stateStream,
       },
       kind: "detail_coverage",
       message,
       reason: "detail_coverage_incomplete",
       recoveryHint: "retry_by_runtime",
-      stream: coverage.stream,
+      stream,
     });
     appendKnownGap(gap);
     await emitSpineEventTracked({
@@ -4186,7 +4168,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
         reason: "detail_coverage_incomplete",
         source: runSource,
         state_stream: stateStream,
-        stream: coverage.stream,
+        stream,
       },
       event_type: "run.stream_skipped",
       object_id: runId,
@@ -4194,10 +4176,10 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       run_id: runId,
       scenario_id: traceContext.scenario_id,
       status: "skipped",
-      stream_id: coverage.stream,
+      stream_id: stream,
       trace_id: traceContext.trace_id,
     });
-    onProgress({ reason: "detail_coverage_incomplete", stream: coverage.stream, type: "stream_skipped" });
+    onProgress({ reason: "detail_coverage_incomplete", stream, type: "stream_skipped" });
   }
 
   // Record a transient per-stream gap for a stream whose ingest was rejected as
@@ -5061,9 +5043,9 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       const coverageHydratedKeys = msg.hydrated_keys as (string | number)[];
       const coverageGapKeys = msg.gap_keys as (string | number)[] | null | undefined;
       const coverageOptionalSkipKeys = msg.optional_skip_keys as (string | number)[] | null | undefined;
-      trackDetailCoverage(msg);
-      const coverageConsidered = boundConsideredCount(msg.considered);
-      const coverageCovered = boundConsideredCount(msg.covered);
+      const coverageEntry = trackDetailCoverage(msg);
+      const coverageConsidered = coverageEntry.considered;
+      const coverageCovered = coverageEntry.covered;
       await emitSpineEventTracked({
         actor_id: connectorId,
         actor_type: "runtime",
@@ -5080,7 +5062,8 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
           // Optional connector-declared denominator; omitted (= `unknown`)
           // unless it is a trusted safe non-negative integer.
           ...(isNullish(coverageConsidered) ? {} : { considered: coverageConsidered }),
-          // Optional covered count (task 4.4); same omit-unless-trusted posture.
+          // Optional covered count (task 4.4), capped by trackDetailCoverage;
+          // same omit-unless-trusted posture.
           ...(isNullish(coverageCovered) ? {} : { covered: coverageCovered }),
         },
         event_type: "run.detail_coverage_declared",
@@ -5796,6 +5779,17 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
         stream: skipStream,
         unsupportedInDefaultScope: streamUnsupportedInDefaultScope(skippedManifestStream),
       });
+      // A continuation is replayed by the committed cursor itself (the next
+      // slice starts at slice_end), so only a continuation-free omission
+      // withholds the checkpoint. stream_collection_failed is tracked above.
+      if (
+        skipStream &&
+        msg.reason !== "stream_collection_failed" &&
+        continuation === null &&
+        (gap.recovery_hint as { retryable: boolean }).retryable
+      ) {
+        retryableSkippedStreams.add(skipStream);
+      }
       appendKnownGap(gap);
       await emitSpineEventTracked({
         actor_id: connectorId,
@@ -6387,64 +6381,41 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
         streamCollectionFailedStreams.size > 0;
 
       if (persistState && (terminalStatus === "succeeded" || isCertifiedStreamCollectionFailure)) {
-        // Unproven coverage withholds only its own state_stream's cursor; every
-        // other stream still commits, and the run stays successful with the
-        // shortfall reported as a known gap.
-        const coverageShortfallStateStreams = await recordDetailCoverageShortfalls();
-        if (done.status === "succeeded") {
-          // Unproven coverage withholds only its own state_stream's cursor; every
-          // other stream still commits, and the run stays successful with the
-          // shortfall reported as a known gap.
-          await Object.entries(newState)
-            .filter(([stream]) => !coverageShortfallStateStreams.has(stream))
-            .reduce(
-              (previous, [stream, cursor]) => previous.then(() => commitState(stream, cursor)),
-              Promise.resolve()
-            );
-        } else {
-          // A failed DONE is normally a global failure: the run's state map is
-          // unproven and nothing commits (the else-branch this replaces for
-          // every other failed/cancelled/crashed/protocol-mismatched close).
-          // The one exception the runtime can verify structurally: the
-          // connector certified the failure as stream-scoped by (a) declaring
-          // DONE.error.code === "stream_collection_failed" AND (b) emitting at
-          // least one in-scope SKIP_RESULT{reason:"stream_collection_failed"}
-          // naming the specific stream(s) that failed. Only those named
-          // streams' cursors are withheld; every other staged stream reached
-          // its own terminal STATE with no reported failure and is provably
-          // safe to commit. A DONE claiming this code with zero matching
-          // SKIP_RESULT (streamCollectionFailedStreams.size === 0) is not
-          // structurally certified and falls through to the fail-closed
-          // default — never trust the code string alone.
-          //
-          // SKIP_RESULT.stream names a DATA stream, but `newState`/`commitState`
-          // are keyed by STATE_STREAM (the checkpoint's own key), which a
-          // manifest may declare as a distinct parent key shared by several
-          // data streams (`stream.state_stream`, see buildManifestStateStreamMap).
-          // Mapping the failed DATA stream straight through as if it were the
-          // STATE_STREAM key would filter nothing (no match in newState) and
-          // falsely commit the parent checkpoint a failed CHILD stream shares
-          // with untouched siblings. `resolveStateStreamsForDataStream` resolves
-          // from the manifest's static declaration ONLY (`state_stream`, or the
-          // full declared `parent_streams` set) — never from live DETAIL_COVERAGE,
-          // which can only select/report within the declared set and must never
-          // widen or override it (see "Precedence between manifest and run-time
-          // evidence"). Using the full declared set here, not just the parents
-          // that happened to report live this run, is deliberately conservative:
-          // a failed stream's live evidence is inherently incomplete, so every
-          // declared parent is a candidate to withhold.
-          const failedStateStreams = new Set(
-            Array.from(streamCollectionFailedStreams).flatMap((stream) => [...resolveStateStreamsForDataStream(stream)])
-          );
-          await Object.entries(newState)
-            .filter(
-              ([stateStream]) =>
-                !(failedStateStreams.has(stateStream) || coverageShortfallStateStreams.has(stateStream))
-            )
-            .reduce(
-              (previous, [stateStream, cursor]) => previous.then(() => commitState(stateStream, cursor)),
-              Promise.resolve()
-            );
+        // A failed DONE is normally a global failure: the run's state map is
+        // unproven and nothing commits (the outer condition excludes every
+        // other failed/cancelled/crashed/protocol-mismatched close). The one
+        // exception the runtime can verify structurally: the connector
+        // certified the failure as stream-scoped by (a) declaring
+        // DONE.error.code === "stream_collection_failed" AND (b) emitting at
+        // least one in-scope SKIP_RESULT{reason:"stream_collection_failed"}
+        // naming the failed stream(s). A DONE claiming this code with zero
+        // matching SKIP_RESULT is not certified and falls through to the
+        // fail-closed default — never trust the code string alone.
+        //
+        // Either way, decideCheckpointCommits says which staged cursors may
+        // move; this block only applies that decision. Coverage reasons become
+        // known gaps (a shortfall is reported, not fatal); omission reasons
+        // already have their SKIP_RESULT gap or STREAM_EVIDENCE fact.
+        const decision = decideCheckpointCommits({
+          coverageByStateStream: detailCoverageByStateStream,
+          detailParentsByStream: manifestDetailParentStreamsByStream,
+          durableGaps: durableDetailGaps,
+          inScopeStreams: new Set(scopeByStream.keys()),
+          omissions: collectReportedOmissions(),
+          stagedStateStreams: Object.keys(newState),
+          stateStreamByStream: manifestStateStreamByStream,
+        });
+        for (const reason of decision.withheld) {
+          if (reason.kind === "coverage_report_missing") {
+            // biome-ignore lint/performance/noAwaitInLoops: one bounded gap per reason; sequential ordering keeps the timeline honest.
+            await recordMissingDetailCoverageReport(reason.stateStream, reason.stream);
+          } else if (reason.kind === "coverage_shortfall") {
+            await recordDetailCoverageShortfall(reason);
+          }
+        }
+        for (const stateStream of decision.commit) {
+          // biome-ignore lint/performance/noAwaitInLoops: commits are sequential, as before.
+          await commitState(stateStream, newState[stateStream]);
         }
       }
       const assistanceStatus = terminalStatus === "succeeded" ? "resolved" : "cancelled";
