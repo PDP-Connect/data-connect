@@ -342,23 +342,6 @@ fn unregister_process_group(process_group: libc::pid_t) {
     }
 }
 
-#[cfg(unix)]
-fn take_process_group_id(state: &SupervisorState) -> Option<libc::pid_t> {
-    state.process_group_id.lock().ok()?.take()
-}
-
-#[cfg(unix)]
-struct ProcessGroupRegistration(Option<libc::pid_t>);
-
-#[cfg(unix)]
-impl Drop for ProcessGroupRegistration {
-    fn drop(&mut self) {
-        if let Some(slot) = self.0.take() {
-            unregister_process_group(slot);
-        }
-    }
-}
-
 /// Notified whenever a supervised child is spawned or reaped, with the
 /// identity an outside observer needs to find that process again.
 ///
@@ -586,22 +569,31 @@ fn run_supervisor(
     let mut restart_count = 0;
     let mut readiness_reported = false;
 
-    // Every `return` below is a terminal exit of this supervisor, and each
-    // one is preceded by `state.finish()`. Announcing the reap from a guard
-    // means a new exit path cannot silently forget to do it and leave a
-    // lease pointing at a dead pid.
+    // A dead leader can still own live descendants. Revoke the durable
+    // lease only after cleanup has confirmed the entire process tree exited.
     struct ReapGuard<'a> {
         observer: &'a Arc<dyn ProcessObserver>,
         label: &'a str,
+        state: &'a SupervisorState,
     }
     impl Drop for ReapGuard<'_> {
         fn drop(&mut self) {
-            self.observer.reaped(self.label);
+            let child_reaped = self.state.child.lock()
+                .map(|child| child.is_none()).unwrap_or(false);
+            #[cfg(unix)]
+            let group_reaped = self.state.process_group_id.lock()
+                .map(|group| group.is_none()).unwrap_or(false);
+            #[cfg(not(unix))]
+            let group_reaped = true;
+            if child_reaped && group_reaped {
+                self.observer.reaped(self.label);
+            }
         }
     }
     let _reap_guard = ReapGuard {
         observer: &observer,
         label: &spec.label,
+        state: &state,
     };
 
     loop {
@@ -674,6 +666,12 @@ fn run_supervisor(
                 return;
             }
             ReadinessOutcome::Exited(status) => {
+                if let Err(error) = stop_current_child(&spec, &state) {
+                    let _ = ready_sender.send(Err(format!("failed to clean up {}: {error}", spec.label)));
+                    log::error!("[{}] failed to clean up exited process tree: {error}", spec.label);
+                    state.finish();
+                    return;
+                }
                 let (stdout_tail, stderr_tail) = spawned.output.drain();
                 log_exit_before_readiness(&spec.label, status.as_ref(), &stdout_tail, &stderr_tail);
                 emit(
@@ -695,10 +693,12 @@ fn run_supervisor(
                         },
                     ),
                     Ok(None) => {}
-                    Err(error) => log::error!(
-                        "[{}] failed to stop after readiness timeout: {error}",
-                        spec.label
-                    ),
+                    Err(error) => {
+                        log::error!("[{}] failed to stop after readiness timeout: {error}", spec.label);
+                        let _ = ready_sender.send(Err(format!("failed to clean up {}: {error}", spec.label)));
+                        state.finish();
+                        return;
+                    }
                 }
             }
             ReadinessOutcome::StopRequested => {
@@ -758,8 +758,12 @@ fn monitor_ready_process(
             return false;
         }
 
-        match take_exited_child(state) {
+        match poll_child_exit(state) {
             Ok(Some(status)) => {
+                if let Err(error) = stop_current_child(spec, state) {
+                    log::error!("[{}] failed to clean up exited process tree: {error}", spec.label);
+                    return false;
+                }
                 emit(
                     spec,
                     sink,
@@ -1526,25 +1530,15 @@ fn child_exit_status(state: &SupervisorState) -> Option<ExitStatus> {
     child.as_mut()?.try_wait().ok().flatten()
 }
 
-fn take_exited_child(state: &SupervisorState) -> io::Result<Option<ExitStatus>> {
+fn poll_child_exit(state: &SupervisorState) -> io::Result<Option<ExitStatus>> {
     let mut child_slot = state
         .child
         .lock()
         .map_err(|_| io::Error::other("supervisor child state was poisoned"))?;
-    let Some(child) = child_slot.as_mut() else {
-        return Ok(None);
-    };
-    match child.try_wait()? {
-        Some(status) => {
-            let _ = child_slot.take();
-            #[cfg(unix)]
-            if let Ok(mut process_group_id) = state.process_group_id.lock() {
-                if let Some(process_group) = process_group_id.take() {
-                    unregister_process_group(process_group);
-                }
-            }
-            Ok(Some(status))
-        }
+    // try_wait reaps only the leader. Keep its identity and group registered
+    // until stop_current_child confirms there are no surviving descendants.
+    match child_slot.as_mut() {
+        Some(child) => child.try_wait(),
         None => Ok(None),
     }
 }
@@ -1557,11 +1551,29 @@ fn stop_current_child(
         .child
         .lock()
         .map_err(|_| io::Error::other("supervisor child state was poisoned"))?;
-    let Some(mut child) = child_slot.take() else {
+    let Some(child) = child_slot.as_mut() else {
         return Ok(None);
     };
+    // Borrow, rather than take, so errors/timeouts retain both ownership
+    // records. A replacement generation must never overwrite this tree.
+    let status = stop_process_tree(spec, state, child)?;
     #[cfg(unix)]
-    let _process_group_registration = ProcessGroupRegistration(take_process_group_id(state));
+    {
+        let mut group = state.process_group_id.lock()
+            .map_err(|_| io::Error::other("supervisor process-group state was poisoned"))?;
+        if let Some(process_group) = group.take() {
+            unregister_process_group(process_group);
+        }
+    }
+    child_slot.take();
+    Ok(status)
+}
+
+fn stop_process_tree(
+    spec: &ProcessSpec,
+    state: &SupervisorState,
+    child: &mut Child,
+) -> io::Result<Option<ExitStatus>> {
     let pid = child.id();
     let deadline = state
         .stop_deadline
@@ -1592,7 +1604,7 @@ fn stop_current_child(
     }
 
     let graceful_deadline = deadline.min(Instant::now() + spec.stop.grace);
-    if wait_for_process_tree_exit(&mut child, pid, spec.process_group, graceful_deadline)? {
+    if wait_for_process_tree_exit(child, pid, spec.process_group, graceful_deadline)? {
         log::info!("[{}] process tree exited after graceful stop", spec.label);
         return child.try_wait();
     }
@@ -1615,7 +1627,7 @@ fn stop_current_child(
     }
 
     let escalate_deadline = deadline.min(Instant::now() + spec.stop.escalate);
-    if wait_for_process_tree_exit(&mut child, pid, spec.process_group, escalate_deadline)? {
+    if wait_for_process_tree_exit(child, pid, spec.process_group, escalate_deadline)? {
         log::info!("[{}] process tree exited after force-kill", spec.label);
         return child.try_wait();
     }
@@ -1636,7 +1648,10 @@ fn stop_current_child(
     if spec.process_group {
         signal_process_group(pid, libc::SIGKILL);
     }
-    child.try_wait()
+    Err(io::Error::new(
+        io::ErrorKind::TimedOut,
+        "process tree exit was not confirmed; retaining ownership",
+    ))
 }
 
 fn wait_for_process_tree_exit(
@@ -2666,6 +2681,115 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
         );
         let result = Supervisor::new(spec, ArcSink(Arc::clone(&sink))).start();
         assert!(result.is_err());
+    }
+
+
+    #[cfg(unix)]
+    fn assert_exited_leader_tree_is_gone_before_restart(ready_first: bool) {
+        let directory = tempdir().unwrap();
+        let identity = directory.path().join("old-group");
+        let exit_gate = directory.path().join("exit-leader");
+        let result = directory.path().join("replacement");
+
+        // Also clean up the old group if an assertion detects the regression.
+        struct GroupCleanup(PathBuf);
+        impl Drop for GroupCleanup {
+            fn drop(&mut self) {
+                if let Ok(text) = fs::read_to_string(&self.0) {
+                    if let Ok(group) = text.trim().parse::<u32>() {
+                        signal_process_group_direct(group, libc::SIGKILL);
+                    }
+                }
+            }
+        }
+        let _cleanup = GroupCleanup(identity.clone());
+        let script = node_script(&format!(
+            r#"const fs = require('node:fs');
+const {{ spawn }} = require('node:child_process');
+const identity = {:?};
+const exitGate = {:?};
+const result = {:?};
+const readyFirst = {};
+if (!fs.existsSync(identity)) {{
+  // Arm the descendant before exiting. The ready-crash case ignores TERM
+  // so that recovery must also exercise the KILL escalation.
+  const child = spawn(process.execPath, ['-e', readyFirst
+    ? "process.on('SIGTERM', () => {{}}); console.log('ARMED'); setInterval(() => {{}}, 1000);"
+    : "console.log('ARMED'); setInterval(() => {{}}, 1000);"],
+    {{ stdio: ['ignore', 'pipe', 'ignore'] }});
+  child.stdout.once('data', () => {{
+    fs.writeFileSync(identity, String(process.pid));
+    if (readyFirst) {{
+      console.log('READY');
+      setInterval(() => {{ if (fs.existsSync(exitGate)) process.exit(17); }}, 10);
+    }} else {{
+      process.exit(17);
+    }}
+  }});
+}} else {{
+  let oldGroup = 'alive';
+  try {{ process.kill(-Number(fs.readFileSync(identity, 'utf8')), 0); }}
+  catch (error) {{ if (error.code === 'ESRCH') oldGroup = 'gone'; }}
+  fs.writeFileSync(result, oldGroup);
+  console.log('READY');
+  setInterval(() => {{}}, 1000);
+}}
+"#,
+            identity.to_string_lossy(),
+            exit_gate.to_string_lossy(),
+            result.to_string_lossy(),
+            ready_first,
+        ));
+        let sink = Arc::new(RecordingSink::default());
+        let mut spec = base_spec(
+            script.path(),
+            Readiness::StdoutMarker {
+                marker: "READY".to_string(),
+                deadline: Duration::from_secs(15),
+            },
+        );
+        spec.restart = RestartPolicy::Bounded {
+            max: 1,
+            backoff: Duration::ZERO,
+        };
+        // Allow the system's orphan reaper to remove killed descendants.
+        spec.stop.escalate = Duration::from_secs(10);
+        spec.stop.total = Duration::from_secs(12);
+        let handle = Supervisor::new(spec, ArcSink(Arc::clone(&sink)))
+            .start()
+            .expect("the clean replacement should reach readiness");
+        if ready_first {
+            fs::write(&exit_gate, "exit").unwrap();
+        }
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while !result.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        handle.stop().unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&result).expect("a replacement must have started"),
+            "gone",
+            "the old descendant group must be empty before replacement code runs",
+        );
+        assert_eq!(
+            states(&sink).iter()
+                .filter(|event| matches!(event, LifecycleState::Starting))
+                .count(),
+            2,
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ready_leader_exit_kills_descendants_before_restart() {
+        assert_exited_leader_tree_is_gone_before_restart(true);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pre_readiness_leader_exit_kills_descendants_before_restart() {
+        assert_exited_leader_tree_is_gone_before_restart(false);
     }
 
     #[test]
