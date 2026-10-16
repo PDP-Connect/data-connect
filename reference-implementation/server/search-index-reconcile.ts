@@ -32,7 +32,12 @@ import {
 import { isPostgresStorageBackend, postgresQuery, withPostgresBulkTransaction } from "./postgres-storage.ts";
 import { referenceQueries } from "./queries/index.ts";
 import { lexicalIndexBackfillForManifest } from "./search.ts";
-import { backendStorageIdentity, getSemanticBackend, semanticIndexBackfillForManifest } from "./search-semantic.ts";
+import {
+  backendStorageIdentity,
+  getSemanticBackend,
+  SemanticBackfillIncompleteError,
+  semanticIndexBackfillForManifest,
+} from "./search-semantic.ts";
 import { currentStorageGeneration, isCurrentStorageGeneration } from "./storage-generation.ts";
 import {
   clearSearchIndexDirty,
@@ -93,11 +98,12 @@ function declaresSemanticFields(manifestStream: Record<string, unknown>): boolea
  * wrong, the scope just needs another round to check the newer state. It
  * must not be counted or evidenced the same as `failed`, which reflects the
  * backfills/storage-fence themselves throwing.
+ * `incomplete`: shutdown interrupted verification; keep dirty without failure backoff.
  * `failed`: a backfill or the storage-generation fence threw; structured
  * failure evidence was recorded (or dropped as a lifecycle race) and the
  * scope's dirty flag is left untouched.
  */
-export type ReconcileScopeOutcome = "converged" | "failed" | "recontended";
+export type ReconcileScopeOutcome = "converged" | "failed" | "recontended" | "incomplete";
 
 export interface ReconcileScopeResult {
   readonly connectorId: string;
@@ -127,7 +133,8 @@ async function runScopeBackfills(
   scope: DirtySearchIndexScope,
   manifest: Record<string, unknown>,
   targetStream: Record<string, unknown>,
-  generation: number
+  generation: number,
+  signal?: AbortSignal
 ): Promise<ReconcileScopeResult> {
   const { connectorId, connectorInstanceId, stream } = scope;
   // Narrowed to the ONE dirty stream, not the whole manifest: the
@@ -182,6 +189,7 @@ async function runScopeBackfills(
     await semanticIndexBackfillForManifest({
       manifest: pinnedManifest,
       orphanStreamCleanup: false,
+      signal,
     } as unknown as SemanticBackfillOptions);
     assertStorageGenerationCurrent(generation);
   }
@@ -199,6 +207,7 @@ async function runScopeBackfills(
   // scope's existing backoff state is left untouched.
   const assertCompletionCurrent = () => {
     assertStorageGenerationCurrent(generation);
+    if (signal?.aborted) throw new SemanticBackfillIncompleteError("semantic verification interrupted");
     const currentBackend = getSemanticBackend();
     if (
       semanticBackend !== currentBackend ||
@@ -251,10 +260,12 @@ async function runScopeBackfills(
  */
 export async function reconcileSearchIndexDirtyScope(
   scope: DirtySearchIndexScope,
-  generation: number = currentStorageGeneration()
+  generation: number = currentStorageGeneration(),
+  signal?: AbortSignal
 ): Promise<ReconcileScopeResult> {
   const { connectorId, connectorInstanceId, stream } = scope;
   try {
+    if (signal?.aborted) return { connectorId, connectorInstanceId, outcome: "incomplete", stream };
     assertStorageGenerationCurrent(generation);
     const manifest = await getRegisteredManifestById(connectorId);
     assertStorageGenerationCurrent(generation);
@@ -287,8 +298,11 @@ export async function reconcileSearchIndexDirtyScope(
       );
       return { connectorId, connectorInstanceId, outcome: cleared ? "converged" : "recontended", stream };
     }
-    return await runScopeBackfills(scope, manifest, targetStream, generation);
+    return await runScopeBackfills(scope, manifest, targetStream, generation, signal);
   } catch (err) {
+    if (err instanceof SemanticBackfillIncompleteError || signal?.aborted) {
+      return { connectorId, connectorInstanceId, outcome: "incomplete", stream };
+    }
     if (err instanceof ScopeStorageGenerationStaleError || !isCurrentStorageGeneration(generation)) {
       // The failure itself may BE storage having closed mid-flight; writing
       // evidence would touch a different generation's table under the same
@@ -336,6 +350,7 @@ const DEFAULT_MAX_DURATION_MS = 2000;
 export async function runSearchIndexDirtyReconcileRound(options?: {
   readonly maxDurationMs?: number;
   readonly pageSize?: number;
+  readonly signal?: AbortSignal;
 }): Promise<SearchIndexDirtyReconcileRoundResult> {
   const pageSize = options?.pageSize ?? DEFAULT_PAGE_SIZE;
   const deadline = Date.now() + (options?.maxDurationMs ?? DEFAULT_MAX_DURATION_MS);
@@ -350,26 +365,27 @@ export async function runSearchIndexDirtyReconcileRound(options?: {
   const outcomeCounts: Record<ReconcileScopeOutcome, number> = {
     converged: 0,
     failed: 0,
+    incomplete: 0,
     recontended: 0,
   };
   let incomplete = false;
   let attempted = 0;
 
   for (const scope of scopes) {
-    if (Date.now() >= deadline || !isCurrentStorageGeneration(generation)) {
+    if (options?.signal?.aborted || Date.now() >= deadline || !isCurrentStorageGeneration(generation)) {
       incomplete = true;
       break;
     }
     attempted += 1;
     // biome-ignore lint/performance/noAwaitInLoops: Bounded round; each scope's reconcile is independent but sequential to keep this sweep's DB load predictable.
-    const result = await reconcileSearchIndexDirtyScope(scope, generation);
+    const result = await reconcileSearchIndexDirtyScope(scope, generation, options?.signal);
     outcomeCounts[result.outcome] += 1;
   }
 
   return {
     attempted,
     failed: outcomeCounts.failed,
-    incomplete: incomplete || scopes.length >= pageSize,
+    incomplete: incomplete || outcomeCounts.incomplete > 0 || scopes.length >= pageSize,
     recontended: outcomeCounts.recontended,
     succeeded: outcomeCounts.converged,
   };
