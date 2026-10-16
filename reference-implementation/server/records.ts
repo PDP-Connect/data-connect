@@ -128,6 +128,7 @@ import {
 } from "./retained-size-read-model.ts";
 import { firstSemanticTimeValue, SEMANTIC_TIME_UNKNOWN } from "./semantic-time-coercion.ts";
 import { rememberRecordSourceText } from "./record-source-text.ts";
+import { resolveRequestedFields } from "./requested-fields.ts";
 import { createStorageBackend } from "./storage-backend.ts";
 import { currentStorageGeneration, isCurrentStorageGeneration } from "./storage-generation.ts";
 import {
@@ -5581,11 +5582,8 @@ async function validateQueryRecordsRequest(
 
   const recordIdentity = await resolveRecordIdentityForBinding(connectorInstanceId, connectorId);
 
-  if (Array.isArray(requestParams.fields) && streamGrant.fields) {
-    const unauthorized = requestParams.fields.filter((field) => !streamGrant.fields?.includes(field));
-    if (unauthorized.length) {
-      throw codedError(`Fields not in grant: ${unauthorized.join(", ")}`, "field_not_granted");
-    }
+  if (Array.isArray(requestParams.fields)) {
+    resolveRequestedFields(requestParams.fields, streamGrant.fields);
   }
 
   const clientRange = clientRangeReadOf(requestParams);
