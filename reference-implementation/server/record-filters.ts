@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { randomBytes } from "node:crypto";
+import { type ClientRangeFilter, exactStoredRecord, matchesClientRangeFilters } from "./client-range-filters.ts";
+import { recordSourceText } from "./record-source-text.ts";
 
 export interface Schema {
   format?: string;
@@ -25,10 +27,15 @@ interface ManifestStream {
 }
 export type CompiledFilter =
   | { field: string; kind: "exact"; value: string }
-  | { field: string; kind: "range"; fieldSchema: Schema; operators: Record<string, number | string> };
+  | { field: string; kind: "range"; fieldSchema: Schema; operators: Record<string, number | string> }
+  // Experimental client range filters (spec-client-range-filters.md). One entry
+  // holds every filter of the request: they combine with AND and are bound to
+  // cursors as a set, so they are never split per field.
+  | { field: ""; filters: ClientRangeFilter[]; kind: "client_range" };
 interface CompiledFilterInput {
   field: string;
   fieldSchema?: Schema;
+  filters?: ClientRangeFilter[];
   kind?: string;
   operators?: Record<string, number | string | null>;
   value?: string;
@@ -335,6 +342,21 @@ export function compileRequestFilters(
   return compiled;
 }
 
+// Stored numbers are compared from their JSON lexemes when the record's source
+// text is known, so no binary64 rounding decides a client range filter.
+function passesClientRangeFilters(data: JsonObject | null, filters: ClientRangeFilter[]): boolean {
+  const text = data ? recordSourceText(data) : undefined;
+  let view: unknown = data;
+  if (text !== undefined) {
+    try {
+      view = exactStoredRecord(text);
+    } catch {
+      view = data;
+    }
+  }
+  return matchesClientRangeFilters(view, filters);
+}
+
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: This protocol transition owns ordered state invariants that must remain local.
 export function passesRequestFilters(
   data: JsonObject | null,
@@ -345,6 +367,12 @@ export function passesRequestFilters(
   }
 
   for (const filter of filters) {
+    if (filter.kind === "client_range") {
+      if (!passesClientRangeFilters(data, filter.filters ?? [])) {
+        return false;
+      }
+      continue;
+    }
     const value = data?.[filter.field];
 
     if (filter.kind === "exact") {

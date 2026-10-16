@@ -53,6 +53,7 @@ import {
   materializeCoreResolvedGrant,
   readRetainedCoreConsentSnapshot,
   resolveCoreEligibleInstanceIds,
+  splitGrantExtensions,
   validateCoreSelectionRequest,
 } from "./core-source-authorization.ts";
 import { getDb, runWithSqliteBusyRetry } from "./db.ts";
@@ -2414,11 +2415,19 @@ function isUnsupportedLegacyGrantShape(grant: DbRow): boolean {
 }
 
 function requireClosedResolvedGrant(grant: unknown, code: "grant_invalid" | "invalid_request"): DbRow {
-  const candidate = cloneJson(grant);
+  // Profile `extensions` members are preserved but are not part of the closed
+  // Core grant schema; the Core members are validated without them.
+  let split: ReturnType<typeof splitGrantExtensions>;
+  try {
+    split = splitGrantExtensions(cloneJson(grant));
+  } catch (cause: unknown) {
+    throw bindingError(code, cause instanceof Error ? cause.message : "Resolved grant extensions are invalid");
+  }
+  const candidate = split.rest;
   if (!validateResolvedGrantContract(candidate)) {
     throw bindingError(code, `Resolved grant is invalid: ${contractValidationMessage(validateResolvedGrantContract)}`);
   }
-  const resolved = candidate as DbRow;
+  const resolved = (split.extensions ? { ...(candidate as DbRow), extensions: split.extensions } : candidate) as DbRow;
   if (resolved.version !== "0.1.0") {
     throw bindingError(code, "Resolved grant version is unsupported; fresh consent is required");
   }

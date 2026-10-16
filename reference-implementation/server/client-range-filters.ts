@@ -1,6 +1,8 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import { parseJsonWithNumbers } from "./lossless-json.ts";
+
 // Pure experimental profile primitives. Callers retain responsibility for
 // endpoint applicability, grant intersection, serving availability and cursors.
 export const CLIENT_RANGE_FILTERS_PROFILE_URI = "https://pdpp.dev/profiles/client-range-filters/0.1-experimental";
@@ -44,7 +46,7 @@ export function clientRangeFiltersRsCapability() {
 
 export function parseFrozenFilterSet(
 	extensions: unknown,
-	streamGrants: Array<{ name: string; fields?: string[] | null }>,
+	streamGrants: Array<{ name: string; fields?: string[] | null | undefined }>,
 ): FrozenFilterSet {
 	if (extensions === undefined || (object(extensions) && !Object.hasOwn(extensions, CLIENT_RANGE_FILTERS_PROFILE_URI))) return { kind: "absent" };
 	const malformed = (): FrozenFilterSet => ({ kind: "malformed", reason: "Malformed client range filters frozen set" });
@@ -242,4 +244,28 @@ export function frozenStreamMetadata(frozenStream: FrozenStream | undefined): {
 		range_filters: Object.fromEntries(entries.map(([field, descriptor]) => [field, OPERATORS.filter(op => descriptor.ops.has(op))])),
 		range_filter_types: Object.fromEntries(entries.map(([field, descriptor]) => [field, descriptor.type])),
 	};
+}
+
+// Decode stored record text with each top-level number kept as an exact decimal,
+// the form matchesClientRangeFilters compares without binary64 rounding. Numbers
+// nested deeper are never filter operands, so they decode as ordinary doubles.
+export function exactStoredRecord(text: string): unknown {
+	return parseJsonWithNumbers(text, (lexeme, depth) => {
+		const exact = depth === 1 ? parseClientRangeDecimal(lexeme) : null;
+		return exact ?? Number(lexeme);
+	});
+}
+
+// Section 2: a client treats the RS as supporting the profile if and only if
+// capabilities.client_range_filters is an object that meets all three tests.
+export function rsAdvertisesClientRangeFilters(metadata: unknown): boolean {
+	const capabilities = object(metadata) ? metadata.capabilities : undefined;
+	const entry = object(capabilities) ? capabilities.client_range_filters : undefined;
+	return object(entry) && entry.supported === true && entry.stability === "experimental" && entry.profile === CLIENT_RANGE_FILTERS_PROFILE_URI;
+}
+
+// Section 2: exact string membership; unknown entries are ignored.
+export function asAdvertisesClientRangeFilters(metadata: unknown): boolean {
+	const supported = object(metadata) ? metadata.pdpp_client_range_filters_supported : undefined;
+	return Array.isArray(supported) && supported.includes(CLIENT_RANGE_FILTERS_PROFILE_URI);
 }

@@ -25,7 +25,6 @@ function compile(value: string, type: RangeType = "number", op = "gte") {
 }
 function filters(value: string, type: RangeType = "number", op = "gte") {
 	const result = compile(value, type, op);
-	assert.equal(result.ok, true);
 	if (!result.ok) throw new Error(result.error.message);
 	return result.filters;
 }

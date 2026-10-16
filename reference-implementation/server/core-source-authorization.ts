@@ -582,6 +582,26 @@ export function normalizeAbsentOnlyExpiry(candidate: unknown): unknown {
   return candidate;
 }
 
+export type ResolvedGrantWithExtensions = ResolvedGrant & { extensions?: Record<string, unknown> };
+
+/**
+ * A grant may carry an `extensions` object keyed by absolute profile URI
+ * (spec-client-range-filters.md Section 4.2). The vendored Core grant schema is
+ * closed and has no such member, so it is validated here and the remainder goes
+ * through the Core schema unchanged. Core preserves the members and does not
+ * interpret them; a profile's own reader validates its member.
+ */
+export function splitGrantExtensions(candidate: unknown): { extensions?: Record<string, unknown>; rest: unknown } {
+  if (!(isObject(candidate) && "extensions" in candidate)) {
+    return { rest: candidate };
+  }
+  const { extensions, ...rest } = candidate;
+  if (!(isObject(extensions) && Object.keys(extensions).every((key) => URL.canParse(key)))) {
+    fail("Resolved grant extensions must be an object keyed by absolute URI");
+  }
+  return Object.keys(extensions).length === 0 ? { rest } : { extensions, rest };
+}
+
 /**
  * Parse the closed Source resolved-grant contract used by every binding.
  *
@@ -627,8 +647,9 @@ export function normalizeAbsentOnlyExpiry(candidate: unknown): unknown {
  * the documented restriction the review asked for, so the migration exception
  * does not silently become permanent protocol acceptance.
  */
-export function parseCoreResolvedGrant(value: unknown): ResolvedGrant {
-  const candidate = normalizeAbsentOnlyExpiry(cloneJson(value));
+export function parseCoreResolvedGrant(value: unknown): ResolvedGrantWithExtensions {
+  const { extensions, rest } = splitGrantExtensions(normalizeAbsentOnlyExpiry(cloneJson(value)));
+  const candidate = rest;
   if (!validateResolvedGrantSchema(candidate)) {
     const details = (validateResolvedGrantSchema.errors ?? [])
       .map((error) => `${error.instancePath || "/"} ${error.message || "is invalid"}`)
@@ -640,7 +661,7 @@ export function parseCoreResolvedGrant(value: unknown): ResolvedGrant {
   if (!semantic.ok) {
     fail(`Resolved grant semantics are invalid: ${semantic.failures.map((item) => item.code).join(", ")}`);
   }
-  return grant;
+  return extensions === undefined ? grant : { ...grant, extensions };
 }
 
 export function servePrecollectedCoreRecords({

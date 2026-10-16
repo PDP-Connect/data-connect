@@ -112,6 +112,7 @@ import {
   normalizeWindowSelector,
   sqliteFieldJsonPath,
 } from "./record-field-window.ts";
+import { clientRangeReadOf } from "./client-range-read.ts";
 import {
   type CompiledFilter,
   compileRequestFilters,
@@ -126,6 +127,7 @@ import {
   markRetainedSizeStreamDirty,
 } from "./retained-size-read-model.ts";
 import { firstSemanticTimeValue, SEMANTIC_TIME_UNKNOWN } from "./semantic-time-coercion.ts";
+import { rememberRecordSourceText } from "./record-source-text.ts";
 import { createStorageBackend } from "./storage-backend.ts";
 import { currentStorageGeneration, isCurrentStorageGeneration } from "./storage-generation.ts";
 import {
@@ -387,6 +389,9 @@ interface RecordSnapshot {
   version: number;
 }
 interface ChangesSinceCursor {
+  // The `beginning` bootstrap token carries no filter binding by design.
+  bootstrap?: true;
+  filters?: string;
   kind?: "changes_since";
   version: number;
 }
@@ -634,6 +639,7 @@ type PageOrder = "ASC" | "DESC";
 interface PaginationCursor {
   after_version?: number;
   cursor_value?: unknown;
+  filters?: unknown;
   order?: unknown;
   primary_key?: unknown;
   session?: unknown;
@@ -747,7 +753,7 @@ function parseStoredRecordData(recordJson: string): RecordData {
   if (!isRecordData(parsed)) {
     throw new Error("[records] stored record_json must contain an object");
   }
-  return parsed;
+  return rememberRecordSourceText(parsed, recordJson);
 }
 
 function asSqliteBindValue(value: unknown): BindValue {
@@ -4218,35 +4224,49 @@ function fetchVisibleRecordRowsPaginated({
   const sqlLimit = hasRequestFilters
     ? Math.max(limit * 4, 100) // headroom for rejections
     : limit + 1;
+  // Client range filters must not under-fill a page (Section 6.10): page
+  // boundaries and has_more come from the filtered result, so keep reading
+  // batches until the page fills or the visible set is exhausted.
+  const scanToFill = compiledFilters.some((filter) => filter.kind === "client_range");
 
   const sql = `
     SELECT ${selectParts.join(", ")}
     FROM records
     ${whereSqlPart}
     ${orderBySql}
-    LIMIT ?
+    LIMIT ?${scanToFill ? " OFFSET ?" : ""}
   `;
 
   // REVIEWED-DYNAMIC: WHERE clause varies with grant time_range / resources
   // / cursor seek; SQL composed in JS as today; LIMIT N+1 included.
   const collected: VisibleRecordRow[] = [];
   let scanned = 0;
+  let offset = 0;
 
-  for (const row of iterateDynamicSqlAcknowledged<StoredRecordRow>(sql, [...whereBinds, ...seekBinds, sqlLimit])) {
-    scanned += 1;
-    const rawData = parseStoredRecordData(row.record_json);
-    if (compiledFilters.length && !passesRequestFilters(rawData, compiledFilters)) {
-      continue;
+  scan: while (true) {
+    let batchRows = 0;
+    const binds = [...whereBinds, ...seekBinds, sqlLimit, ...(scanToFill ? [offset] : [])];
+    for (const row of iterateDynamicSqlAcknowledged<StoredRecordRow>(sql, binds)) {
+      batchRows += 1;
+      scanned += 1;
+      const rawData = parseStoredRecordData(row.record_json);
+      if (compiledFilters.length && !passesRequestFilters(rawData, compiledFilters)) {
+        continue;
+      }
+      collected.push({
+        emitted_at: row.emitted_at,
+        rawData,
+        record_key: row.record_key,
+        sortPosition: buildRecordSortPosition(rawData, row.record_key, manifestStream),
+      });
+      if (collected.length > limit) {
+        break scan;
+      }
     }
-    collected.push({
-      emitted_at: row.emitted_at,
-      rawData,
-      record_key: row.record_key,
-      sortPosition: buildRecordSortPosition(rawData, row.record_key, manifestStream),
-    });
-    if (collected.length > limit) {
+    if (!scanToFill || batchRows < sqlLimit) {
       break;
     }
+    offset += sqlLimit;
   }
 
   const hasMore = collected.length > limit;
@@ -4257,7 +4277,12 @@ function fetchVisibleRecordRowsPaginated({
   // past our sqlLimit window). Acceptable for this tranche: the dashboard
   // doesn't use request filters in its hot paths. A follow-up slice can
   // loop the SQL offset forward in that case.
-  return { hasMore, rows, scanned, underread: hasRequestFilters && !hasMore && scanned >= sqlLimit };
+  return {
+    hasMore,
+    rows,
+    scanned,
+    underread: !scanToFill && hasRequestFilters && !hasMore && scanned >= sqlLimit,
+  };
 }
 
 function buildResponseRecord(
@@ -4619,7 +4644,7 @@ function isVisibleSnapshot(snapshot: RecordSnapshot | null, effective: Effective
 
 function parseChangesSinceCursor(str: string): ChangesSinceCursor | null {
   if (str === "beginning") {
-    return { version: 0 };
+    return { bootstrap: true, version: 0 };
   }
   const decoded = decodeCursor(str);
   if (!decoded) {
@@ -4633,7 +4658,11 @@ function parseChangesSinceCursor(str: string): ChangesSinceCursor | null {
   if (decoded.kind !== "changes_since" || typeof decoded.version !== "number" || !Number.isInteger(decoded.version)) {
     return null;
   }
-  return { kind: "changes_since", version: decoded.version };
+  return {
+    kind: "changes_since",
+    version: decoded.version,
+    ...(typeof decoded.filters === "string" ? { filters: decoded.filters } : {}),
+  };
 }
 
 // Self-teaching error message: when a caller passes something other than the
@@ -4655,9 +4684,14 @@ function parsePageCursor(str: string): PaginationCursor | null {
   return decoded;
 }
 
-function encodeRecordsPageCursor(position: LogicalPosition | null | undefined, order: PageOrder): string {
+function encodeRecordsPageCursor(
+  position: LogicalPosition | null | undefined,
+  order: PageOrder,
+  filterBinding?: string
+): string {
   return encodeCursor({
     cursor_value: position?.cursor_value ?? null,
+    ...(filterBinding ? { filters: filterBinding } : {}),
     kind: "page",
     order,
     primary_key: position?.primary_key || [],
@@ -4669,13 +4703,16 @@ function encodeChangesPageCursor({
   sinceVersion,
   afterVersion,
   sessionMaxVersion,
+  filterBinding,
 }: {
   afterVersion: number;
+  filterBinding?: string | undefined;
   sessionMaxVersion: number;
   sinceVersion: number;
 }): string {
   return encodeCursor({
     after_version: afterVersion,
+    ...(filterBinding ? { filters: filterBinding } : {}),
     kind: "page",
     session: "changes",
     session_max_version: sessionMaxVersion,
@@ -4683,8 +4720,8 @@ function encodeChangesPageCursor({
   });
 }
 
-function encodeChangesSinceCursor(version: number): string {
-  return encodeCursor({ kind: "changes_since", version });
+function encodeChangesSinceCursor(version: number, filterBinding?: string): string {
+  return encodeCursor({ ...(filterBinding ? { filters: filterBinding } : {}), kind: "changes_since", version });
 }
 
 function getSnapshotAtVersion(
@@ -5203,6 +5240,25 @@ function collectVisibleChanges(
   return visibleChanges;
 }
 
+function buildChangeTombstone(
+  group: ChangeGroupRow,
+  stream: string,
+  deletedAt: string | null,
+  emittedAt: string,
+  recordIdentity: RecordIdentity | null
+): ResponseRecord {
+  const tombstone: ResponseRecord = {
+    deleted: true,
+    deleted_at: deletedAt,
+    emitted_at: emittedAt,
+    id: group.record_key,
+    object: "record",
+    stream,
+  };
+  decorateRecordWithConnectionIdentity(tombstone, recordIdentity);
+  return tombstone;
+}
+
 function resolveChangeGroupRecord(
   group: ChangeGroupRow,
   connectorInstanceId: string,
@@ -5217,29 +5273,30 @@ function resolveChangeGroupRecord(
 
   const previousVisible = isVisibleSnapshot(previous, effective);
   const currentVisible = isVisibleSnapshot(current, effective);
+  // Section 6.8: under client range filters, visibility at a horizon includes
+  // the filters, so a record that left the range is a tombstone and one that
+  // entered it is a change even when its projection did not differ.
+  const filterAwareHistory = compiledFilters.some((filter) => filter.kind === "client_range");
+  const previousInRange = previousVisible && !!previous?.data && passesRequestFilters(previous.data, compiledFilters);
 
   if (current?.deleted) {
-    if (!(previousVisible && previous?.data && passesRequestFilters(previous.data, compiledFilters))) {
+    if (!previousInRange) {
       return null;
     }
-    const deletedRecord: ResponseRecord = {
-      deleted: true,
-      deleted_at: current.deleted_at,
-      emitted_at: current.emitted_at,
-      id: group.record_key,
-      object: "record",
-      stream,
-    };
-    decorateRecordWithConnectionIdentity(deletedRecord, recordIdentity);
-    return deletedRecord;
+    return buildChangeTombstone(group, stream, current.deleted_at, current.emitted_at, recordIdentity);
   }
 
   if (!(currentVisible && current?.data && passesRequestFilters(current.data, compiledFilters))) {
+    if (filterAwareHistory && previousInRange && current) {
+      return buildChangeTombstone(group, stream, current.emitted_at, current.emitted_at, recordIdentity);
+    }
     return null;
   }
 
   const previousProjection =
-    previousVisible && previous?.data ? projectFields(previous.data, effective.fields ?? undefined) : null;
+    (filterAwareHistory ? previousInRange : previousVisible) && previous?.data
+      ? projectFields(previous.data, effective.fields ?? undefined)
+      : null;
   const currentProjection = projectFields(current.data, effective.fields ?? undefined);
 
   if (previousProjection && JSON.stringify(previousProjection) === JSON.stringify(currentProjection)) {
@@ -5259,6 +5316,7 @@ function resolveChangeGroupRecord(
 
 interface QueryRecordsChangesSinceArgs {
   changesSince: ChangesSinceCursor | null;
+  clientRangeBinding?: string | undefined;
   compiledFilters: CompiledFilter[];
   connectorInstanceId: string;
   effective: EffectiveReadScope;
@@ -5271,6 +5329,7 @@ interface QueryRecordsChangesSinceArgs {
 
 function queryRecordsChangesSince({
   changesSince,
+  clientRangeBinding,
   compiledFilters,
   connectorInstanceId,
   effective,
@@ -5315,17 +5374,19 @@ function queryRecordsChangesSince({
     }
     response.next_cursor = encodeChangesPageCursor({
       afterVersion: lastGroup.latestVersion,
+      filterBinding: clientRangeBinding,
       sessionMaxVersion: effectiveSessionMaxVersion,
       sinceVersion: verifiedSinceVersion,
     });
   }
 
-  response.next_changes_since = encodeChangesSinceCursor(effectiveSessionMaxVersion);
+  response.next_changes_since = encodeChangesSinceCursor(effectiveSessionMaxVersion, clientRangeBinding);
   attachRequestWarningsToResponse(response, requestWarnings);
   return response;
 }
 
 interface PagedRecordsArgs {
+  clientRangeBinding?: string | undefined;
   compiledFilters: CompiledFilter[];
   connectorId: string;
   connectorInstanceId: string;
@@ -5344,6 +5405,7 @@ interface PagedRecordsArgs {
 }
 
 async function buildPagedRecordsResponse({
+  clientRangeBinding,
   compiledFilters,
   connectorId,
   connectorInstanceId,
@@ -5401,7 +5463,7 @@ async function buildPagedRecordsResponse({
     if (!lastRow) {
       throw new Error("[records] non-empty record page has no terminal row");
     }
-    response.next_cursor = encodeRecordsPageCursor(lastRow.sortPosition, order);
+    response.next_cursor = encodeRecordsPageCursor(lastRow.sortPosition, order, clientRangeBinding);
   }
 
   const countOutcome = computeGradedRecordCount({
@@ -5433,6 +5495,7 @@ async function buildPagedRecordsResponse({
 
 interface ValidatedQueryContext {
   changesSince: ChangesSinceCursor | null;
+  clientRangeBinding?: string | undefined;
   compiledFilters: CompiledFilter[];
   connectorId: string;
   connectorInstanceId: string;
@@ -5446,9 +5509,30 @@ interface ValidatedQueryContext {
   requestWarnings: ReadWarning[];
 }
 
+// Section 6.7: a page cursor or sync token is bound to the set of client range
+// filters it was issued under. An unfiltered token and a filtered request (or
+// the reverse) are different sets. The `beginning` bootstrap names no set.
+function assertCursorFilterBinding(
+  changesSince: ChangesSinceCursor | null,
+  paginationCursor: PaginationCursor | null,
+  filterBinding: string | undefined
+): void {
+  const bound: Array<unknown> = [];
+  if (changesSince && !changesSince.bootstrap) {
+    bound.push(changesSince.filters);
+  }
+  if (paginationCursor) {
+    bound.push(paginationCursor.filters);
+  }
+  if (bound.some((issued) => (issued ?? undefined) !== filterBinding)) {
+    throw codedError("Cursor does not belong to this filter set", "invalid_cursor");
+  }
+}
+
 function validateQueryCursors(
   requestParams: RequestParams,
-  expansions: ReturnType<typeof normalizeExpandRequest>
+  expansions: ReturnType<typeof normalizeExpandRequest>,
+  filterBinding?: string
 ): { changesSince: ChangesSinceCursor | null; paginationCursor: PaginationCursor | null } {
   const changesSince =
     typeof requestParams.changes_since === "string" ? parseChangesSinceCursor(requestParams.changes_since) : null;
@@ -5460,6 +5544,7 @@ function validateQueryCursors(
   if (requestParams.cursor && !paginationCursor) {
     throw codedError("Malformed cursor", "invalid_cursor");
   }
+  assertCursorFilterBinding(changesSince, paginationCursor, filterBinding);
   if (changesSince !== null || paginationCursor?.session === "changes") {
     rejectListOnlyParamsForChangesFeed(requestParams);
   }
@@ -5503,7 +5588,11 @@ async function validateQueryRecordsRequest(
     }
   }
 
-  const compiledFilters = compileRequestFilters(requestParams.filter, streamGrant, mStream);
+  const clientRange = clientRangeReadOf(requestParams);
+  const compiledFilters: CompiledFilter[] = [
+    ...compileRequestFilters(requestParams.filter, streamGrant, mStream),
+    ...(clientRange ? [{ field: "", filters: clientRange.filters, kind: "client_range" } as const] : []),
+  ];
   const effective = buildEffectiveReadScope(streamGrant, requestParams, requiredFields);
   const expansions = normalizeExpandRequest(requestParams, stream, grant, mStream, order);
   const { limit, clamped: limitClamped, requested: requestedLimit } = clampRecordsPageLimit(requestParams.limit);
@@ -5511,10 +5600,11 @@ async function validateQueryRecordsRequest(
     requestWarnings.push(buildLimitClampedWarning(requestedLimit));
   }
 
-  const { changesSince, paginationCursor } = validateQueryCursors(requestParams, expansions);
+  const { changesSince, paginationCursor } = validateQueryCursors(requestParams, expansions, clientRange?.binding);
 
   return {
     changesSince,
+    clientRangeBinding: clientRange?.binding,
     compiledFilters,
     connectorId,
     connectorInstanceId,
@@ -5559,6 +5649,7 @@ export async function queryRecords(
   if (changesSince !== null || paginationCursor?.session === "changes") {
     return queryRecordsChangesSince({
       changesSince: ctx.changesSince,
+      clientRangeBinding: ctx.clientRangeBinding,
       compiledFilters: ctx.compiledFilters,
       connectorInstanceId: ctx.connectorInstanceId,
       effective: ctx.effective,
@@ -5571,6 +5662,7 @@ export async function queryRecords(
   }
 
   return buildPagedRecordsResponse({
+    clientRangeBinding: ctx.clientRangeBinding,
     compiledFilters: ctx.compiledFilters,
     connectorId: ctx.connectorId,
     connectorInstanceId: ctx.connectorInstanceId,

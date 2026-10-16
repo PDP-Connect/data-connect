@@ -77,6 +77,8 @@ import {
   type StreamsListDependencies,
   type StreamsListInput,
 } from "../../operations/rs-streams-list/index.ts";
+import { frozenStreamOf, prepareClientRangeListRead, resolveClientRangeFiltersPolicy } from "../client-range-read.ts";
+import { frozenStreamMetadata } from "../client-range-filters.ts";
 import { rejectUnsupportedClientQuery } from "../record-filters.ts";
 import type { MiddlewareHandler, RouteArg } from "./_route-contract.ts";
 
@@ -87,6 +89,7 @@ import type { MiddlewareHandler, RouteArg } from "./_route-contract.ts";
 interface RouteRequest {
   _pdpp_resolver_warnings?: ResolverWarning[] | undefined;
   readonly headers: Readonly<Record<string, unknown>>;
+  readonly originalUrl?: string;
   readonly params: Readonly<Record<string, string>>;
   readonly path: string;
   readonly query: Readonly<Record<string, unknown>>;
@@ -268,6 +271,7 @@ export interface MountRsReadContext {
     streamGrant: GrantStreamLike | null | undefined;
     grantStreams: GrantStreamLike[];
     freshness: unknown;
+    frozenRangeFilters?: Record<string, unknown> | null;
     manifestStreamNames?: Set<string> | null;
   }) => unknown;
   canonicalConnectorKey: (connectorId: string) => string | null;
@@ -399,6 +403,12 @@ export interface MountRsReadContext {
     requestParams: Record<string, unknown>,
     manifestStream: ManifestStreamLike | undefined
   ) => void;
+}
+
+function rawQueryString(req: RouteRequest): string {
+  const url = req.originalUrl ?? "";
+  const start = url.indexOf("?");
+  return start === -1 ? "" : url.slice(start + 1);
 }
 
 function authorizationTokenId(req: RouteRequest): string | null {
@@ -1537,8 +1547,15 @@ export function mountRsStreamDetail(app: AppLike, ctx: MountRsReadContext): void
               stream: name,
               tokenInfo,
             });
+            const frozenRangeStream = frozenStreamOf(
+              resolveClientRangeFiltersPolicy(ctx.opts),
+              tokenInfo.pdpp_token_kind,
+              tokenInfo.grant,
+              name
+            );
             return ctx.buildStreamMetadataEntry({
               freshness,
+              frozenRangeFilters: frozenRangeStream ? frozenStreamMetadata(frozenRangeStream) : null,
               grantStreams: tokenInfo.grant?.streams || [],
               manifestStream,
               manifestStreamNames: new Set(
@@ -1840,6 +1857,17 @@ export function mountRsRecordsList(app: AppLike, ctx: MountRsReadContext): void 
           traceId,
         };
 
+        // Experimental client range filters: compile the frozen-set filters and
+        // take the `filter[...]` parameters out of Core's rejection path. When
+        // the profile does not apply this is a no-op and Core still rejects.
+        prepareClientRangeListRead({
+          grant: tokenInfo.grant,
+          policy: resolveClientRangeFiltersPolicy(ctx.opts),
+          rawQuery: rawQueryString(req),
+          requestParams,
+          stream: req.params.stream as string,
+          tokenKind: tokenInfo.pdpp_token_kind,
+        });
         rejectUnsupportedClientQuery(tokenInfo.pdpp_token_kind, requestParams);
 
         // Self-export: owner can query without a client grant. `resolveReadScope`
