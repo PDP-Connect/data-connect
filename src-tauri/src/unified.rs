@@ -609,10 +609,14 @@ fn report_unhandled_deep_links(app: &tauri::App) {
 /// in the query, so only the scheme and host are included.
 fn unhandled_deep_link_notice(url: &tauri::Url) -> String {
     format!(
-        "Ignoring a {}://{} link: unified mode has no handler for incoming links",
-        url.scheme(),
-        url.host_str().unwrap_or("")
+        "Ignoring a {} link: unified mode has no handler for incoming links",
+        log_url_origin(url)
     )
+}
+
+/// Safe common prefix for URL logs: no userinfo, query, or fragment.
+fn log_url_origin(url: &tauri::Url) -> String {
+    format!("{}://{}", url.scheme(), url.host_str().unwrap_or(""))
 }
 
 pub(crate) fn focus_or_bootstrap(app: AppHandle) {
@@ -4187,24 +4191,64 @@ fn open_external_dry_run_is_enabled() -> bool {
 /// that needs to log them.
 fn decide_console_navigation(url: &tauri::Url, console_origin: &tauri::Url) -> bool {
     if is_console_origin(url, console_origin) {
-        log::info!("on_navigation: url={url} decision=allowed-internal");
+        log::info!("{}", console_navigation_notice(url, "allowed-internal"));
         return true;
     }
     if url.scheme() == "https" {
         if open_external_dry_run_is_enabled() {
-            log::info!("on_navigation: url={url} decision=opened-externally (dry run: would open {url})");
+            log::info!("{}", console_navigation_notice(url, "opened-externally (dry run)"));
         } else {
             match open::that_detached(url.as_str()) {
-                Ok(()) => log::info!("on_navigation: url={url} decision=opened-externally"),
-                Err(error) => log::error!(
-                    "on_navigation: url={url} decision=opened-externally failed to open: {error}"
+                Ok(()) => log::info!("{}", console_navigation_notice(url, "opened-externally")),
+                // Opener errors may echo the raw URL argument.
+                Err(_) => log::error!(
+                    "{}", console_navigation_notice(url, "opened-externally failed to open")
                 ),
             }
         }
     } else {
-        log::warn!("on_navigation: url={url} decision=refused (non-https scheme)");
+        log::warn!("{}", console_navigation_notice(url, "refused (non-https scheme)"));
     }
     false
+}
+
+/// Never format the raw URL (or an opener error) into a navigation log.
+fn console_navigation_notice(url: &tauri::Url, decision: &str) -> String {
+    format!(
+        "on_navigation: url={}{} decision={decision}",
+        log_url_origin(url),
+        url.path()
+    )
+}
+
+#[cfg(test)]
+mod navigation_log_redaction_tests {
+    use super::*;
+
+    #[test]
+    fn all_navigation_notices_omit_credentials() {
+        for scheme in ["https", "http", "vana"] {
+            let url = tauri::Url::parse(&format!(
+                "{scheme}://USER_SENTINEL:PASSWORD_SENTINEL@example.test/consent?code=QUERY_SENTINEL#FRAGMENT_SENTINEL"
+            )).unwrap();
+            for decision in [
+                "allowed-internal",
+                "opened-externally (dry run)",
+                "opened-externally",
+                "opened-externally failed to open",
+                "refused (non-https scheme)",
+            ] {
+                let notice = console_navigation_notice(&url, decision);
+                assert_eq!(
+                    notice,
+                    format!("on_navigation: url={scheme}://example.test/consent decision={decision}")
+                );
+                for secret in ["USER_SENTINEL", "PASSWORD_SENTINEL", "QUERY_SENTINEL", "FRAGMENT_SENTINEL"] {
+                    assert!(!notice.contains(secret));
+                }
+            }
+        }
+    }
 }
 
 /// A path+query string safe to append to a FRESH console origin this
