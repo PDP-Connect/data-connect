@@ -839,6 +839,16 @@ test("batch attempt deadline cannot block acceptance once derived indexing is de
       attemptTime = 11;
     }
   });
+  // Expire the attempt clock after the durable prefix is written and before
+  // the batch is completed, so acceptance is proven to ignore an expired
+  // deadline once only derived work remains.
+  let expiredBeforeCompletion = false;
+  __setDeviceIngestStoreFaultHookForTest((point) => {
+    if (!expireDurableWrite && point === "before-complete-processing-batch") {
+      attemptTime = 11;
+      expiredBeforeCompletion = true;
+    }
+  });
   const releaseEmbedding = deferred();
   let embeddingWatchdogExpired = false;
   let embeddingGuard: ReturnType<typeof setTimeout> | undefined;
@@ -874,6 +884,7 @@ test("batch attempt deadline cannot block acceptance once derived indexing is de
         authHeaders(device.device_token)
       );
       assert.equal(embeddingWatchdogExpired, false, "acceptance completes while embedding is held");
+      assert.equal(expiredBeforeCompletion, true, "the attempt clock expired before batch completion");
       assert.equal(first.status, 201, JSON.stringify(first.body));
       assert.deepEqual(
         getDb()
@@ -950,6 +961,7 @@ test("batch attempt deadline cannot block acceptance once derived indexing is de
     clearTimeout(embeddingGuard);
     releaseEmbedding.resolve();
     __setDeviceIngestPhaseFaultHookForTest(null);
+    __setDeviceIngestStoreFaultHookForTest(null);
     if (previousDeadline === undefined) {
       delete process.env.PDPP_INGEST_BATCH_ATTEMPT_DEADLINE_MS;
     } else {
