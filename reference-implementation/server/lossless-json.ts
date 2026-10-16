@@ -122,6 +122,63 @@ class Cursor {
 		}
 	}
 
+	// Step over a nested object or array without decoding it. The depth lives in
+	// a counter, so no nesting can exhaust the call stack.
+	skipContainer(): unknown {
+		const placeholder = this.text[this.index] === "[" ? [] : {};
+		let depth = 0;
+		while (this.index < this.text.length) {
+			const char = this.text[this.index];
+			if (char === '"') {
+				this.string();
+				continue;
+			}
+			this.index += 1;
+			if (char === "{" || char === "[") {
+				depth += 1;
+			} else if (char === "}" || char === "]") {
+				depth -= 1;
+				if (depth === 0) {
+					return placeholder;
+				}
+			}
+		}
+		return this.fail("Unterminated container");
+	}
+
+	topLevelObject(): Record<string, unknown> {
+		this.skipWhitespace();
+		this.expect("{");
+		const members: Record<string, unknown> = {};
+		this.skipWhitespace();
+		if (this.text[this.index] === "}") {
+			this.index += 1;
+			return members;
+		}
+		while (true) {
+			this.skipWhitespace();
+			const key = this.string();
+			this.skipWhitespace();
+			this.expect(":");
+			this.skipWhitespace();
+			const first = this.text[this.index];
+			Object.defineProperty(members, key, {
+				configurable: true,
+				enumerable: true,
+				value:
+					first === "{" || first === "[" ? this.skipContainer() : this.value(1),
+				writable: true,
+			});
+			this.skipWhitespace();
+			if (this.text[this.index] === ",") {
+				this.index += 1;
+				continue;
+			}
+			this.expect("}");
+			return members;
+		}
+	}
+
 	value(depth: number): unknown {
 		if (depth > MAX_DEPTH) {
 			this.fail("JSON is nested too deeply");
@@ -161,6 +218,25 @@ export function parseJsonWithNumbers(
 ): unknown {
 	const cursor = new Cursor(text, onNumber);
 	const result = cursor.value(0);
+	cursor.skipWhitespace();
+	if (cursor.index !== text.length) {
+		cursor.fail("Unexpected trailing content");
+	}
+	return result;
+}
+
+/**
+ * Parse a JSON object keeping each top-level number lexeme for the caller.
+ * Nested objects and arrays are not decoded: they become empty placeholders of
+ * the same kind, which is all a top-level comparison needs, and they cannot
+ * exhaust the stack however deep they are.
+ */
+export function parseTopLevelWithNumbers(
+	text: string,
+	onNumber: NumberHandler,
+): Record<string, unknown> {
+	const cursor = new Cursor(text, onNumber);
+	const result = cursor.topLevelObject();
 	cursor.skipWhitespace();
 	if (cursor.index !== text.length) {
 		cursor.fail("Unexpected trailing content");

@@ -5241,21 +5241,22 @@ function collectVisibleChanges(
   return visibleChanges;
 }
 
+// A record that left a client filter range is not deleted, and a client
+// tombstone must not say when the change happened, so a range exit carries
+// neither `deleted_at` nor `emitted_at` (spec-core.md, client tombstones).
 function buildChangeTombstone(
   group: ChangeGroupRow,
   stream: string,
-  deletedAt: string | null,
-  emittedAt: string,
-  recordIdentity: RecordIdentity | null
+  recordIdentity: RecordIdentity | null,
+  deletion?: { deletedAt: string | null; emittedAt: string }
 ): ResponseRecord {
-  const tombstone: ResponseRecord = {
+  const tombstone = {
+    ...(deletion ? { deleted_at: deletion.deletedAt, emitted_at: deletion.emittedAt } : {}),
     deleted: true,
-    deleted_at: deletedAt,
-    emitted_at: emittedAt,
     id: group.record_key,
     object: "record",
     stream,
-  };
+  } as ResponseRecord;
   decorateRecordWithConnectionIdentity(tombstone, recordIdentity);
   return tombstone;
 }
@@ -5284,12 +5285,15 @@ function resolveChangeGroupRecord(
     if (!previousInRange) {
       return null;
     }
-    return buildChangeTombstone(group, stream, current.deleted_at, current.emitted_at, recordIdentity);
+    return buildChangeTombstone(group, stream, recordIdentity, {
+      deletedAt: current.deleted_at,
+      emittedAt: current.emitted_at,
+    });
   }
 
   if (!(currentVisible && current?.data && passesRequestFilters(current.data, compiledFilters))) {
     if (filterAwareHistory && previousInRange && current) {
-      return buildChangeTombstone(group, stream, current.emitted_at, current.emitted_at, recordIdentity);
+      return buildChangeTombstone(group, stream, recordIdentity);
     }
     return null;
   }

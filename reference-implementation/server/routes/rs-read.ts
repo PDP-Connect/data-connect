@@ -401,8 +401,22 @@ export interface MountRsReadContext {
   triggerSearchIndexDirtySelfHeal?: () => void;
   validateRequestedQueryFieldParams: (
     requestParams: Record<string, unknown>,
-    manifestStream: ManifestStreamLike | undefined
+    manifestStream: ManifestStreamLike | undefined,
+    grantedFields?: readonly string[] | null
   ) => void;
+}
+
+// The stream grant's `fields` for a client read; undefined for an owner read,
+// which has no grant to check requested fields against.
+function clientGrantedFields(
+  tokenInfo: TokenInfo,
+  manifestStream: ManifestStreamLike | null | undefined
+): readonly string[] | null | undefined {
+  if (tokenInfo.pdpp_token_kind !== "client") {
+    return undefined;
+  }
+  const streamGrant = tokenInfo.grant?.streams?.find((stream) => stream.name === manifestStream?.name);
+  return Array.isArray(streamGrant?.fields) ? (streamGrant.fields as string[]) : null;
 }
 
 function rawQueryString(req: RouteRequest): string {
@@ -1816,7 +1830,7 @@ function buildRecordsListDeps(
       });
     },
     validateRequestFields: (params: Record<string, unknown>, manifestStream: ManifestStreamLike | undefined) =>
-      ctx.validateRequestedQueryFieldParams(params, manifestStream),
+      ctx.validateRequestedQueryFieldParams(params, manifestStream, clientGrantedFields(tokenInfo, manifestStream)),
   };
 }
 
@@ -2030,7 +2044,11 @@ export function mountRsRecordDetail(app: AppLike, ctx: MountRsReadContext): void
           },
           getSourceDescriptor: () => sourceDescriptor,
           validateRequestFields: (requestParams: Record<string, unknown>, manifestStream: ManifestStreamLike | null) =>
-            ctx.validateRequestedQueryFieldParams(requestParams, manifestStream ?? undefined),
+            ctx.validateRequestedQueryFieldParams(
+              requestParams,
+              manifestStream ?? undefined,
+              clientGrantedFields(tokenInfo, manifestStream)
+            ),
         };
 
         // The native `getRecord` capability throws an `Error` carrying

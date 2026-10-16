@@ -1,7 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { parseJsonWithNumbers } from "./lossless-json.ts";
+import { parseTopLevelWithNumbers } from "./lossless-json.ts";
 
 // Pure experimental profile primitives. Callers retain responsibility for
 // endpoint applicability, grant intersection, serving availability and cursors.
@@ -247,13 +247,10 @@ export function frozenStreamMetadata(frozenStream: FrozenStream | undefined): {
 }
 
 // Decode stored record text with each top-level number kept as an exact decimal,
-// the form matchesClientRangeFilters compares without binary64 rounding. Numbers
-// nested deeper are never filter operands, so they decode as ordinary doubles.
-export function exactStoredRecord(text: string): unknown {
-	return parseJsonWithNumbers(text, (lexeme, depth) => {
-		const exact = depth === 1 ? parseClientRangeDecimal(lexeme) : null;
-		return exact ?? Number(lexeme);
-	});
+// the form matchesClientRangeFilters compares without binary64 rounding. Only
+// top-level members are filter operands, so nested values are not decoded.
+export function exactStoredRecord(text: string): Record<string, unknown> {
+	return parseTopLevelWithNumbers(text, (lexeme) => parseClientRangeDecimal(lexeme) ?? Number(lexeme));
 }
 
 // Section 2: a client treats the RS as supporting the profile if and only if

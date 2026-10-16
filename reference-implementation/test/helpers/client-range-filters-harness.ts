@@ -294,11 +294,12 @@ function presetsFor(presets: JsonObject[]): JsonObject[] {
 export function manifestFor(
 	declaration: JsonObject,
 	version: string,
+	sourceId: string = SOURCE_ID,
 ): JsonObject {
 	const streams = declarationStreams(declaration);
 	return {
 		capabilities: { human_interaction: [] },
-		connector_id: SOURCE_ID,
+		connector_id: sourceId,
 		display_name: "Client range filter fixture",
 		protocol_version: "0.1.0",
 		source_declaration: {
@@ -306,7 +307,7 @@ export function manifestFor(
 			display: { name: "Client range filter fixture" },
 			protocol_version: "0.1.0",
 			publisher: { id: "https://pdpp.dev/reference-implementation/tests" },
-			source: { id: SOURCE_ID, kind: "connector" },
+			source: { id: sourceId, kind: "connector" },
 			...(declaration.selection_presets
 				? { selection_presets: presetsFor(declaration.selection_presets) }
 				: {}),
@@ -397,10 +398,13 @@ export async function registerManifest(
 	);
 }
 
-export async function materializeConnection(instanceId: string): Promise<void> {
+export async function materializeConnection(
+	instanceId: string,
+	sourceId: string = SOURCE_ID,
+): Promise<void> {
 	const now = "2026-01-01T00:00:00.000Z";
 	await createSqliteConnectorInstanceStore().upsert({
-		connectorId: CONNECTOR_KEY,
+		connectorId: canonicalConnectorKey(sourceId) as string,
 		connectorInstanceId: instanceId,
 		createdAt: now,
 		displayName: instanceId,
@@ -658,6 +662,18 @@ export function assertExpected(
 				[...(expected.tombstone_keys ?? [])].sort(),
 				`${where}: tombstone keys`,
 			);
+			// A client tombstone for a range exit says nothing about when or why.
+			for (const tombstone of data.filter(
+				(record) => record.deleted === true,
+			)) {
+				assert.deepEqual(
+					Object.keys(tombstone).filter((key) =>
+						["data", "deleted_at", "emitted_at"].includes(key),
+					),
+					[],
+					`${where}: tombstone ${String(tombstone.id)} must not carry data, deleted_at or emitted_at`,
+				);
+			}
 		}
 		if (expected.page_length !== undefined) {
 			assert.equal(data.length, expected.page_length, `${where}: page length`);

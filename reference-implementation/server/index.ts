@@ -106,6 +106,7 @@ import {
   resolveClientRangeFiltersPolicy,
 } from "./client-range-read.ts";
 import { createLiveRevisions, type LiveRevisions, registerDefaultLiveTopics } from "./live-revisions.ts";
+import { resolveRequestedFields } from "./requested-fields.ts";
 import { createRecoveryKeyStore } from "./recovery-key-store.ts";
 import { probeNonPressureRecoverableCount, probeSourcePressureGaps } from "./scheduler-manager-factory.ts";
 import { getOwnerSessionStore } from "./stores/owner-session-store.ts";
@@ -1699,7 +1700,9 @@ function normalizeFieldListParam(value: unknown) {
 
 function validateRequestedQueryFieldParams(
   requestParams: Record<string, unknown>,
-  manifestStream: { schema?: { properties?: Record<string, unknown> } } | null | undefined
+  manifestStream: { schema?: { properties?: Record<string, unknown> } } | null | undefined,
+  // Set for a client read: the stream grant's `fields`, or null when it lists none.
+  grantedFields?: readonly string[] | null
 ) {
   if (requestParams.fields !== null && requestParams.fields !== undefined) {
     const normalizedFields = normalizeFieldListParam(requestParams.fields);
@@ -1709,6 +1712,11 @@ function validateRequestedQueryFieldParams(
       throw err;
     }
     requestParams.fields = normalizedFields;
+    // The grant is checked before the declaration, so a name that is invented
+    // and a name that exists but is outside the grant take the same path.
+    if (grantedFields !== undefined) {
+      requestParams.fields = resolveRequestedFields(normalizedFields, grantedFields);
+    }
   }
 
   const allowedFields = new Set(Object.keys(manifestStream?.schema?.properties || {}));

@@ -10170,6 +10170,8 @@ export async function exchangeOAuthAuthorizationCode({
   const tokenInfo = await requireOAuthAuthorizationCodeTokenInfo(row, normalized.clientId);
   if (row.grant_id) {
     response.authorization_details = [buildGrantedAuthorizationDetail(tokenInfo.grant)];
+  } else if (row.package_id) {
+    Object.assign(response, await packageGrantExtensions(row.package_id));
   }
   const refresh =
     clientSupportsOAuthRefreshToken(registeredClient) && (await authorizationCodeBindingSupportsRefresh(row, tokenInfo))
@@ -10757,7 +10759,7 @@ export async function exchangeOAuthRefreshToken({
   return {
     access_token: outcome.accessToken,
     access_token_expires_at: outcome.accessTokenExpiresAt,
-    ...(outcome.row.package_id ? {} : await refreshedGrantExtensions(outcome.accessToken)),
+    ...(await refreshedGrantExtensions(outcome.accessToken, outcome.row.package_id)),
     refresh_token: successorToken,
     token_type: "Bearer",
     ...(outcome.row.package_id ? { grant_package_id: outcome.row.package_id } : { grant_id: outcome.row.grant_id }),
@@ -10768,13 +10770,33 @@ export async function exchangeOAuthRefreshToken({
 // response included (spec-client-range-filters.md Section 4.3). A refresh
 // response otherwise names the grant only by id, so this adds the granted
 // authorization detail only when the grant carries a profile member.
-async function refreshedGrantExtensions(accessToken: string): Promise<Record<string, unknown>> {
+async function refreshedGrantExtensions(
+  accessToken: string,
+  packageId?: string | null
+): Promise<Record<string, unknown>> {
+  if (packageId) {
+    return await packageGrantExtensions(packageId);
+  }
   const tokenInfo = await introspect(accessToken);
   const grant = tokenInfo.active ? tokenInfo.grant : null;
   if (!(isRecord(grant) && isRecord(grant.extensions))) {
     return {};
   }
   return { authorization_details: [buildGrantedAuthorizationDetail(grant)] };
+}
+
+// A package token covers several grants. When any child carries a profile
+// member, return every active child as its own element, never merged, so each
+// child's frozen set reaches the client unchanged.
+async function packageGrantExtensions(packageId: string): Promise<Record<string, unknown>> {
+  const access = await getGrantPackageAccess(packageId);
+  const grants = ((access?.members as Array<{ grant?: unknown }> | undefined) ?? [])
+    .map((member) => member.grant)
+    .filter(isRecord);
+  if (!grants.some((grant) => isRecord(grant.extensions))) {
+    return {};
+  }
+  return { authorization_details: grants.map((grant) => buildGrantedAuthorizationDetail(grant)) };
 }
 
 const CONSENT_EXCHANGE_CODE_TTL_MS = 5 * 60 * 1000;

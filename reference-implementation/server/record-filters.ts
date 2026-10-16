@@ -343,18 +343,19 @@ export function compileRequestFilters(
 }
 
 // Stored numbers are compared from their JSON lexemes when the record's source
-// text is known, so no binary64 rounding decides a client range filter.
+// text is known, so no binary64 rounding decides a client range filter. If the
+// text cannot be read exactly the record fails the filter: comparing the
+// rounded value instead could admit a record the exact value excludes.
 function passesClientRangeFilters(data: JsonObject | null, filters: ClientRangeFilter[]): boolean {
   const text = data ? recordSourceText(data) : undefined;
-  let view: unknown = data;
-  if (text !== undefined) {
-    try {
-      view = exactStoredRecord(text);
-    } catch {
-      view = data;
-    }
+  if (text === undefined) {
+    return matchesClientRangeFilters(data, filters);
   }
-  return matchesClientRangeFilters(view, filters);
+  try {
+    return matchesClientRangeFilters(exactStoredRecord(text), filters);
+  } catch {
+    return false;
+  }
 }
 
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: This protocol transition owns ordered state invariants that must remain local.
