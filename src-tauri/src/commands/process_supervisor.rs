@@ -258,9 +258,12 @@ impl From<io::Error> for SupervisorError {
 
 struct SupervisorState {
     stopping: AtomicBool,
-    child: Mutex<Option<Child>>,
+    child: Arc<Mutex<Option<Child>>>,
     #[cfg(unix)]
-    process_group_id: Mutex<Option<libc::pid_t>>,
+    process_group_id: Arc<Mutex<Option<libc::pid_t>>>,
+    #[cfg(unix)]
+    retirement_started: AtomicBool,
+    cleanup_error: Mutex<Option<String>>,
     finished: Mutex<bool>,
     finished_signal: Condvar,
     stop_deadline: Mutex<Option<Instant>>,
@@ -271,9 +274,12 @@ impl SupervisorState {
     fn new() -> Self {
         Self {
             stopping: AtomicBool::new(false),
-            child: Mutex::new(None),
+            child: Arc::new(Mutex::new(None)),
             #[cfg(unix)]
-            process_group_id: Mutex::new(None),
+            process_group_id: Arc::new(Mutex::new(None)),
+            #[cfg(unix)]
+            retirement_started: AtomicBool::new(false),
+            cleanup_error: Mutex::new(None),
             finished: Mutex::new(false),
             finished_signal: Condvar::new(),
             stop_deadline: Mutex::new(None),
@@ -547,6 +553,12 @@ impl SupervisorHandle {
                     "supervisor did not stop before its deadline".to_string(),
                 ));
             }
+        }
+        if let Some(error) = self.state.cleanup_error.lock()
+            .map_err(|_| SupervisorError::Message("supervisor state was poisoned".to_string()))?
+            .as_ref()
+        {
+            return Err(SupervisorError::Message(error.clone()));
         }
         Ok(())
     }
@@ -1544,6 +1556,83 @@ fn poll_child_exit(state: &SupervisorState) -> io::Result<Option<ExitStatus>> {
 }
 
 fn stop_current_child(
+    spec: &ProcessSpec,
+    state: &SupervisorState,
+) -> io::Result<Option<ExitStatus>> {
+    let result = stop_current_child_inner(spec, state);
+    if let Err(error) = &result {
+        *state.cleanup_error.lock().unwrap_or_else(|error| error.into_inner()) =
+            Some(format!("process tree cleanup failed: {error}"));
+        #[cfg(unix)]
+        start_process_group_retirement(state);
+    }
+    result
+}
+
+#[cfg(unix)]
+fn start_process_group_retirement(state: &SupervisorState) {
+    if state.process_group_id.lock().unwrap_or_else(|error| error.into_inner()).is_none()
+        || state.retirement_started.swap(true, Ordering::AcqRel)
+    {
+        return;
+    }
+    // A failed generation never restarts. This latch therefore bounds work
+    // to one retirement worker per retained group, including repeated stops.
+    let child = Arc::clone(&state.child);
+    let group = Arc::clone(&state.process_group_id);
+    if let Err(error) = thread::Builder::new()
+        .name("sidecar-group-retirement".into())
+        .spawn(move || retire_process_group(&child, &group))
+    {
+        // Do not abandon a registered PGID if resource exhaustion prevents
+        // spawning. The supervisor itself becomes the retirement worker;
+        // callers still have their bounded stop deadline and sticky error.
+        log::error!("failed to spawn group retirement worker: {error}; retiring inline");
+        retire_process_group(&state.child, &state.process_group_id);
+    }
+}
+
+#[cfg(unix)]
+fn retire_process_group(
+    child: &Mutex<Option<Child>>,
+    group: &Mutex<Option<libc::pid_t>>,
+) {
+    const RETIREMENT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+    loop {
+        {
+            // Same lock order as normal cleanup. Reap our leader as well:
+            // an unreaped leader alone can otherwise keep the group alive.
+            let mut child = child.lock().unwrap_or_else(|error| error.into_inner());
+            let leader_reaped = child.as_mut()
+                .map(|child| child.try_wait().ok().flatten().is_some())
+                .unwrap_or(true);
+            let mut group = group.lock().unwrap_or_else(|error| error.into_inner());
+            let Some(pgid) = *group else { return };
+            if let Some(Ok(registry)) = PROCESS_GROUP_REGISTRY.get() {
+                let mut registry = registry.lock().unwrap_or_else(|error| error.into_inner());
+                // Keep probe, signal and unregister under the registry lock
+                // so the shutdown handler cannot signal a removed entry.
+                // Numeric PGIDs have no identity handle: reuse between polls
+                // (nominally 10 ms, longer if descheduled), or between probe
+                // and signal, remains a residual race. This is not perfect
+                // identity safety. Zombies keep the group non-empty and
+                // cannot permit reuse until their parent reaps them.
+                if !process_group_exists(pgid as u32) {
+                    registry.remove(&pgid);
+                    group.take();
+                    if leader_reaped {
+                        child.take();
+                    }
+                    return;
+                }
+                signal_process_group_direct(pgid as u32, libc::SIGKILL);
+            }
+        }
+        thread::sleep(RETIREMENT_POLL_INTERVAL);
+    }
+}
+
+fn stop_current_child_inner(
     spec: &ProcessSpec,
     state: &SupervisorState,
 ) -> io::Result<Option<ExitStatus>> {
@@ -3160,6 +3249,89 @@ setInterval(() => {{}}, 1000);
         );
         assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
         assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
+    }
+
+
+    // Own the surviving group member here so a zombie reliably holds the
+    // group until the test explicitly reaps it, independently of PID 1.
+    #[cfg(unix)]
+    fn failed_group_fixture() -> (ProcessSpec, Arc<SupervisorState>, Child, libc::pid_t) {
+        use std::os::unix::process::CommandExt;
+        install_parent_signal_handlers().unwrap();
+        let mut leader = Command::new("/bin/sh")
+            .args(["-c", "read line"])
+            .stdin(Stdio::piped())
+            .process_group(0)
+            .spawn().unwrap();
+        let pgid = leader.id() as libc::pid_t;
+        let member = Command::new("/bin/sh")
+            .args(["-c", "exec sleep 60"])
+            .process_group(pgid)
+            .spawn().unwrap();
+        register_process_group(pgid as u32).unwrap();
+        drop(leader.stdin.take());
+        leader.wait().unwrap();
+        let state = Arc::new(SupervisorState::new());
+        *state.child.lock().unwrap() = Some(leader);
+        *state.process_group_id.lock().unwrap() = Some(pgid);
+        let mut spec = base_spec(Path::new("unused"), Readiness::StdoutMarker {
+            marker: "READY".into(), deadline: Duration::from_secs(1),
+        });
+        spec.stop = StopPolicy {
+            grace: Duration::ZERO, escalate: Duration::ZERO, total: Duration::ZERO,
+        };
+        (spec, state, member, pgid)
+    }
+
+    #[cfg(unix)]
+    fn group_is_registered(pgid: libc::pid_t) -> bool {
+        PROCESS_GROUP_REGISTRY.get().unwrap().as_ref().unwrap()
+            .lock().unwrap().contains(&pgid)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_cleanup_registration_retires_without_another_supervisor_call() {
+        let (spec, state, mut member, pgid) = failed_group_fixture();
+        let cleanup = stop_current_child(&spec, &state);
+        let held = process_group_exists(pgid as u32) && group_is_registered(pgid);
+        // Reap even on a regression so this test never leaves a live process.
+        let _ = member.kill();
+        member.wait().unwrap();
+        assert!(cleanup.is_err());
+        assert!(held, "the surviving group must stay registered");
+        assert!(!process_group_exists(pgid as u32));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while group_is_registered(pgid) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        let retired = !group_is_registered(pgid);
+        unregister_process_group(pgid); // failure-path test hygiene
+        assert!(retired, "empty failed group remained in the shutdown registry");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stop_reports_post_crash_cleanup_failure_after_finished() {
+        let (spec, state, mut member, pgid) = failed_group_fixture();
+        let sink: Arc<dyn EventSink> = Arc::new(RecordingSink::default());
+        let mut restart_count = 0;
+        assert!(!monitor_ready_process(&spec, &state, &sink, &mut restart_count));
+        state.finish();
+        let handle = SupervisorHandle {
+            state, port: 0, stop_budget: Duration::from_secs(1),
+        };
+        let result = handle.stop();
+        let _ = member.kill();
+        member.wait().unwrap();
+        // Don't unregister early on the fixed implementation: let its worker
+        // observe ESRCH before this test returns.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while group_is_registered(pgid) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        unregister_process_group(pgid);
+        assert!(result.is_err(), "post-crash cleanup failure was reported as success");
     }
 
     #[derive(Clone)]
