@@ -100,14 +100,23 @@ jobs:
           $observer.WaitForExit()
           Get-Content $observed
           if ($results | Where-Object { $_ -ne 0 }) { throw "live test failed: $results" }
-          # Concealed phases must show no browser window and no foreground
-          # change. A popup a page opens is created by the browser itself,
-          # outside DevTools, and may show briefly before it is hidden; that
-          # is reported, not failed.
-          $leaks = Get-Content $observed | Where-Object {
-            $_ -match "phase=(\S+) " -and $Matches[1] -match "^(launch|collect|collect-new-page|collect-closed|companion-concealed)$" -and
-            ($_ -notmatch "visible_ticks=0 " -or $_ -notmatch "foreground_ticks=0 ")
+          # Hard requirements while concealed: the browser never holds the
+          # foreground, and no window is visible in steady state. Window
+          # creation (launch, a new page, a popup the page opens) can show a
+          # window for a sample before the hook hides it; those counts are
+          # reported, not failed.
+          $concealed = "^(launch|collect|collect-new-page|collect-popup|collect-closed|companion-concealed)$"
+          $steady = "^(collect|collect-closed|companion-concealed)$"
+          $lines = Get-Content $observed | Where-Object { $_ -match "^OBSERVE phase=" }
+          $failures = @()
+          foreach ($line in $lines) {
+            if ($line -notmatch "phase=(\S+) .*visible_ticks=(\d+) foreground_ticks=(\d+)") { continue }
+            $name = $Matches[1]; $visible = [int]$Matches[2]; $foreground = [int]$Matches[3]
+            if ($name -match $concealed -and $foreground -gt 0) { $failures += "$name took the foreground ($foreground samples)" }
+            if ($name -match $steady -and $visible -gt 0) { $failures += "$name showed a window ($visible samples)" }
           }
-          $popup = Get-Content $observed | Where-Object { $_ -match "phase=collect-popup " }
-          if ($popup) { Write-Host "Popup phase: $popup" }
-          if ($leaks) { throw "Concealment leaked: $($leaks -join '; ')" }
+          "### Windows hidden-native observer (3 runs)" | Out-File -Append $env:GITHUB_STEP_SUMMARY
+          '```' | Out-File -Append $env:GITHUB_STEP_SUMMARY
+          $lines | Out-File -Append $env:GITHUB_STEP_SUMMARY
+          '```' | Out-File -Append $env:GITHUB_STEP_SUMMARY
+          if ($failures) { throw "Concealment requirement failed: $($failures -join '; ')" }

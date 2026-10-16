@@ -51,7 +51,12 @@ public static class BrowserWindowObserver {
         lastRefresh = clock.ElapsedMilliseconds;
       }
       string phase = "start";
-      try { phase = File.ReadAllText(phaseFile).Trim(); } catch { }
+      // Shared access: the test rewrites this file while it is read.
+      try {
+        using (var stream = new FileStream(phaseFile, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+        using (var reader = new StreamReader(stream)) { phase = reader.ReadToEnd().Trim(); }
+      } catch { }
+      if (phase.Length == 0) phase = order.Count > 0 ? order[order.Count - 1] : "start";
       if (!stats.ContainsKey(phase)) { stats[phase] = new Stats(); order.Add(phase); }
       var s = stats[phase];
       int visible = 0;

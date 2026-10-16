@@ -990,8 +990,15 @@ pub(crate) mod tests {
     #[ignore = "requires a real Chrome (DATACONNECT_REAL_BROWSER) on an interactive desktop"]
     fn real_chrome_hidden_native_on_windows() {
         let phase = |name: &str| {
+            // Best effort: on Windows the observer may hold the file for a
+            // moment, and the phase only labels the observer's samples.
             if let Ok(path) = std::env::var("DATACONNECT_OBSERVE_PHASE_FILE") {
-                fs::write(path, name).expect("write phase");
+                for _ in 0..20 {
+                    if fs::write(&path, name).is_ok() {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(5));
+                }
             }
         };
         let run_script = |env: &str, cdp_url: &str| -> Option<(bool, String)> {

@@ -40,10 +40,11 @@ use windows_sys::Win32::System::Diagnostics::ToolHelp::{
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 use windows_sys::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, EnumWindows, GetAncestor, GetWindowThreadProcessId, IsWindowVisible,
-    MsgWaitForMultipleObjects, PeekMessageW, PostThreadMessageW, ShowWindow, TranslateMessage,
-    EVENT_OBJECT_CREATE, EVENT_OBJECT_SHOW, GA_ROOT, MSG, OBJID_WINDOW, PM_REMOVE, QS_ALLINPUT,
-    SW_HIDE, SW_SHOWNOACTIVATE, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_QUIT,
+    DispatchMessageW, EnumWindows, GetAncestor, GetForegroundWindow, GetWindowThreadProcessId,
+    IsWindowVisible, MsgWaitForMultipleObjects, PeekMessageW, PostThreadMessageW,
+    SetForegroundWindow, ShowWindow, TranslateMessage, EVENT_OBJECT_CREATE, EVENT_OBJECT_SHOW,
+    GA_ROOT, MSG, OBJID_WINDOW, PM_REMOVE, QS_ALLINPUT, SW_HIDE, SW_SHOWNOACTIVATE,
+    WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_QUIT,
 };
 
 /// How often every window of the browser is checked, in addition to the
@@ -160,6 +161,9 @@ struct HookContext {
     root: u32,
     tree: HashSet<u32>,
     watch: Arc<Watch>,
+    /// The last foreground window outside the browser, to hand the
+    /// foreground back to when a concealed window takes it.
+    outside_foreground: HWND,
 }
 
 thread_local! {
@@ -175,6 +179,8 @@ fn watch_and_conceal(root: u32, watch: &Arc<Watch>, ready: mpsc::Sender<io::Resu
             root,
             tree: process_tree(root),
             watch: Arc::clone(watch),
+            // SAFETY: reads the current foreground window handle.
+            outside_foreground: unsafe { GetForegroundWindow() },
         });
     });
     let hook = unsafe {
@@ -273,8 +279,18 @@ unsafe extern "system" fn collect_window(window: HWND, windows: LPARAM) -> BOOL 
     1
 }
 
-/// Hide the visible ones among `windows` unless the browser was revealed.
-fn conceal(context: &HookContext, windows: &[HWND]) {
+/// Hide the visible ones among `windows` unless the browser was revealed,
+/// and give the foreground back if a browser window took it. Chromium
+/// activates a popup it opens itself; a hidden window that keeps the
+/// foreground would swallow the owner's typing.
+fn conceal(context: &mut HookContext, windows: &[HWND]) {
+    // SAFETY: reads the current foreground window handle.
+    let foreground = unsafe { GetForegroundWindow() };
+    let browser_has_foreground =
+        !foreground.is_null() && context.tree.contains(&window_process(foreground));
+    if !foreground.is_null() && !browser_has_foreground {
+        context.outside_foreground = foreground;
+    }
     // SAFETY: IsWindowVisible on any handle is safe; stale ones are false.
     let visible: Vec<HWND> = windows
         .iter()
@@ -285,11 +301,16 @@ fn conceal(context: &HookContext, windows: &[HWND]) {
         return;
     };
     if !tracker.observe(visible.len() as u32) {
+        drop(tracker);
+        if !browser_has_foreground {
+            return;
+        }
+        restore_foreground(context);
         return;
     }
     drop(tracker);
     let mut hidden = context.watch.hidden.lock().ok();
-    for window in visible {
+    for window in visible.iter().copied() {
         // SAFETY: hides another process's top-level window; it fails
         // harmlessly if the window is gone.
         unsafe { ShowWindow(window, SW_HIDE) };
@@ -297,6 +318,27 @@ fn conceal(context: &HookContext, windows: &[HWND]) {
             if !hidden.contains(&(window as isize)) {
                 hidden.push(window as isize);
             }
+        }
+    }
+    drop(hidden);
+    restore_foreground(context);
+}
+
+/// Hand the foreground back to the owner's window when a concealed browser
+/// window holds it. Windows may refuse this under its foreground-lock rules;
+/// the refusal is harmless.
+fn restore_foreground(context: &HookContext) {
+    // SAFETY: reads and sets foreground window handles; a stale handle
+    // makes SetForegroundWindow fail harmlessly.
+    unsafe {
+        let foreground = GetForegroundWindow();
+        let browser_has_foreground =
+            !foreground.is_null() && context.tree.contains(&window_process(foreground));
+        if browser_has_foreground
+            && IsWindowVisible(foreground) == 0
+            && !context.outside_foreground.is_null()
+        {
+            SetForegroundWindow(context.outside_foreground);
         }
     }
 }

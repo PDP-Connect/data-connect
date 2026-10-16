@@ -21,9 +21,12 @@ if (!cdpUrl) {
 }
 
 // Lets an outside observer attribute what it sees to each step.
+// Best effort: on Windows the observer may hold the file for a moment.
 const phase = (name) => {
   if (process.env.DATACONNECT_OBSERVE_PHASE_FILE) {
-    writeFileSync(process.env.DATACONNECT_OBSERVE_PHASE_FILE, `collect-${name}`);
+    try {
+      writeFileSync(process.env.DATACONNECT_OBSERVE_PHASE_FILE, `collect-${name}`);
+    } catch {}
   }
 };
 
