@@ -127,6 +127,15 @@ describe("tauri manual-install config", () => {
     )
   })
 
+  it("recommends Xvfb so Debian installs keep connector browsers off-screen", () => {
+    const filePath = resolve(process.cwd(), "src-tauri/tauri.conf.json")
+    const document = JSON.parse(readFileSync(filePath, "utf-8")) as {
+      bundle?: { linux?: { deb?: { recommends?: string[] } } }
+    }
+
+    expect(document.bundle?.linux?.deb?.recommends).toContain("xvfb")
+  })
+
   it("disables updater artifacts and ships no updater endpoint", () => {
     const filePath = resolve(process.cwd(), "src-tauri/tauri.conf.json")
     const document = JSON.parse(readFileSync(filePath, "utf-8")) as {

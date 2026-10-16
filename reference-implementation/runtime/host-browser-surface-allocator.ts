@@ -8,8 +8,21 @@ import type {
 	StopBrowserSurfaceRequest,
 } from "@opendatalabs/remote-surface/leases";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
+import type { BrowserPresentationPolicy } from "./browser-presentation-policy.ts";
 
 const DEFAULT_HOST_REQUEST_TIMEOUT_MS = 5_000;
+/**
+ * The end-to-end budget the host gets for one acquire: waiting behind
+ * another launch, starting the display and the browser's readiness. The host
+ * enforces it across all three stages.
+ */
+export const DEFAULT_HOST_ACQUIRE_TIMEOUT_MS = 30_000;
+/**
+ * Extra time to wait for the host's answer after its budget. The host gives
+ * up at the budget and stops what it started, so waiting slightly longer
+ * means a late launch is always reported, never left without a lease holder.
+ */
+const HOST_ACQUIRE_RESPONSE_MARGIN_MS = 2_000;
 
 export interface HostBrowserSurfaceLeaseBinding {
 	/**
@@ -26,6 +39,14 @@ export interface HostBrowserSurfaceAllocatorOptions {
 	readonly fetchImpl?: typeof fetch;
 	readonly headless: boolean;
 	readonly now?: () => Date;
+	/**
+	 * Sent with every acquire. The host validates it and refuses the launch
+	 * before spawning a browser if it cannot execute it.
+	 */
+	readonly presentationPolicy?: BrowserPresentationPolicy;
+	/** Budget sent with each acquire; see `DEFAULT_HOST_ACQUIRE_TIMEOUT_MS`. */
+	readonly acquireTimeoutMs?: number;
+	/** Timeout for release requests, which do no launch work. */
 	readonly requestTimeoutMs?: number;
 	readonly token: string;
 }
@@ -88,6 +109,8 @@ interface HostLeaseRecord {
 
 interface HostSurfaceLeaseResponse {
 	readonly cdp_url: string;
+	/** Launch milestones the host reported, already reduced to safe values. */
+	readonly launch: Readonly<Record<string, string>>;
 	readonly surface_id: string;
 }
 
@@ -113,6 +136,8 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 	readonly #fetch: FetchImpl;
 	readonly #headless: boolean;
 	readonly #now: () => Date;
+	readonly #presentationPolicy: BrowserPresentationPolicy | undefined;
+	readonly #acquireTimeoutMs: number;
 	readonly #requestTimeoutMs: number;
 	readonly #token: string;
 	readonly #leasesBySurfaceId = new Map<string, HostLeaseRecord>();
@@ -129,6 +154,9 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 		this.#fetch = (options.fetchImpl ?? fetch) as FetchImpl;
 		this.#headless = options.headless;
 		this.#now = options.now ?? (() => new Date());
+		this.#presentationPolicy = options.presentationPolicy;
+		this.#acquireTimeoutMs =
+			options.acquireTimeoutMs ?? DEFAULT_HOST_ACQUIRE_TIMEOUT_MS;
 		this.#requestTimeoutMs =
 			options.requestTimeoutMs ?? DEFAULT_HOST_REQUEST_TIMEOUT_MS;
 		this.#token = options.token.trim();
@@ -179,6 +207,7 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 		let response: unknown;
 		try {
 			response = await this.#requestJson("POST", this.#leasesUrl(), {
+				acquire_timeout_ms: this.#acquireTimeoutMs,
 				run_id: runId,
 				// Canonical, so the host profile key matches the one the RI's
 				// post-delete purge sends (server/browser-profile-purge.ts).
@@ -188,6 +217,9 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 				migrate_connector_profile:
 					this.#migrateProfileBySurfaceId.get(request.surfaceId) === true,
 				headless: this.#headless,
+				...(this.#presentationPolicy
+					? { presentation_policy: this.#presentationPolicy }
+					: {}),
 			});
 		} catch (error) {
 			if (error instanceof HostBrowserSurfaceAllocatorError) {
@@ -202,7 +234,10 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 		const hostLease = parseHostSurfaceLeaseResponse(response);
 		const now = this.#now().toISOString();
 		const surface: BrowserSurface = {
-			allocator_metadata: { host_surface_id: hostLease.surface_id },
+			allocator_metadata: {
+				...hostLease.launch,
+				host_surface_id: hostLease.surface_id,
+			},
 			backend: "neko",
 			cdp_url: hostLease.cdp_url,
 			connector_id: request.connectorId,
@@ -284,7 +319,12 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 		url: string,
 		body: Record<string, unknown>,
 	): Promise<unknown> {
-		const response = await this.#request(method, url, JSON.stringify(body));
+		const response = await this.#request(
+			method,
+			url,
+			this.#acquireTimeoutMs + HOST_ACQUIRE_RESPONSE_MARGIN_MS,
+			JSON.stringify(body),
+		);
 		try {
 			return await response.json();
 		} catch (error) {
@@ -297,19 +337,17 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 	}
 
 	async #requestNoContent(method: "DELETE", url: string): Promise<void> {
-		await this.#request(method, url);
+		await this.#request(method, url, this.#requestTimeoutMs);
 	}
 
 	async #request(
 		method: "DELETE" | "POST",
 		url: string,
+		timeoutMs: number,
 		body?: string,
 	): Promise<FetchResponseLike> {
 		const controller = new AbortController();
-		const timeout = setTimeout(
-			() => controller.abort(),
-			this.#requestTimeoutMs,
-		);
+		const timeout = setTimeout(() => controller.abort(), timeoutMs);
 		try {
 			const response = await this.#fetch(url, {
 				headers: {
@@ -331,7 +369,7 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 			if (controller.signal.aborted) {
 				throw new HostBrowserSurfaceAllocatorError(
 					"host_browser_surface_timeout",
-					`host browser surface ${method} ${url} timed out after ${this.#requestTimeoutMs}ms`,
+					`host browser surface ${method} ${url} timed out after ${timeoutMs}ms`,
 					{ cause: error },
 				);
 			}
@@ -445,7 +483,75 @@ function parseHostSurfaceLeaseResponse(
 			"host browser surface lease response must include an http(s) cdp_url",
 		);
 	}
-	return { cdp_url: normalizedCdpUrl, surface_id: normalizedSurfaceId };
+	return {
+		cdp_url: normalizedCdpUrl,
+		launch: sanitizeHostLaunchReport(response.launch),
+		surface_id: normalizedSurfaceId,
+	};
+}
+
+const LAUNCH_ENUM_FIELDS: Readonly<Record<string, readonly string[]>> = {
+	display_backend: ["inherited-host", "private-xvfb", "externally-owned"],
+	engine_mode: ["headed", "headless"],
+	observed_visibility: ["unknown"],
+};
+const LAUNCH_MILESTONES = ["display_ready", "spawned", "cdp_ready"] as const;
+// Generous: the host's own launch deadline is ten seconds.
+const MAX_LAUNCH_MILESTONE_MS = 600_000;
+const EXECUTABLE_NAME = /^[A-Za-z0-9._-]{1,64}$/;
+const BROWSER_VERSION = /^[A-Za-z]{1,32}\/[0-9.]{1,32}$/;
+
+/**
+ * Keep only the launch facts that are safe to persist with the lease: known
+ * enum values, an executable file name, a product/version string and
+ * millisecond offsets. Paths, URLs, tokens and anything unrecognized are
+ * dropped, so a host that reports more than it should cannot leak it here.
+ */
+export function sanitizeHostLaunchReport(
+	value: unknown,
+): Readonly<Record<string, string>> {
+	if (!value || typeof value !== "object" || Array.isArray(value)) {
+		return {};
+	}
+	const report = value as Record<string, unknown>;
+	const metadata: Record<string, string> = {};
+	for (const [field, allowed] of Object.entries(LAUNCH_ENUM_FIELDS)) {
+		const fieldValue = report[field];
+		if (typeof fieldValue === "string" && allowed.includes(fieldValue)) {
+			metadata[`host_launch_${field}`] = fieldValue;
+		}
+	}
+	if (
+		typeof report.executable === "string" &&
+		EXECUTABLE_NAME.test(report.executable)
+	) {
+		metadata.host_launch_executable = report.executable;
+	}
+	if (
+		typeof report.browser_version === "string" &&
+		BROWSER_VERSION.test(report.browser_version)
+	) {
+		metadata.host_launch_browser_version = report.browser_version;
+	}
+	const milestones = report.milestones_ms;
+	if (
+		milestones &&
+		typeof milestones === "object" &&
+		!Array.isArray(milestones)
+	) {
+		for (const milestone of LAUNCH_MILESTONES) {
+			const offset = (milestones as Record<string, unknown>)[milestone];
+			if (
+				typeof offset === "number" &&
+				Number.isInteger(offset) &&
+				offset >= 0 &&
+				offset <= MAX_LAUNCH_MILESTONE_MS
+			) {
+				metadata[`host_launch_${milestone}_ms`] = String(offset);
+			}
+		}
+	}
+	return metadata;
 }
 
 function isHttpUrl(value: string): boolean {

@@ -10027,6 +10027,7 @@ export async function resolveNekoBrowserSurfaceControllerOptions({
     const hostAllocator = createHostBrowserSurfaceAllocator({
       endpoint: runtimeConfig.host.endpoint,
       headless: runtimeConfig.host.headless,
+      ...(runtimeConfig.host.presentationPolicy ? { presentationPolicy: runtimeConfig.host.presentationPolicy } : {}),
       token: runtimeConfig.host.token,
     });
     options.browserSurfaceAllocator = hostAllocator;

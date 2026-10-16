@@ -3,6 +3,8 @@
 pub mod connector;
 pub mod connector_store;
 pub mod developer_connector_sources;
+pub(crate) mod browser_display;
+pub(crate) mod browser_presentation;
 pub mod browser_surface_host;
 #[cfg(desktop)]
 pub mod desktop_settings;
@@ -11,6 +13,7 @@ pub mod file_ops;
 pub(crate) mod oci;
 pub(crate) mod oci_catalog;
 pub(crate) mod oci_verify;
+pub(crate) mod owned_browser;
 pub mod pdpp_browser;
 pub mod pdpp_collection_state;
 pub mod pdpp_connections;

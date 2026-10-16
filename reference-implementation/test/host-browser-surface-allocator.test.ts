@@ -13,7 +13,9 @@ import {
 import { parseNekoBrowserSurfaceRuntimeConfig } from "../runtime/browser-surface-leases.ts";
 import {
 	createHostBrowserSurfaceAllocator,
+	DEFAULT_HOST_ACQUIRE_TIMEOUT_MS,
 	type HostBrowserSurfaceAllocator,
+	sanitizeHostLaunchReport,
 } from "../runtime/host-browser-surface-allocator.ts";
 import { createBrowserProfilePurger } from "../server/browser-profile-purge.ts";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
@@ -138,6 +140,7 @@ test("host lease POST returns the host CDP URL and release DELETE targets host s
 	assert.equal(surface.cdp_url, "http://127.0.0.1:9222/host-cdp");
 	assert.equal(surface.stream_base_url, "");
 	assert.deepEqual(JSON.parse(mock.calls[0]?.body ?? "{}"), {
+		acquire_timeout_ms: DEFAULT_HOST_ACQUIRE_TIMEOUT_MS,
 		connection_id: "cin_chase",
 		connector_id: "chase",
 		headless: false,
@@ -417,4 +420,250 @@ test("a URL-form connector id leases and purges the same host profile key", asyn
 	assert.equal(lease.connector_id, "github");
 	assert.deepEqual(result, { removed: 1, status: "purged", target: "host" });
 	assert.equal(hostProfiles.size, 0, "the leased profile is the one purged");
+});
+
+const PRIVATE_XVFB_POLICY = {
+	display_backend: "private-xvfb",
+	engine_mode: "headed",
+	fallback: "fail-closed",
+	interaction_presentation: "companion",
+	native_visibility: "isolated-display",
+	version: 1,
+} as const;
+
+const hostModeEnv = {
+	PDPP_BROWSER_SURFACE_HOST_ENDPOINT: "http://127.0.0.1:9916/agent",
+	PDPP_BROWSER_SURFACE_HOST_TOKEN: "shared-secret",
+	PDPP_BROWSER_SURFACE_MODE: "host",
+};
+
+test("host mode reads the presentation policy the desktop host advertises", () => {
+	const config = parseNekoBrowserSurfaceRuntimeConfig({
+		...hostModeEnv,
+		PDPP_BROWSER_PRESENTATION_POLICY: JSON.stringify(PRIVATE_XVFB_POLICY),
+	});
+	assert.deepEqual(config.host?.presentationPolicy, PRIVATE_XVFB_POLICY);
+	assert.equal(config.host?.headless, false);
+
+	const legacy = parseNekoBrowserSurfaceRuntimeConfig(hostModeEnv);
+	assert.equal(legacy.host?.presentationPolicy, undefined);
+	assert.equal(legacy.host?.headless, false);
+});
+
+test("host mode refuses an invalid policy or one that conflicts with PDPP_BROWSER_HEADLESS", () => {
+	assert.throws(
+		() =>
+			parseNekoBrowserSurfaceRuntimeConfig({
+				...hostModeEnv,
+				PDPP_BROWSER_PRESENTATION_POLICY: JSON.stringify({
+					...PRIVATE_XVFB_POLICY,
+					interaction_presentation: "native",
+				}),
+			}),
+		/interaction must use the companion/,
+	);
+	assert.throws(
+		() =>
+			parseNekoBrowserSurfaceRuntimeConfig({
+				...hostModeEnv,
+				PDPP_BROWSER_HEADLESS: "1",
+				PDPP_BROWSER_PRESENTATION_POLICY: JSON.stringify(PRIVATE_XVFB_POLICY),
+			}),
+		/conflicts with PDPP_BROWSER_PRESENTATION_POLICY/,
+	);
+});
+
+test("host lease POST carries the presentation policy and keeps only safe launch facts", async () => {
+	const mock = createMockHostEndpoint({
+		json: async () => ({
+			cdp_url: "http://127.0.0.1:9222",
+			launch: {
+				browser_version: "Chrome/141.0.7390.54",
+				display_backend: "private-xvfb",
+				engine_mode: "headed",
+				executable: "google-chrome",
+				milestones_ms: { cdp_ready: 812, display_ready: 35, spawned: 36 },
+				observed_visibility: "unknown",
+			},
+			surface_id: "host-surface-9",
+		}),
+		ok: true,
+		status: 200,
+	});
+	const allocator = createHostBrowserSurfaceAllocator({
+		endpoint: "http://127.0.0.1:9916/agent",
+		fetchImpl: mock.fetchImpl,
+		headless: false,
+		presentationPolicy: PRIVATE_XVFB_POLICY,
+		token: "shared-secret",
+	});
+	allocator.bindRunToSurface({ runId: "run-9", surfaceId: "surface_1" });
+	const surface = await allocator.ensureSurface({
+		connectorId: "chase",
+		profileKey: "chase:cin_chase",
+		surfaceId: "surface_1",
+		surfaceSubjectId: "cin_chase",
+	});
+
+	const body = JSON.parse(mock.calls[0]?.body ?? "{}");
+	assert.deepEqual(body.presentation_policy, PRIVATE_XVFB_POLICY);
+	assert.equal(body.headless, false);
+	assert.deepEqual(surface.allocator_metadata, {
+		host_launch_browser_version: "Chrome/141.0.7390.54",
+		host_launch_cdp_ready_ms: "812",
+		host_launch_display_backend: "private-xvfb",
+		host_launch_display_ready_ms: "35",
+		host_launch_engine_mode: "headed",
+		host_launch_executable: "google-chrome",
+		host_launch_observed_visibility: "unknown",
+		host_launch_spawned_ms: "36",
+		host_surface_id: "host-surface-9",
+	});
+});
+
+test("launch facts drop paths, URLs, tokens and unknown fields", () => {
+	const metadata = sanitizeHostLaunchReport({
+		browser_version: "Chrome/141 https://evil.test/?token=abc",
+		cdp_url: "ws://127.0.0.1:9222/devtools/page/SECRET",
+		display_backend: "/tmp/.X11-unix/X0",
+		engine_mode: "headed",
+		executable: "/home/owner/.cache/ms-playwright/chromium/chrome",
+		milestones_ms: {
+			cdp_ready: -1,
+			display_ready: 1.5,
+			spawned: "10",
+			token: 7,
+		},
+		observed_visibility: "visible",
+		token: "shared-secret",
+		xauthority: "/home/owner/.local/share/dataconnect/client.xauth",
+	});
+	assert.deepEqual(metadata, { host_launch_engine_mode: "headed" });
+	const serialized = JSON.stringify(metadata);
+	for (const secret of [
+		"SECRET",
+		"shared-secret",
+		"/home/owner",
+		"token=abc",
+		"xauth",
+	]) {
+		assert.equal(serialized.includes(secret), false, secret);
+	}
+	assert.deepEqual(sanitizeHostLaunchReport(undefined), {});
+	assert.deepEqual(sanitizeHostLaunchReport("Chrome/141"), {});
+	assert.deepEqual(sanitizeHostLaunchReport([1]), {});
+});
+
+/** A real loopback host that answers each acquire after `delayMs`, or never. */
+async function startDelayedHost(delayMs: number | null): Promise<{
+	readonly bodies: unknown[];
+	readonly close: () => Promise<void>;
+	readonly endpoint: string;
+}> {
+	const { createServer } = await import("node:http");
+	const bodies: unknown[] = [];
+	const server = createServer((request, response) => {
+		let body = "";
+		request.on("data", (chunk) => {
+			body += chunk;
+		});
+		request.on("end", () => {
+			bodies.push(JSON.parse(body));
+			if (delayMs === null) {
+				return;
+			}
+			setTimeout(() => {
+				response.writeHead(200, { "Content-Type": "application/json" });
+				response.end(
+					JSON.stringify({
+						cdp_url: "http://127.0.0.1:9222",
+						surface_id: "host-surface-delayed",
+					}),
+				);
+			}, delayMs);
+		});
+	});
+	await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+	const address = server.address();
+	assert.ok(address && typeof address === "object");
+	return {
+		bodies,
+		close: () =>
+			new Promise<void>((resolve) => {
+				server.closeAllConnections();
+				server.close(() => resolve());
+			}),
+		endpoint: `http://127.0.0.1:${address.port}`,
+	};
+}
+
+function acquireRequest(): EnsureBrowserSurfaceRequest {
+	return {
+		connectorId: "chase",
+		profileKey: "chase:default",
+		surfaceId: "surface-delayed",
+		surfaceSubjectId: "cin-chase",
+	} as EnsureBrowserSurfaceRequest;
+}
+
+test("a host that answers after the release timeout but within the acquire budget succeeds", async () => {
+	const host = await startDelayedHost(400);
+	try {
+		const allocator = createHostBrowserSurfaceAllocator({
+			acquireTimeoutMs: 1_000,
+			endpoint: host.endpoint,
+			headless: false,
+			// Shorter than the host's answer: acquires must not use it.
+			requestTimeoutMs: 100,
+			token: "host-token",
+		});
+		allocator.bindRunToSurface({ runId: "run-delayed", surfaceId: "surface-delayed" });
+		const surface = await allocator.ensureSurface(acquireRequest());
+		assert.equal(surface.cdp_url, "http://127.0.0.1:9222");
+		assert.equal(
+			(host.bodies[0] as Record<string, unknown>).acquire_timeout_ms,
+			1_000,
+			"the host is told the budget it must enforce",
+		);
+	} finally {
+		await host.close();
+	}
+});
+
+test("the default acquire budget covers a cold browser start and is sent to the host", async () => {
+	const mock = createMockHostEndpoint({
+		json: async () => ({ cdp_url: "http://127.0.0.1:9222", surface_id: "host-surface-1" }),
+		ok: true,
+		status: 200,
+	});
+	const allocator = hostAllocator(mock.fetchImpl);
+	allocator.bindRunToSurface({ runId: "run-default", surfaceId: "surface-delayed" });
+	await allocator.ensureSurface(acquireRequest());
+	const body = JSON.parse(mock.calls[0]?.body ?? "{}") as Record<string, unknown>;
+	assert.equal(body.acquire_timeout_ms, DEFAULT_HOST_ACQUIRE_TIMEOUT_MS);
+	assert.ok(DEFAULT_HOST_ACQUIRE_TIMEOUT_MS >= 20_000);
+});
+
+test("a host that never answers times out only after its budget and a margin", async () => {
+	const host = await startDelayedHost(null);
+	try {
+		const allocator = createHostBrowserSurfaceAllocator({
+			acquireTimeoutMs: 100,
+			endpoint: host.endpoint,
+			headless: false,
+			token: "host-token",
+		});
+		allocator.bindRunToSurface({ runId: "run-silent", surfaceId: "surface-delayed" });
+		const started = Date.now();
+		await assert.rejects(allocator.ensureSurface(acquireRequest()), (error: unknown) => {
+			return (
+				error instanceof Error &&
+				(error as { code?: string }).code === "host_browser_surface_timeout"
+			);
+		});
+		assert.ok(Date.now() - started >= 100 + 1_500, "the host's own deadline answers first");
+		assert.equal(allocator.lastStartFailure("run-silent")?.code, "host_browser_surface_timeout");
+	} finally {
+		await host.close();
+	}
 });

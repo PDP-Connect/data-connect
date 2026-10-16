@@ -2501,7 +2501,7 @@ pub struct BrowserStatus {
 /// profile either.
 fn apply_browser_launch_error(
     status: BrowserStatus,
-    launch_error: Option<super::browser_surface_host::BrowserLaunchError>,
+    launch_error: Option<super::owned_browser::BrowserLaunchError>,
 ) -> BrowserStatus {
     match launch_error {
         Some(error) if error.is_sandbox_unavailable() => BrowserStatus {
@@ -2517,12 +2517,10 @@ fn apply_browser_launch_error(
 
 /// Launch results per browser binary, kept for the life of the process.
 static BROWSER_LAUNCH_CHECKS: std::sync::OnceLock<
-    std::sync::Mutex<HashMap<PathBuf, Option<super::browser_surface_host::BrowserLaunchError>>>,
+    std::sync::Mutex<HashMap<PathBuf, Option<super::owned_browser::BrowserLaunchError>>>,
 > = std::sync::OnceLock::new();
 
-fn cached_browser_launch_error(
-    browser: &Path,
-) -> Option<super::browser_surface_host::BrowserLaunchError> {
+fn cached_browser_launch_error(browser: &Path) -> Option<super::owned_browser::BrowserLaunchError> {
     let cache = BROWSER_LAUNCH_CHECKS.get_or_init(Default::default);
     if let Some(result) = cache
         .lock()
@@ -2543,7 +2541,7 @@ fn cached_browser_launch_error(
 #[cfg(target_os = "linux")]
 pub(crate) fn probe_browser_launch(
     browser: &Path,
-) -> Option<super::browser_surface_host::BrowserLaunchError> {
+) -> Option<super::owned_browser::BrowserLaunchError> {
     let profile = match tempfile::Builder::new()
         .prefix("dataconnect-browser-check-")
         .tempdir()
@@ -2554,12 +2552,24 @@ pub(crate) fn probe_browser_launch(
             return None;
         }
     };
-    match super::browser_surface_host::launch_browser(browser, profile.path(), true) {
-        Ok((mut child, _)) => {
-            let _ = super::pdpp_browser::terminate_browser(&mut child);
+    use super::owned_browser::{BrowserLauncher, LaunchSpec, BROWSER_START_TIMEOUT};
+    let launched = BrowserLauncher::new(super::browser_display::DisplayProviders::default())
+        .launch(&LaunchSpec {
+            executable: browser,
+            profile_dir: profile.path(),
+            headless: true,
+            display_backend: super::browser_presentation::DisplayBackend::InheritedHost,
+            deadline: std::time::Instant::now() + BROWSER_START_TIMEOUT,
+        });
+    match launched {
+        Ok((mut owned, _)) => {
+            let _ = owned.terminate();
             None
         }
-        Err(error) => {
+        Err(super::owned_browser::LaunchFailure { error, unstopped }) => {
+            if let Some(mut unstopped) = unstopped {
+                let _ = unstopped.terminate();
+            }
             log::warn!(
                 "Browser launch check failed ({}): {}",
                 error.code,
@@ -2573,7 +2583,7 @@ pub(crate) fn probe_browser_launch(
 #[cfg(not(target_os = "linux"))]
 pub(crate) fn probe_browser_launch(
     _browser: &Path,
-) -> Option<super::browser_surface_host::BrowserLaunchError> {
+) -> Option<super::owned_browser::BrowserLaunchError> {
     None
 }
 

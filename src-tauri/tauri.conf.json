@@ -76,6 +76,9 @@
         "depends": [
           "libayatana-appindicator3-1"
         ],
+        "recommends": [
+          "xvfb"
+        ],
         "desktopTemplate": "desktop-template.desktop",
         "files": {
           "/usr/share/data-connect/apparmor/dataconnect-chromium": "apparmor/dataconnect-chromium"
