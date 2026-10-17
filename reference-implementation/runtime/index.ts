@@ -47,6 +47,8 @@ import {
 import type { AttentionWriterOptions } from "./attention-writer.ts";
 import { createAttentionWriter } from "./attention-writer.ts";
 import { classifyRuntimeFailure } from "./classify-runtime-failure.ts";
+import { placeCollectionProfile } from "./collection-profile-placement.ts";
+export { REFERENCE_RUNTIME_CAPABILITIES } from "./collection-profile-placement.ts";
 import {
   type ConnectorConnectionEnvironment,
   type ConnectorEnvironmentBinding,
@@ -151,7 +153,8 @@ interface ManifestStream {
 }
 
 interface ConnectorManifest {
-  runtime_requirements?: { bindings?: Record<string, { required?: boolean }> } | null;
+  protocol_capabilities?: string[];
+  runtime_requirements?: { bindings?: Record<string, { required?: boolean; features?: string[] }> } | null;
   storage_binding?: { connector_instance_id?: string | null } | null;
   streams?: ManifestStream[] | null;
   [key: string]: unknown;
@@ -184,12 +187,7 @@ interface AttachmentOutcome {
 }
 
 /** Runtime-advertised child bindings (Collection Profile START.bindings). */
-interface AvailableBindings {
-  browser: Record<string, never>;
-  filesystem: Record<string, never>;
-  interactive?: Record<string, never>;
-  network: Record<string, never>;
-}
+type AvailableBindings = Record<string, Record<string, never>>;
 
 /** RS ingest response, after `readIngestResponse` proves the counters and receipt vector. */
 type IngestResult = StrictIngestResult;
@@ -902,18 +900,6 @@ function buildScopeFields(
     streamScope.time_range && manifestStream?.consent_time_field ? [manifestStream.consent_time_field] : [];
 
   return appendUniqueFields(streamScope.fields, [...requiredFields, ...primaryKeyFields, ...timeRangeFields]);
-}
-
-function buildAvailableBindings(onInteraction: unknown): AvailableBindings {
-  // In this reference runtime, connectors run as local Node child processes
-  // with full filesystem access by virtue of being child processes. We
-  // advertise `filesystem` so file-based connectors can declare it as a
-  // required binding per the Collection Profile spec.
-  const bindings: AvailableBindings = { browser: {}, filesystem: {}, network: {} };
-  if (typeof onInteraction === "function") {
-    bindings.interactive = {};
-  }
-  return bindings;
 }
 
 // Strict, index-validating, oracle-tested parser (test/read-ingest-response-oracle.test.ts).
@@ -2484,17 +2470,6 @@ export function buildBrowserSurfaceLaunchEnv({
   };
 }
 
-function validateRequiredRuntimeBindings(
-  requiredBindings: Record<string, { required?: boolean }>,
-  availableBindings: AvailableBindings
-): void {
-  for (const [binding, req] of Object.entries(requiredBindings)) {
-    if (req.required && !(binding in availableBindings)) {
-      throw new Error(`Runtime cannot satisfy required binding: ${binding}`);
-    }
-  }
-}
-
 function requestedRuntimeStreams(scope: { streams?: unknown } | null): Set<string> | null {
   if (!Array.isArray(scope?.streams)) {
     return null;
@@ -2866,11 +2841,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
   });
   const resolvedConnectorInstanceId = admittedConnection.connectorInstanceId;
 
-  // Check binding requirements
-  const requiredBindings = manifest.runtime_requirements?.bindings || {};
-  const availableBindings = buildAvailableBindings(onInteraction);
-
-  validateRequiredRuntimeBindings(requiredBindings, availableBindings);
+  const availableBindings: AvailableBindings = placeCollectionProfile(connectorId, manifest);
 
   const explicitlyRequestedStreams = requestedRuntimeStreams(providedScope);
   const declaredCollectionScope = readStoredCollectionScope(state).scope;
@@ -6007,7 +5978,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       const interactionTimeoutSeconds = msg.timeout_seconds as number | null | undefined;
       const interactionStream = (msg.stream as string | undefined) || null;
       if (typeof onInteraction !== "function") {
-        throw new Error("Connector emitted INTERACTION but START.bindings omitted interactive");
+        throw new Error("Connector emitted INTERACTION but runtime interaction handling is disabled");
       }
       if (pendingInteraction) {
         // Protocol violation
@@ -6169,6 +6140,9 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
 
       const handler = msg.type ? protocolHandlers[msg.type] : undefined;
       if (handler) {
+        if (msg.type === "STREAM_EVIDENCE" && !manifest.protocol_capabilities?.includes("STREAM_EVIDENCE")) {
+          throw new Error("Connector emitted undeclared protocol capability: STREAM_EVIDENCE");
+        }
         await handler(msg);
         return;
       }

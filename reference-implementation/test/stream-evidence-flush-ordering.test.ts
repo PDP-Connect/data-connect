@@ -169,6 +169,7 @@ const MANIFEST = {
   connector_id: "stream-evidence-flush-ordering",
   display_name: "STREAM_EVIDENCE Flush Ordering Regression",
   manifest_uri: "https://sources.example/stream-evidence-flush-ordering",
+  protocol_capabilities: ["STREAM_EVIDENCE"],
   protocol_version: "0.1.0",
   streams: [
     {
