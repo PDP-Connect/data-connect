@@ -2224,6 +2224,67 @@ async function visiblePostgresChange({
   });
 }
 
+function decodePostgresChangesSince(changesSince: string | null | undefined): number {
+  const decoded = changesSince === "beginning" ? { v: 0 } : decodeCursor(changesSince ?? "");
+  const decodedVersion = decoded && typeof decoded.v === "number" ? decoded.v : null;
+  if (decodedVersion === null || !Number.isInteger(decodedVersion)) {
+    const err: PgQueryError = new Error("Malformed changes_since cursor");
+    err.code = "invalid_cursor";
+    throw err;
+  }
+  return decodedVersion;
+}
+
+async function postgresStreamMaxVersion(connectorInstanceId: string, stream: string): Promise<number> {
+  const maxResult = await postgresQuery(
+    "SELECT max_version FROM version_counter WHERE connector_instance_id = $1 AND stream = $2",
+    [connectorInstanceId, stream]
+  );
+  return maxResult.rows[0] ? Number(maxResult.rows[0].max_version) : 0;
+}
+
+async function assertPostgresChangesRetained(
+  connectorInstanceId: string,
+  stream: string,
+  sinceVersion: number
+): Promise<void> {
+  const minChangeResult = await postgresQuery(
+    `SELECT MIN(version)::bigint AS min_version
+       FROM record_changes
+      WHERE connector_instance_id = $1 AND stream = $2`,
+    [connectorInstanceId, stream]
+  );
+  const minVersion =
+    minChangeResult.rows[0]?.min_version === null || minChangeResult.rows[0]?.min_version === undefined
+      ? null
+      : Number(minChangeResult.rows[0].min_version);
+  if (minVersion !== null && sinceVersion < minVersion - 1) {
+    const err: PgQueryError = new Error("changes_since cursor is too old; full re-sync required");
+    err.code = "cursor_expired";
+    throw err;
+  }
+}
+
+// The latest change of every record key in the (since, max] window, in
+// version order.
+async function listPostgresChangeGroups(
+  connectorInstanceId: string,
+  stream: string,
+  sinceVersion: number,
+  maxVersion: number
+): Promise<PgRow[]> {
+  const rows = await postgresQuery(
+    `SELECT DISTINCT ON (record_key)
+            record_key, record_json, deleted, deleted_at, emitted_at, version
+     FROM record_changes
+     WHERE connector_instance_id = $1 AND stream = $2
+       AND version > $3 AND version <= $4
+     ORDER BY record_key, version DESC`,
+    [connectorInstanceId, stream, sinceVersion, maxVersion]
+  );
+  return [...rows.rows].sort((a, b) => Number(a.version) - Number(b.version));
+}
+
 async function queryPostgresChangesSince({
   compiledFilters,
   connectorInstanceId,
@@ -2242,44 +2303,10 @@ async function queryPostgresChangesSince({
   stream: string;
 }): Promise<RecordListResponse> {
   rejectListOnlyParamsForChangesFeed(requestParams);
-  const changesSince = requestParams.changes_since;
-  const decoded = changesSince === "beginning" ? { v: 0 } : decodeCursor(changesSince ?? "");
-  const decodedVersion = decoded && typeof decoded.v === "number" ? decoded.v : null;
-  if (decodedVersion === null || !Number.isInteger(decodedVersion)) {
-    const err: PgQueryError = new Error("Malformed changes_since cursor");
-    err.code = "invalid_cursor";
-    throw err;
-  }
-  const maxResult = await postgresQuery(
-    "SELECT max_version FROM version_counter WHERE connector_instance_id = $1 AND stream = $2",
-    [connectorInstanceId, stream]
-  );
-  const sessionMax = maxResult.rows[0] ? Number(maxResult.rows[0].max_version) : 0;
-  const minChangeResult = await postgresQuery(
-    `SELECT MIN(version)::bigint AS min_version
-       FROM record_changes
-      WHERE connector_instance_id = $1 AND stream = $2`,
-    [connectorInstanceId, stream]
-  );
-  const minVersion =
-    minChangeResult.rows[0]?.min_version === null || minChangeResult.rows[0]?.min_version === undefined
-      ? null
-      : Number(minChangeResult.rows[0].min_version);
-  if (minVersion !== null && decodedVersion < minVersion - 1) {
-    const err: PgQueryError = new Error("changes_since cursor is too old; full re-sync required");
-    err.code = "cursor_expired";
-    throw err;
-  }
-  const rows = await postgresQuery(
-    `SELECT DISTINCT ON (record_key)
-            record_key, record_json, deleted, deleted_at, emitted_at, version
-     FROM record_changes
-     WHERE connector_instance_id = $1 AND stream = $2
-       AND version > $3 AND version <= $4
-     ORDER BY record_key, version DESC`,
-    [connectorInstanceId, stream, decodedVersion, sessionMax]
-  );
-  const sorted = [...rows.rows].sort((a, b) => Number(a.version) - Number(b.version));
+  const decodedVersion = decodePostgresChangesSince(requestParams.changes_since);
+  const sessionMax = await postgresStreamMaxVersion(connectorInstanceId, stream);
+  await assertPostgresChangesRetained(connectorInstanceId, stream, decodedVersion);
+  const sorted = await listPostgresChangeGroups(connectorInstanceId, stream, decodedVersion, sessionMax);
   const visibleChanges: ResponseRecord[] = [];
   await sorted.reduce(async (previous, row) => {
     await previous;
@@ -2304,6 +2331,49 @@ async function queryPostgresChangesSince({
   };
   attachRequestWarningsToResponse(response, requestWarnings);
   return response;
+}
+
+function encodePostgresRecordCursor(row: PgRow, order: "asc" | "desc"): string {
+  return encodeCursor({
+    cursor_value: row.cursor_value ?? null,
+    k: "pg:records",
+    order,
+    primary_key_text: row.primary_key_text,
+  });
+}
+
+/**
+ * Rows strictly after `cursorPosition` in `ORDER BY cursor <dir> NULLS LAST,
+ * primary_key_text <dir>`. Appends its bind values to `params`.
+ */
+function postgresRecordSeekClause({
+  cursorPosition,
+  cursorSql,
+  order,
+  params,
+  primarySql,
+}: {
+  cursorPosition: JsonObject;
+  cursorSql: string;
+  order: "asc" | "desc";
+  params: unknown[];
+  primarySql: string;
+}): string {
+  const cmp = order === "asc" ? ">" : "<";
+  const cursorValue = cursorPosition.cursor_value ?? null;
+  if (cursorValue === null) {
+    // Every present value came first: continue inside the null bucket.
+    params.push(cursorPosition.primary_key_text);
+    return ` AND ${cursorSql} IS NULL AND ${primarySql} ${cmp} $${params.length}`;
+  }
+  params.push(cursorValue, cursorPosition.primary_key_text);
+  const cursorParam = `$${params.length - 1}`;
+  const keyParam = `$${params.length}`;
+  return ` AND (
+        (${cursorSql} = ${cursorParam} AND ${primarySql} ${cmp} ${keyParam})
+        OR (${cursorSql} IS NOT NULL AND ${cursorSql} ${cmp} ${cursorParam})
+        OR ${cursorSql} IS NULL
+      )`;
 }
 
 async function queryPostgresRecordPage({
@@ -2340,7 +2410,7 @@ async function queryPostgresRecordPage({
   requestParams: QueryRequestParams;
   requestWarnings: unknown[];
   stream: string;
-}): Promise<RecordListResponse> {
+}): Promise<{ pageRows: PgRow[]; response: RecordListResponse }> {
   let cursorPosition: JsonObject | null = null;
   if (requestParams.cursor) {
     cursorPosition = decodeCursor(requestParams.cursor);
@@ -2353,22 +2423,12 @@ async function queryPostgresRecordPage({
   const params: unknown[] = [...countParams];
   let where = countWhere;
   if (cursorPosition) {
-    params.push(cursorPosition.cursor_value, cursorPosition.primary_key_text);
-    if (order === "asc") {
-      where += ` AND (
-        (${cursorSql} = $${params.length - 1} AND ${primarySql} > $${params.length})
-        OR (${cursorSql} IS NOT NULL AND ${cursorSql} > $${params.length - 1})
-        OR (${cursorSql} IS NULL AND $${params.length - 1} IS NOT NULL)
-      )`;
-    } else {
-      where += ` AND (
-        (${cursorSql} = $${params.length - 1} AND ${primarySql} < $${params.length})
-        OR (${cursorSql} IS NOT NULL AND ${cursorSql} < $${params.length - 1})
-      )`;
-    }
+    where += postgresRecordSeekClause({ cursorPosition, cursorSql, order, params, primarySql });
   }
   const dir = order === "asc" ? "ASC" : "DESC";
-  const nulls = order === "asc" ? "NULLS LAST" : "NULLS FIRST";
+  // Null cursor values sort after present values in both directions (Core §8
+  // "Stable sort"); postgresRecordSeekClause seeks in exactly this order.
+  const nulls = "NULLS LAST";
   params.push(limit + 1);
   const result = await postgresQuery(
     `SELECT record_key, record_json, emitted_at,
@@ -2397,12 +2457,7 @@ async function queryPostgresRecordPage({
     if (!last) {
       throw new Error("Postgres records page unexpectedly had no last row");
     }
-    response.next_cursor = encodeCursor({
-      cursor_value: last.cursor_value ?? null,
-      k: "pg:records",
-      order,
-      primary_key_text: last.primary_key_text,
-    });
+    response.next_cursor = encodePostgresRecordCursor(last, order);
   }
   const countOutcome = await computePostgresGradedRecordCount({
     connectorInstanceId,
@@ -2425,17 +2480,32 @@ async function queryPostgresRecordPage({
     response.meta = mergeMetaWindow(response.meta, windowOutcome);
   }
   attachRequestWarningsToResponse(response, requestWarnings);
-  return response;
+  return { pageRows, response };
 }
 
-export async function postgresQueryRecords(
+interface PreparedPostgresRecordRead {
+  compiledFilters: ReturnType<typeof compileRequestFilters>;
+  connectorInstanceId: string;
+  cursorSql: string;
+  effective: EffectiveFilter;
+  expansions: ExpansionEntry[];
+  fields: string[] | null;
+  identity: RecordIdentity | null;
+  limit: number;
+  manifestStream: ManifestStream | null;
+  order: "asc" | "desc";
+  primarySql: string;
+  requestWarnings: unknown[];
+}
+
+// Validation and grant scoping shared by every list read of one connection.
+async function preparePostgresRecordRead(
   storageTarget: StorageTarget,
   stream: string,
   grant: ConnectorGrant,
-  requestParams: QueryRequestParams = {},
-  manifest: ConnectorManifest | null = null
-): Promise<RecordListResponse> {
-  assertManifestReadAuthority(manifest, stream, { actor: "internal" });
+  requestParams: QueryRequestParams,
+  manifest: ConnectorManifest | null
+): Promise<PreparedPostgresRecordRead> {
   const connectorId = resolveStorageConnectorId(storageTarget);
   const connectorInstanceId = resolveStorageConnectorInstanceId(storageTarget, connectorId ?? "");
   const streamGrant = getStreamGrant(grant, stream);
@@ -2488,6 +2558,32 @@ export async function postgresQueryRecords(
     order === "asc" ? "ASC" : "DESC"
   );
 
+  return {
+    compiledFilters,
+    connectorInstanceId,
+    cursorSql,
+    effective,
+    expansions,
+    fields,
+    identity,
+    limit,
+    manifestStream,
+    order,
+    primarySql,
+    requestWarnings,
+  };
+}
+
+export async function postgresQueryRecords(
+  storageTarget: StorageTarget,
+  stream: string,
+  grant: ConnectorGrant,
+  requestParams: QueryRequestParams = {},
+  manifest: ConnectorManifest | null = null
+): Promise<RecordListResponse> {
+  assertManifestReadAuthority(manifest, stream, { actor: "internal" });
+  const read = await preparePostgresRecordRead(storageTarget, stream, grant, requestParams, manifest);
+  const { compiledFilters, connectorInstanceId, effective, identity, requestWarnings } = read;
   if (requestParams.changes_since !== null && requestParams.changes_since !== undefined) {
     return queryPostgresChangesSince({
       compiledFilters,
@@ -2500,6 +2596,29 @@ export async function postgresQueryRecords(
     });
   }
 
+  return (await queryPostgresRecordList(read, stream, requestParams, manifest)).response;
+}
+
+async function queryPostgresRecordList(
+  read: PreparedPostgresRecordRead,
+  stream: string,
+  requestParams: QueryRequestParams,
+  manifest: ConnectorManifest | null
+): Promise<{ pageRows: PgRow[]; response: RecordListResponse }> {
+  const {
+    compiledFilters,
+    connectorInstanceId,
+    cursorSql,
+    effective,
+    expansions,
+    fields,
+    identity,
+    limit,
+    manifestStream,
+    order,
+    primarySql,
+    requestWarnings,
+  } = read;
   const params: unknown[] = [connectorInstanceId, stream];
   const whereParts = ["connector_instance_id = $1", "stream = $2", "deleted = FALSE"];
   appendGrantVisibilityClauses(whereParts, params, effective);
@@ -2513,7 +2632,7 @@ export async function postgresQueryRecords(
   const countWhere = where;
   const countParams = [...params];
 
-  return queryPostgresRecordPage({
+  return await queryPostgresRecordPage({
     connectorInstanceId,
     countParams,
     countWhere,
@@ -2531,6 +2650,154 @@ export async function postgresQueryRecords(
     requestWarnings,
     stream,
   });
+}
+
+// ─── Multi-connection fan-in reads (records.ts queryRecordsAcrossBindings) ──
+
+/**
+ * One connection's records page for fan-in, with the backend sort key and
+ * the resume cursor of every row. The keys are compared only by
+ * postgresRankFanInKeys, in the database's own collation.
+ */
+export async function postgresReadFanInRecordsPage(
+  storageTarget: StorageTarget,
+  stream: string,
+  grant: ConnectorGrant,
+  requestParams: QueryRequestParams,
+  manifest: ConnectorManifest | null
+): Promise<{
+  hasMore: boolean;
+  meta?: unknown;
+  rows: Array<{ key: JsonObject; record: ResponseRecord; resume: string }>;
+}> {
+  const read = await preparePostgresRecordRead(storageTarget, stream, grant, requestParams, manifest);
+  const { pageRows, response } = await queryPostgresRecordList(read, stream, requestParams, manifest);
+  const data = response.data as ResponseRecord[];
+  return {
+    hasMore: !!response.has_more,
+    meta: response.meta,
+    rows: pageRows.map((row, index) => ({
+      key: { cursor_value: row.cursor_value ?? null, primary_key_text: row.primary_key_text },
+      record: data[index] as ResponseRecord,
+      resume: encodePostgresRecordCursor(row, read.order),
+    })),
+  };
+}
+
+/**
+ * Open (or re-check) one connection's change window for a fan-in session:
+ * validates retention for `since` and returns the current version counter,
+ * which becomes the session horizon on page 1.
+ */
+export async function postgresOpenFanInChangesWindow(
+  connectorInstanceId: string,
+  stream: string,
+  sinceVersion: number
+): Promise<number> {
+  const max = await postgresStreamMaxVersion(connectorInstanceId, stream);
+  await assertPostgresChangesRetained(connectorInstanceId, stream, sinceVersion);
+  return max;
+}
+
+/**
+ * One connection's changes in the frozen fan-in window `(since, max]`, in the
+ * records-list order rather than version order. Each changed record is placed
+ * by its state at its latest change no later than `max`, using the same
+ * derived cursor/primary-key text the records table stores (a tombstone has a
+ * null cursor and its record key), and ranked by postgresRankFanInKeys in the
+ * database collation. Eligibility is visiblePostgresChange, as in the
+ * single-connection feed. Returns up to `take` changes strictly after `after`.
+ */
+export async function postgresReadFanInChangesWindow(
+  storageTarget: StorageTarget,
+  stream: string,
+  grant: ConnectorGrant,
+  requestParams: QueryRequestParams,
+  manifest: ConnectorManifest | null,
+  window: { after: unknown; max: number; since: number },
+  take: number
+): Promise<{ hasMore: boolean; rows: Array<{ key: JsonObject; record: ResponseRecord }> }> {
+  const read = await preparePostgresRecordRead(storageTarget, stream, grant, requestParams, manifest);
+  const { connectorInstanceId, manifestStream } = read;
+  await assertPostgresChangesRetained(connectorInstanceId, stream, window.since);
+  const groups = await listPostgresChangeGroups(connectorInstanceId, stream, window.since, window.max);
+  const orderByEmittedAt = nonEmptyJsonField(manifestStream?.cursor_field) === null;
+  const keyed = groups.map((row) => {
+    const data = row.deleted ? null : (row.record_json as JsonObject | null);
+    let cursor: string | null = orderByEmittedAt ? String(row.emitted_at) : cursorValue(data, manifestStream);
+    if (row.deleted && !orderByEmittedAt) {
+      cursor = null;
+    }
+    const key: JsonObject = {
+      cursor_value: cursor,
+      primary_key_text: row.deleted ? row.record_key : primaryKeyText(data, row.record_key, manifestStream),
+    };
+    return { key, row };
+  });
+  const entries = keyed.map((entry) => ({ binding: 0, key: entry.key }));
+  if (window.after) {
+    entries.push({ binding: 0, key: window.after as JsonObject });
+  }
+  const ranks = await postgresRankFanInKeys(entries, read.order === "asc" ? "ASC" : "DESC");
+  const afterRank = window.after ? (ranks[keyed.length] ?? -1) : -1;
+  const ordered = keyed
+    .map((entry, index) => ({ ...entry, rank: ranks[index] ?? 0 }))
+    .filter((entry) => entry.rank > afterRank)
+    .sort((left, right) => left.rank - right.rank);
+  const rows: Array<{ key: JsonObject; record: ResponseRecord }> = [];
+  for (const { key, row } of ordered) {
+    // biome-ignore lint/performance/noAwaitInLoops: stop reading snapshots once take + 1 eligible changes are known.
+    const record = await visiblePostgresChange({
+      compiledFilters: read.compiledFilters,
+      connectorInstanceId,
+      decodedVersion: window.since,
+      effective: read.effective,
+      identity: read.identity,
+      row,
+      stream,
+    });
+    if (record) {
+      rows.push({ key, record });
+      if (rows.length > take) {
+        break;
+      }
+    }
+  }
+  return { hasMore: rows.length > take, rows: rows.slice(0, take) };
+}
+
+/**
+ * Global order of fan-in candidates under the same ORDER BY the records page
+ * uses (cursor NULLS LAST, primary_key_text, then connection index), evaluated
+ * by PostgreSQL so text collation matches the per-connection pages exactly.
+ * Returns each entry's rank, aligned with `entries`.
+ */
+export async function postgresRankFanInKeys(
+  entries: ReadonlyArray<{ binding: number; key: unknown }>,
+  order: "ASC" | "DESC"
+): Promise<number[]> {
+  if (entries.length === 0) {
+    return [];
+  }
+  const keyOf = (entry: { key: unknown }) => (entry.key && typeof entry.key === "object" ? (entry.key as JsonObject) : {});
+  const cursorValues = entries.map((entry) => {
+    const value = keyOf(entry).cursor_value;
+    return value === null || value === undefined ? null : String(value);
+  });
+  const primaryKeys = entries.map((entry) => String(keyOf(entry).primary_key_text ?? ""));
+  const bindings = entries.map((entry) => entry.binding);
+  const dir = order === "ASC" ? "ASC" : "DESC";
+  const result = await postgresQuery(
+    `SELECT (t.ord - 1)::int AS __rn
+       FROM unnest($1::text[], $2::text[], $3::int[]) WITH ORDINALITY AS t(cursor_value, primary_key_text, binding, ord)
+      ORDER BY t.cursor_value ${dir} NULLS LAST, t.primary_key_text ${dir}, t.binding ${dir}`,
+    [cursorValues, primaryKeys, bindings]
+  );
+  const ranks = new Array<number>(entries.length);
+  result.rows.forEach((row, rank) => {
+    ranks[Number(row.__rn)] = rank;
+  });
+  return ranks;
 }
 
 // Compute the bounded `meta.window` aggregate for the Postgres list path,

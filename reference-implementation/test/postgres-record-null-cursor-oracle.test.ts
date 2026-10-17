@@ -104,8 +104,13 @@ if (POSTGRES_URL) {
 
       assert.deepEqual(
         await collectPages(driver, { limit: 3, order: "desc" }),
-        ["b_null", "b_missing", "b_present_new", "b_present_old"],
-        "desc pagination must visit missing/null rows first, then present cursor rows in reverse order"
+        ["b_present_new", "b_present_old", "b_null", "b_missing"],
+        "desc pagination must visit present cursor rows in reverse order, then missing/null rows (Core §8: missing values sort last)"
+      );
+      assert.deepEqual(
+        await collectPages(driver, { limit: 1, order: "desc" }),
+        ["b_present_new", "b_present_old", "b_null", "b_missing"],
+        "desc pagination must cross from present rows into the missing bucket and page within it"
       );
     } finally {
       await driver.teardown();
