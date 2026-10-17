@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import {
@@ -28,7 +29,7 @@ import {
   type ConnectorPathResolver,
   createController,
 } from "../runtime/controller.ts";
-import type { RuntimeRunConnectorOptions, RuntimeRunConnectorResult } from "../runtime/index.ts";
+import { type RuntimeRunConnectorOptions, type RuntimeRunConnectorResult, runConnector } from "../runtime/index.ts";
 import { createHostBrowserSurfaceAllocator } from "../runtime/host-browser-surface-allocator.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
 import type {
@@ -2021,6 +2022,92 @@ test("owner cancellation during a pending assist releases the lease exactly once
     leasedSurfaceId,
     "reacquisition should reuse the same warm surface rather than orphaning it"
   );
+});
+
+// Writes a connector child that answers START with one OTP INTERACTION whose
+// timeout matches a real bank prompt (600 s), then idles until terminated.
+function writeBlockedOtpConnector(t: TestContext): string {
+  const dir = mkdtempSync(join(tmpdir(), "pdpp-cancel-blocked-otp-"));
+  t.after(() => rmSync(dir, { force: true, recursive: true }));
+  const path = join(dir, "connector.mjs");
+  writeFileSync(
+    path,
+    `import { createInterface } from 'node:readline';
+const rl = createInterface({ input: process.stdin, terminal: false });
+rl.once('line', () => {
+  process.stdout.write(JSON.stringify({
+    type: 'INTERACTION', request_id: 'int_blocked_otp', kind: 'otp',
+    message: 'Enter the code', timeout_seconds: 600,
+  }) + '\\n');
+});
+setInterval(() => {}, 1000);
+`,
+    "utf8"
+  );
+  return path;
+}
+
+const BLOCKED_OTP_MANIFEST = {
+  ...MANIFEST,
+  streams: [
+    {
+      name: "items",
+      primary_key: "id",
+      schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+    },
+  ],
+};
+
+test("owner cancellation of a run blocked on an INTERACTION finishes it promptly, not at the interaction timeout", async (t) => {
+  const connectorPath = writeBlockedOtpConnector(t);
+  const { controller, manager } = setup(t, {
+    connectorPathResolver: () => connectorPath,
+    runConnectorImpl: runConnector,
+  });
+  const runId = "run_cancel_blocked_otp";
+  await controller.runNow("managed", { manifest: BLOCKED_OTP_MANIFEST, ownerToken: "owner-token", runId });
+  const pendingDeadline = Date.now() + 10_000;
+  while (controller.getPendingInteraction(runId)?.interaction_id !== "int_blocked_otp") {
+    assert.ok(Date.now() < pendingDeadline, "the OTP interaction should become pending");
+    // biome-ignore lint/performance/noAwaitInLoops: polling must be sequential until the interaction is pending.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+
+  const cancelResult = await controller.cancelRun(runId, "owner_local");
+  assert.equal(cancelResult.status, "cancel_requested");
+  // Bounded by the 250 ms SIGTERM grace plus spine writes, not by the
+  // interaction's 600 s timeout. No one answers the interaction here.
+  const drain = await controller.drainActiveRuns(5000);
+  if (drain.timedOut > 0) {
+    // Answer the prompt so a regression fails fast instead of holding the
+    // suite for the 600 s interaction timeout.
+    const pending = controller.getPendingInteraction(runId);
+    if (pending) {
+      controller.respondToInteraction(runId, { interaction_id: pending.interaction_id, status: "cancelled" });
+    }
+    await controller.drainActiveRuns(5000);
+  }
+  assert.equal(drain.timedOut, 0, "the cancelled run must settle without an interaction answer");
+
+  const events = listRunEvents(runId);
+  const types = events.map((event) => event.event_type);
+  assert.deepEqual(
+    types.filter((type) => type === "run.cancelled" || type === "run.failed" || type === "run.completed"),
+    ["run.cancelled"],
+    "exactly one terminal event, and it is run.cancelled"
+  );
+  assert.ok(types.indexOf("run.cancel_requested") < types.indexOf("run.cancelled"));
+  const completed = events.filter((event) => event.event_type === "run.interaction_completed");
+  assert.deepEqual(
+    completed.map((event) => event.status),
+    ["cancelled"],
+    "the pending interaction settles once, as cancelled"
+  );
+  assert.equal(controller.getPendingInteraction(runId), null, "no prompt stays pending");
+  assert.equal(controller.findActiveRunByRunId(runId), null, "the run is no longer active");
+  const lease = manager.getLease("lease_1");
+  assert.equal(lease?.status, "released", "the run's browser lease is released");
+  assert.equal(manager.getSurface(lease?.surface_id as string)?.active_lease_id, undefined);
 });
 
 test("repeated cancellation of an already-terminal run is idempotent and does not double-release", async (t) => {
