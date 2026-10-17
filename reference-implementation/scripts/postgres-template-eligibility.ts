@@ -115,6 +115,7 @@ export const POSTGRES_TEMPLATE_ELIGIBLE_FILES: readonly string[] = [
   "test/postgres-records-version-floor.test.ts",
   "test/postgres-runtime-storage.test.ts",
   "test/postgres-semantic-existing-keys-bounded.test.ts",
+  "test/postgres-stream-summary-grant-visibility.test.ts",
   "test/postgres-test-database-guard.test.ts",
   "test/postgres-transaction-connector-instance-lock.test.ts",
   "test/provider-app-config-store-postgres.test.ts",

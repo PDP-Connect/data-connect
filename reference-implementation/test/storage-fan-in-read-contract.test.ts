@@ -805,6 +805,37 @@ test("listStreamsAcrossBindings emits one summary per (stream, connection_id)", 
 });
 
 
+test("stream summaries restrict counts and timestamps to grant-visible records", async () => {
+  await withSingleConnectionDb(async () => {
+    const cases = [
+      { resources: ["rec-a-1"] },
+      {
+        time_constraint: {
+          field: "received_at",
+          since: "2026-05-18T12:00:00.000Z",
+          until: "2026-05-18T12:01:00.000Z",
+        },
+      },
+      {
+        resources: ["rec-a-1", "rec-a-2"],
+        time_constraint: { field: "received_at", until: "2026-05-18T12:01:00.000Z" },
+      },
+    ];
+    for (const constraints of cases) {
+      const summaries = await listStreams(target(INSTANCE_A), {
+        streams: [{ name: STREAM, ...constraints }],
+      }, baseManifest);
+      assert.equal(summaries[0]?.record_count, 1);
+      assert.equal(summaries[0]?.last_updated, "2026-05-18T12:00:00.000Z");
+    }
+    const empty = await listStreams(target(INSTANCE_A), {
+      streams: [{ name: STREAM, resources: ["missing"] }],
+    }, baseManifest);
+    assert.equal(empty[0]?.record_count, 0);
+    assert.equal(empty[0]?.last_updated, null);
+  });
+});
+
 test("stream summaries aggregate once per binding, preserving pinned grants and stream order", async () => {
   await withDualConnectionDb(async () => {
     const names = [STREAM, "tasks", "notes"];
