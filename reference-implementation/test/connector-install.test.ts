@@ -1479,6 +1479,43 @@ test("a lifecycle lock row that an earlier start of this process left does not b
   }
 });
 
+test("a live older build's lifecycle lock row keeps the lock busy and stays in place; a provably stale one does not", () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pdpp-connector-install-"));
+  initDb(join(dataDir, "pdpp.sqlite"));
+  const olderBuildRow = (pid: number | undefined) => {
+    getDb().prepare("DELETE FROM connector_lifecycle_locks").run();
+    getDb()
+      .prepare("INSERT INTO connector_lifecycle_locks(connector_id, owner_token, owner_pid) VALUES(?, ?, ?)")
+      .run("github", "older-build-operation", pid);
+  };
+  const rowToken = () =>
+    getDb().prepare("SELECT owner_token FROM connector_lifecycle_locks").get<{ owner_token: string }>()?.owner_token;
+  try {
+    // Creates the lock table.
+    withConnectorLifecycleLockSync(dataDir, "github", () => undefined);
+    // An older build locks by this row alone and takes no OS lock.
+    olderBuildRow(process.ppid);
+    assert.throws(() => withConnectorLifecycleLockSync(dataDir, "github", () => undefined), /lifecycle operation is busy/);
+    assert.equal(rowToken(), "older-build-operation", "the live older build keeps its row");
+
+    const exited = spawnSync(process.execPath, ["-e", ""]);
+    assert.equal(exited.status, 0);
+    // A dead pid, and this pid after a container restart, are stale here.
+    for (const pid of [exited.pid, process.pid]) {
+      olderBuildRow(pid);
+      let entered = false;
+      withConnectorLifecycleLockSync(dataDir, "github", () => {
+        entered = true;
+      });
+      assert.equal(entered, true, `a row with pid ${String(pid)} does not block`);
+      assert.equal(rowToken(), undefined, "the lock released its own row");
+    }
+  } finally {
+    closeDb();
+    rmSync(dataDir, { force: true, recursive: true });
+  }
+});
+
 test("a deadline while an install waits for the lifecycle lock releases the install fence", async () => {
   const dataDir = mkdtempSync(join(tmpdir(), "pdpp-connector-install-"));
   initDb(join(dataDir, "pdpp.sqlite"));
