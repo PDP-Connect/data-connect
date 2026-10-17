@@ -140,8 +140,9 @@ export function resolveBrowsersPath(
     const value = env[key]?.trim();
     return value ? [{ key, value }] : [];
   });
-  // "0" tells Patchright to use its package-local install; it is not a directory.
-  if (configured.some(({ value }) => value === "0")) {
+  // "0" tells Patchright to use its package-local install; it is not a directory. Only the
+  // variable Patchright reads has that meaning; "0" in the other one is not a path to judge.
+  if (configured.some(({ key, value }) => key === PATCHRIGHT_READS_KEY && value === "0")) {
     return { kind: "unchecked", reason: "browsers path is 0 (Patchright package-local browsers)" };
   }
 
@@ -151,7 +152,7 @@ export function resolveBrowsersPath(
   const playwrightValue = configured.find(({ key }) => key === PATCHRIGHT_READS_KEY)?.value;
   const inEffect = [
     { key: PATCHRIGHT_READS_KEY, value: playwrightValue ?? defaultBrowsersPath(deps.homeDir ?? homedir()) },
-    ...configured.filter(({ key }) => key !== PATCHRIGHT_READS_KEY),
+    ...configured.filter(({ key, value }) => key !== PATCHRIGHT_READS_KEY && value !== "0"),
   ];
   const lacking = inEffect.filter(({ value }) => !executableExists(executableUnder(value)));
   const [first] = inEffect;
@@ -165,10 +166,10 @@ export function resolveBrowsersPath(
       executable: executableUnder(IMAGE_BROWSERS_PATH),
       fallbackPath: IMAGE_BROWSERS_PATH,
       kind: "fell_back",
-      // Always the variable Patchright reads, plus any other that was set and lacks the executable.
-      replacements: Object.fromEntries(
-        [PATCHRIGHT_READS_KEY, ...lacking.map(({ key }) => key)].map((key) => [key, IMAGE_BROWSERS_PATH]),
-      ),
+      // Only the variables whose path lacks the executable. The variable Patchright reads is always
+      // judged (via its default when unset), so a stale or empty default is replaced, while a valid
+      // custom path stays as configured.
+      replacements: Object.fromEntries(lacking.map(({ key }) => [key, IMAGE_BROWSERS_PATH])),
       revision,
     };
   }

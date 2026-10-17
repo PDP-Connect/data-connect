@@ -103,6 +103,22 @@ test("child environment: a good PATCHRIGHT_BROWSERS_PATH does not stand in for a
   assert.equal(env.PATCHRIGHT_BROWSERS_PATH, CUSTOM);
 });
 
+test("child environment: a valid custom PLAYWRIGHT path is kept when only PATCHRIGHT is stale", () => {
+  const customExecutable = `${CUSTOM}/chromium-${REVISION}/chrome-linux64/chrome`;
+  const { env } = compose(
+    { PATCHRIGHT_BROWSERS_PATH: STALE, PLAYWRIGHT_BROWSERS_PATH: CUSTOM },
+    [customExecutable, IMAGE_EXECUTABLE]
+  );
+  assert.equal(env.PLAYWRIGHT_BROWSERS_PATH, CUSTOM);
+  assert.equal(env.PATCHRIGHT_BROWSERS_PATH, IMAGE_BROWSERS_PATH);
+});
+
+test("child environment: PATCHRIGHT_BROWSERS_PATH=0 does not stop a stale PLAYWRIGHT default from being corrected", () => {
+  const { env } = compose({ PATCHRIGHT_BROWSERS_PATH: "0" }, [IMAGE_EXECUTABLE]);
+  assert.equal(env.PLAYWRIGHT_BROWSERS_PATH, IMAGE_BROWSERS_PATH);
+  assert.equal(env.PATCHRIGHT_BROWSERS_PATH, "0");
+});
+
 test("child environment: the same stale path warns once across runs", () => {
   const warnings: string[] = [];
   const warned = new Set<string>();
