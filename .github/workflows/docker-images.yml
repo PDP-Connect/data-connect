@@ -151,7 +151,7 @@ jobs:
           echo "PDPP_IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}/${IMAGE_NAME}" >> "$GITHUB_ENV"
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Extract Docker metadata
         id: meta
@@ -171,7 +171,7 @@ jobs:
             type=sha,prefix=sha-
 
       - name: Build image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           # Pull from both the target's own scope and the reference scope.
           # reference-browser/core extend the browsers stage (large ~300 MB
@@ -237,9 +237,9 @@ jobs:
         with:
           persist-credentials: false
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - name: Build n.eko browser image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: ./docker/neko/Dockerfile
@@ -340,11 +340,11 @@ jobs:
 
       - name: Set up QEMU
         if: github.event.inputs.image == 'all' || github.event.inputs.image == matrix.image
-        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
 
       - name: Set up Docker Buildx
         if: github.event.inputs.image == 'all' || github.event.inputs.image == matrix.image
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Log in to GHCR
         if: github.event.inputs.image == 'all' || github.event.inputs.image == matrix.image
@@ -382,7 +382,7 @@ jobs:
       # (including core) that releases write, so it gets the same gate.
       - name: Build image without pushing
         if: github.event.inputs.image == 'all' || github.event.inputs.image == matrix.image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           cache-from: |
             type=gha,scope=${{ matrix.target }}
