@@ -89,6 +89,20 @@ test("child environment: both variables are corrected, with one warning", () => 
   assert.equal(warnings.length, 1);
 });
 
+test("child environment: only PATCHRIGHT_BROWSERS_PATH wrong still sets the variable Patchright reads", () => {
+  const { env, warnings } = compose({ PATCHRIGHT_BROWSERS_PATH: STALE }, [IMAGE_EXECUTABLE]);
+  assert.equal(env.PLAYWRIGHT_BROWSERS_PATH, IMAGE_BROWSERS_PATH);
+  assert.equal(env.PATCHRIGHT_BROWSERS_PATH, IMAGE_BROWSERS_PATH);
+  assert.equal(warnings.length, 1);
+});
+
+test("child environment: a good PATCHRIGHT_BROWSERS_PATH does not stand in for an unset PLAYWRIGHT_BROWSERS_PATH", () => {
+  const customExecutable = `${CUSTOM}/chromium-${REVISION}/chrome-linux64/chrome`;
+  const { env } = compose({ PATCHRIGHT_BROWSERS_PATH: CUSTOM }, [customExecutable, IMAGE_EXECUTABLE]);
+  assert.equal(env.PLAYWRIGHT_BROWSERS_PATH, IMAGE_BROWSERS_PATH);
+  assert.equal(env.PATCHRIGHT_BROWSERS_PATH, CUSTOM);
+});
+
 test("child environment: the same stale path warns once across runs", () => {
   const warnings: string[] = [];
   const warned = new Set<string>();

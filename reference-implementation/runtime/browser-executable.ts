@@ -39,6 +39,9 @@ export const IMAGE_BROWSERS_PATH = "/opt/patchright-browsers";
  */
 export const BROWSERS_PATH_ENV_KEYS = ["PLAYWRIGHT_BROWSERS_PATH", "PATCHRIGHT_BROWSERS_PATH"] as const;
 
+/** The only variable patchright-core 1.63.0 reads for the browsers directory. */
+const PATCHRIGHT_READS_KEY = "PLAYWRIGHT_BROWSERS_PATH";
+
 const LINUX_EXECUTABLE_DIRS: Readonly<Record<string, string>> = {
   arm64: "chrome-linux-arm64",
   x64: "chrome-linux64",
@@ -102,7 +105,7 @@ export type BrowserPathResolution =
       readonly executable: string;
       readonly fallbackPath: string;
       readonly revision: string;
-      /** Replacement values, only for the variables that were set and lacked the executable. */
+      /** Replacement values: the variable Patchright reads, plus any other that was set and lacked the executable. */
       readonly replacements: Readonly<Record<string, string>>;
     }
   | {
@@ -142,11 +145,14 @@ export function resolveBrowsersPath(
     return { kind: "unchecked", reason: "browsers path is 0 (Patchright package-local browsers)" };
   }
 
-  // Nothing set means Patchright uses its default directory, which is judged the same way.
-  const inEffect =
-    configured.length > 0
-      ? configured
-      : [{ key: "PLAYWRIGHT_BROWSERS_PATH", value: defaultBrowsersPath(deps.homeDir ?? homedir()) }];
+  // Patchright reads only PLAYWRIGHT_BROWSERS_PATH (patchright-core registryDirectory), and uses its
+  // default directory when that is unset, so that variable is always in play. PATCHRIGHT_BROWSERS_PATH
+  // is judged too, when set, so the two never disagree.
+  const playwrightValue = configured.find(({ key }) => key === PATCHRIGHT_READS_KEY)?.value;
+  const inEffect = [
+    { key: PATCHRIGHT_READS_KEY, value: playwrightValue ?? defaultBrowsersPath(deps.homeDir ?? homedir()) },
+    ...configured.filter(({ key }) => key !== PATCHRIGHT_READS_KEY),
+  ];
   const lacking = inEffect.filter(({ value }) => !executableExists(executableUnder(value)));
   const [first] = inEffect;
   if (lacking.length === 0 || first === undefined) {
@@ -159,7 +165,10 @@ export function resolveBrowsersPath(
       executable: executableUnder(IMAGE_BROWSERS_PATH),
       fallbackPath: IMAGE_BROWSERS_PATH,
       kind: "fell_back",
-      replacements: Object.fromEntries(lacking.map(({ key }) => [key, IMAGE_BROWSERS_PATH])),
+      // Always the variable Patchright reads, plus any other that was set and lacks the executable.
+      replacements: Object.fromEntries(
+        [PATCHRIGHT_READS_KEY, ...lacking.map(({ key }) => key)].map((key) => [key, IMAGE_BROWSERS_PATH]),
+      ),
       revision,
     };
   }
