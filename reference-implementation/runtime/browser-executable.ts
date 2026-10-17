@@ -136,7 +136,9 @@ export function resolveBrowsersPath(
     chromiumExecutablePath(browsersPath, revision, platform, arch) as string;
 
   const configured = BROWSERS_PATH_ENV_KEYS.flatMap((key) => {
-    const value = env[key]?.trim();
+    // Judge the exact value the child receives: whitespace can be part of a
+    // legitimate directory name, and trimming here would validate a different path.
+    const value = env[key];
     return value ? [{ key, value }] : [];
   });
   // "0" tells Patchright to use its package-local install; it is not a directory. Only the

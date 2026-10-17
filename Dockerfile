@@ -189,7 +189,8 @@ ARG TARGETARCH
 # that leaves the browser behind fails the build. The server also falls back to
 # this path when a deploy env points at one without the executable (see
 # reference-implementation/runtime/browser-executable.ts).
-ENV PLAYWRIGHT_BROWSERS_PATH=/opt/patchright-browsers
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/patchright-browsers \
+    PDPP_RUNTIME_BROWSER=1
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends xvfb \
