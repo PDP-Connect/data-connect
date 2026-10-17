@@ -94,6 +94,9 @@ ngrok = "0.19.0"
 url = "2.5"
 open = "5.3.3"
 uuid = { version = "1.22", features = ["v4"] }
+# Opens the first page of a concealed browser over DevTools. The same
+# version is already locked through tauri-plugin-mcp-bridge.
+tungstenite = "0.28"
 aes-gcm = "0.11.1"
 scrypt = { version = "0.12.0", default-features = false, features = ["kdf"] }
 
@@ -135,9 +138,20 @@ wry = { version = "0.55", default-features = false, features = ["protocol", "os-
 # rust_version per release, not assumed.
 sysinfo = { version = "0.38", default-features = false, features = ["system"] }
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSHTTPCookie", "NSDictionary", "NSString", "NSURL"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSError", "NSHTTPCookie", "NSDictionary", "NSString", "NSURL", "NSValue"] }
+# Launches the hidden-native connector browser, creates its private display
+# and conceals it when that display is unavailable
+# (commands/browser_display_macos.rs). Already locked through tauri.
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "block2", "libc", "NSRunningApplication", "NSWorkspace"] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGWindow", "CGDirectDisplay", "CGDisplayConfiguration", "CGError", "CGGeometry"] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "objc2", "CFArray", "CFCGTypes", "CFDictionary"] }
 objc2-web-kit = { version = "0.3", default-features = false, features = ["std", "block2", "WKWebView", "WKWebViewConfiguration", "WKWebsiteDataStore", "WKHTTPCookieStore"] }
 block2 = "0.6"
+
+# Conceals the hidden-native connector browser's windows
+# (commands/browser_display_windows.rs). Already locked through tauri.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Threading", "Win32_UI_Accessibility", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 robius-authentication = "0.3.1"

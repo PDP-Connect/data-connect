@@ -15,13 +15,17 @@
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
-use std::process::{Child, Stdio};
+#[cfg(test)]
+use std::process::Child;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::browser_display::{DisplayProviders, DisplaySession};
+use super::browser_display::{
+    spawn_child, BrowserProcess, DisplayProviders, DisplaySession, ObservedVisibility,
+};
 use super::browser_presentation::DisplayBackend;
+use super::cdp_relay::CdpRelay;
 
 /// How long a launch outside the browser surface host (the browser check)
 /// waits for DevTools.
@@ -99,37 +103,14 @@ pub(crate) fn sandbox_unavailable_message() -> String {
         .into()
 }
 
-/// A running browser process tree. Tests substitute a fake so lifecycle
-/// order can be proven without real processes or `/proc`.
-pub(crate) trait BrowserProcess: Send {
-    fn id(&self) -> u32;
-    fn has_exited(&mut self) -> bool;
-    /// Stop the process and its descendants. False when the stop could not
-    /// be confirmed.
-    fn terminate(&mut self) -> bool;
-}
-
-struct SpawnedBrowser(Child);
-
-impl BrowserProcess for SpawnedBrowser {
-    fn id(&self) -> u32 {
-        self.0.id()
-    }
-
-    fn has_exited(&mut self) -> bool {
-        super::pdpp_browser::browser_child_exited(&mut self.0)
-    }
-
-    fn terminate(&mut self) -> bool {
-        super::pdpp_browser::terminate_browser(&mut self.0)
-    }
-}
-
 /// A launched browser and the display it renders on.
 pub(crate) struct OwnedBrowser {
     /// Kept after the process is confirmed stopped, so the browser keeps its
     /// identity while its display is still being stopped.
     pid: Option<u32>,
+    /// The DevTools endpoint clients use when pages must open in the
+    /// background.
+    relay: Option<CdpRelay>,
     process: Option<Box<dyn BrowserProcess>>,
     display: Option<Box<dyn DisplaySession>>,
 }
@@ -141,6 +122,7 @@ impl OwnedBrowser {
     ) -> Self {
         Self {
             pid: process.as_ref().map(|process| process.id()),
+            relay: None,
             process,
             display,
         }
@@ -148,7 +130,10 @@ impl OwnedBrowser {
 
     #[cfg(test)]
     pub(crate) fn from_child(child: Child) -> Self {
-        Self::new(Some(Box::new(SpawnedBrowser(child))), None)
+        Self::new(
+            Some(Box::new(super::browser_display::ChildBrowser(child))),
+            None,
+        )
     }
 
     /// The browser's process id, which is also its process group on Unix.
@@ -157,9 +142,38 @@ impl OwnedBrowser {
         self.pid
     }
 
+    /// What the owner could see of the browser, as its display observed it.
+    pub(crate) fn observed_visibility(&self) -> ObservedVisibility {
+        self.display
+            .as_ref()
+            .map_or(ObservedVisibility::Unknown, |display| {
+                display.observed_visibility()
+            })
+    }
+
+    /// Whether the companion receives frames while the browser stays
+    /// concealed. A browser on the inherited display is never concealed.
+    pub(crate) fn streams_while_concealed(&self) -> bool {
+        self.display
+            .as_ref()
+            .is_none_or(|display| display.streams_while_concealed())
+    }
+
+    /// Show the browser on the owner's desktop without taking focus.
+    pub(crate) fn reveal(&mut self) -> Result<(), String> {
+        match self.display.as_mut() {
+            Some(display) => display.reveal(),
+            // Already on the owner's desktop.
+            None => Ok(()),
+        }
+    }
+
     /// Stop the browser, then its display. Idempotent. False means some
     /// stop is unconfirmed: keep this value and call again later.
     pub(crate) fn terminate(&mut self) -> bool {
+        if let Some(mut relay) = self.relay.take() {
+            relay.stop();
+        }
         if let Some(process) = self.process.as_mut() {
             if !process.terminate() {
                 return false;
@@ -287,7 +301,7 @@ impl BrowserLauncher {
 /// Spawn the browser into `owned` and wait for DevTools. On error the caller
 /// stops `owned`, which by then holds whatever was started.
 fn spawn_and_wait(
-    mut command: std::process::Command,
+    command: std::process::Command,
     spec: &LaunchSpec<'_>,
     owned: &mut OwnedBrowser,
 ) -> Result<Readiness, BrowserLaunchError> {
@@ -295,38 +309,55 @@ fn spawn_and_wait(
         return Err(BrowserLaunchError::timed_out("starting the display"));
     }
     let _ = fs::remove_file(spec.profile_dir.join("DevToolsActivePort"));
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = spawn_retrying_busy_executable(&mut command)
-        .map_err(|error| format!("Failed to launch host browser: {error}"))?;
+    let pages_open_in_background = owned
+        .display
+        .as_ref()
+        .is_some_and(|display| display.browser_launch().pages_open_in_background);
+    let spawned = match owned.display.as_mut() {
+        Some(display) => display.spawn(command),
+        None => spawn_child(command),
+    }
+    .map_err(|error| {
+        if error.kind() == std::io::ErrorKind::Unsupported {
+            // The presentation cannot be executed for this browser; say so
+            // and how to get the visible browser instead.
+            BrowserLaunchError::new(
+                BROWSER_DISPLAY_UNAVAILABLE,
+                format!(
+                    "{error}. Set DATACONNECT_BROWSER_DISPLAY=desktop to use a visible browser window."
+                ),
+            )
+        } else {
+            BrowserLaunchError::start_failed(format!("Failed to launch host browser: {error}"))
+        }
+    })?;
     let spawned_at = Instant::now();
-    let pipes = (child.stdout.take(), child.stderr.take());
-    *owned = OwnedBrowser::new(Some(Box::new(SpawnedBrowser(child))), owned.display.take());
-    let (Some(stdout), Some(stderr)) = pipes else {
-        return Err("Host browser output was not piped".into());
-    };
+    owned.pid = Some(spawned.process.id());
+    owned.process = Some(spawned.process);
     let (sender, receiver) = mpsc::channel();
-    thread::spawn(move || {
-        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            if sender.send(line).is_err() {
-                break;
+    if let Some(stdout) = spawned.stdout {
+        thread::spawn(move || {
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                if sender.send(line).is_err() {
+                    break;
+                }
             }
-        }
-    });
+        });
+    }
     let stderr_tail = StderrTail::default();
-    let stderr_reader = stderr_tail.clone();
-    // Keep draining after readiness so a chatty browser never blocks on a
-    // full pipe; only the bounded tail is retained.
-    thread::spawn(move || {
-        let mut reader = BufReader::new(stderr);
-        let mut line = Vec::new();
-        while matches!(reader.read_until(b'\n', &mut line), Ok(read) if read > 0) {
-            stderr_reader.push_line(&String::from_utf8_lossy(&line));
-            line.clear();
-        }
-    });
+    if let Some(stderr) = spawned.stderr {
+        let stderr_reader = stderr_tail.clone();
+        // Keep draining after readiness so a chatty browser never blocks on
+        // a full pipe; only the bounded tail is retained.
+        thread::spawn(move || {
+            let mut reader = BufReader::new(stderr);
+            let mut line = Vec::new();
+            while matches!(reader.read_until(b'\n', &mut line), Ok(read) if read > 0) {
+                stderr_reader.push_line(&String::from_utf8_lossy(&line));
+                line.clear();
+            }
+        });
+    }
     let process = owned
         .process
         .as_deref_mut()
@@ -336,8 +367,18 @@ fn spawn_and_wait(
         process,
         &receiver,
         &stderr_tail,
+        pages_open_in_background,
         spec.deadline,
     )?;
+    let cdp_url = if pages_open_in_background {
+        let relay = CdpRelay::start(&cdp_url)
+            .map_err(|error| format!("Failed to start the DevTools relay: {error}"))?;
+        let url = relay.url().to_string();
+        owned.relay = Some(relay);
+        url
+    } else {
+        cdp_url
+    };
     Ok(Readiness {
         cdp_url,
         browser_version: ready.browser_version,
@@ -345,29 +386,6 @@ fn spawn_and_wait(
         spawned_at,
         cdp_ready_at: Instant::now(),
     })
-}
-
-/// Spawn, retrying briefly when the executable is "busy". A process forked
-/// elsewhere in this app holds inherited descriptors until it execs, so a
-/// browser that was just downloaded (or a test's just-written script) can
-/// fail with ETXTBSY for a moment after its writer closed it.
-pub(crate) fn spawn_retrying_busy_executable(
-    command: &mut std::process::Command,
-) -> std::io::Result<Child> {
-    #[cfg(unix)]
-    let busy = Some(libc::ETXTBSY);
-    #[cfg(not(unix))]
-    let busy = None;
-    let mut attempts = 0;
-    loop {
-        match command.spawn() {
-            Err(error) if busy.is_some() && error.raw_os_error() == busy && attempts < 5 => {
-                attempts += 1;
-                thread::sleep(Duration::from_millis(20));
-            }
-            result => return result,
-        }
-    }
 }
 
 /// The browser announces its DevTools endpoint either on stdout (test
@@ -378,8 +396,10 @@ fn wait_for_devtools_endpoint(
     process: &mut dyn BrowserProcess,
     receiver: &mpsc::Receiver<String>,
     stderr_tail: &StderrTail,
+    pages_open_in_background: bool,
     deadline: Instant,
 ) -> Result<(String, DevtoolsReady), BrowserLaunchError> {
+    let mut first_page_requested = false;
     let active_port = profile_dir.join("DevToolsActivePort");
     let probe = reqwest::blocking::Client::builder()
         .no_proxy()
@@ -402,13 +422,22 @@ fn wait_for_devtools_endpoint(
                 .map(|port| format!("http://127.0.0.1:{port}"))
         });
         for url in [from_stdout, from_port_file].into_iter().flatten() {
-            if let Some(ready) = devtools_http_ready(&probe, &url, deadline) {
-                // A browser that handed off to an existing instance answers
-                // briefly and then exits; that is not a ready browser.
-                if process.has_exited() {
-                    return Err(exited_before_ready(stderr_tail));
+            match probe_devtools(&probe, &url, deadline) {
+                DevtoolsState::Ready(ready) => {
+                    // A browser that handed off to an existing instance answers
+                    // briefly and then exits; that is not a ready browser.
+                    if process.has_exited() {
+                        return Err(exited_before_ready(stderr_tail));
+                    }
+                    return Ok((url, ready));
                 }
-                return Ok((url, ready));
+                DevtoolsState::NoPage { browser_websocket } if pages_open_in_background => {
+                    if !first_page_requested {
+                        open_background_page(&browser_websocket, deadline)?;
+                        first_page_requested = true;
+                    }
+                }
+                DevtoolsState::NoPage { .. } | DevtoolsState::Unreachable => {}
             }
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -464,63 +493,120 @@ struct DevtoolsReady {
     browser_version: Option<String>,
 }
 
-fn devtools_http_ready(
+enum DevtoolsState {
+    Unreachable,
+    /// The browser answers but has no page target yet.
+    NoPage {
+        browser_websocket: String,
+    },
+    Ready(DevtoolsReady),
+}
+
+fn probe_devtools(
     client: &reqwest::blocking::Client,
     cdp_url: &str,
     deadline: Instant,
-) -> Option<DevtoolsReady> {
-    let timeout = devtools_probe_timeout(deadline)?;
-    let request = client
-        .get(format!("{cdp_url}/json/version"))
-        .timeout(timeout);
-    if Instant::now() >= deadline {
-        return None;
-    }
-    let Ok(response) = request.send() else {
-        return None;
+) -> DevtoolsState {
+    let get_json = |path: &str| -> Option<serde_json::Value> {
+        let timeout = devtools_probe_timeout(deadline)?;
+        let response = client
+            .get(format!("{cdp_url}{path}"))
+            .timeout(timeout)
+            .send()
+            .ok()?;
+        if !response.status().is_success() {
+            return None;
+        }
+        response.json::<serde_json::Value>().ok()
     };
-    if !response.status().is_success() {
-        return None;
-    }
-    let Ok(version) = response.json::<serde_json::Value>() else {
-        return None;
+    let Some(version) = get_json("/json/version") else {
+        return DevtoolsState::Unreachable;
+    };
+    let Some(browser_websocket) = version
+        .get("webSocketDebuggerUrl")
+        .and_then(serde_json::Value::as_str)
+        .filter(|url| is_websocket_url(url))
+        .map(str::to_string)
+    else {
+        return DevtoolsState::Unreachable;
     };
     let browser_version = version
         .get("Browser")
         .and_then(serde_json::Value::as_str)
         .map(str::to_string);
-    let has_browser_websocket = version
-        .get("webSocketDebuggerUrl")
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(is_websocket_url);
-    if !has_browser_websocket {
-        return None;
-    }
-
-    let timeout = devtools_probe_timeout(deadline)?;
-    let request = client.get(format!("{cdp_url}/json/list")).timeout(timeout);
-    if Instant::now() >= deadline {
-        return None;
-    }
-    let Ok(response) = request.send() else {
-        return None;
+    let Some(targets) = get_json("/json/list") else {
+        return DevtoolsState::Unreachable;
     };
-    if !response.status().is_success() {
-        return None;
-    }
-    let Ok(targets) = response.json::<Vec<serde_json::Value>>() else {
-        return None;
-    };
-    targets
-        .iter()
-        .any(|target| {
+    let has_page = targets.as_array().is_some_and(|targets| {
+        targets.iter().any(|target| {
             target.get("type").and_then(serde_json::Value::as_str) == Some("page")
                 && target
                     .get("webSocketDebuggerUrl")
                     .and_then(serde_json::Value::as_str)
                     .is_some_and(is_websocket_url)
         })
-        .then_some(DevtoolsReady { browser_version })
+    });
+    if has_page {
+        DevtoolsState::Ready(DevtoolsReady { browser_version })
+    } else {
+        DevtoolsState::NoPage { browser_websocket }
+    }
+}
+
+/// Ask the browser for its first page as a background window. Chromium
+/// shows such a window without activating it, so the browser never takes
+/// the owner's focus, and a concealing backend hides it before it is drawn
+/// on most launches.
+fn open_background_page(
+    browser_websocket: &str,
+    deadline: Instant,
+) -> Result<(), BrowserLaunchError> {
+    let failed = |detail: String| {
+        BrowserLaunchError::start_failed(format!("Failed to open the first browser page: {detail}"))
+    };
+    let url = reqwest::Url::parse(browser_websocket).map_err(|error| failed(error.to_string()))?;
+    let address = url
+        .socket_addrs(|| None)
+        .map_err(|error| failed(error.to_string()))?
+        .into_iter()
+        .next()
+        .ok_or_else(|| failed("no DevTools address".into()))?;
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(BrowserLaunchError::timed_out("opening the first page"));
+    }
+    let stream = std::net::TcpStream::connect_timeout(&address, remaining)
+        .map_err(|error| failed(error.to_string()))?;
+    stream
+        .set_read_timeout(Some(remaining))
+        .map_err(|error| failed(error.to_string()))?;
+    let (mut socket, _) = tungstenite::client::client(browser_websocket, stream)
+        .map_err(|error| failed(error.to_string()))?;
+    let request = serde_json::json!({
+        "id": 1,
+        "method": "Target.createTarget",
+        "params": { "url": "about:blank", "newWindow": true, "background": true },
+    });
+    socket
+        .send(tungstenite::Message::text(request.to_string()))
+        .map_err(|error| failed(error.to_string()))?;
+    loop {
+        let message = socket.read().map_err(|error| failed(error.to_string()))?;
+        let Ok(text) = message.to_text() else {
+            continue;
+        };
+        let Ok(reply) = serde_json::from_str::<serde_json::Value>(text) else {
+            continue;
+        };
+        if reply.get("id") != Some(&serde_json::json!(1)) {
+            continue;
+        }
+        let _ = socket.close(None);
+        return match reply.get("error") {
+            Some(error) => Err(failed(error.to_string())),
+            None => Ok(()),
+        };
+    }
 }
 
 fn devtools_probe_timeout(deadline: Instant) -> Option<Duration> {
@@ -572,6 +658,7 @@ fn is_http_url(value: &str) -> bool {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::commands::browser_display::ObservedVisibility;
     use crate::commands::browser_display::{BrowserDisplayLaunch, DisplayProvider};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -641,6 +728,10 @@ pub(crate) mod tests {
     impl DisplaySession for FakeDisplay {
         fn browser_launch(&self) -> &BrowserDisplayLaunch {
             &self.launch
+        }
+
+        fn observed_visibility(&self) -> ObservedVisibility {
+            ObservedVisibility::IsolatedDisplay
         }
 
         fn terminate(&mut self) -> bool {
@@ -793,6 +884,79 @@ pub(crate) mod tests {
         );
     }
 
+    /// A display that cannot launch this browser hidden.
+    struct UnsupportedDisplay(FakeDisplay);
+
+    impl DisplaySession for UnsupportedDisplay {
+        fn browser_launch(&self) -> &BrowserDisplayLaunch {
+            &self.0.launch
+        }
+
+        fn spawn(
+            &mut self,
+            _command: std::process::Command,
+        ) -> std::io::Result<crate::commands::browser_display::SpawnedBrowser> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "not inside an application bundle",
+            ))
+        }
+
+        fn observed_visibility(&self) -> ObservedVisibility {
+            ObservedVisibility::Concealed
+        }
+
+        fn terminate(&mut self) -> bool {
+            self.0.terminate()
+        }
+    }
+
+    struct UnsupportedProvider(Events);
+
+    impl DisplayProvider for UnsupportedProvider {
+        fn backend(&self) -> DisplayBackend {
+            DisplayBackend::HiddenNative
+        }
+
+        fn start(&self, _deadline: Instant) -> Result<Box<dyn DisplaySession>, String> {
+            Ok(Box::new(UnsupportedDisplay(FakeDisplay::new(
+                self.0.clone(),
+                0,
+            ))))
+        }
+    }
+
+    #[test]
+    fn a_browser_the_backend_cannot_present_fails_with_the_way_out() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let events = Events::default();
+        let launcher = BrowserLauncher::new(
+            DisplayProviders::default().with(Arc::new(UnsupportedProvider(events.clone()))),
+        );
+        let executable = temp.path().join("chromium");
+        let failure = launcher
+            .launch(&LaunchSpec {
+                executable: &executable,
+                profile_dir: temp.path(),
+                headless: false,
+                display_backend: DisplayBackend::HiddenNative,
+                deadline: Instant::now() + Duration::from_secs(5),
+            })
+            .err()
+            .expect("unsupported");
+        assert_eq!(failure.error.code, BROWSER_DISPLAY_UNAVAILABLE);
+        assert!(
+            failure
+                .error
+                .message
+                .contains("DATACONNECT_BROWSER_DISPLAY=desktop"),
+            "{}",
+            failure.error.message
+        );
+        assert!(failure.unstopped.is_none());
+        assert_eq!(events.all(), ["display-stop"]);
+    }
+
     #[test]
     fn a_launch_whose_deadline_passed_during_display_start_does_not_spawn() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -814,6 +978,99 @@ pub(crate) mod tests {
         assert_eq!(failure.error.code, SURFACE_START_TIMEOUT);
         assert!(failure.unstopped.is_none());
         assert_eq!(events.all(), ["display-start", "display-stop"]);
+    }
+
+    /// The Windows `hidden-native` path with a real Chrome, through the
+    /// launcher, the window backend and the DevTools relay. What the owner
+    /// saw is measured by an independent observer
+    /// (`scripts/observe-browser-windows.ps1`) reading the phase this test
+    /// writes to DATACONNECT_OBSERVE_PHASE_FILE.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires a real Chrome (DATACONNECT_REAL_BROWSER) on an interactive desktop"]
+    fn real_chrome_hidden_native_on_windows() {
+        let phase = |name: &str| {
+            // Best effort: on Windows the observer may hold the file for a
+            // moment, and the phase only labels the observer's samples.
+            if let Ok(path) = std::env::var("DATACONNECT_OBSERVE_PHASE_FILE") {
+                for _ in 0..20 {
+                    if fs::write(&path, name).is_ok() {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(5));
+                }
+            }
+        };
+        let run_script = |env: &str, cdp_url: &str| -> Option<(bool, String)> {
+            let script = std::env::var(env).ok()?;
+            let output = std::process::Command::new("node")
+                .arg(script)
+                .arg(cdp_url)
+                .output()
+                .expect("run node");
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            Some((
+                output.status.success(),
+                stdout.lines().last().unwrap_or_default().to_string(),
+            ))
+        };
+        let temp = tempfile::tempdir().expect("tempdir");
+        let browser = std::path::PathBuf::from(
+            std::env::var("DATACONNECT_REAL_BROWSER").expect("DATACONNECT_REAL_BROWSER"),
+        );
+        let profile = temp.path().join("profile");
+        fs::create_dir_all(&profile).expect("profile");
+        let providers = DisplayProviders::discover(temp.path());
+        assert_eq!(
+            providers.installed_backends(),
+            vec![DisplayBackend::HiddenNative]
+        );
+        phase("launch");
+        let (mut owned, readiness) = BrowserLauncher::new(providers)
+            .launch(&LaunchSpec {
+                executable: &browser,
+                profile_dir: &profile,
+                headless: false,
+                display_backend: DisplayBackend::HiddenNative,
+                deadline: Instant::now() + Duration::from_secs(30),
+            })
+            .map_err(|failure| failure.error)
+            .expect("launch");
+        println!(
+            "launch: visibility={:?} streams_while_concealed={} cdp={} spawned_after_ms={} ready_after_ms={}",
+            owned.observed_visibility(),
+            owned.streams_while_concealed(),
+            readiness.cdp_url,
+            readiness.spawned_at.elapsed().as_millis(),
+            readiness.cdp_ready_at.elapsed().as_millis(),
+        );
+        phase("collect");
+        if let Some((ok, line)) =
+            run_script("DATACONNECT_LIVE_COLLECTION_CHECK", &readiness.cdp_url)
+        {
+            println!("collection while concealed: {line}");
+            assert!(ok, "collection failed while concealed: {line}");
+        }
+        phase("companion-concealed");
+        if let Some((ok, line)) = run_script("DATACONNECT_LIVE_CDP_CHECK", &readiness.cdp_url) {
+            println!("companion while concealed: {line}");
+            assert!(ok, "companion failed while concealed: {line}");
+        }
+        println!(
+            "after concealed phases: visibility={:?}",
+            owned.observed_visibility()
+        );
+        phase("reveal");
+        owned.reveal().expect("reveal");
+        thread::sleep(Duration::from_millis(500));
+        phase("companion-revealed");
+        if let Some((ok, line)) = run_script("DATACONNECT_LIVE_CDP_CHECK", &readiness.cdp_url) {
+            println!("companion after reveal: {line}");
+            assert!(ok, "companion failed after reveal: {line}");
+        }
+        phase("release");
+        assert!(owned.terminate());
+        phase("done");
     }
 
     /// Launch-level behaviour against shell-script browsers.

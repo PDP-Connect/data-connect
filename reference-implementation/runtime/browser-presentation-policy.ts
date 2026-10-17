@@ -26,11 +26,13 @@ export const BROWSER_ENGINE_MODES = ["headed", "headless"] as const;
 export const BROWSER_DISPLAY_BACKENDS = [
 	"inherited-host",
 	"private-xvfb",
+	"hidden-native",
 	"externally-owned",
 ] as const;
 export const BROWSER_NATIVE_VISIBILITIES = [
 	"normal",
 	"isolated-display",
+	"concealed",
 	"no-window",
 ] as const;
 export const BROWSER_INTERACTION_PRESENTATIONS = [
@@ -189,7 +191,13 @@ function presentationPolicyConflict(
 	}
 	if (policy.display_backend === "inherited-host") {
 		if (policy.native_visibility !== "normal") {
-			return "v1 has no adapter that hides a window on the owner's desktop";
+			return "a window on the inherited display is shown normally; hiding it needs display_backend hidden-native";
+		}
+		return null;
+	}
+	if (policy.display_backend === "hidden-native") {
+		if (policy.native_visibility !== "concealed") {
+			return "display_backend hidden-native keeps the window on the owner's desktop concealed, so native_visibility must be concealed";
 		}
 		return null;
 	}

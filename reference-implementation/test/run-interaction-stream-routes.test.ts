@@ -112,6 +112,7 @@ type NekoCompanionOptions = Record<string, unknown>;
 interface StartServerOptions {
   asPort?: number;
   browserSurfaceLeaseManager?: unknown;
+  revealConcealedBrowserSurface?: (surfaceId: string) => Promise<void>;
   browserSurfaceReadinessProbe?: unknown;
   connectionScopedRunEnvResolver?: typeof resolveCredentialFreeFixtureRunEnv;
   connectorPathResolver?: () => string;
@@ -151,6 +152,7 @@ test("viewport wire normalizes before validating so fractional dimensions never 
 });
 
 interface MakeLeaseManagerOptions {
+  allocatorMetadata?: Record<string, string>;
   connectorId?: string;
   hostCdp?: boolean;
   initialActiveLease?: boolean;
@@ -163,6 +165,7 @@ interface MakeLeaseManagerOptions {
 }
 
 function makeLeaseManager({
+  allocatorMetadata = {},
   connectorId = "chatgpt",
   hostCdp = false,
   profileKey = "profile_dynamic_1",
@@ -202,6 +205,7 @@ function makeLeaseManager({
         ...(withSettleEndpoint ? { window_settle_endpoint: "http://neko:9222/pdpp/window-settle" } : {}),
         allocator_metadata: {
           resource_owner: "pdpp-reference",
+          ...allocatorMetadata,
         },
         health: surfaceHealth,
         ...(initialActiveLease ? { active_lease_id: "lease_dynamic_1" } : {}),
@@ -747,6 +751,7 @@ interface CompanionSpawnArgs {
  */
 interface HarnessOptions extends Record<string, unknown> {
   browserSurfaceLeaseManager?: unknown;
+  revealConcealedBrowserSurface?: (surfaceId: string) => Promise<void>;
   browserSurfaceReadinessProbe?: unknown;
   buildConnector?: (tmpDir: string) => string;
   isNekoProxyTargetApproved?: unknown;
@@ -869,6 +874,9 @@ async function withHarness(options: HarnessOptions | null, fn: (ctx: HarnessCont
   };
   const server = await startServer({
     asPort: 0,
+    ...(harnessOptions.revealConcealedBrowserSurface
+      ? { revealConcealedBrowserSurface: harnessOptions.revealConcealedBrowserSurface }
+      : {}),
     browserSurfaceLeaseManager: harnessOptions.browserSurfaceLeaseManager,
     browserSurfaceReadinessProbe: harnessOptions.browserSurfaceReadinessProbe,
     connectionScopedRunEnvResolver: resolveCredentialFreeFixtureRunEnv,
@@ -1168,6 +1176,69 @@ test("mint streams a host lease through its CDP endpoint", async () => {
       }
     }
   );
+});
+
+async function mintHostStreamWithMetadata(
+  allocatorMetadata: Record<string, string>,
+  revealSurface: (surfaceId: string) => Promise<void>
+): Promise<{ events: string[]; status: number }> {
+  const connectorId = "https://registry.pdpp.dev/connectors/spotify";
+  const leaseManager = makeLeaseManager({ allocatorMetadata, connectorId, hostCdp: true });
+  const events: string[] = [];
+  let status = 0;
+  await withHarness(
+    {
+      browserSurfaceLeaseManager: leaseManager,
+      revealConcealedBrowserSurface: async (surfaceId: string) => {
+        events.push(`reveal:${surfaceId}`);
+        await revealSurface(surfaceId);
+      },
+      streamingCompanionFactory: ({ browser_session_id }) => {
+        events.push("companion");
+        return createMockCompanion({ browser_session_id });
+      },
+    },
+    async ({ asUrl, spotifyManifest }) => {
+      const started = await startRun(asUrl, spotifyManifest.connector_id);
+      leaseManager.acquire({ connectorId, profileKey: "profile_dynamic_1", runId: started.run_id });
+      const pending = await waitForPendingInteraction(asUrl, started.run_id);
+      try {
+        const mint = await fetchJson(`${asUrl}/_ref/runs/${encodeURIComponent(started.run_id)}/run-interaction-stream`, {
+          body: JSON.stringify({ interaction_id: pending.interaction_id, viewport: { height: 600, width: 800 } }),
+          headers: { "Content-Type": "application/json" },
+          method: "POST",
+        });
+        status = mint.status;
+      } finally {
+        await cancelRun(asUrl, started.run_id, pending.interaction_id);
+      }
+    }
+  );
+  return { events, status };
+}
+
+test("a concealed host browser that renders no frames is revealed before the companion attaches", async () => {
+  const concealed = await mintHostStreamWithMetadata(
+    { host_launch_streams_while_concealed: "false" },
+    async () => undefined
+  );
+  assert.equal(concealed.status, 201);
+  assert.deepEqual(concealed.events, ["reveal:surface_dynamic_1", "companion"]);
+
+  const streaming = await mintHostStreamWithMetadata(
+    { host_launch_streams_while_concealed: "true" },
+    async () => undefined
+  );
+  assert.equal(streaming.status, 201);
+  assert.deepEqual(streaming.events, ["companion"], "a browser that streams while concealed stays concealed");
+});
+
+test("a failed reveal does not block the companion", async () => {
+  const failed = await mintHostStreamWithMetadata({ host_launch_streams_while_concealed: "false" }, async () => {
+    throw new Error("host refused");
+  });
+  assert.equal(failed.status, 201);
+  assert.deepEqual(failed.events, ["reveal:surface_dynamic_1", "companion"]);
 });
 
 test("attached host stream loses attach and input authority when its lease is released", async () => {

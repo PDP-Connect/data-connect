@@ -7906,6 +7906,7 @@ setInterval(() => {}, 1000);
     /// when the rule is inverted) and
     /// `finish_bootstrap_tears_down_with_a_tunnel_preserving_reason`
     /// (verified to fail when a call site passes the wrong reason).
+    #[cfg(unix)]
     #[test]
     fn teardown_stack_stops_real_sidecars_on_both_deadline_arms() {
         for deadline in [None, Some(Instant::now() + Duration::from_secs(5))] {

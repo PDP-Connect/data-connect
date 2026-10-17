@@ -8,7 +8,10 @@ import type {
 	StopBrowserSurfaceRequest,
 } from "@opendatalabs/remote-surface/leases";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
-import type { BrowserPresentationPolicy } from "./browser-presentation-policy.ts";
+import {
+	BROWSER_DISPLAY_BACKENDS,
+	type BrowserPresentationPolicy,
+} from "./browser-presentation-policy.ts";
 
 const DEFAULT_HOST_REQUEST_TIMEOUT_MS = 5_000;
 /**
@@ -63,6 +66,12 @@ export interface HostBrowserSurfaceAllocator extends BrowserSurfaceAllocator {
 		runId: string,
 	) => HostBrowserSurfaceStartFailure | undefined;
 	readonly releaseRun: (runId: string) => Promise<void>;
+	/**
+	 * Show a leased browser on the owner's desktop without taking focus. A
+	 * macOS browser hidden as an application (the fallback when its private
+	 * display cannot be created) renders no companion frames until shown.
+	 */
+	readonly revealSurface: (surfaceId: string) => Promise<void>;
 }
 
 // Bound so a hostile/misbehaving host cannot use the error body to exhaust memory.
@@ -286,6 +295,21 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 		this.#lastStartFailureByRunId.delete(runId);
 	}
 
+	async revealSurface(surfaceId: string): Promise<void> {
+		const record = this.#leasesBySurfaceId.get(surfaceId);
+		if (!record) {
+			throw new HostBrowserSurfaceAllocatorError(
+				"host_browser_surface_missing_lease_context",
+				`no host lease is bound for browser surface ${surfaceId}`,
+			);
+		}
+		await this.#request(
+			"POST",
+			`${this.#leaseUrl(record.hostSurfaceId)}/reveal`,
+			this.#requestTimeoutMs,
+		);
+	}
+
 	async stopSurface(
 		request: StopBrowserSurfaceRequest,
 	): Promise<BrowserSurface | null> {
@@ -491,12 +515,19 @@ function parseHostSurfaceLeaseResponse(
 }
 
 const LAUNCH_ENUM_FIELDS: Readonly<Record<string, readonly string[]>> = {
-	display_backend: ["inherited-host", "private-xvfb", "externally-owned"],
+	display_backend: BROWSER_DISPLAY_BACKENDS,
 	engine_mode: ["headed", "headless"],
-	observed_visibility: ["unknown"],
+	observed_visibility: [
+		"unknown",
+		"isolated-display",
+		"concealed",
+		"concealed-after-show",
+		"revealed",
+		"visible",
+	],
 };
 const LAUNCH_MILESTONES = ["display_ready", "spawned", "cdp_ready"] as const;
-// Generous: the host's own launch deadline is ten seconds.
+// Generous: the host caps an acquire at two minutes.
 const MAX_LAUNCH_MILESTONE_MS = 600_000;
 const EXECUTABLE_NAME = /^[A-Za-z0-9._-]{1,64}$/;
 const BROWSER_VERSION = /^[A-Za-z]{1,32}\/[0-9.]{1,32}$/;
@@ -532,6 +563,11 @@ export function sanitizeHostLaunchReport(
 		BROWSER_VERSION.test(report.browser_version)
 	) {
 		metadata.host_launch_browser_version = report.browser_version;
+	}
+	if (typeof report.streams_while_concealed === "boolean") {
+		metadata.host_launch_streams_while_concealed = String(
+			report.streams_while_concealed,
+		);
 	}
 	const milestones = report.milestones_ms;
 	if (

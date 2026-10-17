@@ -2,7 +2,27 @@
 // SPDX-License-Identifier: Apache-2.0
 fn main() {
     stage_development_node_sidecar();
-    tauri_build::build()
+    tauri_build::try_build(tauri_build::Attributes::new().windows_attributes(windows_attributes()))
+        .expect("failed to run the Tauri build script");
+}
+
+/// Tauri embeds its Windows application manifest as a resource of the app
+/// binary only. Test binaries then load without the Common Controls v6
+/// dependency it declares and die at startup with
+/// STATUS_ENTRYPOINT_NOT_FOUND. Embedding the same manifest through the
+/// linker gives it to every binary this crate links, tests included.
+fn windows_attributes() -> tauri_build::WindowsAttributes {
+    let windows_msvc = std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
+        && std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc");
+    if !windows_msvc {
+        return tauri_build::WindowsAttributes::new();
+    }
+    let manifest =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("windows-app-manifest.xml");
+    println!("cargo:rerun-if-changed={}", manifest.display());
+    println!("cargo:rustc-link-arg=/MANIFEST:EMBED");
+    println!("cargo:rustc-link-arg=/MANIFESTINPUT:{}", manifest.display());
+    tauri_build::WindowsAttributes::new_without_app_manifest()
 }
 
 fn stage_development_node_sidecar() {

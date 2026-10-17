@@ -1,0 +1,124 @@
+name: browser-hidden-native
+
+# Proves the Windows hidden-native connector browser on a real interactive
+# desktop: no visible window or foreground change while concealed, CDP
+# screencast frames and input still working, and reveal showing the exact
+# browser without taking focus. macOS (a private virtual display) is checked
+# on a real Mac; see the ignored test `real_chrome_hidden_native_stays_concealed`.
+
+on:
+  pull_request:
+    paths:
+      - "src-tauri/src/commands/browser_display*.rs"
+      - "src-tauri/src/commands/owned_browser.rs"
+      - "src-tauri/src/commands/cdp_relay.rs"
+      - "src-tauri/src/commands/browser_presentation.rs"
+      - "src-tauri/Cargo.toml"
+      - "scripts/verify-private-display-cdp.mjs"
+      - "scripts/verify-concealed-browser-collection.mjs"
+      - "scripts/observe-browser-windows.ps1"
+      - ".github/workflows/browser-hidden-native.yml"
+  workflow_dispatch: {}
+
+concurrency:
+  group: browser-hidden-native-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    name: Windows hidden-native browser
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.21.0"
+          cache: npm
+
+      - name: Install script dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: stable
+
+      - name: Cache Rust dependencies and build output
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Build library tests
+        working-directory: src-tauri
+        env:
+          TAURI_CONFIG: '{"bundle":{"resources":null,"externalBin":[]}}'
+        run: cargo test --lib --no-run
+
+      - name: Browser unit tests
+        working-directory: src-tauri
+        env:
+          TAURI_CONFIG: '{"bundle":{"resources":null,"externalBin":[]}}'
+        run: cargo test --lib -- browser_display owned_browser cdp_relay browser_presentation
+
+      - name: Live hidden-native browser with an independent observer
+        working-directory: src-tauri
+        shell: pwsh
+        env:
+          TAURI_CONFIG: '{"bundle":{"resources":null,"externalBin":[]}}'
+        run: |
+          $ErrorActionPreference = "Stop"
+          $phase = Join-Path $env:RUNNER_TEMP "phase.txt"
+          $observed = Join-Path $env:RUNNER_TEMP "observer.txt"
+          Set-Content -Path $phase -Value "start"
+          $chrome = "C:\Program Files\Google\Chrome\Application\chrome.exe"
+          Write-Host "Chrome $((Get-Item $chrome).VersionInfo.ProductVersion)"
+          $observer = Start-Process pwsh -PassThru -NoNewWindow -RedirectStandardOutput $observed -ArgumentList @(
+            "-NoProfile", "-File", "$env:GITHUB_WORKSPACE\scripts\observe-browser-windows.ps1",
+            "-Seconds", "150", "-PhaseFile", $phase)
+          Start-Sleep -Seconds 3
+          $env:DATACONNECT_OBSERVE_PHASE_FILE = $phase
+          $env:DATACONNECT_REAL_BROWSER = $chrome
+          $env:DATACONNECT_LIVE_COLLECTION_CHECK = "$env:GITHUB_WORKSPACE\scripts\verify-concealed-browser-collection.mjs"
+          $env:DATACONNECT_LIVE_CDP_CHECK = "$env:GITHUB_WORKSPACE\scripts\verify-private-display-cdp.mjs"
+          $results = @()
+          foreach ($run in 1..3) {
+            cargo test --lib -- --ignored --nocapture real_chrome_hidden_native_on_windows
+            $results += $LASTEXITCODE
+          }
+          $observer.WaitForExit()
+          Get-Content $observed
+          if ($results | Where-Object { $_ -ne 0 }) { throw "live test failed: $results" }
+          # Hard requirements while concealed: no foreground change from
+          # anything a connector does over DevTools, and no visible window
+          # in steady state. Window creation can show a window for a sample
+          # before the hook hides it. A popup that a page opens is created
+          # and activated by the browser itself, outside DevTools, and holds
+          # the foreground for a few samples before it is handed back. Those
+          # counts are reported, not failed.
+          $concealed = "^(launch|collect|collect-new-page|collect-closed|companion-concealed)$"
+          $steady = "^(collect|collect-closed|companion-concealed)$"
+          $lines = Get-Content $observed | Where-Object { $_ -match "^OBSERVE phase=" }
+          $failures = @()
+          foreach ($line in $lines) {
+            if ($line -notmatch "phase=(\S+) .*visible_ticks=(\d+) foreground_ticks=(\d+)") { continue }
+            $name = $Matches[1]; $visible = [int]$Matches[2]; $foreground = [int]$Matches[3]
+            if ($name -match $concealed -and $foreground -gt 0) { $failures += "$name took the foreground ($foreground samples)" }
+            if ($name -match $steady -and $visible -gt 0) { $failures += "$name showed a window ($visible samples)" }
+          }
+          "### Windows hidden-native observer (3 runs)" | Out-File -Append $env:GITHUB_STEP_SUMMARY
+          '```' | Out-File -Append $env:GITHUB_STEP_SUMMARY
+          $lines | Out-File -Append $env:GITHUB_STEP_SUMMARY
+          '```' | Out-File -Append $env:GITHUB_STEP_SUMMARY
+          if ($failures) { throw "Concealment requirement failed: $($failures -join '; ')" }

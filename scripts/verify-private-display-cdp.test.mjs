@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { deflateSync } from "node:zlib"
 import { describe, expect, it } from "vitest"
-import { BLUE, RED, colorNear, decodePng, regionChanged, regionColor } from "./verify-private-display-cdp.mjs"
+import { BLUE, RED, isPrimaryColor, decodePng, regionChanged, regionColor } from "./verify-private-display-cdp.mjs"
 
 function crc32(buffer) {
   let crc = ~0
@@ -84,7 +84,7 @@ describe("regionChanged", () => {
 
   it("reports a colour flip as changed", () => {
     expect(regionChanged(red, blue)).toBe(true)
-    expect(colorNear(regionColor(blue), BLUE)).toBe(true)
+    expect(isPrimaryColor(regionColor(blue), BLUE)).toBe(true)
   })
 
   it("reports the same or an identical frame as unchanged (negative control)", () => {
@@ -92,8 +92,16 @@ describe("regionChanged", () => {
     expect(regionChanged(red, decodePng(solidPng(20, 20, RED)))).toBe(false)
   })
 
+  it("accepts colour-managed primaries and rejects mixtures", () => {
+    // Pure sRGB red as a macOS screencast reports it on a Display P3 panel.
+    expect(isPrimaryColor([234, 51, 35], RED)).toBe(true)
+    expect(isPrimaryColor([0, 0, 245], BLUE)).toBe(true)
+    expect(isPrimaryColor([200, 0, 200], BLUE)).toBe(false)
+    expect(isPrimaryColor([200, 0, 200], RED)).toBe(false)
+  })
+
   it("does not accept a black frame as the expected colour", () => {
-    expect(colorNear(regionColor(black), BLUE)).toBe(false)
+    expect(isPrimaryColor(regionColor(black), BLUE)).toBe(false)
   })
 
   it("refuses to compare frames of different sizes", () => {

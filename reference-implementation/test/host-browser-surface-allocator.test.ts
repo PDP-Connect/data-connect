@@ -534,7 +534,7 @@ test("launch facts drop paths, URLs, tokens and unknown fields", () => {
 			spawned: "10",
 			token: 7,
 		},
-		observed_visibility: "visible",
+		observed_visibility: "on-screen",
 		token: "shared-secret",
 		xauthority: "/home/owner/.local/share/dataconnect/client.xauth",
 	});
@@ -666,4 +666,40 @@ test("a host that never answers times out only after its budget and a margin", a
 	} finally {
 		await host.close();
 	}
+});
+
+test("reveal posts to the host lease and fails for an unknown surface", async () => {
+	const mock = createMockHostEndpoint({
+		json: async () => ({ cdp_url: "http://127.0.0.1:9222", surface_id: "host-surface-9" }),
+		ok: true,
+		status: 200,
+	});
+	const allocator = hostAllocator(mock.fetchImpl);
+	allocator.bindRunToSurface({ runId: "run-reveal", surfaceId: "surface-delayed" });
+	await allocator.ensureSurface(acquireRequest());
+	await allocator.revealSurface("surface-delayed");
+	assert.equal(mock.calls[1]?.method, "POST");
+	assert.ok(mock.calls[1]?.url.endsWith("/browser-surface/leases/host-surface-9/reveal"));
+	await assert.rejects(allocator.revealSurface("surface-unknown"), /no host lease/);
+});
+
+test("launch facts keep concealment observations and whether frames flow while concealed", () => {
+	assert.deepEqual(
+		sanitizeHostLaunchReport({
+			display_backend: "hidden-native",
+			engine_mode: "headed",
+			observed_visibility: "concealed-after-show",
+			streams_while_concealed: false,
+		}),
+		{
+			host_launch_display_backend: "hidden-native",
+			host_launch_engine_mode: "headed",
+			host_launch_observed_visibility: "concealed-after-show",
+			host_launch_streams_while_concealed: "false",
+		},
+	);
+	assert.deepEqual(
+		sanitizeHostLaunchReport({ observed_visibility: "seen-by-everyone", streams_while_concealed: "no" }),
+		{},
+	);
 });
