@@ -13,18 +13,22 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import ts from "typescript"
 import {
+  type AttemptBound,
   classifyForCohort,
   type CohortDefinition,
   type CohortName,
   escapesCohortRoot,
+  exercisedCandidates,
   type ExecutionInputs,
   freezeIntent,
+  isTestPath,
   type LineRange,
   NO_CONFIGURATION_READ,
   ownedByNestedTestRunner,
   parseNameStatusZ,
   parseUnifiedZeroHunks,
   readsMutatedSource,
+  sampleAttempt,
   selectCohortTests,
   widenToStatements,
 } from "./select-pr-files.ts"
@@ -184,7 +188,7 @@ for (const file of parseUnifiedZeroHunks(hunkDiff)) {
   hunks.set(file.path, widened)
 }
 
-const intent = freezeIntent({
+const fullIntent = freezeIntent({
   cohort,
   baseCommit: argument("base"),
   headCommit: argument("head"),
@@ -193,14 +197,45 @@ const intent = freezeIntent({
   hunks,
 })
 
-writeFileSync(argument("out"), `${JSON.stringify(intent, null, 2)}\n`)
+// The bound, when the workflow sets one. Both halves or neither: a bound on
+// lines alone leaves each trial's cost unbounded, and the reverse leaves the
+// mutant count unbounded.
+const maxChangedLines = optionalArgument("max-changed-lines") || undefined
+const maxTests = optionalArgument("max-tests") || undefined
+if ((maxChangedLines === undefined) !== (maxTests === undefined)) {
+  throw new Error(
+    "--max-changed-lines and --max-tests bound one attempt together; pass both or neither"
+  )
+}
+const bound: AttemptBound | undefined =
+  maxChangedLines === undefined || maxTests === undefined
+    ? undefined
+    : { maxChangedLines: Number(maxChangedLines), maxTests: Number(maxTests) }
+const isPositiveInteger = (value: number): boolean => Number.isSafeInteger(value) && value > 0
+if (
+  bound !== undefined &&
+  !(isPositiveInteger(bound.maxChangedLines) && isPositiveInteger(bound.maxTests))
+) {
+  throw new Error(
+    `the attempt bound must be two positive integers, got ${maxChangedLines} and ${maxTests}`
+  )
+}
 
 // The tests this attempt runs, for cohorts whose runner cannot select tests
 // itself. Written unconditionally when asked for: an absent file and an empty
 // file mean different things to the config that reads it, and only one of them
 // is "no selection was recorded".
 const selectedTestsPath = optionalArgument("selected-tests")
+if (bound !== undefined && selectedTestsPath === undefined) {
+  throw new Error("an attempt bound limits the tests each trial runs, so it needs --selected-tests")
+}
+
+let intent = fullIntent
 if (selectedTestsPath !== undefined) {
+  const onDiskPath = (path: string): string => (cohort.root === "." ? path : join(cohort.root, path))
+  const readModule = (path: string): string | undefined =>
+    existsSync(onDiskPath(path)) ? readFileSync(onDiskPath(path), "utf8") : undefined
+
   // A test that reads above the cohort root cannot run in Stryker's sandbox,
   // which is rooted there. Left in, its ENOENT fails the initial test run,
   // rejects the baseline, and makes every mutant inconclusive -- so one such
@@ -226,12 +261,11 @@ if (selectedTestsPath !== undefined) {
       return false
     }
   }
-  const tests = selectCohortTests(diff, cohort).filter((test) => {
-    const onDisk = cohort.root === "." ? test : join(cohort.root, test)
-    if (!existsSync(onDisk)) {
+  const runnable = selectCohortTests(diff, cohort).filter((test) => {
+    const testSource = readModule(test)
+    if (testSource === undefined) {
       return true
     }
-    const testSource = readFileSync(onDisk, "utf8")
     if (escapesCohortRoot(test, testSource)) {
       withheld.push(test)
       return false
@@ -243,12 +277,74 @@ if (selectedTestsPath !== undefined) {
       withheldNestedRunner.push(test)
       return false
     }
-    // A test that asserts on the TEXT of a file this batch mutates reads
-    // Stryker's instrumented copy instead of the authored source, and fails for
-    // a reason the revision did not cause -- rejecting the baseline exactly as
-    // an unreachable path does. Withheld on the same terms, and for the same
-    // reason: it can inform no mutant whose instrumentation it cannot read.
-    if (readsMutatedSource(test, testSource, intent.mutate)) {
+    return true
+  })
+
+  // A revision larger than one attempt can finish mutates a bounded sample.
+  // The sample is frozen into the intent, so the receipt states it.
+  let candidates = runnable
+  if (bound !== undefined && fullIntent.applicability === "applicable") {
+    const scoped = new Set(fullIntent.scope.map((entry) => entry.path))
+    // Sampled only from tests that read the text of no changed file. Such a
+    // test is withheld whenever the file it reads is mutated, so letting it
+    // qualify a file for the sample could leave that file with no test once
+    // the final filter below runs, and every mutant in it a false survivor.
+    const sampleable = runnable.filter((test) => {
+      const testSource = readModule(test)
+      return testSource === undefined || !readsMutatedSource(test, testSource, fullIntent.mutate)
+    })
+    const sample = sampleAttempt({
+      scope: fullIntent.scope,
+      tests: sampleable,
+      exercisedBy: (test) =>
+        exercisedCandidates(
+          test,
+          scoped,
+          (path) => isTestPath(cohort.root === "." ? path : `${cohort.root}/${path}`),
+          readModule
+        ),
+      wholeFileLines: (path) => (readModule(path) ?? "").split("\n").length,
+      bound,
+      sampleKey: argument("head"),
+    })
+    if (sample.kind === "partial") {
+      if (sample.paths.size === 0) {
+        throw new Error(
+          `the ${cohortName} change set exceeds one attempt's bound (${bound.maxChangedLines} ` +
+            `changed lines, ${bound.maxTests} test files per trial), and no changed file is ` +
+            `exercised by a selected test within that bound, so no sample can produce evidence.`
+        )
+      }
+      intent = freezeIntent({
+        cohort,
+        baseCommit: argument("base"),
+        headCommit: argument("head"),
+        diff,
+        executionInputs,
+        hunks,
+        sample,
+      })
+      candidates = [...sample.tests]
+      const { files, changedLines, tests } = sample.completeness
+      process.stdout.write(
+        `partial attempt: the change set exceeds the bound of ${bound.maxChangedLines} changed ` +
+          `lines and ${bound.maxTests} test files per trial; sampled ${files.sampled} of ` +
+          `${files.total} files (${changedLines.sampled} of ${changedLines.total} changed lines) ` +
+          `and the ${tests.sampled} of ${tests.total} selected tests that exercise them\n`
+      )
+    }
+  }
+
+  // A test that asserts on the TEXT of a file this batch mutates reads
+  // Stryker's instrumented copy instead of the authored source, and fails for
+  // a reason the revision did not cause -- rejecting the baseline exactly as
+  // an unreachable path does. Withheld on the same terms, and for the same
+  // reason: it can inform no mutant whose instrumentation it cannot read.
+  // Checked against the final mutate list, since what a test may read depends
+  // on what this batch mutates.
+  const tests = candidates.filter((test) => {
+    const testSource = readModule(test)
+    if (testSource !== undefined && readsMutatedSource(test, testSource, intent.mutate)) {
       withheldReadingMutated.push(test)
       return false
     }
@@ -272,6 +368,8 @@ if (selectedTestsPath !== undefined) {
   writeFileSync(selectedTestsPath, tests.length === 0 ? "" : `${tests.join("\n")}\n`)
 }
 
+writeFileSync(argument("out"), `${JSON.stringify(intent, null, 2)}\n`)
+
 // The scope is printed in full. It is the difference between "this revision was
 // mutated" and "these lines of this revision were mutated", and a reader of the
 // log should not have to open the artifact to tell which one happened.
@@ -287,6 +385,6 @@ for (const entry of intent.scope) {
 
 process.stdout.write(
   `intent ${intent.intentDigest} cohort=${intent.cohort} ` +
-    `applicability=${intent.applicability} mutate=${intent.mutate.length} ` +
-    `excluded=${intent.excluded.length}\n`
+    `applicability=${intent.applicability} completeness=${intent.completeness.kind} ` +
+    `mutate=${intent.mutate.length} excluded=${intent.excluded.length}\n`
 )
