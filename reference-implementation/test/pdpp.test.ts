@@ -139,7 +139,6 @@ const REGEXP_91 = /Grant is malformed or no longer valid/;
 const REGEXP_92 = /Grant is malformed or no longer valid/;
 const REGEXP_93 = /Grant is malformed or no longer valid/;
 const REGEXP_94 = /Grant is malformed or no longer valid/;
-const REGEXP_95 = /Token introspection failed closed/;
 const REGEXP_96 = /Grant is malformed or no longer valid/;
 const REGEXP_97 = /Grant is malformed or no longer valid/;
 const REGEXP_98 = /Stream 'missing_stream' is not declared by the current manifest/;
@@ -4528,10 +4527,16 @@ test("PDPP reference implementation integration", async (t) => {
         `${rsUrl}/v1/streams/pay_statements/records?connection_id=not_a_native_concept`,
         { headers: { Authorization: `Bearer ${approved.token}` } }
       );
-      assert.equal(connectionScopedClientResp.status, 401);
-      const connectionScopedClientBody = parseErrorResponse(await connectionScopedClientResp.json());
-      assert.equal(connectionScopedClientBody.error.code, "context.instance_mismatch");
-      assert.match(connectionScopedClientBody.error.message, REGEXP_95);
+      // A valid grant that does not cover the requested connection is a
+      // permission denial, not a rejected token (spec-core §9 RS item 2).
+      assert.equal(connectionScopedClientResp.status, 403);
+      assert.doesNotMatch(connectionScopedClientResp.headers.get("www-authenticate") ?? "", /invalid_token/);
+      const connectionScopedClientRaw = requireJsonRecord(await connectionScopedClientResp.json(), "instance denial");
+      const connectionScopedClientError = requireJsonRecord(connectionScopedClientRaw.error, "instance denial.error");
+      assert.equal(connectionScopedClientError.code, "grant_instance_not_allowed");
+      assert.equal(connectionScopedClientError.type, "permission_error");
+      assert.equal(connectionScopedClientError.param, "connection_id");
+      assert.equal(Object.hasOwn(connectionScopedClientRaw, "data"), false);
 
       const recordResp = await fetch(`${rsUrl}/v1/streams/pay_statements/records/ps_2026_04_15`, {
         headers: { Authorization: `Bearer ${approved.token}` },
@@ -8855,13 +8860,15 @@ test("PDPP reference implementation integration", async (t) => {
           // A valid bearer is never relabelled as a rejected token.
           assert.doesNotMatch(accepted.headers["www-authenticate"] ?? "", /invalid_token/);
         }
-        // An over-max integer (101) is still clamped with a warning, not rejected.
-        const clamped = await fetchJson(`${rsUrl}/v1/streams/top_artists/records?${scope}limit=101`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        const clampedBody = requireJsonRecord(clamped.body.unwrap(), "clamped limit response");
-        assert.equal(clamped.status, 200, `${actor} limit=101: ${JSON.stringify(clampedBody)}`);
-        assert.match(JSON.stringify(clampedBody.meta), /"code":"limit_clamped"/, `${actor} limit=101 must warn`);
+        // An over-max integer of any length is clamped with a warning, not rejected.
+        for (const limit of ["101", "9007199254740992", "1".padEnd(30, "0")]) {
+          const clamped = await fetchJson(`${rsUrl}/v1/streams/top_artists/records?${scope}limit=${limit}`, {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          const clampedBody = requireJsonRecord(clamped.body.unwrap(), "clamped limit response");
+          assert.equal(clamped.status, 200, `${actor} limit=${limit}: ${JSON.stringify(clampedBody)}`);
+          assert.match(JSON.stringify(clampedBody.meta), /"code":"limit_clamped"/, `${actor} limit=${limit} must warn`);
+        }
       }
     });
   });

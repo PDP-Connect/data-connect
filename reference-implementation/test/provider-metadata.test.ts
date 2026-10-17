@@ -1781,6 +1781,21 @@ test("RS 401 metadata challenge uses configured public resource origin", async (
       `Bearer resource_metadata="${metadataUrl}", error="invalid_token"`
     );
     assert.equal(rejectedBody.error.resource_metadata, metadataUrl);
+
+    // spec-core §8 L1115 requires resource_metadata on every 401. With a
+    // configured canonical URL, an untrusted Host still gets that URL (never
+    // the Host itself) in both the absent- and rejected-token challenges.
+    const spoofedMissing = await httpRequestJson(`${rsUrl}/v1/schema`, { headers: { host: "attacker.example" } });
+    assert.equal(spoofedMissing.status, 401);
+    assert.equal(spoofedMissing.headers["www-authenticate"], `Bearer resource_metadata="${metadataUrl}"`);
+    const spoofedRejected = await httpRequestJson(`${rsUrl}/v1/schema`, {
+      headers: { authorization: "Bearer not-a-real-token", host: "attacker.example" },
+    });
+    assert.equal(spoofedRejected.status, 401);
+    assert.equal(
+      spoofedRejected.headers["www-authenticate"],
+      `Bearer resource_metadata="${metadataUrl}", error="invalid_token"`
+    );
   } finally {
     await closeServer(server);
   }

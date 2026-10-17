@@ -231,12 +231,14 @@ async function assertLimitContract(rsUrl: string, token: string, label: string) 
   const accepted = await fetchJson(`${rsUrl}/v1/streams/notes/records?limit=1`, bearer(token));
   assert.equal(accepted.status, 200, `${label} limit=1: ${JSON.stringify(accepted.body)}`);
   assert.equal(accepted.body.data.length, 1);
-  const clamped = await fetchJson(`${rsUrl}/v1/streams/notes/records?limit=101`, bearer(token));
-  assert.equal(clamped.status, 200, `${label} limit=101: ${JSON.stringify(clamped.body)}`);
-  assert.ok(
-    (clamped.body.meta?.warnings ?? []).some((warning: JsonObject) => warning.code === "limit_clamped"),
-    `${label} limit=101 must carry limit_clamped`
-  );
+  for (const limit of ["101", "9007199254740992", "1".padEnd(30, "0")]) {
+    const clamped = await fetchJson(`${rsUrl}/v1/streams/notes/records?limit=${limit}`, bearer(token));
+    assert.equal(clamped.status, 200, `${label} limit=${limit}: ${JSON.stringify(clamped.body)}`);
+    assert.ok(
+      (clamped.body.meta?.warnings ?? []).some((warning: JsonObject) => warning.code === "limit_clamped"),
+      `${label} limit=${limit} must carry limit_clamped`
+    );
+  }
 }
 
 async function runScenario(backend: Backend): Promise<void> {

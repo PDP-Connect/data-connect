@@ -125,6 +125,18 @@ export const RECORDS_MAX_PAGE_LIMIT = 100;
 // spec-core §8 types `limit` as an integer. The wire grammar is a plain run
 // of decimal digits: no sign, whitespace, fraction, exponent, or radix prefix.
 const RECORDS_PAGE_LIMIT_PATTERN = /^[0-9]+$/;
+const LEADING_ZEROS_PATTERN = /^0+/;
+const MAX_PAGE_LIMIT_TEXT = String(RECORDS_MAX_PAGE_LIMIT);
+const MAX_PAGE_LIMIT_DIGITS = MAX_PAGE_LIMIT_TEXT.length;
+
+// Compare zero-stripped digits as strings: more digits, or equal length and
+// lexically greater, means numerically greater.
+function exceedsMaxPageLimit(digits: string): boolean {
+  if (digits.length !== MAX_PAGE_LIMIT_DIGITS) {
+    return digits.length > MAX_PAGE_LIMIT_DIGITS;
+  }
+  return digits > MAX_PAGE_LIMIT_TEXT;
+}
 
 function invalidRecordsPageLimit(): ErrorWithCode {
   const err: ErrorWithCode = new Error(
@@ -147,28 +159,41 @@ function invalidRecordsPageLimit(): ErrorWithCode {
  * number, a numeric prefix with trailing text, or a repeated or bracketed
  * parameter, is an unsupported query shape: spec-core §8 says it "MUST be
  * rejected with HTTP 400 and MUST NOT be silently ignored", so this throws
- * `invalid_request` on param `limit`. Integers beyond the IEEE-754 safe range
- * are rejected the same way because they cannot be represented exactly.
+ * `invalid_request` on param `limit`.
+ *
+ * A digit string is judged on its digits, not on a converted Number, so an
+ * integer of any length above the maximum clamps instead of failing a
+ * safe-integer check. `requested` is the nearest representable number
+ * (Number.MAX_VALUE when the digits overflow a double).
  */
 export function clampRecordsPageLimit(rawLimit: unknown): ClampedLimitResult {
   if (rawLimit === undefined || rawLimit === null) {
     return { clamped: false, limit: RECORDS_DEFAULT_PAGE_LIMIT, requested: null };
   }
-  let parsed: number;
   if (typeof rawLimit === "number") {
-    parsed = rawLimit;
-  } else if (typeof rawLimit === "string" && RECORDS_PAGE_LIMIT_PATTERN.test(rawLimit)) {
-    parsed = Number(rawLimit);
-  } else {
+    if (!Number.isInteger(rawLimit) || rawLimit <= 0) {
+      throw invalidRecordsPageLimit();
+    }
+    return rawLimit > RECORDS_MAX_PAGE_LIMIT
+      ? { clamped: true, limit: RECORDS_MAX_PAGE_LIMIT, requested: rawLimit }
+      : { clamped: false, limit: rawLimit, requested: rawLimit };
+  }
+  if (typeof rawLimit !== "string" || !RECORDS_PAGE_LIMIT_PATTERN.test(rawLimit)) {
     throw invalidRecordsPageLimit();
   }
-  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+  const digits = rawLimit.replace(LEADING_ZEROS_PATTERN, "");
+  if (digits === "") {
     throw invalidRecordsPageLimit();
   }
-  if (parsed > RECORDS_MAX_PAGE_LIMIT) {
-    return { clamped: true, limit: RECORDS_MAX_PAGE_LIMIT, requested: parsed };
+  const requested = Number(digits);
+  if (exceedsMaxPageLimit(digits)) {
+    return {
+      clamped: true,
+      limit: RECORDS_MAX_PAGE_LIMIT,
+      requested: Number.isFinite(requested) ? requested : Number.MAX_VALUE,
+    };
   }
-  return { clamped: false, limit: parsed, requested: parsed };
+  return { clamped: false, limit: requested, requested };
 }
 
 /**

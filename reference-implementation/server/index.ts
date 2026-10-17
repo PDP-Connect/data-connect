@@ -2109,20 +2109,22 @@ async function requireTokenWithIntrospection(
       if (!(error instanceof SourceIntrospectionContextError)) {
         throw error;
       }
-      // spec-core §8 errors: a valid token naming a stream outside its grant
-      // is an authorization denial (403 grant_stream_not_allowed), not a
-      // token failure. The token stays valid, so no invalid_token challenge.
-      if (error.code === "context.stream_not_allowed") {
-        const message = `Stream '${req.params.stream}' not in grant`;
+      // A valid token asking for a stream or connection outside its grant is
+      // an authorization denial, not a token failure: spec-core §8 Errors
+      // (403 grant_stream_not_allowed) and §9 RS item 2 (the RS enforces the
+      // explicit instance handles). The token stays valid, so no
+      // invalid_token challenge.
+      const denial = grantDenialForContextError(error.code, req.params.stream, requestedConnection);
+      if (denial) {
         if (info.trace_id) {
           setReferenceTraceId(res, info.trace_id);
         }
         await emitAuthGateQueryRejection(req, res, info, {
-          code: "grant_stream_not_allowed",
-          message,
+          code: denial.code,
+          message: denial.message,
           sourceDescriptor: buildClientSourceDescriptor(info),
         });
-        return pdppError(res, 403, "grant_stream_not_allowed", message);
+        return pdppError(res, 403, denial.code, denial.message, denial.param);
       }
       info.active = false;
       info.inactive_reason = error.code;
@@ -2168,6 +2170,29 @@ async function requireTokenWithIntrospection(
   }
   req.tokenInfo = info;
   next();
+}
+
+/**
+ * Map a request-selector failure from the resolved grant to its 403 grant
+ * denial. Other context failures mean the token or its context is unusable
+ * and stay 401.
+ */
+function grantDenialForContextError(
+  code: string,
+  stream: string,
+  requestedConnection: string | null
+): { code: string; message: string; param: string | null } | null {
+  if (code === "context.stream_not_allowed") {
+    return { code: "grant_stream_not_allowed", message: `Stream '${stream}' not in grant`, param: null };
+  }
+  if (code === "context.instance_mismatch") {
+    return {
+      code: "grant_instance_not_allowed",
+      message: `connection_id '${requestedConnection ?? ""}' is not in the grant for stream '${stream}'`,
+      param: "connection_id",
+    };
+  }
+  return null;
 }
 
 /**

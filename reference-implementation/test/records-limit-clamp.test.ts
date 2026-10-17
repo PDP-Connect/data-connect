@@ -231,7 +231,7 @@ const MALFORMED_LIMITS: readonly unknown[] = [
   "1.5",
   "1e2",
   "0x10",
-  "99999999999999999999",
+  "000",
   ["1", "2"],
   { x: "1" },
   true,
@@ -255,11 +255,30 @@ test("clampRecordsPageLimit rejects malformed limits as invalid_request on param
   }
 });
 
+test("clampRecordsPageLimit clamps integers of any length above the maximum", () => {
+  // spec-core §8: "A request for more than 100 is clamped to 100 ... not an
+  // error." The digits decide, so values past 2^53 still clamp.
+  const twoPow53 = "9007199254740992";
+  assert.deepEqual(clampRecordsPageLimit(twoPow53), { clamped: true, limit: 100, requested: 2 ** 53 });
+  const thirtyDigits = "1".padEnd(30, "0");
+  assert.deepEqual(clampRecordsPageLimit(thirtyDigits), { clamped: true, limit: 100, requested: 1e29 });
+  assert.deepEqual(clampRecordsPageLimit(`000${thirtyDigits}`), { clamped: true, limit: 100, requested: 1e29 });
+  assert.deepEqual(clampRecordsPageLimit("9".repeat(400)), {
+    clamped: true,
+    limit: 100,
+    requested: Number.MAX_VALUE,
+  });
+  assert.deepEqual(clampRecordsPageLimit(2 ** 60), { clamped: true, limit: 100, requested: 2 ** 60 });
+});
+
 test("clampRecordsPageLimit accepts the integer boundaries 1, 100, and 101", () => {
   assert.deepEqual(clampRecordsPageLimit("1"), { clamped: false, limit: 1, requested: 1 });
   assert.deepEqual(clampRecordsPageLimit("100"), { clamped: false, limit: 100, requested: 100 });
   assert.deepEqual(clampRecordsPageLimit("101"), { clamped: true, limit: 100, requested: 101 });
   assert.deepEqual(clampRecordsPageLimit("0010"), { clamped: false, limit: 10, requested: 10 });
+  assert.deepEqual(clampRecordsPageLimit("007"), { clamped: false, limit: 7, requested: 7 });
+  assert.deepEqual(clampRecordsPageLimit("0100"), { clamped: false, limit: 100, requested: 100 });
+  assert.deepEqual(clampRecordsPageLimit("000101"), { clamped: true, limit: 100, requested: 101 });
   assert.deepEqual(clampRecordsPageLimit(String(Number.MAX_SAFE_INTEGER)), {
     clamped: true,
     limit: 100,
