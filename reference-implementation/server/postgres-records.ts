@@ -2957,18 +2957,40 @@ export async function postgresListStreams(
   manifest: ConnectorManifest | null = null
 ): Promise<JsonObject[]> {
   assertGrantedManifestReadAuthority(manifest, grant, null);
-  const rows = await postgresListAllStreams(storageTarget);
+  const connectorId = resolveStorageConnectorId(storageTarget);
+  const connectorInstanceId = resolveStorageConnectorInstanceId(storageTarget, connectorId ?? "");
+  const entries = grant.streams.map((streamGrant) => ({
+    streamGrant,
+    effective: buildEffectiveFilter(streamGrant, {}) as unknown as EffectiveFilter,
+  }));
+  // Only unrestricted entries can use the connection-wide grouped summary.
+  const rows = entries.some(({ effective }) => !effective.resources && !effective.timeConstraint)
+    ? await postgresListAllStreams(storageTarget)
+    : [];
   const byName = new Map(rows.map((row) => [row.name, row]));
-  return grant.streams.map((streamGrant) => {
+  const summaries: JsonObject[] = [];
+  await sequentially(entries, async ({ streamGrant, effective }) => {
     const manifestStream = getManifestStream(manifest, streamGrant.name);
-    const stored = byName.get(streamGrant.name);
-    return {
+    let stored = byName.get(streamGrant.name);
+    if (effective.resources || effective.timeConstraint) {
+      const params: unknown[] = [connectorInstanceId, streamGrant.name];
+      const whereParts = ["connector_instance_id = $1", "stream = $2", "deleted = FALSE"];
+      appendGrantVisibilityClauses(whereParts, params, effective);
+      const result = await postgresQuery(
+        `SELECT COUNT(*)::int AS record_count, MAX(emitted_at) AS last_updated
+         FROM records WHERE ${whereParts.join(" AND ")}`,
+        params
+      );
+      stored = result.rows[0];
+    }
+    summaries.push({
       last_updated: stored?.last_updated || null,
       name: streamGrant.name,
       record_count: stored?.record_count || 0,
       schema: manifestStream?.schema || null,
-    };
+    });
   });
+  return summaries;
 }
 
 export function postgresDeleteAllRecords(storageTarget: StorageTarget, stream: string): Promise<number> {
