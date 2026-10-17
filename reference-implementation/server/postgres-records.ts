@@ -788,6 +788,12 @@ export function recordDerivedColumnsStream(manifestStream: unknown): ManifestStr
  * unchanged rows are filtered out, so a rerun rewrites nothing it already
  * repaired. `withinChunk` runs inside each chunk's transaction (a durable
  * cursor advances with the rows it covers); throwing rolls that chunk back.
+ *
+ * The page read outside the transaction picks only record keys. Each chunk
+ * reads `record_json` again under the connector-instance lock that every
+ * record write takes, with the rows locked, and derives from that. A payload
+ * read before the lock could be older than one an ingestion commits while the
+ * repair waits, and would overwrite the newer payload's derived columns.
  */
 export async function postgresRepairRecordDerivedColumnsPage(input: {
   readonly afterRecordKey: string | null;
@@ -801,7 +807,7 @@ export async function postgresRepairRecordDerivedColumnsPage(input: {
 }): Promise<{ readonly done: boolean; readonly lastRecordKey: string | null; readonly updated: number }> {
   const { connectorId, connectorInstanceId, manifestStream, stream } = input;
   const page = await postgresQuery(
-    `SELECT record_key, record_json::text AS record_json
+    `SELECT record_key
        FROM records
       WHERE connector_id = $1
         AND connector_instance_id = $2
@@ -812,20 +818,32 @@ export async function postgresRepairRecordDerivedColumnsPage(input: {
       LIMIT ${String(RECORD_DERIVED_REPAIR_PAGE)}`,
     [connectorId, connectorInstanceId, stream, input.afterRecordKey]
   );
-  const derived = page.rows.map((row) => {
-    const data = typeof row.record_json === "string" ? JSON.parse(row.record_json) : row.record_json;
-    return {
-      cursor: cursorValue(data, manifestStream),
-      primary: primaryKeyText(data, row.record_key, manifestStream),
-      recordKey: String(row.record_key),
-      semanticTime: semanticTimeValue(data, manifestStream),
-    };
-  });
+  const recordKeys = page.rows.map((row) => String(row.record_key));
   let updated = 0;
-  await runBulkChunksWithinStatementBudget(derived, input.budget, async (chunk) => {
+  await runBulkChunksWithinStatementBudget(recordKeys, input.budget, async (chunk) => {
     const result = await withPostgresBulkTransaction(
       async (client) => {
         await assertConnectorManifestStreamSubsetWithClient(client, connectorId, input.manifest);
+        const current = await client.query(
+          `SELECT record_key, record_json::text AS record_json
+             FROM records
+            WHERE connector_id = $1
+              AND connector_instance_id = $2
+              AND stream = $3
+              AND record_key = ANY($4::text[])
+              AND deleted = FALSE
+            FOR UPDATE`,
+          [connectorId, connectorInstanceId, stream, chunk]
+        );
+        const derived = current.rows.map((row) => {
+          const data = typeof row.record_json === "string" ? JSON.parse(row.record_json) : row.record_json;
+          return {
+            cursor: cursorValue(data, manifestStream),
+            primary: primaryKeyText(data, row.record_key, manifestStream),
+            recordKey: String(row.record_key),
+            semanticTime: semanticTimeValue(data, manifestStream),
+          };
+        });
         const applied = await client.query(
           `UPDATE records r
               SET cursor_value = v.cursor_value, primary_key_text = v.primary_key_text, semantic_time = v.semantic_time
@@ -843,13 +861,13 @@ export async function postgresRepairRecordDerivedColumnsPage(input: {
             connectorId,
             connectorInstanceId,
             stream,
-            chunk.map((entry) => entry.recordKey),
-            chunk.map((entry) => entry.cursor),
-            chunk.map((entry) => entry.primary),
-            chunk.map((entry) => entry.semanticTime),
+            derived.map((entry) => entry.recordKey),
+            derived.map((entry) => entry.cursor),
+            derived.map((entry) => entry.primary),
+            derived.map((entry) => entry.semanticTime),
           ]
         );
-        const lastRecordKey = chunk.at(-1)?.recordKey;
+        const lastRecordKey = chunk.at(-1);
         if (input.withinChunk && lastRecordKey !== undefined) {
           await input.withinChunk(client, lastRecordKey);
         }
@@ -862,7 +880,7 @@ export async function postgresRepairRecordDerivedColumnsPage(input: {
   invalidatePostgresRecordManifestCache(connectorId);
   return {
     done: page.rows.length < RECORD_DERIVED_REPAIR_PAGE,
-    lastRecordKey: derived.at(-1)?.recordKey ?? input.afterRecordKey,
+    lastRecordKey: recordKeys.at(-1) ?? input.afterRecordKey,
     updated,
   };
 }

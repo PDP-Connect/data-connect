@@ -13,11 +13,16 @@
 
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
+import { acquireDirectoryLock } from "../server/connector-install/directory-lock.ts";
+import { ConnectorInstallTimeoutError } from "../server/connector-install/index.ts";
+import { connectorInstanceAdvisoryLockKey } from "../server/connector-instance-write-coordinator.ts";
 import { withConnectorLifecycleLock } from "../server/connector-lifecycle-lock.ts";
+import { postgresRepairRecordDerivedColumnsPage, recordDerivedColumnsStream } from "../server/postgres-records.ts";
 import { closeDb, initDb } from "../server/db.ts";
 import { __setRecordDerivedRepairHookForTest, runRecordDerivedRepairRound } from "../server/record-derived-repair.ts";
 import { markRecordDerivedRepairPendingPostgres } from "../server/stores/record-derived-repair-store.ts";
@@ -109,6 +114,37 @@ async function withPostgres(name: string, body: (databaseUrl: string) => Promise
   );
 }
 
+/** True when nothing holds the install fence: probe it by taking and dropping it. */
+function installFenceIsFree(dataDir: string): boolean {
+  try {
+    acquireDirectoryLock(dataDir, ".connector-install.lock", "busy").release();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Requests for the advisory lock `key` (a signed bigint) that wait for another session. */
+async function advisoryLockWaiters(key: string): Promise<number> {
+  const unsigned = BigInt.asUintN(64, BigInt(key));
+  const result = await postgresQuery<{ waiters: string }>(
+    `SELECT count(*)::text AS waiters FROM pg_locks
+      WHERE locktype = 'advisory' AND NOT granted AND objsubid = 1
+        AND classid = $1::bigint::oid AND objid = $2::bigint::oid
+        AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`,
+    [(unsigned >> 32n).toString(), (unsigned & 0xff_ff_ff_ffn).toString()]
+  );
+  return Number(result.rows[0]?.waiters ?? 0);
+}
+
+async function waitForAdvisoryLockWaiter(key: string, what: string): Promise<void> {
+  const deadline = Date.now() + 10_000;
+  while ((await advisoryLockWaiters(key)) === 0) {
+    assert.ok(Date.now() < deadline, `${what} never waited for the lock`);
+    await new Promise((settle) => setTimeout(settle, 10));
+  }
+}
+
 async function gmailLifecycleLockHolders(): Promise<number> {
   const result = await postgresQuery<{ holders: string }>(
     `SELECT count(*)::text AS holders FROM pg_locks
@@ -146,7 +182,7 @@ test(
           await within(repairEntered.promise, 5000, "derived repair start");
 
           // The repair is running, and neither lock is held.
-          assert.equal(existsSync(join(dataDir, ".connector-install.lock")), false);
+          assert.equal(installFenceIsFree(dataDir), true);
           assert.equal(await gmailLifecycleLockHolders(), 0);
           assert.equal(
             await within(
@@ -644,6 +680,136 @@ test(
     } finally {
       __setRecordDerivedRepairHookForTest(null);
       await Promise.resolve(repair).catch(() => undefined);
+      rmSync(dataDir, { force: true, recursive: true });
+    }
+  }
+);
+
+test(
+  "PostgreSQL: a column repair that waits for the instance lock derives from the payload committed meanwhile",
+  { skip: POSTGRES_SKIP },
+  async () => {
+    await withPostgres("repairrace", async () => {
+      const instance = "cin_gmail_race";
+      const recordKey = "messages-000001";
+      const newerReceivedAt = "2027-06-01T00:00:00.000Z";
+      await seedGmail({ instances: [instance], recordsPerStream: 3, registered: installedGmail });
+      await withPostgresTransaction((client) =>
+        markRecordDerivedRepairPendingPostgres(
+          client,
+          { connectorId: CONNECTOR_ID, connectorInstanceId: instance, stream: "messages" },
+          new Date().toISOString()
+        )
+      );
+      const lockHeld = deferred();
+      const repairWaits = deferred();
+      // Session B: an ingestion that commits a newer payload under the
+      // instance lock, as every record write does. Its cursor, primary key and
+      // semantic time all derive differently from the older payload's.
+      const ingestion = withPostgresTransaction(
+        async (client) => {
+          lockHeld.resolve();
+          await repairWaits.promise;
+          await client.query(
+            `UPDATE records
+                SET record_json = jsonb_set(jsonb_set(record_json, '{received_at}', to_jsonb($3::text)),
+                                            '{id}', to_jsonb('newer-id'::text)),
+                    version = version + 1, cursor_value = $3
+              WHERE connector_instance_id = $1 AND stream = 'messages' AND record_key = $2`,
+            [instance, recordKey, newerReceivedAt]
+          );
+        },
+        { lockConnectorInstanceId: instance }
+      );
+      try {
+        await lockHeld.promise;
+        // Session A: the repair reads its page, then waits for the lock B holds.
+        const round = runRecordDerivedRepairRound({ connectorId: CONNECTOR_ID });
+        await waitForAdvisoryLockWaiter(connectorInstanceAdvisoryLockKey(instance), "the column repair");
+        repairWaits.resolve();
+        await ingestion;
+        const result = await within(round, 30_000, "column repair round");
+        assert.equal(result.failed, 0);
+
+        const row = await postgresQuery<{ cursor_value: string; received_at: string }>(
+          `SELECT cursor_value, record_json->>'received_at' AS received_at FROM records
+            WHERE connector_instance_id = $1 AND stream = 'messages' AND record_key = $2`,
+          [instance, recordKey]
+        );
+        assert.equal(row.rows[0]?.received_at, newerReceivedAt);
+        assert.equal(row.rows[0]?.cursor_value, newerReceivedAt, "the cursor derives from the stored payload");
+        // Oracle for all three columns: a repair over the stored payload finds nothing to change.
+        const messages = ((installedGmail as Record<string, unknown>).streams as Record<string, unknown>[]).find(
+          (stream) => stream.name === "messages"
+        );
+        const rerun = await postgresRepairRecordDerivedColumnsPage({
+          afterRecordKey: null,
+          budget: { chunkSize: 256 },
+          connectorId: CONNECTOR_ID,
+          connectorInstanceId: instance,
+          manifest: { ...installedGmail, streams: [messages] },
+          manifestStream: recordDerivedColumnsStream(messages),
+          stream: "messages",
+        });
+        assert.equal(rerun.updated, 0, "every derived column matches the stored payload");
+      } finally {
+        repairWaits.resolve();
+        await ingestion.catch(() => undefined);
+      }
+    });
+  }
+);
+
+test(
+  "PostgreSQL: a deadline while an install waits for the lifecycle lock releases the install fence",
+  { skip: POSTGRES_SKIP },
+  async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "pdpp-install-pg-"));
+    try {
+      await withPostgres("lifecycledeadline", async () => {
+        await seedGmail({ instances: ["cin_gmail_deadline"], recordsPerStream: 1 });
+        const lifecycleLockId = createHash("sha256")
+          .update(`connector-lifecycle:${CONNECTOR_ID}`)
+          .digest()
+          .readBigInt64BE(0)
+          .toString();
+        // The holder is this process (the waiter queues in memory) or another
+        // session (the waiter waits on the advisory lock itself).
+        const holders = {
+          "another session": (done: Promise<void>, entered: () => void) =>
+            withPostgresTransaction(async (client) => {
+              await client.query("SELECT pg_advisory_xact_lock($1::bigint)", [lifecycleLockId]);
+              entered();
+              await done;
+            }),
+          "this process": (done: Promise<void>, entered: () => void) =>
+            withConnectorLifecycleLock(dataDir, CONNECTOR_ID, async () => {
+              entered();
+              await done;
+            }),
+        };
+        for (const [holderName, hold] of Object.entries(holders)) {
+          const entered = deferred();
+          const done = deferred();
+          const holding = hold(done.promise, entered.resolve);
+          try {
+            await entered.promise;
+            await assert.rejects(
+              gmailInstallService(dataDir, { installTimeoutMs: 200 }).install(CONNECTOR_ID, digest),
+              ConnectorInstallTimeoutError
+            );
+            const deadline = Date.now() + 2000;
+            while (!installFenceIsFree(dataDir)) {
+              assert.ok(Date.now() < deadline, `the install fence stayed held (holder: ${holderName})`);
+              await new Promise((settle) => setTimeout(settle, 10));
+            }
+          } finally {
+            done.resolve();
+            await holding;
+          }
+        }
+      });
+    } finally {
       rmSync(dataDir, { force: true, recursive: true });
     }
   }
