@@ -27,7 +27,7 @@
     "tailwind-merge": "^3.7.0"
   },
   "devDependencies": {
-    "@testing-library/user-event": "^14.6.6",
+    "@testing-library/user-event": "^14.6.8",
     "@types/jsdom": "^30.0.0",
     "@types/node": "^26.6.4",
     "@types/react": "^19.2.18",
