@@ -8,8 +8,10 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState, useTransition } from "react";
 import { syncStartFailureLead } from "../../lib/connection-evidence.ts";
+import { connectorNotInstalledCopy } from "../../lib/connector-implementation.ts";
 import { type RunNowResult, runConnectorNowAction } from "../actions.ts";
 import { markSyncStartToast, readSyncStartToast, syncStartToastDismissDelayMs } from "../last-known-sync-start.ts";
+import { ConnectorInstallPrompt } from "./connector-install-prompt.tsx";
 
 const RUNNING_POLL_MS = 3000;
 const TOAST_TTL_MS = 15_000;
@@ -31,6 +33,12 @@ interface Props {
   force?: boolean;
   idleLabel?: string;
   initialRunning: boolean;
+  /**
+   * True when the page already shows the not-installed notice with its
+   * Install action. A refused run then only restates the reason instead of
+   * rendering a second Install button.
+   */
+  installPromptShown?: boolean;
   runningLabel?: string;
   title?: string;
   variant?: "default" | "destructive" | "outline";
@@ -61,6 +69,7 @@ export function SyncNowButton({
   force = false,
   idleLabel = "Sync now",
   initialRunning,
+  installPromptShown = false,
   runningLabel = "Syncing…",
   title,
   variant = "default",
@@ -68,6 +77,10 @@ export function SyncNowButton({
   const router = useRouter();
   const [isPending, startTransition] = useTransition();
   const [toast, setToast] = useState<SyncToast | null>(null);
+  // Set when the reference refused the run because the connector is not
+  // installed. Unlike a toast it does not expire: the blocker stays until the
+  // owner installs, and the page re-renders after that.
+  const [notInstalledKey, setNotInstalledKey] = useState<string | null>(null);
   const running = initialRunning;
   const busy = running || isPending;
   const syncToastScopeId = connectionId ?? connectorId;
@@ -106,6 +119,7 @@ export function SyncNowButton({
 
   const handleClick = useCallback(() => {
     setToast(null);
+    setNotInstalledKey(null);
     startTransition(async () => {
       const res: RunNowResult = await runConnectorNowAction(connectorId, connectionId, { force });
       if (res.ok === true) {
@@ -150,16 +164,28 @@ export function SyncNowButton({
         router.refresh();
         return;
       }
+      if (res.reason === "connector_not_installed") {
+        if (installPromptShown) {
+          setToast({ message: connectorNotInstalledCopy(displayName), tone: "warning" });
+          return;
+        }
+        setNotInstalledKey(res.connector_id);
+        return;
+      }
       // Stay on this connection and say whether the request reached the server.
       setToast({
         message: `${syncStartFailureLead(res.phase)} ${res.message}`.trim(),
         tone: res.phase === "before_server" ? "warning" : "error",
       });
     });
-  }, [connectionId, connectorId, force, router, syncToastScopeId]);
+  }, [connectionId, connectorId, displayName, force, installPromptShown, router, syncToastScopeId]);
 
+  // The feedback flows below the button inside its own box. It used to be
+  // absolutely positioned and right-anchored with `w-max`, so on a narrow
+  // screen a long server message ran off the left edge and painted over the
+  // content beneath it (it reserved no space).
   return (
-    <div className="relative inline-flex">
+    <div className="inline-flex min-w-0 max-w-full flex-col items-start gap-1">
       <IcButton
         aria-label={`${buttonLabel} for ${displayName}`}
         disabled={busy}
@@ -170,10 +196,20 @@ export function SyncNowButton({
       >
         {buttonLabel}
       </IcButton>
+      {notInstalledKey ? (
+        <div className="w-[18rem] min-w-0 max-w-full">
+          <ConnectorInstallPrompt
+            connectorKey={notInstalledKey}
+            displayName={displayName}
+            routeId={syncToastScopeId}
+            variant="inline"
+          />
+        </div>
+      ) : null}
       {toast ? (
         <span
           aria-live="polite"
-          className={`pdpp-caption absolute top-full right-0 z-10 mt-1 w-max max-w-[18rem] text-right ${syncToastToneClass(toast.tone)}`}
+          className={`pdpp-caption block min-w-0 max-w-[18rem] break-words ${syncToastToneClass(toast.tone)}`}
           data-toast-tone={toast.tone}
           role="status"
         >

@@ -445,3 +445,18 @@ test("active pending work (checking) stays distinct from accepted absence", () =
     assert.notEqual(checking.disposition?.title, accepted.coverage.title);
   }
 });
+
+test("a connector that is not installed replaces the next-run disposition with the install blocker", () => {
+  const refresh = entry({ coverage_condition: "complete", forward_disposition: "owner_refresh_due" });
+  const blocked = formatStreamCollectionFacts(refresh, { connectorNotInstalled: true });
+  assert.equal(blocked.disposition?.value, "connector_not_installed");
+  assert.equal(blocked.disposition?.label, "blocked, connector not installed");
+  // The page's install notice is the owner action; the stream line must not
+  // add a "(needs you)" cue that points at a refresh no run can perform.
+  assert.equal(blocked.disposition?.ownerActionNeeded, false);
+  assert.equal(blocked.tone, "warning");
+
+  const unchanged = formatStreamCollectionFacts(refresh, { connectorNotInstalled: false });
+  assert.equal(unchanged.disposition?.value, "owner_refresh_due");
+  assert.equal(formatStreamCollectionFacts(refresh).disposition?.value, "owner_refresh_due");
+});

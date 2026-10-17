@@ -471,7 +471,12 @@ import {
   mountRefDeviceExporterSourceInstances,
   mountRefDeviceExportersList,
 } from "./routes/ref-device-exporters.ts";
-import { codeToStatus, recoveryAdmissionExtrasForWire, typeFor } from "./routes/ref-error-status.ts";
+import {
+  codeToStatus,
+  connectorNotInstalledExtrasForWire,
+  recoveryAdmissionExtrasForWire,
+  typeFor,
+} from "./routes/ref-error-status.ts";
 import {
   mountRefEventSubscriptionsDisable,
   mountRefEventSubscriptionsGet,
@@ -727,6 +732,7 @@ interface PdppErrorBody {
   active_run_id?: string;
   available_connections?: unknown[];
   code: unknown;
+  connector_id?: string;
   message: unknown;
   next_eligible_at?: string;
   next_step?: string;
@@ -1432,6 +1438,9 @@ function pdppError(
     if (typeof extras.pending_pressure_gap_count === "number") {
       body.error.pending_pressure_gap_count = extras.pending_pressure_gap_count;
     }
+    if (typeof extras.connector_id === "string") {
+      body.error.connector_id = extras.connector_id;
+    }
   }
   const resourceMetadataUrl = status === 401 ? getProtectedResourceMetadataUrl(typedRes) : null;
   if (resourceMetadataUrl) {
@@ -1605,7 +1614,7 @@ function handleError(res: ResLike, err: ApiError) {
   if (code === "connection_run_active" && typeof err.active_run_id === "string") {
     extras.active_run_id = err.active_run_id;
   }
-  Object.assign(extras, recoveryAdmissionExtrasForWire(err));
+  Object.assign(extras, recoveryAdmissionExtrasForWire(err), connectorNotInstalledExtrasForWire(err));
   pdppError(res, status, code, err.message, err.param || null, extras);
 }
 
@@ -8390,6 +8399,9 @@ function buildRsApp(opts: ServerOpts = {}) {
   // and registers only a verified installed manifest.
   mountOwnerConnectorInstall(app, {
     handleError,
+    // Installing or removing an implementation flips the summaries'
+    // `connector_implementation`; drop the cached list so the next read shows it.
+    onImplementationChanged: invalidateConnectorSummariesCache,
     pdppError,
     requireOwner,
     requireToken,
