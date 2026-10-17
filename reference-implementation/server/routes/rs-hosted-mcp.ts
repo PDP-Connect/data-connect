@@ -20,6 +20,7 @@
 // without `.d.ts` declarations, so they cannot be imported directly from a
 // strict-mode `.ts` file.
 
+import type { PackageProfile } from "../../vendor/mcp-server/src/package-profile.ts";
 import {
   isTrustedMetadataRequestOrigin,
   protectedResourceMetadataUrlForResource,
@@ -83,6 +84,7 @@ interface McpServerOptions {
   readonly fetch: typeof globalThis.fetch;
   readonly providerUrl: string;
   readonly rsClient?: unknown;
+  readonly packageProfile?: PackageProfile;
   readonly serverIcons?: readonly McpServerIcon[];
   readonly serverName: string;
   readonly serverVersion: string;
@@ -108,7 +110,10 @@ export interface MountRsHostedMcpContext {
   /** Resolved RS public URL (or null; adapter derives it per-request). */
   readonly explicitResource: string | null | undefined;
   /** From auth.js: resolve active grant-package members for a package token. */
-  getGrantPackageAccess: (packageId: string) => Promise<GrantPackageAccess | null>;
+  getGrantPackageAccess: (
+    packageId: string,
+    options?: { includeInactive: boolean }
+  ) => Promise<GrantPackageAccess | null>;
   /**
    * `handleStreamableHttpRequest` from `@pdpp/mcp-server/server`.
    * Injected because the package is JS-only without type declarations.
@@ -285,21 +290,72 @@ export function mountRsHostedMcp(app: AppLike, ctx: MountRsHostedMcpContext): vo
     resource: string,
     internalBase: string
   ): Promise<McpServerOptions | null> {
-    const access = await ctx.getGrantPackageAccess(req.tokenInfo?.grant_package_id as string);
+    const profileEnabled = process.env.PDPP_PROTOTYPE_MCP_PROFILE === "1";
+    const access = await ctx.getGrantPackageAccess(
+      req.tokenInfo?.grant_package_id as string,
+      profileEnabled ? { includeInactive: true } : undefined
+    );
+    if (
+      profileEnabled &&
+      !access?.members.some((member) => (member as unknown as { status: string }).status === "active")
+    ) {
+      const metadataUrl = res.locals[PROTECTED_RESOURCE_METADATA_URL_LOCAL];
+      res.setHeader("WWW-Authenticate", `Bearer error="invalid_token", resource_metadata="${String(metadataUrl)}"`);
+      ctx.pdppError(res, 401, "invalid_token", "Grant package has no active children");
+      return null;
+    }
     if (!access || access.members.length === 0) {
       ctx.pdppError(res, 403, "package_revoked", "Grant package is revoked or has no active members");
       return null;
     }
-    const rsClient = ctx.createPackageRsClient({
-      fetch: globalThis.fetch,
-      members: access.members,
-      // Child self-calls use the internal base, not the public edge.
-      providerUrl: internalBase,
-    });
+    const rsClient = profileEnabled
+      ? undefined
+      : ctx.createPackageRsClient({
+          fetch: globalThis.fetch,
+          members: access.members,
+          // Child self-calls use the internal base, not the public edge.
+          providerUrl: internalBase,
+        });
     const mcpServerOptions = {
       fetch: globalThis.fetch,
       providerUrl: resource,
-      rsClient,
+      ...(rsClient ? { rsClient } : {}),
+      ...(profileEnabled
+        ? {
+            packageProfile: {
+              children: access.members.map((entry) => {
+                const member = entry as unknown as {
+                  grant_id: string;
+                  status: string;
+                  token: string;
+                  grant: {
+                    source: unknown;
+                    purpose_code: unknown;
+                    purpose_description?: unknown;
+                    streams: Array<{ name: string; instance_ids?: string[] }>;
+                    access_mode: unknown;
+                  };
+                };
+                return {
+                  grant_id: member.grant_id,
+                  status: member.status,
+                  source: member.grant.source,
+                  purpose: { code: member.grant.purpose_code, description: member.grant.purpose_description },
+                  streams: member.grant.streams.map(({ name, instance_ids }) => ({
+                    name,
+                    ...(instance_ids ? { instance_ids } : {}),
+                  })),
+                  mode: member.grant.access_mode,
+                  rs: ctx.createRsClient({
+                    accessToken: member.token,
+                    fetch: globalThis.fetch,
+                    providerUrl: internalBase,
+                  }) as PackageProfile["children"][number]["rs"],
+                };
+              }),
+            },
+          }
+        : {}),
       serverIcons: hostedMcpIcons(resource),
       serverName: "pdpp-reference-mcp",
       serverVersion: referenceRevision,

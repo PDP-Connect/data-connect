@@ -174,6 +174,7 @@ export interface ReferenceQueryRegistry extends Readonly<Record<string, Register
   readonly authGrantPackageMembersGetPackageIdByGrant: ReadOneQuery;
   readonly authGrantPackageMembersInsert: MutationQuery;
   readonly authGrantPackageMembersListActiveByPackage: SmallEnumerationQuery;
+  readonly authGrantPackageMembersListProfileByPackage: SmallEnumerationQuery;
   readonly authGrantPackageMembersListAllByPackage: SmallEnumerationQuery;
   readonly authGrantPackageMembersMarkRevokedByGrant: MutationQuery;
   readonly authGrantPackageMembersMarkRevokedByPackage: MutationQuery;
@@ -857,6 +858,7 @@ export function loadReferenceQueries(queryDir = QUERIES_DIR): ReferenceQueryRegi
     // Auth — grant_packages
     "authGrantPackagesListAll",
     "authGrantPackageMembersListAllByPackage",
+    "authGrantPackageMembersListProfileByPackage",
     "authGrantPackageMembersExpiriesByPackage",
     "authGrantPackageMembersGetPackageIdByGrant",
     "authGrantPackageMembersMarkRevokedByGrant",

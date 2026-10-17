@@ -684,7 +684,15 @@ async function handleSchemaTool(rs: RsClient, providerUrl: string, args: JsonObj
  * from manifest, stream, or record data. RS payloads are returned as data; nothing is
  * interpolated into instructions to the model.
  */
-export function buildTools({ rs, providerUrl }: { rs: RsClient; providerUrl: string }): ToolDefinition[] {
+export function buildTools({
+  rs,
+  providerUrl,
+  presentationGrantId,
+}: {
+  rs: RsClient;
+  providerUrl: string;
+  presentationGrantId?: string;
+}): ToolDefinition[] {
   const tools = [
     {
       name: "schema",
@@ -851,6 +859,7 @@ export function buildTools({ rs, providerUrl }: { rs: RsClient; providerUrl: str
         return toSearchToolResult(response, providerUrl, {
           limit: typeof args.limit === "number" ? args.limit : undefined,
           q: typeof args.q === "string" ? args.q : undefined,
+          ...(presentationGrantId ? { presentationGrantId } : {}),
         });
       },
     },
@@ -933,12 +942,17 @@ export function buildTools({ rs, providerUrl }: { rs: RsClient; providerUrl: str
           `/v1/streams/${encodeURIComponent(ref.stream)}/records/${encodeURIComponent(ref.recordId)}/field-window`,
           { query }
         );
-        return toReadRecordFieldToolResult(response, providerUrl, {
-          connectionId: ref.connectionId,
-          stream: ref.stream,
-          recordId: ref.recordId,
-          fieldPath,
-        });
+        return toReadRecordFieldToolResult(
+          response,
+          providerUrl,
+          {
+            connectionId: ref.connectionId,
+            stream: ref.stream,
+            recordId: ref.recordId,
+            fieldPath,
+          },
+          presentationGrantId
+        );
       },
     },
   ];
@@ -1680,6 +1694,7 @@ function pickSharedGrantedConnections(streams: Json[]): SharedGrantedConnections
 }
 
 interface ToSearchToolResultOptions {
+  presentationGrantId?: string;
   limit?: number | undefined;
   q?: string | undefined;
 }
@@ -1704,7 +1719,7 @@ function toSearchToolResult(
     content: [
       {
         type: "text",
-        text: summarizeSearch(summaryBody, results),
+        text: summarizeSearch(summaryBody, results, options.presentationGrantId),
       },
     ],
     structuredContent: {
@@ -1746,7 +1761,11 @@ interface FieldWindowRecordId {
 // Build the `next`/`previous read_record_field args=...` continuation lines
 // for a non-complete field window. Split out of `toReadRecordFieldToolResult`
 // to keep that function's branching budget in check.
-function fieldWindowContinuationLines(window: JsonObject, record: FieldWindowRecordId): string[] {
+function fieldWindowContinuationLines(
+  window: JsonObject,
+  record: FieldWindowRecordId,
+  presentationGrantId?: string
+): string[] {
   if (window.complete === true) {
     return [];
   }
@@ -1755,6 +1774,7 @@ function fieldWindowContinuationLines(window: JsonObject, record: FieldWindowRec
       id: record.id,
       field_path: record.field_path,
       offset_chars: offsetChars,
+      ...(presentationGrantId ? { grant_id: presentationGrantId } : {}),
     };
     const limitChars = numberValue(window.limit_chars);
     if (limitChars !== null) {
@@ -1779,7 +1799,8 @@ function fieldWindowContinuationLines(window: JsonObject, record: FieldWindowRec
 function toReadRecordFieldToolResult(
   response: RsResponse,
   providerUrl: string,
-  identity: ReadRecordFieldIdentity
+  identity: ReadRecordFieldIdentity,
+  presentationGrantId?: string
 ): McpToolResult {
   if (!response.ok) {
     return errorToolResult(response, providerUrl);
@@ -1814,7 +1835,11 @@ function toReadRecordFieldToolResult(
   ]
     .filter(Boolean)
     .join(" ");
-  const continuationLines = fieldWindowContinuationLines(window, { id: record.id, field_path: fieldInfo.path });
+  const continuationLines = fieldWindowContinuationLines(
+    window,
+    { id: record.id, field_path: fieldInfo.path },
+    presentationGrantId
+  );
   const text = typeof window.text === "string" ? window.text : "";
   return {
     content: [
@@ -2790,7 +2815,7 @@ const SEARCH_RESULT_SNIPPET_CHAR_LIMIT = 320;
 // it exists only to keep pathological record keys from blowing the text budget.
 const SEARCH_TEXT_ID_CHAR_LIMIT = 200;
 
-function summarizeSearch(body: Json, results: SearchResult[]): string {
+function summarizeSearch(body: Json, results: SearchResult[], presentationGrantId?: string): string {
   const hasMore = envelopeField(body, "has_more") === true ? " has_more=true." : "";
   const nextCursor = envelopeStringField(body, "next_cursor");
   const cursorText = nextCursor ? ` next_cursor=${formatScalar(nextCursor)}.` : "";
@@ -2800,17 +2825,18 @@ function summarizeSearch(body: Json, results: SearchResult[]): string {
   const previews = results.slice(0, SEARCH_TEXT_PREVIEW_LIMIT).map(formatSearchPreviewLine);
   const matchPreviews = results
     .slice(0, SEARCH_TEXT_PREVIEW_LIMIT)
-    .flatMap((result, index) => formatSearchMatchWindowLines(result, index));
+    .flatMap((result, index) => formatSearchMatchWindowLines(result, index, presentationGrantId));
   const matchPreviewText = matchPreviews.length > 0 ? `\nEvidence excerpts:\n${matchPreviews.join("\n")}` : "";
   const previewText = previews.length > 0 ? `\nTop results:\n${previews.join("\n")}` : "";
   const fetchHint =
     previews.length > 0
-      ? "\nFetch a hit with `fetch` using the shown id as-is; ids are self-contained. Pass connection_id only when shown separately."
+      ? "\nFetch a hit with `fetch` using the shown id as-is; ids are self-contained. Pass connection_id only when shown separately." +
+        (presentationGrantId ? ` Include grant_id=${presentationGrantId}.` : "")
       : "";
   return `search: ${results.length} hit(s).${hasMore}${cursorText}${firstFetchText}${sourceMixText}${recallText}${matchPreviewText}${previewText}${fetchHint} Search envelope metadata: structuredContent.data; flattened results: structuredContent.results.`;
 }
 
-function formatSearchMatchWindowLines(result: SearchResult, index: number): string[] {
+function formatSearchMatchWindowLines(result: SearchResult, index: number, presentationGrantId?: string): string[] {
   const windows = Array.isArray(result.match_windows) ? result.match_windows : [];
   return windows
     .slice(0, 2)
@@ -2825,7 +2851,9 @@ function formatSearchMatchWindowLines(result: SearchResult, index: number): stri
       const limit = Number.isInteger(readArgs?.limit_chars) ? ` limit_chars=${readArgs?.limit_chars}` : "";
       const readTool = firstString(read?.tool);
       const readHint =
-        readTool || readArgs ? ` read=${formatInlineValue(readTool ?? "read_record_field")}${offset}${limit}` : "";
+        readTool || readArgs
+          ? ` read=${formatInlineValue(readTool ?? "read_record_field")}${offset}${limit}${presentationGrantId ? ` grant_id=${presentationGrantId}` : ""}`
+          : "";
       const visibleId = firstString(readArgs?.id as string | undefined, result.id);
       const previewText =
         typeof window.preview_text === "string"
