@@ -4,7 +4,7 @@
 /**
  * Cross-process directory lock for installer state under the data directory.
  *
- * `mkdir` is the atomic acquire. The directory holds `owner.json` with the
+ * `mkdir` is the atomic acquire. The directory holds an `owner` file with the
  * owner's pid and a token that is unique to one process start. A pid alone
  * cannot identify the owner: in a container the server gets the same pid on
  * every start, so a lock left by a crashed process looks held by the live one.
@@ -14,7 +14,8 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-const OWNER_FILE = "owner.json";
+/** Three lines: pid, process token, acquired-at timestamp. Plain text, not a data document. */
+const OWNER_FILE = "owner";
 const LEGACY_PID_FILE = "pid";
 /** A lock without an owner record is a crash between mkdir and the owner write. */
 const UNOWNED_LOCK_GRACE_MS = 60_000;
@@ -84,18 +85,10 @@ function isPidAlive(pid: number): boolean {
 
 function readOwner(lockDir: string): DirectoryLockOwner | null {
   try {
-    const parsed = JSON.parse(readFileSync(join(lockDir, OWNER_FILE), "utf8")) as Record<string, unknown>;
-    if (
-      typeof parsed.pid === "number" &&
-      Number.isInteger(parsed.pid) &&
-      parsed.pid > 0 &&
-      typeof parsed.token === "string"
-    ) {
-      return {
-        acquiredAt: typeof parsed.acquired_at === "string" ? parsed.acquired_at : null,
-        pid: parsed.pid,
-        token: parsed.token,
-      };
+    const [pidLine, token, acquiredAt] = readFileSync(join(lockDir, OWNER_FILE), "utf8").split("\n");
+    const pid = Number(pidLine);
+    if (Number.isInteger(pid) && pid > 0 && token) {
+      return { acquiredAt: acquiredAt || null, pid, token };
     }
   } catch {
     // Fall through to the legacy pid file.
@@ -187,7 +180,7 @@ export function acquireDirectoryLock(dataDir: string, lockName: string, busyMess
   try {
     writeFileSync(
       join(lockDir, OWNER_FILE),
-      `${JSON.stringify({ acquired_at: acquiredAt, pid: process.pid, token: PROCESS_LOCK_TOKEN })}\n`,
+      `${String(process.pid)}\n${PROCESS_LOCK_TOKEN}\n${acquiredAt}\n`,
       { mode: 0o600 }
     );
     writeFileSync(join(lockDir, LEGACY_PID_FILE), `${String(process.pid)}\n`, { mode: 0o600 });

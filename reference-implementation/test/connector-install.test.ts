@@ -1156,7 +1156,7 @@ function writeLockOwner(dataDir: string, owner: { pid: number; token?: string })
   mkdirSync(lockDir, { recursive: true });
   writeFileSync(join(lockDir, "pid"), `${String(owner.pid)}\n`);
   if (owner.token) {
-    writeFileSync(join(lockDir, "owner.json"), JSON.stringify({ pid: owner.pid, token: owner.token }));
+    writeFileSync(join(lockDir, "owner"), `${String(owner.pid)}\n${owner.token}\n`);
   }
   return lockDir;
 }
