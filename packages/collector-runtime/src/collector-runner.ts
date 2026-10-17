@@ -203,8 +203,11 @@ function classifyLocalDeviceFailure(error: unknown): boolean {
  * - `maxEnqueuedBatchesPerRun`: first-backfill/scan safety valve. When a
  *   connector emits more durable record batches than this during one
  *   invocation, the runner stops the child, records a retryable
- *   policy-budget gap, drains already-queued work, and refuses to commit
- *   checkpoint state for the interrupted scan.
+ *   policy-budget gap, drains already-queued work, and commits the STATE the
+ *   connector staged before the stop for streams that emitted records this
+ *   run (never coverage or terminal evidence). The next run resumes from
+ *   that checkpoint. It skips the scan only when it would replay the stop
+ *   (see `hasScanBudgetReplay` and `ScanBudgetResume`).
  */
 export interface CollectorOutboxPolicy {
   drainBatchSize: number;
@@ -843,8 +846,10 @@ export interface CollectorRunResult {
   satisfiedBindings: readonly RuntimeBindingName[];
   /**
    * True when a spawned connector was stopped by the per-run scan enqueue
-   * budget. Already-emitted records remain durable; checkpoint state is
-   * intentionally not committed because the scan boundary is incomplete.
+   * budget. Already-emitted records remain durable. STATE staged before the
+   * stop, for streams that emitted records this run, is committed as an
+   * ordinary checkpoint so the next run resumes; no coverage or terminal
+   * evidence is committed because the scan boundary is incomplete.
    */
   scanBudgetExceeded: boolean;
   sentBatches: number;
@@ -955,7 +960,7 @@ export async function runCollectorConnector(config: CollectorRunConfig): Promise
     const postDrainSummary = outbox.summary({
       sourceInstanceId: config.sourceInstanceId,
     });
-    const skipResult = await maybeSkipScanForBacklog({
+    const skipInput: Omit<MaybeSkipScanInput, "scanBlocked"> = {
       autoPrunePolicy,
       autoRecoveredTransientDeadLetters,
       client,
@@ -966,6 +971,10 @@ export async function runCollectorConnector(config: CollectorRunConfig): Promise
       preScanDrain,
       recoveredLeases,
       satisfiedBindings,
+    };
+    const skipResult = await maybeSkipScanForBacklog({
+      ...skipInput,
+      scanBlocked: hasScanBlockingOutboxWork(outbox, config.sourceInstanceId),
     });
     if (skipResult) {
       return skipResult;
@@ -980,6 +989,28 @@ export async function runCollectorConnector(config: CollectorRunConfig): Promise
       recordsPending: pendingOutboxWorkCount(postDrainSummary),
     });
     const priorState = priorStateProjection.state;
+    // The SERVER is the authority on the declared boundary: it is persisted with
+    // the connection and delivered on the state read, so it cannot be widened by
+    // a local flag or lost when the CLI process goes away. A caller-supplied
+    // scope only applies when the connection declared none.
+    const declaredScope = readCollectionScopeFromState(priorState) ?? config.connector.scope ?? null;
+    const scopedConfig: CollectorRunConfig = {
+      ...config,
+      connector: { ...config.connector, scope: declaredScope },
+    };
+    const replaySkipResult = await maybeSkipScanForBacklog({
+      ...skipInput,
+      scanBlocked: hasScanBudgetReplay({
+        connector: scopedConfig.connector,
+        outbox,
+        policy,
+        priorState,
+        sourceInstanceId: config.sourceInstanceId,
+      }),
+    });
+    if (replaySkipResult) {
+      return replaySkipResult;
+    }
 
     await client.heartbeat({
       agent_version: COLLECTOR_AGENT_VERSION,
@@ -994,15 +1025,6 @@ export async function runCollectorConnector(config: CollectorRunConfig): Promise
     startingHeartbeatSent = true;
 
     scanStarted = true;
-    // The SERVER is the authority on the declared boundary: it is persisted with
-    // the connection and delivered on the state read, so it cannot be widened by
-    // a local flag or lost when the CLI process goes away. A caller-supplied
-    // scope only applies when the connection declared none.
-    const declaredScope = readCollectionScopeFromState(priorState) ?? config.connector.scope ?? null;
-    const scopedConfig: CollectorRunConfig = {
-      ...config,
-      connector: { ...config.connector, scope: declaredScope },
-    };
     const streamResult = await streamConnectorIntoOutbox({
       ...(config.abortSignal ? { abortSignal: config.abortSignal } : {}),
       batchSize: config.batchSize ?? 100,
@@ -1212,10 +1234,16 @@ interface MaybeSkipScanInput {
   preScanDrain: DrainCollectorOutboxResult;
   recoveredLeases: number;
   satisfiedBindings: readonly RuntimeBindingName[];
+  /**
+   * True when this pass must not spawn the connector: open outbox work
+   * ({@link hasScanBlockingOutboxWork}) or a scan that would replay an earlier
+   * budget stop ({@link hasScanBudgetReplay}).
+   */
+  scanBlocked: boolean;
 }
 
 async function maybeSkipScanForBacklog(input: MaybeSkipScanInput): Promise<CollectorRunResult | null> {
-  if (!hasScanBlockingOutboxWork(input.outbox, input.config.sourceInstanceId, input.policy)) {
+  if (!input.scanBlocked) {
     return null;
   }
   const recordsPending = pendingOutboxWorkCount(input.postDrainSummary);
@@ -1558,6 +1586,17 @@ async function streamConnectorIntoOutbox(
   const stderr = new BoundedStderrBuffer(COLLECTOR_STDERR_MAX_BYTES);
   const inScopeStreams = new Set(input.config.connector.streams);
   const bufferedState: Record<string, unknown> = {};
+  // The STATE a budget stop may commit. STATE covers the records before it,
+  // so a STATE for a stream that has emitted no RECORD yet this run covers
+  // nothing new: it may only re-stamp a run-clock field such as `fetched_at`,
+  // and committing it would read as progress to the replay guard. The
+  // coverage diagnostic describes the whole inventory pass and never commits
+  // from a stopped scan.
+  const resumableState: Record<string, unknown> = {};
+  const streamsWithRecords = new Set<string>();
+  // Streams that emitted RECORDs after the last resumable STATE: no checkpoint
+  // a budget stop commits covers them. The stop records them for the guard.
+  const streamsSinceLastState = new Set<string>();
   let batchSeq = nextOutboxBatchSeq(input.outbox, input.config.sourceInstanceId);
   let pendingRecords: Extract<EmittedMessage, { type: "RECORD" }>[] = [];
   let bufferHighWaterMark = 0;
@@ -1613,9 +1652,11 @@ async function streamConnectorIntoOutbox(
     enqueuedBatches += 1;
     batchSeq += 1;
     scanBudgetExceeded = maybeRecordScanBudgetGap({
+      checkpointed: Object.keys(resumableState).length > 0,
       enqueuedBatches,
       input,
       scanBudgetExceeded,
+      uncheckpointedStreams: streamsSinceLastState,
     });
   };
 
@@ -1629,6 +1670,14 @@ async function streamConnectorIntoOutbox(
       status: entry.status,
       stream: entry.stream,
     });
+  };
+
+  const stageState = (message: Extract<EmittedMessage, { type: "STATE" }>): void => {
+    bufferedState[message.stream] = message.cursor;
+    if (message.stream !== COVERAGE_DIAGNOSTICS_STREAM && streamsWithRecords.has(message.stream)) {
+      resumableState[message.stream] = message.cursor;
+      streamsSinceLastState.clear();
+    }
   };
 
   const notifyOnMessage = (message: EmittedMessage): void => {
@@ -1650,6 +1699,8 @@ async function streamConnectorIntoOutbox(
     }
     if (message.type === "RECORD") {
       recordCoverageIfPresent(message);
+      streamsWithRecords.add(message.stream);
+      streamsSinceLastState.add(message.stream);
       pendingRecords.push(message);
       if (pendingRecords.length > bufferHighWaterMark) {
         bufferHighWaterMark = pendingRecords.length;
@@ -1666,7 +1717,7 @@ async function streamConnectorIntoOutbox(
         );
         return;
       }
-      bufferedState[message.stream] = message.cursor;
+      stageState(message);
       return;
     }
     if (message.type === "STREAM_EVIDENCE") {
@@ -1813,7 +1864,11 @@ async function streamConnectorIntoOutbox(
   flushPendingBatch();
 
   return {
-    bufferedState: Object.freeze(scanBudgetExceeded ? {} : { ...bufferedState }),
+    // A budget stop keeps the resumable checkpoints staged before it: STATE
+    // covers only the records before it, and those are already in the outbox,
+    // ahead of the checkpoint row that commits them. Committing them is what
+    // lets a walk longer than one run's budget converge.
+    bufferedState: Object.freeze(scanBudgetExceeded ? { ...resumableState } : { ...bufferedState }),
     bufferHighWaterMark,
     // Coverage is a diagnostic of what the inventory saw, not record-level
     // checkpoint state, so it is reported even when the scan budget cut the
@@ -1912,9 +1967,11 @@ function throwIfConnectorExitedUncleanly(input: {
 }
 
 function maybeRecordScanBudgetGap(input: {
+  checkpointed: boolean;
   enqueuedBatches: number;
   input: StreamConnectorIntoOutboxInput;
   scanBudgetExceeded: boolean;
+  uncheckpointedStreams: ReadonlySet<string>;
 }): boolean {
   if (input.scanBudgetExceeded) {
     return true;
@@ -1922,15 +1979,38 @@ function maybeRecordScanBudgetGap(input: {
   if (input.enqueuedBatches < input.input.policy.maxEnqueuedBatchesPerRun) {
     return false;
   }
+  const { connector, sourceInstanceId } = input.input.config;
+  const connectorId = connector.connector_id;
+  const startCursorKey = scanStartCursorKey({
+    connector,
+    priorState: input.input.priorState,
+    streams: [...input.uncheckpointedStreams],
+  });
+  const uncheckpointedStreams = [...input.uncheckpointedStreams].sort();
+  // One retry per starting point: an earlier resumable stop from this key
+  // already had it, so this stop blocks the next same-budget scan.
+  const earlierResumableStop = input.input.outbox.get(
+    collectorGapRowId({
+      connectorId,
+      reason: "policy_budget",
+      scanResume: { resumable: true, startCursorKey, uncheckpointedStreams },
+      sourceInstanceId,
+    })
+  );
   ensureCollectorGapRow({
     clock: () => new Date(),
-    connectorId: input.input.config.connector.connector_id,
+    connectorId,
     details: `enqueued ${input.enqueuedBatches} batches >= run batch limit ${input.input.policy.maxEnqueuedBatchesPerRun}`,
     outbox: input.input.outbox,
     reason: "policy_budget",
     retryable: true,
     ...(input.input.config.runId ? { runId: input.input.config.runId } : {}),
-    sourceInstanceId: input.input.config.sourceInstanceId,
+    scanResume: {
+      resumable: input.checkpointed && earlierResumableStop === null,
+      startCursorKey,
+      uncheckpointedStreams,
+    },
+    sourceInstanceId,
   });
   return true;
 }
@@ -2368,6 +2448,11 @@ export interface GapPayload {
    * outbox row status still moves only via leases.
    */
   retryable: boolean;
+  /**
+   * Local-only record of where a scan-budget stop left the walk. Never sent
+   * to the server. See {@link ScanBudgetResume}.
+   */
+  scanResume?: ScanBudgetResume;
   sourceInstanceId: string;
   /** Optional stream name when the runner can attribute the gap. */
   stream?: string;
@@ -2378,6 +2463,24 @@ export interface GapPayload {
   streamBoundary?: string;
 }
 
+/**
+ * What a scan-budget stop proves about a retry. `uncheckpointedStreams` are
+ * the streams that emitted records after the stop's last committed STATE, so
+ * no checkpoint covers them. `startCursorKey` hashes the connector build, the
+ * declared scope, and the cursors those streams STARTED the stopped scan from
+ * ({@link scanStartCursorKey}). A retry from the same key walks the same tail.
+ *
+ * `resumable` is true when the stop committed a checkpoint and no earlier stop
+ * started from this key. That checkpoint can free budget for the tail (an
+ * earlier stream finished), so one retry runs. A stop that committed nothing,
+ * or a second stop from the same key, is not resumable: the retry is skipped.
+ */
+export interface ScanBudgetResume {
+  resumable: boolean;
+  startCursorKey: string;
+  uncheckpointedStreams: string[];
+}
+
 interface EnsureGapInput {
   clock: () => Date;
   connectorId: string;
@@ -2386,6 +2489,7 @@ interface EnsureGapInput {
   reason: GapReason;
   retryable: boolean;
   runId?: string;
+  scanResume?: ScanBudgetResume;
   sourceInstanceId: string;
   stream?: string;
   streamBoundary?: string;
@@ -2397,22 +2501,34 @@ interface EnsureGapInput {
  * tuple so re-observing the same condition on a later run does not
  * accumulate new rows — last-attempt metadata is observable from the
  * existing outbox row's `updated_at`/`next_attempt_at`/`attempt_count`
- * after the drain leases it again.
+ * after the drain leases it again. A scan-budget stop also keys the row on
+ * its {@link ScanBudgetResume} key and `resumable` flag, so each distinct
+ * starting point, and a repeat stop from it, gets its own row. The
+ * server-facing gap identity is unchanged.
  */
-function ensureCollectorGapRow(input: EnsureGapInput): LocalDeviceOutboxItem {
-  const firstSeenAt = input.clock().toISOString();
-  const idParts: unknown[] = [
-    input.connectorId,
-    input.sourceInstanceId,
-    input.reason,
-    input.stream ?? null,
-    input.streamBoundary ?? null,
-  ];
-  const id = buildLocalDeviceOutboxId({
+function collectorGapRowId(
+  input: Pick<
+    EnsureGapInput,
+    "connectorId" | "reason" | "scanResume" | "sourceInstanceId" | "stream" | "streamBoundary"
+  >
+): string {
+  return buildLocalDeviceOutboxId({
     kind: "gap",
-    parts: idParts,
+    parts: [
+      input.connectorId,
+      input.sourceInstanceId,
+      input.reason,
+      input.stream ?? null,
+      input.streamBoundary ?? null,
+      ...(input.scanResume ? [input.scanResume.startCursorKey, input.scanResume.resumable] : []),
+    ],
     sourceInstanceId: input.sourceInstanceId,
   });
+}
+
+function ensureCollectorGapRow(input: EnsureGapInput): LocalDeviceOutboxItem {
+  const firstSeenAt = input.clock().toISOString();
+  const id = collectorGapRowId(input);
   const existing = input.outbox.get(id);
   if (existing) {
     return existing;
@@ -2433,6 +2549,9 @@ function ensureCollectorGapRow(input: EnsureGapInput): LocalDeviceOutboxItem {
   }
   if (input.runId) {
     payload.firstSeenRunId = input.runId;
+  }
+  if (input.scanResume) {
+    payload.scanResume = input.scanResume;
   }
   const details = input.details ? sanitizeCollectorGapDetails(input.details) : null;
   if (details) {
@@ -3067,7 +3186,8 @@ function assertGapPayload(payload: unknown, id: string): GapPayload {
     (payload.stream !== undefined && typeof payload.stream !== "string") ||
     (payload.streamBoundary !== undefined && typeof payload.streamBoundary !== "string") ||
     (payload.firstSeenRunId !== undefined && typeof payload.firstSeenRunId !== "string") ||
-    (payload.details !== undefined && typeof payload.details !== "string")
+    (payload.details !== undefined && typeof payload.details !== "string") ||
+    (payload.scanResume !== undefined && !isScanBudgetResume(payload.scanResume))
   ) {
     throw new OutboxPayloadShapeError(`gap payload missing or invalid fields: ${id}`);
   }
@@ -3091,7 +3211,24 @@ function assertGapPayload(payload: unknown, id: string): GapPayload {
   if (typeof payload.details === "string") {
     gap.details = payload.details;
   }
+  if (isScanBudgetResume(payload.scanResume)) {
+    gap.scanResume = {
+      resumable: payload.scanResume.resumable,
+      startCursorKey: payload.scanResume.startCursorKey,
+      uncheckpointedStreams: [...payload.scanResume.uncheckpointedStreams],
+    };
+  }
   return gap;
+}
+
+function isScanBudgetResume(value: unknown): value is ScanBudgetResume {
+  return (
+    isRecord(value) &&
+    typeof value.resumable === "boolean" &&
+    typeof value.startCursorKey === "string" &&
+    Array.isArray(value.uncheckpointedStreams) &&
+    value.uncheckpointedStreams.every((stream) => typeof stream === "string")
+  );
 }
 
 function assertCheckpointPayload(payload: unknown, id: string): CheckpointPayload {
@@ -3201,11 +3338,7 @@ function pendingOutboxWorkCount(summary: LocalDeviceOutboxSummary): number {
   return summary.ready + summary.leased;
 }
 
-function hasScanBlockingOutboxWork(
-  outbox: LocalDeviceOutbox,
-  sourceInstanceId: string,
-  policy: Pick<CollectorOutboxPolicy, "maxEnqueuedBatchesPerRun">
-): boolean {
+function hasScanBlockingOutboxWork(outbox: LocalDeviceOutbox, sourceInstanceId: string): boolean {
   if (
     outbox.hasNonSucceededWork({
       excludeKinds: ["gap", "terminal_run_commit"],
@@ -3214,19 +3347,71 @@ function hasScanBlockingOutboxWork(
   ) {
     return true;
   }
-  if (outbox.hasNonSucceededWork({ kinds: ["terminal_run_commit"], sourceInstanceId, statuses: ["ready", "leased"] })) {
-    return true;
-  }
-  return outbox.listByKind({ kind: "gap", sourceInstanceId }).some((item) => isUnresolvedScanBudgetGap(item, policy));
+  return outbox.hasNonSucceededWork({
+    kinds: ["terminal_run_commit"],
+    sourceInstanceId,
+    statuses: ["ready", "leased"],
+  });
 }
 
 function hasCheckpointBlockingOutboxWork(outbox: LocalDeviceOutbox, sourceInstanceId: string): boolean {
   return outbox.hasNonSucceededWork({ sourceInstanceId });
 }
 
-function isUnresolvedScanBudgetGap(
+/**
+ * Hash of where a scan starts the given streams: the connector build
+ * (command and args, so an upgraded connector gets a fresh attempt), the
+ * declared scope, and each stream's prior cursor (`null` when absent).
+ * Cursors are opaque; only equality matters.
+ */
+function scanStartCursorKey(input: {
+  connector: CollectorConnectorSpec;
+  priorState: Readonly<Record<string, unknown>>;
+  streams: readonly string[];
+}): string {
+  return hashCanonicalJson({
+    args: input.connector.args,
+    command: input.connector.command,
+    connector_id: input.connector.connector_id,
+    cursors: Object.fromEntries(
+      [...input.streams]
+        .sort()
+        .map((stream) => [stream, Object.hasOwn(input.priorState, stream) ? input.priorState[stream] : null])
+    ),
+    scope: collectorScopeFingerprint(input.connector.scope),
+  });
+}
+
+/**
+ * True when an earlier scan-budget stop proves the next scan would replay it:
+ * the stop was not {@link ScanBudgetResume.resumable}, the budget is no
+ * larger, and every stream that stop left uncheckpointed would start from the
+ * same cursor, connector build and scope. A stop that committed a checkpoint
+ * for one of those streams changed its cursor, so the walk resumes from there.
+ *
+ * A stop recorded before the runner kept {@link ScanBudgetResume} cannot
+ * prove a replay, so it permits one scan, which records a new stop if it hits
+ * the budget again.
+ */
+function hasScanBudgetReplay(input: {
+  connector: CollectorConnectorSpec;
+  outbox: LocalDeviceOutbox;
+  policy: Pick<CollectorOutboxPolicy, "maxEnqueuedBatchesPerRun">;
+  priorState: Readonly<Record<string, unknown>>;
+  sourceInstanceId: string;
+}): boolean {
+  return input.outbox
+    .listByKind({ kind: "gap", sourceInstanceId: input.sourceInstanceId })
+    .some((item) => isScanBudgetReplay(item, input));
+}
+
+function isScanBudgetReplay(
   item: LocalDeviceOutboxItem,
-  policy: Pick<CollectorOutboxPolicy, "maxEnqueuedBatchesPerRun">
+  input: {
+    connector: CollectorConnectorSpec;
+    policy: Pick<CollectorOutboxPolicy, "maxEnqueuedBatchesPerRun">;
+    priorState: Readonly<Record<string, unknown>>;
+  }
 ): boolean {
   if (item.status === "dead_letter") {
     return false;
@@ -3237,14 +3422,27 @@ function isUnresolvedScanBudgetGap(
   } catch {
     return item.status !== "succeeded";
   }
-  if (payload.reason !== "policy_budget" || !payload.retryable || !payload.details) {
+  if (
+    payload.reason !== "policy_budget" ||
+    !payload.retryable ||
+    !payload.details ||
+    !payload.scanResume ||
+    payload.scanResume.resumable
+  ) {
     return false;
   }
   const match = payload.details.match(SCAN_BATCH_LIMIT_DETAIL_RE);
-  if (!match?.[1]) {
+  if (!match?.[1] || input.policy.maxEnqueuedBatchesPerRun > Number(match[1])) {
     return false;
   }
-  return policy.maxEnqueuedBatchesPerRun <= Number(match[1]);
+  return (
+    payload.scanResume.startCursorKey ===
+    scanStartCursorKey({
+      connector: input.connector,
+      priorState: input.priorState,
+      streams: payload.scanResume.uncheckpointedStreams,
+    })
+  );
 }
 
 /**
