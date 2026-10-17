@@ -120,6 +120,17 @@ ARG TARGETARCH
 # connector launches; Xvfb alone is not sufficient.
 ENV PDPP_RUNTIME_BROWSER=1
 
+# The image owns where Chromium lives. Patchright reads PLAYWRIGHT_BROWSERS_PATH
+# once at module load and expects <path>/chromium-<revision>/.../chrome, so the
+# install below and every runtime stage built on this one (reference-browser,
+# core) must agree on one fixed path. /opt/patchright-browsers matches the
+# deployed env and deploy/docker/check-image-secrets.sh. The install is
+# asserted against the revision the pinned Patchright expects, so a version bump
+# that leaves the browser behind fails the build. The server also falls back to
+# this path when a deploy env points at one without the executable (see
+# reference-implementation/runtime/browser-executable.ts).
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/patchright-browsers
+
 RUN apt-get update \
   && apt-get install -y --no-install-recommends xvfb \
   && rm -rf /var/lib/apt/lists/* \
@@ -135,7 +146,9 @@ RUN PATCHRIGHT_VERSION="$(node --input-type=module -e "import { readFileSync } f
   && echo '{"name":"patchright-installer","private":true,"version":"0.0.0"}' > package.json \
   && npm install --no-save --ignore-scripts "patchright@${PATCHRIGHT_VERSION}" \
   && npx patchright install --with-deps chromium \
-  && test -n "$(find /root/.cache/ms-playwright -type f \( -path '*/chrome-linux64/chrome' -o -path '*/chrome-linux/chrome' \) -print -quit)" \
+  && EXPECTED_REVISION="$(node -e "const b = require('./node_modules/patchright-core/browsers.json').browsers.find((entry) => entry.name === 'chromium'); if (!b) process.exit(1); process.stdout.write(b.revision)")" \
+  && case "$(dpkg --print-architecture)" in amd64) CHROME_BIN=chrome-linux64/chrome ;; arm64) CHROME_BIN=chrome-linux-arm64/chrome ;; *) echo "unsupported architecture for Patchright Chromium" >&2; exit 1 ;; esac \
+  && test -x "${PLAYWRIGHT_BROWSERS_PATH}/chromium-${EXPECTED_REVISION}/${CHROME_BIN}" \
   && rm -rf /tmp/patchright-install
 
 WORKDIR /app

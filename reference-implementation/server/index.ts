@@ -52,6 +52,7 @@ import type {
 import { SourceWebhookError } from "../operations/ref-source-webhook-ingest/index.ts";
 import { deriveClientEventsFromRecordChange } from "../operations/rs-client-event-derive/index.ts";
 import { isHealthRelevant as isAttentionHealthRelevant } from "../runtime/attention.ts";
+import { checkBrowserExecutableAtBoot } from "../runtime/browser-executable.ts";
 import { createOptionalBrowserSurfaceLeaseManager } from "../runtime/browser-surface/remote-surface-optional.ts";
 import { connectorRetainsSurfaceProcess } from "../runtime/browser-surface/retained-surface-connectors.ts";
 import {
@@ -8804,6 +8805,11 @@ export async function startServer(opts: ServerOpts = {}) {
   // the other boot reconciliations and before HTTP routes mount, so a restart
   // can never leave the system silently inconsistent (P1).
   await checkOrphanedRecordsAtBoot(logger);
+
+  // Browser-image preflight: log, once, whether the Chromium the bundled
+  // Patchright expects exists. Non-fatal and skipped outside browser images; a
+  // missing browser fails browser connectors, not the server.
+  checkBrowserExecutableAtBoot(logger);
 
   // H5: manual-upload artifacts left stuck at uploaded/validating by a
   // process that died mid-upload/mid-validation (crash, OOM, kill -9, an
