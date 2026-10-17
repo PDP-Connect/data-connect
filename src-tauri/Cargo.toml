@@ -59,7 +59,7 @@ tauri-plugin-deep-link = "2"
 tauri-plugin-window-state = "2"
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.13", features = ["json", "stream", "blocking"] }
-zip = "8.6"
+zip = "9.0"
 walkdir = "2"
 futures-util = "0.3"
 base64 = "0.23"
@@ -84,7 +84,7 @@ dotenvy = "0.15"
 mime_guess = "2.0.5"
 flate2 = "1.0"
 fs2 = "0.4"
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 tar = "0.4"
 tempfile = "3"
 tauri-plugin-clipboard-manager = "2.3.2"
@@ -114,7 +114,7 @@ signal-hook = "0.4.4"
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18"
 webkit2gtk = { version = "=2.0.2", features = ["v2_38"] }
-soup3 = "0.5"
+soup3 = "0.9"
 
 # The WebKitGTK cookie test in unified.rs builds a real webview with the wry
 # that tauri already uses, with the same features.
@@ -133,7 +133,7 @@ wry = { version = "0.55", default-features = false, features = ["protocol", "os-
 # sandbox, which cannot compile 0.39 at all. 0.38.4 requires exactly 1.88,
 # matching this crate's MSRV -- verified against crates.io's published
 # rust_version per release, not assumed.
-sysinfo = { version = "0.38", default-features = false, features = ["system"] }
+sysinfo = { version = "0.39", default-features = false, features = ["system"] }
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSHTTPCookie", "NSDictionary", "NSString", "NSURL"] }
 objc2-web-kit = { version = "0.3", default-features = false, features = ["std", "block2", "WKWebView", "WKWebViewConfiguration", "WKWebsiteDataStore", "WKHTTPCookieStore"] }
