@@ -78,18 +78,19 @@ jobs:
             config: reference-implementation/stryker.config.mjs
             config-relative: stryker.config.mjs
             prefixes: "reference-implementation/server/ reference-implementation/lib/ reference-implementation/operations/ reference-implementation/runtime/ reference-implementation/cli/"
-            # The attempt bound (see the header). Measured on a PR #141 sample
-            # pinned to four CPUs with four Stryker workers: 400 changed lines
-            # gave 237 mutants, a trial of five test files took about 7 s, and
-            # the run finished in 7 minutes. The densest scope on record, PR
-            # #83, made 179 mutants from 34 changed lines, about five a line.
-            # At that density 400 lines is 2,000 mutants; at twice the measured
-            # trial time for 8 test files (~22 s on a slower hosted runner)
-            # that is about 3 hours, inside the 360-minute limit. The bound also
-            # keeps the dry run far below Stryker's five-minute dry-run limit,
-            # which the 300-file selection exceeded on PR #141's first attempt.
-            # Raise these only with a measured run that fits.
-            max-changed-lines: "400"
+            # The attempt bound (see the header). Measured on PR #141 samples
+            # pinned to four CPUs with four Stryker workers: a sample with 8
+            # test files took 13 s for one run of its tests, about 20 s per
+            # trial with four workers sharing the CPUs, and 13 minutes for 152
+            # mutants. The densest scope on record, PR #83, made 179 mutants
+            # from 34 changed lines, about five a line. At that density 200
+            # lines is 1,000 mutants; at twice the measured trial time (a
+            # slower hosted runner) that is under 3 hours, inside the
+            # 360-minute limit. The bound also keeps the dry run far below
+            # Stryker's five-minute dry-run limit, which the 300-file
+            # selection exceeded on PR #141's first attempt. Raise these only
+            # with a measured run that fits.
+            max-changed-lines: "200"
             max-tests: "8"
           # The release and supply-chain provenance machinery. Neither cohort
           # above reaches it -- `client` selects `src/`, and the reference
@@ -378,11 +379,19 @@ jobs:
         env:
           COHORT: ${{ matrix.cohort }}
           APPLICABILITY: ${{ steps.intent.outputs.applicability }}
+          INTENT_OUTCOME: ${{ steps.intent.outcome }}
         run: |
           set -euo pipefail
           {
             echo "## Mutation evidence: ${COHORT}"
             echo
+            # A failed intent step never decided applicability, so its empty
+            # output must not read as "nothing changed".
+            if [[ "${INTENT_OUTCOME}" != "success" ]]; then
+              echo "The intent step failed before deciding what to mutate, so no mutation"
+              echo "evidence exists for this revision. Its log states the reason."
+              exit 0
+            fi
             if [[ "${APPLICABILITY}" != "applicable" ]]; then
               echo "No production source in this cohort changed in this revision, so no mutation"
               echo "evidence exists for it. This is not a pass and not a failure."

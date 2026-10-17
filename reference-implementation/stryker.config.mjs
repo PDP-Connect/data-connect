@@ -36,7 +36,9 @@ import { readFileSync } from "node:fs"
 // The fallback is a glob and not a bare `test/` directory: Node resolves a bare
 // directory argument as a module rather than expanding it, so `node --test
 // test/` fails with MODULE_NOT_FOUND and takes the whole baseline down with it.
-const WHOLE_COHORT_TESTS = ["test/**/*.test.ts"]
+// Exported: `run-intent.ts` counts this suite against the attempt bound when no
+// test is selected, since it is what every trial would then run.
+export const wholeCohortTests = ["test/**/*.test.ts"]
 
 // How much of the test command's output Stryker receives: a quarter of the
 // 1 MiB `exec` limit described at `commandRunner` below.
@@ -54,7 +56,7 @@ function selectedTestArguments() {
   } catch {
     // Fall through to the whole-cohort selection below.
   }
-  return WHOLE_COHORT_TESTS
+  return wholeCohortTests
 }
 
 /** @type {import('@stryker-mutator/api/core').PartialStrykerOptions} */

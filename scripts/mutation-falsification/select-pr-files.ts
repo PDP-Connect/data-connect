@@ -1041,7 +1041,8 @@ export function relativeImports(modulePath: SelectedFile, source: string): Selec
     if (
       (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
       node.moduleSpecifier !== undefined &&
-      ts.isStringLiteral(node.moduleSpecifier)
+      ts.isStringLiteral(node.moduleSpecifier) &&
+      !isErasedAtRuntime(node)
     ) {
       add(node.moduleSpecifier.text)
     } else if (
@@ -1056,6 +1057,45 @@ export function relativeImports(modulePath: SelectedFile, source: string): Selec
   }
   ts.forEachChild(sourceFile, visit)
   return [...found].sort()
+}
+
+/**
+ * Whether an import or re-export disappears when types are stripped.
+ *
+ * `import type`, `export type ... from`, and a declaration whose every named
+ * specifier is `type` load nothing under tsx, which drops the whole statement.
+ * Counting them would relate a test to a file it never loads; with coverage
+ * analysis off, every mutant there would then be reported as a survivor.
+ */
+function isErasedAtRuntime(node: ts.ImportDeclaration | ts.ExportDeclaration): boolean {
+  if (ts.isExportDeclaration(node)) {
+    if (node.isTypeOnly) {
+      return true
+    }
+    const clause = node.exportClause
+    return (
+      clause !== undefined &&
+      ts.isNamedExports(clause) &&
+      clause.elements.length > 0 &&
+      clause.elements.every((element) => element.isTypeOnly)
+    )
+  }
+  const clause = node.importClause
+  if (clause === undefined) {
+    // `import "./x.ts"` is a side-effect import: it always loads.
+    return false
+  }
+  if (clause.isTypeOnly) {
+    return true
+  }
+  const bindings = clause.namedBindings
+  return (
+    clause.name === undefined &&
+    bindings !== undefined &&
+    ts.isNamedImports(bindings) &&
+    bindings.elements.length > 0 &&
+    bindings.elements.every((element) => element.isTypeOnly)
+  )
 }
 
 /**

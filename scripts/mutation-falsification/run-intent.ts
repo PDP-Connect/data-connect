@@ -9,8 +9,9 @@
 
 import { createHash } from "node:crypto"
 import { execFileSync } from "node:child_process"
-import { existsSync, readFileSync, writeFileSync } from "node:fs"
-import { join } from "node:path"
+import { existsSync, globSync, readFileSync, writeFileSync } from "node:fs"
+import { join, resolve, sep } from "node:path"
+import { pathToFileURL } from "node:url"
 import ts from "typescript"
 import {
   type AttemptBound,
@@ -284,12 +285,41 @@ if (selectedTestsPath !== undefined) {
   // The sample is frozen into the intent, so the receipt states it.
   let candidates = runnable
   if (bound !== undefined && fullIntent.applicability === "applicable") {
+    // The bound has to count the tests a trial will really run. An empty
+    // selection does not mean "no tests": the configuration then runs its whole
+    // cohort suite, so that suite is the inventory the bound applies to. The
+    // configuration exports it, so the glob has one source.
+    let inventory = runnable
+    if (selectCohortTests(diff, cohort).length === 0) {
+      const configModule = await import(pathToFileURL(resolve(configPath)).href)
+      const patterns: unknown = configModule.wholeCohortTests
+      if (!Array.isArray(patterns) || !patterns.every((pattern) => typeof pattern === "string")) {
+        throw new Error(
+          `${configPath} must export \`wholeCohortTests\`, the globs its command falls back to ` +
+            `when no test is selected, so the attempt bound can count the tests a trial runs`
+        )
+      }
+      const suite = [...new Set(patterns.flatMap((pattern) => globSync(pattern, { cwd: cohort.root })))]
+        .map((path) => path.split(sep).join("/"))
+        .sort()
+      inventory = suite.filter((test) => {
+        const testSource = readModule(test)
+        return (
+          testSource === undefined ||
+          !(escapesCohortRoot(test, testSource) || ownedByNestedTestRunner(test, cohort.root, hasOwnTestScript))
+        )
+      })
+      process.stdout.write(
+        `no test changed in this revision; the attempt bound counts the cohort's whole suite ` +
+          `(${inventory.length} runnable test files)\n`
+      )
+    }
     const scoped = new Set(fullIntent.scope.map((entry) => entry.path))
     // Sampled only from tests that read the text of no changed file. Such a
     // test is withheld whenever the file it reads is mutated, so letting it
     // qualify a file for the sample could leave that file with no test once
     // the final filter below runs, and every mutant in it a false survivor.
-    const sampleable = runnable.filter((test) => {
+    const sampleable = inventory.filter((test) => {
       const testSource = readModule(test)
       return testSource === undefined || !readsMutatedSource(test, testSource, fullIntent.mutate)
     })
@@ -309,6 +339,10 @@ if (selectedTestsPath !== undefined) {
     })
     if (sample.kind === "partial") {
       if (sample.paths.size === 0) {
+        // Rare once the inventory above is counted: every changed file is either
+        // larger than the bound on its own or loaded by no test. No sample can
+        // then produce evidence, and the job says so rather than mutating
+        // nothing and reporting an empty run.
         throw new Error(
           `the ${cohortName} change set exceeds one attempt's bound (${bound.maxChangedLines} ` +
             `changed lines, ${bound.maxTests} test files per trial), and no changed file is ` +

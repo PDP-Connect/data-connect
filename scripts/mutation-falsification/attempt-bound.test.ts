@@ -70,6 +70,39 @@ describe("relativeImports", () => {
   })
 })
 
+describe("relativeImports and erased type-only syntax", () => {
+  it("ignores imports and re-exports that type stripping removes", () => {
+    const source = [
+      'import type { A } from "../server/type-only.ts"',
+      'import { type B, type C } from "../server/inline-type-only.ts"',
+      'import { type D, value } from "../server/mixed.ts"',
+      'export type { E } from "../server/export-type-only.ts"',
+      'export { type F } from "../server/export-inline-type-only.ts"',
+      'import "../server/side-effect.ts"',
+    ].join("\n")
+    expect(relativeImports("test/x.test.ts", source)).toEqual([
+      "server/mixed.ts",
+      "server/side-effect.ts",
+    ])
+  })
+
+  it("does not reach a file a helper only re-exports types from", () => {
+    const modules: Record<string, string> = {
+      "test/a.test.ts": 'import { helper } from "./helpers/h.ts"\nhelper()',
+      "test/helpers/h.ts":
+        'export type { Shape } from "../../server/shape.ts"\nexport function helper() {}',
+    }
+    expect(
+      exercisedCandidates(
+        "test/a.test.ts",
+        new Set(["server/shape.ts"]),
+        (path) => path.startsWith("test/"),
+        (path) => modules[path]
+      )
+    ).toEqual([])
+  })
+})
+
 describe("exercisedCandidates", () => {
   const modules: Record<string, string> = {
     "test/a.test.ts": 'import "../server/a.ts"\nimport "./helpers/h.ts"',
@@ -326,6 +359,56 @@ describe("run-intent with an attempt bound", () => {
     expect(tests).toEqual([sampled === "server/a.ts" ? "test/a.test.ts" : "test/b.test.ts"])
     const deferred = intent.excluded.filter((entry) => entry.reason === "deferred_by_attempt_bound")
     expect(deferred).toHaveLength(2)
+  })
+
+  it("counts the whole-suite fallback when more lines than the bound change and no test does", () => {
+    // Base wrote an intent and an empty selection here, and the configuration
+    // then ran its whole suite. The bound must count that suite, not abort.
+    const directory = mkdtempSync(join(workspace, "repo-"))
+    git(directory, "init", "--quiet", ".")
+    git(directory, "config", "user.email", "control@example.invalid")
+    git(directory, "config", "user.name", "Executed Control")
+    git(directory, "config", "commit.gpgsign", "false")
+    const body = (value: number) =>
+      Array.from({ length: 450 }, (_, index) => `export const v${index} = ${value}`).join("\n") +
+      "\n"
+    write(directory, "reference-implementation/server/large.ts", body(1))
+    write(directory, "reference-implementation/server/other.ts", "export const other = 1\n")
+    write(
+      directory,
+      "reference-implementation/stryker.config.mjs",
+      'export const wholeCohortTests = ["test/**/*.test.ts"]\nexport default {}\n'
+    )
+    write(
+      directory,
+      "reference-implementation/test/other.test.ts",
+      'import { other } from "../server/other.ts"\nconsole.log(other)\n'
+    )
+    write(directory, "reference-implementation/test/unrelated.test.ts", "console.log(0)\n")
+    git(directory, "add", ".")
+    git(directory, "commit", "--quiet", "-m", "base")
+    write(directory, "reference-implementation/server/large.ts", body(2))
+    write(directory, "reference-implementation/server/other.ts", "export const other = 2\n")
+    git(directory, "add", ".")
+    git(directory, "commit", "--quiet", "-m", "head")
+    execFileSync("ln", ["-s", join(REPOSITORY_ROOT, "node_modules"), join(directory, "node_modules")])
+    writeFileSync(join(directory, "package-lock.json"), readFileSync(join(REPOSITORY_ROOT, "package-lock.json")))
+
+    const { stdout, intent, tests } = runIntent(directory, [
+      "--max-changed-lines",
+      "400",
+      "--max-tests",
+      "8",
+    ])
+    expect(stdout).toContain("counts the cohort's whole suite (2 runnable test files)")
+    expect(intent.applicability).toBe("applicable")
+    expect(intent.completeness).toMatchObject({
+      kind: "partial",
+      files: { sampled: 1, total: 2 },
+      tests: { sampled: 1, total: 2 },
+    })
+    expect(intent.mutate).toEqual(["server/other.ts:1-1"])
+    expect(tests).toEqual(["test/other.test.ts"])
   })
 
   it("refuses half a bound", () => {
