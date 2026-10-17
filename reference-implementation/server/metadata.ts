@@ -597,6 +597,20 @@ const OWNER_AGENT_CONTROL_ACTION_CATALOG: readonly OwnerAgentControlActionDescri
     status: "owner_mediated",
     urlTemplate: null,
   },
+  // Supported in this build: a trusted owner agent reads one run's status and
+  // timeline by run_id. Run-scoped, not connection-scoped, so it is a surface
+  // family whose URL carries a literal `{run_id}` placeholder (never projected
+  // onto a connection row). Same handlers and read model as the owner-session
+  // `GET /_ref/runs/{run_id}` and `/timeline`.
+  {
+    family: "inspect_run",
+    method: "GET",
+    reason:
+      "Read one run by run_id: status (active/completed/failed/cancelled/abandoned or a browser-surface state), started/completed timestamps, terminal_reason, and a bounded failure summary (reason, origin, owner-safe message). GET this URL with a run_id from a run_connection 202 or from diagnostics last_run. GET `/v1/owner/runs/{run_id}/timeline` for the run's redacted, paginated events (limit, cursor). Unknown run ids return a typed not_found (404).",
+    scope: "surface",
+    status: "supported",
+    urlTemplate: (rs) => `${rs}/v1/owner/runs/{run_id}`,
+  },
   // Supported in this build: a trusted owner agent pauses, resumes, or deletes a
   // connection's schedule by connection_id. The representative URL is the pause
   // route; the resume sibling lives at the same path with `/resume` instead of
