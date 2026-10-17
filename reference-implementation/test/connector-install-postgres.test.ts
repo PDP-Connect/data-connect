@@ -41,6 +41,7 @@ import {
 import { withTemporaryPostgresDatabase } from "./helpers/postgres-temp-database.ts";
 
 const POSTGRES_URL = process.env.PDPP_TEST_POSTGRES_URL;
+const POSTGRES_SKIP = POSTGRES_URL ? false : "PDPP_TEST_POSTGRES_URL unset";
 const INSTANCES = ["cin_gmail_primary", "cin_gmail_work"] as const;
 const RECORDS_PER_STREAM = 40;
 // `withConnectorLifecycleLock` key for gmail, as two 32-bit halves in pg_locks.
@@ -119,7 +120,7 @@ async function gmailLifecycleLockHolders(): Promise<number> {
 
 test(
   "PostgreSQL: installing over a connector with existing records returns before the O(records) repair and holds no lock during it",
-  { skip: !POSTGRES_URL },
+  { skip: POSTGRES_SKIP },
   async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "pdpp-install-pg-"));
     const repairEntered = deferred();
@@ -178,7 +179,7 @@ test(
 
 test(
   "PostgreSQL: same-process lifecycle waiters cannot exhaust the pool the install holder needs",
-  { skip: !POSTGRES_URL },
+  { skip: POSTGRES_SKIP },
   async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "pdpp-install-pg-"));
     const stage = deferred();
@@ -219,7 +220,7 @@ test(
 
 test(
   "PostgreSQL: terminating the backend of an open transaction fails that transaction without crashing the process",
-  { skip: !POSTGRES_URL },
+  { skip: POSTGRES_SKIP },
   async () => {
     await withPostgres("terminate", async () => {
       const holding = deferred();
@@ -307,7 +308,7 @@ async function withSmallBulkStatementTimeout(body: () => Promise<void>): Promise
 
 test(
   "PostgreSQL: with slow vector inserts, an install returns at publication and the backfill completes in small chunks",
-  { skip: !POSTGRES_URL },
+  { skip: POSTGRES_SKIP },
   async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "pdpp-install-pg-"));
     let repair: Promise<unknown> | undefined;
@@ -372,7 +373,7 @@ const CHILD_PROGRAM = `
 
 test(
   "PostgreSQL: a server killed mid-backfill resumes it after restart without re-embedding committed vectors",
-  { skip: !POSTGRES_URL },
+  { skip: POSTGRES_SKIP },
   async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "pdpp-install-pg-"));
     try {
@@ -479,7 +480,7 @@ const unsearchableGmail = {
 
 test(
   "PostgreSQL: an update that removes the last search declarations leaves no stale index rows after reconcile",
-  { skip: !POSTGRES_URL },
+  { skip: POSTGRES_SKIP },
   async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "pdpp-install-pg-"));
     try {
@@ -509,7 +510,7 @@ test(
 
 test(
   "PostgreSQL: an interrupted column repair stays queued with its cursor and a later sweep round completes it",
-  { skip: !POSTGRES_URL },
+  { skip: POSTGRES_SKIP },
   async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "pdpp-install-pg-"));
     let repair: Promise<unknown> | undefined;
@@ -572,7 +573,7 @@ test(
 
 test(
   "PostgreSQL: a column-repair round that snapshotted an older job never resumes a requeued job from the old cursor",
-  { skip: !POSTGRES_URL },
+  { skip: POSTGRES_SKIP },
   async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "pdpp-install-pg-"));
     let repair: Promise<unknown> | undefined;
@@ -650,7 +651,7 @@ test(
 
 test(
   "PostgreSQL: removing semantic fields with no semantic backend keeps the cleanup scope dirty",
-  { skip: !POSTGRES_URL },
+  { skip: POSTGRES_SKIP },
   async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "pdpp-install-pg-"));
     try {
