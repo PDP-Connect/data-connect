@@ -120,6 +120,32 @@ const POSTGRES_INTERACTIVE_POOL_MAX = 8;
 const POSTGRES_BULK_POOL_MAX = 3;
 
 /**
+ * PostgreSQL notices that a client has gone only when it next reads from the
+ * socket, and a long statement such as VACUUM, REINDEX or a bulk DELETE never
+ * does. When this process dies, its statements keep their locks and run to
+ * completion. Observed in production on v0.7.62: a stopped container left
+ * `VACUUM (ANALYZE) semantic_search_blob` running for more than 41 minutes,
+ * and the next boot's schema batch waited behind it on an AccessExclusiveLock
+ * until an operator cancelled it. `client_connection_check_interval`
+ * (PostgreSQL 14+, Linux) makes the server poll the socket while a statement
+ * runs and end the backend when the client is gone, so a dead process's work
+ * releases its locks within this interval.
+ */
+const POSTGRES_CLIENT_CONNECTION_CHECK_INTERVAL_MS = 5_000;
+
+function createPostgresPool(databaseUrl: string, max: number): PgPool {
+  const created = new Pool({ connectionString: databaseUrl, max });
+  created.on("connect", (client) => {
+    // Best effort: a server older than PostgreSQL 14, or a platform without
+    // socket polling, rejects the setting. Those servers keep the old behavior.
+    client
+      .query(`SET client_connection_check_interval = ${POSTGRES_CLIENT_CONNECTION_CHECK_INTERVAL_MS}`)
+      .catch(() => undefined);
+  });
+  return created;
+}
+
+/**
  * Hard per-statement ceiling for the bulk lane. Postgres cannot preempt a
  * transaction once admitted (see the PostgreSQL wiki's own "Priorities"
  * page: there are no facilities to limit or prioritize resources per
@@ -584,7 +610,13 @@ const POSTGRES_LEASE_PRIORITY_MIGRATION_LOCK = [482_571, 151];
 // individually concurrency-safe. Keep their DDL from racing a fully
 // bootstrapped legacy-priority starter; the priority migration retains its own
 // transaction-scoped lock below so its catalog decision is independently safe.
-const POSTGRES_BOOTSTRAP_SERIALIZATION_LOCK = [482_571, 150];
+//
+// Derived-index maintenance (VACUUM, REINDEX CONCURRENTLY) holds this same key
+// in SHARED mode for its whole run. Maintenance therefore never starts while a
+// bootstrap is in progress, and a bootstrap that finds the key held in shared
+// mode cancels that maintenance instead of waiting behind it. See
+// cancelDerivedIndexMaintenanceBlockingBootstrap.
+export const POSTGRES_BOOTSTRAP_SERIALIZATION_LOCK = [482_571, 150];
 const POSTGRES_BOOTSTRAP_LOCK_INITIAL_DELAY_MS = 25;
 const POSTGRES_BOOTSTRAP_LOCK_MAX_DELAY_MS = 250;
 // The bootstrap DDL batch takes an AccessExclusiveLock on tables (connectors,
@@ -1443,10 +1475,10 @@ export async function initExistingPostgresRepairStorage(
   if (pool) {
     await closePostgresStorage();
   }
-  pool = new Pool({ connectionString: config.databaseUrl, max: POSTGRES_INTERACTIVE_POOL_MAX });
-  bulkPool = new Pool({ connectionString: config.databaseUrl, max: POSTGRES_BULK_POOL_MAX });
+  pool = createPostgresPool(config.databaseUrl, POSTGRES_INTERACTIVE_POOL_MAX);
+  bulkPool = createPostgresPool(config.databaseUrl, POSTGRES_BULK_POOL_MAX);
   lockPoolCapacity = 1;
-  lockPool = new Pool({ connectionString: config.databaseUrl, max: lockPoolCapacity });
+  lockPool = createPostgresPool(config.databaseUrl, lockPoolCapacity);
   activeBackend = "postgres";
   try {
     const result = await pool.query<{ table_name: string }>(
@@ -1502,10 +1534,10 @@ export async function initPostgresStorage(
   }
 
   // Two lanes, not one shared pool: see POSTGRES_INTERACTIVE_POOL_MAX.
-  pool = new Pool({ connectionString: config.databaseUrl, max: POSTGRES_INTERACTIVE_POOL_MAX });
-  bulkPool = new Pool({ connectionString: config.databaseUrl, max: POSTGRES_BULK_POOL_MAX });
+  pool = createPostgresPool(config.databaseUrl, POSTGRES_INTERACTIVE_POOL_MAX);
+  bulkPool = createPostgresPool(config.databaseUrl, POSTGRES_BULK_POOL_MAX);
   lockPoolCapacity = 1;
-  lockPool = new Pool({ connectionString: config.databaseUrl, max: lockPoolCapacity });
+  lockPool = createPostgresPool(config.databaseUrl, lockPoolCapacity);
   activeBackend = "postgres";
   // Storage-lifecycle fence (server/storage-generation.ts): a fresh pool
   // means any deferred work scheduled against a prior pool (this function's
@@ -4209,6 +4241,62 @@ async function describeBootstrapLockHolders(client: PoolClient): Promise<string>
   }
 }
 
+/**
+ * Cancels derived-index maintenance that holds the bootstrap key in shared
+ * mode, in this database only. Maintenance is rebuildable work and records the
+ * cancellation as a failed window; the schema bootstrap gates the listener.
+ * Observed cost of waiting instead: a 41-minute VACUUM of a 14 GB
+ * semantic_search_blob held its ShareUpdateExclusiveLock, the boot batch
+ * queued for an AccessExclusiveLock on the same table, and the app served 503
+ * for six minutes until an operator cancelled the VACUUM.
+ *
+ * Called on every failed poll: a cancel that reaches a maintenance session
+ * between two statements has no effect, and the next poll repeats it.
+ */
+interface MaintenanceCancellationLog {
+  cancelledPids: Set<number>;
+  failureLogged: boolean;
+}
+
+async function cancelDerivedIndexMaintenanceBlockingBootstrap(
+  client: PoolClient,
+  log: StorageLog,
+  logged: MaintenanceCancellationLog
+): Promise<void> {
+  try {
+    // The holders are filtered in a materialized CTE so pg_cancel_backend runs
+    // only on rows that passed every predicate.
+    const result = await client.query<{ cancelled: boolean; pid: number }>(
+      `WITH holders AS MATERIALIZED (
+         SELECT l.pid
+           FROM pg_locks AS l
+          WHERE l.locktype = 'advisory'
+            AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database())
+            AND l.classid = $1::int::oid
+            AND l.objid = $2::int::oid
+            AND l.objsubid = 2
+            AND l.mode = 'ShareLock'
+            AND l.granted
+            AND l.pid <> pg_backend_pid()
+       )
+       SELECT pid, pg_cancel_backend(pid) AS cancelled FROM holders`,
+      POSTGRES_BOOTSTRAP_SERIALIZATION_LOCK
+    );
+    for (const row of result.rows.filter((holder) => holder.cancelled && !logged.cancelledPids.has(holder.pid))) {
+      logged.cancelledPids.add(row.pid);
+      log(`postgres bootstrap cancelled derived-index maintenance in backend pid ${row.pid} to proceed`);
+    }
+  } catch (error) {
+    // A role without permission to signal the holder keeps the old behavior:
+    // wait for the lock within the bootstrap budget.
+    if (!logged.failureLogged) {
+      logged.failureLogged = true;
+      const reason = error instanceof Error ? error.message : String(error);
+      log(`postgres bootstrap could not cancel derived-index maintenance: ${reason}`);
+    }
+  }
+}
+
 interface BootstrapLockWaitOptions {
   budget: PostgresBootstrapLockBudget;
   log?: StorageLog;
@@ -4229,6 +4317,7 @@ async function acquirePostgresBootstrapLock(
   const deadline = startedAt + budget.timeoutMs;
   let attempt = 0;
   let nextProgressAt = startedAt;
+  const maintenanceCancellationLog: MaintenanceCancellationLog = { cancelledPids: new Set(), failureLogged: false };
 
   for (;;) {
     // biome-ignore lint/performance/noAwaitInLoops: This is the bounded polling loop whose deadline is the behavior under test.
@@ -4240,6 +4329,8 @@ async function acquirePostgresBootstrapLock(
       log(`postgres bootstrap lock acquired after ${now() - startedAt}ms (attempt=${attempt})`);
       return;
     }
+
+    await cancelDerivedIndexMaintenanceBlockingBootstrap(client, log, maintenanceCancellationLog);
 
     // pg_try_advisory_lock completes before this application-side sleep. A
     // contender therefore has no active virtual transaction that could block
