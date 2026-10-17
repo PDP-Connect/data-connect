@@ -20,7 +20,9 @@
 
 import { getMany, getOne, referenceQueries } from "../../lib/db.ts";
 import {
+  BLOB_BINDING_PAGE_SIZE,
   postgresListBlobBindings,
+  postgresListBlobBindingsPage,
   postgresLoadBlobSize,
   postgresLoadContentAddressedBlob,
 } from "../postgres-records.ts";
@@ -53,6 +55,16 @@ export interface BlobBinding extends Record<string, unknown> {
   stream: string;
 }
 
+export interface BlobBindingCursor {
+  record_key: string;
+  stream: string;
+}
+
+export interface BlobBindingPage {
+  nextCursor: BlobBindingCursor | null;
+  rows: readonly BlobBinding[];
+}
+
 /**
  * Store methods resolve synchronously on the SQLite backend (bounded-statement
  * primitives return values directly) and asynchronously on the Postgres backend
@@ -63,6 +75,12 @@ type MaybeAsync<T> = T | Promise<T>;
 
 export interface BlobStore {
   listBlobBindings: (blobId: string, opts?: { limit?: number }) => MaybeAsync<readonly BlobBinding[]>;
+  listBlobBindingsPage: (args: {
+    blobId: string;
+    connectorId: string;
+    connectorInstanceId: string;
+    cursor?: BlobBindingCursor | null;
+  }) => MaybeAsync<BlobBindingPage>;
   /**
    * Single indexed point lookup for just `size_bytes`, keyed by `blob_id`
    * (primary key). Distinct from `loadContentAddressedBlob`, which also
@@ -101,6 +119,11 @@ export function createBlobStore(): BlobStore {
       ): MaybeAsync<readonly BlobBinding[]> {
         return postgresListBlobBindings(blobId, { limit }) as unknown as Promise<readonly BlobBinding[]>;
       },
+      listBlobBindingsPage(args): MaybeAsync<BlobBindingPage> {
+        return postgresListBlobBindingsPage({
+          ...args,
+        }) as unknown as Promise<BlobBindingPage>;
+      },
       loadBlobSize(blobId: string): MaybeAsync<number | null> {
         return postgresLoadBlobSize(blobId);
       },
@@ -117,6 +140,39 @@ export function createBlobStore(): BlobStore {
     ): readonly BlobBinding[] {
       const { rows } = getMany<BlobBinding>(referenceQueries.blobsListBindingsById, [blobId, blobId], { limit });
       return rows;
+    },
+    listBlobBindingsPage({ blobId, connectorId, connectorInstanceId, cursor }): BlobBindingPage {
+      const page = getMany<BlobBinding>(
+        referenceQueries.blobsListBindingsByInstancePage,
+        [
+          blobId,
+          blobId,
+          connectorId,
+          connectorInstanceId,
+          cursor ? 1 : 0,
+          cursor?.stream ?? "",
+          cursor?.stream ?? "",
+          cursor?.record_key ?? "",
+        ],
+        { limit: BLOB_BINDING_PAGE_SIZE },
+      );
+      const last = page.rows.at(-1);
+      return {
+        nextCursor:
+          page.truncated && last
+            ? { record_key: last.record_key, stream: last.stream }
+            : null,
+        rows: page.rows.map(
+          ({ connector_id, connector_instance_id, record_key, stream }) => ({
+            connector_id,
+            ...(connector_instance_id === undefined
+              ? {}
+              : { connector_instance_id }),
+            record_key,
+            stream,
+          }),
+        ),
+      };
     },
     loadBlobSize(blobId: string): number | null {
       const row = getOne<{ size_bytes: number }>(referenceQueries.blobsGetSizeById, [blobId]);
