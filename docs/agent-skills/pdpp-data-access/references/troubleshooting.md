@@ -106,7 +106,7 @@ When the flow breaks, work the failure top-down: discovery -> agent-connect -> a
 
 - The grant doesn't cover this stream/field/filter combination. Don't fall back to a broader grant in the background. Request an upgrade and explain to the user why.
 
-**Symptom:** `403 grant_revoked`.
+**Symptom:** `401 invalid_token` with `grant_revoked` in the error body.
 
 - The owner revoked. Stop. Don't request a replacement automatically; ask the user.
 

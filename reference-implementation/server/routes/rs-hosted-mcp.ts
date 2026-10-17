@@ -287,7 +287,14 @@ export function mountRsHostedMcp(app: AppLike, ctx: MountRsHostedMcpContext): vo
   ): Promise<McpServerOptions | null> {
     const access = await ctx.getGrantPackageAccess(req.tokenInfo?.grant_package_id as string);
     if (!access || access.members.length === 0) {
-      ctx.pdppError(res, 403, "package_revoked", "Grant package is revoked or has no active members");
+      const metadataUrl = res.locals[PROTECTED_RESOURCE_METADATA_URL_LOCAL];
+      if (typeof metadataUrl === "string" && metadataUrl) {
+        res.setHeader(
+          "WWW-Authenticate",
+          `Bearer error="invalid_token", resource_metadata="${metadataUrl.replace(/["\\]/g, "\\$&")}"`
+        );
+      }
+      ctx.pdppError(res, 401, "authentication_error", "Grant package is revoked or has no active members");
       return null;
     }
     const rsClient = ctx.createPackageRsClient({
