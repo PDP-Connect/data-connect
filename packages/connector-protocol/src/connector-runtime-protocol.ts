@@ -101,8 +101,14 @@ function isRecordKey(value: unknown): value is string | readonly string[] {
 /** Capability required by a connector that emits STREAM_EVIDENCE. */
 export const STREAM_EVIDENCE_CAPABILITY = "STREAM_EVIDENCE" as const;
 
+/** Capability required to emit DETAIL_COVERAGE empty_keys and unchanged_keys. */
+export const DETAIL_COVERAGE_KEY_SETS_CAPABILITY = "DETAIL_COVERAGE_KEY_SETS" as const;
+
 /** Protocol capabilities that can be advertised by a connector or runtime. */
-export type ConnectorProtocolCapability = typeof STREAM_EVIDENCE_CAPABILITY | typeof HOST_BLOB_CAPABILITY;
+export type ConnectorProtocolCapability =
+  | typeof STREAM_EVIDENCE_CAPABILITY
+  | typeof HOST_BLOB_CAPABILITY
+  | typeof DETAIL_COVERAGE_KEY_SETS_CAPABILITY;
 
 /**
  * The closed, exhaustive list backing {@link ConnectorProtocolCapability} at
@@ -116,6 +122,7 @@ export type ConnectorProtocolCapability = typeof STREAM_EVIDENCE_CAPABILITY | ty
 export const CONNECTOR_PROTOCOL_CAPABILITIES: readonly ConnectorProtocolCapability[] = [
   STREAM_EVIDENCE_CAPABILITY,
   HOST_BLOB_CAPABILITY,
+  DETAIL_COVERAGE_KEY_SETS_CAPABILITY,
 ];
 
 function isConnectorProtocolCapability(value: unknown): value is ConnectorProtocolCapability {
@@ -223,6 +230,13 @@ export interface StartMessage {
    */
   collection_mode?: "full_refresh" | "incremental";
   detail_gaps?: readonly DetailGapStartEntry[];
+  /**
+   * The host advertises the protocol capabilities it implements. Absent means
+   * none (an older host). A connector MUST NOT emit empty_keys/unchanged_keys
+   * unless START lists DETAIL_COVERAGE_KEY_SETS, and must otherwise keep its
+   * previous coverage behavior.
+   */
+  protocol_capabilities?: readonly ConnectorProtocolCapability[];
   /**
    * SLVP-ideal §4.3 recovery-only launch mode. When true, the connector drains
    * pending non-source-pressure detail gaps and MUST NOT perform the forward

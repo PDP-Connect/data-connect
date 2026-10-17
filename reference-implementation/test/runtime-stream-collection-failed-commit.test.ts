@@ -842,7 +842,7 @@ const rl = createInterface({ input: process.stdin, terminal: false });
 rl.on('line', (line) => {
   const msg = JSON.parse(line);
   if (msg.type !== 'START') return;
-  writeFileSync(${JSON.stringify(startStatePath)}, JSON.stringify(msg.state ?? null));
+  writeFileSync(${JSON.stringify(startStatePath)}, JSON.stringify(msg));
   process.stdout.write(JSON.stringify({ type: 'RECORD', stream: 'sibling_b', key: 'b-2', data: { id: 'b-2' }, emitted_at: new Date().toISOString() }) + '\\n');
   process.stdout.write(JSON.stringify({ type: 'STATE', stream: 'sibling_b', cursor: { cursor: 'replayed' } }) + '\\n');
   process.stdout.write(JSON.stringify({ type: 'DONE', status: 'succeeded', records_emitted: 1 }) + '\\n');
@@ -865,7 +865,17 @@ rl.on('line', (line) => {
       state: stateBody.state ?? null,
     })) as RunResult;
     assert.equal(replay.status, "succeeded");
-    const replayStartState = JSON.parse(readFileSync(startStatePath, "utf8")) as Record<string, unknown> | null;
+    const replayStart = JSON.parse(readFileSync(startStatePath, "utf8")) as {
+      protocol_capabilities?: string[];
+      state?: Record<string, unknown> | null;
+      type: string;
+    };
+    assert.equal(replayStart.type, "START");
+    assert.ok(
+      replayStart.protocol_capabilities?.includes("DETAIL_COVERAGE_KEY_SETS"),
+      "START must advertise support before connectors emit empty_keys/unchanged_keys"
+    );
+    const replayStartState = replayStart.state;
     assert.ok(
       !("sibling_b" in (replayStartState ?? {})),
       "the replay run must start sibling_b from its prior checkpoint"

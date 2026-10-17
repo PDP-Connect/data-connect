@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import { join as joinPath } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
+  DETAIL_COVERAGE_KEY_SETS_CAPABILITY,
   PERMANENT_DETAIL_GAP_REASON,
   RETRYABLE_DETAIL_GAP_REASONS,
   validateRuntimeContinuationFact,
@@ -3386,6 +3387,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
     bindings: availableBindings,
     collection_mode: startCollectionMode,
     detail_gaps: startDetailGaps,
+    protocol_capabilities: [DETAIL_COVERAGE_KEY_SETS_CAPABILITY],
     run_id: runId,
     scope: startScope,
     state: startState,
