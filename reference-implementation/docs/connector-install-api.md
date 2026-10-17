@@ -79,8 +79,14 @@ stays installed. This keeps the active artifact and the registered manifest in
 agreement. Once the work has started, the lock stays held until the work stops.
 On SQLite, each connector's lifecycle lock is an OS file lock of the same kind
 in `<database file>.lifecycle-locks/`, so it is shared by exactly the processes
-that share the database; the `connector_lifecycle_locks` row only names the
-holder.
+that share the database. The holder also writes a `connector_lifecycle_locks`
+row. An existing row from an older build, which locks by that row alone, keeps
+the lock busy while its pid is alive in this PID namespace and is not this
+server's pid; it is never deleted.
+
+Run one server per data directory, and stop the old version before you start a
+new one. The locks above exclude a concurrent older build only where it can
+see that build: a live owner pid in this PID namespace.
 
 The response comes once the artifact is activated and the manifest is
 registered. In the same transaction as the manifest, the server queues the
