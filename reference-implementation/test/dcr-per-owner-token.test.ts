@@ -444,7 +444,7 @@ test("owner device approval binds a public dynamic client to the approving owner
     const sessionCookie = await login(asUrl);
 
     const registered = await registerClient(asUrl, {
-      client_name: "Daisy local owner agent",
+      client_name: "Local owner agent",
       token_endpoint_auth_method: "none",
     });
     assert.equal(registered.status, 201);
@@ -465,7 +465,7 @@ test("owner device approval binds a public dynamic client to the approving owner
     const listedAfterApproval = await listOwnerClients(asUrl, sessionCookie);
     const ownerClient = listedAfterApproval.data.find((row) => row.client_id === registeredClientId);
     assert.ok(ownerClient, "approval should bind the dynamic client to the approving owner");
-    assert.equal(ownerClient.client_name, "Daisy local owner agent");
+    assert.equal(ownerClient.client_name, "Local owner agent");
     assert.equal(ownerClient.active_token_count, 1);
 
     const deleteResp = await fetch(`${asUrl}/oauth/register/${encodeURIComponent(registeredClientId)}`, {

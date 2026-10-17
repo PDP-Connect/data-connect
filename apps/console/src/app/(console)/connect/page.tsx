@@ -261,7 +261,7 @@ export default async function ConnectPage({ searchParams }: { searchParams: Prom
     } catch (err) {
       if (err instanceof ReferenceServerUnreachableError) {
         return (
-          <RecordroomShellWithPalette build="pdpp 0.1.0" host="this server">
+          <RecordroomShellWithPalette host="this server">
             <ServerUnreachable />
           </RecordroomShellWithPalette>
         );
@@ -303,7 +303,7 @@ export default async function ConnectPage({ searchParams }: { searchParams: Prom
   ];
 
   return (
-    <RecordroomShellWithPalette build="pdpp 0.1.0" host="this server">
+    <RecordroomShellWithPalette host="this server">
       <PageHeader
         actions={
           <Link className={buttonVariants({ size: "sm", variant: "ghost" })} href="/deployment">
@@ -321,7 +321,7 @@ export default async function ConnectPage({ searchParams }: { searchParams: Prom
       </div>
 
       <Section
-        description="Use these when an app or local client needs read access to records already collected in this PDPP instance."
+        description="Use these when an app or local client needs read access to records already collected in this DataConnect instance."
         title="Connect apps"
       >
         <ul className="divide-y divide-border/70 border-border/70 border-y">

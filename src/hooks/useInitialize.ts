@@ -10,6 +10,8 @@ import { checkConnectorUpdates } from './check-connector-updates';
 interface SavedRun {
   id: string;
   platformId: string;
+  connectionId?: string | null;
+  accountLabel?: string | null;
   filename: string;
   company: string;
   name: string;
@@ -44,6 +46,8 @@ export function useInitialize() {
         const loadedRuns: Run[] = savedRuns.map((saved) => ({
           id: saved.id,
           platformId: saved.platformId,
+          connectionId: saved.connectionId,
+          accountLabel: saved.accountLabel,
           filename: saved.filename,
           company: saved.company,
           name: saved.name,

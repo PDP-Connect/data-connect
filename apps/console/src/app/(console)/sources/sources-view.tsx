@@ -60,7 +60,6 @@
 "use client";
 
 import {
-  ConnectorIcon,
   CopyMono,
   Endorse,
   IcButton,
@@ -80,6 +79,8 @@ import {
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useState, useTransition } from "react";
+import { ConnectorMark } from "../components/connector-mark.tsx";
+import { connectorNotInstalledCopy } from "../lib/connector-implementation.ts";
 import { type RunNowResult, runConnectorNowAction } from "./actions.ts";
 import { SOURCE_ACCESS_NOTE } from "./sources-copy.ts";
 import {
@@ -393,7 +394,7 @@ function InstanceListItem({
   const inner = (
     <>
       <span className="rr-s-item__identity">
-        <ConnectorIcon className="rr-s-item__icon" icon={instance.icon} name={instance.displayName} />
+        <ConnectorMark className="rr-s-item__icon" icon={instance.icon} name={instance.displayName} />
         <span className="rr-s-item__name">{instance.displayName}</span>
       </span>
       {/* Keep list rows comparable: connector kind lives in the selected detail
@@ -416,7 +417,17 @@ function InstanceListItem({
       >
         {instance.fusedStatus.line}
       </span>
-      {instance.ownerActionCue ? (
+      {/* Not installed outranks a suggested action: no action can run until
+          the connector is installed, and both cues share one grid row. */}
+      {instance.connectorNotInstalled ? (
+        <span
+          className="rr-s-item__cue"
+          data-testid="sources-not-installed-cue"
+          title={`${connectorNotInstalledCopy(instance.kind)} Open the source to install it.`}
+        >
+          Not installed · can't sync
+        </span>
+      ) : instance.ownerActionCue ? (
         <span
           className="rr-s-item__cue"
           data-testid="sources-owner-action-cue"
@@ -547,8 +558,8 @@ function InstancePassport({
         ) : null}
         {instance.revoked && !instance.setupFailed ? (
           <p className="rr-s-revoked-note">
-            Future collection is stopped. Already-collected records stay visible and searchable; revoke does not erase
-            anything.
+            Future collection is stopped. Revoke signs out the saved browser session; already-collected records stay
+            visible and searchable.
           </p>
         ) : null}
       </SheetBody>
@@ -677,9 +688,16 @@ function PassportActions({
         router.refresh();
         return;
       }
+      if (res.reason === "connector_not_installed") {
+        setToast({
+          kind: "error",
+          message: `${connectorNotInstalledCopy(instance.kind)} Open the source to install it.`,
+        });
+        return;
+      }
       setToast({ kind: "error", message: res.message });
     });
-  }, [instance.connectorId, instance.connectionId, instance.connectorInstanceId, manualUploadHref, router]);
+  }, [instance.connectorId, instance.connectionId, instance.connectorInstanceId, instance.kind, manualUploadHref, router]);
 
   // Push-mode connections can't be remotely pulled — Sync is inert for them.
   const syncDisabled =
@@ -930,8 +948,8 @@ function RevokeCeremony({
     <form action={revokeAction} className="rr-s-revoke" data-testid="sources-revoke-ceremony">
       <input name="connection_id" type="hidden" value={connectionId} />
       <p className="rr-s-revoke__copy">
-        Revoke stops future collection for this connection. Already-collected records, grants, and audit history are
-        retained — revoke does not erase anything.
+        Revoke stops future collection for this connection and signs out its saved browser session. Already-collected
+        records, grants, and audit history are retained.
       </p>
       <label className="rr-s-revoke__check">
         <input name="confirm_revoke" type="checkbox" value="yes" />

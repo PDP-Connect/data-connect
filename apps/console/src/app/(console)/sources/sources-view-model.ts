@@ -41,6 +41,7 @@ import {
 } from "pdpp-reference-implementation/connection-setup-plan";
 import { formatStreamCollectionFacts, indexCollectionReportByStream } from "../lib/collection-report.ts";
 import { isActiveConnectorRunSummaryStatus } from "../lib/connector-run-summary-status.ts";
+import { isConnectorNotInstalled } from "../lib/connector-implementation.ts";
 import type { FormattedNextAction } from "../lib/next-action.ts";
 import type {
   RefConnectorRunSummary,
@@ -144,6 +145,13 @@ export interface SourceInstanceView {
   connectionId: string | null;
   /** Connector type id (e.g. "gmail"), used for sync + add-source. */
   connectorId: string;
+  /**
+   * The reference reports no implementation to run this connector
+   * (`connector_implementation.state: "not_installed"`), so it cannot sync
+   * until the owner installs it. Marked on the list row; absent evidence is
+   * `false`, never a guess.
+   */
+  connectorNotInstalled: boolean;
   /** The instance-scoped selector the sync action prefers. */
   connectorInstanceId: string | null;
   /** Deep link to the in-app connection detail page (the always-safe target). */
@@ -605,10 +613,11 @@ export function toSourceInstanceView(
   const isLocalDevicePush = summary.source_kind === "local_device";
   const isRunning = summary.last_run !== null && isActiveConnectorRunSummaryStatus(summary.last_run.status);
   const manualUploadHref = manualUploadHrefForSource(summary, options.manifests);
+  const connectorNotInstalled = isConnectorNotInstalled(summary);
   const collectionFactsByStream = new Map(
     [...indexCollectionReportByStream(summary.collection_report)].map(([stream, entry]) => [
       stream,
-      formatStreamCollectionFacts(entry),
+      formatStreamCollectionFacts(entry, { connectorNotInstalled }),
     ])
   );
   const streamRecordsByStream = new Map((summary.stream_records ?? []).map((entry) => [entry.stream, entry]));
@@ -715,6 +724,7 @@ export function toSourceInstanceView(
     connectionId,
     connectorId,
     connectorInstanceId,
+    connectorNotInstalled,
     detailHref: sourceDetailHrefFor(routeId, summary),
     displayName,
     icon: manifest?.icon ?? null,

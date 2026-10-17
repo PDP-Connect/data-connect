@@ -84,17 +84,17 @@ export default function DashboardError({ error, reset }: { error: Error & { dige
   if (!gaveUp) {
     return (
       <div data-testid="dashboard-read-recovering">
-        <ListLoadingSkeleton label="PDPP" rows={6} />
+        <ListLoadingSkeleton label="DataConnect" rows={6} />
       </div>
     );
   }
 
   return (
     <main className="mx-auto flex min-h-[60vh] max-w-xl flex-col items-start justify-center gap-3 px-6 py-16">
-      <p className="pdpp-eyebrow text-muted-foreground/60 uppercase tracking-widest">PDPP</p>
+      <p className="pdpp-eyebrow text-muted-foreground/60 uppercase tracking-widest">DataConnect</p>
       <h1 className="pdpp-heading text-foreground">Something went wrong</h1>
       <p className="pdpp-body max-w-prose text-muted-foreground">
-        PDPP ran into an unexpected error. Your data is safe — this is a display failure, not a change. Try again or
+        DataConnect ran into an unexpected error. Your data is safe — this is a display failure, not a change. Try again or
         sign back in if the problem persists.
       </p>
       <div className="mt-3 flex flex-wrap items-center gap-2">

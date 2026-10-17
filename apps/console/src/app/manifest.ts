@@ -1,8 +1,9 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { LAUNCH_COLORS } from "@pdpp/brand/launch-colors";
-import type { MetadataRoute } from "next";
+import { LAUNCH_COLORS } from "@pdpp/brand/launch-colors"
+import type { MetadataRoute } from "next"
+import { getProductIdentity } from "./(console)/lib/product-identity.ts"
 
 // background_color/theme_color use the HONEST LIGHT first-paint color (the
 // `:root --background` token). The console defaults to the system theme, so
@@ -11,22 +12,23 @@ import type { MetadataRoute } from "next";
 // the correct pre-CSS placeholder. Sourced from LAUNCH_COLORS (single source of
 // truth) — manifests cannot carry oklch() or CSS vars, hence the imported hex.
 export default function manifest(): MetadataRoute.Manifest {
+  const identity = getProductIdentity()
   return {
     background_color: LAUNCH_COLORS.light,
-    description: "Owner console for your PDPP reference instance — connections, runs, grants, and the record explorer.",
+    description: identity.description,
     display: "standalone",
     icons: [
       {
         purpose: "any",
         sizes: "any",
-        src: "/brand/pdpp-favicon.svg",
+        src: "/brand/dataconnect-mark.svg",
         type: "image/svg+xml",
       },
     ],
-    name: "PDPP Owner Console",
+    name: `${identity.name} Owner Console`,
     scope: "/",
-    short_name: "PDPP",
+    short_name: identity.name,
     start_url: "/",
     theme_color: LAUNCH_COLORS.light,
-  };
+  }
 }

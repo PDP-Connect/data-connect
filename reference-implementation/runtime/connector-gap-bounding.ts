@@ -213,7 +213,10 @@ export function boundConnectorErrorMessage(value: unknown, declaredReasonTokens?
   if (typeof value !== "string") {
     return null;
   }
-  const { text } = redactStderrTail(value, declaredReasonTokens ? { declaredReasonTokens } : {});
+  const redacted = redactStderrTail(value, declaredReasonTokens ? { declaredReasonTokens } : {}).text;
+  const text = redacted
+    .replace(/^\s*[╔╚╠╟╞╧╤╥╙╘╒╓╔╚╩╦╬═─━┌┐└┘├┤┬┴┼│║╭╮╰╯]+[^\S\r\n]*.*[╗╝╣╢╡╛╧╤╥╜╛╕╖╩╦╬═─━┐┘┤┬┴┼│║╮╯]\s*$/gm, "")
+    .replace(/\n{3,}/g, "\n\n");
   if (text.length <= CONNECTOR_ERROR_MESSAGE_MAX) {
     return text;
   }
@@ -733,8 +736,14 @@ export function buildCollectionFacts({
     return projectRuntimeSkip(gap);
   };
 
+  // `pending_detail_gaps` keeps meaning "recoverable pending gaps". A permanent
+  // (`retryable: false`) loss is accounted separately so it stays visible without
+  // ever reading as retryable work.
+  const isPermanentGap = (gap: KnownGap): boolean => (gap as { retryable?: boolean | null }).retryable === false;
   const pendingDetailGapsForStream = (stream: string): number =>
-    durableDetailGaps.filter((gap) => gap.stream === stream && gap.status === "pending").length;
+    durableDetailGaps.filter((gap) => gap.stream === stream && gap.status === "pending" && !isPermanentGap(gap)).length;
+  const permanentDetailGapsForStream = (stream: string): number =>
+    durableDetailGaps.filter((gap) => gap.stream === stream && gap.status === "pending" && isPermanentGap(gap)).length;
 
   // STREAM_EVIDENCE is exclusive to state_stream-declared streams, which are
   // themselves forbidden from emitting DETAIL_COVERAGE — so
@@ -767,6 +776,9 @@ export function buildCollectionFacts({
       checkpoint: checkpointForStateStreams(stateStreams),
       ...(continuation ? { collection_scope: continuation.boundary } : {}),
       pending_detail_gaps: pendingDetailGapsForStream(stream),
+      ...(permanentDetailGapsForStream(stream) > 0
+        ? { permanent_detail_gaps: permanentDetailGapsForStream(stream) }
+        : {}),
       skipped: streamSkip,
     };
   });

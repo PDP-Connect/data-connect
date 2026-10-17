@@ -22,6 +22,9 @@ Runtime boundaries:
 - React frontend (Vite + Redux + Router + Tailwind)
 - Tauri/Rust backend (commands, file ops, subprocesses)
 - Playwright runner (Node.js, bundled Chromium)
+- Bundled Next console (`apps/console`), staged and launched by the Tauri
+  backend as its own sidecar; see `docs/260325-grant-connect-flow-architecture.md`
+  for how its `/connect` route differs from the legacy grant flow below.
 
 ```
 ┌─────────────────────────────────────────┐

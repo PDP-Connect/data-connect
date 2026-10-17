@@ -332,6 +332,28 @@ test("missing window-settle behavior is a typed readiness failure before connect
   });
 });
 
+test("a probe that does not require window-settle never requests the n.eko route", async () => {
+  const { calls, fetch } = makeFetchSpy(happyRoutes({ "pdpp/window-settle": { json: {}, status: 404 } }));
+  const { FakeWebSocket, sockets } = makeFakeWebSocketCtor();
+  const probe = createDefaultBrowserSurfaceReadinessProbe({
+    fetchImpl: fetch,
+    requireWindowSettle: false,
+    timeoutMs: TIMEOUT,
+    webSocketFactory: FakeWebSocket,
+  });
+  const resultPromise = probe.probe(READY_SURFACE);
+  const socket = await waitForSocket(sockets);
+  const message = await waitForMessage(socket.peer, "Page.getFrameTree");
+  message.__answered = true;
+  socket.peer.deliver({ id: message.id, result: { frameTree: { frame: { id: "root" } } } });
+  const result = await resultPromise;
+  assertSuccess(result);
+  assert.deepEqual(
+    calls.map((call) => call.url),
+    ["http://neko.local:9222/json/version", "http://neko.local:9222/json/list"]
+  );
+});
+
 test("an unsettled window-settle response is a typed readiness failure before connector use", async () => {
   const { fetch } = makeFetchSpy(
     happyRoutes({ "pdpp/window-settle": { json: { height: 900, settled: false, width: 1440 } } })

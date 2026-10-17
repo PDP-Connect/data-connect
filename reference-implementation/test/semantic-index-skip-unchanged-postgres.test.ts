@@ -7,6 +7,7 @@ import { closeDb, initDb } from "../server/db.ts";
 import { postgresIngestRecord } from "../server/postgres-records.ts";
 import {
   postgresLexicalIndexInsertMany,
+  postgresLexicalIndexInsertManyWithClient,
   postgresLexicalIndexPublishWithClient,
   postgresSemanticIndexPublishWithClient,
 } from "../server/postgres-search.ts";
@@ -314,3 +315,23 @@ if (POSTGRES_URL) {
     /* intentionally empty */
   });
 }
+
+test("PostgreSQL lexical bulk insert rejects an entry without records.version before writing", async () => {
+  const queries: string[] = [];
+  const client = {
+    query: async (sql: string) => {
+      queries.push(sql);
+      return { rows: [], rowCount: 0 };
+    },
+  };
+  await assert.rejects(
+    postgresLexicalIndexInsertManyWithClient(client as never, {
+      connectorId: "connector",
+      connectorInstanceId: "instance",
+      entries: [{ field: "subject", recordKey: "r1", text: "hello" } as never],
+      stream: "messages",
+    }),
+    /no valid records\.version/
+  );
+  assert.deepEqual(queries, [], "no SQL runs for an unversioned batch");
+});

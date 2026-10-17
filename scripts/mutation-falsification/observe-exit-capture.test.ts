@@ -98,4 +98,12 @@ describe("the observation step's exit capture", () => {
     expect(workflow).toContain("|| stryker_exit=$?")
     expect(workflow).not.toMatch(/npx stryker run[^\n]*\n\s*stryker_exit=\$\?/)
   })
+
+  it("passes selected script tests to Stryker only when the scripts intent selected tests", () => {
+    const workflow = readFileSync(WORKFLOW, "utf8")
+    expect(workflow).toContain('mapfile -t test_files < "reports/mutation/${COHORT}/selected-tests.txt"')
+    expect(workflow).toContain('if [[ "${COHORT}" == "scripts" ]] && (( ${#test_files[@]} > 0 )); then')
+    expect(workflow).toContain('test_files_option=(--testFiles "$(IFS=,; echo "${test_files[*]}")")')
+    expect(workflow).toContain('"${test_files_option[@]}" || stryker_exit=$?')
+  })
 })

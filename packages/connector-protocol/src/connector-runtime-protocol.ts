@@ -329,7 +329,24 @@ export interface DetailGapNetworkPressure {
   status?: number;
 }
 
-export interface DetailGapMessage {
+/** Portable reasons for a retryable `DETAIL_GAP` (`retryable: true`). */
+export const RETRYABLE_DETAIL_GAP_REASONS = [
+  "rate_limited",
+  "retry_exhausted",
+  "temporary_unavailable",
+  "upstream_pressure",
+] as const;
+
+/**
+ * The portable reason for a permanent `DETAIL_GAP` (`retryable: false`): a detail
+ * record the connector can never hydrate in full from the source in its current
+ * form. A runtime never schedules, requests, or offers a refetch of such a gap.
+ */
+export const PERMANENT_DETAIL_GAP_REASON = "source_unrepresentable" as const;
+
+export type RetryableDetailGapReason = (typeof RETRYABLE_DETAIL_GAP_REASONS)[number];
+
+interface DetailGapMessageBase {
   detail?: {
     class?: string;
     http_status?: number;
@@ -350,14 +367,27 @@ export interface DetailGapMessage {
   list_cursor?: unknown;
   /** Checkpoint-owning parent stream; must match DETAIL_COVERAGE.state_stream. */
   parent_stream?: string;
-  reason: "rate_limited" | "retry_exhausted" | "temporary_unavailable" | "upstream_pressure";
   record_key: string | number;
   reference_only: true;
-  retryable: true;
+  /** `"pending"` for both gap forms; this version defines no other wire status. */
   status: "pending";
   stream: string;
   type: "DETAIL_GAP";
 }
+
+/** A gap a runtime may retry: `retryable: true` with one of the retryable reasons. */
+export interface RetryableDetailGapMessage extends DetailGapMessageBase {
+  reason: RetryableDetailGapReason;
+  retryable: true;
+}
+
+/** A gap that can never be hydrated in full: `retryable: false` with `source_unrepresentable`. */
+export interface PermanentDetailGapMessage extends DetailGapMessageBase {
+  reason: typeof PERMANENT_DETAIL_GAP_REASON;
+  retryable: false;
+}
+
+export type DetailGapMessage = RetryableDetailGapMessage | PermanentDetailGapMessage;
 
 export interface DetailCoverageMessage {
   /**

@@ -17,6 +17,14 @@ export const BACKUP_TABLE_INVENTORY: Record<string, BackupTableInventoryEntry> =
     classification: "backup_required",
     reason: "Agent-connect handoff attempts and recovery bindings are durable authorization delivery state.",
   },
+  as_issuance_cohort: {
+    classification: "backup_required",
+    reason: "Original issuance expiry provenance and cutover enrollment must survive restore unchanged.",
+  },
+  as_issuance_cutover: {
+    classification: "backup_required",
+    reason: "The completed issuance cutover marker prevents a restore from repeating or skipping enrollment.",
+  },
   blob_bindings: {
     classification: "backup_required",
     reason: "Binds durable blob bytes to records and JSON paths.",
@@ -70,6 +78,10 @@ export const BACKUP_TABLE_INVENTORY: Record<string, BackupTableInventoryEntry> =
     classification: "backup_required",
     reason: "Owner-visible connector attention state must survive restore.",
   },
+  connector_activations: {
+    classification: "backup_required",
+    reason: "Installed connector activation state is durable runtime authority for which verified manifest revision may run.",
+  },
   connector_coverage_horizons: {
     classification: "backup_required",
     reason:
@@ -78,6 +90,18 @@ export const BACKUP_TABLE_INVENTORY: Record<string, BackupTableInventoryEntry> =
   connector_detail_gaps: {
     classification: "backup_required",
     reason: "Gap evidence records source coverage state.",
+  },
+  connector_install_catalog_state: {
+    classification: "backup_required",
+    reason: "Verified connector catalog high-water state prevents catalog rollback after restore.",
+  },
+  connector_lifecycle_locks: {
+    classification: "backup_required",
+    reason: "Lifecycle fences remain durable until their owning process exits and stale owners are reclaimed.",
+  },
+  connector_installs: {
+    classification: "backup_required",
+    reason: "Verified connector artifact records and activation state are required to resolve installed code after restore.",
   },
   connector_instance_config_current: {
     classification: "backup_required",
@@ -130,6 +154,10 @@ export const BACKUP_TABLE_INVENTORY: Record<string, BackupTableInventoryEntry> =
   connectors: {
     classification: "backup_required",
     reason: "Connector catalog rows are required to interpret connections and records.",
+  },
+  consent_challenges: {
+    classification: "backup_required",
+    reason: "Owner-bound consent requests and single-use decision status/digests are durable authorization state.",
   },
   consent_exchange_codes: {
     classification: "backup_required",
@@ -193,6 +221,38 @@ export const BACKUP_TABLE_INVENTORY: Record<string, BackupTableInventoryEntry> =
     classification: "backup_required",
     reason: "OAuth grants are core authorization state.",
   },
+  pairwise_identity_handles: {
+    classification: "backup_required",
+    reason: "Pairwise identifiers must remain stable across restarts and recovery.",
+  },
+  pairwise_as_instance_authority: {
+    classification: "backup_required",
+    reason: "Retained source declaration authority binds issued instance handles to owner-connected sources.",
+  },
+  pairwise_as_instance_authority_versions: {
+    classification: "backup_required",
+    reason: "Versioned source authority lets existing grants retain their accepted declaration revision.",
+  },
+  pairwise_identity_root_keys: {
+    classification: "backup_required",
+    reason: "Pairwise identifiers cannot be re-derived after loss of the issuer identity root key.",
+  },
+  pairwise_trusted_client_sectors: {
+    classification: "backup_required",
+    reason: "Trusted client sector assignments must remain immutable after identifiers are disclosed.",
+  },
+  pairwise_identity_legacy_backfills: {
+    classification: "backup_required",
+    reason: "Legacy identity backfill completion gates the first versioned issuance.",
+  },
+  pairwise_identity_issuer_migrations: {
+    classification: "backup_required",
+    reason: "Issuer migrations record one-time identity namespace changes.",
+  },
+  pairwise_identity_deployment: {
+    classification: "backup_required",
+    reason: "The exact configured issuer pins this database to one deployment identity namespace.",
+  },
   lexical_search_index: {
     classification: "backup_required",
     reason: "Lexical index rows are rebuilt from records.",
@@ -229,6 +289,14 @@ export const BACKUP_TABLE_INVENTORY: Record<string, BackupTableInventoryEntry> =
     classification: "backup_required",
     reason: "Owner-device authorization state must survive restore.",
   },
+  owner_password_verifier: {
+    classification: "backup_required",
+    reason: "Owner password verifier state is the durable local owner credential authority.",
+  },
+  owner_sessions: {
+    classification: "backup_required",
+    reason: "Owner session records are durable bearer inventory and revocation state until expiry.",
+  },
   pending_consents: {
     classification: "backup_required",
     reason: "Pending consent transactions must not be silently dropped by a coherent restore.",
@@ -253,6 +321,11 @@ export const BACKUP_TABLE_INVENTORY: Record<string, BackupTableInventoryEntry> =
   record_changes: {
     classification: "backup_required",
     reason: "Record history is durable owner data.",
+  },
+  record_derived_repair_pending: {
+    classification: "backup_required",
+    reason:
+      "Queued re-derivation of manifest-derived record columns after a manifest publication. Loss leaves those columns derived from the previous manifest until the connector is installed again.",
   },
   record_rejection_quota: {
     classification: "backup_required",
@@ -285,6 +358,11 @@ export const BACKUP_TABLE_INVENTORY: Record<string, BackupTableInventoryEntry> =
   retained_size_top_rows: {
     classification: "backup_required",
     reason: "Retained-size rows are rebuildable projections.",
+  },
+  rs_opaque_cursors: {
+    classification: "backup_required",
+    reason:
+      "Opaque read cursors and sync checkpoints held for clients. Loss forces a client to restart pagination or sync from beginning (invalid_cursor / cursor_expired); no rebuild oracle exists.",
   },
   run_history: {
     classification: "backup_required",
@@ -360,8 +438,10 @@ export const BACKUP_TABLE_INVENTORY: Record<string, BackupTableInventoryEntry> =
 };
 
 const SQLITE_INTERNAL_TABLES = new Set(["sqlite_sequence", "sqlite_stat1", "sqlite_stat4"]);
-const SQLITE_LAZY_APPLICATION_TABLES = ["explore_cursor_store"] as const;
+const SQLITE_LAZY_APPLICATION_TABLES = ["as_issuance_cohort", "as_issuance_cutover", "explore_cursor_store"] as const;
 const POSTGRES_LAZY_APPLICATION_TABLES = [
+  "as_issuance_cohort",
+  "as_issuance_cutover",
   "dataset_summary_projection",
   "dataset_summary_stream_projection",
   "explore_cursor_store",

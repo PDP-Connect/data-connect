@@ -22,6 +22,10 @@ export type AsDeviceDecisionAction = "approve" | "deny";
 
 export interface AsDeviceDecisionInput {
   readonly action: AsDeviceDecisionAction;
+  readonly authorizationFence?: {
+    readonly credentialRevision?: string | null;
+    readonly sessionIdHash?: string;
+  };
   readonly approvalId: string | null | undefined;
   readonly subjectId: string;
   readonly userCode: string | null | undefined;
@@ -34,7 +38,11 @@ export interface AsDeviceDecisionPendingRow {
 }
 
 export interface AsDeviceDecisionDependencies {
-  approve: (userCode: string, subjectId: string) => Promise<unknown> | unknown;
+  approve: (
+    userCode: string,
+    subjectId: string,
+    authorizationFence?: AsDeviceDecisionInput["authorizationFence"]
+  ) => Promise<unknown> | unknown;
   deny: (userCode: string, subjectId: string) => Promise<unknown> | unknown;
   getByApprovalId: (
     approvalId: string
@@ -89,7 +97,7 @@ export async function executeAsDeviceDecision(
 
   try {
     if (input.action === "approve") {
-      await deps.approve(userCode, input.subjectId);
+      await deps.approve(userCode, input.subjectId, input.authorizationFence);
     } else {
       await deps.deny(userCode, input.subjectId);
     }

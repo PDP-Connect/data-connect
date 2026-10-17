@@ -58,6 +58,7 @@ export const CREDENTIAL_STATE_CHANGE_CAUSES = Object.freeze([
   "duplicate_static_secret_identity",
   "owner_abandoned",
   "owner_revoked",
+  "credential_key_lost",
   "provider_rejected",
   "ttl_expired",
 ]);
@@ -111,6 +112,11 @@ interface CredentialStoreRun {
     reason: string | null;
     stateChange: CredentialStateChange;
   }) => Promise<void>;
+  markActiveRejectedForLostCredentialKey: (args: {
+    rejectedAt: string;
+    reason: string;
+    stateChange: CredentialStateChange;
+  }) => Promise<number>;
   revoke: (args: {
     connectorInstanceId: string;
     revokedAt: string;
@@ -167,6 +173,10 @@ export interface ConnectorInstanceCredentialStore {
     reason: string | null;
     stateChange?: CredentialStateChange;
   }) => Promise<CredentialMetadata | null>;
+  markActiveRejectedForLostCredentialKey: (args: {
+    now: string;
+    reason?: string;
+  }) => Promise<number>;
   recoverSecret: (args: {
     connectorInstanceId: string;
     ownerSubjectId: string;
@@ -557,6 +567,20 @@ function buildStore({
       return store.getMetadata(connectorInstanceId);
     },
 
+    async markActiveRejectedForLostCredentialKey({
+      now,
+      reason = "Credential-vault key was not present in the legacy recovery kit. Reconnect this connector to capture a new credential.",
+    }: {
+      now: string;
+      reason?: string;
+    }) {
+      return run.markActiveRejectedForLostCredentialKey({
+        rejectedAt: now,
+        reason,
+        stateChange: { cause: "credential_key_lost" },
+      });
+    },
+
     /**
      * Recover the plaintext secret for orchestrator injection into ONE run.
      * Fails closed (returns no secret, throws a typed error) when the credential
@@ -687,6 +711,28 @@ export function createSqliteConnectorInstanceCredentialStore({
         exec(query, [rejectedAt, reason, serializeCredentialStateChange(stateChange), connectorInstanceId]);
         return Promise.resolve();
       },
+      markActiveRejectedForLostCredentialKey({
+        rejectedAt,
+        reason,
+        stateChange,
+      }: {
+        rejectedAt: string;
+        reason: string;
+        stateChange: CredentialStateChange;
+      }): Promise<number> {
+        const result = getDb()
+          .prepare(
+            `UPDATE connector_instance_credentials
+             SET status = 'rejected',
+                 rejected_at = ?,
+                 rejection_reason = ?,
+                 revoked_at = NULL,
+                 state_change_json = ?
+             WHERE status = 'active'`
+          )
+          .run(rejectedAt, reason, serializeCredentialStateChange(stateChange));
+        return Promise.resolve(result.changes);
+      },
       revoke({
         connectorInstanceId,
         revokedAt,
@@ -781,6 +827,27 @@ export function createPostgresConnectorInstanceCredentialStore({
              AND status <> 'revoked'`,
           [rejectedAt, reason, serializeCredentialStateChange(stateChange), connectorInstanceId]
         );
+      },
+      async markActiveRejectedForLostCredentialKey({
+        rejectedAt,
+        reason,
+        stateChange,
+      }: {
+        rejectedAt: string;
+        reason: string;
+        stateChange: CredentialStateChange;
+      }): Promise<number> {
+        const result = await postgresQuery(
+          `UPDATE connector_instance_credentials
+           SET status = 'rejected',
+               rejected_at = $1,
+               rejection_reason = $2,
+               revoked_at = NULL,
+               state_change_json = $3::jsonb
+           WHERE status = 'active'`,
+          [rejectedAt, reason, serializeCredentialStateChange(stateChange)]
+        );
+        return result.rowCount ?? 0;
       },
       async revoke({
         connectorInstanceId,

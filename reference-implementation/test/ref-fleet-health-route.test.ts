@@ -18,6 +18,7 @@ import {
 import type { MountRefConnectorsContext } from "../server/routes/ref-connectors.ts";
 import { mountRefFleetHealth } from "../server/routes/ref-connectors.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
+import { getOwnerSessionStore } from "../server/stores/owner-session-store.ts";
 import { createApp } from "../server/transport.ts";
 import { TEST_INTROSPECTION_SERVER_OPTS } from "./helpers/introspection-test-credentials.ts";
 
@@ -108,7 +109,9 @@ function withoutObservedAt(value: unknown): unknown {
   return value;
 }
 
-test("fleet-health route uses the real transport, contract registry, and owner-session gate", async () => {
+test("fleet-health route uses the real transport, contract registry, and owner-session gate", async (t) => {
+  initDb(":memory:");
+  t.after(() => closeDb());
   const app = createApp();
   const ownerAuth = createOwnerAuthPlaceholder({ password: OWNER_PASSWORD });
   mountRefFleetHealth(
@@ -134,7 +137,10 @@ test("fleet-health route uses the real transport, contract registry, and owner-s
   assert.equal(rejected.statusCode, 401);
   assert.equal(JSON.parse(rejected.body).error.code, "owner_session_required");
 
-  const session = createOwnerSessionController({ password: OWNER_PASSWORD }).issueSessionCookieHeader();
+  const session = await createOwnerSessionController({
+    password: OWNER_PASSWORD,
+    sessionStore: getOwnerSessionStore(),
+  }).issueSessionCookieHeader();
   assert.ok(session, "test owner session must be issued");
   const accepted = await app.fastify.inject({
     headers: { accept: "application/json", cookie: session.split(";")[0] },

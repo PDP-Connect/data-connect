@@ -4,8 +4,8 @@
 // HTTP adapter for the bearer-authed owner-agent connection-intent route
 // `POST /v1/owner/connections/intents`.
 //
-// This is the owner-agent (bearer) entrypoint a trusted local agent
-// (Daisy/Simon-style automation) uses to answer "how do I add a new connection
+// Trusted local agents use this bearer-authenticated entrypoint to answer
+// "how do I add a new connection
 // for connector X?". It does NOT create a connection: it returns a typed,
 // auditable, owner-mediated next step. The connection only materializes when the
 // owner-mediated step completes (for the local-collector path, when the device

@@ -16,7 +16,7 @@ const STREAM_VIEWER_FILE = `${HERE}stream-viewer.tsx`;
  * (reproduced at 1981x960 and 1400x1005), instead of filling the available
  * viewport. Root cause, proven live with Playwright + real DOM measurement:
  *
- * `IcDialogPopup` (packages/pdpp-brand-react/src/dialog.tsx) applies BOTH the
+ * `IcDialogPopup` (reference-implementation/vendor/brand-react/src/dialog.tsx) applies BOTH the
  * shared `pdpp-dialog` class (max-width: 32rem, from that package's own
  * components.css) and the caller's override class (`pdpp-stream-dialog`,
  * stream.css). Both are single-class selectors of equal specificity

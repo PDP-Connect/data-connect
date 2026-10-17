@@ -263,7 +263,10 @@ export function buildRecoveryDemoModel(): ConnectorPageModel {
     connectionPrimaryAction: renderedVerdict.required_actions[0] ?? null,
     connectionRenderedVerdict: renderedVerdict,
     connectorId: "claude_code",
+    connectorInstallKey: "claude_code",
     connectorInstanceId: connectionId,
+    // A local-device source: the reference reports no install state for it.
+    connectorNotInstalled: false,
     coverageHorizons: [],
     deviceLabels: ["workstation"],
     displayName: "Claude Code workstation",
@@ -282,6 +285,7 @@ export function buildRecoveryDemoModel(): ConnectorPageModel {
     retainedStorage: { breakdown: "current 4.50 MB · history 1.20 MB", total: "5.70 MB" },
     schedule: null,
     scheduleError: null,
+    setupFailed: false,
     sourceBindingKind: null,
     sourceInstances,
     sourceInstancesError: null,

@@ -10,15 +10,19 @@ const HERE = fileURLToPath(new URL(".", import.meta.url));
 // explore-data-assembler.ts moved to the shared @pdpp/operator-ui package;
 // resolve it from the repo root. page.tsx + next.config.mjs stay console-local.
 const REPO_ROOT = new URL("../../../../../../", import.meta.url);
-const ASSEMBLER_FILE = fileURLToPath(new URL("packages/operator-ui/src/explore/explore-data-assembler.ts", REPO_ROOT));
-const COMPONENTS_CSS_FILE = fileURLToPath(new URL("packages/pdpp-brand-react/src/components.css", REPO_ROOT));
+const ASSEMBLER_FILE = fileURLToPath(
+  new URL("reference-implementation/vendor/operator-ui/src/explore/explore-data-assembler.ts", REPO_ROOT)
+);
+const COMPONENTS_CSS_FILE = fileURLToPath(
+  new URL("reference-implementation/vendor/brand-react/src/components.css", REPO_ROOT)
+);
 const RECORD_INSPECTOR_FILE = fileURLToPath(
   new URL("apps/console/src/app/(console)/components/record-inspector.tsx", REPO_ROOT)
 );
 const LIVE_PAGE_FILE = `${HERE}page.tsx`;
 const EXPLORE_CANVAS_FILE = `${HERE}explore-canvas.tsx`;
 const RECORDS_EXPLORER_VIEW_FILE = fileURLToPath(
-  new URL("packages/operator-ui/src/components/views/records-explorer-view.tsx", REPO_ROOT)
+  new URL("reference-implementation/vendor/operator-ui/src/components/views/records-explorer-view.tsx", REPO_ROOT)
 );
 
 const LOAD_TIMELINE_RE = /\bloadTimeline\b/;

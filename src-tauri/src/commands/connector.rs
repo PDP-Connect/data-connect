@@ -106,6 +106,22 @@ pub struct Platform {
     /// Scopes this connector can export (just the scope strings, e.g. ["chatgpt.conversations", "chatgpt.memories"])
     pub scopes: Option<Vec<String>>,
     pub setup: Option<ActivePdppSetup>,
+    #[serde(rename = "sourceKind", skip_serializing_if = "Option::is_none")]
+    pub source_kind: Option<String>,
+    #[serde(rename = "sourceId", skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<String>,
+    #[serde(rename = "sourcePath", skip_serializing_if = "Option::is_none")]
+    pub source_path: Option<String>,
+    #[serde(rename = "activeSource", skip_serializing_if = "Option::is_none")]
+    pub active_source: Option<bool>,
+    /// For an installed PDPP connector: whether its manifest requires the
+    /// browser binding, so the desktop keeps a saved browser session for it.
+    #[serde(rename = "requiresBrowser", skip_serializing_if = "Option::is_none")]
+    pub requires_browser: Option<bool>,
+    #[serde(rename = "connectionId", skip_serializing_if = "Option::is_none")]
+    pub connection_id: Option<String>,
+    #[serde(rename = "accountLabel", skip_serializing_if = "Option::is_none")]
+    pub account_label: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -118,6 +134,19 @@ struct ActivePdppPlatformManifest {
     brand: Option<ActivePdppBrand>,
     setup: Option<ActivePdppSetup>,
     streams: Vec<ActivePdppStream>,
+    #[serde(default)]
+    runtime_requirements: Option<serde_json::Value>,
+}
+
+impl ActivePdppPlatformManifest {
+    /// Mirrors `requires_browser` in pdpp_installed_connector.rs.
+    fn requires_browser(&self) -> bool {
+        self.runtime_requirements
+            .as_ref()
+            .and_then(|requirements| requirements.pointer("/bindings/browser/required"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -458,6 +487,13 @@ fn platform_from_metadata(
         runtime: runtime_override.or(metadata.runtime),
         scopes,
         setup: None,
+        source_kind: None,
+        source_id: None,
+        source_path: None,
+        active_source: None,
+        requires_browser: None,
+        connection_id: None,
+        account_label: None,
     }
 }
 
@@ -557,14 +593,17 @@ fn load_platforms_from_dir(dir: &PathBuf) -> Vec<Platform> {
 }
 
 fn load_active_pdpp_platforms(app: &AppHandle) -> Vec<Platform> {
-    let Some(manifest) = read_active_connector_manifest() else {
-        return Vec::new();
-    };
+    let mut installs = read_active_connector_manifest()
+        .map(|manifest| manifest.connectors.into_values().collect::<Vec<_>>())
+        .unwrap_or_default();
+    installs.extend(
+        super::developer_connector_sources::list_sources()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|source| super::developer_connector_sources::as_active_install(&source)),
+    );
     let resource_dir = app.path().resource_dir().ok();
-    load_pdpp_platforms_with_resource_dir(
-        manifest.connectors.into_values(),
-        resource_dir.as_deref(),
-    )
+    load_pdpp_platforms_with_resource_dir(installs, resource_dir.as_deref())
 }
 
 pub(super) fn load_pdpp_platforms(
@@ -593,6 +632,7 @@ pub(super) fn load_pdpp_platforms_with_resource_dir(
         let Ok(manifest) = serde_json::from_str::<ActivePdppPlatformManifest>(&content) else {
             continue;
         };
+        let requires_browser = manifest.requires_browser();
 
         let connector_key = manifest
             .connector_key
@@ -642,8 +682,15 @@ pub(super) fn load_pdpp_platforms_with_resource_dir(
             })
             .unwrap_or_default();
 
+        let source_id = install.connector_id.clone();
+        let local_source = source_id.starts_with("local_");
+        let active_source = local_source
+            && super::developer_connector_sources::selected_source(&install.connector_id)
+                .ok()
+                .flatten()
+                .is_some();
         platforms.push(Platform {
-            id: install.connector_id,
+            id: source_id.clone(),
             company,
             name: manifest
                 .display_name
@@ -663,6 +710,13 @@ pub(super) fn load_pdpp_platforms_with_resource_dir(
             runtime: Some("pdpp-network".to_string()),
             scopes: Some(scopes),
             setup: manifest.setup,
+            source_kind: local_source.then(|| "developer_local".to_string()),
+            source_id: local_source.then_some(source_id),
+            source_path: local_source.then(|| install.root_path.clone()),
+            active_source: local_source.then_some(active_source),
+            requires_browser: Some(requires_browser),
+            connection_id: None,
+            account_label: None,
         });
     }
 
@@ -741,8 +795,35 @@ pub async fn get_platforms(app: AppHandle) -> Result<Vec<Platform>, String> {
             platforms.push(platform);
         }
     }
-    log::info!("Loaded {} total platforms", platforms.len());
-    Ok(platforms)
+    let mut expanded = Vec::new();
+    for platform in platforms {
+        if platform.runtime.as_deref() != Some("pdpp-network") {
+            expanded.push(platform);
+            continue;
+        }
+        let mut accounts = super::pdpp_connections::stored_connections(&platform.id)?;
+        if accounts.is_empty()
+            && super::pdpp_connections::has_legacy_data(&app, &platform.id, &platform.company)
+        {
+            accounts.push(super::pdpp_connections::ensure_pdpp_connection(
+                app.clone(),
+                platform.id.clone(),
+                platform.company.clone(),
+            )?);
+        }
+        if accounts.is_empty() {
+            expanded.push(platform);
+            continue;
+        }
+        for account in accounts {
+            let mut account_platform = platform.clone();
+            account_platform.connection_id = Some(account.connection_id);
+            account_platform.account_label = account.account_label;
+            expanded.push(account_platform);
+        }
+    }
+    log::info!("Loaded {} total platforms", expanded.len());
+    Ok(expanded)
 }
 
 /// Active connector windows
@@ -2248,6 +2329,7 @@ pub async fn stop_connector_run(app: AppHandle, run_id: String) -> Result<(), St
 pub async fn check_connected_platforms(
     app: AppHandle,
     platform_ids: Vec<String>,
+    connection_ids: Option<HashMap<String, Vec<String>>>,
 ) -> Result<HashMap<String, bool>, String> {
     let mut connected = HashMap::new();
 
@@ -2265,6 +2347,30 @@ pub async fn check_connected_platforms(
         .collect();
 
     for id in platform_ids {
+        if let Some(accounts) = connection_ids
+            .as_ref()
+            .and_then(|connections| connections.get(&id))
+        {
+            for connection_id in accounts {
+                let key = format!("{id}:{connection_id}");
+                let legacy_connection = super::pdpp_connections::legacy_connection_id(&id);
+                let has_legacy_export = connection_id == &legacy_connection
+                    && id_to_company.get(&id).is_some_and(|company| {
+                        let sanitized_company = super::file_ops::sanitize_path_component(company);
+                        super::file_ops::legacy_export_exists(
+                            &data_dir,
+                            &sanitized_company,
+                            &id,
+                        )
+                        .unwrap_or(false)
+                    });
+                connected.insert(
+                    key,
+                    has_legacy_export || exported_connection_exists(&data_dir, connection_id)?,
+                );
+            }
+            continue;
+        }
         // Check by platform ID directory or company name directory
         let exists = data_dir.join(&id).exists()
             || id_to_company
@@ -2275,6 +2381,62 @@ pub async fn check_connected_platforms(
     }
 
     Ok(connected)
+}
+
+fn exported_connection_exists(
+    export_root: &std::path::Path,
+    connection_id: &str,
+) -> Result<bool, String> {
+    if !export_root.exists() {
+        return Ok(false);
+    }
+    let mut directories = vec![export_root.to_path_buf()];
+    while let Some(directory) = directories.pop() {
+        for entry in fs::read_dir(directory)
+            .map_err(|error| error.to_string())?
+            .flatten()
+        {
+            let path = entry.path();
+            if path.is_dir() {
+                if path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.ends_with(&format!("--{connection_id}")))
+                {
+                    return Ok(true);
+                }
+                directories.push(path);
+            }
+        }
+    }
+    Ok(false)
+}
+
+#[cfg(test)]
+mod connection_export_tests {
+    use super::exported_connection_exists;
+    use std::fs;
+
+    #[test]
+    fn exported_data_presence_is_scoped_to_the_connection_id() {
+        let root = tempfile::tempdir().unwrap();
+        for (connection_id, run_id) in [("account-a", "run-a"), ("account-b", "run-b")] {
+            let run_dir = root
+                .path()
+                .join("OpenAI/ChatGPT")
+                .join(format!("{run_id}--{connection_id}"));
+            fs::create_dir_all(&run_dir).unwrap();
+            fs::write(
+                run_dir.join("chatgpt-pdpp_1.json"),
+                serde_json::json!({"connectionId": connection_id}).to_string(),
+            )
+            .unwrap();
+        }
+
+        assert!(exported_connection_exists(root.path(), "account-a").unwrap());
+        assert!(exported_connection_exists(root.path(), "account-b").unwrap());
+        assert!(!exported_connection_exists(root.path(), "account-c").unwrap());
+    }
 }
 
 /// Get the user data path
@@ -2304,7 +2466,22 @@ pub async fn check_browser_available(
         .ok()
         .and_then(|resource_dir| get_bundled_chromium_path(&resource_dir));
 
-    Ok(resolve_browser_status(system_browser, downloaded, bundled))
+    let mut status = resolve_browser_status(system_browser, downloaded.clone(), bundled.clone());
+    // A system browser comes from a distribution package, which ships the
+    // AppArmor profile its sandbox needs. A downloaded or bundled Chromium may
+    // be blocked, and `--version` does not exercise the sandbox, so start it.
+    if let Some(browser) = match status.browser_type.as_str() {
+        "downloaded" => downloaded,
+        "bundled" => bundled,
+        _ => None,
+    } {
+        let launch_error =
+            tauri::async_runtime::spawn_blocking(move || cached_browser_launch_error(&browser))
+                .await
+                .map_err(|error| format!("Browser launch check failed: {error}"))?;
+        status = apply_browser_launch_error(status, launch_error);
+    }
+    Ok(status)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -2312,6 +2489,92 @@ pub struct BrowserStatus {
     pub available: bool,
     pub browser_type: String,
     pub needs_download: bool,
+    /// Machine-readable reason when a browser is present but cannot start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+/// Mark the resolved browser unavailable when it cannot start its sandbox.
+/// A download would not help, because a downloaded Chromium has no AppArmor
+/// profile either.
+fn apply_browser_launch_error(
+    status: BrowserStatus,
+    launch_error: Option<super::browser_surface_host::BrowserLaunchError>,
+) -> BrowserStatus {
+    match launch_error {
+        Some(error) if error.is_sandbox_unavailable() => BrowserStatus {
+            available: false,
+            needs_download: false,
+            reason: Some(error.code.to_string()),
+            message: Some(error.message),
+            ..status
+        },
+        _ => status,
+    }
+}
+
+/// Launch results per browser binary, kept for the life of the process.
+static BROWSER_LAUNCH_CHECKS: std::sync::OnceLock<
+    std::sync::Mutex<HashMap<PathBuf, Option<super::browser_surface_host::BrowserLaunchError>>>,
+> = std::sync::OnceLock::new();
+
+fn cached_browser_launch_error(
+    browser: &Path,
+) -> Option<super::browser_surface_host::BrowserLaunchError> {
+    let cache = BROWSER_LAUNCH_CHECKS.get_or_init(Default::default);
+    if let Some(result) = cache
+        .lock()
+        .ok()
+        .and_then(|checks| checks.get(browser).cloned())
+    {
+        return result;
+    }
+    let result = probe_browser_launch(browser);
+    if let Ok(mut checks) = cache.lock() {
+        checks.insert(browser.to_path_buf(), result.clone());
+    }
+    result
+}
+
+/// Start the browser the way the host does, with a throwaway profile, then
+/// stop it. Only Linux restricts the sandbox this way.
+#[cfg(target_os = "linux")]
+pub(crate) fn probe_browser_launch(
+    browser: &Path,
+) -> Option<super::browser_surface_host::BrowserLaunchError> {
+    let profile = match tempfile::Builder::new()
+        .prefix("dataconnect-browser-check-")
+        .tempdir()
+    {
+        Ok(profile) => profile,
+        Err(error) => {
+            log::warn!("Skipping browser launch check: {error}");
+            return None;
+        }
+    };
+    match super::browser_surface_host::launch_browser(browser, profile.path(), true) {
+        Ok((mut child, _)) => {
+            let _ = super::pdpp_browser::terminate_browser(&mut child);
+            None
+        }
+        Err(error) => {
+            log::warn!(
+                "Browser launch check failed ({}): {}",
+                error.code,
+                error.message
+            );
+            Some(error)
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn probe_browser_launch(
+    _browser: &Path,
+) -> Option<super::browser_surface_host::BrowserLaunchError> {
+    None
 }
 
 fn resolve_browser_status(
@@ -2333,6 +2596,8 @@ fn resolve_browser_status(
         available: browser_type.is_some(),
         browser_type: browser_type.unwrap_or("none").to_string(),
         needs_download: browser_type.is_none(),
+        reason: None,
+        message: None,
     }
 }
 
@@ -2656,24 +2921,46 @@ pub async fn clear_browser_session(connector_id: String) -> Result<(), String> {
         .or_else(|_| std::env::var("USERPROFILE"))
         .map_err(|_| "Could not determine home directory".to_string())?;
 
-    let profile_dir = PathBuf::from(&home)
-        .join(".dataconnect")
-        .join("browser-profiles")
-        .join(&connector_id);
-
-    if !profile_dir.exists() {
-        return Ok(());
-    }
-
-    // Verify the path is within browser-profiles to prevent directory traversal
     let profiles_parent = PathBuf::from(&home)
         .join(".dataconnect")
         .join("browser-profiles");
-    if !profile_dir.starts_with(&profiles_parent) {
+
+    clear_browser_session_from_profiles(&profiles_parent, &connector_id)
+}
+
+fn clear_browser_session_from_profiles(
+    profiles_parent: &Path,
+    connector_id: &str,
+) -> Result<(), String> {
+    if connector_id.is_empty()
+        || connector_id == "."
+        || connector_id == ".."
+        || !connector_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+    {
         return Err("Invalid connector ID".to_string());
     }
 
-    fs::remove_dir_all(&profile_dir)
+    if !profiles_parent.exists() {
+        return Ok(());
+    }
+
+    let canonical_profiles_parent = fs::canonicalize(profiles_parent)
+        .map_err(|e| format!("Failed to resolve browser-profiles directory: {e}"))?;
+    let profile_dir = profiles_parent.join(connector_id);
+    if !profile_dir.exists() {
+        return Ok(());
+    }
+    let canonical_profile_dir = fs::canonicalize(&profile_dir)
+        .map_err(|e| format!("Failed to resolve browser profile: {e}"))?;
+    if canonical_profile_dir == canonical_profiles_parent
+        || !canonical_profile_dir.starts_with(&canonical_profiles_parent)
+    {
+        return Err("Invalid connector ID".to_string());
+    }
+
+    fs::remove_dir_all(&canonical_profile_dir)
         .map_err(|e| format!("Failed to delete browser profile: {}", e))?;
 
     log::info!("Cleared browser session for connector: {}", connector_id);
@@ -2884,10 +3171,11 @@ pub async fn download_chromium_rust(app: AppHandle) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        get_bundled_chromium_path_for_platform, get_downloaded_chromium_path_in_home,
-        manifest_looks_like_connector, pdpp_streams_to_dataconnect_scopes,
-        resolve_automation_browser_path_from, resolve_browser_status, resolve_icon_path,
-        ActivePdppPlatformManifest, ActivePdppStream, ConnectorMetadata,
+        clear_browser_session_from_profiles, get_bundled_chromium_path_for_platform,
+        get_downloaded_chromium_path_in_home, manifest_looks_like_connector,
+        pdpp_streams_to_dataconnect_scopes, resolve_automation_browser_path_from,
+        resolve_browser_status, resolve_icon_path, ActivePdppPlatformManifest, ActivePdppStream,
+        ConnectorMetadata,
     };
     use serde_json::json;
     use std::path::{Path, PathBuf};
@@ -2898,6 +3186,28 @@ mod tests {
         std::fs::create_dir_all(path.parent().expect("file parent")).expect("create parent");
         std::fs::write(&path, "fixture").expect("write fixture");
         path
+    }
+
+    #[test]
+    fn clear_browser_session_rejects_paths_outside_profiles() {
+        let temp = tempdir().expect("temporary directory");
+        let profiles = temp.path().join(".dataconnect/browser-profiles");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&profiles).expect("create profiles root");
+        let outside_file = create_file(&outside, "keep.txt");
+
+        for connector_id in ["..", "nested/connector", outside.to_str().unwrap()] {
+            assert!(clear_browser_session_from_profiles(&profiles, connector_id).is_err());
+            assert_eq!(std::fs::read_to_string(&outside_file).unwrap(), "fixture");
+        }
+
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&outside, profiles.join("outside-link"))
+                .expect("create profile symlink");
+            assert!(clear_browser_session_from_profiles(&profiles, "outside-link").is_err());
+            assert_eq!(std::fs::read_to_string(&outside_file).unwrap(), "fixture");
+        }
     }
 
     fn connector_metadata() -> ConnectorMetadata {
@@ -3092,6 +3402,90 @@ mod tests {
         assert!(status.available);
         assert_eq!(status.browser_type, "bundled");
         assert!(!status.needs_download);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn write_script(dir: &Path, name: &str, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        std::fs::write(&path, body).expect("write script");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod script");
+        path
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn browser_preflight_reports_sandbox_blocked_bundled_browser_unavailable() {
+        let temp = tempdir().expect("tempdir");
+        // Truncated before Chromium's own workaround advice.
+        let blocked = write_script(
+            temp.path(),
+            "chrome",
+            "#!/bin/sh\necho '[1:1:0928/165834.918776:FATAL:zygote_host_impl_linux.cc:129] No usable sandbox! If you are running on Ubuntu 23.10+' >&2\nexit 133\n",
+        );
+
+        let status = super::apply_browser_launch_error(
+            resolve_browser_status(None, None, Some(blocked.clone())),
+            super::cached_browser_launch_error(&blocked),
+        );
+
+        assert!(!status.available);
+        assert!(!status.needs_download);
+        assert_eq!(status.browser_type, "bundled");
+        assert_eq!(
+            status.reason.as_deref(),
+            Some("browser_sandbox_unavailable")
+        );
+        assert!(status
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains(".deb package")));
+
+        // The result is cached per binary: a later fix to the file is not
+        // re-probed during this session.
+        std::fs::write(&blocked, "#!/bin/sh\nexit 1\n").expect("rewrite script");
+        assert!(super::cached_browser_launch_error(&blocked)
+            .is_some_and(|error| error.is_sandbox_unavailable()));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn browser_preflight_keeps_a_startable_bundled_browser_available() {
+        let temp = tempdir().expect("tempdir");
+        let working = write_script(
+            temp.path(),
+            "chrome",
+            "#!/bin/sh\nprintf '%s\\n' '{\"cdp_url\":\"http://127.0.0.1:9222\"}'\ntrap 'exit 0' TERM INT\nwhile :; do sleep 1; done\n",
+        );
+
+        let status = super::apply_browser_launch_error(
+            resolve_browser_status(None, None, Some(working.clone())),
+            super::probe_browser_launch(&working),
+        );
+
+        assert!(status.available);
+        assert_eq!(status.browser_type, "bundled");
+        assert_eq!(status.reason, None);
+    }
+
+    /// Live counterpart of the preflight tests; see the host's
+    /// `live_browser_launch_is_ready_or_reports_sandbox_unavailable`.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "needs a real Chromium in DATACONNECT_LIVE_BROWSER"]
+    fn live_browser_preflight_probe() {
+        let browser = PathBuf::from(
+            std::env::var("DATACONNECT_LIVE_BROWSER").expect("DATACONNECT_LIVE_BROWSER"),
+        );
+        let status = super::apply_browser_launch_error(
+            resolve_browser_status(None, None, Some(browser.clone())),
+            super::probe_browser_launch(&browser),
+        );
+        eprintln!("live preflight status: {status:?}");
+        assert!(
+            status.available || status.reason.as_deref() == Some("browser_sandbox_unavailable")
+        );
     }
 
     #[test]

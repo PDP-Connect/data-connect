@@ -288,11 +288,24 @@ export interface ReferenceQueryRegistry extends Readonly<Record<string, Register
   readonly connectorInstanceGroupsUpsert: MutationQuery;
   readonly connectorInstancesCountActiveByOwnerConnectorIds: ReadManyQuery;
   readonly connectorInstancesDeleteById: MutationQuery;
+  readonly connectorInstancesDeleteConnectorStateByInstance: MutationQuery;
+  readonly connectorInstancesDeleteDetailGapsByInstance: MutationQuery;
+  readonly connectorInstancesDeleteDeviceIngestBatchOutcomesByInstance: MutationQuery;
+  readonly connectorInstancesDeleteGrantConnectorStateByInstance: MutationQuery;
   readonly connectorInstancesDeleteManifestWriteViolationsByConnectorInstance: MutationQuery;
+  readonly connectorInstancesDeleteRetainedSizeConnectionByInstance: MutationQuery;
+  readonly connectorInstancesDeleteRetainedSizeRecordFamilyByInstance: MutationQuery;
+  readonly connectorInstancesDeleteRetainedSizeStreamByInstance: MutationQuery;
+  readonly connectorInstancesDeleteSchedulerLastRunTimeByInstance: MutationQuery;
+  readonly connectorInstancesDeleteSearchIndexDirtyByInstance: MutationQuery;
+  readonly connectorInstancesDeleteSourceWebhookRunReceiptsByInstance: MutationQuery;
   readonly connectorInstancesDeleteSummaryEvidenceByConnectorInstance: MutationQuery;
+  readonly connectorInstancesDeleteSummaryEvidenceRepairChunkByInstance: MutationQuery;
+  readonly connectorInstancesDeleteTombstoneByBinding: MutationQuery;
   readonly connectorInstancesGetByBinding: ReadOneQuery;
   readonly connectorInstancesGetById: ReadOneQuery;
   readonly connectorInstancesGetTombstoneByBinding: ReadOneQuery;
+  readonly connectorInstancesGetTombstoneByConnectionId: ReadOneQuery;
   readonly connectorInstancesInsert: MutationQuery;
   readonly connectorInstancesInsertTombstone: MutationQuery;
   readonly connectorInstancesListActiveByOwnerConnector: ReadManyQuery;
@@ -325,6 +338,7 @@ export interface ReferenceQueryRegistry extends Readonly<Record<string, Register
   readonly controllerMergeRunHistoryBatchFacts: MutationQuery;
   readonly controllerListSchedules: SmallEnumerationQuery;
   readonly controllerMergeRunHistoryCollectionRate: MutationQuery;
+  readonly controllerResetConnectorStateByInstance: MutationQuery;
   readonly controllerStartRunHistory: MutationQuery;
   readonly controllerUpdateSchedule: MutationQuery;
   readonly controllerUpdateScheduleEnabled: MutationQuery;
@@ -453,6 +467,7 @@ export interface ReferenceQueryRegistry extends Readonly<Record<string, Register
   readonly searchIndexCountByStream: ReadOneQuery;
   // Lexical retrieval — FTS5 index maintenance.
   readonly searchIndexDeleteByRecordKey: MutationQuery;
+  readonly searchIndexDeleteByRowid: MutationQuery;
   readonly searchIndexDeleteByStream: MutationQuery;
   // Search — scope-keyed (connector_instance_id, stream) dirty flag for
   // deferred lexical+semantic index maintenance.
@@ -461,8 +476,15 @@ export interface ReferenceQueryRegistry extends Readonly<Record<string, Register
   readonly searchIndexDirtyGetByScope: ReadOneQuery;
   readonly searchIndexDirtyListDirty: IterateQuery;
   readonly searchIndexDirtyMarkDirty: MutationQuery;
+  readonly searchIndexDirtyPark: MutationQuery;
+  readonly searchIndexDirtyRearm: MutationQuery;
+  readonly searchIndexDirtyRecordEvidence: MutationQuery;
   readonly searchIndexDirtyRecordFailure: MutationQuery;
   readonly searchIndexInsertRow: MutationQuery;
+  readonly searchIndexPageAfterRowid: ReadManyQuery;
+  readonly searchIndexPageByRecordKeysAfterRowid: ReadManyQuery;
+  readonly searchIndexRowByIdentity: ReadOneQuery;
+  readonly searchIndexRowsByRecordKeys: ReadManyQuery;
   readonly searchMetaDeleteByStream: MutationQuery;
   // Lexical retrieval — backfill drift detection metadata.
   readonly searchMetaExistsByStream: ReadOneQuery;
@@ -472,14 +494,13 @@ export interface ReferenceQueryRegistry extends Readonly<Record<string, Register
   readonly searchRecordsCountIndexableTextValues: ReadOneQuery;
   readonly searchRecordsCountNonDeleted: ReadOneQuery;
   // Lexical retrieval — record paging for backfill scans + counts.
+  readonly searchRecordsLiveKeysByRecordKeys: ReadManyQuery;
   readonly searchRecordsPageNonDeleted: ReadManyQuery;
   readonly searchSemanticBlobCountAll: ReadOneQuery;
   readonly searchSemanticBlobCountByScope: ReadOneQuery;
   readonly searchSemanticBlobDeleteByConnector: MutationQuery;
   readonly searchSemanticBlobDeleteByRecordAndStreamPrefix: MutationQuery;
   readonly searchSemanticBlobDeleteByScope: MutationQuery;
-  readonly searchSemanticBlobDeleteByStreamPrefix: MutationQuery;
-  readonly searchSemanticBlobListExistingKeysByStreamPrefix: ReadManyQuery;
   // Semantic retrieval — BLOB-flat vector store.
   readonly searchSemanticBlobUpsert: MutationQuery;
   readonly searchSemanticMetaDeleteAll: MutationQuery;
@@ -508,15 +529,12 @@ export interface ReferenceQueryRegistry extends Readonly<Record<string, Register
   readonly searchSemanticRowidDeleteByConnector: MutationQuery;
   readonly searchSemanticRowidDeleteByIdentity: MutationQuery;
   readonly searchSemanticRowidDeleteByScope: MutationQuery;
-  readonly searchSemanticRowidDeleteByStreamPrefix: MutationQuery;
   readonly searchSemanticRowidGetRowidByIdentity: ReadOneQuery;
   readonly searchSemanticRowidInsert: MutationQuery;
-  readonly searchSemanticRowidListExistingKeysByStreamPrefix: ReadManyQuery;
   readonly searchSemanticRowidPageByConnector: ReadManyQuery;
   // Semantic retrieval — sqlite-vec sidecar rowid mapping.
   readonly searchSemanticRowidPageByRecordAndStreamPrefix: ReadManyQuery;
   readonly searchSemanticRowidPageByScope: ReadManyQuery;
-  readonly searchSemanticRowidPageByStreamPrefix: ReadManyQuery;
   readonly searchSemanticSnapshotsDeleteAll: MutationQuery;
   readonly searchSemanticSnapshotsGetById: ReadOneQuery;
   // Semantic retrieval — opaque-cursor snapshots.
@@ -974,7 +992,12 @@ export function loadReferenceQueries(queryDir = QUERIES_DIR): ReferenceQueryRegi
     "spineSearchListRunSummariesByLike",
     // Lexical retrieval — FTS5 index maintenance.
     "searchIndexDeleteByRecordKey",
+    "searchIndexDeleteByRowid",
     "searchIndexInsertRow",
+    "searchIndexPageAfterRowid",
+    "searchIndexPageByRecordKeysAfterRowid",
+    "searchIndexRowsByRecordKeys",
+    "searchIndexRowByIdentity",
     "searchIndexDeleteByStream",
     "searchIndexCountByStream",
     // Lexical retrieval — backfill drift detection metadata.
@@ -984,6 +1007,7 @@ export function loadReferenceQueries(queryDir = QUERIES_DIR): ReferenceQueryRegi
     "searchMetaUpsertFingerprint",
     "searchMetaListStreamsForConnector",
     // Lexical retrieval — record paging for backfill scans + counts.
+    "searchRecordsLiveKeysByRecordKeys",
     "searchRecordsPageNonDeleted",
     "searchRecordsCountNonDeleted",
     "searchRecordsCountIndexableTextValues",
@@ -993,29 +1017,24 @@ export function loadReferenceQueries(queryDir = QUERIES_DIR): ReferenceQueryRegi
     // Semantic retrieval — BLOB-flat vector store.
     "searchSemanticBlobUpsert",
     "searchSemanticBlobDeleteByRecordAndStreamPrefix",
-    "searchSemanticBlobDeleteByStreamPrefix",
     "searchSemanticBlobDeleteByScope",
     "searchSemanticBlobDeleteByConnector",
     "searchSemanticBlobCountAll",
     "searchSemanticBlobCountByScope",
-    "searchSemanticBlobListExistingKeysByStreamPrefix",
     // Semantic retrieval — sqlite-vec virtual-table introspection.
     "searchSemanticVecGetTableSql",
     // Semantic retrieval — sqlite-vec sidecar rowid mapping.
     "searchSemanticRowidPageByRecordAndStreamPrefix",
-    "searchSemanticRowidPageByStreamPrefix",
     "searchSemanticRowidPageByScope",
     "searchSemanticRowidPageByConnector",
     "searchSemanticRowidGetRowidByIdentity",
     "searchSemanticRowidInsert",
     "searchSemanticRowidDeleteByIdentity",
-    "searchSemanticRowidDeleteByStreamPrefix",
     "searchSemanticRowidDeleteByScope",
     "searchSemanticRowidDeleteByConnector",
     "searchSemanticRowidDeleteAll",
     "searchSemanticRowidCountAll",
     "searchSemanticRowidCountByScope",
-    "searchSemanticRowidListExistingKeysByStreamPrefix",
     // Semantic retrieval — drift detection metadata.
     "searchSemanticMetaExistsByStream",
     "searchSemanticMetaDeleteByStream",

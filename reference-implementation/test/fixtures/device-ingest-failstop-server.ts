@@ -6,7 +6,7 @@ import { PassThrough, Writable } from "node:stream";
 
 import { closeDb } from "../../server/db.ts";
 import { startServer } from "../../server/index.ts";
-import { closePostgresStorage, initPostgresStorage, postgresQuery } from "../../server/postgres-storage.ts";
+import { closePostgresStorage, initPostgresStorage } from "../../server/postgres-storage.ts";
 import { makeLocalTransformerBackend } from "../../server/search-semantic.ts";
 
 class NeverExitingTransformerChild extends EventEmitter {
@@ -124,17 +124,9 @@ const server = await startServer({
   startClientEventDeliveryWorker: false,
 });
 
-const manifestResult = await postgresQuery("SELECT manifest FROM connectors WHERE connector_id = $1", ["codex"]);
-const manifest =
-  typeof manifestResult.rows[0]?.manifest === "string"
-    ? JSON.parse(manifestResult.rows[0].manifest)
-    : manifestResult.rows[0]?.manifest;
-const messages = manifest.streams.find((stream: { name: string }) => stream.name === "messages");
-messages.query.search.lexical_fields = ["content"];
-messages.query.search.semantic_fields = ["content"];
-const manifestJson = JSON.stringify(manifest);
-await postgresQuery("UPDATE connectors SET manifest = $1::jsonb WHERE connector_id = $2", [manifestJson, "codex"]);
-
+// No codex manifest edit here: startup registers only verified installs, and
+// device enrollment writes the pinned codex Collection Profile, whose messages
+// stream already declares `content` as a lexical and semantic field.
 process.stdout.write(`${JSON.stringify({ asPort: server.asPort, mode, ready: true })}\n`);
 
 async function shutdown() {

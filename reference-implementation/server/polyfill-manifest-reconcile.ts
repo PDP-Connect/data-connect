@@ -11,10 +11,16 @@
  * declarations (and keep breaking records pagination).
  *
  * Scope:
- *   - Only first-party manifests under
- *     `packages/polyfill-connectors/manifests/` are reconciled. Connectors
- *     that are NOT in this shipped set are left alone so user-custom
- *     manifests are never overwritten.
+ *   - The shipped set is the manifest of every active connector install whose
+ *     recorded bytes still verify (`listVerifiedActiveConnectors`). Connectors
+ *     that are NOT installed are left alone so user-custom manifests are never
+ *     overwritten, and an install that fails verification is reported and
+ *     skipped, never read.
+ *   - The verified catalog installer also registers each manifest when it
+ *     installs it; this pass repairs persisted rows that drifted from the
+ *     installed bytes afterwards.
+ *   - `manifestsDir` replaces the installed set with a directory of manifest
+ *     JSON files, for tests and one-off operator repairs.
  *   - Comparison is a deep structural equality against the persisted
  *     manifest; any difference triggers a fresh `registerConnector()`
  *     call, which is idempotent and runs the full validation + lexical
@@ -28,6 +34,11 @@ import type { Dirent } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  type ConnectorInstallStore,
+  createConnectorInstallStore,
+  listVerifiedActiveConnectors,
+} from "./connector-install/index.ts";
 
 const JSON_EXTENSION_RE = /\.json$/;
 
@@ -63,17 +74,6 @@ const deleteAllRecordsForConnectorTyped: DeleteAllRecordsForConnector =
   deleteAllRecordsForConnector as DeleteAllRecordsForConnector;
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-
-/**
- * Resolve the shipped polyfill-connectors manifests directory: the
- * `@pdpp/polyfill-connectors` package's own `manifests/` directory,
- * resolved via the package's `./manifests` export so this reference never
- * hardcodes (or drifts from) that package's on-disk layout.
- */
-export function defaultPolyfillManifestsDir(): string {
-  const manifestRegistryUrl = import.meta.resolve("@pdpp/polyfill-connectors/manifests");
-  return join(dirname(fileURLToPath(manifestRegistryUrl)), "..", "manifests");
-}
 
 /**
  * Resolve the shipped reference-fixture manifests directory. These are
@@ -145,7 +145,10 @@ export interface ReconcileOptions {
   enabled?: boolean;
   /** Register shipped unlisted manifests for an explicit UAT deployment. */
   includeUnlisted?: boolean;
+  /** Install store whose verified active records are the shipped set. */
+  installStore?: ConnectorInstallStore;
   log?: (line: string) => void;
+  /** Reconcile this directory of manifest JSON files instead of the installed set. */
   manifestsDir?: string;
   /**
    * Directory containing the reference-fixture manifests served by the
@@ -165,7 +168,7 @@ interface ManifestFingerprint {
 /**
  * Cheap, stable summary of a manifest's identity for shape comparison:
  * `(version, sorted-stream-names)`. Strong enough to distinguish the
- * shipped reference fixture from the shipped polyfill manifest for
+ * shipped reference fixture from an optional catalog manifest for
  * connectors that share a `connector_id` (spotify/github/reddit), and
  * cheap enough to compute on every reconcile pass.
  *
@@ -350,18 +353,23 @@ async function applyShippedManifest(
 interface EntryContext {
   includeUnlisted: boolean;
   log: ReconcileLog;
-  manifestsDir: string;
   referenceFixtureFingerprints: Map<string, ManifestFingerprint>;
 }
 
+/** One shipped manifest to reconcile: a name for logs and a loader. */
+interface ShippedManifestSource {
+  readonly entryName: string;
+  readonly load: () => Promise<PolyfillManifest | null>;
+}
+
 /**
- * Decide whether the persisted→shipped diff represents the narrow
- * fixture→polyfill transition that requires record invalidation.
+ * Decide whether the persisted→catalog diff represents the narrow
+ * fixture→catalog transition that requires record invalidation.
  *
  * The criterion is conservative: invalidation fires only when the
  * persisted manifest's `(version, sorted-stream-names)` fingerprint
  * matches the shipped reference-fixture manifest's fingerprint for the
- * same connector_id, AND the shipped polyfill manifest has a different
+ * same connector_id, AND the catalog manifest has a different
  * fingerprint. This is the exact shape of `pdpp seed`'s footprint, and
  * the only case where the persisted records were emitted by the seed
  * connector against fixture identities. Ordinary polyfill manifest
@@ -642,8 +650,9 @@ async function reconcileChangedManifestEntry(
   };
 }
 
-async function reconcileEntry(entryName: string, ctx: EntryContext): Promise<EntryDelta> {
-  const shipped = await loadShippedManifest(ctx.manifestsDir, entryName, ctx.log);
+async function reconcileEntry(source: ShippedManifestSource, ctx: EntryContext): Promise<EntryDelta> {
+  const { entryName } = source;
+  const shipped = await source.load();
   const loadedEntry = validateOrReconcileInvalidManifestEntry(shipped);
   if (loadedEntry.kind === "invalid") {
     return loadedEntry.delta;
@@ -674,9 +683,8 @@ async function reconcileEntry(entryName: string, ctx: EntryContext): Promise<Ent
     // are exercised (or explicitly promoted to listed=true via a future
     // manifest edit).
     //
-    // Safety: this branch only runs for files inside the first-party
-    // shipped manifests dir, so user-custom connectors are never
-    // auto-seeded by reconciliation. Registration is NOT schedule
+    // Safety: this branch only runs for manifests in the shipped set, so
+    // user-custom connectors are never auto-seeded by reconciliation. Registration is NOT schedule
     // enablement — schedules still require an explicit operator action,
     // and the scheduler eligibility filter (refresh_policy.background_safe)
     // continues to gate background runs independently.
@@ -687,18 +695,67 @@ async function reconcileEntry(entryName: string, ctx: EntryContext): Promise<Ent
     return reconcileUnchangedManifestEntry();
   }
   // Default path: the manifest changed shape but the diff is ordinary
-  // polyfill evolution (description, semantic_fields, schema additions,
+  // catalog evolution (description, semantic_fields, schema additions,
   // stream views). Re-register without touching records — owner data is
   // preserved across manifest fixes.
   //
   // Narrow exception: when the persisted manifest fingerprint matches a
-  // reference-fixture fingerprint AND the shipped polyfill fingerprint
+  // reference-fixture fingerprint AND the catalog fingerprint
   // is different, the records currently in the RS were emitted by the
   // seed connector against fixture identities (Taylor Swift, Adele,
   // seedowner/personal-site, ...). Those records are safe to drop and
   // unsafe to advertise as fresh real data. Spec:
   // openspec/changes/reconcile-invalidates-stale-records/.
   return reconcileChangedManifestEntry(loadedEntry.shipped, persisted, connectorId, entryName, ctx);
+}
+
+async function directoryManifestSources(
+  manifestsDir: string,
+  log: ReconcileLog
+): Promise<{ entries: ShippedManifestSource[] } | { disabled_reason: string }> {
+  // readdir's TS overload defaults the dirent buffer parameter to
+  // NonSharedBuffer. We pass the encoding explicitly so the result
+  // is typed as `Dirent<string>[]` (entry.name is a string).
+  let entries: Dirent<string>[];
+  try {
+    entries = await readdir(manifestsDir, { encoding: "utf8", withFileTypes: true });
+  } catch (err) {
+    log(`[manifest-reconcile] manifests dir unavailable: ${errorMessage(err)}`);
+    return { disabled_reason: "manifests_dir_unavailable" };
+  }
+  return {
+    entries: entries
+      .filter((entry) => entry.isFile() && JSON_EXTENSION_RE.test(entry.name))
+      .map((entry) => ({
+        entryName: entry.name,
+        load: () => loadShippedManifest(manifestsDir, entry.name, log),
+      })),
+  };
+}
+
+async function installedManifestSources(
+  store: ConnectorInstallStore,
+  log: ReconcileLog
+): Promise<{ entries: ShippedManifestSource[] } | { disabled_reason: string }> {
+  let listed: Awaited<ReturnType<typeof listVerifiedActiveConnectors>>;
+  try {
+    listed = await listVerifiedActiveConnectors(store);
+  } catch (err) {
+    log(`[manifest-reconcile] connector install store unavailable: ${errorMessage(err)}`);
+    return { disabled_reason: "install_store_unavailable" };
+  }
+  const invalid = listed.invalid.map(({ connectorId, reason }) => ({
+    entryName: connectorId,
+    load: () => {
+      log(`[manifest-reconcile] skipping unverified install ${connectorId}: ${reason}`);
+      return Promise.resolve(null);
+    },
+  }));
+  const verified = listed.verified.map((record) => ({
+    entryName: `${record.connectorId}@${record.digest}`,
+    load: () => Promise.resolve(record.manifest as PolyfillManifest),
+  }));
+  return { entries: [...verified, ...invalid] };
 }
 
 /**
@@ -709,7 +766,8 @@ export async function reconcilePolyfillManifests(opts: ReconcileOptions = {}): P
   const {
     enabled = true,
     includeUnlisted = false,
-    manifestsDir = defaultPolyfillManifestsDir(),
+    installStore,
+    manifestsDir,
     referenceFixturesDir = defaultReferenceFixturesDir(),
     log = () => {
       /* default no-op logger */
@@ -724,29 +782,21 @@ export async function reconcilePolyfillManifests(opts: ReconcileOptions = {}): P
     return { ...EMPTY_SUMMARY, disabled_reason: "env_skip" };
   }
 
-  // readdir's TS overload defaults the dirent buffer parameter to
-  // NonSharedBuffer. We pass the encoding explicitly so the result
-  // is typed as `Dirent<string>[]`, which is what the rest of this
-  // function operates on (entry.name is a string).
-  let entries: Dirent<string>[];
-  try {
-    entries = await readdir(manifestsDir, { encoding: "utf8", withFileTypes: true });
-  } catch (err) {
-    log(`[manifest-reconcile] manifests dir unavailable: ${errorMessage(err)}`);
-    return { ...EMPTY_SUMMARY, disabled_reason: "manifests_dir_unavailable" };
+  const sources = manifestsDir
+    ? await directoryManifestSources(manifestsDir, log)
+    : await installedManifestSources(installStore ?? createConnectorInstallStore(), log);
+  if ("disabled_reason" in sources) {
+    return { ...EMPTY_SUMMARY, disabled_reason: sources.disabled_reason };
   }
 
   const referenceFixtureFingerprints = await loadReferenceFixtureFingerprints(referenceFixturesDir);
-  const ctx: EntryContext = { includeUnlisted, log, manifestsDir, referenceFixtureFingerprints };
+  const ctx: EntryContext = { includeUnlisted, log, referenceFixtureFingerprints };
   const summary: ReconcileSummary = { ...EMPTY_SUMMARY };
 
-  for (const entry of entries) {
-    if (!(entry.isFile() && JSON_EXTENSION_RE.test(entry.name))) {
-      continue;
-    }
+  for (const source of sources.entries) {
     summary.scanned += 1;
     // biome-ignore lint/performance/noAwaitInLoops: Work is intentionally sequential to preserve ordering and state transitions.
-    applyDelta(summary, await reconcileEntry(entry.name, ctx));
+    applyDelta(summary, await reconcileEntry(source, ctx));
   }
   return summary;
 }

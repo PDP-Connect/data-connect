@@ -4,6 +4,18 @@ import { act, renderHook } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { Platform } from "../types"
 
+describe("legacyPdppConnectionId", () => {
+  it("matches the stored legacy ids for built-in and URI connectors", async () => {
+    const { legacyPdppConnectionId } = await import("./useConnector")
+
+    expect(legacyPdppConnectionId("chatgpt-pdpp")).toBe("chatgpt-pdpp-owner")
+    expect(legacyPdppConnectionId("github-pdpp")).toBe("default")
+    expect(legacyPdppConnectionId("https://example.test/😀")).toBe(
+      "pdpp-ac793152-owner"
+    )
+  })
+})
+
 const mockInvoke = vi.fn()
 const mockDispatch = vi.fn()
 let currentRuns: Array<Record<string, unknown>> = []
@@ -205,6 +217,7 @@ describe("useConnector.startImport", () => {
           name: "Apple Health",
           filename: "apple-health-pdpp",
           runtime: "pdpp-network",
+          connectionId: "apple-health-pdpp-owner",
         },
         { importDirectory: "/private/imports/run-1" }
       )
@@ -214,7 +227,7 @@ describe("useConnector.startImport", () => {
       "start_installed_pdpp_connector_run",
       {
         request: {
-          runId: "apple-health-pdpp-1700000000000",
+          runId: expect.stringMatching(/^apple-health-pdpp-[0-9a-f]{8}-1700000000000$/),
           connectorId: "apple-health-pdpp",
           collectionMode: "incremental",
           streams: [],
@@ -245,6 +258,7 @@ describe("useConnector.startImport", () => {
           name: "GitHub",
           filename: "github-pdpp",
           runtime: "pdpp-network",
+          connectionId: "default",
         },
         { githubToken: "ghp_transient" }
       )
@@ -254,12 +268,12 @@ describe("useConnector.startImport", () => {
       "start_installed_pdpp_connector_run",
       {
         request: {
-          runId: "github-pdpp-1700000000000",
+          runId: expect.stringMatching(/^github-pdpp-[0-9a-f]{8}-1700000000000$/),
           connectorId: "github-pdpp",
           collectionMode: "incremental",
           streams: [],
           githubToken: "ghp_transient",
-          connectionId: null,
+          connectionId: "default",
           setupSecrets: null,
         },
       }
@@ -286,13 +300,14 @@ describe("useConnector.startImport", () => {
         ...TEST_PLATFORM,
         id: "github-pdpp",
         runtime: "pdpp-network",
+        connectionId: "default",
       })
     })
 
-    expect(returnedRunId).toBe("github-pdpp-1700000000000")
+    expect(returnedRunId).toMatch(/^github-pdpp-[0-9a-f]{8}-1700000000000$/)
     expect(startRun).toHaveBeenCalledWith(
       expect.objectContaining({
-        id: "github-pdpp-1700000000000",
+        id: expect.stringMatching(/^github-pdpp-[0-9a-f]{8}-1700000000000$/),
         status: "running",
       })
     )
@@ -311,6 +326,7 @@ describe("useConnector.startImport", () => {
           id: "chatgpt-pdpp",
           filename: "chatgpt-pdpp",
           runtime: "pdpp-network",
+          connectionId: "chatgpt-pdpp-owner",
         },
         {
           setupSecrets: {
@@ -350,6 +366,7 @@ describe("useConnector.startImport", () => {
         id: "anthropic-pdpp",
         filename: "anthropic-pdpp",
         runtime: "pdpp-network",
+        connectionId: "anthropic-pdpp-owner",
         setup: null,
       })
     })
@@ -376,11 +393,11 @@ describe("useConnector.startImport", () => {
       name: "Unbundled connector",
       filename: "not-bundled",
       runtime: "pdpp-network",
+      connectionId: "pdpp-uri-owner",
     }
     const connectionId = installedPdppConnectionId(platform)
 
-    expect(connectionId).toMatch(/^pdpp-[0-9a-f]{8}-owner$/)
-    expect(installedPdppConnectionId(platform)).toBe(connectionId)
+    expect(connectionId).toBe("pdpp-uri-owner")
 
     const { result } = renderHook(() => useConnector())
     await act(async () => {
@@ -389,7 +406,7 @@ describe("useConnector.startImport", () => {
 
     expect(startRun).toHaveBeenCalledWith(
       expect.objectContaining({
-        id: expect.stringMatching(/^pdpp-[0-9a-f]{8}-1700000000000$/),
+        id: expect.stringMatching(/^pdpp-[0-9a-f]{8}-[0-9a-f]{8}-1700000000000$/),
         platformId: platform.id,
       })
     )
@@ -397,11 +414,49 @@ describe("useConnector.startImport", () => {
       "start_installed_pdpp_connector_run",
       {
         request: expect.objectContaining({
-          runId: expect.stringMatching(/^pdpp-[0-9a-f]{8}-1700000000000$/),
+          runId: expect.stringMatching(/^pdpp-[0-9a-f]{8}-[0-9a-f]{8}-1700000000000$/),
           connectorId: platform.id,
           connectionId,
         }),
       }
+    )
+  })
+
+  it("keeps simultaneous runs distinct for two accounts of one connector", async () => {
+    mockInvoke.mockResolvedValue(undefined)
+    const { useConnector } = await import("./useConnector")
+    const { result } = renderHook(() => useConnector())
+    const platform = {
+      ...TEST_PLATFORM,
+      id: "chatgpt-pdpp",
+      runtime: "pdpp-network",
+    }
+
+    let firstRunId = ""
+    let secondRunId = ""
+    await act(async () => {
+      firstRunId = (await result.current.startImport({
+        ...platform,
+        connectionId: "chatgpt-account-one",
+      })) ?? ""
+      secondRunId = (await result.current.startImport({
+        ...platform,
+        connectionId: "chatgpt-account-two",
+      })) ?? ""
+    })
+
+    expect(firstRunId).not.toBe(secondRunId)
+    expect(mockInvoke).toHaveBeenCalledWith(
+      "start_installed_pdpp_connector_run",
+      expect.objectContaining({
+        request: expect.objectContaining({ connectionId: "chatgpt-account-one" }),
+      })
+    )
+    expect(mockInvoke).toHaveBeenCalledWith(
+      "start_installed_pdpp_connector_run",
+      expect.objectContaining({
+        request: expect.objectContaining({ connectionId: "chatgpt-account-two" }),
+      })
     )
   })
 
@@ -417,6 +472,7 @@ describe("useConnector.startImport", () => {
           id: "ynab-pdpp",
           filename: "ynab-pdpp",
           runtime: "pdpp-network",
+          connectionId: "ynab-pdpp-owner",
           setup: {
             modality: "static_secret",
             credentialCapture: {

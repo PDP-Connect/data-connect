@@ -101,6 +101,19 @@ test("isTopLevelSearchableStringField accepts plain and nullable string, rejects
   assert.equal(isTopLevelSearchableStringField(null), false);
 });
 
+test("semantic field declarations may span bounded repair pages", () => {
+  const fields = Array.from({ length: 501 }, (_, index) => `field_${index}`);
+  const properties = Object.fromEntries(fields.map((field) => [field, { type: "string" }]));
+  assert.doesNotThrow(() =>
+    validateConnectorManifest(
+      manifestWithStream({
+        query: { search: { semantic_fields: fields } },
+        schema: { properties: { id: { type: "string" }, ...properties } },
+      })
+    )
+  );
+});
+
 test("isReferenceCompatibleCursorSchema accepts numeric and date/date-time strings", () => {
   assert.equal(isReferenceCompatibleCursorSchema({ type: "integer" }), true);
   assert.equal(isReferenceCompatibleCursorSchema({ type: "number" }), true);

@@ -230,6 +230,41 @@ async function seedStaleLocalDeviceIdentity(
 }
 
 if (POSTGRES_URL) {
+  test("pre-column upgrade keeps new and local-device repair scopes eligible", async () => {
+    await withTempDb(POSTGRES_URL, async (url) => {
+      await initPostgresStorage({ backend: "postgres", databaseUrl: url });
+      const pool = getPostgresPool();
+      await seedStaleLocalDeviceIdentity(pool, {
+        instanceId: "cin_boot_pre_column",
+        recordCount: 1,
+        sourceInstanceId: "src_a",
+      });
+      await pool.query(`INSERT INTO search_index_dirty
+        (connector_instance_id, connector_id, stream, marked_at, next_attempt_at)
+        VALUES ('cin_legacy_delayed', 'codex', 'messages', '2026-01-01T00:00:00.000Z', '2099-01-01T00:00:00.000Z')`);
+      await pool.query("ALTER TABLE search_index_dirty DROP COLUMN operator_parked");
+
+      await bootstrapPostgresSchema();
+      await pool.query(`INSERT INTO search_index_dirty
+        (connector_instance_id, connector_id, stream, marked_at)
+        VALUES ('cin_future_enqueue', 'codex', 'messages', '2026-01-01T00:00:00.000Z')`);
+      const states = await pool.query<{ connector_instance_id: string; operator_parked: number | null }>(
+        "SELECT connector_instance_id, operator_parked FROM search_index_dirty ORDER BY connector_instance_id"
+      );
+      assert.deepEqual(states.rows, [
+        { connector_instance_id: "cin_boot_pre_column", operator_parked: 0 },
+        { connector_instance_id: "cin_future_enqueue", operator_parked: 0 },
+        { connector_instance_id: "cin_legacy_delayed", operator_parked: null },
+      ]);
+      const { listDirtySearchIndexScopes } = await import("../server/stores/search-index-dirty-store.ts");
+      assert.deepEqual(
+        (await listDirtySearchIndexScopes(100)).map((scope) => scope.connectorInstanceId).sort(),
+        ["cin_boot_pre_column", "cin_future_enqueue"],
+        "both migration and future enqueues must be automatically repairable after upgrade"
+      );
+    });
+  });
+
   test("first boot canonicalizes authoritative rows and records a complete receipt", async () => {
     await withTempDb(POSTGRES_URL, async (url) => {
       await initPostgresStorage({ backend: "postgres", databaseUrl: url });

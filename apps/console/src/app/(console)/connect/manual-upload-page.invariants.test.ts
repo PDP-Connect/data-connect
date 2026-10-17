@@ -26,9 +26,8 @@ const ACCEPT_ATTR = /accepted_file_names/;
 const ACCEPT_EXTENSIONS = /accepted_file_extensions/;
 const SIZE_PREFLIGHT = /max_file_bytes/;
 const HELP_URL = /help_url/;
-const NEW_TAB = /target="_blank"/;
 const NEW_TAB_COPY = /in a new tab/;
-const NOREFERRER = /rel="noreferrer"/;
+const OPENS_VIA_SYSTEM_BROWSER = /<OpenExternalLink/;
 const SECURITY_BOUNDARY_COPY = /stored for this source and is not exposed to connected apps or clients/i;
 const NO_CONNECTOR_BRANCH = /connectorId\s*===/;
 const NO_PROVIDER_COPY = /\bGoogle\b|\bTimeline\b|\bMaps\b/i;
@@ -38,7 +37,7 @@ const REQUIRE_ACCESS = /await requireDashboardAccess\(/;
 const PREVIEW_ONLY_COPY = /Preview only/;
 const IMPORT_FILE_COPY = /Import file/;
 const OPTIONAL_PREVIEW_COPY = /Preview checks one file/;
-const WHAT_PDPP_FOUND_COPY = /What PDPP found/;
+const WHAT_DATACONNECT_FOUND_COPY = /What DataConnect found/;
 const TARGET_CHOICE_COPY = /Create a new source for these files/;
 const EXISTING_SOURCE_COPY = /Add these files to an existing source/;
 const LABEL_INPUT = /name=\{connectionName\.name\}/;
@@ -80,13 +79,16 @@ test("manual-upload form imports directly and offers preview without connector-s
   assert.match(src, ACCEPT_EXTENSIONS);
   assert.match(src, SIZE_PREFLIGHT);
   assert.match(src, HELP_URL);
-  assert.match(src, NEW_TAB);
+  assert.match(
+    src,
+    OPENS_VIA_SYSTEM_BROWSER,
+    "help_url must route through OpenExternalLink, not a bare <a>, so Tauri opens it in the system browser instead of the webview"
+  );
   assert.match(src, NEW_TAB_COPY);
-  assert.match(src, NOREFERRER);
   assert.match(src, PREVIEW_ONLY_COPY);
   assert.match(src, IMPORT_FILE_COPY);
   assert.match(src, OPTIONAL_PREVIEW_COPY);
-  assert.match(src, WHAT_PDPP_FOUND_COPY);
+  assert.match(src, WHAT_DATACONNECT_FOUND_COPY);
   assert.match(src, TARGET_CHOICE_COPY);
   assert.match(src, EXISTING_SOURCE_COPY);
   assert.match(src, LABEL_INPUT);

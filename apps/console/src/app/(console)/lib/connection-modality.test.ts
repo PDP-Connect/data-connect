@@ -16,9 +16,9 @@ import assert from "node:assert/strict";
 import { readdir, readFile } from "node:fs/promises";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { resolveCommittedManifestsDirForTests } from "./connector-manifests-dir.ts";
 import {
   BROWSER_BOUND_CONNECTORS,
-  enrollmentKeyForCanonicalKey,
   isBrowserBoundConnector,
   isBrowserSessionBoundConnection,
   isSupportedBrowserCollectorConnector,
@@ -27,13 +27,13 @@ import {
   SUPPORTED_LOCAL_COLLECTOR_CONNECTORS,
 } from "./connection-modality.ts";
 
-const COLLECTOR_RUN_CONNECTORS_LITERAL_RE = /COLLECTOR_RUN_CONNECTORS\s*=\s*\[([^\]]*)\]/;
-const SURROUNDING_QUOTES_RE = /^["']|["']$/g;
-
-test("supported local-collector set is exactly claude_code, codex, google_takeout, imessage, apple_photos, google_messages, and signal", () => {
+test("supported local-collector set is exactly claude_code, codex, google_takeout, imessage, apple_photos, and google_messages", () => {
+  // signal is intentionally excluded: its data-connect local-collector
+  // support is deferred to a later, separately-gated PR (see the doc comment
+  // on LOCAL_COLLECTOR_DEFINITIONS in collector-registry.ts).
   assert.deepEqual(
     [...SUPPORTED_LOCAL_COLLECTOR_CONNECTORS],
-    ["claude_code", "codex", "google_takeout", "imessage", "apple_photos", "google_messages", "signal"]
+    ["claude_code", "codex", "google_takeout", "imessage", "apple_photos", "google_messages"]
   );
 });
 
@@ -50,31 +50,19 @@ test("supported browser-collector set is derived from browser-bound production r
   ]);
 });
 
-test("supported set matches the enrollment form's pinned COLLECTOR_RUN_CONNECTORS literal", async () => {
-  // The enrollment form keeps a literal `COLLECTOR_RUN_CONNECTORS` array that
-  // `enrollment-form.consistency.test.ts` pins. This module must stay in sync so
-  // the records-list picker never offers a connector the enroll surface doesn't.
-  //
-  // The form's literal uses each connector's ENROLLMENT key (what actually
-  // gets passed to `--connector`, matching LOCAL_COLLECTOR_DEFINITIONS'
-  // underscore-form `connector_id`), while SUPPORTED_LOCAL_COLLECTOR_CONNECTORS
-  // holds each connector's CANONICAL key (manifest-derived, hyphenated for
-  // claude-code/google-takeout) — so compare through enrollmentKeyForCanonicalKey
-  // rather than raw string equality.
+test("supported set matches the enrollment form's imported connector list", async () => {
+  // The enrollment form imports its connector list directly from
+  // SUPPORTED_LOCAL_COLLECTOR_CONNECTORS (via connection-modality.ts) rather
+  // than pinning a separate literal, so the two cannot drift silently.
   const formSrc = await readFile(
     fileURLToPath(new URL("../device-exporters/enrollment-form.tsx", import.meta.url)),
     "utf8"
   );
-  const match = formSrc.match(COLLECTOR_RUN_CONNECTORS_LITERAL_RE);
-  assert.ok(match, "enrollment form must declare COLLECTOR_RUN_CONNECTORS");
-  const formConnectors = (match[1] ?? "")
-    .split(",")
-    .map((entry) => entry.trim().replace(SURROUNDING_QUOTES_RE, ""))
-    .filter(Boolean);
-  const expectedEnrollmentKeys = [...SUPPORTED_LOCAL_COLLECTOR_CONNECTORS].map((key) =>
-    enrollmentKeyForCanonicalKey(key)
+  assert.match(
+    formSrc,
+    /import \{ SUPPORTED_LOCAL_COLLECTOR_CONNECTORS as COLLECTOR_RUN_CONNECTORS \} from "\.\.\/lib\/connection-modality\.ts";/,
+    "enrollment form must import its connector list from SUPPORTED_LOCAL_COLLECTOR_CONNECTORS"
   );
-  assert.deepEqual(formConnectors, expectedEnrollmentKeys);
 });
 
 test("isSupportedLocalCollectorConnector narrows only the supported keys", () => {
@@ -85,7 +73,7 @@ test("isSupportedLocalCollectorConnector narrows only the supported keys", () =>
   assert.equal(isSupportedLocalCollectorConnector("imessage"), true);
   assert.equal(isSupportedLocalCollectorConnector("apple_photos"), true);
   assert.equal(isSupportedLocalCollectorConnector("google_messages"), true);
-  assert.equal(isSupportedLocalCollectorConnector("signal"), true);
+  assert.equal(isSupportedLocalCollectorConnector("signal"), false);
   assert.equal(isSupportedLocalCollectorConnector("amazon"), false);
   assert.equal(isSupportedLocalCollectorConnector("gmail"), false);
   assert.equal(isSupportedLocalCollectorConnector(""), false);
@@ -139,13 +127,12 @@ test("BROWSER_BOUND_CONNECTORS exactly matches the canonical keys of browser-bin
   // manifest declares that binding — no more (a falsely-suppressed Sync now),
   // no less (a dead button that returns). Pinning against the manifests keeps
   // this from drifting from the real connector bindings.
-  const repoRoot = new URL("../../../../../../", import.meta.url);
-  const manifestsDir = new URL("packages/polyfill-connectors/manifests/", repoRoot);
-  const files = await readdir(fileURLToPath(manifestsDir));
+  const manifestsDir = resolveCommittedManifestsDirForTests();
+  const files = await readdir(manifestsDir);
   const jsonFiles = files.filter((file) => file.endsWith(".json"));
   const manifests = await Promise.all(
     jsonFiles.map(async (file) => {
-      const raw = await readFile(fileURLToPath(new URL(file, manifestsDir)), "utf8");
+      const raw = await readFile(`${manifestsDir}/${file}`, "utf8");
       return JSON.parse(raw) as {
         connector_id?: string;
         runtime_requirements?: { bindings?: Record<string, unknown> | null } | null;

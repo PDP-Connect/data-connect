@@ -21,42 +21,135 @@ pub fn kill_process_group(pid: u32, signal: libc::c_int) {
     }
 }
 
-/// Kill any stale personal-server process from a previous run that is still
-/// holding a port. This prevents EADDRINUSE on startup after unclean exits.
-#[cfg(unix)]
-fn kill_stale_server_on_port(port: u16) {
-    use std::process::Command;
+/// Ports the legacy Personal Server prefers, in order, when no port is given.
+const PREFERRED_PERSONAL_SERVER_PORTS: [u16; 6] = [8080, 8081, 8082, 8083, 8084, 8085];
 
-    // Use lsof to find PIDs listening on this port
-    let output = match Command::new("lsof")
-        .args(["-ti", &format!("tcp:{}", port), "-sTCP:LISTEN"])
-        .output()
-    {
-        Ok(o) => o,
-        Err(e) => {
-            log::warn!("Failed to run lsof to check port {}: {}", port, e);
-            return;
-        }
-    };
+/// Run-lease label for the legacy Personal Server child.
+#[cfg(desktop)]
+pub(crate) const PERSONAL_SERVER_LEASE_LABEL: &str = "legacy-personal-server";
 
-    if !output.status.success() || output.stdout.is_empty() {
-        return; // No process on this port
+/// The legacy Personal Server is part of the legacy runtime only. In unified
+/// mode the managed reference implementation is the server, and a second one
+/// started from here would be a parallel runtime with no visible owner.
+fn ensure_legacy_runtime(unified_enabled: bool) -> Result<(), String> {
+    if unified_enabled {
+        return Err(
+            "start_personal_server belongs to the legacy runtime and is unavailable in unified \
+             mode. Set DATACONNECT_LEGACY_STACK=1 to run the legacy app."
+                .to_string(),
+        );
     }
+    Ok(())
+}
 
-    let pids_str = String::from_utf8_lossy(&output.stdout);
-    for pid_str in pids_str.split_whitespace() {
-        if let Ok(pid) = pid_str.parse::<i32>() {
-            log::warn!(
-                "Found stale process {} on port {}, sending SIGKILL",
-                pid,
-                port
-            );
-            unsafe {
-                libc::kill(pid, libc::SIGKILL);
-            }
-            // Brief wait for it to release the port
-            std::thread::sleep(std::time::Duration::from_millis(200));
+/// Pick the port to start on. `is_free` reports whether a port can be bound.
+///
+/// An occupied port is never evidence that its holder is ours or stale, so
+/// this only chooses among free ports. `Ok(None)` means every preferred port
+/// is taken and the caller should ask the OS for any free port. An explicit
+/// port that is taken is an error rather than something to clear.
+fn choose_personal_server_port(
+    explicit: Option<u16>,
+    is_free: impl Fn(u16) -> bool,
+) -> Result<Option<u16>, String> {
+    if let Some(port) = explicit {
+        if is_free(port) {
+            return Ok(Some(port));
         }
+        return Err(format!(
+            "Port {port} is in use by a process DataConnect does not own; not starting the \
+             Personal Server on it"
+        ));
+    }
+    for port in PREFERRED_PERSONAL_SERVER_PORTS {
+        if is_free(port) {
+            return Ok(Some(port));
+        }
+        log::info!("Port {port} is in use by a process DataConnect does not own; leaving it alone");
+    }
+    Ok(None)
+}
+
+/// Can the Personal Server bind `port`? It binds on all interfaces, so check
+/// both IPv4 and IPv6 loopback.
+fn personal_server_port_is_free(port: u16) -> bool {
+    std::net::TcpListener::bind(("127.0.0.1", port)).is_ok()
+        && std::net::TcpListener::bind(("::1", port)).is_ok()
+}
+
+/// App-data directory holding the running Personal Server's run lease, so
+/// the stop paths, which receive no `AppHandle`, can revoke it.
+#[cfg(desktop)]
+static PERSONAL_SERVER_LEASE_ROOT: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+/// Reap a Personal Server that a previous, now-dead app session started and
+/// recorded in a run lease. This is the only process `start_personal_server`
+/// signals: ownership is proven by the lease's owner and child identities
+/// (see `run_lease::decide`), never by which process holds a port.
+#[cfg(desktop)]
+fn reap_recorded_personal_server_orphan(
+    app_data_dir: &std::path::Path,
+) -> Option<crate::run_lease::ReapDecision> {
+    let decision = crate::run_lease::reap_orphan_with_label(
+        app_data_dir,
+        PERSONAL_SERVER_LEASE_LABEL,
+        std::process::id() as i32,
+    );
+    if matches!(
+        decision,
+        Some(crate::run_lease::ReapDecision::Reaped { .. })
+    ) {
+        // Brief wait for it to release the port
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    decision
+}
+
+/// Record the spawned Personal Server so a later session can prove it owned
+/// this incarnation. A missing lease only costs cleanup on a later boot, so
+/// failure is logged, never returned.
+#[cfg(desktop)]
+fn publish_personal_server_lease(app_data_dir: &std::path::Path, pid: u32, port: u16) {
+    let pid = pid as i32;
+    let Some(started_at_ticks) = crate::run_lease::process_start_ticks(pid) else {
+        log::warn!("Could not read the Personal Server's start time; skipping its run lease");
+        return;
+    };
+    #[cfg(unix)]
+    let pgid = Some(unsafe { libc::getpgid(pid) }).filter(|pgid| *pgid > 0);
+    #[cfg(not(unix))]
+    let pgid = None;
+    let owner_pid = std::process::id() as i32;
+    let lease = crate::run_lease::RunLease {
+        label: PERSONAL_SERVER_LEASE_LABEL.to_string(),
+        pid,
+        pgid,
+        started_at_ticks,
+        owner_pid,
+        owner_started_at_ticks: crate::run_lease::process_start_ticks(owner_pid).unwrap_or(0),
+        port: Some(port),
+    };
+    match lease.publish(app_data_dir) {
+        Ok(()) => {
+            if let Ok(mut root) = PERSONAL_SERVER_LEASE_ROOT.lock() {
+                *root = Some(app_data_dir.to_path_buf());
+            }
+        }
+        Err(error) => log::warn!("Failed to publish the Personal Server run lease: {error}"),
+    }
+}
+
+#[cfg(desktop)]
+fn revoke_personal_server_lease() {
+    let Some(root) = PERSONAL_SERVER_LEASE_ROOT
+        .lock()
+        .ok()
+        .and_then(|mut root| root.take())
+    else {
+        return;
+    };
+    if let Err(error) = crate::run_lease::RunLease::revoke(&root, PERSONAL_SERVER_LEASE_LABEL) {
+        log::warn!("Failed to revoke the Personal Server run lease: {error}");
     }
 }
 
@@ -131,6 +224,11 @@ pub async fn start_personal_server(
     use std::io::{BufRead, BufReader};
     use std::process::{Command, Stdio};
 
+    #[cfg(desktop)]
+    ensure_legacy_runtime(crate::unified::is_enabled())?;
+    #[cfg(not(desktop))]
+    ensure_legacy_runtime(false)?;
+
     // Clear the stopping flag from any previous stop
     if let Ok(mut s) = PERSONAL_SERVER_STOPPING.lock() {
         *s = false;
@@ -172,44 +270,28 @@ pub async fn start_personal_server(
         return Err(error);
     }
 
-    // Kill any stale personal-server from a previous unclean exit
-    #[cfg(unix)]
-    {
-        let ports_to_check: &[u16] = if let Some(p) = port {
-            &[p]
-        } else {
-            &[8080, 8081, 8082, 8083, 8084, 8085]
-        };
-        for &p in ports_to_check {
-            kill_stale_server_on_port(p);
-        }
+    // Reap only a Personal Server a dead session recorded as its own. A
+    // process merely listening on a preferred port is left alone.
+    #[cfg(desktop)]
+    let lease_root = app.path().app_data_dir().ok();
+    #[cfg(desktop)]
+    if let Some(root) = lease_root.as_deref() {
+        let _ = reap_recorded_personal_server_orphan(root);
     }
 
-    let port = if let Some(p) = port {
-        p
-    } else {
-        // Find a free port, preferring 8080
-        let preferred = [8080u16, 8081, 8082, 8083, 8084, 8085];
-        let mut found = None;
-        for p in preferred {
-            // Check both IPv4 and IPv6 — the PS binds on :::PORT (all interfaces)
-            if std::net::TcpListener::bind(("127.0.0.1", p)).is_ok()
-                && std::net::TcpListener::bind(("::1", p)).is_ok()
-            {
-                found = Some(p);
-                break;
-            }
+    let port = match choose_personal_server_port(port, personal_server_port_is_free) {
+        Ok(Some(p)) => p,
+        Ok(None) => {
+            // Bind to port 0 to get any free port
+            let listener = std::net::TcpListener::bind("127.0.0.1:0")
+                .map_err(|e| { clear_starting(); format!("No free port available: {}", e) })?;
+            listener.local_addr()
+                .map_err(|e| { clear_starting(); format!("Failed to get port: {}", e) })?
+                .port()
         }
-        match found {
-            Some(p) => p,
-            None => {
-                // Bind to port 0 to get any free port
-                let listener = std::net::TcpListener::bind("127.0.0.1:0")
-                    .map_err(|e| { clear_starting(); format!("No free port available: {}", e) })?;
-                listener.local_addr()
-                    .map_err(|e| { clear_starting(); format!("Failed to get port: {}", e) })?
-                    .port()
-            }
+        Err(error) => {
+            clear_starting();
+            return Err(error);
         }
     };
     log::info!("Starting personal server on port {}", port);
@@ -218,6 +300,10 @@ pub async fn start_personal_server(
     let mut env_vars: Vec<(&str, String)> = vec![
         ("PORT", port.to_string()),
         ("NODE_ENV", "production".to_string()),
+        ("PDPP_BIND_HOST", "127.0.0.1".to_string()),
+        ("PDPP_REFERENCE_ORIGIN", format!("http://127.0.0.1:{}", port)),
+        ("PDPP_TRUSTED_HOSTS", "127.0.0.1,localhost,::1".to_string()),
+        ("PDPP_TRUSTED_PROXIES", String::new()),
     ];
     if let Some(ref sig) = master_key_signature {
         env_vars.push(("VANA_MASTER_KEY_SIGNATURE", sig.clone()));
@@ -386,6 +472,11 @@ pub async fn start_personal_server(
                 .map_err(|e| { clear_starting(); format!("Failed to spawn personal server (dev): {}", e) })?
         }
     };
+
+    #[cfg(desktop)]
+    if let Some(root) = lease_root.as_deref() {
+        publish_personal_server_lease(root, child.id(), port);
+    }
 
     let stdout = child.stdout.take().ok_or_else(|| { clear_starting(); "Failed to get stdout".to_string() })?;
     let stderr = child.stderr.take().ok_or_else(|| { clear_starting(); "Failed to get stderr".to_string() })?;
@@ -608,6 +699,8 @@ pub async fn stop_personal_server() -> Result<(), String> {
             log::info!("Personal server force-killed");
         }
     }
+    #[cfg(desktop)]
+    revoke_personal_server_lease();
 
     let mut port_guard = PERSONAL_SERVER_PORT.lock().map_err(|e| e.to_string())?;
     let old_port = *port_guard;
@@ -722,6 +815,8 @@ pub fn cleanup_personal_server() {
             for _ in 0..10 {
                 if let Ok(Some(_)) = child.try_wait() {
                     log::info!("Personal server exited on cleanup");
+                    #[cfg(desktop)]
+                    revoke_personal_server_lease();
                     return;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(100));
@@ -736,6 +831,165 @@ pub fn cleanup_personal_server() {
             }
             let _ = child.wait();
             log::info!("Personal server force-killed on cleanup");
+            #[cfg(desktop)]
+            revoke_personal_server_lease();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unified_mode_rejects_the_legacy_personal_server() {
+        let error = ensure_legacy_runtime(true).expect_err("unified mode must reject");
+        assert!(error.contains("DATACONNECT_LEGACY_STACK=1"), "{error}");
+        assert_eq!(ensure_legacy_runtime(false), Ok(()));
+    }
+
+    #[test]
+    fn an_occupied_preferred_port_is_skipped_not_cleared() {
+        let occupied = [8080u16, 8081];
+        let chosen = choose_personal_server_port(None, |port| !occupied.contains(&port));
+        assert_eq!(chosen, Ok(Some(8082)));
+    }
+
+    #[test]
+    fn every_preferred_port_occupied_falls_back_to_any_free_port() {
+        assert_eq!(choose_personal_server_port(None, |_| false), Ok(None));
+    }
+
+    #[test]
+    fn an_occupied_explicit_port_is_reported_not_cleared() {
+        let error = choose_personal_server_port(Some(8080), |_| false)
+            .expect_err("an occupied explicit port must be an error");
+        assert!(error.contains("8080"), "{error}");
+        assert_eq!(choose_personal_server_port(Some(8080), |_| true), Ok(Some(8080)));
+    }
+
+    /// Before this module stopped killing by port, start-up ran `lsof` on
+    /// the preferred ports and SIGKILLed every listener it found. Pin that
+    /// no such path remains in the production half of this file. The test
+    /// module is cut off first so this test's own literals cannot match.
+    #[test]
+    fn production_code_has_no_port_based_kill() {
+        let source = include_str!("server.rs");
+        let production = source
+            .split("#[cfg(test)]\nmod tests {")
+            .next()
+            .expect("source text");
+        assert!(production.len() < source.len(), "the test-module marker must be found");
+        for forbidden in ["\"lsof\"", "sTCP:LISTEN", "\"fuser\""] {
+            assert!(
+                !production.contains(forbidden),
+                "production code must not find processes to kill by port: {forbidden}"
+            );
+        }
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    mod leases {
+        use super::super::*;
+        use crate::run_lease::{process_start_ticks, ReapDecision, RunLease};
+        use std::process::{Child, Command, Stdio};
+
+        struct Sleeper(Child);
+
+        impl Drop for Sleeper {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+
+        fn spawn_sleeper() -> Sleeper {
+            Sleeper(
+                Command::new("sleep")
+                    .arg("300")
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .expect("spawn a test process"),
+            )
+        }
+
+        /// A lease as a dead app session would have left it: owner pid 1
+        /// with a starttime that pid 1 does not have.
+        fn dead_session_lease(label: &str, child: &Child) -> RunLease {
+            let pid = child.id() as i32;
+            RunLease {
+                label: label.to_string(),
+                pid,
+                pgid: None,
+                started_at_ticks: process_start_ticks(pid).expect("child starttime"),
+                owner_pid: 1,
+                owner_started_at_ticks: u64::MAX,
+                port: Some(8080),
+            }
+        }
+
+        fn wait_for_exit(child: &mut Child) -> bool {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while std::time::Instant::now() < deadline {
+                if child.try_wait().ok().flatten().is_some() {
+                    return true;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            false
+        }
+
+        #[test]
+        fn no_lease_means_nothing_is_signalled() {
+            let directory = tempfile::tempdir().expect("temp app data");
+            assert_eq!(reap_recorded_personal_server_orphan(directory.path()), None);
+        }
+
+        #[test]
+        fn the_current_sessions_server_is_never_reaped() {
+            let directory = tempfile::tempdir().expect("temp app data");
+            let mut child = spawn_sleeper();
+            publish_personal_server_lease(directory.path(), child.0.id(), 8080);
+
+            assert_eq!(
+                reap_recorded_personal_server_orphan(directory.path()),
+                Some(ReapDecision::SkippedOwnerAlive)
+            );
+            assert!(child.0.try_wait().expect("poll child").is_none(), "must still run");
+
+            revoke_personal_server_lease();
+            assert_eq!(reap_recorded_personal_server_orphan(directory.path()), None);
+        }
+
+        #[test]
+        fn a_dead_sessions_recorded_server_is_reaped() {
+            let directory = tempfile::tempdir().expect("temp app data");
+            let mut child = spawn_sleeper();
+            let pid = child.0.id() as i32;
+            dead_session_lease(PERSONAL_SERVER_LEASE_LABEL, &child.0)
+                .publish(directory.path())
+                .expect("publish");
+
+            assert_eq!(
+                reap_recorded_personal_server_orphan(directory.path()),
+                Some(ReapDecision::Reaped { pid, pgid: None })
+            );
+            assert!(wait_for_exit(&mut child.0), "the recorded orphan must be dead");
+        }
+
+        #[test]
+        fn another_roles_orphan_is_left_to_its_owner() {
+            let directory = tempfile::tempdir().expect("temp app data");
+            let mut child = spawn_sleeper();
+            dead_session_lease("console", &child.0)
+                .publish(directory.path())
+                .expect("publish");
+
+            assert_eq!(reap_recorded_personal_server_orphan(directory.path()), None);
+            assert!(child.0.try_wait().expect("poll child").is_none(), "must still run");
+            assert!(RunLease::directory(directory.path()).join("console.json").exists());
         }
     }
 }

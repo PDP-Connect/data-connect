@@ -15,7 +15,9 @@
 // observations, and are not accepted as inputs here or anywhere else.
 //
 // There are deliberately no duration, budget, mutant-count, or admission
-// thresholds in this file. Scope is whatever the pull request touched.
+// thresholds in this file. Scope is whatever the pull request touched, unless
+// the workflow passes an attempt bound (`AttemptBound`) and the change set
+// exceeds it; then the scope is a recorded sample and the packet says so.
 //
 // "What the pull request touched" is measured in LINES, not files. Stryker's
 // `mutate` entries take a `path:startLine-endLine` form, so the diff's own hunk
@@ -115,6 +117,12 @@ export interface IntentPacket {
    * a pass nor a failure: no mutation evidence exists for such a revision.
    */
   readonly applicability: "applicable" | "not_applicable"
+  /**
+   * Whether `mutate` is the revision's whole scope or a bounded sample of it.
+   * See {@link AttemptBound}. A `partial` packet lists every deferred file in
+   * `excluded` with reason `deferred_by_attempt_bound`.
+   */
+  readonly completeness: Completeness
   /** SHA-256 over the canonical bytes of every field above. Derived, never supplied. */
   readonly intentDigest: string
 }
@@ -125,6 +133,46 @@ export type ExclusionReason =
   | "outside_cohort"
   | "test_file"
   | "excluded_tooling"
+  | "generated_source"
+  | "no_mutable_change"
+  | "deferred_by_attempt_bound"
+
+/**
+ * The most one attempt takes on, for a cohort whose every trial runs its whole
+ * test selection.
+ *
+ * The command runner reports no per-test coverage, so each mutant runs every
+ * selected test file. An attempt's cost is therefore roughly mutants times the
+ * selection's run time, and both grow with the change set. On PR #141, an
+ * integration merge of roughly 1,200 files, the reference cohort selected 158
+ * files (about 61,000 changed lines and 33,000 mutants) and over 300 test files
+ * whose single run takes about four minutes on the hosted runner -- hundreds of
+ * runner-hours, against a job limit of six. The dry run alone exceeded Stryker's five-minute
+ * dry-run limit on one attempt.
+ *
+ * Above the bound the attempt does not fail and does not pretend: it mutates a
+ * deterministic sample and records the rest as deferred. The bound is a
+ * property of the job's time limit, not of the code, and lives in the workflow
+ * beside that limit.
+ */
+export interface AttemptBound {
+  /** Changed statement lines handed to the engine; a proxy for mutant count. */
+  readonly maxChangedLines: number
+  /** Test files each trial runs; this sets the cost of every trial. */
+  readonly maxTests: number
+}
+
+export type Completeness =
+  | { readonly kind: "complete" }
+  | {
+      readonly kind: "partial"
+      readonly bound: AttemptBound
+      /** Orders the sample. The head commit, so each revision samples afresh. */
+      readonly sampleKey: string
+      readonly files: { readonly sampled: number; readonly total: number }
+      readonly changedLines: { readonly sampled: number; readonly total: number }
+      readonly tests: { readonly sampled: number; readonly total: number }
+    }
 
 /** One `git diff` name-status record, already parsed out of the NUL-delimited stream. */
 export interface DiffEntry {
@@ -512,7 +560,7 @@ export interface CohortDefinition {
 
 const PRODUCTION_SOURCE_EXTENSIONS = [".ts", ".tsx", ".mts", ".cts"]
 
-function isTestPath(path: string): boolean {
+export function isTestPath(path: string): boolean {
   const base = path.slice(path.lastIndexOf("/") + 1)
   return (
     /\.test\.[cm]?tsx?$/.test(base) ||
@@ -522,11 +570,42 @@ function isTestPath(path: string): boolean {
   )
 }
 
+/**
+ * Whether a path is a test FILE a runner executes, as opposed to a file that
+ * merely lives under a test directory.
+ *
+ * `isTestPath` answers "is this production source?" and is deliberately broad:
+ * a fixture or helper under `test/` is not production code and must never be
+ * mutated. Running a file is a narrower question. A cohort's own suite runs
+ * only `*.test.*` files -- reference-implementation discovery matches
+ * `.test.ts` names (`reference-implementation/scripts/run-tests-discovery.ts`)
+ * -- and a support file such as `test/fixtures/device-ingest-failstop-server.ts`
+ * is a child-process entrypoint that exits non-zero when started without the
+ * arguments its parent test passes. Selected because it sat under `test/`, three
+ * such fixtures ran as tests on PR #141, failed, and rejected the baseline.
+ */
+function isExecutableTestFile(path: string): boolean {
+  const base = path.slice(path.lastIndexOf("/") + 1)
+  return /\.test\.[cm]?tsx?$/.test(base)
+}
+
+function isGeneratedSource(path: string): boolean {
+  const base = path.slice(path.lastIndexOf("/") + 1)
+  return /\.generated\.[cm]?tsx?$/.test(base)
+}
+
 function isProductionSourceExtension(path: string): boolean {
   return (
     PRODUCTION_SOURCE_EXTENSIONS.some((extension) => path.endsWith(extension)) &&
     !path.endsWith(".d.ts")
   )
+}
+
+function isCohortTestPath(entryPath: string, cohort: CohortDefinition): boolean {
+  if (cohort.root !== ".") {
+    return entryPath.startsWith(`${cohort.root}/`)
+  }
+  return cohort.productionPrefixes.some((prefix) => entryPath.startsWith(prefix))
 }
 
 /**
@@ -568,6 +647,18 @@ export function classifyForCohort(
   if (!isProductionSourceExtension(entry.path)) {
     return { selected: false, reason: "not_production_source" }
   }
+  // A `*.generated.*` file is the output of a generator, not authored code: its
+  // authored source is the generator and the inputs it reads, and a fault
+  // there reaches this file only by regeneration. Mutating it asks whether the
+  // suite notices a hand-edit the file's own header forbids. It also cannot
+  // run: the drift check that pins the file
+  // (`reference-implementation/test/connector-registry-manifest-derivation.test.ts`)
+  // compares it byte-for-byte with a fresh regeneration, so Stryker's
+  // instrumented copy fails that check in the baseline and rejects it, as it did
+  // on PR #141.
+  if (isGeneratedSource(entry.path)) {
+    return { selected: false, reason: "generated_source" }
+  }
   return { selected: true }
 }
 
@@ -592,17 +683,66 @@ export function selectCohortTests(
     if (entry.status.startsWith("D")) {
       continue
     }
-    if (!isTestPath(entry.path) || !isProductionSourceExtension(entry.path)) {
+    if (!isExecutableTestFile(entry.path)) {
       continue
     }
-    // Test files live inside the cohort root but outside the production
-    // prefixes, so cohort membership is decided by the root here.
-    if (cohort.root !== "." && !entry.path.startsWith(`${cohort.root}/`)) {
+    // Non-root cohorts can keep tests beside their own root even when tests
+    // live outside production prefixes. Root cohorts share the repository root,
+    // so their tests must be narrowed by production prefix; otherwise the
+    // scripts cohort picks up client/reference tests that its Stryker config
+    // cannot honestly run for script mutants.
+    if (!isCohortTestPath(entry.path, cohort)) {
       continue
     }
     selected.push(toCohortRelative(entry.path, cohort.root))
   }
   return [...new Set(selected)].sort()
+}
+
+/**
+ * Whether a test belongs to a nested package that runs its tests its own way.
+ *
+ * A cohort's command runner executes one command for the whole selection, so
+ * every selected test has to be runnable by that one command. A vendored
+ * sub-package with its own `package.json` `test` script is not: it declares a
+ * different contract. `vendor/brand-react` runs
+ * `node --import tsx --import ./css-stub-register.ts` because its tests import
+ * `.tsx` components which in turn `import "./components.css"` -- two loaders the
+ * cohort command does not carry, and would have to adopt wholesale to run these.
+ *
+ * Such a test is not part of the cohort's suite either: reference-implementation
+ * discovery walks `test/` only (`scripts/run-tests.ts:57`), so these files never
+ * run in the cohort's own test job. They reached the baseline solely because the
+ * revision touched them, and there they failed with ERR_UNKNOWN_FILE_EXTENSION,
+ * rejected the baseline, and cost the attempt every mutant's verdict.
+ *
+ * Withholding is not skipping, and here it removes no coverage the baseline
+ * otherwise had: the package's own `npm test` still runs these, and they still
+ * fail if broken. They are held out only of a cohort baseline whose single
+ * command was never able to execute them.
+ *
+ * The judgement is the package boundary, not the file extension -- a nested
+ * `package.json` declaring its own `test` script is the durable signal that some
+ * other runner owns these files.
+ */
+export function ownedByNestedTestRunner(
+  testPath: SelectedFile,
+  cohortRoot: string,
+  hasOwnTestScript: (packageJsonPath: string) => boolean
+): boolean {
+  const segments = testPath.split("/")
+  // Every directory strictly above the test file, nearest first. The cohort root
+  // itself is excluded: its `package.json` is the cohort's own, and treating it
+  // as a nested runner would withhold the whole suite.
+  for (let depth = segments.length - 1; depth > 0; depth -= 1) {
+    const directory = segments.slice(0, depth).join("/")
+    const packageJsonPath =
+      cohortRoot === "." ? `${directory}/package.json` : `${cohortRoot}/${directory}/package.json`
+    if (hasOwnTestScript(packageJsonPath)) {
+      return true
+    }
+  }
+  return false
 }
 
 /**
@@ -623,20 +763,78 @@ export function selectCohortTests(
  * The exclusion is recorded in the intent packet rather than applied silently.
  */
 export function escapesCohortRoot(testPath: SelectedFile, testSource: string): boolean {
+  // Git can walk out of a Stryker sandbox to the enclosing checkout metadata.
+  // A test that asks for the repository root can then read files outside the
+  // copied cohort. That is the same boundary as an explicit ../ path, but the
+  // traversal is hidden behind Git.
+  if (/\bexecFileSync\(\s*["'`]git["'`]\s*,\s*\[\s*["'`]rev-parse["'`]\s*,\s*["'`]--show-toplevel["'`]/.test(testSource)) {
+    return true
+  }
+
   // How far the test's own directory sits below the cohort root. A `../` budget
   // larger than this climbs past the root, which is what leaves the sandbox.
   const depth = testPath.split("/").length - 1
+
+  // Follow simple `join(alias, "relative/path")` bindings as well as direct
+  // literals. Tests often derive the repository root through an intermediate
+  // cohort-root constant; counting each `..` independently misses that the
+  // second join starts at the root rather than at the test directory.
+  const aliasDepths = new Map([["__dirname", depth]])
+  let foundAlias = true
+  while (foundAlias) {
+    foundAlias = false
+    for (const [, alias, base, relativePath] of testSource.matchAll(
+      /(?:const|let)\s+([\w$]+)\s*=\s*join\(\s*([\w$]+)\s*,\s*["'`]([^"'`]*)["'`]\s*\)/g
+    )) {
+      const baseDepth = aliasDepths.get(base)
+      if (baseDepth === undefined || aliasDepths.has(alias)) {
+        continue
+      }
+      let aliasDepth = baseDepth
+      for (const segment of relativePath.split("/")) {
+        if (segment === "..") {
+          aliasDepth -= 1
+        } else if (segment !== "" && segment !== ".") {
+          aliasDepth += 1
+        }
+      }
+      if (aliasDepth < 0) {
+        return true
+      }
+      aliasDepths.set(alias, aliasDepth)
+      foundAlias = true
+    }
+  }
 
   // The traversals these tests build with `join(__dirname, "../../...")`. Each
   // literal is measured against the budget rather than matched at a fixed
   // depth, because the same `../../` escapes from `scripts/` but not from
   // `test/nested/`.
-  for (const [, literal] of testSource.matchAll(/["'`]([^"'`\n]*\.\.\/[^"'`\n]*)["'`]/g)) {
+  //
+  // `join` takes its segments either way, so the same escape has two spellings:
+  // one literal `"../../x"`, or separate arguments `"..", "..", "x"`. Measuring
+  // only the first missed `join(testDir, "..", "..", "PG-PROFILE-51-REPORT.md")`
+  // -- a real repository-root read whose ENOENT in the sandbox rejected a whole
+  // cohort's baseline. A run of adjacent `".."` literals is therefore counted as
+  // one climb, the same as the slash-joined form it is equivalent to.
+  for (const [, literals] of testSource.matchAll(
+    /((?:["'`][^"'`\n]*["'`]\s*,\s*)*["'`][^"'`\n]*\.\.[^"'`\n]*["'`])/g
+  )) {
     let climbed = 0
-    for (const segment of literal.split("/")) {
-      if (segment === "..") {
-        climbed += 1
-      } else if (segment !== "." && segment !== "") {
+    for (const [, literal] of literals.matchAll(/["'`]([^"'`\n]*)["'`]/g)) {
+      // A lone `".."` argument climbs one level; a slash-joined literal climbs
+      // by its own leading `..` segments. Either way the run ends at the first
+      // segment that names something, which is where the descent begins.
+      let escaped = false
+      for (const segment of literal.split("/")) {
+        if (segment === "..") {
+          climbed += 1
+        } else if (segment !== "." && segment !== "") {
+          escaped = true
+          break
+        }
+      }
+      if (escaped) {
         break
       }
     }
@@ -817,6 +1015,214 @@ function resolveCohortRelative(directory: string, literal: string): string | und
   return segments.length === 0 ? undefined : segments.join("/")
 }
 
+/**
+ * The cohort-relative files a module imports by a relative specifier.
+ *
+ * Static `import`/`export ... from` declarations and `import("...")` calls with
+ * a literal argument count. A specifier without an extension also names its
+ * `.ts` sibling, the one extensionless form this repository writes. Anything
+ * not statically resolvable is left out.
+ */
+export function relativeImports(modulePath: SelectedFile, source: string): SelectedFile[] {
+  const sourceFile = ts.createSourceFile("module.ts", source, ts.ScriptTarget.Latest, true)
+  const directory = modulePath.includes("/") ? modulePath.slice(0, modulePath.lastIndexOf("/")) : ""
+  const found = new Set<SelectedFile>()
+  const add = (specifier: string): void => {
+    const resolved = resolveCohortRelative(directory, specifier)
+    if (resolved === undefined) {
+      return
+    }
+    found.add(resolved)
+    if (!/\.[cm]?[jt]sx?$|\.json$/.test(resolved)) {
+      found.add(`${resolved}.ts`)
+    }
+  }
+  const visit = (node: ts.Node): void => {
+    if (
+      (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
+      node.moduleSpecifier !== undefined &&
+      ts.isStringLiteral(node.moduleSpecifier) &&
+      !isErasedAtRuntime(node)
+    ) {
+      add(node.moduleSpecifier.text)
+    } else if (
+      ts.isCallExpression(node) &&
+      node.expression.kind === ts.SyntaxKind.ImportKeyword &&
+      node.arguments.length > 0 &&
+      ts.isStringLiteralLike(node.arguments[0])
+    ) {
+      add(node.arguments[0].text)
+    }
+    ts.forEachChild(node, visit)
+  }
+  ts.forEachChild(sourceFile, visit)
+  return [...found].sort()
+}
+
+/**
+ * Whether an import or re-export disappears when types are stripped.
+ *
+ * `import type`, `export type ... from`, and a declaration whose every named
+ * specifier is `type` load nothing under tsx, which drops the whole statement.
+ * Counting them would relate a test to a file it never loads; with coverage
+ * analysis off, every mutant there would then be reported as a survivor.
+ */
+function isErasedAtRuntime(node: ts.ImportDeclaration | ts.ExportDeclaration): boolean {
+  if (ts.isExportDeclaration(node)) {
+    if (node.isTypeOnly) {
+      return true
+    }
+    const clause = node.exportClause
+    return (
+      clause !== undefined &&
+      ts.isNamedExports(clause) &&
+      clause.elements.length > 0 &&
+      clause.elements.every((element) => element.isTypeOnly)
+    )
+  }
+  const clause = node.importClause
+  if (clause === undefined) {
+    // `import "./x.ts"` is a side-effect import: it always loads.
+    return false
+  }
+  if (clause.isTypeOnly) {
+    return true
+  }
+  const bindings = clause.namedBindings
+  return (
+    clause.name === undefined &&
+    bindings !== undefined &&
+    ts.isNamedImports(bindings) &&
+    bindings.elements.length > 0 &&
+    bindings.elements.every((element) => element.isTypeOnly)
+  )
+}
+
+/**
+ * The candidate files a test exercises through its own imports.
+ *
+ * Import edges are followed through test-support modules -- helpers and
+ * fixtures under the cohort's test tree -- and stop at the first file outside
+ * it. A test that imports `../server/index.ts` reaches most of the server, and
+ * following production imports transitively would call every test related to
+ * every file, which selects nothing. `readModule` returns a module's source, or
+ * `undefined` when it does not exist.
+ */
+export function exercisedCandidates(
+  testPath: SelectedFile,
+  candidates: ReadonlySet<SelectedFile>,
+  isSupportModule: (path: SelectedFile) => boolean,
+  readModule: (path: SelectedFile) => string | undefined
+): SelectedFile[] {
+  const reached = new Set<SelectedFile>()
+  const visited = new Set<SelectedFile>([testPath])
+  const pending = [testPath]
+  while (pending.length > 0) {
+    const current = pending.pop() as SelectedFile
+    const source = readModule(current)
+    if (source === undefined) {
+      continue
+    }
+    for (const target of relativeImports(current, source)) {
+      if (candidates.has(target)) {
+        reached.add(target)
+      } else if (!visited.has(target) && isSupportModule(target)) {
+        visited.add(target)
+        pending.push(target)
+      }
+    }
+  }
+  return [...reached].sort()
+}
+
+/**
+ * Decide whether an attempt fits its bound and, if not, which files it samples.
+ *
+ * The revision fits when its changed lines and its test selection are both
+ * within the bound; then nothing changes. Otherwise files are taken in an order
+ * fixed by `digest(sampleKey, path)` -- reproducible for one revision, different
+ * for the next, so repeated pushes spread over the change set rather than
+ * re-testing the same files. A file is taken when at least one candidate test
+ * exercises it and taking it keeps both totals within the bound. The tests run
+ * are exactly the tests that exercise the files taken.
+ *
+ * A file no candidate test exercises is never sampled: every mutant in it would
+ * survive a selection that does not reach it, which is a false survivor rather
+ * than evidence.
+ */
+export function sampleAttempt(input: {
+  readonly scope: IntentPacket["scope"]
+  /** The cohort-relative tests the complete attempt would run. */
+  readonly tests: readonly SelectedFile[]
+  /** The candidates `test` exercises; see {@link exercisedCandidates}. */
+  readonly exercisedBy: (test: SelectedFile) => readonly SelectedFile[]
+  /** Line count of a file scoped `whole_file`. */
+  readonly wholeFileLines: (path: SelectedFile) => number
+  readonly bound: AttemptBound
+  readonly sampleKey: string
+}):
+  | { readonly kind: "complete" }
+  | {
+      readonly kind: "partial"
+      readonly paths: ReadonlySet<SelectedFile>
+      readonly tests: readonly SelectedFile[]
+      readonly completeness: Extract<Completeness, { kind: "partial" }>
+    } {
+  const linesOf = (entry: IntentPacket["scope"][number]): number =>
+    entry.kind === "whole_file"
+      ? input.wholeFileLines(entry.path)
+      : entry.ranges.reduce((total, range) => total + range.endLine - range.startLine + 1, 0)
+  const totalLines = input.scope.reduce((total, entry) => total + linesOf(entry), 0)
+  if (totalLines <= input.bound.maxChangedLines && input.tests.length <= input.bound.maxTests) {
+    return { kind: "complete" }
+  }
+
+  const testsOf = new Map<SelectedFile, SelectedFile[]>()
+  for (const test of input.tests) {
+    for (const path of input.exercisedBy(test)) {
+      testsOf.set(path, [...(testsOf.get(path) ?? []), test])
+    }
+  }
+
+  const order = (path: SelectedFile): string => digestOf(`${input.sampleKey}\0${path}`)
+  const ordered = [...input.scope].sort((left, right) =>
+    order(left.path) < order(right.path) ? -1 : order(left.path) > order(right.path) ? 1 : 0
+  )
+  const paths = new Set<SelectedFile>()
+  const tests = new Set<SelectedFile>()
+  let sampledLines = 0
+  for (const entry of ordered) {
+    const exercising = testsOf.get(entry.path) ?? []
+    if (exercising.length === 0) {
+      continue
+    }
+    const lines = linesOf(entry)
+    const testsAfter = new Set([...tests, ...exercising])
+    if (sampledLines + lines > input.bound.maxChangedLines || testsAfter.size > input.bound.maxTests) {
+      continue
+    }
+    paths.add(entry.path)
+    for (const test of exercising) {
+      tests.add(test)
+    }
+    sampledLines += lines
+  }
+
+  return {
+    kind: "partial",
+    paths,
+    tests: [...tests].sort(),
+    completeness: {
+      kind: "partial",
+      bound: input.bound,
+      sampleKey: input.sampleKey,
+      files: { sampled: paths.size, total: input.scope.length },
+      changedLines: { sampled: sampledLines, total: totalLines },
+      tests: { sampled: tests.size, total: input.tests.length },
+    },
+  }
+}
+
 /** Make a repository-relative path cohort-relative, so it can be a `mutate` glob. */
 export function toCohortRelative(path: string, cohortRoot: string): string {
   if (cohortRoot === ".") {
@@ -868,16 +1274,31 @@ export function freezeIntent(input: {
    * diff gave it status `A`; it is never quietly promoted to whole-file scope.
    */
   readonly hunks?: ReadonlyMap<string, readonly LineRange[]>
+  /**
+   * A bounded sample from {@link sampleAttempt}. Selected files outside
+   * `paths` (cohort-relative) are deferred: recorded in `excluded`, not mutated.
+   */
+  readonly sample?: {
+    readonly paths: ReadonlySet<SelectedFile>
+    readonly completeness: Extract<Completeness, { kind: "partial" }>
+  }
 }): IntentPacket {
   const selectedPaths: string[] = []
   const excluded: { path: string; reason: ExclusionReason }[] = []
   for (const entry of input.diff) {
     const verdict = classifyForCohort(entry, input.cohort)
-    if (verdict.selected) {
-      selectedPaths.push(entry.path)
+    if (!verdict.selected) {
+      excluded.push({ path: entry.path, reason: verdict.reason })
       continue
     }
-    excluded.push({ path: entry.path, reason: verdict.reason })
+    if (
+      input.sample !== undefined &&
+      !input.sample.paths.has(toCohortRelative(entry.path, input.cohort.root))
+    ) {
+      excluded.push({ path: entry.path, reason: "deferred_by_attempt_bound" })
+      continue
+    }
+    selectedPaths.push(entry.path)
   }
 
   // A newly added file has no prior revision to diff against line by line: the
@@ -905,19 +1326,43 @@ export function freezeIntent(input: {
       continue
     }
 
-    const ranges = [...(input.hunks?.get(path) ?? [])]
-    if (ranges.length === 0) {
-      // Failing here is the point. The caller selected this file, so the
-      // evidence has to say which of its lines were mutated; there is no
-      // reading of "none" that a completed run could honestly report. A revision
-      // that legitimately changes no line of a selected file -- a pure rename --
-      // must drop it from the diff rather than have it silently mutated whole.
+    // `Map.get` distinguishes "no entry for this path" from "an entry whose
+    // ranges are empty" -- `parseUnifiedZeroHunks` only ever inserts a path
+    // when `git diff -U0` emits a `+++ b/<path>` header for it at all, so an
+    // ABSENT entry means git supplied no hunk output whatsoever (a
+    // 100%-similarity rename: the file's bytes are identical at head, and
+    // its being selected as changed at all is exactly the anomaly this
+    // scoping exists to catch). A PRESENT entry with an empty array means
+    // git did emit hunks for the file, and every one of them was a pure
+    // deletion (`newCount` 0 -- see `parseUnifiedZeroHunks`'s doc comment:
+    // deleted content cannot carry a fault into head, so it contributes no
+    // range by design). These are not the same fact and must not collapse
+    // into the same branch: the first is a signal something is wrong with
+    // what the diff even claims changed; the second is an ordinary,
+    // legitimate code change (removing dead code) that happens to leave
+    // nothing mutable behind.
+    const entry = input.hunks?.get(path)
+    if (entry === undefined) {
+      // The caller selected this file, so the evidence has to say which of
+      // its lines were mutated; there is no reading of "none" that a
+      // completed run could honestly report. A revision that legitimately
+      // changes no line of a selected file -- a pure rename -- must drop it
+      // from the diff rather than have it silently mutated whole.
       throw new Error(
         `${relative} was selected for mutation (status ${status || "unknown"}) but has no ` +
           `changed line ranges. Whole-file scope is reserved for added files; a selected file ` +
           `with no derived ranges cannot be scoped, and silently mutating it in full would ` +
           `report evidence this revision's diff does not support.`
       )
+    }
+    const ranges = [...entry]
+    if (ranges.length === 0) {
+      // A modification whose diff exists but whose every hunk is a pure
+      // deletion changed zero lines AT HEAD -- there is nothing left to
+      // mutate, the same fact a deleted or renamed-with-no-content-change
+      // file already records via `excluded`, not a crash.
+      excluded.push({ path, reason: "no_mutable_change" })
+      continue
     }
     scope.push({ path: relative, kind: "changed_ranges", ranges })
     mutate.push(...toMutateEntries(relative, ranges))
@@ -951,6 +1396,7 @@ export function freezeIntent(input: {
     applicability: (mutate.length === 0 ? "not_applicable" : "applicable") as
       | "applicable"
       | "not_applicable",
+    completeness: (input.sample?.completeness ?? { kind: "complete" }) as Completeness,
   }
   return { ...body, intentDigest: digestOf(canonicalJSON(body)) }
 }

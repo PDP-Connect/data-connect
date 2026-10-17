@@ -88,7 +88,7 @@ async function fetchJson<T = unknown>(url: string, opts: RequestInit = {}): Prom
 }
 
 async function issueOwnerToken(asUrl: string, subjectId = "u1"): Promise<string> {
-  const clientId = "cli_longview";
+  const clientId = "pdpp_cli";
   const { body: device } = await fetchJson<{ device_code: string; user_code: string }>(
     `${asUrl}/oauth/device_authorization`,
     {

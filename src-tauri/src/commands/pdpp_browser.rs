@@ -71,24 +71,11 @@ impl PdppBrowserLease {
         // A stale port file must never point a new owner lease at an old
         // browser. Authentication data remains in the durable profile.
         let _ = fs::remove_file(profile_dir.join("DevToolsActivePort"));
-        let mut command = Command::new(browser);
+        let mut command = browser_command(&browser, &profile_dir, false);
         command
-            .arg(format!("--user-data-dir={}", profile_dir.display()))
-            .args([
-                "--remote-debugging-address=127.0.0.1",
-                "--remote-debugging-port=0",
-                "--no-first-run",
-                "--no-default-browser-check",
-                "about:blank",
-            ])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            command.process_group(0);
-        }
         let child = match command.spawn() {
             Ok(child) => child,
             Err(error) => {
@@ -211,6 +198,14 @@ impl PdppBrowserLease {
     pub fn profile_exists(connector_id: &str, owner_id: &str) -> Result<bool, String> {
         validate_owner_id(owner_id)?;
         Ok(profile_dir(&profile_root()?, connector_id, owner_id).is_dir())
+    }
+
+    pub(super) fn profile_exists_at(root: &Path, connector_id: &str, owner_id: &str) -> bool {
+        profile_dir(root, connector_id, owner_id).is_dir()
+    }
+
+    pub(super) fn profile_path_at(root: &Path, connector_id: &str, owner_id: &str) -> PathBuf {
+        profile_dir(root, connector_id, owner_id)
     }
 }
 
@@ -343,10 +338,10 @@ fn wait_for_devtools_endpoint(
     let deadline = Instant::now() + BROWSER_START_TIMEOUT;
     let active_port = profile_dir.join("DevToolsActivePort");
     while Instant::now() < deadline {
-        if let Ok(Some(status)) = child.try_wait() {
+        if browser_child_exited(&mut child) {
             return Err(BrowserLaunchFailure {
-                message: format!("PDPP browser exited before becoming ready: {status}"),
-                terminated: true,
+                message: "PDPP browser exited before becoming ready".into(),
+                terminated: terminate_browser(&mut child),
             });
         }
         if let Ok(contents) = fs::read_to_string(&active_port) {
@@ -371,24 +366,18 @@ struct BrowserLaunchFailure {
     terminated: bool,
 }
 
-fn terminate_browser(child: &mut Child) -> bool {
+pub(crate) fn terminate_browser(child: &mut Child) -> bool {
     #[cfg(unix)]
     {
-        let process_group = child.id();
-        signal_process_group(process_group, libc::SIGTERM);
-        let leader_exited = wait_for_child_exit(child, BROWSER_STOP_WAIT);
-        if leader_exited && wait_for_process_group_exit(process_group, BROWSER_STOP_WAIT) {
-            return true;
-        }
-        signal_process_group(process_group, libc::SIGKILL);
-        let _ = wait_for_child_exit(child, BROWSER_STOP_WAIT);
-        return wait_for_process_group_exit(process_group, BROWSER_STOP_WAIT);
+        return terminate_unix_browser(child, signal_process_group);
     }
 
     #[cfg(not(unix))]
     {
         #[cfg(windows)]
         {
+            // `child` retains the process handle through both tree-kill attempts,
+            // which keeps this PID bound to the launched process object.
             run_windows_taskkill(child.id(), BROWSER_STOP_WAIT);
         }
         #[cfg(not(windows))]
@@ -411,22 +400,65 @@ fn terminate_browser(child: &mut Child) -> bool {
 }
 
 #[cfg(unix)]
+fn terminate_unix_browser(
+    child: &mut Child,
+    mut signal_group: impl FnMut(u32, libc::c_int),
+) -> bool {
+    // WNOWAIT keeps the leader's PID reserved while numeric PGID signals are possible.
+    if child_exited_without_reaping(child).is_err() {
+        return false;
+    }
+    let process_group = child.id();
+    signal_group(process_group, libc::SIGTERM);
+    let _ = wait_for_child_exit_without_reaping(child, BROWSER_STOP_WAIT);
+    // Do not signal if the child identity was lost while waiting.
+    if child_exited_without_reaping(child).is_err() {
+        return false;
+    }
+    signal_group(process_group, libc::SIGKILL);
+    if !wait_for_child_exit_without_reaping(child, BROWSER_STOP_WAIT) {
+        return false;
+    }
+    child.wait().is_ok()
+}
+
+pub(crate) fn browser_command(browser: &Path, profile_dir: &Path, headless: bool) -> Command {
+    browser_command_with_args(browser, profile_dir, headless, &[])
+}
+
+pub(crate) fn browser_command_with_args(
+    browser: &Path,
+    profile_dir: &Path,
+    headless: bool,
+    additional_args: &[&str],
+) -> Command {
+    let mut command = Command::new(browser);
+    command
+        .arg(format!("--user-data-dir={}", profile_dir.display()))
+        .args([
+            "--remote-debugging-address=127.0.0.1",
+            "--remote-debugging-port=0",
+            "--no-first-run",
+            "--no-default-browser-check",
+        ])
+        .args(additional_args);
+    if headless {
+        command.arg("--headless=new");
+    }
+    command.arg("about:blank");
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    command
+}
+
+#[cfg(unix)]
 fn signal_process_group(process_group: u32, signal: libc::c_int) {
     unsafe {
         libc::kill(-(process_group as i32), signal);
     }
-}
-
-#[cfg(unix)]
-fn wait_for_process_group_exit(process_group: u32, timeout: Duration) -> bool {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if !process_group_exists(process_group) {
-            return true;
-        }
-        thread::sleep(Duration::from_millis(20));
-    }
-    !process_group_exists(process_group)
 }
 
 #[cfg(unix)]
@@ -438,6 +470,19 @@ fn process_group_exists(process_group: u32) -> bool {
     io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
 }
 
+#[cfg(unix)]
+fn wait_for_child_exit_without_reaping(child: &Child, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if child_exited_without_reaping(child).unwrap_or(false) {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    false
+}
+
+#[cfg(not(unix))]
 fn wait_for_child_exit(child: &mut Child, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
@@ -447,6 +492,34 @@ fn wait_for_child_exit(child: &mut Child, timeout: Duration) -> bool {
         thread::sleep(Duration::from_millis(20));
     }
     false
+}
+
+#[cfg(unix)]
+pub(crate) fn child_exited_without_reaping(child: &Child) -> io::Result<bool> {
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    let result = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            child.id() as libc::id_t,
+            &mut info,
+            libc::WEXITED | libc::WNOWAIT | libc::WNOHANG,
+        )
+    };
+    if result != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(info.si_signo == libc::SIGCHLD)
+}
+
+pub(crate) fn browser_child_exited(child: &mut Child) -> bool {
+    #[cfg(unix)]
+    {
+        child_exited_without_reaping(child).unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        child.try_wait().ok().flatten().is_some()
+    }
 }
 
 #[cfg(windows)]
@@ -602,6 +675,39 @@ mod tests {
     }
 
     #[test]
+    fn reset_deletes_one_account_profile_and_preserves_its_sibling() {
+        let root = tempfile::tempdir().unwrap();
+        let first = PdppBrowserLease::fixture(
+            root.path(),
+            "chatgpt-pdpp",
+            "account-one",
+            "run-1",
+        )
+        .unwrap();
+        let first_profile = first.profile_dir().to_owned();
+        drop(first);
+        let second = PdppBrowserLease::fixture(
+            root.path(),
+            "chatgpt-pdpp",
+            "account-two",
+            "run-2",
+        )
+        .unwrap();
+        let second_profile = second.profile_dir().to_owned();
+        fs::write(first_profile.join("Cookies"), "first-session").unwrap();
+        fs::write(second_profile.join("Cookies"), "second-session").unwrap();
+        drop(second);
+
+        reset_profile_in(root.path(), "chatgpt-pdpp", "account-one").unwrap();
+
+        assert!(!first_profile.exists());
+        assert_eq!(
+            fs::read_to_string(second_profile.join("Cookies")).unwrap(),
+            "second-session"
+        );
+    }
+
+    #[test]
     fn refuses_implicit_or_unsafe_browser_owners() {
         assert!(validate_owner_id("").is_err());
         assert!(validate_owner_id("../other-owner").is_err());
@@ -680,6 +786,23 @@ mod tests {
             .expect("spawn blocked lock oracle");
         assert!(blocked.success());
         crate::commands::server::kill_process_group(process_group, libc::SIGKILL);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn terminate_does_not_signal_after_the_leader_was_reaped() {
+        let mut child = Command::new("true").spawn().expect("spawn test leader");
+        child.wait().expect("reap test leader");
+        let mut signals = Vec::new();
+
+        assert!(!terminate_unix_browser(&mut child, |group, signal| {
+            signals.push((group, signal));
+        }));
+
+        assert!(
+            signals.is_empty(),
+            "a reaped leader no longer identifies its PGID"
+        );
     }
 
     #[cfg(unix)]

@@ -18,7 +18,7 @@
 
 import { randomBytes } from "node:crypto";
 
-import { credentialValidationMode } from "@pdpp/polyfill-connectors/credential-probe";
+import { credentialValidationMode } from "../polyfill-connectors-runtime.ts";
 import {
   type ConnectorManifestLike,
   displayNameForConnector,
@@ -216,6 +216,7 @@ function projectField(field: StaticSecretSetupField): Record<string, unknown> {
   return {
     autocomplete: field.autocomplete,
     description: field.description,
+    env: field.env,
     help_text: field.helpText,
     help_url: field.helpUrl,
     identity: field.identity,

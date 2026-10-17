@@ -18,7 +18,7 @@
 // them.
 
 import { randomBytes, randomUUID } from "node:crypto";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -29,24 +29,35 @@ import {
   projectBrowserSurfaceLease,
   // biome-ignore lint/correctness/noUnresolvedImports: Biome cannot resolve this installed package export; Node and TypeScript resolve it.
 } from "@opendatalabs/remote-surface/leases";
-import {
-  ConnectorImplementationNotFoundError,
-  resolveConnectorImplementation,
-} from "@pdpp/polyfill-connectors/resolve";
+import { notifyNtfy } from "../server/polyfill-connectors-runtime.ts";
+import type { ManifestManagedConnectors } from "./browser-surface-leases.ts";
 import { getOne, referenceQueries } from "../lib/db.ts";
 import { createTraceContext, emitSpineEvent, getRunTerminalStatus, type SpineTraceContext } from "../lib/spine.ts";
 import {
   approveOwnerDeviceAuthorization,
   getConnectorManifest,
   initiateOwnerDeviceAuthorization,
+  introspect,
+  OWNER_TOKEN_TTL_MS,
 } from "../server/auth.ts";
 import { canonicalConnectorKey, canonicalConnectorKeyFromManifest } from "../server/connector-key.ts";
+import {
+  assertConnectorLifecycleAvailable,
+  connectorLifecycleDataDir,
+  withConnectorLifecycleLock,
+} from "../server/connector-lifecycle-lock.ts";
+import { CONNECTOR_RUNTIME_OWNER_CLIENT_ID } from "../server/reference-local-defaults.ts";
 import {
   getConnectorSummaryEvidence,
   reconcileDirtyConnectorSummaryEvidence,
 } from "../server/connector-summary-read-model.ts";
 import { isPostgresStorageBackend, postgresQuery } from "../server/postgres-storage.ts";
 import { getSyncState } from "../server/records.ts";
+import {
+  createFileLocalConnectorSourceStore,
+  inspectActiveLocalConnectorSource,
+  type LocalConnectorSourceStore,
+} from "../server/connector-install/local-source.ts";
 import type { BrowserSurfaceLeaseStore } from "../server/stores/browser-surface-lease-store.ts";
 import {
   type BrowserSurfaceReplacementReceiptStore,
@@ -82,9 +93,15 @@ import {
 import type { ConnectorEnvironmentBinding } from "./connector-child-environment.ts";
 import { runConnector } from "./index.ts";
 import {
+  type ConnectorInstallStore,
+  createConnectorInstallStore,
+  inspectActiveConnector,
+} from "../server/connector-install/index.ts";
+import {
   classifyRecoveryGap,
   filterFreshPressureRows,
   hasForwardEvidenceDebt,
+  isRecoverableDetailGapRow,
   type RecoveryAdmissionDenialReason,
   resolveRecoveryAdmission,
   resolveRecoveryFirstMode,
@@ -114,17 +131,6 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const REFERENCE_IMPL_DIR = join(__dirname, "..");
 const REFERENCE_MANIFESTS_DIR = join(REFERENCE_IMPL_DIR, "fixtures", "seed-manifests");
 const SEED_CONNECTOR_PATH = join(REFERENCE_IMPL_DIR, "connectors", "seed", "index.ts");
-// Resolved from the installed `@pdpp/polyfill-connectors` package (never a
-// hardcoded relative repo path) so this reference never drifts from that
-// package's own on-disk layout. Manifest enumeration still reads this
-// directory directly (the `manifests` export's on-disk layout is unaffected
-// by the connector-tree-scope fix); only per-connector entry-point
-// resolution moved to resolveConnectorImplementation — see that function's
-// own comment.
-const POLYFILL_PACKAGE_SRC_DIR = dirname(fileURLToPath(import.meta.resolve("@pdpp/polyfill-connectors/manifests")));
-const POLYFILL_ROOT = join(POLYFILL_PACKAGE_SRC_DIR, "..");
-const POLYFILL_MANIFESTS_DIR = join(POLYFILL_ROOT, "manifests");
-
 // ─── Shared domain types ────────────────────────────────────────────────────
 
 export type ConnectorManifest = Record<string, unknown>;
@@ -284,6 +290,8 @@ export interface RunNowOptions {
    * `deriveCollectionState`.
    */
   fullRefresh?: boolean;
+  /** Atomically clear owner sync state with admission of this full-refresh run. */
+  resetState?: boolean;
   manifest?: ConnectorManifest;
   /** Authenticated subject used by the server admission boundary. */
   ownerSubjectId?: string;
@@ -315,6 +323,13 @@ export interface RunNowResult {
   readonly automation_mode?: RunAutomationMode;
   readonly automation_summary?: string;
   readonly browser_surface?: BrowserSurfaceProjection;
+  /**
+   * The host allocator's own error code/message when the browser-surface lease
+   * ended surface_failed because the host's POST /browser-surface/leases 500'd
+   * (e.g. browser_sandbox_unavailable). Undefined when no structured host
+   * reason is known.
+   */
+  readonly browser_surface_failure?: { readonly code: string; readonly message: string };
   readonly run_id: string;
   readonly status?: "started" | BrowserSurfaceProjection["browser_surface_status"];
   readonly trace_id: string;
@@ -467,11 +482,31 @@ export interface BrowserSurfaceRunProjection extends BrowserSurfaceProjection {
   readonly connector_id: string;
 }
 
+/**
+ * Which implementation a run of this connector would execute, as far as
+ * presence goes. `installed`/`local_source` mean a record exists (its bytes
+ * are verified only when a run starts, which fails `connector_install_invalid`
+ * if they no longer match). `built_in` means the path resolver supplies code
+ * without an install (the reference fixture seed, or an injected resolver).
+ * `not_installed` is the state in which `runNow` refuses with
+ * `connector_not_installed`.
+ */
+export type ConnectorImplementationState = "built_in" | "installed" | "local_source" | "not_installed";
+
 export type ConnectorPathResolver = (
   connectorId: string,
   manifest?: ConnectorManifest,
   options?: RunNowOptions
 ) => Promise<string | null> | string | null;
+
+export interface ConnectorRunSource {
+  readonly connector_key?: string;
+  readonly connector_id?: string;
+  readonly id: string;
+  readonly kind: string;
+  readonly source_id?: string;
+  readonly source_kind?: string;
+}
 
 interface ControllerLogger {
   error?: (message: string) => void;
@@ -509,8 +544,22 @@ export interface ControllerOptions {
   /** Operator-authorized connector IDs that may receive ambient proxy aliases. */
   approvedProxyConnectorIds?: readonly string[];
   asPublicUrl?: string;
+  /** Binds a host-provided browser lease to the run before the host is asked to allocate it. */
+  beforeBrowserSurfaceLeaseEnsure?: (args: {
+    readonly connectionId: string | null;
+    readonly runId: string;
+    readonly surfaceId: string;
+  }) => Promise<void> | void;
   /** Awaited before a managed surface lease becomes reusable after run cleanup. */
   beforeBrowserSurfaceLeaseRelease?: (args: { readonly runId: string }) => Promise<void> | void;
+  /**
+   * Resolves the host allocator's recorded start failure (code + message) for a
+   * run whose browser-surface lease just went surface_failed. Wired to the host
+   * allocator's `lastStartFailure` in host mode; undefined in dynamic/local mode.
+   */
+  describeBrowserSurfaceStartFailure?: (args: {
+    readonly runId: string;
+  }) => { readonly code: string; readonly message: string } | undefined;
   /**
    * Awaited before the runtime commits an interaction timeout. The reference
    * server uses this to restore (or retire) a presentation surface before a
@@ -534,6 +583,12 @@ export interface ControllerOptions {
   browserSurfaceHealthObservationTtlMs?: number;
   browserSurfaceLeaseManager?: BrowserSurfaceLeaseManager;
   browserSurfaceLeaseStore?: BrowserSurfaceLeaseStore;
+  /**
+   * Host mode without PDPP_NEKO_MANAGED_CONNECTORS: the lease manager's managed
+   * set, filled from manifests. `runNow` records each manifest it resolves, so
+   * a connector installed after boot gets a surface on its first run.
+   */
+  browserSurfaceManifestManagedConnectors?: Pick<ManifestManagedConnectors, "observe">;
   /**
    * Poll interval for the mid-wait surface-loss detector (ms). Defaults to
    * `DEFAULT_MID_WAIT_SURFACE_LOSS_POLL_INTERVAL_MS` (10 s). Tests set this
@@ -560,6 +615,8 @@ export interface ControllerOptions {
   /** Injectable sleep for the reclaim retry delay. Defaults to setTimeout. Tests inject a synchronous no-op. */
   browserSurfaceSleep?: (ms: number) => Promise<void>;
   connectorPathResolver?: ConnectorPathResolver;
+  /** Separate developer-local source selection store. */
+  localConnectorSourceStore?: LocalConnectorSourceStore;
   // Optional durable detail-gap store override; defaults to the configured
   // storage-backed singleton. The controller reads pending *source-pressure*
   // gaps from it so the schedule projection can surface `cooling_off` honestly
@@ -622,11 +679,16 @@ export interface ControllerOptions {
   runtime?: unknown;
   /**
    * Mutable runtime-context bag the surrounding server populates after
-   * its listeners are bound. The controller reads `rsUrl` and the new
-   * `referenceBaseUrl` lazily so it picks up the realized values once
-   * the AS server has actually allocated its port.
+   * its listeners are bound. The controller reads self-call URLs lazily so
+   * it picks up realized values once the AS and RS listeners allocate their
+   * ports; public URLs remain separate for discovery and token identity.
    */
-  runtimeContext?: { rsUrl?: string | null; referenceBaseUrl?: string | null };
+  runtimeContext?: {
+    rsUrl?: string | null;
+    referenceBaseUrl?: string | null;
+    selfCallRsUrl?: string | null;
+    selfCallReferenceBaseUrl?: string | null;
+  };
   scheduler?: unknown;
   // Optional store override; defaults to the configured storage-backed singleton.
   // Tests use this to substitute fakes without touching module-scoped state.
@@ -845,6 +907,18 @@ export interface Controller {
   ) => Promise<BrowserSurfaceRuntimeSurfaceObservation>;
   promoteBrowserSurfaceLeasesAfterBoot: () => Promise<void>;
   reconcileBrowserSurfaceLeasesAfterBoot: () => Promise<void>;
+  /**
+   * Presence-only answer to "would `runNow` find an implementation for these
+   * connectors?" — the same local-source → install → path-resolver order
+   * `runNow` uses, without starting a run or hashing install bytes. Lets owner
+   * summaries say a connector is not installed before the owner taps Sync.
+   * Batched so a summary page costs one install-store read, not one per row,
+   * and read-only so a summary GET stays write-free. Optional so test doubles
+   * that never project summaries need not supply it.
+   */
+  inspectConnectorImplementations?: (
+    connectors: readonly { readonly connectorId: string; readonly manifest?: ConnectorManifest }[]
+  ) => Promise<ReadonlyMap<string, ConnectorImplementationState>>;
   respondToInteraction: (runId: string, input?: RunInteractionResponseInput) => RunInteractionAck;
   runNow: (connectorId: string, options?: RunNowOptions) => Promise<RunNowResult>;
   setScheduleEnabled: (
@@ -926,6 +1000,12 @@ interface ActiveRunInteraction {
 // typed instanceof checks instead of sniffing duck-typed properties.
 export class ControllerError extends Error {
   readonly code: string;
+  /**
+   * Bare connector key the error is about. Set on `connector_not_installed`
+   * so the HTTP layer can surface `connector_id` in the error envelope and a
+   * client can offer the install action without parsing the message.
+   */
+  readonly connectorId: string | undefined;
   readonly details: readonly { param: string; message: string }[] | undefined;
   /**
    * ISO timestamp of the next eligible retry window. Set on
@@ -945,6 +1025,7 @@ export class ControllerError extends Error {
     message: string,
     code: string,
     extra: {
+      connectorId?: string;
       details?: readonly { param: string; message: string }[];
       nextEligibleAt?: string;
       pendingPressureGapCount?: number;
@@ -954,6 +1035,7 @@ export class ControllerError extends Error {
   ) {
     super(message);
     this.code = code;
+    this.connectorId = extra.connectorId;
     this.details = extra.details;
     this.nextEligibleAt = extra.nextEligibleAt;
     this.pendingPressureGapCount = extra.pendingPressureGapCount;
@@ -1070,8 +1152,6 @@ interface ManifestFingerprint {
   readonly version: string;
 }
 let referenceFixtureFingerprints: Map<string, ManifestFingerprint> | null = null;
-let polyfillManifestFingerprints: Map<string, ManifestFingerprint> | null = null;
-let polyfillConnectorPaths: Map<string, string> | null = null;
 const MAX_RECOVERY_CONTINUATION_ENVELOPES = 12;
 const RECOVERY_CONTINUATION_PENDING_READ_LIMIT = 100;
 // Minimum gap between two self-launched recovery continuations for the same
@@ -1189,7 +1269,7 @@ function nowIso(): string {
 // ─── Connector-path discovery (cached per-process) ──────────────────────────
 
 // A manifest fingerprint is a cheap, stable summary used to tell the
-// reference fixture manifest apart from the shipped polyfill manifest when
+// reference fixture manifest apart from an optional catalog manifest when
 // they share the same `connector_id`. We compare version plus the sorted
 // list of declared stream names — that is enough to distinguish the two
 // github.json files today without pulling in a full JSON equality check.
@@ -1212,10 +1292,6 @@ function fingerprintManifest(manifest: ConnectorManifest | null | undefined): Ma
   // biome-ignore lint/suspicious/useArraySortCompare: Input ordering is intentionally the runtime’s established default string order.
   streamNames.sort();
   return { streams: streamNames.join(","), version };
-}
-
-function fingerprintsEqual(a: ManifestFingerprint | null, b: ManifestFingerprint | null): boolean {
-  return !!(a && b && a.version === b.version && a.streams === b.streams);
 }
 
 function addConnectorLookupKey(keys: string[], key: unknown): void {
@@ -1333,142 +1409,62 @@ function loadReferenceFixtureFingerprints(): Map<string, ManifestFingerprint> {
   return entries;
 }
 
-// Resolve a shipped polyfill connector's runnable (spawnable) entry-point
-// path, given its manifest's connector_id. Returns null when
-// @pdpp/polyfill-connectors has no built implementation for this ID.
+// Resolve the fallback connector-implementation path for a controller-managed
+// run that has no active install.
 //
-// Backed by @pdpp/polyfill-connectors/resolve's resolveConnectorImplementation
-// (data-connectors#75, connector-index.json covers all 45 manifest-listed
-// connectors — no more directory-walking POLYFILL_CONNECTORS_DIR, which only
-// worked for whatever subset this repo's vendored tarball happened to ship
-// compiled at the time). The resolver returns a file:// URL string, safe for
-// `import()` directly; converted to a filesystem path here because this
-// file's own downstream consumer (runtime/index.ts's connector spawn) takes
-// a path, not a URL. Unknown IDs throw ConnectorImplementationNotFoundError
-// rather than returning falsy — caught and treated the same as the old
-// "no on-disk implementation" case, since both mean the same thing to this
-// function's callers: no shipped polyfill connector for this ID.
-function resolvePolyfillConnectorEntryPoint(connectorId: string): string | null {
-  try {
-    return fileURLToPath(resolveConnectorImplementation(connectorId).entry);
-  } catch (err) {
-    if (err instanceof ConnectorImplementationNotFoundError) {
-      return null;
-    }
-    throw err;
-  }
-}
-
-// Index one polyfill manifest file into the connector-path and fingerprint
-// maps. No-op for non-JSON files, connectors without a shipped implementation,
-// malformed manifests, or manifests missing a usable connector_id.
-function indexPolyfillManifestFile(
-  file: string,
-  paths: Map<string, string>,
-  fingerprints: Map<string, ManifestFingerprint>
-): void {
-  if (!file.endsWith(".json")) {
-    return;
-  }
-  try {
-    const manifest = JSON.parse(readFileSync(join(POLYFILL_MANIFESTS_DIR, file), "utf8")) as ConnectorManifest | null;
-    if (!manifest || typeof manifest !== "object") {
-      return;
-    }
-    const connectorId = (manifest as { connector_id?: unknown } | null)?.connector_id;
-    if (typeof connectorId !== "string" || !connectorId.trim()) {
-      return;
-    }
-    const trimmedId = connectorId.trim();
-    const connectorPath = resolvePolyfillConnectorEntryPoint(trimmedId);
-    if (!connectorPath) {
-      return;
-    }
-    setManifestLookupAliases(paths, trimmedId, manifest, connectorPath);
-    const fp = fingerprintManifest(manifest);
-    if (fp) {
-      setManifestLookupAliases(fingerprints, trimmedId, manifest, fp);
-    }
-  } catch {
-    // Ignore malformed manifests when building the local connector-path map.
-  }
-}
-
-function loadPolyfillConnectorPaths(): Map<string, string> {
-  if (polyfillConnectorPaths) {
-    return polyfillConnectorPaths;
-  }
-  const paths = new Map<string, string>();
-  const fingerprints = new Map<string, ManifestFingerprint>();
-  if (existsSync(POLYFILL_MANIFESTS_DIR)) {
-    for (const file of readdirSync(POLYFILL_MANIFESTS_DIR)) {
-      indexPolyfillManifestFile(file, paths, fingerprints);
-    }
-  }
-  polyfillConnectorPaths = paths;
-  polyfillManifestFingerprints = fingerprints;
-  return paths;
-}
-
-function loadPolyfillManifestFingerprints(): Map<string, ManifestFingerprint> {
-  if (!polyfillManifestFingerprints) {
-    loadPolyfillConnectorPaths();
-  }
-  return polyfillManifestFingerprints ?? new Map<string, ManifestFingerprint>();
-}
-
-// Resolve the connector-implementation path for a controller-managed run.
-//
-// Why this is non-trivial: the reference fixture manifests in
-// reference-implementation/fixtures/seed-manifests/ and the shipped polyfill manifests in
-// packages/polyfill-connectors/manifests/ can share a `connector_id`
-// (for example, GitHub). The reference fixture is served by the seed
-// connector at reference-implementation/connectors/seed/index.ts, while
-// the shipped polyfill connector lives at
-// packages/polyfill-connectors/connectors/<name>/index.ts. Silently
-// preferring the seed on collision caused a protocol violation: the seed
-// GitHub fixture emits a `commits` PROGRESS stream that the polyfill
-// manifest does not declare.
-//
-// Rules applied here, in order:
-//   1. When the caller passes the active manifest, compare a stable
-//      fingerprint (version + sorted stream names) against the on-disk
-//      reference fixture and polyfill manifests for that connector_id:
-//        - match polyfill → polyfill connector path;
-//        - match reference → seed connector path;
-//   2. No match, or no manifest provided: prefer the shipped polyfill
-//      connector when it exists. Polyfill is the deployed production
-//      surface; the seed is a fixture kept for explicit reference fixture
-//      manifests and tests.
-//   3. Fall back to the seed connector only when the reference fixture has
-//      a manifest for this connector_id. Unknown ids resolve to null.
+// Catalog connectors execute only from an install record (see
+// resolveActiveInstallFirstConnectorPath below); this resolver never looks
+// for connector code outside that record. What remains is the seed connector
+// at reference-implementation/connectors/seed/index.ts, which serves the
+// reference fixture manifests in reference-implementation/fixtures/seed-manifests/.
+// Those fixtures can share a `connector_id` with a catalog manifest (for
+// example, GitHub). Running the seed for a catalog manifest writes the
+// fixture's synthetic records into the owner's data, so the seed is returned
+// only when the active manifest's fingerprint (version + sorted stream names)
+// matches the reference fixture's. A catalog manifest with no active install,
+// a missing manifest, and an unknown id all resolve to null, and the
+// controller refuses the run.
 export function resolveDefaultConnectorPath(connectorId: string, manifest?: ConnectorManifest): string | null {
-  const referenceFingerprints = loadReferenceFixtureFingerprints();
-  const polyfillFingerprints = loadPolyfillManifestFingerprints();
-  const polyfillPaths = loadPolyfillConnectorPaths();
-  const lookupKeys = connectorLookupKeys(connectorId, manifest ?? null);
-  const polyfillPath = getFirstByConnectorLookupKey(polyfillPaths, lookupKeys);
-  const referenceFingerprint = getFirstByConnectorLookupKey(referenceFingerprints, lookupKeys);
-  const polyfillFingerprint = getFirstByConnectorLookupKey(polyfillFingerprints, lookupKeys);
-  const hasReferenceFixture = referenceFingerprint !== null;
-
+  const referenceFingerprint = getFirstByConnectorLookupKey(
+    loadReferenceFixtureFingerprints(),
+    connectorLookupKeys(connectorId, manifest ?? null)
+  );
   const activeFingerprint = fingerprintManifest(manifest ?? null);
-  if (activeFingerprint) {
-    if (polyfillPath && fingerprintsEqual(activeFingerprint, polyfillFingerprint)) {
-      return polyfillPath;
-    }
-    if (hasReferenceFixture && fingerprintsEqual(activeFingerprint, referenceFingerprint)) {
-      return SEED_CONNECTOR_PATH;
-    }
-  }
+  return referenceFingerprint &&
+    activeFingerprint &&
+    referenceFingerprint.version === activeFingerprint.version &&
+    referenceFingerprint.streams === activeFingerprint.streams
+    ? SEED_CONNECTOR_PATH
+    : null;
+}
 
-  if (polyfillPath) {
-    return polyfillPath;
+// OCI installs are the only source of catalog connector code, and they fail
+// closed. Only an absent active record falls through to the seed resolver; a
+// corrupt or path-escaping active record stops resolution instead of being
+// bypassed.
+const activeConnectorInstallStore = createConnectorInstallStore();
+const localConnectorSourceStore = createFileLocalConnectorSourceStore();
+export async function resolveActiveInstallFirstConnectorPath(
+  connectorId: string,
+  manifest?: ConnectorManifest,
+  _options?: RunNowOptions,
+  localStore: LocalConnectorSourceStore = localConnectorSourceStore,
+  installStore: ConnectorInstallStore = activeConnectorInstallStore
+): Promise<string | null> {
+  const local = await inspectActiveLocalConnectorSource(localStore, connectorId);
+  if (local.status === "invalid") {
+    throw new Error("Active developer-local connector source is invalid for " + connectorId + ": " + local.reason);
   }
-  if (hasReferenceFixture) {
-    return SEED_CONNECTOR_PATH;
+  if (local.status === "active") {
+    return local.path;
   }
-  return null;
+  const active = await inspectActiveConnector(installStore, connectorId);
+  if (active.status === "invalid") {
+    throw new Error(`Active connector install is invalid for ${connectorId}: ${active.reason}`);
+  }
+  return active.status === "active"
+    ? active.path
+    : resolveDefaultConnectorPath(connectorId, manifest);
 }
 
 // Reset cached manifest/path discovery. Tests rewrite manifest files on
@@ -1476,8 +1472,6 @@ export function resolveDefaultConnectorPath(connectorId: string, manifest?: Conn
 // would mask later ones.
 export function __resetControllerPathResolverCachesForTests(): void {
   referenceFixtureFingerprints = null;
-  polyfillManifestFingerprints = null;
-  polyfillConnectorPaths = null;
 }
 
 // ─── Schedule helpers ───────────────────────────────────────────────────────
@@ -1502,11 +1496,15 @@ interface PendingDetailGapRow {
   readonly attempt_count?: number | null;
   readonly connector_id?: string | null;
   readonly connector_instance_id?: string | null;
+  /** Keyset cursor parts (`created_at`, `gap_id`) when the store returns them. */
+  readonly created_at?: string | null;
   readonly detail_class?: string | null;
+  readonly gap_id?: string | null;
   readonly last_attempt_at?: string | null;
   readonly last_error?: { readonly class?: unknown } | null;
   readonly next_attempt_after?: string | null;
   readonly reason?: string | null;
+  readonly retryable?: boolean | null;
   readonly status?: string | null;
   readonly stream?: string | null;
   readonly updated_at?: string | null;
@@ -1516,16 +1514,53 @@ interface PendingDetailGapRow {
  * The read surface of the detail-gap store the controller depends on for the
  * cooldown projection. Kept to one method so a test fake is trivial.
  */
+interface ConnectorDetailGapReadOptions {
+  /** Keyset cursor: only rows strictly after (`created_at`, `gap_id`). */
+  readonly after?: { readonly createdAt: string; readonly gapId: string };
+  /** Connector-wide reads only: scope to one connection in SQL, before the LIMIT. */
+  readonly connectorInstanceId?: string;
+  /** Applied in SQL before the LIMIT: keep only reasons NOT in this list. */
+  readonly excludeReasons?: readonly string[];
+  readonly limit?: number;
+  /** Applied in SQL before the LIMIT: keep only these reasons. */
+  readonly reasons?: readonly string[];
+  /** Applied in SQL before the LIMIT: drop explicit-false (permanent) rows. */
+  readonly recoverableOnly?: boolean;
+}
+
 interface ConnectorDetailGapReadStore {
   listPendingGapsForConnector: (
     connectorId: string,
-    options?: { limit?: number }
+    options?: ConnectorDetailGapReadOptions
   ) => Promise<readonly PendingDetailGapRow[]> | readonly PendingDetailGapRow[];
   listPendingGapsForConnectorInstance?: (
     connectorId: string,
     connectorInstanceId: string,
-    options?: { limit?: number }
+    options?: ConnectorDetailGapReadOptions
   ) => Promise<readonly PendingDetailGapRow[]> | readonly PendingDetailGapRow[];
+}
+
+/** `next` is strictly after `previous` in the stable (`created_at`, `gap_id`) read order. */
+function gapCursorAdvances(
+  previous: { readonly createdAt: string; readonly gapId: string },
+  next: { readonly createdAt: string; readonly gapId: string }
+): boolean {
+  if (next.createdAt !== previous.createdAt) {
+    return next.createdAt > previous.createdAt;
+  }
+  return next.gapId > previous.gapId;
+}
+
+/**
+ * The detail-gap store override could not be scanned to exhaustion, so whether an
+ * eligible recovery row exists is unknown. Distinct from "none exists".
+ */
+function recoveryScanUnsupported(connectorId: string, connectorInstanceId: string, detail: string): ControllerError {
+  return new ControllerError(
+    `Recovery eligibility could not be established for ${connectorId} (connection ${connectorInstanceId}): ${detail}. ` +
+      "A detail-gap store must return stable keyset pages ordered by (created_at, gap_id) and honor `after`.",
+    "recovery_scan_unsupported"
+  );
 }
 
 function isConnectorDetailGapReadStore(value: unknown): value is ConnectorDetailGapReadStore {
@@ -1659,6 +1694,9 @@ function bucketPressureGapsByInstance(
   ensure: EnsureScheduleFacts
 ): void {
   for (const gap of gaps) {
+    if (!isRecoverableDetailGapRow(gap)) {
+      continue;
+    }
     if (typeof gap.reason !== "string" || !SOURCE_PRESSURE_GAP_REASONS.has(gap.reason)) {
       continue;
     }
@@ -1835,9 +1873,9 @@ function resolveWebBaseUrl(): string {
 
 /**
  * Lazy import of the ntfy adapter. Two reasons it's lazy:
- *   1. The polyfill-connectors package is loaded by the reference server
- *      at import time anyway, but doing the import here means tests that
- *      don't reach an interaction never pay the cost.
+ *   1. The optional connector runtime is loaded only when an interaction
+ *      needs notification, so tests that do not reach an interaction do not
+ *      pay the cost.
  *   2. If notify() ever throws synchronously (e.g. malformed env), the
  *      lazy boundary keeps that out of the controller's hot path.
  */
@@ -1848,7 +1886,6 @@ async function fireNtfy(args: {
   log: ControllerLogger;
 }): Promise<void> {
   try {
-    const { notify } = await import("@pdpp/polyfill-connectors/ntfy");
     const { interaction, connectorDisplayName, runId } = args;
     const message = typeof interaction.message === "string" ? interaction.message : "";
     const webBaseUrl = resolveWebBaseUrl();
@@ -1859,7 +1896,7 @@ async function fireNtfy(args: {
         ? `${webBaseUrl}/syncs/${encodedRunId}/stream?interaction_id=${encodedInteractionId}`
         : `${webBaseUrl}/syncs/${encodedRunId}`;
     const tags = interaction.kind === "credentials" || interaction.kind === "otp" ? ["key"] : ["construction"];
-    await notify({
+    await notifyNtfy({
       clickUrl,
       message,
       priority: "high",
@@ -2473,8 +2510,14 @@ export function createController(opts: ControllerOptions = {}): Controller {
   // the durable bounds. This only smooths bursts within one controller's life.
   const recoveryContinuationLastStartedAt = new Map<string, number>();
   const log: ControllerLogger = opts.logger || console;
-  const resolveConnectorPath = opts.connectorPathResolver || resolveDefaultConnectorPath;
-  const ownerClientId = opts.ownerClientId || "cli_longview";
+  const localSourceStore = opts.localConnectorSourceStore ?? localConnectorSourceStore;
+  const resolveConnectorPath =
+    opts.connectorPathResolver ||
+    ((connectorId: string, manifest?: ConnectorManifest, options?: RunNowOptions) =>
+      resolveActiveInstallFirstConnectorPath(connectorId, manifest, options, localSourceStore));
+  // A client of its own, so the AS can hand every run the same live bearer
+  // without sharing one with a CLI a person signed in.
+  const ownerClientId = opts.ownerClientId || CONNECTOR_RUNTIME_OWNER_CLIENT_ID;
   const ownerSubjectId = opts.ownerSubjectId || "owner_local";
   const schedulerStore = opts.schedulerStore || getDefaultSchedulerStore();
   const detailGapStore: ConnectorDetailGapReadStore =
@@ -2722,7 +2765,9 @@ export function createController(opts: ControllerOptions = {}): Controller {
     if (typeof opts.rsUrl === "string" && opts.rsUrl) {
       return opts.rsUrl;
     }
-    const contextUrl = opts.runtimeContext?.rsUrl;
+    const { runtimeContext } = opts;
+    const contextUrl =
+      runtimeContext && "selfCallRsUrl" in runtimeContext ? runtimeContext.selfCallRsUrl : runtimeContext?.rsUrl;
     if (typeof contextUrl === "string" && contextUrl) {
       return contextUrl;
     }
@@ -2732,9 +2777,8 @@ export function createController(opts: ControllerOptions = {}): Controller {
   /**
    * Resolve the AS base URL the spawned connector child should PUT its
    * streaming-target registration to. Read lazily because the surrounding
-   * server populates `runtimeContext.referenceBaseUrl` AFTER its listener
-   * has actually allocated a port (the same pattern `runtimeContext.rsUrl`
-   * uses).
+   * server populates the internal self-call URL AFTER its listener has
+   * actually allocated a port (the same pattern the RS self-call URL uses).
    *
    * IMPORTANT: this URL is for SERVER-TO-SERVER traffic between the
    * connector child and the AS Fastify listener (both on the same host
@@ -2744,22 +2788,50 @@ export function createController(opts: ControllerOptions = {}): Controller {
    * `/admin/runs/:runId/interactions/:interactionId/streaming-target`,
    * so passing the public URL here surfaces as a silent registration
    * 404 and `companion_start_failed` later. The server populates
-   * `runtimeContext.referenceBaseUrl` with the AS loopback URL for
-   * exactly this reason; we no longer fall back to `opts.asPublicUrl`
-   * or `PDPP_REFERENCE_ORIGIN` (both are public/browser-facing URLs).
+   * `runtimeContext.selfCallReferenceBaseUrl` with the AS loopback URL for
+   * exactly this reason. The public `referenceBaseUrl` is never used as a
+   * self-call fallback.
    *
    * Returns `null` when the context URL is not yet populated so
    * `runConnector` skips the env block entirely.
    */
   function currentReferenceBaseUrl(): string | null {
-    const contextUrl = opts.runtimeContext?.referenceBaseUrl;
+    const { runtimeContext } = opts;
+    const contextUrl =
+      runtimeContext && "selfCallReferenceBaseUrl" in runtimeContext
+        ? runtimeContext.selfCallReferenceBaseUrl
+        : runtimeContext?.referenceBaseUrl;
     if (typeof contextUrl === "string" && contextUrl) {
       return contextUrl;
     }
     return null;
   }
 
+  // The last bearer minted per subject. Every run and every scheduler refresh
+  // asks for one; approving a device request for each would add an
+  // owner_device_auth row and a consent.approved event each time.
+  const runtimeOwnerTokens = new Map<string, string>();
+
+  /**
+   * The subject's cached bearer while it is live and has at least half its
+   * lifetime left (the bound the server reuses a bearer under); otherwise a
+   * newly approved one.
+   */
   async function issueRuntimeOwnerToken(subjectId = ownerSubjectId): Promise<string> {
+    const cached = runtimeOwnerTokens.get(subjectId);
+    if (cached) {
+      const { active, exp } = await introspect(cached);
+      if (active && (exp ?? 0) * 1000 > Date.now() + OWNER_TOKEN_TTL_MS / 2) {
+        return cached;
+      }
+      runtimeOwnerTokens.delete(subjectId);
+    }
+    const token = await mintRuntimeOwnerToken(subjectId);
+    runtimeOwnerTokens.set(subjectId, token);
+    return token;
+  }
+
+  async function mintRuntimeOwnerToken(subjectId: string): Promise<string> {
     const baseUrl = opts.asPublicUrl || process.env.AS_PUBLIC_URL;
     const device = await initiateOwnerDeviceAuthorization(ownerClientId, baseUrl ? { baseUrl } : {});
     const approved = await approveOwnerDeviceAuthorization(device.user_code, subjectId);
@@ -2772,6 +2844,12 @@ export function createController(opts: ControllerOptions = {}): Controller {
   const browserSurface = createBrowserSurfaceManager({
     activeRunInteractions,
     browserSurfaceAllocator: browserSurfaceAllocator ?? null,
+    ...(opts.beforeBrowserSurfaceLeaseEnsure
+      ? { beforeBrowserSurfaceLeaseEnsure: opts.beforeBrowserSurfaceLeaseEnsure }
+      : {}),
+    ...(opts.describeBrowserSurfaceStartFailure
+      ? { describeBrowserSurfaceStartFailure: opts.describeBrowserSurfaceStartFailure }
+      : {}),
     browserSurfaceLeaseManager: browserSurfaceLeaseManager ?? null,
     browserSurfaceLeaseStore: browserSurfaceLeaseStore ?? null,
     browserSurfaceMidWaitPollIntervalMs,
@@ -2904,7 +2982,12 @@ export function createController(opts: ControllerOptions = {}): Controller {
     await Promise.all(
       [...connectorIds].map(async (connectorId) => {
         try {
-          const gaps = (await detailGapStore.listPendingGapsForConnector(connectorId, { limit: 200 })) ?? [];
+          const gaps =
+            (await detailGapStore.listPendingGapsForConnector(connectorId, {
+              limit: 200,
+              reasons: [...SOURCE_PRESSURE_GAP_REASONS],
+              recoverableOnly: true,
+            })) ?? [];
           bucketPressureGapsByInstance(gaps, connectorId, ensure);
         } catch (err) {
           console.error(
@@ -3188,6 +3271,7 @@ export function createController(opts: ControllerOptions = {}): Controller {
     readonly connectorInstanceId: string;
     readonly key: string;
     readonly runId: string;
+    readonly resetState?: boolean;
     readonly sourceWebhookEvent?: SourceWebhookRunEvent;
     readonly sourceWebhookOwnerSubjectId?: string;
     readonly startedAt: string;
@@ -3240,7 +3324,14 @@ export function createController(opts: ControllerOptions = {}): Controller {
       }
       inserted = true;
     } else {
-      inserted = await persistActiveRun(activeRun);
+      if (input.resetState) {
+        if (!schedulerStore.resetStateAndUpsertActiveRun) {
+          throw new ControllerError("Atomic source reset is unavailable.", "reset_state_unavailable");
+        }
+        inserted = await schedulerStore.resetStateAndUpsertActiveRun(activeRun);
+      } else {
+        inserted = await persistActiveRun(activeRun);
+      }
     }
     if (inserted === false) {
       throw new ControllerError(`Connector already has an active run: ${input.runId}`, "run_already_active", {
@@ -3356,7 +3447,12 @@ export function createController(opts: ControllerOptions = {}): Controller {
     }
     clearStreamingNonceForRun(input.runId);
     if (input.browserSurfaceLease) {
-      await opts.beforeBrowserSurfaceLeaseRelease?.({ runId: input.runId });
+      try {
+        await opts.beforeBrowserSurfaceLeaseRelease?.({ runId: input.runId });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        log.warn?.(`[controller] browser-surface host release failed for ${input.runId}: ${message}`);
+      }
       await browserSurface.releaseLease(input.browserSurfaceLease, input.connectorId, input.runId, input.traceContext);
     }
     resolveCancelledInteraction(input.runId);
@@ -3452,11 +3548,20 @@ export function createController(opts: ControllerOptions = {}): Controller {
     connectorId: string,
     connectorInstanceId: string
   ): Promise<PendingPressureGap[]> {
+    // Eligibility (this connection, pressure reasons, recoverable) is applied in the
+    // store before the 200-row LIMIT, so older permanent or non-pressure rows, or
+    // another connection's rows, cannot hide this connection's pressure gaps.
     const pendingGapRows = await Promise.resolve(
-      detailGapStore.listPendingGapsForConnector(connectorId, { limit: 200 })
+      detailGapStore.listPendingGapsForConnector(connectorId, {
+        connectorInstanceId,
+        limit: 200,
+        reasons: [...SOURCE_PRESSURE_GAP_REASONS],
+        recoverableOnly: true,
+      })
     );
     const pendingPressureRows = pendingGapRows
       .filter((row) => (row.connector_instance_id || connectorId) === connectorInstanceId)
+      .filter(isRecoverableDetailGapRow)
       .filter((row) => typeof row.reason === "string" && SOURCE_PRESSURE_GAP_REASONS.has(row.reason));
     return filterFreshPressureRows(pendingPressureRows, Date.now()).map((row) =>
       projectPendingPressureGap(row, row.reason as string)
@@ -3507,31 +3612,104 @@ export function createController(opts: ControllerOptions = {}): Controller {
 
   async function listPendingGapsForContinuation(
     connectorId: string,
-    connectorInstanceId: string
+    connectorInstanceId: string,
+    readOptions: {
+      readonly after?: { readonly createdAt: string; readonly gapId: string };
+      readonly limit?: number;
+      readonly recoverableOnly?: boolean;
+    } = {}
   ): Promise<readonly PendingDetailGapRow[]> {
+    // `connectorInstanceId` is passed to BOTH reads so the connector-wide fallback also
+    // scopes to this connection in SQL, before the LIMIT.
+    const options = { connectorInstanceId, limit: RECOVERY_CONTINUATION_PENDING_READ_LIMIT, ...readOptions };
     if (detailGapStore.listPendingGapsForConnectorInstance) {
       return await Promise.resolve(
-        detailGapStore.listPendingGapsForConnectorInstance(connectorId, connectorInstanceId, {
-          limit: RECOVERY_CONTINUATION_PENDING_READ_LIMIT,
-        })
+        detailGapStore.listPendingGapsForConnectorInstance(connectorId, connectorInstanceId, options)
       );
     }
-    const rows = await Promise.resolve(
-      detailGapStore.listPendingGapsForConnector(connectorId, { limit: RECOVERY_CONTINUATION_PENDING_READ_LIMIT })
-    );
+    const rows = await Promise.resolve(detailGapStore.listPendingGapsForConnector(connectorId, options));
     return rows.filter((row) => (row.connector_instance_id || connectorId) === connectorInstanceId);
+  }
+
+  // An explicit recovery-only request is a request to refetch pending detail
+  // gaps. When the connection's ONLY pending gaps are permanent source loss
+  // (`retryable: false`) there is nothing to refetch, and a runtime must not
+  // request or offer a refetch of such a gap: refuse, rather than silently run an
+  // ordinary collection labelled as gap recovery. No pending-gap evidence at all
+  // keeps the existing behavior.
+  async function assertRecoveryOnlyHasRecoverableWork(connectorId: string, connectorInstanceId: string): Promise<void> {
+    // Evidence of "pending exists AND recoverable is absent", not an every() over a
+    // truncated diagnostic page: the recoverable read applies eligibility in SQL
+    // before its LIMIT, and only an empty result makes the second, any-pending read.
+    const recoverable = await listPendingGapsForContinuation(connectorId, connectorInstanceId, {
+      limit: 1,
+      recoverableOnly: true,
+    });
+    if (recoverable.some(isRecoverableDetailGapRow)) {
+      return;
+    }
+    const anyPending = await listPendingGapsForContinuation(connectorId, connectorInstanceId, { limit: 1 });
+    if (anyPending.length > 0) {
+      throw new ControllerError(
+        "Recovery-only run refused: every pending detail gap is permanent source loss (non-retryable) and cannot be refetched.",
+        "invalid_request",
+        { recoveryAdmissionReason: "permanent_loss" }
+      );
+    }
   }
 
   async function hasEligibleNonPressureRecoveryWork(
     connectorId: string,
     connectorInstanceId: string
   ): Promise<boolean> {
-    const rows = await listPendingGapsForContinuation(connectorId, connectorInstanceId);
+    // Eligibility is `resolveRecoveryAdmission` over a row, which depends on the row's
+    // recovery class, its own retry floor and its work domain, so no fixed-size page of
+    // the OLDEST recoverable rows can decide it: they may all be retryable pressure,
+    // still inside their floor, or owner-required / connector-defect. Walk the
+    // connection's recoverable pending gaps in stable keyset pages until an admissible
+    // non-pressure row is found or the pending set is proven exhausted (a short page).
     const nowMs = Date.now();
-    return rows.some((row) => {
-      const classification = classifyRecoveryGap(row);
-      return classification.isNonPressureRecovery && resolveRecoveryAdmission(row, { nowMs }).ok;
-    });
+    let after: { createdAt: string; gapId: string } | undefined;
+    for (;;) {
+      // biome-ignore lint/performance/noAwaitInLoops: each page depends on the previous cursor.
+      const page = await listPendingGapsForContinuation(connectorId, connectorInstanceId, {
+        recoverableOnly: true,
+        ...(after ? { after } : {}),
+      });
+      if (
+        page.some((row) => {
+          const classification = classifyRecoveryGap(row);
+          return classification.isNonPressureRecovery && resolveRecoveryAdmission(row, { nowMs }).ok;
+        })
+      ) {
+        return true;
+      }
+      if (page.length < RECOVERY_CONTINUATION_PENDING_READ_LIMIT) {
+        return false;
+      }
+      // A FULL page of inadmissible rows only proves "no eligible row yet". The next
+      // cursor must come from the store and must strictly advance; an adapter that gives
+      // no cursor, ignores `after`, or answers with a backwards / repeating cursor leaves
+      // rows beyond this page unexamined. That is scan uncertainty, not absence: it must
+      // never be read as "no eligible work" (which would pick forward collection or stop
+      // a continuation), so it is reported as its own error.
+      const last = page[page.length - 1];
+      if (!(last?.created_at && last.gap_id)) {
+        throw recoveryScanUnsupported(
+          connectorId,
+          connectorInstanceId,
+          "a full page carried no created_at/gap_id cursor"
+        );
+      }
+      if (after && !gapCursorAdvances(after, { createdAt: last.created_at, gapId: last.gap_id })) {
+        throw recoveryScanUnsupported(
+          connectorId,
+          connectorInstanceId,
+          "the page cursor did not strictly advance (the store ignored `after`, repeated or went backwards)"
+        );
+      }
+      after = { createdAt: last.created_at, gapId: last.gap_id };
+    }
   }
 
   // Forward-evidence-debt probe for `resolveEffectiveRecoveryOnly` (mirrors
@@ -3590,6 +3768,9 @@ export function createController(opts: ControllerOptions = {}): Controller {
     options: RunNowOptions,
     scopedToResources: boolean
   ): Promise<boolean> {
+    if (options.recoveryOnly === true) {
+      await assertRecoveryOnlyHasRecoverableWork(connectorId, connectorInstanceId);
+    }
     const nonPressureRecoveryEligible =
       options.recoveryOnly === undefined && !scopedToResources
         ? await hasEligibleNonPressureRecoveryWork(connectorId, connectorInstanceId)
@@ -3638,8 +3819,19 @@ export function createController(opts: ControllerOptions = {}): Controller {
       );
       return;
     }
-    if (!(await hasEligibleNonPressureRecoveryWork(input.connectorId, input.connectorInstanceId))) {
-      return;
+    try {
+      if (!(await hasEligibleNonPressureRecoveryWork(input.connectorId, input.connectorInstanceId))) {
+        return;
+      }
+    } catch (err) {
+      // Scan uncertainty is not "drained": report it by its own code and start nothing
+      // (no continuation, and never forward collection). Any other failure keeps its
+      // existing path.
+      if (err instanceof ControllerError && err.code === "recovery_scan_unsupported") {
+        log.warn?.(`[controller] recovery continuation not started (${err.code}): ${err.message}`);
+        return;
+      }
+      throw err;
     }
     // Manifest automation policy gate. A recovery continuation is started BY
     // THE CONTROLLER, not by an owner gesture: it is an unattended automatic
@@ -3827,27 +4019,99 @@ export function createController(opts: ControllerOptions = {}): Controller {
     }
   }
 
+  async function inspectConnectorImplementations(
+    connectors: readonly { readonly connectorId: string; readonly manifest?: ConnectorManifest }[]
+  ): Promise<ReadonlyMap<string, ConnectorImplementationState>> {
+    const states = new Map<string, ConnectorImplementationState>();
+    if (connectors.length === 0) {
+      return states;
+    }
+    const installed = new Set(
+      (await activeConnectorInstallStore.listActive()).map((record) => record.connectorId)
+    );
+    // Developer-local sources are rare; skip the per-connector selection
+    // lookup entirely when none are registered.
+    const hasLocalSources = (await localSourceStore.list()).length > 0;
+    // The fallback `runNow` reaches when neither a local source nor an install
+    // is active. Calling the default resolver here would re-read both stores
+    // per connector, so use its seed-fixture tail directly.
+    const fallbackResolver = opts.connectorPathResolver || resolveDefaultConnectorPath;
+    for (const { connectorId, manifest } of connectors) {
+      if (states.has(connectorId)) {
+        continue;
+      }
+      if (hasLocalSources && (await localSourceStore.getSelectedForConnector(connectorId))) {
+        states.set(connectorId, "local_source");
+      } else if (installed.has(connectorId)) {
+        states.set(connectorId, "installed");
+      } else {
+        const path = await Promise.resolve(fallbackResolver(connectorId, manifest));
+        states.set(connectorId, path ? "built_in" : "not_installed");
+      }
+    }
+    return states;
+  }
+
   async function validateRunNowPreconditions(
     connectorId: string,
     options: RunNowOptions,
     key: string
-  ): Promise<{ readonly connectorPath: string; readonly manifest: ConnectorManifest }> {
-    const manifest = options.manifest ?? (await getConnectorManifest(connectorId));
+  ): Promise<{ readonly connectorPath: string; readonly manifest: ConnectorManifest; readonly runSource?: ConnectorRunSource }> {
+    await assertNotSourcePressureCoolingOff(connectorId, options);
+
+    const activeLocalSource = await inspectActiveLocalConnectorSource(localSourceStore, connectorId);
+    if (activeLocalSource.status === "invalid") {
+      throw new ControllerError(
+        "Active developer-local connector source is invalid for " + connectorId + ": " + activeLocalSource.reason,
+        "connector_install_invalid"
+      );
+    }
+    const activeInstall =
+      activeLocalSource.status === "none" ? await inspectActiveConnector(activeConnectorInstallStore, connectorId) : null;
+    if (activeInstall?.status === "invalid") {
+      throw new ControllerError(
+        `Active connector install is invalid for ${connectorId}: ${activeInstall.reason}`,
+        "connector_install_invalid"
+      );
+    }
+    const manifest =
+      activeLocalSource.status === "active"
+        ? (activeLocalSource.record.manifest as ConnectorManifest)
+        : activeInstall?.status === "active"
+        ? activeInstall.record.manifest as ConnectorManifest
+        : options.manifest ?? (await getConnectorManifest(connectorId));
     if (!manifest) {
       throw new ControllerError(`Unknown connector: ${connectorId}`, "not_found");
     }
+    opts.browserSurfaceManifestManagedConnectors?.observe(connectorId, manifest);
     if (!options.sourceWebhookEvent) {
       assertNoConflictingActiveRun(key);
       await assertNoConflictingDurableActiveRun(key);
     }
 
-    await assertNotSourcePressureCoolingOff(connectorId, options);
-
-    const connectorPath = await Promise.resolve(resolveConnectorPath(connectorId, manifest, options));
+    // Use the same inspection result as the manifest. Re-reading active state
+    // through the resolver could combine a pre-update manifest with a
+    // post-update entrypoint.
+    const connectorPath =
+      activeLocalSource.status === "active"
+        ? activeLocalSource.path
+        : activeInstall?.status === "active"
+        ? activeInstall.path
+        : await Promise.resolve(resolveConnectorPath(connectorId, manifest, options));
     if (!connectorPath) {
-      throw new ControllerError(`No runnable connector implementation is available for ${connectorId}`, "not_found");
+      throw new ControllerError(
+        `No runnable connector implementation is available for ${connectorId}: no verified install is active, and its manifest is not a reference fixture`,
+        "connector_not_installed",
+        { connectorId }
+      );
     }
-    return { connectorPath, manifest };
+    return {
+      connectorPath,
+      manifest,
+      ...(activeLocalSource.status === "active"
+        ? { runSource: { ...activeLocalSource.source, id: connectorId } }
+        : {}),
+    };
   }
 
   /**
@@ -3972,6 +4236,15 @@ export function createController(opts: ControllerOptions = {}): Controller {
 
   // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Run admission owns ordered source-webhook replay, active-run, browser-surface, and runtime-launch state transitions.
   async function runNow(connectorId: string, options: RunNowOptions = {}): Promise<RunNowResult> {
+    const lifecycleId = canonicalConnectorKey(connectorId) ?? connectorId;
+    const dataDir = connectorLifecycleDataDir();
+    return withConnectorLifecycleLock(dataDir, lifecycleId, () => {
+      assertConnectorLifecycleAvailable(dataDir, lifecycleId);
+      return runNowUnlocked(connectorId, options);
+    });
+  }
+
+  async function runNowUnlocked(connectorId: string, options: RunNowOptions = {}): Promise<RunNowResult> {
     const runOwnerSubjectId = options.ownerSubjectId ?? ownerSubjectId;
     const admittedConnection = await resolveAdmittedRunConnection(
       opts,
@@ -3983,7 +4256,7 @@ export function createController(opts: ControllerOptions = {}): Controller {
     const { connectorId: admittedConnectorId, connectorInstanceId } = admittedConnection;
     const key = runtimeKey(admittedConnectorId, connectorInstanceId);
     const sourceWebhookEvent = validatedSourceWebhookRunEvent(options);
-    const { manifest, connectorPath } = await validateRunNowPreconditions(
+    const { manifest, connectorPath, runSource } = await validateRunNowPreconditions(
       admittedConnectorId,
       { ...options, connectorInstanceId },
       key
@@ -4028,11 +4301,16 @@ export function createController(opts: ControllerOptions = {}): Controller {
     // option. Pass an explicit `{ connector_id, connector_instance_id }` object
     // so an explicit connection run reads its own durable state and defaults to
     // incremental when that state is non-empty.
+    if (options.resetState && !options.fullRefresh) {
+      throw new ControllerError("Reset state requires a full-refresh run.", "invalid_reset_run");
+    }
     const { state, collectionMode } = deriveCollectionState(
-      (await getSyncState({
-        connector_id: admittedConnectorId,
-        connector_instance_id: connectorInstanceId,
-      })) as { state?: unknown } | null,
+      options.resetState
+        ? null
+        : ((await getSyncState({
+            connector_id: admittedConnectorId,
+            connector_instance_id: connectorInstanceId,
+          })) as { state?: unknown } | null),
       options.fullRefresh === true
     );
     const ownerToken = options.ownerToken || (await issueRuntimeOwnerToken(runOwnerSubjectId));
@@ -4050,6 +4328,7 @@ export function createController(opts: ControllerOptions = {}): Controller {
       connectorInstanceId,
       key,
       runId,
+      ...(options.resetState ? { resetState: true } : {}),
       ...(sourceWebhookEvent ? { sourceWebhookEvent, sourceWebhookOwnerSubjectId: runOwnerSubjectId } : {}),
       startedAt,
       traceContext,
@@ -4121,6 +4400,19 @@ export function createController(opts: ControllerOptions = {}): Controller {
       baseInteractionHandler
     );
     const handleAssistanceProgress = (msg: unknown) => {
+      const assistanceStatus = msg as Record<string, unknown>;
+      if (assistanceStatus.type === "ASSISTANCE_STATUS" && assistanceStatus.status === "resolved") {
+        const entry = activeRunInteractions.get(runId);
+        const pending = entry?.pending;
+        if (entry && pending?.kind === "otp" && pending.interaction_id === assistanceStatus.assistance_request_id) {
+          entry.pending = null;
+          pending.resolve({
+            request_id: pending.interaction_id,
+            status: "success",
+            type: "INTERACTION_RESPONSE",
+          });
+        }
+      }
       // Progress is persisted via the event spine, not this callback. The
       // one exception is nonblocking ASSISTANCE: the owner has to act
       // somewhere outside PDPP (e.g. approve a ChatGPT push in the app) and
@@ -4190,6 +4482,7 @@ export function createController(opts: ControllerOptions = {}): Controller {
           referenceBaseUrl: currentReferenceBaseUrl(),
           rsUrl: currentRsUrl(options.rsUrl),
           runId,
+          ...(runSource ? { runSource } : {}),
           staticSecretEnv,
           // Mode-A streaming registration env. Both fields must be present
           // for runConnector to thread them into the spawn env; either
@@ -4637,6 +4930,7 @@ export function createController(opts: ControllerOptions = {}): Controller {
     getSchedule,
     isNeedsHuman: (connectorId: string, options: ConnectorInstanceOptions = {}) =>
       needsHumanAttention.has(runtimeKey(connectorId, options.connectorInstanceId)),
+    inspectConnectorImplementations,
     issueRuntimeOwnerToken,
     listBrowserSurfaceRunProjections,
     listSchedules,

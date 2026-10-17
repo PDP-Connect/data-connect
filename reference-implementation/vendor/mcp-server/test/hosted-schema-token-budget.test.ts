@@ -16,7 +16,7 @@ interface CompactViewModule {
 }
 
 const { projectSchemaCompactView, projectSchemaStreamScope, schemaSourceOptions } = (await import(
-  "../../../reference-implementation/operations/rs-schema-get/compact-view.ts"
+  "../../../operations/rs-schema-get/compact-view.ts"
 )) as CompactViewModule;
 
 // Hosted-transport parity for the `schema` MCP tool token budget.

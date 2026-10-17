@@ -80,13 +80,48 @@ describe("a selected file with no derived ranges is an error, not whole-file sco
     )
   })
 
-  it("rejects a modified file whose only hunk was a pure deletion", () => {
+  it("excludes, rather than errors on, a modified file whose only hunk was a pure deletion", () => {
     // A `+N,0` hunk contributes no range by design -- deleted content cannot
     // carry a fault into head -- so a file whose every hunk is a deletion
-    // reaches this point with an empty range list from a legitimate derivation.
-    expect(() =>
-      freeze("M\0reference-implementation/server/index.ts\0", new Map([["reference-implementation/server/index.ts", []]]))
-    ).toThrow(/no changed line ranges/)
+    // reaches this point with an empty range list from a legitimate
+    // derivation, distinguishable from the rename case above by construction:
+    // git DID emit a `+++ b/<path>` header for this file (it is present in
+    // the hunks map, just with `ranges: []`), unlike a byte-identical rename,
+    // which git never mentions in `-U0` output at all (absent from the map).
+    // The file legitimately changed zero lines at head -- there is nothing
+    // left to mutate -- so this is recorded the same way a deleted file is,
+    // not thrown as an error. Real incident this pins:
+    // waspflow/on-new-window-link-bridge-0921 (PR #228) removed two import
+    // lines and a route-mount call from server/index.ts, adding nothing;
+    // that revision's mutation job crashed outright on this exact shape
+    // before this exclusion path existed.
+    const intent = freeze(
+      "M\0reference-implementation/server/index.ts\0",
+      new Map([["reference-implementation/server/index.ts", []]])
+    )
+    expect(intent.mutate).toEqual([])
+    expect(intent.applicability).toBe("not_applicable")
+    expect(intent.excluded).toEqual([
+      { path: "reference-implementation/server/index.ts", reason: "no_mutable_change" },
+    ])
+  })
+
+  it("still mutates other selected files when one file has no mutable change", () => {
+    // A pure-deletion-only file must not swallow evidence for the rest of
+    // the revision -- it is excluded individually, like a deleted or
+    // renamed file, not a reason to abort the whole selection.
+    const intent = freeze(
+      "M\0reference-implementation/server/index.ts\0M\0reference-implementation/server/real-change.ts\0",
+      new Map([
+        ["reference-implementation/server/index.ts", []],
+        ["reference-implementation/server/real-change.ts", [{ startLine: 10, endLine: 12 }]],
+      ])
+    )
+    expect(intent.mutate).toEqual(["server/real-change.ts:10-12"])
+    expect(intent.applicability).toBe("applicable")
+    expect(intent.excluded).toEqual([
+      { path: "reference-implementation/server/index.ts", reason: "no_mutable_change" },
+    ])
   })
 
   it("still scopes a genuinely added file to the whole file", () => {

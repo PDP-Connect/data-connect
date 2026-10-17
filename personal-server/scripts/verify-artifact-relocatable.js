@@ -57,7 +57,10 @@ function log(message) {
 }
 
 export function parseArgs(argv) {
-  const args = { dist: DEFAULT_DIST, timeoutSeconds: 90 };
+  // Windows cold starts are slow: Defender scans the 55 MB executable and the
+  // native addons on first load. A green windows-latest run answered /health
+  // after 76s, so 90s failed on ordinary runner variance.
+  const args = { dist: DEFAULT_DIST, timeoutSeconds: 240 };
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index];
     if (token === '--dist') {
@@ -91,6 +94,20 @@ function stageRelocatedCopy(dist) {
   return stage;
 }
 
+/**
+ * Best-effort removal. On Windows the executable and its addons can stay locked
+ * for a moment after the process exits, and rmSync then throws EPERM. A throw
+ * from the `finally` block would replace the real verdict (and the server output
+ * it carries) with a cleanup error, so a leftover temp directory is only logged.
+ */
+export function removeStage(stage, remove = rmSync) {
+  try {
+    remove(stage, { recursive: true, force: true, maxRetries: 10, retryDelay: 500 });
+  } catch (error) {
+    log(`Warning: could not remove ${stage}: ${error.message}`);
+  }
+}
+
 async function fetchHealth(port) {
   const response = await fetch(`http://127.0.0.1:${port}/health`);
   const body = await response.text();
@@ -112,6 +129,7 @@ export async function verifyRelocatedArtifact({ dist, timeoutSeconds }) {
   // keeps concurrent platform jobs from colliding.
   const port = 20000 + Math.floor(Math.random() * 20000);
 
+  const startedAt = Date.now();
   log(`Relocated artifact to ${artifact}`);
   log(`Booting with an isolated HOME and CONFIG_DIR on port ${port}`);
 
@@ -156,7 +174,8 @@ export async function verifyRelocatedArtifact({ dist, timeoutSeconds }) {
       try {
         const { status, body } = await fetchHealth(port);
         if (status === 200) {
-          log(`HTTP 200 /health from the relocated artifact: ${body.slice(0, 200)}`);
+          const seconds = ((Date.now() - startedAt) / 1000).toFixed(1);
+          log(`HTTP 200 /health from the relocated artifact after ${seconds}s: ${body.slice(0, 200)}`);
           return { status, body };
         }
         throw new Error(`/health answered HTTP ${status}: ${body.slice(0, 400)}`);
@@ -178,9 +197,12 @@ export async function verifyRelocatedArtifact({ dist, timeoutSeconds }) {
     if (child.exitCode === null && child.signalCode === null) {
       child.kill('SIGTERM');
       await Promise.race([exited, new Promise(sleep => setTimeout(sleep, 5000))]);
-      child.kill('SIGKILL');
+      if (child.exitCode === null && child.signalCode === null) {
+        child.kill('SIGKILL');
+        await Promise.race([exited, new Promise(sleep => setTimeout(sleep, 5000))]);
+      }
     }
-    rmSync(stage, { recursive: true, force: true });
+    removeStage(stage);
   }
 }
 

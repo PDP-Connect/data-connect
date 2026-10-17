@@ -16,13 +16,15 @@ import {
 } from "react-router-dom"
 import { ROUTES } from "@/config/routes"
 import { TooltipProvider } from "@/components/ui/tooltip"
-import { clearSessionCredentialCache, Home } from "./index"
+import { clearSessionCredentialCache, Home, sessionCredentialKey } from "./index"
 
 const mockUsePlatforms = vi.fn()
 const mockStartImport = vi.fn()
 const mockStopExport = vi.fn()
 const mockNavigate = vi.fn()
 const mockRefreshConnectedStatus = vi.fn()
+const mockLoadPlatforms = vi.fn().mockResolvedValue(undefined)
+let mockPreserveMissingConnectionIds = false
 const mockInvoke = vi.fn()
 const mockListen = vi.fn()
 let mockConnectedPlatforms: Record<string, boolean> = {}
@@ -84,7 +86,21 @@ vi.mock("react-router-dom", async () => {
 })
 
 vi.mock("@/hooks/usePlatforms", () => ({
-  usePlatforms: () => mockUsePlatforms(),
+  usePlatforms: () => {
+    const value = mockUsePlatforms()
+    return {
+      ...value,
+      platforms: mockPreserveMissingConnectionIds
+        ? value.platforms
+        : value.platforms.map((platform: { id?: string; runtime?: string; connectionId?: string }) =>
+            platform.runtime === "pdpp-network" &&
+            !platform.connectionId
+              ? { ...platform, connectionId: "test-account" }
+              : platform
+          ),
+      loadPlatforms: value.loadPlatforms ?? mockLoadPlatforms,
+    }
+  },
 }))
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -96,12 +112,15 @@ vi.mock("@tauri-apps/api/event", () => ({
 }))
 
 vi.mock("@/hooks/useConnector", () => ({
+  legacyPdppConnectionId: (id: string) => id === "github-pdpp" ? "default" : `${id}-owner`,
   installedPdppConnectionId: (platform: { id: string; runtime?: string }) =>
     platform.runtime === "pdpp-network" && platform.id !== "github-pdpp"
       ? platform.id.startsWith("https://")
         ? "pdpp-uri-owner"
         : `${platform.id}-owner`
       : null,
+  installedPdppConnectionKey: (platform: { id: string; runtime?: string; connectionId?: string | null }) =>
+    `${platform.id}:${platform.runtime === "pdpp-network" ? platform.connectionId ?? "default" : "default"}`,
   isAuthenticationFailure: (error: unknown) =>
     /(?:401|403|unauthorized|forbidden|invalid token|auth(?:entication)? failed)/i.test(
       typeof error === "object" && error !== null && "statusMessage" in error
@@ -142,13 +161,19 @@ vi.mock("react-redux", async () => {
       selector: (state: {
         app: {
           runs: typeof mockRuns
+          platforms: never[]
           connectorUpdates: never[]
           isCheckingUpdates: boolean
         }
       }) => unknown
     ) =>
       selector({
-        app: { runs: mockRuns, connectorUpdates: [], isCheckingUpdates: false },
+        app: {
+          runs: mockRuns,
+          platforms: [],
+          connectorUpdates: [],
+          isCheckingUpdates: false,
+        },
       }),
   }
 })
@@ -189,13 +214,18 @@ function openManualUpload() {
 
 describe("Home", () => {
   beforeEach(() => {
+    mockPreserveMissingConnectionIds = false
     clearSessionCredentialCache()
     mockStartImport.mockReset()
     mockStopExport.mockReset()
     mockNavigate.mockReset()
     mockRefreshConnectedStatus.mockReset()
     mockInvoke.mockReset()
-    mockInvoke.mockResolvedValue(false)
+    mockInvoke.mockImplementation(async (command: string) =>
+      command === "ensure_pdpp_connection"
+        ? { connectionId: "test-account", accountLabel: "Account 1" }
+        : false
+    )
     mockListen.mockReset()
     mockListen.mockResolvedValue(() => undefined)
     mockConnectedPlatforms = {}
@@ -210,6 +240,121 @@ describe("Home", () => {
       getPlatformById: vi.fn(),
       isPlatformConnected: vi.fn(id => Boolean(mockConnectedPlatforms[id])),
     })
+  })
+
+  it("keys session credentials independently for accounts of one connector", () => {
+    const platform = {
+      id: "chatgpt-pdpp",
+      company: "OpenAI",
+      name: "ChatGPT",
+      filename: "chatgpt-pdpp",
+      description: "ChatGPT",
+      isUpdated: false,
+      logoURL: "",
+      needsConnection: true,
+      connectURL: null,
+      connectSelector: null,
+      exportFrequency: null,
+      vectorize_config: null,
+      runtime: "pdpp-network",
+    }
+
+    expect(sessionCredentialKey({ ...platform, connectionId: "account-one" })).not.toBe(
+      sessionCredentialKey({ ...platform, connectionId: "account-two" })
+    )
+  })
+
+  it("shows one connected home row for each account of one connector", () => {
+    const platform = {
+      id: "chatgpt-pdpp",
+      company: "OpenAI",
+      name: "ChatGPT",
+      filename: "chatgpt-pdpp",
+      description: "ChatGPT",
+      isUpdated: false,
+      logoURL: "",
+      needsConnection: true,
+      connectURL: null,
+      connectSelector: null,
+      exportFrequency: null,
+      vectorize_config: null,
+      runtime: "pdpp-network",
+    }
+    const accounts = [
+      { ...platform, connectionId: "account-one", accountLabel: "Account 1" },
+      { ...platform, connectionId: "account-two", accountLabel: "Account 2" },
+    ]
+    mockConnectedPlatforms = {
+      "chatgpt-pdpp:account-one": true,
+      "chatgpt-pdpp:account-two": true,
+    }
+    mockUsePlatforms.mockReturnValue({
+      platforms: accounts,
+      connectedPlatforms: mockConnectedPlatforms,
+      loadPlatforms: vi.fn(),
+      refreshConnectedStatus: mockRefreshConnectedStatus,
+      getPlatformById: vi.fn(),
+      isPlatformConnected: vi.fn(id => Boolean(mockConnectedPlatforms[id])),
+    })
+
+    renderHome()
+
+    expect(screen.getByText("ChatGPT · Account 1")).toBeTruthy()
+    expect(screen.getByText("ChatGPT · Account 2")).toBeTruthy()
+    expect(document.querySelectorAll('[data-slot="source-row-main-button"]')).toHaveLength(2)
+    expect(document.querySelector('[aria-label="Open ChatGPT · Account 1"]')).toBeTruthy()
+    expect(document.querySelector('[aria-label="Open ChatGPT · Account 2"]')).toBeTruthy()
+  })
+
+  it("persists a real connection id before the first installed connector run", async () => {
+    mockPreserveMissingConnectionIds = true
+    const platform = {
+      id: "chatgpt-pdpp",
+      company: "OpenAI",
+      name: "ChatGPT",
+      filename: "chatgpt-pdpp",
+      description: "ChatGPT",
+      isUpdated: false,
+      logoURL: "",
+      needsConnection: true,
+      connectURL: null,
+      connectSelector: null,
+      exportFrequency: null,
+      vectorize_config: null,
+      runtime: "pdpp-network",
+    }
+    const loadPlatforms = vi.fn().mockResolvedValue(undefined)
+    mockInvoke.mockImplementation(async (command: string) => {
+      if (command === "ensure_pdpp_connection") {
+        return { connectionId: "connection-first", accountLabel: "Account 1" }
+      }
+      return false
+    })
+    mockUsePlatforms.mockReturnValue({
+      platforms: [platform],
+      connectedPlatforms: {},
+      loadPlatforms,
+      refreshConnectedStatus: mockRefreshConnectedStatus,
+      getPlatformById: vi.fn(),
+      isPlatformConnected: vi.fn(() => false),
+    })
+    const { getByRole } = renderHome()
+
+    fireEvent.click(getByRole("button", { name: /connect chatgpt/i }))
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("ensure_pdpp_connection", {
+        connectorId: "chatgpt-pdpp",
+        company: "OpenAI",
+      })
+      expect(mockStartImport).toHaveBeenCalledWith(
+        expect.objectContaining({
+          connectionId: "connection-first",
+          accountLabel: "Account 1",
+        })
+      )
+    })
+    expect(loadPlatforms).toHaveBeenCalledOnce()
   })
 
   afterEach(() => {
@@ -898,6 +1043,63 @@ describe("Home", () => {
     }
   )
 
+  it("signs a browser source out from the Remove dialog and links the server copy", async () => {
+    mockInvoke.mockImplementation(command =>
+      Promise.resolve(
+        command === "reference_server_has_connection" ? true : undefined
+      )
+    )
+    mockUsePlatforms.mockReturnValue({
+      platforms: [
+        {
+          id: "amazon-pdpp",
+          company: "Amazon",
+          name: "Amazon",
+          filename: "amazon-pdpp",
+          description: "Amazon PDPP export",
+          isUpdated: false,
+          logoURL: "",
+          needsConnection: true,
+          connectURL: null,
+          connectSelector: null,
+          exportFrequency: null,
+          vectorize_config: null,
+          runtime: "pdpp-network",
+          requiresBrowser: true,
+        },
+      ],
+      connectedPlatforms: { "amazon-pdpp": true },
+      loadPlatforms: vi.fn(),
+      refreshConnectedStatus: vi.fn(),
+      getPlatformById: vi.fn(),
+      isPlatformConnected: vi.fn(() => true),
+    })
+
+    renderHome()
+    fireEvent.click(screen.getByRole("button", { name: "Remove Amazon" }))
+
+    const dialog = await screen.findByRole("alertdialog")
+    expect(dialog.textContent).toContain("This cannot be undone.")
+    expect(
+      screen.getByRole("button", { name: "Remove and delete local data" })
+    ).toBeTruthy()
+    expect(
+      await screen.findByRole("button", { name: "Open Server & Repairs" })
+    ).toBeTruthy()
+    expect(mockInvoke).toHaveBeenCalledWith("reference_server_has_connection", {
+      connectorKey: "amazon",
+    })
+
+    fireEvent.click(screen.getByRole("button", { name: "Sign out" }))
+
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull())
+    expect(mockInvoke).toHaveBeenCalledWith(
+      "reset_installed_pdpp_browser_profile",
+      { connectorId: "amazon-pdpp", connectionId: "amazon-pdpp-owner" }
+    )
+    expect(mockNavigate).not.toHaveBeenCalled()
+  })
+
   it("resets an expired ChatGPT session and returns the owner to setup", async () => {
     mockInvoke.mockImplementation(command =>
       command === "reset_installed_pdpp_browser_profile"
@@ -1182,7 +1384,7 @@ describe("Home", () => {
     ],
   ])(
     "shows one canonical GitHub source when both runtimes are connected (%s)",
-    (_ordering, platformIds) => {
+    async (_ordering, platformIds) => {
       const platformsById = {
         "github-playwright": {
           id: "github-playwright",
@@ -1213,9 +1415,10 @@ describe("Home", () => {
           exportFrequency: null,
           vectorize_config: null,
           runtime: "pdpp-network",
+          connectionId: "default",
         },
       }
-      mockConnectedPlatforms = { "github-playwright": true }
+      mockConnectedPlatforms = { "github-playwright": true, "github-pdpp:default": true }
       mockUsePlatforms.mockReturnValue({
         platforms: platformIds.map(
           id => platformsById[id as keyof typeof platformsById]
@@ -1273,7 +1476,8 @@ describe("Home", () => {
       )
       expect(mockStartImport).not.toHaveBeenCalled()
 
-      fireEvent.change(screen.getByLabelText(/personal access token/i), {
+      const tokenInput = await screen.findByLabelText(/personal access token/i)
+      fireEvent.change(tokenInput, {
         target: { value: "ghp_sync_transient" },
       })
       fireEvent.click(screen.getByRole("button", { name: /start import/i }))

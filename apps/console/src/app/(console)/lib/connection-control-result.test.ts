@@ -28,11 +28,13 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
+  classifyBrowserProfilePurgeResponse,
   classifyDeleteConnectionResponse,
   classifyPauseConnectionResponse,
   classifyResumeConnectionResponse,
   classifyRevokeConnectionResponse,
   connectionControlErrorCode,
+  profilePurgeSentence,
 } from "./connection-control-result.ts";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
@@ -87,6 +89,14 @@ test("delete 200 without a record count still maps to deleted", () => {
 test("delete 409 connection_run_active maps to run_active", () => {
   const body = { error: { code: "connection_run_active", message: "a run is active" } };
   assert.deepEqual(classifyDeleteConnectionResponse(409, body, connectionControlErrorCode(body)), {
+    status: "run_active",
+  });
+});
+
+test("delete 409 connection_run_active carries the blocking run id", () => {
+  const body = { error: { active_run_id: "run_42", code: "connection_run_active", message: "a run is active" } };
+  assert.deepEqual(classifyDeleteConnectionResponse(409, body, connectionControlErrorCode(body)), {
+    activeRunId: "run_42",
     status: "run_active",
   });
 });
@@ -199,4 +209,61 @@ test("operator-runs resumeConnection POSTs the shared owner-session resume route
   assert.match(src, WRAPPER_RESUME_PATH_RE);
   assert.match(src, WRAPPER_POST_RE);
   assert.match(src, WRAPPER_RESUME_CLASSIFY_RE);
+});
+
+// --- Saved browser session purge --------------------------------------------
+// A delete or revoke commits first and purges the browser profile after; the
+// console must show a failed purge instead of implying the session is gone.
+
+const FAILED_PURGE = {
+  error_code: "profile_purge_in_use",
+  message: "Refused to remove 'amazon__cin_a': a browser is still using it.",
+  status: "failed",
+  target: "local",
+};
+
+test("delete 200 carries a failed profile_purge", () => {
+  assert.deepEqual(
+    classifyDeleteConnectionResponse(200, { deleted_record_count: 3, profile_purge: FAILED_PURGE }, null),
+    {
+      deletedRecordCount: 3,
+      profilePurge: { errorCode: "profile_purge_in_use", message: FAILED_PURGE.message, status: "failed" },
+      status: "deleted",
+    }
+  );
+});
+
+test("revoke 200 carries the profile_purge and ignores a malformed one", () => {
+  assert.deepEqual(classifyRevokeConnectionResponse(200, { profile_purge: FAILED_PURGE }, null).profilePurge?.status, "failed");
+  assert.deepEqual(classifyRevokeConnectionResponse(200, { profile_purge: { status: "bogus" } }, null), {
+    status: "revoked",
+  });
+});
+
+test("the banner sentence names a failed purge and stays silent otherwise", () => {
+  assert.equal(
+    profilePurgeSentence({ message: "a browser is still using it", status: "failed" }),
+    "The saved browser session could not be removed (a browser is still using it)."
+  );
+  assert.equal(profilePurgeSentence({ status: "purged" }), null);
+  assert.equal(profilePurgeSentence({ status: "absent" }), null);
+  assert.equal(profilePurgeSentence(undefined), null);
+});
+
+test("the purge retry maps 200, 409 connection_not_removed and 404, and throws otherwise", () => {
+  assert.deepEqual(classifyBrowserProfilePurgeResponse(200, { profile_purge: { status: "purged" } }, null), {
+    profilePurge: { status: "purged" },
+    status: "purge_reported",
+  });
+  assert.deepEqual(classifyBrowserProfilePurgeResponse(409, {}, "connection_not_removed"), { status: "not_removed" });
+  assert.deepEqual(classifyBrowserProfilePurgeResponse(404, {}, "connector_instance_not_found"), {
+    status: "not_found",
+  });
+  assert.throws(() => classifyBrowserProfilePurgeResponse(500, {}, null));
+});
+
+test("operator-runs purgeConnectionBrowserProfile POSTs the owner-session purge route through the classifier", async () => {
+  const src = await readFile(OPERATOR_RUNS_FILE, "utf8");
+  assert.match(src, /connectionControlPath\(connectionId, "\/browser-profile\/purge"\)/);
+  assert.match(src, /classifyBrowserProfilePurgeResponse\(response\.status, body, connectionControlErrorCode\(body\)\)/);
 });

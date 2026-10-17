@@ -34,7 +34,11 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, extname, join, relative } from "node:path";
 import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 
-import { isExemptDataLoadPath, scanFileDataLoads } from "./ri-zero-connector-knowledge-data-load-scan.ts";
+import {
+  isExemptDataLoadPath,
+  sanctionedCallSiteExactnessViolations,
+  scanFileDataLoads,
+} from "./ri-zero-connector-knowledge-data-load-scan.ts";
 import { scanFileIdentity } from "./ri-zero-connector-knowledge-identity-scan.ts";
 
 export interface ScanRoots {
@@ -470,7 +474,8 @@ export function scanFile(
   relPath: string,
   connectorKeys: Set<string>,
   repoRoot: string,
-  validationKinds: Set<string> = new Set()
+  validationKinds: Set<string> = new Set(),
+  sanctionedSiteHits?: Map<string, number>
 ): Violation[] {
   const raw = readFileSync(absPath, "utf8");
   const source = stripComments(raw);
@@ -521,7 +526,7 @@ export function scanFile(
       snippet: v.snippet,
     }))
   );
-  violations.push(...scanFileDataLoads(absPath, relPath, repoRoot, connectorKeys, validationKinds));
+  violations.push(...scanFileDataLoads(absPath, relPath, repoRoot, connectorKeys, validationKinds, sanctionedSiteHits));
 
   // Multiple literals on one line (e.g. a multi-entry array literal) each
   // independently match the same rule; collapse to one report per
@@ -585,11 +590,20 @@ export function scanRepository(roots: ScanRoots): Violation[] {
   const validationKinds = manifestDerivedValidationKinds(roots);
   const files = productionFiles(roots);
   const violations: Violation[] = [];
+  const sanctionedSiteHits = new Map<string, number>();
   for (const relPath of files) {
     violations.push(
-      ...scanFile(join(roots.repoRoot, relPath), relPath, connectorKeys, roots.repoRoot, validationKinds)
+      ...scanFile(
+        join(roots.repoRoot, relPath),
+        relPath,
+        connectorKeys,
+        roots.repoRoot,
+        validationKinds,
+        sanctionedSiteHits
+      )
     );
   }
+  violations.push(...sanctionedCallSiteExactnessViolations(sanctionedSiteHits));
   violations.push(...scanSharedLibraryKindDispatchRoot(roots));
   return violations;
 }

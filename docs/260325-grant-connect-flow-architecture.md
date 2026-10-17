@@ -31,6 +31,17 @@ This document does not cover:
 - connector implementation internals
 - detailed UI copy or visual design
 
+## Not the same route as the console's `/connect`
+
+`apps/console` (the bundled Next console) has its own `/connect` route
+(`apps/console/src/app/(console)/connect/page.tsx`). It is an unrelated
+contract: MCP/CIMD client setup (issuing `claude mcp add` / `codex mcp add`
+commands and CIMD client identities), not a grant-entry route. It does not
+parse `sessionId`/`secret`, does not claim a Session Relay session, and is
+not reachable from the `vana://connect` deep link this document describes.
+The two `/connect` routes are intentionally distinct products; do not merge
+or route between them.
+
 ## Core principles
 
 ### Canonical inputs live in the URL

@@ -40,6 +40,7 @@ import {
   TypedSm,
 } from "@pdpp/brand-react";
 import { notFound } from "next/navigation";
+import { OpenExternalLink } from "@/app/(console)/components/open-external-link.tsx";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
 import { getAsInternalUrl, ReferenceServerUnreachableError } from "../../lib/owner-token.ts";
 import { getTraceTimeline, type SpineEvent, type TimelineEnvelope } from "../../lib/ref-client.ts";
@@ -484,14 +485,12 @@ export default async function TraceDetailPage({
         </Sheet>
         <Caption className="mt-2" style={{ color: "var(--color-muted-foreground)" }}>
           Requires{" "}
-          <a
+          <OpenExternalLink
             href="https://www.npmjs.com/package/@pdpp/cli"
-            rel="noreferrer"
             style={{ textDecoration: "underline", textUnderlineOffset: "2px" }}
-            target="_blank"
           >
             @pdpp/cli
-          </a>{" "}
+          </OpenExternalLink>{" "}
           on PATH. Set <Typed as="code">PDPP_OWNER_SESSION_COOKIE</Typed> when owner auth is enabled.
         </Caption>
         <Caption className="mt-1 break-all" style={{ color: "var(--color-muted-foreground)" }}>

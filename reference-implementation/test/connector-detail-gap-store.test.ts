@@ -7,8 +7,7 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-// biome-ignore lint/correctness/noUnresolvedImports: better-sqlite3 is the real driver under test.
-import Database from "better-sqlite3";
+import Database from "./helpers/sqlite-driver.ts";
 import type { RuntimeRunConnectorOptions, RuntimeRunConnectorResult } from "../runtime/index.ts";
 import { runConnector } from "../runtime/index.ts";
 import { DEFAULT_QUARANTINE_POLICY } from "../runtime/recovery-quarantine.ts";
@@ -665,6 +664,7 @@ async function assertConnectorEmittedDetailGapRoundTrip({
     reason: "upstream_pressure",
     record_key: "conv_deferred",
     retryable: true,
+    status: "pending",
     stream: "messages",
     type: "DETAIL_GAP",
   };
@@ -1876,6 +1876,7 @@ test(
         reason: "upstream_pressure",
         record_key: "conv_1",
         retryable: true,
+        status: "pending",
         stream: "conversations",
         type: "DETAIL_GAP",
       },
@@ -2573,6 +2574,7 @@ test(
         record_key: orderId,
         reference_only: true,
         retryable: true,
+        status: "pending",
         stream: "order_items",
         type: "DETAIL_GAP",
       },
@@ -2647,6 +2649,7 @@ test(
         record_key: orderId,
         reference_only: true,
         retryable: true,
+        status: "pending",
         stream: "order_items",
         type: "DETAIL_GAP",
       },
@@ -4354,18 +4357,16 @@ test(
         async listPendingGaps(): Promise<MockGap[]> {
           return [];
         },
+        // An unleased connector recovery claim goes through the atomic connector-origin
+        // operation; the generic `markGapStatus` is reserved for trusted internal callers.
         // biome-ignore lint/suspicious/useAwait: async test doubles retain the Promise-returning dependency contract and its microtask timing.
-        async markGapStatus(
-          gapId: string,
-          status: string,
-          options: MockMarkGapStatusCall["options"]
-        ): Promise<MockGap> {
-          statusCalls.push({ gapId, options, status });
+        async markConnectorGapRecovered(gapId: string, options: MockMarkGapStatusCall["options"]): Promise<MockGap> {
+          statusCalls.push({ gapId, options, status: "recovered" });
           return {
             gap_id: gapId,
             reason: "rate_limited",
             record_key: "conv_1",
-            status,
+            status: "recovered",
             stream: "messages",
           };
         },
@@ -4432,6 +4433,10 @@ test(
     const { connectorPath, cleanup } = createConnector([
       {
         detail_locator: { conversation_id: "conv_1" },
+        reason: "temporary_unavailable",
+        record_key: "conv_1",
+        retryable: true,
+        status: "pending",
         stream: "conversations",
         type: "DETAIL_GAP",
       },
@@ -4550,6 +4555,7 @@ test(
           reason: "upstream_pressure",
           record_key: "conv_1",
           retryable: true,
+          status: "pending",
           stream: "conversations",
           type: "DETAIL_GAP",
         },

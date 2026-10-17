@@ -14,7 +14,12 @@ import { isIP } from "node:net";
 import { tmpdir } from "node:os";
 import { join as joinPath } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { validateRuntimeContinuationFact } from "@pdpp/connector-protocol/connector-runtime-protocol";
+import {
+  PERMANENT_DETAIL_GAP_REASON,
+  RETRYABLE_DETAIL_GAP_REASONS,
+  validateRuntimeContinuationFact,
+} from "@pdpp/connector-protocol/connector-runtime-protocol";
+import { connectorChildArgs } from "../connector-dependency-loader.mjs";
 import { emitControllerBootedAndStashEpoch } from "../lib/controller-boot.ts";
 import type { SpineEventInput, SpineEventRecord } from "../lib/spine.ts";
 import { createTraceContext, emitSpineEvent, getCurrentBootEpoch } from "../lib/spine.ts";
@@ -64,6 +69,7 @@ import {
 } from "./connector-gap-bounding.ts";
 import type { ConnectorDiagnosticLines } from "./connector-diagnostic-lines.ts";
 import { createConnectorDiagnosticLineCollector, redactConnectorDiagnosticLine } from "./connector-diagnostic-lines.ts";
+import { cursorAuditFact } from "./cursor-audit-fact.ts";
 import { describeCursorBandViolation, evaluateCursorBand } from "./cursor-band-contiguity.ts";
 import { declaredReasonTokensFor } from "./declared-reason-tokens.ts";
 import { createDetailGapPageReader, validateDetailGapsPageRequest } from "./detail-gap-paging.ts";
@@ -274,6 +280,8 @@ interface DurableDetailGap {
   parent_stream?: string | null;
   reason?: string | null;
   record_key?: string | number | null;
+  /** `false` = permanent source loss (never recovered by a connector claim); `null`/absent = legacy. */
+  retryable?: boolean | null;
   status?: string;
   stream?: string;
 }
@@ -293,6 +301,7 @@ interface RuntimeDetailGapInput {
   parentStream?: string | null;
   reason?: string | null;
   recordKey?: unknown;
+  retryable?: boolean | null;
   scope?: unknown;
   source?: unknown;
   stream?: string | null;
@@ -333,6 +342,7 @@ interface RuntimeDetailGapStoreCapabilities {
     limit: number;
     streams?: string[] | null;
   }) => Promise<DurableDetailGap[] | null>;
+  markConnectorGapRecovered?: (gapId: string, options: { runId: string }) => Promise<DurableDetailGap | null>;
   markGapStatus?: (gapId: string, status: string, options: { runId: string }) => Promise<DurableDetailGap | null>;
   markLeasedGapAttempt?: (lease: ServedGapLease) => Promise<DurableDetailGap | null>;
   reclaimStrandedInProgressGaps?: (options: {
@@ -348,6 +358,7 @@ interface RuntimeDetailGapStoreCapabilities {
 }
 
 interface RuntimeDetailGapStore extends RuntimeDetailGapStoreCapabilities {
+  markConnectorGapRecovered: NonNullable<RuntimeDetailGapStoreCapabilities["markConnectorGapRecovered"]>;
   markGapStatus: NonNullable<RuntimeDetailGapStoreCapabilities["markGapStatus"]>;
   markLeasedGapAttempt: NonNullable<RuntimeDetailGapStoreCapabilities["markLeasedGapAttempt"]>;
   settleLeasedGapPending: NonNullable<RuntimeDetailGapStoreCapabilities["settleLeasedGapPending"]>;
@@ -522,6 +533,15 @@ export interface RuntimeRunConnectorOptions {
   connectorId: string;
   connectorInstanceId?: string | null;
   connectorPath: string;
+  /** Non-secret executable-source provenance stamped into run timeline events. */
+  runSource?: {
+    readonly connector_key?: string;
+    readonly connector_id?: string;
+    readonly id: string;
+    readonly kind: string;
+    readonly source_id?: string;
+    readonly source_kind?: string;
+  };
   /**
    * Detail-gap store override for tests and integration seams. Defaults to
    * `getDefaultConnectorDetailGapStore()` when omitted.
@@ -800,8 +820,11 @@ function recordMatchesScopeResource(
   return allowed.has(resourceKey);
 }
 
-function buildRunSourceDescriptor(connectorId: string): { id: string; kind: string } {
-  return { id: connectorId, kind: "connector" };
+function buildRunSourceDescriptor(
+  connectorId: string,
+  source?: RuntimeRunConnectorOptions["runSource"]
+): NonNullable<RuntimeRunConnectorOptions["runSource"]> {
+  return source ? { ...source, id: connectorId } : { id: connectorId, kind: "connector" };
 }
 
 function buildRunConnectionIdentity(connectorInstanceId: string | null): Record<string, string> {
@@ -1761,6 +1784,41 @@ function validateSkipResultMessage(msg: ConnectorMessage, scopeByStream: ScopeBy
   validateSkipTimeRange(msg.time_range);
 }
 
+const RETRYABLE_DETAIL_GAP_REASON_SET: ReadonlySet<string> = new Set(RETRYABLE_DETAIL_GAP_REASONS);
+
+/**
+ * collection-profile §5.6: `status: "pending"` and a boolean `retryable` are
+ * REQUIRED on both gap forms, and `source_unrepresentable` <=> `retryable: false`.
+ * A mismatched pair is rejected here, before any store or coverage effect.
+ */
+function validateDetailGapClassification(msg: ConnectorMessage): void {
+  if (msg.status !== "pending") {
+    throw new Error('Connector emitted invalid DETAIL_GAP.status: expected "pending"');
+  }
+  if (typeof msg.retryable !== "boolean") {
+    throw new Error("Connector emitted invalid DETAIL_GAP.retryable: expected boolean");
+  }
+  if (typeof msg.reason !== "string" || !msg.reason) {
+    throw new Error("Connector emitted invalid DETAIL_GAP.reason: expected non-empty string");
+  }
+  if (msg.retryable === false) {
+    if (msg.reason !== PERMANENT_DETAIL_GAP_REASON) {
+      throw new Error(
+        `Connector emitted invalid DETAIL_GAP: retryable:false requires reason "${PERMANENT_DETAIL_GAP_REASON}", got "${msg.reason}"`
+      );
+    }
+    return;
+  }
+  if (msg.reason === PERMANENT_DETAIL_GAP_REASON) {
+    throw new Error(
+      `Connector emitted invalid DETAIL_GAP: reason "${PERMANENT_DETAIL_GAP_REASON}" requires retryable:false`
+    );
+  }
+  if (!RETRYABLE_DETAIL_GAP_REASON_SET.has(msg.reason)) {
+    throw new Error(`Connector emitted invalid DETAIL_GAP.reason: unknown reason "${msg.reason}"`);
+  }
+}
+
 function validateDetailGapMessage(msg: ConnectorMessage, scopeByStream: ScopeByStream): void {
   requireOptionalNonEmptyString(msg.stream, "DETAIL_GAP.stream");
   if (!msg.stream) {
@@ -1776,10 +1834,7 @@ function validateDetailGapMessage(msg: ConnectorMessage, scopeByStream: ScopeByS
       throw new Error(`Connector emitted invalid DETAIL_GAP.${fieldName}: expected object`);
     }
   }
-  requireOptionalNonEmptyString(msg.reason, "DETAIL_GAP.reason");
-  if (!isNullish(msg.retryable) && typeof msg.retryable !== "boolean") {
-    throw new Error("Connector emitted invalid DETAIL_GAP.retryable: expected boolean");
-  }
+  validateDetailGapClassification(msg);
   requireOptionalNonEmptyString(msg.gap_id, "DETAIL_GAP.gap_id");
   requireOptionalNonEmptyString(msg.lease_id, "DETAIL_GAP.lease_id");
 }
@@ -2235,7 +2290,9 @@ function validateAssistanceMessage(msg: ConnectorMessage, scopeByStream: ScopeBy
   validateAssistanceAttachments(msg.attachments);
 }
 
-function hasBrowserSurfaceLaunchEnv(env: Record<string, string> | null | undefined): boolean {
+export function hasBrowserSurfaceStream(env: Record<string, string> | null | undefined): boolean {
+  // A stream URL enables a remote surface, while a CDP URL enables the leased
+  // host browser companion. Both are real browser-control capabilities.
   return Boolean(
     env &&
       typeof env === "object" &&
@@ -2244,7 +2301,7 @@ function hasBrowserSurfaceLaunchEnv(env: Record<string, string> | null | undefin
   );
 }
 
-function buildAssistanceRequestedDataFromInteraction(
+export function buildAssistanceRequestedDataFromInteraction(
   msg: ConnectorMessage,
   runSource: { id: string; kind: string },
   options: { browserSurfaceAvailable?: boolean } = {}
@@ -2362,10 +2419,14 @@ function optionalNonEmptyEnv(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
-function buildBrowserSurfaceLaunchEnv({
+export function buildBrowserSurfaceLaunchEnv({
+  connectorId,
+  connectorInstanceId,
   browserSurfaceLease,
   browserSurfaceEnv,
 }: {
+  connectorId?: string;
+  connectorInstanceId?: string | null;
   browserSurfaceEnv?: RuntimeBrowserSurfaceEnv | null;
   browserSurfaceLease?: RuntimeBrowserSurfaceLease | null;
 }): Record<string, string> {
@@ -2398,7 +2459,19 @@ function buildBrowserSurfaceLaunchEnv({
     optionalNonEmptyEnv(explicit.PDPP_BROWSER_SURFACE_REQUIRED) ||
     optionalNonEmptyEnv(source.required) ||
     optionalNonEmptyEnv(source.browserSurfaceRequired) ||
-    (remoteCdpUrl ? "neko" : null);
+    (streamBaseUrl ? "neko" : remoteCdpUrl ? "host" : null);
+
+  const legacyProfileName = [connectorId, connectorInstanceId]
+    .map((value) => optionalNonEmptyEnv(value))
+    .filter((value): value is string => value !== null)
+    .join("__");
+  // Published collection profiles bundle their own older connector runtime.
+  // Until those artifacts are rebuilt, give its legacy profile-keyed resolver
+  // the same host CDP endpoint while keeping the generic host contract intact.
+  const legacyHostCdpAlias =
+    required?.toLowerCase() === "host" && remoteCdpUrl && /^[A-Za-z0-9_-]+$/.test(legacyProfileName)
+      ? { [`PDPP_${legacyProfileName.toUpperCase()}_REMOTE_CDP_URL`]: remoteCdpUrl }
+      : {};
 
   return {
     ...(required ? { PDPP_BROWSER_SURFACE_REQUIRED: required } : {}),
@@ -2407,6 +2480,7 @@ function buildBrowserSurfaceLaunchEnv({
     ...(surfaceId ? { PDPP_BROWSER_SURFACE_ID: surfaceId } : {}),
     ...(remoteCdpUrl ? { PDPP_BROWSER_SURFACE_REMOTE_CDP_URL: remoteCdpUrl } : {}),
     ...(streamBaseUrl ? { PDPP_BROWSER_SURFACE_STREAM_BASE_URL: streamBaseUrl } : {}),
+    ...legacyHostCdpAlias,
   };
 }
 
@@ -2498,6 +2572,7 @@ function buildConnectorLaunchConfig({
   automationMode,
   browserSurfaceEnv,
   browserSurfaceLease,
+  connectorId,
   connectorInstanceId,
   connectorPath,
   referenceBaseUrl,
@@ -2510,6 +2585,7 @@ function buildConnectorLaunchConfig({
   | "automationMode"
   | "browserSurfaceEnv"
   | "browserSurfaceLease"
+  | "connectorId"
   | "connectorInstanceId"
   | "connectorPath"
   | "referenceBaseUrl"
@@ -2530,6 +2606,8 @@ function buildConnectorLaunchConfig({
   const browserSurfaceLaunchEnv = buildBrowserSurfaceLaunchEnv({
     browserSurfaceEnv: browserSurfaceEnv ?? null,
     browserSurfaceLease: browserSurfaceLease ?? null,
+    connectorId,
+    connectorInstanceId: connectorInstanceId ?? null,
   });
   const staticSecretLaunchEnv = staticSecretEnv && typeof staticSecretEnv === "object" ? staticSecretEnv : {};
   const connectorInstanceEnv = normalizedConnectorInstanceId
@@ -2547,7 +2625,11 @@ function buildConnectorLaunchConfig({
     ...(triggerKind ? { PDPP_RUN_TRIGGER_KIND: triggerKind } : {}),
     ...(automationMode ? { PDPP_RUN_AUTOMATION_MODE: automationMode } : {}),
   };
-  const args = connectorPath.endsWith(".ts") ? ["--import", "tsx/esm", connectorPath] : [connectorPath];
+  const dependencyLoaderBootstrapUrl = new URL(
+    "../connector-dependency-loader-bootstrap.mjs",
+    import.meta.url
+  ).href;
+  const args = connectorChildArgs(connectorPath, dependencyLoaderBootstrapUrl);
   return {
     args,
     browserSurfaceLaunchEnv,
@@ -2717,6 +2799,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
     ownerSubjectId = null,
     ownerToken,
     manifest,
+    runSource: requestedRunSource,
     scope: providedScope = null,
     state = null,
     collectionMode = "incremental",
@@ -2825,6 +2908,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
   // module boundary (that store has not been migrated yet), so the runtime
   // states the surface it actually drives here.
   const detailGapStore: RuntimeDetailGapStore = {
+    markConnectorGapRecovered: unsupportedDetailGapStoreCapability("connector gap recovery"),
     markGapStatus: unsupportedDetailGapStoreCapability("gap status transitions"),
     markLeasedGapAttempt: unsupportedDetailGapStoreCapability("leased gap attempts"),
     settleLeasedGapPending: unsupportedDetailGapStoreCapability("pending lease settlement"),
@@ -2849,6 +2933,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
     automationMode,
     browserSurfaceEnv,
     browserSurfaceLease,
+    connectorId,
     connectorInstanceId: resolvedConnectorInstanceId,
     connectorPath,
     referenceBaseUrl,
@@ -3045,7 +3130,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
   // omitted optional property, and `createTraceContext` defaults on absence.
   const traceContext = opts.traceContext || createTraceContext(opts.scenarioId ? { scenarioId: opts.scenarioId } : {});
   const runId = spawnRunId;
-  const runSource = buildRunSourceDescriptor(connectorId);
+  const runSource = buildRunSourceDescriptor(connectorId, requestedRunSource);
   const runConnectionIdentity = buildRunConnectionIdentity(normalizedConnectorInstanceId);
 
   // We do NOT use readline.createInterface here. Node 24+ readline treats
@@ -4566,7 +4651,8 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
         actor_type: "runtime",
         data: {
           checkpoint_mode: "checkpointed_streaming",
-          cursor,
+          // Audit fact only; the authoritative cursor is the PUT above (#76).
+          ...cursorAuditFact(cursor),
           grant_id: grantId,
           source: runSource,
           state_streams_committed: committedStateStreams.size,
@@ -4586,7 +4672,8 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
         actor_type: "runtime",
         data: {
           checkpoint_mode: "checkpointed_streaming",
-          cursor,
+          // Audit fact only; the commit of this cursor failed (#76).
+          ...cursorAuditFact(cursor),
           error_message: err instanceof Error ? err.message : String(err),
           grant_id: grantId,
           source: runSource,
@@ -4613,6 +4700,9 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
     let leaseAccountingPromise: Promise<unknown> | null = null;
     let queueDrainedResolve: (() => void) | null = null;
     let pendingInteractionViolationReject: ((err: Error) => void) | null = null;
+    let pendingInteractionAutoResolve: ((response: InteractionResponse) => void) | null = null;
+    let pendingInteractionAutoResolutionStatus: ConnectorMessage | null = null;
+    const completedOtpInteractionRequestIds = new Set<string>();
     let terminateTimer: NodeJS.Timeout | null = null;
     let runtimeTimeoutReason: string | null = null;
 
@@ -4821,13 +4911,32 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
     }
 
     function failPendingInteraction(err: Error): boolean {
-      if (!(pendingInteraction && pendingInteractionViolationReject)) {
+      if (!(pendingInteraction && pendingInteractionViolationReject) || pendingInteractionAutoResolutionStatus) {
         return false;
       }
       const rejectPendingInteraction = pendingInteractionViolationReject;
       pendingInteractionViolationReject = null;
       rejectPendingInteraction(err);
       terminateChild();
+      return true;
+    }
+
+    function resolvePendingOtpInteraction(msg: ConnectorMessage): boolean {
+      if (
+        msg.type !== "ASSISTANCE_STATUS" ||
+        msg.status !== "resolved" ||
+        pendingInteraction?.kind !== "otp" ||
+        msg.assistance_request_id !== pendingInteraction.request_id ||
+        !pendingInteractionAutoResolve
+      ) {
+        return false;
+      }
+      pendingInteractionAutoResolutionStatus = msg;
+      pendingInteractionAutoResolve({
+        request_id: pendingInteraction.request_id as string,
+        status: "success",
+        type: "INTERACTION_RESPONSE",
+      });
       return true;
     }
 
@@ -5154,7 +5263,8 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
         actor_type: "runtime",
         data: {
           checkpoint_mode: "checkpointed_streaming",
-          cursor: msg.cursor,
+          // Audit fact only; the staged cursor lives in `newState` (#76).
+          ...cursorAuditFact(msg.cursor),
           grant_id: grantId,
           source: runSource,
           state_commit_intent: persistState ? "commit_on_success" : "do_not_persist",
@@ -5326,7 +5436,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
         parentStream: gapParentStream,
         reason: gapReason,
         recordKey: msg.record_key ?? null,
-        retryable: msg.retryable ?? null,
+        retryable: msg.retryable === true || msg.retryable === false ? msg.retryable : null,
         scope: startScope,
         source: runSource,
         stream: gapStream,
@@ -5521,16 +5631,47 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
           `Connector emitted DETAIL_GAP_RECOVERED for stream '${recoveredStream}' after already reporting STREAM_EVIDENCE for it this run`
         );
       }
-      await flushAll();
       const lease = allServedGapLeases.get(recoveredGapId);
       if (msg.lease_id && (!lease || lease.leaseId !== msg.lease_id)) {
         throw new Error("Connector recovered a detail gap without the current run-owned lease");
       }
-      const recoveredGap = lease
-        ? await detailGapStore.settleLeasedGapRecovered(lease)
-        : await detailGapStore.markGapStatus(recoveredGapId, "recovered", { runId });
-      if (!recoveredGap || (lease && recoveredGap.lease_id === lease.leaseId)) {
-        throw new Error("Detail-gap recovery lease was lost before durable accounting");
+      // §5.6: a permanent (retryable:false) gap is never served, so a recovery
+      // claim naming one is not a settlement of served work. A DETAIL_GAP_RECOVERED
+      // message is a claim, never a substitute for an accepted RECORD: refuse it
+      // rather than manufacture recovery/hydration of a source_unrepresentable gap.
+      if (!lease && typeof detailGapStore.getGapById === "function") {
+        const named = await detailGapStore.getGapById(recoveredGapId);
+        if (named?.retryable === false) {
+          throw new Error(
+            `Connector emitted DETAIL_GAP_RECOVERED for permanent (non-retryable, ${PERMANENT_DETAIL_GAP_REASON}) gap '${recoveredGapId}': a recovery claim cannot hydrate a permanently unrepresentable record`
+          );
+        }
+      }
+      await flushAll();
+      // A run that was cancelled or timed out while its flush was in flight (the
+      // controller watchdog aborts the run and may admit the next run on the same
+      // connection without waiting for this handler) must not record a recovery:
+      // `flushBatch` also drops buffered records once stopped, so the claim would be
+      // unbacked. Accepted RECORD accounting keeps its own rules.
+      if (terminalStopRequested()) {
+        return;
+      }
+      let recoveredGap: DurableDetailGap | null;
+      if (lease) {
+        recoveredGap = await detailGapStore.settleLeasedGapRecovered(lease);
+        if (!recoveredGap || recoveredGap.lease_id === lease.leaseId) {
+          throw new Error("Detail-gap recovery lease was lost before durable accounting");
+        }
+      } else {
+        // The permanent-loss predicate is evaluated by the store in the same statement
+        // as the write, so the early read above cannot be stale by the time we write.
+        // A null result is a refusal, not a recovery: no event, no credit.
+        recoveredGap = await detailGapStore.markConnectorGapRecovered(recoveredGapId, { runId });
+        if (!recoveredGap) {
+          throw new Error(
+            `Connector emitted DETAIL_GAP_RECOVERED for gap '${recoveredGapId}' that is permanent (non-retryable, ${PERMANENT_DETAIL_GAP_REASON}) or no longer exists: a recovery claim cannot hydrate it`
+          );
+        }
       }
       if (lease) {
         allServedGapLeases.delete(recoveredGapId);
@@ -5729,7 +5870,8 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       interactionHandler: (message: ConnectorMessage) => unknown,
       requestId: string,
       timeoutSeconds: number | null | undefined,
-      violation: Promise<InteractionResponse>
+      violation: Promise<InteractionResponse>,
+      autoResolve: Promise<InteractionResponse>
     ): Promise<InteractionResponse> {
       let timeoutHandle: NodeJS.Timeout | null = null;
       try {
@@ -5757,6 +5899,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
           );
         }
         waitForResponse.push(violation);
+        waitForResponse.push(autoResolve);
         return await Promise.race(waitForResponse);
       } finally {
         if (timeoutHandle) {
@@ -5819,10 +5962,18 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       }
       recordInteractionRecoveryGap(msg, responseStatus, interactionStream);
       pendingInteraction = null;
+      if (msg.kind === "otp") {
+        completedOtpInteractionRequestIds.add(interactionRequestId);
+      }
       if (!writeChildStdin(`${JSON.stringify({ ...response, status: responseStatus })}\n`, "interaction_response")) {
         onProgress({ phase: "interaction_response", reason: childStdinClosedReason, type: "connector_stdin_closed" });
       }
       pendingInteractionViolationReject = null;
+      pendingInteractionAutoResolve = null;
+      if (pendingInteractionAutoResolutionStatus) {
+        onProgress(pendingInteractionAutoResolutionStatus);
+        pendingInteractionAutoResolutionStatus = null;
+      }
     }
 
     function recordInteractionRecoveryGap(
@@ -5867,9 +6018,20 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       const pendingInteractionViolation = new Promise<InteractionResponse>((_, rejectWaiting) => {
         pendingInteractionViolationReject = rejectWaiting;
       });
+      const pendingInteractionAutoResolution = new Promise<InteractionResponse>((resolveResponse) => {
+        pendingInteractionAutoResolve = resolveResponse;
+      });
       pendingInteractionViolation.catch(() => {
         // The protocol violation is observed by the owning queue.
       });
+      const [queuedMessage] = msgQueue;
+      if (queuedMessage) {
+        if (resolvePendingOtpInteraction(queuedMessage)) {
+          msgQueue.shift();
+        } else {
+          failPendingInteraction(new Error(`Connector emitted ${queuedMessage.type} while waiting for INTERACTION_RESPONSE`));
+        }
+      }
 
       await emitSpineEventTracked({
         actor_id: connectorId,
@@ -5896,7 +6058,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
         actor_id: connectorId,
         actor_type: "runtime",
         data: buildAssistanceRequestedDataFromInteraction(msg, runSource, {
-          browserSurfaceAvailable: hasBrowserSurfaceLaunchEnv(browserSurfaceLaunchEnv),
+          browserSurfaceAvailable: hasBrowserSurfaceStream(browserSurfaceLaunchEnv),
         }),
         event_type: "run.assistance_requested",
         interaction_id: interactionRequestId,
@@ -5922,7 +6084,8 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
         onInteraction,
         interactionRequestId,
         interactionTimeoutSeconds,
-        pendingInteractionViolation
+        pendingInteractionViolation,
+        pendingInteractionAutoResolution
       );
 
       await completeInteractionResponse(msg, response, interactionRequestId, interactionStream);
@@ -5934,6 +6097,9 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
         ...(isNullish(msg.message) ? {} : { message: msg.message }),
       });
       if (!closed) {
+        if (completedOtpInteractionRequestIds.has(msg.assistance_request_id as string)) {
+          return;
+        }
         throw new Error(
           `Connector emitted ASSISTANCE_STATUS for unknown assistance_request_id: ${msg.assistance_request_id}`
         );
@@ -6019,6 +6185,12 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       }
       try {
         const msg = JSON.parse(line);
+        if (resolvePendingOtpInteraction(msg)) {
+          // The matching resolution releases the protocol gate immediately.
+          // DONE can arrive on the next line before the async interaction
+          // completion clears pendingInteraction.
+          return;
+        }
         if (failPendingInteraction(new Error(`Connector emitted ${msg.type} while waiting for INTERACTION_RESPONSE`))) {
           return;
         }

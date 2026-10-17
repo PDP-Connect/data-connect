@@ -39,7 +39,7 @@
  */
 "use client";
 
-import { IcInput } from "@pdpp/brand-react";
+import { IcInput, type ConnectorIconLike } from "@pdpp/brand-react";
 import { humanizeFieldLabel, rowPrimary, rowSecondary } from "@pdpp/display";
 import { kindGlyph, RecordIdentity } from "@pdpp/operator-ui/components/record-identity";
 import { feedDescription, feedSectionTitle } from "@pdpp/operator-ui/components/views/explorer-utils";
@@ -67,6 +67,7 @@ import { useRouter } from "next/navigation";
 import {
   type ChangeEvent,
   type KeyboardEvent,
+  type ReactNode,
   useCallback,
   useEffect,
   useMemo,
@@ -75,6 +76,7 @@ import {
   useTransition,
 } from "react";
 import { RecordInspector } from "../components/record-inspector.tsx";
+import { ConnectorMark } from "../components/connector-mark.tsx";
 import { loadExploreBuckets } from "./actions.ts";
 import {
   activeRangeKey,
@@ -335,6 +337,7 @@ function dedupeWarnings(warnings: readonly ExplorerWarning[]): ExplorerWarning[]
 
 interface ExploreCanvasProps {
   data: RecordsExplorerData;
+  connectorIcons?: Readonly<Record<string, ConnectorIconLike | null | undefined>>;
   /**
    * The Explore route base path (e.g. "/explore"). A plain string —
    * NOT the function-bearing `Routes` object — because this is a Client
@@ -1490,6 +1493,7 @@ function FeedControls({
 // honest chronological escape instead: it does not claim to surface ALL matches.
 
 function SearchHeader({
+  connectorIcons,
   data,
   buildSearchSortHref,
   onSort,
@@ -1497,6 +1501,7 @@ function SearchHeader({
   query,
   recordsBasePath,
 }: {
+  connectorIcons: Readonly<Record<string, ConnectorIconLike | null | undefined>>;
   data: RecordsExplorerData;
   buildSearchSortHref: (searchSort: "relevance" | "recent") => string;
   onSort: (searchSort: "relevance" | "recent") => void;
@@ -1550,7 +1555,9 @@ function SearchHeader({
         </a>
       ) : null}
       {/* Per-source browse door: "See all in <stream>" for single-entity results. */}
-      {streamDoor ? <StreamDoorLink door={streamDoor} query={query} recordsBasePath={recordsBasePath} /> : null}
+      {streamDoor ? (
+        <StreamDoorLink connectorIcons={connectorIcons} door={streamDoor} query={query} recordsBasePath={recordsBasePath} />
+      ) : null}
     </div>
   );
 }
@@ -1564,10 +1571,12 @@ function SearchHeader({
 // the feed rows and inspector use — one escape ramp, never two.
 
 function StreamDoorLink({
+  connectorIcons,
   door,
   query,
   recordsBasePath,
 }: {
+  connectorIcons: Readonly<Record<string, ConnectorIconLike | null | undefined>>;
   door: ExplorerStreamDoor;
   query: string;
   recordsBasePath: string;
@@ -1579,12 +1588,20 @@ function StreamDoorLink({
   });
   return (
     <a className="rr-x-stream-door" href={streamHref}>
-      See all '{query}' records in {door.displayName} →
+      See all '{query}' records in <ConnectorMark className="mx-1 inline-block size-4 align-[-0.2em]" icon={connectorIcons[door.connectorId]} name={door.displayName} />{door.displayName} →
     </a>
   );
 }
 
-function StreamSeeAllLink({ link, recordsBasePath }: { link: ExplorerStreamSeeAllLink; recordsBasePath: string }) {
+function StreamSeeAllLink({
+  connectorIcons,
+  link,
+  recordsBasePath,
+}: {
+  connectorIcons: Readonly<Record<string, ConnectorIconLike | null | undefined>>;
+  link: ExplorerStreamSeeAllLink;
+  recordsBasePath: string;
+}) {
   const streamHref = buildStreamRecordsHref(recordsBasePath, {
     connectionId: link.connectionId,
     connectorId: link.connectorId,
@@ -1593,6 +1610,7 @@ function StreamSeeAllLink({ link, recordsBasePath }: { link: ExplorerStreamSeeAl
   const totalLabel = typeof link.total === "number" ? ` - ${link.total.toLocaleString()} records` : "";
   return (
     <a className="rr-x-see-all" href={streamHref} title={link.stream}>
+      <ConnectorMark className="mr-1 inline-block size-4 align-[-0.2em]" icon={connectorIcons[link.connectorId]} name={link.displayName} />
       {link.displayName} - {humanizeFieldLabel(link.stream)}
       {totalLabel} - See all
     </a>
@@ -1607,6 +1625,7 @@ function StreamSeeAllLink({ link, recordsBasePath }: { link: ExplorerStreamSeeAl
 // it is qualified "in view"; when there are zero in view it is HIDDEN (never a "0"
 // that reads as "this source is empty"), never a loaded-window count dressed as a total.
 function FacetRow({
+  leading,
   label,
   mono,
   on,
@@ -1615,6 +1634,7 @@ function FacetRow({
   onToggle,
   onToggleExclude,
 }: {
+  leading?: ReactNode;
   label: string;
   mono?: boolean;
   on: boolean;
@@ -1637,6 +1657,7 @@ function FacetRow({
           className={["rr-x-facet__name", mono ? "rr-x-facet__name--mono" : ""].filter(Boolean).join(" ")}
           title={label}
         >
+          {leading}
           {label}
         </span>
         <span className="rr-x-facet__flag" />
@@ -1696,6 +1717,7 @@ function connectionsFacetRestartHref(explorePath: string): string {
 }
 
 function ConnectionFacets({
+  connectorIcons,
   connections,
   selected,
   excluded,
@@ -1703,6 +1725,7 @@ function ConnectionFacets({
   onToggle,
   onToggleExclude,
 }: {
+  connectorIcons: Readonly<Record<string, ConnectorIconLike | null | undefined>>;
   connections: readonly ExplorerConnectionFacet[];
   selected: readonly string[];
   excluded: readonly string[];
@@ -1719,6 +1742,7 @@ function ConnectionFacets({
           excluded={excluded.includes(c.connectionId)}
           key={c.connectionId}
           label={c.displayName}
+          leading={<ConnectorMark className="size-5 shrink-0" icon={connectorIcons[c.connectorId]} name={c.displayName} />}
           on={selected.includes(c.connectionId)}
           onToggle={() => onToggle(c.connectionId)}
           onToggleExclude={() => onToggleExclude(c.connectionId)}
@@ -1738,11 +1762,13 @@ const STREAM_GROUP_TOP_N = 8;
 // a builder, not a wall) UNLESS it holds an active filter or a search is matching
 // inside it — then it opens so the relevant streams are visible without a click.
 function SourceFacetGroup({
+  connectorIcons,
   group,
   forceOpen,
   onToggle,
   onToggleExclude,
 }: {
+  connectorIcons: Readonly<Record<string, ConnectorIconLike | null | undefined>>;
   group: SourceStreamGroup;
   forceOpen: boolean;
   onToggle: (stream: string) => void;
@@ -1756,6 +1782,7 @@ function SourceFacetGroup({
     <details className="rr-x-source-group" open={forceOpen || hasActive}>
       <summary className="rr-x-source-group__summary">
         <span className="rr-x-source-group__name" title={group.displayName}>
+          <ConnectorMark className="mr-2 inline-block size-5 align-[-0.2em]" icon={connectorIcons[group.connectorId]} name={group.displayName} />
           {group.displayName}
         </span>
         {/* The source total is the SAME count KIND as each stream — loaded rows
@@ -1793,10 +1820,12 @@ function SourceFacetGroup({
 // two sources appears under EACH with that source's own number, never a global
 // tally (RL2/RL3). A "search within filters" box tames many sources/streams.
 function StreamFacets({
+  connectorIcons,
   groups,
   onToggle,
   onToggleExclude,
 }: {
+  connectorIcons: Readonly<Record<string, ConnectorIconLike | null | undefined>>;
   groups: readonly SourceStreamGroup[];
   onToggle: (stream: string) => void;
   onToggleExclude: (stream: string) => void;
@@ -1837,6 +1866,7 @@ function StreamFacets({
       <div className="rr-x-facets__scroll">
         {filtered.map((g) => (
           <SourceFacetGroup
+            connectorIcons={connectorIcons}
             forceOpen={singleSource || searching}
             group={g}
             key={g.connectionId}
@@ -1857,6 +1887,7 @@ function StreamFacets({
 // ─── Feed row ─────────────────────────────────────────────────────
 
 function FeedRow({
+  connectorIcons,
   entry,
   recordsBasePath,
   selected,
@@ -1865,6 +1896,7 @@ function FeedRow({
   onClearSelection,
   onArrow,
 }: {
+  connectorIcons: Readonly<Record<string, ConnectorIconLike | null | undefined>>;
   entry: ExplorerFeedEntry;
   /** Base path for the records section (e.g. "/sources"). Used to
    *  build the full-page record detail href for the Open action + mobile tap. */
@@ -1983,6 +2015,11 @@ function FeedRow({
             {/* F8: the connection name ellipses in the narrow row (…gmail.c…). A native
                 `title` makes the full name recoverable on hover/long-press. */}
             <span className="rr-x-row__con" title={entry.connectionDisplayName ?? entry.connectorId}>
+              <ConnectorMark
+                className="mr-1 inline-block size-4 align-[-0.2em]"
+                icon={connectorIcons[entry.connectorId]}
+                name={entry.connectionDisplayName ?? entry.connectorId}
+              />
               {entry.connectionDisplayName ?? entry.connectorId}
             </span>
             {/* The per-row engine-mode badge (lexical/semantic/hybrid) was removed: it
@@ -2091,6 +2128,7 @@ function FeedRow({
 // ─── Day feed with burst collapse ─────────────────────────────────
 
 function BurstRow({
+  connectorIcons,
   burst,
   expanded,
   onToggle,
@@ -2101,6 +2139,7 @@ function BurstRow({
   recordsBasePath,
   selectedPeekParam,
 }: {
+  connectorIcons: Readonly<Record<string, ConnectorIconLike | null | undefined>>;
   burst: BurstGroup;
   expanded: boolean;
   onToggle: () => void;
@@ -2128,7 +2167,14 @@ function BurstRow({
     <div className="rr-x-burst">
       <div className="rr-x-burst__head">
         <span className="rr-x-burst__count">{loaded.toLocaleString()}</span>{" "}
-        <span className="rr-x-burst__stream">{streamLabel}</span> <span className="rr-x-burst__inview">in view</span>
+        <span className="rr-x-burst__stream">
+          <ConnectorMark
+            className="mr-1 inline-block size-4 align-[-0.2em]"
+            icon={rep?.connectorId ? connectorIcons[rep.connectorId] : null}
+            name={rep?.connectionDisplayName ?? rep?.connectorId ?? "connector"}
+          />
+          {streamLabel}
+        </span>{" "}<span className="rr-x-burst__inview">in view</span>
       </div>
       {/* Rows ALWAYS mount (preview or full) — the feed never shows zero content.
           The single reveal container (rr-x-burst__rows) plays the design-system
@@ -2138,6 +2184,7 @@ function BurstRow({
           const param = explorerPeekParam(entry);
           return (
             <FeedRow
+              connectorIcons={connectorIcons}
               entry={entry}
               key={param}
               onArrow={(direction) => onMoveSelection(param, direction)}
@@ -2414,6 +2461,7 @@ function ZeroResultsRouting({
 }
 
 function FeedDays({
+  connectorIcons,
   dayGroups,
   lens,
   chipsPresent,
@@ -2429,6 +2477,7 @@ function FeedDays({
   selectedPeekParam,
   zeroResultsProps,
 }: {
+  connectorIcons: Readonly<Record<string, ConnectorIconLike | null | undefined>>;
   chipsPresent: boolean;
   chips: readonly FilterChip[];
   dayGroups: readonly DayGroupWithBursts[];
@@ -2507,6 +2556,7 @@ function FeedDays({
                 const { burst } = unit;
                 return (
                   <BurstRow
+                    connectorIcons={connectorIcons}
                     burst={burst}
                     expanded={expandedBursts.has(burst.key)}
                     key={burst.key}
@@ -2524,6 +2574,7 @@ function FeedDays({
               const param = explorerPeekParam(entry);
               return (
                 <FeedRow
+                  connectorIcons={connectorIcons}
                   entry={entry}
                   key={param}
                   onArrow={(direction) => onMoveSelection(param, direction)}
@@ -2552,6 +2603,7 @@ function FeedDays({
 // (YNAB "Pending", Stripe/Gmail "Scheduled", Things/Todoist "Upcoming").
 
 function UpcomingSection({
+  connectorIcons,
   upcoming,
   upcomingCount,
   loadedCount,
@@ -2569,6 +2621,7 @@ function UpcomingSection({
   selectedPeekParam,
   lens,
 }: {
+  connectorIcons: Readonly<Record<string, ConnectorIconLike | null | undefined>>;
   upcoming: readonly DayGroupWithBursts[];
   upcomingCount: number;
   /** How many of the N upcoming records are loaded into `upcoming` so far. */
@@ -2626,6 +2679,7 @@ function UpcomingSection({
           <FeedDays
             chips={[]}
             chipsPresent={false}
+            connectorIcons={connectorIcons}
             dayGroups={visibleDays}
             expandedBursts={expandedBursts}
             lens={lens}
@@ -2681,6 +2735,7 @@ function UpcomingSection({
 // ─── Feed body (day groups + escape ramps + descriptor Load-more) ──
 
 function FeedBody({
+  connectorIcons,
   data,
   visibleFeed,
   chips,
@@ -2700,6 +2755,7 @@ function FeedBody({
   onLoadMore,
   onLoadMoreUpcoming,
 }: {
+  connectorIcons: Readonly<Record<string, ConnectorIconLike | null | undefined>>;
   data: RecordsExplorerData;
   /** The CLIENT-FILTERED feed (server slice narrowed by Explore-only operators). */
   visibleFeed: readonly ExplorerFeedEntry[];
@@ -2745,6 +2801,7 @@ function FeedBody({
     <div className="rr-x-days">
       {upcomingCount > 0 ? (
         <UpcomingSection
+          connectorIcons={connectorIcons}
           expandedBursts={expandedBursts}
           hasMore={data.upcomingHasMore && data.upcomingNextCursor !== null}
           isPending={isPending}
@@ -2766,6 +2823,7 @@ function FeedBody({
       <FeedDays
         chips={chips}
         chipsPresent={chipsPresent}
+        connectorIcons={connectorIcons}
         dayGroups={past}
         expandedBursts={expandedBursts}
         lens={data.lens}
@@ -2797,6 +2855,7 @@ function FeedBody({
         <div className="rr-x-see-all-links">
           {data.streamSeeAllLinks.map((link) => (
             <StreamSeeAllLink
+              connectorIcons={connectorIcons}
               key={`${link.connectionId}:${link.stream}`}
               link={link}
               recordsBasePath={recordsBasePath}
@@ -3015,6 +3074,7 @@ function SavedViewTabs({
 
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: ExploreCanvas orchestrates the full workbench state; this cell only swaps the shared record identity renderer.
 export function ExploreCanvas({
+  connectorIcons = {},
   data,
   explorePath,
   order = "newest",
@@ -3771,6 +3831,7 @@ export function ExploreCanvas({
           ) : (
             <>
               <ConnectionFacets
+                connectorIcons={connectorIcons}
                 connections={data.connections}
                 countFor={countForConnection}
                 excluded={excludeConnectionIds}
@@ -3795,7 +3856,12 @@ export function ExploreCanvas({
               </div>
             </>
           )}
-          <StreamFacets groups={streamGroups} onToggle={toggleStream} onToggleExclude={toggleExcludeStream} />
+          <StreamFacets
+            connectorIcons={connectorIcons}
+            groups={streamGroups}
+            onToggle={toggleStream}
+            onToggleExclude={toggleExcludeStream}
+          />
         </div>
         {/* P1: sticky close affordance so users aren't trapped in the mobile rail */}
         <div className="rr-x-rail__close">
@@ -3869,6 +3935,7 @@ export function ExploreCanvas({
         {data.fromSearch && data.query ? (
           <SearchHeader
             buildSearchSortHref={buildSearchSortHref}
+            connectorIcons={connectorIcons}
             data={data}
             onSort={setSearchSort}
             query={data.query}
@@ -3938,6 +4005,7 @@ export function ExploreCanvas({
         <FeedBody
           chips={chips}
           chipsPresent={chips.length > 0}
+          connectorIcons={connectorIcons}
           data={data}
           expandedBursts={expandedBursts}
           explorePath={explorePath}

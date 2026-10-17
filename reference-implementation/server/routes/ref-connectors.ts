@@ -22,6 +22,7 @@
 // `resolveOwnerConnectorNamespace` so the substrate lookup stays a single
 // implementation.
 
+import type { BrowserProfilePurger, BrowserProfilePurgeResult } from "../browser-profile-purge.ts";
 import {
   executeRefConnectorScheduleGet,
   RefConnectorScheduleGetNotFoundError,
@@ -86,6 +87,7 @@ interface ConnectorInstanceRow {
   readonly connectorInstanceId: string;
   readonly createdAt?: string | null;
   readonly displayName?: string | null;
+  readonly ownerSubjectId?: string | null;
   readonly revokedAt?: string | null;
   readonly sourceBinding?: unknown;
   readonly sourceKind?: string | null;
@@ -104,8 +106,16 @@ interface ConnectorNamespace {
   readonly connectorInstanceId: string;
 }
 
+interface ConnectorInstanceTombstoneRow {
+  readonly connectorId: string;
+  readonly ownerSubjectId: string;
+}
+
 interface ConnectorInstanceStore {
   get: (connectorInstanceId: string) => Promise<ConnectorInstanceRow | null> | ConnectorInstanceRow | null;
+  getTombstoneByConnectionId?: (
+    connectorInstanceId: string
+  ) => Promise<ConnectorInstanceTombstoneRow | null> | ConnectorInstanceTombstoneRow | null;
   listByOwner: (ownerSubjectId: string) => Promise<ConnectorInstanceRow[]> | ConnectorInstanceRow[];
   setDisplayName: (
     connectorInstanceId: string,
@@ -156,12 +166,15 @@ interface OwnerNamespaceOptions {
 
 export interface MountRefConnectorsContext {
   canonicalConnectorKey: (value: string | null | undefined) => string | null;
+  // Clears the owner-delete tombstone of the owner's default-account identity
+  // for one connector. Called only by the explicit owner connector-run route.
+  clearDefaultAccountTombstone?: (input: { connectorId: string; ownerSubjectId: string }) => Promise<boolean> | boolean;
   createRequestConnectorInstanceStore: () => ConnectorInstanceStore;
   createTraceContext: (input?: { scenarioId?: string }) => TraceContext;
   // Connection-scoped destructive delete primitive — the SAME cascade the
   // owner-agent bearer delete route delegates to. Resolves + verifies owner
-  // ownership BEFORE any mutation, refuses active-run / default-account with the
-  // existing typed errors, purges exactly one connection's source-of-truth
+  // ownership BEFORE any mutation, refuses an active run with the existing
+  // typed error, purges exactly one connection's source-of-truth
   // records + state, and returns the non-secret deletion summary. Wired with the
   // same injected `purge` phases the bearer route receives so the console path
   // cannot diverge from the agent path.
@@ -209,7 +222,13 @@ export interface MountRefConnectorsContext {
   markConnectorSummaryEvidenceDirty?: (input: { connectorInstanceId: string; reason?: string }) => Promise<void> | void;
   now?: () => string;
   onScheduleMutation?: () => Promise<unknown> | unknown;
+  parkSearchIndexDirtyScope?: (key: { connectorInstanceId: string; stream: string }) => Promise<boolean>;
   pdppError: PdppErrorFn;
+  // Post-commit browser-profile purge for delete and revoke
+  // (server/browser-profile-purge.ts). Never throws; its result is reported in
+  // the response and the audit event.
+  purgeBrowserProfile?: BrowserProfilePurger;
+  rearmSearchIndexDirtyScope?: (key: { connectorInstanceId: string; stream: string }) => Promise<boolean>;
   requireOwnerSession: MiddlewareHandler;
   resolveOwnerConnectorNamespace: (
     req: unknown,
@@ -246,6 +265,7 @@ export interface MountRefConnectorsContext {
     }
   ) => Promise<unknown>;
   setReferenceTraceId: (res: RouteResponse, traceId: string) => void;
+  resetConnectionState?: (input: { connectorInstanceId: string; ownerSubjectId: string }) => Promise<unknown>;
   setScheduleEnabled: (
     connectorId: string,
     enabled: boolean,
@@ -876,6 +896,7 @@ async function executeRunNow(
     force: boolean;
     ownerSubjectId: string | null;
     runAdmission: RunAdmission;
+    tombstoneCleared?: boolean;
   }
 ): Promise<void> {
   assertRemoteControlSupported(namespace);
@@ -908,6 +929,7 @@ async function executeRunNow(
     outcome: "succeeded",
     ownerSubjectId: audit.ownerSubjectId,
     runId: readRunId(started),
+    ...(audit.tombstoneCleared ? { tombstoneCleared: true } : {}),
   });
   res.status(202).json(started);
 }
@@ -924,6 +946,16 @@ export function mountRefConnectorRun(app: AppLike, ctx: MountRefConnectorsContex
       let connectorKey: string | null = null;
       try {
         const connectorId = decodeURIComponent(req.params.connectorId as string);
+        // An owner-session run addressed by connector id is the explicit
+        // "connect this source" action. If the owner deleted the default-account
+        // connection earlier, its tombstone would refuse the re-materialization
+        // below; the owner asking again is the one intent that clears it.
+        // Implicit paths (scheduler, ingest) never reach this and keep the guard.
+        const tombstoneCleared =
+          (await ctx.clearDefaultAccountTombstone?.({
+            connectorId: ctx.canonicalConnectorKey(connectorId) ?? connectorId,
+            ownerSubjectId,
+          })) === true;
         const namespace = await resolveRefConnectorNamespace(ctx, req, connectorId);
         connectionId = namespace.connectorInstanceId;
         connectorKey = ctx.canonicalConnectorKey(namespace.connectorId) ?? namespace.connectorId;
@@ -933,6 +965,7 @@ export function mountRefConnectorRun(app: AppLike, ctx: MountRefConnectorsContex
           force,
           ownerSubjectId,
           runAdmission: "collection",
+          tombstoneCleared,
         });
       } catch (err) {
         await emitConnectionControlAudit(ctx, res, {
@@ -1306,12 +1339,15 @@ async function emitConnectionControlAudit(
       | "owner_agent.connection.run"
       | "owner_agent.connection.revoke"
       | "owner_agent.connection.delete"
-      | "owner_agent.connection.reactivate";
+      | "owner_agent.connection.reactivate"
+      | "owner_agent.connection.browser_profile_purge";
     force?: boolean;
-    operation: "run_now" | "revoke" | "delete" | "reactivate";
+    operation: "run_now" | "revoke" | "delete" | "reactivate" | "purge_browser_profile";
     outcome: "succeeded" | "failed";
     ownerSubjectId?: string | null;
+    profilePurge?: BrowserProfilePurgeResult | null;
     runId?: string | null;
+    tombstoneCleared?: boolean;
     trace?: TraceContext;
   }
 ): Promise<void> {
@@ -1333,6 +1369,8 @@ async function emitConnectionControlAudit(
             run_id: args.runId ?? null,
           }
         : {}),
+      ...(args.tombstoneCleared ? { tombstone_cleared: true } : {}),
+      ...(args.profilePurge ? { profile_purge: args.profilePurge } : {}),
       target_resource: args.operation === "run_now" ? "connection_run" : "connection",
       ...(args.deletionSummary
         ? {
@@ -1401,6 +1439,11 @@ export function mountRefConnectionRevoke(app: AppLike, ctx: MountRefConnectorsCo
         // (-> `store.updateStatus`) now marks summary evidence dirty in the
         // SAME transaction as the status write — a separate post-hoc call
         // here would be redundant, not additive.
+        // Revoke stops future collection, so the logged-in browser session goes
+        // too. A failure is reported, never a failed revoke.
+        const profilePurge = ctx.purgeBrowserProfile
+          ? await ctx.purgeBrowserProfile({ connectorInstanceId: connectionId, connectorKey, ownerSubjectId })
+          : null;
         await emitConnectionControlAudit(ctx, res, {
           connectionId,
           connectorKey,
@@ -1408,6 +1451,7 @@ export function mountRefConnectionRevoke(app: AppLike, ctx: MountRefConnectorsCo
           operation: "revoke",
           outcome: "succeeded",
           ownerSubjectId,
+          profilePurge,
           trace,
         });
         res.status(200).json({
@@ -1415,6 +1459,7 @@ export function mountRefConnectionRevoke(app: AppLike, ctx: MountRefConnectorsCo
           connector_id: connectorKey,
           connector_key: connectorKey,
           object: "ref_connection_revoke",
+          ...(profilePurge ? { profile_purge: profilePurge } : {}),
           revoked_at: revoked.revokedAt ?? stamp,
           status: revoked.status ?? "revoked",
         });
@@ -1434,12 +1479,167 @@ export function mountRefConnectionRevoke(app: AppLike, ctx: MountRefConnectorsCo
   );
 }
 
+// POST /_ref/connections/:connectorInstanceId/browser-profile/purge — owner-
+// session retry of the post-commit browser-profile purge. A delete or revoke
+// reports `profile_purge.status: "failed"` when the purge could not run (for
+// example a browser still held the profile); a second delete or revoke cannot
+// reach the purge again, so this route runs the same purger for a connection
+// that is already removed: revoked (the row still exists) or deleted (its
+// tombstone records the owner and connector). An active connection is refused,
+// because its session is still in use.
+export function mountRefConnectionBrowserProfilePurge(app: AppLike, ctx: MountRefConnectorsContext): void {
+  app.post(
+    "/_ref/connections/:connectorInstanceId/browser-profile/purge",
+    ctx.requireOwnerSession,
+    async (req: RouteRequest, res: RouteResponse) => {
+      const ownerSubjectId = ctx.getOwnerSubjectId(req);
+      let connectionId: string | null = null;
+      let connectorKey: string | null = null;
+      try {
+        connectionId = decodeURIComponent(req.params.connectorInstanceId as string);
+        const store = ctx.createRequestConnectorInstanceStore();
+        const instance = await store.get(connectionId);
+        let connectorId: string | null = null;
+        if (instance) {
+          if (instance.ownerSubjectId === ownerSubjectId && instance.status !== "revoked") {
+            ctx.pdppError(
+              res,
+              409,
+              "connection_not_removed",
+              "This connection is not revoked or deleted, so its browser session is still in use."
+            );
+            return;
+          }
+          connectorId = instance.ownerSubjectId === ownerSubjectId ? instance.connectorId : null;
+        } else {
+          const tombstone = (await store.getTombstoneByConnectionId?.(connectionId)) ?? null;
+          connectorId = tombstone?.ownerSubjectId === ownerSubjectId ? tombstone.connectorId : null;
+        }
+        if (!(connectorId && ctx.purgeBrowserProfile)) {
+          ctx.pdppError(res, 404, "connector_instance_not_found", "No removed connection with this id was found.");
+          return;
+        }
+        connectorKey = ctx.canonicalConnectorKey(connectorId) ?? connectorId;
+        const profilePurge = await ctx.purgeBrowserProfile({
+          connectorInstanceId: connectionId,
+          connectorKey,
+          ownerSubjectId,
+        });
+        await emitConnectionControlAudit(ctx, res, {
+          connectionId,
+          connectorKey,
+          eventType: "owner_agent.connection.browser_profile_purge",
+          operation: "purge_browser_profile",
+          outcome: "succeeded",
+          ownerSubjectId,
+          profilePurge,
+        });
+        res.status(200).json({
+          connection_id: connectionId,
+          connector_key: connectorKey,
+          object: "ref_connection_browser_profile_purge",
+          profile_purge: profilePurge,
+        });
+      } catch (err) {
+        await emitConnectionControlAudit(ctx, res, {
+          connectionId,
+          connectorKey,
+          error: err,
+          eventType: "owner_agent.connection.browser_profile_purge",
+          operation: "purge_browser_profile",
+          outcome: "failed",
+          ownerSubjectId,
+        });
+        ctx.handleError(res, err);
+      }
+    }
+  );
+}
+
+export function mountRefConnectionResetState(app: AppLike, ctx: MountRefConnectorsContext): void {
+  app.post(
+    "/_ref/connections/:connectorInstanceId/reset-state",
+    ctx.requireOwnerSession,
+    async (req: RouteRequest, res: RouteResponse) => {
+      try {
+        if (!ctx.resetConnectionState) throw new Error("Connection state reset is unavailable.");
+        const connectorInstanceId = decodeURIComponent(req.params.connectorInstanceId as string);
+        const ownerSubjectId = ctx.getOwnerSubjectId(req);
+        const namespace = await ctx.resolveOwnerConnectorNamespace(req, null, { connectorInstanceId });
+        const started = (await ctx.resetConnectionState({
+          connectorInstanceId: namespace.connectorInstanceId,
+          ownerSubjectId,
+        })) as { run_id?: unknown };
+        if (typeof started?.run_id !== "string") throw new Error("Reset did not admit a full sync run.");
+        res.status(202).json({
+          connection_id: namespace.connectorInstanceId,
+          connector_id: namespace.connectorId,
+          object: "ref_connection_state_reset",
+          reset: true,
+          run_id: started.run_id,
+        });
+      } catch (error) {
+        ctx.handleError(res, error);
+      }
+    }
+  );
+}
+
+/** Owner-session control of one existing dirty search-index scope. */
+export function mountRefConnectionSearchIndexControl(app: AppLike, ctx: MountRefConnectorsContext): void {
+  const register = (
+    action: "park" | "rearm",
+    mutate:
+      | MountRefConnectorsContext["parkSearchIndexDirtyScope"]
+      | MountRefConnectorsContext["rearmSearchIndexDirtyScope"]
+  ) => {
+    app.post(
+      `/_ref/connections/:connectorInstanceId/search-index/:stream/${action}`,
+      ctx.requireOwnerSession,
+      async (req: RouteRequest, res: RouteResponse) => {
+        try {
+          const connectorInstanceId = decodeURIComponent(req.params.connectorInstanceId as string);
+          const stream = decodeURIComponent(req.params.stream as string);
+          const namespace = await resolveRefConnectionNamespace(ctx, req, connectorInstanceId);
+          const changed = mutate
+            ? await mutate({
+                connectorInstanceId: namespace.connectorInstanceId,
+                stream,
+              })
+            : false;
+          if (!changed) {
+            ctx.pdppError(
+              res,
+              404,
+              "search_index_scope_not_found",
+              "No dirty search-index scope exists for this connection and stream."
+            );
+            return;
+          }
+          res.status(200).json({
+            action,
+            connector_instance_id: namespace.connectorInstanceId,
+            dirty: true,
+            object: "ref_search_index_scope_control",
+            stream,
+          });
+        } catch (err) {
+          ctx.handleError(res, err);
+        }
+      }
+    );
+  };
+
+  register("park", ctx.parkSearchIndexDirtyScope);
+  register("rearm", ctx.rearmSearchIndexDirtyScope);
+}
+
 // DELETE /_ref/connections/:connectorInstanceId — owner-session delete of one
 // configured connection. Delegates to the shared `deleteConnection` cascade
-// (ownership + active-run + default-account guards live in the store), emits a
+// (ownership + active-run guards live in the store), emits a
 // non-secret delete audit with the deletion summary, and returns the summary so
 // the console can confirm what was erased. The store's typed
-// `connection_run_active` / `default_account_delete_unsupported` /
+// `connection_run_active` / `connection_is_grouping_canonical` /
 // `connector_instance_not_found` errors flow through `handleError` unchanged.
 export function mountRefConnectionDelete(app: AppLike, ctx: MountRefConnectorsContext): void {
   app.delete(
@@ -1463,6 +1663,11 @@ export function mountRefConnectionDelete(app: AppLike, ctx: MountRefConnectorsCo
           connectorInstanceId: connectionId,
           reason: "ref delete removed the connection from canonical state",
         });
+        // The data is gone; now remove the logged-in browser session. A failure
+        // is reported, never a failed delete.
+        const profilePurge = ctx.purgeBrowserProfile
+          ? await ctx.purgeBrowserProfile({ connectorInstanceId: connectionId, connectorKey, ownerSubjectId })
+          : null;
         await emitConnectionControlAudit(ctx, res, {
           connectionId,
           connectorKey,
@@ -1471,6 +1676,7 @@ export function mountRefConnectionDelete(app: AppLike, ctx: MountRefConnectorsCo
           operation: "delete",
           outcome: "succeeded",
           ownerSubjectId,
+          profilePurge,
         });
         res.status(200).json({
           connection_id: summary.connection_id,
@@ -1481,6 +1687,7 @@ export function mountRefConnectionDelete(app: AppLike, ctx: MountRefConnectorsCo
           deleted_stream_count: summary.deleted_stream_count,
           device_refs_cleared: summary.device_refs_cleared,
           object: "ref_connection_delete",
+          ...(profilePurge ? { profile_purge: profilePurge } : {}),
           schedule_deleted: summary.schedule_deleted,
         });
       } catch (err) {

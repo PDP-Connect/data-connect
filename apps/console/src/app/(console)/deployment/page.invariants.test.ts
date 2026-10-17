@@ -34,7 +34,7 @@ test("deployment page does not repeat the connect-an-AI-app card", async () => {
 test("deployment page links to the tokens issuance surface", async () => {
   // The Tokens link in the page header is how an operator navigates from
   // deployment diagnostics to the owner-token issuance flow (the path for
-  // trusted local agents like Daisy).
+  // trusted local agents).
   const src = await readFile(PAGE_FILE, "utf8");
   assert.match(src, TOKENS_LINK_RE);
 });

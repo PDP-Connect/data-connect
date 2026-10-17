@@ -15,12 +15,16 @@
  */
 
 import { stat } from "node:fs/promises";
-import type { CredentialProbeContext, CredentialProbeTransport } from "@pdpp/polyfill-connectors/credential-probe";
-import type { RecoveredStaticSecret } from "@pdpp/polyfill-connectors/static-secret-injection";
+import {
+  loadCredentialProbeHelpers,
+  loadStaticSecretInjectionHelpers as loadOptionalStaticSecretInjectionHelpers,
+} from "./polyfill-connectors-runtime.ts";
 import { resolveProviderAuthRunEnv } from "./stores/provider-auth-run-credentials.ts";
 import { resolveStaticSecretRunEnv, type StaticSecretCredentialStore } from "./stores/static-secret-run-credentials.ts";
 
 type RunEnv = Record<string, string>;
+type CredentialProbeContext = Record<string, unknown>;
+type CredentialProbeTransport = Record<string, unknown>;
 
 interface ConnectorInstance {
   readonly sourceBinding?: unknown;
@@ -43,6 +47,7 @@ type RunEnvResolver = (args: RunEnvResolverArgs) => Promise<RunEnv | null>;
 interface ResolverDependencies {
   readonly createConnectorInstanceCredentialStore: () => ConnectorInstanceCredentialStore;
   readonly createConnectorInstanceStore: () => ConnectorInstanceStore;
+  readonly resolveRegisteredConnectorManifest?: (connectorId: string) => Promise<unknown>;
 }
 
 interface ManualUploadBinding {
@@ -65,17 +70,11 @@ function isManualUploadBinding(value: unknown): value is ManualUploadBinding {
 
 // Lazily loads the pure static-secret injection helpers from the
 // polyfill-connectors runner slice. The reference server reaches connector
-// code by relative path (it does not declare the package as a dependency), so
-// this mirrors the controller's `await import("../../packages/...")` idiom and
-// caches the resolved module after the first run.
-let staticSecretInjectionModulePromise: Promise<
-  typeof import("@pdpp/polyfill-connectors/static-secret-injection")
-> | null = null;
+// code through the optional connector-runtime boundary. Development and
+// conformance runs may provide the polyfill package; production uses the
+// boundary's empty/fail-closed behavior until a catalog connector is active.
 export function loadStaticSecretInjectionHelpers() {
-  if (!staticSecretInjectionModulePromise) {
-    staticSecretInjectionModulePromise = import("@pdpp/polyfill-connectors/static-secret-injection");
-  }
-  return staticSecretInjectionModulePromise;
+  return loadOptionalStaticSecretInjectionHelpers();
 }
 
 // Build the route-facing static-secret credential prober. The reference-only
@@ -87,13 +86,12 @@ export function loadStaticSecretInjectionHelpers() {
 // or grant-scoped reads. Resolved once at startup and injected, so the route
 // stays synchronous and tests inject a deterministic double instead.
 export async function buildStaticSecretCredentialProber() {
-  const [probe, transportModule, adapter] = await Promise.all([
-    import("@pdpp/polyfill-connectors/credential-probe"),
-    import("@pdpp/polyfill-connectors/credential-probe-transport"),
+  const [probe, adapter] = await Promise.all([
+    loadCredentialProbeHelpers(),
     import("./stores/static-secret-credential-probe.ts"),
   ]);
   return adapter.createStaticSecretCredentialProber({
-    createLiveCredentialProbeTransport: transportModule.createLiveCredentialProbeTransport,
+    createLiveCredentialProbeTransport: probe.createLiveCredentialProbeTransport,
     hasCredentialProbe: probe.hasCredentialProbe,
     probeCredential: async ({ connectorKey, context, secret, transport: probeTransport }) =>
       probe.probeCredential({
@@ -120,23 +118,18 @@ export async function buildStaticSecretCredentialProber() {
 function buildControllerStaticSecretRunEnvResolver({
   createConnectorInstanceStore,
   createConnectorInstanceCredentialStore,
+  resolveRegisteredConnectorManifest,
 }: ResolverDependencies): RunEnvResolver {
   return async ({ connectorId, connectorInstanceId, ownerSubjectId }: RunEnvResolverArgs) => {
-    const { isStaticSecretCaptureOptional, isStaticSecretConnector, buildConnectionScopedSecretEnv } =
-      await loadStaticSecretInjectionHelpers();
-    if (!isStaticSecretConnector(connectorId)) {
-      return null;
-    }
-    const credentialStore = createConnectorInstanceCredentialStore();
-    const connectorInstance = await createConnectorInstanceStore().get(connectorInstanceId);
+    const [manifest, connectorInstance] = await Promise.all([
+      resolveRegisteredConnectorManifest?.(connectorId).catch(() => null) ?? Promise.resolve(null),
+      createConnectorInstanceStore().get(connectorInstanceId),
+    ]);
     return await resolveStaticSecretRunEnv({
-      buildConnectionScopedSecretEnv: (id: string, recovered: object) =>
-        buildConnectionScopedSecretEnv(id, recovered as RecoveredStaticSecret, connectorInstance?.sourceBinding),
       connectorId,
       connectorInstanceId,
-      credentialStore,
-      isStaticSecretCaptureOptional,
-      isStaticSecretConnector,
+      credentialStore: createConnectorInstanceCredentialStore(),
+      manifest,
       ownerSubjectId,
       sourceBinding: connectorInstance?.sourceBinding ?? null,
     });
@@ -225,10 +218,12 @@ function buildControllerProviderAuthRunEnvResolver({
 export function buildConnectionScopedRunEnvResolver({
   createConnectorInstanceStore,
   createConnectorInstanceCredentialStore,
+  resolveRegisteredConnectorManifest,
 }: ResolverDependencies): RunEnvResolver {
   const staticSecretResolver = buildControllerStaticSecretRunEnvResolver({
     createConnectorInstanceCredentialStore,
     createConnectorInstanceStore,
+    ...(resolveRegisteredConnectorManifest ? { resolveRegisteredConnectorManifest } : {}),
   });
   const providerAuthResolver = buildControllerProviderAuthRunEnvResolver({
     createConnectorInstanceCredentialStore,

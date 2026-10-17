@@ -15,7 +15,7 @@
  * 1. The destination address is a global-unicast address, not merely "not on
  *    a small deny list." A deny list is inherently incomplete: IANA carves
  *    out many special-purpose ranges (benchmarking 198.18.0.0/15, the three
- *    TEST-NET ranges, AS112, AMT, and their IPv6 equivalents, plus IPv6-only
+ *    TEST-NET ranges, and their IPv6 equivalents, plus IPv6-only
  *    ranges like local-use NAT64 translation and SRv6 SIDs) that are not
  *    globally reachable but also are not RFC 1918 private space, loopback,
  *    or link-local — a hand-maintained "block these known-bad ranges" list
@@ -90,7 +90,7 @@ import { IPV4_SPECIAL_PURPOSE_ROWS, IPV6_SPECIAL_PURPOSE_ROWS } from "./iana-spe
  */
 export const MAX_VALIDATED_ADDRESSES = 8;
 
-type Cidr = [ipaddr.IPv4 | ipaddr.IPv6, number];
+type Cidr = [ipaddr.IPv4, number] | [ipaddr.IPv6, number];
 type CidrTable = [Cidr, boolean | null][];
 export type DnsLookupAll = (hostname: string, options: { all: true }) => Promise<Array<{ address: string }>>;
 type AddressResolution =
@@ -118,11 +118,11 @@ function defaultDnsLookup(hostname: string, options: { all: true }): Promise<Arr
 // for CIDR containment matching (`ip.match(cidr)`), never for its own
 // `range()` classification.
 const IPV4_CIDR_TABLE: CidrTable = IPV4_SPECIAL_PURPOSE_ROWS.map(([cidr, globallyReachable]) => [
-  ipaddr.parseCIDR(cidr),
+  ipaddr.IPv4.parseCIDR(cidr),
   globallyReachable,
 ]);
 const IPV6_CIDR_TABLE: CidrTable = IPV6_SPECIAL_PURPOSE_ROWS.map(([cidr, globallyReachable]) => [
-  ipaddr.parseCIDR(cidr),
+  ipaddr.IPv6.parseCIDR(cidr),
   globallyReachable,
 ]);
 
@@ -132,14 +132,28 @@ const IPV6_CIDR_TABLE: CidrTable = IPV6_SPECIAL_PURPOSE_ROWS.map(([cidr, globall
 // doc: the registry's own Globally Reachable value for 2002::/16 is N/A, not
 // True, so it is not registry-affirmed reachable and must not be
 // conditionally allowed based on payload inspection).
-const SIX_TO_FOUR_CIDR = ipaddr.parseCIDR("2002::/16");
+const SIX_TO_FOUR_CIDR = ipaddr.IPv6.parseCIDR("2002::/16");
 
 // The NAT64 global-use row (64:ff9b::/96) specifically — this one IS
 // registry-affirmed reachable (Globally Reachable: True) and therefore does
 // get its embedded IPv4 payload unwrapped and recursively checked, unlike
 // 6to4. 64:ff9b:1::/48 (local-use, RFC 8215) is a *different* CIDR block and
 // is denied outright via the general table below, with no unwrapping.
-const NAT64_GLOBAL_USE_CIDR = ipaddr.parseCIDR("64:ff9b::/96");
+const NAT64_GLOBAL_USE_CIDR = ipaddr.IPv6.parseCIDR("64:ff9b::/96");
+
+function matchesCidr(addr: ipaddr.IPv4 | ipaddr.IPv6, cidr: Cidr): boolean {
+  const [network, prefixLength] = cidr;
+  if (addr instanceof ipaddr.IPv4 && network instanceof ipaddr.IPv4) {
+    return addr.match(network, prefixLength);
+  }
+  if (addr instanceof ipaddr.IPv6 && network instanceof ipaddr.IPv6) {
+    return addr.match(network, prefixLength);
+  }
+  if (addr instanceof ipaddr.IPv4) {
+    throw new Error("ipaddr: cannot match ipv4 address with non-ipv4 one");
+  }
+  throw new Error("ipaddr: cannot match ipv6 address with non-ipv6 one");
+}
 
 /**
  * Extract the 4 bytes starting at `byteOffset` from an IPv6 address's byte
@@ -176,7 +190,7 @@ function lookupSpecialPurposeRow(addr: ipaddr.IPv4 | ipaddr.IPv6, table: CidrTab
   let bestPrefixLength = -1;
   for (const [cidr, globallyReachable] of table) {
     const [, prefixLength] = cidr;
-    if (prefixLength > bestPrefixLength && addr.match(cidr)) {
+    if (prefixLength > bestPrefixLength && matchesCidr(addr, cidr)) {
       best = globallyReachable;
       bestPrefixLength = prefixLength;
     }
@@ -231,10 +245,10 @@ export function isGlobalUnicastAddress(ip: unknown): boolean {
   }
 
   if (addr.kind() === "ipv6") {
-    if (addr.match(SIX_TO_FOUR_CIDR)) {
+    if (matchesCidr(addr, SIX_TO_FOUR_CIDR)) {
       return false;
     }
-    if (addr.match(NAT64_GLOBAL_USE_CIDR)) {
+    if (matchesCidr(addr, NAT64_GLOBAL_USE_CIDR)) {
       const embedded = extractEmbeddedIpv4(addr, 12);
       return embedded !== null && isGlobalUnicastAddress(embedded);
     }

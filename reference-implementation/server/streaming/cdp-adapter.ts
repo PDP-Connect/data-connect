@@ -21,12 +21,13 @@ import type {
  * reference server should not pull a heavyweight browser-automation library
  * in just to relay input and frames.
  *
- * The adapter resolves the page-target ws URL through the
- * `(runId, interactionId)`-keyed registry (`run-target-registry.js`), which
- * the connector runtime / browser binding populates when a manual_action
- * interaction is created. Legacy env-var entry points
- * (`PDPP_RUN_INTERACTION_CDP_WS_URL`, `PDPP_RUN_INTERACTION_CDP_HTTP_URL`)
- * have been removed; the registry path is the only supported wireup.
+ * The adapter resolves a managed browser surface's CDP HTTP endpoint through
+ * Chrome's `/json/list` endpoint. For connector-owned targets, it resolves the
+ * page-target ws URL through the `(runId, interactionId)` registry
+ * (`run-target-registry.js`), which the connector runtime / browser binding
+ * populates when a manual_action interaction is created. Legacy env-var
+ * entry points (`PDPP_RUN_INTERACTION_CDP_WS_URL`,
+ * `PDPP_RUN_INTERACTION_CDP_HTTP_URL`) remain removed.
  *
  * Surface mechanics are delegated to Remote Surface 1.5.1's assembled CDP
  * backend. The small adapter below only translates that backend's lifecycle
@@ -50,6 +51,7 @@ import type {
  * surfaces as a 4xx on the input POST).
  */
 import { mapInputEventToCdp } from "./cdp-companion.ts";
+import { parseReferenceWireInputPayload } from "./protocol-wire.ts";
 
 type CdpMethod = string;
 
@@ -153,6 +155,10 @@ type CdpProtocolFrameHandler = (frame: PageScreencastFrameEvent) => void;
 type CdpEventHandler = (event: CdpOutputEvent) => void;
 type CdpLogger = Record<string, ((data: CdpJsonObject) => void) | undefined>;
 type CodedError = Error & { code?: string; cdp?: CdpError };
+interface BrowserSurfaceStreamingTarget {
+  readonly backend: string;
+  readonly cdp_http_url?: string;
+}
 interface CdpCompanion {
   ackFrame: (sessionId: number) => Promise<void>;
   readonly browser_session_id: string;
@@ -294,6 +300,39 @@ function isNonEmptyString(value: unknown): value is string {
 
 function isObject(value: unknown): value is CdpJsonObject {
   return value !== null && typeof value === "object";
+}
+
+function hostPageTargetResolver(cdpHttpUrl: string, resolveExactTarget: ResolveTarget): ResolveTarget {
+  return async (runId, interactionId) => {
+    let endpoint: URL;
+    try {
+      endpoint = new URL(cdpHttpUrl);
+      if ((endpoint.protocol !== "http:" && endpoint.protocol !== "https:") || endpoint.username || endpoint.password) {
+        throw new Error("unsupported CDP endpoint");
+      }
+    } catch {
+      throw codedError("Host Chrome DevTools endpoint is invalid", "host_cdp_unavailable");
+    }
+    const wsUrl = await Promise.resolve(resolveExactTarget(runId, interactionId));
+    if (typeof wsUrl !== "string") {
+      throw codedError("Host Chrome has no streamable page target", "streaming_target_unregistered");
+    }
+    let page: URL;
+    try {
+      page = new URL(wsUrl);
+    } catch {
+      throw codedError("Host Chrome page target is invalid", "streaming_target_unregistered");
+    }
+    const endpointPort = endpoint.port || (endpoint.protocol === "https:" ? "443" : "80");
+    const pagePort = page.port || (page.protocol === "wss:" ? "443" : "80");
+    const compatibleProtocols =
+      (endpoint.protocol === "http:" && page.protocol === "ws:") ||
+      (endpoint.protocol === "https:" && page.protocol === "wss:");
+    if (!compatibleProtocols || endpoint.hostname !== page.hostname || endpointPort !== pagePort) {
+      throw codedError("Registered page does not belong to the leased host browser", "host_cdp_target_mismatch");
+    }
+    return wsUrl;
+  };
 }
 
 /**
@@ -669,19 +708,27 @@ function createCdpEventRouter({
  */
 export function createDefaultStreamingCompanionFactory({
   resolveTargetForInteraction,
+  fetchImpl: _fetchImpl = globalThis.fetch,
   WebSocketCtor = globalThis.WebSocket,
   logger,
   commandTimeoutMs,
   openTimeoutMs,
 }: {
   resolveTargetForInteraction?: ResolveTarget;
+  fetchImpl?: typeof fetch;
   WebSocketCtor?: CdpSocketConstructor;
   logger?: CdpLogger | undefined;
   commandTimeoutMs?: number | undefined;
   openTimeoutMs?: number | undefined;
 } = {}):
-  | ((args: { run_id?: string; interaction_id?: string; browser_session_id: string }) => CdpCompanion | null)
+  | ((args: {
+      run_id?: string;
+      interaction_id?: string;
+      browser_session_id: string;
+      target?: BrowserSurfaceStreamingTarget | null;
+    }) => CdpCompanion | null)
   | null {
+  void _fetchImpl;
   if (typeof resolveTargetForInteraction !== "function") {
     return null;
   }
@@ -689,18 +736,24 @@ export function createDefaultStreamingCompanionFactory({
     throw new Error("createDefaultStreamingCompanionFactory: no WebSocket constructor available");
   }
 
-  return ({ run_id, interaction_id, browser_session_id }) => {
+  return ({ run_id, interaction_id, browser_session_id, target }) => {
     const identity = { interaction_id, run_id };
     if (!hasInteractionIdentity(identity)) {
       return null;
     }
+    const targetResolver =
+      target?.backend === "cdp"
+        ? typeof target.cdp_http_url === "string"
+          ? hostPageTargetResolver(target.cdp_http_url, resolveTargetForInteraction)
+          : () => null
+        : resolveTargetForInteraction;
     return createResolvedCompanion({
       browser_session_id,
       commandTimeoutMs,
       interaction_id: identity.interaction_id,
       logger,
       openTimeoutMs,
-      resolveTargetForInteraction,
+      resolveTargetForInteraction: targetResolver,
       run_id: identity.run_id,
       WebSocketCtor,
     });
@@ -1368,6 +1421,7 @@ export function createCdpCompanion({
 
   // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: This adapter deliberately keeps the three assembled-session channels and the legacy CDP fallback in one explicit dispatch boundary.
   async function dispatch(event: unknown): Promise<void> {
+    event = parseReferenceWireInputPayload(event);
     if (isObject(event) && typeof event.type === "string") {
       if (event.type === "pointer" || event.type === "keyboard" || event.type === "text") {
         if (!backendLifecycle) {

@@ -13,8 +13,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import test from "node:test";
-// biome-ignore lint/correctness/noUnresolvedImports: test-only raw SQLite instrumentation.
-import Database from "better-sqlite3";
+import Database from "./helpers/sqlite-driver.ts";
 
 import { closeDb, getDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";

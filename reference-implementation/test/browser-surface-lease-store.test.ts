@@ -9,8 +9,7 @@ import { join } from "node:path";
 import test from "node:test";
 // biome-ignore lint/correctness/noUnresolvedImports: the test runner resolves this runtime fixture import outside Biome static resolution.
 import type { BrowserSurfaceLease } from "@opendatalabs/remote-surface/leases";
-// biome-ignore lint/correctness/noUnresolvedImports: the test runner resolves this runtime fixture import outside Biome static resolution.
-import Database from "better-sqlite3";
+import Database from "./helpers/sqlite-driver.ts";
 import { Pool } from "pg";
 import { closeDb, getDb, initDb } from "../server/db.ts";
 import { closePostgresStorage, initPostgresStorage, postgresQuery } from "../server/postgres-storage.ts";

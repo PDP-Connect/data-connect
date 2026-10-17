@@ -30,9 +30,11 @@ const TOP_LEVEL_REGEX_2 = /owner-agent/i;
  *   - idempotency (I4): first delete 200, second 404 connector_instance_not_found;
  *   - foreign / unknown (I5): foreign-owner and unknown ids → 404, no
  *     cross-owner deletion, no existence leak;
- *   - default-account no-resurrection (I6 / Decision 1 fallback): a
- *     default-account connection is refused with default_account_delete_unsupported
- *     so its deterministic id cannot silently re-materialize;
+ *   - default-account delete (I6): a default-account connection is deletable;
+ *     the cascade erases its cursor and browser profile and writes a tombstone
+ *     so implicit materialization cannot silently re-create it, while an
+ *     explicit owner re-connect clears the tombstone and starts from an empty
+ *     cursor;
  *   - active-run refusal (I7): delete under an active-run lease → 409
  *     connection_run_active, no rows erased;
  *   - grants untouched (I10): a disclosure grant for the connector type is
@@ -47,7 +49,10 @@ const TOP_LEVEL_REGEX_2 = /owner-agent/i;
  */
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { createServer, type IncomingMessage } from "node:http";
+import { hostname, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -64,6 +69,7 @@ import {
   makeDefaultAccountConnectorInstanceId,
 } from "../server/stores/connector-instance-store.ts";
 import { createSqliteSchedulerStore } from "../server/stores/scheduler-store.ts";
+import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REFERENCE_IMPL_DIR = join(__dirname, "..");
@@ -124,6 +130,7 @@ async function withServer(
     asPort: 0,
     dbPath: ":memory:",
     ownerAuthPassword: "",
+    preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
     quiet: true,
     rsPort: 0,
   })) as StartedServer;
@@ -950,6 +957,11 @@ test("owner-agent delete refuses while an active run lease exists (I7) and erase
     const del = await deleteConnection(rsUrl, ownerToken, `/v1/owner/connections/${cin}`);
     assert.equal(del.status, 409);
     assert.equal(deleteBody(del).error?.code, "connection_run_active");
+    assert.equal(
+      (deleteBody(del).error as Record<string, unknown> | undefined)?.active_run_id,
+      "run_cin_running",
+      "the refusal names the in-flight run so the console can cancel it"
+    );
 
     // Nothing erased: row, records, and the active-run lease all survive.
     assert.equal(getInstance(cin)?.status, "active", "row survives refused delete");
@@ -963,33 +975,447 @@ test("owner-agent delete refuses while an active run lease exists (I7) and erase
   });
 });
 
-test("owner-agent delete refuses a default-account connection (I6) so its deterministic id cannot re-materialize", async () => {
+// Points the local browser-profile purge at a throwaway root for one test.
+async function withProfileRoot(fn: (root: string) => Promise<void>): Promise<void> {
+  const previous = process.env.PDPP_BROWSER_PROFILE_ROOT;
+  const root = mkdtempSync(join(tmpdir(), "pdpp-profile-purge-"));
+  process.env.PDPP_BROWSER_PROFILE_ROOT = root;
+  try {
+    await fn(root);
+  } finally {
+    if (previous === undefined) {
+      delete process.env.PDPP_BROWSER_PROFILE_ROOT;
+    } else {
+      process.env.PDPP_BROWSER_PROFILE_ROOT = previous;
+    }
+    rmSync(root, { force: true, recursive: true });
+  }
+}
+
+function seedProfileDir(root: string, name: string): string {
+  const dir = join(root, name);
+  mkdirSync(join(dir, "Default"), { recursive: true });
+  writeFileSync(join(dir, "Default", "Cookies"), "session-cookie-fixture");
+  return dir;
+}
+
+function seedConnectorState(connectorId: string, connectorInstanceId: string, stream: string): void {
+  getDb()
+    .prepare(
+      "INSERT INTO connector_state(connector_id, connector_instance_id, stream, state_json, updated_at) VALUES(?, ?, ?, ?, ?)"
+    )
+    .run(connectorId, connectorInstanceId, stream, JSON.stringify({ cursor: "2026-05-30" }), NOW);
+  getDb()
+    .prepare(
+      "INSERT INTO grant_connector_state(grant_id, connector_id, connector_instance_id, stream, state_json, updated_at) VALUES(?, ?, ?, ?, ?, ?)"
+    )
+    .run("grt_fixture", connectorId, connectorInstanceId, stream, JSON.stringify({ cursor: "2026-05-30" }), NOW);
+}
+
+function countTombstones(connectorInstanceId: string): number {
+  return (
+    getDb()
+      .prepare("SELECT COUNT(*) AS n FROM connector_instance_tombstones WHERE connector_instance_id = ?")
+      .get(connectorInstanceId) as { n: number }
+  ).n;
+}
+
+test("owner-agent delete erases a default-account connection (I6): records, cursor, attention, browser profile; tombstone blocks implicit re-creation", async () => {
+  await withProfileRoot(async (profileRoot) => {
+    await withServer(async ({ asUrl, rsUrl }) => {
+      const manifest = await registerConnector(asUrl, loadReferenceManifest("github"));
+      const connectorKey = canonicalConnectorKey(manifest.connector_id);
+      assert.ok(connectorKey, "expected a canonical connector key");
+      const stream = manifest.streams[0]?.name;
+      assert.ok(stream, "expected the manifest to declare at least one stream");
+      const store = createSqliteConnectorInstanceStore();
+      const defaultId = makeDefaultAccountConnectorInstanceId(OWNER_SUBJECT_ID, connectorKey);
+      await store.ensureDefaultAccountConnection({
+        connectorId: connectorKey,
+        displayName: manifest.display_name || connectorKey,
+        now: NOW,
+        ownerSubjectId: OWNER_SUBJECT_ID,
+      });
+      assert.equal(getInstance(defaultId)?.status, "active");
+
+      const storageTarget = { connector_id: connectorKey, connector_instance_id: defaultId };
+      await ingestRecord(storageTarget, { data: { id: "rec_1", name: "alpha" }, key: "rec_1", stream });
+      seedAttention({ attentionId: "att_default", connectorId: connectorKey, connectorInstanceId: defaultId });
+      seedConnectorState(connectorKey, defaultId, stream);
+      seedSchedule(defaultId, connectorKey);
+      const profileDir = seedProfileDir(profileRoot, `github__${defaultId}`);
+      const siblingProfileDir = seedProfileDir(profileRoot, "github__cin_other_connection");
+      assert.equal(countRows("records", defaultId), 1, "records before");
+      assert.equal(countRows("connector_state", defaultId), 1, "cursor before");
+      assert.equal(countRows("grant_connector_state", defaultId), 1, "grant cursor before");
+      assert.equal(countRows("connector_attention_records", defaultId), 1, "attention before");
+
+      const ownerToken = await issueOwnerToken(asUrl);
+      const del = await deleteConnection(rsUrl, ownerToken, `/v1/owner/connections/${defaultId}`);
+      assert.equal(del.status, 200, JSON.stringify(del.body));
+      const body = deleteBody(del);
+      assert.equal(body.deleted, true);
+      assert.equal(body.deleted_record_count, 1);
+      assert.deepEqual(body.profile_purge, { removed: 1, status: "purged", target: "local" });
+
+      assert.equal(getInstance(defaultId), null, "connector_instances row gone");
+      assert.equal(countRows("records", defaultId), 0, "records erased");
+      assert.equal(countRows("connector_state", defaultId), 0, "cursor erased");
+      assert.equal(countRows("grant_connector_state", defaultId), 0, "grant cursor erased");
+      assert.equal(countRows("connector_attention_records", defaultId), 0, "attention erased");
+      assert.equal(scheduleRowCount(defaultId), 0, "schedule erased");
+      assert.equal(countTombstones(defaultId), 1, "tombstone written");
+      assert.equal(existsSync(profileDir), false, "the connection's browser profile is removed");
+      assert.equal(existsSync(siblingProfileDir), true, "another connection's profile is untouched");
+
+      const audit = findDeleteAuditEvent(del.resp);
+      assert.equal(audit.status, "succeeded");
+      assert.deepEqual((audit.data as Record<string, unknown>).profile_purge, {
+        removed: 1,
+        status: "purged",
+        target: "local",
+      });
+
+      // Implicit materialization (scheduler / ingest) must not bring it back.
+      await assert.rejects(
+        async () =>
+          await store.ensureDefaultAccountConnection({
+            connectorId: connectorKey,
+            now: NOW,
+            ownerSubjectId: OWNER_SUBJECT_ID,
+          }),
+        (err: unknown) => (err as { code?: string }).code === "connection_tombstoned"
+      );
+      assert.equal(getInstance(defaultId), null, "no silent re-creation");
+    });
+  });
+});
+
+test("an explicit owner re-connect after a default-account delete re-creates the connection with an empty cursor", async () => {
   await withServer(async ({ asUrl, rsUrl }) => {
     const manifest = await registerConnector(asUrl, loadReferenceManifest("github"));
     const connectorKey = canonicalConnectorKey(manifest.connector_id);
     assert.ok(connectorKey, "expected a canonical connector key");
+    const stream = manifest.streams[0]?.name;
+    assert.ok(stream, "expected the manifest to declare at least one stream");
     const store = createSqliteConnectorInstanceStore();
     const defaultId = makeDefaultAccountConnectorInstanceId(OWNER_SUBJECT_ID, connectorKey);
-    await store.ensureDefaultAccountConnection({
-      connectorId: connectorKey,
-      displayName: manifest.display_name || connectorKey,
-      now: NOW,
-      ownerSubjectId: OWNER_SUBJECT_ID,
-    });
-    assert.equal(getInstance(defaultId)?.status, "active");
+    await store.ensureDefaultAccountConnection({ connectorId: connectorKey, now: NOW, ownerSubjectId: OWNER_SUBJECT_ID });
+    seedConnectorState(connectorKey, defaultId, stream);
 
     const ownerToken = await issueOwnerToken(asUrl);
     const del = await deleteConnection(rsUrl, ownerToken, `/v1/owner/connections/${defaultId}`);
-    assert.equal(del.status, 409);
-    assert.equal(deleteBody(del).error?.code, "default_account_delete_unsupported");
+    assert.equal(del.status, 200, JSON.stringify(del.body));
 
-    // The default-account row is untouched (still active) — not hard-deleted and
-    // therefore not subject to silent re-materialization.
-    assert.equal(getInstance(defaultId)?.status, "active", "default-account row untouched");
+    // The explicit connect path (POST /_ref/connectors/:id/run) clears the
+    // tombstone, then materializes the default account again.
+    assert.equal(
+      store.clearDefaultAccountTombstone({ connectorId: connectorKey, ownerSubjectId: OWNER_SUBJECT_ID }),
+      true
+    );
+    assert.equal(countTombstones(defaultId), 0);
+    const readded = await store.ensureDefaultAccountConnection({
+      connectorId: connectorKey,
+      now: NOW,
+      ownerSubjectId: OWNER_SUBJECT_ID,
+    });
+    assert.equal(readded.connectorInstanceId, defaultId, "same deterministic id");
+    assert.equal(readded.status, "active");
+    assert.equal(countRows("connector_state", defaultId), 0, "the re-added source starts with no cursor (full backfill)");
+    assert.equal(
+      store.clearDefaultAccountTombstone({ connectorId: connectorKey, ownerSubjectId: OWNER_SUBJECT_ID }),
+      false,
+      "clearing is idempotent"
+    );
+  });
+});
 
-    const audit = findDeleteAuditEvent(del.resp);
-    assert.equal(audit.status, "failed");
-    assert.equal(auditData(audit).error?.code, "default_account_delete_unsupported");
+test("owner-agent revoke purges the connection's browser profile and keeps its records", async () => {
+  await withProfileRoot(async (profileRoot) => {
+    await withServer(async ({ asUrl, rsUrl }) => {
+      const manifest = await registerConnector(asUrl, loadReferenceManifest("spotify"));
+      const connectorKey = canonicalConnectorKey(manifest.connector_id);
+      assert.ok(connectorKey, "expected a canonical connector key");
+      const stream = manifest.streams[0]?.name;
+      assert.ok(stream);
+      const cin = "cin_revoke_profile";
+      await seedInstance({ connectorId: connectorKey, connectorInstanceId: cin, displayName: "R", sourceBindingKey: "r@x" });
+      await ingestRecord(
+        { connector_id: connectorKey, connector_instance_id: cin },
+        { data: { id: "rec_1", name: "kept" }, key: "rec_1", stream }
+      );
+      const profileDir = seedProfileDir(profileRoot, `spotify__${cin}`);
+
+      const ownerToken = await issueOwnerToken(asUrl);
+      const revoke = await fetchJson(`${rsUrl}/v1/owner/connections/${cin}/revoke`, {
+        headers: { Authorization: `Bearer ${ownerToken}`, "Content-Type": "application/json" },
+        method: "POST",
+      });
+      assert.equal(revoke.status, 200, JSON.stringify(revoke.body));
+      assert.deepEqual((revoke.body as Record<string, unknown>).profile_purge, {
+        removed: 1,
+        status: "purged",
+        target: "local",
+      });
+      assert.equal(existsSync(profileDir), false, "browser profile removed on revoke");
+      assert.equal(getInstance(cin)?.status, "revoked");
+      assert.equal(countRows("records", cin), 1, "revoke keeps records");
+    });
+  });
+});
+
+// A live stand-in for the browser that holds a profile: SingletonLock names
+// this host and the child's pid, exactly as Chromium writes it.
+async function withLiveBrowserLock(profileDir: string, fn: (stop: () => Promise<void>) => Promise<void>): Promise<void> {
+  const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+  const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
+  symlinkSync(`${hostname()}-${child.pid}`, join(profileDir, "SingletonLock"));
+  const stop = async () => {
+    child.kill("SIGKILL");
+    await exited;
+  };
+  try {
+    await fn(stop);
+  } finally {
+    await stop();
+  }
+}
+
+function purgeOf(result: JsonResult): Record<string, unknown> | undefined {
+  return (result.body as { profile_purge?: Record<string, unknown> } | null)?.profile_purge;
+}
+
+async function retryPurge(asUrl: string, connectionId: string): Promise<JsonResult> {
+  return await fetchJson(`${asUrl}/_ref/connections/${encodeURIComponent(connectionId)}/browser-profile/purge`, {
+    method: "POST",
+  });
+}
+
+test("a delete that finds a live browser reports the failed purge; the retry route removes the session after the run ends", async () => {
+  await withProfileRoot(async (profileRoot) => {
+    await withServer(async ({ asUrl }) => {
+      await registerConnector(asUrl, loadReferenceManifest("spotify"));
+      const cin = "cin_purge_live";
+      await seedInstance({ connectorId: "spotify", connectorInstanceId: cin, displayName: "L", sourceBindingKey: "l@x" });
+      const profileDir = seedProfileDir(profileRoot, `spotify__${cin}`);
+
+      await withLiveBrowserLock(profileDir, async (stopBrowser) => {
+        const del = await fetchJson(`${asUrl}/_ref/connections/${cin}`, { method: "DELETE" });
+        assert.equal(del.status, 200, JSON.stringify(del.body));
+        assert.equal(purgeOf(del)?.status, "failed");
+        assert.equal(purgeOf(del)?.error_code, "profile_purge_in_use");
+        assert.doesNotMatch(String(purgeOf(del)?.message), /again/, "the owner is not told to remove again");
+        assert.equal(existsSync(join(profileDir, "Default", "Cookies")), true, "the live session is left alone");
+        assert.equal(getInstance(cin), null, "the delete itself committed");
+
+        const whileRunning = await retryPurge(asUrl, cin);
+        assert.equal(whileRunning.status, 200, JSON.stringify(whileRunning.body));
+        assert.equal(purgeOf(whileRunning)?.error_code, "profile_purge_in_use");
+
+        await stopBrowser();
+        const afterRun = await retryPurge(asUrl, cin);
+        assert.equal(afterRun.status, 200, JSON.stringify(afterRun.body));
+        assert.deepEqual(purgeOf(afterRun), { removed: 1, status: "purged", target: "local" });
+        assert.equal(existsSync(profileDir), false, "the retry removed the saved session");
+      });
+
+      const again = await retryPurge(asUrl, cin);
+      assert.deepEqual(purgeOf(again), { status: "absent", target: "local" });
+    });
+  });
+});
+
+// The owner's test on the RI (Core) path: two accounts of one connector each
+// keep their own browser profile, and deleting one leaves the other signed in.
+test("deleting one of two connections of a connector removes only its profile; the other still launches on its own", async () => {
+  await withProfileRoot(async (profileRoot) => {
+    await withServer(async ({ asUrl }) => {
+      await registerConnector(asUrl, loadReferenceManifest("spotify"));
+      await seedInstance({ connectorId: "spotify", connectorInstanceId: "cin_acct_a", displayName: "A", sourceBindingKey: "a@x" });
+      await seedInstance({ connectorId: "spotify", connectorInstanceId: "cin_acct_b", displayName: "B", sourceBindingKey: "b@x" });
+      const dirA = seedProfileDir(profileRoot, "spotify__cin_acct_a");
+      const dirB = seedProfileDir(profileRoot, "spotify__cin_acct_b");
+      writeFileSync(join(dirB, "pdpp-session-marker"), "account-b");
+
+      const del = await fetchJson(`${asUrl}/_ref/connections/cin_acct_a`, { method: "DELETE" });
+
+      assert.equal(del.status, 200, JSON.stringify(del.body));
+      assert.deepEqual(purgeOf(del), { removed: 1, status: "purged", target: "local" });
+      assert.equal(existsSync(dirA), false, "the deleted account's profile is gone");
+      assert.equal(readFileSync(join(dirB, "Default", "Cookies"), "utf8"), "session-cookie-fixture");
+
+      // The connector runtime names a connection's profile
+      // `<profileName>__<connectionId>`; launching it for account B reuses B's
+      // surviving directory.
+      const { acquireIsolatedBrowser } = await import("@pdpp/polyfill-connectors/browser-launch");
+      const browser = await acquireIsolatedBrowser({ headless: true, profileName: "spotify__cin_acct_b" });
+      try {
+        const page = await browser.context.newPage();
+        await page.goto("data:text/html,account-b");
+        assert.equal(readFileSync(join(dirB, "pdpp-session-marker"), "utf8"), "account-b");
+        assert.ok(
+          readdirSync(join(dirB, "Default")).length > 1,
+          "Chromium wrote its profile into account B's own directory"
+        );
+        assert.deepEqual(readdirSync(profileRoot), ["spotify__cin_acct_b"]);
+      } finally {
+        await browser.release();
+      }
+      assert.equal(existsSync(dirA), false, "launching B does not recreate A's profile");
+    });
+  });
+});
+
+test("a revoke during a run keeps the profile (no lock needed) and the retry purges it once the run ends", async () => {
+  await withProfileRoot(async (profileRoot) => {
+    await withServer(async ({ asUrl }) => {
+      await registerConnector(asUrl, loadReferenceManifest("spotify"));
+      const cin = "cin_purge_headless";
+      await seedInstance({ connectorId: "spotify", connectorInstanceId: cin, displayName: "H", sourceBindingKey: "h@x" });
+      const profileDir = seedProfileDir(profileRoot, `spotify__${cin}`);
+      seedActiveRun(cin, "spotify");
+
+      const revoke = await fetchJson(`${asUrl}/_ref/connections/${cin}/revoke`, { method: "POST" });
+      assert.equal(revoke.status, 200, JSON.stringify(revoke.body));
+      assert.equal(purgeOf(revoke)?.error_code, "profile_purge_in_use");
+      assert.equal(existsSync(join(profileDir, "Default", "Cookies")), true, "the running browser keeps its profile");
+
+      getDb().prepare("DELETE FROM controller_active_runs WHERE connector_instance_id = ?").run(cin);
+      const retry = await retryPurge(asUrl, cin);
+      assert.deepEqual(purgeOf(retry), { removed: 1, status: "purged", target: "local" });
+      assert.equal(existsSync(profileDir), false);
+    });
+  });
+});
+
+test("a delete clears a dangling SingletonLock left by a dead browser and removes the session", async () => {
+  await withProfileRoot(async (profileRoot) => {
+    await withServer(async ({ asUrl }) => {
+      await registerConnector(asUrl, loadReferenceManifest("spotify"));
+      const cin = "cin_purge_stale";
+      await seedInstance({ connectorId: "spotify", connectorInstanceId: cin, displayName: "S", sourceBindingKey: "s@x" });
+      const profileDir = seedProfileDir(profileRoot, `spotify__${cin}`);
+      symlinkSync("somehost-99999", join(profileDir, "SingletonLock"));
+
+      const del = await fetchJson(`${asUrl}/_ref/connections/${cin}`, { method: "DELETE" });
+
+      assert.equal(del.status, 200, JSON.stringify(del.body));
+      assert.deepEqual(purgeOf(del), { removed: 1, status: "purged", target: "local" });
+      assert.equal(existsSync(profileDir), false);
+    });
+  });
+});
+
+test("the purge retry accepts a revoked connection and refuses an active, unknown, or foreign one", async () => {
+  await withProfileRoot(async (profileRoot) => {
+    await withServer(async ({ asUrl }) => {
+      await registerConnector(asUrl, loadReferenceManifest("spotify"));
+      const revokedId = "cin_purge_revoked";
+      await seedInstance({
+        connectorId: "spotify",
+        connectorInstanceId: revokedId,
+        displayName: "R",
+        sourceBindingKey: "r@x",
+      });
+      const profileDir = seedProfileDir(profileRoot, `spotify__${revokedId}`);
+      await withLiveBrowserLock(profileDir, async (stopBrowser) => {
+        const revoke = await fetchJson(`${asUrl}/_ref/connections/${revokedId}/revoke`, { method: "POST" });
+        assert.equal(revoke.status, 200, JSON.stringify(revoke.body));
+        assert.equal(purgeOf(revoke)?.error_code, "profile_purge_in_use");
+        await stopBrowser();
+        const retry = await retryPurge(asUrl, revokedId);
+        assert.deepEqual(purgeOf(retry), { removed: 1, status: "purged", target: "local" });
+        assert.equal(existsSync(profileDir), false);
+      });
+
+      const activeId = "cin_purge_active";
+      await seedInstance({ connectorId: "spotify", connectorInstanceId: activeId, displayName: "A", sourceBindingKey: "a@x" });
+      const activeProfile = seedProfileDir(profileRoot, `spotify__${activeId}`);
+      const active = await retryPurge(asUrl, activeId);
+      assert.equal(active.status, 409, JSON.stringify(active.body));
+      assert.equal((active.body as { error?: { code?: string } }).error?.code, "connection_not_removed");
+      assert.equal(existsSync(activeProfile), true, "an active connection keeps its session");
+
+      const unknown = await retryPurge(asUrl, "cin_never_existed");
+      assert.equal(unknown.status, 404);
+
+      const foreignId = "cin_purge_foreign";
+      await seedInstance({
+        connectorId: "spotify",
+        connectorInstanceId: foreignId,
+        displayName: "F",
+        ownerSubjectId: "owner_other",
+        sourceBindingKey: "f@x",
+        status: "revoked",
+      });
+      const foreignProfile = seedProfileDir(profileRoot, `spotify__${foreignId}`);
+      const foreign = await retryPurge(asUrl, foreignId);
+      assert.equal(foreign.status, 404, "another owner's connection is not found");
+      assert.equal(existsSync(foreignProfile), true);
+    });
+  });
+});
+
+async function withFakeDesktopHost(
+  fn: (requests: { method: string; url: string; authorization: string }[]) => Promise<void>
+): Promise<void> {
+  const requests: { method: string; url: string; authorization: string }[] = [];
+  const host = createServer((req: IncomingMessage, res) => {
+    requests.push({ authorization: req.headers.authorization ?? "", method: req.method ?? "", url: req.url ?? "" });
+    res.statusCode = 204;
+    res.end();
+  });
+  await new Promise<void>((resolve) => host.listen(0, "127.0.0.1", resolve));
+  const address = host.address();
+  const port = typeof address === "object" && address ? address.port : 0;
+  const keys = ["PDPP_BROWSER_SURFACE_MODE", "PDPP_BROWSER_SURFACE_HOST_ENDPOINT", "PDPP_BROWSER_SURFACE_HOST_TOKEN"];
+  const previous = keys.map((key) => process.env[key]);
+  process.env.PDPP_BROWSER_SURFACE_MODE = "host";
+  process.env.PDPP_BROWSER_SURFACE_HOST_ENDPOINT = `http://127.0.0.1:${port}`;
+  process.env.PDPP_BROWSER_SURFACE_HOST_TOKEN = "host-token-fixture";
+  try {
+    await fn(requests);
+  } finally {
+    keys.forEach((key, index) => {
+      const value = previous[index];
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    });
+    host.closeAllConnections();
+    await new Promise((resolve) => host.close(resolve));
+  }
+}
+
+test("in desktop host mode a delete resets only that connection's host profile", async () => {
+  await withFakeDesktopHost(async (hostRequests) => {
+    await withServer(async ({ asUrl }) => {
+      await registerConnector(asUrl, loadReferenceManifest("spotify"));
+      await seedInstance({ connectorId: "spotify", connectorInstanceId: "cin_host_a", displayName: "A", sourceBindingKey: "a@x" });
+      await seedInstance({ connectorId: "spotify", connectorInstanceId: "cin_host_b", displayName: "B", sourceBindingKey: "b@x" });
+
+      const first = await fetchJson(`${asUrl}/_ref/connections/cin_host_a`, { method: "DELETE" });
+      assert.equal(first.status, 200, JSON.stringify(first.body));
+      assert.deepEqual(purgeOf(first), { removed: 1, status: "purged", target: "host" });
+
+      const second = await fetchJson(`${asUrl}/_ref/connections/cin_host_b/revoke`, { method: "POST" });
+      assert.equal(second.status, 200, JSON.stringify(second.body));
+      assert.deepEqual(purgeOf(second), { removed: 1, status: "purged", target: "host" });
+      assert.deepEqual(hostRequests, [
+        {
+          authorization: "Bearer host-token-fixture",
+          method: "DELETE",
+          url: "/browser-surface/profiles/spotify/cin_host_a",
+        },
+        {
+          authorization: "Bearer host-token-fixture",
+          method: "DELETE",
+          url: "/browser-surface/profiles/spotify/cin_host_b?legacy=remove",
+        },
+      ]);
+    });
   });
 });
 

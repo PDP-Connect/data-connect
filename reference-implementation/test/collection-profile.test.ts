@@ -28,6 +28,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { RECOVERY_ACTIONS } from "../runtime/connector-gap-bounding.ts";
+import { cursorAuditFact } from "../runtime/cursor-audit-fact.ts";
 import {
   loadSyncState,
   type RuntimeRunConnectorOptions,
@@ -42,6 +43,7 @@ import {
   admitOwnerRunConnection,
   createSqliteConnectorInstanceStore,
 } from "../server/stores/connector-instance-store.ts";
+import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
 
 type TestServer = Awaited<ReturnType<typeof startServer>>;
 
@@ -53,7 +55,7 @@ type TestServer = Awaited<ReturnType<typeof startServer>>;
 const trackedTestServers = new Set<TestServer>();
 
 async function startTestServer(opts: Parameters<typeof startServer>[0] = {}): Promise<TestServer> {
-  const server = await startServer(opts);
+  const server = await startServer({ preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS, ...opts });
   trackedTestServers.add(server);
   return server;
 }
@@ -238,6 +240,17 @@ interface JsonRecord {
 function asRecord(value: unknown): JsonRecord {
   assert.ok(value && typeof value === "object" && !Array.isArray(value), "expected an object payload");
   return value as JsonRecord;
+}
+
+/** Expected `stream:digest` key for a staged/advanced event carrying `{ cursor }`. */
+function cursorEventKey(stream: string, cursor: string): string {
+  return `${stream}:${cursorAuditFact({ cursor }).cursor_sha256}`;
+}
+
+/** Actual `stream:digest` key; also proves the full cursor is no longer embedded. */
+function eventCursorKey(event: { stream_id?: string | null; data: Record<string, unknown> }): string {
+  assert.equal("cursor" in event.data, false, "checkpoint event must not embed the full cursor");
+  return `${event.stream_id}:${event.data.cursor_sha256}`;
 }
 
 function asArray(value: unknown): readonly JsonValue[] {
@@ -1282,7 +1295,13 @@ test("Collection Profile conformance", async (t) => {
   await t.test(
     "an ordinary hosted run (no providedScope) folds the connection's declared collection_scope.since into every default stream's time_range",
     async () => {
-      const server = await startServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+      const server = await startServer({
+        asPort: 0,
+        dbPath: ":memory:",
+        preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
+        quiet: true,
+        rsPort: 0,
+      });
       const { asPort, rsPort } = server;
       const manifest = {
         ...MINIMAL_MANIFEST,
@@ -1347,7 +1366,13 @@ test("Collection Profile conformance", async (t) => {
   await t.test(
     "a declared collection_scope.since is folded ONLY into manifest streams with a non-empty consent_time_field — non-temporal streams stay unscoped",
     async () => {
-      const server = await startServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+      const server = await startServer({
+        asPort: 0,
+        dbPath: ":memory:",
+        preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
+        quiet: true,
+        rsPort: 0,
+      });
       const { asPort, rsPort } = server;
       const manifest = {
         ...MINIMAL_MANIFEST,
@@ -1419,7 +1444,13 @@ test("Collection Profile conformance", async (t) => {
   await t.test(
     "an ordinary hosted run with no declared collection_scope omits time_range entirely (unscoped, unchanged default behavior)",
     async () => {
-      const server = await startServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+      const server = await startServer({
+        asPort: 0,
+        dbPath: ":memory:",
+        preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
+        quiet: true,
+        rsPort: 0,
+      });
       const { asPort, rsPort } = server;
       const manifest = {
         ...MINIMAL_MANIFEST,
@@ -1859,7 +1890,13 @@ test("Collection Profile conformance", async (t) => {
       // seen ("acme-crm") gets the identical `manual_action_required` hint by
       // declaring the same recovery_hint, with a `code` and message sharing
       // nothing with ChatGPT's.
-      const server = await startServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+      const server = await startServer({
+        asPort: 0,
+        dbPath: ":memory:",
+        preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
+        quiet: true,
+        rsPort: 0,
+      });
       const { asPort, rsPort } = server;
       const { ownerToken, connectorId } = await setupConnector(server, asPort, {
         ...MINIMAL_MANIFEST,
@@ -1910,7 +1947,13 @@ test("Collection Profile conformance", async (t) => {
       // An out-of-vocabulary recovery_hint is not silently dropped or trusted —
       // the whole DONE is rejected as a protocol violation, same as any other
       // malformed connector-declared field (see the sibling SKIP_RESULT test).
-      const server = await startServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+      const server = await startServer({
+        asPort: 0,
+        dbPath: ":memory:",
+        preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
+        quiet: true,
+        rsPort: 0,
+      });
       const { asPort, rsPort } = server;
       const { ownerToken, connectorId } = await setupConnector(server, asPort, {
         ...MINIMAL_MANIFEST,
@@ -2172,7 +2215,13 @@ test("Collection Profile conformance", async (t) => {
   for (const testCase of RECOVERY_HINT_PRECEDENCE_CASES) {
     // biome-ignore lint/performance/noAwaitInLoops: Sequential test setup and assertion order is intentional.
     await t.test(`recovery_hint precedence: ${testCase.name}`, async () => {
-      const server = await startServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+      const server = await startServer({
+        asPort: 0,
+        dbPath: ":memory:",
+        preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
+        quiet: true,
+        rsPort: 0,
+      });
       const { asPort, rsPort } = server;
       const { ownerToken, connectorId } = await setupConnector(server, asPort, {
         ...MINIMAL_MANIFEST,
@@ -2232,7 +2281,13 @@ test("Collection Profile conformance", async (t) => {
   await t.test(
     "recovery_hint precedence: malformed hint fails closed even when the message matches the runtime's infrastructure text",
     async () => {
-      const server = await startServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+      const server = await startServer({
+        asPort: 0,
+        dbPath: ":memory:",
+        preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
+        quiet: true,
+        rsPort: 0,
+      });
       const { asPort, rsPort } = server;
       const { ownerToken, connectorId } = await setupConnector(server, asPort, {
         ...MINIMAL_MANIFEST,
@@ -2567,12 +2622,12 @@ test("Collection Profile conformance", async (t) => {
       assert.equal(stagedEvents.length, 2);
       const [firstStaged, secondStaged] = stagedEvents;
       assert.ok(firstStaged && secondStaged, "expected two staged events");
-      assert.deepEqual(firstStaged.data.cursor, { cursor: "cursor_1" });
-      assert.deepEqual(secondStaged.data.cursor, { cursor: "cursor_2" });
+      assert.equal(eventCursorKey(firstStaged), cursorEventKey(String(firstStaged.stream_id), "cursor_1"));
+      assert.equal(eventCursorKey(secondStaged), cursorEventKey(String(secondStaged.stream_id), "cursor_2"));
 
       const advancedEvent = (runTimeline.data || []).find((event) => event.event_type === "run.state_advanced");
       assert.ok(advancedEvent);
-      assert.deepEqual(advancedEvent.data.cursor, { cursor: "cursor_2" });
+      assert.equal(eventCursorKey(advancedEvent), cursorEventKey(String(advancedEvent.stream_id), "cursor_2"));
     } finally {
       cleanup();
       await closeServer(server);
@@ -2668,7 +2723,7 @@ rl.on('line', (line) => {
         const [firstStaged] = stagedEvents;
         assert.ok(firstStaged, "expected one staged event");
         assert.equal(firstStaged.stream_id, "items");
-        assert.deepEqual(firstStaged.data.cursor, { cursor: "cursor_items_1" });
+        assert.equal(eventCursorKey(firstStaged), cursorEventKey("items", "cursor_items_1"));
 
         const failedEvent = (runTimeline.data || []).find((event) => event.event_type === "run.failed");
         assert.ok(failedEvent);
@@ -2747,12 +2802,12 @@ rl.on('line', (line) => {
         assert.equal(stagedEvents.length, 2);
         assert.equal(advancedEvents.length, 2);
         assert.deepEqual(
-          new Set(stagedEvents.map((event) => `${event.stream_id}:${asRecord(event.data.cursor).cursor}`)),
-          new Set(["items:cursor_items_success", "other_items:cursor_other_success"])
+          new Set(stagedEvents.map((event) => eventCursorKey(event))),
+          new Set([cursorEventKey("items", "cursor_items_success"), cursorEventKey("other_items", "cursor_other_success")])
         );
         assert.deepEqual(
-          new Set(advancedEvents.map((event) => `${event.stream_id}:${asRecord(event.data.cursor).cursor}`)),
-          new Set(["items:cursor_items_success", "other_items:cursor_other_success"])
+          new Set(advancedEvents.map((event) => eventCursorKey(event))),
+          new Set([cursorEventKey("items", "cursor_items_success"), cursorEventKey("other_items", "cursor_other_success")])
         );
         assert.deepEqual(
           advancedEvents.map((event) => event.data.state_streams_committed as number).sort((a, b) => a - b),
@@ -2850,8 +2905,8 @@ rl.on('line', (line) => {
       assert.equal(stagedEvents.length, 2);
       assert.equal(advancedEvents.length, 0);
       assert.deepEqual(
-        new Set(stagedEvents.map((event) => `${event.stream_id}:${asRecord(event.data.cursor).cursor}`)),
-        new Set(["items:cursor_items_failed", "other_items:cursor_other_failed"])
+        new Set(stagedEvents.map((event) => eventCursorKey(event))),
+        new Set([cursorEventKey("items", "cursor_items_failed"), cursorEventKey("other_items", "cursor_other_failed")])
       );
 
       const failedEvent = (runTimeline.data || []).find((event) => event.event_type === "run.failed");
@@ -3031,7 +3086,10 @@ rl.on('line', (line) => {
         const [firstCommitFailed] = commitFailedEvents;
         assert.ok(firstCommitFailed, "expected one commit-failed event");
         assert.equal(firstCommitFailed.stream_id, "other_items");
-        assert.deepEqual(firstCommitFailed.data.cursor, { cursor: "other_items_cursor_partial_commit" });
+        assert.equal(
+          eventCursorKey(firstCommitFailed),
+          cursorEventKey("other_items", "other_items_cursor_partial_commit")
+        );
         assert.equal(firstCommitFailed.data.state_streams_staged, 2);
         assert.equal(firstCommitFailed.data.state_streams_committed, 1);
         // biome-ignore lint/performance/useTopLevelRegex: localized test assertion preserves its explicit contract.
@@ -4866,6 +4924,7 @@ rl.on('line', (line) => {
         reason: "temporary_unavailable",
         record_key: "i1",
         retryable: true,
+        status: "pending",
         stream: "other_items",
         type: "DETAIL_GAP",
       },
@@ -6741,6 +6800,109 @@ rl.on('line', (line) => {
     }
   });
 
+  await t.test("resolved OTP assistance completes a pending interaction after page advancement", async () => {
+    const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+    const { asPort, rsPort } = server;
+    const { ownerToken, connectorId } = await setupConnector(server, asPort);
+    const tmpDir = mkdtempSync(join(process.cwd(), ".scratch-otp-manual-"));
+    const connectorPath = join(tmpDir, "connector.mjs");
+    writeFileSync(
+      connectorPath,
+      `
+import { createInterface } from 'readline';
+const rl = createInterface({ input: process.stdin });
+let started = false;
+rl.on('line', (line) => {
+  const msg = JSON.parse(line);
+  if (msg.type === 'START' && !started) {
+    started = true;
+    process.stdout.write(JSON.stringify({ type: 'INTERACTION', request_id: 'otp_manual_1', kind: 'otp', message: 'Enter code', schema: { type: 'object', properties: { code: { type: 'string' } }, required: ['code'] }, timeout_seconds: 300 }) + '\\n');
+    process.stdout.write(JSON.stringify({ type: 'ASSISTANCE_STATUS', assistance_request_id: 'otp_manual_1', status: 'resolved' }) + '\\n');
+  } else if (msg.type === 'INTERACTION_RESPONSE') {
+    process.stdout.write(JSON.stringify({ type: 'ASSISTANCE_STATUS', assistance_request_id: 'otp_manual_1', status: 'resolved' }) + '\\n');
+    process.stdout.write(JSON.stringify({ type: 'DONE', status: 'succeeded', records_emitted: 0 }) + '\\n');
+    rl.close();
+    process.exit(0);
+  }
+});
+`,
+      "utf-8"
+    );
+
+    try {
+      const result = await runTestConnector({
+        collectionMode: "full_refresh",
+        connectorId,
+        connectorPath,
+        manifest: MINIMAL_MANIFEST,
+        onInteraction: async () =>
+          new Promise(() => {
+            // Keep the interaction pending until the connector advances the browser page.
+          }),
+        ownerToken,
+        persistState: true,
+        rsUrl: `http://localhost:${rsPort}`,
+        state: null,
+      });
+      assert.equal(result.status, "succeeded");
+    } finally {
+      rmSync(tmpDir, { force: true, recursive: true });
+      await closeServer(server);
+    }
+  });
+
+  await t.test("late OTP assistance status is ignored after a console response", async () => {
+    const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+    const { asPort, rsPort } = server;
+    const { ownerToken, connectorId } = await setupConnector(server, asPort);
+    const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-test-otp-late-status-"));
+    const connectorPath = join(tmpDir, "connector.mjs");
+    writeFileSync(
+      connectorPath,
+      `
+import { createInterface } from 'readline';
+const rl = createInterface({ input: process.stdin });
+let started = false;
+rl.on('line', (line) => {
+  const msg = JSON.parse(line);
+  if (msg.type === 'START' && !started) {
+    started = true;
+    process.stdout.write(JSON.stringify({ type: 'INTERACTION', request_id: 'otp_console_first', kind: 'otp', message: 'Enter code', schema: { type: 'object', properties: { code: { type: 'string' } }, required: ['code'] }, timeout_seconds: 300 }) + '\\n');
+  } else if (msg.type === 'INTERACTION_RESPONSE') {
+    process.stdout.write(JSON.stringify({ type: 'ASSISTANCE_STATUS', assistance_request_id: 'otp_console_first', status: 'resolved' }) + '\\n');
+    process.stdout.write(JSON.stringify({ type: 'DONE', status: 'succeeded', records_emitted: 0 }) + '\\n');
+    rl.close();
+    process.exit(0);
+  }
+});
+`,
+      "utf-8"
+    );
+
+    try {
+      const result = await runTestConnector({
+        collectionMode: "full_refresh",
+        connectorId,
+        connectorPath,
+        manifest: MINIMAL_MANIFEST,
+        onInteraction: async (message: unknown) => ({
+          data: { code: "123456" },
+          request_id: (message as InteractionMessage).request_id,
+          status: "success",
+          type: "INTERACTION_RESPONSE",
+        }),
+        ownerToken,
+        persistState: true,
+        rsUrl: `http://localhost:${rsPort}`,
+        state: null,
+      });
+      assert.equal(result.status, "succeeded");
+    } finally {
+      rmSync(tmpDir, { force: true, recursive: true });
+      await closeServer(server);
+    }
+  });
+
   await t.test("browser-surface-backed otp INTERACTION projects streamable assistance with secret input", async () => {
     const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
     const { asPort, rsPort } = server;
@@ -6831,6 +6993,53 @@ rl.on('line', (line) => {
       assert.ok(
         !JSON.stringify(runTimeline.data || []).includes("123456"),
         "run timelines should not persist OTP values"
+      );
+
+      const hostResult = await runTestConnector({
+        browserSurfaceEnv: {
+          PDPP_BROWSER_SURFACE_REMOTE_CDP_URL: "http://127.0.0.1:9222",
+          PDPP_BROWSER_SURFACE_REQUIRED: "neko",
+        },
+        collectionMode: "full_refresh",
+        connectorId,
+        connectorPath,
+        manifest: MINIMAL_MANIFEST,
+        // biome-ignore lint/suspicious/useAwait: localized test assertion preserves its explicit contract.
+        onInteraction: async (message: unknown) => {
+          const msg = message as InteractionMessage;
+          assert.equal(msg.kind, "otp");
+          return {
+            data: { code: "654321" },
+            request_id: msg.request_id,
+            status: "success",
+            type: "INTERACTION_RESPONSE",
+          };
+        },
+        ownerToken,
+        persistState: true,
+        rsUrl: `http://localhost:${rsPort}`,
+        state: null,
+      });
+      assert.equal(hostResult.status, "succeeded");
+      const { body: hostTimeline } = await fetchJson<TimelineBody>(
+        `${asUrl}/_ref/runs/${encodeURIComponent(requireRunId(hostResult))}/timeline`
+      );
+      const hostAssistance = (hostTimeline.data || []).find((event) => event.event_type === "run.assistance_requested");
+      assert.ok(hostAssistance, "expected host-mode OTP assistance event");
+      // PDPP_BROWSER_SURFACE_REMOTE_CDP_URL is a real browser-control
+      // capability (hasBrowserSurfaceStream in runtime/index.ts), the same
+      // as the stream-base-url case above, so host-mode OTP also gets the
+      // streaming companion attachment rather than a bare provide_value.
+      assert.equal(hostAssistance.data.owner_action, "operate_attachment");
+      assert.deepEqual(hostAssistance.data.attachments, [{ kind: "browser_surface", role: "streaming_companion" }]);
+      assert.deepEqual(hostAssistance.data.input_schema, {
+        properties: { code: { type: "string" } },
+        required: ["code"],
+        type: "object",
+      });
+      assert.ok(
+        !JSON.stringify(hostTimeline.data || []).includes("654321"),
+        "host-mode run timelines must not persist OTP values"
       );
     } finally {
       rmSync(tmpDir, { force: true, recursive: true });
@@ -8702,8 +8911,8 @@ rl.on('line', (line) => {
       assert.equal(stagedEvents.length, 2);
       assert.equal(advancedEvents.length, 0);
       assert.deepEqual(
-        new Set(stagedEvents.map((event) => `${event.stream_id}:${asRecord(event.data.cursor).cursor}`)),
-        new Set(["items:cursor_items_done_failed", "other_items:cursor_other_done_failed"])
+        new Set(stagedEvents.map((event) => eventCursorKey(event))),
+        new Set([cursorEventKey("items", "cursor_items_done_failed"), cursorEventKey("other_items", "cursor_other_done_failed")])
       );
 
       const failedEvent = (runTimeline.data || []).find((event) => event.event_type === "run.failed");

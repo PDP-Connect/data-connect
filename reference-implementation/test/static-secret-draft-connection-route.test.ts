@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { after } from "node:test";
 import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 
 import { listSpineEventsPage } from "../lib/spine.ts";
@@ -10,6 +10,14 @@ import { getDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
 import { createSqliteConnectorInstanceCredentialStore } from "../server/stores/connector-instance-credential-store.ts";
 import { CREDENTIAL_ENCRYPTION_KEY_ENV } from "../server/stores/credential-encryption.ts";
+import { createFirstSyncConnectorFixture } from "./helpers/first-sync-connector-fixture.ts";
+
+// Tests whose flow starts a first sync need a runnable connector. Catalog
+// connectors run only from a verified install, so these route tests supply a
+// fixture connector instead of reaching a provider.
+const firstSyncConnector = createFirstSyncConnectorFixture();
+after(() => firstSyncConnector.cleanup());
+const FIRST_SYNC_SERVER_OPTIONS = { connectorPathResolver: () => firstSyncConnector.connectorPath };
 
 const REGEXP_1 = /<input type="hidden" name="_csrf" value="([^"]+)"\s*\/>/;
 
@@ -73,7 +81,10 @@ function permissiveProber() {
   });
 }
 
-async function withServer(fn: (harness: { asUrl: string; rsUrl: string }) => Promise<void>): Promise<void> {
+async function withServer(
+  fn: (harness: { asUrl: string; rsUrl: string }) => Promise<void>,
+  extraOptions: { connectorPathResolver?: () => string } = {}
+): Promise<void> {
   const server = await startServer({
     asPort: 0,
     autoEnrollEligibleSchedules: false,
@@ -83,6 +94,7 @@ async function withServer(fn: (harness: { asUrl: string; rsUrl: string }) => Pro
     quiet: true,
     rsPort: 0,
     staticSecretCredentialProber: permissiveProber(),
+    ...extraOptions,
   });
   const asUrl = `http://localhost:${server.asPort}`;
   const rsUrl = `http://localhost:${server.rsPort}`;
@@ -210,7 +222,7 @@ async function registerConnector(asUrl: string, name: string): Promise<void> {
 }
 
 async function issueOwnerToken(asUrl: string, subjectId = OWNER_SUBJECT_ID): Promise<string> {
-  const clientId = "cli_longview";
+  const clientId = "pdpp_cli";
   const { body: deviceBody } = await fetchJson(`${asUrl}/oauth/device_authorization`, {
     body: new URLSearchParams({ client_id: clientId }).toString(),
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -448,7 +460,8 @@ test("static-secret setup descriptor is manifest-authored and readiness-gated", 
       assert.equal(body.validation, "synchronous");
       assert.ok(
         credentialCaptureOf(body).fields.some(
-          (field) => field.name === "account_email" && field.type === "email" && field.secret === false
+          (field) => field.name === "account_email" && field.type === "email" && field.secret === false &&
+            Array.isArray(field.env) && field.env.includes("GMAIL_ADDRESS")
         ),
         "Gmail manifest must declare the account email field"
       );
@@ -461,6 +474,20 @@ test("static-secret setup descriptor is manifest-authored and readiness-gated", 
         ),
         "Gmail manifest must declare the app-password help URL"
       );
+    });
+  });
+});
+
+test("YNAB add-account setup endpoint is registered and does not return 404", async () => {
+  await withCredentialKey(TEST_KEY, async () => {
+    await withServer(async ({ asUrl }) => {
+      await registerConnector(asUrl, "ynab");
+      const cookie = await login(asUrl);
+      const { status, body, text } = await getSetup(asUrl, cookie, "ynab");
+      assert.notEqual(status, 404, text);
+      assert.equal(status, 200, text);
+      assert.equal(body.object, "static_secret_setup");
+      assert.equal(body.connector_id, "ynab");
     });
   });
 });
@@ -813,7 +840,7 @@ test("credential captured with first sync active reads collecting on /_ref/conne
       assert.equal(ownerStateOf(row)?.resolver, "collecting");
       assert.notEqual(ownerStateOf(row)?.resolver, "healthy");
       assert.notEqual(ownerStateOf(row)?.resolver, "system_degraded");
-    });
+    }, FIRST_SYNC_SERVER_OPTIONS);
   });
 });
 

@@ -5,6 +5,7 @@
 
 import { Section, StatusBadge } from "@pdpp/operator-ui/components/primitives";
 import type { StatusVocabulary } from "@pdpp/operator-ui/components/status-vocabularies";
+import { buttonVariants } from "@pdpp/brand-react";
 import { useEffect, useState } from "react";
 import {
   embeddingCacheRow,
@@ -32,10 +33,31 @@ import {
 export function DeploymentReadinessPanel({ inputs }: { inputs: ServerInputs }) {
   const browserOrigin = useBrowserOrigin();
   const refreshTokenProbe = useRefreshTokenAdvertisement();
+  const [originAction, setOriginAction] = useState<"idle" | "copied" | "failed">("idle");
+
+  const useObservedOrigin = () => {
+    if (!browserOrigin || !navigator.clipboard?.writeText) {
+      setOriginAction("failed");
+      return;
+    }
+    void navigator.clipboard
+      .writeText(`PDPP_REFERENCE_ORIGIN=${browserOrigin}`)
+      .then(() => setOriginAction("copied"))
+      .catch(() => setOriginAction("failed"));
+  };
 
   const rows: ReadinessRow[] = [
     ownerPasswordRow(inputs),
-    referenceOriginRow(inputs, browserOrigin),
+    referenceOriginRow(
+      inputs,
+      browserOrigin,
+      browserOrigin
+        ? {
+            label: originAction === "copied" ? "Origin copied" : "Use this origin",
+            onClick: useObservedOrigin,
+          }
+        : undefined
+    ),
     storageBackendRow(inputs),
     embeddingCacheRow(inputs),
     refreshTokenRow(refreshTokenProbe),
@@ -160,6 +182,11 @@ function ReadinessRowItem({ row }: { row: ReadinessRow }) {
       </div>
       <p className="pdpp-body text-muted-foreground">{row.detail}</p>
       {row.hint ? <p className="pdpp-caption text-muted-foreground/80">Hint: {row.hint}</p> : null}
+      {row.action ? (
+        <button className={buttonVariants({ size: "sm", variant: "default" })} onClick={row.action.onClick} type="button">
+          {row.action.label}
+        </button>
+      ) : null}
     </li>
   );
 }

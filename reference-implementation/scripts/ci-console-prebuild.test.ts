@@ -25,6 +25,7 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const WORKFLOW_PATH = join(__dirname, "../../.github/workflows/reference-implementation.yml");
+const MUTATION_WORKFLOW_PATH = join(__dirname, "../../.github/workflows/mutation.yml");
 
 test("the test job builds the console before it runs the gate", async () => {
   const workflow = await readFile(WORKFLOW_PATH, "utf8");
@@ -62,5 +63,30 @@ test("the workflow builds the same target the test would build itself", async ()
   assert.ok(
     workflow.includes(command),
     `the workflow must run ${command}, the exact build composed-origin.test.ts falls back to`
+  );
+});
+
+test("the mutation job builds the console before Stryker's dry run", async () => {
+  // The mutation job runs this cohort's tests too, as Stryker's unmutated
+  // baseline, so it carries the same dependency. It is the worse place to omit
+  // the build: the silence lands inside the dry-run timeout, and when that
+  // expires the run aborts before trying a single mutant and reports no
+  // evidence at all -- a failure that reads as a mutation problem rather than
+  // a missing build step.
+  const workflow = await readFile(MUTATION_WORKFLOW_PATH, "utf8");
+
+  const buildIndex = workflow.indexOf("npm --prefix apps/console run build");
+  assert.notEqual(
+    buildIndex,
+    -1,
+    "the mutation workflow must build apps/console, or the dry run times out building it silently"
+  );
+
+  const strykerIndex = workflow.indexOf("npx stryker run");
+  assert.notEqual(strykerIndex, -1, "expected the mutation workflow to run stryker");
+
+  assert.ok(
+    buildIndex < strykerIndex,
+    "the console build must come before stryker, otherwise the build happens inside the dry run"
   );
 });

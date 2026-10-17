@@ -32,6 +32,7 @@ import test from "node:test";
 import { startServer } from "../server/index.ts";
 import { createRequestConnectorInstanceStore } from "../server/request-store-factories.ts";
 import { makeDefaultAccountConnectorInstanceId } from "../server/stores/connector-instance-store.ts";
+import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
 
 const CONNECTOR_KEY = "codex";
 const CONNECTOR_ID = `https://registry.pdpp.dev/connectors/${CONNECTOR_KEY}`;
@@ -239,6 +240,7 @@ async function withHttpHarness(fn: (urls: { asUrl: string; rsUrl: string }) => P
     asPort: 0,
     dbPath: ":memory:",
     dynamicClientRegistrationInitialAccessTokens: [TEST_DCR_INITIAL_ACCESS_TOKEN],
+    preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
     quiet: true,
     rsPort: 0,
   })) as TestServer;

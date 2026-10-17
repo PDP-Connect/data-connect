@@ -4,9 +4,19 @@ name: mutation
 # production files that revision changed and publish the evidence as artifacts.
 #
 # There is no schedule. The trigger is the pull request itself, so the scope of
-# every run is bounded by what actually changed rather than by a time or mutant
-# budget. There are no duration, budget, or admission constants in this
-# workflow, in the Stryker configurations it invokes, or in the adapter it runs.
+# every run is what actually changed. There are no duration, budget, or
+# admission constants in the Stryker configurations this workflow invokes or in
+# the adapter it runs.
+#
+# One bound exists, and it lives here, beside the job time limit it serves: the
+# reference-implementation row's `max-changed-lines` and `max-tests`. That
+# cohort's command runner runs every selected test file for every mutant, so an
+# attempt costs roughly mutants times the selection's run time. A change set
+# above the bound -- an integration merge such as PR #141 (158 files, about
+# 33,000 mutants, over 300 test files: hundreds of runner-hours) -- mutates
+# a deterministic sample instead, and its intent and receipt are marked
+# `partial`, name every deferred file, and say on their face that the counts
+# describe the sample. A revision within the bound is unaffected.
 #
 # This job is advisory. It publishes evidence a reviewer can read; it does not
 # block merge. Advisory does not mean permissive: failed or incomplete evidence
@@ -47,6 +57,9 @@ jobs:
   mutation:
     name: mutate changed production files (${{ matrix.cohort }})
     runs-on: ubuntu-latest
+    # GitHub's limit for a hosted job, stated so the attempt bound below has a
+    # visible number to answer to. A run that reaches it ends without evidence.
+    timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
@@ -65,6 +78,20 @@ jobs:
             config: reference-implementation/stryker.config.mjs
             config-relative: stryker.config.mjs
             prefixes: "reference-implementation/server/ reference-implementation/lib/ reference-implementation/operations/ reference-implementation/runtime/ reference-implementation/cli/"
+            # The attempt bound (see the header). Measured on PR #141 samples
+            # pinned to four CPUs with four Stryker workers: a sample with 8
+            # test files took 13 s for one run of its tests, about 20 s per
+            # trial with four workers sharing the CPUs, and 13 minutes for 152
+            # mutants. The densest scope on record, PR #83, made 179 mutants
+            # from 34 changed lines, about five a line. At that density 200
+            # lines is 1,000 mutants; at twice the measured trial time (a
+            # slower hosted runner) that is under 3 hours, inside the
+            # 360-minute limit. The bound also keeps the dry run far below
+            # Stryker's five-minute dry-run limit, which the 300-file
+            # selection exceeded on PR #141's first attempt. Raise these only
+            # with a measured run that fits.
+            max-changed-lines: "200"
+            max-tests: "8"
           # The release and supply-chain provenance machinery. Neither cohort
           # above reaches it -- `client` selects `src/`, and the reference
           # implementation selects its own subtree -- so until this row existed a
@@ -153,6 +180,8 @@ jobs:
           COHORT_PREFIXES: ${{ matrix.prefixes }}
           COHORT_EXCLUDED_PREFIXES: ${{ matrix.excluded-prefixes }}
           COHORT_CONFIG: ${{ matrix.config }}
+          COHORT_MAX_CHANGED_LINES: ${{ matrix.max-changed-lines }}
+          COHORT_MAX_TESTS: ${{ matrix.max-tests }}
         run: |
           set -euo pipefail
           mkdir -p "reports/mutation/${COHORT}"
@@ -172,7 +201,8 @@ jobs:
             "${base_commit}" "${HEAD_REF}" > "reports/mutation/${COHORT}/diff.nul"
 
           # `--selected-tests` writes the tests this attempt runs, for cohorts
-          # whose runner cannot select tests itself.
+          # whose runner cannot select tests itself. The bound arguments are
+          # empty, and so unset, for a cohort whose row sets none.
           node --experimental-strip-types scripts/mutation-falsification/run-intent.ts \
             --cohort "${COHORT}" \
             --cohort-root "${COHORT_ROOT}" \
@@ -183,7 +213,9 @@ jobs:
             --head "${HEAD_REF}" \
             --diff "reports/mutation/${COHORT}/diff.nul" \
             --out "reports/mutation/${COHORT}/intent.json" \
-            --selected-tests "reports/mutation/${COHORT}/selected-tests.txt"
+            --selected-tests "reports/mutation/${COHORT}/selected-tests.txt" \
+            --max-changed-lines "${COHORT_MAX_CHANGED_LINES:-}" \
+            --max-tests "${COHORT_MAX_TESTS:-}"
 
           # The configuration's selection lookup is relative to the directory
           # Stryker runs in, which for a non-root cohort is that cohort's root.
@@ -216,6 +248,20 @@ jobs:
           npm --prefix packages/collector-runtime run build
           npm --prefix reference-implementation/vendor/mcp-server run build
 
+      - name: Build console
+        # The dry run executes this cohort's selected tests, and those tests
+        # require the console's production build for the same reason the test
+        # job does: absent it, composed-origin.test.ts builds it in a
+        # subprocess whose output it captures rather than forwards, so the run
+        # goes silent for the length of a cold build. Here that silence is
+        # spent against Stryker's dry-run timeout, and the baseline never
+        # completes -- no mutant is tried and the attempt reports no evidence.
+        # See reference-implementation/scripts/ci-console-prebuild.test.ts.
+        if: steps.intent.outputs.applicability == 'applicable' && matrix.cohort == 'reference-implementation'
+        env:
+          NEXT_TELEMETRY_DISABLED: "1"
+        run: npm --prefix apps/console run build
+
       # OBSERVATION. Stryker runs as a black box. Its exit status and its own
       # per-mutant statuses are recorded, never interpreted here.
       - name: Run mutation testing on the changed files
@@ -231,8 +277,11 @@ jobs:
         run: |
           set -uo pipefail
           mapfile -t mutate < <(node -e 'JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8")).mutate.forEach((f)=>console.log(f))' "reports/mutation/${COHORT}/intent.json")
+          mapfile -t test_files < "reports/mutation/${COHORT}/selected-tests.txt"
           printf 'Mutating %d file(s):\n' "${#mutate[@]}"
           printf '  %s\n' "${mutate[@]}"
+          printf 'Selected %d test file(s):\n' "${#test_files[@]}"
+          printf '  %s\n' "${test_files[@]}"
 
           # Run from the cohort root. Every relative path in play -- the mutate
           # globs, the configuration's reporter paths, its selection lookup and
@@ -261,7 +310,11 @@ jobs:
           # the root.
           cd "${COHORT_ROOT}" || exit 1
           stryker_exit=0
-          npx stryker run "${COHORT_CONFIG_RELATIVE}" --mutate "$(IFS=,; echo "${mutate[*]}")" || stryker_exit=$?
+          test_files_option=()
+          if [[ "${COHORT}" == "scripts" ]] && (( ${#test_files[@]} > 0 )); then
+            test_files_option=(--testFiles "$(IFS=,; echo "${test_files[*]}")")
+          fi
+          npx stryker run "${COHORT_CONFIG_RELATIVE}" --mutate "$(IFS=,; echo "${mutate[*]}")" "${test_files_option[@]}" || stryker_exit=$?
           echo "stryker_exit=${stryker_exit}" >> "$GITHUB_OUTPUT"
           exit "${stryker_exit}"
 
@@ -326,11 +379,19 @@ jobs:
         env:
           COHORT: ${{ matrix.cohort }}
           APPLICABILITY: ${{ steps.intent.outputs.applicability }}
+          INTENT_OUTCOME: ${{ steps.intent.outcome }}
         run: |
           set -euo pipefail
           {
             echo "## Mutation evidence: ${COHORT}"
             echo
+            # A failed intent step never decided applicability, so its empty
+            # output must not read as "nothing changed".
+            if [[ "${INTENT_OUTCOME}" != "success" ]]; then
+              echo "The intent step failed before deciding what to mutate, so no mutation"
+              echo "evidence exists for this revision. Its log states the reason."
+              exit 0
+            fi
             if [[ "${APPLICABILITY}" != "applicable" ]]; then
               echo "No production source in this cohort changed in this revision, so no mutation"
               echo "evidence exists for it. This is not a pass and not a failure."

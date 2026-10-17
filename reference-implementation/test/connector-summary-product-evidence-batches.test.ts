@@ -6,8 +6,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-// biome-ignore lint/correctness/noUnresolvedImports: Biome cannot model the package export.
-import Database from "better-sqlite3";
+import Database from "./helpers/sqlite-driver.ts";
 import { closeDb, initDb } from "../server/db.ts";
 import { readCommittedLocalCoverageDiagnosticsByConnectionIds } from "../server/records.ts";
 import {

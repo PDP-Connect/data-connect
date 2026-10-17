@@ -1,0 +1,15 @@
+{
+  "name": "@dataconnect/e2e-owner-journey",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Playwright owner-journey smoke check for a running DataConnect console.",
+  "type": "module",
+  "scripts": {
+    "test:e2e": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.51.1",
+    "@types/node": "^26.6.1",
+    "typescript": "^7.0.2"
+  }
+}

@@ -282,6 +282,8 @@ async function persistAndDeliverExport({
   company,
   name,
   exportData,
+  connectionId,
+  accountLabel,
   dispatch,
   persistedRunIds,
   statusMessage = 'Export complete',
@@ -291,6 +293,8 @@ async function persistAndDeliverExport({
   company: string;
   name: string;
   exportData: ExportedData;
+  connectionId?: string | null;
+  accountLabel?: string | null;
   dispatch: AppDispatch;
   persistedRunIds: Set<string>;
   statusMessage?: string;
@@ -308,6 +312,7 @@ async function persistAndDeliverExport({
       itemsExported,
       itemLabel,
       exportData,
+      accountLabel: accountLabel ?? undefined,
     })
   );
 
@@ -320,6 +325,8 @@ async function persistAndDeliverExport({
       company,
       name: name || platformId,
       data: serializedExport,
+      connectionId: connectionId ?? null,
+      accountLabel: accountLabel ?? null,
     });
 
     dispatch(
@@ -745,12 +752,24 @@ export function useEvents() {
       });
       if (!normalizedData) return;
 
+      const run = store.getState().app.runs.find(candidate => candidate.id === runId)
+      const accountLabel = normalizedData.userInfo?.email ??
+        normalizedData.userInfo?.name ?? run?.accountLabel ?? null
+      if (run?.connectionId && accountLabel) {
+        void invoke("set_pdpp_connection_label", {
+          connectorId: platformId,
+          connectionId: run.connectionId,
+          accountLabel,
+        }).catch(error => console.warn("Could not save account label:", error))
+      }
       void persistAndDeliverExport({
         runId,
         platformId,
         company,
         name,
         exportData: normalizedData,
+        connectionId: run?.connectionId,
+        accountLabel,
         dispatch,
         persistedRunIds,
       });

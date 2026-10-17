@@ -370,8 +370,7 @@ test("batched head query pins an explicit outer ORDER BY in its SQL text", async
     // better-sqlite3 Database prototype instead — the Proxy's trap still
     // calls through to `target.prepare`, which resolves to this prototype
     // method.
-    // biome-ignore lint/correctness/noUnresolvedImports: Biome resolver cannot model this installed package export
-    const Database = (await import("better-sqlite3")).default;
+    const Database = (await import("./helpers/sqlite-driver.ts")).default;
     type PrepareFn = typeof Database.prototype.prepare;
     const capturedSql: string[] = [];
     const originalPrepare: PrepareFn = Database.prototype.prepare;

@@ -87,13 +87,33 @@ export default {
 
   inPlace: false,
 
+  // Fail closed on untested static module initialization. Several script files
+  // are CLIs whose imports define option schemas and constants before tests
+  // reach their exported pure helpers. Static mutants in that top-level code
+  // have no reliable per-test owner and turned into timeout-heavy trials in
+  // this cohort. Stryker marks them ignored rather than killed or survived;
+  // the projection step already treats ignored/incomplete evidence separately
+  // and does not turn it into a pass.
+  ignoreStatic: true,
+
   // Matches the client cohort's exclusions: the sandbox is a copy of the working
   // tree, and nothing here is read by a `scripts/` test. The last three entries
   // are the same developer-machine EISDIR workaround the client configuration
   // documents -- those directories hold local tooling whose entries can be
   // symlinks to directories, and they do not exist on CI.
+  //
+  // The reference implementation is excluded except for the two paths that
+  // `scripts/mutation-falsification/reference-runner-config.test.ts` reads: that
+  // cohort's Stryker configuration, which it imports, and its `test/` tree,
+  // which it scans for reads of ignored directories. A revision that touches
+  // that test selects it here, and with the directory excluded whole its import
+  // failed and rejected the baseline on PR #141. The `/**` form matters: Stryker
+  // re-includes a negated path's parent directories, and only a rule that also
+  // matches the children keeps the rest of the tree out.
   ignorePatterns: [
-    "reference-implementation",
+    "reference-implementation/**",
+    "!reference-implementation/stryker.config.mjs",
+    "!reference-implementation/test/**",
     "src-tauri/target",
     "packages/*/dist",
     "reports",

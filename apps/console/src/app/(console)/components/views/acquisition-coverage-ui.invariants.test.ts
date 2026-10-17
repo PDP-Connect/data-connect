@@ -42,7 +42,7 @@ const PUBLIC_TIER_COPY = /Supported|Preview/;
 const LEGACY_TIER_COPY = />Experimental\s*\(|Continue anyway|Not available from this page|No setup path available here/;
 const UNAVAILABLE_PROP = /unavailable\?: boolean/;
 const UNAVAILABLE_TEST_ID = /source-unavailable-fact/;
-const NEXT_COPY = />Next step</;
+const REDUNDANT_NEXT_COPY = /<span className="pdpp-eyebrow text-muted-foreground">Next step<\/span>\s*<Link/;
 const GENERIC_SUPPORT_DETAIL_COPY = /Why this, and what to expect/;
 const IMPORT_OPTIONS_DISCLOSURE = /Show import options/;
 const EXISTING_SOURCE_REUSE = /data-testid="existing-source-reuse"/;
@@ -74,7 +74,7 @@ const DEPLOYMENT_SEMANTICS_COPY = /pnpm --dir|packages\/[a-z]|connector_instance
 const IMPORT_COMPLETE_COPY = /Import complete/;
 const VALIDATED_AND_COMMITTED_COPY = /validated and committed/;
 const COVERAGE_PREVIEW_COPY = /Coverage preview/;
-const WHAT_PDPP_FOUND_COPY = /What PDPP found/;
+const WHAT_DATACONNECT_FOUND_COPY = /What DataConnect found/;
 const PARSED_RECORDS_COPY = /Parsed records/;
 const ACCEPTED_COUNT_COPY = /Accepted/;
 const DUPLICATE_COUNT_COPY = /Duplicates/;
@@ -110,8 +110,10 @@ test("source card keeps the support fact distinct from the recommended next acti
   const src = await readFile(CATALOG_FILE, "utf8");
   // Current support/blocked fact is its own labelled element…
   assert.match(src, SUPPORT_FACT_TEST_ID);
-  // …and the action is a compact next step, not a repeated card heading.
-  assert.match(src, NEXT_COPY);
+  // …and the action is compact and placed after the card's content, without
+  // an extra label that repeats what the button already says.
+  assert.match(src, /sourceSetupAction/);
+  assert.doesNotMatch(src, REDUNDANT_NEXT_COPY);
   // The old generic disclosure repeated on every row and made the picker noisy.
   assert.doesNotMatch(src, GENERIC_SUPPORT_DETAIL_COPY);
   // Import-specific detail is still available, but behind explicit import intent.
@@ -179,7 +181,7 @@ test("status page uses import/receipt language for manual_upload", async () => {
   assert.match(src, IMPORT_COMPLETE_COPY);
   assert.match(src, VALIDATED_AND_COMMITTED_COPY);
   assert.match(src, COVERAGE_PREVIEW_COPY);
-  assert.match(src, WHAT_PDPP_FOUND_COPY);
+  assert.match(src, WHAT_DATACONNECT_FOUND_COPY);
   assert.match(src, PARSED_RECORDS_COPY);
   assert.match(src, ACCEPTED_COUNT_COPY);
   assert.match(src, DUPLICATE_COUNT_COPY);

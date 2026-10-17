@@ -24,6 +24,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 
+import { canonicalConnectorKeyFromManifest } from "../server/connector-key.ts";
 import { startServer } from "../server/index.ts";
 
 type StartedServer = Awaited<ReturnType<typeof startServer>>;
@@ -84,7 +85,14 @@ test("manual-upload validation-preview refuses an empty body with import_file_re
 
   try {
     const manifest = loadManifest("google_maps");
-    const connectorId = manifest.connector_id;
+    // The manifest's raw `connector_id` may be a full registry URL
+    // (https://registry.pdpp.dev/connectors/google-maps); registration
+    // stores the connector under its canonical key instead (see
+    // normalizeConnectorManifestForStorage), so the route path below must
+    // use the same canonical key or it 404s on the router before ever
+    // reaching the handler.
+    const connectorId = canonicalConnectorKeyFromManifest(manifest);
+    assert.ok(connectorId, "google_maps manifest SHALL resolve a canonical connector key");
     const register = await fetch(`${asUrl}/connectors`, {
       body: JSON.stringify(manifest),
       headers: { "Content-Type": "application/json" },

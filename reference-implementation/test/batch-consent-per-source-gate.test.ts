@@ -17,6 +17,8 @@ import {
 import { getDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
+import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
+import { deriveDeviceAuditId } from "../lib/postgres-spine.ts";
 
 const REGEXP_1 = /Confirm each source/;
 const REGEXP_2 = /Reference-experimental batch consent/;
@@ -72,7 +74,7 @@ function countConsentEvents(deviceCode: string, eventType: string): number {
       .prepare(
         "SELECT COUNT(*) AS count FROM spine_events WHERE object_id = ? AND object_type = 'pending_consent' AND event_type = ?"
       )
-      .get(deviceCode, eventType) as { count: number }
+      .get(deriveDeviceAuditId(deviceCode), eventType) as { count: number }
   ).count;
 }
 
@@ -127,7 +129,13 @@ interface HarnessContext {
 }
 
 async function withHarness(fn: (ctx: HarnessContext) => Promise<void>) {
-  const server = (await startServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 })) as TestServer;
+  const server = (await startServer({
+    asPort: 0,
+    dbPath: ":memory:",
+    preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
+    quiet: true,
+    rsPort: 0,
+  })) as TestServer;
   const asUrl = `http://localhost:${server.asPort}`;
   const spotify = loadManifest("spotify");
   const reddit = loadManifest("reddit");

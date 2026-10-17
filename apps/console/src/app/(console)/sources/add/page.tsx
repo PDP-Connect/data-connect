@@ -1,17 +1,23 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import { randomUUID } from "node:crypto";
 import { PageHeader } from "@pdpp/operator-ui/components/primitives";
 import { dashboardRoutes } from "@pdpp/operator-ui/components/views/routes";
 import Link from "next/link";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
+import type { ConnectorIconLike } from "@pdpp/brand-react";
 import { existingSourcesByConnectorCatalog } from "../../components/existing-sources-by-connector.ts";
 import { ServerUnreachable } from "../../components/server-unreachable.tsx";
 import { type ExistingSourceSetupLink, SourceSetupCatalog } from "../../components/source-setup-catalog.tsx";
 import { buildOwnerConnectorCatalog, type ConnectorCatalogEntry } from "../../lib/connection-catalog.ts";
-import { ReferenceServerUnreachableError } from "../../lib/owner-token.ts";
+import type { ConnectorInstallLifecycle } from "../../lib/connector-install-presentation.ts";
+import { buildConnectorInstallLifecycleByConnector } from "../../lib/connector-install-presentation.ts";
+import { getConnectorInstallSnapshot } from "../../lib/connector-install-client.ts";
+import { ReferenceServerUnreachableError, ResourceServerHttpError } from "../../lib/owner-token.ts";
 import { listConnectorManifests, listOwnerConnectorTemplates } from "../../lib/rs-client.ts";
 import { isDeterministicSourcesReadError } from "../read-error-classification.ts";
+import { LocalConnectorSourcesPanel } from "./local-connector-sources-panel.tsx";
 
 export const dynamic = "force-dynamic";
 
@@ -38,13 +44,43 @@ export default async function AddSourcePage({ searchParams }: { searchParams: Pr
   const params = await searchParams;
   let catalog: ConnectorCatalogEntry[] = [];
   let existingSourcesByConnector: Record<string, readonly ExistingSourceSetupLink[]> = {};
+  let installLifecycleByConnector: Readonly<Record<string, ConnectorInstallLifecycle>> | null = null;
+  let installCatalogBusySnapshotId: string | null = null;
+  let installCatalogTransientlyUnavailable = false;
+  let localSources: NonNullable<Awaited<ReturnType<typeof getConnectorInstallSnapshot>>["localSources"]> = [];
+  let connectorIcons: Readonly<Record<string, ConnectorIconLike | null | undefined>> = {};
   if (process.env.NODE_ENV !== "production" && params.demo === "atlas") {
     const demo = await import("./add-source-demo-data.ts");
     ({ catalog, existingSourcesByConnector } = demo.buildAddSourceDemoCatalog());
   } else {
     try {
-      const [manifests, templates] = await Promise.all([listConnectorManifests(), listOwnerConnectorTemplates()]);
-      catalog = buildOwnerConnectorCatalog(manifests, templates);
+      const installSnapshotPromise = getConnectorInstallSnapshot().catch((err: unknown) => {
+        // The console can remain usable against a pre-install-route reference
+        // server during the RI rollout. No lifecycle claim is shown in that
+        // case; other failures remain visible to the existing page error path.
+        if (err instanceof ResourceServerHttpError && err.status === 404) {
+          return null;
+        }
+        return Promise.reject(err);
+      });
+      const [manifests, templates, installSnapshot] = await Promise.all([
+        listConnectorManifests(),
+        listOwnerConnectorTemplates(),
+        installSnapshotPromise,
+      ]);
+      connectorIcons = Object.fromEntries(
+        manifests.flatMap((manifest) => [
+          [manifest.connector_id, manifest.icon] as const,
+          ...(manifest.connector_key ? ([[manifest.connector_key, manifest.icon]] as const) : []),
+        ])
+      );
+      catalog = buildOwnerConnectorCatalog(manifests, templates, installSnapshot?.catalog ?? []);
+      installLifecycleByConnector = installSnapshot
+        ? buildConnectorInstallLifecycleByConnector(installSnapshot.catalog, installSnapshot.status)
+        : null;
+      installCatalogTransientlyUnavailable = installSnapshot?.catalogUnavailableReason === "transient_busy";
+      installCatalogBusySnapshotId = installCatalogTransientlyUnavailable ? randomUUID() : null;
+      localSources = installSnapshot?.localSources ? [...installSnapshot.localSources] : [];
       // EXACT per-connector existing-sources lookup — one `GET
       // /_ref/connections?connector_id=` call per catalog entry (bounded by
       // the registered connector-type catalog size, a few dozen, never by
@@ -95,8 +131,12 @@ export default async function AddSourcePage({ searchParams }: { searchParams: Pr
         action={dashboardRoutes.section.addSource}
         catalog={catalog}
         existingSourcesByConnector={existingSourcesByConnector}
+        installCatalogBusySnapshotId={installCatalogBusySnapshotId}
+        installCatalogTransientlyUnavailable={installCatalogTransientlyUnavailable}
+        installLifecycleByConnector={installLifecycleByConnector}
         query={sourceQuery}
       />
+      <LocalConnectorSourcesPanel connectorIcons={connectorIcons} sources={localSources} />
     </RecordroomShellWithPalette>
   );
 }

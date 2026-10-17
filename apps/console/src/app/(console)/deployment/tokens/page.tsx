@@ -35,7 +35,6 @@ interface Params {
 type FlowState = NonNullable<ReturnType<typeof getOwnerBootstrapFlow>>;
 type FlowExamples = NonNullable<Awaited<ReturnType<typeof buildOwnerBootstrapExamples>>>;
 type ReproduceFormat = "curl" | "cli";
-const DAISY_OWNER_AGENT_CREDENTIAL_PATH = "~/applications/daisy/.pi/agent/pdpp-owner-agent.json";
 
 function InlineError({ prefix, message }: { message: string; prefix: string }) {
   return (
@@ -61,10 +60,8 @@ function OwnerAgentOnboardingCard({ entrypoint }: { entrypoint: string }) {
   const command = [
     "pdpp owner-agent onboard",
     shellQuote(entrypoint),
-    "--credential-file",
-    shellQuote(DAISY_OWNER_AGENT_CREDENTIAL_PATH),
     "--client-name",
-    shellQuote("Daisy"),
+    shellQuote("local assistant"),
   ].join(" ");
   return (
     <section
@@ -76,7 +73,7 @@ function OwnerAgentOnboardingCard({ entrypoint }: { entrypoint: string }) {
           <p className="pdpp-eyebrow text-[color:var(--human)]">Recommended owner-agent path</p>
           <h2 className="pdpp-title mt-1 text-foreground">Let the local agent complete onboarding</h2>
           <p className="pdpp-caption mt-2 text-muted-foreground">
-            Use this for Daisy or another trusted local agent. The agent starts from the public entrypoint, opens the
+            Use this for a trusted local agent. The agent starts from the public entrypoint, opens the
             browser approval flow, and writes the owner credential directly to its local state. No bearer needs to be
             pasted into chat or copied out of the dashboard.
           </p>
@@ -92,8 +89,9 @@ function OwnerAgentOnboardingCard({ entrypoint }: { entrypoint: string }) {
         <CopyButton ariaLabel="Copy owner-agent onboarding command" value={command} />
       </div>
       <p className="pdpp-caption mt-3 text-muted-foreground">
-        Daisy reads <code className="font-mono">{DAISY_OWNER_AGENT_CREDENTIAL_PATH}</code>, uses the top-level{" "}
-        <code className="font-mono">access_token</code> for owner-level REST reads, and should not send it to{" "}
+        The CLI stores the credential under <code className="font-mono">~/.pdpp/owner-agents/&lt;host&gt;.json</code>.
+        The assistant can read the top-level <code className="font-mono">access_token</code> for owner-level REST
+        reads and should not send it to{" "}
         <code className="font-mono">/mcp</code>.
       </p>
     </section>
@@ -111,7 +109,8 @@ function IssueCard({ flow }: { flow: FlowState | null }) {
       <div className="mb-4">
         <p className="pdpp-eyebrow">Manual/debug bearer</p>
         <p className="pdpp-caption mt-1 text-muted-foreground">
-          Use this fallback for debugging a script you control or inspecting the wire flow. For Daisy, prefer the
+          Use this fallback for debugging a script you control or inspecting the wire flow. For a trusted local agent,
+          prefer the
           owner-agent command above so the credential lands in the right local file.
         </p>
       </div>

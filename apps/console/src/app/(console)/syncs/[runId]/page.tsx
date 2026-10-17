@@ -8,15 +8,19 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { Fragment } from "react";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
+import { ConnectorMark } from "@/app/(console)/components/connector-mark.tsx";
 import { ServerUnreachable } from "../../components/server-unreachable.tsx";
 import { getAsInternalUrl, ReferenceServerUnreachableError } from "../../lib/owner-token.ts";
 import {
   getRunStatus,
   getRunTimeline,
+  getStaticSecretSetup,
   type RunStatusEnvelope,
   type SpineEvent,
   type TimelineEnvelope,
 } from "../../lib/ref-client.ts";
+import { listConnectorManifests } from "../../lib/rs-client.ts";
+import { findManifestForConnectorId } from "../../sources/lib/relationships.ts";
 import {
   type CurrentRunAssistance,
   getCurrentRunAssistance,
@@ -35,6 +39,7 @@ import {
 } from "../../lib/run-gaps.ts";
 import { CancelRunControl } from "./cancel-run-control.tsx";
 import { RunInteractionForm } from "./interaction-form.tsx";
+import { projectCredentialInteraction } from "./credential-interaction.ts";
 import {
   describeAssistanceOwnerAction,
   describeAssistanceProgressPosture,
@@ -107,6 +112,9 @@ export default async function RunDetailPage({
 
   const { events } = envelope;
   const connectorId = events.find((e) => e.actor_type === "runtime")?.actor_id ?? null;
+  const connectorManifests = await listConnectorManifests().catch(() => []);
+  const connectorManifest = connectorId ? findManifestForConnectorId(connectorManifests, connectorId) : null;
+  const connectorName = connectorManifest?.display_name ?? connectorId ?? "connector";
 
   const checkpoints = summarizeCheckpoints(events);
   const progress = summarizeProgress(events);
@@ -124,6 +132,10 @@ export default async function RunDetailPage({
   // the terminal event is not on this page.
   const inPageTerminalStatus = getTerminalRunStatus(events);
   const currentAssistance = active ? getCurrentRunAssistance(events) : null;
+  const credentialSetup =
+    currentAssistance?.kind === "credentials" && connectorId
+      ? await getStaticSecretSetup(connectorId).catch(() => null)
+      : null;
   const latestProgress = getLatestProgress(events);
   const failure = events.find((e) => e.event_type === "run.failed");
   const terminalKnownGaps = extractTerminalKnownGaps(events);
@@ -139,8 +151,16 @@ export default async function RunDetailPage({
       envelopeTerminal,
       inPageTerminalStatus,
     }) ?? mapRunHandleStatusToDisplay(runStatus?.status ?? null);
-  const stateTone = getRunStateTone({ active, currentAssistance, terminalStatus: displayTerminalStatus });
-  const stateValue = getRunStateValue({ active, currentAssistance, terminalStatus: displayTerminalStatus });
+  const stateTone = getRunStateTone({
+    active,
+    currentAssistance,
+    terminalStatus: displayTerminalStatus,
+  });
+  const stateValue = getRunStateValue({
+    active,
+    currentAssistance,
+    terminalStatus: displayTerminalStatus,
+  });
   const failureRows = summarizeFailure(failure, runStatus);
 
   // The before-timeline stack, header meta pills, and description are assigned
@@ -150,7 +170,12 @@ export default async function RunDetailPage({
   // the prop position.
   const beforeTimeline = (
     <>
-      <CurrentAssistanceSection active={active} currentAssistance={currentAssistance} runId={runId} />
+      <CurrentAssistanceSection
+        active={active}
+        credentialSetup={credentialSetup}
+        currentAssistance={currentAssistance}
+        runId={runId}
+      />
       {active ? <CancelRunControl runId={runId} /> : null}
       <LatestProgressSection active={active} latestProgress={latestProgress} terminalStatus={displayTerminalStatus} />
       <StatsGrid
@@ -160,6 +185,14 @@ export default async function RunDetailPage({
         interactions={interactions}
         progress={progress}
       />
+      {runStatus?.failure?.recovery_hint?.action === "refresh_credentials" && connectorId ? (
+        <p className="pdpp-caption mb-8 text-muted-foreground">
+          Reconnect this source to sync again:{" "}
+          <Link className="text-foreground underline" href={`/sources/${encodeURIComponent(connectorId)}`}>
+            {connectorName}
+          </Link>
+        </p>
+      ) : null}
       <KnownGapsSection
         coverageGaps={gapClassification.coverageGaps}
         informationalGaps={gapClassification.informationalGaps}
@@ -186,6 +219,11 @@ export default async function RunDetailPage({
             className="font-mono text-foreground underline underline-offset-2"
             href={`/sources/${encodeURIComponent(connectorId)}`}
           >
+            <ConnectorMark
+              className="mr-2 inline-block size-5 align-[-0.2em]"
+              icon={connectorManifest?.icon}
+              name={connectorName}
+            />
             {connectorId}
           </Link>
           {" · "}
@@ -233,16 +271,22 @@ export default async function RunDetailPage({
 
 function CurrentAssistanceSection({
   active,
+  credentialSetup,
   currentAssistance,
   runId,
 }: {
   active: boolean;
+  credentialSetup: Awaited<ReturnType<typeof getStaticSecretSetup>> | null;
   currentAssistance: CurrentRunAssistance | null;
   runId: string;
 }) {
   if (!currentAssistance) {
     return null;
   }
+  const credentialView =
+    currentAssistance.kind === "credentials"
+      ? projectCredentialInteraction(currentAssistance.fields, credentialSetup)
+      : null;
   const supportsStreaming =
     active &&
     requiresBrowserSurfaceAssistance(currentAssistance) &&
@@ -273,7 +317,7 @@ function CurrentAssistanceSection({
       ) : null}
       <dl className="pdpp-caption grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
         <dt className="text-muted-foreground">message</dt>
-        <dd>{currentAssistance.message}</dd>
+        <dd>{credentialView?.message ?? currentAssistance.message}</dd>
         <dt className="text-muted-foreground">state</dt>
         <dd>
           {describeAssistanceProgressPosture(currentAssistance.progressPosture)} ·{" "}
@@ -297,12 +341,13 @@ function CurrentAssistanceSection({
       </dl>
       {supportsSubmit ? (
         <RunInteractionForm
-          fields={currentAssistance.fields}
+          fields={credentialView?.fields ?? currentAssistance.fields}
           interactionId={currentAssistance.id}
           key={currentAssistance.id}
           kind={currentAssistance.kind}
-          message={currentAssistance.message}
+          message={credentialView?.message ?? currentAssistance.message}
           runId={runId}
+          submitLabel={credentialView?.submitLabel}
         />
       ) : null}
     </Callout>
@@ -333,7 +378,7 @@ function getAssistanceTitle(assistance: CurrentRunAssistance, active: boolean): 
 function getAssistanceDescription(
   assistance: CurrentRunAssistance,
   active: boolean,
-  supportsStreaming: boolean
+  supportsStreaming: boolean,
 ): string {
   if (!active) {
     return "This assistance request was still open when the run ended.";
@@ -554,8 +599,8 @@ function KnownGapsSection({
 
       {protocolViolationCount > 0 ? (
         <p className="pdpp-caption mt-3 text-muted-foreground">
-          {protocolViolationCount} protocol-violation gap{protocolViolationCount === 1 ? "" : "s"} omitted here; see
-          Failure diagnosis.
+          {protocolViolationCount} protocol-violation gap
+          {protocolViolationCount === 1 ? "" : "s"} omitted here; see Failure diagnosis.
         </p>
       ) : null}
       {/* Skips with no gap record are the ONLY thing this section has to say
@@ -619,8 +664,8 @@ function SkippedWithoutGapRecord({ skipped }: { skipped: SkippedStreamSummary })
       ) : null}
       {skipped.unexplainedCount > 0 ? (
         <p className="pdpp-caption mt-1.5 text-muted-foreground">
-          {skipped.unexplainedCount} of these recorded no reason, so PDPP cannot tell you whether anything is missing
-          for {skipped.unexplainedCount === 1 ? "it" : "them"}.
+          {skipped.unexplainedCount} of these recorded no reason, so DataConnect cannot tell you whether anything is missing for{" "}
+          {skipped.unexplainedCount === 1 ? "it" : "them"}.
         </p>
       ) : null}
     </div>
@@ -1051,6 +1096,9 @@ function summarizeFailure(failure: SpineEvent | undefined, runStatus: RunStatusE
       ];
     }
     if (runStatus?.failure) {
+      if (runStatus.failure.recovery_hint?.action === "refresh_credentials") {
+        return runStatus.failure.message ? [["message", runStatus.failure.message]] : [];
+      }
       return [
         ["reason", runStatus.failure.reason ?? runStatus.terminal_reason ?? "—"],
         ["origin", runStatus.failure.origin ?? "—"],

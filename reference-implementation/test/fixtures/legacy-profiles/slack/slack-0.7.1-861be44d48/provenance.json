@@ -1,0 +1,170 @@
+{
+	"generated_file_notice": "Local-source layout build (scratch builder). Not signed. Rebuild with build-local-source.mjs.",
+	"builder": "build-local-source.mjs (esbuild settings copied from scripts/build-connector-oci-artifact.mjs)",
+	"connector_key": "slack",
+	"connector_directory": "slack",
+	"version": "0.7.1",
+	"source": {
+		"repository": "https://github.com/PDP-Connect/data-connectors",
+		"revision": "861be44d48b7ddaa0b3e9f316279a3546d8091f2",
+		"connector_path": "connectors/slack"
+	},
+	"build_command": "node build-local-source.mjs --dcs <checkout> --connector slack --expect-revision 861be44d48b7ddaa0b3e9f316279a3546d8091f2 --out <work>/tmp/prov/slack-0.7.1/slack",
+	"dependency_install": "node_modules installed in the checkout",
+	"manifest_sha256": "sha256:3383042b7029592d41109bef4ec46e8668beaeb3c9bbb5e64b2cc8679e2b0bc6",
+	"bundle_sha256": "sha256:d1be528ba5a175e1a0cfb9b4d9afe9b89e18fa891364536ef5e1698edc86a968",
+	"esbuild_version": "0.28.2",
+	"externals_left": [
+		"dynamic-import:patchright",
+		"import-statement:node:child_process",
+		"import-statement:node:crypto",
+		"import-statement:node:fs",
+		"import-statement:node:fs/promises",
+		"import-statement:node:os",
+		"import-statement:node:path",
+		"import-statement:node:readline",
+		"import-statement:node:sqlite",
+		"import-statement:node:url"
+	],
+	"source_inventory": [
+		{
+			"path": "connectors/slack/index.ts",
+			"sha256": "sha256:f67024eb6347d332895d39e53cb39de83410a0ce1682791b17c434538ff17ee1"
+		},
+		{
+			"path": "connectors/slack/parsers.ts",
+			"sha256": "sha256:c7e1ea7969325efeb1a7cd16fd1f5d69ee610069f45b48c8e1b718d24d0d990f"
+		},
+		{
+			"path": "connectors/slack/schemas.ts",
+			"sha256": "sha256:50b9c1348b99387e9a3d7f70896aa75d9c3720d9f4c859d759dc00bed415bb1c"
+		},
+		{
+			"path": "connectors/slack/slack-api.ts",
+			"sha256": "sha256:1d91f1a1c37fa8414554af0c1b8fb681dca13f357ac9db17b39d8bb280109c9b"
+		},
+		{
+			"path": "packages/polyfill-connectors/src/browser-handoff.ts",
+			"sha256": "sha256:353a484de582c2233bc30ba779c518637d31208e4904393e1262cc393bc1e30c"
+		},
+		{
+			"path": "packages/polyfill-connectors/src/browser-launch.ts",
+			"sha256": "sha256:84c583e590d1bd8fe1c3c37b5da3509e55e91921426cd737e3bb66da85c05190"
+		},
+		{
+			"path": "packages/polyfill-connectors/src/browser-window.ts",
+			"sha256": "sha256:d51e702c88cb9053a7a0a778929f829bbbe919498f9f8b89da173ccbc2518bd4"
+		},
+		{
+			"path": "packages/polyfill-connectors/src/capture-redaction.ts",
+			"sha256": "sha256:de9f0ef459574d5ef3a03b060e241dab705e8f981958c6d7d2eca8f7a97b4e4a"
+		},
+		{
+			"path": "packages/polyfill-connectors/src/connector-artifact-root.ts",
+			"sha256": "sha256:6f37ea7c7a03efe47380849f41384e1add6df82c3d34e498c0e001c7b1878a9e"
+		},
+		{
+			"path": "packages/polyfill-connectors/src/connector-diagnostic.ts",
+			"sha256": "sha256:8f26461acbd053917f21bdfc4bd9b314323d76919601e0aa33a41e1fb774f0b2"
+		},
+		{
+			"path": "packages/polyfill-connectors/src/connector-exit.ts",
+			"sha256": "sha256:395555db65b8760bd5f7812fe81c7b5922d84a25bfc8a1e82a925c9bd2ed0b56"
+		},
+		{
+			"path": "packages/polyfill-connectors/src/connector-http-governor.ts",
+			"sha256": "sha256:90b162818da7481ffc954e297332f7e86890fa17da19854ffb8a2dbcdfa1e295"
+		},
+		{
+			"path": "packages/polyfill-connectors/src/connector-options.ts",
+			"sha256": "sha256:2bc9f77dc2d1f1379af5bee6675b6c7e2545218094651e8b8ff0f674968d52ae"
+		},
+		{
+			"path": "packages/polyfill-connectors/src/connector-paths.ts",
+			"sha256": "sha256:a8913acf76159270342d7a0bd709d2a85da0d5bfc683fbbd0a0d0f202e884038"
+		},
+		{
+			"path": "packages/polyfill-connectors/src/connector-runtime.ts",
+			"sha256": "sha256:fd040d2b3ac16669ca8e1876dbb2694827f80c12a336a130c649ab40ae863b10"
+		},
+		{
+			"path": "packages/polyfill-connectors/src/fingerprint-cursor.ts",
+			"sha256": "sha256:9e06e7d7796f99b352d85a3b5f30505e3393d555e82829fb331882fc4e695b9a"
+		},
+		{
+			"path": "packages/polyfill-connectors/src/fixture-capture.ts",
+			"sha256": "sha256:4005e66d066f45a28e1bd05599a4f959c96b383f043bf064f51c7c0366cd984b"
+		},
+		{
+			"path": "packages/polyfill-connectors/src/generated/consent-time-fields.generated.ts",
+			"sha256": "sha256:696f2623bc6b0b60291e4148a9c9fa1446af6420e69a17e30d3083717a77914a"
+		},
+		{
+			"path": "packages/polyfill-connectors/src/observation.ts",
+			"sha256": "sha256:cd38885586d60b7940d768b133e461bb787c6d4a293bf114922236665d3d7cc5"
+		},
+		{
+			"path": "packages/polyfill-connectors/src/profile-lock.ts",
+			"sha256": "sha256:e4398bd9a175edcc62cfed0df33bd5c2cd570450f846e5e9e73a8b99e523ad36"
+		},
+		{
+			"path": "packages/polyfill-connectors/src/provider-pacing.ts",
+			"sha256": "sha256:6a79661d584efb5198e8c2dd9c5545806238e2ae62f6fac2b0be7fe7ea422e8a"
+		},
+		{
+			"path": "packages/polyfill-connectors/src/provider-profile.ts",
+			"sha256": "sha256:f8ecae8def55569845a6b00be44c81d41b086815f0934125ea4e73dda255baa5"
+		},
+		{
+			"path": "packages/polyfill-connectors/src/remote-download-har.ts",
+			"sha256": "sha256:1f7c348d4cfe785e45a67beec753bfb03d82e1019da960a6774e135c2648911a"
+		},
+		{
+			"path": "packages/polyfill-connectors/src/run-owned-pages.ts",
+			"sha256": "sha256:51e40c037266a54c7569e82686d17a2536e4ec8916a053e145754910fd69a3d3"
+		},
+		{
+			"path": "packages/polyfill-connectors/src/runtime-environment.ts",
+			"sha256": "sha256:93ad3686202601fe638f97d5278c80b521092b31d849d53d77fe93fb3154d57d"
+		},
+		{
+			"path": "packages/polyfill-connectors/src/schema-registry.ts",
+			"sha256": "sha256:0babcc2e73431002b31e58bfd8754b85d10294cfa51058d4471db7f95a164b73"
+		},
+		{
+			"path": "packages/polyfill-connectors/src/session-establish.ts",
+			"sha256": "sha256:6a469020cc8afbe977a3a7cb4a02bae8afdf221d599436adafd14f09d5db6647"
+		},
+		{
+			"path": "packages/polyfill-connectors/src/shutdown-hook.ts",
+			"sha256": "sha256:20f2918a9c85e645776f3a5c2e46b9ec930d429e50443436978a5cccdabc604f"
+		},
+		{
+			"path": "packages/polyfill-connectors/src/streaming-target-registration.ts",
+			"sha256": "sha256:12eaeeecd9fcbff8b2cd0846721163917df2f6f9e0692050fb581269ef6a76ca"
+		},
+		{
+			"path": "packages/polyfill-connectors/src/terminal-error.ts",
+			"sha256": "sha256:4bc3efc944ca22615905239ee7f875cfc27aabd8ca5dafe28ee5cc8e6d8c426a"
+		},
+		{
+			"path": "packages/polyfill-connectors/src/time-range.ts",
+			"sha256": "sha256:4665e5b89d66aae0e989464a436e61f62fd6f873601e0995a08cec42ca17f1b7"
+		}
+	],
+	"third_party_packages": [
+		{
+			"name": "@pdpp/connector-protocol",
+			"version": "2.4.0",
+			"license": "Apache-2.0",
+			"bundled_inputs": 9
+		},
+		{
+			"name": "zod",
+			"version": "4.6.5",
+			"license": "MIT",
+			"bundled_inputs": 95
+		}
+	],
+	"signed": false
+}

@@ -146,6 +146,8 @@ export interface SetupStatusCollectionFact {
   readonly considered: number | null;
   readonly covered?: number | null;
   readonly pending_detail_gaps: number;
+  /** Permanent source loss is never a verified-empty collection even at 0 recoverable gaps. */
+  readonly permanent_detail_gaps?: number;
   readonly skipped: unknown;
   readonly stream: string;
 }
@@ -351,7 +353,7 @@ function isTrustedEmptyFact(fact: SetupStatusCollectionFact): boolean {
   if (!isCoveredEmpty(fact.covered)) {
     return false;
   }
-  if (fact.pending_detail_gaps !== 0) {
+  if (fact.pending_detail_gaps !== 0 || (fact.permanent_detail_gaps ?? 0) > 0) {
     return false;
   }
   if (fact.skipped !== null) {

@@ -3,9 +3,40 @@
 Publishable PDPP local collector runtime for filesystem-class connectors.
 
 This package is intentionally narrower than `@pdpp/polyfill-connectors`: it
-ships only the local collector runner, the device-exporter client, and bundled
-Claude Code / Codex connector entrypoints. Browser/Patchright-backed connectors
-stay out of this package until each has its own publishability review.
+ships only the local collector runner and the device-exporter client. It
+contains no connector code. Browser/Patchright-backed connectors stay out of
+it until each has its own publishability review.
+
+### Where connector code comes from
+
+Each supported connector (`claude_code`, `codex`, `google_takeout`,
+`imessage`, `apple_photos`) is a signed Collection Profile published by
+[data-connectors](https://github.com/PDP-Connect/data-connectors) to
+`ghcr.io/pdp-connect/connector/<key>`. This package pins one release of each
+by OCI digest (`src/generated/collection-profile-pins.generated.ts`), so the
+package version decides which connector code runs.
+
+The first `run` (or `setup` sample) of a connector fetches the pinned release,
+verifies its Sigstore signature against the data-connectors publish workflow,
+and installs it under the platform state directory
+(`${XDG_STATE_HOME:-$HOME/.local/state}/pdpp/collection-profiles` on Linux,
+next to the outbox directory; `PDPP_COLLECTION_PROFILE_ROOT` overrides it).
+That first run needs network access to `ghcr.io` and to Sigstore. Later runs
+check the installed files against the pinned hashes and need no network; an
+installed copy that fails the check is moved aside and installed again.
+
+`google_messages` is not available: data-connectors does not publish a
+Collection Profile for it yet, and the collector refuses it by name.
+
+To move the pins to the catalog's latest releases (network required):
+
+```bash
+npm run pin:collection-profiles --workspace @pdpp/local-collector
+```
+
+This also rewrites the reference server's copy of the pinned profiles in
+`reference-implementation/server/local-collector-profiles/`, which the server
+uses as the enrollment manifest for these connectors.
 
 For filesystem-class collectors, the local device or host supervisor decides
 when the process runs. The reference server owns enrollment, ingestion, state,
@@ -224,11 +255,11 @@ Under that trust posture, the exact current child-process authority is:
   connector child as `PDPP_LOCAL_DEVICE_TOKEN`.
 - **Filesystem and network:** unrestricted, at the same privilege level as
   the collector process itself.
-- **Process execution:** the runtime invokes the connector's declared command
-  by name with `node_modules/.bin` from both the package root and the repo
-  root prepended to `PATH`.
-- **Working directory:** the child's `cwd` is the collector's own package
-  root.
+- **Process execution:** the runtime invokes the connector with this
+  process's own Node binary, with `node_modules/.bin` under the working
+  directory and two levels above it prepended to `PATH`.
+- **Working directory:** the child's `cwd` is the directory that holds the
+  installed Collection Profile's entrypoint.
 
 This supersedes older, narrower design text that described the connector
 child as receiving no device token and an allowlisted-from-scratch

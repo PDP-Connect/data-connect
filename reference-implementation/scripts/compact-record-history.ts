@@ -112,7 +112,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import process from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
+import { readPolyfillManifests } from "../server/polyfill-connectors-runtime.ts";
 
 // biome-ignore lint/correctness/noUnresolvedImports: Biome cannot resolve this installed package export; Node and TypeScript resolve it.
 import pg from "pg";
@@ -129,8 +129,8 @@ const { Pool } = pg;
  * fact written into `.ts` source, just reached via a different seam — see
  * `reference-implementation/test/ri-zero-connector-knowledge-conformance.test.ts`).
  *
- * This script reads every manifest under both shipped manifest sets
- * (`@pdpp/polyfill-connectors`'s `readPolyfillManifests()`,
+ * This script reads every manifest under both available manifest sets
+ * (the optional polyfill runtime's `readPolyfillManifests()`,
  * `reference-implementation/manifests/` — mirroring
  * `scripts/generate-connector-registry.ts`'s own enumeration of the same two
  * sets, the sanctioned pattern for RI tooling that needs the full manifest

@@ -19,7 +19,13 @@ import { getLastRunLabel } from "@/lib/platform/ui"
 import { getPlatformRegistryEntry } from "@/lib/platform/utils"
 import { resolvePlatformLogo } from "@/lib/platform/resolve-platform-logo"
 import type { Platform, Run } from "@/types"
-import { ChevronRightIcon, KeyRoundIcon, RotateCcwIcon } from "lucide-react"
+import {
+  ChevronRightIcon,
+  KeyRoundIcon,
+  RotateCcwIcon,
+  Trash2Icon,
+  UserPlusIcon,
+} from "lucide-react"
 import { Link } from "react-router-dom"
 import { isBlockingRun } from "./available-sources-list.policy"
 import { getPlatformSourceLabel } from "./available-sources-list.lib"
@@ -32,6 +38,8 @@ interface ConnectedSourcesListProps {
   onSyncSource?: (platform: Platform) => void
   onReconnectSource?: (platform: Platform) => void
   onReplaceCredentials?: (platform: Platform) => void
+  onRemoveSource?: (platform: Platform) => void
+  onAddAccount?: (platform: Platform) => void
 }
 
 type OnboardingMessageState = "empty" | "early" | "mature"
@@ -53,6 +61,8 @@ export function ConnectedSourcesList({
   onSyncSource,
   onReconnectSource,
   onReplaceCredentials,
+  onRemoveSource,
+  onAddAccount,
 }: ConnectedSourcesListProps) {
   const inFlightSyncPlatformIdsRef = useRef<Set<string>>(new Set())
   const syncFeedbackTimeoutsRef = useRef<
@@ -81,34 +91,37 @@ export function ConnectedSourcesList({
   const triggerSyncFeedback = useCallback(
     (platform: Platform) => {
       if (!onSyncSource) return
-      if (inFlightSyncPlatformIdsRef.current.has(platform.id)) return
+      const platformKey = platform.connectionId
+        ? `${platform.id}:${platform.connectionId}`
+        : platform.id
+      if (inFlightSyncPlatformIdsRef.current.has(platformKey)) return
 
-      inFlightSyncPlatformIdsRef.current.add(platform.id)
+      inFlightSyncPlatformIdsRef.current.add(platformKey)
       try {
         onSyncSource(platform)
       } catch (error) {
         console.error("Sync source failed before starting:", error)
-        clearSyncFeedbackForPlatform(platform.id)
+        clearSyncFeedbackForPlatform(platformKey)
         return
       }
-      clearSyncFeedbackTimers(platform.id)
+      clearSyncFeedbackTimers(platformKey)
       setSyncFeedbackByPlatformId(prev => ({
         ...prev,
-        [platform.id]: "running",
+        [platformKey]: "running",
       }))
 
       const moveToBackgroundTimer = setTimeout(() => {
         setSyncFeedbackByPlatformId(prev => ({
           ...prev,
-          [platform.id]: "backgrounding",
+          [platformKey]: "backgrounding",
         }))
       }, 3_000)
 
       const clearFeedbackTimer = setTimeout(() => {
-        clearSyncFeedbackForPlatform(platform.id)
+        clearSyncFeedbackForPlatform(platformKey)
       }, 5_000)
 
-      syncFeedbackTimeoutsRef.current[platform.id] = [
+      syncFeedbackTimeoutsRef.current[platformKey] = [
         moveToBackgroundTimer,
         clearFeedbackTimer,
       ]
@@ -126,14 +139,12 @@ export function ConnectedSourcesList({
   }, [])
 
   const onboardingMessageState = getOnboardingMessageState(platforms.length)
-  const hasBlockingRun = useMemo(
-    () => runs.some(run => isBlockingRun(run)),
-    [runs]
-  )
   const activePlatformIds = useMemo(
     () =>
       new Set(
-        runs.filter(run => run.status === "running").map(run => run.platformId)
+        runs.filter(run => run.status === "running").map(run =>
+          run.connectionId ? `${run.platformId}:${run.connectionId}` : run.platformId
+        )
       ),
     [runs]
   )
@@ -165,11 +176,39 @@ export function ConnectedSourcesList({
         <PersonalServerOnboardingCopy state={onboardingMessageState} />
       </div>
       <SourceRowList>
-        {platforms.map(platform => {
-          const meta = getLastRunLabel(runs, platform.id)
-          const hasActiveRun = activePlatformIds.has(platform.id)
-          const syncFeedbackState = syncFeedbackByPlatformId[platform.id]
+        {platforms.map((platform, index) => {
+          const rowKey = platform.connectionId
+            ? `${platform.id}:${platform.connectionId}`
+            : platform.id
+          const meta = getLastRunLabel(
+            platform.connectionId
+              ? runs.filter(run => run.connectionId === platform.connectionId)
+              : runs,
+            platform.id
+          )
+          const hasActiveRun = activePlatformIds.has(rowKey)
+          const hasBlockingRun = runs.some(
+            run =>
+              isBlockingRun(run) &&
+              (!platform.connectionId || run.connectionId === platform.connectionId)
+          )
+          const syncFeedbackState = syncFeedbackByPlatformId[rowKey]
           const isShowingSyncFeedback = Boolean(syncFeedbackState)
+          const accountCount = platforms.filter(
+            candidate => candidate.id === platform.id
+          ).length
+          const accountOrdinal = platforms
+            .slice(0, index + 1)
+            .filter(candidate => candidate.id === platform.id).length
+          const sourceLabel = platform.connectionId
+            ? platform.name
+            : getPlatformSourceLabel(platform)
+          const rowLabel = platform.accountLabel
+            ? `${sourceLabel} · ${platform.accountLabel}`
+            : accountCount > 1
+              ? `${sourceLabel} · Account ${accountOrdinal}`
+              : sourceLabel
+          const actionLabel = platform.connectionId ? rowLabel : platform.name
           const isSyncDisabled =
             !onSyncSource ||
             hasBlockingRun ||
@@ -184,6 +223,7 @@ export function ConnectedSourcesList({
             (platform.id === "github-pdpp" ||
               platform.setup?.modality === "static_secret") &&
             !hasActiveRun
+          const canRemove = Boolean(onRemoveSource) && !hasActiveRun
           const syncTooltipCopy =
             hasActiveRun || syncFeedbackState === "backgrounding"
               ? "Fetching in background"
@@ -192,21 +232,35 @@ export function ConnectedSourcesList({
                 : "Fetch your latest data"
           return (
             <SourceRowWithActions
-              key={platform.id}
+              key={rowKey}
               iconName={platform.name}
               iconImageSrc={resolvePlatformLogo(
                 platform,
                 getPlatformRegistryEntry(platform)
               )}
-              label={getPlatformSourceLabel(platform)}
+              label={rowLabel}
               meta={meta}
               rowAction={{
                 onClick: onOpenRuns ? () => onOpenRuns(platform) : undefined,
                 disabled: !onOpenRuns,
-                ariaLabel: `Open ${platform.name}`,
+                ariaLabel: `Open ${rowLabel}`,
               }}
               middleSlot={
                 <div className="flex h-full">
+                  {platform.runtime === "pdpp-network" && onAddAccount ? (
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <SourceRowActionButton
+                          className="px-2"
+                          onClick={() => onAddAccount(platform)}
+                          aria-label={`Add another ${platform.name} account`}
+                        >
+                          <UserPlusIcon aria-hidden />
+                        </SourceRowActionButton>
+                      </TooltipTrigger>
+                      <TooltipContent side="top">Add another account</TooltipContent>
+                    </Tooltip>
+                  ) : null}
                   {canReplaceCredentials ? (
                     <Tooltip>
                       <TooltipTrigger asChild>
@@ -239,6 +293,22 @@ export function ConnectedSourcesList({
                       </TooltipContent>
                     </Tooltip>
                   ) : null}
+                  {canRemove ? (
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <SourceRowActionButton
+                          className="px-2"
+                          onClick={() => onRemoveSource?.(platform)}
+                          aria-label={`Remove ${actionLabel}`}
+                        >
+                          <Trash2Icon aria-hidden />
+                        </SourceRowActionButton>
+                      </TooltipTrigger>
+                      <TooltipContent side="top">
+                        Remove this source
+                      </TooltipContent>
+                    </Tooltip>
+                  ) : null}
                   <Tooltip>
                     <TooltipTrigger asChild>
                       <SourceRowActionButton
@@ -249,7 +319,7 @@ export function ConnectedSourcesList({
                             : undefined
                         }
                         disabled={isSyncDisabled}
-                        aria-label={`Fetch latest data for ${platform.name}`}
+                        aria-label={`Fetch latest data for ${actionLabel}`}
                       >
                         {syncFeedbackState ? (
                           <Text

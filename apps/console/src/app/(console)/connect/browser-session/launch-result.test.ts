@@ -31,6 +31,23 @@ test("browser-session launch does not route a surface_failed preflight run to st
   assert.equal("href" in result, false);
 });
 
+test("browser-session launch surfaces the host allocator's structured failure message", () => {
+  const result = classifyBrowserSessionLaunchResult({
+    browser_surface: { browser_surface_status: "surface_failed" },
+    browser_surface_failure: {
+      code: "browser_sandbox_unavailable",
+      message:
+        "This Linux distribution blocks the bundled browser's sandbox. Install Google Chrome or Chromium from a .deb package.",
+    },
+    run_id: "run_surface_failed",
+    status: "surface_failed",
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.status, 503);
+  assert.match(result.message, /This Linux distribution blocks the bundled browser's sandbox/);
+});
+
 test("browser-session launch keeps queued browser runs on the launch page", () => {
   const result = classifyBrowserSessionLaunchResult({
     browser_surface: {

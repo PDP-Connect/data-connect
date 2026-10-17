@@ -35,6 +35,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { resolveCommittedManifestsDirForTests } from "../../../lib/connector-manifests-dir.ts";
 import {
   candidateParentStreamsForChild,
   childHasOneBackLinksFromManifest,
@@ -47,11 +48,7 @@ import {
 } from "../../lib/relationships.ts";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
-// .../sources/[connector]/[stream]/ -> repo root is six levels up from console
-// src; resolve via the manifests dir the console itself reads.
-const CHASE_MANIFEST = fileURLToPath(
-  new URL("../../../../../../../../packages/polyfill-connectors/manifests/chase.json", import.meta.url)
-);
+const CHASE_MANIFEST = `${resolveCommittedManifestsDirForTests()}/chase.json`;
 const DETAIL_PAGE = fileURLToPath(new URL("[recordKey]/page.tsx", `file://${HERE}`));
 const LIST_PAGE = `${HERE}page.tsx`;
 

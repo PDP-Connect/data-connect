@@ -278,3 +278,46 @@ test("validateRuntimeRequirements: external_tools is NOT validated when bindings
     "absent bindings short-circuits external_tools validation"
   );
 });
+
+// --- tuning_environment -----------------------------------------------------
+
+function withTuning(connector_id: string, tuning_environment: unknown): Record<string, unknown> {
+  return { connector_id, runtime_requirements: { tuning_environment } };
+}
+
+test("validateRuntimeRequirements: tuning_environment accepts keys in the first-party namespace", () => {
+  const chatgpt = "https://registry.pdpp.dev/connectors/chatgpt";
+  assert.equal(validateRuntimeRequirements(withTuning(chatgpt, ["PDPP_CHATGPT_PACING_MIN_INTERVAL_MS"]), CODE), undefined);
+  assert.equal(validateRuntimeRequirements(withTuning(chatgpt, []), CODE), undefined);
+  // A third-party manifest has no namespace; its keys still need an operator binding.
+  assert.equal(
+    validateRuntimeRequirements(withTuning("https://registry.example.com/connectors/x", ["EXAMPLE_PAGE_SIZE"]), CODE),
+    undefined
+  );
+});
+
+test("validateRuntimeRequirements: tuning_environment is validated even without bindings", () => {
+  const chatgpt = "https://registry.pdpp.dev/connectors/chatgpt";
+  assertRejects(withTuning(chatgpt, "PDPP_CHATGPT_X"), "tuning_environment must be an array");
+  assertRejects(withTuning(chatgpt, ["pdpp_chatgpt_x"]), "tuning_environment[0] must be an upper-case environment key");
+  assertRejects(withTuning(chatgpt, ["PDPP_CHATGPT_X", "PDPP_CHATGPT_X"]), "tuning_environment duplicates PDPP_CHATGPT_X");
+  assertRejects(
+    withTuning(chatgpt, ["PDPP_GMAIL_MAX_ATTACHMENT_BYTES"]),
+    "PDPP_GMAIL_MAX_ATTACHMENT_BYTES is outside the chatgpt tuning namespace"
+  );
+  assertRejects(withTuning(chatgpt, ["AWS_SECRET_ACCESS_KEY"]), "outside the chatgpt tuning namespace");
+});
+
+test("validateRuntimeRequirements: tuning_environment uses the connector_key identity registration stores", () => {
+  assertRejects(
+    { connector_key: "gmail", runtime_requirements: { tuning_environment: ["PDPP_CHATGPT_MAX_RUN_WALL_CLOCK_MS"] } },
+    "outside the gmail tuning namespace"
+  );
+  assert.equal(
+    validateRuntimeRequirements(
+      { connector_key: "gmail", runtime_requirements: { tuning_environment: ["PDPP_GMAIL_MAX_ATTACHMENT_BYTES"] } },
+      CODE
+    ),
+    undefined
+  );
+});

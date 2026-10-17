@@ -4,6 +4,13 @@
 /**
  * Obtain connectors through the connector manager.
  *
+ * **Status.** The published collector does not use {@link obtainManagedConnectors}.
+ * It installs through `collection-profiles.ts`, which delegates fetch and
+ * signature verification to data-connectors' installer core. That core now
+ * has the OCI and Sigstore path the paragraphs below describe as missing.
+ * The verifier in this directory is kept, with its tests, until an owner
+ * decides whether to remove it.
+ *
  * One call, {@link obtainManagedConnectors}, walks a pinned lock to a set of
  * definitions the existing runner seam accepts: resolve a pinned digest,
  * verify its signature against host policy, install to a content-addressed

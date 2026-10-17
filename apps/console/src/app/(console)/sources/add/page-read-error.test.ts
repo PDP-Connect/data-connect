@@ -11,6 +11,14 @@ const PAGE_FILE = `${HERE}page.tsx`;
 const HANDLES_DETERMINISTIC_REQUEST_RE = /if \(isDeterministicSourcesReadError\(err\)\)/;
 const RENDERS_SERVER_REASON_RE = /The reference server rejected the source catalog request: \{err\.message\}/;
 const PRESERVES_FULL_HEADER_RE = /<AddSourceHeader \/>/;
+const TRANSIENT_INSTALL_CATALOG_STATE_RE =
+  /installCatalogTransientlyUnavailable = installSnapshot\?\.catalogUnavailableReason === "transient_busy";/;
+const TRANSIENT_INSTALL_CATALOG_SNAPSHOT_ID_RE =
+  /installCatalogBusySnapshotId = installCatalogTransientlyUnavailable \? randomUUID\(\) : null;/;
+const PASSES_TRANSIENT_INSTALL_CATALOG_STATE_RE =
+  /installCatalogTransientlyUnavailable=\{installCatalogTransientlyUnavailable\}/;
+const PASSES_TRANSIENT_INSTALL_CATALOG_SNAPSHOT_ID_RE =
+  /installCatalogBusySnapshotId=\{installCatalogBusySnapshotId\}/;
 
 test("Add Source renders a deterministic reference request failure before it reaches Next's error boundary", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
@@ -22,4 +30,13 @@ test("Add Source renders a deterministic reference request failure before it rea
     src.indexOf("if (isDeterministicSourcesReadError(err))") < src.indexOf("throw err;"),
     "the known 4xx path must render before the error boundary can redact it"
   );
+});
+
+test("Add Source preserves transient connector catalog-busy state for package presentation", async () => {
+  const src = await readFile(PAGE_FILE, "utf8");
+  assert.match(src, /import \{ randomUUID \} from "node:crypto";/);
+  assert.match(src, TRANSIENT_INSTALL_CATALOG_STATE_RE);
+  assert.match(src, TRANSIENT_INSTALL_CATALOG_SNAPSHOT_ID_RE);
+  assert.match(src, PASSES_TRANSIENT_INSTALL_CATALOG_STATE_RE);
+  assert.match(src, PASSES_TRANSIENT_INSTALL_CATALOG_SNAPSHOT_ID_RE);
 });

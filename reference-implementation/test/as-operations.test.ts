@@ -89,7 +89,8 @@ test("as.authorization_server.metadata advertises pre_registered_public when DCR
     "cli_device_connect",
     "third_party_client_connect",
   ]);
-  assert.deepEqual(input.tokenEndpointAuthMethodsSupported, ["none"]);
+  assert.deepEqual(input.tokenEndpointAuthMethodsSupported, ["none", "private_key_jwt"]);
+  assert.deepEqual(input.tokenEndpointAuthSigningAlgValuesSupported, ["RS256"]);
   assert.deepEqual(input.grantTypesSupported, [
     "urn:ietf:params:oauth:grant-type:device_code",
     "authorization_code",

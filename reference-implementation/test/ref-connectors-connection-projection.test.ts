@@ -2551,3 +2551,96 @@ test(
     );
   })
 );
+
+// Real store -> real projection (`listConnectorSummaries` /
+// `getConnectorSummaryForRoute`): a connection whose ONLY pending losses are
+// permanent (`retryable: false`) must keep the loss VISIBLE (terminal_gap, not
+// healthy, not resumable) while every recovery-derived backlog field —
+// pending, pending_other and the retry floor `next_attempt_at` — excludes it, so
+// the console's `hasRecoverableWork` cannot offer a retry. This is the state
+// that feeds `source-recovery-state`; rendered-state proof is separate.
+interface PermanentSeedStore {
+  upsertPendingGap: (input: Record<string, unknown>) => Promise<unknown>;
+}
+
+test(
+  "a permanent-only backlog stays visible as terminal_gap and exposes no recoverable work or retry floor",
+  withTmpDb(async () => {
+    seedConnector();
+    await seedInstances({ sourceKind: "manual" });
+    const store = getTestDetailGapStore() as unknown as PermanentSeedStore;
+    const future = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    const base = {
+      connectorId: CONNECTOR_ID,
+      connectorInstanceId: WORK_INSTANCE_ID,
+      grantId: "grant_1",
+      stream: "files",
+    };
+    await store.upsertPendingGap({
+      ...base,
+      nextAttemptAfter: future,
+      reason: "source_unrepresentable",
+      recordKey: "lost_1",
+      retryable: false,
+    });
+    // A pressure-looking reason with an explicit false must not become a pressure backlog either.
+    await store.upsertPendingGap({
+      ...base,
+      nextAttemptAfter: future,
+      reason: "rate_limited",
+      recordKey: "lost_2",
+      retryable: false,
+    });
+
+    for (const [view, summary] of [
+      ["list", (await listConnectorSummaries()).find((row) => row.connector_instance_id === WORK_INSTANCE_ID)],
+      ["detail", await getConnectorSummaryForRoute(WORK_INSTANCE_ID)],
+    ] as const) {
+      assert.ok(summary, `the ${view} view projects a summary`);
+      const backlog = summary.connection_health.detail_gap_backlog;
+      assert.ok(backlog, "a readable store yields a rollup");
+      assert.equal(backlog.pending, 0);
+      assert.equal(backlog.pending_other, 0);
+      assert.equal(backlog.next_attempt_at, null, "a permanent gap's floor is not a retry time");
+      assert.equal(backlog.max_attempt_count, 0);
+
+      const files = collectionReportByStream(summary.collection_report).files;
+      assert.ok(files, "the stream is still reported");
+      assert.equal(files.coverage_condition, "terminal_gap", `the loss stays visible (${view} view)`);
+      assert.notEqual(files.forward_disposition, "resumable");
+      assert.equal(summary.connection_health.axes.coverage, "terminal_gap");
+      assert.notEqual(summary.connection_health.state, "healthy");
+      assert.notEqual(summary.rendered_verdict.pill.label, "Healthy");
+      assert.equal(
+        JSON.stringify(summary.connection_health).includes("retry_by_runtime"),
+        false,
+        "no retry_by_runtime remediation is offered for permanent loss"
+      );
+    }
+  })
+);
+
+test(
+  "a mixed permanent + transient backlog keeps retryable_gap priority and counts only the transient work",
+  withTmpDb(async () => {
+    seedConnector();
+    await seedInstances({ sourceKind: "manual" });
+    const store = getTestDetailGapStore() as unknown as PermanentSeedStore;
+    const base = {
+      connectorId: CONNECTOR_ID,
+      connectorInstanceId: WORK_INSTANCE_ID,
+      grantId: "grant_1",
+      stream: "files",
+    };
+    await store.upsertPendingGap({ ...base, reason: "source_unrepresentable", recordKey: "lost", retryable: false });
+    await store.upsertPendingGap({ ...base, reason: "upstream_pressure", recordKey: "later", retryable: true });
+
+    const summary = await getConnectorSummaryForRoute(WORK_INSTANCE_ID);
+    assert.ok(summary);
+    assert.equal(summary.connection_health.detail_gap_backlog?.pending, 1);
+    const files = collectionReportByStream(summary.collection_report).files;
+    assert.ok(files);
+    assert.equal(files.coverage_condition, "retryable_gap");
+    assert.equal(files.pending_detail_gaps, 1);
+  })
+);

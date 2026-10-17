@@ -60,7 +60,7 @@ const SAY_WHY_RE = /Say why/;
 const NOT_AVAILABLE_YET_RE = /not available for this connector yet/;
 const HAS_NO_OPTIONS_RE = /has no options/i;
 const INVALID_SCHEMA_RE = /invalid/;
-const PROPOSED_BY_DAISY_RE = /Proposed by daisy/;
+const PROPOSED_BY_CLIENT_RE = /Proposed by helper/;
 const YOU_WORD_RE = /you/i;
 const CHANGED_WHILE_EDITING_RE = /changed while you were editing/;
 const STALE_JARGON_RE = /stale|epoch|rebase/i;
@@ -420,9 +420,9 @@ test("status and origin read as owner language, never as raw enum values", () =>
 const LANE_HANDLE_LEAK_RE = /pdpp-slack-archived-run|NOT owner-authored/;
 
 test("an agent proposal names the app and never reads as owner confirmation", () => {
-  assert.equal(originLabel("agent", "client:daisy"), "Proposed by daisy");
+  assert.equal(originLabel("agent", "client:helper"), "Proposed by helper");
   assert.equal(originLabel("agent", "agent"), "Proposed by an automated process");
-  assert.doesNotMatch(originLabel("agent", "client:daisy"), YOU_WORD_RE);
+  assert.doesNotMatch(originLabel("agent", "client:helper"), YOU_WORD_RE);
 });
 
 test("an internal orchestration handle NEVER renders as a pseudo-identity", () => {
@@ -447,7 +447,7 @@ test("an internal orchestration handle NEVER renders as a pseudo-identity", () =
   }
 
   // A REGISTERED app still earns its name — this is not a blanket anonymiser.
-  assert.equal(originLabel("agent", "client:daisy"), "Proposed by daisy");
+  assert.equal(originLabel("agent", "client:helper"), "Proposed by helper");
 });
 
 test("history answers what changed, why, and by whom before any machine field", () => {
@@ -469,12 +469,12 @@ test("history answers what changed, why, and by whom before any machine field", 
 
 test("a pending agent proposal is flagged as needing an owner decision", () => {
   const [entry] = buildHistory(
-    [revision({ origin: "agent", revision: 9, set_by: "client:daisy", status: "proposed" })],
+    [revision({ origin: "agent", revision: 9, set_by: "client:helper", status: "proposed" })],
     schema(),
     8
   );
   assert.equal(entry?.needsOwnerDecision, true);
-  assert.match(entry?.attribution ?? "", PROPOSED_BY_DAISY_RE);
+  assert.match(entry?.attribution ?? "", PROPOSED_BY_CLIENT_RE);
 });
 
 test("history summarises multiple changed settings in plain words", () => {

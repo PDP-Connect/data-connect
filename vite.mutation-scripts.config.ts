@@ -41,8 +41,15 @@ import { defineConfig, mergeConfig } from "vitest/config"
 
 import rootConfig from "./vite.config.ts"
 
+const rootTestConfig = rootConfig({
+  command: "serve",
+  mode: "test",
+  isSsrBuild: false,
+  isPreview: false,
+})
+
 export default mergeConfig(
-  rootConfig,
+  rootTestConfig,
   defineConfig({
     test: {
       setupFiles: ["./scripts/mutation-falsification/test-identity-setup.ts"],

@@ -36,7 +36,11 @@ import { applyCredentialResponseNoStoreHeaders } from "../credential-response-ca
 import { OWNER_AUTH_DEFAULT_SUBJECT_ID } from "../owner-auth.ts";
 import type { PdppErrorFn, RouteArg } from "./_route-contract.ts";
 import type { ConsentUiRenderer, PendingGrant } from "./as-consent-ui-helpers.ts";
-import { renderPendingConsentNotFoundHtml, renderPendingGrantConsentHtml } from "./as-consent-ui-helpers.ts";
+import {
+  HOSTED_DENIAL_COPY,
+  renderPendingConsentNotFoundHtml,
+  renderPendingGrantConsentHtml,
+} from "./as-consent-ui-helpers.ts";
 
 // ─── Local structural types ───────────────────────────────────────────────────
 
@@ -163,7 +167,7 @@ async function renderApproveHtml(
       }),
       ctx.consentUi.renderSurface({
         children: ctx.consentUi.renderResultState({
-          body: "You can revoke this access any time from the grants dashboard. The exchange code is single-use and expires shortly.",
+          body: "You can revoke this access later from your grants page. The exchange code is single-use and expires shortly.",
           title: "Grant issued",
           tone: "success",
         }),
@@ -204,7 +208,14 @@ async function renderPackageApproveHtml(
       }),
       ctx.consentUi.renderSurface({
         children: ctx.consentUi.renderResultState({
-          body: "You can revoke any single source grant independently from the grants dashboard.",
+          // Not "revoke any single source grant independently": that promise
+          // is not deliverable. `POST /grants/:grantId/revoke` exists and the
+          // console proxies it, but no UI calls it — the only revoke control
+          // that ships is the all-or-nothing package cascade at
+          // `/grants/packages/:packageId`. Reversibility is what makes "yes"
+          // feel safe, so promising a granularity the owner cannot reach is
+          // worse than saying less.
+          body: "You can revoke this access later from your grants page.",
           title: `${childGrants.length} grant${childGrants.length === 1 ? "" : "s"} issued`,
           tone: "success",
         }),
@@ -898,9 +909,12 @@ export function mountAsConsent(app: AppLike, ctx: MountAsConsentContext): void {
               }),
               ctx.consentUi.renderSurface({
                 children: ctx.consentUi.renderResultState({
-                  body: "The pending data access request was rejected and cleared.",
-                  title: "Request rejected",
-                  tone: "danger",
+                  body: HOSTED_DENIAL_COPY.body,
+                  title: HOSTED_DENIAL_COPY.title,
+                  // Refusing is a normal outcome, not a failure. `danger`
+                  // painted the owner's own correct decision in the error
+                  // colour.
+                  tone: "neutral",
                 }),
               }),
             ].join("\n"),

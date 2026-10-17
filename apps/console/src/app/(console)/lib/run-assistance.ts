@@ -340,7 +340,6 @@ function parseFields(schema: unknown): AssistanceField[] {
             required: requiredFields.has(name),
           };
         })
-        .sort((left, right) => left.name.localeCompare(right.name))
     : [];
 }
 

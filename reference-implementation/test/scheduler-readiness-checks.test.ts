@@ -42,6 +42,8 @@ const TOP_LEVEL_REGEX_7 = /required local source path\(s\) are missing or unread
 const TOP_LEVEL_REGEX_8 = /data directory=\/nonexistent\/pdpp-test\/acme-data-xyz/;
 
 const BROWSER_ENV_KEYS = [
+  "PDPP_BROWSER_SURFACE_HOST_ENDPOINT",
+  "PDPP_BROWSER_SURFACE_MODE",
   "PDPP_BROWSER_SURFACE_REMOTE_CDP_URL",
   "PDPP_NEKO_CDP_HTTP_URL",
   "PDPP_NEKO_MANAGED_CONNECTORS",
@@ -216,6 +218,18 @@ test("defaultReadinessChecker accepts a required browser binding when a remote C
     const result = await defaultReadinessChecker(schedule("gmail", { bindings: { browser: { required: true } } }));
     assert.deepEqual(result, { ready: true });
   }));
+
+test("defaultReadinessChecker accepts a required browser binding with a host capability provider", () =>
+  withEnv(
+    {
+      PDPP_BROWSER_SURFACE_HOST_ENDPOINT: "http://127.0.0.1:9916/agent",
+      PDPP_BROWSER_SURFACE_MODE: "host",
+    },
+    async () => {
+      const result = await defaultReadinessChecker(schedule("gmail", { bindings: { browser: { required: true } } }));
+      assert.deepEqual(result, { ready: true });
+    }
+  ));
 
 test("defaultReadinessChecker accepts a required browser binding on a browser-capable Core image (PDPP_RUNTIME_BROWSER=1 + DISPLAY)", () =>
   withEnv({ DISPLAY: ":99", PDPP_RUNTIME_BROWSER: "1" }, async () => {

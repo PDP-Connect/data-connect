@@ -1239,7 +1239,7 @@ test("runCollectorConnector rejects promptly when the connector command is missi
         runCollectorConnector({
           baseUrl: harness.url,
           connector: {
-            args: ["connectors/claude_code/index.ts"],
+            args: ["connectors/fixture/index.ts"],
             command: "__pdpp_missing_connector_command__",
             connector_id: "fixture-missing-command",
             env: { PATH: "operator-bin" },
@@ -1899,6 +1899,128 @@ test("runCollectorConnector drains durable checkpoint work before reading prior 
     await harness.close();
   }
 });
+
+test(
+  "runCollectorConnector: restored server cursor is not advanced by an older pending checkpoint",
+  async (t) => {
+    const harness = await startCollectorHarness({ priorState: { messages: { cursor: "cursor-S" } } });
+    try {
+      const queuePath = await tempQueuePath();
+      const outbox = new LocalDeviceOutbox({ path: queuePath });
+      try {
+        const lostRecords = transformRecordsToCollectorEnvelopes({
+          batchId: "accepted-before-restore",
+          batchSeq: 1,
+          connectorId: "fixture-restore-gap",
+          deviceId: "device-1",
+          messages: [
+            {
+              data: { id: "record-after-S" },
+              emitted_at: "2026-10-15T12:00:00.000Z",
+              key: "record-after-S",
+              stream: "messages",
+              type: "RECORD",
+            },
+          ],
+          sourceInstanceId: "src-1",
+        });
+        const acceptedBatchId = buildLocalDeviceOutboxId({
+          kind: "record_batch",
+          parts: ["accepted-before-restore"],
+          sourceInstanceId: "src-1",
+        });
+        outbox.enqueue({
+          id: acceptedBatchId,
+          kind: "record_batch",
+          payload: {
+            batchId: "accepted-before-restore",
+            batchSeq: 1,
+            connectorId: "fixture-restore-gap",
+            deviceId: "device-1",
+            records: lostRecords,
+            sourceInstanceId: "src-1",
+          },
+          sourceInstanceId: "src-1",
+        });
+        const acceptedLease = outbox.claimReady({ holder: "pre-restore", leaseMs: 10_000, sourceInstanceId: "src-1" })[0];
+        assert.ok(acceptedLease);
+        outbox.acknowledge({
+          holder: "pre-restore",
+          id: acceptedLease.id,
+          leaseEpoch: acceptedLease.lease_epoch,
+        });
+        outbox.enqueue({
+          id: buildLocalDeviceOutboxId({
+            kind: "checkpoint",
+            parts: ["fixture-restore-gap", { messages: { cursor: "cursor-T" } }],
+            sourceInstanceId: "src-1",
+          }),
+          kind: "checkpoint",
+          payload: {
+            connectorId: "fixture-restore-gap",
+            sourceInstanceId: "src-1",
+            state: { messages: { cursor: "cursor-T" } },
+          },
+          sourceInstanceId: "src-1",
+        });
+      } finally {
+        outbox.close();
+      }
+
+      const fixture = await writeFixtureConnector({
+        script: `
+          let buf = "";
+          await new Promise((r) => process.stdin.on("data", (c) => {
+            buf += c;
+            if (buf.includes("\\n")) r();
+          }));
+          const start = JSON.parse(buf.split("\\n")[0]);
+          let records = 0;
+          if (start.state?.messages?.cursor === "cursor-S") {
+            process.stdout.write(JSON.stringify({
+              type: "RECORD", stream: "messages", key: "record-after-S",
+              data: { id: "record-after-S" }, emitted_at: "2026-10-15T12:00:00.000Z",
+            }) + "\\n");
+            records = 1;
+          }
+          process.stdout.write(JSON.stringify({ type: "DONE", status: "succeeded", records_emitted: records }) + "\\n");
+        `,
+      });
+
+      const result = await runCollectorConnector({
+        baseUrl: harness.url,
+        connector: {
+          args: [fixture],
+          command: "node",
+          connector_id: "fixture-restore-gap",
+          protocol_capabilities: [],
+          runtime_requirements: { bindings: {} },
+          streams: ["messages"],
+        },
+        deviceId: "device-1",
+        deviceToken: "device-token",
+        executionRoot: TEST_EXECUTION_ROOT,
+        queuePath,
+        sourceInstanceId: "src-1",
+      });
+
+      assert.equal(result.done?.status, "succeeded");
+      await t.test("pending checkpoint must preserve recovery from S", {
+        todo: "known gap: after restoring server DB to S, a pending local checkpoint advances the cursor to T before GET and skips records lost by restore",
+      }, () => assert.deepEqual(
+        {
+          cursorUsedForRecovery: (result.priorState?.messages as { cursor?: string } | undefined)?.cursor,
+          recoveredRecordIds: harness.ingestedBatches.flatMap((batch) =>
+            (batch.records ?? []).flatMap((record) => (typeof record.data?.id === "string" ? [record.data.id] : []))
+          ),
+        },
+        { cursorUsedForRecovery: "cursor-S", recoveredRecordIds: ["record-after-S"] }
+      ));
+    } finally {
+      await harness.close();
+    }
+  }
+);
 
 test("runCollectorConnector validates the reference route before mutating durable outbox work", async () => {
   const harness = await startCollectorHarness({

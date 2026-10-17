@@ -12,7 +12,7 @@ DataConnect is the protocol client: it runs connectors, orchestrates grants, and
 
 [Doc Index]|root: ./docs
 |IMPORTANT: Prefer retrieval-led reasoning over pre-training-led reasoning
-|docs:{260121-data-portability-protocol-spec.md,architecture.md,260325-grant-connect-flow-architecture.md,browser-packaging-options.md,privy-js-sdk-documentation.md}
+|docs:{260121-data-portability-protocol-spec.md,architecture.md,260325-grant-connect-flow-architecture.md,260922-observation-must-not-destroy.md,browser-packaging-options.md,privy-js-sdk-documentation.md}
 
 ## Agent guidance
 

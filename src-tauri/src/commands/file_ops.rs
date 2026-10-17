@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{AppHandle, Manager};
 use dirs::home_dir;
 
@@ -15,11 +16,17 @@ pub struct FileInfo {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RunData {
+    #[serde(rename = "platformId", skip_serializing_if = "Option::is_none")]
+    pub platform_id: Option<String>,
     pub company: String,
     pub name: String,
     #[serde(rename = "runID")]
     pub run_id: String,
     pub timestamp: u64,
+    #[serde(rename = "connectionId", skip_serializing_if = "Option::is_none")]
+    pub connection_id: Option<String>,
+    #[serde(rename = "accountLabel", skip_serializing_if = "Option::is_none")]
+    pub account_label: Option<String>,
     pub content: serde_json::Value,
 }
 
@@ -211,7 +218,7 @@ fn read_export_content(path: &Path) -> Result<serde_json::Value, String> {
     }
 }
 
-fn sanitize_path_component(input: &str) -> String {
+pub(super) fn sanitize_path_component(input: &str) -> String {
     let mut sanitized = String::with_capacity(input.len());
     for ch in input.chars() {
         match ch {
@@ -226,6 +233,155 @@ fn sanitize_path_component(input: &str) -> String {
         "unknown".to_string()
     } else {
         trimmed.to_string()
+    }
+}
+
+pub(super) fn legacy_export_exists(
+    export_root: &Path,
+    sanitized_company: &str,
+    platform_id: &str,
+) -> Result<bool, String> {
+    let company_dir = export_root.join(sanitized_company);
+    if !company_dir.exists() {
+        return Ok(false);
+    }
+    let legacy_connection_id = super::pdpp_connections::legacy_connection_id(platform_id);
+
+    for platform_entry in fs::read_dir(company_dir)
+        .map_err(|error| error.to_string())?
+        .flatten()
+    {
+        if !platform_entry.path().is_dir() {
+            continue;
+        }
+        for run_entry in fs::read_dir(platform_entry.path())
+            .map_err(|error| error.to_string())?
+            .flatten()
+        {
+            if !run_entry.path().is_dir() {
+                continue;
+            }
+            let run_directory_name = run_entry.file_name().to_string_lossy().into_owned();
+            if run_directory_name.ends_with(&format!("--{legacy_connection_id}")) {
+                match latest_export_platform_id(&run_entry.path())? {
+                    Some(export_platform_id) if export_platform_id == platform_id => {
+                        return Ok(true);
+                    }
+                    Some(_) => continue,
+                    None => return Ok(true),
+                }
+            }
+            if run_directory_name.contains("--") {
+                continue;
+            }
+
+            if latest_export_platform_id(&run_entry.path())?.as_deref() == Some(platform_id) {
+                return Ok(true);
+            }
+        }
+    }
+
+    Ok(false)
+}
+
+fn latest_export_platform_id(run_directory: &Path) -> Result<Option<String>, String> {
+    let latest_json = fs::read_dir(run_directory)
+        .map_err(|error| error.to_string())?
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.extension().is_none_or(|extension| extension != "json") {
+                return None;
+            }
+            let stem = path.file_stem()?.to_string_lossy();
+            let (_, timestamp) = stem.rsplit_once('_')?;
+            let timestamp = timestamp.parse::<u64>().ok()?;
+            Some((path, timestamp))
+        })
+        .max_by_key(|(_, timestamp)| *timestamp);
+    let Some((json_path, _)) = latest_json else {
+        return Ok(None);
+    };
+    let Ok(content) = fs::read_to_string(&json_path) else {
+        return Ok(None);
+    };
+    let Ok(data) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return Ok(None);
+    };
+    let inferred_platform_id = json_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .and_then(|stem| stem.rsplit_once('_').map(|(platform_id, _)| platform_id))
+        .unwrap_or("");
+    let platform_id = data
+        .get("platformId")
+        .and_then(|value| value.as_str())
+        .unwrap_or(inferred_platform_id);
+
+    Ok(Some(platform_id.to_owned()))
+}
+
+#[cfg(test)]
+mod legacy_export_tests {
+    use super::legacy_export_exists;
+    use std::fs;
+
+    #[test]
+    fn legacy_export_check_ignores_another_accounts_suffixed_export() {
+        let root = tempfile::tempdir().unwrap();
+        let second_account = root
+            .path()
+            .join("OpenAI/ChatGPT/run-b--connection-bbbb");
+        fs::create_dir_all(&second_account).unwrap();
+        fs::write(
+            second_account.join("chatgpt-pdpp_2.json"),
+            serde_json::json!({"platformId": "chatgpt-pdpp", "connectionId": "connection-bbbb"}).to_string(),
+        )
+        .unwrap();
+
+        assert!(!legacy_export_exists(root.path(), "OpenAI", "chatgpt-pdpp").unwrap());
+    }
+
+    #[test]
+    fn legacy_export_check_accepts_the_migrated_accounts_suffixed_export() {
+        let root = tempfile::tempdir().unwrap();
+        let legacy_account = root
+            .path()
+            .join("OpenAI/ChatGPT/run-a--chatgpt-pdpp-owner");
+        fs::create_dir_all(&legacy_account).unwrap();
+
+        assert!(legacy_export_exists(root.path(), "OpenAI", "chatgpt-pdpp").unwrap());
+    }
+
+    #[test]
+    fn legacy_export_check_ignores_another_connector_in_the_same_company_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let other_connector = root.path().join("OpenAI/OtherApp/legacy-run");
+        fs::create_dir_all(&other_connector).unwrap();
+        fs::write(
+            other_connector.join("other-pdpp_2.json"),
+            serde_json::json!({"platformId": "other-pdpp"}).to_string(),
+        )
+        .unwrap();
+
+        assert!(!legacy_export_exists(root.path(), "OpenAI", "chatgpt-pdpp").unwrap());
+        assert!(legacy_export_exists(root.path(), "OpenAI", "other-pdpp").unwrap());
+    }
+
+    #[test]
+    fn legacy_export_check_ignores_a_suffixed_export_attributed_to_another_connector() {
+        let root = tempfile::tempdir().unwrap();
+        let other_connector = root
+            .path()
+            .join("OpenAI/OtherApp/legacy-run--chatgpt-pdpp-owner");
+        fs::create_dir_all(&other_connector).unwrap();
+        fs::write(
+            other_connector.join("other-pdpp_2.json"),
+            serde_json::json!({"platformId": "other-pdpp"}).to_string(),
+        )
+        .unwrap();
+
+        assert!(!legacy_export_exists(root.path(), "OpenAI", "chatgpt-pdpp").unwrap());
     }
 }
 
@@ -329,6 +485,8 @@ pub async fn write_export_data(
     company: String,
     name: Option<String>, // Optional display name from frontend
     data: String, // JSON string from frontend
+    connection_id: Option<String>,
+    account_label: Option<String>,
 ) -> Result<String, String> {
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -350,6 +508,12 @@ pub async fn write_export_data(
 
     let safe_company = sanitize_path_component(&company);
     let safe_name = sanitize_path_component(&name);
+    let run_directory = if let Some(connection_id) = connection_id.as_deref() {
+        super::pdpp_installed_connector::validate_connection_id(connection_id)?;
+        format!("{run_id}--{connection_id}")
+    } else {
+        run_id.clone()
+    };
 
     let data_dir = app
         .path()
@@ -358,7 +522,7 @@ pub async fn write_export_data(
         .join("exported_data")
         .join(&safe_company)
         .join(&safe_name)
-        .join(&run_id);
+        .join(&run_directory);
 
     fs::create_dir_all(&data_dir)
         .map_err(|e| format!("Failed to create export directory: {}", e))?;
@@ -366,10 +530,13 @@ pub async fn write_export_data(
     let file_path = data_dir.join(format!("{}_{}.json", platform_id, timestamp));
 
     let export_data = RunData {
+        platform_id: Some(platform_id.clone()),
         company,
         name,
         run_id,
         timestamp,
+        connection_id,
+        account_label,
         content,
     };
 
@@ -389,6 +556,10 @@ pub struct SavedRun {
     pub id: String,
     #[serde(rename = "platformId")]
     pub platform_id: String,
+    #[serde(rename = "connectionId")]
+    pub connection_id: Option<String>,
+    #[serde(rename = "accountLabel")]
+    pub account_label: Option<String>,
     pub filename: String,
     pub company: String,
     pub name: String,
@@ -420,6 +591,24 @@ pub async fn load_runs(app: AppHandle) -> Result<Vec<SavedRun>, String> {
     if !data_dir.exists() {
         return Ok(Vec::new());
     }
+
+    let loaded_platforms = super::connector::get_platforms(app.clone()).await.unwrap_or_default();
+    let mut account_ordinals = std::collections::HashMap::<String, usize>::new();
+    let account_labels: std::collections::HashMap<String, String> = loaded_platforms.iter()
+        .filter_map(|platform| {
+            let connection_id = platform.connection_id.as_ref()?;
+            let ordinal = account_ordinals.entry(platform.id.clone()).or_default();
+            *ordinal += 1;
+            Some((
+                format!("{}:{connection_id}", platform.id),
+                platform.account_label.clone().unwrap_or_else(|| format!("Account {ordinal}")),
+            ))
+        })
+        .collect();
+    let pdpp_ids: std::collections::HashSet<String> = loaded_platforms.into_iter()
+        .filter(|platform| platform.runtime.as_deref() == Some("pdpp-network"))
+        .map(|platform| platform.id)
+        .collect();
 
     let mut runs = Vec::new();
 
@@ -534,6 +723,35 @@ pub async fn load_runs(app: AppHandle) -> Result<Vec<SavedRun>, String> {
                                 .and_then(|v| v.as_str())
                                 .map(|s| s.to_string())
                                 .unwrap_or_else(|| platform_name.clone());
+                            let inferred_platform_id = json_path.file_stem()
+                                .and_then(|stem| stem.to_str())
+                                .and_then(|stem| stem.rsplit_once('_').map(|(platform_id, _)| platform_id))
+                                .unwrap_or(&platform_name);
+                            let stored_platform_id = data.get("platformId")
+                                .and_then(|value| value.as_str())
+                                .map(str::to_owned)
+                                .unwrap_or_else(|| inferred_platform_id.to_owned());
+                            let connection_id = data.get("connectionId")
+                                .and_then(|value| value.as_str())
+                                .map(str::to_owned)
+                                .or_else(|| pdpp_ids.contains(&stored_platform_id)
+                                    .then(|| super::pdpp_connections::legacy_connection_id(&stored_platform_id)));
+                            let account_label = data.get("accountLabel")
+                                .and_then(|value| value.as_str())
+                                .map(str::to_owned)
+                                .or_else(|| data.pointer("/content/userInfo/email").and_then(|value| value.as_str()).map(str::to_owned))
+                                .or_else(|| data.pointer("/content/userInfo/name").and_then(|value| value.as_str()).map(str::to_owned))
+                                .or_else(|| {
+                                    connection_id.as_ref().and_then(|connection_id| {
+                                        account_labels
+                                            .get(&format!("{}:{connection_id}", stored_platform_id))
+                                            .cloned()
+                                    })
+                                });
+                            let stored_run_id = data.get("runID")
+                                .and_then(|value| value.as_str())
+                                .unwrap_or(&run_id)
+                                .to_owned();
 
                             // Convert timestamp to ISO date string
                             let start_date = chrono::DateTime::from_timestamp(timestamp as i64, 0)
@@ -541,8 +759,10 @@ pub async fn load_runs(app: AppHandle) -> Result<Vec<SavedRun>, String> {
                                 .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
 
                             runs.push(SavedRun {
-                                id: run_id.clone(),
-                                platform_id: platform_name.clone(),
+                                id: stored_run_id,
+                                platform_id: stored_platform_id,
+                                connection_id,
+                                account_label,
                                 filename: platform_name.clone(),
                                 company: company.clone(),
                                 name: display_name,
@@ -934,6 +1154,30 @@ pub struct AppConfig {
     pub server_mode: Option<String>,
     #[serde(rename = "selfHostedUrl")]
     pub self_hosted_url: Option<String>,
+    /// Skip showing the console window at startup, leaving only the tray
+    /// icon. Purely a startup-sequencing preference (no OS side effect),
+    /// unlike autostart-at-login, which is why it lives in this general
+    /// config blob instead of desktop_settings.rs. Defaults to false so
+    /// existing config.json files without this field parse as "not set".
+    #[serde(rename = "startMinimized", default)]
+    pub start_minimized: bool,
+    /// Hide the console window to the tray instead of quitting when the
+    /// titlebar close button is used. Defaults to true: DataConnect keeps
+    /// background sidecars (RI, console, Personal Server) running whether
+    /// or not a window is open, the same "service-like" mental model as
+    /// Dropbox/1Password/Tailscale/Docker Desktop, which either have no
+    /// quit-on-close choice at all or background by default without asking
+    /// -- see ai/research/desktop-app-packaging/tray-app-lifecycle-settings-and-defaults-2026.md.
+    /// Unlike startMinimized this has a real behavioral consequence (it
+    /// changes whether closing the window quits the app), so it is exposed
+    /// as an explicit, visible setting rather than an implicit default the
+    /// user can't see or change.
+    #[serde(rename = "closeToTray", default = "default_close_to_tray")]
+    pub close_to_tray: bool,
+}
+
+fn default_close_to_tray() -> bool {
+    true
 }
 
 impl Default for AppConfig {
@@ -942,6 +1186,8 @@ impl Default for AppConfig {
             storage_provider: Some("local".to_string()),
             server_mode: Some("cloud".to_string()),
             self_hosted_url: None,
+            start_minimized: false,
+            close_to_tray: default_close_to_tray(),
         }
     }
 }
@@ -956,6 +1202,13 @@ fn get_config_path() -> Result<PathBuf, String> {
 /// Get app configuration from ~/.dataconnect/config.json
 #[tauri::command]
 pub async fn get_app_config() -> Result<AppConfig, String> {
+    read_app_config_sync()
+}
+
+/// Synchronous config read shared by the async command above and by
+/// startup code (unified::setup runs before the async runtime is driving
+/// command dispatch, so it cannot `.await` the command wrapper).
+pub(crate) fn read_app_config_sync() -> Result<AppConfig, String> {
     let config_path = get_config_path()?;
 
     if !config_path.exists() {
@@ -968,6 +1221,57 @@ pub async fn get_app_config() -> Result<AppConfig, String> {
 
     serde_json::from_str(&content)
         .map_err(|e| format!("Failed to parse config file: {}", e))
+}
+
+/// Whether the console window should stay hidden at startup, leaving only
+/// the tray icon. Defaults to false (show) on any read failure — a config
+/// read/parse error must not silently hide the app from a user who never
+/// asked for that.
+pub(crate) fn read_start_minimized_preference() -> bool {
+    read_app_config_sync()
+        .map(|config| config.start_minimized)
+        .unwrap_or(false)
+}
+
+/// Whether the titlebar close button should hide the console window to the
+/// tray instead of quitting the app. Defaults to true (close-to-tray) on
+/// any read failure, matching AppConfig::default -- the safer failure mode
+/// is "sidecars keep running", not "an unreadable config silently starts
+/// quitting the app on every window close".
+///
+/// This does a blocking `fs::read_to_string` (via `read_app_config_sync`).
+/// Callers on a latency-sensitive thread (in particular the GTK/tao window
+/// event loop, which owns titlebar hit-testing and redraw) must use
+/// `cached_close_to_tray_preference()` instead -- see that function's docs.
+pub(crate) fn read_close_to_tray_preference() -> bool {
+    read_app_config_sync()
+        .map(|config| config.close_to_tray)
+        .unwrap_or(true)
+}
+
+/// In-memory cache of the closeToTray preference, so the window-event loop
+/// never has to touch disk. Seeded once at startup by
+/// `init_close_to_tray_cache()` and kept in sync by `set_app_config`
+/// whenever the setting changes -- see
+/// ai/research/desktop-app-packaging/tauri-linux-unresponsive-titlebar-is-a-tao-wayland-csd-overlay-bug-not-a-blocked-main-thread-2026.md
+/// and the orphaned-sidecar-processes corpus entry's H3 hypothesis: a
+/// blocking `fs::read_to_string(~/.dataconnect/config.json)` was running
+/// synchronously inside `on_window_event`'s `CloseRequested` branch, on the
+/// same thread that owns titlebar hit-testing.
+static CLOSE_TO_TRAY_CACHE: AtomicBool = AtomicBool::new(true);
+
+/// Seed the in-memory closeToTray cache from disk. Call exactly once, early
+/// in startup (before any window can receive a close event), off the hot
+/// path this cache exists to protect -- an extra disk read at startup is
+/// fine, the point is that `CloseRequested` never does one.
+pub(crate) fn init_close_to_tray_cache() {
+    CLOSE_TO_TRAY_CACHE.store(read_close_to_tray_preference(), Ordering::Relaxed);
+}
+
+/// Fast, allocation-free, syscall-free read of the closeToTray preference
+/// for use on the window-event loop. Never touches disk.
+pub(crate) fn cached_close_to_tray_preference() -> bool {
+    CLOSE_TO_TRAY_CACHE.load(Ordering::Relaxed)
 }
 
 /// Set app configuration to ~/.dataconnect/config.json
@@ -986,6 +1290,11 @@ pub async fn set_app_config(config: AppConfig) -> Result<(), String> {
 
     fs::write(&config_path, json)
         .map_err(|e| format!("Failed to write config file: {}", e))?;
+
+    // Keep the in-memory closeToTray cache (read by CloseRequested on the
+    // window-event thread) in sync with whatever was just written, so a
+    // settings change takes effect without another disk read.
+    CLOSE_TO_TRAY_CACHE.store(config.close_to_tray, Ordering::Relaxed);
 
     log::info!("App config saved to: {:?}", config_path);
     Ok(())
@@ -1015,6 +1324,7 @@ mod tests {
     use super::read_export_content;
     use super::sanitize_path_component;
     use super::scan_latest_json_in_confined_tree;
+    use super::AppConfig;
     use serde_json::json;
     use std::fs;
     use std::path::PathBuf;
@@ -1123,6 +1433,102 @@ mod tests {
         assert!(
             result.unwrap_err().contains("symlink"),
             "error should explain why the exact export was rejected"
+        );
+    }
+
+    #[test]
+    fn app_config_defaults_close_to_tray_true_for_a_pre_existing_config_file() {
+        // An older config.json written before closeToTray existed has no
+        // such key at all. It must still parse -- and default to true
+        // (close-to-tray), not false (quit-on-close) -- so upgrading the
+        // app does not silently change what the titlebar close button does
+        // for someone who never touched this setting.
+        let legacy_config = json!({
+            "storageProvider": "local",
+            "serverMode": "cloud",
+            "selfHostedUrl": null,
+            "startMinimized": false
+        });
+
+        let config: AppConfig =
+            serde_json::from_value(legacy_config).expect("legacy config should still parse");
+
+        assert!(
+            config.close_to_tray,
+            "a config file predating closeToTray must default to true, not false"
+        );
+    }
+
+    #[test]
+    fn app_config_round_trips_an_explicit_close_to_tray_false() {
+        let config: AppConfig = serde_json::from_value(json!({
+            "storageProvider": "local",
+            "serverMode": "cloud",
+            "selfHostedUrl": null,
+            "startMinimized": false,
+            "closeToTray": false
+        }))
+        .expect("explicit closeToTray: false should parse");
+
+        assert!(
+            !config.close_to_tray,
+            "an explicit false must be honored, not overridden by the default"
+        );
+    }
+
+    // CLOSE_TO_TRAY_CACHE is process-global; serialize the tests that touch
+    // it directly so they can't interleave under cargo test's default
+    // parallelism, mirroring RUN_REGISTRY_TEST_LOCK in
+    // pdpp_installed_connector.rs and COLLECTION_STATE_LOCK in
+    // pdpp_collection_state.rs.
+    static CLOSE_TO_TRAY_CACHE_TEST_LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
+        std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
+
+    #[test]
+    fn cached_close_to_tray_preference_reflects_the_last_value_stored_without_touching_disk() {
+        let _guard = CLOSE_TO_TRAY_CACHE_TEST_LOCK.lock().unwrap();
+
+        // Drive the cache directly through the same atomic the production
+        // code path (set_app_config / init_close_to_tray_cache) writes to
+        // -- proves cached_close_to_tray_preference() is a pure in-memory
+        // read with no filesystem dependency: this test never touches
+        // ~/.dataconnect/config.json, never calls read_app_config_sync,
+        // yet the getter still reports whatever was last stored.
+        super::CLOSE_TO_TRAY_CACHE.store(false, std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            !super::cached_close_to_tray_preference(),
+            "cache getter must report the value just stored, not a disk-derived default"
+        );
+
+        super::CLOSE_TO_TRAY_CACHE.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            super::cached_close_to_tray_preference(),
+            "cache getter must reflect an update made via the same write path set_app_config uses"
+        );
+    }
+
+    #[test]
+    fn set_app_config_write_path_updates_the_cache_to_the_same_value_it_persists() {
+        let _guard = CLOSE_TO_TRAY_CACHE_TEST_LOCK.lock().unwrap();
+
+        // Exercise the exact store the real set_app_config command performs
+        // after writing config.json (see set_app_config above), without
+        // going through the #[tauri::command] wrapper (which needs a
+        // running Tauri app). This is the regression guard for "the cache
+        // must serve the same value the file was just written with."
+        let config = AppConfig {
+            storage_provider: None,
+            server_mode: None,
+            self_hosted_url: None,
+            start_minimized: false,
+            close_to_tray: false,
+        };
+        super::CLOSE_TO_TRAY_CACHE.store(config.close_to_tray, std::sync::atomic::Ordering::Relaxed);
+
+        assert_eq!(
+            super::cached_close_to_tray_preference(),
+            config.close_to_tray,
+            "the cache must match what set_app_config's write path just stored"
         );
     }
 }

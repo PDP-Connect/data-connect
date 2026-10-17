@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { IcButton, IcTimestamp } from "@pdpp/brand-react";
+import { ConnectorMark } from "@/app/(console)/components/connector-mark.tsx";
 import type {
   ApprovalReview as ApprovalReviewData,
   ApprovalReviewJson,
@@ -108,7 +109,9 @@ function StreamFacts({ streams }: { streams: readonly ReviewedStreamArtifact[] }
   );
 }
 
-function SingleArtifactFacts({ artifact }: { artifact: SingleConsentApprovalArtifact }) {
+type ConnectorIconMap = Readonly<Record<string, import("@pdpp/brand-react").ConnectorIconLike | null | undefined>>;
+
+function SingleArtifactFacts({ artifact, connectorIcons }: { artifact: SingleConsentApprovalArtifact; connectorIcons: ConnectorIconMap }) {
   const display = artifact.client.client_display ?? {};
   return (
     <>
@@ -131,6 +134,13 @@ function SingleArtifactFacts({ artifact }: { artifact: SingleConsentApprovalArti
           <DisplayLink label="Terms" value={display.tos_uri} />
           <dt className="text-muted-foreground">Source</dt>
           <dd>
+            {artifact.source.kind === "connector" ? (
+              <ConnectorMark
+                className="mr-2 inline-block size-5 align-[-0.2em]"
+                icon={connectorIcons[artifact.source.id]}
+                name={artifact.source.id}
+              />
+            ) : null}
             {artifact.source.kind}: {artifact.source.id}
           </dd>
           <dt className="text-muted-foreground">Source declaration</dt>
@@ -161,7 +171,7 @@ function SingleArtifactFacts({ artifact }: { artifact: SingleConsentApprovalArti
   );
 }
 
-function BatchArtifactFacts({ artifact }: { artifact: BatchConsentApprovalArtifact }) {
+function BatchArtifactFacts({ artifact, connectorIcons }: { artifact: BatchConsentApprovalArtifact; connectorIcons: ConnectorIconMap }) {
   return (
     <>
       <section aria-labelledby="batch-authority" className="mb-8">
@@ -191,6 +201,13 @@ function BatchArtifactFacts({ artifact }: { artifact: BatchConsentApprovalArtifa
           <dl className="pdpp-body mt-3 grid gap-x-6 gap-y-2 sm:grid-cols-[auto_minmax(0,1fr)]">
             <dt className="text-muted-foreground">Source</dt>
             <dd>
+              {source.source.kind === "connector" ? (
+                <ConnectorMark
+                  className="mr-2 inline-block size-5 align-[-0.2em]"
+                  icon={connectorIcons[source.source.id]}
+                  name={source.source.id}
+                />
+              ) : null}
               {source.source.kind}: {source.source.id}
             </dd>
             <dt className="text-muted-foreground">Source declaration</dt>
@@ -213,11 +230,11 @@ function BatchArtifactFacts({ artifact }: { artifact: BatchConsentApprovalArtifa
   );
 }
 
-function ConsentFacts({ artifact }: { artifact: ConsentApprovalArtifact }) {
+function ConsentFacts({ artifact, connectorIcons }: { artifact: ConsentApprovalArtifact; connectorIcons: ConnectorIconMap }) {
   if (artifact.version === "reference.batch-approval-review.v1") {
-    return <BatchArtifactFacts artifact={artifact} />;
+    return <BatchArtifactFacts artifact={artifact} connectorIcons={connectorIcons} />;
   }
-  return <SingleArtifactFacts artifact={artifact} />;
+  return <SingleArtifactFacts artifact={artifact} connectorIcons={connectorIcons} />;
 }
 
 function ExactArtifactJson({ artifact }: { artifact: ConsentApprovalArtifact }) {
@@ -239,12 +256,14 @@ export function ApprovalReview({
   denyAction,
   detail,
   error,
+  connectorIcons = {},
 }: {
   approveAction: (formData: FormData) => void | Promise<void>;
   confirm: boolean;
   denyAction: (formData: FormData) => void | Promise<void>;
   detail: ApprovalReviewData;
   error?: string;
+  connectorIcons?: ConnectorIconMap;
 }) {
   const reviewHref = `/grants/approvals/${encodeURIComponent(detail.approval_id)}`;
   const artifact = detail.kind === "consent" ? detail.approval_review : undefined;
@@ -327,7 +346,7 @@ export function ApprovalReview({
       ) : null}
       {artifact ? (
         <>
-          <ConsentFacts artifact={artifact} />
+          <ConsentFacts artifact={artifact} connectorIcons={connectorIcons} />
           <ExactArtifactJson artifact={artifact} />
         </>
       ) : (

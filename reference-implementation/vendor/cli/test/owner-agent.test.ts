@@ -111,19 +111,19 @@ test("normalizeEntrypointUrl strips creds, query, trailing slash; defaults https
 test("resolveCredentialFile honors explicit path and expands ~", () => {
   assert.equal(
     resolveCredentialFile({
-      credentialFile: "/abs/daisy/pdpp-owner-agent.json",
+      credentialFile: "/abs/agent/pdpp-owner-agent.json",
       resource: "https://ref.test",
       home: "/home/user",
     }),
-    "/abs/daisy/pdpp-owner-agent.json"
+    "/abs/agent/pdpp-owner-agent.json"
   );
   assert.equal(
     resolveCredentialFile({
-      credentialFile: "~/applications/daisy/.pi/agent/pdpp-owner-agent.json",
+      credentialFile: "~/.pdpp/owner-agents/ref.test.json",
       resource: "https://ref.test",
       home: "/home/user",
     }),
-    "/home/user/applications/daisy/.pi/agent/pdpp-owner-agent.json"
+    "/home/user/.pdpp/owner-agents/ref.test.json"
   );
 });
 
@@ -342,25 +342,25 @@ test("onboard honors explicit --client-id without registering a new client", asy
   });
 });
 
-test("onboard writes to Daisy-style explicit credential-file path", async () => {
+test("onboard writes to local-agent explicit credential-file path", async () => {
   await withTmpHome(async (home) => {
     const captured = capture();
     const fetch = onboardFetch({
       tokenSequence: [{ status: 200, body: { access_token: SECRET, token_type: "Bearer", expires_in: 3600 } }],
     });
-    const daisyPath = join(home, "applications/daisy/.pi/agent/pdpp-owner-agent.json");
+    const credentialPath = join(home, ".pdpp", "owner-agents", "ref.test.json");
 
-    const code = await runOwnerAgent(["onboard", "https://ref.test", "--credential-file", daisyPath], captured.io, {
+    const code = await runOwnerAgent(["onboard", "https://ref.test", "--credential-file", credentialPath], captured.io, {
       fetch,
       home,
       sleep: () => Promise.resolve(),
       now: () => 1_000_000,
     });
     assert.equal(code, 0);
-    assert.ok(existsSync(daisyPath));
+    assert.ok(existsSync(credentialPath));
     // biome-ignore lint/suspicious/noBitwiseOperators: genuine POSIX file-mode bitmask, not a style mistake.
-    assert.equal(statSync(daisyPath).mode & 0o777, 0o600);
-    assert.match(captured.stdout, new RegExp(daisyPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.equal(statSync(credentialPath).mode & 0o777, 0o600);
+    assert.match(captured.stdout, new RegExp(credentialPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   });
 });
 

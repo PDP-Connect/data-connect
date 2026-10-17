@@ -333,3 +333,21 @@ test("panel: every recovery step exposes exactly one primary sentence, evidence 
     assert.doesNotMatch(model.primarySentence, RETRY_CTA_RE);
   }
 });
+
+// Shape the reference projection emits for a permanent-only (`retryable: false`)
+// backlog: every recovery-derived field excludes the loss (the server-side
+// real-projection case is in ref-connectors-connection-projection.test.ts).
+test("a permanent-only backlog shape offers no recoverable work and no recovery step", () => {
+  const permanentOnly = backlog({ max_attempt_count: 0, next_attempt_at: null, pending: 0, pending_other: 0 });
+  assert.equal(hasRecoverableWork(permanentOnly), false);
+  assert.equal(
+    deriveRecoveryStep(
+      null,
+      health({
+        axes: { attention: "none", coverage: "terminal_gap", freshness: "fresh", outbox: "idle" },
+        state: "degraded",
+      })
+    ),
+    "none"
+  );
+});

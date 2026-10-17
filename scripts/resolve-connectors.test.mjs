@@ -47,7 +47,7 @@ const legacyArtifacts = lock.connectors.filter(connector =>
 // This is the reviewed data-connectors main commit containing the duplicate
 // normalized-member guard. Keep the ancestry check local and deterministic;
 // acceptance must not turn into a live git or network lookup.
-const DATA_CONNECTORS_MAIN_ANCESTOR = "ee11b09dc4e4c3acb1a1e0606ced0429f761be27"
+const DATA_CONNECTORS_MAIN_ANCESTOR = "6c71697a1523926fe8d475cd243a8219ea21aa5b"
 
 describe("connector artifact signer identities", () => {
   it("trusts only the six exact legacy artifact URLs retained by the lock", () => {
@@ -414,11 +414,20 @@ function fixture(root) {
   })
   const options = {
     fetchImpl: async url => {
-      const path = new URL(url).pathname.replace(
-        `/v2/${oci.oci.repository}/`,
-        ""
-      )
-      const bytes = objects.get(decodeURIComponent(path))
+      const parsed = new URL(url)
+      const path = parsed.pathname.replace(`/v2/${oci.oci.repository}/`, "")
+      const decodedPath = decodeURIComponent(path)
+      if (decodedPath.startsWith("referrers/")) {
+        return new Response(JSON.stringify({ errors: [{ code: "UNSUPPORTED" }] }), {
+          status: 404,
+        })
+      }
+      const bytes = objects.get(decodedPath)
+      if (!bytes && decodedPath === `manifests/${oci.oci.digest.replace(":", "-")}`) {
+        return new Response(JSON.stringify({ errors: [{ code: "MANIFEST_UNKNOWN" }] }), {
+          status: 404,
+        })
+      }
       if (!bytes) throw new Error(`Unexpected registry request: ${url}`)
       return new Response(bytes, {
         status: 200,

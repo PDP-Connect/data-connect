@@ -36,7 +36,7 @@ const IMPORTS_FROM_MODALITY = /from "\.\.\/lib\/connection-modality\.ts"/;
 const DEFAULT_ONLY_LOCAL_COLLECTOR =
   /const defaultConnectorId = isSupportedLocalCollectorConnector\(requestedConnector\) \? requestedConnector : undefined/;
 const DOES_NOT_USE_SUPPORTED_BROWSER_CLASSIFIER = /\bisSupportedBrowserCollectorConnector\b/;
-const RENDERS_NOTICE = /browserBoundRequest\s*\?\s*<BrowserBoundEnrollmentNotice/;
+const RENDERS_NOTICE = /browserBoundRequest\s*\?\s*\(?\s*<BrowserBoundEnrollmentNotice/;
 const PENDING_BROWSER_TITLE = /Browser setup not available yet/;
 const PACKAGED_PENDING_COPY = /Browser setup is not available in this dashboard yet/;
 const ADD_SOURCE_LINK = /href="\/sources\/add"[\s\S]{0,120}>\s*Add source\s*<\/Link>/;

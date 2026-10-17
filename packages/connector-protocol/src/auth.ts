@@ -294,7 +294,7 @@ registerAuthStrategy<EnvAuthConfig>("env", async (config, runtime) => {
     // told the owner to "set in .env.local for persistence", which described
     // an operator-side deployment step as if it were the effect of answering
     // this prompt.
-    message: `${runtime.connectorName} needs: ${missing.join(", ")}. Used for this run only.`,
+    message: `${runtime.connectorName} needs credentials for this run.`,
     schema: buildCredentialSchema(missing, runtime.connectorName),
     timeout_seconds: 1800,
   });

@@ -10,6 +10,7 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { cursorAuditFact } from "../runtime/cursor-audit-fact.ts";
 import { runConnector } from "../runtime/index.ts";
 import { parsePendingConsentRequestUri, registerConnector } from "../server/auth.ts";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
@@ -21,6 +22,7 @@ import {
   admitOwnerRunConnection,
   makeDefaultAccountConnectorInstanceId,
 } from "../server/stores/connector-instance-store.ts";
+import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
 import {
   TEST_INTROSPECTION_SERVER_OPTS,
   TEST_RS_INTROSPECTION_CREDENTIALS,
@@ -425,6 +427,7 @@ async function withHarness(fn: (ctx: HarnessContext) => Promise<void>) {
     asPort: 0,
     dbPath: ":memory:",
     dynamicClientRegistrationInitialAccessTokens: [TEST_DCR_INITIAL_ACCESS_TOKEN],
+    preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
     quiet: true,
     rsPort: 0,
     ...TEST_INTROSPECTION_SERVER_OPTS,
@@ -457,6 +460,7 @@ async function withNativeHarness(fn: (ctx: NativeHarnessContext) => Promise<void
     asPort: 0,
     dbPath: ":memory:",
     nativeManifest,
+    preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
     quiet: true,
     rsPort: 0,
     ...TEST_INTROSPECTION_SERVER_OPTS,
@@ -890,6 +894,7 @@ async function withMalformedPolyfillClientGrant(fn: (ctx: MalformedPolyfillClien
     asPort: 0,
     dbPath,
     dynamicClientRegistrationInitialAccessTokens: [TEST_DCR_INITIAL_ACCESS_TOKEN],
+    preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
     quiet: true,
     rsPort: 0,
   });
@@ -947,6 +952,7 @@ async function withMalformedPolyfillClientGrant(fn: (ctx: MalformedPolyfillClien
       asPort: server.asPort,
       dbPath,
       dynamicClientRegistrationInitialAccessTokens: [TEST_DCR_INITIAL_ACCESS_TOKEN],
+      preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
       quiet: true,
       rsPort: server.rsPort,
       ...TEST_INTROSPECTION_SERVER_OPTS,
@@ -1204,6 +1210,7 @@ test("PDPP CLI smoke", async (t) => {
       asPort: 0,
       dbPath,
       nativeManifest,
+      preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
       quiet: true,
       rsPort: 0,
       ...TEST_INTROSPECTION_SERVER_OPTS,
@@ -1228,6 +1235,7 @@ test("PDPP CLI smoke", async (t) => {
         asPort: server.asPort,
         dbPath,
         nativeManifest,
+        preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
         quiet: true,
         rsPort: server.rsPort,
         ...TEST_INTROSPECTION_SERVER_OPTS,
@@ -1558,10 +1566,10 @@ test("PDPP CLI smoke", async (t) => {
       assert.ok(requestSubmitted, "trace show should include owner-device request.submitted");
       assert.equal(requestSubmitted.request_id, requestId);
       assert.equal(requestSubmitted.client_id, "cli_longview");
-      // Public _ref redacts bearer-equivalent device_code / user_code on
-      // owner_device_auth (harden-reference-auth-surfaces §7).
+      // Public _ref redacts the device-code object id on owner_device_auth
+      // (harden-reference-auth-surfaces §7); user_code is dropped at ingress.
       assert.equal(requestSubmitted.object_id, "<redacted-device-code>");
-      assert.equal(requestSubmitted.data?.user_code, "<redacted-bearer>");
+      assert.equal(requestSubmitted.data?.user_code, undefined);
 
       const approved = (result.json.data || []).find(
         (event) => event.event_type === "consent.approved" && event.object_type === "owner_device_auth"
@@ -1570,7 +1578,7 @@ test("PDPP CLI smoke", async (t) => {
       assert.equal(approved.request_id, requestId);
       assert.equal(approved.client_id, "cli_longview");
       assert.equal(approved.object_id, "<redacted-device-code>");
-      assert.equal(approved.data?.user_code, "<redacted-bearer>");
+      assert.equal(approved.data?.user_code, undefined);
 
       const tokenIssued = (result.json.data || []).find(
         (event) => event.event_type === "token.issued" && event.data?.issuance_path === "owner_device_flow"
@@ -1578,7 +1586,7 @@ test("PDPP CLI smoke", async (t) => {
       assert.ok(tokenIssued, "trace show should include owner-device token.issued");
       assert.equal(tokenIssued.request_id, requestId);
       assert.equal(tokenIssued.client_id, "cli_longview");
-      assert.equal(tokenIssued.data?.user_code, "<redacted-bearer>");
+      assert.equal(tokenIssued.data?.user_code, undefined);
       assert.equal(result.stderr, "");
     });
   });
@@ -1635,7 +1643,7 @@ test("PDPP CLI smoke", async (t) => {
       assert.equal(rejected.client_id, "cli_longview");
       assert.equal(rejected.object_id, "<redacted-device-code>");
       assert.equal(rejected.data?.issuance_path, "owner_device_flow");
-      assert.equal(rejected.data?.user_code, "<redacted-bearer>");
+      assert.equal(rejected.data?.user_code, undefined);
       assert.equal(asRecord(rejected.data?.error).code, "access_denied");
       assert.match(String(asRecord(rejected.data?.error).message ?? ""), TOP_LEVEL_REGEX_14);
       assert.equal(result.stderr, "");
@@ -1689,7 +1697,7 @@ test("PDPP CLI smoke", async (t) => {
       assert.equal(result.json.authorization_server, asUrl);
       assert.deepEqual(result.json.authorization_servers_advertised, [asUrl]);
       assert.equal(result.json.authorization_server_advertised, true);
-      assert.equal(result.json.resource_name, "PDPP Reference Provider Resource Server");
+      assert.equal(result.json.resource_name, "DataConnect Resource Server");
       assert.equal(result.json.pdpp_self_export_supported, true);
       assert.equal(result.json.device_authorization_supported, true);
       assert.equal(result.json.pushed_authorization_request_supported, true);
@@ -1698,7 +1706,8 @@ test("PDPP CLI smoke", async (t) => {
       assert.equal(result.json.authorization_endpoint, `${asUrl}/oauth/authorize`);
       assert.deepEqual(result.json.response_types_supported, ["code"]);
       assert.deepEqual(result.json.code_challenge_methods_supported, ["S256"]);
-      assert.deepEqual(result.json.token_endpoint_auth_methods_supported, ["none"]);
+      assert.deepEqual(result.json.token_endpoint_auth_methods_supported, ["none", "private_key_jwt"]);
+      assert.deepEqual(result.json.token_endpoint_auth_signing_alg_values_supported, ["RS256"]);
       const providerConnectCapabilities = result.json.pdpp_provider_connect_capabilities;
       assert.ok(Array.isArray(providerConnectCapabilities));
       assert.ok(providerConnectCapabilities.includes("owner_self_export"));
@@ -3681,6 +3690,7 @@ test("PDPP CLI smoke", async (t) => {
     const server = await startServer({
       asPort: 0,
       dbPath: ":memory:",
+      preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
       quiet: true,
       rsPort: 0,
       ...TEST_INTROSPECTION_SERVER_OPTS,
@@ -7292,6 +7302,7 @@ rl.on('line', (line) => {
       asPort: 0,
       dbPath: ":memory:",
       dynamicClientRegistrationInitialAccessTokens: [TEST_DCR_INITIAL_ACCESS_TOKEN],
+      preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
       quiet: true,
       rsPort: 0,
       ...TEST_INTROSPECTION_SERVER_OPTS,
@@ -7387,7 +7398,11 @@ rl.on('line', (line) => {
       );
       assert.ok(commitFailedEvent, "run timeline should include run.state_commit_failed");
       assert.equal(commitFailedEvent.stream_id, "other_items");
-      assert.deepEqual(commitFailedEvent.data?.cursor, { cursor: "other_items_cursor_partial_commit" });
+      assert.equal("cursor" in (commitFailedEvent.data ?? {}), false, "commit-failed event must not embed the full cursor");
+      assert.deepEqual(
+        { cursor_bytes: commitFailedEvent.data?.cursor_bytes, cursor_sha256: commitFailedEvent.data?.cursor_sha256 },
+        cursorAuditFact({ cursor: "other_items_cursor_partial_commit" })
+      );
       assert.equal(commitFailedEvent.data?.state_streams_staged, 2);
       assert.equal(commitFailedEvent.data?.state_streams_committed, 1);
       assert.match(String(commitFailedEvent.data?.error_message ?? ""), TOP_LEVEL_REGEX_90);
@@ -7929,6 +7944,7 @@ rl.on('line', (line) => {
         asPort: 0,
         dbPath,
         nativeManifest,
+        preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
         quiet: true,
         rsPort: 0,
         ...TEST_INTROSPECTION_SERVER_OPTS,
@@ -7961,6 +7977,7 @@ rl.on('line', (line) => {
           asPort: server.asPort,
           dbPath,
           nativeManifest,
+          preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
           quiet: true,
           rsPort: server.rsPort,
           ...TEST_INTROSPECTION_SERVER_OPTS,
@@ -8070,6 +8087,7 @@ rl.on('line', (line) => {
             asPort: server.asPort,
             dbPath,
             nativeManifest,
+            preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
             quiet: true,
             rsPort: server.rsPort,
             ...TEST_INTROSPECTION_SERVER_OPTS,
@@ -8115,6 +8133,7 @@ rl.on('line', (line) => {
         asPort: 0,
         dbPath,
         nativeManifest,
+        preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
         quiet: true,
         rsPort: 0,
         ...TEST_INTROSPECTION_SERVER_OPTS,
@@ -8196,6 +8215,7 @@ rl.on('line', (line) => {
               asPort: server.asPort,
               dbPath,
               nativeManifest,
+              preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
               quiet: true,
               rsPort: server.rsPort,
               ...TEST_INTROSPECTION_SERVER_OPTS,
@@ -8241,6 +8261,7 @@ rl.on('line', (line) => {
           asPort: 0,
           dbPath,
           nativeManifest,
+          preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
           quiet: true,
           rsPort: 0,
           ...TEST_INTROSPECTION_SERVER_OPTS,
@@ -8349,6 +8370,7 @@ rl.on('line', (line) => {
         asPort: 0,
         dbPath,
         nativeManifest,
+        preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
         quiet: true,
         rsPort: 0,
         ...TEST_INTROSPECTION_SERVER_OPTS,
@@ -8373,6 +8395,7 @@ rl.on('line', (line) => {
           asPort: server.asPort,
           dbPath,
           nativeManifest,
+          preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
           quiet: true,
           rsPort: server.rsPort,
         });

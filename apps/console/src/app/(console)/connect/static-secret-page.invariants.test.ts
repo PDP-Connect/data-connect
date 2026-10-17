@@ -37,8 +37,7 @@ const NO_FIELD_ONLY_REQUIRED_ATTRIBUTE = /required=\{field\.required\}/;
 const CONNECTION_NAME_FIELD = /name=\{formContract\.connectionName\.name\}/;
 const CONNECTION_NAME_MAX_LENGTH = /maxLength=\{formContract\.connectionName\.maxLength\}/;
 const HELP_URL = /field\.help_url/;
-const NEW_TAB = /target="_blank"/;
-const NOREFERRER = /rel="noreferrer"/;
+const OPENS_VIA_SYSTEM_BROWSER = /<OpenExternalLink/;
 const OPEN_HELP_COPY = /Open provider setup page in a new tab/;
 const SECRET_BOUNDARY_COPY = /formContract\.credentialSectionDescription/;
 const STORAGE_NOT_READY_COPY = /Credential storage is not ready/;
@@ -145,8 +144,11 @@ test("static-secret page is an owner-session capture form, not an agent secret p
   assert.match(src, CONNECTION_NAME_FIELD);
   assert.match(src, CONNECTION_NAME_MAX_LENGTH);
   assert.match(src, HELP_URL);
-  assert.match(src, NEW_TAB);
-  assert.match(src, NOREFERRER);
+  assert.match(
+    src,
+    OPENS_VIA_SYSTEM_BROWSER,
+    "help_url must route through OpenExternalLink, not a bare <a>, so Tauri opens it in the system browser instead of the webview"
+  );
   assert.match(src, OPEN_HELP_COPY);
   assert.doesNotMatch(src, NO_CONNECTOR_BRANCH);
   assert.doesNotMatch(src, NO_PROVIDER_COPY);

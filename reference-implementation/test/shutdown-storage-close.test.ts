@@ -3,10 +3,9 @@
 
 /**
  * Discriminating test for shutdownStorageClose (server/index.ts), the pure
- * drain-gates-close decision boundary extracted out of the CLI-only
- * `if (process.argv[1]?.endsWith("server/index.ts"))` shutdown block so this
- * invariant is provable at a real boundary instead of by reading the
- * source.
+ * drain-gates-close decision boundary extracted out of the server CLI-only
+ * entrypoint block so this invariant is provable at a real boundary instead
+ * of by reading the source.
  *
  * REVISE-flagged defect: the original inline shutdown code called
  * closePostgresStorage() UNCONDITIONALLY before checking whether the

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { PoolClient } from "pg";
-import { getPostgresLockPool } from "./postgres-storage.ts";
+import { getPostgresLockPool, POSTGRES_BOOTSTRAP_SERIALIZATION_LOCK } from "./postgres-storage.ts";
 
 const DERIVED_INDEX_MAINTENANCE_WINDOW_ENV = "PDPP_POSTGRES_DERIVED_INDEX_MAINTENANCE_WINDOW";
 const DERIVED_INDEX_MAINTENANCE_LOCK = [482_571, 153] as const;
@@ -24,6 +24,11 @@ const REINDEXABLE_DERIVED_INDEXES = [
 const DEFAULT_MINIMUM_TABLE_BYTES = 32 * 1024 * 1024;
 const DEFAULT_MINIMUM_DEAD_TUPLES = 100_000;
 const DEFAULT_MINIMUM_DEAD_TUPLE_RATIO = 0.2;
+// VACUUM never queues behind another lock holder for longer than this. A
+// queued VACUUM would also make every later conflicting lock request queue
+// behind it.
+const VACUUM_LOCK_TIMEOUT_MS = 5000;
+const INTERRUPTED_RUN_ERROR = "interrupted: the maintenance session ended before the run recorded an outcome";
 
 export interface PostgresUtcOffPeakWindow {
   /** Minutes after 00:00 UTC, inclusive. */
@@ -49,6 +54,7 @@ export interface PostgresDerivedIndexMaintenanceReceipt {
   status:
     | "already-attempted"
     | "already-completed"
+    | "bootstrap-pending"
     | "completed"
     | "disabled"
     | "failed"
@@ -293,6 +299,7 @@ export async function runPostgresDerivedIndexMaintenance(
   };
   const client = await getPostgresLockPool().connect();
   let lockHeld = false;
+  let bootstrapExclusionHeld = false;
   let windowClaimed = false;
   try {
     const lock = await client.query<{ locked: boolean }>("SELECT pg_try_advisory_lock($1, $2) AS locked", [
@@ -302,6 +309,27 @@ export async function runPostgresDerivedIndexMaintenance(
     if (!lockHeld) {
       return transientReceipt("lock-unavailable", startedAt, window);
     }
+    // Hold the bootstrap key in shared mode for the whole run: the run does
+    // not start while a schema bootstrap holds the key, and a bootstrap that
+    // starts later cancels this run instead of waiting behind its locks.
+    const bootstrapExclusion = await client.query<{ locked: boolean }>(
+      "SELECT pg_try_advisory_lock_shared($1, $2) AS locked",
+      POSTGRES_BOOTSTRAP_SERIALIZATION_LOCK
+    );
+    bootstrapExclusionHeld = bootstrapExclusion.rows[0]?.locked === true;
+    if (!bootstrapExclusionHeld) {
+      return transientReceipt("bootstrap-pending", startedAt, window);
+    }
+    // The advisory lock is session-scoped, so holding it proves that no other
+    // run is in flight. A 'running' row now belongs to a run whose session
+    // ended before it could record an outcome: its process was killed, or the
+    // server ended the backend after the client went away.
+    await client.query(
+      `UPDATE postgres_derived_index_maintenance_receipts
+          SET status = 'failed', completed_at = now(), error_text = $1
+        WHERE status = 'running'`,
+      [INTERRUPTED_RUN_ERROR]
+    );
     const claim = await claimMaintenanceWindow(client, windowKey);
     if (claim !== "claimed") {
       return alreadyAttemptedReceipt(claim, startedAt, window);
@@ -314,11 +342,15 @@ export async function runPostgresDerivedIndexMaintenance(
       deadTupleRatio: table.deadTuples / Math.max(table.liveTuples + table.deadTuples, 1),
       vacuumed: table.totalBytes >= gates.minimumTableBytes,
     }));
+    await client.query(`SET lock_timeout = ${VACUUM_LOCK_TIMEOUT_MS}`);
     for (const table of tables) {
       if (table.vacuumed) {
         await client.query(`VACUUM (ANALYZE) ${quoteIdentifier(table.tableName)}`);
       }
     }
+    // Not for REINDEX CONCURRENTLY: a lock timeout after its first phase
+    // leaves an invalid copy of the index behind.
+    await client.query("RESET lock_timeout");
 
     const reindexedIndexNames: string[] = [];
     for (const index of REINDEXABLE_DERIVED_INDEXES) {
@@ -365,10 +397,25 @@ export async function runPostgresDerivedIndexMaintenance(
     });
     throw error;
   } finally {
-    if (lockHeld) {
-      await client.query("SELECT pg_advisory_unlock($1, $2)", [...DERIVED_INDEX_MAINTENANCE_LOCK]).catch(() => undefined);
+    // A bootstrap's cancel can land on these statements too. Then discard the
+    // connection: closing the session releases its advisory locks and settings,
+    // so the pooled connection never carries them into later work.
+    let discardConnection = false;
+    const cleanUp = (sql: string, values?: readonly number[]) =>
+      client.query(sql, values ? [...values] : undefined).then(
+        () => undefined,
+        () => {
+          discardConnection = true;
+        }
+      );
+    await cleanUp("RESET lock_timeout");
+    if (bootstrapExclusionHeld) {
+      await cleanUp("SELECT pg_advisory_unlock_shared($1, $2)", POSTGRES_BOOTSTRAP_SERIALIZATION_LOCK);
     }
-    client.release();
+    if (lockHeld) {
+      await cleanUp("SELECT pg_advisory_unlock($1, $2)", DERIVED_INDEX_MAINTENANCE_LOCK);
+    }
+    client.release(discardConnection);
   }
 }
 

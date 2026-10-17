@@ -220,21 +220,28 @@ function neededLibc(addonPath) {
   return needed.find(lib => lib.startsWith('libc.')) ?? null;
 }
 
+function elfMachine(addonPath) {
+  const result = spawnSync('readelf', ['-h', addonPath], { encoding: 'utf8' });
+  if (result.status !== 0 || !result.stdout) return null;
+  return result.stdout.match(/^\s*Machine:\s*(.+)$/m)?.[1]?.trim() ?? null;
+}
+
 /**
- * Delete bundled addons that this Linux build's own C library cannot satisfy.
+ * Delete bundled addons that this Linux build cannot load.
  *
  * Packages that ship prebuilt binaries ship one per platform they support, and
  * exactly one of them is ever loadable here. The rest are usually just weight.
- * On Linux they are not: linuxdeploy walks the AppDir, identifies ELF files by
- * magic bytes, and resolves every `DT_NEEDED` entry it finds.
+ * On Linux they are not: linuxdeploy walks the AppDir and resolves every
+ * `DT_NEEDED` entry it finds. appimagetool also rejects an AppDir that mixes
+ * native and foreign-architecture ELF files.
  *
- * Mach-O and PE addons it cannot parse, so it skips them, and a foreign-arch
- * ELF it warns about and ships. A *musl* addon is neither -- it is a native
- * x86_64 ELF, so it is parsed like any other, and it needs
- * `libc.musl-x86_64.so.1`, which does not exist on a glibc runner. linuxdeploy
- * cannot resolve it and exits non-zero. Tauri discards the tool's output and
- * reports only `failed to run linuxdeploy`, which is the whole of the
- * diagnostic for the ubuntu-22.04 bundling failure.
+ * Mach-O and PE addons are not Linux ELF files, so linuxdeploy skips them. A
+ * foreign-architecture Linux addon must be removed: it makes the AppImage
+ * architecture ambiguous and cannot be loaded by the shipped binary. A *musl*
+ * addon is also a native-architecture ELF, so linuxdeploy parses it and tries
+ * to resolve its musl loader. It needs `libc.musl-x86_64.so.1`, which does not
+ * exist on a glibc runner. Tauri discards linuxdeploy's output and reports only
+ * `failed to run linuxdeploy`.
  *
  * Two packages in this bundle ship one: better-sqlite3
  * (`prebuilds/linuxmusl-x64.node`) and secp256k1
@@ -246,30 +253,39 @@ function neededLibc(addonPath) {
  * are glibc formats, so a musl addon could never have been the one loaded from
  * either; the matching glibc build sits beside each one and is untouched.
  */
-function pruneUnsatisfiableAddons() {
-  if (PLATFORM !== 'linux') return;
-
-  // What this machine -- and so the bundle it is producing -- actually links.
-  const hostLibc = neededLibc(process.execPath) ?? 'libc.so.6';
+export function pruneUnsatisfiableAddons({
+  distRoot = DIST,
+  addons = collectNativeAddons(join(distRoot, 'node_modules')),
+  platformName = PLATFORM,
+  hostMachine = elfMachine(process.execPath),
+  hostLibc = neededLibc(process.execPath) ?? 'libc.so.6',
+  machineForAddon = elfMachine,
+  libcForAddon = neededLibc,
+} = {}) {
+  if (platformName !== 'linux') return [];
 
   const removed = [];
-  for (const addon of collectNativeAddons(join(DIST, 'node_modules'))) {
-    const libc = neededLibc(addon);
-    // `null` is a non-ELF or foreign-arch addon, which linuxdeploy handles on
-    // its own. Only a native ELF wanting a different libc is the failure.
+  for (const addon of addons) {
+    const machine = machineForAddon(addon);
+    if (machine !== null && hostMachine !== null && machine !== hostMachine) {
+      rmSync(addon, { force: true });
+      removed.push(`${relative(distRoot, addon)} (needs architecture ${machine})`);
+      continue;
+    }
+
+    const libc = libcForAddon(addon);
+    // `null` is a non-ELF addon. Leave it in place; linuxdeploy skips it.
     if (libc === null || libc === hostLibc) continue;
 
     rmSync(addon, { force: true });
-    removed.push(`${relative(DIST, addon)} (needs ${libc})`);
+    removed.push(`${relative(distRoot, addon)} (needs ${libc})`);
   }
 
-  if (removed.length === 0) {
-    log('No bundled addon requires a foreign C library.');
-    return;
-  }
+  if (removed.length === 0) return removed;
 
   for (const entry of removed) log(`Removed unloadable addon ${entry}.`);
-  log(`Pruned ${removed.length} addon(s) this ${hostLibc} build cannot load.`);
+  log(`Pruned ${removed.length} addon(s) this Linux build cannot load.`);
+  return removed;
 }
 
 function resolveCopiedImportSpecifier(specifier, fromFile, packageJsonCache) {

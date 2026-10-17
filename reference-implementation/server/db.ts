@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * PDPP Personal Server — Database layer (`better-sqlite3`).
+ * PDPP Personal Server — Database layer (`better-sqlite3` API, linked via
+ * `server/sqlite-driver.ts`; see that module for why the driver package is
+ * named in exactly one place).
  *
  * The reference implementation talks to SQLite synchronously. Callers do:
  *
@@ -21,7 +23,6 @@
 
 import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { createRequire } from "node:module";
 import { dirname } from "node:path";
 import { load as loadSqliteVec } from "sqlite-vec";
 import {
@@ -30,14 +31,13 @@ import {
 } from "./connector-instance-utils.ts";
 import { canonicalConnectorKey } from "./connector-key.ts";
 import { RECORD_REJECTION_GENERATION, recordRejectionReplayKey } from "./record-rejection-replay-key.ts";
+import { SqliteDriver } from "./sqlite-driver.ts";
+import { openSqliteDatabase, type SqliteEncryptionOptions } from "./sqlite-encryption.ts";
 import { bumpStorageGeneration } from "./storage-generation.ts";
 
 const DEFAULT_SQLITE_BUSY_TIMEOUT_MS = 30_000;
 const LEGACY_SYNC_STATE_OWNER_SUBJECT_ID = "owner_local";
-const Database = createRequire(import.meta.url)("better-sqlite3") as new (
-  filename: string,
-  options: { timeout: number }
-) => SqliteDatabase;
+const Database = SqliteDriver;
 
 type SqliteRow = Record<string, unknown>;
 interface SqliteRunResult {
@@ -231,6 +231,7 @@ interface LastRunRow extends ConnectorScopedRow {
 }
 
 interface SemanticIndexRow extends ConnectorScopedRow {
+  input_identity?: string | null;
   embedding?: Uint8Array;
   record_key: string;
   rowid?: number;
@@ -264,7 +265,7 @@ interface AccountDestinationRow {
   status: string;
 }
 
-interface InitDbOptions extends BusyRetryOptions {
+export interface InitDbOptions extends BusyRetryOptions, SqliteEncryptionOptions {
   busyTimeoutMs?: number;
   onSchemaMigration?: (event: SchemaMigrationEvent) => void;
   onSchemaRetry?: (event: BusyRetryEvent) => void;
@@ -518,6 +519,36 @@ CREATE TABLE IF NOT EXISTS connectors (
   connector_id TEXT PRIMARY KEY,
   manifest     TEXT NOT NULL,
   created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS connector_installs (
+  connector_id TEXT PRIMARY KEY,
+  record_json TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS connector_lifecycle_locks (
+  connector_id TEXT PRIMARY KEY,
+  owner_token TEXT NOT NULL,
+  owner_pid INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS connector_activations (
+  connector_id TEXT PRIMARY KEY,
+  state TEXT NOT NULL CHECK (state IN ('active', 'repair_required')),
+  record_json TEXT NOT NULL,
+  canonical_manifest_json TEXT NOT NULL,
+  manifest_revision TEXT NOT NULL,
+  activation_id TEXT NOT NULL,
+  attempt_id TEXT NOT NULL,
+  repair_reason TEXT,
+  repair_error_json TEXT,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS connector_install_catalog_state (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  catalog_high_water TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS connector_instances (
@@ -872,6 +903,7 @@ CREATE TABLE IF NOT EXISTS grants (
   client_id      TEXT NOT NULL,
   storage_binding_json TEXT,
   grant_json     TEXT NOT NULL,
+  trust_signal_json TEXT,
   access_mode    TEXT NOT NULL,
   status         TEXT NOT NULL DEFAULT 'active',
   consumed       INTEGER NOT NULL DEFAULT 0,
@@ -879,6 +911,61 @@ CREATE TABLE IF NOT EXISTS grants (
   expires_at     TEXT,
   trace_id       TEXT,
   scenario_id    TEXT
+);
+
+CREATE TABLE IF NOT EXISTS pairwise_identity_handles (
+  issuer TEXT NOT NULL,
+  subject_id TEXT NOT NULL,
+  client_id TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('subject','grantor','instance')),
+  source_id TEXT NOT NULL,
+  internal_id TEXT NOT NULL,
+  client_sector TEXT,
+  scheme TEXT NOT NULL DEFAULT 'legacy' CHECK (scheme IN ('legacy','v1')),
+  handle TEXT NOT NULL UNIQUE,
+  PRIMARY KEY (issuer,subject_id,client_id,kind,source_id,internal_id,scheme)
+);
+CREATE TABLE IF NOT EXISTS pairwise_trusted_client_sectors (
+  issuer TEXT NOT NULL,
+  client_id TEXT NOT NULL,
+  client_sector TEXT NOT NULL,
+  PRIMARY KEY (issuer, client_id)
+);
+CREATE TABLE IF NOT EXISTS pairwise_as_instance_authority (
+  subject_id TEXT NOT NULL,
+  internal_instance_id TEXT NOT NULL,
+  canonical_source_id TEXT NOT NULL,
+  declaration_version TEXT NOT NULL,
+  accepted_legacy_source_aliases_json TEXT NOT NULL DEFAULT '[]',
+  PRIMARY KEY (subject_id, internal_instance_id)
+);
+CREATE TABLE IF NOT EXISTS pairwise_as_instance_authority_versions (
+  subject_id TEXT NOT NULL,
+  internal_instance_id TEXT NOT NULL,
+  canonical_source_id TEXT NOT NULL,
+  declaration_version TEXT NOT NULL,
+  accepted_legacy_source_aliases_json TEXT NOT NULL DEFAULT '[]',
+  PRIMARY KEY (subject_id, internal_instance_id, declaration_version)
+);
+CREATE TABLE IF NOT EXISTS pairwise_identity_root_keys (
+  issuer TEXT PRIMARY KEY,
+  key_version INTEGER NOT NULL CHECK (key_version = 1),
+  root_key_hex TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS pairwise_identity_legacy_backfills (
+  issuer TEXT PRIMARY KEY,
+  completed_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS pairwise_identity_issuer_migrations (
+  from_issuer TEXT NOT NULL,
+  to_issuer TEXT NOT NULL,
+  migrated_at TEXT NOT NULL,
+  PRIMARY KEY (from_issuer, to_issuer)
+);
+CREATE TABLE IF NOT EXISTS pairwise_identity_deployment (
+  singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+  issuer TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS tokens (
@@ -940,6 +1027,21 @@ CREATE TABLE IF NOT EXISTS pending_consents (
 CREATE INDEX IF NOT EXISTS idx_pending_consents_status_expires
   ON pending_consents(status, expires_at);
 
+CREATE TABLE IF NOT EXISTS consent_challenges (
+  id TEXT PRIMARY KEY,
+  owner_subject_id TEXT NOT NULL,
+  authorization_request_json TEXT NOT NULL,
+  client_json TEXT NOT NULL,
+  render_model_inputs_json TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'accepted', 'rejected', 'expired')),
+  decision_digest TEXT,
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  decided_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_consent_challenges_owner_status_expires
+  ON consent_challenges(owner_subject_id, status, expires_at);
+
 CREATE TABLE IF NOT EXISTS agent_connect_attempts (
   id                TEXT PRIMARY KEY,
   request_uri       TEXT NOT NULL,
@@ -985,6 +1087,36 @@ CREATE TABLE IF NOT EXISTS owner_device_auth (
   -- POST /oauth/token; projecting it to operator surfaces is a
   -- direct credential leak.
   approval_id        TEXT UNIQUE
+);
+
+-- The cookie value is a random credential. Only its SHA-256 hash is stored;
+-- session metadata is retained so the owner can inspect and revoke devices.
+CREATE TABLE IF NOT EXISTS owner_sessions (
+  id_hash       TEXT PRIMARY KEY,
+  session_id    TEXT NOT NULL UNIQUE,
+  subject_id    TEXT NOT NULL,
+  device_key    TEXT,
+  label         TEXT NOT NULL,
+  user_agent    TEXT,
+  ip_address    TEXT,
+  created_at    INTEGER NOT NULL,
+  expires_at    INTEGER NOT NULL,
+  last_seen_at  INTEGER NOT NULL,
+  revoked_at    INTEGER,
+  UNIQUE(subject_id, device_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_owner_sessions_subject_active
+  ON owner_sessions(subject_id, revoked_at, expires_at);
+
+-- The single app-managed owner password is stored as a salted scrypt verifier.
+-- The verifier JSON contains no plaintext password; singleton=1 keeps this
+-- table intentionally limited to one owner credential.
+CREATE TABLE IF NOT EXISTS owner_password_verifier (
+  singleton      INTEGER PRIMARY KEY CHECK (singleton = 1),
+  verifier_json  TEXT NOT NULL,
+  created_at     INTEGER NOT NULL,
+  updated_at     INTEGER NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_owner_device_auth_status_expires
@@ -1779,6 +1911,19 @@ CREATE TABLE IF NOT EXISTS grant_connector_state (
   PRIMARY KEY(grant_id, connector_instance_id, stream)
 );
 
+-- Opaque public read cursors hold compact metadata, never record payloads.
+CREATE TABLE IF NOT EXISTS rs_opaque_cursors (
+  token_digest    TEXT PRIMARY KEY,
+  kind            TEXT NOT NULL CHECK (kind IN ('page', 'changes_page', 'changes_since')),
+  scope_digest    TEXT NOT NULL,
+  context_digest  TEXT NOT NULL,
+  internal_cursor TEXT NOT NULL,
+  created_at      INTEGER NOT NULL,
+  expires_at      INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_rs_opaque_cursors_expiry ON rs_opaque_cursors(expires_at);
+CREATE INDEX IF NOT EXISTS idx_rs_opaque_cursors_scope ON rs_opaque_cursors(scope_digest, kind, created_at);
+
 CREATE TABLE IF NOT EXISTS connector_detail_gaps (
   gap_id              TEXT PRIMARY KEY,
   connector_id        TEXT NOT NULL,
@@ -1804,6 +1949,8 @@ CREATE TABLE IF NOT EXISTS connector_detail_gaps (
   lease_id            TEXT,
   lease_attempted     INTEGER NOT NULL DEFAULT 0,
   lease_expires_at    TEXT,
+  -- 1 = retryable, 0 = permanent source loss, NULL = legacy / unclassified.
+  retryable           INTEGER,
   created_at          TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at          TEXT NOT NULL DEFAULT (datetime('now')),
   CHECK (status IN ('pending', 'in_progress', 'recovered', 'terminal'))
@@ -2082,6 +2229,7 @@ CREATE TABLE IF NOT EXISTS semantic_search_rowid (
   scope_key     TEXT NOT NULL,
   record_key    TEXT NOT NULL,
   rowid         INTEGER NOT NULL,
+  input_identity TEXT,
   PRIMARY KEY(connector_instance_id, scope_key, record_key)
 );
 
@@ -2097,6 +2245,7 @@ CREATE TABLE IF NOT EXISTS semantic_search_blob (
   scope_key     TEXT NOT NULL,
   record_key    TEXT NOT NULL,
   embedding     BLOB NOT NULL,
+  input_identity TEXT,
   PRIMARY KEY(connector_instance_id, scope_key, record_key)
 );
 CREATE INDEX IF NOT EXISTS idx_semantic_search_blob_plan
@@ -2405,15 +2554,16 @@ CREATE TABLE IF NOT EXISTS manifest_write_violations (
 -- scope rotates out of contention and a later healthy scope can take its
 -- page slot, while the failing scope still gets retried periodically.
 -- revision is a monotonic per-scope generation counter, atomically
--- incremented by every mark-dirty write (revision = revision + 1 in the
--- SAME statement, same idiom as connector_instances.manifest_generation).
+-- incremented by every changed mark and explicit park/rearm (revision =
+-- revision + 1 in the SAME statement, same idiom as
+-- connector_instances.manifest_generation).
 -- A reconcile's clear is CAS'd on the revision value it read when it
 -- listed the scope, NOT on marked_at: two durable marks issued within
 -- the same millisecond receive the identical ISO marked_at string (no
 -- guaranteed sub-millisecond monotonicity), so a marked_at-only CAS can
 -- silently pass even though a concurrent write re-dirtied the scope after
--- the reconcile's read -- revision cannot collide, because it only ever
--- increases by exactly 1 per mark and the clear demands an exact match.
+-- the reconcile's read -- revision cannot collide, because every ingest or
+-- operator control advances it and the clear demands an exact match.
 -- marked_at is kept for queue ordering (oldest-first) and operator-facing
 -- diagnostics ONLY; it is no longer part of any correctness-bearing check.
 CREATE TABLE IF NOT EXISTS search_index_dirty (
@@ -2427,10 +2577,28 @@ CREATE TABLE IF NOT EXISTS search_index_dirty (
   last_error            TEXT,
   attempts              INTEGER NOT NULL DEFAULT 0,
   next_attempt_at       TEXT,
+  -- 0 automatic retry state; 1 explicit operator park; NULL legacy delay
+  -- whose provenance cannot be inferred safely.
+  operator_parked       INTEGER DEFAULT 0,
   PRIMARY KEY(connector_instance_id, stream)
 );
 CREATE INDEX IF NOT EXISTS idx_search_index_dirty_pending
   ON search_index_dirty(dirty);
+
+-- Pending re-derivation of manifest-derived record columns for one stream of
+-- one connection, queued with a manifest publication; deleted once done.
+CREATE TABLE IF NOT EXISTS record_derived_repair_pending (
+  connector_instance_id TEXT NOT NULL,
+  connector_id          TEXT NOT NULL,
+  stream                TEXT NOT NULL,
+  job_id                TEXT NOT NULL,
+  after_record_key      TEXT,
+  marked_at             TEXT NOT NULL,
+  attempts              INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at       TEXT,
+  last_error            TEXT,
+  PRIMARY KEY(connector_instance_id, stream)
+);
 
 -- Deployment-scoped provider app config (e.g. a shared OAuth client
 -- id/secret), keyed generically by (identity_group, logical_key) -- never
@@ -2496,12 +2664,13 @@ function withCachedPrepare(raw: SqliteDatabase): DatabaseHandle {
  *       ("The reference's default semantic index SHALL persist across
  *        process restarts")
  */
-function addColumnIfMissing(raw: SqliteDatabase, table: string, column: string, type: string): void {
+function addColumnIfMissing(raw: SqliteDatabase, table: string, column: string, type: string): boolean {
   const cols = raw.prepare(`PRAGMA table_info(${table})`).all();
   if (cols.some((c) => c.name === column)) {
-    return;
+    return false;
   }
   raw.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+  return true;
 }
 
 function rekeyRecordRejectionReplayKeys(raw: SqliteDatabase): void {
@@ -4307,6 +4476,8 @@ function migrateConnectorDetailGapInstanceColumns(raw: SqliteDatabase, opts: Mig
   addColumnIfMissing(raw, "connector_detail_gaps", "lease_id", "TEXT");
   addColumnIfMissing(raw, "connector_detail_gaps", "lease_attempted", "INTEGER NOT NULL DEFAULT 0");
   addColumnIfMissing(raw, "connector_detail_gaps", "lease_expires_at", "TEXT");
+  // Additive, nullable, never backfilled: NULL = legacy / unclassified keeps its old eligibility.
+  addColumnIfMissing(raw, "connector_detail_gaps", "retryable", "INTEGER");
   const legacyLeaseLess = raw
     .prepare(`
     UPDATE connector_detail_gaps
@@ -5869,13 +6040,13 @@ function migrateSemanticSearchInstanceColumns(raw: SqliteDatabase, opts: Migrati
   const migration = raw.transaction(() => {
     const rowids = raw
       .prepare(
-        `SELECT ${rowidHasInstance ? "connector_instance_id," : ""} connector_id, scope_key, record_key, rowid
+        `SELECT ${rowidHasInstance ? "connector_instance_id," : ""} connector_id, scope_key, record_key, rowid, ${hasTableColumn(raw, "semantic_search_rowid", "input_identity") ? "input_identity" : "NULL AS input_identity"}
         FROM semantic_search_rowid`
       )
       .all<SemanticIndexRow>();
     const blobs = raw
       .prepare(
-        `SELECT ${blobHasInstance ? "connector_instance_id," : ""} connector_id, scope_key, record_key, embedding
+        `SELECT ${blobHasInstance ? "connector_instance_id," : ""} connector_id, scope_key, record_key, embedding, ${hasTableColumn(raw, "semantic_search_blob", "input_identity") ? "input_identity" : "NULL AS input_identity"}
         FROM semantic_search_blob`
       )
       .all<SemanticIndexRow>();
@@ -5939,6 +6110,7 @@ function migrateSemanticSearchInstanceColumns(raw: SqliteDatabase, opts: Migrati
         scope_key     TEXT NOT NULL,
         record_key    TEXT NOT NULL,
         rowid         INTEGER NOT NULL,
+        input_identity TEXT,
         PRIMARY KEY(connector_instance_id, scope_key, record_key)
       );
 
@@ -5948,6 +6120,7 @@ function migrateSemanticSearchInstanceColumns(raw: SqliteDatabase, opts: Migrati
         scope_key     TEXT NOT NULL,
         record_key    TEXT NOT NULL,
         embedding     BLOB NOT NULL,
+        input_identity TEXT,
         PRIMARY KEY(connector_instance_id, scope_key, record_key)
       );
       CREATE INDEX IF NOT EXISTS idx_semantic_search_blob_plan
@@ -5955,19 +6128,33 @@ function migrateSemanticSearchInstanceColumns(raw: SqliteDatabase, opts: Migrati
     `);
 
     const insertRowid = raw.prepare(
-      `INSERT INTO semantic_search_rowid(connector_instance_id, connector_id, scope_key, record_key, rowid)
-        VALUES(?, ?, ?, ?, ?)`
+      `INSERT INTO semantic_search_rowid(connector_instance_id, connector_id, scope_key, record_key, rowid, input_identity)
+        VALUES(?, ?, ?, ?, ?, ?)`
     );
     for (const row of rowids) {
-      insertRowid.run(resolveInstanceId(row), row.connector_id, row.scope_key, row.record_key, row.rowid);
+      insertRowid.run(
+        resolveInstanceId(row),
+        row.connector_id,
+        row.scope_key,
+        row.record_key,
+        row.rowid,
+        row.input_identity ?? null
+      );
     }
 
     const insertBlob = raw.prepare(
-      `INSERT INTO semantic_search_blob(connector_instance_id, connector_id, scope_key, record_key, embedding)
-        VALUES(?, ?, ?, ?, ?)`
+      `INSERT INTO semantic_search_blob(connector_instance_id, connector_id, scope_key, record_key, embedding, input_identity)
+        VALUES(?, ?, ?, ?, ?, ?)`
     );
     for (const row of blobs) {
-      insertBlob.run(resolveInstanceId(row), row.connector_id, row.scope_key, row.record_key, row.embedding);
+      insertBlob.run(
+        resolveInstanceId(row),
+        row.connector_id,
+        row.scope_key,
+        row.record_key,
+        row.embedding,
+        row.input_identity ?? null
+      );
     }
 
     const insertMeta = raw.prepare(
@@ -6037,7 +6224,7 @@ export function initDb(path = ":memory:", opts: InitDbOptions = {}): DatabaseHan
   if (path !== ":memory:") {
     mkdirSync(dirname(path), { recursive: true });
   }
-  const raw = new Database(path, { timeout: busyTimeoutMs }) as unknown as SqliteDatabase;
+  const raw = openSqliteDatabase(Database, path, busyTimeoutMs, opts) as unknown as SqliteDatabase;
   sqliteStoreCacheGeneration += 1;
   sqliteStoreCacheIdentity = `sqlite:${String(path)}:${sqliteStoreCacheGeneration}`;
   raw.pragma(`busy_timeout = ${busyTimeoutMs}`);
@@ -6062,6 +6249,61 @@ export function initDb(path = ":memory:", opts: InitDbOptions = {}): DatabaseHan
   // crash the new process. Sync because better-sqlite3 / initDb are sync.
   runWithSqliteBusyRetrySync(() => raw.exec(SCHEMA), {
     onRetry: opts.onSchemaRetry,
+  });
+  // The red-stage table may already contain random handles. Add metadata in
+  // place so those exact issued mappings remain readable as legacy rows.
+  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "pairwise_identity_handles", "client_sector", "TEXT"));
+  runWithSqliteBusyRetrySync(() =>
+    addColumnIfMissing(raw, "pairwise_identity_handles", "scheme", "TEXT NOT NULL DEFAULT 'legacy' CHECK (scheme IN ('legacy','v1'))")
+  );
+  // A legacy row and its v1 successor share the original six-column tuple, so
+  // the key must include scheme. SQLite cannot change a primary key in place:
+  // rebuild once, atomically, copying every disclosed handle unchanged. The
+  // shape is re-read inside the write lock so a concurrent starter skips it.
+  runWithSqliteBusyRetrySync(() => {
+    raw
+      .transaction(() => {
+        const key = raw
+          .prepare("SELECT name FROM pragma_table_info('pairwise_identity_handles') WHERE pk > 0 ORDER BY pk")
+          .all<{ name: string }>()
+          .map((column) => column.name)
+          .join(",");
+        if (key === "issuer,subject_id,client_id,kind,source_id,internal_id,scheme") return;
+        if (key !== "issuer,subject_id,client_id,kind,source_id,internal_id") {
+          throw new Error("Unsupported pairwise_identity_handles primary key; refusing an unsafe migration.");
+        }
+        raw.exec(`
+          CREATE TABLE pairwise_identity_handles_new (
+            issuer TEXT NOT NULL,
+            subject_id TEXT NOT NULL,
+            client_id TEXT NOT NULL,
+            kind TEXT NOT NULL CHECK (kind IN ('subject','grantor','instance')),
+            source_id TEXT NOT NULL,
+            internal_id TEXT NOT NULL,
+            client_sector TEXT,
+            scheme TEXT NOT NULL DEFAULT 'legacy' CHECK (scheme IN ('legacy','v1')),
+            handle TEXT NOT NULL UNIQUE,
+            PRIMARY KEY (issuer,subject_id,client_id,kind,source_id,internal_id,scheme)
+          );
+          INSERT INTO pairwise_identity_handles_new
+            (issuer,subject_id,client_id,kind,source_id,internal_id,client_sector,scheme,handle)
+          SELECT issuer,subject_id,client_id,kind,source_id,internal_id,client_sector,scheme,handle
+            FROM pairwise_identity_handles;
+          DROP TABLE pairwise_identity_handles;
+          ALTER TABLE pairwise_identity_handles_new RENAME TO pairwise_identity_handles;
+          CREATE UNIQUE INDEX idx_pairwise_identity_handles_v1_scope
+            ON pairwise_identity_handles(issuer, client_sector, kind, subject_id, internal_id)
+            WHERE scheme = 'v1';
+        `);
+      })
+      .immediate();
+  });
+  runWithSqliteBusyRetrySync(() => {
+    raw.exec(
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_pairwise_identity_handles_v1_scope
+         ON pairwise_identity_handles(issuer, client_sector, kind, subject_id, internal_id)
+         WHERE scheme = 'v1'`
+    );
   });
   // Older registries contain only the uniqueness key. Keep those claims
   // spent, but leave them without a replay payload so the store fails closed
@@ -6244,6 +6486,23 @@ export function initDb(path = ":memory:", opts: InitDbOptions = {}): DatabaseHan
     addColumnIfMissing(raw, "search_index_dirty", "attempts", "INTEGER NOT NULL DEFAULT 0")
   );
   runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "search_index_dirty", "next_attempt_at", "TEXT"));
+  // Existing delayed rows have no provenance: do not guess whether an old
+  // deadline was automatic or an intentional operator park. New rows use the
+  // default (0) on both fresh and upgraded tables; legacy delayed rows remain
+  // NULL until an automatic failure or explicit control action classifies them.
+  runWithSqliteBusyRetrySync(() => {
+    raw.exec("BEGIN IMMEDIATE");
+    try {
+      if (addColumnIfMissing(raw, "search_index_dirty", "operator_parked", "INTEGER DEFAULT 0")) {
+        raw.exec(`UPDATE search_index_dirty
+                  SET operator_parked = CASE WHEN next_attempt_at IS NULL THEN 0 ELSE NULL END`);
+      }
+      raw.exec("COMMIT");
+    } catch (error) {
+      raw.exec("ROLLBACK");
+      throw error;
+    }
+  });
   // Monotonic per-scope CAS generation (see the CREATE TABLE comment above):
   // a pre-existing reference DB created the table before this column
   // existed. Pre-existing rows seed with 0; any subsequent mark-dirty write
@@ -6307,6 +6566,12 @@ export function initDb(path = ":memory:", opts: InitDbOptions = {}): DatabaseHan
   runWithSqliteBusyRetrySync(() => migrateRecordStorageInstanceColumns(raw, opts));
   runWithSqliteBusyRetrySync(() => migrateBlobOriginInstanceColumn(raw, opts));
   runWithSqliteBusyRetrySync(() => migrateSemanticSearchInstanceColumns(raw, opts));
+  // A legacy vector has no evidence that it was produced from the current
+  // normalized input. NULL deliberately forces one guarded refresh.
+  runWithSqliteBusyRetrySync(() => {
+    addColumnIfMissing(raw, "semantic_search_blob", "input_identity", "TEXT");
+    addColumnIfMissing(raw, "semantic_search_rowid", "input_identity", "TEXT");
+  });
   runWithSqliteBusyRetrySync(() => migrateLexicalSearchInstanceColumns(raw, opts));
   runWithSqliteBusyRetrySync(() => migrateLocalDeviceConnectorInstances(raw, opts));
   runWithSqliteBusyRetrySync(() => migrateRecordSemanticTimeColumn(raw));
@@ -6390,6 +6655,7 @@ CREATE INDEX IF NOT EXISTS idx_blob_bindings_record ON blob_bindings(connector_i
   // write-path derivation, only promoting an existing value to a column.
   // Spec: openspec/changes/reconcile-active-summary-evidence/specs/
   //       reference-connector-instances/spec.md
+  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "grants", "trust_signal_json", "TEXT"));
   runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "spine_events", "connector_instance_id", "TEXT"));
   // Terminal provenance is source-bound, not projection-bound. This trigger
   // shares SQLite's single-writer ordering with registry mutation. It accepts

@@ -62,7 +62,7 @@ jobs:
         run: npm run typecheck
 
   test-client:
-    name: test client
+    name: test client and console
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -82,6 +82,22 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Typecheck console
+        run: npm run types:check --workspace=apps/console
+
+      - name: Build console standalone server
+        env:
+          NEXT_TELEMETRY_DISABLED: "1"
+        run: npm run build --workspace=apps/console
+
+      - name: Test console Node suite
+        run: npm test --workspace=apps/console
+
+      - name: Test copied standalone skill routes
+        env:
+          REQUIRE_STANDALONE: "1"
+        run: node --test apps/console/packaged-agent-skill-routes.test.mjs
 
       # `vitest run` without --passWithNoTests: an empty collection exits 1 on its own,
       # so a vite.config.ts `test.include` that silently stops matching fails the job

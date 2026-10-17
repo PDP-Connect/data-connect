@@ -6,8 +6,8 @@
 // Pure, dependency-free lookup tables extracted from `server/index.js` under
 // the `split-reference-server-by-route-family` pattern. These encode the
 // HTTP-status ↔ error-`type`/`code` contract that EVERY typed-error envelope
-// the public read/MCP surface emits depends on (the envelopes external Claude /
-// Daisy / ChatGPT consume): e.g. `ambiguous_connection → 409`,
+// the public read/MCP surface emits depends on (the envelopes external clients
+// such as Claude and ChatGPT consume): e.g. `ambiguous_connection → 409`,
 // `connection_not_found → 404`, `insufficient_scope → 403`,
 // `cursor_expired → 410`. Kept side-effect-free and closure-free so they are
 // unit-testable in isolation and safe to import anywhere; the impure response
@@ -41,6 +41,19 @@ export function typeFor(status: number): string {
     return "rate_limit_error";
   }
   return "api_error";
+}
+
+/**
+ * Project the controller's `connectorId` onto the `connector_id` envelope
+ * field for `connector_not_installed`, so a client can name and install the
+ * connector without parsing the message. Other codes carry no connector field.
+ */
+export function connectorNotInstalledExtrasForWire(err: unknown): { readonly connector_id?: string } {
+  const source = err as { code?: unknown; connectorId?: unknown } | null | undefined;
+  if (source?.code !== "connector_not_installed") {
+    return {};
+  }
+  return typeof source.connectorId === "string" && source.connectorId ? { connector_id: source.connectorId } : {};
 }
 
 export interface RecoveryAdmissionWireExtras {
@@ -102,6 +115,8 @@ export const codeToStatus: Readonly<Record<string, number>> = {
   connection_is_grouping_canonical: 409,
   connection_not_found: 404,
   connection_run_active: 409,
+  connector_in_use: 409,
+  connector_run_active: 409,
   connection_tombstoned: 409,
   connector_instance_busy: 503,
   // A revision exists but is not in a state the requested transition allows
@@ -126,6 +141,13 @@ export const codeToStatus: Readonly<Record<string, number>> = {
   connector_instance_selector_required: 400,
   connector_instance_store_required: 500,
   connector_invalid: 400,
+  // The connection exists but no implementation is available to run it: no
+  // verified install, no developer-local source, and no built-in fixture. 409
+  // because the request is valid and the server state blocks it; the owner
+  // resolves it by installing the connector (`POST
+  // /v1/owner/connector-install/update`), then retries. The envelope carries
+  // `connector_id` so a client can offer that action without parsing prose.
+  connector_not_installed: 409,
   // The submitted value cannot be a secret (mask, placeholder, or whitespace
   // only). Unmapped codes fall through to 500 (`codeToStatus[code] || 500` in
   // index.ts / request-helpers.ts), which would show the owner an opaque

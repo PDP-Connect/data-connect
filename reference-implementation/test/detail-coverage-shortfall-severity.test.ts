@@ -157,7 +157,7 @@ interface TokenResponse {
 }
 
 async function issueOwnerToken(asUrl: string): Promise<string> {
-  const clientId = "cli_longview";
+  const clientId = "pdpp_cli";
   const { body: device } = await fetchJson<DeviceAuthorizationResponse>(`${asUrl}/oauth/device_authorization`, {
     body: new URLSearchParams({ client_id: clientId }).toString(),
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -253,6 +253,7 @@ function shortfallMessages(): Record<string, unknown>[] {
       reason: "temporary_unavailable",
       record_key: "K",
       retryable: true,
+      status: "pending",
       stream: "activity",
       type: "DETAIL_GAP",
     },
@@ -550,6 +551,7 @@ test("a durable gap cannot satisfy the same detail key under a different parent"
       reason: "temporary_unavailable",
       record_key: "K",
       retryable: true,
+      status: "pending",
       stream: "valuations",
       type: "DETAIL_GAP",
     },

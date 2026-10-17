@@ -34,13 +34,16 @@ const HERE = fileURLToPath(new URL(".", import.meta.url));
 // @pdpp/operator-ui; behavior/structure guards read the shared implementation.
 const CONSOLE_PALETTE_REEXPORT_FILE = `${HERE}command-palette.tsx`;
 const COMMAND_PALETTE_FILE = fileURLToPath(
-  new URL("../../../../../../packages/operator-ui/src/components/command-palette.tsx", import.meta.url)
+  new URL(
+    "../../../../../../reference-implementation/vendor/operator-ui/src/components/command-palette.tsx",
+    import.meta.url
+  )
 );
 const OPERATOR_UI_PALETTE_DIR = fileURLToPath(
-  new URL("../../../../../../packages/operator-ui/src/components/", import.meta.url)
+  new URL("../../../../../../reference-implementation/vendor/operator-ui/src/components/", import.meta.url)
 );
 const RECORDROOM_SHELL_FILE = fileURLToPath(
-  new URL("../../../../../../packages/pdpp-brand-react/src/shell-frame.tsx", import.meta.url)
+  new URL("../../../../../../reference-implementation/vendor/brand-react/src/shell-frame.tsx", import.meta.url)
 );
 const RECORDROOM_SHELL_BRIDGE_FILE = `${HERE}recordroom-shell-with-palette.tsx`;
 const DASHBOARD_PALETTE_PROVIDER_FILE = `${HERE}dashboard-palette-provider.tsx`;
@@ -73,8 +76,8 @@ const NAV_LABEL_STANDING_RE = /label:\s*["']Standing["']/;
 const NAV_LABEL_JUMP_RE = /label:\s*["']Jump["']/;
 const NAV_LABEL_RUNS_RE = /label:\s*["']Runs["']/;
 const NAV_LABEL_TRACES_RE = /label:\s*["']Traces["']/;
-const WORDMARK_SPAN_RE = /rr-side__name">([^<]+)</g;
-const WORDMARK_PDPP_RE = /PDPP/;
+const IDENTITY_WORDMARK_RE = /<span className="rr-side__name">\{identity\.name\}<\/span>/g;
+const DATACONNECT_MARK_RE = /<BrandMark \/>/g;
 const RECORDROOM_AS_COPY_RE = />\s*Recordroom\s*</;
 const CRUMB_LITERAL_RE = /\{host\} · \{build\}/g;
 const HEAD_CRUMB_CLASS_RE = /rr-head__crumb/;
@@ -228,14 +231,14 @@ test("the console default (no basePath) is the clean owner console root", () => 
   assert.equal(live.find((c) => c.id === "nav-overview")?.href, "/");
 });
 
-test("the owner-visible wordmark is PDPP, never Recordroom", async () => {
+test("the owner-visible wordmark and mark are DataConnect", async () => {
   const src = await readFile(RECORDROOM_SHELL_FILE, "utf8");
-  // The three brand render sites (sidebar, header, drawer) say PDPP.
-  const wordmarks = src.match(WORDMARK_SPAN_RE) ?? [];
-  assert.ok(wordmarks.length >= 2, "expected the sidebar + drawer wordmark spans");
-  for (const w of wordmarks) {
-    assert.match(w, WORDMARK_PDPP_RE, "sidebar/drawer wordmark must render PDPP");
-  }
+  // Sidebar, header, and drawer use the centralized product name and the
+  // shared shell renders DataConnect artwork in each corresponding position.
+  assert.equal(src.match(IDENTITY_WORDMARK_RE)?.length, 2);
+  assert.equal(src.match(DATACONNECT_MARK_RE)?.length, 3);
+  assert.match(src, /const identity = DATACONNECT_PRODUCT_IDENTITY/);
+  assert.match(src, /viewBox="0 0 832 832"/);
   // No owner-visible JSX text node renders the internal component name.
   assert.doesNotMatch(src, RECORDROOM_AS_COPY_RE, "Recordroom must not appear as owner-visible copy");
 });

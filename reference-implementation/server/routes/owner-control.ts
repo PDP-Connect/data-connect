@@ -5,8 +5,8 @@
 // `GET /v1/owner/control`.
 //
 // This is the durable, non-secret discovery surface a trusted owner agent
-// (Daisy/Simon-style local automation) reads before guessing at owner-control
-// routes. It returns a capability document that names every owner-agent
+// Trusted local agents read this before guessing at owner-control routes. It
+// returns a capability document that names every owner-agent
 // control action family, marks which are `supported` (with method + absolute
 // URL) vs `owner_mediated` / `unsupported` in this build, and links to the
 // already-supported owner-agent routes — especially `GET /v1/owner/connections`.

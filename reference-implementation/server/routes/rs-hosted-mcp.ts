@@ -26,6 +26,10 @@ import {
   type ResolvePublicUrlRequest,
   resolvePublicUrl,
 } from "../metadata.ts";
+import {
+  isAllowedMcpOrigin,
+  type ReachabilityContract,
+} from "../reachability-contract.ts";
 
 const PROTECTED_RESOURCE_METADATA_URL_LOCAL = "protectedResourceMetadataUrl";
 
@@ -116,7 +120,7 @@ export interface MountRsHostedMcpContext {
    * EXPLICITLY from `opts.rsInternalUrl` or the operator's `PDPP_RS_URL`
    * (see `startServer`) — a loopback/cluster address, NOT request-derived from
    * `Host`/`X-Forwarded-*`. NOTE: it is intentionally NOT the bare
-   * `referenceTopology.rsInternalUrl` default (`http://localhost:7663`): that
+   * `referenceTopology.rsInternalUrl` default (`http://127.0.0.1:7663`): that
    * default is skipped so ephemeral-port test harnesses and deployments that
    * do not set `PDPP_RS_URL` resolve this to null and fall back to the public
    * resource (current behavior preserved). Used as the child fetch base only;
@@ -136,6 +140,8 @@ export interface MountRsHostedMcpContext {
   requireToken: Middleware;
   /** PDPP_TRUSTED_HOSTS allowlist (or null). */
   readonly trustedMetadataHosts: string | null | undefined;
+  /** Parsed origin contract enforced at the server boundary. */
+  readonly reachabilityContract?: ReachabilityContract;
 }
 
 function addMcpWebRequestHeader(headers: Headers, name: string, value: string | string[] | undefined): void {
@@ -234,9 +240,24 @@ function hostedMcpIconLink(resource: string): string {
 }
 
 export function mountRsHostedMcp(app: AppLike, ctx: MountRsHostedMcpContext): void {
-  const { explicitResource, internalResource, trustedMetadataHosts, referenceRevision } = ctx;
+  const {
+    explicitResource,
+    internalResource,
+    reachabilityContract,
+    trustedMetadataHosts,
+    referenceRevision,
+  } = ctx;
 
   function requireTrustedHostedMcpResource(req: RouteRequest, res: RouteResponse, next: () => void): void {
+    if (reachabilityContract && !isAllowedMcpOrigin(req, reachabilityContract)) {
+      ctx.pdppError(
+        res,
+        403,
+        "invalid_origin",
+        "Origin is not allowed for MCP. Set PDPP_REFERENCE_ORIGIN to the published origin."
+      );
+      return;
+    }
     if (isTrustedMetadataRequestOrigin(req, explicitResource, trustedMetadataHosts)) {
       next();
       return;

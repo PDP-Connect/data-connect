@@ -1,0 +1,131 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
+// First-boot support for the standalone Core image.
+//
+// Owner-password setup belongs to the reference server: when a server install
+// has no configured password, it creates a one-time setup token and serves the
+// /setup wizard. This module must not generate or log a password. An explicit
+// PDPP_OWNER_PASSWORD remains an override and is passed through unchanged.
+//
+// When storage resolves to SQLite (the quickstart's zero-config default), a
+// credential encryption key is provisioned the same way so owner-captured
+// static-secret connector setup works without extra flags — the Docker
+// equivalent of the Railway template's generated
+// PDPP_CREDENTIAL_ENCRYPTION_KEY. The key is never printed. Postgres deploys
+// keep the explicit fail-closed key contract (see
+// reference-implementation/server/stores/credential-encryption.ts).
+//
+import { randomBytes } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import path from "node:path";
+
+export const DEFAULT_DATA_DIR = "/var/lib/pdpp";
+export const CREDENTIAL_KEY_FILENAME = "credential-encryption-key";
+
+const LOG_PREFIX = "[core]";
+
+function trimmedValue(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+// The directory that holds generated secrets. Default it to the SQLite
+// database's directory: the quickstart mounts exactly one named volume there,
+// so "keep the database" and "keep the credentials" are the same operator act.
+export function resolveDataDir(env: NodeJS.ProcessEnv = process.env): string {
+  const dbPath = trimmedValue(env.PDPP_DB_PATH);
+  if (dbPath && dbPath !== ":memory:") {
+    return path.dirname(dbPath);
+  }
+  return DEFAULT_DATA_DIR;
+}
+
+// Mirrors resolveStorageBackend in
+// reference-implementation/server/postgres-storage.ts: explicit
+// PDPP_STORAGE_BACKEND wins, otherwise a database URL selects Postgres.
+function usesPostgresStorage(env: NodeJS.ProcessEnv): boolean {
+  const explicit = trimmedValue(env.PDPP_STORAGE_BACKEND)?.toLowerCase();
+  if (explicit === "postgres") {
+    return true;
+  }
+  if (explicit === "sqlite") {
+    return false;
+  }
+  return Boolean(trimmedValue(env.PDPP_DATABASE_URL) ?? trimmedValue(env.DATABASE_URL));
+}
+
+function readPersistedSecret(file: string): string | null {
+  if (!existsSync(file)) {
+    return null;
+  }
+  try {
+    return trimmedValue(readFileSync(file, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function persistSecret(dataDir: string, file: string, secret: string): void {
+  mkdirSync(dataDir, { recursive: true });
+  writeFileSync(file, `${secret}\n`, { mode: 0o600 });
+}
+
+export interface FirstBootEnvAdditions {
+  PDPP_CREDENTIAL_ENCRYPTION_KEY_FILE?: string;
+  PDPP_DATA_DIR?: string;
+}
+export interface FirstBootResult {
+  env: FirstBootEnvAdditions;
+}
+type LogFn = (message: string) => void;
+
+/**
+ * Provision the local SQLite credential-wrapping key when needed. Owner
+ * passwords are configured by the operator or claimed through /setup in the
+ * reference server; they are never generated or logged here.
+ */
+export function prepareFirstBoot({
+  env = process.env,
+  dataDir = resolveDataDir(env),
+  log = console.log,
+  warn = console.error,
+}: {
+  env?: NodeJS.ProcessEnv;
+  dataDir?: string;
+  log?: LogFn;
+  warn?: LogFn;
+} = {}): FirstBootResult {
+  const envAdditions: FirstBootEnvAdditions = {};
+  if (!trimmedValue(env.PDPP_DATA_DIR)) {
+    envAdditions.PDPP_DATA_DIR = dataDir;
+  }
+  if (
+    !(
+      usesPostgresStorage(env) ||
+      trimmedValue(env.PDPP_CREDENTIAL_ENCRYPTION_KEY) ||
+      trimmedValue(env.PDPP_CREDENTIAL_ENCRYPTION_KEY_FILE)
+    )
+  ) {
+    const keyFile = path.join(dataDir, CREDENTIAL_KEY_FILENAME);
+    try {
+      if (!readPersistedSecret(keyFile)) {
+        persistSecret(dataDir, keyFile, randomBytes(32).toString("hex"));
+        log(
+          `${LOG_PREFIX} generated a credential encryption key at ${keyFile} (never printed; keep the data volume to keep sealed credentials readable)`
+        );
+      }
+      envAdditions.PDPP_CREDENTIAL_ENCRYPTION_KEY_FILE = keyFile;
+    } catch (err) {
+      const detail = (err as NodeJS.ErrnoException)?.code || (err as NodeJS.ErrnoException)?.message;
+      warn(
+        `${LOG_PREFIX} warning: could not provision a credential encryption key at ${keyFile} (${detail}); static-secret connector setup stays fail-closed until PDPP_CREDENTIAL_ENCRYPTION_KEY is configured`
+      );
+    }
+  }
+
+  return { env: envAdditions };
+}

@@ -52,7 +52,7 @@ export default async function NotificationsPage() {
 
         <WebPushSettings config={state.config} subscriptions={state.subscriptions} />
 
-        <Section title="What PDPP sends">
+        <Section title="What DataConnect sends">
           <div className="grid gap-3 text-muted-foreground text-sm md:grid-cols-3">
             <p>
               <strong className="text-foreground">Only owner-action alerts.</strong> Notifications are for source

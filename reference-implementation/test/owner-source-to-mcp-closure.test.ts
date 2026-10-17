@@ -238,7 +238,7 @@ async function createManualDraft(asUrl: string, session: OwnerSession): Promise<
 
 async function issueOwnerToken(asUrl: string, session: OwnerSession): Promise<string> {
   const device = await fetchJson(`${asUrl}/oauth/device_authorization`, {
-    body: new URLSearchParams({ client_id: "cli_longview" }).toString(),
+    body: new URLSearchParams({ client_id: "pdpp_cli" }).toString(),
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     method: "POST",
   });
@@ -255,7 +255,7 @@ async function issueOwnerToken(asUrl: string, session: OwnerSession): Promise<st
   assert.equal(approved.status, 200, approved.text);
   const token = await fetchJson(`${asUrl}/oauth/token`, {
     body: new URLSearchParams({
-      client_id: "cli_longview",
+      client_id: "pdpp_cli",
       device_code: stringField(device.body, "device_code"),
       grant_type: "urn:ietf:params:oauth:grant-type:device_code",
     }).toString(),

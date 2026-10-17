@@ -10,14 +10,14 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { registerConnector } from "../../../reference-implementation/server/auth.ts";
-import { startServer } from "../../../reference-implementation/server/index.ts";
-import { ingestRecord } from "../../../reference-implementation/server/records.ts";
-import { createRequestConnectorInstanceStore } from "../../../reference-implementation/server/request-store-factories.ts";
+import { registerConnector } from "../../../server/auth.ts";
+import { startServer } from "../../../server/index.ts";
+import { ingestRecord } from "../../../server/records.ts";
+import { createRequestConnectorInstanceStore } from "../../../server/request-store-factories.ts";
 import { runOwnerAgent } from "../src/owner-agent/command.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REFERENCE_IMPL_DIR = join(__dirname, "..", "..", "..", "reference-implementation");
+const REFERENCE_IMPL_DIR = join(__dirname, "..", "..", "..");
 const TEST_PASSWORD = "owner-agent-reference-smoke-password";
 const TEST_SUBJECT = "owner_agent_reference_smoke_owner";
 
@@ -232,7 +232,7 @@ function buildAutoApprovingFetch({ asUrl, sessionCookie }) {
   };
 }
 
-test("owner-agent CLI smoke discovers metadata, writes Daisy credential, reads REST, rejects MCP, and revokes", async () => {
+test("owner-agent CLI smoke discovers metadata, writes a local credential, reads REST, rejects MCP, and revokes", async () => {
   await withTmpHome(async (home) => {
     const nativeManifest = loadNorthstarManifest();
     const asPort = await freePort();
@@ -253,7 +253,7 @@ test("owner-agent CLI smoke discovers metadata, writes Daisy credential, reads R
       asPublicUrl: asUrl,
       rsPublicUrl: rsUrl,
       ignoreAmbientPublicUrls: true,
-      trustedMetadataHosts: ["127.0.0.1"],
+      trustedMetadataHosts: "127.0.0.1",
     });
 
     try {
@@ -270,10 +270,10 @@ test("owner-agent CLI smoke discovers metadata, writes Daisy credential, reads R
         `${rsUrl}/v1/schema?view=compact`
       );
 
-      const credentialPath = join(home, "applications/daisy/.pi/agent/pdpp-owner-agent.json");
+      const credentialPath = join(home, ".pdpp", "owner-agents", "ref.test.json");
       const onboarding = capture();
       const onboardCode = await runOwnerAgent(
-        ["onboard", rsUrl, "--credential-file", credentialPath, "--client-name", "Daisy reference smoke"],
+        ["onboard", rsUrl, "--credential-file", credentialPath, "--client-name", "Local assistant reference smoke"],
         onboarding.io,
         {
           fetch: buildAutoApprovingFetch({ asUrl, sessionCookie }),

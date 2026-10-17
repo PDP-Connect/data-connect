@@ -19,7 +19,6 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { SUPPORTED_LOCAL_COLLECTOR_CONNECTORS } from "pdpp-reference-implementation/connection-setup-plan";
 
 const ROOT = new URL("../../../../../../", import.meta.url);
 
@@ -38,8 +37,8 @@ const BROWSER_COLLECTOR_MONOREPO_COPY =
   /PDPP monorepo checkout|pnpm --dir|packages\/polyfill-connectors|browser-collector run command/;
 const ENROLL_TESTID = /data-testid="collector-enroll-command"/;
 const RUN_TESTID_CLAUDE = /data-testid={`collector-run-command-/;
-const COLLECTOR_RUN_CONNECTORS_LITERAL_RE = /COLLECTOR_RUN_CONNECTORS\s*=\s*\[([^\]]*)\]/;
-const SURROUNDING_QUOTES_RE = /^["']|["']$/g;
+const COLLECTOR_RUN_CONNECTORS_IMPORT_RE =
+  /import \{ SUPPORTED_LOCAL_COLLECTOR_CONNECTORS as COLLECTOR_RUN_CONNECTORS \} from "\.\.\/lib\/connection-modality\.ts";/;
 
 test("enrollment form derives the canonical local collector commands via shared helpers", async () => {
   const src = await read(FORM_PATH);
@@ -83,27 +82,16 @@ test("enrollment form never renders a local-collector setup invocation", async (
 test("enrollment form advertises every connector bundled in the published @pdpp/local-collector npx path", async () => {
   // Derived, not hardcoded. `LOCAL_COLLECTOR_DEFINITIONS` in
   // packages/polyfill-connectors/src/collector-registry.ts is the single source
-  // of truth for what the published npx bundle actually ships, so the form's
-  // advertised list is checked against that registry rather than a literal
-  // roster this test would have to be edited to keep true. A pinned literal
-  // silently goes stale the moment a connector is bundled (that is exactly how
-  // `signal` broke this test), and the failure then looks like the FORM is
-  // wrong when the bundle grew correctly.
+  // of truth for what the published npx bundle actually ships. The form now
+  // imports its connector list directly from `SUPPORTED_LOCAL_COLLECTOR_CONNECTORS`
+  // (via connection-modality.ts) instead of pinning a separate literal, so the
+  // two cannot drift silently (a pinned literal is exactly how `signal` broke
+  // this test previously).
   const src = await read(FORM_PATH);
-  const match = src.match(COLLECTOR_RUN_CONNECTORS_LITERAL_RE);
-  assert.ok(match, "enrollment form must declare COLLECTOR_RUN_CONNECTORS");
-  const advertised = (match[1] ?? "")
-    .split(",")
-    .map((entry) => entry.trim().replace(SURROUNDING_QUOTES_RE, ""))
-    .filter(Boolean);
-  // `SUPPORTED_LOCAL_COLLECTOR_CONNECTORS` is generated from
-  // `LOCAL_COLLECTOR_DEFINITIONS` (see connection-setup-plan.ts) and is already
-  // in the enrollment-key (underscore) form the form's literal carries and that
-  // gets passed to `--connector`, so this compares like for like.
-  assert.deepEqual(
-    advertised,
-    [...SUPPORTED_LOCAL_COLLECTOR_CONNECTORS],
-    "the form must advertise exactly the connectors bundled in the published @pdpp/local-collector npx path, in bundle order"
+  assert.match(
+    src,
+    COLLECTOR_RUN_CONNECTORS_IMPORT_RE,
+    "the form must import its connector list from SUPPORTED_LOCAL_COLLECTOR_CONNECTORS, not a pinned literal"
   );
 });
 

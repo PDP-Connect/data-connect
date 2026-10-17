@@ -40,6 +40,7 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { deriveDeviceAuditId, deriveTokenAuditId } from "../lib/postgres-spine.ts";
 import {
   type AuthorizationDecisionFaultHook,
   approveGrant,
@@ -287,7 +288,7 @@ if (POSTGRES_URL) {
        WHERE object_id = $1
          AND object_type = 'owner_device_auth'
          AND event_type = 'consent.approved'`,
-      [failed.device_code]
+      [deriveDeviceAuditId(failed.device_code as string)]
     );
     assert.equal(recoveredApprovalEvents.rows[0]?.count, "1");
     const recoveredTokenEvents = await postgresQuery<{ count: string }>(
@@ -296,7 +297,7 @@ if (POSTGRES_URL) {
        WHERE token_id = $1
          AND object_type = 'token'
          AND event_type = 'token.issued'`,
-      [recovered.access_token]
+      [deriveTokenAuditId(recovered.access_token as string)]
     );
     assert.equal(recoveredTokenEvents.rows[0]?.count, "1");
 
@@ -414,7 +415,7 @@ if (POSTGRES_URL) {
     assert.equal((await introspect(approved.access_token)).active, true);
     const losingDenialEvents = await postgresQuery<{ count: string }>(
       "SELECT COUNT(*)::text AS count FROM spine_events WHERE object_id = $1 AND event_type = 'request.rejected'",
-      [approvalWins.device_code]
+      [deriveDeviceAuditId(approvalWins.device_code as string)]
     );
     assert.equal(losingDenialEvents.rows[0]?.count, "0");
 

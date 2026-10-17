@@ -30,7 +30,7 @@
  * at it.
  *
  * Target for local runs:
- *   docker run --rm -d --name pg-pilot -p 127.0.0.1:55447:5432 \
+ *   docker run --rm -d --name pg-pilot --log-driver none -p 127.0.0.1:55447:5432 \
  *     -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=pw \
  *     -e POSTGRES_DB=pdpp_test \
  *     pgvector/pgvector:pg16

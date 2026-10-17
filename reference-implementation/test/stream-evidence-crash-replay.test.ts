@@ -74,7 +74,7 @@ async function fetchJson<T>(url: string, init: RequestInit = {}): Promise<{ body
 
 async function issueOwnerToken(asUrl: string): Promise<string> {
   const device = await fetchJson<{ device_code: string; user_code: string }>(`${asUrl}/oauth/device_authorization`, {
-    body: new URLSearchParams({ client_id: "cli_longview" }).toString(),
+    body: new URLSearchParams({ client_id: "pdpp_cli" }).toString(),
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     method: "POST",
   });
@@ -85,7 +85,7 @@ async function issueOwnerToken(asUrl: string): Promise<string> {
   });
   const token = await fetchJson<{ access_token: string }>(`${asUrl}/oauth/token`, {
     body: new URLSearchParams({
-      client_id: "cli_longview",
+      client_id: "pdpp_cli",
       device_code: device.body.device_code,
       grant_type: "urn:ietf:params:oauth:grant-type:device_code",
     }).toString(),
