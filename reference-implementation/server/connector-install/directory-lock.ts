@@ -16,11 +16,17 @@
  * process start, and when it took the lock. It is diagnostics for the busy
  * message only; no decision reads it. The holder removes it before it unlocks.
  *
- * A `<name>/` directory left by an older build that locked with `mkdir` is
- * ignored. Two builds that lock differently must not share a data directory.
+ * An older build locked by creating the `<name>/` directory. While such a
+ * directory exists, the lock is busy, unless it is provably stale in this
+ * process's PID namespace: an owner pid that does not exist here and is not
+ * this process's pid, or no owner record past the grace period that build
+ * also used. This build never renames or removes that directory. An owner
+ * with this process's pid is ambiguous (a restarted container, or a live
+ * server in another container), so it stays busy until an operator removes
+ * the directory.
  */
 import { randomUUID } from "node:crypto";
-import { lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { SqliteDriver } from "../sqlite-driver.ts";
 
@@ -80,13 +86,54 @@ function busyDetail(lockPath: string, ownerPath: string): string {
   }
 }
 
+/** Same grace period as the `mkdir` build: an owner record can lag the mkdir. */
+const LEGACY_UNOWNED_GRACE_MS = 60_000;
+
+function legacyOwnerPid(legacyDir: string): number | null {
+  for (const file of ["owner", "pid"]) {
+    try {
+      const value = Number(readFileSync(join(legacyDir, file), "utf8").split("\n")[0]?.trim());
+      if (Number.isInteger(value) && value > 0) return value;
+    } catch {
+      // Try the next record.
+    }
+  }
+  return null;
+}
+
+/** Why an older build's lock directory keeps the lock busy, or null if it is absent or provably stale. */
+function legacyLockHolder(legacyDir: string): string | null {
+  let mtimeMs: number;
+  try {
+    const stat = statSync(legacyDir);
+    if (!stat.isDirectory()) return null;
+    mtimeMs = stat.mtimeMs;
+  } catch {
+    return null;
+  }
+  const pid = legacyOwnerPid(legacyDir);
+  const detail = ` An older build's lock directory ${legacyDir} is held`;
+  if (pid === null) {
+    return Date.now() - mtimeMs > LEGACY_UNOWNED_GRACE_MS ? null : `${detail} and is being created.`;
+  }
+  if (pid !== process.pid) {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ESRCH") return null;
+    }
+  }
+  return `${detail} by pid ${String(pid)}; if no older server uses this data directory, remove it.`;
+}
+
 export interface DirectoryLock {
   /** Record that the guarded operation missed its deadline; later busy errors say so. */
   markTimedOut: () => void;
   release: () => void;
 }
 
-export function acquireDirectoryLock(dataDir: string, lockName: string, busyMessage: string): DirectoryLock {
+/** Take the lock, or return the reason it is busy. */
+function attemptDirectoryLock(dataDir: string, lockName: string): DirectoryLock | string {
   mkdirSync(dataDir, { recursive: true });
   const lockPath = join(dataDir, `${lockName}.db`);
   const ownerPath = join(dataDir, `${lockName}.owner`);
@@ -96,7 +143,13 @@ export function acquireDirectoryLock(dataDir: string, lockName: string, busyMess
   // must be checked first: it is what knows that the holder missed a deadline.
   const connection = heldLocks.has(lockPath) ? null : tryLockFile(lockPath);
   if (!connection) {
-    throw new Error(`${busyMessage}${busyDetail(lockPath, ownerPath)}`);
+    return busyDetail(lockPath, ownerPath);
+  }
+  // Checked while holding the OS lock, so no build of this kind enters meanwhile.
+  const legacyHolder = legacyLockHolder(join(dataDir, lockName));
+  if (legacyHolder) {
+    connection.close();
+    return legacyHolder;
   }
   const held: HeldLock = { connection, timedOutAt: null };
   heldLocks.set(lockPath, held);
@@ -131,4 +184,18 @@ export function acquireDirectoryLock(dataDir: string, lockName: string, busyMess
       }
     },
   };
+}
+
+/** Take the lock, or return null when another holder has it. */
+export function tryAcquireDirectoryLock(dataDir: string, lockName: string): DirectoryLock | null {
+  const attempt = attemptDirectoryLock(dataDir, lockName);
+  return typeof attempt === "string" ? null : attempt;
+}
+
+export function acquireDirectoryLock(dataDir: string, lockName: string, busyMessage: string): DirectoryLock {
+  const attempt = attemptDirectoryLock(dataDir, lockName);
+  if (typeof attempt === "string") {
+    throw new Error(`${busyMessage}${attempt}`);
+  }
+  return attempt;
 }

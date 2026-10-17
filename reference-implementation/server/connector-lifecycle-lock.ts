@@ -6,6 +6,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { PoolClient } from "pg";
+import { tryAcquireDirectoryLock } from "./connector-install/directory-lock.ts";
 import { getDb } from "./db.ts";
 import { isPostgresStorageBackend, withPostgresTransaction } from "./postgres-storage.ts";
 
@@ -48,58 +49,68 @@ function sqliteLockTable(): void {
 
 const BUSY_MESSAGE = "Connector lifecycle operation is busy.";
 const LOCK_POLL_MS = 10;
-/**
- * Tokens of the SQLite lifecycle locks this process start holds now. Only
- * memory knows them, so a row a crashed process left cannot pass for one,
- * even when the restarted process has the same pid (normal in a container).
- */
-const heldSqliteTokens = new Set<string>();
+/** Lifecycle locks held in this process on an in-memory SQLite database, which no other process can open. */
+const inMemoryHeld = new Set<string>();
 
-/** Whether the process that wrote a lock row may still hold it. */
-function lockRowMayBeHeld(row: { owner_pid: number; owner_token: string }): boolean {
-  if (row.owner_pid === process.pid) return heldSqliteTokens.has(row.owner_token);
-  try {
-    process.kill(row.owner_pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM";
-  }
+/**
+ * The SQLite lifecycle lock is an OS file lock per connector, next to the
+ * database file, so exactly the processes that share the database share it.
+ * The OS drops it when its holder ends, so no process ever judges another
+ * dead from a pid: a pid proves nothing across PID namespaces (two
+ * containers, each pid 1) or after a restart (the same pid again).
+ */
+function sqliteLifecycleLockDir(): string | null {
+  const handle = getDb() as unknown as { memory?: unknown; name?: unknown };
+  return handle.memory === true || typeof handle.name !== "string" ? null : `${resolve(handle.name)}.lifecycle-locks`;
 }
 
-function acquireSqliteSync(connectorId: string): () => void {
-  validateConnectorId(connectorId);
+/**
+ * The `connector_lifecycle_locks` row is diagnostics: it names the holder's
+ * pid, and an older build in this PID namespace that still decides from rows
+ * sees a live owner. No decision here reads it.
+ */
+function writeLifecycleLockRow(connectorId: string, token: string): void {
   sqliteLockTable();
+  getDb()
+    .prepare(
+      "INSERT OR REPLACE INTO connector_lifecycle_locks(connector_id, owner_token, owner_pid) VALUES(?, ?, ?)"
+    )
+    .run(connectorId, token, process.pid);
+}
+
+/** Take the connector's SQLite lifecycle lock without waiting, or return null when it is held. */
+function tryAcquireSqlite(connectorId: string): (() => void) | null {
+  validateConnectorId(connectorId);
+  const lockDir = sqliteLifecycleLockDir();
+  if (!lockDir) {
+    if (inMemoryHeld.has(connectorId)) return null;
+    inMemoryHeld.add(connectorId);
+    return () => inMemoryHeld.delete(connectorId);
+  }
+  const lock = tryAcquireDirectoryLock(lockDir, createHash("sha256").update(connectorId).digest("hex"));
+  if (!lock) return null;
   const token = randomUUID();
-  const acquired = getDb()
-    .transaction(() => {
-      const row = getDb()
-        .prepare("SELECT owner_token, owner_pid FROM connector_lifecycle_locks WHERE connector_id=?")
-        .get<{ owner_pid: number; owner_token: string }>(connectorId);
-      if (row) {
-        if (lockRowMayBeHeld(row)) return false;
-        // Reclaim in the same immediate transaction that judged the row stale.
-        getDb()
-          .prepare("DELETE FROM connector_lifecycle_locks WHERE connector_id=? AND owner_token=?")
-          .run(connectorId, row.owner_token);
-      }
-      getDb()
-        .prepare("INSERT INTO connector_lifecycle_locks(connector_id, owner_token, owner_pid) VALUES(?, ?, ?)")
-        .run(connectorId, token, process.pid);
-      return true;
-    })
-    .immediate();
-  if (!acquired) throw new Error(BUSY_MESSAGE);
-  heldSqliteTokens.add(token);
+  try {
+    writeLifecycleLockRow(connectorId, token);
+  } catch (error) {
+    lock.release();
+    throw error;
+  }
   return () => {
     try {
       getDb()
         .prepare("DELETE FROM connector_lifecycle_locks WHERE connector_id=? AND owner_token=?")
         .run(connectorId, token);
     } finally {
-      // A row that a failed delete leaves behind is then stale, not held forever.
-      heldSqliteTokens.delete(token);
+      lock.release();
     }
   };
+}
+
+function acquireSqliteSync(connectorId: string): () => void {
+  const release = tryAcquireSqlite(connectorId);
+  if (!release) throw new Error(BUSY_MESSAGE);
+  return release;
 }
 
 /** Resolve when `work` does, or reject with the abort reason as soon as `signal` aborts. */
@@ -126,12 +137,9 @@ function pause(ms: number, signal: AbortSignal | undefined): Promise<void> {
 async function acquireSqliteAsync(connectorId: string, signal: AbortSignal | undefined): Promise<() => void> {
   for (;;) {
     signal?.throwIfAborted();
-    try {
-      return acquireSqliteSync(connectorId);
-    } catch (error) {
-      if (!(error instanceof Error) || error.message !== BUSY_MESSAGE) throw error;
-      await pause(LOCK_POLL_MS, signal);
-    }
+    const release = tryAcquireSqlite(connectorId);
+    if (release) return release;
+    await pause(LOCK_POLL_MS, signal);
   }
 }
 

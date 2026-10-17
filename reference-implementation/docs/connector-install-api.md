@@ -64,8 +64,12 @@ transaction: fcntl on Linux and macOS, LockFileEx on Windows). A second request
 fails with "Another connector installation is in progress." and names the
 holder's pid from `.connector-install.lock.owner`. The OS releases the lock when
 the holder process ends, so a crashed or restarted server never leaves a lock
-behind, even when the new process has the same pid (normal in a container). A
-`.connector-install.lock/` directory from an older build is ignored. An install
+behind, even when the new process has the same pid (normal in a container). An
+older build locked by creating `.connector-install.lock/`. While that directory
+exists, installs stay busy, unless its owner pid is not this server's pid and
+does not exist in this PID namespace, or it has no owner record after 60
+seconds. The server never removes
+it; if no older server uses the data directory, remove it by hand. An install
 or update that passes `PDPP_CONNECTOR_INSTALL_TIMEOUT_MS` (default 5 minutes)
 fails with `connector_install_timeout`. If the deadline passes while the install
 still waits for the connector's lifecycle lock, the wait ends and the lock is
@@ -73,6 +77,10 @@ released. If it passes before manifest registration starts, the install is
 rolled back. If it passes during registration, the install completes late and
 stays installed. This keeps the active artifact and the registered manifest in
 agreement. Once the work has started, the lock stays held until the work stops.
+On SQLite, each connector's lifecycle lock is an OS file lock of the same kind
+in `<database file>.lifecycle-locks/`, so it is shared by exactly the processes
+that share the database; the `connector_lifecycle_locks` row only names the
+holder.
 
 The response comes once the artifact is activated and the manifest is
 registered. In the same transaction as the manifest, the server queues the
