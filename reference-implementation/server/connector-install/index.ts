@@ -666,9 +666,11 @@ async function reuseExistingInstall(
   signal.throwIfAborted();
   await store.activate(verified);
   try {
+    // Last abort point. registerManifest commits the registry manifest on its
+    // own connection; rolling back the activation after that would leave the
+    // two disagreeing, so a deadline during or after it lets the install finish.
     signal.throwIfAborted();
     await registerManifest(verified.manifest);
-    signal.throwIfAborted();
   } catch (error) {
     if (previousActive) {
       await store.activate(previousActive);
@@ -714,10 +716,9 @@ async function installStagedEntry(options: {
     const active = { ...record, root: options.root };
     const verifiedActive = verifyStoredRecord(options.root, active, options.dataDir);
     await options.store.activate(verifiedActive);
+    // Last abort point: see reuseExistingInstall.
     options.signal.throwIfAborted();
     await options.registerManifest(verifiedActive.manifest);
-    // A deadline that passed during registration already failed the request; roll back.
-    options.signal.throwIfAborted();
     return verifiedActive;
   } catch (error) {
     if (published) {

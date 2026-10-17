@@ -1279,6 +1279,66 @@ test("a stuck install fails at its deadline, keeps the fence until it stops, and
   }
 });
 
+function writeVersionedFixture(root: string, version: string): void {
+  mkdirSync(join(root, "profile"), { recursive: true });
+  mkdirSync(join(root, "dist"), { recursive: true });
+  writeFileSync(join(root, "profile", "collection-profile.json"), JSON.stringify({ connector_id: "github", version }));
+  writeFileSync(join(root, "dist", "collection-profile.mjs"), "export {};\n");
+  writeFileSync(join(root, "provenance.json"), "{}\n");
+}
+
+for (const path of ["first install", "update"] as const) {
+  test(`a deadline after manifest persistence keeps artifact and catalog manifest in agreement (${path})`, async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "pdpp-connector-install-"));
+    const next = {
+      ...entry,
+      config_digest: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      digest: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      latest: true,
+      version: "2.0.0",
+    };
+    let current = entry;
+    // The registry row registerConnector commits on its own connection.
+    let catalogManifestVersion: unknown = null;
+    let holdAfterPersist = false;
+    const persisted = deferred();
+    const resume = deferred();
+    try {
+      const service = fixtureService(dataDir, {
+        catalogLoader: async () => [current],
+        installArtifact: (root, target) => {
+          writeVersionedFixture(root, target.version ?? "0.0.0");
+        },
+        installTimeoutMs: 50,
+        registerManifest: async (manifest) => {
+          catalogManifestVersion = manifest.version;
+          if (holdAfterPersist) {
+            persisted.resolve();
+            await resume.promise;
+          }
+        },
+      });
+      if (path === "update") {
+        await service.install("github", digest);
+        current = next;
+      }
+      holdAfterPersist = true;
+      const pending = path === "update" ? service.update("github") : service.install("github", digest);
+      await persisted.promise;
+      await assert.rejects(pending, ConnectorInstallTimeoutError);
+      resume.resolve();
+      await waitFor(() => !existsSync(join(dataDir, ".connector-install.lock")));
+
+      const active = (await service.status())[0];
+      assert.equal(active?.manifest.version, catalogManifestVersion);
+      assert.equal(active?.digest, path === "update" ? next.digest : digest);
+    } finally {
+      resume.resolve();
+      rmSync(dataDir, { force: true, recursive: true });
+    }
+  });
+}
+
 test("derived-state repair runs after the install returns and its locks are released", async () => {
   const dataDir = mkdtempSync(join(tmpdir(), "pdpp-connector-install-"));
   const repairEntered = deferred();

@@ -64,8 +64,11 @@ connector installation is in progress." The lock records the owner's pid and a
 token unique to one process start. Thus a lock left by a crashed or restarted
 server is reclaimed, even when the new process has the same pid (normal in a
 container). An install or update that passes `PDPP_CONNECTOR_INSTALL_TIMEOUT_MS`
-(default 5 minutes) fails with `connector_install_timeout` and is rolled back.
-The lock stays held until the aborted work stops.
+(default 5 minutes) fails with `connector_install_timeout`. If the deadline
+passes before manifest registration starts, the install is rolled back. If it
+passes during registration, the install completes late and stays installed. This
+keeps the active artifact and the registered manifest in agreement. The lock
+stays held until the work stops.
 
 The response comes after activation and manifest registration. If the connector
 already has records, their derived columns and search indexes are re-derived
