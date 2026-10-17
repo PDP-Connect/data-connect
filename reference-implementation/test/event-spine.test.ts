@@ -14,7 +14,16 @@ import Database from "./helpers/sqlite-driver.ts";
 import { emitSpineEvent, type SpineEventRecord } from "../lib/spine.ts";
 import { cursorAuditFact } from "../runtime/cursor-audit-fact.ts";
 import { runConnector } from "../runtime/index.ts";
-import { listActiveTokensForOwnerClient, revokeOwnerClientTokenByPublicId } from "../server/auth.ts";
+import {
+  approveGrant,
+  denyGrant,
+  exchangeGrantScopedDeviceCode,
+  getPendingConsent,
+  initiateGrant,
+  listActiveTokensForOwnerClient,
+  parsePendingConsentRequestUri,
+  revokeOwnerClientTokenByPublicId,
+} from "../server/auth.ts";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { closeDb as closeDbUntyped, getDb as getDbUntyped, initDb as initDbUntyped } from "../server/db.ts";
 import { startServer as startServerUntyped } from "../server/index.ts";
@@ -299,6 +308,29 @@ interface DeviceAuthorizationBody {
   device_code: string;
   user_code: string;
 }
+
+function assertDeviceAuditStorage(
+  deviceCode: string,
+  userCode: string,
+  objectType: string,
+  expectedTypes: string[]
+): string {
+  const rows = getDb().prepare("SELECT * FROM spine_events").all();
+  for (const credential of [deviceCode, userCode]) {
+    assert.ok(credential);
+    assert.equal(JSON.stringify(rows).includes(credential), false, "no persisted column may contain a device credential");
+  }
+  const fingerprint = `dcfp_${createHash("sha256").update(deviceCode).digest("base64url")}`;
+  const events = rows.filter((row) => row.object_type === objectType && row.object_id === fingerprint);
+  assert.deepEqual(events.map((row) => row.event_type).sort(), [...expectedTypes].sort());
+  assert.equal(new Set(events.map((row) => row.object_id)).size, 1);
+  for (const event of events) {
+    const data = JSON.parse(String(event.data_json)) as Record<string, unknown>;
+    assert.equal("user_code" in data, false);
+  }
+  return fingerprint;
+}
+
 interface TokenBody {
   access_token: string;
 }
@@ -876,6 +908,73 @@ test("event spine", async (t) => {
     });
   });
 
+
+  for (const batch of [false, true]) {
+    await t.test(`persists credential-free ${batch ? "batch" : "grant"} device lifecycle events`, async () => {
+      await withHarness(async ({ asUrl, rsUrl, spotifyManifest }) => {
+        const ownerToken = await issueOwnerToken(asUrl, "u1");
+        await seedSpotify(rsUrl, spotifyManifest, ownerToken);
+        const details = (batch ? ["top_artists", "recently_played"] : ["top_artists"]).map((name) => ({
+          access_mode: "single_use",
+          purpose_code: "https://pdpp.dev/purpose/personalization",
+          purpose_description: "Device audit regression",
+          source: { id: spotifyManifest.connector_id, kind: "connector" },
+          streams: [{ name, view: "basic" }],
+          type: "https://pdpp.dev/data-access",
+        }));
+        const begin = () => initiateGrant({
+          authorization_details: details,
+          client_id: "concert_recommendation_app",
+        }, { deviceAuthorization: true });
+        const request = await begin();
+        const deviceCode = parsePendingConsentRequestUri(request.request_uri);
+        assert.ok(deviceCode);
+        assert.equal(typeof request.user_code, "string");
+        const review = await getPendingConsent(deviceCode, {
+          confirmedApproveAll: true,
+          finalizeReview: true,
+          subjectId: "u1",
+        });
+        assert.ok(review?.reviewRevision);
+        await approveGrant(deviceCode, "u1", { approval_review_revision: review.reviewRevision });
+        const exchange = await exchangeGrantScopedDeviceCode({
+          clientId: "concert_recommendation_app",
+          deviceCode,
+        });
+        assert.ok(exchange.access_token);
+        assertDeviceAuditStorage(deviceCode, String(request.user_code), "pending_consent",
+          ["request.submitted", "consent.approved"]);
+
+        const denied = await begin();
+        const deniedCode = parsePendingConsentRequestUri(denied.request_uri);
+        assert.ok(deniedCode);
+        await denyGrant(deniedCode);
+        await assert.rejects(exchangeGrantScopedDeviceCode({
+          clientId: "concert_recommendation_app",
+          deviceCode: deniedCode,
+        }), { code: "access_denied" });
+        assertDeviceAuditStorage(deniedCode, String(denied.user_code), "pending_consent",
+          ["request.submitted", "consent.denied"]);
+      });
+    });
+  }
+
+  await t.test("device audit ingress is deterministic, idempotent and leaves caller data intact", async () => {
+    await withHarness(async () => {
+      for (const objectType of ["pending_consent", "owner_device_auth"]) {
+        const deviceCode = `synthetic-device-${objectType}`;
+        const userCode = `synthetic-user-${objectType}`;
+        const fingerprint = `dcfp_${createHash("sha256").update(deviceCode).digest("base64url")}`;
+        const data = { retained: "yes", user_code: userCode };
+        for (const objectId of [deviceCode, fingerprint]) {
+          await emitSpineEvent({ data, event_type: "audit.test", object_id: objectId, object_type: objectType });
+        }
+        assert.equal(data.user_code, userCode);
+        assertDeviceAuditStorage(deviceCode, userCode, objectType, ["audit.test", "audit.test"]);
+      }
+    });
+  });
+
   await t.test("persists stable token audit fingerprints across public issuance and revocation", async () => {
     await withHarness(async ({ asUrl }) => {
       const registration = await registerDynamicClient(asUrl, {
@@ -1161,6 +1260,8 @@ test("event spine", async (t) => {
       assert.equal(exchangeResp.headers.get("PDPP-Reference-Trace-Id"), traceId);
       const exchangeBody = (await exchangeResp.json()) as DeviceTokenBody;
       assert.ok(exchangeBody.access_token);
+      assertDeviceAuditStorage(deviceBody.device_code, deviceBody.user_code, "owner_device_auth",
+        ["request.submitted", "consent.approved"]);
 
       const { body: traceTimeline } = await fetchJson<TraceTimelineBody>(
         `${asUrl}/_ref/traces/${encodeURIComponent(requirePathSegment(traceId, "traceId"))}`
@@ -1181,7 +1282,7 @@ test("event spine", async (t) => {
       assert.equal(submittedEvent.client_id, "cli_longview");
       assert.equal(submittedEvent.object_type, "owner_device_auth");
       assert.equal(submittedEvent.object_id, "<redacted-device-code>");
-      assert.equal(submittedEvent.data?.user_code, "<redacted-bearer>");
+      assert.equal(submittedEvent.data?.user_code, undefined);
 
       const approvedEvent = (traceTimeline.data || []).find(
         (event) => event.event_type === "consent.approved" && event.object_type === "owner_device_auth"
@@ -1190,7 +1291,7 @@ test("event spine", async (t) => {
       assert.equal(approvedEvent.request_id, requestId);
       assert.equal(approvedEvent.client_id, "cli_longview");
       assert.equal(approvedEvent.object_id, "<redacted-device-code>");
-      assert.equal(approvedEvent.data?.user_code, "<redacted-bearer>");
+      assert.equal(approvedEvent.data?.user_code, undefined);
 
       const tokenIssuedEvent = (traceTimeline.data || []).find(
         (event) => event.event_type === "token.issued" && event.data?.issuance_path === "owner_device_flow"
@@ -1198,7 +1299,7 @@ test("event spine", async (t) => {
       assert.ok(tokenIssuedEvent, "expected token.issued for owner device exchange");
       assert.equal(tokenIssuedEvent.request_id, requestId);
       assert.equal(tokenIssuedEvent.client_id, "cli_longview");
-      assert.equal(tokenIssuedEvent.data?.user_code, "<redacted-bearer>");
+      assert.equal(tokenIssuedEvent.data?.user_code, undefined);
     });
   });
 
@@ -1242,6 +1343,8 @@ test("event spine", async (t) => {
       assert.equal(exchangeResp.headers.get("PDPP-Reference-Trace-Id"), traceId);
       const exchangeBody = (await exchangeResp.json()) as DeviceTokenBody;
       assert.equal(exchangeBody.error, "access_denied");
+      assertDeviceAuditStorage(deviceBody.device_code, deviceBody.user_code, "owner_device_auth",
+        ["request.submitted", "request.rejected"]);
 
       const { body: traceTimeline } = await fetchJson<TraceTimelineBody>(
         `${asUrl}/_ref/traces/${encodeURIComponent(requirePathSegment(traceId, "traceId"))}`
@@ -1257,7 +1360,7 @@ test("event spine", async (t) => {
       assert.equal(submittedEvent.request_id, requestId);
       assert.equal(submittedEvent.client_id, "cli_longview");
       assert.equal(submittedEvent.object_id, "<redacted-device-code>");
-      assert.equal(submittedEvent.data?.user_code, "<redacted-bearer>");
+      assert.equal(submittedEvent.data?.user_code, undefined);
 
       const rejectedEvent = (traceTimeline.data || []).find(
         (event) => event.event_type === "request.rejected" && event.request_id === requestId
@@ -1267,7 +1370,7 @@ test("event spine", async (t) => {
       assert.equal(rejectedEvent.object_type, "owner_device_auth");
       assert.equal(rejectedEvent.object_id, "<redacted-device-code>");
       assert.equal(rejectedEvent.data?.issuance_path, "owner_device_flow");
-      assert.equal(rejectedEvent.data?.user_code, "<redacted-bearer>");
+      assert.equal(rejectedEvent.data?.user_code, undefined);
       assert.equal(rejectedEvent.data?.error?.code, "access_denied");
       assert.match(rejectedEvent.data?.error?.message || "", REGEXP_15);
     });

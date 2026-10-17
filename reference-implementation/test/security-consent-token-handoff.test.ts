@@ -40,6 +40,7 @@ import {
   parsePendingConsentRequestUri,
   revokeGrant,
 } from "../server/auth.ts";
+import { deriveDeviceAuditId } from "../lib/postgres-spine.ts";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { getDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
@@ -220,7 +221,7 @@ function countConsentEvents(deviceCode: string, eventType: string): number {
     .prepare(
       "SELECT COUNT(*) AS count FROM spine_events WHERE object_id = ? AND object_type = 'pending_consent' AND event_type = ?"
     )
-    .get(deviceCode, eventType) as { count: number };
+    .get(deriveDeviceAuditId(deviceCode), eventType) as { count: number };
   return row.count;
 }
 

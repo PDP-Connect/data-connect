@@ -11546,7 +11546,6 @@ function buildOwnerDeviceConsentApprovedEvent({
 
 function buildOwnerDeviceTokenIssuedEvent({
   clientId,
-  pending,
   subjectId,
   token,
   traceContext,
@@ -11564,7 +11563,6 @@ function buildOwnerDeviceTokenIssuedEvent({
     data: {
       issuance_path: "owner_device_flow",
       token_kind: "owner",
-      user_code: pending.user_code,
     },
     event_type: "token.issued",
     object_id: deriveTokenAuditId(token),
@@ -11869,7 +11867,6 @@ async function issueOwnerTokenRecord(
     data: {
       issuance_path: "owner_device_flow",
       token_kind: "owner",
-      ...(meta.userCode ? { user_code: meta.userCode } : {}),
     },
     event_type: "token.issued",
     object_id: deriveTokenAuditId(tokenId),
