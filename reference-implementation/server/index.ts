@@ -313,8 +313,8 @@ import {
   listDatasetSummaryStreamProjectionSeeds,
   listDatasetTopConnectorCandidates,
   listLocalCoverageDiagnostics,
-  listStreams,
   listStreamsAcrossBindings,
+  listStreamsByResolvedBindings,
   maintainRecordIndexes,
   prepareDeviceFinalRecords,
   putSyncState,
@@ -4139,52 +4139,38 @@ async function listSubjectVisibleStreamSummaries({
   const grantStreams = Array.isArray(effectiveGrant.streams)
     ? (effectiveGrant.streams as Record<string, unknown>[])
     : [];
-  const summaries = new Map<string, Record<string, unknown>>();
-  await Promise.all(
-    grantStreams.map(async (streamGrant) => {
-      const streamName = typeof streamGrant.name === "string" ? streamGrant.name : null;
-      if (!streamName) {
-        return;
-      }
-      let bindings: Array<{ connectorId: string; connectorInstanceId: string }>;
+  const typedGrant = {
+    ...effectiveGrant,
+    streams: grantStreams.filter((streamGrant) => typeof streamGrant.name === "string" && streamGrant.name),
+  } as unknown as Parameters<typeof listStreamsByResolvedBindings>[0];
+  const rows = await listStreamsByResolvedBindings(
+    typedGrant,
+    manifest as Parameters<typeof listStreamsByResolvedBindings>[1],
+    async (streamGrant) => {
       try {
         const resolved = await resolveReadRequestBindings({
-          grant: effectiveGrant as unknown as Parameters<typeof resolveReadRequestBindings>[0]["grant"],
+          grant: typedGrant,
           ownerRead: grant === null,
           ...(ownerSubjectId ? { ownerSubjectId } : {}),
           requestParams: {},
           storageBinding: storageBinding as unknown as NonNullable<
             Parameters<typeof resolveReadRequestBindings>[0]["storageBinding"]
           >,
-          streamName,
+          streamName: streamGrant.name,
         });
-        bindings = resolved.bindings as Array<{
-          connectorId: string;
-          connectorInstanceId: string;
-        }>;
+        return resolved.bindings;
       } catch (error) {
         if (error instanceof Error && (error as Error & { code?: string }).code === "connection_not_found") {
-          return;
+          return [];
         }
         throw error;
       }
-      const perBinding = await Promise.all(
-        bindings.map((binding) =>
-          listStreams(
-            {
-              connector_id: binding.connectorId,
-              connector_instance_id: binding.connectorInstanceId,
-            },
-            { streams: [streamGrant] } as unknown as Parameters<typeof listStreams>[1],
-            manifest as Parameters<typeof listStreams>[2]
-          )
-        )
-      );
-      for (const summary of perBinding.flat() as unknown as Record<string, unknown>[]) {
-        summaries.set(streamName, mergeStreamSummary(summaries.get(streamName), summary));
-      }
-    })
+    }
   );
+  const summaries = new Map<string, Record<string, unknown>>();
+  for (const summary of rows) {
+    summaries.set(summary.name, mergeStreamSummary(summaries.get(summary.name), { ...summary }));
+  }
   return [...summaries.values()];
 }
 
