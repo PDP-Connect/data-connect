@@ -3566,6 +3566,22 @@ async function bootstrapPostgresSchemaOnce({
       );
       CREATE INDEX IF NOT EXISTS idx_pg_search_index_dirty_pending
         ON search_index_dirty(dirty);
+      -- Pending re-derivation of manifest-derived record columns
+      -- (cursor_value, primary_key_text, semantic_time) for one stream of one
+      -- connection, queued with a manifest publication. after_record_key is
+      -- the durable resume cursor; the row is deleted once the stream is done.
+      CREATE TABLE IF NOT EXISTS record_derived_repair_pending (
+        connector_instance_id TEXT NOT NULL,
+        connector_id TEXT NOT NULL,
+        stream TEXT NOT NULL,
+        revision BIGINT NOT NULL DEFAULT 1,
+        after_record_key TEXT,
+        marked_at TEXT NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        next_attempt_at TEXT,
+        last_error TEXT,
+        PRIMARY KEY(connector_instance_id, stream)
+      );
       ALTER TABLE search_index_dirty ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 0;
       ALTER TABLE search_index_dirty ADD COLUMN IF NOT EXISTS next_attempt_at TEXT;
       ALTER TABLE search_index_dirty ADD COLUMN IF NOT EXISTS revision BIGINT NOT NULL DEFAULT 0;

@@ -89,6 +89,10 @@ import {
   makeDefaultAccountConnectorInstanceId,
   resolveOwnerConnectorInstanceNamespace,
 } from "./stores/connector-instance-store.ts";
+import {
+  markRecordDerivedRepairPendingPostgres,
+  markRecordDerivedRepairPendingSqlite,
+} from "./stores/record-derived-repair-store.ts";
 import { markSearchIndexDirtyPostgres, markSearchIndexDirtySqlite } from "./stores/search-index-dirty-store.ts";
 import {
   buildDomainControlTrustSignal,
@@ -3408,12 +3412,13 @@ function canonicalManifestJson(rawManifest: string): string {
 }
 
 /** Streams whose lexical or semantic index a manifest change can invalidate. */
-function retrievalIndexedStreamNames(manifestJson: string): string[] {
-  const streams = (JSON.parse(manifestJson) as { streams?: unknown }).streams;
+function retrievalIndexedStreamNames(manifest: unknown): string[] {
+  const parsed = typeof manifest === "string" ? JSON.parse(manifest) : manifest;
+  const streams = (parsed as { streams?: unknown } | null)?.streams;
   if (!Array.isArray(streams)) {
     return [];
   }
-  return streams.flatMap((stream) => {
+  return streams.flatMap((stream: unknown) => {
     const search = (stream as { query?: { search?: { lexical_fields?: unknown; semantic_fields?: unknown } } })?.query
       ?.search;
     const declares = (fields: unknown) => Array.isArray(fields) && fields.length > 0;
@@ -3424,16 +3429,42 @@ function retrievalIndexedStreamNames(manifestJson: string): string[] {
   });
 }
 
+function manifestStreamNames(manifest: unknown): string[] {
+  const parsed = typeof manifest === "string" ? JSON.parse(manifest) : manifest;
+  const streams = (parsed as { streams?: unknown } | null)?.streams;
+  return Array.isArray(streams)
+    ? streams.flatMap((stream: unknown) => {
+        const name = (stream as { name?: unknown } | null)?.name;
+        return typeof name === "string" && name ? [name] : [];
+      })
+    : [];
+}
+
+/**
+ * The durable repair a publication queues, in the same transaction as the
+ * manifest. Search-index scopes: every stream indexed by the old OR the new
+ * manifest, so a stream that lost its last search field still gets its stale
+ * index removed. Record-column repair: every stream of the new manifest.
+ * Queued even when the manifest is unchanged, because an earlier attempt may
+ * have persisted it and then failed its repair.
+ */
+function derivedRepairPlan(
+  previousManifest: unknown,
+  manifestJson: string
+): { readonly columnStreams: string[]; readonly searchStreams: string[] } {
+  return {
+    columnStreams: manifestStreamNames(manifestJson),
+    searchStreams: [
+      ...new Set([...retrievalIndexedStreamNames(previousManifest), ...retrievalIndexedStreamNames(manifestJson)]),
+    ],
+  };
+}
+
 async function persistManifestAndAdvanceGenerations(
   connectorId: string,
   manifestJson: string,
-  options: { markRetrievalScopesDirty?: boolean } = {}
+  options: { queueDerivedRepair?: boolean } = {}
 ): Promise<boolean> {
-  // A durable repair request in the same transaction as the manifest: the
-  // maintenance sweep reconciles these scopes in bounded batches and resumes
-  // after a crash. Marked even when the manifest is unchanged, because an
-  // earlier attempt may have persisted it and then failed its repair.
-  const streamsToMark = options.markRetrievalScopesDirty ? retrievalIndexedStreamNames(manifestJson) : [];
   const markedAt = new Date().toISOString();
   if (isPostgresStorageBackend()) {
     return await withPostgresTransaction(async (client) => {
@@ -3445,6 +3476,14 @@ async function persistManifestAndAdvanceGenerations(
       if (activation.rows[0]?.state === "active") {
         assertActiveConnectorStreamShape(activation.rows[0].canonical_manifest_json, manifestJson);
       }
+      const previous = options.queueDerivedRepair
+        ? (
+            await client.query<{ manifest: unknown }>(
+              "SELECT manifest FROM connectors WHERE connector_id = $1 FOR UPDATE",
+              [connectorId]
+            )
+          ).rows[0]?.manifest
+        : null;
       const changed = await client.query(
         `INSERT INTO connectors(connector_id, manifest)
          VALUES($1, $2::jsonb)
@@ -3453,14 +3492,18 @@ async function persistManifestAndAdvanceGenerations(
          RETURNING connector_id`,
         [connectorId, manifestJson]
       );
-      if (streamsToMark.length > 0) {
+      if (options.queueDerivedRepair) {
+        const plan = derivedRepairPlan(previous, manifestJson);
         const instances = await client.query<{ connector_instance_id: string }>(
           "SELECT connector_instance_id FROM connector_instances WHERE connector_id = $1 ORDER BY connector_instance_id",
           [connectorId]
         );
         for (const { connector_instance_id: connectorInstanceId } of instances.rows) {
-          for (const stream of streamsToMark) {
+          for (const stream of plan.searchStreams) {
             await markSearchIndexDirtyPostgres(client, { connectorId, connectorInstanceId, stream }, markedAt);
+          }
+          for (const stream of plan.columnStreams) {
+            await markRecordDerivedRepairPendingPostgres(client, { connectorId, connectorInstanceId, stream }, markedAt);
           }
         }
       }
@@ -3490,19 +3533,23 @@ async function persistManifestAndAdvanceGenerations(
     if (activation?.state === "active") {
       assertActiveConnectorStreamShape(activation.canonical_manifest_json, manifestJson);
     }
-    if (streamsToMark.length > 0) {
+    const existing = db
+      .prepare("SELECT manifest FROM connectors WHERE connector_id = ?")
+      .get<{ manifest?: string }>(connectorId);
+    if (options.queueDerivedRepair) {
+      const plan = derivedRepairPlan(existing?.manifest ?? null, manifestJson);
       const instances = db
         .prepare("SELECT connector_instance_id FROM connector_instances WHERE connector_id = ? ORDER BY connector_instance_id")
         .all<{ connector_instance_id: string }>(connectorId);
       for (const { connector_instance_id: connectorInstanceId } of instances) {
-        for (const stream of streamsToMark) {
+        for (const stream of plan.searchStreams) {
           markSearchIndexDirtySqlite({ connectorId, connectorInstanceId, stream }, markedAt);
+        }
+        for (const stream of plan.columnStreams) {
+          markRecordDerivedRepairPendingSqlite({ connectorId, connectorInstanceId, stream }, markedAt);
         }
       }
     }
-    const existing = db
-      .prepare("SELECT manifest FROM connectors WHERE connector_id = ?")
-      .get<{ manifest?: string }>(connectorId);
     if (existing?.manifest && canonicalManifestJson(existing.manifest) === canonicalManifestJson(manifestJson)) {
       return false;
     }
@@ -5410,19 +5457,17 @@ export async function registerConnector(
   manifest: Record<string, unknown>,
   options: {
     backfillRetrievalIndexes?: boolean;
-    /** Persist only: also mark the retrieval scopes dirty for the maintenance sweep. */
-    markRetrievalScopesDirty?: boolean;
+    /** Queue the record-column and search-index repair durably with the manifest (see derivedRepairPlan). */
+    queueDerivedRepair?: boolean;
     skipDerivedRepair?: boolean;
     skipManifestPersistence?: boolean;
-    /** Repair only the record columns; the lexical and semantic indexes go through dirty scopes. */
-    skipRetrievalBackfill?: boolean;
   } = {}
 ): Promise<string> {
   validateConnectorManifest(manifest);
   const { connectorId, storedManifest } = normalizeConnectorManifestForStorage(manifest);
   if (!options.skipManifestPersistence) {
     await persistManifestAndAdvanceGenerations(connectorId, JSON.stringify(storedManifest), {
-      markRetrievalScopesDirty: options.markRetrievalScopesDirty === true,
+      queueDerivedRepair: options.queueDerivedRepair === true,
     });
   }
   await maybeRegisterConnectorPhaseForTest("after-manifest-persisted", { connectorId, manifest: storedManifest });
@@ -5467,10 +5512,6 @@ export async function registerConnector(
     await backfillSqliteRecordSemanticTimesForManifest(
       storedManifest as Parameters<typeof backfillSqliteRecordSemanticTimesForManifest>[0]
     );
-  }
-
-  if (options.skipRetrievalBackfill) {
-    return connectorId;
   }
 
   // Lexical retrieval index drift-detect + backfill. Handles three cases

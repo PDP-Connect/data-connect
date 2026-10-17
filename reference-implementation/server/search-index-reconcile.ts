@@ -132,7 +132,7 @@ function assertStorageGenerationCurrent(generation: number): void {
 async function runScopeBackfills(
   scope: DirtySearchIndexScope,
   manifest: Record<string, unknown>,
-  targetStream: Record<string, unknown>,
+  targetStream: Record<string, unknown> | null,
   generation: number,
   signal?: AbortSignal
 ): Promise<ReconcileScopeResult> {
@@ -143,19 +143,26 @@ async function runScopeBackfills(
   // exactly the stream that needs checking keeps one reconcile round's
   // worst case proportional to one stream's drift-check, not every stream
   // this connector declares.
+  //
+  // A stream the manifest no longer declares (targetStream null) has nothing
+  // to pin. Its stale index is removed by orphan cleanup over the full
+  // stream list, still pinned to this one connection: every declared stream
+  // is "visited", so only undeclared streams count as orphans.
+  const removedStream = targetStream === null;
   const pinnedManifest = {
     ...manifest,
     connector_id: connectorId,
     storage_binding: { connector_instance_id: connectorInstanceId },
-    streams: [targetStream],
+    streams: removedStream ? (manifest.streams as unknown[]) : [targetStream],
   };
 
-  // orphanStreamCleanup:false -- the manifest is pinned to ONE stream, so
-  // "every stored stream the manifest does not name" is every healthy sibling.
+  // orphanStreamCleanup:false for a pinned stream -- the manifest names ONE
+  // stream, so "every stored stream the manifest does not name" is every
+  // healthy sibling.
   await lexicalIndexBackfillForManifest({
     manifest: pinnedManifest,
-    orphanStreamCleanup: false,
-    verifyContent: true,
+    orphanStreamCleanup: removedStream,
+    verifyContent: !removedStream,
   } as unknown as LexicalBackfillOptions);
   assertStorageGenerationCurrent(generation);
 
@@ -174,7 +181,7 @@ async function runScopeBackfills(
   // flag is deliberately left set (with distinct evidence, not a generic
   // failure) so a later attempt -- once a backend exists -- still gets a
   // chance to actually check it.
-  const semanticFieldsDeclared = declaresSemanticFields(targetStream);
+  const semanticFieldsDeclared = targetStream !== null && declaresSemanticFields(targetStream);
   const semanticBackend = getSemanticBackend();
   const semanticIdentity = semanticBackend ? backendStorageIdentity(semanticBackend) : null;
   if (semanticFieldsDeclared && !semanticBackend) {
@@ -188,7 +195,7 @@ async function runScopeBackfills(
   if (semanticBackend) {
     await semanticIndexBackfillForManifest({
       manifest: pinnedManifest,
-      orphanStreamCleanup: false,
+      orphanStreamCleanup: removedStream,
       signal,
     } as unknown as SemanticBackfillOptions);
     assertStorageGenerationCurrent(generation);
@@ -322,27 +329,6 @@ async function reconcileSearchIndexDirtyScopeOnce(
       // Use the shared revision-fenced failure path: retain dirty and back off
       // so unavailable manifests cannot monopolize the oldest-first page.
       throw new Error("registered connector manifest is missing or unparseable; dirty flag retained");
-    }
-    if (!targetStream) {
-      // Connector no longer registered, or this stream is no longer
-      // declared in its manifest: nothing to reconcile against. Clear the
-      // flag -- there is no drift-check that can ever run for a stream that
-      // does not exist in the current manifest, and leaving dirty=1 forever
-      // would keep this scope in every future sweep for no actionable
-      // reason. lexicalIndexBackfillForManifest/semanticIndexBackfillForManifest
-      // already handle "declared before, not declared now" cleanup via
-      // their own manifest-driven sweeps; this only short-circuits THIS
-      // scope's flag. CAS'd on scope.revision for the same reason as
-      // runScopeBackfills' clear (see that comment): a write racing in
-      // between this round's listing and this decision must not have its
-      // fresh dirty mark silently discarded, and revision -- not markedAt
-      // -- is the token that can prove that reliably.
-      const cleared = await clearSearchIndexDirty(
-        { connectorInstanceId, stream },
-        scope.revision,
-        new Date().toISOString()
-      );
-      return { connectorId, connectorInstanceId, outcome: cleared ? "converged" : "recontended", stream };
     }
     return await runScopeBackfills(scope, manifest, targetStream, generation, signal);
   } catch (err) {

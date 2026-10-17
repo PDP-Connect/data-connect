@@ -19,7 +19,7 @@ import { join, resolve } from "node:path";
 import test from "node:test";
 import { withConnectorLifecycleLock } from "../server/connector-lifecycle-lock.ts";
 import { closeDb, initDb } from "../server/db.ts";
-import { __setPostgresRecordSortBackfillPhaseHookForTest } from "../server/postgres-records.ts";
+import { __setRecordDerivedRepairHookForTest, runRecordDerivedRepairRound } from "../server/record-derived-repair.ts";
 import {
   closePostgresStorage,
   initPostgresStorage,
@@ -127,8 +127,8 @@ test(
     try {
       await withPostgres("repair", async () => {
         await seedGmail({ instances: INSTANCES, recordsPerStream: RECORDS_PER_STREAM });
-        __setPostgresRecordSortBackfillPhaseHookForTest(async (point) => {
-          if (point === "before-instance-fence") {
+        __setRecordDerivedRepairHookForTest(async (point) => {
+          if (point === "after-page") {
             repairEntered.resolve();
             await repairRelease.promise;
           }
@@ -166,7 +166,7 @@ test(
         } finally {
           repairRelease.resolve();
           await Promise.resolve(repair).catch(() => undefined);
-          __setPostgresRecordSortBackfillPhaseHookForTest(null);
+          __setRecordDerivedRepairHookForTest(null);
         }
       });
     } finally {
@@ -430,6 +430,140 @@ test(
         })
       );
     } finally {
+      rmSync(dataDir, { force: true, recursive: true });
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Review round 3: removed search declarations, and durable column repair.
+// ---------------------------------------------------------------------------
+
+/** Index rows for the two streams the update makes unsearchable (the only streams with records). */
+async function gmailIndexRows(): Promise<{
+  lexical: number;
+  lexicalMeta: number;
+  semantic: number;
+  semanticMeta: number;
+}> {
+  const count = async (sql: string) =>
+    Number((await postgresQuery<{ n: string }>(sql, [CONNECTOR_ID, ["messages", "message_bodies"]])).rows[0]?.n ?? 0);
+  return {
+    lexical: await count(
+      "SELECT count(*)::text AS n FROM lexical_search_index WHERE connector_id = $1 AND stream = ANY($2::text[])"
+    ),
+    lexicalMeta: await count(
+      "SELECT count(*)::text AS n FROM lexical_search_meta WHERE connector_id = $1 AND stream = ANY($2::text[])"
+    ),
+    // semantic_search_blob has no stream column, and the records live only in these two streams.
+    semantic: await count(
+      "SELECT count(*)::text AS n FROM semantic_search_blob WHERE connector_id = $1 AND cardinality($2::text[]) > 0"
+    ),
+    semanticMeta: await count(
+      "SELECT count(*)::text AS n FROM semantic_search_meta WHERE connector_id = $1 AND stream = ANY($2::text[])"
+    ),
+  };
+}
+
+/** gmail with the last search declarations removed from `messages` and `message_bodies`. */
+const unsearchableGmail = {
+  ...installedGmail,
+  streams: ((installedGmail as Record<string, unknown>).streams as Record<string, unknown>[]).map((stream) => {
+    if (stream.name !== "messages" && stream.name !== "message_bodies") return stream;
+    const { query: _query, ...rest } = stream;
+    return rest;
+  }),
+  version: "9.1.0",
+};
+
+test(
+  "PostgreSQL: an update that removes the last search declarations leaves no stale index rows after reconcile",
+  { skip: !POSTGRES_URL },
+  async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "pdpp-install-pg-"));
+    try {
+      await withPostgres("removed", async () => {
+        await seedGmail({ instances: ["cin_gmail_removed"], recordsPerStream: 30 });
+        let repair: Promise<unknown> | undefined;
+        const capture = { onRepair: (started: Promise<unknown>) => (repair = started) };
+        await gmailInstallService(dataDir, capture).install(CONNECTOR_ID, digest);
+        await within(Promise.resolve(repair), 60_000, "first repair");
+        const indexed = await gmailIndexRows();
+        assert.ok(indexed.lexical > 0 && indexed.semantic > 0, JSON.stringify(indexed));
+
+        const nextDigest = `sha256:${"c".repeat(64)}`;
+        await gmailInstallService(dataDir, capture, { digest: nextDigest, manifest: unsearchableGmail }).install(
+          CONNECTOR_ID,
+          nextDigest
+        );
+        await within(Promise.resolve(repair), 60_000, "update repair");
+        assert.deepEqual(await gmailIndexRows(), { lexical: 0, lexicalMeta: 0, semantic: 0, semanticMeta: 0 });
+        assert.equal(await gmailDirtyScopes(), 0);
+      });
+    } finally {
+      rmSync(dataDir, { force: true, recursive: true });
+    }
+  }
+);
+
+test(
+  "PostgreSQL: an interrupted column repair stays queued with its cursor and a later sweep round completes it",
+  { skip: !POSTGRES_URL },
+  async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "pdpp-install-pg-"));
+    let repair: Promise<unknown> | undefined;
+    try {
+      await withPostgres("columns", async () => {
+        // 700 records: three 256-record pages per stream.
+        await seedGmail({ instances: ["cin_gmail_columns"], recordsPerStream: 700 });
+        const staleCursors = async () =>
+          Number(
+            (
+              await postgresQuery<{ n: string }>(
+                `SELECT count(*)::text AS n FROM records
+                  WHERE connector_id = $1 AND stream = 'messages' AND cursor_value IS DISTINCT FROM record_json->>'received_at'`,
+                [CONNECTOR_ID]
+              )
+            ).rows[0]?.n ?? 0
+          );
+        assert.equal(await staleCursors(), 700);
+        let pages = 0;
+        __setRecordDerivedRepairHookForTest((_point, scope) => {
+          if (scope.stream === "messages" && ++pages === 2) {
+            throw new Error("simulated crash after two committed pages");
+          }
+        });
+        try {
+          await gmailInstallService(dataDir, { onRepair: (started) => (repair = started) }).install(
+            CONNECTOR_ID,
+            digest
+          );
+          await assert.rejects(Promise.resolve(repair), /Record column repair failed/);
+        } finally {
+          __setRecordDerivedRepairHookForTest(null);
+        }
+        const pending = await postgresQuery<{ after_record_key: string | null; attempts: number; last_error: string }>(
+          "SELECT after_record_key, attempts, last_error FROM record_derived_repair_pending WHERE connector_id = $1 AND stream = 'messages'",
+          [CONNECTOR_ID]
+        );
+        assert.equal(pending.rows.length, 1);
+        assert.equal(pending.rows[0]?.after_record_key, "messages-000511", "the cursor is the last committed record");
+        assert.equal(pending.rows[0]?.attempts, 1);
+        assert.equal(await staleCursors(), 700 - 512, "two pages are repaired, the rest are not");
+
+        // The next eligible sweep round (past the failure backoff) resumes from the cursor.
+        const later = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString();
+        const round = await runRecordDerivedRepairRound({ maxDurationMs: 60_000, nowIso: later });
+        assert.equal(round.failed, 0);
+        assert.equal(await staleCursors(), 0);
+        const left = await postgresQuery<{ n: string }>(
+          "SELECT count(*)::text AS n FROM record_derived_repair_pending WHERE connector_id = $1",
+          [CONNECTOR_ID]
+        );
+        assert.equal(left.rows[0]?.n, "0");
+      });
+    } finally {
+      await Promise.resolve(repair).catch(() => undefined);
       rmSync(dataDir, { force: true, recursive: true });
     }
   }

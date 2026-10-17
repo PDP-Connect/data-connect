@@ -80,16 +80,20 @@ export async function seedMigratedGmail(options: {
 
 export function gmailInstallService(
   dataDir: string,
-  hooks: { readonly onRepair?: (repair: Promise<unknown>) => void; readonly stage?: Promise<void> } = {}
+  hooks: { readonly onRepair?: (repair: Promise<unknown>) => void; readonly stage?: Promise<void> } = {},
+  artifact: { readonly digest: string; readonly manifest: Record<string, unknown> } = {
+    digest: GMAIL_INSTALL_DIGEST,
+    manifest: installedGmail,
+  }
 ) {
   const entry: ConnectorCatalogEntry = {
     bindings: {},
     config_digest: configDigest,
     connector_id: GMAIL_CONNECTOR_ID,
     connector_key: GMAIL_CONNECTOR_ID,
-    digest: GMAIL_INSTALL_DIGEST,
+    digest: artifact.digest,
     latest: true,
-    version: GMAIL_INSTALL_VERSION,
+    version: String(artifact.manifest.version),
   };
   return createConnectorInstallService({
     catalogLoader: async () => [entry],
@@ -98,7 +102,7 @@ export function gmailInstallService(
       await hooks.stage;
       mkdirSync(join(root, "profile"), { recursive: true });
       mkdirSync(join(root, "dist"), { recursive: true });
-      writeFileSync(join(root, "profile", "collection-profile.json"), JSON.stringify(installedGmail));
+      writeFileSync(join(root, "profile", "collection-profile.json"), JSON.stringify(artifact.manifest));
       writeFileSync(join(root, "dist", "collection-profile.mjs"), "export {};\n");
       writeFileSync(join(root, "provenance.json"), "{}\n");
     },

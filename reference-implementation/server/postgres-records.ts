@@ -769,6 +769,104 @@ export async function postgresBackfillRecordCursorValuesForManifest(
   return { updated };
 }
 
+const RECORD_DERIVED_REPAIR_PAGE = 256;
+
+/** The manifest-derived record columns for one stream, as `postgresRepairRecordDerivedColumnsPage` reads them. */
+export function recordDerivedColumnsStream(manifestStream: unknown): ManifestStream {
+  const candidate = (manifestStream ?? {}) as ManifestStream;
+  return manifestStreamFromFacts({
+    consentTimeField: nonEmptyJsonField(candidate.consent_time_field),
+    cursorField: nonEmptyJsonField(candidate.cursor_field),
+    primaryKey: primaryKeyFieldsFor(candidate),
+  });
+}
+
+/**
+ * Re-derive `cursor_value`, `primary_key_text` and `semantic_time` for up to
+ * one page of a stream's records after `afterRecordKey`, in record-key order.
+ * Each chunk is one fenced, set-based UPDATE in its own bulk transaction, and
+ * unchanged rows are filtered out, so a rerun rewrites nothing it already
+ * repaired. `withinChunk` runs inside each chunk's transaction (a durable
+ * cursor advances with the rows it covers); throwing rolls that chunk back.
+ */
+export async function postgresRepairRecordDerivedColumnsPage(input: {
+  readonly afterRecordKey: string | null;
+  readonly budget: BulkChunkBudget;
+  readonly connectorId: string;
+  readonly connectorInstanceId: string;
+  readonly manifest: Record<string, unknown>;
+  readonly manifestStream: ManifestStream;
+  readonly stream: string;
+  readonly withinChunk?: (client: PostgresTransactionClient, lastRecordKey: string) => Promise<void>;
+}): Promise<{ readonly done: boolean; readonly lastRecordKey: string | null; readonly updated: number }> {
+  const { connectorId, connectorInstanceId, manifestStream, stream } = input;
+  const page = await postgresQuery(
+    `SELECT record_key, record_json::text AS record_json
+       FROM records
+      WHERE connector_id = $1
+        AND connector_instance_id = $2
+        AND stream = $3
+        AND deleted = FALSE
+        AND ($4::text IS NULL OR record_key > $4)
+      ORDER BY record_key
+      LIMIT ${String(RECORD_DERIVED_REPAIR_PAGE)}`,
+    [connectorId, connectorInstanceId, stream, input.afterRecordKey]
+  );
+  const derived = page.rows.map((row) => {
+    const data = typeof row.record_json === "string" ? JSON.parse(row.record_json) : row.record_json;
+    return {
+      cursor: cursorValue(data, manifestStream),
+      primary: primaryKeyText(data, row.record_key, manifestStream),
+      recordKey: String(row.record_key),
+      semanticTime: semanticTimeValue(data, manifestStream),
+    };
+  });
+  let updated = 0;
+  await runBulkChunksWithinStatementBudget(derived, input.budget, async (chunk) => {
+    const result = await withPostgresBulkTransaction(
+      async (client) => {
+        await assertConnectorManifestStreamSubsetWithClient(client, connectorId, input.manifest);
+        const applied = await client.query(
+          `UPDATE records r
+              SET cursor_value = v.cursor_value, primary_key_text = v.primary_key_text, semantic_time = v.semantic_time
+             FROM unnest($4::text[], $5::text[], $6::text[], $7::text[])
+               AS v(record_key, cursor_value, primary_key_text, semantic_time)
+            WHERE r.connector_id = $1
+              AND r.connector_instance_id = $2
+              AND r.stream = $3
+              AND r.record_key = v.record_key
+              AND r.deleted = FALSE
+              AND (r.cursor_value IS DISTINCT FROM v.cursor_value
+                OR r.primary_key_text IS DISTINCT FROM v.primary_key_text
+                OR r.semantic_time IS DISTINCT FROM v.semantic_time)`,
+          [
+            connectorId,
+            connectorInstanceId,
+            stream,
+            chunk.map((entry) => entry.recordKey),
+            chunk.map((entry) => entry.cursor),
+            chunk.map((entry) => entry.primary),
+            chunk.map((entry) => entry.semanticTime),
+          ]
+        );
+        const lastRecordKey = chunk.at(-1)?.recordKey;
+        if (input.withinChunk && lastRecordKey !== undefined) {
+          await input.withinChunk(client, lastRecordKey);
+        }
+        return applied;
+      },
+      { lockConnectorInstanceId: connectorInstanceId }
+    );
+    updated += Number(result.rowCount || 0);
+  });
+  invalidatePostgresRecordManifestCache(connectorId);
+  return {
+    done: page.rows.length < RECORD_DERIVED_REPAIR_PAGE,
+    lastRecordKey: derived.at(-1)?.recordKey ?? input.afterRecordKey,
+    updated,
+  };
+}
+
 export async function postgresBackfillRecordSortPositionsForManifest(
   manifest: ConnectorManifest
 ): Promise<{ updated: number }> {
@@ -801,83 +899,26 @@ export async function postgresBackfillRecordSortPositionsForManifest(
       ORDER BY connector_instance_id`,
     [connectorId, streamFacts.map(({ stream }) => stream)]
   );
-  const repairBudget: BulkChunkBudget = { chunkSize: 256 };
-  const backfillStream = (connectorInstanceId: string, facts: (typeof streamFacts)[number]): Promise<number> => {
-    const manifestStream = manifestStreamFromFacts(facts);
-    const backfillPage = async (afterRecordKey: string | null): Promise<number> => {
-      const page = await postgresQuery(
-        `SELECT record_key, record_json::text AS record_json, emitted_at,
-                cursor_value, primary_key_text, semantic_time
-           FROM records
-          WHERE connector_id = $1
-            AND connector_instance_id = $2
-            AND stream = $3
-            AND deleted = FALSE
-            AND ($4::text IS NULL OR record_key > $4)
-          ORDER BY record_key
-          LIMIT 256`,
-        [connectorId, connectorInstanceId, facts.stream, afterRecordKey]
-      );
-      if (page.rows.length === 0) {
-        return 0;
-      }
-      // One fenced, set-based UPDATE per chunk instead of a transaction per
-      // record: a connector with hundreds of thousands of records otherwise
-      // spends most of an install here. Unchanged rows are filtered out, so a
-      // rerun after a crash rewrites nothing it already repaired.
-      const derived = page.rows.map((row) => {
-        const data = typeof row.record_json === "string" ? JSON.parse(row.record_json) : row.record_json;
-        return {
-          cursor: cursorValue(data, manifestStream),
-          primary: primaryKeyText(data, row.record_key, manifestStream),
-          recordKey: String(row.record_key),
-          semanticTime: semanticTimeValue(data, manifestStream),
-        };
+  const repairBudget: BulkChunkBudget = { chunkSize: RECORD_DERIVED_REPAIR_PAGE };
+  const backfillStream = async (connectorInstanceId: string, facts: (typeof streamFacts)[number]): Promise<number> => {
+    let afterRecordKey: string | null = null;
+    let updated = 0;
+    for (;;) {
+      const page = await postgresRepairRecordDerivedColumnsPage({
+        afterRecordKey,
+        budget: repairBudget,
+        connectorId,
+        connectorInstanceId,
+        manifest: manifest as unknown as Record<string, unknown>,
+        manifestStream: manifestStreamFromFacts(facts),
+        stream: facts.stream,
       });
-      let updatedInPage = 0;
-      await runBulkChunksWithinStatementBudget(derived, repairBudget, async (chunk) => {
-        const result = await withPostgresBulkTransaction(
-          async (client) => {
-            await assertConnectorManifestStreamSubsetWithClient(
-              client,
-              connectorId,
-              manifest as unknown as Record<string, unknown>
-            );
-            return await client.query(
-              `UPDATE records r
-                  SET cursor_value = v.cursor_value, primary_key_text = v.primary_key_text, semantic_time = v.semantic_time
-                 FROM unnest($4::text[], $5::text[], $6::text[], $7::text[])
-                   AS v(record_key, cursor_value, primary_key_text, semantic_time)
-                WHERE r.connector_id = $1
-                  AND r.connector_instance_id = $2
-                  AND r.stream = $3
-                  AND r.record_key = v.record_key
-                  AND r.deleted = FALSE
-                  AND (r.cursor_value IS DISTINCT FROM v.cursor_value
-                    OR r.primary_key_text IS DISTINCT FROM v.primary_key_text
-                    OR r.semantic_time IS DISTINCT FROM v.semantic_time)`,
-              [
-                connectorId,
-                connectorInstanceId,
-                facts.stream,
-                chunk.map((entry) => entry.recordKey),
-                chunk.map((entry) => entry.cursor),
-                chunk.map((entry) => entry.primary),
-                chunk.map((entry) => entry.semanticTime),
-              ]
-            );
-          },
-          { lockConnectorInstanceId: connectorInstanceId }
-        );
-        updatedInPage += Number(result.rowCount || 0);
-      });
-      const lastRow = page.rows.at(-1);
-      if (page.rows.length < 256 || !lastRow?.record_key) {
-        return updatedInPage;
+      updated += page.updated;
+      if (page.done) {
+        return updated;
       }
-      return updatedInPage + (await backfillPage(lastRow.record_key));
-    };
-    return backfillPage(null);
+      afterRecordKey = page.lastRecordKey;
+    }
   };
   const updated = await instances.rows.reduce(async (previous, { connector_instance_id: connectorInstanceId }) => {
     const total = await previous;
