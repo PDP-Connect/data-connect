@@ -22,6 +22,7 @@ import {
   deriveTokenAuditId,
   normalizeDeviceAuditFields,
   postgresEmitSpineEvent,
+  postgresGetRunEffectiveAuthorityEvent,
   postgresGetRunStartedEvent,
   postgresGetRunTerminalEvent,
   postgresListRunSummariesByConnectorIds,
@@ -909,6 +910,17 @@ export async function getRunStartedEvent(runId: string): Promise<RunLifecycleEve
   return summarizeRunLifecycleRow(row);
 }
 
+// Durable authority read, bounded on both storage backends.
+export async function getRunEffectiveAuthorityEvent(runId: string): Promise<RunLifecycleEventSummary | null> {
+  if (!runId) {
+    return null;
+  }
+  const row = isPostgresStorageBackend()
+    ? ((await postgresGetRunEffectiveAuthorityEvent(runId)) as RunLifecycleEventRow | null | undefined)
+    : getOne<RunLifecycleEventRow>(referenceQueries.spineGetRunEffectiveAuthorityEvent, [runId]);
+  return summarizeRunLifecycleRow(row);
+}
+
 /**
  * Summary cap. Internal callers (`listSpineCorrelations`, `searchSpine`)
  * fetch up to this many events per correlation row to compute summaries.
@@ -1140,6 +1152,12 @@ function pickSummaryStatus(events: readonly SpineEventRecord[]): string {
   const runId = pickFirstNonNull(events, "run_id") as string | null;
   if (events.some((ev) => ev.event_type === "run.started")) {
     return hasActiveRunLease(runId) ? "in_progress" : "failed";
+  }
+
+  // A successful authority audit does not certify connector execution,
+  // including legacy events whose storage default was "succeeded".
+  if (events.some((event) => event.event_type === "run.effective_authority")) {
+    return "pending";
   }
 
   return findLatestStatus(events, () => true) ?? "unknown";

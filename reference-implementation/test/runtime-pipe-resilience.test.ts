@@ -2,16 +2,24 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { TestContext } from "node:test";
-import { test } from "node:test";
-import type { RuntimeRunConnectorResult } from "../runtime/index.ts";
+import { after, before, test } from "node:test";
+import { type SpineEventRow, summarizeRows } from "../lib/postgres-spine.ts";
+import { emitSpineEvent, listSpineEventsPage, type SpineEventRecord, summarizeEvents } from "../lib/spine.ts";
+import type { RuntimeRunConnectorOptions, RuntimeRunConnectorResult } from "../runtime/index.ts";
 import { createJsonlLineDispatcher, runConnector } from "../runtime/index.ts";
 import { isClosedPipeWriteError } from "../runtime/pipe-errors.ts";
 import { type DeriveTerminalReasonInput, deriveTerminalReason } from "../runtime/terminal-reason.ts";
+import { closeDb, initDb } from "../server/db.ts";
+import { makeTemporaryDbPath } from "./helpers/temp-dir.ts";
+
+// Placement requires a durable authority record before these spawn fixtures run.
+before(() => initDb(makeTemporaryDbPath("pipe-authority-")));
+after(() => closeDb());
 
 /**
  * `deriveTerminalReason`'s `doneMessage` type only declares the `status`
@@ -58,6 +66,184 @@ function fakeAdmitRunConnection(): (input: {
     return Promise.resolve({ connectorId, connectorInstanceId: exactId, ownerSubjectId });
   };
 }
+
+const AUTHORITY_TEST_CONNECTOR_ID = "https://registry.pdpp.dev/connectors/test-launch-authority";
+const AUTHORITY_TEST_CONNECTION_ID = "cin_test_launch_authority";
+
+function makeAuthorityLaunchFixture(t: TestContext, runId: string): {
+  markerPath: string;
+  options: RuntimeRunConnectorOptions;
+} {
+  const dir = mkdtempSync(join(tmpdir(), "pdpp-launch-authority-"));
+  t.after(() => rmSync(dir, { force: true, recursive: true }));
+  const connectorPath = join(dir, "stub.mjs");
+  const markerPath = join(dir, "spawned");
+  writeFileSync(
+    connectorPath,
+    `import { writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(markerPath)}, "spawned");
+// Never wait for START, stdin EOF, a store callback, or a terminal event.
+setTimeout(() => process.exit(7), 250);
+`,
+    "utf8"
+  );
+  return {
+    markerPath,
+    options: {
+      admitRunConnection: fakeAdmitRunConnection(),
+      cancelSignal: t.signal,
+      connectorConfigStore: { getActiveRevision: () => Promise.resolve(null) },
+      connectorId: AUTHORITY_TEST_CONNECTOR_ID,
+      connectorInstanceId: AUTHORITY_TEST_CONNECTION_ID,
+      connectorPath,
+      detailGapStore: { listPendingGaps: () => Promise.resolve([]) },
+      manifest: {
+        runtime_requirements: {},
+        streams: [{ name: "noop", primary_key: "id" }],
+      },
+      onProgress: () => undefined,
+      ownerToken: "",
+      rsUrl: "http://127.0.0.1:1",
+      runId,
+    },
+  };
+}
+
+async function assertAuthoritySummaryStatus(events: readonly SpineEventRecord[], expected: string): Promise<void> {
+  assert.equal(summarizeEvents(events)?.status, expected, "SQLite lifecycle projection");
+  const rows: SpineEventRow[] = events.map(({ data, ...event }, index) => ({
+    ...event,
+    connector_instance_id: AUTHORITY_TEST_CONNECTION_ID,
+    data_json: JSON.stringify(data),
+    event_seq: index + 1,
+  }));
+  const postgresSummary = await summarizeRows(events[0]?.run_id ?? "", rows);
+  assert.equal(postgresSummary.status, expected, "Postgres lifecycle projection");
+}
+
+for (const status of ["succeeded", "ok"]) {
+  test(`authority-only runs with legacy audit status ${status} project pending on both backends`, { timeout: 5000 }, async () => {
+    const runId = `run_authority_legacy_${status}`;
+    const authority = await emitSpineEvent({
+      actor_id: AUTHORITY_TEST_CONNECTOR_ID,
+      actor_type: "runtime",
+      data: { connector_instance_id: AUTHORITY_TEST_CONNECTION_ID },
+      event_type: "run.effective_authority",
+      object_id: runId,
+      object_type: "run",
+      run_id: runId,
+      status,
+    });
+    assert.ok(authority);
+    await assertAuthoritySummaryStatus([authority], "pending");
+    const incidental = await emitSpineEvent({
+      event_type: "run.stream_session_resolved",
+      run_id: runId,
+      status: "completed",
+    });
+    assert.ok(incidental);
+    await assertAuthoritySummaryStatus([authority, incidental], "pending");
+    const failed = await emitSpineEvent({ event_type: "run.failed", run_id: runId, status: "failed" });
+    assert.ok(failed);
+    await assertAuthoritySummaryStatus([authority, incidental, failed], "failed");
+  });
+}
+
+async function assertAuthorityLaunchFailed(runId: string): Promise<readonly SpineEventRecord[]> {
+  const { events } = listSpineEventsPage("run", runId, { limit: 20 });
+  assert.deepEqual(events.map((event) => event.event_type), ["run.effective_authority", "run.failed"]);
+  assert.equal(events[0]?.status, "pending");
+  assert.deepEqual(events[1]?.data, {
+    connection_id: AUTHORITY_TEST_CONNECTION_ID,
+    connector_instance_id: AUTHORITY_TEST_CONNECTION_ID,
+    failure_origin: "runtime",
+    reason: "runtime_launch_failed",
+    source: { id: AUTHORITY_TEST_CONNECTOR_ID, kind: "connector" },
+  });
+  await assertAuthoritySummaryStatus(events, "failed");
+  return events;
+}
+
+test("runConnector: missing required binding retains unsupported authority without spawning", { timeout: 5000 }, async (t) => {
+  const runId = "run_authority_missing_binding";
+  const { markerPath, options } = makeAuthorityLaunchFixture(t, runId);
+  await assert.rejects(
+    runConnector({
+      ...options,
+      manifest: {
+        ...options.manifest,
+        runtime_requirements: { bindings: { desktop_session: { required: true } } },
+      },
+    }),
+    /Runtime cannot satisfy required binding: desktop_session/
+  );
+  const events = await assertAuthorityLaunchFailed(runId);
+  const data = events[0]?.data as {
+    effective_authority: { instances: { desktop_session: { lifecycle: string } } };
+  };
+  assert.equal(data.effective_authority.instances.desktop_session.lifecycle, "unsupported");
+  assert.equal(existsSync(markerPath), false);
+});
+
+test("runConnector: invalid collection mode retains authority and fails without spawning", { timeout: 5000 }, async (t) => {
+  const runId = "run_authority_invalid_collection";
+  const { markerPath, options } = makeAuthorityLaunchFixture(t, runId);
+  await assert.rejects(
+    runConnector({
+      ...options,
+      collectionMode: "unsupported" as NonNullable<RuntimeRunConnectorOptions["collectionMode"]>,
+    }),
+    /START.collection_mode/
+  );
+  await assertAuthorityLaunchFailed(runId);
+  assert.equal(existsSync(markerPath), false);
+});
+
+test("runConnector: connector config rejection terminalizes durable authority without spawning", { timeout: 5000 }, async (t) => {
+  const runId = "run_authority_config_rejection";
+  const { markerPath, options } = makeAuthorityLaunchFixture(t, runId);
+  const rejection = new Error("injected config read failure");
+  let configReads = 0;
+  await assert.rejects(
+    runConnector({
+      ...options,
+      connectorConfigStore: {
+        getActiveRevision: () => {
+          configReads += 1;
+          return Promise.reject(rejection);
+        },
+      },
+    }),
+    (error) => error === rejection
+  );
+  assert.equal(configReads, 1, "the injected config read was reached exactly once");
+  await assertAuthorityLaunchFailed(runId);
+  assert.equal(existsSync(markerPath), false);
+});
+
+test("runConnector: pre-START reclaim rejection terminalizes pending authority on both backends", { timeout: 5000 }, async (t) => {
+  const runId = "run_authority_pre_start_failure";
+  const { options } = makeAuthorityLaunchFixture(t, runId);
+  const rejection = new Error("injected detail-gap reclaim failure");
+  let pendingEvents: readonly SpineEventRecord[] = [];
+  await assert.rejects(
+    runConnector({
+      ...options,
+      detailGapStore: {
+        listPendingGaps: () => Promise.resolve([]),
+        reclaimStrandedInProgressGaps() {
+          pendingEvents = listSpineEventsPage("run", runId, { limit: 20 }).events;
+          throw rejection;
+        },
+      },
+    }),
+    (error) => error === rejection
+  );
+  assert.deepEqual(pendingEvents.map((event) => event.event_type), ["run.effective_authority"]);
+  assert.equal(pendingEvents[0]?.status, "pending");
+  await assertAuthoritySummaryStatus(pendingEvents, "pending");
+  await assertAuthorityLaunchFailed(runId);
+});
 
 test("createJsonlLineDispatcher replays complete lines emitted before the runtime installs its listener", () => {
   const dispatcher = createJsonlLineDispatcher();

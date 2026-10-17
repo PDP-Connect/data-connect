@@ -10,6 +10,7 @@ import type { RuntimeRunConnectorOptions, RuntimeRunConnectorResult } from "../r
 import { runConnector } from "../runtime/index.ts";
 import { redactStderrTail } from "../runtime/stderr-redact.ts";
 import { createStderrTailBuffer, STDERR_TAIL_DEFAULT_CAP_BYTES } from "../runtime/stderr-tail.ts";
+import { closeDb, initDb } from "../server/db.ts";
 
 // Regression coverage for
 //   openspec/changes/persist-connector-failure-diagnostics
@@ -222,6 +223,8 @@ async function runStub({
   writeFileSync(stubPath, makeStub({ exitCode, stderrText }), "utf8");
   chmodSync(stubPath, 0o755);
 
+  // Runtime placement now requires a durable authority record before spawn.
+  initDb(join(tmpDir, "authority.sqlite"));
   let outcome: StubRunResult | null = null;
   let outcomeError: StubRunResult | null = null;
   const runOptions: RunStubOptions = {
@@ -268,6 +271,7 @@ async function runStub({
     // caught value uniformly with the resolved outcome.
     outcomeError = err as StubRunResult;
   } finally {
+    closeDb();
     rmSync(tmpDir, { force: true, recursive: true });
   }
   return (outcome ?? outcomeError) as StubRunResult;
