@@ -241,3 +241,61 @@ test("boot check: stays silent outside browser images and never throws", () => {
     ["warn"],
   );
 });
+
+for (const padding of [" ", "  ", "\t"]) {
+  test(`child environment and boot check judge literal padded paths (${JSON.stringify(padding)})`, () => {
+    const sourceEnv = {
+      PATCHRIGHT_BROWSERS_PATH: `${IMAGE_BROWSERS_PATH}${padding}`,
+      PLAYWRIGHT_BROWSERS_PATH: `${IMAGE_BROWSERS_PATH}${padding}`,
+    };
+    const { env, warnings } = compose(sourceEnv, [IMAGE_EXECUTABLE]);
+    assert.equal(env.PLAYWRIGHT_BROWSERS_PATH, IMAGE_BROWSERS_PATH);
+    assert.equal(env.PATCHRIGHT_BROWSERS_PATH, IMAGE_BROWSERS_PATH);
+    assert.equal(warnings.length, 1);
+    assert.equal(
+      chromiumExecutablePath(env.PLAYWRIGHT_BROWSERS_PATH, REVISION, "linux", "x64"),
+      IMAGE_EXECUTABLE,
+    );
+    const { entries, logger } = capturingLogger();
+    const result = checkBrowserExecutableAtBoot(
+      logger,
+      { ...sourceEnv, PDPP_RUNTIME_BROWSER: "1" },
+      deps(IMAGE_EXECUTABLE),
+    );
+    assert.equal(result?.kind, "fell_back");
+    assert.equal(entries[0]?.level, "warn");
+    assert.equal(resolveBrowsersPath(env, deps(IMAGE_EXECUTABLE)).kind, "present");
+  });
+}
+
+for (const customPath of ["/opt/custom chromium", "/opt/custom chromium ", "   "]) {
+  test(`child environment preserves an existing literal path: ${JSON.stringify(customPath)}`, () => {
+    const executable = chromiumExecutablePath(customPath, REVISION, "linux", "x64") as string;
+    const sourceEnv = { PATCHRIGHT_BROWSERS_PATH: customPath, PLAYWRIGHT_BROWSERS_PATH: customPath };
+    const { env, warnings } = compose(sourceEnv, [executable, IMAGE_EXECUTABLE]);
+    assert.equal(env.PLAYWRIGHT_BROWSERS_PATH, customPath);
+    assert.equal(env.PATCHRIGHT_BROWSERS_PATH, customPath);
+    assert.deepEqual(warnings, []);
+    const { entries, logger } = capturingLogger();
+    assert.equal(
+      checkBrowserExecutableAtBoot(logger, { ...sourceEnv, PDPP_RUNTIME_BROWSER: "1" }, deps(executable))?.kind,
+      "present",
+    );
+    assert.equal(entries[0]?.level, "info");
+  });
+}
+
+test("boot check: an unpadded custom executable does not validate a missing padded path", () => {
+  const padded = `${CUSTOM} `;
+  const executable = chromiumExecutablePath(CUSTOM, REVISION, "linux", "x64") as string;
+  const { env } = compose({ PLAYWRIGHT_BROWSERS_PATH: padded }, [executable]);
+  assert.equal(env.PLAYWRIGHT_BROWSERS_PATH, padded);
+  const { entries, logger } = capturingLogger();
+  const result = checkBrowserExecutableAtBoot(
+    logger,
+    { PDPP_RUNTIME_BROWSER: "1", PLAYWRIGHT_BROWSERS_PATH: padded },
+    deps(executable),
+  );
+  assert.equal(result?.kind, "missing");
+  assert.equal(entries[0]?.level, "error");
+});
