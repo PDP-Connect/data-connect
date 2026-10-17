@@ -4,6 +4,6 @@
   "type": "module",
   "description": "Private source-only package for the remaining Google Messages connector and shared runtime helpers. This package.json keeps TypeScript ESM inference for files under this directory and ensures npm resolves the connector zod@4 dependency here. The local collector no longer compiles connector source; five connectors run from signed Collection Profiles. Do not add scripts, exports, or a public package identity here.",
   "dependencies": {
-    "zod": "^4.6.5"
+    "zod": "^4.6.7"
   }
 }
