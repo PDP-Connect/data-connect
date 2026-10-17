@@ -8,10 +8,11 @@ import {
   type CdpCommandTransport,
   createCdpServerBackend,
 } from "@opendatalabs/remote-surface/backends/cdp";
-import type {
-  RemoteSurfaceClipboardPayload,
-  RemoteSurfaceInputPayload,
-  RemoteSurfaceViewportPayload,
+import {
+  parseRemoteSurfaceInputPayload,
+  type RemoteSurfaceClipboardPayload,
+  type RemoteSurfaceInputPayload,
+  type RemoteSurfaceViewportPayload,
 } from "@opendatalabs/remote-surface/protocol";
 /**
  * Real CDP companion adapter.
@@ -1426,6 +1427,14 @@ export function createCdpCompanion({
       if (event.type === "pointer" || event.type === "keyboard" || event.type === "text") {
         if (!backendLifecycle) {
           throw codedError("Streaming companion is not started", "companion_not_started");
+        }
+        // The reference schema above bounds lengths and coordinates; the
+        // library's own parser then proves the event is a well-formed
+        // RemoteSurfaceInputPayload before its CDP backend sees it.
+        try {
+          parseRemoteSurfaceInputPayload(event);
+        } catch {
+          throw codedError("Input event is malformed or exceeds supported limits", "invalid_input");
         }
         const normalized = event.type === "pointer" ? normalizeTouchPointerInputForCdp(event) : event;
         await backendLifecycle.input(normalized as unknown as RemoteSurfaceInputPayload);
