@@ -73,6 +73,9 @@ const EXPECTED_CODE_TO_STATUS = {
   connector_instance_selector_required: 400,
   connector_instance_store_required: 500,
   connector_invalid: 400,
+  // No verified install, local source, or built-in fixture can run the
+  // connection; the owner installs the connector and retries.
+  connector_not_installed: 409,
   // The submitted value cannot be a secret (mask, placeholder, or whitespace
   // only). 400 because it is the owner's to correct in the form, not a server
   // fault — an unmapped code would fall through to 500 and read as our failure.

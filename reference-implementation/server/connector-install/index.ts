@@ -317,7 +317,19 @@ export function createConnectorInstallStore(): ConnectorInstallStore {
           .map(parse)
           .filter((row): row is ConnectorInstallRecord => row !== null);
       }
-      const db = await sqlite();
+      // Read-only: owner summary GETs list installs and must stay write-free,
+      // so this path never runs the CREATE TABLE in `sqlite()`. A missing
+      // table means nothing was ever installed.
+      const db = await import("../../lib/db.ts");
+      const tableExists =
+        [
+          ...db.iterateDynamicSqlAcknowledged<{ name: string }>(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'connector_installs'"
+          ),
+        ].length > 0;
+      if (!tableExists) {
+        return [];
+      }
       return [
         ...db.iterateDynamicSqlAcknowledged<InstallRow>(
           "SELECT record_json FROM connector_installs ORDER BY connector_id"

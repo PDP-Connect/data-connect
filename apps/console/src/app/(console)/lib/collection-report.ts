@@ -31,6 +31,7 @@ import type { AxisChip, EvidenceTone } from "@pdpp/display";
 import { formatCoverageAxis } from "@pdpp/display";
 import type { ForwardDispositionSummary } from "./connection-evidence.ts";
 import { formatForwardDisposition } from "./connection-evidence.ts";
+import { dispositionForInstallState } from "./connector-implementation.ts";
 import type { RefCollectionReportEntry } from "./ref-client.ts";
 
 export interface StreamCollectionFacts {
@@ -282,9 +283,22 @@ function strongerTone(a: EvidenceTone, b: EvidenceTone): EvidenceTone {
  * forward-disposition formatters so the per-stream vocabulary never diverges
  * from the connection headline.
  */
-export function formatStreamCollectionFacts(entry: RefCollectionReportEntry): StreamCollectionFacts {
+export function formatStreamCollectionFacts(
+  entry: RefCollectionReportEntry,
+  options: {
+    /**
+     * The connection's connector has no implementation on this server
+     * (`connector_implementation.state: "not_installed"`). No next run can
+     * happen, so the reference's disposition is replaced by the install blocker.
+     */
+    readonly connectorNotInstalled?: boolean;
+  } = {}
+): StreamCollectionFacts {
   const coverage = formatCoverageAxis(entry.coverage_condition);
-  const disposition = formatForwardDisposition(entry.forward_disposition);
+  const disposition = dispositionForInstallState(
+    formatForwardDisposition(entry.forward_disposition),
+    options.connectorNotInstalled === true
+  );
   const counts = buildCountsLine(entry);
   const skipLabel = buildSkipLabel(entry.skipped);
   const pendingDetailGaps =

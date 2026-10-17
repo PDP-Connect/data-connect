@@ -482,6 +482,17 @@ export interface BrowserSurfaceRunProjection extends BrowserSurfaceProjection {
   readonly connector_id: string;
 }
 
+/**
+ * Which implementation a run of this connector would execute, as far as
+ * presence goes. `installed`/`local_source` mean a record exists (its bytes
+ * are verified only when a run starts, which fails `connector_install_invalid`
+ * if they no longer match). `built_in` means the path resolver supplies code
+ * without an install (the reference fixture seed, or an injected resolver).
+ * `not_installed` is the state in which `runNow` refuses with
+ * `connector_not_installed`.
+ */
+export type ConnectorImplementationState = "built_in" | "installed" | "local_source" | "not_installed";
+
 export type ConnectorPathResolver = (
   connectorId: string,
   manifest?: ConnectorManifest,
@@ -896,6 +907,18 @@ export interface Controller {
   ) => Promise<BrowserSurfaceRuntimeSurfaceObservation>;
   promoteBrowserSurfaceLeasesAfterBoot: () => Promise<void>;
   reconcileBrowserSurfaceLeasesAfterBoot: () => Promise<void>;
+  /**
+   * Presence-only answer to "would `runNow` find an implementation for these
+   * connectors?" — the same local-source → install → path-resolver order
+   * `runNow` uses, without starting a run or hashing install bytes. Lets owner
+   * summaries say a connector is not installed before the owner taps Sync.
+   * Batched so a summary page costs one install-store read, not one per row,
+   * and read-only so a summary GET stays write-free. Optional so test doubles
+   * that never project summaries need not supply it.
+   */
+  inspectConnectorImplementations?: (
+    connectors: readonly { readonly connectorId: string; readonly manifest?: ConnectorManifest }[]
+  ) => Promise<ReadonlyMap<string, ConnectorImplementationState>>;
   respondToInteraction: (runId: string, input?: RunInteractionResponseInput) => RunInteractionAck;
   runNow: (connectorId: string, options?: RunNowOptions) => Promise<RunNowResult>;
   setScheduleEnabled: (
@@ -977,6 +1000,12 @@ interface ActiveRunInteraction {
 // typed instanceof checks instead of sniffing duck-typed properties.
 export class ControllerError extends Error {
   readonly code: string;
+  /**
+   * Bare connector key the error is about. Set on `connector_not_installed`
+   * so the HTTP layer can surface `connector_id` in the error envelope and a
+   * client can offer the install action without parsing the message.
+   */
+  readonly connectorId: string | undefined;
   readonly details: readonly { param: string; message: string }[] | undefined;
   /**
    * ISO timestamp of the next eligible retry window. Set on
@@ -996,6 +1025,7 @@ export class ControllerError extends Error {
     message: string,
     code: string,
     extra: {
+      connectorId?: string;
       details?: readonly { param: string; message: string }[];
       nextEligibleAt?: string;
       pendingPressureGapCount?: number;
@@ -1005,6 +1035,7 @@ export class ControllerError extends Error {
   ) {
     super(message);
     this.code = code;
+    this.connectorId = extra.connectorId;
     this.details = extra.details;
     this.nextEligibleAt = extra.nextEligibleAt;
     this.pendingPressureGapCount = extra.pendingPressureGapCount;
@@ -3988,6 +4019,39 @@ export function createController(opts: ControllerOptions = {}): Controller {
     }
   }
 
+  async function inspectConnectorImplementations(
+    connectors: readonly { readonly connectorId: string; readonly manifest?: ConnectorManifest }[]
+  ): Promise<ReadonlyMap<string, ConnectorImplementationState>> {
+    const states = new Map<string, ConnectorImplementationState>();
+    if (connectors.length === 0) {
+      return states;
+    }
+    const installed = new Set(
+      (await activeConnectorInstallStore.listActive()).map((record) => record.connectorId)
+    );
+    // Developer-local sources are rare; skip the per-connector selection
+    // lookup entirely when none are registered.
+    const hasLocalSources = (await localSourceStore.list()).length > 0;
+    // The fallback `runNow` reaches when neither a local source nor an install
+    // is active. Calling the default resolver here would re-read both stores
+    // per connector, so use its seed-fixture tail directly.
+    const fallbackResolver = opts.connectorPathResolver || resolveDefaultConnectorPath;
+    for (const { connectorId, manifest } of connectors) {
+      if (states.has(connectorId)) {
+        continue;
+      }
+      if (hasLocalSources && (await localSourceStore.getSelectedForConnector(connectorId))) {
+        states.set(connectorId, "local_source");
+      } else if (installed.has(connectorId)) {
+        states.set(connectorId, "installed");
+      } else {
+        const path = await Promise.resolve(fallbackResolver(connectorId, manifest));
+        states.set(connectorId, path ? "built_in" : "not_installed");
+      }
+    }
+    return states;
+  }
+
   async function validateRunNowPreconditions(
     connectorId: string,
     options: RunNowOptions,
@@ -4037,7 +4101,8 @@ export function createController(opts: ControllerOptions = {}): Controller {
     if (!connectorPath) {
       throw new ControllerError(
         `No runnable connector implementation is available for ${connectorId}: no verified install is active, and its manifest is not a reference fixture`,
-        "not_found"
+        "connector_not_installed",
+        { connectorId }
       );
     }
     return {
@@ -4865,6 +4930,7 @@ export function createController(opts: ControllerOptions = {}): Controller {
     getSchedule,
     isNeedsHuman: (connectorId: string, options: ConnectorInstanceOptions = {}) =>
       needsHumanAttention.has(runtimeKey(connectorId, options.connectorInstanceId)),
+    inspectConnectorImplementations,
     issueRuntimeOwnerToken,
     listBrowserSurfaceRunProjections,
     listSchedules,

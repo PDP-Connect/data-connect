@@ -1236,6 +1236,58 @@ test("owner uninstall route calls the service and returns the completed action",
   assert.deepEqual(body, { data: { connector_key: "github", uninstalled: true }, object: "connector_uninstall" });
 });
 
+test("owner update route reports an implementation change only after the update succeeds", async () => {
+  type RegisteredHandler = (
+    req: { body?: Record<string, unknown> },
+    res: { json: (body: unknown) => unknown; status: (code: number) => unknown }
+  ) => Promise<void>;
+  let handler: RegisteredHandler | undefined;
+  let changes = 0;
+  let failNext = false;
+  const app = {
+    get() {
+      return this;
+    },
+    post(path: string, ...args: unknown[]) {
+      if (path.endsWith("/update")) handler = args.at(-1) as RegisteredHandler;
+      return this;
+    },
+  };
+  mountOwnerConnectorInstall(app as never, {
+    handleError: () => undefined,
+    onImplementationChanged: () => {
+      changes += 1;
+    },
+    pdppError: (_res, status, code) => assert.fail(`${status} ${code}`),
+    requireOwner: () => undefined,
+    requireToken: () => undefined,
+    service: {
+      catalog: async () => [],
+      install: async () => assert.fail("unexpected install"),
+      status: async () => [],
+      uninstall: async () => assert.fail("unexpected uninstall"),
+      update: async (connectorId) => {
+        if (failNext) throw new Error("no verified update target");
+        return { connectorId, digest } as never;
+      },
+    },
+  });
+  const res = {
+    json() {
+      return this;
+    },
+    status() {
+      return this;
+    },
+  };
+  assert.ok(handler);
+  await handler({ body: { connector_id: "chase" } }, res);
+  assert.equal(changes, 1, "a successful update invalidates cached summaries");
+  failNext = true;
+  await handler({ body: { connector_id: "chase" } }, res);
+  assert.equal(changes, 1, "a failed update leaves the cached summaries alone");
+});
+
 test("owner uninstall route returns the source count refusal", async () => {
   type RegisteredHandler = (
     req: { body?: Record<string, unknown> },
