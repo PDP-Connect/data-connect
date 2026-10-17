@@ -10960,11 +10960,54 @@ function buildConsentPackageGrant(
   };
 }
 
-function consentExchangeTokenIsActive(row: ConsentExchangeRow): boolean {
+interface BoundConsentExchangeRow extends ConsentExchangeRow {
+  token_client_id: string | null;
+  token_subject_id: string;
+}
+
+// A persisted token expiry is TEXT on both backends. Anything that is not a
+// parseable timestamp, including "", fails closed instead of comparing as NaN.
+function tokenExpiryIsActive(expiresAt: string | null): boolean {
+  if (expiresAt === null) {
+    return true;
+  }
+  const expiresAtMs = Date.parse(expiresAt);
+  return Number.isFinite(expiresAtMs) && expiresAtMs > Date.now();
+}
+
+function loadConsentExchangeBoundGrant(row: BoundConsentExchangeRow, grantRow: DbRow): DbRow | null {
+  try {
+    // Same persisted grant and token binding checks that introspection applies.
+    return requirePersistedGrantState({
+      ...grantRow,
+      token_grant_id: row.grant_id,
+      token_client_id: row.token_client_id,
+      token_subject_id: row.token_subject_id,
+      token_expires_at: row.token_expires_at,
+    }).grant;
+  } catch (error: unknown) {
+    if (
+      isAuthError(error) &&
+      (error.code === "grant_invalid" || error.code === "authorization_state.unsupported_legacy_shape")
+    ) {
+      return null;
+    }
+    throw error;
+  }
+}
+
+function consentExchangePackageBindingMatches(row: BoundConsentExchangeRow, packageRow: DbRow): boolean {
+  return Boolean(
+    requireCurrentPackageEnvelope(packageRow) &&
+      packageRow.package_id === row.package_id &&
+      packageRow.subject_id === row.token_subject_id &&
+      packageRow.client_id === row.token_client_id
+  );
+}
+
+function consentExchangeTokenIsActive(row: BoundConsentExchangeRow): boolean {
   return (
-    !row.token_revoked &&
-    (!row.token_expires_at || new Date(row.token_expires_at).getTime() > Date.now()) &&
-    Boolean(row.grant_id) !== Boolean(row.package_id)
+    !row.token_revoked && tokenExpiryIsActive(row.token_expires_at) && Boolean(row.grant_id) !== Boolean(row.package_id)
   );
 }
 
@@ -11048,14 +11091,17 @@ function consentExchangeRedeemedReason(row: ConsentExchangeRow, proofHash: strin
 
 async function loadPostgresConsentExchangeGrant(
   client: PostgresTransactionClient,
-  row: ConsentExchangeRow
+  row: BoundConsentExchangeRow
 ): Promise<
   | { ok: false; reason: "revoked" | "unknown" }
   | { grant: Record<string, unknown>; grantId?: string; ok: true; packageId?: string }
 > {
   if (row.grant_id) {
     const grantResult = await client.query<DbRow>(
-      `SELECT grant_id, grant_json::text AS grant_json
+      `SELECT grant_id AS persisted_grant_id, subject_id AS grant_subject_id,
+              client_id AS grant_client_id, access_mode AS grant_access_mode,
+              expires_at AS grant_expires_at, grant_json::text AS grant_json,
+              storage_binding_json::text AS storage_binding_json
        FROM grants
       WHERE grant_id = $1 AND status = 'active'
       FOR SHARE`,
@@ -11065,20 +11111,20 @@ async function loadPostgresConsentExchangeGrant(
     if (!(grantRow && isNonEmptyString(grantRow.grant_json))) {
       return { ok: false, reason: "revoked" };
     }
-    const parsed: unknown = JSON.parse(grantRow.grant_json);
-    if (!isRecord(parsed) || parsed.grant_id !== row.grant_id) {
+    const parsed = loadConsentExchangeBoundGrant(row, grantRow);
+    if (!parsed) {
       return { ok: false, reason: "unknown" };
     }
     return { grant: parsed, grantId: row.grant_id, ok: true };
   }
   const packageResult = await client.query<DbRow>(
-    `SELECT package_id
+    `SELECT package_id, subject_id, client_id, package_json::text AS package_json
      FROM grant_packages
     WHERE package_id = $1 AND status = 'active'
     FOR SHARE`,
     [row.package_id]
   );
-  if (!packageResult.rows[0]) {
+  if (!packageResult.rows[0] || !consentExchangePackageBindingMatches(row, packageResult.rows[0])) {
     return { ok: false, reason: "revoked" };
   }
   const members = await client.query<GrantPackageMemberRow>(
@@ -11124,9 +11170,10 @@ export async function consumeConsentExchangeCode(
     ? await withPostgresTransaction(
         // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: This transaction deliberately keeps row lock, active-authority validation, envelope reconstruction, and first-redemption transition in one auditable atomic unit.
         async (client) => {
-          const selected = await client.query<ConsentExchangeRow>(
+          const selected = await client.query<BoundConsentExchangeRow>(
             `SELECT c.code_hash, c.proof_hash, c.token_id, c.created_at, c.expires_at,
                   c.redeemed_at, t.grant_id, t.package_id,
+                  t.subject_id AS token_subject_id, t.client_id AS token_client_id,
                   t.revoked AS token_revoked, t.expires_at AS token_expires_at
              FROM consent_exchange_codes c
              JOIN tokens t ON t.token_id = c.token_id
@@ -11172,7 +11219,9 @@ export async function consumeConsentExchangeCode(
     : transaction(
         // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: SQLite mirrors the PostgreSQL atomic unit so authority validation and first redemption cannot be split across transactions.
         () => {
-          const row = getOne<ConsentExchangeRow>(referenceQueries.authConsentExchangeCodesGetForRedemption, [codeHash]);
+          const row = getOne<BoundConsentExchangeRow>(referenceQueries.authConsentExchangeCodesGetForRedemption, [
+            codeHash,
+          ]);
           if (!row) {
             return { ok: false as const, reason: "unknown" };
           }
@@ -11197,15 +11246,22 @@ export async function consumeConsentExchangeCode(
             if (!(grantRow && grantRow.status === "active" && isNonEmptyString(grantRow.grant_json))) {
               return { ok: false as const, reason: "revoked" };
             }
-            const parsed: unknown = JSON.parse(grantRow.grant_json);
-            if (!isRecord(parsed) || parsed.grant_id !== row.grant_id) {
+            const parsed = loadConsentExchangeBoundGrant(row, grantRow);
+            if (!parsed) {
               return { ok: false as const, reason: "unknown" };
             }
             grant = parsed;
             grantId = row.grant_id;
           } else {
             const packageRow = sqliteGrantPackageStore.getPackageById(row.package_id || "") as DbRow | null;
-            if (!(packageRow && packageRow.status === "active" && row.package_id)) {
+            if (
+              !(
+                packageRow &&
+                packageRow.status === "active" &&
+                row.package_id &&
+                consentExchangePackageBindingMatches(row, packageRow)
+              )
+            ) {
               return { ok: false as const, reason: "revoked" };
             }
             const members = sqliteGrantPackageStore.listAllMembers(row.package_id) as readonly GrantPackageMemberRow[];
@@ -11897,33 +11953,38 @@ export async function issueToken(
   meta: { traceContext?: TraceContext | null; source?: string } = {}
 ): Promise<string> {
   if (isPostgresStorageBackend()) {
-    const { tokenId, grantRow, persistedGrant } = await withPostgresTransaction((client) =>
-      insertPostgresGrantToken(client, { clientId, expiresAt, grantId, subjectId })
-    );
+    return withPostgresTransaction(async (client) => {
+      const { tokenId, grantRow, persistedGrant } = await insertPostgresGrantToken(client, {
+        clientId,
+        expiresAt,
+        grantId,
+        subjectId,
+      });
 
-    await emitSpineEvent({
-      actor_id: "pdpp_as",
-      actor_type: "authorization_server",
-      client_id: clientId,
-      data: {
-        issuance_path: meta.source || "grant",
-        source: describeGrantSource(persistedGrant),
-        token_kind: "client",
-      },
-      event_type: "token.issued",
-      grant_id: grantId,
-      object_id: deriveTokenAuditId(tokenId),
-      object_type: "token",
-      request_id: meta.traceContext?.request_id || undefined,
-      scenario_id: meta.traceContext?.scenario_id || grantRow.scenario_id || undefined,
-      status: "succeeded",
-      subject_id: subjectId,
-      subject_type: "subject",
-      token_id: deriveTokenAuditId(tokenId),
-      trace_id: meta.traceContext?.trace_id || grantRow.trace_id || undefined,
+      await postgresEmitSpineEventInTransaction(client, {
+        actor_id: "pdpp_as",
+        actor_type: "authorization_server",
+        client_id: clientId,
+        data: {
+          issuance_path: meta.source || "grant",
+          source: describeGrantSource(persistedGrant),
+          token_kind: "client",
+        },
+        event_type: "token.issued",
+        grant_id: grantId,
+        object_id: deriveTokenAuditId(tokenId),
+        object_type: "token",
+        request_id: meta.traceContext?.request_id || null,
+        scenario_id: meta.traceContext?.scenario_id || grantRow.scenario_id || null,
+        status: "succeeded",
+        subject_id: subjectId,
+        subject_type: "subject",
+        token_id: deriveTokenAuditId(tokenId),
+        trace_id: meta.traceContext?.trace_id || grantRow.trace_id || null,
+      });
+
+      return tokenId;
     });
-
-    return tokenId;
   }
 
   // better-sqlite3 transactions must be synchronous. We prepare the body as a
@@ -12143,7 +12204,7 @@ export async function introspect(token: unknown): Promise<TokenIntrospectionResu
   }
 
   // Check expiry
-  if (row.expires_at && new Date(row.expires_at) < new Date()) {
+  if (!tokenExpiryIsActive(row.expires_at)) {
     return {
       active: false,
       inactive_reason: row.token_kind === "client" ? "grant_expired" : "token_expired",
