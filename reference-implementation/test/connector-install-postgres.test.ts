@@ -11,66 +11,80 @@
  * record, one transaction per record. Every later install failed as busy.
  */
 
-import assert from "node:assert/strict"
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
-import { tmpdir } from "node:os"
-import { join } from "node:path"
-import test from "node:test"
-import { registerConnector } from "../server/auth.ts"
-import {
-  type ConnectorCatalogEntry,
-  createConnectorInstallService,
-  createConnectorInstallStore,
-} from "../server/connector-install/index.ts"
-import { installedConnectorManifestRegistration } from "../server/connector-install/manifest-registration.ts"
-import { withConnectorLifecycleLock } from "../server/connector-lifecycle-lock.ts"
-import { closeDb, initDb } from "../server/db.ts"
-import { __setPostgresRecordSortBackfillPhaseHookForTest } from "../server/postgres-records.ts"
+import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import test from "node:test";
+import { withConnectorLifecycleLock } from "../server/connector-lifecycle-lock.ts";
+import { closeDb, initDb } from "../server/db.ts";
+import { __setPostgresRecordSortBackfillPhaseHookForTest } from "../server/postgres-records.ts";
 import {
   closePostgresStorage,
   initPostgresStorage,
   postgresQuery,
   withPostgresTransaction,
-} from "../server/postgres-storage.ts"
-import { withTemporaryPostgresDatabase } from "./helpers/postgres-temp-database.ts"
+} from "../server/postgres-storage.ts";
+import { createAlreadyAdmittedTestDatabaseChildAttachment } from "../server/postgres-test-database-guard.ts";
+import { runSearchIndexDirtyReconcileRound } from "../server/search-index-reconcile.ts";
+import { configureSemanticBackend, makeStubBackend } from "../server/search-semantic.ts";
+import {
+  GMAIL_CONNECTOR_ID as CONNECTOR_ID,
+  GMAIL_INSTALL_DIGEST as digest,
+  GMAIL_INSTALL_VERSION,
+  gmailInstallService,
+  installedGmail,
+  seedMigratedGmail as seedGmail,
+} from "./helpers/connector-install-gmail-fixture.ts";
+import { withTemporaryPostgresDatabase } from "./helpers/postgres-temp-database.ts";
 
-const POSTGRES_URL = process.env.PDPP_TEST_POSTGRES_URL
-const CONNECTOR_ID = "gmail"
-const INSTANCES = ["cin_gmail_primary", "cin_gmail_work"] as const
-const RECORDS_PER_STREAM = 40
-const digest = `sha256:${"a".repeat(64)}`
-const configDigest = `sha256:${"b".repeat(64)}`
+const POSTGRES_URL = process.env.PDPP_TEST_POSTGRES_URL;
+const INSTANCES = ["cin_gmail_primary", "cin_gmail_work"] as const;
+const RECORDS_PER_STREAM = 40;
 // `withConnectorLifecycleLock` key for gmail, as two 32-bit halves in pg_locks.
-const GMAIL_LIFECYCLE_LOCK = { classid: 1_636_929_005, objid: 1_056_513_344 }
-
-const shippedGmail = JSON.parse(
-  readFileSync(new URL("./fixtures/collection-profiles/gmail.json", import.meta.url), "utf8")
-) as Record<string, unknown>
+const GMAIL_LIFECYCLE_LOCK = { classid: 1_636_929_005, objid: 1_056_513_344 };
 
 function deferred(): { promise: Promise<void>; resolve: () => void } {
-  let resolve: () => void = () => undefined
-  const promise = new Promise<void>(settle => {
-    resolve = settle
-  })
-  return { promise, resolve }
+  let resolve: () => void = () => undefined;
+  const promise = new Promise<void>((settle) => {
+    resolve = settle;
+  });
+  return { promise, resolve };
 }
 
+/** The stub embedding backend, counting the documents it embeds. */
+const embedder = (() => {
+  const stub = makeStubBackend({ dimensions: 16 });
+  const counter = { documents: 0 };
+  return {
+    backend: {
+      ...stub,
+      embedDocument: (text: string) => {
+        counter.documents += 1;
+        return stub.embedDocument(text);
+      },
+    },
+    counter,
+  };
+})();
+
 async function within<T>(work: Promise<T>, ms: number, what: string): Promise<T> {
-  let timer: NodeJS.Timeout | undefined
+  let timer: NodeJS.Timeout | undefined;
   try {
     return await Promise.race([
       work,
       new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(() => reject(new Error(`${what} did not settle within ${String(ms)} ms`)), ms)
+        timer = setTimeout(() => reject(new Error(`${what} did not settle within ${String(ms)} ms`)), ms);
       }),
-    ])
+    ]);
   } finally {
-    clearTimeout(timer)
+    clearTimeout(timer);
   }
 }
 
-async function withPostgres(name: string, body: () => Promise<void>): Promise<void> {
-  assert.ok(POSTGRES_URL)
+async function withPostgres(name: string, body: (databaseUrl: string) => Promise<void>): Promise<void> {
+  assert.ok(POSTGRES_URL);
   await withTemporaryPostgresDatabase(
     {
       closeConnections: closePostgresStorage,
@@ -78,89 +92,19 @@ async function withPostgres(name: string, body: () => Promise<void>): Promise<vo
       databaseName: `pdpp_test_install_${name}_${Date.now().toString(36)}_${Math.random().toString(16).slice(2, 10)}`,
       templateName: null,
     },
-    async databaseUrl => {
-      initDb(":memory:")
+    async (databaseUrl) => {
+      initDb(":memory:");
+      configureSemanticBackend(embedder.backend);
       try {
-        await initPostgresStorage({ backend: "postgres", databaseUrl })
-        await body()
+        await initPostgresStorage({ backend: "postgres", databaseUrl });
+        await body(databaseUrl);
       } finally {
-        await closePostgresStorage()
-        closeDb()
+        configureSemanticBackend(null);
+        await closePostgresStorage();
+        closeDb();
       }
     }
-  )
-}
-
-/** gmail as a migrated instance has it: registered, two connections, records whose derived columns predate the manifest. */
-async function seedMigratedGmail(): Promise<void> {
-  await registerConnector(shippedGmail, { backfillRetrievalIndexes: false })
-  const now = new Date().toISOString()
-  for (const connectorInstanceId of INSTANCES) {
-    await postgresQuery(
-      `INSERT INTO connector_instances(connector_instance_id, owner_subject_id, connector_id, display_name,
-         source_kind, source_binding_key, created_at, updated_at)
-       VALUES($1, 'owner', $2, 'Gmail', 'account', $1, $3, $3)`,
-      [connectorInstanceId, CONNECTOR_ID, now]
-    )
-    for (const stream of ["messages", "message_bodies"]) {
-      const values: string[] = []
-      const params: unknown[] = []
-      for (let index = 0; index < RECORDS_PER_STREAM; index += 1) {
-        const id = `${stream}-${String(index).padStart(4, "0")}`
-        const receivedAt = new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString()
-        const data =
-          stream === "messages"
-            ? { id, received_at: receivedAt, snippet: `snippet ${id}`, subject: `subject ${id}` }
-            : { body_text: `body ${id}`, id, message_received_at: receivedAt }
-        const base = values.length * 5
-        values.push(`($1, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}::jsonb, $${base + 6}, $${base + 4})`)
-        params.push(connectorInstanceId, stream, id, JSON.stringify(data), receivedAt)
-      }
-      // Every row shares $1, the connector id.
-      await postgresQuery(
-        `INSERT INTO records(connector_id, connector_instance_id, stream, record_key, record_json, emitted_at, primary_key_text)
-         VALUES ${values.join(", ")}`,
-        [CONNECTOR_ID, ...params]
-      )
-    }
-  }
-}
-
-function gmailInstallService(
-  dataDir: string,
-  hooks: { readonly onRepair?: (repair: Promise<unknown>) => void; readonly stage?: Promise<void> } = {}
-) {
-  const entry: ConnectorCatalogEntry = {
-    bindings: {},
-    config_digest: configDigest,
-    connector_id: CONNECTOR_ID,
-    connector_key: CONNECTOR_ID,
-    digest,
-    latest: true,
-    version: "9.0.0",
-  }
-  return createConnectorInstallService({
-    catalogLoader: async () => [entry],
-    dataDir,
-    installArtifact: async root => {
-      await hooks.stage
-      mkdirSync(join(root, "profile"), { recursive: true })
-      mkdirSync(join(root, "dist"), { recursive: true })
-      writeFileSync(
-        join(root, "profile", "collection-profile.json"),
-        JSON.stringify({ ...shippedGmail, version: "9.0.0" })
-      )
-      writeFileSync(join(root, "dist", "collection-profile.mjs"), "export {};\n")
-      writeFileSync(join(root, "provenance.json"), "{}\n")
-    },
-    registerManifest: installedConnectorManifestRegistration.registerManifest,
-    repairManifestDerivedState: manifest => {
-      const repair = installedConnectorManifestRegistration.repairManifestDerivedState(manifest)
-      hooks.onRepair?.(repair)
-      return repair
-    },
-    store: createConnectorInstallStore(),
-  })
+  );
 }
 
 async function gmailLifecycleLockHolders(): Promise<number> {
@@ -168,40 +112,40 @@ async function gmailLifecycleLockHolders(): Promise<number> {
     `SELECT count(*)::text AS holders FROM pg_locks
       WHERE locktype = 'advisory' AND granted AND classid = $1 AND objid = $2 AND objsubid = 1`,
     [GMAIL_LIFECYCLE_LOCK.classid, GMAIL_LIFECYCLE_LOCK.objid]
-  )
-  return Number(result.rows[0]?.holders ?? 0)
+  );
+  return Number(result.rows[0]?.holders ?? 0);
 }
 
 test(
   "PostgreSQL: installing over a connector with existing records returns before the O(records) repair and holds no lock during it",
   { skip: !POSTGRES_URL },
   async () => {
-    const dataDir = mkdtempSync(join(tmpdir(), "pdpp-install-pg-"))
-    const repairEntered = deferred()
-    const repairRelease = deferred()
-    let repair: Promise<unknown> | undefined
+    const dataDir = mkdtempSync(join(tmpdir(), "pdpp-install-pg-"));
+    const repairEntered = deferred();
+    const repairRelease = deferred();
+    let repair: Promise<unknown> | undefined;
     try {
       await withPostgres("repair", async () => {
-        await seedMigratedGmail()
-        __setPostgresRecordSortBackfillPhaseHookForTest(async point => {
+        await seedGmail({ instances: INSTANCES, recordsPerStream: RECORDS_PER_STREAM });
+        __setPostgresRecordSortBackfillPhaseHookForTest(async (point) => {
           if (point === "before-instance-fence") {
-            repairEntered.resolve()
-            await repairRelease.promise
+            repairEntered.resolve();
+            await repairRelease.promise;
           }
-        })
+        });
         try {
           const service = gmailInstallService(dataDir, {
-            onRepair: started => {
-              repair = started
+            onRepair: (started) => {
+              repair = started;
             },
-          })
-          const installed = await within(service.install(CONNECTOR_ID, digest), 5000, "gmail install")
-          assert.equal(installed.digest, digest)
-          await within(repairEntered.promise, 5000, "derived repair start")
+          });
+          const installed = await within(service.install(CONNECTOR_ID, digest), 5000, "gmail install");
+          assert.equal(installed.digest, digest);
+          await within(repairEntered.promise, 5000, "derived repair start");
 
           // The repair is running, and neither lock is held.
-          assert.equal(existsSync(join(dataDir, ".connector-install.lock")), false)
-          assert.equal(await gmailLifecycleLockHolders(), 0)
+          assert.equal(existsSync(join(dataDir, ".connector-install.lock")), false);
+          assert.equal(await gmailLifecycleLockHolders(), 0);
           assert.equal(
             await within(
               withConnectorLifecycleLock(dataDir, CONNECTOR_ID, async () => "free"),
@@ -209,93 +153,284 @@ test(
               "lifecycle lock"
             ),
             "free"
-          )
+          );
 
-          repairRelease.resolve()
-          await within(Promise.resolve(repair), 10_000, "derived repair")
+          repairRelease.resolve();
+          await within(Promise.resolve(repair), 10_000, "derived repair");
           const stale = await postgresQuery<{ stale: string }>(
             `SELECT count(*)::text AS stale FROM records
               WHERE connector_id = $1 AND stream = 'messages' AND cursor_value IS DISTINCT FROM record_json->>'received_at'`,
             [CONNECTOR_ID]
-          )
-          assert.equal(stale.rows[0]?.stale, "0", "the deferred repair still re-derives existing records")
+          );
+          assert.equal(stale.rows[0]?.stale, "0", "the deferred repair still re-derives existing records");
         } finally {
-          repairRelease.resolve()
-          await Promise.resolve(repair).catch(() => undefined)
-          __setPostgresRecordSortBackfillPhaseHookForTest(null)
+          repairRelease.resolve();
+          await Promise.resolve(repair).catch(() => undefined);
+          __setPostgresRecordSortBackfillPhaseHookForTest(null);
         }
-      })
+      });
     } finally {
-      rmSync(dataDir, { force: true, recursive: true })
+      rmSync(dataDir, { force: true, recursive: true });
     }
   }
-)
+);
 
 test(
   "PostgreSQL: same-process lifecycle waiters cannot exhaust the pool the install holder needs",
   { skip: !POSTGRES_URL },
   async () => {
-    const dataDir = mkdtempSync(join(tmpdir(), "pdpp-install-pg-"))
-    const stage = deferred()
-    const waiters: Promise<unknown>[] = []
-    let repair: Promise<unknown> | undefined
+    const dataDir = mkdtempSync(join(tmpdir(), "pdpp-install-pg-"));
+    const stage = deferred();
+    const waiters: Promise<unknown>[] = [];
+    let repair: Promise<unknown> | undefined;
     try {
       await withPostgres("pool", async () => {
-        await seedMigratedGmail()
+        await seedGmail({ instances: INSTANCES, recordsPerStream: RECORDS_PER_STREAM });
         const service = gmailInstallService(dataDir, {
-          onRepair: started => {
-            repair = started
+          onRepair: (started) => {
+            repair = started;
           },
           stage: stage.promise,
-        })
-        const installing = service.install(CONNECTOR_ID, digest)
+        });
+        const installing = service.install(CONNECTOR_ID, digest);
         // The install now holds the gmail lifecycle lock and waits on its artifact.
         for (let attempt = 0; attempt < 200 && (await gmailLifecycleLockHolders()) === 0; attempt += 1) {
-          await new Promise(settle => setTimeout(settle, 10))
+          await new Promise((settle) => setTimeout(settle, 10));
         }
-        assert.equal(await gmailLifecycleLockHolders(), 1)
+        assert.equal(await gmailLifecycleLockHolders(), 1);
         // More waiters than the interactive pool has connections (8): scheduler
         // ticks, run starts and connection upserts for the same connector.
         for (let index = 0; index < 8; index += 1) {
-          waiters.push(withConnectorLifecycleLock(dataDir, CONNECTOR_ID, async () => index))
+          waiters.push(withConnectorLifecycleLock(dataDir, CONNECTOR_ID, async () => index));
         }
-        await new Promise(settle => setTimeout(settle, 200))
-        stage.resolve()
-        assert.equal((await within(installing, 5000, "gmail install")).digest, digest)
-        assert.deepEqual(await within(Promise.all(waiters), 5000, "lifecycle waiters"), [0, 1, 2, 3, 4, 5, 6, 7])
-        await within(Promise.resolve(repair), 30_000, "derived repair")
-      })
+        await new Promise((settle) => setTimeout(settle, 200));
+        stage.resolve();
+        assert.equal((await within(installing, 5000, "gmail install")).digest, digest);
+        assert.deepEqual(await within(Promise.all(waiters), 5000, "lifecycle waiters"), [0, 1, 2, 3, 4, 5, 6, 7]);
+        await within(Promise.resolve(repair), 30_000, "derived repair");
+      });
     } finally {
-      stage.resolve()
-      rmSync(dataDir, { force: true, recursive: true })
+      stage.resolve();
+      rmSync(dataDir, { force: true, recursive: true });
     }
   }
-)
+);
 
 test(
   "PostgreSQL: terminating the backend of an open transaction fails that transaction without crashing the process",
   { skip: !POSTGRES_URL },
   async () => {
     await withPostgres("terminate", async () => {
-      const holding = deferred()
-      const terminated = deferred()
-      let holdingPid = 0
-      const transaction = withPostgresTransaction(async client => {
-        await client.query("SELECT pg_advisory_xact_lock(424242)")
-        const backend = await client.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")
-        holdingPid = backend.rows[0]?.pid ?? 0
-        holding.resolve()
+      const holding = deferred();
+      const terminated = deferred();
+      let holdingPid = 0;
+      const transaction = withPostgresTransaction(async (client) => {
+        await client.query("SELECT pg_advisory_xact_lock(424242)");
+        const backend = await client.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+        holdingPid = backend.rows[0]?.pid ?? 0;
+        holding.resolve();
         // Idle in transaction, as the install's lifecycle lock was.
-        await terminated.promise
-        await client.query("SELECT 1")
-      })
-      await holding.promise
-      await postgresQuery("SELECT pg_terminate_backend($1)", [holdingPid])
-      await new Promise(settle => setTimeout(settle, 200))
-      terminated.resolve()
+        await terminated.promise;
+        await client.query("SELECT 1");
+      });
+      await holding.promise;
+      await postgresQuery("SELECT pg_terminate_backend($1)", [holdingPid]);
+      await new Promise((settle) => setTimeout(settle, 200));
+      terminated.resolve();
       // Before the fix, the client's unhandled `error` event crashed the process here.
-      await assert.rejects(transaction)
-      assert.equal((await postgresQuery<{ ok: number }>("SELECT 1 AS ok")).rows[0]?.ok, 1)
-    })
+      await assert.rejects(transaction);
+      assert.equal((await postgresQuery<{ ok: number }>("SELECT 1 AS ok")).rows[0]?.ok, 1);
+    });
   }
-)
+);
+
+// ---------------------------------------------------------------------------
+// A large semantic backfill on a database where HNSW inserts are slow.
+//
+// Prod (2026-10-17): chatgpt installs over 289k records failed 3 of 3 times.
+// A 500-row INSERT into semantic_search_blob passed the 15 s bulk
+// statement_timeout, and the error rolled the install back. The trigger below
+// stands in for an HNSW index that does not fit in memory: each row in one
+// statement costs more than the one before, so a 500-row statement takes about
+// 20 s and a 30-row statement well under 0.1 s.
+// ---------------------------------------------------------------------------
+
+const LARGE_RECORDS_PER_STREAM = 300;
+/** messages declares 2 semantic fields and message_bodies 1. */
+const LARGE_EXPECTED_VECTORS = LARGE_RECORDS_PER_STREAM * 3;
+const SMALL_STATEMENT_TIMEOUT_MS = "1000";
+
+async function slowSemanticInserts(): Promise<void> {
+  await postgresQuery(`
+    CREATE TABLE test_semantic_chunks (txid BIGINT PRIMARY KEY, rows_in_statement INTEGER NOT NULL);
+    CREATE FUNCTION test_slow_semantic_insert() RETURNS trigger LANGUAGE plpgsql AS $$
+    DECLARE position INTEGER;
+    BEGIN
+      INSERT INTO test_semantic_chunks VALUES (txid_current(), 1)
+        ON CONFLICT (txid) DO UPDATE SET rows_in_statement = test_semantic_chunks.rows_in_statement + 1
+        RETURNING rows_in_statement INTO position;
+      PERFORM pg_sleep(0.00016 * position);
+      RETURN NEW;
+    END $$;
+    CREATE TRIGGER test_slow_semantic_insert BEFORE INSERT ON semantic_search_blob
+      FOR EACH ROW EXECUTE FUNCTION test_slow_semantic_insert();
+  `);
+}
+
+async function gmailVectorCount(): Promise<number> {
+  const result = await postgresQuery<{ n: string }>(
+    "SELECT count(*)::text AS n FROM semantic_search_blob WHERE connector_id = $1",
+    [CONNECTOR_ID]
+  );
+  return Number(result.rows[0]?.n ?? 0);
+}
+
+async function gmailDirtyScopes(): Promise<number> {
+  const result = await postgresQuery<{ n: string }>(
+    "SELECT count(*)::text AS n FROM search_index_dirty WHERE connector_id = $1 AND dirty <> 0",
+    [CONNECTOR_ID]
+  );
+  return Number(result.rows[0]?.n ?? 0);
+}
+
+async function withSmallBulkStatementTimeout(body: () => Promise<void>): Promise<void> {
+  const previous = process.env.PDPP_POSTGRES_BULK_STATEMENT_TIMEOUT_MS;
+  process.env.PDPP_POSTGRES_BULK_STATEMENT_TIMEOUT_MS = SMALL_STATEMENT_TIMEOUT_MS;
+  try {
+    await body();
+  } finally {
+    if (previous === undefined) delete process.env.PDPP_POSTGRES_BULK_STATEMENT_TIMEOUT_MS;
+    else process.env.PDPP_POSTGRES_BULK_STATEMENT_TIMEOUT_MS = previous;
+  }
+}
+
+test(
+  "PostgreSQL: with slow vector inserts, an install returns at publication and the backfill completes in small chunks",
+  { skip: !POSTGRES_URL },
+  async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "pdpp-install-pg-"));
+    let repair: Promise<unknown> | undefined;
+    try {
+      await withSmallBulkStatementTimeout(() =>
+        withPostgres("large", async () => {
+          // The registry is already at the version being installed, with no
+          // install record: what three failed chatgpt installs left on prod.
+          await seedGmail({
+            instances: ["cin_gmail_large"],
+            recordsPerStream: LARGE_RECORDS_PER_STREAM,
+            registered: installedGmail,
+          });
+          await slowSemanticInserts();
+          const service = gmailInstallService(dataDir, {
+            onRepair: (started) => {
+              repair = started;
+            },
+          });
+
+          const startedAt = Date.now();
+          const installed = await within(service.install(CONNECTOR_ID, digest), 5000, "gmail install");
+          assert.ok(Date.now() - startedAt < 5000);
+          assert.equal(installed.manifest.version, GMAIL_INSTALL_VERSION);
+
+          await within(Promise.resolve(repair), 120_000, "post-install repair");
+          assert.equal(await gmailVectorCount(), LARGE_EXPECTED_VECTORS);
+          assert.equal(await gmailDirtyScopes(), 0);
+          const chunks = await postgresQuery<{ chunks: string; largest: number }>(
+            "SELECT count(*)::text AS chunks, max(rows_in_statement) AS largest FROM test_semantic_chunks"
+          );
+          // Only committed chunks remain; every one stayed far below the fixed 500.
+          assert.ok(Number(chunks.rows[0]?.chunks) > 1);
+          assert.ok(Number(chunks.rows[0]?.largest) < 125, `largest chunk ${String(chunks.rows[0]?.largest)}`);
+        })
+      );
+    } finally {
+      await Promise.resolve(repair).catch(() => undefined);
+      rmSync(dataDir, { force: true, recursive: true });
+    }
+  }
+);
+
+const CHILD_PROGRAM = `
+  import { closeDb, initDb } from "./server/db.ts";
+  import { initPostgresStorage } from "./server/postgres-storage.ts";
+  import { configureSemanticBackend, makeStubBackend } from "./server/search-semantic.ts";
+  import { GMAIL_CONNECTOR_ID, GMAIL_INSTALL_DIGEST, gmailInstallService } from "./test/helpers/connector-install-gmail-fixture.ts";
+  initDb(":memory:");
+  configureSemanticBackend(makeStubBackend({ dimensions: 16 }));
+  await initPostgresStorage(
+    { backend: "postgres", databaseUrl: process.env.PDPP_INSTALL_CHILD_DATABASE_URL },
+    { testOnlyAlreadyAdmittedChildAttachment: process.env.PDPP_INSTALL_CHILD_ATTACHMENT }
+  );
+  const service = gmailInstallService(process.env.PDPP_INSTALL_CHILD_DATA_DIR);
+  const startedAt = Date.now();
+  await service.install(GMAIL_CONNECTOR_ID, GMAIL_INSTALL_DIGEST);
+  console.log("INSTALLED " + String(Date.now() - startedAt));
+  // Stay alive: the post-install repair runs until the parent kills us.
+  setInterval(() => undefined, 1000);
+`;
+
+test(
+  "PostgreSQL: a server killed mid-backfill resumes it after restart without re-embedding committed vectors",
+  { skip: !POSTGRES_URL },
+  async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "pdpp-install-pg-"));
+    try {
+      await withSmallBulkStatementTimeout(() =>
+        withPostgres("restart", async (databaseUrl) => {
+          // Minted before any data exists: the guard admits a child only then.
+          const attachment = await createAlreadyAdmittedTestDatabaseChildAttachment(databaseUrl);
+          await seedGmail({ instances: ["cin_gmail_restart"], recordsPerStream: LARGE_RECORDS_PER_STREAM });
+          await slowSemanticInserts();
+          const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", CHILD_PROGRAM], {
+            cwd: resolve(import.meta.dirname, ".."),
+            env: {
+              ...process.env,
+              PDPP_INSTALL_CHILD_ATTACHMENT: attachment,
+              PDPP_INSTALL_CHILD_DATABASE_URL: databaseUrl,
+              PDPP_INSTALL_CHILD_DATA_DIR: dataDir,
+            },
+            stdio: ["ignore", "pipe", "pipe"],
+          });
+          let stdout = "";
+          let stderr = "";
+          child.stdout.on("data", (chunk) => (stdout += chunk));
+          child.stderr.on("data", (chunk) => (stderr += chunk));
+          const exited = new Promise<void>((settle) => child.once("close", () => settle()));
+          try {
+            // Kill the server once the backfill has committed some vectors.
+            const deadline = Date.now() + 60_000;
+            while ((await gmailVectorCount()) < 100) {
+              assert.ok(Date.now() < deadline, `backfill never started; child stderr: ${stderr.slice(-2000)}`);
+              assert.equal(child.exitCode, null, `child exited early: ${stderr.slice(-2000)}`);
+              await new Promise((settle) => setTimeout(settle, 50));
+            }
+          } finally {
+            child.kill("SIGKILL");
+            await exited;
+          }
+          assert.match(stdout, /INSTALLED \d+/, "the install returned before the backfill finished");
+          const committedAtKill = await gmailVectorCount();
+          assert.ok(committedAtKill < LARGE_EXPECTED_VECTORS, "the kill landed mid-backfill");
+          assert.ok((await gmailDirtyScopes()) > 0, "the unfinished repair is durable");
+
+          // After the restart, the maintenance sweep resumes the dirty scopes.
+          embedder.counter.documents = 0;
+          for (let round = 0; round < 20 && (await gmailDirtyScopes()) > 0; round += 1) {
+            await runSearchIndexDirtyReconcileRound({ maxDurationMs: 60_000, pageSize: 25 });
+          }
+          assert.equal(await gmailDirtyScopes(), 0);
+          assert.equal(await gmailVectorCount(), LARGE_EXPECTED_VECTORS);
+          // Committed vectors are kept, not embedded again. At most the one
+          // page in flight at the kill (500 record/field pairs) repeats.
+          const remaining = LARGE_EXPECTED_VECTORS - committedAtKill;
+          assert.ok(
+            embedder.counter.documents <= remaining + 500 && embedder.counter.documents < LARGE_EXPECTED_VECTORS,
+            `embedded ${String(embedder.counter.documents)} for ${String(remaining)} missing vectors`
+          );
+        })
+      );
+    } finally {
+      rmSync(dataDir, { force: true, recursive: true });
+    }
+  }
+);

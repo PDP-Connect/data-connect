@@ -180,7 +180,17 @@ function createPostgresPool(databaseUrl: string, max: number, log: StorageLog): 
  * into a failed backfill. 15s is ~14x the observed write cost and still an
  * order of magnitude under the 44.5s incident.
  */
-const POSTGRES_BULK_STATEMENT_TIMEOUT_MS = 15_000;
+const DEFAULT_POSTGRES_BULK_STATEMENT_TIMEOUT_MS = 15_000;
+
+/**
+ * The bulk-lane statement ceiling. `PDPP_POSTGRES_BULK_STATEMENT_TIMEOUT_MS`
+ * overrides the default, so an operator can raise it on a slow database
+ * without a release. It is read per transaction, so a test can lower it.
+ */
+export function postgresBulkStatementTimeoutMs(): number {
+  const configured = Number(process.env.PDPP_POSTGRES_BULK_STATEMENT_TIMEOUT_MS);
+  return Number.isInteger(configured) && configured > 0 ? configured : DEFAULT_POSTGRES_BULK_STATEMENT_TIMEOUT_MS;
+}
 /**
  * Bulk work must not sit in a lock queue either. Kept well under the
  * statement bound so a contended chunk fails fast and is retried on the next
@@ -1173,7 +1183,7 @@ export async function postgresBulkQuery<Row extends QueryResultRow = QueryResult
     // SET LOCAL, never bare SET: it reverts at COMMIT/ROLLBACK and so cannot
     // leak this bulk ceiling onto whichever caller the pool hands this
     // physical connection to next.
-    await client.query(`SET LOCAL statement_timeout = ${POSTGRES_BULK_STATEMENT_TIMEOUT_MS}`);
+    await client.query(`SET LOCAL statement_timeout = ${postgresBulkStatementTimeoutMs()}`);
     await client.query(`SET LOCAL lock_timeout = ${POSTGRES_BULK_LOCK_TIMEOUT_MS}`);
     const result = await client.query<Row>(sql, params);
     await client.query("COMMIT");
@@ -1413,6 +1423,44 @@ export async function withPostgresTransaction<T>(
   }
 }
 
+export interface BulkChunkBudget {
+  chunkSize: number;
+}
+
+/**
+ * Run `items` through `runChunk` in chunks that keep each bulk statement well
+ * under `postgresBulkStatementTimeoutMs()`. A chunk slower than a quarter of
+ * the timeout halves the next chunk. A chunk that the timeout cancels is
+ * retried at half its size; a single item that still times out is rethrown.
+ * `runChunk` must commit each chunk on its own and be idempotent, so a crash
+ * keeps every committed chunk. The caller keeps one budget across calls, so
+ * a learned size carries over to its later pages.
+ */
+export async function runBulkChunksWithinStatementBudget<T>(
+  items: readonly T[],
+  budget: BulkChunkBudget,
+  runChunk: (chunk: readonly T[]) => Promise<unknown>
+): Promise<void> {
+  let offset = 0;
+  while (offset < items.length) {
+    const chunk = items.slice(offset, offset + Math.max(1, budget.chunkSize));
+    const startedAt = Date.now();
+    try {
+      await runChunk(chunk);
+    } catch (error) {
+      if (!(error instanceof PostgresStatementTimeoutError) || chunk.length === 1) {
+        throw error;
+      }
+      budget.chunkSize = Math.max(1, Math.floor(chunk.length / 2));
+      continue;
+    }
+    offset += chunk.length;
+    if (Date.now() - startedAt > postgresBulkStatementTimeoutMs() / 4) {
+      budget.chunkSize = Math.max(1, Math.floor(chunk.length / 2));
+    }
+  }
+}
+
 /** Keep a bounded derived-index page on the bulk lane while it shares its manifest fence and write transaction. */
 export async function withPostgresBulkTransaction<T>(
   fn: (client: PoolClient) => Promise<T>,
@@ -1421,7 +1469,7 @@ export async function withPostgresBulkTransaction<T>(
   const client = await getPostgresBulkPool().connect();
   try {
     await client.query("BEGIN");
-    await client.query(`SET LOCAL statement_timeout = ${POSTGRES_BULK_STATEMENT_TIMEOUT_MS}`);
+    await client.query(`SET LOCAL statement_timeout = ${postgresBulkStatementTimeoutMs()}`);
     await client.query(`SET LOCAL lock_timeout = ${POSTGRES_BULK_LOCK_TIMEOUT_MS}`);
     if (options?.lockConnectorInstanceId) {
       await acquireConnectorInstanceXactLock(client, options.lockConnectorInstanceId);

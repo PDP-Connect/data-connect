@@ -103,8 +103,10 @@ import {
 } from "./postgres-search.ts";
 import type { PostgresTransactionClient } from "./postgres-storage.ts";
 import {
+  type BulkChunkBudget,
   isPostgresStorageBackend,
   postgresQuery,
+  runBulkChunksWithinStatementBudget,
   withPostgresBulkTransaction,
   withPostgresTransaction,
 } from "./postgres-storage.ts";
@@ -2686,6 +2688,9 @@ async function rebuildSemanticIndexForStream({
     await pruneSemanticIndexCandidates(repairScope);
     await prunePhysicalVecInventory(repairScope);
   };
+  // HNSW inserts slow down when the index does not fit in memory; the budget
+  // shrinks publication chunks for the rest of this stream's rebuild.
+  const publication: BulkChunkBudget = { chunkSize: SEMANTIC_FIELD_BATCH };
   async function rebuildPage(lastId: number, indexed: number, scanned: number): Promise<number> {
     let currentProgressJob = progressJob;
     // Cancellation hook (see lexical counterpart in search.js): the CLI
@@ -2749,31 +2754,35 @@ async function rebuildSemanticIndexForStream({
       // This writer fence lasts for one version-guarded field batch. If a
       // later batch fails, the existing stream progress row causes restart to
       // re-probe earlier identities and embed only the missing pairs.
-      await withConnectorInstanceWrite(connectorInstanceId, async () => {
-        if (usePostgres) {
-          await withPostgresBulkTransaction(
-            async (client) => {
-              await assertConnectorManifestStreamSubsetWithClient(client, connectorId, manifest);
-              assertSemanticRepairBackend(repairScope);
-              await postgresSemanticIndexInsertManyGuarded({
-                connectorId,
-                connectorInstanceId,
-                entries,
-                stream,
-                client,
-              });
-              assertSemanticRepairBackend(repairScope);
-            },
-            { lockConnectorInstanceId: connectorInstanceId }
-          );
-        } else {
+      if (usePostgres) {
+        await runBulkChunksWithinStatementBudget(entries, publication, (chunk) =>
+          withConnectorInstanceWrite(connectorInstanceId, () =>
+            withPostgresBulkTransaction(
+              async (client) => {
+                await assertConnectorManifestStreamSubsetWithClient(client, connectorId, manifest);
+                assertSemanticRepairBackend(repairScope);
+                await postgresSemanticIndexInsertManyGuarded({
+                  connectorId,
+                  connectorInstanceId,
+                  entries: chunk,
+                  stream,
+                  client,
+                });
+                assertSemanticRepairBackend(repairScope);
+              },
+              { lockConnectorInstanceId: connectorInstanceId }
+            )
+          )
+        );
+      } else {
+        await withConnectorInstanceWrite(connectorInstanceId, async () => {
           transaction(() => {
             assertConnectorManifestStreamSubsetSync(connectorId, manifest);
             assertSemanticRepairBackend(repairScope);
             vectorIndex.upsertMany(liveEntriesOnly(entries, connectorInstanceId, stream));
           });
-        }
-      });
+        });
+      }
       await semanticRepairPhase("after-field-batch-publish", repairScope);
     }
     await semanticRepairPhase("after-page-publish", repairScope);

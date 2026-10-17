@@ -264,6 +264,52 @@ export async function reconcileSearchIndexDirtyScope(
   signal?: AbortSignal
 ): Promise<ReconcileScopeResult> {
   const { connectorId, connectorInstanceId, stream } = scope;
+  // One reconcile per scope per process. The sweep, the read-time self-heal
+  // and the post-install repair can all reach the same scope; a second run
+  // would embed the same records again. A second caller gets `incomplete`;
+  // the scope stays dirty until the running reconcile clears it.
+  const inFlightKey = `${connectorInstanceId}\u0000${stream}`;
+  if (scopesInFlight.has(inFlightKey)) {
+    return { connectorId, connectorInstanceId, outcome: "incomplete", stream };
+  }
+  scopesInFlight.add(inFlightKey);
+  try {
+    return await reconcileSearchIndexDirtyScopeOnce(scope, generation, signal);
+  } finally {
+    scopesInFlight.delete(inFlightKey);
+  }
+}
+
+const scopesInFlight = new Set<string>();
+
+/**
+ * Reconcile every eligible dirty scope of one connector, for example right
+ * after an install published a new manifest. Throws when any scope failed;
+ * the failure is already recorded on the scope with its backoff.
+ */
+export async function reconcileConnectorSearchIndexScopes(connectorId: string): Promise<ReconcileScopeResult[]> {
+  const generation = currentStorageGeneration();
+  const results: ReconcileScopeResult[] = [];
+  for (const scope of await listDirtySearchIndexScopes(10_000, { connectorId })) {
+    results.push(await reconcileSearchIndexDirtyScope(scope, generation));
+  }
+  const failed = results.filter((result) => result.outcome === "failed");
+  if (failed.length > 0) {
+    throw new Error(
+      `Search-index repair failed for ${String(failed.length)} scope(s) of ${connectorId}: ${failed
+        .map((result) => `${result.connectorInstanceId}/${result.stream}`)
+        .join(", ")}; they stay dirty and the maintenance sweep retries them.`
+    );
+  }
+  return results;
+}
+
+async function reconcileSearchIndexDirtyScopeOnce(
+  scope: DirtySearchIndexScope,
+  generation: number,
+  signal?: AbortSignal
+): Promise<ReconcileScopeResult> {
+  const { connectorId, connectorInstanceId, stream } = scope;
   try {
     if (signal?.aborted) return { connectorId, connectorInstanceId, outcome: "incomplete", stream };
     assertStorageGenerationCurrent(generation);

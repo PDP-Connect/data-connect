@@ -28,8 +28,11 @@ import { canonicalConnectorKey } from "./connector-key.ts";
 import { assertConnectorManifestStreamSubsetWithClient } from "./connector-manifest-write-fence.ts";
 import { assertGrantedManifestReadAuthority, assertManifestReadAuthority } from "./manifest-read-authority.ts";
 import {
+  type BulkChunkBudget,
   isPostgresStorageBackend,
   postgresQuery as rawPostgresQuery,
+  runBulkChunksWithinStatementBudget,
+  withPostgresBulkTransaction,
   withPostgresTransaction,
 } from "./postgres-storage.ts";
 import {
@@ -798,6 +801,7 @@ export async function postgresBackfillRecordSortPositionsForManifest(
       ORDER BY connector_instance_id`,
     [connectorId, streamFacts.map(({ stream }) => stream)]
   );
+  const repairBudget: BulkChunkBudget = { chunkSize: 256 };
   const backfillStream = (connectorInstanceId: string, facts: (typeof streamFacts)[number]): Promise<number> => {
     const manifestStream = manifestStreamFromFacts(facts);
     const backfillPage = async (afterRecordKey: string | null): Promise<number> => {
@@ -817,34 +821,56 @@ export async function postgresBackfillRecordSortPositionsForManifest(
       if (page.rows.length === 0) {
         return 0;
       }
-      const updatedInPage = await page.rows.reduce(async (previous, row) => {
-        const total = await previous;
-        await withPostgresTransaction((client) =>
-          assertConnectorManifestStreamSubsetWithClient(
-            client,
-            connectorId,
-            manifest as unknown as Record<string, unknown>
-          )
-        );
+      // One fenced, set-based UPDATE per chunk instead of a transaction per
+      // record: a connector with hundreds of thousands of records otherwise
+      // spends most of an install here. Unchanged rows are filtered out, so a
+      // rerun after a crash rewrites nothing it already repaired.
+      const derived = page.rows.map((row) => {
         const data = typeof row.record_json === "string" ? JSON.parse(row.record_json) : row.record_json;
-        const cursor = cursorValue(data, manifestStream);
-        const primary = primaryKeyText(data, row.record_key, manifestStream);
-        const semanticTime = semanticTimeValue(data, manifestStream);
-        const result = await postgresQuery(
-          `UPDATE records
-              SET cursor_value = $5, primary_key_text = $6, semantic_time = $7
-            WHERE connector_id = $1
-              AND connector_instance_id = $2
-              AND record_key = $3
-              AND stream = $4
-              AND deleted = FALSE
-              AND (cursor_value IS DISTINCT FROM $5
-                OR primary_key_text IS DISTINCT FROM $6
-                OR semantic_time IS DISTINCT FROM $7)`,
-          [connectorId, connectorInstanceId, row.record_key, facts.stream, cursor, primary, semanticTime]
+        return {
+          cursor: cursorValue(data, manifestStream),
+          primary: primaryKeyText(data, row.record_key, manifestStream),
+          recordKey: String(row.record_key),
+          semanticTime: semanticTimeValue(data, manifestStream),
+        };
+      });
+      let updatedInPage = 0;
+      await runBulkChunksWithinStatementBudget(derived, repairBudget, async (chunk) => {
+        const result = await withPostgresBulkTransaction(
+          async (client) => {
+            await assertConnectorManifestStreamSubsetWithClient(
+              client,
+              connectorId,
+              manifest as unknown as Record<string, unknown>
+            );
+            return await client.query(
+              `UPDATE records r
+                  SET cursor_value = v.cursor_value, primary_key_text = v.primary_key_text, semantic_time = v.semantic_time
+                 FROM unnest($4::text[], $5::text[], $6::text[], $7::text[])
+                   AS v(record_key, cursor_value, primary_key_text, semantic_time)
+                WHERE r.connector_id = $1
+                  AND r.connector_instance_id = $2
+                  AND r.stream = $3
+                  AND r.record_key = v.record_key
+                  AND r.deleted = FALSE
+                  AND (r.cursor_value IS DISTINCT FROM v.cursor_value
+                    OR r.primary_key_text IS DISTINCT FROM v.primary_key_text
+                    OR r.semantic_time IS DISTINCT FROM v.semantic_time)`,
+              [
+                connectorId,
+                connectorInstanceId,
+                facts.stream,
+                chunk.map((entry) => entry.recordKey),
+                chunk.map((entry) => entry.cursor),
+                chunk.map((entry) => entry.primary),
+                chunk.map((entry) => entry.semanticTime),
+              ]
+            );
+          },
+          { lockConnectorInstanceId: connectorInstanceId }
         );
-        return total + Number(result.rowCount || 0);
-      }, Promise.resolve(0));
+        updatedInPage += Number(result.rowCount || 0);
+      });
       const lastRow = page.rows.at(-1);
       if (page.rows.length < 256 || !lastRow?.record_key) {
         return updatedInPage;

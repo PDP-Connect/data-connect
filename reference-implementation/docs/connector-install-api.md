@@ -70,10 +70,18 @@ passes during registration, the install completes late and stays installed. This
 keeps the active artifact and the registered manifest in agreement. The lock
 stays held until the work stops.
 
-The response comes after activation and manifest registration. If the connector
-already has records, their derived columns and search indexes are re-derived
-for the new manifest after the response, outside the lock. That work grows with
-the record count. A failure is logged and does not roll back the activation.
+The response comes once the artifact is activated and the manifest is
+registered. In the same transaction as the manifest, every connection and
+search-indexed stream of the connector is marked dirty in `search_index_dirty`.
+After the response and outside the lock, the server re-derives the record
+columns, then reconciles those scopes (lexical and semantic indexes). Each
+statement covers a bounded chunk. Record-column and semantic chunks shrink when
+one nears or passes the bulk `statement_timeout`
+(`PDPP_POSTGRES_BULK_STATEMENT_TIMEOUT_MS`, default 15 s). Committed chunks stay. If the server stops midway, the scopes stay
+dirty and the maintenance sweep resumes them, embedding only pairs that are
+still missing. A failure is recorded on the scope (`last_error`, `attempts`,
+backoff) and does not roll back the activation. Progress is visible in
+`search_index_dirty` and `semantic_search_backfill_progress`.
 
 Artifact identity is `digest`; version is display metadata. Package activation
 is separate from connection setup and never changes
