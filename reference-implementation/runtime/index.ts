@@ -29,7 +29,10 @@ import { readStoredCollectionScope } from "../server/local-collection-scope.ts";
 import { encodeKey } from "../server/records.ts";
 import { getDefaultConnectorAttentionStore } from "../server/stores/connector-attention-store.ts";
 import { getDefaultConnectorDetailGapStore } from "../server/stores/connector-detail-gap-store.ts";
-import type { ConnectorInstanceConfigStore } from "../server/stores/connector-instance-config-store.ts";
+import {
+  type ConnectorInstanceConfigStore,
+  getDefaultConnectorInstanceConfigStore,
+} from "../server/stores/connector-instance-config-store.ts";
 import {
   getDefaultStreamEvidenceRunRegistryStore,
   type StreamEvidenceClaim,
@@ -79,6 +82,7 @@ import {
   validateDoneRecordsEmitted,
   validateDoneStatus,
 } from "./done-validators.ts";
+import { buildEffectiveAuthorityRecord } from "./effective-authority.ts";
 import type { IngestResult as StrictIngestResult } from "./ingest-failure.ts";
 import { readIngestResponse as strictReadIngestResponse } from "./ingest-failure.ts";
 import {
@@ -2782,7 +2786,26 @@ function resolveStreamEvidenceRunRegistryStore(
   return injected ?? getDefaultStreamEvidenceRunRegistryStore();
 }
 
+interface RuntimeLaunchGuard {
+  fail: (() => Promise<void>) | null;
+}
+
 export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<RuntimeRunConnectorResult> {
+  const launchGuard: RuntimeLaunchGuard = { fail: null };
+  try {
+    return await runConnectorWithLaunchGuard(opts, launchGuard);
+  } catch (error) {
+    // Only launch setup owns this callback. The established terminal state
+    // machine takes over once run.started and onStarted have completed.
+    await launchGuard.fail?.();
+    throw error;
+  }
+}
+
+async function runConnectorWithLaunchGuard(
+  opts: RuntimeRunConnectorOptions,
+  launchGuard: RuntimeLaunchGuard
+): Promise<RuntimeRunConnectorResult> {
   const defaultOnProgress =
     process.env.PDPP_RUNTIME_QUIET === "1"
       ? () => {
@@ -2869,7 +2892,69 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
   // Check binding requirements
   const requiredBindings = manifest.runtime_requirements?.bindings || {};
   const availableBindings = buildAvailableBindings(onInteraction);
+  // Compute a collision-resistant run id before any child can execute.
+  const spawnRunId = opts.runId || `run_${randomUUID()}`;
+  // A child can egress from top-level code before START. Persist authority
+  // before spawn, and fail closed if its durable write fails.
+  const authorityTrace =
+    opts.traceContext || createTraceContext(opts.scenarioId ? { scenarioId: opts.scenarioId } : {});
+  const effectiveAuthority = buildEffectiveAuthorityRecord({
+    connectorId,
+    connectorInstanceId: resolvedConnectorInstanceId,
+    effectiveBindings: availableBindings,
+    ownerSubjectId: admittedConnection.ownerSubjectId,
+    requestedBindings: requiredBindings,
+    runId: spawnRunId,
+  });
+  const authorityEvent = await emitSpineEvent({
+    actor_id: connectorId,
+    actor_type: "runtime",
+    data: {
+      ...buildRunConnectionIdentity(resolvedConnectorInstanceId),
+      effective_authority: effectiveAuthority,
+      source: buildRunSourceDescriptor(connectorId, requestedRunSource),
+    },
+    event_type: "run.effective_authority",
+    object_id: spawnRunId,
+    object_type: "run",
+    run_id: spawnRunId,
+    scenario_id: authorityTrace.scenario_id,
+    status: "pending",
+    subject_id: admittedConnection.ownerSubjectId,
+    trace_id: authorityTrace.trace_id,
+  });
+  if (!authorityEvent) {
+    throw new Error("Runtime cannot persist effective authority before spawn");
+  }
+  let terminateLaunchChild: (() => void) | null = null;
+  launchGuard.fail = async () => {
+    terminateLaunchChild?.();
+    // Persist only fixed diagnostic codes and run identity. Errors from
+    // configuration, environment or startup callbacks may contain secrets.
+    const failureEvent = await emitSpineEvent({
+      actor_id: connectorId,
+      actor_type: "runtime",
+      data: {
+        ...buildRunConnectionIdentity(resolvedConnectorInstanceId),
+        failure_origin: "runtime",
+        reason: "runtime_launch_failed",
+        source: buildRunSourceDescriptor(connectorId, requestedRunSource),
+      },
+      event_type: "run.failed",
+      object_id: spawnRunId,
+      object_type: "run",
+      run_id: spawnRunId,
+      scenario_id: authorityTrace.scenario_id,
+      status: "failed",
+      subject_id: admittedConnection.ownerSubjectId,
+      trace_id: authorityTrace.trace_id,
+    });
+    if (!failureEvent) {
+      throw new Error("Runtime cannot persist launch failure");
+    }
+  };
 
+  // Rejected bindings must retain their durable unsupported authority record.
   validateRequiredRuntimeBindings(requiredBindings, availableBindings);
 
   const explicitlyRequestedStreams = requestedRuntimeStreams(providedScope);
@@ -2882,11 +2967,28 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
   // collects against manifest defaults instead. This is the only read path
   // from that spine into a run — see server/connector-run-config.ts for why it
   // fails closed and why it does not ride in on `state`.
+  const connectorConfigStore = opts.connectorConfigStore ?? getDefaultConnectorInstanceConfigStore();
+  const connectorConfigReadFailures: unknown[] = [];
   const startConnectorOptions = await resolveRunConnectorOptions({
     connectorInstanceId: resolvedConnectorInstanceId,
     onDecision: (decision) => onProgress({ reference_only: true, type: "CONNECTOR_CONFIG_DECISION", ...decision }),
-    ...(opts.connectorConfigStore ? { store: opts.connectorConfigStore } : {}),
+    store: {
+      getActiveRevision: async (...args) => {
+        try {
+          return await connectorConfigStore.getActiveRevision(...args);
+        } catch (error) {
+          connectorConfigReadFailures.push(error);
+          throw error;
+        }
+      },
+    },
   });
+  // The config resolver can recover a failed read as absent configuration.
+  // Launch must fail closed instead. Keep the original rejection (including
+  // undefined) without persisting its potentially sensitive message.
+  if (connectorConfigReadFailures.length > 0) {
+    throw connectorConfigReadFailures[0];
+  }
   const startCollectionMode = validateCollectionMode(collectionMode);
   const startState = persistState ? validateStartState(state) : null;
   // §4.3: validate and normalize recoveryOnly — must be a boolean if provided
@@ -2919,15 +3021,6 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
   const streamEvidenceRunRegistryStore: StreamEvidenceRunRegistryStore = resolveStreamEvidenceRunRegistryStore(
     opts.streamEvidenceRunRegistryStore
   );
-
-  // Compute runId before spawn so it can be threaded into the child env
-  // alongside the streaming registration token. The traceContext is
-  // computed below alongside the rest of the run-scoped state.
-  // A cryptographically strong UUID keeps the fallback globally
-  // collision-resistant: run_id is the sole uniqueness key for the durable
-  // STREAM_EVIDENCE claim registry, and a millisecond-granularity fallback
-  // can collide across unrelated concurrent runs.
-  const spawnRunId = opts.runId || `run_${randomUUID()}`;
 
   const launchConfig = buildConnectorLaunchConfig({
     automationMode,
@@ -3044,6 +3137,16 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
     }
   };
 
+  terminateLaunchChild = () => {
+    // No terminal handler owns a rejected launch. Reap its entire group and
+    // close the pipes even if preparation failed before START was written.
+    terminateConnectorChildGroup("SIGKILL");
+    unregisterOwnedConnectorChild(proc.pid);
+    proc.stdin.destroy();
+    proc.stdout.destroy();
+    proc.stderr.destroy();
+  };
+
   // Track this child's process group for the parent-exit sweep (see the
   // `ownedConnectorChildPids` registry near the top of this module). The PID
   // is the group leader because the child was spawned `detached`. It is
@@ -3128,7 +3231,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
   // `scenarioId` is spread in only when present: under
   // `exactOptionalPropertyTypes` an explicit `undefined` is not the same as an
   // omitted optional property, and `createTraceContext` defaults on absence.
-  const traceContext = opts.traceContext || createTraceContext(opts.scenarioId ? { scenarioId: opts.scenarioId } : {});
+  const traceContext = authorityTrace;
   const runId = spawnRunId;
   const runSource = buildRunSourceDescriptor(connectorId, requestedRunSource);
   const runConnectionIdentity = buildRunConnectionIdentity(normalizedConnectorInstanceId);
@@ -3235,31 +3338,21 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
 
   let startDetailGaps: unknown[] = [];
   let startDetailGapAdmission: unknown = null;
-  try {
-    // Reclaim only expired leases from crashed/killed runs; a different live
-    // run id is never evidence that this run may steal a lease.
-    if (typeof detailGapStore.reclaimStrandedInProgressGaps === "function") {
-      await detailGapStore.reclaimStrandedInProgressGaps({
-        connectorId,
-        connectorInstanceId: normalizedConnectorInstanceId,
-        currentRunId: spawnRunId,
-        grantId,
-      });
-    }
-    const page = await readDetailGapPage({
-      streams: startScope.streams.map((stream) => stream.name),
+  // Reclaim only expired leases from crashed/killed runs; a different live
+  // run id is never evidence that this run may steal a lease.
+  if (typeof detailGapStore.reclaimStrandedInProgressGaps === "function") {
+    await detailGapStore.reclaimStrandedInProgressGaps({
+      connectorId,
+      connectorInstanceId: normalizedConnectorInstanceId,
+      currentRunId: spawnRunId,
+      grantId,
     });
-    startDetailGaps = page.detailGaps;
-    startDetailGapAdmission = page.admission;
-  } catch (err) {
-    // Pre-START failure (before the run promise / cleanupChildHandles exists):
-    // reap the just-spawned connector group rather than leaking it, and drop
-    // it from the parent-exit registry so a later exit can't re-signal a group
-    // we already terminated.
-    terminateConnectorChildGroup("SIGTERM");
-    unregisterOwnedConnectorChild(proc.pid);
-    throw err;
   }
+  const page = await readDetailGapPage({
+    streams: startScope.streams.map((stream) => stream.name),
+  });
+  startDetailGaps = page.detailGaps;
+  startDetailGapAdmission = page.admission;
 
   // Send START
   const startMsg = {
@@ -3430,7 +3523,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
   // `controller.booted` here so the runtime is always self-sufficient.
   // See docs/run-reconciliation-design-brief.md §3.3 / §3.4.
   const _bootEpoch = await ensureRuntimeBootEpoch();
-  await emitSpineEventTracked({
+  const startedEvent = await emitSpineEventTracked({
     actor_id: connectorId,
     actor_type: "runtime",
     data: {
@@ -3456,7 +3549,11 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
     status: "started",
     trace_id: traceContext.trace_id,
   });
+  if (!startedEvent) {
+    throw new Error("Runtime cannot persist run.started");
+  }
   onStarted?.({ run_id: runId, scenario_id: traceContext.scenario_id, trace_id: traceContext.trace_id });
+  launchGuard.fail = null;
 
   // Collect new STATE checkpoints
   const newState: Record<string, unknown> = {};

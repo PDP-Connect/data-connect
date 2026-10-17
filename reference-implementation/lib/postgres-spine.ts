@@ -660,6 +660,21 @@ export async function postgresGetRunStartedEvent(runId: string | null): Promise<
   return result.rows[0] ?? null;
 }
 
+export async function postgresGetRunEffectiveAuthorityEvent(runId: string | null): Promise<LifecycleEventRow | null> {
+  if (!runId) {
+    return null;
+  }
+  const result = await postgresQuery<LifecycleEventRow>(
+    `SELECT event_type, status, data_json::text AS data_json, occurred_at, trace_id, actor_id
+     FROM spine_events
+     WHERE run_id = $1 AND event_type = 'run.effective_authority'
+     ORDER BY event_seq DESC
+     LIMIT 1`,
+    [runId]
+  );
+  return result.rows[0] ?? null;
+}
+
 interface SummaryEventFields {
   readonly failureEvent: SpineEventRecord | undefined;
   readonly first: SpineEventRecord | null;
@@ -747,6 +762,12 @@ async function projectSummaryStatus(id: string, events: SpineEventRecord[]): Pro
     // Non-run correlations still use the most recent non-"unknown" status.
     const runId = events.find((event) => event.run_id)?.run_id || id || null;
     return (await hasPostgresActiveRunLease(runId)) ? "in_progress" : "failed";
+  }
+
+  // Match SQLite for the pre-start window and historical authority events
+  // whose audit-write status defaulted to "ok".
+  if (events.some((event) => event.event_type === "run.effective_authority")) {
+    return "pending";
   }
 
   return latestKnownEventStatus(events);
