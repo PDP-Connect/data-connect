@@ -201,6 +201,7 @@ export function SyncNowButton({
           <ConnectorInstallPrompt
             connectorKey={notInstalledKey}
             displayName={displayName}
+            onInstalled={() => setNotInstalledKey(null)}
             routeId={syncToastScopeId}
             variant="inline"
           />

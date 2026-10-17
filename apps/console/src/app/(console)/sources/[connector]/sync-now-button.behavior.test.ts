@@ -139,6 +139,11 @@ test("Install calls the owner install action with the connector key and shows a 
     await act(async () => button(container, "Install Chase").click());
     assert.equal(installCalls.length, 2);
     assert.equal(refreshCalls, 1, "a successful install re-reads the page state");
+    assert.equal(
+      container.querySelector('[data-testid="connector-not-installed-inline"]'),
+      null,
+      "a successful install removes the inline not-installed prompt even if this component is preserved"
+    );
   });
 });
 

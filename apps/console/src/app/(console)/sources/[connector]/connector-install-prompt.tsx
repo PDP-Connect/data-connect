@@ -25,6 +25,8 @@ interface Props {
    * `inline`: the compact form the Sync button shows after a refused run.
    */
   variant: "inline" | "notice";
+  /** Called after a successful install, so a parent holding this prompt can drop it. */
+  onInstalled?: () => void;
 }
 
 type Feedback = { message: string; tone: "error" | "success" } | null;
@@ -34,7 +36,7 @@ type Feedback = { message: string; tone: "error" | "success" } | null;
  * action that fixes it. Installing is the owner's decision, so nothing runs
  * until the button is pressed; afterwards the page re-reads its state.
  */
-export function ConnectorInstallPrompt({ connectorKey, displayName, routeId, variant }: Props) {
+export function ConnectorInstallPrompt({ connectorKey, displayName, onInstalled, routeId, variant }: Props) {
   const router = useRouter();
   const [isPending, startTransition] = useTransition();
   const [feedback, setFeedback] = useState<Feedback>(null);
@@ -48,9 +50,10 @@ export function ConnectorInstallPrompt({ connectorKey, displayName, routeId, var
         return;
       }
       setFeedback({ message: "Installed. Refreshing…", tone: "success" });
+      onInstalled?.();
       router.refresh();
     });
-  }, [connectorKey, displayName, routeId, router]);
+  }, [connectorKey, displayName, onInstalled, routeId, router]);
 
   const notice = variant === "notice";
   return (
