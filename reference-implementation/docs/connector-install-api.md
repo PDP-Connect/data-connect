@@ -58,6 +58,20 @@ record with HTTP 201. `POST /v1/owner/connector-install/update` accepts
 `{ "connector_id": "github" }` and activates the signed catalog row marked
 `latest`.
 
+Install, update and uninstall run one at a time per data directory, guarded by
+`<data dir>/.connector-install.lock/`. A second request fails with "Another
+connector installation is in progress." The lock records the owner's pid and a
+token unique to one process start. Thus a lock left by a crashed or restarted
+server is reclaimed, even when the new process has the same pid (normal in a
+container). An install or update that passes `PDPP_CONNECTOR_INSTALL_TIMEOUT_MS`
+(default 5 minutes) fails with `connector_install_timeout` and is rolled back.
+The lock stays held until the aborted work stops.
+
+The response comes after activation and manifest registration. If the connector
+already has records, their derived columns and search indexes are re-derived
+for the new manifest after the response, outside the lock. That work grows with
+the record count. A failure is logged and does not roll back the activation.
+
 Artifact identity is `digest`; version is display metadata. Package activation
 is separate from connection setup and never changes
 `connector_instances.source_binding_json`. Filesystem roots and internal

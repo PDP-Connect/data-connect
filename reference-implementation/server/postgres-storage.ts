@@ -133,9 +133,20 @@ const POSTGRES_BULK_POOL_MAX = 3;
  */
 const POSTGRES_CLIENT_CONNECTION_CHECK_INTERVAL_MS = 5_000;
 
-function createPostgresPool(databaseUrl: string, max: number): PgPool {
+/**
+ * A pooled client whose backend is terminated (`pg_terminate_backend`,
+ * `idle_in_transaction_session_timeout`, a Postgres restart) emits `error`.
+ * pg-pool listens only while the client is idle, and then re-emits on the pool.
+ * An `error` event with no listener throws, and the process exits. The pool
+ * reports it instead: the query in flight already rejects, the client is no
+ * longer queryable, and pg-pool discards it on release.
+ */
+function createPostgresPool(databaseUrl: string, max: number, log: StorageLog): PgPool {
   const created = new Pool({ connectionString: databaseUrl, max });
+  const reportLostConnection = (error: Error) => log(`[postgres] pooled connection lost: ${error.message}`);
+  created.on("error", reportLostConnection);
   created.on("connect", (client) => {
+    client.on("error", reportLostConnection);
     // Best effort: a server older than PostgreSQL 14, or a platform without
     // socket polling, rejects the setting. Those servers keep the old behavior.
     client
@@ -1475,10 +1486,10 @@ export async function initExistingPostgresRepairStorage(
   if (pool) {
     await closePostgresStorage();
   }
-  pool = createPostgresPool(config.databaseUrl, POSTGRES_INTERACTIVE_POOL_MAX);
-  bulkPool = createPostgresPool(config.databaseUrl, POSTGRES_BULK_POOL_MAX);
+  pool = createPostgresPool(config.databaseUrl, POSTGRES_INTERACTIVE_POOL_MAX, NOOP_STORAGE_LOG);
+  bulkPool = createPostgresPool(config.databaseUrl, POSTGRES_BULK_POOL_MAX, NOOP_STORAGE_LOG);
   lockPoolCapacity = 1;
-  lockPool = createPostgresPool(config.databaseUrl, lockPoolCapacity);
+  lockPool = createPostgresPool(config.databaseUrl, lockPoolCapacity, NOOP_STORAGE_LOG);
   activeBackend = "postgres";
   try {
     const result = await pool.query<{ table_name: string }>(
@@ -1534,10 +1545,10 @@ export async function initPostgresStorage(
   }
 
   // Two lanes, not one shared pool: see POSTGRES_INTERACTIVE_POOL_MAX.
-  pool = createPostgresPool(config.databaseUrl, POSTGRES_INTERACTIVE_POOL_MAX);
-  bulkPool = createPostgresPool(config.databaseUrl, POSTGRES_BULK_POOL_MAX);
+  pool = createPostgresPool(config.databaseUrl, POSTGRES_INTERACTIVE_POOL_MAX, log);
+  bulkPool = createPostgresPool(config.databaseUrl, POSTGRES_BULK_POOL_MAX, log);
   lockPoolCapacity = 1;
-  lockPool = createPostgresPool(config.databaseUrl, lockPoolCapacity);
+  lockPool = createPostgresPool(config.databaseUrl, lockPoolCapacity, log);
   activeBackend = "postgres";
   // Storage-lifecycle fence (server/storage-generation.ts): a fresh pool
   // means any deferred work scheduled against a prior pool (this function's

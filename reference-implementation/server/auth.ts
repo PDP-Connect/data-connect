@@ -5348,11 +5348,18 @@ async function maybeRegisterConnectorPhaseForTest(point: string, context: Record
 }
 
 /**
- * Register or update a connector manifest
+ * Register or update a connector manifest.
+ *
+ * Two phases: persist the manifest (one short transaction), then repair the
+ * derived state of records already stored under this connector (cursor,
+ * primary key, semantic time, lexical and semantic indexes). The repair is
+ * O(existing records). `skipDerivedRepair` runs only the first phase and
+ * `skipManifestPersistence` only the second, so a caller that holds a lock
+ * can persist under it and repair after it releases the lock.
  */
 export async function registerConnector(
   manifest: Record<string, unknown>,
-  options: { backfillRetrievalIndexes?: boolean; skipManifestPersistence?: boolean } = {}
+  options: { backfillRetrievalIndexes?: boolean; skipDerivedRepair?: boolean; skipManifestPersistence?: boolean } = {}
 ): Promise<string> {
   validateConnectorManifest(manifest);
   const { connectorId, storedManifest } = normalizeConnectorManifestForStorage(manifest);
@@ -5360,6 +5367,9 @@ export async function registerConnector(
     await persistManifestAndAdvanceGenerations(connectorId, JSON.stringify(storedManifest));
   }
   await maybeRegisterConnectorPhaseForTest("after-manifest-persisted", { connectorId, manifest: storedManifest });
+  if (options.skipDerivedRepair) {
+    return connectorId;
+  }
 
   const postgresBackend = isPostgresStorageBackend();
 
