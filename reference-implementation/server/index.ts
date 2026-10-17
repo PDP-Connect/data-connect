@@ -7804,6 +7804,46 @@ function buildRsApp(opts: ServerOpts = {}) {
     resolveOwnerReadScope,
     resolveReadRequestBindings,
     resolveRegisteredConnectorManifest,
+    validatePairwiseReadBindingOwnership: async ({
+      ownerSubjectId,
+      bindings,
+    }: {
+      ownerSubjectId: string;
+      bindings: readonly { readonly source_id: string; readonly rs_instance: string }[];
+    }) => {
+      const store = createRequestConnectorInstanceStore();
+      const checked = new Set<string>();
+      for (const binding of bindings) {
+        const key = JSON.stringify([binding.source_id, binding.rs_instance]);
+        if (checked.has(key)) continue;
+        checked.add(key);
+        const instance = await store.get(binding.rs_instance);
+        if (
+          !instance ||
+          instance.status !== "active" ||
+          instance.revokedAt !== null ||
+          instance.ownerSubjectId !== ownerSubjectId
+        ) {
+          throw Object.assign(new Error("Authenticated instance binding is outside the active owner scope"), {
+            code: "grant_invalid",
+          });
+        }
+        let manifest: Awaited<ReturnType<typeof resolveRegisteredConnectorManifest>>;
+        try {
+          manifest = await resolveRegisteredConnectorManifest(instance.connectorId);
+        } catch {
+          throw Object.assign(new Error("Authenticated instance binding source is not registered"), {
+            code: "grant_invalid",
+          });
+        }
+        const declaredSource = (manifest.source_declaration as { source?: { id?: unknown } } | null | undefined)?.source;
+        if (typeof declaredSource?.id !== "string" || declaredSource.id !== binding.source_id) {
+          throw Object.assign(new Error("Authenticated instance binding source does not match its registered source"), {
+            code: "grant_invalid",
+          });
+        }
+      }
+    },
     runHybridSearch,
     runLexicalSearch,
     runSemanticSearch,
