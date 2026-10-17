@@ -103,7 +103,8 @@ const { killed, survived, inconclusive, validDenominator } = receipt.summary
 process.stdout.write(
   `receipt ${receipt.receiptDigest} cohort=${argument("cohort")} ` +
     `killed=${killed} survived=${survived} inconclusive=${inconclusive} ` +
-    `valid_denominator=${validDenominator} stryker_exit=${strykerExit}\n`
+    `valid_denominator=${validDenominator} stryker_exit=${strykerExit} ` +
+    `completeness=${receipt.completeness.kind}\n`
 )
 
 // A run that was applicable and produced no evidence must not report success.

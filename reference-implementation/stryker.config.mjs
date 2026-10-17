@@ -36,7 +36,13 @@ import { readFileSync } from "node:fs"
 // The fallback is a glob and not a bare `test/` directory: Node resolves a bare
 // directory argument as a module rather than expanding it, so `node --test
 // test/` fails with MODULE_NOT_FOUND and takes the whole baseline down with it.
-const WHOLE_COHORT_TESTS = ["test/**/*.test.ts"]
+// Exported: `run-intent.ts` counts this suite against the attempt bound when no
+// test is selected, since it is what every trial would then run.
+export const wholeCohortTests = ["test/**/*.test.ts"]
+
+// How much of the test command's output Stryker receives: a quarter of the
+// 1 MiB `exec` limit described at `commandRunner` below.
+const RETAINED_OUTPUT_BYTES = 256 * 1024
 
 function selectedTestArguments() {
   try {
@@ -50,7 +56,7 @@ function selectedTestArguments() {
   } catch {
     // Fall through to the whole-cohort selection below.
   }
-  return WHOLE_COHORT_TESTS
+  return wholeCohortTests
 }
 
 /** @type {import('@stryker-mutator/api/core').PartialStrykerOptions} */
@@ -62,7 +68,19 @@ export default {
     // runner can express it. `--test` on explicit paths keeps the selection
     // visible in the retained command string, so a reader of the receipt can
     // see exactly which tests a survivor survived.
-    command: `TSX_TSCONFIG_PATH=vendor/brand-react/tsconfig.json node --import tsx --import ./vendor/brand-react/css-stub-register.ts --test ${selectedTestArguments().join(" ")}`,
+    //
+    // The output is written to a file and only its tail reaches Stryker. The
+    // command runner starts the command with `child_process.exec`, whose
+    // default `maxBuffer` is 1 MiB, and when either stream passes that, Node
+    // kills the command with SIGTERM. Stryker records that as a failed baseline,
+    // or as a kill for a mutant, with no test having failed. The PR #141
+    // selection prints about 1.5 MiB on a clean pass, so every baseline was
+    // rejected. The tail holds the spec reporter's closing summary, which lists
+    // each failing test with its error, and the exit status is kept.
+    command:
+      `out="$(mktemp)"; ` +
+      `TSX_TSCONFIG_PATH=vendor/brand-react/tsconfig.json node --import tsx --import ./vendor/brand-react/css-stub-register.ts --test ${selectedTestArguments().join(" ")} >"$out" 2>&1; ` +
+      `status=$?; tail -c ${RETAINED_OUTPUT_BYTES} "$out"; rm -f "$out"; exit "$status"`,
   },
 
   // Populated from the pull request diff by the workflow; empty means this
@@ -76,6 +94,17 @@ export default {
   inPlace: false,
   checkers: [],
 
+  // No `// @ts-nocheck` rewriting. Nothing in this cohort type-checks: tsx
+  // strips types without checking them and `checkers` is empty, so the header
+  // protects nothing here. Its cost is real. Stryker's default pattern rewrites
+  // every JavaScript and TypeScript file under `test/`, `src/` and `lib/`, mutated
+  // or not, and a rewritten file is written fresh rather than copied, which
+  // drops its mode. `test/fixtures/legacy-profiles/slack/slackdump-stub.mjs` is
+  // executed directly as `SLACKDUMP_BIN`; without its executable bit both
+  // compiled-Slack tests failed in the PR #141 baseline. With this off, an
+  // unmutated file is copied byte-for-byte with its mode.
+  disableTypeChecks: false,
+
   // Stryker copies the working tree into the sandbox, so anything not needed to
   // run this cohort's tests is excluded. `node_modules` is deliberately absent
   // from this list: the tests import from it, and Stryker links it into the
@@ -87,10 +116,13 @@ export default {
   // failed a hosted run of this cohort after 91 minutes came from the mutant
   // count, not the copied tree, and is addressed by scoping mutation to the
   // changed lines rather than by this list. Stated so the next reader does not
-  // over-credit it. `connectors` and `examples` are deliberately NOT excluded:
-  // tests read them. `docs` above is a pre-existing entry, and ~65 cohort files
+  // over-credit it. `connectors`, `examples` and `openapi` are deliberately NOT
+  // excluded: tests read them. `openapi` used to be listed, and
+  // `test/owner-connection-intent.test.ts` reads
+  // `openapi/reference-full.openapi.json`, so it failed with ENOENT in the
+  // PR #141 baseline. `docs` above is a pre-existing entry, and ~65 cohort files
   // do reference `docs/` -- worth revisiting separately, not changed here.
-  ignorePatterns: ["reports", "fixtures/large", "vendor/*/dist", "docs", "openapi", "quality"],
+  ignorePatterns: ["reports", "fixtures/large", "vendor/*/dist", "docs", "quality"],
 
   tempDirName: ".stryker-tmp/reference-implementation",
 }
