@@ -947,16 +947,23 @@ export function createConnectorInstallService(options: {
   const installEntry = async (connectorId: string, entry: ConnectorCatalogEntry): Promise<ConnectorInstallRecord> => {
     const lock = acquireInstallLock(dataDir);
     const deadline = new AbortController();
-    // The locks are released only when the work settles, never at the deadline:
-    // an operation still in flight must keep the one-install-at-a-time fence.
+    // A deadline that passes while the install still waits for the lifecycle
+    // lock ends the wait, and the install fence goes with it. Once the work
+    // has started, the fence is released only when the work settles: an
+    // operation still in flight must keep the one-install-at-a-time fence.
     const work = (async () => {
       try {
-        return await withConnectorLifecycleLock(dataDir, connectorId, async () => {
-          deadline.signal.throwIfAborted();
-          const record = await installEntryCore(connectorId, entry, deadline.signal);
-          clearConnectorLifecycleUninstalled(dataDir, connectorId);
-          return record;
-        });
+        return await withConnectorLifecycleLock(
+          dataDir,
+          connectorId,
+          async () => {
+            deadline.signal.throwIfAborted();
+            const record = await installEntryCore(connectorId, entry, deadline.signal);
+            clearConnectorLifecycleUninstalled(dataDir, connectorId);
+            return record;
+          },
+          { signal: deadline.signal }
+        );
       } finally {
         lock.release();
       }

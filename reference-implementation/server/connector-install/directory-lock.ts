@@ -2,146 +2,82 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Cross-process directory lock for installer state under the data directory.
+ * Cross-process lock for installer state under the data directory.
  *
- * `mkdir` is the atomic acquire. The directory holds an `owner` file with the
- * owner's pid and a token that is unique to one process start. A pid alone
- * cannot identify the owner: in a container the server gets the same pid on
- * every start, so a lock left by a crashed process looks held by the live one.
- * A legacy `pid` file is still written so an older build can read the lock.
+ * The lock is held by the kernel, not by a path that may or may not exist.
+ * The holder keeps an exclusive SQLite transaction open on `<name>.db`.
+ * SQLite takes an OS byte-range lock for it: fcntl on Linux and macOS,
+ * LockFileEx on Windows. The OS drops that lock when the holder process ends,
+ * on a crash too, so no process ever has to decide that another one is dead
+ * and remove its lock. A live lock cannot look absent, and a pid reused after
+ * a container restart cannot keep a dead lock alive.
+ *
+ * The `<name>.owner` file records the holder's pid, a token unique to its
+ * process start, and when it took the lock. It is diagnostics for the busy
+ * message only; no decision reads it. The holder removes it before it unlocks.
+ *
+ * A `<name>/` directory left by an older build that locked with `mkdir` is
+ * ignored. Two builds that lock differently must not share a data directory.
  */
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { SqliteDriver } from "../sqlite-driver.ts";
 
-/** Three lines: pid, process token, acquired-at timestamp. Plain text, not a data document. */
-const OWNER_FILE = "owner";
-const LEGACY_PID_FILE = "pid";
-/** A lock without an owner record is a crash between mkdir and the owner write. */
-const UNOWNED_LOCK_GRACE_MS = 60_000;
+type LockConnection = InstanceType<typeof SqliteDriver>;
 
 /** Unique to this process start. */
 const PROCESS_LOCK_TOKEN = randomUUID();
 
 interface HeldLock {
-  readonly acquiredAt: string;
+  readonly connection: LockConnection;
   timedOutAt: string | null;
 }
 
-/** Locks this process acquired and has not released yet, by lock directory. */
+/** Locks this process holds, by lock file. The map also keeps each connection reachable. */
 const heldLocks = new Map<string, HeldLock>();
 
-export interface DirectoryLockOwner {
-  readonly acquiredAt: string | null;
-  readonly pid: number;
-  /** Null for a lock written by a build that recorded only the pid. */
-  readonly token: string | null;
+function isSqliteBusy(error: unknown): boolean {
+  const code = (error as { code?: unknown } | null)?.code;
+  return typeof code === "string" && code.startsWith("SQLITE_BUSY");
 }
 
-export type DirectoryLockDecision =
-  { readonly action: "busy"; readonly reason: string } | { readonly action: "reclaim"; readonly reason: string };
-
-/**
- * Decide whether an existing lock may be taken over.
- *
- * Reclaim when the owner record is missing past the grace period, when this
- * process wrote the lock but no longer holds it (an aborted operation skipped
- * its release), when an earlier process with this same pid wrote it, or when
- * the owner pid is dead. Everything else is busy.
- */
-export function decideDirectoryLockReclaim(input: {
-  readonly isPidAlive: (pid: number) => boolean;
-  readonly lockAgeMs: number;
-  readonly owner: DirectoryLockOwner | null;
-  readonly self: { readonly heldByThisProcess: boolean; readonly pid: number; readonly token: string };
-}): DirectoryLockDecision {
-  const { owner, self } = input;
-  if (!owner) {
-    return input.lockAgeMs > UNOWNED_LOCK_GRACE_MS
-      ? { action: "reclaim", reason: "lock has no owner record" }
-      : { action: "busy", reason: "lock is being created" };
+function refuseSymlink(path: string): void {
+  if (lstatSync(path, { throwIfNoEntry: false })?.isSymbolicLink()) {
+    throw new Error(`Installer lock path ${path} is a symbolic link.`);
   }
-  if (owner.token === self.token) {
-    return self.heldByThisProcess
-      ? { action: "busy", reason: "held by an operation in this process" }
-      : { action: "reclaim", reason: "left by an aborted operation in this process" };
-  }
-  if (owner.pid === self.pid) {
-    return { action: "reclaim", reason: "left by an earlier process with the same pid" };
-  }
-  return input.isPidAlive(owner.pid)
-    ? { action: "busy", reason: `held by live process ${String(owner.pid)}` }
-    : { action: "reclaim", reason: `owner process ${String(owner.pid)} is gone` };
 }
 
-function isPidAlive(pid: number): boolean {
+/** Take the OS lock without waiting, or return null when another holder has it. */
+function tryLockFile(lockPath: string): LockConnection | null {
+  // timeout 0: a held lock fails at once with SQLITE_BUSY instead of waiting.
+  const connection = new SqliteDriver(lockPath, { timeout: 0 });
   try {
-    process.kill(pid, 0);
-    return true;
+    // In rollback-journal mode this takes the OS write lock at once, even on
+    // an empty file. Nothing is ever written: the transaction is only a lock.
+    connection.exec("BEGIN EXCLUSIVE");
+    return connection;
   } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM";
-  }
-}
-
-function readOwner(lockDir: string): DirectoryLockOwner | null {
-  try {
-    const [pidLine, token, acquiredAt] = readFileSync(join(lockDir, OWNER_FILE), "utf8").split("\n");
-    const pid = Number(pidLine);
-    if (Number.isInteger(pid) && pid > 0 && token) {
-      return { acquiredAt: acquiredAt || null, pid, token };
-    }
-  } catch {
-    // Fall through to the legacy pid file.
-  }
-  try {
-    const pid = Number.parseInt(readFileSync(join(lockDir, LEGACY_PID_FILE), "utf8").trim(), 10);
-    return Number.isInteger(pid) && pid > 0 ? { acquiredAt: null, pid, token: null } : null;
-  } catch {
-    return null;
-  }
-}
-
-function sameOwner(left: DirectoryLockOwner | null, right: DirectoryLockOwner | null): boolean {
-  return left?.pid === right?.pid && left?.token === right?.token;
-}
-
-function lockAgeMs(lockDir: string): number {
-  try {
-    return Date.now() - statSync(lockDir).mtimeMs;
-  } catch {
-    return 0;
-  }
-}
-
-/** Move a judged-stale lock aside. False when it vanished or changed owner meanwhile. */
-function reclaim(lockDir: string, judged: DirectoryLockOwner | null): boolean {
-  const staleDir = `${lockDir}.stale.${PROCESS_LOCK_TOKEN}.${String(Date.now())}`;
-  try {
-    renameSync(lockDir, staleDir);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return false;
+    connection.close();
+    if (isSqliteBusy(error)) {
+      return null;
     }
     throw error;
   }
-  if (!sameOwner(readOwner(staleDir), judged)) {
-    // Another process reclaimed and re-acquired between our read and rename.
-    renameSync(staleDir, lockDir);
-    return false;
-  }
-  rmSync(staleDir, { force: true, recursive: true });
-  return true;
 }
 
-function busyDetail(lockDir: string, owner: DirectoryLockOwner | null): string {
-  const held = heldLocks.get(lockDir);
-  if (owner?.token === PROCESS_LOCK_TOKEN && held?.timedOutAt) {
-    return ` It exceeded its deadline at ${held.timedOutAt} and has not stopped; restart the server to clear it.`;
+function busyDetail(lockPath: string, ownerPath: string): string {
+  const timedOutAt = heldLocks.get(lockPath)?.timedOutAt;
+  if (timedOutAt) {
+    return ` It exceeded its deadline at ${timedOutAt} and has not stopped; restart the server to clear it.`;
   }
-  if (!owner) {
+  try {
+    const [pid, , acquiredAt] = readFileSync(ownerPath, "utf8").split("\n");
+    return /^\d+$/.test(pid ?? "") ? ` Held by pid ${String(pid)}${acquiredAt ? ` since ${acquiredAt}` : ""}.` : "";
+  } catch {
+    // The holder has not written its owner record yet, or is releasing.
     return "";
   }
-  return ` Held by pid ${String(owner.pid)}${owner.acquiredAt ? ` since ${owner.acquiredAt}` : ""}.`;
 }
 
 export interface DirectoryLock {
@@ -152,42 +88,23 @@ export interface DirectoryLock {
 
 export function acquireDirectoryLock(dataDir: string, lockName: string, busyMessage: string): DirectoryLock {
   mkdirSync(dataDir, { recursive: true });
-  const lockDir = join(dataDir, lockName);
-  for (;;) {
-    try {
-      mkdirSync(lockDir);
-      break;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
-        throw error;
-      }
-      const owner = readOwner(lockDir);
-      const decision = decideDirectoryLockReclaim({
-        isPidAlive,
-        lockAgeMs: lockAgeMs(lockDir),
-        owner,
-        self: { heldByThisProcess: heldLocks.has(lockDir), pid: process.pid, token: PROCESS_LOCK_TOKEN },
-      });
-      if (decision.action === "reclaim" && reclaim(lockDir, owner)) {
-        continue;
-      }
-      throw new Error(`${busyMessage}${busyDetail(lockDir, owner)}`, { cause: error });
-    }
+  const lockPath = join(dataDir, `${lockName}.db`);
+  const ownerPath = join(dataDir, `${lockName}.owner`);
+  refuseSymlink(lockPath);
+  refuseSymlink(ownerPath);
+  // SQLite also refuses a second connection in this process, but the map
+  // must be checked first: it is what knows that the holder missed a deadline.
+  const connection = heldLocks.has(lockPath) ? null : tryLockFile(lockPath);
+  if (!connection) {
+    throw new Error(`${busyMessage}${busyDetail(lockPath, ownerPath)}`);
   }
+  const held: HeldLock = { connection, timedOutAt: null };
+  heldLocks.set(lockPath, held);
   const acquiredAt = new Date().toISOString();
-  const held: HeldLock = { acquiredAt, timedOutAt: null };
-  heldLocks.set(lockDir, held);
   try {
-    writeFileSync(
-      join(lockDir, OWNER_FILE),
-      `${String(process.pid)}\n${PROCESS_LOCK_TOKEN}\n${acquiredAt}\n`,
-      { mode: 0o600 }
-    );
-    writeFileSync(join(lockDir, LEGACY_PID_FILE), `${String(process.pid)}\n`, { mode: 0o600 });
-  } catch (error) {
-    heldLocks.delete(lockDir);
-    rmSync(lockDir, { force: true, recursive: true });
-    throw error;
+    writeFileSync(ownerPath, `${String(process.pid)}\n${PROCESS_LOCK_TOKEN}\n${acquiredAt}\n`, { mode: 0o600 });
+  } catch {
+    // Diagnostics only: the OS lock is what excludes other processes.
   }
   let released = false;
   return {
@@ -199,10 +116,18 @@ export function acquireDirectoryLock(dataDir: string, lockName: string, busyMess
         return;
       }
       released = true;
-      heldLocks.delete(lockDir);
-      // Remove only our own lock; never one another process took over.
-      if (readOwner(lockDir)?.token === PROCESS_LOCK_TOKEN) {
-        rmSync(lockDir, { force: true, recursive: true });
+      heldLocks.delete(lockPath);
+      try {
+        // Still locked here, so this removes our own record, never a successor's.
+        rmSync(ownerPath, { force: true });
+      } catch {
+        // A stale owner record is harmless; the next holder overwrites it.
+      }
+      try {
+        connection.exec("ROLLBACK");
+      } finally {
+        // Closing the connection is what gives the OS lock back.
+        connection.close();
       }
     },
   };

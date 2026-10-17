@@ -59,16 +59,20 @@ record with HTTP 201. `POST /v1/owner/connector-install/update` accepts
 `latest`.
 
 Install, update and uninstall run one at a time per data directory, guarded by
-`<data dir>/.connector-install.lock/`. A second request fails with "Another
-connector installation is in progress." The lock records the owner's pid and a
-token unique to one process start. Thus a lock left by a crashed or restarted
-server is reclaimed, even when the new process has the same pid (normal in a
-container). An install or update that passes `PDPP_CONNECTOR_INSTALL_TIMEOUT_MS`
-(default 5 minutes) fails with `connector_install_timeout`. If the deadline
-passes before manifest registration starts, the install is rolled back. If it
-passes during registration, the install completes late and stays installed. This
-keeps the active artifact and the registered manifest in agreement. The lock
-stays held until the work stops.
+an OS file lock on `<data dir>/.connector-install.lock.db` (an exclusive SQLite
+transaction: fcntl on Linux and macOS, LockFileEx on Windows). A second request
+fails with "Another connector installation is in progress." and names the
+holder's pid from `.connector-install.lock.owner`. The OS releases the lock when
+the holder process ends, so a crashed or restarted server never leaves a lock
+behind, even when the new process has the same pid (normal in a container). A
+`.connector-install.lock/` directory from an older build is ignored. An install
+or update that passes `PDPP_CONNECTOR_INSTALL_TIMEOUT_MS` (default 5 minutes)
+fails with `connector_install_timeout`. If the deadline passes while the install
+still waits for the connector's lifecycle lock, the wait ends and the lock is
+released. If it passes before manifest registration starts, the install is
+rolled back. If it passes during registration, the install completes late and
+stays installed. This keeps the active artifact and the registered manifest in
+agreement. Once the work has started, the lock stays held until the work stops.
 
 The response comes once the artifact is activated and the manifest is
 registered. In the same transaction as the manifest, the server queues the

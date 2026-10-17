@@ -80,7 +80,11 @@ export async function seedMigratedGmail(options: {
 
 export function gmailInstallService(
   dataDir: string,
-  hooks: { readonly onRepair?: (repair: Promise<unknown>) => void; readonly stage?: Promise<void> } = {},
+  hooks: {
+    readonly installTimeoutMs?: number;
+    readonly onRepair?: (repair: Promise<unknown>) => void;
+    readonly stage?: Promise<void>;
+  } = {},
   artifact: { readonly digest: string; readonly manifest: Record<string, unknown> } = {
     digest: GMAIL_INSTALL_DIGEST,
     manifest: installedGmail,
@@ -106,6 +110,7 @@ export function gmailInstallService(
       writeFileSync(join(root, "dist", "collection-profile.mjs"), "export {};\n");
       writeFileSync(join(root, "provenance.json"), "{}\n");
     },
+    ...(hooks.installTimeoutMs === undefined ? {} : { installTimeoutMs: hooks.installTimeoutMs }),
     registerManifest: installedConnectorManifestRegistration.registerManifest,
     repairManifestDerivedState: (manifest) => {
       const repair = installedConnectorManifestRegistration.repairManifestDerivedState(manifest);

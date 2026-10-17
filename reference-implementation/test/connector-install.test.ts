@@ -11,13 +11,12 @@ import {
   renameSync,
   rmSync,
   symlinkSync,
-  utimesSync,
   writeFileSync,
 } from "node:fs";
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import test from "node:test";
@@ -34,7 +33,8 @@ import {
   reconcileConnectorUninstalls,
   resolveActiveConnectorPath,
 } from "../server/connector-install/index.ts";
-import { decideDirectoryLockReclaim } from "../server/connector-install/directory-lock.ts";
+import { acquireDirectoryLock } from "../server/connector-install/directory-lock.ts";
+import { withConnectorLifecycleLock, withConnectorLifecycleLockSync } from "../server/connector-lifecycle-lock.ts";
 import {
   createFileLocalConnectorSourceStore,
   inspectActiveLocalConnectorSource,
@@ -52,7 +52,6 @@ const RE_ONE_MIB = /1 MiB/;
 const RE_STATE_COMMIT_FAILED = /state commit failed/;
 const RE_ROLLBACK = /rollback/;
 const RE_INSTALL_IN_PROGRESS = /Another connector installation is in progress/;
-const RE_INSTALL_HELD_BY_PID = /Another connector installation is in progress\. Held by pid \d+/;
 const RE_INSTALL_PAST_DEADLINE = /exceeded its deadline at .* and has not stopped/;
 const RE_DERIVED_REPAIR_FAILED = /derived repair failed/;
 const RE_SYMBOLIC_LINK = /symbolic-link/;
@@ -1151,16 +1150,6 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
   return { promise, resolve };
 }
 
-function writeLockOwner(dataDir: string, owner: { pid: number; token?: string }): string {
-  const lockDir = join(dataDir, ".connector-install.lock");
-  mkdirSync(lockDir, { recursive: true });
-  writeFileSync(join(lockDir, "pid"), `${String(owner.pid)}\n`);
-  if (owner.token) {
-    writeFileSync(join(lockDir, "owner"), `${String(owner.pid)}\n${owner.token}\n`);
-  }
-  return lockDir;
-}
-
 function fixtureService(dataDir: string, extra: Partial<Parameters<typeof createConnectorInstallService>[0]> = {}) {
   return createConnectorInstallService({
     catalogLoader: async () => [entry],
@@ -1174,71 +1163,277 @@ function fixtureService(dataDir: string, extra: Partial<Parameters<typeof create
   });
 }
 
-test("install lock reclaim rules do not trust a pid alone", () => {
-  const self = { heldByThisProcess: false, pid: 29, token: "token-now" };
-  const alive = () => true;
-  const dead = () => false;
-  const decide = (owner: Parameters<typeof decideDirectoryLockReclaim>[0]["owner"], overrides = {}) =>
-    decideDirectoryLockReclaim({ isPidAlive: alive, lockAgeMs: 0, owner, self, ...overrides }).action;
-  // A restarted container reuses pid 29: an older token or a legacy pid-only lock is stale.
-  assert.equal(decide({ acquiredAt: null, pid: 29, token: "token-before-restart" }), "reclaim");
-  assert.equal(decide({ acquiredAt: null, pid: 29, token: null }), "reclaim");
-  // This process wrote it: busy while held, stale once the holder is gone.
-  assert.equal(decide({ acquiredAt: null, pid: 29, token: "token-now" }), "reclaim");
-  assert.equal(
-    decide({ acquiredAt: null, pid: 29, token: "token-now" }, { self: { ...self, heldByThisProcess: true } }),
-    "busy"
-  );
-  // Another pid: busy while alive, stale once dead.
-  assert.equal(decide({ acquiredAt: null, pid: 41, token: "other" }), "busy");
-  assert.equal(decide({ acquiredAt: null, pid: 41, token: "other" }, { isPidAlive: dead }), "reclaim");
-  // No owner record: a lock being created, or a crash between mkdir and the owner write.
-  assert.equal(decide(null), "busy");
-  assert.equal(decide(null, { lockAgeMs: 61_000 }), "reclaim");
+/** True when nothing holds the install fence: probe it by taking and dropping it. */
+function installFenceIsFree(dataDir: string): boolean {
+  try {
+    acquireDirectoryLock(dataDir, ".connector-install.lock", "busy").release();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * A child process that takes the install fence, prints one line per event,
+ * and holds the fence until its stdin closes. With a gate directory it also
+ * stops before and after any rename of the old `mkdir` lock path, printing
+ * `PAUSED <point>` and waiting for the file `<gate>/<point>`. A lock that
+ * reclaims by renaming the lock path aside thus shows its race window to
+ * the test; a lock that never renames it never stops.
+ */
+const LOCK_CHILD_PROGRAM = `
+  import fs, { existsSync, writeSync } from "node:fs";
+  import { syncBuiltinESMExports } from "node:module";
+  import { join } from "node:path";
+  const dataDir = process.env.PDPP_LOCK_CHILD_DATA_DIR;
+  const gateDir = process.env.PDPP_LOCK_CHILD_GATE_DIR;
+  const say = (line) => writeSync(1, line + "\\n");
+  if (gateDir) {
+    const lockPath = join(dataDir, ".connector-install.lock");
+    const realRename = fs.renameSync;
+    const cell = new Int32Array(new SharedArrayBuffer(4));
+    const stop = (point) => {
+      say("PAUSED " + point);
+      while (!existsSync(join(gateDir, point))) Atomics.wait(cell, 0, 0, 10);
+    };
+    fs.renameSync = (from, to) => {
+      if (String(from) !== lockPath) return realRename(from, to);
+      stop("before-rename");
+      realRename(from, to);
+      stop("after-rename");
+    };
+    syncBuiltinESMExports();
+  }
+  const { acquireDirectoryLock } = await import("./server/connector-install/directory-lock.ts");
+  let lock;
+  try {
+    lock = acquireDirectoryLock(dataDir, ".connector-install.lock", "Another connector installation is in progress.");
+  } catch (error) {
+    say("BUSY " + error.message);
+    process.exit(0);
+  }
+  say("ACQUIRED");
+  process.stdin.resume();
+  process.stdin.on("end", () => {
+    lock.release();
+    process.exit(0);
+  });
+`;
+
+interface LockChild {
+  readonly exited: Promise<void>;
+  kill: () => Promise<void>;
+  next: () => Promise<string>;
+  readonly pid: number | undefined;
+}
+
+function spawnLockChild(dataDir: string, gateDir?: string): LockChild {
+  const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", LOCK_CHILD_PROGRAM], {
+    cwd: resolve(import.meta.dirname, ".."),
+    env: {
+      ...process.env,
+      PDPP_LOCK_CHILD_DATA_DIR: dataDir,
+      ...(gateDir ? { PDPP_LOCK_CHILD_GATE_DIR: gateDir } : {}),
+    },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  const lines: string[] = [];
+  let buffered = "";
+  let stderr = "";
+  let wake: (() => void) | null = null;
+  child.stdout.on("data", (chunk) => {
+    buffered += String(chunk);
+    const parts = buffered.split("\n");
+    buffered = parts.pop() ?? "";
+    lines.push(...parts);
+    wake?.();
+  });
+  child.stderr.on("data", (chunk) => (stderr += String(chunk)));
+  const exited = new Promise<void>((settle) => child.once("close", () => settle()));
+  void exited.then(() => wake?.());
+  return {
+    exited,
+    kill: async () => {
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+      await exited;
+    },
+    next: async () => {
+      const deadline = Date.now() + 30_000;
+      while (lines.length === 0) {
+        assert.ok(child.exitCode === null, `lock child exited without output: ${stderr.slice(-2000)}`);
+        assert.ok(Date.now() < deadline, `lock child printed nothing: ${stderr.slice(-2000)}`);
+        await new Promise<void>((settle) => {
+          wake = settle;
+          setTimeout(settle, 100);
+        });
+      }
+      return lines.shift() as string;
+    },
+    pid: child.pid,
+  };
+}
+
+test("an install lock whose holder process died does not block, nor does a lock directory an older build left", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pdpp-connector-install-"));
+  const holder = spawnLockChild(dataDir);
+  try {
+    assert.equal(await holder.next(), "ACQUIRED");
+    await holder.kill();
+    // An older build's mkdir lock, with this pid, as a restarted container leaves it.
+    const legacyLockDir = join(dataDir, ".connector-install.lock");
+    mkdirSync(legacyLockDir, { recursive: true });
+    writeFileSync(join(legacyLockDir, "pid"), `${String(process.pid)}\n`);
+    assert.equal((await fixtureService(dataDir).install("github", digest)).digest, digest);
+    assert.equal(installFenceIsFree(dataDir), true);
+  } finally {
+    await holder.kill();
+    rmSync(dataDir, { force: true, recursive: true });
+  }
 });
 
-test("an install lock left by an earlier process with this pid is reclaimed", async () => {
+test("a live holder in another process keeps the install fence until it exits", async () => {
   const dataDir = mkdtempSync(join(tmpdir(), "pdpp-connector-install-"));
+  const holder = spawnLockChild(dataDir);
   try {
-    for (const owner of [{ pid: process.pid }, { pid: process.pid, token: "previous-process-start" }]) {
-      const lockDir = writeLockOwner(dataDir, owner);
-      const service = fixtureService(dataDir);
-      assert.equal((await service.install("github", digest)).digest, digest);
-      assert.equal(existsSync(lockDir), false);
+    assert.equal(await holder.next(), "ACQUIRED");
+    await assert.rejects(
+      () => fixtureService(dataDir).install("github", digest),
+      new RegExp(`Another connector installation is in progress\\. Held by pid ${String(holder.pid)} since `)
+    );
+    await holder.kill();
+    assert.equal((await fixtureService(dataDir).install("github", digest)).digest, digest);
+  } finally {
+    await holder.kill();
+    rmSync(dataDir, { force: true, recursive: true });
+  }
+});
+
+test("three processes that find a crashed holder's lock never hold the install fence at once", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pdpp-connector-install-"));
+  const gateDir = mkdtempSync(join(tmpdir(), "pdpp-connector-install-gate-"));
+  const children: LockChild[] = [];
+  const start = (gate?: string) => {
+    const child = spawnLockChild(dataDir, gate);
+    children.push(child);
+    return child;
+  };
+  try {
+    const crashed = start();
+    assert.equal(await crashed.next(), "ACQUIRED");
+    await crashed.kill();
+
+    // B finds the dead holder's lock. If its way to take over is to move the
+    // lock path aside, B stops right there, after it judged the lock stale.
+    const b = start(gateDir);
+    let bState = await b.next();
+    // A finds the same dead holder's lock while B is stopped.
+    const a = start();
+    const aState = await a.next();
+    if (bState === "PAUSED before-rename") {
+      // B moves the lock path aside and stops again before it checks the owner.
+      writeFileSync(join(gateDir, "before-rename"), "");
+      bState = await b.next();
+    }
+    // C arrives while the lock path may be missing.
+    const c = start();
+    const cState = await c.next();
+
+    const states = { A: aState, B: bState, C: cState };
+    const holders = Object.entries(states)
+      .filter(([, state]) => state === "ACQUIRED")
+      .map(([name]) => name);
+    assert.equal(holders.length, 1, `holders at the same time: ${holders.join(", ")}; ${JSON.stringify(states)}`);
+  } finally {
+    await Promise.all(children.map((child) => child.kill()));
+    rmSync(gateDir, { force: true, recursive: true });
+    rmSync(dataDir, { force: true, recursive: true });
+  }
+});
+
+test("an install reclaims a lifecycle lock row that an earlier start of this process left", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pdpp-connector-install-"));
+  initDb(join(dataDir, "pdpp.sqlite"));
+  try {
+    // Creates the lock table.
+    await withConnectorLifecycleLock(dataDir, "github", async () => undefined);
+    // A crash, then a container restart: the new process has the old pid.
+    getDb()
+      .prepare("INSERT INTO connector_lifecycle_locks(connector_id, owner_token, owner_pid) VALUES(?, ?, ?)")
+      .run("github", "token-from-before-the-restart", process.pid);
+    const installed = await fixtureService(dataDir, { installTimeoutMs: 5000 }).install("github", digest);
+    assert.equal(installed.digest, digest);
+    assert.equal(
+      getDb().prepare("SELECT count(*) AS n FROM connector_lifecycle_locks").get<{ n: number }>()?.n,
+      0,
+      "the stale row is gone and the install released its own"
+    );
+  } finally {
+    // Lets a waiter that never reclaims finish instead of polling forever.
+    getDb()?.prepare("DELETE FROM connector_lifecycle_locks").run();
+    closeDb();
+    rmSync(dataDir, { force: true, recursive: true });
+  }
+});
+
+test("a lifecycle lock row with this pid that no current lock owns is reclaimed, in either token format", () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pdpp-connector-install-"));
+  initDb(join(dataDir, "pdpp.sqlite"));
+  try {
+    // Creates the lock table.
+    withConnectorLifecycleLockSync(dataDir, "github", () => undefined);
+    for (const staleToken of ["a2c4e6f8-legacy-operation-token", "prior-process-start:prior-operation"]) {
+      getDb()
+        .prepare("INSERT INTO connector_lifecycle_locks(connector_id, owner_token, owner_pid) VALUES(?, ?, ?)")
+        .run("github", staleToken, process.pid);
+      let entered = false;
+      withConnectorLifecycleLockSync(dataDir, "github", () => {
+        entered = true;
+      });
+      assert.equal(entered, true, `a row with token ${staleToken} was reclaimed`);
+      assert.equal(getDb().prepare("SELECT count(*) AS n FROM connector_lifecycle_locks").get<{ n: number }>()?.n, 0);
     }
   } finally {
+    closeDb();
     rmSync(dataDir, { force: true, recursive: true });
   }
 });
 
-test("an install lock from a dead pid is reclaimed and a live pid keeps it", async () => {
+test("a deadline while an install waits for the lifecycle lock releases the install fence", async () => {
   const dataDir = mkdtempSync(join(tmpdir(), "pdpp-connector-install-"));
+  initDb(join(dataDir, "pdpp.sqlite"));
+  const entered = deferred();
+  const holderDone = deferred();
+  let holding: Promise<void> | undefined;
   try {
-    const exited = spawnSync(process.execPath, ["-e", ""]);
-    assert.equal(exited.status, 0);
-    const lockDir = writeLockOwner(dataDir, { pid: exited.pid, token: "dead-process" });
-    assert.equal((await fixtureService(dataDir).install("github", digest)).digest, digest);
-    assert.equal(existsSync(lockDir), false);
+    holding = withConnectorLifecycleLock(dataDir, "github", async () => {
+      entered.resolve();
+      await holderDone.promise;
+    });
+    await entered.promise;
+    let staged = false;
+    const service = fixtureService(dataDir, {
+      installArtifact: (root) => {
+        staged = true;
+        writeFixture(root);
+      },
+      installTimeoutMs: 100,
+    });
+    await assert.rejects(service.install("github", digest), ConnectorInstallTimeoutError);
+    await waitFor(() => installFenceIsFree(dataDir), 2000);
+    assert.equal(staged, false, "the install never started its work");
+    assert.equal(
+      getDb().prepare("SELECT count(*) AS n FROM connector_lifecycle_locks").get<{ n: number }>()?.n,
+      1,
+      "the live holder keeps its lifecycle lock"
+    );
 
-    writeLockOwner(dataDir, { pid: process.ppid, token: "live-process" });
-    await assert.rejects(() => fixtureService(dataDir).install("github", digest), RE_INSTALL_HELD_BY_PID);
-    assert.equal(existsSync(lockDir), true);
-  } finally {
-    rmSync(dataDir, { force: true, recursive: true });
-  }
-});
-
-test("an install lock without an owner record is reclaimed only after its grace period", async () => {
-  const dataDir = mkdtempSync(join(tmpdir(), "pdpp-connector-install-"));
-  try {
-    const lockDir = join(dataDir, ".connector-install.lock");
-    mkdirSync(lockDir);
-    await assert.rejects(() => fixtureService(dataDir).install("github", digest), RE_INSTALL_IN_PROGRESS);
-    const old = new Date(Date.now() - 120_000);
-    utimesSync(lockDir, old, old);
+    holderDone.resolve();
+    await holding;
     assert.equal((await fixtureService(dataDir).install("github", digest)).digest, digest);
-    assert.equal(existsSync(lockDir), false);
   } finally {
+    holderDone.resolve();
+    await holding;
+    closeDb();
     rmSync(dataDir, { force: true, recursive: true });
   }
 });
@@ -1270,7 +1465,7 @@ test("a stuck install fails at its deadline, keeps the fence until it stops, and
     await assert.rejects(() => fixtureService(dataDir).install("github", digest), RE_INSTALL_PAST_DEADLINE);
 
     stuck.resolve();
-    await waitFor(() => !existsSync(join(dataDir, ".connector-install.lock")));
+    await waitFor(() => installFenceIsFree(dataDir));
     assert.deepEqual(await service.status(), []);
     assert.equal((await fixtureService(dataDir).install("github", digest)).digest, digest);
   } finally {
@@ -1327,7 +1522,7 @@ for (const path of ["first install", "update"] as const) {
       await persisted.promise;
       await assert.rejects(pending, ConnectorInstallTimeoutError);
       resume.resolve();
-      await waitFor(() => !existsSync(join(dataDir, ".connector-install.lock")));
+      await waitFor(() => installFenceIsFree(dataDir));
 
       const active = (await service.status())[0];
       assert.equal(active?.manifest.version, catalogManifestVersion);
@@ -1357,7 +1552,7 @@ test("derived-state repair runs after the install returns and its locks are rele
     });
     const installed = await service.install("github", digest);
     await repairEntered.promise;
-    assert.equal(existsSync(join(dataDir, ".connector-install.lock")), false);
+    assert.equal(installFenceIsFree(dataDir), true);
     // The fence is free while the O(records) repair runs.
     assert.equal((await fixtureService(dataDir).install("github", digest)).digest, digest);
 
