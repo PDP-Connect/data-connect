@@ -122,27 +122,48 @@ interface DisplayNameProjectionContext {
 export const RECORDS_DEFAULT_PAGE_LIMIT = 25;
 export const RECORDS_MAX_PAGE_LIMIT = 100;
 
+// spec-core §8 types `limit` as an integer. The wire grammar is a plain run
+// of decimal digits: no sign, whitespace, fraction, exponent, or radix prefix.
+const RECORDS_PAGE_LIMIT_PATTERN = /^[0-9]+$/;
+
+function invalidRecordsPageLimit(): ErrorWithCode {
+  const err: ErrorWithCode = new Error(
+    `limit must be a positive integer (default ${RECORDS_DEFAULT_PAGE_LIMIT}, max ${RECORDS_MAX_PAGE_LIMIT}; larger values are clamped)`
+  );
+  err.code = "invalid_request";
+  err.param = "limit";
+  return err;
+}
+
 /**
- * Clamp a request's `limit` to the records-list page contract (default 25,
- * max 100) without throwing. Returns the effective `limit`, the parsed
- * `requested` value (or null when absent/unparseable), and whether the cap
- * was applied.
+ * Resolve a request's `limit` against the records-list page contract
+ * (spec-core §8: default 25, max 100). Returns the effective `limit`, the
+ * requested value (null when absent), and whether the cap was applied.
  *
- * The runtime clamps rather than rejects an over-max `limit` so a client that
- * optimistically asks for a big page still gets a valid bounded page; the
- * `clamped` flag lets the caller surface a `limit_clamped` warning so the
- * reduction is never silent. A non-positive or unparseable `limit` falls back
- * to the default and is not treated as a clamp (there is nothing to report).
+ * An absent `limit` (undefined or null) uses the default. A positive integer
+ * above the maximum is clamped, and the `clamped` flag lets the caller
+ * surface a `limit_clamped` warning so the reduction is never silent. Any
+ * other value, including an empty string, zero, a negative or fractional
+ * number, a numeric prefix with trailing text, or a repeated or bracketed
+ * parameter, is an unsupported query shape: spec-core §8 says it "MUST be
+ * rejected with HTTP 400 and MUST NOT be silently ignored", so this throws
+ * `invalid_request` on param `limit`. Integers beyond the IEEE-754 safe range
+ * are rejected the same way because they cannot be represented exactly.
  */
 export function clampRecordsPageLimit(rawLimit: unknown): ClampedLimitResult {
-  // Number.parseInt coerces any input to a string at runtime (it always did,
-  // even pre-migration -- Number.parseInt(undefined, 10) is NaN just like
-  // Number.parseInt(String(undefined), 10)); the explicit String(...) here
-  // only satisfies the stricter (string, number) => number lib signature and
-  // changes no observable behavior.
-  const parsed = Number.parseInt(String(rawLimit), 10);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
+  if (rawLimit === undefined || rawLimit === null) {
     return { clamped: false, limit: RECORDS_DEFAULT_PAGE_LIMIT, requested: null };
+  }
+  let parsed: number;
+  if (typeof rawLimit === "number") {
+    parsed = rawLimit;
+  } else if (typeof rawLimit === "string" && RECORDS_PAGE_LIMIT_PATTERN.test(rawLimit)) {
+    parsed = Number(rawLimit);
+  } else {
+    throw invalidRecordsPageLimit();
+  }
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw invalidRecordsPageLimit();
   }
   if (parsed > RECORDS_MAX_PAGE_LIMIT) {
     return { clamped: true, limit: RECORDS_MAX_PAGE_LIMIT, requested: parsed };

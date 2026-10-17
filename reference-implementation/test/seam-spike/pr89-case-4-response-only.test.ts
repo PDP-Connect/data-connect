@@ -72,9 +72,9 @@ test("captured introspection context enforces the response-only request matrix w
 
     const deniedRequests = [
       {
-        code: "context.stream_not_allowed",
+        code: "grant_stream_not_allowed",
         name: "stream",
-        status: 401,
+        status: 403,
         url: `${harness.rsUrl}/v1/streams/recently_played/records`,
       },
       {

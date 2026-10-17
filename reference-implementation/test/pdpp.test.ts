@@ -180,12 +180,12 @@ const REGEXP_138 = /Unknown connector: missing_spotify_connector/;
 const REGEXP_139 = /connector_id must be a single non-empty string/;
 const REGEXP_140 = /connector_id must be a single non-empty string/;
 const REGEXP_141 = /Connector manifest .* is malformed or no longer valid/;
-const REGEXP_142 = /Token introspection failed closed/;
-const REGEXP_143 = /Invalid or expired token/;
-const REGEXP_144 = /Token introspection failed closed/;
-const REGEXP_145 = /Invalid or expired token/;
-const REGEXP_146 = /Token introspection failed closed/;
-const REGEXP_147 = /Invalid or expired token/;
+const REGEXP_142 = /Stream 'recently_played' not in grant/;
+const REGEXP_143 = /Stream 'recently_played' not in grant/;
+const REGEXP_144 = /Stream 'recently_played' not in grant/;
+const REGEXP_145 = /Stream 'recently_played' not in grant/;
+const REGEXP_146 = /Stream 'saved_tracks' not in grant/;
+const REGEXP_147 = /Stream 'saved_tracks' not in grant/;
 const REGEXP_148 = /Record not found/;
 const REGEXP_149 = /Record not found/;
 const REGEXP_150 = /Record not found/;
@@ -201,6 +201,7 @@ const REGEXP_162 = /missing_native_storage_connector/;
 const REGEXP_163 = /not addressable under this grant/;
 const REGEXP_164 = /Unknown source: https:\/\/northstar\.example\/pdpp/;
 const REGEXP_165 = /Transient Longview/;
+const REGEXP_PAY_STATEMENTS_NOT_IN_GRANT = /Stream 'pay_statements' not in grant/;
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REFERENCE_IMPL_DIR = join(__dirname, "..");
@@ -215,6 +216,7 @@ if (spotifyConnectorKey === null) {
 }
 const SPOTIFY_CONNECTOR_KEY = spotifyConnectorKey;
 const SPOTIFY_SOURCE_ID = "https://registry.pdpp.dev/connectors/spotify";
+const SPOTIFY_CLIENT_SOURCE = { id: SPOTIFY_SOURCE_ID, kind: "connector" };
 
 type JsonRecord = Record<string, unknown>;
 
@@ -364,6 +366,7 @@ interface ErrorResponse {
     code: string;
     message: string;
     request_id: string | null | undefined;
+    type: string | null | undefined;
   };
 }
 
@@ -730,6 +733,7 @@ function parseErrorResponse(value: unknown): ErrorResponse {
       code: requireString(error.code, "error response.error.code"),
       message: requireString(error.message, "error response.error.message"),
       request_id: optionalString(error.request_id, "error response.error.request_id"),
+      type: optionalString(error.type, "error response.error.type"),
     },
   };
 }
@@ -5500,9 +5504,10 @@ test("PDPP reference implementation integration", async (t) => {
         const metadataResp = await fetchJson(`${rsUrl}/v1/streams/pay_statements`, {
           headers: { Authorization: `Bearer ${approved.token}` },
         });
-        assert.equal(metadataResp.status, 401);
-        assert.equal(metadataResp.body.error.code, "context.stream_not_allowed");
-        assert.match(metadataResp.body.error.message, REGEXP_95);
+        assert.equal(metadataResp.status, 403);
+        assert.equal(metadataResp.body.error.code, "grant_stream_not_allowed");
+        assert.match(metadataResp.body.error.message, REGEXP_PAY_STATEMENTS_NOT_IN_GRANT);
+        assert.equal(metadataResp.body.error.type, "permission_error");
 
         const revokeResp = await fetchJson(`${asUrl}/grants/${approved.grant.grant_id}/revoke`, {
           headers: {
@@ -7596,13 +7601,15 @@ test("PDPP reference implementation integration", async (t) => {
         const rejectedResp = await fetch(`${rsUrl}/v1/streams/recently_played`, {
           headers: { Authorization: `Bearer ${approved.token}` },
         });
-        assert.equal(rejectedResp.status, 401);
+        assert.equal(rejectedResp.status, 403);
+        assert.doesNotMatch(rejectedResp.headers.get("www-authenticate") ?? "", /invalid_token/);
         const rejectedRequestId = rejectedResp.headers.get("Request-Id");
         const rejectedTraceId = rejectedResp.headers.get("PDPP-Reference-Trace-Id");
         assert.ok(rejectedRequestId?.startsWith("req_"));
         assert.ok(rejectedTraceId, "rejected client metadata reads should carry a reference trace id");
         const rejectedBody = parseErrorResponse(await rejectedResp.json());
-        assert.equal(rejectedBody.error.code, "context.stream_not_allowed");
+        assert.equal(rejectedBody.error.code, "grant_stream_not_allowed");
+        assert.equal(rejectedBody.error.type, "permission_error");
         assert.match(rejectedBody.error.message, REGEXP_142);
 
         const { body: timeline } = await fetchGrantTimeline(asUrl, approved.grant.grant_id);
@@ -7616,7 +7623,7 @@ test("PDPP reference implementation integration", async (t) => {
         assert.equal(queryReceivedEvent.trace_id, rejectedTraceId);
         assert.equal(queryReceivedEvent.stream_id, "recently_played");
         assert.equal(queryReceivedEvent.data.query_shape, "stream_metadata");
-        assert.equal(queryReceivedEvent.data.source, undefined);
+        assert.deepEqual(queryReceivedEvent.data.source, SPOTIFY_CLIENT_SOURCE);
 
         const rejectedEvent = timeline.data.find(
           (event) => event.event_type === "query.rejected" && event.object_id === rejectedRequestId
@@ -7625,8 +7632,8 @@ test("PDPP reference implementation integration", async (t) => {
         assert.equal(rejectedEvent.trace_id, rejectedTraceId);
         assert.equal(rejectedEvent.stream_id, "recently_played");
         assert.equal(rejectedEvent.data.query_shape, "stream_metadata");
-        assert.equal(rejectedEvent.data.source, undefined);
-        assert.equal(rejectedEvent.data.error?.code, "context.stream_not_allowed");
+        assert.deepEqual(rejectedEvent.data.source, SPOTIFY_CLIENT_SOURCE);
+        assert.equal(rejectedEvent.data.error?.code, "grant_stream_not_allowed");
         assert.match(rejectedEvent.data.error?.message || "", REGEXP_143);
 
         const servedEvent = timeline.data.find(
@@ -7656,13 +7663,15 @@ test("PDPP reference implementation integration", async (t) => {
         const rejectedResp = await fetch(`${rsUrl}/v1/streams/recently_played/records?limit=1`, {
           headers: { Authorization: `Bearer ${approved.token}` },
         });
-        assert.equal(rejectedResp.status, 401);
+        assert.equal(rejectedResp.status, 403);
+        assert.doesNotMatch(rejectedResp.headers.get("www-authenticate") ?? "", /invalid_token/);
         const rejectedRequestId = rejectedResp.headers.get("Request-Id");
         const rejectedTraceId = rejectedResp.headers.get("PDPP-Reference-Trace-Id");
         assert.ok(rejectedRequestId?.startsWith("req_"));
         assert.ok(rejectedTraceId, "rejected client record-list reads should carry a reference trace id");
         const rejectedBody = parseErrorResponse(await rejectedResp.json());
-        assert.equal(rejectedBody.error.code, "context.stream_not_allowed");
+        assert.equal(rejectedBody.error.code, "grant_stream_not_allowed");
+        assert.equal(rejectedBody.error.type, "permission_error");
         assert.match(rejectedBody.error.message, REGEXP_144);
 
         const { body: timeline } = await fetchGrantTimeline(asUrl, approved.grant.grant_id);
@@ -7673,7 +7682,7 @@ test("PDPP reference implementation integration", async (t) => {
         assert.equal(queryReceivedEvent.trace_id, rejectedTraceId);
         assert.equal(queryReceivedEvent.stream_id, "recently_played");
         assert.equal(queryReceivedEvent.data.query_shape, "record_list");
-        assert.equal(queryReceivedEvent.data.source, undefined);
+        assert.deepEqual(queryReceivedEvent.data.source, SPOTIFY_CLIENT_SOURCE);
 
         const rejectedEvent = timeline.data.find(
           (event) => event.event_type === "query.rejected" && event.object_id === rejectedRequestId
@@ -7682,8 +7691,8 @@ test("PDPP reference implementation integration", async (t) => {
         assert.equal(rejectedEvent.trace_id, rejectedTraceId);
         assert.equal(rejectedEvent.stream_id, "recently_played");
         assert.equal(rejectedEvent.data.query_shape, "record_list");
-        assert.equal(rejectedEvent.data.source, undefined);
-        assert.equal(rejectedEvent.data.error?.code, "context.stream_not_allowed");
+        assert.deepEqual(rejectedEvent.data.source, SPOTIFY_CLIENT_SOURCE);
+        assert.equal(rejectedEvent.data.error?.code, "grant_stream_not_allowed");
         assert.match(rejectedEvent.data.error?.message || "", REGEXP_145);
 
         const servedEvent = timeline.data.find(
@@ -7723,13 +7732,15 @@ test("PDPP reference implementation integration", async (t) => {
             headers: { Authorization: `Bearer ${approved.token}` },
           }
         );
-        assert.equal(rejectedResp.status, 401);
+        assert.equal(rejectedResp.status, 403);
+        assert.doesNotMatch(rejectedResp.headers.get("www-authenticate") ?? "", /invalid_token/);
         const rejectedRequestId = rejectedResp.headers.get("Request-Id");
         const rejectedTraceId = rejectedResp.headers.get("PDPP-Reference-Trace-Id");
         assert.ok(rejectedRequestId?.startsWith("req_"));
         assert.ok(rejectedTraceId, "rejected client record-detail reads should carry a reference trace id");
         const rejectedBody = parseErrorResponse(await rejectedResp.json());
-        assert.equal(rejectedBody.error.code, "context.stream_not_allowed");
+        assert.equal(rejectedBody.error.code, "grant_stream_not_allowed");
+        assert.equal(rejectedBody.error.type, "permission_error");
         assert.match(rejectedBody.error.message, REGEXP_146);
 
         const { body: timeline } = await fetchGrantTimeline(asUrl, approved.grant.grant_id);
@@ -7740,7 +7751,7 @@ test("PDPP reference implementation integration", async (t) => {
         assert.equal(queryReceivedEvent.trace_id, rejectedTraceId);
         assert.equal(queryReceivedEvent.stream_id, "saved_tracks");
         assert.equal(queryReceivedEvent.data.query_shape, "record_detail");
-        assert.equal(queryReceivedEvent.data.source, undefined);
+        assert.deepEqual(queryReceivedEvent.data.source, SPOTIFY_CLIENT_SOURCE);
 
         const rejectedEvent = timeline.data.find(
           (event) => event.event_type === "query.rejected" && event.object_id === rejectedRequestId
@@ -7749,8 +7760,8 @@ test("PDPP reference implementation integration", async (t) => {
         assert.equal(rejectedEvent.trace_id, rejectedTraceId);
         assert.equal(rejectedEvent.stream_id, "saved_tracks");
         assert.equal(rejectedEvent.data.query_shape, "record_detail");
-        assert.equal(rejectedEvent.data.source, undefined);
-        assert.equal(rejectedEvent.data.error?.code, "context.stream_not_allowed");
+        assert.deepEqual(rejectedEvent.data.source, SPOTIFY_CLIENT_SOURCE);
+        assert.equal(rejectedEvent.data.error?.code, "grant_stream_not_allowed");
         assert.match(rejectedEvent.data.error?.message || "", REGEXP_147);
 
         const servedEvent = timeline.data.find(
@@ -8679,6 +8690,179 @@ test("PDPP reference implementation integration", async (t) => {
       const tombstone = requireFirst(tombstoneDelta.body.data, "tombstone delta");
       assert.equal(tombstone.deleted, true);
       assert.equal(tombstone.id, deletedId);
+
+      const unrestrictedTombstone = requireFirst(
+        requireJsonRecordArray(requireJsonRecord(tombstoneDelta.body.unwrap(), "tombstone delta").data, "tombstone data"),
+        "unrestricted tombstone"
+      );
+      assert.equal(Object.hasOwn(unrestrictedTombstone, "data"), false);
+
+      // spec-core §4 "Tombstones": sparse `fields` select data fields; they must
+      // not strip the tombstone envelope (object, id, stream, deleted, both
+      // timestamps) or add a data field.
+      for (const fields of ["id", "name", "name&limit=1"]) {
+        const sparseDelta = await fetchJson(
+          `${rsUrl}/v1/streams/top_artists/records?changes_since=${encodeURIComponent(visibleDelta.body.next_changes_since)}&fields=${fields}`,
+          { headers: { Authorization: `Bearer ${approved.token}` } }
+        );
+        const sparseBody = requireJsonRecord(sparseDelta.body.unwrap(), `fields=${fields} tombstone delta`);
+        assert.equal(sparseDelta.status, 200, JSON.stringify(sparseBody));
+        const sparseData = requireJsonRecordArray(sparseBody.data, `fields=${fields} tombstone delta.data`);
+        assert.equal(sparseData.length, 1);
+        const sparseTombstone = requireFirst(sparseData, `fields=${fields} tombstone`);
+        assert.equal(sparseTombstone.object, "record", `fields=${fields}`);
+        assert.equal(sparseTombstone.id, deletedId, `fields=${fields}`);
+        assert.equal(sparseTombstone.stream, "top_artists", `fields=${fields}`);
+        assert.equal(sparseTombstone.deleted, true, `fields=${fields}`);
+        assert.ok(requireString(sparseTombstone.deleted_at, "tombstone deleted_at").length > 0, `fields=${fields}`);
+        assert.ok(requireString(sparseTombstone.emitted_at, "tombstone emitted_at").length > 0, `fields=${fields}`);
+        assert.equal(Object.hasOwn(sparseTombstone, "data"), false, `fields=${fields}`);
+        // Sparse and unrestricted reads expose the same tombstone envelope.
+        assert.deepEqual(sparseTombstone, unrestrictedTombstone, `fields=${fields}`);
+        assert.equal(sparseBody.has_more, false, `fields=${fields}`);
+        assert.equal(sparseDelta.body.next_changes_since, tombstoneDelta.body.next_changes_since);
+      }
+      const afterTombstone = await fetchJson(
+        `${rsUrl}/v1/streams/top_artists/records?changes_since=${encodeURIComponent(tombstoneDelta.body.next_changes_since)}&fields=id`,
+        { headers: { Authorization: `Bearer ${approved.token}` } }
+      );
+      assert.equal(afterTombstone.status, 200);
+      assert.equal(afterTombstone.body.data.length, 0);
+      assert.ok(afterTombstone.body.next_changes_since.length > 0);
+    });
+  });
+
+  await t.test("owner sparse record-list reads always include schema-required fields", async () => {
+    await withHarness(async ({ asUrl, rsUrl, spotifyManifest }) => {
+      const ownerToken = await issueOwnerToken(asUrl, "u1");
+      await seedSpotify(rsUrl, spotifyManifest, ownerToken);
+      // spec-core §8 `fields`: "Schema-required fields are always included."
+      // top_artists requires [id, name].
+      const resp = await fetchJson(
+        `${rsUrl}/v1/streams/top_artists/records?connector_id=${encodeURIComponent(spotifyManifest.connector_id)}&fields=genres&limit=3`,
+        { headers: { Authorization: `Bearer ${ownerToken}` } }
+      );
+      assert.equal(resp.status, 200, JSON.stringify(resp.body));
+      const records = requireJsonRecordArray(requireJsonRecord(resp.body.unwrap(), "owner sparse read").data, "data");
+      assert.ok(records.length > 0);
+      for (const record of records) {
+        const data = requireJsonRecord(record.data, "owner sparse record data");
+        assert.deepEqual(Object.keys(data).sort(), ["genres", "id", "name"], JSON.stringify(data));
+        // The live envelope survives projection and gains no deletion marker.
+        assert.equal(record.object, "record");
+        assert.equal(record.stream, "top_artists");
+        assert.equal(record.id, data.id);
+        assert.equal(typeof record.emitted_at, "string");
+        assert.equal(Object.hasOwn(record, "deleted"), false);
+      }
+
+      // A full owner read stays unprojected (more than the required fields).
+      const full = await fetchJson(
+        `${rsUrl}/v1/streams/top_artists/records?connector_id=${encodeURIComponent(spotifyManifest.connector_id)}&limit=1`,
+        { headers: { Authorization: `Bearer ${ownerToken}` } }
+      );
+      assert.equal(full.status, 200);
+      const fullRecord = requireFirst(
+        requireJsonRecordArray(requireJsonRecord(full.body.unwrap(), "owner full read").data, "data"),
+        "owner full record"
+      );
+      const fullKeys = Object.keys(requireJsonRecord(fullRecord.data, "owner full record data"));
+      for (const key of ["id", "name", "genres", "popularity", "followers"]) {
+        assert.ok(fullKeys.includes(key), `full owner read keeps ${key}: ${fullKeys.join(",")}`);
+      }
+
+      // A client sparse read stays inside the request and the frozen grant.
+      const approved = await approveGrant(asUrl, "u1", {
+        access_mode: "continuous",
+        client_id: "concert_recommendation_app",
+        purpose_code: "https://pdpp.dev/purpose/personalization",
+        purpose_description: "Maintain a concert-recommendation profile over time",
+        source: { id: sourceIdForConnectorId(spotifyManifest.connector_id), kind: "connector" },
+        streams: [{ name: "top_artists", view: "basic" }],
+      });
+      const clientSparse = await fetchJson(`${rsUrl}/v1/streams/top_artists/records?fields=id,name&limit=3`, {
+        headers: { Authorization: `Bearer ${approved.token}` },
+      });
+      assert.equal(clientSparse.status, 200, JSON.stringify(clientSparse.body));
+      for (const record of requireJsonRecordArray(
+        requireJsonRecord(clientSparse.body.unwrap(), "client sparse read").data,
+        "data"
+      )) {
+        assert.deepEqual(Object.keys(requireJsonRecord(record.data, "client data")).sort(), ["id", "name"]);
+      }
+      // A declared field outside the frozen grant is a permission error.
+      const ungrantedField = await fetchJson(`${rsUrl}/v1/streams/top_artists/records?fields=popularity`, {
+        headers: { Authorization: `Bearer ${approved.token}` },
+      });
+      assert.equal(ungrantedField.status, 403, JSON.stringify(ungrantedField.body));
+      assert.equal(ungrantedField.body.error.code, "field_not_granted");
+      assert.equal(ungrantedField.body.error.type, "permission_error");
+    });
+  });
+
+  await t.test("record-list rejects malformed limit values with 400 invalid_request", async () => {
+    await withHarness(async ({ asUrl, rsUrl, spotifyManifest }) => {
+      const ownerToken = await issueOwnerToken(asUrl, "u1");
+      await seedSpotify(rsUrl, spotifyManifest, ownerToken);
+      const approved = await approveGrant(asUrl, "u1", {
+        access_mode: "continuous",
+        client_id: "concert_recommendation_app",
+        purpose_code: "https://pdpp.dev/purpose/personalization",
+        purpose_description: "Maintain a concert-recommendation profile over time",
+        source: { id: sourceIdForConnectorId(spotifyManifest.connector_id), kind: "connector" },
+        streams: [{ name: "top_artists", view: "basic" }],
+      });
+      const ownerScope = `connector_id=${encodeURIComponent(spotifyManifest.connector_id)}&`;
+      const cases: Array<[string, string, string]> = [
+        ["owner", ownerToken, ownerScope],
+        ["client", approved.token, ""],
+      ];
+      // spec-core §8: `limit` is an integer; unsupported query shapes MUST be
+      // rejected with HTTP 400 and MUST NOT be silently ignored.
+      const malformed = [
+        "limit=abc",
+        "limit=-1",
+        "limit=0",
+        "limit=1junk",
+        "limit=25garbage",
+        "limit=1.5",
+        "limit=",
+        "limit=1&limit=2",
+        "limit[]=25",
+        "limit[value]=25",
+      ];
+      for (const [actor, token, scope] of cases) {
+        for (const query of malformed) {
+          const resp = await fetchJson(`${rsUrl}/v1/streams/top_artists/records?${scope}${query}`, {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          const body = requireJsonRecord(resp.body.unwrap(), "malformed limit response");
+          const error = requireJsonRecord(body.error, "malformed limit response.error");
+          assert.equal(resp.status, 400, `${actor} ${query}: ${JSON.stringify(body)}`);
+          assert.equal(error.code, "invalid_request", `${actor} ${query}`);
+          assert.equal(error.param, "limit", `${actor} ${query}`);
+          assert.equal(error.type, "invalid_request_error", `${actor} ${query}`);
+          assert.equal(Object.hasOwn(body, "data"), false, `${actor} ${query}`);
+        }
+        for (const limit of ["1", "25", "100"]) {
+          const accepted = await fetchJson(`${rsUrl}/v1/streams/top_artists/records?${scope}limit=${limit}`, {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          const acceptedBody = requireJsonRecord(accepted.body.unwrap(), "accepted limit response");
+          assert.equal(accepted.status, 200, `${actor} limit=${limit}: ${JSON.stringify(acceptedBody)}`);
+          assert.ok(requireJsonRecordArray(acceptedBody.data, "data").length <= Number(limit));
+          assert.doesNotMatch(JSON.stringify(acceptedBody.meta ?? {}), /limit_clamped/, `${actor} limit=${limit}`);
+          // A valid bearer is never relabelled as a rejected token.
+          assert.doesNotMatch(accepted.headers["www-authenticate"] ?? "", /invalid_token/);
+        }
+        // An over-max integer (101) is still clamped with a warning, not rejected.
+        const clamped = await fetchJson(`${rsUrl}/v1/streams/top_artists/records?${scope}limit=101`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        const clampedBody = requireJsonRecord(clamped.body.unwrap(), "clamped limit response");
+        assert.equal(clamped.status, 200, `${actor} limit=101: ${JSON.stringify(clampedBody)}`);
+        assert.match(JSON.stringify(clampedBody.meta), /"code":"limit_clamped"/, `${actor} limit=101 must warn`);
+      }
     });
   });
 

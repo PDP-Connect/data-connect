@@ -1727,12 +1727,26 @@ test("RS 401 responses advertise protected-resource metadata in header and body"
     });
     const invalidBody = (await invalidResp.json()) as JsonObject;
     assert.equal(invalidResp.status, 401);
-    assert.equal(invalidResp.headers.get("www-authenticate"), expectedChallenge);
+    // spec-core §8 "Protected resource metadata": a presented-and-rejected
+    // token MUST carry error="invalid_token"; an absent token MUST NOT.
+    assert.equal(invalidResp.headers.get("www-authenticate"), `${expectedChallenge}, error="invalid_token"`);
     assert.equal(invalidBody.error.resource_metadata, metadataUrl);
     // biome-ignore lint/performance/useTopLevelRegex: localized test assertion preserves its explicit contract.
     assert.match(invalidBody.error.next_step, /pdpp_agent_discovery\.cli/);
     // biome-ignore lint/performance/useTopLevelRegex: localized test assertion preserves its explicit contract.
     assert.doesNotMatch(invalidBody.error.next_step, /npx -y @pdpp\/cli connect/);
+
+    // The same challenge applies on a stream-scoped records-list route.
+    const invalidListResp = await fetch(`${rsUrl}/v1/streams/top_artists/records?limit=1`, {
+      headers: { authorization: "Bearer not-a-real-token" },
+    });
+    const invalidListBody = (await invalidListResp.json()) as JsonObject;
+    assert.equal(invalidListResp.status, 401);
+    assert.equal(invalidListResp.headers.get("www-authenticate"), `${expectedChallenge}, error="invalid_token"`);
+    // The code may be a PDPP extension (spec-core §8 Errors: unknown codes are
+    // opaque); the type stays authentication_error.
+    assert.equal(invalidListBody.error.type, "authentication_error");
+    assert.equal(Object.hasOwn(invalidListBody, "data"), false);
   } finally {
     await closeServer(server);
   }
@@ -1758,6 +1772,15 @@ test("RS 401 metadata challenge uses configured public resource origin", async (
     assert.equal(resp.status, 401);
     assert.equal(resp.headers.get("www-authenticate"), `Bearer resource_metadata="${metadataUrl}"`);
     assert.equal(body.error.resource_metadata, metadataUrl);
+
+    const rejected = await fetch(`${rsUrl}/v1/schema`, { headers: { authorization: "Bearer not-a-real-token" } });
+    const rejectedBody = (await rejected.json()) as JsonObject;
+    assert.equal(rejected.status, 401);
+    assert.equal(
+      rejected.headers.get("www-authenticate"),
+      `Bearer resource_metadata="${metadataUrl}", error="invalid_token"`
+    );
+    assert.equal(rejectedBody.error.resource_metadata, metadataUrl);
   } finally {
     await closeServer(server);
   }
@@ -1778,10 +1801,19 @@ test("RS 401 metadata challenge omits untrusted public host-derived origin", asy
       headers: { host: "attacker.example" },
     });
     assert.equal(resp.status, 401);
-    assert.equal(resp.headers["www-authenticate"], undefined);
+    // RFC 6750 §3 still requires a Bearer challenge on every 401; only the
+    // untrusted host-derived resource_metadata URL is withheld.
+    assert.equal(resp.headers["www-authenticate"], "Bearer");
     assert.equal(resp.body.error.code, "authentication_error");
     assert.equal(resp.body.error.resource_metadata, undefined);
     assert.equal(resp.body.error.next_step, undefined);
+
+    const rejected = await httpRequestJson(`${rsUrl}/v1/schema`, {
+      headers: { authorization: "Bearer not-a-real-token", host: "attacker.example" },
+    });
+    assert.equal(rejected.status, 401);
+    assert.equal(rejected.headers["www-authenticate"], 'Bearer error="invalid_token"');
+    assert.equal(rejected.body.error.resource_metadata, undefined);
   } finally {
     await closeServer(server);
   }
