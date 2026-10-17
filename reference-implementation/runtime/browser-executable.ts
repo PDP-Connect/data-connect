@@ -24,7 +24,7 @@
  * Scope: this inspects the Patchright pinned by this package. A connector that
  * bundles a different Patchright revision is not covered.
  */
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -64,11 +64,10 @@ export function bundledChromiumRevision(): string | null {
     return cachedBundledRevision;
   }
   try {
-    const corePackage = createRequire(import.meta.url).resolve("patchright-core/package.json");
-    const manifest = JSON.parse(readFileSync(path.join(path.dirname(corePackage), "browsers.json"), "utf8")) as {
-      browsers?: { name?: string; revision?: string }[];
-    };
-    cachedBundledRevision = manifest.browsers?.find((browser) => browser.name === "chromium")?.revision ?? null;
+    // Ask Patchright itself where it expects Chromium; the directory name carries the revision
+    // (".../chromium-<revision>/..."). This needs no read of the package's data files.
+    const { chromium } = createRequire(import.meta.url)("patchright") as { chromium: { executablePath(): string } };
+    cachedBundledRevision = /[\\/]chromium-(\d+)[\\/]/.exec(chromium.executablePath())?.[1] ?? null;
   } catch {
     cachedBundledRevision = null;
   }
