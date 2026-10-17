@@ -47,7 +47,7 @@ export function connectorNotInstalledCopy(displayName: string): string {
 
 /** What installing does, said once beside the action. */
 export function connectorInstallExplainer(displayName: string): string {
-  return `Installing adds the latest signed ${displayName} connector from the catalog. Your existing records and settings are kept.`;
+  return `Installing adds the latest signed ${displayName} connector from the catalog. It does not delete records you already collected.`;
 }
 
 export function connectorInstallActionLabel(displayName: string): string {
