@@ -280,7 +280,10 @@ export async function isSearchIndexScopeDirty(key: SearchIndexScopeKey): Promise
  * marked_at), permanently starving every healthy scope behind it out of
  * every page. Re-queried fresh every sweep round.
  */
-export async function listDirtySearchIndexScopes(limit: number): Promise<DirtySearchIndexScope[]> {
+export async function listDirtySearchIndexScopes(
+  limit: number,
+  filter: { readonly connectorId?: string } = {}
+): Promise<DirtySearchIndexScope[]> {
   if (isPostgresStorageBackend()) {
     const result = await postgresQuery<{
       connector_id: string;
@@ -294,9 +297,10 @@ export async function listDirtySearchIndexScopes(limit: number): Promise<DirtySe
        WHERE dirty <> 0
          AND operator_parked = 0
          AND (next_attempt_at IS NULL OR next_attempt_at <= $2)
+         AND ($3::text IS NULL OR connector_id = $3)
        ORDER BY marked_at ASC, connector_instance_id ASC, stream ASC
        LIMIT $1`,
-      [limit, new Date().toISOString()]
+      [limit, new Date().toISOString(), filter.connectorId ?? null]
     );
     return result.rows.map((row) => ({
       connectorId: row.connector_id,
@@ -314,6 +318,9 @@ export async function listDirtySearchIndexScopes(limit: number): Promise<DirtySe
     revision: number;
     stream: string;
   }>(referenceQueries.searchIndexDirtyListDirty, [new Date().toISOString()])) {
+    if (filter.connectorId !== undefined && row.connector_id !== filter.connectorId) {
+      continue;
+    }
     scopes.push({
       connectorId: row.connector_id,
       connectorInstanceId: row.connector_instance_id,

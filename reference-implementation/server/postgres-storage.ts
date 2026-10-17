@@ -133,9 +133,20 @@ const POSTGRES_BULK_POOL_MAX = 3;
  */
 const POSTGRES_CLIENT_CONNECTION_CHECK_INTERVAL_MS = 5_000;
 
-function createPostgresPool(databaseUrl: string, max: number): PgPool {
+/**
+ * A pooled client whose backend is terminated (`pg_terminate_backend`,
+ * `idle_in_transaction_session_timeout`, a Postgres restart) emits `error`.
+ * pg-pool listens only while the client is idle, and then re-emits on the pool.
+ * An `error` event with no listener throws, and the process exits. The pool
+ * reports it instead: the query in flight already rejects, the client is no
+ * longer queryable, and pg-pool discards it on release.
+ */
+function createPostgresPool(databaseUrl: string, max: number, log: StorageLog): PgPool {
   const created = new Pool({ connectionString: databaseUrl, max });
+  const reportLostConnection = (error: Error) => log(`[postgres] pooled connection lost: ${error.message}`);
+  created.on("error", reportLostConnection);
   created.on("connect", (client) => {
+    client.on("error", reportLostConnection);
     // Best effort: a server older than PostgreSQL 14, or a platform without
     // socket polling, rejects the setting. Those servers keep the old behavior.
     client
@@ -169,7 +180,17 @@ function createPostgresPool(databaseUrl: string, max: number): PgPool {
  * into a failed backfill. 15s is ~14x the observed write cost and still an
  * order of magnitude under the 44.5s incident.
  */
-const POSTGRES_BULK_STATEMENT_TIMEOUT_MS = 15_000;
+const DEFAULT_POSTGRES_BULK_STATEMENT_TIMEOUT_MS = 15_000;
+
+/**
+ * The bulk-lane statement ceiling. `PDPP_POSTGRES_BULK_STATEMENT_TIMEOUT_MS`
+ * overrides the default, so an operator can raise it on a slow database
+ * without a release. It is read per transaction, so a test can lower it.
+ */
+export function postgresBulkStatementTimeoutMs(): number {
+  const configured = Number(process.env.PDPP_POSTGRES_BULK_STATEMENT_TIMEOUT_MS);
+  return Number.isInteger(configured) && configured > 0 ? configured : DEFAULT_POSTGRES_BULK_STATEMENT_TIMEOUT_MS;
+}
 /**
  * Bulk work must not sit in a lock queue either. Kept well under the
  * statement bound so a contended chunk fails fast and is retried on the next
@@ -1162,7 +1183,7 @@ export async function postgresBulkQuery<Row extends QueryResultRow = QueryResult
     // SET LOCAL, never bare SET: it reverts at COMMIT/ROLLBACK and so cannot
     // leak this bulk ceiling onto whichever caller the pool hands this
     // physical connection to next.
-    await client.query(`SET LOCAL statement_timeout = ${POSTGRES_BULK_STATEMENT_TIMEOUT_MS}`);
+    await client.query(`SET LOCAL statement_timeout = ${postgresBulkStatementTimeoutMs()}`);
     await client.query(`SET LOCAL lock_timeout = ${POSTGRES_BULK_LOCK_TIMEOUT_MS}`);
     const result = await client.query<Row>(sql, params);
     await client.query("COMMIT");
@@ -1402,6 +1423,44 @@ export async function withPostgresTransaction<T>(
   }
 }
 
+export interface BulkChunkBudget {
+  chunkSize: number;
+}
+
+/**
+ * Run `items` through `runChunk` in chunks that keep each bulk statement well
+ * under `postgresBulkStatementTimeoutMs()`. A chunk slower than a quarter of
+ * the timeout halves the next chunk. A chunk that the timeout cancels is
+ * retried at half its size; a single item that still times out is rethrown.
+ * `runChunk` must commit each chunk on its own and be idempotent, so a crash
+ * keeps every committed chunk. The caller keeps one budget across calls, so
+ * a learned size carries over to its later pages.
+ */
+export async function runBulkChunksWithinStatementBudget<T>(
+  items: readonly T[],
+  budget: BulkChunkBudget,
+  runChunk: (chunk: readonly T[]) => Promise<unknown>
+): Promise<void> {
+  let offset = 0;
+  while (offset < items.length) {
+    const chunk = items.slice(offset, offset + Math.max(1, budget.chunkSize));
+    const startedAt = Date.now();
+    try {
+      await runChunk(chunk);
+    } catch (error) {
+      if (!(error instanceof PostgresStatementTimeoutError) || chunk.length === 1) {
+        throw error;
+      }
+      budget.chunkSize = Math.max(1, Math.floor(chunk.length / 2));
+      continue;
+    }
+    offset += chunk.length;
+    if (Date.now() - startedAt > postgresBulkStatementTimeoutMs() / 4) {
+      budget.chunkSize = Math.max(1, Math.floor(chunk.length / 2));
+    }
+  }
+}
+
 /** Keep a bounded derived-index page on the bulk lane while it shares its manifest fence and write transaction. */
 export async function withPostgresBulkTransaction<T>(
   fn: (client: PoolClient) => Promise<T>,
@@ -1410,7 +1469,7 @@ export async function withPostgresBulkTransaction<T>(
   const client = await getPostgresBulkPool().connect();
   try {
     await client.query("BEGIN");
-    await client.query(`SET LOCAL statement_timeout = ${POSTGRES_BULK_STATEMENT_TIMEOUT_MS}`);
+    await client.query(`SET LOCAL statement_timeout = ${postgresBulkStatementTimeoutMs()}`);
     await client.query(`SET LOCAL lock_timeout = ${POSTGRES_BULK_LOCK_TIMEOUT_MS}`);
     if (options?.lockConnectorInstanceId) {
       await acquireConnectorInstanceXactLock(client, options.lockConnectorInstanceId);
@@ -1475,10 +1534,10 @@ export async function initExistingPostgresRepairStorage(
   if (pool) {
     await closePostgresStorage();
   }
-  pool = createPostgresPool(config.databaseUrl, POSTGRES_INTERACTIVE_POOL_MAX);
-  bulkPool = createPostgresPool(config.databaseUrl, POSTGRES_BULK_POOL_MAX);
+  pool = createPostgresPool(config.databaseUrl, POSTGRES_INTERACTIVE_POOL_MAX, NOOP_STORAGE_LOG);
+  bulkPool = createPostgresPool(config.databaseUrl, POSTGRES_BULK_POOL_MAX, NOOP_STORAGE_LOG);
   lockPoolCapacity = 1;
-  lockPool = createPostgresPool(config.databaseUrl, lockPoolCapacity);
+  lockPool = createPostgresPool(config.databaseUrl, lockPoolCapacity, NOOP_STORAGE_LOG);
   activeBackend = "postgres";
   try {
     const result = await pool.query<{ table_name: string }>(
@@ -1534,10 +1593,10 @@ export async function initPostgresStorage(
   }
 
   // Two lanes, not one shared pool: see POSTGRES_INTERACTIVE_POOL_MAX.
-  pool = createPostgresPool(config.databaseUrl, POSTGRES_INTERACTIVE_POOL_MAX);
-  bulkPool = createPostgresPool(config.databaseUrl, POSTGRES_BULK_POOL_MAX);
+  pool = createPostgresPool(config.databaseUrl, POSTGRES_INTERACTIVE_POOL_MAX, log);
+  bulkPool = createPostgresPool(config.databaseUrl, POSTGRES_BULK_POOL_MAX, log);
   lockPoolCapacity = 1;
-  lockPool = createPostgresPool(config.databaseUrl, lockPoolCapacity);
+  lockPool = createPostgresPool(config.databaseUrl, lockPoolCapacity, log);
   activeBackend = "postgres";
   // Storage-lifecycle fence (server/storage-generation.ts): a fresh pool
   // means any deferred work scheduled against a prior pool (this function's
@@ -3507,6 +3566,24 @@ async function bootstrapPostgresSchemaOnce({
       );
       CREATE INDEX IF NOT EXISTS idx_pg_search_index_dirty_pending
         ON search_index_dirty(dirty);
+      -- Pending re-derivation of manifest-derived record columns
+      -- (cursor_value, primary_key_text, semantic_time) for one stream of one
+      -- connection, queued with a manifest publication. job_id is new on every
+      -- queue write and is never reused, so a round holding an older job can
+      -- not move or delete a newer one. after_record_key is the durable
+      -- resume cursor; the row is deleted once the stream is done.
+      CREATE TABLE IF NOT EXISTS record_derived_repair_pending (
+        connector_instance_id TEXT NOT NULL,
+        connector_id TEXT NOT NULL,
+        stream TEXT NOT NULL,
+        job_id TEXT NOT NULL,
+        after_record_key TEXT,
+        marked_at TEXT NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        next_attempt_at TEXT,
+        last_error TEXT,
+        PRIMARY KEY(connector_instance_id, stream)
+      );
       ALTER TABLE search_index_dirty ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 0;
       ALTER TABLE search_index_dirty ADD COLUMN IF NOT EXISTS next_attempt_at TEXT;
       ALTER TABLE search_index_dirty ADD COLUMN IF NOT EXISTS revision BIGINT NOT NULL DEFAULT 0;

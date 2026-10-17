@@ -90,6 +90,11 @@ import {
   resolveOwnerConnectorInstanceNamespace,
 } from "./stores/connector-instance-store.ts";
 import {
+  markRecordDerivedRepairPendingPostgres,
+  markRecordDerivedRepairPendingSqlite,
+} from "./stores/record-derived-repair-store.ts";
+import { markSearchIndexDirtyPostgres, markSearchIndexDirtySqlite } from "./stores/search-index-dirty-store.ts";
+import {
   buildDomainControlTrustSignal,
   parseTrustSignal,
   serializeTrustSignal,
@@ -3406,7 +3411,61 @@ function canonicalManifestJson(rawManifest: string): string {
   });
 }
 
-async function persistManifestAndAdvanceGenerations(connectorId: string, manifestJson: string): Promise<boolean> {
+/** Streams whose lexical or semantic index a manifest change can invalidate. */
+function retrievalIndexedStreamNames(manifest: unknown): string[] {
+  const parsed = typeof manifest === "string" ? JSON.parse(manifest) : manifest;
+  const streams = (parsed as { streams?: unknown } | null)?.streams;
+  if (!Array.isArray(streams)) {
+    return [];
+  }
+  return streams.flatMap((stream: unknown) => {
+    const search = (stream as { query?: { search?: { lexical_fields?: unknown; semantic_fields?: unknown } } })?.query
+      ?.search;
+    const declares = (fields: unknown) => Array.isArray(fields) && fields.length > 0;
+    const name = (stream as { name?: unknown })?.name;
+    return typeof name === "string" && (declares(search?.lexical_fields) || declares(search?.semantic_fields))
+      ? [name]
+      : [];
+  });
+}
+
+function manifestStreamNames(manifest: unknown): string[] {
+  const parsed = typeof manifest === "string" ? JSON.parse(manifest) : manifest;
+  const streams = (parsed as { streams?: unknown } | null)?.streams;
+  return Array.isArray(streams)
+    ? streams.flatMap((stream: unknown) => {
+        const name = (stream as { name?: unknown } | null)?.name;
+        return typeof name === "string" && name ? [name] : [];
+      })
+    : [];
+}
+
+/**
+ * The durable repair a publication queues, in the same transaction as the
+ * manifest. Search-index scopes: every stream indexed by the old OR the new
+ * manifest, so a stream that lost its last search field still gets its stale
+ * index removed. Record-column repair: every stream of the new manifest.
+ * Queued even when the manifest is unchanged, because an earlier attempt may
+ * have persisted it and then failed its repair.
+ */
+function derivedRepairPlan(
+  previousManifest: unknown,
+  manifestJson: string
+): { readonly columnStreams: string[]; readonly searchStreams: string[] } {
+  return {
+    columnStreams: manifestStreamNames(manifestJson),
+    searchStreams: [
+      ...new Set([...retrievalIndexedStreamNames(previousManifest), ...retrievalIndexedStreamNames(manifestJson)]),
+    ],
+  };
+}
+
+async function persistManifestAndAdvanceGenerations(
+  connectorId: string,
+  manifestJson: string,
+  options: { queueDerivedRepair?: boolean } = {}
+): Promise<boolean> {
+  const markedAt = new Date().toISOString();
   if (isPostgresStorageBackend()) {
     return await withPostgresTransaction(async (client) => {
       await lockConnectorManifestPublication(client, connectorId);
@@ -3417,6 +3476,14 @@ async function persistManifestAndAdvanceGenerations(connectorId: string, manifes
       if (activation.rows[0]?.state === "active") {
         assertActiveConnectorStreamShape(activation.rows[0].canonical_manifest_json, manifestJson);
       }
+      const previous = options.queueDerivedRepair
+        ? (
+            await client.query<{ manifest: unknown }>(
+              "SELECT manifest FROM connectors WHERE connector_id = $1 FOR UPDATE",
+              [connectorId]
+            )
+          ).rows[0]?.manifest
+        : null;
       const changed = await client.query(
         `INSERT INTO connectors(connector_id, manifest)
          VALUES($1, $2::jsonb)
@@ -3425,6 +3492,21 @@ async function persistManifestAndAdvanceGenerations(connectorId: string, manifes
          RETURNING connector_id`,
         [connectorId, manifestJson]
       );
+      if (options.queueDerivedRepair) {
+        const plan = derivedRepairPlan(previous, manifestJson);
+        const instances = await client.query<{ connector_instance_id: string }>(
+          "SELECT connector_instance_id FROM connector_instances WHERE connector_id = $1 ORDER BY connector_instance_id",
+          [connectorId]
+        );
+        for (const { connector_instance_id: connectorInstanceId } of instances.rows) {
+          for (const stream of plan.searchStreams) {
+            await markSearchIndexDirtyPostgres(client, { connectorId, connectorInstanceId, stream }, markedAt);
+          }
+          for (const stream of plan.columnStreams) {
+            await markRecordDerivedRepairPendingPostgres(client, { connectorId, connectorInstanceId, stream }, markedAt);
+          }
+        }
+      }
       if (changed.rowCount === 0) {
         return false;
       }
@@ -3454,6 +3536,20 @@ async function persistManifestAndAdvanceGenerations(connectorId: string, manifes
     const existing = db
       .prepare("SELECT manifest FROM connectors WHERE connector_id = ?")
       .get<{ manifest?: string }>(connectorId);
+    if (options.queueDerivedRepair) {
+      const plan = derivedRepairPlan(existing?.manifest ?? null, manifestJson);
+      const instances = db
+        .prepare("SELECT connector_instance_id FROM connector_instances WHERE connector_id = ? ORDER BY connector_instance_id")
+        .all<{ connector_instance_id: string }>(connectorId);
+      for (const { connector_instance_id: connectorInstanceId } of instances) {
+        for (const stream of plan.searchStreams) {
+          markSearchIndexDirtySqlite({ connectorId, connectorInstanceId, stream }, markedAt);
+        }
+        for (const stream of plan.columnStreams) {
+          markRecordDerivedRepairPendingSqlite({ connectorId, connectorInstanceId, stream }, markedAt);
+        }
+      }
+    }
     if (existing?.manifest && canonicalManifestJson(existing.manifest) === canonicalManifestJson(manifestJson)) {
       return false;
     }
@@ -5348,18 +5444,36 @@ async function maybeRegisterConnectorPhaseForTest(point: string, context: Record
 }
 
 /**
- * Register or update a connector manifest
+ * Register or update a connector manifest.
+ *
+ * Two phases: persist the manifest (one short transaction), then repair the
+ * derived state of records already stored under this connector (cursor,
+ * primary key, semantic time, lexical and semantic indexes). The repair is
+ * O(existing records). `skipDerivedRepair` runs only the first phase and
+ * `skipManifestPersistence` only the second, so a caller that holds a lock
+ * can persist under it and repair after it releases the lock.
  */
 export async function registerConnector(
   manifest: Record<string, unknown>,
-  options: { backfillRetrievalIndexes?: boolean; skipManifestPersistence?: boolean } = {}
+  options: {
+    backfillRetrievalIndexes?: boolean;
+    /** Queue the record-column and search-index repair durably with the manifest (see derivedRepairPlan). */
+    queueDerivedRepair?: boolean;
+    skipDerivedRepair?: boolean;
+    skipManifestPersistence?: boolean;
+  } = {}
 ): Promise<string> {
   validateConnectorManifest(manifest);
   const { connectorId, storedManifest } = normalizeConnectorManifestForStorage(manifest);
   if (!options.skipManifestPersistence) {
-    await persistManifestAndAdvanceGenerations(connectorId, JSON.stringify(storedManifest));
+    await persistManifestAndAdvanceGenerations(connectorId, JSON.stringify(storedManifest), {
+      queueDerivedRepair: options.queueDerivedRepair === true,
+    });
   }
   await maybeRegisterConnectorPhaseForTest("after-manifest-persisted", { connectorId, manifest: storedManifest });
+  if (options.skipDerivedRepair) {
+    return connectorId;
+  }
 
   const postgresBackend = isPostgresStorageBackend();
 

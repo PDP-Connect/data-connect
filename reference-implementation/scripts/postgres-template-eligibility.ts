@@ -43,6 +43,8 @@ export const POSTGRES_TEMPLATE_ELIGIBLE_FILES: readonly string[] = [
   "test/client-event-subscription-store-postgres.test.ts",
   "test/compact-record-history.test.ts",
   "test/connector-attention-store.test.ts",
+  // Exercises install, lock and post-install repair behavior over seeded data, not schema bootstrap.
+  "test/connector-install-postgres.test.ts",
   "test/connector-instance-credential-revoke-postgres.test.ts",
   "test/connector-instance-delete-upsert-two-process-race.test.ts",
   "test/connector-instance-delete-vs-queued-write-fence.test.ts",

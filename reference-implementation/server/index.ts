@@ -89,6 +89,7 @@ import {
   reconcileConnectorUninstalls,
 } from "./connector-install/index.ts";
 import { removeConnectorActivation } from "./connector-install/activation-authority.ts";
+import { installedConnectorManifestRegistration } from "./connector-install/manifest-registration.ts";
 import {
   connectorLifecycleDataDir,
   withConnectorLifecycleLock,
@@ -6795,7 +6796,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
   const connectorInstallService =
     opts.connectorInstallService ??
     createConnectorInstallService({
-      registerManifest: (manifest) => registerConnector(manifest),
+      ...installedConnectorManifestRegistration,
     });
 
   {
@@ -8395,7 +8396,7 @@ function buildRsApp(opts: ServerOpts = {}) {
     service:
       opts.connectorInstallService ??
       createConnectorInstallService({
-        registerManifest: (manifest) => registerConnector(manifest),
+        ...installedConnectorManifestRegistration,
         removeActivation: removeConnectorActivation,
         assertUninstallAllowed: async (connectorId) => {
           const activeRun = isPostgresStorageBackend()
@@ -9313,7 +9314,7 @@ export async function startServer(opts: ServerOpts = {}) {
   const connectorInstallService =
     opts.connectorInstallService ??
     createConnectorInstallService({
-      registerManifest: (manifest) => registerConnector(manifest),
+      ...installedConnectorManifestRegistration,
     });
   const asApp = buildAsApp({
     acceptedCollectorProtocolVersions: opts.acceptedCollectorProtocolVersions,

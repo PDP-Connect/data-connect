@@ -128,10 +128,15 @@ export async function withConnectorLifecycleLock<T>(
   nested.add(connectorId);
   if (isPostgresStorageBackend()) {
     const lockId = createHash("sha256").update(`connector-lifecycle:${connectorId}`).digest().readBigInt64BE(0);
-    return await withPostgresTransaction(async (client) => {
-      await client.query("SELECT pg_advisory_xact_lock($1::bigint)", [lockId.toString()]);
-      return await heldLifecycleLocks.run(nested, operation);
-    });
+    // Same-process callers queue in memory first. Queued on the advisory lock,
+    // each waiter would pin a pooled connection, and enough waiters exhaust the
+    // pool the holder itself needs to finish: a deadlock Postgres cannot see.
+    return await withProcessLocalLifecycleLock(connectorId, () =>
+      withPostgresTransaction(async (client) => {
+        await client.query("SELECT pg_advisory_xact_lock($1::bigint)", [lockId.toString()]);
+        return await heldLifecycleLocks.run(nested, operation);
+      })
+    );
   }
   if (!getDb()) return await withProcessLocalLifecycleLock(connectorId, operation);
   const release = await acquireSqliteAsync(connectorId);
