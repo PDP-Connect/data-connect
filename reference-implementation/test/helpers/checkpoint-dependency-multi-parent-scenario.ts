@@ -225,6 +225,94 @@ export async function runMultiParentScenario<Store>({
   }
 }
 
+/**
+ * Hydrated-key crediting depends on the connector's own manifest declaration.
+ * The connector lists `H` as hydrated for the holdings boundary but emits no
+ * valuations record for it, and reports `A` as verified empty for activity.
+ * With DETAIL_COVERAGE_KEY_SETS declared, the bare `H` listing is not evidence
+ * and holdings stays put. Without it, the connector keeps the crediting it had
+ * before the capability existed and both cursors commit. Shared by the SQLite
+ * and Postgres conformance files so both backends run one scenario.
+ */
+export async function runHydratedKeyCreditingScenario<Store>({
+  asUrl,
+  rsUrl,
+  runConnector,
+  admitOwnerRunConnection,
+  createRequestConnectorInstanceStore,
+  connectorId,
+  declaresKeySets,
+}: {
+  asUrl: string;
+  rsUrl: string;
+  runConnector: RunConnectorFn;
+  admitOwnerRunConnection: Parameters<typeof fakeAdmitRunConnection<Store>>[0];
+  createRequestConnectorInstanceStore: Parameters<typeof fakeAdmitRunConnection<Store>>[1];
+  connectorId: string;
+  declaresKeySets: boolean;
+}): Promise<void> {
+  const manifest = {
+    ...multiParentManifest(connectorId),
+    protocol_capabilities: declaresKeySets ? ["DETAIL_COVERAGE_KEY_SETS"] : [],
+  };
+  const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-checkpoint-profile-hydrated-credit-"));
+  const connectorPath = writeConnectorStub(
+    tmpDir,
+    `
+  process.stdout.write(JSON.stringify({ type: 'RECORD', stream: 'holdings', key: 'H', data: { id: 'H' }, emitted_at: new Date().toISOString() }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'RECORD', stream: 'activity', key: 'A', data: { id: 'A' }, emitted_at: new Date().toISOString() }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'DETAIL_COVERAGE', reference_only: true, stream: 'valuations', state_stream: 'holdings', required_keys: ['H'], hydrated_keys: ['H'] }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'DETAIL_COVERAGE', reference_only: true, stream: 'valuations', state_stream: 'activity', required_keys: ['A'], hydrated_keys: [], empty_keys: ['A'] }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'STATE', stream: 'holdings', cursor: { page: 'holdings-1' } }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'STATE', stream: 'activity', cursor: { page: 'activity-1' } }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'DONE', status: 'succeeded', records_emitted: 2 }) + '\\n');
+  rl.close();
+  process.exit(0);
+`
+  );
+
+  try {
+    const registerResp = await fetch(`${asUrl}/connectors`, {
+      body: JSON.stringify(manifest),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    });
+    assert.equal(registerResp.status, 201);
+    const ownerToken = await issueOwnerToken(asUrl);
+
+    const result = await runConnector({
+      admitRunConnection: fakeAdmitRunConnection(admitOwnerRunConnection, createRequestConnectorInstanceStore),
+      collectionMode: "incremental",
+      connectorId: manifest.connector_id,
+      connectorPath,
+      manifest,
+      onInteraction: async () => ({}),
+      ownerToken,
+      persistState: true,
+      rsUrl,
+      state: null,
+    });
+
+    assert.equal(result.status, "succeeded");
+    assert.equal(result.checkpoint_summary?.state_streams_staged, 2);
+    assert.equal(result.checkpoint_summary?.state_streams_committed, declaresKeySets ? 1 : 2);
+
+    const stateResp = await fetch(`${rsUrl}/v1/state/${encodeURIComponent(manifest.connector_id)}`, {
+      headers: { Authorization: `Bearer ${ownerToken}` },
+    });
+    assert.equal(stateResp.status, 200);
+    const stateBody = (await stateResp.json()) as { state?: Record<string, unknown> };
+    assert.deepEqual(
+      stateBody.state,
+      declaresKeySets
+        ? { activity: { page: "activity-1" } }
+        : { activity: { page: "activity-1" }, holdings: { page: "holdings-1" } }
+    );
+  } finally {
+    rmSync(tmpDir, { force: true, recursive: true });
+  }
+}
+
 // -----------------------------------------------------------------------
 // Manifest-authority scenarios (checkpoint dependency P1-2): live
 // DETAIL_COVERAGE evidence is validated against the manifest's declared

@@ -32,11 +32,13 @@ function input(overrides: Partial<CheckpointCommitInput>): CheckpointCommitInput
   };
 }
 
+/** A report from a connector that declares DETAIL_COVERAGE_KEY_SETS, unless overridden. */
 function report(overrides: Partial<CoverageReport> & { requiredKeys: string[] }): CoverageReport {
   return {
     emptyKeys: new Set(),
     evidencedKeys: new Set(),
     hydratedKeys: new Set(),
+    hydratedKeysNeedEvidence: true,
     optionalSkipKeys: new Set(),
     rejectedKeys: new Set(),
     stream: "details",
@@ -143,6 +145,53 @@ test("coveredRequiredKeys counts evidenced, empty and unchanged keys, never skip
     })
   );
   assert.deepEqual(covered, ["h", "e", "u"]);
+});
+
+test("without DETAIL_COVERAGE_KEY_SETS, a bare hydrated declaration credits its key, as before the capability", () => {
+  const legacy = decideCheckpointCommits(
+    detailInput(report({ hydratedKeys: new Set(["k"]), hydratedKeysNeedEvidence: false, requiredKeys: ["k", "m"] }), {
+      durableGaps: [{ parent_stream: "orders", record_key: "m", status: "pending", stream: "details" }],
+    })
+  );
+  assert.deepEqual(legacy, { commit: ["orders"], withheld: [] });
+  const undeclared = decideCheckpointCommits(
+    detailInput(report({ hydratedKeysNeedEvidence: false, requiredKeys: ["k"] }))
+  );
+  assert.deepEqual(undeclared.withheld, [
+    { kind: "coverage_shortfall", missingKeyCount: 1, requiredKeyCount: 1, stateStream: "orders", stream: "details" },
+  ]);
+});
+
+test("without DETAIL_COVERAGE_KEY_SETS, empty and unchanged keys credit like hydrated ones and rejections still withhold", () => {
+  for (const field of ["hydratedKeys", "emptyKeys", "unchangedKeys"] as const) {
+    const credited = decideCheckpointCommits(
+      detailInput(report({ [field]: new Set(["k"]), hydratedKeysNeedEvidence: false, requiredKeys: ["k"] }))
+    );
+    assert.deepEqual(credited.commit, ["orders"], field);
+    const rejected = decideCheckpointCommits(
+      detailInput(
+        report({
+          [field]: new Set(["k"]),
+          hydratedKeysNeedEvidence: false,
+          rejectedKeys: new Set(["k"]),
+          requiredKeys: ["k"],
+        })
+      )
+    );
+    assert.deepEqual(rejected.commit, [], field);
+  }
+  assert.deepEqual(
+    coveredRequiredKeys(
+      report({
+        hydratedKeys: new Set(["h", "r"]),
+        hydratedKeysNeedEvidence: false,
+        optionalSkipKeys: new Set(["s"]),
+        rejectedKeys: new Set(["r"]),
+        requiredKeys: ["h", "r", "s", "g"],
+      })
+    ),
+    ["h"]
+  );
 });
 
 test("an optional skip credits its required key", () => {

@@ -223,6 +223,13 @@ const MANIFEST = {
   version: "1.0.0",
 };
 
+/**
+ * The same connector, declaring DETAIL_COVERAGE_KEY_SETS. Only a connector that
+ * declares it gets evidence-based crediting of hydrated keys; MANIFEST keeps
+ * the crediting it had before the capability existed.
+ */
+const KEY_SETS_MANIFEST = { ...MANIFEST, protocol_capabilities: ["DETAIL_COVERAGE_KEY_SETS"] };
+
 function createCannedConnector(messages: readonly Record<string, unknown>[]): {
   connectorPath: string;
   cleanup: () => void;
@@ -295,7 +302,8 @@ async function runShortfall(
   ownerToken: string,
   messages: readonly Record<string, unknown>[],
   connectorInstanceId?: string,
-  streams: readonly string[] = ["holdings", "activity", "valuations"]
+  streams: readonly string[] = ["holdings", "activity", "valuations"],
+  manifest: typeof MANIFEST = MANIFEST
 ): Promise<{ result: RuntimeRunConnectorResult | null; thrown: unknown }> {
   const { connectorPath, cleanup } = createCannedConnector(messages);
   let result: RuntimeRunConnectorResult | null = null;
@@ -308,7 +316,7 @@ async function runShortfall(
       ...(connectorInstanceId ? { connectorInstanceId } : {}),
       connectorPath,
       detailGapStore: getDefaultConnectorDetailGapStore(),
-      manifest: MANIFEST,
+      manifest,
       onInteraction: async () => ({}),
       ownerToken,
       persistState: true,
@@ -874,12 +882,17 @@ function holdingsRun(middle: readonly Record<string, unknown>[]): Record<string,
 async function runHoldings(
   server: ClosableServer,
   ownerToken: string,
-  middle: readonly Record<string, unknown>[]
+  middle: readonly Record<string, unknown>[],
+  manifest: typeof MANIFEST = MANIFEST
 ): Promise<RuntimeRunConnectorResult> {
-  const { result, thrown } = await runShortfall(server, ownerToken, holdingsRun(middle), undefined, [
-    "holdings",
-    "activity",
-  ]);
+  const { result, thrown } = await runShortfall(
+    server,
+    ownerToken,
+    holdingsRun(middle),
+    undefined,
+    ["holdings", "activity"],
+    manifest
+  );
   assert.equal(thrown, null);
   assert.ok(result);
   assert.equal(result.status, "succeeded");
@@ -909,29 +922,78 @@ test("an accepted retry after DETAIL_COVERAGE credits a key whose first attempt 
   t.after(() => closeServer(server));
   const ownerToken = await registerAndAuthorize(server);
 
-  const result = await runHoldings(server, ownerToken, [
-    activityRecord("K", { id: "not-K" }),
-    holdingsCoverage({ considered: 1, covered: 1, hydrated_keys: ["K"], required_keys: ["K"] }),
-    activityRecord("K", { id: "K" }),
-  ]);
+  const result = await runHoldings(
+    server,
+    ownerToken,
+    [
+      activityRecord("K", { id: "not-K" }),
+      holdingsCoverage({ considered: 1, covered: 1, hydrated_keys: ["K"], required_keys: ["K"] }),
+      activityRecord("K", { id: "K" }),
+    ],
+    KEY_SETS_MANIFEST
+  );
   assert.equal(result.checkpoint_summary?.state_streams_committed, 1);
   assert.equal(terminalCoveredFor(result.run_id as string, "activity"), 1);
 });
 
-// A hydrated listing is a claim, not evidence. With no accepted record for the
-// key the parent stays put; a key with no detail must say so in empty_keys.
+// For a connector that declares DETAIL_COVERAGE_KEY_SETS, a hydrated listing
+// is a claim, not evidence. With no accepted record for the key the parent
+// stays put; a key with no detail must say so in empty_keys.
 test("a hydrated key with no accepted record for it withholds the parent and does not count as covered", async (t) => {
   const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
   t.after(() => closeServer(server));
   const ownerToken = await registerAndAuthorize(server);
 
-  const result = await runHoldings(server, ownerToken, [
-    holdingsCoverage({ considered: 1, covered: 1, hydrated_keys: ["K"], required_keys: ["K"] }),
-  ]);
+  const result = await runHoldings(
+    server,
+    ownerToken,
+    [holdingsCoverage({ considered: 1, covered: 1, hydrated_keys: ["K"], required_keys: ["K"] })],
+    KEY_SETS_MANIFEST
+  );
   assert.equal(result.checkpoint_summary?.state_streams_committed, 0);
   assert.equal(terminalCoveredFor(result.run_id as string, "activity"), 0);
   const coverageGap = (result.known_gaps ?? []).find((gap) => gap.reason === "detail_coverage_incomplete");
   assert.match(String(coverageGap?.message ?? ""), HOLDINGS_STATE_STREAM_PATTERN);
+});
+
+// A connector without DETAIL_COVERAGE_KEY_SETS may list a key with no detail
+// record (an account with no transactions) as hydrated. Crediting it by
+// evidence would stall that connector's cursor every run, so it keeps the
+// crediting it had before the capability: the declaration credits the key.
+test("without DETAIL_COVERAGE_KEY_SETS, a hydrated key with no record still commits the parent and counts as covered", async (t) => {
+  const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+  t.after(() => closeServer(server));
+  const ownerToken = await registerAndAuthorize(server);
+
+  for (let run = 0; run < 2; run += 1) {
+    // biome-ignore lint/performance/noAwaitInLoops: the second run proves the cursor keeps moving.
+    const result = await runHoldings(server, ownerToken, [
+      holdingsCoverage({ considered: 1, covered: 1, hydrated_keys: ["K"], required_keys: ["K"] }),
+    ]);
+    assert.equal(result.checkpoint_summary?.state_streams_committed, 1, `run ${run + 1}`);
+    assert.equal(terminalCoveredFor(result.run_id as string, "activity"), 1);
+    assert.deepEqual(withheldEvents(result.run_id as string), []);
+    assert.equal(
+      (result.known_gaps ?? []).some((gap) => gap.reason === "detail_coverage_incomplete"),
+      false,
+      "no shortfall is reported"
+    );
+  }
+});
+
+// START lists DETAIL_COVERAGE_KEY_SETS to every connector, so a connector whose
+// manifest does not declare it may still send empty_keys and unchanged_keys.
+// They credit like its hydrated keys: rejecting the message would fail a run
+// the host invited, and ignoring the keys would stall the cursor.
+test("without DETAIL_COVERAGE_KEY_SETS, empty_keys and unchanged_keys credit like hydrated keys", async (t) => {
+  const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+  t.after(() => closeServer(server));
+  const ownerToken = await registerAndAuthorize(server);
+
+  const result = await runHoldings(server, ownerToken, [
+    holdingsCoverage({ empty_keys: ["E"], required_keys: ["E", "U"], unchanged_keys: ["U"] }),
+  ]);
+  assert.equal(result.checkpoint_summary?.state_streams_committed, 1);
 });
 
 test("verified-empty and verified-unchanged keys release the parent and count as covered", async (t) => {
@@ -960,13 +1022,16 @@ test("a detail record's parent foreign key evidences the parent key; a rejected 
   const ownerToken = await registerAndAuthorize(server);
   const coverage = holdingsCoverage({ considered: 1, covered: 1, hydrated_keys: ["K"], required_keys: ["K"] });
 
-  const accepted = await runHoldings(server, ownerToken, [
-    activityRecord("txn-1", { holding_id: "K", id: "txn-1" }),
-    coverage,
-  ]);
+  const accepted = await runHoldings(
+    server,
+    ownerToken,
+    [activityRecord("txn-1", { holding_id: "K", id: "txn-1" }), coverage],
+    KEY_SETS_MANIFEST
+  );
   assert.equal(accepted.checkpoint_summary?.state_streams_committed, 1);
   assert.equal(terminalCoveredFor(accepted.run_id as string, "activity"), 1);
 
+  // Rejections withhold for every connector, so the legacy MANIFEST applies.
   const rejected = await runHoldings(server, ownerToken, [
     activityRecord("txn-1", { holding_id: "K", id: "txn-1" }),
     activityRecord("txn-2", { holding_id: "K", id: "not-txn-2" }),
@@ -1001,7 +1066,7 @@ test("a checkpoint withheld for the same reason on consecutive runs is reported 
   let last: RuntimeRunConnectorResult | null = null;
   for (let run = 0; run < 3; run += 1) {
     // biome-ignore lint/performance/noAwaitInLoops: the streak is defined by run order.
-    last = await runHoldings(server, ownerToken, unproven);
+    last = await runHoldings(server, ownerToken, unproven, KEY_SETS_MANIFEST);
     const [event, ...rest] = withheldEvents(last.run_id as string);
     assert.ok(event);
     assert.equal(rest.length, 0);
@@ -1014,13 +1079,16 @@ test("a checkpoint withheld for the same reason on consecutive runs is reported 
   assert.equal(stall?.severity, "actionable");
   assert.match(String(stall?.message), STALL_MESSAGE_PATTERN);
 
-  const committed = await runHoldings(server, ownerToken, [
-    holdingsCoverage({ empty_keys: ["K"], required_keys: ["K"] }),
-  ]);
+  const committed = await runHoldings(
+    server,
+    ownerToken,
+    [holdingsCoverage({ empty_keys: ["K"], required_keys: ["K"] })],
+    KEY_SETS_MANIFEST
+  );
   assert.equal(committed.checkpoint_summary?.state_streams_committed, 1);
   assert.deepEqual(withheldEvents(committed.run_id as string), []);
 
-  const again = await runHoldings(server, ownerToken, unproven);
+  const again = await runHoldings(server, ownerToken, unproven, KEY_SETS_MANIFEST);
   const [event] = withheldEvents(again.run_id as string);
   assert.ok(event);
   assert.equal(event.consecutive_runs, 1, "a commit ends the streak");
@@ -1048,7 +1116,7 @@ test("successful cursor resets its streak when the next cursor PUT fails", async
   t.after(() => closeServer(server));
   const ownerToken = await registerAndAuthorize(server);
   const unproven = [holdingsCoverage({ hydrated_keys: ["K"], required_keys: ["K"] })];
-  await runHoldings(server, ownerToken, unproven);
+  await runHoldings(server, ownerToken, unproven, KEY_SETS_MANIFEST);
   const originalFetch = globalThis.fetch;
   const puts: string[] = [];
   const mocked = t.mock.method(globalThis, "fetch", async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
@@ -1068,10 +1136,10 @@ test("successful cursor resets its streak when the next cursor PUT fails", async
     { cursor: { page: "2" }, stream: "holdings", type: "STATE" },
     { cursor: { page: "2" }, stream: "activity", type: "STATE" },
     { records_emitted: 2, status: "succeeded", type: "DONE" },
-  ], undefined, ["holdings", "activity"]);
+  ], undefined, ["holdings", "activity"], KEY_SETS_MANIFEST);
   mocked.mock.restore();
   assert.deepEqual(puts, ["holdings", "activity"]);
   assert.ok(attempt.thrown || attempt.result?.status === "failed");
-  const again = await runHoldings(server, ownerToken, unproven);
+  const again = await runHoldings(server, ownerToken, unproven, KEY_SETS_MANIFEST);
   assert.equal(withheldEvents(again.run_id as string)[0]?.consecutive_runs, 1);
 });

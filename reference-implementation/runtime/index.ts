@@ -2663,6 +2663,18 @@ function buildManifestParentForeignKeysMap(
   return foreignKeysByStream;
 }
 
+/**
+ * Whether the connector's manifest declares DETAIL_COVERAGE_KEY_SETS in its
+ * `protocol_capabilities`. Only such a connector gets evidence-based crediting
+ * of `hydrated_keys` (see `CoverageReport.hydratedKeysNeedEvidence`). The
+ * capability is the connector's own declaration; the runtime never decides it
+ * per source. A missing or malformed declaration reads as not declared.
+ */
+function manifestDeclaresDetailCoverageKeySets(manifest: ConnectorManifest): boolean {
+  const capabilities = manifest.protocol_capabilities;
+  return Array.isArray(capabilities) && capabilities.includes(DETAIL_COVERAGE_KEY_SETS_CAPABILITY);
+}
+
 function openRuntimeTraceFile(traceDir: string | undefined, connectorId: string, runId: string): string | null {
   if (!traceDir) {
     return null;
@@ -3024,6 +3036,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
   const manifestStateStreamByStream = buildManifestStateStreamMap(manifest);
   const manifestDetailParentStreamsByStream = buildManifestDetailParentStreamsMap(manifest);
   const manifestParentForeignKeysByStream = buildManifestParentForeignKeysMap(manifest);
+  const hydratedKeysNeedEvidence = manifestDeclaresDetailCoverageKeySets(manifest);
   // `getDefaultConnectorDetailGapStore()` is declared `unknown` at its own
   // module boundary (that store has not been migrated yet), so the runtime
   // states the surface it actually drives here.
@@ -4138,7 +4151,12 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
             stateStream,
             entry.requiredKeys
           );
-          const report: CoverageReport = { ...entry, evidencedKeys: evidenced, rejectedKeys: rejected };
+          const report: CoverageReport = {
+            ...entry,
+            evidencedKeys: evidenced,
+            hydratedKeysNeedEvidence,
+            rejectedKeys: rejected,
+          };
           const uncoveredCount = entry.requiredKeys.length - coveredRequiredKeys(report).length;
           return {
             ...report,

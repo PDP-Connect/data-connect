@@ -20,9 +20,11 @@
  *    (`coverage_shortfall`). A key the RS rejected a record for this run (and
  *    never accepted that record) is uncredited whatever the connector says,
  *    unless a durable gap covers it. Otherwise a key is credited by:
- *    - a hydrated declaration backed by an accepted record of the detail
- *      stream for that key: its primary key, or the foreign key of a manifest
- *      relationship to the parent. A bare hydrated listing proves nothing;
+ *    - a hydrated declaration. When the report requires evidence, the
+ *      declaration must be backed by an accepted record of the detail stream
+ *      for that key: its primary key, or the foreign key of a manifest
+ *      relationship to the parent; a bare hydrated listing proves nothing.
+ *      See `CoverageReport.hydratedKeysNeedEvidence` for which reports;
  *    - an explicit `empty_keys` or `unchanged_keys` outcome: the connector
  *      verified the key has no detail, or no changed detail, this run;
  *    - an optional-skip declaration (an accepted terminal absence); or
@@ -51,6 +53,16 @@ export interface CoverageReport {
   evidencedKeys: ReadonlySet<string>;
   /** Hydrated keys as the connector declared them. */
   hydratedKeys: ReadonlySet<string>;
+  /**
+   * True when the connector's manifest declares DETAIL_COVERAGE_KEY_SETS: a
+   * hydrated key then credits only when `evidencedKeys` holds it. False for a
+   * connector without the capability: its hydrated declaration credits by
+   * itself, as it did before the capability existed, because such a
+   * connector may list a key with no detail record (an empty parent) as
+   * hydrated. In both cases `empty_keys` and `unchanged_keys` credit without a
+   * record, and a rejection uncredits the key.
+   */
+  hydratedKeysNeedEvidence: boolean;
   optionalSkipKeys: ReadonlySet<string>;
   /** Keys with a record of `stream` the RS rejected this run and never accepted. */
   rejectedKeys: ReadonlySet<string>;
@@ -61,16 +73,16 @@ export interface CoverageReport {
 }
 
 /**
- * The required keys the run accounted for: hydrated with evidence, verified
- * empty, or verified unchanged, and not contradicted by a rejection. Optional
- * skips and gaps release a checkpoint but are not coverage, so a declared
- * `covered` count never exceeds this.
+ * The required keys the run accounted for: hydrated (with evidence when the
+ * report needs it), verified empty, or verified unchanged, and not
+ * contradicted by a rejection. Optional skips and gaps release a checkpoint
+ * but are not coverage, so a declared `covered` count never exceeds this.
  */
 export function coveredRequiredKeys(report: CoverageReport): string[] {
   return report.requiredKeys.filter(
     (key) =>
       !report.rejectedKeys.has(key) &&
-      ((report.hydratedKeys.has(key) && report.evidencedKeys.has(key)) ||
+      ((report.hydratedKeys.has(key) && (!report.hydratedKeysNeedEvidence || report.evidencedKeys.has(key))) ||
         report.emptyKeys.has(key) ||
         report.unchangedKeys.has(key))
   );

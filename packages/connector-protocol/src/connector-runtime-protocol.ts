@@ -101,7 +101,12 @@ function isRecordKey(value: unknown): value is string | readonly string[] {
 /** Capability required by a connector that emits STREAM_EVIDENCE. */
 export const STREAM_EVIDENCE_CAPABILITY = "STREAM_EVIDENCE" as const;
 
-/** Capability required to emit DETAIL_COVERAGE empty_keys and unchanged_keys. */
+/**
+ * DETAIL_COVERAGE key sets. A host lists it in START when it accepts
+ * `empty_keys` and `unchanged_keys`. A connector declares it in its manifest
+ * `protocol_capabilities` to opt into evidence-based crediting of
+ * `hydrated_keys` (see {@link DetailCoverageMessage.hydrated_keys}).
+ */
 export const DETAIL_COVERAGE_KEY_SETS_CAPABILITY = "DETAIL_COVERAGE_KEY_SETS" as const;
 
 /** Protocol capabilities that can be advertised by a connector or runtime. */
@@ -437,12 +442,14 @@ export interface DetailCoverageMessage {
   empty_keys?: Array<string | number>;
   gap_keys?: Array<string | number>;
   /**
-   * Required keys whose detail the run emitted. The runtime credits a hydrated
-   * key only when an accepted record of `stream` answers for it this run: a
-   * record whose primary key is the key, or whose foreign key in a manifest
+   * Required keys whose detail the run emitted. For a connector whose manifest
+   * declares DETAIL_COVERAGE_KEY_SETS, the runtime credits a hydrated key only
+   * when an accepted record of `stream` answers for it this run: a record
+   * whose primary key is the key, or whose foreign key in a manifest
    * `relationships` entry to `state_stream` holds it. A hydrated key with no
-   * such record, or with a record the store rejected, withholds the
-   * `state_stream` checkpoint.
+   * such record withholds the `state_stream` checkpoint. For any other
+   * connector the declaration alone credits the key. For every connector, a
+   * key with a record the store rejected withholds the checkpoint.
    */
   hydrated_keys: Array<string | number>;
   /**
