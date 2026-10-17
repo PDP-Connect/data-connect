@@ -1291,6 +1291,7 @@ export interface AuthorizationServerMetadataInput {
   authorizationDetailsTypesSupported?: readonly string[] | null;
   authorizationEndpoint?: string | null;
   cimdEnabled?: boolean | null;
+  clientRangeFiltersProfiles?: readonly string[] | null;
   codeChallengeMethodsSupported?: readonly string[] | null;
   deviceAuthorizationEndpoint?: string | null;
   deviceAuthorizationProfilesSupported?: readonly Record<string, unknown>[] | null;
@@ -1324,6 +1325,7 @@ export interface AuthorizationServerMetadata {
   introspection_endpoint: string;
   issuer: string;
   pdpp_authorization_details_types_supported?: readonly string[];
+  pdpp_client_range_filters_supported?: readonly string[];
   pdpp_device_authorization_profiles_supported?: readonly Record<string, unknown>[];
   pdpp_pre_registered_public_clients?: readonly AuthorizationServerPublicClient[];
   pdpp_provider_connect_capabilities: Record<string, unknown>;
@@ -1348,6 +1350,7 @@ export function buildAuthorizationServerMetadata({
   authorizationEndpoint,
   codeChallengeMethodsSupported,
   cimdEnabled,
+  clientRangeFiltersProfiles,
   tokenEndpoint,
   tokenEndpointAuthMethodsSupported,
   tokenEndpointAuthSigningAlgValuesSupported,
@@ -1384,6 +1387,10 @@ export function buildAuthorizationServerMetadata({
 
   if (authorizationDetailsTypesSupported?.length) {
     metadata.pdpp_authorization_details_types_supported = authorizationDetailsTypesSupported;
+  }
+
+  if (clientRangeFiltersProfiles?.length) {
+    metadata.pdpp_client_range_filters_supported = clientRangeFiltersProfiles;
   }
 
   if (authorizationEndpoint) {

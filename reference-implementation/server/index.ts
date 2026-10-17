@@ -100,7 +100,15 @@ import { ownerPasswordManagedByDesktop, ownerPasswordOwnerSet } from "./owner-pa
 import { appConfigPath, createAppConfigStore } from "./app-config-store.ts";
 import { autostartStatePath, createAutostartStore } from "./autostart-store.ts";
 import { type BrowserProfilePurger, createBrowserProfilePurger } from "./browser-profile-purge.ts";
+import { CLIENT_RANGE_FILTERS_PROFILE_URI, clientRangeFiltersRsCapability } from "./client-range-filters.ts";
+import {
+  type ClientRangeFiltersOption,
+  clientFilterParameterOutsideList,
+  grantFrozenSetIsMalformed,
+  resolveClientRangeFiltersPolicy,
+} from "./client-range-read.ts";
 import { createLiveRevisions, type LiveRevisions, registerDefaultLiveTopics } from "./live-revisions.ts";
+import { resolveRequestedFields } from "./requested-fields.ts";
 import { createRecoveryKeyStore } from "./recovery-key-store.ts";
 import { probeNonPressureRecoverableCount, probeSourcePressureGaps } from "./scheduler-manager-factory.ts";
 import { getOwnerSessionStore } from "./stores/owner-session-store.ts";
@@ -834,6 +842,12 @@ interface ServerOpts {
   clientLogoFetchDependencies?: import("./client-logo-cache.ts").FetchClientLogoOptions;
   clientEventSubscriptionsCapability?: unknown;
   clientEventSubscriptionsSupported?: boolean;
+  /**
+   * Opt in to the experimental client range filters profile
+   * (`spec-client-range-filters.md`). Off unless true or the
+   * `PDPP_EXPERIMENTAL_CLIENT_RANGE_FILTERS=1` environment switch is set.
+   */
+  clientRangeFilters?: ClientRangeFiltersOption;
   configuredProviderAuthConnectorKeys?: readonly string[];
   connectionScopedRunEnvResolver?: ReturnType<typeof buildConnectionScopedRunEnvResolver>;
   /** Operator-owned connector child environment policy; defaults to the JSON env contract. */
@@ -1697,7 +1711,9 @@ function normalizeFieldListParam(value: unknown) {
 
 function validateRequestedQueryFieldParams(
   requestParams: Record<string, unknown>,
-  manifestStream: { schema?: { properties?: Record<string, unknown> } } | null | undefined
+  manifestStream: { schema?: { properties?: Record<string, unknown> } } | null | undefined,
+  // Set for a client read: the stream grant's `fields`, or null when it lists none.
+  grantedFields?: readonly string[] | null
 ) {
   if (requestParams.fields !== null && requestParams.fields !== undefined) {
     const normalizedFields = normalizeFieldListParam(requestParams.fields);
@@ -1707,6 +1723,11 @@ function validateRequestedQueryFieldParams(
       throw err;
     }
     requestParams.fields = normalizedFields;
+    // The grant is checked before the declaration, so a name that is invented
+    // and a name that exists but is outside the grant take the same path.
+    if (grantedFields !== undefined) {
+      requestParams.fields = resolveRequestedFields(normalizedFields, grantedFields);
+    }
   }
 
   const allowedFields = new Set(Object.keys(manifestStream?.schema?.properties || {}));
@@ -3920,6 +3941,7 @@ function buildStreamMetadataEntry({
   streamGrant = null,
   grantStreams = [] as Record<string, unknown>[],
   freshness = null as ReturnType<typeof buildFreshness> | null,
+  frozenRangeFilters = null as Record<string, unknown> | null,
   grantedConnections = null as unknown[] | null,
   manifestStreamNames = null as Set<string> | null,
 }: {
@@ -3927,6 +3949,8 @@ function buildStreamMetadataEntry({
   streamGrant?: Record<string, unknown> | null;
   grantStreams?: Record<string, unknown>[];
   freshness?: ReturnType<typeof buildFreshness> | null;
+  /** Frozen client range filter facts of the grant (spec Section 7); client tokens only. */
+  frozenRangeFilters?: Record<string, unknown> | null;
   grantedConnections?: unknown[] | null;
   manifestStreamNames?: Set<string> | null;
 }) {
@@ -3941,7 +3965,9 @@ function buildStreamMetadataEntry({
     name: projectedManifestStream.name,
     object: "stream_metadata",
     primary_key: normalizePrimaryKey(projectedManifestStream.primary_key),
-    query: projectedManifestStream.query || {},
+    // A client projection never copies the current declaration's query
+    // capabilities; the frozen set of the grant is the only vocabulary shown.
+    query: frozenRangeFilters ?? projectedManifestStream.query ?? {},
     relationships: projectedManifestStream.relationships || [],
     schema: projectedManifestStream.schema,
     selection: projectedManifestStream.selection,
@@ -4983,7 +5009,9 @@ export function buildAsApp(opts: ServerOpts = {}) {
       ? Object.freeze([...opts.acceptedCollectorProtocolVersions])
       : SUPPORTED_COLLECTOR_PROTOCOL_VERSIONS;
   const controller = opts.controller || null;
-  const consentStore = createConsentStore();
+  const consentStore = createConsentStore({
+    clientRangeFilters: resolveClientRangeFiltersPolicy(opts).enabled(),
+  });
   const ownerDeviceAuthStore = createOwnerDeviceAuthStore() as unknown as OwnerDeviceAuthStore;
   const deviceExporterStore = opts.deviceExporterStore || createDeviceExporterStore();
   const webPushStore = opts.webPushSubscriptionStore || createWebPushSubscriptionStore();
@@ -5296,6 +5324,8 @@ export function buildAsApp(opts: ServerOpts = {}) {
       typeof mountAsAuthorizationServerMetadata
     >[1]["buildAuthorizationServerMetadata"],
     cimdEnabled: opts.cimdEnabled !== false,
+    clientRangeFiltersProfiles: () =>
+      resolveClientRangeFiltersPolicy(opts).enabled() ? [CLIENT_RANGE_FILTERS_PROFILE_URI] : [],
     dynamicClientRegistrationEnabled,
     publicClientMetadataForAuthorizationServer: publicClientMetadataForAuthorizationServer as unknown as Parameters<
       typeof mountAsAuthorizationServerMetadata
@@ -7435,8 +7465,27 @@ function buildRsApp(opts: ServerOpts = {}) {
     expectedIssuer: opts.resolveIntrospectionIssuer ?? (() => opts.asIssuer ?? opts.asPublicUrl ?? null),
     ...(opts.introspectionFetch ? { fetchImpl: opts.introspectionFetch } : {}),
   });
+  const clientRangeFiltersPolicy = resolveClientRangeFiltersPolicy(opts);
+  // Section 4.4: an RS that serves the profile refuses to serve data under a
+  // grant whose frozen set is malformed, and never repairs it. Reusing the
+  // inactive-token path gives every read route the same 403 grant_invalid.
+  const introspectGrantContext = async (token: string): Promise<TokenInfo> => {
+    const info = await introspectToken(token);
+    if (info.active && grantFrozenSetIsMalformed(clientRangeFiltersPolicy, info.pdpp_token_kind as string | undefined, info.grant)) {
+      return {
+        active: false,
+        client_id: info.client_id,
+        grant_id: info.grant_id,
+        inactive_reason: "grant_invalid",
+        scenario_id: info.scenario_id,
+        subject_id: info.subject_id,
+        trace_id: info.trace_id,
+      } as TokenInfo;
+    }
+    return info;
+  };
   const requireToken = (req: ReqLike, res: ResLike, next: () => void) =>
-    requireTokenWithIntrospection(req, res, next, introspectToken);
+    requireTokenWithIntrospection(req, res, next, introspectGrantContext);
 
   app.use(((
     req: ReqLike & { headers: Record<string, string | string[] | undefined> },
@@ -7683,6 +7732,8 @@ function buildRsApp(opts: ServerOpts = {}) {
     pdppProviderConnectVersion: PDPP_PROVIDER_CONNECT_VERSION,
     providerName,
     rejectUntrustedMetadataHost,
+    resolveClientRangeFiltersCapability: () =>
+      resolveClientRangeFiltersPolicy(opts).enabled() ? clientRangeFiltersRsCapability() : null,
     resolveClientEventSubscriptionsCapability: () => {
       if (opts.clientEventSubscriptionsCapability) {
         return opts.clientEventSubscriptionsCapability;
@@ -7792,7 +7843,27 @@ function buildRsApp(opts: ServerOpts = {}) {
     projectBindingForWire,
     queryRecordsAcrossBindings,
     rejectQuery,
-    requireCoreEndpointToken,
+    // Section 6.1 of the client range filters profile: where the RS serves it, a
+    // client `filter[...]` fails on every Core read endpoint except list-records,
+    // which compiles its own filters.
+    requireCoreEndpointToken: ((req: ReqLike, res: ResLike, next: () => void) =>
+      requireCoreEndpointToken(req, res, () => {
+        const rawQuery = String((req as { originalUrl?: string }).originalUrl ?? "").split("?")[1] ?? "";
+        const isRecordsList = /^\/v1\/streams\/[^/]+\/records\/?$/.test(String((req as { path?: string }).path ?? ""));
+        const rejected = isRecordsList
+          ? undefined
+          : clientFilterParameterOutsideList(clientRangeFiltersPolicy, req.tokenInfo?.pdpp_token_kind, rawQuery);
+        if (rejected !== undefined) {
+          return pdppError(
+            res,
+            400,
+            "invalid_request",
+            "Client range filters are accepted only when listing records",
+            rejected
+          );
+        }
+        next();
+      })) as typeof requireCoreEndpointToken,
     requireToken,
     resolveGrantManifest: (tokenInfo: unknown, options: unknown) =>
       resolveGrantManifest(
@@ -9324,6 +9395,7 @@ export async function startServer(opts: ServerOpts = {}) {
     asPublicUrl: configuredAsPublicUrl,
     clientLogoFetchDependencies: opts.clientLogoFetchDependencies,
     cimdFetchDependencies: opts.cimdFetchDependencies,
+    clientRangeFilters: opts.clientRangeFilters,
     connectorInstallService,
     controller,
     ownerLive: resolveOwnerLive(opts),
@@ -9438,6 +9510,7 @@ export async function startServer(opts: ServerOpts = {}) {
     ownerLive: resolveOwnerLive(opts),
     ownerAuthPassword: opts.ownerAuthPassword,
     hostedRecordRejectionAfterInsertBeforeCommit: opts.hostedRecordRejectionAfterInsertBeforeCommit,
+    clientRangeFilters: opts.clientRangeFilters,
     hybridRetrievalCapability: opts.hybridRetrievalCapability,
     // Hybrid retrieval experimental extension knobs — see search-hybrid.js +
     // the metadata route. Forwarded verbatim so test harnesses and operator

@@ -105,6 +105,7 @@ function resolvedGrantInput(info: JsonObject, pdpp: JsonObject, detail: JsonObje
   return {
     access_mode: detail.access_mode,
     client: { client_id: pdpp.client_id },
+    ...(detail.extensions !== undefined ? { extensions: detail.extensions } : {}),
     // Absent-only expiry: omit the field when the token carries no `exp`.
     ...(typeof info.exp === "number" ? { expires_at: new Date(info.exp * 1000).toISOString() } : {}),
     grant_id: pdpp.grant_id,

@@ -56,6 +56,10 @@ export interface ApprovedAuthorization {
 
 export interface GrantedAuthorizationDetail {
   access_mode: "continuous" | "single_use";
+  // Profile members keyed by absolute URI (e.g. the frozen client range filter
+  // set). Core preserves them without interpreting them; see
+  // spec-client-range-filters.md Section 4.3.
+  extensions?: Record<string, unknown>;
   purpose_code: string;
   purpose_description?: string;
   retention?: { max_duration: string; on_expiry: "anonymize" | "delete" };
@@ -67,6 +71,7 @@ export interface GrantedAuthorizationDetail {
 
 const RAR_DETAIL_KEYS = new Set([
   "access_mode",
+  "extensions",
   "purpose_code",
   "purpose_description",
   "retention",
@@ -302,6 +307,12 @@ function requireGrantedPolicy(value: JsonObject): void {
   if (value.purpose_description !== undefined && !isNonEmptyString(value.purpose_description)) {
     sourceFail("Granted authorization detail has an invalid purpose_description");
   }
+  if (
+    value.extensions !== undefined &&
+    !(isObject(value.extensions) && Object.keys(value.extensions).every((key) => URL.canParse(key)))
+  ) {
+    sourceFail("Granted authorization detail extensions must be an object keyed by absolute URI");
+  }
   if (value.selection_preset !== undefined && !isNonEmptyString(value.selection_preset)) {
     sourceFail("Granted authorization detail has an invalid selection_preset");
   }
@@ -343,6 +354,7 @@ export function buildGrantedAuthorizationDetail(value: unknown): GrantedAuthoriz
   const grant = parseCoreResolvedGrant(value);
   return {
     access_mode: grant.access_mode,
+    ...(grant.extensions ? { extensions: structuredClone(grant.extensions) } : {}),
     purpose_code: grant.purpose_code,
     ...(grant.purpose_description ? { purpose_description: grant.purpose_description } : {}),
     ...(grant.retention ? { retention: structuredClone(grant.retention) } : {}),
