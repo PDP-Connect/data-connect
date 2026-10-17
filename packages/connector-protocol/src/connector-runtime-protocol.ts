@@ -101,8 +101,19 @@ function isRecordKey(value: unknown): value is string | readonly string[] {
 /** Capability required by a connector that emits STREAM_EVIDENCE. */
 export const STREAM_EVIDENCE_CAPABILITY = "STREAM_EVIDENCE" as const;
 
+/**
+ * DETAIL_COVERAGE key sets. A host lists it in START when it accepts
+ * `empty_keys` and `unchanged_keys`. A connector declares it in its manifest
+ * `protocol_capabilities` to opt into evidence-based crediting of
+ * `hydrated_keys` (see {@link DetailCoverageMessage.hydrated_keys}).
+ */
+export const DETAIL_COVERAGE_KEY_SETS_CAPABILITY = "DETAIL_COVERAGE_KEY_SETS" as const;
+
 /** Protocol capabilities that can be advertised by a connector or runtime. */
-export type ConnectorProtocolCapability = typeof STREAM_EVIDENCE_CAPABILITY | typeof HOST_BLOB_CAPABILITY;
+export type ConnectorProtocolCapability =
+  | typeof STREAM_EVIDENCE_CAPABILITY
+  | typeof HOST_BLOB_CAPABILITY
+  | typeof DETAIL_COVERAGE_KEY_SETS_CAPABILITY;
 
 /**
  * The closed, exhaustive list backing {@link ConnectorProtocolCapability} at
@@ -116,6 +127,7 @@ export type ConnectorProtocolCapability = typeof STREAM_EVIDENCE_CAPABILITY | ty
 export const CONNECTOR_PROTOCOL_CAPABILITIES: readonly ConnectorProtocolCapability[] = [
   STREAM_EVIDENCE_CAPABILITY,
   HOST_BLOB_CAPABILITY,
+  DETAIL_COVERAGE_KEY_SETS_CAPABILITY,
 ];
 
 function isConnectorProtocolCapability(value: unknown): value is ConnectorProtocolCapability {
@@ -223,6 +235,13 @@ export interface StartMessage {
    */
   collection_mode?: "full_refresh" | "incremental";
   detail_gaps?: readonly DetailGapStartEntry[];
+  /**
+   * The host advertises the protocol capabilities it implements. Absent means
+   * none (an older host). A connector MUST NOT emit empty_keys/unchanged_keys
+   * unless START lists DETAIL_COVERAGE_KEY_SETS, and must otherwise keep its
+   * previous coverage behavior.
+   */
+  protocol_capabilities?: readonly ConnectorProtocolCapability[];
   /**
    * SLVP-ideal §4.3 recovery-only launch mode. When true, the connector drains
    * pending non-source-pressure detail gaps and MUST NOT perform the forward
@@ -415,7 +434,23 @@ export interface DetailCoverageMessage {
    * reads `partial`. NEVER inferred from the collected count.
    */
   covered?: number;
+  /**
+   * Required keys the connector verified have no detail at all this run (an
+   * account with no transactions, an order with no items). A key with no
+   * detail record belongs here, not in `hydrated_keys`.
+   */
+  empty_keys?: Array<string | number>;
   gap_keys?: Array<string | number>;
+  /**
+   * Required keys whose detail the run emitted. For a connector whose manifest
+   * declares DETAIL_COVERAGE_KEY_SETS, the runtime credits a hydrated key only
+   * when an accepted record of `stream` answers for it this run: a record
+   * whose primary key is the key, or whose foreign key in a manifest
+   * `relationships` entry to `state_stream` holds it. A hydrated key with no
+   * such record withholds the `state_stream` checkpoint. For any other
+   * connector the declaration alone credits the key. For every connector, a
+   * key with a record the store rejected withholds the checkpoint.
+   */
   hydrated_keys: Array<string | number>;
   /**
    * Required keys accepted by an explicit optional-detail policy. A provider
@@ -428,6 +463,11 @@ export interface DetailCoverageMessage {
   state_stream: string;
   stream: string;
   type: "DETAIL_COVERAGE";
+  /**
+   * Required keys whose detail the connector verified is unchanged since a
+   * prior run and so did not re-emit (a fingerprint or sync-token match).
+   */
+  unchanged_keys?: Array<string | number>;
 }
 
 export interface RuntimeContinuationFact {

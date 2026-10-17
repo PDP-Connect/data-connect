@@ -82,6 +82,11 @@ export const BACKUP_TABLE_INVENTORY: Record<string, BackupTableInventoryEntry> =
     classification: "backup_required",
     reason: "Installed connector activation state is durable runtime authority for which verified manifest revision may run.",
   },
+  connector_checkpoint_withholds: {
+    classification: "backup_required",
+    reason:
+      "Consecutive-run withhold counts behind the checkpoint-stall report. A lost row only restarts a count, so a stall is reported a few runs late.",
+  },
   connector_coverage_horizons: {
     classification: "backup_required",
     reason:

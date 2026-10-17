@@ -44,6 +44,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { type RuntimeRunConnectorResult, runConnector } from "../runtime/index.ts";
 
+import { getDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
 import { createRequestConnectorInstanceStore } from "../server/request-store-factories.ts";
 import { getDefaultConnectorDetailGapStore } from "../server/stores/connector-detail-gap-store.ts";
@@ -58,6 +59,8 @@ const HOLDINGS_STATE_STREAM_PATTERN = /state_stream=holdings/;
 const ACTIVITY_STATE_STREAM_PATTERN = /state_stream=activity/;
 const DUPLICATE_COVERAGE_PATTERN = /duplicate DETAIL_COVERAGE/;
 const OVERLAPPING_OUTCOME_PATTERN = /outcome key appears in multiple sets/;
+const STALL_MESSAGE_PATTERN =
+  /withheld for 3 consecutive runs, each time because activity left required keys uncredited/;
 
 interface ClosableServer {
   abortStartupBackfill: (reason: string) => void;
@@ -198,7 +201,12 @@ const MANIFEST = {
     {
       name: "activity",
       primary_key: ["id"],
-      schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+      relationships: [{ cardinality: "has_one", foreign_key: "holding_id", name: "holding", stream: "holdings" }],
+      schema: {
+        properties: { holding_id: { type: "string" }, id: { type: "string" } },
+        required: ["id"],
+        type: "object",
+      },
       selection: { fields: true, resources: true },
       semantics: "append_only",
     },
@@ -214,6 +222,13 @@ const MANIFEST = {
   ],
   version: "1.0.0",
 };
+
+/**
+ * The same connector, declaring DETAIL_COVERAGE_KEY_SETS. Only a connector that
+ * declares it gets evidence-based crediting of hydrated keys; MANIFEST keeps
+ * the crediting it had before the capability existed.
+ */
+const KEY_SETS_MANIFEST = { ...MANIFEST, protocol_capabilities: ["DETAIL_COVERAGE_KEY_SETS"] };
 
 function createCannedConnector(messages: readonly Record<string, unknown>[]): {
   connectorPath: string;
@@ -287,7 +302,8 @@ async function runShortfall(
   ownerToken: string,
   messages: readonly Record<string, unknown>[],
   connectorInstanceId?: string,
-  streams: readonly string[] = ["holdings", "activity", "valuations"]
+  streams: readonly string[] = ["holdings", "activity", "valuations"],
+  manifest: typeof MANIFEST = MANIFEST
 ): Promise<{ result: RuntimeRunConnectorResult | null; thrown: unknown }> {
   const { connectorPath, cleanup } = createCannedConnector(messages);
   let result: RuntimeRunConnectorResult | null = null;
@@ -300,7 +316,7 @@ async function runShortfall(
       ...(connectorInstanceId ? { connectorInstanceId } : {}),
       connectorPath,
       detailGapStore: getDefaultConnectorDetailGapStore(),
-      manifest: MANIFEST,
+      manifest,
       onInteraction: async () => ({}),
       ownerToken,
       persistState: true,
@@ -503,6 +519,7 @@ test("one detail stream can independently prove two parent checkpoints", async (
   const messages: Record<string, unknown>[] = [
     { data: { id: "H" }, emitted_at: "2026-04-18T00:00:00Z", key: "H", stream: "holdings", type: "RECORD" },
     { data: { id: "A" }, emitted_at: "2026-04-18T00:00:00Z", key: "A", stream: "activity", type: "RECORD" },
+    { data: { id: "A" }, emitted_at: "2026-04-18T00:00:00Z", key: "A", stream: "valuations", type: "RECORD" },
     {
       hydrated_keys: [],
       reference_only: true,
@@ -521,7 +538,7 @@ test("one detail stream can independently prove two parent checkpoints", async (
     },
     { cursor: { page: "holdings-1" }, stream: "holdings", type: "STATE" },
     { cursor: { page: "activity-1" }, stream: "activity", type: "STATE" },
-    { records_emitted: 2, status: "succeeded", type: "DONE" },
+    { records_emitted: 3, status: "succeeded", type: "DONE" },
   ];
 
   const { result, thrown } = await runShortfall(server, ownerToken, messages);
@@ -630,7 +647,8 @@ test("a staged parent without its required detail coverage report cannot commit"
   const ownerToken = await registerAndAuthorize(server);
   const messages: Record<string, unknown>[] = [
     {
-      hydrated_keys: ["H"],
+      empty_keys: ["H"],
+      hydrated_keys: [],
       reference_only: true,
       required_keys: ["H"],
       state_stream: "holdings",
@@ -715,6 +733,7 @@ test("an uncovered detail key leaves its parent retryable and a later complete p
 
   const complete = await runShortfall(server, ownerToken, [
     { data: { id: "K" }, emitted_at: "2026-04-18T00:00:00Z", key: "K", stream: "holdings", type: "RECORD" },
+    { data: { id: "K" }, emitted_at: "2026-04-18T00:00:00Z", key: "K", stream: "valuations", type: "RECORD" },
     {
       hydrated_keys: ["K"],
       reference_only: true,
@@ -724,8 +743,403 @@ test("an uncovered detail key leaves its parent retryable and a later complete p
       type: "DETAIL_COVERAGE",
     },
     { cursor: { page: "2" }, stream: "holdings", type: "STATE" },
-    { records_emitted: 1, status: "succeeded", type: "DONE" },
+    { records_emitted: 2, status: "succeeded", type: "DONE" },
   ]);
   assert.equal(complete.thrown, null);
   assert.equal(complete.result?.checkpoint_summary?.state_streams_committed, 1);
+});
+
+function terminalCoveredFor(runId: string, stream: string): unknown {
+  const row = getDb()
+    .prepare(
+      `SELECT data_json FROM spine_events
+       WHERE run_id = ? AND event_type IN ('run.completed', 'run.failed', 'run.cancelled')
+       ORDER BY event_seq DESC LIMIT 1`
+    )
+    .get<{ data_json: string }>(runId);
+  assert.ok(row, `expected a terminal spine event for run ${runId}`);
+  const data = JSON.parse(row.data_json) as { collection_facts?: { streams?: Record<string, unknown>[] } };
+  const fact = data.collection_facts?.streams?.find((entry) => entry.stream === stream);
+  assert.ok(fact, `expected a collection fact for ${stream}`);
+  return fact.covered;
+}
+
+function hydratedKeyMessages(activityData: Record<string, unknown>): Record<string, unknown>[] {
+  return [
+    { data: { id: "H" }, emitted_at: "2026-04-18T00:00:00Z", key: "H", stream: "holdings", type: "RECORD" },
+    { data: activityData, emitted_at: "2026-04-18T00:00:00Z", key: "K", stream: "activity", type: "RECORD" },
+    {
+      considered: 1,
+      covered: 1,
+      hydrated_keys: ["K"],
+      reference_only: true,
+      required_keys: ["K"],
+      state_stream: "holdings",
+      stream: "activity",
+      type: "DETAIL_COVERAGE",
+    },
+    { cursor: { page: "1" }, stream: "holdings", type: "STATE" },
+    { records_emitted: 2, status: "succeeded", type: "DONE" },
+  ];
+}
+
+// The RS permanently rejects a record whose key disagrees with data.id. A
+// DETAIL_COVERAGE that still lists that key as hydrated claims coverage the
+// store never accepted: it must not pass the checkpoint gate or count as covered.
+test("a hydrated key the RS rejected neither passes the checkpoint gate nor counts as covered", async (t) => {
+  const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+  t.after(() => closeServer(server));
+  const ownerToken = await registerAndAuthorize(server);
+
+  const rejected = await runShortfall(server, ownerToken, hydratedKeyMessages({ id: "not-K" }), undefined, [
+    "holdings",
+    "activity",
+  ]);
+  assert.equal(rejected.thrown, null);
+  assert.equal(rejected.result?.status, "succeeded");
+  assert.equal(rejected.result?.checkpoint_summary?.state_streams_staged, 1);
+  assert.equal(
+    rejected.result?.checkpoint_summary?.state_streams_committed,
+    0,
+    "a rejected key is not hydrated, so the holdings cursor must not commit"
+  );
+  assert.equal(terminalCoveredFor(rejected.result?.run_id as string, "activity"), 0);
+
+  // Control: the same report over an accepted record commits and counts.
+  const accepted = await runShortfall(server, ownerToken, hydratedKeyMessages({ id: "K" }), undefined, [
+    "holdings",
+    "activity",
+  ]);
+  assert.equal(accepted.thrown, null);
+  assert.equal(accepted.result?.checkpoint_summary?.state_streams_committed, 1);
+  assert.equal(terminalCoveredFor(accepted.result?.run_id as string, "activity"), 1);
+});
+
+// An optional skip is an accepted terminal absence, so it may release the
+// checkpoint, but it is not coverage: `covered` counts emitted and unchanged
+// items only.
+test("optional_skip_keys release the checkpoint but never inflate covered", async (t) => {
+  const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+  t.after(() => closeServer(server));
+  const ownerToken = await registerAndAuthorize(server);
+
+  const { result, thrown } = await runShortfall(
+    server,
+    ownerToken,
+    [
+      { data: { id: "H" }, emitted_at: "2026-04-18T00:00:00Z", key: "H", stream: "holdings", type: "RECORD" },
+      { data: { id: "K1" }, emitted_at: "2026-04-18T00:00:00Z", key: "K1", stream: "activity", type: "RECORD" },
+      {
+        considered: 2,
+        covered: 2,
+        hydrated_keys: ["K1"],
+        optional_skip_keys: ["K2"],
+        reference_only: true,
+        required_keys: ["K1", "K2"],
+        state_stream: "holdings",
+        stream: "activity",
+        type: "DETAIL_COVERAGE",
+      },
+      { cursor: { page: "1" }, stream: "holdings", type: "STATE" },
+      { records_emitted: 2, status: "succeeded", type: "DONE" },
+    ],
+    undefined,
+    ["holdings", "activity"]
+  );
+  assert.equal(thrown, null);
+  assert.equal(result?.checkpoint_summary?.state_streams_committed, 1);
+  assert.equal(terminalCoveredFor(result?.run_id as string, "activity"), 1);
+});
+
+const RECORD_AT = "2026-04-18T00:00:00Z";
+
+function activityRecord(key: string, data: Record<string, unknown>): Record<string, unknown> {
+  return { data, emitted_at: RECORD_AT, key, stream: "activity", type: "RECORD" };
+}
+
+function holdingsCoverage(fields: Record<string, unknown>): Record<string, unknown> {
+  return {
+    hydrated_keys: [],
+    reference_only: true,
+    state_stream: "holdings",
+    stream: "activity",
+    type: "DETAIL_COVERAGE",
+    ...fields,
+  };
+}
+
+/** holdings record H, then `middle`, then the holdings STATE and a successful DONE. */
+function holdingsRun(middle: readonly Record<string, unknown>[]): Record<string, unknown>[] {
+  const records = middle.filter((message) => message.type === "RECORD").length + 1;
+  return [
+    { data: { id: "H" }, emitted_at: RECORD_AT, key: "H", stream: "holdings", type: "RECORD" },
+    ...middle,
+    { cursor: { page: "1" }, stream: "holdings", type: "STATE" },
+    { records_emitted: records, status: "succeeded", type: "DONE" },
+  ];
+}
+
+async function runHoldings(
+  server: ClosableServer,
+  ownerToken: string,
+  middle: readonly Record<string, unknown>[],
+  manifest: typeof MANIFEST = MANIFEST
+): Promise<RuntimeRunConnectorResult> {
+  const { result, thrown } = await runShortfall(
+    server,
+    ownerToken,
+    holdingsRun(middle),
+    undefined,
+    ["holdings", "activity"],
+    manifest
+  );
+  assert.equal(thrown, null);
+  assert.ok(result);
+  assert.equal(result.status, "succeeded");
+  return result;
+}
+
+// Records may follow their DETAIL_COVERAGE and are flushed at DONE. Coverage
+// is reconciled against ingest evidence at DONE, so a rejection that arrives
+// after the report still counts against the key.
+test("a rejection that arrives after its DETAIL_COVERAGE still withholds the parent and uncovers the key", async (t) => {
+  const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+  t.after(() => closeServer(server));
+  const ownerToken = await registerAndAuthorize(server);
+
+  const result = await runHoldings(server, ownerToken, [
+    holdingsCoverage({ considered: 1, covered: 1, hydrated_keys: ["K"], required_keys: ["K"] }),
+    activityRecord("K", { id: "not-K" }),
+  ]);
+  assert.equal(result.checkpoint_summary?.state_streams_committed, 0);
+  assert.equal(terminalCoveredFor(result.run_id as string, "activity"), 0);
+});
+
+// The converse: a record rejected before the report and accepted on a retry
+// after it is hydrated.
+test("an accepted retry after DETAIL_COVERAGE credits a key whose first attempt was rejected", async (t) => {
+  const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+  t.after(() => closeServer(server));
+  const ownerToken = await registerAndAuthorize(server);
+
+  const result = await runHoldings(
+    server,
+    ownerToken,
+    [
+      activityRecord("K", { id: "not-K" }),
+      holdingsCoverage({ considered: 1, covered: 1, hydrated_keys: ["K"], required_keys: ["K"] }),
+      activityRecord("K", { id: "K" }),
+    ],
+    KEY_SETS_MANIFEST
+  );
+  assert.equal(result.checkpoint_summary?.state_streams_committed, 1);
+  assert.equal(terminalCoveredFor(result.run_id as string, "activity"), 1);
+});
+
+// For a connector that declares DETAIL_COVERAGE_KEY_SETS, a hydrated listing
+// is a claim, not evidence. With no accepted record for the key the parent
+// stays put; a key with no detail must say so in empty_keys.
+test("a hydrated key with no accepted record for it withholds the parent and does not count as covered", async (t) => {
+  const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+  t.after(() => closeServer(server));
+  const ownerToken = await registerAndAuthorize(server);
+
+  const result = await runHoldings(
+    server,
+    ownerToken,
+    [holdingsCoverage({ considered: 1, covered: 1, hydrated_keys: ["K"], required_keys: ["K"] })],
+    KEY_SETS_MANIFEST
+  );
+  assert.equal(result.checkpoint_summary?.state_streams_committed, 0);
+  assert.equal(terminalCoveredFor(result.run_id as string, "activity"), 0);
+  const coverageGap = (result.known_gaps ?? []).find((gap) => gap.reason === "detail_coverage_incomplete");
+  assert.match(String(coverageGap?.message ?? ""), HOLDINGS_STATE_STREAM_PATTERN);
+});
+
+// A connector without DETAIL_COVERAGE_KEY_SETS may list a key with no detail
+// record (an account with no transactions) as hydrated. Crediting it by
+// evidence would stall that connector's cursor every run, so it keeps the
+// crediting it had before the capability: the declaration credits the key.
+test("without DETAIL_COVERAGE_KEY_SETS, a hydrated key with no record still commits the parent and counts as covered", async (t) => {
+  const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+  t.after(() => closeServer(server));
+  const ownerToken = await registerAndAuthorize(server);
+
+  for (let run = 0; run < 2; run += 1) {
+    // biome-ignore lint/performance/noAwaitInLoops: the second run proves the cursor keeps moving.
+    const result = await runHoldings(server, ownerToken, [
+      holdingsCoverage({ considered: 1, covered: 1, hydrated_keys: ["K"], required_keys: ["K"] }),
+    ]);
+    assert.equal(result.checkpoint_summary?.state_streams_committed, 1, `run ${run + 1}`);
+    assert.equal(terminalCoveredFor(result.run_id as string, "activity"), 1);
+    assert.deepEqual(withheldEvents(result.run_id as string), []);
+    assert.equal(
+      (result.known_gaps ?? []).some((gap) => gap.reason === "detail_coverage_incomplete"),
+      false,
+      "no shortfall is reported"
+    );
+  }
+});
+
+// START lists DETAIL_COVERAGE_KEY_SETS to every connector, so a connector whose
+// manifest does not declare it may still send empty_keys and unchanged_keys.
+// They credit like its hydrated keys: rejecting the message would fail a run
+// the host invited, and ignoring the keys would stall the cursor.
+test("without DETAIL_COVERAGE_KEY_SETS, empty_keys and unchanged_keys credit like hydrated keys", async (t) => {
+  const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+  t.after(() => closeServer(server));
+  const ownerToken = await registerAndAuthorize(server);
+
+  const result = await runHoldings(server, ownerToken, [
+    holdingsCoverage({ empty_keys: ["E"], required_keys: ["E", "U"], unchanged_keys: ["U"] }),
+  ]);
+  assert.equal(result.checkpoint_summary?.state_streams_committed, 1);
+});
+
+test("verified-empty and verified-unchanged keys release the parent and count as covered", async (t) => {
+  const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+  t.after(() => closeServer(server));
+  const ownerToken = await registerAndAuthorize(server);
+
+  const result = await runHoldings(server, ownerToken, [
+    holdingsCoverage({
+      considered: 2,
+      covered: 2,
+      empty_keys: ["E"],
+      required_keys: ["E", "U"],
+      unchanged_keys: ["U"],
+    }),
+  ]);
+  assert.equal(result.checkpoint_summary?.state_streams_committed, 1);
+  assert.equal(terminalCoveredFor(result.run_id as string, "activity"), 2);
+});
+
+// The USAA/Chase shape: required keys are parent (account) keys and detail
+// records carry them in a manifest-declared foreign key, not as their own key.
+test("a detail record's parent foreign key evidences the parent key; a rejected one withholds it", async (t) => {
+  const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+  t.after(() => closeServer(server));
+  const ownerToken = await registerAndAuthorize(server);
+  const coverage = holdingsCoverage({ considered: 1, covered: 1, hydrated_keys: ["K"], required_keys: ["K"] });
+
+  const accepted = await runHoldings(
+    server,
+    ownerToken,
+    [activityRecord("txn-1", { holding_id: "K", id: "txn-1" }), coverage],
+    KEY_SETS_MANIFEST
+  );
+  assert.equal(accepted.checkpoint_summary?.state_streams_committed, 1);
+  assert.equal(terminalCoveredFor(accepted.run_id as string, "activity"), 1);
+
+  // Rejections withhold for every connector, so the legacy MANIFEST applies.
+  const rejected = await runHoldings(server, ownerToken, [
+    activityRecord("txn-1", { holding_id: "K", id: "txn-1" }),
+    activityRecord("txn-2", { holding_id: "K", id: "not-txn-2" }),
+    coverage,
+  ]);
+  assert.equal(
+    rejected.checkpoint_summary?.state_streams_committed,
+    0,
+    "one rejected transaction of the account leaves the account incomplete"
+  );
+  assert.equal(terminalCoveredFor(rejected.run_id as string, "activity"), 0);
+});
+
+function withheldEvents(runId: string): { consecutive_runs: number | null; stalled: boolean; state_stream: string }[] {
+  return getDb()
+    .prepare(
+      "SELECT data_json FROM spine_events WHERE run_id = ? AND event_type = 'run.checkpoint_withheld' ORDER BY event_seq"
+    )
+    .all<{ data_json: string }>(runId)
+    .map((row) => JSON.parse(row.data_json));
+}
+
+// Withholding is safe against loss but not live: the same reason every run
+// means the cursor never moves. The owner is told once it persists.
+test("a checkpoint withheld for the same reason on consecutive runs is reported as stalled; a commit resets the count", async (t) => {
+  const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+  t.after(() => closeServer(server));
+  const ownerToken = await registerAndAuthorize(server);
+  const unproven = [holdingsCoverage({ hydrated_keys: ["K"], required_keys: ["K"] })];
+
+  const streaks: (number | null)[] = [];
+  let last: RuntimeRunConnectorResult | null = null;
+  for (let run = 0; run < 3; run += 1) {
+    // biome-ignore lint/performance/noAwaitInLoops: the streak is defined by run order.
+    last = await runHoldings(server, ownerToken, unproven, KEY_SETS_MANIFEST);
+    const [event, ...rest] = withheldEvents(last.run_id as string);
+    assert.ok(event);
+    assert.equal(rest.length, 0);
+    assert.equal(event.state_stream, "holdings");
+    streaks.push(event.consecutive_runs);
+  }
+  assert.deepEqual(streaks, [1, 2, 3]);
+  const stall = (last?.known_gaps ?? []).find((gap) => gap.kind === "checkpoint_withheld");
+  assert.equal(stall?.reason, "checkpoint_stalled");
+  assert.equal(stall?.severity, "actionable");
+  assert.match(String(stall?.message), STALL_MESSAGE_PATTERN);
+
+  const committed = await runHoldings(
+    server,
+    ownerToken,
+    [holdingsCoverage({ empty_keys: ["K"], required_keys: ["K"] })],
+    KEY_SETS_MANIFEST
+  );
+  assert.equal(committed.checkpoint_summary?.state_streams_committed, 1);
+  assert.deepEqual(withheldEvents(committed.run_id as string), []);
+
+  const again = await runHoldings(server, ownerToken, unproven, KEY_SETS_MANIFEST);
+  const [event] = withheldEvents(again.run_id as string);
+  assert.ok(event);
+  assert.equal(event.consecutive_runs, 1, "a commit ends the streak");
+  assert.equal(event.stalled, false);
+  const gap = (again.known_gaps ?? []).find((entry) => entry.kind === "checkpoint_withheld");
+  assert.equal(gap?.reason, "checkpoint_withheld");
+  assert.equal(gap?.severity, "transient");
+});
+
+test("changed-FK accepted retry cannot credit a rejected parent", async (t) => {
+  const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+  t.after(() => closeServer(server));
+  const ownerToken = await registerAndAuthorize(server);
+  const result = await runHoldings(server, ownerToken, [
+    activityRecord("T", { id: "wrong", holding_id: "A" }),
+    holdingsCoverage({ considered: 1, covered: 1, hydrated_keys: ["A"], required_keys: ["A"] }),
+    activityRecord("T", { id: "T", holding_id: "B" }),
+  ]);
+  assert.equal(result.checkpoint_summary?.state_streams_committed, 0);
+  assert.equal(terminalCoveredFor(result.run_id as string, "activity"), 0);
+});
+
+test("successful cursor resets its streak when the next cursor PUT fails", async (t) => {
+  const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+  t.after(() => closeServer(server));
+  const ownerToken = await registerAndAuthorize(server);
+  const unproven = [holdingsCoverage({ hydrated_keys: ["K"], required_keys: ["K"] })];
+  await runHoldings(server, ownerToken, unproven, KEY_SETS_MANIFEST);
+  const originalFetch = globalThis.fetch;
+  const puts: string[] = [];
+  const mocked = t.mock.method(globalThis, "fetch", async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    if (init?.method === "PUT" && String(input).includes("/v1/state/")) {
+      const stream = Object.keys(JSON.parse(String(init.body)).state)[0] as string;
+      puts.push(stream);
+      if (stream === "activity") {
+        return new Response("injected second cursor failure", { status: 400 });
+      }
+    }
+    return originalFetch(input, init);
+  });
+  const attempt = await runShortfall(server, ownerToken, [
+    { data: { id: "H" }, emitted_at: RECORD_AT, key: "H", stream: "holdings", type: "RECORD" },
+    activityRecord("T", { id: "T" }),
+    holdingsCoverage({ empty_keys: ["K"], required_keys: ["K"] }),
+    { cursor: { page: "2" }, stream: "holdings", type: "STATE" },
+    { cursor: { page: "2" }, stream: "activity", type: "STATE" },
+    { records_emitted: 2, status: "succeeded", type: "DONE" },
+  ], undefined, ["holdings", "activity"], KEY_SETS_MANIFEST);
+  mocked.mock.restore();
+  assert.deepEqual(puts, ["holdings", "activity"]);
+  assert.ok(attempt.thrown || attempt.result?.status === "failed");
+  const again = await runHoldings(server, ownerToken, unproven, KEY_SETS_MANIFEST);
+  assert.equal(withheldEvents(again.run_id as string)[0]?.consecutive_runs, 1);
 });
