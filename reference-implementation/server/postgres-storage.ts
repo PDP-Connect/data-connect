@@ -3568,13 +3568,15 @@ async function bootstrapPostgresSchemaOnce({
         ON search_index_dirty(dirty);
       -- Pending re-derivation of manifest-derived record columns
       -- (cursor_value, primary_key_text, semantic_time) for one stream of one
-      -- connection, queued with a manifest publication. after_record_key is
-      -- the durable resume cursor; the row is deleted once the stream is done.
+      -- connection, queued with a manifest publication. job_id is new on every
+      -- queue write and is never reused, so a round holding an older job can
+      -- not move or delete a newer one. after_record_key is the durable
+      -- resume cursor; the row is deleted once the stream is done.
       CREATE TABLE IF NOT EXISTS record_derived_repair_pending (
         connector_instance_id TEXT NOT NULL,
         connector_id TEXT NOT NULL,
         stream TEXT NOT NULL,
-        revision BIGINT NOT NULL DEFAULT 1,
+        job_id TEXT NOT NULL,
         after_record_key TEXT,
         marked_at TEXT NOT NULL,
         attempts INTEGER NOT NULL DEFAULT 0,

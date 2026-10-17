@@ -20,6 +20,7 @@ import test from "node:test";
 import { withConnectorLifecycleLock } from "../server/connector-lifecycle-lock.ts";
 import { closeDb, initDb } from "../server/db.ts";
 import { __setRecordDerivedRepairHookForTest, runRecordDerivedRepairRound } from "../server/record-derived-repair.ts";
+import { markRecordDerivedRepairPendingPostgres } from "../server/stores/record-derived-repair-store.ts";
 import {
   closePostgresStorage,
   initPostgresStorage,
@@ -528,8 +529,8 @@ test(
           );
         assert.equal(await staleCursors(), 700);
         let pages = 0;
-        __setRecordDerivedRepairHookForTest((_point, scope) => {
-          if (scope.stream === "messages" && ++pages === 2) {
+        __setRecordDerivedRepairHookForTest((point, scope) => {
+          if (point === "after-page" && scope.stream === "messages" && ++pages === 2) {
             throw new Error("simulated crash after two committed pages");
           }
         });
@@ -564,6 +565,133 @@ test(
       });
     } finally {
       await Promise.resolve(repair).catch(() => undefined);
+      rmSync(dataDir, { force: true, recursive: true });
+    }
+  }
+);
+
+test(
+  "PostgreSQL: a column-repair round that snapshotted an older job never resumes a requeued job from the old cursor",
+  { skip: !POSTGRES_URL },
+  async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "pdpp-install-pg-"));
+    let repair: Promise<unknown> | undefined;
+    try {
+      await withPostgres("requeue", async () => {
+        await seedGmail({ instances: ["cin_gmail_requeue"], recordsPerStream: 700 });
+        const staleCursors = async () =>
+          Number(
+            (
+              await postgresQuery<{ n: string }>(
+                `SELECT count(*)::text AS n FROM records
+                  WHERE connector_id = $1 AND stream = 'messages' AND cursor_value IS DISTINCT FROM record_json->>'received_at'`,
+                [CONNECTOR_ID]
+              )
+            ).rows[0]?.n ?? 0
+          );
+        // Job 1 stops after two pages, so its row holds cursor messages-000511.
+        let pages = 0;
+        __setRecordDerivedRepairHookForTest((point, scope) => {
+          if (point === "after-page" && scope.stream === "messages" && ++pages === 2) {
+            throw new Error("simulated crash after two committed pages");
+          }
+        });
+        try {
+          await gmailInstallService(dataDir, { onRepair: (started) => (repair = started) }).install(
+            CONNECTOR_ID,
+            digest
+          );
+          await assert.rejects(Promise.resolve(repair));
+        } finally {
+          __setRecordDerivedRepairHookForTest(null);
+        }
+        const later = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString();
+
+        // Round A snapshots job 1 and pauses before it takes the stream.
+        const paused = deferred();
+        const resume = deferred();
+        __setRecordDerivedRepairHookForTest(async (point, scope) => {
+          if (point === "after-snapshot" && scope.stream === "messages") {
+            __setRecordDerivedRepairHookForTest(null);
+            paused.resolve();
+            await resume.promise;
+          }
+        });
+        const roundA = runRecordDerivedRepairRound({ connectorId: CONNECTOR_ID, nowIso: later });
+        await paused.promise;
+
+        // Round B finishes job 1. A reinstall then queues job 2 for the same
+        // stream from the start, over records whose columns are stale again.
+        await runRecordDerivedRepairRound({ connectorId: CONNECTOR_ID, nowIso: later });
+        await postgresQuery("UPDATE records SET cursor_value = NULL WHERE connector_id = $1 AND stream = 'messages'", [
+          CONNECTOR_ID,
+        ]);
+        await withPostgresTransaction((client) =>
+          markRecordDerivedRepairPendingPostgres(
+            client,
+            { connectorId: CONNECTOR_ID, connectorInstanceId: "cin_gmail_requeue", stream: "messages" },
+            new Date().toISOString()
+          )
+        );
+
+        resume.resolve();
+        await roundA;
+        // Whatever round A did, job 2 is either finished or still queued.
+        await runRecordDerivedRepairRound({ connectorId: CONNECTOR_ID, nowIso: later });
+        assert.equal(await staleCursors(), 0, "no record before the old cursor was skipped");
+      });
+    } finally {
+      __setRecordDerivedRepairHookForTest(null);
+      await Promise.resolve(repair).catch(() => undefined);
+      rmSync(dataDir, { force: true, recursive: true });
+    }
+  }
+);
+
+test(
+  "PostgreSQL: removing semantic fields with no semantic backend keeps the cleanup scope dirty",
+  { skip: !POSTGRES_URL },
+  async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "pdpp-install-pg-"));
+    try {
+      await withPostgres("nobackend", async () => {
+        await seedGmail({ instances: ["cin_gmail_nobackend"], recordsPerStream: 30 });
+        let repair: Promise<unknown> | undefined;
+        const capture = { onRepair: (started: Promise<unknown>) => (repair = started) };
+        await gmailInstallService(dataDir, capture).install(CONNECTOR_ID, digest);
+        await within(Promise.resolve(repair), 60_000, "first repair");
+        const before = await gmailIndexRows();
+        assert.ok(before.semantic > 0 && before.semanticMeta > 0, JSON.stringify(before));
+
+        // The server loses its semantic backend, then an update removes the fields.
+        configureSemanticBackend(null);
+        const nextDigest = `sha256:${"c".repeat(64)}`;
+        await gmailInstallService(dataDir, capture, { digest: nextDigest, manifest: unsearchableGmail }).install(
+          CONNECTOR_ID,
+          nextDigest
+        );
+        await Promise.resolve(repair).catch(() => undefined);
+        const debt = await postgresQuery<{ stream: string; last_error: string }>(
+          `SELECT stream, last_error FROM search_index_dirty
+            WHERE connector_id = $1 AND dirty <> 0 AND stream = ANY($2::text[]) ORDER BY stream`,
+          [CONNECTOR_ID, ["messages", "message_bodies"]]
+        );
+        assert.deepEqual(
+          debt.rows.map((row) => row.stream),
+          ["message_bodies", "messages"],
+          "the semantic cleanup debt stays dirty"
+        );
+        assert.match(String(debt.rows[0]?.last_error), /no semantic backend/);
+
+        // With a backend again, the retried scopes remove the stale vectors.
+        configureSemanticBackend(embedder.backend);
+        await postgresQuery("UPDATE search_index_dirty SET next_attempt_at = NULL WHERE connector_id = $1", [
+          CONNECTOR_ID,
+        ]);
+        await runSearchIndexDirtyReconcileRound({ maxDurationMs: 60_000, pageSize: 25 });
+        assert.deepEqual(await gmailIndexRows(), { lexical: 0, lexicalMeta: 0, semantic: 0, semanticMeta: 0 });
+      });
+    } finally {
       rmSync(dataDir, { force: true, recursive: true });
     }
   }

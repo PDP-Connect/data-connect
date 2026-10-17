@@ -427,6 +427,31 @@ function* iterateDynamicSqlAcknowledged<R extends SemanticDbRow = SemanticDbRow>
  * use JSON.stringify so a stream or field containing '|' cannot collide with
  * a different (stream, field) pair.
  */
+/**
+ * Whether this connection still has semantic index state for `stream`: a
+ * completion meta row or an in-progress row. Vectors are written only while a
+ * progress row exists and kept with a meta row, so either row marks vectors
+ * that a cleanup may still need to remove.
+ */
+export async function hasSemanticIndexState({
+  connectorInstanceId,
+  stream,
+}: {
+  connectorInstanceId: string;
+  stream: string;
+}): Promise<boolean> {
+  if (isPostgresStorageBackend()) {
+    return Boolean(
+      (await postgresGetSemanticMeta({ connectorInstanceId, stream })) ||
+        (await postgresGetSemanticProgress({ connectorInstanceId, stream }))
+    );
+  }
+  return Boolean(
+    getOne(referenceQueries.searchSemanticMetaGetByStream, [connectorInstanceId, stream]) ||
+      getOne(referenceQueries.searchSemanticProgressGetByStream, [connectorInstanceId, stream])
+  );
+}
+
 export function encodeScopeKey(stream: string, field: string): string {
   return JSON.stringify([stream, field]);
 }

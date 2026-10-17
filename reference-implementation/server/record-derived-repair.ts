@@ -27,7 +27,7 @@ import type { RecordDerivedRepairScope } from "./stores/record-derived-repair-st
 interface PendingRepair extends RecordDerivedRepairScope {
   readonly afterRecordKey: string | null;
   readonly attempts: number;
-  readonly revision: number;
+  readonly jobId: string;
 }
 
 export interface RecordDerivedRepairRoundResult {
@@ -44,7 +44,7 @@ function backoffMs(attempts: number): number {
   return Math.min(MAX_BACKOFF_MS, 30_000 * 2 ** Math.min(attempts, 16));
 }
 
-type RepairHook = (point: "after-page", scope: RecordDerivedRepairScope) => Promise<void> | void;
+type RepairHook = (point: "after-page" | "after-snapshot", scope: RecordDerivedRepairScope) => Promise<void> | void;
 let repairHookForTest: RepairHook | null = null;
 
 export function __setRecordDerivedRepairHookForTest(hook: RepairHook | null): void {
@@ -56,7 +56,7 @@ interface PendingRow {
   attempts: number | string;
   connector_id: string;
   connector_instance_id: string;
-  revision: number | string;
+  job_id: string;
   stream: string;
 }
 
@@ -66,12 +66,12 @@ function toPending(row: PendingRow): PendingRepair {
     attempts: Number(row.attempts),
     connectorId: row.connector_id,
     connectorInstanceId: row.connector_instance_id,
-    revision: Number(row.revision),
+    jobId: row.job_id,
     stream: row.stream,
   };
 }
 
-const LIST_SQL = `SELECT connector_instance_id, connector_id, stream, revision, after_record_key, attempts
+const LIST_SQL = `SELECT connector_instance_id, connector_id, stream, job_id, after_record_key, attempts
   FROM record_derived_repair_pending
   WHERE (next_attempt_at IS NULL OR next_attempt_at <= $1)
     AND ($2::text IS NULL OR connector_id = $2)
@@ -90,7 +90,7 @@ export async function listPendingRecordDerivedRepairs(
   }
   const rows = getDb()
     .prepare(
-      `SELECT connector_instance_id, connector_id, stream, revision, after_record_key, attempts
+      `SELECT connector_instance_id, connector_id, stream, job_id, after_record_key, attempts
          FROM record_derived_repair_pending
         WHERE (next_attempt_at IS NULL OR next_attempt_at <= ?)
           AND (? IS NULL OR connector_id = ?)
@@ -124,11 +124,32 @@ function manifestStream(manifest: Record<string, unknown>, stream: string): Reco
 
 class RepairRecontendedError extends Error {}
 
+async function reloadPending(repair: PendingRepair): Promise<PendingRepair | null> {
+  const params = [repair.connectorInstanceId, repair.stream];
+  if (isPostgresStorageBackend()) {
+    const row = (
+      await postgresQuery<PendingRow>(
+        `SELECT connector_instance_id, connector_id, stream, job_id, after_record_key, attempts
+           FROM record_derived_repair_pending WHERE connector_instance_id = $1 AND stream = $2`,
+        params
+      )
+    ).rows[0];
+    return row ? toPending(row) : null;
+  }
+  const row = getDb()
+    .prepare(
+      `SELECT connector_instance_id, connector_id, stream, job_id, after_record_key, attempts
+         FROM record_derived_repair_pending WHERE connector_instance_id = ? AND stream = ?`
+    )
+    .get<PendingRow>(...params);
+  return row ? toPending(row) : null;
+}
+
 async function completeRepair(repair: PendingRepair): Promise<boolean> {
-  const params = [repair.connectorInstanceId, repair.stream, repair.revision];
+  const params = [repair.connectorInstanceId, repair.stream, repair.jobId];
   if (isPostgresStorageBackend()) {
     const result = await postgresQuery(
-      "DELETE FROM record_derived_repair_pending WHERE connector_instance_id = $1 AND stream = $2 AND revision = $3",
+      "DELETE FROM record_derived_repair_pending WHERE connector_instance_id = $1 AND stream = $2 AND job_id = $3",
       params
     );
     return (result.rowCount ?? 0) > 0;
@@ -136,7 +157,7 @@ async function completeRepair(repair: PendingRepair): Promise<boolean> {
   return (
     getDb()
       .prepare(
-        "DELETE FROM record_derived_repair_pending WHERE connector_instance_id = ? AND stream = ? AND revision = ?"
+        "DELETE FROM record_derived_repair_pending WHERE connector_instance_id = ? AND stream = ? AND job_id = ?"
       )
       .run(...params).changes > 0
   );
@@ -145,11 +166,11 @@ async function completeRepair(repair: PendingRepair): Promise<boolean> {
 async function recordFailure(repair: PendingRepair, error: unknown): Promise<void> {
   const message = error instanceof Error ? error.message : String(error);
   const nextAttemptAt = new Date(Date.now() + backoffMs(repair.attempts)).toISOString();
-  const params = [repair.connectorInstanceId, repair.stream, repair.revision, message, nextAttemptAt];
+  const params = [repair.connectorInstanceId, repair.stream, repair.jobId, message, nextAttemptAt];
   if (isPostgresStorageBackend()) {
     await postgresQuery(
       `UPDATE record_derived_repair_pending SET attempts = attempts + 1, last_error = $4, next_attempt_at = $5
-        WHERE connector_instance_id = $1 AND stream = $2 AND revision = $3`,
+        WHERE connector_instance_id = $1 AND stream = $2 AND job_id = $3`,
       params
     );
     return;
@@ -157,9 +178,9 @@ async function recordFailure(repair: PendingRepair, error: unknown): Promise<voi
   getDb()
     .prepare(
       `UPDATE record_derived_repair_pending SET attempts = attempts + 1, last_error = ?, next_attempt_at = ?
-        WHERE connector_instance_id = ? AND stream = ? AND revision = ?`
+        WHERE connector_instance_id = ? AND stream = ? AND job_id = ?`
     )
-    .run(message, nextAttemptAt, repair.connectorInstanceId, repair.stream, repair.revision);
+    .run(message, nextAttemptAt, repair.connectorInstanceId, repair.stream, repair.jobId);
 }
 
 type RepairOutcome = "completed" | "incomplete" | "recontended";
@@ -192,8 +213,8 @@ async function repairPostgresStream(repair: PendingRepair, deadline: number): Pr
         withinChunk: async (client, lastRecordKey) => {
           const advanced = await client.query(
             `UPDATE record_derived_repair_pending SET after_record_key = $3
-              WHERE connector_instance_id = $1 AND stream = $2 AND revision = $4`,
-            [repair.connectorInstanceId, repair.stream, lastRecordKey, repair.revision]
+              WHERE connector_instance_id = $1 AND stream = $2 AND job_id = $4`,
+            [repair.connectorInstanceId, repair.stream, lastRecordKey, repair.jobId]
           );
           if (!advanced.rowCount) {
             // A newer publication re-queued this stream from the start.
@@ -241,6 +262,9 @@ export async function runRecordDerivedRepairRound(
 ): Promise<RecordDerivedRepairRoundResult> {
   const deadline = Date.now() + (options.maxDurationMs ?? Number.POSITIVE_INFINITY);
   const pending = await listPendingRecordDerivedRepairs(options);
+  for (const repair of pending) {
+    await repairHookForTest?.("after-snapshot", repair);
+  }
   let attempted = 0;
   let completed = 0;
   let failed = 0;
@@ -263,9 +287,18 @@ export async function runRecordDerivedRepairRound(
     for (const key of keys) repairsInFlight.add(key);
     attempted += group.length;
     try {
+      // The snapshot may be stale by now: another round may have finished
+      // the job, and a new publication may have queued a new one. Work only
+      // on the job the row holds now, from its current cursor.
+      const current = await Promise.all(group.map(reloadPending));
+      if (current.some((row, index) => row?.jobId !== group[index]?.jobId)) {
+        incomplete = true;
+        continue;
+      }
+      const fresh = current as PendingRepair[];
       const outcome = isPostgresStorageBackend()
-        ? await repairPostgresStream(group[0] as PendingRepair, deadline)
-        : await repairSqliteConnector(group);
+        ? await repairPostgresStream(fresh[0] as PendingRepair, deadline)
+        : await repairSqliteConnector(fresh);
       if (outcome === "completed") completed += group.length;
       else incomplete = true;
     } catch (error) {

@@ -35,6 +35,7 @@ import { lexicalIndexBackfillForManifest } from "./search.ts";
 import {
   backendStorageIdentity,
   getSemanticBackend,
+  hasSemanticIndexState,
   SemanticBackfillIncompleteError,
   semanticIndexBackfillForManifest,
 } from "./search-semantic.ts";
@@ -184,6 +185,19 @@ async function runScopeBackfills(
   const semanticFieldsDeclared = targetStream !== null && declaresSemanticFields(targetStream);
   const semanticBackend = getSemanticBackend();
   const semanticIdentity = semanticBackend ? backendStorageIdentity(semanticBackend) : null;
+  // The same holds for cleanup debt: a stream that no longer declares
+  // semantic fields (or left the manifest) but still has semantic state for
+  // this connection needs the semantic pass to remove it. Deleting through
+  // the fenced repair path needs the backend, so without one the scope stays
+  // dirty and is retried when a backend is configured.
+  if (!(semanticFieldsDeclared || semanticBackend) && (await hasSemanticIndexState({ connectorInstanceId, stream }))) {
+    await recordSearchIndexDirtyFailure(
+      { connectorInstanceId, stream },
+      scope.revision,
+      "stale semantic index state remains for this stream but no semantic backend is currently configured; cleanup is pending, dirty flag retained"
+    );
+    return { connectorId, connectorInstanceId, outcome: "failed", stream };
+  }
   if (semanticFieldsDeclared && !semanticBackend) {
     await recordSearchIndexDirtyFailure(
       { connectorInstanceId, stream },

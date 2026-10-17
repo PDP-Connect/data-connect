@@ -2591,7 +2591,7 @@ CREATE TABLE IF NOT EXISTS record_derived_repair_pending (
   connector_instance_id TEXT NOT NULL,
   connector_id          TEXT NOT NULL,
   stream                TEXT NOT NULL,
-  revision              INTEGER NOT NULL DEFAULT 1,
+  job_id                TEXT NOT NULL,
   after_record_key      TEXT,
   marked_at             TEXT NOT NULL,
   attempts              INTEGER NOT NULL DEFAULT 0,
