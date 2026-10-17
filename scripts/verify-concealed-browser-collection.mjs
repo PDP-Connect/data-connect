@@ -5,8 +5,8 @@
 // Proves that a concealed browser still collects: animation frames run and
 // Playwright can navigate, click and fill, also in a second page and in a
 // popup the page opens, which are new windows the backend must conceal too.
-// It does not check screencast frames, which a concealed macOS browser does
-// not produce until revealed.
+// It does not check screencast frames; `verify-private-display-cdp.mjs`
+// does.
 // Used by the ignored Rust test `real_chrome_hidden_native_stays_concealed`.
 //
 // Usage: node scripts/verify-concealed-browser-collection.mjs <cdp-http-url>

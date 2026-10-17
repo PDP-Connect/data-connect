@@ -13,8 +13,11 @@
 // an owner-only Xauthority cookie (never `-ac`) and does not listen on TCP.
 // Only the browser's environment receives DISPLAY and XAUTHORITY.
 //
-// The macOS and Windows backends (`hidden-native`) keep the browser on the
-// owner's desktop and conceal its windows from launch until the host
+// `hidden-native` keeps the browser's windows away from the owner's screen
+// with the operating system's own means. On macOS the browser renders on a
+// private virtual display (`browser_display_virtual.rs`), and falls back to
+// a hidden application when that display cannot be created. On Windows its
+// windows stay on the owner's desktop, concealed from launch until the host
 // reveals them.
 
 use super::browser_presentation::DisplayBackend;
@@ -267,8 +270,9 @@ impl DisplayProviders {
     }
 
     /// The providers whose software is installed on this machine: a private
-    /// Xvfb on Linux when the `Xvfb` executable is found, and concealed
-    /// windows on the owner's desktop on macOS and Windows.
+    /// Xvfb on Linux when the `Xvfb` executable is found, a private virtual
+    /// display on macOS, and concealed windows on the owner's desktop on
+    /// Windows.
     pub(crate) fn discover(runtime_dir: &std::path::Path) -> Self {
         #[cfg(target_os = "linux")]
         {
@@ -283,7 +287,9 @@ impl DisplayProviders {
         #[cfg(target_os = "macos")]
         {
             let _ = runtime_dir;
-            Self::default().with(Arc::new(macos::HiddenNativeProvider))
+            Self::default().with(Arc::new(virtual_display::VirtualDisplayProvider::new(
+                Arc::new(macos::MacDisplays),
+            )))
         }
         #[cfg(windows)]
         {
@@ -292,6 +298,9 @@ impl DisplayProviders {
         }
     }
 }
+
+#[path = "browser_display_virtual.rs"]
+pub(crate) mod virtual_display;
 
 #[cfg(target_os = "macos")]
 #[path = "browser_display_macos.rs"]

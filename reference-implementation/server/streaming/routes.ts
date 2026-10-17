@@ -265,7 +265,8 @@ interface RegisterStreamingRoutesOptions {
   /**
    * Shows a host browser surface on the owner's desktop without taking focus.
    * Called before a companion attaches to a surface whose launch report says
-   * it renders no frames while concealed (macOS hidden-native).
+   * it renders no frames while concealed (macOS hidden-native when the
+   * browser had to be hidden instead of placed on a private display).
    */
   revealConcealedBrowserSurface?: ((surfaceId: string) => Promise<void>) | null;
   /**

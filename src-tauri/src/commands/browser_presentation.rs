@@ -119,9 +119,10 @@ impl PresentationPolicy {
         fallback: Fallback::FailClosed,
     };
 
-    /// Headed Chromium on the owner's desktop with its windows concealed
-    /// from launch. The owner reaches it through the companion; the host can
-    /// reveal it.
+    /// Headed Chromium whose windows the owner does not see from launch: on
+    /// a private virtual display on macOS, concealed on the owner's desktop
+    /// on Windows. The owner reaches it through the companion; the host can
+    /// reveal a concealed one.
     pub(crate) const HIDDEN_NATIVE: Self = Self {
         version: PRESENTATION_POLICY_VERSION,
         engine_mode: EngineMode::Headed,

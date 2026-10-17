@@ -3,8 +3,8 @@ name: browser-hidden-native
 # Proves the Windows hidden-native connector browser on a real interactive
 # desktop: no visible window or foreground change while concealed, CDP
 # screencast frames and input still working, and reveal showing the exact
-# browser without taking focus. macOS is checked on a real Mac; see the
-# ignored test `real_chrome_hidden_native_stays_concealed`.
+# browser without taking focus. macOS (a private virtual display) is checked
+# on a real Mac; see the ignored test `real_chrome_hidden_native_stays_concealed`.
 
 on:
   pull_request:

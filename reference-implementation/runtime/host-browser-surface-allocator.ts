@@ -68,7 +68,8 @@ export interface HostBrowserSurfaceAllocator extends BrowserSurfaceAllocator {
 	readonly releaseRun: (runId: string) => Promise<void>;
 	/**
 	 * Show a leased browser on the owner's desktop without taking focus. A
-	 * concealed macOS browser renders no companion frames until it is shown.
+	 * macOS browser hidden as an application (the fallback when its private
+	 * display cannot be created) renders no companion frames until shown.
 	 */
 	readonly revealSurface: (surfaceId: string) => Promise<void>;
 }

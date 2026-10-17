@@ -139,11 +139,12 @@ wry = { version = "0.55", default-features = false, features = ["protocol", "os-
 sysinfo = { version = "0.38", default-features = false, features = ["system"] }
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSError", "NSHTTPCookie", "NSDictionary", "NSString", "NSURL", "NSValue"] }
-# Launches and conceals the hidden-native connector browser
+# Launches the hidden-native connector browser, creates its private display
+# and conceals it when that display is unavailable
 # (commands/browser_display_macos.rs). Already locked through tauri.
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "block2", "libc", "NSRunningApplication", "NSWorkspace"] }
-objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGWindow"] }
-objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFArray"] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGWindow", "CGDirectDisplay", "CGDisplayConfiguration", "CGError", "CGGeometry"] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "objc2", "CFArray", "CFCGTypes", "CFDictionary"] }
 objc2-web-kit = { version = "0.3", default-features = false, features = ["std", "block2", "WKWebView", "WKWebViewConfiguration", "WKWebsiteDataStore", "WKHTTPCookieStore"] }
 block2 = "0.6"
 

@@ -104,7 +104,8 @@ struct LaunchReport {
     /// `concealed`, `concealed-after-show` or `visible`.
     observed_visibility: String,
     /// False when the companion receives no frames until the browser is
-    /// revealed (macOS `hidden-native`).
+    /// revealed (macOS `hidden-native` when its private display could not be
+    /// created and the browser is hidden instead).
     streams_while_concealed: bool,
     milestones_ms: LaunchMilestones,
 }
@@ -1396,11 +1397,13 @@ wait "$server_pid"
         ))
     }
 
-    /// The macOS `hidden-native` path with a real Chrome. Evidence of what
-    /// the owner saw comes from an independent observer
-    /// (DATACONNECT_OBSERVE_PHASE_FILE names the file this test writes its
-    /// phase to); the test itself proves collection while concealed, then
-    /// companion frames and input after reveal.
+    /// The macOS `hidden-native` path with a real Chrome: the browser on a
+    /// private virtual display. Evidence of what the owner saw comes from an
+    /// independent observer (DATACONNECT_OBSERVE_PHASE_FILE names the file
+    /// this test writes its phase to); the test itself proves collection,
+    /// then companion frames and input, all without revealing anything.
+    /// DATACONNECT_LIVE_FPS_CHECK optionally names a script that measures
+    /// the screencast frame rate.
     #[cfg(target_os = "macos")]
     #[test]
     #[ignore = "requires a real Chrome (DATACONNECT_REAL_BROWSER) in a logged-in macOS session"]
@@ -1452,34 +1455,33 @@ wait "$server_pid"
         let launch = acquired.launch.clone().expect("launch report");
         println!("launch report: {launch:?}");
         assert_eq!(launch.display_backend, "hidden-native");
-        assert!(!launch.streams_while_concealed);
+        assert_eq!(
+            launch.observed_visibility, "isolated-display",
+            "the browser is on its private display, not hidden as a fallback"
+        );
+        assert!(launch.streams_while_concealed);
 
         phase("collect");
         if let Some((ok, line)) =
             run_cdp_script("DATACONNECT_LIVE_COLLECTION_CHECK", &acquired.cdp_url)
         {
-            println!("collection while concealed: {line}");
-            assert!(ok, "collection failed while concealed: {line}");
+            println!("collection: {line}");
+            assert!(ok, "collection failed: {line}");
         }
-        // Lets an outside sampler measure the concealment watch's cost.
+        // Lets an outside sampler measure the session's cost.
         if let Ok(seconds) = std::env::var("DATACONNECT_LIVE_HOLD_SECS") {
-            println!("holding concealed: pid {}", std::process::id());
+            println!("holding: pid {}", std::process::id());
             thread::sleep(Duration::from_secs(seconds.parse().expect("hold seconds")));
         }
-        thread::sleep(Duration::from_millis(500));
-        phase("reveal");
-        let revealed = reveal(&host, &acquired.surface_id);
-        assert_eq!(
-            revealed.status,
-            204,
-            "{}",
-            String::from_utf8_lossy(&revealed.body)
-        );
-        thread::sleep(Duration::from_millis(500));
         phase("companion");
         if let Some((ok, line)) = run_cdp_script("DATACONNECT_LIVE_CDP_CHECK", &acquired.cdp_url) {
-            println!("companion after reveal: {line}");
-            assert!(ok, "companion check failed after reveal: {line}");
+            println!("companion: {line}");
+            assert!(ok, "companion check failed: {line}");
+        }
+        phase("fps");
+        if let Some((ok, line)) = run_cdp_script("DATACONNECT_LIVE_FPS_CHECK", &acquired.cdp_url) {
+            println!("fps: {line}");
+            assert!(ok, "frame rate check failed: {line}");
         }
         phase("release");
         let pid = host.state.leases.lock().expect("leases")[&acquired.surface_id].browser_pid;
@@ -1488,6 +1490,8 @@ wait "$server_pid"
         // SAFETY: signal 0 only checks whether the group still exists.
         let group_alive = unsafe { libc::kill(-(pid as libc::pid_t), 0) } == 0;
         assert!(!group_alive, "the browser's process group is gone");
+        // Lets the observer see that the private display is gone.
+        thread::sleep(Duration::from_millis(500));
         phase("done");
     }
 
