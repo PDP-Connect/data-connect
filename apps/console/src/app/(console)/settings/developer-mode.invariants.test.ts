@@ -60,3 +60,15 @@ test("developer-only connector surfaces share one settings gate", async () => {
   assert.match(page, /<DeveloperModeSetting \/>/)
   assert.match(shell, /\{ label: "Settings", href: "\/settings" \}/)
 })
+
+test("developer mode is the last settings section, below About", async () => {
+  const page = await readFile(PAGE_FILE, "utf8")
+  const about = page.indexOf("<AboutSection ")
+  const developerMode = page.indexOf("<DeveloperModeSetting />")
+  assert.ok(about !== -1 && developerMode > about, "Developer mode must follow About")
+  assert.doesNotMatch(
+    page.slice(developerMode),
+    /<Section\b/,
+    "no settings section may follow Developer mode"
+  )
+})
