@@ -7694,3 +7694,58 @@ for (const invalidDecision of ["stale review", "bad expiry", "empty selection"] 
     }
   });
 }
+
+test("live authorization code rejects bad bindings without burning the honest retry", async () => {
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+  try {
+    const manifest = await registerAuthorizedSpotify(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+    const otherClient = await registerAuthCodeClient(asUrl);
+    const prepared = await prepareOauthCodeFlow({ asUrl, client, manifest });
+    // Same shape as a valid verifier, so only the S256 comparison can reject it.
+    const wrongVerifier = `${prepared.verifier[0] === "A" ? "B" : "A"}${prepared.verifier.slice(1)}`;
+    const defaults: Record<string, string> = {
+      client_id: client.client_id,
+      code: prepared.code,
+      code_verifier: prepared.verifier,
+      grant_type: "authorization_code",
+      redirect_uri: "https://client.example/callback",
+    };
+    const redeem = (changes: Record<string, string> = {}) =>
+      fetchJson(`${asUrl}/oauth/token`, {
+        body: new URLSearchParams({ ...defaults, ...changes }).toString(),
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        method: "POST",
+      });
+    const refreshCount = () =>
+      (getDb().prepare("SELECT COUNT(*) AS n FROM oauth_refresh_tokens").get() as { n: number }).n;
+    const beforeRefresh = refreshCount();
+    const cases: Array<{ changes: Record<string, string>; message: RegExp }> = [
+      { changes: { code_verifier: wrongVerifier }, message: /PKCE verification failed/ },
+      { changes: { client_id: otherClient.client_id }, message: /client_id mismatch/ },
+      { changes: { redirect_uri: "https://client.example/other" }, message: /redirect_uri mismatch/ },
+    ];
+    for (const entry of cases) {
+      const rejected = await redeem(entry.changes);
+      assert.equal(rejected.status, 400);
+      assert.equal(rejected.body.error, "invalid_grant");
+      assert.match(String(rejected.body.error_description), entry.message);
+      const stored = getDb()
+        .prepare("SELECT status, consumed_at FROM oauth_authorization_codes WHERE code = ?")
+        .get(prepared.code) as { consumed_at: string | null; status: string };
+      assert.deepEqual({ ...stored }, { consumed_at: null, status: "issued" });
+      assert.equal(refreshCount(), beforeRefresh);
+    }
+    const accepted = await redeem();
+    assert.equal(accepted.status, 200);
+    assert.equal(typeof accepted.body.access_token, "string");
+    assert.equal(typeof accepted.body.refresh_token, "string");
+    assert.equal(refreshCount(), beforeRefresh + 1);
+    const replay = await redeem();
+    assert.equal(replay.status, 400);
+    assert.equal(replay.body.error, "invalid_grant");
+  } finally {
+    await closeServer(server);
+  }
+});

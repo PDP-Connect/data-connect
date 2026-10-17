@@ -63,7 +63,7 @@ zip = "8.6"
 walkdir = "2"
 futures-util = "0.3"
 base64 = "0.23"
-getrandom = "0.3.4"
+getrandom = "=0.4.3"
 keyring = "4.2.0"
 chrono = { version = "0.4", features = ["serde"] }
 sha2 = "0.11"
