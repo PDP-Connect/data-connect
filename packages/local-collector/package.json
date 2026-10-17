@@ -57,13 +57,13 @@
     "ajv": "^8.20.0",
     "sigstore": "^5.0.0",
     "tar": "^7.5.22",
-    "zod": "^4.6.5"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@opendatalabs/data-connectors-tools": "github:PDP-Connect/data-connectors#6c71697a1523926fe8d475cd243a8219ea21aa5b",
     "@pdpp/collector-runtime": "0.0.1",
     "@pdpp/connector-protocol": "0.0.1",
-    "playwright": "^1.63.0",
+    "playwright": "^1.64.1",
     "tsx": "^4.23.15"
   },
   "engines": {
