@@ -40,6 +40,18 @@ function read(rel: string) {
   return readFileSync(path.join(repoRoot, rel), "utf8");
 }
 
+
+test("schema summaries share the bounded grouped stream reader", () => {
+  const src = read("reference-implementation/server/index.ts");
+  const start = src.indexOf("async function listSubjectVisibleStreamSummaries(");
+  const end = src.indexOf("async function buildConnectorSchemaItem(", start);
+  assert.ok(start >= 0 && end > start);
+  const summaryReader = src.slice(start, end);
+  assert.ok(summaryReader.includes("await listStreamsByResolvedBindings("));
+  assert.equal(summaryReader.includes("Promise.all("), false);
+  assert.equal(summaryReader.includes("listStreams("), false);
+});
+
 test("rs.streams.list operation has no host or storage concretes", () => {
   const rel = "reference-implementation/operations/rs-streams-list/index.ts";
   assertOperationBoundary(read(rel), rel);

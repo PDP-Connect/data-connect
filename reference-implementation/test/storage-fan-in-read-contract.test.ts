@@ -38,6 +38,7 @@ import {
   aggregateRecordsAcrossBindings as aggregateRecordsAcrossBindingsUntyped,
   getRecordAcrossBindings,
   ingestRecord,
+  listStreams,
   listStreamsAcrossBindings as listStreamsAcrossBindingsUntyped,
   queryRecordsAcrossBindings as queryRecordsAcrossBindingsUntyped,
   resolveReadRequestBindings,
@@ -801,6 +802,105 @@ test("listStreamsAcrossBindings emits one summary per (stream, connection_id)", 
       assert.ok(summary.display_name && ["Account A", "Account B"].includes(summary.display_name));
     }
   });
+});
+
+
+test("stream summaries aggregate once per binding, preserving pinned grants and stream order", async () => {
+  await withDualConnectionDb(async () => {
+    const names = [STREAM, "tasks", "notes"];
+    const multiManifest = {
+      ...baseManifest,
+      streams: names.map((name) => ({ ...baseManifest.streams[0], name })),
+    };
+    const multiGrant = {
+      streams: [
+        { name: STREAM, instance_ids: [INSTANCE_A, INSTANCE_B], resources: ["shared-id"] },
+        { name: "tasks", instance_ids: [INSTANCE_A] },
+        { name: "notes", instance_ids: [INSTANCE_A, INSTANCE_B] },
+      ],
+    };
+    const { bindings } = await resolveFanInBindings({
+      connectorId: CONNECTOR_ID,
+      ownerSubjectId: OWNER_AUTH_DEFAULT_SUBJECT_ID,
+    });
+    const resolver = async (streamGrant: { instance_ids?: string[] }) =>
+      bindings.filter((binding) => streamGrant.instance_ids?.includes(binding.connectorInstanceId));
+    const expected = (
+      await Promise.all(
+        multiGrant.streams.map(async (streamGrant) => {
+          const selected = await resolver(streamGrant);
+          return listStreamsAcrossBindings(selected, { streams: [streamGrant] }, multiManifest);
+        })
+      )
+    ).flat();
+    const calls = new Map<string, number>();
+    const streamStore = {
+      listStreams: async (...args: Parameters<typeof listStreams>) => {
+        const storageTarget = args[0];
+        assert.ok(storageTarget && typeof storageTarget === "object");
+        const id = storageTarget.connector_instance_id;
+        assert.ok(id);
+        calls.set(id, (calls.get(id) ?? 0) + 1);
+        return await listStreams(...args);
+      },
+    };
+    const actual = await listStreamsAcrossBindings(bindings, multiGrant, multiManifest, {
+      concurrency: 2,
+      resolveBindingsForStream: resolver,
+      streamStore,
+    });
+    assert.deepEqual(actual, expected);
+    assert.deepEqual([...calls], [[INSTANCE_A, 1], [INSTANCE_B, 1]]);
+    assert.deepEqual(actual.map((row) => row.record_count), [1, 1, 0, 0, 0]);
+  });
+});
+
+
+test("stream summary storage work obeys one global concurrency bound", async () => {
+  const bindings = Array.from({ length: 8 }, (_, index) => ({
+    connectorId: CONNECTOR_ID,
+    connectorInstanceId: `cin_summary_${index}`,
+    displayName: `Connection ${index}`,
+  }));
+  const multiGrant = { streams: [{ name: STREAM }, { name: "tasks" }, { name: "unbound" }] };
+  const multiManifest = {
+    ...baseManifest,
+    streams: multiGrant.streams.map(({ name }) => ({ ...baseManifest.streams[0], name })),
+  };
+  let active = 0;
+  let maximum = 0;
+  const calls: string[] = [];
+  const streamStore = {
+    listStreams: async (...args: Parameters<typeof listStreams>) => {
+      const storageTarget = args[0];
+      assert.ok(storageTarget && typeof storageTarget === "object");
+      const id = storageTarget.connector_instance_id;
+      assert.ok(id);
+      calls.push(id);
+      active += 1;
+      maximum = Math.max(maximum, active);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      active -= 1;
+      return args[1].streams.map(({ name }) => ({
+        last_updated: "2026-05-18T12:00:00.000Z",
+        name,
+        object: "stream" as const,
+        record_count: 7,
+      }));
+    },
+  };
+  const summaries = await listStreamsAcrossBindings(bindings, multiGrant, multiManifest, {
+    concurrency: 2,
+    resolveBindingsForStream: async ({ name }) => name === "unbound" ? [] : bindings,
+    streamStore,
+  });
+  assert.equal(maximum, 2);
+  assert.equal(active, 0);
+  assert.deepEqual(calls, bindings.map((binding) => binding.connectorInstanceId));
+  assert.deepEqual(
+    summaries.map((summary) => [summary.name, summary.connection_id, summary.record_count]),
+    [STREAM, "tasks"].flatMap((name) => bindings.map((binding) => [name, binding.connectorInstanceId, 7]))
+  );
 });
 
 // ─── Owner-mode setDisplayName ─────────────────────────────────────────────
