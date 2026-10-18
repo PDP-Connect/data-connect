@@ -45,6 +45,23 @@ export const wholeCohortTests = ["test/**/*.test.ts"]
 const RETAINED_OUTPUT_BYTES = 256 * 1024
 
 function selectedTestArguments() {
+  // An empty list is ambiguous: no test changed, or every selected test was
+  // withheld. The second must never fall through to the whole cohort below,
+  // which would run the very tests that were withheld. The workflow does not
+  // start Stryker for it; this refusal covers a run that gets here anyway.
+  try {
+    const outcome = readFileSync("reports/mutation/reference-implementation/selection-outcome.txt", "utf8").trim()
+    if (outcome === "none_runnable") {
+      throw new Error(
+        "every test selected for this attempt was withheld from the mutation baseline; " +
+          "refusing to fall back to the cohort's whole suite"
+      )
+    }
+  } catch (error) {
+    if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) {
+      throw error
+    }
+  }
   try {
     const listed = readFileSync("reports/mutation/reference-implementation/selected-tests.txt", "utf8")
       .split("\n")
