@@ -179,7 +179,7 @@ test("a label just before the tail cut still drops its continuation", () => {
   }
 });
 
-test("a single unbroken line longer than the redaction block is replaced, not scanned", async () => {
+test("a single unbroken line far over the tail size is cut and its credential never shown", async () => {
   const outcome = await superviseFileChild({
     child: spawnNode(
       `process.stdout.write('Authorization: Bearer ' + 'A'.repeat(${KILLED_OUTPUT_TAIL_BYTES + 4096}) + 'SYNTHETIC-TAIL-SECRET\\nTAIL-MARKER\\n'); setInterval(() => {}, 1000);`
