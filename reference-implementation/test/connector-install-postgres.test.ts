@@ -912,7 +912,7 @@ test(
   }
 );
 
-test("gap oracle: derived chunk and its progress cursor roll back together", {
+test("derived chunk and its progress cursor roll back together", {
   skip: POSTGRES_SKIP,
 }, async () => {
   await withPostgres("gap_chunk_atomic", async () => {
@@ -1016,7 +1016,7 @@ test("gap oracle: derived chunk and its progress cursor roll back together", {
 });
 
 for (const failOldJob of [false, true]) {
-  test(`gap oracle: replacement survives old final-page ${failOldJob ? "failure" : "completion"}`, {
+  test(`replacement survives old final-page ${failOldJob ? "failure" : "completion"}`, {
     skip: POSTGRES_SKIP,
   }, async () => {
     await withPostgres(failOldJob ? "gap_job_failure" : "gap_job_complete", async () => {
@@ -1075,7 +1075,7 @@ for (const failOldJob of [false, true]) {
   });
 }
 
-test("gap oracle: late bulk-delete failure restores records, history, counter and reset generation", {
+test("late bulk-delete failure restores records, history, counter and reset generation", {
   skip: POSTGRES_SKIP,
 }, async () => {
   await withPostgres("gap_delete_rollback", async () => {
@@ -1129,7 +1129,7 @@ test("gap oracle: late bulk-delete failure restores records, history, counter an
   });
 });
 
-test("gap oracle: identical attempt-context replay repairs derived facts without a new version", {
+test("identical attempt-context replay repairs derived facts without a new version", {
   skip: POSTGRES_SKIP,
 }, async () => {
   await withPostgres("gap_noop_facts", async () => {
