@@ -3,7 +3,11 @@
 #
 # Usage: test-sandbox [--cpu PCT] [--mem SIZE] [--tasks N] [--net none|host]
 #   [--pg 16|18] [--pg-port PORT] [--pg-env NAME] [--timeout SECONDS]
-#   [--slots N] [--receipt FILE] [--scratch DIR] -- cmd...
+#   [--slots N] [--receipt FILE] [--scratch DIR] [--pidns] -- cmd...
+# --pidns (or TEST_SANDBOX_PIDNS=1) adds a private PID namespace. It is off by
+# default: code that records PIDs in shared files (lock owners, scratch-root
+# owners) would see live host processes as dead from inside one. The scope
+# (or, without systemd, the process group) already reaps every descendant.
 # Defaults may also be set with TEST_SANDBOX_CPU, _MEM, _TASKS, _NET, _PG,
 # _TIMEOUT and _SLOTS. TEST_SANDBOX_REQUIRE=1 requires cgroups and bwrap.
 # TEST_SANDBOX_STATE_DIR overrides the shared slot directory (tests only).
@@ -12,7 +16,9 @@
 # Old bash (macOS ships 3.2) cannot parse what follows: run the command directly.
 if [ -z "${BASH_VERSINFO:-}" ] || [ "${BASH_VERSINFO[0]}" -lt 5 ]; then
   echo "test-sandbox: bash 5 not found; running without enforcement" >&2
-  exec "$@"
+  # Drop our options (bash 3.2 syntax only): everything after "--" is the command.
+  for a in "$@"; do shift; [ "$a" = "--" ] && exec "$@"; done
+  echo "test-sandbox: usage: test-sandbox [options] -- cmd..." >&2; exit 2
 fi
 set -uo pipefail
 
@@ -24,7 +30,7 @@ net=${TEST_SANDBOX_NET:-none}
 pg=${TEST_SANDBOX_PG:-}
 timeout_s=${TEST_SANDBOX_TIMEOUT:-0}
 slots=${TEST_SANDBOX_SLOTS:-6}
-pg_port=55447 pg_env=DATABASE_URL receipt="" scratch=""
+pg_port=55447 pg_env=DATABASE_URL receipt="" scratch="" pidns=${TEST_SANDBOX_PIDNS:-0}
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --cpu|--mem|--tasks|--net|--pg|--pg-port|--pg-env|--timeout|--slots|--receipt|--scratch)
@@ -36,6 +42,7 @@ while [[ $# -gt 0 ]]; do
         --receipt) receipt=$2;; --scratch) scratch=$2;;
       esac
       shift 2;;
+    --pidns) pidns=1; shift;;
     --) shift; break;;
     -*) die "unknown option $1 (put the command after --)";;
     *) break;;
@@ -78,7 +85,16 @@ if [[ "$disabled" != 1 && $in_receipt -eq 0 ]] && command -v systemd-run >/dev/n
     sleep 0.1
   done
 fi
-if [[ "$disabled" != 1 ]] && command -v bwrap >/dev/null; then bwrap_ok=1; fi
+# Probe bwrap with the flags this run needs: it can be installed but unable to
+# create namespaces (AppArmor userns restriction on Ubuntu 24.04 runners,
+# containers without CAP_SYS_ADMIN).
+if [[ "$disabled" != 1 ]] && command -v bwrap >/dev/null; then
+  probe=(bwrap --dev-bind / / --tmpfs /tmp)
+  [[ "$net" == none ]] && probe+=(--unshare-net)
+  [[ "$pidns" == 1 ]] && probe+=(--unshare-pid --proc /proc)
+  if "${probe[@]}" true >/dev/null 2>&1; then bwrap_ok=1
+  else notes+=("bwrap is installed but cannot create namespaces here; running without it"); fi
+fi
 if [[ "$disabled" == 1 ]]; then
   enforcement=disabled
 else
@@ -195,6 +211,15 @@ trap cleanup EXIT
 trap 'on_signal 130' INT
 trap 'on_signal 143' TERM
 
+# The private tmpfs on /tmp would hide a --scratch dir or working directory
+# that lives under /tmp (CI often uses RUNNER_TEMP=/tmp/...): bind them back.
+tmp_binds=()
+[[ -n "$scratch" ]] && mkdir -p "$scratch"
+for p in "$scratch" "$PWD"; do
+  [[ -n "$p" ]] || continue
+  p=$(cd "$p" 2>/dev/null && pwd -P) || continue
+  [[ "$p" == /tmp/* ]] && tmp_binds+=(--bind "$p" "$p")
+done
 # The quoted body is evaluated later by bash -c inside the scope.
 # shellcheck disable=SC2016
 collector='stats="$1"; shift
@@ -246,7 +271,8 @@ else
   if (( systemd_ok )); then
     cmd=("$@")
     if (( bwrap_ok )); then
-      bw=(bwrap --dev-bind / / --unshare-pid --proc /proc --die-with-parent --tmpfs /tmp --chdir "$PWD")
+      bw=(bwrap --dev-bind / / --die-with-parent --tmpfs /tmp "${tmp_binds[@]}" --chdir "$PWD")
+      [[ "$pidns" == 1 ]] && bw+=(--unshare-pid --proc /proc)
       [[ "$net" == none ]] && bw+=(--unshare-net)
       cmd=("${bw[@]}" bash -c "$collector" _ "$stats" "$scratch" "$pg" "$pg_port" "$pg_env" "${cmd[@]}")
     else
@@ -289,14 +315,15 @@ PY
 )
   else
     if (( bwrap_ok )); then
-      cmd=(bwrap --dev-bind / / --unshare-pid --proc /proc --die-with-parent --tmpfs /tmp --chdir "$PWD")
+      cmd=(bwrap --dev-bind / / --die-with-parent --tmpfs /tmp "${tmp_binds[@]}" --chdir "$PWD")
+      [[ "$pidns" == 1 ]] && cmd+=(--unshare-pid --proc /proc)
       [[ "$net" == none ]] && cmd+=(--unshare-net)
       cmd+=(bash -c "$collector" _ "$stats" "$scratch" "$pg" "$pg_port" "$pg_env" "$@")
     else
       [[ "$net" == none ]] && notes+=("command ran without network isolation")
       cmd=(bash -c "$collector" _ "$stats" "$scratch" "$pg" "$pg_port" "$pg_env" "$@")
     fi
-    if (( ! bwrap_ok )) && command -v setsid >/dev/null; then
+    if command -v setsid >/dev/null; then
       setsid "${cmd[@]}" & child=$!; child_group=1
     else
       "${cmd[@]}" & child=$!
@@ -316,7 +343,10 @@ PY
         sleep .2
       done
     fi
-    wait "$child"; rc=$?; child="" child_group=0
+    wait "$child"; rc=$?
+    # Without a scope, reap what the command left behind in its process group.
+    if (( child_group )); then kill -KILL -- "-$child" 2>/dev/null || true; fi
+    child="" child_group=0
     [[ "$timed_out" == true ]] && rc=124
     wall=0 cpu_s=0 peak_mb=0 pids_peak=0
   fi
