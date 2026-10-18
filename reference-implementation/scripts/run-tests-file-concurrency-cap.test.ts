@@ -32,18 +32,18 @@ function resolve(
   return resolveFileConcurrency({ availableCpus, profile, requestedConcurrency, selectedFileCount });
 }
 
-test("each profile has its own cap, and postgres stays at 2", () => {
+test("each profile has its own cap; postgres is 8 on measured evidence", () => {
   assert.equal(fileConcurrencyCap("memory-default"), 8);
   assert.equal(
     fileConcurrencyCap("postgres"),
-    2,
-    "widening the postgres lane needs its own measured evidence"
+    8,
+    "the postgres cap is backed by the receipts in docs/gate-concurrency.md"
   );
 });
 
 test("with CPUs and files to spare, each profile runs up to its own cap", () => {
   assert.equal(resolve("memory-default", 24, 1000), 8);
-  assert.equal(resolve("postgres", 24, 1000), 2);
+  assert.equal(resolve("postgres", 24, 1000), 8);
 });
 
 test("available CPUs clamp the cap", () => {
@@ -53,10 +53,9 @@ test("available CPUs clamp the cap", () => {
   assert.equal(resolve("memory-default", 4, 1000), 4);
   assert.equal(resolve("memory-default", 24, 1000), 8, "24 CPUs must not exceed the cap");
 
-  // The postgres cap is below every one of these CPU counts, so it governs.
   assert.equal(resolve("postgres", 1, 1000), 1);
-  assert.equal(resolve("postgres", 4, 1000), 2);
-  assert.equal(resolve("postgres", 24, 1000), 2);
+  assert.equal(resolve("postgres", 4, 1000), 4);
+  assert.equal(resolve("postgres", 24, 1000), 8, "24 CPUs must not exceed the cap");
 });
 
 test("the selected file count clamps the worker count", () => {
@@ -65,7 +64,8 @@ test("the selected file count clamps the worker count", () => {
   assert.equal(resolve("memory-default", 24, 8), 8);
   assert.equal(resolve("memory-default", 24, 9), 8, "more files than the cap still stops at the cap");
   assert.equal(resolve("postgres", 24, 1), 1);
-  assert.equal(resolve("postgres", 24, 3), 2);
+  assert.equal(resolve("postgres", 24, 3), 3);
+  assert.equal(resolve("postgres", 24, 9), 8);
 });
 
 test("selecting no files still resolves to a single worker, never zero", () => {
@@ -97,7 +97,8 @@ test("a non-positive CPU count still resolves to a single worker", () => {
 
 test("positive overrides are clamped by cap, CPUs and file count", () => {
   assert.equal(resolve("memory-default", 24, 1000, 32), 8);
-  assert.equal(resolve("postgres", 24, 1000, 32), 2);
+  assert.equal(resolve("postgres", 24, 1000, 32), 8);
+  assert.equal(resolve("postgres", 24, 1000, 2), 2, "an explicit lower override still wins");
   assert.equal(resolve("memory-default", 4, 1000, 16), 4);
   assert.equal(resolve("memory-default", 24, 2, 16), 2);
   // Below the cap: honoured downwards too.
