@@ -7,7 +7,12 @@ import { closeDb, getDb, initDb } from "../server/db.ts";
 import { ingestRecord } from "../server/records.ts";
 import { __setLexicalBackfillPhaseHookForTest, lexicalIndexBackfillForManifest } from "../server/search.ts";
 import { reconcileSearchIndexDirtyScope } from "../server/search-index-reconcile.ts";
-import { configureSemanticBackend, resetVectorIndexForTests } from "../server/search-semantic.ts";
+import {
+  configureSemanticBackend,
+  makeStubBackend,
+  resetVectorIndexForTests,
+  semanticIndexBackfillForManifest,
+} from "../server/search-semantic.ts";
 import {
   isSearchIndexScopeDirty,
   listDirtySearchIndexScopes,
@@ -171,6 +176,53 @@ test("G1: a stream that never had lexical state is not cleaned on every pass", {
       });
     }
     assert.deepEqual(cleanups, [], "no meta and no index rows means nothing to delete");
+  } finally {
+    reset();
+  }
+});
+
+test("G1: reconciling a removed stream keeps the semantic index of a declared sibling stream", {
+  concurrency: false,
+  timeout: 15000,
+}, async () => {
+  initDb(":memory:");
+  resetVectorIndexForTests("blob-flat");
+  const backend = makeStubBackend({ dimensions: 8 });
+  configureSemanticBackend(backend);
+  const connectorId = "gap-lex-removed-semantic-sibling";
+  const instance = "cin_gap_lex_removed_semantic_sibling";
+  const semanticStream = (name: string) => ({
+    ...manifest(connectorId, true).streams[0]!,
+    name,
+  });
+  const both = { ...manifest(connectorId, true), streams: [semanticStream("items"), semanticStream("notes")] };
+  const vectors = (stream: string) =>
+    getDb()
+      .prepare(
+        "SELECT record_key FROM semantic_search_blob WHERE connector_instance_id = ? AND scope_key LIKE ? ORDER BY record_key"
+      )
+      .all(instance, `[${JSON.stringify(stream)},%`);
+  try {
+    await registerConnector(both);
+    for (const stream of ["items", "notes"]) {
+      const outcome = await ingestRecord(
+        { connector_id: connectorId, connector_instance_id: instance },
+        { data: { id: "k1", subject: `canonical ${stream}` }, emitted_at: "2026-07-16T00:00:00.000Z", key: "k1", stream },
+        { deferIndexes: true }
+      );
+      assert.equal(outcome.accepted, true);
+    }
+    await semanticIndexBackfillForManifest({
+      manifest: { ...both, storage_binding: { connector_instance_id: instance } },
+      orphanStreamCleanup: false,
+    });
+    assert.equal(vectors("notes").length, 1, "the sibling must start with a real vector");
+    await registerConnector({ ...both, streams: [semanticStream("notes")] }, { backfillRetrievalIndexes: false });
+    mark(connectorId, instance);
+    const result = await reconcileSearchIndexDirtyScope(await scope(instance));
+    assert.equal(result.outcome, "converged");
+    assert.deepEqual(vectors("items"), [], "the removed stream's vectors are cleaned");
+    assert.equal(vectors("notes").length, 1, "a declared sibling stream must keep its semantic index");
   } finally {
     reset();
   }

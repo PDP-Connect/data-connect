@@ -208,8 +208,11 @@ async function runScopeBackfills(
     return { connectorId, connectorInstanceId, outcome: "failed", stream };
   }
   if (semanticBackend) {
+    // The lexical sentinel names only the removed stream. Semantic orphan
+    // cleanup treats every stream the manifest does not name as an orphan, so
+    // it must see the full declared stream list or it drops healthy siblings.
     await semanticIndexBackfillForManifest({
-      manifest: pinnedManifest,
+      manifest: removedStream ? { ...pinnedManifest, streams: manifest.streams as unknown[] } : pinnedManifest,
       orphanStreamCleanup: removedStream,
       signal,
     } as unknown as SemanticBackfillOptions);
