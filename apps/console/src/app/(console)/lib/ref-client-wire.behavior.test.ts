@@ -160,7 +160,7 @@ test("approvePendingApproval posts only the reviewed revision and request URI", 
 
   assert.equal(fetchMock.mock.callCount(), 1);
   const [input, init] = fetchMock.mock.calls[0]?.arguments ?? [];
-  assert.equal(new URL(input instanceof Request ? input.url : input).pathname, "/consent/approve");
+  assert.equal(new URL(input instanceof Request ? input.url : String(input)).pathname, "/consent/approve");
   assert.equal(init?.method, "POST");
   assert.deepEqual(JSON.parse(String(init?.body)), {
     approval_review_revision: "review-revision-2",
