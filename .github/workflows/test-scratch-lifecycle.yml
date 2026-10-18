@@ -1,0 +1,55 @@
+name: test-scratch-lifecycle
+
+# The scratch-ownership tooling in scripts/test-scratch/ decides which test
+# scratch directories may be deleted. Every Node test entry point in this repo
+# runs through it, and PDP-Connect/pdpp shares the same scratch parent on a
+# developer host, so a wrong "owner is dead" decision deletes another run's
+# files. This workflow runs its own oracle: strict typecheck and the lifecycle
+# tests ported from pdpp (scripts/test-scratch/run-command.test.ts).
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/test-scratch-lifecycle.yml"
+      - "scripts/test-scratch/**"
+      - "package-lock.json"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/test-scratch-lifecycle.yml"
+      - "scripts/test-scratch/**"
+      - "package-lock.json"
+  workflow_dispatch: {}
+
+concurrency:
+  group: test-scratch-lifecycle-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lifecycle:
+    name: test-scratch lifecycle
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24.21.0"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Strict typecheck
+        run: npx tsc --project scripts/test-scratch/tsconfig.json --pretty false
+
+      - name: Lifecycle owner oracle
+        run: node --import tsx --test scripts/test-scratch/run-command.test.ts
