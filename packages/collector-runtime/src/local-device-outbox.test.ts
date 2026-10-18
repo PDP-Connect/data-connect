@@ -4,10 +4,10 @@
 import assert from "node:assert/strict";
 import { statSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
-import type { TestContext } from "node:test";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import type { TestContext } from "node:test";
 import { test } from "node:test";
 
 import {
@@ -43,7 +43,7 @@ test("LocalDeviceOutbox persists ready work and reopens from disk", async (t) =>
   }
 });
 
-test("LocalDeviceOutbox supports deterministic ids and idempotent enqueue", async () => {
+test("LocalDeviceOutbox supports deterministic ids and idempotent enqueue", () => {
   const outbox = new LocalDeviceOutbox({ path: ":memory:" });
   try {
     const id = buildLocalDeviceOutboxId({
@@ -260,7 +260,7 @@ test("schema v3 migration failure rolls back, closes, and reopens with v2 bytes 
   }
 });
 
-test("LocalDeviceOutbox claims ready work with holder, epoch, and lease deadline", async () => {
+test("LocalDeviceOutbox claims ready work with holder, epoch, and lease deadline", () => {
   let now = new Date("2026-05-19T12:00:00.000Z");
   const outbox = new LocalDeviceOutbox({
     clock: () => now,
@@ -302,7 +302,7 @@ test("LocalDeviceOutbox claims ready work with holder, epoch, and lease deadline
   }
 });
 
-test("LocalDeviceOutbox can exclude checkpoint rows while batch-claiming ready work", async () => {
+test("LocalDeviceOutbox can exclude checkpoint rows while batch-claiming ready work", () => {
   const outbox = new LocalDeviceOutbox({
     clock: () => new Date("2026-05-19T12:00:00.000Z"),
     path: ":memory:",
@@ -345,7 +345,7 @@ test("LocalDeviceOutbox can exclude checkpoint rows while batch-claiming ready w
   }
 });
 
-test("LocalDeviceOutbox recovers expired leases and fences stale acknowledgements", async () => {
+test("LocalDeviceOutbox recovers expired leases and fences stale acknowledgements", () => {
   let now = new Date("2026-05-19T12:00:00.000Z");
   const outbox = new LocalDeviceOutbox({
     clock: () => now,
@@ -393,7 +393,7 @@ test("LocalDeviceOutbox recovers expired leases and fences stale acknowledgement
   }
 });
 
-test("LocalDeviceOutbox handles retry and dead-letter transitions", async () => {
+test("LocalDeviceOutbox handles retry and dead-letter transitions", () => {
   let now = new Date("2026-05-19T12:00:00.000Z");
   const outbox = new LocalDeviceOutbox({
     clock: () => now,
@@ -445,7 +445,7 @@ test("LocalDeviceOutbox handles retry and dead-letter transitions", async () => 
   }
 });
 
-test("LocalDeviceOutbox requeues dead letters by source, kind, and limit", async () => {
+test("LocalDeviceOutbox requeues dead letters by source, kind, and limit", () => {
   const outbox = new LocalDeviceOutbox({
     clock: fixedClock("2026-05-19T12:00:00.000Z"),
     path: ":memory:",
@@ -511,7 +511,7 @@ test("LocalDeviceOutbox requeues dead letters by source, kind, and limit", async
   }
 });
 
-test("LocalDeviceOutbox only retires rejected terminal evidence after an accepted replacement", async () => {
+test("LocalDeviceOutbox only retires rejected terminal evidence after an accepted replacement", () => {
   let now = new Date("2026-05-19T12:00:00.000Z");
   const path = ":memory:";
   const outbox = new LocalDeviceOutbox({ clock: () => now, path });
@@ -611,7 +611,7 @@ test("LocalDeviceOutbox only retires rejected terminal evidence after an accepte
   }
 });
 
-test("LocalDeviceOutbox requeues dead letters by redacted error class", async () => {
+test("LocalDeviceOutbox requeues dead letters by redacted error class", () => {
   const outbox = new LocalDeviceOutbox({ path: ":memory:" });
   const sourceInstanceId = "src-1";
   try {
@@ -669,7 +669,7 @@ test("LocalDeviceOutbox requeues dead letters by redacted error class", async ()
   }
 });
 
-test("LocalDeviceOutbox deletes only succeeded rows by id", async () => {
+test("LocalDeviceOutbox deletes only succeeded rows by id", () => {
   const outbox = new LocalDeviceOutbox({ path: ":memory:" });
   try {
     outbox.enqueue({
@@ -707,7 +707,7 @@ test("LocalDeviceOutbox deletes only succeeded rows by id", async () => {
   }
 });
 
-test("LocalDeviceOutbox rejects lease transitions after expiry even before recovery", async () => {
+test("LocalDeviceOutbox rejects lease transitions after expiry even before recovery", () => {
   let now = new Date("2026-05-19T12:00:00.000Z");
   const outbox = new LocalDeviceOutbox({
     clock: () => now,
@@ -761,7 +761,7 @@ test("LocalDeviceOutbox rejects lease transitions after expiry even before recov
   }
 });
 
-test("LocalDeviceOutbox renews only the current unexpired lease holder", async () => {
+test("LocalDeviceOutbox renews only the current unexpired lease holder", () => {
   let now = new Date("2026-05-19T12:00:00.000Z");
   const outbox = new LocalDeviceOutbox({
     clock: () => now,
@@ -811,7 +811,7 @@ test("LocalDeviceOutbox renews only the current unexpired lease holder", async (
   }
 });
 
-test("LocalDeviceOutbox can recover expired leases by source instance", async () => {
+test("LocalDeviceOutbox can recover expired leases by source instance", () => {
   let now = new Date("2026-05-19T12:00:00.000Z");
   const outbox = new LocalDeviceOutbox({
     clock: () => now,
@@ -841,7 +841,7 @@ test("LocalDeviceOutbox can recover expired leases by source instance", async ()
   }
 });
 
-test("LocalDeviceOutbox.summary aggregates large queues with one SQL pass", async () => {
+test("LocalDeviceOutbox.summary aggregates large queues with one SQL pass", () => {
   let now = new Date("2026-05-19T12:00:00.000Z");
   const outbox = new LocalDeviceOutbox({
     clock: () => now,
@@ -939,7 +939,7 @@ test("LocalDeviceOutbox.summary aggregates large queues with one SQL pass", asyn
   }
 });
 
-test("LocalDeviceOutbox.summary: a never-failed backlog has oldestReadyAt but no oldestRetryingAt", async () => {
+test("LocalDeviceOutbox.summary: a never-failed backlog has oldestReadyAt but no oldestRetryingAt", () => {
   // Simulates a large healthy first drain: rows enqueued and still ready,
   // none of them has ever failed (attempt_count stays 0 for all of them).
   // oldestReadyAt ages with the queue; oldestRetryingAt must stay null,
@@ -964,7 +964,7 @@ test("LocalDeviceOutbox.summary: a never-failed backlog has oldestReadyAt but no
   }
 });
 
-test("LocalDeviceOutbox.summary: a row that fails once then a fresh row is enqueued keeps oldestRetryingAt scoped to the failed row", async () => {
+test("LocalDeviceOutbox.summary: a row that fails once then a fresh row is enqueued keeps oldestRetryingAt scoped to the failed row", () => {
   const outbox = new LocalDeviceOutbox({ path: ":memory:" });
   try {
     const sourceInstanceId = "src-mixed";
@@ -1007,7 +1007,7 @@ test("LocalDeviceOutbox.summary: a row that fails once then a fresh row is enque
   }
 });
 
-test("LocalDeviceOutbox.summary scopes by source instance without scanning others", async () => {
+test("LocalDeviceOutbox.summary scopes by source instance without scanning others", () => {
   const outbox = new LocalDeviceOutbox({ path: ":memory:" });
   try {
     outbox.enqueue({
@@ -1036,7 +1036,7 @@ test("LocalDeviceOutbox.summary scopes by source instance without scanning other
   }
 });
 
-test("LocalDeviceOutbox exposes payload-light production queries for large retained queues", async () => {
+test("LocalDeviceOutbox exposes payload-light production queries for large retained queues", () => {
   const outbox = new LocalDeviceOutbox({ path: ":memory:" });
   try {
     outbox.enqueue({
@@ -1218,7 +1218,7 @@ test("LocalDeviceOutbox preserves gap rows durably with source-instance scoping 
   }
 });
 
-test("LocalDeviceOutbox.deadLetterErrorSummary groups by redacted error class with counts", async () => {
+test("LocalDeviceOutbox.deadLetterErrorSummary groups by redacted error class with counts", () => {
   const outbox = new LocalDeviceOutbox({
     clock: fixedClock("2026-05-19T12:00:00.000Z"),
     path: ":memory:",
@@ -1272,7 +1272,7 @@ test("LocalDeviceOutbox.deadLetterErrorSummary groups by redacted error class wi
   }
 });
 
-test("LocalDeviceOutbox.deadLetterErrorSummary is empty on a clean outbox", async () => {
+test("LocalDeviceOutbox.deadLetterErrorSummary is empty on a clean outbox", () => {
   const outbox = new LocalDeviceOutbox({ path: ":memory:" });
   try {
     outbox.enqueue({
@@ -1314,7 +1314,7 @@ test("classifyDeadLetterError preserves status shape and scrubs secrets, paths, 
   assert.equal(classifyDeadLetterError("first line\nsecond line with /root/secret"), "first line");
 });
 
-test("hasObservedStream / countRecordBatches detect coverage records across statuses and ignore dead letters", async () => {
+test("hasObservedStream / countRecordBatches detect coverage records across statuses and ignore dead letters", () => {
   const path = ":memory:";
   const outbox = new LocalDeviceOutbox({ path });
   try {
@@ -1566,7 +1566,7 @@ test("hasObservedStream is bounded on a giant legacy outbox: over-budget unindex
   }
 });
 
-test("countRecordBatches reads indexed status/kind columns only and ignores dead letters", async () => {
+test("countRecordBatches reads indexed status/kind columns only and ignores dead letters", () => {
   const path = ":memory:";
   const outbox = new LocalDeviceOutbox({ path });
   try {
@@ -1633,15 +1633,7 @@ function seedFatSucceededRows(path: string, sourceInstanceId: string, count: num
     );
     db.exec("BEGIN");
     for (let index = 0; index < count; index += 1) {
-      insert.run(
-        `${sourceInstanceId}:fat:${index}`,
-        sourceInstanceId,
-        payload,
-        stamp,
-        stamp,
-        stamp,
-        stamp
-      );
+      insert.run(`${sourceInstanceId}:fat:${index}`, sourceInstanceId, payload, stamp, stamp, stamp, stamp);
     }
     db.exec("COMMIT");
   } finally {
@@ -1750,7 +1742,7 @@ test("compact preserves unsent (ready/leased/dead-letter) rows — VACUUM is los
   }
 });
 
-test("countNonSucceeded counts ready/leased/dead-letter across all sources, ignoring succeeded", async () => {
+test("countNonSucceeded counts ready/leased/dead-letter across all sources, ignoring succeeded", () => {
   const path = ":memory:";
   const outbox = new LocalDeviceOutbox({
     clock: () => new Date("2026-06-04T00:00:00.000Z"),
@@ -1819,13 +1811,13 @@ test("compact on an already-tight file reclaims ~nothing and keeps every row", a
 
 async function tempOutboxPath(t: TestContext): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "pdpp-local-outbox-"));
-  t.after(() => rm(root, { recursive: true, force: true }));
+  t.after(() => rm(root, { force: true, recursive: true }));
   return join(root, "outbox.sqlite");
 }
 
 test("temporary outbox roots register their own removal before the path is returned", async (t) => {
   const sibling = await mkdtemp(join(tmpdir(), "pdpp-local-outbox-sibling-"));
-  t.after(() => rm(sibling, { recursive: true, force: true }));
+  t.after(() => rm(sibling, { force: true, recursive: true }));
   // node:test runs t.after hooks when a test fails too, so registering before
   // returning is what makes cleanup survive a failed assertion.
   const cleanups: Array<() => unknown> = [];
@@ -1834,8 +1826,10 @@ test("temporary outbox roots register their own removal before the path is retur
   assert.equal(cleanups.length, 1);
   assert.doesNotThrow(() => statSync(root));
 
-  await cleanups[0]!();
-  await cleanups[0]!();
+  const [cleanup] = cleanups;
+  assert.ok(cleanup);
+  await cleanup();
+  await cleanup();
   assert.throws(() => statSync(root), { code: "ENOENT" });
   assert.doesNotThrow(() => statSync(sibling));
 });
