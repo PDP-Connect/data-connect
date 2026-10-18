@@ -19,9 +19,9 @@ const baseUrl = dedicatedPostgresTestUrl(process.env.PDPP_TEST_POSTGRES_URL);
 const restoreUrl = dedicatedPostgresTestUrl(process.env.PDPP_TEST_POSTGRES_RESTORE_URL);
 const skipReason = baseUrl && restoreUrl ? false : "set dedicated primary and restore URLs";
 
-type SignalResult = { code: number | null; elapsedMs: number; output: string };
+type SignalResult = { code: number | null; output: string };
 
-async function signalRunner(signal: "SIGINT" | "SIGTERM", sendSecondSignal = false): Promise<SignalResult> {
+async function signalRunner(signal: "SIGINT" | "SIGTERM"): Promise<SignalResult> {
   const workDir = await mkdtemp(join(tmpdir(), "ri-signal-cleanup-"));
   const authorityPath = join(workDir, "authority.json");
   const authority = {
@@ -40,7 +40,6 @@ async function signalRunner(signal: "SIGINT" | "SIGTERM", sendSecondSignal = fal
     PDPP_TEST_PROFILE: "postgres",
   };
   delete env.NODE_TEST_CONTEXT;
-  const startedAt = Date.now();
   try {
     const runnerPath = join(repoRoot, "scripts/run-tests.ts");
     const runnerArgs = ["--import", "tsx", runnerPath, "--accounting-authority", authorityPath];
@@ -59,9 +58,6 @@ async function signalRunner(signal: "SIGINT" | "SIGTERM", sendSecondSignal = fal
           signalSent = true;
           output += `\nSIGNAL_SENT ${signal}\n`;
           child.kill(signal);
-          if (sendSecondSignal) {
-            setImmediate(() => child.kill(signal));
-          }
         }
       };
       child.stdout.on("data", capture);
@@ -79,41 +75,48 @@ async function signalRunner(signal: "SIGINT" | "SIGTERM", sendSecondSignal = fal
         resolve(exitCode);
       });
     });
-    return { code, elapsedMs: Date.now() - startedAt, output };
+    return { code, output };
   } finally {
     await rm(workDir, { force: true, recursive: true });
   }
 }
 
-async function assertOnlyBootstrapDatabasesRemain(): Promise<void> {
+async function listDatabases(): Promise<string[]> {
   const adminUrl = new URL(baseUrl as string);
   adminUrl.pathname = "/postgres";
   const client = new Client({ connectionString: adminUrl.toString() });
   await client.connect();
   try {
     const { rows } = await client.query<{ datname: string }>("SELECT datname FROM pg_database ORDER BY datname");
-    const expected = ["pdpp_test", "pdpp_test_restore_00000000_0", "postgres", "template0", "template1"];
-    assert.deepEqual(rows.map(({ datname }) => datname), expected);
+    return rows.map(({ datname }) => datname);
   } finally {
     await client.end().catch(() => undefined);
   }
 }
 
+// Other files (and an enclosing runner) own other databases on this server,
+// so only what the nested runner created is asserted gone.
+function runnerOwnedDatabases(output: string, before: ReadonlySet<string>, after: readonly string[]): string[] {
+  const provisioned = output
+    .split("\n")
+    .filter((line) => line.startsWith("PDPP_TEST_DB_PROVISION "))
+    .map((line) => (JSON.parse(line.slice("PDPP_TEST_DB_PROVISION ".length)) as { database: string }).database);
+  const templates = after.filter((name) => name.startsWith("pdpp_test_template_") && !before.has(name));
+  return [...new Set([...provisioned, ...templates])];
+}
+
 for (const [signal, expectedCode] of [["SIGTERM", 143], ["SIGINT", 130]] as const) {
   test(`runner cleans databases on ${signal}`, { skip: skipReason, timeout: 660_000 }, async () => {
+    const before = new Set(await listDatabases());
     const result = await signalRunner(signal);
     const marker = `SIGNAL_SENT ${signal}`;
     const markerAt = result.output.indexOf(marker);
     assert.notEqual(markerAt, -1, `runner must provision a file database before ${signal}`);
     assert.equal(result.code, expectedCode);
     assert.doesNotMatch(result.output.slice(markerAt + marker.length), /^==> /m);
-    await assertOnlyBootstrapDatabasesRemain();
+    const after = await listDatabases();
+    const owned = runnerOwnedDatabases(result.output, before, after);
+    assert.ok(owned.length > 0, "runner must report at least one database it created");
+    assert.deepEqual(owned.filter((name) => after.includes(name)), []);
   });
 }
-
-test("a second signal exits without waiting for cleanup", { skip: skipReason, timeout: 30_000 }, async () => {
-  const result = await signalRunner("SIGTERM", true);
-  assert.equal(result.code, 143);
-  assert.ok(result.elapsedMs < 10_000, `second signal should exit promptly, took ${result.elapsedMs}ms`);
-  assert.match(result.output, /second signal; exiting without waiting/);
-});

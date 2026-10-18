@@ -3,7 +3,6 @@
 
 import { type ChildProcess, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { writeSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { availableParallelism } from "node:os";
 import { dirname, join } from "node:path";
@@ -30,7 +29,7 @@ import {
   POSTGRES_TEST_RUNNER_NONCE_BYTES,
 } from "./postgres-test-template.ts";
 import { needsOuterPostgresDatabase, needsPostgresRestoreDatabase } from "./run-tests-db-requirements.ts";
-import { discoverSelectedTestFiles, discoverTestFiles, isStrictTestFileSubset } from "./run-tests-discovery.ts";
+import { discoverSelectedTestFiles } from "./run-tests-discovery.ts";
 import { RUN_AUTHORITY_SCHEMA } from "./test-accounting/inventory.ts";
 import type { StructuredSummary } from "./test-accounting/receipt.ts";
 import {
@@ -264,7 +263,6 @@ const activeChildren = new Set<ChildProcess>();
 let stopping = false;
 let signalExitCode: number | undefined;
 let signalCleanupArmed = false;
-let signalCount = 0;
 
 function armSignalCleanup(): void {
   if (signalCleanupArmed) {
@@ -273,15 +271,13 @@ function armSignalCleanup(): void {
   signalCleanupArmed = true;
   for (const sig of ["SIGINT", "SIGTERM"] as const) {
     process.on(sig, () => {
-      signalCount += 1;
-      if (signalCount > 1) {
-        writeSync(2, "test runner received a second signal; exiting without waiting for pending cleanup\n");
-        process.exit(signalExitCode ?? (sig === "SIGINT" ? 130 : 143));
-      }
       stopping = true;
       signalExitCode ??= sig === "SIGINT" ? 130 : 143;
       // Main stops new work, signals active children, and cleans up after
-      // in-flight allocation and worker operations settle.
+      // in-flight allocation and worker operations settle. A hung CREATE or
+      // DROP is bounded outside the runner: it always runs under
+      // scripts/test-scratch/run-command.ts or test-sandbox, which SIGKILL
+      // the whole process group after a grace period.
       for (const child of activeChildren) child.kill("SIGTERM");
     });
   }
@@ -498,11 +494,7 @@ async function runNodeTest(filePath: string, extraArgs: string[]): Promise<NodeT
   );
 }
 
-const standaloneTestFiles = await discoverTestFiles(repoRoot, testDir);
-const testFiles = accountingAuthority
-  ? await discoverSelectedTestFiles(repoRoot, testDir, accountingAuthority.files)
-  : standaloneTestFiles;
-const isStrictSubsetSelection = isStrictTestFileSubset(new Set(testFiles), new Set(standaloneTestFiles));
+const testFiles = await discoverSelectedTestFiles(repoRoot, testDir, accountingAuthority?.files);
 const fileConcurrency = resolveFileConcurrency({
   availableCpus: availableParallelism?.() ?? null,
   profile: selectedProfile,
@@ -606,9 +598,15 @@ const counts = {
   skip_reasons: skipReasons,
   skipped: summaries.reduce((sum, summary) => sum + summary.skipped, 0),
 };
-// Only a strict subset skips named-mapping equality. Full and superset selections
-// receive the same check, whether the files came from an authority or discovery.
-if (!isStrictSubsetSelection) {
+// Complete-suite finalization for property 3 (exact named-mapping join): once
+// every planned file has run, require the named-mapping rows CONFIGURED for
+// this suite to exactly equal the identities the run CONSUMED. This is the one
+// new fail-closed path; it does not touch execution order, concurrency,
+// timeouts, output counts/schema, or the ordinary exit path. It is skipped
+// when the suite did not run to completion (a failing file already dominates
+// the exit) or a signal arrived, so it can never mask an unrelated failure or
+// fire on a partial run.
+if (!failed && signalExitCode === undefined && results.length === testFiles.length) {
   const consumedMappingIdentities = summaries.flatMap((summary) => summary.consumed_mapping_identities);
   try {
     assertNamedSkipMappingsFullyConsumed(

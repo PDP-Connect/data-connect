@@ -200,7 +200,7 @@ export async function computePostgresSchemaCatalogDigest(connectionString: strin
     );
     return createHash("sha256").update(JSON.stringify({ columns, indexes })).digest("hex");
   } finally {
-    await client.end();
+    await client.end().catch(() => undefined);
   }
 }
 
@@ -460,7 +460,7 @@ async function templateIdentityMatches(
 export async function ensurePostgresTestTemplate(
   baseConnectionString: string,
   runnerId: string,
-  onCreated: () => void = () => {}
+  onCreated: () => void = () => undefined
 ): Promise<BuiltPostgresTestTemplate> {
   const templateName = deriveDedicatedPostgresTemplateName(runnerId);
   let identityDigest: string | null = null;
@@ -626,7 +626,7 @@ export async function clonePostgresTestDatabaseFromTemplate(
   databaseName: string,
   templateName: string,
   expectedIdentity: string,
-  onCreated: () => void = () => {}
+  onCreated: () => void = () => undefined
 ): Promise<void> {
   await withAdminClient(baseConnectionString, async (admin) => {
     // ONE connection, ONE lock, across verify -> capture OID -> clone

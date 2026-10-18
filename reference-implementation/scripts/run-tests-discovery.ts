@@ -53,18 +53,6 @@ export async function discoverTestFiles(repoRoot: string, testDir: string): Prom
   return [...topLevelTests, ...colocatedTests].sort();
 }
 
-export function isStrictTestFileSubset(selected: ReadonlySet<string>, allFiles: ReadonlySet<string>): boolean {
-  if (selected.size >= allFiles.size) {
-    return false;
-  }
-  for (const file of selected) {
-    if (!allFiles.has(file)) {
-      return false;
-    }
-  }
-  return true;
-}
-
 // The test-accounting authority (test-accounting.manifest.json's `include`
 // globs, evaluated against the tracked repository) is the single source of
 // truth for which RI files belong to this suite. When an authority is

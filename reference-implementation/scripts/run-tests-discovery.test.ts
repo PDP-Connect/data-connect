@@ -6,12 +6,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import {
-  discoverSelectedTestFiles,
-  discoverTestFiles,
-  isStrictTestFileSubset,
-  riRelativeFromAuthorityPath,
-} from "./run-tests-discovery.ts";
+import { discoverSelectedTestFiles, discoverTestFiles, riRelativeFromAuthorityPath } from "./run-tests-discovery.ts";
 
 const OUTSIDE_RI_PATTERN = /outside reference-implementation/;
 const MISSING_FILE_PATTERN = /is missing/;
@@ -54,14 +49,6 @@ test("authority-driven selection uses the issued files directly instead of re-di
   } finally {
     await fixture.cleanup();
   }
-});
-
-test("only a strict subset omits full-suite named-skip accounting", () => {
-  const allFiles = new Set(["a.test.ts", "b.test.ts"]);
-  assert.equal(isStrictTestFileSubset(new Set(["a.test.ts", "b.test.ts"]), allFiles), false);
-  assert.equal(isStrictTestFileSubset(new Set(["b.test.ts", "a.test.ts"]), allFiles), false);
-  assert.equal(isStrictTestFileSubset(new Set(["a.test.ts"]), allFiles), true);
-  assert.equal(isStrictTestFileSubset(new Set(["a.test.ts", "b.test.ts", "c.test.ts"]), allFiles), false);
 });
 
 test("an authority file outside reference-implementation is rejected fail-closed", () => {
