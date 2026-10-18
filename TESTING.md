@@ -3,7 +3,8 @@
 How to run the tests in this repository, what each tier isolates, and what it costs.
 This page covers the desktop client (`src/`, `src-tauri/` TypeScript, `scripts/`),
 `apps/console`, `packages/*` and `e2e/`. The reference implementation has its own
-gate; see its section below.
+gate; see
+[`reference-implementation/TESTING.md`](reference-implementation/TESTING.md).
 
 ## Tiers
 
