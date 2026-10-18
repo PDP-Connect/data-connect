@@ -13,7 +13,7 @@
  *
  * Failure modes, each followed by the production restart path:
  *  - a thrown error at every step boundary (first and last occurrence);
- *  - two failures in a row: the retry fails at a different step;
+ *  - two failures in a row: the retry fails at a different, reachable step;
  *  - a process kill (SIGKILL through the crash harness) at every step boundary;
  *  - a kill, then a second kill during the retry.
  *
@@ -221,10 +221,17 @@ async function killAttempt(spec: ChildSpec, point: string, nth: number): Promise
   assert.equal(exit.signal, "SIGKILL", `child must die by SIGKILL at ${point}#${nth}`);
 }
 
-/** Step names and how often each is hit in one clean teardown, in first-hit order. */
-async function recordSteps(backend: Backend): Promise<Map<string, number>> {
+/** Step names and counts in a clean teardown, or its retry after a named failure. */
+async function recordSteps(backend: Backend, firstFailure?: string): Promise<Map<string, number>> {
   const steps = new Map<string, number>();
   await withScenario(backend, 0, async ({ ids }) => {
+    if (firstFailure !== undefined) {
+      assert.equal(
+        await throwingAttempt(ids, firstFailure, 1),
+        `injected failure at ${firstFailure}#1`,
+        `${backend.name}: first selected hook must throw before discovering retry steps`
+      );
+    }
     __setCrashPointHookForTest((name) => {
       if (name.startsWith(PREFIX))
         steps.set(name.slice(PREFIX.length), (steps.get(name.slice(PREFIX.length)) ?? 0) + 1);
@@ -376,14 +383,24 @@ async function runMatrix(backend: Backend, phase: Phase): Promise<void> {
     });
   }
 
-  // 2. Two failures in a row: the retry throws at a different step.
+  // 2. Discover reachable retry steps: the first failure may have finished all deletion.
   for (const first of phase === "throw-twice" ? firstHits : []) {
-    for (const second of firstHits) {
+    // biome-ignore lint/performance/noAwaitInLoops: Discover each retry on a fresh fixture after its first failure.
+    const retrySteps = await recordSteps(backend, first);
+    for (const second of retrySteps.keys()) {
       if (first === second) continue;
       const label = `${backend.name} throw at ${first}, retry throws at ${second}`;
       await withScenario(backend, 0, async (scenario) => {
-        assert.ok(await throwingAttempt(scenario.ids, first, 1), `${label}: first failure must surface`);
-        await throwingAttempt(scenario.ids, second, 1);
+        assert.equal(
+          await throwingAttempt(scenario.ids, first, 1),
+          `injected failure at ${first}#1`,
+          `${label}: first selected hook must throw`
+        );
+        assert.equal(
+          await throwingAttempt(scenario.ids, second, 1),
+          `injected failure at ${second}#1`,
+          `${label}: second selected hook must throw`
+        );
         assertNoHalfDeletedPair(label, await readTeardownState(backend.sql, scenario.ids), scenario.seeded);
         await restartPath(scenario.ids);
         assertConverged(backend, label, await readTeardownState(backend.sql, scenario.ids), control, scenario.seeded);
