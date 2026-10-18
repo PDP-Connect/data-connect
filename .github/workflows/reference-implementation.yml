@@ -108,6 +108,8 @@ jobs:
               .github/workflows/reference-implementation.yml|\
               package.json|\
               package-lock.json|\
+              scripts/test-sandbox/*|\
+              scripts/test-scratch/*|\
               reference-implementation/*|reference-implementation/**)
                 reference_impacting=true
                 break
