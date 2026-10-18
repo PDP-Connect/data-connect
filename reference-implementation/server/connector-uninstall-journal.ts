@@ -39,6 +39,7 @@ export interface ConnectorUninstallJournalInput<ActiveRecord = unknown> {
 
 export interface ConnectorUninstallReconcileCallbacks<ActiveRecord = unknown> {
   readonly clearUninstalledMarker?: (connectorId: string) => Promise<void> | void;
+  readonly cleanupActivation?: (connectorId: string) => Promise<void> | void;
   readonly getActive: (connectorId: string) => Promise<ActiveRecord | null> | ActiveRecord | null;
   readonly restoreActive: (record: ActiveRecord) => Promise<void> | void;
 }
@@ -250,6 +251,7 @@ export async function reconcileConnectorUninstallJournal<ActiveRecord>(
     return { connectorId: journal.connectorId, status: "restored" };
   }
   removeMovedAndOriginalRoots(journal.rootMoves);
+  await callbacks.cleanupActivation?.(journal.connectorId);
   deleteConnectorUninstallJournal(dataDir, journal.connectorId);
   return { connectorId: journal.connectorId, status: "cleaned" };
 }

@@ -43,7 +43,10 @@ import {
 import { closeDb, getDb, initDb } from "../server/db.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
 import { createSqliteSchedulerStore } from "../server/stores/scheduler-store.ts";
-import { writeConnectorUninstallJournal } from "../server/connector-uninstall-journal.ts";
+import {
+  connectorUninstallJournalPath,
+  writeConnectorUninstallJournal,
+} from "../server/connector-uninstall-journal.ts";
 import { mountOwnerConnectorInstall } from "../server/routes/owner-connector-install.ts";
 
 const digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -404,6 +407,53 @@ test("startup recovery restores the original entrypoint at each root-move crash 
       closeDb();
       rmSync(dataDir, { force: true, recursive: true });
     }
+  }
+});
+
+test("startup uninstall recovery retries activation cleanup after its first failure", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pdpp-uninstall-retry-gap-"));
+  closeDb();
+  initDb(join(dataDir, "pdpp.sqlite"));
+  const store = createFileConnectorInstallStore(dataDir);
+  let cleanupCalls = 0;
+  let activationStillPresent = true;
+  try {
+    const service = createConnectorInstallService({
+      catalogLoader: async () => [entry],
+      dataDir,
+      installArtifact: (root) => writeFixture(root),
+      registerManifest: () => Promise.resolve(),
+      store,
+    });
+    const active = await service.install("github", digest);
+    const moved = join(dataDir, "connectors", "github", ".uninstall-retry");
+    writeConnectorUninstallJournal(dataDir, {
+      connectorId: "github",
+      priorActiveRecord: active,
+      rootMoves: [{ original: active.root, moved }],
+    });
+    renameSync(active.root, moved);
+    await store.deactivate("github");
+    const removeActivation = async () => {
+      cleanupCalls += 1;
+      if (cleanupCalls === 1) throw new Error("temporary activation cleanup failure");
+      activationStillPresent = false;
+    };
+
+    await assert.rejects(
+      reconcileConnectorUninstalls(dataDir, store, removeActivation),
+      /temporary activation cleanup failure/
+    );
+    await reconcileConnectorUninstalls(dataDir, store, removeActivation);
+
+    assert.equal(cleanupCalls, 2, "the incomplete cleanup must be discovered again");
+    assert.equal(activationStillPresent, false);
+    assert.equal(existsSync(moved), false);
+    assert.equal(existsSync(active.root), false);
+    assert.equal(existsSync(connectorUninstallJournalPath(dataDir, "github")), false);
+  } finally {
+    closeDb();
+    rmSync(dataDir, { force: true, recursive: true });
   }
 });
 

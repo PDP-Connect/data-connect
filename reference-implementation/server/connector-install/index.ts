@@ -120,11 +120,18 @@ export async function reconcileConnectorUninstalls(
 ): Promise<void> {
   for (const connectorId of listConnectorUninstallJournalIds(dataDir)) {
     await withConnectorLifecycleLock(dataDir, connectorId, async () => {
-      await reconcileConnectorUninstallJournal(dataDir, connectorId, {
+      const result = await reconcileConnectorUninstallJournal(dataDir, connectorId, {
         clearUninstalledMarker: (id) => clearConnectorLifecycleUninstalled(dataDir, id),
+        cleanupActivation: async (id) => {
+          await store.deactivate(id);
+          await removeActivation(id);
+        },
         getActive: (id) => store.getActive(id),
         restoreActive: (record) => store.activate(record),
       });
+      if (result.status === "cleaned") {
+        return;
+      }
       if (!(await store.getActive(connectorId))) {
         await store.deactivate(connectorId);
         await removeActivation(connectorId);
