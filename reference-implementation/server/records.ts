@@ -5,6 +5,7 @@ import { parseCoverageDiagnosticsStateSnapshot } from "./polyfill-connectors-run
 /**
  * PDPP Resource Server — record storage and grant-enforced query
  */
+import { crashPoint } from "./crash-point.ts";
 import { getDb } from "./db.ts";
 import { assertGrantedManifestReadAuthority, assertManifestReadAuthority } from "./manifest-read-authority.ts";
 import type { ComputedLexicalFields } from "./search.ts";
@@ -2377,6 +2378,7 @@ async function ingestSqliteRecord(
     const nextVersion = allocated.max_version;
 
     maybeFault("after-version-allocation", { connectorId, connectorInstanceId, nextVersion, recordKey, stream });
+    crashPoint("ingest:after-version-allocation");
 
     writeRecordChange({
       connectorId,
@@ -2393,6 +2395,7 @@ async function ingestSqliteRecord(
     maybeFault("after-records-mutation", { connectorId, connectorInstanceId, nextVersion, op, recordKey, stream });
 
     maybeFault("after-record-changes-append", { connectorId, connectorInstanceId, nextVersion, op, recordKey, stream });
+    crashPoint("ingest:after-record-write");
 
     // Scope-keyed dirty mark, inside the SAME transaction as the record
     // mutation above: this scope's lexical/semantic index may now be stale,
@@ -2401,6 +2404,7 @@ async function ingestSqliteRecord(
     // writes -- so the mark must be atomic with the write, not best-effort
     // after it. See server/stores/search-index-dirty-store.ts.
     markSearchIndexDirtySqlite({ connectorId, connectorInstanceId, stream }, nowIso());
+    crashPoint("ingest:after-dirty-mark");
 
     const insertedChangeJsonBytes = byteLength(op === "delete" ? current?.record_json : recordJson);
     const { prunedBytesForDelta, prunedRowsForDelta } = pruneRecordChangeHistory(
@@ -2425,8 +2429,10 @@ async function ingestSqliteRecord(
       stream,
     });
 
+    crashPoint("ingest:before-commit");
     return finishDurableOutcome({ kind: "changed", op, selfHeal, version: nextVersion });
   });
+  crashPoint("ingest:after-commit-before-ack");
 
   if (outcome.kind === "noop") {
     return { accepted: true, changed: false };
