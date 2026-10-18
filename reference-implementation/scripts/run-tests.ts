@@ -1,8 +1,9 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { spawn, type ChildProcess } from "node:child_process";
+import { type ChildProcess, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { writeSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { availableParallelism } from "node:os";
 import { dirname, join } from "node:path";
@@ -16,19 +17,20 @@ import {
 } from "../test/helpers/dedicated-postgres-test-url.ts";
 import { collectChildProcessOutput } from "./child-process-output.ts";
 import { deriveDedicatedPostgresDbNameForFile } from "./dedicated-postgres-db-name.ts";
-import { startFileProcessWatchdog } from "./file-process-watchdog.ts";
 import { resolveFileConcurrency } from "./file-concurrency.ts";
-import { createOwnedTestResource, drainTestWorkers, type OwnedTestResource } from "./owned-test-resource.ts";
-import { needsOuterPostgresDatabase, needsPostgresRestoreDatabase } from "./run-tests-db-requirements.ts";
+import { startFileProcessWatchdog } from "./file-process-watchdog.ts";
+import { createOwnedTestResource, type OwnedTestResource, settleAll } from "./owned-test-resource.ts";
 import { assertPostgresProfilePreflight } from "./postgres-profile-preflight.ts";
 import { isPostgresTemplateEligibleFilePath } from "./postgres-template-eligibility.ts";
 import {
   clonePostgresTestDatabaseFromTemplate,
+  deriveDedicatedPostgresTemplateName,
   dropPostgresTestTemplate,
   ensurePostgresTestTemplate,
   POSTGRES_TEST_RUNNER_NONCE_BYTES,
 } from "./postgres-test-template.ts";
-import { discoverSelectedTestFiles } from "./run-tests-discovery.ts";
+import { needsOuterPostgresDatabase, needsPostgresRestoreDatabase } from "./run-tests-db-requirements.ts";
+import { discoverSelectedTestFiles, discoverTestFiles, isStrictTestFileSubset } from "./run-tests-discovery.ts";
 import { RUN_AUTHORITY_SCHEMA } from "./test-accounting/inventory.ts";
 import type { StructuredSummary } from "./test-accounting/receipt.ts";
 import {
@@ -181,8 +183,8 @@ const dedicatedBasePostgresTestUrl: string | null = configuredPostgresTestUrl
 // admin URL, opens a connection, or starts a test child. `pg` lets query
 // parameters override connection-string authority and path, so only the
 // narrow dedicated-url contract reaches the real-Postgres lane. The restore
-// target is not per-file allocated and must therefore be independently
-// sentinel-provisioned before the backup oracle can touch it.
+// target is independently preflighted, then receives its own cold per-file
+// database before the backup oracle can touch it.
 await assertPostgresProfilePreflight({
   primaryUrl: configuredPostgresTestUrl,
   profile: selectedProfile,
@@ -192,9 +194,9 @@ await assertPostgresProfilePreflight({
 // --- Per-file Postgres database isolation ---
 //
 // When PDPP_TEST_POSTGRES_URL is set, each test file receives its own
-// ephemeral database created before spawn and dropped after exit, whether
-// or not the file passes. This eliminates cross-file state pollution without
-// requiring any changes to individual test files.
+// ephemeral database created before spawn and dropped after its child exits,
+// whether or not the file passes. This eliminates cross-file state pollution
+// without requiring any changes to individual test files.
 
 let fileCounter = 0;
 const runnerId = randomBytes(4).toString("hex");
@@ -238,9 +240,11 @@ function adminUrlFromBase(baseUrl: string): string {
  * The pure derivation itself lives in `dedicated-postgres-db-name.ts` so it
  * can be unit-tested without importing this top-level-await CLI script.
  */
-function deriveDbName(filePath: string): string {
+function deriveDbName(filePath: string, label?: "restore"): string {
   fileCounter += 1;
-  const dbName = deriveDedicatedPostgresDbNameForFile(filePath, runnerId, fileCounter);
+  const fileName = filePath.split("/").pop() ?? filePath;
+  const labeledPath = label ? `${label}_${fileName}` : filePath;
+  const dbName = deriveDedicatedPostgresDbNameForFile(labeledPath, runnerId, fileCounter);
   if (!isDedicatedPostgresTestDatabaseName(dbName)) {
     throw new Error(`runner derived a database name outside the dedicated test contract: ${dbName}`);
   }
@@ -252,43 +256,59 @@ interface TestDbAllocation {
   url: string;
 }
 
-// Per-file databases currently allocated. Tracked so that if the runner
-// process itself is killed (SIGTERM/SIGINT, CI timeout) while child tests are
-// in flight, their databases are dropped on the way out rather than orphaned.
+// Databases remain registered from CREATE until DROP succeeds. The first
+// signal stops admission and drains workers before releasing these resources.
 const activeAllocations = new Set<OwnedTestResource>();
 const activeTemplates = new Set<OwnedTestResource>();
 const activeChildren = new Set<ChildProcess>();
 let stopping = false;
 let signalExitCode: number | undefined;
 let signalCleanupArmed = false;
+let signalCount = 0;
 
 function armSignalCleanup(): void {
-  if (signalCleanupArmed) return;
+  if (signalCleanupArmed) {
+    return;
+  }
   signalCleanupArmed = true;
   for (const sig of ["SIGINT", "SIGTERM"] as const) {
     process.on(sig, () => {
+      signalCount += 1;
+      if (signalCount > 1) {
+        writeSync(2, "test runner received a second signal; exiting without waiting for pending cleanup\n");
+        process.exit(signalExitCode ?? (sig === "SIGINT" ? 130 : 143));
+      }
       stopping = true;
       signalExitCode ??= sig === "SIGINT" ? 130 : 143;
-      // Main's finally performs cleanup after allocation/build promises and
-      // workers settle. A second signal must not race cleanup against CREATE.
+      // Main stops new work, signals active children, and cleans up after
+      // in-flight allocation and worker operations settle.
       for (const child of activeChildren) child.kill("SIGTERM");
     });
   }
 }
 
-async function allocateTestDb(filePath: string, baseUrl: string): Promise<TestDbAllocation> {
-  const dbName = deriveDbName(filePath);
+async function allocateTestDb(
+  filePath: string,
+  baseUrl: string,
+  { cold, label }: { cold: boolean; label?: "restore" }
+): Promise<TestDbAllocation> {
+  const dbName = deriveDbName(filePath, label);
   const adminUrl = adminUrlFromBase(baseUrl);
   const testUrl = new URL(baseUrl);
   testUrl.pathname = `/${dbName}`;
-  const useTemplate = postgresTestTemplateName !== null && isPostgresTemplateEligibleFilePath(filePath);
+  // DEFAULT IS COLD: only explicitly reviewed files can use a template. This
+  // is fail-closed, not an opt-out; an eligible file must fail if its template
+  // is missing or unusable rather than silently taking the cold path.
+  const useTemplate = !cold && isPostgresTemplateEligibleFilePath(filePath);
   const allocation = await createOwnedTestResource({
     registry: activeAllocations,
     create: async (onCreated) => {
       if (useTemplate) {
         const templateName = postgresTestTemplateName;
         const identity = postgresTestTemplateIdentity;
-        if (!(templateName && identity)) throw new Error("missing runner-bound template identity");
+        if (!(templateName && identity)) {
+          throw new Error("missing runner-bound template identity");
+        }
         await clonePostgresTestDatabaseFromTemplate(baseUrl, dbName, templateName, identity, onCreated);
       } else {
         const client = new pg.Client({ connectionString: adminUrl });
@@ -298,11 +318,17 @@ async function allocateTestDb(filePath: string, baseUrl: string): Promise<TestDb
           await client.query(`CREATE DATABASE "${dbName}"`);
           onCreated();
         } finally {
-          await client.end();
+          await client.end().catch(() => undefined);
         }
       }
+      // This event makes the cold-vs-template eligibility decision assertable
+      // by external reviews and integration tests (external review P1-1).
       process.stdout.write(
-        `PDPP_TEST_DB_PROVISION ${JSON.stringify({ file: filePath, path: useTemplate ? "template-clone" : "cold-bootstrap" })}\n`
+        `PDPP_TEST_DB_PROVISION ${JSON.stringify({
+          database: dbName,
+          file: label ? `${filePath}.${label}` : filePath,
+          path: useTemplate ? "template-clone" : "cold-bootstrap",
+        })}\n`
       );
       return testUrl.toString();
     },
@@ -313,7 +339,7 @@ async function allocateTestDb(filePath: string, baseUrl: string): Promise<TestDb
         await client.connect();
         await client.query(`DROP DATABASE IF EXISTS "${dbName}" WITH (FORCE)`);
       } finally {
-        await client.end();
+        await client.end().catch(() => undefined);
       }
     },
   });
@@ -335,30 +361,25 @@ async function runNodeTest(filePath: string, extraArgs: string[]): Promise<NodeT
   // Unknown files retain an outer DB. Restore allocation is separate and cold.
   let allocation: TestDbAllocation | undefined;
   let restoreAllocation: TestDbAllocation | undefined;
-  const releaseFileResources = () => drainTestWorkers(
-    [allocation, restoreAllocation].flatMap((item) => item ? [item.release()] : [])
+  const releaseFileResources = () => settleAll(
+    [allocation, restoreAllocation].flatMap((item) => (item ? [item.release()] : []))
   );
   try {
     if (baseUrl && needsOuterPostgresDatabase(filePath)) {
-      allocation = await allocateTestDb(filePath, baseUrl);
-      if (!allocation) {
-        // Fail loudly instead of falling back to the SHARED base database. The
-        // old fallback handed the child the operator-supplied base URL, so a
-        // failed allocation silently downgraded per-file isolation to "every
-        // test writes the same shared database". The in-process sentinel guard
-        // would now refuse that database anyway; refusing here names the real
-        // cause (allocation failed) rather than surfacing it as a confusing
-        // per-test admission error.
-        throw new Error(
-          `could not allocate a dedicated Postgres test database for ${filePath}; refusing to fall back to the shared base database`
-        );
+      try {
+        allocation = await allocateTestDb(filePath, baseUrl, { cold: false });
+      } catch (error) {
+        // Never fall back to the shared base database after allocation fails.
+        throw new Error(`could not allocate a dedicated Postgres test database for ${filePath}`, { cause: error });
       }
     }
 
     if (baseUrl && configuredPostgresRestoreUrl && needsPostgresRestoreDatabase(filePath)) {
-      restoreAllocation = await allocateTestDb(`${filePath}.restore`, configuredPostgresRestoreUrl);
+      restoreAllocation = await allocateTestDb(filePath, configuredPostgresRestoreUrl, { cold: true, label: "restore" });
     }
-    if (stopping) throw new Error("test runner interrupted before child spawn");
+    if (stopping) {
+      throw new Error("test runner interrupted before child spawn");
+    }
   } catch (error) {
     try {
       await releaseFileResources();
@@ -368,31 +389,19 @@ async function runNodeTest(filePath: string, extraArgs: string[]): Promise<NodeT
     throw error;
   }
 
-  const childEnvBase: ProcessEnvLike = allocation
-    ? {
-        ...baseEnv,
-        PDPP_TEST_POSTGRES_URL: allocation.url,
-        // Passed to every child unconditionally (harmless): withTemporaryPostgresDatabase
-        // (test/helpers/postgres-temp-database.ts) only resolves this default
-        // when the CHILD's own file path is on the explicit allowlist in
-        // postgres-template-eligibility.ts, independent of whether THIS
-        // file's own per-file database above was templated. A cold-required
-        // file receiving this env var still bootstraps from scratch.
-        // Unset entirely (not set to "") when no template was built, so a
-        // Postgres run without templating is byte-identical to today.
-        ...(postgresTestTemplateName && postgresTestTemplateIdentity
-          ? {
-              PDPP_TEST_POSTGRES_TEMPLATE: postgresTestTemplateName,
-              PDPP_TEST_POSTGRES_TEMPLATE_IDENTITY: postgresTestTemplateIdentity,
-            }
-          : {}),
-      }
-    : { ...baseEnv };
+  const childEnvBase: ProcessEnvLike = { ...baseEnv };
+  if (allocation) {
+    childEnvBase.PDPP_TEST_POSTGRES_URL = allocation.url;
+  }
   if (postgresTestTemplateName && postgresTestTemplateIdentity) {
+    // Passed to every child: helper-owned databases use the same explicit
+    // eligibility allowlist and keep DEFAULT IS COLD independently.
     childEnvBase.PDPP_TEST_POSTGRES_TEMPLATE = postgresTestTemplateName;
     childEnvBase.PDPP_TEST_POSTGRES_TEMPLATE_IDENTITY = postgresTestTemplateIdentity;
   }
-  if (restoreAllocation) childEnvBase.PDPP_TEST_POSTGRES_RESTORE_URL = restoreAllocation.url;
+  if (restoreAllocation) {
+    childEnvBase.PDPP_TEST_POSTGRES_RESTORE_URL = restoreAllocation.url;
+  }
   // Turn the preload (appended to effectiveArgs above) live in the child. Left
   // unset when the guard is disabled so the child is byte-identical to a
   // pre-guard run (guard-absent parity).
@@ -460,10 +469,40 @@ async function runNodeTest(filePath: string, extraArgs: string[]): Promise<NodeT
         });
       }).catch(reject);
     });
-  }).finally(releaseFileResources);
+  }).then(
+    async (result) => {
+      try {
+        await releaseFileResources();
+      } catch (cleanupError) {
+        if (result.exitCode !== 0) {
+          throw new AggregateError(
+            [
+              new Error(`test process for ${filePath} exited with code ${result.exitCode}:\n${result.output}`),
+              cleanupError,
+            ],
+            "test execution and file cleanup failed"
+          );
+        }
+        throw cleanupError;
+      }
+      return result;
+    },
+    async (error) => {
+      try {
+        await releaseFileResources();
+      } catch (cleanupError) {
+        throw new AggregateError([error, cleanupError], "test execution and file cleanup failed");
+      }
+      throw error;
+    }
+  );
 }
 
-const testFiles = await discoverSelectedTestFiles(repoRoot, testDir, accountingAuthority?.files);
+const standaloneTestFiles = await discoverTestFiles(repoRoot, testDir);
+const testFiles = accountingAuthority
+  ? await discoverSelectedTestFiles(repoRoot, testDir, accountingAuthority.files)
+  : standaloneTestFiles;
+const isStrictSubsetSelection = isStrictTestFileSubset(new Set(testFiles), new Set(standaloneTestFiles));
 const fileConcurrency = resolveFileConcurrency({
   availableCpus: availableParallelism?.() ?? null,
   profile: selectedProfile,
@@ -473,6 +512,14 @@ const fileConcurrency = resolveFileConcurrency({
 
 const queue = [...testFiles];
 const results: NodeTestResult[] = [];
+
+function formatRunnerError(error: unknown): string {
+  if (error instanceof AggregateError) {
+    const nested = error.errors.map(formatRunnerError).join("\n");
+    return `${error.stack ?? error.message}\n${nested}`;
+  }
+  return error instanceof Error ? error.stack ?? error.message : String(error);
+}
 
 // Build the per-run Postgres schema template once, before any child spawns,
 // when Postgres is in play and there is at least one file to run it for. This
@@ -484,22 +531,21 @@ const results: NodeTestResult[] = [];
 // behind a normal-looking (slow) green run, which is the one thing the task
 // this exists for explicitly rules out.
 armSignalCleanup();
+const runnerErrors: unknown[] = [];
 try {
   if (dedicatedBasePostgresTestUrl && testFiles.some(isPostgresTemplateEligibleFilePath)) {
     // The builder returns the identity it committed before publishing the
     // template. Do not re-read it off the template afterwards: an expectation
     // sourced from the thing being verified proves nothing (external review
     // P1-2).
-    let ownedTemplateName: string | undefined;
     const template = await createOwnedTestResource({
       registry: activeTemplates,
-      create: (onCreated) => ensurePostgresTestTemplate(dedicatedBasePostgresTestUrl, templateRunnerId, (name) => {
-        ownedTemplateName = name;
-        onCreated();
-      }),
-      provision: async () => {},
+      create: (onCreated) => ensurePostgresTestTemplate(dedicatedBasePostgresTestUrl, templateRunnerId, onCreated),
       destroy: async () => {
-        if (ownedTemplateName) await dropPostgresTestTemplate(dedicatedBasePostgresTestUrl, ownedTemplateName);
+        await dropPostgresTestTemplate(
+          dedicatedBasePostgresTestUrl,
+          deriveDedicatedPostgresTemplateName(templateRunnerId)
+        );
       },
     });
     postgresTestTemplateName = template.value.templateName;
@@ -512,8 +558,8 @@ try {
       if (!file) {
         return;
       }
-      // biome-ignore lint/performance/noAwaitInLoops: this IS the bounded-concurrency primitive -- fileConcurrency workers each pull one file from the shared queue, so parallelizing here would defeat the deliberate cap (Promise.all of worker() calls below).
       try {
+        // biome-ignore lint/performance/noAwaitInLoops: each worker pulls one file from the shared queue; awaiting here preserves the deliberate concurrency cap.
         const result = await runNodeTest(file, effectiveArgs);
         results.push(result);
         process.stdout.write(result.output);
@@ -524,22 +570,24 @@ try {
     }
   }
 
-  await drainTestWorkers(Array.from({ length: fileConcurrency }, () => worker()));
-} finally {
-  try {
-    await drainTestWorkers([...activeAllocations].map((allocation) => allocation.release()));
-  } finally {
-    try {
-      await drainTestWorkers([...activeTemplates].map((template) => template.release()));
-    } finally {
-      if (signalExitCode !== undefined) process.exit(signalExitCode);
-    }
-  }
+  await settleAll(Array.from({ length: fileConcurrency }, () => worker()));
+} catch (error) {
+  runnerErrors.push(error);
+}
+try {
+  await settleAll([...activeAllocations].map((allocation) => allocation.release()));
+} catch (error) {
+  runnerErrors.push(error);
+}
+try {
+  await settleAll([...activeTemplates].map((template) => template.release()));
+} catch (error) {
+  runnerErrors.push(error);
 }
 
 const selectedFiles = repositoryPaths("reference-implementation", testFiles);
 if (accountingAuthority && JSON.stringify(selectedFiles) !== JSON.stringify(accountingAuthority.files)) {
-  throw new Error("RI discovery differs from authority-issued child selection");
+  runnerErrors.push(new Error("RI discovery differs from authority-issued child selection"));
 }
 const summaries: StructuredSummary[] = results.map((result) => structuredNodeSummary(result.output));
 const skipReasons: Record<string, number> = {};
@@ -558,19 +606,21 @@ const counts = {
   skip_reasons: skipReasons,
   skipped: summaries.reduce((sum, summary) => sum + summary.skipped, 0),
 };
-// Complete-suite finalization for property 3 (exact named-mapping join): once
-// every planned file has run, require the named-mapping rows CONFIGURED for
-// this suite to exactly equal the identities the run CONSUMED. This is the one
-// new fail-closed path; it does not touch execution order, concurrency,
-// timeouts, output counts/schema, or the ordinary exit path. It is skipped
-// when the suite did not run to completion (a failing file already dominates
-// the exit), so it can never mask an unrelated failure or fire on a partial run.
-if (!accountingAuthority && !failed && results.length === testFiles.length) {
+// Only a strict subset skips named-mapping equality. Full and superset selections
+// receive the same check, whether the files came from an authority or discovery.
+if (!isStrictSubsetSelection) {
   const consumedMappingIdentities = summaries.flatMap((summary) => summary.consumed_mapping_identities);
-  assertNamedSkipMappingsFullyConsumed(
-    consumedMappingIdentities,
-    riConfiguredNamedSkipMappingIdentities(selectedProfile)
-  );
+  try {
+    assertNamedSkipMappingsFullyConsumed(
+      consumedMappingIdentities,
+      riConfiguredNamedSkipMappingIdentities(selectedProfile)
+    );
+  } catch (error) {
+    runnerErrors.push(error);
+  }
+}
+if (runnerErrors.length > 0 && failed) {
+  runnerErrors.push(new Error(`test process for ${failed.filePath} exited with code ${failed.exitCode}:\n${failed.output}`));
 }
 if (accountingAuthority) {
   process.stdout.write(
@@ -578,6 +628,19 @@ if (accountingAuthority) {
   );
 }
 
-if (failed) {
-  process.exit(failed.exitCode);
+if (runnerErrors.length > 0) {
+  const error = runnerErrors.length === 1
+    ? runnerErrors[0]
+    : new AggregateError(runnerErrors, "test runner execution and cleanup failed");
+  if (signalExitCode !== undefined) {
+    process.stderr.write(`${formatRunnerError(error)}\n`);
+    process.exitCode = signalExitCode;
+  } else {
+    throw error;
+  }
+}
+if (signalExitCode !== undefined) {
+  process.exitCode = signalExitCode;
+} else if (failed) {
+  process.exitCode = failed.exitCode;
 }

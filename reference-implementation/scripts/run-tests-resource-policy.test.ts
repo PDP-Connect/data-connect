@@ -2,17 +2,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
-import { createOwnedTestResource, drainTestWorkers, type OwnedTestResource } from "./owned-test-resource.ts";
-import { needsOuterPostgresDatabase, needsPostgresRestoreDatabase } from "./run-tests-db-requirements.ts";
-import {
-  POSTGRES_TEMPLATE_COLD_REQUIRED_FILES,
-  isPostgresTemplateEligibleFilePath,
-} from "./postgres-template-eligibility.ts";
+import { isDedicatedPostgresTestDatabaseName } from "../test/helpers/dedicated-postgres-test-url.ts";
 import { deriveDedicatedPostgresDbNameForFile } from "./dedicated-postgres-db-name.ts";
+import { createOwnedTestResource, type OwnedTestResource, settleAll } from "./owned-test-resource.ts";
+import {
+  isPostgresTemplateEligibleFilePath,
+  POSTGRES_TEMPLATE_COLD_REQUIRED_FILES,
+} from "./postgres-template-eligibility.ts";
+import { needsOuterPostgresDatabase, needsPostgresRestoreDatabase } from "./run-tests-db-requirements.ts";
 
 test("only reviewed files bypass outer allocation; restore remains separate", () => {
   assert.equal(needsOuterPostgresDatabase("test/backup-table-inventory.test.ts"), false);
@@ -22,12 +20,17 @@ test("only reviewed files bypass outer allocation; restore remains separate", ()
   assert.equal(needsPostgresRestoreDatabase("test/backup-table-inventory-postgres.test.ts"), true);
   assert.equal(needsPostgresRestoreDatabase("test/unknown-postgres.test.ts"), false);
   const file = "test/backup-table-inventory-postgres.test.ts";
+  const fileName = file.split("/").pop() ?? file;
   const names = [
     deriveDedicatedPostgresDbNameForFile(file, "12345678", 1),
-    deriveDedicatedPostgresDbNameForFile(file + ".restore", "12345678", 2),
-    deriveDedicatedPostgresDbNameForFile(file + ".restore", "87654321", 2),
+    deriveDedicatedPostgresDbNameForFile(`restore_${fileName}`, "12345678", 2),
+    deriveDedicatedPostgresDbNameForFile(`restore_${fileName}`, "87654321", 2),
   ];
+  const restoreName = names[1];
+  assert.ok(restoreName);
   assert.equal(new Set(names).size, 3);
+  assert.match(restoreName, /^pdpp_test_restore_/);
+  assert.equal(isDedicatedPostgresTestDatabaseName(restoreName), true);
 });
 
 test("all 37 cold-required entries remain cold, including helper-owned bootstrap", () => {
@@ -90,45 +93,70 @@ test("name collision never grants ownership or drops a foreign resource", async 
   assert.equal(registry.size, 0);
 });
 
-test("the runner creates a file database before its owned cleanup can drop it", async () => {
-  const runnerPath = join(dirname(fileURLToPath(import.meta.url)), "run-tests.ts");
-  const runner = await readFile(runnerPath, "utf8");
-  const allocationStart = runner.indexOf("async function allocateTestDb");
-  const allocationEnd = runner.indexOf("interface NodeTestResult", allocationStart);
-  assert.notEqual(allocationStart, -1);
-  assert.notEqual(allocationEnd, -1);
-  const allocation = runner.slice(allocationStart, allocationEnd);
-  const createIndex = allocation.indexOf("CREATE DATABASE");
-  const dropIndex = allocation.indexOf("DROP DATABASE");
-  assert.notEqual(createIndex, -1);
-  assert.notEqual(dropIndex, -1);
-  assert.ok(createIndex < dropIndex, "the runner must never pre-drop a same-named database");
+test("a created database is provisioned before its owned destroy runs", async () => {
+  const registry = new Set<OwnedTestResource>();
+  const operations: string[] = [];
+  const resource = await createOwnedTestResource({
+    registry,
+    create: async (created) => {
+      operations.push("CREATE DATABASE");
+      created();
+      return "url";
+    },
+    provision: async () => {
+      operations.push("provision");
+    },
+    destroy: async () => {
+      operations.push("DROP DATABASE");
+    },
+  });
+  await resource.release();
+  assert.deepEqual(operations, ["CREATE DATABASE", "provision", "DROP DATABASE"]);
 });
 
 test("failed rollback remains registered and can be retried", async () => {
   const registry = new Set<OwnedTestResource>();
   let drops = 0;
+  const provisionError = new Error("provision failed");
+  const dropError = new Error("drop unavailable");
   await assert.rejects(createOwnedTestResource({
     registry,
     create: async (created) => { created(); return "url"; },
-    provision: async () => { throw new Error("provision failed"); },
-    destroy: async () => { if (++drops === 1) throw new Error("drop unavailable"); },
-  }), AggregateError);
+    provision: async () => { throw provisionError; },
+    destroy: async () => {
+      if (++drops === 1) {
+        throw dropError;
+      }
+    },
+  }), (error) => {
+    assert.ok(error instanceof AggregateError);
+    assert.deepEqual(error.errors, [provisionError, dropError]);
+    return true;
+  });
   assert.equal(registry.size, 1);
-  await drainTestWorkers([...registry].map((resource) => resource.release()));
+  await settleAll([...registry].map((resource) => resource.release()));
   assert.equal(drops, 2);
   assert.equal(registry.size, 0);
+});
+
+test("settleAll reports every rejected operation", async () => {
+  const first = new Error("first failure");
+  const second = new Error("second failure");
+  await assert.rejects(settleAll([Promise.reject(first), Promise.reject(second)]), (error) => {
+    assert.ok(error instanceof AggregateError);
+    assert.deepEqual(error.errors, [first, second]);
+    return true;
+  });
 });
 
 test("worker failure does not permit cleanup before another worker settles", async () => {
   let finish: () => void = () => {};
   const activeWorker = new Promise<void>((resolve) => { finish = resolve; });
   let cleanup = false;
-  const draining = drainTestWorkers([Promise.reject(new Error("worker failed")), activeWorker])
+  const draining = settleAll([Promise.reject(new Error("operation failed")), activeWorker])
     .finally(() => { cleanup = true; });
   draining.catch(() => {});
-  await Promise.resolve();
-  await Promise.resolve();
+  await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(cleanup, false);
   finish();
   await assert.rejects(draining, AggregateError);

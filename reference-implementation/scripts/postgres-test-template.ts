@@ -356,7 +356,7 @@ async function withAdminClient<T>(
   try {
     return await fn(client);
   } finally {
-    await client.end();
+    await client.end().catch(() => undefined);
   }
 }
 
@@ -460,7 +460,7 @@ async function templateIdentityMatches(
 export async function ensurePostgresTestTemplate(
   baseConnectionString: string,
   runnerId: string,
-  onCreated: (templateName: string) => void = () => {}
+  onCreated: () => void = () => {}
 ): Promise<BuiltPostgresTestTemplate> {
   const templateName = deriveDedicatedPostgresTemplateName(runnerId);
   let identityDigest: string | null = null;
@@ -480,7 +480,7 @@ export async function ensurePostgresTestTemplate(
       }
 
       await admin.query(`CREATE DATABASE ${quotedIdentifier(templateName)}`);
-      onCreated(templateName);
+      onCreated();
 
       const templateUrl = databaseUrl(baseConnectionString, templateName);
       // Stamp the sentinel BEFORE bootstrapping schema, exactly like every
