@@ -427,7 +427,7 @@ test("skips full-suite named mapping finalization for files-from runs", async ()
   );
   assert.match(
     runner,
-    /if \(filesFromIndex === -1 && !failed && results\.length === testFiles\.length\)/,
+    /if \(filesFromIndex === -1 && !failed && signalExitCode === undefined && results\.length === testFiles\.length\)/,
   );
 });
 
