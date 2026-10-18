@@ -90,6 +90,7 @@ import {
 } from "./connector-install/index.ts";
 import { removeConnectorActivation } from "./connector-install/activation-authority.ts";
 import { installedConnectorManifestRegistration } from "./connector-install/manifest-registration.ts";
+import { validateConnectorManifest } from "./connector-manifest-validation.ts";
 import {
   connectorLifecycleDataDir,
   withConnectorLifecycleLock,
@@ -139,6 +140,7 @@ import {
   listGrantPackagesForOwner,
   listOwnerIssuedClients,
   listRegisteredConnectorIds,
+  normalizeConnectorManifestForStorage,
   registerConnector,
   registerDynamicClient,
   requireGrantContractAgainstManifest,
@@ -7214,9 +7216,11 @@ export function buildAsApp(opts: ServerOpts = {}) {
     const asPolyfillConnectorsContext = {
       getConnectorManifest,
       handleError,
+      normalizeManifestForStorage: normalizeConnectorManifestForStorage,
       pdppError,
       registerConnector,
       requireOwnerSessionForRegister: lockConnectorRegistry ? ownerAuth.requireOwnerSession : null,
+      validateManifest: (manifest: Record<string, unknown>) => validateConnectorManifest(manifest),
     };
     mountAsPolyfillConnectorRegister(
       app,

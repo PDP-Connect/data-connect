@@ -894,7 +894,7 @@ test("STREAM_EVIDENCE: a transient-manifest-drift-skipped stream's dropped batch
   try {
     const m = manifest("stream-evidence-drift-skip");
     await registerManifest(asUrl, m);
-    const driftedManifest = { ...m, streams: m.streams.filter((stream) => stream.name !== "message_bodies") };
+    const driftedManifest = { ...m, version: "drifted", streams: m.streams.filter((stream) => stream.name !== "message_bodies") };
     const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-stream-evidence-drift-skip-"));
     const connectorPath = writeConnectorStub(
       tmpDir,

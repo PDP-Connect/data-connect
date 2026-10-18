@@ -60,10 +60,20 @@ test("detail: a present manifest is returned as the success envelope", async () 
 // register
 // ---------------------------------------------------------------------------
 
+// No declaration is accepted yet, so the equivocation check never fires here.
+const noAcceptedDeclaration = {
+  getConnectorManifest: () => null,
+  normalizeManifestForStorage: (m: Record<string, unknown>) => ({
+    connectorId: String(m.connector_key ?? m.connector_id),
+    storedManifest: m,
+  }),
+  validateManifest: () => undefined,
+};
+
 test("register: a manifest missing connector_key/connector_id is a 400 invalid_request", async () => {
   const out = await executeAsPolyfillConnectorRegister(
     { manifest: { streams: [] } },
-    { registerConnector: () => "should-not-be-called" }
+    { ...noAcceptedDeclaration, registerConnector: () => "should-not-be-called" }
   );
   assert.equal(out.outcome, "failure");
   assert.equal(out.status, 400);
@@ -73,10 +83,13 @@ test("register: a manifest missing connector_key/connector_id is a 400 invalid_r
 
 test("register: a non-object manifest is rejected", async () => {
   for (const manifest of [null, "string", ["array"]]) {
-    // @ts-expect-error — deliberately passing non-object manifests to prove
-    // the runtime rejects them (400) beyond the declared param type.
     // biome-ignore lint/performance/noAwaitInLoops: ordered test setup is intentionally sequential
-    const out = await executeAsPolyfillConnectorRegister({ manifest }, { registerConnector: () => "x" });
+    const out = await executeAsPolyfillConnectorRegister(
+      // @ts-expect-error — deliberately passing non-object manifests to prove
+      // the runtime rejects them (400) beyond the declared param type.
+      { manifest },
+      { ...noAcceptedDeclaration, registerConnector: () => "x" }
+    );
     assert.equal(out.outcome, "failure", `rejected: ${JSON.stringify(manifest)}`);
     assert.equal(out.status, 400);
   }
@@ -86,7 +99,7 @@ test("register: connector_key is preferred over connector_id for extraction", as
   // registerConnector returns nothing -> the outcome falls back to the extracted key.
   const out = await executeAsPolyfillConnectorRegister(
     { manifest: { connector_id: "https://registry/connectors/amazon", connector_key: "canonical-key" } },
-    { registerConnector: () => undefined }
+    { ...noAcceptedDeclaration, registerConnector: () => undefined }
   );
   assert.ok(out.outcome === "success");
   assert.equal(out.status, 201);
@@ -97,7 +110,7 @@ test("register: connector_key is preferred over connector_id for extraction", as
 test("register: falls back to connector_id when connector_key is absent", async () => {
   const out = await executeAsPolyfillConnectorRegister(
     { manifest: { connector_id: "amazon" } },
-    { registerConnector: () => undefined }
+    { ...noAcceptedDeclaration, registerConnector: () => undefined }
   );
   assert.ok(out.outcome === "success");
   assert.equal(out.envelope.connector_id, "amazon");
@@ -106,7 +119,7 @@ test("register: falls back to connector_id when connector_key is absent", async 
 test("register: the registerConnector return value (when a non-empty string) becomes the registered key", async () => {
   const out = await executeAsPolyfillConnectorRegister(
     { manifest: { connector_id: "raw-id" } },
-    { registerConnector: () => "canonicalized-by-store" }
+    { ...noAcceptedDeclaration, registerConnector: () => "canonicalized-by-store" }
   );
   assert.equal(out.status, 201);
   assert.equal(out.envelope.connector_id, "canonicalized-by-store", "store-canonicalized key used");

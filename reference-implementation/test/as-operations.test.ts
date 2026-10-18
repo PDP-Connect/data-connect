@@ -584,10 +584,67 @@ test("as.introspect strips grant_storage_binding from public envelope", async ()
 
 // ─── as.polyfill.connector.register / detail ────────────────────────────
 
+// Identity normalization and an empty catalog: no accepted declaration exists.
+const registerDepsStub = {
+  getConnectorManifest: () => null,
+  normalizeManifestForStorage: (m: Record<string, unknown>) => ({
+    connectorId: String(m.connector_key ?? m.connector_id),
+    storedManifest: m,
+  }),
+  validateManifest: () => undefined,
+};
+
+test("as.polyfill.connector.register rejects different content under an accepted key+version and does not register", async () => {
+  const accepted = { connector_id: "eqv", streams: [{ name: "alpha" }], version: "v1" };
+  const outcome = await executeAsPolyfillConnectorRegister(
+    { manifest: { connector_id: "eqv", streams: [{ name: "beta" }], version: "v1" } },
+    { ...registerDepsStub, getConnectorManifest: () => accepted, registerConnector: () => assert.fail("not reached") }
+  );
+  assert.equal(outcome.outcome, "failure");
+  assert.equal(outcome.status, 409);
+  assert.equal(outcome.errorCode, "declaration_equivocation");
+});
+
+test("as.polyfill.connector.register treats key order as no change, and a new version as a new key", async () => {
+  const accepted = { connector_id: "eqv", streams: [{ name: "alpha", primary_key: ["id"] }], version: "v1" };
+  const registered: unknown[] = [];
+  const deps = {
+    ...registerDepsStub,
+    getConnectorManifest: () => accepted,
+    registerConnector: (m: unknown) => {
+      registered.push(m);
+      return "eqv";
+    },
+  };
+  const reordered = {
+    connector_id: "eqv",
+    streams: [Object.fromEntries(Object.entries(accepted.streams[0] ?? {}).reverse())],
+    version: "v1",
+  };
+  assert.equal((await executeAsPolyfillConnectorRegister({ manifest: reordered }, deps)).outcome, "success");
+  const next = { connector_id: "eqv", streams: [{ name: "beta" }], version: "v2" };
+  assert.equal((await executeAsPolyfillConnectorRegister({ manifest: next }, deps)).outcome, "success");
+  assert.equal(registered.length, 2);
+});
+
+test("as.polyfill.connector.register lets a registration replace an unreadable stored manifest", async () => {
+  const outcome = await executeAsPolyfillConnectorRegister(
+    { manifest: { connector_id: "eqv", version: "v1" } },
+    {
+      ...registerDepsStub,
+      getConnectorManifest: () => {
+        throw new Error("stored manifest is malformed");
+      },
+      registerConnector: () => "eqv",
+    }
+  );
+  assert.equal(outcome.outcome, "success");
+});
+
 test("as.polyfill.connector.register rejects body without connector_key or connector_id", async () => {
   const outcome = await executeAsPolyfillConnectorRegister(
     { manifest: { name: "x" } },
-    { registerConnector: () => assert.fail("not reached") }
+    { ...registerDepsStub, registerConnector: () => assert.fail("not reached") }
   );
   assert.equal(outcome.outcome, "failure");
   assert.equal(outcome.status, 400);
@@ -599,6 +656,7 @@ test("as.polyfill.connector.register echoes registered connector key on 201", as
   const outcome = await executeAsPolyfillConnectorRegister(
     { manifest: { connector_id: "github", name: "GitHub" } },
     {
+      ...registerDepsStub,
       registerConnector: (m) => {
         captured = m;
         return "github";
@@ -624,6 +682,7 @@ test("as.polyfill.connector.register accepts connector_key identity", async () =
       },
     },
     {
+      ...registerDepsStub,
       registerConnector: (m) => {
         captured = m;
         return "custom-source";
