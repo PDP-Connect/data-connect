@@ -83,7 +83,16 @@ if [[ "$disabled" != 1 && $in_receipt -eq 0 ]] && command -v systemd-run >/dev/n
     sleep 0.1
   done
 fi
-if [[ "$disabled" != 1 ]] && command -v bwrap >/dev/null; then bwrap_ok=1; fi
+# Probe bwrap with the flags this run needs: it can be installed but unable to
+# create namespaces (AppArmor userns restriction on Ubuntu 24.04 runners,
+# containers without CAP_SYS_ADMIN).
+if [[ "$disabled" != 1 ]] && command -v bwrap >/dev/null; then
+  probe=(bwrap --dev-bind / / --tmpfs /tmp)
+  [[ "$net" == none ]] && probe+=(--unshare-net)
+  [[ "$pidns" == 1 ]] && probe+=(--unshare-pid --proc /proc)
+  if "${probe[@]}" true >/dev/null 2>&1; then bwrap_ok=1
+  else notes+=("bwrap is installed but cannot create namespaces here; running without it"); fi
+fi
 if [[ "$disabled" == 1 ]]; then
   enforcement=disabled
 else
