@@ -177,6 +177,10 @@ function serializedDetailGapBytes(entry: PendingStartDetailGap | StartDetailGap)
   }
 }
 
+function detailGapLeaseId(runId: string, pageId: number, gapId: string): string {
+  return `${runId}:detail-gap-page:${pageId}:gap:${gapId}`;
+}
+
 function buildStartDetailGap(gap: DetailGap): PendingStartDetailGap {
   return {
     detail_locator: gap.detail_locator ?? null,
@@ -336,7 +340,7 @@ export function createDetailGapPageReader({
     const { detailGaps, serializedBytes, entryBytesTotal } = trimDetailGapPageToByteBudget(
       pendingGaps,
       byteBudget,
-      (gap) => `${runId}:detail-gap-page:${pageId}:gap:${gap.gap_id}`
+      (gap) => detailGapLeaseId(runId, pageId, gap.gap_id)
     );
 
     if (detailGaps.length === 0) {
@@ -367,7 +371,7 @@ export function createDetailGapPageReader({
     const leasesByGapId = new Map<string, string>();
     await Promise.all(
       detailGaps.map(async (gap) => {
-        const leaseId = `${runId}:detail-gap-page:${pageId}:gap:${gap.gap_id}`;
+        const leaseId = detailGapLeaseId(runId, pageId, gap.gap_id);
         const claimed = await detailGapStore.claimPendingGaps([gap.gap_id], { leaseExpiresAt, leaseId, runId });
         if (claimed.includes(gap.gap_id)) {
           leasesByGapId.set(gap.gap_id, leaseId);
