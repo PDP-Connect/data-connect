@@ -369,6 +369,46 @@ test("an atomic uninstall failure leaves the prior active pointer and entrypoint
   }
 });
 
+test("SQLite: install and activation deletes roll back together when the second delete fails", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pdpp-connector-install-delete-atomicity-"));
+  const previousPreloadDir = process.env.PDPP_CONNECTOR_PRELOAD_DIR;
+  delete process.env.PDPP_CONNECTOR_PRELOAD_DIR;
+  closeDb();
+  initDb(join(dataDir, "pdpp.sqlite"));
+  try {
+    const now = new Date().toISOString();
+    getDb()
+      .prepare("INSERT INTO connector_installs(connector_id, record_json, updated_at) VALUES (?, ?, ?)")
+      .run("github", "{}", now);
+    getDb()
+      .prepare(
+        `INSERT INTO connector_activations(
+          connector_id,state,record_json,canonical_manifest_json,manifest_revision,
+          activation_id,attempt_id,updated_at
+        ) VALUES (?, 'active', '{}', '{}', '1', 'activation', 'attempt', ?)`
+      )
+      .run("github", now);
+    getDb().exec(`
+      CREATE TRIGGER fail_connector_activation_delete
+      BEFORE DELETE ON connector_activations
+      BEGIN
+        SELECT RAISE(ABORT, 'injected activation delete failure');
+      END
+    `);
+
+    const store = createConnectorInstallStore();
+    assert.ok(store.deactivateAndRemoveActivation);
+    await assert.rejects(store.deactivateAndRemoveActivation("github"), /injected activation delete failure/);
+    assert.ok(getDb().prepare("SELECT 1 FROM connector_installs WHERE connector_id=?").get("github"));
+    assert.ok(getDb().prepare("SELECT 1 FROM connector_activations WHERE connector_id=?").get("github"));
+  } finally {
+    closeDb();
+    if (previousPreloadDir === undefined) delete process.env.PDPP_CONNECTOR_PRELOAD_DIR;
+    else process.env.PDPP_CONNECTOR_PRELOAD_DIR = previousPreloadDir;
+    rmSync(dataDir, { force: true, recursive: true });
+  }
+});
+
 test("startup recovery restores the original entrypoint at each root-move crash point", async () => {
   for (const { name, moveCount } of [
     { moveCount: 0, name: "before moves" },
