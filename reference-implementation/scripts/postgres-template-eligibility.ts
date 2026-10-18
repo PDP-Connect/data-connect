@@ -36,6 +36,8 @@ export const POSTGRES_TEMPLATE_ELIGIBLE_FILES: readonly string[] = [
   "test/auth-consent-device-postgres-path.test.ts",
   // Uses Postgres as a fixture for process-kill recovery of auth rows, not as the subject of schema bootstrap.
   "test/auth-kill-boundaries.test.ts",
+  // Uses Postgres as a fixture for process-kill recovery of revocation cascades, not as the subject of schema bootstrap.
+  "test/auth-revocation-atomicity.test.ts",
   "test/browser-surface-external-loss-receipt-atomicity.test.ts",
   "test/browser-surface-readiness-generation-atomicity.test.ts",
   "test/browser-surface-replacement-correction-artifact.test.ts",
