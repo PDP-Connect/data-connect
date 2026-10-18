@@ -20,6 +20,7 @@ import {
   resolveRequestConnectionId,
 } from "./connection-id-request.ts";
 import { assertConnectorInstanceWritableStatus } from "./connector-instance-admission.ts";
+import { crashPoint } from "./crash-point.ts";
 import {
   type ConnectorInstanceWriteOwnership,
   withConnectorInstanceWrite,
@@ -2076,6 +2077,7 @@ export async function postgresIngestRecord(
       const selfHeal = ingestDisposition === "self_heal";
 
       const nextVersion = await allocateNextVersion(client, resolvedConnectorId, connectorInstanceId, stream);
+      crashPoint("ingest:after-version-allocation");
       const currentRecordJsonBytes = current && !current.deleted ? Number(current.record_json_bytes || 0) : 0;
       const nextRecordJsonBytes = await writePostgresIngestMutation({
         client,
@@ -2092,6 +2094,7 @@ export async function postgresIngestRecord(
         storedSemanticTime,
         stream,
       });
+      crashPoint("ingest:after-record-write");
 
       // Scope-keyed dirty mark, inside the SAME transaction/client as the
       // record mutation above: this scope's lexical/semantic index may now be
@@ -2101,6 +2104,7 @@ export async function postgresIngestRecord(
         { connectorId: resolvedConnectorId, connectorInstanceId, stream },
         nowIso()
       );
+      crashPoint("ingest:after-dirty-mark");
 
       const insertedChangeJsonBytes = op === "delete" ? currentRecordJsonBytes : nextRecordJsonBytes;
       const { bytes: prunedBytesForDelta, rows: prunedRowsForDelta } = await prunePostgresRecordChanges({
@@ -2111,6 +2115,7 @@ export async function postgresIngestRecord(
         stream,
       });
 
+      crashPoint("ingest:before-commit");
       return finishDurableOutcome({
         kind: "changed",
         op,
@@ -2138,6 +2143,7 @@ export async function postgresIngestRecord(
     },
     { lockConnectorInstanceId: connectorInstanceId }
   );
+  crashPoint("ingest:after-commit-before-ack");
 
   if (outcome.kind === "noop") {
     return { accepted: true, changed: false };
