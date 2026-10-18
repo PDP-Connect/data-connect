@@ -95,3 +95,23 @@ test("owner token introspection fails closed on malformed expiry (PostgreSQL)", 
     }
   );
 });
+
+test("owner token expiry is inactive at exact timestamp equality", async (t) => {
+  const now = Date.parse("2026-10-17T12:00:00.000Z");
+  t.mock.timers.enable({ apis: ["Date"], now });
+  initDb(":memory:");
+  try {
+    getDb()
+      .prepare(
+        `INSERT INTO tokens(token_id, subject_id, client_id, token_kind, expires_at, revoked)
+         VALUES ('tok_exact_expiry_fixture', 'owner_local', 'expiry_test_client', 'owner', ?, 0)`
+      )
+      .run(new Date(now).toISOString());
+    const result = await introspect("tok_exact_expiry_fixture");
+    assert.equal(result.active, false);
+    assert.equal(result.inactive_reason, "token_expired");
+  } finally {
+    closeDb();
+    t.mock.timers.reset();
+  }
+});
