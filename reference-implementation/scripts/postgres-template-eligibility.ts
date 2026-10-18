@@ -143,6 +143,8 @@ export const POSTGRES_TEMPLATE_ELIGIBLE_FILES: readonly string[] = [
   "test/records-null-cursor-pagination.test.ts",
   // Child processes ingest into a scratch database; does not observe schema bootstrap.
   "test/records-version-allocation-contention-postgres.test.ts",
+  // Child processes tear down a seeded scratch database and are killed; does not observe schema bootstrap.
+  "test/records-teardown-failure-matrix.test.ts",
   "test/recovery-bounded-reads.test.ts",
   // Quarantine compare-and-swap race over a seeded gap; does not observe schema bootstrap.
   "test/recovery-quarantine-race-postgres.test.ts",
