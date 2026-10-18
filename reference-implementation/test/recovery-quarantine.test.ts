@@ -282,6 +282,43 @@ test(
 );
 
 test(
+  "quarantine does not apply when only attempt_count moved after its decision read",
+  withTempDb(async () => {
+    const store = createSqliteConnectorDetailGapStore();
+    const gap = await seedGap(store, "quarantine_attempt_count_race");
+    await store.markGapStatus(gap.gap_id, "in_progress");
+    const adapter = quarantineStore(store);
+    let intercepted = false;
+    const staleReadAdapter: Parameters<typeof maybeQuarantineGap>[0] = {
+      ...adapter,
+      async getGapById(id) {
+        const snapshot = await adapter.getGapById(id);
+        if (!intercepted && snapshot) {
+          intercepted = true;
+          // in_progress -> in_progress advances attempt_count and leaves status unchanged.
+          await store.markGapStatus(id, "in_progress");
+        }
+        return snapshot;
+      },
+    };
+
+    const outcome = await maybeQuarantineGap(
+      staleReadAdapter,
+      gap.gap_id,
+      { failure_class: "interrupted" },
+      { maxNoProgressAttempts: 1 }
+    );
+
+    assert.equal(intercepted, true, "the read/write interleaving actually occurred");
+    const persisted = await store.getGapById(gap.gap_id);
+    assert.ok(persisted);
+    assert.equal(persisted.status, "in_progress", "a stale attempt_count must not terminalize the gap");
+    assert.equal(persisted.attempt_count, 2, "the concurrent attempt is preserved");
+    assert.equal(outcome.quarantined, false);
+  })
+);
+
+test(
   "maybeQuarantineGap: a poison item does not block its siblings - siblings keep draining",
   withTempDb(async () => {
     const store = createSqliteConnectorDetailGapStore();
