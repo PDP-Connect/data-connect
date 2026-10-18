@@ -206,6 +206,9 @@ jobs:
         env:
           PDPP_OWNER_PASSWORD: reference-implementation-ci
           PDPP_TEST_PROFILE: "memory-default"
+          # The hosted runner is a disposable VM, which is the isolation
+          # boundary here; test-sandbox runs the command directly.
+          TEST_SANDBOX_DISABLE: "1"
         run: npm --prefix reference-implementation run test
 
   check-vendor-freshness:
