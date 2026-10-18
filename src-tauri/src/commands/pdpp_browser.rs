@@ -411,14 +411,23 @@ fn terminate_unix_browser(
         return false;
     }
     let process_group = child.id();
+    // Reap the leader only after every other group member has exited.
+    // Reaping it as soon as it exits reports success while a descendant
+    // still runs.
     signal_group(process_group, libc::SIGTERM);
-    let _ = wait_for_child_exit_without_reaping(child, BROWSER_STOP_WAIT);
+    if wait_for_child_exit_without_reaping(child, BROWSER_STOP_WAIT)
+        && wait_for_process_group_members_exit(process_group, child.id(), BROWSER_STOP_WAIT)
+    {
+        return child.wait().is_ok();
+    }
     // Do not signal if the child identity was lost while waiting.
     if child_exited_without_reaping(child).is_err() {
         return false;
     }
     signal_group(process_group, libc::SIGKILL);
-    if !wait_for_child_exit_without_reaping(child, BROWSER_STOP_WAIT) {
+    if !wait_for_child_exit_without_reaping(child, BROWSER_STOP_WAIT)
+        || !wait_for_process_group_members_exit(process_group, child.id(), BROWSER_STOP_WAIT)
+    {
         return false;
     }
     child.wait().is_ok()
@@ -463,13 +472,128 @@ fn signal_process_group(process_group: u32, signal: libc::c_int) {
     }
 }
 
-#[cfg(unix)]
-fn process_group_exists(process_group: u32) -> bool {
-    let result = unsafe { libc::kill(-(process_group as i32), 0) };
-    if result == 0 {
-        return true;
+#[cfg(target_os = "linux")]
+fn process_group_has_other_members(process_group: u32, leader_pid: u32) -> io::Result<bool> {
+    for entry in fs::read_dir("/proc")? {
+        let entry = entry?;
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if pid == leader_pid {
+            continue;
+        }
+        let stat = match fs::read_to_string(entry.path().join("stat")) {
+            Ok(stat) => stat,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        let Some((_, fields)) = stat.rsplit_once(") ") else {
+            continue;
+        };
+        let mut fields = fields.split_whitespace();
+        let Some(state) = fields.next() else { continue };
+        let Some(_) = fields.next() else { continue };
+        let Some(pgrp) = fields.next().and_then(|value| value.parse::<u32>().ok()) else {
+            continue;
+        };
+        if pgrp == process_group && state != "Z" && state != "X" {
+            return Ok(true);
+        }
     }
-    io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+    Ok(false)
+}
+
+#[cfg(target_os = "macos")]
+fn process_group_has_other_members(process_group: u32, leader_pid: u32) -> io::Result<bool> {
+    const PROC_PGRP_ONLY: u32 = 2;
+    let mut pids = vec![0 as libc::pid_t; 4096];
+    loop {
+        let size = std::mem::size_of_val(pids.as_slice());
+        let bytes = unsafe {
+            libc::proc_listpids(
+                PROC_PGRP_ONLY,
+                process_group,
+                pids.as_mut_ptr().cast(),
+                size as libc::c_int,
+            )
+        };
+        if bytes < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if bytes as usize >= size {
+            pids.resize(pids.len() * 2, 0);
+            continue;
+        }
+        for pid in pids
+            .iter()
+            .copied()
+            .take(bytes as usize / std::mem::size_of::<libc::pid_t>())
+        {
+            if pid <= 0 || pid as u32 == leader_pid {
+                continue;
+            }
+            let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+            let read = unsafe {
+                libc::proc_pidinfo(
+                    pid,
+                    libc::PROC_PIDTBSDINFO,
+                    0,
+                    (&mut info as *mut libc::proc_bsdinfo).cast(),
+                    std::mem::size_of_val(&info) as libc::c_int,
+                )
+            };
+            if read == std::mem::size_of_val(&info) as libc::c_int {
+                if info.pbi_pgid == process_group && info.pbi_status != libc::SZOMB {
+                    return Ok(true);
+                }
+            } else if read < 0 {
+                return Err(io::Error::last_os_error());
+            } else if read == 0 {
+                let result = unsafe { libc::kill(pid, 0) };
+                if result != 0 && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+                    continue;
+                }
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    "could not inspect a process group member",
+                ));
+            } else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "short process group member record",
+                ));
+            }
+        }
+        return Ok(false);
+    }
+}
+
+#[cfg(unix)]
+fn wait_for_process_group_members_exit(
+    process_group: u32,
+    leader_pid: u32,
+    timeout: Duration,
+) -> bool {
+    let deadline = Instant::now() + timeout;
+    let mut saw_empty_group = false;
+    loop {
+        match process_group_has_other_members(process_group, leader_pid) {
+            Ok(false) if saw_empty_group => return true,
+            Ok(false) if Instant::now() < deadline => {
+                saw_empty_group = true;
+                thread::sleep(Duration::from_millis(20));
+            }
+            Ok(true) if Instant::now() < deadline => {
+                saw_empty_group = false;
+                thread::sleep(Duration::from_millis(20));
+            }
+            Ok(false) | Ok(true) | Err(_) => return false,
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -817,6 +941,46 @@ mod tests {
         let process_group = child.id();
 
         assert!(terminate_browser(&mut child));
-        assert!(!process_group_exists(process_group));
+        assert!(!process_group_has_other_members(process_group, child.id()).unwrap());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn terminate_does_not_report_success_while_group_member_remains() {
+        let temp = tempfile::tempdir().unwrap();
+        let pid_file = temp.path().join("descendant-pid");
+        let pid_file_arg = pid_file.to_string_lossy().into_owned();
+        let mut command = Command::new("sh");
+        command.args([
+            "-c",
+            "trap '' TERM; (trap '' TERM; exec sleep 30) & echo $! > \"$1\"; while ! kill -0 \"$(cat \"$1\")\" 2>/dev/null; do :; done; exit 0",
+            "sh",
+            &pid_file_arg,
+        ]);
+        command.process_group(0);
+        let mut child = command.spawn().expect("spawn test browser process tree");
+        let process_group = child.id();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !pid_file.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        while !child_exited_without_reaping(&child).unwrap() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(pid_file.exists(), "descendant must start before cleanup");
+        assert!(
+            child_exited_without_reaping(&child).unwrap(),
+            "leader must exit first"
+        );
+
+        // A no-op signaller keeps the descendant alive past both signal
+        // attempts. Cleanup must refuse success while it remains.
+        let terminated = terminate_unix_browser(&mut child, |_, _| {});
+        signal_process_group(process_group, libc::SIGKILL);
+        let _ = child.wait();
+        assert!(
+            !terminated,
+            "a live descendant must prevent cleanup success"
+        );
     }
 }
