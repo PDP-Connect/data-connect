@@ -8,8 +8,8 @@ once. Each storage profile has a cap: **8** for `memory-default`, **2** for
 number of selected test files, and never falls below 1.
 
 `PDPP_TEST_CONCURRENCY`, when it parses to a positive integer, replaces that
-default. A positive override is **not** clamped to the CPU count or the
-selected file count. The runner reads it with `Number.parseInt`, which
+default request. Positive overrides remain clamped by the profile cap, CPU
+count and selected file count. The runner reads it with `Number.parseInt`, which
 truncates, so `1.5` becomes 1; a non-positive or unparseable value falls back
 to the profile default, which is then clamped as above.
 
@@ -23,9 +23,10 @@ process. Process isolation alone does not bound resource use: files still open
 SQLite databases and temporary directories on the same host, and several tests
 assert real serialization ordering that heavy parallelism can break.
 
-The PostgreSQL path has a stronger reason to stay low. Its backup/restore oracle
-shares the restore database named by `PDPP_TEST_POSTGRES_RESTORE_URL`, so
-otherwise-independent file workers can contend for the same restore resource.
+The PostgreSQL cap remains 2 pending fresh measurements. The runner allocates a
+separate disposable restore database for the backup oracle; the configured
+restore URL is validated as before and supplies the isolated cluster connection.
+Direct test invocations outside the runner still require caller-owned targets.
 Raising concurrency for PostgreSQL needs its own restore-aware measurement on a
 PostgreSQL host; a memory-profile result is not authority for it.
 
@@ -96,7 +97,7 @@ known and a measurement for the same profile justifies it:
 # Memory profile, overriding the default cap of 8.
 PDPP_TEST_PROFILE=memory-default PDPP_TEST_CONCURRENCY=4 npm --prefix reference-implementation test
 
-# PostgreSQL stays at 2 unless its own restore-aware measurement says otherwise.
+# PostgreSQL stays capped at 2.
 PDPP_TEST_PROFILE=postgres npm --prefix reference-implementation test
 ```
 
