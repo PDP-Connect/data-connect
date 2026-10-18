@@ -2,11 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, test } from "node:test";
 import {
+  collectChangeSet,
   formatDepthSummary,
   parseDepth,
   selectAffectedTests,
@@ -31,6 +33,30 @@ async function tree(files: Record<string, string>): Promise<string> {
     await writeFile(destination, source);
   }
   return root;
+}
+
+/** Commit `files` in a fresh git repo; returns [gitRoot, referenceImplementationDir]. */
+async function gitTree(
+  files: Record<string, string>,
+): Promise<[string, string]> {
+  const root = await tree(files);
+  git(root, "init", "-q");
+  git(root, "add", ".");
+  git(root, "commit", "-q", "-m", "base", "--no-gpg-sign");
+  return [root, join(root, "reference-implementation")];
+}
+
+function git(cwd: string, ...args: string[]): void {
+  execFileSync("git", args, {
+    cwd,
+    env: {
+      ...process.env,
+      GIT_AUTHOR_NAME: "t",
+      GIT_AUTHOR_EMAIL: "t@example.invalid",
+      GIT_COMMITTER_NAME: "t",
+      GIT_COMMITTER_EMAIL: "t@example.invalid",
+    },
+  });
 }
 
 afterEach(async () => {
@@ -401,4 +427,114 @@ test("skips full-suite named mapping finalization for files-from runs", async ()
     runner,
     /if \(filesFromIndex === -1 && !failed && results\.length === testFiles\.length\)/,
   );
+});
+
+test("a changed root lockfile falls back to full discovery", async () => {
+  const [root, riRoot] = await gitTree({
+    "package-lock.json": '{"lockfileVersion":3}',
+    "reference-implementation/test/a.test.ts": "test('x', () => {});",
+    "reference-implementation/test/b.test.ts": "test('y', () => {});",
+  });
+  await writeFile(join(root, "package-lock.json"), '{"lockfileVersion":4}');
+  const result = await selectAffectedTests(
+    riRoot,
+    ["test/a.test.ts", "test/b.test.ts"],
+    collectChangeSet(riRoot, "HEAD"),
+  );
+  assert.equal(result.fallback, true);
+  assert.deepEqual(result.files, ["test/a.test.ts", "test/b.test.ts"]);
+});
+
+test("a changed root package.json falls back to full discovery", async () => {
+  const [root, riRoot] = await gitTree({
+    "package.json": '{"name":"root"}',
+    "reference-implementation/test/a.test.ts": "test('x', () => {});",
+  });
+  await writeFile(join(root, "package.json"), '{"name":"changed"}');
+  const result = await selectAffectedTests(
+    riRoot,
+    ["test/a.test.ts"],
+    collectChangeSet(riRoot, "HEAD"),
+  );
+  assert.equal(result.fallback, true);
+});
+
+test("a changed file unrelated to the RI does not force a fallback", async () => {
+  const [root, riRoot] = await gitTree({
+    "docs/note.md": "a",
+    "reference-implementation/test/a.test.ts": "test('x', () => {});",
+  });
+  await writeFile(join(root, "docs/note.md"), "b");
+  const result = await selectAffectedTests(
+    riRoot,
+    ["test/a.test.ts"],
+    collectChangeSet(riRoot, "HEAD"),
+  );
+  assert.equal(result.fallback, false);
+  assert.deepEqual(result.files, []);
+});
+
+test("a renamed test file triggers the test-tree inventory tests", async () => {
+  const body = "test('same body so git detects a rename', () => {});\n".repeat(
+    20,
+  );
+  const [root, riRoot] = await gitTree({
+    "reference-implementation/test/old-name.test.ts": body,
+    "reference-implementation/test/inventory.test.ts": inventorySource,
+    "reference-implementation/test/other.test.ts": "test('o', () => {});",
+  });
+  git(
+    root,
+    "mv",
+    "reference-implementation/test/old-name.test.ts",
+    "reference-implementation/test/new-name.test.ts",
+  );
+  const result = await selectAffectedTests(
+    riRoot,
+    ["test/new-name.test.ts", "test/inventory.test.ts", "test/other.test.ts"],
+    collectChangeSet(riRoot, "HEAD"),
+  );
+  assert.equal(result.fallback, true);
+  assert.match(result.reason, /deleted module/);
+  assert.ok(result.files.includes("test/inventory.test.ts"));
+});
+
+test("selects tests behind every module that reads a changed asset", async () => {
+  const root = await tree({
+    "test/a.test.ts": staticImport("../server/a.ts"),
+    "test/b.test.ts": staticImport("../server/b.ts"),
+    "server/a.ts": 'readFileSync("shared.sql");',
+    "server/b.ts": 'readFileSync("shared.sql");',
+    "sql/shared.sql": "select 1;",
+  });
+  const result = await selectAffectedTests(
+    root,
+    ["test/a.test.ts", "test/b.test.ts"],
+    {
+      addedOrModified: ["reference-implementation/sql/shared.sql"],
+      deleted: [],
+    },
+    { depth: "all" },
+  );
+  assert.deepEqual(result.files, ["test/a.test.ts", "test/b.test.ts"]);
+});
+
+test("a JSON asset with an import edge also selects its textual readers", async () => {
+  const root = await tree({
+    "test/a.test.ts": staticImport("../server/a.ts"),
+    "test/b.test.ts": staticImport("../server/b.ts"),
+    "server/a.ts": `import data from "../fixtures/data.json";`,
+    "server/b.ts": 'readFileSync("data.json");',
+    "fixtures/data.json": '{"v":1}',
+  });
+  const result = await selectAffectedTests(
+    root,
+    ["test/a.test.ts", "test/b.test.ts"],
+    {
+      addedOrModified: ["reference-implementation/fixtures/data.json"],
+      deleted: [],
+    },
+    { depth: "all" },
+  );
+  assert.deepEqual(result.files, ["test/a.test.ts", "test/b.test.ts"]);
 });

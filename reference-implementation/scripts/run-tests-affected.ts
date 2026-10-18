@@ -17,6 +17,7 @@ import { discoverTestFiles } from "./run-tests-discovery.ts";
 
 const MODULE_EXTENSIONS = [".ts", ".js", ".mjs", ".cjs", ".json"] as const;
 const FALLBACK_PATHS = [
+  /^package\.json$/,
   /^reference-implementation\/package\.json$/,
   /(^|\/)(?:package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|yarn\.lock|bun\.lockb?)$/,
   /^reference-implementation\/tsconfig[^/]*\.json$/,
@@ -291,6 +292,27 @@ export async function validateFilesFrom(
   return [...new Set(files)].sort();
 }
 
+/** Every discovered module whose source names the asset by relative path or basename. */
+function textualReaders(
+  sources: ReadonlyMap<string, string>,
+  asset: string,
+): string[] {
+  const basename = asset.split("/").at(-1) ?? asset;
+  const readers: string[] = [];
+  for (const [modulePath, source] of sources) {
+    const relativeAsset = relative(dirname(modulePath), asset).replaceAll(
+      "\\",
+      "/",
+    );
+    if (
+      source.includes(JSON.stringify(relativeAsset)) ||
+      source.includes(JSON.stringify(basename))
+    )
+      readers.push(modulePath);
+  }
+  return readers;
+}
+
 export async function selectAffectedTests(
   repoRoot: string,
   discoveredTests: readonly string[],
@@ -394,25 +416,19 @@ export async function selectAffectedTests(
     const absolute = resolve(repoRoot, path);
     if (sources.has(absolute)) {
       direct.add(absolute);
+      // A JSON asset with an import edge can also be read by path elsewhere.
+      if (extname(path) === ".json")
+        for (const reader of textualReaders(sources, absolute))
+          direct.add(reader);
       continue;
     }
     if (isModulePath(path) && extname(path) !== ".json") {
       unresolved.push(path);
       continue;
     }
-    const basename = path.split("/").at(-1) ?? path;
-    const reference = [...sources].find(([modulePath, source]) => {
-      const relativeAsset = relative(dirname(modulePath), absolute).replaceAll(
-        "\\",
-        "/",
-      );
-      return (
-        source.includes(JSON.stringify(relativeAsset)) ||
-        source.includes(JSON.stringify(basename))
-      );
-    });
-    if (reference) direct.add(reference[0]);
-    else unresolved.push(changed[index] ?? path);
+    const readers = textualReaders(sources, absolute);
+    for (const reader of readers) direct.add(reader);
+    if (readers.length === 0) unresolved.push(changed[index] ?? path);
   }
   if (unresolved.length > 0)
     return fallback(`unmodelled or unreferenced change: ${unresolved[0]}`);
@@ -536,6 +552,102 @@ export function formatDepthSummary(selection: Selection): string[] {
   return lines;
 }
 
+function gitPaths(repoRoot: string, ...args: string[]): string[] {
+  return execFileSync("git", args, { cwd: repoRoot, encoding: "utf8" })
+    .trim()
+    .split("\n")
+    .filter(Boolean);
+}
+
+/** Changed paths from `base` to the working tree, as the selector's input. */
+export function collectChangeSet(repoRoot: string, base: string): ChangeSet {
+  const changedNames = gitPaths(
+    repoRoot,
+    "diff",
+    "--no-renames",
+    "--name-only",
+    base,
+  );
+  const staged = gitPaths(
+    repoRoot,
+    "diff",
+    "--cached",
+    "--no-renames",
+    "--name-only",
+  );
+  const unstaged = gitPaths(repoRoot, "diff", "--no-renames", "--name-only");
+  const untracked = gitPaths(
+    repoRoot,
+    "ls-files",
+    "--full-name",
+    "--others",
+    "--exclude-standard",
+  );
+  const allChanged = [
+    ...new Set([...changedNames, ...staged, ...unstaged, ...untracked]),
+  ];
+  // Fallback paths (root lockfiles, root package.json) stay in the set so the
+  // selector's fallback rules see them; other unrelated paths are dropped.
+  const relevant = allChanged.filter(
+    (path) =>
+      path.startsWith("reference-implementation/") ||
+      /^(packages|scripts\/test-scratch|scripts\/test-sandbox)\//.test(path) ||
+      FALLBACK_PATHS.some((pattern) => pattern.test(path)),
+  );
+  const deleted = [
+    ...gitPaths(
+      repoRoot,
+      "diff",
+      "--no-renames",
+      "--name-only",
+      "--diff-filter=D",
+      base,
+    ),
+    ...gitPaths(
+      repoRoot,
+      "diff",
+      "--cached",
+      "--no-renames",
+      "--name-only",
+      "--diff-filter=D",
+    ),
+    ...gitPaths(
+      repoRoot,
+      "diff",
+      "--no-renames",
+      "--name-only",
+      "--diff-filter=D",
+    ),
+  ];
+  const deletedLocal = [
+    ...new Set(deleted.filter((path) => relevant.includes(path))),
+  ];
+  const added = [
+    ...gitPaths(
+      repoRoot,
+      "diff",
+      "--no-renames",
+      "--name-only",
+      "--diff-filter=A",
+      base,
+    ),
+    ...gitPaths(
+      repoRoot,
+      "diff",
+      "--cached",
+      "--no-renames",
+      "--name-only",
+      "--diff-filter=A",
+    ),
+    ...untracked,
+  ];
+  return {
+    added: [...new Set(added.filter((path) => relevant.includes(path)))],
+    addedOrModified: relevant.filter((path) => !deletedLocal.includes(path)),
+    deleted: deletedLocal,
+  };
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const baseIndex = args.indexOf("--base");
@@ -545,11 +657,6 @@ async function main(): Promise<void> {
   const depth = parseDepth(args);
   const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
   const testFiles = await discoverTestFiles(repoRoot, join(repoRoot, "test"));
-  const gitPaths = (...args: string[]): string[] =>
-    execFileSync("git", args, { cwd: repoRoot, encoding: "utf8" })
-      .trim()
-      .split("\n")
-      .filter(Boolean);
   let base = baseOverride;
   if (!base) {
     try {
@@ -562,44 +669,10 @@ async function main(): Promise<void> {
       base = "origin/main";
     }
   }
-  const changedNames = gitPaths("diff", "--name-only", base);
-  const staged = gitPaths("diff", "--cached", "--name-only");
-  const unstaged = gitPaths("diff", "--name-only");
-  const untracked = gitPaths(
-    "ls-files",
-    "--full-name",
-    "--others",
-    "--exclude-standard",
-  );
-  const allChanged = [
-    ...new Set([...changedNames, ...staged, ...unstaged, ...untracked]),
-  ];
-  const relevant = allChanged.filter(
-    (path) =>
-      path.startsWith("reference-implementation/") ||
-      /^(packages|scripts\/test-scratch|scripts\/test-sandbox)\//.test(path),
-  );
-  const deleted = [
-    ...gitPaths("diff", "--name-only", "--diff-filter=D", base),
-    ...gitPaths("diff", "--cached", "--name-only", "--diff-filter=D"),
-    ...gitPaths("diff", "--name-only", "--diff-filter=D"),
-  ];
-  const deletedLocal = [
-    ...new Set(deleted.filter((path) => relevant.includes(path))),
-  ];
-  const added = [
-    ...gitPaths("diff", "--name-only", "--diff-filter=A", base),
-    ...gitPaths("diff", "--cached", "--name-only", "--diff-filter=A"),
-    ...untracked,
-  ];
   const selection = await selectAffectedTests(
     repoRoot,
     testFiles,
-    {
-      added: [...new Set(added.filter((path) => relevant.includes(path)))],
-      addedOrModified: relevant.filter((path) => !deletedLocal.includes(path)),
-      deleted: deletedLocal,
-    },
+    collectChangeSet(repoRoot, base),
     { depth },
   );
   console.log(
