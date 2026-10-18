@@ -44,7 +44,7 @@ test("LocalDeviceOutbox persists ready work and reopens from disk", async (t) =>
 });
 
 test("LocalDeviceOutbox supports deterministic ids and idempotent enqueue", async (t) => {
-  const outbox = new LocalDeviceOutbox({ path: await tempOutboxPath(t) });
+  const outbox = new LocalDeviceOutbox({ path: ":memory:" });
   try {
     const id = buildLocalDeviceOutboxId({
       kind: "record_batch",
@@ -264,7 +264,7 @@ test("LocalDeviceOutbox claims ready work with holder, epoch, and lease deadline
   let now = new Date("2026-05-19T12:00:00.000Z");
   const outbox = new LocalDeviceOutbox({
     clock: () => now,
-    path: await tempOutboxPath(t),
+    path: ":memory:",
   });
   try {
     outbox.enqueue({
@@ -305,7 +305,7 @@ test("LocalDeviceOutbox claims ready work with holder, epoch, and lease deadline
 test("LocalDeviceOutbox can exclude checkpoint rows while batch-claiming ready work", async (t) => {
   const outbox = new LocalDeviceOutbox({
     clock: () => new Date("2026-05-19T12:00:00.000Z"),
-    path: await tempOutboxPath(t),
+    path: ":memory:",
   });
   try {
     outbox.enqueue({
@@ -349,7 +349,7 @@ test("LocalDeviceOutbox recovers expired leases and fences stale acknowledgement
   let now = new Date("2026-05-19T12:00:00.000Z");
   const outbox = new LocalDeviceOutbox({
     clock: () => now,
-    path: await tempOutboxPath(t),
+    path: ":memory:",
   });
   try {
     outbox.enqueue({
@@ -397,7 +397,7 @@ test("LocalDeviceOutbox handles retry and dead-letter transitions", async (t) =>
   let now = new Date("2026-05-19T12:00:00.000Z");
   const outbox = new LocalDeviceOutbox({
     clock: () => now,
-    path: await tempOutboxPath(t),
+    path: ":memory:",
   });
   try {
     outbox.enqueue({
@@ -448,7 +448,7 @@ test("LocalDeviceOutbox handles retry and dead-letter transitions", async (t) =>
 test("LocalDeviceOutbox requeues dead letters by source, kind, and limit", async (t) => {
   const outbox = new LocalDeviceOutbox({
     clock: fixedClock("2026-05-19T12:00:00.000Z"),
-    path: await tempOutboxPath(t),
+    path: ":memory:",
   });
   try {
     for (const [id, kind, sourceInstanceId] of [
@@ -513,7 +513,7 @@ test("LocalDeviceOutbox requeues dead letters by source, kind, and limit", async
 
 test("LocalDeviceOutbox only retires rejected terminal evidence after an accepted replacement", async (t) => {
   let now = new Date("2026-05-19T12:00:00.000Z");
-  const path = await tempOutboxPath(t);
+  const path = ":memory:";
   const outbox = new LocalDeviceOutbox({ clock: () => now, path });
   const oldId = "src-terminal:old-terminal";
   const replacementId = "src-terminal:new-terminal";
@@ -612,7 +612,7 @@ test("LocalDeviceOutbox only retires rejected terminal evidence after an accepte
 });
 
 test("LocalDeviceOutbox requeues dead letters by redacted error class", async (t) => {
-  const outbox = new LocalDeviceOutbox({ path: await tempOutboxPath(t) });
+  const outbox = new LocalDeviceOutbox({ path: ":memory:" });
   const sourceInstanceId = "src-1";
   try {
     for (const [id, error] of [
@@ -670,7 +670,7 @@ test("LocalDeviceOutbox requeues dead letters by redacted error class", async (t
 });
 
 test("LocalDeviceOutbox deletes only succeeded rows by id", async (t) => {
-  const outbox = new LocalDeviceOutbox({ path: await tempOutboxPath(t) });
+  const outbox = new LocalDeviceOutbox({ path: ":memory:" });
   try {
     outbox.enqueue({
       id: "src-1:gap:succeeded",
@@ -711,7 +711,7 @@ test("LocalDeviceOutbox rejects lease transitions after expiry even before recov
   let now = new Date("2026-05-19T12:00:00.000Z");
   const outbox = new LocalDeviceOutbox({
     clock: () => now,
-    path: await tempOutboxPath(t),
+    path: ":memory:",
   });
   try {
     outbox.enqueue({
@@ -765,7 +765,7 @@ test("LocalDeviceOutbox renews only the current unexpired lease holder", async (
   let now = new Date("2026-05-19T12:00:00.000Z");
   const outbox = new LocalDeviceOutbox({
     clock: () => now,
-    path: await tempOutboxPath(t),
+    path: ":memory:",
   });
   try {
     outbox.enqueue({
@@ -815,7 +815,7 @@ test("LocalDeviceOutbox can recover expired leases by source instance", async (t
   let now = new Date("2026-05-19T12:00:00.000Z");
   const outbox = new LocalDeviceOutbox({
     clock: () => now,
-    path: await tempOutboxPath(t),
+    path: ":memory:",
   });
   try {
     for (const sourceInstanceId of ["src-1", "src-2"]) {
@@ -845,7 +845,7 @@ test("LocalDeviceOutbox.summary aggregates large queues with one SQL pass", asyn
   let now = new Date("2026-05-19T12:00:00.000Z");
   const outbox = new LocalDeviceOutbox({
     clock: () => now,
-    path: await tempOutboxPath(t),
+    path: ":memory:",
   });
   try {
     const sourceInstanceId = "src-bulk";
@@ -944,7 +944,7 @@ test("LocalDeviceOutbox.summary: a never-failed backlog has oldestReadyAt but no
   // none of them has ever failed (attempt_count stays 0 for all of them).
   // oldestReadyAt ages with the queue; oldestRetryingAt must stay null,
   // since age alone is not retry/failure evidence.
-  const outbox = new LocalDeviceOutbox({ path: await tempOutboxPath(t) });
+  const outbox = new LocalDeviceOutbox({ path: ":memory:" });
   try {
     const sourceInstanceId = "src-never-failed";
     for (let index = 0; index < 10; index += 1) {
@@ -965,7 +965,7 @@ test("LocalDeviceOutbox.summary: a never-failed backlog has oldestReadyAt but no
 });
 
 test("LocalDeviceOutbox.summary: a row that fails once then a fresh row is enqueued keeps oldestRetryingAt scoped to the failed row", async (t) => {
-  const outbox = new LocalDeviceOutbox({ path: await tempOutboxPath(t) });
+  const outbox = new LocalDeviceOutbox({ path: ":memory:" });
   try {
     const sourceInstanceId = "src-mixed";
     outbox.enqueue({
@@ -1008,7 +1008,7 @@ test("LocalDeviceOutbox.summary: a row that fails once then a fresh row is enque
 });
 
 test("LocalDeviceOutbox.summary scopes by source instance without scanning others", async (t) => {
-  const outbox = new LocalDeviceOutbox({ path: await tempOutboxPath(t) });
+  const outbox = new LocalDeviceOutbox({ path: ":memory:" });
   try {
     outbox.enqueue({
       id: "src-a:r:1",
@@ -1037,7 +1037,7 @@ test("LocalDeviceOutbox.summary scopes by source instance without scanning other
 });
 
 test("LocalDeviceOutbox exposes payload-light production queries for large retained queues", async (t) => {
-  const outbox = new LocalDeviceOutbox({ path: await tempOutboxPath(t) });
+  const outbox = new LocalDeviceOutbox({ path: ":memory:" });
   try {
     outbox.enqueue({
       id: "src-a:batch:1",
@@ -1221,7 +1221,7 @@ test("LocalDeviceOutbox preserves gap rows durably with source-instance scoping 
 test("LocalDeviceOutbox.deadLetterErrorSummary groups by redacted error class with counts", async (t) => {
   const outbox = new LocalDeviceOutbox({
     clock: fixedClock("2026-05-19T12:00:00.000Z"),
-    path: await tempOutboxPath(t),
+    path: ":memory:",
   });
   try {
     // Three rows fail with the same server-rejection shape, one with a
@@ -1273,7 +1273,7 @@ test("LocalDeviceOutbox.deadLetterErrorSummary groups by redacted error class wi
 });
 
 test("LocalDeviceOutbox.deadLetterErrorSummary is empty on a clean outbox", async (t) => {
-  const outbox = new LocalDeviceOutbox({ path: await tempOutboxPath(t) });
+  const outbox = new LocalDeviceOutbox({ path: ":memory:" });
   try {
     outbox.enqueue({
       id: "src-1:record_batch:1",
@@ -1315,7 +1315,7 @@ test("classifyDeadLetterError preserves status shape and scrubs secrets, paths, 
 });
 
 test("hasObservedStream / countRecordBatches detect coverage records across statuses and ignore dead letters", async (t) => {
-  const path = await tempOutboxPath(t);
+  const path = ":memory:";
   const outbox = new LocalDeviceOutbox({ path });
   try {
     // A drained content batch carrying a coverage_diagnostics record.
@@ -1567,7 +1567,7 @@ test("hasObservedStream is bounded on a giant legacy outbox: over-budget unindex
 });
 
 test("countRecordBatches reads indexed status/kind columns only and ignores dead letters", async (t) => {
-  const path = await tempOutboxPath(t);
+  const path = ":memory:";
   const outbox = new LocalDeviceOutbox({ path });
   try {
     outbox.enqueue({
@@ -1623,6 +1623,7 @@ function seedFatSucceededRows(path: string, sourceInstanceId: string, count: num
   const db = new DatabaseSync(path);
   try {
     const blob = "x".repeat(2000);
+    const payload = JSON.stringify({ blob });
     const stamp = "2026-06-04T00:00:00.000Z";
     const insert = db.prepare(
       `INSERT INTO local_device_outbox (
@@ -1635,7 +1636,7 @@ function seedFatSucceededRows(path: string, sourceInstanceId: string, count: num
       insert.run(
         `${sourceInstanceId}:fat:${index}`,
         sourceInstanceId,
-        JSON.stringify({ blob, index }),
+        payload,
         stamp,
         stamp,
         stamp,
@@ -1750,7 +1751,7 @@ test("compact preserves unsent (ready/leased/dead-letter) rows — VACUUM is los
 });
 
 test("countNonSucceeded counts ready/leased/dead-letter across all sources, ignoring succeeded", async (t) => {
-  const path = await tempOutboxPath(t);
+  const path = ":memory:";
   const outbox = new LocalDeviceOutbox({
     clock: () => new Date("2026-06-04T00:00:00.000Z"),
     path,
