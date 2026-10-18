@@ -21,10 +21,11 @@ import { test } from "node:test"
 import {
   assertHarnessOwnership,
   MARKER,
+  refuseConsoleEnvFiles,
   startWatcher,
   TARGET_VARIABLES,
 } from "./harness-safety.mjs"
-import { cleanEnvironment, runOwnedHarness } from "./harness.mjs"
+import { cleanEnvironment, main, runOwnedHarness } from "./harness.mjs"
 
 const loopback = { lo: [{ internal: true }] }
 const harness = fileURLToPath(new URL("harness.mjs", import.meta.url))
@@ -78,6 +79,79 @@ test("external targets are refused before process creation or filesystem writes"
       assert.equal((await stat(root)).mtimeMs, directoryBefore.mtimeMs)
     }
   }
+})
+
+test("every console env file except *.example is refused before any spawn", async t => {
+  const dir = await mkdtemp(join(tmpdir(), "e2e-env-"))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  await writeFile(join(dir, ".env.example"), "")
+  refuseConsoleEnvFiles(dir)
+  // A missing wrapper would be the next error, so a refusal message proves order.
+  const env = { PATH: process.env.PATH }
+  const wrapper = [join(dir, "no-such-wrapper")]
+  for (const name of [
+    ".env",
+    ".env.local",
+    ".env.development",
+    ".env.production",
+    ".env.production.local",
+    ".env.test.local",
+  ]) {
+    await writeFile(join(dir, name), "AS_PUBLIC_URL=https://example.com\n")
+    await assert.rejects(
+      main({ args: [], env, consoleDir: dir, wrapper }),
+      new RegExp(`Refusing console environment file apps/console/${name}`)
+    )
+    await rm(join(dir, name))
+  }
+})
+
+test("a missing or failing test-sandbox is fatal and no other isolation is tried", async t => {
+  const dir = await mkdtemp(join(tmpdir(), "e2e-wrapper-"))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  const env = { PATH: process.env.PATH }
+  await assert.rejects(
+    main({ args: [], env, consoleDir: dir, wrapper: [join(dir, "missing")] }),
+    /missing, and the E2E harness supports no other isolation/
+  )
+  // A wrapper that fails never runs the command: its exit status is ours.
+  const failing = join(dir, "failing.sh")
+  const record = join(dir, "args")
+  await writeFile(
+    failing,
+    `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > ${JSON.stringify(record)}\nexit 3\n`,
+    { mode: 0o755 }
+  )
+  assert.equal(
+    await main({
+      args: ["a.spec.ts"],
+      env,
+      consoleDir: dir,
+      wrapper: [failing],
+    }),
+    3
+  )
+  assert.deepEqual((await readFile(record, "utf8")).trim().split("\n"), [
+    process.execPath,
+    harness,
+    "--isolated",
+    "a.spec.ts",
+  ])
+})
+
+test("inside a sandbox, a network that is not loopback-only is refused before servers start", async t => {
+  const dir = await mkdtemp(join(tmpdir(), "e2e-ownership-"))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  for (const interfaces of [{ ...loopback, eth0: [{ internal: false }] }, {}])
+    await assert.rejects(
+      main({
+        args: [],
+        env: { PATH: process.env.PATH, TEST_SANDBOX_ACTIVE: "1" },
+        consoleDir: dir,
+        interfaces,
+      }),
+      /loopback-only/
+    )
 })
 
 test("ownership guard refuses each unsafe condition before a write", async t => {

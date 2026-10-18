@@ -5,21 +5,36 @@ import { createRequire } from "node:module"
 import { randomBytes } from "node:crypto"
 import { existsSync } from "node:fs"
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
-import { createServer } from "node:net"
+import { createServer, Socket } from "node:net"
 import { createInterface } from "node:readline"
 import { homedir, tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
+import { once } from "node:events"
 import { setTimeout as delay } from "node:timers/promises"
 import {
   assertLoopbackOnly,
   MARKER,
+  refuseConsoleEnvFiles,
   refuseExternalTargets,
 } from "./harness-safety.mjs"
 
 const here = dirname(fileURLToPath(import.meta.url))
 const repo = resolve(here, "..")
 const require = createRequire(import.meta.url)
+// The one supported isolation: a loopback-only namespace from the vendored wrapper.
+const SANDBOX = [
+  join(repo, "scripts/test-sandbox/test-sandbox"),
+  "--net",
+  "none",
+  "--",
+]
+
+export const signalExitCode = signal =>
+  signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 1
+
+const interruption = signal =>
+  Object.assign(new Error(`E2E interrupted by ${signal}`), { signal })
 
 export function cleanEnvironment(env = process.env) {
   return Object.fromEntries(
@@ -56,20 +71,22 @@ function groupExists(pid) {
   }
 }
 
+function signalGroup(pid, signal) {
+  try {
+    process.kill(-pid, signal)
+  } catch (error) {
+    if (error.code !== "ESRCH") throw error
+  }
+}
+
 export async function stopProcess(child) {
   if (!child.pid) return
-  const kill = signal => {
-    try {
-      process.kill(-child.pid, signal)
-    } catch (error) {
-      if (error.code !== "ESRCH") throw error
-    }
-  }
-  kill("SIGTERM")
+  signalGroup(child.pid, "SIGTERM")
   const deadline = Date.now() + 3000
   while (groupExists(child.pid) && Date.now() < deadline) await delay(50)
-  if (groupExists(child.pid)) kill("SIGKILL")
-  await child.completion
+  if (groupExists(child.pid)) signalGroup(child.pid, "SIGKILL")
+  // The leader's exit is bounded; completion never waits on stray pipe holders.
+  await Promise.race([child.completion, delay(5000)])
   const killedDeadline = Date.now() + 3000
   while (groupExists(child.pid) && Date.now() < killedDeadline) await delay(50)
   if (groupExists(child.pid))
@@ -87,10 +104,7 @@ export async function runOwnedHarness(
   let failure
   let work
   let exitCode = 1
-  const interrupt = signal => {
-    exitCode = signal === "SIGINT" ? 130 : 143
-    controller.abort(new Error(`E2E interrupted by ${signal}`))
-  }
+  const interrupt = signal => controller.abort(interruption(signal))
   const sigint = () => interrupt("SIGINT")
   const sigterm = () => interrupt("SIGTERM")
   process.on("SIGINT", sigint)
@@ -129,13 +143,17 @@ export async function runOwnedHarness(
         detached: true,
         stdio: ["ignore", "pipe", "pipe"],
       })
+      // Resolve when the leader exits. 'close' also waits for every holder of
+      // the pipes, and a descendant that left the group (setsid) can hold them
+      // forever: give the tail one second to flush, then drop the pipes.
       child.completion = new Promise((resolveExit, reject) => {
         child.once("error", reject)
-        child.once("close", (code, signal) =>
-          resolveExit(
-            code ?? (signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 1)
-          )
-        )
+        child.once("exit", async (code, signal) => {
+          await Promise.race([once(child, "close"), delay(1000)])
+          child.stdout.destroy()
+          child.stderr.destroy()
+          resolveExit(code ?? signalExitCode(signal))
+        })
       })
       // Keep rejection observed even if a later startup step fails first.
       child.completion.catch(() => {})
@@ -228,18 +246,6 @@ async function waitReady(url, child, signal) {
 }
 
 async function startStack({ root, launch, signal }, args) {
-  for (const name of [
-    ".env",
-    ".env.local",
-    ".env.development",
-    ".env.development.local",
-  ]) {
-    if (existsSync(join(repo, "apps/console", name))) {
-      throw new Error(
-        `Refusing console environment file apps/console/${name}; use a clean checkout for npm run test:e2e.`
-      )
-    }
-  }
   const data = join(root, "data")
   await mkdir(data)
   const nonce = randomBytes(24).toString("hex")
@@ -271,9 +277,12 @@ async function startStack({ root, launch, signal }, args) {
   console.log(
     `Reference startup: ${await waitReady(`${shared.PDPP_AS_URL}/.well-known/oauth-authorization-server`, reference, signal)}s`
   )
-  // Production build, as the desktop app serves it. `next dev` opens an HMR
-  // websocket whose reconnect refreshes the router and reloads the page, which
-  // races the relay test that cuts every socket.
+  // A production build, not `next dev`: dev opens an HMR websocket whose
+  // reconnect refreshes the router and reloads the page, which races the relay
+  // test that cuts every socket. The desktop app runs a staged standalone
+  // server.js via launch.mjs (scripts/ensure-console-stack.js); staging through
+  // stageConsoleStack is a follow-up. `next start` prints a warning because
+  // next.config.ts sets `output: "standalone"`; it still serves the build.
   const next = join(repo, "node_modules/next/dist/bin/next")
   const consoleOptions = {
     cwd: join(repo, "apps/console"),
@@ -315,58 +324,48 @@ async function startStack({ root, launch, signal }, args) {
   return code
 }
 
-// Use the pipe so bwrap stays alive while the inner finally removes scratch.
+// Fd 3 carries the outer-to-inner signal: test-sandbox starts its command with
+// `&`, so stdin is /dev/null there. EOF means SIGTERM (also when the outer dies);
+// an optional payload names SIGINT.
 export function receiveSignals() {
-  let buffer = ""
-  const receive = chunk => {
-    buffer += chunk
-    while (buffer.includes("\n")) {
-      const end = buffer.indexOf("\n")
-      const signal = buffer.slice(0, end)
-      buffer = buffer.slice(end + 1)
-      if (signal === "SIGINT" || signal === "SIGTERM") process.emit(signal)
-    }
-  }
-  process.stdin.on("data", receive)
+  const channel = new Socket({ fd: 3, readable: true, writable: false })
+  let payload = ""
+  let stopped = false
+  channel.setEncoding("utf8")
+  channel.on("data", chunk => {
+    payload += chunk
+  })
+  channel.on("error", () => {})
+  channel.on("close", () => {
+    if (!stopped)
+      process.emit(payload.trim() === "SIGINT" ? "SIGINT" : "SIGTERM")
+  })
   return () => {
-    process.stdin.off("data", receive)
-    process.stdin.pause()
+    stopped = true
+    channel.destroy()
   }
 }
 
-export async function runInNamespace(args) {
-  // Detached browser helpers can outlive the process group that launched them.
-  // Remove their state after the PID namespace has reaped every descendant.
-  const namespaceRoot = await mkdtemp(
-    join(process.env.TEST_TMPDIR || tmpdir(), "dataconnect-e2e-namespace-")
+/** Run `node args` inside the wrapper; fail before any spawn if it is missing. */
+export async function runInSandbox(args, wrapper = SANDBOX) {
+  if (!existsSync(wrapper[0]))
+    throw new Error(
+      `${wrapper[0]} is missing, and the E2E harness supports no other isolation. No servers started.`
+    )
+  const child = spawn(
+    wrapper[0],
+    [...wrapper.slice(1), process.execPath, ...args],
+    { detached: true, stdio: ["ignore", "inherit", "inherit", "pipe"] }
   )
-  const sandbox = join(repo, "scripts/test-sandbox/test-sandbox")
-  const command = existsSync(sandbox) ? sandbox : "bwrap"
-  const prefix = existsSync(sandbox)
-    ? ["--net", "none", "--"]
-    : [
-        "--dev-bind",
-        "/",
-        "/",
-        "--unshare-net",
-        "--unshare-pid",
-        "--die-with-parent",
-        "--tmpfs",
-        "/tmp",
-        "--",
-      ]
-  const child = spawn(command, [...prefix, process.execPath, ...args], {
-    detached: true,
-    env: { ...process.env, TEST_TMPDIR: namespaceRoot },
-    stdio: ["pipe", "inherit", "inherit"],
-  })
-  child.stdin.on("error", () => {})
-  let signalDeadline
-  let requestedSignal
+  const channel = child.stdio[3]
+  channel.on("error", () => {})
+  let requested
+  let killTimer
   const forward = signal => {
-    requestedSignal ||= signal
-    child.stdin.write(`${signal}\n`)
-    signalDeadline ||= setTimeout(() => child.kill("SIGKILL"), 20_000)
+    if (requested) return
+    requested = signal
+    channel.end(`${signal}\n`)
+    killTimer = setTimeout(() => signalGroup(child.pid, "SIGKILL"), 20_000)
   }
   const forwardInt = () => forward("SIGINT")
   const forwardTerm = () => forward("SIGTERM")
@@ -374,56 +373,42 @@ export async function runInNamespace(args) {
   process.on("SIGTERM", forwardTerm)
   try {
     return await new Promise((resolveExit, reject) => {
-      child.once("error", () =>
-        reject(
-          new Error(
-            "Cannot create private E2E namespace: install bwrap or scripts/test-sandbox/test-sandbox. No servers started."
-          )
-        )
-      )
-      child.once("close", (code, signal) =>
+      child.once("error", reject)
+      child.once("exit", (code, signal) =>
         resolveExit(
-          requestedSignal === "SIGINT"
-            ? 130
-            : requestedSignal === "SIGTERM"
-              ? 143
-              : (code ??
-                (signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 1))
+          requested
+            ? signalExitCode(requested)
+            : (code ?? signalExitCode(signal))
         )
       )
     })
   } finally {
-    clearTimeout(signalDeadline)
+    clearTimeout(killTimer)
     process.off("SIGINT", forwardInt)
     process.off("SIGTERM", forwardTerm)
-    await rm(namespaceRoot, {
-      recursive: true,
-      force: true,
-      maxRetries: 5,
-      retryDelay: 100,
-    })
   }
 }
 
-function alreadyIsolated() {
-  try {
-    assertLoopbackOnly()
-    return true
-  } catch {
-    return false
-  }
-}
-
-async function main() {
-  // Refuse targets before namespace setup, process launch, or filesystem writes.
-  refuseExternalTargets(process.env)
-  const args = process.argv.slice(2)
+export async function main({
+  args = process.argv.slice(2),
+  env = process.env,
+  consoleDir = join(repo, "apps/console"),
+  wrapper = SANDBOX,
+  interfaces,
+} = {}) {
+  // Refuse before namespace setup, process launch, or filesystem writes.
+  refuseExternalTargets(env)
+  refuseConsoleEnvFiles(consoleDir)
+  args = [...args]
   const reexeced = args[0] === "--isolated"
   if (reexeced) args.shift()
-  // A caller that already provides a loopback-only namespace (test-sandbox
-  // --net none) forbids a nested one; any other caller re-executes below.
-  if (reexeced || alreadyIsolated()) {
-    assertLoopbackOnly()
+  // test-sandbox exports TEST_SANDBOX_ACTIVE=1 inside its scope but not its
+  // network mode, so ownership is that flag plus a loopback-only check (an
+  // offline host alone would pass the check). Wanted export: TEST_SANDBOX_NET.
+  // Descendants that leave the process group (Playwright's detached browsers)
+  // are reaped by the caller's scope in place, and by the namespace otherwise.
+  if (reexeced || env.TEST_SANDBOX_ACTIVE === "1") {
+    assertLoopbackOnly(interfaces)
     const stopReceiving = reexeced ? receiveSignals() : () => {}
     try {
       return await runOwnedHarness(state => startStack(state, args))
@@ -431,7 +416,10 @@ async function main() {
       stopReceiving()
     }
   }
-  return runInNamespace([fileURLToPath(import.meta.url), "--isolated", ...args])
+  return runInSandbox(
+    [fileURLToPath(import.meta.url), "--isolated", ...args],
+    wrapper
+  )
 }
 
 if (
@@ -444,10 +432,6 @@ if (
     })
     .catch(error => {
       console.error(error.message)
-      process.exitCode = /SIGINT/.test(error.message)
-        ? 130
-        : /SIGTERM/.test(error.message)
-          ? 143
-          : 1
+      process.exitCode = signalExitCode(error.signal)
     })
 }

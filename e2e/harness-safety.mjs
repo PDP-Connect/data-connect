@@ -1,5 +1,6 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
+import { readdirSync } from "node:fs"
 import { readFile, realpath } from "node:fs/promises"
 import { networkInterfaces } from "node:os"
 import { isAbsolute, join, relative } from "node:path"
@@ -18,6 +19,17 @@ export function refuseExternalTargets(env) {
   if (supplied.length)
     throw new Error(
       `Refusing externally supplied ${supplied.join(", ")}. Unset these variables and run npm run test:e2e.`
+    )
+}
+
+/** Next loads every .env* file for its mode (dev, build, start), so refuse them all. */
+export function refuseConsoleEnvFiles(consoleDir) {
+  const found = readdirSync(consoleDir).filter(
+    name => name.startsWith(".env") && !name.endsWith(".example")
+  )
+  if (found.length)
+    throw new Error(
+      `Refusing console environment file ${found.map(name => `apps/console/${name}`).join(", ")}; use a clean checkout for npm run test:e2e.`
     )
 }
 
