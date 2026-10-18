@@ -1,0 +1,159 @@
+name: package-verify
+
+# Runs each npm package's `verify` on the pull request that changes its
+# inputs, so a broken package fails on its own PR instead of on main.
+#
+# Before this workflow, these `verify` scripts ran only in npm-release's
+# `quality` job: after merge, and only when a release was due. #448 bumped
+# zod in packages/connector-protocol/package.json without regenerating
+# artifact.json, and nothing failed until a later push to main resolved a
+# release.
+#
+# Packages and their inputs:
+#
+# - connector-protocol: its own directory. artifact.json binds
+#   package.json, README.md, the build script, tsconfig.build.json and src/.
+# - collector-runtime: its own directory plus connector-protocol.
+#   artifact.json includes connector-protocol's source digest.
+# - local-collector: both of the above, plus polyfill-connectors and
+#   reference-implementation. It vendors their code, and its smoke test
+#   starts the reference server.
+#
+# Every package also depends on the root package.json, package-lock.json,
+# and .npmrc (install and toolchain versions) and on this workflow file.
+#
+# Skips: `gate` is the single context to make required. It accepts a
+# skipped `verify` ONLY when `classify` succeeded and selected no package. If
+# `classify` selected a package, `verify` must report success; skipped,
+# cancelled, or failed is red. If `classify` itself fails, the gate is red.
+
+on:
+  pull_request: {}
+  merge_group: {}
+
+concurrency:
+  group: package-verify-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  classify:
+    name: classify package-verify inputs
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      packages: ${{ steps.changes.outputs.packages }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Select packages whose inputs changed
+        id: changes
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
+        run: |
+          set -euo pipefail
+
+          # A failed diff exits non-zero (set -e), which fails this job and so
+          # the gate. Missing shas are an error, not an empty change set.
+          if [[ -z "${BASE_SHA}" || -z "${HEAD_SHA}" ]]; then
+            echo "::error::missing base or head sha for ${GITHUB_EVENT_NAME}"
+            exit 1
+          fi
+          git diff --name-only "${BASE_SHA}" "${HEAD_SHA}" > "$RUNNER_TEMP/changed-files.txt"
+
+          protocol=false
+          runtime=false
+          collector=false
+          while IFS= read -r path; do
+            case "$path" in
+              package.json|package-lock.json|.npmrc|.github/workflows/package-verify.yml|\
+              packages/connector-protocol/*)
+                protocol=true; runtime=true; collector=true ;;
+              packages/collector-runtime/*)
+                runtime=true; collector=true ;;
+              packages/local-collector/*|packages/polyfill-connectors/*|reference-implementation/*)
+                collector=true ;;
+            esac
+          done < "$RUNNER_TEMP/changed-files.txt"
+
+          # Order matters: the jobs below verify in this order, matching
+          # npm-release's quality job.
+          packages=""
+          [[ "${protocol}" == "true" ]] && packages+="connector-protocol "
+          [[ "${runtime}" == "true" ]] && packages+="collector-runtime "
+          [[ "${collector}" == "true" ]] && packages+="local-collector "
+          packages="${packages% }"
+
+          echo "packages=${packages}" >> "$GITHUB_OUTPUT"
+          echo "Selected packages: ${packages:-none}"
+
+  verify:
+    name: verify selected packages
+    needs: classify
+    if: needs.classify.outputs.packages != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24.21.0"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify packages
+        env:
+          PACKAGES: ${{ needs.classify.outputs.packages }}
+        run: |
+          set -euo pipefail
+          for package in ${PACKAGES}; do
+            echo "::group::verify ${package}"
+            npm run --workspace "packages/${package}" verify
+            echo "::endgroup::"
+          done
+
+  gate:
+    name: package-verify gate
+    needs: [classify, verify]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require verify for every selected package
+        env:
+          CLASSIFY_RESULT: ${{ needs.classify.result }}
+          PACKAGES: ${{ needs.classify.outputs.packages }}
+          VERIFY_RESULT: ${{ needs.verify.result }}
+        run: |
+          set -euo pipefail
+          if [[ "${CLASSIFY_RESULT}" != "success" ]]; then
+            echo "::error::classify reported ${CLASSIFY_RESULT}"
+            exit 1
+          fi
+          if [[ -z "${PACKAGES}" ]]; then
+            if [[ "${VERIFY_RESULT}" != "skipped" ]]; then
+              echo "::error::no package inputs changed, but verify reported ${VERIFY_RESULT}"
+              exit 1
+            fi
+            echo "No package inputs changed; verify skipped."
+            exit 0
+          fi
+          if [[ "${VERIFY_RESULT}" != "success" ]]; then
+            echo "::error::verify for [${PACKAGES}] reported ${VERIFY_RESULT}"
+            exit 1
+          fi
+          echo "verify passed for: ${PACKAGES}"
