@@ -80,6 +80,19 @@ test("a failing todo test makes the gate exit non-zero, naming the test", async 
   assert.match(output, /todo test rejected \(body failed\): a failing todo placeholder/);
 });
 
+// Node 24 marks every test inside a todo describe as todo, so the first
+// rejection names the child; the suite's own event is rejected as well.
+test("a todo describe with a passing child makes the gate exit non-zero", async () => {
+  const { code, output } = await runFixture(
+    'import { describe, it } from "node:test";\n' +
+      'describe("an unfinished suite", { todo: "fixture" }, () => {\n' +
+      '  it("a green child", () => {});\n' +
+      "});\n"
+  );
+  assert.notEqual(code, 0, `the runner exited 0 for a todo suite. Output:\n${output.slice(-2000)}`);
+  assert.match(output, /todo test rejected \(body passed\): (a green child|an unfinished suite)/);
+});
+
 test("a named skip is accepted by the gate", async () => {
   const { code, output } = await runFixture(
     'import test from "node:test";\n' + 'test("a named skip placeholder", { skip: "fixture reason" }, () => {});\n'

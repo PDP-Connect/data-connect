@@ -904,6 +904,12 @@ test("rejects a todo test whether its body passed or failed, naming the test", (
     () => structuredNodeSummary(`${event({ type: "test:fail", details: { type: "test", name: "broken case", todo: "later" } })}\n`),
     FAILING_TODO_REJECTED_PATTERN
   );
+  // A todo suite (`describe(..., { todo })`) is rejected too, though suites
+  // are otherwise not counted.
+  assert.throws(
+    () => structuredNodeSummary(`${event({ type: "test:pass", details: { type: "suite", name: "unfinished suite", todo: "later" } })}\n`),
+    /todo test rejected \(body passed\): unfinished suite/
+  );
   // An explicit todo:false is an ordinary test, not a todo.
   assert.equal(
     structuredNodeSummary(`${event({ type: "test:pass", details: { type: "test", name: "ordinary", todo: false } })}\n`).passed,

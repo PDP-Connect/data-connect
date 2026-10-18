@@ -494,18 +494,23 @@ export function structuredNodeSummary(output: string): StructuredSummary {
   let failed = 0;
   let skipped = 0;
   for (const event of events) {
-    if (!["test:pass", "test:fail"].includes(event.type) || event.details?.type !== "test") {
+    if (!["test:pass", "test:fail"].includes(event.type)) {
       continue;
     }
     // `node --test` counts a passing `todo` as a pass and exits 0 when a `todo`
     // fails, so a todo test is neither a real pass nor a real failure. Reject
-    // it outright: a placeholder must be a named skip.
-    const { skip, todo } = event.details;
+    // it outright, before the suite filter below so a todo `describe` is
+    // rejected too: a placeholder must be a named skip.
+    const todo = event.details?.todo;
     if (todo !== false && todo !== undefined && todo !== null) {
       fail(
-        `todo test rejected (${event.type === "test:pass" ? "body passed" : "body failed"}): ${event.details.name ?? "unnamed test"}; use a named skip instead`
+        `todo test rejected (${event.type === "test:pass" ? "body passed" : "body failed"}): ${event.details?.name ?? "unnamed test"}; use a named skip instead`
       );
     }
+    if (event.details?.type !== "test") {
+      continue;
+    }
+    const { skip } = event.details;
     assertions += 1;
     if (skip !== false && skip !== undefined && skip !== null) {
       const { reason, consumedIdentity } = resolveEmittedSkipReason(skip, event.details.name);
