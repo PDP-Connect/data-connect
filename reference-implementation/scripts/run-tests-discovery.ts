@@ -23,6 +23,7 @@ export const COLOCATED_TEST_DIRS = [
   { dir: join("test", "seam-spike"), extensions: NODE_TEST_EXTENSIONS },
   { dir: join("server", "streaming"), extensions: NODE_TEST_EXTENSIONS },
   { dir: "scripts", extensions: NODE_TEST_EXTENSIONS },
+  { dir: join("scripts", "test-accounting"), extensions: NODE_TEST_EXTENSIONS },
 ];
 
 /** Independent directory-walk discovery used only for standalone (no-authority) runs. */
