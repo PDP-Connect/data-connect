@@ -36,6 +36,37 @@ export interface Selection {
   files: string[];
   reason: string;
   fallback: boolean;
+  /** Import distance limit that produced `files`; "all" is the full closure. */
+  depth?: number | "all";
+  /** Count of closure tests at each shortest import distance (0 = changed test). */
+  countsByDepth?: Record<number, number>;
+}
+
+export interface SelectionOptions {
+  /** Maximum import distance from a changed file. Default 1; "all" selects the full closure. */
+  depth?: number | "all";
+}
+
+const DEFAULT_DEPTH = 1;
+// Basenames shared by many modules would match unrelated tests.
+const GENERIC_BASENAMES = new Set(["index"]);
+
+function basenameMatchedTests(
+  repoRoot: string,
+  changedModules: readonly string[],
+  testAbs: readonly string[],
+): Set<string> {
+  const prefixes = changedModules
+    .map((path) => (path.split("/").at(-1) ?? path).replace(/\.[^.]+$/, ""))
+    .filter((name) => name && !GENERIC_BASENAMES.has(name));
+  const matched = new Set<string>();
+  for (const testPath of testAbs) {
+    const rel = relative(repoRoot, testPath).replaceAll("\\", "/");
+    if (!rel.startsWith("test/") || !rel.endsWith(".test.ts")) continue;
+    const name = rel.split("/").at(-1) ?? rel;
+    if (prefixes.some((prefix) => name.startsWith(prefix))) matched.add(testPath);
+  }
+  return matched;
 }
 
 function isModulePath(path: string): boolean {
@@ -264,7 +295,9 @@ export async function selectAffectedTests(
   repoRoot: string,
   discoveredTests: readonly string[],
   changes: ChangeSet,
+  options: SelectionOptions = {},
 ): Promise<Selection> {
+  const depthLimit = options.depth ?? DEFAULT_DEPTH;
   const changed = [...changes.addedOrModified, ...changes.deleted].map((path) =>
     path.replaceAll("\\", "/"),
   );
@@ -384,20 +417,47 @@ export async function selectAffectedTests(
   if (unresolved.length > 0)
     return fallback(`unmodelled or unreferenced change: ${unresolved[0]}`);
 
-  const selected: string[] = [];
-  for (const testPath of testAbs) {
-    const seen = new Set<string>();
-    const visit = (modulePath: string): boolean => {
-      if (direct.has(modulePath)) return true;
-      if (seen.has(modulePath)) return false;
-      seen.add(modulePath);
-      for (const dependency of graph.get(modulePath) ?? [])
-        if (visit(dependency)) return true;
-      return false;
-    };
-    if (visit(testPath))
-      selected.push(relative(repoRoot, testPath).replaceAll("\\", "/"));
+  // Multi-source BFS over the reverse import graph: distance 0 is a changed
+  // module, 1 is a module that imports it, and so on.
+  const importers = new Map<string, string[]>();
+  for (const [modulePath, dependencies] of graph)
+    for (const dependency of dependencies) {
+      const list = importers.get(dependency);
+      if (list) list.push(modulePath);
+      else importers.set(dependency, [modulePath]);
+    }
+  const distance = new Map<string, number>([...direct].map((m) => [m, 0]));
+  const frontier = [...direct];
+  for (let head = 0; head < frontier.length; head += 1) {
+    const modulePath = frontier[head] as string;
+    const next = (distance.get(modulePath) ?? 0) + 1;
+    for (const importer of importers.get(modulePath) ?? [])
+      if (!distance.has(importer)) {
+        distance.set(importer, next);
+        frontier.push(importer);
+      }
   }
+  const countsByDepth: Record<number, number> = {};
+  const closure = new Map<string, number>();
+  for (const testPath of new Set(testAbs)) {
+    const testDistance = distance.get(testPath);
+    if (testDistance === undefined) continue;
+    closure.set(testPath, testDistance);
+    countsByDepth[testDistance] = (countsByDepth[testDistance] ?? 0) + 1;
+  }
+  const chosen = new Set<string>();
+  for (const [testPath, testDistance] of closure)
+    if (depthLimit === "all" || testDistance <= depthLimit) chosen.add(testPath);
+  if (depthLimit !== "all")
+    for (const testPath of basenameMatchedTests(
+      repoRoot,
+      changedRel.filter((path) => isModulePath(path)),
+      testAbs,
+    ))
+      chosen.add(testPath);
+  const selected = [...chosen].map((path) =>
+    relative(repoRoot, path).replaceAll("\\", "/"),
+  );
   const discovered = new Set(testAbs);
   const addedTests = (changes.added ?? [])
     .map((path) => path.replaceAll("\\", "/"))
@@ -418,11 +478,21 @@ export async function selectAffectedTests(
       }
     }
   }
+  const scope =
+    depthLimit === "all"
+      ? "affected import closure"
+      : `affected tests within import depth ${depthLimit}`;
   const reason =
     selected.length > 0
-      ? `affected import closure for ${changed.join(", ")}${addedTests.length > 0 ? "; added test selects test-tree inventory tests" : ""}`
+      ? `${scope} for ${changed.join(", ")}${addedTests.length > 0 ? "; added test selects test-tree inventory tests" : ""}`
       : `no discovered tests depend on ${changed.join(", ")}`;
-  return { files: selected.sort(), reason, fallback: false };
+  return {
+    files: selected.sort(),
+    reason,
+    fallback: false,
+    depth: depthLimit,
+    countsByDepth,
+  };
 }
 
 function run(command: string, args: string[], cwd: string): Promise<number> {
@@ -437,12 +507,42 @@ function run(command: string, args: string[], cwd: string): Promise<number> {
   });
 }
 
+export function parseDepth(args: readonly string[]): number | "all" {
+  const depthIndex = args.indexOf("--depth");
+  const all = args.includes("--all");
+  if (all && depthIndex !== -1)
+    throw new Error("--all and --depth are mutually exclusive");
+  if (all) return "all";
+  if (depthIndex === -1) return DEFAULT_DEPTH;
+  const value = Number(args[depthIndex + 1]);
+  if (!Number.isInteger(value) || value < 0)
+    throw new Error("--depth requires a non-negative integer N");
+  return value;
+}
+
+export function formatDepthSummary(selection: Selection): string[] {
+  if (selection.fallback || selection.countsByDepth === undefined) return [];
+  const counts = Object.entries(selection.countsByDepth)
+    .map(([depth, count]) => [Number(depth), count] as const)
+    .sort((a, b) => a[0] - b[0]);
+  const total = counts.reduce((sum, [, count]) => sum + count, 0);
+  const lines = [
+    `[test:fast] tests by import depth: ${counts.map(([depth, count]) => `d${depth}=${count}`).join(" ") || "none"} (closure ${total}); depth used: ${selection.depth}`,
+  ];
+  if (selection.depth !== "all" && selection.files.length < total)
+    lines.push(
+      `[test:fast] widen to the full closure (${total} tests): npm run test:affected`,
+    );
+  return lines;
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const baseIndex = args.indexOf("--base");
   const baseOverride = baseIndex === -1 ? undefined : args[baseIndex + 1];
   if (baseIndex !== -1 && !baseOverride) throw new Error("--base requires REF");
   const dryRun = args.includes("--dry-run");
+  const depth = parseDepth(args);
   const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
   const testFiles = await discoverTestFiles(repoRoot, join(repoRoot, "test"));
   const gitPaths = (...args: string[]): string[] =>
@@ -492,14 +592,22 @@ async function main(): Promise<void> {
     ...gitPaths("diff", "--cached", "--name-only", "--diff-filter=A"),
     ...untracked,
   ];
-  const selection = await selectAffectedTests(repoRoot, testFiles, {
-    added: [...new Set(added.filter((path) => relevant.includes(path)))],
-    addedOrModified: relevant.filter((path) => !deletedLocal.includes(path)),
-    deleted: deletedLocal,
-  });
+  const selection = await selectAffectedTests(
+    repoRoot,
+    testFiles,
+    {
+      added: [...new Set(added.filter((path) => relevant.includes(path)))],
+      addedOrModified: relevant.filter((path) => !deletedLocal.includes(path)),
+      deleted: deletedLocal,
+    },
+    { depth },
+  );
   console.log(
     `[test:fast] ${selection.files.length} test files; ${selection.reason}${selection.fallback ? " (fallback to full discovery)" : ""}`,
   );
+  if (selection.fallback)
+    console.log(`[test:fast] fallback reason: ${selection.reason}`);
+  for (const line of formatDepthSummary(selection)) console.log(line);
   for (const path of selection.files.slice(0, 20)) console.log(`  ${path}`);
   if (selection.files.length > 20)
     console.log(`  ... ${selection.files.length - 20} more`);

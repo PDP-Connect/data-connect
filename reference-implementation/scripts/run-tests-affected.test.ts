@@ -7,6 +7,8 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, test } from "node:test";
 import {
+  formatDepthSummary,
+  parseDepth,
   selectAffectedTests,
   validateFilesFrom,
 } from "./run-tests-affected.ts";
@@ -95,17 +97,187 @@ test("a removed test file falls back to discovery including inventory tests", as
   ]);
 });
 
-test("selects a test for a transitive import two hops away", async () => {
+test("selects a test for a transitive import two hops away with all", async () => {
   const root = await tree({
     "test/a.test.ts": staticImport("../server/one.ts"),
     "server/one.ts": staticImport("./two.ts"),
     "server/two.ts": "export const value = 1;",
   });
-  const result = await selectAffectedTests(root, ["test/a.test.ts"], {
-    addedOrModified: ["reference-implementation/server/two.ts"],
-    deleted: [],
-  });
+  const result = await selectAffectedTests(
+    root,
+    ["test/a.test.ts"],
+    {
+      addedOrModified: ["reference-implementation/server/two.ts"],
+      deleted: [],
+    },
+    { depth: "all" },
+  );
   assert.deepEqual(result.files, ["test/a.test.ts"]);
+});
+
+const rankedTree = () =>
+  tree({
+    "test/direct.test.ts": staticImport("../server/leaf.ts"),
+    "test/twohop.test.ts": staticImport("../server/middle.ts"),
+    "test/unrelated.test.ts": "test('u', () => {});",
+    "server/middle.ts": staticImport("./leaf.ts"),
+    "server/leaf.ts": "export const value = 1;",
+  });
+const rankedTests = [
+  "test/direct.test.ts",
+  "test/twohop.test.ts",
+  "test/unrelated.test.ts",
+];
+const leafChange = {
+  addedOrModified: ["reference-implementation/server/leaf.ts"],
+  deleted: [],
+};
+
+test("default depth selects direct importers and ranks the two-hop test behind", async () => {
+  const root = await rankedTree();
+  const result = await selectAffectedTests(root, rankedTests, leafChange);
+  assert.deepEqual(result.files, ["test/direct.test.ts"]);
+  assert.equal(result.depth, 1);
+  assert.deepEqual(result.countsByDepth, { 1: 1, 2: 1 });
+});
+
+test("depth 2 adds the two-hop test", async () => {
+  const root = await rankedTree();
+  const result = await selectAffectedTests(root, rankedTests, leafChange, {
+    depth: 2,
+  });
+  assert.deepEqual(result.files, ["test/direct.test.ts", "test/twohop.test.ts"]);
+});
+
+test("all selects the full closure and omits unrelated tests", async () => {
+  const root = await rankedTree();
+  const result = await selectAffectedTests(root, rankedTests, leafChange, {
+    depth: "all",
+  });
+  assert.deepEqual(result.files, ["test/direct.test.ts", "test/twohop.test.ts"]);
+  assert.equal(result.depth, "all");
+});
+
+test("a changed test file is distance 0 and always selected", async () => {
+  const root = await rankedTree();
+  const result = await selectAffectedTests(
+    root,
+    rankedTests,
+    {
+      addedOrModified: ["reference-implementation/test/twohop.test.ts"],
+      deleted: [],
+    },
+    { depth: 0 },
+  );
+  assert.deepEqual(result.files, ["test/twohop.test.ts"]);
+  assert.deepEqual(result.countsByDepth, { 0: 1 });
+});
+
+test("a changed module also selects tests whose basename starts with it", async () => {
+  const root = await tree({
+    "test/records.test.ts": "test('r', () => {});",
+    "test/records-extra.test.ts": "test('re', () => {});",
+    "test/other.test.ts": staticImport("../server/wrapper.ts"),
+    "server/wrapper.ts": staticImport("./records.ts"),
+    "server/records.ts": "export const value = 1;",
+  });
+  const tests = [
+    "test/records.test.ts",
+    "test/records-extra.test.ts",
+    "test/other.test.ts",
+  ];
+  const change = {
+    addedOrModified: ["reference-implementation/server/records.ts"],
+    deleted: [],
+  };
+  const fast = await selectAffectedTests(root, tests, change);
+  assert.deepEqual(fast.files, [
+    "test/records-extra.test.ts",
+    "test/records.test.ts",
+  ]);
+  const all = await selectAffectedTests(root, tests, change, { depth: "all" });
+  assert.deepEqual(all.files, ["test/other.test.ts"]);
+});
+
+test("the generic index basename does not match tests by name", async () => {
+  const root = await tree({
+    "test/index-routes.test.ts": "test('i', () => {});",
+    "test/far.test.ts": staticImport("../server/mid.ts"),
+    "server/mid.ts": staticImport("../operations/x/index.ts"),
+    "operations/x/index.ts": "export const value = 1;",
+  });
+  const result = await selectAffectedTests(
+    root,
+    ["test/index-routes.test.ts", "test/far.test.ts"],
+    {
+      addedOrModified: ["reference-implementation/operations/x/index.ts"],
+      deleted: [],
+    },
+  );
+  assert.deepEqual(result.files, []);
+});
+
+test("depth selection keeps inventory tests when a test file is added", async () => {
+  const root = await tree({
+    "test/new.test.ts": "test('new', () => {});",
+    "test/inventory.test.ts": inventorySource,
+    "test/far.test.ts": staticImport("../server/mid.ts"),
+    "server/mid.ts": staticImport("./leaf.ts"),
+    "server/leaf.ts": "export const value = 1;",
+  });
+  const result = await selectAffectedTests(
+    root,
+    [
+      "test/new.test.ts",
+      "test/inventory.test.ts",
+      "test/far.test.ts",
+    ],
+    {
+      added: ["reference-implementation/test/new.test.ts"],
+      addedOrModified: [
+        "reference-implementation/test/new.test.ts",
+        "reference-implementation/server/leaf.ts",
+      ],
+      deleted: [],
+    },
+  );
+  assert.deepEqual(result.files, [
+    "test/inventory.test.ts",
+    "test/new.test.ts",
+  ]);
+});
+
+test("a fallback keeps full discovery whatever the depth", async () => {
+  const root = await rankedTree();
+  const result = await selectAffectedTests(
+    root,
+    rankedTests,
+    {
+      addedOrModified: ["reference-implementation/package.json"],
+      deleted: [],
+    },
+    { depth: 1 },
+  );
+  assert.equal(result.fallback, true);
+  assert.deepEqual(result.files, rankedTests);
+  assert.deepEqual(formatDepthSummary(result), []);
+});
+
+test("parses --depth and --all", () => {
+  assert.equal(parseDepth([]), 1);
+  assert.equal(parseDepth(["--depth", "3"]), 3);
+  assert.equal(parseDepth(["--all"]), "all");
+  assert.throws(() => parseDepth(["--depth", "x"]), /non-negative integer/);
+  assert.throws(() => parseDepth(["--depth"]), /non-negative integer/);
+  assert.throws(() => parseDepth(["--all", "--depth", "2"]), /mutually exclusive/);
+});
+
+test("the depth summary prints per-depth counts and the widen command", async () => {
+  const root = await rankedTree();
+  const result = await selectAffectedTests(root, rankedTests, leafChange);
+  const lines = formatDepthSummary(result);
+  assert.match(lines[0] ?? "", /d1=1 d2=1 \(closure 2\); depth used: 1/);
+  assert.match(lines[1] ?? "", /npm run test:affected/);
 });
 
 test("resolves a .js import to its .ts source", async () => {
