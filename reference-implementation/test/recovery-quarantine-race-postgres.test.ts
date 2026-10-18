@@ -12,7 +12,9 @@ const POSTGRES_URL = process.env.PDPP_TEST_POSTGRES_URL;
 const CONNECTOR_ID = "quarantine_cas_race";
 const INSTANCE_ID = "cin_quarantine_cas_race";
 
-test("Postgres quarantine compare-and-swap preserves a concurrent recovery", { skip: !POSTGRES_URL }, async () => {
+test("Postgres quarantine compare-and-swap preserves a concurrent recovery", {
+  skip: POSTGRES_URL ? false : "PDPP_TEST_POSTGRES_URL unset",
+}, async () => {
   initDb(":memory:");
   await initPostgresStorage({ backend: "postgres", databaseUrl: POSTGRES_URL as string });
   const store = createPostgresConnectorDetailGapStore();
