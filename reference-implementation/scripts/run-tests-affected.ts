@@ -37,14 +37,14 @@ export interface Selection {
   files: string[];
   reason: string;
   fallback: boolean;
-  /** Import distance limit that produced `files`; "all" is the full closure. */
+  /** Import distance limit that produced `files`; "all" is the whole import closure (still heuristic). */
   depth?: number | "all";
   /** Count of closure tests at each shortest import distance (0 = changed test). */
   countsByDepth?: Record<number, number>;
 }
 
 export interface SelectionOptions {
-  /** Maximum import distance from a changed file. Default 1; "all" selects the full closure. */
+  /** Maximum import distance from a changed file. Default 1; "all" takes the whole import closure, which is not a complete run. */
   depth?: number | "all";
 }
 
@@ -220,6 +220,19 @@ function moduleReferences(source: string): {
       }
       continue;
     }
+    // A literal require("./x") (CommonJS) is a static edge like an import.
+    if (
+      token.value === "require" &&
+      tokens[index - 1]?.value !== "." &&
+      tokens[index + 1]?.value === "(" &&
+      isString(tokens[index + 2]) &&
+      tokens[index + 3]?.value === ")"
+    ) {
+      const specifier = tokens[index + 2];
+      if (isString(specifier) && specifier.value.startsWith("."))
+        imports.push(specifier.value);
+      continue;
+    }
     if (
       token.value === "new" &&
       tokens[index + 1]?.value === "URL" &&
@@ -298,7 +311,14 @@ export async function validateFilesFrom(
   return [...new Set(files)].sort();
 }
 
-/** Every discovered module whose source names the asset by relative path or basename. */
+/**
+ * A recall heuristic for the edit loop, never a merge oracle: tests reachable
+ * from the changed code modules through static import, literal require and
+ * `new URL(..., import.meta.url)` edges, ranked by import distance. A static
+ * graph cannot see variable imports or paths built at run time, so any
+ * changed non-code file falls back to full discovery and the full RI gate
+ * stays the backstop.
+ */
 export async function selectAffectedTests(
   repoRoot: string,
   discoveredTests: readonly string[],
@@ -455,14 +475,16 @@ export async function selectAffectedTests(
     relative(repoRoot, path).replaceAll("\\", "/"),
   );
   const discovered = new Set(testAbs);
-  const addedTests = (changes.added ?? [])
+  // A new or edited test can change what the inventory tests read (file
+  // names, registrations, markers), so either one selects them.
+  const changedTests = changes.addedOrModified
     .map((path) => path.replaceAll("\\", "/"))
     .filter((path) => path.startsWith("reference-implementation/test/"))
     .map((path) =>
       resolve(repoRoot, path.slice("reference-implementation/".length)),
     )
     .filter((path) => discovered.has(path));
-  if (addedTests.length > 0) {
+  if (changedTests.length > 0) {
     for (const testPath of testAbs) {
       if (
         !selected.includes(
@@ -476,11 +498,11 @@ export async function selectAffectedTests(
   }
   const scope =
     depthLimit === "all"
-      ? "affected import closure"
+      ? "import closure (heuristic)"
       : `affected tests within import depth ${depthLimit}`;
   const reason =
     selected.length > 0
-      ? `${scope} for ${changed.join(", ")}${addedTests.length > 0 ? "; added test selects test-tree inventory tests" : ""}`
+      ? `${scope} for ${changed.join(", ")}${changedTests.length > 0 ? "; changed test selects test-tree inventory tests" : ""}`
       : `no discovered tests depend on ${changed.join(", ")}`;
   return {
     files: selected.sort(),
@@ -503,12 +525,10 @@ function run(command: string, args: string[], cwd: string): Promise<number> {
   });
 }
 
-export function parseDepth(args: readonly string[]): number | "all" {
+export function parseDepth(args: readonly string[]): number {
+  if (args.includes("--all"))
+    throw new Error("--all was removed: no selection is complete; run the full RI gate (npm test)");
   const depthIndex = args.indexOf("--depth");
-  const all = args.includes("--all");
-  if (all && depthIndex !== -1)
-    throw new Error("--all and --depth are mutually exclusive");
-  if (all) return "all";
   if (depthIndex === -1) return DEFAULT_DEPTH;
   const value = Number(args[depthIndex + 1]);
   if (!Number.isInteger(value) || value < 0)
@@ -527,7 +547,7 @@ export function formatDepthSummary(selection: Selection): string[] {
   ];
   if (selection.depth !== "all" && selection.files.length < total)
     lines.push(
-      `[test:fast] widen to the full closure (${total} tests): npm run test:affected`,
+      `[test:fast] widen with --depth N (import closure: ${total} tests, still heuristic)`,
     );
   return lines;
 }
@@ -654,6 +674,9 @@ async function main(): Promise<void> {
     testFiles,
     collectChangeSet(repoRoot, base),
     { depth },
+  );
+  console.log(
+    "[test:fast] heuristic selection: run the full RI gate (npm test) before opening a PR",
   );
   console.log(
     `[test:fast] ${selection.files.length} test files; ${selection.reason}${selection.fallback ? " (fallback to full discovery)" : ""}`,

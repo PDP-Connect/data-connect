@@ -100,7 +100,7 @@ test("selects test-tree inventory tests when a test file is added", async () => 
     "test/inventory.test.ts",
     "test/new.test.ts",
   ]);
-  assert.match(result.reason, /added test selects test-tree inventory tests/);
+  assert.match(result.reason, /changed test selects test-tree inventory tests/);
 });
 
 test("a removed test file falls back to discovery including inventory tests", async () => {
@@ -289,13 +289,12 @@ test("a fallback keeps full discovery whatever the depth", async () => {
   assert.deepEqual(formatDepthSummary(result), []);
 });
 
-test("parses --depth and --all", () => {
+test("parses --depth and refuses the removed --all", () => {
   assert.equal(parseDepth([]), 1);
   assert.equal(parseDepth(["--depth", "3"]), 3);
-  assert.equal(parseDepth(["--all"]), "all");
   assert.throws(() => parseDepth(["--depth", "x"]), /non-negative integer/);
   assert.throws(() => parseDepth(["--depth"]), /non-negative integer/);
-  assert.throws(() => parseDepth(["--all", "--depth", "2"]), /mutually exclusive/);
+  assert.throws(() => parseDepth(["--all"]), /no selection is complete/);
 });
 
 test("the depth summary prints per-depth counts and the widen command", async () => {
@@ -303,7 +302,7 @@ test("the depth summary prints per-depth counts and the widen command", async ()
   const result = await selectAffectedTests(root, rankedTests, leafChange);
   const lines = formatDepthSummary(result);
   assert.match(lines[0] ?? "", /d1=1 d2=1 \(closure 2\); depth used: 1/);
-  assert.match(lines[1] ?? "", /npm run test:affected/);
+  assert.match(lines[1] ?? "", /--depth N .*still heuristic/);
 });
 
 test("resolves a .js import to its .ts source", async () => {
@@ -330,7 +329,7 @@ test("follows a literal dynamic import", async () => {
   assert.deepEqual(result.files, ["test/a.test.ts"]);
 });
 
-test("follows a module path in new URL relative to import.meta.url", async () => {
+test("a JSON asset reached only by new URL falls back", async () => {
   const root = await tree({
     "test/a.test.ts":
       'const path = new URL("../server/config.json", import.meta.url);',
@@ -341,9 +340,10 @@ test("follows a module path in new URL relative to import.meta.url", async () =>
     deleted: [],
   });
   assert.deepEqual(result.files, ["test/a.test.ts"]);
+  assert.equal(result.fallback, true);
 });
 
-test("connects a SQL asset by a relative string literal", async () => {
+test("a changed SQL asset falls back even when a module names it", async () => {
   const root = await tree({
     "test/a.test.ts": staticImport("../server/query.ts"),
     "server/query.ts": 'readFileSync("../sql/schema.sql");',
@@ -354,9 +354,10 @@ test("connects a SQL asset by a relative string literal", async () => {
     deleted: [],
   });
   assert.deepEqual(result.files, ["test/a.test.ts"]);
+  assert.equal(result.fallback, true);
 });
 
-test("connects a JSON fixture by its basename string literal", async () => {
+test("a changed JSON fixture falls back even when a module names it", async () => {
   const root = await tree({
     "test/a.test.ts": staticImport("../server/query.ts"),
     "server/query.ts": 'readFileSync("fixture.json");',
@@ -367,6 +368,7 @@ test("connects a JSON fixture by its basename string literal", async () => {
     deleted: [],
   });
   assert.deepEqual(result.files, ["test/a.test.ts"]);
+  assert.equal(result.fallback, true);
 });
 
 test("falls back for an unreferenced asset", async () => {
@@ -499,7 +501,7 @@ test("a renamed test file triggers the test-tree inventory tests", async () => {
   assert.ok(result.files.includes("test/inventory.test.ts"));
 });
 
-test("selects tests behind every module that reads a changed asset", async () => {
+test("a changed asset read by several modules falls back", async () => {
   const root = await tree({
     "test/a.test.ts": staticImport("../server/a.ts"),
     "test/b.test.ts": staticImport("../server/b.ts"),
@@ -520,7 +522,7 @@ test("selects tests behind every module that reads a changed asset", async () =>
   assert.equal(result.fallback, true);
 });
 
-test("a JSON asset with an import edge also selects its textual readers", async () => {
+test("a JSON asset with an import edge falls back", async () => {
   const root = await tree({
     "test/a.test.ts": staticImport("../server/a.ts"),
     "test/b.test.ts": staticImport("../server/b.ts"),
@@ -541,7 +543,7 @@ test("a JSON asset with an import edge also selects its textual readers", async 
   assert.equal(result.fallback, true);
 });
 
-test("a non-JSON asset with a URL reader also selects its path readers", async () => {
+test("a non-JSON asset with a URL reader falls back", async () => {
   const root = await tree({
     "test/a.test.ts": staticImport("../server/a.ts"),
     "test/b.test.ts": staticImport("../server/b.ts"),
@@ -584,3 +586,67 @@ test("a file name in a comment never narrows an asset change", async () => {
   assert.equal(result.fallback, true);
   assert.deepEqual(result.files, ["test/a.test.ts", "test/b.test.ts"]);
 });
+
+test("a literal require in a CommonJS module is an import edge", async () => {
+  const root = await tree({
+    "test/a.test.ts": staticImport("../server/a.cjs"),
+    "test/b.test.ts": staticImport("../server/b.ts"),
+    "server/a.cjs": 'const leaf = require("./leaf.cjs");',
+    "server/leaf.cjs": "module.exports = 1;",
+    "server/b.ts": "export const b = 1;",
+  });
+  const result = await selectAffectedTests(
+    root,
+    ["test/a.test.ts", "test/b.test.ts"],
+    {
+      addedOrModified: ["reference-implementation/server/leaf.cjs"],
+      deleted: [],
+    },
+    { depth: "all" },
+  );
+  assert.equal(result.fallback, false);
+  assert.deepEqual(result.files, ["test/a.test.ts"]);
+});
+
+test("an edited existing test also selects the test-tree inventory tests", async () => {
+  const root = await tree({
+    "test/edited.test.ts": "test('edited', () => {}); // initPostgresStorage",
+    "test/inventory.test.ts": inventorySource,
+    "test/other.test.ts": "test('other', () => {});",
+  });
+  const result = await selectAffectedTests(
+    root,
+    ["test/edited.test.ts", "test/inventory.test.ts", "test/other.test.ts"],
+    {
+      addedOrModified: ["reference-implementation/test/edited.test.ts"],
+      deleted: [],
+    },
+  );
+  assert.deepEqual(result.files, ["test/edited.test.ts", "test/inventory.test.ts"]);
+});
+
+// Known recall gap, kept visible on purpose: a static graph cannot see an
+// import whose specifier is computed at run time, so the second consumer of a
+// changed leaf module is not selected. test:fast is an edit-loop heuristic;
+// the full RI gate is the backstop.
+test(
+  "known gap: a variable import of a changed module is not selected",
+  { todo: "static selection cannot see computed specifiers; the full RI gate covers it" },
+  async () => {
+    const root = await tree({
+      "test/a.test.ts": staticImport("../server/leaf.ts"),
+      "test/b.test.ts": 'const name = "../server/" + "leaf.ts"; await import(name);',
+      "server/leaf.ts": "export const leaf = 1;",
+    });
+    const result = await selectAffectedTests(
+      root,
+      ["test/a.test.ts", "test/b.test.ts"],
+      {
+        addedOrModified: ["reference-implementation/server/leaf.ts"],
+        deleted: [],
+      },
+      { depth: "all" },
+    );
+    assert.deepEqual(result.files, ["test/a.test.ts", "test/b.test.ts"]);
+  },
+);
