@@ -494,7 +494,17 @@ async function runNodeTest(filePath: string, extraArgs: string[]): Promise<NodeT
   );
 }
 
-const testFiles = await discoverSelectedTestFiles(repoRoot, testDir, accountingAuthority?.files);
+const filesFromIndex = effectiveArgs.indexOf("--files-from");
+let testFiles = await discoverSelectedTestFiles(repoRoot, testDir, accountingAuthority?.files);
+if (filesFromIndex !== -1) {
+  const path = effectiveArgs[filesFromIndex + 1];
+  if (!path) throw new Error("--files-from requires PATH");
+  effectiveArgs.splice(filesFromIndex, 2);
+  const { discoverTestFiles } = await import("./run-tests-discovery.ts");
+  const { validateFilesFrom } = await import("./run-tests-affected.ts");
+  const requested = (await readFile(path, "utf8")).split(/\r?\n/).filter(Boolean);
+  testFiles = await validateFilesFrom(requested, await discoverTestFiles(repoRoot, testDir));
+}
 const fileConcurrency = resolveFileConcurrency({
   availableCpus: availableParallelism?.() ?? null,
   profile: selectedProfile,
@@ -610,8 +620,8 @@ const counts = {
 // timeouts, output counts/schema, or the ordinary exit path. It is skipped
 // when the suite did not run to completion (a failing file already dominates
 // the exit) or a signal arrived, so it can never mask an unrelated failure or
-// fire on a partial run.
-if (!failed && signalExitCode === undefined && results.length === testFiles.length) {
+// fire on a partial run. A --files-from selection is partial by construction.
+if (filesFromIndex === -1 && !failed && signalExitCode === undefined && results.length === testFiles.length) {
   const consumedMappingIdentities = summaries.flatMap((summary) => summary.consumed_mapping_identities);
   try {
     assertNamedSkipMappingsFullyConsumed(
