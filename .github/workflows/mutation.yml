@@ -225,6 +225,7 @@ jobs:
             --diff "reports/mutation/${COHORT}/diff.nul" \
             --out "reports/mutation/${COHORT}/intent.json" \
             --selected-tests "reports/mutation/${COHORT}/selected-tests.txt" \
+            --selection-outcome "reports/mutation/${COHORT}/selection-outcome.txt" \
             --max-changed-lines "${COHORT_MAX_CHANGED_LINES:-}" \
             --max-tests "${COHORT_MAX_TESTS:-}"
 
@@ -234,6 +235,8 @@ jobs:
             mkdir -p "${COHORT_ROOT}/reports/mutation/${COHORT}"
             cp "reports/mutation/${COHORT}/selected-tests.txt" \
               "${COHORT_ROOT}/reports/mutation/${COHORT}/selected-tests.txt"
+            cp "reports/mutation/${COHORT}/selection-outcome.txt" \
+              "${COHORT_ROOT}/reports/mutation/${COHORT}/selection-outcome.txt"
           fi
 
           echo "Selected tests for this attempt:"
@@ -242,6 +245,24 @@ jobs:
           applicability="$(node -e 'process.stdout.write(JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8")).applicability)' "reports/mutation/${COHORT}/intent.json")"
           echo "applicability=${applicability}" >> "$GITHUB_OUTPUT"
           echo "Intent applicability: ${applicability}"
+
+      # An empty selected-tests file does not say why it is empty: no test
+      # changed (the cohort's own suite is then the explicit selection), or every
+      # selected test was withheld from the baseline. The second must not start
+      # the engine, because both cohorts' runners read an empty list as "run
+      # everything" and would run exactly the tests that were withheld. The
+      # decision lives in selection-outcome.ts so it is testable; this step only
+      # carries it. When the engine does not start, `engine_exit=not_run` reaches
+      # the receipt through the projection step below.
+      - name: Decide whether the engine runs
+        id: plan
+        if: steps.intent.outputs.applicability == 'applicable'
+        env:
+          COHORT: ${{ matrix.cohort }}
+        run: |
+          set -euo pipefail
+          node --experimental-strip-types scripts/mutation-falsification/plan-engine-run.ts \
+            --outcome "reports/mutation/${COHORT}/selection-outcome.txt" >> "$GITHUB_OUTPUT"
 
       # There is deliberately no result cache here. An earlier revision carried
       # one, and it was wrong twice: the reference implementation read its
@@ -253,7 +274,7 @@ jobs:
       # cost need and invalidation proven against the paths the engine reads.
 
       - name: Build workspace packages
-        if: steps.intent.outputs.applicability == 'applicable' && matrix.cohort == 'reference-implementation'
+        if: steps.plan.outputs.run == 'true' && matrix.cohort == 'reference-implementation'
         run: |
           npm --prefix packages/connector-protocol run build
           npm --prefix packages/collector-runtime run build
@@ -268,7 +289,7 @@ jobs:
         # spent against Stryker's dry-run timeout, and the baseline never
         # completes -- no mutant is tried and the attempt reports no evidence.
         # See reference-implementation/scripts/ci-console-prebuild.test.ts.
-        if: steps.intent.outputs.applicability == 'applicable' && matrix.cohort == 'reference-implementation'
+        if: steps.plan.outputs.run == 'true' && matrix.cohort == 'reference-implementation'
         env:
           NEXT_TELEMETRY_DISABLED: "1"
         run: npm --prefix apps/console run build
@@ -276,7 +297,7 @@ jobs:
       # OBSERVATION. Stryker runs as a black box. Its exit status and its own
       # per-mutant statuses are recorded, never interpreted here.
       - name: Run mutation testing on the changed files
-        if: steps.intent.outputs.applicability == 'applicable'
+        if: steps.plan.outputs.run == 'true'
         id: observe
         continue-on-error: true
         env:
@@ -346,7 +367,9 @@ jobs:
         env:
           COHORT: ${{ matrix.cohort }}
           COHORT_ROOT: ${{ matrix.root }}
-          STRYKER_EXIT: ${{ steps.observe.outputs.stryker_exit }}
+          # `engine_exit` is set only when the plan step decided not to start the
+          # engine, so a run that did start and lost its status still reads empty.
+          STRYKER_EXIT: ${{ steps.observe.outputs.stryker_exit || steps.plan.outputs.engine_exit }}
         run: |
           set -euo pipefail
           # Stryker resolves its reporter paths against the directory it ran in,

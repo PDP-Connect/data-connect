@@ -33,6 +33,7 @@ import {
   selectCohortTests,
   widenToStatements,
 } from "./select-pr-files.ts"
+import { classifySelection } from "./selection-outcome.ts"
 
 function argument(name: string): string {
   const index = process.argv.indexOf(`--${name}`)
@@ -225,7 +226,8 @@ if (
 // The tests this attempt runs, for cohorts whose runner cannot select tests
 // itself. Written unconditionally when asked for: an absent file and an empty
 // file mean different things to the config that reads it, and only one of them
-// is "no selection was recorded".
+// is "no selection was recorded". `--selection-outcome`
+// then says which kind of empty an empty file is.
 const selectedTestsPath = optionalArgument("selected-tests")
 if (bound !== undefined && selectedTestsPath === undefined) {
   throw new Error("an attempt bound limits the tests each trial runs, so it needs --selected-tests")
@@ -400,6 +402,23 @@ if (selectedTestsPath !== undefined) {
     )
   }
   writeFileSync(selectedTestsPath, tests.length === 0 ? "" : `${tests.join("\n")}\n`)
+
+  // An empty file is ambiguous (see selection-outcome.ts), so what it means is
+  // written beside it. The requested count is taken before the withholding
+  // filters above: a revision whose only changed tests were all withheld
+  // requested tests and has none left, which is not the same as one that
+  // changed no test.
+  const requested = Math.max(selectCohortTests(diff, cohort).length, candidates.length)
+  const outcome = classifySelection(requested, tests.length)
+  const outcomePath = optionalArgument("selection-outcome")
+  if (outcomePath !== undefined) {
+    writeFileSync(outcomePath, `${outcome}\n`)
+  }
+  if (outcome === "none_runnable") {
+    process.stdout.write(
+      `every selected test was withheld; the ${cohortName} cohort will not be run on its whole suite\n`
+    )
+  }
 }
 
 writeFileSync(argument("out"), `${JSON.stringify(intent, null, 2)}\n`)
