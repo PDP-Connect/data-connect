@@ -101,11 +101,15 @@ forward, **the evidence is the ongoing CI runs at the current cap**: every
 `reference-implementation` CI run exercises the default cap against the tree as
 it actually is, which is the claim worth holding.
 
-Reading any run's counts, then or now: `completed_files` is derived from the
-exit code (`run-tests.ts` writes `failed ? 0 : results.length`), not from an
-observed per-file completion count, so it is 0 for any run that exits non-zero.
-A real per-file completion claim needs raw file-outcome events, which the
-receipt schema does not carry.
+Reading any run's counts, then or now: older `run-tests.ts` runs wrote
+`completed_files` as `failed ? 0 : results.length`, so it is 0 for any such run
+that exited non-zero, NOT because no file finished. `run-tests.ts` now counts
+the files whose child exited, pass or fail, and adds `failed_files` for the
+ones that exited non-zero or were killed by the per-file watchdog. A killed file
+is a failed file with its output tail and a `TIMED OUT (idle|hard)` line; it no
+longer aborts the files after it. `gate-concurrency-receipt.ts` still derives its
+own `completed_files` from the exit code, so that receipt remains 0 on a failed
+run.
 
 ## Operational use
 

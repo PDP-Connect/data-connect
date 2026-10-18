@@ -14,10 +14,9 @@ import {
   dedicatedPostgresTestUrl,
   isDedicatedPostgresTestDatabaseName,
 } from "../test/helpers/dedicated-postgres-test-url.ts";
-import { collectChildProcessOutput } from "./child-process-output.ts";
 import { deriveDedicatedPostgresDbNameForFile } from "./dedicated-postgres-db-name.ts";
 import { resolveFileConcurrency } from "./file-concurrency.ts";
-import { startFileProcessWatchdog } from "./file-process-watchdog.ts";
+import { countFileOutcomes, drainFileQueue, type NodeTestResult, superviseFileChild } from "./file-outcome.ts";
 import { createOwnedTestResource, type OwnedTestResource, settleAll } from "./owned-test-resource.ts";
 import { assertPostgresProfilePreflight } from "./postgres-profile-preflight.ts";
 import { isPostgresTemplateEligibleFilePath } from "./postgres-template-eligibility.ts";
@@ -342,13 +341,6 @@ async function allocateTestDb(
   return { url: allocation.value, release: allocation.release };
 }
 
-interface NodeTestResult {
-  durationMs: number;
-  exitCode: number;
-  filePath: string;
-  output: string;
-}
-
 async function runNodeTest(filePath: string, extraArgs: string[]): Promise<NodeTestResult> {
   const startedAt = Date.now();
   const baseEnv: ProcessEnvLike = scrubbedBaseEnv;
@@ -403,7 +395,7 @@ async function runNodeTest(filePath: string, extraArgs: string[]): Promise<NodeT
   // pre-guard run (guard-absent parity).
   const childEnv: ProcessEnvLike = hermeticGuardEnabled ? { ...childEnvBase, PDPP_HERMETIC_GUARD: "1" } : childEnvBase;
 
-  return new Promise<NodeTestResult>((resolve, reject) => {
+  return new Promise<NodeTestResult>((resolve) => {
     const child = spawn(process.execPath, ["--test", ...extraArgs, filePath], {
       cwd: repoRoot,
       env: childEnv,
@@ -411,60 +403,16 @@ async function runNodeTest(filePath: string, extraArgs: string[]): Promise<NodeT
     });
     activeChildren.add(child);
     child.once("close", () => activeChildren.delete(child));
-    // Reporter output proves that a long file is still making progress. The
-    // hard deadline separately bounds a chatty process that never exits.
-    const watchdog = startFileProcessWatchdog({
-      hardDeadlineMs: PER_FILE_HARD_TIMEOUT_MS,
-      idleBudgetMs: PER_FILE_IDLE_TIMEOUT_MS,
-      kill: () => child.kill("SIGKILL"),
-    });
-    let settled = false;
-    const outputPromise = collectChildProcessOutput(child, watchdog.markProgress);
-
-    const settle = async (finish: () => void | Promise<void>) => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      watchdog.clear();
-      await finish();
-    };
-
-    child.on("error", (err) => {
-      settle(() => reject(err)).catch(reject);
-    });
-    child.on("close", (code, signal) => {
-      settle(async () => {
-        const output = await outputPromise;
-        const timeoutReason = watchdog.timeoutReason();
-        if (timeoutReason === "idle") {
-          reject(
-            new Error(
-              `Test process for ${filePath} timed out after ${PER_FILE_IDLE_TIMEOUT_MS}ms without child output and was killed`
-            )
-          );
-          return;
-        }
-        if (timeoutReason === "hard") {
-          reject(
-            new Error(
-              `Test process for ${filePath} exceeded the ${PER_FILE_HARD_TIMEOUT_MS}ms hard deadline and was killed`
-            )
-          );
-          return;
-        }
-        if (signal) {
-          reject(new Error(`Test process for ${filePath} exited via signal ${signal}`));
-          return;
-        }
-        resolve({
-          durationMs: Date.now() - startedAt,
-          exitCode: code ?? 1,
-          filePath,
-          output: `\n==> ${filePath}\n${output}`,
-        });
-      }).catch(reject);
-    });
+    // A watchdog kill or a signal death is a failed file, not a runner error.
+    resolve(
+      superviseFileChild({
+        child,
+        filePath,
+        hardDeadlineMs: PER_FILE_HARD_TIMEOUT_MS,
+        idleBudgetMs: PER_FILE_IDLE_TIMEOUT_MS,
+        startedAt,
+      })
+    );
   }).then(
     async (result) => {
       try {
@@ -559,23 +507,19 @@ try {
     postgresTestTemplateIdentity = template.value.identityDigest;
   }
 
-  async function worker(): Promise<void> {
-    while (!stopping && queue.length > 0) {
-      const file = queue.shift();
-      if (!file) {
-        return;
-      }
-      try {
-        // biome-ignore lint/performance/noAwaitInLoops: each worker pulls one file from the shared queue; awaiting here preserves the deliberate concurrency cap.
-        const result = await runNodeTest(file, effectiveArgs);
+  const worker = () =>
+    drainFileQueue({
+      isStopping: () => stopping,
+      onResult: (result) => {
         results.push(result);
         process.stdout.write(result.output);
-      } catch (error) {
+      },
+      queue,
+      runFile: (file) => runNodeTest(file, effectiveArgs),
+      stop: () => {
         stopping = true;
-        throw error;
-      }
-    }
-  }
+      },
+    });
 
   await settleAll(Array.from({ length: fileConcurrency }, () => worker()));
 } catch (error) {
@@ -596,7 +540,20 @@ const selectedFiles = repositoryPaths("reference-implementation", testFiles);
 if (accountingAuthority && JSON.stringify(selectedFiles) !== JSON.stringify(accountingAuthority.files)) {
   runnerErrors.push(new Error("RI discovery differs from authority-issued child selection"));
 }
-const summaries: StructuredSummary[] = results.map((result) => structuredNodeSummary(result.output));
+const EMPTY_KILLED_SUMMARY: StructuredSummary = {
+  assertions: 0,
+  consumed_mapping_identities: [],
+  failed: 0,
+  passed: 0,
+  skip_reasons: {},
+  skipped: 0,
+};
+// A killed child's output is a bounded tail with no complete event stream, so
+// it contributes no assertion counts; its failure shows in failed_files and
+// the exit code.
+const summaries: StructuredSummary[] = results.map((result) =>
+  result.killed ? EMPTY_KILLED_SUMMARY : structuredNodeSummary(result.output)
+);
 const skipReasons: Record<string, number> = {};
 for (const summary of summaries) {
   for (const [reason, count] of Object.entries(summary.skip_reasons)) {
@@ -612,7 +569,7 @@ const silentFailures = results.filter(
 );
 const counts = {
   assertions: summaries.reduce((sum, summary) => sum + summary.assertions, 0),
-  completed_files: failed ? 0 : results.length,
+  ...countFileOutcomes(results),
   failed: summaries.reduce((sum, summary) => sum + summary.failed, 0),
   passed: summaries.reduce((sum, summary) => sum + summary.passed, 0),
   planned_files: testFiles.length,

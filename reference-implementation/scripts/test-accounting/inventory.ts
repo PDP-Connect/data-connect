@@ -86,6 +86,7 @@ export interface Counts {
   assertions: number;
   completed_files?: number;
   failed: number;
+  failed_files?: number;
   passed: number;
   planned_files?: number;
   protocol_error?: string;
