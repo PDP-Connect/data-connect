@@ -5237,7 +5237,7 @@ setInterval(() => {}, 1000);
             executable_dir.join("../Helpers/DataConnect Helper.app/Contents/MacOS/DataConnect");
         fs::create_dir_all(executable_dir).unwrap();
         fs::create_dir_all(helper.parent().unwrap()).unwrap();
-        fs::copy(ambient_node, &helper).unwrap();
+        crate::test_executable::copy(&ambient_node, &helper);
         fs::write(executable_dir.join(BUNDLED_NODE_NAME), "invalid old runtime").unwrap();
         assert_eq!(
             Path::new(&resolve_node_program_from(&executable, None).unwrap()),
@@ -5256,9 +5256,7 @@ setInterval(() => {}, 1000);
         });
         fs::write(&fake_app, b"fixture app").unwrap();
         let bundled_node = app_dir.path().join(BUNDLED_NODE_NAME);
-        let staged_node = app_dir.path().join(format!(".{BUNDLED_NODE_NAME}.staged"));
-        fs::copy(&ambient_node, &staged_node).unwrap();
-        fs::rename(&staged_node, &bundled_node).unwrap();
+        crate::test_executable::copy(&ambient_node, &bundled_node);
 
         let resolved_node = resolve_node_program_from(&fake_app, Some(OsStr::new(""))).unwrap();
         assert_eq!(Path::new(&resolved_node), bundled_node);
