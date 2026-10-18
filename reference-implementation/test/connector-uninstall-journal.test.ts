@@ -2,14 +2,26 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import {
   connectorUninstallJournalPath,
-  reconcileConnectorUninstallJournal,
+  deleteConnectorUninstallJournal,
+  listConnectorUninstallJournalIds,
   readConnectorUninstallJournal,
+  reconcileConnectorUninstallJournal,
   updateConnectorUninstallJournalRoots,
   writeConnectorUninstallJournal,
 } from "../server/connector-uninstall-journal.ts";
@@ -266,4 +278,79 @@ test("journal cleanup finishes when the emptied connector directory is already g
   );
 
   assert.equal(existsSync(connectorUninstallJournalPath(dataDir, "github")), false);
+});
+
+// A journal directory that is a symlink would send journal writes, reads, lists and deletes outside the data directory.
+const RE_JOURNAL_SYMLINK = /symbolic link/;
+
+function symlinkedJournalDir(t: TestContext): { dataDir: string; outside: string } {
+  const dataDir = tempDataDir(t);
+  const outside = tempDataDir(t);
+  symlinkSync(outside, join(dataDir, "connector-uninstall-journals"), "dir");
+  return { dataDir, outside };
+}
+
+function plantJournal(dataDir: string, outside: string): string {
+  const original = join(dataDir, "connectors", "github", "sha256-five");
+  const planted = join(outside, "github.journal");
+  writeFileSync(
+    planted,
+    JSON.stringify({
+      connectorId: "github",
+      priorActiveRecord: { connectorId: "github" },
+      rootMoves: [{ moved: join(dataDir, "connectors", "github", ".uninstall-five"), original }],
+      version: 1,
+    })
+  );
+  return planted;
+}
+
+test("journal write refuses a symlinked journal directory and writes nothing outside the data directory", (t) => {
+  if (process.platform === "win32") {
+    t.skip("directory symlink privilege is platform-dependent");
+    return;
+  }
+  const { dataDir, outside } = symlinkedJournalDir(t);
+
+  assert.throws(
+    () =>
+      writeConnectorUninstallJournal(dataDir, {
+        connectorId: "github",
+        priorActiveRecord: { connectorId: "github" },
+        rootMoves: [],
+      }),
+    RE_JOURNAL_SYMLINK
+  );
+  assert.deepEqual(readdirSync(outside), [], "nothing may be written through the link");
+});
+
+test("journal read, list and reconcile refuse a journal planted behind a symlinked journal directory", async (t) => {
+  if (process.platform === "win32") {
+    t.skip("directory symlink privilege is platform-dependent");
+    return;
+  }
+  const { dataDir, outside } = symlinkedJournalDir(t);
+  plantJournal(dataDir, outside);
+
+  assert.throws(() => readConnectorUninstallJournal(dataDir, "github"), RE_JOURNAL_SYMLINK);
+  assert.throws(() => listConnectorUninstallJournalIds(dataDir), RE_JOURNAL_SYMLINK);
+  await assert.rejects(
+    reconcileConnectorUninstallJournal(dataDir, "github", {
+      getActive: () => assert.fail("a planted journal must not be read"),
+      restoreActive: () => assert.fail("a planted journal must not be acted on"),
+    }),
+    RE_JOURNAL_SYMLINK
+  );
+});
+
+test("journal delete refuses a symlinked journal directory and keeps the file behind it", (t) => {
+  if (process.platform === "win32") {
+    t.skip("directory symlink privilege is platform-dependent");
+    return;
+  }
+  const { dataDir, outside } = symlinkedJournalDir(t);
+  const planted = plantJournal(dataDir, outside);
+
+  assert.throws(() => deleteConnectorUninstallJournal(dataDir, "github"), RE_JOURNAL_SYMLINK);
+  assert.equal(existsSync(planted), true, "a file outside the data directory must survive");
 });

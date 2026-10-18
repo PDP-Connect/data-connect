@@ -81,7 +81,10 @@ function assertRootMoves(dataDir: string, connectorId: string, rootMoves: readon
 }
 
 function journalDir(dataDir: string): string {
-  return resolve(dataDir, "connector-uninstall-journals");
+  const dir = resolve(dataDir, "connector-uninstall-journals");
+  // Every journal write, read, list and delete goes through here: a link would send them outside the data directory.
+  assertNoSymlinkBelowDataDir(dataDir, dir);
+  return dir;
 }
 
 export function connectorUninstallJournalPath(dataDir: string, connectorId: string): string {
