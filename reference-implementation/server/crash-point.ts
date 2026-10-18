@@ -15,11 +15,11 @@ type CrashPointHook = (name: string) => void;
 let crashPointHookForTest: CrashPointHook | null = null;
 
 export function crashPoint(name: string): void {
-	if (crashPointHookForTest) {
-		crashPointHookForTest(name);
-	}
+  if (crashPointHookForTest) {
+    crashPointHookForTest(name);
+  }
 }
 
 export function __setCrashPointHookForTest(hook: CrashPointHook | null): void {
-	crashPointHookForTest = hook;
+  crashPointHookForTest = hook;
 }

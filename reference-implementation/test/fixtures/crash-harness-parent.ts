@@ -11,24 +11,17 @@ import { crashPoint } from "../../server/crash-point.ts";
 import { armCrashPoints, spawnCrashChild } from "../helpers/crash-harness.ts";
 
 armCrashPoints();
-const [log, pidFile, mode] = process.argv.slice(2) as [
-	string,
-	string,
-	"parked" | "running",
-];
-const child = spawnCrashChild(
-	join(import.meta.dirname, "crash-harness-child.ts"),
-	{
-		args: [log, "linger"],
-		points: mode === "parked" ? ["after-one"] : [],
-	},
-);
+const [log, pidFile, mode] = process.argv.slice(2) as [string, string, "parked" | "running"];
+const child = spawnCrashChild(join(import.meta.dirname, "crash-harness-child.ts"), {
+  args: [log, "linger"],
+  points: mode === "parked" ? ["after-one"] : [],
+});
 if (mode === "parked") {
-	await child.parked("after-one");
+  await child.parked("after-one");
 } else {
-	while (!(existsSync(log) && readFileSync(log, "utf8").includes("three"))) {
-		await new Promise((settle) => setTimeout(settle, 20));
-	}
+  while (!(existsSync(log) && readFileSync(log, "utf8").includes("three"))) {
+    await new Promise((settle) => setTimeout(settle, 20));
+  }
 }
 writeFileSync(pidFile, String(child.pid));
 crashPoint("child-started");
