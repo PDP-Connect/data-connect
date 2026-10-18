@@ -127,7 +127,12 @@ import {
 } from "./retained-size-read-model.ts";
 import { firstSemanticTimeValue, SEMANTIC_TIME_UNKNOWN } from "./semantic-time-coercion.ts";
 import { createStorageBackend } from "./storage-backend.ts";
-import { currentStorageGeneration, isCurrentStorageGeneration } from "./storage-generation.ts";
+import {
+  assertCurrentStorageGeneration,
+  currentStorageGeneration,
+  isCurrentStorageGeneration,
+  StaleStorageGenerationError,
+} from "./storage-generation.ts";
 import {
   getChangeHistoryLimit,
   nowIso,
@@ -1054,13 +1059,6 @@ function releaseIndexWork(generation: number): void {
  * and then queue behind another generation's held admission permit for an
  * arbitrarily long time before actually running its operation.
  */
-class StaleStorageGenerationError extends Error {
-  constructor() {
-    super("storage generation changed while queued for index-work admission");
-    this.name = "StaleStorageGenerationError";
-  }
-}
-
 async function withIndexWork<T>(operation: () => Promise<T>, generation = currentStorageGeneration()): Promise<T> {
   await acquireIndexWork(generation);
   try {
@@ -1819,7 +1817,7 @@ async function runDeferredRecordIndexes(
     try {
       // biome-ignore lint/performance/noAwaitInLoops: One connector instance's derived index repairs are intentionally ordered.
       await withIndexWork(
-        () => maintainRecordIndexesWithinPermit(storageTarget, record, version, {}),
+        () => maintainRecordIndexesWithinPermit(storageTarget, record, version, {}, scheduledGeneration),
         scheduledGeneration
       );
     } catch (err) {
@@ -2501,7 +2499,7 @@ export async function maintainRecordIndexes(
   generation: number = currentStorageGeneration()
 ): Promise<void> {
   return await withIndexWork(
-    () => maintainRecordIndexesWithinPermit(storageTarget, record, expectedVersion, options),
+    () => maintainRecordIndexesWithinPermit(storageTarget, record, expectedVersion, options, generation),
     generation
   );
 }
@@ -2786,7 +2784,8 @@ async function maintainRecordIndexesWithinPermit(
   storageTarget: RecordStorageTarget,
   record: RecordEnvelope,
   expectedVersion: number,
-  options: RecordIngestOptions
+  options: RecordIngestOptions,
+  generation: number
 ): Promise<void> {
   const connectorId = connectorIdForStorageTarget(storageTarget);
   const connectorInstanceId = resolveStorageConnectorInstanceId(storageTarget, connectorId);
@@ -2838,6 +2837,7 @@ async function maintainRecordIndexesWithinPermit(
       connectorInstanceId,
       data,
       declaredFields: options.attemptContext ? (attemptFacts?.semanticFields ?? []) : undefined,
+      generation,
       recordKey,
       stream,
     });
@@ -2858,9 +2858,14 @@ async function maintainRecordIndexesWithinPermit(
     stream,
   });
 
+  // withIndexWork checked the generation before this operation started, but the
+  // compute awaits above can span a storage close and re-init. The version check
+  // below cannot tell the new database from the old one: the same key can sit at
+  // the same version there with different content.
   if (isPostgresStorageBackend()) {
     return withPostgresTransaction(
       async (client) => {
+        assertCurrentStorageGeneration(generation);
         // Match repair's instance -> publication -> derived DML order, including deletes.
         await lockConnectorManifestPublication(client, connectorId);
         const current = await client.query<{ version: string | number; deleted: boolean }>(
@@ -2900,6 +2905,7 @@ async function maintainRecordIndexesWithinPermit(
     );
   }
 
+  assertCurrentStorageGeneration(generation);
   return writeTransaction(() => {
     const current = getOne<CurrentRecordRow>(referenceQueries.recordsIngestGetCurrentRecordState, [
       connectorInstanceId,

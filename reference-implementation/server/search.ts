@@ -96,6 +96,7 @@ import {
 import { compileRequestFilters, passesGrantRecordConstraints, passesRequestFilters } from "./record-filters.ts";
 import { mapSearchFanout } from "./search-fanout.ts";
 import { sqliteCountIndexableTextValues } from "./search-index-counts.ts";
+import { assertCurrentStorageGeneration, currentStorageGeneration } from "./storage-generation.ts";
 import { makeDefaultAccountConnectorInstanceId } from "./stores/connector-instance-store.ts";
 import { countDirtySearchIndexScopes } from "./stores/search-index-dirty-store.ts";
 
@@ -350,6 +351,12 @@ interface LexicalBackfillManifestStream {
 type LexicalBackfillManifest = LexicalManifest & { connector_id: string; streams: LexicalBackfillManifestStream[] };
 
 interface LexicalBackfillOptions {
+  /**
+   * Storage generation this backfill belongs to (default: the generation when it
+   * starts). Every write re-checks it, so a backfill that outlives a storage
+   * close and re-init cannot write into the new database.
+   */
+  generation?: number;
   log?: (message?: unknown) => void;
   manifest?: LexicalBackfillManifest;
   /**
@@ -393,6 +400,7 @@ async function assertLexicalBackfillManifestCurrent(
 async function withLexicalBackfillWrite(
   connectorId: string,
   connectorInstanceId: string,
+  generation: number,
   expected: LexicalBackfillManifestStream | { absentStream: string },
   sqliteWrite: () => void,
   postgresWrite: (client: PostgresTransactionClient) => Promise<unknown>
@@ -408,12 +416,14 @@ async function withLexicalBackfillWrite(
             await assertConnectorManifestStreamSubsetWithClient(client, connectorId, manifest);
           }
           await maybeLexicalBackfillPhaseForTest("before-derived-dml", { connectorId, connectorInstanceId });
+          assertCurrentStorageGeneration(generation);
           await postgresWrite(client);
         },
         { lockConnectorInstanceId: connectorInstanceId }
       );
     } else {
       transaction(() => {
+        assertCurrentStorageGeneration(generation);
         if ("absentStream" in expected) {
           assertConnectorManifestStreamAbsentSync(connectorId, expected.absentStream);
         } else {
@@ -1037,6 +1047,7 @@ async function pruneStaleSqliteLexicalRows(
   connectorId: string,
   mStream: LexicalBackfillManifestStream,
   connectorInstanceId: string,
+  generation: number,
   stream: string,
   declaredFields: readonly string[]
 ): Promise<void> {
@@ -1065,6 +1076,7 @@ async function pruneStaleSqliteLexicalRows(
         connectorId,
         connectorInstanceId,
         declaredFields: declared,
+        generation,
         mStream,
         rows: stale,
         stream,
@@ -1078,6 +1090,7 @@ async function pruneStaleSqliteLexicalPage({
   connectorId,
   mStream,
   connectorInstanceId,
+  generation,
   stream,
   declaredFields,
   rows,
@@ -1085,6 +1098,7 @@ async function pruneStaleSqliteLexicalPage({
   connectorId: string;
   mStream: LexicalBackfillManifestStream;
   connectorInstanceId: string;
+  generation: number;
   stream: string;
   declaredFields: ReadonlySet<string>;
   rows: readonly { rowid: number; record_key: string; field: string }[];
@@ -1093,6 +1107,7 @@ async function pruneStaleSqliteLexicalPage({
   await withLexicalBackfillWrite(
     connectorId,
     connectorInstanceId,
+    generation,
     mStream,
     () => {
       for (const candidate of rows) {
@@ -1149,6 +1164,7 @@ function rebuildLexicalIndexForStream({
   connectorId,
   mStream,
   connectorInstanceId,
+  generation,
   stream,
   declaredFields,
   recordsToScan = null,
@@ -1158,6 +1174,7 @@ function rebuildLexicalIndexForStream({
   connectorId: string;
   mStream: LexicalBackfillManifestStream;
   connectorInstanceId: string | null;
+  generation: number;
   stream: string;
   declaredFields: readonly string[];
   recordsToScan?: number | null;
@@ -1180,6 +1197,7 @@ function rebuildLexicalIndexForStream({
       await withLexicalBackfillWrite(
         connectorId,
         resolvedConnectorInstanceId,
+        generation,
         mStream,
         () => {
           throw new Error("PostgreSQL stale prune requires PostgreSQL");
@@ -1192,7 +1210,7 @@ function rebuildLexicalIndexForStream({
           })
       );
     } else {
-      await pruneStaleSqliteLexicalRows(connectorId, mStream, resolvedConnectorInstanceId, stream, fields);
+      await pruneStaleSqliteLexicalRows(connectorId, mStream, resolvedConnectorInstanceId, generation, stream, fields);
     }
   };
 
@@ -1241,6 +1259,7 @@ function rebuildLexicalIndexForStream({
     await withLexicalBackfillWrite(
       connectorId,
       resolvedConnectorInstanceId,
+      generation,
       mStream,
       () =>
         writeSqliteLexicalPage({
@@ -1346,6 +1365,7 @@ async function lexicalMetaGetFingerprint({
 async function deleteLexicalBackfillStream(
   connectorId: string,
   connectorInstanceId: string,
+  generation: number,
   stream: string,
   expected: LexicalBackfillManifestStream | { absentStream: string }
 ): Promise<void> {
@@ -1353,6 +1373,7 @@ async function deleteLexicalBackfillStream(
   await withLexicalBackfillWrite(
     connectorId,
     connectorInstanceId,
+    generation,
     expected,
     () => {
       exec(referenceQueries.searchIndexDeleteByStream, [connectorInstanceId, stream]);
@@ -1642,6 +1663,7 @@ async function indexRowsAllCanonical({
 async function backfillLexicalStream({
   connectorId,
   connectorInstanceId,
+  generation,
   mStream,
   stream,
   progressJob,
@@ -1652,6 +1674,7 @@ async function backfillLexicalStream({
   verifyContent: boolean;
   connectorId: string;
   connectorInstanceId: string;
+  generation: number;
   mStream: LexicalBackfillManifestStream;
   stream: string;
   progressJob: LexicalBackfillJob;
@@ -1679,6 +1702,7 @@ async function backfillLexicalStream({
       await deleteLexicalBackfillStream(
         connectorId,
         connectorInstanceId,
+        generation,
         stream,
         mStream.absentStream ? { absentStream: mStream.absentStream } : mStream
       );
@@ -1762,6 +1786,7 @@ async function backfillLexicalStream({
     connectorId,
     connectorInstanceId,
     declaredFields,
+    generation,
     mStream,
     progressJob,
     recordsToScan: recordCount,
@@ -1779,6 +1804,7 @@ async function backfillLexicalStream({
   await withLexicalBackfillWrite(
     connectorId,
     connectorInstanceId,
+    generation,
     mStream,
     () => {
       exec(referenceQueries.searchMetaUpsertFingerprint, [
@@ -1807,6 +1833,7 @@ async function backfillLexicalStream({
 async function backfillLexicalConnectorInstance(
   connectorId: string,
   connectorInstanceId: string,
+  generation: number,
   manifestStreams: LexicalBackfillManifestStream[],
   progressJob: LexicalBackfillJob,
   log: (message?: unknown) => void,
@@ -1833,6 +1860,7 @@ async function backfillLexicalConnectorInstance(
     currentProgressJob = await backfillLexicalStream({
       connectorId,
       connectorInstanceId,
+      generation,
       log,
       mStream,
       progressJob: currentProgressJob,
@@ -1867,7 +1895,9 @@ async function backfillLexicalConnectorInstance(
       `[PDPP] Lexical index: stream='${row.stream}' connector='${connectorId}' ` +
         "no longer in manifest — dropping stale index + meta"
     );
-    await deleteLexicalBackfillStream(connectorId, connectorInstanceId, row.stream, { absentStream: row.stream });
+    await deleteLexicalBackfillStream(connectorId, connectorInstanceId, generation, row.stream, {
+      absentStream: row.stream,
+    });
   });
 
   return currentProgressJob;
@@ -1879,6 +1909,7 @@ export async function lexicalIndexBackfillForManifest({
   signal = null,
   orphanStreamCleanup = true,
   verifyContent = false,
+  generation = currentStorageGeneration(),
 }: LexicalBackfillOptions = {}): Promise<LexicalBackfillJob | undefined> {
   if (!(manifest?.connector_id && Array.isArray(manifest?.streams))) {
     return;
@@ -1927,6 +1958,7 @@ export async function lexicalIndexBackfillForManifest({
       progressJob = await backfillLexicalConnectorInstance(
         connectorId,
         connectorInstanceId,
+        generation,
         manifest.streams,
         progressJob,
         log,
