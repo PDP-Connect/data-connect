@@ -4,6 +4,7 @@ import assert from "node:assert/strict"
 import { spawn, spawnSync } from "node:child_process"
 import {
   access,
+  mkdir,
   mkdtemp,
   readFile,
   readdir,
@@ -182,7 +183,11 @@ test(
       t.skip("test-sandbox cannot enforce cgroups and bwrap here")
       return
     }
-    const directory = await mkdtemp(join(tmpdir(), "e2e-escape-test-"))
+    // The sandbox's private /tmp hides a host /tmp fixture, so the fixture lives
+    // in the gitignored e2e/test-results. TEST_TMPDIR stays as the caller set it.
+    const parent = fileURLToPath(new URL("test-results", import.meta.url))
+    await mkdir(parent, { recursive: true })
+    const directory = await mkdtemp(join(parent, "escape-"))
     const tag = `escape-tag-${process.pid}-${Date.now()}`
     let child
     t.after(async () => {
@@ -200,7 +205,7 @@ test(
     child = spawn(process.execPath, [fixture, "host"], {
       detached: true,
       stdio: ["ignore", "pipe", "pipe"],
-      env: { ...env, TEST_TMPDIR: directory },
+      env,
     })
     let output = ""
     for (const stream of [child.stdout, child.stderr])
@@ -211,10 +216,23 @@ test(
       child.once("error", reject)
       child.once("exit", resolve)
     })
-    const code = await Promise.race([exited, delay(25_000, "hung")])
+    // The fixture holds the wrapper until the descendant acks (15 s deadline),
+    // so this bound covers that wait plus teardown. A slow host must not hang.
+    const code = await Promise.race([
+      exited,
+      delay(40_000, "hung", { ref: false }),
+    ])
     assert.notEqual(code, "hung", "the wrapper never returned")
     assert.equal(code, 0, output)
-    assert.match(output, /"ready":true/, "the escaped process had started")
+    // Only the descendant's ack proves it existed and had left the owned group.
+    const ready = output.match(/^\{"ready":true.*\}$/m)
+    assert.ok(ready, "the escaped descendant never acknowledged")
+    const { group, escaped } = JSON.parse(ready[0])
+    assert.notEqual(
+      escaped.pgid,
+      group,
+      "the escaped descendant stayed in the owned process group"
+    )
     let remaining = await processesWithTag(tag)
     for (let retry = 0; remaining.length && retry < 40; retry++) {
       await delay(50)
@@ -235,15 +253,16 @@ function fixtureSource(mode, wrapper, tag = "") {
     console.log(JSON.stringify({pgid: Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[2])}));
     spawn(process.execPath, ["-e", '/*${tag}*/ process.on("SIGTERM", () => {}); console.log(JSON.stringify({grandchild:true})); setInterval(() => {}, 1000)'], {stdio: ["ignore", "inherit", "inherit"]});
     if (${JSON.stringify(mode)} === "escape") {
-      // setsid descendant that ignores TERM and holds our stdout and stderr.
-      spawn(process.execPath, ["-e", '/*${tag}*/ process.on("SIGTERM", () => {}); setInterval(() => {}, 1000)'], {detached: true, stdio: ["ignore", "inherit", "inherit"]});
+      // setsid descendant that ignores TERM and holds our stdout and stderr. Once
+      // it is detached and TERM is armed, it acks by renaming a file into argv[1].
+      spawn(process.execPath, ["-e", '/*${tag}*/ process.on("SIGTERM", () => {}); const fs = require("node:fs"); const ack = process.argv[1]; const stat = fs.readFileSync("/proc/self/stat", "utf8"); fs.writeFileSync(ack + ".part", JSON.stringify({pgid: Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[2])})); fs.renameSync(ack + ".part", ack); setInterval(() => {}, 1000)', process.argv[1]], {detached: true, stdio: ["ignore", "inherit", "inherit"]});
       process.on("SIGTERM", () => process.exit(0));
     }
     setInterval(() => {}, 1000);
   `
   const failing = `import { test, expect } from ${JSON.stringify(new URL("node_modules/@playwright/test/index.mjs", import.meta.url).href)}; test("seeded assertion failure", () => { expect(true).toBe(false) });`
   return `
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { runOwnedHarness, runInSandbox, receiveSignals, signalExitCode } from ${JSON.stringify(harness)};
@@ -257,11 +276,23 @@ const stat = readFileSync("/proc/self/stat", "utf8");
 console.log(JSON.stringify({ pgid: Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[2]) }));
 try {
   const code = await runOwnedHarness(async ({ root, launch }) => {
-    launch(["-e", ${JSON.stringify(child)}], { output: true });
+    const ack = join(root, "escaped.json");
+    const owned = launch(["-e", ${JSON.stringify(child)}, ack], { output: true });
+    if (mode === "escape") {
+      // The descendant's ack is the readiness, not a timer. Teardown waits here,
+      // so the wrapper's exit is what must reap the descendant.
+      const deadline = Date.now() + 15_000;
+      while (!existsSync(ack)) {
+        if (Date.now() > deadline) throw new Error("the escaped descendant never acknowledged");
+        await new Promise(r => setTimeout(r, 50));
+      }
+      console.log(JSON.stringify({ ready: true, group: owned.pid, escaped: JSON.parse(readFileSync(ack, "utf8")) }));
+      return 0;
+    }
     // Give both generations time to install their TERM-resistant handlers.
     await new Promise(r => setTimeout(r, 300));
     console.log(JSON.stringify({ ready: true }));
-    if (mode === "normal" || mode === "escape") return 0;
+    if (mode === "normal") return 0;
     if (mode === "failure") {
       const spec = join(root, "failure.spec.mjs");
       const config = join(root, "playwright.config.mjs");
