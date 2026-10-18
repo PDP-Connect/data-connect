@@ -167,3 +167,34 @@ test("approvePendingApproval posts only the reviewed revision and request URI", 
     request_uri: "urn:request:9",
   });
 });
+
+test("approveConsentRequest reviews staged consent and approves only its revision and URI", async (t) => {
+  const approvals = await loadOperatorApprovals();
+  const review = {
+    approval_review: { client: { client_id: "client-staged" } },
+    approval_review_revision: "revision-staged",
+    request_uri: "urn:request:staged",
+  };
+  const requests: Array<{ body: string | undefined; method: string | undefined; path: string }> = [];
+  const fetchMock = t.mock.method(globalThis, "fetch", async (input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(input instanceof Request ? input.url : input);
+    requests.push({ body: init?.body?.toString(), method: init?.method, path: url.pathname });
+    return requests.length === 1 ? Response.json(review) : Response.json({ ok: true });
+  });
+
+  assert.deepEqual(await approvals.approveConsentRequest("urn:request:staged", "subject-7"), { ok: true });
+
+  assert.equal(fetchMock.mock.callCount(), 2);
+  assert.deepEqual(requests.map(({ path, method }) => [path, method]), [
+    ["/consent/review", "POST"],
+    ["/consent/approve", "POST"],
+  ]);
+  assert.deepEqual(JSON.parse(requests[0]?.body ?? "{}"), {
+    request_uri: "urn:request:staged",
+    subject_id: "subject-7",
+  });
+  assert.deepEqual(JSON.parse(requests[1]?.body ?? "{}"), {
+    approval_review_revision: "revision-staged",
+    request_uri: "urn:request:staged",
+  });
+});

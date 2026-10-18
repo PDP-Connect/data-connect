@@ -9,9 +9,9 @@
  * `connection-control-result.ts` (not `operator-runs.ts`) specifically so they
  * can be imported and executed under `node --test`: `operator-runs.ts`
  * transitively imports `owner-token.ts`, which does `import "server-only"` and
- * throws outside the React Server runtime. We unit-test the classifiers directly
- * Wrapper requests run separately through `operator-runs-wire.behavior.test.ts`;
- * the remaining source check below guards only the browser-profile purge route.
+ * throws outside the React Server runtime. We unit-test the classifiers directly.
+ * Wrapper requests run separately through `operator-runs-wire.behavior.test.ts`,
+ * including browser-profile purge.
  *
  * Outcomes under test (tasks 2.1 / 2.2):
  *   Revoke: 200 → revoked; 400 connector_instance_inactive → already_revoked;

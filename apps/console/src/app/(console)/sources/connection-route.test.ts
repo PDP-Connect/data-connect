@@ -8,7 +8,7 @@ const requests: unknown[] = [];
 let responseRows: Array<Record<string, unknown>> = [];
 const route = (async () => {
   mock.module("../lib/ref-client.ts", {
-    namedExports: {
+    exports: {
       listConnectorSummaries: async (request: unknown) => {
         requests.push(request);
         return { data: responseRows };

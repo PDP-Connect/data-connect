@@ -2,13 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import { mock, test } from "node:test";
+
+// Source structure preserves the R5 exactness ruling (add-source-perf-design-agy-0730.md; terminal-read-architecture-fable-0730.md §2 R5).
 
 const requests: Array<Record<string, unknown>> = [];
 let fetchPage: (request: Record<string, unknown>) => Promise<unknown>;
 const moduleApi = (async () => {
   mock.module("../lib/ref-client.ts", {
-    namedExports: {
+    exports: {
       CONNECTOR_SUMMARY_CONNECTOR_ID_SET_MAX: 100,
       listConnectorSummaries: async (request: Record<string, unknown>) => {
         requests.push(request);
@@ -87,4 +90,9 @@ test("catalog lookup batches unique connector ids into bounded scopes", async ()
   assert.deepEqual(requests.map((request) => (request.connectorId as string[]).length).sort((a, b) => a - b), [1, ...Array(9).fill(100)]);
   assert.ok(maxActive > 1 && maxActive <= 8, `expected concurrency from 2 through 8, got ${maxActive}`);
   assert.ok(requests.every((request) => request.profile === "retained_count_summary"));
+});
+
+test("source: exact results do not expose a complete or incompleteness field", async () => {
+  const source = await readFile(new URL("./existing-sources-by-connector.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /\bcomplete\s*[:?]/);
 });

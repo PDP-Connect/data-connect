@@ -7,27 +7,27 @@ import { mock, test } from "node:test";
 
 let requestUrl = "";
 const client = (async () => {
-  mock.module("server-only", { namedExports: {} });
+  mock.module("server-only", { exports: {} });
   mock.module("./owner-token.ts", {
-    namedExports: {
+    exports: {
       getOwnerToken: async () => "owner-token",
       getRsInternalUrl: () => "http://resource.invalid",
     },
   });
-  mock.module("./verify-session.ts", { namedExports: { verifyDashboardSession: async () => {} } });
+  mock.module("./verify-session.ts", { exports: { verifyDashboardSession: async () => {} } });
   return await import("./rs-client.ts");
 })();
 
-test("listOwnerConnectorTemplates calls the registered owner template path", async () => {
+test("listOwnerConnectorTemplates calls the registered owner template path", async (t) => {
   const { listOwnerConnectorTemplates } = await client;
   const templates = [{ connector_id: "gmail", display_name: "Gmail" }];
-  globalThis.fetch = (async (input: RequestInfo | URL) => {
+  t.mock.method(globalThis, "fetch", async (input: RequestInfo | URL) => {
     requestUrl = String(input);
     return new Response(JSON.stringify({ data: templates }), {
       headers: { "content-type": "application/json" },
       status: 200,
     });
-  }) as typeof fetch;
+  });
   assert.deepEqual(await listOwnerConnectorTemplates(), templates);
   assert.equal(requestUrl, "http://resource.invalid/v1/owner/connector-templates");
 });

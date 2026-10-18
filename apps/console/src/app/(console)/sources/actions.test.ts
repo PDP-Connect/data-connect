@@ -9,12 +9,12 @@ let nextError: Error | null = null;
 const calls: unknown[][] = [];
 const revalidated: string[] = [];
 const action = (async () => {
-  mock.module("next/cache", { namedExports: { revalidatePath: (path: string) => revalidated.push(path) } });
+  mock.module("next/cache", { exports: { revalidatePath: (path: string) => revalidated.push(path) } });
   mock.module("../lib/owner-token.ts", {
-    namedExports: { ReferenceServerUnreachableError: FakeUnreachableError },
+    exports: { ReferenceServerUnreachableError: FakeUnreachableError },
   });
   mock.module("../lib/operator-runs.ts", {
-    namedExports: {
+    exports: {
       runConnectionNow: async (...args: unknown[]) => {
         calls.push(args);
         if (nextError) throw nextError;

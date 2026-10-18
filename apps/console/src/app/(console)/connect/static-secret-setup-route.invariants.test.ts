@@ -7,9 +7,9 @@ import { mock, test } from "node:test";
 
 let requestPath = "";
 const api = (async () => {
-  mock.module("server-only", { namedExports: {} });
+  mock.module("server-only", { exports: {} });
   mock.module("../lib/owner-token.ts", {
-    namedExports: {
+    exports: {
       getAsInternalUrl: () => "http://reference.invalid",
       getOwnerToken: async () => "test-owner-token",
       ReferenceServerUnreachableError: class extends Error {},
@@ -17,20 +17,20 @@ const api = (async () => {
       withOwnerSessionCookie: async (init: RequestInit) => init,
     },
   });
-  mock.module("../lib/verify-session.ts", { namedExports: { verifyDashboardSession: async () => {} } });
+  mock.module("../lib/verify-session.ts", { exports: { verifyDashboardSession: async () => {} } });
   return await import("../lib/ref-client.ts");
 })();
 
-test("getStaticSecretSetup requests and returns the encoded setup endpoint", async () => {
+test("getStaticSecretSetup requests and returns the encoded setup endpoint", async (t) => {
   const { getStaticSecretSetup } = await api;
   const setup = { object: "static_secret_setup", display_name: "Test", credential_kind: "api_key" };
-  globalThis.fetch = (async (input: RequestInfo | URL) => {
+  t.mock.method(globalThis, "fetch", async (input: RequestInfo | URL) => {
     requestPath = String(input);
     return new Response(JSON.stringify(setup), {
       headers: { "content-type": "application/json" },
       status: 200,
     });
-  }) as typeof fetch;
+  });
   assert.deepEqual(await getStaticSecretSetup("connector/a"), setup);
   assert.equal(requestPath, "http://reference.invalid/_ref/connectors/connector%2Fa/static-secret-setup");
 });
@@ -41,4 +41,5 @@ test("source: mounted route registers the static-secret setup endpoint", async (
     "utf8"
   );
   assert.match(riRoute, /app\.get\(\s*"\/_ref\/connectors\/:connectorId\/static-secret-setup"/);
+  assert.match(riRoute, /res\.status\(200\)\.json\(setup\)/);
 });
