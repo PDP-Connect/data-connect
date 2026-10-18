@@ -178,9 +178,12 @@ test("rejects a files-from entry outside standalone discovery", async () => {
 });
 
 test("skips full-suite named mapping finalization for files-from runs", async () => {
-	const runner = await readFile(new URL("./run-tests.ts", import.meta.url), "utf8");
+	const runner = await readFile(
+		new URL("./run-tests.ts", import.meta.url),
+		"utf8",
+	);
 	assert.match(
 		runner,
-		/if \(!rawForwardedArgs\.includes\("--files-from"\) && !failed && results\.length === testFiles\.length\)/,
+		/if \(filesFromIndex === -1 && !failed && results\.length === testFiles\.length\)/,
 	);
 });
