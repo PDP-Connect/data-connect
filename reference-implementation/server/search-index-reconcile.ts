@@ -461,6 +461,14 @@ export async function runSearchIndexDirtyReconcileRound(options?: {
 const SEARCH_INDEX_DIRTY_AUTO_RECONCILE_FAILURE_COOLDOWN_MS = 30_000;
 let searchIndexDirtyAutoReconcileRetryAfterMs = 0;
 let searchIndexDirtySelfHealInFlight: Promise<void> | null = null;
+let searchIndexDirtySelfHealRound = runSearchIndexDirtyReconcileRound;
+
+/** Replace the read-time round runner to observe outer single-flight behavior in tests. */
+export function __setSearchIndexDirtySelfHealRoundForTest(
+  round: typeof runSearchIndexDirtyReconcileRound | null
+): void {
+  searchIndexDirtySelfHealRound = round ?? runSearchIndexDirtyReconcileRound;
+}
 
 function searchIndexDirtyAutoReconcileNow(): number {
   return Date.now();
@@ -476,7 +484,7 @@ async function runSelfHealAttempt(): Promise<void> {
     return;
   }
   try {
-    await runSearchIndexDirtyReconcileRound({ maxDurationMs: 250, pageSize: 5 });
+    await searchIndexDirtySelfHealRound({ maxDurationMs: 250, pageSize: 5 });
     searchIndexDirtyAutoReconcileRetryAfterMs = 0;
   } catch {
     searchIndexDirtyAutoReconcileRetryAfterMs =
