@@ -46,7 +46,10 @@ export default defineConfig(({ mode }) => ({
     },
   },
   test: {
-    environment: "happy-dom",
+    environment: "node",
+    // Matches test-sandbox's default 400% CPU budget: more workers than CPUs
+    // only adds memory and makes the 5 s default timeouts trip under load.
+    maxWorkers: 4,
     include: [
       "src/**/*.test.{ts,tsx}",
       "src-tauri/**/*.test.ts",
