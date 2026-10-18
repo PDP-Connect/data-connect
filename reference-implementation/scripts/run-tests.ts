@@ -620,8 +620,13 @@ const counts = {
 // timeouts, output counts/schema, or the ordinary exit path. It is skipped
 // when the suite did not run to completion (a failing file already dominates
 // the exit) or a signal arrived, so it can never mask an unrelated failure or
-// fire on a partial run.
-if (!failed && signalExitCode === undefined && results.length === testFiles.length) {
+// fire on a partial run. A --files-from selection is partial by construction.
+if (
+  !rawForwardedArgs.includes("--files-from") &&
+  !failed &&
+  signalExitCode === undefined &&
+  results.length === testFiles.length
+) {
   const consumedMappingIdentities = summaries.flatMap((summary) => summary.consumed_mapping_identities);
   try {
     assertNamedSkipMappingsFullyConsumed(

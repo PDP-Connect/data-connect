@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, test } from "node:test";
@@ -174,5 +174,13 @@ test("rejects a files-from entry outside standalone discovery", async () => {
 	await assert.rejects(
 		validateFilesFrom(["server/not-a-test.ts"], ["test/a.test.ts"]),
 		/outside test discovery/,
+	);
+});
+
+test("skips full-suite named mapping finalization for files-from runs", async () => {
+	const runner = await readFile(new URL("./run-tests.ts", import.meta.url), "utf8");
+	assert.match(
+		runner,
+		/if \(!rawForwardedArgs\.includes\("--files-from"\) && !failed && results\.length === testFiles\.length\)/,
 	);
 });
