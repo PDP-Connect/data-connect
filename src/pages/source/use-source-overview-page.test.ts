@@ -318,19 +318,21 @@ describe("useSourceOverviewPage", () => {
         expect(result.current.sourceEntry?.id).toBe("chatgpt")
       })
 
+      vi.useFakeTimers()
+
       await act(async () => {
         await result.current.handleCopyFullJson()
       })
 
       expect(result.current.copyStatus).toBe("copied")
 
-      await waitFor(
-        () => {
-          expect(result.current.copyStatus).toBe("idle")
-        },
-        { timeout: 2_500 }
-      )
+      act(() => {
+        vi.advanceTimersByTime(1_200)
+      })
+
+      expect(result.current.copyStatus).toBe("idle")
     } finally {
+      vi.useRealTimers()
       Object.defineProperty(navigator, "clipboard", {
         configurable: true,
         value: originalClipboard,
