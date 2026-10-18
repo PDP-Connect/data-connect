@@ -2837,6 +2837,7 @@ async function maintainRecordIndexesWithinPermit(
       connectorInstanceId,
       data,
       declaredFields: options.attemptContext ? (attemptFacts?.semanticFields ?? []) : undefined,
+      generation,
       recordKey,
       stream,
     });

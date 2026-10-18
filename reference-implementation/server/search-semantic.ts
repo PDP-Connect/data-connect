@@ -2205,6 +2205,7 @@ export async function computeSemanticEntries({
   recordKey,
   data,
   declaredFields,
+  generation,
 }: {
   connectorId: string;
   connectorInstanceId: string;
@@ -2212,6 +2213,8 @@ export async function computeSemanticEntries({
   recordKey: string;
   data?: SemanticRecordData | null;
   declaredFields?: string[];
+  /** Storage generation the caller captured; re-checked before the lazy vector-index init. */
+  generation?: number;
 }): Promise<ComputedSemanticEntries | null> {
   if (!backend) {
     return null;
@@ -2262,9 +2265,15 @@ export async function computeSemanticEntries({
       recordKeys: [recordKey],
       scopeKeys: fieldsBatch.map((field) => encodeScopeKey(stream, field)),
     };
-    const existing = isPostgresStorageBackend()
-      ? await postgresListExistingSemanticIdentitiesForRecords(args)
-      : (ensureVectorIndex()?.inputIdentitiesFor?.(args) ?? new Map<string, string | null>());
+    let existing: Map<string, string | null>;
+    if (isPostgresStorageBackend()) {
+      existing = await postgresListExistingSemanticIdentitiesForRecords(args);
+    } else {
+      await semanticRepairPhase("before-record-index-init", { connectorInstanceId, stream });
+      // No await between this check and the lazy init: it can drop and recreate the vec0 table.
+      if (generation !== undefined) assertCurrentStorageGeneration(generation);
+      existing = ensureVectorIndex()?.inputIdentitiesFor?.(args) ?? new Map<string, string | null>();
+    }
     const batchEntries = await Promise.all(
       fieldsBatch.map(async (field) => {
         const text = normalizeSemanticEmbeddingInput(data?.[field]);
@@ -3033,6 +3042,8 @@ type SemanticRepairPhase =
   | "after-page-publish"
   | "before-prune-page"
   | "before-orphan-prune"
+  | "before-backfill-index-init"
+  | "before-record-index-init"
   | "after-verification"
   | "after-physical-verification-page";
 let semanticRepairPhaseHook:
@@ -4273,6 +4284,12 @@ async function backfillSemanticIndexForConnectorInstance({
   let backfillError: unknown = null;
   try {
     const usePostgres = isPostgresStorageBackend();
+    await semanticRepairPhase("before-backfill-index-init", {
+      connectorInstanceId: fencedConnectorInstanceId,
+      stream: "",
+    });
+    // No await between this check and the lazy init: it can drop and recreate the vec0 table.
+    assertCurrentStorageGeneration(generation);
     const index = usePostgres ? null : ensureVectorIndex();
     if (!(usePostgres || index)) {
       return;

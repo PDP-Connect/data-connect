@@ -19,6 +19,7 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
+import { getDb } from "../server/db.ts";
 import { __setIndexPublishPhaseHookForTest, recordIndexWorkStatsForGenerationForTests } from "../server/records.ts";
 import { __setLexicalBackfillPhaseHookForTest } from "../server/search.ts";
 import {
@@ -36,6 +37,7 @@ import {
   assertNewDatabaseUntouched,
   type BackendKit,
   backendKits,
+  CONNECTOR_ID,
   currentRecordText,
   derivedState,
   GHOST_ROW,
@@ -47,6 +49,7 @@ import {
   STREAM,
   trackUnhandledRejections,
   until,
+  withTwoSqliteDatabases,
 } from "./helpers/lifecycle-race.ts";
 
 async function dirtyScope() {
@@ -394,4 +397,142 @@ function retainedEvidenceTests(kit: BackendKit) {
       __setSearchIndexReconcilePhaseHookForTest(null);
     }
   });
+}
+
+// --- Lazy vector-index creation (search-semantic.ts ensureVectorIndex) ---
+//
+// ensureVectorIndex binds the CURRENT database and, when the physical vec0 table disagrees with
+// the work's dimensions or metric, drops it and deletes every semantic sidecar, meta, progress and
+// snapshot row before recreating it. Two deferred paths reach it after an await that can span a
+// storage replacement: the semantic backfill (manifest and instance reads) and the record
+// maintenance compute (manifest read). Each is parked at the seam directly before the lazy
+// initialization. The new database already holds a populated vec0 table of another width and metric,
+// so a stale initialization shows up as a changed schema or lost rows.
+function lazyVectorIndexInitTests() {
+  const cases = [
+    { name: "semantic backfill", phase: "before-backfill-index-init" },
+    { name: "record index maintenance compute", phase: "before-record-index-init" },
+  ] as const;
+  for (const pause of cases) {
+    test(`SQLite: ${pause.name} parked before the lazy vector-index init does not rebuild the replaced database's vector table`, {
+      concurrency: false,
+      timeout: 60_000,
+    }, async () => {
+      const gate = oneShotGate();
+      const rejections = trackUnhandledRejections();
+      configureSemanticBackend(makeStubBackend({ dimensions: 8 }));
+      __setSemanticRepairPhaseHookForTest(async (phase) => {
+        if (phase === pause.phase) {
+          await gate.park();
+        }
+      });
+      try {
+        await withTwoSqliteDatabases(async (dbs) => {
+          const isBackfill = pause.phase === "before-backfill-index-init";
+          await dbs.openOld({ deferIndexes: isBackfill, semantic: true });
+          const oldGeneration = currentStorageGeneration();
+          const reconcile = isBackfill ? reconcileSearchIndexDirtyScope(await dirtyScope()) : null;
+          await gate.entered;
+
+          const seeded = await dbs.replaceWithFresh({ semantic: true });
+          assert.notEqual(currentStorageGeneration(), oldGeneration, "storage moved to a new generation");
+          seedMismatchedVectorTable();
+          const seededState = await derivedState();
+          const seededVectors = vectorTableState();
+          assert.ok(
+            seededVectors.tableSql.includes("FLOAT[4] distance_metric=l2"),
+            "the seeded table is not 8-wide cosine"
+          );
+          assert.equal(seededVectors.vecRows.length, 1, "the seeded vector table is populated");
+
+          gate.release();
+          if (reconcile) {
+            const result = await reconcile;
+            assert.equal(result.outcome, "failed", "old reconcile is dropped: not converged, not recontended");
+          } else {
+            await until(
+              () => recordIndexWorkStatsForGenerationForTests(oldGeneration).active === 0,
+              "the old job to finish"
+            );
+            // Let any fire-and-forget tail of the old job settle.
+            for (let turn = 0; turn < 5; turn += 1) {
+              // biome-ignore lint/performance/noAwaitInLoops: yield a few turns, order matters.
+              await new Promise((resolve) => setImmediate(resolve));
+            }
+          }
+          assert.equal(seeded.revision, (await derivedState()).dirty[0]?.revision, "the dirty revision is unchanged");
+          assert.deepEqual(
+            vectorTableState(),
+            seededVectors,
+            `old work released from ${pause.phase} rebuilt or wrote the vector table`
+          );
+          assert.deepEqual(
+            await derivedState(),
+            seededState,
+            `old work released from ${pause.phase} changed derived state`
+          );
+        });
+        assert.deepEqual(rejections.stop(), [], "the old job exits without an unhandled rejection");
+      } finally {
+        gate.release();
+        __setSemanticRepairPhaseHookForTest(null);
+        configureSemanticBackend(null);
+      }
+    });
+  }
+}
+
+lazyVectorIndexInitTests();
+
+/** A populated vec0 table (4 wide, l2) with its sidecar, meta, progress and snapshot rows, in the CURRENT database. */
+function seedMismatchedVectorTable(): void {
+  const db = getDb();
+  assert.equal(db.vectorIndexKind, "sqlite-vec", "this regression needs the physical vec0 table");
+  db.exec(`CREATE VIRTUAL TABLE semantic_search_vec USING vec0(
+    connector_instance_id TEXT PARTITION KEY,
+    connector_id TEXT,
+    scope_key TEXT,
+    +record_key TEXT,
+    embedding FLOAT[4] distance_metric=l2
+  )`);
+  const scopeKey = JSON.stringify([STREAM, "subject"]);
+  const info = db
+    .prepare(
+      "INSERT INTO semantic_search_vec(connector_instance_id, connector_id, scope_key, record_key, embedding) VALUES (?, ?, ?, 'k1', ?)"
+    )
+    .run(INSTANCE_ID, CONNECTOR_ID, scopeKey, Buffer.from(new Float32Array([1, 2, 3, 4]).buffer));
+  db.prepare(
+    "INSERT INTO semantic_search_rowid(connector_instance_id, connector_id, scope_key, record_key, rowid, input_identity) VALUES (?, ?, ?, 'k1', ?, 'new-identity')"
+  ).run(INSTANCE_ID, CONNECTOR_ID, scopeKey, Number(info.lastInsertRowid));
+  db.prepare(
+    "INSERT INTO semantic_search_meta(connector_instance_id, connector_id, stream, fields_fingerprint, model_id, dimensions, distance_metric) VALUES (?, ?, ?, '[]', 'new-model', 4, 'l2')"
+  ).run(INSTANCE_ID, CONNECTOR_ID, STREAM);
+  db.prepare(
+    "INSERT INTO semantic_search_backfill_progress(connector_instance_id, connector_id, stream, fields_fingerprint, model_id, dimensions, distance_metric) VALUES (?, ?, ?, '[]', 'new-model', 4, 'l2')"
+  ).run(INSTANCE_ID, CONNECTOR_ID, STREAM);
+  db.prepare(
+    "INSERT INTO semantic_search_snapshots(snapshot_id, query, plan_hash, results_json) VALUES ('new-snapshot', 'q', 'h', '[]')"
+  ).run();
+}
+
+/** The physical vector table and every sidecar the lazy initialization can delete, from the CURRENT database. */
+function vectorTableState() {
+  const db = getDb();
+  const all = (sql: string) => db.prepare(sql).all();
+  return {
+    meta: all("SELECT * FROM semantic_search_meta ORDER BY connector_instance_id, stream"),
+    progress: all("SELECT * FROM semantic_search_backfill_progress ORDER BY connector_instance_id, stream"),
+    rowids: all("SELECT * FROM semantic_search_rowid ORDER BY rowid"),
+    snapshots: all("SELECT * FROM semantic_search_snapshots ORDER BY snapshot_id"),
+    tableSql: String(
+      (
+        db.prepare("SELECT sql FROM sqlite_master WHERE name = 'semantic_search_vec'").get() as
+          | { sql?: string }
+          | undefined
+      )?.sql
+    ),
+    vecRows: all(
+      "SELECT rowid, connector_instance_id, connector_id, scope_key, embedding FROM semantic_search_vec ORDER BY rowid"
+    ),
+  };
 }
