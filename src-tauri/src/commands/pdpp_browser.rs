@@ -76,7 +76,9 @@ impl PdppBrowserLease {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        let child = match command.spawn() {
+        // The browser may be a Chromium that `download_chromium_rust` just
+        // extracted.
+        let child = match crate::spawn_retry::spawn_retrying_while_busy(&mut command) {
             Ok(child) => child,
             Err(error) => {
                 release_profile_lease(Some(lease_lock));

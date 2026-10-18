@@ -745,8 +745,9 @@ fn launch_browser_with_cleanup(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    let mut child = command
-        .spawn()
+    // The browser may be a Chromium that `download_chromium_rust` just
+    // extracted.
+    let mut child = crate::spawn_retry::spawn_retrying_while_busy(&mut command)
         .map_err(|error| format!("Failed to launch host browser: {error}"))?;
     let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
         return Err(on_failure(child, "Host browser output was not piped".into()));

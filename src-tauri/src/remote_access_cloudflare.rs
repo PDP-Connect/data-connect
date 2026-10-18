@@ -136,8 +136,6 @@ pub(crate) const CLOUDFLARE_TUNNEL_PROVIDER_ID: &str = "cloudflare_tunnel";
 const LOOPBACK_BIND_HOST: &str = "127.0.0.1";
 const CLOUDFLARED_BINARY: &str = "cloudflared";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
-/// How long `start` retries a spawn that fails because the binary is busy.
-const EXECUTABLE_BUSY_RETRY_BUDGET: Duration = Duration::from_secs(2);
 
 /// Cloudflare terminates TLS at its edge for every named tunnel, exactly as
 /// it does for Quick Tunnels: "Cloudflare must decrypt traffic in order to
@@ -419,7 +417,8 @@ where
             command.process_group(0);
         }
 
-        let spawned = spawn_retrying_while_busy(&mut command, EXECUTABLE_BUSY_RETRY_BUDGET);
+        // `ensure_cloudflared_available` may have written the binary just now.
+        let spawned = crate::spawn_retry::spawn_retrying_while_busy(&mut command);
         let mut child = spawned.map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
                 format!(
@@ -800,36 +799,6 @@ fn ensure_cloudflared_available_from(
     download::ensure_cached_cloudflared(cache_dir)
 }
 
-/// Spawns `command`, retrying while exec fails with ETXTBSY
-/// (`ExecutableFileBusy`).
-///
-/// `ensure_cloudflared_available` may have written the binary moments
-/// earlier. `std::fs::write` opens it with `O_CLOEXEC`, but that flag closes
-/// the descriptor only when a process calls exec. A child that another
-/// thread spawns while the file is open gets a copy of the write descriptor
-/// and keeps it until its own exec. While any process holds the file open
-/// for writing, exec of the file fails with ETXTBSY. The rename into place
-/// does not help, because the descriptor refers to the same inode. The copy
-/// goes away when that child execs or exits, so a short retry clears the
-/// error. A writer that stays open past `budget` still fails the start.
-fn spawn_retrying_while_busy(command: &mut Command, budget: Duration) -> std::io::Result<Child> {
-    let deadline = std::time::Instant::now() + budget;
-    let mut delay = Duration::from_millis(5);
-    loop {
-        match command.spawn() {
-            Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
-                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-                if remaining.is_zero() {
-                    return Err(error);
-                }
-                thread::sleep(delay.min(remaining));
-                delay = (delay * 2).min(Duration::from_millis(100));
-            }
-            result => return result,
-        }
-    }
-}
-
 fn spawn_output_watcher(
     stdout: Option<std::process::ChildStdout>,
     stderr: Option<std::process::ChildStderr>,
@@ -935,53 +904,6 @@ fn validate_tunnel_hostname(hostname: &str) -> Result<String, String> {
 mod tests {
     use super::*;
     use crate::remote_access::CredentialResolver;
-
-    /// Reproduces the race deterministically. `holder` stands in for a child
-    /// that another thread spawned while the binary was open for writing: it
-    /// keeps a write descriptor to the binary until the test releases it.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn spawn_waits_until_no_process_holds_the_binary_open_for_writing() {
-        use std::io::Write;
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = tempfile::tempdir().expect("tempdir");
-        let binary = dir.path().join("cloudflared");
-        std::fs::write(&binary, "#!/bin/sh\nexit 0\n").expect("write fake cloudflared");
-        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755))
-            .expect("make fake cloudflared executable");
-        let writer = std::fs::OpenOptions::new()
-            .write(true)
-            .open(&binary)
-            .expect("open fake cloudflared for writing");
-        let mut holder = Command::new("sh")
-            .args(["-c", "read _"])
-            .stdin(Stdio::piped())
-            .stdout(writer)
-            .spawn()
-            .expect("spawn descriptor holder");
-        let mut release = holder.stdin.take().expect("holder stdin");
-
-        let busy = Command::new(&binary)
-            .status()
-            .expect_err("exec must fail while another process can write the binary");
-        assert_eq!(busy.kind(), std::io::ErrorKind::ExecutableFileBusy);
-        let still_busy =
-            spawn_retrying_while_busy(&mut Command::new(&binary), Duration::from_millis(50))
-                .expect_err("the retry must stop at its budget");
-        assert_eq!(still_busy.kind(), std::io::ErrorKind::ExecutableFileBusy);
-
-        let releaser = thread::spawn(move || {
-            thread::sleep(Duration::from_millis(100));
-            let _ = release.write_all(b"\n");
-        });
-        let mut child =
-            spawn_retrying_while_busy(&mut Command::new(&binary), Duration::from_secs(10))
-                .expect("spawn once the holder has exited");
-        assert!(child.wait().expect("wait for fake cloudflared").success());
-        releaser.join().expect("releaser thread");
-        assert!(holder.wait().expect("wait for holder").success());
-    }
 
     #[derive(Clone)]
     struct StaticResolver {
