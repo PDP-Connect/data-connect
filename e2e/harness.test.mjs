@@ -119,7 +119,7 @@ test("a missing or failing test-sandbox is fatal and no other isolation is tried
   const record = join(dir, "args")
   await writeFile(
     failing,
-    `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > ${JSON.stringify(record)}\nexit 3\n`,
+    `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > ${JSON.stringify(record)}\nprintf '%s' "$TEST_SANDBOX_REQUIRE" > ${JSON.stringify(record + ".require")}\nexit 3\n`,
     { mode: 0o755 }
   )
   assert.equal(
@@ -137,6 +137,11 @@ test("a missing or failing test-sandbox is fatal and no other isolation is tried
     "--isolated",
     "a.spec.ts",
   ])
+  assert.equal(
+    await readFile(record + ".require", "utf8"),
+    "1",
+    "missing cgroup or bwrap enforcement must fail before any launch"
+  )
 })
 
 test("inside a sandbox, a network that is not loopback-only is refused before servers start", async t => {
@@ -152,6 +157,24 @@ test("inside a sandbox, a network that is not loopback-only is refused before se
       }),
       /loopback-only/
     )
+})
+
+test("in place, a sandbox that was disabled is refused before servers start", async t => {
+  const dir = await mkdtemp(join(tmpdir(), "e2e-disabled-"))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  await assert.rejects(
+    main({
+      args: [],
+      env: {
+        PATH: process.env.PATH,
+        TEST_SANDBOX_ACTIVE: "1",
+        TEST_SANDBOX_DISABLE: "1",
+      },
+      consoleDir: dir,
+      interfaces: loopback,
+    }),
+    /TEST_SANDBOX_DISABLE=1/
+  )
 })
 
 test("ownership guard refuses each unsafe condition before a write", async t => {

@@ -1,7 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 import assert from "node:assert/strict"
-import { spawn } from "node:child_process"
+import { spawn, spawnSync } from "node:child_process"
 import {
   access,
   mkdtemp,
@@ -36,6 +36,22 @@ async function processesInGroup(pgid) {
   return found
 }
 
+// Processes whose command line carries `tag`, seen from the host. Under a PID
+// namespace the PIDs the fixture prints are not host PIDs, so match by tag.
+async function processesWithTag(tag) {
+  const found = []
+  for (const pid of await readdir("/proc")) {
+    if (!/^\d+$/.test(pid)) continue
+    try {
+      const cmdline = await readFile(`/proc/${pid}/cmdline`, "utf8")
+      if (cmdline.includes(tag)) found.push(Number(pid))
+    } catch (error) {
+      if (error.code !== "ENOENT" && error.code !== "ESRCH") throw error
+    }
+  }
+  return found
+}
+
 // "host" runs the outer wrapper path through a stub that mimics test-sandbox
 // (`cmd & wait`: stdin is /dev/null, fd 3 is inherited), so it runs even inside
 // a sandbox; "in-place" runs the inner path directly, as under test-sandbox.
@@ -46,7 +62,6 @@ const EXPECTED = {
   SIGTERM: 143,
   SIGINT: 130,
   timeout: 1,
-  escape: 0,
 }
 
 function killGroup(pid, signal = "SIGKILL") {
@@ -69,16 +84,10 @@ describe("process cleanup", { concurrency: 4 }, () => {
           const states = []
           let child
           t.after(async () => {
-            // A seeded fault must fail fast: kill the fixture, every recorded
-            // group and the escaped descendant instead of hanging the runner.
+            // A seeded fault must fail fast: kill the fixture and every
+            // recorded group instead of hanging the runner.
             if (child?.pid) killGroup(child.pid)
             for (const { pgid } of states) if (pgid) killGroup(pgid)
-            for (const { escaped } of states)
-              if (escaped) {
-                try {
-                  process.kill(escaped, "SIGKILL")
-                } catch {}
-              }
             await rm(directory, { recursive: true, force: true })
           })
           const wrapper = join(directory, "wrapper.sh")
@@ -153,19 +162,81 @@ describe("process cleanup", { concurrency: 4 }, () => {
   }
 })
 
+// Containment on the real test-sandbox, not a stub: a setsid descendant that
+// ignores TERM must be gone when the wrapper returns, before any cleanup here.
+test(
+  "sandbox: a detached descendant does not outlive the wrapper",
+  { timeout: 60_000 },
+  async t => {
+    const env = { ...process.env }
+    delete env.TEST_SANDBOX_ACTIVE
+    const sandbox = fileURLToPath(
+      new URL("../scripts/test-sandbox/test-sandbox", import.meta.url)
+    )
+    const probe = spawnSync(
+      sandbox,
+      ["--net", "none", "--pidns", "--", "true"],
+      { env: { ...env, TEST_SANDBOX_REQUIRE: "1" }, stdio: "ignore" }
+    )
+    if (probe.status !== 0) {
+      t.skip("test-sandbox cannot enforce cgroups and bwrap here")
+      return
+    }
+    const directory = await mkdtemp(join(tmpdir(), "e2e-escape-test-"))
+    const tag = `escape-tag-${process.pid}-${Date.now()}`
+    let child
+    t.after(async () => {
+      // Emergency cleanup only: it runs after the assertion below.
+      for (const pid of await processesWithTag(tag)) {
+        try {
+          process.kill(pid, "SIGKILL")
+        } catch {}
+      }
+      if (child?.pid) killGroup(child.pid)
+      await rm(directory, { recursive: true, force: true })
+    })
+    const fixture = join(directory, "fixture.mjs")
+    await writeFile(fixture, fixtureSource("escape", null, tag))
+    child = spawn(process.execPath, [fixture, "host"], {
+      detached: true,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: { ...env, TEST_TMPDIR: directory },
+    })
+    let output = ""
+    for (const stream of [child.stdout, child.stderr])
+      stream.on("data", chunk => {
+        output += chunk
+      })
+    const exited = new Promise((resolve, reject) => {
+      child.once("error", reject)
+      child.once("exit", resolve)
+    })
+    const code = await Promise.race([exited, delay(25_000, "hung")])
+    assert.notEqual(code, "hung", "the wrapper never returned")
+    assert.equal(code, 0, output)
+    assert.match(output, /"ready":true/, "the escaped process had started")
+    let remaining = await processesWithTag(tag)
+    for (let retry = 0; remaining.length && retry < 40; retry++) {
+      await delay(50)
+      remaining = await processesWithTag(tag)
+    }
+    assert.deepEqual(remaining, [], "processes that outlived the sandbox")
+  }
+)
+
 // The fixture's timeout (30 s) sits above the test's (20 s): a signal that never
 // reaches the inner process fails the test instead of passing via the timeout.
-function fixtureSource(mode, wrapper) {
+function fixtureSource(mode, wrapper, tag = "") {
   const child = `
+    /*${tag}*/
     process.on("SIGTERM", () => {});
     const {spawn} = require("node:child_process");
     const stat = require("node:fs").readFileSync("/proc/self/stat", "utf8");
     console.log(JSON.stringify({pgid: Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[2])}));
-    spawn(process.execPath, ["-e", 'process.on("SIGTERM", () => {}); console.log(JSON.stringify({grandchild:true})); setInterval(() => {}, 1000)'], {stdio: ["ignore", "inherit", "inherit"]});
+    spawn(process.execPath, ["-e", '/*${tag}*/ process.on("SIGTERM", () => {}); console.log(JSON.stringify({grandchild:true})); setInterval(() => {}, 1000)'], {stdio: ["ignore", "inherit", "inherit"]});
     if (${JSON.stringify(mode)} === "escape") {
       // setsid descendant that ignores TERM and holds our stdout and stderr.
-      const escaped = spawn(process.execPath, ["-e", 'process.on("SIGTERM", () => {}); setInterval(() => {}, 1000)'], {detached: true, stdio: ["ignore", "inherit", "inherit"]});
-      console.log(JSON.stringify({escaped: escaped.pid}));
+      spawn(process.execPath, ["-e", '/*${tag}*/ process.on("SIGTERM", () => {}); setInterval(() => {}, 1000)'], {detached: true, stdio: ["ignore", "inherit", "inherit"]});
       process.on("SIGTERM", () => process.exit(0));
     }
     setInterval(() => {}, 1000);
@@ -179,7 +250,7 @@ import { runOwnedHarness, runInSandbox, receiveSignals, signalExitCode } from ${
 const mode = ${JSON.stringify(mode)};
 const inner = process.argv.includes("--isolated");
 if (!inner && process.argv[2] === "host") {
-  process.exitCode = await runInSandbox([process.argv[1], process.argv[2], "--isolated"], [${JSON.stringify(wrapper)}]);
+  process.exitCode = await runInSandbox([process.argv[1], process.argv[2], "--isolated"], ${wrapper ? `[${JSON.stringify(wrapper)}]` : ""});
 } else {
 const stopReceiving = inner ? receiveSignals() : () => {};
 const stat = readFileSync("/proc/self/stat", "utf8");

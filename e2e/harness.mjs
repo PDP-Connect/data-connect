@@ -22,11 +22,15 @@ import {
 const here = dirname(fileURLToPath(import.meta.url))
 const repo = resolve(here, "..")
 const require = createRequire(import.meta.url)
-// The one supported isolation: a loopback-only namespace from the vendored wrapper.
+// The one supported isolation: a loopback-only network and PID namespace from
+// the vendored wrapper. --pidns lets it reap detached descendants (Playwright's
+// browsers) that leave the process group; every PID this harness records lives
+// in its own scratch, so the wrapper's opt-in caveat does not apply.
 const SANDBOX = [
   join(repo, "scripts/test-sandbox/test-sandbox"),
   "--net",
   "none",
+  "--pidns",
   "--",
 ]
 
@@ -355,7 +359,12 @@ export async function runInSandbox(args, wrapper = SANDBOX) {
   const child = spawn(
     wrapper[0],
     [...wrapper.slice(1), process.execPath, ...args],
-    { detached: true, stdio: ["ignore", "inherit", "inherit", "pipe"] }
+    {
+      detached: true,
+      stdio: ["ignore", "inherit", "inherit", "pipe"],
+      // Fail before any launch if cgroup or bwrap enforcement is missing.
+      env: { ...process.env, TEST_SANDBOX_REQUIRE: "1" },
+    }
   )
   const channel = child.stdio[3]
   channel.on("error", () => {})
@@ -402,12 +411,16 @@ export async function main({
   args = [...args]
   const reexeced = args[0] === "--isolated"
   if (reexeced) args.shift()
-  // test-sandbox exports TEST_SANDBOX_ACTIVE=1 inside its scope but not its
-  // network mode, so ownership is that flag plus a loopback-only check (an
-  // offline host alone would pass the check). Wanted export: TEST_SANDBOX_NET.
-  // Descendants that leave the process group (Playwright's detached browsers)
-  // are reaped by the caller's scope in place, and by the namespace otherwise.
+  // In-place mode trusts the caller. test-sandbox exports TEST_SANDBOX_ACTIVE=1
+  // before it checks TEST_SANDBOX_DISABLE or enforcement, and not its network
+  // mode, so the flag plus a loopback-only check is no proof; only a
+  // DISABLE=1 run is refused. Wanted export: TEST_SANDBOX_NET, for the tool
+  // owner. The caller's scope is what reaps detached descendants in place.
   if (reexeced || env.TEST_SANDBOX_ACTIVE === "1") {
+    if (env.TEST_SANDBOX_DISABLE === "1")
+      throw new Error(
+        "TEST_SANDBOX_DISABLE=1 runs without isolation; the E2E harness refuses to start in place."
+      )
     assertLoopbackOnly(interfaces)
     const stopReceiving = reexeced ? receiveSignals() : () => {}
     try {
