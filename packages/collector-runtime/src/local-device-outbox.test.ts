@@ -1823,23 +1823,21 @@ async function tempOutboxPath(t: TestContext): Promise<string> {
   return join(root, "outbox.sqlite");
 }
 
-test("temporary outbox cleanup runs on error unwind and preserves sibling directories", async (t) => {
+test("temporary outbox roots register their own removal before the path is returned", async (t) => {
   const sibling = await mkdtemp(join(tmpdir(), "pdpp-local-outbox-sibling-"));
   t.after(() => rm(sibling, { recursive: true, force: true }));
-  let root = "";
+  // node:test runs t.after hooks when a test fails too, so registering before
+  // returning is what makes cleanup survive a failed assertion.
+  const cleanups: Array<() => unknown> = [];
+  const path = await tempOutboxPath({ after: (fn: () => unknown) => cleanups.push(fn) } as unknown as TestContext);
+  const root = dirname(path);
+  assert.equal(cleanups.length, 1);
+  assert.doesNotThrow(() => statSync(root));
 
-  await t.test("intentional error after allocating an outbox", { todo: true }, async (subtest) => {
-    const path = await tempOutboxPath(subtest);
-    root = dirname(path);
-    assert.doesNotThrow(() => statSync(root));
-    throw new Error("exercise cleanup during error unwind");
-  });
-
+  await cleanups[0]!();
+  await cleanups[0]!();
   assert.throws(() => statSync(root), { code: "ENOENT" });
   assert.doesNotThrow(() => statSync(sibling));
-  await rm(root, { recursive: true, force: true });
-  await rm(root, { recursive: true, force: true });
-  assert.throws(() => statSync(root), { code: "ENOENT" });
 });
 
 /**
