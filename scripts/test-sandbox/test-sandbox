@@ -21,6 +21,9 @@ if [ -z "${BASH_VERSINFO:-}" ] || [ "${BASH_VERSINFO[0]}" -lt 5 ]; then
   echo "test-sandbox: usage: test-sandbox [options] -- cmd..." >&2; exit 2
 fi
 set -uo pipefail
+# systemd-run (>= 254) expands ${VAR} in the command line by default, which
+# mangles shell code and test arguments; turn that off where supported.
+noexpand=(); systemd-run --help 2>/dev/null | grep -q -- --expand-environment && noexpand=(--expand-environment=no)
 
 die() { echo "test-sandbox: $*" >&2; exit 2; }
 cpu=${TEST_SANDBOX_CPU:-400}
@@ -218,7 +221,9 @@ tmp_binds=()
 for p in "$scratch" "$PWD"; do
   [[ -n "$p" ]] || continue
   p=$(cd "$p" 2>/dev/null && pwd -P) || continue
-  [[ "$p" == /tmp/* ]] && tmp_binds+=(--bind "$p" "$p")
+  # Bind the whole top directory under /tmp, so a checkout's root (node_modules,
+  # sibling packages) stays visible when the working directory is deeper.
+  if [[ "$p" == /tmp/* ]]; then top=${p#/tmp/}; top=/tmp/${top%%/*}; tmp_binds+=(--bind "$top" "$top"); fi
 done
 # The quoted body is evaluated later by bash -c inside the scope.
 # shellcheck disable=SC2016
@@ -238,7 +243,11 @@ if [[ -n "$pg" ]]; then
   pg_data=$(mktemp -d "$scratch/pgdata.XXXXXX") && pg_owned=1 || rc=1
   [[ $rc -eq 0 ]] && "$pg_bin/initdb" -D "$pg_data" -U postgres -A trust --no-sync -E UTF8 >"$pg_data.initdb.log" 2>&1 || { [[ $rc -eq 0 ]] && cat "$pg_data.initdb.log" >&2; rc=1; }
   if [[ $rc -eq 0 ]]; then
-    "$pg_bin/pg_ctl" -D "$pg_data" -o "-h 127.0.0.1 -p $pg_port -k $scratch -c fsync=off -c synchronous_commit=off -c full_page_writes=off -c max_connections=200" -w start >/dev/null 2>&1 || rc=1
+    # Settings go in postgresql.conf, not pg_ctl -o, which a shell re-parses
+    # (a scratch path with a space would break it). \047 is a single quote.
+    q=$(printf "\047"); sock=${scratch//$q/$q$q}
+    printf "listen_addresses = \047127.0.0.1\047\nport = %s\nunix_socket_directories = \047%s\047\nfsync = off\nsynchronous_commit = off\nfull_page_writes = off\nmax_connections = 200\n" "$pg_port" "$sock" >>"$pg_data/postgresql.conf"
+    "$pg_bin/pg_ctl" -D "$pg_data" -w start >/dev/null 2>&1 || rc=1
   fi
   if [[ $rc -eq 0 ]]; then
     ready=0; for _ in $(seq 1 150); do if "$pg_bin/pg_isready" -h 127.0.0.1 -p "$pg_port" >/dev/null 2>&1; then ready=1; break; fi; sleep .1; done
@@ -279,7 +288,7 @@ else
       if [[ "$net" == none ]]; then notes+=("command ran without network isolation"); fi
       cmd=(bash -c "$collector" _ "$stats" "$scratch" "$pg" "$pg_port" "$pg_env" "${cmd[@]}")
     fi
-    systemd-run --user --scope --quiet --unit="$unit" --slice="$slice_unit" -p "CPUQuota=${cpu}%" -p "MemoryMax=$mem" -p "TasksMax=$tasks" -p MemoryAccounting=yes -- "${cmd[@]}" &
+    systemd-run "${noexpand[@]}" --user --scope --quiet --unit="$unit" --slice="$slice_unit" -p "CPUQuota=${cpu}%" -p "MemoryMax=$mem" -p "TasksMax=$tasks" -p MemoryAccounting=yes -- "${cmd[@]}" &
     child=$!
     if [[ "$timeout_s" != 0 ]]; then
       deadline_us=$(( ${EPOCHREALTIME/./} + $(python3 -c 'import sys;print(int(float(sys.argv[1])*1e6))' "$timeout_s") ))
