@@ -350,22 +350,6 @@ const SANCTIONED_GENERIC_DATA_READ_CALL_SITES: ReadonlySet<string> = new Set([
   // indirection deeper than the bounded folder follows. Verified by direct
   // inspection, not by the scanner.
   'reference-implementation/scripts/generate-connector-registry.ts::readPolyfillManifests::readFileSync(resolve(manifestsDir, file), "utf8")',
-  // readOwner(ownerPath) in with-local-full-suite-lock.mjs: readFileSync(ownerPath,
-  // "utf8") where `ownerPath = resolve(lockPath, OWNER_NAME)`, `lockPath =
-  // resolve(gitCommonDirectory(), LOCK_NAME)`, and `gitCommonDirectory()` runs
-  // `git rev-parse --path-format=absolute --git-common-dir` (an
-  // execFileSync call, not a scanner-recognized path-anchor shape). This is
-  // this SAME TOOL's own advisory-lock owner file: `LOCK_NAME`
-  // ("pdpp-test-accounting.lock.d") and `OWNER_NAME` ("owner.json") are
-  // fixed string constants a few lines above, and the directory itself is
-  // this repo's own `.git` common directory -- never attacker- or
-  // connector-influenced. The file is written by THIS SAME SCRIPT
-  // (`writeFileSync(ownerPath, ...)`, acquireLock()) and only ever read back
-  // by itself; its content is a lock-ownership token/pid/timestamp, not
-  // connector/provider policy data. Verified by direct inspection, not by
-  // the scanner (no rule here folds an `execFileSync` call result as a path
-  // anchor, matching this scanner's stated bounded-resolver scope).
-  'reference-implementation/scripts/test-accounting/with-local-full-suite-lock.mjs::readOwner::readFileSync(ownerPath, "utf8")',
   // main(manifestPath, repoRoot) in check-test-backends.ts: readFileSync(manifestPath,
   // "utf8") where `manifestPath` is the operator's own CLI positional
   // argument (process.argv[2]), same class as deploy-canary.ts:606 and

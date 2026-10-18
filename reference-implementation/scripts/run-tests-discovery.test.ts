@@ -23,14 +23,22 @@ async function makeRiFixture(): Promise<{ repoRoot: string; testDir: string; cle
   const scriptsDir = join(repoRoot, "scripts");
   await mkdir(scriptsDir, { recursive: true });
   await writeFile(join(scriptsDir, "helper.test.ts"), "");
+  const accountingDir = join(scriptsDir, "test-accounting");
+  await mkdir(accountingDir, { recursive: true });
+  await writeFile(join(accountingDir, "accounting.test.ts"), "");
   return { cleanup: () => rm(repoRoot, { force: true, recursive: true }), repoRoot, testDir };
 }
 
-test("standalone discovery finds nested test/seam-spike files alongside top-level and colocated tests", async () => {
+test("standalone discovery finds nested test/seam-spike and scripts/test-accounting files alongside top-level and colocated tests", async () => {
   const fixture = await makeRiFixture();
   try {
     const files = await discoverTestFiles(fixture.repoRoot, fixture.testDir);
-    assert.deepEqual(files, ["scripts/helper.test.ts", "test/seam-spike/nested.test.ts", "test/top-level.test.ts"]);
+    assert.deepEqual(files, [
+      "scripts/helper.test.ts",
+      "scripts/test-accounting/accounting.test.ts",
+      "test/seam-spike/nested.test.ts",
+      "test/top-level.test.ts",
+    ]);
   } finally {
     await fixture.cleanup();
   }
