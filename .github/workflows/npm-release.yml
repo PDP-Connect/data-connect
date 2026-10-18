@@ -156,9 +156,13 @@ jobs:
         run: npm ci
 
       - name: Verify connector-protocol package
+        env:
+          TEST_SANDBOX_DISABLE: "1"
         run: npm run --workspace packages/connector-protocol verify
 
       - name: Verify collector-runtime package
+        env:
+          TEST_SANDBOX_DISABLE: "1"
         run: npm run --workspace packages/collector-runtime verify
 
       # @pdpp/local-collector is published by this workflow as of the change
@@ -183,6 +187,8 @@ jobs:
       # that made every published 1.3.0-1.5.4 unrunnable. Because `quality`
       # must pass before `release`, a failure here blocks publication.
       - name: Verify local-collector package
+        env:
+          TEST_SANDBOX_DISABLE: "1"
         run: npm run --workspace packages/local-collector verify
 
       - name: Test commit-analyzer scope gate
