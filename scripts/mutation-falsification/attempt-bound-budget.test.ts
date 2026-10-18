@@ -25,6 +25,9 @@ const workflow = readFileSync(
 // (about 30 s alone): 16 mutants in 8 min 20 s = 31.3 s a mutant. See the
 // comment beside `max-changed-lines` for the rest of the measurements.
 const SLOW_SELECTION_SECONDS_PER_MUTANT = 31.3
+// The selection that measurement ran. A mutant's time is dominated by the test
+// files its trial runs, so the figure holds for no more files than this.
+const MEASURED_SELECTION_TESTS = 8
 // The densest scope on record: PR #83, 179 mutants from 34 changed lines.
 const DENSEST_MUTANTS_PER_LINE = 179 / 34
 // A hosted runner is assumed to be this many times slower than the sandbox.
@@ -39,6 +42,17 @@ function referenceRowBound(): number {
   const match = /max-changed-lines: "(\d+)"/.exec(row)
   if (match === null) {
     throw new Error("the reference-implementation row has no max-changed-lines")
+  }
+  return Number(match[1])
+}
+
+function referenceRowMaxTests(): number {
+  const row = workflow.slice(
+    workflow.indexOf("- cohort: reference-implementation")
+  )
+  const match = /max-tests: "(\d+)"/.exec(row)
+  if (match === null) {
+    throw new Error("the reference-implementation row has no max-tests")
   }
   return Number(match[1])
 }
@@ -62,5 +76,9 @@ describe("the reference-implementation attempt bound", () => {
       FIXED_OVERHEAD_MINUTES
 
     expect(worstMinutes).toBeLessThanOrEqual(jobTimeoutMinutes())
+  })
+
+  it("does not select more test files per trial than the per-mutant time was measured with", () => {
+    expect(referenceRowMaxTests()).toBeLessThanOrEqual(MEASURED_SELECTION_TESTS)
   })
 })
