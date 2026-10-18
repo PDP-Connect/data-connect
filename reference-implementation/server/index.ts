@@ -1580,6 +1580,9 @@ async function ensureReferenceConnectorCatalogEntry(
     // decouple-device-enrollment-from-ingest-writer-admission design D1.
     await registerConnector(localCollectorManifest, {
       backfillRetrievalIndexes: false,
+      // The server's own shipped manifest: a trusted publication, so it may
+      // supersede the accepted content recorded for its version.
+      replaceAcceptedDigest: true,
     });
     return;
   }
