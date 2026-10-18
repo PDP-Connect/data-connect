@@ -131,6 +131,7 @@ import {
   assertCurrentStorageGeneration,
   currentStorageGeneration,
   isCurrentStorageGeneration,
+  StaleStorageGenerationError,
 } from "./storage-generation.ts";
 import {
   getChangeHistoryLimit,
@@ -1058,13 +1059,6 @@ function releaseIndexWork(generation: number): void {
  * and then queue behind another generation's held admission permit for an
  * arbitrarily long time before actually running its operation.
  */
-class StaleStorageGenerationError extends Error {
-  constructor() {
-    super("storage generation changed while queued for index-work admission");
-    this.name = "StaleStorageGenerationError";
-  }
-}
-
 async function withIndexWork<T>(operation: () => Promise<T>, generation = currentStorageGeneration()): Promise<T> {
   await acquireIndexWork(generation);
   try {
