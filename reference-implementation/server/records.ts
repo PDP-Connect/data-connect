@@ -6703,6 +6703,7 @@ export async function deleteAllRecordsForConnector(connectorId: string, instance
       if (!instanceStreams) {
         return;
       }
+      crashPoint("connector-teardown:before-durable-delete");
       writeTransaction(() => {
         advanceSqliteRecordResetGenerationForStreams(connectorInstanceId, instanceStreams);
         for (const stream of instanceStreams) {
@@ -6719,18 +6720,25 @@ export async function deleteAllRecordsForConnector(connectorId: string, instance
           // `deleteConnectionRecordRowsSqlite`.
           exec(referenceQueries.recordsDeleteDeleteBlobsByStream, [connectorInstanceId, stream]);
         }
+        crashPoint("connector-teardown:before-commit");
       });
+      crashPoint("connector-teardown:after-durable-delete");
       await mapWithConcurrency(instanceStreams, 1, async (stream) => {
         await markRetainedSizeStreamDirty({ connectorInstanceId, stream });
+        crashPoint("connector-teardown:after-retained-dirty");
         await markConnectorSummaryEvidenceDirty({
           connectorInstanceId,
           reason: "bulk connector record delete changed connection count/stream evidence",
         });
+        crashPoint("connector-teardown:after-summary-dirty");
         await lexicalIndexDeleteByConnectorStream({ connectorId: storageConnectorId, connectorInstanceId, stream });
+        crashPoint("connector-teardown:after-lexical-delete");
         await semanticIndexDeleteByConnectorStream({ connectorId: storageConnectorId, connectorInstanceId, stream });
+        crashPoint("connector-teardown:after-semantic-delete");
       });
     })
   );
+  crashPoint("connector-teardown:after-instances");
   if (deletedCount > 0) {
     markDatasetSummaryProjectionStale("bulk connector record delete bypassed exact dataset summary projection deltas");
     await markRetainedSizeConnectionDirty({ connectorInstanceId: null });
@@ -6819,6 +6827,7 @@ async function postgresDeleteAllRecordsForConnector(connectorId: string, instanc
       }
       await mapWithConcurrency(instanceStreams, 1, async (stream) => {
         await postgresDeleteAllRecords(storageTarget, stream);
+        crashPoint("connector-teardown:after-durable-delete");
         await withPostgresTransaction(
           async (client) => {
             const unbound = await client.query<{ blob_id: string }>(
@@ -6848,7 +6857,9 @@ async function postgresDeleteAllRecordsForConnector(connectorId: string, instanc
           },
           { lockConnectorInstanceId: connectorInstanceId }
         );
+        crashPoint("connector-teardown:after-blob-delete");
         await markRetainedSizeStreamDirty({ connectorInstanceId, stream });
+        crashPoint("connector-teardown:after-retained-dirty");
         // Parity with the SQLite arm above: a connector-wide record delete
         // changes this connection's count/stream evidence and must mark the
         // connector-summary evidence row dirty too, not just retained-size.
@@ -6860,11 +6871,15 @@ async function postgresDeleteAllRecordsForConnector(connectorId: string, instanc
           connectorInstanceId,
           reason: "bulk connector record delete changed connection count/stream evidence",
         });
+        crashPoint("connector-teardown:after-summary-dirty");
         await lexicalIndexDeleteByConnectorStream({ connectorId, connectorInstanceId, stream });
+        crashPoint("connector-teardown:after-lexical-delete");
         await semanticIndexDeleteByConnectorStream({ connectorId, connectorInstanceId, stream });
+        crashPoint("connector-teardown:after-semantic-delete");
       });
     })
   );
+  crashPoint("connector-teardown:after-instances");
 
   if (deletedCount > 0) {
     // Postgres dashboard summary reads from the retained-size projection

@@ -3041,6 +3041,7 @@ export function postgresDeleteAllRecords(storageTarget: StorageTarget, stream: s
       const deletedRecordCount = Number(countResult.rows[0]?.count || 0);
       await advancePostgresRecordResetGenerationForStreams(client, connectorInstanceId, [stream]);
       await deletePostgresRecordTailForPair(client, connectorInstanceId, stream);
+      crashPoint("connector-teardown:before-commit");
       return deletedRecordCount;
     },
     { lockConnectorInstanceId: connectorInstanceId }
