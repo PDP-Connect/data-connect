@@ -206,10 +206,12 @@ if [[ -z "$scratch" ]]; then scratch=$(mktemp -d /tmp/test-sandbox.XXXXXX); crea
 export TMPDIR="$scratch" TEST_TMPDIR="$scratch" TMP="$scratch" TEMP="$scratch"
 pg_data=""
 pg_bin="/usr/lib/postgresql/$pg/bin"
-pg_stop() { if [[ -n "$pg_data" ]]; then "$pg_bin/pg_ctl" -D "$pg_data" -m immediate stop >/dev/null 2>&1 || true; rm -rf "$pg_data"; fi; }
+pg_owned=0
+# Stop and delete only a cluster this run created.
+pg_stop() { if (( pg_owned )); then "$pg_bin/pg_ctl" -D "$pg_data" -m immediate stop >/dev/null 2>&1 || true; rm -rf "$pg_data" "$pg_data.initdb.log"; pg_owned=0; fi; }
 if [[ -n "$pg" ]]; then
-  pg_data="$scratch/pgdata"
-  "$pg_bin/initdb" -D "$pg_data" -U postgres -A trust --no-sync -E UTF8 >"$scratch/initdb.log" 2>&1 || { cat "$scratch/initdb.log" >&2; rc=1; }
+  pg_data=$(mktemp -d "$scratch/pgdata.XXXXXX") && pg_owned=1 || rc=1
+  [[ $rc -eq 0 ]] && "$pg_bin/initdb" -D "$pg_data" -U postgres -A trust --no-sync -E UTF8 >"$pg_data.initdb.log" 2>&1 || { [[ $rc -eq 0 ]] && cat "$pg_data.initdb.log" >&2; rc=1; }
   if [[ $rc -eq 0 ]]; then
     "$pg_bin/pg_ctl" -D "$pg_data" -o "-h 127.0.0.1 -p $pg_port -k $scratch -c fsync=off -c synchronous_commit=off -c full_page_writes=off -c max_connections=200" -w start >/dev/null 2>&1 || rc=1
   fi
