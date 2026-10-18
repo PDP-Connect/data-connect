@@ -23,6 +23,7 @@ import {
 } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import { canonicalConnectorKey } from "../connector-key.ts";
+import { crashPoint } from "../crash-point.ts";
 import {
   assertConnectorLifecycleAvailable,
   clearConnectorLifecycleUninstalled,
@@ -684,12 +685,14 @@ async function reuseExistingInstall(
   const verified = verifyStoredRecord(root, reusable, dataDir);
   signal.throwIfAborted();
   await store.activate(verified);
+  crashPoint("connector-install:after-activate");
   try {
     // Last abort point. registerManifest commits the registry manifest on its
     // own connection; rolling back the activation after that would leave the
     // two disagreeing, so a deadline during or after it lets the install finish.
     signal.throwIfAborted();
     await registerManifest(verified.manifest);
+    crashPoint("connector-install:after-register");
   } catch (error) {
     if (previousActive) {
       await store.activate(previousActive);
@@ -735,9 +738,11 @@ async function installStagedEntry(options: {
     const active = { ...record, root: options.root };
     const verifiedActive = verifyStoredRecord(options.root, active, options.dataDir);
     await options.store.activate(verifiedActive);
+    crashPoint("connector-install:after-activate");
     // Last abort point: see reuseExistingInstall.
     options.signal.throwIfAborted();
     await options.registerManifest(verifiedActive.manifest);
+    crashPoint("connector-install:after-register");
     return verifiedActive;
   } catch (error) {
     if (published) {
