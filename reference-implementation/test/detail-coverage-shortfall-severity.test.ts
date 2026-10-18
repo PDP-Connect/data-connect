@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 // Regression for run_1786242751717 (live UAT, 2026-08-08).
@@ -59,6 +59,8 @@ const HOLDINGS_STATE_STREAM_PATTERN = /state_stream=holdings/;
 const ACTIVITY_STATE_STREAM_PATTERN = /state_stream=activity/;
 const DUPLICATE_COVERAGE_PATTERN = /duplicate DETAIL_COVERAGE/;
 const OVERLAPPING_OUTCOME_PATTERN = /outcome key appears in multiple sets/;
+const UNKNOWN_CAPABILITY_PATTERN = /protocol_capabilities must be an array of known capability names/;
+const UNSUPPORTED_CAPABILITY_PATTERN = /requires protocol capabilities this runtime does not support: (\S+)/;
 const STALL_MESSAGE_PATTERN =
   /withheld for 3 consecutive runs, each time because activity left required keys uncredited/;
 
@@ -226,9 +228,14 @@ const MANIFEST = {
 /**
  * The same connector, declaring DETAIL_COVERAGE_KEY_SETS. Only a connector that
  * declares it gets evidence-based crediting of hydrated keys; MANIFEST keeps
- * the crediting it had before the capability existed.
+ * the crediting it had before the capability existed. The capability is new in
+ * Collection Profile 0.2.0, so the manifest declares that version (Section 3.1).
  */
-const KEY_SETS_MANIFEST = { ...MANIFEST, protocol_capabilities: ["DETAIL_COVERAGE_KEY_SETS"] };
+const KEY_SETS_MANIFEST = {
+  ...MANIFEST,
+  protocol_capabilities: ["DETAIL_COVERAGE_KEY_SETS"],
+  protocol_version: "0.2.0",
+};
 
 function createCannedConnector(messages: readonly Record<string, unknown>[]): {
   connectorPath: string;
@@ -1142,4 +1149,186 @@ test("successful cursor resets its streak when the next cursor PUT fails", async
   assert.ok(attempt.thrown || attempt.result?.status === "failed");
   const again = await runHoldings(server, ownerToken, unproven, KEY_SETS_MANIFEST);
   assert.equal(withheldEvents(again.run_id as string)[0]?.consecutive_runs, 1);
+});
+
+async function registerManifest(server: ClosableServer, manifest: Record<string, unknown>): Promise<number> {
+  const { status } = await fetchJson(`http://localhost:${server.asPort}/connectors`, {
+    body: JSON.stringify(manifest),
+    headers: { "Content-Type": "application/json" },
+    method: "POST",
+  });
+  return status;
+}
+
+function isAdmitted(status: number): boolean {
+  return status >= 200 && status < 300;
+}
+
+/** Run `messages` as the connector and return the START line it received, or null if it never started. */
+async function runCapturingStart(
+  server: ClosableServer,
+  ownerToken: string,
+  manifest: Record<string, unknown>,
+  messages: readonly Record<string, unknown>[]
+): Promise<{ result: RuntimeRunConnectorResult | null; start: Record<string, unknown> | null; thrown: unknown }> {
+  const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-start-capture-"));
+  const startPath = join(tmpDir, "start.json");
+  const connectorPath = join(tmpDir, "connector.mjs");
+  writeFileSync(
+    connectorPath,
+    `
+import { writeFileSync } from 'fs';
+import { createInterface } from 'readline';
+const rl = createInterface({ input: process.stdin });
+rl.on('line', (line) => {
+  const msg = JSON.parse(line);
+  if (msg.type === 'START') {
+    writeFileSync(${JSON.stringify(startPath)}, line);
+    for (const m of ${JSON.stringify(messages)}) process.stdout.write(JSON.stringify(m) + '\\n');
+    rl.close();
+    process.exit(0);
+  }
+});
+`,
+    "utf-8"
+  );
+  let result: RuntimeRunConnectorResult | null = null;
+  let thrown: unknown = null;
+  try {
+    result = await runConnectorWithGapStore({
+      admitRunConnection: fakeAdmitRunConnection(),
+      collectionMode: "full_refresh",
+      connectorId: MANIFEST.connector_id,
+      connectorPath,
+      detailGapStore: getDefaultConnectorDetailGapStore(),
+      manifest: manifest as typeof MANIFEST,
+      onInteraction: async () => ({}),
+      ownerToken,
+      persistState: true,
+      rsUrl: `http://localhost:${server.rsPort}`,
+      scope: { streams: ["holdings", "activity"].map((name) => ({ name })) },
+      state: null,
+    });
+  } catch (err) {
+    thrown = err;
+  }
+  let start: Record<string, unknown> | null = null;
+  try {
+    start = JSON.parse(readFileSync(startPath, "utf-8")) as Record<string, unknown>;
+  } catch {
+    start = null;
+  }
+  rmSync(tmpDir, { force: true, recursive: true });
+  return { result, start, thrown };
+}
+
+const UNPROVEN_HYDRATED_KEY = [
+  holdingsCoverage({ considered: 1, covered: 1, hydrated_keys: ["K"], required_keys: ["K"] }),
+];
+
+// Collection Profile 0.2.0 adds DETAIL_COVERAGE_KEY_SETS (Sections 3.4, 8). A
+// manifest that declares it at 0.2.0 registers, passes the pre-spawn gate, and
+// gets evidence-based crediting: a hydrated key with no record is not credited.
+test("a 0.2.0 manifest declaring DETAIL_COVERAGE_KEY_SETS registers, starts, and gets evidence-based crediting", async (t) => {
+  const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+  t.after(() => closeServer(server));
+  const ownerToken = await registerAndAuthorize(server);
+  assert.equal(isAdmitted(await registerManifest(server, KEY_SETS_MANIFEST)), true, "the 0.2.0 manifest is admitted");
+
+  const { result, start, thrown } = await runCapturingStart(
+    server,
+    ownerToken,
+    KEY_SETS_MANIFEST,
+    holdingsRun(UNPROVEN_HYDRATED_KEY)
+  );
+  assert.equal(thrown, null);
+  assert.ok(start, "the connector received START");
+  assert.equal(result?.status, "succeeded");
+  assert.equal(result?.checkpoint_summary?.state_streams_committed, 0, "the unproven parent cursor is withheld");
+  assert.equal(terminalCoveredFor(result?.run_id as string, "activity"), 0);
+});
+
+// A 0.1.0 manifest keeps the 0.1.0 crediting, and may not declare a capability
+// that 0.2.0 adds (Section 3.1).
+test("a 0.1.0 manifest keeps legacy crediting and cannot declare a 0.2.0 capability", async (t) => {
+  const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+  t.after(() => closeServer(server));
+  const ownerToken = await registerAndAuthorize(server);
+  assert.equal(isAdmitted(await registerManifest(server, MANIFEST)), true, "the 0.1.0 manifest is admitted");
+  assert.equal(
+    await registerManifest(server, { ...KEY_SETS_MANIFEST, protocol_version: "0.1.0" }),
+    400,
+    "DETAIL_COVERAGE_KEY_SETS requires protocol_version 0.2.0"
+  );
+
+  const { result, thrown } = await runCapturingStart(server, ownerToken, MANIFEST, holdingsRun(UNPROVEN_HYDRATED_KEY));
+  assert.equal(thrown, null);
+  assert.equal(result?.checkpoint_summary?.state_streams_committed, 1, "the declaration alone credits the key");
+  assert.equal(terminalCoveredFor(result?.run_id as string, "activity"), 1);
+});
+
+// Pre-spawn gate (Sections 3.4 and 4): an unknown capability name fails closed,
+// and a known required capability this runtime does not implement fails before
+// any connector code runs. DETAIL_COVERAGE_KEY_SETS is advisory and
+// STREAM_EVIDENCE is implemented, so both pass.
+test("the pre-spawn gate rejects unknown and unsupported required capabilities and admits implemented ones", async (t) => {
+  const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+  t.after(() => closeServer(server));
+  const ownerToken = await registerAndAuthorize(server);
+  assert.equal(
+    await registerManifest(server, { ...KEY_SETS_MANIFEST, protocol_capabilities: ["FORGED"] }),
+    400,
+    "an unknown capability name is not admitted"
+  );
+
+  const cases: [unknown, RegExp | null, string | null][] = [
+    [["FORGED"], UNKNOWN_CAPABILITY_PATTERN, null],
+    [["DETAIL_COVERAGE_KEY_SETS", "FORGED"], UNKNOWN_CAPABILITY_PATTERN, null],
+    ["DETAIL_COVERAGE_KEY_SETS", UNKNOWN_CAPABILITY_PATTERN, null],
+    [null, UNKNOWN_CAPABILITY_PATTERN, null],
+    [["OBSERVATION"], UNSUPPORTED_CAPABILITY_PATTERN, "OBSERVATION"],
+    [["DETAIL_COVERAGE_KEY_SETS", "BLOB"], UNSUPPORTED_CAPABILITY_PATTERN, "BLOB"],
+    [["DETAIL_COVERAGE_KEY_SETS", "STREAM_EVIDENCE"], null, null],
+  ];
+  for (const [protocolCapabilities, rejection, unsupported] of cases) {
+    // biome-ignore lint/performance/noAwaitInLoops: each case is one isolated run.
+    const { result, start, thrown } = await runCapturingStart(
+      server,
+      ownerToken,
+      { ...KEY_SETS_MANIFEST, protocol_capabilities: protocolCapabilities },
+      holdingsRun([holdingsCoverage({ empty_keys: ["K"], required_keys: ["K"] })])
+    );
+    const label = JSON.stringify(protocolCapabilities);
+    if (rejection === null) {
+      assert.equal(thrown, null, label);
+      assert.ok(start, `${label} starts`);
+      assert.equal(result?.status, "succeeded", label);
+      continue;
+    }
+    assert.equal(start, null, `${label} never reaches the connector`);
+    assert.match(String((thrown as Error | null)?.message), rejection, label);
+    if (unsupported !== null) {
+      assert.equal(UNSUPPORTED_CAPABILITY_PATTERN.exec(String((thrown as Error).message))?.[1], unsupported, label);
+    }
+  }
+});
+
+// START.protocol_capabilities lists what this runtime implements (Section
+// 5.1): it accepts empty_keys/unchanged_keys and it validates STREAM_EVIDENCE.
+// It does not implement BLOB or OBSERVATION, so it does not list them.
+test("START advertises the protocol capabilities this runtime implements, to every connector", async (t) => {
+  const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+  t.after(() => closeServer(server));
+  const ownerToken = await registerAndAuthorize(server);
+  for (const manifest of [MANIFEST, KEY_SETS_MANIFEST]) {
+    // biome-ignore lint/performance/noAwaitInLoops: each manifest is one isolated run.
+    const { start, thrown } = await runCapturingStart(
+      server,
+      ownerToken,
+      manifest,
+      holdingsRun([holdingsCoverage({ empty_keys: ["K"], required_keys: ["K"] })])
+    );
+    assert.equal(thrown, null);
+    assert.deepEqual(start?.protocol_capabilities, ["DETAIL_COVERAGE_KEY_SETS", "STREAM_EVIDENCE"]);
+  }
 });

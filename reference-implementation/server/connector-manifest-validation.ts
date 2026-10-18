@@ -10,6 +10,7 @@
  * logic.
  */
 
+import { collectionProfileDeclarationError } from "@pdpp/connector-protocol";
 import { tuningEnvironmentKeyOwner } from "../runtime/connector-child-environment.ts";
 import {
   normalizeStaticSecretCredentialCapture,
@@ -180,6 +181,23 @@ export function invalidConnectorManifest(message: string, code = "invalid_reques
   const err = new Error(message) as Error & { code: string };
   err.code = code;
   return err;
+}
+
+/**
+ * Collection Profile declaration gate (profile Sections 3.1 and 3.4):
+ * `protocol_version` names a supported profile version, every
+ * `protocol_capabilities` name is known, and a capability added in 0.2.0
+ * comes with `protocol_version` 0.2.0. This server has always admitted a
+ * manifest without `protocol_version`; it is checked as a 0.1.0 manifest.
+ */
+function validateCollectionProfileDeclaration(manifest: Record<string, unknown>, code: string): void {
+  const error = collectionProfileDeclarationError(
+    manifest.protocol_version === undefined ? "0.1.0" : manifest.protocol_version,
+    manifest.protocol_capabilities
+  );
+  if (error !== null) {
+    throw invalidConnectorManifest(error, code);
+  }
 }
 
 /**
@@ -2170,7 +2188,7 @@ function validateManifestStream({
 export function validateConnectorManifest(
   manifest: Record<string, unknown> = {},
   code = "invalid_request",
-  opts: { skipCursorFieldSortCheck?: boolean } = {}
+  opts: { skipCollectionProfileCheck?: boolean; skipCursorFieldSortCheck?: boolean } = {}
 ): void {
   const hasConnectorId = isNonEmptyString(manifest.connector_id);
   const hasConnectorKey = isNonEmptyString(manifest.connector_key);
@@ -2210,6 +2228,9 @@ export function validateConnectorManifest(
     throw invalidConnectorManifest("Connector manifests must include a non-empty streams array", code);
   }
 
+  if (!opts.skipCollectionProfileCheck) {
+    validateCollectionProfileDeclaration(manifest, code);
+  }
   validateRuntimeRequirements(manifest, code);
   validateRefreshPolicyCapability(manifest, code);
   validateDeclaredReasonTokensCapability(manifest, code);

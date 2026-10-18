@@ -137,6 +137,41 @@ test("capability withdrawal is fail-closed for emitters but leaves non-emitters 
   );
 });
 
+// Collection Profile Section 3.4: DETAIL_COVERAGE_KEY_SETS is advisory. A
+// runtime that does not advertise it still starts a connector that declares
+// it; that connector folds its empty and unchanged keys into hydrated_keys.
+test("an advisory DETAIL_COVERAGE_KEY_SETS declaration places on a runtime that does not advertise it", () => {
+  const keySetsConnector = {
+    connector_id: "key-sets-connector",
+    protocol_capabilities: ["DETAIL_COVERAGE_KEY_SETS" as const],
+  };
+  assert.equal(COLLECTOR_RUNTIME_CAPABILITIES.protocolCapabilities.has("DETAIL_COVERAGE_KEY_SETS"), false);
+  assert.deepEqual(diffRequiredProtocolCapabilities(keySetsConnector, COLLECTOR_RUNTIME_CAPABILITIES), []);
+  assert.deepEqual(evaluatePlacement(keySetsConnector, COLLECTOR_RUNTIME_CAPABILITIES), { kind: "ok", satisfied: [] });
+  assert.deepEqual(evaluatePlacement(keySetsConnector, PROVIDER_RUNTIME_CAPABILITIES), { kind: "ok", satisfied: [] });
+});
+
+// OBSERVATION is a known name, so it is not a malformed declaration, but it is
+// required: a runtime that does not advertise it must not start the connector.
+test("a declared OBSERVATION capability is a named missing capability, not a malformed declaration", () => {
+  const observationConnector = {
+    connector_id: "observation-connector",
+    protocol_capabilities: ["DETAIL_COVERAGE_KEY_SETS" as const, "OBSERVATION" as const],
+  };
+  const decision = evaluatePlacement(observationConnector, COLLECTOR_RUNTIME_CAPABILITIES);
+  assert.deepEqual(decision, {
+    connectorId: "observation-connector",
+    kind: "missing_capability",
+    missing: ["OBSERVATION"],
+    runtime: COLLECTOR_RUNTIME_CAPABILITIES.id,
+  });
+  const observingRuntime = {
+    ...COLLECTOR_RUNTIME_CAPABILITIES,
+    protocolCapabilities: new Set(["OBSERVATION" as const]),
+  };
+  assert.equal(evaluatePlacement(observationConnector, observingRuntime).kind, "ok");
+});
+
 test("boundary_claim remains optional and does not require a protocol capability", () => {
   const skipResult = {
     boundary_claim: "provider_history_boundary",

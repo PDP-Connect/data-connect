@@ -251,9 +251,12 @@ export async function runHydratedKeyCreditingScenario<Store>({
   connectorId: string;
   declaresKeySets: boolean;
 }): Promise<void> {
+  // DETAIL_COVERAGE_KEY_SETS is new in Collection Profile 0.2.0, so a manifest
+  // that declares it declares that version (profile Section 3.1).
   const manifest = {
     ...multiParentManifest(connectorId),
     protocol_capabilities: declaresKeySets ? ["DETAIL_COVERAGE_KEY_SETS"] : [],
+    protocol_version: declaresKeySets ? "0.2.0" : "0.1.0",
   };
   const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-checkpoint-profile-hydrated-credit-"));
   const connectorPath = writeConnectorStub(

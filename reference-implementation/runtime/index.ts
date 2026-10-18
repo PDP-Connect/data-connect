@@ -15,9 +15,13 @@ import { tmpdir } from "node:os";
 import { join as joinPath } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
+  type ConnectorProtocolCapability,
   DETAIL_COVERAGE_KEY_SETS_CAPABILITY,
+  isConnectorProtocolCapabilityArray,
   PERMANENT_DETAIL_GAP_REASON,
   RETRYABLE_DETAIL_GAP_REASONS,
+  STREAM_EVIDENCE_CAPABILITY,
+  unsupportedRequiredProtocolCapabilities,
   validateRuntimeContinuationFact,
 } from "@pdpp/connector-protocol/connector-runtime-protocol";
 import { connectorChildArgs } from "../connector-dependency-loader.mjs";
@@ -2580,6 +2584,36 @@ export function buildBrowserSurfaceLaunchEnv({
   };
 }
 
+/**
+ * Protocol capabilities this runtime implements, listed in
+ * START.protocol_capabilities. It accepts DETAIL_COVERAGE empty_keys and
+ * unchanged_keys, and validates STREAM_EVIDENCE. It has no BLOB transport and
+ * no OBSERVATION handler, so it does not list them.
+ */
+const RUNTIME_PROTOCOL_CAPABILITIES: readonly ConnectorProtocolCapability[] = [
+  DETAIL_COVERAGE_KEY_SETS_CAPABILITY,
+  STREAM_EVIDENCE_CAPABILITY,
+];
+
+/**
+ * Pre-spawn capability gate (Collection Profile Sections 3.4 and 4). An
+ * absent `protocol_capabilities` declares none. A malformed list or an unknown
+ * name fails closed, and so does a required capability this runtime does not
+ * implement. An advisory capability never blocks the run.
+ */
+function validateRequiredProtocolCapabilities(manifest: ConnectorManifest): void {
+  const declared = manifest.protocol_capabilities === undefined ? [] : manifest.protocol_capabilities;
+  if (!isConnectorProtocolCapabilityArray(declared)) {
+    throw new Error("Connector manifest protocol_capabilities must be an array of known capability names");
+  }
+  const unsupported = unsupportedRequiredProtocolCapabilities(declared, RUNTIME_PROTOCOL_CAPABILITIES);
+  if (unsupported.length > 0) {
+    throw new Error(
+      `Connector requires protocol capabilities this runtime does not support: ${unsupported.join(", ")}`
+    );
+  }
+}
+
 function validateRequiredRuntimeBindings(
   requiredBindings: Record<string, { required?: boolean }>,
   availableBindings: AvailableBindings
@@ -3002,6 +3036,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
   const availableBindings = buildAvailableBindings(onInteraction);
 
   validateRequiredRuntimeBindings(requiredBindings, availableBindings);
+  validateRequiredProtocolCapabilities(manifest);
 
   const explicitlyRequestedStreams = requestedRuntimeStreams(providedScope);
   const declaredCollectionScope = readStoredCollectionScope(state).scope;
@@ -3400,7 +3435,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
     bindings: availableBindings,
     collection_mode: startCollectionMode,
     detail_gaps: startDetailGaps,
-    protocol_capabilities: [DETAIL_COVERAGE_KEY_SETS_CAPABILITY],
+    protocol_capabilities: RUNTIME_PROTOCOL_CAPABILITIES,
     run_id: runId,
     scope: startScope,
     state: startState,
