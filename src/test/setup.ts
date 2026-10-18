@@ -69,7 +69,9 @@ function assertLoopbackHost(protocol: string, host: string) {
 
 if (!Reflect.get(globalThis, networkGuardMarker)) {
   const originalFetch = globalThis.fetch
-  globalThis.fetch = (input, init) => {
+  // async, so a blocked call rejects like a real network failure instead of
+  // throwing synchronously at the call site.
+  globalThis.fetch = async (input, init) => {
     const inputUrl =
       typeof input === "string"
         ? input
@@ -86,7 +88,9 @@ if (!Reflect.get(globalThis, networkGuardMarker)) {
     configurable: true,
     writable: true,
     value: function (this: Socket, ...args: unknown[]) {
-      const address = args[0]
+      // net.connect() and tls.connect() pass their normalized [options, cb]
+      // array as the single argument.
+      const address = Array.isArray(args[0]) ? args[0][0] : args[0]
       if (typeof address === "number") {
         assertLoopbackHost(
           "socket connection",
