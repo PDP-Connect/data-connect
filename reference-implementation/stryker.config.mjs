@@ -87,6 +87,18 @@ export default {
   // revision touched no reference-implementation production source.
   mutate: [],
 
+  // One trial at a time. Each trial is itself parallel: `node --test` starts a
+  // process per test file, and tsx compiles in each, so one trial of the 7-file
+  // sample on PR #494 used about 12 CPU-seconds in 3.3 s of wall time and fills
+  // a 4-CPU runner on its own. Stryker's timeout is `1.5 * net dry-run time +
+  // 5 s`, and the dry run runs alone. With four Stryker workers each trial then
+  // competes with three others and takes about four times as long, so any
+  // selection whose solo run passes 2 s outlives that limit: every one of the 144
+  // mutants of PR #494 timed out and the attempt had no evidence. One worker
+  // makes a trial run under the conditions the limit was measured in. It is not
+  // slower: 18 mutants took 43 s with one worker and 52 s with four.
+  concurrency: 1,
+
   reporters: ["json", "html", "progress"],
   jsonReporter: { fileName: "reports/mutation/reference-implementation/mutation.json" },
   htmlReporter: { fileName: "reports/mutation/reference-implementation/mutation.html" },
