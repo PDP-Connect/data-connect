@@ -264,7 +264,10 @@ test("unexpected child exit fences and rejects the generation after confirmed ex
 
 test("deadline fences immediately, then rejects only after confirmed TERM exit", async () => {
   const children: FakeChild[] = [];
-  const executor = executorFor(children, { deadlineMs: 5, termGraceMs: 30 });
+  // The grace period never elapses here: the test confirms the exit by hand, so
+  // a slow host cannot push the executor from TERM to KILL. The KILL-after-grace
+  // path is covered by the TERM-ignore test below.
+  const executor = executorFor(children, { deadlineMs: 5, termGraceMs: 60_000 });
   const work = executor.embed("input", "backend-a", {});
   // biome-ignore lint/style/useDestructuring: localized test assertion preserves its explicit contract.
   const child = children[0];
