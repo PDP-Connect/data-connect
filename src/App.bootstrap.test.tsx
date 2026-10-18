@@ -12,6 +12,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { cleanup, render, waitFor } from "@testing-library/react"
 import { TooltipProvider } from "@/components/ui/tooltip"
+// Imported statically so the ~400 ms cold transform of the whole app graph is
+// paid at file import (which has no per-test timeout), not inside the 5 s test
+// budget. Nothing in the graph reads the Tauri marker at import time; every
+// isTauriRuntime() check runs inside a hook or handler.
+import App from "./App"
 
 const invokedCommands: string[] = []
 
@@ -69,8 +74,6 @@ describe("legacy App bootstrap", () => {
     // which checks for this marker. Real Tauri webviews inject it; jsdom does not.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     ;(window as any).__TAURI_INTERNALS__ = {}
-
-    const { default: App } = await import("./App")
 
     render(
       <TooltipProvider delayDuration={0}>
