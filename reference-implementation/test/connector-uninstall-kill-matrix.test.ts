@@ -118,14 +118,19 @@ async function seed(): Promise<Fixture> {
     const service = createConnectorInstallService({
       catalogLoader: async () => [catalogEntry(DIGEST_A), catalogEntry(DIGEST_B)],
       dataDir,
-      installArtifact: (root) => {
-        writeFixture(root, root.endsWith(DIGEST_A) ? DIGEST_A : DIGEST_B);
+      installArtifact: (root, entry) => {
+        writeFixture(root, entry.digest);
       },
       registerManifest: () => Promise.resolve(),
       store,
     });
     await service.install("github", DIGEST_A);
     await service.install("github", DIGEST_B);
+    assert.notEqual(
+      readFileSync(join(dataDir, "connectors", "github", DIGEST_A, "dist", "collection-profile.mjs"), "utf8"),
+      readFileSync(join(dataDir, "connectors", "github", DIGEST_B, "dist", "collection-profile.mjs"), "utf8"),
+      "fixture digest roots must have distinct payloads so swapped restores are detectable"
+    );
     const now = new Date().toISOString();
     getDb()
       .prepare(
@@ -308,7 +313,7 @@ const UNINSTALL_KILLS: readonly UninstallKill[] = [
   },
 ];
 
-function assertPreState(fixture: Fixture, kill: UninstallKill, label: string): void {
+function assertPreState(fixture: Fixture, kill: Pick<UninstallKill, "preState">, label: string): void {
   openForInspection(fixture.dataDir);
   try {
     assert.deepEqual(
@@ -341,6 +346,7 @@ interface RecoveryKill {
   readonly expected: "cleaned" | "restored";
   readonly hit?: number;
   readonly point: string;
+  readonly preState: UninstallKill["preState"];
   /** Where the uninstall is killed first, to give recovery something to do. */
   readonly uninstallKill: { readonly hit?: number; readonly point: string };
 }
@@ -355,40 +361,47 @@ const RECOVERY_KILLS: readonly RecoveryKill[] = [
   {
     expected: "restored",
     point: "uninstall-recovery:after-restore-active",
+    preState: { activeRecord: true, journal: true, marker: true, staged: 2 },
     uninstallKill: ROOT_MOVES_DONE,
   },
   {
     expected: "restored",
     hit: 1,
     point: "uninstall-recovery:after-root-restore",
+    preState: { activeRecord: true, journal: true, marker: true, staged: 1 },
     uninstallKill: ROOT_MOVES_DONE,
   },
   {
     expected: "restored",
     hit: 2,
     point: "uninstall-recovery:after-root-restore",
+    preState: { activeRecord: true, journal: true, marker: true, staged: 0 },
     uninstallKill: ROOT_MOVES_DONE,
   },
   {
     expected: "restored",
     point: "uninstall-recovery:after-marker-clear",
+    preState: { activeRecord: true, journal: true, marker: false, staged: 0 },
     uninstallKill: ROOT_MOVES_DONE,
   },
   {
     expected: "cleaned",
     hit: 1,
     point: "uninstall-recovery:after-root-removal",
+    preState: { activeRecord: false, journal: true, marker: true, staged: 1 },
     uninstallKill: ACTIVE_REMOVED,
   },
   {
     expected: "cleaned",
     hit: 2,
     point: "uninstall-recovery:after-root-removal",
+    preState: { activeRecord: false, journal: true, marker: true, staged: 0 },
     uninstallKill: ACTIVE_REMOVED,
   },
   {
     expected: "cleaned",
     point: "uninstall-recovery:after-activation-cleanup",
+    preState: { activeRecord: false, journal: true, marker: true, staged: 0 },
     uninstallKill: ACTIVE_REMOVED,
   },
 ];
@@ -400,6 +413,7 @@ for (const kill of RECOVERY_KILLS) {
     t.after(() => rmSync(fixture.dataDir, { force: true, recursive: true }));
     await killAtHit(fixture.dataDir, "uninstall", kill.uninstallKill.point, kill.uninstallKill.hit ?? 1);
     await killAtHit(fixture.dataDir, "recover", kill.point, kill.hit ?? 1);
+    assertPreState(fixture, kill, label);
     await recoverTwiceAndAssert(fixture, kill.expected, label);
   });
 }

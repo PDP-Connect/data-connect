@@ -24,7 +24,6 @@ import {
 import { dirname, join, resolve, sep } from "node:path";
 import { crashPoint } from "../crash-point.ts";
 import { canonicalConnectorKey } from "../connector-key.ts";
-import { crashPoint } from "../crash-point.ts";
 import {
   assertConnectorLifecycleAvailable,
   clearConnectorLifecycleUninstalled,
