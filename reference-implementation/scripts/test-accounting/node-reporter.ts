@@ -1,7 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { accountingEventLine } from "./receipt.ts";
+import { accountingEventLine, MAX_STARTED_TEST_NAME_LENGTH, PROGRESS_EVENT_LINE } from "./receipt.ts";
 
 interface ReporterEventData {
   details?: { error?: ReporterError; name?: string; skip?: boolean | string; type?: string };
@@ -21,7 +21,8 @@ interface ReporterEvent {
 }
 
 const MAX_FAILURE_FIELD_LENGTH = 2000;
-const MAX_STARTED_TEST_NAME_LENGTH = 200;
+// At most one progress event per this many milliseconds of test output.
+const PROGRESS_INTERVAL_MS = 1000;
 const MAX_FAILURE_DIAGNOSTIC_LENGTH = 4000;
 const MAX_DIAGNOSTIC_BUFFER_LENGTH = 16_000;
 // Hard bound on raw input handed to the structured-header scanner, applied
@@ -610,9 +611,20 @@ function failureDetails(error: ReporterError | undefined, diagnosticTail: string
 // carries only the test name.
 export default async function* accountingReporter(source: AsyncIterable<ReporterEvent>): AsyncGenerator<string> {
   const diagnostic = new DiagnosticBuffer();
+  let lastProgressAt = Number.NEGATIVE_INFINITY;
   for await (const event of source) {
     const data = event.data ?? {};
     const details = data.details ?? {};
+    if (event.type === "test:stdout" || event.type === "test:stderr" || event.type === "test:diagnostic") {
+      // The test's output is never emitted, but it proves the file is alive:
+      // without a sign of it, the runner's idle watchdog would kill a healthy
+      // test that only logs. The sign carries no content.
+      const now = Date.now();
+      if (now - lastProgressAt >= PROGRESS_INTERVAL_MS) {
+        lastProgressAt = now;
+        yield `${PROGRESS_EVENT_LINE}\n`;
+      }
+    }
     if (event.type === "test:stderr" || event.type === "test:diagnostic") {
       if (typeof data.message === "string" && data.message.trim()) {
         // Keep chunks until terminal failure so a credential label and value

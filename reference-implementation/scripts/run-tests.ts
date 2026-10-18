@@ -4,7 +4,7 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import { availableParallelism, tmpdir } from "node:os";
+import { availableParallelism } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 // biome-ignore lint/correctness/noUnresolvedImports: Biome cannot resolve this installed package export; Node and TypeScript resolve it.
@@ -16,6 +16,7 @@ import {
 } from "../test/helpers/dedicated-postgres-test-url.ts";
 import { deriveDedicatedPostgresDbNameForFile } from "./dedicated-postgres-db-name.ts";
 import { resolveFileConcurrency } from "./file-concurrency.ts";
+import { killedFileDiagnosticsRoot, runDirectoryName } from "./killed-file-diagnostics.ts";
 import { countFileOutcomes, drainFileQueue, type NodeTestResult, superviseFileChild } from "./file-outcome.ts";
 import { processGroupAlive, signalProcessGroup, terminateProcessGroup } from "./file-process-group.ts";
 import { createOwnedTestResource, type OwnedTestResource, settleAll } from "./owned-test-resource.ts";
@@ -109,9 +110,11 @@ if (PER_FILE_HARD_TIMEOUT_MS < PER_FILE_IDLE_TIMEOUT_MS) {
   throw new Error("PDPP_TEST_FILE_HARD_TIMEOUT_MS must be greater than or equal to PDPP_TEST_FILE_TIMEOUT_MS");
 }
 // The raw output of a killed file is never printed. Locally it goes to a private
-// file in the run's scratch directory (test:scratch and test-sandbox set TMPDIR
-// to one they remove afterwards). On CI the log is public, so nothing is kept.
-const KILLED_FILE_RAW_TAIL_DIR = process.env.CI ? undefined : process.env.TMPDIR || tmpdir();
+// file under the per-user state directory, which outlives a sandboxed run's
+// TMPDIR. On CI the log is public, so nothing is kept.
+const killedFileDiagnosticsDir = killedFileDiagnosticsRoot();
+const KILLED_FILE_RAW_TAIL_DIR =
+  killedFileDiagnosticsDir === undefined ? undefined : join(killedFileDiagnosticsDir, runDirectoryName());
 if (!effectiveArgs.some((arg) => arg === "--test-reporter" || arg.startsWith("--test-reporter="))) {
   effectiveArgs.push(
     `--test-reporter=${fileURLToPath(new URL("./test-accounting/node-reporter.ts", import.meta.url))}`

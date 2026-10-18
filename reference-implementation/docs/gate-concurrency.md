@@ -109,8 +109,14 @@ ones that exited non-zero or were killed by the per-file watchdog. A killed file
 is a failed file; it no longer aborts the files after it. Its result holds only
 structured fields (`TIMED OUT (idle|hard)` or `KILLED`, the signal, the elapsed
 time and the last test that began running), never its raw output. Locally the
-newest 64 KB of that output goes to a mode 0600 file in the run's scratch
-directory, whose path the result names; on CI (`CI` set) it is not kept. `gate-concurrency-receipt.ts` still derives its
+newest 64 KB of that output goes to a mode 0600 file under
+`${XDG_STATE_HOME:-~/.local/state}/pdpp-ri-test-diagnostics/` (one 0700
+directory per run; the newest 20 runs are kept, none older than 7 days), whose
+path the result names. It does not go to the run's `TMPDIR`, which the sandbox
+removes when the run ends. On CI (`CI` set) it is not kept. The reporter never
+prints a test's own output, but it emits a content-free `test:progress` event
+(at most one a second) when output arrives, so a test that logs is not killed as
+idle. `gate-concurrency-receipt.ts` still derives its
 own `completed_files` from the exit code, so that receipt remains 0 on a failed
 run.
 

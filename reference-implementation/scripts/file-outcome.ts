@@ -2,8 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { ChildProcess } from "node:child_process";
-import { mkdtemp, writeFile } from "node:fs/promises";
-import { basename, join } from "node:path";
 import { collectChildProcessOutput } from "./child-process-output.ts";
 import { PROCESS_GROUP_KILL_GRACE_MS, terminateProcessGroup } from "./file-process-group.ts";
 import {
@@ -12,7 +10,8 @@ import {
   type FileProcessWatchdogOptions,
   startFileProcessWatchdog,
 } from "./file-process-watchdog.ts";
-import { lastStartedTestName } from "./test-accounting/receipt.ts";
+import { writeKilledFileTail } from "./killed-file-diagnostics.ts";
+import { lastStartedTestName, withoutProgressEvents } from "./test-accounting/receipt.ts";
 
 /**
  * The outcome of one test file's child process.
@@ -44,23 +43,6 @@ function newestBytes(output: string, maxBytes: number): Buffer {
   return bytes.subarray(start);
 }
 
-/**
- * Write the raw output tail of a killed file where only its owner can read it:
- * a fresh directory (mode 0700) holding a file (mode 0600). Returns the path,
- * or undefined when it could not be written; a failed write must not turn a
- * killed file into a runner error.
- */
-async function writeRawTail(dir: string, filePath: string, output: string): Promise<string | undefined> {
-  try {
-    const own = await mkdtemp(join(dir, "pdpp-killed-file-"));
-    const path = join(own, `${basename(filePath).replace(/[^\w.-]/g, "_")}.log`);
-    await writeFile(path, newestBytes(output, KILLED_OUTPUT_TAIL_BYTES), { flag: "wx", mode: 0o600 });
-    return path;
-  } catch {
-    return undefined;
-  }
-}
-
 interface FileCloseInput {
   code: number | null;
   durationMs: number;
@@ -69,8 +51,9 @@ interface FileCloseInput {
   idleBudgetMs: number;
   output: string;
   /**
-   * Directory for the raw output tail of a killed file. Omit it where the log is
-   * public (CI): the tail is then neither written nor mentioned.
+   * This run's directory for the raw output tails of killed files (created on
+   * first use). Omit it where the log is public (CI): the tail is then neither
+   * written nor mentioned.
    */
   rawTailDir?: string | undefined;
   signal: NodeJS.Signals | null;
@@ -104,7 +87,7 @@ export async function fileResultFromClose(input: FileCloseInput): Promise<NodeTe
       durationMs: input.durationMs,
       exitCode: input.code ?? 1,
       filePath: input.filePath,
-      output: `\n==> ${input.filePath}\n${input.output}`,
+      output: `\n==> ${input.filePath}\n${withoutProgressEvents(input.output)}`,
     };
   }
   const lastTest = lastStartedTestName(input.output);
@@ -115,7 +98,11 @@ export async function fileResultFromClose(input: FileCloseInput): Promise<NodeTe
     `last test started: ${lastTest === undefined ? "none" : JSON.stringify(lastTest)}`,
   ];
   if (input.rawTailDir !== undefined) {
-    const path = await writeRawTail(input.rawTailDir, input.filePath, input.output);
+    const path = await writeKilledFileTail(
+      input.rawTailDir,
+      input.filePath,
+      newestBytes(input.output, KILLED_OUTPUT_TAIL_BYTES)
+    );
     fields.push(`raw output tail: ${path ?? "not saved"}`);
   }
   return {

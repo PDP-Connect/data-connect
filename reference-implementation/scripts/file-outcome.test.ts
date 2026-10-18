@@ -3,7 +3,7 @@
 
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -28,13 +28,16 @@ function result(filePath: string, exitCode: number, killed?: boolean): NodeTestR
   return { durationMs: 1, exitCode, filePath, ...(killed ? { killed } : {}), output: `\n==> ${filePath}\n` };
 }
 
-/** A scratch directory standing in for the run's TMPDIR; removed after `body`. */
-async function withScratch<T>(body: (dir: string) => Promise<T>): Promise<T> {
-  const dir = await mkdtemp(join(tmpdir(), "file-outcome-test-"));
+/**
+ * A scratch root standing in for the per-user diagnostics root, and the path of
+ * this run's directory inside it (created by the first write); removed after `body`.
+ */
+async function withScratch<T>(body: (runDir: string, root: string) => Promise<T>): Promise<T> {
+  const root = await mkdtemp(join(tmpdir(), "file-outcome-test-"));
   try {
-    return await body(dir);
+    return await body(join(root, "run-test"), root);
   } finally {
-    await rm(dir, { force: true, recursive: true });
+    await rm(root, { force: true, recursive: true });
   }
 }
 
@@ -176,18 +179,23 @@ for (const [name, output, secret] of LEAK_SHAPES) {
 }
 
 test("with no directory (CI) a killed file writes nothing and names no path", async () => {
-  await withScratch(async (dir) => {
+  await withScratch(async (_runDir, root) => {
     const outcome = await killedResult("Authorization: Bearer SYNTHETIC-CI-SECRET\n");
     assert.equal(outcome.killed, true);
     assert.doesNotMatch(outcome.output, /SYNTHETIC-CI-SECRET|raw output tail/);
-    assert.deepEqual(await readdir(dir), []);
+    assert.deepEqual(await readdir(root), []);
   });
 });
 
 test("a raw tail that cannot be written is reported as not saved and the file is still killed", async () => {
-  const outcome = await killedResult("anything\n", join(tmpdir(), "file-outcome-test-no-such-dir", "nested"));
-  assert.equal(outcome.killed, true);
-  assert.match(outcome.output, /raw output tail: not saved\n/);
+  await withScratch(async (_runDir, root) => {
+    // A regular file where the diagnostics root should be: no directory can be made under it.
+    const blocker = join(root, "not-a-directory");
+    await writeFile(blocker, "");
+    const outcome = await killedResult("anything\n", join(blocker, "run-test"));
+    assert.equal(outcome.killed, true);
+    assert.match(outcome.output, /raw output tail: not saved\n/);
+  });
 });
 
 test("the private file holds the newest 64 KB of a flood, from a character boundary", async () => {
@@ -213,7 +221,8 @@ test("a timeout kills the whole process group before the result resolves", async
     "process.stdout.write('GRANDCHILD_PID=' + grandchild.pid + '\\n');",
     "setInterval(() => {}, 1000);",
   ].join("\n");
-  const dir = await mkdtemp(join(tmpdir(), "file-outcome-test-"));
+  const root = await mkdtemp(join(tmpdir(), "file-outcome-test-"));
+  const dir = join(root, "run-test");
   const outcome = await superviseFileChild({
     child: spawnNode(supervisor),
     filePath: "test/group.test.ts",
@@ -224,7 +233,7 @@ test("a timeout kills the whole process group before the result resolves", async
   });
   // The grandchild's pid is raw output, so it is read from the private file.
   const pid = Number(/GRANDCHILD_PID=(\d+)/.exec((await readRawTail(dir, outcome.output)).text)?.[1]);
-  await rm(dir, { force: true, recursive: true });
+  await rm(root, { force: true, recursive: true });
   assert.ok(Number.isInteger(pid) && pid > 0, `the grandchild reported its pid\n${outcome.output}`);
   try {
     assert.throws(() => process.kill(pid, 0), { code: "ESRCH" }, "the grandchild must be gone when the result resolves");

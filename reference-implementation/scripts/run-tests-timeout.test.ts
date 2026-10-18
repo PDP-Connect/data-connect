@@ -90,16 +90,27 @@ const AFTER_FILE = [
   "});",
 ].join("\n");
 
-/** Raw-tail files the runner left in `tmp`: one 0700 directory per killed file, holding one 0600 log. */
-async function rawTailFiles(tmp: string) {
-  const found: { dirMode: number; fileMode: number; path: string; text: string }[] = [];
-  for (const entry of (await readdir(tmp)).filter((name) => name.startsWith("pdpp-killed-file-"))) {
-    for (const log of await readdir(join(tmp, entry))) {
-      const path = join(tmp, entry, log);
+/**
+ * Raw-tail files the runner left under `stateHome`: a 0700 root, one 0700
+ * directory for the run, and one 0600 log per killed file.
+ */
+async function rawTailFiles(stateHome: string) {
+  const root = join(stateHome, "pdpp-ri-test-diagnostics");
+  const found: { dirMode: number; fileMode: number; path: string; rootMode: number; text: string }[] = [];
+  let runs: string[];
+  try {
+    runs = await readdir(root);
+  } catch {
+    return found;
+  }
+  for (const run of runs) {
+    for (const log of await readdir(join(root, run))) {
+      const path = join(root, run, log);
       found.push({
-        dirMode: (await stat(join(tmp, entry))).mode & 0o777,
+        dirMode: (await stat(join(root, run))).mode & 0o777,
         fileMode: (await stat(path)).mode & 0o777,
         path,
+        rootMode: (await stat(root)).mode & 0o777,
         text: await readFile(path, "utf8"),
       });
     }
@@ -112,8 +123,11 @@ for (const mode of [[], ["--test-isolation=none"]]) {
     const label = `${mode.join(" ") || "default isolation"}, ${ci ? "CI=1" : "CI unset"}`;
     test(`a hung file is reported failed with structured fields only and the next file still runs (${label})`, async () => {
       const scratch = await mkdtemp(join(scriptsDir, ".ri-timeout-fixture-"));
-      // Stands in for the run's TMPDIR, which test:scratch and test-sandbox own.
+      // Stands in for the run's TMPDIR, which test:scratch and test-sandbox own
+      // and remove when the run ends: the raw tail must not go there.
       const tmp = await mkdtemp(join(tmpdir(), "ri-timeout-tmp-"));
+      // Stands in for the per-user state directory, which outlives the run.
+      const stateHome = await mkdtemp(join(tmpdir(), "ri-timeout-state-"));
       try {
         await mkdir(scratch, { recursive: true });
         await writeFile(join(scratch, "a-hang.test.mjs"), HUNG_FILE);
@@ -148,6 +162,7 @@ for (const mode of [[], ["--test-isolation=none"]]) {
           PDPP_TEST_FILE_TIMEOUT_MS: "2500",
           PDPP_TEST_PROFILE: "memory-default",
           TMPDIR: tmp,
+          XDG_STATE_HOME: stateHome,
         });
 
         try {
@@ -161,19 +176,22 @@ for (const mode of [[], ["--test-isolation=none"]]) {
           assert.match(stdout, /==> .*a-hang\.test\.mjs/, "the hung file's header is kept");
           assert.match(stdout, /elapsed: \d+ms/);
           assert.match(stdout, /last test started: "hang"/, `the last started test is named\n${shown}`);
-          const kept = await rawTailFiles(tmp);
+          const kept = await rawTailFiles(stateHome);
+          assert.deepEqual(
+            (await readdir(tmp)).filter((name) => name.startsWith("pdpp-")),
+            [],
+            "no raw tail is kept in the run's TMPDIR, which the sandbox removes"
+          );
           if (ci) {
             assert.deepEqual(kept, [], "CI keeps no raw tail");
+            assert.deepEqual(await readdir(stateHome), [], "CI creates no diagnostics directory");
             assert.doesNotMatch(shown, /raw output tail/, "CI prints no path");
-            assert.deepEqual(
-              (await readdir(tmp)).filter((name) => name.startsWith("pdpp-killed-file-")),
-              []
-            );
           } else {
-            assert.equal(kept.length, 1, `one raw tail for the one killed file\n${shown}`);
+            assert.equal(kept.length, 1, `one raw tail for the one killed file, in the state directory\n${shown}`);
             const [raw] = kept;
             assert.equal(raw?.fileMode, 0o600);
             assert.equal(raw?.dirMode, 0o700);
+            assert.equal(raw?.rootMode, 0o700);
             assert.ok(stdout.includes(`raw output tail: ${raw?.path}\n`), "the result names the file");
             assert.match(raw?.text ?? "", /"name":"hang"/, "the tail holds the reporter's events");
             if (mode.length > 0) {
@@ -203,7 +221,69 @@ for (const mode of [[], ["--test-isolation=none"]]) {
       } finally {
         await rm(scratch, { force: true, recursive: true });
         await rm(tmp, { force: true, recursive: true });
+        await rm(stateHome, { force: true, recursive: true });
       }
     });
   }
 }
+
+// The reporter swallows a test's own output. A healthy test that only logs
+// must still count as progress, or the idle watchdog kills it.
+const LOGGING_FILE = [
+  'import test from "node:test";',
+  'test("logs every 300 ms and finishes after 4.5 s", async () => {',
+  '  const timer = setInterval(() => process.stderr.write("still working\\n"), 300);',
+  "  await new Promise((resolve) => setTimeout(resolve, 4500));",
+  "  clearInterval(timer);",
+  "});",
+].join("\n");
+
+test("a test that logs but takes longer than the idle budget is not killed (default isolation)", async () => {
+  const scratch = await mkdtemp(join(scriptsDir, ".ri-timeout-fixture-"));
+  const stateHome = await mkdtemp(join(tmpdir(), "ri-timeout-state-"));
+  try {
+    await writeFile(join(scratch, "logging.test.mjs"), LOGGING_FILE);
+    const base = scratch.slice(scriptsDir.length + 1);
+    const authorityPath = join(scratch, "authority.json");
+    await writeFile(
+      authorityPath,
+      JSON.stringify({
+        expires_at: "2099-01-01T00:00:00.000Z",
+        files: [`reference-implementation/scripts/${base}/logging.test.mjs`],
+        nonce: "progress-nonce",
+        profile: "memory-default",
+        run_id: "progress-run",
+        schema: RUN_AUTHORITY_SCHEMA,
+        suite: "ri-default",
+      })
+    );
+    const { stderr, stdout } = await runRunner(["--accounting-authority", authorityPath], {
+      ...process.env,
+      CI: undefined,
+      NODE_TEST_CONTEXT: undefined,
+      PDPP_TEST_CONCURRENCY: "1",
+      PDPP_TEST_FILE_HARD_TIMEOUT_MS: "60000",
+      PDPP_TEST_FILE_TIMEOUT_MS: "2500",
+      PDPP_TEST_PROFILE: "memory-default",
+      XDG_STATE_HOME: stateHome,
+    });
+    const shown = `${stdout}\n${stderr}`;
+    assert.doesNotMatch(stdout, /TIMED OUT/, `the logging test was killed as idle\n${shown}`);
+    assert.match(stdout, /"type":"test:pass".*"logs every 300 ms/);
+    // The exit code is not the oracle: a one-file authority run is a complete
+    // suite, so named-skip finalization fails it for the skips it did not run.
+    const line = stdout.split("\n").find((l) => l.startsWith(RESULT_PREFIX));
+    assert.ok(line, `no accounting result line\n${shown}`);
+    const { counts } = JSON.parse(line.slice(RESULT_PREFIX.length));
+    assert.deepEqual(
+      { failed: counts.failed, failed_files: counts.failed_files, passed: counts.passed },
+      { failed: 0, failed_files: 0, passed: 1 },
+      shown
+    );
+    assert.doesNotMatch(shown, /still working/, "the test's own output is still not printed");
+    assert.doesNotMatch(stdout, /"type":"test:(progress|running)"/, "a file that exits prints only terminal events");
+  } finally {
+    await rm(scratch, { force: true, recursive: true });
+    await rm(stateHome, { force: true, recursive: true });
+  }
+});
