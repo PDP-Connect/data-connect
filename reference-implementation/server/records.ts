@@ -2312,6 +2312,7 @@ async function ingestSqliteRecord(
 
   // Durable mutation unit: returns the operation outcome so derived index
   // maintenance can run *after* the commit succeeds.
+  crashPoint("ingest:before-write-transaction");
   const outcome = writeTransaction<DurableIngestOutcome>(() => {
     assertSqliteRunStillAdmitted(options.runId, connectorInstanceId);
     if (options.requireConnectionAdmission) {

@@ -141,6 +141,8 @@ export const POSTGRES_TEMPLATE_ELIGIBLE_FILES: readonly string[] = [
   "test/records-ingest-kill-durability.test.ts",
   // List pagination over seeded records on a scratch database; does not observe schema bootstrap.
   "test/records-null-cursor-pagination.test.ts",
+  // Child processes ingest into a scratch database; does not observe schema bootstrap.
+  "test/records-version-allocation-contention-postgres.test.ts",
   "test/recovery-bounded-reads.test.ts",
   // Quarantine compare-and-swap race over a seeded gap; does not observe schema bootstrap.
   "test/recovery-quarantine-race-postgres.test.ts",
