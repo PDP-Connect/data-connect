@@ -1666,16 +1666,23 @@ async function backfillLexicalStream({
     // version declared lexical_fields for it, drop the stale index +
     // meta so historical data doesn't keep matching against a field set
     // that's no longer declared.
-    log(
-      `[PDPP] Lexical index: stream='${stream}' connector='${connectorId}' ` +
-        "no longer declares lexical_fields — dropping stale index + meta"
-    );
-    await deleteLexicalBackfillStream(
-      connectorId,
-      connectorInstanceId,
-      stream,
-      mStream.absentStream ? { absentStream: mStream.absentStream } : mStream
-    );
+    // Check the index rows too: a prior partial cleanup can delete the meta
+    // row and leave index rows behind, and those must still be removed.
+    const hasStaleState =
+      Boolean(await lexicalMetaGetFingerprint({ connectorInstanceId, stream })) ||
+      (await lexicalIndexCountByStream({ connectorInstanceId, stream })) > 0;
+    if (hasStaleState) {
+      log(
+        `[PDPP] Lexical index: stream='${stream}' connector='${connectorId}' ` +
+          "no longer declares lexical_fields — dropping stale index + meta"
+      );
+      await deleteLexicalBackfillStream(
+        connectorId,
+        connectorInstanceId,
+        stream,
+        mStream.absentStream ? { absentStream: mStream.absentStream } : mStream
+      );
+    }
     return progressJob;
   }
   progressJob = updateLexicalBackfillJob(progressJob, {
