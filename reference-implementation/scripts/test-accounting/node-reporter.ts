@@ -1,7 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { accountingEventLine } from "./receipt.ts";
+import { accountingDiagnosticLine, accountingEventLine } from "./receipt.ts";
 
 interface ReporterEventData {
   details?: { error?: ReporterError; name?: string; skip?: boolean | string; type?: string };
@@ -567,14 +567,13 @@ export function redactStructuredHeadersWithBudget(input: string, totalOperations
   return scanAndRedactStructuredHeaders(input, new ScanBudget(totalOperations));
 }
 
-function boundedRedactedTail(value: unknown, maximumLength: number): string | undefined {
-  if (typeof value !== "string" || !value.trim()) {
-    return;
-  }
-  if (value.length > MAX_RAW_SCAN_LENGTH) {
-    return OVERSIZED_INPUT_MARKER;
-  }
-  const redacted = redactStructuredHeaders(value)
+// Redacts credentials from diagnostic text of any length, with no size cap
+// and no truncation. Callers that keep only a tail must redact the whole text
+// first: a credential that straddles the cut would otherwise lose its label
+// and survive. Run-level output uses this directly; failure fields add the
+// oversize and tail bounds in boundedRedactedTail.
+export function redactDiagnosticText(value: string): string {
+  return redactStructuredHeaders(value)
     .replace(QUOTED_SENSITIVE_VALUE_PATTERN, '$1"[REDACTED]"')
     .replace(AUTHORIZATION_PATTERN, "Authorization: [REDACTED]")
     .replace(COOKIE_PATTERN, "Cookie: [REDACTED]")
@@ -582,6 +581,16 @@ function boundedRedactedTail(value: unknown, maximumLength: number): string | un
     .replace(SENSITIVE_URL_USERINFO_PATTERN, "$1[REDACTED]@")
     .replace(UNQUOTED_SENSITIVE_VALUE_PATTERN, "$1$2[REDACTED]")
     .replace(SENSITIVE_QUERY_PARAMETER_PATTERN, "$1[REDACTED]");
+}
+
+function boundedRedactedTail(value: unknown, maximumLength: number): string | undefined {
+  if (typeof value !== "string" || !value.trim()) {
+    return;
+  }
+  if (value.length > MAX_RAW_SCAN_LENGTH) {
+    return OVERSIZED_INPUT_MARKER;
+  }
+  const redacted = redactDiagnosticText(value);
   return redacted.length > maximumLength ? redacted.slice(-maximumLength) : redacted;
 }
 
@@ -606,18 +615,70 @@ function failureDetails(error: ReporterError | undefined, diagnosticTail: string
 // accounting evidence; all lifecycle events are presentation noise. A failure
 // retains bounded, redacted runner diagnostics so a failing CI job explains
 // itself without changing terminal pass/fail/skip accounting.
+//
+// A hung test never reaches a terminal event, so its output would be lost with
+// the process the runner kills. Test stdout, stderr and diagnostics are
+// therefore also flushed as bounded, redacted diagnostic lines whenever the
+// stream goes quiet. The runner shows them for a killed file and drops them
+// otherwise.
+const DIAGNOSTIC_FLUSH_IDLE_MS = 250;
+const MAX_EMITTED_DIAGNOSTIC_LENGTH = 64_000;
+const IDLE = Symbol("idle");
+
+function waitForIdle(): { cancel: () => void; elapsed: Promise<typeof IDLE> } {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const elapsed = new Promise<typeof IDLE>((resolve) => {
+    timer = setTimeout(() => resolve(IDLE), DIAGNOSTIC_FLUSH_IDLE_MS);
+    // Never keep the process alive just to flush diagnostics.
+    timer.unref();
+  });
+  return { cancel: () => clearTimeout(timer), elapsed };
+}
+
 export default async function* accountingReporter(source: AsyncIterable<ReporterEvent>): AsyncGenerator<string> {
   const diagnostic = new DiagnosticBuffer();
-  for await (const event of source) {
+  // Output not yet flushed as a diagnostic line. Redacted as one unit so a
+  // credential label and value in adjacent chunks stay together.
+  const unflushed = new DiagnosticBuffer();
+  let emittedLength = 0;
+  const flush = (): string | undefined => {
+    const text = boundedRedactedTail(unflushed.take(), MAX_FAILURE_DIAGNOSTIC_LENGTH);
+    if (text === undefined || emittedLength >= MAX_EMITTED_DIAGNOSTIC_LENGTH) {
+      return;
+    }
+    emittedLength += text.length;
+    return `${accountingDiagnosticLine(text)}\n`;
+  };
+  const events = source[Symbol.asyncIterator]();
+  let pending = events.next();
+  for (;;) {
+    const idle = waitForIdle();
+    const step = await Promise.race([pending, idle.elapsed]);
+    idle.cancel();
+    if (step === IDLE) {
+      const line = flush();
+      if (line !== undefined) {
+        yield line;
+      }
+      continue;
+    }
+    if (step.done) {
+      return;
+    }
+    pending = events.next();
+    const event = step.value;
     const data = event.data ?? {};
     const details = data.details ?? {};
-    if (event.type === "test:stderr" || event.type === "test:diagnostic") {
+    if (event.type === "test:stdout" || event.type === "test:stderr" || event.type === "test:diagnostic") {
       if (typeof data.message === "string" && data.message.trim()) {
         // Keep chunks until terminal failure so a credential label and value
         // cannot be separated by Node's chunking or a tail boundary. Once the
         // bounded input buffer overflows, emit only a redacted overflow marker.
         const { message } = data;
-        diagnostic.append(message);
+        unflushed.append(message);
+        if (event.type !== "test:stdout") {
+          diagnostic.append(message);
+        }
       }
       continue;
     }
@@ -630,6 +691,10 @@ export default async function* accountingReporter(source: AsyncIterable<Reporter
       skip: data.skip ?? details.skip,
       ...(event.type === "test:fail" ? { failure: failureDetails(details.error, diagnostic.take()) } : {}),
     };
+    const line = flush();
+    if (line !== undefined) {
+      yield line;
+    }
     yield `${accountingEventLine({ type: event.type, details: eventDetails })}\n`;
     diagnostic.take();
   }

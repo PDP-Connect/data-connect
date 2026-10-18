@@ -8,6 +8,7 @@ import {
   boundedOutputTail,
   countFileOutcomes,
   drainFileQueue,
+  fileResultFromClose,
   KILLED_OUTPUT_TAIL_BYTES,
   type NodeTestResult,
   superviseFileChild,
@@ -17,7 +18,8 @@ const HUNG_CHILD =
   "process.stdout.write('before-hang\\n'); process.stderr.write('stderr-before-hang\\n'); setInterval(() => {}, 1000);";
 
 function spawnNode(source: string) {
-  return spawn(process.execPath, ["-e", source], { stdio: ["ignore", "pipe", "pipe"] });
+  // Detached, like the runner's children: the child leads its own process group.
+  return spawn(process.execPath, ["-e", source], { detached: true, stdio: ["ignore", "pipe", "pipe"] });
 }
 
 function result(filePath: string, exitCode: number, killed?: boolean): NodeTestResult {
@@ -78,6 +80,88 @@ test("a child that exits on its own keeps its exit code and full output", async 
   assert.equal(outcome.output, "\n==> test/exits.test.ts\ndone\n");
 });
 
+test("a killed child's output never exposes a credential, even with isolation off", async () => {
+  // Isolation off puts the test's own stderr straight into the child output.
+  const outcome = await superviseFileChild({
+    child: spawnNode(
+      "process.stderr.write('request failed\\nAuthorization: Bearer SYNTHETIC-BEARER-SECRET\\nCookie: sid=SYNTHETIC-COOKIE-SECRET\\n'); process.stderr.write('{\"Set-Cookie\":\"sid=SYNTHETIC-SET-COOKIE-SECRET\"}\\n'); setInterval(() => {}, 1000);"
+    ),
+    filePath: "test/credential.test.ts",
+    hardDeadlineMs: 20_000,
+    idleBudgetMs: 400,
+    killGraceMs: 200,
+  });
+  assert.equal(outcome.killed, true);
+  assert.match(outcome.output, /request failed/);
+  assert.match(outcome.output, /Authorization: \[REDACTED\]/);
+  assert.doesNotMatch(outcome.output, /SYNTHETIC-[A-Z-]*SECRET/);
+});
+
+test("a credential line is redacted wherever the tail cut falls", () => {
+  const filler = `${"x".repeat(99)}\n`;
+  for (let linesFromEnd = 560; linesFromEnd <= 760; linesFromEnd += 1) {
+    const output = `${filler.repeat(2000)}Authorization: Bearer SYNTHETIC-TAIL-SECRET\n${filler.repeat(linesFromEnd)}`;
+    const outcome = fileResultFromClose({
+      code: null,
+      durationMs: 1,
+      filePath: "test/cut.test.ts",
+      hardDeadlineMs: 20_000,
+      idleBudgetMs: 400,
+      output,
+      signal: "SIGKILL",
+      timeoutReason: "idle",
+    });
+    assert.doesNotMatch(outcome.output, /SYNTHETIC-TAIL-SECRET|Bearer/, `${linesFromEnd} lines from the end`);
+  }
+});
+
+test("a single unbroken line longer than the redaction block is replaced, not scanned", async () => {
+  const outcome = await superviseFileChild({
+    child: spawnNode(
+      `process.stdout.write('Authorization: Bearer ' + 'A'.repeat(${KILLED_OUTPUT_TAIL_BYTES + 4096}) + 'SYNTHETIC-TAIL-SECRET\\nTAIL-MARKER\\n'); setInterval(() => {}, 1000);`
+    ),
+    filePath: "test/straddle.test.ts",
+    hardDeadlineMs: 20_000,
+    idleBudgetMs: 800,
+    killGraceMs: 200,
+  });
+  assert.equal(outcome.killed, true);
+  assert.match(outcome.output, /TAIL-MARKER/);
+  assert.doesNotMatch(outcome.output, /SYNTHETIC-TAIL-SECRET|AAAAAAAAAA/);
+});
+
+test("a timeout kills the whole process group before the result resolves", async () => {
+  // Both the child and its grandchild ignore SIGTERM, so only the SIGKILL
+  // escalation can end them. The grandchild has no stdio, so `close` alone
+  // would not wait for it.
+  const supervisor = [
+    "const { spawn } = require('node:child_process');",
+    "const grandchild = spawn(process.execPath, ['-e', \"process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);\"], { stdio: 'ignore' });",
+    "process.on('SIGTERM', () => {});",
+    "process.stdout.write('GRANDCHILD_PID=' + grandchild.pid + '\\n');",
+    "setInterval(() => {}, 1000);",
+  ].join("\n");
+  const outcome = await superviseFileChild({
+    child: spawnNode(supervisor),
+    filePath: "test/group.test.ts",
+    hardDeadlineMs: 20_000,
+    idleBudgetMs: 600,
+    killGraceMs: 200,
+  });
+  const pid = Number(/GRANDCHILD_PID=(\d+)/.exec(outcome.output)?.[1]);
+  assert.ok(Number.isInteger(pid) && pid > 0, `the grandchild reported its pid\n${outcome.output}`);
+  try {
+    assert.throws(() => process.kill(pid, 0), { code: "ESRCH" }, "the grandchild must be gone when the result resolves");
+  } finally {
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {
+      // already gone
+    }
+  }
+  assert.equal(outcome.killed, true);
+});
+
 test("a spawn error is a runner error and rejects", async () => {
   const child = spawn("/nonexistent/pdpp-test-binary", [], { stdio: ["ignore", "pipe", "pipe"] });
   await assert.rejects(
@@ -87,7 +171,7 @@ test("a spawn error is a runner error and rejects", async () => {
 });
 
 test("a killed child's output is bounded to its tail and labelled", async () => {
-  const flood = `process.stdout.write('HEAD-MARKER\\n'); process.stdout.write('x'.repeat(${KILLED_OUTPUT_TAIL_BYTES * 3}) + '\\nTAIL-MARKER\\n'); setInterval(() => {}, 1000);`;
+  const flood = `process.stdout.write('HEAD-MARKER\\n'); process.stdout.write(('x'.repeat(99) + '\\n').repeat(${Math.ceil((KILLED_OUTPUT_TAIL_BYTES * 3) / 100)}) + 'TAIL-MARKER\\n'); setInterval(() => {}, 1000);`;
   const outcome = await superviseFileChild({
     child: spawnNode(flood),
     filePath: "test/flood.test.ts",

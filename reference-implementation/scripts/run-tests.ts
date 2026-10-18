@@ -17,6 +17,7 @@ import {
 import { deriveDedicatedPostgresDbNameForFile } from "./dedicated-postgres-db-name.ts";
 import { resolveFileConcurrency } from "./file-concurrency.ts";
 import { countFileOutcomes, drainFileQueue, type NodeTestResult, superviseFileChild } from "./file-outcome.ts";
+import { processGroupAlive, signalProcessGroup, terminateProcessGroup } from "./file-process-group.ts";
 import { createOwnedTestResource, type OwnedTestResource, settleAll } from "./owned-test-resource.ts";
 import { assertPostgresProfilePreflight } from "./postgres-profile-preflight.ts";
 import { isPostgresTemplateEligibleFilePath } from "./postgres-template-eligibility.ts";
@@ -277,9 +278,14 @@ function armSignalCleanup(): void {
       // DROP is bounded outside the runner: it always runs under
       // scripts/test-scratch/run-command.ts or test-sandbox, which SIGKILL
       // the whole process group after a grace period.
-      for (const child of activeChildren) child.kill("SIGTERM");
+      for (const child of activeChildren) terminateProcessGroup(child).catch(() => undefined);
     });
   }
+  // Children run in their own process groups, so a runner that exits
+  // without its workers draining must still take them down.
+  process.on("exit", () => {
+    for (const child of activeChildren) signalProcessGroup(child, "SIGKILL");
+  });
 }
 
 async function allocateTestDb(
@@ -399,6 +405,9 @@ async function runNodeTest(filePath: string, extraArgs: string[]): Promise<NodeT
     const child = spawn(process.execPath, ["--test", ...extraArgs, filePath], {
       cwd: repoRoot,
       env: childEnv,
+      // Own process group: `node --test` runs the file in a descendant, so a
+      // timeout or signal must kill the group, not only this child.
+      detached: true,
       stdio: ["ignore", "pipe", "pipe"],
     });
     activeChildren.add(child);
@@ -411,6 +420,13 @@ async function runNodeTest(filePath: string, extraArgs: string[]): Promise<NodeT
         hardDeadlineMs: PER_FILE_HARD_TIMEOUT_MS,
         idleBudgetMs: PER_FILE_IDLE_TIMEOUT_MS,
         startedAt,
+      }).then(async (outcome) => {
+        // The file's slot is released only when nothing it started is alive,
+        // including after a runner signal, where only the SIGTERM went out.
+        if (processGroupAlive(child)) {
+          await terminateProcessGroup(child);
+        }
+        return outcome;
       })
     );
   }).then(

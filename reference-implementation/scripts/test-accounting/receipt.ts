@@ -3,6 +3,7 @@
 
 const RESULT_PREFIX = "PDPP_TEST_ACCOUNTING_RESULT ";
 const EVENT_PREFIX = "PDPP_TEST_ACCOUNTING_EVENT ";
+export const DIAGNOSTIC_PREFIX = "PDPP_TEST_ACCOUNTING_DIAGNOSTIC ";
 
 function fail(message: string): never {
   throw new Error(`test accounting result: ${message}`);
@@ -22,6 +23,10 @@ export function accountingResultLine(result: unknown): string {
 }
 export function accountingEventLine(event: unknown): string {
   return `${EVENT_PREFIX}${JSON.stringify(event)}`;
+}
+/** One bounded, already-redacted chunk of test stdout/stderr, kept for a file the runner kills. */
+export function accountingDiagnosticLine(text: string): string {
+  return `${DIAGNOSTIC_PREFIX}${JSON.stringify(text)}`;
 }
 
 // Node's boolean `skip: !X` tests carry no reason on the wire, only their name.
