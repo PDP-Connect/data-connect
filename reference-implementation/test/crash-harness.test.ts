@@ -10,6 +10,20 @@ import test from "node:test";
 import { killChildAt, spawnCrashChild } from "./helpers/crash-harness.ts";
 
 const CHILD = join(import.meta.dirname, "fixtures/crash-harness-child.ts");
+const PARENT = join(import.meta.dirname, "fixtures/crash-harness-parent.ts");
+
+async function waitUntilGone(pid: number): Promise<boolean> {
+	const deadline = Date.now() + 5000;
+	while (Date.now() < deadline) {
+		try {
+			process.kill(pid, 0);
+		} catch {
+			return true;
+		}
+		await new Promise((settle) => setTimeout(settle, 25));
+	}
+	return false;
+}
 
 function withLog(run: (log: string) => Promise<void>): () => Promise<void> {
 	return async () => {
@@ -75,3 +89,22 @@ test(
 		assert.equal((await child.exited).signal, "SIGKILL");
 	}),
 );
+
+for (const mode of ["parked", "running"] as const) {
+	test(
+		`a ${mode} child dies when its parent is SIGKILLed`,
+		withLog(async (log) => {
+			const pidFile = `${log}.pid`;
+			await killChildAt(PARENT, "child-started", {
+				args: [log, pidFile, mode],
+			});
+			const childPid = Number(readFileSync(pidFile, "utf8"));
+			assert.ok(childPid > 0);
+			assert.equal(
+				await waitUntilGone(childPid),
+				true,
+				`orphaned crash child ${childPid} is still alive`,
+			);
+		}),
+	);
+}

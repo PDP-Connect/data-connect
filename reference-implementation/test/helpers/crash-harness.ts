@@ -8,7 +8,14 @@
  * at a named `crashPoint(...)` (server/crash-point.ts), SIGKILLs it there, and
  * then reopens the same SQLite file, Postgres database or data directory to
  * assert recovery. Parking is a blocking read on a pipe, not a sleep, so the
- * kill lands exactly at the named boundary.
+ * kill lands exactly at the named boundary. (If the inherited pipe is ever
+ * non-blocking, the read is retried every 5 ms; the child's code still does
+ * not run.)
+ *
+ * Cleanup: children still alive when the test file finishes are SIGKILLed.
+ * A child whose parent dies kills itself: at once if parked, else within
+ * 250 ms (only while its event loop runs; a synchronous hang needs the outer
+ * test-sandbox scope).
  *
  * Parent side:
  *   const exit = await killChildAt(script, "uninstall:after-root-move", { env });
@@ -28,6 +35,7 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { readSync, writeSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { Readable, Writable } from "node:stream";
+import { after } from "node:test";
 
 import { __setCrashPointHookForTest } from "../../server/crash-point.ts";
 
@@ -35,6 +43,18 @@ const POINTS_ENV = "PDPP_CRASH_HARNESS_POINTS";
 const CONTROL_FD = 3;
 const RI_ROOT = resolve(import.meta.dirname, "../..");
 const DEFAULT_TIMEOUT_MS = 60_000;
+
+const liveChildren = new Set<ChildProcess>();
+let cleanupRegistered = false;
+
+/** A failed assertion must not leave a parked child holding the test runner open. */
+function killLiveChildrenAfterThisFile(): void {
+	if (cleanupRegistered) return;
+	cleanupRegistered = true;
+	after(() => {
+		for (const child of liveChildren) child.kill("SIGKILL");
+	});
+}
 
 export interface CrashChildExit {
 	readonly code: number | null;
@@ -97,6 +117,8 @@ export function spawnCrashChild(
 	);
 	if (child.pid === undefined)
 		throw new Error(`crash child failed to start: ${script}`);
+	killLiveChildrenAfterThisFile();
+	liveChildren.add(child);
 	let stdout = "";
 	let stderr = "";
 	child.stdout?.on("data", (chunk) => (stdout += String(chunk)));
@@ -118,6 +140,7 @@ export function spawnCrashChild(
 	const exited = new Promise<CrashChildExit>((settle) => {
 		child.once("close", (code, signal) => {
 			done = true;
+			liveChildren.delete(child);
 			wake?.();
 			settle({ code, signal, stderr, stdout });
 		});
@@ -219,12 +242,16 @@ function blockUntilResumed(): void {
 
 /**
  * Child side: park at every point the parent armed. Call before any work.
- * Without armed points (or outside the harness) this installs nothing.
+ * Outside the harness this does nothing.
  */
 export function armCrashPoints(): void {
-	const armed = new Set<string>(
-		JSON.parse(process.env[POINTS_ENV] ?? "[]") as string[],
-	);
+	const points = process.env[POINTS_ENV];
+	if (points === undefined) return;
+	const parent = process.ppid;
+	setInterval(() => {
+		if (process.ppid !== parent) process.kill(process.pid, "SIGKILL");
+	}, 250).unref();
+	const armed = new Set<string>(JSON.parse(points) as string[]);
 	if (armed.size === 0) return;
 	__setCrashPointHookForTest((name) => {
 		if (!armed.has(name)) return;
