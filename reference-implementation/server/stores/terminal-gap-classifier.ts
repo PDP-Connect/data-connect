@@ -278,6 +278,15 @@ interface DetailGapStore {
   markGapStatus: (gapId: string, status: string, options?: Record<string, unknown>) => Promise<Gap | null>;
 }
 
+interface QuarantineGapStore extends DetailGapStore {
+  markGapQuarantined: (
+    gapId: string,
+    expectedStatus: string,
+    expectedAttemptCount: number,
+    options?: Record<string, unknown>
+  ) => Promise<Gap | null>;
+}
+
 interface MaybeTerminateResult {
   readonly gap: Gap | null;
   readonly terminated: boolean;
@@ -385,7 +394,7 @@ interface MaybeQuarantineResult {
  * @returns {Promise<{ quarantined: boolean, gap: object|null }>}
  */
 export async function maybeQuarantineGap(
-  store: DetailGapStore,
+  store: QuarantineGapStore,
   gapId: string,
   evidence: Evidence | null | undefined,
   policy: QuarantinePolicy
@@ -429,7 +438,7 @@ export async function maybeQuarantineGap(
     attempt_count: attemptCount,
     threshold: policy.maxNoProgressAttempts,
   };
-  const quarantined = await store.markGapStatus(gapId, "terminal", {
+  const quarantined = await store.markGapQuarantined(gapId, current.status ?? "pending", attemptCount, {
     lastError: quarantineError,
     reason: "quarantined",
   });
