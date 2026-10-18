@@ -17,20 +17,19 @@
  * have failed anything.
  *
  * This file closes that gap end to end. It runs the real `run-tests.ts` as a
- * subprocess against a real PostgreSQL server, on a COLD-REQUIRED file, with
- * a POISONED template published under the name the run will derive -- a
- * template whose schema is empty, so any database cloned from it is missing
- * every table the test needs.
+ * subprocess against a real PostgreSQL server, selecting one COLD-REQUIRED
+ * file and one template-ELIGIBLE file. The eligible file makes the runner
+ * build the run's template, so both provisioning paths are exercised in one
+ * run, and the test asserts the path the runner reports for each:
  *
- *   - If selection is correct, the cold-required file is bootstrapped from
- *     scratch, never touches the poisoned template, and passes.
- *   - If the eligibility half of the condition is dropped, the file is
- *     cloned from the poisoned template and fails.
+ *   - the cold-required file reports `cold-bootstrap`, even though a template
+ *     exists for the run;
+ *   - the eligible file reports `template-clone`.
  *
- * The template is poisoned rather than merely observed because an
- * observational assertion (counting clones) can be satisfied by a runner
- * that clones and then happens to work; a poisoned template makes wrongly
- * using it impossible to survive.
+ * A fault that clones every file whenever a template exists (or never clones)
+ * fails one of the two assertions. The run's template carries a correct
+ * schema, so a wrongly cloned cold-required file would usually still pass;
+ * only the reported path distinguishes the two.
  */
 
 import assert from "node:assert/strict";
@@ -66,6 +65,14 @@ const POSTGRES_SKIP = POSTGRES_URL ? false : "PDPP_TEST_POSTGRES_URL unset or no
  * testing the wrong thing.
  */
 const COLD_REQUIRED_TARGET = "test/device-ingest-reservation-migration.test.ts";
+
+/**
+ * A storage-only, template-eligible file selected alongside the cold-required
+ * one. The runner builds the per-run template only when an eligible file is
+ * selected, so without it the nested run has no template at all and a fault
+ * that clones every file whenever a template exists cannot be observed.
+ */
+const ELIGIBLE_TARGET = "test/acknowledged-loss-store-postgres.test.ts";
 
 function adminUrlFor(base: string): string {
   const url = new URL(base);
@@ -223,6 +230,12 @@ test(
       "a cold-required file must not be template-eligible"
     );
 
+    assert.equal(
+      isPostgresTemplateEligibleFilePath(ELIGIBLE_TARGET),
+      true,
+      `${ELIGIBLE_TARGET} must be template-eligible so the run builds a template`
+    );
+
     const workDir = await mkdtemp(join(tmpdir(), "pdpp-selection-"));
     const authorityPath = join(workDir, "authority.json");
     const allocatedDatabases = new Set<string>();
@@ -230,7 +243,7 @@ test(
       authorityPath,
       JSON.stringify({
         expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
-        files: [`reference-implementation/${COLD_REQUIRED_TARGET}`],
+        files: [`reference-implementation/${COLD_REQUIRED_TARGET}`, `reference-implementation/${ELIGIBLE_TARGET}`],
         nonce: randomBytes(8).toString("hex"),
         profile: "postgres",
         run_id: `selection-${randomBytes(4).toString("hex")}`,
@@ -284,6 +297,16 @@ test(
         record.path,
         "cold-bootstrap",
         `a cold-required file must be bootstrapped from scratch even though a template exists for this run; the runner reported ${JSON.stringify(record.path)}`
+      );
+      const eligibleRecord = provisionLines.find((entry) => entry.file === ELIGIBLE_TARGET);
+      assert.ok(
+        eligibleRecord,
+        `the runner should have reported a provisioning path for ${ELIGIBLE_TARGET}. Output:\n${output.slice(-4000)}`
+      );
+      assert.equal(
+        eligibleRecord.path,
+        "template-clone",
+        `a template-eligible file must be cloned from the run's template; the runner reported ${JSON.stringify(eligibleRecord.path)}`
       );
       assert.doesNotMatch(
         output,
