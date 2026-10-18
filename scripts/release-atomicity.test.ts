@@ -127,6 +127,12 @@ process.exit(2)
 // An `npm` shim whose `view` answers walk a sequence, so a caller that asks
 // once and a caller that retries are distinguishable. Every invocation is
 // counted on disk, since the shim runs in its own process.
+//
+// The shim is POSIX sh using only builtins. The barrier retries up to 8 times,
+// and a `#!/usr/bin/env node` shim costs a cold node start (~45 ms CPU) per
+// call — enough that, with the CPUs oversubscribed, the retry tests alone
+// approached the 5 s per-test timeout. `sh` starts in about a millisecond and
+// emits byte-identical output.
 function makeSequencedViewNpm(
   answers: ("published" | "missing")[],
   options: { repeatLast?: boolean } = {}
@@ -134,32 +140,31 @@ function makeSequencedViewNpm(
   const dir = mkdtempSync(join(tmpdir(), "barrier-npm-"))
   const countLog = join(dir, "view.log")
   writeFileSync(countLog, "")
-  writeFileSync(
-    join(dir, "answers.json"),
-    JSON.stringify({ answers, repeatLast: options.repeatLast === true })
-  )
 
-  const shim = `#!/usr/bin/env node
-const { appendFileSync, readFileSync } = require("node:fs")
-const argv = process.argv.slice(2)
-if (argv[0] !== "view") {
-  process.stderr.write("sequenced stub npm: unexpected invocation: " + argv.join(" ") + "\\n")
-  process.exit(2)
-}
-const { answers, repeatLast } = JSON.parse(readFileSync(${JSON.stringify(join(dir, "answers.json"))}, "utf8"))
-appendFileSync(${JSON.stringify(countLog)}, "view\\n")
-const calls = readFileSync(${JSON.stringify(countLog)}, "utf8").split("\\n").filter(Boolean).length
-const index = calls - 1
-const answer = index < answers.length ? answers[index] : (repeatLast ? answers[answers.length - 1] : "missing")
-const target = argv[1]
-if (answer === "published") {
-  const version = target.slice(target.lastIndexOf("@") + 1)
-  process.stdout.write(JSON.stringify([version]) + "\\n")
-  process.exit(0)
-}
-// Real npm's miss shape.
-process.stderr.write("npm error code E404\\nnpm error 404 Not Found - GET https://registry.npmjs.org/" + target + "\\n")
-process.exit(1)
+  const fallback = options.repeatLast === true ? answers[answers.length - 1] : "missing"
+  const arms = answers.map((answer, index) => `  ${index + 1}) answer=${answer} ;;`).join("\n")
+  const quoted = (value: string) => `'${value.replace(/'/g, "'\\''")}'`
+
+  const shim = `#!/bin/sh
+if [ "$1" != view ]; then
+  printf 'sequenced stub npm: unexpected invocation: %s\\n' "$*" >&2
+  exit 2
+fi
+echo view >> ${quoted(countLog)}
+calls=0
+while read -r _; do calls=$((calls + 1)); done < ${quoted(countLog)}
+case $calls in
+${arms}
+  *) answer=${fallback} ;;
+esac
+target=$2
+if [ "$answer" = published ]; then
+  printf '["%s"]\\n' "\${target##*@}"
+  exit 0
+fi
+# Real npm's miss shape.
+printf 'npm error code E404\\nnpm error 404 Not Found - GET https://registry.npmjs.org/%s\\n' "$target" >&2
+exit 1
 `
   const npmPath = join(dir, "npm")
   writeFileSync(npmPath, shim)
@@ -639,37 +644,32 @@ describe("resolve-release-version decide()", () => {
     return dir
   }
 
-  // Runs decide() in a child process so the stubbed npm is a real PATH
-  // resolution, the same way the script resolves it in CI.
-  function runDecide(
+  // Runs decide() in-process with the stubbed npm first on PATH. decide()
+  // resolves `npm` and `git` through process.env.PATH at spawn time, so this is
+  // the same PATH resolution CI performs, without paying a cold `tsx` child
+  // process (~0.45 CPU-s each) per test. A rejection is reported the way the
+  // CLI would report it: non-zero status, message on stderr, nothing on stdout.
+  async function runDecide(
     repo: string,
     stubDir: string
-  ): { status: number; stdout: string; stderr: string } {
-    const tsxEntry = require.resolve("tsx")
-    const script = `
-      import { decide } from ${JSON.stringify(join(REPO_ROOT, "scripts/resolve-release-version.ts"))}
-      const d = await decide(process.argv[2])
-      process.stdout.write(JSON.stringify(d))
-    `
-    const entry = join(stubDir, "decide-entry.mts")
-    writeFileSync(entry, script)
+  ): Promise<{ status: number; stdout: string; stderr: string }> {
+    const { decide } = await import("./resolve-release-version.js")
+    const previousPath = process.env.PATH
+    process.env.PATH = `${stubDir}:${previousPath ?? ""}`
     try {
-      const stdout = execFileSync(process.execPath, ["--import", tsxEntry, entry, repo], {
-        encoding: "utf8",
-        env: { ...process.env, PATH: `${stubDir}:${process.env.PATH ?? ""}` },
-      })
-      return { status: 0, stdout, stderr: "" }
+      return { status: 0, stdout: JSON.stringify(await decide(repo)), stderr: "" }
     } catch (error) {
-      const e = error as { status?: number; stdout?: string; stderr?: string }
-      return { status: e.status ?? 1, stdout: e.stdout ?? "", stderr: e.stderr ?? "" }
+      return { status: 1, stdout: "", stderr: String(error instanceof Error ? error.message : error) }
+    } finally {
+      process.env.PATH = previousPath
     }
   }
 
-  it("routes a fully published tag to an ordinary release", () => {
+  it("routes a fully published tag to an ordinary release", async () => {
     const repo = makeTaggedRepo([`v${V}`])
     const stub = makeStubNpm({ view: { [CP]: "published", [CR]: "published", [LC]: "published" } })
     try {
-      const result = runDecide(repo, stub.dir)
+      const result = await runDecide(repo, stub.dir)
       expect(result.status).toBe(0)
       const decision = JSON.parse(result.stdout) as { mode: string; reason: string }
       expect(decision.mode).toBe("release")
@@ -682,11 +682,11 @@ describe("resolve-release-version decide()", () => {
 
   // A partial prior version is reported, not repaired — the next release
   // supersedes it rather than resuming it.
-  it("routes a partially published tag to an ordinary release and names what is missing", () => {
+  it("routes a partially published tag to an ordinary release and names what is missing", async () => {
     const repo = makeTaggedRepo([`v${V}`])
     const stub = makeStubNpm({ view: { [CP]: "published", [CR]: "missing", [LC]: "missing" } })
     try {
-      const result = runDecide(repo, stub.dir)
+      const result = await runDecide(repo, stub.dir)
       expect(result.status).toBe(0)
       const decision = JSON.parse(result.stdout) as {
         mode: string
@@ -707,11 +707,11 @@ describe("resolve-release-version decide()", () => {
   // A tag with NOTHING published is not a partial release — there is no
   // partial set to report as superseded, and this is a real behaviour
   // difference the suite previously could not see.
-  it("routes a zero-published tag to an ordinary release with nothing superseded", () => {
+  it("routes a zero-published tag to an ordinary release with nothing superseded", async () => {
     const repo = makeTaggedRepo([`v${V}`])
     const stub = makeStubNpm({ view: { [CP]: "missing", [CR]: "missing", [LC]: "missing" } })
     try {
-      const result = runDecide(repo, stub.dir)
+      const result = await runDecide(repo, stub.dir)
       expect(result.status).toBe(0)
       const decision = JSON.parse(result.stdout) as { mode: string; reason: string }
       expect(decision.mode).toBe("release")
@@ -722,11 +722,11 @@ describe("resolve-release-version decide()", () => {
     }
   })
 
-  it("treats a repository with no release tag as an ordinary release", () => {
+  it("treats a repository with no release tag as an ordinary release", async () => {
     const repo = makeTaggedRepo([])
     const stub = makeStubNpm({ view: {} })
     try {
-      const result = runDecide(repo, stub.dir)
+      const result = await runDecide(repo, stub.dir)
       expect(result.status).toBe(0)
       expect((JSON.parse(result.stdout) as { mode: string }).mode).toBe("release")
     } finally {
@@ -738,7 +738,7 @@ describe("resolve-release-version decide()", () => {
   // The property the file's header calls SAFETY. A registry outage must not be
   // able to make a COMPLETE release look partial and pull the pipeline into
   // re-publishing something that already shipped.
-  it("throws rather than deciding anything when the registry will not answer", () => {
+  it("throws rather than deciding anything when the registry will not answer", async () => {
     const repo = makeTaggedRepo([`v${V}`])
     const stub = makeStubNpm({
       view: {
@@ -748,7 +748,7 @@ describe("resolve-release-version decide()", () => {
       },
     })
     try {
-      const result = runDecide(repo, stub.dir)
+      const result = await runDecide(repo, stub.dir)
       expect(result.status).not.toBe(0)
       expect(result.stderr).toMatch(/UNKNOWN/)
       // Decisively: no decision was emitted at all.
@@ -761,7 +761,7 @@ describe("resolve-release-version decide()", () => {
 
   // The exact misclassification the #100 review found: an E500 whose body
   // happens to quote E404 must stay UNKNOWN, not degrade to "not published".
-  it("does not let an E500 quoting E404 masquerade as a missing package", () => {
+  it("does not let an E500 quoting E404 masquerade as a missing package", async () => {
     const repo = makeTaggedRepo([`v${V}`])
     const stub = makeStubNpm({
       view: {
@@ -771,7 +771,7 @@ describe("resolve-release-version decide()", () => {
       },
     })
     try {
-      const result = runDecide(repo, stub.dir)
+      const result = await runDecide(repo, stub.dir)
       expect(result.status).not.toBe(0)
       expect(result.stderr).toMatch(/UNKNOWN/)
     } finally {
@@ -780,7 +780,7 @@ describe("resolve-release-version decide()", () => {
     }
   })
 
-  it("picks the newest tag by version order, not lexically", () => {
+  it("picks the newest tag by version order, not lexically", async () => {
     const repo = makeTaggedRepo(["v2.9.0", "v2.10.0"])
     const stub = makeStubNpm({
       view: {
@@ -790,7 +790,7 @@ describe("resolve-release-version decide()", () => {
       },
     })
     try {
-      const result = runDecide(repo, stub.dir)
+      const result = await runDecide(repo, stub.dir)
       expect(result.status).toBe(0)
       const decision = JSON.parse(result.stdout) as {
         mode: string
