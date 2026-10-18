@@ -514,7 +514,8 @@ if (POSTGRES_URL) {
 // Known gap pin, not desired behaviour (see `assertConverged`): SQLite blob reclaim
 // keys on the first uploader (records.ts KNOWN GAP in deleteConnectionRecordRowsSqlite),
 // so a blob shared with a connection torn down earlier is orphaned after a failed
-// teardown. The fix is a pending design decision. This test asserts the gap
+// teardown. The fix is a pending design decision:
+// https://github.com/PDP-Connect/data-connect/issues/529. This test asserts the gap
 // exactly; when it is fixed the test fails and should assert reclaim instead.
 // (The RI accounting counts a failing `todo` as a failure.)
 test("[sqlite] known gap: a blob first uploaded by a connection torn down earlier stays orphaned after a failed teardown", async () => {
@@ -529,7 +530,7 @@ test("[sqlite] known gap: a blob first uploaded by a connection torn down earlie
       assert.equal(
         state.blobs.shared,
         true,
-        "known gap: the shared blob has no binding left but is not reclaimed (fixed? assert false here)"
+        "known gap #529 (https://github.com/PDP-Connect/data-connect/issues/529): the shared blob has no binding left but is not reclaimed (fixed? assert false here)"
       );
     });
   } finally {

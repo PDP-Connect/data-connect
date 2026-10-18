@@ -355,7 +355,8 @@ if (POSTGRES_URL) {
   // Known gap pin, not desired behaviour: Postgres applies the retained-size delta
   // after the ingest commit, so a kill in between leaves the projection one row
   // behind and unmarked, and reconcile (dirty rows only) never repairs it. The fix
-  // is a pending design decision. This test asserts the gap exactly; when the
+  // is a pending design decision: https://github.com/PDP-Connect/data-connect/issues/528
+  // This test asserts the gap exactly; when the
   // delta becomes crash-safe it fails, and should become a plain consistency check.
   // (The RI accounting counts a failing `todo` as a failure, so the gap cannot be
   // pinned with `todo`.)
@@ -385,7 +386,7 @@ if (POSTGRES_URL) {
       assert.equal(
         snap.retained.historyCount,
         snap.changes.length - 1,
-        "known gap: the projection misses exactly the killed write's history row (fixed? turn this into assertConsistent)"
+        "known gap #528 (https://github.com/PDP-Connect/data-connect/issues/528): the projection misses exactly the killed write's history row (fixed? turn this into assertConsistent)"
       );
     } finally {
       await closePostgresStorage();
