@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import {
   access,
   chmod,
@@ -1348,6 +1348,137 @@ test("parallel outer owners isolate participant worker trees under one inherited
     assert.deepEqual(await secondClose, { code: null, signal: "SIGTERM" });
     await assert.rejects(access(firstRoot));
     await assert.rejects(access(secondRoot));
+    await rm(runnerTemp, { force: true, recursive: true });
+  }
+});
+
+function runInlineScript(runnerTemp: string, script: string) {
+  return spawnSync(process.execPath, ["--import", "tsx", wrapperPath, "--", process.execPath, "-e", script], {
+    encoding: "utf8",
+    env: { ...process.env, RUNNER_TEMP: runnerTemp },
+  });
+}
+
+function readyLine(proc: ReturnType<typeof spawn>, timeoutMs = 5000): Promise<Record<string, unknown>> {
+  return new Promise((resolve, reject) => {
+    let output = "";
+    const deadline = setTimeout(() => reject(new Error(`child did not become ready: ${output}`)), timeoutMs);
+    proc.stdout?.setEncoding("utf8");
+    proc.stdout?.on("data", (chunk: string) => {
+      output += chunk;
+      const line = output.split("\n").find((candidate) => candidate.startsWith("{"));
+      if (line) {
+        clearTimeout(deadline);
+        resolve(JSON.parse(line));
+      }
+    });
+    proc.once("error", (error) => {
+      clearTimeout(deadline);
+      reject(error);
+    });
+  });
+}
+
+test("the wrapper points every temp variable at its owned root and removes that root", async () => {
+  const runnerTemp = await temporaryParent();
+  try {
+    const script = [
+      "const names = ['TMP', 'TEMP', 'TMPDIR', 'TEST_TMPDIR'];",
+      "process.stdout.write(JSON.stringify({root: process.env.TMPDIR, values: names.map((name) => process.env[name])}));",
+    ].join(" ");
+    const result = runInlineScript(runnerTemp, script);
+    assert.equal(result.status, 0, result.stderr);
+    const { root, values } = JSON.parse(result.stdout) as { root: string; values: string[] };
+    assert.ok(root.startsWith(join(runnerTemp, "pdpp-test-scratch", "run-")));
+    assert.deepEqual(values, [root, root, root, root]);
+    await assert.rejects(access(root), { code: "ENOENT" });
+  } finally {
+    await rm(runnerTemp, { force: true, recursive: true });
+  }
+});
+
+test("SIGTERM stops the owned group, including a descendant holding a scratch file, and spares an unrelated group", async () => {
+  const runnerTemp = await temporaryParent();
+  const scratchParent = join(runnerTemp, "pdpp-test-scratch");
+  await mkdir(scratchParent, { recursive: true, mode: 0o700 });
+  const siblingDirectory = join(scratchParent, "unrelated-sibling");
+  await mkdir(siblingDirectory);
+  const siblingFile = join(siblingDirectory, "keep.txt");
+  await writeFile(siblingFile, "keep");
+
+  const unrelated = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { detached: true, stdio: "ignore" });
+  assert.ok(unrelated.pid);
+  unrelated.unref();
+
+  let wrapper: ReturnType<typeof spawn> | undefined;
+  try {
+    const script = [
+      "const fs = require('node:fs');",
+      "const { spawn } = require('node:child_process');",
+      "const file = require('node:path').join(process.env.TMPDIR, 'held-open.txt');",
+      "const child = spawn(process.execPath, ['-e', `const fs = require('node:fs'); const fd = fs.openSync(process.argv[1], 'w'); fs.writeSync(fd, String(process.pid)); setInterval(() => {}, 1000);`, file], { stdio: 'ignore' });",
+      "const timer = setInterval(() => { if (fs.existsSync(file)) { console.log(JSON.stringify({root: process.env.TMPDIR, group: process.pid, descendant: Number(fs.readFileSync(file, 'utf8'))})); clearInterval(timer); } }, 10);",
+      "setInterval(() => {}, 1000);",
+    ].join(" ");
+    wrapper = spawn(process.execPath, ["--import", "tsx", wrapperPath, "--", process.execPath, "-e", script], {
+      env: { ...process.env, RUNNER_TEMP: runnerTemp },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const ready = await readyLine(wrapper);
+    const root = ready.root as string;
+    const group = ready.group as number;
+    assert.ok((await stat(join(root, "held-open.txt"))).isFile());
+
+    const status = await new Promise<ChildResult>((resolve, reject) => {
+      const deadline = setTimeout(() => reject(new Error("wrapper did not exit after SIGTERM")), 10_000);
+      wrapper?.once("close", (code, signal) => {
+        clearTimeout(deadline);
+        resolve({ code, signal });
+      });
+      wrapper?.kill("SIGTERM");
+    });
+    assert.ok(status.signal === "SIGTERM" || status.code === 143, JSON.stringify(status));
+    await eventuallyAbsentGroup(group);
+    await assert.rejects(access(root), { code: "ENOENT" });
+    assert.equal(await readFile(siblingFile, "utf8"), "keep");
+    process.kill(-unrelated.pid, 0);
+  } finally {
+    if (wrapper && wrapper.exitCode === null && wrapper.signalCode === null) {
+      wrapper.kill("SIGKILL");
+    }
+    if (unrelated.pid) {
+      try {
+        process.kill(-unrelated.pid, "SIGKILL");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH") {
+          throw error;
+        }
+      }
+    }
+    await rm(runnerTemp, { force: true, recursive: true });
+  }
+});
+
+test("a cleanup failure after a successful command returns nonzero", async () => {
+  const runnerTemp = await temporaryParent();
+  const previousRunnerTemp = process.env.RUNNER_TEMP;
+  process.env.RUNNER_TEMP = runnerTemp;
+  try {
+    const result = await runScratchCommand(command(["--exit=0"]), {
+      cleanupHooks: {
+        afterJournal: async () => {
+          throw new Error("seeded cleanup failure");
+        },
+      },
+    });
+    assert.notEqual(result.code, 0);
+    assert.equal(result.signal, null);
+  } finally {
+    if (previousRunnerTemp === undefined) {
+      delete process.env.RUNNER_TEMP;
+    } else {
+      process.env.RUNNER_TEMP = previousRunnerTemp;
+    }
     await rm(runnerTemp, { force: true, recursive: true });
   }
 });

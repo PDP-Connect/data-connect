@@ -15,12 +15,16 @@ on:
     paths:
       - ".github/workflows/test-scratch-lifecycle.yml"
       - "scripts/test-scratch/**"
+      - "scripts/run-node-tests.mjs"
+      - "scripts/run-node-tests.test.mjs"
       - "package-lock.json"
   push:
     branches: [main]
     paths:
       - ".github/workflows/test-scratch-lifecycle.yml"
       - "scripts/test-scratch/**"
+      - "scripts/run-node-tests.mjs"
+      - "scripts/run-node-tests.test.mjs"
       - "package-lock.json"
   workflow_dispatch: {}
 
@@ -56,3 +60,8 @@ jobs:
 
       - name: Lifecycle owner oracle
         run: node --import tsx --test scripts/test-scratch/run-command.test.ts
+
+      # run-node-tests.mjs bounds `node --test` concurrency for the vendored
+      # packages; Vitest does not collect this node:test file, so it runs here.
+      - name: run-node-tests worker budget
+        run: node --test scripts/run-node-tests.test.mjs
