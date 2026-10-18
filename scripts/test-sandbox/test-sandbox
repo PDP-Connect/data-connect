@@ -4,6 +4,11 @@
 # Usage: test-sandbox [--cpu PCT] [--mem SIZE] [--tasks N] [--net none|host]
 #   [--pg 16|18] [--pg-port PORT] [--pg-env NAME] [--timeout SECONDS]
 #   [--slots N] [--receipt FILE] [--scratch DIR] [--pidns] -- cmd...
+# --isolate cgroup (or TEST_SANDBOX_ISOLATE=cgroup) keeps slots, limits and
+# descendant cleanup but skips bwrap: for tests that create their own
+# namespaces (nested bwrap/unshare fails inside bwrap) and for the governor-only
+# use. The network is then the host's and /tmp is shared; TMPDIR still points to
+# a run-owned directory.
 # --pidns (or TEST_SANDBOX_PIDNS=1) adds a private PID namespace. It is off by
 # default: code that records PIDs in shared files (lock owners, scratch-root
 # owners) would see live host processes as dead from inside one. The scope
@@ -21,6 +26,9 @@ if [ -z "${BASH_VERSINFO:-}" ] || [ "${BASH_VERSINFO[0]}" -lt 5 ]; then
   echo "test-sandbox: usage: test-sandbox [options] -- cmd..." >&2; exit 2
 fi
 set -uo pipefail
+# systemd-run (>= 254) expands ${VAR} in the command line by default, which
+# mangles shell code and test arguments; turn that off where supported.
+noexpand=(); systemd-run --help 2>/dev/null | grep -q -- --expand-environment && noexpand=(--expand-environment=no)
 
 die() { echo "test-sandbox: $*" >&2; exit 2; }
 cpu=${TEST_SANDBOX_CPU:-400}
@@ -30,19 +38,20 @@ net=${TEST_SANDBOX_NET:-none}
 pg=${TEST_SANDBOX_PG:-}
 timeout_s=${TEST_SANDBOX_TIMEOUT:-0}
 slots=${TEST_SANDBOX_SLOTS:-6}
-pg_port=55447 pg_env=DATABASE_URL receipt="" scratch="" pidns=${TEST_SANDBOX_PIDNS:-0}
+pg_port=55447 pg_env=DATABASE_URL receipt="" scratch="" pidns=${TEST_SANDBOX_PIDNS:-0} isolate=${TEST_SANDBOX_ISOLATE:-full}
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --cpu|--mem|--tasks|--net|--pg|--pg-port|--pg-env|--timeout|--slots|--receipt|--scratch)
       [[ $# -ge 2 ]] || die "$1 needs a value"
       case "$1" in
-        --cpu) cpu=$2;; --mem) mem=$2;; --tasks) tasks=$2;; --net) net=$2;;
+        --cpu) cpu=$2;; --mem) mem=$2;; --tasks) tasks=$2;; --net) net=$2; net_given=1;;
         --pg) pg=$2;; --pg-port) pg_port=$2;; --pg-env) pg_env=$2;;
         --timeout) timeout_s=$2;; --slots) slots=$2;;
         --receipt) receipt=$2;; --scratch) scratch=$2;;
       esac
       shift 2;;
     --pidns) pidns=1; shift;;
+    --isolate) [[ $# -ge 2 ]] || die "--isolate needs a value"; isolate=$2; shift 2;;
     --) shift; break;;
     -*) die "unknown option $1 (put the command after --)";;
     *) break;;
@@ -53,6 +62,11 @@ done
 [[ -n "$mem" ]] || die "--mem cannot be empty"
 [[ "$tasks" =~ ^[1-9][0-9]*$ ]] || die "--tasks must be a positive integer"
 [[ "$net" == none || "$net" == host ]] || die "--net must be none or host"
+[[ "$isolate" == full || "$isolate" == cgroup ]] || die "--isolate must be full or cgroup"
+if [[ "$isolate" == cgroup ]]; then
+  [[ "$net" == none && -n "${TEST_SANDBOX_NET:-}${net_given:-}" ]] && die "--isolate cgroup cannot give --net none"
+  net=host
+fi
 [[ -z "$pg" || "$pg" == 16 || "$pg" == 18 ]] || die "--pg must be 16 or 18"
 [[ "$pg_port" =~ ^[1-9][0-9]*$ && "$pg_port" -le 65535 ]] || die "--pg-port must be a port number"
 [[ "$pg_env" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]] || die "--pg-env must be an environment variable name"
@@ -88,7 +102,7 @@ fi
 # Probe bwrap with the flags this run needs: it can be installed but unable to
 # create namespaces (AppArmor userns restriction on Ubuntu 24.04 runners,
 # containers without CAP_SYS_ADMIN).
-if [[ "$disabled" != 1 ]] && command -v bwrap >/dev/null; then
+if [[ "$disabled" != 1 && "$isolate" == full ]] && command -v bwrap >/dev/null; then
   probe=(bwrap --dev-bind / / --tmpfs /tmp)
   [[ "$net" == none ]] && probe+=(--unshare-net)
   [[ "$pidns" == 1 ]] && probe+=(--unshare-pid --proc /proc)
@@ -214,11 +228,15 @@ trap 'on_signal 143' TERM
 # The private tmpfs on /tmp would hide a --scratch dir or working directory
 # that lives under /tmp (CI often uses RUNNER_TEMP=/tmp/...): bind them back.
 tmp_binds=()
-[[ -n "$scratch" ]] && mkdir -p "$scratch"
+# A given --scratch dir is created once, private, only if absent at start; it is
+# never re-created later (its owner may delete it on purpose, e.g. test-scratch).
+if [[ -n "$scratch" && ! -e "$scratch" ]]; then (umask 077; mkdir -p "$scratch") || die "cannot create --scratch $scratch"; fi
 for p in "$scratch" "$PWD"; do
   [[ -n "$p" ]] || continue
   p=$(cd "$p" 2>/dev/null && pwd -P) || continue
-  [[ "$p" == /tmp/* ]] && tmp_binds+=(--bind "$p" "$p")
+  # Bind the whole top directory under /tmp, so a checkout's root (node_modules,
+  # sibling packages) stays visible when the working directory is deeper.
+  if [[ "$p" == /tmp/* ]]; then top=${p#/tmp/}; top=/tmp/${top%%/*}; tmp_binds+=(--bind "$top" "$top"); fi
 done
 # The quoted body is evaluated later by bash -c inside the scope.
 # shellcheck disable=SC2016
@@ -227,7 +245,7 @@ scratch="$1"; pg="$2"; pg_port="$3"; pg_env="$4"; shift 4
 cg=/sys/fs/cgroup$(grep "^0::" /proc/self/cgroup | cut -d: -f3)
 rc=0
 created_scratch=0
-if [[ -z "$scratch" ]]; then scratch=$(mktemp -d /tmp/test-sandbox.XXXXXX); created_scratch=1; else mkdir -p "$scratch"; fi
+if [[ -z "$scratch" ]]; then scratch=$(mktemp -d /tmp/test-sandbox.XXXXXX); created_scratch=1; fi
 export TMPDIR="$scratch" TEST_TMPDIR="$scratch" TMP="$scratch" TEMP="$scratch"
 pg_data=""
 pg_bin="/usr/lib/postgresql/$pg/bin"
@@ -238,7 +256,11 @@ if [[ -n "$pg" ]]; then
   pg_data=$(mktemp -d "$scratch/pgdata.XXXXXX") && pg_owned=1 || rc=1
   [[ $rc -eq 0 ]] && "$pg_bin/initdb" -D "$pg_data" -U postgres -A trust --no-sync -E UTF8 >"$pg_data.initdb.log" 2>&1 || { [[ $rc -eq 0 ]] && cat "$pg_data.initdb.log" >&2; rc=1; }
   if [[ $rc -eq 0 ]]; then
-    "$pg_bin/pg_ctl" -D "$pg_data" -o "-h 127.0.0.1 -p $pg_port -k $scratch -c fsync=off -c synchronous_commit=off -c full_page_writes=off -c max_connections=200" -w start >/dev/null 2>&1 || rc=1
+    # Settings go in postgresql.conf, not pg_ctl -o, which a shell re-parses
+    # (a scratch path with a space would break it). \047 is a single quote.
+    q=$(printf "\047"); sock=${scratch//$q/$q$q}
+    printf "listen_addresses = \047127.0.0.1\047\nport = %s\nunix_socket_directories = \047%s\047\nfsync = off\nsynchronous_commit = off\nfull_page_writes = off\nmax_connections = 200\n" "$pg_port" "$sock" >>"$pg_data/postgresql.conf"
+    "$pg_bin/pg_ctl" -D "$pg_data" -w start >/dev/null 2>&1 || rc=1
   fi
   if [[ $rc -eq 0 ]]; then
     ready=0; for _ in $(seq 1 150); do if "$pg_bin/pg_isready" -h 127.0.0.1 -p "$pg_port" >/dev/null 2>&1; then ready=1; break; fi; sleep .1; done
@@ -279,7 +301,7 @@ else
       if [[ "$net" == none ]]; then notes+=("command ran without network isolation"); fi
       cmd=(bash -c "$collector" _ "$stats" "$scratch" "$pg" "$pg_port" "$pg_env" "${cmd[@]}")
     fi
-    systemd-run --user --scope --quiet --unit="$unit" --slice="$slice_unit" -p "CPUQuota=${cpu}%" -p "MemoryMax=$mem" -p "TasksMax=$tasks" -p MemoryAccounting=yes -- "${cmd[@]}" &
+    systemd-run "${noexpand[@]}" --user --scope --quiet --unit="$unit" --slice="$slice_unit" -p "CPUQuota=${cpu}%" -p "MemoryMax=$mem" -p "TasksMax=$tasks" -p MemoryAccounting=yes -- "${cmd[@]}" &
     child=$!
     if [[ "$timeout_s" != 0 ]]; then
       deadline_us=$(( ${EPOCHREALTIME/./} + $(python3 -c 'import sys;print(int(float(sys.argv[1])*1e6))' "$timeout_s") ))
