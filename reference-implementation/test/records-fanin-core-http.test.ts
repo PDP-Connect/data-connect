@@ -386,6 +386,15 @@ acceptance("C1/C2 an unrecognised or order-mismatched cursor is invalid_cursor",
   const mismatch = await read(ctx, token, { cursor: first.body.next_cursor, limit: 2, order: "desc" });
   assert.equal(mismatch.status, 400);
   assert.deepEqual(errorOf(mismatch), { code: "invalid_cursor", type: "invalid_request_error" }, "C2");
+  assert.match(String(first.body.next_cursor), /^pdc_/, "the cursor is an opaque server-held handle");
+  const otherGrant = await grantToken(ctx, [a, b, e]);
+  const foreign = await read(ctx, otherGrant, { cursor: first.body.next_cursor, limit: 2, order: "asc" });
+  assert.equal(foreign.status, 400);
+  assert.deepEqual(
+    errorOf(foreign),
+    { code: "invalid_cursor", type: "invalid_request_error" },
+    "a cursor issued under one grant does not resume under another"
+  );
   const restart = await read(ctx, token, { limit: 2, order: "desc" });
   assert.deepEqual(
     (restart.body.data as Json[]).map((r) => r.id),

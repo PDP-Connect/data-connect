@@ -30,6 +30,7 @@ import { registerConnector } from "../server/auth.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
 import { OWNER_AUTH_DEFAULT_SUBJECT_ID } from "../server/owner-auth.ts";
 import { closePostgresStorage, initPostgresStorage, postgresQuery } from "../server/postgres-storage.ts";
+import * as recordsModule from "../server/records.ts";
 import { ingestRecord, queryRecords, queryRecordsAcrossBindings } from "../server/records.ts";
 import {
   createPostgresConnectorInstanceStore,
@@ -60,6 +61,7 @@ interface Backend {
 const EVENTS = "events";
 const NOTES = "notes";
 const COUNTERS = "counters";
+const ITEMS = "items";
 
 function manifestFor(connectorId: string) {
   return {
@@ -104,6 +106,22 @@ function manifestFor(connectorId: string) {
         semantics: "mutable_state",
       },
       {
+        cursor_field: "c",
+        name: ITEMS,
+        primary_key: ["n"],
+        schema: {
+          properties: {
+            c: { format: "date-time", type: ["string", "null"] },
+            n: { type: "integer" },
+            v: { type: "string" },
+          },
+          required: ["n"],
+          type: "object",
+        },
+        selection: { fields: true, resources: true },
+        semantics: "mutable_state",
+      },
+      {
         cursor_field: "seq",
         name: COUNTERS,
         primary_key: ["id"],
@@ -123,6 +141,7 @@ function manifestFor(connectorId: string) {
 const STREAM_FIELDS: Record<string, string[]> = {
   [COUNTERS]: ["id", "seq"],
   [EVENTS]: ["id", "occurred_at", "title", "secret"],
+  [ITEMS]: ["n", "c", "v"],
   [NOTES]: ["id", "title", "updated_at"],
 };
 
@@ -168,7 +187,7 @@ async function fixture(backend: Backend, labels: string[]): Promise<Fixture> {
         {
           data: opts.op === "delete" ? null : data,
           emitted_at: opts.emittedAt ?? "2026-10-01T00:00:00.000Z",
-          key: String(data.id),
+          key: String(data.id ?? data.n),
           ...(opts.op ? { op: opts.op } : {}),
           stream,
         } as never
@@ -179,14 +198,35 @@ async function fixture(backend: Backend, labels: string[]): Promise<Fixture> {
   };
 }
 
-function fanIn(f: Fixture, bindings: Binding[], stream: string, grant: Json, params: Json): Promise<ListPage> {
-  return queryRecordsAcrossBindings(
-    bindings as never,
-    stream,
-    grant as never,
-    params as never,
-    f.manifest as never
-  ) as unknown as Promise<ListPage>;
+// The authenticated caller a fan-in token is bound to (the route passes the
+// token's subject, client and grant).
+function authorityFor(f: Fixture, client = "client-a"): Json {
+  return { client_id: client, grant_id: `grant-${f.connectorId}`, subject_id: "owner", token_kind: "client" };
+}
+
+function fanIn(
+  f: Fixture,
+  bindings: Binding[],
+  stream: string,
+  grant: Json,
+  params: Json,
+  authority: Json = authorityFor(f)
+): Promise<ListPage> {
+  return queryRecordsAcrossBindings(bindings as never, stream, grant as never, params as never, f.manifest as never, {
+    cursorAuthority: authority,
+  } as never) as unknown as Promise<ListPage>;
+}
+
+// A public fan-in token is an opaque server-held handle: nothing in it decodes
+// to record values, connection ids or positions.
+function assertOpaqueToken(token: unknown, forbidden: string[], label: string): void {
+  assert.equal(typeof token, "string", `${label}: token present`);
+  assert.match(String(token), /^pdc_[A-Za-z0-9_-]+$/, `${label}: opaque handle`);
+  const decoded = Buffer.from(String(token).slice(4), "base64url").toString("latin1");
+  for (const value of forbidden) {
+    assert.ok(!decoded.includes(value), `${label}: token must not disclose ${value}`);
+    assert.ok(!String(token).includes(value), `${label}: token must not disclose ${value}`);
+  }
 }
 
 function single(f: Fixture, instanceId: string, stream: string, params: Json): Promise<ListPage> {
@@ -306,11 +346,6 @@ fanInCase("D3/D4 interleaved connections page in global order with a selector-fr
       order,
     });
     assert.deepEqual(ids(reversed), expected, `${order}: binding enumeration order must not matter`);
-    assert.deepEqual(
-      reversed.map((p) => p.next_cursor ?? null),
-      pages.map((p) => p.next_cursor ?? null),
-      `${order}: the same position yields the same cursor`
-    );
     assert.deepEqual(
       ids(pages),
       await singleBindingOracle(
@@ -594,9 +629,14 @@ async function syncSession(
   stream: string,
   since: string,
   limit: number,
-  between?: (pageIndex: number) => Promise<void>
+  between?: (pageIndex: number) => Promise<void>,
+  maxPages = 50
 ): Promise<{ next: string; pages: ListPage[] }> {
-  const pages = await traverse((p) => changes(f, stream, p), { changes_since: since, limit }, between ? { between } : {});
+  const pages = await traverse(
+    (p) => changes(f, stream, p),
+    { changes_since: since, limit },
+    between ? { between, maxPages } : { maxPages }
+  );
   for (const page of pages.slice(0, -1)) {
     assert.equal(page.next_changes_since, undefined, "a non-terminal page must not hand out a sync token");
     assert.ok(page.data.length <= limit, "no page exceeds limit");
@@ -750,6 +790,239 @@ fanInCase("D5 expired history on one connection fails the whole session with cur
   );
 });
 
+// ─── Review findings on the first revision (dot review of #454) ─────────────
+
+fanInCase("review P1-1 a write behind the cursor never hides a later record of another connection", async (backend) => {
+  const f = await fixture(backend, ["a", "b"]);
+  await f.ingest(f.instance("a"), EVENTS, { id: "a10", occurred_at: iso(10) });
+  await f.ingest(f.instance("a"), EVENTS, { id: "a30", occurred_at: iso(30) });
+  await f.ingest(f.instance("b"), EVENTS, { id: "b20", occurred_at: iso(20) });
+  const pages = await traverse((p) => fanIn(f, f.bindings, EVENTS, f.grant(EVENTS), p), { limit: 1, order: "asc" }, {
+    between: async (pageIndex) => {
+      if (pageIndex === 0) {
+        // Behind the cursor (a10) but ahead of b's own checkpoint.
+        await f.ingest(f.instance("b"), EVENTS, { id: "b5", occurred_at: iso(5) });
+      }
+    },
+  });
+  assert.deepEqual(ids(pages), ["a10", "b20", "a30"], "b20 must not be lost behind the passed-over b5");
+});
+
+fanInCase("review P1-2 fan-in tokens are opaque and bound to the caller and the query", async (backend) => {
+  const f = await fixture(backend, ["a", "b"]);
+  for (let i = 0; i < 3; i += 1) {
+    await f.ingest(f.instance("a"), EVENTS, { id: `a${i}`, occurred_at: iso(i), secret: "s", title: "t" });
+    await f.ingest(f.instance("b"), EVENTS, { id: `b${i}`, occurred_at: iso(i), secret: "s", title: "t" });
+  }
+  const grant = f.grant(EVENTS, { fields: ["id", "title"] });
+  // Long, distinctive values only: a short string can occur in random bytes.
+  const forbidden = ["2026-10-01T00:0", "occurred_at", f.instance("a"), f.instance("b")];
+  const pages = await traverse((p) => fanIn(f, f.bindings, EVENTS, grant, p), { limit: 1, order: "asc" });
+  for (const page of pages.slice(0, -1)) {
+    assertOpaqueToken(page.next_cursor, forbidden, "records next_cursor");
+  }
+  const session = await traverse((p) => fanIn(f, f.bindings, EVENTS, grant, p), { changes_since: "beginning", limit: 1 });
+  for (const page of session.slice(0, -1)) {
+    assertOpaqueToken(page.next_cursor, forbidden, "changes next_cursor");
+  }
+  const syncToken = session.at(-1)?.next_changes_since;
+  assertOpaqueToken(syncToken, forbidden, "next_changes_since");
+
+  const first = await fanIn(f, f.bindings, EVENTS, grant, { limit: 1, order: "asc" });
+  await expectCode(
+    fanIn(f, f.bindings, EVENTS, grant, { cursor: first.next_cursor, limit: 1, order: "asc" }, authorityFor(f, "client-b")),
+    "invalid_cursor",
+    "another caller cannot resume this cursor"
+  );
+  await expectCode(
+    fanIn(f, f.bindings, EVENTS, grant, { cursor: first.next_cursor, fields: ["id"], limit: 1, order: "asc" }),
+    "invalid_cursor",
+    "a cursor resumes only the query that produced it"
+  );
+  await expectCode(
+    fanIn(f, f.bindings, EVENTS, grant, { changes_since: syncToken }, authorityFor(f, "client-b")),
+    "invalid_cursor",
+    "another caller cannot use this sync token"
+  );
+});
+
+fanInCase("review P2 a tampered or hand-built token is rejected", async (backend) => {
+  const f = await fixture(backend, ["a", "b"]);
+  for (const binding of f.bindings) {
+    await f.ingest(binding.connectorInstanceId, EVENTS, { id: "r1", occurred_at: iso(1) });
+    await f.ingest(binding.connectorInstanceId, EVENTS, { id: "r2", occurred_at: iso(2) });
+  }
+  const grant = f.grant(EVENTS);
+  const page = await fanIn(f, f.bindings, EVENTS, grant, { changes_since: "beginning", limit: 1 });
+  const token = String(page.next_cursor);
+  const flipped = `${token.slice(0, -1)}${token.endsWith("A") ? "B" : "A"}`;
+  await expectCode(fanIn(f, f.bindings, EVENTS, grant, { cursor: flipped, limit: 1 }), "invalid_cursor", "edited token");
+  const forged = (k: string, entry: Json) =>
+    Buffer.from(
+      JSON.stringify({
+        bindings: f.bindings.map((b) => ({ ...entry, id: b.connectorInstanceId })),
+        k,
+        order: "DESC",
+      })
+    ).toString("base64");
+  await expectCode(
+    fanIn(f, f.bindings, EVENTS, grant, { cursor: forged("fanin:changes", { after: null, max: 999_999, since: 0 }), limit: 1 }),
+    "invalid_cursor",
+    "a hand-built change cursor with a future horizon"
+  );
+  await expectCode(
+    fanIn(f, f.bindings, EVENTS, grant, { changes_since: forged("fanin:changes_since", { since: 999_999 }) }),
+    "invalid_cursor",
+    "a hand-built sync token"
+  );
+  await expectCode(
+    fanIn(f, f.bindings, EVENTS, grant, {
+      cursor: forged("fanin:records", { after: null }).replace(/^/, ""),
+      limit: 1,
+    }),
+    "invalid_cursor",
+    "a hand-built records cursor"
+  );
+});
+
+interface FanInReadObservation {
+  binding: string;
+  candidates: number;
+  hydrated: number;
+  phase: string;
+}
+
+fanInCase("review P1-3 a change page reads a bounded number of candidates per connection", async (backend) => {
+  const setObserver = (recordsModule as Record<string, unknown>).__setFanInReadObserverForTest;
+  assert.equal(typeof setObserver, "function", "fan-in reads must expose a bounded-work observer for tests");
+  const f = await fixture(backend, ["a", "b"]);
+  for (let i = 0; i < 300; i += 1) {
+    await f.ingest(f.instance("a"), EVENTS, { id: `a${String(i).padStart(3, "0")}`, occurred_at: iso(i), title: "v1" });
+  }
+  for (let i = 0; i < 3; i += 1) {
+    await f.ingest(f.instance("b"), EVENTS, { id: `b${i}`, occurred_at: iso(i), title: "v1" });
+  }
+  const observations: FanInReadObservation[] = [];
+  (setObserver as (fn: ((o: FanInReadObservation) => void) | null) => void)((o) => observations.push(o));
+  try {
+    const limit = 5;
+    const bound = 64;
+    const grant = f.grant(EVENTS, { fields: ["id", "occurred_at", "title"] });
+    const firstPages = await traverse(
+      (p) => changes(f, EVENTS, p, grant),
+      { changes_since: "beginning", limit },
+      { maxPages: 200 }
+    );
+    const first = { next: String(firstPages.at(-1)?.next_changes_since), pages: firstPages };
+    assert.equal(identities(first.pages).length, 303, "every change once");
+    assertNoDuplicates(identities(first.pages), "no change repeats");
+    const changePages = observations.filter((o) => o.phase === "changes");
+    assert.ok(changePages.length > 0, "observer saw change reads");
+    for (const o of changePages) {
+      assert.ok(o.candidates <= bound, `candidates per connection per page ${o.candidates} > ${bound}`);
+      assert.ok(o.hydrated <= bound, `snapshots hydrated per connection per page ${o.hydrated} > ${bound}`);
+    }
+    // A window of hidden-only changes is skipped in bounded steps too.
+    for (let i = 0; i < 300; i += 1) {
+      await f.ingest(f.instance("a"), EVENTS, {
+        id: `a${String(i).padStart(3, "0")}`,
+        occurred_at: iso(i),
+        secret: "hidden",
+        title: "v1",
+      });
+    }
+    observations.length = 0;
+    const hidden = await traverse(
+      (p) => changes(f, EVENTS, p, grant),
+      { changes_since: first.next, limit },
+      { maxPages: 200 }
+    );
+    assert.deepEqual(hidden.flatMap((p) => p.data), [], "hidden-only changes are not visible");
+    assert.equal(typeof hidden.at(-1)?.next_changes_since, "string");
+    for (const o of observations.filter((x) => x.phase === "changes")) {
+      assert.ok(o.candidates <= bound && o.hydrated <= bound, `bounded hidden-only scan: ${JSON.stringify(o)}`);
+    }
+  } finally {
+    (setObserver as (fn: null) => void)(null);
+  }
+});
+
+fanInCase("review P1-3 a connection cut short by its scan budget holds back later rows of others", async (backend) => {
+  const f = await fixture(backend, ["a", "b"]);
+  const grant = f.grant(EVENTS, { fields: ["id", "occurred_at", "title"] });
+  for (let i = 0; i < 100; i += 1) {
+    await f.ingest(f.instance("a"), EVENTS, { id: `a${String(i).padStart(3, "0")}`, occurred_at: iso(i), title: "v1" });
+  }
+  await f.ingest(f.instance("a"), EVENTS, { id: "a100", occurred_at: iso(100), title: "v1" });
+  for (const minute of [150, 151, 152]) {
+    await f.ingest(f.instance("b"), EVENTS, { id: `b${minute}`, occurred_at: iso(minute), title: "v1" });
+  }
+  const baseline = await traverse((p) => changes(f, EVENTS, p, grant), { changes_since: "beginning", limit: 100 }, {
+    maxPages: 20,
+  });
+  // Ahead of a100, a's window holds more hidden-only changes than one page may examine.
+  for (let i = 0; i < 100; i += 1) {
+    await f.ingest(f.instance("a"), EVENTS, {
+      id: `a${String(i).padStart(3, "0")}`,
+      occurred_at: iso(i),
+      secret: "hidden",
+      title: "v1",
+    });
+  }
+  await f.ingest(f.instance("a"), EVENTS, { id: "a100", occurred_at: iso(100), title: "v2" });
+  for (const minute of [150, 151, 152]) {
+    await f.ingest(f.instance("b"), EVENTS, { id: `b${minute}`, occurred_at: iso(minute), title: "v2" });
+  }
+  const delta = await traverse(
+    (p) => changes(f, EVENTS, p, grant),
+    { changes_since: String(baseline.at(-1)?.next_changes_since), limit: 5, order: "asc" },
+    { maxPages: 20 }
+  );
+  assert.deepEqual(ids(delta), ["a100", "b150", "b151", "b152"], "a100 must not be overtaken while a is unread");
+});
+
+fanInCase("review P1-4 tied sort keys never re-emit the boundary row", async (backend) => {
+  const f = await fixture(backend, ["a", "b"]);
+  for (let i = 0; i < 30; i += 1) {
+    // Every record shares one cursor value: order rests on the key alone.
+    await f.ingest(f.instance("a"), EVENTS, { id: `k${String(i).padStart(2, "0")}`, occurred_at: iso(1), title: "v" });
+    await f.ingest(f.instance("b"), EVENTS, { id: `k${String(i).padStart(2, "0")}`, occurred_at: iso(1), title: "v" });
+  }
+  for (const order of ["asc", "desc"] as const) {
+    for (const limit of [1, 3]) {
+      const list = await traverse((p) => fanIn(f, f.bindings, EVENTS, f.grant(EVENTS), p), { limit, order }, {
+        maxPages: 200,
+      });
+      assertNoDuplicates(identities(list), `records ${order} limit=${limit}`);
+      assert.equal(identities(list).length, 60);
+      const delta = await traverse((p) => changes(f, EVENTS, p), { changes_since: "beginning", limit, order }, {
+        maxPages: 200,
+      });
+      assertNoDuplicates(identities(delta), `changes ${order} limit=${limit}`);
+      assert.equal(identities(delta).length, 60);
+    }
+  }
+});
+
+fanInCase("review P1-5 numeric primary keys keep their type through tombstones and cursors", async (backend) => {
+  const f = await fixture(backend, ["a", "b"]);
+  await f.ingest(f.instance("a"), ITEMS, { n: 1, v: "x" });
+  await f.ingest(f.instance("b"), ITEMS, { n: 2, v: "x" });
+  await f.ingest(f.instance("a"), ITEMS, { n: 3, v: "x" });
+  const first = await syncSession(f, ITEMS, "beginning", 1);
+  await f.ingest(f.instance("a"), ITEMS, { n: 1 }, { op: "delete" });
+  await f.ingest(f.instance("b"), ITEMS, { n: 2, v: "y" });
+  await f.ingest(f.instance("a"), ITEMS, { n: 3, v: "y" });
+  for (const [order, expected] of [
+    ["asc", ["1", "2", "3"]],
+    ["desc", ["3", "2", "1"]],
+  ] as const) {
+    const delta = await traverse((p) => changes(f, ITEMS, p), { changes_since: first.next, limit: 1, order });
+    assert.deepEqual(ids(delta), expected, `${order}: tombstone 1 sorts by its numeric key`);
+    assert.equal(delta.flatMap((p) => p.data).find((r) => r.id === "1")?.deleted, true);
+  }
+});
+
 // ─── Single-binding reads are unchanged ─────────────────────────────────────
 
 // SHA-256 of the transcript below, captured on main at f926c97c2b before this
@@ -779,7 +1052,7 @@ fanInCase("single-binding reads through the fan-in facade are byte-identical to 
         {
           data: opts.op === "delete" ? null : data,
           emitted_at: opts.emittedAt ?? "2026-10-01T00:00:00.000Z",
-          key: String(data.id),
+          key: String(data.id ?? data.n),
           ...(opts.op ? { op: opts.op } : {}),
           stream,
         } as never
@@ -807,6 +1080,102 @@ fanInCase("single-binding reads through the fan-in facade are byte-identical to 
   const { createHash } = await import("node:crypto");
   const digest = createHash("sha256").update(json).digest("hex");
   assert.equal(digest, SINGLE_BINDING_TRANSCRIPT_SHA256[backend.name], `single-binding transcript changed: ${json}`);
+});
+
+// Per-segment SHA-256 of single-binding transcripts captured on main at
+// 81b6fa3fc7 (this PR's base), for paths the first transcript does not reach:
+// null and absent cursor values, an integer primary key, and change sessions
+// with tombstones. A DESC read that mixes present and missing cursor values is
+// left out on purpose: it is the ordering this PR fixes ("extra" case above).
+// On PostgreSQL the list segments are left out too: on main, once a page ended
+// inside the null group the next page came back empty and every later row
+// was lost (main: [1], [] where this branch returns [1], [10], [2], [3]).
+const SINGLE_BINDING_SEGMENT_SHA256: Record<Backend["name"], Record<string, string>> = {
+  postgres: {
+    notes_sync: "dd4aeaed6ec96708323691443db3e3a365f54a530b90292a3bc5324bc4bb0e84",
+    items_sync: "cea989c942bb15421a3dcfb89c295204aad5da38372060911e7edceb6e282907",
+    notes_delta: "6406f96bd60a9fd1ee6ebb8b1d561d353d4cecf68fc8552d5f95fad2eff677c0",
+    items_delta: "4829f966c8fab305d667d87091cafb871f10c4c44c297f7972aece68c9793998",
+  },
+  sqlite: {
+    notes_asc_1: "0e8729e718d910d7062e893c81d9e2c2cb405cc4837dce8b5e10bb0b1849a20a",
+    notes_asc_2: "99b1ad15b171937c4eec5fc32545b7698662ba5a8fbbaaab274b0ed7a834dd20",
+    notes_asc_3: "24ef0364a0e4164023a1e74793de5b12136eff1689a541c0dfaf4d57257dea26",
+    items_asc_1: "70361b34eb2f1915231e9c766a15073ad4316d0fcfb91db9324e744ebea0872f",
+    items_asc_3: "98344e2662b291d1b2d744511b52232e05412ced7e495f389b4a70a570a57979",
+    items_desc_1: "5faa54a3676a6a0e5399b256888f269e3c2c1456e4db114116132dfdd5d0ac72",
+    items_desc_3: "2c8d786758b837f9fa2656ba4f64fdfd4e9ab9c5954da8286ae53a5adea9a9de",
+    notes_sync: "0a67c046f4638e9df3cf4e391d5cd287871f45ed3fbfd7adb0bc72328bb668dc",
+    items_sync: "a28a2e2f61c10edab24958e789c7edafc6181a4d6261a8aea7a3b5ddf63c2196",
+    notes_delta: "6b4168c735f6491fc0dcb113ae26076aa62fdf0b0c559743f25030fdc078cacb",
+    items_delta: "9dbcf2464a95c8b24239904cc0fb96aa05042bb2aaf1abd7b16c42f9d7d53312",
+  },
+};
+
+fanInCase("single-binding null-cursor, integer-key and tombstone reads are byte-identical to main", async (backend) => {
+  const connectorId = `fanin-core-golden2-${backend.name}`;
+  const manifest = manifestFor(connectorId);
+  await registerConnector(manifest);
+  const instanceId = `cin_fanin_core_golden2_${backend.name}`;
+  await backend.seedInstance(connectorId, instanceId, "Golden");
+  const binding: Binding = { connectorId, connectorInstanceId: instanceId, displayName: "Golden" };
+  let tick = 0;
+  const put = async (stream: string, data: Json, op?: "delete") => {
+    tick += 1;
+    await ingestRecord(
+      { connector_id: connectorId, connector_instance_id: instanceId },
+      {
+        data: op ? null : data,
+        emitted_at: new Date(Date.UTC(2026, 9, 1, 0, 0, tick)).toISOString(),
+        key: String(data.id ?? data.n),
+        ...(op ? { op } : {}),
+        stream,
+      } as never
+    );
+  };
+  for (const [, data] of NULLABLE_ROWS) {
+    await put(NOTES, data);
+  }
+  for (const n of [3, 1, 10, 2]) {
+    await put(ITEMS, { n, v: `v${n}` });
+  }
+  const grantFor = (stream: string) => ({
+    streams: [{ fields: STREAM_FIELDS[stream], instance_ids: [instanceId], name: stream }],
+  });
+  const reader = (stream: string) => (params: Json) =>
+    queryRecordsAcrossBindings([binding] as never, stream, grantFor(stream) as never, params as never, manifest as never) as unknown as Promise<ListPage>;
+  const segments: Record<string, unknown> = {};
+  for (const limit of [1, 2, 3]) {
+    segments[`notes_asc_${limit}`] = await traverse(reader(NOTES), { limit, order: "asc" });
+  }
+  for (const order of ["asc", "desc"] as const) {
+    for (const limit of [1, 3]) {
+      segments[`items_${order}_${limit}`] = await traverse(reader(ITEMS), { limit, order });
+    }
+  }
+  const notesSync = await traverse(reader(NOTES), { changes_since: "beginning", limit: 2 });
+  const itemsSync = await traverse(reader(ITEMS), { changes_since: "beginning", limit: 2 });
+  segments.notes_sync = notesSync;
+  segments.items_sync = itemsSync;
+  await put(NOTES, { id: "a_null" }, "delete");
+  await put(NOTES, { id: "b_present_mid", title: "y", updated_at: null });
+  await put(ITEMS, { n: 1 }, "delete");
+  await put(ITEMS, { n: 10, v: "w" });
+  segments.notes_delta = await traverse(reader(NOTES), {
+    changes_since: String(notesSync.at(-1)?.next_changes_since),
+    limit: 1,
+  });
+  segments.items_delta = await traverse(reader(ITEMS), {
+    changes_since: String(itemsSync.at(-1)?.next_changes_since),
+    limit: 1,
+  });
+  const { createHash } = await import("node:crypto");
+  const digests = Object.fromEntries(
+    Object.entries(segments).map(([name, value]) => [name, createHash("sha256").update(JSON.stringify(value)).digest("hex")])
+  );
+  const expected = SINGLE_BINDING_SEGMENT_SHA256[backend.name];
+  const compared = Object.fromEntries(Object.keys(expected).map((name) => [name, digests[name]]));
+  assert.deepEqual(compared, expected, `segment transcripts: ${JSON.stringify(segments)}`);
 });
 
 // ─── Backends ───────────────────────────────────────────────────────────────

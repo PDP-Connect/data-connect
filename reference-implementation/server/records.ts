@@ -95,6 +95,7 @@ import {
   postgresReadFanInRecordsPage,
 } from "./postgres-records.ts";
 import { isPostgresStorageBackend, postgresQuery, withPostgresTransaction } from "./postgres-storage.ts";
+import { issueRsCursor, type RsCursorKind, resolveRsCursor } from "./rs-opaque-cursors.ts";
 import {
   assertExpansionInstanceAuthorized,
   assertNonEmptyJsonField,
@@ -512,6 +513,9 @@ interface ReadWarning {
   param?: string;
 }
 interface FanInOptions {
+  // The authenticated caller (token kind, subject, client, grant) that fan-in
+  // continuation tokens are bound to.
+  cursorAuthority?: unknown;
   streamStore?: { listStreams: typeof listStreams };
   concurrency?: unknown;
   extraWarnings?: ReadWarning[];
@@ -5318,46 +5322,44 @@ function queryRecordsChangesSince({
 }
 
 /**
- * One connection's changes for a multi-connection fan-in session, in the
- * list order (Core §8 "Stable sort") rather than version order.
+ * One connection's change window `(since, max]` for a multi-connection
+ * fan-in session, in list order (Core §8 "Stable sort") instead of version
+ * order.
  *
- * The window `(since, max]` is the session frozen on page 1: each changed
- * record is placed by its state at its latest change no later than `max`
- * (a tombstone has no cursor value, so it sorts in the missing bucket by
- * primary key) and is eligible under the same grant-projection rule as the
- * single-connection feed. Returns up to `take` changes strictly after `after`.
- * Every page re-reads the whole window: correct under concurrent writes, at
- * a cost linear in the window size per page.
+ * A changed record is placed by its state at the horizon `max`: the current
+ * `records` row when it has not been written since the horizon, else its
+ * latest `record_changes` row at or below the horizon. A tombstone has no
+ * cursor value, so it sorts with the missing values; its primary key keeps the
+ * declared type. One key-only query seeks strictly after `after` and fetches
+ * at most `budget` candidates; only those are hydrated and checked for
+ * eligibility. The returned `frontier` is the last candidate examined, so a
+ * page cut short by the budget or the payload cap resumes after it.
  */
-function readChangesWindowForFanIn(
+function readSqliteChangesWindowForFanIn(
   ctx: ValidatedQueryContext & { recordIdentity: RecordIdentity | null },
   stream: string,
-  window: { after: unknown; max: number; since: number },
+  window: FanInChangesWindow,
   order: PageOrder,
-  take: number
-): FanInLocalRows {
+  take: number,
+  limits: FanInWindowLimits
+): FanInWindowRead {
   const { compiledFilters, connectorInstanceId, effective, mStream, recordIdentity } = ctx;
   assertChangesSinceRetained(connectorInstanceId, stream, window.since);
-  const compare = sqliteFanInComparator(mStream);
-  const after = (window.after ?? null) as LogicalPosition | null;
-  const candidates: Array<{ group: ChangeGroupRow; key: LogicalPosition }> = [];
-  for (const group of iterate<ChangeGroupRow>(referenceQueries.recordsSnapshotsListChangeGroups, [
-    connectorInstanceId,
-    stream,
-    window.since,
-    window.max,
-  ])) {
-    const state = getSnapshotAtVersion(connectorInstanceId, stream, group.record_key, group.latest_version);
-    const key = buildRecordSortPosition(state?.deleted ? null : state?.data, group.record_key, mStream);
-    if (!after || compare(key, after, mStream, order) > 0) {
-      candidates.push({ group, key });
-    }
-  }
-  candidates.sort((left, right) => compare(left.key, right.key, mStream, order));
-  const rows: FanInLocalRow[] = [];
-  for (const { group, key } of candidates) {
+  const { binds, sql } = buildSqliteChangeCandidatesSql(connectorInstanceId, stream, mStream, order, window, limits.budget);
+  // REVIEWED-DYNAMIC: key-only candidate seek; ORDER BY mirrors the list
+  // order and LIMIT bounds the rows read.
+  const candidates = [...iterateDynamicSqlAcknowledged<SqliteChangeCandidateRow>(sql, binds)];
+  const read: FanInWindowRead = { candidates: candidates.length, examined: 0, frontier: window.after, hasMore: false, rows: [] };
+  let bytes = 0;
+  for (const candidate of candidates) {
+    const key: SqliteChangeKey = {
+      cursor_value: candidate.__cv ?? null,
+      primary_key: [candidate.__pk],
+      record_key: candidate.record_key,
+    };
+    read.examined += 1;
     const record = resolveChangeGroupRecord(
-      group,
+      { latest_version: candidate.state_version, record_key: candidate.record_key },
       connectorInstanceId,
       stream,
       window.since,
@@ -5366,13 +5368,113 @@ function readChangesWindowForFanIn(
       recordIdentity
     );
     if (record) {
-      rows.push({ key, record });
-      if (rows.length > take) {
-        break;
+      const size = JSON.stringify(record).length;
+      if (read.rows.length === take || (read.rows.length > 0 && bytes + size > limits.payloadBytes)) {
+        read.hasMore = true;
+        return read;
       }
+      bytes += size;
+      read.rows.push({ key, record });
+    }
+    read.frontier = key;
+  }
+  read.hasMore = candidates.length >= limits.budget;
+  return read;
+}
+
+interface SqliteChangeCandidateRow {
+  __cv?: unknown;
+  __pk: unknown;
+  record_key: string;
+  state_version: number;
+}
+
+interface SqliteChangeKey {
+  cursor_value: unknown;
+  primary_key: unknown[];
+  record_key: string;
+}
+
+function isNumericFieldSchema(fieldSchema: JsonSchema | null): boolean {
+  const types = nonNullSchemaTypes(fieldSchema);
+  return types.has("integer") || types.has("number");
+}
+
+// Key-only candidates of one change window in list order, strictly after
+// `window.after`. Both halves expose the same columns: __cv (null for
+// tombstones), __pk (typed; the record key cast to the declared type when the
+// row has no key value) and record_key as the final tie-break.
+function buildSqliteChangeCandidatesSql(
+  connectorInstanceId: string,
+  stream: string,
+  manifestStream: ManifestStream | null | undefined,
+  order: PageOrder,
+  window: FanInChangesWindow,
+  limit: number
+): { binds: BindValue[]; sql: string } {
+  const cursorField = manifestStream?.cursor_field || null;
+  const primaryKeyFields = normalizePrimaryKey(manifestStream?.primary_key);
+  const [pkField] = primaryKeyFields;
+  if (!pkField) {
+    throw new Error("[records] manifest primary_key is required");
+  }
+  let typedRecordKey = "record_key";
+  if (primaryKeyFields.length > 1) {
+    typedRecordKey = "json_extract(record_key, '$[0]')";
+  } else if (isNumericFieldSchema(getFieldSchema(manifestStream, pkField))) {
+    typedRecordKey = "CAST(record_key AS NUMERIC)";
+  }
+  const pkJson = jsonExtractExpr(pkField);
+  const cvExpr = cursorField ? `CASE WHEN deleted = 1 THEN NULL ELSE ${jsonExtractExpr(cursorField)} END` : "NULL";
+  const pkExpr = `CASE WHEN deleted = 1 OR ${pkJson} IS NULL THEN ${typedRecordKey} ELSE ${pkJson} END`;
+  const columns = `record_key, version AS state_version, ${cvExpr} AS __cv, ${pkExpr} AS __pk`;
+  const current = `SELECT ${columns} FROM records
+     WHERE connector_instance_id = ? AND stream = ? AND version > ? AND version <= ?`;
+  const atHorizon = `SELECT ${columns} FROM record_changes AS c
+     WHERE connector_instance_id = ? AND stream = ? AND version > ? AND version <= ?
+       AND record_key IN (SELECT record_key FROM records WHERE connector_instance_id = ? AND stream = ? AND version > ?)
+       AND version = (SELECT MAX(c2.version) FROM record_changes AS c2
+                       WHERE c2.connector_instance_id = c.connector_instance_id AND c2.stream = c.stream
+                         AND c2.record_key = c.record_key AND c2.version <= ?)`;
+  const binds: BindValue[] = [
+    connectorInstanceId,
+    stream,
+    window.since,
+    window.max,
+    connectorInstanceId,
+    stream,
+    window.since,
+    window.max,
+    connectorInstanceId,
+    stream,
+    window.max,
+    window.max,
+  ];
+  const cmp = order === "ASC" ? ">" : "<";
+  let seek = "";
+  const after = window.after as SqliteChangeKey | null;
+  if (after) {
+    const pkValue = asSqliteBindValue(after.primary_key[0] ?? null);
+    const tail = `(__pk ${cmp} ? OR (__pk = ? AND record_key ${cmp} ?))`;
+    if (!cursorField || isMissingCursorValue(after.cursor_value ?? null)) {
+      seek = `AND __missing = 1 AND ${tail}`;
+      binds.push(pkValue, pkValue, after.record_key);
+    } else {
+      const cursorValue = asSqliteBindValue(after.cursor_value);
+      seek = `AND (__missing = 1 OR (__missing = 0 AND (__cv ${cmp} ? OR (__cv = ? AND ${tail}))))`;
+      binds.push(cursorValue, cursorValue, pkValue, pkValue, after.record_key);
     }
   }
-  return { hasMore: rows.length > take, rows: rows.slice(0, take) };
+  binds.push(limit);
+  const sql = `
+    SELECT record_key, state_version, __cv, __pk FROM (
+      SELECT u.*, CASE WHEN u.__cv IS NULL OR u.__cv = '' THEN 1 ELSE 0 END AS __missing
+        FROM (${current} UNION ALL ${atHorizon}) AS u
+    ) AS t
+    WHERE 1 = 1 ${seek}
+    ORDER BY __missing ASC, __cv ${order}, __pk ${order}, record_key ${order}
+    LIMIT ?`;
+  return { binds, sql };
 }
 
 interface PagedRecordsArgs {
@@ -7503,42 +7605,66 @@ function finalizeFanInListWindow(
 // `next_cursor` continuation, and `changes_since` sessions anchored to the
 // horizon chosen on page 1.
 //
-// Records pages are a bounded k-way merge. Each connection's own reader
-// returns up to `limit` rows after that connection's last emitted row, with a
-// backend sort key and resume cursor per row. The backend ranks the
-// candidates in its own ORDER BY semantics (SQLite comparator mirror, or a
-// PostgreSQL ORDER BY in the database collation) with the connection's
-// canonical index as the final tie-break; the merge then takes heads in rank
-// order. Because each connection is consumed strictly in its own order, no
-// row is emitted twice or skipped, whatever the ranks. The cursor holds every
-// connection's resume point plus the global position of the last emitted
-// row: rows a concurrent write placed behind that position are passed over,
-// the same as a single-connection keyset cursor does.
+// Every page is a k-way merge of per-connection buffers, each in that
+// connection's own order. The backend ranks all candidates in its own ORDER BY
+// semantics (a SQLite comparator mirror, or a PostgreSQL ORDER BY in the
+// database collation) with the canonical connection index as the final
+// tie-break, and the merge takes heads in rank order. A connection that may
+// hold more rows than its buffer shows contributes a blocking frontier: once
+// its buffer is used up, no row ranked after that frontier is emitted on this
+// page. Each connection is consumed strictly in its own order, so no row is
+// emitted twice or skipped, whatever the ranks.
 //
-// Change-feed pages use the same merge over each connection's frozen window
-// `(since, max]`, in the same list order (Core §8 "Stable sort" and `order`
-// carry no changes_since exception). Page 1 fixes every connection's horizon
-// before any change is read; continuation pages re-read the same windows, so
-// later writes never join the session. The terminal `next_changes_since`
-// keeps one horizon per connection, so a lagging connection is never filtered
-// by a sibling's version counter. The single-connection change feed is
-// unchanged (version order; `order` rejected).
+// Records pages: each buffer is up to `limit` rows after that connection's
+// last emitted row. The cursor also holds the position of the last emitted row;
+// rows a concurrent write placed behind it are passed over (as a
+// single-connection keyset cursor does) and the buffer is refilled before any
+// head is chosen.
 //
-// The merge state needs no global position here: a frozen window cannot gain
-// rows behind the cursor.
+// Change pages: each connection's window `(since, max]` is frozen on page 1.
+// Its buffer comes from one key-only query that seeks strictly after the
+// connection's checkpoint and reads a bounded number of candidates; only those
+// are hydrated. The terminal `next_changes_since` keeps one horizon per
+// connection, so a lagging connection is never filtered by a sibling's version
+// counter. The single-connection change feed is unchanged (version order;
+// `order` rejected).
 //
-// Both token kinds are base64 JSON like the single-connection cursors and
-// are exact-bound to the sorted set of connection ids. A cursor from a
-// different set, a scalar single-connection cursor, or the other token space
-// is rejected as `invalid_cursor`; none is ever replayed against every
-// connection.
+// Public tokens are opaque handles from rs-opaque-cursors.ts: the merge state
+// stays on the server, bound to the caller's authority, the stream grant, the
+// sorted connection ids and (for page cursors) the query shape. A token from
+// another caller, query, connection set or token space is `invalid_cursor`;
+// none is ever replayed against every connection.
 
-const FAN_IN_RECORDS_CURSOR_KIND = "fanin:records";
-const FAN_IN_CHANGES_CURSOR_KIND = "fanin:changes";
-const FAN_IN_CHANGES_SINCE_KIND = "fanin:changes_since";
-// Fill rounds per page. More than one round runs only when a concurrent write
-// put rows behind the cursor; each round strictly advances some connection.
-const FAN_IN_MAX_FILL_ROUNDS = 8;
+// Refetches allowed when concurrent writes put a whole buffer behind the
+// records cursor; past this the connection blocks at its frontier instead.
+const FAN_IN_REFILL_ROUNDS = 8;
+// Candidates one connection may examine for one change page, and the most
+// change payload one connection adds to one page.
+const FAN_IN_CHANGE_EXAMINE_FLOOR = 64;
+const FAN_IN_CHANGE_PAGE_BYTES = 8 * 1024 * 1024;
+
+interface FanInWindowLimits {
+  budget: number;
+  payloadBytes: number;
+}
+
+function fanInWindowLimits(take: number): FanInWindowLimits {
+  return { budget: Math.max(FAN_IN_CHANGE_EXAMINE_FLOOR, 4 * (take + 1)), payloadBytes: FAN_IN_CHANGE_PAGE_BYTES };
+}
+
+interface FanInReadObservation {
+  binding: string;
+  candidates: number;
+  hydrated: number;
+  phase: "changes";
+}
+
+let fanInReadObserver: ((observation: FanInReadObservation) => void) | null = null;
+
+/** Test-only: observe the work each fan-in change page does per connection. */
+export function __setFanInReadObserverForTest(observer: ((observation: FanInReadObservation) => void) | null): void {
+  fanInReadObserver = observer;
+}
 
 interface FanInRowKey {
   binding: number;
@@ -7553,15 +7679,30 @@ interface FanInLocalRow {
   resume?: string;
 }
 
-// One connection's candidate rows in its own order; `hasMore` when rows exist
-// beyond them.
+// One connection's candidate rows in its own order. `hasMore` when rows may
+// exist beyond them; `frontier` is the key up to which every row of the
+// connection has been returned or skipped (defaults to the last row).
 interface FanInLocalRows {
+  frontier?: unknown;
   hasMore: boolean;
   rows: FanInLocalRow[];
 }
 
 interface FanInLocalRecordsPage extends FanInLocalRows {
   meta?: RecordResponseMeta;
+}
+
+// Per-connection frozen window `(since, max]` and the key of the last change
+// consumed from it (null before the first).
+interface FanInChangesWindow {
+  after: unknown;
+  max: number;
+  since: number;
+}
+
+interface FanInWindowRead extends FanInLocalRows {
+  candidates: number;
+  examined: number;
 }
 
 // One canonical order for the binding set: deduplicated by connection id and
@@ -7595,30 +7736,158 @@ function fanInBaseParams(requestParams: RequestParams): RequestParams {
   return base;
 }
 
-// Decode a fan-in token of `kind` and return its per-connection entries,
-// aligned with `bindings`. Anything else is `invalid_cursor`.
-function decodeFanInToken(
-  raw: string,
-  kind: string,
-  bindings: readonly ReadBinding[],
-  malformedMessage: string
-): { decoded: Record<string, unknown>; entries: Record<string, unknown>[] } {
-  const decoded = decodeCursor(raw);
-  if (!(isRecordData(decoded) && decoded.k === kind && Array.isArray(decoded.bindings))) {
-    throw codedError(malformedMessage, "invalid_cursor");
-  }
-  const entries = decoded.bindings;
-  const matches =
-    entries.length === bindings.length &&
-    entries.every((entry, index) => isRecordData(entry) && entry.id === bindings[index]?.connectorInstanceId);
-  if (!matches) {
-    throw codedError(
-      "Cursor was issued for a different set of connections; restart without it",
-      "invalid_cursor"
-    );
-  }
-  return { decoded, entries: entries as Record<string, unknown>[] };
+// ─── Opaque fan-in tokens ───────────────────────────────────────────────────
+
+interface FanInTokenScope {
+  authority: unknown;
+  bindings: string[];
+  grant: unknown;
+  stream: string;
 }
+
+function fanInTokenScope(
+  bindings: readonly ReadBinding[],
+  grant: ReadGrant,
+  stream: string,
+  opts: FanInOptions
+): FanInTokenScope {
+  return {
+    authority: opts.cursorAuthority ?? null,
+    bindings: bindings.map((binding) => binding.connectorInstanceId),
+    grant: grant.streams.find((entry) => entry.name === stream) ?? null,
+    stream,
+  };
+}
+
+// The query a page cursor may continue: everything but the cursor, the page
+// size and the sync token, with the order resolved.
+function fanInQueryShape(requestParams: RequestParams, order: PageOrder): Record<string, unknown> {
+  const shape: Record<string, unknown> = { ...fanInBaseParams(requestParams) };
+  delete shape.order;
+  delete shape.sort;
+  shape.order = order;
+  return shape;
+}
+
+function issueFanInToken(
+  kind: RsCursorKind,
+  scope: FanInTokenScope,
+  query: Record<string, unknown> | null,
+  state: Record<string, unknown>
+): Promise<string> {
+  return issueRsCursor({
+    context: query ? { ...scope, query } : scope,
+    internalCursor: JSON.stringify(state),
+    kind,
+    // Quota per caller and stream, so one stream's tokens never evict another's.
+    scope: { authority: scope.authority, stream: scope.stream },
+  });
+}
+
+function malformedFanInToken(): Error & { code: string } {
+  return codedError("Malformed cursor", "invalid_cursor");
+}
+
+function parseFanInState(internalCursor: string): Record<string, unknown> {
+  let state: unknown = null;
+  try {
+    state = JSON.parse(internalCursor);
+  } catch {
+    throw malformedFanInToken();
+  }
+  if (!isRecordData(state)) {
+    throw malformedFanInToken();
+  }
+  return state;
+}
+
+async function resolveFanInPageToken(
+  raw: string,
+  scope: FanInTokenScope,
+  query: Record<string, unknown>
+): Promise<{ kind: RsCursorKind; state: Record<string, unknown> }> {
+  const { internalCursor, kind } = await resolveRsCursor({
+    accept: ["page", "changes_page"],
+    context: { ...scope, query },
+    param: "cursor",
+    token: raw,
+  });
+  return { kind, state: parseFanInState(internalCursor) };
+}
+
+// `beginning`, or a fan-in sync token issued for exactly this caller, grant
+// and connection set, mapped to each connection's baseline version.
+async function resolveFanInSince(raw: string, scope: FanInTokenScope): Promise<number[]> {
+  if (raw === "beginning") {
+    return scope.bindings.map(() => 0);
+  }
+  if (!raw.startsWith("pdc_")) {
+    throw codedError(CHANGES_SINCE_MALFORMED_MESSAGE, "invalid_cursor");
+  }
+  const { internalCursor } = await resolveRsCursor({
+    accept: ["changes_since"],
+    context: scope,
+    param: "changes_since",
+    token: raw,
+  });
+  const since = parseFanInState(internalCursor).since;
+  if (!(Array.isArray(since) && since.length === scope.bindings.length)) {
+    throw malformedFanInToken();
+  }
+  return since.map(decodeVersion);
+}
+
+function decodeVersion(value: unknown): number {
+  if (Number.isSafeInteger(value) && (value as number) >= 0) {
+    return value as number;
+  }
+  throw malformedFanInToken();
+}
+
+function decodeRecordsState(
+  state: Record<string, unknown>,
+  bindingCount: number
+): { after: Array<string | null>; at: FanInRowKey | null } {
+  const { after, at } = state;
+  if (!(Array.isArray(after) && after.length === bindingCount)) {
+    throw malformedFanInToken();
+  }
+  for (const entry of after) {
+    if (!(entry === null || typeof entry === "string")) {
+      throw malformedFanInToken();
+    }
+  }
+  if (at === null) {
+    return { after: after as Array<string | null>, at: null };
+  }
+  if (!(isRecordData(at) && Number.isSafeInteger(at.binding)) || (at.binding as number) < 0) {
+    throw malformedFanInToken();
+  }
+  if ((at.binding as number) >= bindingCount) {
+    throw malformedFanInToken();
+  }
+  return { after: after as Array<string | null>, at: { binding: at.binding as number, key: at.key ?? null } };
+}
+
+function decodeChangesState(state: Record<string, unknown>, bindingCount: number): FanInChangesWindow[] {
+  const { windows } = state;
+  if (!(Array.isArray(windows) && windows.length === bindingCount)) {
+    throw malformedFanInToken();
+  }
+  return windows.map((entry) => {
+    if (!isRecordData(entry)) {
+      throw malformedFanInToken();
+    }
+    const since = decodeVersion(entry.since);
+    const max = decodeVersion(entry.max);
+    if (max < since) {
+      throw malformedFanInToken();
+    }
+    return { after: entry.after ?? null, max, since };
+  });
+}
+
+// ─── Per-connection readers ─────────────────────────────────────────────────
 
 function readFanInRecordsPage(
   binding: ReadBinding,
@@ -7696,12 +7965,14 @@ async function readFanInChangesWindow(
   grant: ReadGrant,
   params: RequestParams,
   manifest: ReadManifest | null,
-  window: { after: unknown; max: number; since: number },
+  window: FanInChangesWindow,
   take: number
-): Promise<FanInLocalRecordsPage> {
+): Promise<FanInLocalRows> {
   const target = buildBindingStorageTarget(binding.connectorId, binding.connectorInstanceId);
+  const limits = fanInWindowLimits(take);
+  let read: FanInWindowRead;
   if (isPostgresStorageBackend()) {
-    return (await Reflect.apply(postgresReadFanInChangesWindow, undefined, [
+    read = (await Reflect.apply(postgresReadFanInChangesWindow, undefined, [
       target,
       stream,
       grant,
@@ -7709,11 +7980,22 @@ async function readFanInChangesWindow(
       manifest?.streams ? { streams: manifest.streams } : null,
       window,
       take,
-    ])) as FanInLocalRecordsPage;
+      limits,
+    ])) as FanInWindowRead;
+  } else {
+    const ctx = await validateQueryRecordsRequest(target, stream, grant, params, manifest);
+    read = readSqliteChangesWindowForFanIn(ctx, stream, window, ctx.order, take, limits);
   }
-  const ctx = await validateQueryRecordsRequest(target, stream, grant, params, manifest);
-  return readChangesWindowForFanIn(ctx, stream, window, ctx.order, take);
+  fanInReadObserver?.({
+    binding: binding.connectorInstanceId,
+    candidates: read.candidates,
+    hydrated: read.examined,
+    phase: "changes",
+  });
+  return { frontier: read.frontier, hasMore: read.hasMore, rows: read.rows };
 }
+
+// ─── Ranking and merge ──────────────────────────────────────────────────────
 
 /**
  * Mirror of SQLite's ORDER BY over `json_extract` values: NULL, then numbers
@@ -7741,11 +8023,14 @@ function compareSqliteSqlValues(left: unknown, right: unknown): number {
   return Buffer.compare(Buffer.from(text(left)), Buffer.from(text(right)));
 }
 
-// The comparator of `buildPaginatedSqlParts`' ORDER BY: missing bucket last,
-// cursor value, then the first primary-key part, in the requested direction.
+type SqlitePosition = LogicalPosition & { record_key?: string };
+
+// The comparator of the SQLite list and change-window ORDER BY: missing
+// bucket last, cursor value, the first primary-key part, then the record key
+// when both positions carry one, in the requested direction.
 function compareSqliteSqlPositions(
-  left: LogicalPosition | null | undefined,
-  right: LogicalPosition | null | undefined,
+  left: SqlitePosition | null | undefined,
+  right: SqlitePosition | null | undefined,
   manifestStream: ManifestStream | null | undefined,
   order: PageOrder
 ): number {
@@ -7763,44 +8048,60 @@ function compareSqliteSqlPositions(
       }
     }
   }
-  return compareSqliteSqlValues(left?.primary_key?.[0], right?.primary_key?.[0]) * direction;
+  const pkCmp = compareSqliteSqlValues(left?.primary_key?.[0], right?.primary_key?.[0]);
+  if (pkCmp !== 0) {
+    return pkCmp * direction;
+  }
+  if (typeof left?.record_key === "string" && typeof right?.record_key === "string") {
+    return compareSqliteSqlValues(left.record_key, right.record_key) * direction;
+  }
+  return 0;
 }
 
 // The order SQLite's own records page uses for this stream: the SQL ORDER BY
-// mirror, or the in-memory fallback comparator.
+// mirror, or the in-memory fallback comparator. Change windows are always
+// ordered in SQL.
 function sqliteFanInComparator(
-  manifestStream: ManifestStream | null | undefined
+  manifestStream: ManifestStream | null | undefined,
+  source: "changes" | "records"
 ): (
-  left: LogicalPosition | null | undefined,
-  right: LogicalPosition | null | undefined,
+  left: SqlitePosition | null | undefined,
+  right: SqlitePosition | null | undefined,
   manifestStream: ManifestStream | null | undefined,
   order: PageOrder
 ) => number {
-  return classifyCursorFieldSqlSupport(manifestStream).supported ? compareSqliteSqlPositions : compareLogicalPositions;
+  if (source === "changes" || classifyCursorFieldSqlSupport(manifestStream).supported) {
+    return compareSqliteSqlPositions;
+  }
+  return compareLogicalPositions;
 }
 
-// Rank fan-in candidates in the order the backend's own records page uses,
-// then by canonical connection index. Ranks align with `entries`.
+// Rank fan-in candidates in the order the backend's own reader uses, then by
+// canonical connection index, then by position in `entries` (so an entry
+// appended after an identical key ranks after it). Ranks align with `entries`.
 async function rankFanInKeys(
   entries: readonly FanInRowKey[],
   manifestStream: ManifestStream | null,
-  order: PageOrder
+  order: PageOrder,
+  source: "changes" | "records"
 ): Promise<number[]> {
   if (isPostgresStorageBackend()) {
     return (await Reflect.apply(postgresRankFanInKeys, undefined, [entries, order])) as number[];
   }
-  const compare = sqliteFanInComparator(manifestStream);
+  const compare = sqliteFanInComparator(manifestStream, source);
   const direction = order === "ASC" ? 1 : -1;
   const sorted = entries
     .map((entry, index) => ({ entry, index }))
     .sort(
       (left, right) =>
         compare(
-          left.entry.key as LogicalPosition | null,
-          right.entry.key as LogicalPosition | null,
+          left.entry.key as SqlitePosition | null,
+          right.entry.key as SqlitePosition | null,
           manifestStream,
           order
-        ) || (left.entry.binding - right.entry.binding) * direction
+        ) ||
+        (left.entry.binding - right.entry.binding) * direction ||
+        left.index - right.index
     );
   const ranks = new Array<number>(entries.length);
   sorted.forEach(({ index }, rank) => {
@@ -7809,32 +8110,40 @@ async function rankFanInKeys(
   return ranks;
 }
 
-interface FanInMergeRound {
-  // Rows taken (emitted or passed over) from each connection's page, a prefix.
+interface FanInMergeResult {
+  // Rows emitted from each connection's buffer, a prefix of it.
   consumed: number[];
   emitted: Array<{ binding: number; row: FanInLocalRow }>;
-  passedOver: boolean;
 }
 
-// Merge one round of per-connection pages: pass over rows a concurrent write
-// put behind `at`, then take up to `capacity` heads in rank order.
-async function mergeFanInRound(
-  pages: readonly FanInLocalRecordsPage[],
-  at: FanInRowKey | null,
+function frontierOf(page: FanInLocalRows): unknown {
+  return page.frontier === undefined ? (page.rows.at(-1)?.key ?? null) : page.frontier;
+}
+
+// Take up to `capacity` heads in rank order. A connection with `hasMore`
+// whose buffer is used up blocks at its frontier: its next row is unknown and
+// may rank before any remaining head.
+async function mergeFanInHeads(
+  pages: readonly FanInLocalRows[],
   capacity: number,
   manifestStream: ManifestStream | null,
-  order: PageOrder
-): Promise<FanInMergeRound> {
+  order: PageOrder,
+  source: "changes" | "records"
+): Promise<FanInMergeResult> {
   const entries: FanInRowKey[] = [];
   pages.forEach((page, binding) => {
     for (const row of page.rows) {
       entries.push({ binding, key: row.key });
     }
   });
-  if (at) {
-    entries.push(at);
-  }
-  const ranks = await rankFanInKeys(entries, manifestStream, order);
+  const blockingIndex = pages.map((page, binding) => {
+    if (!page.hasMore) {
+      return -1;
+    }
+    entries.push({ binding, key: frontierOf(page) });
+    return entries.length - 1;
+  });
+  const ranks = await rankFanInKeys(entries, manifestStream, order, source);
   let next = 0;
   const rowRanks = pages.map((page) =>
     page.rows.map(() => {
@@ -7843,81 +8152,42 @@ async function mergeFanInRound(
       return rank;
     })
   );
-  const atRank = at ? (ranks[next] ?? -1) : -1;
   const consumed = pages.map(() => 0);
-  let passedOver = false;
-  rowRanks.forEach((rowRank, binding) => {
-    while ((consumed[binding] ?? 0) < rowRank.length && (rowRank[consumed[binding] ?? 0] ?? 0) < atRank) {
-      consumed[binding] = (consumed[binding] ?? 0) + 1;
-      passedOver = true;
-    }
-  });
   const emitted: Array<{ binding: number; row: FanInLocalRow }> = [];
   while (emitted.length < capacity) {
     let best = -1;
     let bestRank = Number.POSITIVE_INFINITY;
+    let blocked = false;
     rowRanks.forEach((rowRank, binding) => {
-      const head = rowRank[consumed[binding] ?? 0];
+      const taken = consumed[binding] ?? 0;
+      const blocking = blockingIndex[binding] ?? -1;
+      let head = rowRank[taken];
+      let isBlocking = false;
+      if (head === undefined && blocking >= 0) {
+        head = ranks[blocking];
+        isBlocking = true;
+      }
       if (head !== undefined && head < bestRank) {
         best = binding;
         bestRank = head;
+        blocked = isBlocking;
       }
     });
-    const row = pages[best]?.rows[consumed[best] ?? 0];
+    const row = blocked ? undefined : pages[best]?.rows[consumed[best] ?? 0];
     if (!row) {
       break;
     }
     emitted.push({ binding: best, row });
     consumed[best] = (consumed[best] ?? 0) + 1;
   }
-  return { consumed, emitted, passedOver };
+  return { consumed, emitted };
 }
 
-interface FanInRecordsCursorState {
-  after: Array<string | null>;
-  at: FanInRowKey | null;
+function fanInHasMore(pages: readonly FanInLocalRows[], consumed: readonly number[]): boolean {
+  return pages.some((page, index) => page.hasMore || (consumed[index] ?? 0) < page.rows.length);
 }
 
-function decodeFanInRecordsCursor(
-  raw: string,
-  bindings: readonly ReadBinding[],
-  order: PageOrder
-): FanInRecordsCursorState {
-  const { decoded, entries } = decodeFanInToken(raw, FAN_IN_RECORDS_CURSOR_KIND, bindings, "Malformed cursor");
-  if (decoded.order !== order) {
-    throw codedError("Cursor order does not match request order", "invalid_cursor");
-  }
-  const after = entries.map((entry) => {
-    if (entry.after === null || typeof entry.after === "string") {
-      return entry.after;
-    }
-    throw codedError("Malformed cursor", "invalid_cursor");
-  });
-  const at = decoded.at;
-  if (at === null) {
-    return { after, at: null };
-  }
-  if (
-    !(isRecordData(at) && Number.isSafeInteger(at.binding) && (at.binding as number) >= 0) ||
-    (at.binding as number) >= bindings.length
-  ) {
-    throw codedError("Malformed cursor", "invalid_cursor");
-  }
-  return { after, at: { binding: at.binding as number, key: at.key ?? null } };
-}
-
-function encodeFanInRecordsCursor(
-  bindings: readonly ReadBinding[],
-  state: FanInRecordsCursorState,
-  order: PageOrder
-): string {
-  return encodeCursor({
-    at: state.at,
-    bindings: bindings.map((binding, index) => ({ after: state.after[index] ?? null, id: binding.connectorInstanceId })),
-    k: FAN_IN_RECORDS_CURSOR_KIND,
-    order,
-  });
-}
+// ─── Records pages ──────────────────────────────────────────────────────────
 
 function fanInListAccumulator(requestedCount: string | null, requestedWindow: string | null): FanInListAccumulator {
   return {
@@ -7948,6 +8218,43 @@ function withLimitAndExtraWarnings(
   return next;
 }
 
+// Drop the prefix of one connection's buffer that ranks behind `at` (rows a
+// concurrent write placed behind the cursor) and refill the buffer when that
+// empties it, so the merge never picks a head while this connection's next row
+// is unknown. Returns the buffer to merge and advances `after[index]`.
+async function passOverBehindCursor(
+  page: FanInLocalRecordsPage,
+  index: number,
+  at: FanInRowKey,
+  after: Array<string | null>,
+  refetch: () => Promise<FanInLocalRecordsPage>,
+  manifestStream: ManifestStream | null,
+  order: PageOrder
+): Promise<FanInLocalRecordsPage> {
+  let current = page;
+  for (let round = 0; round < FAN_IN_REFILL_ROUNDS; round += 1) {
+    const entries: FanInRowKey[] = current.rows.map((row) => ({ binding: index, key: row.key }));
+    entries.push(at);
+    // biome-ignore lint/performance/noAwaitInLoops: each refill reads from the checkpoint the previous one advanced.
+    const ranks = await rankFanInKeys(entries, manifestStream, order, "records");
+    const atRank = ranks.at(-1) ?? -1;
+    let behind = 0;
+    while (behind < current.rows.length && (ranks[behind] ?? 0) < atRank) {
+      behind += 1;
+    }
+    if (behind === 0) {
+      return current;
+    }
+    after[index] = current.rows[behind - 1]?.resume ?? after[index] ?? null;
+    if (behind < current.rows.length || !current.hasMore) {
+      return { ...current, rows: current.rows.slice(behind) };
+    }
+    current = await refetch();
+  }
+  // Still behind after every refill: block at the last passed-over row.
+  return { frontier: current.rows.at(-1)?.key ?? null, hasMore: true, rows: [] };
+}
+
 async function queryRecordsFanInPage(
   bindings: readonly ReadBinding[],
   stream: string,
@@ -7955,66 +8262,58 @@ async function queryRecordsFanInPage(
   requestParams: RequestParams,
   manifest: ReadManifest | null,
   opts: FanInOptions,
-  extraWarnings: readonly ReadWarning[]
+  extraWarnings: readonly ReadWarning[],
+  token: { order: PageOrder; query: Record<string, unknown>; scope: FanInTokenScope; state: Record<string, unknown> | null }
 ): Promise<ListResponse> {
   const manifestStream = manifest?.streams?.find((entry) => entry.name === stream) ?? null;
-  const order = resolveListOrder(requestParams.order, validateCanonicalSort(requestParams.sort, manifestStream));
+  const { order } = token;
   const { limit } = clampRecordsPageLimit(requestParams.limit);
-  const rawCursor = nonEmptyStringParam(requestParams.cursor);
-  const state: FanInRecordsCursorState = rawCursor
-    ? decodeFanInRecordsCursor(rawCursor, bindings, order)
-    : { after: bindings.map(() => null), at: null };
+  const decoded = token.state ? decodeRecordsState(token.state, bindings.length) : null;
+  const after: Array<string | null> = decoded ? [...decoded.after] : bindings.map(() => null);
+  let at = decoded?.at ?? null;
   const base = fanInBaseParams(requestParams);
+  const read = (index: number) => {
+    const binding = bindings[index] as ReadBinding;
+    const cursor = after[index];
+    return readFanInRecordsPage(binding, stream, grant, { ...base, ...(cursor ? { cursor } : {}), limit }, manifest);
+  };
 
+  let pages = await mapWithConcurrency(bindings, fanInReadConcurrency(opts), (_, index) => read(index), fanInMapOptions(opts));
   const requestedCount = typeof requestParams.count === "string" ? requestParams.count : null;
   const requestedWindow = typeof requestParams.window === "string" ? requestParams.window : null;
   const acc = fanInListAccumulator(requestedCount, requestedWindow);
-  const data: ResponseRecord[] = [];
-  let hasMore = false;
-
-  for (let round = 0; round < FAN_IN_MAX_FILL_ROUNDS; round += 1) {
-    // biome-ignore lint/performance/noAwaitInLoops: a further round runs only from the checkpoints the previous round advanced.
-    const pages = await mapWithConcurrency(
-      bindings,
+  for (const page of pages) {
+    foldListMeta(acc, page.meta, { requestedCount, requestedWindow });
+  }
+  const cursorAt = at;
+  if (cursorAt) {
+    pages = await mapWithConcurrency(
+      pages,
       fanInReadConcurrency(opts),
-      (binding, index) => {
-        const after = state.after[index];
-        return readFanInRecordsPage(binding, stream, grant, { ...base, ...(after ? { cursor: after } : {}), limit }, manifest);
-      },
+      (page, index) => passOverBehindCursor(page, index, cursorAt, after, () => read(index), manifestStream, order),
       fanInMapOptions(opts)
     );
-    for (const page of pages) {
-      if (round === 0) {
-        // Count and window describe the whole query, not this page.
-        foldListMeta(acc, page.meta, { requestedCount, requestedWindow });
-      } else {
-        acc.meta = mergeMetaWarnings(acc.meta, page.meta);
-      }
-    }
-    // biome-ignore lint/performance/noAwaitInLoops: ranking belongs to this round's pages.
-    const merged = await mergeFanInRound(pages, state.at, limit - data.length, manifestStream, order);
-    merged.consumed.forEach((count, index) => {
-      const resume = count > 0 ? pages[index]?.rows[count - 1]?.resume : undefined;
-      if (resume) {
-        state.after[index] = resume;
-      }
-    });
-    for (const { row } of merged.emitted) {
-      data.push(row.record);
-    }
-    const last = merged.emitted.at(-1);
-    if (last) {
-      state.at = { binding: last.binding, key: last.row.key };
-    }
-    hasMore = pages.some((page, index) => page.hasMore || (merged.consumed[index] ?? 0) < page.rows.length);
-    if (!(hasMore && merged.passedOver && data.length < limit)) {
-      break;
-    }
   }
 
-  const response: ListResponse = { data, has_more: hasMore, object: "list" };
+  const merged = await mergeFanInHeads(pages, limit, manifestStream, order, "records");
+  merged.consumed.forEach((count, index) => {
+    const resume = count > 0 ? pages[index]?.rows[count - 1]?.resume : undefined;
+    if (resume) {
+      after[index] = resume;
+    }
+  });
+  const last = merged.emitted.at(-1);
+  if (last) {
+    at = { binding: last.binding, key: last.row.key };
+  }
+  const hasMore = fanInHasMore(pages, merged.consumed);
+  const response: ListResponse = {
+    data: merged.emitted.map(({ row }) => row.record),
+    has_more: hasMore,
+    object: "list",
+  };
   if (hasMore) {
-    response.next_cursor = encodeFanInRecordsCursor(bindings, state, order);
+    response.next_cursor = await issueFanInToken("page", token.scope, token.query, { after, at });
   }
   let meta = finalizeFanInListCount(acc, requestedCount, acc.meta);
   meta = finalizeFanInListWindow(acc, requestedWindow, meta);
@@ -8025,50 +8324,7 @@ async function queryRecordsFanInPage(
   return response;
 }
 
-function decodeVersion(value: unknown): number {
-  if (Number.isSafeInteger(value) && (value as number) >= 0) {
-    return value as number;
-  }
-  throw codedError("Malformed cursor", "invalid_cursor");
-}
-
-// `beginning`, or a fan-in sync token for exactly this binding set, mapped to
-// each connection's own baseline version.
-function decodeFanInChangesSince(raw: string, bindings: readonly ReadBinding[]): number[] {
-  if (raw === "beginning") {
-    return bindings.map(() => 0);
-  }
-  const { entries } = decodeFanInToken(raw, FAN_IN_CHANGES_SINCE_KIND, bindings, CHANGES_SINCE_MALFORMED_MESSAGE);
-  return entries.map((entry) => {
-    if (Number.isSafeInteger(entry.since) && (entry.since as number) >= 0) {
-      return entry.since as number;
-    }
-    throw codedError(CHANGES_SINCE_MALFORMED_MESSAGE, "invalid_cursor");
-  });
-}
-
-// Per-connection frozen window `(since, max]` and the key of the last change
-// returned from it (null before the first).
-type FanInChangesWindow = { after: unknown; max: number; since: number };
-
-function decodeFanInChangesCursor(
-  raw: string,
-  bindings: readonly ReadBinding[],
-  order: PageOrder
-): FanInChangesWindow[] {
-  const { decoded, entries } = decodeFanInToken(raw, FAN_IN_CHANGES_CURSOR_KIND, bindings, "Malformed cursor");
-  if (decoded.order !== order) {
-    throw codedError("Cursor order does not match request order", "invalid_cursor");
-  }
-  return entries.map((entry) => {
-    const since = decodeVersion(entry.since);
-    const max = decodeVersion(entry.max);
-    if (max < since) {
-      throw codedError("Malformed cursor", "invalid_cursor");
-    }
-    return { after: entry.after ?? null, max, since };
-  });
-}
+// ─── Change pages ───────────────────────────────────────────────────────────
 
 function rejectUnsupportedChangesParams(requestParams: RequestParams): void {
   // `order` is a Core list parameter and applies to change sessions too (Core
@@ -8087,19 +8343,21 @@ async function queryChangesFanInPage(
   requestParams: RequestParams,
   manifest: ReadManifest | null,
   opts: FanInOptions,
-  extraWarnings: readonly ReadWarning[]
+  extraWarnings: readonly ReadWarning[],
+  token: { order: PageOrder; query: Record<string, unknown>; scope: FanInTokenScope; state: Record<string, unknown> | null }
 ): Promise<ListResponse> {
   rejectUnsupportedChangesParams(requestParams);
   const manifestStream = manifest?.streams?.find((entry) => entry.name === stream) ?? null;
-  const order = resolveListOrder(requestParams.order, null);
+  const { order } = token;
   const { limit } = clampRecordsPageLimit(requestParams.limit);
   const base = fanInBaseParams(requestParams);
-  const changesSince = nonEmptyStringParam(requestParams.changes_since);
   let windows: FanInChangesWindow[];
-  if (changesSince) {
+  if (token.state) {
+    windows = decodeChangesState(token.state, bindings.length);
+  } else {
     // Page 1: fix every connection's horizon before any change is read, so
     // later pages of this session never see newer writes (Core §8).
-    const since = decodeFanInChangesSince(changesSince, bindings);
+    const since = await resolveFanInSince(String(requestParams.changes_since), token.scope);
     const max = await mapWithConcurrency(
       bindings,
       fanInReadConcurrency(opts),
@@ -8107,8 +8365,6 @@ async function queryChangesFanInPage(
       fanInMapOptions(opts)
     );
     windows = bindings.map((_, index) => ({ after: null, max: max[index] ?? 0, since: since[index] ?? 0 }));
-  } else {
-    windows = decodeFanInChangesCursor(String(requestParams.cursor), bindings, order);
   }
 
   const pages = await mapWithConcurrency(
@@ -8126,43 +8382,36 @@ async function queryChangesFanInPage(
       ),
     fanInMapOptions(opts)
   );
-  const merged = await mergeFanInRound(pages, null, limit, manifestStream, order);
+  const merged = await mergeFanInHeads(pages, limit, manifestStream, order, "changes");
   merged.consumed.forEach((count, index) => {
     const window = windows[index];
-    const last = count > 0 ? pages[index]?.rows[count - 1] : undefined;
-    if (window && last) {
-      window.after = last.key;
+    const page = pages[index];
+    if (!(window && page)) {
+      return;
+    }
+    if (count === page.rows.length) {
+      // Every returned change was emitted: resume after everything examined.
+      window.after = frontierOf(page) ?? window.after;
+    } else if (count > 0) {
+      window.after = page.rows[count - 1]?.key ?? window.after;
     }
   });
-  const hasMore = pages.some((page, index) => page.hasMore || (merged.consumed[index] ?? 0) < page.rows.length);
+  const hasMore = fanInHasMore(pages, merged.consumed);
   const response: ListResponse = {
     data: merged.emitted.map(({ row }) => row.record),
     has_more: hasMore,
     object: "list",
   };
   if (hasMore) {
-    response.next_cursor = encodeCursor({
-      bindings: bindings.map((binding, index) => ({
-        after: windows[index]?.after ?? null,
-        id: binding.connectorInstanceId,
-        max: windows[index]?.max,
-        since: windows[index]?.since,
-      })),
-      k: FAN_IN_CHANGES_CURSOR_KIND,
-      order,
-    });
+    response.next_cursor = await issueFanInToken("changes_page", token.scope, token.query, { windows });
   } else {
     // Only the terminal page hands out the next session's token: an earlier
     // copy would skip the changes this session has not yet returned.
-    response.next_changes_since = encodeCursor({
-      bindings: bindings.map((binding, index) => ({ id: binding.connectorInstanceId, since: windows[index]?.max })),
-      k: FAN_IN_CHANGES_SINCE_KIND,
+    response.next_changes_since = await issueFanInToken("changes_since", token.scope, null, {
+      since: windows.map((window) => window.max),
     });
   }
   let meta: RecordResponseMeta | null = null;
-  for (const page of pages) {
-    meta = mergeMetaWarnings(meta, page.meta);
-  }
   meta = withLimitAndExtraWarnings(meta, requestParams, extraWarnings);
   if (meta && Object.keys(meta).length) {
     response.meta = meta;
@@ -8222,21 +8471,39 @@ export async function queryRecordsAcrossBindings(
   if (ordered.length === 1) {
     return queryRecordsAcrossBindings(ordered, stream, grant, requestParams, manifest, opts);
   }
-  const hasCursor = nonEmptyStringParam(requestParams.cursor) !== null;
-  if (hasCursor && nonEmptyStringParam(requestParams.changes_since) !== null) {
+  const rawCursor = nonEmptyStringParam(requestParams.cursor);
+  const changesSince = nonEmptyStringParam(requestParams.changes_since);
+  if (rawCursor && changesSince) {
     throw invalidQueryError(
       "cursor and changes_since cannot be combined: pass changes_since to start a session, then follow next_cursor alone",
       "invalid_request"
     );
   }
-  const decodedCursor = hasCursor ? decodeCursor(String(requestParams.cursor)) : null;
-  if (
-    nonEmptyStringParam(requestParams.changes_since) !== null ||
-    (isRecordData(decodedCursor) && decodedCursor.k === FAN_IN_CHANGES_CURSOR_KIND)
-  ) {
-    return queryChangesFanInPage(ordered, stream, grant, requestParams, manifest, opts, extraWarnings);
+  const manifestStream = manifest?.streams?.find((entry) => entry.name === stream) ?? null;
+  const order = resolveListOrder(requestParams.order, validateCanonicalSort(requestParams.sort, manifestStream));
+  const scope = fanInTokenScope(ordered, grant, stream, opts);
+  const query = fanInQueryShape(requestParams, order);
+  if (changesSince) {
+    return queryChangesFanInPage(ordered, stream, grant, requestParams, manifest, opts, extraWarnings, {
+      order,
+      query,
+      scope,
+      state: null,
+    });
   }
-  return queryRecordsFanInPage(ordered, stream, grant, requestParams, manifest, opts, extraWarnings);
+  if (rawCursor) {
+    const { kind, state } = await resolveFanInPageToken(rawCursor, scope, query);
+    const continuation = { order, query, scope, state };
+    return kind === "changes_page"
+      ? queryChangesFanInPage(ordered, stream, grant, requestParams, manifest, opts, extraWarnings, continuation)
+      : queryRecordsFanInPage(ordered, stream, grant, requestParams, manifest, opts, extraWarnings, continuation);
+  }
+  return queryRecordsFanInPage(ordered, stream, grant, requestParams, manifest, opts, extraWarnings, {
+    order,
+    query,
+    scope,
+    state: null,
+  });
 }
 
 /**

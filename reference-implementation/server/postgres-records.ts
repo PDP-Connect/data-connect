@@ -2699,14 +2699,87 @@ export async function postgresOpenFanInChangesWindow(
   return max;
 }
 
+// PostgreSQL text that equals JavaScript's String(value) for a JSON scalar,
+// which is how cursor_value and primary_key_text are derived at ingest.
+function postgresJsonScalarText(expr: string): string {
+  return `CASE jsonb_typeof(${expr}) WHEN 'number' THEN ((${expr}) #>> '{}')::float8::text WHEN 'null' THEN NULL ELSE (${expr}) #>> '{}' END`;
+}
+
+/**
+ * Key-only candidates of one fan-in change window `(since, max]` in list
+ * order, strictly after `after`. A record not written since the horizon is
+ * read from `records` (its derived cursor_value/primary_key_text columns); one
+ * written since is read from its latest record_changes row at or below the
+ * horizon, deriving the same text. Tombstones have a null cursor (or their
+ * emitted_at when the stream orders by it) and their record key.
+ */
+function buildPostgresChangeCandidatesSql(
+  connectorInstanceId: string,
+  stream: string,
+  manifestStream: ManifestStream | null,
+  order: "asc" | "desc",
+  window: { after: unknown; max: number; since: number },
+  limit: number
+): { params: unknown[]; sql: string } {
+  const cursorField = nonEmptyJsonField(manifestStream?.cursor_field);
+  const primaryKeyFields = primaryKeyFieldsFor(manifestStream);
+  const fieldJson = (field: string) => `(c.record_json -> ${postgresJsonKeyLiteral(field)})`;
+  const horizonCursor = cursorField
+    ? `CASE WHEN c.deleted THEN NULL ELSE ${postgresJsonScalarText(fieldJson(cursorField))} END`
+    : "c.emitted_at";
+  const horizonKeyParts = primaryKeyFields.map((field) => `COALESCE(${postgresJsonScalarText(fieldJson(field))}, c.record_key)`);
+  const horizonKey = horizonKeyParts.length
+    ? `CASE WHEN c.deleted THEN c.record_key ELSE ${horizonKeyParts.join(" || chr(1) || ")} END`
+    : "c.record_key";
+  const params: unknown[] = [connectorInstanceId, stream, window.since, window.max];
+  const dir = order === "asc" ? "ASC" : "DESC";
+  const cmp = order === "asc" ? ">" : "<";
+  let seek = "";
+  const after = window.after && typeof window.after === "object" ? (window.after as JsonObject) : null;
+  if (after) {
+    const cursorValue = after.cursor_value === null || after.cursor_value === undefined ? null : String(after.cursor_value);
+    params.push(String(after.primary_key_text ?? ""), String(after.record_key ?? ""));
+    const keyParam = `$${params.length - 1}`;
+    const recordKeyParam = `$${params.length}`;
+    const tail = `(t.pk ${cmp} ${keyParam} OR (t.pk = ${keyParam} AND t.record_key ${cmp} ${recordKeyParam}))`;
+    if (cursorValue === null) {
+      seek = `AND t.cv IS NULL AND ${tail}`;
+    } else {
+      params.push(cursorValue);
+      const cursorParam = `$${params.length}`;
+      seek = `AND (t.cv IS NULL OR t.cv ${cmp} ${cursorParam} OR (t.cv = ${cursorParam} AND ${tail}))`;
+    }
+  }
+  params.push(limit);
+  const sql = `
+    SELECT t.record_key, t.state_version, t.deleted, t.deleted_at, t.emitted_at, t.cv, t.pk FROM (
+      SELECT record_key, version AS state_version, deleted, deleted_at, emitted_at,
+             ${cursorField ? "cursor_value" : "emitted_at"} AS cv, primary_key_text AS pk
+        FROM records
+       WHERE connector_instance_id = $1 AND stream = $2 AND version > $3 AND version <= $4
+      UNION ALL
+      SELECT c.record_key, c.version AS state_version, c.deleted, c.deleted_at, c.emitted_at,
+             ${horizonCursor} AS cv, ${horizonKey} AS pk
+        FROM record_changes c
+       WHERE c.connector_instance_id = $1 AND c.stream = $2 AND c.version > $3 AND c.version <= $4
+         AND c.record_key IN (SELECT r.record_key FROM records r
+                               WHERE r.connector_instance_id = $1 AND r.stream = $2 AND r.version > $4)
+         AND c.version = (SELECT MAX(c2.version) FROM record_changes c2
+                           WHERE c2.connector_instance_id = $1 AND c2.stream = $2
+                             AND c2.record_key = c.record_key AND c2.version <= $4)
+    ) t
+    WHERE TRUE ${seek}
+    ORDER BY t.cv ${dir} NULLS LAST, t.pk ${dir}, t.record_key ${dir}
+    LIMIT $${params.length}`;
+  return { params, sql };
+}
+
 /**
  * One connection's changes in the frozen fan-in window `(since, max]`, in the
- * records-list order rather than version order. Each changed record is placed
- * by its state at its latest change no later than `max`, using the same
- * derived cursor/primary-key text the records table stores (a tombstone has a
- * null cursor and its record key), and ranked by postgresRankFanInKeys in the
- * database collation. Eligibility is visiblePostgresChange, as in the
- * single-connection feed. Returns up to `take` changes strictly after `after`.
+ * records-list order rather than version order. One key-only query reads at
+ * most `limits.budget` candidates after `window.after`; only those are
+ * hydrated and checked with visiblePostgresChange, the single-connection
+ * eligibility rule. `frontier` is the last candidate examined.
  */
 export async function postgresReadFanInChangesWindow(
   storageTarget: StorageTarget,
@@ -2715,62 +2788,75 @@ export async function postgresReadFanInChangesWindow(
   requestParams: QueryRequestParams,
   manifest: ConnectorManifest | null,
   window: { after: unknown; max: number; since: number },
-  take: number
-): Promise<{ hasMore: boolean; rows: Array<{ key: JsonObject; record: ResponseRecord }> }> {
+  take: number,
+  limits: { budget: number; payloadBytes: number }
+): Promise<{
+  candidates: number;
+  examined: number;
+  frontier: unknown;
+  hasMore: boolean;
+  rows: Array<{ key: JsonObject; record: ResponseRecord }>;
+}> {
   const read = await preparePostgresRecordRead(storageTarget, stream, grant, requestParams, manifest);
-  const { connectorInstanceId, manifestStream } = read;
+  const { connectorInstanceId } = read;
   await assertPostgresChangesRetained(connectorInstanceId, stream, window.since);
-  const groups = await listPostgresChangeGroups(connectorInstanceId, stream, window.since, window.max);
-  const orderByEmittedAt = nonEmptyJsonField(manifestStream?.cursor_field) === null;
-  const keyed = groups.map((row) => {
-    const data = row.deleted ? null : (row.record_json as JsonObject | null);
-    let cursor: string | null = orderByEmittedAt ? String(row.emitted_at) : cursorValue(data, manifestStream);
-    if (row.deleted && !orderByEmittedAt) {
-      cursor = null;
-    }
+  const { params, sql } = buildPostgresChangeCandidatesSql(
+    connectorInstanceId,
+    stream,
+    read.manifestStream,
+    read.order,
+    window,
+    limits.budget
+  );
+  const candidates = (await postgresQuery(sql, params)).rows as Array<
+    PgRow & { cv?: string | null; pk: string; state_version: number | string }
+  >;
+  const result = {
+    candidates: candidates.length,
+    examined: 0,
+    frontier: window.after,
+    hasMore: false,
+    rows: [] as Array<{ key: JsonObject; record: ResponseRecord }>,
+  };
+  let bytes = 0;
+  for (const candidate of candidates) {
     const key: JsonObject = {
-      cursor_value: cursor,
-      primary_key_text: row.deleted ? row.record_key : primaryKeyText(data, row.record_key, manifestStream),
+      cursor_value: candidate.cv ?? null,
+      primary_key_text: candidate.pk,
+      record_key: candidate.record_key,
     };
-    return { key, row };
-  });
-  const entries = keyed.map((entry) => ({ binding: 0, key: entry.key }));
-  if (window.after) {
-    entries.push({ binding: 0, key: window.after as JsonObject });
-  }
-  const ranks = await postgresRankFanInKeys(entries, read.order === "asc" ? "ASC" : "DESC");
-  const afterRank = window.after ? (ranks[keyed.length] ?? -1) : -1;
-  const ordered = keyed
-    .map((entry, index) => ({ ...entry, rank: ranks[index] ?? 0 }))
-    .filter((entry) => entry.rank > afterRank)
-    .sort((left, right) => left.rank - right.rank);
-  const rows: Array<{ key: JsonObject; record: ResponseRecord }> = [];
-  for (const { key, row } of ordered) {
-    // biome-ignore lint/performance/noAwaitInLoops: stop reading snapshots once take + 1 eligible changes are known.
+    result.examined += 1;
+    // biome-ignore lint/performance/noAwaitInLoops: stop hydrating once take + 1 eligible changes are known.
     const record = await visiblePostgresChange({
       compiledFilters: read.compiledFilters,
       connectorInstanceId,
       decodedVersion: window.since,
       effective: read.effective,
       identity: read.identity,
-      row,
+      row: { ...candidate, version: candidate.state_version },
       stream,
     });
     if (record) {
-      rows.push({ key, record });
-      if (rows.length > take) {
-        break;
+      const size = JSON.stringify(record).length;
+      if (result.rows.length === take || (result.rows.length > 0 && bytes + size > limits.payloadBytes)) {
+        result.hasMore = true;
+        return result;
       }
+      bytes += size;
+      result.rows.push({ key, record });
     }
+    result.frontier = key;
   }
-  return { hasMore: rows.length > take, rows: rows.slice(0, take) };
+  result.hasMore = candidates.length >= limits.budget;
+  return result;
 }
 
 /**
  * Global order of fan-in candidates under the same ORDER BY the records page
- * uses (cursor NULLS LAST, primary_key_text, then connection index), evaluated
- * by PostgreSQL so text collation matches the per-connection pages exactly.
- * Returns each entry's rank, aligned with `entries`.
+ * and change windows use (cursor NULLS LAST, primary_key_text, record key when
+ * present, then connection index), evaluated by PostgreSQL so text collation
+ * matches the per-connection reads exactly. Returns each entry's rank,
+ * aligned with `entries`.
  */
 export async function postgresRankFanInKeys(
   entries: ReadonlyArray<{ binding: number; key: unknown }>,
@@ -2785,13 +2871,17 @@ export async function postgresRankFanInKeys(
     return value === null || value === undefined ? null : String(value);
   });
   const primaryKeys = entries.map((entry) => String(keyOf(entry).primary_key_text ?? ""));
+  const recordKeys = entries.map((entry) => String(keyOf(entry).record_key ?? ""));
   const bindings = entries.map((entry) => entry.binding);
   const dir = order === "ASC" ? "ASC" : "DESC";
+  // `ord` breaks exact ties by input position, so an entry appended after an
+  // identical key (a cursor boundary) always ranks after it.
   const result = await postgresQuery(
     `SELECT (t.ord - 1)::int AS __rn
-       FROM unnest($1::text[], $2::text[], $3::int[]) WITH ORDINALITY AS t(cursor_value, primary_key_text, binding, ord)
-      ORDER BY t.cursor_value ${dir} NULLS LAST, t.primary_key_text ${dir}, t.binding ${dir}`,
-    [cursorValues, primaryKeys, bindings]
+       FROM unnest($1::text[], $2::text[], $3::text[], $4::int[])
+            WITH ORDINALITY AS t(cursor_value, primary_key_text, record_key, binding, ord)
+      ORDER BY t.cursor_value ${dir} NULLS LAST, t.primary_key_text ${dir}, t.record_key ${dir}, t.binding ${dir}, t.ord ASC`,
+    [cursorValues, primaryKeys, recordKeys, bindings]
   );
   const ranks = new Array<number>(entries.length);
   result.rows.forEach((row, rank) => {
