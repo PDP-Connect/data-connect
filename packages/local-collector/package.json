@@ -48,7 +48,7 @@
     "prepack": "npm run build",
     "pack-install-run": "node --import tsx scripts/pack-install-run.ts",
     "pin:collection-profiles": "tsx scripts/pin-collection-profiles.ts",
-    "test": "../../scripts/test-sandbox/test-sandbox -- tsx scripts/run-tests.ts",
+    "test": "tsx scripts/run-tests.ts",
     "validate:package": "tsx scripts/validate-package.ts",
     "verify": "npm test && npm run validate:package && npm run pack-install-run"
   },
