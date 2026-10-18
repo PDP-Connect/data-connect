@@ -3,16 +3,20 @@
 
 // Child for test/records-version-allocation-contention*.test.ts: one of N
 // independent OS processes that ingest changed writes into the SAME stream of
-// the SAME store. Before each write transaction it parks at the crash point
-// `ingest:before-write-transaction`, so the parent can line all children up
-// and release them together.
+// the SAME store. Before each ingest call it parks at the crash point
+// `contention:before-ingest`, so the parent can line all children up.
+// Resume and successful-return timestamps bound the ingest call, including
+// setup before the transaction and return work after commit.
 //
 // args: <sqlite|postgres> <sqlite-path|-> <writer-id> <writes>
 // env:  PDPP_TEST_POSTGRES_URL (postgres), CONTENTION_CHILD_ATTACHMENT
 //
-// stdout, one JSON line per acknowledged write: {"writer","key","index"}.
+// stdout, one JSON line per acknowledged write:
+// {"writer","key","index","resumed","committed"}, using Date.now() on the
+// host clock shared by all children.
 // A rejected write prints {"writer","key","index","error"} and the child
 // exits 1 after the loop, so the parent sees both the ack set and the failure.
+import { crashPoint } from "../../../server/crash-point.ts";
 import { closeDb, initDb } from "../../../server/db.ts";
 import { closePostgresStorage, initPostgresStorage } from "../../../server/postgres-storage.ts";
 import { ingestRecord } from "../../../server/records.ts";
@@ -44,6 +48,8 @@ for (let index = 0; index < writes; index += 1) {
   // Even writes create a record owned by this writer; odd writes update the
   // one record every writer shares, so writers also contend on a single row.
   const key = index % 2 === 0 ? `own-${writerId}-${index}` : "shared";
+  crashPoint("contention:before-ingest");
+  const resumed = Date.now();
   try {
     await ingestRecord(
       CONTENTION_CONNECTOR_ID,
@@ -56,7 +62,7 @@ for (let index = 0; index < writes; index += 1) {
       },
       { deferIndexes: true }
     );
-    process.stdout.write(`${JSON.stringify({ index, key, writer: writerId })}\n`);
+    process.stdout.write(`${JSON.stringify({ committed: Date.now(), index, key, resumed, writer: writerId })}\n`);
   } catch (error) {
     failed = true;
     process.stdout.write(

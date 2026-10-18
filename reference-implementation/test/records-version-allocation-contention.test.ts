@@ -8,9 +8,10 @@
  * records-version-allocation-atomic.test.ts proves the allocator one write at
  * a time in one process. This file runs three real OS processes against one
  * SQLite file (WAL, the production busy handling from initDb). Each round
- * every writer parks just before its ingest write transaction; the parent
- * resumes all of them at once, so the three writes race for the write lock on
- * the same stream. Rounds repeat; odd writes also update one shared record.
+ * every writer parks just before its ingest call; the parent sends each a
+ * resume. Child timestamps must show at least one round with all calls started
+ * before any returns after commit. This observes call overlap, not SQL lock
+ * timing. Rounds repeat; odd writes also update one shared record.
  *
  * What protects the counter on SQLite is the `BEGIN IMMEDIATE` in
  * `writeTransaction` (lib/db.ts): the write lock is taken before the counter
@@ -94,6 +95,10 @@ test("[sqlite] independent processes racing changed writes on one stream get uni
       assert.deepEqual(child.errors, [], `writer w${n} had rejected writes under contention`);
       assert.equal(child.code, 0, `writer w${n} must exit cleanly: ${child.stderr}`);
     }
+    assert.ok(
+      result.overlappedRounds > 0,
+      `no overlapping ingest round: all ${WRITERS} children must resume before any commits in at least one of ${WRITES_PER_WRITER} rounds`
+    );
 
     initDb(sqlitePath);
     try {

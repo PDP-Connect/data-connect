@@ -6,8 +6,10 @@
  * Postgres backend (env-gated on `PDPP_TEST_POSTGRES_URL`).
  *
  * Three real OS processes ingest changed writes into one stream of one
- * database. Each round every writer parks just before its ingest transaction
- * (`ingest:before-write-transaction`); the parent resumes all of them at once.
+ * database. Each round every writer parks just before its ingest call; the
+ * parent sends each a resume. Child timestamps must show at least one round
+ * with all calls started before any returns after commit. This observes call
+ * overlap, not SQL lock timing.
  * Two layers protect the counter on Postgres: the per-connector-instance
  * transaction advisory lock taken by `withPostgresTransaction`, and the
  * single-statement allocator `allocateNextVersion`. The test asserts the
@@ -54,6 +56,10 @@ if (POSTGRES_URL) {
         assert.deepEqual(child.errors, [], `writer w${n} had rejected writes under contention`);
         assert.equal(child.code, 0, `writer w${n} must exit cleanly: ${child.stderr}`);
       }
+      assert.ok(
+        result.overlappedRounds > 0,
+        `no overlapping ingest round: all ${WRITERS} children must resume before any commits in at least one of ${WRITES_PER_WRITER} rounds`
+      );
 
       const rows = async (table: "record_changes" | "records") =>
         (

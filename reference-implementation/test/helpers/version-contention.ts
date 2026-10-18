@@ -6,10 +6,11 @@
  *
  * `runContention` starts N real child processes
  * (test/fixtures/crash/version-allocation-contention-child.ts). In each round
- * every child parks at `ingest:before-write-transaction`; the parent waits
- * until ALL of them are parked, then resumes them in one burst. Each round is
- * therefore a real contention window on one stream, not a hope that the
- * scheduler overlaps the writers.
+ * every child parks immediately before calling ingestRecord; the parent
+ * waits until ALL are parked, then sends a resume to each. Child timestamps
+ * must show at least one round where every ingest call starts before any
+ * returns after commit. This proves overlapping call intervals on one stream;
+ * it does not measure when SQL transactions start or lock waits occur.
  *
  * `assertContentionInvariants` is the backend-independent oracle over the
  * rows the parent reads back afterwards.
@@ -20,7 +21,7 @@ import { join } from "node:path";
 
 import { spawnCrashChild } from "./crash-harness.ts";
 
-export const CONTENTION_POINT = "ingest:before-write-transaction";
+export const CONTENTION_POINT = "contention:before-ingest";
 const CHILD = join(import.meta.dirname, "../fixtures/crash/version-allocation-contention-child.ts");
 
 export interface Ack {
@@ -39,6 +40,8 @@ export interface ContentionResult {
     signal: NodeJS.Signals | null;
     stderr: string;
   }[];
+  /** Successful rounds where all ingest calls started before any returned. */
+  readonly overlappedRounds: number;
 }
 
 export async function runContention(options: {
@@ -70,17 +73,28 @@ export async function runContention(options: {
     const exits = await Promise.all(children.map((child) => child.exited));
     const acks: Ack[] = [];
     const result: ContentionResult["children"] = [];
+    const timings: { committed: number; index: number; resumed: number; writer: string }[] = [];
     for (const exit of exits) {
       const errors: string[] = [];
       for (const line of exit.stdout.split("\n").filter(Boolean)) {
-        const parsed = JSON.parse(line) as Ack & { error?: string };
-        if (parsed.error === undefined)
+        const parsed = JSON.parse(line) as Ack & { committed?: number; error?: string; resumed?: number };
+        if (parsed.error === undefined) {
+          assert.ok(Number.isFinite(parsed.resumed), "every acknowledged write must report its resume time");
+          assert.ok(Number.isFinite(parsed.committed), "every acknowledged write must report its commit time");
+          timings.push({
+            committed: parsed.committed as number,
+            index: parsed.index,
+            resumed: parsed.resumed as number,
+            writer: parsed.writer,
+          });
           acks.push({
             index: parsed.index,
             key: parsed.key,
             writer: parsed.writer,
           });
-        else errors.push(`${parsed.writer}#${parsed.index} ${parsed.key}: ${parsed.error}`);
+        } else {
+          errors.push(`${parsed.writer}#${parsed.index} ${parsed.key}: ${parsed.error}`);
+        }
       }
       result.push({
         code: exit.code,
@@ -89,7 +103,20 @@ export async function runContention(options: {
         stderr: exit.stderr.slice(-2000),
       });
     }
-    return { acks, children: result };
+    let overlappedRounds = 0;
+    for (let round = 0; round < options.writesPerWriter; round += 1) {
+      const writes = timings.filter((timing) => timing.index === round);
+      if (
+        new Set(writes.map((timing) => timing.writer)).size === options.writers &&
+        Math.max(...writes.map((timing) => timing.resumed)) < Math.min(...writes.map((timing) => timing.committed))
+      ) {
+        overlappedRounds += 1;
+      }
+    }
+    console.log(
+      `[${options.backend}] overlapped rounds: ${overlappedRounds}/${options.writesPerWriter} (all ${options.writers} children resumed before any committed)`
+    );
+    return { acks, children: result, overlappedRounds };
   } finally {
     await Promise.all(children.map((child) => child.kill()));
   }
