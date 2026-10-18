@@ -24,13 +24,15 @@ export interface FileConcurrencyInput {
 }
 
 /**
- * Per-profile ceiling before the clamps. `postgres` stays at 2 pending fresh
- * measurements with run-owned restore targets. The measurement behind 8 is in
- * reference-implementation/docs/gate-concurrency.md.
+ * Per-profile ceiling before the clamps. Both profiles cap at 8. Postgres was
+ * held at 2 while files shared one restore database and one test dropped every
+ * test database on the cluster; the runner now owns a restore database per
+ * file and each run can use its own cluster (`npm run test:postgres`). The
+ * measurements are in reference-implementation/docs/gate-concurrency.md.
  */
 const PROFILE_CAPS: Record<TestProfile, number> = {
   "memory-default": 8,
-  postgres: 2,
+  postgres: 8,
 };
 
 /** Cap for a profile, exposed so callers can report the policy they ran under. */

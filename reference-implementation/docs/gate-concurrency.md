@@ -3,8 +3,8 @@
 ## Policy
 
 `scripts/file-concurrency.ts` decides how many test files the gate runs at
-once. Each storage profile has a cap: **8** for `memory-default`, **2** for
-`postgres`. The cap is clamped by the available CPU parallelism and by the
+once. Each storage profile has a cap: **8** for `memory-default` and **8**
+for `postgres`. The cap is clamped by the available CPU parallelism and by the
 number of selected test files, and never falls below 1.
 
 `PDPP_TEST_CONCURRENCY`, when it parses to a positive integer, replaces that
@@ -23,12 +23,31 @@ process. Process isolation alone does not bound resource use: files still open
 SQLite databases and temporary directories on the same host, and several tests
 assert real serialization ordering that heavy parallelism can break.
 
-The PostgreSQL cap remains 2 pending fresh measurements. The runner allocates a
-separate disposable restore database for the backup oracle; the configured
-restore URL is validated as before and supplies the isolated cluster connection.
-Direct test invocations outside the runner still require caller-owned targets.
-Raising concurrency for PostgreSQL needs its own restore-aware measurement on a
-PostgreSQL host; a memory-profile result is not authority for it.
+The PostgreSQL cap was 2 for two reasons that no longer hold. Files shared the
+one restore database the backup oracle resets, and
+`test/run-tests-postgres-template-selection.test.ts` cleaned up by dropping every
+`pdpp_test_%` database on the cluster, killing other files' live databases at
+any concurrency above 2. The runner now allocates a cold restore database per
+file and owns every database it creates, and that test drops only the databases
+its nested runner reports. `npm run test:postgres` also gives each run its own
+disposable cluster, so concurrent runs do not share a server. Direct test
+invocations outside the runner still require caller-owned targets.
+
+Measured on 2026-10-18, 80 randomly sampled PostgreSQL-using test files
+(`--files-from`, seed 2), private PostgreSQL 18 per run, `test-ab -n 3`
+interleaved under `CPUQuota=800% MemoryMax=24G`, host load 56 to 90:
+
+| | cap 2 | cap 8 |
+| --- | --- | --- |
+| wall (median, range) | 256.3 s (249.0 to 268.2) | 95.2 s (89.1 to 107.0) |
+| CPU-seconds | 369.2 (358.4 to 372.3) | 380.5 (377.3 to 397.7) |
+| peak memory | 1,936 MB (1,854 to 1,972) | 3,386 MB (3,267 to 3,465) |
+| result, every run | 80 files, 862 passed, 0 failed | 80 files, 862 passed, 0 failed |
+
+Cap 8 cuts wall time by 63 percent for 3 percent more CPU and 1.4 GB more peak
+memory; all three differences are outside the run-to-run ranges. A single run
+at 4 took 126 s, so the gain continues past 4. A 4-CPU hosted runner still
+resolves to 4.
 
 ## Load-sensitive failures are defects, not artifacts
 
@@ -97,8 +116,8 @@ known and a measurement for the same profile justifies it:
 # Memory profile, overriding the default cap of 8.
 PDPP_TEST_PROFILE=memory-default PDPP_TEST_CONCURRENCY=4 npm --prefix reference-implementation test
 
-# PostgreSQL stays capped at 2.
-PDPP_TEST_PROFILE=postgres npm --prefix reference-implementation test
+# PostgreSQL on a private, disposable cluster (cap 8, clamped by CPUs).
+npm --prefix reference-implementation run test:postgres
 ```
 
 Whether 8 suits hardware larger than the measured host is not settled here;
