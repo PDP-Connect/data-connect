@@ -298,17 +298,14 @@ function textualReaders(
   asset: string,
 ): string[] {
   const basename = asset.split("/").at(-1) ?? asset;
+  // Any string literal that ends in the asset's file name counts as a reader,
+  // whatever path prefix it carries (relative, repository-relative, joined).
+  // Over-selecting a reader is cheap; missing one hides a failure.
+  const escaped = basename.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const literal = new RegExp(`["'\`/\\\\]${escaped}["'\`]`);
   const readers: string[] = [];
   for (const [modulePath, source] of sources) {
-    const relativeAsset = relative(dirname(modulePath), asset).replaceAll(
-      "\\",
-      "/",
-    );
-    if (
-      source.includes(JSON.stringify(relativeAsset)) ||
-      source.includes(JSON.stringify(basename))
-    )
-      readers.push(modulePath);
+    if (literal.test(source)) readers.push(modulePath);
   }
   return readers;
 }
@@ -416,8 +413,9 @@ export async function selectAffectedTests(
     const absolute = resolve(repoRoot, path);
     if (sources.has(absolute)) {
       direct.add(absolute);
-      // A JSON asset with an import edge can also be read by path elsewhere.
-      if (extname(path) === ".json")
+      // An asset reached by an import or URL edge can also be read by path
+      // elsewhere; code modules are reached only through the graph.
+      if (!isModulePath(path) || extname(path) === ".json")
         for (const reader of textualReaders(sources, absolute))
           direct.add(reader);
       continue;

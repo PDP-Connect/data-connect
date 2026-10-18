@@ -538,3 +538,23 @@ test("a JSON asset with an import edge also selects its textual readers", async 
   );
   assert.deepEqual(result.files, ["test/a.test.ts", "test/b.test.ts"]);
 });
+
+test("a non-JSON asset with a URL reader also selects its path readers", async () => {
+  const root = await tree({
+    "test/a.test.ts": staticImport("../server/a.ts"),
+    "test/b.test.ts": staticImport("../server/b.ts"),
+    "server/a.ts": 'const template = new URL("../fixtures/template.txt", import.meta.url);',
+    "server/b.ts": 'readFileSync("fixtures/template.txt");',
+    "fixtures/template.txt": "hello",
+  });
+  const result = await selectAffectedTests(
+    root,
+    ["test/a.test.ts", "test/b.test.ts"],
+    {
+      addedOrModified: ["reference-implementation/fixtures/template.txt"],
+      deleted: [],
+    },
+    { depth: "all" },
+  );
+  assert.deepEqual(result.files, ["test/a.test.ts", "test/b.test.ts"]);
+});
