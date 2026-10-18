@@ -3403,7 +3403,9 @@ function canonicalManifestJson(rawManifest: string): string {
     if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
       return candidate;
     }
-    const sorted: Record<string, unknown> = {};
+    // Null prototype: an own "__proto__" key from JSON.parse must stay content
+    // rather than hit the inherited setter and vanish from the digest.
+    const sorted: Record<string, unknown> = Object.create(null);
     for (const key of Object.keys(candidate).sort()) {
       sorted[key] = candidate[key];
     }
@@ -3834,7 +3836,9 @@ function canonicalApprovalReviewJson(value: unknown): string {
     if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
       return candidate;
     }
-    const sorted: Record<string, unknown> = {};
+    // Null prototype: an own "__proto__" key from JSON.parse must stay content
+    // rather than hit the inherited setter and vanish from the digest.
+    const sorted: Record<string, unknown> = Object.create(null);
     for (const key of Object.keys(candidate).sort()) {
       sorted[key] = candidate[key];
     }

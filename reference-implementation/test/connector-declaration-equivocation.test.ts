@@ -179,3 +179,10 @@ test("a trusted internal publication replaces the accepted content for its versi
     assert.deepEqual(await retainedStreamNames(asUrl), ["beta"]);
   });
 });
+
+test("the declaration digest keeps an own __proto__ key as content", async () => {
+  const { connectorDeclarationDigest } = await import("../server/auth.ts");
+  const base = JSON.parse('{"connector_id":"eqv","version":"v1","extra":{"a":1}}');
+  const withProto = JSON.parse('{"connector_id":"eqv","version":"v1","extra":{"a":1,"__proto__":{"b":2}}}');
+  assert.notEqual(connectorDeclarationDigest(base), connectorDeclarationDigest(withProto));
+});
