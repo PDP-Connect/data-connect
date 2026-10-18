@@ -97,7 +97,7 @@ export type QuarantineDecision =
 export function evaluateQuarantine(row: QuarantineGapRow, policy: QuarantinePolicy): QuarantineDecision {
   // biome-ignore lint/suspicious/noUnnecessaryConditions: TypeScript boundary permits nullish input; this guard preserves runtime behavior.
   const threshold = policy?.maxNoProgressAttempts;
-  if (typeof threshold !== "number" || !Number.isFinite(threshold) || threshold <= 0) {
+  if (typeof threshold !== "number" || !Number.isFinite(threshold) || !Number.isInteger(threshold) || threshold <= 0) {
     throw new Error(
       "evaluateQuarantine requires policy.maxNoProgressAttempts as a positive integer; " +
         "a poison item must always have a finite no-progress budget (design.md D10)"

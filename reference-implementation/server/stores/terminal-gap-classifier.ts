@@ -390,7 +390,13 @@ export async function maybeQuarantineGap(
   evidence: Evidence | null | undefined,
   policy: QuarantinePolicy
 ): Promise<MaybeQuarantineResult> {
-  if (!policy || typeof policy.maxNoProgressAttempts !== "number" || policy.maxNoProgressAttempts <= 0) {
+  if (
+    !policy ||
+    typeof policy.maxNoProgressAttempts !== "number" ||
+    !Number.isFinite(policy.maxNoProgressAttempts) ||
+    !Number.isInteger(policy.maxNoProgressAttempts) ||
+    policy.maxNoProgressAttempts <= 0
+  ) {
     throw new Error(
       "maybeQuarantineGap requires policy.maxNoProgressAttempts as a positive integer; " +
         "a poison item must always have a finite no-progress budget (design.md D10)"

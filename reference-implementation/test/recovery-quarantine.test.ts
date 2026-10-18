@@ -69,6 +69,35 @@ test("DEFAULT_QUARANTINE_POLICY is a finite positive integer budget", () => {
   );
 });
 
+test(
+  "effectful quarantine rejects nonfinite and fractional budgets without changing the row",
+  withTempDb(async () => {
+    const store = createSqliteConnectorDetailGapStore();
+    const adapter = quarantineStore(store);
+    for (const [index, threshold] of [Number.NaN, Number.POSITIVE_INFINITY, 1.5].entries()) {
+      const gap = await seedGap(store, `quarantine_invalid_budget_${index}`);
+      let thrown: unknown;
+      try {
+        await maybeQuarantineGap(adapter, gap.gap_id, null, { maxNoProgressAttempts: threshold });
+      } catch (error) {
+        thrown = error;
+      }
+      const after = await store.getGapById(gap.gap_id);
+      assert.ok(after);
+      assert.equal(after.status, "pending", "invalid policy cannot terminalize an unattempted gap");
+      assert.equal(after.attempt_count, 0);
+      assert.ok(thrown instanceof Error, "invalid policy must fail loudly");
+    }
+  })
+);
+
+test("pure quarantine rejects a fractional budget", () => {
+  assert.throws(
+    () => evaluateQuarantine({ attempt_count: 1, status: "pending" }, { maxNoProgressAttempts: 1.5 }),
+    /positive integer/
+  );
+});
+
 test("a quarantined gap classifies as connector_defect and is denied as a system_issue (no owner retry)", () => {
   const row = {
     attempt_count: 8,
