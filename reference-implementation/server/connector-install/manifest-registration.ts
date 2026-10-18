@@ -20,7 +20,7 @@ import { reconcileConnectorSearchIndexScopes } from "../search-index-reconcile.t
  */
 export const installedConnectorManifestRegistration = {
   registerManifest: (manifest: Record<string, unknown>): Promise<string> =>
-    registerConnector(manifest, { queueDerivedRepair: true, skipDerivedRepair: true }),
+    registerConnector(manifest, { queueDerivedRepair: true, replaceAcceptedDigest: true, skipDerivedRepair: true }),
   repairManifestDerivedState: async (manifest: Record<string, unknown>): Promise<string> => {
     const { connectorId } = normalizeConnectorManifestForStorage(manifest);
     const columns = await runRecordDerivedRepairRound({ connectorId });

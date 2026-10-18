@@ -3421,6 +3421,17 @@ function declarationVersionOf(manifestJson: string): string | null {
   return typeof version === "string" && version ? version : null;
 }
 
+/** Version and content digest of a stored manifest, or null when it holds neither (or does not parse). */
+function declarationDigestOf(manifest: unknown): { digest: string; version: string } | null {
+  try {
+    const parsed = (typeof manifest === "string" ? JSON.parse(manifest) : manifest) as Record<string, unknown>;
+    const version = parsed?.version;
+    return typeof version === "string" && version ? { digest: connectorDeclarationDigest(parsed), version } : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * The digest of the content first accepted under (connector, version), or
  * null when none was recorded (for example a version accepted before digests
@@ -3492,7 +3503,7 @@ function derivedRepairPlan(
 async function persistManifestAndAdvanceGenerations(
   connectorId: string,
   manifestJson: string,
-  options: { queueDerivedRepair?: boolean } = {}
+  options: { queueDerivedRepair?: boolean; replaceAcceptedDigest?: boolean } = {}
 ): Promise<boolean> {
   const markedAt = new Date().toISOString();
   if (isPostgresStorageBackend()) {
@@ -3505,19 +3516,27 @@ async function persistManifestAndAdvanceGenerations(
       if (activation.rows[0]?.state === "active") {
         assertActiveConnectorStreamShape(activation.rows[0].canonical_manifest_json, manifestJson);
       }
-      const previous = options.queueDerivedRepair
-        ? (
-            await client.query<{ manifest: unknown }>(
-              "SELECT manifest FROM connectors WHERE connector_id = $1 FOR UPDATE",
-              [connectorId]
-            )
-          ).rows[0]?.manifest
-        : null;
+      const previous = (
+        await client.query<{ manifest: unknown }>("SELECT manifest FROM connectors WHERE connector_id = $1 FOR UPDATE", [
+          connectorId,
+        ])
+      ).rows[0]?.manifest;
+      // A manifest stored before digests were retained is the only record of
+      // its version's accepted content: keep it before it is replaced.
+      const previousDigest = previous ? declarationDigestOf(previous) : null;
+      if (previousDigest) {
+        await client.query(
+          `INSERT INTO connector_accepted_declarations(connector_id, declaration_version, content_digest)
+           VALUES($1, $2, $3) ON CONFLICT DO NOTHING`,
+          [connectorId, previousDigest.version, previousDigest.digest]
+        );
+      }
       const acceptedVersion = declarationVersionOf(manifestJson);
       if (acceptedVersion) {
         await client.query(
           `INSERT INTO connector_accepted_declarations(connector_id, declaration_version, content_digest)
-           VALUES($1, $2, $3) ON CONFLICT DO NOTHING`,
+           VALUES($1, $2, $3)
+           ON CONFLICT ${options.replaceAcceptedDigest ? "(connector_id, declaration_version) DO UPDATE SET content_digest = EXCLUDED.content_digest" : "DO NOTHING"}`,
           [connectorId, acceptedVersion, connectorDeclarationDigest(JSON.parse(manifestJson))]
         );
       }
@@ -3587,11 +3606,20 @@ async function persistManifestAndAdvanceGenerations(
         }
       }
     }
+    const previousDigest = existing?.manifest ? declarationDigestOf(existing.manifest) : null;
+    if (previousDigest) {
+      execDynamicSqlAcknowledged(
+        `INSERT INTO connector_accepted_declarations(connector_id, declaration_version, content_digest)
+         VALUES(?, ?, ?) ON CONFLICT DO NOTHING`,
+        [connectorId, previousDigest.version, previousDigest.digest]
+      );
+    }
     const acceptedVersion = declarationVersionOf(manifestJson);
     if (acceptedVersion) {
       execDynamicSqlAcknowledged(
         `INSERT INTO connector_accepted_declarations(connector_id, declaration_version, content_digest)
-         VALUES(?, ?, ?) ON CONFLICT DO NOTHING`,
+         VALUES(?, ?, ?)
+         ON CONFLICT ${options.replaceAcceptedDigest ? "(connector_id, declaration_version) DO UPDATE SET content_digest = excluded.content_digest" : "DO NOTHING"}`,
         [connectorId, acceptedVersion, connectorDeclarationDigest(JSON.parse(manifestJson))]
       );
     }
@@ -5504,6 +5532,12 @@ export async function registerConnector(
     backfillRetrievalIndexes?: boolean;
     /** Queue the record-column and search-index repair durably with the manifest (see derivedRepairPlan). */
     queueDerivedRepair?: boolean;
+    /**
+     * Trusted internal publication (startup reconcile, installer): replace the
+     * accepted digest for the version written instead of keeping the first.
+     * The HTTP registration path never sets it.
+     */
+    replaceAcceptedDigest?: boolean;
     skipDerivedRepair?: boolean;
     skipManifestPersistence?: boolean;
   } = {}
@@ -5513,6 +5547,7 @@ export async function registerConnector(
   if (!options.skipManifestPersistence) {
     await persistManifestAndAdvanceGenerations(connectorId, JSON.stringify(storedManifest), {
       queueDerivedRepair: options.queueDerivedRepair === true,
+      replaceAcceptedDigest: options.replaceAcceptedDigest === true,
     });
   }
   await maybeRegisterConnectorPhaseForTest("after-manifest-persisted", { connectorId, manifest: storedManifest });

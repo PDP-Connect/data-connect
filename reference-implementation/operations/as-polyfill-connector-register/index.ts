@@ -102,17 +102,21 @@ export async function executeAsPolyfillConnectorRegister(
   deps.validateManifest(manifest as Record<string, unknown>);
   const { connectorId, storedManifest } = deps.normalizeManifestForStorage(manifest as Record<string, unknown>);
   const version = storedManifest.version;
+  const incomingDigest = deps.declarationDigest(storedManifest);
   let acceptedDigest: string | null = null;
   if (typeof version === "string" && version) {
-    acceptedDigest = (await deps.getAcceptedDeclarationDigest(connectorId, version)) ?? null;
-    if (acceptedDigest === null) {
-      // No digest was retained for this key (accepted before digests were
-      // kept): the current manifest is the only accepted content to compare.
-      const current = await acceptedManifestFor(deps, connectorId);
-      acceptedDigest = current && current.version === version ? deps.declarationDigest(current) : null;
+    const current = await acceptedManifestFor(deps, connectorId);
+    const currentDigest = current && current.version === version ? deps.declarationDigest(current) : null;
+    // The current stored manifest is what the server serves: re-registering it
+    // is idempotent even if a trusted internal publication has since rewritten
+    // it under the same version.
+    if (currentDigest !== incomingDigest) {
+      // No digest retained for this key means it was accepted before digests
+      // were kept: the current manifest is then the only accepted content.
+      acceptedDigest = (await deps.getAcceptedDeclarationDigest(connectorId, version)) ?? currentDigest;
     }
   }
-  if (acceptedDigest !== null && acceptedDigest !== deps.declarationDigest(storedManifest)) {
+  if (acceptedDigest !== null && acceptedDigest !== incomingDigest) {
     return {
       errorCode: "declaration_equivocation",
       errorMessage: `Connector ${connectorId} version ${String(version)} is already registered with different content; register a new version instead`,

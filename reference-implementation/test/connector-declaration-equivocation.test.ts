@@ -137,3 +137,45 @@ test("content accepted under an earlier version is retained after a newer versio
     assert.equal((await register(asUrl, manifest("v1", "alpha"))).status, 201);
   });
 });
+
+/** Drops the retained history, as in a database that predates it: only the current manifest remains. */
+async function forgetAcceptedHistory(): Promise<void> {
+  const { isPostgresStorageBackend, postgresQuery } = await import("../server/postgres-storage.ts");
+  if (isPostgresStorageBackend()) {
+    await postgresQuery("DELETE FROM connector_accepted_declarations WHERE connector_id = $1", ["eqv"]);
+    return;
+  }
+  const { getDb } = await import("../server/db.ts");
+  getDb().prepare("DELETE FROM connector_accepted_declarations WHERE connector_id = ?").run("eqv");
+}
+
+test("a manifest stored before history was kept stays protected after a newer version replaces it", async () => {
+  await withServer(async (asUrl) => {
+    assert.equal((await register(asUrl, manifest("v1", "alpha"))).status, 201);
+    await forgetAcceptedHistory();
+
+    assert.equal((await register(asUrl, manifest("v2", "beta"))).status, 201);
+
+    const conflicting = await register(asUrl, manifest("v1", "gamma"));
+    assert.equal(conflicting.status, 409);
+    assert.equal(((await conflicting.json()) as { error: { code: string } }).error.code, "declaration_equivocation");
+    assert.equal((await register(asUrl, manifest("v1", "alpha"))).status, 201);
+  });
+});
+
+test("a trusted internal publication replaces the accepted content for its version", async () => {
+  await withServer(async (asUrl) => {
+    assert.equal((await register(asUrl, manifest("v1", "alpha"))).status, 201);
+
+    // Startup reconcile and the installer rewrite content under the same version.
+    const { registerConnector } = await import("../server/auth.ts");
+    await registerConnector(manifest("v1", "beta"), { replaceAcceptedDigest: true });
+    assert.deepEqual(await retainedStreamNames(asUrl), ["beta"]);
+
+    // The corrected content is not equivocation; the superseded content is.
+    assert.equal((await register(asUrl, manifest("v1", "beta"))).status, 201);
+    const stale = await register(asUrl, manifest("v1", "alpha"));
+    assert.equal(stale.status, 409);
+    assert.deepEqual(await retainedStreamNames(asUrl), ["beta"]);
+  });
+});
