@@ -34,6 +34,7 @@
     "typecheck": "tsc -b --noEmit",
     "test": "npm run typecheck && npm run test:unit",
     "test:unit": "scripts/test-sandbox/test-sandbox -- vitest run",
+    "test:fast": "node scripts/test-fast.mjs",
     "test:pdpp-interop": "node --test scripts/pdpp-interoperability-e2e.test.mjs",
     "test:e2e": "npm --prefix e2e run test:e2e",
     "preview": "vite preview",
