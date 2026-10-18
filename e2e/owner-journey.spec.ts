@@ -10,11 +10,7 @@
  * public-URL remote-access posture, and a blocked-IPC error banner leaking
  * onto Settings. It asserts on the rendered page, not on component internals.
  *
- * Target a running console with:
- *   E2E_BASE_URL=http://127.0.0.1:PORT E2E_OWNER_PASSWORD=... npm run test:e2e
- *
- * See e2e/README.md for how to find the port and password for a given
- * console instance.
+ * Run npm run test:e2e to start a disposable console. See e2e/README.md.
  */
 import { expect, test } from "@playwright/test"
 
@@ -76,9 +72,7 @@ async function loginAsOwner(
 ): Promise<void> {
   if (!OWNER_PASSWORD) {
     throw new Error(
-      "E2E_OWNER_PASSWORD is not set. Pass the console's actual owner password " +
-        "(not necessarily the contents of ~/.tmp/unified-owner-password - that file can be stale for a " +
-        "given running instance; read PDPP_OWNER_PASSWORD from the target process's environment if unsure)."
+      "Run npm run test:e2e to start a disposable console."
     )
   }
   await page.goto(`${BASE_URL}/owner/login?return_to=%2F`)

@@ -1,59 +1,76 @@
-# Owner-journey e2e check
+# Disposable console e2e checks
 
-Runs a headless-browser check against a **running** console and asserts on
-what the owner actually sees: the connector catalog on `/sources/add`, and
-the Remote access / About sections on `/settings`.
-
-## Run it
+Install dependencies and Chromium once, with network access:
 
 ```sh
-E2E_BASE_URL=http://127.0.0.1:<port> E2E_OWNER_PASSWORD=<password> npm run test:e2e
+npm ci --no-audit --no-fund --allow-git=root
+npm --prefix e2e ci --no-audit --no-fund
+npm --prefix e2e exec -- playwright install chromium
 ```
 
-- `E2E_BASE_URL` — origin of a running console (Tauri desktop console, or the
-  personal-server's `apps/console` bundled console). Defaults to
-  `http://127.0.0.1:1421`.
-- `E2E_OWNER_PASSWORD` — the target instance's actual `PDPP_OWNER_PASSWORD`.
-  **This is not necessarily the contents of `~/.tmp/unified-owner-password`**
-  — that file is written once and can go stale relative to a specific
-  running process. If login fails, read `PDPP_OWNER_PASSWORD` out of the
-  target process's own environment (`tr '\0' '\n' < /proc/<pid>/environ | grep PDPP_OWNER_PASSWORD`).
-
-### Finding a running console's port
-
-The console is a separate HTTP server (Next.js `apps/console`), not the
-Tauri window's native webview — Playwright cannot drive the webview directly
-over its remote-debugging port. To find the console's port for a given
-running app instance, locate its `console/launch.mjs` child process and read
-the port it bound:
+Run from the repository root:
 
 ```sh
-pgrep -af 'reference-stack/console/launch.mjs'
-# then, for the next-server child of that pid:
-ss -tlnp | grep 'next-server'
+npm run test:e2e
+# Equivalent:
+npm --prefix e2e run test:e2e
+# Select a spec:
+npm --prefix e2e run test:e2e -- live-settings.spec.ts
 ```
 
-curl the candidate port; the console redirects unauthenticated requests to
-`/owner/login` with a 307, and the login page's `<title>` is
-`DataConnect — Owner sign-in` (or `<instance name> — Owner sign-in` when
-`PDPP_INSTANCE_NAME` is set). Once logged in, `/settings`
-renders with `<title>Settings</title>`.
+Linux with unprivileged network namespaces is required. The harness uses
+`scripts/test-sandbox/test-sandbox --net none` when installed, or `bwrap`
+with private network and PID namespaces. It fails closed when isolation is
+unavailable. Only loopback interfaces may exist inside the namespace, so the
+servers and browser cannot reach host services or the internet.
 
-## What this does not catch
+The harness refuses caller-supplied `E2E_BASE_URL`, `E2E_DATA_DIR`,
+`E2E_OWNER_PASSWORD`, `E2E_REMOTE_BASE_URL`, and `E2E_BUFFERING_BASE_URL`,
+including empty values, before creating files or launching processes. Unset
+these variables. Running these specs against a live console is not supported.
 
-This check drives a plain headless browser against the console's HTTP port.
-It does **not** run inside the Tauri webview, so it cannot exercise bugs that
-only occur through the Tauri IPC bridge (e.g. a blocked `invoke()` call that
-only fails inside the packaged app). The "not allowed" / "Plugin not found"
-assertion on Settings will only catch that class of bug if the error banner
-text is rendered into the page owner regardless of transport — verify this
-assertion's honesty against a real Tauri-window repro before trusting a green
-run to mean the IPC bug is fixed.
+Each run starts its own reference server and console with random loopback
+ports, a random owner password, and a fresh data directory and SQLite database.
+Child environments exclude ambient credentials, backend URLs, and Node loaders.
+The reference server starts directly without the development environment loader
+or the shared development database defaults. The harness also refuses console `.env` files so Next cannot load ambient configuration.
+The console uses `next dev --webpack`:
+its first measured login readiness took 17.70 seconds, and a warm start took
+5.61 seconds. It compiles routes on demand, once per run, rather than building a
+second production bundle for each spec. No product servers are reused.
 
-## CI status
+All three spec files share one disposable stack, with one Playwright worker
+because settings are global to that stack. Each browser context is test-owned.
+Live-settings checks loopback isolation, the real data-directory path, and a
+random ownership marker before writing or changing settings. Watcher shutdown
+waits for its last write; fixture teardown closes contexts and the TCP relay even
+when assertions fail. Tunnel-dependent coverage skips in this offline lane.
 
-Not wired into a required gate yet. See the repo's `E2E-JOURNEY-0918.md`
-report for what's needed before this can gate merges (a bootable reference
-server on CI, a stable owner-password provisioning story, and a decision on
-how to start the console under CI without the currently-broken `npm run
-tauri:dev` path).
+The harness stops its process groups, waits for exit, and removes scratch state
+on success, failure, timeout (ten minutes), SIGINT, and SIGTERM. Signal exits are
+130 and 143. Scratch lives under `TEST_TMPDIR`, or the namespace's private `/tmp`.
+Failure traces survive in gitignored `e2e/test-results/`, outside scratch. The
+next run replaces that directory, keeping failure artifacts bounded. Traces can
+contain disposable test credentials; server diagnostics redact passwords and
+omit cookie or authorization lines.
+
+Offline harness acceptance checks:
+
+```sh
+npm --prefix e2e run test:harness
+npm --prefix e2e run test:harness:cleanup
+```
+
+The cleanup check records process groups and verifies no descendants survive
+normal exit, a failing test process, SIGINT, SIGTERM, or timeout. It uses synthetic
+processes and never connects to a server. The browser specs exercise the HTTP
+console, not the Tauri webview or native IPC. These checks are not wired into CI.
+
+## Current offline limit
+
+At the baseline revision for this harness, connector discovery fetches its signed
+catalog from `ghcr.io` on each catalog request. The private namespace blocks that
+request, so the full owner journey and catalog checks fail. The tab-to-tab
+settings and offline link checks pass. The relay check also has an unresolved
+failure in its focus-refresh assertion. Keep the isolation boundary in place;
+these gaps must be resolved before this command can pass all non-tunnel checks.
