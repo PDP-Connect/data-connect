@@ -52,8 +52,11 @@ jobs:
         run: |
           set -euo pipefail
           major=$(ls /usr/lib/postgresql | sort -n | tail -1)
-          sudo apt-get update -qq
+          # The semantic tests need pgvector 0.8 or newer (hnsw.iterative_scan);
+          # the distribution archive ships an older one, so use the PGDG archive.
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
           sudo apt-get install -y -qq "postgresql-${major}-pgvector"
+          dpkg-query -W "postgresql-${major}" "postgresql-${major}-pgvector"
           echo "TEST_SANDBOX_PG=${major}" >> "$GITHUB_ENV"
 
       - name: Install dependencies
