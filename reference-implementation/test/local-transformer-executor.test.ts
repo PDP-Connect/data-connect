@@ -286,12 +286,15 @@ test("deadline fences immediately, then rejects only after confirmed TERM exit",
 
 test("TERM-ignore uses KILL and still waits for confirmed exit before cleanup", async () => {
   const children: FakeChild[] = [];
-  const executor = executorFor(children, { deadlineMs: 5, killGraceMs: 15, termGraceMs: 5 });
+  const termGraceMs = 50;
+  const executor = executorFor(children, { deadlineMs: 5, killGraceMs: 15, termGraceMs });
   const work = executor.embed("input", "backend-a", {});
   // biome-ignore lint/style/useDestructuring: localized test assertion preserves its explicit contract.
   const child = children[0];
   assert.ok(child);
+  const sentAt = new Map<NodeJS.Signals, number>();
   child.onKill = (signal) => {
+    sentAt.set(signal, performance.now());
     if (signal === "SIGKILL") {
       child.exit(0, signal);
     }
@@ -299,6 +302,13 @@ test("TERM-ignore uses KILL and still waits for confirmed exit before cleanup", 
 
   await assert.rejects(work, assertCode("transformer_deadline"));
   assert.deepEqual(child.signals, ["SIGTERM", "SIGKILL"]);
+  // A lower bound only: a slow host can delay KILL, never bring it forward.
+  // Timers may fire up to 1 ms early, hence the 1 ms allowance.
+  const graceObservedMs = (sentAt.get("SIGKILL") ?? 0) - (sentAt.get("SIGTERM") ?? 0);
+  assert.ok(
+    graceObservedMs >= termGraceMs - 1,
+    `KILL came ${graceObservedMs.toFixed(1)} ms after TERM, before the ${termGraceMs} ms grace ended`
+  );
   assert.equal(executor.telemetry().childPid, null, "KILL exit is confirmed before child state is released");
 });
 
