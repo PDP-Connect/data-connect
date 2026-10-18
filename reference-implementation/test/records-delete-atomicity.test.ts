@@ -19,13 +19,9 @@
  * only run after a successful commit; index drift recovery is the search
  * indexer's responsibility, not the durable record store's.
  *
- * Old failure mode the rollback test pins: prior to this change, the durable
- * writes ran outside an explicit SQLite transaction. If the process crashed
- * between the live `records` mutation and the `record_changes` append (or
- * between the change-log append and the `version_counter` advance), the
- * three tables drifted: live state could move while the change feed and
- * counter did not, so `changes_since` cursors could observe gaps,
- * collisions, or stale max_versions on the next mutation.
+ * The test injects an exception after the live delete-marker mutation and
+ * before the history append. This checks transaction rollback at that cut;
+ * it does not simulate process termination, power loss or fsync failure.
  *
  * Spec: openspec/changes/harden-record-delete-atomicity/specs/
  *       reference-implementation-architecture/spec.md
@@ -201,7 +197,7 @@ test("direct delete on an already-deleted record returns 0 and does not append r
   }
 });
 
-test("failure between live mutation and record_changes append rolls back the whole durable direct-delete unit", async () => {
+test("injected failure after live delete mutation rolls back before history append", async () => {
   setup();
   try {
     await ingestRecord(CONNECTOR_ID, makeUpsert("a", { v: 1 }));
@@ -213,10 +209,9 @@ test("failure between live mutation and record_changes append rolls back the who
     assert.equal(baselineLive.version, 1);
     assert.equal(baselineCounter, 1);
 
-    // Inject a failure *after* the records delete-marker mutation but
-    // *before* the record_changes append. Without an explicit transaction
-    // the records mutation would persist; with the new atomic boundary the
-    // whole unit rolls back.
+    // Inject a failure after the records delete-marker mutation but before
+    // the record_changes append. This hook gives a deterministic exception
+    // cut, not a literal process kill.
     __setDeleteFaultHookForTest((point: string) => {
       if (point === "after-records-mutation") {
         throw new Error("injected fault between records and record_changes (delete)");
