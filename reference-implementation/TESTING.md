@@ -88,6 +88,8 @@ the normal entry points, which keep the sandbox, the per-file databases and the 
 - memory profile: `PDPP_TEST_PROFILE=memory-default npm test -- --files-from list.txt`
 - PostgreSQL: `npm run test:postgres -- --files-from list.txt` (the private cluster, sentinel and
   per-file database come with it; no manual setup)
+Keep the list out of `/tmp`: the sandbox gives each run a private `/tmp`, so the runner cannot see
+a list written there.
 - New PG test file: register it in `scripts/postgres-template-eligibility.ts` (eligible if it only uses
   Postgres as seeded data; cold-required if it observes bootstrap or migration), update the counts in
   `PG-PROFILE-51-REPORT.md`, and run `test/postgres-template-eligibility-inventory.test.ts` before the PR.
