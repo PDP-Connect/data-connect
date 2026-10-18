@@ -112,3 +112,28 @@ test("journal update preserves prior active record", (t) => {
   });
   assert.match(readFileSync(connectorUninstallJournalPath(dataDir, "github"), "utf8"), /sha256-three-next/);
 });
+
+test("journal read rejects a different connector identity than its filename", (t) => {
+  const dataDir = tempDataDir(t);
+  writeConnectorUninstallJournal(dataDir, {
+    connectorId: "github",
+    priorActiveRecord: { connectorId: "github" },
+    rootMoves: [],
+  });
+  const path = connectorUninstallJournalPath(dataDir, "github");
+  writeFileSync(
+    path,
+    JSON.stringify({
+      version: 1,
+      connectorId: "calendar",
+      priorActiveRecord: { connectorId: "calendar" },
+      rootMoves: [],
+    })
+  );
+
+  assert.throws(
+    () => readConnectorUninstallJournal(dataDir, "github"),
+    "a filename-scoped lifecycle lock must never admit another connector's journal"
+  );
+  assert.equal(existsSync(path), true, "rejected journal remains available for diagnosis");
+});
