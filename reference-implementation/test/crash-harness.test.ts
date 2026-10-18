@@ -87,7 +87,7 @@ test(
   })
 );
 
-for (const mode of ["parked", "running"] as const) {
+for (const mode of ["parked", "running", "starting"] as const) {
   test(
     `a ${mode} child dies when its parent is SIGKILLed`,
     withLog(async (log) => {
@@ -101,3 +101,19 @@ for (const mode of ["parked", "running"] as const) {
     })
   );
 }
+
+let leftoverPid = 0;
+
+test(
+  "a child still running when its test ends is left for the harness to kill",
+  withLog(async (log) => {
+    const child = spawnCrashChild(CHILD, { args: [log, "linger"], points: ["after-one"] });
+    await child.parked("after-one");
+    leftoverPid = child.pid;
+  })
+);
+
+test("the harness kills that child once the test that spawned it has ended", async () => {
+  assert.ok(leftoverPid > 0);
+  assert.equal(await waitUntilGone(leftoverPid), true, `crash child ${leftoverPid} outlived its test`);
+});

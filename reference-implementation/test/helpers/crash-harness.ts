@@ -12,7 +12,7 @@
  * non-blocking, the read is retried every 5 ms; the child's code still does
  * not run.)
  *
- * Cleanup: children still alive when the test file finishes are SIGKILLed.
+ * Cleanup: a child still alive when the test that spawned it ends is SIGKILLed.
  * A child whose parent dies kills itself: at once if parked, else within
  * 250 ms (only while its event loop runs; a synchronous hang needs the outer
  * test-sandbox scope).
@@ -40,25 +40,10 @@ import { after } from "node:test";
 import { __setCrashPointHookForTest } from "../../server/crash-point.ts";
 
 const POINTS_ENV = "PDPP_CRASH_HARNESS_POINTS";
+const PARENT_ENV = "PDPP_CRASH_HARNESS_PARENT";
 const CONTROL_FD = 3;
 const RI_ROOT = resolve(import.meta.dirname, "../..");
 const DEFAULT_TIMEOUT_MS = 60_000;
-
-const liveChildren = new Set<ChildProcess>();
-let cleanupRegistered = false;
-
-/** A failed assertion must not leave a parked child holding the test runner open. */
-function killLiveChildrenAfterThisFile(): void {
-  if (cleanupRegistered) {
-    return;
-  }
-  cleanupRegistered = true;
-  after(() => {
-    for (const child of liveChildren) {
-      child.kill("SIGKILL");
-    }
-  });
-}
 
 export interface CrashChildExit {
   readonly code: number | null;
@@ -96,24 +81,26 @@ function describe(exit: CrashChildExit): string {
 /** Start a child script (a .ts file run under tsx from the reference-implementation root). */
 export function spawnCrashChild(script: string, options: CrashChildOptions = {}): CrashChild {
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  // A child is not a test file: without NODE_TEST_CONTEXT it never registers node:test hooks.
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    ...options.env,
+    [PARENT_ENV]: String(process.pid),
+    [POINTS_ENV]: JSON.stringify(options.points ?? []),
+  };
+  delete env.NODE_TEST_CONTEXT;
   const child: ChildProcess = spawn(
     process.execPath,
     ["--import", "tsx", "--import", join(RI_ROOT, "scripts/hermetic/preload.ts"), script, ...(options.args ?? [])],
     {
       cwd: RI_ROOT,
-      env: {
-        ...process.env,
-        ...options.env,
-        [POINTS_ENV]: JSON.stringify(options.points ?? []),
-      },
+      env,
       stdio: ["ignore", "pipe", "pipe", "pipe"],
     }
   );
   if (child.pid === undefined) {
     throw new Error(`crash child failed to start: ${script}`);
   }
-  killLiveChildrenAfterThisFile();
-  liveChildren.add(child);
   let stdout = "";
   let stderr = "";
   child.stdout?.on("data", (chunk) => (stdout += String(chunk)));
@@ -135,11 +122,20 @@ export function spawnCrashChild(script: string, options: CrashChildOptions = {})
   const exited = new Promise<CrashChildExit>((settle) => {
     child.once("close", (code, signal) => {
       done = true;
-      liveChildren.delete(child);
       wake?.();
       settle({ code, signal, stderr, stdout });
     });
   });
+
+  // A failed assertion must not leave a parked child holding the test file open:
+  // inside a test, `after` runs when the test that spawned this child ends.
+  if (process.env.NODE_TEST_CONTEXT !== undefined) {
+    after(() => {
+      if (!done) {
+        child.kill("SIGKILL");
+      }
+    });
+  }
 
   const kill = async (): Promise<CrashChildExit> => {
     if (!done) {
@@ -242,12 +238,16 @@ export function armCrashPoints(): void {
   if (points === undefined) {
     return;
   }
-  const parent = process.ppid;
-  setInterval(() => {
+  // Compare with the pid that spawned us, not our ppid now: the parent may
+  // already have died while tsx was still loading this script.
+  const parent = Number(process.env[PARENT_ENV]);
+  const exitIfOrphaned = () => {
     if (process.ppid !== parent) {
       process.kill(process.pid, "SIGKILL");
     }
-  }, 250).unref();
+  };
+  exitIfOrphaned();
+  setInterval(exitIfOrphaned, 250).unref();
   const armed = new Set<string>(JSON.parse(points) as string[]);
   if (armed.size === 0) {
     return;
