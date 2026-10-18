@@ -37,7 +37,9 @@ import {
 const CONNECTOR_ID = "https://test.pdpp.dev/connectors/version-contention";
 const STREAM = "items";
 const WRITERS = 3;
-const WRITES_PER_WRITER = 6;
+// SQLite overlap is scheduling-dependent (observed 1-4 of 6 rounds per run), so run
+// enough rounds that "no round overlapped" means the release is broken, not unlucky.
+const WRITES_PER_WRITER = 20;
 
 function readRows(): {
   changes: ChangeRow[];
