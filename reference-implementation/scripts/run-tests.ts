@@ -574,10 +574,21 @@ const EMPTY_KILLED_SUMMARY: StructuredSummary = {
 };
 // A killed child's result holds no event stream, so it contributes no
 // assertion counts; its failure shows in failed_files and
-// the exit code.
-const summaries: StructuredSummary[] = results.map((result) =>
-  result.killed ? EMPTY_KILLED_SUMMARY : structuredNodeSummary(result.output)
-);
+// the exit code. A file whose events cannot be accounted (a rejected todo, an
+// unexplained skip, a malformed event) is not a runner crash either: it
+// contributes an empty summary and is reported after the accounting result.
+const accountingErrors: { error: unknown; filePath: string }[] = [];
+const summaries: StructuredSummary[] = results.map((result) => {
+  if (result.killed) {
+    return EMPTY_KILLED_SUMMARY;
+  }
+  try {
+    return structuredNodeSummary(result.output);
+  } catch (error) {
+    accountingErrors.push({ error, filePath: result.filePath });
+    return EMPTY_KILLED_SUMMARY;
+  }
+});
 const skipReasons: Record<string, number> = {};
 for (const summary of summaries) {
   for (const [reason, count] of Object.entries(summary.skip_reasons)) {
@@ -591,9 +602,14 @@ const failed = results.find((result) => result.exitCode !== 0);
 const silentFailures = results.filter(
   (result, index) => result.exitCode === 0 && (summaries[index]?.failed ?? 0) > 0
 );
+// A file fails once: on a non-zero exit, a recorded failure, or an accounting error.
+const failedOtherwise = new Set([
+  ...silentFailures,
+  ...results.filter((result) => accountingErrors.some((entry) => entry.filePath === result.filePath)),
+]);
 const counts = {
   assertions: summaries.reduce((sum, summary) => sum + summary.assertions, 0),
-  ...countFileOutcomes(results),
+  ...countFileOutcomes(results, failedOtherwise),
   failed: summaries.reduce((sum, summary) => sum + summary.failed, 0),
   passed: summaries.reduce((sum, summary) => sum + summary.passed, 0),
   planned_files: testFiles.length,
@@ -612,6 +628,7 @@ if (
   filesFromIndex === -1 &&
   !failed &&
   silentFailures.length === 0 &&
+  accountingErrors.length === 0 &&
   signalExitCode === undefined &&
   results.length === testFiles.length
 ) {
@@ -624,6 +641,9 @@ if (
   } catch (error) {
     runnerErrors.push(error);
   }
+}
+for (const { error, filePath } of accountingErrors) {
+  runnerErrors.push(new Error(`accounting error in ${filePath}: ${error instanceof Error ? error.message : String(error)}`));
 }
 if (runnerErrors.length > 0 && failed) {
   runnerErrors.push(new Error(`test process for ${failed.filePath} exited with code ${failed.exitCode}:\n${failed.output}`));

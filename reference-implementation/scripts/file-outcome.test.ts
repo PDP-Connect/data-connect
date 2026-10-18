@@ -83,9 +83,10 @@ test("a child killed for idleness is a failed result with structured fields and 
     assert.match(outcome.output, /TIMED OUT \(idle\) after 400ms/);
     assert.match(outcome.output, /elapsed: \d+ms/);
     assert.match(outcome.output, /signal: \w+/);
-    assert.match(outcome.output, /last test started: none/);
+    assert.doesNotMatch(outcome.output, /last test started/);
     assert.doesNotMatch(outcome.output, /before-hang/);
     const raw = await readRawTail(dir, outcome.output);
+    assert.match(raw.text, /^last test started: none\n/);
     assert.match(raw.text, /before-hang/);
     assert.match(raw.text, /stderr-before-hang/);
   });
@@ -132,7 +133,7 @@ test("a child that exits on its own keeps its exit code and full output", async 
   assert.equal(outcome.output, "\n==> test/exits.test.ts\ndone\n");
 });
 
-test("the result names the last test the reporter announced as started", async () => {
+test("the private file, not the result, names the last test the reporter announced as started", async () => {
   const events = [
     '{"type":"test:running","details":{"name":"first"}}',
     '{"type":"test:pass","details":{"type":"test","name":"first"}}',
@@ -141,8 +142,12 @@ test("the result names the last test the reporter announced as started", async (
   ]
     .map((json) => `PDPP_TEST_ACCOUNTING_EVENT ${json}\n`)
     .join("");
-  const outcome = await killedResult(events);
-  assert.match(outcome.output, /last test started: "the one that hung"\n/);
+  await withScratch(async (dir) => {
+    const outcome = await killedResult(events, dir);
+    assert.doesNotMatch(outcome.output, /last test started|the one that hung/);
+    const raw = await readRawTail(dir, outcome.output);
+    assert.ok(raw.text.startsWith('last test started: "the one that hung"\n'), raw.text);
+  });
 });
 
 // Each shape hid a secret from a redactor in a past review round: a label whose
@@ -253,6 +258,11 @@ test("a spawn error is a runner error and rejects", async () => {
     superviseFileChild({ child, filePath: "test/never.test.ts", hardDeadlineMs: 20_000, idleBudgetMs: 20_000 }),
     /ENOENT/
   );
+});
+
+test("a file counts as failed once, whether by exit code or by recorded failure", () => {
+  const [a, b, c] = [result("a", 0), result("b", 1), result("c", 0)];
+  assert.deepEqual(countFileOutcomes([a, b, c], new Set([b, c])), { completed_files: 3, failed_files: 2 });
 });
 
 test("completed_files counts every executed file even when one failed", () => {

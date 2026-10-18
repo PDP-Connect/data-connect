@@ -29,7 +29,7 @@ export interface NodeTestResult {
   output: string;
 }
 
-/** The raw output of a killed child is kept to its newest this many bytes, in a private file. */
+/** A killed child's private file is at most this many bytes: a header line, then its newest raw output. */
 export const KILLED_OUTPUT_TAIL_BYTES = 64 * 1024;
 
 /** The newest `maxBytes` of `output`, starting on a character boundary. */
@@ -90,18 +90,14 @@ export async function fileResultFromClose(input: FileCloseInput): Promise<NodeTe
       output: `\n==> ${input.filePath}\n${withoutProgressEvents(input.output)}`,
     };
   }
-  const lastTest = lastStartedTestName(input.output);
-  const fields = [
-    line,
-    `elapsed: ${input.durationMs}ms`,
-    `signal: ${input.signal ?? "none"}`,
-    `last test started: ${lastTest === undefined ? "none" : JSON.stringify(lastTest)}`,
-  ];
+  const fields = [line, `elapsed: ${input.durationMs}ms`, `signal: ${input.signal ?? "none"}`];
   if (input.rawTailDir !== undefined) {
+    const lastTest = lastStartedTestName(input.output);
+    const header = Buffer.from(`last test started: ${lastTest === undefined ? "none" : JSON.stringify(lastTest)}\n`);
     const path = await writeKilledFileTail(
       input.rawTailDir,
       input.filePath,
-      newestBytes(input.output, KILLED_OUTPUT_TAIL_BYTES)
+      Buffer.concat([header, newestBytes(input.output, KILLED_OUTPUT_TAIL_BYTES - header.length)])
     );
     fields.push(`raw output tail: ${path ?? "not saved"}`);
   }
@@ -198,14 +194,21 @@ export function superviseFileChild({
   });
 }
 
-/** Per-file accounting: a file is completed once its child exited, pass or fail. */
-export function countFileOutcomes(results: readonly NodeTestResult[]): {
+/**
+ * Per-file accounting: a file is completed once its child exited, pass or fail.
+ * A file fails, once, when its child exited non-zero or when `failedOtherwise`
+ * holds it: a structured failure or an accounting error under a zero exit.
+ */
+export function countFileOutcomes(
+  results: readonly NodeTestResult[],
+  failedOtherwise: ReadonlySet<NodeTestResult> = new Set()
+): {
   completed_files: number;
   failed_files: number;
 } {
   return {
     completed_files: results.length,
-    failed_files: results.filter((result) => result.exitCode !== 0).length,
+    failed_files: results.filter((result) => result.exitCode !== 0 || failedOtherwise.has(result)).length,
   };
 }
 

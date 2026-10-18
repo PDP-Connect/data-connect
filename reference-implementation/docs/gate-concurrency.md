@@ -105,11 +105,18 @@ Reading any run's counts, then or now: older `run-tests.ts` runs wrote
 `completed_files` as `failed ? 0 : results.length`, so it is 0 for any such run
 that exited non-zero, NOT because no file finished. `run-tests.ts` now counts
 the files whose child exited, pass or fail, and adds `failed_files` for the
-ones that exited non-zero or were killed by the per-file watchdog. A killed file
+ones that exited non-zero, were killed by the per-file watchdog, recorded a
+failure although the child exited 0, or could not be accounted (a rejected
+`todo`, an unexplained skip, a malformed event). An accounting error does not
+stop the run: the file counts as failed with an empty summary, the accounting
+result is still written, and the run then fails naming each file and error. A killed file
 is a failed file; it no longer aborts the files after it. Its result holds only
-structured fields (`TIMED OUT (idle|hard)` or `KILLED`, the signal, the elapsed
-time and the last test that began running), never its raw output. Locally the
-newest 64 KB of that output goes to a mode 0600 file under
+structured fields (`TIMED OUT (idle|hard)` or `KILLED`, the signal and the
+elapsed time), never its raw output and never the name of the last test that
+began running: under `--test-isolation=none` test code shares the child's stdout
+with the reporter and can write that line itself, so the name is untrusted.
+Locally the file's first line names that test and the newest 64 KB of the raw
+output follows, in a mode 0600 file under
 `${XDG_STATE_HOME:-~/.local/state}/pdpp-ri-test-diagnostics/` (one 0700
 directory per run; the newest 20 runs are kept, none older than 7 days), whose
 path the result names. It does not go to the run's `TMPDIR`, which the sandbox
