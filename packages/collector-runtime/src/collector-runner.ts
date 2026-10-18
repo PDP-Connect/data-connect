@@ -1594,9 +1594,11 @@ async function streamConnectorIntoOutbox(
   // from a stopped scan.
   const resumableState: Record<string, unknown> = {};
   const streamsWithRecords = new Set<string>();
-  // Streams that emitted RECORDs after the last resumable STATE: no checkpoint
-  // a budget stop commits covers them. The stop records them for the guard.
-  const streamsSinceLastState = new Set<string>();
+  // Per stream, the key of the first record emitted since that stream's last
+  // resumable STATE. A STATE clears only its own stream, so a stream with no
+  // STATE of its own stays uncovered all run. Together the entries say where
+  // the walk resumes after a budget stop; the replay guard compares them.
+  const firstUncoveredRecord = new Map<string, unknown>();
   let batchSeq = nextOutboxBatchSeq(input.outbox, input.config.sourceInstanceId);
   let pendingRecords: Extract<EmittedMessage, { type: "RECORD" }>[] = [];
   let bufferHighWaterMark = 0;
@@ -1652,11 +1654,11 @@ async function streamConnectorIntoOutbox(
     enqueuedBatches += 1;
     batchSeq += 1;
     scanBudgetExceeded = maybeRecordScanBudgetGap({
-      checkpointed: Object.keys(resumableState).length > 0,
       enqueuedBatches,
+      firstUncoveredRecord,
       input,
+      resumableState,
       scanBudgetExceeded,
-      uncheckpointedStreams: streamsSinceLastState,
     });
   };
 
@@ -1672,11 +1674,18 @@ async function streamConnectorIntoOutbox(
     });
   };
 
+  const trackRecord = (message: Extract<EmittedMessage, { type: "RECORD" }>): void => {
+    streamsWithRecords.add(message.stream);
+    if (!firstUncoveredRecord.has(message.stream)) {
+      firstUncoveredRecord.set(message.stream, message.key ?? null);
+    }
+  };
+
   const stageState = (message: Extract<EmittedMessage, { type: "STATE" }>): void => {
     bufferedState[message.stream] = message.cursor;
     if (message.stream !== COVERAGE_DIAGNOSTICS_STREAM && streamsWithRecords.has(message.stream)) {
       resumableState[message.stream] = message.cursor;
-      streamsSinceLastState.clear();
+      firstUncoveredRecord.delete(message.stream);
     }
   };
 
@@ -1699,8 +1708,7 @@ async function streamConnectorIntoOutbox(
     }
     if (message.type === "RECORD") {
       recordCoverageIfPresent(message);
-      streamsWithRecords.add(message.stream);
-      streamsSinceLastState.add(message.stream);
+      trackRecord(message);
       pendingRecords.push(message);
       if (pendingRecords.length > bufferHighWaterMark) {
         bufferHighWaterMark = pendingRecords.length;
@@ -1967,11 +1975,11 @@ function throwIfConnectorExitedUncleanly(input: {
 }
 
 function maybeRecordScanBudgetGap(input: {
-  checkpointed: boolean;
   enqueuedBatches: number;
+  firstUncoveredRecord: ReadonlyMap<string, unknown>;
   input: StreamConnectorIntoOutboxInput;
+  resumableState: Readonly<Record<string, unknown>>;
   scanBudgetExceeded: boolean;
-  uncheckpointedStreams: ReadonlySet<string>;
 }): boolean {
   if (input.scanBudgetExceeded) {
     return true;
@@ -1981,22 +1989,16 @@ function maybeRecordScanBudgetGap(input: {
   }
   const { connector, sourceInstanceId } = input.input.config;
   const connectorId = connector.connector_id;
-  const startCursorKey = scanStartCursorKey({
-    connector,
-    priorState: input.input.priorState,
-    streams: [...input.uncheckpointedStreams],
+  const resumePointKey = hashCanonicalJson({
+    connector_id: connectorId,
+    resume_at: Object.fromEntries([...input.firstUncoveredRecord].sort(([left], [right]) => left.localeCompare(right))),
+    scope: collectorScopeFingerprint(connector.scope),
   });
-  const uncheckpointedStreams = [...input.uncheckpointedStreams].sort();
-  // One retry per starting point: an earlier resumable stop from this key
-  // already had it, so this stop blocks the next same-budget scan.
-  const earlierResumableStop = input.input.outbox.get(
-    collectorGapRowId({
-      connectorId,
-      reason: "policy_budget",
-      scanResume: { resumable: true, startCursorKey, uncheckpointedStreams },
-      sourceInstanceId,
-    })
-  );
+  // A stop that resumes where an earlier stop resumed made no progress, however
+  // its cursors changed. Each resume point gets one retry.
+  const repeatsEarlierStop = input.input.outbox
+    .listByKind({ kind: "gap", sourceInstanceId })
+    .some((item) => scanResumeOf(item)?.resumePointKey === resumePointKey);
   ensureCollectorGapRow({
     clock: () => new Date(),
     connectorId,
@@ -2006,9 +2008,11 @@ function maybeRecordScanBudgetGap(input: {
     retryable: true,
     ...(input.input.config.runId ? { runId: input.input.config.runId } : {}),
     scanResume: {
-      resumable: input.checkpointed && earlierResumableStop === null,
-      startCursorKey,
-      uncheckpointedStreams,
+      // The server merges a checkpoint per stream, so this is the state the
+      // next scan starts from once this stop's checkpoint commits.
+      nextStartKey: scanStartKey({ connector, state: { ...input.input.priorState, ...input.resumableState } }),
+      resumable: Object.keys(input.resumableState).length > 0 && !repeatsEarlierStop,
+      resumePointKey,
     },
     sourceInstanceId,
   });
@@ -2464,21 +2468,23 @@ export interface GapPayload {
 }
 
 /**
- * What a scan-budget stop proves about a retry. `uncheckpointedStreams` are
- * the streams that emitted records after the stop's last committed STATE, so
- * no checkpoint covers them. `startCursorKey` hashes the connector build, the
- * declared scope, and the cursors those streams STARTED the stopped scan from
- * ({@link scanStartCursorKey}). A retry from the same key walks the same tail.
+ * What a scan-budget stop proves about a retry. Cursors are opaque, so
+ * progress is judged by records: `resumePointKey` hashes, per stream, the key
+ * of the first record that no committed STATE of that stream covers. That is
+ * where the walk resumes. A stop whose resume point matches an earlier stop's
+ * moved nothing forward, even if a cursor changed (for example a fresh
+ * `fetched_at`); a change in any stream's entry is progress.
  *
- * `resumable` is true when the stop committed a checkpoint and no earlier stop
- * started from this key. That checkpoint can free budget for the tail (an
- * earlier stream finished), so one retry runs. A stop that committed nothing,
- * or a second stop from the same key, is not resumable: the retry is skipped.
+ * `resumable` is true when the stop committed a checkpoint and its resume
+ * point is new. One retry then runs. A stop that committed nothing, or one
+ * that repeats an earlier resume point, is not resumable, and the next scan
+ * that would start from `nextStartKey` ({@link scanStartKey} of the prior
+ * state with this stop's checkpoint applied) is skipped.
  */
 export interface ScanBudgetResume {
+  nextStartKey: string;
   resumable: boolean;
-  startCursorKey: string;
-  uncheckpointedStreams: string[];
+  resumePointKey: string;
 }
 
 interface EnsureGapInput {
@@ -2502,8 +2508,7 @@ interface EnsureGapInput {
  * accumulate new rows — last-attempt metadata is observable from the
  * existing outbox row's `updated_at`/`next_attempt_at`/`attempt_count`
  * after the drain leases it again. A scan-budget stop also keys the row on
- * its {@link ScanBudgetResume} key and `resumable` flag, so each distinct
- * starting point, and a repeat stop from it, gets its own row. The
+ * its {@link ScanBudgetResume}, so every distinct stop gets its own row. The
  * server-facing gap identity is unchanged.
  */
 function collectorGapRowId(
@@ -2520,7 +2525,9 @@ function collectorGapRowId(
       input.reason,
       input.stream ?? null,
       input.streamBoundary ?? null,
-      ...(input.scanResume ? [input.scanResume.startCursorKey, input.scanResume.resumable] : []),
+      ...(input.scanResume
+        ? [input.scanResume.resumePointKey, input.scanResume.resumable, input.scanResume.nextStartKey]
+        : []),
     ],
     sourceInstanceId: input.sourceInstanceId,
   });
@@ -3213,9 +3220,9 @@ function assertGapPayload(payload: unknown, id: string): GapPayload {
   }
   if (isScanBudgetResume(payload.scanResume)) {
     gap.scanResume = {
+      nextStartKey: payload.scanResume.nextStartKey,
       resumable: payload.scanResume.resumable,
-      startCursorKey: payload.scanResume.startCursorKey,
-      uncheckpointedStreams: [...payload.scanResume.uncheckpointedStreams],
+      resumePointKey: payload.scanResume.resumePointKey,
     };
   }
   return gap;
@@ -3224,11 +3231,18 @@ function assertGapPayload(payload: unknown, id: string): GapPayload {
 function isScanBudgetResume(value: unknown): value is ScanBudgetResume {
   return (
     isRecord(value) &&
+    typeof value.nextStartKey === "string" &&
     typeof value.resumable === "boolean" &&
-    typeof value.startCursorKey === "string" &&
-    Array.isArray(value.uncheckpointedStreams) &&
-    value.uncheckpointedStreams.every((stream) => typeof stream === "string")
+    typeof value.resumePointKey === "string"
   );
+}
+
+function scanResumeOf(item: LocalDeviceOutboxItem): ScanBudgetResume | null {
+  try {
+    return assertGapPayload(item.payload, item.id).scanResume ?? null;
+  } catch {
+    return null;
+  }
 }
 
 function assertCheckpointPayload(payload: unknown, id: string): CheckpointPayload {
@@ -3359,35 +3373,26 @@ function hasCheckpointBlockingOutboxWork(outbox: LocalDeviceOutbox, sourceInstan
 }
 
 /**
- * Hash of where a scan starts the given streams: the connector build
- * (command and args, so an upgraded connector gets a fresh attempt), the
- * declared scope, and each stream's prior cursor (`null` when absent).
- * Cursors are opaque; only equality matters.
+ * Hash of where a scan starts: the connector build (command and args, so an
+ * upgraded connector gets a fresh attempt), the declared scope, and the whole
+ * state. Cursors are opaque; only equality matters.
  */
-function scanStartCursorKey(input: {
-  connector: CollectorConnectorSpec;
-  priorState: Readonly<Record<string, unknown>>;
-  streams: readonly string[];
-}): string {
+function scanStartKey(input: { connector: CollectorConnectorSpec; state: Readonly<Record<string, unknown>> }): string {
   return hashCanonicalJson({
     args: input.connector.args,
     command: input.connector.command,
     connector_id: input.connector.connector_id,
-    cursors: Object.fromEntries(
-      [...input.streams]
-        .sort()
-        .map((stream) => [stream, Object.hasOwn(input.priorState, stream) ? input.priorState[stream] : null])
-    ),
     scope: collectorScopeFingerprint(input.connector.scope),
+    state: input.state,
   });
 }
 
 /**
  * True when an earlier scan-budget stop proves the next scan would replay it:
  * the stop was not {@link ScanBudgetResume.resumable}, the budget is no
- * larger, and every stream that stop left uncheckpointed would start from the
- * same cursor, connector build and scope. A stop that committed a checkpoint
- * for one of those streams changed its cursor, so the walk resumes from there.
+ * larger, and this scan would start from the state that stop left behind,
+ * with the same connector build and scope. Any later change to that state
+ * (a larger-budget run, an operator reset) lets the scan run again.
  *
  * A stop recorded before the runner kept {@link ScanBudgetResume} cannot
  * prove a replay, so it permits one scan, which records a new stop if it hits
@@ -3435,14 +3440,7 @@ function isScanBudgetReplay(
   if (!match?.[1] || input.policy.maxEnqueuedBatchesPerRun > Number(match[1])) {
     return false;
   }
-  return (
-    payload.scanResume.startCursorKey ===
-    scanStartCursorKey({
-      connector: input.connector,
-      priorState: input.priorState,
-      streams: payload.scanResume.uncheckpointedStreams,
-    })
-  );
+  return payload.scanResume.nextStartKey === scanStartKey({ connector: input.connector, state: input.priorState });
 }
 
 /**
