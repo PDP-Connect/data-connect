@@ -47,6 +47,16 @@ describe("reference-implementation mutation sandbox", () => {
     expect(config.disableTypeChecks).toBe(false)
   })
 
+  it("runs one trial at a time, so a trial is timed under the conditions its limit was measured in", async () => {
+    const configPath = "../../reference-implementation/stryker.config.mjs"
+    const { default: config } = await import(configPath)
+    // Stryker's trial limit is derived from a dry run that runs alone. Each
+    // trial already runs a process per test file, so with several workers the
+    // trials compete for the same CPUs and outlive a limit measured without
+    // them: on PR #494 every one of 144 mutants timed out.
+    expect(config.concurrency).toBe(1)
+  })
+
   it("does not ignore a directory that a cohort test reads", async () => {
     const configPath = "../../reference-implementation/stryker.config.mjs"
     const { default: config } = await import(configPath)

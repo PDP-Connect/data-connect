@@ -93,6 +93,14 @@ jobs:
             # Stryker's five-minute dry-run limit, which the 300-file
             # selection exceeded on PR #141's first attempt. Raise these only
             # with a measured run that fits.
+            #
+            # The runner is now configured for one Stryker worker, because a
+            # trial already fills the CPUs and four workers pushed every trial
+            # of PR #494's 7-file sample past Stryker's timeout (see
+            # reference-implementation/stryker.config.mjs). The figures above
+            # were measured with four workers. Re-measure before relying on
+            # them: the 144 mutants of that sample took 6.5 minutes on four
+            # CPUs with one worker.
             max-changed-lines: "200"
             max-tests: "8"
           # The release and supply-chain provenance machinery. Neither cohort
