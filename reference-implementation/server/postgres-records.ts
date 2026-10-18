@@ -2789,7 +2789,7 @@ export async function postgresReadFanInChangesWindow(
   manifest: ConnectorManifest | null,
   window: { after: unknown; max: number; since: number },
   take: number,
-  limits: { budget: number; payloadBytes: number }
+  limits: { budget: number; payloadChars: number }
 ): Promise<{
   candidates: number;
   examined: number;
@@ -2818,7 +2818,7 @@ export async function postgresReadFanInChangesWindow(
     hasMore: false,
     rows: [] as Array<{ key: JsonObject; record: ResponseRecord }>,
   };
-  let bytes = 0;
+  let chars = 0;
   for (const candidate of candidates) {
     const key: JsonObject = {
       cursor_value: candidate.cv ?? null,
@@ -2838,11 +2838,11 @@ export async function postgresReadFanInChangesWindow(
     });
     if (record) {
       const size = JSON.stringify(record).length;
-      if (result.rows.length === take || (result.rows.length > 0 && bytes + size > limits.payloadBytes)) {
+      if (result.rows.length === take || (result.rows.length > 0 && chars + size > limits.payloadChars)) {
         result.hasMore = true;
         return result;
       }
-      bytes += size;
+      chars += size;
       result.rows.push({ key, record });
     }
     result.frontier = key;

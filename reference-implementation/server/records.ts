@@ -5350,7 +5350,7 @@ function readSqliteChangesWindowForFanIn(
   // order and LIMIT bounds the rows read.
   const candidates = [...iterateDynamicSqlAcknowledged<SqliteChangeCandidateRow>(sql, binds)];
   const read: FanInWindowRead = { candidates: candidates.length, examined: 0, frontier: window.after, hasMore: false, rows: [] };
-  let bytes = 0;
+  let chars = 0;
   for (const candidate of candidates) {
     const key: SqliteChangeKey = {
       cursor_value: candidate.__cv ?? null,
@@ -5369,11 +5369,11 @@ function readSqliteChangesWindowForFanIn(
     );
     if (record) {
       const size = JSON.stringify(record).length;
-      if (read.rows.length === take || (read.rows.length > 0 && bytes + size > limits.payloadBytes)) {
+      if (read.rows.length === take || (read.rows.length > 0 && chars + size > limits.payloadChars)) {
         read.hasMore = true;
         return read;
       }
-      bytes += size;
+      chars += size;
       read.rows.push({ key, record });
     }
     read.frontier = key;
@@ -7638,18 +7638,20 @@ function finalizeFanInListWindow(
 // Refetches allowed when concurrent writes put a whole buffer behind the
 // records cursor; past this the connection blocks at its frontier instead.
 const FAN_IN_REFILL_ROUNDS = 8;
-// Candidates one connection may examine for one change page, and the most
-// change payload one connection adds to one page.
+// Candidates one connection may examine for one change page, and a soft
+// payload budget per connection per page: the summed JSON.stringify length
+// (UTF-16 code units, not response bytes) of the changes it contributes. The
+// first change is always admitted, however large, so every page progresses.
 const FAN_IN_CHANGE_EXAMINE_FLOOR = 64;
-const FAN_IN_CHANGE_PAGE_BYTES = 8 * 1024 * 1024;
+const FAN_IN_CHANGE_PAGE_CHARS = 8 * 1024 * 1024;
 
 interface FanInWindowLimits {
   budget: number;
-  payloadBytes: number;
+  payloadChars: number;
 }
 
 function fanInWindowLimits(take: number): FanInWindowLimits {
-  return { budget: Math.max(FAN_IN_CHANGE_EXAMINE_FLOOR, 4 * (take + 1)), payloadBytes: FAN_IN_CHANGE_PAGE_BYTES };
+  return { budget: Math.max(FAN_IN_CHANGE_EXAMINE_FLOOR, 4 * (take + 1)), payloadChars: FAN_IN_CHANGE_PAGE_CHARS };
 }
 
 interface FanInReadObservation {
@@ -8222,6 +8224,13 @@ function withLimitAndExtraWarnings(
 // concurrent write placed behind the cursor) and refill the buffer when that
 // empties it, so the merge never picks a head while this connection's next row
 // is unknown. Returns the buffer to merge and advances `after[index]`.
+//
+// Invariant: `after[index]` only ever passes rows this connection emitted or
+// rows ranked behind `at`, which can never be emitted again; the frontier this
+// returns is never beyond a row of the connection that has not been ranked.
+// When the refill rounds run out, the connection blocks at the last row it
+// passed over, so this page emits nothing ranked after it and the next page
+// resumes from there.
 async function passOverBehindCursor(
   page: FanInLocalRecordsPage,
   index: number,
@@ -8232,7 +8241,7 @@ async function passOverBehindCursor(
   order: PageOrder
 ): Promise<FanInLocalRecordsPage> {
   let current = page;
-  for (let round = 0; round < FAN_IN_REFILL_ROUNDS; round += 1) {
+  for (let round = 1; ; round += 1) {
     const entries: FanInRowKey[] = current.rows.map((row) => ({ binding: index, key: row.key }));
     entries.push(at);
     // biome-ignore lint/performance/noAwaitInLoops: each refill reads from the checkpoint the previous one advanced.
@@ -8245,14 +8254,18 @@ async function passOverBehindCursor(
     if (behind === 0) {
       return current;
     }
-    after[index] = current.rows[behind - 1]?.resume ?? after[index] ?? null;
+    const lastBehind = current.rows[behind - 1];
+    after[index] = lastBehind?.resume ?? after[index] ?? null;
     if (behind < current.rows.length || !current.hasMore) {
       return { ...current, rows: current.rows.slice(behind) };
     }
+    if (round >= FAN_IN_REFILL_ROUNDS) {
+      // Every row ranked so far was behind the cursor and more may follow:
+      // block at the last of them rather than at rows not yet ranked.
+      return { frontier: lastBehind?.key ?? null, hasMore: true, rows: [] };
+    }
     current = await refetch();
   }
-  // Still behind after every refill: block at the last passed-over row.
-  return { frontier: current.rows.at(-1)?.key ?? null, hasMore: true, rows: [] };
 }
 
 async function queryRecordsFanInPage(

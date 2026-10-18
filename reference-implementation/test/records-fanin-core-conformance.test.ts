@@ -808,6 +808,158 @@ fanInCase("review P1-1 a write behind the cursor never hides a later record of a
   assert.deepEqual(ids(pages), ["a10", "b20", "a30"], "b20 must not be lost behind the passed-over b5");
 });
 
+fanInCase("review-2 P1 a refill that runs out of rounds never skips rows it has not inspected", async (backend) => {
+  const f = await fixture(backend, ["a", "b"]);
+  await f.ingest(f.instance("a"), EVENTS, { id: "a102", occurred_at: iso(102) });
+  await f.ingest(f.instance("a"), EVENTS, { id: "a104", occurred_at: iso(104) });
+  for (const minute of [100, 101, 103]) {
+    await f.ingest(f.instance("b"), EVENTS, { id: `b${minute}`, occurred_at: iso(minute) });
+  }
+  const pages = await traverse((p) => fanIn(f, f.bindings, EVENTS, f.grant(EVENTS), p), { limit: 2, order: "asc" }, {
+    between: async (pageIndex) => {
+      if (pageIndex === 0) {
+        // Sixteen rows behind the cursor (b101), ahead of a's own checkpoint:
+        // more than the refill rounds can pass over at limit 2.
+        for (let i = 0; i < 16; i += 1) {
+          await f.ingest(f.instance("a"), EVENTS, { id: `a${String(i).padStart(3, "0")}`, occurred_at: iso(i) });
+        }
+      }
+    },
+    maxPages: 30,
+  });
+  assert.deepEqual(ids(pages), ["b100", "b101", "a102", "b103", "a104"], "a102 must not be lost");
+});
+
+// Small deterministic PRNG so a failing trial can be replayed by seed.
+function seededRandom(seed: number): () => number {
+  let state = seed >>> 0;
+  return () => {
+    state = (state + 0x6d2b79f5) >>> 0;
+    let t = state;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4_294_967_296;
+  };
+}
+
+fanInCase("review-2 property: records present at the start are emitted exactly once, in order, under concurrent writes", async (backend) => {
+  // A trial is cheap on SQLite; PostgreSQL pays a round trip per query.
+  const trials = backend.name === "sqlite" ? 80 : 16;
+  for (let trial = 0; trial < trials; trial += 1) {
+    const seed = 7919 * (trial + 1);
+    const rand = seededRandom(seed);
+    const pick = (n: number) => Math.floor(rand() * n);
+    const labels = trial % 2 === 0 ? ["a", "b", "c"] : ["a", "b"];
+    const f = await fixture(backend, labels);
+    const order = rand() < 0.5 ? "asc" : "desc";
+    const limit = 1 + pick(3);
+    const used = new Set<number>();
+    let serial = 0;
+    const put = async (label: string, minute: number) => {
+      used.add(minute);
+      serial += 1;
+      const id = `${label}${String(minute).padStart(4, "0")}x${serial}`;
+      await f.ingest(f.instance(label), EVENTS, { id, occurred_at: iso(minute) });
+      return `${f.instance(label)}/${id}`;
+    };
+    // Initial rows live in minutes 1000..1400, so "behind" and "ahead" writes
+    // are always on one side of the whole initial set.
+    const initial = new Set<string>();
+    for (const label of labels) {
+      const count = 2 + pick(6);
+      for (let i = 0; i < count; i += 1) {
+        let minute = 1000 + pick(400);
+        while (used.has(minute)) {
+          minute = 1000 + pick(400);
+        }
+        initial.add(await put(label, minute));
+      }
+    }
+    const emittedMinutes: number[] = [];
+    const emittedBy = new Set<string>();
+    const minuteOf = (record: Json) =>
+      (Date.parse(String((record.data as Json).occurred_at)) - Date.UTC(2026, 9, 1)) / 60_000;
+    const pages = await traverse(
+      async (p) => {
+        const page = await fanIn(f, f.bindings, EVENTS, f.grant(EVENTS), p);
+        emittedMinutes.push(...page.data.map(minuteOf));
+        for (const record of page.data) {
+          emittedBy.add(String(record.connection_id));
+        }
+        return page;
+      },
+      { limit, order },
+      {
+        between: async (pageIndex) => {
+          // Writes stop after a few pages, so every traversal must finish.
+          if (pageIndex >= 6) {
+            return;
+          }
+          const last = emittedMinutes.at(-1);
+          const roll = rand();
+          // Bursts around 8 x limit end inside the last refill round (8 rounds
+          // per page), the edge where a refill runs out of rounds.
+          const burst = roll < 0.4 ? 7 * limit + pick(2 * limit + 2) : roll < 0.7 ? 1 + pick(3) : 0;
+          // Aim at a connection that has emitted nothing yet when there is one:
+          // its checkpoint is below the burst, so the rows land in its buffer.
+          const unread = labels.filter((label) => !emittedBy.has(f.instance(label)));
+          const target = unread.length ? (unread[pick(unread.length)] as string) : (labels[pick(labels.length)] as string);
+          for (let i = 0; i < burst; i += 1) {
+            const label = rand() < 0.8 ? target : (labels[pick(labels.length)] as string);
+            // Behind the cursor: before (asc) or after (desc) every row emitted so far.
+            const behind = order === "asc" ? pick(900) : 1500 + pick(900);
+            await put(label, behind);
+          }
+          if (rand() < 0.5 && last !== undefined) {
+            // Ahead of the cursor, among the initial rows still to come.
+            const span = order === "asc" ? 1400 - last : last - 1000;
+            if (span > 1) {
+              const ahead = order === "asc" ? last + 1 + pick(span - 1) : last - 1 - pick(span - 1);
+              if (!used.has(ahead)) {
+                await put(labels[pick(labels.length)] as string, ahead);
+              }
+            }
+          }
+        },
+        maxPages: 400,
+      }
+    );
+    const flat = pages.flatMap((page) => page.data);
+    const emitted = identities(pages);
+    const context = `seed=${seed} order=${order} limit=${limit} bindings=${labels.length}`;
+    assertNoDuplicates(emitted, `${context}: no record twice`);
+    for (const identity of initial) {
+      assert.ok(emitted.includes(identity), `${context}: ${identity} present at the start was never emitted`);
+    }
+    const keys = flat.map((record) => [String((record.data as Json).occurred_at), String(record.id), String(record.connection_id)]);
+    for (let i = 1; i < keys.length; i += 1) {
+      const previous = keys[i - 1] as string[];
+      const current = keys[i] as string[];
+      const cmp = previous[0] === current[0] ? 0 : (previous[0] as string) < (current[0] as string) ? -1 : 1;
+      assert.ok(order === "asc" ? cmp <= 0 : cmp >= 0, `${context}: out of order at ${i}: ${previous} then ${current}`);
+    }
+
+    // The same writes during a change session: every change present when the
+    // session starts arrives once; nothing written afterwards joins it.
+    const atStart = new Set(identities(await traverse((p) => fanIn(f, f.bindings, EVENTS, f.grant(EVENTS), p), { limit: 100 })));
+    const session = await traverse(
+      (p) => fanIn(f, f.bindings, EVENTS, f.grant(EVENTS), p),
+      { changes_since: "beginning", limit, order },
+      {
+        between: async () => {
+          for (let i = 0; i < pick(4); i += 1) {
+            await put(labels[pick(labels.length)] as string, pick(2400));
+          }
+        },
+        maxPages: 400,
+      }
+    );
+    const changed = identities(session);
+    assertNoDuplicates(changed, `${context}: no change twice`);
+    assert.deepEqual([...changed].sort(), [...atStart].sort(), `${context}: exactly the changes present at the start`);
+  }
+});
+
 fanInCase("review P1-2 fan-in tokens are opaque and bound to the caller and the query", async (backend) => {
   const f = await fixture(backend, ["a", "b"]);
   for (let i = 0; i < 3; i += 1) {
@@ -1227,7 +1379,10 @@ async function upsertInstance(
   } as never);
 }
 
-test("multi-binding fan-in conforms to PDPP Core on SQLite (memory-default)", async (t) => {
+// One parent per backend runs every case; the property trials make it long.
+const PARENT_TIMEOUT_MS = 600_000;
+
+test("multi-binding fan-in conforms to PDPP Core on SQLite (memory-default)", { timeout: PARENT_TIMEOUT_MS }, async (t) => {
   initDb(":memory:");
   try {
     for (const [name, run] of CASES) {
@@ -1240,7 +1395,7 @@ test("multi-binding fan-in conforms to PDPP Core on SQLite (memory-default)", as
 
 const POSTGRES_URL = process.env.PDPP_TEST_POSTGRES_URL;
 if (POSTGRES_URL) {
-  test("multi-binding fan-in conforms to PDPP Core on PostgreSQL", async (t) => {
+  test("multi-binding fan-in conforms to PDPP Core on PostgreSQL", { timeout: PARENT_TIMEOUT_MS }, async (t) => {
     await withTemporaryPostgresDatabase(
       {
         closeConnections: closePostgresStorage,

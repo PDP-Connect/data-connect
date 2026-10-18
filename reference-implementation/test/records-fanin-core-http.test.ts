@@ -374,6 +374,16 @@ acceptance("L0/L1/L25/L100/L101 the combined page honours default, small, and cl
   }
 });
 
+acceptance("Lbad a malformed limit is 400 invalid_request across instances", async (ctx) => {
+  const { a, b, e } = await fixtureF();
+  const token = await grantToken(ctx, [a, b, e]);
+  for (const limit of ["1.5", "abc"]) {
+    const result = await read(ctx, token, { limit });
+    assert.equal(result.status, 400, `limit=${limit}`);
+    assert.deepEqual(errorOf(result), { code: "invalid_request", type: "invalid_request_error" }, `limit=${limit}`);
+  }
+});
+
 // ─── C: cursor validity and concurrent writes ───────────────────────────────
 
 acceptance("C1/C2 an unrecognised or order-mismatched cursor is invalid_cursor", async (ctx) => {
