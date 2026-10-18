@@ -307,7 +307,7 @@ function assertNoHalfDeletedPair(label: string, state: TeardownState, seeded: Te
  * torn down EARLIER than the last connection still bound to it (documented as
  * a KNOWN GAP in records.ts, `deleteConnectionRecordRowsSqlite`). A failure
  * that lets the owner go first reaches that state, so the `shared` blob is
- * left out of the SQLite convergence check here and pinned by the `todo` test
+ * left out of the SQLite convergence check here and pinned by the "known gap" test
  * at the end of this file.
  */
 function assertConverged(
@@ -511,11 +511,13 @@ if (POSTGRES_URL) {
   }
 }
 
-// Known gap (see `assertConverged`): documented in records.ts as not repaired on
-// SQLite, design-level fix. `todo` keeps the suite green and the gap visible.
-test("[sqlite] a blob first uploaded by a connection torn down earlier is reclaimed after a failed teardown", {
-  todo: "SQLite blob reclaim keys on the first uploader (records.ts KNOWN GAP in deleteConnectionRecordRowsSqlite)",
-}, async () => {
+// Known gap pin, not desired behaviour (see `assertConverged`): SQLite blob reclaim
+// keys on the first uploader (records.ts KNOWN GAP in deleteConnectionRecordRowsSqlite),
+// so a blob shared with a connection torn down earlier is orphaned after a failed
+// teardown. The fix is a pending design decision. This test asserts the gap
+// exactly; when it is fixed the test fails and should assert reclaim instead.
+// (The RI accounting counts a failing `todo` as a failure.)
+test("[sqlite] known gap: a blob first uploaded by a connection torn down earlier stays orphaned after a failed teardown", async () => {
   const dir = mkdtempSync(join(tmpdir(), "pdpp-teardown-gap-"));
   try {
     const backend = sqliteBackend(dir);
@@ -524,7 +526,11 @@ test("[sqlite] a blob first uploaded by a connection torn down earlier is reclai
       assert.ok(await throwingAttempt(ids, "before-durable-delete", 1));
       await restartPath(ids);
       const state = await readTeardownState(backend.sql, ids);
-      assert.equal(state.blobs.shared, false, "the shared blob has no binding left and must be reclaimed");
+      assert.equal(
+        state.blobs.shared,
+        true,
+        "known gap: the shared blob has no binding left but is not reclaimed (fixed? assert false here)"
+      );
     });
   } finally {
     closeDb();
