@@ -1,5 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
+import { Socket } from "node:net"
+
 function installStoragePolyfill(target: "localStorage" | "sessionStorage") {
   const current = globalThis[target] as Storage | undefined
   if (
@@ -46,8 +48,67 @@ installStoragePolyfill("sessionStorage")
 
 // Networked protocol integrations are opt-in in production. Tests that cover
 // their request shape use neutral, non-routable example origins instead.
-process.env.VITE_SESSION_RELAY_URL ??= "https://session-relay.test"
-process.env.VITE_GATEWAY_URL ??= "https://gateway.test"
-process.env.VITE_ACCOUNT_URL ??= "https://account.test"
-process.env.VITE_HYDRA_PUBLIC_URL ??= "https://oauth.test"
-process.env.VITE_TUNNEL_SERVER_ADDR ??= "frpc.tunnel.test"
+process.env.VITE_SESSION_RELAY_URL = "https://session-relay.test"
+process.env.VITE_GATEWAY_URL = "https://gateway.test"
+process.env.VITE_ACCOUNT_URL = "https://account.test"
+process.env.VITE_HYDRA_PUBLIC_URL = "https://oauth.test"
+process.env.VITE_TUNNEL_SERVER_ADDR = "frpc.tunnel.test"
+
+const networkGuardMarker = Symbol.for("pdpp.unit-test-network-guard")
+
+function assertLoopbackHost(protocol: string, host: string) {
+  const normalizedHost = host.toLowerCase().replace(/^\[|\]$/g, "")
+  if (["localhost", "127.0.0.1", "::1"].includes(normalizedHost)) {
+    return
+  }
+
+  throw new Error(
+    `Unit test network guard blocked ${protocol} to non-loopback host "${host}".`
+  )
+}
+
+if (!Reflect.get(globalThis, networkGuardMarker)) {
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = (input, init) => {
+    const inputUrl =
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.href
+          : input.url
+    const url = new URL(inputUrl, "http://localhost")
+    assertLoopbackHost("fetch", url.hostname)
+    return originalFetch.call(globalThis, input, init)
+  }
+
+  const originalConnect = Socket.prototype.connect
+  Object.defineProperty(Socket.prototype, "connect", {
+    configurable: true,
+    writable: true,
+    value: function (this: Socket, ...args: unknown[]) {
+      const address = args[0]
+      if (typeof address === "number") {
+        assertLoopbackHost(
+          "socket connection",
+          typeof args[1] === "string" ? args[1] : "localhost"
+        )
+      } else if (typeof address === "object" && address !== null) {
+        const options = address as {
+          host?: string
+          hostname?: string
+          path?: string
+        }
+        if (!options.path) {
+          assertLoopbackHost(
+            "socket connection",
+            options.host ?? options.hostname ?? "localhost"
+          )
+        }
+      }
+
+      return Reflect.apply(originalConnect, this, args) as Socket
+    },
+  })
+
+  Reflect.set(globalThis, networkGuardMarker, true)
+}
