@@ -26,7 +26,10 @@ name: reference-implementation
 # lands, since pdpp's own reference-implementation.yml will keep evolving until then.
 
 on:
-  pull_request: {}
+  pull_request:
+    # PRs into the test-engineering integration branch are gated by a local
+    # oracle and review; full CI runs once on the batch PR into main.
+    branches-ignore: [testeng/integration]
   merge_group: {}
   push:
     branches: [main, integration/unified-stack]

@@ -43,7 +43,10 @@ name: mutation
 # clean run.
 
 on:
-  pull_request: {}
+  pull_request:
+    # PRs into the test-engineering integration branch are gated by a local
+    # oracle and review; full CI runs once on the batch PR into main.
+    branches-ignore: [testeng/integration]
   workflow_dispatch: {}
 
 concurrency:

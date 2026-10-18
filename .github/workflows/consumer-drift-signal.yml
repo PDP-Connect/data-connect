@@ -50,6 +50,9 @@ on:
       - ".github/scripts/cross-repo-integrity/check-pin-freshness.mjs"
   workflow_dispatch: {}
   pull_request:
+    # PRs into the test-engineering integration branch are gated by a local
+    # oracle and review; full CI runs once on the batch PR into main.
+    branches-ignore: [testeng/integration]
     paths:
       - "packages/collector-runtime/**"
       - "packages/connector-protocol/**"

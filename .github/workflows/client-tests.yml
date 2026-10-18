@@ -27,7 +27,10 @@ name: client-tests
 # that test passes on main; until then it reports honestly and does not block merges.
 
 on:
-  pull_request: {}
+  pull_request:
+    # PRs into the test-engineering integration branch are gated by a local
+    # oracle and review; full CI runs once on the batch PR into main.
+    branches-ignore: [testeng/integration]
   merge_group: {}
   workflow_dispatch: {}
 
