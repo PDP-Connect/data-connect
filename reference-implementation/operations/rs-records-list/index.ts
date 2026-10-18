@@ -34,7 +34,7 @@
  *     block fields populated from operation inputs and result counts.
  */
 
-import { normalizeProjectionFields, projectRecordEnvelope } from "../read-projection.ts";
+import { normalizeProjectionFields, projectRecordEnvelope, withOwnerRequiredFields } from "../read-projection.ts";
 
 export interface RecordsListSourceDescriptor {
   id: string;
@@ -58,7 +58,7 @@ export type RecordsListActor =
  */
 export interface RecordsListManifestStream {
   name: string;
-  schema?: { properties?: Record<string, unknown> };
+  schema?: { properties?: Record<string, unknown>; required?: string[] };
   views?: Array<{ id: string; fields: string[] }>;
   [extra: string]: unknown;
 }
@@ -296,7 +296,11 @@ export async function executeRecordsList(
 
   const rawResult = await dependencies.queryRecords(input.streamName, grant, input.requestParams, manifest);
 
-  const projectionFields = normalizeProjectionFields(input.requestParams.fields);
+  const projectionFields = withOwnerRequiredFields(
+    normalizeProjectionFields(input.requestParams.fields),
+    input.actor.kind,
+    mStream?.schema?.required
+  );
   const decoratedData = rawResult.data.map((record) =>
     projectRecordEnvelope(dependencies.decorateRecord(record), projectionFields)
   );

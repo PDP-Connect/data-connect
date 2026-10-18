@@ -105,8 +105,8 @@ const TOP_LEVEL_REGEX_73 = /Request ID: (req_[A-Za-z0-9_]+)/;
 const TOP_LEVEL_REGEX_74 = /Reference trace ID: (trc_[A-Za-z0-9_]+)/;
 const TOP_LEVEL_REGEX_CLIENT_FILTER_UNSUPPORTED =
   /filter\[\.\.\.\] is not supported for client-token reads in PDPP v0\.1/;
-const TOP_LEVEL_REGEX_INTROSPECTION_FAILED = /Token introspection failed closed/;
-const TOP_LEVEL_REGEX_INVALID_TOKEN = /Invalid or expired token/;
+const TOP_LEVEL_REGEX_STREAM_RECENTLY_PLAYED_NOT_IN_GRANT = /Stream 'recently_played' not in grant/;
+const TOP_LEVEL_REGEX_STREAM_SAVED_TRACKS_NOT_IN_GRANT = /Stream 'saved_tracks' not in grant/;
 const TOP_LEVEL_REGEX_77 = /Record not found/;
 const TOP_LEVEL_REGEX_78 = /Record not found/;
 const TOP_LEVEL_REGEX_82 = /Record not found/;
@@ -4597,10 +4597,10 @@ test("PDPP CLI smoke", async (t) => {
 
         const scenarios = [
           {
-            expectedBodyMessage: TOP_LEVEL_REGEX_INTROSPECTION_FAILED,
-            expectedCode: "context.stream_not_allowed",
-            expectedTimelineMessage: TOP_LEVEL_REGEX_INVALID_TOKEN,
-            expectStatus: 401,
+            expectedBodyMessage: TOP_LEVEL_REGEX_STREAM_RECENTLY_PLAYED_NOT_IN_GRANT,
+            expectedCode: "grant_stream_not_allowed",
+            expectedTimelineMessage: TOP_LEVEL_REGEX_STREAM_RECENTLY_PLAYED_NOT_IN_GRANT,
+            expectStatus: 403,
             label: "stream-metadata reads",
             queryShape: "stream_metadata",
             streamId: "recently_played",
@@ -4610,10 +4610,10 @@ test("PDPP CLI smoke", async (t) => {
               }),
           },
           {
-            expectedBodyMessage: TOP_LEVEL_REGEX_INTROSPECTION_FAILED,
-            expectedCode: "context.stream_not_allowed",
-            expectedTimelineMessage: TOP_LEVEL_REGEX_INVALID_TOKEN,
-            expectStatus: 401,
+            expectedBodyMessage: TOP_LEVEL_REGEX_STREAM_RECENTLY_PLAYED_NOT_IN_GRANT,
+            expectedCode: "grant_stream_not_allowed",
+            expectedTimelineMessage: TOP_LEVEL_REGEX_STREAM_RECENTLY_PLAYED_NOT_IN_GRANT,
+            expectStatus: 403,
             label: "record-list reads",
             queryShape: "record_list",
             streamId: "recently_played",
@@ -4623,10 +4623,10 @@ test("PDPP CLI smoke", async (t) => {
               }),
           },
           {
-            expectedBodyMessage: TOP_LEVEL_REGEX_INTROSPECTION_FAILED,
-            expectedCode: "context.stream_not_allowed",
-            expectedTimelineMessage: TOP_LEVEL_REGEX_INVALID_TOKEN,
-            expectStatus: 401,
+            expectedBodyMessage: TOP_LEVEL_REGEX_STREAM_SAVED_TRACKS_NOT_IN_GRANT,
+            expectedCode: "grant_stream_not_allowed",
+            expectedTimelineMessage: TOP_LEVEL_REGEX_STREAM_SAVED_TRACKS_NOT_IN_GRANT,
+            expectStatus: 403,
             label: "record-detail reads",
             queryShape: "record_detail",
             requestedRecordId: hiddenRecord.id,
