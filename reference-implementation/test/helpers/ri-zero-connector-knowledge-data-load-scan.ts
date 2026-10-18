@@ -987,9 +987,9 @@ function resolveViaParameterIndirection(
 /**
  * PROVES a same-file, non-exported function's own BODY structurally
  * constrains its return value to a fixed root one of its OWN PARAMETERS
- * names — this codebase's own `safePath(root, path)`/`safeLeasePath(directory,
- * file)` (`scripts/test-accounting/packet.ts`) and `authorityContained(directory,
- * path, label)` (`scripts/test-accounting/inventory.ts`) idiom: resolve a
+ * names — the `safePath(root, path)`/`safeLeasePath(directory, file)` idiom
+ * (formerly in the deleted `scripts/test-accounting/packet.ts`) and
+ * `authorityContained(directory, path, label)` (`scripts/test-accounting/inventory.ts`): resolve a
  * REAL, symlink-resolved root via `realpathSync(<rootParam>)`, `resolve(...)`
  * a candidate against that real root, and REJECT (via a call this function
  * treats as a fail-path -- see `isFailCallName` below) any candidate that
