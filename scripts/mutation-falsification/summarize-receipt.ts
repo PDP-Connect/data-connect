@@ -14,7 +14,25 @@ import type { AttemptReceipt } from "./stryker-adapter.ts"
 const receipt = JSON.parse(readFileSync(process.argv[2] ?? "", "utf8")) as AttemptReceipt
 const { killed, survived, inconclusive, validDenominator, rawStatusCounts } = receipt.summary
 
-const lines: string[] = [
+const lines: string[] = []
+
+// A bounded attempt says so before any count, because every count below then
+// describes the sample and not the revision.
+if (receipt.completeness.kind === "partial") {
+  const { bound, files, changedLines, tests } = receipt.completeness
+  lines.push(
+    `**Partial evidence.** This revision's change set exceeds what one attempt can finish ` +
+      `(${bound.maxChangedLines} changed lines, ${bound.maxTests} test files per trial). ` +
+      `This attempt mutated ${files.sampled} of ${files.total} changed files ` +
+      `(${changedLines.sampled} of ${changedLines.total} changed lines), sampled in an order ` +
+      `fixed by the head commit, and ran the ${tests.sampled} of ${tests.total} selected tests ` +
+      "that import them. Every count below describes that sample. The other files have no " +
+      "mutation evidence from this run; the intent lists them as `deferred_by_attempt_bound`.",
+    ""
+  )
+}
+
+lines.push(
   "| Projected outcome | Count |",
   "| --- | --- |",
   `| killed (a test protecting this code failed) | ${killed} |`,
@@ -40,8 +58,8 @@ const lines: string[] = [
   `Intent: \`${receipt.intentDigest}\``,
   `Raw report: \`${receipt.rawReportDigest}\``,
   `Receipt: \`${receipt.receiptDigest}\``,
-  "",
-]
+  ""
+)
 
 if (survived > 0) {
   lines.push(

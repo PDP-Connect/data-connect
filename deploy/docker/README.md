@@ -188,6 +188,13 @@ advanced deployment-wide headless/minimal path. n.eko remains optional and
 headed: when configured, the runtime attaches to its remote CDP browser.
 `reference` and `reference-browser` remain split-runtime compatibility images.
 
+The image installs Chromium into `/opt/patchright-browsers` and sets
+`PLAYWRIGHT_BROWSERS_PATH` to match; do not set that variable in the
+deployment. If a deployment sets it to a path without the Chromium revision the
+bundled Patchright expects, connectors use `/opt/patchright-browsers` instead
+and the server logs one warning. If neither path has it, the server logs an
+error at startup naming the path and revision.
+
 Serve a real domain through your HTTPS reverse proxy (Caddy, Traefik, nginx)
 pointed at the Core port, and set `PDPP_REFERENCE_ORIGIN` to that domain so
 owner-session cookies and OAuth metadata are correct.

@@ -103,8 +103,10 @@ import {
 } from "./postgres-search.ts";
 import type { PostgresTransactionClient } from "./postgres-storage.ts";
 import {
+  type BulkChunkBudget,
   isPostgresStorageBackend,
   postgresQuery,
+  runBulkChunksWithinStatementBudget,
   withPostgresBulkTransaction,
   withPostgresTransaction,
 } from "./postgres-storage.ts";
@@ -425,6 +427,31 @@ function* iterateDynamicSqlAcknowledged<R extends SemanticDbRow = SemanticDbRow>
  * use JSON.stringify so a stream or field containing '|' cannot collide with
  * a different (stream, field) pair.
  */
+/**
+ * Whether this connection still has semantic index state for `stream`: a
+ * completion meta row or an in-progress row. Vectors are written only while a
+ * progress row exists and kept with a meta row, so either row marks vectors
+ * that a cleanup may still need to remove.
+ */
+export async function hasSemanticIndexState({
+  connectorInstanceId,
+  stream,
+}: {
+  connectorInstanceId: string;
+  stream: string;
+}): Promise<boolean> {
+  if (isPostgresStorageBackend()) {
+    return Boolean(
+      (await postgresGetSemanticMeta({ connectorInstanceId, stream })) ||
+        (await postgresGetSemanticProgress({ connectorInstanceId, stream }))
+    );
+  }
+  return Boolean(
+    getOne(referenceQueries.searchSemanticMetaGetByStream, [connectorInstanceId, stream]) ||
+      getOne(referenceQueries.searchSemanticProgressGetByStream, [connectorInstanceId, stream])
+  );
+}
+
 export function encodeScopeKey(stream: string, field: string): string {
   return JSON.stringify([stream, field]);
 }
@@ -1428,15 +1455,16 @@ function makeBlobFlatIndex({
       connectorInstanceId?: string | null;
       stream: string;
     }): void {
-      const streamPrefix = scopeKeyPrefixForStream(stream);
-      if (connectorInstanceId) {
-        execDynamicSqlAcknowledged(
-          "DELETE FROM semantic_search_blob WHERE connector_instance_id = ? AND connector_id = ? AND scope_key LIKE ?",
-          [connectorInstanceId, connectorId, `${streamPrefix}%`]
-        );
-        return;
-      }
-      exec(referenceQueries.searchSemanticBlobDeleteByStreamPrefix, [connectorId, `${streamPrefix}%`]);
+      const lower = scopeKeyPrefixForStream(stream);
+      const upper = `${lower.slice(0, -1)}-`;
+      // REVIEWED-DYNAMIC: exact binary JSON scope prefix; all values are bound.
+      const instanceClause = connectorInstanceId ? "AND connector_instance_id = ?" : "";
+      execDynamicSqlAcknowledged(
+        `DELETE FROM semantic_search_blob
+         WHERE connector_id = ? AND scope_key COLLATE BINARY >= ? AND scope_key COLLATE BINARY < ?
+           ${instanceClause}`,
+        [connectorId, lower, upper, ...(connectorInstanceId ? [connectorInstanceId] : [])]
+      );
     },
     deleteRecord({
       connectorId,
@@ -1449,15 +1477,13 @@ function makeBlobFlatIndex({
       stream: string;
       recordKey: string;
     }): void {
-      // scope_key contains stream as the first JSON array element. Use
-      // a LIKE match anchored on the opening characters of scope_key's
-      // JSON encoding to narrow before comparing the stream name exactly
-      // against the decoded scope_key.
+      // Binary ranges treat stream wildcard characters and case literally.
       const streamPrefix = scopeKeyPrefixForStream(stream); // e.g. '["posts",'
+      const streamUpper = `${streamPrefix.slice(0, -1)}-`;
       if (!connectorInstanceId) {
         execDynamicSqlAcknowledged(
-          "DELETE FROM semantic_search_blob WHERE connector_id = ? AND record_key = ? AND scope_key LIKE ?",
-          [connectorId, recordKey, `${streamPrefix}%`]
+          "DELETE FROM semantic_search_blob WHERE connector_id = ? AND record_key = ? AND scope_key COLLATE BINARY >= ? AND scope_key COLLATE BINARY < ?",
+          [connectorId, recordKey, streamPrefix, streamUpper]
         );
         return;
       }
@@ -1465,7 +1491,8 @@ function makeBlobFlatIndex({
         connectorId,
         connectorInstanceId,
         recordKey,
-        `${streamPrefix}%`,
+        streamPrefix,
+        streamUpper,
       ]);
     },
     kind: "blob-flat",
@@ -1706,10 +1733,10 @@ function makeSqliteVecIndex({
         iterateDynamicSqlAcknowledged(
           `SELECT rowid, connector_instance_id, scope_key
          FROM semantic_search_rowid
-         WHERE connector_id = ? AND record_key = ? AND scope_key LIKE ? AND rowid > ?
+         WHERE connector_id = ? AND record_key = ? AND scope_key COLLATE BINARY >= ? AND scope_key COLLATE BINARY < ? AND rowid > ?
          ORDER BY rowid ASC
          LIMIT ?`,
-          [connectorId, recordKey, `${streamPrefix}%`, cursorRowid, ROWID_PAGE]
+          [connectorId, recordKey, streamPrefix, `${streamPrefix.slice(0, -1)}-`, cursorRowid, ROWID_PAGE]
         )
       );
       for (const row of rows) {
@@ -1742,7 +1769,7 @@ function makeSqliteVecIndex({
     for (;;) {
       const page = getMany(
         referenceQueries.searchSemanticRowidPageByRecordAndStreamPrefix,
-        [connectorId, connectorInstanceId, recordKey, `${streamPrefix}%`, cursorRowid],
+        [connectorId, connectorInstanceId, recordKey, streamPrefix, `${streamPrefix.slice(0, -1)}-`, cursorRowid],
         { limit: ROWID_PAGE }
       );
       for (const row of page.rows) {
@@ -1807,41 +1834,36 @@ function makeSqliteVecIndex({
       exec(referenceQueries.searchSemanticRowidDeleteByScope, [connectorId, scopeKey]);
     },
     deleteByConnectorStream({ connectorId, connectorInstanceId = null, stream }) {
-      const streamPrefix = scopeKeyPrefixForStream(stream);
-      if (connectorInstanceId) {
+      const lower = scopeKeyPrefixForStream(stream);
+      const upper = `${lower.slice(0, -1)}-`;
+      const instanceClause = connectorInstanceId ? "AND connector_instance_id = ?" : "";
+      const params = [connectorId, lower, upper, ...(connectorInstanceId ? [connectorInstanceId] : [])];
+      let cursorRowid = 0;
+      for (;;) {
+        // REVIEWED-DYNAMIC: bound exact binary scope range and rowid page.
         const rows = Array.from(
           iterateDynamicSqlAcknowledged(
-            `SELECT rowid
-           FROM semantic_search_rowid
-           WHERE connector_instance_id = ? AND connector_id = ? AND scope_key LIKE ?`,
-            [connectorInstanceId, connectorId, `${streamPrefix}%`]
+            `SELECT rowid FROM semantic_search_rowid
+             WHERE connector_id = ? AND scope_key COLLATE BINARY >= ? AND scope_key COLLATE BINARY < ?
+               ${instanceClause} AND rowid > ?
+             ORDER BY rowid LIMIT ?`,
+            [...params, cursorRowid, ROWID_PAGE]
           )
         );
         for (const row of rows) {
           deleteVecByRowid(row.rowid);
-        }
-        execDynamicSqlAcknowledged(
-          "DELETE FROM semantic_search_rowid WHERE connector_instance_id = ? AND connector_id = ? AND scope_key LIKE ?",
-          [connectorInstanceId, connectorId, `${streamPrefix}%`]
-        );
-        return;
-      }
-      let cursorRowid = 0;
-      for (;;) {
-        const page = getMany(
-          referenceQueries.searchSemanticRowidPageByStreamPrefix,
-          [connectorId, `${streamPrefix}%`, cursorRowid],
-          { limit: ROWID_PAGE }
-        );
-        for (const row of page.rows) {
-          deleteVecByRowid(row.rowid);
           cursorRowid = Number(row.rowid);
         }
-        if (!page.truncated) {
+        if (rows.length < ROWID_PAGE) {
           break;
         }
       }
-      exec(referenceQueries.searchSemanticRowidDeleteByStreamPrefix, [connectorId, `${streamPrefix}%`]);
+      execDynamicSqlAcknowledged(
+        `DELETE FROM semantic_search_rowid
+         WHERE connector_id = ? AND scope_key COLLATE BINARY >= ? AND scope_key COLLATE BINARY < ?
+           ${instanceClause}`,
+        params
+      );
     },
     deleteRecord({ connectorId, connectorInstanceId, stream, recordKey }) {
       const streamPrefix = scopeKeyPrefixForStream(stream);
@@ -2685,19 +2707,21 @@ async function rebuildSemanticIndexForStream({
     frozenBackend,
     frozenBackendIdentity,
     physicalVecInventory: physicalVecInventory ?? null,
+    signal,
   };
   const pruneStale = async () => {
     await pruneSemanticIndexCandidates(repairScope);
     await prunePhysicalVecInventory(repairScope);
   };
+  // HNSW inserts slow down when the index does not fit in memory; the budget
+  // shrinks publication chunks for the rest of this stream's rebuild.
+  const publication: BulkChunkBudget = { chunkSize: SEMANTIC_FIELD_BATCH };
   async function rebuildPage(lastId: number, indexed: number, scanned: number): Promise<number> {
     let currentProgressJob = progressJob;
     // Cancellation hook (see lexical counterpart in search.js): the CLI
     // shutdown handler aborts the signal before closing the DB so the
     // embed/upsert loop releases the WAL writer cleanly.
-    if (signal?.aborted) {
-      throw signal.reason instanceof Error ? signal.reason : new Error("semantic backfill aborted");
-    }
+    assertSemanticBackfillNotAborted({ signal });
     // UNFENCED scan + embed: no connector-instance writer-admission slot
     // held across the page read or buildSemanticIndexEntries' embedding
     // calls (embedDocumentWithAdmission, gated by their OWN separate
@@ -2755,31 +2779,35 @@ async function rebuildSemanticIndexForStream({
       // This writer fence lasts for one version-guarded field batch. If a
       // later batch fails, the existing stream progress row causes restart to
       // re-probe earlier identities and embed only the missing pairs.
-      await withConnectorInstanceWrite(connectorInstanceId, async () => {
-        if (usePostgres) {
-          await withPostgresBulkTransaction(
-            async (client) => {
-              await assertConnectorManifestStreamSubsetWithClient(client, connectorId, manifest);
-              assertSemanticRepairBackend(repairScope);
-              await postgresSemanticIndexInsertManyGuarded({
-                connectorId,
-                connectorInstanceId,
-                entries,
-                stream,
-                client,
-              });
-              assertSemanticRepairBackend(repairScope);
-            },
-            { lockConnectorInstanceId: connectorInstanceId }
-          );
-        } else {
+      if (usePostgres) {
+        await runBulkChunksWithinStatementBudget(entries, publication, (chunk) =>
+          withConnectorInstanceWrite(connectorInstanceId, () =>
+            withPostgresBulkTransaction(
+              async (client) => {
+                await assertConnectorManifestStreamSubsetWithClient(client, connectorId, manifest);
+                assertSemanticRepairBackend(repairScope);
+                await postgresSemanticIndexInsertManyGuarded({
+                  connectorId,
+                  connectorInstanceId,
+                  entries: chunk,
+                  stream,
+                  client,
+                });
+                assertSemanticRepairBackend(repairScope);
+              },
+              { lockConnectorInstanceId: connectorInstanceId }
+            )
+          )
+        );
+      } else {
+        await withConnectorInstanceWrite(connectorInstanceId, async () => {
           transaction(() => {
             assertConnectorManifestStreamSubsetSync(connectorId, manifest);
             assertSemanticRepairBackend(repairScope);
             vectorIndex.upsertMany(liveEntriesOnly(entries, connectorInstanceId, stream));
           });
-        }
-      });
+        });
+      }
       await semanticRepairPhase("after-field-batch-publish", repairScope);
     }
     await semanticRepairPhase("after-page-publish", repairScope);
@@ -2947,6 +2975,7 @@ type SemanticRepairScope = {
   includesAllStreamScopes?: boolean;
   /** One per connector-instance repair, never a durable vec0 catalog. */
   physicalVecInventory?: Vec0PhysicalInventory | null;
+  signal?: AbortSignal | null;
 };
 
 type Vec0PhysicalInventory = {
@@ -2968,7 +2997,8 @@ type SemanticRepairPhase =
   | "after-page-publish"
   | "before-prune-page"
   | "before-orphan-prune"
-  | "after-verification";
+  | "after-verification"
+  | "after-physical-verification-page";
 let semanticRepairPhaseHook:
   | ((phase: SemanticRepairPhase, scope: { connectorInstanceId: string; stream: string }) => Promise<void> | void)
   | null = null;
@@ -2985,9 +3015,20 @@ async function semanticRepairPhase(phase: SemanticRepairPhase, scope: SemanticRe
   });
 }
 
+export class SemanticBackfillIncompleteError extends Error {
+  override name = "SemanticBackfillIncompleteError";
+}
+
+function assertSemanticBackfillNotAborted(scope: { signal?: AbortSignal | null }): void {
+  if (scope.signal?.aborted) {
+    throw new SemanticBackfillIncompleteError("semantic backfill interrupted; verification incomplete, dirty retained");
+  }
+}
+
 function assertSemanticRepairBackend(
-  scope: Pick<SemanticRepairScope, "frozenBackend" | "frozenBackendIdentity">
+  scope: Pick<SemanticRepairScope, "frozenBackend" | "frozenBackendIdentity"> & { signal?: AbortSignal | null }
 ): void {
+  assertSemanticBackfillNotAborted(scope);
   if (backend !== scope.frozenBackend || backendStorageIdentity(scope.frozenBackend) !== scope.frozenBackendIdentity) {
     throw new Error("semantic backend changed during derived repair");
   }
@@ -3207,6 +3248,7 @@ async function hasUntrustedSemanticScopeKey(scope: SemanticRepairScope): Promise
   let afterScopeKey: string | null = null;
   let afterRecordKey: string | null = null;
   for (;;) {
+    assertSemanticBackfillNotAborted(scope);
     const rows: Array<{ scope_key: string; record_key: string }> = scope.usePostgres
       ? (
           await postgresQuery<{ scope_key: string; record_key: string }>(
@@ -3288,10 +3330,11 @@ function currentPhysicalVecCandidate(
   };
 }
 
-function physicalVecInventoryIsInSync(scope: SemanticRepairScope): boolean {
+async function physicalVecInventoryIsInSync(scope: SemanticRepairScope): Promise<boolean> {
   if (scope.vectorIndex?.kind !== "sqlite-vec") return true;
   let afterOrdinal = 0;
   for (;;) {
+    assertSemanticBackfillNotAborted(scope);
     const page = physicalVecInventoryPage(scope, afterOrdinal);
     if (page.length === 0) return true;
     for (const observed of page) {
@@ -3314,6 +3357,8 @@ function physicalVecInventoryIsInSync(scope: SemanticRepairScope): boolean {
       if (current.sidecar_exists === 0 || expected === null || current.input_identity !== expected) return false;
     }
     afterOrdinal = page.at(-1)?.inventory_ordinal ?? afterOrdinal;
+    await semanticRepairPhase("after-physical-verification-page", scope);
+    await yieldImmediate();
   }
 }
 
@@ -3327,6 +3372,7 @@ async function prunePhysicalVecInventory(scope: SemanticRepairScope): Promise<vo
   if (scope.vectorIndex?.kind !== "sqlite-vec") return;
   let afterOrdinal = 0;
   for (;;) {
+    assertSemanticBackfillNotAborted(scope);
     const page = physicalVecInventoryPage(scope, afterOrdinal);
     if (page.length === 0) return;
     await semanticRepairPhase("before-prune-page", scope);
@@ -3405,6 +3451,7 @@ async function prunePhysicalVecInventory(scope: SemanticRepairScope): Promise<vo
 async function pruneSemanticIndexCandidates(scope: SemanticRepairScope): Promise<void> {
   let after: SemanticIndexCandidate | null = null;
   for (;;) {
+    assertSemanticBackfillNotAborted(scope);
     const page = await semanticCandidatesPage(scope, after);
     if (page.length === 0) return;
     // Physical vec0 duplicates are distinct candidates even when corrupt
@@ -3492,6 +3539,7 @@ async function pruneRemovedSemanticStream({
   frozenBackend,
   frozenBackendIdentity,
   physicalVecInventory,
+  signal = null,
 }: Omit<SemanticRepairScope, "declaredFields" | "includesAllStreamScopes">): Promise<void> {
   const scope: SemanticRepairScope = {
     connectorId,
@@ -3505,6 +3553,7 @@ async function pruneRemovedSemanticStream({
     manifest,
     physicalVecInventory: physicalVecInventory ?? null,
     includesAllStreamScopes: true,
+    signal,
   };
   await semanticRepairPhase("before-orphan-prune", scope);
   await pruneSemanticIndexCandidates(scope);
@@ -3542,10 +3591,11 @@ async function pruneRemovedSemanticStream({
 async function semanticBackfillIndexIsInSync(scope: SemanticRepairScope): Promise<boolean> {
   assertSemanticRepairBackend(scope);
   if (await hasUntrustedSemanticScopeKey(scope)) return false;
-  if (!physicalVecInventoryIsInSync(scope)) return false;
+  if (!(await physicalVecInventoryIsInSync(scope))) return false;
   let afterId = 0;
   const pageLimit = Math.max(1, Math.floor(SEMANTIC_REPAIR_PAGE / Math.max(scope.declaredFields.length, 1)));
   for (;;) {
+    assertSemanticBackfillNotAborted(scope);
     const rows = scope.usePostgres
       ? ((await postgresSemanticRecordsPage({
           connectorInstanceId: scope.connectorInstanceId,
@@ -3593,9 +3643,11 @@ async function semanticBackfillIndexIsInSync(scope: SemanticRepairScope): Promis
       }
     }
     afterId = Number(rows.at(-1)?.id);
+    await yieldImmediate();
   }
   let after: SemanticIndexCandidate | null = null;
   for (;;) {
+    assertSemanticBackfillNotAborted(scope);
     const page = await semanticCandidatesPage(scope, after);
     if (page.length === 0) break;
     for (const candidate of page) {
@@ -3609,12 +3661,13 @@ async function semanticBackfillIndexIsInSync(scope: SemanticRepairScope): Promis
         return false;
     }
     after = page.at(-1) as SemanticIndexCandidate;
+    await yieldImmediate();
   }
   assertSemanticRepairBackend(scope);
   // Recheck after the read-only proof so a concurrent malformed/corrupt
   // insertion cannot let this repair clear a dirty generation.
   if (await hasUntrustedSemanticScopeKey(scope)) return false;
-  if (!physicalVecInventoryIsInSync(scope)) return false;
+  if (!(await physicalVecInventoryIsInSync(scope))) return false;
   return true;
 }
 
@@ -3710,6 +3763,7 @@ async function inspectSemanticBackfillInstance({
           frozenBackendIdentity: currentModel,
           manifest: context.manifest,
           physicalVecInventory: context.physicalVecInventory,
+          signal: context.signal,
         },
         null
       );
@@ -3729,8 +3783,9 @@ async function inspectSemanticBackfillInstance({
           frozenBackendIdentity: currentModel,
           manifest: context.manifest,
           physicalVecInventory: context.physicalVecInventory,
+          signal: context.signal,
         };
-        if (!(await hasUntrustedSemanticScopeKey(emptyScope)) && physicalVecInventoryIsInSync(emptyScope))
+        if (!(await hasUntrustedSemanticScopeKey(emptyScope)) && (await physicalVecInventoryIsInSync(emptyScope)))
           return { canResume: false, needsRebuild: false };
       }
     }
@@ -3771,6 +3826,7 @@ async function inspectSemanticBackfillInstance({
       frozenBackendIdentity: currentModel,
       manifest: context.manifest,
       physicalVecInventory: context.physicalVecInventory,
+      signal: context.signal,
     });
     if (inSync) {
       const scope: SemanticRepairScope = {
@@ -3784,6 +3840,7 @@ async function inspectSemanticBackfillInstance({
         frozenBackendIdentity: currentModel,
         manifest: context.manifest,
         physicalVecInventory: context.physicalVecInventory,
+        signal: context.signal,
       };
       await semanticRepairPhase("after-verification", scope);
       await assertSemanticBackfillManifestCurrent(connectorId, context.manifest);
@@ -3821,7 +3878,7 @@ async function rebuildSemanticBackfillInstance({
   canResume: boolean;
   stream: string;
 }): Promise<SemanticBackfillJob> {
-  const { connectorId, currentIdentity, currentMetric, currentModel, log, signal, usePostgres } = context;
+  const { connectorId, currentIdentity, currentMetric, currentModel, log, usePostgres } = context;
   if (usePostgres) {
     await postgresUpsertSemanticProgress({
       connectorId,
@@ -3857,12 +3914,12 @@ async function rebuildSemanticBackfillInstance({
     declaredFields,
     progressJob: rebuildingJob,
     recordsToScan,
-    signal,
     stream,
     manifest: context.manifest,
     frozenBackend: context.frozenBackend,
     frozenBackendIdentity: currentModel,
     physicalVecInventory: context.physicalVecInventory,
+    signal: context.signal,
   });
   const scope: SemanticRepairScope = {
     connectorId,
@@ -3875,6 +3932,7 @@ async function rebuildSemanticBackfillInstance({
     frozenBackend: context.frozenBackend,
     frozenBackendIdentity: currentModel,
     physicalVecInventory: context.physicalVecInventory,
+    signal: context.signal,
   };
   if (!(await semanticBackfillIndexIsInSync(scope))) {
     throw new Error("semantic index did not converge; current dirty generation retained");
@@ -3952,6 +4010,7 @@ async function deleteSemanticNonParticipatingStream({
       frozenBackend: context.frozenBackend,
       frozenBackendIdentity: context.currentModel,
       physicalVecInventory: context.physicalVecInventory,
+      signal: context.signal,
     };
     await pruneSemanticIndexCandidates(scope);
     await prunePhysicalVecInventory(scope);
@@ -4167,9 +4226,7 @@ async function backfillSemanticIndexForConnectorInstance({
     const visitedStreams = new Set<string>();
 
     await runSequential(manifest.streams, async (mStream) => {
-      if (signal?.aborted) {
-        throw signal.reason instanceof Error ? signal.reason : new Error("semantic backfill aborted");
-      }
+      assertSemanticBackfillNotAborted({ signal });
       const stream = mStream?.name;
       if (typeof stream !== "string" || stream.length === 0) {
         return;
@@ -4269,6 +4326,7 @@ async function backfillSemanticIndexForConnectorInstance({
               usePostgres,
               vectorIndex,
               physicalVecInventory,
+              signal,
             })
         );
       });

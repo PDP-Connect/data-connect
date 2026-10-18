@@ -25,7 +25,7 @@
     "@pdpp/list-envelope": "*",
     "@pdpp/operator-ui": "*",
     "@tailwindcss/postcss": "^4.3.3",
-    "@tanstack/react-query": "^5.103.2",
+    "@tanstack/react-query": "^5.104.2",
     "@tauri-apps/plugin-shell": "^2.3.6",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/addon-web-links": "^0.12.0",
@@ -36,16 +36,16 @@
     "lucide-react": "^1.50.0",
     "next": "^16.3.8",
     "pdpp-reference-implementation": "*",
-    "postcss": "^8.5.28",
+    "postcss": "^8.5.30",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
     "server-only": "^0.0.1",
-    "simple-icons": "^16.31.0",
+    "simple-icons": "^16.35.0",
     "tailwind-merge": "^3.7.0",
     "tailwindcss": "^4.3.3",
-    "zod": "^4.6.5"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@types/jsdom": "^30.0.0",

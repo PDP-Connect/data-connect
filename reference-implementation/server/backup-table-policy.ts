@@ -327,6 +327,11 @@ export const BACKUP_TABLE_INVENTORY: Record<string, BackupTableInventoryEntry> =
     classification: "backup_required",
     reason: "Record history is durable owner data.",
   },
+  record_derived_repair_pending: {
+    classification: "backup_required",
+    reason:
+      "Queued re-derivation of manifest-derived record columns after a manifest publication. Loss leaves those columns derived from the previous manifest until the connector is installed again.",
+  },
   record_rejection_quota: {
     classification: "backup_required",
     reason: "Hosted rejection quota counters bound durable rejection accounting and replay.",

@@ -31,6 +31,9 @@ pub mod winclose_repro;
 pub mod pdeathsig_port_repro;
 #[cfg(desktop)]
 mod sealed_credential;
+mod spawn_retry;
+#[cfg(test)]
+mod test_executable;
 #[cfg(desktop)]
 mod unified;
 #[cfg(target_os = "linux")]

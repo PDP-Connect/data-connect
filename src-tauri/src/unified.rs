@@ -609,10 +609,14 @@ fn report_unhandled_deep_links(app: &tauri::App) {
 /// in the query, so only the scheme and host are included.
 fn unhandled_deep_link_notice(url: &tauri::Url) -> String {
     format!(
-        "Ignoring a {}://{} link: unified mode has no handler for incoming links",
-        url.scheme(),
-        url.host_str().unwrap_or("")
+        "Ignoring a {} link: unified mode has no handler for incoming links",
+        log_url_origin(url)
     )
+}
+
+/// Safe common prefix for URL logs: no userinfo, query, or fragment.
+fn log_url_origin(url: &tauri::Url) -> String {
+    format!("{}://{}", url.scheme(), url.host_str().unwrap_or(""))
 }
 
 pub(crate) fn focus_or_bootstrap(app: AppHandle) {
@@ -3332,7 +3336,8 @@ fn console_path_before_restart(app: &AppHandle) -> Option<String> {
             // propagate a shape `console_url_preserving_path` was not
             // proven safe for.
             log::warn!(
-                "console_path_before_restart: console URL path {path_and_query:?} failed validation, falling back to root"
+                "{}", console_restart_path_warning(&url, &path_and_query,
+                    "console_path_before_restart: console URL path failed validation")
             );
             None
         }
@@ -3457,10 +3462,9 @@ const AUTOSTART_STATE_POLL_INTERVAL: Duration = Duration::from_secs(3);
 /// Decrypt a pending `ngrok_authtoken_sealed` (written by `owner-remote-access.ts`'s
 /// POST handler, see `RemoteAccessConfig::ngrok_authtoken_sealed`'s doc comment
 /// in `remote_access.rs`) into the OS keychain, then blank the sealed field
-/// back to `None` on disk. Returns the config with the field cleared either
-/// way -- on decrypt failure the sealed token is dropped rather than retried
-/// forever, since a bad token needs the owner to resubmit it, not a poll loop
-/// hammering the same ciphertext every 3 seconds.
+/// back to `None` on disk only after durable storage succeeds. On failure,
+/// leave the sealed token on disk and return an error so the watcher retries
+/// on its next poll without advancing its baseline or restarting the stack.
 ///
 /// Must run BEFORE `restart_after_remote_access_config`: the restart's own
 /// `start_managed_stack` reads the ngrok authtoken back out of the keychain
@@ -3477,44 +3481,33 @@ const AUTOSTART_STATE_POLL_INTERVAL: Duration = Duration::from_secs(3);
 fn apply_pending_ngrok_authtoken(
     app: &AppHandle,
     config: RemoteAccessConfig,
-) -> RemoteAccessConfig {
-    let Some(sealed) = config.ngrok_authtoken_sealed.clone() else {
-        return config;
-    };
-    let outcome = (|| -> Result<(), String> {
-        let key_path = credential_encryption_key_path(app)?;
-        let database_path = app
-            .path()
-            .app_data_dir()
-            .map_err(|error| format!("Failed to resolve DataConnect app-data directory: {error}"))?
-            .join(UNIFIED_DB_DIRECTORY)
-            .join(UNIFIED_DB_FILE);
-        let credential_encryption_key =
-            load_or_create_credential_encryption_key(&key_path, &database_path)?;
-        let token = crate::sealed_credential::open_sealed_credential(
-            &sealed,
-            &credential_encryption_key,
-        )
-        .map_err(|error| format!("Failed to decrypt the pending ngrok authtoken: {error}"))?;
-        crate::owner_credential::store_provider_credential_reference(
-            crate::remote_access_ngrok::NGROK_PROVIDER_ID,
-            &token,
-        )
-    })();
-    if let Err(error) = outcome {
-        log::error!("Could not apply the pending ngrok authtoken: {error}");
-    }
-    let cleared = RemoteAccessConfig {
-        ngrok_authtoken_sealed: None,
-        ..config
-    };
-    match save_remote_access_config(app, cleared.clone()) {
-        Ok(saved) => saved,
-        Err(error) => {
-            log::error!("Could not clear the pending ngrok authtoken from disk: {error}");
-            cleared
-        }
-    }
+) -> Result<RemoteAccessConfig, String> {
+    apply_pending_credential_handoff(
+        config,
+        |config| &mut config.ngrok_authtoken_sealed,
+        |sealed| {
+            let key_path = credential_encryption_key_path(app)?;
+            let database_path = app
+                .path()
+                .app_data_dir()
+                .map_err(|error| format!("Failed to resolve DataConnect app-data directory: {error}"))?
+                .join(UNIFIED_DB_DIRECTORY)
+                .join(UNIFIED_DB_FILE);
+            let credential_encryption_key =
+                load_or_create_credential_encryption_key(&key_path, &database_path)?;
+            let token = crate::sealed_credential::open_sealed_credential(
+                sealed,
+                &credential_encryption_key,
+            )
+            .map_err(|error| format!("Failed to decrypt the pending ngrok authtoken: {error}"))?;
+            crate::owner_credential::store_provider_credential_reference(
+                crate::remote_access_ngrok::NGROK_PROVIDER_ID,
+                &token,
+            )
+        },
+        || load_remote_access_config(app),
+        |config| save_remote_access_config(app, config),
+    )
 }
 
 /// Decrypt a pending `cloudflare_tunnel_token_sealed` into the OS keychain,
@@ -3525,44 +3518,208 @@ fn apply_pending_ngrok_authtoken(
 fn apply_pending_cloudflare_tunnel_token(
     app: &AppHandle,
     config: RemoteAccessConfig,
-) -> RemoteAccessConfig {
-    let Some(sealed) = config.cloudflare_tunnel_token_sealed.clone() else {
-        return config;
+) -> Result<RemoteAccessConfig, String> {
+    apply_pending_credential_handoff(
+        config,
+        |config| &mut config.cloudflare_tunnel_token_sealed,
+        |sealed| {
+            let key_path = credential_encryption_key_path(app)?;
+            let database_path = app
+                .path()
+                .app_data_dir()
+                .map_err(|error| format!("Failed to resolve DataConnect app-data directory: {error}"))?
+                .join(UNIFIED_DB_DIRECTORY)
+                .join(UNIFIED_DB_FILE);
+            let credential_encryption_key =
+                load_or_create_credential_encryption_key(&key_path, &database_path)?;
+            let token = crate::sealed_credential::open_sealed_credential(
+                sealed,
+                &credential_encryption_key,
+            )
+            .map_err(|error| {
+                format!("Failed to decrypt the pending Cloudflare tunnel token: {error}")
+            })?;
+            crate::owner_credential::store_provider_credential_reference(
+                crate::remote_access_cloudflare::CLOUDFLARE_TUNNEL_PROVIDER_ID,
+                &token,
+            )
+        },
+        || load_remote_access_config(app),
+        |config| save_remote_access_config(app, config),
+    )
+}
+
+/// Store before changing the persisted handoff; a failed store remains retryable.
+fn apply_pending_credential_handoff(
+    mut config: RemoteAccessConfig,
+    pending_field: fn(&mut RemoteAccessConfig) -> &mut Option<String>,
+    store: impl FnOnce(&str) -> Result<(), String>,
+    reload: impl FnOnce() -> Result<RemoteAccessConfig, String>,
+    save: impl FnOnce(RemoteAccessConfig) -> Result<RemoteAccessConfig, String>,
+) -> Result<RemoteAccessConfig, String> {
+    let Some(consumed) = pending_field(&mut config).clone() else {
+        return Ok(config);
     };
-    let outcome = (|| -> Result<(), String> {
-        let key_path = credential_encryption_key_path(app)?;
-        let database_path = app
-            .path()
-            .app_data_dir()
-            .map_err(|error| format!("Failed to resolve DataConnect app-data directory: {error}"))?
-            .join(UNIFIED_DB_DIRECTORY)
-            .join(UNIFIED_DB_FILE);
-        let credential_encryption_key =
-            load_or_create_credential_encryption_key(&key_path, &database_path)?;
-        let token = crate::sealed_credential::open_sealed_credential(
-            &sealed,
-            &credential_encryption_key,
-        )
-        .map_err(|error| {
-            format!("Failed to decrypt the pending Cloudflare tunnel token: {error}")
-        })?;
-        crate::owner_credential::store_provider_credential_reference(
-            crate::remote_access_cloudflare::CLOUDFLARE_TUNNEL_PROVIDER_ID,
-            &token,
-        )
-    })();
-    if let Err(error) = outcome {
-        log::error!("Could not apply the pending Cloudflare tunnel token: {error}");
+    store(&consumed)?;
+    // The keychain can block while the owner writes from another process.
+    // Reload only after it succeeds, and change only the handoff we consumed.
+    let mut current = reload()?;
+    let pending = pending_field(&mut current);
+    if pending.as_deref() == Some(consumed.as_str()) {
+        *pending = None;
     }
-    let cleared = RemoteAccessConfig {
-        cloudflare_tunnel_token_sealed: None,
-        ..config
-    };
-    match save_remote_access_config(app, cleared.clone()) {
-        Ok(saved) => saved,
-        Err(error) => {
-            log::error!("Could not clear the pending Cloudflare tunnel token from disk: {error}");
-            cleared
+    // Two processes share this file without a file lock: an owner write in
+    // the remaining reload-to-atomic-rename window can still race. Do not put
+    // keychain work or any other blocking external call between reload/save.
+    save(current)
+}
+
+#[cfg(test)]
+mod pending_credential_handoff_tests {
+    use super::*;
+
+    type PendingField = fn(&mut RemoteAccessConfig) -> &mut Option<String>;
+
+    fn pending_fields() -> [PendingField; 2] {
+        [
+            |config| &mut config.ngrok_authtoken_sealed,
+            |config| &mut config.cloudflare_tunnel_token_sealed,
+        ]
+    }
+
+    struct Fixture(PathBuf);
+
+    impl Fixture {
+        fn new(config: &RemoteAccessConfig) -> Self {
+            static NEXT: std::sync::atomic::AtomicUsize =
+                std::sync::atomic::AtomicUsize::new(0);
+            let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let root = std::env::temp_dir().join(format!(
+                "dataconnect-handoff-{}-{id}", std::process::id()
+            ));
+            fs::create_dir(&root).unwrap();
+            let fixture = Self(root);
+            fixture.save(config.clone()).unwrap();
+            fixture
+        }
+
+        fn path(&self) -> PathBuf {
+            self.0.join("remote-access.json")
+        }
+
+        fn load(&self) -> Result<RemoteAccessConfig, String> {
+            let content = fs::read_to_string(self.path()).map_err(|e| e.to_string())?;
+            let config = serde_json::from_str(&content).map_err(|e| e.to_string())?;
+            crate::remote_access::validate_remote_access_config(config)
+        }
+
+        fn save(&self, config: RemoteAccessConfig) -> Result<RemoteAccessConfig, String> {
+            let config = crate::remote_access::validate_remote_access_config(config)?;
+            crate::atomic_write::write_json_atomically(
+                &self.path(), &config, "handoff fixture write",
+            )?;
+            Ok(config)
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn initial_config() -> RemoteAccessConfig {
+        let mut config = off_remote_access_config();
+        config.posture = crate::remote_access::RemoteAccessPosture::PublicUrl;
+        config.provider = Some("user_supplied_origin".to_owned());
+        config.fields.reference_origin = Some("https://old.example.test".to_owned());
+        config.fields.trusted_hosts = "old.example.test".to_owned();
+        config.console_port = Some(4321);
+        // Synthetic ciphertext only; store is always injected, never real keychain.
+        config.ngrok_authtoken_sealed = Some("ngrok-sealed-fixture".to_owned());
+        config.cloudflare_tunnel_token_sealed = Some("cloudflare-sealed-fixture".to_owned());
+        config
+    }
+
+    #[test]
+    fn handoff_preserves_concurrent_remote_access_off() {
+        for field in pending_fields() {
+            let initial = initial_config();
+            let fixture = Fixture::new(&initial);
+            let expected = off_remote_access_config();
+            let result = apply_pending_credential_handoff(
+                initial, field,
+                |_| fixture.save(expected.clone()).map(|_| ()),
+                || fixture.load(), |config| fixture.save(config),
+            ).unwrap();
+            assert_eq!(fixture.load().unwrap(), expected);
+            assert_eq!(result, expected, "watcher must receive the current off config");
+        }
+    }
+
+    #[test]
+    fn handoff_preserves_concurrent_newer_token_and_origin() {
+        for field in pending_fields() {
+            let initial = initial_config();
+            let fixture = Fixture::new(&initial);
+            let mut expected = initial.clone();
+            *field(&mut expected) = Some("newer-sealed-fixture".to_owned());
+            expected.fields.reference_origin = Some("https://new.example.test".to_owned());
+            expected.fields.trusted_hosts = "new.example.test".to_owned();
+            expected.console_port = Some(5432);
+            let result = apply_pending_credential_handoff(
+                initial, field,
+                |_| fixture.save(expected.clone()).map(|_| ()),
+                || fixture.load(), |config| fixture.save(config),
+            ).unwrap();
+            assert_eq!(fixture.load().unwrap(), expected);
+            assert_eq!(result, expected, "watcher must receive the fresh config");
+        }
+    }
+
+    #[test]
+    fn handoff_clears_only_consumed_field_without_concurrent_change() {
+        for field in pending_fields() {
+            let initial = initial_config();
+            let fixture = Fixture::new(&initial);
+            let mut expected = initial.clone();
+            let consumed = field(&mut expected).take().unwrap();
+            let result = apply_pending_credential_handoff(
+                initial, field, |sealed| {
+                    assert_eq!(sealed, consumed);
+                    Ok(())
+                },
+                || fixture.load(), |config| fixture.save(config),
+            ).unwrap();
+            assert_eq!(fixture.load().unwrap(), expected);
+            assert_eq!(result, expected);
+        }
+    }
+
+    #[test]
+    fn failed_store_retains_each_handoff_until_successful_retry() {
+        for field in pending_fields() {
+            let initial = initial_config();
+            let fixture = Fixture::new(&initial);
+            let original_bytes = fs::read(fixture.path()).unwrap();
+            for failure in ["decryption unavailable", "keychain locked"] {
+                let result = apply_pending_credential_handoff(
+                    initial.clone(), field, |_| Err(failure.to_owned()),
+                    || panic!("failed store must not reload"),
+                    |_| panic!("failed store must not save"),
+                );
+                assert_eq!(result, Err(failure.to_owned()));
+                assert_eq!(fs::read(fixture.path()).unwrap(), original_bytes);
+                assert_eq!(fixture.load().unwrap(), initial);
+            }
+            let mut expected = initial.clone();
+            *field(&mut expected) = None;
+            let result = apply_pending_credential_handoff(
+                initial, field, |_| Ok(()),
+                || fixture.load(), |config| fixture.save(config),
+            ).unwrap();
+            assert_eq!(fixture.load().unwrap(), expected);
+            assert_eq!(result, expected);
         }
     }
 }
@@ -3638,9 +3795,13 @@ pub(crate) fn spawn_remote_access_config_watcher(app: AppHandle) {
                 })
                 .await
                 {
-                    Ok(config) => config,
+                    Ok(Ok(config)) => config,
+                    Ok(Err(error)) => {
+                        log::error!("Pending ngrok authtoken handoff failed; retained for retry: {error}");
+                        continue;
+                    }
                     Err(error) => {
-                        log::error!("Pending ngrok authtoken task failed: {error}");
+                        log::error!("Pending ngrok authtoken task failed; retained for retry: {error}");
                         continue;
                     }
                 }
@@ -3654,9 +3815,13 @@ pub(crate) fn spawn_remote_access_config_watcher(app: AppHandle) {
                 })
                 .await
                 {
-                    Ok(config) => config,
+                    Ok(Ok(config)) => config,
+                    Ok(Err(error)) => {
+                        log::error!("Pending Cloudflare tunnel token handoff failed; retained for retry: {error}");
+                        continue;
+                    }
                     Err(error) => {
-                        log::error!("Pending Cloudflare tunnel token task failed: {error}");
+                        log::error!("Pending Cloudflare tunnel token task failed; retained for retry: {error}");
                         continue;
                     }
                 }
@@ -4187,24 +4352,128 @@ fn open_external_dry_run_is_enabled() -> bool {
 /// that needs to log them.
 fn decide_console_navigation(url: &tauri::Url, console_origin: &tauri::Url) -> bool {
     if is_console_origin(url, console_origin) {
-        log::info!("on_navigation: url={url} decision=allowed-internal");
+        log::info!("{}", console_navigation_notice(url, "allowed-internal"));
         return true;
     }
     if url.scheme() == "https" {
         if open_external_dry_run_is_enabled() {
-            log::info!("on_navigation: url={url} decision=opened-externally (dry run: would open {url})");
+            log::info!("{}", console_navigation_notice(url, "opened-externally (dry run)"));
         } else {
             match open::that_detached(url.as_str()) {
-                Ok(()) => log::info!("on_navigation: url={url} decision=opened-externally"),
-                Err(error) => log::error!(
-                    "on_navigation: url={url} decision=opened-externally failed to open: {error}"
+                Ok(()) => log::info!("{}", console_navigation_notice(url, "opened-externally")),
+                // Opener errors may echo the raw URL argument.
+                Err(_) => log::error!(
+                    "{}", console_navigation_notice(url, "opened-externally failed to open")
                 ),
             }
         }
     } else {
-        log::warn!("on_navigation: url={url} decision=refused (non-https scheme)");
+        log::warn!("{}", console_navigation_notice(url, "refused (non-https scheme)"));
     }
     false
+}
+
+/// Never format the raw URL (or an opener error) into a navigation log.
+fn console_navigation_notice(url: &tauri::Url, decision: &str) -> String {
+    format!(
+        "on_navigation: url={}{} decision={decision}",
+        log_url_origin(url),
+        url.path()
+    )
+}
+
+#[cfg(test)]
+mod restart_log_redaction_tests {
+    use super::*;
+
+    fn assert_warning_redacted(raw: &str) {
+        let url = tauri::Url::parse(
+            "https://USER_SENTINEL:PASSWORD_SENTINEL@example.test:8443//callback?code=SYNTHETIC_QUERY_SECRET#SYNTHETIC_FRAGMENT_SECRET"
+        ).unwrap();
+        for context in [
+            "console_path_before_restart: console URL path failed validation",
+            "console_url_preserving_path: rejected path for restart redirect",
+        ] {
+            let warning = console_restart_path_warning(&url, raw, context);
+            for secret in [
+                "SYNTHETIC_QUERY_SECRET",
+                "SYNTHETIC_FRAGMENT_SECRET",
+                "USER_SENTINEL",
+                "PASSWORD_SENTINEL",
+            ] {
+                assert!(!warning.contains(secret), "warning leaked {secret}");
+            }
+            assert_eq!(
+                warning,
+                format!("{context}: url=https://example.test//callback, falling back to root")
+            );
+        }
+    }
+
+    #[test]
+    fn restart_warnings_omit_query_secrets() {
+        assert_warning_redacted("//callback?code=SYNTHETIC_QUERY_SECRET#SYNTHETIC_FRAGMENT_SECRET");
+    }
+
+    #[test]
+    fn restart_warnings_omit_fragment_without_query() {
+        assert_warning_redacted("//callback#SYNTHETIC_FRAGMENT_SECRET");
+    }
+
+    #[test]
+    fn rejected_absolute_input_omits_userinfo() {
+        assert_warning_redacted("https://USER_SENTINEL:PASSWORD_SENTINEL@example.test//callback?code=SYNTHETIC_QUERY_SECRET#SYNTHETIC_FRAGMENT_SECRET");
+    }
+}
+
+/// Shared pure formatting boundary for restart validation warnings.
+fn console_restart_path_warning(
+    url: &tauri::Url,
+    raw: &str,
+    context: &str,
+) -> String {
+    // The rejected input need not be a valid path. Split both delimiters
+    // before rendering it; never resolve it against the console origin.
+    // log_url_origin shares navigation logging's userinfo-free policy.
+    // An invalid absolute-URL input must not expose its authority either.
+    let parsed = tauri::Url::parse(raw).ok();
+    let path = parsed.as_ref().map(|url| url.path()).unwrap_or_else(|| {
+        raw.split(['?', '#']).next().unwrap_or_default()
+    });
+    format!(
+        "{context}: url={}{path}, falling back to root",
+        log_url_origin(url)
+    )
+}
+
+#[cfg(test)]
+mod navigation_log_redaction_tests {
+    use super::*;
+
+    #[test]
+    fn all_navigation_notices_omit_credentials() {
+        for scheme in ["https", "http", "vana"] {
+            let url = tauri::Url::parse(&format!(
+                "{scheme}://USER_SENTINEL:PASSWORD_SENTINEL@example.test/consent?code=QUERY_SENTINEL#FRAGMENT_SENTINEL"
+            )).unwrap();
+            for decision in [
+                "allowed-internal",
+                "opened-externally (dry run)",
+                "opened-externally",
+                "opened-externally failed to open",
+                "refused (non-https scheme)",
+            ] {
+                let notice = console_navigation_notice(&url, decision);
+                assert_eq!(
+                    notice,
+                    format!("on_navigation: url={scheme}://example.test/consent decision={decision}")
+                );
+                for secret in ["USER_SENTINEL", "PASSWORD_SENTINEL", "QUERY_SENTINEL", "FRAGMENT_SENTINEL"] {
+                    assert!(!notice.contains(secret));
+                }
+            }
+        }
+    }
 }
 
 /// A path+query string safe to append to a FRESH console origin this
@@ -4253,7 +4522,8 @@ fn console_url_preserving_path(
     };
     let Some(path_and_query) = ConsolePathAndQuery::parse(raw) else {
         log::warn!(
-            "console_url_preserving_path: rejected path {raw:?} for restart redirect, falling back to root"
+            "{}", console_restart_path_warning(console_origin, raw,
+                "console_url_preserving_path: rejected path for restart redirect")
         );
         return console_origin.clone();
     };

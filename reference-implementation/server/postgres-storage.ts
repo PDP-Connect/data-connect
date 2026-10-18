@@ -120,6 +120,43 @@ const POSTGRES_INTERACTIVE_POOL_MAX = 8;
 const POSTGRES_BULK_POOL_MAX = 3;
 
 /**
+ * PostgreSQL notices that a client has gone only when it next reads from the
+ * socket, and a long statement such as VACUUM, REINDEX or a bulk DELETE never
+ * does. When this process dies, its statements keep their locks and run to
+ * completion. Observed in production on v0.7.62: a stopped container left
+ * `VACUUM (ANALYZE) semantic_search_blob` running for more than 41 minutes,
+ * and the next boot's schema batch waited behind it on an AccessExclusiveLock
+ * until an operator cancelled it. `client_connection_check_interval`
+ * (PostgreSQL 14+, Linux) makes the server poll the socket while a statement
+ * runs and end the backend when the client is gone, so a dead process's work
+ * releases its locks within this interval.
+ */
+const POSTGRES_CLIENT_CONNECTION_CHECK_INTERVAL_MS = 5_000;
+
+/**
+ * A pooled client whose backend is terminated (`pg_terminate_backend`,
+ * `idle_in_transaction_session_timeout`, a Postgres restart) emits `error`.
+ * pg-pool listens only while the client is idle, and then re-emits on the pool.
+ * An `error` event with no listener throws, and the process exits. The pool
+ * reports it instead: the query in flight already rejects, the client is no
+ * longer queryable, and pg-pool discards it on release.
+ */
+function createPostgresPool(databaseUrl: string, max: number, log: StorageLog): PgPool {
+  const created = new Pool({ connectionString: databaseUrl, max });
+  const reportLostConnection = (error: Error) => log(`[postgres] pooled connection lost: ${error.message}`);
+  created.on("error", reportLostConnection);
+  created.on("connect", (client) => {
+    client.on("error", reportLostConnection);
+    // Best effort: a server older than PostgreSQL 14, or a platform without
+    // socket polling, rejects the setting. Those servers keep the old behavior.
+    client
+      .query(`SET client_connection_check_interval = ${POSTGRES_CLIENT_CONNECTION_CHECK_INTERVAL_MS}`)
+      .catch(() => undefined);
+  });
+  return created;
+}
+
+/**
  * Hard per-statement ceiling for the bulk lane. Postgres cannot preempt a
  * transaction once admitted (see the PostgreSQL wiki's own "Priorities"
  * page: there are no facilities to limit or prioritize resources per
@@ -143,7 +180,17 @@ const POSTGRES_BULK_POOL_MAX = 3;
  * into a failed backfill. 15s is ~14x the observed write cost and still an
  * order of magnitude under the 44.5s incident.
  */
-const POSTGRES_BULK_STATEMENT_TIMEOUT_MS = 15_000;
+const DEFAULT_POSTGRES_BULK_STATEMENT_TIMEOUT_MS = 15_000;
+
+/**
+ * The bulk-lane statement ceiling. `PDPP_POSTGRES_BULK_STATEMENT_TIMEOUT_MS`
+ * overrides the default, so an operator can raise it on a slow database
+ * without a release. It is read per transaction, so a test can lower it.
+ */
+export function postgresBulkStatementTimeoutMs(): number {
+  const configured = Number(process.env.PDPP_POSTGRES_BULK_STATEMENT_TIMEOUT_MS);
+  return Number.isInteger(configured) && configured > 0 ? configured : DEFAULT_POSTGRES_BULK_STATEMENT_TIMEOUT_MS;
+}
 /**
  * Bulk work must not sit in a lock queue either. Kept well under the
  * statement bound so a contended chunk fails fast and is retried on the next
@@ -584,7 +631,13 @@ const POSTGRES_LEASE_PRIORITY_MIGRATION_LOCK = [482_571, 151];
 // individually concurrency-safe. Keep their DDL from racing a fully
 // bootstrapped legacy-priority starter; the priority migration retains its own
 // transaction-scoped lock below so its catalog decision is independently safe.
-const POSTGRES_BOOTSTRAP_SERIALIZATION_LOCK = [482_571, 150];
+//
+// Derived-index maintenance (VACUUM, REINDEX CONCURRENTLY) holds this same key
+// in SHARED mode for its whole run. Maintenance therefore never starts while a
+// bootstrap is in progress, and a bootstrap that finds the key held in shared
+// mode cancels that maintenance instead of waiting behind it. See
+// cancelDerivedIndexMaintenanceBlockingBootstrap.
+export const POSTGRES_BOOTSTRAP_SERIALIZATION_LOCK = [482_571, 150];
 const POSTGRES_BOOTSTRAP_LOCK_INITIAL_DELAY_MS = 25;
 const POSTGRES_BOOTSTRAP_LOCK_MAX_DELAY_MS = 250;
 // The bootstrap DDL batch takes an AccessExclusiveLock on tables (connectors,
@@ -1130,7 +1183,7 @@ export async function postgresBulkQuery<Row extends QueryResultRow = QueryResult
     // SET LOCAL, never bare SET: it reverts at COMMIT/ROLLBACK and so cannot
     // leak this bulk ceiling onto whichever caller the pool hands this
     // physical connection to next.
-    await client.query(`SET LOCAL statement_timeout = ${POSTGRES_BULK_STATEMENT_TIMEOUT_MS}`);
+    await client.query(`SET LOCAL statement_timeout = ${postgresBulkStatementTimeoutMs()}`);
     await client.query(`SET LOCAL lock_timeout = ${POSTGRES_BULK_LOCK_TIMEOUT_MS}`);
     const result = await client.query<Row>(sql, params);
     await client.query("COMMIT");
@@ -1370,6 +1423,44 @@ export async function withPostgresTransaction<T>(
   }
 }
 
+export interface BulkChunkBudget {
+  chunkSize: number;
+}
+
+/**
+ * Run `items` through `runChunk` in chunks that keep each bulk statement well
+ * under `postgresBulkStatementTimeoutMs()`. A chunk slower than a quarter of
+ * the timeout halves the next chunk. A chunk that the timeout cancels is
+ * retried at half its size; a single item that still times out is rethrown.
+ * `runChunk` must commit each chunk on its own and be idempotent, so a crash
+ * keeps every committed chunk. The caller keeps one budget across calls, so
+ * a learned size carries over to its later pages.
+ */
+export async function runBulkChunksWithinStatementBudget<T>(
+  items: readonly T[],
+  budget: BulkChunkBudget,
+  runChunk: (chunk: readonly T[]) => Promise<unknown>
+): Promise<void> {
+  let offset = 0;
+  while (offset < items.length) {
+    const chunk = items.slice(offset, offset + Math.max(1, budget.chunkSize));
+    const startedAt = Date.now();
+    try {
+      await runChunk(chunk);
+    } catch (error) {
+      if (!(error instanceof PostgresStatementTimeoutError) || chunk.length === 1) {
+        throw error;
+      }
+      budget.chunkSize = Math.max(1, Math.floor(chunk.length / 2));
+      continue;
+    }
+    offset += chunk.length;
+    if (Date.now() - startedAt > postgresBulkStatementTimeoutMs() / 4) {
+      budget.chunkSize = Math.max(1, Math.floor(chunk.length / 2));
+    }
+  }
+}
+
 /** Keep a bounded derived-index page on the bulk lane while it shares its manifest fence and write transaction. */
 export async function withPostgresBulkTransaction<T>(
   fn: (client: PoolClient) => Promise<T>,
@@ -1378,7 +1469,7 @@ export async function withPostgresBulkTransaction<T>(
   const client = await getPostgresBulkPool().connect();
   try {
     await client.query("BEGIN");
-    await client.query(`SET LOCAL statement_timeout = ${POSTGRES_BULK_STATEMENT_TIMEOUT_MS}`);
+    await client.query(`SET LOCAL statement_timeout = ${postgresBulkStatementTimeoutMs()}`);
     await client.query(`SET LOCAL lock_timeout = ${POSTGRES_BULK_LOCK_TIMEOUT_MS}`);
     if (options?.lockConnectorInstanceId) {
       await acquireConnectorInstanceXactLock(client, options.lockConnectorInstanceId);
@@ -1443,10 +1534,10 @@ export async function initExistingPostgresRepairStorage(
   if (pool) {
     await closePostgresStorage();
   }
-  pool = new Pool({ connectionString: config.databaseUrl, max: POSTGRES_INTERACTIVE_POOL_MAX });
-  bulkPool = new Pool({ connectionString: config.databaseUrl, max: POSTGRES_BULK_POOL_MAX });
+  pool = createPostgresPool(config.databaseUrl, POSTGRES_INTERACTIVE_POOL_MAX, NOOP_STORAGE_LOG);
+  bulkPool = createPostgresPool(config.databaseUrl, POSTGRES_BULK_POOL_MAX, NOOP_STORAGE_LOG);
   lockPoolCapacity = 1;
-  lockPool = new Pool({ connectionString: config.databaseUrl, max: lockPoolCapacity });
+  lockPool = createPostgresPool(config.databaseUrl, lockPoolCapacity, NOOP_STORAGE_LOG);
   activeBackend = "postgres";
   try {
     const result = await pool.query<{ table_name: string }>(
@@ -1502,10 +1593,10 @@ export async function initPostgresStorage(
   }
 
   // Two lanes, not one shared pool: see POSTGRES_INTERACTIVE_POOL_MAX.
-  pool = new Pool({ connectionString: config.databaseUrl, max: POSTGRES_INTERACTIVE_POOL_MAX });
-  bulkPool = new Pool({ connectionString: config.databaseUrl, max: POSTGRES_BULK_POOL_MAX });
+  pool = createPostgresPool(config.databaseUrl, POSTGRES_INTERACTIVE_POOL_MAX, log);
+  bulkPool = createPostgresPool(config.databaseUrl, POSTGRES_BULK_POOL_MAX, log);
   lockPoolCapacity = 1;
-  lockPool = new Pool({ connectionString: config.databaseUrl, max: lockPoolCapacity });
+  lockPool = createPostgresPool(config.databaseUrl, lockPoolCapacity, log);
   activeBackend = "postgres";
   // Storage-lifecycle fence (server/storage-generation.ts): a fresh pool
   // means any deferred work scheduled against a prior pool (this function's
@@ -3488,6 +3579,24 @@ async function bootstrapPostgresSchemaOnce({
       );
       CREATE INDEX IF NOT EXISTS idx_pg_search_index_dirty_pending
         ON search_index_dirty(dirty);
+      -- Pending re-derivation of manifest-derived record columns
+      -- (cursor_value, primary_key_text, semantic_time) for one stream of one
+      -- connection, queued with a manifest publication. job_id is new on every
+      -- queue write and is never reused, so a round holding an older job can
+      -- not move or delete a newer one. after_record_key is the durable
+      -- resume cursor; the row is deleted once the stream is done.
+      CREATE TABLE IF NOT EXISTS record_derived_repair_pending (
+        connector_instance_id TEXT NOT NULL,
+        connector_id TEXT NOT NULL,
+        stream TEXT NOT NULL,
+        job_id TEXT NOT NULL,
+        after_record_key TEXT,
+        marked_at TEXT NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        next_attempt_at TEXT,
+        last_error TEXT,
+        PRIMARY KEY(connector_instance_id, stream)
+      );
       ALTER TABLE search_index_dirty ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 0;
       ALTER TABLE search_index_dirty ADD COLUMN IF NOT EXISTS next_attempt_at TEXT;
       ALTER TABLE search_index_dirty ADD COLUMN IF NOT EXISTS revision BIGINT NOT NULL DEFAULT 0;
@@ -4222,6 +4331,62 @@ async function describeBootstrapLockHolders(client: PoolClient): Promise<string>
   }
 }
 
+/**
+ * Cancels derived-index maintenance that holds the bootstrap key in shared
+ * mode, in this database only. Maintenance is rebuildable work and records the
+ * cancellation as a failed window; the schema bootstrap gates the listener.
+ * Observed cost of waiting instead: a 41-minute VACUUM of a 14 GB
+ * semantic_search_blob held its ShareUpdateExclusiveLock, the boot batch
+ * queued for an AccessExclusiveLock on the same table, and the app served 503
+ * for six minutes until an operator cancelled the VACUUM.
+ *
+ * Called on every failed poll: a cancel that reaches a maintenance session
+ * between two statements has no effect, and the next poll repeats it.
+ */
+interface MaintenanceCancellationLog {
+  cancelledPids: Set<number>;
+  failureLogged: boolean;
+}
+
+async function cancelDerivedIndexMaintenanceBlockingBootstrap(
+  client: PoolClient,
+  log: StorageLog,
+  logged: MaintenanceCancellationLog
+): Promise<void> {
+  try {
+    // The holders are filtered in a materialized CTE so pg_cancel_backend runs
+    // only on rows that passed every predicate.
+    const result = await client.query<{ cancelled: boolean; pid: number }>(
+      `WITH holders AS MATERIALIZED (
+         SELECT l.pid
+           FROM pg_locks AS l
+          WHERE l.locktype = 'advisory'
+            AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database())
+            AND l.classid = $1::int::oid
+            AND l.objid = $2::int::oid
+            AND l.objsubid = 2
+            AND l.mode = 'ShareLock'
+            AND l.granted
+            AND l.pid <> pg_backend_pid()
+       )
+       SELECT pid, pg_cancel_backend(pid) AS cancelled FROM holders`,
+      POSTGRES_BOOTSTRAP_SERIALIZATION_LOCK
+    );
+    for (const row of result.rows.filter((holder) => holder.cancelled && !logged.cancelledPids.has(holder.pid))) {
+      logged.cancelledPids.add(row.pid);
+      log(`postgres bootstrap cancelled derived-index maintenance in backend pid ${row.pid} to proceed`);
+    }
+  } catch (error) {
+    // A role without permission to signal the holder keeps the old behavior:
+    // wait for the lock within the bootstrap budget.
+    if (!logged.failureLogged) {
+      logged.failureLogged = true;
+      const reason = error instanceof Error ? error.message : String(error);
+      log(`postgres bootstrap could not cancel derived-index maintenance: ${reason}`);
+    }
+  }
+}
+
 interface BootstrapLockWaitOptions {
   budget: PostgresBootstrapLockBudget;
   log?: StorageLog;
@@ -4242,6 +4407,7 @@ async function acquirePostgresBootstrapLock(
   const deadline = startedAt + budget.timeoutMs;
   let attempt = 0;
   let nextProgressAt = startedAt;
+  const maintenanceCancellationLog: MaintenanceCancellationLog = { cancelledPids: new Set(), failureLogged: false };
 
   for (;;) {
     // biome-ignore lint/performance/noAwaitInLoops: This is the bounded polling loop whose deadline is the behavior under test.
@@ -4253,6 +4419,8 @@ async function acquirePostgresBootstrapLock(
       log(`postgres bootstrap lock acquired after ${now() - startedAt}ms (attempt=${attempt})`);
       return;
     }
+
+    await cancelDerivedIndexMaintenanceBlockingBootstrap(client, log, maintenanceCancellationLog);
 
     // pg_try_advisory_lock completes before this application-side sleep. A
     // contender therefore has no active virtual transaction that could block

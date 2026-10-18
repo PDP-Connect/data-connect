@@ -627,6 +627,11 @@ export interface RefCoverageHorizon {
   readonly supersededByHorizonId: string | null;
 }
 
+export interface RefConnectorImplementation {
+  connector_id: string;
+  state: "built_in" | "installed" | "local_source" | "not_installed" | "unknown";
+}
+
 export interface RefConnectorSummary {
   /**
    * Owner/control-plane acquisition provenance for manual imports, device
@@ -648,6 +653,15 @@ export interface RefConnectorSummary {
   connection_id: string;
   connector_display_name?: string;
   connector_id: string;
+  /**
+   * Whether the reference has an implementation to run this connection's
+   * connector (`ConnectorSummary.connector_implementation` in
+   * `server/ref-control.ts`). `state: "not_installed"` means a run will be
+   * refused with `connector_not_installed`; `connector_id` is the bare key the
+   * owner install route accepts. Optional on the mirror: a reference predating
+   * the field omits it and the console claims nothing about install state.
+   */
+  connector_implementation?: RefConnectorImplementation | null;
   connector_instance_id?: string;
   /**
    * Durable, attributed disclosures of provider-retention boundaries. Optional

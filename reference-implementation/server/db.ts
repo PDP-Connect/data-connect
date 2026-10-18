@@ -2601,6 +2601,21 @@ CREATE TABLE IF NOT EXISTS search_index_dirty (
 CREATE INDEX IF NOT EXISTS idx_search_index_dirty_pending
   ON search_index_dirty(dirty);
 
+-- Pending re-derivation of manifest-derived record columns for one stream of
+-- one connection, queued with a manifest publication; deleted once done.
+CREATE TABLE IF NOT EXISTS record_derived_repair_pending (
+  connector_instance_id TEXT NOT NULL,
+  connector_id          TEXT NOT NULL,
+  stream                TEXT NOT NULL,
+  job_id                TEXT NOT NULL,
+  after_record_key      TEXT,
+  marked_at             TEXT NOT NULL,
+  attempts              INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at       TEXT,
+  last_error            TEXT,
+  PRIMARY KEY(connector_instance_id, stream)
+);
+
 -- Deployment-scoped provider app config (e.g. a shared OAuth client
 -- id/secret), keyed generically by (identity_group, logical_key) -- never
 -- by an env-var literal. sealed_value is ALWAYS the AES-256-GCM token from

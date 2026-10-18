@@ -55,6 +55,7 @@ interface FetchJsonResult<T> {
 interface RefErrorEnvelope {
   readonly error?: {
     readonly code?: string;
+    readonly connector_id?: string;
     readonly param?: string;
     readonly recovery_admission_reason?: string;
     readonly pending_pressure_gap_count?: number;
@@ -68,6 +69,7 @@ interface RefListEnvelope {
 }
 
 interface RefSourceRow {
+  readonly connector_implementation?: { readonly connector_id?: string; readonly state?: string } | null;
   readonly connector_instance_id?: string;
   readonly last_run?: {
     readonly connector_error?: unknown;
@@ -158,6 +160,30 @@ async function registerSpotifyManifest(asUrl: string): Promise<ConnectorManifest
     method: "POST",
   });
   assert.equal(resp.status, 201, `register spotify failed: ${resp.status}`);
+  return manifest;
+}
+
+/**
+ * Registers the Spotify fixture manifest with a version the reference fixture
+ * does not carry. The seed resolver only runs a manifest whose fingerprint
+ * matches the fixture, so with no install record this connector has no
+ * runnable implementation — the production state of every catalog connector
+ * before the owner installs it.
+ */
+async function registerUninstalledSpotifyManifest(asUrl: string): Promise<ConnectorManifest> {
+  const manifest = {
+    ...(JSON.parse(readFileSync(join(REFERENCE_IMPL_DIR, "fixtures/seed-manifests/spotify.json"), "utf8")) as Record<
+      string,
+      unknown
+    >),
+    version: "99.0.0-catalog",
+  } as unknown as ConnectorManifest;
+  const resp = await fetch(`${asUrl}/connectors`, {
+    body: JSON.stringify(manifest),
+    headers: { "Content-Type": "application/json" },
+    method: "POST",
+  });
+  assert.equal(resp.status, 201, `register uninstalled spotify failed: ${resp.status}`);
   return manifest;
 }
 
@@ -423,6 +449,42 @@ test("POST /_ref/connections/:connectorInstanceId/run returns recovery admission
       Date.parse(nextEligibleAt) >= Date.parse(nextAttemptAfter),
       `next_eligible_at should honor the connector retry floor: ${nextEligibleAt}`
     );
+  });
+});
+
+test("POST /_ref/connections/:connectorInstanceId/run refuses an uninstalled connector with connector_not_installed", async () => {
+  await withServer(async ({ asUrl }) => {
+    const manifest = await registerUninstalledSpotifyManifest(asUrl);
+    const connectorId = connectorKeyForManifest(manifest);
+    await seedSpotifyInstance(connectorId);
+
+    const { status, body } = await fetchJson<RefErrorEnvelope>(`${asUrl}/_ref/connections/${SPOTIFY_INSTANCE_ID}/run`, {
+      method: "POST",
+    });
+
+    assert.equal(status, 409);
+    assert.equal(body?.error?.code, "connector_not_installed");
+    assert.equal(body?.error?.connector_id, connectorId);
+  });
+});
+
+test("GET /_ref/connectors reports connector_implementation before any run is attempted", async () => {
+  await withServer(async ({ asUrl }) => {
+    const uninstalled = await registerUninstalledSpotifyManifest(asUrl);
+    const connectorId = connectorKeyForManifest(uninstalled);
+    await seedSpotifyInstance(connectorId);
+
+    const before = await fetchJson<RefListEnvelope>(`${asUrl}/_ref/connectors?limit=50`);
+    assert.equal(before.status, 200);
+    const uninstalledRow = before.body.data?.find((row) => row.connector_instance_id === SPOTIFY_INSTANCE_ID);
+    assert.deepEqual(uninstalledRow?.connector_implementation, { connector_id: connectorId, state: "not_installed" });
+
+    // Re-registering the reference fixture manifest makes the seed connector
+    // runnable again; the summary must follow without a run in between.
+    await registerSpotifyManifest(asUrl);
+    const after = await fetchJson<RefListEnvelope>(`${asUrl}/_ref/connectors?limit=50`);
+    const fixtureRow = after.body.data?.find((row) => row.connector_instance_id === SPOTIFY_INSTANCE_ID);
+    assert.deepEqual(fixtureRow?.connector_implementation, { connector_id: connectorId, state: "built_in" });
   });
 });
 

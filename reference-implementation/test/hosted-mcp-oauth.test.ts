@@ -7135,6 +7135,63 @@ test("a stream declared after review is not added to the issued grant", async ()
   }
 });
 
+
+test("hosted package member failure rolls back all authority and permits one retry", async () => {
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+  try {
+    await registerAuthorizedSpotify(asUrl);
+    await registerAuthorizedGithub(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+    const challenge = await startConsentChallenge(asUrl, client, "atomic-package-retry");
+    const model = await fetchConsentChallengeModel(asUrl, challenge);
+    const body = consentChallengeAcceptBody({
+      chosen: model.sources.map((source) => ({ source, streams: source.streams })),
+      client,
+      model,
+    });
+    const db = getDb();
+    const authorityCounts = () => ({
+      grants: db.prepare("SELECT count(*) AS n FROM grants WHERE client_id = ?").get(client.client_id),
+      packages: db.prepare("SELECT count(*) AS n FROM grant_packages WHERE client_id = ?").get(client.client_id),
+      tokens: db.prepare("SELECT count(*) AS n FROM tokens WHERE client_id = ?").get(client.client_id),
+      members: db.prepare("SELECT count(*) AS n FROM grant_package_members").get(),
+    });
+    const before = authorityCounts();
+    db.exec(`
+      CREATE TRIGGER fail_hosted_package_member
+      AFTER INSERT ON grant_package_members
+      BEGIN
+        SELECT RAISE(ABORT, 'injected hosted member failure');
+      END
+    `);
+    let failed: JsonResponse;
+    try {
+      failed = await postConsentChallenge(asUrl, challenge, "accept", body);
+    } finally {
+      db.exec("DROP TRIGGER fail_hosted_package_member");
+    }
+    assert.equal(failed.status, 400, JSON.stringify(failed.body));
+    assert.deepEqual(authorityCounts(), before, "failed issuance must leave no authority rows");
+    assert.deepEqual(
+      db.prepare("SELECT status, decision_digest FROM consent_challenges WHERE id = ?").get(challenge),
+      { decision_digest: null, status: "pending" }
+    );
+    const retried = await postConsentChallenge(asUrl, challenge, "accept", body);
+    assert.equal(retried.status, 200, JSON.stringify(retried.body));
+    assert.deepEqual(authorityCounts(), {
+      grants: { n: 2 },
+      packages: { n: 1 },
+      tokens: { n: 3 },
+      members: { n: 2 },
+    });
+    assert.equal((await postConsentChallenge(asUrl, challenge, "accept", body)).status, 404);
+    assert.equal(await countGrantPackagesForOwner(), 1);
+  } finally {
+    await closeServer(server);
+  }
+});
+
 test("a source revoked while minting leaves the consent challenge retryable", async () => {
   const server = await startOpenTestServer();
   const asUrl = `http://localhost:${server.asPort}`;
@@ -7637,3 +7694,58 @@ for (const invalidDecision of ["stale review", "bad expiry", "empty selection"] 
     }
   });
 }
+
+test("live authorization code rejects bad bindings without burning the honest retry", async () => {
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+  try {
+    const manifest = await registerAuthorizedSpotify(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+    const otherClient = await registerAuthCodeClient(asUrl);
+    const prepared = await prepareOauthCodeFlow({ asUrl, client, manifest });
+    // Same shape as a valid verifier, so only the S256 comparison can reject it.
+    const wrongVerifier = `${prepared.verifier[0] === "A" ? "B" : "A"}${prepared.verifier.slice(1)}`;
+    const defaults: Record<string, string> = {
+      client_id: client.client_id,
+      code: prepared.code,
+      code_verifier: prepared.verifier,
+      grant_type: "authorization_code",
+      redirect_uri: "https://client.example/callback",
+    };
+    const redeem = (changes: Record<string, string> = {}) =>
+      fetchJson(`${asUrl}/oauth/token`, {
+        body: new URLSearchParams({ ...defaults, ...changes }).toString(),
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        method: "POST",
+      });
+    const refreshCount = () =>
+      (getDb().prepare("SELECT COUNT(*) AS n FROM oauth_refresh_tokens").get() as { n: number }).n;
+    const beforeRefresh = refreshCount();
+    const cases: Array<{ changes: Record<string, string>; message: RegExp }> = [
+      { changes: { code_verifier: wrongVerifier }, message: /PKCE verification failed/ },
+      { changes: { client_id: otherClient.client_id }, message: /client_id mismatch/ },
+      { changes: { redirect_uri: "https://client.example/other" }, message: /redirect_uri mismatch/ },
+    ];
+    for (const entry of cases) {
+      const rejected = await redeem(entry.changes);
+      assert.equal(rejected.status, 400);
+      assert.equal(rejected.body.error, "invalid_grant");
+      assert.match(String(rejected.body.error_description), entry.message);
+      const stored = getDb()
+        .prepare("SELECT status, consumed_at FROM oauth_authorization_codes WHERE code = ?")
+        .get(prepared.code) as { consumed_at: string | null; status: string };
+      assert.deepEqual({ ...stored }, { consumed_at: null, status: "issued" });
+      assert.equal(refreshCount(), beforeRefresh);
+    }
+    const accepted = await redeem();
+    assert.equal(accepted.status, 200);
+    assert.equal(typeof accepted.body.access_token, "string");
+    assert.equal(typeof accepted.body.refresh_token, "string");
+    assert.equal(refreshCount(), beforeRefresh + 1);
+    const replay = await redeem();
+    assert.equal(replay.status, 400);
+    assert.equal(replay.body.error, "invalid_grant");
+  } finally {
+    await closeServer(server);
+  }
+});

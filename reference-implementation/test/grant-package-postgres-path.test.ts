@@ -5,8 +5,8 @@
  * Real auth.js Postgres-adapter path proof for the hosted-MCP grant-package
  * lifecycle.
  *
- * The grant-package row operations in `server/auth.ts` (issuePackageToken,
- * getGrantPackageRow, persistChildGrantForPackage, createGrantPackage,
+ * The grant-package row operations in `server/auth.ts` (persistHostedPackageAtomically,
+ * getGrantPackageRow, createGrantPackage,
  * getGrantPackageMembers, listGrantPackagesByParent,
  * listActiveGrantPackageMembersForRevocation, markGrantPackageMemberRevoked,
  * markGrantPackageRevoked) each carry a Postgres adapter behind
@@ -17,9 +17,9 @@
  * This test closes that gap. It boots the REAL reference server with the
  * storage backend switched to Postgres, issues a multi-source hosted MCP
  * grant package through the real HTTP picker flow (which drives
- * createHostedMcpGrantPackage -> persistChildGrantForPackage (grants INSERT)
- * -> issuePackageToken (tokens INSERT) -> grant_package_members INSERT, all
- * on the Postgres adapters), then drives the exported owner-facing reads and
+ * createHostedMcpGrantPackage -> persistHostedPackageAtomically (grants,
+ * tokens and grant_package_members INSERTs in one transaction, all on the
+ * Postgres adapters), then drives the exported owner-facing reads and
  * the revoke cascade directly:
  *   - listGrantPackagesForOwner / getGrantPackageForOwner /
  *     getGrantPackageAccess (Postgres SELECT adapters: getGrantPackageRow,
@@ -479,8 +479,8 @@ if (POSTGRES_URL) {
   // A) Issue + list + detail through the real Postgres adapters.
   //
   // Exercises (write path, via HTTP): createHostedMcpGrantPackage ->
-  // grant_packages INSERT, persistChildGrantForPackage -> grants INSERT,
-  // grant_package_members INSERT, issuePackageToken -> tokens INSERT.
+  // persistHostedPackageAtomically -> grant_packages, grants,
+  // grant_package_members and tokens INSERTs in one transaction.
   // Exercises (read path, via exported fns): listGrantPackagesForOwner,
   // getGrantPackageForOwner (getGrantPackageRow SELECT + getGrantPackageMembers
   // join), getGrantPackageAccess (active-members join),

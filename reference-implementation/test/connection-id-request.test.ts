@@ -28,10 +28,19 @@ function errorCode(err: unknown): { code?: string; param?: string } {
   return err as Error & { code?: string; param?: string };
 }
 
-test("clampRecordsPageLimit falls back to default for absent / unparseable / non-positive", () => {
-  for (const raw of [undefined, null, "abc", 0, -5, "0", "-1"]) {
+test("clampRecordsPageLimit falls back to the default only when limit is absent", () => {
+  for (const raw of [undefined, null]) {
     const result = clampRecordsPageLimit(raw);
     assert.deepEqual(result, { clamped: false, limit: RECORDS_DEFAULT_PAGE_LIMIT, requested: null });
+  }
+});
+
+test("clampRecordsPageLimit rejects unparseable / non-positive limits as invalid_request", () => {
+  for (const raw of ["abc", 0, -5, "0", "-1"]) {
+    assert.throws(
+      () => clampRecordsPageLimit(raw),
+      (err: unknown) => errorCode(err).code === "invalid_request" && errorCode(err).param === "limit"
+    );
   }
 });
 

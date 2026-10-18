@@ -501,8 +501,6 @@ export interface ReferenceQueryRegistry extends Readonly<Record<string, Register
   readonly searchSemanticBlobDeleteByConnector: MutationQuery;
   readonly searchSemanticBlobDeleteByRecordAndStreamPrefix: MutationQuery;
   readonly searchSemanticBlobDeleteByScope: MutationQuery;
-  readonly searchSemanticBlobDeleteByStreamPrefix: MutationQuery;
-  readonly searchSemanticBlobListExistingKeysByStreamPrefix: ReadManyQuery;
   // Semantic retrieval — BLOB-flat vector store.
   readonly searchSemanticBlobUpsert: MutationQuery;
   readonly searchSemanticMetaDeleteAll: MutationQuery;
@@ -531,15 +529,12 @@ export interface ReferenceQueryRegistry extends Readonly<Record<string, Register
   readonly searchSemanticRowidDeleteByConnector: MutationQuery;
   readonly searchSemanticRowidDeleteByIdentity: MutationQuery;
   readonly searchSemanticRowidDeleteByScope: MutationQuery;
-  readonly searchSemanticRowidDeleteByStreamPrefix: MutationQuery;
   readonly searchSemanticRowidGetRowidByIdentity: ReadOneQuery;
   readonly searchSemanticRowidInsert: MutationQuery;
-  readonly searchSemanticRowidListExistingKeysByStreamPrefix: ReadManyQuery;
   readonly searchSemanticRowidPageByConnector: ReadManyQuery;
   // Semantic retrieval — sqlite-vec sidecar rowid mapping.
   readonly searchSemanticRowidPageByRecordAndStreamPrefix: ReadManyQuery;
   readonly searchSemanticRowidPageByScope: ReadManyQuery;
-  readonly searchSemanticRowidPageByStreamPrefix: ReadManyQuery;
   readonly searchSemanticSnapshotsDeleteAll: MutationQuery;
   readonly searchSemanticSnapshotsGetById: ReadOneQuery;
   // Semantic retrieval — opaque-cursor snapshots.
@@ -1022,29 +1017,24 @@ export function loadReferenceQueries(queryDir = QUERIES_DIR): ReferenceQueryRegi
     // Semantic retrieval — BLOB-flat vector store.
     "searchSemanticBlobUpsert",
     "searchSemanticBlobDeleteByRecordAndStreamPrefix",
-    "searchSemanticBlobDeleteByStreamPrefix",
     "searchSemanticBlobDeleteByScope",
     "searchSemanticBlobDeleteByConnector",
     "searchSemanticBlobCountAll",
     "searchSemanticBlobCountByScope",
-    "searchSemanticBlobListExistingKeysByStreamPrefix",
     // Semantic retrieval — sqlite-vec virtual-table introspection.
     "searchSemanticVecGetTableSql",
     // Semantic retrieval — sqlite-vec sidecar rowid mapping.
     "searchSemanticRowidPageByRecordAndStreamPrefix",
-    "searchSemanticRowidPageByStreamPrefix",
     "searchSemanticRowidPageByScope",
     "searchSemanticRowidPageByConnector",
     "searchSemanticRowidGetRowidByIdentity",
     "searchSemanticRowidInsert",
     "searchSemanticRowidDeleteByIdentity",
-    "searchSemanticRowidDeleteByStreamPrefix",
     "searchSemanticRowidDeleteByScope",
     "searchSemanticRowidDeleteByConnector",
     "searchSemanticRowidDeleteAll",
     "searchSemanticRowidCountAll",
     "searchSemanticRowidCountByScope",
-    "searchSemanticRowidListExistingKeysByStreamPrefix",
     // Semantic retrieval — drift detection metadata.
     "searchSemanticMetaExistsByStream",
     "searchSemanticMetaDeleteByStream",

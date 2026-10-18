@@ -96,6 +96,12 @@ test("legacy persisted grant state fails before the SQLite RS route", async () =
     const route = await fetch(`${rsUrl}/v1/schema`, { headers: { Authorization: `Bearer ${token}` } });
     assert.equal(route.status, 401);
     assert.equal(errorCode(await route.json()), "authorization_state.unsupported_legacy_shape");
+    // spec-core §8 "Protected resource metadata": a presented, rejected token
+    // gets error="invalid_token" next to the metadata pointer.
+    assert.equal(
+      route.headers.get("www-authenticate"),
+      `Bearer resource_metadata="${rsUrl}/.well-known/oauth-protected-resource", error="invalid_token"`
+    );
   } finally {
     await closeServer(server);
   }

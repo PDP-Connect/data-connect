@@ -58,6 +58,57 @@ record with HTTP 201. `POST /v1/owner/connector-install/update` accepts
 `{ "connector_id": "github" }` and activates the signed catalog row marked
 `latest`.
 
+Install, update and uninstall run one at a time per data directory, guarded by
+an OS file lock on `<data dir>/.connector-install.lock.db` (an exclusive SQLite
+transaction: fcntl on Linux and macOS, LockFileEx on Windows). A second request
+fails with "Another connector installation is in progress." and names the
+holder's pid from `.connector-install.lock.owner`. The OS releases the lock when
+the holder process ends, so a crashed or restarted server never leaves a lock
+behind, even when the new process has the same pid (normal in a container). An
+older build locked by creating `.connector-install.lock/`. While that directory
+exists, installs stay busy, unless its owner pid is not this server's pid and
+does not exist in this PID namespace, or it has no owner record after 60
+seconds. The server never removes
+it; if no older server uses the data directory, remove it by hand. An install
+or update that passes `PDPP_CONNECTOR_INSTALL_TIMEOUT_MS` (default 5 minutes)
+fails with `connector_install_timeout`. If the deadline passes while the install
+still waits for the connector's lifecycle lock, the wait ends and the lock is
+released. If it passes before manifest registration starts, the install is
+rolled back. If it passes during registration, the install completes late and
+stays installed. This keeps the active artifact and the registered manifest in
+agreement. Once the work has started, the lock stays held until the work stops.
+On SQLite, each connector's lifecycle lock is an OS file lock of the same kind
+in `<database file>.lifecycle-locks/`, so it is shared by exactly the processes
+that share the database. The holder also writes a `connector_lifecycle_locks`
+row. An existing row from an older build, which locks by that row alone, keeps
+the lock busy while its pid is alive in this PID namespace and is not this
+server's pid; it is never deleted.
+
+Run one server per data directory, and stop the old version before you start a
+new one. The locks above exclude a concurrent older build only where it can
+see that build: a live owner pid in this PID namespace.
+
+The response comes once the artifact is activated and the manifest is
+registered. In the same transaction as the manifest, the server queues the
+derived repair for every connection of the connector:
+
+- `record_derived_repair_pending`: one row per stream of the new manifest, to
+  re-derive `cursor_value`, `primary_key_text` and `semantic_time`. On
+  Postgres, `after_record_key` is the resume cursor.
+- `search_index_dirty`: one scope per stream that the old or the new manifest
+  indexes. A stream that lost its search fields thus has its stale index
+  removed.
+
+After the response and outside the lock, the server works through both
+queues. Each statement covers a bounded chunk. Record-column and semantic
+chunks shrink when a statement nears or passes the bulk `statement_timeout`
+(`PDPP_POSTGRES_BULK_STATEMENT_TIMEOUT_MS`, default 15 s). Committed chunks
+stay. If the server stops midway, the queues keep the rest and the maintenance
+sweep resumes them; the semantic index embeds only pairs that are still
+missing. A failure is recorded on its row (`last_error`, `attempts`, backoff)
+and does not roll back the activation. Progress is visible in those two tables
+and in `semantic_search_backfill_progress`.
+
 Artifact identity is `digest`; version is display metadata. Package activation
 is separate from connection setup and never changes
 `connector_instances.source_binding_json`. Filesystem roots and internal
