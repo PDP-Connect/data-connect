@@ -102,9 +102,9 @@ When the flow breaks, work the failure top-down: discovery -> agent-connect -> a
 
 ## Data calls
 
-**Symptom:** `403 insufficient_scope`.
+**Symptom:** `403 grant_stream_not_allowed`, `403 field_not_granted`, or `403 insufficient_scope`.
 
-- The grant doesn't cover this stream/field/filter combination. Don't fall back to a broader grant in the background. Request an upgrade and explain to the user why.
+- The grant doesn't cover this stream, field, or expansion. The token is still valid; don't re-authenticate. Don't fall back to a broader grant in the background. Request an upgrade and explain to the user why.
 
 **Symptom:** `403 grant_revoked`.
 

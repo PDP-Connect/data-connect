@@ -161,6 +161,7 @@ export const codeToStatus: Readonly<Record<string, number>> = {
   field_not_text: 422,
   grant_consumed: 403,
   grant_expired: 403,
+  grant_instance_not_allowed: 403,
   grant_invalid: 403,
   grant_revoked: 403,
   grant_stream_not_allowed: 403,

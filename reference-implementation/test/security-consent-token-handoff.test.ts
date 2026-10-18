@@ -34,6 +34,7 @@ import {
   approveGrant,
   consumeConsentExchangeCode,
   createConsentExchangeCode,
+  createHostedMcpGrantPackage,
   denyGrant,
   getPendingConsent,
   introspect,
@@ -751,5 +752,76 @@ test("security: harden consent token handoff", async (t) => {
         assert.equal((await introspect(approvedToken)).active, true);
       }
     });
+  });
+});
+
+// A handoff code is bound to a token row. If that row's persisted subject no
+// longer matches the grant or package it names, introspection already treats
+// the bearer as invalid; redemption must refuse it too and leave the code
+// unredeemed. The UPDATE models inconsistent persisted state, not an API.
+function redeemedAtForToken(token: string): string | null {
+  const row = getDb().prepare("SELECT redeemed_at FROM consent_exchange_codes WHERE token_id = ?").get(token) as {
+    redeemed_at: string | null;
+  };
+  return row.redeemed_at;
+}
+
+function driftTokenSubject(token: string): void {
+  const changed = getDb()
+    .prepare("UPDATE tokens SET subject_id = ? WHERE token_id = ?")
+    .run("owner_injected_inconsistent_binding", token);
+  assert.equal(changed.changes, 1);
+}
+
+test("handoff refuses a grant token whose persisted subject drifted after code creation", async () => {
+  await withHarness(async ({ asUrl, spotifyManifest }) => {
+    const initiate = await initiateGrantRequest(asUrl, spotifyManifest);
+    const response = await approveReviewedJson(asUrl, initiate.request_uri);
+    assert.equal(response.status, 200);
+    const approved = (await response.json()) as ApproveJsonResponse;
+    const code = await createConsentExchangeCode({
+      grant: approved.grant as Record<string, unknown>,
+      grantId: approved.grant_id,
+      token: approved.token,
+    });
+    assert.equal((await introspect(approved.token)).active, true);
+    driftTokenSubject(approved.token);
+    assert.equal((await introspect(approved.token)).active, false);
+    const result = await consumeConsentExchangeCode(code);
+    assert.equal(result.ok, false);
+    assert.equal(result.token, undefined);
+    assert.equal(redeemedAtForToken(approved.token), null);
+  });
+});
+
+test("handoff refuses a package token whose persisted subject drifted after code creation", async () => {
+  await withHarness(async ({ spotifyManifest }) => {
+    const created = await createHostedMcpGrantPackage({
+      authorizationDetails: [
+        {
+          access_mode: "continuous",
+          purpose_code: "https://pdpp.dev/purpose/personal_ai_assistant",
+          source: { id: spotifyManifest.connector_id, kind: "connector" },
+          streams: [{ instance_ids: ["cin_security_consent_handoff_spotify"], name: "top_artists", view: "basic" }],
+          type: "https://pdpp.dev/data-access",
+        },
+      ],
+      clientId: "concert_recommendation_app",
+      connectionIds: ["cin_security_consent_handoff_spotify"],
+      storageBindings: [{ connector_id: "spotify" }],
+    });
+    const token = created.token as string;
+    const code = await createConsentExchangeCode({
+      grant: created.package as Record<string, unknown>,
+      grantId: created.package_id as string,
+      token,
+    });
+    assert.equal((await introspect(token)).active, true);
+    driftTokenSubject(token);
+    assert.equal((await introspect(token)).active, false);
+    const result = await consumeConsentExchangeCode(code);
+    assert.equal(result.ok, false);
+    assert.equal(result.token, undefined);
+    assert.equal(redeemedAtForToken(token), null);
   });
 });
