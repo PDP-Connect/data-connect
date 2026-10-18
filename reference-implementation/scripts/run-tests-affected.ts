@@ -76,6 +76,12 @@ function isModulePath(path: string): boolean {
   );
 }
 
+const CODE_EXTENSIONS = [".ts", ".js", ".mjs", ".cjs"] as const;
+
+function isCodePath(path: string): boolean {
+  return CODE_EXTENSIONS.includes(extname(path) as (typeof CODE_EXTENSIONS)[number]);
+}
+
 function enumeratesTestTree(source: string): boolean {
   if (/\bdiscoverTestFiles\s*\(/.test(source)) return true;
   // Inventory tests bind the test directory to __dirname before enumerating it.
@@ -293,23 +299,6 @@ export async function validateFilesFrom(
 }
 
 /** Every discovered module whose source names the asset by relative path or basename. */
-function textualReaders(
-  sources: ReadonlyMap<string, string>,
-  asset: string,
-): string[] {
-  const basename = asset.split("/").at(-1) ?? asset;
-  // Any string literal that ends in the asset's file name counts as a reader,
-  // whatever path prefix it carries (relative, repository-relative, joined).
-  // Over-selecting a reader is cheap; missing one hides a failure.
-  const escaped = basename.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const literal = new RegExp(`["'\`/\\\\]${escaped}["'\`]`);
-  const readers: string[] = [];
-  for (const [modulePath, source] of sources) {
-    if (literal.test(source)) readers.push(modulePath);
-  }
-  return readers;
-}
-
 export async function selectAffectedTests(
   repoRoot: string,
   discoveredTests: readonly string[],
@@ -407,29 +396,22 @@ export async function selectAffectedTests(
     }
   }
 
+  // Narrow only on module-graph evidence. A changed code module that the
+  // graph reaches selects its importers; any other changed file (JSON, SQL,
+  // fixtures, any asset) can be read by a path built at run time, which no
+  // static scan proves complete, so it falls back to full discovery.
   const direct = new Set<string>();
   const unresolved: string[] = [];
   for (const [index, path] of changedRel.entries()) {
     const absolute = resolve(repoRoot, path);
-    if (sources.has(absolute)) {
+    if (isCodePath(path) && sources.has(absolute)) {
       direct.add(absolute);
-      // An asset reached by an import or URL edge can also be read by path
-      // elsewhere; code modules are reached only through the graph.
-      if (!isModulePath(path) || extname(path) === ".json")
-        for (const reader of textualReaders(sources, absolute))
-          direct.add(reader);
       continue;
     }
-    if (isModulePath(path) && extname(path) !== ".json") {
-      unresolved.push(path);
-      continue;
-    }
-    const readers = textualReaders(sources, absolute);
-    for (const reader of readers) direct.add(reader);
-    if (readers.length === 0) unresolved.push(changed[index] ?? path);
+    unresolved.push(changed[index] ?? path);
   }
   if (unresolved.length > 0)
-    return fallback(`unmodelled or unreferenced change: ${unresolved[0]}`);
+    return fallback(`changed file is not a code module in the import graph: ${unresolved[0]}`);
 
   // Multi-source BFS over the reverse import graph: distance 0 is a changed
   // module, 1 is a module that imports it, and so on.

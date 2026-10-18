@@ -517,6 +517,7 @@ test("selects tests behind every module that reads a changed asset", async () =>
     { depth: "all" },
   );
   assert.deepEqual(result.files, ["test/a.test.ts", "test/b.test.ts"]);
+  assert.equal(result.fallback, true);
 });
 
 test("a JSON asset with an import edge also selects its textual readers", async () => {
@@ -537,6 +538,7 @@ test("a JSON asset with an import edge also selects its textual readers", async 
     { depth: "all" },
   );
   assert.deepEqual(result.files, ["test/a.test.ts", "test/b.test.ts"]);
+  assert.equal(result.fallback, true);
 });
 
 test("a non-JSON asset with a URL reader also selects its path readers", async () => {
@@ -556,5 +558,29 @@ test("a non-JSON asset with a URL reader also selects its path readers", async (
     },
     { depth: "all" },
   );
+  assert.deepEqual(result.files, ["test/a.test.ts", "test/b.test.ts"]);
+  assert.equal(result.fallback, true);
+});
+
+test("a file name in a comment never narrows an asset change", async () => {
+  // The real reader builds the asset path at run time; a comment that merely
+  // names the file must not stand in for it and suppress the fallback.
+  const root = await tree({
+    "test/a.test.ts": staticImport("../server/a.ts"),
+    "test/b.test.ts": staticImport("../server/b.ts"),
+    "server/a.ts": '// formerly loaded "other/template.txt"\nexport const a = 1;',
+    "server/b.ts": 'readFileSync(["tem", "plate.txt"].join(""));',
+    "fixtures/template.txt": "hello",
+  });
+  const result = await selectAffectedTests(
+    root,
+    ["test/a.test.ts", "test/b.test.ts"],
+    {
+      addedOrModified: ["reference-implementation/fixtures/template.txt"],
+      deleted: [],
+    },
+    { depth: "all" },
+  );
+  assert.equal(result.fallback, true);
   assert.deepEqual(result.files, ["test/a.test.ts", "test/b.test.ts"]);
 });
