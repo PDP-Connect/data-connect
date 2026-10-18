@@ -10,6 +10,7 @@ import {
   type FileProcessWatchdogOptions,
   startFileProcessWatchdog,
 } from "./file-process-watchdog.ts";
+import { capDiagnosticLine, failCloseCredentialContinuations } from "./test-accounting/diagnostic-lines.ts";
 import { redactDiagnosticText } from "./test-accounting/node-reporter.ts";
 import { DIAGNOSTIC_PREFIX } from "./test-accounting/receipt.ts";
 
@@ -50,51 +51,34 @@ export function boundedOutputTail(
   return `[output truncated: last ${bytes.length - start} of ${totalBytes} bytes]\n${bytes.subarray(start).toString()}`;
 }
 
-// The redactor is quadratic in the length of an unbroken word, so it is fed
-// blocks of whole lines no longer than this (the reporter caps its own input
-// the same way) and a longer single line is replaced rather than scanned.
-const REDACTION_BLOCK_CHARS = 20_000;
-const OVERSIZED_LINE_MARKER = "[REDACTED oversized output line]";
+// Lines read before the cut for a credential label whose continuation starts after it.
+const CUT_CONTEXT_LINES = 16;
 
 /**
- * Redact credentials from `output`, newest lines first, until more than
- * `maxBytes` of redacted text exist; earlier lines are dropped unread. Every
- * kept line is redacted whole, so no cut can separate a credential from its
- * label. Returns the redacted tail and whether earlier lines were dropped.
+ * The newest lines of `output` that fit in `maxBytes`, each capped in length,
+ * redacted in one pass so a credential keeps its context across lines.
+ * Truncating first bounds the redactor's cost: capped lines bound its
+ * quadratic worst case, and it never reads the dropped head. The few lines
+ * before the cut go through the credential rules too, so a label just before
+ * the cut still drops its continuation. Returns the redacted tail and whether
+ * earlier lines were dropped.
  */
 function redactedOutputTail(output: string, maxBytes: number): { dropped: boolean; text: string } {
-  const lines = output.split("\n");
-  const kept: string[] = [];
+  const lines = output.split("\n").map((line) => capDiagnosticLine(line.replace(/\r$/, "")));
   let keptBytes = 0;
-  let block: string[] = [];
-  let blockChars = 0;
-  const keep = (text: string) => {
-    kept.push(text);
-    keptBytes += Buffer.byteLength(text) + 1;
-  };
-  const flushBlock = () => {
-    if (block.length > 0) {
-      keep(redactDiagnosticText(block.reverse().join("\n")));
-      block = [];
-      blockChars = 0;
+  let start = lines.length;
+  while (start > 0) {
+    const bytes = Buffer.byteLength(lines[start - 1] ?? "") + 1;
+    if (keptBytes + bytes > maxBytes) {
+      break;
     }
-  };
-  let index = lines.length - 1;
-  for (; index >= 0 && keptBytes <= maxBytes; index -= 1) {
-    const line = lines[index] ?? "";
-    if (line.length > REDACTION_BLOCK_CHARS) {
-      flushBlock();
-      keep(OVERSIZED_LINE_MARKER);
-      continue;
-    }
-    if (blockChars + line.length + 1 > REDACTION_BLOCK_CHARS) {
-      flushBlock();
-    }
-    block.push(line);
-    blockChars += line.length + 1;
+    keptBytes += bytes;
+    start -= 1;
   }
-  flushBlock();
-  return { dropped: index >= 0, text: kept.reverse().join("\n") };
+  const dropped = start > 0;
+  const context = Math.min(start, CUT_CONTEXT_LINES);
+  const closed = failCloseCredentialContinuations(lines.slice(start - context), context).lines;
+  return { dropped, text: redactDiagnosticText(closed.join("\n")) };
 }
 
 interface FileCloseInput {
@@ -160,8 +144,7 @@ export function fileResultFromClose(input: FileCloseInput): NodeTestResult {
       output: `\n==> ${input.filePath}\n${withDiagnostics(input.output, false)}`,
     };
   }
-  // Redact before cutting to a tail: a credential that straddles the cut would
-  // otherwise lose its label and survive.
+  // Cut to the newest lines first, then redact that tail whole in one pass.
   const shown = withDiagnostics(input.output, true);
   const redacted = redactedOutputTail(shown, KILLED_OUTPUT_TAIL_BYTES);
   const tail = boundedOutputTail(

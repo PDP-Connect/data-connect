@@ -1,6 +1,11 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import {
+  capDiagnosticLine,
+  failCloseCredentialContinuations,
+  MAX_DIAGNOSTIC_LINE_LENGTH,
+} from "./diagnostic-lines.ts";
 import { accountingDiagnosticLine, accountingEventLine } from "./receipt.ts";
 
 interface ReporterEventData {
@@ -104,6 +109,99 @@ class DiagnosticBuffer {
     this.#overflowed = false;
     this.#value = "";
     return value;
+  }
+}
+
+// Output waiting to be flushed as diagnostic lines, kept by whole line. A
+// flush on a pause takes only complete lines, never the partial line a test is
+// still writing, and holds back a credential region the next line could extend
+// (see failCloseCredentialContinuations). Each line is capped on arrival.
+class DiagnosticLineBuffer {
+  #lines: string[] = [];
+  #overflowed = false;
+  #partial = "";
+  #partialCut = false;
+  #size = 0;
+
+  append(chunk: string) {
+    if (this.#overflowed) {
+      return;
+    }
+    const pieces = chunk.split("\n");
+    for (const [index, piece] of pieces.entries()) {
+      this.#extendPartial(piece);
+      if (index < pieces.length - 1) {
+        this.#lines.push(this.#finishPartial());
+      }
+    }
+    this.#size += chunk.length;
+    if (this.#size > MAX_DIAGNOSTIC_BUFFER_LENGTH) {
+      this.#overflowed = true;
+      this.#lines = [];
+      this.#partial = "";
+      this.#partialCut = false;
+    }
+  }
+
+  #extendPartial(piece: string) {
+    if (this.#partialCut) {
+      return;
+    }
+    const joined = this.#partial + piece.replace(/\r$/, "");
+    if (joined.length > MAX_DIAGNOSTIC_LINE_LENGTH) {
+      this.#partial = joined.slice(0, MAX_DIAGNOSTIC_LINE_LENGTH + 1);
+      this.#partialCut = true;
+    } else {
+      this.#partial = joined;
+    }
+  }
+
+  #finishPartial(): string {
+    const line = capDiagnosticLine(this.#partial);
+    this.#partial = "";
+    this.#partialCut = false;
+    return line;
+  }
+
+  /** Complete lines only, minus a credential region still open at the end. */
+  takeComplete(): string[] {
+    if (this.#overflowed) {
+      return this.#reset();
+    }
+    const closed = failCloseCredentialContinuations(this.#lines);
+    if (closed.openFrom === undefined) {
+      this.#lines = [];
+      this.#size = this.#partial.length;
+      return closed.lines;
+    }
+    const held = this.#lines.slice(closed.openFrom);
+    const released = failCloseCredentialContinuations(this.#lines.slice(0, closed.openFrom)).lines;
+    this.#lines = held;
+    this.#size = held.reduce((total, line) => total + line.length + 1, this.#partial.length);
+    return released;
+  }
+
+  /** Everything, including a partial last line: the test is ending. */
+  takeAll(): string[] {
+    if (this.#overflowed) {
+      return this.#reset();
+    }
+    if (this.#partial !== "" || this.#partialCut) {
+      this.#lines.push(this.#finishPartial());
+    }
+    const lines = failCloseCredentialContinuations(this.#lines).lines;
+    this.#lines = [];
+    this.#size = 0;
+    return lines;
+  }
+
+  #reset(): string[] {
+    this.#overflowed = false;
+    this.#lines = [];
+    this.#partial = "";
+    this.#partialCut = false;
+    this.#size = 0;
+    return ["[REDACTED diagnostic overflow]"];
   }
 }
 
@@ -637,12 +735,12 @@ function waitForIdle(): { cancel: () => void; elapsed: Promise<typeof IDLE> } {
 
 export default async function* accountingReporter(source: AsyncIterable<ReporterEvent>): AsyncGenerator<string> {
   const diagnostic = new DiagnosticBuffer();
-  // Output not yet flushed as a diagnostic line. Redacted as one unit so a
-  // credential label and value in adjacent chunks stay together.
-  const unflushed = new DiagnosticBuffer();
+  // Output not yet flushed as a diagnostic line, kept by whole line.
+  const unflushed = new DiagnosticLineBuffer();
   let emittedLength = 0;
-  const flush = (): string | undefined => {
-    const text = boundedRedactedTail(unflushed.take(), MAX_FAILURE_DIAGNOSTIC_LENGTH);
+  const flush = (final: boolean): string | undefined => {
+    const lines = final ? unflushed.takeAll() : unflushed.takeComplete();
+    const text = boundedRedactedTail(lines.join("\n"), MAX_FAILURE_DIAGNOSTIC_LENGTH);
     if (text === undefined || emittedLength >= MAX_EMITTED_DIAGNOSTIC_LENGTH) {
       return;
     }
@@ -656,7 +754,7 @@ export default async function* accountingReporter(source: AsyncIterable<Reporter
     const step = await Promise.race([pending, idle.elapsed]);
     idle.cancel();
     if (step === IDLE) {
-      const line = flush();
+      const line = flush(false);
       if (line !== undefined) {
         yield line;
       }
@@ -670,10 +768,11 @@ export default async function* accountingReporter(source: AsyncIterable<Reporter
     const data = event.data ?? {};
     const details = data.details ?? {};
     if (event.type === "test:stdout" || event.type === "test:stderr" || event.type === "test:diagnostic") {
-      if (typeof data.message === "string" && data.message.trim()) {
-        // Keep chunks until terminal failure so a credential label and value
-        // cannot be separated by Node's chunking or a tail boundary. Once the
-        // bounded input buffer overflows, emit only a redacted overflow marker.
+      if (typeof data.message === "string" && data.message.length > 0) {
+        // Keep whole lines until a pause or a terminal event, so a credential
+        // label and value cannot be separated by Node's chunking or a flush.
+        // Blank lines count: they end a credential region. Once the bounded
+        // input buffer overflows, emit only a redacted overflow marker.
         const { message } = data;
         unflushed.append(message);
         if (event.type !== "test:stdout") {
@@ -691,7 +790,7 @@ export default async function* accountingReporter(source: AsyncIterable<Reporter
       skip: data.skip ?? details.skip,
       ...(event.type === "test:fail" ? { failure: failureDetails(details.error, diagnostic.take()) } : {}),
     };
-    const line = flush();
+    const line = flush(true);
     if (line !== undefined) {
       yield line;
     }

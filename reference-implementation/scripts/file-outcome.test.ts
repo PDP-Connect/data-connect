@@ -115,6 +115,70 @@ test("a credential line is redacted wherever the tail cut falls", () => {
   }
 });
 
+function killedOutput(output: string): string {
+  return fileResultFromClose({
+    code: null,
+    durationMs: 1,
+    filePath: "test/killed.test.ts",
+    hardDeadlineMs: 20_000,
+    idleBudgetMs: 400,
+    output,
+    signal: "SIGKILL",
+    timeoutReason: "idle",
+  }).output;
+}
+
+test("a line over 2 KB is truncated and marked", () => {
+  const output = killedOutput(`before\n${"x".repeat(5000)}\nafter\n`);
+  assert.match(output, /x{2048}…\[line truncated\]/);
+  assert.doesNotMatch(output, /x{2049}/);
+  assert.match(output, /before/);
+  assert.match(output, /after/);
+});
+
+test("a label at the end of the tail fails closed", () => {
+  const output = killedOutput("ran\nAuthorization: Bearer\n");
+  assert.match(output, /Authorization/);
+  assert.match(output, /\[REDACTED: possible credential continuation\]/);
+  const unterminated = killedOutput("ran\n{\"Authorization\":");
+  // The structured-header scanner may replace the whole tail with its own marker.
+  assert.match(unterminated, /\[REDACTED: possible credential continuation\]|\[REDACTED malformed sensitive header\]/);
+});
+
+test("a credential on the line after its label is dropped up to the next blank line", () => {
+  const output = killedOutput(
+    "ran\nAuthorization: Bearer\nSYNTHETIC-NEXTLINE-SECRET\nSYNTHETIC-SECOND-SECRET\n\nafter-blank\n"
+  );
+  assert.match(output, /ran/);
+  assert.match(output, /\[REDACTED: possible credential continuation\]/);
+  assert.match(output, /after-blank/);
+  assert.doesNotMatch(output, /SYNTHETIC-[A-Z]+-SECRET/);
+  const folded = killedOutput("Cookie: a=1;\n  b=SYNTHETIC-FOLDED-SECRET\nnext\n\nafter-blank\n");
+  assert.doesNotMatch(folded, /SYNTHETIC-FOLDED-SECRET/);
+  assert.match(folded, /after-blank/);
+});
+
+test("a credential is redacted across what used to be a redaction block boundary", () => {
+  // The old runner redacted blocks of up to 20,000 characters on their own. A
+  // quoted value that runs over two lines needs both lines in one pass; vary the
+  // padding so the old block edge falls between them for some length.
+  const filler = `${"x".repeat(99)}\n`;
+  for (let padding = 0; padding <= 100; padding += 1) {
+    const output = `"password": "SYNTHETIC-BOUNDARY\n-SECRET"\n${"x".repeat(padding)}\n${filler.repeat(199)}`;
+    assert.doesNotMatch(killedOutput(output), /SYNTHETIC-BOUNDARY|-SECRET/, `${padding} padding characters`);
+  }
+});
+
+test("a label just before the tail cut still drops its continuation", () => {
+  const filler = `${"x".repeat(99)}\n`;
+  const secretLine = "SYNTHETIC-CUT-SECRET\n";
+  const kept = Math.floor(KILLED_OUTPUT_TAIL_BYTES / 100);
+  for (let fillerLines = kept - 8; fillerLines <= kept + 8; fillerLines += 1) {
+    const output = `${filler.repeat(50)}Authorization: Bearer\n${secretLine}${filler.repeat(fillerLines)}`;
+    assert.doesNotMatch(killedOutput(output), /SYNTHETIC-CUT-SECRET/, `${fillerLines} filler lines`);
+  }
+});
+
 test("a single unbroken line longer than the redaction block is replaced, not scanned", async () => {
   const outcome = await superviseFileChild({
     child: spawnNode(

@@ -60,3 +60,51 @@ test("a stream with no test output emits only accounting events", async () => {
   assert.equal(lines.length, 1);
   assert.ok(lines.every((line) => !line.startsWith(DIAGNOSTIC_PREFIX)));
 });
+
+test("a pause never flushes a partial line", async () => {
+  const lines = await collect([
+    { event: { data: { message: "complete-line\nPARTIAL-LINE-NO-NEWLINE" }, type: "test:stderr" } },
+    // The stream goes quiet, so the idle flush runs; the stream then ends.
+    { delayMs: 600, event: { type: "test:complete" } },
+  ]);
+  const text = diagnosticText(lines);
+  assert.match(text, /complete-line/);
+  assert.doesNotMatch(text, /PARTIAL-LINE-NO-NEWLINE/);
+});
+
+test("a header split across a pause never leaks its value", async () => {
+  const lines = await collect([
+    { event: { data: { message: "HUNG-MARKER\nAuthorization: Bearer\n" }, type: "test:stderr" } },
+    { delayMs: 700, event: { data: { message: "SYNTHETIC-HUNG-SECRET\n" }, type: "test:stderr" } },
+    { delayMs: 600, event: { type: "test:complete" } },
+  ]);
+  const text = diagnosticText(lines);
+  assert.match(text, /HUNG-MARKER/);
+  assert.doesNotMatch(text, /SYNTHETIC-HUNG-SECRET/);
+});
+
+test("a credential region ends at a blank line and the output after it is kept", async () => {
+  const lines = await collect([
+    {
+      event: {
+        data: { message: "Authorization: Bearer\nSYNTHETIC-DROPPED-SECRET\n\nafter-blank\n" },
+        type: "test:stderr",
+      },
+    },
+    { delayMs: 600, event: { type: "test:complete" } },
+  ]);
+  const text = diagnosticText(lines);
+  assert.match(text, /possible credential continuation/);
+  assert.match(text, /after-blank/);
+  assert.doesNotMatch(text, /SYNTHETIC-DROPPED-SECRET/);
+});
+
+test("a line over 2 KB is truncated and marked", async () => {
+  const lines = await collect([
+    { event: { data: { message: `${"y".repeat(5000)}\n` }, type: "test:stderr" } },
+    { delayMs: 600, event: { type: "test:complete" } },
+  ]);
+  const text = diagnosticText(lines);
+  assert.match(text, /y{100}…\[line truncated\]/);
+  assert.doesNotMatch(text, /y{2049}/);
+});

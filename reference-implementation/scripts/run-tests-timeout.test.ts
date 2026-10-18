@@ -53,6 +53,9 @@ const HUNG_FILE = [
   '  const grandchild = spawn(process.execPath, ["-e", "process.on(\'SIGTERM\', () => {}); setInterval(() => {}, 1000);"], { stdio: "ignore" });',
   '  writeFileSync(new URL("./grandchild.pid", import.meta.url), String(grandchild.pid));',
   '  process.stderr.write("HUNG-FIXTURE-OUTPUT Authorization: Bearer SYNTHETIC-HUNG-SECRET\\n");',
+  // A header whose value arrives on the next line after a pause.
+  '  process.stderr.write("Authorization: Bearer\\n");',
+  '  setTimeout(() => process.stderr.write("SYNTHETIC-HUNG-MULTILINE-SECRET\\n"), 700);',
   "  setInterval(() => {}, 1000);",
   "  return new Promise(() => {});",
   "});",
@@ -112,6 +115,11 @@ for (const mode of [[], ["--test-isolation=none"]]) {
         assert.match(stdout, /==> .*a-hang\.test\.mjs/, "the hung file's header is kept");
         assert.match(stdout, /HUNG-FIXTURE-OUTPUT/, `the hung file's output is kept\n${stdout}\n${stderr}`);
         assert.doesNotMatch(stdout + stderr, /SYNTHETIC-HUNG-SECRET/, "the credential is redacted");
+        assert.doesNotMatch(
+          stdout + stderr,
+          /SYNTHETIC-HUNG-MULTILINE-SECRET/,
+          "a header value that arrives on the next line after a pause is not kept"
+        );
         assert.match(stdout, /==> .*b-after\.test\.mjs/, "the file after the hang still ran");
         assert.match(stdout, /"name":"after the hang, its grandchild is gone"/, "the next file saw the grandchild gone");
         assert.doesNotMatch(stdout, /"type":"test:fail"/, "the next file passed");

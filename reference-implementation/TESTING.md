@@ -57,6 +57,11 @@ The runner owns every database it creates. It registers a database right after `
 set-up fails, and never drops a database it did not create. On SIGINT or SIGTERM it stops admitting
 files, stops the children, then drops its databases (PR #504).
 
+The runner starts each test file in its own process group and kills the whole group when the file times
+out. A group is detached, so it can outlive a SIGKILL of the runner itself: nothing is left to signal it.
+This limit is accepted. `test-sandbox`'s cgroup scope contains such processes on a shared host, and a
+throwaway CI VM destroys them.
+
 A hermetic guard blocks non-loopback HTTP inside the test child processes. The sandbox's network
 namespace blocks the rest.
 
