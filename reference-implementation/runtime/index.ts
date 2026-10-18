@@ -3258,6 +3258,16 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
     // we already terminated.
     terminateConnectorChildGroup("SIGTERM");
     unregisterOwnedConnectorChild(proc.pid);
+    // cleanupChildHandles does not exist yet, so release any leases a partial
+    // claim already registered. A release failure must not mask `err`.
+    if (allServedGapLeases.size > 0 && typeof detailGapStore.releaseLeasedGaps === "function") {
+      try {
+        await detailGapStore.releaseLeasedGaps([...allServedGapLeases.values()]);
+      } catch {
+        // The original start failure is the error to report; leases expire on their own.
+      }
+      allServedGapLeases.clear();
+    }
     throw err;
   }
 
