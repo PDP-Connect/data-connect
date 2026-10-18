@@ -16,7 +16,9 @@
 # Old bash (macOS ships 3.2) cannot parse what follows: run the command directly.
 if [ -z "${BASH_VERSINFO:-}" ] || [ "${BASH_VERSINFO[0]}" -lt 5 ]; then
   echo "test-sandbox: bash 5 not found; running without enforcement" >&2
-  exec "$@"
+  # Drop our options (bash 3.2 syntax only): everything after "--" is the command.
+  for a in "$@"; do shift; [ "$a" = "--" ] && exec "$@"; done
+  echo "test-sandbox: usage: test-sandbox [options] -- cmd..." >&2; exit 2
 fi
 set -uo pipefail
 
@@ -209,6 +211,15 @@ trap cleanup EXIT
 trap 'on_signal 130' INT
 trap 'on_signal 143' TERM
 
+# The private tmpfs on /tmp would hide a --scratch dir or working directory
+# that lives under /tmp (CI often uses RUNNER_TEMP=/tmp/...): bind them back.
+tmp_binds=()
+[[ -n "$scratch" ]] && mkdir -p "$scratch"
+for p in "$scratch" "$PWD"; do
+  [[ -n "$p" ]] || continue
+  p=$(cd "$p" 2>/dev/null && pwd -P) || continue
+  [[ "$p" == /tmp/* ]] && tmp_binds+=(--bind "$p" "$p")
+done
 # The quoted body is evaluated later by bash -c inside the scope.
 # shellcheck disable=SC2016
 collector='stats="$1"; shift
@@ -260,7 +271,7 @@ else
   if (( systemd_ok )); then
     cmd=("$@")
     if (( bwrap_ok )); then
-      bw=(bwrap --dev-bind / / --die-with-parent --tmpfs /tmp --chdir "$PWD")
+      bw=(bwrap --dev-bind / / --die-with-parent --tmpfs /tmp "${tmp_binds[@]}" --chdir "$PWD")
       [[ "$pidns" == 1 ]] && bw+=(--unshare-pid --proc /proc)
       [[ "$net" == none ]] && bw+=(--unshare-net)
       cmd=("${bw[@]}" bash -c "$collector" _ "$stats" "$scratch" "$pg" "$pg_port" "$pg_env" "${cmd[@]}")
@@ -304,7 +315,7 @@ PY
 )
   else
     if (( bwrap_ok )); then
-      cmd=(bwrap --dev-bind / / --die-with-parent --tmpfs /tmp --chdir "$PWD")
+      cmd=(bwrap --dev-bind / / --die-with-parent --tmpfs /tmp "${tmp_binds[@]}" --chdir "$PWD")
       [[ "$pidns" == 1 ]] && cmd+=(--unshare-pid --proc /proc)
       [[ "$net" == none ]] && cmd+=(--unshare-net)
       cmd+=(bash -c "$collector" _ "$stats" "$scratch" "$pg" "$pg_port" "$pg_env" "$@")
