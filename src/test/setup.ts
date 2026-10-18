@@ -54,8 +54,6 @@ process.env.VITE_ACCOUNT_URL = "https://account.test"
 process.env.VITE_HYDRA_PUBLIC_URL = "https://oauth.test"
 process.env.VITE_TUNNEL_SERVER_ADDR = "frpc.tunnel.test"
 
-const networkGuardMarker = Symbol.for("pdpp.unit-test-network-guard")
-
 function assertLoopbackHost(protocol: string, host: string) {
   const normalizedHost = host.toLowerCase().replace(/^\[|\]$/g, "")
   if (["localhost", "127.0.0.1", "::1"].includes(normalizedHost)) {
@@ -67,52 +65,51 @@ function assertLoopbackHost(protocol: string, host: string) {
   )
 }
 
-if (!Reflect.get(globalThis, networkGuardMarker)) {
-  const originalFetch = globalThis.fetch
-  // async, so a blocked call rejects like a real network failure instead of
-  // throwing synchronously at the call site.
-  globalThis.fetch = async (input, init) => {
-    const inputUrl =
-      typeof input === "string"
-        ? input
-        : input instanceof URL
-          ? input.href
-          : input.url
-    const url = new URL(inputUrl, "http://localhost")
+const originalFetch = globalThis.fetch
+// async, so a blocked call rejects like a real network failure instead of
+// throwing synchronously at the call site.
+globalThis.fetch = async (input, init) => {
+  const inputUrl =
+    typeof input === "string"
+      ? input
+      : input instanceof URL
+        ? input.href
+        : input.url
+  const url = new URL(inputUrl, "http://localhost")
+  // data: and blob: URLs never leave the process.
+  if (url.protocol !== "data:" && url.protocol !== "blob:") {
     assertLoopbackHost("fetch", url.hostname)
-    return originalFetch.call(globalThis, input, init)
   }
+  return originalFetch.call(globalThis, input, init)
+}
 
-  const originalConnect = Socket.prototype.connect
-  Object.defineProperty(Socket.prototype, "connect", {
-    configurable: true,
-    writable: true,
-    value: function (this: Socket, ...args: unknown[]) {
-      // net.connect() and tls.connect() pass their normalized [options, cb]
-      // array as the single argument.
-      const address = Array.isArray(args[0]) ? args[0][0] : args[0]
-      if (typeof address === "number") {
+const originalConnect = Socket.prototype.connect
+Object.defineProperty(Socket.prototype, "connect", {
+  configurable: true,
+  writable: true,
+  value: function (this: Socket, ...args: unknown[]) {
+    // net.connect() and tls.connect() pass their normalized [options, cb]
+    // array as the single argument.
+    const address = Array.isArray(args[0]) ? args[0][0] : args[0]
+    if (typeof address === "number") {
+      assertLoopbackHost(
+        "socket connection",
+        typeof args[1] === "string" ? args[1] : "localhost"
+      )
+    } else if (typeof address === "object" && address !== null) {
+      const options = address as {
+        host?: string
+        hostname?: string
+        path?: string
+      }
+      if (!options.path) {
         assertLoopbackHost(
           "socket connection",
-          typeof args[1] === "string" ? args[1] : "localhost"
+          options.host ?? options.hostname ?? "localhost"
         )
-      } else if (typeof address === "object" && address !== null) {
-        const options = address as {
-          host?: string
-          hostname?: string
-          path?: string
-        }
-        if (!options.path) {
-          assertLoopbackHost(
-            "socket connection",
-            options.host ?? options.hostname ?? "localhost"
-          )
-        }
       }
+    }
 
-      return Reflect.apply(originalConnect, this, args) as Socket
-    },
-  })
-
-  Reflect.set(globalThis, networkGuardMarker, true)
-}
+    return Reflect.apply(originalConnect, this, args) as Socket
+  },
+})

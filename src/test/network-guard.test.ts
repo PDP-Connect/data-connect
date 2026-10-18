@@ -25,7 +25,23 @@ describe("unit test network guard", () => {
     )
   })
 
+  it("still allows data: URLs, which never leave the process", async () => {
+    await expect((await fetch("data:text/plain,ok")).text()).resolves.toBe("ok")
+  })
+
   it("pins the protocol endpoints to neutral test origins", () => {
-    expect(process.env.VITE_GATEWAY_URL).toBe("https://gateway.test")
+    expect({
+      VITE_SESSION_RELAY_URL: process.env.VITE_SESSION_RELAY_URL,
+      VITE_GATEWAY_URL: process.env.VITE_GATEWAY_URL,
+      VITE_ACCOUNT_URL: process.env.VITE_ACCOUNT_URL,
+      VITE_HYDRA_PUBLIC_URL: process.env.VITE_HYDRA_PUBLIC_URL,
+      VITE_TUNNEL_SERVER_ADDR: process.env.VITE_TUNNEL_SERVER_ADDR,
+    }).toEqual({
+      VITE_SESSION_RELAY_URL: "https://session-relay.test",
+      VITE_GATEWAY_URL: "https://gateway.test",
+      VITE_ACCOUNT_URL: "https://account.test",
+      VITE_HYDRA_PUBLIC_URL: "https://oauth.test",
+      VITE_TUNNEL_SERVER_ADDR: "frpc.tunnel.test",
+    })
   })
 })
