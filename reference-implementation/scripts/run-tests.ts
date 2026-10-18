@@ -494,7 +494,17 @@ async function runNodeTest(filePath: string, extraArgs: string[]): Promise<NodeT
   );
 }
 
-const testFiles = await discoverSelectedTestFiles(repoRoot, testDir, accountingAuthority?.files);
+const filesFromIndex = effectiveArgs.indexOf("--files-from");
+let testFiles = await discoverSelectedTestFiles(repoRoot, testDir, accountingAuthority?.files);
+if (filesFromIndex !== -1) {
+  const path = effectiveArgs[filesFromIndex + 1];
+  if (!path) throw new Error("--files-from requires PATH");
+  effectiveArgs.splice(filesFromIndex, 2);
+  const { discoverTestFiles } = await import("./run-tests-discovery.ts");
+  const { validateFilesFrom } = await import("./run-tests-affected.ts");
+  const requested = (await readFile(path, "utf8")).split(/\r?\n/).filter(Boolean);
+  testFiles = await validateFilesFrom(requested, await discoverTestFiles(repoRoot, testDir));
+}
 const fileConcurrency = resolveFileConcurrency({
   availableCpus: availableParallelism?.() ?? null,
   profile: selectedProfile,
