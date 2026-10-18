@@ -17,6 +17,7 @@ import { DatabaseSync } from "node:sqlite";
 import {
   type ConnectorProtocolCapability,
   DETAIL_COVERAGE_KEY_SETS_CAPABILITY,
+  HOST_BLOB_CAPABILITY,
   isConnectorProtocolCapabilityArray,
   PERMANENT_DETAIL_GAP_REASON,
   RETRYABLE_DETAIL_GAP_REASONS,
@@ -2596,17 +2597,31 @@ const RUNTIME_PROTOCOL_CAPABILITIES: readonly ConnectorProtocolCapability[] = [
 ];
 
 /**
+ * Declared capabilities this runtime starts a connector with although it does
+ * not implement them. BLOB is a runtime-specific extension (Collection Profile
+ * Section 7). chatgpt and anthropic declare it but emit BLOB only for an item
+ * over the inline cap, so most of their runs never send one. Such a run
+ * completes; a run that does send BLOB fails at that line as an unknown
+ * message type. BLOB stays out of START until this runtime implements it.
+ */
+const SPAWN_TOLERATED_PROTOCOL_CAPABILITIES: readonly ConnectorProtocolCapability[] = [HOST_BLOB_CAPABILITY];
+
+/**
  * Pre-spawn capability gate (Collection Profile Sections 3.4 and 4). An
  * absent `protocol_capabilities` declares none. A malformed list or an unknown
  * name fails closed, and so does a required capability this runtime does not
- * implement. An advisory capability never blocks the run.
+ * implement, except BLOB (see SPAWN_TOLERATED_PROTOCOL_CAPABILITIES). An
+ * advisory capability never blocks the run.
  */
 function validateRequiredProtocolCapabilities(manifest: ConnectorManifest): void {
   const declared = manifest.protocol_capabilities === undefined ? [] : manifest.protocol_capabilities;
   if (!isConnectorProtocolCapabilityArray(declared)) {
     throw new Error("Connector manifest protocol_capabilities must be an array of known capability names");
   }
-  const unsupported = unsupportedRequiredProtocolCapabilities(declared, RUNTIME_PROTOCOL_CAPABILITIES);
+  const unsupported = unsupportedRequiredProtocolCapabilities(declared, [
+    ...RUNTIME_PROTOCOL_CAPABILITIES,
+    ...SPAWN_TOLERATED_PROTOCOL_CAPABILITIES,
+  ]);
   if (unsupported.length > 0) {
     throw new Error(
       `Connector requires protocol capabilities this runtime does not support: ${unsupported.join(", ")}`

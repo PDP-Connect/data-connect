@@ -60,7 +60,8 @@ const ACTIVITY_STATE_STREAM_PATTERN = /state_stream=activity/;
 const DUPLICATE_COVERAGE_PATTERN = /duplicate DETAIL_COVERAGE/;
 const OVERLAPPING_OUTCOME_PATTERN = /outcome key appears in multiple sets/;
 const UNKNOWN_CAPABILITY_PATTERN = /protocol_capabilities must be an array of known capability names/;
-const UNSUPPORTED_CAPABILITY_PATTERN = /requires protocol capabilities this runtime does not support: (\S+)/;
+const UNKNOWN_BLOB_MESSAGE_PATTERN = /Connector emitted unknown message type: BLOB/;
+const UNSUPPORTED_CAPABILITY_PATTERN = /requires protocol capabilities this runtime does not support: (.+)$/;
 const STALL_MESSAGE_PATTERN =
   /withheld for 3 consecutive runs, each time because activity left required keys uncredited/;
 
@@ -1270,7 +1271,7 @@ test("a 0.1.0 manifest keeps legacy crediting and cannot declare a 0.2.0 capabil
 // Pre-spawn gate (Sections 3.4 and 4): an unknown capability name fails closed,
 // and a known required capability this runtime does not implement fails before
 // any connector code runs. DETAIL_COVERAGE_KEY_SETS is advisory and
-// STREAM_EVIDENCE is implemented, so both pass.
+// STREAM_EVIDENCE is implemented, so both pass. BLOB is covered separately.
 test("the pre-spawn gate rejects unknown and unsupported required capabilities and admits implemented ones", async (t) => {
   const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
   t.after(() => closeServer(server));
@@ -1287,7 +1288,7 @@ test("the pre-spawn gate rejects unknown and unsupported required capabilities a
     ["DETAIL_COVERAGE_KEY_SETS", UNKNOWN_CAPABILITY_PATTERN, null],
     [null, UNKNOWN_CAPABILITY_PATTERN, null],
     [["OBSERVATION"], UNSUPPORTED_CAPABILITY_PATTERN, "OBSERVATION"],
-    [["DETAIL_COVERAGE_KEY_SETS", "BLOB"], UNSUPPORTED_CAPABILITY_PATTERN, "BLOB"],
+    [["DETAIL_COVERAGE_KEY_SETS", "OBSERVATION", "BLOB"], UNSUPPORTED_CAPABILITY_PATTERN, "OBSERVATION"],
     [["DETAIL_COVERAGE_KEY_SETS", "STREAM_EVIDENCE"], null, null],
   ];
   for (const [protocolCapabilities, rejection, unsupported] of cases) {
@@ -1331,4 +1332,43 @@ test("START advertises the protocol capabilities this runtime implements, to eve
     assert.equal(thrown, null);
     assert.deepEqual(start?.protocol_capabilities, ["DETAIL_COVERAGE_KEY_SETS", "STREAM_EVIDENCE"]);
   }
+});
+
+// BLOB is a runtime-specific extension (Collection Profile Section 7) that this
+// runtime does not implement. chatgpt and anthropic declare it but emit BLOB
+// only for an item over the inline cap, so a declaring connector still starts
+// here. A run that emits no BLOB completes; a run that emits one fails at that
+// line, with the same error as before the capability gate existed.
+test("a 0.1.0 manifest declaring BLOB starts; it completes without BLOB and fails at a BLOB line", async (t) => {
+  const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+  t.after(() => closeServer(server));
+  const ownerToken = await registerAndAuthorize(server);
+  const blobManifest = { ...MANIFEST, protocol_capabilities: ["BLOB"] };
+  assert.equal(isAdmitted(await registerManifest(server, blobManifest)), true, "the BLOB manifest is admitted");
+
+  const clean = await runCapturingStart(
+    server,
+    ownerToken,
+    blobManifest,
+    holdingsRun([holdingsCoverage({ empty_keys: ["K"], required_keys: ["K"] })])
+  );
+  assert.equal(clean.thrown, null);
+  assert.ok(clean.start, "the connector received START");
+  assert.equal(clean.start?.protocol_capabilities instanceof Array, true);
+  assert.equal((clean.start?.protocol_capabilities as string[]).includes("BLOB"), false, "START does not offer BLOB");
+  assert.equal(clean.result?.status, "succeeded");
+
+  const blobLine = {
+    file: "blob-1.json",
+    key: "H",
+    mime_type: "application/json",
+    sha256: "a".repeat(64),
+    size_bytes: 2,
+    stream: "holdings",
+    type: "BLOB",
+  };
+  const withBlob = await runCapturingStart(server, ownerToken, blobManifest, [blobLine, ...holdingsRun([])]);
+  assert.ok(withBlob.start, "the connector received START");
+  const failure = withBlob.thrown instanceof Error ? withBlob.thrown.message : JSON.stringify(withBlob.result);
+  assert.match(failure, UNKNOWN_BLOB_MESSAGE_PATTERN);
 });
