@@ -103,6 +103,11 @@ jobs:
           REQUIRE_STANDALONE: "1"
         run: node --test apps/console/packaged-agent-skill-routes.test.mjs
 
+      - name: Test e2e harness (no browser)
+        run: |
+          npm --prefix e2e ci --no-audit --no-fund
+          node --test e2e/harness.test.mjs e2e/harness-cleanup.test.mjs
+
       # `vitest run` without --passWithNoTests: an empty collection exits 1 on its own,
       # so a vite.config.ts `test.include` that silently stops matching fails the job
       # instead of reporting a green zero-test run. The JSON report records which files
