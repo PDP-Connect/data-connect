@@ -21,5 +21,8 @@ test("vendored test-sandbox matches its recorded sha256 and stays executable", (
     .update(readFileSync(join(sandboxDir, "test-sandbox")))
     .digest("hex");
   assert.equal(recorded, `${actual}  test-sandbox`);
-  assert.ok(statSync(join(sandboxDir, "test-sandbox")).mode & 0o100, "test-sandbox must be executable");
+  // Windows reports no POSIX mode bits; Git still records the file as 100755.
+  if (process.platform !== "win32") {
+    assert.ok(statSync(join(sandboxDir, "test-sandbox")).mode & 0o100, "test-sandbox must be executable");
+  }
 });
