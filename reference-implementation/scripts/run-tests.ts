@@ -1,7 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { availableParallelism } from "node:os";
@@ -18,6 +18,8 @@ import { collectChildProcessOutput } from "./child-process-output.ts";
 import { deriveDedicatedPostgresDbNameForFile } from "./dedicated-postgres-db-name.ts";
 import { startFileProcessWatchdog } from "./file-process-watchdog.ts";
 import { resolveFileConcurrency } from "./file-concurrency.ts";
+import { createOwnedTestResource, drainTestWorkers, type OwnedTestResource } from "./owned-test-resource.ts";
+import { needsOuterPostgresDatabase, needsPostgresRestoreDatabase } from "./run-tests-db-requirements.ts";
 import { assertPostgresProfilePreflight } from "./postgres-profile-preflight.ts";
 import { isPostgresTemplateEligibleFilePath } from "./postgres-template-eligibility.ts";
 import {
@@ -253,145 +255,69 @@ interface TestDbAllocation {
 // Per-file databases currently allocated. Tracked so that if the runner
 // process itself is killed (SIGTERM/SIGINT, CI timeout) while child tests are
 // in flight, their databases are dropped on the way out rather than orphaned.
-const activeAllocations = new Set<TestDbAllocation>();
+const activeAllocations = new Set<OwnedTestResource>();
+const activeTemplates = new Set<OwnedTestResource>();
+const activeChildren = new Set<ChildProcess>();
+let stopping = false;
+let signalExitCode: number | undefined;
 let signalCleanupArmed = false;
 
 function armSignalCleanup(): void {
-  if (signalCleanupArmed) {
-    return;
-  }
+  if (signalCleanupArmed) return;
   signalCleanupArmed = true;
-  const dropAll = () => {
-    // Best-effort synchronous-ish drop of every live allocation; release() is
-    // idempotent (DROP DATABASE IF EXISTS) so double-dropping is harmless.
-    const pending = [...activeAllocations].map((a) =>
-      a.release().catch(() => {
-        // Best-effort teardown; the process is already exiting on a signal.
-      })
-    );
-    return Promise.allSettled(pending);
-  };
   for (const sig of ["SIGINT", "SIGTERM"] as const) {
     process.on(sig, () => {
-      dropAll().finally(() => {
-        process.exit(sig === "SIGINT" ? 130 : 143);
-      });
+      stopping = true;
+      signalExitCode ??= sig === "SIGINT" ? 130 : 143;
+      // Main's finally performs cleanup after allocation/build promises and
+      // workers settle. A second signal must not race cleanup against CREATE.
+      for (const child of activeChildren) child.kill("SIGTERM");
     });
   }
 }
 
-/**
- * Create a fresh database and return its connection URL plus a cleanup
- * function that drops it. Never throws -- on error it logs a warning and
- * returns undefined so the caller falls back to the base URL.
- */
-async function allocateTestDb(filePath: string, baseUrl: string): Promise<TestDbAllocation | undefined> {
+async function allocateTestDb(filePath: string, baseUrl: string): Promise<TestDbAllocation> {
   const dbName = deriveDbName(filePath);
   const adminUrl = adminUrlFromBase(baseUrl);
-  // DEFAULT IS COLD: a template is used for this file's own per-file
-  // database only when the file appears on the explicit allowlist in
-  // postgres-template-eligibility.ts. Every other file -- including one this
-  // registry has never heard of -- gets a real, from-scratch bootstrap for
-  // its own database, regardless of whether a template happens to exist for
-  // this run. See that file's header for why this is a fail-closed default,
-  // not an opt-out.
-  const useTemplate = postgresTestTemplateName !== null && isPostgresTemplateEligibleFilePath(filePath);
-  const client = new pg.Client({ connectionString: adminUrl });
-  try {
-    await client.connect();
-    // Identifier is safe: deriveDbName produces only [a-z0-9_] chars.
-    await client.query(`DROP DATABASE IF EXISTS "${dbName}" WITH (FORCE)`);
-    if (useTemplate) {
-      const templateName = postgresTestTemplateName;
-      const templateIdentity = postgresTestTemplateIdentity;
-      if (!(templateName && templateIdentity)) {
-        throw new Error("Postgres template clone requested without a runner-bound template identity");
-      }
-      // The clone helper verifies the template's complete identity immediately
-      // before CREATE DATABASE ... TEMPLATE. Do not replace this with a raw
-      // query: a same-named stale or altered template must fail closed.
-      await clonePostgresTestDatabaseFromTemplate(baseUrl, dbName, templateName, templateIdentity);
-    } else {
-      await client.query(`CREATE DATABASE "${dbName}"`);
-    }
-    // State which provisioning path this file took. The choice is otherwise
-    // invisible from outside the runner, which is what let the eligibility
-    // half of `useTemplate` go untested (external review P1-1): a
-    // cold-required file wrongly routed through the template would still
-    // usually pass, because the template carries a correct schema. Naming
-    // the path makes the decision itself assertable.
-    process.stdout.write(
-      `PDPP_TEST_DB_PROVISION ${JSON.stringify({ file: filePath, path: useTemplate ? "template-clone" : "cold-bootstrap" })}\n`
-    );
-    await client.end();
-  } catch (err) {
-    try {
-      await client.end();
-    } catch {
-      // Best-effort teardown after a failed connect/query.
-    }
-    process.stderr.write(
-      `[run-tests] WARN: could not create test DB ${dbName}: ${err instanceof Error ? err.message : String(err)}\n`
-    );
-    return;
-  }
-
-  // Reuse the base URL structure but point at the new DB.
   const testUrl = new URL(baseUrl);
   testUrl.pathname = `/${dbName}`;
-
-  // Stamp the freshly-created (therefore empty) database with the test
-  // sentinel. Without this the in-process guard in initPostgresStorage
-  // refuses the database, which is the intended fail-closed default: a
-  // database is admissible only because it was explicitly provisioned here.
-  try {
-    await provisionTestDatabase(testUrl.toString());
-  } catch (err) {
-    process.stderr.write(
-      `[run-tests] WARN: could not provision test sentinel on ${dbName}: ${err instanceof Error ? err.message : String(err)}\n`
-    );
-    return;
-  }
-
-  let releasePromise: Promise<void> | undefined;
-  const allocation: TestDbAllocation = {
-    release: () => {
-      if (releasePromise) {
-        return releasePromise;
-      }
-      releasePromise = (async () => {
-        const drop = new pg.Client({ connectionString: adminUrl });
+  const useTemplate = postgresTestTemplateName !== null && isPostgresTemplateEligibleFilePath(filePath);
+  const allocation = await createOwnedTestResource({
+    registry: activeAllocations,
+    create: async (onCreated) => {
+      if (useTemplate) {
+        const templateName = postgresTestTemplateName;
+        const identity = postgresTestTemplateIdentity;
+        if (!(templateName && identity)) throw new Error("missing runner-bound template identity");
+        await clonePostgresTestDatabaseFromTemplate(baseUrl, dbName, templateName, identity, onCreated);
+      } else {
+        const client = new pg.Client({ connectionString: adminUrl });
         try {
-          await drop.connect();
-          await drop.query(`DROP DATABASE IF EXISTS "${dbName}" WITH (FORCE)`);
-          await drop.end();
-          activeAllocations.delete(allocation);
-        } catch (err) {
-          try {
-            await drop.end();
-          } catch {
-            // Best-effort teardown after a failed connect/query.
-          }
-          throw new Error(
-            `[run-tests] could not drop test DB ${dbName}: ${err instanceof Error ? err.message : String(err)}`,
-            { cause: err }
-          );
+          await client.connect();
+          // No pre-emptive DROP: a collision must never destroy another run.
+          await client.query(`CREATE DATABASE "${dbName}"`);
+          onCreated();
+        } finally {
+          await client.end();
         }
-      })().catch((error) => {
-        releasePromise = undefined;
-        throw error;
-      });
-      return releasePromise;
+      }
+      process.stdout.write(
+        `PDPP_TEST_DB_PROVISION ${JSON.stringify({ file: filePath, path: useTemplate ? "template-clone" : "cold-bootstrap" })}\n`
+      );
+      return testUrl.toString();
     },
-    url: testUrl.toString(),
-  };
-
-  // Track the live allocation and arm the runner-level signal cleanup so a
-  // killed runner drops its in-flight databases instead of orphaning them.
-  armSignalCleanup();
-  activeAllocations.add(allocation);
-
-  return allocation;
+    provision: provisionTestDatabase,
+    destroy: async () => {
+      const client = new pg.Client({ connectionString: adminUrl });
+      try {
+        await client.connect();
+        await client.query(`DROP DATABASE IF EXISTS "${dbName}" WITH (FORCE)`);
+      } finally {
+        await client.end();
+      }
+    },
+  });
+  return { url: allocation.value, release: allocation.release };
 }
 
 interface NodeTestResult {
@@ -406,22 +332,40 @@ async function runNodeTest(filePath: string, extraArgs: string[]): Promise<NodeT
   const baseEnv: ProcessEnvLike = scrubbedBaseEnv;
   const baseUrl = dedicatedBasePostgresTestUrl;
 
-  // Allocate a per-file DB when a base Postgres URL is configured.
+  // Unknown files retain an outer DB. Restore allocation is separate and cold.
   let allocation: TestDbAllocation | undefined;
-  if (baseUrl) {
-    allocation = await allocateTestDb(filePath, baseUrl);
-    if (!allocation) {
-      // Fail loudly instead of falling back to the SHARED base database. The
-      // old fallback handed the child the operator-supplied base URL, so a
-      // failed allocation silently downgraded per-file isolation to "every
-      // test writes the same shared database". The in-process sentinel guard
-      // would now refuse that database anyway; refusing here names the real
-      // cause (allocation failed) rather than surfacing it as a confusing
-      // per-test admission error.
-      throw new Error(
-        `could not allocate a dedicated Postgres test database for ${filePath}; refusing to fall back to the shared base database`
-      );
+  let restoreAllocation: TestDbAllocation | undefined;
+  const releaseFileResources = () => drainTestWorkers(
+    [allocation, restoreAllocation].flatMap((item) => item ? [item.release()] : [])
+  );
+  try {
+    if (baseUrl && needsOuterPostgresDatabase(filePath)) {
+      allocation = await allocateTestDb(filePath, baseUrl);
+      if (!allocation) {
+        // Fail loudly instead of falling back to the SHARED base database. The
+        // old fallback handed the child the operator-supplied base URL, so a
+        // failed allocation silently downgraded per-file isolation to "every
+        // test writes the same shared database". The in-process sentinel guard
+        // would now refuse that database anyway; refusing here names the real
+        // cause (allocation failed) rather than surfacing it as a confusing
+        // per-test admission error.
+        throw new Error(
+          `could not allocate a dedicated Postgres test database for ${filePath}; refusing to fall back to the shared base database`
+        );
+      }
     }
+
+    if (baseUrl && configuredPostgresRestoreUrl && needsPostgresRestoreDatabase(filePath)) {
+      restoreAllocation = await allocateTestDb(`${filePath}.restore`, configuredPostgresRestoreUrl);
+    }
+    if (stopping) throw new Error("test runner interrupted before child spawn");
+  } catch (error) {
+    try {
+      await releaseFileResources();
+    } catch (cleanupError) {
+      throw new AggregateError([error, cleanupError], "file setup and cleanup failed");
+    }
+    throw error;
   }
 
   const childEnvBase: ProcessEnvLike = allocation
@@ -443,18 +387,25 @@ async function runNodeTest(filePath: string, extraArgs: string[]): Promise<NodeT
             }
           : {}),
       }
-    : baseEnv;
+    : { ...baseEnv };
+  if (postgresTestTemplateName && postgresTestTemplateIdentity) {
+    childEnvBase.PDPP_TEST_POSTGRES_TEMPLATE = postgresTestTemplateName;
+    childEnvBase.PDPP_TEST_POSTGRES_TEMPLATE_IDENTITY = postgresTestTemplateIdentity;
+  }
+  if (restoreAllocation) childEnvBase.PDPP_TEST_POSTGRES_RESTORE_URL = restoreAllocation.url;
   // Turn the preload (appended to effectiveArgs above) live in the child. Left
   // unset when the guard is disabled so the child is byte-identical to a
   // pre-guard run (guard-absent parity).
   const childEnv: ProcessEnvLike = hermeticGuardEnabled ? { ...childEnvBase, PDPP_HERMETIC_GUARD: "1" } : childEnvBase;
 
-  return new Promise((resolve, reject) => {
+  return new Promise<NodeTestResult>((resolve, reject) => {
     const child = spawn(process.execPath, ["--test", ...extraArgs, filePath], {
       cwd: repoRoot,
       env: childEnv,
       stdio: ["ignore", "pipe", "pipe"],
     });
+    activeChildren.add(child);
+    child.once("close", () => activeChildren.delete(child));
     // Reporter output proves that a long file is still making progress. The
     // hard deadline separately bounds a chatty process that never exits.
     const watchdog = startFileProcessWatchdog({
@@ -465,23 +416,20 @@ async function runNodeTest(filePath: string, extraArgs: string[]): Promise<NodeT
     let settled = false;
     const outputPromise = collectChildProcessOutput(child, watchdog.markProgress);
 
-    const settleAfterRelease = async (finish: () => void | Promise<void>) => {
+    const settle = async (finish: () => void | Promise<void>) => {
       if (settled) {
         return;
       }
       settled = true;
       watchdog.clear();
-      if (allocation) {
-        await allocation.release();
-      }
       await finish();
     };
 
     child.on("error", (err) => {
-      settleAfterRelease(() => reject(err)).catch(reject);
+      settle(() => reject(err)).catch(reject);
     });
     child.on("close", (code, signal) => {
-      settleAfterRelease(async () => {
+      settle(async () => {
         const output = await outputPromise;
         const timeoutReason = watchdog.timeoutReason();
         if (timeoutReason === "idle") {
@@ -512,7 +460,7 @@ async function runNodeTest(filePath: string, extraArgs: string[]): Promise<NodeT
         });
       }).catch(reject);
     });
-  });
+  }).finally(releaseFileResources);
 }
 
 const testFiles = await discoverSelectedTestFiles(repoRoot, testDir, accountingAuthority?.files);
@@ -535,38 +483,57 @@ const results: NodeTestResult[] = [];
 // per-file bootstrap on template-build failure would hide a broken template
 // behind a normal-looking (slow) green run, which is the one thing the task
 // this exists for explicitly rules out.
-if (dedicatedBasePostgresTestUrl && testFiles.length > 0) {
-  // The builder returns the identity it committed before publishing the
-  // template. Do not re-read it off the template afterwards: an expectation
-  // sourced from the thing being verified proves nothing (external review
-  // P1-2).
-  const builtTemplate = await ensurePostgresTestTemplate(dedicatedBasePostgresTestUrl, templateRunnerId);
-  postgresTestTemplateName = builtTemplate.templateName;
-  postgresTestTemplateIdentity = builtTemplate.identityDigest;
-}
-
-async function worker(): Promise<void> {
-  while (queue.length > 0) {
-    const file = queue.shift();
-    if (!file) {
-      return;
-    }
-    // biome-ignore lint/performance/noAwaitInLoops: this IS the bounded-concurrency primitive -- fileConcurrency workers each pull one file from the shared queue, so parallelizing here would defeat the deliberate cap (Promise.all of worker() calls below).
-    const result = await runNodeTest(file, effectiveArgs);
-    results.push(result);
-    process.stdout.write(result.output);
-  }
-}
-
+armSignalCleanup();
 try {
-  await Promise.all(Array.from({ length: fileConcurrency }, () => worker()));
-} finally {
-  if (dedicatedBasePostgresTestUrl && postgresTestTemplateName) {
-    await dropPostgresTestTemplate(dedicatedBasePostgresTestUrl, postgresTestTemplateName).catch((error) => {
-      process.stderr.write(
-        `[run-tests] WARN: could not drop Postgres test template ${postgresTestTemplateName}: ${error instanceof Error ? error.message : String(error)}\n`
-      );
+  if (dedicatedBasePostgresTestUrl && testFiles.some(isPostgresTemplateEligibleFilePath)) {
+    // The builder returns the identity it committed before publishing the
+    // template. Do not re-read it off the template afterwards: an expectation
+    // sourced from the thing being verified proves nothing (external review
+    // P1-2).
+    let ownedTemplateName: string | undefined;
+    const template = await createOwnedTestResource({
+      registry: activeTemplates,
+      create: (onCreated) => ensurePostgresTestTemplate(dedicatedBasePostgresTestUrl, templateRunnerId, (name) => {
+        ownedTemplateName = name;
+        onCreated();
+      }),
+      provision: async () => {},
+      destroy: async () => {
+        if (ownedTemplateName) await dropPostgresTestTemplate(dedicatedBasePostgresTestUrl, ownedTemplateName);
+      },
     });
+    postgresTestTemplateName = template.value.templateName;
+    postgresTestTemplateIdentity = template.value.identityDigest;
+  }
+
+  async function worker(): Promise<void> {
+    while (!stopping && queue.length > 0) {
+      const file = queue.shift();
+      if (!file) {
+        return;
+      }
+      // biome-ignore lint/performance/noAwaitInLoops: this IS the bounded-concurrency primitive -- fileConcurrency workers each pull one file from the shared queue, so parallelizing here would defeat the deliberate cap (Promise.all of worker() calls below).
+      try {
+        const result = await runNodeTest(file, effectiveArgs);
+        results.push(result);
+        process.stdout.write(result.output);
+      } catch (error) {
+        stopping = true;
+        throw error;
+      }
+    }
+  }
+
+  await drainTestWorkers(Array.from({ length: fileConcurrency }, () => worker()));
+} finally {
+  try {
+    await drainTestWorkers([...activeAllocations].map((allocation) => allocation.release()));
+  } finally {
+    try {
+      await drainTestWorkers([...activeTemplates].map((template) => template.release()));
+    } finally {
+      if (signalExitCode !== undefined) process.exit(signalExitCode);
+    }
   }
 }
 
@@ -598,7 +565,7 @@ const counts = {
 // timeouts, output counts/schema, or the ordinary exit path. It is skipped
 // when the suite did not run to completion (a failing file already dominates
 // the exit), so it can never mask an unrelated failure or fire on a partial run.
-if (!failed && results.length === testFiles.length) {
+if (!accountingAuthority && !failed && results.length === testFiles.length) {
   const consumedMappingIdentities = summaries.flatMap((summary) => summary.consumed_mapping_identities);
   assertNamedSkipMappingsFullyConsumed(
     consumedMappingIdentities,

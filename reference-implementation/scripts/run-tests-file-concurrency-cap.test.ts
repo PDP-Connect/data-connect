@@ -37,7 +37,7 @@ test("each profile has its own cap, and postgres stays at 2", () => {
   assert.equal(
     fileConcurrencyCap("postgres"),
     2,
-    "the postgres restore target is not per-file allocated; widening this lane needs its own evidence"
+    "widening the postgres lane needs its own measured evidence"
   );
 });
 
@@ -95,14 +95,11 @@ test("a non-positive CPU count still resolves to a single worker", () => {
   }
 });
 
-test("a positive override wins and is not clamped by cap, CPUs or file count", () => {
-  // Above both caps: an operator who names a number knows something about the
-  // host that this policy does not.
-  assert.equal(resolve("memory-default", 24, 1000, 32), 32);
-  assert.equal(resolve("postgres", 24, 1000, 32), 32);
-  // Above the CPU count and above the file count.
-  assert.equal(resolve("memory-default", 4, 1000, 16), 16);
-  assert.equal(resolve("memory-default", 24, 2, 16), 16);
+test("positive overrides are clamped by cap, CPUs and file count", () => {
+  assert.equal(resolve("memory-default", 24, 1000, 32), 8);
+  assert.equal(resolve("postgres", 24, 1000, 32), 2);
+  assert.equal(resolve("memory-default", 4, 1000, 16), 4);
+  assert.equal(resolve("memory-default", 24, 2, 16), 2);
   // Below the cap: honoured downwards too.
   assert.equal(resolve("memory-default", 24, 1000, 1), 1);
 });

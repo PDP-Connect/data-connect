@@ -459,7 +459,8 @@ async function templateIdentityMatches(
  */
 export async function ensurePostgresTestTemplate(
   baseConnectionString: string,
-  runnerId: string
+  runnerId: string,
+  onCreated: (templateName: string) => void = () => {}
 ): Promise<BuiltPostgresTestTemplate> {
   const templateName = deriveDedicatedPostgresTemplateName(runnerId);
   let identityDigest: string | null = null;
@@ -479,6 +480,7 @@ export async function ensurePostgresTestTemplate(
       }
 
       await admin.query(`CREATE DATABASE ${quotedIdentifier(templateName)}`);
+      onCreated(templateName);
 
       const templateUrl = databaseUrl(baseConnectionString, templateName);
       // Stamp the sentinel BEFORE bootstrapping schema, exactly like every
@@ -491,13 +493,17 @@ export async function ensurePostgresTestTemplate(
       // every Postgres-backed test file already goes through today (guard
       // check + bootstrapPostgresSchema). This is the one-time cost the
       // template amortizes; every later clone skips it entirely.
-      await initPostgresStorage({ backend: "postgres", databaseUrl: templateUrl });
+      try {
+        await initPostgresStorage({ backend: "postgres", databaseUrl: templateUrl });
+      } finally {
+        await closePostgresStorage();
+      }
       // initPostgresStorage leaves the process-global pool pointed at the
       // template. Close it so the template build does not leak a live
       // pool/connection into the caller, which would also hold
       // datallowconn=false hostage (ALTER DATABASE ... datallowconn fails
       // while the pool's own connections are still open against it).
-      await closePostgresStorage();
+      // Storage is closed in the finally above, including failed bootstrap.
 
       // Record the schema the template actually carries while it still
       // accepts connections; once ALLOW_CONNECTIONS is false nothing can
@@ -619,7 +625,8 @@ export async function clonePostgresTestDatabaseFromTemplate(
   baseConnectionString: string,
   databaseName: string,
   templateName: string,
-  expectedIdentity: string
+  expectedIdentity: string,
+  onCreated: () => void = () => {}
 ): Promise<void> {
   await withAdminClient(baseConnectionString, async (admin) => {
     // ONE connection, ONE lock, across verify -> capture OID -> clone
@@ -642,6 +649,7 @@ export async function clonePostgresTestDatabaseFromTemplate(
         );
       }
       await admin.query(`CREATE DATABASE ${quotedIdentifier(databaseName)} TEMPLATE ${quotedIdentifier(templateName)}`);
+      onCreated();
     } finally {
       await admin.query("SELECT pg_advisory_unlock($1, $2)", TEMPLATE_CLONE_SERIALIZATION_LOCK);
     }
