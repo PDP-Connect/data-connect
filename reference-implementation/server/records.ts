@@ -127,7 +127,11 @@ import {
 } from "./retained-size-read-model.ts";
 import { firstSemanticTimeValue, SEMANTIC_TIME_UNKNOWN } from "./semantic-time-coercion.ts";
 import { createStorageBackend } from "./storage-backend.ts";
-import { currentStorageGeneration, isCurrentStorageGeneration } from "./storage-generation.ts";
+import {
+  assertCurrentStorageGeneration,
+  currentStorageGeneration,
+  isCurrentStorageGeneration,
+} from "./storage-generation.ts";
 import {
   getChangeHistoryLimit,
   nowIso,
@@ -1819,7 +1823,7 @@ async function runDeferredRecordIndexes(
     try {
       // biome-ignore lint/performance/noAwaitInLoops: One connector instance's derived index repairs are intentionally ordered.
       await withIndexWork(
-        () => maintainRecordIndexesWithinPermit(storageTarget, record, version, {}),
+        () => maintainRecordIndexesWithinPermit(storageTarget, record, version, {}, scheduledGeneration),
         scheduledGeneration
       );
     } catch (err) {
@@ -2501,7 +2505,7 @@ export async function maintainRecordIndexes(
   generation: number = currentStorageGeneration()
 ): Promise<void> {
   return await withIndexWork(
-    () => maintainRecordIndexesWithinPermit(storageTarget, record, expectedVersion, options),
+    () => maintainRecordIndexesWithinPermit(storageTarget, record, expectedVersion, options, generation),
     generation
   );
 }
@@ -2786,7 +2790,8 @@ async function maintainRecordIndexesWithinPermit(
   storageTarget: RecordStorageTarget,
   record: RecordEnvelope,
   expectedVersion: number,
-  options: RecordIngestOptions
+  options: RecordIngestOptions,
+  generation: number
 ): Promise<void> {
   const connectorId = connectorIdForStorageTarget(storageTarget);
   const connectorInstanceId = resolveStorageConnectorInstanceId(storageTarget, connectorId);
@@ -2858,9 +2863,14 @@ async function maintainRecordIndexesWithinPermit(
     stream,
   });
 
+  // withIndexWork checked the generation before this operation started, but the
+  // compute awaits above can span a storage close and re-init. The version check
+  // below cannot tell the new database from the old one: the same key can sit at
+  // the same version there with different content.
   if (isPostgresStorageBackend()) {
     return withPostgresTransaction(
       async (client) => {
+        assertCurrentStorageGeneration(generation);
         // Match repair's instance -> publication -> derived DML order, including deletes.
         await lockConnectorManifestPublication(client, connectorId);
         const current = await client.query<{ version: string | number; deleted: boolean }>(
@@ -2900,6 +2910,7 @@ async function maintainRecordIndexesWithinPermit(
     );
   }
 
+  assertCurrentStorageGeneration(generation);
   return writeTransaction(() => {
     const current = getOne<CurrentRecordRow>(referenceQueries.recordsIngestGetCurrentRecordState, [
       connectorInstanceId,
