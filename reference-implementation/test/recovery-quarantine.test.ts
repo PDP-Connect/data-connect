@@ -174,6 +174,10 @@ function quarantineStore(
       const gap = await store.markGapStatus(gapId, status, options);
       return gap ? { ...gap, attempt_count: gap.attempt_count } : null;
     },
+    markGapQuarantined: async (gapId, expectedStatus, expectedAttemptCount, options) => {
+      const gap = await store.markGapQuarantined(gapId, expectedStatus, expectedAttemptCount, options);
+      return gap ? { ...gap, attempt_count: gap.attempt_count } : null;
+    },
   };
 }
 
@@ -239,6 +243,41 @@ test(
       0,
       "not in fillable-pending"
     );
+  })
+);
+
+test(
+  "quarantine does not overwrite a recovery committed after its decision read",
+  withTempDb(async () => {
+    const store = createSqliteConnectorDetailGapStore();
+    const gap = await seedGap(store, "quarantine_read_write_race");
+    await store.markGapStatus(gap.gap_id, "in_progress");
+    const adapter = quarantineStore(store);
+    let intercepted = false;
+    const staleReadAdapter: Parameters<typeof maybeQuarantineGap>[0] = {
+      ...adapter,
+      async getGapById(id) {
+        const snapshot = await adapter.getGapById(id);
+        if (!intercepted && snapshot) {
+          intercepted = true;
+          await store.markGapStatus(id, "recovered", { runId: "winning_recovery" });
+        }
+        return snapshot;
+      },
+    };
+
+    const outcome = await maybeQuarantineGap(
+      staleReadAdapter,
+      gap.gap_id,
+      { failure_class: "interrupted" },
+      { maxNoProgressAttempts: 1 }
+    );
+
+    assert.equal(intercepted, true, "the read/write interleaving actually occurred");
+    const persisted = await store.getGapById(gap.gap_id);
+    assert.ok(persisted);
+    assert.equal(persisted.status, "recovered", "a stale quarantine decision must not overwrite recovery");
+    assert.equal(outcome.quarantined, false, "report only a quarantine transition actually committed");
   })
 );
 
