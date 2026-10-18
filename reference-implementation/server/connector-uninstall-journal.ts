@@ -255,8 +255,10 @@ function removeMovedAndOriginalRoots(dataDir: string, rootMoves: readonly Connec
     const { moved, original } = checkedMovePaths(dataDir, move);
     rmSync(moved, { force: true, recursive: true });
     rmSync(original, { force: true, recursive: true });
-    fsyncDirectory(dirname(moved));
-    fsyncDirectory(dirname(original));
+    // Uninstall removes the emptied connector directory before it deletes the journal.
+    for (const dir of new Set([dirname(moved), dirname(original)])) {
+      if (existsSync(dir)) fsyncDirectory(dir);
+    }
   }
 }
 

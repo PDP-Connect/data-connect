@@ -244,3 +244,26 @@ test("journal cleanup does not follow a symlink hidden behind a dot-dot segment"
   });
   assert.equal(readFileSync(sentinel, "utf8"), "outside bytes must survive");
 });
+
+test("journal cleanup finishes when the emptied connector directory is already gone", async (t) => {
+  const dataDir = tempDataDir(t);
+  const original = join(dataDir, "connectors", "github", "sha256-four");
+  const moved = join(dataDir, "connectors", "github", ".uninstall-sha256-four");
+  writeConnectorUninstallJournal(dataDir, {
+    connectorId: "github",
+    priorActiveRecord: { connectorId: "github", root: original },
+    rootMoves: [{ moved, original }],
+  });
+  // Uninstall removed the staged root and the empty connector directory, then died before deleting the journal.
+  assert.equal(existsSync(join(dataDir, "connectors", "github")), false);
+
+  assert.deepEqual(
+    await reconcileConnectorUninstallJournal(dataDir, "github", {
+      getActive: () => null,
+      restoreActive: () => assert.fail("cleanup must not restore active records"),
+    }),
+    { connectorId: "github", status: "cleaned" }
+  );
+
+  assert.equal(existsSync(connectorUninstallJournalPath(dataDir, "github")), false);
+});
