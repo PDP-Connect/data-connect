@@ -8264,21 +8264,23 @@ const postgresGrantPackageStore: GrantPackageStore = {
        WHERE package_id = $2 AND grant_id = $3 AND status = 'active'`,
       [revokedAt, packageId, grantId]
     ),
-  markPackageRevokedCascade: async ({ packageId, revokedAt }) => {
-    await pgExec(
-      "UPDATE grant_packages SET status = 'revoked', revoked_at = $1 WHERE package_id = $2 AND status = 'active'",
-      [revokedAt, packageId]
-    );
-    await pgExec("UPDATE tokens SET revoked = TRUE WHERE package_id = $1", [packageId]);
-    await pgExec(
-      "UPDATE grant_package_members SET status = 'revoked', revoked_at = $1 WHERE package_id = $2 AND status = 'active'",
-      [revokedAt, packageId]
-    );
-    await pgExec(
-      "UPDATE oauth_refresh_tokens SET status = 'revoked', revoked_at = $1 WHERE package_id = $2 AND status = 'active'",
-      [revokedAt, packageId]
-    );
-  },
+  markPackageRevokedCascade: ({ packageId, revokedAt }) =>
+    withPostgresTransaction(async (client) => {
+      await client.query(
+        "UPDATE grant_packages SET status = 'revoked', revoked_at = $1 WHERE package_id = $2 AND status = 'active'",
+        [revokedAt, packageId]
+      );
+      crashPoint("package-revoke:in-cascade");
+      await client.query("UPDATE tokens SET revoked = TRUE WHERE package_id = $1", [packageId]);
+      await client.query(
+        "UPDATE grant_package_members SET status = 'revoked', revoked_at = $1 WHERE package_id = $2 AND status = 'active'",
+        [revokedAt, packageId]
+      );
+      await client.query(
+        "UPDATE oauth_refresh_tokens SET status = 'revoked', revoked_at = $1 WHERE package_id = $2 AND status = 'active'",
+        [revokedAt, packageId]
+      );
+    }),
 };
 
 /**
@@ -8406,10 +8408,13 @@ const sqliteGrantPackageStore: GrantPackageStore = {
   markMemberRevoked: ({ packageId, grantId, revokedAt }) =>
     exec(referenceQueries.authGrantPackageMembersMarkRevokedByGrant, [revokedAt, packageId, grantId]),
   markPackageRevokedCascade: ({ packageId, revokedAt }) => {
-    exec(referenceQueries.authGrantPackagesMarkRevoked, [revokedAt, packageId]);
-    exec(referenceQueries.authTokensRevokeByPackage, [packageId]);
-    exec(referenceQueries.authGrantPackageMembersMarkRevokedByPackage, [revokedAt, packageId]);
-    exec(referenceQueries.authOauthRefreshTokensRevokeByPackage, [revokedAt, packageId]);
+    transaction(() => {
+      exec(referenceQueries.authGrantPackagesMarkRevoked, [revokedAt, packageId]);
+      crashPoint("package-revoke:in-cascade");
+      exec(referenceQueries.authTokensRevokeByPackage, [packageId]);
+      exec(referenceQueries.authGrantPackageMembersMarkRevokedByPackage, [revokedAt, packageId]);
+      exec(referenceQueries.authOauthRefreshTokensRevokeByPackage, [revokedAt, packageId]);
+    });
   },
 };
 
@@ -12420,18 +12425,26 @@ async function requireRevocablePersistedGrant(
 }
 
 async function revokeGrantStorage(grantId: string): Promise<void> {
+  // One transaction: a kill between the statements used to leave a revoked grant whose token
+  // and refresh token rows stayed live, and the owner routes refuse to retry a revoked grant.
   if (isPostgresStorageBackend()) {
-    await pgExec("UPDATE grants SET status = 'revoked' WHERE grant_id = $1", [grantId]);
-    await pgExec("UPDATE tokens SET revoked = TRUE WHERE grant_id = $1", [grantId]);
-    await pgExec(
-      "UPDATE oauth_refresh_tokens SET status = 'revoked', revoked_at = $1 WHERE grant_id = $2 AND status = 'active'",
-      [nowIso(), grantId]
-    );
+    await withPostgresTransaction(async (client) => {
+      await client.query("UPDATE grants SET status = 'revoked' WHERE grant_id = $1", [grantId]);
+      crashPoint("grant-revoke:after-status-update");
+      await client.query("UPDATE tokens SET revoked = TRUE WHERE grant_id = $1", [grantId]);
+      await client.query(
+        "UPDATE oauth_refresh_tokens SET status = 'revoked', revoked_at = $1 WHERE grant_id = $2 AND status = 'active'",
+        [nowIso(), grantId]
+      );
+    });
     return;
   }
-  exec(referenceQueries.authGrantsMarkRevoked, [grantId]);
-  exec(referenceQueries.authTokensRevokeByGrant, [grantId]);
-  exec(referenceQueries.authOauthRefreshTokensRevokeByGrant, [nowIso(), grantId]);
+  transaction(() => {
+    exec(referenceQueries.authGrantsMarkRevoked, [grantId]);
+    crashPoint("grant-revoke:after-status-update");
+    exec(referenceQueries.authTokensRevokeByGrant, [grantId]);
+    exec(referenceQueries.authOauthRefreshTokensRevokeByGrant, [nowIso(), grantId]);
+  });
 }
 
 async function emitGrantRevoked(
