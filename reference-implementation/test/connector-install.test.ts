@@ -1725,7 +1725,7 @@ test("derived-state repair runs after the install returns and its locks are rele
   }
 });
 
-test("owner install route rejects missing installation fields", async () => {
+test("owner connector-install routes register both guards and reject missing install fields", async () => {
   type RegisteredHandler = (
     req: { body?: Record<string, unknown> },
     res: {
@@ -1765,6 +1765,12 @@ test("owner install route rejects missing installation fields", async () => {
       update: async () => assert.fail("should not update"),
     },
   });
+  assert.equal(registrations.size, 10, "the complete owner connector-install route set is registered");
+  for (const [route, handlers] of registrations) {
+    assert.equal(handlers.length, 3, `${route} registers two guards and one handler`);
+    assert.equal(handlers[0], tokenGuard, `${route} requires an owner token`);
+    assert.equal(handlers[1], ownerGuard, `${route} requires owner authorization`);
+  }
   let status = 200;
   let body: unknown;
   await routes.get("POST /v1/owner/connector-install/install")?.(
@@ -1782,8 +1788,6 @@ test("owner install route rejects missing installation fields", async () => {
   );
   assert.equal(status, 400);
   assert.deepEqual(body, { code: "invalid_request", message: "connector_id is required", param: "connector_id" });
-  assert.equal(registrations.get("POST /v1/owner/connector-install/install")?.[0], tokenGuard);
-  assert.equal(registrations.get("POST /v1/owner/connector-install/install")?.[1], ownerGuard);
 });
 
 test("owner uninstall route calls the service and returns the completed action", async () => {
