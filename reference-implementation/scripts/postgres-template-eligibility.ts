@@ -168,6 +168,8 @@ export const POSTGRES_TEMPLATE_ELIGIBLE_FILES: readonly string[] = [
   "test/search-index-lexical-resume.postgres.test.ts",
   "test/search-index-reconcile-scope-isolation.postgres.test.ts",
   "test/search-index-repair-correctness.postgres.test.ts",
+  // Lexical cleanup debt over seeded rows; does not observe schema bootstrap.
+  "test/search-reconcile-g1-postgres.test.ts",
   // Semantic cleanup debt over seeded vectors; does not observe schema bootstrap.
   "test/search-reconcile-g2-postgres.test.ts",
   "test/setup-binding-promotion.test.ts",
