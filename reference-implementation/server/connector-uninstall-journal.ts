@@ -183,7 +183,11 @@ export function readConnectorUninstallJournal<ActiveRecord>(
 ): ConnectorUninstallJournal<ActiveRecord> | null {
   const path = connectorUninstallJournalPath(dataDir, connectorId);
   if (!existsSync(path)) return null;
-  return parseJournal<ActiveRecord>(dataDir, JSON.parse(readFileSync(path, "utf8")));
+  const journal = parseJournal<ActiveRecord>(dataDir, JSON.parse(readFileSync(path, "utf8")));
+  if (journal.connectorId !== connectorId) {
+    throw new Error("Connector uninstall journal identity does not match its filename.");
+  }
+  return journal;
 }
 
 export function updateConnectorUninstallJournalRoots<ActiveRecord>(
