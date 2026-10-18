@@ -1,10 +1,14 @@
-// Copyright The PDP-Connect Contributors
-// SPDX-License-Identifier: Apache-2.0
-
-// A test child can exit 0 while its reporter recorded a failure: `node --test`
-// exits 0 when only a `todo` test fails. The gate must still go red. This runs
-// the real runner on a throwaway fixture file whose only test is a failing
-// todo, selected with --files-from so no other finalization can turn it red.
+// The gate must go red for a test that the Node runner itself would let through.
+// `node --test` counts a passing `todo` as a pass and exits 0 when a `todo`
+// fails, so the accounting rejects every `todo` test by name. These tests run
+// the real runner on throwaway fixture files selected with --files-from, so no
+// other finalization can turn the run red.
+//
+// `todo` was the only way found for a child to exit 0 after a `test:fail` event:
+// the exit code comes from the outer `node --test` process, which a fixture
+// cannot zero (an exit handler setting process.exitCode = 0, or process.exit(0)
+// in a later test, still exits 1). The `silentFailures` check in run-tests.ts
+// stays as defence in depth and has no test of its own.
 
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
@@ -41,27 +45,57 @@ function runRunner(listPath: string): Promise<{ code: number | null; output: str
   });
 }
 
-test("a recorded failure event makes the gate exit non-zero even when the child exited 0", async () => {
-  // Discovery reads scripts/ one level deep, so the fixture must sit there to
-  // pass --files-from validation; the random name keeps it unique.
+// Discovery reads scripts/ one level deep, so a fixture must sit there to pass
+// --files-from validation; the random name keeps it unique.
+async function runFixture(source: string): Promise<{ code: number | null; output: string }> {
   const fixture = `scripts/zz-failure-event-fixture-${randomBytes(4).toString("hex")}.test.ts`;
   const workDir = await mkdtemp(join(tmpdir(), "pdpp-failure-events-"));
   const listPath = join(workDir, "files.txt");
-  await writeFile(
-    join(repoRoot, fixture),
-    'import test from "node:test";\n' +
-      'test("a failing todo still records a failure event", { todo: "fixture" }, () => {\n' +
-      '  throw new Error("fixture failure");\n' +
-      "});\n"
-  );
+  await writeFile(join(repoRoot, fixture), source);
   await writeFile(listPath, `${fixture}\n`);
   try {
-    const { code, output } = await runRunner(listPath);
-    assert.match(output, /"type":"test:fail"/, `the fixture must record a failure event. Output:\n${output.slice(-2000)}`);
-    assert.notEqual(code, 0, `the runner exited 0 although a failure was recorded. Output:\n${output.slice(-2000)}`);
-    assert.match(output, /recorded failure events although the test process exited 0/);
+    return await runRunner(listPath);
   } finally {
     await rm(join(repoRoot, fixture), { force: true });
     await rm(workDir, { force: true, recursive: true });
   }
+}
+
+test("a passing todo test makes the gate exit non-zero, naming the test", async () => {
+  const { code, output } = await runFixture(
+    'import test from "node:test";\n' + 'test("a passing todo placeholder", { todo: "fixture" }, () => {});\n'
+  );
+  assert.notEqual(code, 0, `the runner exited 0 for a passing todo. Output:\n${output.slice(-2000)}`);
+  assert.match(output, /todo test rejected \(body passed\): a passing todo placeholder/);
+});
+
+test("a failing todo test makes the gate exit non-zero, naming the test", async () => {
+  const { code, output } = await runFixture(
+    'import test from "node:test";\n' +
+      'test("a failing todo placeholder", { todo: "fixture" }, () => {\n' +
+      '  throw new Error("fixture failure");\n' +
+      "});\n"
+  );
+  assert.notEqual(code, 0, `the runner exited 0 for a failing todo. Output:\n${output.slice(-2000)}`);
+  assert.match(output, /todo test rejected \(body failed\): a failing todo placeholder/);
+});
+
+// Node 24 marks every test inside a todo describe as todo, so the first
+// rejection names the child; the suite's own event is rejected as well.
+test("a todo describe with a passing child makes the gate exit non-zero", async () => {
+  const { code, output } = await runFixture(
+    'import { describe, it } from "node:test";\n' +
+      'describe("an unfinished suite", { todo: "fixture" }, () => {\n' +
+      '  it("a green child", () => {});\n' +
+      "});\n"
+  );
+  assert.notEqual(code, 0, `the runner exited 0 for a todo suite. Output:\n${output.slice(-2000)}`);
+  assert.match(output, /todo test rejected \(body passed\): (a green child|an unfinished suite)/);
+});
+
+test("a named skip is accepted by the gate", async () => {
+  const { code, output } = await runFixture(
+    'import test from "node:test";\n' + 'test("a named skip placeholder", { skip: "fixture reason" }, () => {});\n'
+  );
+  assert.equal(code, 0, `the runner rejected a named skip. Output:\n${output.slice(-2000)}`);
 });

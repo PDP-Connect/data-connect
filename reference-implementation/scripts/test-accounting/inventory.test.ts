@@ -888,6 +888,46 @@ test("uses only structured runner events and rejects generic skips", () => {
   );
   assert.throws(() => structuredNodeSummary("# pass 99\n"), NO_STRUCTURED_NODE_EVENTS_PATTERN);
 });
+test("rejects a todo test whether its body passed or failed, naming the test", () => {
+  const event = (value: unknown) => `PDPP_TEST_ACCOUNTING_EVENT ${JSON.stringify(value)}`;
+  const TODO_REJECTED_PATTERN = /todo test rejected \(body passed\): placeholder case/;
+  const FAILING_TODO_REJECTED_PATTERN = /todo test rejected \(body failed\): broken case/;
+  assert.throws(
+    () => structuredNodeSummary(`${event({ type: "test:pass", details: { type: "test", name: "placeholder case", todo: "later" } })}\n`),
+    TODO_REJECTED_PATTERN
+  );
+  assert.throws(
+    () => structuredNodeSummary(`${event({ type: "test:pass", details: { type: "test", name: "placeholder case", todo: true } })}\n`),
+    TODO_REJECTED_PATTERN
+  );
+  assert.throws(
+    () => structuredNodeSummary(`${event({ type: "test:fail", details: { type: "test", name: "broken case", todo: "later" } })}\n`),
+    FAILING_TODO_REJECTED_PATTERN
+  );
+  // A todo suite (`describe(..., { todo })`) is rejected too, though suites
+  // are otherwise not counted.
+  assert.throws(
+    () => structuredNodeSummary(`${event({ type: "test:pass", details: { type: "suite", name: "unfinished suite", todo: "later" } })}\n`),
+    /todo test rejected \(body passed\): unfinished suite/
+  );
+  // An explicit todo:false is an ordinary test, not a todo.
+  assert.equal(
+    structuredNodeSummary(`${event({ type: "test:pass", details: { type: "test", name: "ordinary", todo: false } })}\n`).passed,
+    1
+  );
+});
+test("a named skip is accepted and an empty skip reason is still rejected", () => {
+  const event = (value: unknown) => `PDPP_TEST_ACCOUNTING_EVENT ${JSON.stringify(value)}`;
+  const summary = structuredNodeSummary(
+    `${event({ type: "test:pass", details: { type: "test", name: "placeholder", skip: "requires the owner module" } })}\n`
+  );
+  assert.equal(summary.passed, 0);
+  assert.deepEqual(summary.skip_reasons, { "requires the owner module": 1 });
+  assert.throws(
+    () => structuredNodeSummary(`${event({ type: "test:pass", details: { type: "test", name: "placeholder", skip: "  " } })}\n`),
+    UNEXPLAINED_SKIP_PATTERN
+  );
+});
 test("runs Python files directly and derives explicit unittest skips from verbose output", () => {
   const output =
     "test_unit (__main__.Unit.test_unit) ... ok\ntest_x11 (__main__.X11.test_x11) ... skipped 'requires Xvfb'\n\n----------------------------------------------------------------------\nRan 2 tests in 0.001s\n\nOK (skipped=1)\n";
