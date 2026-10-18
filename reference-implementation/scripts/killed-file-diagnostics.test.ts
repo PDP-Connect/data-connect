@@ -9,7 +9,9 @@ import {
 	readdir,
 	rm,
 	stat,
+	symlink,
 	utimes,
+	writeFile,
 } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -117,6 +119,51 @@ test(`a new run keeps the newest ${KEEP_RUNS} runs, none older than ${KEEP_DAYS}
 			),
 		);
 		assert.equal((await readdir(join(root, current))).length, 2);
+	} finally {
+		await rm(root, { force: true, recursive: true });
+	}
+});
+
+test("a dangling run-* symlink does not stop the tail being saved, and is left alone", async () => {
+	const root = await mkdtemp(join(tmpdir(), "killed-file-diagnostics-"));
+	try {
+		const link = join(
+			root,
+			runDirectoryName(new Date("2026-01-01T00:00:00.000Z"), 1),
+		);
+		await symlink(join(root, "no-such-target"), link);
+		const path = await writeKilledFileTail(
+			join(root, runDirectoryName()),
+			"test/x.test.ts",
+			Buffer.from("x"),
+		);
+		assert.ok(path, "the tail is saved despite the dangling symlink");
+		assert.ok((await readdir(root)).includes(link.slice(root.length + 1)));
+	} finally {
+		await rm(root, { force: true, recursive: true });
+	}
+});
+
+test("a regular file named run-* is not pruned", async () => {
+	const root = await mkdtemp(join(tmpdir(), "killed-file-diagnostics-"));
+	try {
+		const nowMs = Date.now();
+		const name = runDirectoryName(
+			new Date(nowMs - 30 * 24 * 60 * 60 * 1000),
+			1,
+		);
+		await writeFile(join(root, name), "not a run directory");
+		const old = new Date(nowMs - 30 * 24 * 60 * 60 * 1000);
+		await utimes(join(root, name), old, old);
+		assert.ok(
+			await writeKilledFileTail(
+				join(root, runDirectoryName(new Date(nowMs))),
+				"test/x.test.ts",
+				Buffer.from("x"),
+				nowMs,
+			),
+		);
+		assert.ok((await readdir(root)).includes(name), "the file is left alone");
 	} finally {
 		await rm(root, { force: true, recursive: true });
 	}

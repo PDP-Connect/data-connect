@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { randomBytes } from "node:crypto";
-import { chmod, mkdir, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 
@@ -35,14 +35,25 @@ export function runDirectoryName(
 	return `${RUN_DIR_PREFIX}${now.toISOString().replace(/[:.]/g, "-")}-${pid}`;
 }
 
-/** Remove run directories beyond the newest KEEP_RUNS or older than KEEP_DAYS, never `keep`. */
+/**
+ * Remove run directories beyond the newest KEEP_RUNS or older than KEEP_DAYS,
+ * never `keep`. Only real directories count and are removed: a file or a
+ * symlink named `run-*` is not ours to delete. An entry another run removes
+ * mid-scan is skipped.
+ */
 async function pruneRunDirectories(
 	root: string,
 	keep: string,
 	nowMs: number,
 ): Promise<void> {
-	const runs = (await readdir(root))
-		.filter((name) => name.startsWith(RUN_DIR_PREFIX) && name !== keep)
+	const runs = (await readdir(root, { withFileTypes: true }))
+		.filter(
+			(entry) =>
+				entry.isDirectory() &&
+				entry.name.startsWith(RUN_DIR_PREFIX) &&
+				entry.name !== keep,
+		)
+		.map((entry) => entry.name)
 		.sort()
 		.reverse();
 	const maxAgeMs = KEEP_DAYS * 24 * 60 * 60 * 1000;
@@ -51,7 +62,15 @@ async function pruneRunDirectories(
 			const path = join(root, name);
 			// The current run takes one of the KEEP_RUNS places.
 			const tooMany = index >= KEEP_RUNS - 1;
-			const tooOld = nowMs - (await stat(path)).mtimeMs > maxAgeMs;
+			let tooOld = false;
+			try {
+				tooOld = nowMs - (await lstat(path)).mtimeMs > maxAgeMs;
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+					return;
+				}
+				throw error;
+			}
 			if (tooMany || tooOld) {
 				await rm(path, { force: true, recursive: true });
 			}
