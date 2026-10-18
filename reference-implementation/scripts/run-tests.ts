@@ -4,7 +4,7 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import { availableParallelism } from "node:os";
+import { availableParallelism, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 // biome-ignore lint/correctness/noUnresolvedImports: Biome cannot resolve this installed package export; Node and TypeScript resolve it.
@@ -108,6 +108,10 @@ const PER_FILE_HARD_TIMEOUT_MS = readPositiveTimeout(
 if (PER_FILE_HARD_TIMEOUT_MS < PER_FILE_IDLE_TIMEOUT_MS) {
   throw new Error("PDPP_TEST_FILE_HARD_TIMEOUT_MS must be greater than or equal to PDPP_TEST_FILE_TIMEOUT_MS");
 }
+// The raw output of a killed file is never printed. Locally it goes to a private
+// file in the run's scratch directory (test:scratch and test-sandbox set TMPDIR
+// to one they remove afterwards). On CI the log is public, so nothing is kept.
+const KILLED_FILE_RAW_TAIL_DIR = process.env.CI ? undefined : process.env.TMPDIR || tmpdir();
 if (!effectiveArgs.some((arg) => arg === "--test-reporter" || arg.startsWith("--test-reporter="))) {
   effectiveArgs.push(
     `--test-reporter=${fileURLToPath(new URL("./test-accounting/node-reporter.ts", import.meta.url))}`
@@ -419,6 +423,7 @@ async function runNodeTest(filePath: string, extraArgs: string[]): Promise<NodeT
         filePath,
         hardDeadlineMs: PER_FILE_HARD_TIMEOUT_MS,
         idleBudgetMs: PER_FILE_IDLE_TIMEOUT_MS,
+        rawTailDir: KILLED_FILE_RAW_TAIL_DIR,
         startedAt,
       }).then(async (outcome) => {
         // The file's slot is released only when nothing it started is alive,
@@ -564,8 +569,8 @@ const EMPTY_KILLED_SUMMARY: StructuredSummary = {
   skip_reasons: {},
   skipped: 0,
 };
-// A killed child's output is a bounded tail with no complete event stream, so
-// it contributes no assertion counts; its failure shows in failed_files and
+// A killed child's result holds no event stream, so it contributes no
+// assertion counts; its failure shows in failed_files and
 // the exit code.
 const summaries: StructuredSummary[] = results.map((result) =>
   result.killed ? EMPTY_KILLED_SUMMARY : structuredNodeSummary(result.output)

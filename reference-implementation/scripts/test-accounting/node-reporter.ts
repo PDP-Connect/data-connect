@@ -1,12 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import {
-  capDiagnosticLine,
-  failCloseCredentialContinuations,
-  MAX_DIAGNOSTIC_LINE_LENGTH,
-} from "./diagnostic-lines.ts";
-import { accountingDiagnosticLine, accountingEventLine } from "./receipt.ts";
+import { accountingEventLine } from "./receipt.ts";
 
 interface ReporterEventData {
   details?: { error?: ReporterError; name?: string; skip?: boolean | string; type?: string };
@@ -26,6 +21,7 @@ interface ReporterEvent {
 }
 
 const MAX_FAILURE_FIELD_LENGTH = 2000;
+const MAX_STARTED_TEST_NAME_LENGTH = 200;
 const MAX_FAILURE_DIAGNOSTIC_LENGTH = 4000;
 const MAX_DIAGNOSTIC_BUFFER_LENGTH = 16_000;
 // Hard bound on raw input handed to the structured-header scanner, applied
@@ -109,99 +105,6 @@ class DiagnosticBuffer {
     this.#overflowed = false;
     this.#value = "";
     return value;
-  }
-}
-
-// Output waiting to be flushed as diagnostic lines, kept by whole line. A
-// flush on a pause takes only complete lines, never the partial line a test is
-// still writing, and holds back a credential region the next line could extend
-// (see failCloseCredentialContinuations). Each line is capped on arrival.
-class DiagnosticLineBuffer {
-  #lines: string[] = [];
-  #overflowed = false;
-  #partial = "";
-  #partialCut = false;
-  #size = 0;
-
-  append(chunk: string) {
-    if (this.#overflowed) {
-      return;
-    }
-    const pieces = chunk.split("\n");
-    for (const [index, piece] of pieces.entries()) {
-      this.#extendPartial(piece);
-      if (index < pieces.length - 1) {
-        this.#lines.push(this.#finishPartial());
-      }
-    }
-    this.#size += chunk.length;
-    if (this.#size > MAX_DIAGNOSTIC_BUFFER_LENGTH) {
-      this.#overflowed = true;
-      this.#lines = [];
-      this.#partial = "";
-      this.#partialCut = false;
-    }
-  }
-
-  #extendPartial(piece: string) {
-    if (this.#partialCut) {
-      return;
-    }
-    const joined = this.#partial + piece.replace(/\r$/, "");
-    if (joined.length > MAX_DIAGNOSTIC_LINE_LENGTH) {
-      this.#partial = joined.slice(0, MAX_DIAGNOSTIC_LINE_LENGTH + 1);
-      this.#partialCut = true;
-    } else {
-      this.#partial = joined;
-    }
-  }
-
-  #finishPartial(): string {
-    const line = capDiagnosticLine(this.#partial);
-    this.#partial = "";
-    this.#partialCut = false;
-    return line;
-  }
-
-  /** Complete lines only, minus a credential region still open at the end. */
-  takeComplete(): string[] {
-    if (this.#overflowed) {
-      return this.#reset();
-    }
-    const closed = failCloseCredentialContinuations(this.#lines);
-    if (closed.openFrom === undefined) {
-      this.#lines = [];
-      this.#size = this.#partial.length;
-      return closed.lines;
-    }
-    const held = this.#lines.slice(closed.openFrom);
-    const released = failCloseCredentialContinuations(this.#lines.slice(0, closed.openFrom)).lines;
-    this.#lines = held;
-    this.#size = held.reduce((total, line) => total + line.length + 1, this.#partial.length);
-    return released;
-  }
-
-  /** Everything, including a partial last line: the test is ending. */
-  takeAll(): string[] {
-    if (this.#overflowed) {
-      return this.#reset();
-    }
-    if (this.#partial !== "" || this.#partialCut) {
-      this.#lines.push(this.#finishPartial());
-    }
-    const lines = failCloseCredentialContinuations(this.#lines).lines;
-    this.#lines = [];
-    this.#size = 0;
-    return lines;
-  }
-
-  #reset(): string[] {
-    this.#overflowed = false;
-    this.#lines = [];
-    this.#partial = "";
-    this.#partialCut = false;
-    this.#size = 0;
-    return ["[REDACTED diagnostic overflow]"];
   }
 }
 
@@ -665,22 +568,6 @@ export function redactStructuredHeadersWithBudget(input: string, totalOperations
   return scanAndRedactStructuredHeaders(input, new ScanBudget(totalOperations));
 }
 
-// Redacts credentials from diagnostic text of any length, with no size cap
-// and no truncation. Callers that keep only a tail must redact the whole text
-// first: a credential that straddles the cut would otherwise lose its label
-// and survive. Run-level output uses this directly; failure fields add the
-// oversize and tail bounds in boundedRedactedTail.
-export function redactDiagnosticText(value: string): string {
-  return redactStructuredHeaders(value)
-    .replace(QUOTED_SENSITIVE_VALUE_PATTERN, '$1"[REDACTED]"')
-    .replace(AUTHORIZATION_PATTERN, "Authorization: [REDACTED]")
-    .replace(COOKIE_PATTERN, "Cookie: [REDACTED]")
-    .replace(GITHUB_PAT_PATTERN, "[REDACTED]")
-    .replace(SENSITIVE_URL_USERINFO_PATTERN, "$1[REDACTED]@")
-    .replace(UNQUOTED_SENSITIVE_VALUE_PATTERN, "$1$2[REDACTED]")
-    .replace(SENSITIVE_QUERY_PARAMETER_PATTERN, "$1[REDACTED]");
-}
-
 function boundedRedactedTail(value: unknown, maximumLength: number): string | undefined {
   if (typeof value !== "string" || !value.trim()) {
     return;
@@ -688,7 +575,14 @@ function boundedRedactedTail(value: unknown, maximumLength: number): string | un
   if (value.length > MAX_RAW_SCAN_LENGTH) {
     return OVERSIZED_INPUT_MARKER;
   }
-  const redacted = redactDiagnosticText(value);
+  const redacted = redactStructuredHeaders(value)
+    .replace(QUOTED_SENSITIVE_VALUE_PATTERN, '$1"[REDACTED]"')
+    .replace(AUTHORIZATION_PATTERN, "Authorization: [REDACTED]")
+    .replace(COOKIE_PATTERN, "Cookie: [REDACTED]")
+    .replace(GITHUB_PAT_PATTERN, "[REDACTED]")
+    .replace(SENSITIVE_URL_USERINFO_PATTERN, "$1[REDACTED]@")
+    .replace(UNQUOTED_SENSITIVE_VALUE_PATTERN, "$1$2[REDACTED]")
+    .replace(SENSITIVE_QUERY_PARAMETER_PATTERN, "$1[REDACTED]");
   return redacted.length > maximumLength ? redacted.slice(-maximumLength) : redacted;
 }
 
@@ -712,72 +606,30 @@ function failureDetails(error: ReporterError | undefined, diagnosticTail: string
 // Node's reporter stream is the runner's structured API. Terminal events are
 // accounting evidence; all lifecycle events are presentation noise. A failure
 // retains bounded, redacted runner diagnostics so a failing CI job explains
-// itself without changing terminal pass/fail/skip accounting.
-//
-// A hung test never reaches a terminal event, so its output would be lost with
-// the process the runner kills. Test stdout, stderr and diagnostics are
-// therefore also flushed as bounded, redacted diagnostic lines whenever the
-// stream goes quiet. The runner shows them for a killed file and drops them
-// otherwise.
-const DIAGNOSTIC_FLUSH_IDLE_MS = 250;
-const MAX_EMITTED_DIAGNOSTIC_LENGTH = 64_000;
-const IDLE = Symbol("idle");
-
-function waitForIdle(): { cancel: () => void; elapsed: Promise<typeof IDLE> } {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const elapsed = new Promise<typeof IDLE>((resolve) => {
-    timer = setTimeout(() => resolve(IDLE), DIAGNOSTIC_FLUSH_IDLE_MS);
-    // Never keep the process alive just to flush diagnostics.
-    timer.unref();
-  });
-  return { cancel: () => clearTimeout(timer), elapsed };
-}
-
+// itself without changing terminal pass/fail/skip accounting. A start event
+// carries only the test name.
 export default async function* accountingReporter(source: AsyncIterable<ReporterEvent>): AsyncGenerator<string> {
   const diagnostic = new DiagnosticBuffer();
-  // Output not yet flushed as a diagnostic line, kept by whole line.
-  const unflushed = new DiagnosticLineBuffer();
-  let emittedLength = 0;
-  const flush = (final: boolean): string | undefined => {
-    const lines = final ? unflushed.takeAll() : unflushed.takeComplete();
-    const text = boundedRedactedTail(lines.join("\n"), MAX_FAILURE_DIAGNOSTIC_LENGTH);
-    if (text === undefined || emittedLength >= MAX_EMITTED_DIAGNOSTIC_LENGTH) {
-      return;
-    }
-    emittedLength += text.length;
-    return `${accountingDiagnosticLine(text)}\n`;
-  };
-  const events = source[Symbol.asyncIterator]();
-  let pending = events.next();
-  for (;;) {
-    const idle = waitForIdle();
-    const step = await Promise.race([pending, idle.elapsed]);
-    idle.cancel();
-    if (step === IDLE) {
-      const line = flush(false);
-      if (line !== undefined) {
-        yield line;
+  for await (const event of source) {
+    const data = event.data ?? {};
+    const details = data.details ?? {};
+    if (event.type === "test:stderr" || event.type === "test:diagnostic") {
+      if (typeof data.message === "string" && data.message.trim()) {
+        // Keep chunks until terminal failure so a credential label and value
+        // cannot be separated by Node's chunking or a tail boundary. Once the
+        // bounded input buffer overflows, emit only a redacted overflow marker.
+        const { message } = data;
+        diagnostic.append(message);
       }
       continue;
     }
-    if (step.done) {
-      return;
-    }
-    pending = events.next();
-    const event = step.value;
-    const data = event.data ?? {};
-    const details = data.details ?? {};
-    if (event.type === "test:stdout" || event.type === "test:stderr" || event.type === "test:diagnostic") {
-      if (typeof data.message === "string" && data.message.length > 0) {
-        // Keep whole lines until a pause or a terminal event, so a credential
-        // label and value cannot be separated by Node's chunking or a flush.
-        // Blank lines count: they end a credential region. Once the bounded
-        // input buffer overflows, emit only a redacted overflow marker.
-        const { message } = data;
-        unflushed.append(message);
-        if (event.type !== "test:stdout") {
-          diagnostic.append(message);
-        }
+    if (event.type === "test:dequeue") {
+      // A test that hangs never reaches a terminal event; the runner names the
+      // last one that began running when it kills the file. Node's own
+      // test:start event is no use here: it is reported only once a test ends.
+      const startedName = data.name ?? details.name;
+      if (typeof startedName === "string") {
+        yield `${accountingEventLine({ type: "test:running", details: { name: startedName.slice(0, MAX_STARTED_TEST_NAME_LENGTH) } })}\n`;
       }
       continue;
     }
@@ -790,10 +642,6 @@ export default async function* accountingReporter(source: AsyncIterable<Reporter
       skip: data.skip ?? details.skip,
       ...(event.type === "test:fail" ? { failure: failureDetails(details.error, diagnostic.take()) } : {}),
     };
-    const line = flush(true);
-    if (line !== undefined) {
-      yield line;
-    }
     yield `${accountingEventLine({ type: event.type, details: eventDetails })}\n`;
     diagnostic.take();
   }

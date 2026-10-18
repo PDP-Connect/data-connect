@@ -397,7 +397,8 @@ async function reporterOutput(events: ReporterEvent[]): Promise<string> {
 }
 
 function failureFromOutput(output: string): Record<string, string> {
-  const line = output.split("\n").find((value) => value.startsWith("PDPP_TEST_ACCOUNTING_EVENT "));
+  // The reporter may announce a running test first; the failure is the terminal event.
+  const line = output.split("\n").find((value) => value.startsWith('PDPP_TEST_ACCOUNTING_EVENT {"type":"test:fail"'));
   assert.ok(line, "reporter must emit a terminal failure event");
   const event = JSON.parse(line.slice("PDPP_TEST_ACCOUNTING_EVENT ".length)) as {
     details?: { failure?: Record<string, string> };

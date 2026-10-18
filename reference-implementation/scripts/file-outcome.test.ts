@@ -3,9 +3,11 @@
 
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import {
-  boundedOutputTail,
   countFileOutcomes,
   drainFileQueue,
   fileResultFromClose,
@@ -26,19 +28,64 @@ function result(filePath: string, exitCode: number, killed?: boolean): NodeTestR
   return { durationMs: 1, exitCode, filePath, ...(killed ? { killed } : {}), output: `\n==> ${filePath}\n` };
 }
 
-test("a child killed for idleness is a failed result that keeps its output", async () => {
-  const outcome = await superviseFileChild({
-    child: spawnNode(HUNG_CHILD),
-    filePath: "test/hung.test.ts",
+/** A scratch directory standing in for the run's TMPDIR; removed after `body`. */
+async function withScratch<T>(body: (dir: string) => Promise<T>): Promise<T> {
+  const dir = await mkdtemp(join(tmpdir(), "file-outcome-test-"));
+  try {
+    return await body(dir);
+  } finally {
+    await rm(dir, { force: true, recursive: true });
+  }
+}
+
+/** The one raw-tail file a killed result points at, with its modes. */
+async function readRawTail(dir: string, output: string) {
+  const path = /raw output tail: (.+)\n/.exec(output)?.[1];
+  if (path === undefined || !path.startsWith(dir)) {
+    assert.fail(`the result names a raw tail file inside the scratch dir\n${output}`);
+  }
+  return {
+    dirMode: (await stat(join(path, ".."))).mode & 0o777,
+    fileMode: (await stat(path)).mode & 0o777,
+    text: await readFile(path, "utf8"),
+  };
+}
+
+function killedResult(output: string, rawTailDir?: string) {
+  return fileResultFromClose({
+    code: null,
+    durationMs: 1234,
+    filePath: "test/killed.test.ts",
     hardDeadlineMs: 20_000,
     idleBudgetMs: 400,
+    output,
+    rawTailDir,
+    signal: "SIGKILL",
+    timeoutReason: "idle",
   });
-  assert.notEqual(outcome.exitCode, 0);
-  assert.equal(outcome.killed, true);
-  assert.match(outcome.output, /==> test\/hung\.test\.ts/);
-  assert.match(outcome.output, /before-hang/);
-  assert.match(outcome.output, /stderr-before-hang/);
-  assert.match(outcome.output, /TIMED OUT \(idle\) after 400ms/);
+}
+
+test("a child killed for idleness is a failed result with structured fields and no raw output", async () => {
+  await withScratch(async (dir) => {
+    const outcome = await superviseFileChild({
+      child: spawnNode(HUNG_CHILD),
+      filePath: "test/hung.test.ts",
+      hardDeadlineMs: 20_000,
+      idleBudgetMs: 400,
+      rawTailDir: dir,
+    });
+    assert.notEqual(outcome.exitCode, 0);
+    assert.equal(outcome.killed, true);
+    assert.match(outcome.output, /==> test\/hung\.test\.ts/);
+    assert.match(outcome.output, /TIMED OUT \(idle\) after 400ms/);
+    assert.match(outcome.output, /elapsed: \d+ms/);
+    assert.match(outcome.output, /signal: \w+/);
+    assert.match(outcome.output, /last test started: none/);
+    assert.doesNotMatch(outcome.output, /before-hang/);
+    const raw = await readRawTail(dir, outcome.output);
+    assert.match(raw.text, /before-hang/);
+    assert.match(raw.text, /stderr-before-hang/);
+  });
 });
 
 test("a child killed at the hard deadline is a failed result labelled hard", async () => {
@@ -52,7 +99,7 @@ test("a child killed at the hard deadline is a failed result labelled hard", asy
   });
   assert.notEqual(outcome.exitCode, 0);
   assert.equal(outcome.killed, true);
-  assert.match(outcome.output, /tick/);
+  assert.doesNotMatch(outcome.output, /tick/);
   assert.match(outcome.output, /TIMED OUT \((hard|idle)\) after 700ms/);
 });
 
@@ -66,6 +113,8 @@ test("a child that dies on a signal is a failed result, not a rejection", async 
   assert.notEqual(outcome.exitCode, 0);
   assert.equal(outcome.killed, true);
   assert.match(outcome.output, /KILLED by signal SIGTERM/);
+  assert.match(outcome.output, /signal: SIGTERM/);
+  assert.doesNotMatch(outcome.output, /about-to-die/);
 });
 
 test("a child that exits on its own keeps its exit code and full output", async () => {
@@ -80,118 +129,77 @@ test("a child that exits on its own keeps its exit code and full output", async 
   assert.equal(outcome.output, "\n==> test/exits.test.ts\ndone\n");
 });
 
-test("a killed child's output never exposes a credential, even with isolation off", async () => {
-  // Isolation off puts the test's own stderr straight into the child output.
-  const outcome = await superviseFileChild({
-    child: spawnNode(
-      "process.stderr.write('request failed\\nAuthorization: Bearer SYNTHETIC-BEARER-SECRET\\nCookie: sid=SYNTHETIC-COOKIE-SECRET\\n'); process.stderr.write('{\"Set-Cookie\":\"sid=SYNTHETIC-SET-COOKIE-SECRET\"}\\n'); setInterval(() => {}, 1000);"
-    ),
-    filePath: "test/credential.test.ts",
-    hardDeadlineMs: 20_000,
-    idleBudgetMs: 400,
-    killGraceMs: 200,
-  });
-  assert.equal(outcome.killed, true);
-  assert.match(outcome.output, /request failed/);
-  assert.match(outcome.output, /Authorization: \[REDACTED\]/);
-  assert.doesNotMatch(outcome.output, /SYNTHETIC-[A-Z-]*SECRET/);
+test("the result names the last test the reporter announced as started", async () => {
+  const events = [
+    '{"type":"test:running","details":{"name":"first"}}',
+    '{"type":"test:pass","details":{"type":"test","name":"first"}}',
+    '{"type":"test:running","details":{"name":"the one that hung"}}',
+    '{"type":"test:running","details":{"name":"cut off by the ki',
+  ]
+    .map((json) => `PDPP_TEST_ACCOUNTING_EVENT ${json}\n`)
+    .join("");
+  const outcome = await killedResult(events);
+  assert.match(outcome.output, /last test started: "the one that hung"\n/);
 });
 
-test("a credential line is redacted wherever the tail cut falls", () => {
-  const filler = `${"x".repeat(99)}\n`;
-  for (let linesFromEnd = 560; linesFromEnd <= 760; linesFromEnd += 1) {
-    const output = `${filler.repeat(2000)}Authorization: Bearer SYNTHETIC-TAIL-SECRET\n${filler.repeat(linesFromEnd)}`;
-    const outcome = fileResultFromClose({
-      code: null,
-      durationMs: 1,
-      filePath: "test/cut.test.ts",
-      hardDeadlineMs: 20_000,
-      idleBudgetMs: 400,
-      output,
-      signal: "SIGKILL",
-      timeoutReason: "idle",
+// Each shape hid a secret from a redactor in a past review round: a label whose
+// value starts after a pause or a 2 KB line cap, a PEM block that has no label,
+// and a credential region that began more than 16 lines before the cut. No
+// redactor is involved now, so none of them may reach a result.
+const LEAK_SHAPES: [name: string, output: string, secret: string][] = [
+  ["a label, 3,000 spaces, then the value on the next line", `{"password":${" ".repeat(3000)}\n"SYNTHETIC-PAD-SECRET"\n}\n\nSAFE\n`, "SYNTHETIC-PAD-SECRET"],
+  ["a value past the line cap", `{"password": "${"A".repeat(3000)}\nSYNTHETIC-CAP-SECRET"}\n\nSAFE\n`, "SYNTHETIC-CAP-SECRET"],
+  ["a PEM block", "-----BEGIN PRIVATE KEY-----\nSYNTHETIC-PEM-SECRET\n-----END PRIVATE KEY-----\n\nSAFE\n", "SYNTHETIC-PEM-SECRET"],
+  [
+    "a credential region far back in the output",
+    `Authorization: Bearer\n${`${"A".repeat(2040)}\n`.repeat(60)}SYNTHETIC-FARBACK-SECRET\n\nSAFE\n`,
+    "SYNTHETIC-FARBACK-SECRET",
+  ],
+  ["a bearer header and a cookie", "Authorization: Bearer SYNTHETIC-BEARER-SECRET\nCookie: sid=SYNTHETIC-COOKIE-SECRET\n", "SYNTHETIC-BEARER-SECRET"],
+];
+
+for (const [name, output, secret] of LEAK_SHAPES) {
+  test(`${name}: the secret is in no result, and is in the private file locally`, async () => {
+    const withoutDir = await killedResult(output);
+    assert.doesNotMatch(withoutDir.output, new RegExp(secret));
+    assert.doesNotMatch(withoutDir.output, /raw output tail/, "no directory, no path is mentioned");
+    await withScratch(async (dir) => {
+      const withDir = await killedResult(output, dir);
+      assert.doesNotMatch(withDir.output, new RegExp(secret));
+      assert.doesNotMatch(withDir.output, /SAFE|AAAAAAAA/, "no raw text at all, only the path");
+      const raw = await readRawTail(dir, withDir.output);
+      assert.equal(raw.fileMode, 0o600);
+      assert.equal(raw.dirMode, 0o700);
+      assert.match(raw.text, new RegExp(secret));
     });
-    assert.doesNotMatch(outcome.output, /SYNTHETIC-TAIL-SECRET|Bearer/, `${linesFromEnd} lines from the end`);
-  }
-});
-
-function killedOutput(output: string): string {
-  return fileResultFromClose({
-    code: null,
-    durationMs: 1,
-    filePath: "test/killed.test.ts",
-    hardDeadlineMs: 20_000,
-    idleBudgetMs: 400,
-    output,
-    signal: "SIGKILL",
-    timeoutReason: "idle",
-  }).output;
+  });
 }
 
-test("a line over 2 KB is truncated and marked", () => {
-  const output = killedOutput(`before\n${"x".repeat(5000)}\nafter\n`);
-  assert.match(output, /x{2048}…\[line truncated\]/);
-  assert.doesNotMatch(output, /x{2049}/);
-  assert.match(output, /before/);
-  assert.match(output, /after/);
-});
-
-test("a label at the end of the tail fails closed", () => {
-  const output = killedOutput("ran\nAuthorization: Bearer\n");
-  assert.match(output, /Authorization/);
-  assert.match(output, /\[REDACTED: possible credential continuation\]/);
-  const unterminated = killedOutput("ran\n{\"Authorization\":");
-  // The structured-header scanner may replace the whole tail with its own marker.
-  assert.match(unterminated, /\[REDACTED: possible credential continuation\]|\[REDACTED malformed sensitive header\]/);
-});
-
-test("a credential on the line after its label is dropped up to the next blank line", () => {
-  const output = killedOutput(
-    "ran\nAuthorization: Bearer\nSYNTHETIC-NEXTLINE-SECRET\nSYNTHETIC-SECOND-SECRET\n\nafter-blank\n"
-  );
-  assert.match(output, /ran/);
-  assert.match(output, /\[REDACTED: possible credential continuation\]/);
-  assert.match(output, /after-blank/);
-  assert.doesNotMatch(output, /SYNTHETIC-[A-Z]+-SECRET/);
-  const folded = killedOutput("Cookie: a=1;\n  b=SYNTHETIC-FOLDED-SECRET\nnext\n\nafter-blank\n");
-  assert.doesNotMatch(folded, /SYNTHETIC-FOLDED-SECRET/);
-  assert.match(folded, /after-blank/);
-});
-
-test("a credential is redacted across what used to be a redaction block boundary", () => {
-  // The old runner redacted blocks of up to 20,000 characters on their own. A
-  // quoted value that runs over two lines needs both lines in one pass; vary the
-  // padding so the old block edge falls between them for some length.
-  const filler = `${"x".repeat(99)}\n`;
-  for (let padding = 0; padding <= 100; padding += 1) {
-    const output = `"password": "SYNTHETIC-BOUNDARY\n-SECRET"\n${"x".repeat(padding)}\n${filler.repeat(199)}`;
-    assert.doesNotMatch(killedOutput(output), /SYNTHETIC-BOUNDARY|-SECRET/, `${padding} padding characters`);
-  }
-});
-
-test("a label just before the tail cut still drops its continuation", () => {
-  const filler = `${"x".repeat(99)}\n`;
-  const secretLine = "SYNTHETIC-CUT-SECRET\n";
-  const kept = Math.floor(KILLED_OUTPUT_TAIL_BYTES / 100);
-  for (let fillerLines = kept - 8; fillerLines <= kept + 8; fillerLines += 1) {
-    const output = `${filler.repeat(50)}Authorization: Bearer\n${secretLine}${filler.repeat(fillerLines)}`;
-    assert.doesNotMatch(killedOutput(output), /SYNTHETIC-CUT-SECRET/, `${fillerLines} filler lines`);
-  }
-});
-
-test("a single unbroken line far over the tail size is cut and its credential never shown", async () => {
-  const outcome = await superviseFileChild({
-    child: spawnNode(
-      `process.stdout.write('Authorization: Bearer ' + 'A'.repeat(${KILLED_OUTPUT_TAIL_BYTES + 4096}) + 'SYNTHETIC-TAIL-SECRET\\nTAIL-MARKER\\n'); setInterval(() => {}, 1000);`
-    ),
-    filePath: "test/straddle.test.ts",
-    hardDeadlineMs: 20_000,
-    idleBudgetMs: 800,
-    killGraceMs: 200,
+test("with no directory (CI) a killed file writes nothing and names no path", async () => {
+  await withScratch(async (dir) => {
+    const outcome = await killedResult("Authorization: Bearer SYNTHETIC-CI-SECRET\n");
+    assert.equal(outcome.killed, true);
+    assert.doesNotMatch(outcome.output, /SYNTHETIC-CI-SECRET|raw output tail/);
+    assert.deepEqual(await readdir(dir), []);
   });
+});
+
+test("a raw tail that cannot be written is reported as not saved and the file is still killed", async () => {
+  const outcome = await killedResult("anything\n", join(tmpdir(), "file-outcome-test-no-such-dir", "nested"));
   assert.equal(outcome.killed, true);
-  assert.match(outcome.output, /TAIL-MARKER/);
-  assert.doesNotMatch(outcome.output, /SYNTHETIC-TAIL-SECRET|AAAAAAAAAA/);
+  assert.match(outcome.output, /raw output tail: not saved\n/);
+});
+
+test("the private file holds the newest 64 KB of a flood, from a character boundary", async () => {
+  await withScratch(async (dir) => {
+    const flood = `HEAD-MARKER\n${"é".repeat(KILLED_OUTPUT_TAIL_BYTES)}\nTAIL-MARKER\n`;
+    const outcome = await killedResult(flood, dir);
+    const raw = await readRawTail(dir, outcome.output);
+    assert.match(raw.text, /TAIL-MARKER/);
+    assert.doesNotMatch(raw.text, /HEAD-MARKER|�/);
+    assert.ok(Buffer.byteLength(raw.text) <= KILLED_OUTPUT_TAIL_BYTES);
+    assert.ok(Buffer.byteLength(raw.text) > KILLED_OUTPUT_TAIL_BYTES - 4);
+  });
 });
 
 test("a timeout kills the whole process group before the result resolves", async () => {
@@ -205,14 +213,18 @@ test("a timeout kills the whole process group before the result resolves", async
     "process.stdout.write('GRANDCHILD_PID=' + grandchild.pid + '\\n');",
     "setInterval(() => {}, 1000);",
   ].join("\n");
+  const dir = await mkdtemp(join(tmpdir(), "file-outcome-test-"));
   const outcome = await superviseFileChild({
     child: spawnNode(supervisor),
     filePath: "test/group.test.ts",
     hardDeadlineMs: 20_000,
     idleBudgetMs: 600,
     killGraceMs: 200,
+    rawTailDir: dir,
   });
-  const pid = Number(/GRANDCHILD_PID=(\d+)/.exec(outcome.output)?.[1]);
+  // The grandchild's pid is raw output, so it is read from the private file.
+  const pid = Number(/GRANDCHILD_PID=(\d+)/.exec((await readRawTail(dir, outcome.output)).text)?.[1]);
+  await rm(dir, { force: true, recursive: true });
   assert.ok(Number.isInteger(pid) && pid > 0, `the grandchild reported its pid\n${outcome.output}`);
   try {
     assert.throws(() => process.kill(pid, 0), { code: "ESRCH" }, "the grandchild must be gone when the result resolves");
@@ -232,26 +244,6 @@ test("a spawn error is a runner error and rejects", async () => {
     superviseFileChild({ child, filePath: "test/never.test.ts", hardDeadlineMs: 20_000, idleBudgetMs: 20_000 }),
     /ENOENT/
   );
-});
-
-test("a killed child's output is bounded to its tail and labelled", async () => {
-  const flood = `process.stdout.write('HEAD-MARKER\\n'); process.stdout.write(('x'.repeat(99) + '\\n').repeat(${Math.ceil((KILLED_OUTPUT_TAIL_BYTES * 3) / 100)}) + 'TAIL-MARKER\\n'); setInterval(() => {}, 1000);`;
-  const outcome = await superviseFileChild({
-    child: spawnNode(flood),
-    filePath: "test/flood.test.ts",
-    hardDeadlineMs: 20_000,
-    idleBudgetMs: 600,
-  });
-  assert.match(outcome.output, /output truncated: last \d+ of \d+ bytes/);
-  assert.match(outcome.output, /TAIL-MARKER/);
-  assert.doesNotMatch(outcome.output, /HEAD-MARKER/);
-  assert.ok(outcome.output.length < KILLED_OUTPUT_TAIL_BYTES + 1024);
-});
-
-test("tail truncation never splits a multi-byte character", () => {
-  const tail = boundedOutputTail("é".repeat(10), 5);
-  assert.doesNotMatch(tail, /�/);
-  assert.equal(boundedOutputTail("short", 100), "short");
 });
 
 test("completed_files counts every executed file even when one failed", () => {

@@ -3,7 +3,6 @@
 
 const RESULT_PREFIX = "PDPP_TEST_ACCOUNTING_RESULT ";
 const EVENT_PREFIX = "PDPP_TEST_ACCOUNTING_EVENT ";
-export const DIAGNOSTIC_PREFIX = "PDPP_TEST_ACCOUNTING_DIAGNOSTIC ";
 
 function fail(message: string): never {
   throw new Error(`test accounting result: ${message}`);
@@ -23,10 +22,6 @@ export function accountingResultLine(result: unknown): string {
 }
 export function accountingEventLine(event: unknown): string {
   return `${EVENT_PREFIX}${JSON.stringify(event)}`;
-}
-/** One bounded, already-redacted chunk of test stdout/stderr, kept for a file the runner kills. */
-export function accountingDiagnosticLine(text: string): string {
-  return `${DIAGNOSTIC_PREFIX}${JSON.stringify(text)}`;
 }
 
 // Node's boolean `skip: !X` tests carry no reason on the wire, only their name.
@@ -431,6 +426,26 @@ function resolveEmittedSkipReason(
   }
   const mapping = resolveNamedSkipMapping(name);
   return mapping ? { reason: mapping.reason, consumedIdentity: mapping.identity } : { reason: undefined };
+}
+
+/** Name of the last test the reporter announced as started, or undefined when it announced none. */
+export function lastStartedTestName(output: string): string | undefined {
+  const lines = output.split("\n");
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index] ?? "";
+    if (!line.startsWith(EVENT_PREFIX)) {
+      continue;
+    }
+    try {
+      const event = JSON.parse(line.slice(EVENT_PREFIX.length));
+      if (event?.type === "test:running" && typeof event.details?.name === "string") {
+        return event.details.name;
+      }
+    } catch {
+      // A line cut off by the kill: read the one before it.
+    }
+  }
+  return undefined;
 }
 
 export function structuredNodeSummary(output: string): StructuredSummary {

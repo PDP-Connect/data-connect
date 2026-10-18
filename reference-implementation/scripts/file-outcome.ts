@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { ChildProcess } from "node:child_process";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { basename, join } from "node:path";
 import { collectChildProcessOutput } from "./child-process-output.ts";
 import { PROCESS_GROUP_KILL_GRACE_MS, terminateProcessGroup } from "./file-process-group.ts";
 import {
@@ -10,15 +12,13 @@ import {
   type FileProcessWatchdogOptions,
   startFileProcessWatchdog,
 } from "./file-process-watchdog.ts";
-import { capDiagnosticLine, failCloseCredentialContinuations } from "./test-accounting/diagnostic-lines.ts";
-import { redactDiagnosticText } from "./test-accounting/node-reporter.ts";
-import { DIAGNOSTIC_PREFIX } from "./test-accounting/receipt.ts";
+import { lastStartedTestName } from "./test-accounting/receipt.ts";
 
 /**
  * The outcome of one test file's child process.
  *
  * A child the watchdog kills, or that dies on a signal, is a failed file with
- * its diagnostics, not a runner failure. Only a spawn error (the child never
+ * its structured fields, not a runner failure. Only a spawn error (the child never
  * ran) is a runner failure and rejects.
  */
 export interface NodeTestResult {
@@ -30,55 +30,35 @@ export interface NodeTestResult {
   output: string;
 }
 
-/** Output kept for a killed child: enough to show where it stopped. */
+/** The raw output of a killed child is kept to its newest this many bytes, in a private file. */
 export const KILLED_OUTPUT_TAIL_BYTES = 64 * 1024;
 
-/** The last `maxBytes` of `output`, cut on a character boundary and labelled when shortened. */
-export function boundedOutputTail(
-  output: string,
-  maxBytes = KILLED_OUTPUT_TAIL_BYTES,
-  totalBytes = Buffer.byteLength(output)
-): string {
+/** The newest `maxBytes` of `output`, starting on a character boundary. */
+function newestBytes(output: string, maxBytes: number): Buffer {
   const bytes = Buffer.from(output);
-  if (bytes.length <= maxBytes && totalBytes <= bytes.length) {
-    return output;
-  }
   let start = Math.max(0, bytes.length - maxBytes);
   // Skip UTF-8 continuation bytes so the tail does not begin mid-character.
   while (start < bytes.length && ((bytes.at(start) ?? 0) & 0xc0) === 0x80) {
     start += 1;
   }
-  return `[output truncated: last ${bytes.length - start} of ${totalBytes} bytes]\n${bytes.subarray(start).toString()}`;
+  return bytes.subarray(start);
 }
 
-// Lines read before the cut for a credential label whose continuation starts after it.
-const CUT_CONTEXT_LINES = 16;
-
 /**
- * The newest lines of `output` that fit in `maxBytes`, each capped in length,
- * redacted in one pass so a credential keeps its context across lines.
- * Truncating first bounds the redactor's cost: capped lines bound its
- * quadratic worst case, and it never reads the dropped head. The few lines
- * before the cut go through the credential rules too, so a label just before
- * the cut still drops its continuation. Returns the redacted tail and whether
- * earlier lines were dropped.
+ * Write the raw output tail of a killed file where only its owner can read it:
+ * a fresh directory (mode 0700) holding a file (mode 0600). Returns the path,
+ * or undefined when it could not be written; a failed write must not turn a
+ * killed file into a runner error.
  */
-function redactedOutputTail(output: string, maxBytes: number): { dropped: boolean; text: string } {
-  const lines = output.split("\n").map((line) => capDiagnosticLine(line.replace(/\r$/, "")));
-  let keptBytes = 0;
-  let start = lines.length;
-  while (start > 0) {
-    const bytes = Buffer.byteLength(lines[start - 1] ?? "") + 1;
-    if (keptBytes + bytes > maxBytes) {
-      break;
-    }
-    keptBytes += bytes;
-    start -= 1;
+async function writeRawTail(dir: string, filePath: string, output: string): Promise<string | undefined> {
+  try {
+    const own = await mkdtemp(join(dir, "pdpp-killed-file-"));
+    const path = join(own, `${basename(filePath).replace(/[^\w.-]/g, "_")}.log`);
+    await writeFile(path, newestBytes(output, KILLED_OUTPUT_TAIL_BYTES), { flag: "wx", mode: 0o600 });
+    return path;
+  } catch {
+    return undefined;
   }
-  const dropped = start > 0;
-  const context = Math.min(start, CUT_CONTEXT_LINES);
-  const closed = failCloseCredentialContinuations(lines.slice(start - context), context).lines;
-  return { dropped, text: redactDiagnosticText(closed.join("\n")) };
 }
 
 interface FileCloseInput {
@@ -88,6 +68,11 @@ interface FileCloseInput {
   hardDeadlineMs: number;
   idleBudgetMs: number;
   output: string;
+  /**
+   * Directory for the raw output tail of a killed file. Omit it where the log is
+   * public (CI): the tail is then neither written nor mentioned.
+   */
+  rawTailDir?: string | undefined;
   signal: NodeJS.Signals | null;
   timeoutReason: FileProcessTimeoutReason | undefined;
 }
@@ -106,58 +91,39 @@ function killedLine(input: FileCloseInput): string | undefined {
 }
 
 /**
- * Reporter diagnostic lines carry the test's own stdout/stderr, which the
- * accounting reporter otherwise swallows. Show them for a killed file, where no
- * terminal event explains the hang; drop them otherwise.
+ * Turn a closed child into a result: a timeout or signal death becomes a failed
+ * file. A killed file's result holds structured fields only: how it ended, how
+ * long it ran, and the last test the reporter announced. Its raw output is
+ * untrusted text of unknown content, so it goes to a private file, never into
+ * the result or the runner's logs.
  */
-function withDiagnostics(output: string, keep: boolean): string {
-  if (!output.includes(DIAGNOSTIC_PREFIX)) {
-    return output;
-  }
-  return output
-    .split("\n")
-    .flatMap((line) => {
-      if (!line.startsWith(DIAGNOSTIC_PREFIX)) {
-        return [line];
-      }
-      if (!keep) {
-        return [];
-      }
-      try {
-        return [String(JSON.parse(line.slice(DIAGNOSTIC_PREFIX.length)))];
-      } catch {
-        // A line cut off by the kill: keep the raw text for the redaction below.
-        return [line];
-      }
-    })
-    .join("\n");
-}
-
-/** Turn a closed child into a result: a timeout or signal death becomes a failed file. */
-export function fileResultFromClose(input: FileCloseInput): NodeTestResult {
+export async function fileResultFromClose(input: FileCloseInput): Promise<NodeTestResult> {
   const line = killedLine(input);
   if (line === undefined) {
     return {
       durationMs: input.durationMs,
       exitCode: input.code ?? 1,
       filePath: input.filePath,
-      output: `\n==> ${input.filePath}\n${withDiagnostics(input.output, false)}`,
+      output: `\n==> ${input.filePath}\n${input.output}`,
     };
   }
-  // Cut to the newest lines first, then redact that tail whole in one pass.
-  const shown = withDiagnostics(input.output, true);
-  const redacted = redactedOutputTail(shown, KILLED_OUTPUT_TAIL_BYTES);
-  const tail = boundedOutputTail(
-    redacted.text,
-    KILLED_OUTPUT_TAIL_BYTES,
-    redacted.dropped ? Buffer.byteLength(shown) : undefined
-  );
+  const lastTest = lastStartedTestName(input.output);
+  const fields = [
+    line,
+    `elapsed: ${input.durationMs}ms`,
+    `signal: ${input.signal ?? "none"}`,
+    `last test started: ${lastTest === undefined ? "none" : JSON.stringify(lastTest)}`,
+  ];
+  if (input.rawTailDir !== undefined) {
+    const path = await writeRawTail(input.rawTailDir, input.filePath, input.output);
+    fields.push(`raw output tail: ${path ?? "not saved"}`);
+  }
   return {
     durationMs: input.durationMs,
     exitCode: input.code || 1,
     filePath: input.filePath,
     killed: true,
-    output: `\n==> ${input.filePath}\n${tail}${tail === "" || tail.endsWith("\n") ? "" : "\n"}${line}\n`,
+    output: `\n==> ${input.filePath}\n${fields.join("\n")}\n`,
   };
 }
 
@@ -168,6 +134,8 @@ export interface SuperviseFileChildOptions {
   idleBudgetMs: number;
   /** Grace between SIGTERM and SIGKILL when the watchdog kills the child's process group. */
   killGraceMs?: number;
+  /** Where a killed file's raw output tail goes; omit to keep none (see FileCloseInput). */
+  rawTailDir?: string | undefined;
   startedAt?: number;
   watchdog?: Pick<FileProcessWatchdogOptions, "cancel" | "now" | "schedule">;
 }
@@ -186,6 +154,7 @@ export function superviseFileChild({
   hardDeadlineMs,
   idleBudgetMs,
   killGraceMs = PROCESS_GROUP_KILL_GRACE_MS,
+  rawTailDir,
   startedAt = Date.now(),
   watchdog: watchdogOptions,
 }: SuperviseFileChildOptions): Promise<NodeTestResult> {
@@ -231,6 +200,7 @@ export function superviseFileChild({
               hardDeadlineMs,
               idleBudgetMs,
               output,
+              rawTailDir,
               signal,
               timeoutReason: watchdog.timeoutReason(),
             })
