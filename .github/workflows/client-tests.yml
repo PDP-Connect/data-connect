@@ -91,7 +91,11 @@ jobs:
           NEXT_TELEMETRY_DISABLED: "1"
         run: npm run build --workspace=apps/console
 
+      # The hosted runner is a disposable VM, which is the isolation boundary here;
+      # test-sandbox runs the command directly.
       - name: Test console Node suite
+        env:
+          TEST_SANDBOX_DISABLE: "1"
         run: npm test --workspace=apps/console
 
       - name: Test copied standalone skill routes
