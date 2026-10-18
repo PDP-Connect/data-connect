@@ -9,7 +9,7 @@ from the repository root.
 
 | Tier | Command | What runs | When | Measured |
 |---|---|---|---|---|
-| fast (PR #515, pending merge) | `npm run test:fast` | Only the test files your change can reach, ranked by import distance. Default depth is 1. `npm run test:affected` runs the full import closure. Both fall back to the full suite when `package.json`, a lockfile, a `tsconfig`, the runner, the hermetic guard or the accounting code changes, or when a module is deleted | Edit loop. Not a gate | An edit to `operations/rs-records-detail/index.ts` runs 1 file in 2.2 s (full closure: 362 files). `server/search.ts` reaches 37 files. `server/records.ts` reaches 133 |
+| fast (heuristic) | `npm run test:fast` | Test files reachable from the changed code modules through static imports, literal `require` and `new URL(..., import.meta.url)`, ranked by import distance (default 1; `--depth N` widens). Any changed non-code file (JSON, SQL, fixtures), `package.json`, a lockfile, a `tsconfig`, the runner, hermetic guard or accounting code, or a deleted module falls back to the full suite. An added or edited test also runs the inventory tests. A static graph cannot see computed imports or paths, so this is a recall heuristic, never a merge oracle | Edit loop only | An edit to `operations/rs-records-detail/index.ts` runs 1 file in 2.2 s. `server/search.ts` selects 37 files and `server/records.ts` 133; an SQL edit falls back to 1,181 |
 | full, memory profile | `PDPP_TEST_PROFILE=memory-default npm test` | Every test file against the in-memory profile, inside `test-sandbox` | Before you push, and as the CI gate | 1,159 files, about 11,700 tests. 542.8 s wall, 2,769 CPU-s, 4.4 GB peak, on a 24-core host under 800% CPU (load about 26) |
 | PostgreSQL | `npm run test:postgres` | The same files against a disposable PostgreSQL 18 cluster, started for this run only, on `127.0.0.1:55447` inside the sandbox's own network namespace | Before you push a change to storage, migrations, search or records | 1,159 files, 12,072 pass, 19 skip. About 39 min at concurrency 2 on this host |
 | CI | pull request and push to `main` | The memory profile is the required RI gate. The PostgreSQL lane runs nightly in `.github/workflows/reference-implementation-postgres.yml`. Mutation testing is advisory and diff-aware. `test-scratch-lifecycle` checks the scratch-directory code | Every PR; nightly for PostgreSQL | Memory gate: test step 1,159 s, job about 21.6 min p50 on success. Nightly PostgreSQL: 12,140 tests, 0 failures, 32.6 min |
@@ -59,6 +59,7 @@ namespace blocks the rest.
 
 ## Rules
 
+- The oracle for a PR into `testeng/integration` that changes RI code is the full RI gate in the sandbox (`PDPP_TEST_PROFILE=memory-default npm test`, plus `npm run test:postgres` for storage, search or records changes), not `test:fast`.
 - A bug fix comes with a test that fails without the fix. Prove it by seeding the fault (see
   the next section).
 - A new PostgreSQL test file must be classified in `scripts/postgres-template-eligibility.ts`.
