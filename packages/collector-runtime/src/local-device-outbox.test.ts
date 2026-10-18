@@ -3,9 +3,10 @@
 
 import assert from "node:assert/strict";
 import { statSync } from "node:fs";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
+import type { TestContext } from "node:test";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 
@@ -17,8 +18,8 @@ import {
   LocalDeviceOutbox,
 } from "./local-device-outbox.ts";
 
-test("LocalDeviceOutbox persists ready work and reopens from disk", async () => {
-  const path = await tempOutboxPath();
+test("LocalDeviceOutbox persists ready work and reopens from disk", async (t) => {
+  const path = await tempOutboxPath(t);
   const clock = fixedClock("2026-05-19T12:00:00.000Z");
   const outbox = new LocalDeviceOutbox({ clock, path });
   outbox.enqueue({
@@ -43,7 +44,7 @@ test("LocalDeviceOutbox persists ready work and reopens from disk", async () => 
 });
 
 test("LocalDeviceOutbox supports deterministic ids and idempotent enqueue", async () => {
-  const outbox = new LocalDeviceOutbox({ path: await tempOutboxPath() });
+  const outbox = new LocalDeviceOutbox({ path: ":memory:" });
   try {
     const id = buildLocalDeviceOutboxId({
       kind: "record_batch",
@@ -79,8 +80,8 @@ test("LocalDeviceOutbox supports deterministic ids and idempotent enqueue", asyn
   }
 });
 
-test("schema v3/v4 migration preserves pending v2 work and accepts terminal run commits", async () => {
-  const path = await tempOutboxPath();
+test("schema v3/v4 migration preserves pending v2 work and accepts terminal run commits", async (t) => {
+  const path = await tempOutboxPath(t);
   const db = new DatabaseSync(path);
   try {
     db.exec(`
@@ -162,8 +163,8 @@ test("schema v3/v4 migration preserves pending v2 work and accepts terminal run 
   }
 });
 
-test("an old v2 binary uses the production version fence to refuse a v3 outbox", async () => {
-  const path = await tempOutboxPath();
+test("an old v2 binary uses the production version fence to refuse a v3 outbox", async (t) => {
+  const path = await tempOutboxPath(t);
   const outbox = new LocalDeviceOutbox({ path });
   outbox.enqueue({
     id: "terminal-v3",
@@ -184,16 +185,16 @@ test("an old v2 binary uses the production version fence to refuse a v3 outbox",
   }
 });
 
-test("current binary refuses a future v5 outbox before applying schema", async () => {
-  const path = await tempOutboxPath();
+test("current binary refuses a future v5 outbox before applying schema", async (t) => {
+  const path = await tempOutboxPath(t);
   const db = new DatabaseSync(path);
   db.exec("PRAGMA user_version = 5");
   db.close();
   assert.throws(() => new LocalDeviceOutbox({ path }), /newer than supported version 4/);
 });
 
-test("schema v3 migration failure rolls back, closes, and reopens with v2 bytes and metadata intact", async () => {
-  const path = await tempOutboxPath();
+test("schema v3 migration failure rolls back, closes, and reopens with v2 bytes and metadata intact", async (t) => {
+  const path = await tempOutboxPath(t);
   const db = new DatabaseSync(path);
   const payloadJson = '{"state":{"cursor":"c1\\u0000byte"}}';
   db.exec(`
@@ -263,7 +264,7 @@ test("LocalDeviceOutbox claims ready work with holder, epoch, and lease deadline
   let now = new Date("2026-05-19T12:00:00.000Z");
   const outbox = new LocalDeviceOutbox({
     clock: () => now,
-    path: await tempOutboxPath(),
+    path: ":memory:",
   });
   try {
     outbox.enqueue({
@@ -304,7 +305,7 @@ test("LocalDeviceOutbox claims ready work with holder, epoch, and lease deadline
 test("LocalDeviceOutbox can exclude checkpoint rows while batch-claiming ready work", async () => {
   const outbox = new LocalDeviceOutbox({
     clock: () => new Date("2026-05-19T12:00:00.000Z"),
-    path: await tempOutboxPath(),
+    path: ":memory:",
   });
   try {
     outbox.enqueue({
@@ -348,7 +349,7 @@ test("LocalDeviceOutbox recovers expired leases and fences stale acknowledgement
   let now = new Date("2026-05-19T12:00:00.000Z");
   const outbox = new LocalDeviceOutbox({
     clock: () => now,
-    path: await tempOutboxPath(),
+    path: ":memory:",
   });
   try {
     outbox.enqueue({
@@ -396,7 +397,7 @@ test("LocalDeviceOutbox handles retry and dead-letter transitions", async () => 
   let now = new Date("2026-05-19T12:00:00.000Z");
   const outbox = new LocalDeviceOutbox({
     clock: () => now,
-    path: await tempOutboxPath(),
+    path: ":memory:",
   });
   try {
     outbox.enqueue({
@@ -447,7 +448,7 @@ test("LocalDeviceOutbox handles retry and dead-letter transitions", async () => 
 test("LocalDeviceOutbox requeues dead letters by source, kind, and limit", async () => {
   const outbox = new LocalDeviceOutbox({
     clock: fixedClock("2026-05-19T12:00:00.000Z"),
-    path: await tempOutboxPath(),
+    path: ":memory:",
   });
   try {
     for (const [id, kind, sourceInstanceId] of [
@@ -512,7 +513,7 @@ test("LocalDeviceOutbox requeues dead letters by source, kind, and limit", async
 
 test("LocalDeviceOutbox only retires rejected terminal evidence after an accepted replacement", async () => {
   let now = new Date("2026-05-19T12:00:00.000Z");
-  const path = await tempOutboxPath();
+  const path = ":memory:";
   const outbox = new LocalDeviceOutbox({ clock: () => now, path });
   const oldId = "src-terminal:old-terminal";
   const replacementId = "src-terminal:new-terminal";
@@ -611,7 +612,7 @@ test("LocalDeviceOutbox only retires rejected terminal evidence after an accepte
 });
 
 test("LocalDeviceOutbox requeues dead letters by redacted error class", async () => {
-  const outbox = new LocalDeviceOutbox({ path: await tempOutboxPath() });
+  const outbox = new LocalDeviceOutbox({ path: ":memory:" });
   const sourceInstanceId = "src-1";
   try {
     for (const [id, error] of [
@@ -669,7 +670,7 @@ test("LocalDeviceOutbox requeues dead letters by redacted error class", async ()
 });
 
 test("LocalDeviceOutbox deletes only succeeded rows by id", async () => {
-  const outbox = new LocalDeviceOutbox({ path: await tempOutboxPath() });
+  const outbox = new LocalDeviceOutbox({ path: ":memory:" });
   try {
     outbox.enqueue({
       id: "src-1:gap:succeeded",
@@ -710,7 +711,7 @@ test("LocalDeviceOutbox rejects lease transitions after expiry even before recov
   let now = new Date("2026-05-19T12:00:00.000Z");
   const outbox = new LocalDeviceOutbox({
     clock: () => now,
-    path: await tempOutboxPath(),
+    path: ":memory:",
   });
   try {
     outbox.enqueue({
@@ -764,7 +765,7 @@ test("LocalDeviceOutbox renews only the current unexpired lease holder", async (
   let now = new Date("2026-05-19T12:00:00.000Z");
   const outbox = new LocalDeviceOutbox({
     clock: () => now,
-    path: await tempOutboxPath(),
+    path: ":memory:",
   });
   try {
     outbox.enqueue({
@@ -814,7 +815,7 @@ test("LocalDeviceOutbox can recover expired leases by source instance", async ()
   let now = new Date("2026-05-19T12:00:00.000Z");
   const outbox = new LocalDeviceOutbox({
     clock: () => now,
-    path: await tempOutboxPath(),
+    path: ":memory:",
   });
   try {
     for (const sourceInstanceId of ["src-1", "src-2"]) {
@@ -844,7 +845,7 @@ test("LocalDeviceOutbox.summary aggregates large queues with one SQL pass", asyn
   let now = new Date("2026-05-19T12:00:00.000Z");
   const outbox = new LocalDeviceOutbox({
     clock: () => now,
-    path: await tempOutboxPath(),
+    path: ":memory:",
   });
   try {
     const sourceInstanceId = "src-bulk";
@@ -943,7 +944,7 @@ test("LocalDeviceOutbox.summary: a never-failed backlog has oldestReadyAt but no
   // none of them has ever failed (attempt_count stays 0 for all of them).
   // oldestReadyAt ages with the queue; oldestRetryingAt must stay null,
   // since age alone is not retry/failure evidence.
-  const outbox = new LocalDeviceOutbox({ path: await tempOutboxPath() });
+  const outbox = new LocalDeviceOutbox({ path: ":memory:" });
   try {
     const sourceInstanceId = "src-never-failed";
     for (let index = 0; index < 10; index += 1) {
@@ -964,7 +965,7 @@ test("LocalDeviceOutbox.summary: a never-failed backlog has oldestReadyAt but no
 });
 
 test("LocalDeviceOutbox.summary: a row that fails once then a fresh row is enqueued keeps oldestRetryingAt scoped to the failed row", async () => {
-  const outbox = new LocalDeviceOutbox({ path: await tempOutboxPath() });
+  const outbox = new LocalDeviceOutbox({ path: ":memory:" });
   try {
     const sourceInstanceId = "src-mixed";
     outbox.enqueue({
@@ -1007,7 +1008,7 @@ test("LocalDeviceOutbox.summary: a row that fails once then a fresh row is enque
 });
 
 test("LocalDeviceOutbox.summary scopes by source instance without scanning others", async () => {
-  const outbox = new LocalDeviceOutbox({ path: await tempOutboxPath() });
+  const outbox = new LocalDeviceOutbox({ path: ":memory:" });
   try {
     outbox.enqueue({
       id: "src-a:r:1",
@@ -1036,7 +1037,7 @@ test("LocalDeviceOutbox.summary scopes by source instance without scanning other
 });
 
 test("LocalDeviceOutbox exposes payload-light production queries for large retained queues", async () => {
-  const outbox = new LocalDeviceOutbox({ path: await tempOutboxPath() });
+  const outbox = new LocalDeviceOutbox({ path: ":memory:" });
   try {
     outbox.enqueue({
       id: "src-a:batch:1",
@@ -1113,9 +1114,9 @@ test("LocalDeviceOutbox exposes payload-light production queries for large retai
   }
 });
 
-test("LocalDeviceOutbox preserves gap rows durably with source-instance scoping and lifecycle transitions", async () => {
+test("LocalDeviceOutbox preserves gap rows durably with source-instance scoping and lifecycle transitions", async (t) => {
   let now = new Date("2026-05-19T12:00:00.000Z");
-  const path = await tempOutboxPath();
+  const path = await tempOutboxPath(t);
   const outbox = new LocalDeviceOutbox({ clock: () => now, path });
   try {
     outbox.enqueue({
@@ -1220,7 +1221,7 @@ test("LocalDeviceOutbox preserves gap rows durably with source-instance scoping 
 test("LocalDeviceOutbox.deadLetterErrorSummary groups by redacted error class with counts", async () => {
   const outbox = new LocalDeviceOutbox({
     clock: fixedClock("2026-05-19T12:00:00.000Z"),
-    path: await tempOutboxPath(),
+    path: ":memory:",
   });
   try {
     // Three rows fail with the same server-rejection shape, one with a
@@ -1272,7 +1273,7 @@ test("LocalDeviceOutbox.deadLetterErrorSummary groups by redacted error class wi
 });
 
 test("LocalDeviceOutbox.deadLetterErrorSummary is empty on a clean outbox", async () => {
-  const outbox = new LocalDeviceOutbox({ path: await tempOutboxPath() });
+  const outbox = new LocalDeviceOutbox({ path: ":memory:" });
   try {
     outbox.enqueue({
       id: "src-1:record_batch:1",
@@ -1314,7 +1315,7 @@ test("classifyDeadLetterError preserves status shape and scrubs secrets, paths, 
 });
 
 test("hasObservedStream / countRecordBatches detect coverage records across statuses and ignore dead letters", async () => {
-  const path = await tempOutboxPath();
+  const path = ":memory:";
   const outbox = new LocalDeviceOutbox({ path });
   try {
     // A drained content batch carrying a coverage_diagnostics record.
@@ -1403,8 +1404,8 @@ test("hasObservedStream / countRecordBatches detect coverage records across stat
   }
 });
 
-test("enqueue maintains the observed-stream index so coverage detection never reparses payloads", async () => {
-  const path = await tempOutboxPath();
+test("enqueue maintains the observed-stream index so coverage detection never reparses payloads", async (t) => {
+  const path = await tempOutboxPath(t);
   const outbox = new LocalDeviceOutbox({ path });
   try {
     outbox.enqueue({
@@ -1458,8 +1459,8 @@ test("enqueue maintains the observed-stream index so coverage detection never re
   }
 });
 
-test("a record_batch carrying no records is indexed (sentinel) and never treated as legacy unindexed", async () => {
-  const path = await tempOutboxPath();
+test("a record_batch carrying no records is indexed (sentinel) and never treated as legacy unindexed", async (t) => {
+  const path = await tempOutboxPath(t);
   const outbox = new LocalDeviceOutbox({ path });
   try {
     outbox.enqueue({
@@ -1482,8 +1483,8 @@ test("a record_batch carrying no records is indexed (sentinel) and never treated
   }
 });
 
-test("hasObservedStream backfills a legacy (pre-index) outbox within budget and answers exactly", async () => {
-  const path = await tempOutboxPath();
+test("hasObservedStream backfills a legacy (pre-index) outbox within budget and answers exactly", async (t) => {
+  const path = await tempOutboxPath(t);
   // Build a legacy v1 outbox (no observed-stream index table) directly.
   seedLegacyV1Outbox(path, [
     { id: "legacy-1", sourceInstanceId: "src-1", streams: ["sessions"] },
@@ -1533,8 +1534,8 @@ test("hasObservedStream backfills a legacy (pre-index) outbox within budget and 
   }
 });
 
-test("hasObservedStream is bounded on a giant legacy outbox: over-budget unindexed backlog returns null", async () => {
-  const path = await tempOutboxPath();
+test("hasObservedStream is bounded on a giant legacy outbox: over-budget unindexed backlog returns null", async (t) => {
+  const path = await tempOutboxPath(t);
   const budget = 5000;
   // Seed more unindexed legacy rows for one lane than the bounded scan budget,
   // none on the queried stream. Opening the DB does NO payload work (the index
@@ -1566,7 +1567,7 @@ test("hasObservedStream is bounded on a giant legacy outbox: over-budget unindex
 });
 
 test("countRecordBatches reads indexed status/kind columns only and ignores dead letters", async () => {
-  const path = await tempOutboxPath();
+  const path = ":memory:";
   const outbox = new LocalDeviceOutbox({ path });
   try {
     outbox.enqueue({
@@ -1622,6 +1623,7 @@ function seedFatSucceededRows(path: string, sourceInstanceId: string, count: num
   const db = new DatabaseSync(path);
   try {
     const blob = "x".repeat(2000);
+    const payload = JSON.stringify({ blob });
     const stamp = "2026-06-04T00:00:00.000Z";
     const insert = db.prepare(
       `INSERT INTO local_device_outbox (
@@ -1634,7 +1636,7 @@ function seedFatSucceededRows(path: string, sourceInstanceId: string, count: num
       insert.run(
         `${sourceInstanceId}:fat:${index}`,
         sourceInstanceId,
-        JSON.stringify({ blob, index }),
+        payload,
         stamp,
         stamp,
         stamp,
@@ -1647,8 +1649,8 @@ function seedFatSucceededRows(path: string, sourceInstanceId: string, count: num
   }
 }
 
-test("compact reclaims the freelist a prune leaves behind (file shrinks) and preserves all rows", async () => {
-  const path = await tempOutboxPath();
+test("compact reclaims the freelist a prune leaves behind (file shrinks) and preserves all rows", async (t) => {
+  const path = await tempOutboxPath(t);
   const sourceInstanceId = "src-compact";
   // 4,000 fat succeeded rows (~8 MiB of payload) so the freelist after prune is
   // unmistakably large.
@@ -1687,8 +1689,8 @@ test("compact reclaims the freelist a prune leaves behind (file shrinks) and pre
   }
 });
 
-test("compact preserves unsent (ready/leased/dead-letter) rows — VACUUM is lossless", async () => {
-  const path = await tempOutboxPath();
+test("compact preserves unsent (ready/leased/dead-letter) rows — VACUUM is lossless", async (t) => {
+  const path = await tempOutboxPath(t);
   const sourceInstanceId = "src-compact-unsent";
   const holder = "holder-compact";
   const outbox = new LocalDeviceOutbox({
@@ -1749,7 +1751,7 @@ test("compact preserves unsent (ready/leased/dead-letter) rows — VACUUM is los
 });
 
 test("countNonSucceeded counts ready/leased/dead-letter across all sources, ignoring succeeded", async () => {
-  const path = await tempOutboxPath();
+  const path = ":memory:";
   const outbox = new LocalDeviceOutbox({
     clock: () => new Date("2026-06-04T00:00:00.000Z"),
     path,
@@ -1793,8 +1795,8 @@ test("countNonSucceeded counts ready/leased/dead-letter across all sources, igno
   }
 });
 
-test("compact on an already-tight file reclaims ~nothing and keeps every row", async () => {
-  const path = await tempOutboxPath();
+test("compact on an already-tight file reclaims ~nothing and keeps every row", async (t) => {
+  const path = await tempOutboxPath(t);
   const sourceInstanceId = "src-tight";
   const outbox = new LocalDeviceOutbox({ path });
   try {
@@ -1815,9 +1817,28 @@ test("compact on an already-tight file reclaims ~nothing and keeps every row", a
   }
 });
 
-async function tempOutboxPath(): Promise<string> {
-  return join(await mkdtemp(join(tmpdir(), "pdpp-local-outbox-")), "outbox.sqlite");
+async function tempOutboxPath(t: TestContext): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), "pdpp-local-outbox-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  return join(root, "outbox.sqlite");
 }
+
+test("temporary outbox roots register their own removal before the path is returned", async (t) => {
+  const sibling = await mkdtemp(join(tmpdir(), "pdpp-local-outbox-sibling-"));
+  t.after(() => rm(sibling, { recursive: true, force: true }));
+  // node:test runs t.after hooks when a test fails too, so registering before
+  // returning is what makes cleanup survive a failed assertion.
+  const cleanups: Array<() => unknown> = [];
+  const path = await tempOutboxPath({ after: (fn: () => unknown) => cleanups.push(fn) } as unknown as TestContext);
+  const root = dirname(path);
+  assert.equal(cleanups.length, 1);
+  assert.doesNotThrow(() => statSync(root));
+
+  await cleanups[0]!();
+  await cleanups[0]!();
+  assert.throws(() => statSync(root), { code: "ENOENT" });
+  assert.doesNotThrow(() => statSync(sibling));
+});
 
 /**
  * Seed a schema-v1 (pre-observed-stream-index) outbox file directly, so tests
@@ -1916,11 +1937,11 @@ function seedSucceededRows(path: string, sourceInstanceId: string, count: number
   }
 }
 
-test("pruneSent deletes a backlog larger than SQLite's per-statement variable limit", async () => {
+test("pruneSent deletes a backlog larger than SQLite's per-statement variable limit", async (t) => {
   // The live incident shape: ~170k succeeded rows. A single
   // `DELETE ... WHERE id IN (...)` over that set throws "too many SQL
   // variables" (limit ~32,766). pruneSent must chunk and delete them all.
-  const path = await tempOutboxPath();
+  const path = await tempOutboxPath(t);
   const sourceInstanceId = "src-huge";
   // One over the variable limit is enough to force >1 chunk and prove the
   // single-statement path would have failed.
@@ -1943,8 +1964,8 @@ test("pruneSent deletes a backlog larger than SQLite's per-statement variable li
   }
 });
 
-test("requeueDeadLetters requeues a backlog larger than the per-statement variable limit", async () => {
-  const path = await tempOutboxPath();
+test("requeueDeadLetters requeues a backlog larger than the per-statement variable limit", async (t) => {
+  const path = await tempOutboxPath(t);
   const sourceInstanceId = "src-dl-huge";
   const total = 32_767 + 5;
   // Seed dead-letter rows directly (status override) on the current schema.
