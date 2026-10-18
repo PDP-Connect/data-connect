@@ -243,11 +243,10 @@ function moduleReferences(source: string): {
         isString(specifier) &&
         specifier.value.startsWith(".") &&
         tokens[index + 4]?.value === "," &&
-        tokens[index + 5]?.value === "import" &&
-        tokens[index + 6]?.value === "." &&
-        tokens[index + 7]?.value === "meta" &&
-        tokens[index + 8]?.value === "." &&
-        tokens[index + 9]?.value === "url"
+        tokens
+          .slice(index + 5, index + 10)
+          .map((token) => token?.value)
+          .join("") === "import.meta.url"
       )
         urls.push(specifier.value);
     }
