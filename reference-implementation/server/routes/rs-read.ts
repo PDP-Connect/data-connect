@@ -352,7 +352,7 @@ export interface MountRsReadContext {
     grant: GrantLike | null,
     params: Record<string, unknown>,
     manifest: ManifestLike,
-    options: { extraWarnings: ResolverWarning[] }
+    options: { cursorAuthority: unknown; extraWarnings: ResolverWarning[] }
   ) => Promise<unknown>;
   rejectQuery: (
     res: unknown,
@@ -1795,6 +1795,13 @@ function buildRecordsListDeps(
         streamName: stream,
       });
       return await ctx.queryRecordsAcrossBindings(bindings, stream, grant, params, m, {
+        // Multi-connection continuation tokens are bound to this caller.
+        cursorAuthority: {
+          client_id: tokenInfo.client_id ?? null,
+          grant_id: tokenInfo.grant_id ?? null,
+          subject_id: tokenInfo.subject_id ?? null,
+          token_kind: tokenInfo.pdpp_token_kind ?? null,
+        },
         extraWarnings: resolverWarnings || [],
       });
     },

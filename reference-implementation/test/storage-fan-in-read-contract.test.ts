@@ -545,7 +545,7 @@ test("queryRecordsAcrossBindings fans in records across two granted connections"
   });
 });
 
-test("queryRecordsAcrossBindings preserves fan-in order and cursor collapse under bounded concurrency", async () => {
+test("queryRecordsAcrossBindings keeps global order and a continuation cursor under bounded concurrency", async () => {
   await withDualConnectionDb(async () => {
     await seedInstance(INSTANCE_C, "Account C", "c@example.com");
     await ingestRecord(target(INSTANCE_C), recordPayload("rec-c-1", "C first", "2026-05-18T12:04:00.000Z"));
@@ -562,21 +562,35 @@ test("queryRecordsAcrossBindings preserves fan-in order and cursor collapse unde
     assert.equal(orderedBindings.length, 3, "expected all seeded bindings to resolve");
 
     let peakInFlight = 0;
-    const response = await queryRecordsAcrossBindings(orderedBindings, STREAM, grant, { limit: 1 }, baseManifest, {
+    const opts = {
       concurrency: 2,
       onInFlightChange: (inFlight: number) => {
         peakInFlight = Math.max(peakInFlight, inFlight);
       },
-    });
-
-    assert.deepEqual(
-      response.data.map((record) => record.connection_id),
-      [INSTANCE_A, INSTANCE_B, INSTANCE_C],
-      "bounded fan-in keeps global result order identical to serial binding order"
-    );
-    assert.equal(response.has_more, true);
-    assert.equal(response.next_cursor, undefined, "multi-binding fan-in still suppresses an unsafe global cursor");
-    assert.ok(response.meta?.warnings?.some((warning) => warning.code === "partial_results"));
+    };
+    const seen: Array<string | undefined> = [];
+    let cursor: string | undefined;
+    for (let page = 0; page < 10; page += 1) {
+      const response = await queryRecordsAcrossBindings(
+        orderedBindings,
+        STREAM,
+        grant,
+        cursor ? { cursor, limit: 1 } : { limit: 1 },
+        baseManifest,
+        opts
+      );
+      assert.equal(response.data.length, 1, "limit bounds the combined page");
+      assert.ok(!response.meta?.warnings?.some((warning) => warning.code === "partial_results"));
+      seen.push(response.data[0]?.connection_id as string | undefined);
+      if (!response.has_more) {
+        assert.equal(response.next_cursor, undefined);
+        break;
+      }
+      assert.equal(typeof response.next_cursor, "string", "has_more carries a continuation cursor");
+      cursor = response.next_cursor ?? undefined;
+    }
+    // Default order is received_at descending across all three connections.
+    assert.deepEqual(seen, [INSTANCE_C, INSTANCE_B, INSTANCE_B, INSTANCE_A, INSTANCE_A]);
     assert.ok(peakInFlight > 1, `expected bounded fan-in to overlap reads, saw peak ${peakInFlight}`);
     assert.ok(peakInFlight <= 2, `expected peak in-flight reads <= 2, saw ${peakInFlight}`);
   });
@@ -1013,34 +1027,25 @@ test("validateConnectionAlias accepts canonical, accepts alias, rejects conflict
 // The corresponding fixes live in `server/records.js` (helpers) and
 // `server/index.js` (route adapters).
 
-test("queryRecordsAcrossBindings rejects changes_since under multi-binding fan-in with retry guidance", async () => {
+test("queryRecordsAcrossBindings serves changes_since across bindings with a per-connection sync token", async () => {
   await withDualConnectionDb(async () => {
     const { bindings } = await resolveFanInBindings({
       connectorId: CONNECTOR_ID,
       ownerSubjectId: OWNER_AUTH_DEFAULT_SUBJECT_ID,
     });
     assert.equal(bindings.length, 2);
-    await assert.rejects(
-      () => queryRecordsAcrossBindings(bindings, STREAM, grant, { changes_since: "beginning" }, baseManifest),
-      (err: unknown) => {
-        assert.ok(
-          err !== null &&
-            typeof err === "object" &&
-            "code" in err &&
-            "param" in err &&
-            "retry_with" in err &&
-            "available_connections" in err
-        );
-        assert.equal(err.code, "invalid_argument");
-        assert.equal(err.param, "changes_since");
-        assert.equal(err.retry_with, "connection_id");
-        assert.ok(Array.isArray(err.available_connections), "expected available_connections list");
-        // biome-ignore lint/suspicious/useArraySortCompare: localized test assertion preserves its explicit contract.
-        const ids = (err.available_connections as Array<{ connection_id: string }>).map((c) => c.connection_id).sort();
-        assert.deepEqual(ids, [INSTANCE_A, INSTANCE_B]);
-        return true;
-      }
+    const first = await queryRecordsAcrossBindings(bindings, STREAM, grant, { changes_since: "beginning" }, baseManifest);
+    assert.equal(first.data.length, 4, "every change from both connections");
+    assert.equal(first.has_more, false);
+    assert.equal(typeof first.next_changes_since, "string");
+    const again = await queryRecordsAcrossBindings(
+      bindings,
+      STREAM,
+      grant,
+      { changes_since: first.next_changes_since },
+      baseManifest
     );
+    assert.deepEqual(again.data, [], "nothing changed since the terminal token");
   });
 });
 
@@ -1067,22 +1072,18 @@ test("queryRecordsAcrossBindings honors changes_since on the single-binding fast
   });
 });
 
-test("queryRecordsAcrossBindings emits partial_results warning when fan-in collapses pagination", async () => {
+test("queryRecordsAcrossBindings pages with next_cursor instead of a partial_results warning", async () => {
   await withDualConnectionDb(async () => {
     const { bindings } = await resolveFanInBindings({
       connectorId: CONNECTOR_ID,
       ownerSubjectId: OWNER_AUTH_DEFAULT_SUBJECT_ID,
     });
-    // limit=1 forces each binding to report has_more=true so the fan-in
-    // wrapper must surface the partial-results warning instead of
-    // silently dropping the cursor.
     const response = await queryRecordsAcrossBindings(bindings, STREAM, grant, { limit: 1 }, baseManifest);
+    assert.equal(response.data.length, 1);
     assert.equal(response.has_more, true);
-    assert.equal(response.next_cursor, undefined, "multi-binding fan-in must NOT synthesize next_cursor");
+    assert.equal(typeof response.next_cursor, "string", "multi-binding fan-in continues with next_cursor");
     const warnings = response.meta?.warnings || [];
-    const partial = warnings.find((w) => w.code === "partial_results");
-    assert.ok(partial, `expected partial_results warning, got ${JSON.stringify(warnings)}`);
-    assert.equal(partial.param, "connection_id");
+    assert.ok(!warnings.some((w) => w.code === "partial_results"), JSON.stringify(warnings));
   });
 });
 

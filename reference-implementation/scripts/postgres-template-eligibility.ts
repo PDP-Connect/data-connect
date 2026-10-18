@@ -131,6 +131,9 @@ export const POSTGRES_TEMPLATE_ELIGIBLE_FILES: readonly string[] = [
   "test/record-version-stats.test.ts",
   "test/record-window-count-parity.test.ts",
   "test/records-delete-postgres-routing.test.ts",
+  // Fan-in read conformance over seeded records on a scratch database; does not observe schema bootstrap.
+  "test/records-fanin-core-conformance.test.ts",
+  "test/records-fanin-core-http.test.ts",
   "test/recovery-bounded-reads.test.ts",
   "test/ref-connectors-identity-inventory-profile.test.ts",
   "test/ref-connectors-identity-page-filter-explain.test.ts",

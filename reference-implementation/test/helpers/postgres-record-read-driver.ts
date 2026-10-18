@@ -25,8 +25,8 @@
  *     payload, which has no shared shape with the SQLite cursor and is
  *     never asserted against by the harness;
  *   - the missing/null cursor bucket is implemented in SQL using
- *     `cursor_value IS NULL` and ordered after present rows in asc and
- *     before in desc, with `primary_key` (one-element pk in the harness
+ *     `cursor_value IS NULL` and ordered after present rows in both
+ *     directions (PDPP Core §8 "Stable sort"), with `primary_key` (one-element pk in the harness
  *     manifest) as the tiebreaker;
  *   - filter compilation is a thin layer on top of `record_data ->> field`
  *     for exact filters and a typed cast for range filters; the driver
@@ -412,7 +412,7 @@ export function createPostgresRecordReadDriver({ connectionString }: { connectio
       //                 OR (cv > cursor_cv) (both non-null)
       //                 OR (cv IS NULL AND cursor_cv IS NOT NULL)
       //                 within missing bucket: pk > cursor_pk.
-      // Desc mirrors with NULLs first.
+      // Desc mirrors the comparisons; the missing bucket stays last.
       if (cursorPosition) {
         const { cursor_value, primary_key_text } = cursorPosition;
         if (order === "asc") {
@@ -432,8 +432,7 @@ export function createPostgresRecordReadDriver({ connectionString }: { connectio
             )`;
           }
         } else if (cursor_value === null) {
-          // In missing bucket already (which sorts first in desc); only
-          // later pk within missing... but desc means lower pk is "after".
+          // In the missing bucket, which comes last: only lower pk is after.
           queryParams.push(primary_key_text);
           where += ` AND cursor_value IS NULL AND primary_key < $${queryParams.length}`;
         } else {
@@ -441,17 +440,18 @@ export function createPostgresRecordReadDriver({ connectionString }: { connectio
           const cvIdx = queryParams.length - 2;
           const pkIdx = queryParams.length - 1;
           const cv2Idx = queryParams.length;
-          where += ` AND cursor_value IS NOT NULL AND (
+          where += ` AND (
               (cursor_value = $${cvIdx} AND primary_key < $${pkIdx})
-              OR (cursor_value < $${cv2Idx})
+              OR (cursor_value IS NOT NULL AND cursor_value < $${cv2Idx})
+              OR (cursor_value IS NULL)
             )`;
         }
       }
 
-      // ORDER BY: missing bucket last in asc, first in desc; within
-      // present rows order by cursor_value, pk; within missing order by pk.
+      // ORDER BY: missing bucket last in both directions; within present
+      // rows order by cursor_value, pk; within missing order by pk.
       const dir = order === "asc" ? "ASC" : "DESC";
-      const nullsPos = order === "asc" ? "NULLS LAST" : "NULLS FIRST";
+      const nullsPos = "NULLS LAST";
       const orderBy = `ORDER BY cursor_value ${dir} ${nullsPos}, primary_key ${dir}`;
 
       // Fetch limit + 1 to compute has_more cheaply.

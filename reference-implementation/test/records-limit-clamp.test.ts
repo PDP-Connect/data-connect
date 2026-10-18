@@ -357,10 +357,9 @@ test("limit exactly at the maximum (100) is not treated as a clamp", async () =>
 // ─── multi-connection fan-in ─────────────────────────────────────────────────
 
 test("multi-connection fan-in surfaces a single deduplicated limit_clamped warning", async () => {
-  // Each per-binding query clamps and emits its own limit_clamped warning;
-  // appendUniqueWarning must collapse them to one row so a fan-in caller sees
-  // exactly one limit_clamped entry (alongside the existing partial_results
-  // warning), not one per connection.
+  // The clamp applies once to the combined page: the fan-in caller sees
+  // exactly one limit_clamped entry, not one per connection, and at most
+  // RECORDS_MAX_PAGE_LIMIT records in total.
   await withDualConnectionDb(80, async () => {
     const { bindings } = await resolveFanInBindings({
       authorizedInstanceIds: [INSTANCE_A, INSTANCE_B],
@@ -370,6 +369,8 @@ test("multi-connection fan-in surfaces a single deduplicated limit_clamped warni
     assert.equal(bindings.length, 2, "expected two active bindings to fan in");
 
     const response = await queryRecordsAcrossBindings(bindings, STREAM, grant, { limit: 500 }, manifest);
+    assert.equal(response.data.length, RECORDS_MAX_PAGE_LIMIT, "the clamp bounds the combined page");
+    assert.equal(response.has_more, true, "60 of the 160 records remain");
 
     const clampWarnings = (response.meta?.warnings ?? []).filter(
       (w) => w.code === CANONICAL_WARNING_CODES.LIMIT_CLAMPED
