@@ -101,11 +101,24 @@ forward, **the evidence is the ongoing CI runs at the current cap**: every
 `reference-implementation` CI run exercises the default cap against the tree as
 it actually is, which is the claim worth holding.
 
-Reading any run's counts, then or now: `completed_files` is derived from the
-exit code (`run-tests.ts` writes `failed ? 0 : results.length`), not from an
-observed per-file completion count, so it is 0 for any run that exits non-zero.
-A real per-file completion claim needs raw file-outcome events, which the
-receipt schema does not carry.
+Reading any run's counts, then or now: older `run-tests.ts` runs wrote
+`completed_files` as `failed ? 0 : results.length`, so it is 0 for any such run
+that exited non-zero, NOT because no file finished. `run-tests.ts` now counts
+the files whose child exited, pass or fail, and adds `failed_files` for the
+ones that exited non-zero or were killed by the per-file watchdog. A killed file
+is a failed file; it no longer aborts the files after it. Its result holds only
+structured fields (`TIMED OUT (idle|hard)` or `KILLED`, the signal, the elapsed
+time and the last test that began running), never its raw output. Locally the
+newest 64 KB of that output goes to a mode 0600 file under
+`${XDG_STATE_HOME:-~/.local/state}/pdpp-ri-test-diagnostics/` (one 0700
+directory per run; the newest 20 runs are kept, none older than 7 days), whose
+path the result names. It does not go to the run's `TMPDIR`, which the sandbox
+removes when the run ends. On CI (`CI` set) it is not kept. The reporter never
+prints a test's own output, but it emits a content-free `test:progress` event
+(at most one a second) when output arrives, so a test that logs is not killed as
+idle. `gate-concurrency-receipt.ts` still derives its
+own `completed_files` from the exit code, so that receipt remains 0 on a failed
+run.
 
 ## Operational use
 

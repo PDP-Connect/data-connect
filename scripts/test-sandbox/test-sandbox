@@ -49,6 +49,16 @@ set -uo pipefail
 noexpand=(); systemd-run --help 2>/dev/null | grep -q -- --expand-environment && noexpand=(--expand-environment=no)
 
 die() { echo "test-sandbox: $*" >&2; exit 2; }
+# Host-local settings: KEY=VALUE lines of TEST_SANDBOX_* variables in
+# ${TEST_SANDBOX_CONFIG:-~/.config/test-sandbox/config}. The environment wins.
+# Example: TEST_SANDBOX_SLICE_CPU=1200 caps all agents' tests at 12 cores.
+cfg=${TEST_SANDBOX_CONFIG:-$HOME/.config/test-sandbox/config}
+if [[ -r "$cfg" ]]; then
+  while IFS='=' read -r k v; do
+    [[ "$k" =~ ^TEST_SANDBOX_[A-Z_]+$ ]] || continue
+    [[ -z "${!k+x}" ]] && export "$k=$v"
+  done < "$cfg"
+fi
 cpu=${TEST_SANDBOX_CPU:-400}
 mem=${TEST_SANDBOX_MEM:-8G}
 tasks=${TEST_SANDBOX_TASKS:-4096}
@@ -76,6 +86,16 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 [[ $# -gt 0 ]] || die "usage: test-sandbox [options] -- cmd..."
+# TEST_SANDBOX_FAIL_OPEN=1 (used by the agent hook): if the governor itself
+# fails, warn and run the command unwrapped instead of failing the caller.
+cmd_argv=("$@")
+fail_open() {
+  echo "test-sandbox: governor unavailable ($*); running the command without it" >&2
+  exec "${cmd_argv[@]}"
+}
+if [[ "${TEST_SANDBOX_FAIL_OPEN:-0}" == 1 ]]; then
+  die() { fail_open "$*"; }
+fi
 [[ "$cpu" =~ ^[1-9][0-9]*([.][0-9]+)?$ ]] || die "--cpu must be a positive percentage"
 [[ -n "$mem" ]] || die "--mem cannot be empty"
 [[ "$tasks" =~ ^[1-9][0-9]*$ ]] || die "--tasks must be a positive integer"
@@ -95,7 +115,13 @@ have_flock=1; command -v flock >/dev/null || have_flock=0
 
 # A command already inside a sandbox runs directly: a nested call would take a
 # second slot (and could deadlock with --slots 1) and gain nothing.
-if [[ -n "${TEST_SANDBOX_ACTIVE:-}" ]]; then exec "$@"; fi
+# Inside a governor-only run (--isolate cgroup, as the agent hook uses), a nested
+# call still gets the isolation it asks for (netns, --pg, ...); it reuses the outer
+# slot and scope, so it takes no second slot and stays inside the outer limits.
+nested=0
+if [[ -n "${TEST_SANDBOX_ACTIVE:-}" ]]; then
+  if [[ "${TEST_SANDBOX_RUN_ISOLATE:-full}" == cgroup ]]; then nested=1; else exec "$@"; fi
+fi
 slice=${TEST_SANDBOX_SLICE:-agent-tests}
 slice=${slice%.slice}
 slice_unit="$slice.slice"
@@ -104,7 +130,7 @@ notes=()
 systemd_ok=0 bwrap_ok=0
 # Under test-receipt the caller's scope already carries the limits and is the
 # measurement boundary; a new scope would move the work out of it.
-in_receipt=0; [[ -n "${TEST_RECEIPT_ACTIVE:-}" ]] && in_receipt=1
+in_receipt=0; [[ -n "${TEST_RECEIPT_ACTIVE:-}" || $nested -eq 1 ]] && in_receipt=1
 if [[ "$disabled" != 1 && $in_receipt -eq 0 ]] && command -v systemd-run >/dev/null && command -v systemctl >/dev/null &&
    [[ -r /sys/fs/cgroup/cgroup.controllers ]]; then
   for probe in 1 2 3; do
@@ -172,7 +198,8 @@ state_dir=${TEST_SANDBOX_STATE_DIR:-$runtime/agent-tests}
 mkdir -p "$state_dir/slots" || die "cannot create slot directory $state_dir/slots"
 slot="" slot_fd=""
 if (( ! have_flock )); then slot=0; notes+=("flock unavailable; host-wide slots not enforced"); fi
-for ((i=1;i<=slots && have_flock;i++)); do
+if (( nested )); then slot=0; notes+=("nested in a governor-only run: uses the outer slot and scope"); fi
+for ((i=1;i<=slots && have_flock && !nested;i++)); do
   exec {fd}>"$state_dir/slots/$i" || die "cannot open slot $i"
   if flock -n "$fd"; then slot=$i; slot_fd=$fd; break; fi
   exec {fd}>&-
@@ -254,9 +281,15 @@ tmp_binds=()
 # A given --scratch dir is created once, private, only if absent at start; it is
 # never re-created later (its owner may delete it on purpose, e.g. test-scratch).
 if [[ -n "$scratch" && ! -e "$scratch" ]]; then (umask 077; mkdir -p "$scratch") || die "cannot create --scratch $scratch"; fi
-for p in "$scratch" "$PWD"; do
+# Command arguments that name an existing path under /tmp (a --files-from list,
+# a fixture) are bound through as well, also in --flag=/tmp/... form.
+tmp_args=()
+for arg in "$@"; do
+  v=${arg#*=}; [[ "$v" == /tmp/* && -e "$v" ]] && tmp_args+=("$v")
+done
+for p in "$scratch" "$PWD" "${tmp_args[@]}"; do
   [[ -n "$p" ]] || continue
-  p=$(cd "$p" 2>/dev/null && pwd -P) || continue
+  p=$(realpath -e -- "$p" 2>/dev/null) || continue
   # Bind the whole top directory under /tmp, so a checkout's root (node_modules,
   # sibling packages) stays visible when the working directory is deeper.
   if [[ "$p" == /tmp/* ]]; then top=${p#/tmp/}; top=/tmp/${top%%/*}; tmp_binds+=(--bind "$top" "$top"); fi
@@ -264,6 +297,7 @@ done
 # The quoted body is evaluated later by bash -c inside the scope.
 # shellcheck disable=SC2016
 collector='stats="$1"; shift
+: >"$stats.started"
 scratch="$1"; pg="$2"; pg_port="$3"; pg_env="$4"; shift 4
 cg=/sys/fs/cgroup$(grep "^0::" /proc/self/cgroup | cut -d: -f3)
 rc=0
@@ -347,6 +381,11 @@ else
     wait "$child"; rc=$?; child=""
     if [[ "$timed_out" == true ]]; then rc=124; fi
     systemctl --user stop "$unit.scope" >/dev/null 2>&1 || true
+    # The scope never started the command (systemd-run failed): fail open if asked.
+    if [[ ! -e "$stats.started" && "${TEST_SANDBOX_FAIL_OPEN:-0}" == 1 && "$timed_out" != true ]]; then
+      rm -rf "$tmpdir"; [[ -n "$slot_fd" ]] && exec {slot_fd}>&-
+      fail_open "scope did not start (systemd-run exit $rc)"
+    fi
     if [[ -f "$stats" ]]; then
       read -r _ wrapped_rc < <(sed -n '1p' "$stats")
       read -r _ mem_bytes < <(sed -n '2p' "$stats")

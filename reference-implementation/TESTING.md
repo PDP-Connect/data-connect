@@ -57,6 +57,11 @@ The runner owns every database it creates. It registers a database right after `
 set-up fails, and never drops a database it did not create. On SIGINT or SIGTERM it stops admitting
 files, stops the children, then drops its databases (PR #504).
 
+The runner starts each test file in its own process group and kills the whole group when the file times
+out. A group is detached, so it can outlive a SIGKILL of the runner itself: nothing is left to signal it.
+This limit is accepted. `test-sandbox`'s cgroup scope contains such processes on a shared host, and a
+throwaway CI VM destroys them.
+
 A hermetic guard blocks non-loopback HTTP inside the test child processes. The sandbox's network
 namespace blocks the rest.
 
@@ -92,8 +97,8 @@ the normal entry points, which keep the sandbox, the per-file databases and the 
 - PostgreSQL: `npm run test:postgres -- --files-from list.txt` (the private cluster, sentinel and
   per-file database come with it; no manual setup; the exceptions listed under the isolation
   contract still apply)
-Keep the list out of `/tmp`: the sandbox gives each run a private `/tmp`, so the runner cannot see
-a list written there.
+Since `test-sandbox` c1ae39d, `/tmp` paths passed as arguments are visible inside the sandbox, so the list
+may live in `/tmp`.
 - New PG test file: register it in `scripts/postgres-template-eligibility.ts` (eligible if it only uses
   Postgres as seeded data; cold-required if it observes bootstrap or migration), update the counts in
   `PG-PROFILE-51-REPORT.md`, and run `test/postgres-template-eligibility-inventory.test.ts` before the PR.
