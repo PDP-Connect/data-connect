@@ -81,27 +81,50 @@ jobs:
             config: reference-implementation/stryker.config.mjs
             config-relative: stryker.config.mjs
             prefixes: "reference-implementation/server/ reference-implementation/lib/ reference-implementation/operations/ reference-implementation/runtime/ reference-implementation/cli/"
-            # The attempt bound (see the header). Measured on PR #141 samples
-            # pinned to four CPUs with four Stryker workers: a sample with 8
-            # test files took 13 s for one run of its tests, about 20 s per
-            # trial with four workers sharing the CPUs, and 13 minutes for 152
-            # mutants. The densest scope on record, PR #83, made 179 mutants
-            # from 34 changed lines, about five a line. At that density 200
-            # lines is 1,000 mutants; at twice the measured trial time (a
-            # slower hosted runner) that is under 3 hours, inside the
-            # 360-minute limit. The bound also keeps the dry run far below
-            # Stryker's five-minute dry-run limit, which the 300-file
-            # selection exceeded on PR #141's first attempt. Raise these only
-            # with a measured run that fits.
+            # The attempt bound (see the header). It is sized for the runner as
+            # configured now: ONE Stryker worker (see
+            # reference-implementation/stryker.config.mjs), so a trial is not
+            # shared with three others and the attempt is serial. Figures
+            # measured on 2026-10-18 under a 4-CPU, 8 GB cgroup sandbox:
             #
-            # The runner is now configured for one Stryker worker, because a
-            # trial already fills the CPUs and four workers pushed every trial
-            # of PR #494's 7-file sample past Stryker's timeout (see
-            # reference-implementation/stryker.config.mjs). The figures above
-            # were measured with four workers. Re-measure before relying on
-            # them: the 144 mutants of that sample took 6.5 minutes on four
-            # CPUs with one worker.
-            max-changed-lines: "200"
+            #   - A selection of 8 test files (the `max-tests` bound) that
+            #     includes a slow file: 16 mutants of server/introspection-http.ts
+            #     took 8 min 20 s with one worker, 31.3 s a mutant (1.9 a
+            #     minute); its dry run took 33.8 s. The slow file runs about 30 s
+            #     alone and sets the trial time, because `node --test` runs the
+            #     selection's files in parallel. That is the cost to size for:
+            #     `max-tests` bounds how many files run, not how slow they are.
+            #   - 1 file in 77 sampled across the cohort's 1,156 test files took
+            #     over 30 s alone (34.1 s); the median took 0.3 s and the 90th
+            #     percentile 2.5 s. An earlier 7-file sample ran 2.4-2.7 s a
+            #     mutant, so a typical selection is an order of magnitude cheaper.
+            #   - Mutant density: 0.85 a line for the whole of
+            #     server/introspection-http.ts (228 mutants in 268 lines); the
+            #     densest scope on record, PR #83, made 179 mutants from 34
+            #     lines, 5.3 a line.
+            #
+            # Worst case at the bound: the densest scope and the slow selection
+            # together, on a runner twice as slow as the sandbox (the margin):
+            #
+            #   60 lines x 5.3 mutants x 31.3 s x 2 / 60  = 332 minutes
+            #   + 20 minutes for checkout, install, builds and the dry run
+            #     (an allowance, not a measurement)       = 352 minutes, under 360
+            #
+            # Solved for the bound: (360 - 20) x 60 / 2 / 31.3 s / 5.3 mutants
+            # = 61.5 lines, rounded down to 60. The bound of 200 lines this
+            # replaces was calibrated with four workers; at one worker and the
+            # same worst case it is 200 x 5.3 x 31.3 x 2 / 60 = 1,106 minutes,
+            # three times the job limit. A typical run (0.85 a line, 3.3 s a
+            # trial) at 60 lines is about 3 minutes, so most revisions stay far
+            # inside the bound; the cost of the lower figure is that a large
+            # change is sampled sooner, and a sample is recorded as `partial`,
+            # not hidden. The dry run stays far below
+            # Stryker's five-minute dry-run limit, which the 300-file selection
+            # exceeded on PR #141's first attempt. Raise these only with a
+            # measured run that fits; the executed control in
+            # scripts/mutation-falsification/attempt-bound-budget.test.ts holds
+            # the arithmetic to the values here.
+            max-changed-lines: "60"
             max-tests: "8"
           # The release and supply-chain provenance machinery. Neither cohort
           # above reaches it -- `client` selects `src/`, and the reference
