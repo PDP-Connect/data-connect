@@ -130,7 +130,11 @@ interface Frozen {
 }
 
 /** Run `run-intent.ts` the way the workflow's intent step does. */
-function freeze(cohort: Cohort, directory: string): Frozen {
+function freeze(
+  cohort: Cohort,
+  directory: string,
+  maxChangedLines = "200"
+): Frozen {
   const reports = join(directory, "reports/mutation", cohort.name)
   mkdirSync(reports, { recursive: true })
   const base = git(directory, "rev-parse", "HEAD^").trim()
@@ -165,7 +169,7 @@ function freeze(cohort: Cohort, directory: string): Frozen {
       ...["--selected-tests", join(reports, "selected-tests.txt")],
       ...["--selection-outcome", join(reports, "selection-outcome.txt")],
       ...(cohort.bound
-        ? ["--max-changed-lines", "200", "--max-tests", "8"]
+        ? ["--max-changed-lines", maxChangedLines, "--max-tests", "8"]
         : []),
     ],
     { cwd: directory, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }
@@ -274,6 +278,44 @@ describe("the reference-implementation cohort", () => {
 
   it("records a no-run outcome when every selected test is withheld", () => {
     const frozen = freeze(REFERENCE, withheldRevision())
+    expect(frozen.selectedTests).toEqual([])
+    expect(frozen.outcome).toBe("none_runnable")
+  })
+
+  // The only test is withheld and unchanged, so the change set is source-only
+  // and the bound counts the cohort's whole suite -- which withholding empties.
+  const ESCAPING_TEST =
+    'import { readFileSync } from "node:fs"\nreadFileSync("../server/policy.ts", "utf8")\n'
+
+  it("records a no-run outcome for a source-only change whose whole suite is withheld", () => {
+    const directory = repository(
+      REFERENCE,
+      {
+        "reference-implementation/server/policy.ts": SOURCE_V1,
+        "reference-implementation/test/policy.test.ts": ESCAPING_TEST,
+      },
+      { "reference-implementation/server/policy.ts": SOURCE_V2 }
+    )
+    const frozen = freeze(REFERENCE, directory)
+    expect(frozen.selectedTests).toEqual([])
+    expect(frozen.outcome).toBe("none_runnable")
+  })
+
+  it("records a no-run outcome, rather than throwing, when a change over the bound has every changed test withheld", () => {
+    const lines = (tag: string): string =>
+      Array.from({ length: 61 }, (_, index) => `export const v${index} = "${tag}"`).join("\n") + "\n"
+    const directory = repository(
+      REFERENCE,
+      {
+        "reference-implementation/server/policy.ts": lines("a"),
+        "reference-implementation/test/policy.test.ts": "// v1\n",
+      },
+      {
+        "reference-implementation/server/policy.ts": lines("b"),
+        "reference-implementation/test/policy.test.ts": ESCAPING_TEST,
+      }
+    )
+    const frozen = freeze(REFERENCE, directory, "60")
     expect(frozen.selectedTests).toEqual([])
     expect(frozen.outcome).toBe("none_runnable")
   })
