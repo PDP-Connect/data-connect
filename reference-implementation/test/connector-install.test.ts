@@ -372,6 +372,46 @@ test("an atomic uninstall failure leaves the prior active pointer and entrypoint
   }
 });
 
+test("SQLite: install and activation deletes roll back together when the second delete fails", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pdpp-connector-install-delete-atomicity-"));
+  const previousPreloadDir = process.env.PDPP_CONNECTOR_PRELOAD_DIR;
+  delete process.env.PDPP_CONNECTOR_PRELOAD_DIR;
+  closeDb();
+  initDb(join(dataDir, "pdpp.sqlite"));
+  try {
+    const now = new Date().toISOString();
+    getDb()
+      .prepare("INSERT INTO connector_installs(connector_id, record_json, updated_at) VALUES (?, ?, ?)")
+      .run("github", "{}", now);
+    getDb()
+      .prepare(
+        `INSERT INTO connector_activations(
+          connector_id,state,record_json,canonical_manifest_json,manifest_revision,
+          activation_id,attempt_id,updated_at
+        ) VALUES (?, 'active', '{}', '{}', '1', 'activation', 'attempt', ?)`
+      )
+      .run("github", now);
+    getDb().exec(`
+      CREATE TRIGGER fail_connector_activation_delete
+      BEFORE DELETE ON connector_activations
+      BEGIN
+        SELECT RAISE(ABORT, 'injected activation delete failure');
+      END
+    `);
+
+    const store = createConnectorInstallStore();
+    assert.ok(store.deactivateAndRemoveActivation);
+    await assert.rejects(store.deactivateAndRemoveActivation("github"), /injected activation delete failure/);
+    assert.ok(getDb().prepare("SELECT 1 FROM connector_installs WHERE connector_id=?").get("github"));
+    assert.ok(getDb().prepare("SELECT 1 FROM connector_activations WHERE connector_id=?").get("github"));
+  } finally {
+    closeDb();
+    if (previousPreloadDir === undefined) delete process.env.PDPP_CONNECTOR_PRELOAD_DIR;
+    else process.env.PDPP_CONNECTOR_PRELOAD_DIR = previousPreloadDir;
+    rmSync(dataDir, { force: true, recursive: true });
+  }
+});
+
 test("startup recovery restores the original entrypoint at each root-move crash point", async () => {
   for (const { name, moveCount } of [
     { moveCount: 0, name: "before moves" },
@@ -1735,7 +1775,7 @@ test("derived-state repair runs after the install returns and its locks are rele
   }
 });
 
-test("owner install route rejects missing installation fields", async () => {
+test("owner connector-install routes register both guards and reject missing install fields", async () => {
   type RegisteredHandler = (
     req: { body?: Record<string, unknown> },
     res: {
@@ -1775,6 +1815,12 @@ test("owner install route rejects missing installation fields", async () => {
       update: async () => assert.fail("should not update"),
     },
   });
+  assert.equal(registrations.size, 10, "the complete owner connector-install route set is registered");
+  for (const [route, handlers] of registrations) {
+    assert.equal(handlers.length, 3, `${route} registers two guards and one handler`);
+    assert.equal(handlers[0], tokenGuard, `${route} requires an owner token`);
+    assert.equal(handlers[1], ownerGuard, `${route} requires owner authorization`);
+  }
   let status = 200;
   let body: unknown;
   await routes.get("POST /v1/owner/connector-install/install")?.(
@@ -1792,8 +1838,6 @@ test("owner install route rejects missing installation fields", async () => {
   );
   assert.equal(status, 400);
   assert.deepEqual(body, { code: "invalid_request", message: "connector_id is required", param: "connector_id" });
-  assert.equal(registrations.get("POST /v1/owner/connector-install/install")?.[0], tokenGuard);
-  assert.equal(registrations.get("POST /v1/owner/connector-install/install")?.[1], ownerGuard);
 });
 
 test("owner uninstall route calls the service and returns the completed action", async () => {

@@ -19,7 +19,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import { acquireDirectoryLock } from "../server/connector-install/directory-lock.ts";
-import { ConnectorInstallTimeoutError } from "../server/connector-install/index.ts";
+import { ConnectorInstallTimeoutError, createConnectorInstallStore } from "../server/connector-install/index.ts";
 import { connectorInstanceAdvisoryLockKey } from "../server/connector-instance-write-coordinator.ts";
 import { withConnectorLifecycleLock } from "../server/connector-lifecycle-lock.ts";
 import { postgresRepairRecordDerivedColumnsPage, recordDerivedColumnsStream } from "../server/postgres-records.ts";
@@ -113,6 +113,54 @@ async function withPostgres(name: string, body: (databaseUrl: string) => Promise
     }
   );
 }
+
+test(
+  "PostgreSQL: install and activation deletes roll back together when the second delete fails",
+  { skip: POSTGRES_SKIP },
+  async () => {
+    await withPostgres("install_delete_atomicity", async () => {
+      const now = new Date().toISOString();
+      await postgresQuery(
+        "INSERT INTO connector_installs(connector_id, record_json, updated_at) VALUES ($1, $2, $3)",
+        ["github", "{}", now]
+      );
+      await postgresQuery(
+        `INSERT INTO connector_activations(
+          connector_id,state,record_json,canonical_manifest_json,manifest_revision,
+          activation_id,attempt_id,updated_at
+        ) VALUES ($1, 'active', '{}', '{}', '1', 'activation', 'attempt', $2)`,
+        ["github", now]
+      );
+      await postgresQuery(`
+        CREATE FUNCTION fail_connector_activation_delete() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+          RAISE EXCEPTION 'injected activation delete failure';
+        END;
+        $$
+      `);
+      await postgresQuery(`
+        CREATE TRIGGER fail_connector_activation_delete
+        BEFORE DELETE ON connector_activations
+        FOR EACH ROW EXECUTE FUNCTION fail_connector_activation_delete()
+      `);
+
+      const store = createConnectorInstallStore();
+      assert.ok(store.deactivateAndRemoveActivation);
+      await assert.rejects(
+        store.deactivateAndRemoveActivation("github"),
+        /injected activation delete failure/
+      );
+      assert.equal(
+        (await postgresQuery("SELECT 1 FROM connector_installs WHERE connector_id=$1", ["github"])).rowCount,
+        1
+      );
+      assert.equal(
+        (await postgresQuery("SELECT 1 FROM connector_activations WHERE connector_id=$1", ["github"])).rowCount,
+        1
+      );
+    });
+  }
+);
 
 /** True when nothing holds the install fence: probe it by taking and dropping it. */
 function installFenceIsFree(dataDir: string): boolean {
