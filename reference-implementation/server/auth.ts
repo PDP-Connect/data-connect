@@ -46,6 +46,7 @@ import {
   validateConnectorManifest,
 } from "./connector-manifest-validation.ts";
 import { lockConnectorManifestPublication } from "./connector-manifest-write-fence.ts";
+import { crashPoint } from "./crash-point.ts";
 import {
   projectResolvedCoreGrantStreams as coreProjectResolvedGrantStreams,
   coreSchemaRequiredFields,
@@ -4392,6 +4393,7 @@ async function persistApprovedSingleGrantAtomically({
         err.code = "approval_conflict";
         throw err;
       }
+      crashPoint("consent-approve:before-commit");
       return tokenId;
     });
   }
@@ -4455,6 +4457,7 @@ async function persistApprovedSingleGrantAtomically({
       err.code = "approval_conflict";
       throw err;
     }
+    crashPoint("consent-approve:before-commit");
     return tokenId;
   });
 }
@@ -7757,6 +7760,7 @@ export async function approveGrant(
     traceContext,
   });
 
+  crashPoint("consent-approve:after-commit");
   return { grant, token };
 }
 
@@ -9010,6 +9014,7 @@ async function persistHostedPackageAtomically(input: {
       await forEachSequential(input.packageEvents(packageToken), async (event) => {
         await postgresEmitSpineEventInTransaction(client, event as SpineEventInput);
       });
+      crashPoint("package-create:before-commit");
       return packageToken;
     });
   }
@@ -9036,6 +9041,7 @@ async function persistHostedPackageAtomically(input: {
     for (const event of input.packageEvents(packageToken)) {
       emitRawSpineEvent(event as SpineEventInput, db);
     }
+    crashPoint("package-create:before-commit");
     return packageToken;
   });
 }
@@ -9850,6 +9856,7 @@ export async function revokeGrantPackage(
     }
     try {
       await revokeGrant(member.grant_id, context);
+      crashPoint("package-revoke:after-member-grant-revoked");
       const childRevokedAt = nowIso();
       await markGrantPackageMemberRevoked(packageId, member.grant_id, childRevokedAt);
       revokedChildGrants.push(member.grant_id);
@@ -9887,7 +9894,9 @@ export async function revokeGrantPackage(
   }
 
   const now = nowIso();
+  crashPoint("package-revoke:before-package-mark");
   await markGrantPackageRevoked(packageId, now);
+  crashPoint("package-revoke:after-package-mark");
 
   await emitSpineEvent({
     actor_id: "pdpp_as",
@@ -9995,6 +10004,7 @@ async function issueOrRecoverOAuthAuthorizationCode(
   if (!updated.changes) {
     return recoverIssuedOAuthAuthorizationCode(await oauthCodeStore.getByDeviceCode(deviceCode), binding);
   }
+  crashPoint("oauth-code:after-issue");
   return authorizationCodeDelivery({
     ...row,
     consumed_at: null,
@@ -10199,6 +10209,7 @@ async function consumeOAuthAuthorizationCodeAtomically({
       if (consumed.rowCount !== 1) {
         throw buildOAuthAuthorizationCodeError("invalid_grant", "Authorization code is invalid or already used");
       }
+      crashPoint("oauth-exchange:after-consume-update");
       if (!refresh) {
         return;
       }
@@ -10238,6 +10249,7 @@ async function consumeOAuthAuthorizationCodeAtomically({
     if (!consumed.changes) {
       throw buildOAuthAuthorizationCodeError("invalid_grant", "Authorization code is invalid or already used");
     }
+    crashPoint("oauth-exchange:after-consume-update");
     if (!refresh) {
       return;
     }
@@ -10360,6 +10372,7 @@ export async function exchangeOAuthAuthorizationCode({
     refresh,
     tokenId: row.token_id,
   });
+  crashPoint("oauth-exchange:after-consume-commit");
   if (refresh) {
     response.refresh_token = refresh.refreshToken;
     response.access_token_expires_at = refreshAccessTokenExpiresAt(refresh.createdAt, refresh.expiresAt);
@@ -11061,6 +11074,7 @@ export async function createConsentExchangeCode({
          ) VALUES($1, $2, $3, $4, $5, NULL)`,
         [codeHash, proofHash, token, createdAt, expiresAt]
       );
+      crashPoint("consent-exchange:before-create-commit");
     });
   } else {
     transaction(() => {
@@ -11070,6 +11084,7 @@ export async function createConsentExchangeCode({
         token,
       ]);
       exec(referenceQueries.authConsentExchangeCodesInsert, [codeHash, proofHash, token, createdAt, expiresAt]);
+      crashPoint("consent-exchange:before-create-commit");
     });
   }
   return codeSecret;
@@ -11208,6 +11223,7 @@ export async function consumeConsentExchangeCode(
               [redeemedAt, codeHash]
             );
           }
+          crashPoint("consent-exchange:before-redeem-commit");
           return {
             grant: loaded.grant,
             ok: true as const,
@@ -11271,6 +11287,7 @@ export async function consumeConsentExchangeCode(
           if (!row.redeemed_at) {
             exec(referenceQueries.authConsentExchangeCodesMarkRedeemed, [redeemedAt, codeHash]);
           }
+          crashPoint("consent-exchange:before-redeem-commit");
           return {
             grant,
             ok: true as const,
@@ -11279,6 +11296,7 @@ export async function consumeConsentExchangeCode(
           };
         }
       );
+  crashPoint("consent-exchange:after-redeem-commit");
   return result;
 }
 
