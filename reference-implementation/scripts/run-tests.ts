@@ -530,6 +530,11 @@ try {
     // template. Do not re-read it off the template afterwards: an expectation
     // sourced from the thing being verified proves nothing (external review
     // P1-2).
+    // Name the template before it exists, so a run interrupted mid-build
+    // still tells its observer which database it may have created.
+    process.stdout.write(
+      `PDPP_TEST_DB_TEMPLATE ${JSON.stringify({ database: deriveDedicatedPostgresTemplateName(templateRunnerId) })}\n`
+    );
     const template = await createOwnedTestResource({
       registry: activeTemplates,
       create: (onCreated) => ensurePostgresTestTemplate(dedicatedBasePostgresTestUrl, templateRunnerId, onCreated),

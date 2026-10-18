@@ -96,18 +96,17 @@ async function listDatabases(): Promise<string[]> {
 
 // Other files (and an enclosing runner) own other databases on this server,
 // so only what the nested runner created is asserted gone.
-function runnerOwnedDatabases(output: string, before: ReadonlySet<string>, after: readonly string[]): string[] {
-  const provisioned = output
+function runnerOwnedDatabases(output: string): string[] {
+  const reported = output
     .split("\n")
-    .filter((line) => line.startsWith("PDPP_TEST_DB_PROVISION "))
-    .map((line) => (JSON.parse(line.slice("PDPP_TEST_DB_PROVISION ".length)) as { database: string }).database);
-  const templates = after.filter((name) => name.startsWith("pdpp_test_template_") && !before.has(name));
-  return [...new Set([...provisioned, ...templates])];
+    .map((line) => /^PDPP_TEST_DB_(?:PROVISION|TEMPLATE) (.*)$/.exec(line)?.[1])
+    .filter((json): json is string => json !== undefined)
+    .map((json) => (JSON.parse(json) as { database: string }).database);
+  return [...new Set(reported)];
 }
 
 for (const [signal, expectedCode] of [["SIGTERM", 143], ["SIGINT", 130]] as const) {
   test(`runner cleans databases on ${signal}`, { skip: skipReason, timeout: 660_000 }, async () => {
-    const before = new Set(await listDatabases());
     const result = await signalRunner(signal);
     const marker = `SIGNAL_SENT ${signal}`;
     const markerAt = result.output.indexOf(marker);
@@ -115,7 +114,7 @@ for (const [signal, expectedCode] of [["SIGTERM", 143], ["SIGINT", 130]] as cons
     assert.equal(result.code, expectedCode);
     assert.doesNotMatch(result.output.slice(markerAt + marker.length), /^==> /m);
     const after = await listDatabases();
-    const owned = runnerOwnedDatabases(result.output, before, after);
+    const owned = runnerOwnedDatabases(result.output);
     assert.ok(owned.length > 0, "runner must report at least one database it created");
     assert.deepEqual(owned.filter((name) => after.includes(name)), []);
   });
