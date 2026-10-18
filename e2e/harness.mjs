@@ -271,27 +271,27 @@ async function startStack({ root, launch, signal }, args) {
   console.log(
     `Reference startup: ${await waitReady(`${shared.PDPP_AS_URL}/.well-known/oauth-authorization-server`, reference, signal)}s`
   )
+  // Production build, as the desktop app serves it. `next dev` opens an HMR
+  // websocket whose reconnect refreshes the router and reloads the page, which
+  // races the relay test that cuts every socket.
+  const next = join(repo, "node_modules/next/dist/bin/next")
+  const consoleOptions = {
+    cwd: join(repo, "apps/console"),
+    extraEnv: { ...shared, NEXT_TELEMETRY_DISABLED: "1" },
+  }
+  const buildStarted = performance.now()
+  const build = launch([next, "build", "--webpack"], consoleOptions)
+  if ((await build.completion) !== 0)
+    throw new Error(`Console build failed\n${build.diagnostic()}`)
+  console.log(
+    `Console build: ${((performance.now() - buildStarted) / 1000).toFixed(2)}s`
+  )
   const web = launch(
-    [
-      join(repo, "node_modules/next/dist/bin/next"),
-      "dev",
-      "--webpack",
-      "--hostname",
-      "127.0.0.1",
-      "--port",
-      String(consolePort),
-    ],
-    {
-      cwd: join(repo, "apps/console"),
-      extraEnv: {
-        ...shared,
-        NEXT_TELEMETRY_DISABLED: "1",
-        NODE_ENV: "development",
-      },
-    }
+    [next, "start", "--hostname", "127.0.0.1", "--port", String(consolePort)],
+    consoleOptions
   )
   console.log(
-    `Console startup (next dev --webpack): ${await waitReady(`${origin}/owner/login`, web, signal)}s`
+    `Console startup (next start): ${await waitReady(`${origin}/owner/login`, web, signal)}s`
   )
   const browser = launch(
     [require.resolve("@playwright/test/cli"), "test", ...args],
@@ -405,15 +405,28 @@ export async function runInNamespace(args) {
   }
 }
 
+function alreadyIsolated() {
+  try {
+    assertLoopbackOnly()
+    return true
+  } catch {
+    return false
+  }
+}
+
 async function main() {
   // Refuse targets before namespace setup, process launch, or filesystem writes.
   refuseExternalTargets(process.env)
   const args = process.argv.slice(2)
-  if (args[0] === "--isolated") {
+  const reexeced = args[0] === "--isolated"
+  if (reexeced) args.shift()
+  // A caller that already provides a loopback-only namespace (test-sandbox
+  // --net none) forbids a nested one; any other caller re-executes below.
+  if (reexeced || alreadyIsolated()) {
     assertLoopbackOnly()
-    const stopReceiving = receiveSignals()
+    const stopReceiving = reexeced ? receiveSignals() : () => {}
     try {
-      return await runOwnedHarness(state => startStack(state, args.slice(1)))
+      return await runOwnedHarness(state => startStack(state, args))
     } finally {
       stopReceiving()
     }

@@ -51,11 +51,16 @@ import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { runOwnedHarness, runInNamespace, receiveSignals } from ${JSON.stringify(harness)};
 import { assertLoopbackOnly } from ${JSON.stringify(pathToFileURL(fileURLToPath(new URL("harness-safety.mjs", import.meta.url))).href)};
-if (!process.argv.includes("--isolated")) {
+// Same decision as harness.mjs main(): under test-sandbox --net none a nested
+// namespace is refused, so the fixture runs the inner path directly.
+const reexeced = process.argv.includes("--isolated");
+let isolated = reexeced;
+if (!reexeced) { try { assertLoopbackOnly(); isolated = true } catch {} }
+if (!isolated) {
   process.exitCode = await runInNamespace([process.argv[1], "--isolated"]);
 } else {
 assertLoopbackOnly();
-const stopReceiving = receiveSignals();
+const stopReceiving = reexeced ? receiveSignals() : () => {};
 const mode = ${JSON.stringify(mode)};
 try {
   const code = await runOwnedHarness(async ({ root, launch }) => {
