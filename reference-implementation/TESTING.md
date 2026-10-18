@@ -9,7 +9,7 @@ from the repository root.
 
 | Tier | Command | What runs | When | Measured |
 |---|---|---|---|---|
-| fast (heuristic) | `npm run test:fast` | Test files reachable from the changed code modules through static imports, literal `require` and `new URL(..., import.meta.url)`, ranked by import distance (default 1; `--depth N` widens). Any changed non-code file (JSON, SQL, fixtures), `package.json`, a lockfile, a `tsconfig`, the runner, hermetic guard or accounting code, or a deleted module falls back to the full suite. An added or edited test also runs the inventory tests. A static graph cannot see computed imports or paths, so this is a recall heuristic, never a merge oracle | Edit loop only | An edit to `operations/rs-records-detail/index.ts` runs 1 file in 2.2 s. `server/search.ts` selects 37 files and `server/records.ts` 133; an SQL edit falls back to 1,181 |
+| fast (heuristic) | `npm run test:fast` | Test files reachable from the changed code modules through static imports, literal `require` and `new URL(..., import.meta.url)`, ranked by import distance (default 1; `--depth N` widens). Any changed non-code file (JSON, SQL, fixtures), `package.json`, a lockfile, a `tsconfig`, the runner, hermetic guard or accounting code, or a deleted module falls back to the full suite. An added or edited test also runs the inventory tests. A static graph cannot see computed imports or paths, so this is a recall heuristic, never a merge oracle | Edit loop only | An edit to `operations/rs-records-detail/index.ts` runs 1 file (12 tests) in 1.5 s wall. `server/search.ts` selects 37 files and `server/records.ts` 133; an SQL edit falls back to 1,181 |
 | full, memory profile | `PDPP_TEST_PROFILE=memory-default npm test` | Every test file against the in-memory profile, inside `test-sandbox` | Before you push, and as the CI gate | 1,159 files, about 11,700 tests. 542.8 s wall, 2,769 CPU-s, 4.4 GB peak, on a 24-core host under 800% CPU (load about 26) |
 | PostgreSQL | `npm run test:postgres` | The same files against a disposable PostgreSQL 18 cluster, started for this run only, on `127.0.0.1:55447` inside the sandbox's own network namespace | Before you push a change to storage, migrations, search or records | 1,159 files, 12,072 pass, 19 skip. About 39 min at concurrency 2 on this host |
 | CI | pull request and push to `main` | The memory profile is the required RI gate. The PostgreSQL lane runs nightly in `.github/workflows/reference-implementation-postgres.yml`. Mutation testing is advisory and diff-aware. `test-scratch-lifecycle` checks the scratch-directory code | Every PR; nightly for PostgreSQL | Memory gate: test step 1,159 s, job about 21.6 min p50 on success. Nightly PostgreSQL: 12,140 tests, 0 failures, 32.6 min |
@@ -83,16 +83,11 @@ How a gap test is proven (2026-10-18 gap pass, 46 rows + 5 scheduler findings):
 3. Revert the fault. The test must pass with `skipped 0`.
 4. Paste both outputs in the PR body.
 
-Running one RI test file (inside the sandbox, never directly). The runner takes no file
-argument, so use these commands for a single file. To run the whole suite, use the tier
-commands above.
-- SQLite/memory: `test-sandbox -- node --test --import tsx --import ./scripts/hermetic/preload.ts test/<file>.test.ts`
-- PostgreSQL: `test-sandbox --pg 18 -- ...` with these three steps first. Otherwise the file silently skips or fails:
-  - Use database `pdpp_test` with the `postgresql://` scheme. `test/helpers/dedicated-postgres-test-url.ts` accepts only
-    `postgresql://postgres@127.0.0.1:55447/pdpp_test` or a runner-shaped name.
-  - Stamp the guard sentinel: `node --import tsx scripts/provision-test-database.ts <url>`.
-  - Export both `PDPP_TEST_POSTGRES_URL` and `DATABASE_URL` as that URL, and give each file its own fresh database.
-    PG test files assume they own their database.
+Running selected RI test files: list them, one RI-relative path per line, and pass the list to
+the normal entry points, which keep the sandbox, the per-file databases and the hermetic guard:
+- memory profile: `PDPP_TEST_PROFILE=memory-default npm test -- --files-from list.txt`
+- PostgreSQL: `npm run test:postgres -- --files-from list.txt` (the private cluster, sentinel and
+  per-file database come with it; no manual setup)
 - New PG test file: register it in `scripts/postgres-template-eligibility.ts` (eligible if it only uses
   Postgres as seeded data; cold-required if it observes bootstrap or migration), update the counts in
   `PG-PROFILE-51-REPORT.md`, and run `test/postgres-template-eligibility-inventory.test.ts` before the PR.
