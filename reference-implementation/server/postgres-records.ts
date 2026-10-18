@@ -2352,18 +2352,28 @@ async function queryPostgresRecordPage({
   }
   const params: unknown[] = [...countParams];
   let where = countWhere;
+  // The seek selects rows strictly after the cursor in the ORDER BY below.
+  // The null-cursor group comes after present rows in asc and before them in
+  // desc, ordered by primary key. `cursor = NULL` is never true, so a cursor
+  // that ends inside the null group needs its own predicate.
+  const cmp = order === "asc" ? ">" : "<";
+  const nullGroupFollowsPresent = order === "asc";
   if (cursorPosition) {
-    params.push(cursorPosition.cursor_value, cursorPosition.primary_key_text);
-    if (order === "asc") {
-      where += ` AND (
-        (${cursorSql} = $${params.length - 1} AND ${primarySql} > $${params.length})
-        OR (${cursorSql} IS NOT NULL AND ${cursorSql} > $${params.length - 1})
-        OR (${cursorSql} IS NULL AND $${params.length - 1} IS NOT NULL)
-      )`;
+    const cursorValue = cursorPosition.cursor_value ?? null;
+    if (cursorValue === null) {
+      params.push(cursorPosition.primary_key_text);
+      const laterInNullGroup = `(${cursorSql} IS NULL AND ${primarySql} ${cmp} $${params.length})`;
+      where += nullGroupFollowsPresent
+        ? ` AND ${laterInNullGroup}`
+        : ` AND (${laterInNullGroup} OR ${cursorSql} IS NOT NULL)`;
     } else {
+      params.push(cursorValue, cursorPosition.primary_key_text);
+      const cursorParam = `$${params.length - 1}`;
+      const keyParam = `$${params.length}`;
       where += ` AND (
-        (${cursorSql} = $${params.length - 1} AND ${primarySql} < $${params.length})
-        OR (${cursorSql} IS NOT NULL AND ${cursorSql} < $${params.length - 1})
+        (${cursorSql} = ${cursorParam} AND ${primarySql} ${cmp} ${keyParam})
+        OR (${cursorSql} IS NOT NULL AND ${cursorSql} ${cmp} ${cursorParam})
+        ${nullGroupFollowsPresent ? `OR ${cursorSql} IS NULL` : ""}
       )`;
     }
   }
