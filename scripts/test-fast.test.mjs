@@ -82,6 +82,20 @@ describe("planLanes", () => {
     ])
   })
 
+  it("runs the whole console suite for a console data file no import names", () => {
+    const { lanes } = plan(["apps/console/data/brands.json"])
+    expect(lanes.map(lane => lane.argv)).toEqual([
+      ["npm", "test", "--workspace", "apps/console"],
+    ])
+  })
+
+  it("does not pass a deleted console test to node --test", () => {
+    const { lanes } = plan(["apps/console/src/lib/gone.test.ts"])
+    expect(lanes).toHaveLength(1)
+    expect(lanes[0].argv.join(" ")).not.toContain("gone.test.ts")
+    expect(lanes[0].argv.join(" ")).toContain("format.test.ts")
+  })
+
   it("runs the whole console suite when console config changes", () => {
     const { lanes } = plan([
       "apps/console/tsconfig.json",

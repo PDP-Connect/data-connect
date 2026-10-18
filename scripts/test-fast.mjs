@@ -68,10 +68,14 @@ function selectConsoleTests(changed, consoleTests) {
   for (const file of changed) {
     if (CONSOLE_CONFIG.test(file)) return "all"
     if (CONSOLE_TEST.test(file)) {
-      selected.add(file)
-      continue
+      // A deleted test has nothing to run; tests that imported it are found below.
+      if (consoleTests.some(t => t.path === file)) {
+        selected.add(file)
+        continue
+      }
     }
-    if (!CONSOLE_CODE.test(file) && !file.startsWith(`${CONSOLE}src/`)) continue
+    // Data, assets and other files no import names: run the whole suite.
+    if (!CONSOLE_CODE.test(file) && !file.startsWith(`${CONSOLE}src/`)) return "all"
     const names = new Set([stem(file)])
     if (stem(file) === "index") names.add(path.posix.basename(dirOf(file)))
     const matches = consoleTests.filter(
@@ -211,8 +215,10 @@ function resolveBase() {
 function changedFiles(base) {
   return [
     ...new Set([
-      ...gitLines("diff", "--name-only", base, "HEAD"),
-      ...gitLines("diff", "--name-only", "HEAD"),
+      // --no-renames lists a moved file under its old and new paths, so tests
+      // that still import the old one are selected too.
+      ...gitLines("diff", "--name-only", "--no-renames", base, "HEAD"),
+      ...gitLines("diff", "--name-only", "--no-renames", "HEAD"),
       ...gitLines("ls-files", "--others", "--exclude-standard"),
     ]),
   ].sort()
