@@ -173,7 +173,16 @@ export function planLanes(changed, { base, consoleTests, testedPackages }) {
     lanes.push({
       name: `packages/${name}`,
       why: "package changed: its whole test script",
-      argv: ["npm", "test", "--workspace", `packages/${name}`],
+      // Published package manifests cannot name repo-root scripts, so the
+      // sandbox wraps the package suite here instead.
+      argv: [
+        "scripts/test-sandbox/test-sandbox",
+        "--",
+        "npm",
+        "test",
+        "--workspace",
+        `packages/${name}`,
+      ],
     })
   }
 

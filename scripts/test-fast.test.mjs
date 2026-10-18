@@ -116,6 +116,8 @@ describe("planLanes", () => {
     ])
     expect(lanes).toHaveLength(1)
     expect(lanes[0].argv).toEqual([
+      "scripts/test-sandbox/test-sandbox",
+      "--",
       "npm",
       "test",
       "--workspace",
