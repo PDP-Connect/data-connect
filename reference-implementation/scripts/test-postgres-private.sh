@@ -33,9 +33,9 @@ fi
 # PostgreSQL 18 loads extensions from extra directories without a reinstall.
 if ! psql_admin -Atc "SELECT 1 FROM pg_available_extensions WHERE name = 'vector'" | grep -q 1; then
   vector_root=${PDPP_TEST_PGVECTOR_ROOT:-}
-  if [[ -z "$vector_root" || "$major" -lt 18 ]]; then
+  if [[ "$vector_root" != /* || ! -d "$vector_root/usr/share/postgresql/$major/extension" || "$major" -lt 18 ]]; then
     echo "test-postgres-private.sh: pgvector is not available to PostgreSQL $major." >&2
-    echo "Install it for this server, or on PostgreSQL 18 set PDPP_TEST_PGVECTOR_ROOT (see this script)." >&2
+    echo "Install it for this server, or on PostgreSQL 18 set PDPP_TEST_PGVECTOR_ROOT to the absolute root of an unpacked package (see this script)." >&2
     exit 2
   fi
   psql_admin \

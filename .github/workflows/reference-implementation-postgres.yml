@@ -77,4 +77,8 @@ jobs:
         env:
           PDPP_OWNER_PASSWORD: reference-implementation-ci
           TEST_SANDBOX_PG_UNSAFE_HOST: "1"
+          # test/search-index-repair-correctness.postgres.test.ts has a 20k-record
+          # repair case that prints nothing for about 100 s on a fast host; the
+          # default 120 s idle watchdog killed it on the hosted runner.
+          PDPP_TEST_FILE_TIMEOUT_MS: "300000"
         run: npm --prefix reference-implementation run test:postgres
