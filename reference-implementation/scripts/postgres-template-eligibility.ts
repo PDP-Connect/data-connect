@@ -113,6 +113,8 @@ export const POSTGRES_TEMPLATE_ELIGIBLE_FILES: readonly string[] = [
   "test/postgres-expand-hydration.test.ts",
   "test/postgres-lexical-backend-state.test.ts",
   "test/postgres-query-bounded.test.ts",
+  // Live history pruning over seeded records; does not observe schema bootstrap.
+  "test/postgres-record-prune-anchor.test.ts",
   "test/postgres-records-ingest-noop.test.ts",
   "test/postgres-records-version-floor.test.ts",
   "test/postgres-runtime-storage.test.ts",
@@ -164,6 +166,8 @@ export const POSTGRES_TEMPLATE_ELIGIBLE_FILES: readonly string[] = [
   "test/search-index-lexical-resume.postgres.test.ts",
   "test/search-index-reconcile-scope-isolation.postgres.test.ts",
   "test/search-index-repair-correctness.postgres.test.ts",
+  // Semantic cleanup debt over seeded vectors; does not observe schema bootstrap.
+  "test/search-reconcile-g2-postgres.test.ts",
   "test/setup-binding-promotion.test.ts",
   "test/source-declaration-trust.test.ts",
   "test/source-field-name-records-parity.test.ts",
