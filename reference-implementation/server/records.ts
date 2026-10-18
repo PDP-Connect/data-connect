@@ -4130,7 +4130,9 @@ function buildPaginatedSqlParts(
 
   const selectParts = ["record_key", "record_json", "emitted_at"];
   if (cursorField) {
-    selectParts.push(`${jsonExtractExpr(cursorField)} AS __cursor_val`);
+    // NULLIF folds '' into NULL so the missing bucket ties on the cursor and
+    // orders by pk alone, which is what buildCursorSeekClause seeks by.
+    selectParts.push(`NULLIF(${jsonExtractExpr(cursorField)}, '') AS __cursor_val`);
     selectParts.push(
       `CASE WHEN ${jsonExtractExpr(cursorField)} IS NULL OR ${jsonExtractExpr(cursorField)} = '' ` +
         "     THEN 1 ELSE 0 END AS __cursor_missing"
