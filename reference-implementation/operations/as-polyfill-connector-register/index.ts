@@ -75,10 +75,15 @@ async function acceptedManifestFor(
 ): Promise<Record<string, unknown> | null> {
   try {
     return (await deps.getConnectorManifest(connectorId)) ?? null;
-  } catch {
+  } catch (error) {
     // A stored manifest that no longer parses holds no accepted content to
-    // retain, so it must stay replaceable by a valid registration.
-    return null;
+    // retain, so it must stay replaceable by a valid registration. Any other
+    // read failure (database, I/O) propagates: overwriting content the
+    // server could not read would defeat the equivocation guard.
+    if ((error as { code?: unknown } | null)?.code === "connector_invalid") {
+      return null;
+    }
+    throw error;
   }
 }
 

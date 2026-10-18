@@ -633,12 +633,28 @@ test("as.polyfill.connector.register lets a registration replace an unreadable s
     {
       ...registerDepsStub,
       getConnectorManifest: () => {
-        throw new Error("stored manifest is malformed");
+        throw Object.assign(new Error("stored manifest is malformed"), { code: "connector_invalid" });
       },
       registerConnector: () => "eqv",
     }
   );
   assert.equal(outcome.outcome, "success");
+});
+
+test("as.polyfill.connector.register does not overwrite when the stored manifest cannot be read", async () => {
+  await assert.rejects(
+    executeAsPolyfillConnectorRegister(
+      { manifest: { connector_id: "eqv", version: "v1" } },
+      {
+        ...registerDepsStub,
+        getConnectorManifest: () => {
+          throw new Error("database is locked");
+        },
+        registerConnector: () => assert.fail("must not register over unreadable accepted content"),
+      }
+    ),
+    { message: "database is locked" }
+  );
 });
 
 test("as.polyfill.connector.register rejects body without connector_key or connector_id", async () => {
