@@ -9,10 +9,10 @@ from the repository root.
 
 | Tier | Command | What runs | When | Measured |
 |---|---|---|---|---|
-| fast (heuristic) | `npm run test:fast` | Test files reachable from the changed code modules through static imports, literal `require` and `new URL(..., import.meta.url)`, ranked by import distance (default 1; `--depth N` widens). Any changed non-code file (JSON, SQL, fixtures), `package.json`, a lockfile, a `tsconfig`, the runner, hermetic guard or accounting code, or a deleted module falls back to the full suite. An added or edited test also runs the inventory tests. A static graph cannot see computed imports or paths, so this is a recall heuristic, never a merge oracle | Edit loop only | An edit to `operations/rs-records-detail/index.ts` runs 1 file (12 tests) in 1.5 s wall. `server/search.ts` selects 37 files and `server/records.ts` 133; an SQL edit falls back to 1,181 |
-| full, memory profile | `PDPP_TEST_PROFILE=memory-default npm test` | Every test file against the in-memory profile, inside `test-sandbox` | Before you push, and as the CI gate | 1,159 files, about 11,700 tests. 542.8 s wall, 2,769 CPU-s, 4.4 GB peak, on a 24-core host under 800% CPU (load about 26) |
-| PostgreSQL | `npm run test:postgres` | The same files against a disposable PostgreSQL 18 cluster, started for this run only, on `127.0.0.1:55447` inside the sandbox's own network namespace | Before you push a change to storage, migrations, search or records | 1,159 files, 12,072 pass, 19 skip. About 39 min at concurrency 2 on this host |
-| CI | pull request and push to `main` | The memory profile is the required RI gate. The PostgreSQL lane runs nightly in `.github/workflows/reference-implementation-postgres.yml`. Mutation testing is advisory and diff-aware. `test-scratch-lifecycle` checks the scratch-directory code | Every PR; nightly for PostgreSQL | Memory gate: test step 1,159 s, job about 21.6 min p50 on success. Nightly PostgreSQL: 12,140 tests, 0 failures, 32.6 min |
+| fast (heuristic) | `npm run test:fast` | Test files reachable from the changed code modules through static imports, literal `require` and `new URL(..., import.meta.url)`, ranked by import distance (default 1; `--depth N` widens). Any changed non-code file (JSON, SQL, fixtures), `package.json`, a lockfile, a `tsconfig`, the runner, hermetic guard or accounting code, or a deleted module falls back to the full suite. An added or edited test also runs the inventory tests. A static graph cannot see computed imports or paths, so this is a recall heuristic, never a merge oracle | Edit loop only | An edit to `operations/rs-records-detail/index.ts` runs 1 file (12 tests) in 1.5 s wall. `server/search.ts` selects 40 files and `server/records.ts` 139; an SQL edit falls back to all 1,190 discovered files (counts at integration cdc6b6fe2f) |
+| full, memory profile | `PDPP_TEST_PROFILE=memory-default npm test` | Every test file against the in-memory profile, inside `test-sandbox` | Before you push, and as the CI gate Measured at 59a3fb480e (1,159 files then; 1,190 now): about 11,700 tests, 542.8 s wall, 2,769 CPU-s, 4.4 GB peak, on a 24-core host under 800% CPU (load about 26) |
+| PostgreSQL | `npm run test:postgres` | The same files against a disposable PostgreSQL 18 cluster, started for this run only, on `127.0.0.1:55447` inside the sandbox's own network namespace | Before you push a change to storage, migrations, search or records Measured at 59a3fb480e (1,159 files): 12,072 pass, 19 skip, about 39 min at concurrency 2 on this host |
+| CI | pull request and push to `main` | The memory profile is the required RI gate. The PostgreSQL lane runs nightly in `.github/workflows/reference-implementation-postgres.yml`. Mutation testing is advisory and diff-aware. `test-scratch-lifecycle` checks the scratch-directory code | Reference-impacting PRs, excluding PRs into `testeng/integration`; nightly for PostgreSQL | Memory gate: test step 1,159 s, job about 21.6 min p50 on success. Nightly PostgreSQL: 12,140 tests, 0 failures, 32.6 min |
 
 CI sets `TEST_SANDBOX_DISABLE=1`, because the hosted VM is the isolation boundary. The PostgreSQL lane
 installs pgvector 0.8.7 from PGDG and runs a 300 s idle watchdog. Pull requests into
@@ -22,7 +22,9 @@ The full gate and the PostgreSQL run use the memory and PostgreSQL profiles of o
 `scripts/run-tests.ts`. Both commands run under `scripts/test-scratch/run-command.ts` and
 `scripts/test-sandboxed.sh`. The sandbox puts the run in a cgroup scope in the shared
 `agent-tests` slice with a loopback-only network, so concurrent agents share one CPU and memory
-budget. It prints one JSON receipt with wall time, CPU-seconds and peak memory.
+budget. It prints one JSON receipt with wall time, CPU-seconds, peak memory and the `enforcement` it
+actually applied (`cgroup+netns`, `cgroup`, `netns`, `none` or `disabled`). Every isolation claim
+below depends on that field: with `none` or `disabled` (macOS, CI) the run is not isolated.
 
 ### pgvector for local PostgreSQL runs
 
@@ -31,9 +33,10 @@ server has none, unpack the package and name its root. This works on PostgreSQL 
 root access:
 
 ```
-mkdir -p ~/.tmp/pgvector && cd ~/.tmp/pgvector
-apt-get download postgresql-18-pgvector
-dpkg-deb -x postgresql-18-pgvector_*.deb .
+(mkdir -p ~/.tmp/pgvector && cd ~/.tmp/pgvector &&
+  apt-get download postgresql-18-pgvector &&
+  dpkg-deb -x postgresql-18-pgvector_*.deb .)
+# then, from reference-implementation/:
 PDPP_TEST_PGVECTOR_ROOT=$HOME/.tmp/pgvector npm run test:postgres
 ```
 
@@ -44,9 +47,9 @@ The path must be absolute. `scripts/test-postgres-private.sh` points the private
 
 | Scope | What | Why |
 |---|---|---|
-| Shared, read-only | `node_modules`, the toolchain, builds | Immutable inputs; installing or building per worker is pure cost |
-| Per run | The sandbox scope and network namespace; the scratch directory (`TMPDIR`), owned by `scripts/test-scratch/run-command.ts`; the private PostgreSQL cluster; one schema template, built only when a template-eligible file is selected | Another run's scratch, network and databases cannot be reached |
-| Per file | Its own child process; its own PostgreSQL database, created from the template or cold, as `scripts/postgres-template-eligibility.ts` says; a cold restore database for the backup test | A test file owns its database and cannot see another file's rows |
+| Shared | `node_modules`, the toolchain, builds | Left unchanged by convention, not enforced: a run can write them. Installing or building per worker is pure cost |
+| Per run | The sandbox scope and network namespace; the scratch directory (`TMPDIR`), owned by `scripts/test-scratch/run-command.ts`; the private PostgreSQL cluster; one schema template, built only when a template-eligible file is selected | Another run's network and databases cannot be reached under `cgroup+netns`. Scratch is owned by its run (recovery never deletes a live owner's scratch) but is not hidden: another run on the same host can read and write it |
+| Per file | Its own child process; its own PostgreSQL database, created from the template or cold, as `scripts/postgres-template-eligibility.ts` says; a cold restore database for `test/backup-table-inventory-postgres.test.ts`. Exceptions, from `scripts/run-tests-db-requirements.ts`: `test/backup-table-inventory.test.ts`, `scripts/run-tests-file-concurrency-cap.test.ts` and `scripts/run-tests-resource-policy.test.ts` get no outer database; `test/postgres-record-index-bootstrap.test.ts` creates its own through its helper | A test file owns its database and does not see another file's rows |
 | Per test | State the test creates and removes itself (temp roots, rows, spawned children) | Tests clean up their own state |
 | Locked or serial | File concurrency: 8 for the memory profile, 2 for PostgreSQL, clamped by CPU count and file count | More workers than CPUs only adds memory and trips timeouts |
 
@@ -87,7 +90,8 @@ Running selected RI test files: list them, one RI-relative path per line, and pa
 the normal entry points, which keep the sandbox, the per-file databases and the hermetic guard:
 - memory profile: `PDPP_TEST_PROFILE=memory-default npm test -- --files-from list.txt`
 - PostgreSQL: `npm run test:postgres -- --files-from list.txt` (the private cluster, sentinel and
-  per-file database come with it; no manual setup)
+  per-file database come with it; no manual setup; the exceptions listed under the isolation
+  contract still apply)
 Keep the list out of `/tmp`: the sandbox gives each run a private `/tmp`, so the runner cannot see
 a list written there.
 - New PG test file: register it in `scripts/postgres-template-eligibility.ts` (eligible if it only uses
@@ -147,7 +151,7 @@ CI numbers are from `reference-implementation.yml` over the 30 days to 2026-10-1
 | Fast pre-merge gate with a time budget | Kubernetes presubmit under 1 h, preferably under 30 min. Chromium median trybot cycle under 40 min | RI job about 21.6 min p50 on success (p95 22.7 min) | Closed |
 | Affected-only selection with measured recall | Shopify 99.94% recall (5 missed failures in 8,360 commits). Meta over 95% of failures | `test:fast` selects by import distance. Recall measured on 1 sample only | Open: replay 100 or more merged commits against full-run results |
 | Full-run backstop behind selection | Shopify runs full suites for every deployed commit | A push to `main` runs the full gate | Closed |
-| Tiering by cost, with a scheduled tier | OpenJDK tier1 to tier4. CockroachDB nightly lanes | `test:fast`, memory gate on every PR, PostgreSQL lane nightly (32.6 min) | Closed |
+| Tiering by cost, with a scheduled tier | OpenJDK tier1 to tier4. CockroachDB nightly lanes | `test:fast`, memory gate on reference-impacting PRs (not PRs into `testeng/integration`), PostgreSQL lane nightly (32.6 min) | Closed |
 | Flake policy: no retries, owned quarantine, flake tracking | Kubernetes bans retries and assigns each flake to an owner. Firefox disables a test at 150 failures in 21 days | No retries. No quarantine owner process and no flake-rate tracking. Known load flakes fixed in #513 (2) | Open |
 | Green rate with a stated target | Node.js targets 80% for PRs and 90% for daily master | `main` 90.3% (28 of 31 pushes). PRs 70.9% (596 of 841 completed). 14 of 20 re-run PRs went green after a failed first attempt | Open: no target stated, no tracking |
 | Regression test per fix | Django, TypeScript and Node.js require one that fails before the fix | `AGENTS.md` has a soft rule ("when feasible"). Testeng lanes enforce it by review with a seeded-fault proof | Partly closed |
