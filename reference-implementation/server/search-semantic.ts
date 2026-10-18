@@ -440,15 +440,41 @@ export async function hasSemanticIndexState({
   connectorInstanceId: string;
   stream: string;
 }): Promise<boolean> {
+  const scopePrefix = `[${JSON.stringify(stream)},`;
+  const escapedPrefix = scopePrefix.replaceAll("\\", "\\\\").replaceAll("%", "\\%").replaceAll("_", "\\_");
+  const scopePattern = `${escapedPrefix}%`;
   if (isPostgresStorageBackend()) {
-    return Boolean(
+    const metadataExists = Boolean(
       (await postgresGetSemanticMeta({ connectorInstanceId, stream })) ||
         (await postgresGetSemanticProgress({ connectorInstanceId, stream }))
     );
+    if (metadataExists) return true;
+    const { rows } = await postgresQuery<{ exists: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1 FROM semantic_search_blob
+          WHERE connector_instance_id = $1 AND scope_key LIKE $2 ESCAPE '\\'
+       ) AS exists`,
+      [connectorInstanceId, scopePattern]
+    );
+    return Boolean(rows[0]?.exists);
   }
-  return Boolean(
+  const metadataExists = Boolean(
     getOne(referenceQueries.searchSemanticMetaGetByStream, [connectorInstanceId, stream]) ||
       getOne(referenceQueries.searchSemanticProgressGetByStream, [connectorInstanceId, stream])
+  );
+  if (metadataExists) return true;
+  return Boolean(
+    getDb()
+      .prepare(
+        `SELECT EXISTS (
+         SELECT 1 FROM semantic_search_blob
+          WHERE connector_instance_id = ? AND scope_key LIKE ? ESCAPE '\\'
+         UNION ALL
+         SELECT 1 FROM semantic_search_rowid
+          WHERE connector_instance_id = ? AND scope_key LIKE ? ESCAPE '\\'
+       ) AS present`
+      )
+      .get<{ present: number }>(connectorInstanceId, scopePattern, connectorInstanceId, scopePattern)?.present
   );
 }
 
