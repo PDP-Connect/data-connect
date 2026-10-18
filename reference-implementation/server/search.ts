@@ -342,6 +342,7 @@ let nextLexicalBackfillJobId = 1;
 let lexicalBackfillPhaseHook: LexicalBackfillPhaseHook = null;
 
 interface LexicalBackfillManifestStream {
+  absentStream?: string;
   name: string;
   query?: { search?: { lexical_fields?: string[] } };
 }
@@ -1342,19 +1343,6 @@ async function lexicalMetaGetFingerprint({
   return await getSearchIndexStore().metaGetFingerprint({ connectorInstanceId, stream });
 }
 
-async function lexicalMetaExists({
-  connectorInstanceId,
-  stream,
-}: {
-  connectorInstanceId: string;
-  stream: string;
-}): Promise<boolean> {
-  if (isPostgresStorageBackend()) {
-    return !!(await lexicalMetaGetFingerprint({ connectorInstanceId, stream }));
-  }
-  return !!getOne(referenceQueries.searchMetaExistsByStream, [connectorInstanceId, stream]);
-}
-
 async function deleteLexicalBackfillStream(
   connectorId: string,
   connectorInstanceId: string,
@@ -1678,14 +1666,16 @@ async function backfillLexicalStream({
     // version declared lexical_fields for it, drop the stale index +
     // meta so historical data doesn't keep matching against a field set
     // that's no longer declared.
-    const metaExists = await lexicalMetaExists({ connectorInstanceId, stream });
-    if (metaExists) {
-      log(
-        `[PDPP] Lexical index: stream='${stream}' connector='${connectorId}' ` +
-          "no longer declares lexical_fields — dropping stale index + meta"
-      );
-      await deleteLexicalBackfillStream(connectorId, connectorInstanceId, stream, mStream);
-    }
+    log(
+      `[PDPP] Lexical index: stream='${stream}' connector='${connectorId}' ` +
+        "no longer declares lexical_fields — dropping stale index + meta"
+    );
+    await deleteLexicalBackfillStream(
+      connectorId,
+      connectorInstanceId,
+      stream,
+      mStream.absentStream ? { absentStream: mStream.absentStream } : mStream
+    );
     return progressJob;
   }
   progressJob = updateLexicalBackfillJob(progressJob, {
@@ -1918,7 +1908,11 @@ export async function lexicalIndexBackfillForManifest({
         connectorId,
         connectorInstanceId,
       });
-      await assertLexicalBackfillManifestCurrent(connectorId, manifest);
+      // Removed-stream scopes carry an absence-fenced sentinel. Their
+      // mutation validates absence inside the write transaction instead.
+      if (!manifest.streams.every((stream) => stream.absentStream)) {
+        await assertLexicalBackfillManifestCurrent(connectorId, manifest);
+      }
       // Keep scans outside writer admission. Each bounded mutation below
       // validates the manifest inside its instance-locked transaction. A
       // concurrent ingest also advances the dirty revision, so this pass

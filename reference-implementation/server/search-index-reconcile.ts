@@ -26,6 +26,8 @@
 
 import { getOne, transaction } from "../lib/db.ts";
 import {
+  assertConnectorManifestStreamAbsentSync,
+  assertConnectorManifestStreamAbsentWithClient,
   assertConnectorManifestStreamSubsetSync,
   assertConnectorManifestStreamSubsetWithClient,
 } from "./connector-manifest-write-fence.ts";
@@ -145,24 +147,22 @@ async function runScopeBackfills(
   // worst case proportional to one stream's drift-check, not every stream
   // this connector declares.
   //
-  // A stream the manifest no longer declares (targetStream null) has nothing
-  // to pin. Its stale index is removed by orphan cleanup over the full
-  // stream list, still pinned to this one connection: every declared stream
-  // is "visited", so only undeclared streams count as orphans.
+  // A stream the manifest no longer declares is still an exact dirty scope.
+  // Pass an absence-fenced sentinel so index-only rows can be deleted even
+  // when their metadata row was already lost, without sweeping sibling streams.
   const removedStream = targetStream === null;
   const pinnedManifest = {
     ...manifest,
     connector_id: connectorId,
     storage_binding: { connector_instance_id: connectorInstanceId },
-    streams: removedStream ? (manifest.streams as unknown[]) : [targetStream],
+    streams: removedStream ? [{ name: stream, absentStream: stream }] : [targetStream],
   };
 
-  // orphanStreamCleanup:false for a pinned stream -- the manifest names ONE
-  // stream, so "every stored stream the manifest does not name" is every
-  // healthy sibling.
+  // Scope-pinned reconcile never sweeps sibling streams. Removed-stream
+  // cleanup uses its explicit absence-fenced sentinel above.
   await lexicalIndexBackfillForManifest({
     manifest: pinnedManifest,
-    orphanStreamCleanup: removedStream,
+    orphanStreamCleanup: false,
     signal,
     verifyContent: !removedStream,
   } as unknown as LexicalBackfillOptions);
@@ -242,7 +242,11 @@ async function runScopeBackfills(
   const cleared = isPostgresStorageBackend()
     ? await withPostgresBulkTransaction(
         async (client) => {
-          await assertConnectorManifestStreamSubsetWithClient(client, connectorId, pinnedManifest);
+          if (removedStream) {
+            await assertConnectorManifestStreamAbsentWithClient(client, connectorId, stream);
+          } else {
+            await assertConnectorManifestStreamSubsetWithClient(client, connectorId, pinnedManifest);
+          }
           assertCompletionCurrent();
           const applied = await clearSearchIndexDirty(key, scope.revision, new Date().toISOString(), client);
           assertCompletionCurrent();
@@ -251,7 +255,11 @@ async function runScopeBackfills(
         { lockConnectorInstanceId: connectorInstanceId }
       )
     : transaction(() => {
-        assertConnectorManifestStreamSubsetSync(connectorId, pinnedManifest);
+        if (removedStream) {
+          assertConnectorManifestStreamAbsentSync(connectorId, stream);
+        } else {
+          assertConnectorManifestStreamSubsetSync(connectorId, pinnedManifest);
+        }
         assertCompletionCurrent();
         return clearSearchIndexDirtySync(key, scope.revision, new Date().toISOString());
       });
