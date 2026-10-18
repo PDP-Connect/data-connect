@@ -163,6 +163,7 @@ async function runScopeBackfills(
   await lexicalIndexBackfillForManifest({
     manifest: pinnedManifest,
     orphanStreamCleanup: removedStream,
+    signal,
     verifyContent: !removedStream,
   } as unknown as LexicalBackfillOptions);
   assertStorageGenerationCurrent(generation);
