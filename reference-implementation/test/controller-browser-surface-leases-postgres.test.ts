@@ -37,6 +37,20 @@ function fakeAdmitRunConnection(): (input: {
   };
 }
 
+async function waitForLeaseStatus(
+  leaseStore: ReturnType<typeof createPostgresBrowserSurfaceLeaseStore>,
+  leaseId: string,
+  status: string
+): Promise<void> {
+  // Returns as soon as the row commits; the deadline only turns a lost release into a clear failure.
+  const deadline = Date.now() + 30_000;
+  // biome-ignore lint/performance/noAwaitInLoops: polling is sequential by definition.
+  while ((await leaseStore.getLease(leaseId))?.status !== status) {
+    assert.ok(Date.now() < deadline, `lease ${leaseId} never reached ${status}`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
 function schedulerStore(): SchedulerStore {
   const active = new Map<string, ActiveRunRecord>();
   return {
@@ -190,6 +204,12 @@ test("dedicated PostgreSQL: duplicate allocator-absent ready rows create one bou
     runId: `${namespace}-successor-run`,
   });
   await controller.drainActiveRuns(1000);
+  // drainActiveRuns forgets a run as soon as its cleanup starts, so it does not
+  // wait for the lease release that cleanup persists. Wait for that write here:
+  // the after hook deletes leases and then surfaces, and a release write still
+  // in flight between those two statements leaves a lease row that blocks the
+  // surface delete (browser_surface_leases_surface_id_fkey).
+  await waitForLeaseStatus(leaseStore, `${namespace}-successor-lease`, "released");
   assert.equal(result.status, "started");
   assert.equal(ensureCalls, 1);
   assert.deepEqual(
