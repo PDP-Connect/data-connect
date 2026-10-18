@@ -8,9 +8,9 @@
  * `cancel-run-result.ts` (not `operator-runs.ts`) specifically so it can be
  * imported and executed under `node --test`: `operator-runs.ts` transitively
  * imports `owner-token.ts`, which does `import "server-only"` and throws
- * outside the React Server runtime. We unit-test the classifier directly and
- * separately assert (via source regex, below) that `cancelRun` feeds the real
- * response status/body/error-code through it and POSTs the cancel route.
+ * outside the React Server runtime. We unit-test the classifier directly; the
+ * wrapper request and response path is exercised in
+ * `operator-runs-wire.behavior.test.ts`.
  *
  * Outcomes under test (task 4.1):
  *   202                         → cancel_requested
@@ -20,19 +20,13 @@
  */
 
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
 import { cancelRunErrorCode, classifyCancelRunResponse } from "./cancel-run-result.ts";
-
-const HERE = fileURLToPath(new URL(".", import.meta.url));
-const OPERATOR_RUNS_FILE = `${HERE}operator-runs.ts`;
 
 const NO_SUCH_RUN_RE = /no such run/;
 const OTHER_CONFLICT_RE = /some other conflict/;
 const UPSTREAM_EXPLODED_RE = /upstream exploded/;
 const STATUS_FALLBACK_RE = /run cancel failed \(503\)/;
-const CATCH_RE = /catch/;
 
 test("202 maps to cancel_requested", () => {
   assert.deepEqual(classifyCancelRunResponse(202, null, null), { status: "cancel_requested" });
@@ -73,26 +67,4 @@ test("cancelRunErrorCode reads error.code and tolerates malformed bodies", () =>
   assert.equal(cancelRunErrorCode({ error: "string-form" }), null);
   assert.equal(cancelRunErrorCode("plain text"), null);
   assert.equal(cancelRunErrorCode(null), null);
-});
-
-// ── Source-regex guard for the I/O wiring (matches operator-runs.test.ts style).
-// `cancelRun` itself can't be imported here (server-only chain), so assert it
-// POSTs the cancel route, reads the body, and routes it through the classifier
-// + error-code extractor — and lets ReferenceServerUnreachableError propagate
-// (it never catches it).
-
-const CANCEL_RUN_EXPORT_RE = /export async function cancelRun\(runId: string\): Promise<CancelRunResult>/;
-const CANCEL_RUN_POSTS_ROUTE_RE =
-  /fetchAs\(`\/_ref\/runs\/\$\{encodeURIComponent\(runId\)\}\/cancel`,\s*\{\s*method: "POST",\s*\}\)/;
-const CANCEL_RUN_USES_CLASSIFIER_RE = /classifyCancelRunResponse\(response\.status, body, cancelRunErrorCode\(body\)\)/;
-
-test("cancelRun POSTs the owner-session cancel route and routes the response through the classifier", async () => {
-  const src = await readFile(OPERATOR_RUNS_FILE, "utf8");
-  assert.match(src, CANCEL_RUN_EXPORT_RE);
-  assert.match(src, CANCEL_RUN_POSTS_ROUTE_RE);
-  assert.match(src, CANCEL_RUN_USES_CLASSIFIER_RE);
-  // It must NOT catch ReferenceServerUnreachableError — that propagates exactly
-  // like the other run helpers leave it.
-  const block = src.slice(src.indexOf("export async function cancelRun"));
-  assert.equal(CATCH_RE.test(block.slice(0, block.indexOf("export async function deleteConnectorSchedule"))), false);
 });
