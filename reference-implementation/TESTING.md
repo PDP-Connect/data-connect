@@ -97,8 +97,8 @@ the normal entry points, which keep the sandbox, the per-file databases and the 
 - PostgreSQL: `npm run test:postgres -- --files-from list.txt` (the private cluster, sentinel and
   per-file database come with it; no manual setup; the exceptions listed under the isolation
   contract still apply)
-Keep the list out of `/tmp`: the sandbox gives each run a private `/tmp`, so the runner cannot see
-a list written there.
+Since `test-sandbox` c1ae39d, `/tmp` paths passed as arguments are visible inside the sandbox, so the list
+may live in `/tmp`.
 - New PG test file: register it in `scripts/postgres-template-eligibility.ts` (eligible if it only uses
   Postgres as seeded data; cold-required if it observes bootstrap or migration), update the counts in
   `PG-PROFILE-51-REPORT.md`, and run `test/postgres-template-eligibility-inventory.test.ts` before the PR.
