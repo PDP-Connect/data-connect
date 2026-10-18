@@ -4,6 +4,7 @@
 /** The database pointer is the only authority for an OCI connector's runnable bytes. */
 import { createHash, randomUUID } from "node:crypto";
 import { normalizeConnectorManifestForStorage } from "../auth.ts";
+import { crashPoint } from "../crash-point.ts";
 import { getDb } from "../db.ts";
 import { isPostgresStorageBackend, postgresQuery, withPostgresTransaction } from "../postgres-storage.ts";
 import type { ConnectorInstallRecord } from "./index.ts";
@@ -142,6 +143,7 @@ export async function publishConnectorActivation(record: ConnectorInstallRecord)
          ON CONFLICT(connector_id) DO UPDATE SET record_json=EXCLUDED.record_json,updated_at=EXCLUDED.updated_at`,
         [id, values.recordJson]
       );
+      crashPoint("activation-authority:in-publish");
     });
   } else {
     getDb()
@@ -172,6 +174,7 @@ export async function publishConnectorActivation(record: ConnectorInstallRecord)
         db.prepare(
           "INSERT INTO connector_installs(connector_id,record_json,updated_at) VALUES(?,?,datetime('now')) ON CONFLICT(connector_id) DO UPDATE SET record_json=excluded.record_json,updated_at=excluded.updated_at"
         ).run(id, values.recordJson);
+        crashPoint("activation-authority:in-publish");
       })
       .immediate();
   }
@@ -296,6 +299,7 @@ function assertCompatibleRepairManifest(
 
 /** Legacy installations are imported once. A registry mismatch enters repair rather than guessing policy. */
 async function migrateLegacyActivation(connectorId: string): Promise<void> {
+  crashPoint("activation-authority:before-legacy-import");
   if (isPostgresStorageBackend()) {
     await withPostgresTransaction(async (client) => {
       await client.query("SELECT pg_advisory_xact_lock(hashtext('connector_activation'), hashtext($1))", [connectorId]);
@@ -317,6 +321,7 @@ async function migrateLegacyActivation(connectorId: string): Promise<void> {
         [connectorId]
       );
       const coherent = registry.rows[0] && canonicalJson(registry.rows[0].manifest) === values.canonicalManifestJson;
+      crashPoint("activation-authority:in-legacy-import");
       await client.query(
         `INSERT INTO connector_activations(connector_id,state,record_json,canonical_manifest_json,manifest_revision,activation_id,attempt_id,repair_reason,updated_at)
         VALUES($1,$2,$3,$4,$5,$6,$7,$8,clock_timestamp()::text)`,
@@ -351,6 +356,7 @@ async function migrateLegacyActivation(connectorId: string): Promise<void> {
           .prepare("SELECT manifest FROM connectors WHERE connector_id=?")
           .get<{ manifest: string }>(connectorId);
         const coherent = registry && canonicalJson(JSON.parse(registry.manifest)) === values.canonicalManifestJson;
+        crashPoint("activation-authority:in-legacy-import");
         db.prepare(`INSERT INTO connector_activations(connector_id,state,record_json,canonical_manifest_json,manifest_revision,activation_id,attempt_id,repair_reason,updated_at)
         VALUES(?,?,?,?,?,?,?,?,datetime('now'))`).run(
           connectorId,

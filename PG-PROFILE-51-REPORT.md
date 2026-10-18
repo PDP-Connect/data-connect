@@ -168,7 +168,7 @@ tail:
 
 The completed profile receipt recorded 1,034 files; that historical receipt
 is unchanged. The template equivalence registry is a different measure:
-150 eligible plus 37 cold-required files, for **187** total. The
+151 eligible plus 37 cold-required files, for **188** total. The
 handle-generation, issuance-cutover, opaque-cursor and search-index repair
 tests remain registered. These counts are recomputed from the merged registry arrays.
 
@@ -187,7 +187,7 @@ $ PATH=.../node/22.23.1/bin NODE_OPTIONS=--import=tsx node --test --import tsx t
 # fail 0
 
 $ node --import tsx --input-type=module ...
-template_equivalence_files=148
+template_equivalence_files=149
 
 $ git diff --check
 (no output)
