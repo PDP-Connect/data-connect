@@ -122,9 +122,11 @@ import {
   createHostedMcpGrantPackage,
   deleteCimdDocument,
   deleteRegisteredClient,
+  connectorDeclarationDigest,
   exchangeGrantScopedDeviceCode,
   exchangeOAuthAuthorizationCode,
   exchangeOAuthRefreshToken,
+  getAcceptedDeclarationDigest,
   getCimdDocument,
   getConfiguredNativeManifest,
   getConnectorManifest,
@@ -7214,6 +7216,8 @@ export function buildAsApp(opts: ServerOpts = {}) {
     // GET /connectors/:id (manifest read) is unchanged — it exposes no user
     // data and is needed by the unauthenticated client-side connect flow.
     const asPolyfillConnectorsContext = {
+      declarationDigest: connectorDeclarationDigest,
+      getAcceptedDeclarationDigest,
       getConnectorManifest,
       handleError,
       normalizeManifestForStorage: normalizeConnectorManifestForStorage,

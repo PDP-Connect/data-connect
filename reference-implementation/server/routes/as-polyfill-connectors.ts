@@ -60,6 +60,9 @@ export interface MountAsPolyfillConnectorsContext {
   getConnectorManifest: (
     connectorId: string
   ) => Promise<Record<string, unknown> | null | undefined> | Record<string, unknown> | null | undefined;
+  /** Digest of a stored-form manifest's parsed content; delegated to `connectorDeclarationDigest`. */
+  declarationDigest: (storedManifest: Record<string, unknown>) => string;
+  getAcceptedDeclarationDigest: (connectorId: string, version: string) => Promise<string | null> | string | null;
   handleError: (res: unknown, err: unknown) => void;
   /**
    * Storage-form projection of a manifest, used to compare a candidate with
@@ -94,6 +97,8 @@ export function mountAsPolyfillConnectorRegister(app: AppLike, ctx: MountAsPolyf
       const outcome = await executeAsPolyfillConnectorRegister(
         { manifest: req.body },
         {
+          declarationDigest: ctx.declarationDigest,
+          getAcceptedDeclarationDigest: ctx.getAcceptedDeclarationDigest,
           getConnectorManifest: ctx.getConnectorManifest,
           normalizeManifestForStorage: ctx.normalizeManifestForStorage,
           registerConnector: ctx.registerConnector,

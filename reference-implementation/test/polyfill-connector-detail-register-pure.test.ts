@@ -62,6 +62,8 @@ test("detail: a present manifest is returned as the success envelope", async () 
 
 // No declaration is accepted yet, so the equivocation check never fires here.
 const noAcceptedDeclaration = {
+  declarationDigest: (m: Record<string, unknown>) => JSON.stringify(m),
+  getAcceptedDeclarationDigest: () => null,
   getConnectorManifest: () => null,
   normalizeManifestForStorage: (m: Record<string, unknown>) => ({
     connectorId: String(m.connector_key ?? m.connector_id),

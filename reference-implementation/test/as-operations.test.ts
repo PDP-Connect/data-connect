@@ -586,6 +586,13 @@ test("as.introspect strips grant_storage_binding from public envelope", async ()
 
 // Identity normalization and an empty catalog: no accepted declaration exists.
 const registerDepsStub = {
+  declarationDigest: (m: Record<string, unknown>) =>
+    JSON.stringify(m, (_k, v: unknown) =>
+      v && typeof v === "object" && !Array.isArray(v)
+        ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => a.localeCompare(b)))
+        : v
+    ),
+  getAcceptedDeclarationDigest: () => null,
   getConnectorManifest: () => null,
   normalizeManifestForStorage: (m: Record<string, unknown>) => ({
     connectorId: String(m.connector_key ?? m.connector_id),
@@ -625,6 +632,23 @@ test("as.polyfill.connector.register treats key order as no change, and a new ve
   const next = { connector_id: "eqv", streams: [{ name: "beta" }], version: "v2" };
   assert.equal((await executeAsPolyfillConnectorRegister({ manifest: next }, deps)).outcome, "success");
   assert.equal(registered.length, 2);
+});
+
+test("as.polyfill.connector.register compares with the content accepted under the key, not the current manifest", async () => {
+  const v1A = { connector_id: "eqv", streams: [{ name: "alpha" }], version: "v1" };
+  const v2B = { connector_id: "eqv", streams: [{ name: "beta" }], version: "v2" };
+  const v1C = { connector_id: "eqv", streams: [{ name: "gamma" }], version: "v1" };
+  const digests = new Map([["v1", registerDepsStub.declarationDigest(v1A)]]);
+  const deps = {
+    ...registerDepsStub,
+    getAcceptedDeclarationDigest: (_id: string, version: string) => digests.get(version) ?? null,
+    getConnectorManifest: () => v2B,
+    registerConnector: () => "eqv",
+  };
+  const rejected = await executeAsPolyfillConnectorRegister({ manifest: v1C }, deps);
+  assert.equal(rejected.outcome, "failure");
+  assert.equal(rejected.status, 409);
+  assert.equal((await executeAsPolyfillConnectorRegister({ manifest: v1A }, deps)).outcome, "success");
 });
 
 test("as.polyfill.connector.register lets a registration replace an unreadable stored manifest", async () => {

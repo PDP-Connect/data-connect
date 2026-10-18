@@ -10,7 +10,7 @@
  * - Issues opaque bearer tokens (random strings)
  * - Implements RFC 7662-style introspection with PDPP extensions
  */
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { createRequire } from "node:module";
 import {
   BATCH_CONSENT_STAGED_ENTRY_SOFT_CAP,
@@ -3411,6 +3411,35 @@ function canonicalManifestJson(rawManifest: string): string {
   });
 }
 
+/** Digest of the parsed content of a stored-form manifest; key order is not content. */
+export function connectorDeclarationDigest(storedManifest: Record<string, unknown>): string {
+  return createHash("sha256").update(canonicalManifestJson(JSON.stringify(storedManifest))).digest("hex");
+}
+
+function declarationVersionOf(manifestJson: string): string | null {
+  const version = (JSON.parse(manifestJson) as { version?: unknown }).version;
+  return typeof version === "string" && version ? version : null;
+}
+
+/**
+ * The digest of the content first accepted under (connector, version), or
+ * null when none was recorded (for example a version accepted before digests
+ * were retained).
+ */
+export async function getAcceptedDeclarationDigest(connectorId: string, version: string): Promise<string | null> {
+  if (isPostgresStorageBackend()) {
+    const row = await pgOne(
+      "SELECT content_digest FROM connector_accepted_declarations WHERE connector_id = $1 AND declaration_version = $2",
+      [connectorId, version]
+    );
+    return (row?.content_digest as string | undefined) ?? null;
+  }
+  const row = getDb()
+    .prepare("SELECT content_digest FROM connector_accepted_declarations WHERE connector_id = ? AND declaration_version = ?")
+    .get<{ content_digest: string }>(connectorId, version);
+  return row?.content_digest ?? null;
+}
+
 /** Streams whose lexical or semantic index a manifest change can invalidate. */
 function retrievalIndexedStreamNames(manifest: unknown): string[] {
   const parsed = typeof manifest === "string" ? JSON.parse(manifest) : manifest;
@@ -3484,6 +3513,14 @@ async function persistManifestAndAdvanceGenerations(
             )
           ).rows[0]?.manifest
         : null;
+      const acceptedVersion = declarationVersionOf(manifestJson);
+      if (acceptedVersion) {
+        await client.query(
+          `INSERT INTO connector_accepted_declarations(connector_id, declaration_version, content_digest)
+           VALUES($1, $2, $3) ON CONFLICT DO NOTHING`,
+          [connectorId, acceptedVersion, connectorDeclarationDigest(JSON.parse(manifestJson))]
+        );
+      }
       const changed = await client.query(
         `INSERT INTO connectors(connector_id, manifest)
          VALUES($1, $2::jsonb)
@@ -3549,6 +3586,14 @@ async function persistManifestAndAdvanceGenerations(
           markRecordDerivedRepairPendingSqlite({ connectorId, connectorInstanceId, stream }, markedAt);
         }
       }
+    }
+    const acceptedVersion = declarationVersionOf(manifestJson);
+    if (acceptedVersion) {
+      execDynamicSqlAcknowledged(
+        `INSERT INTO connector_accepted_declarations(connector_id, declaration_version, content_digest)
+         VALUES(?, ?, ?) ON CONFLICT DO NOTHING`,
+        [connectorId, acceptedVersion, connectorDeclarationDigest(JSON.parse(manifestJson))]
+      );
     }
     if (existing?.manifest && canonicalManifestJson(existing.manifest) === canonicalManifestJson(manifestJson)) {
       return false;

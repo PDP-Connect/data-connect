@@ -26,6 +26,13 @@ export interface AsPolyfillConnectorRegisterDependencies {
   getConnectorManifest: (
     connectorKey: string
   ) => Promise<Record<string, unknown> | null | undefined> | Record<string, unknown> | null | undefined;
+  /** Digest of a stored-form manifest's parsed content; key order is not content. */
+  declarationDigest: (storedManifest: Record<string, unknown>) => string;
+  /**
+   * Digest of the content first accepted under (connector key, version), kept
+   * whether or not that version is still current; null when none was recorded.
+   */
+  getAcceptedDeclarationDigest: (connectorId: string, version: string) => Promise<string | null> | string | null;
   /** Produces the exact representation `registerConnector` persists, and its storage key. */
   normalizeManifestForStorage: (manifest: Record<string, unknown>) => {
     connectorId: string;
@@ -52,22 +59,6 @@ export interface AsPolyfillConnectorRegisterFailureOutcome {
 export type AsPolyfillConnectorRegisterOutcome =
   | AsPolyfillConnectorRegisterSuccessOutcome
   | AsPolyfillConnectorRegisterFailureOutcome;
-
-// Key-order-insensitive serialization: "different parsed content" is a
-// structural difference, never a byte difference. Array order is content.
-function canonicalJson(value: unknown): string {
-  return JSON.stringify(value, (_key, v: unknown) => {
-    if (v && typeof v === "object" && !Array.isArray(v)) {
-      const record = v as Record<string, unknown>;
-      return Object.fromEntries(
-        Object.keys(record)
-          .sort()
-          .map((key) => [key, record[key]])
-      );
-    }
-    return v;
-  });
-}
 
 async function acceptedManifestFor(
   deps: AsPolyfillConnectorRegisterDependencies,
@@ -110,15 +101,21 @@ export async function executeAsPolyfillConnectorRegister(
   // content is an idempotent re-registration; a new version is a new key.
   deps.validateManifest(manifest as Record<string, unknown>);
   const { connectorId, storedManifest } = deps.normalizeManifestForStorage(manifest as Record<string, unknown>);
-  const accepted = await acceptedManifestFor(deps, connectorId);
-  if (
-    accepted &&
-    accepted.version === storedManifest.version &&
-    canonicalJson(accepted) !== canonicalJson(storedManifest)
-  ) {
+  const version = storedManifest.version;
+  let acceptedDigest: string | null = null;
+  if (typeof version === "string" && version) {
+    acceptedDigest = (await deps.getAcceptedDeclarationDigest(connectorId, version)) ?? null;
+    if (acceptedDigest === null) {
+      // No digest was retained for this key (accepted before digests were
+      // kept): the current manifest is the only accepted content to compare.
+      const current = await acceptedManifestFor(deps, connectorId);
+      acceptedDigest = current && current.version === version ? deps.declarationDigest(current) : null;
+    }
+  }
+  if (acceptedDigest !== null && acceptedDigest !== deps.declarationDigest(storedManifest)) {
     return {
       errorCode: "declaration_equivocation",
-      errorMessage: `Connector ${connectorId} version ${String(accepted.version)} is already registered with different content; register a new version instead`,
+      errorMessage: `Connector ${connectorId} version ${String(version)} is already registered with different content; register a new version instead`,
       outcome: "failure",
       status: 409,
     };

@@ -117,3 +117,23 @@ test("a new version with different content is accepted", async () => {
     assert.deepEqual(await retainedStreamNames(asUrl), ["beta"]);
   });
 });
+
+test("content accepted under an earlier version is retained after a newer version becomes current", async () => {
+  await withServer(async (asUrl) => {
+    assert.equal((await register(asUrl, manifest("v1", "alpha"))).status, 201);
+    assert.equal((await register(asUrl, manifest("v2", "beta"))).status, 201);
+
+    // v1 is no longer current, but its accepted content A is still protected.
+    const conflicting = await register(asUrl, manifest("v1", "gamma"));
+    assert.equal(conflicting.status, 409);
+    assert.equal(((await conflicting.json()) as { error: { code: string } }).error.code, "declaration_equivocation");
+
+    const { getAcceptedDeclarationDigest, connectorDeclarationDigest, normalizeConnectorManifestForStorage } =
+      await import("../server/auth.ts");
+    const acceptedA = connectorDeclarationDigest(normalizeConnectorManifestForStorage(manifest("v1", "alpha")).storedManifest);
+    assert.equal(await getAcceptedDeclarationDigest("eqv", "v1"), acceptedA);
+
+    // The same accepted content is still accepted (idempotent) after v2.
+    assert.equal((await register(asUrl, manifest("v1", "alpha"))).status, 201);
+  });
+});
