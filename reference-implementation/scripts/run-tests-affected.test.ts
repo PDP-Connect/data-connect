@@ -17,6 +17,7 @@ const staticImport = (specifier: string) =>
 	["import ", JSON.stringify(specifier), ";"].join("");
 const dynamicImport = (specifier: string) =>
 	["const load = () => import(", JSON.stringify(specifier), ");"].join("");
+const inventorySource = `const ${["test", "Dir"].join("")} = __dirname; await ${["re", "addir"].join("")}(${["test", "Dir"].join("")}, { withFileTypes: true });`;
 
 async function tree(files: Record<string, string>): Promise<string> {
 	await mkdir(scratchRoot, { recursive: true });
@@ -50,6 +51,48 @@ test("selects a directly changed test", async () => {
 		},
 	);
 	assert.deepEqual(result.files, ["test/direct.test.ts"]);
+});
+
+test("selects test-tree inventory tests when a test file is added", async () => {
+	const root = await tree({
+		"test/new.test.ts": "test('new', () => {});",
+		"test/inventory.test.ts": inventorySource,
+		"test/other.test.ts": "test('other', () => {});",
+	});
+	const result = await selectAffectedTests(
+		root,
+		["test/new.test.ts", "test/inventory.test.ts", "test/other.test.ts"],
+		{
+			added: ["reference-implementation/test/new.test.ts"],
+			addedOrModified: ["reference-implementation/test/new.test.ts"],
+			deleted: [],
+		},
+	);
+	assert.deepEqual(result.files, [
+		"test/inventory.test.ts",
+		"test/new.test.ts",
+	]);
+	assert.match(result.reason, /added test selects test-tree inventory tests/);
+});
+
+test("a removed test file falls back to discovery including inventory tests", async () => {
+	const root = await tree({
+		"test/inventory.test.ts": inventorySource,
+		"test/other.test.ts": "test('other', () => {});",
+	});
+	const result = await selectAffectedTests(
+		root,
+		["test/inventory.test.ts", "test/other.test.ts"],
+		{
+			addedOrModified: [],
+			deleted: ["reference-implementation/test/removed.test.ts"],
+		},
+	);
+	assert.equal(result.fallback, true);
+	assert.deepEqual(result.files, [
+		"test/inventory.test.ts",
+		"test/other.test.ts",
+	]);
 });
 
 test("selects a test for a transitive import two hops away", async () => {

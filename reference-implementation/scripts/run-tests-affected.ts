@@ -27,6 +27,7 @@ const FALLBACK_PATHS = [
 ];
 
 export interface ChangeSet {
+	added?: string[];
 	addedOrModified: string[];
 	deleted: string[];
 }
@@ -40,6 +41,15 @@ export interface Selection {
 function isModulePath(path: string): boolean {
 	return MODULE_EXTENSIONS.includes(
 		extname(path) as (typeof MODULE_EXTENSIONS)[number],
+	);
+}
+
+function enumeratesTestTree(source: string): boolean {
+	if (/\bdiscoverTestFiles\s*\(/.test(source)) return true;
+	// Inventory tests bind the test directory to __dirname before enumerating it.
+	return (
+		/\b(?:readdir(?:Sync)?|glob(?:Sync)?)\s*\(/.test(source) &&
+		/\b(?:const|let|var)\s+(?:testDir|testsDir)\s*=\s*__dirname\b/.test(source)
 	);
 }
 
@@ -388,9 +398,29 @@ export async function selectAffectedTests(
 		if (visit(testPath))
 			selected.push(relative(repoRoot, testPath).replaceAll("\\", "/"));
 	}
+	const discovered = new Set(testAbs);
+	const addedTests = (changes.added ?? [])
+		.map((path) => path.replaceAll("\\", "/"))
+		.filter((path) => path.startsWith("reference-implementation/test/"))
+		.map((path) =>
+			resolve(repoRoot, path.slice("reference-implementation/".length)),
+		)
+		.filter((path) => discovered.has(path));
+	if (addedTests.length > 0) {
+		for (const testPath of testAbs) {
+			if (
+				!selected.includes(
+					relative(repoRoot, testPath).replaceAll("\\", "/"),
+				) &&
+				enumeratesTestTree(sources.get(testPath) ?? "")
+			) {
+				selected.push(relative(repoRoot, testPath).replaceAll("\\", "/"));
+			}
+		}
+	}
 	const reason =
 		selected.length > 0
-			? `affected import closure for ${changed.join(", ")}`
+			? `affected import closure for ${changed.join(", ")}${addedTests.length > 0 ? "; added test selects test-tree inventory tests" : ""}`
 			: `no discovered tests depend on ${changed.join(", ")}`;
 	return { files: selected.sort(), reason, fallback: false };
 }
@@ -415,6 +445,11 @@ async function main(): Promise<void> {
 	const dryRun = args.includes("--dry-run");
 	const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 	const testFiles = await discoverTestFiles(repoRoot, join(repoRoot, "test"));
+	const gitPaths = (...args: string[]): string[] =>
+		execFileSync("git", args, { cwd: repoRoot, encoding: "utf8" })
+			.trim()
+			.split("\n")
+			.filter(Boolean);
 	let base = baseOverride;
 	if (!base) {
 		try {
@@ -427,35 +462,15 @@ async function main(): Promise<void> {
 			base = "origin/main";
 		}
 	}
-	const changedNames = execFileSync("git", ["diff", "--name-only", base], {
-		cwd: repoRoot,
-		encoding: "utf8",
-	})
-		.trim()
-		.split("\n")
-		.filter(Boolean);
-	const staged = execFileSync("git", ["diff", "--cached", "--name-only"], {
-		cwd: repoRoot,
-		encoding: "utf8",
-	})
-		.trim()
-		.split("\n")
-		.filter(Boolean);
-	const unstaged = execFileSync("git", ["diff", "--name-only"], {
-		cwd: repoRoot,
-		encoding: "utf8",
-	})
-		.trim()
-		.split("\n")
-		.filter(Boolean);
-	const untracked = execFileSync(
-		"git",
-		["ls-files", "--others", "--exclude-standard"],
-		{ cwd: repoRoot, encoding: "utf8" },
-	)
-		.trim()
-		.split("\n")
-		.filter(Boolean);
+	const changedNames = gitPaths("diff", "--name-only", base);
+	const staged = gitPaths("diff", "--cached", "--name-only");
+	const unstaged = gitPaths("diff", "--name-only");
+	const untracked = gitPaths(
+		"ls-files",
+		"--full-name",
+		"--others",
+		"--exclude-standard",
+	);
 	const allChanged = [
 		...new Set([...changedNames, ...staged, ...unstaged, ...untracked]),
 	];
@@ -464,18 +479,21 @@ async function main(): Promise<void> {
 			path.startsWith("reference-implementation/") ||
 			/^(packages|scripts\/test-scratch|scripts\/test-sandbox)\//.test(path),
 	);
-	const deleted = execFileSync(
-		"git",
-		["diff", "--name-only", "--diff-filter=D", base],
-		{ cwd: repoRoot, encoding: "utf8" },
-	)
-		.trim()
-		.split("\n")
-		.filter(Boolean);
+	const deleted = [
+		...gitPaths("diff", "--name-only", "--diff-filter=D", base),
+		...gitPaths("diff", "--cached", "--name-only", "--diff-filter=D"),
+		...gitPaths("diff", "--name-only", "--diff-filter=D"),
+	];
 	const deletedLocal = [
 		...new Set(deleted.filter((path) => relevant.includes(path))),
 	];
+	const added = [
+		...gitPaths("diff", "--name-only", "--diff-filter=A", base),
+		...gitPaths("diff", "--cached", "--name-only", "--diff-filter=A"),
+		...untracked,
+	];
 	const selection = await selectAffectedTests(repoRoot, testFiles, {
+		added: [...new Set(added.filter((path) => relevant.includes(path)))],
 		addedOrModified: relevant.filter((path) => !deletedLocal.includes(path)),
 		deleted: deletedLocal,
 	});
