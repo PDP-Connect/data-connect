@@ -46,7 +46,7 @@ export default defineConfig(({ mode }) => ({
     },
   },
   test: {
-    environment: "happy-dom",
+    environment: "node",
     include: [
       "src/**/*.test.{ts,tsx}",
       "src-tauri/**/*.test.ts",

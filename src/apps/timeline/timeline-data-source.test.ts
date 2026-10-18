@@ -1,5 +1,6 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
+// @vitest-environment happy-dom
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
 const tauriFetch = vi.fn()

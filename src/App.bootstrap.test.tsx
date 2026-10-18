@@ -1,5 +1,6 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
+// @vitest-environment happy-dom
 
 // Characterizes what the legacy frontend (src/App.tsx) actually runs when its
 // window exists. The default unified desktop build never creates that window
