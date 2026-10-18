@@ -90,6 +90,7 @@ import {
 } from "./connector-install/index.ts";
 import { removeConnectorActivation } from "./connector-install/activation-authority.ts";
 import { installedConnectorManifestRegistration } from "./connector-install/manifest-registration.ts";
+import { validateConnectorManifest } from "./connector-manifest-validation.ts";
 import {
   connectorLifecycleDataDir,
   withConnectorLifecycleLock,
@@ -121,9 +122,11 @@ import {
   createHostedMcpGrantPackage,
   deleteCimdDocument,
   deleteRegisteredClient,
+  connectorDeclarationDigest,
   exchangeGrantScopedDeviceCode,
   exchangeOAuthAuthorizationCode,
   exchangeOAuthRefreshToken,
+  getAcceptedDeclarationDigest,
   getCimdDocument,
   getConfiguredNativeManifest,
   getConnectorManifest,
@@ -139,6 +142,7 @@ import {
   listGrantPackagesForOwner,
   listOwnerIssuedClients,
   listRegisteredConnectorIds,
+  normalizeConnectorManifestForStorage,
   registerConnector,
   registerDynamicClient,
   requireGrantContractAgainstManifest,
@@ -1576,6 +1580,9 @@ async function ensureReferenceConnectorCatalogEntry(
     // decouple-device-enrollment-from-ingest-writer-admission design D1.
     await registerConnector(localCollectorManifest, {
       backfillRetrievalIndexes: false,
+      // The server's own shipped manifest: a trusted publication, so it may
+      // supersede the accepted content recorded for its version.
+      replaceAcceptedDigest: true,
     });
     return;
   }
@@ -7212,11 +7219,15 @@ export function buildAsApp(opts: ServerOpts = {}) {
     // GET /connectors/:id (manifest read) is unchanged — it exposes no user
     // data and is needed by the unauthenticated client-side connect flow.
     const asPolyfillConnectorsContext = {
+      declarationDigest: connectorDeclarationDigest,
+      getAcceptedDeclarationDigest,
       getConnectorManifest,
       handleError,
+      normalizeManifestForStorage: normalizeConnectorManifestForStorage,
       pdppError,
       registerConnector,
       requireOwnerSessionForRegister: lockConnectorRegistry ? ownerAuth.requireOwnerSession : null,
+      validateManifest: (manifest: Record<string, unknown>) => validateConnectorManifest(manifest),
     };
     mountAsPolyfillConnectorRegister(
       app,

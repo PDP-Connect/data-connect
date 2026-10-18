@@ -74,6 +74,11 @@ export const BACKUP_TABLE_INVENTORY: Record<string, BackupTableInventoryEntry> =
     classification: "backup_required",
     reason: "Subscriptions are durable client delivery configuration.",
   },
+  connector_accepted_declarations: {
+    classification: "backup_required",
+    reason:
+      "First accepted content digest per connector version. A restore that drops it lets a registration replace content the server had accepted (Core section 5 equivocation guard).",
+  },
   connector_attention_records: {
     classification: "backup_required",
     reason: "Owner-visible connector attention state must survive restore.",

@@ -10,7 +10,7 @@
  * - Issues opaque bearer tokens (random strings)
  * - Implements RFC 7662-style introspection with PDPP extensions
  */
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { createRequire } from "node:module";
 import {
   BATCH_CONSENT_STAGED_ENTRY_SOFT_CAP,
@@ -3404,12 +3404,54 @@ function canonicalManifestJson(rawManifest: string): string {
     if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
       return candidate;
     }
-    const sorted: Record<string, unknown> = {};
+    // Null prototype: an own "__proto__" key from JSON.parse must stay content
+    // rather than hit the inherited setter and vanish from the digest.
+    const sorted: Record<string, unknown> = Object.create(null);
     for (const key of Object.keys(candidate).sort()) {
       sorted[key] = candidate[key];
     }
     return sorted;
   });
+}
+
+/** Digest of the parsed content of a stored-form manifest; key order is not content. */
+export function connectorDeclarationDigest(storedManifest: Record<string, unknown>): string {
+  return createHash("sha256").update(canonicalManifestJson(JSON.stringify(storedManifest))).digest("hex");
+}
+
+function declarationVersionOf(manifestJson: string): string | null {
+  const version = (JSON.parse(manifestJson) as { version?: unknown }).version;
+  return typeof version === "string" && version ? version : null;
+}
+
+/** Version and content digest of a stored manifest, or null when it holds neither (or does not parse). */
+function declarationDigestOf(manifest: unknown): { digest: string; version: string } | null {
+  try {
+    const parsed = (typeof manifest === "string" ? JSON.parse(manifest) : manifest) as Record<string, unknown>;
+    const version = parsed?.version;
+    return typeof version === "string" && version ? { digest: connectorDeclarationDigest(parsed), version } : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The digest of the content first accepted under (connector, version), or
+ * null when none was recorded (for example a version accepted before digests
+ * were retained).
+ */
+export async function getAcceptedDeclarationDigest(connectorId: string, version: string): Promise<string | null> {
+  if (isPostgresStorageBackend()) {
+    const row = await pgOne(
+      "SELECT content_digest FROM connector_accepted_declarations WHERE connector_id = $1 AND declaration_version = $2",
+      [connectorId, version]
+    );
+    return (row?.content_digest as string | undefined) ?? null;
+  }
+  const row = getDb()
+    .prepare("SELECT content_digest FROM connector_accepted_declarations WHERE connector_id = ? AND declaration_version = ?")
+    .get<{ content_digest: string }>(connectorId, version);
+  return row?.content_digest ?? null;
 }
 
 /** Streams whose lexical or semantic index a manifest change can invalidate. */
@@ -3464,7 +3506,7 @@ function derivedRepairPlan(
 async function persistManifestAndAdvanceGenerations(
   connectorId: string,
   manifestJson: string,
-  options: { queueDerivedRepair?: boolean } = {}
+  options: { queueDerivedRepair?: boolean; replaceAcceptedDigest?: boolean } = {}
 ): Promise<boolean> {
   const markedAt = new Date().toISOString();
   if (isPostgresStorageBackend()) {
@@ -3477,14 +3519,30 @@ async function persistManifestAndAdvanceGenerations(
       if (activation.rows[0]?.state === "active") {
         assertActiveConnectorStreamShape(activation.rows[0].canonical_manifest_json, manifestJson);
       }
-      const previous = options.queueDerivedRepair
-        ? (
-            await client.query<{ manifest: unknown }>(
-              "SELECT manifest FROM connectors WHERE connector_id = $1 FOR UPDATE",
-              [connectorId]
-            )
-          ).rows[0]?.manifest
-        : null;
+      const previous = (
+        await client.query<{ manifest: unknown }>("SELECT manifest FROM connectors WHERE connector_id = $1 FOR UPDATE", [
+          connectorId,
+        ])
+      ).rows[0]?.manifest;
+      // A manifest stored before digests were retained is the only record of
+      // its version's accepted content: keep it before it is replaced.
+      const previousDigest = previous ? declarationDigestOf(previous) : null;
+      if (previousDigest) {
+        await client.query(
+          `INSERT INTO connector_accepted_declarations(connector_id, declaration_version, content_digest)
+           VALUES($1, $2, $3) ON CONFLICT DO NOTHING`,
+          [connectorId, previousDigest.version, previousDigest.digest]
+        );
+      }
+      const acceptedVersion = declarationVersionOf(manifestJson);
+      if (acceptedVersion) {
+        await client.query(
+          `INSERT INTO connector_accepted_declarations(connector_id, declaration_version, content_digest)
+           VALUES($1, $2, $3)
+           ON CONFLICT ${options.replaceAcceptedDigest ? "(connector_id, declaration_version) DO UPDATE SET content_digest = EXCLUDED.content_digest" : "DO NOTHING"}`,
+          [connectorId, acceptedVersion, connectorDeclarationDigest(JSON.parse(manifestJson))]
+        );
+      }
       const changed = await client.query(
         `INSERT INTO connectors(connector_id, manifest)
          VALUES($1, $2::jsonb)
@@ -3550,6 +3608,23 @@ async function persistManifestAndAdvanceGenerations(
           markRecordDerivedRepairPendingSqlite({ connectorId, connectorInstanceId, stream }, markedAt);
         }
       }
+    }
+    const previousDigest = existing?.manifest ? declarationDigestOf(existing.manifest) : null;
+    if (previousDigest) {
+      execDynamicSqlAcknowledged(
+        `INSERT INTO connector_accepted_declarations(connector_id, declaration_version, content_digest)
+         VALUES(?, ?, ?) ON CONFLICT DO NOTHING`,
+        [connectorId, previousDigest.version, previousDigest.digest]
+      );
+    }
+    const acceptedVersion = declarationVersionOf(manifestJson);
+    if (acceptedVersion) {
+      execDynamicSqlAcknowledged(
+        `INSERT INTO connector_accepted_declarations(connector_id, declaration_version, content_digest)
+         VALUES(?, ?, ?)
+         ON CONFLICT ${options.replaceAcceptedDigest ? "(connector_id, declaration_version) DO UPDATE SET content_digest = excluded.content_digest" : "DO NOTHING"}`,
+        [connectorId, acceptedVersion, connectorDeclarationDigest(JSON.parse(manifestJson))]
+      );
     }
     if (existing?.manifest && canonicalManifestJson(existing.manifest) === canonicalManifestJson(manifestJson)) {
       return false;
@@ -3762,7 +3837,9 @@ function canonicalApprovalReviewJson(value: unknown): string {
     if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
       return candidate;
     }
-    const sorted: Record<string, unknown> = {};
+    // Null prototype: an own "__proto__" key from JSON.parse must stay content
+    // rather than hit the inherited setter and vanish from the digest.
+    const sorted: Record<string, unknown> = Object.create(null);
     for (const key of Object.keys(candidate).sort()) {
       sorted[key] = candidate[key];
     }
@@ -5462,6 +5539,12 @@ export async function registerConnector(
     backfillRetrievalIndexes?: boolean;
     /** Queue the record-column and search-index repair durably with the manifest (see derivedRepairPlan). */
     queueDerivedRepair?: boolean;
+    /**
+     * Trusted internal publication (startup reconcile, installer): replace the
+     * accepted digest for the version written instead of keeping the first.
+     * The HTTP registration path never sets it.
+     */
+    replaceAcceptedDigest?: boolean;
     skipDerivedRepair?: boolean;
     skipManifestPersistence?: boolean;
   } = {}
@@ -5471,6 +5554,7 @@ export async function registerConnector(
   if (!options.skipManifestPersistence) {
     await persistManifestAndAdvanceGenerations(connectorId, JSON.stringify(storedManifest), {
       queueDerivedRepair: options.queueDerivedRepair === true,
+      replaceAcceptedDigest: options.replaceAcceptedDigest === true,
     });
   }
   await maybeRegisterConnectorPhaseForTest("after-manifest-persisted", { connectorId, manifest: storedManifest });

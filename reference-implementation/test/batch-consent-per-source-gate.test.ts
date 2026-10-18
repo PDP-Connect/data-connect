@@ -516,7 +516,7 @@ test("batch consent gate: suppressed approve-all cannot silently approve every s
 
 test("batch consent gate: sensitive source with no time bound suppresses approve-all", async () => {
   await withHarness(async ({ asUrl, spotify, reddit }) => {
-    await registerManifest(asUrl, { ...spotify, sensitivity: "sensitive" });
+    await registerManifest(asUrl, { ...spotify, sensitivity: "sensitive", version: "sensitive" });
     const body = unwrapBody(
       await par(asUrl, [
         detail({ id: spotify.connector_id, kind: "connector" }, [{ name: "top_artists" }], {
@@ -536,7 +536,7 @@ test("batch consent gate: three sensitive sources suppress approve-all", async (
   await withHarness(async ({ asUrl, spotify, reddit, github }) => {
     for (const manifest of [spotify, reddit, github]) {
       // biome-ignore lint/performance/noAwaitInLoops: Sequential test setup and assertion order is intentional.
-      await registerManifest(asUrl, { ...manifest, sensitivity: "sensitive" });
+      await registerManifest(asUrl, { ...manifest, sensitivity: "sensitive", version: "sensitive" });
     }
     const body = unwrapBody(
       await par(asUrl, [
