@@ -4,16 +4,16 @@
 /**
  * Process-kill tests for the revocation cascades.
  *
- * `markPackageRevokedCascade` (package row, package tokens, member rows,
- * refresh tokens) and `revokeGrantStorage` (grant row, tokens, refresh
- * tokens) used to run their statements one by one, each in its own commit.
+ * `markPackageRevokedCascade` and `revokeGrantStorage` used to run their
+ * statements one by one, each in its own commit.
  * A kill between two of them left a row that says "revoked" with live rows
  * beneath it. The owner revoke route refuses a package whose persisted
  * status is not 'active' (server/routes/ref-grants.ts), so nothing retried
  * the half-finished cascade.
  *
  * Each scenario runs the real revocation in a child process, SIGKILLs it
- * after the status row and before the rest, reopens the same storage
+ * after the refresh rows and before the remaining dependent and parent
+ * rows, reopens the same storage
  * (SQLite file or private Postgres database) and asserts that a revoked row
  * has nothing live under it, and that a retry reaches the fully revoked
  * state. SIGKILL keeps the kernel page cache: this proves recovery from a
@@ -21,6 +21,9 @@
  */
 
 import assert from "node:assert/strict";
+import test from "node:test";
+import { setTimeout } from "node:timers/promises";
+import pg from "pg";
 
 import {
   exchangeOAuthAuthorizationCode,
@@ -30,14 +33,17 @@ import {
   revokeGrant,
   revokeGrantPackage,
 } from "../server/auth.ts";
-import { closePostgresStorage } from "../server/postgres-storage.ts";
+import { closePostgresStorage, postgresQuery } from "../server/postgres-storage.ts";
 import {
   approveAndStageOAuthRequest,
+  closeStorage,
   count,
   isActive,
   OAUTH_CLIENT_ID,
   OAUTH_REDIRECT_URI,
+  openStorage,
   rows,
+  seedBase,
 } from "./helpers/auth-kill-fixture.ts";
 import {
   assertPackageFullyRevoked,
@@ -87,8 +93,98 @@ scenario(
   }
 );
 
+for (const kind of ["grant", "package"] as const) {
+  test(`Postgres ${kind} revoke waits for the refresh row before locking the parent`, {
+    skip: POSTGRES_URL ? false : "PDPP_TEST_POSTGRES_URL unset",
+  }, async () => {
+    assert.ok(POSTGRES_URL);
+    await withTemporaryPostgresDatabase(
+      {
+        closeConnections: closePostgresStorage,
+        connectionString: POSTGRES_URL,
+        databaseName: `pdpp_test_revoke_lock_${kind}_${process.pid}`,
+      },
+      async (pgUrl) => {
+        const spec = { backend: "postgres" as const, pgUrl, sqlitePath: ":memory:" };
+        await openStorage(spec);
+        const holder = new pg.Client({ connectionString: pgUrl });
+        let revoking: Promise<unknown> | undefined;
+        try {
+          await seedBase();
+          let id: string;
+          if (kind === "package") {
+            id = (await packageWithRefreshToken(spec)).packageId;
+          } else {
+            const approved = await approveAndStageOAuthRequest(spec);
+            const delivery = await issueOAuthAuthorizationCodeForDeviceCode(approved.deviceCode, approved);
+            await exchangeOAuthAuthorizationCode({
+              clientId: OAUTH_CLIENT_ID,
+              code: delivery?.code,
+              codeVerifier: approved.pkce.verifier,
+              redirectUri: OAUTH_REDIRECT_URI,
+            });
+            id = approved.grantId;
+          }
+          const column = kind === "grant" ? "grant_id" : "package_id";
+          const table = kind === "grant" ? "grants" : "grant_packages";
+          const refresh = await postgresQuery<{ refresh_token_hash: string }>(
+            `SELECT refresh_token_hash FROM oauth_refresh_tokens WHERE ${column} = $1`,
+            [id]
+          );
+          assert.equal(refresh.rows.length, 1, "premise: one refresh row");
+          await holder.connect();
+          await holder.query("BEGIN");
+          const [backend] = (await holder.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")).rows;
+          assert.ok(backend);
+          const { pid } = backend;
+          const [refreshRow] = refresh.rows;
+          assert.ok(refreshRow);
+          // The refresh path locks this exact row before it locks its parent.
+          await holder.query("SELECT * FROM oauth_refresh_tokens WHERE refresh_token_hash = $1 FOR UPDATE", [
+            refreshRow.refresh_token_hash,
+          ]);
+          revoking = kind === "grant" ? revokeGrant(id) : revokeGrantPackage(id);
+          // Attach a handler immediately; the result is still checked below.
+          revoking.catch(() => undefined);
+          let blocked = false;
+          const deadline = Date.now() + 10_000;
+          while (!blocked && Date.now() < deadline) {
+            // biome-ignore lint/performance/noAwaitInLoops: Poll until the database observes the blocked revoke.
+            const observation = await postgresQuery<{ blocked: boolean }>(
+              "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))) AS blocked",
+              [pid]
+            );
+            const [observed] = observation.rows;
+            assert.ok(observed);
+            ({ blocked } = observed);
+            if (!blocked) {
+              await setTimeout(10);
+            }
+          }
+          assert.ok(blocked, "revoke must wait on the held refresh row");
+          await assert.doesNotReject(
+            () => holder.query(`SELECT 1 FROM ${table} WHERE ${column} = $1 FOR UPDATE NOWAIT`, [id]),
+            "dependent rows first: revoke must not hold the parent while waiting for refresh"
+          );
+          await holder.query("COMMIT");
+          await revoking;
+          const parent = await postgresQuery<{ status: string }>(`SELECT status FROM ${table} WHERE ${column} = $1`, [
+            id,
+          ]);
+          assert.equal(parent.rows[0]?.status, "revoked", "revoke completes after refresh releases its lock");
+        } finally {
+          await holder.query("ROLLBACK").catch(() => undefined);
+          await holder.end();
+          await revoking?.catch(() => undefined);
+          await closeStorage(spec);
+        }
+      }
+    );
+  });
+}
+
 scenario(
-  "grant revocation killed after the grant row never leaves a revoked grant with a live token or refresh token",
+  "grant revocation killed inside the cascade never leaves a revoked grant with a live token or refresh token",
   async (spec) => {
     const approved = await approveAndStageOAuthRequest(spec);
     const delivery = await issueOAuthAuthorizationCodeForDeviceCode(approved.deviceCode, {
@@ -102,7 +198,7 @@ scenario(
       redirectUri: OAUTH_REDIRECT_URI,
     });
     assert.equal(typeof exchanged.refresh_token, "string");
-    await killAt(spec, "grant-revoke:after-status-update", "revoke-grant", {
+    await killAt(spec, "grant-revoke:in-cascade", "revoke-grant", {
       grantId: approved.grantId,
     });
 

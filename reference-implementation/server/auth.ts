@@ -8266,8 +8266,9 @@ const postgresGrantPackageStore: GrantPackageStore = {
     ),
   markPackageRevokedCascade: ({ packageId, revokedAt }) =>
     withPostgresTransaction(async (client) => {
+      // Lock refresh rows, tokens, members, then the parent to match refresh and consent redemption.
       await client.query(
-        "UPDATE grant_packages SET status = 'revoked', revoked_at = $1 WHERE package_id = $2 AND status = 'active'",
+        "UPDATE oauth_refresh_tokens SET status = 'revoked', revoked_at = $1 WHERE package_id = $2 AND status = 'active'",
         [revokedAt, packageId]
       );
       crashPoint("package-revoke:in-cascade");
@@ -8277,7 +8278,7 @@ const postgresGrantPackageStore: GrantPackageStore = {
         [revokedAt, packageId]
       );
       await client.query(
-        "UPDATE oauth_refresh_tokens SET status = 'revoked', revoked_at = $1 WHERE package_id = $2 AND status = 'active'",
+        "UPDATE grant_packages SET status = 'revoked', revoked_at = $1 WHERE package_id = $2 AND status = 'active'",
         [revokedAt, packageId]
       );
     }),
@@ -8409,11 +8410,12 @@ const sqliteGrantPackageStore: GrantPackageStore = {
     exec(referenceQueries.authGrantPackageMembersMarkRevokedByGrant, [revokedAt, packageId, grantId]),
   markPackageRevokedCascade: ({ packageId, revokedAt }) => {
     transaction(() => {
-      exec(referenceQueries.authGrantPackagesMarkRevoked, [revokedAt, packageId]);
+      // Keep the dependent-first order used by Postgres to avoid refresh/consent deadlocks.
+      exec(referenceQueries.authOauthRefreshTokensRevokeByPackage, [revokedAt, packageId]);
       crashPoint("package-revoke:in-cascade");
       exec(referenceQueries.authTokensRevokeByPackage, [packageId]);
       exec(referenceQueries.authGrantPackageMembersMarkRevokedByPackage, [revokedAt, packageId]);
-      exec(referenceQueries.authOauthRefreshTokensRevokeByPackage, [revokedAt, packageId]);
+      exec(referenceQueries.authGrantPackagesMarkRevoked, [revokedAt, packageId]);
     });
   },
 };
@@ -12425,25 +12427,25 @@ async function requireRevocablePersistedGrant(
 }
 
 async function revokeGrantStorage(grantId: string): Promise<void> {
-  // One transaction: a kill between the statements used to leave a revoked grant whose token
-  // and refresh token rows stayed live, and the owner routes refuse to retry a revoked grant.
+  // One transaction: a kill between statements rolls back the whole cascade.
+  // Lock refresh rows, tokens, then the parent to match refresh and consent redemption.
   if (isPostgresStorageBackend()) {
     await withPostgresTransaction(async (client) => {
-      await client.query("UPDATE grants SET status = 'revoked' WHERE grant_id = $1", [grantId]);
-      crashPoint("grant-revoke:after-status-update");
-      await client.query("UPDATE tokens SET revoked = TRUE WHERE grant_id = $1", [grantId]);
       await client.query(
         "UPDATE oauth_refresh_tokens SET status = 'revoked', revoked_at = $1 WHERE grant_id = $2 AND status = 'active'",
         [nowIso(), grantId]
       );
+      crashPoint("grant-revoke:in-cascade");
+      await client.query("UPDATE tokens SET revoked = TRUE WHERE grant_id = $1", [grantId]);
+      await client.query("UPDATE grants SET status = 'revoked' WHERE grant_id = $1", [grantId]);
     });
     return;
   }
   transaction(() => {
-    exec(referenceQueries.authGrantsMarkRevoked, [grantId]);
-    crashPoint("grant-revoke:after-status-update");
-    exec(referenceQueries.authTokensRevokeByGrant, [grantId]);
     exec(referenceQueries.authOauthRefreshTokensRevokeByGrant, [nowIso(), grantId]);
+    crashPoint("grant-revoke:in-cascade");
+    exec(referenceQueries.authTokensRevokeByGrant, [grantId]);
+    exec(referenceQueries.authGrantsMarkRevoked, [grantId]);
   });
 }
 
