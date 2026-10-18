@@ -604,6 +604,12 @@ for (const summary of summaries) {
   }
 }
 const failed = results.find((result) => result.exitCode !== 0);
+// A child can exit 0 while its reporter recorded a failure (`node --test`
+// exits 0 when only a `todo` test fails). Exit codes alone would turn that run
+// green, so a recorded failure event fails the gate too.
+const silentFailures = results.filter(
+  (result, index) => result.exitCode === 0 && (summaries[index]?.failed ?? 0) > 0
+);
 const counts = {
   assertions: summaries.reduce((sum, summary) => sum + summary.assertions, 0),
   completed_files: failed ? 0 : results.length,
@@ -621,7 +627,13 @@ const counts = {
 // when the suite did not run to completion (a failing file already dominates
 // the exit) or a signal arrived, so it can never mask an unrelated failure or
 // fire on a partial run. A --files-from selection is partial by construction.
-if (filesFromIndex === -1 && !failed && signalExitCode === undefined && results.length === testFiles.length) {
+if (
+  filesFromIndex === -1 &&
+  !failed &&
+  silentFailures.length === 0 &&
+  signalExitCode === undefined &&
+  results.length === testFiles.length
+) {
   const consumedMappingIdentities = summaries.flatMap((summary) => summary.consumed_mapping_identities);
   try {
     assertNamedSkipMappingsFullyConsumed(
@@ -656,4 +668,9 @@ if (signalExitCode !== undefined) {
   process.exitCode = signalExitCode;
 } else if (failed) {
   process.exitCode = failed.exitCode;
+} else if (silentFailures.length > 0) {
+  process.stderr.write(
+    `[run-tests] ${silentFailures.map((result) => result.filePath).join(", ")} recorded failure events although the test process exited 0\n`
+  );
+  process.exitCode = 1;
 }
