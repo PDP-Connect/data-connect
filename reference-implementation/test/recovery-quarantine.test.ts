@@ -397,3 +397,32 @@ test(
     assert.equal(row.n, 1, "re-attempt must not produce a duplicate record visible to reads");
   })
 );
+
+test(
+  "quarantine classification and budget evidence override conflicting caller fields",
+  withTempDb(async () => {
+    const store = createSqliteConnectorDetailGapStore();
+    const gap = await seedGap(store, "quarantine_evidence_class");
+    await store.markGapStatus(gap.gap_id, "in_progress");
+    const outcome = await maybeQuarantineGap(
+      quarantineStore(store),
+      gap.gap_id,
+      {
+        attempt_count: 999,
+        class: "temporary_unavailable",
+        failure_class: "parse_missing",
+        threshold: 999,
+      },
+      { maxNoProgressAttempts: 1 }
+    );
+
+    assert.equal(outcome.quarantined, true);
+    assert.ok(outcome.gap);
+    const error = evidenceRecord(outcome.gap.last_error);
+    assert.equal(outcome.gap.reason, "quarantined");
+    assert.equal(error.class, "quarantined");
+    assert.equal(error.failure_class, "parse_missing", "preserve useful caller evidence");
+    assert.equal(error.threshold, 1, "authoritative policy wins");
+    assert.equal(error.attempt_count, 1, "authoritative persisted attempt count wins");
+  })
+);

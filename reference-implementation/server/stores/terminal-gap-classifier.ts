@@ -424,8 +424,8 @@ export async function maybeQuarantineGap(
   // carries the `quarantined` class the recovery-decision classifier routes to
   // `connector_defect`; the `last_error` carries the (sanitized) evidence trail.
   const quarantineError: Record<string, unknown> = {
-    class: "quarantined",
     ...(evidence && typeof evidence === "object" ? evidence : {}),
+    class: "quarantined",
     attempt_count: attemptCount,
     threshold: policy.maxNoProgressAttempts,
   };
