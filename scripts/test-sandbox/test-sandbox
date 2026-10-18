@@ -9,6 +9,11 @@
 # TEST_SANDBOX_STATE_DIR overrides the shared slot directory (tests only).
 # TEST_SANDBOX_DISABLE=1 runs directly. One JSON receipt is written to stderr
 # unless --receipt is given.
+# Old bash (macOS ships 3.2) cannot parse what follows: run the command directly.
+if [ -z "${BASH_VERSINFO:-}" ] || [ "${BASH_VERSINFO[0]}" -lt 5 ]; then
+  echo "test-sandbox: bash 5 not found; running without enforcement" >&2
+  exec "$@"
+fi
 set -uo pipefail
 
 die() { echo "test-sandbox: $*" >&2; exit 2; }
@@ -47,7 +52,7 @@ done
 [[ "$timeout_s" =~ ^[0-9]+([.][0-9]+)?$ ]] || die "--timeout must be zero or positive seconds"
 [[ "$slots" =~ ^[1-9][0-9]*$ ]] || die "--slots must be a positive integer"
 command -v python3 >/dev/null || die "python3 is required"
-command -v flock >/dev/null || die "flock is required"
+have_flock=1; command -v flock >/dev/null || have_flock=0
 
 # A command already inside a sandbox runs directly: a nested call would take a
 # second slot (and could deadlock with --slots 1) and gain nothing.
@@ -59,7 +64,10 @@ slice_unit="$slice.slice"
 disabled=${TEST_SANDBOX_DISABLE:-0}
 notes=()
 systemd_ok=0 bwrap_ok=0
-if [[ "$disabled" != 1 ]] && command -v systemd-run >/dev/null && command -v systemctl >/dev/null &&
+# Under test-receipt the caller's scope already carries the limits and is the
+# measurement boundary; a new scope would move the work out of it.
+in_receipt=0; [[ -n "${TEST_RECEIPT_ACTIVE:-}" ]] && in_receipt=1
+if [[ "$disabled" != 1 && $in_receipt -eq 0 ]] && command -v systemd-run >/dev/null && command -v systemctl >/dev/null &&
    [[ -r /sys/fs/cgroup/cgroup.controllers ]]; then
   for probe in 1 2 3; do
     # shellcheck disable=SC2016
@@ -75,7 +83,9 @@ if [[ "$disabled" == 1 ]]; then
   enforcement=disabled
 else
   enforcement=none
-  if (( systemd_ok )); then enforcement=cgroup; else notes+=("systemd user manager unavailable; cgroup limits not enforced"); fi
+  if (( systemd_ok )); then enforcement=cgroup
+  elif (( in_receipt )); then enforcement=cgroup; notes+=("cgroup limits from the caller's test-receipt scope")
+  else notes+=("systemd user manager unavailable; cgroup limits not enforced"); fi
   if [[ "$net" == none ]] && (( bwrap_ok )); then
     if (( systemd_ok )); then enforcement=cgroup+netns; else enforcement=netns; fi
   elif [[ "$net" == none ]]; then notes+=("bwrap unavailable; network and PID isolation not enforced")
@@ -85,7 +95,7 @@ if [[ -n "$pg" && "$net" == host ]]; then die "--pg requires --net none"
 elif [[ -n "$pg" && $bwrap_ok -eq 0 && ${TEST_SANDBOX_PG_UNSAFE_HOST:-0} != 1 ]]; then die "--pg requires bwrap (or TEST_SANDBOX_PG_UNSAFE_HOST=1)"
 fi
 if [[ "${TEST_SANDBOX_REQUIRE:-0}" == 1 && "$disabled" != 1 ]] &&
-   { (( ! systemd_ok )) || { [[ "$net" == none ]] && (( ! bwrap_ok )); }; }; then
+   { (( ! systemd_ok && ! in_receipt )) || (( ! have_flock )) || { [[ "$net" == none ]] && (( ! bwrap_ok )); }; }; then
   notes+=("required enforcement layer unavailable")
   write_receipt() {
     python3 - "$receipt" "$slice" "$cpu" "$mem" "$tasks" "$pg" <<'PY'
@@ -108,7 +118,8 @@ runtime=${XDG_RUNTIME_DIR:-$HOME/.cache}
 state_dir=${TEST_SANDBOX_STATE_DIR:-$runtime/agent-tests}
 mkdir -p "$state_dir/slots" || die "cannot create slot directory $state_dir/slots"
 slot="" slot_fd=""
-for ((i=1;i<=slots;i++)); do
+if (( ! have_flock )); then slot=0; notes+=("flock unavailable; host-wide slots not enforced"); fi
+for ((i=1;i<=slots && have_flock;i++)); do
   exec {fd}>"$state_dir/slots/$i" || die "cannot open slot $i"
   if flock -n "$fd"; then slot=$i; slot_fd=$fd; break; fi
   exec {fd}>&-
@@ -233,7 +244,7 @@ else
   if (( systemd_ok )); then
     cmd=("$@")
     if (( bwrap_ok )); then
-      bw=(bwrap --dev-bind / / --unshare-pid --die-with-parent --tmpfs /tmp --chdir "$PWD")
+      bw=(bwrap --dev-bind / / --unshare-pid --proc /proc --die-with-parent --tmpfs /tmp --chdir "$PWD")
       [[ "$net" == none ]] && bw+=(--unshare-net)
       cmd=("${bw[@]}" bash -c "$collector" _ "$stats" "$scratch" "$pg" "$pg_port" "$pg_env" "${cmd[@]}")
     else
@@ -276,7 +287,7 @@ PY
 )
   else
     if (( bwrap_ok )); then
-      cmd=(bwrap --dev-bind / / --unshare-pid --die-with-parent --tmpfs /tmp --chdir "$PWD")
+      cmd=(bwrap --dev-bind / / --unshare-pid --proc /proc --die-with-parent --tmpfs /tmp --chdir "$PWD")
       [[ "$net" == none ]] && cmd+=(--unshare-net)
       cmd+=(bash -c "$collector" _ "$stats" "$scratch" "$pg" "$pg_port" "$pg_env" "$@")
     else
