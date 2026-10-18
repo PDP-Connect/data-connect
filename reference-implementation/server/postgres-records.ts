@@ -2015,6 +2015,7 @@ export async function postgresIngestRecord(
   // keeps the row's existing semantic_time). Falls back to emitted_at.
   const storedSemanticTime = op === "delete" ? null : semanticTimeValue(data ?? null, manifestStream);
 
+  crashPoint("ingest:before-write-transaction");
   const outcome = await withPostgresTransaction<DurableIngestOutcome>(
     async (client) => {
       if (options.requireConnectionAdmission) {
