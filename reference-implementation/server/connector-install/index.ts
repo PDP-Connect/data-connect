@@ -22,6 +22,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
+import { crashPoint } from "../crash-point.ts";
 import { canonicalConnectorKey } from "../connector-key.ts";
 import { crashPoint } from "../crash-point.ts";
 import {
@@ -1034,6 +1035,7 @@ export function createConnectorInstallService(options: {
           rootMoves,
         });
         markConnectorLifecycleUninstalled(dataDir, connectorId);
+        crashPoint("connector-uninstall:after-marker");
         const staged: Array<{ original: string; moved: string }> = [];
         let restoreActiveRecord = false;
         try {
@@ -1041,6 +1043,7 @@ export function createConnectorInstallService(options: {
             assertNoSymlinkComponents(move.original);
             renameSync(move.original, move.moved);
             staged.push(move);
+            crashPoint("connector-uninstall:after-root-move");
           }
           if (store.deactivateAndRemoveActivation) {
             await store.deactivateAndRemoveActivation(connectorId);
@@ -1049,6 +1052,7 @@ export function createConnectorInstallService(options: {
             restoreActiveRecord = true;
             await removeActivation(connectorId);
           }
+          crashPoint("connector-uninstall:after-active-removed");
         } catch (error) {
           for (const item of [...staged].reverse()) {
             if (existsSync(item.moved)) renameSync(item.moved, item.original);
@@ -1091,6 +1095,7 @@ export function createConnectorInstallService(options: {
         } catch {
           // The install and activation pointers are gone; an empty parent is inert.
         }
+        crashPoint("connector-uninstall:after-staged-removal");
         deleteConnectorUninstallJournal(dataDir, connectorId);
       });
     } finally {
