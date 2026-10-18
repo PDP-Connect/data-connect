@@ -4,10 +4,11 @@
 import { accountingEventLine, MAX_STARTED_TEST_NAME_LENGTH, PROGRESS_EVENT_LINE } from "./receipt.ts";
 
 interface ReporterEventData {
-  details?: { error?: ReporterError; name?: string; skip?: boolean | string; type?: string };
+  details?: { error?: ReporterError; name?: string; skip?: boolean | string; todo?: boolean | string; type?: string };
   message?: string;
   name?: string;
   skip?: boolean | string;
+  todo?: boolean | string;
 }
 interface ReporterError {
   code?: unknown;
@@ -652,6 +653,7 @@ export default async function* accountingReporter(source: AsyncIterable<Reporter
       type: details.type,
       name: data.name ?? details.name,
       skip: data.skip ?? details.skip,
+      todo: data.todo ?? details.todo,
       ...(event.type === "test:fail" ? { failure: failureDetails(details.error, diagnostic.take()) } : {}),
     };
     yield `${accountingEventLine({ type: event.type, details: eventDetails })}\n`;

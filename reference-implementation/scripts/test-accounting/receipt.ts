@@ -421,6 +421,7 @@ export interface StructuredSummary {
 interface NodeTestEventDetails {
   name?: string;
   skip?: boolean | string;
+  todo?: boolean | string;
   type?: string;
 }
 interface NodeTestEvent {
@@ -496,8 +497,16 @@ export function structuredNodeSummary(output: string): StructuredSummary {
     if (!["test:pass", "test:fail"].includes(event.type) || event.details?.type !== "test") {
       continue;
     }
+    // `node --test` counts a passing `todo` as a pass and exits 0 when a `todo`
+    // fails, so a todo test is neither a real pass nor a real failure. Reject
+    // it outright: a placeholder must be a named skip.
+    const { skip, todo } = event.details;
+    if (todo !== false && todo !== undefined && todo !== null) {
+      fail(
+        `todo test rejected (${event.type === "test:pass" ? "body passed" : "body failed"}): ${event.details.name ?? "unnamed test"}; use a named skip instead`
+      );
+    }
     assertions += 1;
-    const { skip } = event.details;
     if (skip !== false && skip !== undefined && skip !== null) {
       const { reason, consumedIdentity } = resolveEmittedSkipReason(skip, event.details.name);
       if (!reason) {
