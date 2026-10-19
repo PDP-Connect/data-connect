@@ -146,7 +146,22 @@ jobs:
           node-version: "24.21.0"
           cache: npm
 
+      # npm's download cache is already restored above, yet `npm ci` still takes
+      # about 70 s to rebuild node_modules. Restore the installed tree itself,
+      # keyed on the lockfile, and install only on a miss.
+      - name: Restore installed node_modules
+        id: node-modules-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            node_modules
+            reference-implementation/node_modules
+            packages/local-collector/node_modules
+            apps/console/node_modules
+          key: node-modules-${{ runner.os }}-node24.21.0-${{ hashFiles('package-lock.json') }}
+
       - name: Install dependencies
+        if: steps.node-modules-cache.outputs.cache-hit != 'true'
         run: npm ci
 
       - name: Build workspace packages
@@ -183,7 +198,22 @@ jobs:
           node-version: "24.21.0"
           cache: npm
 
+      # npm's download cache is already restored above, yet `npm ci` still takes
+      # about 70 s to rebuild node_modules. Restore the installed tree itself,
+      # keyed on the lockfile, and install only on a miss.
+      - name: Restore installed node_modules
+        id: node-modules-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            node_modules
+            reference-implementation/node_modules
+            packages/local-collector/node_modules
+            apps/console/node_modules
+          key: node-modules-${{ runner.os }}-node24.21.0-${{ hashFiles('package-lock.json') }}
+
       - name: Install dependencies
+        if: steps.node-modules-cache.outputs.cache-hit != 'true'
         run: npm ci
 
       - name: Build workspace packages
