@@ -143,6 +143,29 @@ export async function replayStoredSession(
       `${tokenKind}: captured ${key} disappeared during replay`
     )
   }
+  const baseReads = captured.resourceReads as Record<string, unknown>[]
+  const currentReads = observed.resourceReads as Record<string, unknown>[]
+  assert(Array.isArray(baseReads) && Array.isArray(currentReads),
+    `${tokenKind}: captured resource reads are missing`)
+  for (const uri of [
+    ...(expected.recordUris as string[]),
+    ...(expected.fieldWindowUris as string[]),
+  ]) {
+    const recordContent = (reads: Record<string, unknown>[]): unknown[] => {
+      const read = reads.find(entry => entry.uri === uri)
+      assert(read && Array.isArray(read.contents) && read.contents.length > 0,
+        `${tokenKind}: captured resource content is missing: ${uri}`)
+      return (read.contents as Record<string, unknown>[]).map(part => {
+        assert(typeof part.text === "string", `${tokenKind}: captured resource content is not text: ${uri}`)
+        return {
+          mimeType: part.mimeType,
+          value: part.mimeType === "application/json" ? JSON.parse(part.text) : part.text,
+        }
+      })
+    }
+    assert.deepEqual(recordContent(currentReads), recordContent(baseReads),
+      `${tokenKind}: captured resource identity, MIME type or content changed: ${uri}`)
+  }
 }
 
 test(

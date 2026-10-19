@@ -742,6 +742,35 @@ export function assertWindowContinuation(first: JsonObject, next: JsonObject): v
     "field continuation must return different nonempty text")
 }
 
+function assertFieldRead(args: JsonObject, result: JsonObject): JsonObject {
+  const handle = String(args.id)
+  const connectionId = connectionIdForRecordHandle(handle)
+  const recordId = handle.startsWith("pdpp://record/")
+    ? object(JSON.parse(Buffer.from(decodeURIComponent(handle.slice("pdpp://record/".length)), "base64url").toString("utf8"))).record_id
+    : handle.split(":").at(-1)
+  const data = object(result.structuredContent)
+  const record = object(data.record)
+  assert(record.connection_id === connectionId && record.record_id === recordId && record.stream === "documents",
+    `saved field read returned a different record identity: ${handle}`)
+  assert(object(data.field).path === args.field_path,
+    `saved field read returned a different field: ${handle}`)
+  const window = object(data.window)
+  const start = window.start_chars ?? window.start_char ?? window.start ?? window.offset ?? window.start_offset
+  const text = window.text
+  const limit = typeof args.limit_chars === "number" ? args.limit_chars : 240
+  assert(typeof start === "number" && Number.isInteger(start) && start >= 0 &&
+    typeof text === "string" && text.length > 0 && Array.from(text).length <= limit &&
+    text === Array.from(LONG_TEXT).slice(start, start + Array.from(text).length).join(""),
+    `saved field read returned invalid text or bounds: ${handle}`)
+  if (!args.cursor && typeof args.offset_chars === "number")
+    assert(start === args.offset_chars, `saved field read ignored its offset: ${handle}`)
+  if (!args.cursor && args.offset_chars === undefined && args.q === undefined)
+    assert(start === 0, `saved field read ignored its initial offset: ${handle}`)
+  assert(contentTexts(result).some(content => content.includes(text)),
+    `saved field read omitted its window from content text: ${handle}`)
+  return window
+}
+
 function connectionIdForRecordHandle(handle: string): string | undefined {
   if (handle.startsWith("pdpp://record/")) {
     const value = decodeURIComponent(handle.slice("pdpp://record/".length))
@@ -1284,6 +1313,24 @@ export async function replay(
   const readResults = await Promise.all(
     readRequests.map(args => call("read_record_field", args))
   )
+  const validateFieldReads = async (requests: JsonObject[], results: JsonObject[]): Promise<(JsonObject | undefined)[]> =>
+    Promise.all(requests.map(async (args, index) => {
+      const window = assertFieldRead(args, results[index]!)
+      const start = Number(window.start_chars ?? window.start_char ?? window.start ?? window.offset ?? window.start_offset)
+      if (start + Array.from(String(window.text)).length >= Array.from(LONG_TEXT).length) return undefined
+      assert(typeof window.next_cursor === "string" && window.next_cursor.length > 0,
+        `saved field read has no continuation cursor: ${String(args.id)}`)
+      const { offset_chars: _offset, q: _query, ...selector } = args
+      const nextArgs = { ...selector, cursor: window.next_cursor }
+      const next = await call("read_record_field", nextArgs)
+      const nextWindow = assertFieldRead(nextArgs, next)
+      assertWindowContinuation(window, nextWindow)
+      const nextStart = nextWindow.start_chars ?? nextWindow.start_char ?? nextWindow.start ?? nextWindow.offset ?? nextWindow.start_offset
+      assert(typeof window.next_offset_chars === "number" && nextStart === window.next_offset_chars,
+        `saved field read continuation ignored its advertised offset: ${String(args.id)}`)
+      return next
+    }))
+  const readContinuations = await validateFieldReads(readRequests, readResults)
   const read = readResults[0]
   assert(read, "read_record_field replay returned no results")
   const readData = object(read.structuredContent)
@@ -1303,11 +1350,8 @@ export async function replay(
     typeof readCursor === "string" && readCursor.length > 0,
     "read_record_field must provide a continuation cursor for the long fixture"
   )
-  const cursorRead = await call("read_record_field", {
-    ...readRequests[0],
-    cursor: readCursor,
-    limit_chars: 240,
-  })
+  const cursorRead = readContinuations[0]
+  assert(cursorRead, "bounded field continuation must resolve")
   assert(
     typeof object(object(cursorRead.structuredContent).window).text ===
       "string" &&
@@ -1436,15 +1480,17 @@ export async function replay(
     "base capture produced zero search result ids"
   )
   assert(fetchIds.length > 0, "base capture produced zero fetch ids")
+  const windowRequests = windowArgs.map(args => {
+    const id = typeof args.id === "string" ? args.id : scopedConnection
+    return {
+      ...packageArgs(connectionIdForRecordHandle(id) ?? scopedConnection),
+      ...args,
+    }
+  })
   const windowReadResults = await Promise.all(
-    windowArgs.map(args => {
-      const id = typeof args.id === "string" ? args.id : scopedConnection
-      return call("read_record_field", {
-        ...packageArgs(connectionIdForRecordHandle(id) ?? scopedConnection),
-        ...args,
-      })
-    })
+    windowRequests.map(args => call("read_record_field", args))
   )
+  await validateFieldReads(windowRequests, windowReadResults)
 
   const connectionIds = new Set<string>()
   const recordUris = new Set<string>(searchRecordUris)

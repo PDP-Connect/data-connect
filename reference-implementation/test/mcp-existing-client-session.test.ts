@@ -14,7 +14,10 @@ const object = (value: unknown): JsonObject => (value ?? {}) as JsonObject;
 
 // Only search ordering and the future child-selector interface are controlled.
 // Record, resource, query and field reads still execute against the local server.
-function controlSession(t: test.TestContext, options: { bFirst?: boolean; grants?: boolean } = {}) {
+function controlSession(
+  t: test.TestContext,
+  options: { bFirst?: boolean; grants?: boolean; refusedResource?: string } = {}
+) {
   const nativeFetch = globalThis.fetch;
   const calls: JsonObject[] = [];
   const searchIds: string[][] = [];
@@ -30,6 +33,9 @@ function controlSession(t: test.TestContext, options: { bFirst?: boolean; grants
     let requestInit = init;
     const params = object(message.params);
     const args = object(params.arguments);
+    if (message.method === "resources/read" && params.uri === options.refusedResource) {
+      return Response.json({ id: message.id, jsonrpc: "2.0", result: { contents: [] } });
+    }
     if (message.method === "tools/call") {
       calls.push(structuredClone(params));
       if (params.name === "query_records" && args.cursor) {
@@ -126,6 +132,9 @@ function controlSession(t: test.TestContext, options: { bFirst?: boolean; grants
   });
   return {
     calls,
+    refuseResource: (uri: string) => {
+      options.refusedResource = uri;
+    },
     searchIds,
     setBFirst: () => {
       options.bFirst = true;
@@ -256,16 +265,7 @@ test("P4 comparison accepts reordered real search discoveries while replaying ca
     const savedUris = saved.recordUris as string[];
     const [savedUri] = savedUris;
     assert(savedUri);
-    const controlledFetch = globalThis.fetch;
-    t.mock.method(globalThis, "fetch", async (url: string | URL | Request, init?: RequestInit) => {
-      if (String(url).endsWith("/mcp") && typeof init?.body === "string") {
-        const request = JSON.parse(init.body) as JsonObject;
-        if (request.method === "resources/read" && request.params.uri === savedUri) {
-          return Response.json({ id: request.id, jsonrpc: "2.0", result: { contents: [] } });
-        }
-      }
-      return await controlledFetch(url, init);
-    });
+    control.refuseResource(savedUri);
     await assert.rejects(
       replayStoredSession(fixture.rsUrl, fixture.package, "package", captured),
       MISSING_STORED_RESOURCE,
@@ -275,3 +275,118 @@ test("P4 comparison accepts reordered real search discoveries while replaying ca
     await fixture.close();
   }
 });
+
+const INVALID_FIELD_READ = /field (read|window)|read_record_field/;
+const CHANGED_RESOURCE = /captured resource|resource (record|content)/;
+
+for (const corruption of ["empty second handle", "corrupt saved window"] as const) {
+  test(`saved field replay rejects ${corruption}`, async (t) => {
+    const fixture = await startPermanentAudienceFixture();
+    try {
+      const base = await replay(fixture.rsUrl, fixture.client, "client");
+      const saved = object(object(base.session).storedIds);
+      assert.equal(saved.readIds.length, 2);
+      assert(String(saved.readIds[1]).startsWith("pdpp://record/"));
+      const [windowArgs] = saved.readArgsList;
+      assert(windowArgs);
+      const nativeFetch = globalThis.fetch;
+      let changed = 0;
+      t.mock.method(globalThis, "fetch", async (url: string | URL | Request, init?: RequestInit) => {
+        const response = await nativeFetch(url, init);
+        if (!String(url).endsWith("/mcp") || typeof init?.body !== "string") {
+          return response;
+        }
+        const request = JSON.parse(init.body) as JsonObject;
+        const args = object(request.params?.arguments);
+        if (request.params?.name !== "read_record_field") {
+          return response;
+        }
+        const emptySecond = corruption === "empty second handle" && args.id === saved.readIds[1] && !args.cursor;
+        const corruptWindow =
+          corruption === "corrupt saved window" &&
+          args.id === windowArgs.id &&
+          args.limit_chars === windowArgs.limit_chars &&
+          args.offset_chars === windowArgs.offset_chars;
+        if (!(emptySecond || corruptWindow)) {
+          return response;
+        }
+        changed += 1;
+        const body = (await response.json()) as JsonObject;
+        if (emptySecond) {
+          body.result = { content: [{ text: "successful empty read", type: "text" }], structuredContent: {} };
+        } else {
+          body.result.structuredContent.window.text = "corrupted saved field text";
+        }
+        return Response.json(body, { headers: response.headers });
+      });
+      await assert.rejects(replay(fixture.rsUrl, fixture.client, "client", saved), INVALID_FIELD_READ);
+      assert.equal(changed, 1, "negative control must corrupt only its targeted saved read");
+    } finally {
+      await fixture.close();
+    }
+  });
+}
+
+for (const tokenKind of ["client", "package"] as const) {
+  for (const corruption of ["record sibling", "field-window sibling", "record MIME"] as const) {
+    test(`P4 rejects ${tokenKind} saved resource with ${corruption}`, async (t) => {
+      const fixture = await startPermanentAudienceFixture();
+      try {
+        const token = fixture[tokenKind];
+        const base = await replay(fixture.rsUrl, token, tokenKind);
+        const session = object(base.session);
+        const saved = object(session.storedIds);
+        const originalUri = (
+          corruption === "field-window sibling" ? saved.fieldWindowUris : saved.recordUris
+        )[0] as string;
+        assert(originalUri);
+        const prefix = corruption === "field-window sibling" ? "pdpp://field-window/" : "pdpp://record/";
+        const payload = JSON.parse(Buffer.from(originalUri.slice(prefix.length), "base64url").toString()) as JsonObject;
+        const siblingId = String(payload.record_id).endsWith("-page")
+          ? String(payload.record_id).slice(0, -5)
+          : `${payload.record_id}-page`;
+        const siblingUri = `${prefix}${Buffer.from(JSON.stringify({ ...payload, record_id: siblingId })).toString("base64url")}`;
+        const nativeFetch = globalThis.fetch;
+        let changed = 0;
+        t.mock.method(globalThis, "fetch", async (url: string | URL | Request, init?: RequestInit) => {
+          if (!String(url).endsWith("/mcp") || typeof init?.body !== "string") {
+            return nativeFetch(url, init);
+          }
+          const request = JSON.parse(init.body) as JsonObject;
+          if (request.method !== "resources/read" || request.params.uri !== originalUri) {
+            return nativeFetch(url, init);
+          }
+          const response = await nativeFetch(url, {
+            ...init,
+            body: JSON.stringify({
+              ...request,
+              params: { uri: corruption === "record MIME" ? originalUri : siblingUri },
+            }),
+          });
+          const body = (await response.json()) as JsonObject;
+          if (corruption !== "record MIME") {
+            assert(
+              body.result.contents.some((part: JsonObject) => String(part.text).includes(siblingId)),
+              "control must use real sibling content"
+            );
+          }
+          for (const part of body.result.contents) {
+            part.uri = originalUri;
+            if (corruption === "record MIME") {
+              part.mimeType = "text/plain";
+            }
+          }
+          changed += 1;
+          return Response.json(body, { headers: response.headers });
+        });
+        await assert.rejects(
+          replayStoredSession(fixture.rsUrl, token, tokenKind, { session: { ...session, storedIds: saved } }),
+          CHANGED_RESOURCE
+        );
+        assert(changed > 0);
+      } finally {
+        await fixture.close();
+      }
+    });
+  }
+}
