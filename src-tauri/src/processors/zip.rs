@@ -22,7 +22,7 @@ pub fn extract_zip(source: &Path, target: &Path) -> Result<(), String> {
             None => continue,
         };
 
-        if file.name().ends_with('/') {
+        if file.is_dir() {
             // Directory entry
             fs::create_dir_all(&outpath)
                 .map_err(|e| format!("Failed to create directory: {}", e))?;
