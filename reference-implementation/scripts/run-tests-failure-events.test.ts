@@ -1,3 +1,6 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 // The gate must go red for a test that the Node runner itself would let through.
 // `node --test` counts a passing `todo` as a pass and exits 0 when a `todo`
 // fails, so the accounting rejects every `todo` test by name. These tests run
