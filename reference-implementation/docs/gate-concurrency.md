@@ -115,7 +115,8 @@ result is still written, and the run then fails with
 test code controls, so it goes only to a private 0600 file next to the
 killed-file tails (named in the line), and on CI nowhere. A runner that a test
 starts writes its diagnostics inside the outer run's directory
-(`PDPP_TEST_DIAGNOSTICS_ROOT`). A killed file
+(`PDPP_TEST_DIAGNOSTICS_ROOT`); the runner accepts that override only under the
+outer run's own directory, and prunes only run directories it marked. A killed file
 is a failed file; it no longer aborts the files after it. Its result holds only
 structured fields (`TIMED OUT (idle|hard)` or `KILLED`, the signal and the
 elapsed time), never its raw output and never the name of the last test that
