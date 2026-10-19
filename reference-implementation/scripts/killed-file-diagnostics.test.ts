@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import {
 	chmod,
 	mkdir,
@@ -14,15 +15,21 @@ import {
 	writeFile,
 } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
+
 import {
 	KEEP_DAYS,
 	KEEP_RUNS,
 	killedFileDiagnosticsRoot,
+	RUN_MARKER_FILE,
 	runDirectoryName,
 	writeKilledFileTail,
 } from "./killed-file-diagnostics.ts";
+
+const execFileAsync = promisify(execFile);
 
 test("the diagnostics root is a per-user state directory, and there is none on CI", () => {
 	assert.equal(
@@ -37,21 +44,213 @@ test("the diagnostics root is a per-user state directory, and there is none on C
 		killedFileDiagnosticsRoot({ CI: "1", XDG_STATE_HOME: "/state" }),
 		undefined,
 	);
-	// A runner started by a test writes inside the outer run's directory.
-	assert.equal(
-		killedFileDiagnosticsRoot({
-			PDPP_TEST_DIAGNOSTICS_ROOT: "/outer/run/nested",
-			XDG_STATE_HOME: "/state",
-		}),
-		"/outer/run/nested",
-	);
 	assert.equal(
 		killedFileDiagnosticsRoot({
 			CI: "1",
-			PDPP_TEST_DIAGNOSTICS_ROOT: "/outer/run/nested",
+			PDPP_TEST_DIAGNOSTICS_ROOT:
+				"/state/pdpp-ri-test-diagnostics/run-x/nested",
+			XDG_STATE_HOME: "/state",
 		}),
 		undefined,
 	);
+});
+
+test("a runner started by a test writes inside the outer run's directory, and nowhere else", () => {
+	const env = { XDG_STATE_HOME: "/state" };
+	const base = "/state/pdpp-ri-test-diagnostics";
+	// One nested level, and the same shape repeated for a nested runner's own children.
+	for (const accepted of [
+		`${base}/run-x/nested`,
+		`${base}/run-x/nested/run-y/nested`,
+	]) {
+		assert.equal(
+			killedFileDiagnosticsRoot({
+				...env,
+				PDPP_TEST_DIAGNOSTICS_ROOT: accepted,
+			}),
+			accepted,
+		);
+	}
+	for (const refused of [
+		"/outer/run/nested",
+		"/state",
+		base,
+		`${base}/run-x`,
+		`${base}/run-x/other`,
+		`${base}/nested`,
+		`${base}/run-/nested`,
+		`${base}/not-a-run/nested`,
+		`${base}/run-x/nested/run-y`,
+		`${base}/run-x/../../elsewhere/nested`,
+		`${base}-evil/run-x/nested`,
+		"relative/run-x/nested",
+	]) {
+		assert.equal(
+			killedFileDiagnosticsRoot({
+				...env,
+				PDPP_TEST_DIAGNOSTICS_ROOT: refused,
+			}),
+			undefined,
+			refused,
+		);
+	}
+});
+
+test("an override outside the outer run's directory is ignored: nothing is chmodded, pruned or written there", async () => {
+	const parent = await mkdtemp(join(tmpdir(), "killed-file-diagnostics-"));
+	try {
+		const shared = join(parent, "shared-results");
+		await mkdir(shared, { mode: 0o755 });
+		await chmod(shared, 0o755);
+		const oldRun = join(shared, "run-2020-01-01T00-00-00-000Z-1");
+		await mkdir(oldRun);
+		const old = new Date("2020-01-01T00:00:00.000Z");
+		await utimes(oldRun, old, old);
+		const env = {
+			PDPP_TEST_DIAGNOSTICS_ROOT: shared,
+			XDG_STATE_HOME: join(parent, "state"),
+		};
+		// What run-tests.ts does: keep no diagnostics when there is no root.
+		const root = killedFileDiagnosticsRoot(env);
+		assert.equal(root, undefined);
+		const path =
+			root === undefined
+				? undefined
+				: await writeKilledFileTail(
+						join(root, runDirectoryName()),
+						"test/x.test.ts",
+						Buffer.from("x"),
+					);
+		assert.equal(path, undefined);
+		assert.equal(
+			(await stat(shared)).mode & 0o777,
+			0o755,
+			"the mode is unchanged",
+		);
+		assert.deepEqual(await readdir(shared), [basename(oldRun)]);
+	} finally {
+		await rm(parent, { force: true, recursive: true });
+	}
+});
+
+test("an accepted nested override still takes a tail", async () => {
+	const stateHome = await mkdtemp(join(tmpdir(), "killed-file-diagnostics-"));
+	try {
+		const outerRun = join(
+			stateHome,
+			"pdpp-ri-test-diagnostics",
+			runDirectoryName(),
+		);
+		const root = killedFileDiagnosticsRoot({
+			PDPP_TEST_DIAGNOSTICS_ROOT: join(outerRun, "nested"),
+			XDG_STATE_HOME: stateHome,
+		});
+		assert.equal(root, join(outerRun, "nested"));
+		const path = await writeKilledFileTail(
+			join(root ?? "", runDirectoryName()),
+			"test/x.test.ts",
+			Buffer.from("x"),
+		);
+		assert.ok(
+			path?.startsWith(join(outerRun, "nested")),
+			"written under the outer run",
+		);
+		assert.equal((await stat(join(outerRun, "nested"))).mode & 0o777, 0o700);
+		assert.ok(
+			(await readdir(outerRun)).includes(RUN_MARKER_FILE),
+			"the outer run directory made on the way is marked, so it can be pruned",
+		);
+		// A symlink anywhere in the chain refuses the override.
+		const elsewhere = join(stateHome, "elsewhere");
+		await mkdir(elsewhere);
+		const linkedRun = join(stateHome, "pdpp-ri-test-diagnostics", "run-linked");
+		await symlink(elsewhere, linkedRun);
+		assert.equal(
+			killedFileDiagnosticsRoot({
+				PDPP_TEST_DIAGNOSTICS_ROOT: join(linkedRun, "nested"),
+				XDG_STATE_HOME: stateHome,
+			}),
+			undefined,
+		);
+	} finally {
+		await rm(stateHome, { force: true, recursive: true });
+	}
+});
+
+test("a run directory that is a symlink is not written through", async () => {
+	const parent = await mkdtemp(join(tmpdir(), "killed-file-diagnostics-"));
+	try {
+		const root = join(parent, "pdpp-ri-test-diagnostics");
+		const outside = join(parent, "outside");
+		await mkdir(outside, { mode: 0o755 });
+		await chmod(outside, 0o755);
+		await mkdir(root);
+		const runDir = join(root, runDirectoryName());
+		await symlink(outside, runDir);
+		const path = await writeKilledFileTail(
+			runDir,
+			"test/x.test.ts",
+			Buffer.from("secret"),
+		);
+		assert.equal(path, undefined, "the result is not saved");
+		assert.deepEqual(
+			await readdir(outside),
+			[],
+			"nothing is written through the link",
+		);
+		assert.equal((await stat(outside)).mode & 0o777, 0o755);
+		// A symlinked root is refused too.
+		const linkedRoot = join(parent, "linked-root");
+		await symlink(outside, linkedRoot);
+		assert.equal(
+			await writeKilledFileTail(
+				join(linkedRoot, runDirectoryName()),
+				"test/x.test.ts",
+				Buffer.from("secret"),
+			),
+			undefined,
+		);
+		assert.deepEqual(await readdir(outside), []);
+		assert.equal((await stat(outside)).mode & 0o777, 0o755);
+		// An existing run directory the runner did not mark is refused.
+		const unmarked = join(root, "run-unmarked");
+		await mkdir(unmarked);
+		assert.equal(
+			await writeKilledFileTail(unmarked, "test/x.test.ts", Buffer.from("x")),
+			undefined,
+		);
+	} finally {
+		await rm(parent, { force: true, recursive: true });
+	}
+});
+
+test("only directories the runner marked are pruned", async () => {
+	const stateHome = await mkdtemp(join(tmpdir(), "killed-file-diagnostics-"));
+	try {
+		const root = killedFileDiagnosticsRoot({ XDG_STATE_HOME: stateHome }) ?? "";
+		const nowMs = Date.parse("2026-10-18T12:00:00.000Z");
+		const old = new Date(nowMs - 30 * 24 * 60 * 60 * 1000);
+		const markedOld = runDirectoryName(old, 1);
+		const unmarkedOld = runDirectoryName(old, 2);
+		await mkdir(join(root, markedOld), { recursive: true });
+		await writeFile(join(root, markedOld, RUN_MARKER_FILE), "");
+		await mkdir(join(root, unmarkedOld));
+		await utimes(join(root, markedOld), old, old);
+		await utimes(join(root, unmarkedOld), old, old);
+		assert.ok(
+			await writeKilledFileTail(
+				join(root, runDirectoryName(new Date(nowMs), 3)),
+				"test/x.test.ts",
+				Buffer.from("x"),
+				nowMs,
+			),
+		);
+		const left = await readdir(root);
+		assert.ok(!left.includes(markedOld), "the old marked run is pruned");
+		assert.ok(left.includes(unmarkedOld), "the old unmarked run is left alone");
+	} finally {
+		await rm(stateHome, { force: true, recursive: true });
+	}
 });
 
 test("run directory names sort by start time", () => {
@@ -98,12 +297,14 @@ test(`a new run keeps the newest ${KEEP_RUNS} runs, none older than ${KEEP_DAYS}
 			const name = runDirectoryName(new Date(nowMs - (25 - index) * 60_000), 1);
 			recent.push(name);
 			await mkdir(join(root, name));
+			await writeFile(join(root, name, RUN_MARKER_FILE), "");
 		}
 		const stale = runDirectoryName(
 			new Date(nowMs - 8 * 24 * 60 * 60 * 1000),
 			1,
 		);
 		await mkdir(join(root, stale));
+		await writeFile(join(root, stale, RUN_MARKER_FILE), "");
 		const staleTime = new Date(nowMs - 8 * 24 * 60 * 60 * 1000);
 		await utimes(join(root, stale), staleTime, staleTime);
 		const unrelated = join(root, "not-a-run");
@@ -133,7 +334,12 @@ test(`a new run keeps the newest ${KEEP_RUNS} runs, none older than ${KEEP_DAYS}
 				nowMs,
 			),
 		);
-		assert.equal((await readdir(join(root, current))).length, 2);
+		assert.equal(
+			(await readdir(join(root, current))).filter((name) =>
+				name.endsWith(".log"),
+			).length,
+			2,
+		);
 	} finally {
 		await rm(root, { force: true, recursive: true });
 	}
@@ -179,6 +385,71 @@ test("a regular file named run-* is not pruned", async () => {
 			),
 		);
 		assert.ok((await readdir(root)).includes(name), "the file is left alone");
+	} finally {
+		await rm(root, { force: true, recursive: true });
+	}
+});
+
+// Two killed files of one run finish together. The first writer is held just
+// before it writes the run's marker; on the old code the second writer then
+// found the run directory made but unmarked, refused it, and lost its tail.
+// A child process mocks node:fs/promises to hold that one write, so the
+// interleaving is fixed rather than left to timing.
+const MARKER_RACE_PROBE = `
+import * as fs from "node:fs/promises";
+import { join } from "node:path";
+import { mock } from "node:test";
+let hold;
+const writeFile = async (...args) => {
+	if (hold && String(args[0]).endsWith(".pdpp-ri-run")) await hold(args[0]);
+	return fs.writeFile(...args);
+};
+mock.module("node:fs/promises", { namedExports: { ...fs, writeFile } });
+const m = await import(process.argv[2]);
+const runDir = join(process.argv[3], m.runDirectoryName());
+let release;
+const gate = new Promise((resolve) => { release = resolve; });
+let entered;
+const hit = new Promise((resolve) => { entered = resolve; });
+hold = async () => { hold = undefined; entered(); await gate; };
+const first = m.writeKilledFileTail(runDir, "test/a.test.ts", Buffer.from("a"));
+await hit;
+const second = m.writeKilledFileTail(runDir, "test/b.test.ts", Buffer.from("b"));
+// The old code settles the second writer without the held write; the fixed
+// code waits for the shared preparation, so release after a bound.
+await Promise.race([second, new Promise((resolve) => setTimeout(resolve, 1000))]);
+release();
+const saved = (await Promise.all([first, second])).map((path) => path !== undefined);
+process.stdout.write(JSON.stringify(saved));
+`;
+
+test("two killed files of one run that finish together both keep their tails", async () => {
+	const root = await mkdtemp(join(tmpdir(), "killed-file-diagnostics-"));
+	try {
+		const probe = join(root, "probe.mjs");
+		await writeFile(probe, MARKER_RACE_PROBE);
+		const modulePath = fileURLToPath(
+			new URL("./killed-file-diagnostics.ts", import.meta.url),
+		);
+		const { stdout } = await execFileAsync(
+			process.execPath,
+			[
+				"--experimental-test-module-mocks",
+				"--no-warnings",
+				probe,
+				modulePath,
+				root,
+			],
+			{
+				encoding: "utf8",
+				env: { ...process.env, NODE_TEST_CONTEXT: undefined },
+			},
+		);
+		assert.deepEqual(
+			JSON.parse(stdout),
+			[true, true],
+			"both writers saved their tail",
+		);
 	} finally {
 		await rm(root, { force: true, recursive: true });
 	}
