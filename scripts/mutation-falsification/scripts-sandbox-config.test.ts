@@ -46,15 +46,27 @@ async function scriptsSandboxInputs(): Promise<string[]> {
 }
 
 describe("scripts cohort sandbox", () => {
-  it("holds the reference configuration and test tree that the reference-runner test reads, and nothing else of the reference implementation", async () => {
+  // The two loader files `scripts/ensure-reference-stack.test.js` copies into
+  // its fixture root. A revision whose scripts selection is empty runs that test
+  // in this sandbox, and without them it fails with ENOENT (PR #494).
+  const LOADER_FILES = [
+    "reference-implementation/connector-dependency-loader.mjs",
+    "reference-implementation/connector-dependency-loader-bootstrap.mjs",
+  ]
+
+  it("holds the reference configuration, test tree and loader files that scripts tests read, and nothing else of the reference implementation", async () => {
     const reference = (await scriptsSandboxInputs()).filter((file) =>
       file.startsWith("reference-implementation/")
     )
     expect(reference).toContain("reference-implementation/stryker.config.mjs")
     expect(reference.some((file) => file.startsWith("reference-implementation/test/"))).toBe(true)
+    for (const loader of LOADER_FILES) {
+      expect(reference).toContain(loader)
+    }
     const outside = reference.filter(
       (file) =>
         file !== "reference-implementation/stryker.config.mjs" &&
+        !LOADER_FILES.includes(file) &&
         !file.startsWith("reference-implementation/test/")
     )
     expect(outside).toEqual([])

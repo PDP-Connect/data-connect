@@ -3,7 +3,7 @@
 
 /**
  * SKELETON — intentionally not implemented. See
- * openspec/changes/own-run-lifecycle-state-machine. Every case is `todo`
+ * openspec/changes/own-run-lifecycle-state-machine. Every case is a named `skip`
  * because the run-lifecycle owner module does not exist yet, and because
  * `run_history` has no `owner_epoch` column on either backend today
  * (server/db.ts:1358, server/postgres-storage.ts:2169).
@@ -31,7 +31,7 @@ import test from "node:test";
 test("run lifecycle: owner-epoch fencing", async (t) => {
   await t.test(
     "a stale epoch's transition matches zero rows on both backends",
-    { todo: "requires run_history.owner_epoch and the owner module" },
+    { skip: "requires run_history.owner_epoch and the owner module" },
     () => {
       // Assert on the statement's own changes/rowCount -- proving the DATABASE
       // refused it. Asserting only that final state is unchanged would also
@@ -42,7 +42,7 @@ test("run lifecycle: owner-epoch fencing", async (t) => {
 
   await t.test(
     "a null owner epoch is claimable, and the predicate does not spare it",
-    { todo: "requires run_history.owner_epoch and the owner module" },
+    { skip: "requires run_history.owner_epoch and the owner module" },
     () => {
       // Legacy rows written before the column existed. On PostgreSQL,
       // `owner_epoch IS DISTINCT FROM NULL` reduces to `IS NOT NULL` and
@@ -53,7 +53,7 @@ test("run lifecycle: owner-epoch fencing", async (t) => {
 
   await t.test(
     "run_id alone does not fence: two connections sharing a run_id are isolated",
-    { todo: "requires the owner module" },
+    { skip: "requires the owner module" },
     () => {
       // run_id is not unique across connections; identity is the
       // (run_id, connector_instance_id) pair. Note controller-boot.ts:829
@@ -64,7 +64,7 @@ test("run lifecycle: owner-epoch fencing", async (t) => {
 
   await t.test(
     "both backends produce identical fencing outcomes for the same interleaving",
-    { todo: "requires run_history.owner_epoch on both backends" },
+    { skip: "requires run_history.owner_epoch on both backends" },
     () => {
       // Replay one generated interleaving against each backend and diff the
       // outcome sequences.

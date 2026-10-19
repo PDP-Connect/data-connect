@@ -61,7 +61,7 @@ import {
 type GetConnectorManifest = (connectorId: string) => Promise<unknown>;
 type RegisterConnector = (
   manifest: PolyfillManifest,
-  options?: { backfillRetrievalIndexes?: boolean }
+  options?: { backfillRetrievalIndexes?: boolean; replaceAcceptedDigest?: boolean }
 ) => Promise<unknown>;
 type DeleteAllRecordsForConnector = (
   connectorId: string,
@@ -331,7 +331,7 @@ async function applyShippedManifest(
   log: ReconcileLog
 ): Promise<{ ok: boolean }> {
   try {
-    await registerConnectorTyped(shipped, { backfillRetrievalIndexes: false });
+    await registerConnectorTyped(shipped, { backfillRetrievalIndexes: false, replaceAcceptedDigest: true });
     log(`[manifest-reconcile] updated ${connectorId} from ${entryName}`);
     return { ok: true };
   } catch (err) {

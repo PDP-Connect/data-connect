@@ -368,7 +368,13 @@ async function registerManifest(asUrl: string | true, manifest: SeedManifest): P
     method: "POST",
   });
   const text = await res.text();
-  // 409 on re-register is fine — manifest version unchanged.
+  // 409 on re-register is fine — manifest version unchanged. A 409
+  // declaration_equivocation is not: the content changed under the same version.
+  if (res.status === 409 && text.includes("declaration_equivocation")) {
+    throw new Error(
+      `register manifest rejected: the connector declares different content under an already-registered version. Bump \`version\` in the manifest and seed again. ${text}`
+    );
+  }
   if (res.status !== 201 && res.status !== 200 && res.status !== 409) {
     throw new Error(`register manifest failed ${res.status}: ${text}`);
   }

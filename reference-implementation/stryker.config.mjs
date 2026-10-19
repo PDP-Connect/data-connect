@@ -45,6 +45,23 @@ export const wholeCohortTests = ["test/**/*.test.ts"]
 const RETAINED_OUTPUT_BYTES = 256 * 1024
 
 function selectedTestArguments() {
+  // An empty list is ambiguous: no test changed, or every selected test was
+  // withheld. The second must never fall through to the whole cohort below,
+  // which would run the very tests that were withheld. The workflow does not
+  // start Stryker for it; this refusal covers a run that gets here anyway.
+  try {
+    const outcome = readFileSync("reports/mutation/reference-implementation/selection-outcome.txt", "utf8").trim()
+    if (outcome === "none_runnable") {
+      throw new Error(
+        "every test selected for this attempt was withheld from the mutation baseline; " +
+          "refusing to fall back to the cohort's whole suite"
+      )
+    }
+  } catch (error) {
+    if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) {
+      throw error
+    }
+  }
   try {
     const listed = readFileSync("reports/mutation/reference-implementation/selected-tests.txt", "utf8")
       .split("\n")
@@ -86,6 +103,18 @@ export default {
   // Populated from the pull request diff by the workflow; empty means this
   // revision touched no reference-implementation production source.
   mutate: [],
+
+  // One trial at a time. Each trial is itself parallel: `node --test` starts a
+  // process per test file, and tsx compiles in each, so one trial of the 7-file
+  // sample on PR #494 used about 12 CPU-seconds in 3.3 s of wall time and fills
+  // a 4-CPU runner on its own. Stryker's timeout is `1.5 * net dry-run time +
+  // 5 s`, and the dry run runs alone. With four Stryker workers each trial then
+  // competes with three others and takes about four times as long, so any
+  // selection whose solo run passes 2 s outlives that limit: every one of the 144
+  // mutants of PR #494 timed out and the attempt had no evidence. One worker
+  // makes a trial run under the conditions the limit was measured in. It is not
+  // slower: 18 mutants took 43 s with one worker and 52 s with four.
+  concurrency: 1,
 
   reporters: ["json", "html", "progress"],
   jsonReporter: { fileName: "reports/mutation/reference-implementation/mutation.json" },

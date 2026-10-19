@@ -29,7 +29,7 @@ import test from "node:test";
 test("run lifecycle: exactly one terminal state", async (t) => {
   await t.test(
     "concurrent terminal attempts resolve to exactly one winner",
-    { todo: "requires the run-lifecycle owner module" },
+    { skip: "requires the run-lifecycle owner module" },
     () => {
       // Count SUCCESSFUL terminal transitions, not final state. A design that
       // lets two writers both "succeed" and land on the same value would pass
@@ -39,7 +39,7 @@ test("run lifecycle: exactly one terminal state", async (t) => {
 
   await t.test(
     "an unfenced upsert cannot overwrite a terminal status",
-    { todo: "requires the owner module; currently fails against insert-run-history.sql:40" },
+    { skip: "requires the owner module; currently fails against insert-run-history.sql:40" },
     () => {
       // Terminalize a run, then replay the scheduler's appendRunHistory path
       // for the same (run_id, connector_instance_id). The terminal status must
@@ -49,7 +49,7 @@ test("run lifecycle: exactly one terminal state", async (t) => {
 
   await t.test(
     "an interrupted run terminalizes as abandoned, never failed (F4)",
-    { todo: "requires the owner module" },
+    { skip: "requires the owner module" },
     () => {
       // Of 134 production runs recorded as run.failed/controller_restarted,
       // 55 had staged a cursor and 34 had durably ingested a batch. The two
@@ -59,7 +59,7 @@ test("run lifecycle: exactly one terminal state", async (t) => {
 
   await t.test(
     "records committed before the terminal transition are never revised",
-    { todo: "requires the owner module" },
+    { skip: "requires the owner module" },
     () => {
       // records_emitted must not be rewritten to zero by an abandon.
     }

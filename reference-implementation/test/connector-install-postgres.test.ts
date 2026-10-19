@@ -19,7 +19,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import { acquireDirectoryLock } from "../server/connector-install/directory-lock.ts";
-import { ConnectorInstallTimeoutError } from "../server/connector-install/index.ts";
+import { ConnectorInstallTimeoutError, createConnectorInstallStore } from "../server/connector-install/index.ts";
 import { connectorInstanceAdvisoryLockKey } from "../server/connector-instance-write-coordinator.ts";
 import { withConnectorLifecycleLock } from "../server/connector-lifecycle-lock.ts";
 import { postgresRepairRecordDerivedColumnsPage, recordDerivedColumnsStream } from "../server/postgres-records.ts";
@@ -113,6 +113,54 @@ async function withPostgres(name: string, body: (databaseUrl: string) => Promise
     }
   );
 }
+
+test(
+  "PostgreSQL: install and activation deletes roll back together when the second delete fails",
+  { skip: POSTGRES_SKIP },
+  async () => {
+    await withPostgres("install_delete_atomicity", async () => {
+      const now = new Date().toISOString();
+      await postgresQuery(
+        "INSERT INTO connector_installs(connector_id, record_json, updated_at) VALUES ($1, $2, $3)",
+        ["github", "{}", now]
+      );
+      await postgresQuery(
+        `INSERT INTO connector_activations(
+          connector_id,state,record_json,canonical_manifest_json,manifest_revision,
+          activation_id,attempt_id,updated_at
+        ) VALUES ($1, 'active', '{}', '{}', '1', 'activation', 'attempt', $2)`,
+        ["github", now]
+      );
+      await postgresQuery(`
+        CREATE FUNCTION fail_connector_activation_delete() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+          RAISE EXCEPTION 'injected activation delete failure';
+        END;
+        $$
+      `);
+      await postgresQuery(`
+        CREATE TRIGGER fail_connector_activation_delete
+        BEFORE DELETE ON connector_activations
+        FOR EACH ROW EXECUTE FUNCTION fail_connector_activation_delete()
+      `);
+
+      const store = createConnectorInstallStore();
+      assert.ok(store.deactivateAndRemoveActivation);
+      await assert.rejects(
+        store.deactivateAndRemoveActivation("github"),
+        /injected activation delete failure/
+      );
+      assert.equal(
+        (await postgresQuery("SELECT 1 FROM connector_installs WHERE connector_id=$1", ["github"])).rowCount,
+        1
+      );
+      assert.equal(
+        (await postgresQuery("SELECT 1 FROM connector_activations WHERE connector_id=$1", ["github"])).rowCount,
+        1
+      );
+    });
+  }
+);
 
 /** True when nothing holds the install fence: probe it by taking and dropping it. */
 function installFenceIsFree(dataDir: string): boolean {
@@ -863,3 +911,286 @@ test(
     }
   }
 );
+
+test("derived chunk and its progress cursor roll back together", {
+  skip: POSTGRES_SKIP,
+}, async () => {
+  await withPostgres("gap_chunk_atomic", async () => {
+    const instance = "cin_gap_chunk";
+    const sibling = "cin_gap_chunk_sibling";
+    await seedGmail({ instances: [instance, sibling], recordsPerStream: 3 });
+    const scope = { connectorId: CONNECTOR_ID, connectorInstanceId: instance, stream: "messages" };
+    await postgresQuery("DELETE FROM record_derived_repair_pending WHERE connector_id = $1", [CONNECTOR_ID]);
+    await withPostgresTransaction((client) =>
+      markRecordDerivedRepairPendingPostgres(client, scope, new Date().toISOString())
+    );
+    const registry = await postgresQuery<{ manifest: Record<string, unknown> | string }>(
+      "SELECT manifest FROM connectors WHERE connector_id = $1",
+      [CONNECTOR_ID]
+    );
+    const raw = registry.rows[0]?.manifest;
+    assert.ok(raw);
+    const manifest = typeof raw === "string" ? (JSON.parse(raw) as Record<string, unknown>) : raw;
+    const definition = (manifest.streams as Record<string, unknown>[]).find((stream) => stream.name === "messages");
+    assert.ok(definition);
+    await postgresQuery(
+      "UPDATE records SET cursor_value = 'bad', primary_key_text = 'bad', semantic_time = 'bad' WHERE connector_id = $1",
+      [CONNECTOR_ID]
+    );
+    const rows = async () =>
+      (
+        await postgresQuery(
+          "SELECT connector_instance_id, stream, record_key, cursor_value, primary_key_text, semantic_time, version, record_json FROM records WHERE connector_id = $1 ORDER BY connector_instance_id, stream, record_key",
+          [CONNECTOR_ID]
+        )
+      ).rows;
+    const pending = async () =>
+      (
+        await postgresQuery(
+          "SELECT * FROM record_derived_repair_pending WHERE connector_instance_id = $1 AND stream = $2",
+          [instance, "messages"]
+        )
+      ).rows;
+    const before = await rows();
+    const beforePending = await pending();
+    const input = {
+      afterRecordKey: null,
+      budget: { chunkSize: 256 },
+      connectorId: CONNECTOR_ID,
+      connectorInstanceId: instance,
+      manifest: { ...manifest, streams: [definition] },
+      manifestStream: recordDerivedColumnsStream(definition),
+      stream: "messages",
+    };
+    await assert.rejects(
+      postgresRepairRecordDerivedColumnsPage({
+        ...input,
+        withinChunk: async (client, lastKey) => {
+          await client.query(
+            "UPDATE record_derived_repair_pending SET after_record_key = $2 WHERE connector_instance_id = $1",
+            [instance, lastKey]
+          );
+          throw new Error("gap chunk abort");
+        },
+      }),
+      /gap chunk abort/
+    );
+    assert.deepEqual(await rows(), before, "no derived column may escape the failed chunk");
+    assert.deepEqual(await pending(), beforePending, "cursor cannot escape the failed chunk");
+    const success = await postgresRepairRecordDerivedColumnsPage({
+      ...input,
+      withinChunk: async (client, lastKey) => {
+        await client.query(
+          "UPDATE record_derived_repair_pending SET after_record_key = $2 WHERE connector_instance_id = $1",
+          [instance, lastKey]
+        );
+      },
+    });
+    assert.equal(success.updated, 3);
+    assert.equal(success.done, true);
+    assert.equal(success.lastRecordKey, "messages-000002");
+    assert.equal((await pending())[0]?.after_record_key, success.lastRecordKey);
+    const after = await rows();
+    for (const row of after) {
+      if (row.connector_instance_id === instance && row.stream === "messages") {
+        const data = row.record_json as Record<string, unknown>;
+        assert.equal(row.cursor_value, data.received_at);
+        assert.equal(row.primary_key_text, data.id);
+        assert.equal(row.semantic_time, data.received_at);
+      } else {
+        assert.deepEqual(
+          row,
+          before.find(
+            (old) =>
+              old.connector_instance_id === row.connector_instance_id &&
+              old.stream === row.stream &&
+              old.record_key === row.record_key
+          )
+        );
+      }
+    }
+    const repeat = await postgresRepairRecordDerivedColumnsPage(input);
+    assert.equal(repeat.updated, 0, "already correct columns must not be rewritten");
+    assert.deepEqual(await rows(), after);
+  });
+});
+
+for (const failOldJob of [false, true]) {
+  test(`replacement survives old final-page ${failOldJob ? "failure" : "completion"}`, {
+    skip: POSTGRES_SKIP,
+  }, async () => {
+    await withPostgres(failOldJob ? "gap_job_failure" : "gap_job_complete", async () => {
+      const instance = "cin_gap_replacement";
+      const scope = { connectorId: CONNECTOR_ID, connectorInstanceId: instance, stream: "messages" };
+      await seedGmail({ instances: [instance], recordsPerStream: 1 });
+      await postgresQuery("DELETE FROM record_derived_repair_pending WHERE connector_id = $1", [CONNECTOR_ID]);
+      const mark = () =>
+        withPostgresTransaction((client) =>
+          markRecordDerivedRepairPendingPostgres(client, scope, new Date().toISOString())
+        );
+      const read = async () =>
+        (
+          await postgresQuery<{
+            job_id: string;
+            after_record_key: string | null;
+            attempts: number;
+            next_attempt_at: string | null;
+            last_error: string | null;
+          }>(
+            "SELECT job_id, after_record_key, attempts, next_attempt_at, last_error FROM record_derived_repair_pending WHERE connector_instance_id = $1 AND stream = $2",
+            [instance, "messages"]
+          )
+        ).rows[0];
+      await mark();
+      const original = await read();
+      assert.ok(original);
+      let replacement: Awaited<ReturnType<typeof read>>;
+      __setRecordDerivedRepairHookForTest(async (point, seen) => {
+        if (point !== "after-page" || seen.connectorInstanceId !== instance || seen.stream !== "messages") return;
+        __setRecordDerivedRepairHookForTest(null);
+        await mark();
+        replacement = await read();
+        assert.ok(replacement);
+        assert.notEqual(replacement.job_id, original.job_id);
+        if (failOldJob) throw new Error("gap old job failed after replacement");
+      });
+      try {
+        const round = await runRecordDerivedRepairRound({ connectorId: CONNECTOR_ID });
+        assert.ok(replacement, "the final-page seam must have been reached");
+        assert.deepEqual(await read(), replacement, "old completion/failure cannot mutate a newer job");
+        assert.equal(replacement.after_record_key, null);
+        assert.equal(Number(replacement.attempts), 0);
+        assert.equal(replacement.next_attempt_at, null);
+        assert.equal(replacement.last_error, null);
+        assert.equal(round.failed, failOldJob ? 1 : 0);
+        if (!failOldJob) assert.equal(round.incomplete, true);
+        const retry = await runRecordDerivedRepairRound({ connectorId: CONNECTOR_ID });
+        assert.equal(retry.completed, 1);
+        assert.equal(retry.failed, 0);
+        assert.equal(await read(), undefined);
+      } finally {
+        __setRecordDerivedRepairHookForTest(null);
+      }
+    });
+  });
+}
+
+test("late bulk-delete failure restores records, history, counter and reset generation", {
+  skip: POSTGRES_SKIP,
+}, async () => {
+  await withPostgres("gap_delete_rollback", async () => {
+    const { postgresDeleteAllRecords, postgresIngestRecord } = await import("../server/postgres-records.ts");
+    const instance = "cin_gap_delete";
+    await seedGmail({ instances: [instance], recordsPerStream: 1 });
+    const target = { connector_id: CONNECTOR_ID, connector_instance_id: instance };
+    await postgresIngestRecord(target, {
+      key: "gap-delete",
+      stream: "messages",
+      op: "upsert",
+      emitted_at: "2026-01-02T00:00:00.000Z",
+      data: { id: "gap-delete", received_at: "2026-01-02T00:00:00.000Z" },
+    });
+    const snapshot = async () => ({
+      records: (
+        await postgresQuery("SELECT * FROM records WHERE connector_instance_id = $1 ORDER BY stream, record_key", [instance])
+      ).rows,
+      changes: (
+        await postgresQuery("SELECT * FROM record_changes WHERE connector_instance_id = $1 ORDER BY stream, version", [instance])
+      ).rows,
+      counters: (
+        await postgresQuery("SELECT * FROM version_counter WHERE connector_instance_id = $1 ORDER BY stream", [instance])
+      ).rows,
+      generation: (
+        await postgresQuery("SELECT record_reset_generation FROM connector_instances WHERE connector_instance_id = $1", [instance])
+      ).rows,
+    });
+    const before = await snapshot();
+    await postgresQuery(`CREATE FUNCTION gap_delete_abort() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN RAISE EXCEPTION 'gap late delete abort'; RETURN OLD; END $$`);
+    await postgresQuery(
+      "CREATE TRIGGER gap_delete_abort BEFORE DELETE ON version_counter FOR EACH ROW EXECUTE FUNCTION gap_delete_abort()"
+    );
+    try {
+      await assert.rejects(postgresDeleteAllRecords(target, "messages"), /gap late delete abort/);
+      assert.deepEqual(await snapshot(), before, "earlier DELETEs and reset generation must roll back");
+    } finally {
+      await postgresQuery("DROP TRIGGER gap_delete_abort ON version_counter");
+      await postgresQuery("DROP FUNCTION gap_delete_abort()");
+    }
+    assert.equal(await postgresDeleteAllRecords(target, "messages"), 2);
+    const after = await snapshot();
+    assert.deepEqual(after.records, before.records.filter((row) => row.stream !== "messages"));
+    assert.deepEqual(after.changes, before.changes.filter((row) => row.stream !== "messages"));
+    assert.deepEqual(after.counters, before.counters.filter((row) => row.stream !== "messages"));
+    assert.equal(
+      Number(after.generation[0]?.record_reset_generation),
+      Number(before.generation[0]?.record_reset_generation) + 1
+    );
+  });
+});
+
+test("identical attempt-context replay repairs derived facts without a new version", {
+  skip: POSTGRES_SKIP,
+}, async () => {
+  await withPostgres("gap_noop_facts", async () => {
+    const { postgresIngestRecord } = await import("../server/postgres-records.ts");
+    const instance = "cin_gap_noop";
+    await seedGmail({ instances: [instance], recordsPerStream: 0 });
+    const target = { connector_id: CONNECTOR_ID, connector_instance_id: instance };
+    const options = {
+      attemptContext: {
+        streams: {
+          messages: { primaryKey: ["id"], cursorField: "received_at", consentTimeField: "received_at" },
+        },
+      },
+    };
+    const record = {
+      key: "gap-noop",
+      stream: "messages",
+      op: "upsert" as const,
+      emitted_at: "2026-01-03T00:00:00.000Z",
+      data: { id: "gap-noop", received_at: "2026-01-02T00:00:00.000Z", subject: "same" },
+    };
+    const first = await postgresIngestRecord(target, record, options);
+    assert.equal(first.changed, true);
+    const read = async () =>
+      (
+        await postgresQuery(
+          "SELECT * FROM records WHERE connector_instance_id = $1 AND stream = 'messages' AND record_key = 'gap-noop'",
+          [instance]
+        )
+      ).rows[0];
+    const history = async () =>
+      (
+        await postgresQuery(
+          "SELECT * FROM record_changes WHERE connector_instance_id = $1 ORDER BY version",
+          [instance]
+        )
+      ).rows;
+    const counter = async () =>
+      (
+        await postgresQuery("SELECT * FROM version_counter WHERE connector_instance_id = $1 ORDER BY stream", [instance])
+      ).rows;
+    const expected = await read();
+    assert.ok(expected);
+    const beforeHistory = await history();
+    const beforeCounter = await counter();
+    await postgresQuery(
+      "UPDATE records SET cursor_value = 'bad', primary_key_text = 'bad', semantic_time = 'bad' WHERE connector_instance_id = $1",
+      [instance]
+    );
+    const replay = await postgresIngestRecord(
+      target,
+      {
+        ...record,
+        emitted_at: "2026-01-04T00:00:00.000Z",
+        data: { subject: "same", received_at: record.data.received_at, id: record.data.id },
+      },
+      options
+    );
+    assert.deepEqual(replay, { accepted: true, changed: false });
+    assert.deepEqual(await read(), expected, "restore derived facts only; keep emitted_at and version");
+    assert.deepEqual(await history(), beforeHistory);
+    assert.deepEqual(await counter(), beforeCounter);
+  });
+});

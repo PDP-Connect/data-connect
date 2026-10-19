@@ -9,6 +9,7 @@
 // produced no evidence or counts them as if they had.
 
 import { readFileSync } from "node:fs"
+import { ENGINE_NOT_RUN } from "./selection-outcome.ts"
 import type { AttemptReceipt } from "./stryker-adapter.ts"
 
 const receipt = JSON.parse(readFileSync(process.argv[2] ?? "", "utf8")) as AttemptReceipt
@@ -28,6 +29,18 @@ if (receipt.completeness.kind === "partial") {
       `fixed by the head commit, and ran the ${tests.sampled} of ${tests.total} selected tests ` +
       "that import them. Every count below describes that sample. The other files have no " +
       "mutation evidence from this run; the intent lists them as `deferred_by_attempt_bound`.",
+    ""
+  )
+}
+
+// An engine that was never started produced zero counts, which would otherwise
+// read as a run that found nothing.
+if (receipt.attempt.engineExit === ENGINE_NOT_RUN) {
+  lines.push(
+    "**The engine was not started.** Every test selected for this revision was withheld from",
+    "the mutation baseline, so no test could inform a mutant, and running the cohort's whole",
+    "suite would have run the withheld tests. The counts below are zero because nothing ran.",
+    "This is not a pass and not a failure.",
     ""
   )
 }

@@ -5,6 +5,7 @@ import { parseCoverageDiagnosticsStateSnapshot } from "./polyfill-connectors-run
 /**
  * PDPP Resource Server — record storage and grant-enforced query
  */
+import { crashPoint } from "./crash-point.ts";
 import { getDb } from "./db.ts";
 import { assertGrantedManifestReadAuthority, assertManifestReadAuthority } from "./manifest-read-authority.ts";
 import type { ComputedLexicalFields } from "./search.ts";
@@ -127,7 +128,12 @@ import {
 } from "./retained-size-read-model.ts";
 import { firstSemanticTimeValue, SEMANTIC_TIME_UNKNOWN } from "./semantic-time-coercion.ts";
 import { createStorageBackend } from "./storage-backend.ts";
-import { currentStorageGeneration, isCurrentStorageGeneration } from "./storage-generation.ts";
+import {
+  assertCurrentStorageGeneration,
+  currentStorageGeneration,
+  isCurrentStorageGeneration,
+  StaleStorageGenerationError,
+} from "./storage-generation.ts";
 import {
   getChangeHistoryLimit,
   nowIso,
@@ -1054,13 +1060,6 @@ function releaseIndexWork(generation: number): void {
  * and then queue behind another generation's held admission permit for an
  * arbitrarily long time before actually running its operation.
  */
-class StaleStorageGenerationError extends Error {
-  constructor() {
-    super("storage generation changed while queued for index-work admission");
-    this.name = "StaleStorageGenerationError";
-  }
-}
-
 async function withIndexWork<T>(operation: () => Promise<T>, generation = currentStorageGeneration()): Promise<T> {
   await acquireIndexWork(generation);
   try {
@@ -1819,7 +1818,7 @@ async function runDeferredRecordIndexes(
     try {
       // biome-ignore lint/performance/noAwaitInLoops: One connector instance's derived index repairs are intentionally ordered.
       await withIndexWork(
-        () => maintainRecordIndexesWithinPermit(storageTarget, record, version, {}),
+        () => maintainRecordIndexesWithinPermit(storageTarget, record, version, {}, scheduledGeneration),
         scheduledGeneration
       );
     } catch (err) {
@@ -2313,6 +2312,7 @@ async function ingestSqliteRecord(
 
   // Durable mutation unit: returns the operation outcome so derived index
   // maintenance can run *after* the commit succeeds.
+  crashPoint("ingest:before-write-transaction");
   const outcome = writeTransaction<DurableIngestOutcome>(() => {
     assertSqliteRunStillAdmitted(options.runId, connectorInstanceId);
     if (options.requireConnectionAdmission) {
@@ -2379,6 +2379,7 @@ async function ingestSqliteRecord(
     const nextVersion = allocated.max_version;
 
     maybeFault("after-version-allocation", { connectorId, connectorInstanceId, nextVersion, recordKey, stream });
+    crashPoint("ingest:after-version-allocation");
 
     writeRecordChange({
       connectorId,
@@ -2395,6 +2396,7 @@ async function ingestSqliteRecord(
     maybeFault("after-records-mutation", { connectorId, connectorInstanceId, nextVersion, op, recordKey, stream });
 
     maybeFault("after-record-changes-append", { connectorId, connectorInstanceId, nextVersion, op, recordKey, stream });
+    crashPoint("ingest:after-record-write");
 
     // Scope-keyed dirty mark, inside the SAME transaction as the record
     // mutation above: this scope's lexical/semantic index may now be stale,
@@ -2403,6 +2405,7 @@ async function ingestSqliteRecord(
     // writes -- so the mark must be atomic with the write, not best-effort
     // after it. See server/stores/search-index-dirty-store.ts.
     markSearchIndexDirtySqlite({ connectorId, connectorInstanceId, stream }, nowIso());
+    crashPoint("ingest:after-dirty-mark");
 
     const insertedChangeJsonBytes = byteLength(op === "delete" ? current?.record_json : recordJson);
     const { prunedBytesForDelta, prunedRowsForDelta } = pruneRecordChangeHistory(
@@ -2427,8 +2430,10 @@ async function ingestSqliteRecord(
       stream,
     });
 
+    crashPoint("ingest:before-commit");
     return finishDurableOutcome({ kind: "changed", op, selfHeal, version: nextVersion });
   });
+  crashPoint("ingest:after-commit-before-ack");
 
   if (outcome.kind === "noop") {
     return { accepted: true, changed: false };
@@ -2501,7 +2506,7 @@ export async function maintainRecordIndexes(
   generation: number = currentStorageGeneration()
 ): Promise<void> {
   return await withIndexWork(
-    () => maintainRecordIndexesWithinPermit(storageTarget, record, expectedVersion, options),
+    () => maintainRecordIndexesWithinPermit(storageTarget, record, expectedVersion, options, generation),
     generation
   );
 }
@@ -2786,7 +2791,8 @@ async function maintainRecordIndexesWithinPermit(
   storageTarget: RecordStorageTarget,
   record: RecordEnvelope,
   expectedVersion: number,
-  options: RecordIngestOptions
+  options: RecordIngestOptions,
+  generation: number
 ): Promise<void> {
   const connectorId = connectorIdForStorageTarget(storageTarget);
   const connectorInstanceId = resolveStorageConnectorInstanceId(storageTarget, connectorId);
@@ -2838,6 +2844,7 @@ async function maintainRecordIndexesWithinPermit(
       connectorInstanceId,
       data,
       declaredFields: options.attemptContext ? (attemptFacts?.semanticFields ?? []) : undefined,
+      generation,
       recordKey,
       stream,
     });
@@ -2858,9 +2865,14 @@ async function maintainRecordIndexesWithinPermit(
     stream,
   });
 
+  // withIndexWork checked the generation before this operation started, but the
+  // compute awaits above can span a storage close and re-init. The version check
+  // below cannot tell the new database from the old one: the same key can sit at
+  // the same version there with different content.
   if (isPostgresStorageBackend()) {
     return withPostgresTransaction(
       async (client) => {
+        assertCurrentStorageGeneration(generation);
         // Match repair's instance -> publication -> derived DML order, including deletes.
         await lockConnectorManifestPublication(client, connectorId);
         const current = await client.query<{ version: string | number; deleted: boolean }>(
@@ -2900,6 +2912,7 @@ async function maintainRecordIndexesWithinPermit(
     );
   }
 
+  assertCurrentStorageGeneration(generation);
   return writeTransaction(() => {
     const current = getOne<CurrentRecordRow>(referenceQueries.recordsIngestGetCurrentRecordState, [
       connectorInstanceId,
@@ -6690,6 +6703,7 @@ export async function deleteAllRecordsForConnector(connectorId: string, instance
       if (!instanceStreams) {
         return;
       }
+      crashPoint("connector-teardown:before-durable-delete");
       writeTransaction(() => {
         advanceSqliteRecordResetGenerationForStreams(connectorInstanceId, instanceStreams);
         for (const stream of instanceStreams) {
@@ -6706,18 +6720,25 @@ export async function deleteAllRecordsForConnector(connectorId: string, instance
           // `deleteConnectionRecordRowsSqlite`.
           exec(referenceQueries.recordsDeleteDeleteBlobsByStream, [connectorInstanceId, stream]);
         }
+        crashPoint("connector-teardown:before-commit");
       });
+      crashPoint("connector-teardown:after-durable-delete");
       await mapWithConcurrency(instanceStreams, 1, async (stream) => {
         await markRetainedSizeStreamDirty({ connectorInstanceId, stream });
+        crashPoint("connector-teardown:after-retained-dirty");
         await markConnectorSummaryEvidenceDirty({
           connectorInstanceId,
           reason: "bulk connector record delete changed connection count/stream evidence",
         });
+        crashPoint("connector-teardown:after-summary-dirty");
         await lexicalIndexDeleteByConnectorStream({ connectorId: storageConnectorId, connectorInstanceId, stream });
+        crashPoint("connector-teardown:after-lexical-delete");
         await semanticIndexDeleteByConnectorStream({ connectorId: storageConnectorId, connectorInstanceId, stream });
+        crashPoint("connector-teardown:after-semantic-delete");
       });
     })
   );
+  crashPoint("connector-teardown:after-instances");
   if (deletedCount > 0) {
     markDatasetSummaryProjectionStale("bulk connector record delete bypassed exact dataset summary projection deltas");
     await markRetainedSizeConnectionDirty({ connectorInstanceId: null });
@@ -6806,6 +6827,7 @@ async function postgresDeleteAllRecordsForConnector(connectorId: string, instanc
       }
       await mapWithConcurrency(instanceStreams, 1, async (stream) => {
         await postgresDeleteAllRecords(storageTarget, stream);
+        crashPoint("connector-teardown:after-durable-delete");
         await withPostgresTransaction(
           async (client) => {
             const unbound = await client.query<{ blob_id: string }>(
@@ -6835,7 +6857,9 @@ async function postgresDeleteAllRecordsForConnector(connectorId: string, instanc
           },
           { lockConnectorInstanceId: connectorInstanceId }
         );
+        crashPoint("connector-teardown:after-blob-delete");
         await markRetainedSizeStreamDirty({ connectorInstanceId, stream });
+        crashPoint("connector-teardown:after-retained-dirty");
         // Parity with the SQLite arm above: a connector-wide record delete
         // changes this connection's count/stream evidence and must mark the
         // connector-summary evidence row dirty too, not just retained-size.
@@ -6847,11 +6871,15 @@ async function postgresDeleteAllRecordsForConnector(connectorId: string, instanc
           connectorInstanceId,
           reason: "bulk connector record delete changed connection count/stream evidence",
         });
+        crashPoint("connector-teardown:after-summary-dirty");
         await lexicalIndexDeleteByConnectorStream({ connectorId, connectorInstanceId, stream });
+        crashPoint("connector-teardown:after-lexical-delete");
         await semanticIndexDeleteByConnectorStream({ connectorId, connectorInstanceId, stream });
+        crashPoint("connector-teardown:after-semantic-delete");
       });
     })
   );
+  crashPoint("connector-teardown:after-instances");
 
   if (deletedCount > 0) {
     // Postgres dashboard summary reads from the retained-size projection

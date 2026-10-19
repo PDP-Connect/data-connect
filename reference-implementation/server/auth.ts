@@ -10,7 +10,7 @@
  * - Issues opaque bearer tokens (random strings)
  * - Implements RFC 7662-style introspection with PDPP extensions
  */
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { createRequire } from "node:module";
 import {
   BATCH_CONSENT_STAGED_ENTRY_SOFT_CAP,
@@ -46,6 +46,7 @@ import {
   validateConnectorManifest,
 } from "./connector-manifest-validation.ts";
 import { lockConnectorManifestPublication } from "./connector-manifest-write-fence.ts";
+import { crashPoint } from "./crash-point.ts";
 import {
   projectResolvedCoreGrantStreams as coreProjectResolvedGrantStreams,
   coreSchemaRequiredFields,
@@ -3403,12 +3404,54 @@ function canonicalManifestJson(rawManifest: string): string {
     if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
       return candidate;
     }
-    const sorted: Record<string, unknown> = {};
+    // Null prototype: an own "__proto__" key from JSON.parse must stay content
+    // rather than hit the inherited setter and vanish from the digest.
+    const sorted: Record<string, unknown> = Object.create(null);
     for (const key of Object.keys(candidate).sort()) {
       sorted[key] = candidate[key];
     }
     return sorted;
   });
+}
+
+/** Digest of the parsed content of a stored-form manifest; key order is not content. */
+export function connectorDeclarationDigest(storedManifest: Record<string, unknown>): string {
+  return createHash("sha256").update(canonicalManifestJson(JSON.stringify(storedManifest))).digest("hex");
+}
+
+function declarationVersionOf(manifestJson: string): string | null {
+  const version = (JSON.parse(manifestJson) as { version?: unknown }).version;
+  return typeof version === "string" && version ? version : null;
+}
+
+/** Version and content digest of a stored manifest, or null when it holds neither (or does not parse). */
+function declarationDigestOf(manifest: unknown): { digest: string; version: string } | null {
+  try {
+    const parsed = (typeof manifest === "string" ? JSON.parse(manifest) : manifest) as Record<string, unknown>;
+    const version = parsed?.version;
+    return typeof version === "string" && version ? { digest: connectorDeclarationDigest(parsed), version } : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The digest of the content first accepted under (connector, version), or
+ * null when none was recorded (for example a version accepted before digests
+ * were retained).
+ */
+export async function getAcceptedDeclarationDigest(connectorId: string, version: string): Promise<string | null> {
+  if (isPostgresStorageBackend()) {
+    const row = await pgOne(
+      "SELECT content_digest FROM connector_accepted_declarations WHERE connector_id = $1 AND declaration_version = $2",
+      [connectorId, version]
+    );
+    return (row?.content_digest as string | undefined) ?? null;
+  }
+  const row = getDb()
+    .prepare("SELECT content_digest FROM connector_accepted_declarations WHERE connector_id = ? AND declaration_version = ?")
+    .get<{ content_digest: string }>(connectorId, version);
+  return row?.content_digest ?? null;
 }
 
 /** Streams whose lexical or semantic index a manifest change can invalidate. */
@@ -3463,7 +3506,7 @@ function derivedRepairPlan(
 async function persistManifestAndAdvanceGenerations(
   connectorId: string,
   manifestJson: string,
-  options: { queueDerivedRepair?: boolean } = {}
+  options: { queueDerivedRepair?: boolean; replaceAcceptedDigest?: boolean } = {}
 ): Promise<boolean> {
   const markedAt = new Date().toISOString();
   if (isPostgresStorageBackend()) {
@@ -3476,14 +3519,30 @@ async function persistManifestAndAdvanceGenerations(
       if (activation.rows[0]?.state === "active") {
         assertActiveConnectorStreamShape(activation.rows[0].canonical_manifest_json, manifestJson);
       }
-      const previous = options.queueDerivedRepair
-        ? (
-            await client.query<{ manifest: unknown }>(
-              "SELECT manifest FROM connectors WHERE connector_id = $1 FOR UPDATE",
-              [connectorId]
-            )
-          ).rows[0]?.manifest
-        : null;
+      const previous = (
+        await client.query<{ manifest: unknown }>("SELECT manifest FROM connectors WHERE connector_id = $1 FOR UPDATE", [
+          connectorId,
+        ])
+      ).rows[0]?.manifest;
+      // A manifest stored before digests were retained is the only record of
+      // its version's accepted content: keep it before it is replaced.
+      const previousDigest = previous ? declarationDigestOf(previous) : null;
+      if (previousDigest) {
+        await client.query(
+          `INSERT INTO connector_accepted_declarations(connector_id, declaration_version, content_digest)
+           VALUES($1, $2, $3) ON CONFLICT DO NOTHING`,
+          [connectorId, previousDigest.version, previousDigest.digest]
+        );
+      }
+      const acceptedVersion = declarationVersionOf(manifestJson);
+      if (acceptedVersion) {
+        await client.query(
+          `INSERT INTO connector_accepted_declarations(connector_id, declaration_version, content_digest)
+           VALUES($1, $2, $3)
+           ON CONFLICT ${options.replaceAcceptedDigest ? "(connector_id, declaration_version) DO UPDATE SET content_digest = EXCLUDED.content_digest" : "DO NOTHING"}`,
+          [connectorId, acceptedVersion, connectorDeclarationDigest(JSON.parse(manifestJson))]
+        );
+      }
       const changed = await client.query(
         `INSERT INTO connectors(connector_id, manifest)
          VALUES($1, $2::jsonb)
@@ -3549,6 +3608,23 @@ async function persistManifestAndAdvanceGenerations(
           markRecordDerivedRepairPendingSqlite({ connectorId, connectorInstanceId, stream }, markedAt);
         }
       }
+    }
+    const previousDigest = existing?.manifest ? declarationDigestOf(existing.manifest) : null;
+    if (previousDigest) {
+      execDynamicSqlAcknowledged(
+        `INSERT INTO connector_accepted_declarations(connector_id, declaration_version, content_digest)
+         VALUES(?, ?, ?) ON CONFLICT DO NOTHING`,
+        [connectorId, previousDigest.version, previousDigest.digest]
+      );
+    }
+    const acceptedVersion = declarationVersionOf(manifestJson);
+    if (acceptedVersion) {
+      execDynamicSqlAcknowledged(
+        `INSERT INTO connector_accepted_declarations(connector_id, declaration_version, content_digest)
+         VALUES(?, ?, ?)
+         ON CONFLICT ${options.replaceAcceptedDigest ? "(connector_id, declaration_version) DO UPDATE SET content_digest = excluded.content_digest" : "DO NOTHING"}`,
+        [connectorId, acceptedVersion, connectorDeclarationDigest(JSON.parse(manifestJson))]
+      );
     }
     if (existing?.manifest && canonicalManifestJson(existing.manifest) === canonicalManifestJson(manifestJson)) {
       return false;
@@ -3761,7 +3837,9 @@ function canonicalApprovalReviewJson(value: unknown): string {
     if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
       return candidate;
     }
-    const sorted: Record<string, unknown> = {};
+    // Null prototype: an own "__proto__" key from JSON.parse must stay content
+    // rather than hit the inherited setter and vanish from the digest.
+    const sorted: Record<string, unknown> = Object.create(null);
     for (const key of Object.keys(candidate).sort()) {
       sorted[key] = candidate[key];
     }
@@ -4392,6 +4470,7 @@ async function persistApprovedSingleGrantAtomically({
         err.code = "approval_conflict";
         throw err;
       }
+      crashPoint("consent-approve:before-commit");
       return tokenId;
     });
   }
@@ -4455,6 +4534,7 @@ async function persistApprovedSingleGrantAtomically({
       err.code = "approval_conflict";
       throw err;
     }
+    crashPoint("consent-approve:before-commit");
     return tokenId;
   });
 }
@@ -5459,6 +5539,12 @@ export async function registerConnector(
     backfillRetrievalIndexes?: boolean;
     /** Queue the record-column and search-index repair durably with the manifest (see derivedRepairPlan). */
     queueDerivedRepair?: boolean;
+    /**
+     * Trusted internal publication (startup reconcile, installer): replace the
+     * accepted digest for the version written instead of keeping the first.
+     * The HTTP registration path never sets it.
+     */
+    replaceAcceptedDigest?: boolean;
     skipDerivedRepair?: boolean;
     skipManifestPersistence?: boolean;
   } = {}
@@ -5468,6 +5554,7 @@ export async function registerConnector(
   if (!options.skipManifestPersistence) {
     await persistManifestAndAdvanceGenerations(connectorId, JSON.stringify(storedManifest), {
       queueDerivedRepair: options.queueDerivedRepair === true,
+      replaceAcceptedDigest: options.replaceAcceptedDigest === true,
     });
   }
   await maybeRegisterConnectorPhaseForTest("after-manifest-persisted", { connectorId, manifest: storedManifest });
@@ -7757,6 +7844,7 @@ export async function approveGrant(
     traceContext,
   });
 
+  crashPoint("consent-approve:after-commit");
   return { grant, token };
 }
 
@@ -8176,21 +8264,24 @@ const postgresGrantPackageStore: GrantPackageStore = {
        WHERE package_id = $2 AND grant_id = $3 AND status = 'active'`,
       [revokedAt, packageId, grantId]
     ),
-  markPackageRevokedCascade: async ({ packageId, revokedAt }) => {
-    await pgExec(
-      "UPDATE grant_packages SET status = 'revoked', revoked_at = $1 WHERE package_id = $2 AND status = 'active'",
-      [revokedAt, packageId]
-    );
-    await pgExec("UPDATE tokens SET revoked = TRUE WHERE package_id = $1", [packageId]);
-    await pgExec(
-      "UPDATE grant_package_members SET status = 'revoked', revoked_at = $1 WHERE package_id = $2 AND status = 'active'",
-      [revokedAt, packageId]
-    );
-    await pgExec(
-      "UPDATE oauth_refresh_tokens SET status = 'revoked', revoked_at = $1 WHERE package_id = $2 AND status = 'active'",
-      [revokedAt, packageId]
-    );
-  },
+  markPackageRevokedCascade: ({ packageId, revokedAt }) =>
+    withPostgresTransaction(async (client) => {
+      // Lock refresh rows, tokens, members, then the parent to match refresh and consent redemption.
+      await client.query(
+        "UPDATE oauth_refresh_tokens SET status = 'revoked', revoked_at = $1 WHERE package_id = $2 AND status = 'active'",
+        [revokedAt, packageId]
+      );
+      crashPoint("package-revoke:in-cascade");
+      await client.query("UPDATE tokens SET revoked = TRUE WHERE package_id = $1", [packageId]);
+      await client.query(
+        "UPDATE grant_package_members SET status = 'revoked', revoked_at = $1 WHERE package_id = $2 AND status = 'active'",
+        [revokedAt, packageId]
+      );
+      await client.query(
+        "UPDATE grant_packages SET status = 'revoked', revoked_at = $1 WHERE package_id = $2 AND status = 'active'",
+        [revokedAt, packageId]
+      );
+    }),
 };
 
 /**
@@ -8318,10 +8409,14 @@ const sqliteGrantPackageStore: GrantPackageStore = {
   markMemberRevoked: ({ packageId, grantId, revokedAt }) =>
     exec(referenceQueries.authGrantPackageMembersMarkRevokedByGrant, [revokedAt, packageId, grantId]),
   markPackageRevokedCascade: ({ packageId, revokedAt }) => {
-    exec(referenceQueries.authGrantPackagesMarkRevoked, [revokedAt, packageId]);
-    exec(referenceQueries.authTokensRevokeByPackage, [packageId]);
-    exec(referenceQueries.authGrantPackageMembersMarkRevokedByPackage, [revokedAt, packageId]);
-    exec(referenceQueries.authOauthRefreshTokensRevokeByPackage, [revokedAt, packageId]);
+    transaction(() => {
+      // Keep the dependent-first order used by Postgres to avoid refresh/consent deadlocks.
+      exec(referenceQueries.authOauthRefreshTokensRevokeByPackage, [revokedAt, packageId]);
+      crashPoint("package-revoke:in-cascade");
+      exec(referenceQueries.authTokensRevokeByPackage, [packageId]);
+      exec(referenceQueries.authGrantPackageMembersMarkRevokedByPackage, [revokedAt, packageId]);
+      exec(referenceQueries.authGrantPackagesMarkRevoked, [revokedAt, packageId]);
+    });
   },
 };
 
@@ -9010,6 +9105,7 @@ async function persistHostedPackageAtomically(input: {
       await forEachSequential(input.packageEvents(packageToken), async (event) => {
         await postgresEmitSpineEventInTransaction(client, event as SpineEventInput);
       });
+      crashPoint("package-create:before-commit");
       return packageToken;
     });
   }
@@ -9036,6 +9132,7 @@ async function persistHostedPackageAtomically(input: {
     for (const event of input.packageEvents(packageToken)) {
       emitRawSpineEvent(event as SpineEventInput, db);
     }
+    crashPoint("package-create:before-commit");
     return packageToken;
   });
 }
@@ -9850,6 +9947,7 @@ export async function revokeGrantPackage(
     }
     try {
       await revokeGrant(member.grant_id, context);
+      crashPoint("package-revoke:after-member-grant-revoked");
       const childRevokedAt = nowIso();
       await markGrantPackageMemberRevoked(packageId, member.grant_id, childRevokedAt);
       revokedChildGrants.push(member.grant_id);
@@ -9887,7 +9985,9 @@ export async function revokeGrantPackage(
   }
 
   const now = nowIso();
+  crashPoint("package-revoke:before-package-mark");
   await markGrantPackageRevoked(packageId, now);
+  crashPoint("package-revoke:after-package-mark");
 
   await emitSpineEvent({
     actor_id: "pdpp_as",
@@ -9995,6 +10095,7 @@ async function issueOrRecoverOAuthAuthorizationCode(
   if (!updated.changes) {
     return recoverIssuedOAuthAuthorizationCode(await oauthCodeStore.getByDeviceCode(deviceCode), binding);
   }
+  crashPoint("oauth-code:after-issue");
   return authorizationCodeDelivery({
     ...row,
     consumed_at: null,
@@ -10199,6 +10300,7 @@ async function consumeOAuthAuthorizationCodeAtomically({
       if (consumed.rowCount !== 1) {
         throw buildOAuthAuthorizationCodeError("invalid_grant", "Authorization code is invalid or already used");
       }
+      crashPoint("oauth-exchange:after-consume-update");
       if (!refresh) {
         return;
       }
@@ -10238,6 +10340,7 @@ async function consumeOAuthAuthorizationCodeAtomically({
     if (!consumed.changes) {
       throw buildOAuthAuthorizationCodeError("invalid_grant", "Authorization code is invalid or already used");
     }
+    crashPoint("oauth-exchange:after-consume-update");
     if (!refresh) {
       return;
     }
@@ -10360,6 +10463,7 @@ export async function exchangeOAuthAuthorizationCode({
     refresh,
     tokenId: row.token_id,
   });
+  crashPoint("oauth-exchange:after-consume-commit");
   if (refresh) {
     response.refresh_token = refresh.refreshToken;
     response.access_token_expires_at = refreshAccessTokenExpiresAt(refresh.createdAt, refresh.expiresAt);
@@ -11061,6 +11165,7 @@ export async function createConsentExchangeCode({
          ) VALUES($1, $2, $3, $4, $5, NULL)`,
         [codeHash, proofHash, token, createdAt, expiresAt]
       );
+      crashPoint("consent-exchange:before-create-commit");
     });
   } else {
     transaction(() => {
@@ -11070,6 +11175,7 @@ export async function createConsentExchangeCode({
         token,
       ]);
       exec(referenceQueries.authConsentExchangeCodesInsert, [codeHash, proofHash, token, createdAt, expiresAt]);
+      crashPoint("consent-exchange:before-create-commit");
     });
   }
   return codeSecret;
@@ -11208,6 +11314,7 @@ export async function consumeConsentExchangeCode(
               [redeemedAt, codeHash]
             );
           }
+          crashPoint("consent-exchange:before-redeem-commit");
           return {
             grant: loaded.grant,
             ok: true as const,
@@ -11271,6 +11378,7 @@ export async function consumeConsentExchangeCode(
           if (!row.redeemed_at) {
             exec(referenceQueries.authConsentExchangeCodesMarkRedeemed, [redeemedAt, codeHash]);
           }
+          crashPoint("consent-exchange:before-redeem-commit");
           return {
             grant,
             ok: true as const,
@@ -11279,6 +11387,7 @@ export async function consumeConsentExchangeCode(
           };
         }
       );
+  crashPoint("consent-exchange:after-redeem-commit");
   return result;
 }
 
@@ -12318,18 +12427,26 @@ async function requireRevocablePersistedGrant(
 }
 
 async function revokeGrantStorage(grantId: string): Promise<void> {
+  // One transaction: a kill between statements rolls back the whole cascade.
+  // Lock refresh rows, tokens, then the parent to match refresh and consent redemption.
   if (isPostgresStorageBackend()) {
-    await pgExec("UPDATE grants SET status = 'revoked' WHERE grant_id = $1", [grantId]);
-    await pgExec("UPDATE tokens SET revoked = TRUE WHERE grant_id = $1", [grantId]);
-    await pgExec(
-      "UPDATE oauth_refresh_tokens SET status = 'revoked', revoked_at = $1 WHERE grant_id = $2 AND status = 'active'",
-      [nowIso(), grantId]
-    );
+    await withPostgresTransaction(async (client) => {
+      await client.query(
+        "UPDATE oauth_refresh_tokens SET status = 'revoked', revoked_at = $1 WHERE grant_id = $2 AND status = 'active'",
+        [nowIso(), grantId]
+      );
+      crashPoint("grant-revoke:in-cascade");
+      await client.query("UPDATE tokens SET revoked = TRUE WHERE grant_id = $1", [grantId]);
+      await client.query("UPDATE grants SET status = 'revoked' WHERE grant_id = $1", [grantId]);
+    });
     return;
   }
-  exec(referenceQueries.authGrantsMarkRevoked, [grantId]);
-  exec(referenceQueries.authTokensRevokeByGrant, [grantId]);
-  exec(referenceQueries.authOauthRefreshTokensRevokeByGrant, [nowIso(), grantId]);
+  transaction(() => {
+    exec(referenceQueries.authOauthRefreshTokensRevokeByGrant, [nowIso(), grantId]);
+    crashPoint("grant-revoke:in-cascade");
+    exec(referenceQueries.authTokensRevokeByGrant, [grantId]);
+    exec(referenceQueries.authGrantsMarkRevoked, [grantId]);
+  });
 }
 
 async function emitGrantRevoked(

@@ -8,8 +8,7 @@
  * helper is fail-closed, which is worth proving, but they never execute the
  * line that decides whether a file gets a clone at all:
  *
- *   const useTemplate =
- *     postgresTestTemplateName !== null && isPostgresTemplateEligibleFilePath(filePath);
+ *   const useTemplate = !cold && isPostgresTemplateEligibleFilePath(filePath);
  *
  * The `isPostgresTemplateEligibleFilePath` half is the fail-closed default --
  * a file not on the eligibility allowlist must get a real, from-scratch
@@ -18,20 +17,19 @@
  * have failed anything.
  *
  * This file closes that gap end to end. It runs the real `run-tests.ts` as a
- * subprocess against a real PostgreSQL server, on a COLD-REQUIRED file, with
- * a POISONED template published under the name the run will derive -- a
- * template whose schema is empty, so any database cloned from it is missing
- * every table the test needs.
+ * subprocess against a real PostgreSQL server, selecting one COLD-REQUIRED
+ * file and one template-ELIGIBLE file. The eligible file makes the runner
+ * build the run's template, so both provisioning paths are exercised in one
+ * run, and the test asserts the path the runner reports for each:
  *
- *   - If selection is correct, the cold-required file is bootstrapped from
- *     scratch, never touches the poisoned template, and passes.
- *   - If the eligibility half of the condition is dropped, the file is
- *     cloned from the poisoned template and fails.
+ *   - the cold-required file reports `cold-bootstrap`, even though a template
+ *     exists for the run;
+ *   - the eligible file reports `template-clone`.
  *
- * The template is poisoned rather than merely observed because an
- * observational assertion (counting clones) can be satisfied by a runner
- * that clones and then happens to work; a poisoned template makes wrongly
- * using it impossible to survive.
+ * A fault that clones every file whenever a template exists (or never clones)
+ * fails one of the two assertions. The run's template carries a correct
+ * schema, so a wrongly cloned cold-required file would usually still pass;
+ * only the reported path distinguishes the two.
  */
 
 import assert from "node:assert/strict";
@@ -44,12 +42,13 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 // biome-ignore lint/correctness/noUnresolvedImports: localized test assertion preserves its explicit contract.
 import pg from "pg";
+import { deriveDedicatedPostgresDbNameForFile } from "../scripts/dedicated-postgres-db-name.ts";
 import {
   isPostgresTemplateEligibleFilePath,
   POSTGRES_TEMPLATE_COLD_REQUIRED_FILES,
 } from "../scripts/postgres-template-eligibility.ts";
 import { RUN_AUTHORITY_SCHEMA } from "../scripts/test-accounting/inventory.ts";
-import { dedicatedPostgresTestUrl } from "./helpers/dedicated-postgres-test-url.ts";
+import { dedicatedPostgresTestUrl, isDedicatedPostgresTestDatabaseName } from "./helpers/dedicated-postgres-test-url.ts";
 
 const { Client } = pg;
 
@@ -66,6 +65,14 @@ const POSTGRES_SKIP = POSTGRES_URL ? false : "PDPP_TEST_POSTGRES_URL unset or no
  * testing the wrong thing.
  */
 const COLD_REQUIRED_TARGET = "test/device-ingest-reservation-migration.test.ts";
+
+/**
+ * A storage-only, template-eligible file selected alongside the cold-required
+ * one. The runner builds the per-run template only when an eligible file is
+ * selected, so without it the nested run has no template at all and a fault
+ * that clones every file whenever a template exists cannot be observed.
+ */
+const ELIGIBLE_TARGET = "test/acknowledged-loss-store-postgres.test.ts";
 
 function adminUrlFor(base: string): string {
   const url = new URL(base);
@@ -92,9 +99,10 @@ async function withAdmin<T>(base: string, fn: (client: InstanceType<typeof Clien
  * Assigning `undefined` does not remove a key from a spawn env object, so it
  * is deleted explicitly.
  */
-function childEnv(baseUrl: string, restoreUrl: string): NodeJS.ProcessEnv {
+function childEnv(baseUrl: string, restoreUrl: string, extraEnv: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {
     ...process.env,
+    ...extraEnv,
     PDPP_HERMETIC_GUARD: "0",
     PDPP_TEST_POSTGRES_RESTORE_URL: restoreUrl,
     PDPP_TEST_POSTGRES_URL: baseUrl,
@@ -110,7 +118,12 @@ interface RunResult {
   output: string;
 }
 
-function runRunner(authorityPath: string, baseUrl: string, restoreUrl: string): Promise<RunResult> {
+function runRunner(
+  authorityPath: string,
+  baseUrl: string,
+  restoreUrl: string,
+  extraEnv: NodeJS.ProcessEnv = {}
+): Promise<RunResult> {
   return new Promise((resolve) => {
     const child = spawn(
       process.execPath,
@@ -123,7 +136,7 @@ function runRunner(authorityPath: string, baseUrl: string, restoreUrl: string): 
         // files and emits no structured events, which this runner then
         // reports as "runner emitted no structured node events". Clearing it
         // makes the subprocess an ordinary Node process again.
-        env: childEnv(baseUrl, restoreUrl),
+        env: childEnv(baseUrl, restoreUrl, extraEnv),
       }
     );
     let output = "";
@@ -136,6 +149,66 @@ function runRunner(authorityPath: string, baseUrl: string, restoreUrl: string): 
     child.on("close", (code) => resolve({ code, output }));
   });
 }
+
+test("runner refuses a database name collision without dropping the existing database", {
+  skip: POSTGRES_SKIP,
+  timeout: 600_000,
+}, async () => {
+  const baseUrl = POSTGRES_URL as string;
+  const restoreUrl = process.env.PDPP_TEST_POSTGRES_RESTORE_URL as string;
+  assert.ok(restoreUrl);
+  const target = "test/device-ingest-reservation-migration.test.ts";
+  assert.ok(POSTGRES_TEMPLATE_COLD_REQUIRED_FILES.includes(target));
+  const runnerId = randomBytes(4).toString("hex");
+  const collisionName = deriveDedicatedPostgresDbNameForFile(target, runnerId, 1);
+  const workDir = await mkdtemp(join(tmpdir(), "pdpp-collision-"));
+  const authorityPath = join(workDir, "authority.json");
+  const preloadPath = join(workDir, "fixed-random.mjs");
+  let collisionCreated = false;
+  await writeFile(authorityPath, JSON.stringify({
+    expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+    files: [`reference-implementation/${target}`],
+    nonce: randomBytes(8).toString("hex"),
+    profile: "postgres",
+    run_id: `collision-${randomBytes(4).toString("hex")}`,
+    schema: RUN_AUTHORITY_SCHEMA,
+    suite: "ri-default",
+  }));
+  await writeFile(preloadPath, `import crypto from "node:crypto";
+import { syncBuiltinESMExports } from "node:module";
+const originalRandomBytes = crypto.randomBytes.bind(crypto);
+crypto.randomBytes = (size) => size === 4
+  ? Buffer.from(process.env.PDPP_TEST_FIXED_RUNNER_ID, "hex")
+  : originalRandomBytes(size);
+syncBuiltinESMExports();
+`);
+
+  try {
+    await withAdmin(baseUrl, async (admin) => {
+      const { rows } = await admin.query<{ exists: boolean }>("SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1) AS exists", [collisionName]);
+      assert.equal(rows[0]?.exists, false, "the deterministic test database name must be unused before setup");
+      await admin.query(`CREATE DATABASE "${collisionName}"`);
+      collisionCreated = true;
+    });
+    const { code, output } = await runRunner(authorityPath, baseUrl, restoreUrl, {
+      PDPP_TEST_FIXED_RUNNER_ID: runnerId,
+      NODE_OPTIONS: [process.env.NODE_OPTIONS, `--import=${preloadPath}`].filter(Boolean).join(" "),
+    });
+    assert.notEqual(code, 0, `the runner must reject an existing database name. Output:\n${output.slice(-4000)}`);
+    assert.match(output, /already exists|duplicate_database/i);
+    await withAdmin(baseUrl, async (admin) => {
+      const { rows } = await admin.query<{ exists: boolean }>("SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1) AS exists", [collisionName]);
+      assert.equal(rows[0]?.exists, true, "a name collision belongs to the other run and must survive");
+    });
+  } finally {
+    if (collisionCreated) {
+      await withAdmin(baseUrl, async (admin) => {
+        await admin.query(`DROP DATABASE IF EXISTS "${collisionName}" WITH (FORCE)`);
+      });
+    }
+    await rm(workDir, { force: true, recursive: true });
+  }
+});
 
 test(
   "run-tests.ts bootstraps a cold-required file from scratch even when a template exists",
@@ -157,13 +230,20 @@ test(
       "a cold-required file must not be template-eligible"
     );
 
+    assert.equal(
+      isPostgresTemplateEligibleFilePath(ELIGIBLE_TARGET),
+      true,
+      `${ELIGIBLE_TARGET} must be template-eligible so the run builds a template`
+    );
+
     const workDir = await mkdtemp(join(tmpdir(), "pdpp-selection-"));
     const authorityPath = join(workDir, "authority.json");
+    const allocatedDatabases = new Set<string>();
     await writeFile(
       authorityPath,
       JSON.stringify({
         expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
-        files: [`reference-implementation/${COLD_REQUIRED_TARGET}`],
+        files: [`reference-implementation/${COLD_REQUIRED_TARGET}`, `reference-implementation/${ELIGIBLE_TARGET}`],
         nonce: randomBytes(8).toString("hex"),
         profile: "postgres",
         run_id: `selection-${randomBytes(4).toString("hex")}`,
@@ -194,16 +274,39 @@ test(
       const provisionLines = output
         .split("\n")
         .filter((line) => line.startsWith("PDPP_TEST_DB_PROVISION "))
-        .map((line) => JSON.parse(line.slice("PDPP_TEST_DB_PROVISION ".length)) as { file: string; path: string });
+        .map((line) => JSON.parse(line.slice("PDPP_TEST_DB_PROVISION ".length)) as {
+          database: string;
+          file: string;
+          path: string;
+        });
+      for (const provision of provisionLines) {
+        if (isDedicatedPostgresTestDatabaseName(provision.database)) {
+          allocatedDatabases.add(provision.database);
+        }
+      }
       const record = provisionLines.find((entry) => entry.file === COLD_REQUIRED_TARGET);
       assert.ok(
         record,
         `the runner should have reported a provisioning path for ${COLD_REQUIRED_TARGET}. Output:\n${output.slice(-4000)}`
       );
+      assert.ok(
+        isDedicatedPostgresTestDatabaseName(record.database),
+        `the runner should report the exact dedicated database it created. Output:\n${output.slice(-4000)}`
+      );
       assert.equal(
         record.path,
         "cold-bootstrap",
         `a cold-required file must be bootstrapped from scratch even though a template exists for this run; the runner reported ${JSON.stringify(record.path)}`
+      );
+      const eligibleRecord = provisionLines.find((entry) => entry.file === ELIGIBLE_TARGET);
+      assert.ok(
+        eligibleRecord,
+        `the runner should have reported a provisioning path for ${ELIGIBLE_TARGET}. Output:\n${output.slice(-4000)}`
+      );
+      assert.equal(
+        eligibleRecord.path,
+        "template-clone",
+        `a template-eligible file must be cloned from the run's template; the runner reported ${JSON.stringify(eligibleRecord.path)}`
       );
       assert.doesNotMatch(
         output,
@@ -217,22 +320,12 @@ test(
       );
     } finally {
       await rm(workDir, { force: true, recursive: true });
-      // Clean only what the run itself allocated. The base and restore
-      // databases share the `pdpp_test_` prefix, so they are excluded by
-      // name rather than by pattern -- dropping either one breaks every
-      // later test in the file.
-      const keep = new Set(
-        [baseUrl, restoreUrl].map((url) => decodeURIComponent(new URL(url).pathname.slice(1)))
-      );
+      // The runner normally already dropped these. Retry only names it
+      // reported as created; scanning the shared cluster can kill another
+      // file's live database or another run's resources.
       await withAdmin(baseUrl, async (admin) => {
-        const { rows } = await admin.query<{ datname: string }>(
-          "SELECT datname FROM pg_database WHERE datname LIKE 'pdpp_test_%' AND datistemplate = false AND datname <> 'pdpp_test'"
-        );
-        for (const row of rows) {
-          if (keep.has(row.datname)) {
-            continue;
-          }
-          await admin.query(`DROP DATABASE IF EXISTS "${row.datname}" WITH (FORCE)`).catch(() => undefined);
+        for (const database of allocatedDatabases) {
+          await admin.query(`DROP DATABASE IF EXISTS "${database}" WITH (FORCE)`).catch(() => undefined);
         }
       });
     }

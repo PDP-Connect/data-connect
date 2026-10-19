@@ -1580,6 +1580,51 @@ export function createSqliteConnectorDetailGapStore() {
       return rows.map((row) => rowToGap(row) as DetailGap);
     },
 
+    // Quarantine is decided from a prior row snapshot. Keep that decision's status
+    // and attempt count in the write predicate so recovery or a newer attempt wins.
+    // biome-ignore lint/suspicious/useAwait: The async signature is part of this caller-facing contract.
+    async markGapQuarantined(
+      gapId: string,
+      expectedStatus: string,
+      expectedAttemptCount: number,
+      options: MarkGapStatusOptions = {}
+    ): Promise<DetailGap | null> {
+      const mutation = normalizeGapStatusMutation(gapId, "terminal", options);
+      const result = execDynamicSqlAcknowledged(
+        `
+        UPDATE connector_detail_gaps
+        SET status = 'terminal',
+            reason = COALESCE(?, reason),
+            attempt_count = attempt_count + ?,
+            last_attempt_at = CASE WHEN ? = 1 THEN ? ELSE last_attempt_at END,
+            next_attempt_after = ?,
+            last_error_json = ?,
+            last_run_id = COALESCE(?, last_run_id),
+            recovered_run_id = COALESCE(?, recovered_run_id),
+            updated_at = ?
+        WHERE gap_id = ? AND status = ? AND attempt_count = ?
+      `,
+        [
+          mutation.reason,
+          mutation.attemptDelta,
+          mutation.attemptDelta,
+          mutation.now,
+          mutation.nextAttemptAfter,
+          mutation.lastErrorJson,
+          mutation.runId,
+          mutation.recoveredRunId,
+          mutation.now,
+          mutation.gapId,
+          expectedStatus,
+          expectedAttemptCount,
+        ]
+      );
+      if (Number(result.changes || 0) !== 1) {
+        return null;
+      }
+      return rowToGap(firstSqliteRow("SELECT * FROM connector_detail_gaps WHERE gap_id = ? LIMIT 1", [gapId]));
+    },
+
     // biome-ignore lint/suspicious/useAwait: The async signature is part of this caller-facing contract.
     async markGapStatus(gapId: string, status: string, options: MarkGapStatusOptions = {}): Promise<DetailGap | null> {
       const mutation = normalizeGapStatusMutation(gapId, status, options);
@@ -2316,6 +2361,46 @@ export function createPostgresConnectorDetailGapStore() {
         [connectorId, scopedConnectorInstanceId, limit]
       );
       return (result.rows as DetailGapRow[]).map((row) => rowToGap(row) as DetailGap);
+    },
+
+    // Quarantine is decided from a prior row snapshot. Keep that decision's status
+    // and attempt count in the write predicate so recovery or a newer attempt wins.
+    async markGapQuarantined(
+      gapId: string,
+      expectedStatus: string,
+      expectedAttemptCount: number,
+      options: MarkGapStatusOptions = {}
+    ): Promise<DetailGap | null> {
+      const mutation = normalizeGapStatusMutation(gapId, "terminal", options);
+      const result = await postgresQuery<DetailGapRow>(
+        `
+        UPDATE connector_detail_gaps
+        SET status = 'terminal',
+            reason = COALESCE($1, reason),
+            attempt_count = attempt_count + $2,
+            last_attempt_at = CASE WHEN $2 = 1 THEN $3 ELSE last_attempt_at END,
+            next_attempt_after = $4,
+            last_error_json = $5::jsonb,
+            last_run_id = COALESCE($6, last_run_id),
+            recovered_run_id = COALESCE($7, recovered_run_id),
+            updated_at = $3
+        WHERE gap_id = $8 AND status = $9 AND attempt_count = $10
+        RETURNING *
+      `,
+        [
+          mutation.reason,
+          mutation.attemptDelta,
+          mutation.now,
+          mutation.nextAttemptAfter,
+          mutation.lastErrorJson,
+          mutation.runId,
+          mutation.recoveredRunId,
+          mutation.gapId,
+          expectedStatus,
+          expectedAttemptCount,
+        ]
+      );
+      return result.rows[0] ? rowToGap(result.rows[0]) : null;
     },
 
     async markGapStatus(gapId: string, status: string, options: MarkGapStatusOptions = {}): Promise<DetailGap | null> {

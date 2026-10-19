@@ -46,11 +46,15 @@ export default defineConfig(({ mode }) => ({
     },
   },
   test: {
-    environment: "happy-dom",
+    environment: "node",
+    // Matches test-sandbox's default 400% CPU budget: more workers than CPUs
+    // only adds memory and makes the 5 s default timeouts trip under load.
+    maxWorkers: 4,
     include: [
       "src/**/*.test.{ts,tsx}",
       "src-tauri/**/*.test.ts",
       "scripts/is-main-module.test.mjs",
+      "scripts/test-fast.test.mjs",
       "scripts/create-macos-dmg.test.mjs",
       "scripts/ensure-pdpp-runtime.test.mjs",
       "scripts/release-github.test.mjs",
@@ -78,6 +82,7 @@ export default defineConfig(({ mode }) => ({
       "scripts/verify-bundled-personal-server.test.mjs",
       "scripts/consumer-drift-signal.test.mjs",
       "scripts/check-polyfill-connectors-tarball-freshness.test.mjs",
+      "scripts/clean-install-acceptance.test.mjs",
       "playwright-runner/scripts/build.test.js",
     ],
     exclude: ["src-tauri/target/**"],

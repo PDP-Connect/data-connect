@@ -52,6 +52,9 @@ on:
       - "scripts/fixtures/**"
       - "deploy/docker/check-image-identity.sh"
   pull_request:
+    # PRs into the test-engineering integration branch are gated by a local
+    # oracle and review; full CI runs once on the batch PR into main.
+    branches-ignore: [testeng/integration]
     # See the push trigger above for the narrow reference-implementation paths
     # that affect the production image build.
     paths:

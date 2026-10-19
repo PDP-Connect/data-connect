@@ -27,7 +27,10 @@ name: client-tests
 # that test passes on main; until then it reports honestly and does not block merges.
 
 on:
-  pull_request: {}
+  pull_request:
+    # PRs into the test-engineering integration branch are gated by a local
+    # oracle and review; full CI runs once on the batch PR into main.
+    branches-ignore: [testeng/integration]
   merge_group: {}
   workflow_dispatch: {}
 
@@ -91,13 +94,22 @@ jobs:
           NEXT_TELEMETRY_DISABLED: "1"
         run: npm run build --workspace=apps/console
 
+      # The hosted runner is a disposable VM, which is the isolation boundary here;
+      # test-sandbox runs the command directly.
       - name: Test console Node suite
+        env:
+          TEST_SANDBOX_DISABLE: "1"
         run: npm test --workspace=apps/console
 
       - name: Test copied standalone skill routes
         env:
           REQUIRE_STANDALONE: "1"
         run: node --test apps/console/packaged-agent-skill-routes.test.mjs
+
+      - name: Test e2e harness (no browser)
+        run: |
+          npm --prefix e2e ci --no-audit --no-fund
+          node --test e2e/harness.test.mjs e2e/harness-cleanup.test.mjs
 
       # `vitest run` without --passWithNoTests: an empty collection exits 1 on its own,
       # so a vite.config.ts `test.include` that silently stops matching fails the job
