@@ -65,6 +65,22 @@ throwaway CI VM destroys them.
 A hermetic guard blocks non-loopback HTTP inside the test child processes. The sandbox's network
 namespace blocks the rest.
 
+Test code is trusted repository code. The runner protects runtime data that could reach public logs by
+accident: a test child's stdout and stderr, server output and environment values. For a killed file or an
+accounting error, that output goes only to a private 0600 file under
+`${XDG_STATE_HOME:-~/.local/state}/pdpp-ri-test-diagnostics/` locally, and nowhere on CI. Per-file result
+lines still carry test names. A test that puts a secret in its own name, or that forges reporter events
+under `--test-isolation=none`, prints it on purpose. This is a known limit. Issue
+[#536](https://github.com/PDP-Connect/data-connect/issues/536) tracks the hardening follow-up: a reporter
+channel that test code cannot write.
+
+Two more limits are accepted under the same threat model, because each needs write access to the private
+diagnostics tree:
+
+- A directory in that tree that is swapped for a symlink between the runner's check and its write can
+  redirect the write.
+- A forged `.pdpp-ri-run` marker makes pruning treat a directory as a runner-created run.
+
 ## Rules
 
 - The oracle for a PR into `testeng/integration` that changes RI code is the full RI gate in the sandbox (`PDPP_TEST_PROFILE=memory-default npm test`, plus `npm run test:postgres` for storage, search or records changes), not `test:fast`.

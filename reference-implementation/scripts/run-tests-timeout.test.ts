@@ -22,6 +22,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { RUN_MARKER_FILE } from "./killed-file-diagnostics.ts";
 import { RUN_AUTHORITY_SCHEMA } from "./test-accounting/inventory.ts";
 
 const scriptsDir = dirname(fileURLToPath(import.meta.url));
@@ -92,7 +93,7 @@ const AFTER_FILE = [
 
 /**
  * Raw-tail files the runner left under `stateHome`: a 0700 root, one 0700
- * directory for the run, and one 0600 log per killed file.
+ * directory for the run (with the runner's marker file), and one 0600 log per killed file.
  */
 async function rawTailFiles(stateHome: string) {
   const root = join(stateHome, "pdpp-ri-test-diagnostics");
@@ -105,6 +106,10 @@ async function rawTailFiles(stateHome: string) {
   }
   for (const run of runs) {
     for (const log of await readdir(join(root, run))) {
+      // The runner's own marker is not a raw tail.
+      if (log === RUN_MARKER_FILE) {
+        continue;
+      }
       const path = join(root, run, log);
       found.push({
         dirMode: (await stat(join(root, run))).mode & 0o777,

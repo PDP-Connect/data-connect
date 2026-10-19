@@ -3432,30 +3432,34 @@ export function createController(opts: ControllerOptions = {}): Controller {
     // Safe to delete unconditionally here: the guard above already proved
     // activeRuns.get(input.key)?.run_id === input.runId.
     activeRuns.delete(input.key);
-    activeRunPromises.delete(input.runId);
-    activeRunTraceContexts.delete(input.runId);
-    activeRunCancellations.delete(input.runId);
-    clearPersistedActiveRun(input.connectorInstanceId, input.runId).catch((err) => {
-      const message = err instanceof Error ? err.message : String(err);
-      log.warn?.(`[controller] failed to clear active run ${input.runId} for ${input.connectorId}: ${message}`);
-    });
     try {
-      await opts.beforeRunCleanup?.({ runId: input.runId });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      log.warn?.(`[controller] run cleanup barrier failed for ${input.runId}: ${message}`);
-    }
-    clearStreamingNonceForRun(input.runId);
-    if (input.browserSurfaceLease) {
+      activeRunTraceContexts.delete(input.runId);
+      activeRunCancellations.delete(input.runId);
+      clearPersistedActiveRun(input.connectorInstanceId, input.runId).catch((err) => {
+        const message = err instanceof Error ? err.message : String(err);
+        log.warn?.(`[controller] failed to clear active run ${input.runId} for ${input.connectorId}: ${message}`);
+      });
       try {
-        await opts.beforeBrowserSurfaceLeaseRelease?.({ runId: input.runId });
+        await opts.beforeRunCleanup?.({ runId: input.runId });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        log.warn?.(`[controller] browser-surface host release failed for ${input.runId}: ${message}`);
+        log.warn?.(`[controller] run cleanup barrier failed for ${input.runId}: ${message}`);
       }
-      await browserSurface.releaseLease(input.browserSurfaceLease, input.connectorId, input.runId, input.traceContext);
+      clearStreamingNonceForRun(input.runId);
+      if (input.browserSurfaceLease) {
+        try {
+          await opts.beforeBrowserSurfaceLeaseRelease?.({ runId: input.runId });
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          log.warn?.(`[controller] browser-surface host release failed for ${input.runId}: ${message}`);
+        }
+        await browserSurface.releaseLease(input.browserSurfaceLease, input.connectorId, input.runId, input.traceContext);
+      }
+      resolveCancelledInteraction(input.runId);
+    } finally {
+      // Keep shutdown drain tracking until lease release has been persisted.
+      activeRunPromises.delete(input.runId);
     }
-    resolveCancelledInteraction(input.runId);
   }
 
   /**
