@@ -162,6 +162,7 @@ for (const mode of [[], ["--test-isolation=none"]]) {
           PDPP_TEST_FILE_TIMEOUT_MS: "2500",
           PDPP_TEST_PROFILE: "memory-default",
           TMPDIR: tmp,
+          PDPP_TEST_DIAGNOSTICS_ROOT: undefined,
           XDG_STATE_HOME: stateHome,
         });
 
@@ -266,6 +267,7 @@ test("a test that logs but takes longer than the idle budget is not killed (defa
       PDPP_TEST_FILE_HARD_TIMEOUT_MS: "60000",
       PDPP_TEST_FILE_TIMEOUT_MS: "2500",
       PDPP_TEST_PROFILE: "memory-default",
+      PDPP_TEST_DIAGNOSTICS_ROOT: undefined,
       XDG_STATE_HOME: stateHome,
     });
     const shown = `${stdout}\n${stderr}`;
@@ -342,6 +344,7 @@ for (const ci of [false, true]) {
         PDPP_TEST_FILE_HARD_TIMEOUT_MS: "60000",
         PDPP_TEST_FILE_TIMEOUT_MS: "2500",
         PDPP_TEST_PROFILE: "memory-default",
+        PDPP_TEST_DIAGNOSTICS_ROOT: undefined,
         XDG_STATE_HOME: stateHome,
       });
       const shown = `${stdout}\n${stderr}`;
@@ -370,59 +373,119 @@ for (const ci of [false, true]) {
 // A killed file, a failing todo and a named skip run together. The todo
 // rejection is an accounting error for its file, not a runner crash: the final
 // accounting result must still be emitted, with every file counted, and the
-// run must then fail naming the todo test.
-test("an accounting error in one file does not drop the accounting result of the run", async () => {
-  const scratch = await mkdtemp(join(scriptsDir, ".ri-timeout-fixture-"));
-  const stateHome = await mkdtemp(join(tmpdir(), "ri-timeout-state-"));
-  try {
-    await writeFile(
-      join(scratch, "a-killed.test.mjs"),
-      'import test from "node:test";\ntest("killed test", async () => {\n  setInterval(() => {}, 100);\n  await new Promise(() => {});\n});\n'
-    );
-    await writeFile(
-      join(scratch, "b-todo.test.mjs"),
-      'import test from "node:test";\ntest("failing todo placeholder", { todo: "fixture" }, () => { throw new Error("todo failure"); });\n'
-    );
-    await writeFile(
-      join(scratch, "c-skip.test.mjs"),
-      [
-        'import test from "node:test";',
-        "test('live CDP smoke proves frame, click, and viewport resize against Chromium', { skip: true }, () => {});",
-        "test('explicit named skip', { skip: 'fixture reason' }, () => {});",
-        "test('passes', () => {});",
-      ].join("\n")
-    );
-    const authorityPath = await writeAuthority(scratch, ["a-killed.test.mjs", "b-todo.test.mjs", "c-skip.test.mjs"], "acct");
-    const { code, stderr, stdout } = await runRunner(["--accounting-authority", authorityPath], {
-      ...process.env,
-      CI: undefined,
-      NODE_TEST_CONTEXT: undefined,
-      PDPP_TEST_CONCURRENCY: "1",
-      PDPP_TEST_FILE_HARD_TIMEOUT_MS: "60000",
-      PDPP_TEST_FILE_TIMEOUT_MS: "2500",
-      PDPP_TEST_PROFILE: "memory-default",
-      XDG_STATE_HOME: stateHome,
+// run must then fail naming the file and a fixed error kind. The todo's name is
+// test-controlled text, so the error never prints it: locally it is in a
+// private 0600 file, on CI nowhere. (The file's own event lines on stdout still
+// carry test names, as for every file.)
+for (const ci of [false, true]) {
+  test(`an accounting error keeps the run's accounting result and prints no test text (${ci ? "CI=1" : "CI unset"})`, async () => {
+    const scratch = await mkdtemp(join(scriptsDir, ".ri-timeout-fixture-"));
+    const stateHome = await mkdtemp(join(tmpdir(), "ri-timeout-state-"));
+    try {
+      await writeFile(
+        join(scratch, "a-killed.test.mjs"),
+        'import test from "node:test";\ntest("killed test", async () => {\n  setInterval(() => {}, 100);\n  await new Promise(() => {});\n});\n'
+      );
+      await writeFile(
+        join(scratch, "b-todo.test.mjs"),
+        'import test from "node:test";\ntest("SYNTHETIC_TODO_SECRET placeholder", { todo: "fixture" }, () => { throw new Error("todo failure"); });\n'
+      );
+      await writeFile(
+        join(scratch, "c-skip.test.mjs"),
+        [
+          'import test from "node:test";',
+          "test('live CDP smoke proves frame, click, and viewport resize against Chromium', { skip: true }, () => {});",
+          "test('explicit named skip', { skip: 'fixture reason' }, () => {});",
+          "test('passes', () => {});",
+        ].join("\n")
+      );
+      const authorityPath = await writeAuthority(scratch, ["a-killed.test.mjs", "b-todo.test.mjs", "c-skip.test.mjs"], "acct");
+      const { code, stderr, stdout } = await runRunner(["--accounting-authority", authorityPath], {
+        ...process.env,
+        CI: ci ? "1" : undefined,
+        NODE_TEST_CONTEXT: undefined,
+        PDPP_TEST_CONCURRENCY: "1",
+        PDPP_TEST_FILE_HARD_TIMEOUT_MS: "60000",
+        PDPP_TEST_FILE_TIMEOUT_MS: "2500",
+        PDPP_TEST_PROFILE: "memory-default",
+        PDPP_TEST_DIAGNOSTICS_ROOT: undefined,
+        XDG_STATE_HOME: stateHome,
+      });
+      const shown = `${stdout}\n${stderr}`;
+      assert.notEqual(code, 0, shown);
+      assert.doesNotMatch(stderr, /SYNTHETIC_TODO_SECRET/, `the error prints no test-controlled text\n${stderr}`);
+      assert.match(stderr, /accounting error in \S*b-todo\.test\.mjs: todo-rejected/, `the error names the file and kind\n${shown}`);
+      const details = (await rawTailFiles(stateHome)).filter((file) => file.text.includes("todo test rejected"));
+      if (ci) {
+        assert.deepEqual(details, [], "CI keeps no details");
+        assert.doesNotMatch(stderr, /details:/, "CI prints no path");
+      } else {
+        assert.equal(details.length, 1, `the details are kept privately\n${shown}`);
+        assert.equal(details[0]?.fileMode, 0o600);
+        assert.ok(details[0]?.text.includes("SYNTHETIC_TODO_SECRET"), "the private file names the test");
+        assert.ok(stderr.includes(`(details: ${details[0]?.path})`), "the error names the private file");
+      }
+      const counts = accountingCounts(stdout, shown);
+      assert.deepEqual(
+        {
+          completed_files: counts.completed_files,
+          failed_files: counts.failed_files,
+          planned_files: counts.planned_files,
+          skipped: counts.skipped,
+        },
+        { completed_files: 3, failed_files: 2, planned_files: 3, skipped: 2 },
+        shown
+      );
+    } finally {
+      await rm(scratch, { force: true, recursive: true });
+      await rm(stateHome, { force: true, recursive: true });
+    }
+  });
+}
+
+// Under --test-isolation=none a test can write lines shaped like reporter
+// events. A forged unexplained skip and a malformed event are accounting errors
+// whose message would carry the forged text; the error prints only the kind.
+const FORGED_SKIP =
+  'PDPP_TEST_ACCOUNTING_EVENT {"type":"test:pass","details":{"type":"test","name":"SYNTHETIC_FORGED_SECRET","skip":true}}';
+for (const [kind, line] of [
+  ["unexplained-skip", FORGED_SKIP],
+  ["malformed-events", "PDPP_TEST_ACCOUNTING_EVENT invalid-SYNTHETIC_FORGED_SECRET"],
+] as const) {
+  for (const ci of [false, true]) {
+    test(`a forged ${kind} event prints only the error kind (--test-isolation=none, ${ci ? "CI=1" : "CI unset"})`, async () => {
+      const scratch = await mkdtemp(join(scriptsDir, ".ri-timeout-fixture-"));
+      const stateHome = await mkdtemp(join(tmpdir(), "ri-timeout-state-"));
+      try {
+        await writeFile(
+          join(scratch, "forged.test.mjs"),
+          `import test from "node:test";\nprocess.stdout.write(${JSON.stringify(`${line}\n`)});\ntest("ordinary", () => {});\n`
+        );
+        const authorityPath = await writeAuthority(scratch, ["forged.test.mjs"], "forged");
+        const { code, stderr, stdout } = await runRunner(
+          ["--accounting-authority", authorityPath, "--test-isolation=none"],
+          {
+            ...process.env,
+            CI: ci ? "1" : undefined,
+            NODE_TEST_CONTEXT: undefined,
+            PDPP_TEST_CONCURRENCY: "1",
+            PDPP_TEST_PROFILE: "memory-default",
+            PDPP_TEST_DIAGNOSTICS_ROOT: undefined,
+            XDG_STATE_HOME: stateHome,
+          }
+        );
+        const shown = `${stdout}\n${stderr}`;
+        assert.notEqual(code, 0, shown);
+        assert.doesNotMatch(stderr, /SYNTHETIC_FORGED_SECRET/, `the error prints no forged text\n${stderr}`);
+        assert.match(stderr, new RegExp(`accounting error in \\S*forged\\.test\\.mjs: ${kind}`), shown);
+        assert.equal(accountingCounts(stdout, shown).failed_files, 1);
+      } finally {
+        await rm(scratch, { force: true, recursive: true });
+        await rm(stateHome, { force: true, recursive: true });
+      }
     });
-    const shown = `${stdout}\n${stderr}`;
-    assert.notEqual(code, 0, shown);
-    assert.match(shown, /todo test rejected \(body failed\): failing todo placeholder/, "the error names the todo test");
-    assert.match(shown, /b-todo\.test\.mjs/, "the error names the file");
-    const counts = accountingCounts(stdout, shown);
-    assert.deepEqual(
-      {
-        completed_files: counts.completed_files,
-        failed_files: counts.failed_files,
-        planned_files: counts.planned_files,
-        skipped: counts.skipped,
-      },
-      { completed_files: 3, failed_files: 2, planned_files: 3, skipped: 2 },
-      shown
-    );
-  } finally {
-    await rm(scratch, { force: true, recursive: true });
-    await rm(stateHome, { force: true, recursive: true });
   }
-});
+}
 
 // A reporter can record a failure for a child that still exits 0 (node --test
 // exits 0 when only a todo test fails). The gate goes red for it, and the file
@@ -453,6 +516,7 @@ test("a file whose child exits 0 but whose summary records a failure counts as a
         NODE_TEST_CONTEXT: undefined,
         PDPP_TEST_CONCURRENCY: "1",
         PDPP_TEST_PROFILE: "memory-default",
+        PDPP_TEST_DIAGNOSTICS_ROOT: undefined,
         XDG_STATE_HOME: stateHome,
       }
     );

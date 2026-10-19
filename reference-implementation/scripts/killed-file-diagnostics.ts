@@ -10,6 +10,8 @@ import { basename, dirname, join } from "node:path";
 export const KEEP_RUNS = 20;
 export const KEEP_DAYS = 7;
 const RUN_DIR_PREFIX = "run-";
+/** The diagnostics root for runners started by tests; see killedFileDiagnosticsRoot. */
+export const NESTED_DIAGNOSTICS_ROOT_ENV = "PDPP_TEST_DIAGNOSTICS_ROOT";
 
 /**
  * Where the raw output tails of killed test files go: a per-user state
@@ -22,6 +24,12 @@ export function killedFileDiagnosticsRoot(
 ): string | undefined {
 	if (env.CI) {
 		return undefined;
+	}
+	// Set by an outer RI runner for its test children, so a runner that a test
+	// starts keeps its diagnostics inside the outer run's directory instead of
+	// filling the user's list of recent runs.
+	if (env[NESTED_DIAGNOSTICS_ROOT_ENV]) {
+		return env[NESTED_DIAGNOSTICS_ROOT_ENV];
 	}
 	const stateHome = env.XDG_STATE_HOME || join(homedir(), ".local", "state");
 	return join(stateHome, "pdpp-ri-test-diagnostics");

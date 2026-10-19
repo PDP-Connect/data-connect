@@ -37,6 +37,21 @@ test("the diagnostics root is a per-user state directory, and there is none on C
 		killedFileDiagnosticsRoot({ CI: "1", XDG_STATE_HOME: "/state" }),
 		undefined,
 	);
+	// A runner started by a test writes inside the outer run's directory.
+	assert.equal(
+		killedFileDiagnosticsRoot({
+			PDPP_TEST_DIAGNOSTICS_ROOT: "/outer/run/nested",
+			XDG_STATE_HOME: "/state",
+		}),
+		"/outer/run/nested",
+	);
+	assert.equal(
+		killedFileDiagnosticsRoot({
+			CI: "1",
+			PDPP_TEST_DIAGNOSTICS_ROOT: "/outer/run/nested",
+		}),
+		undefined,
+	);
 });
 
 test("run directory names sort by start time", () => {

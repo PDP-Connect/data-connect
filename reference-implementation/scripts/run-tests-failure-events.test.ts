@@ -27,6 +27,9 @@ function runRunner(listPath: string): Promise<{ code: number | null; output: str
       cwd: repoRoot,
       env: {
         ...process.env,
+        // CI keeps no private diagnostics, so these runs write nothing to the
+        // user's state directory.
+        CI: "1",
         NODE_TEST_CONTEXT: undefined,
         PDPP_TEST_POSTGRES_URL: undefined,
         PDPP_TEST_PROFILE: "memory-default",
@@ -61,15 +64,15 @@ async function runFixture(source: string): Promise<{ code: number | null; output
   }
 }
 
-test("a passing todo test makes the gate exit non-zero, naming the test", async () => {
+test("a passing todo test makes the gate exit non-zero, naming the file", async () => {
   const { code, output } = await runFixture(
     'import test from "node:test";\n' + 'test("a passing todo placeholder", { todo: "fixture" }, () => {});\n'
   );
   assert.notEqual(code, 0, `the runner exited 0 for a passing todo. Output:\n${output.slice(-2000)}`);
-  assert.match(output, /todo test rejected \(body passed\): a passing todo placeholder/);
+  assert.match(output, /accounting error in scripts\/zz-failure-event-fixture-\w+\.test\.ts: todo-rejected/);
 });
 
-test("a failing todo test makes the gate exit non-zero, naming the test", async () => {
+test("a failing todo test makes the gate exit non-zero, naming the file", async () => {
   const { code, output } = await runFixture(
     'import test from "node:test";\n' +
       'test("a failing todo placeholder", { todo: "fixture" }, () => {\n' +
@@ -77,11 +80,11 @@ test("a failing todo test makes the gate exit non-zero, naming the test", async 
       "});\n"
   );
   assert.notEqual(code, 0, `the runner exited 0 for a failing todo. Output:\n${output.slice(-2000)}`);
-  assert.match(output, /todo test rejected \(body failed\): a failing todo placeholder/);
+  assert.match(output, /accounting error in scripts\/zz-failure-event-fixture-\w+\.test\.ts: todo-rejected/);
 });
 
-// Node 24 marks every test inside a todo describe as todo, so the first
-// rejection names the child; the suite's own event is rejected as well.
+// Node 24 marks every test inside a todo describe as todo, so its children
+// are rejected; the suite's own event is rejected as well.
 test("a todo describe with a passing child makes the gate exit non-zero", async () => {
   const { code, output } = await runFixture(
     'import { describe, it } from "node:test";\n' +
@@ -90,7 +93,7 @@ test("a todo describe with a passing child makes the gate exit non-zero", async 
       "});\n"
   );
   assert.notEqual(code, 0, `the runner exited 0 for a todo suite. Output:\n${output.slice(-2000)}`);
-  assert.match(output, /todo test rejected \(body passed\): (a green child|an unfinished suite)/);
+  assert.match(output, /accounting error in scripts\/zz-failure-event-fixture-\w+\.test\.ts: todo-rejected/);
 });
 
 test("a named skip is accepted by the gate", async () => {

@@ -7,6 +7,26 @@ const EVENT_PREFIX = "PDPP_TEST_ACCOUNTING_EVENT ";
 function fail(message: string): never {
   throw new Error(`test accounting result: ${message}`);
 }
+
+/** Why a file's structured events could not be accounted. */
+export type StructuredSummaryErrorKind = "malformed-events" | "todo-rejected" | "unexplained-skip";
+
+/**
+ * A file's events could not be accounted. `kind` is fixed text and safe to
+ * print anywhere; `message` can hold test-controlled text (a test name), so it
+ * belongs only in private diagnostics.
+ */
+export class StructuredSummaryError extends Error {
+  readonly kind: StructuredSummaryErrorKind;
+  constructor(kind: StructuredSummaryErrorKind, message: string) {
+    super(`test accounting result: ${message}`);
+    this.kind = kind;
+  }
+}
+
+function failSummary(kind: StructuredSummaryErrorKind, message: string): never {
+  throw new StructuredSummaryError(kind, message);
+}
 function compareStrings(a: string, b: string): number {
   if (a < b) {
     return -1;
@@ -481,11 +501,11 @@ export function structuredNodeSummary(output: string): StructuredSummary {
       try {
         return JSON.parse(line.slice(EVENT_PREFIX.length));
       } catch {
-        return fail("reporter emitted malformed structured event");
+        return failSummary("malformed-events", "reporter emitted malformed structured event");
       }
     });
   if (events.length === 0) {
-    fail("runner emitted no structured node events");
+    failSummary("malformed-events", "runner emitted no structured node events");
   }
   const skipReasons: Record<string, number> = {};
   const consumedMappingIdentities: string[] = [];
@@ -503,7 +523,8 @@ export function structuredNodeSummary(output: string): StructuredSummary {
     // rejected too: a placeholder must be a named skip.
     const todo = event.details?.todo;
     if (todo !== false && todo !== undefined && todo !== null) {
-      fail(
+      failSummary(
+        "todo-rejected",
         `todo test rejected (${event.type === "test:pass" ? "body passed" : "body failed"}): ${event.details?.name ?? "unnamed test"}; use a named skip instead`
       );
     }
@@ -515,7 +536,7 @@ export function structuredNodeSummary(output: string): StructuredSummary {
     if (skip !== false && skip !== undefined && skip !== null) {
       const { reason, consumedIdentity } = resolveEmittedSkipReason(skip, event.details.name);
       if (!reason) {
-        fail(`unexplained skip: ${event.details.name ?? "unnamed test"}`);
+        failSummary("unexplained-skip", `unexplained skip: ${event.details.name ?? "unnamed test"}`);
       }
       if (consumedIdentity !== undefined) {
         consumedMappingIdentities.push(consumedIdentity);
