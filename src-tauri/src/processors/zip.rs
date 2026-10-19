@@ -35,10 +35,7 @@ pub fn extract_zip(source: &Path, target: &Path) -> Result<(), String> {
         } else {
             // File entry
             if !written.insert(outpath.clone()) {
-                return Err(format!(
-                    "Duplicate ZIP entry path: {}",
-                    outpath.display()
-                ));
+                return Err(format!("Duplicate ZIP entry path: {}", outpath.display()));
             }
             if let Some(parent) = outpath.parent() {
                 if !parent.exists() {
@@ -93,7 +90,11 @@ mod tests {
     fn extracts_files_and_directories() {
         let dir = tempfile::tempdir().unwrap();
         let source = dir.path().join("in.zip");
-        fs::write(&source, write_zip(&[("a/one.txt", b"1"), ("two.txt", b"2")])).unwrap();
+        fs::write(
+            &source,
+            write_zip(&[("a/one.txt", b"1"), ("two.txt", b"2")]),
+        )
+        .unwrap();
         let target = dir.path().join("out");
 
         extract_zip(&source, &target).unwrap();
