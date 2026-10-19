@@ -3,7 +3,7 @@
 
 import assert from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
-import { createReadStream, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import fs, { createReadStream, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -92,6 +92,61 @@ describe("LocalDeviceBlobSpool", () => {
     // failed temp file must not linger as garbage.
     assert.equal(spool.has(sha256Of(partial)), false);
     assert.deepEqual(readdirSync(join(root, "tmp")), []);
+  });
+
+  it("leaves no temp file when the source fails before the sink has opened", async (t) => {
+    const root = makeRoot();
+    const spool = new LocalDeviceBlobSpool({ root });
+    const partial = randomBytes(8192);
+    const boom = new Error("source read failed");
+
+    // Hold the sink's open() until the failure has been handled. Unheld, the
+    // open can land after put()'s cleanup and leave a temp file behind. Under
+    // load that order happens by chance; holding the open forces it.
+    const realOpen = fs.open;
+    let releaseOpen!: () => void;
+    const released = new Promise<void>((resolve) => {
+      releaseOpen = resolve;
+    });
+    let openLanded!: () => void;
+    const landed = new Promise<void>((resolve) => {
+      openLanded = resolve;
+    });
+    let held = false;
+    t.mock.method(
+      fs,
+      "open",
+      (path: string, flags: string, mode: number, callback: (error: Error | null, fd: number) => void) => {
+        held = true;
+        released.then(() =>
+          realOpen(path, flags, mode, (error, fd) => {
+            callback(error, fd);
+            openLanded();
+          })
+        );
+      }
+    );
+
+    const outcome = spool
+      .put(
+        (async function* () {
+          yield await Promise.resolve(partial);
+          throw boom;
+        })()
+      )
+      .then(
+        () => assert.fail("put must reject when the source fails"),
+        (error: unknown) => error
+      );
+
+    // Let the failure reach its cleanup while the open is still held.
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.ok(held, "the sink's open() must go through fs.open for this test to hold it");
+    releaseOpen();
+    await landed;
+
+    assert.equal(await outcome, boom);
+    assert.deepEqual(readdirSync(join(root, "tmp")), [], "the failed write must not leave a temp file behind");
   });
 
   it("reports a missing body distinctly so the drain can stop retrying", () => {
