@@ -16,7 +16,12 @@ import {
 } from "../test/helpers/dedicated-postgres-test-url.ts";
 import { deriveDedicatedPostgresDbNameForFile } from "./dedicated-postgres-db-name.ts";
 import { resolveFileConcurrency } from "./file-concurrency.ts";
-import { killedFileDiagnosticsRoot, runDirectoryName } from "./killed-file-diagnostics.ts";
+import {
+  killedFileDiagnosticsRoot,
+  NESTED_DIAGNOSTICS_ROOT_ENV,
+  runDirectoryName,
+  writeKilledFileTail,
+} from "./killed-file-diagnostics.ts";
 import { countFileOutcomes, drainFileQueue, type NodeTestResult, superviseFileChild } from "./file-outcome.ts";
 import { processGroupAlive, signalProcessGroup, terminateProcessGroup } from "./file-process-group.ts";
 import { createOwnedTestResource, type OwnedTestResource, settleAll } from "./owned-test-resource.ts";
@@ -32,7 +37,7 @@ import {
 import { needsOuterPostgresDatabase, needsPostgresRestoreDatabase } from "./run-tests-db-requirements.ts";
 import { discoverSelectedTestFiles } from "./run-tests-discovery.ts";
 import { RUN_AUTHORITY_SCHEMA } from "./test-accounting/inventory.ts";
-import type { StructuredSummary } from "./test-accounting/receipt.ts";
+import { type StructuredSummary, StructuredSummaryError } from "./test-accounting/receipt.ts";
 import {
   accountingResultLine,
   assertNamedSkipMappingsFullyConsumed,
@@ -403,6 +408,9 @@ async function runNodeTest(filePath: string, extraArgs: string[]): Promise<NodeT
   if (restoreAllocation) {
     childEnvBase.PDPP_TEST_POSTGRES_RESTORE_URL = restoreAllocation.url;
   }
+  if (KILLED_FILE_RAW_TAIL_DIR !== undefined) {
+    childEnvBase[NESTED_DIAGNOSTICS_ROOT_ENV] = join(KILLED_FILE_RAW_TAIL_DIR, "nested");
+  }
   // Turn the preload (appended to effectiveArgs above) live in the child. Left
   // unset when the guard is disabled so the child is byte-identical to a
   // pre-guard run (guard-absent parity).
@@ -574,10 +582,21 @@ const EMPTY_KILLED_SUMMARY: StructuredSummary = {
 };
 // A killed child's result holds no event stream, so it contributes no
 // assertion counts; its failure shows in failed_files and
-// the exit code.
-const summaries: StructuredSummary[] = results.map((result) =>
-  result.killed ? EMPTY_KILLED_SUMMARY : structuredNodeSummary(result.output)
-);
+// the exit code. A file whose events cannot be accounted (a rejected todo, an
+// unexplained skip, a malformed event) is not a runner crash either: it
+// contributes an empty summary and is reported after the accounting result.
+const accountingErrors: { error: unknown; filePath: string }[] = [];
+const summaries: StructuredSummary[] = results.map((result) => {
+  if (result.killed) {
+    return EMPTY_KILLED_SUMMARY;
+  }
+  try {
+    return structuredNodeSummary(result.output);
+  } catch (error) {
+    accountingErrors.push({ error, filePath: result.filePath });
+    return EMPTY_KILLED_SUMMARY;
+  }
+});
 const skipReasons: Record<string, number> = {};
 for (const summary of summaries) {
   for (const [reason, count] of Object.entries(summary.skip_reasons)) {
@@ -591,9 +610,14 @@ const failed = results.find((result) => result.exitCode !== 0);
 const silentFailures = results.filter(
   (result, index) => result.exitCode === 0 && (summaries[index]?.failed ?? 0) > 0
 );
+// A file fails once: on a non-zero exit, a recorded failure, or an accounting error.
+const failedOtherwise = new Set([
+  ...silentFailures,
+  ...results.filter((result) => accountingErrors.some((entry) => entry.filePath === result.filePath)),
+]);
 const counts = {
   assertions: summaries.reduce((sum, summary) => sum + summary.assertions, 0),
-  ...countFileOutcomes(results),
+  ...countFileOutcomes(results, failedOtherwise),
   failed: summaries.reduce((sum, summary) => sum + summary.failed, 0),
   passed: summaries.reduce((sum, summary) => sum + summary.passed, 0),
   planned_files: testFiles.length,
@@ -612,6 +636,7 @@ if (
   filesFromIndex === -1 &&
   !failed &&
   silentFailures.length === 0 &&
+  accountingErrors.length === 0 &&
   signalExitCode === undefined &&
   results.length === testFiles.length
 ) {
@@ -624,6 +649,19 @@ if (
   } catch (error) {
     runnerErrors.push(error);
   }
+}
+// The error's message can carry test-controlled text (a test name), so the
+// public line holds only the file and a fixed kind. Locally the message goes to
+// a private 0600 file next to the killed-file tails; on CI it is not kept.
+for (const { error, filePath } of accountingErrors) {
+  const kind = error instanceof StructuredSummaryError ? error.kind : "malformed-events";
+  let line = `accounting error in ${filePath}: ${kind}`;
+  if (KILLED_FILE_RAW_TAIL_DIR !== undefined) {
+    const detail = error instanceof Error ? error.message : String(error);
+    const path = await writeKilledFileTail(KILLED_FILE_RAW_TAIL_DIR, filePath, Buffer.from(`${detail}\n`));
+    line += ` (details: ${path ?? "not saved"})`;
+  }
+  runnerErrors.push(new Error(line));
 }
 if (runnerErrors.length > 0 && failed) {
   runnerErrors.push(new Error(`test process for ${failed.filePath} exited with code ${failed.exitCode}:\n${failed.output}`));
