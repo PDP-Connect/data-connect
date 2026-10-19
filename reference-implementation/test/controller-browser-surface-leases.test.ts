@@ -790,6 +790,49 @@ test("ordinary connector completion keeps a managed lease unavailable until the 
   );
 });
 
+test("drain waits for persisted managed lease release after connector completion", async (t) => {
+  let releasePresentation: () => void = () => undefined;
+  let enterTerminalizer: () => void = () => undefined;
+  const presentationBarrier = new Promise<void>((resolve) => {
+    releasePresentation = resolve;
+  });
+  const entered = new Promise<void>((resolve) => {
+    enterTerminalizer = resolve;
+  });
+  const browserSurfaceLeaseStore = createMemoryBrowserSurfaceLeaseStore();
+  const { controller } = setup(t, {
+    beforeBrowserSurfaceLeaseRelease: async () => {
+      enterTerminalizer();
+      await presentationBarrier;
+    },
+    browserSurfaceAllocator: createReadyAllocator(),
+    browserSurfaceLeaseStore,
+    manager: createDynamicManager(),
+  });
+
+  try {
+    await controller.runNow("managed", {
+      manifest: MANIFEST,
+      ownerToken: "owner-token",
+      runId: "run_drain_persisted_release",
+    });
+    await entered;
+    assert.equal((await browserSurfaceLeaseStore.getLease("lease_1"))?.status, "leased");
+
+    const heldDrain = await controller.drainActiveRuns(200);
+    assert.equal(heldDrain.timedOut, 1);
+    assert.equal((await browserSurfaceLeaseStore.getLease("lease_1"))?.status, "leased");
+
+    releasePresentation();
+    const releasedDrain = await controller.drainActiveRuns(5000);
+    assert.equal(releasedDrain.timedOut, 0);
+    assert.equal((await browserSurfaceLeaseStore.getLease("lease_1"))?.status, "released");
+  } finally {
+    releasePresentation();
+    await controller.drainActiveRuns(5000);
+  }
+});
+
 test("ordinary connector failure keeps a managed lease unavailable until the presentation terminalizer settles", async (t) => {
   let releasePresentation: () => void = () => undefined;
   let terminalizerStarted = false;
