@@ -236,6 +236,9 @@ const KEY_SETS_MANIFEST = {
   ...MANIFEST,
   protocol_capabilities: ["DETAIL_COVERAGE_KEY_SETS"],
   protocol_version: "0.2.0",
+  // Different content needs its own version: the server refuses different
+  // content under an accepted connector key and version (Core section 5).
+  version: "1.1.0",
 };
 
 function createCannedConnector(messages: readonly Record<string, unknown>[]): {
@@ -1343,7 +1346,7 @@ test("a 0.1.0 manifest declaring BLOB starts; it completes without BLOB and fail
   const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
   t.after(() => closeServer(server));
   const ownerToken = await registerAndAuthorize(server);
-  const blobManifest = { ...MANIFEST, protocol_capabilities: ["BLOB"] };
+  const blobManifest = { ...MANIFEST, protocol_capabilities: ["BLOB"], version: "1.2.0" };
   assert.equal(isAdmitted(await registerManifest(server, blobManifest)), true, "the BLOB manifest is admitted");
 
   const clean = await runCapturingStart(
