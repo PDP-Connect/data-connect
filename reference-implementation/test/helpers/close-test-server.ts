@@ -53,6 +53,8 @@ async function closeOnce(server: TestServer): Promise<void> {
   errors.push(...(await runOperations([() => closeHttpServer(server.asServer), () => closeHttpServer(server.rsServer)])));
   errors.push(
     ...(await runOperations([
+      // After stop(), refresh() queues a no-op restart behind any in-flight
+      // refresh, so awaiting it waits for that refresh to finish.
       () => server.schedulerManager?.refresh(),
       () => server.manifestReconciliationDone,
       () => server.postgresSemanticHnswMaintenanceDone,

@@ -26,4 +26,8 @@ test("test files do not increase the hand-rolled server teardown count", () => {
     count <= BASELINE,
     `Found ${count} test files hand-rolling server teardown (baseline ${BASELINE}). Lower the baseline by migrating files to closeTestServer; raising it requires an explicit reviewed change.`
   );
+  assert.ok(
+    count >= BASELINE,
+    `Hand-rolled server teardown fell to ${count} files; lower BASELINE in test/close-test-server-ratchet.test.ts from ${BASELINE} to ${count} so the ratchet stays tight.`
+  );
 });
