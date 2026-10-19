@@ -15,8 +15,11 @@
 // - setTimeout(N) with one argument (the node:timers/promises form), and
 //   sleep(N), delay(N) or wait(N), with N > 50;
 // where N is a numeric literal or a product of numeric literals (5 * 1000,
-// 2_000). Known limits: a delay held in a variable or constant is not counted,
-// and a regular expression literal that contains a quote can confuse the scan.
+// 2_000, 1e3). Code inside a template literal's ${...} is scanned. Known
+// limits of a lexical scan: a delay held in a variable or constant is not
+// counted; a regular expression literal containing a quote or a parenthesis,
+// and a TypeScript generic argument list containing a comma (fn<A, B>()), can
+// shift the argument split. These under-count; they never count a short wait.
 
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
@@ -34,10 +37,12 @@ const TEST_DIRECTORY = fileURLToPath(new URL(".", import.meta.url));
 const SKIPPED_DIRECTORIES = new Set(["fixtures", "node_modules"]);
 const TEST_FILE = /\.(?:ts|mjs|js)$/;
 
-/** Replace comments and string contents with spaces, keeping offsets. */
+/**
+ * Replace comments and string contents with spaces, keeping offsets. The code
+ * inside a template literal's `${...}` is kept, so a wait written there counts.
+ */
 export function codeOnly(source: string): string {
   const out = source.split("");
-  let index = 0;
   const blank = (from: number, to: number) => {
     for (let i = from; i < to; i += 1) {
       if (out[i] !== "\n") {
@@ -45,35 +50,72 @@ export function codeOnly(source: string): string {
       }
     }
   };
-  while (index < source.length) {
-    const char = source[index];
-    const next = source[index + 1];
-    if (char === "/" && next === "/") {
-      const end = source.indexOf("\n", index);
-      const stop = end === -1 ? source.length : end;
-      blank(index, stop);
-      index = stop;
-    } else if (char === "/" && next === "*") {
-      const end = source.indexOf("*/", index + 2);
-      const stop = end === -1 ? source.length : end + 2;
-      blank(index, stop);
-      index = stop;
-    } else if (char === '"' || char === "'" || char === "`") {
-      let cursor = index + 1;
-      while (cursor < source.length && source[cursor] !== char) {
-        if (source[cursor] === "\\") {
-          cursor += 1;
-        } else if (char !== "`" && source[cursor] === "\n") {
-          break;
+  // Scans code from `index`; inside a template expression it stops at the
+  // closing brace that matches the opening `${`, and returns its index.
+  const scanCode = (start: number, inTemplateExpression: boolean): number => {
+    let index = start;
+    let braces = 0;
+    while (index < source.length) {
+      const char = source[index];
+      const next = source[index + 1];
+      if (char === "/" && next === "/") {
+        const end = source.indexOf("\n", index);
+        const stop = end === -1 ? source.length : end;
+        blank(index, stop);
+        index = stop;
+      } else if (char === "/" && next === "*") {
+        const end = source.indexOf("*/", index + 2);
+        const stop = end === -1 ? source.length : end + 2;
+        blank(index, stop);
+        index = stop;
+      } else if (char === '"' || char === "'") {
+        let cursor = index + 1;
+        while (cursor < source.length && source[cursor] !== char && source[cursor] !== "\n") {
+          cursor += source[cursor] === "\\" ? 2 : 1;
         }
-        cursor += 1;
+        blank(index + 1, cursor);
+        index = cursor + 1;
+      } else if (char === "`") {
+        index = scanTemplate(index + 1);
+      } else if (inTemplateExpression && char === "{") {
+        braces += 1;
+        index += 1;
+      } else if (inTemplateExpression && char === "}") {
+        if (braces === 0) {
+          return index;
+        }
+        braces -= 1;
+        index += 1;
+      } else {
+        index += 1;
       }
-      blank(index + 1, cursor);
-      index = cursor + 1;
-    } else {
-      index += 1;
     }
-  }
+    return index;
+  };
+  // Blanks template text from `start` and keeps each `${...}` as code; returns
+  // the index after the closing backtick.
+  const scanTemplate = (start: number): number => {
+    let index = start;
+    let textStart = start;
+    while (index < source.length) {
+      const char = source[index];
+      if (char === "\\") {
+        index += 2;
+      } else if (char === "`") {
+        blank(textStart, index);
+        return index + 1;
+      } else if (char === "$" && source[index + 1] === "{") {
+        blank(textStart, index);
+        index = scanCode(index + 2, true) + 1;
+        textStart = index;
+      } else {
+        index += 1;
+      }
+    }
+    blank(textStart, index);
+    return index;
+  };
+  scanCode(0, false);
   return out.join("");
 }
 
@@ -101,8 +143,11 @@ function callArguments(code: string, open: number): string[] | undefined {
 }
 
 /** The value of a numeric literal or a product of numeric literals, else undefined. */
+const NUMBER = String.raw`\d[\d_]*(?:\.\d[\d_]*)?(?:[eE][+-]?\d+)?`;
+const LITERAL_PRODUCT = new RegExp(`^${NUMBER}(?:\\s*\\*\\s*${NUMBER})*$`);
+
 function literalMs(expression: string | undefined): number | undefined {
-  if (expression === undefined || !/^\d[\d_]*(?:\s*\*\s*\d[\d_]*)*$/.test(expression)) {
+  if (expression === undefined || !LITERAL_PRODUCT.test(expression)) {
     return undefined;
   }
   return expression
@@ -119,7 +164,7 @@ export function countRealWaits(source: string): number {
   let count = 0;
   for (const match of code.matchAll(CALL)) {
     const name = match[1];
-    const before = code[match.index - 1];
+    const before = code.slice(0, match.index).trimEnd().at(-1);
     if (before === "." && name !== "setTimeout" && name !== "setInterval") {
       continue; // e.g. page.wait(...) or object.delay(...)
     }
@@ -162,6 +207,11 @@ test("the real-wait counter counts long literal waits and ignores short, compute
   assert.equal(countRealWaits("// setTimeout(fn, 5000)\n/* sleep(9000) */"), 0);
   assert.equal(countRealWaits('const fixture = "setTimeout(fn, 5000)";'), 0);
   assert.equal(countRealWaits("page.wait(5000);"), 0);
+  assert.equal(countRealWaits("page. /* c */ wait(5000);"), 0);
+  assert.equal(countRealWaits("const r = `${await sleep(100)}`;"), 1);
+  assert.equal(countRealWaits("const r = `a ${`b ${await delay(200)}`} c`;"), 1);
+  assert.equal(countRealWaits("const r = `setTimeout(fn, 5000)`;"), 0);
+  assert.equal(countRealWaits("setTimeout(fn, 1e3); await sleep(100.5);"), 2);
 });
 
 test(`real waits over ${THRESHOLD_MS} ms in RI test code do not grow`, () => {
