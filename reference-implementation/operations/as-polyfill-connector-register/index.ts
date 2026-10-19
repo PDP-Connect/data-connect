@@ -22,7 +22,25 @@ export interface AsPolyfillConnectorRegisterInput {
 }
 
 export interface AsPolyfillConnectorRegisterDependencies {
+  /** Returns the accepted manifest stored under a connector key, or null. */
+  getConnectorManifest: (
+    connectorKey: string
+  ) => Promise<Record<string, unknown> | null | undefined> | Record<string, unknown> | null | undefined;
+  /** Digest of a stored-form manifest's parsed content; key order is not content. */
+  declarationDigest: (storedManifest: Record<string, unknown>) => string;
+  /**
+   * Digest of the content first accepted under (connector key, version), kept
+   * whether or not that version is still current; null when none was recorded.
+   */
+  getAcceptedDeclarationDigest: (connectorId: string, version: string) => Promise<string | null> | string | null;
+  /** Produces the exact representation `registerConnector` persists, and its storage key. */
+  normalizeManifestForStorage: (manifest: Record<string, unknown>) => {
+    connectorId: string;
+    storedManifest: Record<string, unknown>;
+  };
   registerConnector: (manifest: Record<string, unknown>) => Promise<unknown> | unknown;
+  /** Throws when the manifest is invalid; an invalid manifest is never equivocation. */
+  validateManifest: (manifest: Record<string, unknown>) => void;
 }
 
 export interface AsPolyfillConnectorRegisterSuccessOutcome {
@@ -32,15 +50,33 @@ export interface AsPolyfillConnectorRegisterSuccessOutcome {
 }
 
 export interface AsPolyfillConnectorRegisterFailureOutcome {
-  readonly errorCode: "invalid_request";
+  readonly errorCode: "invalid_request" | "declaration_equivocation";
   readonly errorMessage: string;
   readonly outcome: "failure";
-  readonly status: 400;
+  readonly status: 400 | 409;
 }
 
 export type AsPolyfillConnectorRegisterOutcome =
   | AsPolyfillConnectorRegisterSuccessOutcome
   | AsPolyfillConnectorRegisterFailureOutcome;
+
+async function acceptedManifestFor(
+  deps: AsPolyfillConnectorRegisterDependencies,
+  connectorId: string
+): Promise<Record<string, unknown> | null> {
+  try {
+    return (await deps.getConnectorManifest(connectorId)) ?? null;
+  } catch (error) {
+    // A stored manifest that no longer parses holds no accepted content to
+    // retain, so it must stay replaceable by a valid registration. Any other
+    // read failure (database, I/O) propagates: overwriting content the
+    // server could not read would defeat the equivocation guard.
+    if ((error as { code?: unknown } | null)?.code === "connector_invalid") {
+      return null;
+    }
+    throw error;
+  }
+}
 
 export async function executeAsPolyfillConnectorRegister(
   input: AsPolyfillConnectorRegisterInput,
@@ -57,6 +93,35 @@ export async function executeAsPolyfillConnectorRegister(
       errorMessage: "Missing connector_key or connector_id",
       outcome: "failure",
       status: 400,
+    };
+  }
+  // PDPP Core §5: an accepted declaration is keyed by source identity and
+  // `declaration_version`; different parsed content under that key is
+  // equivocation and the previously accepted content is retained. Same
+  // content is an idempotent re-registration; a new version is a new key.
+  deps.validateManifest(manifest as Record<string, unknown>);
+  const { connectorId, storedManifest } = deps.normalizeManifestForStorage(manifest as Record<string, unknown>);
+  const version = storedManifest.version;
+  const incomingDigest = deps.declarationDigest(storedManifest);
+  let acceptedDigest: string | null = null;
+  if (typeof version === "string" && version) {
+    const current = await acceptedManifestFor(deps, connectorId);
+    const currentDigest = current && current.version === version ? deps.declarationDigest(current) : null;
+    // The current stored manifest is what the server serves: re-registering it
+    // is idempotent even if a trusted internal publication has since rewritten
+    // it under the same version.
+    if (currentDigest !== incomingDigest) {
+      // No digest retained for this key means it was accepted before digests
+      // were kept: the current manifest is then the only accepted content.
+      acceptedDigest = (await deps.getAcceptedDeclarationDigest(connectorId, version)) ?? currentDigest;
+    }
+  }
+  if (acceptedDigest !== null && acceptedDigest !== incomingDigest) {
+    return {
+      errorCode: "declaration_equivocation",
+      errorMessage: `Connector ${connectorId} version ${String(version)} is already registered with different content; register a new version instead`,
+      outcome: "failure",
+      status: 409,
     };
   }
   const registered = await deps.registerConnector(manifest as Record<string, unknown>);

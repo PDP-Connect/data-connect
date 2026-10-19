@@ -4,9 +4,8 @@
 import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 
-export function localNodeTestArgs(args, isCi = Boolean(process.env.CI)) {
+export function localNodeTestArgs(args) {
   if (
-    isCi ||
     !args.includes("--test") ||
     args.some((argument) => argument === "--test-concurrency" || argument.startsWith("--test-concurrency="))
   ) {

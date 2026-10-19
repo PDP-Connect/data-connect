@@ -1,0 +1,87 @@
+name: reference-implementation postgres
+
+# The RI suite against real PostgreSQL. The required PR gate
+# (reference-implementation.yml) runs only the memory-default profile, so this
+# is the one CI lane that exercises the PostgreSQL storage paths, pgvector, and
+# the pg_dump/psql backup tests. It is a scheduled backstop rather than a
+# per-PR check because it takes far longer than the PR gate. It also runs on
+# PRs that change the lane itself.
+#
+# `npm run test:postgres` starts a disposable cluster through test-sandbox
+# (scripts/test-sandbox/README.md). The hosted runner has no bubblewrap
+# network namespace, so the cluster listens on the VM's own 127.0.0.1:55447;
+# the VM is disposable, which is what TEST_SANDBOX_PG_UNSAFE_HOST=1 accepts.
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch: {}
+  pull_request:
+    # PRs into the test-engineering integration branch are gated by a local
+    # oracle and review; full CI runs once on the batch PR into main.
+    branches-ignore: [testeng/integration]
+    paths:
+      - ".github/workflows/reference-implementation-postgres.yml"
+      - "reference-implementation/scripts/test-postgres-private.sh"
+      - "reference-implementation/scripts/test-sandboxed.sh"
+      - "scripts/test-sandbox/**"
+
+concurrency:
+  group: reference-implementation-postgres-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test-postgres:
+    name: test reference implementation (postgres)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24.21.0"
+          cache: npm
+
+      - name: Install PostgreSQL server tools and pgvector
+        run: |
+          set -euo pipefail
+          major=$(ls /usr/lib/postgresql | sort -n | tail -1)
+          # The semantic tests need pgvector 0.8 or newer (hnsw.iterative_scan);
+          # the distribution archive ships an older one, so use the PGDG archive.
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get install -y -qq "postgresql-${major}-pgvector"
+          dpkg-query -W "postgresql-${major}" "postgresql-${major}-pgvector"
+          echo "TEST_SANDBOX_PG=${major}" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build workspace packages
+        run: |
+          npm --prefix packages/connector-protocol run build
+          npm --prefix packages/collector-runtime run build
+          npm --prefix reference-implementation/vendor/mcp-server run build
+
+      - name: Build console
+        env:
+          NEXT_TELEMETRY_DISABLED: "1"
+        run: npm --prefix apps/console run build
+
+      - name: Test reference implementation (postgres)
+        env:
+          PDPP_OWNER_PASSWORD: reference-implementation-ci
+          TEST_SANDBOX_PG_UNSAFE_HOST: "1"
+          # test/search-index-repair-correctness.postgres.test.ts has a 20k-record
+          # repair case that prints nothing for about 100 s on a fast host; the
+          # default 120 s idle watchdog killed it on the hosted runner.
+          PDPP_TEST_FILE_TIMEOUT_MS: "300000"
+        run: npm --prefix reference-implementation run test:postgres

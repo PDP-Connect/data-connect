@@ -15,6 +15,7 @@ import {
   readdirSync,
 } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
+import { crashPoint } from "./crash-point.ts";
 
 const CONNECTOR_ID = /^[a-z0-9][a-z0-9-]*$/;
 const JOURNAL_VERSION = 1;
@@ -39,6 +40,7 @@ export interface ConnectorUninstallJournalInput<ActiveRecord = unknown> {
 
 export interface ConnectorUninstallReconcileCallbacks<ActiveRecord = unknown> {
   readonly clearUninstalledMarker?: (connectorId: string) => Promise<void> | void;
+  readonly cleanupActivation?: (connectorId: string) => Promise<void> | void;
   readonly getActive: (connectorId: string) => Promise<ActiveRecord | null> | ActiveRecord | null;
   readonly restoreActive: (record: ActiveRecord) => Promise<void> | void;
 }
@@ -80,7 +82,10 @@ function assertRootMoves(dataDir: string, connectorId: string, rootMoves: readon
 }
 
 function journalDir(dataDir: string): string {
-  return resolve(dataDir, "connector-uninstall-journals");
+  const dir = resolve(dataDir, "connector-uninstall-journals");
+  // Every journal write, read, list and delete goes through here: a link would send them outside the data directory.
+  assertNoSymlinkBelowDataDir(dataDir, dir);
+  return dir;
 }
 
 export function connectorUninstallJournalPath(dataDir: string, connectorId: string): string {
@@ -124,7 +129,9 @@ function writeJsonDurably(path: string, value: unknown): void {
   const temp = join(dir, `.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`);
   writeFileSync(temp, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
   fsyncPath(temp);
+  crashPoint("uninstall-journal:after-temp-fsync");
   renameSync(temp, path);
+  crashPoint("uninstall-journal:after-rename");
   fsyncDirectory(dir);
 }
 
@@ -183,7 +190,11 @@ export function readConnectorUninstallJournal<ActiveRecord>(
 ): ConnectorUninstallJournal<ActiveRecord> | null {
   const path = connectorUninstallJournalPath(dataDir, connectorId);
   if (!existsSync(path)) return null;
-  return parseJournal<ActiveRecord>(dataDir, JSON.parse(readFileSync(path, "utf8")));
+  const journal = parseJournal<ActiveRecord>(dataDir, JSON.parse(readFileSync(path, "utf8")));
+  if (journal.connectorId !== connectorId) {
+    throw new Error("Connector uninstall journal identity does not match its filename.");
+  }
+  return journal;
 }
 
 export function updateConnectorUninstallJournalRoots<ActiveRecord>(
@@ -204,33 +215,58 @@ export function deleteConnectorUninstallJournal(dataDir: string, connectorId: st
   removeFileDurably(connectorUninstallJournalPath(dataDir, connectorId));
 }
 
-function assertNotSymlink(path: string): void {
-  if (existsSync(path) && lstatSync(path).isSymbolicLink()) {
-    throw new Error("Connector uninstall journal path must not be a symbolic link.");
-  }
-}
-
-function restoreMovedRoots(rootMoves: readonly ConnectorUninstallRootMove[]): void {
-  for (const move of [...rootMoves].reverse()) {
-    assertNotSymlink(move.moved);
-    assertNotSymlink(move.original);
-    if (existsSync(move.moved)) {
-      if (existsSync(move.original)) throw new Error("Cannot restore connector root over an existing path.");
-      mkdirSync(dirname(move.original), { recursive: true });
-      renameSync(move.moved, move.original);
-      fsyncDirectory(dirname(move.original));
+// Recovery deletes recursively, so a symlink anywhere between the data
+// directory and the target would redirect it outside the tree. The data
+// directory itself and its ancestors are operator-chosen and may be symlinks.
+function assertNoSymlinkBelowDataDir(dataDir: string, path: string): void {
+  const root = resolve(dataDir);
+  for (let current = resolve(path); current !== root; current = dirname(current)) {
+    if (dirname(current) === current) {
+      throw new Error("Connector uninstall journal path must stay inside the data directory.");
+    }
+    try {
+      if (lstatSync(current).isSymbolicLink()) {
+        throw new Error("Connector uninstall journal path must not contain a symbolic link.");
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
   }
 }
 
-function removeMovedAndOriginalRoots(rootMoves: readonly ConnectorUninstallRootMove[]): void {
+// Inspect and operate on the same normalized path: a raw `link/../x` would
+// pass a lexical check while the filesystem resolves `link` first.
+function checkedMovePaths(dataDir: string, move: ConnectorUninstallRootMove): { moved: string; original: string } {
+  const moved = resolve(move.moved);
+  const original = resolve(move.original);
+  assertNoSymlinkBelowDataDir(dataDir, moved);
+  assertNoSymlinkBelowDataDir(dataDir, original);
+  return { moved, original };
+}
+
+function restoreMovedRoots(dataDir: string, rootMoves: readonly ConnectorUninstallRootMove[]): void {
+  for (const move of [...rootMoves].reverse()) {
+    const { moved, original } = checkedMovePaths(dataDir, move);
+    if (existsSync(moved)) {
+      if (existsSync(original)) throw new Error("Cannot restore connector root over an existing path.");
+      mkdirSync(dirname(original), { recursive: true });
+      renameSync(moved, original);
+      crashPoint("uninstall-recovery:after-root-restore");
+      fsyncDirectory(dirname(original));
+    }
+  }
+}
+
+function removeMovedAndOriginalRoots(dataDir: string, rootMoves: readonly ConnectorUninstallRootMove[]): void {
   for (const move of rootMoves) {
-    assertNotSymlink(move.moved);
-    assertNotSymlink(move.original);
-    rmSync(move.moved, { force: true, recursive: true });
-    rmSync(move.original, { force: true, recursive: true });
-    fsyncDirectory(dirname(move.moved));
-    fsyncDirectory(dirname(move.original));
+    const { moved, original } = checkedMovePaths(dataDir, move);
+    rmSync(moved, { force: true, recursive: true });
+    rmSync(original, { force: true, recursive: true });
+    crashPoint("uninstall-recovery:after-root-removal");
+    // Uninstall removes the emptied connector directory before it deletes the journal.
+    for (const dir of new Set([dirname(moved), dirname(original)])) {
+      if (existsSync(dir)) fsyncDirectory(dir);
+    }
   }
 }
 
@@ -244,12 +280,16 @@ export async function reconcileConnectorUninstallJournal<ActiveRecord>(
   const active = await callbacks.getActive(journal.connectorId);
   if (active) {
     await callbacks.restoreActive(journal.priorActiveRecord);
-    restoreMovedRoots(journal.rootMoves);
+    crashPoint("uninstall-recovery:after-restore-active");
+    restoreMovedRoots(dataDir, journal.rootMoves);
     await callbacks.clearUninstalledMarker?.(journal.connectorId);
+    crashPoint("uninstall-recovery:after-marker-clear");
     deleteConnectorUninstallJournal(dataDir, journal.connectorId);
     return { connectorId: journal.connectorId, status: "restored" };
   }
-  removeMovedAndOriginalRoots(journal.rootMoves);
+  removeMovedAndOriginalRoots(dataDir, journal.rootMoves);
+  await callbacks.cleanupActivation?.(journal.connectorId);
+  crashPoint("uninstall-recovery:after-activation-cleanup");
   deleteConnectorUninstallJournal(dataDir, journal.connectorId);
   return { connectorId: journal.connectorId, status: "cleaned" };
 }

@@ -34,6 +34,10 @@ export const POSTGRES_TEMPLATE_ELIGIBLE_FILES: readonly string[] = [
   "test/agent-connect-absent-only-expiry.test.ts",
   "test/approval-review-seam.test.ts",
   "test/auth-consent-device-postgres-path.test.ts",
+  // Uses Postgres as a fixture for process-kill recovery of auth rows, not as the subject of schema bootstrap.
+  "test/auth-kill-boundaries.test.ts",
+  // Uses Postgres as a fixture for process-kill recovery of revocation cascades, not as the subject of schema bootstrap.
+  "test/auth-revocation-atomicity.test.ts",
   "test/browser-surface-external-loss-receipt-atomicity.test.ts",
   "test/browser-surface-readiness-generation-atomicity.test.ts",
   "test/browser-surface-replacement-correction-artifact.test.ts",
@@ -114,6 +118,8 @@ export const POSTGRES_TEMPLATE_ELIGIBLE_FILES: readonly string[] = [
   "test/postgres-expand-hydration.test.ts",
   "test/postgres-lexical-backend-state.test.ts",
   "test/postgres-query-bounded.test.ts",
+  // Live history pruning over seeded records; does not observe schema bootstrap.
+  "test/postgres-record-prune-anchor.test.ts",
   "test/postgres-records-ingest-noop.test.ts",
   "test/postgres-records-version-floor.test.ts",
   "test/postgres-runtime-storage.test.ts",
@@ -132,9 +138,17 @@ export const POSTGRES_TEMPLATE_ELIGIBLE_FILES: readonly string[] = [
   "test/record-version-stats.test.ts",
   "test/record-window-count-parity.test.ts",
   "test/records-delete-postgres-routing.test.ts",
+  // Child processes ingest into a scratch database and are killed; does not observe schema bootstrap.
+  "test/records-ingest-kill-durability.test.ts",
   // List pagination over seeded records on a scratch database; does not observe schema bootstrap.
   "test/records-null-cursor-pagination.test.ts",
+  // Child processes ingest into a scratch database; does not observe schema bootstrap.
+  "test/records-version-allocation-contention-postgres.test.ts",
+  // Child processes tear down a seeded scratch database and are killed; does not observe schema bootstrap.
+  "test/records-teardown-failure-matrix.test.ts",
   "test/recovery-bounded-reads.test.ts",
+  // Quarantine compare-and-swap race over a seeded gap; does not observe schema bootstrap.
+  "test/recovery-quarantine-race-postgres.test.ts",
   "test/ref-connectors-identity-inventory-profile.test.ts",
   "test/ref-connectors-identity-page-filter-explain.test.ts",
   "test/ref-connectors-identity-page-set-scope-explain.test.ts",
@@ -165,6 +179,10 @@ export const POSTGRES_TEMPLATE_ELIGIBLE_FILES: readonly string[] = [
   "test/search-index-lexical-resume.postgres.test.ts",
   "test/search-index-reconcile-scope-isolation.postgres.test.ts",
   "test/search-index-repair-correctness.postgres.test.ts",
+  // Lexical cleanup debt over seeded rows; does not observe schema bootstrap.
+  "test/search-reconcile-g1-postgres.test.ts",
+  // Semantic cleanup debt over seeded vectors; does not observe schema bootstrap.
+  "test/search-reconcile-g2-postgres.test.ts",
   "test/setup-binding-promotion.test.ts",
   "test/source-declaration-trust.test.ts",
   "test/source-field-name-records-parity.test.ts",

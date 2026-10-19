@@ -1693,6 +1693,13 @@ async function bootstrapPostgresSchemaOnce({
         created_at TEXT NOT NULL DEFAULT (now() AT TIME ZONE 'utc')::text
       );
 
+      CREATE TABLE IF NOT EXISTS connector_accepted_declarations (
+        connector_id TEXT NOT NULL,
+        declaration_version TEXT NOT NULL,
+        content_digest TEXT NOT NULL,
+        PRIMARY KEY (connector_id, declaration_version)
+      );
+
       CREATE TABLE IF NOT EXISTS connector_installs (
         connector_id TEXT PRIMARY KEY,
         record_json TEXT NOT NULL,

@@ -22,6 +22,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
+import { crashPoint } from "../crash-point.ts";
 import { canonicalConnectorKey } from "../connector-key.ts";
 import {
   assertConnectorLifecycleAvailable,
@@ -120,11 +121,18 @@ export async function reconcileConnectorUninstalls(
 ): Promise<void> {
   for (const connectorId of listConnectorUninstallJournalIds(dataDir)) {
     await withConnectorLifecycleLock(dataDir, connectorId, async () => {
-      await reconcileConnectorUninstallJournal(dataDir, connectorId, {
+      const result = await reconcileConnectorUninstallJournal(dataDir, connectorId, {
         clearUninstalledMarker: (id) => clearConnectorLifecycleUninstalled(dataDir, id),
+        cleanupActivation: async (id) => {
+          await store.deactivate(id);
+          await removeActivation(id);
+        },
         getActive: (id) => store.getActive(id),
         restoreActive: (record) => store.activate(record),
       });
+      if (result.status === "cleaned") {
+        return;
+      }
       if (!(await store.getActive(connectorId))) {
         await store.deactivate(connectorId);
         await removeActivation(connectorId);
@@ -677,12 +685,14 @@ async function reuseExistingInstall(
   const verified = verifyStoredRecord(root, reusable, dataDir);
   signal.throwIfAborted();
   await store.activate(verified);
+  crashPoint("connector-install:after-activate");
   try {
     // Last abort point. registerManifest commits the registry manifest on its
     // own connection; rolling back the activation after that would leave the
     // two disagreeing, so a deadline during or after it lets the install finish.
     signal.throwIfAborted();
     await registerManifest(verified.manifest);
+    crashPoint("connector-install:after-register");
   } catch (error) {
     if (previousActive) {
       await store.activate(previousActive);
@@ -728,9 +738,11 @@ async function installStagedEntry(options: {
     const active = { ...record, root: options.root };
     const verifiedActive = verifyStoredRecord(options.root, active, options.dataDir);
     await options.store.activate(verifiedActive);
+    crashPoint("connector-install:after-activate");
     // Last abort point: see reuseExistingInstall.
     options.signal.throwIfAborted();
     await options.registerManifest(verifiedActive.manifest);
+    crashPoint("connector-install:after-register");
     return verifiedActive;
   } catch (error) {
     if (published) {
@@ -1022,6 +1034,7 @@ export function createConnectorInstallService(options: {
           rootMoves,
         });
         markConnectorLifecycleUninstalled(dataDir, connectorId);
+        crashPoint("connector-uninstall:after-marker");
         const staged: Array<{ original: string; moved: string }> = [];
         let restoreActiveRecord = false;
         try {
@@ -1029,6 +1042,7 @@ export function createConnectorInstallService(options: {
             assertNoSymlinkComponents(move.original);
             renameSync(move.original, move.moved);
             staged.push(move);
+            crashPoint("connector-uninstall:after-root-move");
           }
           if (store.deactivateAndRemoveActivation) {
             await store.deactivateAndRemoveActivation(connectorId);
@@ -1037,6 +1051,7 @@ export function createConnectorInstallService(options: {
             restoreActiveRecord = true;
             await removeActivation(connectorId);
           }
+          crashPoint("connector-uninstall:after-active-removed");
         } catch (error) {
           for (const item of [...staged].reverse()) {
             if (existsSync(item.moved)) renameSync(item.moved, item.original);
@@ -1079,6 +1094,7 @@ export function createConnectorInstallService(options: {
         } catch {
           // The install and activation pointers are gone; an empty parent is inert.
         }
+        crashPoint("connector-uninstall:after-staged-removal");
         deleteConnectorUninstallJournal(dataDir, connectorId);
       });
     } finally {

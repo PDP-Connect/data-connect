@@ -33,6 +33,7 @@ import {
   selectCohortTests,
   widenToStatements,
 } from "./select-pr-files.ts"
+import { classifySelection } from "./selection-outcome.ts"
 
 function argument(name: string): string {
   const index = process.argv.indexOf(`--${name}`)
@@ -225,7 +226,8 @@ if (
 // The tests this attempt runs, for cohorts whose runner cannot select tests
 // itself. Written unconditionally when asked for: an absent file and an empty
 // file mean different things to the config that reads it, and only one of them
-// is "no selection was recorded".
+// is "no selection was recorded". `--selection-outcome`
+// then says which kind of empty an empty file is.
 const selectedTestsPath = optionalArgument("selected-tests")
 if (bound !== undefined && selectedTestsPath === undefined) {
   throw new Error("an attempt bound limits the tests each trial runs, so it needs --selected-tests")
@@ -284,13 +286,19 @@ if (selectedTestsPath !== undefined) {
   // A revision larger than one attempt can finish mutates a bounded sample.
   // The sample is frozen into the intent, so the receipt states it.
   let candidates = runnable
+  // How many tests the bound's inventory held before withholding, when
+  // withholding left it empty. Zero otherwise: an inventory with runnable tests
+  // is classified from the final selection, and one that was never there is a
+  // run that asked for nothing.
+  let exhaustedInventory = 0
   if (bound !== undefined && fullIntent.applicability === "applicable") {
     // The bound has to count the tests a trial will really run. An empty
     // selection does not mean "no tests": the configuration then runs its whole
     // cohort suite, so that suite is the inventory the bound applies to. The
     // configuration exports it, so the glob has one source.
     let inventory = runnable
-    if (selectCohortTests(diff, cohort).length === 0) {
+    let inventoryBeforeWithholding = selectCohortTests(diff, cohort).length
+    if (inventoryBeforeWithholding === 0) {
       const configModule = await import(pathToFileURL(resolve(configPath)).href)
       const patterns: unknown = configModule.wholeCohortTests
       if (!Array.isArray(patterns) || !patterns.every((pattern) => typeof pattern === "string")) {
@@ -302,6 +310,7 @@ if (selectedTestsPath !== undefined) {
       const suite = [...new Set(patterns.flatMap((pattern) => globSync(pattern, { cwd: cohort.root })))]
         .map((path) => path.split(sep).join("/"))
         .sort()
+      inventoryBeforeWithholding = suite.length
       inventory = suite.filter((test) => {
         const testSource = readModule(test)
         return (
@@ -323,20 +332,32 @@ if (selectedTestsPath !== undefined) {
       const testSource = readModule(test)
       return testSource === undefined || !readsMutatedSource(test, testSource, fullIntent.mutate)
     })
-    const sample = sampleAttempt({
-      scope: fullIntent.scope,
-      tests: sampleable,
-      exercisedBy: (test) =>
-        exercisedCandidates(
-          test,
-          scoped,
-          (path) => isTestPath(cohort.root === "." ? path : `${cohort.root}/${path}`),
-          readModule
-        ),
-      wholeFileLines: (path) => (readModule(path) ?? "").split("\n").length,
-      bound,
-      sampleKey: argument("head"),
-    })
+    // An inventory that withholding emptied has nothing to sample, however large
+    // the change is: sampling it would throw before any outcome is recorded, and
+    // a fallback to the whole suite would bring the withheld tests back. Both
+    // kinds of withholding count, since the final filter below applies the
+    // second to whatever the first leaves. Classified below, from the count
+    // taken before any of it.
+    if (sampleable.length === 0 && inventoryBeforeWithholding > 0) {
+      exhaustedInventory = inventoryBeforeWithholding
+    }
+    const sample =
+      exhaustedInventory > 0
+        ? ({ kind: "complete" } as const)
+        : sampleAttempt({
+            scope: fullIntent.scope,
+            tests: sampleable,
+            exercisedBy: (test) =>
+              exercisedCandidates(
+                test,
+                scoped,
+                (path) => isTestPath(cohort.root === "." ? path : `${cohort.root}/${path}`),
+                readModule
+              ),
+            wholeFileLines: (path) => (readModule(path) ?? "").split("\n").length,
+            bound,
+            sampleKey: argument("head"),
+          })
     if (sample.kind === "partial") {
       if (sample.paths.size === 0) {
         // Rare once the inventory above is counted: every changed file is either
@@ -400,6 +421,23 @@ if (selectedTestsPath !== undefined) {
     )
   }
   writeFileSync(selectedTestsPath, tests.length === 0 ? "" : `${tests.join("\n")}\n`)
+
+  // An empty file is ambiguous (see selection-outcome.ts), so what it means is
+  // written beside it. The requested count is taken before the withholding
+  // filters above: a revision whose only changed tests were all withheld
+  // requested tests and has none left, which is not the same as one that
+  // changed no test.
+  const requested = Math.max(selectCohortTests(diff, cohort).length, candidates.length, exhaustedInventory)
+  const outcome = classifySelection(requested, tests.length)
+  const outcomePath = optionalArgument("selection-outcome")
+  if (outcomePath !== undefined) {
+    writeFileSync(outcomePath, `${outcome}\n`)
+  }
+  if (outcome === "none_runnable") {
+    process.stdout.write(
+      `every selected test was withheld; the ${cohortName} cohort will not be run on its whole suite\n`
+    )
+  }
 }
 
 writeFileSync(argument("out"), `${JSON.stringify(intent, null, 2)}\n`)

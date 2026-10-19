@@ -33,6 +33,20 @@ async function markCodeConsumed(backend: Backend, code: string): Promise<void> {
     .run(code);
 }
 
+async function expireIssuedCode(backend: Backend, deviceCode: string): Promise<void> {
+  const expiresAt = new Date(Date.now() - 60_000).toISOString();
+  if (backend === "postgres") {
+    await postgresQuery("UPDATE oauth_authorization_codes SET expires_at = $1 WHERE device_code = $2", [
+      expiresAt,
+      deviceCode,
+    ]);
+    return;
+  }
+  getDb()
+    .prepare("UPDATE oauth_authorization_codes SET expires_at = ? WHERE device_code = ?")
+    .run(expiresAt, deviceCode);
+}
+
 async function countIssuedRows(backend: Backend, deviceCode: string): Promise<number> {
   if (backend === "postgres") {
     const result = await postgresQuery<{ count: number }>(
@@ -103,6 +117,32 @@ async function exerciseDelivery(backend: Backend): Promise<void> {
       }),
     NOT_RECOVERABLE
   );
+
+  const expiredDeviceCode = `device_expired_${backend}_${randomBytes(6).toString("hex")}`;
+  await stage(expiredDeviceCode);
+  const expiredBinding = { grantId: `grt_expired_${backend}`, token: `tok_expired_${backend}` };
+  const expiredDelivery = await issueOAuthAuthorizationCodeForDeviceCode(expiredDeviceCode, expiredBinding);
+  assert.equal(typeof expiredDelivery?.code, "string");
+  await expireIssuedCode(backend, expiredDeviceCode);
+  const expiredRows =
+    backend === "postgres"
+      ? (
+          await postgresQuery<{ expires_at: string }>(
+            "SELECT expires_at FROM oauth_authorization_codes WHERE device_code = $1",
+            [expiredDeviceCode]
+          )
+        ).rows
+      : [
+          getDb()
+            .prepare("SELECT expires_at FROM oauth_authorization_codes WHERE device_code = ?")
+            .get(expiredDeviceCode) as { expires_at: string },
+        ];
+  assert.ok(Date.parse(String(expiredRows[0]?.expires_at)) < Date.now(), "seeded issued code must be expired");
+  await assert.rejects(
+    () => issueOAuthAuthorizationCodeForDeviceCode(expiredDeviceCode, expiredBinding),
+    NOT_RECOVERABLE
+  );
+  assert.equal(await countIssuedRows(backend, expiredDeviceCode), 1, "expired delivery must not be replaced");
 }
 
 test("SQLite authorization-code delivery is CAS-bound and recoverable", async () => {

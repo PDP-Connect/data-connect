@@ -110,10 +110,20 @@ export default {
   // failed and rejected the baseline on PR #141. The `/**` form matters: Stryker
   // re-includes a negated path's parent directories, and only a rule that also
   // matches the children keeps the rest of the tree out.
+  //
+  // The two connector-dependency-loader files are the third read.
+  // `scripts/ensure-reference-stack.test.js` copies both into its fixture root
+  // (`fixtureRoot()`), and `scripts/ensure-reference-stack.js` lists them as
+  // required staged paths. A revision whose scripts selection is empty runs the
+  // whole root suite -- `related: false`, and no `--testFiles` -- and that test
+  // failed with ENOENT on `lstat` of the loader in the sandbox, which rejected
+  // the baseline of PR #494 and made every mutant in the batch inconclusive.
   ignorePatterns: [
     "reference-implementation/**",
     "!reference-implementation/stryker.config.mjs",
     "!reference-implementation/test/**",
+    "!reference-implementation/connector-dependency-loader.mjs",
+    "!reference-implementation/connector-dependency-loader-bootstrap.mjs",
     "src-tauri/target",
     "packages/*/dist",
     "reports",

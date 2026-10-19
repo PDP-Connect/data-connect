@@ -34,7 +34,7 @@ import test from "node:test";
 test("run lifecycle: no transition commits on a stale premise", async (t) => {
   await t.test(
     "a competing mutation in the read-write window refuses the transition",
-    { todo: "requires the owner module's compare-and-swap" },
+    { skip: "requires the owner module's compare-and-swap" },
     () => {
       // Inject the competing write between observation and attempt, across
       // every target state.
@@ -43,7 +43,7 @@ test("run lifecycle: no transition commits on a stale premise", async (t) => {
 
   await t.test(
     "a refused transition reports refusal rather than silently no-oping",
-    { todo: "requires the owner module" },
+    { skip: "requires the owner module" },
     () => {
       // A refusal that looks like success is how a false "empty" exit
       // happened. The caller must be able to tell the two apart.
@@ -52,7 +52,7 @@ test("run lifecycle: no transition commits on a stale premise", async (t) => {
 
   await t.test(
     "no decision reads the same fact twice with different boundary semantics",
-    { todo: "requires the owner module" },
+    { skip: "requires the owner module" },
     () => {
       // The literal drain/clock defect: one decision, one observation.
     }

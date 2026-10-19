@@ -1,5 +1,6 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
+// @vitest-environment happy-dom
 import { beforeEach, describe, expect, it } from "vitest"
 import { getTelemetryEnabled, setTelemetryEnabled } from "./client"
 

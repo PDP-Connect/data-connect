@@ -15,6 +15,7 @@ import {
   type ReportValidity,
 } from "./stryker-adapter.ts"
 import { type IntentPacket, verifyIntentDigest } from "./select-pr-files.ts"
+import { ENGINE_NOT_RUN } from "./selection-outcome.ts"
 
 /**
  * Say what was wrong with the report, in terms of the artifact rather than of
@@ -150,24 +151,39 @@ const engineRanAndFoundNothingToMutate =
   reportValidity.kind === "valid" && baselineComplete && receipt.projections.length === 0
 
 const failures: string[] = []
-if (!baselineComplete) {
-  failures.push(
-    `the baseline was rejected (engine exit ${strykerExit}), so every mutant in this ` +
-      "batch is inconclusive and the run established nothing about the suite"
+// Recorded by the workflow before Stryker was due to start: every selected test
+// was withheld from the baseline, so no test could inform a mutant. Like a
+// revision with nothing to mutate, this is neither a pass nor a failure, and the
+// receipt names the engine exit so it cannot be read as a clean run. No report is
+// expected, so none of the absent-evidence checks below apply.
+const engineNotStarted = strykerExit === ENGINE_NOT_RUN
+if (engineNotStarted) {
+  process.stdout.write(
+    "The engine was not started: every test selected for this revision was withheld from the\n" +
+      "mutation baseline, so no test can inform a mutant, and running the cohort's whole suite\n" +
+      "would have run the withheld tests. No mutation evidence exists for it. This is not a\n" +
+      "pass and not a failure.\n"
   )
-}
-if (reportValidity.kind !== "valid") {
-  failures.push(reportUnusableReason(reportValidity))
-}
-if (receipt.projections.length === 0) {
-  if (!engineRanAndFoundNothingToMutate && reportValidity.kind === "valid") {
-    failures.push("no mutant trials were recorded, so this attempt produced no evidence")
+} else {
+  if (!baselineComplete) {
+    failures.push(
+      `the baseline was rejected (engine exit ${strykerExit}), so every mutant in this ` +
+        "batch is inconclusive and the run established nothing about the suite"
+    )
   }
-} else if (validDenominator === 0) {
-  failures.push(
-    `all ${inconclusive} trial(s) were inconclusive, so no fault was shown to be ` +
-      "either detected or missed"
-  )
+  if (reportValidity.kind !== "valid") {
+    failures.push(reportUnusableReason(reportValidity))
+  }
+  if (receipt.projections.length === 0) {
+    if (!engineRanAndFoundNothingToMutate && reportValidity.kind === "valid") {
+      failures.push("no mutant trials were recorded, so this attempt produced no evidence")
+    }
+  } else if (validDenominator === 0) {
+    failures.push(
+      `all ${inconclusive} trial(s) were inconclusive, so no fault was shown to be ` +
+        "either detected or missed"
+    )
+  }
 }
 
 if (engineRanAndFoundNothingToMutate && failures.length === 0) {

@@ -602,7 +602,7 @@ describe("bundled personal-server verifier", () => {
   it.runIf(hasDpkgDeb)(
     "lists a package with a large payload without buffering its archive",
     () => {
-      const temporaryRoot = mkdtempSync(join(process.cwd(), ".verify-deb-"))
+      const temporaryRoot = mkdtempSync(join(tmpdir(), "verify-deb-"))
       try {
         const packageRoot = join(temporaryRoot, "package")
         const resources = join(packageRoot, "usr", "lib", "DataConnect")
