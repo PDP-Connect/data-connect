@@ -150,6 +150,10 @@ test("an accepted nested override still takes a tail", async () => {
 			"written under the outer run",
 		);
 		assert.equal((await stat(join(outerRun, "nested"))).mode & 0o777, 0o700);
+		assert.ok(
+			(await readdir(outerRun)).includes(RUN_MARKER_FILE),
+			"the outer run directory made on the way is marked, so it can be pruned",
+		);
 		// A symlink anywhere in the chain refuses the override.
 		const elsewhere = join(stateHome, "elsewhere");
 		await mkdir(elsewhere);

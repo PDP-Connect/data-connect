@@ -125,6 +125,29 @@ async function isRealDirectory(path: string): Promise<boolean> {
 }
 
 /**
+ * Mark the run directories above a nested root that this call just created
+ * (`firstCreated` is the topmost directory `mkdir -p` made, `root` the
+ * lowest): a nested runner can make its outer run's directory before the
+ * outer run writes anything, and an unmarked directory would never be pruned.
+ */
+async function markCreatedRunDirectories(
+	firstCreated: string,
+	root: string,
+): Promise<void> {
+	for (let path = root; ; path = dirname(path)) {
+		if (basename(path).startsWith(RUN_DIR_PREFIX)) {
+			await writeFile(join(path, RUN_MARKER_FILE), "", {
+				flag: "wx",
+				mode: 0o600,
+			});
+		}
+		if (path === firstCreated || path === dirname(path)) {
+			return;
+		}
+	}
+}
+
+/**
  * Remove run directories beyond the newest KEEP_RUNS or older than KEEP_DAYS,
  * never `keep`. Only real directories that hold the runner's marker file count
  * and are removed: a file, a symlink or an unmarked directory named `run-*` is
@@ -192,9 +215,12 @@ export async function writeKilledFileTail(
 ): Promise<string | undefined> {
 	try {
 		const root = dirname(runDir);
-		await mkdir(root, { mode: 0o700, recursive: true });
+		const firstCreated = await mkdir(root, { mode: 0o700, recursive: true });
 		if (!(await isRealDirectory(root))) {
 			return undefined;
+		}
+		if (firstCreated !== undefined) {
+			await markCreatedRunDirectories(firstCreated, root);
 		}
 		await chmod(root, 0o700);
 		let created = true;
