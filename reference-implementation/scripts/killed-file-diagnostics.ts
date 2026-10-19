@@ -5,7 +5,15 @@ import { randomBytes } from "node:crypto";
 import { lstatSync } from "node:fs";
 import { chmod, lstat, mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import {
+	basename,
+	dirname,
+	isAbsolute,
+	join,
+	relative,
+	resolve,
+	sep,
+} from "node:path";
 
 /** Run directories kept: the newest this many, and none older than KEEP_DAYS. */
 export const KEEP_RUNS = 20;
@@ -87,7 +95,9 @@ export function killedFileDiagnosticsRoot(
 	// any other value keeps no diagnostics, never an arbitrary directory.
 	const override = env[NESTED_DIAGNOSTICS_ROOT_ENV];
 	if (override) {
-		return isOwnNestedRoot(defaultRoot, override) ? resolve(override) : undefined;
+		return isOwnNestedRoot(defaultRoot, override)
+			? resolve(override)
+			: undefined;
 	}
 	return defaultRoot;
 }
@@ -134,7 +144,9 @@ async function pruneRunDirectories(
 		)
 		.map((entry) => entry.name);
 	const marked = await Promise.all(
-		candidates.map(async (name) => ((await hasRunMarker(join(root, name))) ? name : undefined)),
+		candidates.map(async (name) =>
+			(await hasRunMarker(join(root, name))) ? name : undefined,
+		),
 	);
 	const runs = marked
 		.filter((name): name is string => name !== undefined)
@@ -200,7 +212,10 @@ export async function writeKilledFileTail(
 				mode: 0o600,
 			});
 			await pruneRunDirectories(root, basename(runDir), nowMs);
-		} else if (!(await isRealDirectory(runDir)) || !(await hasRunMarker(runDir))) {
+		} else if (
+			!(await isRealDirectory(runDir)) ||
+			!(await hasRunMarker(runDir))
+		) {
 			return undefined;
 		}
 		const name = `${basename(filePath).replace(/[^\w.-]/g, "_")}-${randomBytes(4).toString("hex")}.log`;

@@ -41,7 +41,8 @@ test("the diagnostics root is a per-user state directory, and there is none on C
 	assert.equal(
 		killedFileDiagnosticsRoot({
 			CI: "1",
-			PDPP_TEST_DIAGNOSTICS_ROOT: "/state/pdpp-ri-test-diagnostics/run-x/nested",
+			PDPP_TEST_DIAGNOSTICS_ROOT:
+				"/state/pdpp-ri-test-diagnostics/run-x/nested",
 			XDG_STATE_HOME: "/state",
 		}),
 		undefined,
@@ -52,9 +53,15 @@ test("a runner started by a test writes inside the outer run's directory, and no
 	const env = { XDG_STATE_HOME: "/state" };
 	const base = "/state/pdpp-ri-test-diagnostics";
 	// One nested level, and the same shape repeated for a nested runner's own children.
-	for (const accepted of [`${base}/run-x/nested`, `${base}/run-x/nested/run-y/nested`]) {
+	for (const accepted of [
+		`${base}/run-x/nested`,
+		`${base}/run-x/nested/run-y/nested`,
+	]) {
 		assert.equal(
-			killedFileDiagnosticsRoot({ ...env, PDPP_TEST_DIAGNOSTICS_ROOT: accepted }),
+			killedFileDiagnosticsRoot({
+				...env,
+				PDPP_TEST_DIAGNOSTICS_ROOT: accepted,
+			}),
 			accepted,
 		);
 	}
@@ -73,7 +80,10 @@ test("a runner started by a test writes inside the outer run's directory, and no
 		"relative/run-x/nested",
 	]) {
 		assert.equal(
-			killedFileDiagnosticsRoot({ ...env, PDPP_TEST_DIAGNOSTICS_ROOT: refused }),
+			killedFileDiagnosticsRoot({
+				...env,
+				PDPP_TEST_DIAGNOSTICS_ROOT: refused,
+			}),
 			undefined,
 			refused,
 		);
@@ -106,7 +116,11 @@ test("an override outside the outer run's directory is ignored: nothing is chmod
 						Buffer.from("x"),
 					);
 		assert.equal(path, undefined);
-		assert.equal((await stat(shared)).mode & 0o777, 0o755, "the mode is unchanged");
+		assert.equal(
+			(await stat(shared)).mode & 0o777,
+			0o755,
+			"the mode is unchanged",
+		);
 		assert.deepEqual(await readdir(shared), [basename(oldRun)]);
 	} finally {
 		await rm(parent, { force: true, recursive: true });
@@ -116,7 +130,11 @@ test("an override outside the outer run's directory is ignored: nothing is chmod
 test("an accepted nested override still takes a tail", async () => {
 	const stateHome = await mkdtemp(join(tmpdir(), "killed-file-diagnostics-"));
 	try {
-		const outerRun = join(stateHome, "pdpp-ri-test-diagnostics", runDirectoryName());
+		const outerRun = join(
+			stateHome,
+			"pdpp-ri-test-diagnostics",
+			runDirectoryName(),
+		);
 		const root = killedFileDiagnosticsRoot({
 			PDPP_TEST_DIAGNOSTICS_ROOT: join(outerRun, "nested"),
 			XDG_STATE_HOME: stateHome,
@@ -127,7 +145,10 @@ test("an accepted nested override still takes a tail", async () => {
 			"test/x.test.ts",
 			Buffer.from("x"),
 		);
-		assert.ok(path?.startsWith(join(outerRun, "nested")), "written under the outer run");
+		assert.ok(
+			path?.startsWith(join(outerRun, "nested")),
+			"written under the outer run",
+		);
 		assert.equal((await stat(join(outerRun, "nested"))).mode & 0o777, 0o700);
 		// A symlink anywhere in the chain refuses the override.
 		const elsewhere = join(stateHome, "elsewhere");
@@ -162,7 +183,11 @@ test("a run directory that is a symlink is not written through", async () => {
 			Buffer.from("secret"),
 		);
 		assert.equal(path, undefined, "the result is not saved");
-		assert.deepEqual(await readdir(outside), [], "nothing is written through the link");
+		assert.deepEqual(
+			await readdir(outside),
+			[],
+			"nothing is written through the link",
+		);
 		assert.equal((await stat(outside)).mode & 0o777, 0o755);
 		// A symlinked root is refused too.
 		const linkedRoot = join(parent, "linked-root");
@@ -300,7 +325,9 @@ test(`a new run keeps the newest ${KEEP_RUNS} runs, none older than ${KEEP_DAYS}
 			),
 		);
 		assert.equal(
-			(await readdir(join(root, current))).filter((name) => name.endsWith(".log")).length,
+			(await readdir(join(root, current))).filter((name) =>
+				name.endsWith(".log"),
+			).length,
 			2,
 		);
 	} finally {
