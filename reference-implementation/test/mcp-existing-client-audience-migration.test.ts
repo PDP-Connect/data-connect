@@ -10,6 +10,7 @@ import test from "node:test";
 import { getDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
 import { replay } from "./helpers/mcp-existing-client-session.ts";
+import { assertMcpBaseProvenance, MCP_EXISTING_CLIENT_BASE } from "./helpers/mcp-existing-client-provenance.ts";
 
 type Stage = "P2" | "P3" | "P7";
 
@@ -35,23 +36,9 @@ function assertWorktreeIsCurrent(): void {
   const seeder = realpathSync(resolve(baseWorktree));
   const candidate = realpathSync(resolve(worktree));
   assert.notEqual(candidate, seeder, "audience candidate must differ from its base seeder worktree");
-  const baseRevision = "3282ac2f5e4687419bf391c2294d2118dd63fd7c";
-  const revision = (root: string): string => execFileSync(
-    "git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }
-  ).trim();
-  assert.equal(revision(seeder), baseRevision, "audience seeder must be the pinned base");
-  assert.notEqual(revision(candidate), baseRevision, "audience candidate must differ from base revision");
-  // Gate overlays are expected under test/ and in package.json scripts only.
-  assert.equal(execFileSync("git", ["-C", seeder, "status", "--porcelain",
-    "--untracked-files=all", "--", ".", ":(exclude)reference-implementation/test",
-    ":(exclude)reference-implementation/package.json"], { encoding: "utf8" }).trim(), "",
-    "audience seeder runtime worktree must be clean before seeding");
-  const originalPackage = JSON.parse(execFileSync("git", ["-C", seeder, "show",
-    "HEAD:reference-implementation/package.json"], { encoding: "utf8" }));
-  const currentPackage = JSON.parse(readFileSync(join(seeder, "reference-implementation/package.json"), "utf8"));
-  delete originalPackage.scripts;
-  delete currentPackage.scripts;
-  assert.deepEqual(currentPackage, originalPackage, "seeder package changes may only add gate scripts");
+  assertMcpBaseProvenance(seeder);
+  const candidateRevision = execFileSync("git", ["-C", candidate, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  assert.notEqual(candidateRevision, MCP_EXISTING_CLIENT_BASE, "audience candidate must differ from base revision");
 }
 
 function assertPermanentRows(

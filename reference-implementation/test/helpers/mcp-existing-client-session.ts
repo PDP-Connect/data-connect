@@ -1169,12 +1169,7 @@ export async function replay(
     ...searchRecordUris,
   ]
   const fetchIds = Array.isArray(storedIds?.fetchIds)
-    ? [
-        ...new Set([
-          ...(storedIds.fetchIds as string[]),
-          ...((storedIds.recordUris as string[] | undefined) ?? []),
-        ]),
-      ]
+    ? (storedIds.fetchIds as string[])
     : candidateHandles
   assert(fetchIds.length > 0, "search returned no stored record handles")
   const fetchId =
@@ -1229,15 +1224,14 @@ export async function replay(
   const queryConnectionIds = [
     ...new Set([...capturedConnectionIds, resultConnectionId]),
   ]
+  const queryRequests = queryConnectionIds.map(connectionId => ({
+    ...packageArgs(connectionId),
+    connection_id: connectionId,
+    limit: 1,
+    stream,
+  }))
   const queriedResults = await Promise.all(
-    queryConnectionIds.map(connectionId =>
-      call("query_records", {
-        ...packageArgs(connectionId),
-        connection_id: connectionId,
-        limit: 1,
-        stream,
-      })
-    )
+    queryRequests.map(args => call("query_records", args))
   )
   const queried = queriedResults[0]
   assert(queried, "query_records replay returned no results")
@@ -1249,11 +1243,8 @@ export async function replay(
     "query_records must include a pagination cursor"
   )
   const nextQuery = await call("query_records", {
-    ...packageArgs(),
-    connection_id: scopedConnection,
+    ...queryRequests[0],
     cursor: queryCursor,
-    limit: 1,
-    stream,
   })
   const nextQueryEnvelope = object(object(nextQuery.structuredContent).data)
   const nextQueryRecords = nextQueryEnvelope.data ?? nextQueryEnvelope.records
@@ -1280,24 +1271,18 @@ export async function replay(
   )
   const readArgs = object(storedIds?.readArgs)
   const readIds = Array.isArray(storedIds?.readIds)
-    ? [
-        ...new Set([
-          ...(storedIds.readIds as string[]),
-          ...((storedIds.recordUris as string[] | undefined) ?? []),
-        ]),
-      ]
+    ? (storedIds.readIds as string[])
     : fetchIds
+  const readRequests = readIds.map(id => ({
+    ...packageArgs(connectionIdForRecordHandle(id) ?? scopedConnection),
+    ...readArgs,
+    field_path: "text",
+    id,
+    limit_chars:
+      typeof readArgs.limit_chars === "number" ? readArgs.limit_chars : 240,
+  }))
   const readResults = await Promise.all(
-    readIds.map(id =>
-      call("read_record_field", {
-        ...packageArgs(connectionIdForRecordHandle(id) ?? scopedConnection),
-        ...readArgs,
-        field_path: "text",
-        id,
-        limit_chars:
-          typeof readArgs.limit_chars === "number" ? readArgs.limit_chars : 240,
-      })
-    )
+    readRequests.map(args => call("read_record_field", args))
   )
   const read = readResults[0]
   assert(read, "read_record_field replay returned no results")
@@ -1319,9 +1304,7 @@ export async function replay(
     "read_record_field must provide a continuation cursor for the long fixture"
   )
   const cursorRead = await call("read_record_field", {
-    ...packageArgs(),
-    field_path: "text",
-    id: readIds[0],
+    ...readRequests[0],
     cursor: readCursor,
     limit_chars: 240,
   })
@@ -1427,7 +1410,7 @@ export async function replay(
       "base capture produced zero real text-window arguments from the content ladder"
     )
   const windowArgs = Array.isArray(storedIds?.readArgsList)
-    ? (storedIds.readArgsList as JsonObject[])
+    ? [...(storedIds.readArgsList as JsonObject[])]
     : currentWindowArgs
   if (windowArgs.length === 0) {
     windowArgs.push({
@@ -1577,14 +1560,14 @@ export async function replay(
       ? (storedIds.recordUris as string[])
       : []
   )
-  storedRecordUris.add(recordUri)
+  if (!storedIds) storedRecordUris.add(recordUri)
   const recordedUris = [...storedRecordUris].sort()
   const fieldWindowUris = new Set<string>(
     Array.isArray(storedIds?.fieldWindowUris)
       ? (storedIds.fieldWindowUris as string[])
       : []
   )
-  if (fieldWindowUri) fieldWindowUris.add(fieldWindowUri)
+  if (!storedIds && fieldWindowUri) fieldWindowUris.add(fieldWindowUri)
   const resourceUris = [
     ...new Set([...recordedUris, ...fieldWindowUris]),
   ].sort()
@@ -1714,7 +1697,7 @@ export async function replay(
       schemaKeys: Object.keys(schemaData).sort(),
       searchResultKeys: Object.keys(hit).sort(),
       searchedFetchId: hit.id,
-      storedIds: {
+      storedIds: storedIds ?? {
         connectionIds: [
           ...new Set([...capturedConnectionIds, ...connectionIds]),
         ].sort(),
@@ -1725,9 +1708,9 @@ export async function replay(
         readIds: [...new Set([...readIds, ...recordUris])],
         recordUris: recordedUris,
         fieldWindowUris: [...fieldWindowUris].sort(),
-        searchResultIds: storedIds?.searchResultIds ?? searchResultIds,
+        searchResultIds,
         searchArgs: { q: "pasta" },
-        searchResultId: storedIds?.searchResultId ?? hit.id,
+        searchResultId: hit.id,
         queryArgs: { connection_id: resultConnectionId, limit: 10, stream },
       },
       observedConnectionIds: [...connectionIds].sort(),

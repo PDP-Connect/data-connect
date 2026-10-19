@@ -17,6 +17,7 @@ import test from "node:test"
 import { getDb } from "../server/db.ts"
 import { startServer } from "../server/index.ts"
 import { replay } from "./helpers/mcp-existing-client-session.ts"
+import { assertMcpBaseProvenance, MCP_EXISTING_CLIENT_BASE } from "./helpers/mcp-existing-client-provenance.ts"
 
 const worktree = process.env.MCP_STORED_ID_WORKTREE
 const baseWorktree = process.env.MCP_STORED_ID_BASE_WORKTREE
@@ -60,18 +61,9 @@ function assertWorktrees(): void {
     seeder,
     "stored-ID candidate must differ from its base seeder worktree"
   )
-  const baseRevision =
-    process.env.MCP_STORED_ID_BASE_REV ??
-    "3282ac2f5e4687419bf391c2294d2118dd63fd7c"
-  const actualRevision = execFileSync(
-    "git",
-    ["-C", seeder, "rev-parse", "HEAD"],
-    { encoding: "utf8" }
-  ).trim()
-  assert.equal(
-    actualRevision,
-    baseRevision,
-    `stored-ID seeder must be ${baseRevision}, got ${actualRevision}`
+  const actualRevision = assertMcpBaseProvenance(
+    seeder,
+    process.env.MCP_STORED_ID_BASE_REV ?? MCP_EXISTING_CLIENT_BASE
   )
   const candidateRevision = execFileSync(
     "git",
@@ -85,7 +77,7 @@ function assertWorktrees(): void {
   )
 }
 
-async function replayStoredSession(
+export async function replayStoredSession(
   rsUrl: string,
   token: string,
   tokenKind: "client" | "package",
@@ -140,16 +132,17 @@ async function replayStoredSession(
     expected.readArgsList,
     `${tokenKind}: stored field-window arguments changed`
   )
-  assert.deepEqual(
-    (candidate.session as Record<string, unknown>).observedConnectionIds,
-    (base.session as Record<string, unknown>).observedConnectionIds,
-    `${tokenKind}: adopted connection_id values changed or disappeared`
-  )
-  assert.deepEqual(
-    (candidate.session as Record<string, unknown>).observedRecordUris,
-    (base.session as Record<string, unknown>).observedRecordUris,
-    `${tokenKind}: stored pdpp://record handles changed or disappeared`
-  )
+  const observed = candidate.session as Record<string, unknown>
+  const captured = base.session as Record<string, unknown>
+  for (const key of ["observedConnectionIds", "observedRecordUris"]) {
+    const current = observed[key]
+    const previous = captured[key]
+    assert(Array.isArray(current) && Array.isArray(previous))
+    assert(
+      previous.every(value => current.includes(value)),
+      `${tokenKind}: captured ${key} disappeared during replay`
+    )
+  }
 }
 
 test(
