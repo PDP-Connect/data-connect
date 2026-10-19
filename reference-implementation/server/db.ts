@@ -22,7 +22,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { load as loadSqliteVec } from "sqlite-vec";
 import {
@@ -32,7 +32,11 @@ import {
 import { canonicalConnectorKey } from "./connector-key.ts";
 import { RECORD_REJECTION_GENERATION, recordRejectionReplayKey } from "./record-rejection-replay-key.ts";
 import { SqliteDriver } from "./sqlite-driver.ts";
-import { openSqliteDatabase, type SqliteEncryptionOptions } from "./sqlite-encryption.ts";
+import {
+  openSqliteDatabase,
+  resolveDatabaseEncryptionKey,
+  type SqliteEncryptionOptions,
+} from "./sqlite-encryption.ts";
 import { bumpStorageGeneration } from "./storage-generation.ts";
 
 const DEFAULT_SQLITE_BUSY_TIMEOUT_MS = 30_000;
@@ -58,6 +62,7 @@ interface SqliteDatabase {
   pragma: (source: string, options?: { simple?: boolean }) => unknown;
   prepare: (sql: string) => SqliteStatement;
   transaction: <T>(fn: () => T) => (() => T) & { immediate: () => T };
+  serialize: () => Buffer;
 }
 type VectorIndexKind = "sqlite-vec" | "blob-flat";
 type DatabaseHandle = SqliteDatabase & { vectorIndexKind: VectorIndexKind };
@@ -277,6 +282,14 @@ const BROWSER_SURFACE_LEASE_CREATE_TABLE_NAME_PATTERN =
   /^(CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?)(?:"browser_surface_leases"|browser_surface_leases)/i;
 
 let db: DatabaseHandle | null = null;
+let sqliteMemorySchemaSnapshot: Buffer | null = null;
+let sqliteFileSchemaSnapshot: Buffer | null = null;
+let sqliteSchemaSnapshotRestores = 0;
+
+/** How many databases this process opened from a schema snapshot (tests only). */
+export function sqliteSchemaSnapshotRestoreCountForTests(): number {
+  return sqliteSchemaSnapshotRestores;
+}
 let sqliteStoreCacheGeneration = 0;
 let sqliteStoreCacheIdentity = "sqlite:closed:0";
 
@@ -6234,7 +6247,42 @@ export function initDb(path = ":memory:", opts: InitDbOptions = {}): DatabaseHan
   if (path !== ":memory:") {
     mkdirSync(dirname(path), { recursive: true });
   }
-  const raw = openSqliteDatabase(Database, path, busyTimeoutMs, opts) as unknown as SqliteDatabase;
+  const hasMigrationCallback =
+    opts.onSchemaMigration !== undefined ||
+    opts.onSchemaRetry !== undefined ||
+    opts.onEncryptionMigrationStep !== undefined;
+  // Test runs only (the RI runner requires PDPP_TEST_PROFILE): a test process
+  // opens many fresh databases, and rebuilding the schema for each one cost
+  // about 6.6% of the memory gate's CPU. Production opens one database per
+  // process and never takes this path. Anything that must observe or change
+  // the schema build bypasses it: migration callbacks, encryption, and the
+  // test-only source-revision install marker.
+  const canUseSchemaSnapshot =
+    process.env.PDPP_TEST_PROFILE !== undefined &&
+    !hasMigrationCallback &&
+    !process.env.PDPP_TEST_SOURCE_REVISION_INSTALL_LOCK_PATH &&
+    resolveDatabaseEncryptionKey(opts.encryptionKey) === null;
+  const restoredMemorySchema =
+    path === ":memory:" && canUseSchemaSnapshot && sqliteMemorySchemaSnapshot !== null;
+  let restoredFileSchema = false;
+  let seedFileSchemaSnapshot = false;
+  if (path !== ":memory:" && canUseSchemaSnapshot) {
+    if (!existsSync(path) && !existsSync(`${path}-wal`) && !existsSync(`${path}-shm`)) {
+      const fileSnapshot = sqliteMemorySchemaSnapshot ?? sqliteFileSchemaSnapshot;
+      try {
+        writeFileSync(path, fileSnapshot ?? Buffer.alloc(0), { flag: "wx" });
+        restoredFileSchema = fileSnapshot !== null;
+        seedFileSchemaSnapshot = fileSnapshot === null;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+          throw error;
+        }
+      }
+    }
+  }
+  const raw = (restoredMemorySchema
+    ? new Database(sqliteMemorySchemaSnapshot as Buffer, { timeout: busyTimeoutMs })
+    : openSqliteDatabase(Database, path, busyTimeoutMs, opts)) as unknown as SqliteDatabase;
   sqliteStoreCacheGeneration += 1;
   sqliteStoreCacheIdentity = `sqlite:${String(path)}:${sqliteStoreCacheGeneration}`;
   raw.pragma(`busy_timeout = ${busyTimeoutMs}`);
@@ -6251,6 +6299,22 @@ export function initDb(path = ":memory:", opts: InitDbOptions = {}): DatabaseHan
   }
 
   const vectorIndexKind = loadVectorExtension(raw);
+
+  // SQLite connection settings are not part of a serialized database. The
+  // schema-building path restores foreign_keys during its migrations; a
+  // deserialized connection must restore it explicitly.
+  if (restoredMemorySchema || restoredFileSchema) {
+    sqliteSchemaSnapshotRestores += 1;
+    raw.pragma("foreign_keys = ON");
+    db = withCachedPrepare(raw);
+    Object.defineProperty(raw, "vectorIndexKind", {
+      configurable: false,
+      enumerable: true,
+      value: vectorIndexKind,
+      writable: false,
+    });
+    return db;
+  }
 
   // The first non-trivial write on the freshly opened DB. On Docker dev
   // restart the previous process may still be closing its WAL writer;
@@ -6810,6 +6874,14 @@ CREATE TABLE IF NOT EXISTS cimd_client_documents (
   runWithSqliteBusyRetrySync(() =>
     raw.transaction(() => ensureConnectorSummarySourceRevisionPrimitive(raw)).immediate()
   );
+  if (
+    path === ":memory:" && canUseSchemaSnapshot && !restoredMemorySchema
+  ) {
+    sqliteMemorySchemaSnapshot = raw.serialize();
+  }
+  if (seedFileSchemaSnapshot) {
+    sqliteFileSchemaSnapshot = raw.serialize();
+  }
   db = withCachedPrepare(raw);
   // Stamp the chosen vector-index backend onto the wrapped db so
   // search-semantic.js can select without re-probing. The Proxy's
