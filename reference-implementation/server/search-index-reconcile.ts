@@ -26,6 +26,8 @@
 
 import { getOne, transaction } from "../lib/db.ts";
 import {
+  assertConnectorManifestStreamAbsentSync,
+  assertConnectorManifestStreamAbsentWithClient,
   assertConnectorManifestStreamSubsetSync,
   assertConnectorManifestStreamSubsetWithClient,
 } from "./connector-manifest-write-fence.ts";
@@ -122,6 +124,33 @@ function assertStorageGenerationCurrent(generation: number): void {
   }
 }
 
+type ReconcilePhaseHook =
+  | ((point: string, context: { connectorInstanceId: string; stream: string }) => void | Promise<void>)
+  | null;
+let reconcilePhaseHook: ReconcilePhaseHook = null;
+
+/** Test-only async pause seam inside one scope's reconcile; production installs none. */
+export function __setSearchIndexReconcilePhaseHookForTest(hook: ReconcilePhaseHook): void {
+  reconcilePhaseHook = hook;
+}
+
+/**
+ * Records "retained dirty, here is why" evidence for a scope. It can run after
+ * awaits that span a storage close and re-init, and the revision check cannot
+ * tell the new database from the old one (both can hold the same revision), so
+ * the generation is re-checked right before the write.
+ */
+async function recordScopeRetainedEvidence(
+  scope: DirtySearchIndexScope,
+  generation: number,
+  message: string
+): Promise<void> {
+  const { connectorInstanceId, stream } = scope;
+  await reconcilePhaseHook?.("before-retained-evidence", { connectorInstanceId, stream });
+  assertStorageGenerationCurrent(generation);
+  await recordSearchIndexDirtyFailure({ connectorInstanceId, stream }, scope.revision, message);
+}
+
 /**
  * Runs both backfills for one already-resolved (manifest, targetStream)
  * pair, pinned to this exact connector instance, then clears the scope's
@@ -145,24 +174,24 @@ async function runScopeBackfills(
   // worst case proportional to one stream's drift-check, not every stream
   // this connector declares.
   //
-  // A stream the manifest no longer declares (targetStream null) has nothing
-  // to pin. Its stale index is removed by orphan cleanup over the full
-  // stream list, still pinned to this one connection: every declared stream
-  // is "visited", so only undeclared streams count as orphans.
+  // A stream the manifest no longer declares is still an exact dirty scope.
+  // Pass an absence-fenced sentinel so index-only rows can be deleted even
+  // when their metadata row was already lost, without sweeping sibling streams.
   const removedStream = targetStream === null;
   const pinnedManifest = {
     ...manifest,
     connector_id: connectorId,
     storage_binding: { connector_instance_id: connectorInstanceId },
-    streams: removedStream ? (manifest.streams as unknown[]) : [targetStream],
+    streams: removedStream ? [{ name: stream, absentStream: stream }] : [targetStream],
   };
 
-  // orphanStreamCleanup:false for a pinned stream -- the manifest names ONE
-  // stream, so "every stored stream the manifest does not name" is every
-  // healthy sibling.
+  // Scope-pinned reconcile never sweeps sibling streams. Removed-stream
+  // cleanup uses its explicit absence-fenced sentinel above.
   await lexicalIndexBackfillForManifest({
+    generation,
     manifest: pinnedManifest,
-    orphanStreamCleanup: removedStream,
+    orphanStreamCleanup: false,
+    signal,
     verifyContent: !removedStream,
   } as unknown as LexicalBackfillOptions);
   assertStorageGenerationCurrent(generation);
@@ -191,24 +220,28 @@ async function runScopeBackfills(
   // the fenced repair path needs the backend, so without one the scope stays
   // dirty and is retried when a backend is configured.
   if (!(semanticFieldsDeclared || semanticBackend) && (await hasSemanticIndexState({ connectorInstanceId, stream }))) {
-    await recordSearchIndexDirtyFailure(
-      { connectorInstanceId, stream },
-      scope.revision,
+    await recordScopeRetainedEvidence(
+      scope,
+      generation,
       "stale semantic index state remains for this stream but no semantic backend is currently configured; cleanup is pending, dirty flag retained"
     );
     return { connectorId, connectorInstanceId, outcome: "failed", stream };
   }
   if (semanticFieldsDeclared && !semanticBackend) {
-    await recordSearchIndexDirtyFailure(
-      { connectorInstanceId, stream },
-      scope.revision,
+    await recordScopeRetainedEvidence(
+      scope,
+      generation,
       "semantic_fields is declared for this stream but no semantic backend is currently configured; semantic sync is unproven, dirty flag retained"
     );
     return { connectorId, connectorInstanceId, outcome: "failed", stream };
   }
   if (semanticBackend) {
+    // The lexical sentinel names only the removed stream. Semantic orphan
+    // cleanup treats every stream the manifest does not name as an orphan, so
+    // it must see the full declared stream list or it drops healthy siblings.
     await semanticIndexBackfillForManifest({
-      manifest: pinnedManifest,
+      generation,
+      manifest: removedStream ? { ...pinnedManifest, streams: manifest.streams as unknown[] } : pinnedManifest,
       orphanStreamCleanup: removedStream,
       signal,
     } as unknown as SemanticBackfillOptions);
@@ -241,7 +274,11 @@ async function runScopeBackfills(
   const cleared = isPostgresStorageBackend()
     ? await withPostgresBulkTransaction(
         async (client) => {
-          await assertConnectorManifestStreamSubsetWithClient(client, connectorId, pinnedManifest);
+          if (removedStream) {
+            await assertConnectorManifestStreamAbsentWithClient(client, connectorId, stream);
+          } else {
+            await assertConnectorManifestStreamSubsetWithClient(client, connectorId, pinnedManifest);
+          }
           assertCompletionCurrent();
           const applied = await clearSearchIndexDirty(key, scope.revision, new Date().toISOString(), client);
           assertCompletionCurrent();
@@ -250,7 +287,11 @@ async function runScopeBackfills(
         { lockConnectorInstanceId: connectorInstanceId }
       )
     : transaction(() => {
-        assertConnectorManifestStreamSubsetSync(connectorId, pinnedManifest);
+        if (removedStream) {
+          assertConnectorManifestStreamAbsentSync(connectorId, stream);
+        } else {
+          assertConnectorManifestStreamSubsetSync(connectorId, pinnedManifest);
+        }
         assertCompletionCurrent();
         return clearSearchIndexDirtySync(key, scope.revision, new Date().toISOString());
       });
@@ -265,19 +306,15 @@ async function runScopeBackfills(
  * Storage-lifecycle fence (server/storage-generation.ts): `generation` is
  * captured by the caller at round-start. `assertStorageGenerationCurrent`
  * re-checks it before every storage-touching step below (and inside
- * runScopeBackfills). Like every other fence check in this codebase (see
- * withIndexWork's identical caveat in records.ts), this proves the
- * generation was still current at the moment of that check -- it does NOT
- * protect the awaits inside lexicalIndexBackfillForManifest/
- * semanticIndexBackfillForManifest themselves; storage can still close
- * mid-call between two of THEIR internal awaits. What this closes is the
- * previously-completely-unfenced gap (this file never checked the
- * generation at all) for the common shutdown/teardown race, not a
- * guarantee against every possible interleaving. A mismatch at any gate
- * means the work is dropped silently: the scope's dirty flag is left
- * untouched (never cleared, no failure evidence written) and converges on
- * the NEW generation's own reconcile, same as any other dropped deferred
- * job.
+ * runScopeBackfills). A check only proves the generation was current at that
+ * moment, so the awaits inside the two backfills are covered too: this
+ * function passes `generation` to both, and each backfill re-checks it
+ * immediately before every write it makes (see withLexicalBackfillWrite in
+ * search.ts and assertSemanticRepairBackend in search-semantic.ts). A
+ * mismatch at any gate means the work is dropped silently: the scope's
+ * dirty flag is left untouched (never cleared, no failure evidence written)
+ * and converges on the NEW generation's own reconcile, same as any other
+ * dropped deferred job.
  */
 export async function reconcileSearchIndexDirtyScope(
   scope: DirtySearchIndexScope,
@@ -461,6 +498,14 @@ export async function runSearchIndexDirtyReconcileRound(options?: {
 const SEARCH_INDEX_DIRTY_AUTO_RECONCILE_FAILURE_COOLDOWN_MS = 30_000;
 let searchIndexDirtyAutoReconcileRetryAfterMs = 0;
 let searchIndexDirtySelfHealInFlight: Promise<void> | null = null;
+let searchIndexDirtySelfHealRound = runSearchIndexDirtyReconcileRound;
+
+/** Replace the read-time round runner to observe outer single-flight behavior in tests. */
+export function __setSearchIndexDirtySelfHealRoundForTest(
+  round: typeof runSearchIndexDirtyReconcileRound | null
+): void {
+  searchIndexDirtySelfHealRound = round ?? runSearchIndexDirtyReconcileRound;
+}
 
 function searchIndexDirtyAutoReconcileNow(): number {
   return Date.now();
@@ -476,7 +521,7 @@ async function runSelfHealAttempt(): Promise<void> {
     return;
   }
   try {
-    await runSearchIndexDirtyReconcileRound({ maxDurationMs: 250, pageSize: 5 });
+    await searchIndexDirtySelfHealRound({ maxDurationMs: 250, pageSize: 5 });
     searchIndexDirtyAutoReconcileRetryAfterMs = 0;
   } catch {
     searchIndexDirtyAutoReconcileRetryAfterMs =

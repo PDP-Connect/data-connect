@@ -2101,6 +2101,8 @@ function loadShippedManifest(name: string): Record<string, unknown> {
 
 function stripSemanticFields(manifest: Record<string, unknown>): Record<string, unknown> {
   const copy = JSON.parse(JSON.stringify(manifest));
+  // Different content is a different declaration revision (PDPP Core §5).
+  copy.version = `${String(copy.version)}-stripped`;
   for (const streamRaw of asArray(copy.streams)) {
     const stream = asRecord(streamRaw);
     const search = asRecord(asRecord(stream.query).search);

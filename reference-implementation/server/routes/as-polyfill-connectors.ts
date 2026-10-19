@@ -60,7 +60,18 @@ export interface MountAsPolyfillConnectorsContext {
   getConnectorManifest: (
     connectorId: string
   ) => Promise<Record<string, unknown> | null | undefined> | Record<string, unknown> | null | undefined;
+  /** Digest of a stored-form manifest's parsed content; delegated to `connectorDeclarationDigest`. */
+  declarationDigest: (storedManifest: Record<string, unknown>) => string;
+  getAcceptedDeclarationDigest: (connectorId: string, version: string) => Promise<string | null> | string | null;
   handleError: (res: unknown, err: unknown) => void;
+  /**
+   * Storage-form projection of a manifest, used to compare a candidate with
+   * the accepted manifest. Delegated to `normalizeConnectorManifestForStorage`.
+   */
+  normalizeManifestForStorage: (manifest: Record<string, unknown>) => {
+    connectorId: string;
+    storedManifest: Record<string, unknown>;
+  };
   pdppError: PdppErrorFn;
   /**
    * Registers a connector manifest in the polyfill store.
@@ -74,6 +85,8 @@ export interface MountAsPolyfillConnectorsContext {
    * manifest upsert cannot wipe grants unauthenticated (security audit S-2).
    */
   requireOwnerSessionForRegister?: MiddlewareHandler | null;
+  /** Manifest validation `registerConnector` applies; delegated to `validateConnectorManifest`. */
+  validateManifest: (manifest: Record<string, unknown>) => void;
 }
 
 // POST /connectors
@@ -83,7 +96,14 @@ export function mountAsPolyfillConnectorRegister(app: AppLike, ctx: MountAsPolyf
     try {
       const outcome = await executeAsPolyfillConnectorRegister(
         { manifest: req.body },
-        { registerConnector: ctx.registerConnector }
+        {
+          declarationDigest: ctx.declarationDigest,
+          getAcceptedDeclarationDigest: ctx.getAcceptedDeclarationDigest,
+          getConnectorManifest: ctx.getConnectorManifest,
+          normalizeManifestForStorage: ctx.normalizeManifestForStorage,
+          registerConnector: ctx.registerConnector,
+          validateManifest: ctx.validateManifest,
+        }
       );
       if (outcome.outcome === "success") {
         res.status(outcome.status).json(outcome.envelope);

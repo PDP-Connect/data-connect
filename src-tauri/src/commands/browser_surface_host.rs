@@ -745,8 +745,9 @@ fn launch_browser_with_cleanup(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    let mut child = command
-        .spawn()
+    // The browser may be a Chromium that `download_chromium_rust` just
+    // extracted.
+    let mut child = crate::spawn_retry::spawn_retrying_while_busy(&mut command)
         .map_err(|error| format!("Failed to launch host browser: {error}"))?;
     let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
         return Err(on_failure(child, "Host browser output was not piped".into()));
@@ -1286,7 +1287,6 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::os::unix::fs::symlink;
-    use std::os::unix::fs::PermissionsExt;
     use std::process::Command;
     use tempfile::TempDir;
 
@@ -1344,7 +1344,7 @@ server.serve_forever()
 "#,
         )
         .expect("write fake DevTools server");
-        fs::write(
+        crate::test_executable::write(
             &path,
             r#"#!/bin/sh
 profile=""
@@ -1359,10 +1359,7 @@ server_pid=$!
 trap 'kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true; exit 0' TERM INT
 wait "$server_pid"
 "#,
-        )
-        .expect("write fake browser");
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
-            .expect("make fake browser executable");
+        );
         path
     }
 
@@ -1590,15 +1587,12 @@ wait "$server_pid"
             }
         });
         let browser = temp.path().join("fake-browser-slow.sh");
-        fs::write(
+        crate::test_executable::write(
             &browser,
             format!(
                 "#!/bin/sh\nfor i in $(seq 1 100); do printf '{{\"cdp_url\":\"http://{address}\"}}\\n'; done\ntrap 'exit 0' TERM INT\nwhile :; do sleep 1; done\n"
             ),
-        )
-        .expect("write slow fake browser");
-        fs::set_permissions(&browser, fs::Permissions::from_mode(0o755))
-            .expect("make slow fake browser executable");
+        );
         let profile = temp.path().join("profile");
         fs::create_dir_all(&profile).expect("create profile");
 
@@ -1622,6 +1616,17 @@ wait "$server_pid"
         let reservation = TcpListener::bind("127.0.0.1:0").expect("reserve port");
         let address = reservation.local_addr().expect("port address");
         drop(reservation);
+
+        // Written before the server's 200 ms delay starts, so the time the
+        // write takes cannot shorten the measured wait.
+        let browser = temp.path().join("fake-browser-delayed.sh");
+        crate::test_executable::write(
+            &browser,
+            format!(
+                "#!/bin/sh\nprofile=\"\"\nfor arg in \"$@\"; do\n  case \"$arg\" in\n    --user-data-dir=*) profile=\"${{arg#*=}}\" ;;\n  esac\ndone\nprintf '%s\\n' {} > \"$profile/DevToolsActivePort\"\ntrap 'exit 0' TERM INT\nwhile :; do sleep 1; done\n",
+                address.port()
+            ),
+        );
 
         let ready_server = thread::spawn(move || {
             thread::sleep(Duration::from_millis(200));
@@ -1668,17 +1673,6 @@ wait "$server_pid"
             false
         });
 
-        let browser = temp.path().join("fake-browser-delayed.sh");
-        fs::write(
-            &browser,
-            format!(
-                "#!/bin/sh\nprofile=\"\"\nfor arg in \"$@\"; do\n  case \"$arg\" in\n    --user-data-dir=*) profile=\"${{arg#*=}}\" ;;\n  esac\ndone\nprintf '%s\\n' {} > \"$profile/DevToolsActivePort\"\ntrap 'exit 0' TERM INT\nwhile :; do sleep 1; done\n",
-                address.port()
-            ),
-        )
-        .expect("write delayed fake browser");
-        fs::set_permissions(&browser, fs::Permissions::from_mode(0o755))
-            .expect("make delayed fake browser executable");
         let profile = temp.path().join("profile");
         fs::create_dir_all(&profile).expect("create profile");
 
@@ -1721,9 +1715,10 @@ wait "$server_pid"
     fn failed_launch_cleanup_retry(retry: &str) {
         let temp = tempfile::tempdir().expect("tempdir");
         let browser = temp.path().join("not-ready.sh");
-        fs::write(&browser, "#!/bin/sh\nfor arg in \"$@\"; do\ncase \"$arg\" in\n--user-data-dir=*) profile=\"${arg#*=}\" ;;\nesac\ndone\necho $$ > \"$profile/browser.pid\"\nexec sleep 60\n")
-            .expect("write browser without CDP");
-        fs::set_permissions(&browser, fs::Permissions::from_mode(0o755)).expect("chmod");
+        crate::test_executable::write(
+            &browser,
+            "#!/bin/sh\nfor arg in \"$@\"; do\ncase \"$arg\" in\n--user-data-dir=*) profile=\"${arg#*=}\" ;;\nesac\ndone\necho $$ > \"$profile/browser.pid\"\nexec sleep 60\n",
+        );
         let state = HostState::new(temp.path().join("profiles"), None, Some(browser.clone()));
         let profile = state.profile_dir("github", "cin-github", false).expect("profile");
         fs::write(profile.join("Cookies"), "session").expect("seed cookie");
@@ -2152,16 +2147,13 @@ wait "$server_pid"
     /// own workaround advice.
     fn sandbox_blocked_browser(temp: &TempDir) -> PathBuf {
         let path = temp.path().join("sandbox-blocked-browser.sh");
-        fs::write(
+        crate::test_executable::write(
             &path,
             r#"#!/bin/sh
 echo '[1:1:0928/165834.918776:FATAL:content/browser/zygote_host/zygote_host_impl_linux.cc:129] No usable sandbox! If you are running on Ubuntu 23.10+ or another Linux distro that has disabled unprivileged user namespaces with AppArmor, see https://chromium.googlesource.com/chromium/src/+/main/docs/security/apparmor-userns-restrictions.md?from=test' >&2
 exit 133
 "#,
-        )
-        .expect("write sandbox-blocked browser");
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
-            .expect("make sandbox-blocked browser executable");
+        );
         path
     }
 
@@ -2236,9 +2228,7 @@ exit 133
     fn early_exit_without_sandbox_signature_stays_surface_start_failed() {
         let temp = tempfile::tempdir().expect("tempdir");
         let path = temp.path().join("crashing-browser.sh");
-        fs::write(&path, "#!/bin/sh\necho 'some other failure' >&2\nexit 1\n")
-            .expect("write crashing browser");
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod");
+        crate::test_executable::write(&path, "#!/bin/sh\necho 'some other failure' >&2\nexit 1\n");
         let error = launch_browser(&path, temp.path(), true).expect_err("launch must fail");
         assert_eq!(error.code, "surface_start_failed");
         assert!(error.message.contains("exited before becoming ready"));
@@ -2306,15 +2296,13 @@ exit 133
             .expect("profile dir");
         let browser = temp.path().join("orphan-browser.sh");
         let pid_file = profile.join("orphan.pid");
-        fs::write(
+        crate::test_executable::write(
             &browser,
             format!(
                 "#!/bin/sh\nprofile=\"\"\nfor arg in \"$@\"; do case \"$arg\" in --user-data-dir=*) profile=\"${{arg#*=}}\" ;; esac; done\npython3 -c 'import time; time.sleep(30)' --user-data-dir=\"$profile\" &\necho $! > {}\nexit 0\n",
                 pid_file.display()
             ),
-        )
-        .expect("write orphan browser");
-        fs::set_permissions(&browser, fs::Permissions::from_mode(0o755)).expect("chmod");
+        );
         let mut command = Command::new(&browser);
         command.arg(format!("--user-data-dir={}", profile.display()));
         use std::os::unix::process::CommandExt;
@@ -2365,16 +2353,14 @@ exit 133
         fs::create_dir_all(&profile).expect("profile dir");
         let pid_file = profile.join("orphan.pid");
         let browser = temp.path().join("handoff-browser.sh");
-        fs::write(
+        crate::test_executable::write(
             &browser,
             format!(
                 "#!/bin/sh\npython3 -c 'import time; time.sleep(30)' --user-data-dir={} &\necho $! > {}\nexit 1\n",
                 profile.display(),
                 pid_file.display()
             ),
-        )
-        .expect("write fake handoff browser");
-        fs::set_permissions(&browser, fs::Permissions::from_mode(0o755)).expect("chmod");
+        );
 
         assert!(launch_browser(&browser, &profile, true).is_err());
         let pid = fs::read_to_string(pid_file)

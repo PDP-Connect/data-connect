@@ -795,6 +795,74 @@ if (POSTGRES_URL) {
     assert.equal(rejected.reason, "revoked");
     assert.equal(rejected.token, undefined);
   });
+
+  // A persisted token subject that no longer matches its grant or package
+  // makes introspection report the bearer inactive; Postgres redemption must
+  // refuse it too and leave the code unredeemed.
+  async function driftPostgresTokenSubject(token: string): Promise<void> {
+    const changed = await postgresQuery("UPDATE tokens SET subject_id = $1 WHERE token_id = $2", [
+      "owner_injected_inconsistent_binding",
+      token,
+    ]);
+    assert.equal(changed.rowCount, 1);
+  }
+
+  async function postgresRedeemedAt(token: string): Promise<string | null> {
+    const stored = await postgresQuery<{ redeemed_at: string | null }>(
+      "SELECT redeemed_at FROM consent_exchange_codes WHERE token_id = $1",
+      [token]
+    );
+    assert.equal(stored.rows.length, 1);
+    return stored.rows[0]?.redeemed_at ?? null;
+  }
+
+  test("consent handoff: Postgres refuses a grant token whose persisted subject drifted", async () => {
+    const { deviceCode, reviewRevision } = await startReviewedPendingConsent();
+    const approved = await approveGrant(deviceCode, "owner_local", { approval_review_revision: reviewRevision });
+    const code = await createConsentExchangeCode({
+      grant: approved.grant,
+      grantId: approved.grant.grant_id as string,
+      token: approved.token,
+    });
+    assert.equal((await introspect(approved.token)).active, true);
+    await driftPostgresTokenSubject(approved.token);
+    assert.equal((await introspect(approved.token)).active, false);
+    const result = await consumeConsentExchangeCode(code);
+    assert.equal(result.ok, false);
+    assert.equal(result.token, undefined);
+    assert.equal(await postgresRedeemedAt(approved.token), null);
+  });
+
+  test("consent handoff: Postgres refuses a package token whose persisted subject drifted", async () => {
+    const manifest = loadSpotifyManifest();
+    const created = await createHostedMcpGrantPackage({
+      authorizationDetails: [
+        {
+          access_mode: "continuous",
+          purpose_code: "https://pdpp.dev/purpose/personal_ai_assistant",
+          source: { id: manifest.connector_id, kind: "connector" },
+          streams: [{ instance_ids: [POSTGRES_AUTH_INSTANCE_ID], name: "top_artists", view: "basic" }],
+          type: "https://pdpp.dev/data-access",
+        },
+      ],
+      clientId: CONSOLE_CLIENT_ID,
+      connectionIds: [POSTGRES_AUTH_INSTANCE_ID],
+      storageBindings: [{ connector_id: "spotify" }],
+    });
+    const token = created.token as string;
+    const code = await createConsentExchangeCode({
+      grant: created.package as Record<string, unknown>,
+      grantId: created.package_id as string,
+      token,
+    });
+    assert.equal((await introspect(token)).active, true);
+    await driftPostgresTokenSubject(token);
+    assert.equal((await introspect(token)).active, false);
+    const result = await consumeConsentExchangeCode(code);
+    assert.equal(result.ok, false);
+    assert.equal(result.token, undefined);
+    assert.equal(await postgresRedeemedAt(token), null);
+  });
 } else {
   test("auth.js consent/owner-device-auth postgres-adapter path (skipped: PDPP_TEST_POSTGRES_URL unset)", {
     skip: true,

@@ -113,6 +113,7 @@ import {
 import type { CompiledFilter } from "./record-filters.ts";
 import { compileRequestFilters, passesGrantRecordConstraints, passesRequestFilters } from "./record-filters.ts";
 import { mapSearchFanout } from "./search-fanout.ts";
+import { assertCurrentStorageGeneration, currentStorageGeneration } from "./storage-generation.ts";
 
 type SemanticManifestStream = SearchSemanticManifestStream & {
   query?: { search?: { semantic_fields?: string[] } };
@@ -204,6 +205,8 @@ interface SemanticRunOptions {
 }
 
 interface SemanticBackfillOptions {
+  /** Storage generation this backfill belongs to (default: when it starts). See the lexical twin in search.ts. */
+  generation?: number;
   log?: (message: string) => void;
   manifest?: SemanticBackfillManifest;
   /** Drop stored streams the manifest does not name; `false` for scope-pinned manifests. See lexical twin in search.ts. */
@@ -440,15 +443,41 @@ export async function hasSemanticIndexState({
   connectorInstanceId: string;
   stream: string;
 }): Promise<boolean> {
+  const scopePrefix = `[${JSON.stringify(stream)},`;
+  const escapedPrefix = scopePrefix.replaceAll("\\", "\\\\").replaceAll("%", "\\%").replaceAll("_", "\\_");
+  const scopePattern = `${escapedPrefix}%`;
   if (isPostgresStorageBackend()) {
-    return Boolean(
+    const metadataExists = Boolean(
       (await postgresGetSemanticMeta({ connectorInstanceId, stream })) ||
         (await postgresGetSemanticProgress({ connectorInstanceId, stream }))
     );
+    if (metadataExists) return true;
+    const { rows } = await postgresQuery<{ exists: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1 FROM semantic_search_blob
+          WHERE connector_instance_id = $1 AND scope_key LIKE $2 ESCAPE '\\'
+       ) AS exists`,
+      [connectorInstanceId, scopePattern]
+    );
+    return Boolean(rows[0]?.exists);
   }
-  return Boolean(
+  const metadataExists = Boolean(
     getOne(referenceQueries.searchSemanticMetaGetByStream, [connectorInstanceId, stream]) ||
       getOne(referenceQueries.searchSemanticProgressGetByStream, [connectorInstanceId, stream])
+  );
+  if (metadataExists) return true;
+  return Boolean(
+    getDb()
+      .prepare(
+        `SELECT EXISTS (
+         SELECT 1 FROM semantic_search_blob
+          WHERE connector_instance_id = ? AND scope_key LIKE ? ESCAPE '\\'
+         UNION ALL
+         SELECT 1 FROM semantic_search_rowid
+          WHERE connector_instance_id = ? AND scope_key LIKE ? ESCAPE '\\'
+       ) AS present`
+      )
+      .get<{ present: number }>(connectorInstanceId, scopePattern, connectorInstanceId, scopePattern)?.present
   );
 }
 
@@ -2176,6 +2205,7 @@ export async function computeSemanticEntries({
   recordKey,
   data,
   declaredFields,
+  generation,
 }: {
   connectorId: string;
   connectorInstanceId: string;
@@ -2183,6 +2213,8 @@ export async function computeSemanticEntries({
   recordKey: string;
   data?: SemanticRecordData | null;
   declaredFields?: string[];
+  /** Storage generation the caller captured; re-checked before the lazy vector-index init. */
+  generation?: number;
 }): Promise<ComputedSemanticEntries | null> {
   if (!backend) {
     return null;
@@ -2233,9 +2265,15 @@ export async function computeSemanticEntries({
       recordKeys: [recordKey],
       scopeKeys: fieldsBatch.map((field) => encodeScopeKey(stream, field)),
     };
-    const existing = isPostgresStorageBackend()
-      ? await postgresListExistingSemanticIdentitiesForRecords(args)
-      : (ensureVectorIndex()?.inputIdentitiesFor?.(args) ?? new Map<string, string | null>());
+    let existing: Map<string, string | null>;
+    if (isPostgresStorageBackend()) {
+      existing = await postgresListExistingSemanticIdentitiesForRecords(args);
+    } else {
+      await semanticRepairPhase("before-record-index-init", { connectorInstanceId, stream });
+      // No await between this check and the lazy init: it can drop and recreate the vec0 table.
+      if (generation !== undefined) assertCurrentStorageGeneration(generation);
+      existing = ensureVectorIndex()?.inputIdentitiesFor?.(args) ?? new Map<string, string | null>();
+    }
     const batchEntries = await Promise.all(
       fieldsBatch.map(async (field) => {
         const text = normalizeSemanticEmbeddingInput(data?.[field]);
@@ -2671,6 +2709,7 @@ async function rebuildSemanticIndexForStream({
   manifest,
   frozenBackend,
   frozenBackendIdentity,
+  generation,
   physicalVecInventory,
 }: {
   connectorId: string;
@@ -2683,6 +2722,7 @@ async function rebuildSemanticIndexForStream({
   manifest: SemanticBackfillManifest;
   frozenBackend: SemanticEmbeddingBackend;
   frozenBackendIdentity: string;
+  generation: number;
   physicalVecInventory: Vec0PhysicalInventory | null;
 }): Promise<number> {
   const usePostgres = isPostgresStorageBackend();
@@ -2706,6 +2746,7 @@ async function rebuildSemanticIndexForStream({
     manifest,
     frozenBackend,
     frozenBackendIdentity,
+    generation,
     physicalVecInventory: physicalVecInventory ?? null,
     signal,
   };
@@ -2948,6 +2989,7 @@ interface SemanticBackfillContext {
   frozenBackend: SemanticEmbeddingBackend;
   connectorId: string;
   currentIdentity: SemanticBackfillIdentity;
+  generation: number;
   currentMetric: SemanticDistanceMetric;
   currentModel: string;
   index: SemanticIndex | null;
@@ -2970,6 +3012,8 @@ type SemanticRepairScope = {
   vectorIndex: SemanticIndex | null;
   frozenBackend: SemanticEmbeddingBackend;
   frozenBackendIdentity: string;
+  /** Storage generation of the backfill that owns this scope; every write re-checks it. */
+  generation: number;
   manifest: SemanticBackfillManifest;
   /** Removed streams have no declared fields; their actual index rows are still paged safely. */
   includesAllStreamScopes?: boolean;
@@ -2993,10 +3037,13 @@ export function __setSemanticVecInventoryFaultHookForTest(hook: typeof semanticV
 }
 
 type SemanticRepairPhase =
+  | "before-progress-upsert"
   | "after-field-batch-publish"
   | "after-page-publish"
   | "before-prune-page"
   | "before-orphan-prune"
+  | "before-backfill-index-init"
+  | "before-record-index-init"
   | "after-verification"
   | "after-physical-verification-page";
 let semanticRepairPhaseHook:
@@ -3008,7 +3055,10 @@ export function __setSemanticRepairPhaseHookForTest(hook: typeof semanticRepairP
   semanticRepairPhaseHook = hook;
 }
 
-async function semanticRepairPhase(phase: SemanticRepairPhase, scope: SemanticRepairScope): Promise<void> {
+async function semanticRepairPhase(
+  phase: SemanticRepairPhase,
+  scope: Pick<SemanticRepairScope, "connectorInstanceId" | "stream">
+): Promise<void> {
   await semanticRepairPhaseHook?.(phase, {
     connectorInstanceId: scope.connectorInstanceId,
     stream: scope.stream,
@@ -3026,8 +3076,13 @@ function assertSemanticBackfillNotAborted(scope: { signal?: AbortSignal | null }
 }
 
 function assertSemanticRepairBackend(
-  scope: Pick<SemanticRepairScope, "frozenBackend" | "frozenBackendIdentity"> & { signal?: AbortSignal | null }
+  scope: Pick<SemanticRepairScope, "frozenBackend" | "frozenBackendIdentity"> & {
+    /** Set by backfill scopes. Record-level callers re-check the generation before their own write. */
+    generation?: number;
+    signal?: AbortSignal | null;
+  }
 ): void {
+  if (scope.generation !== undefined) assertCurrentStorageGeneration(scope.generation);
   assertSemanticBackfillNotAborted(scope);
   if (backend !== scope.frozenBackend || backendStorageIdentity(scope.frozenBackend) !== scope.frozenBackendIdentity) {
     throw new Error("semantic backend changed during derived repair");
@@ -3538,6 +3593,7 @@ async function pruneRemovedSemanticStream({
   vectorIndex,
   frozenBackend,
   frozenBackendIdentity,
+  generation,
   physicalVecInventory,
   signal = null,
 }: Omit<SemanticRepairScope, "declaredFields" | "includesAllStreamScopes">): Promise<void> {
@@ -3550,6 +3606,7 @@ async function pruneRemovedSemanticStream({
     vectorIndex,
     frozenBackend,
     frozenBackendIdentity,
+    generation,
     manifest,
     physicalVecInventory: physicalVecInventory ?? null,
     includesAllStreamScopes: true,
@@ -3563,6 +3620,7 @@ async function pruneRemovedSemanticStream({
       await withPostgresBulkTransaction(
         async (client) => {
           await assertConnectorManifestStreamAbsentWithClient(client, connectorId, stream);
+          assertCurrentStorageGeneration(generation);
           await client.query("DELETE FROM semantic_search_meta WHERE connector_instance_id = $1 AND stream = $2", [
             connectorInstanceId,
             stream,
@@ -3578,6 +3636,7 @@ async function pruneRemovedSemanticStream({
     }
     transaction(() => {
       assertConnectorManifestStreamAbsentSync(connectorId, stream);
+      assertCurrentStorageGeneration(generation);
       execDynamicSqlAcknowledged("DELETE FROM semantic_search_meta WHERE connector_instance_id = ? AND stream = ?", [
         connectorInstanceId,
         stream,
@@ -3761,6 +3820,7 @@ async function inspectSemanticBackfillInstance({
           vectorIndex,
           frozenBackend: context.frozenBackend,
           frozenBackendIdentity: currentModel,
+          generation: context.generation,
           manifest: context.manifest,
           physicalVecInventory: context.physicalVecInventory,
           signal: context.signal,
@@ -3781,6 +3841,7 @@ async function inspectSemanticBackfillInstance({
           vectorIndex,
           frozenBackend: context.frozenBackend,
           frozenBackendIdentity: currentModel,
+          generation: context.generation,
           manifest: context.manifest,
           physicalVecInventory: context.physicalVecInventory,
           signal: context.signal,
@@ -3824,6 +3885,7 @@ async function inspectSemanticBackfillInstance({
       vectorIndex,
       frozenBackend: context.frozenBackend,
       frozenBackendIdentity: currentModel,
+      generation: context.generation,
       manifest: context.manifest,
       physicalVecInventory: context.physicalVecInventory,
       signal: context.signal,
@@ -3838,6 +3900,7 @@ async function inspectSemanticBackfillInstance({
         vectorIndex,
         frozenBackend: context.frozenBackend,
         frozenBackendIdentity: currentModel,
+        generation: context.generation,
         manifest: context.manifest,
         physicalVecInventory: context.physicalVecInventory,
         signal: context.signal,
@@ -3851,6 +3914,7 @@ async function inspectSemanticBackfillInstance({
       canResume = false;
       log(`[PDPP] Semantic index drift for ${connectorId} stream='${stream}' — rebuilding`);
     } else if (progressRow) {
+      assertCurrentStorageGeneration(context.generation);
       if (usePostgres) {
         await postgresDeleteSemanticProgress({ connectorInstanceId, stream });
       } else {
@@ -3879,6 +3943,8 @@ async function rebuildSemanticBackfillInstance({
   stream: string;
 }): Promise<SemanticBackfillJob> {
   const { connectorId, currentIdentity, currentMetric, currentModel, log, usePostgres } = context;
+  await semanticRepairPhase("before-progress-upsert", { connectorInstanceId, stream });
+  assertCurrentStorageGeneration(context.generation);
   if (usePostgres) {
     await postgresUpsertSemanticProgress({
       connectorId,
@@ -3918,6 +3984,7 @@ async function rebuildSemanticBackfillInstance({
     manifest: context.manifest,
     frozenBackend: context.frozenBackend,
     frozenBackendIdentity: currentModel,
+    generation: context.generation,
     physicalVecInventory: context.physicalVecInventory,
     signal: context.signal,
   });
@@ -3931,6 +3998,7 @@ async function rebuildSemanticBackfillInstance({
     manifest: context.manifest,
     frozenBackend: context.frozenBackend,
     frozenBackendIdentity: currentModel,
+    generation: context.generation,
     physicalVecInventory: context.physicalVecInventory,
     signal: context.signal,
   };
@@ -4009,6 +4077,7 @@ async function deleteSemanticNonParticipatingStream({
       manifest: context.manifest,
       frozenBackend: context.frozenBackend,
       frozenBackendIdentity: context.currentModel,
+      generation: context.generation,
       physicalVecInventory: context.physicalVecInventory,
       signal: context.signal,
     };
@@ -4142,6 +4211,7 @@ export async function semanticIndexBackfillForManifest({
   },
   signal = null,
   orphanStreamCleanup = true,
+  generation = currentStorageGeneration(),
 }: SemanticBackfillOptions = {}): Promise<void> {
   if (!(manifest?.connector_id && Array.isArray(manifest?.streams))) {
     return;
@@ -4162,6 +4232,7 @@ export async function semanticIndexBackfillForManifest({
     // ingest writer-admission gate this used to also hold hostage.
     await backfillSemanticIndexForConnectorInstance({
       fencedConnectorInstanceId: connectorInstanceId,
+      generation,
       log,
       manifest,
       orphanStreamCleanup,
@@ -4178,9 +4249,11 @@ async function backfillSemanticIndexForConnectorInstance({
   log,
   signal,
   fencedConnectorInstanceId,
+  generation,
   orphanStreamCleanup,
 }: {
   manifest: SemanticBackfillManifest;
+  generation: number;
   orphanStreamCleanup: boolean;
   log: (message: string) => void;
   signal: AbortSignal | null;
@@ -4211,6 +4284,12 @@ async function backfillSemanticIndexForConnectorInstance({
   let backfillError: unknown = null;
   try {
     const usePostgres = isPostgresStorageBackend();
+    await semanticRepairPhase("before-backfill-index-init", {
+      connectorInstanceId: fencedConnectorInstanceId,
+      stream: "",
+    });
+    // No await between this check and the lazy init: it can drop and recreate the vec0 table.
+    assertCurrentStorageGeneration(generation);
     const index = usePostgres ? null : ensureVectorIndex();
     if (!(usePostgres || index)) {
       return;
@@ -4235,6 +4314,7 @@ async function backfillSemanticIndexForConnectorInstance({
       progressJob = await backfillSemanticManifestStream({
         context: {
           frozenBackend: activeBackend,
+          generation,
           connectorId,
           currentIdentity: {
             dimensions: currentDims,
@@ -4321,6 +4401,7 @@ async function backfillSemanticIndexForConnectorInstance({
               connectorInstanceId,
               frozenBackend: activeBackend,
               frozenBackendIdentity: currentModel,
+              generation,
               manifest,
               stream: orphanStream,
               usePostgres,

@@ -69,6 +69,35 @@ test("DEFAULT_QUARANTINE_POLICY is a finite positive integer budget", () => {
   );
 });
 
+test(
+  "effectful quarantine rejects nonfinite and fractional budgets without changing the row",
+  withTempDb(async () => {
+    const store = createSqliteConnectorDetailGapStore();
+    const adapter = quarantineStore(store);
+    for (const [index, threshold] of [Number.NaN, Number.POSITIVE_INFINITY, 1.5].entries()) {
+      const gap = await seedGap(store, `quarantine_invalid_budget_${index}`);
+      let thrown: unknown;
+      try {
+        await maybeQuarantineGap(adapter, gap.gap_id, null, { maxNoProgressAttempts: threshold });
+      } catch (error) {
+        thrown = error;
+      }
+      const after = await store.getGapById(gap.gap_id);
+      assert.ok(after);
+      assert.equal(after.status, "pending", "invalid policy cannot terminalize an unattempted gap");
+      assert.equal(after.attempt_count, 0);
+      assert.ok(thrown instanceof Error, "invalid policy must fail loudly");
+    }
+  })
+);
+
+test("pure quarantine rejects a fractional budget", () => {
+  assert.throws(
+    () => evaluateQuarantine({ attempt_count: 1, status: "pending" }, { maxNoProgressAttempts: 1.5 }),
+    /positive integer/
+  );
+});
+
 test("a quarantined gap classifies as connector_defect and is denied as a system_issue (no owner retry)", () => {
   const row = {
     attempt_count: 8,
@@ -145,6 +174,10 @@ function quarantineStore(
       const gap = await store.markGapStatus(gapId, status, options);
       return gap ? { ...gap, attempt_count: gap.attempt_count } : null;
     },
+    markGapQuarantined: async (gapId, expectedStatus, expectedAttemptCount, options) => {
+      const gap = await store.markGapQuarantined(gapId, expectedStatus, expectedAttemptCount, options);
+      return gap ? { ...gap, attempt_count: gap.attempt_count } : null;
+    },
   };
 }
 
@@ -210,6 +243,78 @@ test(
       0,
       "not in fillable-pending"
     );
+  })
+);
+
+test(
+  "quarantine does not overwrite a recovery committed after its decision read",
+  withTempDb(async () => {
+    const store = createSqliteConnectorDetailGapStore();
+    const gap = await seedGap(store, "quarantine_read_write_race");
+    await store.markGapStatus(gap.gap_id, "in_progress");
+    const adapter = quarantineStore(store);
+    let intercepted = false;
+    const staleReadAdapter: Parameters<typeof maybeQuarantineGap>[0] = {
+      ...adapter,
+      async getGapById(id) {
+        const snapshot = await adapter.getGapById(id);
+        if (!intercepted && snapshot) {
+          intercepted = true;
+          await store.markGapStatus(id, "recovered", { runId: "winning_recovery" });
+        }
+        return snapshot;
+      },
+    };
+
+    const outcome = await maybeQuarantineGap(
+      staleReadAdapter,
+      gap.gap_id,
+      { failure_class: "interrupted" },
+      { maxNoProgressAttempts: 1 }
+    );
+
+    assert.equal(intercepted, true, "the read/write interleaving actually occurred");
+    const persisted = await store.getGapById(gap.gap_id);
+    assert.ok(persisted);
+    assert.equal(persisted.status, "recovered", "a stale quarantine decision must not overwrite recovery");
+    assert.equal(outcome.quarantined, false, "report only a quarantine transition actually committed");
+  })
+);
+
+test(
+  "quarantine does not apply when only attempt_count moved after its decision read",
+  withTempDb(async () => {
+    const store = createSqliteConnectorDetailGapStore();
+    const gap = await seedGap(store, "quarantine_attempt_count_race");
+    await store.markGapStatus(gap.gap_id, "in_progress");
+    const adapter = quarantineStore(store);
+    let intercepted = false;
+    const staleReadAdapter: Parameters<typeof maybeQuarantineGap>[0] = {
+      ...adapter,
+      async getGapById(id) {
+        const snapshot = await adapter.getGapById(id);
+        if (!intercepted && snapshot) {
+          intercepted = true;
+          // in_progress -> in_progress advances attempt_count and leaves status unchanged.
+          await store.markGapStatus(id, "in_progress");
+        }
+        return snapshot;
+      },
+    };
+
+    const outcome = await maybeQuarantineGap(
+      staleReadAdapter,
+      gap.gap_id,
+      { failure_class: "interrupted" },
+      { maxNoProgressAttempts: 1 }
+    );
+
+    assert.equal(intercepted, true, "the read/write interleaving actually occurred");
+    const persisted = await store.getGapById(gap.gap_id);
+    assert.ok(persisted);
+    assert.equal(persisted.status, "in_progress", "a stale attempt_count must not terminalize the gap");
+    assert.equal(persisted.attempt_count, 2, "the concurrent attempt is preserved");
+    assert.equal(outcome.quarantined, false);
   })
 );
 
@@ -366,5 +471,34 @@ test(
       .get(connectorId, stream, "order_dup");
     assert.ok(row, "idempotent record query returns a count row");
     assert.equal(row.n, 1, "re-attempt must not produce a duplicate record visible to reads");
+  })
+);
+
+test(
+  "quarantine classification and budget evidence override conflicting caller fields",
+  withTempDb(async () => {
+    const store = createSqliteConnectorDetailGapStore();
+    const gap = await seedGap(store, "quarantine_evidence_class");
+    await store.markGapStatus(gap.gap_id, "in_progress");
+    const outcome = await maybeQuarantineGap(
+      quarantineStore(store),
+      gap.gap_id,
+      {
+        attempt_count: 999,
+        class: "temporary_unavailable",
+        failure_class: "parse_missing",
+        threshold: 999,
+      },
+      { maxNoProgressAttempts: 1 }
+    );
+
+    assert.equal(outcome.quarantined, true);
+    assert.ok(outcome.gap);
+    const error = evidenceRecord(outcome.gap.last_error);
+    assert.equal(outcome.gap.reason, "quarantined");
+    assert.equal(error.class, "quarantined");
+    assert.equal(error.failure_class, "parse_missing", "preserve useful caller evidence");
+    assert.equal(error.threshold, 1, "authoritative policy wins");
+    assert.equal(error.attempt_count, 1, "authoritative persisted attempt count wins");
   })
 );

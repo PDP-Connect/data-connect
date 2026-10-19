@@ -521,6 +521,16 @@ CREATE TABLE IF NOT EXISTS connectors (
   created_at   TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Content digest of the manifest first accepted under each (connector, version),
+-- kept independent of which revision is current so a superseded version's
+-- accepted content is still protected from equivocation.
+CREATE TABLE IF NOT EXISTS connector_accepted_declarations (
+  connector_id        TEXT NOT NULL,
+  declaration_version TEXT NOT NULL,
+  content_digest      TEXT NOT NULL,
+  PRIMARY KEY (connector_id, declaration_version)
+);
+
 CREATE TABLE IF NOT EXISTS connector_installs (
   connector_id TEXT PRIMARY KEY,
   record_json TEXT NOT NULL,

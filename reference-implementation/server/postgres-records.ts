@@ -20,6 +20,7 @@ import {
   resolveRequestConnectionId,
 } from "./connection-id-request.ts";
 import { assertConnectorInstanceWritableStatus } from "./connector-instance-admission.ts";
+import { crashPoint } from "./crash-point.ts";
 import {
   type ConnectorInstanceWriteOwnership,
   withConnectorInstanceWrite,
@@ -2014,6 +2015,7 @@ export async function postgresIngestRecord(
   // keeps the row's existing semantic_time). Falls back to emitted_at.
   const storedSemanticTime = op === "delete" ? null : semanticTimeValue(data ?? null, manifestStream);
 
+  crashPoint("ingest:before-write-transaction");
   const outcome = await withPostgresTransaction<DurableIngestOutcome>(
     async (client) => {
       if (options.requireConnectionAdmission) {
@@ -2076,6 +2078,7 @@ export async function postgresIngestRecord(
       const selfHeal = ingestDisposition === "self_heal";
 
       const nextVersion = await allocateNextVersion(client, resolvedConnectorId, connectorInstanceId, stream);
+      crashPoint("ingest:after-version-allocation");
       const currentRecordJsonBytes = current && !current.deleted ? Number(current.record_json_bytes || 0) : 0;
       const nextRecordJsonBytes = await writePostgresIngestMutation({
         client,
@@ -2092,6 +2095,7 @@ export async function postgresIngestRecord(
         storedSemanticTime,
         stream,
       });
+      crashPoint("ingest:after-record-write");
 
       // Scope-keyed dirty mark, inside the SAME transaction/client as the
       // record mutation above: this scope's lexical/semantic index may now be
@@ -2101,6 +2105,7 @@ export async function postgresIngestRecord(
         { connectorId: resolvedConnectorId, connectorInstanceId, stream },
         nowIso()
       );
+      crashPoint("ingest:after-dirty-mark");
 
       const insertedChangeJsonBytes = op === "delete" ? currentRecordJsonBytes : nextRecordJsonBytes;
       const { bytes: prunedBytesForDelta, rows: prunedRowsForDelta } = await prunePostgresRecordChanges({
@@ -2111,6 +2116,7 @@ export async function postgresIngestRecord(
         stream,
       });
 
+      crashPoint("ingest:before-commit");
       return finishDurableOutcome({
         kind: "changed",
         op,
@@ -2138,6 +2144,7 @@ export async function postgresIngestRecord(
     },
     { lockConnectorInstanceId: connectorInstanceId }
   );
+  crashPoint("ingest:after-commit-before-ack");
 
   if (outcome.kind === "noop") {
     return { accepted: true, changed: false };
@@ -2352,18 +2359,28 @@ async function queryPostgresRecordPage({
   }
   const params: unknown[] = [...countParams];
   let where = countWhere;
+  // The seek selects rows strictly after the cursor in the ORDER BY below.
+  // The null-cursor group comes after present rows in asc and before them in
+  // desc, ordered by primary key. `cursor = NULL` is never true, so a cursor
+  // that ends inside the null group needs its own predicate.
+  const cmp = order === "asc" ? ">" : "<";
+  const nullGroupFollowsPresent = order === "asc";
   if (cursorPosition) {
-    params.push(cursorPosition.cursor_value, cursorPosition.primary_key_text);
-    if (order === "asc") {
-      where += ` AND (
-        (${cursorSql} = $${params.length - 1} AND ${primarySql} > $${params.length})
-        OR (${cursorSql} IS NOT NULL AND ${cursorSql} > $${params.length - 1})
-        OR (${cursorSql} IS NULL AND $${params.length - 1} IS NOT NULL)
-      )`;
+    const cursorValue = cursorPosition.cursor_value ?? null;
+    if (cursorValue === null) {
+      params.push(cursorPosition.primary_key_text);
+      const laterInNullGroup = `(${cursorSql} IS NULL AND ${primarySql} ${cmp} $${params.length})`;
+      where += nullGroupFollowsPresent
+        ? ` AND ${laterInNullGroup}`
+        : ` AND (${laterInNullGroup} OR ${cursorSql} IS NOT NULL)`;
     } else {
+      params.push(cursorValue, cursorPosition.primary_key_text);
+      const cursorParam = `$${params.length - 1}`;
+      const keyParam = `$${params.length}`;
       where += ` AND (
-        (${cursorSql} = $${params.length - 1} AND ${primarySql} < $${params.length})
-        OR (${cursorSql} IS NOT NULL AND ${cursorSql} < $${params.length - 1})
+        (${cursorSql} = ${cursorParam} AND ${primarySql} ${cmp} ${keyParam})
+        OR (${cursorSql} IS NOT NULL AND ${cursorSql} ${cmp} ${cursorParam})
+        ${nullGroupFollowsPresent ? `OR ${cursorSql} IS NULL` : ""}
       )`;
     }
   }
@@ -3024,6 +3041,7 @@ export function postgresDeleteAllRecords(storageTarget: StorageTarget, stream: s
       const deletedRecordCount = Number(countResult.rows[0]?.count || 0);
       await advancePostgresRecordResetGenerationForStreams(client, connectorInstanceId, [stream]);
       await deletePostgresRecordTailForPair(client, connectorInstanceId, stream);
+      crashPoint("connector-teardown:before-commit");
       return deletedRecordCount;
     },
     { lockConnectorInstanceId: connectorInstanceId }

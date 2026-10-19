@@ -7077,6 +7077,7 @@ test("a stream declared after review is not added to the issued grant", async ()
       }
     ).manifest;
     const widened = structuredClone(manifest) as typeof manifest & { streams: Record<string, unknown>[] };
+    widened.version = "widened";
     widened.streams.push({ ...structuredClone(widened.streams[0]), name: "late_declared_stream" });
     assert.equal(
       (

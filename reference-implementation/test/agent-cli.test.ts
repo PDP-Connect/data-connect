@@ -2187,8 +2187,8 @@ test("agent-connect: approved scoped token cannot access ungranted stream", asyn
       headers: { Authorization: `Bearer ${completedPoll.body.access_token}` },
     });
     const body = await streamResp.json();
-    assert.equal(streamResp.status, 401, JSON.stringify(body));
-    assert.equal(errorCode(body), "context.stream_not_allowed");
+    assert.equal(streamResp.status, 403, JSON.stringify(body));
+    assert.equal(errorCode(body), "grant_stream_not_allowed");
   } finally {
     await closeServer(server);
   }

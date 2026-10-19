@@ -343,6 +343,12 @@ interface RuntimeDetailGapStoreCapabilities {
     streams?: string[] | null;
   }) => Promise<DurableDetailGap[] | null>;
   markConnectorGapRecovered?: (gapId: string, options: { runId: string }) => Promise<DurableDetailGap | null>;
+  markGapQuarantined?: (
+    gapId: string,
+    expectedStatus: string,
+    expectedAttemptCount: number,
+    options?: Record<string, unknown>
+  ) => Promise<DurableDetailGap | null>;
   markGapStatus?: (gapId: string, status: string, options: { runId: string }) => Promise<DurableDetailGap | null>;
   markLeasedGapAttempt?: (lease: ServedGapLease) => Promise<DurableDetailGap | null>;
   reclaimStrandedInProgressGaps?: (options: {
@@ -359,6 +365,7 @@ interface RuntimeDetailGapStoreCapabilities {
 
 interface RuntimeDetailGapStore extends RuntimeDetailGapStoreCapabilities {
   markConnectorGapRecovered: NonNullable<RuntimeDetailGapStoreCapabilities["markConnectorGapRecovered"]>;
+  markGapQuarantined: NonNullable<RuntimeDetailGapStoreCapabilities["markGapQuarantined"]>;
   markGapStatus: NonNullable<RuntimeDetailGapStoreCapabilities["markGapStatus"]>;
   markLeasedGapAttempt: NonNullable<RuntimeDetailGapStoreCapabilities["markLeasedGapAttempt"]>;
   settleLeasedGapPending: NonNullable<RuntimeDetailGapStoreCapabilities["settleLeasedGapPending"]>;
@@ -2909,6 +2916,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
   // states the surface it actually drives here.
   const detailGapStore: RuntimeDetailGapStore = {
     markConnectorGapRecovered: unsupportedDetailGapStoreCapability("connector gap recovery"),
+    markGapQuarantined: unsupportedDetailGapStoreCapability("gap quarantine transitions"),
     markGapStatus: unsupportedDetailGapStoreCapability("gap status transitions"),
     markLeasedGapAttempt: unsupportedDetailGapStoreCapability("leased gap attempts"),
     settleLeasedGapPending: unsupportedDetailGapStoreCapability("pending lease settlement"),
@@ -3258,6 +3266,16 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
     // we already terminated.
     terminateConnectorChildGroup("SIGTERM");
     unregisterOwnedConnectorChild(proc.pid);
+    // cleanupChildHandles does not exist yet, so release any leases a partial
+    // claim already registered. A release failure must not mask `err`.
+    if (allServedGapLeases.size > 0 && typeof detailGapStore.releaseLeasedGaps === "function") {
+      try {
+        await detailGapStore.releaseLeasedGaps([...allServedGapLeases.values()]);
+      } catch {
+        // The original start failure is the error to report; leases expire on their own.
+      }
+      allServedGapLeases.clear();
+    }
     throw err;
   }
 

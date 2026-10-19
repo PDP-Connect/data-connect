@@ -292,7 +292,7 @@ test("rs.records.list applies decorateRecord to every returned record", async ()
   }
 });
 
-test("rs.records.list applies request projection after lower driver required fields", async () => {
+test("rs.records.list projects returned data to the requested fields when the schema declares none required", async () => {
   const result = await executeRecordsList(
     {
       actor: ownerActor,
@@ -528,4 +528,108 @@ test("rs.records.list does not surface non-string raw view as requested_view", a
     makeDeps()
   );
   assert.equal(result.queryData.requested_view, "compact");
+});
+
+// ─── spec-core §4 tombstones and §8 sparse fields ───────────────────────────
+
+const REQUIRED_MANIFEST_SCHEMA = {
+  properties: { channel_id: {}, id: {}, optional: {}, ts: {} },
+  required: ["id", "channel_id", "ts"],
+};
+
+function requiredFieldDeps(overrides: Partial<RecordsListDependencies> = {}): RecordsListDependencies {
+  return makeDeps({
+    getManifest: () =>
+      makeManifest({
+        schema: REQUIRED_MANIFEST_SCHEMA,
+        views: [{ fields: ["optional"], id: "optional_only" }],
+      }),
+    queryRecords: () =>
+      Promise.resolve({
+        data: [
+          {
+            data: { channel_id: "C1", id: "r1", optional: "o", ts: "123.456" },
+            id: "r1",
+            object: "record",
+          },
+        ],
+        has_more: false,
+        object: "list",
+      }),
+    ...overrides,
+  });
+}
+
+test("rs.records.list keeps a tombstone envelope intact under sparse fields", async () => {
+  const tombstone = {
+    deleted: true,
+    deleted_at: "2026-04-01T10:00:00Z",
+    emitted_at: "2026-04-01T10:00:01Z",
+    id: "r9",
+    object: "record",
+    stream: "pay_statements",
+  };
+  for (const actor of [ownerActor, clientActor]) {
+    const result = await executeRecordsList(
+      {
+        actor,
+        rawQueryFields: "net_pay_minor",
+        requestParams: { changes_since: "opaque-fixture", fields: ["net_pay_minor"] },
+        streamName: "pay_statements",
+      },
+      makeDeps({
+        queryRecords: () =>
+          Promise.resolve({ data: [{ ...tombstone }], has_more: false, next_changes_since: "next-fixture" }),
+      })
+    );
+    assert.deepEqual(result.result.data, [tombstone], `${actor.kind} tombstone must keep every envelope key`);
+    assert.equal(result.result.next_changes_since, "next-fixture");
+    assert.equal(result.disclosureData.record_count, 1);
+  }
+});
+
+test("rs.records.list keeps schema-required fields in an owner sparse read", async () => {
+  const result = await executeRecordsList(
+    { actor: ownerActor, rawQueryFields: "id", requestParams: { fields: ["id"] }, streamName: "pay_statements" },
+    requiredFieldDeps()
+  );
+  assert.ok(result.result.data[0]);
+  assert.deepEqual(result.result.data[0].data, { channel_id: "C1", id: "r1", ts: "123.456" });
+});
+
+test("rs.records.list keeps schema-required fields when an owner view omits them", async () => {
+  const result = await executeRecordsList(
+    { actor: ownerActor, rawQueryView: "optional_only", requestParams: {}, streamName: "pay_statements" },
+    requiredFieldDeps()
+  );
+  assert.ok(result.result.data[0]);
+  assert.deepEqual(result.result.data[0].data, { channel_id: "C1", id: "r1", optional: "o", ts: "123.456" });
+});
+
+test("rs.records.list leaves an owner read without fields unprojected", async () => {
+  const result = await executeRecordsList(
+    { actor: ownerActor, requestParams: {}, streamName: "pay_statements" },
+    requiredFieldDeps()
+  );
+  assert.ok(result.result.data[0]);
+  assert.deepEqual(result.result.data[0].data, { channel_id: "C1", id: "r1", optional: "o", ts: "123.456" });
+});
+
+test("rs.records.list does not widen a client sparse read with current schema-required fields", async () => {
+  // A client grant freezes its field set at issuance (spec-core §7). Current
+  // schema requiredness must not add fields the request did not select, even
+  // when the driver returns them.
+  const result = await executeRecordsList(
+    {
+      actor: clientActor,
+      rawQueryFields: "id",
+      requestParams: { fields: ["id"] },
+      streamName: "pay_statements",
+    },
+    requiredFieldDeps({
+      getGrant: () => ({ streams: [{ fields: ["id", "channel_id"], instance_ids: ["account-a"], name: "pay_statements" }] }),
+    })
+  );
+  assert.ok(result.result.data[0]);
+  assert.deepEqual(result.result.data[0].data, { id: "r1" });
 });

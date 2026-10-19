@@ -43,7 +43,10 @@ name: mutation
 # clean run.
 
 on:
-  pull_request: {}
+  pull_request:
+    # PRs into the test-engineering integration branch are gated by a local
+    # oracle and review; full CI runs once on the batch PR into main.
+    branches-ignore: [testeng/integration]
   workflow_dispatch: {}
 
 concurrency:
@@ -78,19 +81,50 @@ jobs:
             config: reference-implementation/stryker.config.mjs
             config-relative: stryker.config.mjs
             prefixes: "reference-implementation/server/ reference-implementation/lib/ reference-implementation/operations/ reference-implementation/runtime/ reference-implementation/cli/"
-            # The attempt bound (see the header). Measured on PR #141 samples
-            # pinned to four CPUs with four Stryker workers: a sample with 8
-            # test files took 13 s for one run of its tests, about 20 s per
-            # trial with four workers sharing the CPUs, and 13 minutes for 152
-            # mutants. The densest scope on record, PR #83, made 179 mutants
-            # from 34 changed lines, about five a line. At that density 200
-            # lines is 1,000 mutants; at twice the measured trial time (a
-            # slower hosted runner) that is under 3 hours, inside the
-            # 360-minute limit. The bound also keeps the dry run far below
-            # Stryker's five-minute dry-run limit, which the 300-file
-            # selection exceeded on PR #141's first attempt. Raise these only
-            # with a measured run that fits.
-            max-changed-lines: "200"
+            # The attempt bound (see the header). It is sized for the runner as
+            # configured now: ONE Stryker worker (see
+            # reference-implementation/stryker.config.mjs), so a trial is not
+            # shared with three others and the attempt is serial. Figures
+            # measured on 2026-10-18 under a 4-CPU, 8 GB cgroup sandbox:
+            #
+            #   - A selection of 8 test files (the `max-tests` bound) that
+            #     includes a slow file: 16 mutants of server/introspection-http.ts
+            #     took 8 min 20 s with one worker, 31.3 s a mutant (1.9 a
+            #     minute); its dry run took 33.8 s. The slow file runs about 30 s
+            #     alone and sets the trial time, because `node --test` runs the
+            #     selection's files in parallel. That is the cost to size for:
+            #     `max-tests` bounds how many files run, not how slow they are.
+            #   - 1 file in 77 sampled across the cohort's 1,156 test files took
+            #     over 30 s alone (34.1 s); the median took 0.3 s and the 90th
+            #     percentile 2.5 s. An earlier 7-file sample ran 2.4-2.7 s a
+            #     mutant, so a typical selection is an order of magnitude cheaper.
+            #   - Mutant density: 0.85 a line for the whole of
+            #     server/introspection-http.ts (228 mutants in 268 lines); the
+            #     densest scope on record, PR #83, made 179 mutants from 34
+            #     lines, 5.3 a line.
+            #
+            # Worst case at the bound: the densest scope and the slow selection
+            # together, on a runner twice as slow as the sandbox (the margin):
+            #
+            #   60 lines x 5.3 mutants x 31.3 s x 2 / 60  = 332 minutes
+            #   + 20 minutes for checkout, install, builds and the dry run
+            #     (an allowance, not a measurement)       = 352 minutes, under 360
+            #
+            # Solved for the bound: (360 - 20) x 60 / 2 / 31.3 s / 5.3 mutants
+            # = 61.5 lines, rounded down to 60. The bound of 200 lines this
+            # replaces was calibrated with four workers; at one worker and the
+            # same worst case it is 200 x 5.3 x 31.3 x 2 / 60 = 1,106 minutes,
+            # three times the job limit. A typical run (0.85 a line, 3.3 s a
+            # trial) at 60 lines is about 3 minutes, so most revisions stay far
+            # inside the bound; the cost of the lower figure is that a large
+            # change is sampled sooner, and a sample is recorded as `partial`,
+            # not hidden. The dry run stays far below
+            # Stryker's five-minute dry-run limit, which the 300-file selection
+            # exceeded on PR #141's first attempt. Raise these only with a
+            # measured run that fits; the executed control in
+            # scripts/mutation-falsification/attempt-bound-budget.test.ts holds
+            # the arithmetic to the values here.
+            max-changed-lines: "60"
             max-tests: "8"
           # The release and supply-chain provenance machinery. Neither cohort
           # above reaches it -- `client` selects `src/`, and the reference
@@ -214,6 +248,7 @@ jobs:
             --diff "reports/mutation/${COHORT}/diff.nul" \
             --out "reports/mutation/${COHORT}/intent.json" \
             --selected-tests "reports/mutation/${COHORT}/selected-tests.txt" \
+            --selection-outcome "reports/mutation/${COHORT}/selection-outcome.txt" \
             --max-changed-lines "${COHORT_MAX_CHANGED_LINES:-}" \
             --max-tests "${COHORT_MAX_TESTS:-}"
 
@@ -223,6 +258,8 @@ jobs:
             mkdir -p "${COHORT_ROOT}/reports/mutation/${COHORT}"
             cp "reports/mutation/${COHORT}/selected-tests.txt" \
               "${COHORT_ROOT}/reports/mutation/${COHORT}/selected-tests.txt"
+            cp "reports/mutation/${COHORT}/selection-outcome.txt" \
+              "${COHORT_ROOT}/reports/mutation/${COHORT}/selection-outcome.txt"
           fi
 
           echo "Selected tests for this attempt:"
@@ -231,6 +268,24 @@ jobs:
           applicability="$(node -e 'process.stdout.write(JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8")).applicability)' "reports/mutation/${COHORT}/intent.json")"
           echo "applicability=${applicability}" >> "$GITHUB_OUTPUT"
           echo "Intent applicability: ${applicability}"
+
+      # An empty selected-tests file does not say why it is empty: no test
+      # changed (the cohort's own suite is then the explicit selection), or every
+      # selected test was withheld from the baseline. The second must not start
+      # the engine, because both cohorts' runners read an empty list as "run
+      # everything" and would run exactly the tests that were withheld. The
+      # decision lives in selection-outcome.ts so it is testable; this step only
+      # carries it. When the engine does not start, `engine_exit=not_run` reaches
+      # the receipt through the projection step below.
+      - name: Decide whether the engine runs
+        id: plan
+        if: steps.intent.outputs.applicability == 'applicable'
+        env:
+          COHORT: ${{ matrix.cohort }}
+        run: |
+          set -euo pipefail
+          node --experimental-strip-types scripts/mutation-falsification/plan-engine-run.ts \
+            --outcome "reports/mutation/${COHORT}/selection-outcome.txt" >> "$GITHUB_OUTPUT"
 
       # There is deliberately no result cache here. An earlier revision carried
       # one, and it was wrong twice: the reference implementation read its
@@ -242,7 +297,7 @@ jobs:
       # cost need and invalidation proven against the paths the engine reads.
 
       - name: Build workspace packages
-        if: steps.intent.outputs.applicability == 'applicable' && matrix.cohort == 'reference-implementation'
+        if: steps.plan.outputs.run == 'true' && matrix.cohort == 'reference-implementation'
         run: |
           npm --prefix packages/connector-protocol run build
           npm --prefix packages/collector-runtime run build
@@ -257,7 +312,7 @@ jobs:
         # spent against Stryker's dry-run timeout, and the baseline never
         # completes -- no mutant is tried and the attempt reports no evidence.
         # See reference-implementation/scripts/ci-console-prebuild.test.ts.
-        if: steps.intent.outputs.applicability == 'applicable' && matrix.cohort == 'reference-implementation'
+        if: steps.plan.outputs.run == 'true' && matrix.cohort == 'reference-implementation'
         env:
           NEXT_TELEMETRY_DISABLED: "1"
         run: npm --prefix apps/console run build
@@ -265,7 +320,7 @@ jobs:
       # OBSERVATION. Stryker runs as a black box. Its exit status and its own
       # per-mutant statuses are recorded, never interpreted here.
       - name: Run mutation testing on the changed files
-        if: steps.intent.outputs.applicability == 'applicable'
+        if: steps.plan.outputs.run == 'true'
         id: observe
         continue-on-error: true
         env:
@@ -335,7 +390,9 @@ jobs:
         env:
           COHORT: ${{ matrix.cohort }}
           COHORT_ROOT: ${{ matrix.root }}
-          STRYKER_EXIT: ${{ steps.observe.outputs.stryker_exit }}
+          # `engine_exit` is set only when the plan step decided not to start the
+          # engine, so a run that did start and lost its status still reads empty.
+          STRYKER_EXIT: ${{ steps.observe.outputs.stryker_exit || steps.plan.outputs.engine_exit }}
         run: |
           set -euo pipefail
           # Stryker resolves its reporter paths against the directory it ran in,

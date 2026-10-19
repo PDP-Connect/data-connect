@@ -43,7 +43,10 @@ import {
 import { closeDb, getDb, initDb } from "../server/db.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
 import { createSqliteSchedulerStore } from "../server/stores/scheduler-store.ts";
-import { writeConnectorUninstallJournal } from "../server/connector-uninstall-journal.ts";
+import {
+  connectorUninstallJournalPath,
+  writeConnectorUninstallJournal,
+} from "../server/connector-uninstall-journal.ts";
 import { mountOwnerConnectorInstall } from "../server/routes/owner-connector-install.ts";
 
 const digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -369,6 +372,46 @@ test("an atomic uninstall failure leaves the prior active pointer and entrypoint
   }
 });
 
+test("SQLite: install and activation deletes roll back together when the second delete fails", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pdpp-connector-install-delete-atomicity-"));
+  const previousPreloadDir = process.env.PDPP_CONNECTOR_PRELOAD_DIR;
+  delete process.env.PDPP_CONNECTOR_PRELOAD_DIR;
+  closeDb();
+  initDb(join(dataDir, "pdpp.sqlite"));
+  try {
+    const now = new Date().toISOString();
+    getDb()
+      .prepare("INSERT INTO connector_installs(connector_id, record_json, updated_at) VALUES (?, ?, ?)")
+      .run("github", "{}", now);
+    getDb()
+      .prepare(
+        `INSERT INTO connector_activations(
+          connector_id,state,record_json,canonical_manifest_json,manifest_revision,
+          activation_id,attempt_id,updated_at
+        ) VALUES (?, 'active', '{}', '{}', '1', 'activation', 'attempt', ?)`
+      )
+      .run("github", now);
+    getDb().exec(`
+      CREATE TRIGGER fail_connector_activation_delete
+      BEFORE DELETE ON connector_activations
+      BEGIN
+        SELECT RAISE(ABORT, 'injected activation delete failure');
+      END
+    `);
+
+    const store = createConnectorInstallStore();
+    assert.ok(store.deactivateAndRemoveActivation);
+    await assert.rejects(store.deactivateAndRemoveActivation("github"), /injected activation delete failure/);
+    assert.ok(getDb().prepare("SELECT 1 FROM connector_installs WHERE connector_id=?").get("github"));
+    assert.ok(getDb().prepare("SELECT 1 FROM connector_activations WHERE connector_id=?").get("github"));
+  } finally {
+    closeDb();
+    if (previousPreloadDir === undefined) delete process.env.PDPP_CONNECTOR_PRELOAD_DIR;
+    else process.env.PDPP_CONNECTOR_PRELOAD_DIR = previousPreloadDir;
+    rmSync(dataDir, { force: true, recursive: true });
+  }
+});
+
 test("startup recovery restores the original entrypoint at each root-move crash point", async () => {
   for (const { name, moveCount } of [
     { moveCount: 0, name: "before moves" },
@@ -404,6 +447,53 @@ test("startup recovery restores the original entrypoint at each root-move crash 
       closeDb();
       rmSync(dataDir, { force: true, recursive: true });
     }
+  }
+});
+
+test("startup uninstall recovery retries activation cleanup after its first failure", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pdpp-uninstall-retry-gap-"));
+  closeDb();
+  initDb(join(dataDir, "pdpp.sqlite"));
+  const store = createFileConnectorInstallStore(dataDir);
+  let cleanupCalls = 0;
+  let activationStillPresent = true;
+  try {
+    const service = createConnectorInstallService({
+      catalogLoader: async () => [entry],
+      dataDir,
+      installArtifact: (root) => writeFixture(root),
+      registerManifest: () => Promise.resolve(),
+      store,
+    });
+    const active = await service.install("github", digest);
+    const moved = join(dataDir, "connectors", "github", ".uninstall-retry");
+    writeConnectorUninstallJournal(dataDir, {
+      connectorId: "github",
+      priorActiveRecord: active,
+      rootMoves: [{ original: active.root, moved }],
+    });
+    renameSync(active.root, moved);
+    await store.deactivate("github");
+    const removeActivation = async () => {
+      cleanupCalls += 1;
+      if (cleanupCalls === 1) throw new Error("temporary activation cleanup failure");
+      activationStillPresent = false;
+    };
+
+    await assert.rejects(
+      reconcileConnectorUninstalls(dataDir, store, removeActivation),
+      /temporary activation cleanup failure/
+    );
+    await reconcileConnectorUninstalls(dataDir, store, removeActivation);
+
+    assert.equal(cleanupCalls, 2, "the incomplete cleanup must be discovered again");
+    assert.equal(activationStillPresent, false);
+    assert.equal(existsSync(moved), false);
+    assert.equal(existsSync(active.root), false);
+    assert.equal(existsSync(connectorUninstallJournalPath(dataDir, "github")), false);
+  } finally {
+    closeDb();
+    rmSync(dataDir, { force: true, recursive: true });
   }
 });
 
@@ -1479,6 +1569,43 @@ test("a lifecycle lock row that an earlier start of this process left does not b
   }
 });
 
+test("a live older build's lifecycle lock row keeps the lock busy and stays in place; a provably stale one does not", () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pdpp-connector-install-"));
+  initDb(join(dataDir, "pdpp.sqlite"));
+  const olderBuildRow = (pid: number | undefined) => {
+    getDb().prepare("DELETE FROM connector_lifecycle_locks").run();
+    getDb()
+      .prepare("INSERT INTO connector_lifecycle_locks(connector_id, owner_token, owner_pid) VALUES(?, ?, ?)")
+      .run("github", "older-build-operation", pid);
+  };
+  const rowToken = () =>
+    getDb().prepare("SELECT owner_token FROM connector_lifecycle_locks").get<{ owner_token: string }>()?.owner_token;
+  try {
+    // Creates the lock table.
+    withConnectorLifecycleLockSync(dataDir, "github", () => undefined);
+    // An older build locks by this row alone and takes no OS lock.
+    olderBuildRow(process.ppid);
+    assert.throws(() => withConnectorLifecycleLockSync(dataDir, "github", () => undefined), /lifecycle operation is busy/);
+    assert.equal(rowToken(), "older-build-operation", "the live older build keeps its row");
+
+    const exited = spawnSync(process.execPath, ["-e", ""]);
+    assert.equal(exited.status, 0);
+    // A dead pid, and this pid after a container restart, are stale here.
+    for (const pid of [exited.pid, process.pid]) {
+      olderBuildRow(pid);
+      let entered = false;
+      withConnectorLifecycleLockSync(dataDir, "github", () => {
+        entered = true;
+      });
+      assert.equal(entered, true, `a row with pid ${String(pid)} does not block`);
+      assert.equal(rowToken(), undefined, "the lock released its own row");
+    }
+  } finally {
+    closeDb();
+    rmSync(dataDir, { force: true, recursive: true });
+  }
+});
+
 test("a deadline while an install waits for the lifecycle lock releases the install fence", async () => {
   const dataDir = mkdtempSync(join(tmpdir(), "pdpp-connector-install-"));
   initDb(join(dataDir, "pdpp.sqlite"));
@@ -1648,7 +1775,7 @@ test("derived-state repair runs after the install returns and its locks are rele
   }
 });
 
-test("owner install route rejects missing installation fields", async () => {
+test("owner connector-install routes register both guards and reject missing install fields", async () => {
   type RegisteredHandler = (
     req: { body?: Record<string, unknown> },
     res: {
@@ -1688,6 +1815,12 @@ test("owner install route rejects missing installation fields", async () => {
       update: async () => assert.fail("should not update"),
     },
   });
+  assert.equal(registrations.size, 10, "the complete owner connector-install route set is registered");
+  for (const [route, handlers] of registrations) {
+    assert.equal(handlers.length, 3, `${route} registers two guards and one handler`);
+    assert.equal(handlers[0], tokenGuard, `${route} requires an owner token`);
+    assert.equal(handlers[1], ownerGuard, `${route} requires owner authorization`);
+  }
   let status = 200;
   let body: unknown;
   await routes.get("POST /v1/owner/connector-install/install")?.(
@@ -1705,8 +1838,6 @@ test("owner install route rejects missing installation fields", async () => {
   );
   assert.equal(status, 400);
   assert.deepEqual(body, { code: "invalid_request", message: "connector_id is required", param: "connector_id" });
-  assert.equal(registrations.get("POST /v1/owner/connector-install/install")?.[0], tokenGuard);
-  assert.equal(registrations.get("POST /v1/owner/connector-install/install")?.[1], ownerGuard);
 });
 
 test("owner uninstall route calls the service and returns the completed action", async () => {

@@ -64,18 +64,48 @@ function sqliteLifecycleLockDir(): string | null {
   return handle.memory === true || typeof handle.name !== "string" ? null : `${resolve(handle.name)}.lifecycle-locks`;
 }
 
+/** Prefix of the row tokens this build writes. Such a row is only ever held together with the OS lock. */
+const OS_LOCKED_ROW_TOKEN_PREFIX = "os-lock:";
+
 /**
- * The `connector_lifecycle_locks` row is diagnostics: it names the holder's
- * pid, and an older build in this PID namespace that still decides from rows
- * sees a live owner. No decision here reads it.
+ * Whether an older build that locks by row alone may hold a row. It may when
+ * its pid is alive in this PID namespace and is not this process's pid. A dead
+ * pid is provably stale here; this process's pid is a row left by an earlier
+ * start of a server with the same pid (a container restart). A row this build
+ * wrote is stale whenever the OS lock is free, so it never blocks.
  */
-function writeLifecycleLockRow(connectorId: string, token: string): void {
+function olderBuildMayHoldRow(row: { owner_pid: number; owner_token: string }): boolean {
+  if (row.owner_token.startsWith(OS_LOCKED_ROW_TOKEN_PREFIX) || row.owner_pid === process.pid) return false;
+  try {
+    process.kill(row.owner_pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
+/**
+ * Under the OS lock, claim the `connector_lifecycle_locks` row, or return
+ * false when an older build that locks by row alone may hold it. That row is
+ * never deleted. The row this build writes names the holder for diagnostics,
+ * and an older build in this PID namespace sees a live owner in it.
+ */
+function claimLifecycleLockRow(connectorId: string, token: string): boolean {
   sqliteLockTable();
-  getDb()
-    .prepare(
-      "INSERT OR REPLACE INTO connector_lifecycle_locks(connector_id, owner_token, owner_pid) VALUES(?, ?, ?)"
-    )
-    .run(connectorId, token, process.pid);
+  return getDb()
+    .transaction(() => {
+      const row = getDb()
+        .prepare("SELECT owner_token, owner_pid FROM connector_lifecycle_locks WHERE connector_id=?")
+        .get<{ owner_pid: number; owner_token: string }>(connectorId);
+      if (row && olderBuildMayHoldRow(row)) return false;
+      getDb()
+        .prepare(
+          "INSERT OR REPLACE INTO connector_lifecycle_locks(connector_id, owner_token, owner_pid) VALUES(?, ?, ?)"
+        )
+        .run(connectorId, token, process.pid);
+      return true;
+    })
+    .immediate();
 }
 
 /** Take the connector's SQLite lifecycle lock without waiting, or return null when it is held. */
@@ -89,9 +119,12 @@ function tryAcquireSqlite(connectorId: string): (() => void) | null {
   }
   const lock = tryAcquireDirectoryLock(lockDir, createHash("sha256").update(connectorId).digest("hex"));
   if (!lock) return null;
-  const token = randomUUID();
+  const token = `${OS_LOCKED_ROW_TOKEN_PREFIX}${randomUUID()}`;
   try {
-    writeLifecycleLockRow(connectorId, token);
+    if (!claimLifecycleLockRow(connectorId, token)) {
+      lock.release();
+      return null;
+    }
   } catch (error) {
     lock.release();
     throw error;

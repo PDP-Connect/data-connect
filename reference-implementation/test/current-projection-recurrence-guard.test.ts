@@ -531,11 +531,11 @@ test("a torn bulk delete (record_changes cleared, records left) is caught as unr
     await upsert("b", { v: 1 });
     const cin = instanceIdFor();
 
-    // Simulate the exact post-crash state of the NON-ATOMIC SQLite bulk-delete
-    // paths: the `record_changes` delete committed but the process died before
-    // the `records` delete. `deleteAllRecords` / `deleteAllRecordsForConnector`
-    // issue these as two separate `exec()` statements with NO surrounding
-    // writeTransaction, so this interleaving is reachable on a real crash.
+    // Seed the torn state directly so the detector can be tested in isolation.
+    // This is not a reachable cut in the current per-stream bulk-delete path:
+    // `deleteAllRecords` wraps the reset generation and all three deletes in
+    // one `writeTransaction` (see server/records.ts). The detector still needs
+    // to recognize the orphan if it is created by another path or old data.
     getDb().prepare("DELETE FROM record_changes WHERE connector_instance_id = ? AND stream = ?").run(cin, STREAM);
 
     const drift = detectCurrentProjectionDrift();

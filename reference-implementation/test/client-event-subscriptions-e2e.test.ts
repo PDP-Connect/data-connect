@@ -45,10 +45,23 @@ type TestServer = Awaited<ReturnType<typeof startServer>> & {
 async function closeServer(server: TestServer) {
   server.asServer.closeAllConnections();
   server.rsServer.closeAllConnections();
-  await Promise.allSettled([
-    new Promise((r) => server.asServer.close(r)),
-    new Promise((r) => server.rsServer.close(r)),
+  const stopped = await Promise.allSettled([
+    new Promise<void>((resolve, reject) => server.asServer.close((error) => error ? reject(error) : resolve())),
+    new Promise<void>((resolve, reject) => server.rsServer.close((error) => error ? reject(error) : resolve())),
+    Promise.resolve().then(() => server.abortStartupBackfill("test teardown")),
+    Promise.resolve().then(() => server.schedulerManager?.stop()),
+    Promise.resolve().then(() => server.stopBrowserSurfaceLeaseSweep()),
+    Promise.resolve().then(() => server.stopConnectorMaintenanceSweep()),
+    Promise.resolve().then(() => server.stopPostgresDerivedIndexMaintenance()),
+    Promise.resolve().then(() => server.stopClientEventDeliveryWorker()),
+    server.manifestReconciliationDone,
+    server.startupBackfillDone,
+    server.startupRunHistoryBackfillDone,
+    server.startupSummaryEvidenceSweepDone,
+    server.postgresSemanticHnswMaintenanceDone,
   ]);
+  const errors = stopped.flatMap((result) => result.status === "rejected" ? [result.reason] : []);
+  if (errors.length) throw new AggregateError(errors, "event subscription fixture teardown failed");
 }
 
 async function fetchJson<T = unknown>(url: string, opts: RequestInit = {}): Promise<{ status: number; body: T }> {

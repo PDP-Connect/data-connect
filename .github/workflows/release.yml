@@ -2,6 +2,9 @@ name: Release manual-install artifacts
 
 on:
   pull_request:
+    # PRs into the test-engineering integration branch are gated by a local
+    # oracle and review; full CI runs once on the batch PR into main.
+    branches-ignore: [testeng/integration]
   release:
     types: [created]
   workflow_dispatch:

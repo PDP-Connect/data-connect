@@ -2,6 +2,9 @@ name: rust-unit-tests
 
 on:
   pull_request:
+    # PRs into the test-engineering integration branch are gated by a local
+    # oracle and review; full CI runs once on the batch PR into main.
+    branches-ignore: [testeng/integration]
     paths:
       - "src-tauri/**"
       - "connectors/**"
@@ -106,11 +109,12 @@ jobs:
             TMPDIR="$test_tmp" TMP="$test_tmp" TEMP="$test_tmp" \
             CARGO_BUILD_JOBS=4 \
             TAURI_CONFIG='{"bundle":{"resources":null,"externalBin":[]}}' \
-            cargo test --lib
+            cargo test --lib -- --exact --skip unified::tests::a_desktop_recovery_start_revokes_owner_sessions_and_bearers_in_the_real_ri
 
       - name: Prove the real-RI recovery test ran
-        # A skipped test passes silently under cargo test. Re-run this one
-        # test uncaptured (already compiled above) and require its marker.
+        # A skipped test passes silently under cargo test. The step above
+        # skips this one test by exact name; run it here, once, uncaptured
+        # (already compiled above), and require its marker.
         working-directory: src-tauri
         run: |
           set -euo pipefail

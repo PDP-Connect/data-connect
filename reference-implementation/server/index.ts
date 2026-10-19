@@ -90,6 +90,7 @@ import {
 } from "./connector-install/index.ts";
 import { removeConnectorActivation } from "./connector-install/activation-authority.ts";
 import { installedConnectorManifestRegistration } from "./connector-install/manifest-registration.ts";
+import { validateConnectorManifest } from "./connector-manifest-validation.ts";
 import {
   connectorLifecycleDataDir,
   withConnectorLifecycleLock,
@@ -121,9 +122,11 @@ import {
   createHostedMcpGrantPackage,
   deleteCimdDocument,
   deleteRegisteredClient,
+  connectorDeclarationDigest,
   exchangeGrantScopedDeviceCode,
   exchangeOAuthAuthorizationCode,
   exchangeOAuthRefreshToken,
+  getAcceptedDeclarationDigest,
   getCimdDocument,
   getConfiguredNativeManifest,
   getConnectorManifest,
@@ -139,6 +142,7 @@ import {
   listGrantPackagesForOwner,
   listOwnerIssuedClients,
   listRegisteredConnectorIds,
+  normalizeConnectorManifestForStorage,
   registerConnector,
   registerDynamicClient,
   requireGrantContractAgainstManifest,
@@ -1503,12 +1507,20 @@ function getProtectedResourceMetadataUrl(res: ResLike) {
   return typeof metadataUrl === "string" && metadataUrl ? metadataUrl : null;
 }
 
-function setProtectedResourceMetadataChallenge(res: ResLike) {
+/**
+ * spec-core §8 "Protected resource metadata": every RS 401 carries a
+ * `WWW-Authenticate: Bearer` challenge (RFC 6750 §3). It names the metadata
+ * document in `resource_metadata` (RFC 9728 §5.1) when the RS has a trusted
+ * URL for it, and it adds `error="invalid_token"` when a token was presented
+ * and rejected. An untrusted, host-derived URL is never echoed.
+ */
+function setProtectedResourceMetadataChallenge(res: ResLike, { tokenRejected }: { tokenRejected: boolean }) {
   const metadataUrl = getProtectedResourceMetadataUrl(res);
-  if (!metadataUrl) {
-    return;
-  }
-  res.setHeader("WWW-Authenticate", `Bearer resource_metadata="${httpQuotedString(metadataUrl)}"`);
+  const params = [
+    ...(metadataUrl ? [`resource_metadata="${httpQuotedString(metadataUrl)}"`] : []),
+    ...(tokenRejected ? ['error="invalid_token"'] : []),
+  ];
+  res.setHeader("WWW-Authenticate", params.length ? `Bearer ${params.join(", ")}` : "Bearer");
 }
 
 function sha256Hex(value: string) {
@@ -1568,6 +1580,9 @@ async function ensureReferenceConnectorCatalogEntry(
     // decouple-device-enrollment-from-ingest-writer-admission design D1.
     await registerConnector(localCollectorManifest, {
       backfillRetrievalIndexes: false,
+      // The server's own shipped manifest: a trusted publication, so it may
+      // supersede the accepted content recorded for its version.
+      replaceAcceptedDigest: true,
     });
     return;
   }
@@ -2085,7 +2100,7 @@ async function requireTokenWithIntrospection(
 ) {
   const auth = req.headers?.authorization;
   if (!auth || typeof auth !== "string" || !auth.startsWith("Bearer ")) {
-    setProtectedResourceMetadataChallenge(res);
+    setProtectedResourceMetadataChallenge(res, { tokenRejected: false });
     return pdppError(res, 401, "authentication_error", "Missing Bearer token");
   }
   const token = auth.slice(7);
@@ -2098,57 +2113,48 @@ async function requireTokenWithIntrospection(
         stream: req.params.stream,
       });
     } catch (error: unknown) {
-      if (error instanceof SourceIntrospectionContextError) {
-        info.active = false;
-        info.inactive_reason = error.code;
-      } else {
+      if (!(error instanceof SourceIntrospectionContextError)) {
         throw error;
       }
+      // A valid token asking for a stream or connection outside its grant is
+      // an authorization denial, not a token failure: spec-core §8 Errors
+      // (403 grant_stream_not_allowed) and §9 RS item 2 (the RS enforces the
+      // explicit instance handles). The token stays valid, so no
+      // invalid_token challenge.
+      const denial = grantDenialForContextError(error.code, req.params.stream, requestedConnection);
+      if (denial) {
+        if (info.trace_id) {
+          setReferenceTraceId(res, info.trace_id);
+        }
+        await emitAuthGateQueryRejection(req, res, info, {
+          code: denial.code,
+          message: denial.message,
+          sourceDescriptor: buildClientSourceDescriptor(info),
+        });
+        return pdppError(res, 403, denial.code, denial.message, denial.param);
+      }
+      info.active = false;
+      info.inactive_reason = error.code;
     }
   }
   if (!info.active) {
     if (info.trace_id) {
       setReferenceTraceId(res, info.trace_id);
     }
-    const authGateQuery = inferAuthGateQueryContext(req, info);
-    if (authGateQuery && info.trace_id) {
-      const authGateContext: QueryContext = {
-        actorId: info.client_id ?? null,
-        actorType: "client",
-        queryData: {
-          auth_gate: true,
-          query_shape: authGateQuery.queryShape,
-          ...(authGateQuery.queryShape === "record_list"
-            ? {
-                // biome-ignore lint/suspicious/noUnnecessaryConditions: TypeScript boundary permits nullish input; this guard preserves runtime behavior.
-                has_changes_since: authGateQuery.hasChangesSince ?? false,
-                limit: authGateQuery.limit ?? null,
-              }
-            : {}),
-          ...(authGateQuery.requestedRecordId ? { requested_record_id: authGateQuery.requestedRecordId } : {}),
-        },
-        queryId: ensureRequestId(res),
-        scenarioId: info.scenario_id ?? null,
-        streamId: authGateQuery.streamId ?? null,
-        tokenInfo: info,
-        traceId: info.trace_id ?? null,
-      };
-      await emitQueryReceived(authGateContext, req);
-      const gateErrMsg =
-        info.inactive_reason === "grant_revoked"
-          ? "Grant has been revoked"
+    const gateErrMsg =
+      info.inactive_reason === "grant_revoked"
+        ? "Grant has been revoked"
+        : // biome-ignore lint/style/noNestedTernary: The existing expression mirrors the protocol’s compact value selection contract.
+          info.inactive_reason === "grant_expired"
+          ? "Grant has expired"
           : // biome-ignore lint/style/noNestedTernary: The existing expression mirrors the protocol’s compact value selection contract.
-            info.inactive_reason === "grant_expired"
-            ? "Grant has expired"
-            : // biome-ignore lint/style/noNestedTernary: The existing expression mirrors the protocol’s compact value selection contract.
-              info.inactive_reason === "grant_invalid"
-              ? "Grant is malformed or no longer valid"
-              : "Invalid or expired token";
-      const gateErr = Object.assign(new Error(gateErrMsg), {
-        code: info.inactive_reason || "authentication_error",
-      }) as ApiError;
-      await emitQueryRejected(authGateContext, req, gateErr);
-    }
+            info.inactive_reason === "grant_invalid"
+            ? "Grant is malformed or no longer valid"
+            : "Invalid or expired token";
+    await emitAuthGateQueryRejection(req, res, info, {
+      code: info.inactive_reason || "authentication_error",
+      message: gateErrMsg,
+    });
     if (info.inactive_reason === "grant_revoked") {
       return pdppError(res, 403, "grant_revoked", "Grant has been revoked");
     }
@@ -2159,18 +2165,83 @@ async function requireTokenWithIntrospection(
       return pdppError(res, 403, "grant_invalid", "Grant is malformed or no longer valid");
     }
     if (info.inactive_reason?.startsWith("context.")) {
-      setProtectedResourceMetadataChallenge(res);
+      setProtectedResourceMetadataChallenge(res, { tokenRejected: true });
       return pdppError(res, 401, info.inactive_reason, "Token introspection failed closed");
     }
     if (info.inactive_reason === "authorization_state.unsupported_legacy_shape") {
-      setProtectedResourceMetadataChallenge(res);
+      setProtectedResourceMetadataChallenge(res, { tokenRejected: true });
       return pdppError(res, 401, info.inactive_reason, "Fresh consent is required");
     }
-    setProtectedResourceMetadataChallenge(res);
+    setProtectedResourceMetadataChallenge(res, { tokenRejected: true });
     return pdppError(res, 401, "authentication_error", "Invalid or expired token");
   }
   req.tokenInfo = info;
   next();
+}
+
+/**
+ * Map a request-selector failure from the resolved grant to its 403 grant
+ * denial. Other context failures mean the token or its context is unusable
+ * and stay 401.
+ */
+function grantDenialForContextError(
+  code: string,
+  stream: string,
+  requestedConnection: string | null
+): { code: string; message: string; param: string | null } | null {
+  if (code === "context.stream_not_allowed") {
+    return { code: "grant_stream_not_allowed", message: `Stream '${stream}' not in grant`, param: null };
+  }
+  if (code === "context.instance_mismatch") {
+    return {
+      code: "grant_instance_not_allowed",
+      message: `connection_id '${requestedConnection ?? ""}' is not in the grant for stream '${stream}'`,
+      param: "connection_id",
+    };
+  }
+  return null;
+}
+
+/**
+ * Record an auth-gate rejection of a client stream read on the grant timeline
+ * as a correlated query.received / query.rejected pair. Reads that are not
+ * stream-scoped GETs, or that carry no trace id, are not recorded.
+ */
+async function emitAuthGateQueryRejection(
+  req: ReqLike,
+  res: ResLike,
+  info: TokenInfo,
+  rejection: { code: string; message: string; sourceDescriptor?: unknown }
+) {
+  const authGateQuery = inferAuthGateQueryContext(req, info);
+  if (!(authGateQuery && info.trace_id)) {
+    return;
+  }
+  const authGateContext: QueryContext = {
+    actorId: info.client_id ?? null,
+    actorType: "client",
+    queryData: {
+      auth_gate: true,
+      query_shape: authGateQuery.queryShape,
+      ...(authGateQuery.queryShape === "record_list"
+        ? {
+            // biome-ignore lint/suspicious/noUnnecessaryConditions: TypeScript boundary permits nullish input; this guard preserves runtime behavior.
+            has_changes_since: authGateQuery.hasChangesSince ?? false,
+            limit: authGateQuery.limit ?? null,
+          }
+        : {}),
+      ...(authGateQuery.requestedRecordId ? { requested_record_id: authGateQuery.requestedRecordId } : {}),
+    },
+    queryId: ensureRequestId(res),
+    scenarioId: info.scenario_id ?? null,
+    ...(Object.hasOwn(rejection, "sourceDescriptor") ? { sourceDescriptor: rejection.sourceDescriptor } : {}),
+    streamId: authGateQuery.streamId ?? null,
+    tokenInfo: info,
+    traceId: info.trace_id ?? null,
+  };
+  await emitQueryReceived(authGateContext, req);
+  const gateErr = Object.assign(new Error(rejection.message), { code: rejection.code }) as ApiError;
+  await emitQueryRejected(authGateContext, req, gateErr);
 }
 
 function requireOwner(req: ReqLike, res: ResLike, next: () => void) {
@@ -7148,11 +7219,15 @@ export function buildAsApp(opts: ServerOpts = {}) {
     // GET /connectors/:id (manifest read) is unchanged — it exposes no user
     // data and is needed by the unauthenticated client-side connect flow.
     const asPolyfillConnectorsContext = {
+      declarationDigest: connectorDeclarationDigest,
+      getAcceptedDeclarationDigest,
       getConnectorManifest,
       handleError,
+      normalizeManifestForStorage: normalizeConnectorManifestForStorage,
       pdppError,
       registerConnector,
       requireOwnerSessionForRegister: lockConnectorRegistry ? ownerAuth.requireOwnerSession : null,
+      validateManifest: (manifest: Record<string, unknown>) => validateConnectorManifest(manifest),
     };
     mountAsPolyfillConnectorRegister(
       app,

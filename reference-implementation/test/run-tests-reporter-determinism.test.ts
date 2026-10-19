@@ -6,6 +6,7 @@ const FAILURE_TEST_NAME_PATTERN = /reporter preserves intentional failure diagno
 const LIFECYCLE_EVENT_PATTERN =
   /"type":"(test:enqueue|test:dequeue|test:start|test:complete|test:plan|test:summary|test:stderr|test:diagnostic)"/;
 const REDACTED_PATTERN = /\[REDACTED\]/;
+const REDACTED_ANY_PATTERN = /\[REDACTED/;
 const RETAINED_CONTEXT_PATTERN = /stderr context|useful trailing context|\[REDACTED\]/;
 const SPLIT_MARKER_PATTERN = /marker-direct-split/;
 const SPLIT_REDACTION_PATTERN = /GITHUB_TOKEN=\[REDACTED\]/;
@@ -308,6 +309,13 @@ const MALFORMED_SEPARATOR_CASES: readonly SensitiveFailureCase[] = MALFORMED_SEP
   })
 );
 
+// The exact reproduction vector the gate reported: a truncated `\u20` escape
+// after a recognized sensitive key.
+const GATE_MALFORMED_VECTOR_CASE: SensitiveFailureCase = {
+  marker: "child_malformed_unicode_0729",
+  payload: '{"Authorization"\\u20:\\u20"Token child_malformed_unicode_0729"}',
+};
+
 function childTestEnv() {
   // NODE_TEST_CONTEXT/NODE_TEST_WORKER_ID are set by the outer `node --test`
   // this suite itself runs under. Left inherited, Node detects the spawned
@@ -397,7 +405,8 @@ async function reporterOutput(events: ReporterEvent[]): Promise<string> {
 }
 
 function failureFromOutput(output: string): Record<string, string> {
-  const line = output.split("\n").find((value) => value.startsWith("PDPP_TEST_ACCOUNTING_EVENT "));
+  // The reporter may announce a running test first; the failure is the terminal event.
+  const line = output.split("\n").find((value) => value.startsWith('PDPP_TEST_ACCOUNTING_EVENT {"type":"test:fail"'));
   assert.ok(line, "reporter must emit a terminal failure event");
   const event = JSON.parse(line.slice("PDPP_TEST_ACCOUNTING_EVENT ".length)) as {
     details?: { failure?: Record<string, string> };
@@ -426,6 +435,57 @@ function expectedStderrContext(sensitiveCase: SensitiveFailureCase): string {
     return "useful trailing context";
   }
   return "stderr context";
+}
+
+// Node delivers a child's stderr and its result over two separate pipes and
+// documents `test:stderr` as "not guaranteed to be emitted in the same order
+// as the tests are defined". When the parent runner is slow to start reading
+// (a loaded host), the result can reach the reporter first, and that failure
+// then has no `stderr_tail`. A real run therefore guarantees `stderr_tail` is
+// redacted and bounded WHEN it is present, never that it is present. The
+// fields every run does guarantee are the ones a real run must keep.
+function presentFailureFields(failure: Record<string, string>): string[] {
+  return ["message", "stack", ...(failure.stderr_tail === undefined ? [] : ["stderr_tail"])];
+}
+
+// readline splits a child's stderr into lines before the runner emits one
+// `test:stderr` event per line.
+const STDERR_LINE_BREAK = /\r?\n|\r(?!\n)/;
+
+function stderrEvents(chunks: string[]): ReporterEvent[] {
+  const lines = chunks.join("").split(STDERR_LINE_BREAK);
+  if (lines.at(-1) === "") {
+    lines.pop();
+  }
+  return lines.map((line) => ({ data: { message: `${line}\n` }, type: "test:stderr" }));
+}
+
+function intentionalFailureEvent(message: string): ReporterEvent {
+  return {
+    data: {
+      details: {
+        error: {
+          code: "ERR_TEST_FAILURE",
+          failureType: "testCodeFailure",
+          message,
+          stack: `Error [ERR_TEST_FAILURE]: ${message}`,
+        },
+        type: "test",
+      },
+      name: REPORTER_FAILURE_NAME,
+    },
+    type: "test:fail",
+  };
+}
+
+// The same fixture as runIntentionalFailureFixture, fed to the reporter as the
+// ordered event stream (stderr before the result) that fixes what the e2e runs
+// cannot: this is where stderr_tail retention and redaction are proven.
+async function orderedFailureOutput({ payload, stderrChunks }: SensitiveFailureCase): Promise<string> {
+  return await reporterOutput([
+    ...stderrEvents(stderrChunks ?? [`stderr context ${payload}\n`]),
+    intentionalFailureEvent(`failure message context ${payload}`),
+  ]);
 }
 
 describe("run-tests reporter determinism (compact-record-history.test.js)", () => {
@@ -466,7 +526,7 @@ describe("run-tests reporter determinism (compact-record-history.test.js)", () =
       assert.match(output, FAILURE_STACK_PATTERN);
       assert.match(JSON.stringify(failure), REDACTED_PATTERN);
       assert.equal(output.includes(sensitiveCase.marker), false, `${sensitiveCase.marker}: marker must be redacted`);
-      for (const field of ["message", "stack", "stderr_tail"]) {
+      for (const field of presentFailureFields(failure)) {
         assert.equal(
           requiredFailureField(failure, field).includes(sensitiveCase.marker),
           false,
@@ -493,14 +553,9 @@ describe("run-tests reporter determinism (compact-record-history.test.js)", () =
       if (sensitiveCase.payload.includes("://")) {
         assert.equal(output.includes("example.test"), true, `${sensitiveCase.marker}: URL host must remain useful`);
       }
-      assert.equal(
-        requiredFailureField(failure, "stderr_tail").includes(expectedStderrContext(sensitiveCase)),
-        true,
-        `${sensitiveCase.marker}: useful stderr context must remain after redaction and tailing`
-      );
       assert.match(JSON.stringify(failure), RETAINED_CONTEXT_PATTERN);
       assert.doesNotMatch(output, LIFECYCLE_EVENT_PATTERN);
-      for (const field of ["code", "failure_type", "message", "stack", "stderr_tail"]) {
+      for (const field of ["code", "failure_type", "message", "stack"]) {
         requiredFailureField(failure, field);
       }
       assertFailureCaps(failure);
@@ -523,7 +578,7 @@ describe("run-tests reporter determinism (compact-record-history.test.js)", () =
 
       assert.notEqual(exitCode, 0, `${sensitiveCase.marker}: the fixture must remain an actual failed test run`);
       assert.equal(output.includes(sensitiveCase.marker), false, `${sensitiveCase.marker}: marker must be redacted`);
-      for (const field of ["message", "stack", "stderr_tail"]) {
+      for (const field of presentFailureFields(failure)) {
         assert.equal(
           requiredFailureField(failure, field).includes(sensitiveCase.marker),
           false,
@@ -531,13 +586,8 @@ describe("run-tests reporter determinism (compact-record-history.test.js)", () =
         );
       }
       assert.match(JSON.stringify(failure), REDACTED_PATTERN);
-      assert.equal(
-        requiredFailureField(failure, "stderr_tail").includes(expectedStderrContext(sensitiveCase)),
-        true,
-        `${sensitiveCase.marker}: useful stderr context must remain after redaction and tailing`
-      );
       assert.doesNotMatch(output, LIFECYCLE_EVENT_PATTERN);
-      for (const field of ["code", "failure_type", "message", "stack", "stderr_tail"]) {
+      for (const field of ["code", "failure_type", "message", "stack"]) {
         requiredFailureField(failure, field);
       }
       assertFailureCaps(failure);
@@ -560,7 +610,7 @@ describe("run-tests reporter determinism (compact-record-history.test.js)", () =
 
       assert.notEqual(exitCode, 0, `${sensitiveCase.marker}: the fixture must remain an actual failed test run`);
       assert.equal(output.includes(sensitiveCase.marker), false, `${sensitiveCase.marker}: marker must be redacted`);
-      for (const field of ["message", "stack", "stderr_tail"]) {
+      for (const field of presentFailureFields(failure)) {
         assert.equal(
           requiredFailureField(failure, field).includes(sensitiveCase.marker),
           false,
@@ -568,13 +618,8 @@ describe("run-tests reporter determinism (compact-record-history.test.js)", () =
         );
       }
       assert.match(JSON.stringify(failure), REDACTED_PATTERN);
-      assert.equal(
-        requiredFailureField(failure, "stderr_tail").includes(expectedStderrContext(sensitiveCase)),
-        true,
-        `${sensitiveCase.marker}: useful stderr context must remain after redaction and tailing`
-      );
       assert.doesNotMatch(output, LIFECYCLE_EVENT_PATTERN);
-      for (const field of ["code", "failure_type", "message", "stack", "stderr_tail"]) {
+      for (const field of ["code", "failure_type", "message", "stack"]) {
         requiredFailureField(failure, field);
       }
       assertFailureCaps(failure);
@@ -597,7 +642,7 @@ describe("run-tests reporter determinism (compact-record-history.test.js)", () =
 
       assert.notEqual(exitCode, 0, `${sensitiveCase.marker}: the fixture must remain an actual failed test run`);
       assert.equal(output.includes(sensitiveCase.marker), false, `${sensitiveCase.marker}: marker must be redacted`);
-      for (const field of ["message", "stack", "stderr_tail"]) {
+      for (const field of presentFailureFields(failure)) {
         assert.equal(
           requiredFailureField(failure, field).includes(sensitiveCase.marker),
           false,
@@ -605,13 +650,8 @@ describe("run-tests reporter determinism (compact-record-history.test.js)", () =
         );
       }
       assert.match(JSON.stringify(failure), REDACTED_PATTERN);
-      assert.equal(
-        requiredFailureField(failure, "stderr_tail").includes(expectedStderrContext(sensitiveCase)),
-        true,
-        `${sensitiveCase.marker}: useful stderr context must remain after redaction and tailing`
-      );
       assert.doesNotMatch(output, LIFECYCLE_EVENT_PATTERN);
-      for (const field of ["code", "failure_type", "message", "stack", "stderr_tail"]) {
+      for (const field of ["code", "failure_type", "message", "stack"]) {
         requiredFailureField(failure, field);
       }
       assertFailureCaps(failure);
@@ -634,7 +674,7 @@ describe("run-tests reporter determinism (compact-record-history.test.js)", () =
 
       assert.notEqual(exitCode, 0, `${sensitiveCase.marker}: the fixture must remain an actual failed test run`);
       assert.equal(output.includes(sensitiveCase.marker), false, `${sensitiveCase.marker}: marker must never leak`);
-      for (const field of ["message", "stack", "stderr_tail"]) {
+      for (const field of presentFailureFields(failure)) {
         const value = requiredFailureField(failure, field);
         assert.equal(value.includes(sensitiveCase.marker), false, `${sensitiveCase.marker}: ${field} must not leak`);
         assert.match(
@@ -644,7 +684,7 @@ describe("run-tests reporter determinism (compact-record-history.test.js)", () =
         );
       }
       assert.doesNotMatch(output, LIFECYCLE_EVENT_PATTERN);
-      for (const field of ["code", "failure_type", "message", "stack", "stderr_tail"]) {
+      for (const field of ["code", "failure_type", "message", "stack"]) {
         requiredFailureField(failure, field);
       }
       assertFailureCaps(failure);
@@ -660,14 +700,13 @@ describe("run-tests reporter determinism (compact-record-history.test.js)", () =
   });
 
   it("fails closed on the gate's exact malformed-separator reproduction vector", async () => {
-    const marker = "child_malformed_unicode_0729";
-    const payload = `{"Authorization"\\u20:\\u20"Token ${marker}"}`;
-    const { exitCode, output } = await runIntentionalFailureFixture({ marker, payload });
+    const { marker } = GATE_MALFORMED_VECTOR_CASE;
+    const { exitCode, output } = await runIntentionalFailureFixture(GATE_MALFORMED_VECTOR_CASE);
     const failure = failureFromOutput(output);
 
     assert.notEqual(exitCode, 0, "the fixture must remain an actual failed test run");
     assert.equal(output.includes(marker), false, "the gate's exact marker must never leak");
-    for (const field of ["message", "stack", "stderr_tail"]) {
+    for (const field of presentFailureFields(failure)) {
       const value = requiredFailureField(failure, field);
       assert.equal(value.includes(marker), false, `${field} must not retain the gate's marker`);
       assert.match(value, MALFORMED_SENSITIVE_HEADER_PATTERN, `${field} must fail the whole field closed`);
@@ -680,6 +719,77 @@ describe("run-tests reporter determinism (compact-record-history.test.js)", () =
       skip_reasons: {},
       skipped: 0,
     });
+  });
+
+  // The e2e runs above cannot require `stderr_tail`, so these prove it: the
+  // same payloads, with the child's stderr delivered before its result.
+  const ORDERED_STDERR_TAIL_CASES: readonly { cases: readonly SensitiveFailureCase[]; name: string }[] = [
+    { cases: SENSITIVE_FAILURE_CASES, name: "SENSITIVE_FAILURE_CASES" },
+    { cases: STRUCTURED_WHITESPACE_FAILURE_CASES, name: "STRUCTURED_WHITESPACE_FAILURE_CASES" },
+    {
+      cases: STRUCTURED_ESCAPED_UNICODE_WHITESPACE_FAILURE_CASES,
+      name: "STRUCTURED_ESCAPED_UNICODE_WHITESPACE_FAILURE_CASES",
+    },
+    { cases: UNTERMINATED_STRUCTURED_HEADER_CASES, name: "UNTERMINATED_STRUCTURED_HEADER_CASES" },
+    { cases: MALFORMED_SEPARATOR_CASES, name: "MALFORMED_SEPARATOR_CASES" },
+    { cases: [GATE_MALFORMED_VECTOR_CASE], name: "GATE_MALFORMED_VECTOR_CASE" },
+  ];
+
+  for (const { cases, name } of ORDERED_STDERR_TAIL_CASES) {
+    it(`keeps a redacted, bounded stderr_tail for every ${name} entry when stderr precedes the failure`, async () => {
+      for (const sensitiveCase of cases) {
+        // biome-ignore lint/performance/noAwaitInLoops: in-process cases run in order so a failure names its case.
+        const output = await orderedFailureOutput(sensitiveCase);
+        const failure = failureFromOutput(output);
+        const { marker } = sensitiveCase;
+        const stderrTail = requiredFailureField(failure, "stderr_tail");
+
+        assert.equal(output.includes(marker), false, `${marker}: marker must be redacted`);
+        assert.equal(stderrTail.includes(marker), false, `${marker}: stderr_tail must redact the marker`);
+        assert.match(stderrTail, REDACTED_ANY_PATTERN, `${marker}: stderr_tail must show the redaction`);
+        if (cases === MALFORMED_SEPARATOR_CASES || cases[0] === GATE_MALFORMED_VECTOR_CASE) {
+          assert.match(
+            stderrTail,
+            MALFORMED_SENSITIVE_HEADER_PATTERN,
+            `${marker}: stderr_tail must fail the whole field closed`
+          );
+        } else {
+          assert.equal(
+            stderrTail.includes(expectedStderrContext(sensitiveCase)),
+            true,
+            `${marker}: useful stderr context must remain after redaction and tailing`
+          );
+        }
+        assert.doesNotMatch(output, LIFECYCLE_EVENT_PATTERN);
+        assertFailureCaps(failure);
+        assert.deepEqual(structuredNodeSummary(output), {
+          assertions: 1,
+          consumed_mapping_identities: [],
+          failed: 1,
+          passed: 0,
+          skip_reasons: {},
+          skipped: 0,
+        });
+      }
+    });
+  }
+
+  it("attaches only stderr that arrived before the failure, and never leaks stderr that arrived after it", async () => {
+    // The unordered case a loaded host produces: the result reaches the
+    // reporter first. The failure keeps its guaranteed fields, has no
+    // stderr_tail, and the late stderr is not emitted anywhere.
+    const marker = "marker-late-stderr";
+    const output = await reporterOutput([
+      intentionalFailureEvent("failure message context"),
+      { data: { message: `token=${marker}\n` }, type: "test:stderr" },
+    ]);
+    const failure = failureFromOutput(output);
+    assert.equal(failure.stderr_tail, undefined);
+    assert.equal(output.includes(marker), false);
+    assert.deepEqual(presentFailureFields(failure), ["message", "stack"]);
+    for (const field of ["code", "failure_type", "message", "stack"]) {
+      requiredFailureField(failure, field);
+    }
   });
 
   it("redacts a structured header value at the raw input scan bound rather than truncating then leaking", async () => {

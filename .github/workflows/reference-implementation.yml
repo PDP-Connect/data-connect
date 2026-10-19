@@ -26,7 +26,10 @@ name: reference-implementation
 # lands, since pdpp's own reference-implementation.yml will keep evolving until then.
 
 on:
-  pull_request: {}
+  pull_request:
+    # PRs into the test-engineering integration branch are gated by a local
+    # oracle and review; full CI runs once on the batch PR into main.
+    branches-ignore: [testeng/integration]
   merge_group: {}
   push:
     branches: [main, integration/unified-stack]
@@ -108,6 +111,8 @@ jobs:
               .github/workflows/reference-implementation.yml|\
               package.json|\
               package-lock.json|\
+              scripts/test-sandbox/*|\
+              scripts/test-scratch/*|\
               reference-implementation/*|reference-implementation/**)
                 reference_impacting=true
                 break
@@ -204,6 +209,9 @@ jobs:
         env:
           PDPP_OWNER_PASSWORD: reference-implementation-ci
           PDPP_TEST_PROFILE: "memory-default"
+          # The hosted runner is a disposable VM, which is the isolation
+          # boundary here; test-sandbox runs the command directly.
+          TEST_SANDBOX_DISABLE: "1"
         run: npm --prefix reference-implementation run test
 
   check-vendor-freshness:
