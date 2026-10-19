@@ -51,8 +51,13 @@ not OAuth resource aliases. Do not introduce Host-based resource aliases to
 make the latter pass; a future policy change must update this visible scenario.
 
 The committed golden contract was generated from
-`3282ac2f5e4687419bf391c2294d2118dd63fd7c`. Its generator refuses to run from
-another revision. To refresh deliberately, first check out the gate revision so
+`3282ac2f5e4687419bf391c2294d2118dd63fd7c`. One narrow baseline exception removes
+`next_step` and `resource_metadata` from the client `unknown_stream` error shapes:
+[PR #450](https://github.com/PDP-Connect/data-connect/pull/450)
+(`827f8281cfa54d31a3d4c64f7e336200ea4902f7`) changed an ungranted stream denial
+from 401 to Core's 403 `grant_stream_not_allowed`; `pdppError` adds those fields
+only to 401 responses. The generator refuses to run from another revision.
+To refresh deliberately, first check out the gate revision so
 the generator and helper exist, then apply the gate to a detached worktree at
 the exact integration base and run the copied generator there:
 

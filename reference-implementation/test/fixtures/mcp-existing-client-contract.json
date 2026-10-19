@@ -1835,9 +1835,7 @@
                   "properties": {
                     "code": "string",
                     "message": "string",
-                    "next_step": "string",
                     "request_id": "string",
-                    "resource_metadata": "string",
                     "type": "string"
                   }
                 },
@@ -1856,9 +1854,7 @@
               "properties": {
                 "code": "string",
                 "message": "string",
-                "next_step": "string",
                 "request_id": "string",
-                "resource_metadata": "string",
                 "type": "string"
               }
             },
