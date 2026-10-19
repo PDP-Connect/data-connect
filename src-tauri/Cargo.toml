@@ -7,7 +7,7 @@ authors = ["DataConnect Team"]
 license = "MIT"
 repository = ""
 edition = "2021"
-rust-version = "1.88.0"
+rust-version = "1.95.0"
 
 [lib]
 name = "dataconnect_lib"
@@ -48,7 +48,7 @@ tauri-build = { version = "2.5.5", features = [] }
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
-tauri = { version = "2.11", features = ["test", "unstable", "tray-icon"] }
+tauri = { version = "2.12", features = ["test", "unstable", "tray-icon"] }
 tauri-plugin-log = "2"
 tauri-plugin-fs = "2"
 tauri-plugin-dialog = "2"
@@ -59,7 +59,7 @@ tauri-plugin-deep-link = "2"
 tauri-plugin-window-state = "2"
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.13", features = ["json", "stream", "blocking"] }
-zip = "8.6"
+zip = "9.0"
 walkdir = "2"
 futures-util = "0.3"
 base64 = "0.23"
@@ -84,7 +84,7 @@ dotenvy = "0.15"
 mime_guess = "2.0.5"
 flate2 = "1.0"
 fs2 = "0.4"
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 tar = "0.4"
 tempfile = "3"
 tauri-plugin-clipboard-manager = "2.3.2"
@@ -114,12 +114,15 @@ signal-hook = "0.4.4"
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18"
 webkit2gtk = { version = "=2.0.2", features = ["v2_38"] }
+# Must match the soup3 that webkit2gtk links against: webview_cookies.rs passes
+# a soup::Cookie into webkit2gtk's CookieManager. webkit2gtk 2.0.2 (latest, and
+# pinned above for wry) uses soup3 0.5 on glib 0.18; soup3 0.9 is on glib 0.22.
 soup3 = "0.5"
 
 # The WebKitGTK cookie test in unified.rs builds a real webview with the wry
 # that tauri already uses, with the same features.
 [target.'cfg(target_os = "linux")'.dev-dependencies]
-wry = { version = "0.55", default-features = false, features = ["protocol", "os-webview", "linux-body"] }
+wry = { version = "0.57", default-features = false, features = ["os-webview", "linux-body"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # run_lease.rs's process-identity check has no /proc filesystem to read on
@@ -127,13 +130,9 @@ wry = { version = "0.55", default-features = false, features = ["protocol", "os-
 # untouched; Windows already has its own #[cfg(not(unix))] no-op path in the
 # same module and does not need this).
 #
-# Pinned to 0.38, not the newer 0.39 line: 0.39 requires Rust 1.95, above
-# this crate's own declared rust-version = "1.88" (Cargo.toml, package
-# section) and above the 1.94.0 toolchain available in this review's
-# sandbox, which cannot compile 0.39 at all. 0.38.4 requires exactly 1.88,
-# matching this crate's MSRV -- verified against crates.io's published
-# rust_version per release, not assumed.
-sysinfo = { version = "0.38", default-features = false, features = ["system"] }
+# sysinfo 0.39 requires Rust 1.95 (crates.io rust_version), which sets this
+# crate's rust-version in the package section.
+sysinfo = { version = "0.39", default-features = false, features = ["system"] }
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSHTTPCookie", "NSDictionary", "NSString", "NSURL"] }
 objc2-web-kit = { version = "0.3", default-features = false, features = ["std", "block2", "WKWebView", "WKWebViewConfiguration", "WKWebsiteDataStore", "WKHTTPCookieStore"] }
