@@ -109,7 +109,13 @@ ones that exited non-zero, were killed by the per-file watchdog, recorded a
 failure although the child exited 0, or could not be accounted (a rejected
 `todo`, an unexplained skip, a malformed event). An accounting error does not
 stop the run: the file counts as failed with an empty summary, the accounting
-result is still written, and the run then fails naming each file and error. A killed file
+result is still written, and the run then fails with
+`accounting error in <file>: <kind>`, where the kind is `todo-rejected`,
+`unexplained-skip` or `malformed-events`. The full error names a test, which
+test code controls, so it goes only to a private 0600 file next to the
+killed-file tails (named in the line), and on CI nowhere. A runner that a test
+starts writes its diagnostics inside the outer run's directory
+(`PDPP_TEST_DIAGNOSTICS_ROOT`). A killed file
 is a failed file; it no longer aborts the files after it. Its result holds only
 structured fields (`TIMED OUT (idle|hard)` or `KILLED`, the signal and the
 elapsed time), never its raw output and never the name of the last test that
