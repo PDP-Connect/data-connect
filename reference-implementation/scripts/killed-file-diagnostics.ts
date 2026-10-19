@@ -198,6 +198,59 @@ async function pruneRunDirectories(
 }
 
 /**
+ * One preparation per run directory in this process. Killed files of one run
+ * can finish at the same moment; without a shared preparation the second
+ * writer could find the run directory made but not yet marked, refuse it and
+ * lose its tail.
+ */
+const runDirectoryPreparations = new Map<string, Promise<boolean>>();
+
+function prepareRunDirectory(runDir: string, nowMs: number): Promise<boolean> {
+	let preparation = runDirectoryPreparations.get(runDir);
+	if (preparation === undefined) {
+		preparation = createRunDirectory(runDir, nowMs).catch(() => false);
+		runDirectoryPreparations.set(runDir, preparation);
+	}
+	return preparation;
+}
+
+/**
+ * Create, mark and chmod the run directory and its root, then prune old runs.
+ * True when `runDir` is ready to write into: a real directory the runner
+ * marked, under a real root directory.
+ */
+async function createRunDirectory(
+	runDir: string,
+	nowMs: number,
+): Promise<boolean> {
+	const root = dirname(runDir);
+	const firstCreated = await mkdir(root, { mode: 0o700, recursive: true });
+	if (!(await isRealDirectory(root))) {
+		return false;
+	}
+	if (firstCreated !== undefined) {
+		await markCreatedRunDirectories(firstCreated, root);
+	}
+	await chmod(root, 0o700);
+	try {
+		await mkdir(runDir, { mode: 0o700 });
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+			throw error;
+		}
+		// Made earlier: by a nested runner's mkdir -p (which marks it), or not by
+		// this runner at all.
+		return (await isRealDirectory(runDir)) && (await hasRunMarker(runDir));
+	}
+	await writeFile(join(runDir, RUN_MARKER_FILE), "", {
+		flag: "wx",
+		mode: 0o600,
+	});
+	await pruneRunDirectories(root, basename(runDir), nowMs);
+	return true;
+}
+
+/**
  * Write `tail` for `filePath` where only its owner can read it: a 0600 file in
  * the run's 0700 directory `runDir`, under a 0700 root (its parent). The caller
  * passes only a root from killedFileDiagnosticsRoot, which the runner owns. The
@@ -214,34 +267,7 @@ export async function writeKilledFileTail(
 	nowMs: number = Date.now(),
 ): Promise<string | undefined> {
 	try {
-		const root = dirname(runDir);
-		const firstCreated = await mkdir(root, { mode: 0o700, recursive: true });
-		if (!(await isRealDirectory(root))) {
-			return undefined;
-		}
-		if (firstCreated !== undefined) {
-			await markCreatedRunDirectories(firstCreated, root);
-		}
-		await chmod(root, 0o700);
-		let created = true;
-		try {
-			await mkdir(runDir, { mode: 0o700 });
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
-				throw error;
-			}
-			created = false;
-		}
-		if (created) {
-			await writeFile(join(runDir, RUN_MARKER_FILE), "", {
-				flag: "wx",
-				mode: 0o600,
-			});
-			await pruneRunDirectories(root, basename(runDir), nowMs);
-		} else if (
-			!(await isRealDirectory(runDir)) ||
-			!(await hasRunMarker(runDir))
-		) {
+		if (!(await prepareRunDirectory(runDir, nowMs))) {
 			return undefined;
 		}
 		const name = `${basename(filePath).replace(/[^\w.-]/g, "_")}-${randomBytes(4).toString("hex")}.log`;

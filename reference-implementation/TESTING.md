@@ -74,6 +74,13 @@ under `--test-isolation=none`, prints it on purpose. This is a known limit. Issu
 [#536](https://github.com/PDP-Connect/data-connect/issues/536) tracks the hardening follow-up: a reporter
 channel that test code cannot write.
 
+Two more limits are accepted under the same threat model, because each needs write access to the private
+diagnostics tree:
+
+- A directory in that tree that is swapped for a symlink between the runner's check and its write can
+  redirect the write.
+- A forged `.pdpp-ri-run` marker makes pruning treat a directory as a runner-created run.
+
 ## Rules
 
 - The oracle for a PR into `testeng/integration` that changes RI code is the full RI gate in the sandbox (`PDPP_TEST_PROFILE=memory-default npm test`, plus `npm run test:postgres` for storage, search or records changes), not `test:fast`.

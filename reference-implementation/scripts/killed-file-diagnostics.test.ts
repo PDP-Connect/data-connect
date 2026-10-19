@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import {
 	chmod,
 	mkdir,
@@ -16,6 +17,9 @@ import {
 import { homedir, tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
+
 import {
 	KEEP_DAYS,
 	KEEP_RUNS,
@@ -24,6 +28,8 @@ import {
 	runDirectoryName,
 	writeKilledFileTail,
 } from "./killed-file-diagnostics.ts";
+
+const execFileAsync = promisify(execFile);
 
 test("the diagnostics root is a per-user state directory, and there is none on CI", () => {
 	assert.equal(
@@ -379,6 +385,71 @@ test("a regular file named run-* is not pruned", async () => {
 			),
 		);
 		assert.ok((await readdir(root)).includes(name), "the file is left alone");
+	} finally {
+		await rm(root, { force: true, recursive: true });
+	}
+});
+
+// Two killed files of one run finish together. The first writer is held just
+// before it writes the run's marker; on the old code the second writer then
+// found the run directory made but unmarked, refused it, and lost its tail.
+// A child process mocks node:fs/promises to hold that one write, so the
+// interleaving is fixed rather than left to timing.
+const MARKER_RACE_PROBE = `
+import * as fs from "node:fs/promises";
+import { join } from "node:path";
+import { mock } from "node:test";
+let hold;
+const writeFile = async (...args) => {
+	if (hold && String(args[0]).endsWith(".pdpp-ri-run")) await hold(args[0]);
+	return fs.writeFile(...args);
+};
+mock.module("node:fs/promises", { namedExports: { ...fs, writeFile } });
+const m = await import(process.argv[2]);
+const runDir = join(process.argv[3], m.runDirectoryName());
+let release;
+const gate = new Promise((resolve) => { release = resolve; });
+let entered;
+const hit = new Promise((resolve) => { entered = resolve; });
+hold = async () => { hold = undefined; entered(); await gate; };
+const first = m.writeKilledFileTail(runDir, "test/a.test.ts", Buffer.from("a"));
+await hit;
+const second = m.writeKilledFileTail(runDir, "test/b.test.ts", Buffer.from("b"));
+// The old code settles the second writer without the held write; the fixed
+// code waits for the shared preparation, so release after a bound.
+await Promise.race([second, new Promise((resolve) => setTimeout(resolve, 1000))]);
+release();
+const saved = (await Promise.all([first, second])).map((path) => path !== undefined);
+process.stdout.write(JSON.stringify(saved));
+`;
+
+test("two killed files of one run that finish together both keep their tails", async () => {
+	const root = await mkdtemp(join(tmpdir(), "killed-file-diagnostics-"));
+	try {
+		const probe = join(root, "probe.mjs");
+		await writeFile(probe, MARKER_RACE_PROBE);
+		const modulePath = fileURLToPath(
+			new URL("./killed-file-diagnostics.ts", import.meta.url),
+		);
+		const { stdout } = await execFileAsync(
+			process.execPath,
+			[
+				"--experimental-test-module-mocks",
+				"--no-warnings",
+				probe,
+				modulePath,
+				root,
+			],
+			{
+				encoding: "utf8",
+				env: { ...process.env, NODE_TEST_CONTEXT: undefined },
+			},
+		);
+		assert.deepEqual(
+			JSON.parse(stdout),
+			[true, true],
+			"both writers saved their tail",
+		);
 	} finally {
 		await rm(root, { force: true, recursive: true });
 	}
