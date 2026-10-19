@@ -2680,63 +2680,6 @@ test("device-exporter diagnostics scope heartbeat, ingest, and local-collector g
     );
     assert.equal(ingestFirst.status, 201);
 
-    // The first device also ingests coverage diagnostics. The records carry
-    // a `reason` with a planted path+secret; the projection must surface
-    // only the safe store/stream/status triple and never the reason text.
-    const coverageBatch = {
-      batch_id: "diag-coverage-1",
-      batch_seq: 2,
-      body_hash: "hash-diag-coverage-1",
-      connector_id: first.connector_id,
-      device_id: first.device_id,
-      records: [
-        {
-          data: {
-            id: "sessions:collected",
-            reason: "declared stream at /home/user owner/.codex/sessions token=coverage-secret",
-            status: "collected",
-            store: "sessions",
-            stream: "sessions",
-          },
-          emitted_at: "2026-05-20T12:00:00.000Z",
-          record_key: "sessions:collected",
-          stream: "coverage_diagnostics",
-        },
-        {
-          data: {
-            id: "auth:excluded",
-            reason: "auth-adjacent /home/user owner/.codex/auth.json",
-            status: "excluded",
-            store: "auth",
-            stream: null,
-          },
-          emitted_at: "2026-05-20T12:00:00.000Z",
-          record_key: "auth:excluded",
-          stream: "coverage_diagnostics",
-        },
-        {
-          data: {
-            id: "logs:deferred",
-            reason: "redaction pending",
-            status: "deferred",
-            store: "logs",
-            stream: "logs",
-          },
-          emitted_at: "2026-05-20T12:00:00.000Z",
-          record_key: "logs:deferred",
-          stream: "coverage_diagnostics",
-        },
-      ],
-      source_instance_id: first.source_instance_id,
-    };
-    coverageBatch.body_hash = bodyHash(coverageBatch.records);
-    const ingestCoverage = await postJson(
-      `${asUrl}/_ref/device-exporters/${encodeURIComponent(first.device_id)}/ingest-batches`,
-      coverageBatch,
-      authHeaders(first.device_token)
-    );
-    assert.equal(ingestCoverage.status, 201, JSON.stringify(ingestCoverage.body));
-
     // Only the second device reports a local-collector gap. The first
     // device must show zero pending local-collector gaps even though
     // both devices share the `codex` connector type.
@@ -2815,9 +2758,8 @@ test("device-exporter diagnostics scope heartbeat, ingest, and local-collector g
     assert.equal(diagnosticsJson.includes("/Users/user owner"), false);
     assert.ok(diagnosticsJson.includes("[REDACTED"));
 
-    // Ingest counts scoped per source instance: 1 message record plus 3
-    // coverage-diagnostic records across two batches.
-    assert.equal(firstSource.accepted_record_count, 4);
+    // Ingest counts scoped per source instance.
+    assert.equal(firstSource.accepted_record_count, 1);
     assert.ok(firstSource.last_ingest_at);
     assert.equal(secondSource.accepted_record_count, 0);
     assert.equal(secondSource.last_ingest_at, null);
@@ -2841,30 +2783,6 @@ test("device-exporter diagnostics scope heartbeat, ingest, and local-collector g
     assert.deepEqual(secondSource.local_collector_gaps.reasons, ["policy_budget"]);
     assert.equal(secondSource.local_collector_gaps.unreliable, false);
     assert.ok(secondSource.local_collector_gaps.last_updated_at);
-
-    // Local-collector coverage (Section 5.3) surfaces per source instance,
-    // scoped to the connector instance, with only safe store/stream/status.
-    assert.ok(firstSource.local_collector_coverage);
-    assert.equal(firstSource.local_collector_coverage.observed, true);
-    assert.equal(firstSource.local_collector_coverage.store_count, 3);
-    assert.equal(firstSource.local_collector_coverage.fully_accounted, true);
-    assert.deepEqual(firstSource.local_collector_coverage.unaccounted_stores, []);
-    assert.equal(firstSource.local_collector_coverage.counts_by_status.collected, 1);
-    assert.equal(firstSource.local_collector_coverage.counts_by_status.excluded, 1);
-    assert.equal(firstSource.local_collector_coverage.counts_by_status.deferred, 1);
-    assert.equal(firstSource.local_collector_coverage.by_store.auth, "excluded");
-    assert.equal(firstSource.local_collector_coverage.by_store.logs, "deferred");
-    // The second device requested no coverage; absence reads as absence.
-    const secondCoverage = mustExist(secondSource.local_collector_coverage, "second source coverage must exist");
-    assert.equal(secondCoverage.observed, false);
-    assert.equal(secondCoverage.store_count, 0);
-    assert.equal(secondCoverage.fully_accounted, false);
-    // The coverage `reason` free-text (with its planted path/secret) must
-    // never reach the diagnostics surface.
-    assert.equal(diagnosticsJson.includes("coverage-secret"), false);
-    assert.equal(diagnosticsJson.includes("redaction pending"), false);
-    assert.equal(diagnosticsJson.includes(".codex/sessions"), false);
-    assert.equal(diagnosticsJson.includes(".codex/auth.json"), false);
 
     // Recovering the second device's gap clears its per-source backlog
     // without disturbing the first device.
@@ -3087,14 +3005,6 @@ interface DiagnosticsSourceInstance extends Row {
   last_heartbeat_status: string | null;
   last_ingest_at: string | null;
   local_binding_name: string;
-  local_collector_coverage: {
-    observed: boolean;
-    store_count: number;
-    fully_accounted: boolean;
-    unaccounted_stores: string[];
-    counts_by_status: Record<string, number>;
-    by_store: Record<string, string>;
-  } | null;
   local_collector_gaps: {
     pending_count: number;
     reasons: string[];

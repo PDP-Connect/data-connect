@@ -11,7 +11,6 @@ import { after as afterTest, test } from "node:test";
 import { buildAgentVersion } from "./collector-build-info.ts";
 import {
   buildCollectorStartMessage,
-  buildTerminalCollectionFacts,
   COLLECTOR_STDERR_MAX_BYTES,
   type CollectorConnectorSpec,
   CollectorStateReadError,
@@ -68,20 +67,6 @@ test("buildCollectorStartMessage can request explicit stream backfills", () => {
     streamsToBackfill: ["attachments"],
     type: "START",
   });
-});
-
-test("buildTerminalCollectionFacts preserves raw coverage statuses without inventing a local policy", () => {
-  const facts = buildTerminalCollectionFacts(
-    new Map([
-      ["messages-store", { status: "collected", stream: "messages" }],
-      ["rules-store", { status: "deferred", stream: "rules" }],
-      ["rules-shadow", { status: "unaccounted", stream: "rules" }],
-    ])
-  );
-  assert.deepEqual(facts, [
-    { coverage_statuses: ["collected"], stream: "messages" },
-    { coverage_statuses: ["deferred", "unaccounted"], stream: "rules" },
-  ]);
 });
 
 test("buildCollectorStartMessage can scope a stream to explicit resources", () => {
@@ -197,123 +182,6 @@ test("runCollectorConnector gives changed emitted_at records a distinct local ba
 
     assert.notEqual(first.bodyHash, second.bodyHash, "server idempotency hash changes when emitted_at changes");
     assert.notEqual(first.batchId, second.batchId, "batch id must change with the body hash to avoid false conflicts");
-  } finally {
-    await harness.close();
-  }
-});
-
-test("runCollectorConnector summarizes coverage completeness distinct from declared-stream success", async () => {
-  const harness = await startCollectorHarness({ priorState: {} });
-  try {
-    // The connector reports a clean DONE for its declared stream while the
-    // coverage diagnostic shows a mix of accounted statuses — collected,
-    // excluded, deferred, and missing. Declared-stream success must not
-    // flatten that completeness picture (Section 5.2).
-    const fixture = await writeFixtureConnector({
-      script: `
-        await new Promise((r) => {
-          let buf = "";
-          process.stdin.on("data", (c) => { buf += c; if (buf.includes("\\n")) r(); });
-        });
-        const coverage = [
-          { store: "sessions", stream: "sessions", status: "collected", reason: "declared stream" },
-          { store: "auth", stream: null, status: "excluded", reason: "auth-adjacent" },
-          { store: "logs", stream: "logs", status: "deferred", reason: "redaction pending" },
-          { store: "downloads", stream: "downloads", status: "missing", reason: "not present" },
-        ];
-        process.stdout.write(JSON.stringify({
-          type: "RECORD", stream: "sessions", key: "s-1",
-          data: { id: "s-1" }, emitted_at: new Date().toISOString(),
-        }) + "\\n");
-        for (const c of coverage) {
-          process.stdout.write(JSON.stringify({
-            type: "RECORD", stream: "coverage_diagnostics", key: "coverage:" + c.store,
-            data: { id: "coverage:" + c.store, ...c }, emitted_at: new Date().toISOString(),
-          }) + "\\n");
-        }
-        process.stdout.write(JSON.stringify({ type: "DONE", status: "succeeded", records_emitted: 5 }) + "\\n");
-      `,
-    });
-
-    const result = await runCollectorConnector({
-      baseUrl: harness.url,
-      connector: {
-        args: [fixture],
-        command: "node",
-        connector_id: "fixture-coverage",
-        protocol_capabilities: [],
-        runtime_requirements: { bindings: {} },
-        streams: ["sessions", "coverage_diagnostics"],
-      },
-      deviceId: "device-1",
-      deviceToken: "device-token",
-      executionRoot: TEST_EXECUTION_ROOT,
-      queuePath: await tempQueuePath(),
-      sourceInstanceId: "src-coverage",
-    });
-
-    // Declared-stream success is reported on `done`.
-    assert.equal(result.done?.status, "succeeded");
-
-    // Completeness is a separate, non-failing signal.
-    assert.ok(result.completeness, "expected a completeness summary");
-    assert.equal(result.completeness?.storeCount, 4);
-    assert.equal(result.completeness?.fullyAccounted, true);
-    assert.deepEqual(result.completeness?.unaccountedStores, []);
-    assert.equal(result.completeness?.countsByStatus.collected, 1);
-    assert.equal(result.completeness?.countsByStatus.excluded, 1);
-    assert.equal(result.completeness?.countsByStatus.deferred, 1);
-    assert.equal(result.completeness?.countsByStatus.missing, 1);
-    assert.equal(result.completeness?.byStore.auth, "excluded");
-    assert.equal(result.completeness?.byStore.downloads, "missing");
-
-    // The summary must not carry paths, payloads, or the reason free-text.
-    const json = JSON.stringify(result.completeness);
-    assert.equal(json.includes("reason"), false);
-    assert.equal(json.includes("redaction pending"), false);
-  } finally {
-    await harness.close();
-  }
-});
-
-test("runCollectorConnector reports null completeness when no coverage diagnostic is observed", async () => {
-  const harness = await startCollectorHarness({ priorState: {} });
-  try {
-    const fixture = await writeFixtureConnector({
-      script: `
-        await new Promise((r) => {
-          let buf = "";
-          process.stdin.on("data", (c) => { buf += c; if (buf.includes("\\n")) r(); });
-        });
-        process.stdout.write(JSON.stringify({
-          type: "RECORD", stream: "messages", key: "m-1",
-          data: { id: "m-1" }, emitted_at: new Date().toISOString(),
-        }) + "\\n");
-        process.stdout.write(JSON.stringify({ type: "DONE", status: "succeeded", records_emitted: 1 }) + "\\n");
-      `,
-    });
-
-    const result = await runCollectorConnector({
-      baseUrl: harness.url,
-      connector: {
-        args: [fixture],
-        command: "node",
-        connector_id: "fixture-no-coverage",
-        protocol_capabilities: [],
-        runtime_requirements: { bindings: {} },
-        streams: ["messages"],
-      },
-      deviceId: "device-1",
-      deviceToken: "device-token",
-      executionRoot: TEST_EXECUTION_ROOT,
-      queuePath: await tempQueuePath(),
-      sourceInstanceId: "src-no-coverage",
-    });
-
-    // A run that does not request coverage reports absence as absence, not
-    // as "complete".
-    assert.equal(result.done?.status, "succeeded");
-    assert.equal(result.completeness, null);
   } finally {
     await harness.close();
   }
@@ -777,52 +645,6 @@ test("runCollectorConnector under the default policy retains a clean run's ackno
     } finally {
       outbox.close();
     }
-  } finally {
-    await harness.close();
-  }
-});
-
-test("runCollectorConnector flags an unrecognized coverage status as unaccounted", async () => {
-  const harness = await startCollectorHarness({ priorState: {} });
-  try {
-    const fixture = await writeFixtureConnector({
-      script: `
-        await new Promise((r) => {
-          let buf = "";
-          process.stdin.on("data", (c) => { buf += c; if (buf.includes("\\n")) r(); });
-        });
-        process.stdout.write(JSON.stringify({
-          type: "RECORD", stream: "coverage_diagnostics", key: "mystery:weird",
-          data: { id: "mystery:weird", store: "mystery", stream: null, status: "weird-new-status" },
-          emitted_at: new Date().toISOString(),
-        }) + "\\n");
-        process.stdout.write(JSON.stringify({ type: "DONE", status: "succeeded", records_emitted: 1 }) + "\\n");
-      `,
-    });
-
-    const result = await runCollectorConnector({
-      baseUrl: harness.url,
-      connector: {
-        args: [fixture],
-        command: "node",
-        connector_id: "fixture-unaccounted",
-        protocol_capabilities: [],
-        runtime_requirements: { bindings: {} },
-        streams: ["coverage_diagnostics"],
-      },
-      deviceId: "device-1",
-      deviceToken: "device-token",
-      executionRoot: TEST_EXECUTION_ROOT,
-      queuePath: await tempQueuePath(),
-      sourceInstanceId: "src-unaccounted",
-    });
-
-    // An unknown status from a future tool release surfaces as unaccounted,
-    // so declared-stream success cannot read as complete.
-    assert.equal(result.done?.status, "succeeded");
-    assert.equal(result.completeness?.fullyAccounted, false);
-    assert.deepEqual(result.completeness?.unaccountedStores, ["mystery"]);
-    assert.equal(result.completeness?.countsByStatus.unaccounted, 1);
   } finally {
     await harness.close();
   }
@@ -1328,45 +1150,6 @@ function seedDeadLetteredRecordBatch(input: {
     assert.ok(claim, "seeded batch must be claimable");
     outbox.deadLetter({
       error: input.error,
-      holder: "seed",
-      id: claim.id,
-      leaseEpoch: claim.lease_epoch,
-    });
-  } finally {
-    outbox.close();
-  }
-  return rowId;
-}
-
-function seedDeadLetteredTerminalCommit(input: {
-  connectorId: string;
-  queuePath: string;
-  sourceInstanceId: string;
-}): string {
-  const rowId = `${input.sourceInstanceId}:old-terminal`;
-  const outbox = new LocalDeviceOutbox({ path: input.queuePath });
-  try {
-    outbox.enqueue({
-      id: rowId,
-      kind: "terminal_run_commit",
-      payload: {
-        collection_boundary: "unscoped",
-        commit_id: "old-terminal-commit",
-        connector_id: input.connectorId,
-        connector_instance_id: "cin_fake",
-        device_id: "device-1",
-        run_id: "old-run",
-        source_instance_id: input.sourceInstanceId,
-        state_delta: {},
-        terminal_facts: [],
-        version: 1,
-      },
-      sourceInstanceId: input.sourceInstanceId,
-    });
-    const [claim] = outbox.claimReady({ holder: "seed", leaseMs: 60_000, sourceInstanceId: input.sourceInstanceId });
-    assert.ok(claim);
-    outbox.deadLetter({
-      error: "local device request failed: 400 invalid_request",
       holder: "seed",
       id: claim.id,
       leaseEpoch: claim.lease_epoch,
@@ -3934,77 +3717,6 @@ test("runCollectorConnector preserves terminal local-device dead letters", async
   }
 });
 
-test("runCollectorConnector rebuilds a rejected terminal commit after a completed pass", async () => {
-  const harness = await startCollectorHarness({ priorState: {} });
-  try {
-    const queuePath = await tempQueuePath();
-    const oldId = seedDeadLetteredTerminalCommit({
-      connectorId: "fixture-terminal-rebuild",
-      queuePath,
-      sourceInstanceId: "src-terminal-rebuild",
-    });
-    const fixture = await writeFixtureConnector({
-      script: `
-        await new Promise((r) => {
-          let buf = "";
-          process.stdin.on("data", (c) => { buf += c; if (buf.includes("\\n")) r(); });
-        });
-        process.stdout.write(JSON.stringify({
-          type: "RECORD", stream: "coverage_diagnostics", key: "coverage:messages",
-          data: { id: "coverage:messages", store: "messages", stream: "messages", status: "collected" },
-          emitted_at: new Date().toISOString(),
-        }) + "\\n");
-        process.stdout.write(JSON.stringify({
-          type: "STATE", stream: "coverage_diagnostics", cursor: { fetched_at: new Date().toISOString() },
-        }) + "\\n");
-        process.stdout.write(JSON.stringify({ type: "DONE", status: "succeeded", records_emitted: 1 }) + "\\n");
-      `,
-    });
-
-    const result = await runCollectorConnector({
-      baseUrl: harness.url,
-      connector: {
-        args: [fixture],
-        command: "node",
-        connector_id: "fixture-terminal-rebuild",
-        protocol_capabilities: [],
-        runtime_requirements: { bindings: {} },
-        streams: ["messages", "coverage_diagnostics"],
-      },
-      deviceId: "device-1",
-      deviceToken: "device-token",
-      executionRoot: TEST_EXECUTION_ROOT,
-      queuePath,
-      runId: "replacement-run",
-      sourceInstanceId: "src-terminal-rebuild",
-    });
-
-    assert.equal(result.skippedScanForBacklog, false);
-    assert.equal(result.done?.status, "succeeded");
-    assert.equal(result.outboxSummary.deadLetter, 0);
-    assert.equal(harness.terminalCommits.length, 1, "the old terminal bytes must not be retried");
-    assert.equal(harness.terminalCommits[0]?.run_id, "replacement-run");
-    assert.notEqual(harness.terminalCommits[0]?.commit_id, "old-terminal-commit");
-    assert.equal(harness.ingestedBatches.length, 1, "the completed pass must retain and upload its record batch");
-
-    const after = new LocalDeviceOutbox({ path: queuePath });
-    try {
-      const old = after.get(oldId);
-      assert.equal(old?.status, "dead_letter", "old evidence remains retained, not deleted or rewritten");
-      assert.equal(after.isTerminalCommitSuperseded(oldId), true);
-      assert.equal(after.summary({ sourceInstanceId: "src-terminal-rebuild" }).deadLetter, 0);
-      assert.equal(
-        after.list({ sourceInstanceId: "src-terminal-rebuild" }).filter((item) => item.kind === "record_batch").length,
-        1
-      );
-    } finally {
-      after.close();
-    }
-  } finally {
-    await harness.close();
-  }
-});
-
 test("runCollectorConnector drains a prior pass's enqueued backlog before scanning again", async () => {
   // Models crash-after-enqueue-before-upload-acknowledgement across two
   // runner invocations using one harness whose ingest can be toggled.
@@ -5259,7 +4971,7 @@ test("runCollectorConnector does not let a dead-lettered gap row permanently ski
   }
 });
 
-test("runCollectorConnector recovers acknowledged local gaps only after a successful coverage STATE commit", async () => {
+test("runCollectorConnector recovers acknowledged local gaps only after a successful STATE commit", async () => {
   const harness = await startCollectorHarness({ priorState: {} });
   try {
     const queuePath = await tempQueuePath();
@@ -5307,11 +5019,6 @@ test("runCollectorConnector recovers acknowledged local gaps only after a succes
           cursor: "cursor-after-recovery",
         }) + "\\n");
         process.stdout.write(JSON.stringify({
-          type: "STATE",
-          stream: "coverage_diagnostics",
-          cursor: { fetched_at: new Date().toISOString() },
-        }) + "\\n");
-        process.stdout.write(JSON.stringify({
           type: "DONE",
           status: "succeeded",
           records_emitted: 0,
@@ -5327,7 +5034,7 @@ test("runCollectorConnector recovers acknowledged local gaps only after a succes
         connector_id: "fixture-recovered-gap",
         protocol_capabilities: [],
         runtime_requirements: { bindings: {} },
-        streams: ["messages", "coverage_diagnostics"],
+        streams: ["messages"],
       },
       deviceId: "device-1",
       deviceToken: "device-token",
@@ -5339,10 +5046,6 @@ test("runCollectorConnector recovers acknowledged local gaps only after a succes
 
     assert.equal(result.skippedScanForBacklog, false);
     assert.equal(result.flushedState?.messages, "cursor-after-recovery");
-    assert.equal(
-      typeof (result.flushedState?.coverage_diagnostics as { fetched_at?: unknown } | undefined)?.fetched_at,
-      "string"
-    );
     assert.equal(harness.gapRecoveries.length, 1);
     assert.equal(harness.gapRecoveries[0]?.reason, "policy_budget");
     assert.equal(harness.gapRecoveries[0]?.recovered_run_id, "run-recovered-gap-2");

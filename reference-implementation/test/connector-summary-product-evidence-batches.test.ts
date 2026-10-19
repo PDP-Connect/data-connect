@@ -8,7 +8,6 @@ import { join } from "node:path";
 import test from "node:test";
 import Database from "./helpers/sqlite-driver.ts";
 import { closeDb, initDb } from "../server/db.ts";
-import { readCommittedLocalCoverageDiagnosticsByConnectionIds } from "../server/records.ts";
 import {
   listRetainedSizeConnectionsByInstanceIds,
   listRetainedSizeStreamsByInstanceIds,
@@ -48,7 +47,6 @@ function readAll(ids: readonly string[]) {
   return Promise.all([
     Promise.resolve(acquisition.listByConnectionIds(ids, { limit: 5 })),
     credentials.getMetadataByInstanceIds(ids),
-    readCommittedLocalCoverageDiagnosticsByConnectionIds(ids),
     listSourceInstanceHeartbeatsByConnectionIds(ids),
     listRetainedSizeConnectionsByInstanceIds(ids),
     listRetainedSizeStreamsByInstanceIds(ids),
@@ -68,7 +66,7 @@ test("product-evidence SQLite reads stay page-bounded and chunk above the bind f
   withTempDb(async () => {
     const one = await countRawPrepareCalls(() => readAll(["cin_0"]));
     const many = await countRawPrepareCalls(() => readAll(Array.from({ length: 1001 }, (_, index) => `cin_${index}`)));
-    // Six axes each issue one query at N=1 and two chunks at N=1001. The
+    // Five axes each issue one query at N=1 and two chunks at N=1001. The
     // growth is therefore bounded by the number of axes, never the number of
     // connection ids; a per-connection read would be roughly 1000x larger.
     assert.ok(many.calls <= one.calls + 8, `expected chunk-bounded SQL, got N=1:${one.calls}, N=1001:${many.calls}`);

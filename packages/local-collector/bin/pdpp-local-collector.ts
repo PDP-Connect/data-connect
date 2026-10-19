@@ -170,14 +170,6 @@ export function getBundledConnector(connectorId: string): BundledConnectorEntry 
   return getBundledConnectorFrom(BUNDLED_CONNECTORS, normalizeConnectorId(connectorId));
 }
 
-/**
- * Stream name the local source inventory emits coverage records on. Kept
- * here (not imported) because the CLI only needs the literal to ask the
- * durable outbox "has this lane ever carried a coverage diagnostic?".
- * Mirrors `COVERAGE_DIAGNOSTICS_STREAM` in the runner.
- */
-const COVERAGE_DIAGNOSTICS_STREAM = "coverage_diagnostics";
-
 const LOCAL_COLLECTOR_PACKAGE_NAME = "@pdpp/local-collector";
 const LOCAL_COLLECTOR_PACKAGE_VERSION_FALLBACK = "0.0.0";
 const LOCAL_COLLECTOR_PROFILE_DIR_ENV = "PDPP_LOCAL_COLLECTOR_PROFILE_DIR";
@@ -1444,20 +1436,6 @@ export async function runLogout(options: CliOptions, deps: RunLogoutDeps = {}): 
 
 export interface LocalCollectorRunOutput extends Omit<CollectorRunResult, "flushedState" | "priorState"> {
   /**
-   * One honest, operator-facing line stating whether THIS run committed
-   * terminal coverage evidence — i.e. whether the connector exhaustively
-   * enumerated the declared boundary and the server now holds proof of it —
-   * or whether the run was partial (interrupted, sample-limited, or stopped
-   * by the per-run scan budget) and therefore recorded no completion claim.
-   * Drawn from the exact same gate `collector-runner.ts` uses to decide
-   * whether to call `reportTerminalCollection`
-   * (`done.status === "succeeded" && !scanBudgetExceeded &&
-   * completeness !== null`), so this note can never say "complete" when the
-   * server was never told so. Identical logic for every connector — no
-   * connector-id branch decides this sentence.
-   */
-  coverage_note: string;
-  /**
    * One honest, operator-facing line describing the drain outcome of this
    * invocation. A successful connector pass (`done.status === "succeeded"`)
    * does NOT imply the outbox is empty: the run can succeed on the source
@@ -1477,8 +1455,6 @@ export interface LocalCollectorRunOutput extends Omit<CollectorRunResult, "flush
    * Drain-state lifecycle derived from {@link CollectorRunResult.outboxSummary}
    * using the same taxonomy the `status`/`doctor` surface reports, so the run
    * path and the inspect path never disagree about whether the lane is idle.
-   * Coverage is intentionally NOT folded in here (the run separately reports
-   * `completeness`); this axis is purely "did the queue drain?".
    */
   lifecycle_state: LocalCollectorLifecycleState;
   priorState: LocalCollectorStateSummary | null;
@@ -1510,20 +1486,11 @@ export interface LocalCollectorCursorSummary {
 
 export function summarizeRunResultForCli(result: CollectorRunResult): LocalCollectorRunOutput {
   const summary = result.outboxSummary;
-  // Derive the drain-state lifecycle from the post-drain outbox summary using
-  // the shared taxonomy. Coverage is a separate axis (reported via
-  // `completeness` and surfaced by `doctor`), so it is suppressed here with a
-  // null observation; this verdict is purely about queue drain state.
-  const lifecycleState = deriveLocalCollectorLifecycleState({
-    coverageObserved: null,
-    recordBatchCount: 0,
-    summary,
-  });
+  const lifecycleState = deriveLocalCollectorLifecycleState({ summary });
   const openWork = pendingOpenWork(summary);
   const drained = openWork === 0;
   return {
     ...result,
-    coverage_note: runCoverageNote(result),
     drain_note: runDrainNote(result, summary, drained),
     drained,
     flushedState: summarizeCollectorState(result.flushedState),
@@ -1576,42 +1543,6 @@ function runDrainNote(result: CollectorRunResult, summary: LocalDeviceOutboxSumm
   return `Run succeeded on the source but the outbox is NOT fully drained: ${parts.join(", ")}.${scanNote}`;
 }
 
-/**
- * One honest line on whether this run's completion is provable, not just
- * "the process exited zero". Mirrors `collector-runner.ts`'s own
- * `reportTerminalCollection` gate exactly, so this text and the server's
- * committed evidence can never disagree: a `--sample`/interrupted/
- * budget-stopped pass never claims exhaustive coverage of the declared
- * boundary, regardless of how many records it happened to collect.
- */
-function runCoverageNote(result: CollectorRunResult): string {
-  if (result.scanBudgetExceeded) {
-    return (
-      "Coverage NOT committed: the connector was stopped by the per-run scan budget before it finished " +
-      "enumerating the declared boundary. Re-run to continue; only a run that finishes without hitting the " +
-      "budget can commit a completion claim."
-    );
-  }
-  if (result.done?.status !== "succeeded") {
-    return (
-      "Coverage NOT committed: this run did not finish (interrupted or the connector exited without " +
-      "reporting success). Records already collected before the stop were still delivered, but no completion " +
-      "claim was recorded for the declared boundary — re-run to finish the enumeration."
-    );
-  }
-  if (!result.completeness) {
-    return (
-      "Coverage NOT committed: the connector finished but reported no coverage diagnostics for this pass, " +
-      "so no completion claim was recorded."
-    );
-  }
-  return result.completeness.fullyAccounted
-    ? "Coverage committed: the connector exhaustively enumerated the declared boundary and every requested " +
-        "stream is fully accounted for."
-    : `Coverage committed, but ${result.completeness.unaccountedStores.length} store(s) are unaccounted for ` +
-        `(${result.completeness.unaccountedStores.join(", ")}) — see \`doctor\` for detail.`;
-}
-
 function pendingOpenWork(summary: LocalDeviceOutboxSummary): number {
   return summary.ready + summary.leased + summary.deadLetter;
 }
@@ -1660,27 +1591,6 @@ export interface LocalOutboxStatusOutput {
     device_id_configured: boolean;
     device_token_configured: boolean;
   };
-  /**
-   * Local coverage-diagnostic observation for this lane, derived from the
-   * durable outbox alone (never the server). A drained lane that has carried
-   * real records but never a `coverage_diagnostics` record is the local
-   * shape behind the dashboard's stuck `coverage_unknown`.
-   *
-   * - `observed`: true once any non-dead-letter `record_batch` row has
-   *   carried a `coverage_diagnostics` record. `null` when the surface cannot
-   *   answer it: either no connection id was supplied (the scan cannot be
-   *   scoped, so it does not guess), or a legacy pre-index outbox carries more
-   *   unindexed record batches than the bounded coverage-scan budget (the
-   *   probe refuses an unbounded payload scan; re-running the collector
-   *   indexes the lane and a later probe answers exactly).
-   * - `record_batches`: count of non-dead-letter record batches for the lane.
-   *   Lets `observed: false` mean "collected records but no coverage" rather
-   *   than "nothing collected yet".
-   */
-  coverage: {
-    observed: boolean | null;
-    record_batches: number;
-  };
   db: {
     configured: boolean;
     exists: boolean;
@@ -1696,9 +1606,7 @@ export interface LocalOutboxStatusOutput {
   deployment_posture: LocalCollectorDeploymentPosture;
   /**
    * The single mutually-exclusive lifecycle state for this lane, derived
-   * from the outbox counts plus the coverage observation. One of
-   * healthy_idle, draining, retryable_backlog, dead_letter, stale_lease, or
-   * coverage_missing. This is the honest active/drain/coverage signal an
+   * from the outbox counts. This is the active/drain signal an
    * operator or agent reads instead of inferring from raw counts.
    */
   lifecycle_state: LocalCollectorLifecycleState;
@@ -1756,13 +1664,6 @@ export interface LocalCollectorReferenceRouteCheck {
 
 export interface LocalOutboxDoctorOutput extends LocalOutboxStatusOutput {
   checks: {
-    /**
-     * `warn` once the lane has collected records but never carried a
-     * `coverage_diagnostics` record (the local shape behind a stuck
-     * dashboard `coverage_unknown`). `ok` when coverage was observed, the
-     * lane is empty, or no connection id scoped the scan.
-     */
-    coverage_diagnostics: "ok" | "warn";
     /**
      * `warn` when the running collector is a `repo_dist_override` or reports the
      * `0.0.0` placeholder version — either disqualifies the output as published
@@ -1843,23 +1744,15 @@ export function inspectLocalOutboxStatus(
   const exists = existsSync(dbPath);
   const inspection = exists
     ? readOutboxInspection(dbPath, options.sourceInstanceId)
-    : { coverageObserved: null, recordBatchCount: 0, summary: emptyOutboxSummary() };
-  const { coverageObserved, recordBatchCount, summary } = inspection;
-  const lifecycleState = deriveLocalCollectorLifecycleState({
-    coverageObserved,
-    recordBatchCount,
-    summary,
-  });
+    : { summary: emptyOutboxSummary() };
+  const { summary } = inspection;
+  const lifecycleState = deriveLocalCollectorLifecycleState({ summary });
   const deploymentPosture = deps.deploymentPosture ?? classifyLocalCollectorDeploymentPosture();
   return {
     collector_protocol_version: COLLECTOR_PROTOCOL_VERSION,
     configured_device: {
       device_id_configured: Boolean(options.deviceId),
       device_token_configured: Boolean(options.deviceToken),
-    },
-    coverage: {
-      observed: inspection.coverageObserved,
-      record_batches: inspection.recordBatchCount,
     },
     db: {
       configured: true,
@@ -2009,7 +1902,6 @@ export function buildLocalOutboxDoctor(
   const posture = status.deployment_posture;
   const postureDisqualifiesEvidence = posture.kind === "repo_dist_override" || posture.is_placeholder_version;
   const checks: LocalOutboxDoctorOutput["checks"] = {
-    coverage_diagnostics: status.lifecycle_state === "coverage_missing" ? "warn" : "ok",
     deployment_posture: postureDisqualifiesEvidence ? "warn" : "ok",
     expired_leases: status.outbox.expired_leases > 0 ? "warn" : "ok",
     outbox_db: status.db.exists ? "ok" : "missing",
@@ -2033,17 +1925,6 @@ export function buildLocalOutboxDoctor(
       `${status.outbox.expired_leases} lease(s) are past expiry — a previous run likely crashed mid-drain. ` +
         "The next `pdpp-local-collector run …` recovers expired leases automatically before scanning; " +
         "no manual action is required."
-    );
-  }
-  if (checks.coverage_diagnostics === "warn") {
-    remediation.push(
-      `This lane drained ${status.coverage.record_batches} record batch(es) but never carried a ` +
-        "`coverage_diagnostics` record, so the dashboard can only show coverage_unknown. " +
-        "Re-run with a build that emits `coverage_diagnostics` by default and the default stream set (no `--streams`): " +
-        "`npx -y @pdpp/local-collector run …` (or `pdpp-local-collector run …` if already on a current build). " +
-        "Older installs may omit `coverage_diagnostics` from bundled defaults. `npx -y` fetches the latest *published* build, " +
-        "which can still lag the repo build — if the gap persists, confirm the published `latest` carries the fix with " +
-        "`pnpm release:dist-tag-check` (release owner) rather than assuming the published build is current."
     );
   }
   if (checks.deployment_posture === "warn") {
@@ -2109,7 +1990,7 @@ function deploymentPostureRemediation(posture: LocalCollectorDeploymentPosture):
  * Roll the per-check verdicts into the coarse doctor severity. Dead-letter
  * rows and a failed configured reference route are `critical` conditions
  * (they prevent delivery or need operator recovery); expired leases, a missing
- * DB, a coverage gap, and a dev/placeholder deployment posture are `warning`
+ * DB, and a dev/placeholder deployment posture are `warning`
  * (each self-heals, is informational, or is a supported dev path that merely
  * disqualifies operator-host evidence);
  * everything else is `ok`. A `retryable_backlog`/`draining` lane stays `ok`
@@ -2123,7 +2004,6 @@ function doctorSeverityForChecks(checks: LocalOutboxDoctorOutput["checks"]): "ok
   if (
     checks.expired_leases === "warn" ||
     checks.outbox_db === "missing" ||
-    checks.coverage_diagnostics === "warn" ||
     checks.deployment_posture === "warn"
   ) {
     return "warning";
@@ -3550,15 +3430,6 @@ function hasExplicitQueuePath(options: CliOptions): boolean {
 }
 
 interface LocalOutboxInspection {
-  /**
-   * Whether the lane has durably carried a `coverage_diagnostics` record.
-   * Null when the answer is unknowable: no connection id was supplied (the
-   * scan is per-lane, so an unscoped status must not guess), or a legacy
-   * pre-index outbox exceeds the bounded coverage-scan budget (the probe
-   * refuses an unbounded payload scan).
-   */
-  coverageObserved: boolean | null;
-  recordBatchCount: number;
   summary: LocalDeviceOutboxSummary;
 }
 
@@ -3567,11 +3438,9 @@ function readOutboxInspection(path: string, sourceInstanceId: string | undefined
   try {
     const summary = outbox.summary(sourceInstanceId ? { sourceInstanceId } : {});
     if (!sourceInstanceId) {
-      return { coverageObserved: null, recordBatchCount: 0, summary };
+      return { summary };
     }
     return {
-      coverageObserved: outbox.hasObservedStream({ sourceInstanceId, stream: COVERAGE_DIAGNOSTICS_STREAM }),
-      recordBatchCount: outbox.countRecordBatches({ sourceInstanceId }),
       summary,
     };
   } finally {

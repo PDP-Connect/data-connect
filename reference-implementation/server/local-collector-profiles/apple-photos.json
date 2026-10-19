@@ -1,12 +1,18 @@
 {
 	"protocol_version": "0.1.0",
 	"connector_id": "https://registry.pdpp.dev/connectors/apple-photos",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/apple_photos",
+		"display": {
+			"name": "Apple Photos"
+		}
+	},
 	"connector_key": "apple-photos",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/apple-photos",
-	"version": "0.1.0",
+	"version": "0.1.21",
 	"display_name": "Apple Photos",
 	"brand": {
-		"icon": "icons/apple_photos.svg",
+		"icon": "icon.svg",
 		"background_color": "#FA633E"
 	},
 	"runtime_requirements": {
@@ -137,48 +143,8 @@
 			},
 			"coverage_strategy": "snapshot_import_receipt",
 			"freshness_strategy": "manual_as_of"
-		},
-		{
-			"name": "coverage_diagnostics",
-			"required": false,
-			"description": "Safe coverage status for this connector's one known local store (the Photos.app export directory), so a local-collector run always leaves durable, honest coverage evidence even when the export directory is missing or empty — never a silent zero-evidence run.",
-			"display": {
-				"label": "Local collector coverage status",
-				"detail": "Whether the Photos.app export directory was found and collected on this run."
-			},
-			"semantics": "mutable_state",
-			"schema": {
-				"type": "object",
-				"properties": {
-					"id": {
-						"type": "string"
-					},
-					"store": {
-						"type": "string"
-					},
-					"stream": {
-						"type": ["string", "null"]
-					},
-					"status": {
-						"type": "string"
-					},
-					"reason": {
-						"type": "string",
-						"x_pdpp_role": "primary-title"
-					}
-				},
-				"required": ["id", "store", "status", "reason"]
-			},
-			"primary_key": ["id"],
-			"selection": {
-				"fields": true,
-				"resources": true
-			},
-			"incremental": false,
-			"coverage_strategy": "snapshot_import_receipt",
-			"freshness_strategy": "device_heartbeat"
-		}
-	],
+			}
+		],
 	"reason_display_messages": {
 		"export_not_found": "We couldn't find an export to import"
 	}

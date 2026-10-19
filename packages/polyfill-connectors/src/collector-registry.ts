@@ -71,9 +71,9 @@ export const LOCAL_COLLECTOR_DEFINITIONS: readonly LocalCollectorDefinition[] =
 				"memory_notes",
 				"skills",
 				"slash_commands",
+				"usage",
 				"file_history",
 				"cache_inventory",
-				"coverage_diagnostics",
 				"backup_inventory",
 				"config_inventory",
 			],
@@ -98,7 +98,6 @@ export const LOCAL_COLLECTOR_DEFINITIONS: readonly LocalCollectorDefinition[] =
 				"shell_snapshots",
 				"config_inventory",
 				"cache_inventory",
-				"coverage_diagnostics",
 			],
 			time_scopable_streams: ["sessions", "messages", "function_calls"],
 			source_root_scopable_streams: ["sessions", "messages", "function_calls"],
@@ -114,7 +113,6 @@ export const LOCAL_COLLECTOR_DEFINITIONS: readonly LocalCollectorDefinition[] =
 				"youtube_watch_history",
 				"search_history",
 				"photos",
-				"coverage_diagnostics",
 			],
 			time_scopable_streams: ["location_history", "youtube_watch_history", "search_history", "photos"],
 		},
@@ -131,7 +129,7 @@ export const LOCAL_COLLECTOR_DEFINITIONS: readonly LocalCollectorDefinition[] =
 			entry: "apple_photos",
 			bindings: { filesystem: { required: true } },
 			protocol_capabilities: [],
-			streams: ["photos", "coverage_diagnostics"],
+			streams: ["photos"],
 			time_scopable_streams: ["photos"],
 		},
 		{
@@ -139,7 +137,7 @@ export const LOCAL_COLLECTOR_DEFINITIONS: readonly LocalCollectorDefinition[] =
 			entry: "google_messages",
 			bindings: { filesystem: { required: true } },
 			protocol_capabilities: [],
-			streams: ["messages", "coverage_diagnostics"],
+			streams: ["messages"],
 			time_scopable_streams: ["messages"],
 		},
 	]);
@@ -151,8 +149,7 @@ export const LOCAL_COLLECTOR_DEFINITIONS: readonly LocalCollectorDefinition[] =
  * A connector's definition is the single source of truth for what an
  * unscoped run requests, so every runner in this package reads it from here
  * rather than keeping a table of its own: a hand-copied list drifts
- * silently, and a run that omits `coverage_diagnostics` leaves the drained
- * collector on `coverage_unknown`.
+ * silently. A run requests exactly the released profile's declared streams.
  *
  * Throws for an unknown id rather than returning an empty scope — a runner
  * asking for a connector this registry does not carry is a wiring bug, and

@@ -14,41 +14,41 @@ export const COLLECTION_PROFILE_PINS: readonly CollectionProfilePin[] = Object.f
   {
     "connectorId": "claude_code",
     "connectorKey": "claude-code",
-    "version": "0.3.0",
-    "digest": "sha256:5b8866392bb11f24cbc3827e37e96faae9b30c8863d7d82bf9cd21aa2e636c82",
-    "profileSha256": "sha256:b6398b12d41043706ac4701db92f577ed9964d86b6e4776d471eca65587ae79f",
-    "entrypointSha256": "sha256:2a76a5b518c474a2a342bd2511ad825aec289c1310b2575801a419813bb9bea3"
+    "version": "0.3.23",
+    "digest": "sha256:30a1fb96c235ed230697aaf2ba37dbfe085f0e2af7c0d58628e6751779516440",
+    "profileSha256": "sha256:fe6cab49e033d383024a7d214b722e6f274df2f4bcf027acdd6e120033f75f26",
+    "entrypointSha256": "sha256:ae7b66daa0b1bbeeed1c7541ccc8989bd905ddba2fafc9e83fdd2cf63fee3d20"
   },
   {
     "connectorId": "codex",
     "connectorKey": "codex",
-    "version": "0.3.0",
-    "digest": "sha256:bb75129071d1afcf60bf5e20097b84e1262d3cb2ce3ca5b3c228d23f00495d28",
-    "profileSha256": "sha256:3287a16b01517439443e8641e97c7f1bfcb358d01641d3b3490331b2ddc107ab",
-    "entrypointSha256": "sha256:0ae6336d89b88d50ae6a13d11e62d4b844a623d76cfeb7f83dcd29c889764b3b"
+    "version": "0.3.15",
+    "digest": "sha256:6df59e78fcfd79cef46c0b3ef512a7bc3c921cf9536cabb647893e7ca131437e",
+    "profileSha256": "sha256:d16789f5621bbaab27130c18de00ce4fb46a40f05956af88d5605a14c7e04e13",
+    "entrypointSha256": "sha256:0c375ee05d5d59ffd9073f8444a54b9d6feb807329ea5c16e8d28eb1b3772aaf"
   },
   {
     "connectorId": "google_takeout",
     "connectorKey": "google-takeout",
-    "version": "0.1.0",
-    "digest": "sha256:38d4bd1312073b167b668cad1701ebc78fea8cf9c19a0edb37a98d11fd660562",
-    "profileSha256": "sha256:708f149f0efedae0b41cc3f67a065c541ec6ab5305edb322b9f983a9d0913353",
-    "entrypointSha256": "sha256:710d01455fa0cc146665de92612682b749810b54f8f72d5e235a5538c4f43fda"
+    "version": "0.1.21",
+    "digest": "sha256:1130173e6328340ddc9e682c70f7a98f740c1e04e8d17ba2f1600837e46ba8ff",
+    "profileSha256": "sha256:85709d3abe622b2e8fa462d04d58f5836f80ac54d6576d3c5c44846ed7a32b1e",
+    "entrypointSha256": "sha256:f313e034142164e41cd55d2dbbe8218d29561cf11c23b49ec1023ea0ab010a7b"
   },
   {
     "connectorId": "imessage",
     "connectorKey": "imessage",
-    "version": "0.1.0",
-    "digest": "sha256:ace3798a8e222e73fa1555a39ba52b245e2566d31d84bb60fdec61c9ae1a9ca6",
-    "profileSha256": "sha256:654eb8abb9625554c19edcf7e1ef6416fca556929456454ba29277751cde8efb",
-    "entrypointSha256": "sha256:aee91cec10278cca82acc000d504420f2135eac2e44838d3b4693d08db5f3d84"
+    "version": "0.1.20",
+    "digest": "sha256:f51ade76da993bab3eed2fb761092bb1dbf3e93f769c5e6886e93dbb4733d821",
+    "profileSha256": "sha256:82d80ef4e41aa39ec5df5f333e8a3a72f45a8132bfedb950180b6a0466f3c407",
+    "entrypointSha256": "sha256:3696e7fc7137b0bc4d2cf07e8289c542a0b505dfc76cae1d9666ee4857a8cc36"
   },
   {
     "connectorId": "apple_photos",
     "connectorKey": "apple-photos",
-    "version": "0.1.0",
-    "digest": "sha256:0952cef101b05b5416d0ea0620ee12c857f493bae547ce71119a243131741415",
-    "profileSha256": "sha256:1d941bd3fc02831618fcd29b899b091ed2ce51f25535f35f58c5a2aaa37ce596",
-    "entrypointSha256": "sha256:eccd685d0d5d9b9c675365b0b3073c46028067aac5bceb2719770e5069bf8ca2"
+    "version": "0.1.21",
+    "digest": "sha256:3bd47bd1b7d4ba8f7dd6a182801e9e72d12a9e6555f086a042f6fe7e57552bc1",
+    "profileSha256": "sha256:3096fb37a87226c9cb6601c12a1de52a3bed78c5971af574534a608dffbe34b7",
+    "entrypointSha256": "sha256:269788dae2745111df882e0b4278b515bdbad64e961028134303771aeaa406c8"
   },
 ]);

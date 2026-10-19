@@ -876,7 +876,6 @@ interface DiagnosticsSnapshot {
     outbox_diagnostics: unknown;
     outbox_state: unknown;
     local_collector_gaps: unknown;
-    local_collector_coverage: unknown;
     last_error: unknown;
   };
 }
@@ -1107,7 +1106,6 @@ function createDriver({
           last_heartbeat_at: source.last_heartbeat_at,
           last_heartbeat_status: source.last_heartbeat_status,
           last_ingest_at: source.last_ingest_at,
-          local_collector_coverage: source.local_collector_coverage,
           local_collector_gaps: source.local_collector_gaps,
           outbox_diagnostics: source.outbox_diagnostics,
           outbox_state: source.outbox_state,
@@ -1482,7 +1480,6 @@ function diagnosticFreshnessInputs(diagnostics: DiagnosticsSnapshot) {
       last_error: diagnostics.source.last_error,
       last_heartbeat_at: diagnostics.source.last_heartbeat_at,
       last_heartbeat_status: diagnostics.source.last_heartbeat_status,
-      local_collector_coverage: diagnostics.source.local_collector_coverage,
       local_collector_gaps: diagnostics.source.local_collector_gaps,
       outbox_diagnostics: diagnostics.source.outbox_diagnostics,
       outbox_state: diagnostics.source.outbox_state,

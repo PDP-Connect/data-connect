@@ -116,9 +116,7 @@ async function connectorFixture(): Promise<string> {
       }
       emit({ type: "RECORD", stream: "messages", key: "message-1", data: { id: "message-1" }, emitted_at: "2026-08-12T12:00:00.000Z" });
       emit({ type: "STATE", stream: "messages", cursor: { cursor: "c1" } });
-      emit({ type: "RECORD", stream: "coverage_diagnostics", key: "coverage:messages", data: { id: "coverage:messages", store: "messages", stream: "messages", status: "collected" }, emitted_at: "2026-08-12T12:00:00.000Z" });
-      emit({ type: "STATE", stream: "coverage_diagnostics", cursor: { cursor: "coverage-c1" } });
-      emit({ type: "DONE", status: "succeeded", records_emitted: 2 });
+      emit({ type: "DONE", status: "succeeded", records_emitted: 1 });
     })().catch((error) => { process.stderr.write(String(error)); process.exit(1); });\n`
   );
   return path;
@@ -226,7 +224,7 @@ for (const backend of ["sqlite", "postgres"] as const) {
         connector_id: CONNECTOR_ID,
         protocol_capabilities: [],
         runtime_requirements: { bindings: {} },
-        streams: ["messages", "coverage_diagnostics"],
+        streams: ["messages"],
       },
       deviceId: DEVICE_ID,
       deviceToken: "device-token",

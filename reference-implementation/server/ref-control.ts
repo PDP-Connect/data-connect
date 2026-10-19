@@ -165,13 +165,8 @@ import { listConnectorSummaryEvidence } from "./connector-summary-read-model.ts"
 import { filterRunGapsProvenCompleteByReport } from "./continuation-proof.ts";
 import { getSqliteStoreCacheIdentity } from "./db.ts";
 import { deriveReferenceFreshness, type ReferenceFreshness } from "./freshness.ts";
-import { readStoredCollectionScope } from "./local-collection-scope.ts";
 import { mapPendingPressureGaps } from "./pending-pressure-gap-map.ts";
 import { isPostgresStorageBackend, postgresQuery } from "./postgres-storage.ts";
-import {
-  readCommittedLocalCoverageDiagnostics,
-  readCommittedLocalCoverageDiagnosticsByConnectionIds,
-} from "./records.ts";
 import {
   chooseDisplayTimestamp,
   compareTimestampValues,
@@ -3119,57 +3114,6 @@ function mapCoverageAxis(
   return "unknown";
 }
 
-/**
- * Build the projection's coverage evidence: the axis plus the
- * `requiredButAccepted` contradiction signal. The signal is only set
- * when at least one *required* stream declares an accepted-coverage
- * policy; the connection-health projection then refuses to project
- * healthy even though the axis name is `unsupported`/`unavailable`/
- * `deferred`/`inventory_only`.
- *
- * `unknownStaleCollectorBuild` is `true` only when the axis is `unknown`
- * SPECIFICALLY because `localCoverage.unreliableReason === "missing_stores"`
- * (`deriveLocalCoverageAxis`, `describeLocalCoverageUnreliableReason`): the
- * device's committed coverage snapshot structurally cannot contain a store
- * the current descriptor authority requires, because that collector build
- * predates the commit that taught the connector to report it at all (see
- * `4d9e6b7e4`/`67c8730f3`). This is a concrete, owner-actionable cause
- * ("update the collector"), distinct from ordinary evidence-not-yet-observed
- * `unknown` — never fabricates a `complete`/non-`unknown` axis, purely a
- * label the caller may use to give a more specific message.
- */
-function buildCoverageEvidence(
-  lastRun: ConnectorRunSummary | null,
-  pendingDetailGaps: readonly PendingDetailGapSummary[],
-  manifestStreams: readonly ManifestStream[],
-  localCoverage: LocalCoverageDiagnosticAxis | null = null
-): {
-  axis: CoverageAxis;
-  requiredButAccepted: boolean;
-  unknownStaleCollectorBuild: boolean;
-} {
-  const requiredButAccepted = pickRequiredAcceptedCoverage(manifestStreams) !== null;
-  // Run-derived coverage is authoritative whenever a terminal spine run exists
-  // (scheduler-managed connections) or any gap/contradiction evidence is
-  // present. Local-device collectors push records from a device outbox and
-  // never write spine run history, so `mapCoverageAxis` can only ever return
-  // `unknown` for them — there is no run to anchor "complete" on. When the run
-  // path yields `unknown` AND durable local coverage diagnostics exist, prefer
-  // the diagnostic-derived axis. This is the only honest signal of local
-  // collector completeness: an empty/drained outbox is NOT proof of coverage.
-  const runAxis = mapCoverageAxis(lastRun, pendingDetailGaps, manifestStreams);
-  if (runAxis === "unknown" && localCoverage !== null && localCoverage.axis !== "unknown") {
-    return {
-      axis: localCoverage.axis,
-      requiredButAccepted,
-      unknownStaleCollectorBuild: false,
-    };
-  }
-  const unknownStaleCollectorBuild =
-    runAxis === "unknown" && localCoverage !== null && localCoverage.unreliableReason === "missing_stores";
-  return { axis: runAxis, requiredButAccepted, unknownStaleCollectorBuild };
-}
-
 const DEGRADING_REPORT_COVERAGE_ROLLUP_ORDER = ["terminal_gap", "retryable_gap", "gaps", "partial"] as const;
 
 export function rollupCollectionReportCoverageOverride(
@@ -3497,7 +3441,6 @@ function applyCoverageOverride(
     axis: CoverageAxis;
     requiredButAccepted: boolean;
     unfillableAccounted?: boolean;
-    unknownStaleCollectorBuild: boolean;
   },
   coverageOverride:
     | {
@@ -3511,7 +3454,6 @@ function applyCoverageOverride(
   axis: CoverageAxis;
   requiredButAccepted: boolean;
   unfillableAccounted?: boolean;
-  unknownStaleCollectorBuild: boolean;
 } {
   if (!coverageOverride || coverageOverride.axis === undefined) {
     return resolvedCoverage;
@@ -3526,14 +3468,6 @@ function applyCoverageOverride(
     // PRE-override axis/report pairing. Absent/`false` on the override always
     // means `false` here.
     unfillableAccounted: coverageOverride.unfillableAccounted === true,
-    // A collection-report override supplies its OWN, more specific axis
-    // (`refineConnectionHealthWithCollectionReport`'s required-unknown
-    // refusal) — it never re-derives `localCoverage.unreliableReason`, so it
-    // must not carry forward a stale-collector label that described the
-    // PRE-override axis. Only relevant when the override's axis is itself
-    // `unknown`; every other axis already ignores this field.
-    unknownStaleCollectorBuild:
-      coverageOverride.axis === "unknown" ? false : resolvedCoverage.unknownStaleCollectorBuild,
   };
 }
 
@@ -3818,7 +3752,6 @@ export function buildCollectionReport(input: {
    * overrides the classifying run's own facts.
    */
   readonly latestStreamFacts?: ReadonlyMap<string, LatestStreamFactRecord> | null;
-  readonly localCoverage?: LocalCoverageDiagnosticAxis | null;
   readonly manifestStreams: readonly ManifestStream[];
   /**
    * Whether the composed projection still authorizes a required stream to
@@ -3859,17 +3792,11 @@ export function buildCollectionReport(input: {
    * which case no staleness comparison is performed and behavior is unchanged.
    */
   readonly declaredCollectionScope?: string | null;
-  /**
-   * Boundary the evidence was measured under, when it does not ride on
-   * `collectionFacts` (the local-device path, whose evidence is the
-   * coverage-diagnostic axis). Falls back to the run fact block's own value.
-   */
-  readonly evidenceCollectionScope?: string | null;
 }): CollectionReportEntry[] {
   const { inScope, ...entryIndexes } = indexCollectionReportInputs(input);
   // One comparison for the whole report, not one per stream.
   const evidenceScopeIsStale = collectionEvidenceScopeIsStale(
-    input.evidenceCollectionScope ?? input.collectionFacts?.collection_scope,
+    input.collectionFacts?.collection_scope,
     input.declaredCollectionScope
   );
   const entries = [...inScope].map((stream) =>
@@ -3879,7 +3806,6 @@ export function buildCollectionReport(input: {
       attentionOpen: input.attentionOpen,
       evidenceScopeIsStale,
       freshness: input.freshness,
-      localCoverage: input.localCoverage ?? null,
       refresh: input.refresh,
       schedule: input.schedule ?? null,
     })
@@ -3940,7 +3866,7 @@ function inheritStateStreamCoverageCondition(
     if (entry.coverage_condition !== "unknown") {
       return entry;
     }
-    const parentStream = localCoverageParentStream(manifestByStream.get(entry.stream));
+    const parentStream = stateStreamParent(manifestByStream.get(entry.stream));
     if (!parentStream) {
       return entry;
     }
@@ -3968,7 +3894,6 @@ function inheritStateStreamCoverageCondition(
 interface IndexedCollectionReportInputs {
   readonly factByStream: ReadonlyMap<string, EffectiveStreamFact>;
   readonly inScope: ReadonlySet<string>;
-  readonly localCoverageConditionByStream: ReadonlyMap<string, CoverageAxis>;
   readonly manifestByStream: ReadonlyMap<string, ManifestStream>;
   readonly pendingGapCountByStream: ReadonlyMap<string, number>;
   readonly permanentGapCountByStream: ReadonlyMap<string, number>;
@@ -3988,7 +3913,6 @@ function indexCollectionReportInputs(input: {
   readonly collectionFactsAsOf?: string | null;
   readonly collectionFactsRunId?: string | null;
   readonly latestStreamFacts?: ReadonlyMap<string, LatestStreamFactRecord> | null;
-  readonly localCoverage?: LocalCoverageDiagnosticAxis | null;
   readonly manifestStreams: readonly ManifestStream[];
   readonly requiredCoverageEvidenceAuthoritative?: boolean;
   readonly pendingDetailGaps?: readonly PendingDetailGapSummary[];
@@ -4020,7 +3944,6 @@ function indexCollectionReportInputs(input: {
       ...permanentGapCountByStream.keys(),
       ...terminalGapCountByStream.keys(),
     ]),
-    localCoverageConditionByStream: localCoverageConditionsByStream(input.localCoverage, manifestByStream),
     manifestByStream,
     pendingGapCountByStream,
     permanentGapCountByStream,
@@ -4051,8 +3974,6 @@ function buildCollectionReportEntry(input: {
   readonly pendingGapReadHitLimit: boolean;
   readonly requiredCoverageEvidenceAuthoritative: boolean;
   readonly manifestByStream: ReadonlyMap<string, ManifestStream>;
-  readonly localCoverageConditionByStream: ReadonlyMap<string, CoverageAxis>;
-  readonly localCoverage?: LocalCoverageDiagnosticAxis | null;
   readonly freshness: FreshnessAxis;
   readonly attentionOpen: boolean;
   readonly refresh: ConnectionRefreshEvidence | null;
@@ -4094,9 +4015,7 @@ function buildCollectionReportEntry(input: {
     coverage_strategy: readCoverageEvidenceStrategy(manifestStream),
     coverage_unfillable_accounted: unfillableAccounted,
     covered: effectiveFact.covered === null ? "unknown" : effectiveFact.covered,
-    evidence_as_of:
-      effective?.evidenceAsOf ??
-      (input.localCoverageConditionByStream.has(input.stream) ? (input.localCoverage?.evidenceAsOf ?? null) : null),
+    evidence_as_of: effective?.evidenceAsOf ?? null,
     forward_disposition: forwardDisposition,
     freshness_strategy: readFreshnessEvidenceStrategy(manifestStream),
     pending_detail_gaps: effectiveFact.pending_detail_gaps,
@@ -4123,7 +4042,6 @@ function deriveCollectionReportEntryCoverage(input: {
   readonly terminalGapCountByStream: ReadonlyMap<string, number>;
   readonly unfillableAccountedByStream: ReadonlyMap<string, boolean>;
   readonly manifestByStream: ReadonlyMap<string, ManifestStream>;
-  readonly localCoverageConditionByStream: ReadonlyMap<string, CoverageAxis>;
   readonly requiredCoverageEvidenceAuthoritative: boolean;
 }): CollectionReportEntryCoverage {
   const effective = input.factByStream.get(input.stream);
@@ -4154,15 +4072,11 @@ function deriveCollectionReportEntryCoverage(input: {
     manifestStream,
     parentFacts: input.factByStream,
   });
-  const localCoverageCondition =
-    !hasRuntimeFact && effectiveFact.pending_detail_gaps === 0 && permanentGaps === 0
-      ? input.localCoverageConditionByStream.get(input.stream)
-      : null;
   const terminalDetailGaps = input.terminalGapCountByStream.get(input.stream) ?? 0;
   const derivedCoverageCondition =
     terminalDetailGaps > 0
       ? "terminal_gap"
-      : (localCoverageCondition ?? deriveStreamCoverageCondition(effectiveFact, manifestStream));
+      : deriveStreamCoverageCondition(effectiveFact, manifestStream);
   // Only meaningful when the stream actually landed on `terminal_gap`: a
   // stream whose per-stream unfillable read happened to be `true` for some
   // other axis (it can't be — the map is only ever populated from terminal
@@ -4206,7 +4120,7 @@ function applyStateStreamCheckpointInheritance(input: {
   ) {
     return fact;
   }
-  const parentStream = localCoverageParentStream(manifestStream);
+  const parentStream = stateStreamParent(manifestStream);
   if (!parentStream) {
     return fact;
   }
@@ -4269,7 +4183,6 @@ export function projectCollectionReport(input: {
   readonly latestSettledRun?: ConnectorRunSummary | null;
   readonly connectionHealth: ConnectionHealthSnapshot;
   readonly latestStreamFacts?: ReadonlyMap<string, LatestStreamFactRecord> | null;
-  readonly localCoverage?: LocalCoverageDiagnosticAxis | null;
   readonly localDeviceBacked?: boolean;
   readonly manifestStreams: readonly ManifestStream[];
   /**
@@ -4291,12 +4204,6 @@ export function projectCollectionReport(input: {
    * different boundary. Omitted where no scope applies, preserving behavior.
    */
   readonly declaredCollectionScope?: string | null;
-  /**
-   * Fingerprint the local-device coverage evidence was measured under. Local
-   * runs carry their evidence in `localCoverage` rather than a run's
-   * `collection_facts`, so the boundary arrives alongside it.
-   */
-  readonly localCoverageCollectionScope?: string | null;
 }): CollectionReportEntry[] {
   // Select source authority before run precedence: local-device scheduler facts
   // are audit history, never coverage evidence.
@@ -4306,35 +4213,13 @@ export function projectCollectionReport(input: {
     latestSettledRun: input.latestSettledRun ?? null,
     localDeviceBacked: input.localDeviceBacked === true,
   });
-  const { declaredCollectionScope: explicitCollectionScope, localCoverage } = input;
-  let declaredCollectionScope = explicitCollectionScope;
-  if (declaredCollectionScope === undefined && input.localDeviceBacked === true) {
-    declaredCollectionScope = localCoverage?.declaredCollectionScope;
-  }
   return buildCollectionReport({
     attentionOpen: input.connectionHealth.axes.attention !== "none",
     collectionFacts: classifyingRun?.collection_facts ?? null,
-    // Declared boundary: explicit caller value wins; otherwise it rides on the
-    // local-coverage axis, which already read it from the connector-state
-    // projection (no extra query, no per-stream read).
-    ...(declaredCollectionScope === undefined ? {} : { declaredCollectionScope }),
-    // A local-device connection's evidence is the coverage-diagnostic axis, not
-    // a run fact block, so its measured boundary comes off that axis -- which
-    // derived it from the coverage rows themselves. Deriving beats accepting: a
-    // caller-supplied argument is an agreement, and a production call that
-    // omitted it would silently compare a real scoped run against `unscoped`
-    // and read `unknown` forever. An explicit override is honored for tests.
-    ...(input.localDeviceBacked === true
-      ? {
-          evidenceCollectionScope:
-            input.localCoverageCollectionScope ?? input.localCoverage?.measuredCollectionScope ?? null,
-        }
-      : {}),
     collectionFactsAsOf: classifyingRun ? classifyingRun.last_at : null,
     collectionFactsRunId: classifyingRun?.run_id ?? null,
     freshness: input.connectionHealth.axes.freshness,
     latestStreamFacts: input.localDeviceBacked ? null : (input.latestStreamFacts ?? null),
-    localCoverage: input.localDeviceBacked === true ? (input.localCoverage ?? null) : null,
     manifestStreams: input.manifestStreams,
     pendingDetailGaps: input.pendingDetailGaps ?? [],
     pendingDetailGapsReadLimit: input.pendingDetailGapsReadLimit ?? null,
@@ -4533,437 +4418,12 @@ function pendingDetailGapCountsByStream(
   return counts;
 }
 
-function localCoverageConditionForStatus(status: unknown): CoverageAxis | null {
-  switch (status) {
-    case "collected":
-    case "excluded":
-    case "missing":
-      return "complete";
-    case "inventory_only":
-      return "inventory_only";
-    case "deferred":
-      return "deferred";
-    case "unsupported":
-      return "unsupported";
-    case "unavailable":
-      return "unavailable";
-    case "unaccounted":
-      return "gaps";
-    default:
-      return null;
-  }
-}
-
-function localCoverageConditionsByStream(
-  localCoverage: LocalCoverageDiagnosticAxis | null | undefined,
-  manifestByStream: ReadonlyMap<string, ManifestStream>
-): ReadonlyMap<string, CoverageAxis> {
-  const conditions = new Map<string, CoverageAxis>();
-  if (localCoverage?.reliable !== true || localCoverage.axis !== "complete") {
-    return conditions;
-  }
-  const rows = localCoverage?.rows ?? [];
-  seedLocalCoverageConditions(conditions, rows);
-  addCoverageDiagnosticsCondition(conditions, rows, manifestByStream);
-  inheritLocalCoverageParentConditions(conditions, manifestByStream);
-  return conditions;
-}
-
-function seedLocalCoverageConditions(
-  conditions: Map<string, CoverageAxis>,
-  rows: readonly LocalCoverageDiagnosticRow[]
-): void {
-  for (const row of rows) {
-    const stream = typeof row.stream === "string" && row.stream ? row.stream : null;
-    if (!stream) {
-      continue;
-    }
-    const condition = localCoverageConditionForStatus(row.status);
-    if (!condition) {
-      continue;
-    }
-    const existing = conditions.get(stream);
-    if (!existing || localCoverageConditionSeverity(condition) > localCoverageConditionSeverity(existing)) {
-      conditions.set(stream, condition);
-    }
-  }
-}
-
-function localCoverageConditionSeverity(axis: CoverageAxis): number {
-  switch (axis) {
-    case "complete":
-      return 0;
-    case "inventory_only":
-    case "deferred":
-    case "unsupported":
-      return 1;
-    case "unavailable":
-      return 2;
-    case "gaps":
-      return 3;
-    default:
-      return 4;
-  }
-}
-
-function addCoverageDiagnosticsCondition(
-  conditions: Map<string, CoverageAxis>,
-  rows: readonly LocalCoverageDiagnosticRow[],
-  manifestByStream: ReadonlyMap<string, ManifestStream>
-): void {
-  if (rows.length > 0 && manifestByStream.has("coverage_diagnostics") && !conditions.has("coverage_diagnostics")) {
-    conditions.set("coverage_diagnostics", "complete");
-  }
-}
-
-function inheritLocalCoverageParentConditions(
-  conditions: Map<string, CoverageAxis>,
-  manifestByStream: ReadonlyMap<string, ManifestStream>
-): void {
-  for (let pass = 0; pass < manifestByStream.size; pass += 1) {
-    let changed = false;
-    for (const [stream, manifestStream] of manifestByStream) {
-      if (conditions.has(stream)) {
-        continue;
-      }
-      const parentStream = localCoverageParentStream(manifestStream);
-      if (!parentStream) {
-        continue;
-      }
-      const parentCondition = conditions.get(parentStream);
-      if (!parentCondition) {
-        continue;
-      }
-      conditions.set(stream, parentCondition);
-      changed = true;
-    }
-    if (!changed) {
-      break;
-    }
-  }
-}
-
-function localCoverageParentStream(stream: ManifestStream | undefined): string | null {
+function stateStreamParent(stream: ManifestStream | undefined): string | null {
   if (!stream || typeof stream !== "object") {
     return null;
   }
   const parent = stream.state_stream;
   return typeof parent === "string" && parent ? parent : null;
-}
-
-/**
- * The measured boundary carried on one coverage row, in either producer's
- * spelling. Only a non-empty string counts: a blank or malformed value reads as
- * NO recorded boundary rather than as an empty one, so it can never be mistaken
- * for a measured full pass.
- */
-/**
- * The boundary a connection currently declares, for the coverage axis.
- *
- * The reader resolves it from the reserved `$collection_scope` state row and
- * passes it in directly (one projection per connection, so this stays O(1)).
- * The `state` lookup is the fallback for callers that still hand over a whole
- * multi-stream projection; it cannot serve the reader's own payload, which is
- * the `coverage_diagnostics` snapshot and structurally cannot hold a boundary.
- */
-function resolveDeclaredCoverageScope(declared: string | null | undefined, state: unknown): string {
-  if (typeof declared === "string" && declared.trim()) {
-    return declared.trim();
-  }
-  const projection = state && typeof state === "object" && !Array.isArray(state) ? state : null;
-  return readStoredCollectionScope(projection as Record<string, unknown> | null).fingerprint;
-}
-
-function readRowCollectionScope(row: LocalCoverageDiagnosticRow): string | null {
-  for (const candidate of [row.collection_scope, row.collectionScope]) {
-    if (typeof candidate === "string" && candidate.trim()) {
-      return candidate.trim();
-    }
-  }
-  return null;
-}
-
-/** Safe per-store coverage triple read from `coverage_diagnostics` records. */
-interface LocalCoverageDiagnosticRow {
-  /**
-   * Boundary this row was measured under, committed with the row itself.
-   *
-   * Two producers feed this type and they name the field differently: the
-   * durable state snapshot uses the wire form `collection_scope` (what
-   * `buildCoverageDiagnosticsStateSnapshot` writes and
-   * `parseCoverageDiagnosticsStateSnapshot` returns), while the records-table
-   * projection uses the camelCase `collectionScope`. Both are read, so the
-   * fingerprint survives whichever path the caller took.
-   */
-  readonly collection_scope?: unknown;
-  readonly collectionScope?: unknown;
-  readonly status?: unknown;
-  readonly store?: unknown;
-  readonly stream?: unknown;
-}
-
-interface LocalCoverageDiagnosticAxis {
-  readonly axis: CoverageAxis;
-  /**
-   * Boundary this connection CURRENTLY declares, read off the same
-   * connector-state projection this axis is already derived from — so binding
-   * coverage to the declared scope costs no additional query and cannot become
-   * an N+1 across a page of connections.
-   */
-  readonly declaredCollectionScope?: string;
-  readonly evidenceAsOf: string | null;
-  /**
-   * Boundary the connection's stored terminal evidence was MEASURED under, read
-   * off the same state projection as the declared one. Derived here rather than
-   * accepted from a caller: an argument is an agreement, and a caller that omits
-   * it silently compares a real scoped run against `unscoped` forever.
-   * `null` when no local run has committed terminal evidence under the contract.
-   */
-  readonly measuredCollectionScope?: string | null;
-  readonly reliable: boolean;
-  /** Safe per-store triples from `coverage_diagnostics`, used to project stream rows. */
-  readonly rows?: readonly LocalCoverageDiagnosticRow[];
-  /** Stores the collector discovered but could not account for. */
-  readonly unaccountedStores: readonly string[];
-  /**
-   * Which reliability precondition failed, present only when `reliable` is
-   * false. Distinguishes "this collector's build genuinely never measured a
-   * required store" (`missing_stores` — see `missingStores` on the read-side
-   * parse result) from every other refusal reason, so an operator does not
-   * have to re-derive this by hand-tracing `parseCoverageDiagnosticsStateSnapshot`
-   * against `LOCAL_COVERAGE_STORE_DESCRIPTORS_BY_CONNECTOR` the way this was
-   * first diagnosed in production (four local-device connections stuck on
-   * `coverage=unknown` because their agent build predated the derived-stream
-   * descriptors `derived_messages`/`derived_attachments`/`derived_memory_notes`
-   * (claude_code) and `derived_messages`/`derived_function_calls` (codex)).
-   * Never widens what counts as reliable -- purely a label on the same gate.
-   */
-  readonly unreliableReason?:
-    | "invalid_cursor"
-    | "generation_mismatch"
-    | "malformed"
-    | "no_authoritative_inventory"
-    | "no_committed_snapshot"
-    | "duplicate_stores"
-    | "missing_stores"
-    | "unexpected_stores";
-}
-
-const LOCAL_COVERAGE_ACCOUNTED_STATUSES = new Set([
-  "collected",
-  "inventory_only",
-  "excluded",
-  "deferred",
-  "missing",
-  "unsupported",
-]);
-
-/**
- * Derive a connection coverage axis from durable local-collector
- * `coverage_diagnostics` records.
- *
- * Mirrors the honest classification `summarizeLocalCoverage` uses for the
- * device-exporter diagnostics surface (Section 5.3 / the
- * `local-agent-collector-completeness` spec): a store is accounted for when
- * its status is any recognized safe status other than `unaccounted`. The axis:
- *
- *   - no rows observed              -> `unknown` (a run never proved coverage;
- *                                      an empty/drained outbox is NOT complete)
- *   - every observed store accounted -> `complete`
- *   - any unaccounted store          -> `gaps` (degrading; names the shortfall)
- *
- * This refuses to project `complete` from an absence of evidence, which is the
- * load-bearing honesty guarantee: the spec forbids treating declared-stream
- * success (or a quiet outbox) as complete local collection.
- */
-/**
- * Which reliability precondition failed, checked in the same order
- * `deriveLocalCoverageAxis`'s `reliable` conjunction short-circuits, so the
- * reported reason is always the FIRST precondition that actually failed --
- * matching what a reader tracing the boolean by hand would find.
- */
-function describeLocalCoverageUnreliableReason(input: {
-  readonly currentGeneration: number | null | undefined;
-  readonly duplicateStores: readonly string[];
-  readonly hasAuthoritativeInventory: boolean;
-  readonly hasCommittedSnapshot: boolean | undefined;
-  readonly malformed: boolean;
-  readonly missingStores: readonly string[];
-  readonly proofGeneration: number | null | undefined;
-  readonly unexpectedStores: readonly string[];
-  readonly validCursor: boolean;
-}): NonNullable<LocalCoverageDiagnosticAxis["unreliableReason"]> {
-  if (!input.validCursor) {
-    return "invalid_cursor";
-  }
-  if (!Number.isInteger(input.currentGeneration) || input.currentGeneration !== input.proofGeneration) {
-    return "generation_mismatch";
-  }
-  if (input.malformed) {
-    return "malformed";
-  }
-  if (!input.hasAuthoritativeInventory) {
-    return "no_authoritative_inventory";
-  }
-  if (input.hasCommittedSnapshot !== true) {
-    return "no_committed_snapshot";
-  }
-  if (input.duplicateStores.length > 0) {
-    return "duplicate_stores";
-  }
-  if (input.missingStores.length > 0) {
-    return "missing_stores";
-  }
-  return "unexpected_stores";
-}
-
-export function deriveLocalCoverageAxis(input: {
-  readonly rows: readonly LocalCoverageDiagnosticRow[];
-  readonly malformed: boolean;
-  readonly duplicateStores: readonly string[];
-  readonly missingStores: readonly string[];
-  readonly unexpectedStores: readonly string[];
-  readonly hasAuthoritativeInventory: boolean;
-  readonly hasCommittedSnapshot?: boolean;
-  readonly state: unknown;
-  readonly updatedAt: string | null;
-  readonly manifestGeneration?: number | null;
-  readonly stateManifestGeneration?: number | null;
-  readonly nowIso?: string;
-  /**
-   * Fingerprint of the boundary this connection CURRENTLY declares, resolved by
-   * the coverage reader from the reserved `$collection_scope` state row.
-   *
-   * It arrives as its own field because it cannot live in `state`: that is the
-   * `coverage_diagnostics` payload, validated against an exact `fetched_at`/
-   * `stores` key set. Reading the boundary out of `state` therefore always
-   * resolved `unscoped`, which made the staleness comparison trivially agree and
-   * let a whole-corpus pass prove a narrowed horizon it never enforced. Callers
-   * that hold no boundary omit it and keep the honest `unscoped` default.
-   */
-  readonly declaredCollectionScope?: string | null;
-}): LocalCoverageDiagnosticAxis {
-  const declaredScope = resolveDeclaredCoverageScope(input.declaredCollectionScope, input.state);
-  const { rows } = input;
-  // The MEASURED boundary is derived from the coverage rows themselves -- the
-  // same rows this axis is already reading, written in the same ingest batch as
-  // the evidence they qualify. No second store, so no crash window can pair one
-  // run's coverage with another run's boundary, and no caller can hand over a
-  // value the evidence does not support.
-  //
-  // A run whose rows disagree (a partially-replaced set spanning two runs, which
-  // the stable `coverage:<store>` keys make possible under interleaved upserts)
-  // is deliberately treated as having NO measured boundary rather than picking
-  // one: an ambiguous pairing must not be able to read as proof.
-  const measuredScopes = new Set(
-    rows.map((row) => readRowCollectionScope(row)).filter((value): value is string => value !== null)
-  );
-  const measuredScope: string | null = measuredScopes.size === 1 ? ([...measuredScopes][0] ?? null) : null;
-  const scopeField = { declaredCollectionScope: declaredScope, measuredCollectionScope: measuredScope };
-  const stateCursor =
-    input.state && typeof input.state === "object" && !Array.isArray(input.state)
-      ? (input.state as Record<string, unknown>).fetched_at
-      : null;
-  const validCursor = typeof stateCursor === "string" && Number.isFinite(Date.parse(stateCursor));
-  const currentGeneration = input.manifestGeneration;
-  const proofGeneration = input.stateManifestGeneration;
-  const reliable =
-    validCursor &&
-    Number.isInteger(currentGeneration) &&
-    currentGeneration === proofGeneration &&
-    !input.malformed &&
-    input.hasAuthoritativeInventory &&
-    input.hasCommittedSnapshot === true &&
-    input.duplicateStores.length === 0 &&
-    input.missingStores.length === 0 &&
-    input.unexpectedStores.length === 0;
-  if (!reliable) {
-    return {
-      ...scopeField,
-      axis: "unknown",
-      evidenceAsOf: null,
-      reliable: false,
-      rows,
-      unaccountedStores: [],
-      unreliableReason: describeLocalCoverageUnreliableReason({
-        currentGeneration,
-        duplicateStores: input.duplicateStores,
-        hasAuthoritativeInventory: input.hasAuthoritativeInventory,
-        hasCommittedSnapshot: input.hasCommittedSnapshot,
-        malformed: input.malformed,
-        missingStores: input.missingStores,
-        proofGeneration,
-        unexpectedStores: input.unexpectedStores,
-        validCursor,
-      }),
-    };
-  }
-  if (rows.length === 0) {
-    return {
-      ...scopeField,
-      axis: "unknown",
-      evidenceAsOf: input.updatedAt,
-      reliable: true,
-      rows,
-      unaccountedStores: [],
-    };
-  }
-  const unaccountedStores: string[] = [];
-  for (const row of rows) {
-    const store = typeof row.store === "string" && row.store ? row.store : "unknown_store";
-    const status =
-      typeof row.status === "string" && LOCAL_COVERAGE_ACCOUNTED_STATUSES.has(row.status) ? row.status : "unaccounted";
-    if (status === "unaccounted") {
-      unaccountedStores.push(store);
-    }
-  }
-  if (unaccountedStores.length > 0) {
-    return {
-      ...scopeField,
-      axis: "gaps",
-      evidenceAsOf: input.updatedAt,
-      reliable: true,
-      rows,
-      unaccountedStores: unaccountedStores.sort((left, right) => left.localeCompare(right)),
-    };
-  }
-  return {
-    ...scopeField,
-    axis: "complete",
-    evidenceAsOf: input.updatedAt,
-    reliable: true,
-    rows,
-    unaccountedStores: [],
-  };
-}
-
-/**
- * Read durable local coverage diagnostics for one connection and project the
- * coverage axis. Returns `null` (axis derivation skipped) when the read throws —
- * a read failure must not turn an otherwise-fine connection into a fabricated
- * `complete`, and absence of evidence already maps to `unknown` inside the
- * projection.
- *
- * When `connectorInstanceId` is provided, coverage is scoped to exactly that
- * connection so one device's diagnostics cannot color another device's pill.
- * When it is absent (the connector-keyed detail surface), the read falls back to
- * the default-account instance the same way `listLocalCoverageDiagnostics` does.
- */
-async function getConnectorLocalCoverageAxis(
-  connectorId: string,
-  connectorInstanceId: string | null | undefined,
-  nowIso?: string
-): Promise<LocalCoverageDiagnosticAxis | null> {
-  const storageTarget: { connector_id: string; connector_instance_id?: string } = { connector_id: connectorId };
-  if (connectorInstanceId) {
-    storageTarget.connector_instance_id = connectorInstanceId;
-  }
-  try {
-    const proof = await readCommittedLocalCoverageDiagnostics(storageTarget);
-    return deriveLocalCoverageAxis(nowIso ? { ...proof, nowIso } : proof);
-  } catch {
-    return null;
-  }
 }
 
 function mapRunStatus(status: string | null | undefined): "failed" | "succeeded" | null {
@@ -5042,7 +4502,6 @@ async function loadPageProductEvidence(connectorInstanceIds: readonly string[]):
     attention,
     acquisition,
     credentials,
-    coverage,
     heartbeats,
     unfillableAccounted,
     coverageHorizons,
@@ -5071,7 +4530,6 @@ async function loadPageProductEvidence(connectorInstanceIds: readonly string[]):
     getConnectorCredentialStore()
       .getMetadataByInstanceIds(ids)
       .catch(() => null),
-    readCommittedLocalCoverageDiagnosticsByConnectionIds(ids).catch(() => null),
     listSourceInstanceHeartbeatsByConnectionIds(ids).catch(() => null),
     getUnfillableAccountedByStreamForInstanceIds(detailStore, ids),
     getDefaultConnectorCoverageHorizonStore()
@@ -5121,14 +4579,6 @@ async function loadPageProductEvidence(connectorInstanceIds: readonly string[]):
           ])
         )
       : null;
-  const localCoverageByInstanceId = coverage
-    ? new Map(
-        ids.map((id) => {
-          const proof = coverage.get(id);
-          return [id, proof ? deriveLocalCoverageAxis({ ...proof, nowIso }) : null] as const;
-        })
-      )
-    : null;
   const outboxByInstanceId = heartbeats
     ? new Map(
         ids.map((id) => {
@@ -5145,7 +4595,6 @@ async function loadPageProductEvidence(connectorInstanceIds: readonly string[]):
       coverageHorizonsByInstanceId: coverageHorizons,
       credentialMetadataByInstanceId: credentials as ReadonlyMap<string, CredentialStoreMetadata> | null,
       detailGapsByInstanceId,
-      localCoverageByInstanceId,
       outboxByInstanceId,
     },
     retainedSizeSnapshot: {
@@ -5880,15 +5329,6 @@ export function projectConnectorSummaryConnectionHealth(input: {
    */
   readonly latestSettledRun?: ConnectorRunSummary | null;
   /**
-   * Coverage axis derived from durable local-collector `coverage_diagnostics`
-   * records, used only as a fallback when no spine run exists to anchor
-   * run-derived coverage (local-device collectors push from a device outbox and
-   * write no run history). `null` means "no local coverage evidence read", which
-   * preserves the prior behavior (run-derived axis, typically `unknown` for
-   * local collectors). Never lets an empty/drained outbox imply `complete`.
-   */
-  readonly localCoverage?: LocalCoverageDiagnosticAxis | null;
-  /**
    * Whether this connection is backed by a local-device collector
    * (`sourceKind === "local_device"`). Only the caller knows the source
    * kind. When `true`, the projection MAY establish the local-device
@@ -6036,12 +5476,10 @@ export function projectConnectorSummaryConnectionHealth(input: {
     nowIso,
   });
   const coverage = applyCoverageOverride(
-    buildCoverageEvidence(
-      coverageRunForHealth,
-      pendingDetailGaps,
-      input.manifestStreams ?? [],
-      input.localCoverage ?? null
-    ),
+    {
+      axis: mapCoverageAxis(coverageRunForHealth, pendingDetailGaps, input.manifestStreams ?? []),
+      requiredButAccepted: pickRequiredAcceptedCoverage(input.manifestStreams ?? []) !== null,
+    },
     input.coverageOverride
   );
   const outbox = input.outbox ?? { axis: "unknown" };
@@ -6587,7 +6025,6 @@ interface PageProductEvidence {
   readonly coverageHorizonsByInstanceId: ReadonlyMap<string, readonly ConnectionCoverageHorizon[]> | null;
   readonly credentialMetadataByInstanceId: ReadonlyMap<string, CredentialStoreMetadata> | null;
   readonly detailGapsByInstanceId: ReadonlyMap<string, DetailGapProjection> | null;
-  readonly localCoverageByInstanceId: ReadonlyMap<string, LocalCoverageDiagnosticAxis | null> | null;
   readonly outboxByInstanceId: ReadonlyMap<
     string,
     {
@@ -6893,7 +6330,6 @@ interface ConnectorSummarySynthesisInput {
    */
   readonly latestStreamFacts: ReadonlyMap<string, LatestStreamFactRecord> | null;
   readonly live: RecordProjection;
-  readonly localCoverage: Awaited<ReturnType<typeof getConnectorLocalCoverageAxis>>;
   readonly manifest: ConnectorManifest;
   /**
    * The parse-layer manifest-declaration result (see
@@ -6931,7 +6367,6 @@ function synthesizeConnectorSummary(input: ConnectorSummarySynthesisInput): Conn
     latestSettledRun,
     latestStreamFacts,
     live,
-    localCoverage,
     manifest,
     manifestDeclaration,
     nowIso,
@@ -7029,7 +6464,6 @@ function synthesizeConnectorSummary(input: ConnectorSummarySynthesisInput): Conn
     lastRun: authoritativeLastRun,
     lastSuccessfulRun: authoritativeLastSuccessfulRun,
     latestSettledRun: authoritativeLatestSettledRun,
-    localCoverage,
     localDeviceBacked,
     manifestStreams: manifest.streams ?? [],
     nowIso,
@@ -7063,7 +6497,6 @@ function synthesizeConnectorSummary(input: ConnectorSummarySynthesisInput): Conn
     lastSuccessfulRun: authoritativeLastSuccessfulRun,
     latestSettledRun: authoritativeLatestSettledRun,
     latestStreamFacts: authoritativeLatestStreamFacts,
-    localCoverage,
     localDeviceBacked,
     manifestStreams: manifest.streams ?? [],
     pendingDetailGaps: detailGaps.gaps,
@@ -7918,16 +7351,6 @@ async function projectConnectorSummaryForInstance(
   } else {
     schedulePromise = Promise.resolve(deps.schedulesByInstanceId.get(connectorInstanceId) ?? null);
   }
-  let localCoveragePromise: Promise<LocalCoverageDiagnosticAxis | null>;
-  if (!localDeviceBacked) {
-    localCoveragePromise = Promise.resolve(null);
-  } else if (pageProductEvidence) {
-    localCoveragePromise = Promise.resolve(
-      pageProductEvidence.localCoverageByInstanceId?.get(connectorInstanceId) ?? null
-    );
-  } else {
-    localCoveragePromise = getConnectorLocalCoverageAxis(connectorId, connectorInstanceId, nowIso);
-  }
   let credentialMetadataPromise: Promise<CredentialMetadataRead>;
   if (staticSecretBound && pageProductEvidence) {
     credentialMetadataPromise = Promise.resolve(
@@ -7959,7 +7382,6 @@ async function projectConnectorSummaryForInstance(
     outbox,
     attention,
     remoteSurface,
-    localCoverage,
     acquisitionCoverage,
     credentialMetadata,
     coverageHorizons,
@@ -8006,7 +7428,6 @@ async function projectConnectorSummaryForInstance(
       profileKey: browserSurfaceProfileKey,
       store: sharedBrowserSurfaceReader,
     }),
-    localCoveragePromise,
     pageProductEvidence
       ? Promise.resolve(
           (() => {
@@ -8086,7 +7507,6 @@ async function projectConnectorSummaryForInstance(
     latestSettledRun,
     latestStreamFacts: deps.latestStreamFactsByInstanceId.get(connectorInstanceId) ?? null,
     live,
-    localCoverage,
     manifest,
     manifestDeclaration,
     nowIso,

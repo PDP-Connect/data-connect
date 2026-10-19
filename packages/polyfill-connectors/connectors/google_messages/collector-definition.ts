@@ -20,22 +20,15 @@
  * `gmcli` is not bundled/installed by `@pdpp/local-collector`; it is a
  * separate operator-installed prerequisite, documented in the manifest's
  * `runtime_requirements.external_tools` entry and surfaced by the guided
- * setup flow. Default streams include `coverage_diagnostics` (mirroring
- * claude_code/codex/apple_photos's mechanism) so a drained local-collector
- * run always leaves durable coverage evidence even when gmcli/pairing is
- * unavailable.
+ * setup flow.
  */
 
 import type { LocalCollectorDefinition } from "@pdpp/connector-protocol/collector-definition";
 
-export const GOOGLE_MESSAGES_DEFAULT_STREAMS = [
-	"messages",
-	"coverage_diagnostics",
-] as const;
+export const GOOGLE_MESSAGES_DEFAULT_STREAMS = ["messages"] as const;
 
 /**
- * `messages` declares `sent_at`; `coverage_diagnostics` is the run's own
- * accounting and carries no owner-moment, so it is always collected whole.
+ * `messages` declares `sent_at` and can be bounded by owner time.
  */
 export const GOOGLE_MESSAGES_TIME_SCOPABLE_STREAMS = ["messages"] as const;
 

@@ -295,39 +295,6 @@ test("a required stream reading unknown drags the connection coverage axis off c
   assert.notEqual(override, "partial");
 });
 
-test("unreliable projection withholds required complete coverage but preserves optional policy outcomes", () => {
-  const entries = buildCollectionReport({
-    attentionOpen: false,
-    collectionFacts: null,
-    freshness: "fresh",
-    localCoverage: {
-      axis: "complete",
-      evidenceAsOf: "2026-07-23T00:00:00.000Z",
-      reliable: true,
-      rows: [
-        { status: "collected", stream: "required" },
-        { status: "inventory_only", stream: "inventory" },
-        { status: "deferred", stream: "deferred" },
-      ],
-      unaccountedStores: [],
-    },
-    manifestStreams: [
-      { coverage_strategy: "checkpoint_window", name: "required" },
-      { coverage_strategy: "snapshot_import_receipt", name: "inventory", required: false },
-      { coverage_strategy: "snapshot_import_receipt", name: "deferred", required: false },
-    ],
-    refresh: null,
-    requiredCoverageEvidenceAuthoritative: false,
-  });
-  const required = entryFor(entries, "required");
-  assert.equal(required.considered, "unknown");
-  assert.equal(required.covered, "unknown");
-  assert.equal(required.checkpoint, "unknown");
-  assert.equal(required.coverage_condition, "unknown");
-  assert.equal(entryFor(entries, "inventory").coverage_condition, "inventory_only");
-  assert.equal(entryFor(entries, "deferred").coverage_condition, "deferred");
-});
-
 test("declared coverage strategy without committed boundary does not fabricate completeness", () => {
   const entries = buildCollectionReport({
     attentionOpen: false,
