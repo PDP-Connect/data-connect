@@ -3,13 +3,15 @@
 
 // Acceptance test for host-wide admission (ledger DCR-79): two concurrent runs
 // of the vendored test-sandbox with one slot must not run at the same time.
-// The second waits for the slot, and both run inside the shared
-// agent-tests.slice cgroup. The test uses a private slot directory, so it does
-// not take or wait for the host's real slots. It needs a systemd user manager
-// (systemd-run --user); without one, as on hosted CI, it is skipped.
+// The second waits for the slot, and both run inside the agent-tests.slice
+// hierarchy. The runs use a private slot directory and a private child slice
+// (agent-tests-admission<pid>.slice, which systemd nests directly under
+// agent-tests.slice), so the test neither takes the host's real slots nor
+// rewrites the shared slice's limits. Without cgroup enforcement (no systemd
+// user manager, as on hosted CI) it is skipped.
 
 import assert from "node:assert/strict";
-import { spawn, spawnSync } from "node:child_process";
+import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -17,8 +19,12 @@ import { fileURLToPath } from "node:url";
 
 const scriptsDir = dirname(fileURLToPath(import.meta.url));
 const sandbox = join(scriptsDir, "..", "..", "scripts", "test-sandbox", "test-sandbox");
+const slice = `agent-tests-admission${process.pid}`;
 
-/** The environment with every test-sandbox and test-receipt variable removed, so the runs are not nested. */
+/**
+ * The environment with every test-sandbox and test-receipt variable removed
+ * (so the runs are not nested in this run's sandbox) and no user config file.
+ */
 function freshEnvironment(stateDir: string): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const [key, value] of Object.entries(process.env)) {
@@ -26,33 +32,59 @@ function freshEnvironment(stateDir: string): NodeJS.ProcessEnv {
       env[key] = value;
     }
   }
+  env.TEST_SANDBOX_CONFIG = "/dev/null";
   env.TEST_SANDBOX_STATE_DIR = stateDir;
   env.TEST_SANDBOX_ISOLATE = "cgroup";
+  env.TEST_SANDBOX_SLICE = slice;
   return env;
 }
 
-function systemdUserUnavailable(): string | false {
+/** Skip unless the vendored tool itself reports cgroup enforcement here. */
+function cgroupEnforcementUnavailable(): string | false {
   if (process.platform !== "linux") {
     return "test-sandbox admission needs Linux";
   }
-  const probe = spawnSync("systemd-run", ["--user", "--scope", "--quiet", "true"], { encoding: "utf8", timeout: 10_000 });
-  return probe.status === 0 ? false : "no systemd user manager (systemd-run --user unavailable, as on hosted CI)";
+  const stateDir = mkdtempSync(join(scriptsDir, ".sandbox-admission-probe-"));
+  try {
+    const probe = spawnSync(sandbox, ["--slots", "1", "--timeout", "30", "--", "true"], {
+      encoding: "utf8",
+      env: freshEnvironment(stateDir),
+      timeout: 60_000,
+    });
+    const receipt = probe.stderr
+      .split("\n")
+      .filter((line) => line.startsWith('{"tool":"test-sandbox"'))
+      .pop();
+    const enforcement = receipt ? (JSON.parse(receipt) as { enforcement?: string }).enforcement : undefined;
+    return enforcement?.includes("cgroup")
+      ? false
+      : `test-sandbox has no cgroup enforcement here (enforcement: ${enforcement ?? "unknown"}), as on hosted CI`;
+  } finally {
+    rmSync(stateDir, { force: true, recursive: true });
+  }
 }
 
-function runSandboxed(env: NodeJS.ProcessEnv, script: string) {
-  const child = spawn(sandbox, ["--slots", "1", "--timeout", "60", "--", "sh", "-c", script], {
+interface SandboxRun {
+  child: ChildProcess;
+  exited: Promise<number | null>;
+  stderr: () => string;
+}
+
+/** Run `script` in a one-slot sandbox; the work directory is passed as $1, never spliced into the script. */
+function runSandboxed(env: NodeJS.ProcessEnv, work: string, script: string): SandboxRun {
+  const child = spawn(sandbox, ["--slots", "1", "--timeout", "60", "--", "sh", "-c", script, "sh", work], {
     env,
     stdio: ["ignore", "pipe", "pipe"],
   });
   let stderr = "";
-  child.stderr.on("data", (chunk) => {
+  child.stderr?.on("data", (chunk) => {
     stderr += String(chunk);
   });
   const exited = new Promise<number | null>((resolve, reject) => {
     child.on("error", reject);
     child.on("close", (code) => resolve(code));
   });
-  return { exited, stderr: () => stderr };
+  return { child, exited, stderr: () => stderr };
 }
 
 async function until(condition: () => boolean, what: string, timeoutMs = 30_000): Promise<void> {
@@ -65,23 +97,33 @@ async function until(condition: () => boolean, what: string, timeoutMs = 30_000)
 
 test(
   "two one-slot test-sandbox runs do not overlap, and both run under agent-tests.slice",
-  { skip: systemdUserUnavailable() },
+  { skip: cgroupEnforcementUnavailable() },
   async () => {
     // Under the scripts directory, not /tmp: the sandbox gives each run a private /tmp.
     const work = mkdtempSync(join(scriptsDir, ".sandbox-admission-"));
+    const runs: SandboxRun[] = [];
     try {
       const env = freshEnvironment(join(work, "slots"));
       const file = (name: string) => join(work, name);
       // First holds the slot until the test releases it.
-      const first = runSandboxed(
-        env,
-        `cat /proc/self/cgroup > '${file("first.cgroup")}'; touch '${file("first.started")}'; while [ ! -e '${file("release")}' ]; do sleep 0.05; done; touch '${file("first.done")}'`
+      runs.push(
+        runSandboxed(
+          env,
+          work,
+          'cat /proc/self/cgroup > "$1/first.cgroup"; touch "$1/first.started"; while [ ! -e "$1/release" ]; do sleep 0.05; done; touch "$1/first.done"'
+        )
       );
+      const [first] = runs;
       await until(() => existsSync(file("first.started")), "the first run to start");
-      const second = runSandboxed(
-        env,
-        `test -e '${file("first.done")}' || echo overlap > '${file("second.overlap")}'; cat /proc/self/cgroup > '${file("second.cgroup")}'; touch '${file("second.started")}'`
+      runs.push(
+        runSandboxed(
+          env,
+          work,
+          'test -e "$1/first.done" || echo overlap > "$1/second.overlap"; cat /proc/self/cgroup > "$1/second.cgroup"; touch "$1/second.started"'
+        )
       );
+      const second = runs[1];
+      assert.ok(first && second);
       await until(() => second.stderr().includes("waiting for a test slot"), "the second run to report that it waits");
       assert.equal(existsSync(file("second.started")), false, "the second run must not start while the first holds the slot");
       writeFileSync(file("release"), "");
@@ -89,9 +131,20 @@ test(
       assert.equal(await second.exited, 0, `the second run exits cleanly\n${second.stderr()}`);
       assert.equal(existsSync(file("second.overlap")), false, "the second run started before the first finished");
       for (const name of ["first.cgroup", "second.cgroup"]) {
-        assert.match(readFileSync(file(name), "utf8"), /agent-tests\.slice/, `${name} shows the shared slice`);
+        const cgroup = readFileSync(file(name), "utf8");
+        assert.match(cgroup, /\/agent-tests\.slice\//, `${name} shows the shared agent-tests.slice`);
+        assert.match(cgroup, new RegExp(`/${slice}\\.slice/`), `${name} shows this test's child slice`);
       }
     } finally {
+      // On a failed assertion, stop any run still holding or waiting for the slot before removing its files.
+      writeFileSync(join(work, "release"), "");
+      for (const run of runs) {
+        if (run.child.exitCode === null && run.child.signalCode === null) {
+          run.child.kill("SIGTERM");
+        }
+      }
+      await Promise.allSettled(runs.map((run) => run.exited));
+      spawnSync("systemctl", ["--user", "stop", `${slice}.slice`], { timeout: 10_000 });
       rmSync(work, { force: true, recursive: true });
     }
   }
