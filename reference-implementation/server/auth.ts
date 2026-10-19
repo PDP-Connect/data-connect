@@ -5741,9 +5741,15 @@ function parseAndValidateConnectorManifestRow(row: DbRow, connectorId: unknown):
     }
     // Read-path validation: skip the reference cursor_field sort-compat check
     // so stale DB manifests (pre-guardrail) still flow through to the records
-    // module's in-memory fallback. Registration-time paths enforce the full
-    // check; see validateConnectorManifest.
-    validateConnectorManifest(manifest, "connector_invalid", { skipCursorFieldSortCheck: true });
+    // module's in-memory fallback. The Collection Profile version/capability
+    // check is skipped too: a stored manifest stays readable, and the runtime
+    // refuses an unknown or unsupported capability before spawn.
+    // Registration-time paths enforce the full check; see
+    // validateConnectorManifest.
+    validateConnectorManifest(manifest, "connector_invalid", {
+      skipCollectionProfileCheck: true,
+      skipCursorFieldSortCheck: true,
+    });
     return manifest;
   } catch (cause: unknown) {
     const err = invalidConnectorManifest(

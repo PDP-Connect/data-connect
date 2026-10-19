@@ -38,6 +38,7 @@ import { closePostgresStorage } from "../server/postgres-storage.ts";
 import { createRequestConnectorInstanceStore } from "../server/request-store-factories.ts";
 import { admitOwnerRunConnection } from "../server/stores/connector-instance-store.ts";
 import {
+  runHydratedKeyCreditingScenario,
   runMultiParentScenario,
   runStaticParentEmitsCoverageScenario,
   runSubsetParentCoverageScenario,
@@ -134,6 +135,25 @@ if (POSTGRES_URL) {
         rsUrl,
         runConnector,
       });
+    });
+  });
+
+  test("SQLite/Postgres parity scenario (Postgres side): only a DETAIL_COVERAGE_KEY_SETS connector needs a record behind a hydrated key", async () => {
+    await withScenarioServer(baseUrl, async (server) => {
+      const asUrl = `http://localhost:${server.asPort}`;
+      const rsUrl = `http://localhost:${server.rsPort}`;
+      for (const declaresKeySets of [false, true]) {
+        // biome-ignore lint/performance/noAwaitInLoops: one connector per declaration, run in turn on one server.
+        await runHydratedKeyCreditingScenario({
+          admitOwnerRunConnection,
+          asUrl,
+          connectorId: `checkpoint-profile-postgres-hydrated-credit-${declaresKeySets ? "key-sets" : "legacy"}`,
+          createRequestConnectorInstanceStore,
+          declaresKeySets,
+          rsUrl,
+          runConnector,
+        });
+      }
     });
   });
 
