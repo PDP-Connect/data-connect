@@ -86,6 +86,9 @@ diagnostics tree:
 - The oracle for a PR into `testeng/integration` that changes RI code is the full RI gate in the sandbox (`PDPP_TEST_PROFILE=memory-default npm test`, plus `npm run test:postgres` for storage, search or records changes), not `test:fast`.
 - A bug fix comes with a test that fails without the fix. Prove it by seeding the fault (see
   the next section).
+- Fix a load-sensitive test at its cause: inject a clock, wait on an event, or poll with a deadline. Never add a
+  retry or a longer sleep. `test/real-wait-ratchet.test.ts` fails if real waits over 50 ms in test code grow
+  (baseline 172 when it was added), and asks for the baseline to be lowered when they shrink.
 - A new PostgreSQL test file must be classified in `scripts/postgres-template-eligibility.ts`.
   The inventory test (`test/postgres-template-eligibility-inventory.test.ts`) fails if it is not.
 - Run every test command through `test-sandbox` or `test-receipt` on a shared host. The `npm`
