@@ -124,6 +124,7 @@ const MANIFEST = {
   connector_id: "stream-evidence-crash-replay",
   display_name: "STREAM_EVIDENCE crash replay",
   manifest_uri: "https://sources.example/stream-evidence-crash-replay",
+  protocol_capabilities: ["STREAM_EVIDENCE"],
   protocol_version: "0.1.0",
   streams: [
     {

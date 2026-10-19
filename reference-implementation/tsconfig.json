@@ -42,7 +42,15 @@
     // them via transpilePackages.
     "allowJs": true,
     "checkJs": false,
-    "allowImportingTsExtensions": true
+    "allowImportingTsExtensions": true,
+    "paths": {
+      "@pdpp/collector-runtime/runtime-binding-support": [
+        "../packages/collector-runtime/src/runtime-binding-support.ts"
+      ],
+      "@pdpp/collector-runtime/runtime-capabilities": [
+        "../packages/collector-runtime/src/runtime-capabilities.ts"
+      ]
+    }
   },
   "include": [
     "server/**/*.ts",

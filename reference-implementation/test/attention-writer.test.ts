@@ -497,7 +497,7 @@ test(
 
     const manifest = {
       connector_id: "codex",
-      runtime_requirements: { bindings: { interactive: { required: false } } },
+      capabilities: { human_interaction: ["otp"] },
       streams: [
         {
           name: "conversations",

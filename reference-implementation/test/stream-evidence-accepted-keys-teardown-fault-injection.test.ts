@@ -152,6 +152,7 @@ function manifest(connectorId: string) {
     connector_id: connectorId,
     display_name: connectorId,
     manifest_uri: `https://sources.example/${connectorId}`,
+    protocol_capabilities: ["STREAM_EVIDENCE"],
     protocol_version: "0.1.0",
     streams: [
       {

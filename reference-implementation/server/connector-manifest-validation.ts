@@ -11,12 +11,12 @@
  */
 
 import { tuningEnvironmentKeyOwner } from "../runtime/connector-child-environment.ts";
+import { canonicalConnectorKey, canonicalConnectorKeyFromManifest, isConnectorKey } from "./connector-key.ts";
 import {
   normalizeStaticSecretCredentialCapture,
   StaticSecretCredentialCaptureError,
   type StaticSecretCredentialCaptureLike,
 } from "./polyfill-connectors-runtime.ts";
-import { canonicalConnectorKey, canonicalConnectorKeyFromManifest, isConnectorKey } from "./connector-key.ts";
 import { publicListingTierError } from "./public-listing-tier.ts";
 import { refreshPolicyContradictions } from "./refresh-policy-consistency.ts";
 
@@ -265,13 +265,11 @@ export const REFRESH_POLICY_ALLOWED_KEYS = new Set([
 // production code, but the read-site clamp holds even if it does.
 export const REFRESH_POLICY_MAX_COOLDOWN_CYCLES_RANGE = { max: 24, min: 1 } as const;
 export const REFRESH_POLICY_MAX_RECOVERY_ATTEMPTS_RANGE = { max: 20, min: 1 } as const;
-export const RUNTIME_REQUIREMENT_BINDINGS = new Set([
-  "browser",
-  "desktop_session",
-  "filesystem",
-  "interactive",
-  "network",
-]);
+export const RUNTIME_REQUIREMENT_BINDINGS = new Set(["browser", "desktop_session", "filesystem", "network"]);
+// Matches the authoritative connector-manifest.schema.json bindingName
+// grammar: DNS namespace, slash, and one extension name (CP §3.3).
+const EXTENSION_BINDING_NAME =
+  /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+\/[a-z0-9]([a-z0-9._-]*[a-z0-9])?$/;
 export const STREAM_AVAILABILITY_STATES = new Set(["supported", "unsupported_in_mode", "experimental", "deprecated"]);
 export const STREAM_AVAILABILITY_ALLOWED_KEYS = new Set(["future_modes", "mode", "reason", "state"]);
 export const STREAM_COVERAGE_POLICIES = new Set([
@@ -323,7 +321,9 @@ function validateRuntimeBindings(req: Record<string, unknown>, code: string): bo
     throw invalidConnectorManifest("runtime_requirements.bindings must be an object when declared", code);
   }
   const bindingsObj = bindings as Record<string, unknown>;
-  const unknownBindings = Object.keys(bindingsObj).filter((binding) => !RUNTIME_REQUIREMENT_BINDINGS.has(binding));
+  const unknownBindings = Object.keys(bindingsObj).filter(
+    (binding) => !(RUNTIME_REQUIREMENT_BINDINGS.has(binding) || EXTENSION_BINDING_NAME.test(binding))
+  );
   if (unknownBindings.length) {
     throw invalidConnectorManifest(
       `runtime_requirements.bindings has unsupported keys: ${unknownBindings.join(", ")}`,
@@ -337,6 +337,17 @@ function validateRuntimeBindings(req: Record<string, unknown>, code: string): bo
     const reqObj = requirement as Record<string, unknown>;
     if (reqObj.required !== undefined && typeof reqObj.required !== "boolean") {
       throw invalidConnectorManifest(`runtime_requirements.bindings.${binding}.required must be a boolean`, code);
+    }
+    if (
+      reqObj.features !== undefined &&
+      (!Array.isArray(reqObj.features) ||
+        reqObj.features.some((feature) => !isNonEmptyString(feature)) ||
+        new Set(reqObj.features).size !== reqObj.features.length)
+    ) {
+      throw invalidConnectorManifest(
+        `runtime_requirements.bindings.${binding}.features must be an array of unique non-empty strings`,
+        code
+      );
     }
   }
   return true;
