@@ -33,36 +33,10 @@ import { createRequestConnectorInstanceStore } from "../server/request-store-fac
 import { getSubscriptionSummary } from "../server/stores/client-event-subscription-store.ts";
 import { makeDefaultAccountConnectorInstanceId } from "../server/stores/connector-instance-store.ts";
 import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
+import { closeTestServer, type TestServer } from "./helpers/close-test-server.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REFERENCE_IMPL_DIR = join(__dirname, "..");
-
-type TestServer = Awaited<ReturnType<typeof startServer>> & {
-  asServer: { close: (cb: (err?: Error) => void) => void; closeAllConnections: () => void };
-  rsServer: { close: (cb: (err?: Error) => void) => void; closeAllConnections: () => void };
-};
-
-async function closeServer(server: TestServer) {
-  server.asServer.closeAllConnections();
-  server.rsServer.closeAllConnections();
-  const stopped = await Promise.allSettled([
-    new Promise<void>((resolve, reject) => server.asServer.close((error) => error ? reject(error) : resolve())),
-    new Promise<void>((resolve, reject) => server.rsServer.close((error) => error ? reject(error) : resolve())),
-    Promise.resolve().then(() => server.abortStartupBackfill("test teardown")),
-    Promise.resolve().then(() => server.schedulerManager?.stop()),
-    Promise.resolve().then(() => server.stopBrowserSurfaceLeaseSweep()),
-    Promise.resolve().then(() => server.stopConnectorMaintenanceSweep()),
-    Promise.resolve().then(() => server.stopPostgresDerivedIndexMaintenance()),
-    Promise.resolve().then(() => server.stopClientEventDeliveryWorker()),
-    server.manifestReconciliationDone,
-    server.startupBackfillDone,
-    server.startupRunHistoryBackfillDone,
-    server.startupSummaryEvidenceSweepDone,
-    server.postgresSemanticHnswMaintenanceDone,
-  ]);
-  const errors = stopped.flatMap((result) => result.status === "rejected" ? [result.reason] : []);
-  if (errors.length) throw new AggregateError(errors, "event subscription fixture teardown failed");
-}
 
 async function fetchJson<T = unknown>(url: string, opts: RequestInit = {}): Promise<{ status: number; body: T }> {
   const resp = await fetch(url, opts);
@@ -502,7 +476,7 @@ test("client event subscriptions deliver signed hints end-to-end", async () => {
     assert.ok(visible, "client must be able to read the changed record");
   } finally {
     await receiver.close();
-    await closeServer(server);
+    await closeTestServer(server);
   }
 });
 
@@ -565,7 +539,7 @@ test("grant revoke disables subscription and notifies client", async () => {
     // skip that path here, the lifecycle property already proven.
   } finally {
     await receiver.close();
-    await closeServer(server);
+    await closeTestServer(server);
   }
 });
 
@@ -697,7 +671,7 @@ test("trusted owner-agent event subscriptions deliver signed hints and are revok
     assert.equal(summary.disabled_reason, "client_deleted");
   } finally {
     await receiver.close();
-    await closeServer(server);
+    await closeTestServer(server);
   }
 });
 
@@ -799,7 +773,7 @@ test("discovery: RS protected-resource metadata advertises client_event_subscrip
     assert.equal(cap.limits.callback_url_max_bytes, 2048);
     assert.equal(cap.envelope.no_record_bodies, true);
   } finally {
-    await closeServer(server);
+    await closeTestServer(server);
   }
 });
 
@@ -837,7 +811,7 @@ test("registered owner bearer cannot see client-grant subscriptions", async () =
     assert.deepEqual(ownerListResp.body.data, []);
   } finally {
     await receiver.close();
-    await closeServer(server);
+    await closeTestServer(server);
   }
 });
 
@@ -857,6 +831,6 @@ test("unregistered owner bearer cannot use event-subscription endpoints", async 
     });
     assert.equal(ownerListResp.status, 403);
   } finally {
-    await closeServer(server);
+    await closeTestServer(server);
   }
 });
