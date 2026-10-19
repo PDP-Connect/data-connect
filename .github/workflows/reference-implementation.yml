@@ -164,6 +164,19 @@ jobs:
         if: steps.node-modules-cache.outputs.cache-hit != 'true'
         run: npm ci
 
+      # A restored tree skips npm's lifecycle scripts, so run what `npm ci`
+      # would: the root postinstall and each workspace's `prepare` build, in
+      # dependency order.
+      - name: Run install lifecycle scripts on a restored tree
+        if: steps.node-modules-cache.outputs.cache-hit == 'true'
+        run: |
+          npm run postinstall
+          npm --prefix packages/connector-protocol run build
+          npm --prefix packages/collector-runtime run build
+          npm --prefix reference-implementation/vendor/read-core run build
+          npm --prefix reference-implementation/vendor/mcp-server run build
+          npm --prefix reference-implementation/vendor/cli run build
+
       - name: Build workspace packages
         # The root tsconfig.json's project references only cover the app
         # (tsconfig.app.json/tsconfig.node.json) -- `npx tsc -b` never
@@ -215,6 +228,19 @@ jobs:
       - name: Install dependencies
         if: steps.node-modules-cache.outputs.cache-hit != 'true'
         run: npm ci
+
+      # A restored tree skips npm's lifecycle scripts, so run what `npm ci`
+      # would: the root postinstall and each workspace's `prepare` build, in
+      # dependency order.
+      - name: Run install lifecycle scripts on a restored tree
+        if: steps.node-modules-cache.outputs.cache-hit == 'true'
+        run: |
+          npm run postinstall
+          npm --prefix packages/connector-protocol run build
+          npm --prefix packages/collector-runtime run build
+          npm --prefix reference-implementation/vendor/read-core run build
+          npm --prefix reference-implementation/vendor/mcp-server run build
+          npm --prefix reference-implementation/vendor/cli run build
 
       - name: Build workspace packages
         # The root tsconfig.json's project references only cover the app
