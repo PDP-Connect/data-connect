@@ -158,7 +158,8 @@ jobs:
             reference-implementation/node_modules
             packages/local-collector/node_modules
             apps/console/node_modules
-          key: node-modules-${{ runner.os }}-node24.21.0-${{ hashFiles('package-lock.json') }}
+            ~/.cache/ms-playwright
+          key: node-modules-v2-${{ runner.os }}-node24.21.0-${{ hashFiles('package-lock.json') }}
 
       - name: Install dependencies
         if: steps.node-modules-cache.outputs.cache-hit != 'true'
@@ -223,7 +224,8 @@ jobs:
             reference-implementation/node_modules
             packages/local-collector/node_modules
             apps/console/node_modules
-          key: node-modules-${{ runner.os }}-node24.21.0-${{ hashFiles('package-lock.json') }}
+            ~/.cache/ms-playwright
+          key: node-modules-v2-${{ runner.os }}-node24.21.0-${{ hashFiles('package-lock.json') }}
 
       - name: Install dependencies
         if: steps.node-modules-cache.outputs.cache-hit != 'true'
