@@ -1133,6 +1133,7 @@ function ConnectorPrimaryHeaderAction({
       <RenderedVerdictHeaderAction
         action={renderedOwnerAction}
         browserSessionRepairHref={browserSessionRepairHref}
+        canSync={primaryAction.kind === "sync"}
         connectionId={connectionId}
         connectorId={connectorId}
         credentialUpdateHref={credentialUpdateHref}
@@ -1140,6 +1141,7 @@ function ConnectorPrimaryHeaderAction({
         installPromptShown={installPromptShown}
         running={running}
         storedCredentialUpdateHref={storedCredentialUpdateHref}
+        syncIdleLabel={syncIdleLabel}
       />
     );
   }
@@ -1250,6 +1252,7 @@ function reauthActionPresentation({
 function RenderedVerdictHeaderAction({
   action,
   browserSessionRepairHref,
+  canSync,
   connectionId,
   connectorId,
   credentialUpdateHref,
@@ -1257,9 +1260,11 @@ function RenderedVerdictHeaderAction({
   installPromptShown,
   running,
   storedCredentialUpdateHref,
+  syncIdleLabel,
 }: {
   action: RefRequiredAction;
   browserSessionRepairHref: string | null;
+  canSync: boolean;
   connectionId: string | null;
   connectorId: string;
   credentialUpdateHref: string | null;
@@ -1267,6 +1272,7 @@ function RenderedVerdictHeaderAction({
   installPromptShown: boolean;
   running: boolean;
   storedCredentialUpdateHref: string | null;
+  syncIdleLabel: string;
 }) {
   if (action.audience !== "owner" || action.satisfied_when.kind === "none") {
     return null;
@@ -1369,20 +1375,30 @@ function RenderedVerdictHeaderAction({
     );
   }
   if (action.kind === "reattach_schedule") {
-    // The owner paused this connection's automatic schedule. `Sync now`
-    // would run once but leave the schedule disabled — it does not satisfy
-    // `schedule_attached_and_enabled`, the action's real contract. Wire the
-    // existing `resumeConnectorScheduleAction` server action (already
-    // reaches the real instance-scoped `/schedule/resume` endpoint) instead
-    // of falling through to the sync-now button below.
+    // Resume remains the primary action that satisfies
+    // `schedule_attached_and_enabled`. An owner-runnable connection can also
+    // sync once without re-enabling its automatic schedule.
     return (
-      <form action={resumeConnectorScheduleAction}>
-        <input name="connector_id" type="hidden" value={connectorId} />
-        {connectionId ? <input name="connection_id" type="hidden" value={connectionId} /> : null}
-        <IcButton data-testid="detail-action-reattach-schedule" size="sm" type="submit" variant="default">
-          {action.cta}
-        </IcButton>
-      </form>
+      <>
+        <form action={resumeConnectorScheduleAction}>
+          <input name="connector_id" type="hidden" value={connectorId} />
+          {connectionId ? <input name="connection_id" type="hidden" value={connectionId} /> : null}
+          <IcButton data-testid="detail-action-reattach-schedule" size="sm" type="submit" variant="default">
+            {action.cta}
+          </IcButton>
+        </form>
+        {canSync ? (
+          <SyncNowButton
+            connectionId={connectionId}
+            connectorId={connectorId}
+            displayName={displayName}
+            installPromptShown={installPromptShown}
+            idleLabel={syncIdleLabel}
+            initialRunning={running}
+            variant="outline"
+          />
+        ) : null}
+      </>
     );
   }
   return (

@@ -156,14 +156,14 @@ test("credential repair follows the connection binding before connector capabili
 test("SyncNowButton renders only inside owner-actionable branches", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
   assert.match(src, SYNC_BRANCH_GUARD);
-  // Four render sites are allowed: the rendered-verdict repair action,
+  // Five render sites are allowed: the rendered-verdict repair action,
   // ordinary sync, manual-upload reprocess nested under the owner-syncable
-  // branch, and the separately-named force override nested under cooldown.
+  // branch, paused-schedule sync, and the separately-named force override nested under cooldown.
   const renders = src.match(/<SyncNowButton/g) ?? [];
   assert.equal(
     renders.length,
-    4,
-    "expected rendered-verdict repair, ordinary sync, manual reprocess, and cooldown force render sites"
+    5,
+    "expected repair, ordinary sync, manual reprocess, paused-schedule sync, and cooldown force render sites"
   );
   assert.match(src, MANUAL_UPLOAD_IMPORT_LINK);
   assert.match(src, MANUAL_UPLOAD_REPROCESS_BUTTON);
@@ -252,4 +252,49 @@ test("resumeConnectorScheduleAction reaches the real instance-scoped schedule-re
   // Instance-scoped resume when a connection_id is present — never silently
   // falls back to the connector-wide resume for a connection-scoped action.
   assert.match(src, REATTACH_SCHEDULE_RESUME_CALL);
+});
+
+test("paused schedules retain primary Resume and offer an independent secondary one-off sync", async () => {
+  const src = await readFile(PAGE_FILE, "utf8");
+  const branch = src.slice(
+    src.indexOf('  if (action.kind === "reattach_schedule")'),
+    src.indexOf("\nfunction AcquisitionCoverageSection")
+  );
+  const pausedBranch = branch.slice(0, branch.indexOf("\n  return ("));
+  assert.match(pausedBranch, REATTACH_SCHEDULE_FORM_ACTION);
+  assert.match(pausedBranch, REATTACH_SCHEDULE_CONNECTOR_ID_INPUT);
+  assert.match(pausedBranch, REATTACH_SCHEDULE_CONNECTION_ID_INPUT);
+  assert.match(pausedBranch, /<IcButton[^>]*variant="default">\s*\{action\.cta\}/);
+  assert.match(pausedBranch, /<\/form>\s*\{canSync \? \(\s*<SyncNowButton/);
+  const sync = pausedBranch.match(/<SyncNowButton[\s\S]*?\/>/)?.[0];
+  assert.ok(sync, "paused schedule offers Sync now outside the Resume form");
+  for (const prop of ["connectionId", "connectorId", "displayName", "installPromptShown"]) {
+    assert.ok(sync.includes(`${prop}={${prop}}`), `forwards ${prop} like ordinary sync`);
+  }
+  assert.match(sync, /idleLabel=\{syncIdleLabel\}/);
+  assert.match(sync, /initialRunning=\{running\}/);
+  assert.match(sync, /variant="outline"/);
+  assert.doesNotMatch(sync, /\bforce\b|runningLabel|action\.cta|resumeConnectorScheduleAction/);
+});
+
+test("paused-schedule sync preserves modality, setup, revoked and running guards", async () => {
+  const src = await readFile(PAGE_FILE, "utf8");
+  const primary = src.slice(
+    src.indexOf("function ConnectorPrimaryHeaderAction"),
+    src.indexOf("function reauthActionPresentation")
+  );
+  assert.match(primary, /if \(setupFailed\) \{\s*return null;/);
+  assert.ok(primary.indexOf("if (revoked)") < primary.indexOf("<RenderedVerdictHeaderAction"));
+  assert.match(primary, /canSync=\{primaryAction\.kind === "sync"\}/);
+  assert.match(primary, /syncIdleLabel=\{syncIdleLabel\}/);
+  const rendered = src.slice(
+    src.indexOf("function RenderedVerdictHeaderAction"),
+    src.indexOf("function AcquisitionCoverageSection")
+  );
+  assert.match(rendered, /canSync,/);
+  assert.match(rendered, /syncIdleLabel,/);
+  assert.match(rendered, NON_OWNER_HEADER_ACTIONS_RETURN_NULL);
+  const button = await readFile(SYNC_BUTTON_FILE, "utf8");
+  assert.match(button, /const busy = running \|\| isPending/);
+  assert.match(button, /disabled=\{busy\}/);
 });
