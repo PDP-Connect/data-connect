@@ -283,7 +283,6 @@ const BROWSER_SURFACE_LEASE_CREATE_TABLE_NAME_PATTERN =
 
 let db: DatabaseHandle | null = null;
 let sqliteMemorySchemaSnapshot: Buffer | null = null;
-let sqliteFileSchemaSnapshot: Buffer | null = null;
 let sqliteSchemaSnapshotRestores = 0;
 
 /** How many databases this process opened from a schema snapshot (tests only). */
@@ -6239,104 +6238,35 @@ function loadVectorExtension(raw: SqliteDatabase): VectorIndexKind {
 }
 
 /**
- * Publish `bytes` as a new database file at `path`, or throw EEXIST if
- * anything already exists there. The bytes are written in full to a unique
- * temporary file in the same directory first, so no other process can open a
- * partly written database. A hard link then makes the file visible at `path`
- * in one step, and it never replaces a competing database.
+ * Publish `bytes` as a new database file at `path`, or throw if `path` cannot be
+ * published: EEXIST when anything already exists there, or another error from
+ * `link` when the filesystem has no hard links. The bytes are written in full to
+ * a unique temporary file in the same directory first, so no other process can
+ * open a partly written database. The hard link then makes the file visible at
+ * `path` in one step, and it never replaces a competing database. The temporary
+ * file is removed either way.
  */
-export function publishSchemaSnapshotFile(path: string, bytes: Buffer): void {
+export function publishSchemaSnapshotFile(
+  path: string,
+  bytes: Buffer,
+  link: (existingPath: string, newPath: string) => void = linkSync,
+): void {
   const temporaryPath = `${path}.snapshot-${process.pid}-${randomBytes(8).toString("hex")}`;
   try {
     writeFileSync(temporaryPath, bytes, { flag: "wx" });
-    linkSync(temporaryPath, path);
+    link(temporaryPath, path);
   } finally {
     rmSync(temporaryPath, { force: true });
   }
 }
 
-export function initDb(path = ":memory:", opts: InitDbOptions = {}): DatabaseHandle {
-  // Detach, don't close: a previously-returned handle belongs to whoever
-  // holds it. See `detachDb()` for why closing here was a cross-instance
-  // interference defect.
-  detachDb();
-  const busyTimeoutMs = resolveSqliteBusyTimeoutMs(opts.busyTimeoutMs);
-  if (path !== ":memory:") {
-    mkdirSync(dirname(path), { recursive: true });
-  }
-  const hasMigrationCallback =
-    opts.onSchemaMigration !== undefined ||
-    opts.onSchemaRetry !== undefined ||
-    opts.onEncryptionMigrationStep !== undefined;
-  // Test runs only (the RI runner requires PDPP_TEST_PROFILE): a test process
-  // opens many fresh databases, and rebuilding the schema for each one cost
-  // about 6.6% of the memory gate's CPU. Production opens one database per
-  // process and never takes this path. Anything that must observe or change
-  // the schema build bypasses it: migration callbacks, encryption, and the
-  // test-only source-revision install marker.
-  const canUseSchemaSnapshot =
-    process.env.PDPP_TEST_PROFILE !== undefined &&
-    !hasMigrationCallback &&
-    !process.env.PDPP_TEST_SOURCE_REVISION_INSTALL_LOCK_PATH &&
-    resolveDatabaseEncryptionKey(opts.encryptionKey) === null;
-  const restoredMemorySchema =
-    path === ":memory:" && canUseSchemaSnapshot && sqliteMemorySchemaSnapshot !== null;
-  let restoredFileSchema = false;
-  let seedFileSchemaSnapshot = false;
-  if (path !== ":memory:" && canUseSchemaSnapshot) {
-    if (!existsSync(path) && !existsSync(`${path}-wal`) && !existsSync(`${path}-shm`)) {
-      const fileSnapshot = sqliteMemorySchemaSnapshot ?? sqliteFileSchemaSnapshot;
-      try {
-        if (fileSnapshot === null) {
-          writeFileSync(path, Buffer.alloc(0), { flag: "wx" });
-        } else {
-          publishSchemaSnapshotFile(path, fileSnapshot);
-        }
-        restoredFileSchema = fileSnapshot !== null;
-        seedFileSchemaSnapshot = fileSnapshot === null;
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
-          throw error;
-        }
-      }
-    }
-  }
-  const raw = (restoredMemorySchema
-    ? new Database(sqliteMemorySchemaSnapshot as Buffer, { timeout: busyTimeoutMs })
-    : openSqliteDatabase(Database, path, busyTimeoutMs, opts)) as unknown as SqliteDatabase;
-  sqliteStoreCacheGeneration += 1;
-  sqliteStoreCacheIdentity = `sqlite:${String(path)}:${sqliteStoreCacheGeneration}`;
-  raw.pragma(`busy_timeout = ${busyTimeoutMs}`);
-
-  // Performance PRAGMAs — see openspec/changes/add-polyfill-connector-system/
-  // design-notes/sqlite-performance-recommendations.md for rationale. WAL is
-  // invalid on in-memory DBs.
-  if (path !== ":memory:") {
-    raw.pragma("journal_mode = WAL");
-    raw.pragma("synchronous = NORMAL");
-    raw.pragma("temp_store = MEMORY");
-    raw.pragma("mmap_size = 268435456");
-    raw.pragma("cache_size = -65536");
-  }
-
-  const vectorIndexKind = loadVectorExtension(raw);
-
-  // SQLite connection settings are not part of a serialized database. The
-  // schema-building path restores foreign_keys during its migrations; a
-  // deserialized connection must restore it explicitly.
-  if (restoredMemorySchema || restoredFileSchema) {
-    sqliteSchemaSnapshotRestores += 1;
-    raw.pragma("foreign_keys = ON");
-    db = withCachedPrepare(raw);
-    Object.defineProperty(raw, "vectorIndexKind", {
-      configurable: false,
-      enumerable: true,
-      value: vectorIndexKind,
-      writable: false,
-    });
-    return db;
-  }
-
+/**
+ * Create the schema on `raw`, a connection to a database with no schema yet.
+ * It does not read or write the module's database handle or store-cache
+ * identity, so `initDb` can run it on a private `:memory:` connection (see
+ * `buildPrivateSchemaSnapshot`) as well as on the connection it returns.
+ */
+function buildSqliteSchema(raw: SqliteDatabase, opts: InitDbOptions): void {
   // The first non-trivial write on the freshly opened DB. On Docker dev
   // restart the previous process may still be closing its WAL writer;
   // wrap with the same bounded retry policy used by
@@ -6895,13 +6825,124 @@ CREATE TABLE IF NOT EXISTS cimd_client_documents (
   runWithSqliteBusyRetrySync(() =>
     raw.transaction(() => ensureConnectorSummarySourceRevisionPrimitive(raw)).immediate()
   );
+}
+
+/**
+ * The schema as a serialized database image, built on a private `:memory:`
+ * connection that no other code can reach. The build starts from an empty
+ * database, so a file created from the image holds no rows from any other
+ * database.
+ */
+function buildPrivateSchemaSnapshot(opts: InitDbOptions): Buffer {
+  const seed = openSqliteDatabase(
+    Database,
+    ":memory:",
+    resolveSqliteBusyTimeoutMs(opts.busyTimeoutMs),
+    opts,
+  ) as unknown as SqliteDatabase;
+  try {
+    loadVectorExtension(seed);
+    buildSqliteSchema(seed, opts);
+    return seed.serialize();
+  } finally {
+    seed.close();
+  }
+}
+
+/**
+ * Create `path` from the schema image, so a fresh database file starts with its
+ * schema built. The image is built privately and is never copied from `path`,
+ * because another process may be writing to `path` at this moment. Returns false
+ * when `path` was not published, and the caller then opens it and builds the
+ * schema in place: another process created `path` first (EEXIST), or the
+ * filesystem has no hard links. Any other error also returns false; the in-place
+ * build then reports a real problem.
+ */
+function publishFileSchemaSnapshot(path: string, opts: InitDbOptions): boolean {
+  if (sqliteMemorySchemaSnapshot === null) {
+    sqliteMemorySchemaSnapshot = buildPrivateSchemaSnapshot(opts);
+  }
+  try {
+    publishSchemaSnapshotFile(path, sqliteMemorySchemaSnapshot);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function initDb(path = ":memory:", opts: InitDbOptions = {}): DatabaseHandle {
+  // Detach, don't close: a previously-returned handle belongs to whoever
+  // holds it. See `detachDb()` for why closing here was a cross-instance
+  // interference defect.
+  detachDb();
+  const busyTimeoutMs = resolveSqliteBusyTimeoutMs(opts.busyTimeoutMs);
+  if (path !== ":memory:") {
+    mkdirSync(dirname(path), { recursive: true });
+  }
+  const hasMigrationCallback =
+    opts.onSchemaMigration !== undefined ||
+    opts.onSchemaRetry !== undefined ||
+    opts.onEncryptionMigrationStep !== undefined;
+  // Test runs only (the RI runner requires PDPP_TEST_PROFILE): a test process
+  // opens many fresh databases, and rebuilding the schema for each one cost
+  // about 6.6% of the memory gate's CPU. Production opens one database per
+  // process and never takes this path. Anything that must observe or change
+  // the schema build bypasses it: migration callbacks, encryption, and the
+  // test-only source-revision install marker.
+  const canUseSchemaSnapshot =
+    process.env.PDPP_TEST_PROFILE !== undefined &&
+    !hasMigrationCallback &&
+    !process.env.PDPP_TEST_SOURCE_REVISION_INSTALL_LOCK_PATH &&
+    resolveDatabaseEncryptionKey(opts.encryptionKey) === null;
+  const restoredMemorySchema =
+    path === ":memory:" && canUseSchemaSnapshot && sqliteMemorySchemaSnapshot !== null;
+  let restoredFileSchema = false;
+  if (path !== ":memory:" && canUseSchemaSnapshot) {
+    if (!existsSync(path) && !existsSync(`${path}-wal`) && !existsSync(`${path}-shm`)) {
+      restoredFileSchema = publishFileSchemaSnapshot(path, opts);
+    }
+  }
+  const raw = (restoredMemorySchema
+    ? new Database(sqliteMemorySchemaSnapshot as Buffer, { timeout: busyTimeoutMs })
+    : openSqliteDatabase(Database, path, busyTimeoutMs, opts)) as unknown as SqliteDatabase;
+  sqliteStoreCacheGeneration += 1;
+  sqliteStoreCacheIdentity = `sqlite:${String(path)}:${sqliteStoreCacheGeneration}`;
+  raw.pragma(`busy_timeout = ${busyTimeoutMs}`);
+
+  // Performance PRAGMAs — see openspec/changes/add-polyfill-connector-system/
+  // design-notes/sqlite-performance-recommendations.md for rationale. WAL is
+  // invalid on in-memory DBs.
+  if (path !== ":memory:") {
+    raw.pragma("journal_mode = WAL");
+    raw.pragma("synchronous = NORMAL");
+    raw.pragma("temp_store = MEMORY");
+    raw.pragma("mmap_size = 268435456");
+    raw.pragma("cache_size = -65536");
+  }
+
+  const vectorIndexKind = loadVectorExtension(raw);
+
+  // SQLite connection settings are not part of a serialized database. The
+  // schema-building path restores foreign_keys during its migrations; a
+  // deserialized connection must restore it explicitly.
+  if (restoredMemorySchema || restoredFileSchema) {
+    sqliteSchemaSnapshotRestores += 1;
+    raw.pragma("foreign_keys = ON");
+    db = withCachedPrepare(raw);
+    Object.defineProperty(raw, "vectorIndexKind", {
+      configurable: false,
+      enumerable: true,
+      value: vectorIndexKind,
+      writable: false,
+    });
+    return db;
+  }
+
+  buildSqliteSchema(raw, opts);
   if (
     path === ":memory:" && canUseSchemaSnapshot && !restoredMemorySchema
   ) {
     sqliteMemorySchemaSnapshot = raw.serialize();
-  }
-  if (seedFileSchemaSnapshot) {
-    sqliteFileSchemaSnapshot = raw.serialize();
   }
   db = withCachedPrepare(raw);
   // Stamp the chosen vector-index backend onto the wrapped db so

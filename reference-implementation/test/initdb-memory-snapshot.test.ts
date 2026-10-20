@@ -3,8 +3,14 @@
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
-import { homedir } from "node:os";
+import {
+	existsSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -39,9 +45,7 @@ function tableContents(db: ReturnType<typeof initDb>) {
 }
 
 test("new file databases restore the snapshot and reopen as normal SQLite files", () => {
-	const directory = mkdtempSync(
-		join(homedir(), ".tmp/testeng/dcri/initdb/file-snapshot-"),
-	);
+	const directory = mkdtempSync(join(tmpdir(), "pdpp-initdb-file-snapshot-"));
 	const path = join(directory, "pdpp.sqlite");
 	const initialPath = join(directory, "initial.sqlite");
 	const fresh = initDb(":memory:", { onSchemaMigration: () => undefined });
@@ -174,7 +178,9 @@ test("the schema snapshot is used only in test runs", () => {
 });
 
 test("a snapshot never replaces a competing database, which then opens normally", () => {
-	const directory = mkdtempSync(join(homedir(), ".tmp/testeng/dcri/initdb/publish-competing-"));
+	const directory = mkdtempSync(
+		join(tmpdir(), "pdpp-initdb-publish-competing-"),
+	);
 	const path = join(directory, "pdpp.sqlite");
 	let competing: ReturnType<typeof initDb> | undefined;
 	let reopened: ReturnType<typeof initDb> | undefined;
@@ -214,8 +220,45 @@ test("a snapshot never replaces a competing database, which then opens normally"
 	}
 });
 
+test("publishing a snapshot where hard links fail leaves neither a file nor a temporary file", () => {
+	const directory = mkdtempSync(
+		join(tmpdir(), "pdpp-initdb-publish-unlinkable-"),
+	);
+	const path = join(directory, "pdpp.sqlite");
+
+	try {
+		for (const code of ["EPERM", "ENOTSUP"]) {
+			// The injected link stands in for a filesystem such as exFAT that rejects hard links.
+			assert.throws(
+				() =>
+					publishSchemaSnapshotFile(path, Buffer.from("snapshot bytes"), () => {
+						throw Object.assign(
+							new Error(`${code}: hard links are not supported`),
+							{ code },
+						);
+					}),
+				{ code },
+			);
+			assert.equal(
+				existsSync(path),
+				false,
+				`${code} must not leave a file at the target path`,
+			);
+			assert.deepEqual(
+				readdirSync(directory),
+				[],
+				`${code} must not leave a temporary file`,
+			);
+		}
+	} finally {
+		rmSync(directory, { force: true, recursive: true });
+	}
+});
+
 test("publishing a snapshot writes the exact bytes and leaves no temporary file", () => {
-	const directory = mkdtempSync(join(homedir(), ".tmp/testeng/dcri/initdb/publish-snapshot-"));
+	const directory = mkdtempSync(
+		join(tmpdir(), "pdpp-initdb-publish-snapshot-"),
+	);
 	const path = join(directory, "pdpp.sqlite");
 
 	try {
