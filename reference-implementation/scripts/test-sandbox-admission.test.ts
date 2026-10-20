@@ -175,15 +175,24 @@ test(
       }
     } finally {
       // On a failed assertion, stop any run still holding or waiting for the slot before removing its files.
-      writeFileSync(join(work, "release"), "");
-      for (const run of runs) {
-        if (run.child.exitCode === null && run.child.signalCode === null) {
-          run.child.kill("SIGTERM");
-        }
+      // Each step is best-effort so a failing one (e.g. ENOSPC on the release file) cannot skip the
+      // slice cleanup that follows.
+      try {
+        writeFileSync(join(work, "release"), "");
+      } catch {
+        // The SIGTERM below still stops a run waiting on the release file.
       }
-      await Promise.allSettled(runs.map((run) => run.exited));
-      releasePrivateSlice();
-      rmSync(work, { force: true, recursive: true });
+      try {
+        for (const run of runs) {
+          if (run.child.exitCode === null && run.child.signalCode === null) {
+            run.child.kill("SIGTERM");
+          }
+        }
+        await Promise.allSettled(runs.map((run) => run.exited));
+      } finally {
+        releasePrivateSlice();
+        rmSync(work, { force: true, recursive: true });
+      }
     }
   }
 );
