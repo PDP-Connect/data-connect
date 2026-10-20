@@ -198,7 +198,10 @@ jobs:
     needs: classify
     if: needs.classify.outputs.reference_impacting == 'true' && needs.classify.outputs.has_content == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # The memory-profile suite alone takes 18-27 minutes on a hosted runner, so
+    # 30 minutes cancelled green runs (2 of 3 main runs on 2026-10-19). Raise the
+    # bound; splitting the suite across jobs is the follow-up that cuts wall time.
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
