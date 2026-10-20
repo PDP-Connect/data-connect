@@ -395,6 +395,8 @@ export class NekoSurfaceAllocatorService {
         // Chromium boots, and replacing on that signal would cause a boot loop.
         // "unhealthy" only appears after StartPeriod + failing retries.
         if (isInspectUnhealthy(existing)) {
+          // Replacing needs the image: check it before destroying anything.
+          await this.assertImageReady();
           await this.#removeContainer(existing.Id);
         } else {
           await this.#migrateContainerNetworkIfNeeded(existing.Id);
@@ -407,6 +409,7 @@ export class NekoSurfaceAllocatorService {
         // than re-binding clients to a dead CDP socket and is the only way
         // an allocator-aware boot reconcile can make progress when prior
         // surfaces were OOM/network-evicted across restarts.
+        await this.assertImageReady();
         await this.#removeContainer(existing.Id);
       } else {
         await this.#startContainer(existing.Id);
@@ -415,6 +418,10 @@ export class NekoSurfaceAllocatorService {
       }
     }
 
+    if (existing === null) {
+      // Before port reclamation, which removes stopped containers.
+      await this.assertImageReady();
+    }
     const skippedPorts = new Set<number>();
     for (;;) {
       // biome-ignore lint/performance/noAwaitInLoops: Work is intentionally sequential to preserve ordering and state transitions.
@@ -422,47 +429,49 @@ export class NekoSurfaceAllocatorService {
       const names = this.#resourceNames(request);
       await this.#prepareProfileDirectory(names.profilePath, rootIdentity);
       const labels = this.#labelsForRequest(request, names, port);
-      const created = await this.#docker.requestJson("/containers/create", {
-        body: {
-          Env: this.#containerEnv(request, port),
-          ExposedPorts: {
-            [`${String(this.#options.containerHttpPort)}/tcp`]: {},
-            [`${String(this.#options.containerCdpPort)}/tcp`]: {},
-            [`${String(port)}/tcp`]: {},
-            [`${String(port)}/udp`]: {},
-          },
-          Healthcheck: this.#containerHealthcheck(),
-          HostConfig: {
-            Binds: [`${names.profilePath}:/home/user/.config/chromium`],
-            // Docker takes these option values as strings only.
-            LogConfig: { Config: { "max-file": "5", "max-size": "10m" }, Type: "json-file" },
-            NetworkMode: this.#options.network,
-            PortBindings: {
-              [`${String(port)}/tcp`]: [{ HostPort: String(port) }],
-              [`${String(port)}/udp`]: [{ HostPort: String(port) }],
+      const created = await this.#docker
+        .requestJson("/containers/create", {
+          body: {
+            Env: this.#containerEnv(request, port),
+            ExposedPorts: {
+              [`${String(this.#options.containerHttpPort)}/tcp`]: {},
+              [`${String(this.#options.containerCdpPort)}/tcp`]: {},
+              [`${String(port)}/tcp`]: {},
+              [`${String(port)}/udp`]: {},
             },
+            Healthcheck: this.#containerHealthcheck(),
+            HostConfig: {
+              Binds: [`${names.profilePath}:/home/user/.config/chromium`],
+              // Docker takes these option values as strings only.
+              LogConfig: { Config: { "max-file": "5", "max-size": "10m" }, Type: "json-file" },
+              NetworkMode: this.#options.network,
+              PortBindings: {
+                [`${String(port)}/tcp`]: [{ HostPort: String(port) }],
+                [`${String(port)}/udp`]: [{ HostPort: String(port) }],
+              },
+            },
+            Image: this.#options.image,
+            Labels: labels,
           },
-          Image: this.#options.image,
-          Labels: labels,
-        },
-        method: "POST",
-        okStatuses: [201],
-        query: { name: names.containerName },
-      }).catch(async (cause: unknown) => {
-        // A create 404 can also name a missing network; inspect the image
-        // and replace the create error only when the image is missing, so
-        // unrelated (or inspect-time) Docker failures keep the create error.
-        if (isDockerNotFoundError(cause)) {
-          try {
-            await this.assertImageReady();
-          } catch (inspectError) {
-            if (inspectError instanceof NekoSurfaceAllocatorServiceError && inspectError.code === "image_missing") {
-              throw inspectError;
+          method: "POST",
+          okStatuses: [201],
+          query: { name: names.containerName },
+        })
+        .catch(async (cause: unknown) => {
+          // A create 404 can also name a missing network; inspect the image
+          // and replace the create error only when the image is missing, so
+          // unrelated (or inspect-time) Docker failures keep the create error.
+          if (isDockerNotFoundError(cause)) {
+            try {
+              await this.assertImageReady();
+            } catch (inspectError) {
+              if (inspectError instanceof NekoSurfaceAllocatorServiceError && inspectError.code === "image_missing") {
+                throw inspectError;
+              }
             }
           }
-        }
-        throw cause;
-      });
+          throw cause;
+        });
       const containerId = readCreatedContainerId(created);
       try {
         await this.#startContainer(containerId);
