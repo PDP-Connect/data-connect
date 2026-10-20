@@ -3,12 +3,12 @@
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { initDb } from "../server/db.ts";
+import { initDb, publishSchemaSnapshotFile } from "../server/db.ts";
 
 function schemaObjects(db: ReturnType<typeof initDb>) {
 	return db
@@ -171,4 +171,59 @@ test("the schema snapshot is used only in test runs", () => {
 		}).trim();
 	assert.equal(restores(undefined), "0", "without PDPP_TEST_PROFILE no database comes from a snapshot");
 	assert.equal(restores("memory-default"), "1", "in a test run the second open comes from the snapshot");
+});
+
+test("a snapshot never replaces a competing database, which then opens normally", () => {
+	const directory = mkdtempSync(join(homedir(), ".tmp/testeng/dcri/initdb/publish-competing-"));
+	const path = join(directory, "pdpp.sqlite");
+	let competing: ReturnType<typeof initDb> | undefined;
+	let reopened: ReturnType<typeof initDb> | undefined;
+
+	try {
+		// Another process created the database after this one checked for it.
+		competing = initDb(path, { onSchemaMigration: () => undefined });
+		competing.exec("CREATE TABLE competing_marker (value TEXT NOT NULL)");
+		competing
+			.prepare("INSERT INTO competing_marker (value) VALUES (?)")
+			.run("competing");
+		competing.close();
+		competing = undefined;
+		const before = readFileSync(path);
+
+		assert.throws(
+			() => publishSchemaSnapshotFile(path, Buffer.from("snapshot bytes")),
+			{ code: "EEXIST" },
+		);
+		assert.deepEqual(readFileSync(path), before);
+		assert.deepEqual(
+			readdirSync(directory).filter((name) => name.includes(".snapshot-")),
+			[],
+		);
+
+		reopened = initDb(path);
+		assert.equal(
+			reopened
+				.prepare("SELECT value FROM competing_marker")
+				.get<{ value: string }>()?.value,
+			"competing",
+		);
+	} finally {
+		reopened?.close();
+		competing?.close();
+		rmSync(directory, { force: true, recursive: true });
+	}
+});
+
+test("publishing a snapshot writes the exact bytes and leaves no temporary file", () => {
+	const directory = mkdtempSync(join(homedir(), ".tmp/testeng/dcri/initdb/publish-snapshot-"));
+	const path = join(directory, "pdpp.sqlite");
+
+	try {
+		const bytes = Buffer.from("complete snapshot bytes");
+		publishSchemaSnapshotFile(path, bytes);
+		assert.deepEqual(readFileSync(path), bytes);
+		assert.deepEqual(readdirSync(directory), ["pdpp.sqlite"]);
+	} finally {
+		rmSync(directory, { force: true, recursive: true });
+	}
 });

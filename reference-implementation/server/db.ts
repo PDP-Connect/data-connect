@@ -21,8 +21,8 @@
  * call sites to hoist statements to module scope.
  */
 
-import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
+import { existsSync, linkSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { load as loadSqliteVec } from "sqlite-vec";
 import {
@@ -6238,6 +6238,23 @@ function loadVectorExtension(raw: SqliteDatabase): VectorIndexKind {
   }
 }
 
+/**
+ * Publish `bytes` as a new database file at `path`, or throw EEXIST if
+ * anything already exists there. The bytes are written in full to a unique
+ * temporary file in the same directory first, so no other process can open a
+ * partly written database. A hard link then makes the file visible at `path`
+ * in one step, and it never replaces a competing database.
+ */
+export function publishSchemaSnapshotFile(path: string, bytes: Buffer): void {
+  const temporaryPath = `${path}.snapshot-${process.pid}-${randomBytes(8).toString("hex")}`;
+  try {
+    writeFileSync(temporaryPath, bytes, { flag: "wx" });
+    linkSync(temporaryPath, path);
+  } finally {
+    rmSync(temporaryPath, { force: true });
+  }
+}
+
 export function initDb(path = ":memory:", opts: InitDbOptions = {}): DatabaseHandle {
   // Detach, don't close: a previously-returned handle belongs to whoever
   // holds it. See `detachDb()` for why closing here was a cross-instance
@@ -6270,7 +6287,11 @@ export function initDb(path = ":memory:", opts: InitDbOptions = {}): DatabaseHan
     if (!existsSync(path) && !existsSync(`${path}-wal`) && !existsSync(`${path}-shm`)) {
       const fileSnapshot = sqliteMemorySchemaSnapshot ?? sqliteFileSchemaSnapshot;
       try {
-        writeFileSync(path, fileSnapshot ?? Buffer.alloc(0), { flag: "wx" });
+        if (fileSnapshot === null) {
+          writeFileSync(path, Buffer.alloc(0), { flag: "wx" });
+        } else {
+          publishSchemaSnapshotFile(path, fileSnapshot);
+        }
         restoredFileSchema = fileSnapshot !== null;
         seedFileSchemaSnapshot = fileSnapshot === null;
       } catch (error) {
