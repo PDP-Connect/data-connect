@@ -227,7 +227,12 @@ test("Chromium resize watcher only grows undersized visible windows", async (t) 
     { name: "exact size", root: [1440, 900], geometries: ["1440x900"], resized: [] },
     { name: "phone minimum width", root: [390, 844], geometries: ["500x900"], resized: [] },
     { name: "oversized desktop", root: [1280, 720], geometries: ["1500x950"], resized: [] },
-    { name: "only the second window is small", root: [1440, 900], geometries: ["1440x900", "1438x898"], resized: ["102"] },
+    {
+      name: "only the second window is small",
+      root: [1440, 900],
+      geometries: ["1440x900", "1438x898"],
+      resized: ["102"],
+    },
     { name: "malformed geometry", root: [1440, 900], geometries: ["not-a-size"], resized: [] },
     { name: "missing geometry", root: [1440, 900], geometries: [""], resized: [] },
   ];
@@ -271,14 +276,22 @@ test("Chromium resize watcher only grows undersized visible windows", async (t) 
         // Run the real functions once, without launching Chromium or the watcher loop.
         const result = spawnSync("/bin/sh", [script], {
           encoding: "utf8",
-          env: { ...process.env, PATH: `${dir}:${process.env.PATH ?? "/usr/bin:/bin"}`, DISPLAY: ":99", FIXTURES: dir, RESIZE_LOG: log },
+          env: {
+            ...process.env,
+            PATH: `${dir}:${process.env.PATH ?? "/usr/bin:/bin"}`,
+            DISPLAY: ":99",
+            FIXTURES: dir,
+            RESIZE_LOG: log,
+          },
           timeout: 5000,
         });
         assert.ifError(result.error);
         assert.equal(result.signal, null);
         assert.equal(result.status, 0, result.stderr);
         assert.equal(result.stderr, "");
-        const expected = scenario.resized.map((id) => `windowsize ${id} ${scenario.root[0]} ${scenario.root[1]}\n`).join("");
+        const expected = scenario.resized
+          .map((id) => `windowsize ${id} ${scenario.root[0]} ${scenario.root[1]}\n`)
+          .join("");
         assert.equal(await readFile(log, "utf8"), expected);
       } finally {
         await rm(dir, { recursive: true, force: true });
