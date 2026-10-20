@@ -8,7 +8,8 @@
 // (agent-tests-admission<pid>.slice, which systemd nests directly under
 // agent-tests.slice), so the test neither takes the host's real slots nor
 // rewrites the shared slice's limits. Without cgroup enforcement (no systemd
-// user manager, as on hosted CI) it is skipped.
+// user manager, as on hosted CI) or without host-wide slots (no flock) it is
+// skipped.
 
 import assert from "node:assert/strict";
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
@@ -39,7 +40,10 @@ function freshEnvironment(stateDir: string): NodeJS.ProcessEnv {
   return env;
 }
 
-/** Skip unless the vendored tool itself reports cgroup enforcement here. */
+/**
+ * Skip unless the vendored tool reports cgroup enforcement and a host-wide slot here. Enforcement is chosen
+ * before the scope launches, so a probe that did not finish cleanly says nothing about this host.
+ */
 function cgroupEnforcementUnavailable(): string | false {
   if (process.platform !== "linux") {
     return "test-sandbox admission needs Linux";
@@ -51,14 +55,36 @@ function cgroupEnforcementUnavailable(): string | false {
       env: freshEnvironment(stateDir),
       timeout: 60_000,
     });
+    if (probe.status !== 0) {
+      return `test-sandbox probe exited with ${probe.status ?? probe.signal}, not 0`;
+    }
     const receipt = probe.stderr
       .split("\n")
       .filter((line) => line.startsWith('{"tool":"test-sandbox"'))
       .pop();
-    const enforcement = receipt ? (JSON.parse(receipt) as { enforcement?: string }).enforcement : undefined;
-    return enforcement?.includes("cgroup")
-      ? false
-      : `test-sandbox has no cgroup enforcement here (enforcement: ${enforcement ?? "unknown"}), as on hosted CI`;
+    if (!receipt) {
+      return "test-sandbox probe wrote no receipt";
+    }
+    const { exit, enforcement, slot, notes = [] } = JSON.parse(receipt) as {
+      exit?: number;
+      enforcement?: string;
+      slot?: number;
+      notes?: string[];
+    };
+    if (exit !== 0) {
+      return `test-sandbox probe receipt reports exit ${exit ?? "unknown"}, not 0`;
+    }
+    if (!enforcement?.includes("cgroup")) {
+      return `test-sandbox has no cgroup enforcement here (enforcement: ${enforcement ?? "unknown"}), as on hosted CI`;
+    }
+    const noSlotNote = notes.find((note) => note.includes("host-wide slots not enforced"));
+    if (noSlotNote) {
+      return `test-sandbox does not enforce host-wide slots here (receipt note: "${noSlotNote}")`;
+    }
+    if (slot === undefined || !Number.isInteger(slot) || slot < 1) {
+      return `test-sandbox took no host-wide slot here (slot: ${slot ?? "unknown"})`;
+    }
+    return false;
   } finally {
     rmSync(stateDir, { force: true, recursive: true });
   }
