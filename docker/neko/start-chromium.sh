@@ -161,7 +161,7 @@ read_screen_size() {
   xwininfo -root -display "${DISPLAY}" 2>/dev/null | awk '/Width:/ { width = $2 } /Height:/ { height = $2 } END { if (width && height) print width "x" height }'
 }
 
-# Keep every visible browser window exactly screen-sized. A window opened
+# Keep every visible browser window at least screen-sized. A window opened
 # after launch (a connector's new tab opens a new window under --app) comes
 # up a pixel or two smaller than the screen, and the window-settle probe
 # then reports the surface unsettled. So compare each visible window on
@@ -174,7 +174,14 @@ fit_browser_windows_to_screen() {
   window_ids="$(xdotool search --onlyvisible --class RemoteBrowserApp 2>/dev/null || true)"
   for window_id in ${window_ids}; do
     window_size="$(xdotool getwindowgeometry "${window_id}" 2>/dev/null | awk '/Geometry:/ { print $2 }')"
-    if [ -n "${window_size}" ] && [ "${window_size}" != "${screen_size}" ]; then
+    case "${window_size}" in
+      ''|*[!0-9x]*|x*) continue ;;
+    esac
+    # Only an undersized window leaves part of the screen uncovered. An
+    # oversized one is clipped to the screen and still settles, and Chromium
+    # refuses widths under 500 px (phone screens), so shrinking it would be
+    # retried forever without effect.
+    if [ "${window_size%x*}" -lt "${screen_size%x*}" ] || [ "${window_size#*x}" -lt "${screen_size#*x}" ]; then
       xdotool windowsize "${window_id}" "${screen_size%x*}" "${screen_size#*x}" 2>/dev/null || true
     fi
   done
