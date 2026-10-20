@@ -8518,7 +8518,8 @@ const postgresOAuthCodeStore: OAuthCodeStore = {
          created_at = excluded.created_at,
          expires_at = excluded.expires_at,
          issued_at = NULL,
-         consumed_at = NULL`,
+         consumed_at = NULL
+       WHERE oauth_authorization_codes.status NOT IN ('issued', 'consumed')`,
       [id, deviceCode, clientId, redirectUri, state, codeChallenge, codeChallengeMethod, createdAt, expiresAt]
     ),
 };
@@ -10164,7 +10165,7 @@ export async function stageOAuthAuthorizationCodeRequest({
     state: state || null,
   };
 
-  await getOAuthCodeStore().upsertPending({
+  const updated = await getOAuthCodeStore().upsertPending({
     clientId: row.clientId,
     codeChallenge: row.codeChallenge,
     codeChallengeMethod: row.codeChallengeMethod,
@@ -10175,6 +10176,12 @@ export async function stageOAuthAuthorizationCodeRequest({
     redirectUri: row.redirectUri,
     state: row.state,
   });
+  if (!updated.changes) {
+    throw buildOAuthAuthorizationCodeError(
+      "invalid_request",
+      "OAuth authorization request was already issued or consumed and cannot be restaged"
+    );
+  }
 
   return { ...row, status: "pending" };
 }
