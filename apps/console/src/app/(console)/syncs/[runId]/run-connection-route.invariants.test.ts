@@ -17,7 +17,7 @@ const PAGE_FILE = `${HERE}page.tsx`;
 test("all run source links share the encoded resolved connection route", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
   assert.ok(src.includes("const connectionId = resolveRunConnectionId(runStatus, events);"));
-  assert.ok(src.includes("const sourceHref = connectionId ? `/sources/${encodeURIComponent(connectionId)}` : null;"));
+  assert.ok(src.includes('const sourceHref = connectionId ? `/sources/${encodeURIComponent(connectionId)}` : null;'));
   assert.equal((src.match(/href=\{sourceHref\}/g) ?? []).length, 2);
   assert.ok(src.includes("{ href: sourceHref, label: connectorName }"));
   assert.equal((src.match(/\x2fsources\x2f\$\{/g) ?? []).length, 1);
@@ -26,14 +26,8 @@ test("all run source links share the encoded resolved connection route", async (
 
 test("description and reconnect labels stay visible without a source route", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
-  assert.match(
-    src,
-    /sourceHref \? \([\s\S]*?<Link[^>]*href=\{sourceHref\}>\s*\{connectorName\}\s*<\/Link>\s*\) : \(\s*<span>\{connectorName\}<\/span>/
-  );
-  assert.match(
-    src,
-    /sourceHref \? \([\s\S]*?<Link[^>]*href=\{sourceHref\}>\s*\{connectorLabel\}\s*<\/Link>\s*\) : \(\s*<span[^>]*>\{connectorLabel\}<\/span>/
-  );
+  assert.match(src, /sourceHref \? \([\s\S]*?<Link[^>]*href=\{sourceHref\}>\s*\{connectorName\}\s*<\/Link>\s*\) : \(\s*<span>\{connectorName\}<\/span>/);
+  assert.match(src, /sourceHref \? \([\s\S]*?<Link[^>]*href=\{sourceHref\}>\s*\{connectorLabel\}\s*<\/Link>\s*\) : \(\s*<span[^>]*>\{connectorLabel\}<\/span>/);
 });
 
 test("breadcrumbs include a source only when its connection route is known", async () => {

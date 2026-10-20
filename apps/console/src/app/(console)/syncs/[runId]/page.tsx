@@ -390,7 +390,7 @@ function getAssistanceTitle(assistance: CurrentRunAssistance, active: boolean): 
 function getAssistanceDescription(
   assistance: CurrentRunAssistance,
   active: boolean,
-  supportsStreaming: boolean
+  supportsStreaming: boolean,
 ): string {
   if (!active) {
     return "This assistance request was still open when the run ended.";
@@ -676,8 +676,8 @@ function SkippedWithoutGapRecord({ skipped }: { skipped: SkippedStreamSummary })
       ) : null}
       {skipped.unexplainedCount > 0 ? (
         <p className="pdpp-caption mt-1.5 text-muted-foreground">
-          {skipped.unexplainedCount} of these recorded no reason, so DataConnect cannot tell you whether anything is
-          missing for {skipped.unexplainedCount === 1 ? "it" : "them"}.
+          {skipped.unexplainedCount} of these recorded no reason, so DataConnect cannot tell you whether anything is missing for{" "}
+          {skipped.unexplainedCount === 1 ? "it" : "them"}.
         </p>
       ) : null}
     </div>
