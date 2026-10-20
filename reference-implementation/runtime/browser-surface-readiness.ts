@@ -347,6 +347,15 @@ export async function probeBrowserSurfaceReadinessOverHttp(
     };
   }
 
+  // Settle before listing targets: the settle wait can take seconds, during
+  // which a connector may close the page it started with and open another.
+  if (requireWindowSettle) {
+    const windowSettleFailure = await probeWindowSettleBehavior(baseUrl, fetchImpl, timeoutMs, windowSettlePoll);
+    if (windowSettleFailure) {
+      return windowSettleFailure;
+    }
+  }
+
   const targetsResult = await fetchJsonWithBudget(`${baseUrl}json/list`, fetchImpl, timeoutMs);
   if (!targetsResult.ok) {
     return targetsResult.failure;
@@ -357,41 +366,21 @@ export async function probeBrowserSurfaceReadinessOverHttp(
   }
 
   return completeReadinessProbe({
-    baseUrl,
-    fetchImpl,
-    requireWindowSettle,
     targetListProjection,
     timeoutMs,
     versionPayload,
     webSocketFactory,
-    windowSettlePoll,
   });
 }
 
 interface CompleteReadinessProbeInput {
-  readonly baseUrl: string;
-  readonly fetchImpl: typeof fetch;
-  readonly requireWindowSettle: boolean;
   readonly targetListProjection: Extract<TargetListProjectionResult, { ok: true }>;
   readonly timeoutMs: number;
   readonly versionPayload: DevtoolsVersionPayload;
   readonly webSocketFactory: BrowserSurfaceReadinessWebSocketFactory;
-  readonly windowSettlePoll: WindowSettlePollOptions;
 }
 
 async function completeReadinessProbe(input: CompleteReadinessProbeInput): Promise<BrowserSurfaceReadinessProbeResult> {
-  if (input.requireWindowSettle) {
-    const windowSettleFailure = await probeWindowSettleBehavior(
-      input.baseUrl,
-      input.fetchImpl,
-      input.timeoutMs,
-      input.windowSettlePoll
-    );
-    if (windowSettleFailure) {
-      return windowSettleFailure;
-    }
-  }
-
   const targetCommandResult = await probeSemanticPageTarget(
     input.targetListProjection.pageTarget,
     input.webSocketFactory,

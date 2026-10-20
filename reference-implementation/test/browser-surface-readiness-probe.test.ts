@@ -325,8 +325,8 @@ test("all stages succeed → ok with page-target count and browser version", asy
     calls.map((call) => call.url),
     [
       "http://neko.local:9222/json/version",
-      "http://neko.local:9222/json/list",
       "http://neko.local:9222/pdpp/window-settle",
+      "http://neko.local:9222/json/list",
     ]
   );
   assert.equal(socket.peer.messages.length, 1, "only the semantic command is sent");
@@ -396,9 +396,38 @@ test("window-settle becomes ready on the third read without real sleeps", async 
   assert.equal(reads, 3);
   assert.deepEqual(clock.sleeps, [250, 250]);
   assert.deepEqual(
-    calls.slice(2).map((call) => call.url),
+    calls.slice(1, 4).map((call) => call.url),
     Array(3).fill("http://neko.local:9222/pdpp/window-settle")
   );
+});
+
+test("targets are listed after the window settles, so a page replaced during the wait is not probed", async () => {
+  let settleReads = 0;
+  const { calls, fetch } = makeFetchSpy(
+    happyRoutes({
+      "json/list": {
+        get json() {
+          // The connector closed T1 and opened T2 while the window settled.
+          return settleReads < 3 ? [pageTarget("T1")] : [pageTarget("T2")];
+        },
+      },
+      "pdpp/window-settle": {
+        get json() {
+          settleReads += 1;
+          return { height: 900, settled: settleReads === 3, width: 1440 };
+        },
+      },
+    })
+  );
+  const clock = makeSettleClock();
+  const { FakeWebSocket, sockets } = makeFakeWebSocketCtor();
+  const resultPromise = probeBrowserSurfaceReadinessOverHttp(READY_SURFACE, fetch, FakeWebSocket, TIMEOUT, true, clock);
+  const socket = await waitForSocket(sockets);
+  assert.equal(socket.url, "ws://neko/T2");
+  const message = await waitForMessage(socket.peer, "Page.getFrameTree");
+  socket.peer.deliver({ id: message.id, result: { frameTree: { frame: { id: "root" } } } });
+  assertSuccess(await resultPromise);
+  assert.equal(calls.at(-1)?.url, "http://neko.local:9222/json/list");
 });
 
 test("an unsettled window exhausts the default budget with the typed settle failure", async () => {
@@ -415,8 +444,8 @@ test("an unsettled window exhausts the default budget with the typed settle fail
   });
   assert.equal(clock.now(), 5000);
   assert.deepEqual(clock.sleeps, Array(20).fill(250));
-  // version + list, then one read per sleep plus the final read at the deadline.
-  assert.equal(calls.length, 23);
+  // version, then one read per sleep plus the final read at the deadline.
+  assert.equal(calls.length, 22);
   assert.equal(sockets.length, 0);
 });
 
@@ -435,7 +464,7 @@ test("window-settle sleep is capped by the remaining injected budget", async () 
   assert.equal(result.code, "browser_surface_window_settle_unavailable");
   assert.deepEqual(clock.sleeps, [250, 250, 100]);
   assert.equal(clock.now(), 600);
-  assert.equal(calls.length, 6);
+  assert.equal(calls.length, 5);
 });
 
 for (const [name, route, detail] of [
@@ -452,7 +481,7 @@ for (const [name, route, detail] of [
     assertFailure(result);
     assert.equal(result.code, "browser_surface_window_settle_unavailable");
     assert.ok(result.detail.includes(detail));
-    assert.equal(calls.length, 3);
+    assert.equal(calls.length, 2);
     assert.deepEqual(clock.sleeps, []);
     assert.equal(sockets.length, 0);
   });
@@ -594,8 +623,8 @@ test("semantic probe timeout → browser_surface_probe_timeout after the observa
     calls.map((call) => call.url),
     [
       "http://neko.local:9222/json/version",
-      "http://neko.local:9222/json/list",
       "http://neko.local:9222/pdpp/window-settle",
+      "http://neko.local:9222/json/list",
     ]
   );
   // biome-ignore lint/performance/useTopLevelRegex: localized test assertion preserves its explicit contract.
