@@ -2,18 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Source-regex guard: a run must lead back to the source it belongs to.
- *
- * Reported by the owner during live UAT, 2026-08-07: "btw annoying i cant get
- * to the connection/source from its run. not with breadcrumbs or anything
- * else."
- *
- * The page already resolved the connector id from the runtime actor, but
- * rendered it as inert text and breadcrumbed only `Syncs / Sync`. A run was a
- * terminal node: having found the run that collected your data, there was no
- * route to the source that produced it.
+ * Source wiring guard. Connection ids identify source routes; connector ids
+ * only label integrations. Behavioral resolver coverage lives alongside the
+ * pure helper in run-detail-labels.test.ts.
  */
-
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
@@ -22,28 +14,31 @@ import { fileURLToPath } from "node:url";
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const PAGE_FILE = `${HERE}page.tsx`;
 
-// The connector name in the description is a Link, not a bare <span>.
-const CONNECTOR_IS_LINK_RE =
-  /connector\{" "\}\s*<Link[^>]*href=\{`\/sources\/\$\{encodeURIComponent\(connectorId\)\}`\}/;
-// The breadcrumb trail carries the source between Syncs and this run.
-const BREADCRUMB_INCLUDES_SOURCE_RE =
-  /breadcrumbs=\{[\s\S]*connectorId[\s\S]*href: `\/sources\/\$\{encodeURIComponent\(connectorId\)\}`, label: connectorId/;
-
-test("run detail links its connector back to the source page", async () => {
+test("all run source links share the encoded resolved connection route", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
-  assert.match(src, CONNECTOR_IS_LINK_RE, "the connector id must navigate, not render as inert text");
+  assert.ok(src.includes("const connectionId = resolveRunConnectionId(runStatus, events);"));
+  assert.ok(src.includes("const sourceHref = connectionId ? `/sources/${encodeURIComponent(connectionId)}` : null;"));
+  assert.equal((src.match(/href=\{sourceHref\}/g) ?? []).length, 2);
+  assert.ok(src.includes("{ href: sourceHref, label: connectorName }"));
+  assert.equal((src.match(/\x2fsources\x2f\$\{/g) ?? []).length, 1);
+  assert.ok(!src.includes("encodeURIComponent(connectorId)"));
 });
 
-test("run detail breadcrumbs include the source when the connector is known", async () => {
+test("description and reconnect labels stay visible without a source route", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
-  assert.match(src, BREADCRUMB_INCLUDES_SOURCE_RE, "breadcrumbs must offer a route back to the source");
+  assert.match(
+    src,
+    /sourceHref \? \([\s\S]*?<Link[^>]*href=\{sourceHref\}>\s*\{connectorName\}\s*<\/Link>\s*\) : \(\s*<span>\{connectorName\}<\/span>/
+  );
+  assert.match(
+    src,
+    /sourceHref \? \([\s\S]*?<Link[^>]*href=\{sourceHref\}>\s*\{connectorLabel\}\s*<\/Link>\s*\) : \(\s*<span[^>]*>\{connectorLabel\}<\/span>/
+  );
 });
 
-test("run detail still renders a breadcrumb trail when the connector is unknown", async () => {
-  // Not every run resolves a connector (the runtime actor may be absent). That
-  // case must degrade to the old two-item trail rather than emitting a link to
-  // `/sources/undefined`.
+test("breadcrumbs include a source only when its connection route is known", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
+  assert.match(src, /breadcrumbs=\{\s*sourceHref\s*\? \[/);
   assert.match(src, /: \[\{ href: dashboardRoutes\.section\.runs, label: "Syncs" \}, \{ label: "Sync" \}\]/);
 });
 

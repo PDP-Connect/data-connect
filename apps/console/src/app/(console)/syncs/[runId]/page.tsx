@@ -48,6 +48,7 @@ import {
   describeInteractionStatLabel,
   describeProgressStatLabel,
   describeTerminalRunStatus,
+  resolveRunConnectionId,
 } from "./run-detail-labels.ts";
 import { RunDetailPoller } from "./run-detail-poller.tsx";
 import {
@@ -111,6 +112,8 @@ export default async function RunDetailPage({
   }
 
   const { events } = envelope;
+  const connectionId = resolveRunConnectionId(runStatus, events);
+  const sourceHref = connectionId ? `/sources/${encodeURIComponent(connectionId)}` : null;
   const connectorId = events.find((e) => e.actor_type === "runtime")?.actor_id ?? null;
   const connectorManifests = await listConnectorManifests().catch(() => []);
   const connectorManifest = connectorId ? findManifestForConnectorId(connectorManifests, connectorId) : null;
@@ -188,9 +191,13 @@ export default async function RunDetailPage({
       {runStatus?.failure?.recovery_hint?.action === "refresh_credentials" && connectorId ? (
         <p className="pdpp-caption mb-8 text-muted-foreground">
           Reconnect this source to sync again:{" "}
-          <Link className="text-foreground underline" href={`/sources/${encodeURIComponent(connectorId)}`}>
-            {connectorName}
-          </Link>
+          {sourceHref ? (
+            <Link className="text-foreground underline" href={sourceHref}>
+              {connectorName}
+            </Link>
+          ) : (
+            <span>{connectorName}</span>
+          )}
         </p>
       ) : null}
       <KnownGapsSection
@@ -207,25 +214,30 @@ export default async function RunDetailPage({
       />
     </>
   );
-  // The connector name is the owner's route back to the thing this run belongs
-  // to. Rendered as inert text it was a dead end: from a run there was no way
-  // to reach its source at all — not via the breadcrumb, not here.
+  // A connector identifies the integration, not a specific source connection.
+  // Keep the label visible even when this timeline window has no connection id.
+  const connectorLabel = (
+    <>
+      <ConnectorMark
+        className="mr-2 inline-block size-5 align-[-0.2em]"
+        icon={connectorManifest?.icon}
+        name={connectorName}
+      />
+      {connectorId}
+    </>
+  );
   const description = (
     <>
       {connectorId ? (
         <>
           connector{" "}
-          <Link
-            className="font-mono text-foreground underline underline-offset-2"
-            href={`/sources/${encodeURIComponent(connectorId)}`}
-          >
-            <ConnectorMark
-              className="mr-2 inline-block size-5 align-[-0.2em]"
-              icon={connectorManifest?.icon}
-              name={connectorName}
-            />
-            {connectorId}
-          </Link>
+          {sourceHref ? (
+            <Link className="font-mono text-foreground underline underline-offset-2" href={sourceHref}>
+              {connectorLabel}
+            </Link>
+          ) : (
+            <span className="font-mono text-foreground">{connectorLabel}</span>
+          )}
           {" · "}
         </>
       ) : null}
@@ -247,10 +259,10 @@ export default async function RunDetailPage({
       <TimelineDetailView
         beforeTimelineContent={beforeTimeline}
         breadcrumbs={
-          connectorId
+          sourceHref
             ? [
                 { href: dashboardRoutes.section.runs, label: "Syncs" },
-                { href: `/sources/${encodeURIComponent(connectorId)}`, label: connectorId },
+                { href: sourceHref, label: connectorName },
                 { label: "Sync" },
               ]
             : [{ href: dashboardRoutes.section.runs, label: "Syncs" }, { label: "Sync" }]
@@ -378,7 +390,7 @@ function getAssistanceTitle(assistance: CurrentRunAssistance, active: boolean): 
 function getAssistanceDescription(
   assistance: CurrentRunAssistance,
   active: boolean,
-  supportsStreaming: boolean,
+  supportsStreaming: boolean
 ): string {
   if (!active) {
     return "This assistance request was still open when the run ended.";
@@ -664,8 +676,8 @@ function SkippedWithoutGapRecord({ skipped }: { skipped: SkippedStreamSummary })
       ) : null}
       {skipped.unexplainedCount > 0 ? (
         <p className="pdpp-caption mt-1.5 text-muted-foreground">
-          {skipped.unexplainedCount} of these recorded no reason, so DataConnect cannot tell you whether anything is missing for{" "}
-          {skipped.unexplainedCount === 1 ? "it" : "them"}.
+          {skipped.unexplainedCount} of these recorded no reason, so DataConnect cannot tell you whether anything is
+          missing for {skipped.unexplainedCount === 1 ? "it" : "them"}.
         </p>
       ) : null}
     </div>
