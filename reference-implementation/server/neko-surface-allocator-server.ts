@@ -300,6 +300,7 @@ export class NekoSurfaceAllocatorServiceError extends Error {
     | "docker_malformed_response"
     | "docker_request_failed"
     | "foreign_resource"
+    | "image_missing"
     | "not_found"
     | "port_capacity_exhausted"
     | "profile_path_invalid"
@@ -447,6 +448,13 @@ export class NekoSurfaceAllocatorService {
         method: "POST",
         okStatuses: [201],
         query: { name: names.containerName },
+      }).catch(async (cause: unknown) => {
+        // A create 404 can also name a missing network; inspect the image
+        // before translating it so unrelated Docker failures keep their code.
+        if (isDockerNotFoundError(cause)) {
+          await this.assertImageReady();
+        }
+        throw cause;
       });
       const containerId = readCreatedContainerId(created);
       try {
@@ -741,6 +749,21 @@ export class NekoSurfaceAllocatorService {
       okStatuses: [204, 404, 409],
       query: { force: "true", v: "false" },
     });
+  }
+
+  async assertImageReady(): Promise<void> {
+    try {
+      await this.#docker.requestJson(`/images/${encodeURIComponent(this.#options.image)}/json`);
+    } catch (cause) {
+      if (!isDockerNotFoundError(cause)) {
+        throw cause;
+      }
+      throw new NekoSurfaceAllocatorServiceError(
+        "image_missing",
+        `n.eko container image is missing: ${this.#options.image}`,
+        { cause }
+      );
+    }
   }
 
   /**
@@ -1299,6 +1322,7 @@ async function routeAllocatorRequest(
   const parts = url.pathname.split("/").filter(Boolean);
   if (parts.length === 1 && parts[0] === "readyz" && req.method === "GET") {
     await service.assertProfileStorageReady();
+    await service.assertImageReady();
     sendJson(res, 200, { ready: true });
     return;
   }
@@ -1360,10 +1384,11 @@ export async function startNekoSurfaceAllocatorServer(
   options: NekoSurfaceAllocatorServerOptions
 ): Promise<{ close: () => Promise<void>; url: string }> {
   const service = new NekoSurfaceAllocatorService(options);
-  // Fail before listening: an allocator that cannot write profiles must exit
+  // Fail before listening: an allocator without profiles or its image must exit
   // (visible to the container restart policy) instead of accepting requests
   // it can only fail.
   await service.assertProfileStorageReady();
+  await service.assertImageReady();
   await service.ensureNetworkExists();
   const server = createServer(createNekoSurfaceAllocatorHttpHandler(service));
   const listenHost = options.listenHost ?? "127.0.0.1";
@@ -1512,7 +1537,11 @@ function statusForError(error: Error): number {
   if (error.code === "foreign_resource" || error.code === "profile_path_invalid") {
     return 409;
   }
-  if (error.code === "port_capacity_exhausted" || error.code === "profile_storage_unavailable") {
+  if (
+    error.code === "port_capacity_exhausted" ||
+    error.code === "profile_storage_unavailable" ||
+    error.code === "image_missing"
+  ) {
     return 503;
   }
   return 502;
