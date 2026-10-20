@@ -477,7 +477,14 @@ for (const [name, route, detail] of [
     const { calls, fetch } = makeFetchSpy(happyRoutes({ "pdpp/window-settle": route }));
     const clock = makeSettleClock();
     const { FakeWebSocket, sockets } = makeFakeWebSocketCtor();
-    const result = await probeBrowserSurfaceReadinessOverHttp(READY_SURFACE, fetch, FakeWebSocket, TIMEOUT, true, clock);
+    const result = await probeBrowserSurfaceReadinessOverHttp(
+      READY_SURFACE,
+      fetch,
+      FakeWebSocket,
+      TIMEOUT,
+      true,
+      clock
+    );
     assertFailure(result);
     assert.equal(result.code, "browser_surface_window_settle_unavailable");
     assert.ok(result.detail.includes(detail));
