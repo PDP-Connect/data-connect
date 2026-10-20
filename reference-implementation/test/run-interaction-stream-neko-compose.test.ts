@@ -39,7 +39,7 @@ const TOP_LEVEL_REGEX_36 = /COPY docker\/neko\/xorg\.conf \/etc\/neko\/xorg\.con
 const TOP_LEVEL_REGEX_37 = /SCREEN="\$\{NEKO_DESKTOP_SCREEN:-1440x900@30\}"/;
 const TOP_LEVEL_REGEX_38 = /WIDTH="\$\{SCREEN_WIDTH\}"/;
 const TOP_LEVEL_REGEX_39 = /HEIGHT="\$\{SCREEN_HEIGHT\}"/;
-const TOP_LEVEL_REGEX_40 = /xdotool windowsize --sync/;
+const TOP_LEVEL_REGEX_40 = /xdotool search --onlyvisible --class RemoteBrowserApp/;
 const TOP_LEVEL_REGEX_41 = /neko:[\s\S]*ports:[\s\S]*"\$\{NEKO_WEBRTC_PORT:-59000\}:59000\/udp"/;
 
 // Copyright The PDP-Connect Contributors
