@@ -337,18 +337,16 @@ export async function probeBrowserSurfaceReadinessOverHttp(
 
   // Settle before listing targets: the settle wait can take seconds, during
   // which a connector may close the page it started with and open another,
-  // or Chromium may restart. After a wait, read the browser generation again
-  // so the result never pairs a new browser's targets with the old one's hash.
+  // or Chromium may restart. Read the browser generation again after it, so
+  // the result does not pair a new browser's targets with the old one's hash.
   if (requireWindowSettle) {
-    const settle = await probeWindowSettleBehavior(baseUrl, fetchImpl, timeoutMs, windowSettlePoll);
-    if (settle.failure) {
-      return settle.failure;
+    const settleFailure = await probeWindowSettleBehavior(baseUrl, fetchImpl, timeoutMs, windowSettlePoll);
+    if (settleFailure) {
+      return settleFailure;
     }
-    if (settle.waited) {
-      version = await readDevtoolsVersion(baseUrl, fetchImpl, timeoutMs);
-      if (!version.ok) {
-        return version.failure;
-      }
+    version = await readDevtoolsVersion(baseUrl, fetchImpl, timeoutMs);
+    if (!version.ok) {
+      return version.failure;
     }
   }
   const versionPayload = version.payload;
@@ -431,7 +429,7 @@ async function probeWindowSettleBehavior(
   fetchImpl: typeof fetch,
   timeoutMs: number,
   options: WindowSettlePollOptions
-): Promise<{ failure: BrowserSurfaceReadinessProbeFailure | null; waited: boolean }> {
+): Promise<BrowserSurfaceReadinessProbeFailure | null> {
   const budgetMs = options.budgetMs ?? 5000;
   const pollIntervalMs = options.pollIntervalMs ?? 250;
   if (!Number.isInteger(budgetMs) || budgetMs < 1 || !Number.isInteger(pollIntervalMs) || pollIntervalMs < 1) {
@@ -449,33 +447,28 @@ async function probeWindowSettleBehavior(
   // dimensions: explicit viewport operations own presentation mutations.
   // The budget bounds the polling, not a read: the last read happens at the
   // deadline with the normal per-read timeout.
-  let waited = false;
   for (;;) {
     // biome-ignore lint/performance/noAwaitInLoops: Startup settlement requires sequential observations.
     const settleResult = await fetchJsonWithBudget(`${baseUrl}pdpp/window-settle`, fetchImpl, timeoutMs);
     if (!settleResult.ok) {
-      return { failure: { ...settleResult.failure, code: "browser_surface_window_settle_unavailable" }, waited };
+      return { ...settleResult.failure, code: "browser_surface_window_settle_unavailable" };
     }
     if (!isWindowSettleStatus(settleResult.payload)) {
-      return { failure: invalidStatus, waited };
+      return invalidStatus;
     }
     if (settleResult.payload.settled) {
-      return { failure: null, waited };
+      return null;
     }
     const remainingMs = deadline - now();
     if (remainingMs <= 0) {
       return {
-        failure: {
-          code: "browser_surface_window_settle_unavailable",
-          detail: `cdp_url ${baseUrl}pdpp/window-settle did not report settled within ${String(budgetMs)}ms`,
-          ok: false,
-        },
-        waited,
+        code: "browser_surface_window_settle_unavailable",
+        detail: `cdp_url ${baseUrl}pdpp/window-settle did not report settled within ${String(budgetMs)}ms`,
+        ok: false,
       };
     }
     // biome-ignore lint/performance/noAwaitInLoops: Wait only after a valid, unsettled status.
     await sleep(Math.min(pollIntervalMs, remainingMs));
-    waited = true;
   }
 }
 

@@ -326,6 +326,7 @@ test("all stages succeed → ok with page-target count and browser version", asy
     [
       "http://neko.local:9222/json/version",
       "http://neko.local:9222/pdpp/window-settle",
+      "http://neko.local:9222/json/version",
       "http://neko.local:9222/json/list",
     ]
   );
@@ -430,7 +431,7 @@ test("targets are listed after the window settles, so a page replaced during the
   assert.equal(calls.at(-1)?.url, "http://neko.local:9222/json/list");
 });
 
-test("after a settle wait the browser generation is read again, so a restart is not labelled with the old hash", async () => {
+test("the browser generation is read again after settling, so a restart is not labelled with the old hash", async () => {
   async function probeHash(routes: Record<string, RouteSpec>): Promise<string | undefined> {
     const { FakeWebSocket, sockets } = makeFakeWebSocketCtor();
     const resultPromise = probeBrowserSurfaceReadinessOverHttp(
@@ -467,10 +468,28 @@ test("after a settle wait the browser generation is read again, so a restart is 
       },
     })
   );
+  // Chromium restarts while the first settle read is in flight; no wait happens.
+  let firstSettleDone = false;
+  const restartedWithoutWait = await probeHash(
+    happyRoutes({
+      "json/version": {
+        get json() {
+          return firstSettleDone ? generationB : generationA;
+        },
+      },
+      "pdpp/window-settle": {
+        get json() {
+          firstSettleDone = true;
+          return { height: 900, settled: true, width: 1440 };
+        },
+      },
+    })
+  );
   const onlyA = await probeHash(happyRoutes({ "json/version": { json: generationA } }));
   const onlyB = await probeHash(happyRoutes({ "json/version": { json: generationB } }));
   assert.notEqual(onlyA, onlyB);
   assert.equal(restarted, onlyB);
+  assert.equal(restartedWithoutWait, onlyB);
 });
 
 test("an unsettled window exhausts the default budget with the typed settle failure", async () => {
@@ -674,6 +693,7 @@ test("semantic probe timeout → browser_surface_probe_timeout after the observa
     [
       "http://neko.local:9222/json/version",
       "http://neko.local:9222/pdpp/window-settle",
+      "http://neko.local:9222/json/version",
       "http://neko.local:9222/json/list",
     ]
   );
