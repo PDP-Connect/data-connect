@@ -22,7 +22,8 @@ test("five shards partition the actual unsharded file list exactly and determini
 test("sharding uses the selected list and rejects invalid or empty slices", () => {
   assert.deepEqual(selectTestShard(["a", "b", "c"], 1, 2), ["b"]);
   assert.throws(() => selectTestShard(["a"], 1, 2), /zero files/);
-  for (const [index, count] of [[-1, 2], [2, 2], [0, 0], [0.5, 2], [0, 2.5]]) {
+  const invalidShards: Array<[number, number]> = [[-1, 2], [2, 2], [0, 0], [0.5, 2], [0, 2.5]];
+  for (const [index, count] of invalidShards) {
     assert.throws(() => selectTestShard(["a"], index, count), /shard/);
   }
 });
