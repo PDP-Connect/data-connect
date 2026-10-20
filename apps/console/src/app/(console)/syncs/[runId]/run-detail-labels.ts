@@ -121,3 +121,36 @@ const INTERACTION_STAT_LABELS: Record<string, string> = {
 export function describeInteractionStatLabel(key: string): string {
   return INTERACTION_STAT_LABELS[key] ?? key;
 }
+
+/**
+ * Prefer the window-independent run status, then the first event carrying a
+ * connection id. Runtime actor ids name connectors and must never be used as
+ * source route ids. The legacy connector_instance_id is an alias, not actor_id.
+ */
+export function resolveRunConnectionId(runStatus: unknown, events: readonly { data?: unknown }[]): string | null {
+  const fromStatus = readConnectionId(runStatus);
+  if (fromStatus) {
+    return fromStatus;
+  }
+  for (const event of events) {
+    const connectionId = readConnectionId(event.data);
+    if (connectionId) {
+      return connectionId;
+    }
+  }
+  return null;
+}
+
+function readConnectionId(value: unknown): string | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const fields = value as Record<string, unknown>;
+  for (const key of ["connection_id", "connector_instance_id"]) {
+    const id = fields[key];
+    if (typeof id === "string" && id.trim().length > 0) {
+      return id.trim();
+    }
+  }
+  return null;
+}
