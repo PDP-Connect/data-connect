@@ -284,7 +284,11 @@ test("paused-schedule sync preserves modality, setup, revoked and running guards
     src.indexOf("function reauthActionPresentation")
   );
   assert.match(primary, /if \(setupFailed\) \{\s*return null;/);
-  assert.ok(primary.indexOf("if (revoked)") < primary.indexOf("<RenderedVerdictHeaderAction"));
+  const revokedGuard = primary.indexOf("if (revoked)");
+  const dispatch = primary.indexOf("<RenderedVerdictHeaderAction");
+  assert.ok(revokedGuard >= 0, "the revoked guard must exist");
+  assert.ok(dispatch >= 0, "the owner action dispatch must exist");
+  assert.ok(revokedGuard < dispatch, "a revoked connection returns before any owner action renders");
   assert.match(primary, /canSync=\{primaryAction\.kind === "sync"\}/);
   assert.match(primary, /syncIdleLabel=\{syncIdleLabel\}/);
   const rendered = src.slice(
