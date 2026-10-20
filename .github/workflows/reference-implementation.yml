@@ -193,15 +193,16 @@ jobs:
       - name: Typecheck reference implementation
         run: npm --prefix reference-implementation run typecheck
 
-  test-reference-implementation:
-    name: test reference implementation
+  test-reference-shard:
+    name: test reference implementation shard ${{ matrix.shard }}
     needs: classify
     if: needs.classify.outputs.reference_impacting == 'true' && needs.classify.outputs.has_content == 'true'
     runs-on: ubuntu-latest
-    # The memory-profile suite alone takes 18-27 minutes on a hosted runner, so
-    # 30 minutes cancelled green runs (2 of 3 main runs on 2026-10-19). Raise the
-    # bound; splitting the suite across jobs is the follow-up that cuts wall time.
-    timeout-minutes: 45
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4]
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -266,14 +267,45 @@ jobs:
           NEXT_TELEMETRY_DISABLED: "1"
         run: npm --prefix apps/console run build
 
+      - name: Report runner CPU admission
+        run: |
+          node -e 'const os = require("node:os"); const fs = require("node:fs"); console.log(`runner CPUs: logical=${os.cpus().length} available=${os.availableParallelism()}`); for (const path of ["/sys/fs/cgroup/cpu.max", "/sys/fs/cgroup/cpuset.cpus.effective"]) { if (fs.existsSync(path)) console.log(`${path}: ${fs.readFileSync(path, "utf8").trim()}`); }'
+
       - name: Test reference implementation
         env:
           PDPP_OWNER_PASSWORD: reference-implementation-ci
           PDPP_TEST_PROFILE: "memory-default"
+          PDPP_TEST_SHARD_INDEX: ${{ matrix.shard }}
+          PDPP_TEST_SHARD_COUNT: "5"
           # The hosted runner is a disposable VM, which is the isolation
           # boundary here; test-sandbox runs the command directly.
           TEST_SANDBOX_DISABLE: "1"
         run: npm --prefix reference-implementation run test
+
+  test-reference-implementation:
+    name: test reference implementation
+    needs: [classify, test-reference-shard]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every selected shard to pass
+        env:
+          CLASSIFY_RESULT: ${{ needs.classify.result }}
+          REFERENCE_IMPACTING: ${{ needs.classify.outputs.reference_impacting }}
+          HAS_CONTENT: ${{ needs.classify.outputs.has_content }}
+          SHARD_RESULT: ${{ needs.test-reference-shard.result }}
+        run: |
+          set -euo pipefail
+          if [[ "$CLASSIFY_RESULT" != success ]]; then
+            echo "::error::classify reported $CLASSIFY_RESULT"
+            exit 1
+          fi
+          if [[ "$REFERENCE_IMPACTING" != true || "$HAS_CONTENT" != true ]]; then
+            [[ "$SHARD_RESULT" == skipped ]] || { echo "::error::unexpected shard result: $SHARD_RESULT"; exit 1; }
+            exit 0
+          fi
+          [[ "$SHARD_RESULT" == success ]] || { echo "::error::one or more shards reported $SHARD_RESULT"; exit 1; }
 
   check-vendor-freshness:
     name: check polyfill-connectors tarball freshness

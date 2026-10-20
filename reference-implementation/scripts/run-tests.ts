@@ -36,6 +36,7 @@ import {
 } from "./postgres-test-template.ts";
 import { needsOuterPostgresDatabase, needsPostgresRestoreDatabase } from "./run-tests-db-requirements.ts";
 import { discoverSelectedTestFiles } from "./run-tests-discovery.ts";
+import { selectTestShard } from "./run-tests-shard.ts";
 import { RUN_AUTHORITY_SCHEMA } from "./test-accounting/inventory.ts";
 import { type StructuredSummary, StructuredSummaryError } from "./test-accounting/receipt.ts";
 import {
@@ -485,12 +486,24 @@ if (filesFromIndex !== -1) {
   const requested = (await readFile(path, "utf8")).split(/\r?\n/).filter(Boolean);
   testFiles = await validateFilesFrom(requested, await discoverTestFiles(repoRoot, testDir));
 }
+const shardIndex = process.env.PDPP_TEST_SHARD_INDEX;
+const shardCount = process.env.PDPP_TEST_SHARD_COUNT;
+if (shardIndex !== undefined || shardCount !== undefined) {
+  if (shardIndex === undefined || shardCount === undefined) {
+    throw new Error("PDPP_TEST_SHARD_INDEX and PDPP_TEST_SHARD_COUNT must be set together");
+  }
+  testFiles = selectTestShard(testFiles, Number(shardIndex), Number(shardCount));
+}
+const availableCpus = availableParallelism?.() ?? null;
 const fileConcurrency = resolveFileConcurrency({
-  availableCpus: availableParallelism?.() ?? null,
+  availableCpus,
   profile: selectedProfile,
   requestedConcurrency,
   selectedFileCount: testFiles.length,
 });
+process.stdout.write(
+  `PDPP_TEST_FILE_WORKERS ${JSON.stringify({ availableCpus, workers: fileConcurrency, selectedFiles: testFiles.length })}\n`
+);
 
 const queue = [...testFiles];
 const results: NodeTestResult[] = [];
