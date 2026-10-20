@@ -41,6 +41,16 @@ function freshEnvironment(stateDir: string): NodeJS.ProcessEnv {
 }
 
 /**
+ * Stop this run's private slice and revert the runtime limits the tool set on it. Each call is bounded and its
+ * errors are ignored: a slice that was never created has nothing to stop, and cleanup must not hang a test.
+ */
+function releasePrivateSlice(): void {
+  for (const verb of ["stop", "revert"]) {
+    spawnSync("systemctl", ["--user", verb, `${slice}.slice`], { timeout: 10_000 });
+  }
+}
+
+/**
  * Skip unless the vendored tool reports cgroup enforcement and a host-wide slot here. Enforcement is chosen
  * before the scope launches, so a probe that did not finish cleanly says nothing about this host.
  */
@@ -86,6 +96,8 @@ function cgroupEnforcementUnavailable(): string | false {
     }
     return false;
   } finally {
+    // The probe sets runtime limits on the slice and starts its scope there, even when it then skips.
+    releasePrivateSlice();
     rmSync(stateDir, { force: true, recursive: true });
   }
 }
@@ -170,7 +182,7 @@ test(
         }
       }
       await Promise.allSettled(runs.map((run) => run.exited));
-      spawnSync("systemctl", ["--user", "stop", `${slice}.slice`], { timeout: 10_000 });
+      releasePrivateSlice();
       rmSync(work, { force: true, recursive: true });
     }
   }
