@@ -2820,6 +2820,19 @@ async function bootstrapPostgresSchemaOnce({
       CREATE INDEX IF NOT EXISTS idx_pg_stream_evidence_run_registry_instance
         ON stream_evidence_run_registry(connector_instance_id);
 
+      -- See the SQLite DDL comment in server/db.ts (connector_checkpoint_withholds).
+      CREATE TABLE IF NOT EXISTS connector_checkpoint_withholds (
+        connector_id TEXT NOT NULL,
+        connector_instance_id TEXT NOT NULL,
+        grant_id TEXT NOT NULL,
+        state_stream TEXT NOT NULL,
+        reason_key TEXT NOT NULL,
+        consecutive_runs INTEGER NOT NULL CHECK(consecutive_runs >= 1),
+        last_run_id TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (connector_id, connector_instance_id, grant_id, state_stream)
+      );
+
       CREATE TABLE IF NOT EXISTS connector_attention_records (
         attention_id TEXT PRIMARY KEY,
         dedupe_key TEXT NOT NULL,

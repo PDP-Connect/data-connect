@@ -3108,9 +3108,12 @@ pub async fn download_chromium_rust(app: AppHandle) -> Result<String, String> {
             .by_index(i)
             .map_err(|e| format!("Failed to read zip entry: {}", e))?;
 
-        let outpath = chromium_dir.join(file.mangled_name());
+        let outpath = chromium_dir.join(
+            file.mangled_name()
+                .map_err(|e| format!("Failed to read zip entry name: {}", e))?,
+        );
 
-        if file.name().ends_with('/') {
+        if file.is_dir() {
             std::fs::create_dir_all(&outpath)
                 .map_err(|e| format!("Failed to create directory: {}", e))?;
         } else {

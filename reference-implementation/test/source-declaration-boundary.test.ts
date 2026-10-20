@@ -33,6 +33,7 @@ const RUNTIME_IMPORT_REGEX = /import\s+(?!type\s)[\s\S]*?from\s+["']([^"']+)["']
 // src/public/source.ts directly.
 const SOURCE_CONTRACT_PATH_REGEX = /\/dist\/public\/source\.js$/;
 const PROJECTED_DECLARATION_VERSION_REGEX = /^reference\.legacy-connector-projection\.v1:sha256:[0-9a-f]{64}$/;
+const UNSUPPORTED_PROFILE_VERSION_REGEX = /manifest\.protocol_version must be one of 0\.1\.0, 0\.2\.0, received 0\.3\.0/;
 
 const query = {
   aggregations: {
@@ -299,6 +300,28 @@ test("legacy adapter normalizes only the exact append semantics alias and reject
         attribution
       ),
     MALFORMED_STREAM_REGEX
+  );
+});
+
+// The manifest `protocol_version` is the Collection Profile version (profile
+// Section 8). SourceDeclaration.protocol_version is the Core schema version,
+// which Core Section 5 fixes at 0.1.0. A 0.2.0 manifest projects into the same
+// Core declaration as its 0.1.0 equivalent.
+test("legacy adapter admits Collection Profile 0.2.0 and keeps the Core declaration at 0.1.0", () => {
+  const profile020 = {
+    ...legacy,
+    protocol_capabilities: ["DETAIL_COVERAGE_KEY_SETS", "OBSERVATION"],
+    protocol_version: "0.2.0",
+  };
+  const declaration = sourceDeclarationFromLegacyConnectorManifest(profile020, attribution);
+  assert.equal(declaration.protocol_version, "0.1.0");
+  assert.deepEqual(declaration, sourceDeclarationFromLegacyConnectorManifest(legacy, attribution));
+});
+
+test("legacy adapter rejects a profile version other than 0.1.0 and 0.2.0", () => {
+  assert.throws(
+    () => sourceDeclarationFromLegacyConnectorManifest({ ...legacy, protocol_version: "0.3.0" }, attribution),
+    UNSUPPORTED_PROFILE_VERSION_REGEX
   );
 });
 

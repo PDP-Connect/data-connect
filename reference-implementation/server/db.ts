@@ -2072,6 +2072,22 @@ CREATE TABLE IF NOT EXISTS stream_evidence_run_registry (
 CREATE INDEX IF NOT EXISTS idx_stream_evidence_run_registry_instance
   ON stream_evidence_run_registry(connector_instance_id);
 
+-- Consecutive runs each staged checkpoint was withheld for the same reason
+-- (server/stores/checkpoint-withhold-store.ts). Scheduling state only: a
+-- commit keeps the row as a tombstone (last_run_id holds a versioned run
+-- ledger), and a lost row only delays a stall report.
+CREATE TABLE IF NOT EXISTS connector_checkpoint_withholds (
+  connector_id          TEXT NOT NULL,
+  connector_instance_id TEXT NOT NULL,
+  grant_id              TEXT NOT NULL,
+  state_stream          TEXT NOT NULL,
+  reason_key            TEXT NOT NULL,
+  consecutive_runs      INTEGER NOT NULL CHECK(consecutive_runs >= 1),
+  last_run_id           TEXT NOT NULL,
+  updated_at            TEXT NOT NULL,
+  PRIMARY KEY (connector_id, connector_instance_id, grant_id, state_stream)
+);
+
 CREATE TABLE IF NOT EXISTS version_counter (
   connector_id  TEXT NOT NULL,
   connector_instance_id TEXT NOT NULL,

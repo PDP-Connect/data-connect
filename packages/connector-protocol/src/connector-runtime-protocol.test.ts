@@ -4,15 +4,20 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  COLLECTION_PROFILE_VERSIONS,
   CONNECTOR_PROTOCOL_CAPABILITIES,
   CONNECTOR_PROTOCOL_VERSION,
+  collectionProfileDeclarationError,
+  DETAIL_COVERAGE_KEY_SETS_CAPABILITY,
   HOST_BLOB_CAPABILITY,
   isConnectorProtocolCapabilityArray,
+  OBSERVATION_CAPABILITY,
   type RuntimeContinuationFact,
   recordKeysEqual,
   STREAM_EVIDENCE_CAPABILITY,
   selectAuthoritativeContinuation,
   selectAuthoritativeSkip,
+  unsupportedRequiredProtocolCapabilities,
   validateHostBlobMessage,
   validateStreamEvidenceCounts,
 } from "./connector-runtime-protocol.ts";
@@ -322,4 +327,57 @@ test("isConnectorProtocolCapabilityArray rejects non-array values", () => {
   assert.equal(isConnectorProtocolCapabilityArray("STREAM_EVIDENCE"), false);
   assert.equal(isConnectorProtocolCapabilityArray({}), false);
   assert.equal(isConnectorProtocolCapabilityArray(42), false);
+});
+
+// Collection Profile Section 3.4: DETAIL_COVERAGE_KEY_SETS (since 0.2.0) and
+// OBSERVATION (since 0.2.0) are portable capability names. A connector that
+// declares one must not fail the vocabulary check.
+test("the capability vocabulary knows DETAIL_COVERAGE_KEY_SETS and OBSERVATION", () => {
+  assert.equal(DETAIL_COVERAGE_KEY_SETS_CAPABILITY, "DETAIL_COVERAGE_KEY_SETS");
+  assert.equal(OBSERVATION_CAPABILITY, "OBSERVATION");
+  assert.equal(isConnectorProtocolCapabilityArray(["DETAIL_COVERAGE_KEY_SETS"]), true);
+  assert.equal(isConnectorProtocolCapabilityArray(["OBSERVATION"]), true);
+  assert.deepEqual([...CONNECTOR_PROTOCOL_CAPABILITIES].sort(), [
+    "BLOB",
+    "DETAIL_COVERAGE_KEY_SETS",
+    "OBSERVATION",
+    "STREAM_EVIDENCE",
+  ]);
+});
+
+// Section 3.4: a runtime that does not advertise DETAIL_COVERAGE_KEY_SETS
+// still starts a connector that declares it. Every other declared capability
+// is required: a runtime that does not advertise it must not start the
+// connector.
+test("an advisory capability is never unsupported; a required one is unsupported unless advertised", () => {
+  assert.deepEqual(unsupportedRequiredProtocolCapabilities(["DETAIL_COVERAGE_KEY_SETS"], []), []);
+  assert.deepEqual(
+    unsupportedRequiredProtocolCapabilities(
+      ["DETAIL_COVERAGE_KEY_SETS", "OBSERVATION", "STREAM_EVIDENCE", "BLOB"],
+      new Set(["STREAM_EVIDENCE"] as const)
+    ),
+    ["OBSERVATION", "BLOB"]
+  );
+  assert.deepEqual(unsupportedRequiredProtocolCapabilities(["OBSERVATION"], ["OBSERVATION"]), []);
+  assert.deepEqual(unsupportedRequiredProtocolCapabilities([], []), []);
+});
+
+// Section 3.1: protocol_version is "0.1.0" or "0.2.0", and "0.2.0" when the
+// manifest declares a capability Section 8 adds in 0.2.0. It is the profile
+// version, not CONNECTOR_PROTOCOL_VERSION.
+test("collectionProfileDeclarationError accepts 0.1.0 and 0.2.0 and binds 0.2.0 capabilities to 0.2.0", () => {
+  assert.deepEqual([...COLLECTION_PROFILE_VERSIONS], ["0.1.0", "0.2.0"]);
+  assert.equal(collectionProfileDeclarationError("0.1.0", undefined), null);
+  assert.equal(collectionProfileDeclarationError("0.1.0", []), null);
+  assert.equal(collectionProfileDeclarationError("0.1.0", ["STREAM_EVIDENCE", "BLOB"]), null);
+  assert.equal(collectionProfileDeclarationError("0.2.0", undefined), null);
+  assert.equal(collectionProfileDeclarationError("0.2.0", ["DETAIL_COVERAGE_KEY_SETS", "OBSERVATION"]), null);
+  assert.equal(collectionProfileDeclarationError("0.2.0", ["STREAM_EVIDENCE"]), null);
+  assert.match(String(collectionProfileDeclarationError("0.1.0", ["DETAIL_COVERAGE_KEY_SETS"])), /0\.2\.0/);
+  assert.match(String(collectionProfileDeclarationError("0.1.0", ["OBSERVATION"])), /OBSERVATION/);
+  assert.match(String(collectionProfileDeclarationError("0.3.0", [])), /protocol_version/);
+  assert.match(String(collectionProfileDeclarationError(undefined, [])), /protocol_version/);
+  assert.match(String(collectionProfileDeclarationError("0.2.0", ["FORGED"])), /protocol_capabilities/);
+  assert.match(String(collectionProfileDeclarationError("0.2.0", null)), /protocol_capabilities/);
+  assert.match(String(collectionProfileDeclarationError("0.2.0", "OBSERVATION")), /protocol_capabilities/);
 });

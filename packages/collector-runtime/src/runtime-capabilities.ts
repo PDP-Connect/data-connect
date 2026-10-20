@@ -5,6 +5,7 @@ import {
   CONNECTOR_PROTOCOL_VERSION,
   type ConnectorProtocolCapability,
   isConnectorProtocolCapabilityArray,
+  unsupportedRequiredProtocolCapabilities,
 } from "@pdpp/connector-protocol";
 
 /**
@@ -160,6 +161,9 @@ export function diffRequiredBindings(
 /**
  * Returns the protocol capabilities a connector requires that the runtime
  * does not advertise. A missing capability is a pre-spawn incompatibility.
+ * An advisory capability (DETAIL_COVERAGE_KEY_SETS) is never missing: the
+ * Collection Profile requires a runtime that does not advertise it to start
+ * the connector anyway.
  *
  * `protocol_capabilities` is required by `ConnectorPlacementInput`, so a
  * well-typed caller always has it present. Call `hasMalformedCapabilities`
@@ -170,7 +174,7 @@ export function diffRequiredProtocolCapabilities(
   connector: ConnectorPlacementInput,
   runtime: RuntimeCapabilityProfile
 ): ConnectorProtocolCapability[] {
-  return connector.protocol_capabilities.filter((capability) => !runtime.protocolCapabilities.has(capability));
+  return unsupportedRequiredProtocolCapabilities(connector.protocol_capabilities, runtime.protocolCapabilities);
 }
 
 /**
