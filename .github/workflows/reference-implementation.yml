@@ -146,8 +146,37 @@ jobs:
           node-version: "24.21.0"
           cache: npm
 
+      # npm's download cache is already restored above, yet `npm ci` still takes
+      # about 70 s to rebuild node_modules. Restore the installed tree itself,
+      # keyed on the lockfile, and install only on a miss.
+      - name: Restore installed node_modules
+        id: node-modules-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            node_modules
+            reference-implementation/node_modules
+            packages/local-collector/node_modules
+            apps/console/node_modules
+            ~/.cache/ms-playwright
+          key: node-modules-v2-${{ runner.os }}-node24.21.0-${{ hashFiles('package-lock.json') }}
+
       - name: Install dependencies
+        if: steps.node-modules-cache.outputs.cache-hit != 'true'
         run: npm ci
+
+      # A restored tree skips npm's lifecycle scripts, so run what `npm ci`
+      # would: the root postinstall and each workspace's `prepare` build, in
+      # dependency order.
+      - name: Run install lifecycle scripts on a restored tree
+        if: steps.node-modules-cache.outputs.cache-hit == 'true'
+        run: |
+          npm run postinstall
+          npm --prefix packages/connector-protocol run build
+          npm --prefix packages/collector-runtime run build
+          npm --prefix reference-implementation/vendor/read-core run build
+          npm --prefix reference-implementation/vendor/mcp-server run build
+          npm --prefix reference-implementation/vendor/cli run build
 
       - name: Build workspace packages
         # The root tsconfig.json's project references only cover the app
@@ -183,8 +212,37 @@ jobs:
           node-version: "24.21.0"
           cache: npm
 
+      # npm's download cache is already restored above, yet `npm ci` still takes
+      # about 70 s to rebuild node_modules. Restore the installed tree itself,
+      # keyed on the lockfile, and install only on a miss.
+      - name: Restore installed node_modules
+        id: node-modules-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            node_modules
+            reference-implementation/node_modules
+            packages/local-collector/node_modules
+            apps/console/node_modules
+            ~/.cache/ms-playwright
+          key: node-modules-v2-${{ runner.os }}-node24.21.0-${{ hashFiles('package-lock.json') }}
+
       - name: Install dependencies
+        if: steps.node-modules-cache.outputs.cache-hit != 'true'
         run: npm ci
+
+      # A restored tree skips npm's lifecycle scripts, so run what `npm ci`
+      # would: the root postinstall and each workspace's `prepare` build, in
+      # dependency order.
+      - name: Run install lifecycle scripts on a restored tree
+        if: steps.node-modules-cache.outputs.cache-hit == 'true'
+        run: |
+          npm run postinstall
+          npm --prefix packages/connector-protocol run build
+          npm --prefix packages/collector-runtime run build
+          npm --prefix reference-implementation/vendor/read-core run build
+          npm --prefix reference-implementation/vendor/mcp-server run build
+          npm --prefix reference-implementation/vendor/cli run build
 
       - name: Build workspace packages
         # The root tsconfig.json's project references only cover the app
