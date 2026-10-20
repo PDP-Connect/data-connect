@@ -4,16 +4,15 @@
 // Captioned screen recording of the walkthrough (the walkthrough-e2e.ts story),
 // with a caption bar, a pointer that moves to each click, and outlines around
 // the parts of the page a scene is about. Each scene is its own browser
-// context and video segment; the segments are joined into one MP4, so waiting
-// for on-chain settlement between the last two scenes is not recorded.
+// context and video segment; the segments are joined into one MP4. The video
+// shows no payments or blockchain: the shared demo hides them
+// (VACUNA_SHOW_PAYMENTS unset, ../deploy/DEPLOY.md).
 //
 //   BASE_URL=https://vacuna-al-dia-demo.fly.dev DEMO_LANG=en|es \
 //   OUT=/path/walkthrough-en.mp4 node walkthrough-video.ts
 //
 // Needs ffmpeg on PATH. Adds grants and paid reads like walkthrough-e2e.ts:
 // start from a reset demo and reset again afterwards (../deploy/DEPLOY.md).
-// SETTLE_WAIT_S (default 420) bounds the wait for the relayer; 0 skips the
-// settlement scene.
 
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync } from "node:fs";
@@ -26,7 +25,6 @@ const BASE_URL = (process.env.BASE_URL || "http://localhost:8080").replace(/\/$/
 const LANG = process.env.DEMO_LANG === "es" ? "es" : "en";
 const OUT = resolve(process.env.OUT || `walkthrough-${LANG}.mp4`);
 const PASSWORD = process.env.DEMO_PASSWORD || WALKTHROUGH_PASSWORD;
-const SETTLE_WAIT_S = Number(process.env.SETTLE_WAIT_S ?? 420);
 const SIZE = { height: 800, width: 1280 };
 const SEGMENT_LEAD_IN_S = 1.6;
 const t = (es: string, en: string) => (LANG === "es" ? es : en);
@@ -288,18 +286,12 @@ async function approve(s: Scene, childId: string): Promise<void> {
   await s.page.waitForURL(new RegExp(`/recordatorio\\?hijo=${childId}`));
 }
 
-async function dashboardHtml(): Promise<string> {
-  const res = await fetch(`${BASE_URL}/recordatorio/panel?lang=${LANG}`);
-  return res.text();
-}
-
 const browser = await chromium.launch(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {});
 try {
   await scene(browser, t("1 · María, un hijo", "1 · María, one child"), async (s) => {
     await s.card("Vacuna al día", [
       t("Recordatorios de vacunas con el permiso de madres y padres.", "Vaccine reminders, with the parent's permission."),
       t("Demostración del piloto PDPP: Cuenta Única, Registro Civil y el registro nacional de vacunación.", "PDPP pilot walkthrough: Cuenta Única, the civil registry and the national vaccination register."),
-      t("Pagos por lectura liquidados en la red de prueba Moksha de Vana.", "Per-read payments settled on Vana's Moksha testnet."),
     ]);
     await s.say(t("María tiene una hija, Sofía. Quiere que le recuerden sus vacunas.", "María has one daughter, Sofía. She wants reminders for Sofía's vaccines."), 3200);
     await s.click("[data-start]");
@@ -318,7 +310,7 @@ try {
     await s.say(t("María autoriza.", "María authorizes."), 1400);
     await approve(s, "DR-9100001");
     await s.page.waitForSelector("[data-connected-child=DR-9100001] [data-next-dose]");
-    await s.say(t("El servicio leyó el registro de Sofía y ya sabe su próxima dosis. Esa lectura se pagó en Moksha.", "The service read Sofía's record and knows her next dose. That read was paid on Moksha."), 1500);
+    await s.say(t("El servicio leyó el registro de Sofía y ya sabe su próxima dosis.", "The service read Sofía's record and knows her next dose."), 1500);
     await s.spot("[data-connected-child=DR-9100001]", t("Leído del registro nacional", "Read from the national register"), 3800);
   });
 
@@ -406,44 +398,9 @@ try {
     await s.say(t("Cada semana el servicio vuelve a leer los registros activos. Aquí lo forzamos.", "Every week the service reads active records again. Here we trigger it now."), 2600);
     await s.click("[data-read-now]");
     await s.page.waitForURL(/leido=1/);
-    await s.spot('[data-stat="payments"]', t("Cada lectura se paga", "Every read is paid for"), 3000);
-    await s.spot("tr[data-payment]", t("Aceptado por el gateway de Vana", "Accepted by the Vana gateway"), 3400);
-    await s.say(t("El relayer del gateway liquida cada pago en la cadena en unos minutos.", "The gateway's relayer settles each payment on chain within minutes."), 3000);
+    await s.spot('[data-stat="reads"]', t("Lecturas nuevas del registro", "New reads from the register"), 3000);
+    await s.spot('[data-child-row="DR-9100003"]', t("Ana: leída de nuevo; Diego y Sofía no", "Ana: read again; Diego and Sofía are not"), 3400);
   });
-
-  if (SETTLE_WAIT_S > 0) {
-    // Not recorded: wait for every payment row to show as settled.
-    const deadline = Date.now() + SETTLE_WAIT_S * 1000;
-    for (;;) {
-      const html = await dashboardHtml();
-      const rows = html.match(/<tr data-payment=[^>]*>/g) ?? [];
-      const settled = rows.filter((r) => r.includes('data-settlement="settled"')).length;
-      console.log(`settlement: ${settled}/${rows.length}`);
-      if ((rows.length > 0 && settled === rows.length) || Date.now() > deadline) {
-        break;
-      }
-      await pause(20_000);
-    }
-    await scene(browser, t("8 · Liquidado en Moksha", "8 · Settled on Moksha"), async (s) => {
-      await s.goto("/recordatorio/panel");
-      await s.say(t("Unos minutos después: los pagos aparecen liquidados en la cadena.", "A few minutes later: the payments show as settled on chain."), 2600);
-      await s.spot('tr[data-settlement="settled"]', t("Liquidado, con su transacción", "Settled, with its transaction"), 3400);
-      const link = 'tr[data-settlement="settled"] a[data-tx]';
-      if (await s.page.locator(link).count()) {
-        const href = await s.page.locator(link).first().getAttribute("href");
-        await s.click(link).catch(() => undefined);
-        // The link opens a new tab in a real browser; follow it in this page.
-        if (href && !s.page.url().startsWith(href)) {
-          await s.page.goto(href);
-        }
-        await s.page.waitForLoadState("load").catch(() => undefined);
-        await s.say(t("La transacción en el explorador de Moksha.", "The transaction on the Moksha explorer."), 1500);
-        await s
-          .spot("text=recordAccessAndSettle", t("Liquidado por el relayer del gateway", "Settled by the gateway relayer"), 4000)
-          .catch(() => undefined);
-      }
-    });
-  }
 } finally {
   await browser.close();
 }

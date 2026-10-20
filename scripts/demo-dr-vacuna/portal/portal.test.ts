@@ -200,6 +200,30 @@ test("dashboard with the Moksha payer: payments move from accepted to settled; p
   assert.equal((en.html.match(/<span data-settled>settled<\/span>/g) ?? []).length, 2);
   assert.match(en.html, /grant fee settled: <a /);
 
+  // showPayments: false (the shared demo): same paid, settled reads, no payment or chain wording on the page.
+  const hidden = await createReminderWeb({
+    asInternal: "http://127.0.0.1:1",
+    issuer: publicOrigin,
+    publicOrigin,
+    rsInternal: "http://127.0.0.1:1",
+    settlementPollMs: 0,
+    settlementStaleMs: 0,
+    showPayments: false,
+    stateDir,
+  });
+  t.after(() => hidden.close());
+  const hiddenServer = createServer((req, res) => void hidden.handle(req, res));
+  await new Promise<void>((resolve) => hiddenServer.listen(0, "127.0.0.1", resolve));
+  t.after(() => hiddenServer.close());
+  for (const lang of ["es", "en"]) {
+    const resp = await fetch(`http://127.0.0.1:${(hiddenServer.address() as { port: number }).port}${BASE}/panel?lang=${lang}`);
+    const html = await resp.text();
+    assert.equal(resp.status, 200);
+    assert.match(html, /data-stat="reads"/, "the rest of the dashboard stays");
+    assert.doesNotMatch(html, /data-payment|data-stat="payments"|data-settle|explorer\.test|0x[0-9a-f]{10}/);
+    assert.doesNotMatch(html, /VANA|Moksha|pago|payment|liquid|settle|cadena|chain|transacci|transaction/i);
+  }
+
   // The chain goes away: the poll fails, the page still renders what is known.
   await fake.stop();
   page = await panel("es");

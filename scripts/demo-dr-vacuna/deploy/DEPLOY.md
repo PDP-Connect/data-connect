@@ -78,7 +78,8 @@ Set in `fly.toml` (`[env]`) unless marked secret.
 | `VACUNA_DATA_POINT_SCOPE`, `VACUNA_DATA_POINT_VERSION` | `dr.vacuna.child_immunizations`, `1` | Data point registered for the register |
 | `VACUNA_PAYMENT_AMOUNT_WEI`, `VACUNA_PAYMENT_ASSET` | `10000000000000000` (0.01 VANA), native | Per read |
 | `VACUNA_PAYER_ENV_FILE` | `/data/moksha.env` | Optional KEY=VALUE file with the non-secret Moksha settings; env wins; private keys are refused |
-| `VACUNA_EXPLORER_TX_URL` | `https://moksha.vanascan.io/tx/` | Dashboard links for settled payments |
+| `VACUNA_SHOW_PAYMENTS` | unset | `1` shows per-read payments, amounts and settlement on the dashboard. Unset (the shared demo): hidden; reads are still paid |
+| `VACUNA_EXPLORER_TX_URL` | `https://moksha.vanascan.io/tx/` | Dashboard links for settled payments (with `VACUNA_SHOW_PAYMENTS=1`) |
 | `VACUNA_MOKSHA_FROM_BLOCK` | unset | `VACUNA_PAYER=moksha`: first block the server's settlement poll scans (once; the cursor is then kept in `VACUNA_MOKSHA_STATE_DIR`). Unset: 100 blocks below the latest on a fresh state, 20,000 if unsettled paid reads already exist |
 | `VACUNA_BUILDER_PRIVATE_KEY`, `VACUNA_REGISTER_SERVER_PRIVATE_KEY` | secrets | Payment and access-record signers |
 
@@ -161,7 +162,7 @@ BASE_URL=$ORIGIN DEMO_LANG=es VIEWPORT=desktop \
 scripts/demo-dr-vacuna/deploy/reset.sh fly        # the run leaves grants behind
 ```
 
-With the gateway payer, the dashboard's "Pagos por lectura" table links each
+With `VACUNA_SHOW_PAYMENTS=1` and the gateway payer, the dashboard's "Pagos por lectura" table links each
 payment to the Moksha explorer once the gateway response carries a
 transaction hash; until then it shows "aceptado, sin transacción todavía".
 

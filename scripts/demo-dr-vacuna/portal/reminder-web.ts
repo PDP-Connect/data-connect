@@ -51,6 +51,11 @@ export interface ReminderWebOptions {
   settlementPollMs?: number;
   /** VACUNA_PAYER=moksha: a dashboard view polls when the last poll is this old (default 30 s). */
   settlementStaleMs?: number;
+  /**
+   * Dashboard shows per-read payments, amounts and settlement (default true).
+   * False hides them from the page only; reads are still paid.
+   */
+  showPayments?: boolean;
   stateDir: string;
 }
 
@@ -383,6 +388,7 @@ export async function createReminderWeb(opts: ReminderWebOptions) {
   const { key, kid } = loadOrCreateClientKey(keyPath);
   const client: ClientCredentials = privateKeyJwtClient({ clientId: clientState.clientId, issuer: opts.issuer, key, kid });
   const { moksha, payer } = buildPayer(store);
+  const showPayments = opts.showPayments ?? true;
   // VACUNA_PAYER=moksha: learn each paid read's settle tx from the chain (../moksha/lib/settlement.ts).
   const settlements = moksha
     ? new SettlementWatcher({
@@ -637,7 +643,7 @@ ${connected ? childCard(connected, lang, now) : ""}
 ${stat(totals.children_active ?? 0, t("niños con autorización activa", "children with an active authorization"), "active")}
 ${stat(totals.records_received ?? 0, t("lecturas recibidas del registro", "reads received from the register"), "reads")}
 ${stat(c.denied ?? 0, t("lecturas rechazadas (desde el último reinicio)", "reads refused (since last restart)"), "denied")}
-${stat(totals.payments_accepted ?? 0, t(`pagos por lectura aceptados (${payer.name})`, `per-read payments accepted (${payer.name})`), "payments")}
+${showPayments ? stat(totals.payments_accepted ?? 0, t(`pagos por lectura aceptados (${payer.name})`, `per-read payments accepted (${payer.name})`), "payments") : ""}
 </div>`;
     const rowsHtml = rows.length
       ? rows
@@ -679,7 +685,7 @@ ${stat(totals.payments_accepted ?? 0, t(`pagos por lectura aceptados (${payer.na
 <td data-label="${t("Liquidación", "Settlement")}">${settled}</td></tr>`;
       })
       .join("");
-    const paymentsTable = payments.length
+    const paymentsTable = showPayments && payments.length
       ? `<h2 style="font-size:18px;margin:28px 0 10px">${t("Pagos por lectura", "Per-read payments")}</h2>
 <table class="vd-table"><thead><tr><th>${t("Lectura", "Read")}</th><th>${t("Monto", "Amount")}</th><th>${t("Cuándo", "When")}</th><th>${t("Liquidación", "Settlement")}</th></tr></thead><tbody>${paymentRows}</tbody></table>${
           settlements
@@ -699,10 +705,17 @@ ${stats}
 <table class="vd-table"><thead><tr><th>${t("Registro", "Record")}</th><th>${t("Autorización", "Authorization")}</th><th>${t("Última lectura", "Last read")}</th><th>${t("Próxima dosis", "Next dose")}</th></tr></thead>
 <tbody>${rowsHtml}</tbody></table>
 ${paymentsTable}
-<p class="vd-note">${t(
-      `Pagos: ${payer.name === "mock" ? "simulados (no se mueve dinero)" : "pasarela de datos de Vana (Moksha)"} · recibos de lectura verificados: ${c.receiptsVerified ?? 0} · lecturas intentadas: ${c.readsAttempted ?? 0}`,
-      `Payments: ${payer.name === "mock" ? "simulated (no money moves)" : "Vana data gateway (Moksha)"} · read receipts verified: ${c.receiptsVerified ?? 0} · reads attempted: ${c.readsAttempted ?? 0}`
-    )}</p>`;
+<p class="vd-note">${
+      showPayments
+        ? t(
+            `Pagos: ${payer.name === "mock" ? "simulados (no se mueve dinero)" : "pasarela de datos de Vana (Moksha)"} · recibos de lectura verificados: ${c.receiptsVerified ?? 0} · lecturas intentadas: ${c.readsAttempted ?? 0}`,
+            `Payments: ${payer.name === "mock" ? "simulated (no money moves)" : "Vana data gateway (Moksha)"} · read receipts verified: ${c.receiptsVerified ?? 0} · reads attempted: ${c.readsAttempted ?? 0}`
+          )
+        : t(
+            `Recibos de lectura verificados: ${c.receiptsVerified ?? 0} · lecturas intentadas: ${c.readsAttempted ?? 0}`,
+            `Read receipts verified: ${c.receiptsVerified ?? 0} · reads attempted: ${c.readsAttempted ?? 0}`
+          )
+    }</p>`;
     return shell({ body, currentUrl: currentUrl(url), lang, page: "panel", title: `${CLIENT_NAME} · ${t("Panel", "Dashboard")}` });
   }
 

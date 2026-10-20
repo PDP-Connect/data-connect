@@ -116,6 +116,8 @@ const reminder = await createReminderWeb({
   issuer: process.env.VACUNA_AS_ISSUER || PUBLIC_ORIGIN,
   publicOrigin: PUBLIC_ORIGIN,
   rsInternal: RS_INTERNAL,
+  // The shared demo shows no payments, amounts or chain settlement; reads are still paid.
+  showPayments: process.env.VACUNA_SHOW_PAYMENTS === "1",
   stateDir: STATE_DIR,
 });
 
