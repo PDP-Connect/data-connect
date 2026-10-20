@@ -44,6 +44,20 @@ const READY_SURFACE: BrowserSurface = Object.freeze({
 
 const TIMEOUT = 50;
 
+function makeSettleClock() {
+  let elapsedMs = 0;
+  const sleeps: number[] = [];
+  return {
+    now: () => elapsedMs,
+    sleep: (ms: number) => {
+      sleeps.push(ms);
+      elapsedMs += ms;
+      return Promise.resolve();
+    },
+    sleeps,
+  };
+}
+
 function pageTarget(id = "T1", webSocketDebuggerUrl = `ws://neko/${id}`) {
   return { id, type: "page", url: "https://example.com", webSocketDebuggerUrl };
 }
@@ -354,15 +368,94 @@ test("a probe that does not require window-settle never requests the n.eko route
   );
 });
 
-test("an unsettled window-settle response is a typed readiness failure before connector use", async () => {
-  const { fetch } = makeFetchSpy(
+test("window-settle becomes ready on the third read without real sleeps", async () => {
+  let reads = 0;
+  const { calls, fetch } = makeFetchSpy(
+    happyRoutes({
+      "pdpp/window-settle": {
+        get json() {
+          reads += 1;
+          return { height: 900, settled: reads === 3, width: 1440 };
+        },
+      },
+    })
+  );
+  const clock = makeSettleClock();
+  const { FakeWebSocket, sockets } = makeFakeWebSocketCtor();
+  const probe = createDefaultBrowserSurfaceReadinessProbe({
+    fetchImpl: fetch,
+    timeoutMs: TIMEOUT,
+    webSocketFactory: FakeWebSocket,
+    windowSettlePoll: clock,
+  });
+  const resultPromise = probe.probe(READY_SURFACE);
+  const socket = await waitForSocket(sockets);
+  const message = await waitForMessage(socket.peer, "Page.getFrameTree");
+  socket.peer.deliver({ id: message.id, result: { frameTree: { frame: { id: "root" } } } });
+  assertSuccess(await resultPromise);
+  assert.equal(reads, 3);
+  assert.deepEqual(clock.sleeps, [250, 250]);
+  assert.deepEqual(
+    calls.slice(2).map((call) => call.url),
+    Array(3).fill("http://neko.local:9222/pdpp/window-settle")
+  );
+});
+
+test("an unsettled window exhausts the default budget with the same typed failure", async () => {
+  const { calls, fetch } = makeFetchSpy(
     happyRoutes({ "pdpp/window-settle": { json: { height: 900, settled: false, width: 1440 } } })
   );
+  const clock = makeSettleClock();
+  const { FakeWebSocket, sockets } = makeFakeWebSocketCtor();
+  const result = await probeBrowserSurfaceReadinessOverHttp(READY_SURFACE, fetch, FakeWebSocket, TIMEOUT, true, clock);
+  assert.deepEqual(result, {
+    code: "browser_surface_window_settle_unavailable",
+    detail: "cdp_url http://neko.local:9222/pdpp/window-settle returned an invalid status",
+    ok: false,
+  });
+  assert.equal(clock.now(), 5000);
+  assert.deepEqual(clock.sleeps, Array(20).fill(250));
+  assert.equal(calls.length, 22);
+  assert.equal(sockets.length, 0);
+});
+
+test("window-settle sleep is capped by the remaining injected budget", async () => {
+  const { calls, fetch } = makeFetchSpy(
+    happyRoutes({ "pdpp/window-settle": { json: { height: 900, settled: false, width: 1440 } } })
+  );
+  const clock = makeSettleClock();
   const { FakeWebSocket } = makeFakeWebSocketCtor();
-  const result = await probeBrowserSurfaceReadinessOverHttp(READY_SURFACE, fetch, FakeWebSocket, TIMEOUT);
+  const result = await probeBrowserSurfaceReadinessOverHttp(READY_SURFACE, fetch, FakeWebSocket, TIMEOUT, true, {
+    ...clock,
+    budgetMs: 600,
+    pollIntervalMs: 250,
+  });
   assertFailure(result);
   assert.equal(result.code, "browser_surface_window_settle_unavailable");
+  assert.deepEqual(clock.sleeps, [250, 250, 100]);
+  assert.equal(clock.now(), 600);
+  assert.equal(calls.length, 5);
 });
+
+for (const [name, route, detail] of [
+  ["invalid shape", { json: { height: 900, settled: false } }, "invalid status"],
+  ["malformed JSON", { malformed: true }, "malformed JSON"],
+  ["transport failure", { throw: new TypeError("ECONNREFUSED") }, "ECONNREFUSED"],
+  ["HTTP failure", { status: 503 }, "HTTP 503"],
+] as const) {
+  test(`window-settle ${name} fails immediately without retries`, async () => {
+    const { calls, fetch } = makeFetchSpy(happyRoutes({ "pdpp/window-settle": route }));
+    const clock = makeSettleClock();
+    const { FakeWebSocket, sockets } = makeFakeWebSocketCtor();
+    const result = await probeBrowserSurfaceReadinessOverHttp(READY_SURFACE, fetch, FakeWebSocket, TIMEOUT, true, clock);
+    assertFailure(result);
+    assert.equal(result.code, "browser_surface_window_settle_unavailable");
+    assert.ok(result.detail.includes(detail));
+    assert.equal(calls.length, 3);
+    assert.deepEqual(clock.sleeps, []);
+    assert.equal(sockets.length, 0);
+  });
+}
 
 test("window-settle capability probe preserves the current screen geometry exactly", async () => {
   const before = { height: 915, width: 412 };

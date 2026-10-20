@@ -137,6 +137,13 @@ type TargetListProjectionResult =
 export const DEFAULT_BROWSER_SURFACE_READINESS_PROBE_TIMEOUT_MS = 5000;
 export const DEFAULT_MID_WAIT_SURFACE_LOSS_POLL_INTERVAL_MS = 10_000;
 
+export interface WindowSettlePollOptions {
+  readonly budgetMs?: number;
+  readonly now?: () => number;
+  readonly pollIntervalMs?: number;
+  readonly sleep?: (ms: number) => Promise<void>;
+}
+
 export interface CreateDefaultBrowserSurfaceReadinessProbeOptions {
   readonly fetchImpl?: typeof fetch;
   /**
@@ -148,6 +155,8 @@ export interface CreateDefaultBrowserSurfaceReadinessProbeOptions {
   readonly requireWindowSettle?: boolean;
   readonly timeoutMs?: number;
   readonly webSocketFactory?: BrowserSurfaceReadinessWebSocketFactory;
+  /** Separate startup-settlement budget; clock and sleep can be replaced in tests. */
+  readonly windowSettlePoll?: WindowSettlePollOptions;
 }
 
 export interface MidWaitSurfaceLossDetectorOptions {
@@ -294,7 +303,14 @@ export function createDefaultBrowserSurfaceReadinessProbe(
   const requireWindowSettle = options.requireWindowSettle ?? true;
   return {
     probe(surface) {
-      return probeBrowserSurfaceReadinessOverHttp(surface, fetchImpl, webSocketFactory, timeoutMs, requireWindowSettle);
+      return probeBrowserSurfaceReadinessOverHttp(
+        surface,
+        fetchImpl,
+        webSocketFactory,
+        timeoutMs,
+        requireWindowSettle,
+        options.windowSettlePoll
+      );
     },
   };
 }
@@ -304,7 +320,8 @@ export async function probeBrowserSurfaceReadinessOverHttp(
   fetchImpl: typeof fetch,
   webSocketFactory: BrowserSurfaceReadinessWebSocketFactory,
   timeoutMs: number,
-  requireWindowSettle = true
+  requireWindowSettle = true,
+  windowSettlePoll: WindowSettlePollOptions = {}
 ): Promise<BrowserSurfaceReadinessProbeResult> {
   const notReady = validateSurfaceShape(surface);
   if (notReady) {
@@ -347,6 +364,7 @@ export async function probeBrowserSurfaceReadinessOverHttp(
     timeoutMs,
     versionPayload,
     webSocketFactory,
+    windowSettlePoll,
   });
 }
 
@@ -358,11 +376,17 @@ interface CompleteReadinessProbeInput {
   readonly timeoutMs: number;
   readonly versionPayload: DevtoolsVersionPayload;
   readonly webSocketFactory: BrowserSurfaceReadinessWebSocketFactory;
+  readonly windowSettlePoll: WindowSettlePollOptions;
 }
 
 async function completeReadinessProbe(input: CompleteReadinessProbeInput): Promise<BrowserSurfaceReadinessProbeResult> {
   if (input.requireWindowSettle) {
-    const windowSettleFailure = await probeWindowSettleBehavior(input.baseUrl, input.fetchImpl, input.timeoutMs);
+    const windowSettleFailure = await probeWindowSettleBehavior(
+      input.baseUrl,
+      input.fetchImpl,
+      input.timeoutMs,
+      input.windowSettlePoll
+    );
     if (windowSettleFailure) {
       return windowSettleFailure;
     }
@@ -394,23 +418,48 @@ async function completeReadinessProbe(input: CompleteReadinessProbeInput): Promi
 async function probeWindowSettleBehavior(
   baseUrl: string,
   fetchImpl: typeof fetch,
-  timeoutMs: number
+  timeoutMs: number,
+  options: WindowSettlePollOptions
 ): Promise<BrowserSurfaceReadinessProbeFailure | null> {
-  // This endpoint is an observational X/window status read. Never attach
-  // synthetic dimensions: explicit viewport operations own presentation
-  // mutations, while capability evidence is a single no-query request.
-  const settleResult = await fetchJsonWithBudget(`${baseUrl}pdpp/window-settle`, fetchImpl, timeoutMs);
-  if (!settleResult.ok) {
-    return { ...settleResult.failure, code: "browser_surface_window_settle_unavailable" };
+  const budgetMs = options.budgetMs ?? 5000;
+  const pollIntervalMs = options.pollIntervalMs ?? 250;
+  if (!Number.isInteger(budgetMs) || budgetMs < 1 || !Number.isInteger(pollIntervalMs) || pollIntervalMs < 1) {
+    throw new Error("window-settle budgetMs and pollIntervalMs must be positive integers");
   }
-  if (isWindowSettleStatus(settleResult.payload) && settleResult.payload.settled === true) {
-    return null;
-  }
-  return {
+  const now = options.now ?? (() => performance.now());
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const deadline = now() + budgetMs;
+  const invalidStatus: BrowserSurfaceReadinessProbeFailure = {
     code: "browser_surface_window_settle_unavailable",
     detail: `cdp_url ${baseUrl}pdpp/window-settle returned an invalid status`,
     ok: false,
   };
+  // These are observational X/window status reads. Never attach synthetic
+  // dimensions: explicit viewport operations own presentation mutations.
+  while (now() < deadline) {
+    // biome-ignore lint/performance/noAwaitInLoops: Startup settlement requires sequential observations.
+    const settleResult = await fetchJsonWithBudget(
+      `${baseUrl}pdpp/window-settle`,
+      fetchImpl,
+      Math.min(timeoutMs, Math.max(1, deadline - now()))
+    );
+    if (!settleResult.ok) {
+      return { ...settleResult.failure, code: "browser_surface_window_settle_unavailable" };
+    }
+    if (!isWindowSettleStatus(settleResult.payload)) {
+      return invalidStatus;
+    }
+    if (settleResult.payload.settled) {
+      return null;
+    }
+    const remainingMs = deadline - now();
+    if (remainingMs <= 0) {
+      return invalidStatus;
+    }
+    // biome-ignore lint/performance/noAwaitInLoops: Wait only after a valid, unsettled status.
+    await sleep(Math.min(pollIntervalMs, remainingMs));
+  }
+  return invalidStatus;
 }
 
 function deriveBrowserGenerationHash(browserVersion: string | undefined, webSocketDebuggerUrl: string): string {
