@@ -39,14 +39,17 @@ const TOP_LEVEL_REGEX_36 = /COPY docker\/neko\/xorg\.conf \/etc\/neko\/xorg\.con
 const TOP_LEVEL_REGEX_37 = /SCREEN="\$\{NEKO_DESKTOP_SCREEN:-1440x900@30\}"/;
 const TOP_LEVEL_REGEX_38 = /WIDTH="\$\{SCREEN_WIDTH\}"/;
 const TOP_LEVEL_REGEX_39 = /HEIGHT="\$\{SCREEN_HEIGHT\}"/;
-const TOP_LEVEL_REGEX_40 = /xdotool windowsize --sync/;
+const TOP_LEVEL_REGEX_40 = /xdotool search --onlyvisible --class RemoteBrowserApp/;
 const TOP_LEVEL_REGEX_41 = /neko:[\s\S]*ports:[\s\S]*"\$\{NEKO_WEBRTC_PORT:-59000\}:59000\/udp"/;
 
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { NekoSurfaceAllocatorClient } from "../runtime/neko-surface-allocator.ts";
@@ -207,6 +210,94 @@ test("Chromium defaults its launch size to the active n.eko screen", async () =>
   assert.match(startScript, TOP_LEVEL_REGEX_39);
   assert.match(startScript, TOP_LEVEL_REGEX_40);
   assert.match(startScript, TOP_LEVEL_REGEX_18);
+});
+
+test("Chromium resize watcher only grows undersized visible windows", async (t) => {
+  const startScript = await readFile(NEKO_CHROMIUM_START, "utf8");
+  const lines = startScript.split("\n");
+  const start = lines.indexOf("read_screen_size() {");
+  const end = lines.findIndex((line, index) => index > start && line.startsWith("trap "));
+  assert.ok(start >= 0 && end > start, "resize functions must precede the process trap");
+  const functions = lines.slice(start, end).join("\n");
+  assert.ok(functions.includes("fit_browser_windows_to_screen() {"));
+  const cases = [
+    { name: "both axes undersized", root: [1440, 900], geometries: ["1438x898"], resized: ["101"] },
+    { name: "height alone undersized", root: [1440, 900], geometries: ["1440x899"], resized: ["101"] },
+    { name: "width alone undersized", root: [1440, 900], geometries: ["1439x900"], resized: ["101"] },
+    { name: "exact size", root: [1440, 900], geometries: ["1440x900"], resized: [] },
+    { name: "phone minimum width", root: [390, 844], geometries: ["500x900"], resized: [] },
+    { name: "oversized desktop", root: [1280, 720], geometries: ["1500x950"], resized: [] },
+    {
+      name: "only the second window is small",
+      root: [1440, 900],
+      geometries: ["1440x900", "1438x898"],
+      resized: ["102"],
+    },
+    { name: "malformed geometry", root: [1440, 900], geometries: ["not-a-size"], resized: [] },
+    { name: "missing geometry", root: [1440, 900], geometries: [""], resized: [] },
+  ];
+
+  for (const scenario of cases) {
+    await t.test(scenario.name, async () => {
+      const dir = await mkdtemp(join(tmpdir(), "neko-window-resize-"));
+      try {
+        const log = join(dir, "windowsize.log");
+        const script = join(dir, "resize.sh");
+        const ids = scenario.geometries.map((_, index) => String(101 + index));
+        await writeFile(log, "");
+        await writeFile(script, `${functions}\nfit_browser_windows_to_screen\n`);
+        await writeFile(join(dir, "root"), `  Width: ${scenario.root[0]}\n  Height: ${scenario.root[1]}\n`);
+        await writeFile(join(dir, "windows"), `${ids.join("\n")}\n`);
+        for (const [index, geometry] of scenario.geometries.entries()) {
+          await writeFile(join(dir, `geometry-${ids[index]}`), `Window ${ids[index]}\n  Geometry: ${geometry}\n`);
+        }
+        await writeFile(
+          join(dir, "xwininfo"),
+          '#!/bin/sh\n[ "$*" = "-root -display :99" ] || exit 1\ncat "$FIXTURES/root"\n',
+          { mode: 0o755 }
+        );
+        await writeFile(
+          join(dir, "xdotool"),
+          [
+            "#!/bin/sh",
+            'case "$1" in',
+            "  search)",
+            '    [ "$*" = "search --onlyvisible --class RemoteBrowserApp" ] || exit 1',
+            '    cat "$FIXTURES/windows" ;;',
+            '  getwindowgeometry) cat "$FIXTURES/geometry-$2" ;;',
+            '  windowsize) printf "%s\\n" "$*" >> "$RESIZE_LOG" ;;',
+            "  *) exit 1 ;;",
+            "esac",
+            "",
+          ].join("\n"),
+          { mode: 0o755 }
+        );
+
+        // Run the real functions once, without launching Chromium or the watcher loop.
+        const result = spawnSync("/bin/sh", [script], {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            PATH: `${dir}:${process.env.PATH ?? "/usr/bin:/bin"}`,
+            DISPLAY: ":99",
+            FIXTURES: dir,
+            RESIZE_LOG: log,
+          },
+          timeout: 5000,
+        });
+        assert.ifError(result.error);
+        assert.equal(result.signal, null);
+        assert.equal(result.status, 0, result.stderr);
+        assert.equal(result.stderr, "");
+        const expected = scenario.resized
+          .map((id) => `windowsize ${id} ${scenario.root[0]} ${scenario.root[1]}\n`)
+          .join("");
+        assert.equal(await readFile(log, "utf8"), expected);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+  }
 });
 
 test("ChatGPT large-history guardrails are wired into Docker runtime config", async () => {
