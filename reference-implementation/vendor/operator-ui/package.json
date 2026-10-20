@@ -79,7 +79,7 @@
     "@pdpp/list-envelope": "*",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
-    "lucide-react": "^1.50.0",
+    "lucide-react": "^1.58.0",
     "next-themes": "^0.4.6",
     "tailwind-merge": "^3.7.0"
   },

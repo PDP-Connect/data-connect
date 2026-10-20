@@ -34,7 +34,7 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "imapflow": "^2.5.7",
-    "lucide-react": "^1.50.0",
+    "lucide-react": "^1.58.0",
     "next": "^16.4.2",
     "pdpp-reference-implementation": "*",
     "postcss": "^8.5.30",
