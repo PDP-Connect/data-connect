@@ -36,7 +36,7 @@ import {
 } from "./postgres-test-template.ts";
 import { needsOuterPostgresDatabase, needsPostgresRestoreDatabase } from "./run-tests-db-requirements.ts";
 import { discoverSelectedTestFiles } from "./run-tests-discovery.ts";
-import { selectTestShard } from "./run-tests-shard.ts";
+import { selectTestShard, withoutShardEnvironment } from "./run-tests-shard.ts";
 import { RUN_AUTHORITY_SCHEMA } from "./test-accounting/inventory.ts";
 import { type StructuredSummary, StructuredSummaryError } from "./test-accounting/receipt.ts";
 import {
@@ -396,7 +396,7 @@ async function runNodeTest(filePath: string, extraArgs: string[]): Promise<NodeT
     throw error;
   }
 
-  const childEnvBase: ProcessEnvLike = { ...baseEnv };
+  const childEnvBase: ProcessEnvLike = withoutShardEnvironment(baseEnv);
   if (allocation) {
     childEnvBase.PDPP_TEST_POSTGRES_URL = allocation.url;
   }

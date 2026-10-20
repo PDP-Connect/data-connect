@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { discoverSelectedTestFiles } from "./run-tests-discovery.ts";
-import { selectTestShard } from "./run-tests-shard.ts";
+import { selectTestShard, withoutShardEnvironment } from "./run-tests-shard.ts";
 
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 
@@ -26,4 +26,15 @@ test("sharding uses the selected list and rejects invalid or empty slices", () =
   for (const [index, count] of invalidShards) {
     assert.throws(() => selectTestShard(["a"], index, count), /shard/);
   }
+});
+
+test("test children do not inherit outer shard controls", () => {
+  const outer = {
+    PDPP_TEST_PROFILE: "memory-default",
+    PDPP_TEST_SHARD_INDEX: "2",
+    PDPP_TEST_SHARD_COUNT: "5",
+    PDPP_TEST_SHARD_RECEIPT: "/scratch/shard.json",
+  };
+  assert.deepEqual(withoutShardEnvironment(outer), { PDPP_TEST_PROFILE: "memory-default" });
+  assert.equal(outer.PDPP_TEST_SHARD_INDEX, "2", "the parent environment is unchanged");
 });
