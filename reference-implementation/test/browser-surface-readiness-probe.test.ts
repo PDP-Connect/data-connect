@@ -430,6 +430,49 @@ test("targets are listed after the window settles, so a page replaced during the
   assert.equal(calls.at(-1)?.url, "http://neko.local:9222/json/list");
 });
 
+test("after a settle wait the browser generation is read again, so a restart is not labelled with the old hash", async () => {
+  async function probeHash(routes: Record<string, RouteSpec>): Promise<string | undefined> {
+    const { FakeWebSocket, sockets } = makeFakeWebSocketCtor();
+    const resultPromise = probeBrowserSurfaceReadinessOverHttp(
+      READY_SURFACE,
+      makeFetchSpy(routes).fetch,
+      FakeWebSocket,
+      TIMEOUT,
+      true,
+      makeSettleClock()
+    );
+    const socket = await waitForSocket(sockets);
+    const message = await waitForMessage(socket.peer, "Page.getFrameTree");
+    socket.peer.deliver({ id: message.id, result: { frameTree: { frame: { id: "root" } } } });
+    const result = await resultPromise;
+    assertSuccess(result);
+    return result.browserGenerationHash;
+  }
+  const generationA = { Browser: "Chrome/120", webSocketDebuggerUrl: "ws://neko/browser-a" };
+  const generationB = { Browser: "Chrome/120", webSocketDebuggerUrl: "ws://neko/browser-b" };
+  let settleReads = 0;
+  // Chromium restarts (A -> B) while the window is still settling.
+  const restarted = await probeHash(
+    happyRoutes({
+      "json/version": {
+        get json() {
+          return settleReads < 2 ? generationA : generationB;
+        },
+      },
+      "pdpp/window-settle": {
+        get json() {
+          settleReads += 1;
+          return { height: 900, settled: settleReads === 2, width: 1440 };
+        },
+      },
+    })
+  );
+  const onlyA = await probeHash(happyRoutes({ "json/version": { json: generationA } }));
+  const onlyB = await probeHash(happyRoutes({ "json/version": { json: generationB } }));
+  assert.notEqual(onlyA, onlyB);
+  assert.equal(restarted, onlyB);
+});
+
 test("an unsettled window exhausts the default budget with the typed settle failure", async () => {
   const { calls, fetch } = makeFetchSpy(
     happyRoutes({ "pdpp/window-settle": { json: { height: 900, settled: false, width: 1440 } } })

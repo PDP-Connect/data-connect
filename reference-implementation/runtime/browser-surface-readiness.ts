@@ -330,31 +330,28 @@ export async function probeBrowserSurfaceReadinessOverHttp(
 
   const baseUrl = normalizeCdpBase(surface.cdp_url);
 
-  const versionResult = await fetchJsonWithBudget(`${baseUrl}json/version`, fetchImpl, timeoutMs);
-  if (!versionResult.ok) {
-    return versionResult.failure;
-  }
-  const versionPayload = versionResult.payload as DevtoolsVersionPayload | null;
-  if (
-    !versionPayload ||
-    typeof versionPayload !== "object" ||
-    typeof versionPayload.webSocketDebuggerUrl !== "string"
-  ) {
-    return {
-      code: "browser_surface_cdp_disconnected",
-      detail: `cdp_url ${baseUrl}json/version returned a payload without webSocketDebuggerUrl`,
-      ok: false,
-    };
+  let version = await readDevtoolsVersion(baseUrl, fetchImpl, timeoutMs);
+  if (!version.ok) {
+    return version.failure;
   }
 
   // Settle before listing targets: the settle wait can take seconds, during
-  // which a connector may close the page it started with and open another.
+  // which a connector may close the page it started with and open another,
+  // or Chromium may restart. After a wait, read the browser generation again
+  // so the result never pairs a new browser's targets with the old one's hash.
   if (requireWindowSettle) {
-    const windowSettleFailure = await probeWindowSettleBehavior(baseUrl, fetchImpl, timeoutMs, windowSettlePoll);
-    if (windowSettleFailure) {
-      return windowSettleFailure;
+    const settle = await probeWindowSettleBehavior(baseUrl, fetchImpl, timeoutMs, windowSettlePoll);
+    if (settle.failure) {
+      return settle.failure;
+    }
+    if (settle.waited) {
+      version = await readDevtoolsVersion(baseUrl, fetchImpl, timeoutMs);
+      if (!version.ok) {
+        return version.failure;
+      }
     }
   }
+  const versionPayload = version.payload;
 
   const targetsResult = await fetchJsonWithBudget(`${baseUrl}json/list`, fetchImpl, timeoutMs);
   if (!targetsResult.ok) {
@@ -404,12 +401,37 @@ async function completeReadinessProbe(input: CompleteReadinessProbeInput): Promi
   };
 }
 
+async function readDevtoolsVersion(
+  baseUrl: string,
+  fetchImpl: typeof fetch,
+  timeoutMs: number
+): Promise<
+  { ok: true; payload: DevtoolsVersionPayload } | { ok: false; failure: BrowserSurfaceReadinessProbeFailure }
+> {
+  const versionResult = await fetchJsonWithBudget(`${baseUrl}json/version`, fetchImpl, timeoutMs);
+  if (!versionResult.ok) {
+    return { failure: versionResult.failure, ok: false };
+  }
+  const payload = versionResult.payload as DevtoolsVersionPayload | null;
+  if (!payload || typeof payload !== "object" || typeof payload.webSocketDebuggerUrl !== "string") {
+    return {
+      failure: {
+        code: "browser_surface_cdp_disconnected",
+        detail: `cdp_url ${baseUrl}json/version returned a payload without webSocketDebuggerUrl`,
+        ok: false,
+      },
+      ok: false,
+    };
+  }
+  return { ok: true, payload };
+}
+
 async function probeWindowSettleBehavior(
   baseUrl: string,
   fetchImpl: typeof fetch,
   timeoutMs: number,
   options: WindowSettlePollOptions
-): Promise<BrowserSurfaceReadinessProbeFailure | null> {
+): Promise<{ failure: BrowserSurfaceReadinessProbeFailure | null; waited: boolean }> {
   const budgetMs = options.budgetMs ?? 5000;
   const pollIntervalMs = options.pollIntervalMs ?? 250;
   if (!Number.isInteger(budgetMs) || budgetMs < 1 || !Number.isInteger(pollIntervalMs) || pollIntervalMs < 1) {
@@ -427,28 +449,33 @@ async function probeWindowSettleBehavior(
   // dimensions: explicit viewport operations own presentation mutations.
   // The budget bounds the polling, not a read: the last read happens at the
   // deadline with the normal per-read timeout.
+  let waited = false;
   for (;;) {
     // biome-ignore lint/performance/noAwaitInLoops: Startup settlement requires sequential observations.
     const settleResult = await fetchJsonWithBudget(`${baseUrl}pdpp/window-settle`, fetchImpl, timeoutMs);
     if (!settleResult.ok) {
-      return { ...settleResult.failure, code: "browser_surface_window_settle_unavailable" };
+      return { failure: { ...settleResult.failure, code: "browser_surface_window_settle_unavailable" }, waited };
     }
     if (!isWindowSettleStatus(settleResult.payload)) {
-      return invalidStatus;
+      return { failure: invalidStatus, waited };
     }
     if (settleResult.payload.settled) {
-      return null;
+      return { failure: null, waited };
     }
     const remainingMs = deadline - now();
     if (remainingMs <= 0) {
       return {
-        code: "browser_surface_window_settle_unavailable",
-        detail: `cdp_url ${baseUrl}pdpp/window-settle did not report settled within ${String(budgetMs)}ms`,
-        ok: false,
+        failure: {
+          code: "browser_surface_window_settle_unavailable",
+          detail: `cdp_url ${baseUrl}pdpp/window-settle did not report settled within ${String(budgetMs)}ms`,
+          ok: false,
+        },
+        waited,
       };
     }
     // biome-ignore lint/performance/noAwaitInLoops: Wait only after a valid, unsettled status.
     await sleep(Math.min(pollIntervalMs, remainingMs));
+    waited = true;
   }
 }
 
