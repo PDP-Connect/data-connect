@@ -450,9 +450,16 @@ export class NekoSurfaceAllocatorService {
         query: { name: names.containerName },
       }).catch(async (cause: unknown) => {
         // A create 404 can also name a missing network; inspect the image
-        // before translating it so unrelated Docker failures keep their code.
+        // and replace the create error only when the image is missing, so
+        // unrelated (or inspect-time) Docker failures keep the create error.
         if (isDockerNotFoundError(cause)) {
-          await this.assertImageReady();
+          try {
+            await this.assertImageReady();
+          } catch (inspectError) {
+            if (inspectError instanceof NekoSurfaceAllocatorServiceError && inspectError.code === "image_missing") {
+              throw inspectError;
+            }
+          }
         }
         throw cause;
       });
