@@ -401,7 +401,7 @@ test("window-settle becomes ready on the third read without real sleeps", async 
   );
 });
 
-test("an unsettled window exhausts the default budget with the same typed failure", async () => {
+test("an unsettled window exhausts the default budget with the typed settle failure", async () => {
   const { calls, fetch } = makeFetchSpy(
     happyRoutes({ "pdpp/window-settle": { json: { height: 900, settled: false, width: 1440 } } })
   );
@@ -410,12 +410,13 @@ test("an unsettled window exhausts the default budget with the same typed failur
   const result = await probeBrowserSurfaceReadinessOverHttp(READY_SURFACE, fetch, FakeWebSocket, TIMEOUT, true, clock);
   assert.deepEqual(result, {
     code: "browser_surface_window_settle_unavailable",
-    detail: "cdp_url http://neko.local:9222/pdpp/window-settle returned an invalid status",
+    detail: "cdp_url http://neko.local:9222/pdpp/window-settle did not report settled within 5000ms",
     ok: false,
   });
   assert.equal(clock.now(), 5000);
   assert.deepEqual(clock.sleeps, Array(20).fill(250));
-  assert.equal(calls.length, 22);
+  // version + list, then one read per sleep plus the final read at the deadline.
+  assert.equal(calls.length, 23);
   assert.equal(sockets.length, 0);
 });
 
@@ -434,7 +435,7 @@ test("window-settle sleep is capped by the remaining injected budget", async () 
   assert.equal(result.code, "browser_surface_window_settle_unavailable");
   assert.deepEqual(clock.sleeps, [250, 250, 100]);
   assert.equal(clock.now(), 600);
-  assert.equal(calls.length, 5);
+  assert.equal(calls.length, 6);
 });
 
 for (const [name, route, detail] of [

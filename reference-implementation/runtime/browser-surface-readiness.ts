@@ -436,13 +436,11 @@ async function probeWindowSettleBehavior(
   };
   // These are observational X/window status reads. Never attach synthetic
   // dimensions: explicit viewport operations own presentation mutations.
-  while (now() < deadline) {
+  // The budget bounds the polling, not a read: the last read happens at the
+  // deadline with the normal per-read timeout.
+  for (;;) {
     // biome-ignore lint/performance/noAwaitInLoops: Startup settlement requires sequential observations.
-    const settleResult = await fetchJsonWithBudget(
-      `${baseUrl}pdpp/window-settle`,
-      fetchImpl,
-      Math.min(timeoutMs, Math.max(1, deadline - now()))
-    );
+    const settleResult = await fetchJsonWithBudget(`${baseUrl}pdpp/window-settle`, fetchImpl, timeoutMs);
     if (!settleResult.ok) {
       return { ...settleResult.failure, code: "browser_surface_window_settle_unavailable" };
     }
@@ -454,12 +452,15 @@ async function probeWindowSettleBehavior(
     }
     const remainingMs = deadline - now();
     if (remainingMs <= 0) {
-      return invalidStatus;
+      return {
+        code: "browser_surface_window_settle_unavailable",
+        detail: `cdp_url ${baseUrl}pdpp/window-settle did not report settled within ${String(budgetMs)}ms`,
+        ok: false,
+      };
     }
     // biome-ignore lint/performance/noAwaitInLoops: Wait only after a valid, unsettled status.
     await sleep(Math.min(pollIntervalMs, remainingMs));
   }
-  return invalidStatus;
 }
 
 function deriveBrowserGenerationHash(browserVersion: string | undefined, webSocketDebuggerUrl: string): string {
