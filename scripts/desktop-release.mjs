@@ -30,7 +30,10 @@ export function nextVersion(base, messages) {
   }
   if (!bump) return null
   const [major, minor, patch] = base.split(".").map(Number)
-  // Breaking changes use major even at 0.x: explicit, conventional SemVer.
+  // SemVer item 4: while major is 0, anything may change, so a breaking
+  // change bumps minor. Moving to 1.0.0 is a deliberate owner decision, made
+  // by publishing 1.0.0, not something a commit message triggers.
+  if (bump === 3 && major === 0) bump = 2
   return bump === 3
     ? `${major + 1}.0.0`
     : bump === 2

@@ -10,7 +10,7 @@ The version script reads all commit messages since the highest reachable, stable
 | --- | --- |
 | `fix:` or `perf:` (with optional scope) | Patch |
 | `feat:` (with optional scope) | Minor |
-| Conventional header with `!`, or `BREAKING CHANGE:` / `BREAKING-CHANGE:` footer | Major, including at `0.x` |
+| Conventional header with `!`, or `BREAKING CHANGE:` / `BREAKING-CHANGE:` footer | Minor while the major version is 0 ([SemVer item 4](https://semver.org/spec/v2.0.0.html#spec-item-4)); major from 1.0.0 on |
 | `test:`, `docs:`, `ci:`, `chore:`, `style:`, `refactor:`, `build:`, `revert:` without a breaking marker | None |
 
 The highest bump in the range wins. Merge commits are ignored unless their messages follow the convention; ordinary merge histories still include the component commits. With squash merges, the squash commit's title/body must preserve the release intent. An explicit breaking marker overrides an otherwise ignored type.
@@ -33,9 +33,9 @@ node scripts/desktop-release.mjs plan <ref>
 
 The default target is local `origin/main`. The command pins that ref to a SHA, prints the desktop baseline, commit count and selected version (or skip reason), and uses the same version and remote-tag collision rules as the coordinator. It reads Git history, origin's tags and the GitHub releases API. It does not fetch, write files, create tags/releases or trigger workflows. Use a checkout with current main history and release tags; check the printed SHA against GitHub before relying on the result. `GITHUB_REPOSITORY` defaults to `PDP-Connect/data-connect` for this command. The plan predicts version selection, not whether the CI gate has passed.
 
-At the 2026-10-21 inspection, main `79ac35bfb1e4757b8e5ee4baaea1d8fe884ea66c` had baseline `v0.7.54`, 827 commits since it, and selected `v1.0.1`. Newer complete desktop releases through `v0.7.63` are prereleases and remain excluded. Published Apple Silicon installer names use `_aarch64.dmg`; the script accepts that and `_arm64.dmg`. Historical breaking commits select `1.0.0`, and the existing remote `v1.0.0` tag advances the selection to `1.0.1`.
+At the 2026-10-21 inspection, main `79ac35bfb1e4757b8e5ee4baaea1d8fe884ea66c` had baseline `v0.7.54`, 827 commits since it, and selected `v0.8.0`. Newer complete desktop releases through `v0.7.63` are prereleases and remain excluded. Published Apple Silicon installer names use `_aarch64.dmg`; the script accepts that and `_arm64.dmg`. Historical breaking commits bump minor because the major version is 0.
 
-Before enabling automation, the owner should decide whether that major version is intended. To start at a chosen version instead, add a reviewed bootstrap record with the exact history cutoff SHA and first version (for example `0.7.64`, after checking availability). Both plan and prepare should consume that record until the first complete automated release is published, then use the ordinary release baseline. This is a proposed follow-up; no version override or historical-baseline change is enabled here.
+Automation never selects 1.0.0 from a 0.x baseline; going to 1.0.0 is an owner decision. To start at a chosen version instead, add a reviewed bootstrap record with the exact history cutoff SHA and first version (for example `0.7.64`, after checking availability). Both plan and prepare should consume that record until the first complete automated release is published, then use the ordinary release baseline. This is a proposed follow-up; no version override or historical-baseline change is enabled here.
 
 ## npm publishing
 
@@ -76,7 +76,7 @@ A manual published prerelease builds desktop and its versioned Core image but do
 - Actions must be enabled, including reusable workflows and the pinned actions. Allow `GITHUB_TOKEN` the job-requested `contents: write`, `actions: read`, `packages: write`, `id-token: write` and `attestations: write` permissions. The coordinator needs no PAT or new secret. Existing builders use `GITHUB_TOKEN`; macOS installers remain unsigned and notarization remains downstream.
 - Tag rulesets/protection must permit the Actions identity to create `v*` and `npm-v*` tags. Branch protection on `main` needs no bypass: automatic releases never push commits to it. Protect workflow edits with the repository's normal review policy because `workflow_run` jobs have write privileges.
 - GHCR must permit this repository's Actions token to publish the existing Core package. Retain npm trusted-publisher bindings for all three packages to `npm-release.yml` on GitHub-hosted runners. No `NPM_TOKEN` is added.
-- Before enabling, inspect the last complete desktop release and its reachable tag. The first automatic run can contain many historical conventional commits and therefore produce a major bump. Missing old installer assets cause a closed failure or selection of an older complete baseline. Check the run's printed baseline/version and the npm migration's legacy tag.
+- Before enabling, inspect the last complete desktop release and its reachable tag. The first automatic run can contain many historical conventional commits; at 0.x the largest possible bump is minor. Missing old installer assets cause a closed failure or selection of an older complete baseline. Check the run's printed baseline/version and the npm migration's legacy tag.
 - Cancellation can leave reserved tags, drafts, uploaded installers or a versioned Core image; those are retained and never silently deleted. Core promotion occurs before draft publication, so cancellation in that short window can leave `core:latest` ahead of GitHub Latest. Retry the same SHA. Automatic DMG attestations originate from the main workflow context rather than a release-event tag context; downstream signer policies must allow the reusable workflow through this coordinator. Hosted installers, GHCR, npm and signer integration must be verified in the first live run.
 
 ## Prior art used

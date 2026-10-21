@@ -49,8 +49,11 @@ test("highest bump wins regardless of order or ignored commits", () => {
   assert.equal(nextVersion("1.2.3", ["fix: bug", "feat: feature"]), "1.3.0")
   assert.equal(nextVersion("1.2.3", []), null)
 })
-test("breaking changes use major at 0.x", () =>
-  assert.equal(nextVersion("0.7.63", ["feat!: break"]), "1.0.0"))
+test("breaking changes bump minor while major is 0", () => {
+  assert.equal(nextVersion("0.7.63", ["feat!: break"]), "0.8.0")
+  assert.equal(nextVersion("0.7.63", ["fix: x\n\nBREAKING CHANGE: y"]), "0.8.0")
+  assert.equal(nextVersion("0.7.63", ["fix!: break", "fix: small"]), "0.8.0")
+})
 test("malformed versions fail closed", () =>
   assert.throws(() => nextVersion("1.2", ["fix: bug"])))
 
@@ -339,7 +342,7 @@ test("plan reads all release pages, pins origin/main and never writes", t => {
   assert.match(r.stdout, /Target: origin\/main/)
   assert.match(r.stdout, /Desktop baseline: v0.7.63/)
   assert.match(r.stdout, /Commits since baseline: 2/)
-  assert.match(r.stdout, /Next desktop version: v1.0.0/)
+  assert.match(r.stdout, /Next desktop version: v0.8.0/)
   assert.equal(r.output, "")
   assert.deepEqual(r.calls.filter(c => c[0] === "gh"), [[
     "gh", "api", "--paginate", "--slurp",
