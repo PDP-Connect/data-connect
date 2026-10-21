@@ -23,17 +23,25 @@ fi
 # Compose substitutes these values into Core and Postgres. Hex avoids URL
 # escaping for the Postgres password embedded in PDPP_DATABASE_URL.
 fill_empty() {
-  local key="$1" bytes="$2" value
-  if grep -qE "^${key}=.+" "$target"; then
+  local key="$1" bytes="$2" value temp
+  if grep -qE "^${key}=[^[:space:]]" "$target"; then
     printf 'preserved %s\n' "$key"
     return
   fi
   value="$(openssl rand -hex "$bytes")"
-  if grep -qE "^${key}=" "$target"; then
-    sed -i "s/^${key}=.*/${key}=${value}/" "$target"
-  else
-    printf '%s=%s\n' "$key" "$value" >> "$target"
-  fi
+  temp="$(mktemp "${target}.XXXXXX")"
+  awk -v key="$key" -v value="$value" '
+    $0 ~ "^" key "=" {
+      if ($0 ~ "^" key "=[[:space:]]*$") print key "=" value
+      else print
+      found = 1
+      next
+    }
+    { print }
+    END { if (!found) print key "=" value }
+  ' "$target" > "$temp"
+  chmod 600 "$temp"
+  mv "$temp" "$target"
   printf 'set %s\n' "$key"
 }
 
