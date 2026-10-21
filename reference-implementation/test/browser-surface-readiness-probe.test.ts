@@ -784,46 +784,62 @@ test("BROWSER_SURFACE_READINESS_PROBE_CODES enumerates the documented failure co
 
 test("mid-wait successful probe invokes the generic observation hook before the next poll", async () => {
   let probeCount = 0;
-  let resolveObserved: () => void;
-  const observed = new Promise<void>((resolve) => {
-    resolveObserved = resolve;
-  });
-  let releaseObservation!: () => void;
-  const observationPending = new Promise<void>((resolve) => {
-    releaseObservation = resolve;
-  });
+  // Each probe reports a distinct browser generation, so the test can tell
+  // which probe's result reached the hook.
+  const generation = (n: number): string => String(n % 10).repeat(64);
+  const observations: Array<{ generation: string | undefined; release: () => void }> = [];
+  const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+  // Bounded so a hook that is never (or never again) invoked fails here with a
+  // focused message instead of hanging until the runner's timeout.
+  const waitForObservations = async (count: number): Promise<void> => {
+    const deadline = Date.now() + 2000;
+    while (observations.length < count) {
+      if (Date.now() > deadline) {
+        assert.fail(`expected ${count} observations, got ${observations.length}`);
+      }
+      await sleep(1);
+    }
+  };
   const detector = createMidWaitSurfaceLossDetector(
     READY_SURFACE,
     {
       // biome-ignore lint/suspicious/useAwait: localized test assertion preserves its explicit contract.
       probe: async () => {
         probeCount += 1;
-        return { browserGenerationHash: "b".repeat(64), ok: true, pageTargetCount: 1 };
+        return { browserGenerationHash: generation(probeCount), ok: true, pageTargetCount: 1 };
       },
     },
     {
+      // Every observation stays pending until the test releases it.
       onProbeResult: async (result) => {
         assert.equal(result.ok, true);
-        if (probeCount === 1) {
-          resolveObserved();
-          await observationPending;
-        }
+        await new Promise<void>((release) => {
+          observations.push({ generation: result.browserGenerationHash, release });
+        });
       },
       pollIntervalMs: 1,
     }
   );
 
   try {
-    await observed;
-    // Leave the first hook pending for many 1 ms poll intervals.
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await waitForObservations(1);
+    // Leave the first observation pending for many 1 ms poll intervals.
+    await sleep(20);
     assert.equal(probeCount, 1, "a pending observation must block the next probe");
 
-    releaseObservation();
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    assert.ok(probeCount >= 2, "polling must resume after the observation resolves");
+    observations[0]?.release();
+    await waitForObservations(2);
+    await sleep(20);
+    assert.equal(probeCount, 2, "the second pending observation must block a third probe");
+    assert.deepEqual(
+      observations.map((observation) => observation.generation),
+      [generation(1), generation(2)],
+      "each successful probe's own result must reach the hook"
+    );
   } finally {
     detector.cancel();
-    releaseObservation();
+    for (const observation of observations) {
+      observation.release();
+    }
   }
 });
