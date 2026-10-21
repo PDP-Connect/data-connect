@@ -13,7 +13,7 @@
  *     backend uses for one connection; missing cursor values sort last in
  *     both directions.
  *   - D4: a truncated page carries `next_cursor`, and following it with only
- *     Core parameters visits every record exactly once.
+ *     Core parameters visits every record exactly once on an unchanged dataset.
  *   - D5: `changes_since` works across connections, pages stay anchored to the
  *     horizon chosen on page 1, and the terminal page carries a
  *     `next_changes_since` that keeps each connection's progress separately.
@@ -62,6 +62,7 @@ const EVENTS = "events";
 const NOTES = "notes";
 const COUNTERS = "counters";
 const ITEMS = "items";
+const PAIRS = "pairs";
 
 function manifestFor(connectorId: string) {
   return {
@@ -122,6 +123,22 @@ function manifestFor(connectorId: string) {
         semantics: "mutable_state",
       },
       {
+        cursor_field: "c",
+        name: PAIRS,
+        primary_key: ["tenant", "n"],
+        schema: {
+          properties: {
+            c: { format: "date-time", type: ["string", "null"] },
+            n: { type: "integer" },
+            tenant: { type: "string" },
+          },
+          required: ["tenant", "n"],
+          type: "object",
+        },
+        selection: { fields: true, resources: true },
+        semantics: "mutable_state",
+      },
+      {
         cursor_field: "seq",
         name: COUNTERS,
         primary_key: ["id"],
@@ -143,6 +160,7 @@ const STREAM_FIELDS: Record<string, string[]> = {
   [EVENTS]: ["id", "occurred_at", "title", "secret"],
   [ITEMS]: ["n", "c", "v"],
   [NOTES]: ["id", "title", "updated_at"],
+  [PAIRS]: ["tenant", "n", "c"],
 };
 
 let caseCounter = 0;
@@ -182,16 +200,13 @@ async function fixture(backend: Backend, labels: string[]): Promise<Fixture> {
       ],
     }),
     ingest: async (instanceId, stream, data, opts = {}) => {
-      await ingestRecord(
-        { connector_id: connectorId, connector_instance_id: instanceId },
-        {
-          data: opts.op === "delete" ? null : data,
-          emitted_at: opts.emittedAt ?? "2026-10-01T00:00:00.000Z",
-          key: String(data.id ?? data.n),
-          ...(opts.op ? { op: opts.op } : {}),
-          stream,
-        } as never
-      );
+      await ingestRecord({ connector_id: connectorId, connector_instance_id: instanceId }, {
+        data: opts.op === "delete" ? null : data,
+        emitted_at: opts.emittedAt ?? "2026-10-01T00:00:00.000Z",
+        key: stream === PAIRS ? [data.tenant, data.n] : String(data.id ?? data.n),
+        ...(opts.op ? { op: opts.op } : {}),
+        stream,
+      } as never);
     },
     instance,
     manifest,
@@ -595,24 +610,28 @@ fanInCase("D4 cursors are bound to the binding set, order and token space", asyn
   );
 });
 
-fanInCase("D4 writes between pages never duplicate or reorder records", async (backend) => {
+fanInCase("D4 fresh-identity inserts between pages never duplicate or reorder records", async (backend) => {
   const f = await fixture(backend, ["a", "b"]);
   for (let i = 0; i < 4; i += 1) {
     await f.ingest(f.instance("a"), EVENTS, { id: `a${i}`, occurred_at: iso(10 * i + 1) });
     await f.ingest(f.instance("b"), EVENTS, { id: `b${i}`, occurred_at: iso(10 * i + 2) });
   }
-  const pages = await traverse((p) => fanIn(f, f.bindings, EVENTS, f.grant(EVENTS), p), { limit: 3, order: "asc" }, {
-    between: async (pageIndex) => {
-      if (pageIndex !== 0) {
-        return;
-      }
-      // After page 1 (a0,b0,a1 at minutes 1,2,11):
-      // - behind the cursor in b's own range: not visited, like one connection;
-      await f.ingest(f.instance("b"), EVENTS, { id: "b_behind", occurred_at: iso(5) });
-      // - ahead of the cursor: visited once, in order.
-      await f.ingest(f.instance("a"), EVENTS, { id: "a_ahead", occurred_at: iso(25) });
-    },
-  });
+  const pages = await traverse(
+    (p) => fanIn(f, f.bindings, EVENTS, f.grant(EVENTS), p),
+    { limit: 3, order: "asc" },
+    {
+      between: async (pageIndex) => {
+        if (pageIndex !== 0) {
+          return;
+        }
+        // After page 1 (a0,b0,a1 at minutes 1,2,11):
+        // - behind the cursor in b's own range: not visited, like one connection;
+        await f.ingest(f.instance("b"), EVENTS, { id: "b_behind", occurred_at: iso(5) });
+        // - ahead of the cursor: visited once, in order.
+        await f.ingest(f.instance("a"), EVENTS, { id: "a_ahead", occurred_at: iso(25) });
+      },
+    }
+  );
   const seen = ids(pages);
   assertNoDuplicates(seen, "no record may repeat");
   assert.deepEqual(seen, ["a0", "b0", "a1", "b1", "a2", "b2", "a_ahead", "a3", "b3"]);
@@ -790,6 +809,279 @@ fanInCase("D5 expired history on one connection fails the whole session with cur
   );
 });
 
+fanInCase("D5 null and empty cursor values are one missing bucket ordered by primary key", async (backend) => {
+  if (backend.name !== "sqlite") {
+    return; // PostgreSQL stores '' as a present value; only SQLite folds it into the missing bucket.
+  }
+  const f = await fixture(backend, ["a", "b"]);
+  // `z` has a null cursor and `a` an empty one: both are missing, so the
+  // bucket orders them by primary key alone (a before z in ASC). A change
+  // session resumes inside the bucket by primary key, so its SQL order must
+  // not tell the two apart.
+  await f.ingest(f.instance("a"), NOTES, { id: "z", title: "x", updated_at: null });
+  await f.ingest(f.instance("a"), NOTES, { id: "a", title: "x", updated_at: "" });
+  const grant = f.grant(NOTES);
+  const expected = { asc: ["a", "z"], desc: ["z", "a"] };
+  for (const order of ["asc", "desc"] as const) {
+    const session = await traverse((p) => fanIn(f, f.bindings, NOTES, grant, p), {
+      changes_since: "beginning",
+      limit: 1,
+      order,
+    });
+    assert.deepEqual(ids(session), expected[order], `${order}: a change session must not skip the empty-cursor record`);
+  }
+});
+
+// biome-ignore-start lint/performance/noAwaitInLoops: these stateful pagination scenarios require ordered writes and reads.
+fanInCase("F1 ordinary missing bucket visits null and empty values exactly once", async (backend) => {
+  if (backend.name !== "sqlite") {
+    return;
+  }
+  const f = await fixture(backend, ["a", "b"]);
+  await f.ingest(f.instance("a"), NOTES, { id: "z", updated_at: null });
+  await f.ingest(f.instance("a"), NOTES, { id: "a", updated_at: "" });
+  for (const order of ["asc", "desc"] as const) {
+    for (const limit of [1, 2]) {
+      const pages = await traverse((p) => fanIn(f, f.bindings, NOTES, f.grant(NOTES), p), { limit, order });
+      assert.deepEqual(ids(pages), order === "asc" ? ["a", "z"] : ["z", "a"], `${order} limit=${limit}`);
+    }
+  }
+});
+
+fanInCase("F2 sparse request filters resume beyond the raw scan budget", async (backend) => {
+  for (const order of ["asc", "desc"] as const) {
+    const f = await fixture(backend, ["a", "b"]);
+    const minute = (n: number) => (order === "asc" ? n : 400 - n);
+    for (let i = 0; i <= 200; i += 1) {
+      await f.ingest(f.instance("a"), EVENTS, {
+        id: `a${i}`,
+        occurred_at: iso(minute(i)),
+        title: i === 200 ? "match" : "skip",
+      });
+    }
+    await f.ingest(f.instance("b"), EVENTS, { id: "b", occurred_at: iso(minute(300)), title: "match" });
+    const read = (p: Json) => fanIn(f, f.bindings, EVENTS, f.grant(EVENTS), p);
+    const params = { filter: { title: "match" }, limit: 1, order };
+    const emptyPrefixes = await traverse(read, params);
+    assert.deepEqual(ids(emptyPrefixes), ["a200", "b"], "an incomplete local prefix must hold back the later binding");
+    if (backend.name === "sqlite") {
+      // PostgreSQL applies the request filter in SQL without a scan budget.
+      assert.ok(
+        emptyPrefixes.some((page) => page.data.length === 0 && page.has_more),
+        "empty bounded scans remain resumable"
+      );
+    }
+    const local = await traverse((p) => single(f, f.instance("a"), EVENTS, p), params);
+    assert.deepEqual(ids(local), ["a200"], "single-binding reads share the resumable scan contract");
+    await f.ingest(f.instance("a"), EVENTS, { id: "a0", occurred_at: iso(minute(0)), title: "match" });
+    for (const limit of [1, 2]) {
+      const partialPrefixes = await traverse(read, { ...params, limit });
+      assert.deepEqual(
+        ids(partialPrefixes),
+        ["a0", "a200", "b"],
+        "only consumed visible rows permit advancing the examined frontier"
+      );
+    }
+    const absent = await traverse(read, { ...params, filter: { title: "absent" } });
+    assert.deepEqual(ids(absent), [], "a wholly rejected scan still reaches true exhaustion");
+  }
+});
+
+fanInCase("F3 multipart numeric keys retain typed order through change cursors and tombstones", async (backend) => {
+  if (backend.name !== "sqlite") {
+    return;
+  }
+  const f = await fixture(backend, ["a", "b"]);
+  for (const label of ["a", "b"]) {
+    for (const n of [2, 10]) {
+      await f.ingest(f.instance(label), PAIRS, { tenant: "x", n, c: iso(1) });
+    }
+  }
+  let since = "beginning";
+  for (const order of ["asc", "desc"] as const) {
+    const ordinary = await traverse((p) => fanIn(f, f.bindings, PAIRS, f.grant(PAIRS), p), { limit: 1, order });
+    assert.deepEqual(
+      ids(ordinary),
+      (order === "asc" ? [2, 2, 10, 10] : [10, 10, 2, 2]).map((n) => JSON.stringify(["x", n]))
+    );
+    const pages = await traverse((p) => fanIn(f, f.bindings, PAIRS, f.grant(PAIRS), p), {
+      changes_since: "beginning",
+      limit: 1,
+      order,
+    });
+    assert.deepEqual(
+      ids(pages),
+      (order === "asc" ? [2, 2, 10, 10] : [10, 10, 2, 2]).map((n) => JSON.stringify(["x", n]))
+    );
+    since = String(pages.at(-1)?.next_changes_since);
+  }
+  for (const label of ["a", "b"]) {
+    for (const n of [2, 10]) {
+      await f.ingest(f.instance(label), PAIRS, { tenant: "x", n }, { op: "delete" });
+    }
+  }
+  for (const order of ["asc", "desc"] as const) {
+    const pages = await traverse((p) => fanIn(f, f.bindings, PAIRS, f.grant(PAIRS), p), {
+      changes_since: since,
+      limit: 1,
+      order,
+    });
+    assert.ok(pages.flatMap((p) => p.data).every((r) => r.deleted === true));
+    assert.deepEqual(
+      ids(pages),
+      (order === "asc" ? [2, 2, 10, 10] : [10, 10, 2, 2]).map((n) => JSON.stringify(["x", n]))
+    );
+  }
+});
+
+fanInCase("F4 existing identity updates expose ordinary live-keyset semantics", async (backend) => {
+  for (const order of ["asc", "desc"] as const) {
+    const f = await fixture(backend, ["a", "b"]);
+    const minute = (n: number) => (order === "asc" ? n : 10 - n);
+    await f.ingest(f.instance("a"), EVENTS, { id: "a", occurred_at: iso(minute(1)) });
+    await f.ingest(f.instance("b"), EVENTS, { id: "b", occurred_at: iso(minute(2)) });
+    await f.ingest(f.instance("b"), EVENTS, { id: "c", occurred_at: iso(minute(4)) });
+    const pages = await traverse(
+      (p) => fanIn(f, f.bindings, EVENTS, f.grant(EVENTS), p),
+      { limit: 1, order },
+      {
+        between: async (index) => {
+          if (index !== 0) {
+            return;
+          }
+          await f.ingest(f.instance("a"), EVENTS, { id: "a", occurred_at: iso(minute(3)) });
+          await f.ingest(f.instance("b"), EVENTS, { id: "b", occurred_at: iso(minute(0)) });
+        },
+      }
+    );
+    // Ordinary pages are a live keyset, not a frozen identity set: a moves
+    // ahead and can reappear; unread b moves behind and is no longer eligible.
+    assert.deepEqual(ids(pages), ["a", "a", "c"], `${order}: mutable identities follow their current positions`);
+  }
+});
+
+fanInCase("F4 randomized existing-identity updates match a live-keyset model", async (backend) => {
+  for (let trial = 0; trial < 16; trial += 1) {
+    const rand = seededRandom(104_729 * (trial + 1));
+    const f = await fixture(backend, ["a", "b"]);
+    const order = trial % 2 === 0 ? "asc" : "desc";
+    const direction = order === "asc" ? 1 : -1;
+    const state = new Map<string, { label: string; id: string; minute: number }>();
+    const put = async (label: string, id: string, minute: number) => {
+      state.set(`${f.instance(label)}/${id}`, { label, id, minute });
+      await f.ingest(f.instance(label), EVENTS, { id, occurred_at: iso(minute) });
+    };
+    for (const label of ["a", "b"]) {
+      for (let i = 0; i < 4; i += 1) {
+        await put(label, `${label}${i}`, i * 10 + (label === "b" ? 5 : 0));
+      }
+    }
+    const key = (row: { label: string; id: string; minute: number }) => [
+      iso(row.minute),
+      row.id,
+      f.instance(row.label),
+    ];
+    const compare = (left: string[], right: string[]) => {
+      for (let i = 0; i < left.length; i += 1) {
+        if (left[i] !== right[i]) {
+          return ((left[i] as string) < (right[i] as string) ? -1 : 1) * direction;
+        }
+      }
+      return 0;
+    };
+    let at: string[] | null = null;
+    let pageIndex = 0;
+    await traverse(
+      async (params) => {
+        const eligible = [...state.values()]
+          .filter((row) => !at || compare(key(row), at) > 0)
+          .sort((a, b) => compare(key(a), key(b)));
+        const page = await fanIn(f, f.bindings, EVENTS, f.grant(EVENTS), params);
+        assert.deepEqual(
+          page.data.map((r) => `${r.connection_id}/${r.id}`),
+          eligible.slice(0, 1).map((r) => `${f.instance(r.label)}/${r.id}`),
+          `trial=${trial} page=${pageIndex} order=${order}`
+        );
+        const [record] = page.data;
+        if (record) {
+          at = [String((record.data as Json).occurred_at), String(record.id), String(record.connection_id)];
+        }
+        pageIndex += 1;
+        return page;
+      },
+      { limit: 1, order },
+      {
+        between: async (index) => {
+          if (index >= 5) {
+            return;
+          }
+          for (let i = 0; i < 3; i += 1) {
+            const row = [...state.values()][Math.floor(rand() * state.size)];
+            assert.ok(row);
+            await put(row.label, row.id, Math.floor(rand() * 60) - 10);
+          }
+        },
+      }
+    );
+  }
+});
+
+// biome-ignore-end lint/performance/noAwaitInLoops: stateful pagination scenarios.
+
+// biome-ignore-start lint/performance/noAwaitInLoops: seed order and continuation are part of the regression.
+fanInCase("review P3 omitted data primary keys use the full typed envelope key", async (backend) => {
+  if (backend.name !== "sqlite") {
+    return;
+  }
+  for (const { stream, singleArray } of [
+    { stream: ITEMS, singleArray: false },
+    { stream: ITEMS, singleArray: true },
+    { stream: PAIRS, singleArray: false },
+  ]) {
+    const f = await fixture(backend, ["a", "b"]);
+    const keyFor = (n: number) => {
+      if (stream === PAIRS) {
+        return ["x", n];
+      }
+      return singleArray ? [String(n)] : String(n);
+    };
+    for (const label of ["a", "b"]) {
+      for (const n of [10, 2, 3]) {
+        // Omitted data fields are accepted by assertPrimaryKeyIdentity; the
+        // envelope key remains the record's complete identity.
+        const data: Json = { c: iso(1) };
+        if (n === 3) {
+          data.n = n;
+          if (stream === PAIRS) {
+            data.tenant = "x";
+          }
+        }
+        await ingestRecord({ connector_id: f.connectorId, connector_instance_id: f.instance(label) }, {
+          data,
+          emitted_at: iso(1),
+          key: keyFor(n),
+          stream,
+        } as never);
+      }
+    }
+    for (const order of ["asc", "desc"] as const) {
+      const expected = (order === "asc" ? [2, 3, 10] : [10, 3, 2]).map((n) => {
+        const key = keyFor(n);
+        return Array.isArray(key) ? JSON.stringify(key) : key;
+      });
+      const local = await traverse((p) => single(f, f.instance("a"), stream, p), { limit: 1, order });
+      assert.deepEqual(ids(local), expected, `${stream} array=${singleArray} ${order}: single-binding typed fallback`);
+      const pages = await traverse((p) => fanIn(f, f.bindings, stream, f.grant(stream), p), { limit: 1, order });
+      assert.deepEqual(
+        ids(pages),
+        expected.flatMap((id) => [id, id]),
+        `${stream} ${order}: fan-in typed fallback`
+      );
+    }
+  }
+});
+// biome-ignore-end lint/performance/noAwaitInLoops: ordered regression.
+
 // ─── Review findings on the first revision (dot review of #454) ─────────────
 
 fanInCase("review P1-1 a write behind the cursor never hides a later record of another connection", async (backend) => {
@@ -842,7 +1134,7 @@ function seededRandom(seed: number): () => number {
   };
 }
 
-fanInCase("review-2 property: records present at the start are emitted exactly once, in order, under concurrent writes", async (backend) => {
+fanInCase("review-2 property: unchanged initial rows arrive once under inserts of new IDs", async (backend) => {
   // A trial is cheap on SQLite; PostgreSQL pays a round trip per query.
   const trials = backend.name === "sqlite" ? 80 : 16;
   for (let trial = 0; trial < trials; trial += 1) {
@@ -903,7 +1195,9 @@ fanInCase("review-2 property: records present at the start are emitted exactly o
           // Aim at a connection that has emitted nothing yet when there is one:
           // its checkpoint is below the burst, so the rows land in its buffer.
           const unread = labels.filter((label) => !emittedBy.has(f.instance(label)));
-          const target = unread.length ? (unread[pick(unread.length)] as string) : (labels[pick(labels.length)] as string);
+          const target = unread.length
+            ? (unread[pick(unread.length)] as string)
+            : (labels[pick(labels.length)] as string);
           for (let i = 0; i < burst; i += 1) {
             const label = rand() < 0.8 ? target : (labels[pick(labels.length)] as string);
             // Behind the cursor: before (asc) or after (desc) every row emitted so far.
@@ -931,7 +1225,11 @@ fanInCase("review-2 property: records present at the start are emitted exactly o
     for (const identity of initial) {
       assert.ok(emitted.includes(identity), `${context}: ${identity} present at the start was never emitted`);
     }
-    const keys = flat.map((record) => [String((record.data as Json).occurred_at), String(record.id), String(record.connection_id)]);
+    const keys = flat.map((record) => [
+      String((record.data as Json).occurred_at),
+      String(record.id),
+      String(record.connection_id),
+    ]);
     for (let i = 1; i < keys.length; i += 1) {
       const previous = keys[i - 1] as string[];
       const current = keys[i] as string[];
@@ -941,7 +1239,9 @@ fanInCase("review-2 property: records present at the start are emitted exactly o
 
     // The same writes during a change session: every change present when the
     // session starts arrives once; nothing written afterwards joins it.
-    const atStart = new Set(identities(await traverse((p) => fanIn(f, f.bindings, EVENTS, f.grant(EVENTS), p), { limit: 100 })));
+    const atStart = new Set(
+      identities(await traverse((p) => fanIn(f, f.bindings, EVENTS, f.grant(EVENTS), p), { limit: 100 }))
+    );
     const session = await traverse(
       (p) => fanIn(f, f.bindings, EVENTS, f.grant(EVENTS), p),
       { changes_since: "beginning", limit, order },
