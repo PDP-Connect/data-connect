@@ -61,6 +61,7 @@ interface Backend {
 const EVENTS = "events";
 const NOTES = "notes";
 const COUNTERS = "counters";
+const READINGS = "readings";
 const ITEMS = "items";
 
 function manifestFor(connectorId: string) {
@@ -122,6 +123,18 @@ function manifestFor(connectorId: string) {
         semantics: "mutable_state",
       },
       {
+        cursor_field: "v",
+        name: READINGS,
+        primary_key: ["id"],
+        schema: {
+          properties: { id: { type: "string" }, note: { type: "string" }, v: { type: "number" } },
+          required: ["id"],
+          type: "object",
+        },
+        selection: { fields: true, resources: true },
+        semantics: "mutable_state",
+      },
+      {
         cursor_field: "seq",
         name: COUNTERS,
         primary_key: ["id"],
@@ -143,6 +156,7 @@ const STREAM_FIELDS: Record<string, string[]> = {
   [EVENTS]: ["id", "occurred_at", "title", "secret"],
   [ITEMS]: ["n", "c", "v"],
   [NOTES]: ["id", "title", "updated_at"],
+  [READINGS]: ["id", "v", "note"],
 };
 
 let caseCounter = 0;
@@ -788,6 +802,32 @@ fanInCase("D5 expired history on one connection fails the whole session with cur
     "cursor_expired",
     "a lagging connection whose history is gone must not be skipped"
   );
+});
+
+fanInCase("D5 a record rewritten after the horizon keeps its sort key for numbers JavaScript prints differently", async (backend) => {
+  const f = await fixture(backend, ["a", "b"]);
+  const a = f.instance("a");
+  // String(v) at ingest is "0.00001", "2000000000000000" and "5". PostgreSQL's
+  // float8 text is "1e-05" and "2e+15" for the first two, so a key rebuilt
+  // from a record's history row must not use it.
+  const values: Record<string, number> = { r1: 0.00001, r2: 2e15, r3: 5 };
+  for (const [id, v] of Object.entries(values)) {
+    await f.ingest(a, READINGS, { id, note: "v1", v });
+  }
+  const grant = f.grant(READINGS);
+  for (const order of ["asc", "desc"] as const) {
+    const pages = await traverse((p) => fanIn(f, f.bindings, READINGS, grant, p), { changes_since: "beginning", limit: 1, order }, {
+      between: async (pageIndex) => {
+        if (pageIndex === 0) {
+          // Rewritten after the horizon: every row now reads from its history.
+          for (const [id, v] of Object.entries(values)) {
+            await f.ingest(a, READINGS, { id, note: `after-${order}`, v });
+          }
+        }
+      },
+    });
+    assert.deepEqual(ids(pages).sort(), ["r1", "r2", "r3"], `${order}: every change exactly once`);
+  }
 });
 
 // ─── Review findings on the first revision (dot review of #454) ─────────────
