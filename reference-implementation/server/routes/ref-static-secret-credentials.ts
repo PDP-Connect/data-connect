@@ -268,13 +268,11 @@ export interface MountRefStaticSecretCredentialsContext {
   // `ref-connection-resume.ts` uses) and then triggers the connector's normal
   // first-sync/incremental run — the SAME run path the "Run this connection"
   // next-step already points to, never a full-history replay and never a
-  // second connector_instance row. Not called when `autoResumeSatisfiedActions`
-  // already returned a run for this connection: the route reports that run
-  // instead (see `resumeArchiveConnectionAfterCapture`). Absent for narrow
-  // injected test callers that do not exercise the archive-reconnect journey;
-  // every other capture (draft/active, or a paused row of any other binding
-  // kind) is unaffected regardless of whether this is injected, because the
-  // route only calls it when the pre-capture status+binding check matches.
+  // second connector_instance row. Absent for narrow injected test callers
+  // that do not exercise the archive-reconnect journey; every other capture
+  // (draft/active, or a paused row of any other binding kind) is unaffected
+  // regardless of whether this is injected, because the route only calls it
+  // when the pre-capture status+binding check matches.
   resumeHistoricalArchiveConnectionAndRunFirstSync?: (input: {
     connectorId: string;
     connectorInstanceId: string;

@@ -6695,8 +6695,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
     resolveRegisteredConnectorManifest,
     // Fires ONLY when the capture route detects (before the credential
     // write) that the target was `paused` + `historical_archive` — the
-    // recovered-archive reconnect journey, and only when the auto-resume hook
-    // above did not already start a run for it. Resumes the SAME
+    // recovered-archive reconnect journey. Resumes the SAME
     // connector_instance row via `applyResume` (identical primitive the
     // owner-agent bearer and owner-session resume routes use — no duplicate
     // status-flip logic), then triggers the connector's normal
