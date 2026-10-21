@@ -231,18 +231,15 @@ test("bundled connector entries declare filesystem binding as required", () => {
   }
 });
 
-test("bundled connector defaults request coverage_diagnostics whenever the connector's manifest declares that stream, so a drained run is never coverage_unknown", async () => {
+test("legacy profiles that declare coverage_diagnostics request it by default", async () => {
   // Reads each connector's pinned Collection Profile (the manifest of the
   // release the collector installs), which the reference server keeps under
   // reference-implementation/server/local-collector-profiles/.
   //
-  // Local-device collectors push records from a device outbox and write no
-  // spine run, so the connection-health rollup can only project a non-`unknown`
-  // coverage axis from durable `coverage_diagnostics` records where that is the
-  // connector's coverage mechanism. If the published default stream set omits
-  // that stream, every `pdpp-local-collector run` emits zero coverage evidence
-  // and the dashboard is stuck at `coverage_unknown` even after a healthy
-  // drain. See openspec/changes/derive-local-collector-coverage-from-diagnostics.
+  // Older profiles used `coverage_diagnostics` records. When a profile still
+  // declares that stream, its default set must request it. Typed terminal
+  // coverage is checked separately below; this legacy stream alone proves
+  // no current coverage verdict.
   //
   // Not every connector uses this mechanism: iMessage declares a per-stream
   // `coverage_strategy` (snapshot_import_receipt) in its manifest instead, and
@@ -471,6 +468,7 @@ test("local collector doctor flags missing db, expired leases, and dead letters"
       expired_leases: "warn",
       outbox_db: "ok",
       outbox_failures: "fail",
+      terminal_coverage: "unknown",
     });
     // Dead letters dominate the lifecycle state even though no coverage
     // diagnostic was observed: a lane that needs recovery is not first
@@ -2532,9 +2530,7 @@ test("inspectLocalOutboxStatus reads connection-scoped counts from the scoped de
   assert.equal(bOnly.outbox.counts.total, 1);
 });
 
-// --- Lifecycle state axis (Target 2/4): status/doctor must distinguish
-// healthy_idle, draining, retryable_backlog, dead_letter, stale_lease, and
-// coverage_missing from the durable outbox alone. ---
+// --- Lifecycle state axis: queue health and acknowledged terminal coverage. ---
 
 function statusFor(path, sourceInstanceId = "src-1") {
   return inspectLocalOutboxStatus(
@@ -2574,12 +2570,166 @@ function drainRow(outbox, id, sourceInstanceId = "src-1") {
   outbox.acknowledge({ holder: "drainer", id: claim.id, leaseEpoch: claim.lease_epoch });
 }
 
-test("lifecycle_state is healthy_idle on an empty outbox (nothing collected, no coverage to miss)", async () => {
+function acknowledgeTerminalCoverage(outbox, { id, sourceInstanceId = "src-1", stores, scoped = true, version = 2 }) {
+  outbox.enqueue({
+    id,
+    kind: "terminal_run_commit",
+    payload: {
+      collection_boundary: "unscoped",
+      commit_id: id,
+      connector_id: "claude_code",
+      connector_instance_id: "connector-1",
+      device_id: "device-1",
+      run_id: id,
+      source_instance_id: sourceInstanceId,
+      state_delta: {},
+      terminal_facts: version === 2
+        ? [{ scoped, stores, stream: "sessions" }]
+        : [{ coverage_statuses: ["collected"], stream: "sessions" }],
+      version,
+    },
+    sourceInstanceId,
+  });
+  drainRow(outbox, id, sourceInstanceId);
+}
+
+test("acknowledged v2 coverage stays covered after sent rows are pruned", async () => {
+  const path = await tempOutboxPath();
+  const outbox = new LocalDeviceOutbox({ path });
+  try {
+    acknowledgeTerminalCoverage(outbox, {
+      id: "terminal-covered",
+      stores: [{ store: "local_files", status: "collected" }],
+    });
+    outbox.pruneSent({ dryRun: false, keepCount: 0, sourceInstanceId: "src-1" });
+  } finally {
+    outbox.close();
+  }
+  const status = statusFor(path);
+  assert.equal(status.outbox.counts.total, 0);
+  assert.equal(status.terminal_coverage.verdict, "covered");
+  assert.equal(status.terminal_coverage.collection_boundary, "unscoped");
+  assert.equal(status.lifecycle_state, "covered");
+  assert.equal(buildLocalOutboxDoctor(status).checks.terminal_coverage, "ok");
+  const matchingDoctor = buildLocalOutboxDoctor(status, null, {
+    base_url: "https://pdpp.example.com/",
+    check: "device_source_state",
+    scope: "unscoped",
+    status: "ok",
+  });
+  assert.equal(matchingDoctor.lifecycle_state, "covered");
+  assert.equal(matchingDoctor.scope.active, "unscoped");
+  const staleDoctor = buildLocalOutboxDoctor(status, null, {
+    base_url: "https://pdpp.example.com/",
+    check: "device_source_state",
+    scope: "new-owner-scope",
+    status: "ok",
+  });
+  assert.equal(staleDoctor.lifecycle_state, "no_evidence");
+  assert.equal(staleDoctor.terminal_coverage.verdict, "no_evidence");
+  assert.equal(staleDoctor.checks.terminal_coverage, "warn");
+  assert.equal(staleDoctor.status, "warning");
+});
+
+test("a later partial terminal receipt replaces a previously covered verdict", async () => {
+  const path = await tempOutboxPath();
+  const outbox = new LocalDeviceOutbox({ path });
+  try {
+    acknowledgeTerminalCoverage(outbox, {
+      id: "terminal-first",
+      stores: [{ store: "local_files", status: "collected" }],
+    });
+    acknowledgeTerminalCoverage(outbox, {
+      id: "terminal-second",
+      stores: [{ store: "local_files", status: "partial" }],
+    });
+  } finally {
+    outbox.close();
+  }
+  const status = statusFor(path);
+  assert.equal(status.terminal_coverage.verdict, "incomplete");
+  assert.equal(status.lifecycle_state, "coverage_incomplete");
+});
+
+test("a later v1 terminal ACK clears prior v2 coverage proof", async () => {
+  const path = await tempOutboxPath();
+  const outbox = new LocalDeviceOutbox({ path });
+  try {
+    acknowledgeTerminalCoverage(outbox, {
+      id: "terminal-v2",
+      stores: [{ store: "local_files", status: "collected" }],
+    });
+    acknowledgeTerminalCoverage(outbox, {
+      id: "terminal-v1",
+      stores: [{ store: "local_files", status: "collected" }],
+      version: 1,
+    });
+  } finally {
+    outbox.close();
+  }
+  const status = statusFor(path);
+  assert.equal(status.terminal_coverage.verdict, "no_evidence");
+  assert.equal(status.lifecycle_state, "no_evidence");
+});
+
+test("partial, failed, unscoped, and v1 terminal commits do not prove coverage", async () => {
+  for (const [statusValue, scoped, version, expected] of [
+    ["partial", true, 2, "incomplete"],
+    ["failed", true, 2, "incomplete"],
+    ["unavailable", true, 2, "incomplete"],
+    ["collected", false, 2, "incomplete"],
+    ["collected", true, 1, "no_evidence"],
+  ]) {
+    const path = await tempOutboxPath();
+    const outbox = new LocalDeviceOutbox({ path });
+    try {
+      acknowledgeTerminalCoverage(outbox, {
+        id: `terminal-${statusValue}-${scoped}-${version}`,
+        stores: [{ store: "local_files", status: statusValue }],
+        scoped,
+        version,
+      });
+      outbox.pruneSent({ dryRun: false, keepCount: 0, sourceInstanceId: "src-1" });
+    } finally {
+      outbox.close();
+    }
+    const observed = statusFor(path);
+    assert.equal(observed.terminal_coverage.verdict, expected);
+    assert.notEqual(observed.lifecycle_state, "covered");
+    assert.equal(buildLocalOutboxDoctor(observed).checks.terminal_coverage, expected === "no_evidence" ? "unknown" : "warn");
+  }
+});
+
+test("a malformed persisted terminal receipt stays unknown without crashing status", async () => {
+  const path = await tempOutboxPath();
+  const outbox = new LocalDeviceOutbox({ path });
+  try {
+    acknowledgeTerminalCoverage(outbox, {
+      id: "terminal-corrupt",
+      stores: [{ store: "local_files", status: "collected" }],
+    });
+  } finally {
+    outbox.close();
+  }
+  const db = new DatabaseSync(path);
+  try {
+    db.prepare("UPDATE local_device_terminal_coverage_receipts SET terminal_facts_json = ? WHERE source_instance_id = ?")
+      .run("{malformed", "src-1");
+  } finally {
+    db.close();
+  }
+  const status = statusFor(path);
+  assert.equal(status.terminal_coverage.verdict, "no_evidence");
+  assert.equal(status.lifecycle_state, "no_evidence");
+});
+
+test("lifecycle_state is no_evidence on an empty scoped outbox", async () => {
   const path = await tempOutboxPath();
   const outbox = new LocalDeviceOutbox({ path });
   outbox.close();
   const status = statusFor(path);
-  assert.equal(status.lifecycle_state, "healthy_idle");
+  assert.equal(status.lifecycle_state, "no_evidence");
+  assert.equal(status.terminal_coverage.verdict, "no_evidence");
   assert.deepEqual(status.coverage, { observed: false, record_batches: 0 });
   assert.equal(buildLocalOutboxDoctor(status).checks.coverage_diagnostics, "ok");
 });
@@ -2654,7 +2804,7 @@ test("lifecycle_state is stale_lease when a lease is past expiry", async () => {
   assert.ok(doctor.remediation.some((line) => /past expiry/.test(line)));
 });
 
-test("lifecycle_state is coverage_missing after a clean drain that never carried a coverage record", async () => {
+test("lifecycle_state is no_evidence after a clean drain without a typed terminal verdict", async () => {
   const path = await tempOutboxPath();
   const outbox = new LocalDeviceOutbox({ path });
   try {
@@ -2669,36 +2819,16 @@ test("lifecycle_state is coverage_missing after a clean drain that never carried
   assert.equal(status.outbox.counts.leased, 0);
   assert.equal(status.coverage.observed, false);
   assert.ok(status.coverage.record_batches >= 1);
-  assert.equal(status.lifecycle_state, "coverage_missing");
+  assert.equal(status.lifecycle_state, "no_evidence");
+  assert.equal(status.terminal_coverage.verdict, "no_evidence");
 
   const doctor = buildLocalOutboxDoctor(status);
   assert.equal(doctor.checks.coverage_diagnostics, "warn");
   assert.equal(doctor.status, "warning");
-  // biome-ignore lint/performance/useTopLevelRegex: inline assertion literal scoped to this test case; hoisting would separate the pattern from the single call site it documents.
-  assert.ok(doctor.remediation.some((line) => /coverage_unknown/.test(line)));
-  // biome-ignore lint/performance/useTopLevelRegex: inline assertion literal scoped to this test case; hoisting would separate the pattern from the single call site it documents.
-  assert.ok(doctor.remediation.some((line) => /default stream set/.test(line)));
-  // The hint must name the npx -y path so an operator with a stale globally-installed
-  // binary (which may predate coverage_diagnostics in bundled defaults) gets the right
-  // recovery: fetch a current published build, not just re-run with the existing install.
-  assert.ok(
-    // biome-ignore lint/performance/useTopLevelRegex: inline assertion literal scoped to this test case; hoisting would separate the pattern from the single call site it documents.
-    doctor.remediation.some((line) => /npx -y @pdpp\/local-collector/.test(line)),
-    "coverage_missing remediation must name the npx -y upgrade path"
-  );
-  // …but it must not promise that the published build is current. When the
-  // coverage fix only exists on the repo build and not yet published, the npx
-  // path alone would not close the gap, so the hint routes verification through
-  // the release owner's dist-tag check instead of asserting the publish is current.
-  // biome-ignore lint/performance/useTopLevelRegex: inline assertion literal scoped to this test case; hoisting would separate the pattern from the single call site it documents.
-  const coverageHint = doctor.remediation.find((line) => /coverage_unknown/.test(line));
-  // biome-ignore lint/performance/useTopLevelRegex: inline assertion literal scoped to this test case; hoisting would separate the pattern from the single call site it documents.
-  assert.match(coverageHint, /can still lag the repo build/);
-  // biome-ignore lint/performance/useTopLevelRegex: inline assertion literal scoped to this test case; hoisting would separate the pattern from the single call site it documents.
-  assert.match(coverageHint, /release:dist-tag-check/);
+  assert.ok(doctor.remediation.some((line) => /Coverage remains unknown/.test(line)));
 });
 
-test("lifecycle_state is healthy_idle once a drained lane has carried a coverage_diagnostics record", async () => {
+test("legacy coverage_diagnostics alone does not prove typed terminal coverage", async () => {
   const path = await tempOutboxPath();
   const outbox = new LocalDeviceOutbox({ path });
   try {
@@ -2711,7 +2841,8 @@ test("lifecycle_state is healthy_idle once a drained lane has carried a coverage
   }
   const status = statusFor(path);
   assert.equal(status.coverage.observed, true);
-  assert.equal(status.lifecycle_state, "healthy_idle");
+  assert.equal(status.lifecycle_state, "no_evidence");
+  assert.equal(status.terminal_coverage.verdict, "no_evidence");
   assert.equal(buildLocalOutboxDoctor(status).checks.coverage_diagnostics, "ok");
 });
 
@@ -2784,10 +2915,10 @@ test("status/doctor stay bounded and report observed:null on a giant legacy (pre
     queuePath: path,
     sourceInstanceId: "src-legacy",
   });
-  // Unknown coverage suppresses the coverage_missing verdict (never guess from
-  // a partial scan); the lane is fully drained otherwise, so it is healthy_idle.
+  // The bounded legacy scan cannot supply typed terminal proof; a fully
+  // drained lane still reports no evidence.
   assert.equal(status.coverage.observed, null);
-  assert.equal(status.lifecycle_state, "healthy_idle");
+  assert.equal(status.lifecycle_state, "no_evidence");
 
   const doctor = buildLocalOutboxDoctor(status);
   assert.equal(doctor.checks.coverage_diagnostics, "ok");

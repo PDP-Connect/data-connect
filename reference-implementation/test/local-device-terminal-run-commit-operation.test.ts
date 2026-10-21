@@ -5,9 +5,12 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
 import { canonicalTerminalRunCommitJson } from "@pdpp/reference-contract/common";
-import { handleLocalDeviceTerminalRunCommit } from "../operations/local-device-terminal-collection.ts";
+import { canonicalTerminalRunCommitEnvelope, hashCanonicalJson } from "@pdpp/collector-runtime/local-device-envelope";
+import { handleLocalDeviceTerminalRunCommit, normalizeTerminalCoverageFacts } from "../operations/local-device-terminal-collection.ts";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
+import { deriveStreamCoverageCondition } from "../server/connector-coverage-policy.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
+import { readRuntimeCollectionFact } from "../server/runtime-collection-facts.ts";
 import {
   commitTerminalRun as commitTerminalRunToStore,
   type ResolvedTerminalRunCommit,
@@ -48,6 +51,94 @@ function validBody(overrides: Record<string, unknown> = {}) {
     ...overrides,
   };
 }
+
+test("version 2 terminal coverage validates named stores against the manifest", async () => {
+  const capture = responseCapture();
+  let committed: ResolvedTerminalRunCommit | null = null;
+  const sentBody = validBody({
+    state_delta: {},
+    terminal_facts: [{
+      stream: "messages", scoped: true,
+      stores: [{ store: "messages", status: "collected" }, { store: "history", status: "partial" }],
+    }],
+    version: 2,
+  });
+  await handleLocalDeviceTerminalRunCommit({
+    ctx: {
+      canonicalConnectorKey: () => "codex",
+      getConnectorManifest: () => Promise.resolve({
+        streams: [{ name: "messages", coverage_stores: ["messages", "history"] }],
+      }),
+      commitTerminalRun: (input) => {
+        committed = input;
+        return Promise.resolve({
+          replayed: false,
+          response: {
+            commit_id: input.commitId,
+            envelope_hash: input.envelopeHash,
+            object: "device_terminal_run_commit",
+            run_id: input.runId,
+            terminal_event_id: "evt-v2",
+          },
+        });
+      },
+      emitSpineEvent: () => Promise.resolve(),
+      handleError: (_res, error) => { throw error; },
+      pdppError: (_res, status) => { capture.response.status(status); },
+    },
+    req: {
+      body: sentBody,
+      deviceExporter: { deviceId: "dev-1" },
+      params: { deviceId: "dev-1", sourceInstanceId: "src-1" },
+    },
+    res: capture.response,
+    resolveAuthorizedSource: () => Promise.resolve({
+      connectorInstance: { connectorInstanceId: "cin-1" },
+      sourceInstance: { connectorId: "codex" },
+    }),
+  });
+  assert.equal(capture.snapshot().status, 201);
+  assert.ok(committed);
+  assert.deepEqual((committed as ResolvedTerminalRunCommit).normalizedFacts[0]?.coverage_statuses, ["collected", "partial"]);
+  assert.equal(
+    (committed as ResolvedTerminalRunCommit).envelopeHash,
+    hashCanonicalJson(canonicalTerminalRunCommitEnvelope(sentBody as Parameters<typeof canonicalTerminalRunCommitEnvelope>[0]))
+  );
+});
+
+test("typed terminal coverage is green only for complete scoped store evidence", () => {
+  const manifest = { streams: [{ name: "messages", coverage_stores: ["messages", "history"] }] };
+  const fact = (statuses: readonly [string, string], scoped = true) => ({
+    stream: "messages", scoped,
+    stores: [{ store: "messages", status: statuses[0] }, { store: "history", status: statuses[1] }],
+  });
+  const axis = (raw: unknown) => {
+    const normalized = normalizeTerminalCoverageFacts([raw], manifest, "unscoped");
+    assert.ok(normalized);
+    const parsed = readRuntimeCollectionFact(normalized[0]);
+    assert.ok(parsed);
+    return deriveStreamCoverageCondition(parsed, { coverage_strategy: "checkpoint_window" });
+  };
+  assert.equal(axis(fact(["collected", "collected"])), "complete");
+  assert.notEqual(axis(fact(["collected", "partial"])), "complete");
+  assert.notEqual(axis(fact(["failed", "collected"])), "complete");
+  assert.notEqual(axis(fact(["collected", "collected"], false)), "complete");
+  assert.equal(normalizeTerminalCoverageFacts([], manifest, "unscoped"), null);
+  assert.equal(normalizeTerminalCoverageFacts([fact(["collected", "collected"])], { streams: [] }, "unscoped"), null);
+  assert.equal(normalizeTerminalCoverageFacts([fact(["collected", "bogus"])], manifest, "unscoped"), null);
+  assert.equal(normalizeTerminalCoverageFacts([{ ...fact(["collected", "collected"]), stores: [{ store: "messages", status: "collected" }] }], manifest, "unscoped"), null);
+  assert.equal(normalizeTerminalCoverageFacts([fact(["collected", "collected"], false)], manifest, "bounded"), null);
+});
+
+test("a selected-stream terminal commit is accepted without proving omitted manifest streams", () => {
+  const manifest = { streams: [
+    { name: "messages", coverage_stores: ["messages"] },
+    { name: "photos", coverage_stores: ["photos"] },
+  ] };
+  const selected = [{ stream: "messages", scoped: true, stores: [{ store: "messages", status: "collected" }] }];
+  assert.equal(normalizeTerminalCoverageFacts(selected, manifest, "unscoped"), null);
+  assert.equal(normalizeTerminalCoverageFacts(selected, manifest, "unscoped", { allowSubset: true })?.length, 1);
+});
 
 test("terminal run commit resolves authorization before receipt lookup and passes canonical binding", async () => {
   const capture = responseCapture();

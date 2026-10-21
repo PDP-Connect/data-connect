@@ -28,7 +28,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import { createInterface } from "node:readline";
-import type { EmittedMessage, StartMessage, StreamScope } from "@pdpp/connector-protocol";
+import type { EmittedMessage, RunCoverageVerdict, StartMessage, StreamScope } from "@pdpp/connector-protocol";
 import { validateHostBlobMessage, validateStreamEvidenceCounts } from "@pdpp/connector-protocol";
 import { buildAgentVersion } from "./collector-build-info.ts";
 import { type BlobUploadPayload, isBlobUploadPayload } from "./local-device-blob-capture.ts";
@@ -42,6 +42,7 @@ import {
   LocalDeviceReceiptValidationError,
   LocalDeviceRequestTimeoutError,
   type TerminalCollectionFact,
+  type TerminalCoverageFact,
   type TerminalRunCommitRequest,
 } from "./local-device-client.ts";
 import {
@@ -1032,7 +1033,7 @@ export async function runCollectorConnector(config: CollectorRunConfig): Promise
     });
     const scopedTimeRanges = resolveScopedStreamTimeRanges(declaredScope, config.connector.timeScopableStreams);
     const scopedRoots = resolveScopedSourceRoots(declaredScope);
-    const terminalFacts =
+    const legacyTerminalFacts =
       done?.status === "succeeded" &&
       !streamResult.scanBudgetExceeded &&
       streamResult.coverageByStore &&
@@ -1045,6 +1046,22 @@ export async function runCollectorConnector(config: CollectorRunConfig): Promise
             config.connector.sourceRootScopableStreams
           )
         : null;
+    const typedTerminalFacts =
+      done?.status === "succeeded" && !streamResult.scanBudgetExceeded && done.coverage
+        ? done.coverage.streams.map(
+            (stream): TerminalCoverageFact => ({
+              scoped: stream.scoped,
+              stores: stream.stores,
+              stream: stream.stream,
+            })
+          )
+        : null;
+    let terminalEvidence: TerminalEvidence | null = null;
+    if (typedTerminalFacts) {
+      terminalEvidence = { facts: typedTerminalFacts, version: 2 };
+    } else if (legacyTerminalFacts) {
+      terminalEvidence = { facts: legacyTerminalFacts, version: 1 };
+    }
     const checkpointResult = await maybeCommitCheckpoint({
       afterRecordsSummary,
       bufferedState,
@@ -1053,11 +1070,14 @@ export async function runCollectorConnector(config: CollectorRunConfig): Promise
       holderId,
       outbox,
       policy,
-      terminalFacts,
+      terminalEvidence,
       terminalRunBoundary: collectorScopeFingerprint(declaredScope),
       terminalRunConnectorInstanceId: priorStateProjection.connectorInstanceId,
     });
 
+    const coverageCheckpointCommitted =
+      checkpointResult.flushedState !== null &&
+      (typedTerminalFacts !== null || Object.hasOwn(checkpointResult.flushedState, COVERAGE_DIAGNOSTICS_STREAM));
     await recoverResolvedLocalCollectorGaps({
       client,
       config,
@@ -1065,9 +1085,7 @@ export async function runCollectorConnector(config: CollectorRunConfig): Promise
       // coverage STATE commit. A scoped success or corrective heartbeat is
       // deliberately insufficient.
       deferRecoveredGapCleanup:
-        streamResult.scanBudgetExceeded ||
-        done?.status !== "succeeded" ||
-        !Object.hasOwn(checkpointResult.flushedState ?? {}, COVERAGE_DIAGNOSTICS_STREAM),
+        streamResult.scanBudgetExceeded || done?.status !== "succeeded" || !coverageCheckpointCommitted,
       outbox,
     });
 
@@ -1422,6 +1440,62 @@ function assertValidStreamEvidence(
   }
 }
 
+/** Parse the optional terminal claim before it can enter a durable outbox row. */
+export function validateRunCoverageVerdict(
+  value: unknown,
+  requestedStreams: readonly string[],
+  collectionScope: string
+): RunCoverageVerdict {
+  if (
+    !isRecord(value) ||
+    value.version !== 1 ||
+    value.collection_scope !== collectionScope ||
+    !Array.isArray(value.streams)
+  ) {
+    throw new Error("DONE coverage version or collection scope is invalid");
+  }
+  const requested = new Set(requestedStreams);
+  const seenStreams = new Set<string>();
+  const streams: RunCoverageVerdict["streams"][number][] = [];
+  for (const rawStream of value.streams) {
+    if (
+      !isRecord(rawStream) ||
+      typeof rawStream.stream !== "string" ||
+      !requested.has(rawStream.stream) ||
+      seenStreams.has(rawStream.stream) ||
+      typeof rawStream.scoped !== "boolean" ||
+      !Array.isArray(rawStream.stores) ||
+      rawStream.stores.length === 0
+    ) {
+      throw new Error("DONE coverage stream set is invalid");
+    }
+    seenStreams.add(rawStream.stream);
+    const seenStores = new Set<string>();
+    const stores: RunCoverageVerdict["streams"][number]["stores"][number][] = [];
+    for (const rawStore of rawStream.stores) {
+      if (
+        !isRecord(rawStore) ||
+        typeof rawStore.store !== "string" ||
+        !rawStore.store.trim() ||
+        seenStores.has(rawStore.store) ||
+        !(["collected", "partial", "unavailable", "failed"] as readonly unknown[]).includes(rawStore.status)
+      ) {
+        throw new Error("DONE coverage store verdict is invalid");
+      }
+      seenStores.add(rawStore.store);
+      stores.push({
+        status: rawStore.status as RunCoverageVerdict["streams"][number]["stores"][number]["status"],
+        store: rawStore.store,
+      });
+    }
+    streams.push({ scoped: rawStream.scoped, stores, stream: rawStream.stream });
+  }
+  if (seenStreams.size !== requested.size) {
+    throw new Error("DONE coverage is missing a requested stream");
+  }
+  return { collection_scope: collectionScope, streams, version: 1 };
+}
+
 /** Local collector has no durable blob transport, even for a declared emitter. */
 function rejectUnsupportedHostBlob(
   message: Extract<EmittedMessage, { type: "BLOB" }>,
@@ -1643,6 +1717,7 @@ async function streamConnectorIntoOutbox(
     }
   };
 
+  // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: one ordered protocol handler keeps terminal and record state transitions together.
   const handleMessage = (message: EmittedMessage): void => {
     notifyOnMessage(message);
     if (done !== null) {
@@ -1674,7 +1749,21 @@ async function streamConnectorIntoOutbox(
       return;
     }
     if (message.type === "DONE") {
-      done = message;
+      if (message.coverage === undefined) {
+        done = message;
+        return;
+      }
+      if (message.status !== "succeeded") {
+        throw new Error(`${input.config.connector.connector_id} emitted coverage on failed DONE`);
+      }
+      done = {
+        ...message,
+        coverage: validateRunCoverageVerdict(
+          message.coverage,
+          input.config.connector.streams,
+          collectorScopeFingerprint(input.config.connector.scope)
+        ),
+      };
     }
   };
 
@@ -1746,7 +1835,8 @@ async function streamConnectorIntoOutbox(
         // ignore while the run still looks bounded.
         input.config.connector.enforcesSourceRoots === true
           ? resolveScopedSourceRoots(input.config.connector.scope)
-          : []
+          : [],
+        collectorScopeFingerprint(input.config.connector.scope)
       )
     )}\n`
   );
@@ -1957,6 +2047,10 @@ function recordConnectorChildFailureGap(input: {
   });
 }
 
+type TerminalEvidence =
+  | { facts: readonly TerminalCollectionFact[]; version: 1 }
+  | { facts: readonly TerminalCoverageFact[]; version: 2 };
+
 async function maybeCommitCheckpoint(input: {
   afterRecordsSummary: LocalDeviceOutboxSummary;
   bufferedState: Readonly<Record<string, unknown>>;
@@ -1968,19 +2062,19 @@ async function maybeCommitCheckpoint(input: {
   holderId: string;
   outbox: LocalDeviceOutbox;
   policy: CollectorOutboxPolicy;
-  terminalFacts: readonly TerminalCollectionFact[] | null;
+  terminalEvidence: TerminalEvidence | null;
   terminalRunBoundary: string;
   terminalRunConnectorInstanceId: string;
 }): Promise<{
   flushedState: Readonly<Record<string, unknown>> | null;
   statePutFailed: boolean;
 }> {
-  if (Object.keys(input.bufferedState).length === 0 && !input.terminalFacts) {
+  if (Object.keys(input.bufferedState).length === 0 && !input.terminalEvidence) {
     return { flushedState: null, statePutFailed: false };
   }
 
   const runId = input.config.runId ?? randomUUID();
-  const terminalCommitIdentity = input.terminalFacts
+  const terminalCommitIdentity = input.terminalEvidence
     ? {
         collection_boundary: input.terminalRunBoundary,
         connector_id: input.config.connector.connector_id,
@@ -1989,8 +2083,9 @@ async function maybeCommitCheckpoint(input: {
         run_id: runId,
         source_instance_id: input.config.sourceInstanceId,
         state_delta: input.bufferedState,
-        terminal_facts: input.terminalFacts,
-        version: 1 as const,
+        ...(input.terminalEvidence.version === 1
+          ? { terminal_facts: input.terminalEvidence.facts, version: 1 as const }
+          : { terminal_facts: input.terminalEvidence.facts, version: 2 as const }),
       }
     : null;
   const commitId = terminalCommitIdentity ? `terminal-commit:${hashCanonicalJson(terminalCommitIdentity)}` : null;
@@ -2225,9 +2320,11 @@ export function buildCollectorStartMessage(
   priorState?: Readonly<Record<string, unknown>> | null,
   resources: Readonly<Record<string, readonly string[]>> = {},
   timeRanges: CollectorStreamTimeRanges = {},
-  sourceRoots: readonly string[] = []
+  sourceRoots: readonly string[] = [],
+  collectionScope?: string
 ): StartMessage {
   const start: StartMessage = {
+    ...(collectionScope ? { collection_scope: collectionScope } : {}),
     scope: {
       streams: streams.map((name): StreamScope => {
         const streamResources = resources[name]?.filter((value) => typeof value === "string" && value.length > 0);
@@ -3117,7 +3214,7 @@ function assertTerminalRunCommitPayload(payload: unknown, id: string): TerminalR
     throw new OutboxPayloadShapeError(`terminal_run_commit payload is not an object: ${id}`);
   }
   if (
-    payload.version !== 1 ||
+    (payload.version !== 1 && payload.version !== 2) ||
     typeof payload.commit_id !== "string" ||
     typeof payload.run_id !== "string" ||
     typeof payload.device_id !== "string" ||
@@ -3128,11 +3225,11 @@ function assertTerminalRunCommitPayload(payload: unknown, id: string): TerminalR
     !isRecord(payload.state_delta) ||
     !Array.isArray(payload.terminal_facts) ||
     payload.terminal_facts.length === 0 ||
-    !payload.terminal_facts.every(isTerminalCollectionFact)
+    !payload.terminal_facts.every(payload.version === 1 ? isTerminalCollectionFact : isTerminalCoverageFact)
   ) {
     throw new OutboxPayloadShapeError(`terminal_run_commit payload missing or invalid fields: ${id}`);
   }
-  return {
+  const common = {
     collection_boundary: payload.collection_boundary,
     commit_id: payload.commit_id,
     connector_id: payload.connector_id,
@@ -3141,9 +3238,42 @@ function assertTerminalRunCommitPayload(payload: unknown, id: string): TerminalR
     run_id: payload.run_id,
     source_instance_id: payload.source_instance_id,
     state_delta: payload.state_delta,
+  };
+  if (payload.version === 2) {
+    const facts = payload.terminal_facts.filter(isTerminalCoverageFact);
+    if (new Set(facts.map((fact) => fact.stream)).size !== facts.length) {
+      throw new OutboxPayloadShapeError(`terminal_run_commit duplicate coverage streams: ${id}`);
+    }
+    return { ...common, terminal_facts: facts, version: 2 };
+  }
+  return {
+    ...common,
     terminal_facts: payload.terminal_facts.filter(isTerminalCollectionFact),
     version: 1,
   };
+}
+
+function isTerminalCoverageFact(value: unknown): value is TerminalCoverageFact {
+  if (
+    !isRecord(value) ||
+    typeof value.stream !== "string" ||
+    !value.stream ||
+    typeof value.scoped !== "boolean" ||
+    !Array.isArray(value.stores) ||
+    value.stores.length === 0
+  ) {
+    return false;
+  }
+  const { stores } = value;
+  return (
+    stores.every(
+      (store) =>
+        isRecord(store) &&
+        typeof store.store === "string" &&
+        Boolean(store.store) &&
+        (["collected", "partial", "unavailable", "failed"] as readonly unknown[]).includes(store.status)
+    ) && new Set(stores.map((store) => store.store)).size === stores.length
+  );
 }
 
 function isTerminalCollectionFact(value: unknown): value is TerminalCollectionFact {

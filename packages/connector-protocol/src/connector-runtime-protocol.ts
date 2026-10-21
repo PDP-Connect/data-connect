@@ -307,6 +307,8 @@ export interface StartMessage {
    * backward compatibility with connectors/tests that predate this field.
    */
   collection_mode?: "full_refresh" | "incremental";
+  /** Canonical boundary fingerprint that a terminal coverage verdict must echo. */
+  collection_scope?: string;
   detail_gaps?: readonly DetailGapStartEntry[];
   /**
    * The host advertises the protocol capabilities it implements. Absent means
@@ -769,6 +771,21 @@ export interface ProgressExtra {
  */
 export type SkipResultBoundaryClaim = "provider_history_boundary";
 
+/** A terminal claim about one named source store within a requested stream. */
+export type RunCoverageStatus = "collected" | "partial" | "unavailable" | "failed";
+
+export interface RunCoverageVerdict {
+  /** Fingerprint received in START; `unscoped` names a full pass. */
+  collection_scope: string;
+  streams: readonly {
+    /** True only when the requested boundary was enforced during enumeration. */
+    scoped: boolean;
+    stores: readonly { status: RunCoverageStatus; store: string }[];
+    stream: string;
+  }[];
+  version: 1;
+}
+
 export type EmittedMessage =
   | HostBlobMessage
   | {
@@ -892,6 +909,8 @@ export type EmittedMessage =
       type: "DONE";
       status: "succeeded" | "failed";
       records_emitted: number;
+      /** Optional terminal store verdict; absence carries no coverage proof. */
+      coverage?: RunCoverageVerdict;
       error?: {
         code?: string;
         message: string;

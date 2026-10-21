@@ -23,6 +23,7 @@ export interface ResolvedTerminalRunCommit {
   readonly runId: string;
   readonly sourceInstanceId: string;
   readonly stateDelta: Readonly<Record<string, unknown>>;
+  readonly version?: 1 | 2;
 }
 
 export interface TerminalRunCommitResponse {
@@ -95,7 +96,7 @@ function eventInputFor(
       collection_facts: {
         collection_scope: input.collectionBoundary,
         reference_only: true,
-        schema_version: 1,
+        schema_version: input.version ?? 1,
         streams: input.normalizedFacts,
       },
       connector_instance_id: input.connectorInstanceId,
@@ -110,7 +111,7 @@ function eventInputFor(
         commit_id: input.commitId,
         envelope_hash: input.envelopeHash,
         response,
-        version: 1,
+        version: input.version ?? 1,
       },
     },
     event_id: eventId,
@@ -142,7 +143,7 @@ function parseStoredResponse(dataJson: unknown, input: ResolvedTerminalRunCommit
   const bindings = asRecord(receipt?.bindings);
   const response = asRecord(receipt?.response);
   const exactReceiptFields = [
-    receipt?.version === 1,
+    receipt?.version === (input.version ?? 1),
     receipt?.commit_id === input.commitId,
     receipt?.envelope_hash === input.envelopeHash,
     bindings?.device_id === input.deviceId,

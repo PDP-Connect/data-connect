@@ -54,6 +54,8 @@ export type {
   RecordData,
   RetryableDetailGapMessage,
   RetryableDetailGapReason,
+  RunCoverageStatus,
+  RunCoverageVerdict,
   SkipResultBoundaryClaim,
   StartMessage,
   StreamEvidenceOutcomes,

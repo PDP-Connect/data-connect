@@ -173,8 +173,15 @@ export interface TerminalCollectionFact {
   stream: string;
 }
 
+/** Named stores are required for the server to check a signed inventory. */
+export interface TerminalCoverageFact {
+  scoped: boolean;
+  stores: readonly { store: string; status: "collected" | "partial" | "unavailable" | "failed" }[];
+  stream: string;
+}
+
 /** Durable terminal checkpoint and evidence envelope (local outbox schema v3+). */
-export interface TerminalRunCommitRequest {
+interface TerminalRunCommitBase {
   collection_boundary: string;
   commit_id: string;
   connector_id: string;
@@ -183,9 +190,13 @@ export interface TerminalRunCommitRequest {
   run_id: string;
   source_instance_id: string;
   state_delta: Record<string, unknown>;
-  terminal_facts: readonly TerminalCollectionFact[];
-  version: 1;
 }
+
+export type TerminalRunCommitRequest = TerminalRunCommitBase &
+  (
+    | { terminal_facts: readonly TerminalCollectionFact[]; version: 1 }
+    | { terminal_facts: readonly TerminalCoverageFact[]; version: 2 }
+  );
 
 export interface TerminalRunCommitResponse {
   commit_id: string;

@@ -19,6 +19,7 @@ import type { RuntimeContinuationFact } from "@pdpp/connector-protocol/connector
 import { allowUnboundedReadAcknowledged, iterateDynamicSqlAcknowledged, referenceQueries } from "../lib/db.ts";
 import { isNullish } from "../lib/nullish.ts";
 import type { SpineSummary } from "../lib/spine.ts";
+import { normalizeTerminalCoverageFacts } from "../operations/local-device-terminal-collection.ts";
 import type { RefApprovalDetail } from "../operations/ref-approval-detail/index.ts";
 import {
   buildLiveConsentApprovalDetail,
@@ -594,6 +595,12 @@ export interface ConnectorRunSummary {
    * `collection_report`; never final coverage truth.
    */
   readonly collection_facts: RuntimeCollectionFacts | null;
+  /** Authenticated v2 device terminal evidence, kept raw until manifest and current scope are checked on read. */
+  readonly local_terminal_coverage?: {
+    readonly eligibleLocalRun: boolean;
+    readonly collectionScope: unknown;
+    readonly streams: unknown;
+  } | null;
   readonly connector_error?: ConnectorRunErrorSummary | null;
   readonly event_count: number;
   readonly failure_reason: string | null;
@@ -1589,6 +1596,7 @@ function productRunHistoryToConnectorRunSummary(
       : null;
   return {
     collection_facts: readCollectionFactsFromTerminalData(facts),
+    local_terminal_coverage: readLocalTerminalCoverage(facts, history),
     connector_error: projectConnectorRunError(history.connectorError),
     event_count: 0,
     failure_reason: history.failureReason ?? history.error ?? browserSurfaceFailureReason,
@@ -1605,6 +1613,30 @@ function productRunHistoryToConnectorRunSummary(
     status,
     terminal_reason: history.terminalReason ?? null,
     yield_counts_present: yieldCounts.present,
+  };
+}
+
+function recordOrNull(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+}
+
+function readLocalTerminalCoverage(
+  facts: Record<string, unknown> | null,
+  history: ProductRunHistoryRecord
+): NonNullable<ConnectorRunSummary["local_terminal_coverage"]> | null {
+  const block = recordOrNull(facts?.collection_facts);
+  if (block?.schema_version !== 2) {
+    return null;
+  }
+  return {
+    eligibleLocalRun:
+      history.status === "succeeded" &&
+      history.schedulerManaged === false &&
+      typeof history.connectorInstanceId === "string" &&
+      typeof history.runId === "string" &&
+      block.reference_only === true,
+    collectionScope: block?.collection_scope,
+    streams: block?.streams,
   };
 }
 
@@ -4547,6 +4579,9 @@ function localCoverageConditionForStatus(status: unknown): CoverageAxis | null {
       return "unsupported";
     case "unavailable":
       return "unavailable";
+    case "partial":
+      return "partial";
+    case "failed":
     case "unaccounted":
       return "gaps";
     default:
@@ -4559,7 +4594,7 @@ function localCoverageConditionsByStream(
   manifestByStream: ReadonlyMap<string, ManifestStream>
 ): ReadonlyMap<string, CoverageAxis> {
   const conditions = new Map<string, CoverageAxis>();
-  if (localCoverage?.reliable !== true || localCoverage.axis !== "complete") {
+  if (localCoverage?.reliable !== true || (localCoverage.axis !== "complete" && localCoverage.source !== "terminal_verdict")) {
     return conditions;
   }
   const rows = localCoverage?.rows ?? [];
@@ -4598,6 +4633,8 @@ function localCoverageConditionSeverity(axis: CoverageAxis): number {
     case "unsupported":
       return 1;
     case "unavailable":
+      return 2;
+    case "partial":
       return 2;
     case "gaps":
       return 3;
@@ -4704,6 +4741,8 @@ interface LocalCoverageDiagnosticRow {
 
 interface LocalCoverageDiagnosticAxis {
   readonly axis: CoverageAxis;
+  /** v2 facts are an authenticated terminal receipt, rather than a diagnostics snapshot. */
+  readonly source?: "terminal_verdict";
   /**
    * Boundary this connection CURRENTLY declares, read off the same
    * connector-state projection this axis is already derived from — so binding
@@ -4934,6 +4973,71 @@ export function deriveLocalCoverageAxis(input: {
     reliable: true,
     rows,
     unaccountedStores: [],
+  };
+}
+
+/** Recheck committed v2 facts against the currently pinned manifest and scope. */
+function deriveLocalTerminalCoverageAxis(
+  run: ConnectorRunSummary | null,
+  manifest: ConnectorManifest,
+  legacyAxis: LocalCoverageDiagnosticAxis | null
+): LocalCoverageDiagnosticAxis | null {
+  const terminal = run?.local_terminal_coverage;
+  if (!terminal) {
+    return null;
+  }
+  const declaredScope = legacyAxis?.declaredCollectionScope;
+  const unknown: LocalCoverageDiagnosticAxis = {
+    axis: "unknown",
+    declaredCollectionScope: declaredScope ?? "unscoped",
+    evidenceAsOf: null,
+    measuredCollectionScope: null,
+    reliable: false,
+    rows: [],
+    source: "terminal_verdict",
+    unaccountedStores: [],
+  };
+  // A failed scope-state read cannot establish which boundary the connection
+  // currently asks the collector to cover.
+  if (!legacyAxis || typeof declaredScope !== "string" || !terminal.eligibleLocalRun || typeof terminal.collectionScope !== "string" ||
+    terminal.collectionScope !== declaredScope || !Array.isArray(terminal.streams)) {
+    return unknown;
+  }
+  const normalized = normalizeTerminalCoverageFacts(terminal.streams, manifest, terminal.collectionScope);
+  if (!normalized) {
+    return unknown;
+  }
+  const rows: LocalCoverageDiagnosticRow[] = [];
+  const unaccountedStores: string[] = [];
+  let axis: CoverageAxis = "complete";
+  for (const rawFact of normalized) {
+    const stream = rawFact.stream as string;
+    if (rawFact.scoped !== true) {
+      return unknown;
+    }
+    for (const rawStore of rawFact.stores as readonly { store: string; status: string }[]) {
+      rows.push({ collection_scope: terminal.collectionScope, status: rawStore.status, store: rawStore.store, stream });
+      if (rawStore.status !== "collected") {
+        unaccountedStores.push(rawStore.store);
+      }
+      const condition = localCoverageConditionForStatus(rawStore.status);
+      if (!condition) {
+        return unknown;
+      }
+      if (localCoverageConditionSeverity(condition) > localCoverageConditionSeverity(axis)) {
+        axis = condition;
+      }
+    }
+  }
+  return {
+    axis,
+    declaredCollectionScope: declaredScope,
+    evidenceAsOf: run?.last_at ?? null,
+    measuredCollectionScope: terminal.collectionScope,
+    reliable: true,
+    rows,
+    source: "terminal_verdict",
+    unaccountedStores: unaccountedStores.sort((left, right) => left.localeCompare(right)),
   };
 }
 
@@ -6955,6 +7059,9 @@ function synthesizeConnectorSummary(input: ConnectorSummarySynthesisInput): Conn
   const authoritativeLastSuccessfulRun = isOwnScopedRun(lastSuccessfulRun) ? lastSuccessfulRun : null;
   const fallbackSettledRun = latestSettledRun ?? fallbackLatestSettledRun(lastRun, lastSuccessfulRun);
   const authoritativeLatestSettledRun = isOwnScopedRun(fallbackSettledRun) ? fallbackSettledRun : null;
+  const effectiveLocalCoverage = localDeviceBacked
+    ? (deriveLocalTerminalCoverageAxis(fallbackSettledRun, manifest, localCoverage) ?? localCoverage)
+    : localCoverage;
   const authoritativeLatestStreamFacts = localDeviceBacked ? null : latestStreamFacts;
   const terminalSetupDisposition =
     instance.status === "draft" && authoritativeLastRun
@@ -7029,7 +7136,7 @@ function synthesizeConnectorSummary(input: ConnectorSummarySynthesisInput): Conn
     lastRun: authoritativeLastRun,
     lastSuccessfulRun: authoritativeLastSuccessfulRun,
     latestSettledRun: authoritativeLatestSettledRun,
-    localCoverage,
+    localCoverage: effectiveLocalCoverage,
     localDeviceBacked,
     manifestStreams: manifest.streams ?? [],
     nowIso,
@@ -7063,7 +7170,7 @@ function synthesizeConnectorSummary(input: ConnectorSummarySynthesisInput): Conn
     lastSuccessfulRun: authoritativeLastSuccessfulRun,
     latestSettledRun: authoritativeLatestSettledRun,
     latestStreamFacts: authoritativeLatestStreamFacts,
-    localCoverage,
+    localCoverage: effectiveLocalCoverage,
     localDeviceBacked,
     manifestStreams: manifest.streams ?? [],
     pendingDetailGaps: detailGaps.gaps,
