@@ -61,15 +61,20 @@ export type {
   ValidateRecord,
 } from "./connector-runtime-protocol.ts";
 export {
+  COLLECTION_PROFILE_VERSIONS,
   CONNECTOR_PROTOCOL_CAPABILITIES,
   CONNECTOR_PROTOCOL_VERSION,
+  collectionProfileDeclarationError,
+  DETAIL_COVERAGE_KEY_SETS_CAPABILITY,
   HOST_BLOB_CAPABILITY,
   HOST_BLOB_MAX_BYTES,
   isConnectorProtocolCapabilityArray,
+  OBSERVATION_CAPABILITY,
   PERMANENT_DETAIL_GAP_REASON,
   RETRYABLE_DETAIL_GAP_REASONS,
   recordKeysEqual,
   STREAM_EVIDENCE_CAPABILITY,
+  unsupportedRequiredProtocolCapabilities,
   validateHostBlobMessage,
   validateStreamEvidenceCounts,
 } from "./connector-runtime-protocol.ts";

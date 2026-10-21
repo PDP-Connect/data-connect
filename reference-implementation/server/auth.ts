@@ -5741,9 +5741,15 @@ function parseAndValidateConnectorManifestRow(row: DbRow, connectorId: unknown):
     }
     // Read-path validation: skip the reference cursor_field sort-compat check
     // so stale DB manifests (pre-guardrail) still flow through to the records
-    // module's in-memory fallback. Registration-time paths enforce the full
-    // check; see validateConnectorManifest.
-    validateConnectorManifest(manifest, "connector_invalid", { skipCursorFieldSortCheck: true });
+    // module's in-memory fallback. The Collection Profile version/capability
+    // check is skipped too: a stored manifest stays readable, and the runtime
+    // refuses an unknown or unsupported capability before spawn.
+    // Registration-time paths enforce the full check; see
+    // validateConnectorManifest.
+    validateConnectorManifest(manifest, "connector_invalid", {
+      skipCollectionProfileCheck: true,
+      skipCursorFieldSortCheck: true,
+    });
     return manifest;
   } catch (cause: unknown) {
     const err = invalidConnectorManifest(
@@ -8518,7 +8524,8 @@ const postgresOAuthCodeStore: OAuthCodeStore = {
          created_at = excluded.created_at,
          expires_at = excluded.expires_at,
          issued_at = NULL,
-         consumed_at = NULL`,
+         consumed_at = NULL
+       WHERE oauth_authorization_codes.status NOT IN ('issued', 'consumed')`,
       [id, deviceCode, clientId, redirectUri, state, codeChallenge, codeChallengeMethod, createdAt, expiresAt]
     ),
 };
@@ -10164,7 +10171,7 @@ export async function stageOAuthAuthorizationCodeRequest({
     state: state || null,
   };
 
-  await getOAuthCodeStore().upsertPending({
+  const updated = await getOAuthCodeStore().upsertPending({
     clientId: row.clientId,
     codeChallenge: row.codeChallenge,
     codeChallengeMethod: row.codeChallengeMethod,
@@ -10175,6 +10182,12 @@ export async function stageOAuthAuthorizationCodeRequest({
     redirectUri: row.redirectUri,
     state: row.state,
   });
+  if (!updated.changes) {
+    throw buildOAuthAuthorizationCodeError(
+      "invalid_request",
+      "OAuth authorization request was already issued or consumed and cannot be restaged"
+    );
+  }
 
   return { ...row, status: "pending" };
 }

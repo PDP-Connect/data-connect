@@ -43,6 +43,7 @@ export const POSTGRES_TEMPLATE_ELIGIBLE_FILES: readonly string[] = [
   "test/browser-surface-replacement-correction-artifact.test.ts",
   "test/browser-surface-replacement-ledger-store.test.ts",
   "test/checkpoint-dependency-profile-conformance-postgres.test.ts",
+  "test/checkpoint-withhold-store.test.ts",
   "test/client-connector-postgres-path.test.ts",
   "test/client-event-subscription-store-postgres.test.ts",
   "test/compact-record-history.test.ts",

@@ -892,6 +892,141 @@ test("startNekoSurfaceAllocatorServer ensures the dynamic surface network exists
   }
 });
 
+test("startup rejects a missing image before creating the network", async () => {
+  const docker = new FakeDocker();
+  docker.images.clear();
+  await assert.rejects(() => startNekoSurfaceAllocatorServer({ ...BASE_OPTIONS, docker, fetchImpl: readyFetch() }), {
+    code: "image_missing",
+    message: `n.eko container image is missing: ${BASE_OPTIONS.image}`,
+  });
+  assert.deepEqual(
+    docker.calls.map((call) => call.path),
+    [`/images/${encodeURIComponent(BASE_OPTIONS.image)}/json`]
+  );
+});
+
+for (const [name, seed] of [
+  [
+    "an exited container",
+    (docker: FakeDocker, id: string) => {
+      findContainer(docker, id).running = false;
+    },
+  ],
+  [
+    "an unhealthy container",
+    (docker: FakeDocker, id: string) => {
+      findContainer(docker, id).health = "unhealthy";
+    },
+  ],
+] as const) {
+  test(`a missing image leaves ${name} in place instead of removing it first`, async () => {
+    const docker = new FakeDocker();
+    const service = new NekoSurfaceAllocatorService({ ...BASE_OPTIONS, docker, fetchImpl: readyFetch() });
+    await service.ensureSurface({ connectorId: "chatgpt", profileKey: "profile_1", surfaceId: "surface_1" });
+    const containerId = onlyContainerId(docker);
+    seed(docker, containerId);
+    docker.images.clear();
+    docker.calls.length = 0;
+
+    await assert.rejects(
+      () => service.ensureSurface({ connectorId: "chatgpt", profileKey: "profile_1", surfaceId: "surface_1" }),
+      { code: "image_missing" }
+    );
+    assert.equal(docker.containers.has(containerId), true);
+    assert.equal(
+      docker.calls.some((call) => call.init.method === "DELETE" || call.path === "/containers/create"),
+      false
+    );
+  });
+}
+
+test("a missing image stops a new surface before it reclaims stopped containers' ports", async () => {
+  const docker = new FakeDocker();
+  const service = new NekoSurfaceAllocatorService({
+    ...BASE_OPTIONS,
+    docker,
+    fetchImpl: readyFetch(),
+    webrtcHostPortEnd: 59_000,
+    webrtcHostPortStart: 59_000,
+  });
+  await service.ensureSurface({ connectorId: "chatgpt", profileKey: "profile_1", surfaceId: "surface_1" });
+  await service.stopSurface({ reason: "idle_ttl", surfaceId: "surface_1" });
+  const stoppedId = onlyContainerId(docker);
+  docker.images.clear();
+  docker.calls.length = 0;
+
+  await assert.rejects(
+    () => service.ensureSurface({ connectorId: "reddit", profileKey: "profile_2", surfaceId: "surface_2" }),
+    { code: "image_missing" }
+  );
+  assert.equal(docker.containers.has(stoppedId), true);
+  assert.equal(
+    docker.calls.some((call) => call.init.method === "DELETE"),
+    false
+  );
+});
+
+test("readiness and surface creation report a missing image without Docker response details", async () => {
+  const docker = new FakeDocker();
+  const server = await startNekoSurfaceAllocatorServer({ ...BASE_OPTIONS, docker, fetchImpl: readyFetch() });
+  try {
+    const ready = await fetch(new URL("readyz", server.url));
+    assert.equal(ready.status, 200);
+    assert.deepEqual(await ready.json(), { ready: true });
+
+    docker.images.clear();
+    const notReady = await fetch(new URL("readyz", server.url));
+    assert.equal(notReady.status, 503);
+    const expected = {
+      code: "image_missing",
+      error: `n.eko container image is missing: ${BASE_OPTIONS.image}`,
+    };
+    assert.deepEqual(await notReady.json(), expected);
+
+    const create = await fetch(new URL("surfaces", server.url), {
+      body: JSON.stringify({ connector_id: "chatgpt", profile_key: "profile_1", surface_id: "surface_1" }),
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    });
+    assert.equal(create.status, 503);
+    assert.deepEqual(await create.json(), expected);
+    assert.equal(docker.containers.size, 0);
+
+    docker.images.add(BASE_OPTIONS.image);
+    const recovered = await fetch(new URL("readyz", server.url));
+    assert.equal(recovered.status, 200);
+    assert.deepEqual(await recovered.json(), { ready: true });
+  } finally {
+    await server.close();
+  }
+});
+
+test("image readiness preserves non-404 Docker failures", async () => {
+  const failure = new NekoSurfaceAllocatorServiceError("docker_request_failed", "Docker unavailable");
+  const service = new NekoSurfaceAllocatorService({
+    ...BASE_OPTIONS,
+    docker: { requestJson: () => Promise.reject(failure) },
+  });
+  await assert.rejects(
+    () => service.assertImageReady(),
+    (error) => error === failure
+  );
+});
+
+test("surface creation preserves a non-image Docker 404", async () => {
+  const docker = new FakeDocker();
+  const failure = new NekoSurfaceAllocatorServiceError(
+    "docker_http_error",
+    "Docker POST /containers/create returned HTTP 404: network not found"
+  );
+  docker.createError = failure;
+  const service = new NekoSurfaceAllocatorService({ ...BASE_OPTIONS, docker, fetchImpl: readyFetch() });
+  await assert.rejects(
+    () => service.ensureSurface({ connectorId: "chatgpt", profileKey: "profile_1", surfaceId: "surface_1" }),
+    (error) => error === failure
+  );
+});
+
 // This file previously also asserted several invariants directly against
 // pdpp-repo-root deployment config: `docker-compose.neko.yml` (allocator
 // command/stream template, network ownership, legacy-network migration) and
@@ -1482,6 +1617,8 @@ class FakeDocker implements DockerEngineTransport {
   calls: DockerCall[] = [];
   containers = new Map<string, FakeContainer>();
   networks = new Set<string>();
+  images = new Set<string>([BASE_OPTIONS.image]);
+  createError: NekoSurfaceAllocatorServiceError | undefined;
   nextId = 0;
   foreignInspectIds = new Set<string>();
   startFailurePorts = new Set<number | undefined>();
@@ -1500,6 +1637,15 @@ class FakeDocker implements DockerEngineTransport {
     // narrower DockerCreateContainerBody | DockerNetworkCall union the test
     // bodies assert against at each specific call site.
     const body: Record<string, unknown> = (init.body as Record<string, unknown> | undefined) ?? {};
+    if (path === `/images/${encodeURIComponent(BASE_OPTIONS.image)}/json` && (init.method ?? "GET") === "GET") {
+      if (!this.images.has(BASE_OPTIONS.image)) {
+        throw new NekoSurfaceAllocatorServiceError(
+          "docker_http_error",
+          `Docker GET ${path} returned HTTP 404: simulated private Docker detail`
+        );
+      }
+      return { Id: "image_1" };
+    }
     const networkInspectMatch = path.match(REGEXP_25);
     if (networkInspectMatch?.[1] !== undefined && (call.init.method ?? "GET") === "GET") {
       const name = decodeURIComponent(networkInspectMatch[1]);
@@ -1568,6 +1714,15 @@ class FakeDocker implements DockerEngineTransport {
         }));
     }
     if (path === "/containers/create") {
+      if (this.createError !== undefined) {
+        throw this.createError;
+      }
+      if (!this.images.has(String(body.Image))) {
+        throw new NekoSurfaceAllocatorServiceError(
+          "docker_http_error",
+          "Docker POST /containers/create returned HTTP 404: simulated private Docker detail"
+        );
+      }
       // biome-ignore lint/suspicious/noAssignInExpressions: Loop guard mutation is deliberately coupled to cursor progression.
       const id = `container_${(this.nextId += 1)}`;
       const createBody = body as {
