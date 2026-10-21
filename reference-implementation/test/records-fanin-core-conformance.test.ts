@@ -790,6 +790,29 @@ fanInCase("D5 expired history on one connection fails the whole session with cur
   );
 });
 
+fanInCase("D5 null and empty cursor values are one missing bucket ordered by primary key", async (backend) => {
+  if (backend.name !== "sqlite") {
+    return; // PostgreSQL stores '' as a present value; only SQLite folds it into the missing bucket.
+  }
+  const f = await fixture(backend, ["a", "b"]);
+  // `z` has a null cursor and `a` an empty one: both are missing, so the
+  // bucket orders them by primary key alone (a before z in ASC). A change
+  // session resumes inside the bucket by primary key, so its SQL order must
+  // not tell the two apart.
+  await f.ingest(f.instance("a"), NOTES, { id: "z", title: "x", updated_at: null });
+  await f.ingest(f.instance("a"), NOTES, { id: "a", title: "x", updated_at: "" });
+  const grant = f.grant(NOTES);
+  const expected = { asc: ["a", "z"], desc: ["z", "a"] };
+  for (const order of ["asc", "desc"] as const) {
+    const session = await traverse((p) => fanIn(f, f.bindings, NOTES, grant, p), {
+      changes_since: "beginning",
+      limit: 1,
+      order,
+    });
+    assert.deepEqual(ids(session), expected[order], `${order}: a change session must not skip the empty-cursor record`);
+  }
+});
+
 // ─── Review findings on the first revision (dot review of #454) ─────────────
 
 fanInCase("review P1-1 a write behind the cursor never hides a later record of another connection", async (backend) => {

@@ -5466,13 +5466,15 @@ function buildSqliteChangeCandidatesSql(
     }
   }
   binds.push(limit);
+  // Null and '' are one missing bucket: the seek above resumes inside it by
+  // (__pk, record_key) alone, so the ORDER BY must not rank __cv within it.
   const sql = `
     SELECT record_key, state_version, __cv, __pk FROM (
       SELECT u.*, CASE WHEN u.__cv IS NULL OR u.__cv = '' THEN 1 ELSE 0 END AS __missing
         FROM (${current} UNION ALL ${atHorizon}) AS u
     ) AS t
     WHERE 1 = 1 ${seek}
-    ORDER BY __missing ASC, __cv ${order}, __pk ${order}, record_key ${order}
+    ORDER BY __missing ASC, CASE WHEN __missing = 1 THEN NULL ELSE __cv END ${order}, __pk ${order}, record_key ${order}
     LIMIT ?`;
   return { binds, sql };
 }
