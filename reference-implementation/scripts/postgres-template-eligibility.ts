@@ -102,7 +102,6 @@ export const POSTGRES_TEMPLATE_ELIGIBLE_FILES: readonly string[] = [
   "test/legacy-upgrade-preservation-postgres.test.ts",
   "test/lexical-index-skip-unchanged-postgres.test.ts",
   "test/live-shadow-comparison.test.ts",
-  "test/local-coverage-state-parser-postgres.test.ts",
   "test/manual-upload-artifact-store-postgres.test.ts",
   "test/oauth-code-delivery-atomicity.test.ts",
   "test/owner-connection-delete-orphans.test.ts",
@@ -192,7 +191,6 @@ export const POSTGRES_TEMPLATE_ELIGIBLE_FILES: readonly string[] = [
   "test/sources-visible-identity-page-postgres.test.ts",
   "test/storage-mode-startup-boundary.test.ts",
   "test/stream-evidence-run-registry-store-postgres.test.ts",
-  "test/terminal-run-commit-collector-restart.test.ts",
   "test/terminal-run-commit-store-postgres.test.ts",
   "test/web-push-notifications.test.ts",
 ];

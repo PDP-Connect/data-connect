@@ -1317,6 +1317,12 @@ function attemptStreamFacts(rawStreams: unknown[]): Record<string, DeviceAttempt
   return streams;
 }
 
+const RETIRED_COVERAGE_CONNECTORS = new Set(["claude_code", "codex", "google_takeout", "apple_photos"]);
+
+function isRetiredCoverageRecord(connectorId: string, stream: string): boolean {
+  return stream === "coverage_diagnostics" && RETIRED_COVERAGE_CONNECTORS.has(connectorId);
+}
+
 function validateAttemptRecords(records: unknown[], streams: DeviceAttemptContext["streams"]): void {
   for (const [index, value] of records.entries()) {
     const record = value as { stream?: unknown; key?: unknown; data?: unknown };
@@ -1354,6 +1360,19 @@ async function compileDeviceAttemptContext(
     throw attemptContextError("connector manifest is unavailable for device ingest");
   }
   const streams = attemptStreamFacts(rawStreams);
+  // Older signed local profiles still emit this stream. The current profiles
+  // omit it, but rejecting a mixed batch would also discard its data records.
+  // Match the retired manifests' identity rule; this does not make the
+  // diagnostic a coverage proof for current profiles.
+  if (RETIRED_COVERAGE_CONNECTORS.has(connectorId) && !streams.coverage_diagnostics) {
+    streams.coverage_diagnostics = {
+      consentTimeField: null,
+      cursorField: null,
+      lexicalFields: [],
+      primaryKey: ["id"],
+      semanticFields: [],
+    };
+  }
   validateAttemptRecords(records, streams);
   const requiresSemanticWork = records.some((record) => {
     // biome-ignore lint/style/useDestructuring: Explicit property or positional access documents this compatibility boundary.
@@ -2721,6 +2740,12 @@ async function processDeviceIngestBatch(
             authoritativeFinalPlan,
             finalIndexPlanConcurrency(),
             async ({ record, inputIndex, version }) => {
+              const stream = (record as { stream?: unknown }).stream;
+              if (typeof stream === "string" && isRetiredCoverageRecord(connectorId, stream)) {
+                // The current signed manifest no longer declares this stream.
+                // The dirty-scope reconciler removes any old index entries.
+                return;
+              }
               if (typeof version !== "number") {
                 // No durable version could be resolved for this key (e.g. it was
                 // never actually written this attempt and has no repair reread
