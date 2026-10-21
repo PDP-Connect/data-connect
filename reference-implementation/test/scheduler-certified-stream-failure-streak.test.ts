@@ -37,6 +37,7 @@ import { closeDb, initDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
 import { createRunManagedConnectorViaController } from "../server/scheduler-manager-factory.ts";
 import type { SchedulerRunHistoryRecord } from "../server/stores/scheduler-store.ts";
+import { closeTestServer } from "./helpers/close-test-server.ts";
 
 const BASE_INTERVAL_MS = 60_000;
 const CONNECTOR_ID = "scheduler-certified-stream-failure-streak";
@@ -332,12 +333,7 @@ async function dispatchGateOutcome(
     const gaveUpEmitted = completedRuns.some((record) => record.error?.startsWith("schedule.gave_up:"));
     return { gaveUp, gaveUpEmitted, reachedReadiness };
   } finally {
-    server.asServer.closeAllConnections();
-    server.rsServer.closeAllConnections();
-    await Promise.allSettled([
-      new Promise<void>((resolve) => server.asServer.close(() => resolve())),
-      new Promise<void>((resolve) => server.rsServer.close(() => resolve())),
-    ]);
+    await closeTestServer(server);
     closeDb();
   }
 }
