@@ -1189,12 +1189,26 @@ export function createConnectorInstallService(options: {
       lock.release();
     }
   };
+  // The pre-plan update path. `/update` keeps it for a connector that has no
+  // verified install record: a registration carried over from the pre-OCI
+  // bundle has a manifest to replace but no installed tuple for a plan item.
+  const updateDirect = async (connectorId: string): Promise<ConnectorInstallRecord> => {
+    const entries = await catalog();
+    const candidates = entries.filter((entry) => entry.connector_id === connectorId);
+    const candidate = candidates.find((entry) => entry.latest === true);
+    if (!candidate) {
+      throw new Error("Connector has no verified update target.");
+    }
+    assertCatalogEntry(candidate, connectorId, candidate.digest);
+    return await installEntry(connectorId, candidate);
+  };
   let updateService: ConnectorUpdateService | undefined;
   const getUpdates = (): ConnectorUpdateService =>
     (updateService ??= createConnectorUpdateService({
       dataDir,
       catalog,
       catalogGeneration: () => store.getCatalogHighWater(),
+      directUpdate: updateDirect,
       installed: async () => {
         return (await listVerifiedActiveConnectors(store)).verified;
       },
@@ -1301,16 +1315,7 @@ export function createConnectorInstallService(options: {
     selectLocalSource: (connectorKey, sourceId) => localSourceStore.select(connectorKey, sourceId),
     status: async () => (await listVerifiedActiveConnectors(store)).verified,
     uninstall,
-    async update(connectorId) {
-      const entries = await catalog();
-      const candidates = entries.filter((entry) => entry.connector_id === connectorId);
-      const candidate = candidates.find((entry) => entry.latest === true);
-      if (!candidate) {
-        throw new Error("Connector has no verified update target.");
-      }
-      assertCatalogEntry(candidate, connectorId, candidate.digest);
-      return await installEntry(connectorId, candidate);
-    },
+    update: updateDirect,
   };
 }
 

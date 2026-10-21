@@ -58,6 +58,10 @@ record with HTTP 201. `POST /v1/owner/connector-install/update` accepts
 `{ "connector_id": "github" }` and runs the shared update plan and batch for
 that connector. It returns the installed record after success. A target needing
 review, a changed plan, a deferred run, or failed publication returns an error.
+A connector registered without a verified install record, such as a registration
+carried over from the pre-OCI bundle, is not part of a plan: the route publishes
+the catalog's latest verified target for it through the direct install path and
+returns the installed record.
 
 ## Manual update plans and batches
 

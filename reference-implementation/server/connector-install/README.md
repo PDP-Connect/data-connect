@@ -95,8 +95,12 @@ repair failures retain the existing maintenance retry behavior.
 
 The existing `POST /v1/owner/connector-install/update` uses the same plan/batch
 service for one connector. It retains its successful installed-record response;
-review or deferred/recovery outcomes return an error. New clients should use the
-asynchronous endpoints so work remains observable after an HTTP disconnect.
+review or deferred/recovery outcomes return an error. A connector without a
+verified install record (a registration carried over from the pre-OCI bundle)
+has no installed tuple for a plan item, so the route publishes the catalog's
+latest verified target for it through the direct install path. New clients
+should use the asynchronous endpoints so work remains observable after an HTTP
+disconnect.
 
 Plans, batch items, results, and idempotency receipts are private atomic JSON
 records under `PDPP_DATA_DIR/connector-updates`, guarded by the existing OS-backed

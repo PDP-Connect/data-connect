@@ -87,6 +87,13 @@ export interface ConnectorUpdateDependencies {
   catalogGeneration: () => Promise<string | null>;
   completePublication?: (connectorId: string) => void;
   dataDir: string;
+  /**
+   * Publishes the catalog's latest verified target through the direct installer
+   * path. `updateOne` uses it for a connector with no verified install record: a
+   * registration carried over from the pre-OCI bundle has a manifest to replace
+   * but no installed tuple for a plan item to diff.
+   */
+  directUpdate: (connectorId: string) => Promise<ConnectorInstallRecord>;
   hasActiveRuns: (connectorId: string) => Promise<boolean>;
   installed: () => Promise<readonly ConnectorInstallRecord[]>;
   now?: () => number;
@@ -677,6 +684,12 @@ export function createConnectorUpdateService(deps: ConnectorUpdateDependencies) 
       await Promise.all([...running.values()]);
     },
     async updateOne(connectorId: string) {
+      // A registration carried over from the pre-OCI bundle has a manifest but
+      // no verified install record, so a plan has no installed tuple to diff.
+      // Keep publishing the catalog target for it through the direct path.
+      if (!(await deps.installed()).some((record) => record.connectorId === connectorId)) {
+        return await deps.directUpdate(connectorId);
+      }
       const created = createPlan();
       await wait(`plan-${created.plan_id}`);
       const plan = getPlan(created.plan_id);
