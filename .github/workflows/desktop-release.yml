@@ -2,7 +2,10 @@ name: Automatic desktop release
 
 on:
   workflow_run:
-    workflows: [client-tests]
+    # A release needs both test workflows green on the same commit. Whichever
+    # finishes second finds both successful and releases; the first one exits
+    # without releasing.
+    workflows: [client-tests, reference-implementation]
     branches: [main]
     types: [completed]
   workflow_dispatch: {}
@@ -42,15 +45,25 @@ jobs:
         with:
           node-version: "24.21.0"
       - name: Require successful main CI for this exact commit
+        id: gate
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           sha="$(git rev-parse HEAD)"
-          gh api "repos/$GITHUB_REPOSITORY/actions/workflows/client-tests.yml/runs?branch=main&event=push&head_sha=$sha&per_page=100" \
-            --jq '.workflow_runs | any(.conclusion == "success")' | grep -qx true
+          ready=true
+          for workflow in client-tests.yml reference-implementation.yml; do
+            ok="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow/runs?branch=main&event=push&head_sha=$sha&per_page=100" \
+              --jq '.workflow_runs | any(.conclusion == "success")')"
+            if [ "$ok" != true ]; then
+              echo "No successful $workflow push run for $sha yet; not releasing."
+              ready=false
+            fi
+          done
+          echo "ready=$ready" >> "$GITHUB_OUTPUT"
       - name: Compute version and reserve draft release
         id: prepare
+        if: steps.gate.outputs.ready == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: node scripts/desktop-release.mjs prepare

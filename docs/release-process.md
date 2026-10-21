@@ -2,7 +2,7 @@
 
 ## Automatic desktop releases
 
-A merge to `main` runs `client-tests.yml` (client typecheck and client/console tests). When that push run succeeds, `desktop-release.yml` checks out its exact SHA, confirms it is still the current `main` head, and computes a version. Pull-request, fork, failed and cancelled CI runs cannot publish. This is the desktop release gate; other independent CI workflows are not aggregated into it.
+A merge to `main` runs `client-tests.yml` (client typecheck and client/console tests) and `reference-implementation.yml` (the server tests). When either push run finishes, `desktop-release.yml` checks that both have a successful push run for that exact SHA. If one is missing, it exits without releasing; the later of the two completions does the release. It then checks out the SHA, confirms it is still the current `main` head, and computes a version. Pull-request, fork, failed and cancelled CI runs cannot publish. Other CI workflows are not part of the gate.
 
 The version script reads all commit messages since the highest reachable, stable, published `vX.Y.Z` release that has all five desktop installers. Empty historical npm releases, drafts, prereleases and tags outside the selected history cannot become the baseline. It refuses to guess if no complete desktop release exists.
 
@@ -45,7 +45,7 @@ On the first npm run with no reachable `npm-v*` tag, `npm-release-tags.mjs` read
 
 ## Manual runs and recovery
 
-Re-run the failed automatic workflow in Actions, or dispatch `desktop-release.yml` on `main`. Dispatch requires a successful `client-tests` push run for the exact commit too. A draft at that SHA can be rebuilt and published without moving its tag. A newer main head supersedes old automatic work; dispatch releases the current head only.
+Re-run the failed automatic workflow in Actions, or dispatch `desktop-release.yml` on `main`. Dispatch requires successful `client-tests` and `reference-implementation` push runs for the exact commit too. A draft at that SHA can be rebuilt and published without moving its tag. A newer main head supersedes old automatic work; dispatch releases the current head only.
 
 Existing manual commands remain available:
 

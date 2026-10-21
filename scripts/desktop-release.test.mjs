@@ -386,3 +386,24 @@ test("plan handles real-sized historical commit logs above 1 MiB", t => {
   assert.match(r.stdout, /Commits since baseline: 2/)
   assert.match(r.stdout, /Next desktop version: v0.7.64/)
 })
+
+test("a release waits for both client and reference-implementation CI", () => {
+  const workflow = load(
+    readFileSync(
+      new URL("../.github/workflows/desktop-release.yml", import.meta.url),
+      "utf8"
+    )
+  )
+  assert.deepEqual(workflow.on.workflow_run.workflows, [
+    "client-tests",
+    "reference-implementation",
+  ])
+  const steps = workflow.jobs.prepare.steps
+  const gate = steps.find(s => s.id === "gate")
+  for (const file of ["client-tests.yml", "reference-implementation.yml"])
+    assert.match(gate.run, new RegExp(file.replace(".", "\\.")))
+  assert.equal(
+    steps.find(s => s.id === "prepare").if,
+    "steps.gate.outputs.ready == 'true'"
+  )
+})
