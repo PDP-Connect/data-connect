@@ -1317,12 +1317,6 @@ function attemptStreamFacts(rawStreams: unknown[]): Record<string, DeviceAttempt
   return streams;
 }
 
-const RETIRED_COVERAGE_CONNECTORS = new Set(["claude_code", "codex", "google_takeout", "apple_photos"]);
-
-function isRetiredCoverageRecord(connectorId: string, stream: string): boolean {
-  return stream === "coverage_diagnostics" && RETIRED_COVERAGE_CONNECTORS.has(connectorId);
-}
-
 function validateAttemptRecords(records: unknown[], streams: DeviceAttemptContext["streams"]): void {
   for (const [index, value] of records.entries()) {
     const record = value as { stream?: unknown; key?: unknown; data?: unknown };
@@ -1360,11 +1354,10 @@ async function compileDeviceAttemptContext(
     throw attemptContextError("connector manifest is unavailable for device ingest");
   }
   const streams = attemptStreamFacts(rawStreams);
-  // Older signed local profiles still emit this stream. The current profiles
-  // omit it, but rejecting a mixed batch would also discard its data records.
-  // Match the retired manifests' identity rule; this does not make the
-  // diagnostic a coverage proof for current profiles.
-  if (RETIRED_COVERAGE_CONNECTORS.has(connectorId) && !streams.coverage_diagnostics) {
+  // Older signed profiles can still send this retired protocol stream beside
+  // data. Accept its old identity shape without treating it as coverage proof.
+  const retiredCoverageDiagnostic = !streams.coverage_diagnostics;
+  if (retiredCoverageDiagnostic) {
     streams.coverage_diagnostics = {
       consentTimeField: null,
       cursorField: null,
@@ -1384,6 +1377,7 @@ async function compileDeviceAttemptContext(
   }
   return {
     manifestFingerprint: fingerprintDeviceAttemptManifest(rawManifest),
+    retiredCoverageDiagnostic,
     semanticCapabilityIdentity: ctx.getSemanticCapabilityIdentity(),
     streams,
   };
@@ -2740,8 +2734,8 @@ async function processDeviceIngestBatch(
             authoritativeFinalPlan,
             finalIndexPlanConcurrency(),
             async ({ record, inputIndex, version }) => {
-              const stream = (record as { stream?: unknown }).stream;
-              if (typeof stream === "string" && isRetiredCoverageRecord(connectorId, stream)) {
+              const { stream } = record as { stream?: unknown };
+              if (attemptContext.retiredCoverageDiagnostic && stream === "coverage_diagnostics") {
                 // The current signed manifest no longer declares this stream.
                 // The dirty-scope reconciler removes any old index entries.
                 return;

@@ -312,43 +312,51 @@ function firstRecord(batch: DeviceBatch): DeviceRecordEntry {
   return mustExist(batch.records[0], "batch must carry its first record");
 }
 
-test("a pre-repin local device can ingest its legacy coverage record beside data", async () => {
+test("any pre-repin local device can ingest its legacy coverage record beside data", async () => {
   await withServer(async ({ asUrl }) => {
-    const device = await enrollDevice(asUrl, "legacy-coverage");
-    const batch = makeBatch(device, "legacy-coverage-batch", "data");
-    batch.records.push({
-      data: { id: "coverage:messages", store: "messages", stream: "messages", status: "collected", reason: "collected" },
-      emitted_at: "2026-04-30T12:00:00.000Z",
-      record_key: "coverage:messages",
-      stream: "coverage_diagnostics",
+    await runSerial(["codex", "imessage"], async (connectorId) => {
+      const device = await enrollDevice(asUrl, `legacy-coverage-${connectorId}`, connectorId);
+      const batch = makeBatch(device, `legacy-coverage-batch-${connectorId}`, "data");
+      batch.records.push({
+        data: {
+          id: "coverage:messages",
+          reason: "collected",
+          status: "collected",
+          store: "messages",
+          stream: "messages",
+        },
+        emitted_at: "2026-04-30T12:00:00.000Z",
+        record_key: "coverage:messages",
+        stream: "coverage_diagnostics",
+      });
+      batch.body_hash = bodyHash(batch.records);
+      const response = await postJson(
+        `${asUrl}/_ref/device-exporters/${encodeURIComponent(device.device_id)}/ingest-batches`,
+        batch,
+        authHeaders(device.device_token)
+      );
+      assert.equal(response.status, 201, JSON.stringify(response.body));
+      await drainConnectorInstanceIndexWorkForTests();
+      const reconcile = await runSearchIndexDirtyReconcileRound({ maxDurationMs: 10_000 });
+      assert.equal(reconcile.failed, 0);
+      assert.equal(
+        selectRow<{ count: number }>(
+          "SELECT COUNT(*) AS count FROM search_index_dirty WHERE connector_instance_id = ? AND dirty <> 0",
+          device.connector_instance_id
+        ).count,
+        0,
+        "retired diagnostic records must not leave an unrepairable index scope"
+      );
+      assert.equal(
+        selectRow<{ count: number }>(
+          "SELECT COUNT(*) AS count FROM records WHERE connector_instance_id = ? AND stream = ?",
+          device.connector_instance_id,
+          "messages"
+        ).count,
+        1,
+        "the mixed legacy batch must preserve its data record"
+      );
     });
-    batch.body_hash = bodyHash(batch.records);
-    const response = await postJson(
-      `${asUrl}/_ref/device-exporters/${encodeURIComponent(device.device_id)}/ingest-batches`,
-      batch,
-      authHeaders(device.device_token)
-    );
-    assert.equal(response.status, 201, JSON.stringify(response.body));
-    await drainConnectorInstanceIndexWorkForTests();
-    const reconcile = await runSearchIndexDirtyReconcileRound({ maxDurationMs: 10_000 });
-    assert.equal(reconcile.failed, 0);
-    assert.equal(
-      selectRow<{ count: number }>(
-        "SELECT COUNT(*) AS count FROM search_index_dirty WHERE connector_instance_id = ? AND dirty <> 0",
-        device.connector_instance_id
-      ).count,
-      0,
-      "retired diagnostic records must not leave an unrepairable index scope"
-    );
-    assert.equal(
-      selectRow<{ count: number }>(
-        "SELECT COUNT(*) AS count FROM records WHERE connector_instance_id = ? AND stream = ?",
-        device.connector_instance_id,
-        "messages"
-      ).count,
-      1,
-      "the mixed legacy batch must preserve its data record"
-    );
   });
 });
 
