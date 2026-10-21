@@ -298,10 +298,18 @@ test("late stale or failed CI events cannot replace the current release's pendin
     current,
     conclusion,
     runId,
-    ref = "refs/heads/main"
+    ref = "refs/heads/main",
+    runEvent = "push",
+    runRepo = "PDP-Connect/data-connect"
   ) => {
     const value = expression
       .replaceAll("github.event_name", JSON.stringify(event))
+      .replaceAll("github.event.workflow_run.event", JSON.stringify(runEvent))
+      .replaceAll(
+        "github.event.workflow_run.head_repository.full_name",
+        JSON.stringify(runRepo)
+      )
+      .replaceAll("github.repository", JSON.stringify("PDP-Connect/data-connect"))
       .replaceAll("github.event.workflow_run.head_sha", JSON.stringify(head))
       .replaceAll(
         "github.event.workflow_run.conclusion",
@@ -315,6 +323,16 @@ test("late stale or failed CI events cannot replace the current release's pendin
   assert.equal(group("workflow_run", "new", "new", "success", 1), "main")
   assert.equal(group("workflow_run", "old", "new", "success", 2), 2)
   assert.equal(group("workflow_run", "new", "new", "failure", 3), 3)
+  // A successful CI run that prepare would reject (a dispatched or fork run)
+  // must not join the release group and cancel an active release.
+  assert.equal(
+    group("workflow_run", "new", "new", "success", 6, undefined, "workflow_dispatch"),
+    6
+  )
+  assert.equal(
+    group("workflow_run", "new", "new", "success", 7, undefined, "push", "fork/data-connect"),
+    7
+  )
   assert.equal(group("workflow_dispatch", "", "new", "", 4), "main")
   assert.equal(
     group("workflow_dispatch", "", "new", "", 5, "refs/heads/other"),
@@ -406,4 +424,20 @@ test("a release waits for both client and reference-implementation CI", () => {
     steps.find(s => s.id === "prepare").if,
     "steps.gate.outputs.ready == 'true'"
   )
+})
+
+test("a same-commit prerelease, empty or incomplete release is not treated as released", t => {
+  const sameCommit = (existing, version) => {
+    const r = prepareFixture(t, {
+      tags: ["v0.7.63", "v0.7.64"],
+      refs: { "v0.7.64^{commit}": "a".repeat(40) },
+      releases: [release("v0.7.63"), existing],
+    }, ["plan"])
+    assert.equal(r.status, 0, r.stderr)
+    assert.match(r.stdout, new RegExp(`Next desktop version: ${version}`))
+    return r
+  }
+  sameCommit(release("v0.7.64", { prerelease: true }), "v0.7.65")
+  sameCommit(release("v0.7.64", { assets: [] }), "v0.7.65")
+  sameCommit(release("v0.7.64", { assets: assets.slice(1) }), "v0.7.65")
 })

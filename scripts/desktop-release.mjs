@@ -41,20 +41,28 @@ export function nextVersion(base, messages) {
       : `${major}.${minor}.${patch + 1}`
 }
 
+const DESKTOP_INSTALLERS = [
+  /_(?:arm64|aarch64)\.dmg$/,
+  /_x86_64\.dmg$/,
+  /\.deb$/,
+  /\.AppImage$/,
+  /-setup\.exe$/,
+]
+
+// One definition of "a desktop release": published, stable, vX.Y.Z, with all
+// five installers. Both the baseline and the already-released check use it.
+export function isCompleteDesktopRelease(r) {
+  return (
+    !r.draft &&
+    !r.prerelease &&
+    /^v\d+\.\d+\.\d+$/.test(r.tag_name) &&
+    DESKTOP_INSTALLERS.every(pattern => r.assets.some(a => pattern.test(a.name)))
+  )
+}
+
 export function desktopBase(releases, reachableTags) {
   const candidates = releases.filter(
-    r =>
-      !r.draft &&
-      !r.prerelease &&
-      /^v\d+\.\d+\.\d+$/.test(r.tag_name) &&
-      reachableTags.includes(r.tag_name) &&
-      [
-        /_(?:arm64|aarch64)\.dmg$/,
-        /_x86_64\.dmg$/,
-        /\.deb$/,
-        /\.AppImage$/,
-        /-setup\.exe$/,
-      ].every(pattern => r.assets.some(a => pattern.test(a.name)))
+    r => isCompleteDesktopRelease(r) && reachableTags.includes(r.tag_name)
   )
   candidates.sort((a, b) =>
     compareVersions(b.tag_name.slice(1), a.tag_name.slice(1))
@@ -113,9 +121,12 @@ function releasePlan(repo, ref, sha) {
     const tagSha = remoteTags.get(`v${version}`)
     const existing = releases.find(r => r.tag_name === `v${version}`)
     if (tagSha === sha && (!existing || existing.draft)) break // recover tag-only reservations too
-    if (tagSha === sha && existing && !existing.draft) {
+    if (tagSha === sha && existing && isCompleteDesktopRelease(existing)) {
       return { ...summary, reason: "This commit is already released" }
     }
+    // A published prerelease, an empty npm release or a desktop release with
+    // missing installers at this commit is not a desktop release. Its tag is
+    // immutable, so take the next unused version.
     version = nextVersion(version, ["fix: reserve the next unused version"])
   }
   return { ...summary, version, releases, tags }

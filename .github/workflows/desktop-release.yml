@@ -13,7 +13,7 @@ on:
 # A newer completed CI run replaces both running and pending older releases.
 concurrency:
   # Stale/failed events must not replace the shared group's pending slot either.
-  group: desktop-release-${{ ((github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_sha == github.sha)) && 'main' || github.run_id }}
+  group: desktop-release-${{ ((github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.head_sha == github.sha)) && 'main' || github.run_id }}
   cancel-in-progress: true
 
 permissions:
