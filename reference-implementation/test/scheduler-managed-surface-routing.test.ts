@@ -45,6 +45,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import { closeDb, getDb, initDb } from "../server/db.ts";
 import { createScheduler } from "../runtime/scheduler.ts";
 import type { RunManagedConnectorViaController, RunRecord } from "../runtime/scheduler-domain-types.ts";
 import type { PendingPressureGap } from "../runtime/scheduler-source-pressure-cooldown.ts";
@@ -166,6 +167,131 @@ test("managed controller adapter forwards the per-run owner subject", async () =
 
   assert.deepEqual(calls, [{ connectorId: "chatgpt", ownerSubjectId: "owner_b" }]);
   assert.equal(result?.status, "surface_failed");
+});
+
+test("factory all-connector adapter routes each dispatch through runNow and returns terminal metadata", async (t) => {
+  closeDb();
+  initDb(":memory:");
+  t.after(() => closeDb());
+
+  const runNowCalls: { connectorId: string; options: Record<string, unknown> }[] = [];
+  const awaitRunCalls: string[] = [];
+  const terminalStatuses = ["succeeded", "failed"];
+  const runner = createRunManagedConnectorViaController(
+    {
+      awaitRun: async (runId) => {
+        awaitRunCalls.push(runId);
+        return terminalStatuses[awaitRunCalls.length - 1] ?? "failed";
+      },
+      getActiveRun: () => null,
+      isNeedsHuman: () => false,
+      issueRuntimeOwnerToken: async () => "unused",
+      markNeedsHuman: () => undefined,
+      runNow: async (connectorId, options) => {
+        const runNumber = runNowCalls.length + 1;
+        runNowCalls.push({ connectorId, options });
+        const runId = `run_${runNumber}`;
+        const isFailure = runNumber === 2;
+        const eventData = isFailure
+          ? {
+              connector_error: { message: "connector failed" },
+              known_gaps: [{ reason: "upstream_pressure" }],
+              reason: "connector_reported_failed",
+              terminal_reason: "connector_reported_failed",
+            }
+          : {};
+        getDb()
+          .prepare(
+            `INSERT INTO spine_events(
+               event_id, event_seq, event_type, occurred_at, recorded_at, scenario_id, trace_id,
+               actor_type, actor_id, object_type, object_id, status, run_id, connector_instance_id, data_json, version
+             ) VALUES(?, ?, ?, ?, ?, 'test', ?, 'runtime', ?, 'run', ?, ?, ?, ?, ?, '1')`
+          )
+          .run(
+            `evt_${runId}`,
+            runNumber,
+            isFailure ? "run.failed" : "run.completed",
+            new Date().toISOString(),
+            new Date().toISOString(),
+            `trace_${runNumber}`,
+            connectorId,
+            runId,
+            isFailure ? "failed" : "succeeded",
+            runId,
+            "cin_calendar_personal",
+            JSON.stringify(eventData)
+          );
+        return {
+          run_id: runId,
+          status: "started",
+          trace_id: `trace_${runNumber}`,
+        };
+      },
+    },
+    { routeAllConnectors: true }
+  );
+
+  assert.ok(runner, "all-connector scheduled adapter must work without a lease manager");
+  const options = {
+    connectorInstanceId: "cin_calendar_personal",
+    ownerSubjectId: "owner_scheduler",
+    ownerToken: "owner-token",
+    priorityClass: "background" as const,
+    recoveryOnly: true,
+    triggerKind: "scheduled" as const,
+    rsUrl: "http://rs.internal",
+    referenceBaseUrl: "http://reference.internal",
+  };
+  const first = await runner("calendar", options);
+  const second = await runner("calendar", options);
+
+  assert.deepEqual(runNowCalls, [
+    {
+      connectorId: "calendar",
+      options: {
+        connectorInstanceId: "cin_calendar_personal",
+        ownerSubjectId: "owner_scheduler",
+        ownerToken: "owner-token",
+        priorityClass: "background",
+        recoveryOnly: true,
+        triggerKind: "scheduled",
+        rsUrl: "http://rs.internal",
+        referenceBaseUrl: "http://reference.internal",
+      },
+    },
+    {
+      connectorId: "calendar",
+      options: {
+        connectorInstanceId: "cin_calendar_personal",
+        ownerSubjectId: "owner_scheduler",
+        ownerToken: "owner-token",
+        priorityClass: "background",
+        recoveryOnly: true,
+        triggerKind: "scheduled",
+        rsUrl: "http://rs.internal",
+        referenceBaseUrl: "http://reference.internal",
+      },
+    },
+  ]);
+  assert.deepEqual(awaitRunCalls, ["run_1", "run_2"]);
+  assert.deepEqual(first, {
+    connector_error: null,
+    failure_reason: null,
+    known_gaps: [],
+    run_id: "run_1",
+    status: "succeeded",
+    terminal_reason: null,
+    trace_id: "trace_1",
+  });
+  assert.deepEqual(second, {
+    connector_error: { message: "connector failed" },
+    failure_reason: "connector_reported_failed",
+    known_gaps: [{ reason: "upstream_pressure" }],
+    run_id: "run_2",
+    status: "failed",
+    terminal_reason: "connector_reported_failed",
+    trace_id: "trace_2",
+  });
 });
 
 // ── T1 + T2: managed connector acquires surface via callback ────────────────
