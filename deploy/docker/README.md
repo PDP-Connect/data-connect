@@ -124,41 +124,25 @@ address above; do not publish the container port directly.
 [`docker-compose.yml`](./docker-compose.yml) runs one Core application service
 plus Postgres with pgvector. No repository clone required:
 
+Download the Compose file, example configuration, and secret helper into an empty directory. OpenSSL and Docker Compose are required.
+
 ```sh
 mkdir pdpp && cd pdpp
-curl -fsSLO https://raw.githubusercontent.com/PDP-Connect/data-connect/main/deploy/docker/docker-compose.yml
+for file in docker-compose.yml .env.example generate-secrets.sh; do
+  curl -fsSLO "https://raw.githubusercontent.com/PDP-Connect/data-connect/main/deploy/docker/$file"
+done
 umask 077
-PDPP_CREDENTIAL_ENCRYPTION_KEY="$(openssl rand -hex 32)"
-printf 'PDPP_CREDENTIAL_ENCRYPTION_KEY=%s\n' "$PDPP_CREDENTIAL_ENCRYPTION_KEY" > .env
-echo PDPP_CORE_IMAGE=ghcr.io/pdp-connect/data-connect/core:latest >> .env
-docker compose up -d && printf '\nPDPP is running at http://localhost:7662/\nOpen /setup and use the one-time setup token from: docker compose logs core\n\n'
+cp .env.example .env
+bash generate-secrets.sh --write .env
+docker compose --env-file .env pull
+docker compose --env-file .env up -d
 ```
 
-The encryption key is saved but never printed. With no
-`PDPP_OWNER_PASSWORD`, the hosted instance boots locked; open
-`http://localhost:7662/setup` and use the one-time setup token from
-`docker compose logs core` to choose the owner password. For scripted
-deployments, add an owner password to `.env` before starting the stack:
+The helper fills the credential encryption key and Postgres password without printing their values. It preserves any value already set. Both values are used by `docker-compose.yml`; the credential encryption key is required for Core to boot. The Postgres password otherwise defaults to `pdpp`, so generate it before starting a production node. Keep `.env` with your backups and out of version control.
 
-```sh
-printf 'PDPP_OWNER_PASSWORD=%s\n' "$(openssl rand -base64 24)" >> .env
-```
+Leave `PDPP_OWNER_PASSWORD` empty to claim the node at `http://localhost:7662/setup` with the one-time setup token from `docker compose --env-file .env logs core`. Set an owner password in `.env` before starting if you manage that secret separately. A nonempty value bypasses the setup wizard.
 
-The compose file refuses to boot until the credential encryption key exists in
-`.env`; it seals any connector credentials you store. Keep `.env` with your
-backups. `PDPP_OWNER_PASSWORD` is optional: set it for scripted deployments or
-leave it unset to claim the install at `/setup`.
-
-Configuration knobs (all optional, set in `.env`):
-
-```sh
-PDPP_REFERENCE_ORIGIN=https://pdpp.example.com  # public origin; default http://localhost:7662
-PDPP_BIND_HOST=127.0.0.1                        # default; use 0.0.0.0 for hosted public-origin setup
-PDPP_TRUSTED_HOSTS=localhost,127.0.0.1          # include your tunnel or reverse-proxy host
-PDPP_WEB_PORT=7662                              # host port mapped to container port 3000
-PDPP_POSTGRES_PASSWORD=...                      # change if you ever publish Postgres
-PDPP_EMBEDDING_DOWNLOAD_ALLOWED=0               # opt out of semantic search model download
-```
+For a local port other than 7662, set `PDPP_WEB_PORT` and `PDPP_REFERENCE_ORIGIN` to the same host port in `.env`. The optional variables in `.env.example` are all read by this Compose file. For public access, configure HTTPS and the trusted host as described below.
 
 For a public tunnel or reverse proxy, set `PDPP_REFERENCE_ORIGIN` to its HTTPS
 origin and add its hostname to `PDPP_TRUSTED_HOSTS`. Keep

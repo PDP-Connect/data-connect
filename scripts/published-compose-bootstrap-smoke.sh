@@ -95,17 +95,16 @@ require_command node
 trap cleanup EXIT
 
 cp "$ENV_TEMPLATE" "$ENV_FILE"
-# Run the documented step 2 exactly as selfhost-quickstart.md tells a new user
-# to. Without it PDPP_OWNER_PASSWORD stays empty and the reference container
-# refuses to boot ("Refusing to start: ... PDPP_OWNER_PASSWORD is unset"), so a
-# smoke test that skips this step can never pass and never guards the real path.
-# `--write` patches only empty values and resolves `.env.docker` relative to the
-# working directory, so run it from the smoke root: the isolated copy is patched
-# and the operator's real .env.docker is never touched.
-(cd "$SMOKE_ROOT" && bash "$REPOSITORY_ROOT/scripts/generate-secrets.sh" --write >/dev/null)
+# The split reference stack requires an owner password and credential key.
+# Its Postgres URL uses the example password, so do not run the production
+# Compose helper here: that helper rotates the Postgres password too.
+owner_password="$(openssl rand -hex 32)"
+credential_key="$(openssl rand -hex 32)"
+sed -i "s/^PDPP_OWNER_PASSWORD=.*/PDPP_OWNER_PASSWORD=$owner_password/" "$ENV_FILE"
+sed -i "s/^PDPP_CREDENTIAL_ENCRYPTION_KEY=.*/PDPP_CREDENTIAL_ENCRYPTION_KEY=$credential_key/" "$ENV_FILE"
 for required_secret in PDPP_OWNER_PASSWORD PDPP_CREDENTIAL_ENCRYPTION_KEY; do
   if ! grep -qE "^${required_secret}=.+" "$ENV_FILE"; then
-    echo "published-compose-bootstrap-smoke: $required_secret was not populated by generate-secrets.sh" >&2
+    echo "published-compose-bootstrap-smoke: $required_secret was not populated" >&2
     exit 1
   fi
 done

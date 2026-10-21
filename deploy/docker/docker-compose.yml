@@ -5,12 +5,10 @@
 #   postgres   - durable storage with pgvector (semantic search index)
 #
 # Setup (see ./README.md for the full runbook):
-#
-#   curl -fsSLO https://raw.githubusercontent.com/PDP-Connect/data-connect/main/deploy/docker/docker-compose.yml
-#   printf 'PDPP_CREDENTIAL_ENCRYPTION_KEY=%s\n' "$(openssl rand -hex 32)" > .env
-#   # Optional scripted owner-password override:
-#   # printf 'PDPP_OWNER_PASSWORD=%s\n' "$(openssl rand -base64 24)" >> .env
-#   docker compose up -d
+#   download this file, .env.example, and generate-secrets.sh together
+#   cp .env.example .env
+#   bash generate-secrets.sh --write .env
+#   docker compose --env-file .env up -d
 #
 # This file is intentionally small. The repository-root docker-compose.yml is
 # the development/owner stack (connector credentials, fixture mounts, browser
