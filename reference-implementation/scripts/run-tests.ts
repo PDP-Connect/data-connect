@@ -3,7 +3,7 @@
 
 import { type ChildProcess, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { availableParallelism } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -48,6 +48,7 @@ import {
 import type { ProcessEnvLike } from "./test-env.ts";
 import { buildScrubbedTestEnv } from "./test-env.ts";
 import { requireExplicitTestProfile, storageProfileEnvironment } from "./test-profile-env.ts";
+import { parseTestShard, selectShardFiles } from "./test-shard.ts";
 import { assertWorkspaceRuntimeDependencies } from "./workspace-runtime-dependency-preflight.ts";
 
 /** The `run-authority` JSON file shape accepted via `--accounting-authority`. */
@@ -67,6 +68,14 @@ const testDir = join(repoRoot, "test");
 const rawForwardedArgs = process.argv.slice(2).filter((arg, index) => !(index === 0 && arg === "--"));
 const accountingIndex = rawForwardedArgs.indexOf("--accounting-authority");
 const accountingPath = accountingIndex === -1 ? undefined : rawForwardedArgs[accountingIndex + 1];
+const testShard = parseTestShard(process.env.PDPP_TEST_SHARD);
+const shardReceiptPath = process.env.PDPP_TEST_SHARD_RECEIPT;
+if (testShard && (accountingIndex !== -1 || rawForwardedArgs.includes("--files-from"))) {
+  throw new Error("PDPP_TEST_SHARD cannot be combined with --accounting-authority or --files-from");
+}
+if (testShard && !shardReceiptPath) {
+  throw new Error("PDPP_TEST_SHARD requires PDPP_TEST_SHARD_RECEIPT for complete-suite accounting");
+}
 if (accountingIndex !== -1 && !accountingPath) {
   throw new Error("--accounting-authority requires PATH");
 }
@@ -90,8 +99,8 @@ const effectiveArgs = forwardedArgs;
 const DEFAULT_PER_FILE_IDLE_TIMEOUT_MS = 120_000;
 // cli.test.ts took about 343s in isolation, and collection-profile.test.ts
 // exceeded the former 480s wall-clock limit while still producing reporter
-// events. Fifteen minutes leaves measured headroom and remains below one
-// third of the 45-minute CI job limit.
+// events. Fifteen minutes leaves measured headroom within the 25-minute
+// per-shard CI job limit.
 const DEFAULT_PER_FILE_HARD_TIMEOUT_MS = 900_000;
 
 function readPositiveTimeout(name: string, fallbackMs: number): number {
@@ -485,6 +494,11 @@ if (filesFromIndex !== -1) {
   const requested = (await readFile(path, "utf8")).split(/\r?\n/).filter(Boolean);
   testFiles = await validateFilesFrom(requested, await discoverTestFiles(repoRoot, testDir));
 }
+if (testShard) {
+  const totalFiles = testFiles.length;
+  testFiles = selectShardFiles(testFiles, testShard);
+  console.log(`[run-tests] shard ${testShard.index}/${testShard.total}: ${testFiles.length}/${totalFiles} files`);
+}
 const fileConcurrency = resolveFileConcurrency({
   availableCpus: availableParallelism?.() ?? null,
   profile: selectedProfile,
@@ -632,8 +646,10 @@ const counts = {
 // when the suite did not run to completion (a failing file already dominates
 // the exit) or a signal arrived, so it can never mask an unrelated failure or
 // fire on a partial run. A --files-from selection is partial by construction.
+// Shards defer this join to check-test-shards.ts after all receipts arrive.
 if (
   filesFromIndex === -1 &&
+  !testShard &&
   !failed &&
   silentFailures.length === 0 &&
   accountingErrors.length === 0 &&
@@ -692,4 +708,19 @@ if (signalExitCode !== undefined) {
     `[run-tests] ${silentFailures.map((result) => result.filePath).join(", ")} recorded failure events although the test process exited 0\n`
   );
   process.exitCode = 1;
+}
+// Only a complete, successful shard may contribute to the cross-shard join.
+if (testShard && shardReceiptPath && !process.exitCode) {
+  if (results.length !== testFiles.length) {
+    throw new Error("shard did not run every selected file");
+  }
+  await writeFile(
+    shardReceiptPath,
+    JSON.stringify({
+      shard: testShard,
+      profile: selectedProfile,
+      files: testFiles,
+      consumedMappingIdentities: summaries.flatMap((summary) => summary.consumed_mapping_identities),
+    })
+  );
 }

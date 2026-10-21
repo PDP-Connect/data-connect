@@ -165,11 +165,15 @@ jobs:
         run: npm --prefix reference-implementation run typecheck
 
   test-reference-implementation:
-    name: test reference implementation
+    name: test reference implementation (${{ matrix.shard }}/3)
     needs: classify
     if: needs.classify.outputs.reference_impacting == 'true' && needs.classify.outputs.has_content == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -209,10 +213,20 @@ jobs:
         env:
           PDPP_OWNER_PASSWORD: reference-implementation-ci
           PDPP_TEST_PROFILE: "memory-default"
+          PDPP_TEST_SHARD: ${{ matrix.shard }}/3
+          PDPP_TEST_SHARD_RECEIPT: ${{ runner.temp }}/shard-${{ matrix.shard }}.json
           # The hosted runner is a disposable VM, which is the isolation
           # boundary here; test-sandbox runs the command directly.
           TEST_SANDBOX_DISABLE: "1"
         run: npm --prefix reference-implementation run test
+
+      - name: Upload completed shard accounting
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ri-shard-${{ matrix.shard }}
+          path: ${{ runner.temp }}/shard-${{ matrix.shard }}.json
+          if-no-files-found: error
+          retention-days: 1
 
   check-vendor-freshness:
     name: check polyfill-connectors tarball freshness
@@ -246,11 +260,46 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      - name: Checkout
+        if: needs.test-reference-implementation.result == 'success'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        if: needs.test-reference-implementation.result == 'success'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24.21.0"
+
+      - name: Download shard accounting
+        if: needs.test-reference-implementation.result == 'success'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: ri-shard-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/ri-shards
+
+      - name: Verify complete suite across shards
+        if: needs.test-reference-implementation.result == 'success'
+        env:
+          RECEIPT_DIR: ${{ runner.temp }}/ri-shards
+        run: node reference-implementation/scripts/check-test-shards.ts "$RECEIPT_DIR" 3 memory-default
+
       - name: Aggregate required sub-job results
+        if: always()
         run: |
           set -euo pipefail
 
           fail=0
+          # A matrix dependency succeeds only when every shard succeeds.
+          # Skipping is valid only when classification did not request RI tests.
+          if [[ "${{ needs.classify.outputs.reference_impacting }}" == "true" && \
+                "${{ needs.classify.outputs.has_content }}" == "true" && \
+                "${{ needs.test-reference-implementation.result }}" != "success" ]]; then
+            echo "::error::All three reference-implementation shards must succeed"
+            fail=1
+          fi
           for job_result in \
             "typecheck-reference:${{ needs.typecheck-reference.result }}" \
             "test-reference-implementation:${{ needs.test-reference-implementation.result }}" \
