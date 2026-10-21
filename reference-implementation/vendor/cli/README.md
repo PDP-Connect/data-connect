@@ -64,11 +64,18 @@ supports four command namespaces:
   `npm i -g @pdpp/local-collector`, unless the operator intentionally wants
   the `@pdpp/cli` shim.
 
-- **`pdpp ref ...`** — reference operator diagnostics over `_ref` routes on a
-  running reference deployment. Current subcommands: `pdpp ref run timeline
-  <run-id>`, `pdpp ref grant timeline <grant-id>`, `pdpp ref trace show
-  <trace-id>`. Requires `PDPP_OWNER_SESSION_COOKIE` when owner auth is enabled.
-  These are reference-only operator tools, not core PDPP protocol.
+- **`pdpp ref ...`** — reference operator diagnostics over `_ref` routes and
+  owner operations over `/v1/owner` on a running reference deployment. Current
+  subcommands include `pdpp ref run timeline <run-id>`, `pdpp ref grant timeline
+  <grant-id>`, `pdpp ref trace show <trace-id>`, and
+  `pdpp ref connectors updates plan|apply|status`. Update commands use owner
+  bearer auth from `PDPP_OWNER_TOKEN` or `--owner-token-stdin`. `plan` creates a
+  plan, `apply <plan-id>` starts a batch with a generated idempotency key, and
+  `status` accepts either `--plan-id` or `--batch-id`. The generated key is
+  printed on stderr for safe retries; pass `--idempotency-key` to reuse a key
+  explicitly. Pass comma-separated `--connector-id` values to apply a subset.
+  Tokens are never printed. These are reference-only operator tools, not core
+  PDPP protocol.
 
 ## Install
 
@@ -83,6 +90,7 @@ the workspace executable:
 ```bash
 # @pdpp/cli package, workspace-launched pdpp binary
 pnpm exec pdpp ref run timeline <run-id>
+pnpm exec pdpp ref connectors updates plan --as-url http://localhost:7662
 ```
 
 The public command surface is still the `pdpp` binary; `pnpm exec` is only the
