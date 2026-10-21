@@ -1279,7 +1279,7 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
   ): RunRecord {
     return {
       attempt,
-      checkpointSummary: null,
+      checkpointSummary: runNowResult.checkpoint_summary || null,
       completedAt: nowIso(),
       connectorError: runNowResult.connector_error || null,
       connectorId,

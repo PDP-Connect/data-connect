@@ -161,6 +161,47 @@ function readConnectorReason(error: RunRecord["connectorError"]): string | null 
   return null;
 }
 
+// ─── Certified stream-scoped failure ───────────────────────────────────────
+
+/**
+ * The connector-declared `DONE.error.code` of a certified stream-scoped failure
+ * (Collection Profile: DONE failed + this code + an in-scope SKIP_RESULT naming
+ * each failed stream). The runtime only commits sibling cursors for a failed
+ * DONE when this certificate holds (`runtime/index.ts`, `handleDoneClose`).
+ */
+const STREAM_COLLECTION_FAILED_CODE = "stream_collection_failed";
+
+/**
+ * True for a failed run that certified its failure as stream-scoped AND whose
+ * sibling streams committed (`checkpointSummary.commit_status` is `committed`
+ * or `partially_committed`; the runtime reports `not_committed` when nothing
+ * moved and `disabled` when state is not persisted).
+ *
+ * Such a run is progress, not a repeat of a whole-run failure: the connector
+ * ran, reached the source and committed data; only the named streams' cursors
+ * were withheld. Every DONE-failed run shares the streak class
+ * `terminal:connector_reported_failed`, so without this check a stream that
+ * fails on every run would back the source off from the 3rd run and, at
+ * `BLOCKED_PROMOTION_THRESHOLD`, stop automatic dispatch of the whole source
+ * while its siblings commit on every run.
+ *
+ * Both facts must be present on the record. A certified code with nothing
+ * committed, or with no checkpoint summary, is not evidence of progress and
+ * keeps counting as a failure. The owner-visible signal for a failed stream
+ * that never advances is the runtime's `checkpoint_stalled` known gap (after
+ * `CHECKPOINT_STALL_RUNS` withheld runs); it does not depend on this streak.
+ */
+export function isCertifiedStreamFailureWithCommittedSiblings(record: RunRecord): boolean {
+  if (record.status !== "failed") {
+    return false;
+  }
+  if ((record.connectorError as { code?: unknown } | null | undefined)?.code !== STREAM_COLLECTION_FAILED_CODE) {
+    return false;
+  }
+  const commitStatus = record.checkpointSummary?.commit_status;
+  return commitStatus === "committed" || commitStatus === "partially_committed";
+}
+
 // ─── Core helper ────────────────────────────────────────────────────────────
 
 /**
@@ -319,6 +360,19 @@ function countConsecutiveSameClassFailures(history: readonly RunRecord[]): {
       // reset nor extend the streak. Skip past them.
       continue;
     }
+    if (isCertifiedStreamFailureWithCommittedSiblings(record)) {
+      // Not counted, and it ends the streak (it is not transparent like a
+      // `skipped` record). The run reached the source and committed sibling
+      // streams, which a whole-run failure (login challenge, surface
+      // unavailable, protocol violation) rules out, so the cause of the older
+      // failures is no longer in effect. Staying transparent would leave a
+      // stale streak live for as long as the failed stream keeps failing:
+      // `blocked` could never clear, because no scheduler success follows.
+      // This is a streak reset only. It is NOT a success: `status` stays
+      // `failed`, `last_success_at` and health `CollectionSucceeded` are
+      // untouched, and `isCounterResetStatus` is unchanged.
+      break;
+    }
     const candidate = reasonClassOf(record);
     if (candidate === null) {
       // Defensive: a failed record with no class shouldn't happen, but if
@@ -378,3 +432,4 @@ function normalizeOptionalEpochMs(value: number | null | undefined): number | nu
 export function isCounterResetStatus(status: RunStatus): boolean {
   return status === "succeeded";
 }
+
