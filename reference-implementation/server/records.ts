@@ -3281,7 +3281,7 @@ function compareComparableValues(left: unknown, right: unknown, fieldSchema: Jso
  * the manifest-declared schema types. `order === 'ASC'` produces ascending
  * order, `'DESC'` descending. Missing cursor values (null/'') bucket last in
  * both directions (Core §8 "Stable sort") — matches the SQL path's
- * `__cursor_missing ASC` key.
+ * missing-flag ASC key.
  */
 function compareLogicalPositions(
   left: LogicalPosition | null | undefined,
@@ -3316,7 +3316,7 @@ function compareLogicalPositions(
 // (no cursor_field declared, or both values equal/present-and-equal). A missing
 // cursor value sorts after a present one in both directions.
 // A cursor value counts as "missing" when null/undefined or the empty string,
-// matching the SQL `__cursor_missing` bucket.
+// matching the SQL missing-value bucket.
 function isMissingCursorValue(value: unknown): boolean {
   return value === null || value === "";
 }
@@ -3359,7 +3359,10 @@ function buildRecordSortPosition(
     if (rawData?.[field] !== undefined) {
       return rawData[field];
     }
-    return decodedKeyParts[index] ?? null;
+    const fallback = decodedKeyParts[index] ?? null;
+    return fallback !== null && isNumericFieldSchema(getFieldSchema(manifestStream, field))
+      ? Number(fallback)
+      : fallback;
   });
 
   return {
@@ -3853,39 +3856,14 @@ function appendSqliteGrantTimeConstraint(
 }
 
 /**
- * Exact-parity note (vs `compareLogicalPositions`):
+ * SQLite pagination uses numeric scalar order and BINARY (UTF-8 byte) text
+ * order. Missing cursor values sort last in both directions. The shared
+ * `sqliteRecordOrder` terms also drive its seeks and fan-in comparator.
  *
- * - The JS comparator sorts by `cursor_field` (if declared), with missing
- *   values (null or '') sorted **after** present values in ASC, **before**
- *   in DESC. We reproduce that with a `__cursor_missing` boolean in the
- *   SELECT list and an explicit two-key ORDER BY: `__cursor_missing ASC/DESC`
- *   first, then the field value.
- * - Within "present cursor" rows the JS comparator uses either numeric compare
- *   (integer/number schemas) or `localeCompare` (strings). SQLite's ORDER BY
- *   on `json_extract(...)` uses numeric ordering for SQLite's INTEGER/REAL
- *   affinity values and BINARY collation for TEXT. For our corpus every
- *   declared `cursor_field` is typed as integer/number or as a string with
- *   `format: date` / `format: date-time` (ISO-8601), where lexical BINARY
- *   order equals temporal order — semantic parity holds.
- * - Nullable variants like `["string", "null"]` or `["integer", "null"]` are
- *   semantically the same sort basis with additional null rows; those null
- *   rows fall into the `__cursor_missing` bucket which ORDER BY already
- *   places after present values in ASC (before in DESC). No parity break.
- * - For any cursor_field whose non-null type is not numeric and not ISO
- *   date/date-time (e.g. a plain `"string"` or `["string", "null"]` with no
- *   date/date-time format), we bail out rather than silently accept
- *   BINARY-vs-localeCompare drift. That leaves slice-2 handlers free to
- *   narrow the scope later without anyone relying on accidental parity today.
- * - `primary_key` parts fall through to the same rules. Every stream in
- *   our corpus uses `["id"]` primary keys — always strings of ASCII hex /
- *   UUID / etc. BINARY == localeCompare on ASCII.
- */
-/**
- * Returns `{supported, reason}` for a stream's `cursor_field`. A supported
- * cursor field means the SQL-pushdown records path will produce results
- * consistent with the JS comparator. Unsupported shapes route the stream
- * through `fetchVisibleRecordRowsInMemory` instead — see the fallback in
- * `fetchVisibleRecordRowsPaginated`.
+ * SQL pushdown supports numeric and ISO date/date-time cursor schemas.
+ * Other cursor shapes retain the existing in-memory logical comparator.
+ * That path uses localeCompare for strings; BINARY and localeCompare are
+ * distinct collations, including for ASCII strings.
  */
 function classifyCursorFieldSqlSupport(manifestStream: ManifestStream | null | undefined): {
   reason: string | null;
@@ -3931,70 +3909,93 @@ function logSqlFallbackOnce(connectorId: string, stream: string, reason: string)
   console.warn(`[records] stream ${connectorId}/${stream} using in-memory pagination fallback: ${reason}`);
 }
 
-/**
- * Build the seek predicate WHERE clause that selects rows strictly after
- * `cursorPosition` in the requested `order`, honoring the same missing/present
- * bucketing as `compareLogicalPositions`.
- *
- * Returns `{sql, binds}` where `sql` is a ready-to-inject predicate fragment
- * (no leading AND) and `binds` is the positional params in order.
- *
- * Assumes primary_key has exactly one scalar column (verified against the
- * current corpus; widening this requires a per-pk-column seek builder).
- */
-function buildCursorSeekClause(
+// SQLite list-order invariant. SQL ordering, continuation and fan-in ranking
+// all consume these same terms: missing bucket, normalized cursor, full typed
+// primary key, then (for changes) encoded identity as a final tie-break.
+function sqliteRecordOrder(
   manifestStream: ManifestStream | null | undefined,
-  cursorPosition: Required<LogicalPosition>,
-  order: PageOrder
-): { binds: BindValue[]; sql: string } {
-  const cursorField = manifestStream?.cursor_field || null;
-  const primaryKeyFields = normalizePrimaryKey(manifestStream?.primary_key);
-  if (primaryKeyFields.length === 0) {
-    throw new Error("[records] cursor seek requires a manifest-declared primary_key");
+  order: PageOrder,
+  source: "changes" | "records" = "records"
+) {
+  const fields = normalizePrimaryKey(manifestStream?.primary_key);
+  if (!fields.length) {
+    throw new Error("[records] manifest primary_key is required");
   }
-  if (primaryKeyFields.length > 1) {
-    // Parity with `compareLogicalPositions` for multi-part primary keys would
-    // require nested `OR (pk0 = pv0 AND (pk1 > pv1 OR …))` — worth building
-    // when a corpus stream actually uses one. Today every stream has ["id"].
-    throw new Error("[records] SQL cursor seek is not implemented for multi-part primary keys");
+  const tupleKey = "CASE WHEN json_valid(record_key) THEN json_type(record_key) = 'array' ELSE 0 END";
+  const primaryKeyColumns = fields.map((field, index) => {
+    // decodeKey accepts scalar and array envelopes even for a single field.
+    const scalarKey = index === 0 ? "record_key" : "NULL";
+    let key = `CASE WHEN (${tupleKey}) THEN json_extract(record_key, '$[${index}]') ELSE ${scalarKey} END`;
+    if (isNumericFieldSchema(getFieldSchema(manifestStream, field))) {
+      key = `CAST(${key} AS NUMERIC)`;
+    }
+    const path = jsonPathForTopLevelField(field).replace(/'/g, "''");
+    // Match buildRecordSortPosition: omitted fields use the envelope key;
+    // explicit JSON null remains null. Tombstones always use the key.
+    return `CASE WHEN deleted = 1 OR json_type(record_json, '${path}') IS NULL THEN ${key} ELSE ${jsonExtractExpr(field)} END`;
+  });
+  const terms: Array<{
+    sql: string;
+    order: PageOrder;
+    value: (position: SqlitePosition | null | undefined) => unknown;
+  }> = [];
+  if (manifestStream?.cursor_field) {
+    const cursor = source === "changes" ? "__cv" : jsonExtractExpr(manifestStream.cursor_field);
+    const missing = `(${cursor} IS NULL OR ${cursor} = '')`;
+    terms.push(
+      {
+        sql: `CASE WHEN ${missing} THEN 1 ELSE 0 END`,
+        order: "ASC",
+        value: (position) => (isMissingCursorValue(position?.cursor_value ?? null) ? 1 : 0),
+      },
+      {
+        sql: `CASE WHEN ${missing} THEN NULL ELSE ${cursor} END`,
+        order,
+        value: (position) => (isMissingCursorValue(position?.cursor_value ?? null) ? null : position?.cursor_value),
+      }
+    );
   }
-  const [pkField] = primaryKeyFields;
-  if (!pkField) {
-    throw new Error("[records] cursor seek requires a manifest-declared primary_key");
+  primaryKeyColumns.forEach((column, index) => {
+    terms.push({
+      sql: source === "changes" ? `__pk_${index}` : column,
+      order,
+      value: (position) => position?.primary_key?.[index] ?? null,
+    });
+  });
+  if (source === "changes") {
+    terms.push({ sql: "record_key", order, value: (position) => position?.record_key ?? null });
   }
-  const pkExpr = jsonExtractExpr(pkField);
-
-  const cursorMissing = cursorPosition.cursor_value === null || cursorPosition.cursor_value === "";
-  const pkValue = asSqliteBindValue(cursorPosition.primary_key[0] ?? null);
-  const cursorValue = asSqliteBindValue(cursorPosition.cursor_value);
-  const cmp = order === "ASC" ? ">" : "<";
-
-  if (!cursorField) {
-    // No cursor_field declared → sort key is just primary_key.
-    return { binds: [pkValue], sql: `AND ${pkExpr} ${cmp} ?` };
-  }
-
-  const cursorExpr = jsonExtractExpr(cursorField);
-  // __cursor_missing in the SELECT is (cursor IS NULL OR cursor = ''). The
-  // missing bucket sorts after every present value in BOTH directions (Core §8
-  // "Stable sort"); inside it rows are ordered by pk in the requested direction.
-  const missingSql = `(${cursorExpr} IS NULL OR ${cursorExpr} = '')`;
-  if (cursorMissing) {
-    // Every present row came before this position: seek inside the missing
-    // bucket by pk only.
-    return {
-      binds: [pkValue],
-      sql: `AND ${missingSql} AND ${pkExpr} ${cmp} ?`,
-    };
-  }
-  // Strictly after a present position = same cursor and later pk, OR a later
-  // present cursor, OR the whole missing bucket (which comes last).
   return {
-    binds: [cursorValue, pkValue, cursorValue],
-    sql:
-      `AND ((${cursorExpr} = ? AND ${pkExpr} ${cmp} ?) ` +
-      `  OR (${cursorExpr} IS NOT NULL AND ${cursorExpr} <> '' AND ${cursorExpr} ${cmp} ?) ` +
-      `  OR ${missingSql})`,
+    primaryKeyColumns,
+    orderByParts: terms.map((term) => `${term.sql} ${term.order}`),
+    compare(left: SqlitePosition | null | undefined, right: SqlitePosition | null | undefined): number {
+      for (const term of terms) {
+        const cmp = compareSqliteSqlValues(term.value(left), term.value(right));
+        if (cmp) {
+          return cmp * (term.order === "ASC" ? 1 : -1);
+        }
+      }
+      return 0;
+    },
+    seek(position: SqlitePosition): { binds: BindValue[]; sql: string } {
+      const binds: BindValue[] = [];
+      const branches = terms.map((term, index) => {
+        const equal = terms.slice(0, index).map((prefix) => {
+          binds.push(asSqliteBindValue(prefix.value(position)));
+          return `${prefix.sql} IS ?`;
+        });
+        const value = asSqliteBindValue(term.value(position));
+        let later: string;
+        if (value === null) {
+          later = term.order === "ASC" ? `${term.sql} IS NOT NULL` : "0";
+        } else {
+          binds.push(value);
+          later = term.order === "ASC" ? `${term.sql} > ?` : `(${term.sql} < ? OR ${term.sql} IS NULL)`;
+        }
+        return `(${[...equal, later].join(" AND ")})`;
+      });
+      return { binds, sql: `AND (${branches.join(" OR ")})` };
+    },
   };
 }
 
@@ -4006,7 +4007,7 @@ function buildCursorSeekClause(
  *
  * Contract:
  *   - Access-control filters (time_constraint, resources) are applied in SQL.
- *   - ORDER BY is applied in SQL, reproducing `compareLogicalPositions`.
+ *   - ORDER BY uses the shared SQLite sort terms.
  *   - Cursor-based seek is applied in SQL; no result is materialized for
  *     rows before the cursor.
  *   - Request-side filters (compiledFilters) are kept in JS per the spec;
@@ -4088,7 +4089,6 @@ function fetchVisibleRecordRowsInMemory({
 
 interface PaginatedSqlParts {
   orderByParts: string[];
-  primaryKeyField: string;
   seekBinds: BindValue[];
   seekSql: string;
   selectParts: string[];
@@ -4104,24 +4104,8 @@ function buildPaginatedSqlParts(
   cursorPosition: Required<LogicalPosition> | null,
   order: PageOrder
 ): PaginatedSqlParts {
-  const cursorField = manifestStream?.cursor_field || null;
-  const primaryKeyFields = normalizePrimaryKey(manifestStream?.primary_key);
-  if (primaryKeyFields.length === 0) {
-    throw new Error("[records] manifest primary_key is required");
-  }
-  const [primaryKeyField] = primaryKeyFields;
-  if (!primaryKeyField) {
-    throw new Error("[records] manifest primary_key is required");
-  }
-
+  const ordering = sqliteRecordOrder(manifestStream, order);
   const selectParts = ["record_key", "record_json", "emitted_at"];
-  if (cursorField) {
-    selectParts.push(`${jsonExtractExpr(cursorField)} AS __cursor_val`);
-    selectParts.push(
-      `CASE WHEN ${jsonExtractExpr(cursorField)} IS NULL OR ${jsonExtractExpr(cursorField)} = '' ` +
-        "     THEN 1 ELSE 0 END AS __cursor_missing"
-    );
-  }
 
   const whereParts = ["connector_instance_id = ?", "stream = ?", "deleted = 0"];
   const whereBinds: BindValue[] = [connectorInstanceId, stream];
@@ -4135,20 +4119,12 @@ function buildPaginatedSqlParts(
   let seekSql = "";
   const seekBinds: BindValue[] = [];
   if (cursorPosition) {
-    const seek = buildCursorSeekClause(manifestStream, cursorPosition, order);
+    const seek = ordering.seek(cursorPosition);
     seekSql = seek.sql;
     seekBinds.push(...seek.binds);
   }
 
-  const orderByParts: string[] = [];
-  if (cursorField) {
-    // Missing cursor values last in both directions (Core §8 "Stable sort").
-    orderByParts.push("__cursor_missing ASC");
-    orderByParts.push(`__cursor_val ${order}`);
-  }
-  orderByParts.push(`${jsonExtractExpr(primaryKeyField)} ${order}`);
-
-  return { orderByParts, primaryKeyField, seekBinds, seekSql, selectParts, whereBinds, whereParts };
+  return { orderByParts: ordering.orderByParts, seekBinds, seekSql, selectParts, whereBinds, whereParts };
 }
 
 function fetchVisibleRecordRowsPaginated({
@@ -4161,7 +4137,13 @@ function fetchVisibleRecordRowsPaginated({
   cursorPosition,
   limit,
   order,
-}: FetchVisibleRecordsArgs): { hasMore: boolean; rows: VisibleRecordRow[]; scanned: number; underread: boolean } {
+}: FetchVisibleRecordsArgs): {
+  frontier?: LogicalPosition;
+  hasMore: boolean;
+  rows: VisibleRecordRow[];
+  scanned: number;
+  underread: boolean;
+} {
   // Graceful per-stream fallback for manifests whose cursor_field is not
   // compatible with the SQL sort path. Registration-time validation catches
   // this for freshly-registered connectors (see auth.js), but stale DB rows
@@ -4199,9 +4181,9 @@ function fetchVisibleRecordRowsPaginated({
   // Post-SQL we run request-side filters in JS. When request-filters reject
   // rows, we need to keep reading from the driver until we've collected
   // `limit + 1` post-filter rows. Use iterate() with a generous batch bound —
-  // if the driver's LIMIT cuts us off before filling the page, we re-issue
-  // with the offset advanced. For the no-request-filter case (the overwhelming
-  // majority of traffic) one batch of `limit + 1` is enough.
+  // if the driver's LIMIT cuts us off before filling the page, we return
+  // an incomplete prefix and its examined frontier for continuation. Without
+  // request filters one batch of `limit + 1` is enough.
   const hasRequestFilters = compiledFilters && compiledFilters.length > 0;
   const sqlLimit = hasRequestFilters
     ? Math.max(limit * 4, 100) // headroom for rejections
@@ -4219,10 +4201,12 @@ function fetchVisibleRecordRowsPaginated({
   // / cursor seek; SQL composed in JS as today; LIMIT N+1 included.
   const collected: VisibleRecordRow[] = [];
   let scanned = 0;
+  let frontier: LogicalPosition | undefined;
 
   for (const row of iterateDynamicSqlAcknowledged<StoredRecordRow>(sql, [...whereBinds, ...seekBinds, sqlLimit])) {
     scanned += 1;
     const rawData = parseStoredRecordData(row.record_json);
+    frontier = buildRecordSortPosition(rawData, row.record_key, manifestStream);
     if (compiledFilters.length && !passesRequestFilters(rawData, compiledFilters)) {
       continue;
     }
@@ -4240,12 +4224,10 @@ function fetchVisibleRecordRowsPaginated({
   const hasMore = collected.length > limit;
   const rows = hasMore ? collected.slice(0, limit) : collected;
 
-  // If we had request filters AND we exhausted the SQL batch without filling
-  // the page, we under-return (hasMore=false even though more rows may exist
-  // past our sqlLimit window). Acceptable for this tranche: the dashboard
-  // doesn't use request filters in its hot paths. A follow-up slice can
-  // loop the SQL offset forward in that case.
-  return { hasMore, rows, scanned, underread: hasRequestFilters && !hasMore && scanned >= sqlLimit };
+  // A full raw batch without visible lookahead proves only an incomplete
+  // prefix. Resume after the examined frontier, including rejected rows.
+  const underread = hasRequestFilters && !hasMore && scanned >= sqlLimit;
+  return { ...(underread && frontier ? { frontier } : {}), hasMore, rows, scanned, underread };
 }
 
 function buildResponseRecord(
@@ -5345,16 +5327,29 @@ function readSqliteChangesWindowForFanIn(
 ): FanInWindowRead {
   const { compiledFilters, connectorInstanceId, effective, mStream, recordIdentity } = ctx;
   assertChangesSinceRetained(connectorInstanceId, stream, window.since);
-  const { binds, sql } = buildSqliteChangeCandidatesSql(connectorInstanceId, stream, mStream, order, window, limits.budget);
+  const { binds, sql } = buildSqliteChangeCandidatesSql(
+    connectorInstanceId,
+    stream,
+    mStream,
+    order,
+    window,
+    limits.budget
+  );
   // REVIEWED-DYNAMIC: key-only candidate seek; ORDER BY mirrors the list
   // order and LIMIT bounds the rows read.
   const candidates = [...iterateDynamicSqlAcknowledged<SqliteChangeCandidateRow>(sql, binds)];
-  const read: FanInWindowRead = { candidates: candidates.length, examined: 0, frontier: window.after, hasMore: false, rows: [] };
+  const read: FanInWindowRead = {
+    candidates: candidates.length,
+    examined: 0,
+    frontier: window.after,
+    hasMore: false,
+    rows: [],
+  };
   let chars = 0;
   for (const candidate of candidates) {
     const key: SqliteChangeKey = {
       cursor_value: candidate.__cv ?? null,
-      primary_key: [candidate.__pk],
+      primary_key: normalizePrimaryKey(mStream.primary_key).map((_, index) => candidate[`__pk_${index}`]),
       record_key: candidate.record_key,
     };
     read.examined += 1;
@@ -5384,7 +5379,7 @@ function readSqliteChangesWindowForFanIn(
 
 interface SqliteChangeCandidateRow {
   __cv?: unknown;
-  __pk: unknown;
+  [column: string]: unknown;
   record_key: string;
   state_version: number;
 }
@@ -5402,8 +5397,8 @@ function isNumericFieldSchema(fieldSchema: JsonSchema | null): boolean {
 
 // Key-only candidates of one change window in list order, strictly after
 // `window.after`. Both halves expose the same columns: __cv (null for
-// tombstones), __pk (typed; the record key cast to the declared type when the
-// row has no key value) and record_key as the final tie-break.
+// tombstones), __pk_N (all typed key parts, recovered from the encoded key
+// when the row has no key value) and record_key as the final tie-break.
 function buildSqliteChangeCandidatesSql(
   connectorInstanceId: string,
   stream: string,
@@ -5413,21 +5408,10 @@ function buildSqliteChangeCandidatesSql(
   limit: number
 ): { binds: BindValue[]; sql: string } {
   const cursorField = manifestStream?.cursor_field || null;
-  const primaryKeyFields = normalizePrimaryKey(manifestStream?.primary_key);
-  const [pkField] = primaryKeyFields;
-  if (!pkField) {
-    throw new Error("[records] manifest primary_key is required");
-  }
-  let typedRecordKey = "record_key";
-  if (primaryKeyFields.length > 1) {
-    typedRecordKey = "json_extract(record_key, '$[0]')";
-  } else if (isNumericFieldSchema(getFieldSchema(manifestStream, pkField))) {
-    typedRecordKey = "CAST(record_key AS NUMERIC)";
-  }
-  const pkJson = jsonExtractExpr(pkField);
+  const ordering = sqliteRecordOrder(manifestStream, order, "changes");
+  const pkColumns = ordering.primaryKeyColumns.map((column, index) => `${column} AS __pk_${index}`);
   const cvExpr = cursorField ? `CASE WHEN deleted = 1 THEN NULL ELSE ${jsonExtractExpr(cursorField)} END` : "NULL";
-  const pkExpr = `CASE WHEN deleted = 1 OR ${pkJson} IS NULL THEN ${typedRecordKey} ELSE ${pkJson} END`;
-  const columns = `record_key, version AS state_version, ${cvExpr} AS __cv, ${pkExpr} AS __pk`;
+  const columns = `record_key, version AS state_version, ${cvExpr} AS __cv, ${pkColumns.join(", ")}`;
   const current = `SELECT ${columns} FROM records
      WHERE connector_instance_id = ? AND stream = ? AND version > ? AND version <= ?`;
   const atHorizon = `SELECT ${columns} FROM record_changes AS c
@@ -5450,31 +5434,13 @@ function buildSqliteChangeCandidatesSql(
     window.max,
     window.max,
   ];
-  const cmp = order === "ASC" ? ">" : "<";
-  let seek = "";
   const after = window.after as SqliteChangeKey | null;
-  if (after) {
-    const pkValue = asSqliteBindValue(after.primary_key[0] ?? null);
-    const tail = `(__pk ${cmp} ? OR (__pk = ? AND record_key ${cmp} ?))`;
-    if (!cursorField || isMissingCursorValue(after.cursor_value ?? null)) {
-      seek = `AND __missing = 1 AND ${tail}`;
-      binds.push(pkValue, pkValue, after.record_key);
-    } else {
-      const cursorValue = asSqliteBindValue(after.cursor_value);
-      seek = `AND (__missing = 1 OR (__missing = 0 AND (__cv ${cmp} ? OR (__cv = ? AND ${tail}))))`;
-      binds.push(cursorValue, cursorValue, pkValue, pkValue, after.record_key);
-    }
-  }
-  binds.push(limit);
-  // Null and '' are one missing bucket: the seek above resumes inside it by
-  // (__pk, record_key) alone, so the ORDER BY must not rank __cv within it.
+  const seek = after ? ordering.seek(after) : { binds: [], sql: "" };
+  binds.push(...seek.binds, limit);
   const sql = `
-    SELECT record_key, state_version, __cv, __pk FROM (
-      SELECT u.*, CASE WHEN u.__cv IS NULL OR u.__cv = '' THEN 1 ELSE 0 END AS __missing
-        FROM (${current} UNION ALL ${atHorizon}) AS u
-    ) AS t
-    WHERE 1 = 1 ${seek}
-    ORDER BY __missing ASC, CASE WHEN __missing = 1 THEN NULL ELSE __cv END ${order}, __pk ${order}, record_key ${order}
+    SELECT * FROM (${current} UNION ALL ${atHorizon}) AS t
+    WHERE 1 = 1 ${seek.sql}
+    ORDER BY ${ordering.orderByParts.join(", ")}
     LIMIT ?`;
   return { binds, sql };
 }
@@ -5520,9 +5486,19 @@ async function buildPagedRecordsPage({
   requestParams,
   requestWarnings,
   stream,
-}: PagedRecordsArgs): Promise<{ positions: LogicalPosition[]; response: ListResponse }> {
+}: PagedRecordsArgs): Promise<{
+  frontier?: LogicalPosition;
+  underread: boolean;
+  positions: LogicalPosition[];
+  response: ListResponse;
+}> {
   const cursorPosition = normalizePaginationCursor(paginationCursor, order);
-  const { rows: pagedRows, hasMore } = fetchVisibleRecordRowsPaginated({
+  const {
+    rows: pagedRows,
+    hasMore,
+    underread,
+    frontier,
+  } = fetchVisibleRecordRowsPaginated({
     compiledFilters,
     connectorId,
     connectorInstanceId,
@@ -5553,11 +5529,13 @@ async function buildPagedRecordsPage({
 
   const response: ListResponse = {
     data,
-    has_more: hasMore,
+    has_more: hasMore || underread,
     object: "list",
   };
 
-  if (hasMore && data.length) {
+  if (underread && frontier) {
+    response.next_cursor = encodeRecordsPageCursor(frontier, order);
+  } else if (hasMore && data.length) {
     const lastRow = effectivePageRows.at(-1);
     if (!lastRow) {
       throw new Error("[records] non-empty record page has no terminal row");
@@ -5589,7 +5567,12 @@ async function buildPagedRecordsPage({
   }
 
   attachRequestWarningsToResponse(response, requestWarnings);
-  return { positions: effectivePageRows.map((row) => row.sortPosition), response };
+  return {
+    ...(frontier ? { frontier } : {}),
+    underread,
+    positions: effectivePageRows.map((row) => row.sortPosition),
+    response,
+  };
 }
 
 interface ValidatedQueryContext {
@@ -7614,14 +7597,15 @@ function finalizeFanInListWindow(
 // tie-break, and the merge takes heads in rank order. A connection that may
 // hold more rows than its buffer shows contributes a blocking frontier: once
 // its buffer is used up, no row ranked after that frontier is emitted on this
-// page. Each connection is consumed strictly in its own order, so no row is
-// emitted twice or skipped, whatever the ranks.
+// page. On an unchanged dataset, each connection is consumed strictly in its
+// own order, so no row is emitted twice or skipped.
 //
 // Records pages: each buffer is up to `limit` rows after that connection's
 // last emitted row. The cursor also holds the position of the last emitted row;
 // rows a concurrent write placed behind it are passed over (as a
 // single-connection keyset cursor does) and the buffer is refilled before any
-// head is chosen.
+// head is chosen. These are live keysets: an emitted identity moved ahead
+// may reappear, and an unread identity moved behind the cursor may be omitted.
 //
 // Change pages: each connection's window `(since, max]` is frozen on page 1.
 // Its buffer comes from one key-only query that seeks strictly after the
@@ -7693,6 +7677,7 @@ interface FanInLocalRows {
 }
 
 interface FanInLocalRecordsPage extends FanInLocalRows {
+  resumeFrontier?: string;
   meta?: RecordResponseMeta;
 }
 
@@ -7921,7 +7906,7 @@ async function readSqliteFanInRecordsPage(
   manifest: ReadManifest | null
 ): Promise<FanInLocalRecordsPage> {
   const ctx = await validateQueryRecordsRequest(target, stream, grant, params, manifest);
-  const { positions, response } = await buildPagedRecordsPage({
+  const { positions, response, frontier, underread } = await buildPagedRecordsPage({
     compiledFilters: ctx.compiledFilters,
     connectorId: ctx.connectorId,
     connectorInstanceId: ctx.connectorInstanceId,
@@ -7940,6 +7925,7 @@ async function readSqliteFanInRecordsPage(
   });
   return {
     hasMore: response.has_more,
+    ...(underread && frontier ? { frontier, resumeFrontier: encodeRecordsPageCursor(frontier, ctx.order) } : {}),
     ...(response.meta ? { meta: response.meta } : {}),
     rows: response.data.map((record, index) => {
       const position = positions[index] ?? null;
@@ -8029,57 +8015,6 @@ function compareSqliteSqlValues(left: unknown, right: unknown): number {
 
 type SqlitePosition = LogicalPosition & { record_key?: string };
 
-// The comparator of the SQLite list and change-window ORDER BY: missing
-// bucket last, cursor value, the first primary-key part, then the record key
-// when both positions carry one, in the requested direction.
-function compareSqliteSqlPositions(
-  left: SqlitePosition | null | undefined,
-  right: SqlitePosition | null | undefined,
-  manifestStream: ManifestStream | null | undefined,
-  order: PageOrder
-): number {
-  const direction = order === "ASC" ? 1 : -1;
-  if (manifestStream?.cursor_field) {
-    const leftMissing = isMissingCursorValue(left?.cursor_value ?? null);
-    const rightMissing = isMissingCursorValue(right?.cursor_value ?? null);
-    if (leftMissing !== rightMissing) {
-      return leftMissing ? 1 : -1;
-    }
-    if (!leftMissing) {
-      const cmp = compareSqliteSqlValues(left?.cursor_value, right?.cursor_value);
-      if (cmp !== 0) {
-        return cmp * direction;
-      }
-    }
-  }
-  const pkCmp = compareSqliteSqlValues(left?.primary_key?.[0], right?.primary_key?.[0]);
-  if (pkCmp !== 0) {
-    return pkCmp * direction;
-  }
-  if (typeof left?.record_key === "string" && typeof right?.record_key === "string") {
-    return compareSqliteSqlValues(left.record_key, right.record_key) * direction;
-  }
-  return 0;
-}
-
-// The order SQLite's own records page uses for this stream: the SQL ORDER BY
-// mirror, or the in-memory fallback comparator. Change windows are always
-// ordered in SQL.
-function sqliteFanInComparator(
-  manifestStream: ManifestStream | null | undefined,
-  source: "changes" | "records"
-): (
-  left: SqlitePosition | null | undefined,
-  right: SqlitePosition | null | undefined,
-  manifestStream: ManifestStream | null | undefined,
-  order: PageOrder
-) => number {
-  if (source === "changes" || classifyCursorFieldSqlSupport(manifestStream).supported) {
-    return compareSqliteSqlPositions;
-  }
-  return compareLogicalPositions;
-}
-
 // Rank fan-in candidates in the order the backend's own reader uses, then by
 // canonical connection index, then by position in `entries` (so an entry
 // appended after an identical key ranks after it). Ranks align with `entries`.
@@ -8092,18 +8027,17 @@ async function rankFanInKeys(
   if (isPostgresStorageBackend()) {
     return (await Reflect.apply(postgresRankFanInKeys, undefined, [entries, order])) as number[];
   }
-  const compare = sqliteFanInComparator(manifestStream, source);
+  const compare =
+    source === "changes" || classifyCursorFieldSqlSupport(manifestStream).supported
+      ? sqliteRecordOrder(manifestStream, order, source).compare
+      : (left: SqlitePosition | null, right: SqlitePosition | null) =>
+          compareLogicalPositions(left, right, manifestStream, order);
   const direction = order === "ASC" ? 1 : -1;
   const sorted = entries
     .map((entry, index) => ({ entry, index }))
     .sort(
       (left, right) =>
-        compare(
-          left.entry.key as SqlitePosition | null,
-          right.entry.key as SqlitePosition | null,
-          manifestStream,
-          order
-        ) ||
+        compare(left.entry.key as SqlitePosition | null, right.entry.key as SqlitePosition | null) ||
         (left.entry.binding - right.entry.binding) * direction ||
         left.index - right.index
     );
@@ -8228,7 +8162,7 @@ function withLimitAndExtraWarnings(
 // is unknown. Returns the buffer to merge and advances `after[index]`.
 //
 // Invariant: `after[index]` only ever passes rows this connection emitted or
-// rows ranked behind `at`, which can never be emitted again; the frontier this
+// positions ranked behind `at`, which cannot be emitted later; the frontier this
 // returns is never beyond a row of the connection that has not been ranked.
 // When the refill rounds run out, the connection blocks at the last row it
 // passed over, so this page emits nothing ranked after it and the next page
@@ -8278,7 +8212,12 @@ async function queryRecordsFanInPage(
   manifest: ReadManifest | null,
   opts: FanInOptions,
   extraWarnings: readonly ReadWarning[],
-  token: { order: PageOrder; query: Record<string, unknown>; scope: FanInTokenScope; state: Record<string, unknown> | null }
+  token: {
+    order: PageOrder;
+    query: Record<string, unknown>;
+    scope: FanInTokenScope;
+    state: Record<string, unknown> | null;
+  }
 ): Promise<ListResponse> {
   const manifestStream = manifest?.streams?.find((entry) => entry.name === stream) ?? null;
   const { order } = token;
@@ -8293,7 +8232,12 @@ async function queryRecordsFanInPage(
     return readFanInRecordsPage(binding, stream, grant, { ...base, ...(cursor ? { cursor } : {}), limit }, manifest);
   };
 
-  let pages = await mapWithConcurrency(bindings, fanInReadConcurrency(opts), (_, index) => read(index), fanInMapOptions(opts));
+  let pages = await mapWithConcurrency(
+    bindings,
+    fanInReadConcurrency(opts),
+    (_, index) => read(index),
+    fanInMapOptions(opts)
+  );
   const requestedCount = typeof requestParams.count === "string" ? requestParams.count : null;
   const requestedWindow = typeof requestParams.window === "string" ? requestParams.window : null;
   const acc = fanInListAccumulator(requestedCount, requestedWindow);
@@ -8312,7 +8256,11 @@ async function queryRecordsFanInPage(
 
   const merged = await mergeFanInHeads(pages, limit, manifestStream, order, "records");
   merged.consumed.forEach((count, index) => {
-    const resume = count > 0 ? pages[index]?.rows[count - 1]?.resume : undefined;
+    const page = pages[index];
+    let resume = count > 0 ? page?.rows[count - 1]?.resume : undefined;
+    if (page && count === page.rows.length && page.resumeFrontier) {
+      resume = page.resumeFrontier;
+    }
     if (resume) {
       after[index] = resume;
     }
