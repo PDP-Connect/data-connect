@@ -788,6 +788,10 @@ test("mid-wait successful probe invokes the generic observation hook before the 
   const observed = new Promise<void>((resolve) => {
     resolveObserved = resolve;
   });
+  let releaseObservation!: () => void;
+  const observationPending = new Promise<void>((resolve) => {
+    releaseObservation = resolve;
+  });
   const detector = createMidWaitSurfaceLossDetector(
     READY_SURFACE,
     {
@@ -798,18 +802,28 @@ test("mid-wait successful probe invokes the generic observation hook before the 
       },
     },
     {
-      // biome-ignore lint/suspicious/useAwait: localized test assertion preserves its explicit contract.
       onProbeResult: async (result) => {
         assert.equal(result.ok, true);
-        assert.equal(probeCount, 1, "the first observation must finish before another poll is scheduled");
-        resolveObserved();
+        if (probeCount === 1) {
+          resolveObserved();
+          await observationPending;
+        }
       },
       pollIntervalMs: 1,
     }
   );
 
-  await observed;
-  detector.cancel();
-  await new Promise((resolve) => setTimeout(resolve, 5));
-  assert.equal(probeCount, 1);
+  try {
+    await observed;
+    // Leave the first hook pending for many 1 ms poll intervals.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(probeCount, 1, "a pending observation must block the next probe");
+
+    releaseObservation();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.ok(probeCount >= 2, "polling must resume after the observation resolves");
+  } finally {
+    detector.cancel();
+    releaseObservation();
+  }
 });
