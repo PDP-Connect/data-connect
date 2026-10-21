@@ -167,6 +167,23 @@ test("older installed digest exposes Update only when a latest target exists", (
   });
 });
 
+test("a server-flagged review makes the update row a review row, never a one-click Update", () => {
+  const catalog = parseConnectorInstallCatalogResponse(connectorInstallCatalogFixture).data;
+  const status = parseConnectorInstallStatusResponse(connectorInstallStatusFixture).data;
+  const lifecycle = {
+    catalog: catalog.find((candidate) => candidate.connector_id === "github" && candidate.latest) ?? null,
+    installed: status[0] ?? null,
+  };
+  assert.equal(connectorInstallRowModel(entry("github"), lifecycle, { reviewRequired: true }).reviewRequired, true);
+  assert.equal(connectorInstallRowModel(entry("github"), lifecycle).reviewRequired, false);
+  const current = connectorInstallRowModel(
+    entry("github"),
+    { catalog: lifecycle.catalog, installed: null },
+    { reviewRequired: true }
+  );
+  assert.equal(current.reviewRequired, false, "review applies only to updates");
+});
+
 test("explicit unavailable binding blocks Install and surfaces its server reason", () => {
   const catalog = parseConnectorInstallCatalogResponse(connectorInstallCatalogFixture).data;
   const signal = connectorInstallRowModel(entry("signal", "preview"), {

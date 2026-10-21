@@ -11,16 +11,16 @@
 
 import {
   type ConnectorInstallCatalogEntry,
-  type ConnectorLocalSource,
   type ConnectorInstallSnapshot,
   type ConnectorInstallStatus,
+  type ConnectorLocalSource,
   parseConnectorInstallCatalogResponse,
   parseConnectorInstallResponse,
-  parseConnectorLocalSourcesResponse,
   parseConnectorInstallStatusResponse,
+  parseConnectorLocalSourcesResponse,
 } from "./connector-install-contract.ts";
-import { describeErrorText } from "./describe-error.ts";
 import { isTransientConnectorInstallCatalogError } from "./connector-install-transient.ts";
+import { describeErrorText } from "./describe-error.ts";
 import {
   getOwnerToken,
   getRsInternalUrl,
@@ -129,6 +129,48 @@ export async function updateConnector(connectorId: string): Promise<ConnectorIns
     method: "POST",
   });
   return parseStatusRecord(payload);
+}
+
+/** All update surfaces use the reference server's durable plan and batch. */
+export async function createConnectorUpdatePlan(): Promise<unknown> {
+  return await connectorInstallFetch("/v1/owner/connector-updates/plans", { method: "POST" });
+}
+
+export async function getConnectorUpdatePlan(planId: string): Promise<unknown> {
+  return await connectorInstallFetch(`/v1/owner/connector-updates/plans/${encodeURIComponent(planId)}`);
+}
+
+/** Assumed route: server issues a one-use consent bound to one plan item and its exact target digest. */
+export async function createConnectorUpdateConsent(input: {
+  connectorId: string;
+  planId: string;
+  targetDigest: string;
+}): Promise<unknown> {
+  return await connectorInstallFetch(`/v1/owner/connector-updates/plans/${encodeURIComponent(input.planId)}/consents`, {
+    body: JSON.stringify({ connector_id: input.connectorId, target_digest: input.targetDigest }),
+    method: "POST",
+  });
+}
+
+export async function createConnectorUpdateBatch(input: {
+  consentToken?: string;
+  idempotencyKey: string;
+  planId: string;
+  selectedConnectorIds?: readonly string[];
+}): Promise<unknown> {
+  return await connectorInstallFetch("/v1/owner/connector-updates/batches", {
+    body: JSON.stringify({
+      ...(input.consentToken ? { consent_token: input.consentToken } : {}),
+      idempotency_key: input.idempotencyKey,
+      plan_id: input.planId,
+      ...(input.selectedConnectorIds ? { selected_connector_ids: input.selectedConnectorIds } : {}),
+    }),
+    method: "POST",
+  });
+}
+
+export async function getConnectorUpdateBatch(batchId: string): Promise<unknown> {
+  return await connectorInstallFetch(`/v1/owner/connector-updates/batches/${encodeURIComponent(batchId)}`);
 }
 
 export async function uninstallConnector(connectorKey: string): Promise<void> {

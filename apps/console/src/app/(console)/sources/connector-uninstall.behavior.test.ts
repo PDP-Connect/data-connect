@@ -20,6 +20,7 @@ const components = (async () => {
   Object.assign(globalThis, {
     document: dom.window.document,
     Event: dom.window.Event,
+    HTMLDetailsElement: dom.window.HTMLDetailsElement,
     HTMLElement: dom.window.HTMLElement,
     IS_REACT_ACT_ENVIRONMENT: true,
     MouseEvent: dom.window.MouseEvent,
@@ -139,4 +140,42 @@ test("connector row confirms uninstall and displays refusal or success without o
     assert.equal(container.querySelector('[role="status"]')?.textContent, "Uninstall complete. Refreshing status…");
     assert.equal(refreshCalls, 1);
   });
+});
+
+test("reviewed update row opens review instead of offering Update", async () => {
+  const { ConnectorInstallRow, dom } = await components;
+  const review = dom.window.document.createElement("details");
+  review.id = "connector-update-review";
+  dom.window.document.body.append(review);
+  const model = {
+    action: { digest: "sha256:target", kind: "update", version: "2.0.0" },
+    activationLabel: "Update available",
+    activationState: "update_available",
+    connectorId: "slack",
+    connectorKey: "slack",
+    hostBlockReason: null,
+    installedDigest: "sha256:old",
+    installedDigestFull: "sha256:old",
+    installedVersion: "1.2.0",
+    reviewRequired: true,
+    targetVersion: "2.0.0",
+    tier: "supported",
+  } as ConnectorInstallRowModel;
+  try {
+    await mounted(createElement(ConnectorInstallRow, { model }), async (container) => {
+      assert.equal([...container.querySelectorAll("button")].some((button) => button.textContent?.trim() === "Update"), false);
+      const openReview = button(container, "Review changes");
+      await act(async () => openReview.click());
+      assert.equal(review.open, true);
+    });
+    await mounted(createElement(ConnectorInstallRow, { model: { ...model, reviewRequired: false } }), async (container) => {
+      assert.ok([...container.querySelectorAll("button")].some((button) => button.textContent?.trim() === "Update"));
+    });
+    await mounted(createElement(ConnectorInstallRow, { model: { ...model, reviewRequired: false }, updatePlanState: "checking" }), async (container) => {
+      const checking = [...container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Checking updates…");
+      assert.ok(checking?.disabled);
+    });
+  } finally {
+    review.remove();
+  }
 });

@@ -14,7 +14,7 @@ test("source cards make package installation the next step before Add account", 
   const source = await readFile(CARD_FILE, "utf8")
   assert.match(
     source,
-    /const installModel = installLifecycle \? connectorInstallRowModel\(entry, installLifecycle\) : null/
+    /const installModel = installLifecycle \? connectorInstallRowModel\(entry, installLifecycle, \{ reviewRequired \}\) : null/
   )
   assert.match(
     source,

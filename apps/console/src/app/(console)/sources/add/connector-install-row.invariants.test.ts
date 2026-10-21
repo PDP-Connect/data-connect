@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 const ROW_FILE = fileURLToPath(new URL("./connector-install-row.tsx", import.meta.url));
 const CLIENT_DIRECTIVE_RE = /^"use client";/;
 const TRANSITION_RE = /useTransition\(\)/;
-const PENDING_DISABLED_RE = /disabled=\{isPending\}/;
+const PENDING_DISABLED_RE = /disabled=\{isPending \|\| \(action\.kind === "update" && updatePlanState !== "ready"\)\}/;
 const FEEDBACK_ROLE_RE = /const feedbackRole = message\?\.tone === "error" \? "alert" : "status";/;
 const FEEDBACK_ROLE_PROP_RE = /role=\{feedbackRole\}/;
 const REFRESH_RE = /router\.refresh\(\)/;
@@ -36,4 +36,11 @@ test("connector install row keeps mutation feedback inline and non-optimistic", 
   assert.match(source, UNINSTALL_CONFIRM_RE);
   assert.match(source, UNINSTALL_REFUSAL_RE);
   assert.doesNotMatch(source, NO_DUPLICATE_TIER_RE);
+});
+
+test("connector install row swaps Update for Review changes when the server requires review", async () => {
+  const source = await readFile(ROW_FILE, "utf8");
+  assert.match(source, /action && model\.reviewRequired/);
+  assert.match(source, /action && !model\.reviewRequired/);
+  assert.match(source, /Review changes/);
 });

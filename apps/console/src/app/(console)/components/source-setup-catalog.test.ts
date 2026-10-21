@@ -8,6 +8,7 @@ import * as React from "react";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { ConnectorCatalogEntry } from "../lib/connection-catalog.ts";
+import { ConnectorUpdateProvider } from "../sources/add/connector-update-context.tsx";
 
 // The catalog's import graph reaches `server-only`, which throws outside a
 // server component, and its recovery notice calls `useRouter`, which needs a
@@ -50,14 +51,18 @@ const reddit: ConnectorCatalogEntry = {
 async function render(installCatalogTransientlyUnavailable: boolean): Promise<string> {
   const { SourceSetupCatalog } = await catalogModule;
   return renderToStaticMarkup(
-    createElement(SourceSetupCatalog, {
-      action: "/sources/add",
-      catalog: [reddit],
-      installCatalogTransientlyUnavailable,
-      // The page builds this from the empty catalog a busy snapshot returns.
-      installLifecycleByConnector: {},
-      query: "",
-    })
+    createElement(
+      ConnectorUpdateProvider,
+      null,
+      createElement(SourceSetupCatalog, {
+        action: "/sources/add",
+        catalog: [reddit],
+        installCatalogTransientlyUnavailable,
+        // The page builds this from the empty catalog a busy snapshot returns.
+        installLifecycleByConnector: {},
+        query: "",
+      })
+    )
   );
 }
 
